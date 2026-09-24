@@ -7,6 +7,7 @@
 #include "vcs/package_public_shape.h"
 
 #include "base/safe_alloc.h"
+#include "platform/positioned_file.h"
 #include "vcs/blob_store.h"
 #include "vcs/fastobj_carrier.h"
 #include "vcs/package_deps.h"
@@ -22,9 +23,16 @@
 #include "vcs/zcode_work_output.h"
 
 #include <dirent.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define SHAPE_LOG "vcs.package.public"
 #define STORE_SHAPE_PATH_MAX 4400u
@@ -253,6 +261,64 @@ static bool shape_transport_closes(struct vcs_package_store *store,
     return closed;
 }
 
+/* Read only a regular leaf of the already-open release directory. Pinning
+ * both descriptors makes a linked leaf unable to import external bytes. */
+static bool shape_release_wire(DIR *d, const char *dir, const char *name,
+                               uint8_t *wire, size_t *len)
+{
+#if defined(_WIN32)
+    (void)d;
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, dir, name))
+        return false;
+    uint64_t size = 0;
+    bool complete = platform_positioned_file_size(&file, &size) &&
+                    size < VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES &&
+                    platform_positioned_file_read(&file, wire, (size_t)size,
+                                                  0) == (int64_t)size;
+    platform_positioned_file_close(&file);
+    if (complete)
+        *len = (size_t)size;
+    return complete;
+#else
+    (void)dir;
+    int fd = openat(dirfd(d), name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        return false;
+    }
+    FILE *f = fdopen(fd, "rb");
+    if (!f) {
+        close(fd);
+        return false;
+    }
+    *len = fread(wire, 1, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES, f);
+    bool complete = feof(f) && !ferror(f);
+    if (fclose(f) != 0)
+        complete = false;
+    return complete;
+#endif
+}
+
+static DIR *shape_open_releases(const char *dir)
+{
+#if defined(_WIN32)
+    return opendir(dir);
+#else
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return NULL;
+    DIR *d = fdopendir(fd);
+    if (!d)
+        close(fd);
+    return d;
+#endif
+}
+
 /* Does a persisted release envelope name and sign exactly these bytes?
  *
  * The store files a committed manifest under manifests/<root-hex> only
@@ -275,7 +341,7 @@ static bool shape_release_signs(struct vcs_package_store *store,
     int n = snprintf(dir, sizeof(dir), "%s/releases", zcode_dir);
     if (n < 0 || (size_t)n >= sizeof(dir))
         return false;
-    DIR *d = opendir(dir);
+    DIR *d = shape_open_releases(dir);
     if (!d)
         return false; /* no releases yet: nothing is publicly releasable */
     uint8_t *wire = zcl_malloc(VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES,
@@ -283,19 +349,11 @@ static bool shape_release_signs(struct vcs_package_store *store,
     bool signed_here = false;
     struct dirent *de;
     while (wire && !signed_here && (de = readdir(d)) != NULL) {
-        char path[STORE_SHAPE_PATH_MAX];
-        n = snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
-        if (n < 0 || (size_t)n >= sizeof(path))
+        size_t len = 0;
+        if (!shape_release_wire(d, dir, de->d_name, wire, &len))
             continue;
-        FILE *f = fopen(path, "rb");
-        if (!f)
-            continue;
-        size_t len = fread(wire, 1, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES, f);
-        bool trailing = !feof(f);
-        fclose(f);
         struct vcs_package_release release;
-        if (trailing ||
-            vcs_package_release_parse(wire, len, &release) !=
+        if (vcs_package_release_parse(wire, len, &release) !=
                 VCS_PACKAGE_RELEASE_OK ||
             memcmp(release.package_root, root, 32) != 0)
             continue;

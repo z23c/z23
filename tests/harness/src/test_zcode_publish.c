@@ -84,6 +84,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define ZP_CHECK(name, expr) do {                                     \
     if (expr) { printf("  zcode_publish: %s... OK\n", (name)); }      \
@@ -3085,6 +3086,67 @@ static int t_release_load_blocked_directory(void)
     return failures;
 }
 
+static int zp_check_linked_release_load(const char *zcode, const char *outside,
+                                        const char *leaf,
+                                        const uint8_t package_root[32])
+{
+    int failures = 0;
+    struct vcs_package_release loaded_release = {0};
+    size_t count = 0, skipped = 0;
+    bool loaded = vcs_package_publish_load_releases(
+        zcode, &loaded_release, 1, &count, &skipped);
+    ZP_CHECK("load: linked release leaf does not enter the install table",
+             loaded && count == 0 && skipped == 1);
+    bool moved = unlink(leaf) == 0 && rename(outside, leaf) == 0;
+    count = skipped = 0;
+    loaded = moved && vcs_package_publish_load_releases(
+        zcode, &loaded_release, 1, &count, &skipped);
+    ZP_CHECK("load: same envelope stored as a real leaf is accepted",
+             loaded && count == 1 && skipped == 0 &&
+             memcmp(loaded_release.package_root, package_root, 32) == 0);
+    return failures;
+}
+
+static int t_release_load_linked_leaf(void)
+{
+    int failures = 0;
+    char dd[256], zcode[320], releases[352];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "release-link");
+    snprintf(zcode, sizeof(zcode), "%s/zcode", dd);
+    snprintf(releases, sizeof(releases), "%s/releases", zcode);
+    bool prepared = mkdir(zcode, 0700) == 0 &&
+                    mkdir(releases, 0700) == 0;
+    uint8_t package_root[32] = {0};
+    package_root[0] = 0x6cu;
+    struct vcs_package_release release = {0};
+    uint8_t id[32] = {0};
+    prepared = prepared &&
+        zp_release(&release, 0x6c, 1u, "alice/linked", "MIT", package_root) &&
+        vcs_package_release_id(&release, id) == VCS_PACKAGE_RELEASE_OK;
+    char id_hex[65], outside[384], leaf[440];
+    zp_hex32(id, id_hex);
+    snprintf(outside, sizeof(outside), "%s/outside-release", zcode);
+    snprintf(leaf, sizeof(leaf), "%s/%s", releases, id_hex);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    prepared = prepared &&
+        vcs_package_release_serialize(&release, &wire, &wire_len) ==
+            VCS_PACKAGE_RELEASE_OK;
+    FILE *f = prepared ? fopen(outside, "wb") : NULL;
+    prepared = f && fwrite(wire, 1, wire_len, f) == wire_len;
+    if (f)
+        prepared = fclose(f) == 0 && prepared;
+    free(wire);
+    prepared = prepared && symlink("../outside-release", leaf) == 0;
+    ZP_CHECK("load: valid signed envelope linked under its real ID is prepared",
+             prepared);
+    if (prepared)
+        failures += zp_check_linked_release_load(zcode, outside, leaf,
+                                                 package_root);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 int test_zcode_publish(void)
 {
     printf("\n=== zcode_publish: publication + local search ===\n");
@@ -3101,6 +3163,7 @@ int test_zcode_publish(void)
     failures += t_show();
     failures += t_index_rebuild();
     failures += t_release_load_blocked_directory();
+    failures += t_release_load_linked_leaf();
     failures += t_registry_path();
     failures += t_commit_routes_to_resident();
     printf("=== zcode_publish complete: %d failure(s) ===\n", failures);

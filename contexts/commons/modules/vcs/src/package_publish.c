@@ -10,13 +10,21 @@
 
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
 
 #include <dirent.h>
 #include <errno.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define PUBLISH_LOG "vcs.publish"
 
@@ -343,16 +351,87 @@ static bool publish_name_is_hex64(const char *name)
 static DIR *publish_open_releases(const char *path, bool *missing_out)
 {
     *missing_out = false;
-    DIR *d = opendir(path);
-    if (d)
-        return d;
-    if (errno == ENOENT) {
+#if defined(_WIN32)
+    enum platform_directory_probe_result probe =
+        platform_directory_probe_real(path);
+    if (probe == PLATFORM_DIRECTORY_PROBE_MISSING) {
         *missing_out = true;
         return NULL;
     }
+    if (probe != PLATFORM_DIRECTORY_PROBE_OK) {
+        LOG_ERROR(PUBLISH_LOG, "releases directory is linked or unreadable: %s",
+                  path);
+        return NULL;
+    }
+    DIR *d = opendir(path);
+    if (d)
+        return d;
     LOG_ERROR(PUBLISH_LOG, "cannot open releases directory %s: %s", path,
               strerror(errno));
     return NULL;
+#else
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            *missing_out = true;
+            return NULL;
+        }
+        LOG_ERROR(PUBLISH_LOG, "cannot open releases directory %s: %s", path,
+                  strerror(errno));
+        return NULL;
+    }
+    DIR *d = fdopendir(fd);
+    if (d)
+        return d;
+    int saved_errno = errno;
+    close(fd);
+    LOG_ERROR(PUBLISH_LOG, "cannot open releases directory %s: %s", path,
+              strerror(saved_errno));
+    return NULL;
+#endif
+}
+
+/* Read only a regular leaf of the pinned release directory. */
+static bool publish_read_release_wire(DIR *d, const char *dir,
+                                      const char *name, uint8_t *wire,
+                                      size_t *len)
+{
+#if defined(_WIN32)
+    (void)d;
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, dir, name))
+        return false;
+    uint64_t size = 0;
+    bool complete = platform_positioned_file_size(&file, &size) &&
+                    size < VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES &&
+                    platform_positioned_file_read(&file, wire, (size_t)size,
+                                                  0) == (int64_t)size;
+    platform_positioned_file_close(&file);
+    if (complete)
+        *len = (size_t)size;
+    return complete;
+#else
+    (void)dir;
+    int fd = openat(dirfd(d), name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        return false;
+    }
+    FILE *f = fdopen(fd, "rb");
+    if (!f) {
+        close(fd);
+        return false;
+    }
+    *len = fread(wire, 1, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES, f);
+    bool complete = feof(f) && !ferror(f);
+    if (fclose(f) != 0)
+        complete = false;
+    return complete;
+#endif
 }
 
 bool vcs_package_publish_load_releases(const char *zcode_dir,
@@ -386,22 +465,14 @@ bool vcs_package_publish_load_releases(const char *zcode_dir,
             (*skipped_out)++;
             continue;
         }
-        char path[4400];
-        n = snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
-        if (n < 0 || (size_t)n >= sizeof(path)) {
+        size_t len = 0;
+        if (!publish_read_release_wire(d, dir, de->d_name, wire, &len)) {
+            LOG_ERROR(PUBLISH_LOG, "skipping unreadable or linked release %s",
+                      de->d_name);
             (*skipped_out)++;
             continue;
         }
-        FILE *f = fopen(path, "rb");
-        if (!f) {
-            (*skipped_out)++;
-            continue;
-        }
-        size_t len = fread(wire, 1, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES, f);
-        bool trailing = !feof(f);
-        fclose(f);
-        if (trailing ||
-            vcs_package_release_parse(wire, len,
+        if (vcs_package_release_parse(wire, len,
                                       &out[*count_out]) !=
                 VCS_PACKAGE_RELEASE_OK) {
             LOG_ERROR(PUBLISH_LOG, "skipping unparseable release %s",

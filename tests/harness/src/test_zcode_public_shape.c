@@ -286,6 +286,36 @@ static bool ps_unlink_releases(const char *zcode_dir, const char *stem)
     return unlink(path) == 0;
 }
 
+/* A valid envelope at its real release ID, but reached through a linked
+ * releases/ leaf. Its bytes live outside the store's release directory. */
+static bool ps_link_external_release(const char *datadir,
+                                     const char *zcode_dir,
+                                     const struct vcs_package_release *r,
+                                     char stem[65])
+{
+    uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
+    if (vcs_package_release_id(r, id) != VCS_PACKAGE_RELEASE_OK)
+        return false;
+    zcl_hex_encode(id, sizeof(id), stem);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_package_release_serialize(r, &wire, &wire_len) !=
+            VCS_PACKAGE_RELEASE_OK)
+        return false;
+    char outside[1400], link_path[1400];
+    int a = snprintf(outside, sizeof(outside), "%s/outside-release", datadir);
+    int b = snprintf(link_path, sizeof(link_path), "%s/releases/%s",
+                     zcode_dir, stem);
+    bool ok = a > 0 && (size_t)a < sizeof(outside) &&
+              b > 0 && (size_t)b < sizeof(link_path);
+    FILE *f = ok ? fopen(outside, "wb") : NULL;
+    ok = f && fwrite(wire, 1, wire_len, f) == wire_len;
+    if (f)
+        ok = fclose(f) == 0 && ok;
+    free(wire);
+    return ok && symlink(outside, link_path) == 0;
+}
+
 /* ── the verdict under test ───────────────────────────────────────── */
 
 struct ps_node {
@@ -410,6 +440,26 @@ static int t_ps_release_binding(void)
              ps_refused(n.store, a.root, "no-verified-release"));
     PS_CHECK("flipped envelope removed",
              ps_unlink_releases(n.zcode_dir, "flipped-sig"));
+
+    /* A signed envelope is not a store release when its directory entry
+     * leads outside releases/, even when the entry has the correct ID. */
+    struct vcs_package_release linked;
+    char linked_stem[65] = {0};
+    PS_CHECK("external envelope builds",
+             ps_release_make(a.root, 0x24, "pslink/fixture", "MIT", &linked));
+    bool linked_ready = ps_link_external_release(n.datadir, n.zcode_dir,
+                                                 &linked, linked_stem);
+    PS_CHECK("external envelope linked under real ID", linked_ready);
+    PS_CHECK("linked envelope does not release package a",
+             linked_ready &&
+             ps_refused(n.store, a.root, "no-verified-release"));
+    if (linked_ready) {
+        PS_CHECK("linked envelope removed",
+                 ps_unlink_releases(n.zcode_dir, linked_stem));
+        char outside[1400];
+        snprintf(outside, sizeof(outside), "%s/outside-release", n.datadir);
+        PS_CHECK("external envelope removed", unlink(outside) == 0);
+    }
 
     /* The same envelope, unflipped, does release it — so the refusals
      * above were the signature and nothing else. */
