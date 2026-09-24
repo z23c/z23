@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
+# Shared Linux host broker candidate. Install only after legacy devbuild jobs drain.
+set -euo pipefail
+
+wait_for_slot=0
+project=${DEVBUILD_PROJECT:-auto}
+class=normal
+plan=0
+exclusive=0
+while (($#)); do
+    case $1 in
+        --wait) wait_for_slot=1; shift ;;
+        --project) (($# >= 2)) || exit 64; project=$2; shift 2 ;;
+        --class) (($# >= 2)) || exit 64; class=$2; shift 2 ;;
+        --exclusive) exclusive=1; shift ;;
+        --plan) plan=1; shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+if [[ $project == auto ]] && grep -Fq '/development.slice/' /proc/self/cgroup; then
+    project=${DEVBUILD_ACTIVE:-exclusive}
+fi
+if [[ $project == auto ]]; then
+    common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    case $common in
+        */qedc/*|*/qedc.git) project=qedc ;;
+        */zclassic23/*|*/z23/*|*/z23.git) project=z23 ;;
+        *) project=exclusive ;;
+    esac
+fi
+case $project in qedc|z23|exclusive) ;; *) printf 'devbuild: unknown project: %s\n' "$project" >&2; exit 64 ;; esac
+case $class in
+    hotload) cpu=4; ram=4; io=1; weight=40; priority=300 ;;
+    release) cpu=16; ram=20; io=2; weight=30; priority=200 ;;
+    normal) cpu=8; ram=8; io=1; weight=20; priority=100 ;;
+    background) cpu=8; ram=8; io=1; weight=10; priority=0 ;;
+    *) printf 'devbuild: unknown class: %s\n' "$class" >&2; exit 64 ;;
+esac
+if ((exclusive)) || [[ $project == exclusive ]]; then
+    project=exclusive; class=exclusive; cpu=28; ram=48; io=4; weight=20; priority=150
+fi
+if ((!plan)) && grep -Fq '/development.slice/' /proc/self/cgroup; then
+    (($#)) || { printf 'devbuild: command required\n' >&2; exit 64; }
+    enclosing=${DEVBUILD_ACTIVE:-exclusive}
+    if [[ $enclosing != exclusive && $project != "$enclosing" ]]; then
+        printf 'devbuild: nested project change refused (%s to %s)\n' "$enclosing" "$project" >&2
+        exit 75
+    fi
+    printf 'devbuild: nested call reuses %s budget\n' "$enclosing" >&2
+    exec "$@"
+fi
+cpu_plan=$(lscpu -b -p=CPU,CORE,SOCKET | awk -F, '
+    /^#/ { next }
+    { key=$2 SUBSEP $3; if (!(key in physical)) physical[key]=++count
+      if (physical[key] > 2) { list=list sep $1; sep=","; workers++ } }
+    END { if (workers < 4) exit 1; print list; print workers }
+')
+cpu_list=${cpu_plan%$'\n'*}
+worker_cores=${cpu_plan##*$'\n'}
+[[ $worker_cores =~ ^[0-9]+$ ]] && ((worker_cores >= 28)) || {
+    printf 'devbuild: worker CPU pool smaller than broker contract\n' >&2; exit 75;
+}
+if ((plan)); then
+    printf 'project=%s class=%s cpu_tokens=%s ram_gib=%s io_tokens=%s pool_cpu=28 pool_ram_gib=48 pool_io=4 normal_lanes=2 hotload_reserve=4/4/1 cpus=%s\n' \
+        "$project" "$class" "$cpu" "$ram" "$io" "$cpu_list"
+    exit 0
+fi
+(($#)) || { printf 'devbuild: command required\n' >&2; exit 64; }
+
+command_umask=$(umask)
+umask 077
+state=${DEVBUILD_BROKER_STATE:-$HOME/.local/state/development/broker-v1}
+mkdir -p "$state/queue" "$state/running"
+exec 7>"$state/mutex.lock"
+start_ns=$(date +%s%N)
+start_tick=$(awk '{print $22}' "/proc/$$/stat")
+id="$$-$start_tick-$start_ns"
+unit="devbuild-${id}.scope"
+queue_file="$state/queue/$id"
+run_file="$state/running/$id"
+new_file="$state/.new-$id"
+log_file="$state/events.tsv"
+scope_done() {
+    local state_value
+    state_value=$(systemctl --user show "$1" -p ActiveState --value 2>/dev/null) || return 1
+    [[ $state_value == inactive || $state_value == failed ]]
+}
+cleanup() {
+    local rc=$?
+    /usr/bin/flock 7
+    rm -f -- "$new_file"
+    if [[ -e $queue_file ]]; then
+        rm -f -- "$queue_file"
+        printf '%s\t%s\tcancel\t%s\t%s\t%s\n' "$(date +%s%N)" "$id" "$project" "$class" "$rc" >>"$log_file"
+    fi
+    if [[ -e $run_file ]]; then
+        if scope_done "$unit"; then
+            rm -f -- "$run_file"
+            printf '%s\t%s\trelease\t%s\t%s\t%s\n' "$(date +%s%N)" "$id" "$project" "$class" "$rc" >>"$log_file"
+        fi
+    fi
+    /usr/bin/flock -u 7
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# All queue and lease changes occur under mutex. A killed wrapper retains its
+# lease while its scope is active; after both vanish, another waiter reaps it.
+reap() {
+    local file p tick u live
+    for file in "$state"/queue/* "$state"/running/*; do
+        [[ -f $file ]] || continue
+        read -r p tick u _ <"$file"
+        live=0
+        if [[ -r /proc/$p/stat ]] && [[ $(awk '{print $22}' "/proc/$p/stat") == "$tick" ]]; then
+            live=1
+        fi
+        if (( ! live )) && [[ $file == "$state"/running/* ]] &&
+           ! scope_done "$u"; then
+            live=1
+        fi
+        if (( ! live )); then
+            rm -f -- "$file"
+            printf '%s\t%s\treap\n' "$(date +%s%N)" "${file##*/}" >>"$log_file"
+        fi
+    done
+}
+
+/usr/bin/flock 7
+printf '%s %s %s %s %s %s %s %s %s %s\n' \
+    "$$" "$start_tick" "$unit" "$project" "$class" "$cpu" "$ram" "$io" "$priority" "$start_ns" >"$new_file"
+mv -- "$new_file" "$queue_file"
+printf '%s\t%s\tqueued\t%s\t%s\t%s\t%s\t%s\n' \
+    "$start_ns" "$id" "$project" "$class" "$cpu" "$ram" "$io" >>"$log_file"
+/usr/bin/flock -u 7
+
+while :; do
+    /usr/bin/flock 7
+    reap
+    used_cpu=0 used_ram=0 used_io=0 project_ram=0 ordinary=0 active=0
+    for file in "$state"/running/*; do
+        [[ -f $file ]] || continue
+        read -r _ _ _ p c cp mem disk _ _ <"$file"
+        ((used_cpu+=cp, used_ram+=mem, used_io+=disk, active+=1)) || true
+        [[ $p != "$project" ]] || ((project_ram+=mem)) || true
+        [[ $c == hotload ]] || ((ordinary+=1)) || true
+    done
+    now_s=$(date +%s)
+    best_id= best_score=-999999 best_ns=9999999999999999999
+    hot_id= hot_score=-999999 hot_ns=9999999999999999999
+    for file in "$state"/queue/*; do
+        [[ -f $file ]] || continue
+        read -r _ _ _ _ queued_class _ _ _ pri queued_ns <"$file"
+        score=$((pri + (now_s - queued_ns / 1000000000)))
+        if [[ $queued_class == hotload ]]; then
+            if ((score > hot_score)) || { ((score == hot_score)) && ((queued_ns < hot_ns)); }; then
+                hot_id=${file##*/}; hot_score=$score; hot_ns=$queued_ns
+            fi
+            continue
+        fi
+        if ((score > best_score)) || { ((score == best_score)) && ((queued_ns < best_ns)); }; then
+            best_id=${file##*/}; best_score=$score; best_ns=$queued_ns
+        fi
+    done
+    admitted=0
+    if [[ $class == hotload && $hot_id == "$id" ]] ||
+       { [[ -z $hot_id && $best_id == "$id" ]] ||
+         [[ $best_id == "$id" && $class != hotload ]]; }; then
+        if [[ $project == exclusive ]]; then
+            ((active == 0)) && admitted=1
+        elif ((used_cpu + cpu <= 28 && used_ram + ram <= 48 && used_io + io <= 4 &&
+                project_ram + ram <= 24 && active < 3)); then
+            if [[ $class == hotload ]]; then
+                admitted=1
+            elif ((ordinary < 2 && used_cpu + cpu <= 24 && used_ram + ram <= 44 && used_io + io <= 3)); then
+                admitted=1
+            fi
+        fi
+    fi
+    if ((admitted)); then
+        available=$(awk '$1 == "MemAvailable:" {print $2}' /proc/meminfo)
+        if [[ ! $available =~ ^[0-9]+$ ]] || ((available < 24 * 1024 * 1024)); then
+            printf 'devbuild: fewer than 24 GiB available; deferred\n' >&2
+            /usr/bin/flock -u 7
+            exit 75
+        fi
+        mv -- "$queue_file" "$run_file"
+        admitted_ns=$(date +%s%N)
+        printf '%s\t%s\tadmitted\t%s\t%s\t%s\n' \
+            "$admitted_ns" "$id" "$project" "$class" "$((admitted_ns-start_ns))" >>"$log_file"
+        /usr/bin/flock -u 7
+        break
+    fi
+    /usr/bin/flock -u 7
+    if ((!wait_for_slot)); then
+        printf 'devbuild: broker busy; use --wait\n' >&2
+        exit 75
+    fi
+    sleep 0.2
+done
+
+printf 'devbuild: %s/%s admitted after %s ns, CPU %s, RAM %sG, I/O tokens %s\n' \
+    "$project" "$class" "$((admitted_ns-start_ns))" "$cpu" "$ram" "$io" >&2
+quota="$((cpu * 100))%"
+systemd-run --user --scope --quiet --unit="$unit" --slice=development.slice \
+    --property="CPUQuota=$quota" --property="MemoryMax=${ram}G" \
+    --property=MemorySwapMax=0 --property="CPUWeight=$weight" \
+    --property="IOWeight=$weight" -- \
+    /usr/bin/env "DEVBUILD_ACTIVE=$project" "ZCC_MAX_MB=${ZCC_MAX_MB:-8192}" \
+    /usr/bin/nice -n 10 /usr/bin/ionice -c 2 -n 7 \
+    /usr/bin/taskset --cpu-list "$cpu_list" \
+    /bin/bash -c 'umask "$1"; shift; exec "$@"' devbuild-command \
+    "$command_umask" "$@" 7>&-

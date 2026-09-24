@@ -31,6 +31,14 @@ you are new; this page is about operating a host, not about building.
   `systemd/` and `system/` carry their own READMEs or headers.
 - **[`devbuild`](devbuild)** — a reference copy, not an installed program. See
   its header.
+- **[`devbuild-broker`](devbuild-broker)** — a staged Linux replacement for the
+  host scheduler. It admits two ordinary heavy lanes, reserves an additional
+  interactive lane, and orders release proof ahead of ordinary queued work.
+  CPU, RAM, and I/O tokens are bounded under the existing development slice;
+  [`test-devbuild-broker.sh`](test-devbuild-broker.sh) exercises concurrent
+  admission and queue order with short isolated scopes. It is not installed by
+  the repository. The existing `devbuild` mirror remains the running contract
+  until the shared host has no wrappers still executing its previous code.
 
 ## What a tracked unit has to earn
 
