@@ -39,6 +39,7 @@ FOCUSED_RECEIPT_RAN=0
 FOCUSED_RECEIPT_REUSED=0
 FOCUSED_RECEIPT_TOOLKEY=""
 GENERATED_CHANGED_FILES_FILE=""
+FAST_FF_LOCKED=0
 
 cleanup_generated_changed_files() {
     local owned="${GENERATED_CHANGED_FILES_FILE:-}"
@@ -52,6 +53,26 @@ trap cleanup_generated_changed_files EXIT
 
 log() {
     printf '[agent-fast-ci] %s\n' "$*"
+}
+
+# Stage timings use Bash's in-process clock on Linux and a coarse in-process
+# fallback on older host shells. No clock process joins the edit path.
+fast_trace_now_us() {
+    local now="${EPOCHREALTIME:-}"
+    if [[ "$now" =~ ^[0-9]+\.[0-9]{6}$ ]]; then
+        FAST_TRACE_NOW_US="${now/./}"
+    else
+        FAST_TRACE_NOW_US="$((SECONDS * 1000000))"
+    fi
+}
+
+fast_trace_end() {
+    local phase="$1" started="$2" rc="$3" ended
+    [ "${FAST_TRACE_ACTIVE:-0}" = 1 ] || return 0
+    fast_trace_now_us
+    ended="$FAST_TRACE_NOW_US"
+    printf '[agent-fast-ci stage] schema=zcl.agent_fast_stage.v1 phase=%s elapsed_us=%s rc=%s\n' \
+        "$phase" "$((ended - started))" "$rc" >&2
 }
 
 fail() {
@@ -171,11 +192,20 @@ show_cache_stats() {
 }
 
 make_fast() {
+    local started rc
     resolve_fast_jobs
     [ -n "$FROZEN_SOURCE_RECORD" ] ||
         fail "internal source record was not prepared before nested Make"
-    make -j"$FAST_JOBS" CC="$FAST_CC" \
-        BUILD_SOURCE_RECORD="$FROZEN_SOURCE_RECORD" "$@"
+    fast_trace_now_us
+    started="$FAST_TRACE_NOW_US"
+    if make -j"$FAST_JOBS" CC="$FAST_CC" \
+        BUILD_SOURCE_RECORD="$FROZEN_SOURCE_RECORD" "$@"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    fast_trace_end "make.$1" "$started" "$rc"
+    return "$rc"
 }
 
 fast_changed_files_only() {
@@ -367,13 +397,16 @@ match_shared_impact_rules() {
 }
 
 select_test_groups() {
-    local file matched
+    local file matched started
+    fast_trace_now_us
+    started="$FAST_TRACE_NOW_US"
     TEST_GROUPS=""
     UNMAPPED_CODE_CHANGES=""
     if [ -n "${ZCL_FAST_TESTS:-}" ]; then
         for file in $(printf '%s\n' "$ZCL_FAST_TESTS" | tr ',:' '  '); do
             [ -n "$file" ] && add_group "$file"
         done
+        fast_trace_end changed_file_classification "$started" 0
         return
     fi
 
@@ -396,6 +429,7 @@ select_test_groups() {
     done <<EOF
 $(changed_file_hints | sort -u)
 EOF
+    fast_trace_end changed_file_classification "$started" 0
 }
 
 note_unmapped_code_changes() {
@@ -443,7 +477,9 @@ capture_source_identity_record() {
 }
 
 prepare_frozen_source_record() {
-    local source_id clean mutation extra
+    local source_id clean mutation extra started
+    fast_trace_now_us
+    started="$FAST_TRACE_NOW_US"
 
     if [ -z "$FROZEN_SOURCE_RECORD" ]; then
         FROZEN_SOURCE_RECORD="$(capture_source_identity_record)" ||
@@ -458,6 +494,7 @@ prepare_frozen_source_record() {
     # assignment.  Build-session acquire/final verification still compare it
     # with the exact current source inventory.
     FROZEN_SOURCE_RECORD="$source_id $clean $mutation"
+    fast_trace_end source_record_prepare "$started" 0
 }
 
 cycle_source_identity_record() {
@@ -1179,6 +1216,13 @@ run_test_proof() {
         0|false|no|"") ;;
         *) fail "unknown ZCL_FAST_STRICT_TESTS=${ZCL_FAST_STRICT_TESTS}" ;;
     esac
+    # `make ff` already owns the checkout lock. Calling the unlocked front
+    # door here would parse the full Make graph again just to discover the
+    # same lock and recurse into its locked goal. Direct invocations of this
+    # script retain the ordinary lock-acquiring front door.
+    if [ "$FAST_FF_LOCKED" = 1 ]; then
+        target="${target}-locked"
+    fi
     log "source-wide test proof target=$target jobs=${FAST_JOBS:-auto} classification_hints=${TEST_GROUPS:-none}"
     make_fast "$target"
 }
@@ -1377,11 +1421,14 @@ first_error_line() {
 run_rung() {
     local label="$1"
     shift
-    local output rc
+    local output rc started
+    fast_trace_now_us
+    started="$FAST_TRACE_NOW_US"
     set +e
     output="$("$@" 2>&1)"
     rc=$?
     set -e
+    fast_trace_end "rung.$label" "$started" "$rc"
     printf '%s\n' "$output"
     if [ "$rc" -ne 0 ]; then
         first_error_line "$label" "$output"
@@ -1557,10 +1604,16 @@ run_mapped_focused_tests() {
 # warns and names the fix instead of paying it. The DB is an index input
 # only, never a build input, so staleness is advisory.
 compdb_freshness_notice() {
-    local status freshness
-    [ -f tools/dev/generate-compdb.sh ] || return 0
+    local status freshness started
+    fast_trace_now_us
+    started="$FAST_TRACE_NOW_US"
+    if [ ! -f tools/dev/generate-compdb.sh ]; then
+        fast_trace_end compdb_freshness "$started" 0
+        return 0
+    fi
     status="$(bash tools/dev/generate-compdb.sh --status 2>/dev/null)" || {
         log "compdb: freshness probe failed — run \`make agent-index\` to rebuild compile_commands.json"
+        fast_trace_end compdb_freshness "$started" 1
         return 0
     }
     freshness="$(printf '%s' "$status" |
@@ -1568,10 +1621,12 @@ compdb_freshness_notice() {
     if [ "$freshness" != "fresh" ]; then
         log "compdb: compile_commands.json is ${freshness:-unknown} — run \`make agent-index\` (index consumers only; never a build input)"
     fi
+    fast_trace_end compdb_freshness "$started" 0
 }
 
 main() {
     local mode="${1:-run}"
+    if [ "$mode" = ff ]; then FAST_TRACE_ACTIVE=1; fi
     case "$mode" in
         cache-selftest|--cache-selftest)
             cache_authority_selftest
@@ -1634,13 +1689,16 @@ main() {
             # it runs first; the source-wide test proof before lint keeps runtime
             # failures at the front.
             log "ff ladder: compile -> source-wide-tests -> lint-fast (fail-fast; not release CI)"
+            if [ "${ZCL_CHECKOUT_LOCK_HELD:-0}" = 1 ]; then
+                FAST_FF_LOCKED=1
+            fi
 
             # rung 1: compile the complete current source inventory.
             run_rung compile compile_changed_gate
 
-            # rung 2: run the source-wide fast harness. Mapped paths are hints.
-            select_test_groups
-            note_unmapped_code_changes
+            # rung 2: source-wide fast tests do not consume mapped paths.
+            # The resident edit epoch already classified the changed files;
+            # repeating that Git walk here cannot affect this proof set.
             run_rung source-wide-tests run_test_proof
 
             # rung 3: fast lint gates.

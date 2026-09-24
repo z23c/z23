@@ -840,23 +840,23 @@ Z23_FLAG("ZCL_EXPORT_SECONDARY", "env_build", "-", "-",
 Z23_FLAG("ZCL_EXTERNALIP_FLAG", "env_build", "-", "-",
           "undocumented; first use tools/repro_on_copy.sh:53")
 Z23_FLAG("ZCL_FAST_BASE", "env_build", "-", "-",
-          "undocumented; first use tools/agent_fast_ci.sh:212")
+          "undocumented; first use tools/agent_fast_ci.sh:242")
 Z23_FLAG("ZCL_FAST_BUILD_SOURCE_RECORD", "env_build", "-", "-",
           "first use tools/agent_fast_ci.sh:37; documented at docs/DEVELOPING.md:283: or pass BUILD_SOURCE_RECORD or ZCL_FAST_BUILD_SOURCE_RECORD; the owning")
 Z23_FLAG("ZCL_FAST_CACHE", "env_build", "1", "-",
-          "first use tools/agent_fast_ci.sh:408; documented at docs/AGENT_API.md:1282: Use ZCL_FAST_CACHE=0 to force a rerun,")
+          "first use tools/agent_fast_ci.sh:442; documented at docs/AGENT_API.md:1282: Use ZCL_FAST_CACHE=0 to force a rerun,")
 Z23_FLAG("ZCL_FAST_CACHE_DIR", "env_build", "-", "-",
           "first use tools/agent_fast_ci.sh:17; documented at docs/AGENT_API.md:1284: ZCL_FAST_CACHE_DIR=... to move it.")
 Z23_FLAG("ZCL_FAST_CACHE_RESET", "env_build", "0", "-",
-          "first use tools/agent_fast_ci.sh:416; documented at docs/AGENT_API.md:1283: ZCL_FAST_CACHE_RESET=1 to clear the green-input cache, or")
+          "first use tools/agent_fast_ci.sh:450; documented at docs/AGENT_API.md:1283: ZCL_FAST_CACHE_RESET=1 to clear the green-input cache, or")
 Z23_FLAG("ZCL_FAST_CC", "make_var", "-", "-",
           "first use Makefile:4673; documented at docs/AGENT_API.md:1275: Override with ZCL_FAST_CC='ccache cc'. Use ZCL_FAST_JOBS=N,")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES", "env_build", "-", "-",
-          "first use tools/agent_fast_ci.sh:192; documented at docs/work/fast-path.md:123: ZCL_FAST_CHANGED_FILES_ONLY=1 when ZCL_FAST_CHANGED_FILES[_FILE] is already")
+          "first use tools/agent_fast_ci.sh:222; documented at docs/work/fast-path.md:123: ZCL_FAST_CHANGED_FILES_ONLY=1 when ZCL_FAST_CHANGED_FILES[_FILE] is already")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES_FILE", "env_build", "-", "-",
-          "undocumented; first use tools/agent_fast_ci.sh:191")
+          "undocumented; first use tools/agent_fast_ci.sh:221")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES_ONLY", "env_build", "0", "-",
-          "first use tools/agent_fast_ci.sh:182; documented at docs/AGENT_API.md:1279: ZCL_FAST_CHANGED_FILES_ONLY=1 when an explicit changed-file list is exact,")
+          "first use tools/agent_fast_ci.sh:212; documented at docs/AGENT_API.md:1279: ZCL_FAST_CHANGED_FILES_ONLY=1 when an explicit changed-file list is exact,")
 Z23_FLAG("ZCL_FAST_COMPILE", "env_build", "changed", "-",
           "first use tools/agent_fast_ci.sh:16; documented at docs/AGENT_API.md:1276: ZCL_FAST_COMPILE=dev to force full fast-compile,")
 Z23_FLAG("ZCL_FAST_DEV_NODE_BIN", "env_build", "build/bin/z23-dev", "-",
@@ -866,15 +866,15 @@ Z23_FLAG("ZCL_FAST_IMPACT_RULES_FILE", "env_build", "-", "-",
 Z23_FLAG("ZCL_FAST_JOBS", "env_build", "-", "-",
           "first use tools/agent_fast_ci.sh:34; documented at docs/AGENT_API.md:1275: Override with ZCL_FAST_CC='ccache cc'. Use ZCL_FAST_JOBS=N,")
 Z23_FLAG("ZCL_FAST_LIVE", "env_build", "auto", "-",
-          "first use tools/agent_fast_ci.sh:509; documented at docs/AGENT_API.md:1281: ZCL_FAST_STRICT_TESTS=1, and ZCL_FAST_LIVE=0 as needed.")
+          "first use tools/agent_fast_ci.sh:546; documented at docs/AGENT_API.md:1281: ZCL_FAST_STRICT_TESTS=1, and ZCL_FAST_LIVE=0 as needed.")
 Z23_FLAG("ZCL_FAST_NODE_BIN", "env_build", "build/bin/z23", "-",
           "first use tools/agent_fast_ci.sh:32; documented at docs/work/fast-path.md:135: binary with ZCL_FAST_NODE_BIN=... or skip the live check with")
 Z23_FLAG("ZCL_FAST_STRICT_TESTS", "env_build", "0", "-",
-          "first use tools/agent_fast_ci.sh:508; documented at docs/AGENT_API.md:1281: ZCL_FAST_STRICT_TESTS=1, and ZCL_FAST_LIVE=0 as needed.")
+          "first use tools/agent_fast_ci.sh:545; documented at docs/AGENT_API.md:1281: ZCL_FAST_STRICT_TESTS=1, and ZCL_FAST_LIVE=0 as needed.")
 Z23_FLAG("ZCL_FAST_TEST_JOBS", "env_build", "-", "-",
           "undocumented; first use tools/agent_fast_ci.sh:35")
 Z23_FLAG("ZCL_FAST_TESTS", "env_build", "-", "-",
-          "first use tools/agent_fast_ci.sh:373; documented at docs/AGENT_API.md:1280: ZCL_FAST_TESTS=group[,group],")
+          "first use tools/agent_fast_ci.sh:405; documented at docs/AGENT_API.md:1280: ZCL_FAST_TESTS=group[,group],")
 Z23_FLAG("ZCL_FEELER_INTERVAL_SECS", "env_runtime", "-", "-",
           "undocumented; first use core/modules/net/src/connman_dialer.c:392")
 Z23_FLAG("ZCL_FILE_PURPOSE_ROOT", "env_build", ".", "-",
