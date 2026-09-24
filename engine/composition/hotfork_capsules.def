@@ -34,14 +34,14 @@ HOTFORK_CAPSULE(
 HOTFORK_CAPSULE(
     "dev.native-command-input-policy.v1",
     "HOT_FORK",
-    "tools/command/native_dev_command.c",
+    "tools/command/native_dev_input_policy.c",
     "",
     "native-dev-input-and-interrupt-policy.v1",
     "native-dev-input-and-interrupt-policy.v1",
     "native-dev-input-and-interrupt-policy.v1",
     1000,
     "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
-    "dev_request_files+dev_drive_input_int+dev_event_interrupting+dev_group_valid+dev_generation_name_valid+dev_failure_id_valid")
+    "zcl_dev_request_files+zcl_dev_drive_input_int+zcl_dev_event_interrupting+zcl_dev_group_valid+zcl_dev_generation_name_valid+zcl_dev_failure_id_valid")
 
 HOTFORK_CAPSULE(
     "dev.native-hotswap-receipt-policy.v1",

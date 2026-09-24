@@ -51,7 +51,7 @@ elif [[ "$OWNER_KIND" == command-input ]]; then
     MUTANT_OLD='{ "max_cpu_seconds", 1, 600 },'
     MUTANT_NEW='{ "max_cpu_seconds", 1, 599 },'
 elif [[ "$OWNER_KIND" == native-dev ]]; then
-    SOURCE="$ROOT/tools/command/native_dev_command.c"
+    SOURCE="$ROOT/tools/command/native_dev_input_policy.c"
     OUTPUT="${ZCL_REFLEX_NATIVE_DEV_CORE_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-native-dev-core-acceptance.json}"
     STORY='native-dev-input-and-interrupt-policy.v1'
     MUTANT_OLD='strstr(path, "..")'

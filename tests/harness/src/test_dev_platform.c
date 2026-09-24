@@ -3920,14 +3920,22 @@ static int test_hotfork_descriptor_boundary(void)
             capsule.source_tu, object_root, &capsule));
 
         capsule.owner_id = "dev.native-command-input-policy.v1";
-        capsule.source_tu = "tools/command/native_dev_command.c";
+        capsule.source_tu = "tools/command/native_dev_input_policy.c";
         capsule.story_id = "native-dev-input-and-interrupt-policy.v1";
         capsule.story_root =
-                "9029d31e65330bcb075692f03854a1eeae81b9e79a9a83b82cbc0cfbb3d639b7";
+                "6d10e6a34b181a3bb44f5e02217e673bf6ad7704fb9c43fb43b5eba01d8e0e1d";
         capsule.story_fixture_root =
             "84a5a5c9cda8f565a1cc4ac6b8d7c24ad1cbf33e67a540cf929a271028a821a3";
         ASSERT(zcl_devloop_hotfork_descriptor_validate(
             capsule.source_tu, object_root, &capsule));
+        /* The command and watcher shells the pure policy cores moved out of
+         * are static authority shells (hotswap_shadow_owners.def), not
+         * capsule members: an edit there is an exact shell compile check,
+         * never a story over bytes the capsule does not compile. */
+        ASSERT(!zcl_devloop_hotfork_descriptor_validate(
+            "tools/command/native_dev_command.c", object_root, &capsule));
+        ASSERT(!zcl_devloop_hotfork_descriptor_validate(
+            "tools/dev/devloop_watch.c", object_root, &capsule));
 
         capsule.owner_id = "dev.native-hotswap-receipt-policy.v1";
         capsule.source_tu = "tools/command/native_dev_hotswap.c";

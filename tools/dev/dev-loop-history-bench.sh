@@ -225,11 +225,13 @@ if [ "$MODE" = "--self-test" ]; then
         fail 'service island classification regressed'
     [ "$(classify contexts/wallet/services/src/vault_intent_decision_service.c | cut -f1)" = HOT_SHADOW_CORE ] ||
         fail 'shadow service classification regressed'
-    [ "$(classify tools/dev/devloop_cycle.c | cut -f1)" = COMPILE_ONLY ] ||
+    [ "$(classify tools/dev/devloop_watch.c | cut -f1)" = COMPILE_ONLY ] ||
         fail 'static-shell compile-only classification regressed'
+    [ "$(classify tools/command/native_dev_command.c | cut -f1)" = COMPILE_ONLY ] ||
+        fail 'command static-shell compile-only classification regressed'
     [ "$(classify contexts/commons/modules/vcs/src/source_package_checkout.c | cut -f1)" = HOT_FORK ] ||
         fail 'HOT_FORK capsule classification regressed'
-    [ "$(classify tools/command/native_dev_command.c | cut -f1)" = HOT_FORK ] ||
+    [ "$(classify tools/command/native_dev_input_policy.c | cut -f1)" = HOT_FORK ] ||
         fail 'highest-churn HOT_FORK owner classification regressed'
     [ "$(classify tools/command/native_dev_hotswap.c | cut -f1)" = HOT_FORK ] ||
         fail 'hot-swap receipt HOT_FORK owner classification regressed'
