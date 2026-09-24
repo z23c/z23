@@ -1072,7 +1072,7 @@ ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_store_io.c", CAP
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_store_possession.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_swarm_node.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_swarm_receipt_session.c", CAP_FS_WRITE|CAP_WALLET, "derives a public key from swarm-receipt signing material via secp256k1_ec_pubkey_create")
-ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_swarm_record.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_swarm_record.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_transport.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_verify_capabilities.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_verify_policy.c", CAP_FS_READ|CAP_FS_WRITE, "")

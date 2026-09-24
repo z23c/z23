@@ -442,6 +442,71 @@ int t_swarm_legacy_record(void)
     return failures;
 }
 
+static bool linked_record_prepare(const struct sw_node *n,
+                                  const struct sw_pkg *p,
+                                  char leaf[4096], char outside[4096])
+{
+    char dir[4096], root_hex[65];
+    zcl_hex_encode(p->root, 32, root_hex);
+    int dn = snprintf(dir, sizeof(dir), "%s/downloads", n->zcode_dir);
+    int ln = snprintf(leaf, 4096, "%s/%s", dir, root_hex);
+    int on = snprintf(outside, 4096, "%s/outside-record",
+                      n->zcode_dir);
+    uint8_t wire[VCS_SWARM_RECORD_WIRE_BYTES] =
+        {'Z', 'S', 'W', 'D', 'L', 'R', 0x0d, 0x0a};
+    zcl_write_u16_le(wire + 8, 3);
+    memcpy(wire + 10, p->root, 32);
+    zcl_write_u64_le(wire + 42, (uint64_t)SW_DAY);
+    wire[50] = 0;
+    zcl_write_u64_le(wire + 51, 0);
+    bool prepared = dn > 0 && (size_t)dn < sizeof(dir) &&
+        ln > 0 && (size_t)ln < 4096 &&
+        on > 0 && (size_t)on < 4096 && mkdir(dir, 0700) == 0;
+    FILE *file = prepared ? fopen(outside, "wb") : NULL;
+    prepared = file && fwrite(wire, 1, sizeof(wire), file) == sizeof(wire);
+    if (file)
+        prepared = fclose(file) == 0 && prepared;
+    return prepared && symlink("../outside-record", leaf) == 0;
+}
+
+int t_swarm_linked_record(void)
+{
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg p;
+    if (!sw_node_open(&n, "linked_record", sw_score_contributor) ||
+        !sw_make_package(&p, 1, 41))
+        return 1;
+    vcs_swarm_engine_free(n.engine);
+    n.engine = NULL;
+    char leaf[4096], outside[4096];
+    bool prepared = linked_record_prepare(&n, &p, leaf, outside);
+    SW_CHECK("resume: valid linked download record is prepared", prepared);
+    if (prepared) {
+        n.engine = vcs_swarm_engine_create(n.store, n.book, n.zcode_dir,
+                                            sw_score_contributor, NULL);
+        struct vcs_swarm_download_status status;
+        SW_CHECK("resume: linked record does not create a download",
+                 n.engine && vcs_swarm_engine_download_status(
+                                 n.engine, p.root, &status) &&
+                 status.state == VCS_SWARM_DL_INACTIVE &&
+                 vcs_swarm_engine_active_downloads(n.engine) == 0);
+        vcs_swarm_engine_free(n.engine);
+        n.engine = NULL;
+        bool restored = rename(outside, leaf) == 0;
+        n.engine = restored ? vcs_swarm_engine_create(
+            n.store, n.book, n.zcode_dir, sw_score_contributor, NULL) : NULL;
+        SW_CHECK("resume: same record as real leaf creates a download",
+                 n.engine && vcs_swarm_engine_download_status(
+                                 n.engine, p.root, &status) &&
+                 status.state == VCS_SWARM_DL_WANT_MANIFEST);
+    }
+    sw_free_package(&p);
+    sw_node_close(&n);
+    test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
 int t_swarm_event_driven_schedule(void)
 {
     int failures = 0;
@@ -961,4 +1026,3 @@ int t_swarm_peer_offer(void)
              filled == VCS_SWARM_MAX_PEER_ADS - 1);
     return failures;
 }
-

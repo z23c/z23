@@ -435,7 +435,7 @@ contexts/commons/modules/vcs/src/package_swarm_node.c:swarm_fetch:39
 contexts/commons/modules/vcs/src/package_swarm_receipt.c:vcs_swarm_receipt_accept:23
 contexts/commons/modules/vcs/src/package_swarm_receipt_session.c:vcs_swarm_receipt_session_handle:34
 contexts/commons/modules/vcs/src/package_swarm_receipt_session.c:vcs_swarm_receipt_session_open:20
-contexts/commons/modules/vcs/src/package_swarm_record.c:vcs_swarm_record_load:19
+contexts/commons/modules/vcs/src/package_swarm_record.c:vcs_swarm_record_load:16
 contexts/commons/modules/vcs/src/package_swarm_stalled.c:vcs_swarm_engine_unadvertised_roots:16
 contexts/commons/modules/vcs/src/package_transport.c:vcs_package_transport_build:25
 contexts/commons/modules/vcs/src/package_transport.c:vcs_package_transport_import:23

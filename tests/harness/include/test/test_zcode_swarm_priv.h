@@ -137,6 +137,7 @@ int t_swarm_blob_transfer(void);
 int t_swarm_provider_restricted(void);
 int t_swarm_bounded_provider(void);
 int t_swarm_legacy_record(void);
+int t_swarm_linked_record(void);
 int t_swarm_event_driven_schedule(void);
 int t_swarm_receipt_exchange(void);
 int t_swarm_receipt_session(void);

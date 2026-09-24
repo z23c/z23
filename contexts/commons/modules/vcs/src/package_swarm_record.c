@@ -9,6 +9,7 @@
 #include "vcs_priv.h"
 
 #include "util/log_macros.h"
+#include "platform/positioned_file.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -67,16 +68,21 @@ bool vcs_swarm_record_persist(const char *zcode_dir, const char *root_hex,
 
 bool vcs_swarm_record_load(const char *path, struct vcs_swarm_record *out)
 {
+    if (!path || !out)
+        LOG_FAIL(SWARM_RECORD_LOG, "download record load input invalid");
     uint8_t wire[VCS_SWARM_RECORD_WIRE_BYTES];
-    FILE *f = path ? fopen(path, "rb") : NULL;
-    struct stat st;
-    bool sized = f && fstat(fileno(f), &st) == 0 && st.st_size >= 0 &&
-                 (size_t)st.st_size <= sizeof(wire);
-    size_t wire_len = sized ? (size_t)st.st_size : 0;
-    bool read_ok = sized && fread(wire, 1, wire_len, f) == wire_len &&
-                   fgetc(f) == EOF;
-    if (f)
-        fclose(f);
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        LOG_FAIL(SWARM_RECORD_LOG, "download record %s is not a real file",
+                 path);
+    uint64_t size = 0;
+    bool sized = platform_positioned_file_size(&file, &size) &&
+                 size <= sizeof(wire);
+    size_t wire_len = sized ? (size_t)size : 0;
+    bool read_ok = sized && platform_positioned_file_read(
+                               &file, wire, wire_len, 0) == (int64_t)wire_len;
+    platform_positioned_file_close(&file);
     uint16_t version = read_ok && wire_len >= 10u
                            ? vcs_rd_u16le(wire + 8) : 0;
     bool supported =
@@ -84,9 +90,10 @@ bool vcs_swarm_record_load(const char *path, struct vcs_swarm_record *out)
          wire_len == VCS_SWARM_RECORD_WIRE_BYTES) ||
         (version == SWARM_RECORD_VERSION_LEGACY &&
          wire_len == SWARM_RECORD_WIRE_BYTES_LEGACY);
-    if (!out || !read_ok || !supported ||
+    if (!read_ok || !supported ||
         memcmp(wire, record_magic, sizeof(record_magic)) != 0)
-        return false;
+        LOG_FAIL(SWARM_RECORD_LOG, "download record %s has invalid wire",
+                 path);
     memset(out, 0, sizeof(*out));
     memcpy(out->root, wire + 10, 32);
     out->created_day = (int64_t)vcs_rd_u64le(wire + 42);
