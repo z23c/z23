@@ -1876,7 +1876,19 @@ static int tc_unadmissible_group(struct testcache *tc)
     TC_CHECK("group too long for signed leaf has no reusable key",
              !p.key_valid && !p.cacheable && !p.hit &&
              p.code == TESTCACHE_R_GROUP_UNADMISSIBLE);
+    testcache_probe_group(tc, "test_acme_worker", &p);
+    TC_CHECK("external ACME worker requires independent execution",
+             !p.key_valid && !p.cacheable && !p.hit &&
+             p.code == TESTCACHE_R_EXTERNAL_INPUT);
     return failures;
+}
+
+static bool tc_acme_and_agent_policy(void)
+{
+    return file_contains("tests/harness/src/test_acme_worker.c",
+                         "build/bin/zclassic23-acme") &&
+           testcache_group_is_denylisted("test_acme_worker") &&
+           testcache_group_is_denylisted("test_agent_copy_prove");
 }
 
 int test_testcache(void)
@@ -2409,7 +2421,7 @@ int test_testcache(void)
              testcache_group_is_denylisted("test_cli_argv_strict") &&
              testcache_group_is_denylisted("test_kill9_recovery") &&
              testcache_group_is_denylisted("test_wallet_view") &&
-             testcache_group_is_denylisted("test_agent_copy_prove") &&
+             tc_acme_and_agent_policy() &&
              testcache_group_is_denylisted("test_replay_canary_verdict"));
     TC_CHECK("a plain in-tree unit group stays cacheable",
              !testcache_group_is_denylisted("test_hkdf_sha256_rfc5869"));

@@ -389,6 +389,7 @@ static bool group_reads_external_inputs(const char *name)
         name += 5;
     static const char *const ext[] = {
         /* --- execs a built binary or a repo script (whole-link input) --- */
+        "acme_worker",                  /* executes zclassic23-acme selftests */
         "agent_copy_prove",
         "chain_advance_atomicity",
         "chaos_harness",                  /* reads tests/fixtures block files */
