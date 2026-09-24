@@ -361,7 +361,7 @@ compile_step() {
         case "$(uname -s 2>/dev/null || true)" in
             MINGW*|MSYS*|CYGWIN*) target=windows-acceptance ;;
         esac
-        make -C "$REPO_ROOT" --no-print-directory "$target"
+        MAKEFLAGS= make -C "$REPO_ROOT" -j"$(cross_link_jobs)" --no-print-directory "$target"
         return $?
     fi
     if [ "${ZCL_REQUIRE_MINGW:-0}" = 1 ]; then
@@ -505,8 +505,8 @@ run_selftest() {
     expect_red "9. an active ID without _SOURCES is caught" \
                "active acceptance IDs and _SOURCES IDs differ" "$d" || rc=1
 
-    if [ "$rc" -eq 0 ]; then
-        echo "══ self-test: PASS (9/9) — this gate is proven able to go red ══"
+    selftest_cross_link_jobs || rc=1; if [ "$rc" -eq 0 ]; then
+        echo "══ self-test: PASS (10/10) — this gate is proven able to go red ══"
     else
         echo "══ self-test: FAIL ══"
     fi
@@ -522,6 +522,48 @@ main() {
     reconcile_root "${ZCL_WINDOWS_ACCEPTANCE_ROOT:-$REPO_ROOT}" || exit 1
     compile_step
     exit $?
+}
+
+# ── cross-link parallelism ──────────────────────────────────────────────────
+# compile_step names its own job count and drops the inherited MAKEFLAGS.
+# Under the lint driver this nested make inherits -j without the jobserver
+# descriptors and falls back to -j1, which cross-linked the 72 programs
+# serially: 118-142 s cold, 22-26 s at -j14 on the 28-processor build grant.
+# Half the host, clamped to [4, 16], the same share
+# check_standalone_tools_link.sh takes for its own nested make beside the
+# other lint workers. ZCL_HOST_JOBS is the Makefile's affinity-mask count;
+# getconf answers the same question portably for a run outside make. These
+# live below main() so the flag first-use lines recorded in flags.def do not
+# move.
+cross_link_jobs() {
+    local host_jobs jobs
+    host_jobs="${ZCL_HOST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}"
+    case "$host_jobs" in ''|*[!0-9]*) host_jobs=8 ;; esac
+    jobs=$(( host_jobs / 2 ))
+    if [ "$jobs" -lt 4 ];  then jobs=4;  fi
+    if [ "$jobs" -gt 16 ]; then jobs=16; fi
+    echo "$jobs"
+}
+
+# Self-test case 10: a stub make records what compile_step actually runs
+# under an inherited -j28 with a dead jobserver.
+selftest_cross_link_jobs() {
+    local stub="$FIXTURE_ROOT/stub-make" seen
+    mkdir -p "$stub"
+    printf '#!/bin/sh\nprintf "%%s|%%s\\n" "${MAKEFLAGS-}" "$*" > "%s/argv"\n' \
+        "$stub" > "$stub/make"
+    chmod +x "$stub/make"
+    (PATH="$stub:$PATH" MAKEFLAGS='-j28 --jobserver-auth=fifo:/nonexistent' \
+        ZCL_HOST_JOBS=28 ZCL_WINDOWS_ACCEPTANCE_CC=true compile_step) \
+        >/dev/null 2>&1 || true
+    seen="$(cat "$stub/argv" 2>/dev/null || true)"
+    case "$seen" in
+        "|"*" -j14 "*)
+            echo "  self-test ok (GREEN): 10. the cross-link runs -j14 on a 28-processor grant with MAKEFLAGS cleared"
+            return 0 ;;
+    esac
+    echo "SELF-TEST FAIL: 10. the cross-link must clear MAKEFLAGS and name -j14; ran: ${seen:-nothing}"
+    return 1
 }
 
 main "$@"
