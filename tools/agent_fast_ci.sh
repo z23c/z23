@@ -203,7 +203,9 @@ make_fast() {
     if [ "$FAST_FF_LOCKED" = 1 ] &&
        [ "$FAST_CC" = "${BUILD_COMPILER_CC:-}" ] &&
        [[ "${BUILD_COMPILER_ID:-}" =~ ^[0-9a-f]{64}$ ]] &&
-       [[ "${BUILD_SYSTEM_ID:-}" =~ ^[0-9a-f]{64}$ ]]; then
+       [[ "${BUILD_COMPILER_ID:-}" =~ [1-9a-f] ]] &&
+       [[ "${BUILD_SYSTEM_ID:-}" =~ ^[0-9a-f]{64}$ ]] &&
+       [[ "${BUILD_SYSTEM_ID:-}" =~ [1-9a-f] ]]; then
         epoch_args=("BUILD_COMPILER_ID=$BUILD_COMPILER_ID"
                     "BUILD_SYSTEM_ID=$BUILD_SYSTEM_ID")
     fi

@@ -489,7 +489,7 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # therefore owns only the dev epoch; the explicit proof bundle below keeps the
 # complete dev+test-fast graph on platforms that can consume it.
 ZCL_EPOCH_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
-else ifneq ($(filter dev-proof-bundle,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter dev-proof-bundle ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -515,7 +515,7 @@ else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_EPOCH_SINGL
 ZCL_EPOCH_PROFILES := dev-tsan
 else ifneq ($(filter coverage coverage-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := coverage
-else ifneq ($(filter lint-fast watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id ff t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES :=
 endif
 endif
