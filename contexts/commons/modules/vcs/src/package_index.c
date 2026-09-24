@@ -9,6 +9,7 @@
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/positioned_file.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,47 @@ struct vcs_package_index {
     size_t skipped_count;
 };
 
+static bool index_read_manifest_wire(const char *zcode_dir,
+                                     const char *root_hex, uint8_t **out,
+                                     size_t *out_len)
+{
+    char manifests_dir[4400];
+    int n = snprintf(manifests_dir, sizeof(manifests_dir), "%s/manifests",
+                     zcode_dir);
+    if (n < 0 || (size_t)n >= sizeof(manifests_dir))
+        return false;
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(
+            &file, manifests_dir, root_hex))
+        return false;
+    uint64_t size = 0;
+    if (!platform_positioned_file_size(&file, &size) || size == 0 ||
+        size > VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES) {
+        platform_positioned_file_close(&file);
+        LOG_ERROR(INDEX_LOG, "manifest %s exceeds the wire bound",
+                  root_hex);
+        return false;
+    }
+    uint8_t *wire = zcl_malloc((size_t)size, "index_manifest_wire");
+    if (!wire) {
+        platform_positioned_file_close(&file);
+        LOG_ERROR(INDEX_LOG, "manifest wire buffer alloc failed");
+        return false;
+    }
+    int64_t got = platform_positioned_file_read(&file, wire, (size_t)size, 0);
+    platform_positioned_file_close(&file);
+    if (got != (int64_t)size) {
+        free(wire);
+        LOG_ERROR(INDEX_LOG, "manifest %s cannot be read completely",
+                  root_hex);
+        return false;
+    }
+    *out = wire;
+    *out_len = (size_t)size;
+    return true;
+}
+
 /* Project one parsed manifest wire (read from <zcode_dir>/manifests/<root>)
  * into the entry's summary fields. Absent/unparseable manifests leave
  * manifest_present false — a release can be indexed before its package is
@@ -29,30 +71,11 @@ struct vcs_package_index {
 static void index_fill_manifest_summary(const char *zcode_dir,
                                         struct vcs_package_index_entry *e)
 {
-    char path[4400];
-    int n = snprintf(path, sizeof(path), "%s/manifests/%s", zcode_dir,
-                     e->package_root_hex);
-    if (n < 0 || (size_t)n >= sizeof(path))
+    uint8_t *wire = NULL;
+    size_t len = 0;
+    if (!index_read_manifest_wire(zcode_dir, e->package_root_hex, &wire,
+                                  &len))
         return;
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return;
-    uint8_t *wire = zcl_malloc(VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES,
-                               "index_manifest_wire");
-    if (!wire) {
-        fclose(f);
-        LOG_ERROR(INDEX_LOG, "manifest wire buffer alloc failed");
-        return;
-    }
-    size_t len = fread(wire, 1, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES, f);
-    bool trailing = !feof(f);
-    fclose(f);
-    if (trailing || len == 0) {
-        free(wire);
-        LOG_ERROR(INDEX_LOG, "manifest %s exceeds the wire bound",
-                  e->package_root_hex);
-        return;
-    }
     struct vcs_package_manifest manifest;
     if (!vcs_package_manifest_parse(wire, len, &manifest)) {
         free(wire);

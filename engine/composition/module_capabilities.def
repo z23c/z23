@@ -1052,7 +1052,7 @@ ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_capsule.c", CAP_
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_checkout.c", CAP_FS_WRITE|CAP_FS_READ|CAP_PRIVILEGE, "inert checkout of one verified ordinary ZCODE package tree: reaches the kernel directly via syscall() for the no-clobber rename glibc does not expose under strict C23 flags")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_content.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_deps.c", CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_index.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_index.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_install.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_manifest.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_mapping.c", CAP_FS_WRITE, "")

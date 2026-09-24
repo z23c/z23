@@ -2581,6 +2581,51 @@ static int t_index_rebuild(void)
     return failures;
 }
 
+static bool zp_index_manifest_state(const char *zcode, bool present)
+{
+    struct vcs_package_index *index = vcs_package_index_build(zcode);
+    const struct vcs_package_index_entry *entry = index ?
+        vcs_package_index_at(index, 0) : NULL;
+    bool ok = entry && entry->manifest_present == present &&
+              (present ? entry->file_count > 0 : entry->file_count == 0);
+    vcs_package_index_free(index);
+    return ok;
+}
+
+static int t_index_linked_manifest(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "manifest-link");
+    bool committed = zp_commit_one(dd, 0x9a, 1u, "alice/manifest-link",
+                                   "MIT", 34);
+    char zcode[320];
+    snprintf(zcode, sizeof(zcode), "%s/zcode", dd);
+    struct vcs_package_index *index = committed ?
+        vcs_package_index_build(zcode) : NULL;
+    const struct vcs_package_index_entry *entry = index ?
+        vcs_package_index_at(index, 0) : NULL;
+    char leaf[440], outside[384];
+    bool prepared = entry && entry->manifest_present &&
+        snprintf(leaf, sizeof(leaf), "%s/manifests/%s", zcode,
+                 entry->package_root_hex) > 0 &&
+        snprintf(outside, sizeof(outside), "%s/outside-manifest", zcode) > 0;
+    vcs_package_index_free(index);
+    prepared = prepared && rename(leaf, outside) == 0 &&
+               symlink("../outside-manifest", leaf) == 0;
+    ZP_CHECK("index: valid manifest linked from outside is prepared", prepared);
+    if (prepared) {
+        ZP_CHECK("index: linked manifest does not claim local presence",
+                 zp_index_manifest_state(zcode, false));
+        bool restored = unlink(leaf) == 0 && rename(outside, leaf) == 0;
+        ZP_CHECK("index: same manifest as real leaf is present",
+                 restored && zp_index_manifest_state(zcode, true));
+    }
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 /* ── 11: the CLI path — input_validate, then the BOUND handler ────────
  *
  * Every other case in this file calls the handler symbol directly, which is
@@ -3162,6 +3207,7 @@ int test_zcode_publish(void)
     failures += t_library_reproduction();
     failures += t_show();
     failures += t_index_rebuild();
+    failures += t_index_linked_manifest();
     failures += t_release_load_blocked_directory();
     failures += t_release_load_linked_leaf();
     failures += t_registry_path();
