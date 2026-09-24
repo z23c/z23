@@ -1001,6 +1001,40 @@ static int fcw_fetch_resume(struct vcs_package_store *dst,
     return failures;
 }
 
+static int fcw_linked_sidecar_refusal(const char *base, const char *cache,
+                                     const char *key,
+                                     struct vcs_package_store *store,
+                                     uint8_t root[32],
+                                     struct vcs_fastobj_carrier_stats *stats,
+                                     char *err, size_t err_cap)
+{
+    int failures = 0;
+    char linked[4096], object[4096], sidecar[4096], outside[4096];
+    bool prepared = snprintf(linked, sizeof(linked), "%s/linked", base) <
+                        (int)sizeof(linked) &&
+                    fcw_rm_rf(linked) && fcw_copy_tree(cache, linked) &&
+                    vcs_fastobj_cache_paths(linked, key, object,
+                                            sizeof(object), sidecar,
+                                            sizeof(sidecar)) &&
+                    snprintf(outside, sizeof(outside), "%s/outside-sidecar",
+                             base) < (int)sizeof(outside) &&
+                    rename(sidecar, outside) == 0 &&
+                    symlink("../../../outside-sidecar", sidecar) == 0;
+    FC_CHECK("export linked sidecar fixture is prepared", prepared);
+    if (!prepared)
+        return failures;
+    bool refused = !vcs_fastobj_carrier_export(linked, store, root, stats,
+                                               err, err_cap);
+    FC_CHECK("export refuses a linked cache sidecar",
+             refused && strstr(err, "sidecar unreadable"));
+    bool restored = unlink(sidecar) == 0 &&
+                    rename(outside, sidecar) == 0;
+    FC_CHECK("same sidecar as real leaf exports",
+             restored && vcs_fastobj_carrier_export(linked, store, root,
+                                                    stats, err, err_cap));
+    return failures;
+}
+
 static int test_fastobj_carrier_platform_arm(void)
 {
     int failures = 0;
@@ -1567,6 +1601,10 @@ static int test_fastobj_carrier_platform_arm(void)
                          false);
             }
         }
+
+        failures += fcw_linked_sidecar_refusal(base, cacheA, key, nodeA,
+                                                rootL, &stRef, err,
+                                                sizeof(err));
 
         /* R4: a hand-built carrier whose sidecar is filed under a key it
          * does not hash to — ADMIT must refuse at the destination. */

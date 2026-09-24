@@ -8,6 +8,7 @@
 #if !defined(_WIN32)
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "platform/positioned_file.h"
 #include "sha3/sha3.h"
 #include "vcs/fastobj.h"
 #include "vcs/package_content.h"
@@ -33,32 +34,33 @@ static const char carrier_dir[] = VCS_FASTOBJ_CARRIER_DIR "/";
 static bool fc_read_file(const char *path, size_t cap, uint8_t **out,
                          size_t *out_len)
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        (uint64_t)st.st_size > (uint64_t)cap) {
-        close(fd);
+    uint64_t size = 0;
+    if (!platform_positioned_file_size(&file, &size) || size > cap) {
+        platform_positioned_file_close(&file);
         return false;
     }
-    size_t len = (size_t)st.st_size;
+    size_t len = (size_t)size;
     uint8_t *buf = zcl_malloc(len ? len : 1u, "fastobj-carrier-read");
     if (!buf) {
-        close(fd);
+        platform_positioned_file_close(&file);
         return false;
     }
     size_t got = 0;
     while (got < len) {
-        ssize_t n = read(fd, buf + got, len - got);
+        int64_t n = platform_positioned_file_read(&file, buf + got,
+                                                  len - got, got);
         if (n <= 0) {
             free(buf);
-            close(fd);
+            platform_positioned_file_close(&file);
             return false;
         }
         got += (size_t)n;
     }
-    close(fd);
+    platform_positioned_file_close(&file);
     *out = buf;
     *out_len = len;
     return true;
