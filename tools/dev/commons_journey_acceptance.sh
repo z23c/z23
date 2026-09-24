@@ -207,7 +207,9 @@ cj_require_refusal() {
     got="$(cj_field error.code "$doc" '')$(cj_field error.rule "$doc" '')"
     got="$got $(cj_field error.message "$doc" '')"
     case "$got" in
-        *"$want"*) cj_note "refused by name: $label -> $want" ;;
+        *"$want"*)
+            printf '%s\t%s\n' "$label" "$want" >>"$DHT_WORK/named-refusals.tsv"
+            cj_note "refused by name: $label -> $want" ;;
         *) cj_die "$label was refused, but not by name '$want': $doc" ;;
     esac
 }
@@ -2162,6 +2164,36 @@ cj_zdog_turn_faster_edit() {
         cj_die "the bounded change did not land in the candidate: $hdr"
 }
 
+# Record only stages whose assertion has passed. This is a measurement of the
+# existing quickturn journey, not another work ledger: the action and receipt
+# identities still live in the node. A row includes the current proof backlog,
+# duplicate worker attempts, and a local process resource sample. Remote hosts
+# have no comparable local ps sample and are reported as unavailable.
+cj_turn_metric() {
+    local stage="$1" elapsed backlog duplicates cpu=unavailable rss=unavailable
+    elapsed=$(( $(date +%s) - CJ_TURN_METRIC_T0 ))
+    if [ "$stage" = observed_c ]; then
+        # A has been killed by this assertion; querying it would replay a
+        # one-shot CLI against a dead publisher and misstate the backlog.
+        backlog=unavailable
+    else
+        # Requester action rows intentionally remain SNAPSHOTTED while a
+        # remote worker proves them. Count only the latest unfinished proof
+        # event in each chain; historical REQUESTED rows are not backlog.
+        backlog="$(cj_sql a "SELECT count(*) FROM build_proof_events e WHERE e.state IN ('REQUESTED','PEER_DISCOVERED','CONTEXT_READY','RUNNING') AND NOT EXISTS (SELECT 1 FROM build_proof_events n WHERE n.prior_event_root=e.event_root)")"
+    fi
+    duplicates="$(cj_sql b "SELECT coalesce(sum(CASE WHEN attempt_count>1 THEN attempt_count-1 ELSE 0 END),0) FROM build_actions")"
+    [ -n "$backlog" ] && [ -n "$duplicates" ] ||
+        cj_die "quickturn metrics could not read the existing proof actions"
+    if [ "$CJ_MULTIHOST" = 0 ] && [ "$CJ_TWOHOST" = 0 ]; then
+        cpu="$(ps -p "$DHT_PGID_A,$DHT_PGID_B" -o %cpu= | awk '{sum+=$1} END {printf "%.1f",sum}')"
+        rss="$(ps -p "$DHT_PGID_A,$DHT_PGID_B" -o rss= | awk '{sum+=$1} END {printf "%.0f",sum}')"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$stage" "$CJ_TURN_LOC" "$elapsed" "$backlog" "$duplicates" "$cpu" "$rss" \
+        >>"$DHT_WORK/turn-funnel.tsv"
+}
+
 # Build the probe where the node lives, against the zprng THAT node admitted
 # for itself. Same discipline as cj_build_wordcount: no node reaches into
 # another node's datadir.
@@ -2321,6 +2353,10 @@ cj_journey_turn_faster() {
     # No details=true here: this workspace is a real package with a real
     # dependency, and the detailed reuse plan does not fit the bounded response
     # budget. The bound is the contract; the journey asks for what fits.
+    CJ_TURN_METRIC_T0="$(date +%s)"
+    printf 'stage\tloc\telapsed_s\tproof_backlog\tduplicate_attempts\tnode_cpu_pct\tnode_rss_kib\n' \
+        >"$DHT_WORK/turn-funnel.tsv"
+    CJ_TURN_LOC=0
     start="$(cj_a zcode work start \
         --input="{\"workspace\":\"$CJ_ZDOG_WS\",\"goal\":\"$CJ_TURN_GOAL\",\"profile\":\"$CJ_PROFILE\"}")"
     cj_require_ok "work start (turn faster)" "$start"
@@ -2328,6 +2364,7 @@ cj_journey_turn_faster() {
     CJ_ZDOG_WORK_ID="$(cj_field data.work_id "$start" '')"
     [ -n "$CJ_ZDOG_WORK_ID" ] || cj_die "work start bound no work id: $start"
     cj_human_first "work start (turn faster)" "$start"
+    cj_turn_metric requested
 
     # ── the change is made, and only the change ──────────────────────────
     handoff="$(cj_a zcode work run \
@@ -2338,6 +2375,10 @@ cj_journey_turn_faster() {
     [ "$(cj_field data.authority "$handoff" '')" = "NONE_MANUAL_HANDOFF" ] ||
         cj_die "the manual handoff claimed authority it must not have: $handoff"
     cj_zdog_turn_faster_edit "$candidate"
+    CJ_TURN_LOC="$(awk '/^#define ZDOG_YAW_RATE_BRAD 45511/{n++} END {print n+0}' \
+        "$candidate/include/zdogfight/zdogfight.h")"
+    [ "$CJ_TURN_LOC" -eq 1 ] || cj_die "quickturn did not generate exactly one changed C23 line"
+    cj_turn_metric generated
 
     run="$(cj_a zcode work run \
         --input="{\"workspace\":\"$CJ_ZDOG_WS\",\"work\":\"latest\",\"adapter\":\"manual\",\"datadir\":\"$DHT_DD_A\",\"details\":true}")"
@@ -2351,6 +2392,7 @@ cj_journey_turn_faster() {
     # creation: the requester asked the commons instead of proving itself.
     [ "$(cj_sql a "SELECT count(*) FROM build_actions WHERE action_id='$CJ_ZDOG_ACTION_ID' AND state='SNAPSHOTTED' AND attempt_count=0 AND started_at=0 AND length(worker_id)=0")" = 1 ] ||
         cj_die "node A proved its own change instead of asking the commons"
+    cj_turn_metric candidate
 
     # ── the person sees the consequence ──────────────────────────────────
     cj_wait_work_state EVIDENCE_READY 300 "$CJ_ZDOG_WS" ||
@@ -2375,7 +2417,10 @@ cj_journey_turn_faster() {
     esac
     [ "$(cj_field data.confirmation_ready "$show" False)" = True ] ||
         cj_die "work show does not offer the person a decision: $show"
+    cj_turn_metric buildable
+    cj_turn_metric tested
     cj_human_first "work show (turn faster)" "$show"
+    cj_turn_metric previewed
     local confirmation_identity detailed
     detailed="$(cj_a zcode work show \
         --input="{\"workspace\":\"$CJ_ZDOG_WS\",\"work\":\"latest\",\"datadir\":\"$DHT_DD_A\",\"details\":true}")"
@@ -2387,6 +2432,7 @@ cj_journey_turn_faster() {
     confirmation_identity="$(cj_field data.confirmation_identity "$detailed" '')"
     [ "${#confirmation_identity}" -eq 64 ] ||
         cj_die "turn-faster show omitted its exact confirmation identity"
+    cj_turn_metric verified
 
     # ── the person decides, and the exact bytes travel ───────────────────
     accept="$(cj_a zcode work accept \
@@ -2404,6 +2450,7 @@ cj_journey_turn_faster() {
     CJ_ZDOG_ACCEPTED_WORK="$(printf '%s' "$(cj_field data.expert "$accept")" | cj_jget lane_receipt_root '')"
     [ "${#CJ_ZDOG_ACCEPTED_SOURCE}" -eq 64 ] && [ "${#CJ_ZDOG_ACCEPTED_WORK}" -eq 64 ] ||
         cj_die "acceptance bound no accepted source / lane receipt root: $accept"
+    cj_turn_metric accepted
     again="$(cj_a zcode work accept \
         --input="{\"workspace\":\"$CJ_ZDOG_WS\",\"work\":\"latest\",\"datadir\":\"$DHT_DD_A\"}")"
     cj_require_ok "work accept (turn faster, repeat)" "$again"
@@ -2438,6 +2485,7 @@ cj_journey_turn_faster() {
     # exists, unaltered, and anyone can still fetch it.
     [ "$CJ_ZDOG_APP_ROOT" != "$CJ_ZDOG_ROOT" ] ||
         cj_die "the accepted change published the same root as the original"
+    cj_turn_metric published
     cj_note "the changed version published: ${CJ_ZDOG_APP_ROOT:0:16}… (was ${CJ_ZDOG_ROOT:0:16}…)"
 
     # ── AFTER: another machine reproduces it and runs it ─────────────────
@@ -2467,6 +2515,7 @@ cj_journey_turn_faster() {
     # same controls, on a different machine — and the aircraft turns faster.
     [ "$CJ_TURN_AFTER" -gt "$CJ_TURN_BEFORE" ] ||
         cj_die "the accepted change did not make the aircraft turn faster: before=$CJ_TURN_BEFORE after=$CJ_TURN_AFTER"
+    cj_turn_metric observed_b
     cj_note "after:  the aircraft turns $CJ_TURN_AFTER deg/s on node B (was $CJ_TURN_BEFORE on node A)"
     cj_note "the change travelled as $CJ_ZDOG_BYTES bytes, reproduced from its own root"
 }
@@ -2572,6 +2621,14 @@ cj_journey_publisher_disappears() {
     pre_tip="$(dht_height "$DHT_DD_A" "$A_RPC")"
     [ -n "$pre_tip" ] || cj_die "node A reported no chain height before C joined"
     cj_wait_height "$DHT_DD_C" "$C_RPC" "$pre_tip" "node C (initial sync)"
+    # Require B's historical anchor before A exits: B is the surviving source.
+    # A's old anchor is diagnostic, not an authority for this fetch.
+    local known_a known_b
+    known_a="$(cj_sql c "SELECT count(*) FROM zid_identities WHERE lower(hex(master_pubkey))=lower('$CJ_PUB_A') AND status='active'")"
+    known_b="$(cj_sql c "SELECT count(*) FROM zid_identities WHERE lower(hex(master_pubkey))=lower('$CJ_PUB_B') AND status='active'")"
+    cj_note "latecomer historical ZID anchors at tip $pre_tip: A=$known_a B=$known_b"
+    [ "$known_b" = 1 ] ||
+        cj_die "latecomer chain tip $pre_tip lacks surviving node B's historical ZID anchor"
     # The anchor rides A's wallet, and A was restarted for the overlay phase:
     # re-arm the custody gates (unlock, fresh current-key backup) exactly as
     # cj_identities did before the first anchors.
@@ -2692,8 +2749,15 @@ cj_journey_publisher_disappears() {
         fi
         sleep 0.5
     done
-    [ "${auth_b:-0}" -ge 1 ] && [ "${auth_c:-0}" -ge 1 ] ||
+    if [ "${auth_b:-0}" -lt 1 ] || [ "${auth_c:-0}" -lt 1 ]; then
+        cj_stall_facts B "$DHT_DD_B" "$B_RPC"
+        cj_stall_facts C "$DHT_DD_C" "$C_RPC"
+        dht_status "$DHT_DD_B" "$B_RPC" >"$DHT_WORK/survivor-dht.json"
+        dht_status "$DHT_DD_C" "$C_RPC" >"$DHT_WORK/latecomer-dht.json"
+        cj_b dumpstate transport >"$DHT_WORK/survivor-transport.json"
+        cj_c dumpstate transport >"$DHT_WORK/latecomer-transport.json"
         cj_die "B and C never formed an authenticated overlay session"
+    fi
 
     # The proof itself: with A gone, C discovers, fetches and reproduces the
     # exact accepted source from B, then runs the identical program.
@@ -2807,6 +2871,7 @@ cj_journey_publisher_disappears() {
     [ "$rate_c" -gt "$CJ_TURN_BEFORE" ] ||
         cj_die "node C did not observe the faster turn: $rate_c vs $CJ_TURN_BEFORE"
     CJ_TURN_SURVIVED=1
+    cj_turn_metric observed_c
     cj_note "with A gone, node C turns at $rate_c deg/s — the same number B measured, from B's bytes alone"
 
     CJ_PUBLISHER_SURVIVAL=1
@@ -3012,6 +3077,9 @@ cj_write_facts() {
         printf 'changed_root_after    = %s\n' "$CJ_ZDOG_APP_ROOT"
         printf 'turn_rate_before      = %s deg/s (node A, the package as published)\n' "$CJ_TURN_BEFORE"
         printf 'turn_rate_after       = %s deg/s (node B, from the bytes it fetched)\n' "$CJ_TURN_AFTER"
+        printf 'turn_funnel_sha3      = %s\n' "$(cj_sha3 "$DHT_WORK/turn-funnel.tsv")"
+        printf 'turn_funnel_rows      = %s\n' "$(( $(wc -l <"$DHT_WORK/turn-funnel.tsv") - 1 ))"
+        printf 'named_refusals        = %s\n' "$(wc -l <"$DHT_WORK/named-refusals.tsv")"
         if [ "${CJ_PUBLISHER_SURVIVAL:-0}" = 1 ]; then
             if [ "$CJ_MULTIHOST" = 1 ]; then
                 printf 'publisher_survival    = node A process killed; node C on another addressed host reproduced and ran the exact accepted bytes from node B\n'
@@ -3078,8 +3146,9 @@ if [ "$CJ_TWOHOST" = 1 ]; then
             "$started_node" "$started_pid" "$actual_binary" >>"$DHT_WORK/started-binaries.sha3"
     done
 fi
-# The reuse-availability proof runs while the published package is still
-# un-admitted on A; peer distribution then admits it (the pointer gate makes
+CJ_RECORD_MODE="${ZCL_COMMONS_DEMO_RECORD:-0}"
+# The reuse-availability proof runs before A admits the published package;
+# peer distribution then admits it (the pointer gate makes
 # the publisher's own reproduction evidence a precondition of announcing).
 cj_journey_work_start_unavailable
 cj_journey_peer_distribution
@@ -3146,7 +3215,7 @@ cj_strip > "$DHT_WORK/commons-demo.strip" ||
     cj_die "could not write the journey strip"
 cat "$DHT_WORK/commons-demo.strip" || true
 cj_write_facts "$DHT_WORK/commons-demo.facts" "$DHT_WORK/commons-demo.strip"
-if [ "${ZCL_COMMONS_DEMO_RECORD:-0}" = 1 ]; then
+if [ "$CJ_RECORD_MODE" = 1 ]; then
     cp "$DHT_WORK/commons-demo.strip" \
        "$REPO_ROOT/docs/assets/z23-commons-demo.strip"
     cp "$DHT_WORK/commons-demo.facts" \
