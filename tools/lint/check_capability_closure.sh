@@ -1020,25 +1020,35 @@ check_root() {
 #      not "compiled out", and a genuine overdeclaration behind it still
 #      VIOLATIONs (N2), so the softening cannot launder an ordinary defect.
 FIXTURE_ROOT=""
+FILLER_TEMPLATE=""
 selftest_cleanup() { [ -n "$FIXTURE_ROOT" ] && rm -rf "$FIXTURE_ROOT"; }
 
 # make_epoch <dir> — populate <dir>/build/dev-obj/epochs/fx0/ with
 # CAP_CLOSURE_MIN_OBJECTS_SCANNED harmless filler objects (zero undefined
 # symbols each, so they cannot affect closure/declaration/symmetry) plus
 # whatever real synthetic objects the caller compiles in afterward.
+# The same bytes serve every fixture: build the filler set once and copy the
+# whole set for each case, avoiding one cp process per object per fixture.
 make_epoch() {
     local d="$1" epoch="$1/build/dev-obj/epochs/fx0"
-    mkdir -p "$epoch"
-    local src="$d/.filler.c" obj="$d/.filler.o"
-    cat > "$src" <<'EOF'
+    mkdir -p "$epoch" || return 2
+    if [ -z "$FILLER_TEMPLATE" ]; then
+        local src="$FIXTURE_ROOT/.filler.c" obj="$FIXTURE_ROOT/.filler.o"
+        local template="$FIXTURE_ROOT/.filler-template"
+        mkdir -p "$template" || return 2
+        cat > "$src" <<'EOF'
 static int filler_fn(int x) { return x + 1; }
 int filler_export(int x) { return filler_fn(x) + 1; }
 EOF
-    cc -std=c23 -c "$src" -o "$obj" 2>/dev/null || cc -c "$src" -o "$obj"
-    local i
-    for i in $(seq 1 "$CAP_CLOSURE_MIN_OBJECTS_SCANNED"); do
-        cp "$obj" "$epoch/filler_$i.o"
-    done
+        cc -std=c23 -c "$src" -o "$obj" 2>/dev/null ||
+            cc -c "$src" -o "$obj" || return 2
+        local i
+        for ((i = 1; i <= CAP_CLOSURE_MIN_OBJECTS_SCANNED; i++)); do
+            cp "$obj" "$template/filler_$i.o" || return 2
+        done
+        FILLER_TEMPLATE="$template"
+    fi
+    cp -R "$FILLER_TEMPLATE/." "$epoch/" || return 2
 }
 
 # fixture_symbols <dir> — a minimal, real capability_symbols.def: just
