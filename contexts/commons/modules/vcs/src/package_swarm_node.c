@@ -19,6 +19,7 @@
 #include "vcs_priv.h"
 
 #include "base/hex.h"
+#include "platform/positioned_file.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -1301,11 +1302,8 @@ static void resume_downloads(struct vcs_swarm_engine *engine)
     closedir(d);
 }
 
-/* Load-and-bump the persisted boot nonce: request ids are
- * (nonce << 32) | counter, unique across engine restarts so the
- * slice-11 replayed-request dedup never swallows credit for reissued
- * work. Without persistence the nonce is a fixed 1 (single-lifetime
- * engines, e.g. tests without a zcode_dir). */
+/* Boot nonce keeps request IDs distinct across restarts for replay credit.
+ * Without persistence use 1. Read one extra byte to reject long records. */
 static uint64_t nonce_bump(struct vcs_swarm_engine *engine)
 {
     if (!engine->persist)
@@ -1313,12 +1311,13 @@ static uint64_t nonce_bump(struct vcs_swarm_engine *engine)
     char path[STORE_PATH_MAX];
     snprintf(path, sizeof(path), "%s/swarm_nonce", engine->zcode_dir);
     uint64_t nonce = 0;
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        uint8_t buf[8];
-        if (fread(buf, 1, sizeof(buf), f) == sizeof(buf))
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (platform_positioned_file_open(&file, path)) {
+        uint8_t buf[9];
+        if (platform_positioned_file_read(&file, buf, sizeof(buf), 0) == 8)
             nonce = vcs_rd_u64le(buf);
-        fclose(f);
+        platform_positioned_file_close(&file);
     }
     nonce++;
     if (nonce >= (UINT64_C(1) << 32))

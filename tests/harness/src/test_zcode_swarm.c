@@ -537,10 +537,61 @@ struct vcs_swarm_frame_result sw_answer(
     return res;
 }
 
+#if !defined(_WIN32)
+static bool sw_nonce_file_equals(const char *path, uint64_t expected)
+{
+    uint8_t wire[8];
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    bool ok = fread(wire, 1, sizeof(wire), f) == sizeof(wire) &&
+              fgetc(f) == EOF;
+    if (fclose(f) != 0)
+        ok = false;
+    return ok && zcl_read_u64_le(wire) == expected;
+}
+
+static int t_swarm_linked_nonce(void)
+{
+    int failures = 0;
+    char dd[1024], zcode[1100], leaf[1200], outside[1200];
+    sw_make_tmpdir(dd, sizeof(dd), "linked-nonce");
+    snprintf(zcode, sizeof(zcode), "%s/zcode", dd);
+    snprintf(leaf, sizeof(leaf), "%s/swarm_nonce", zcode);
+    snprintf(outside, sizeof(outside), "%s/outside-nonce", dd);
+    uint8_t wire[8];
+    zcl_write_u64_le(wire, 42);
+    FILE *f = fopen(outside, "wb");
+    bool prepared = mkdir(zcode, 0700) == 0 && f &&
+                    fwrite(wire, 1, sizeof(wire), f) == sizeof(wire);
+    if (f && fclose(f) != 0)
+        prepared = false;
+    prepared = prepared && symlink("../outside-nonce", leaf) == 0;
+    SW_CHECK("nonce: persisted leaf linked outside is prepared", prepared);
+    if (prepared) {
+        struct vcs_swarm_engine *engine =
+            vcs_swarm_engine_create(NULL, NULL, zcode, NULL, NULL);
+        SW_CHECK("nonce: engine restarts with linked leaf", engine != NULL);
+        if (engine) {
+            SW_CHECK("nonce: linked bytes do not seed request IDs",
+                     sw_nonce_file_equals(leaf, 1));
+            SW_CHECK("nonce: outside bytes remain untouched",
+                     sw_nonce_file_equals(outside, 42));
+            vcs_swarm_engine_free(engine);
+        }
+    }
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+#endif
+
 
 int test_zcode_swarm(void)
 {
     int failures = 0;
+#if !defined(_WIN32)
+    failures += t_swarm_linked_nonce();
+#endif
     failures += t_swarm_invalid_data();
     failures += t_swarm_unsolicited_and_replay();
     failures += t_swarm_cancel_race();
