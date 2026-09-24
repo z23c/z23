@@ -3932,7 +3932,7 @@ tools/dev/devloop_hotswap_build.c:hs_emit_event:36
 tools/dev/devloop_hotswap_build.c:hs_hotfork_build:81
 tools/dev/devloop_hotswap_build.c:hs_hotfork_probe:58
 tools/dev/devloop_hotswap_build.c:hs_hotfork_unity_source:45
-tools/dev/devloop_hotswap_build.c:hs_plan_load_locked:45
+tools/dev/devloop_hotswap_build.c:hs_plan_load_locked:43
 tools/dev/devloop_hotswap_build.c:hs_shadow_probe:69
 tools/dev/devloop_hotswap_build.c:hs_story_receipt_valid:42
 tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_batch_event:42

@@ -100,6 +100,7 @@ static int hs_flock(int fd, int op)
 struct hs_action_plan {
     char root[PATH_MAX];
     char cc[512];
+    char cxx[512];
     char compiler_id[65];
     char cflags[HS_PLAN_TEXT_MAX];
     char ldflags[2048];
@@ -355,6 +356,18 @@ static bool hs_lower_hex64(const char *value)
     return true;
 }
 
+static bool hs_plan_apply_field(struct hs_action_plan *plan, const char *line)
+{
+    return hs_plan_line(plan->cc, sizeof(plan->cc), line, "CC=") ||
+           hs_plan_line(plan->cxx, sizeof(plan->cxx), line, "CXX=") ||
+           hs_plan_line(plan->compiler_id, sizeof(plan->compiler_id), line,
+                        "COMPILER_ID=") ||
+           hs_plan_line(plan->cflags, sizeof(plan->cflags), line,
+                        "DEV_CFLAGS=") ||
+           hs_plan_line(plan->ldflags, sizeof(plan->ldflags), line,
+                        "HOTSWAP_MODULE_LDFLAGS=");
+}
+
 static bool hs_plan_load_locked(const char *root, bool *cache_hit,
                                 int64_t *elapsed_us, char *why,
                                 size_t why_len)
@@ -430,13 +443,7 @@ static bool hs_plan_load_locked(const char *root, bool *cache_hit,
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
             continue;
-        if (hs_plan_line(next.cc, sizeof(next.cc), line, "CC=") ||
-            hs_plan_line(next.compiler_id, sizeof(next.compiler_id), line,
-                         "COMPILER_ID=") ||
-            hs_plan_line(next.cflags, sizeof(next.cflags), line,
-                         "DEV_CFLAGS=") ||
-            hs_plan_line(next.ldflags, sizeof(next.ldflags), line,
-                         "HOTSWAP_MODULE_LDFLAGS="))
+        if (hs_plan_apply_field(&next, line))
             continue;
         fclose(f);
         hs_why(why, why_len, "resident action plan has an unknown field");
@@ -444,7 +451,8 @@ static bool hs_plan_load_locked(const char *root, bool *cache_hit,
     }
     bool read_error = ferror(f) != 0;
     fclose(f);
-    if (read_error || !next.cc[0] || !hs_lower_hex64(next.compiler_id) ||
+    if (read_error || !next.cc[0] || !next.cxx[0] ||
+        !hs_lower_hex64(next.compiler_id) ||
         !next.cflags[0] || !next.ldflags[0] ||
         !strstr(next.cflags, "-DZCL_DEV_BUILD") ||
         !strstr(next.ldflags, "-Wl,-Bsymbolic") ||

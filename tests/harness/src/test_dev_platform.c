@@ -2382,6 +2382,7 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
     int n = snprintf(
         flags, sizeof(flags),
         "CC=%s\n"
+        "CXX=g++\n"
         "COMPILER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "DEV_CFLAGS=-DZCL_DEV_BUILD -ffile-prefix-map=%s=/zclassic23\n"
         "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
