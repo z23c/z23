@@ -529,7 +529,7 @@ static int nak_has(const char *s, size_t n, const char *needle)
         if (memcmp(s + i, needle, m) == 0) return 1;
     return 0;
 }
-
+static int nak_match(const regex_t *re, const char *line, size_t n);
 struct nak_acc { regex_t *re; FILE *hits; int nfiles, nhits; };
 
 static int nak_scan_file(const char *path, struct nak_acc *a)
@@ -546,7 +546,7 @@ static int nak_scan_file(const char *path, struct nak_acc *a)
         if (nak_has(line, (size_t)n, "api-key-example-ok")) continue;
         for (ssize_t i = 0; i < n; i++)
             if (line[i] == '\0') line[i] = ' ';
-        if (n <= 0 || regexec(a->re, line, 0, NULL, 0) != 0) continue;
+        if (n <= 0 || !nak_match(a->re, line, (size_t)n)) continue;
         a->nhits++;
         if (a->nhits > 20) continue;
         if (fprintf(a->hits, "%s:%d:", path, lineno) < 0) {
@@ -680,11 +680,44 @@ int check_no_api_keys_run(int argc, char **argv)
     return rc;
 }
 
+/* Every regex arm contains one of these fixed leads, or a dot with at least
+ * 32 hex and 16 alphanumeric bytes beside it. Keep the dot check wider than
+ * the regex: false positives cost one regexec, while false negatives would
+ * hide a credential. This only skips regex work; every tracked file is read. */
+static int nak_regex_possible(const char *s, size_t n)
+{
+    static const char *const lead[] = {
+        "sk-", "xai-", "gsk_", "ghp_", "glpat-", "AKIA", "Bearer"
+    };
+    for (size_t k = 0; k < sizeof lead / sizeof lead[0]; k++)
+        if (nak_has(s, n, lead[k])) return 1;
+    for (size_t i = 32; i + 16 < n; i++) {
+        if (s[i] != '.') continue;
+        size_t j = 0;
+        for (; j < 32; j++) {
+            unsigned char c = (unsigned char)s[i - 1 - j];
+            if (c < 128 && !isalnum(c)) break;
+        }
+        if (j != 32) continue;
+        for (j = 0; j < 16; j++) {
+            unsigned char c = (unsigned char)s[i + 1 + j];
+            if (c < 128 && !isalnum(c)) break;
+        }
+        if (j == 16) return 1;
+    }
+    return 0;
+}
+
+static int nak_match(const regex_t *re, const char *line, size_t n)
+{
+    return nak_regex_possible(line, n) && regexec(re, line, 0, NULL, 0) == 0;
+}
+
 static int nak_want(const regex_t *re, const char *s, int w)
 {
     int got = (strstr(s, "api-key-example-ok") == NULL)
            && (regexec(re, s, 0, NULL, 0) == 0);
-    if (got != w) {
+    if (got != w || (got && !nak_regex_possible(s, strlen(s)))) {
         fprintf(stderr, "check_no_api_keys selftest: want %d: %s\n", w, s);
         return 1;
     }
@@ -777,6 +810,8 @@ int check_no_api_keys_selftest(void)
     }
     int bad = nak_want_core(&re, sk, xai, gsk, ghp, glp, akia, br, dig, okm, sha, shortsk)
         | nak_skip_checks();
+    bad |= nak_regex_possible("ordinary text with a short.name",
+                              sizeof("ordinary text with a short.name") - 1);
     const char *const tokens[] = { sk, xai, gsk, ghp, glp, akia };
     int rc = nak_boundary_checks(&re, tokens, sizeof tokens / sizeof tokens[0], &bad);
     regfree(&re);
@@ -1440,4 +1475,3 @@ int check_equihash_params_run(int argc, char **argv)
         return die("z23-lint: write failed\n", "");
     return status;
 }
-
