@@ -107,6 +107,33 @@ ABI v1 accepts presentation changes that round-trip the existing canonical
 state exactly. Data migrations require a separate compatibility contract and
 are refused here.
 
+### Qualification replay
+
+The package manifest is [`zcode-package.json`](./zcode-package.json). From a
+clean checkout of the exact source commit being qualified, replay the real
+application journey through the registered test group:
+
+```sh
+git rev-parse HEAD
+git hash-object contexts/commons/packages/ztasks/zcode-package.json
+devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" t-fast-exact \
+  ONLY=test_resident_launch_contract T_FAST_EXACT_ARGS=--no-cache
+```
+
+The group edits the C23 application into distinct package roots, installs the
+resulting programs, and runs their actual preview entry points through the
+separate package verifier while the previously accepted version stays usable.
+Its output names each root, receipt, artifact digest, edit-to-visible-preview
+time, and the p50/p95 of 20 samples. It also checks that a compile-valid wrong
+task row, a crashing program, and an incompatible preview interface leave the
+accepted program, tasks, and undo unchanged. The preview child probes an
+inherited descriptor and environment secret; seeing either fails the run.
+
+This replay needs a host with qualified full package isolation. Linux uses
+Landlock and seccomp; macOS uses native Seatbelt for the separate verifier.
+Windows refuses preview execution. A headless pass does not establish real
+macOS desktop interaction or grant publication, acceptance, or deployment.
+
 Headless acceptance uses real installed package variants and the same update
 owner and native actions. **Real Mac desktop interaction remains OPEN** until
 an authorized desktop session is available.
