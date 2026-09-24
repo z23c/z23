@@ -9,7 +9,7 @@
  * Patterns use shell/fnmatch syntax. Keep groups space-separated. */
 
 AGENT_IMPACT_RULE("tests/harness/src/test_zcode_policy.c", "zcode_policy")
-AGENT_IMPACT_RULE("tests/harness/src/test_download_speed_contract.c|C-HANDOFF.md|docs/experiments/C3_SPEED_BASELINE.md", "download_speed_contract")
+AGENT_IMPACT_RULE("tests/harness/src/test_download_speed_contract.c|docs/experiments/C3_DOWNLOAD_PERF_LAB.md|docs/experiments/C3_SPEED_BASELINE.md", "download_speed_contract")
 AGENT_IMPACT_RULE("tests/harness/fixtures/c3_mutex_probe.c|tools/dev/c3_mutex_probe.h", "download_speed_contract download_enqueue_profile")
 AGENT_IMPACT_RULE("tests/harness/fixtures/c3_tip_seam_probe.c", "tip_finalize_stage tip_finalize_post_step")
 /* These two files hold S_() sandbox-lane contracts, and lint_owner_of()

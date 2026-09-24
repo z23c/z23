@@ -43,7 +43,7 @@ VENDOR_CC=gcc make -j12 c3-speed-bench
 
 Compare the emitted `c3.speed_scaling.v1`, `c3.speed_contract.v1`,
 `c3.command_contention.v1` and `c3.queue_work.v1` records against
-[`C3_SPEED_BASELINE.md`](docs/experiments/C3_SPEED_BASELINE.md).
+[`C3_SPEED_BASELINE.md`](C3_SPEED_BASELINE.md).
 Record exact source, compiler, flags, dependency hashes and CPU-frequency
 samples for both runs. Cross-toolchain behavior is distinct from byte
 reproduction. Never compare concurrent or differently throttled runs as a
@@ -109,7 +109,7 @@ not validated or persisted bodies. The previous live receiver measured
 - `tests/harness/src/test_download.c`: optional larger enqueue witness,
   registered as `download_enqueue_profile`.
 - `tests/harness/fixtures/c3_mutex_probe.c`: bounded, selected-mutex wait/hold/unlock recorder.
-- [`C3_SPEED_BASELINE.md`](docs/experiments/C3_SPEED_BASELINE.md): machine-readable
+- [`C3_SPEED_BASELINE.md`](C3_SPEED_BASELINE.md): machine-readable
   baseline rows, including CPU frequency, cycles and measurement scope.
 
 The portable registered benchmark reports hardware cycles as unavailable

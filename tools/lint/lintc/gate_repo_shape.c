@@ -25,7 +25,7 @@
 enum { AT_SET = RS_MAX, AT_NAME = RS_NAME, AT_PATH = RS_PATH, AT_HIT = 64 };
 
 static const char *const k_at_roots[] = {
-    "AGENTS.md", "C-HANDOFF.md", "CLAUDE.md", "COPYING", "LICENSE", "Makefile", "NOTICE",
+    "AGENTS.md", "CLAUDE.md", "COPYING", "LICENSE", "Makefile", "NOTICE",
     "README.md", ".clangd", ".claude", ".gitattributes", ".github",
     ".gitignore", ".gitmodules", ".grok", ".ignore", "apps", "cognition",
     "contexts", "core", "docs", "engine", "platform", "tests", "tools",
