@@ -20,7 +20,7 @@
 
 #include "test/test_core.h"
 #include "test/testcache.h"
-#include "dev_proof_observation.h"
+#include "dev_proof_observation_admission.h"
 #include "vcs/vcs_object.h"
 
 #include <stdio.h>

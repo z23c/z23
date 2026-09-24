@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
  * purpose: Persist and verify signed per-group runner observations. */
-#include "dev_proof_observation.h"
+#include "dev_proof_observation_admission.h"
 
 #include "vcs/vcs_object.h"
 
