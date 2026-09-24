@@ -582,6 +582,26 @@ static int t_evaluator(void)
 
 /* ── 3. the store ───────────────────────────────────────────────────── */
 
+static int zb_linked_policy_regression(const char *zcode)
+{
+    int failures = 0;
+    char leaf[4400], outside[4400];
+    snprintf(leaf, sizeof(leaf), "%s/badge_policy", zcode);
+    snprintf(outside, sizeof(outside), "%s/outside-policy", zcode);
+    bool linked = rename(leaf, outside) == 0 &&
+                  symlink("outside-policy", leaf) == 0;
+    ZB_CHECK("store: valid policy linked from outside is prepared", linked);
+    if (linked) {
+        struct vcs_badge_policy linked_policy;
+        ZB_CHECK("store: linked policy cannot set badge trust",
+                 !vcs_badge_policy_load(zcode, &linked_policy));
+        bool restored = unlink(leaf) == 0 && rename(outside, leaf) == 0;
+        ZB_CHECK("store: same policy as real leaf loads",
+                 restored && vcs_badge_policy_load(zcode, &linked_policy));
+    }
+    return failures;
+}
+
 static int t_store(void)
 {
     int failures = 0;
@@ -606,6 +626,8 @@ static int t_store(void)
     ZB_CHECK("store: policy loads",
              vcs_badge_policy_load(zcode, &policy) &&
                  memcmp(policy.issuer_pubkey, issuer_pk.vch, 33) == 0);
+
+    failures += zb_linked_policy_regression(zcode);
 
     struct vcs_badge b1 = {0}, b2 = {0}, b3 = {0};
     ZB_CHECK("store: badges built",

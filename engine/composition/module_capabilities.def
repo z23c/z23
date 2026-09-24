@@ -1044,7 +1044,7 @@ ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/moderation_attestation_c
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_accept.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_attest.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_attest_transport.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_badge.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_badge.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_badge_commit.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_badge_eligible.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/package_build.c", CAP_FS_WRITE, "")

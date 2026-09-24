@@ -371,6 +371,33 @@ bool vcs_badge_recognized(const struct vcs_badge *badge,
            memcmp(badge->issuer_pubkey, policy->issuer_pubkey, 33) == 0;
 }
 
+static bool badge_policy_extract_lines(const uint8_t *wire, size_t wire_len,
+                                       char lines[2][128], size_t *count)
+{
+    size_t pos = 0;
+    *count = 0;
+    while (*count < 2 && pos < wire_len) {
+        size_t end = pos;
+        while (end < wire_len && wire[end] != '\n')
+            end++;
+        size_t begin = pos;
+        while (begin < end && (wire[begin] == ' ' || wire[begin] == '\t'))
+            begin++;
+        size_t len = end - begin;
+        if (len > 0 && wire[begin + len - 1] == '\r')
+            len--;
+        pos = end + (end < wire_len);
+        if (len == 0 || wire[begin] == '#')
+            continue;
+        if (len >= sizeof(lines[0]))
+            return false;
+        memcpy(lines[*count], wire + begin, len);
+        lines[*count][len] = '\0';
+        (*count)++;
+    }
+    return true;
+}
+
 bool vcs_badge_policy_load(const char *zcode_dir,
                            struct vcs_badge_policy *out)
 {
@@ -381,32 +408,18 @@ bool vcs_badge_policy_load(const char *zcode_dir,
     int n = snprintf(path, sizeof(path), "%s/badge_policy", zcode_dir);
     if (n <= 0 || (size_t)n >= sizeof(path))
         LOG_RETURN(false, BADGE_LOG, "policy path too long");
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        LOG_ERROR(BADGE_LOG, "badge policy %s: %s", path, strerror(errno));
+    size_t wire_len = 0;
+    uint8_t *wire = badge_read_file(path, 65536, &wire_len);
+    if (!wire) {
+        LOG_ERROR(BADGE_LOG, "badge policy %s is absent or unreadable", path);
         return false;
     }
     char lines[2][128];
     size_t count = 0;
-    char buf[256];
-    while (count < 2 && fgets(buf, sizeof(buf), f)) {
-        char *s = buf;
-        while (*s == ' ' || *s == '\t')
-            s++;
-        if (*s == '#' || *s == '\n' || *s == '\r' || *s == '\0')
-            continue;
-        size_t len = strcspn(s, "\r\n");
-        if (len >= sizeof(lines[0])) {
-            fclose(f);
-            LOG_ERROR(BADGE_LOG, "badge policy line too long in %s", path);
-            return false;
-        }
-        memcpy(lines[count], s, len);
-        lines[count][len] = '\0';
-        count++;
-    }
-    fclose(f);
-    if (count != 2 || !zcl_hex_decode_lower(lines[0], out->policy_id, 32) ||
+    bool lines_ok = badge_policy_extract_lines(wire, wire_len, lines, &count);
+    free(wire);
+    if (!lines_ok || count != 2 ||
+        !zcl_hex_decode_lower(lines[0], out->policy_id, 32) ||
         !zcl_hex_decode_lower(lines[1], out->issuer_pubkey, 33) ||
         badge_is_zero(out->policy_id, 32) ||
         !badge_pubkey_parses(out->issuer_pubkey)) {
