@@ -42,6 +42,9 @@
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 #if !defined(_WIN32)
@@ -617,12 +620,24 @@ static int test_sigkill_midrun_clears_stale_no_fresh_pass(void)
         char sentinel[PATH_MAX];
         snprintf(sentinel, sizeof(sentinel), "%s/replay_canary_anchor.json", vd);
 
+        pid_t parent_pid = getpid();
         pid_t pid = fork();
         if (pid == 0) {
             /* child in its own group: exec the REAL harness. Its self-test
              * path runs reset_verdict (clearing the stale sentinel) and then
              * blocks on the never-fed FIFO BEFORE evaluating/writing — so the
              * kill lands inside a genuine run, mid-harness. */
+#if defined(__linux__)
+            /* A cancelled proof can kill the test worker before its explicit
+             * kill below. Do not leave the blocked harness orphaned with the
+             * inherited checkout lock indefinitely. */
+            if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 ||
+                getppid() != parent_pid)
+                _exit(126);
+#endif
+            /* Portable bound if the worker disappears on a platform without
+             * a parent-death signal. Normal self-test kills within seconds. */
+            alarm(15);
             setsid();
             char cmd[PATH_MAX * 5];
             snprintf(cmd, sizeof(cmd),
