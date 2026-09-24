@@ -5285,6 +5285,109 @@ _test_next:;
   return failures;
 }
 
+/* Composition latency pin for a live, directly connected provider. The
+ * foreground discovery wrappers queue their frames outside any frame
+ * handler; production delivered those only on the next 1 s supervisor
+ * turn, once for the routing FIND and again for the FIND_RECORD, which is
+ * where 1-2 s of every `zcode package fetch` went on localhost. The fixture
+ * transport here moves frames only when the composition asks for a turn
+ * (the wake), and the clock never advances: a discovery that still waited
+ * for the periodic flush stays PENDING. */
+static unsigned g_dht_outbound_wakes;
+static void count_dht_outbound_wake(void) { g_dht_outbound_wakes++; }
+
+/* Two connected fixture nodes; node 1 holds one signed provider record. */
+static bool wake_fixture_open(struct multi_network *net,
+                              const uint8_t genesis[32],
+                              struct vcs_zcode_dht_record *provider) {
+  net->node_count = 2;
+  net->now = test_time(1001);
+  for (size_t i = 0; i < net->node_count; i++) {
+    test_make_tmpdir(net->dir[i], sizeof(net->dir[i]), "dhtwake",
+                     i == 0 ? "a" : "b");
+    memset(net->noise[i], (int)(0x20 + i), 32);
+    net->reach[i].network = net;
+    net->reach[i].owner = i;
+    if (!fixture_identity(net->dir[i], (uint8_t)(0x30 + i), genesis,
+                          net->noise[i]) ||
+        !fixture_material(net->dir[i], &(struct vcs_zcode_dht_delegation){0},
+                          (uint8_t[32]){0}, net->node_id[i]) ||
+        !(net->service[i] = multi_service(net, i, genesis)))
+      return false;
+  }
+  return multi_connect(net, 0, 1) && multi_drive(net) &&
+         fixture_provider_record(net->dir[1], genesis, 0xb7, provider) &&
+         vcs_zcode_dht_service_record_admit(net->service[1], provider,
+                                            net->now) ==
+             VCS_ZCODE_DHT_RECORD_STORE_ADDED;
+}
+
+static int test_foreground_discovery_needs_no_periodic_flush(void) {
+  int failures = 0;
+  TEST("zcode dht composition: provider discovery completes on its own "
+       "wakes, with no periodic flush and no idle-poll wake") {
+    static struct multi_network net;
+    static struct vcs_zcode_dht_record_discovery_result out;
+    memset(&net, 0, sizeof(net));
+    memset(&out, 0, sizeof(out));
+    uint8_t genesis[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    struct vcs_zcode_dht_record provider;
+    ASSERT(wake_fixture_open(&net, genesis, &provider));
+    struct vcs_zcode_dht_record_selector selector = {
+        .kind = VCS_ZCODE_DHT_RECORD_PROVIDER};
+    (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
+                   "science");
+    memset(selector.root, 0xb7, 32);
+
+    boot_zcode_dht_test_adopt(net.service[0], count_dht_outbound_wake);
+    g_dht_outbound_wakes = 0;
+    uint64_t operation = 0, generation = 0;
+    bool began = boot_zcode_dht_record_discovery_begin(
+        &selector, net.now, &operation, &generation);
+    unsigned begin_wakes = g_dht_outbound_wakes;
+    /* Nothing new is queued while the FIND is in flight: an idle poll must
+     * not ask for a turn, or a 50 ms CLI poll becomes a 20 Hz tick. */
+    bool idle_polled = began && boot_zcode_dht_record_discovery_poll(
+                                    operation, generation, net.now, &out);
+    unsigned idle_wakes = g_dht_outbound_wakes - begin_wakes;
+    unsigned turns = 0;
+    bool driven = true;
+    while (idle_polled && driven && turns < 8 &&
+           out.state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING &&
+           g_dht_outbound_wakes > 0) {
+      g_dht_outbound_wakes = 0;
+      turns++;
+      driven = multi_drive(&net) &&
+               boot_zcode_dht_record_discovery_poll(operation, generation,
+                                                    net.now, &out);
+    }
+    boot_zcode_dht_test_adopt(NULL, NULL);
+    for (size_t i = 0; i < net.node_count; i++)
+      vcs_zcode_dht_service_free(net.service[i], net.now);
+    for (size_t i = 0; i < net.node_count; i++)
+      test_rm_rf(net.dir[i]);
+
+    ASSERT(began);
+    ASSERT(idle_polled);
+    ASSERT(driven);
+    if (out.state != VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE)
+      printf("  discovery still %d after %u woken turns (begin wakes=%u); "
+             "its frames wait for the periodic flush\n",
+             (int)out.state, turns, begin_wakes);
+    ASSERT_EQ(out.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    ASSERT_EQ(out.record_count, 1);
+    ASSERT(memcmp(out.records[0].provider_node_id, net.node_id[1], 32) == 0);
+    ASSERT_EQ(begin_wakes, 1);
+    ASSERT_EQ(idle_wakes, 0);
+    /* One turn for the routing FIND, one for the responsible-node query. */
+    ASSERT(turns >= 1 && turns <= 2);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 int test_zcode_dht_service(void) {
   int failures = test_disabled_diagnostics();
   failures += test_signed_record_storage_denial(VCS_ZCODE_SOVEREIGNTY_STORE);
@@ -5315,6 +5418,7 @@ int test_zcode_dht_service(void) {
   failures += test_record_collect_tick_debounce();
   failures += test_sparse_iterative_network();
   failures += test_sparse_space16_network();
+  failures += test_foreground_discovery_needs_no_periodic_flush();
   TEST("zcode dht service: Noise-authenticated two-node lookup and restart") {
     char adir[] = "/tmp/zcl_dht_service_a_XXXXXX";
     char bdir[] = "/tmp/zcl_dht_service_b_XXXXXX";

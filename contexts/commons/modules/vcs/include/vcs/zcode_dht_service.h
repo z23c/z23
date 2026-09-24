@@ -304,6 +304,12 @@ bool vcs_zcode_dht_service_next_outbound(struct vcs_zcode_dht_service *service,
                                          uint64_t *peer_out, uint8_t *wire_out,
                                          size_t wire_capacity,
                                          size_t *wire_len_out);
+/* Lifetime count of frames this service has queued for next_outbound(); it
+ * only grows.  O(1), read-only: the composition root compares it across a
+ * foreground call to learn whether that call produced transport work that
+ * must not wait for the periodic flush. */
+uint64_t vcs_zcode_dht_service_outbound_enqueued(
+    const struct vcs_zcode_dht_service *service);
 void vcs_zcode_dht_service_tick(struct vcs_zcode_dht_service *service,
                                 struct vcs_zcode_dht_time now);
 #ifdef ZCL_TESTING

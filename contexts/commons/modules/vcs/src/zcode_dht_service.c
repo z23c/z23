@@ -146,6 +146,7 @@ static bool outbound_push(struct vcs_zcode_dht_service *s, uint64_t peer,
       s->outbound[i].len = len;
       memcpy(s->outbound[i].wire, wire, len);
       s->outbound_count++;
+      s->outbound_enqueued++;
       return true;
     }
   return false;

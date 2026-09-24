@@ -135,6 +135,11 @@ void boot_zcode_dht_publication_record_test_render(
 void boot_zcode_dht_provider_route_test_render(
     struct json_value *result,
     const struct vcs_zcode_dht_provider_route *route, uint32_t fetch_result);
+/* Test-only: route the wrappers above to a caller-owned service and count
+ * the foreground outbound wake instead of requesting a supervisor turn.
+ * NULL/NULL restores production dispatch; the caller frees the service. */
+void boot_zcode_dht_test_adopt(struct vcs_zcode_dht_service *service,
+                               void (*outbound_wake)(void));
 #endif
 
 /* Snapshot the network binding owned by the running DHT composition root.

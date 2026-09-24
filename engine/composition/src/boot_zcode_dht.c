@@ -9,6 +9,7 @@
 #include "config/boot_zcode_dht_frame_auth.h"
 #include "config/boot_zcode_dht_possession.h"
 #include "config/boot_zcode_dht_reachability.h"
+#include "config/boot_zcode_swarm.h"
 #include "config/boot_zcode_swarm_dht.h"
 #include "base/safe_alloc.h"
 #include "net/connman.h"
@@ -62,6 +63,32 @@ static void dht_lock(void) {
     }
   }
   zcl_mutex_lock(&g_dht_lock);
+}
+/* Frames a foreground call queues (an RPC or the swarm recovery lane
+ * beginning or advancing a lookup or record discovery) are queued outside
+ * any frame handler, so nothing sends them until the next net.zcode.swarm
+ * supervisor turn: up to a full ZCODE_SWARM_TICK_PERIOD_SEC per lookup
+ * phase, about 1-2 s of dead time per provider discovery on a live link.
+ * Wake that owner the moment such a call queued frames.  The wake is
+ * edge-triggered and coalesced, fires only when this call grew the queue
+ * (never on an idle poll), and the supervised turn still performs every
+ * send outside the DHT lock; no frame is added, only delivered sooner. */
+#ifdef ZCL_TESTING
+static void (*g_test_outbound_wake)(void);
+#endif
+static uint64_t dht_enqueued_locked(void) {
+  return g_dht ? vcs_zcode_dht_service_outbound_enqueued(g_dht) : 0;
+}
+static void dht_wake_if_enqueued(uint64_t before, uint64_t after) {
+  if (after <= before)
+    return;
+#ifdef ZCL_TESTING
+  if (g_test_outbound_wake) {
+    g_test_outbound_wake();
+    return;
+  }
+#endif
+  boot_zcode_swarm_request_tick();
 }
 bool boot_zcode_dht_service_apply(boot_zcode_dht_service_apply_fn apply,
                                   void *context) {
@@ -582,11 +609,14 @@ bool boot_zcode_dht_lookup_begin(
   if (!target || !lookup_id || !generation)
     return false;
   dht_lock();
+  uint64_t enqueued = dht_enqueued_locked();
   bool ok = g_dht && vcs_zcode_dht_service_lookup_begin(
                          g_dht, target, now, lookup_id);
   if (ok)
     *generation = g_dht_generation;
+  uint64_t after = dht_enqueued_locked();
   zcl_mutex_unlock(&g_dht_lock);
+  dht_wake_if_enqueued(enqueued, after);
   return ok;
 }
 
@@ -596,9 +626,12 @@ bool boot_zcode_dht_lookup_poll(
   if (!lookup_id || !generation || !out)
     return false;
   dht_lock();
+  uint64_t enqueued = dht_enqueued_locked();
   bool ok = g_dht && generation == g_dht_generation &&
             vcs_zcode_dht_service_lookup_poll(g_dht, lookup_id, now, out);
+  uint64_t after = dht_enqueued_locked();
   zcl_mutex_unlock(&g_dht_lock);
+  dht_wake_if_enqueued(enqueued, after);
   return ok;
 }
 
@@ -619,11 +652,14 @@ bool boot_zcode_dht_record_discovery_begin(
   if (!selector || !operation_id || !generation)
     return false;
   dht_lock();
+  uint64_t enqueued = dht_enqueued_locked();
   bool ok = g_dht && vcs_zcode_dht_service_record_discovery_begin(
                          g_dht, selector, now, operation_id);
   if (ok)
     *generation = g_dht_generation;
+  uint64_t after = dht_enqueued_locked();
   zcl_mutex_unlock(&g_dht_lock);
+  dht_wake_if_enqueued(enqueued, after);
   return ok;
 }
 
@@ -634,10 +670,13 @@ bool boot_zcode_dht_record_discovery_poll(
   if (!operation_id || !generation || !out)
     return false;
   dht_lock();
+  uint64_t enqueued = dht_enqueued_locked();
   bool ok = g_dht && generation == g_dht_generation &&
             vcs_zcode_dht_service_record_discovery_poll(
                 g_dht, operation_id, now, out);
+  uint64_t after = dht_enqueued_locked();
   zcl_mutex_unlock(&g_dht_lock);
+  dht_wake_if_enqueued(enqueued, after);
   return ok;
 }
 
@@ -809,3 +848,19 @@ void boot_zcode_dht_shutdown(void) {
   boot_zcode_dht_chain_reset();
   boot_zcode_dht_possession_reset();
 }
+
+#ifdef ZCL_TESTING
+/* Lend a caller-owned service to the composition wrappers without a
+ * msg_processor, and capture the outbound wake instead of ticking the
+ * supervisor. NULL/NULL detaches both; the caller still frees the service. */
+void boot_zcode_dht_test_adopt(struct vcs_zcode_dht_service *service,
+                               void (*outbound_wake)(void)) {
+  dht_lock();
+  g_dht = service;
+  g_dht_generation++;
+  if (!g_dht_generation)
+    g_dht_generation++;
+  g_test_outbound_wake = outbound_wake;
+  zcl_mutex_unlock(&g_dht_lock);
+}
+#endif

@@ -6,6 +6,7 @@
 #include "config/boot_zcode_dht_record_kind.h"
 #include "config/boot_zcode_dht_render.h"
 #include "config/boot_zcode_dht_replication.h"
+#include "config/boot_zcode_swarm.h"
 
 #include "base/hex.h"
 #include "crypto/random_secret.h"
@@ -697,6 +698,11 @@ static bool rpc_provider_route(const struct json_value *params, bool help,
         : vcs_swarm_engine_fetch_from(
               engine, selector.root, (int64_t)(now / 86400u), now,
               route.peer_ids, route.authenticated_count);
+  /* An accepted routed fetch has WANTs to send now; do not leave the first
+   * one to the next periodic swarm turn (up to a full second). Same
+   * coalesced wake every accepted swarm frame already requests. */
+  if (fetched == VCS_SWARM_FETCH_OK)
+    boot_zcode_swarm_request_tick();
   boot_zcode_dht_provider_route_json(result, &route, fetched);
   bool package_ns = strcmp(selector.namespace_name, "zclassic23.package") == 0;
   boot_zcode_package_import_render(package_ns ? engine : NULL, selector.root,

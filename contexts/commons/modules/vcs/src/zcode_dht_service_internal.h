@@ -188,6 +188,8 @@ struct vcs_zcode_dht_service {
       discoveries[VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS];
   struct vcs_zcode_dht_record_store *record_store;
   uint32_t outbound_count;
+  /* Lifetime frames queued; only ever grows (see outbound_enqueued()). */
+  uint64_t outbound_enqueued;
   uint64_t serial, next_lookup_id, next_record_operation_id;
   uint64_t next_possession_proof_epoch;
   uint64_t next_record_discovery_id;

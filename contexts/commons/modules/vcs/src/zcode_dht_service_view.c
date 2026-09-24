@@ -101,6 +101,11 @@ void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
   }
 }
 
+uint64_t vcs_zcode_dht_service_outbound_enqueued(
+    const struct vcs_zcode_dht_service *s) {
+  return s ? s->outbound_enqueued : 0;
+}
+
 size_t vcs_zcode_dht_service_peers(const struct vcs_zcode_dht_service *s,
                                    uint64_t now,
                                    struct vcs_zcode_dht_peer_view *out,

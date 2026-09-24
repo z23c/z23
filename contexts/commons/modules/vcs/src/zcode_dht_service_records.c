@@ -109,6 +109,7 @@ static bool records_outbound_push(struct vcs_zcode_dht_service *service,
       service->outbound[i].len = wire_len;
       memcpy(service->outbound[i].wire, wire, wire_len);
       service->outbound_count++;
+      service->outbound_enqueued++;
       return true;
     }
   return false;
