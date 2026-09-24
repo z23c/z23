@@ -576,6 +576,30 @@ static bool node_db_sync_copy_block(struct block *dst, const struct block *src)
     return true;
 }
 
+/* Gap-log latch: the projection cursor at which the last "refusing to fold
+ * over a gap" line was written. One line per stuck cursor position, not one
+ * per dropped height, so a 50-block burst logs once. */
+static _Atomic int g_async_fold_gap_logged_cursor = -1;
+
+/* True when folding `height` would leap the projection cursor over heights
+ * whose async jobs never ran (dropped when the db-service queue was full).
+ * Only a KNOWN cursor (>= 0) defines a gap; h <= cursor + 1 is contiguous
+ * (the next height, or a reorg reconnect at/below the cursor). */
+static bool node_db_sync_async_fold_leaves_gap(struct node_db *ndb, int height)
+{
+    int cursor = node_db_sync_get_tip_height(ndb);
+
+    if (cursor < 0 || height <= cursor + 1)
+        return false;
+    if (atomic_exchange(&g_async_fold_gap_logged_cursor, cursor) != cursor)
+        LOG_WARN("sync",
+                 "async projection: refusing to fold height %d over a gap "
+                 "(projection cursor %d, heights %d..%d never folded); "
+                 "cursor held for projection backfill",
+                 height, cursor, cursor + 1, height - 1);
+    return true;
+}
+
 static bool node_db_sync_connect_block_async_write(struct node_db *ndb,
                                                    void *ctx)
 {
@@ -583,6 +607,22 @@ static bool node_db_sync_connect_block_async_write(struct node_db *ndb,
 
     if (!async || !async->copied)
         LOG_FAIL("sync", "connect_block_async_write: invalid ctx");
+    /* Contiguity rule. db_service_enqueue_write REFUSES a job when its queue
+     * is full, so a burst of connected blocks (a late joiner syncing 50+
+     * blocks at once) can lose any subset of these per-height jobs. Folding a
+     * surviving job at h > cursor + 1 would set the cursor to h over the
+     * never-folded heights; the catchup walk starts at cursor + 1 and the
+     * hole audit only fires early for a cursor frozen BEHIND the tip, so
+     * those heights (and any ZID/OP_RETURN rows in them) would never be
+     * projected. Instead write NOTHING for such a job and hold the cursor:
+     * the projection backfill watcher (boot_background_workers.c) sees
+     * cursor < chain tip and re-walks cursor+1..tip through the catchup lane
+     * (sync_block_lean: blocks + explorer projections + wallet scan). The
+     * refused job reports success — it is deferred derived work, not a DB
+     * failure. An unknown cursor (< 0) and h <= cursor + 1 (next height, or
+     * a reorg reconnect at/below the cursor) fold exactly as before. */
+    if (node_db_sync_async_fold_leaves_gap(ndb, async->pindex.nHeight))
+        return true;
     bool ok = node_db_sync_connect_block_local(
         ndb, &async->blk, &async->pindex, async->wallet);
     /* Fold the explorer projections (op_returns / tx_outputs / tx_inputs /
@@ -591,14 +631,16 @@ static bool node_db_sync_connect_block_async_write(struct node_db *ndb,
      * bumps sync_projection_tip_height, so the node_db catchup pass — the
      * only other explorer_index_block caller — early-returns on these
      * heights forever (db_tip >= chain_tip). On regtest, where this feed is
-     * the ONLY connect path, a block folded here without its projections
-     * can never be projected at all (the 2026-08-02 C5 COLLECT wedge: the
+     * the ONLY connect path while the cursor stays contiguous, a block
+     * folded here without its projections can never be projected at all
+     * (the 2026-08-02 C5 COLLECT wedge: the
      * access-token mint confirmed at h=116 yet no op_returns/zslp_transfers
      * row ever existed, so the chain-derived store token gate correctly
      * answered 0). Mainnet never calls the async family (the consensus path
      * defers projections to catchup by design), so this costs nothing on
      * the live hot path. The hook is fail-soft and row-idempotent; db
-     * service serializes these jobs in enqueue (= chain) order, so h-1's
+     * service serializes these jobs in enqueue (= chain) order and the
+     * contiguity rule above refuses any job past a dropped height, so h-1's
      * receipt exists when h folds — a fail-soft miss at h-1 yields a
      * zeros-prev receipt at h, a LOUD chain break on a derived, rebuildable
      * projection, never silent corruption. */

@@ -17,6 +17,10 @@
 #include "primitives/transaction.h"
 #include "primitives/block.h"
 #include "chain/chain.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
+#include "controllers/sync_controller.h"
+#include "models/block.h"
 
 static int count_rows(struct node_db *ndb, const char *sql)
 {
@@ -178,6 +182,167 @@ static int test_znam_apply_auth(struct node_db *ndb)
                   expiry_before + ZNAM_REGISTRATION_TERM_BLOCKS);
            failures++; }
 
+    return failures;
+}
+
+/* ── Late-join async fold contiguity ─────────────────────────────────────
+ * The regtest tip-finalize feed folds each connected block through
+ * node_db_sync_connect_block_async_with_wallet → db_service_enqueue_write,
+ * which REFUSES jobs when its queue is full. A late joiner syncing a burst
+ * therefore loses some per-height jobs. A surviving job past the hole must
+ * not move the projection cursor over it (the catchup walk starts at
+ * cursor + 1 and would never project the skipped heights — the Commons
+ * journey's missing historical ZID anchors). */
+
+struct async_fold_block {
+    struct transaction tx;
+    struct block blk;
+    struct uint256 hash;
+    struct block_index pindex;
+};
+
+/* One-tx block at `height` with a distinct hash (`tag`) whose tx spends a
+ * distinct prevout and, when `op_return`, carries an OP_RETURN output. */
+static void async_fold_block_build(struct async_fold_block *b, int height,
+                                   uint8_t tag, bool op_return)
+{
+    memset(b, 0, sizeof(*b));
+    transaction_init(&b->tx);
+    transaction_alloc(&b->tx, 1, 1);
+    memset(b->tx.vin[0].prevout.hash.data, tag, 32);
+    b->tx.vin[0].sequence = 0xFFFFFFFFu;
+    struct script *sp = &b->tx.vout[0].script_pub_key;
+    if (op_return) {
+        sp->data[0] = 0x6a;    /* OP_RETURN */
+        sp->data[1] = 0x03;    /* push 3 */
+        sp->data[2] = 'Z'; sp->data[3] = 'I'; sp->data[4] = 'D';
+        sp->size = 5;
+    } else {
+        sp->data[0] = 0x51;    /* OP_1 */
+        sp->size = 1;
+        b->tx.vout[0].value = COIN;
+    }
+    transaction_compute_hash(&b->tx);
+
+    block_init(&b->blk);
+    b->blk.vtx = &b->tx;
+    b->blk.num_vtx = 1;
+    b->blk.header.nVersion = 4;
+    b->blk.header.nTime = 1700000000u + (uint32_t)height;
+    b->blk.header.nBits = 0x200f0f0f;
+    b->blk.header.nSolution[0] = 0;
+    b->blk.header.nSolutionSize = 1;
+    memset(b->blk.header.hashPrevBlock.data, (uint8_t)(tag - 1), 32);
+    memset(b->blk.header.hashMerkleRoot.data, (uint8_t)(tag + 0x40), 32);
+    memset(b->hash.data, tag, 32);
+    b->pindex.nHeight = height;
+    b->pindex.phashBlock = &b->hash;
+    b->pindex.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+}
+
+static void async_fold_block_free(struct async_fold_block *b)
+{
+    b->blk.vtx = NULL;     /* tx is owned here, not by the block */
+    b->blk.num_vtx = 0;
+    transaction_free(&b->tx);
+}
+
+static bool async_fold(struct node_db *ndb, struct db_service *svc,
+                       const struct async_fold_block *b)
+{
+    return node_db_sync_connect_block_async(ndb, &b->blk, &b->pindex) &&
+           db_service_flush_write(svc);
+}
+
+static bool async_fold_has_block(struct node_db *ndb, int height,
+                                 const struct async_fold_block *b)
+{
+    struct db_block found;
+    memset(&found, 0, sizeof(found));
+    return db_block_find_by_height(ndb, height, &found) &&
+           memcmp(found.hash, b->hash.data, 32) == 0;
+}
+
+static int async_fold_check(const char *label, bool ok)
+{
+    printf("explorer_index: async fold %s... %s\n", label, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+/* Fold `b` and require the cursor to land on `want_cursor` with b's row. */
+static bool async_fold_lands(struct node_db *ndb, struct db_service *svc,
+                             const struct async_fold_block *b, int want_cursor)
+{
+    return async_fold(ndb, svc, b) &&
+           node_db_sync_get_tip_height(ndb) == want_cursor &&
+           async_fold_has_block(ndb, b->pindex.nHeight, b);
+}
+
+/* h=2's job was dropped by a full queue; h=3's job survives. */
+static int async_fold_check_gap(struct node_db *ndb, struct db_service *svc,
+                                const struct async_fold_block *b3)
+{
+    bool ok = async_fold(ndb, svc, b3);
+    int cursor = node_db_sync_get_tip_height(ndb);
+    struct db_block none;
+    bool row3 = db_block_find_by_height(ndb, 3, &none);
+    int op_returns = count_rows(ndb, "SELECT COUNT(*) FROM op_returns");
+    printf("explorer_index: gap fold h=3 over dropped h=2: ok=%d cursor=%d "
+           "row3=%d op_returns=%d\n", ok, cursor, row3, op_returns);
+    return async_fold_check("past a dropped height holds the cursor",
+                            ok && cursor == 1 && !row3 && op_returns == 0);
+}
+
+static int async_fold_run(struct node_db *ndb, struct db_service *svc,
+                          const struct async_fold_block blocks[4])
+{
+    const struct async_fold_block *b1 = &blocks[0], *b2 = &blocks[1],
+                                  *b3 = &blocks[2], *b2_reorg = &blocks[3];
+    int failures = async_fold_check("h=1 folds (cursor 1)",
+                                    async_fold_lands(ndb, svc, b1, 1));
+    failures += async_fold_check_gap(ndb, svc, b3);
+    /* The backfill re-walk delivers h=2 then h=3 in order. */
+    bool refill = async_fold_lands(ndb, svc, b2, 2) &&
+                  async_fold_lands(ndb, svc, b3, 3);
+    failures += async_fold_check("in-order refill projects h=2,h=3 + OP_RETURN",
+        refill && count_rows(ndb, "SELECT COUNT(*) FROM op_returns "
+                                  "WHERE block_height=3") == 1);
+    /* A reconnect at/below the cursor (reorg) still folds. */
+    failures += async_fold_check("reorg reconnect below cursor still folds",
+                                 async_fold_lands(ndb, svc, b2_reorg, 2));
+    return failures;
+}
+
+static int test_async_fold_contiguity(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    struct db_service svc;
+    struct app_runtime_context runtime;
+    struct async_fold_block blocks[4];
+
+    memset(&ndb, 0, sizeof(ndb));
+    memset(&runtime, 0, sizeof(runtime));
+    db_service_init(&svc);
+    bool up = node_db_open(&ndb, ":memory:") &&
+              db_service_attach(&svc, &ndb) && db_service_start(&svc);
+    runtime.db_service = &svc;
+    app_runtime_set_current(&runtime);
+    async_fold_block_build(&blocks[0], 1, 0x11, false);
+    async_fold_block_build(&blocks[1], 2, 0x12, false);
+    async_fold_block_build(&blocks[2], 3, 0x13, true);
+    async_fold_block_build(&blocks[3], 2, 0x22, false);
+
+    failures += async_fold_check("fixture node.db + db service up", up);
+    if (up)
+        failures += async_fold_run(&ndb, &svc, blocks);
+
+    for (int i = 0; i < 4; i++)
+        async_fold_block_free(&blocks[i]);
+    app_runtime_set_current(NULL);
+    db_service_stop(&svc);
+    if (ndb.open)
+        node_db_close(&ndb);
     return failures;
 }
 
@@ -356,6 +521,9 @@ int test_explorer_index(void)
     failures += test_znam_apply_auth(&ndb);
 
     node_db_close(&ndb);
+
+    /* Late-join async fold contiguity (own node.db + db service). */
+    failures += test_async_fold_contiguity();
 
     printf("explorer_index: closed-db receipt read leaves output untouched... ");
     { uint8_t sentinel[32], before[32];

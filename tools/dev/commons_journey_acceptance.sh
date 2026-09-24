@@ -2185,9 +2185,13 @@ cj_turn_metric() {
     duplicates="$(cj_sql b "SELECT coalesce(sum(CASE WHEN attempt_count>1 THEN attempt_count-1 ELSE 0 END),0) FROM build_actions")"
     [ -n "$backlog" ] && [ -n "$duplicates" ] ||
         cj_die "quickturn metrics could not read the existing proof actions"
-    if [ "$CJ_MULTIHOST" = 0 ] && [ "$CJ_TWOHOST" = 0 ]; then
-        cpu="$(ps -p "$DHT_PGID_A,$DHT_PGID_B" -o %cpu= | awk '{sum+=$1} END {printf "%.1f",sum}')"
-        rss="$(ps -p "$DHT_PGID_A,$DHT_PGID_B" -o rss= | awk '{sum+=$1} END {printf "%.0f",sum}')"
+    # Sample only the node processes still alive: once A is killed its pgid
+    # is empty, and `ps -p ,PID` is an "improper list" that aborts the run.
+    local pids
+    pids="$(printf '%s\n' "$DHT_PGID_A" "$DHT_PGID_B" "$DHT_PGID_C" | awk 'NF' | paste -sd, -)"
+    if [ "$CJ_MULTIHOST" = 0 ] && [ "$CJ_TWOHOST" = 0 ] && [ -n "$pids" ]; then
+        cpu="$(ps -p "$pids" -o %cpu= | awk '{sum+=$1} END {printf "%.1f",sum}')"
+        rss="$(ps -p "$pids" -o rss= | awk '{sum+=$1} END {printf "%.0f",sum}')"
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$stage" "$CJ_TURN_LOC" "$elapsed" "$backlog" "$duplicates" "$cpu" "$rss" \
@@ -2623,10 +2627,21 @@ cj_journey_publisher_disappears() {
     cj_wait_height "$DHT_DD_C" "$C_RPC" "$pre_tip" "node C (initial sync)"
     # Require B's historical anchor before A exits: B is the surviving source.
     # A's old anchor is diagnostic, not an authority for this fetch.
-    local known_a known_b
-    known_a="$(cj_sql c "SELECT count(*) FROM zid_identities WHERE lower(hex(master_pubkey))=lower('$CJ_PUB_A') AND status='active'")"
-    known_b="$(cj_sql c "SELECT count(*) FROM zid_identities WHERE lower(hex(master_pubkey))=lower('$CJ_PUB_B') AND status='active'")"
-    cj_note "latecomer historical ZID anchors at tip $pre_tip: A=$known_a B=$known_b"
+    # Chain height is not projection height: C's node.db projection (which
+    # holds zid_identities) may still be backfilling heights its async fold
+    # refused past a dropped job, so poll a bounded 60 s for the row.
+    local known_a known_b anchor_deadline anchor_t0 anchor_ms
+    anchor_t0="${EPOCHREALTIME/./}"
+    anchor_deadline=$(( $(date +%s) + 60 ))
+    while :; do
+        known_a="$(cj_sql c "SELECT count(*) FROM zid_identities WHERE lower(hex(master_pubkey))=lower('$CJ_PUB_A') AND status='active'")"
+        known_b="$(cj_sql c "SELECT count(*) FROM zid_identities WHERE lower(hex(master_pubkey))=lower('$CJ_PUB_B') AND status='active'")"
+        [ "$known_b" = 1 ] && break
+        [ "$(date +%s)" -lt "$anchor_deadline" ] || break
+        sleep 0.5
+    done
+    anchor_ms=$(( (${EPOCHREALTIME/./} - anchor_t0) / 1000 ))
+    cj_note "latecomer historical ZID anchors at tip $pre_tip: A=$known_a B=$known_b (projection wait $((anchor_ms / 1000)).$(printf '%03d' $((anchor_ms % 1000)))s)"
     [ "$known_b" = 1 ] ||
         cj_die "latecomer chain tip $pre_tip lacks surviving node B's historical ZID anchor"
     # The anchor rides A's wallet, and A was restarted for the overlay phase:
