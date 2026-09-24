@@ -1101,6 +1101,52 @@ static int fcw_linked_shard_refusal(const char *base, const char *cache,
     return failures;
 }
 
+static bool fcw_linked_admit_paths(const char *base, const char *key,
+                                   char dest[4096], char objects[4096],
+                                   char shard[4096], char outside[4096],
+                                   char outside_obj[4096],
+                                   char outside_side[4096])
+{
+    return snprintf(dest, 4096, "%s/linked-admit", base) < 4096 &&
+           snprintf(objects, 4096, "%s/objects", dest) < 4096 &&
+           snprintf(shard, 4096, "%s/%.2s", objects, key) < 4096 &&
+           snprintf(outside, 4096, "%s/outside-admit-shard", base) < 4096 &&
+           snprintf(outside_obj, 4096, "%s/%s.o", outside, key + 2) < 4096 &&
+           snprintf(outside_side, 4096, "%s/%s.json", outside,
+                    key + 2) < 4096;
+}
+
+static int fcw_linked_admit_shard_refusal(
+    const char *base, const char *key, struct vcs_package_store *store,
+    const uint8_t root[32], char *err, size_t err_cap)
+{
+    int failures = 0;
+    char dest[4096], objects[4096], shard[4096], outside[4096];
+    char outside_obj[4096], outside_side[4096];
+    bool prepared = fcw_linked_admit_paths(base, key, dest, objects, shard,
+                                            outside, outside_obj,
+                                            outside_side) &&
+                    fcw_rm_rf(dest) && fcw_rm_rf(outside) &&
+                    fcw_mkdir_p(objects) && mkdir(outside, 0700) == 0 &&
+                    symlink("../../outside-admit-shard", shard) == 0;
+    FC_CHECK("admit linked shard fixture is prepared", prepared);
+    if (!prepared)
+        return failures;
+    struct vcs_fastobj_carrier_stats stats;
+    bool refused = !vcs_fastobj_carrier_admit(dest, store, root, &stats,
+                                              err, err_cap);
+    struct stat st;
+    bool outside_clean = lstat(outside_obj, &st) != 0 && errno == ENOENT &&
+                         lstat(outside_side, &st) != 0 && errno == ENOENT;
+    FC_CHECK("admit refuses a linked destination shard without outside writes",
+             refused && outside_clean);
+    bool restored = unlink(shard) == 0 && mkdir(shard, 0700) == 0;
+    FC_CHECK("same destination as real shard admits",
+             restored && vcs_fastobj_carrier_admit(dest, store, root,
+                                                   &stats, err, err_cap));
+    return failures;
+}
+
 static int test_fastobj_carrier_platform_arm(void)
 {
     int failures = 0;
@@ -1677,6 +1723,8 @@ static int test_fastobj_carrier_platform_arm(void)
         failures += fcw_linked_shard_refusal(base, cacheA, key, nodeA,
                                               rootL, &stRef, err,
                                               sizeof(err));
+        failures += fcw_linked_admit_shard_refusal(base, key, nodeA, rootA,
+                                                    err, sizeof(err));
 
         /* R4: a hand-built carrier whose sidecar is filed under a key it
          * does not hash to — ADMIT must refuse at the destination. */

@@ -69,17 +69,19 @@ static bool fc_read_file(const char *cache_dir, const char *relative,
     return true;
 }
 
-/* Write bytes to a temp beside dst, fsync, then atomically rename — the
- * same discipline as the worker's cache store and the store's commits. */
-static bool fc_atomic_write(const char *dst, const uint8_t *bytes,
-                            size_t len, mode_t mode)
+/* Write through the verified shard descriptor, without following or replacing
+ * a cache member. */
+static bool fc_atomic_write_at(int dirfd, const char *name,
+                               const uint8_t *bytes, size_t len,
+                               mode_t mode)
 {
-    char tmp[4096];
-    int tn = snprintf(tmp, sizeof(tmp), "%s.zfctmp.%ld", dst,
+    char tmp[128];
+    int tn = snprintf(tmp, sizeof(tmp), "%s.zfctmp.%ld", name,
                       (long)getpid());
     if (tn <= 0 || (size_t)tn >= sizeof(tmp))
         return false;
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode);
+    int fd = openat(dirfd, tmp, O_WRONLY | O_CREAT | O_EXCL |
+                               O_CLOEXEC | O_NOFOLLOW, mode);
     if (fd < 0)
         return false;
     size_t put = 0;
@@ -96,10 +98,10 @@ static bool fc_atomic_write(const char *dst, const uint8_t *bytes,
         ok = false;
     if (close(fd) != 0)
         ok = false;
-    if (ok && rename(tmp, dst) != 0)
+    if (ok && linkat(dirfd, tmp, dirfd, name, 0) != 0)
         ok = false;
-    if (!ok)
-        (void)unlink(tmp);
+    if (unlinkat(dirfd, tmp, 0) != 0)
+        ok = false;
     return ok;
 }
 
@@ -121,6 +123,61 @@ static bool fc_mkdir_p(const char *path)
         *p = '/';
     }
     return mkdir(buf, 0700) == 0 || errno == EEXIST;
+}
+
+static int fc_admit_shard(const char *cache_dir, const char *key)
+{
+    int root = open(cache_dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (root < 0)
+        return -1;
+    if (mkdirat(root, "objects", 0700) != 0 && errno != EEXIST) {
+        close(root);
+        return -1;
+    }
+    int objects = openat(root, "objects", O_RDONLY | O_DIRECTORY |
+                                          O_NOFOLLOW | O_CLOEXEC);
+    close(root);
+    if (objects < 0)
+        return -1;
+    char prefix[3] = {key[0], key[1], '\0'};
+    if (mkdirat(objects, prefix, 0700) != 0 && errno != EEXIST) {
+        close(objects);
+        return -1;
+    }
+    int shard = openat(objects, prefix, O_RDONLY | O_DIRECTORY |
+                                       O_NOFOLLOW | O_CLOEXEC);
+    close(objects);
+    return shard;
+}
+
+static bool fc_read_file_at(int dirfd, const char *name, size_t cap,
+                            uint8_t **out, size_t *out_len)
+{
+    int fd = openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    struct stat st;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+              st.st_size >= 0 && (uint64_t)st.st_size <= cap;
+    size_t len = ok ? (size_t)st.st_size : 0;
+    uint8_t *buf = ok ? zcl_malloc(len ? len : 1u, "fastobj-admit-read") : NULL;
+    ok = ok && buf != NULL;
+    for (size_t got = 0; ok && got < len;) {
+        ssize_t n = read(fd, buf + got, len - got);
+        if (n <= 0)
+            ok = false;
+        else
+            got += (size_t)n;
+    }
+    if (close(fd) != 0)
+        ok = false;
+    if (!ok) {
+        free(buf);
+        return false;
+    }
+    *out = buf;
+    *out_len = len;
+    return true;
 }
 
 static bool fc_is_lower_hex(const char *s, size_t n)
@@ -710,6 +767,52 @@ static bool fc_carrier_member(const char *path, const char *ext,
     return fc_is_lower_hex(key_out, 64u);
 }
 
+static bool fc_admit_entry(const char *cache_dir, const char *key,
+                           const uint8_t *obj, size_t obj_len,
+                           const uint8_t *side, size_t side_len,
+                           char *err, size_t err_cap)
+{
+    int shard = fc_admit_shard(cache_dir, key);
+    if (shard < 0) {
+        (void)snprintf(err, err_cap,
+                       "cache root, objects, or shard unavailable or linked for %.16s...",
+                       key);
+        return false;
+    }
+    char obj_name[65], side_name[68];
+    (void)snprintf(obj_name, sizeof(obj_name), "%s.o", key + 2);
+    (void)snprintf(side_name, sizeof(side_name), "%s.json", key + 2);
+    struct stat st;
+    bool have_obj = fstatat(shard, obj_name, &st, AT_SYMLINK_NOFOLLOW) == 0;
+    bool have_side = fstatat(shard, side_name, &st, AT_SYMLINK_NOFOLLOW) == 0;
+    bool ok;
+    if (have_obj || have_side) {
+        uint8_t *eobj = NULL, *eside = NULL;
+        size_t eobj_len = 0, eside_len = 0;
+        ok = have_obj && have_side &&
+             fc_read_file_at(shard, obj_name, FASTOBJ_CARRIER_MAX_OBJECT_BYTES,
+                             &eobj, &eobj_len) &&
+             fc_read_file_at(shard, side_name, VCS_FASTOBJ_SIDECAR_MAX_BYTES,
+                             &eside, &eside_len) &&
+             eobj_len == obj_len && eside_len == side_len &&
+             memcmp(eobj, obj, obj_len) == 0 &&
+             memcmp(eside, side, side_len) == 0;
+        free(eobj);
+        free(eside);
+        if (!ok)
+            (void)snprintf(err, err_cap,
+                           "cache CORRUPTION: existing entry %.16s... differs from the carrier",
+                           key);
+    } else {
+        ok = fc_atomic_write_at(shard, obj_name, obj, obj_len, 0444) &&
+             fc_atomic_write_at(shard, side_name, side, side_len, 0600);
+        if (!ok)
+            (void)snprintf(err, err_cap, "cannot store entry %.16s...", key);
+    }
+    close(shard);
+    return ok;
+}
+
 /* Walk one carrier root in the store, verifying every entry pair; when
  * `cache_dir` is non-NULL each verified pair also lands in the receiving
  * cache (admit). A NULL cache_dir is the read-only walk behind
@@ -809,58 +912,9 @@ static bool fc_carrier_apply(const char *cache_dir,
                 entry_ok = false;
             }
         }
-        if (entry_ok && cache_dir) {
-            char obj_path[4096], side_path[4096];
-            entry_ok = vcs_fastobj_cache_paths(cache_dir, key, obj_path,
-                                               sizeof(obj_path), side_path,
-                                               sizeof(side_path));
-            struct stat st;
-            bool have_obj = stat(obj_path, &st) == 0;
-            bool have_side = stat(side_path, &st) == 0;
-            if (entry_ok && (have_obj || have_side)) {
-                /* Existing entry: byte-verify, never overwrite. */
-                uint8_t *eobj = NULL, *eside = NULL;
-                size_t eobj_len = 0, eside_len = 0;
-                bool same = have_obj && have_side &&
-                    fc_read_file(NULL, obj_path,
-                                 FASTOBJ_CARRIER_MAX_OBJECT_BYTES, &eobj,
-                                 &eobj_len) &&
-                    fc_read_file(NULL, side_path,
-                                 VCS_FASTOBJ_SIDECAR_MAX_BYTES, &eside,
-                                 &eside_len) &&
-                    eobj_len == obj_len && eside_len == side_len &&
-                    memcmp(eobj, obj, obj_len) == 0 &&
-                    memcmp(eside, side, side_len) == 0;
-                free(eobj);
-                free(eside);
-                if (!same) {
-                    (void)snprintf(err, err_cap,
-                                   "cache CORRUPTION: existing entry "
-                                   "%.16s... differs from the carrier",
-                                   key);
-                    entry_ok = false;
-                }
-            } else if (entry_ok) {
-                char shard[4096];
-                (void)snprintf(shard, sizeof(shard), "%s", obj_path);
-                char *slash = strrchr(shard, '/');
-                if (slash)
-                    *slash = '\0';
-                if (!fc_mkdir_p(shard)) {
-                    (void)snprintf(err, err_cap,
-                                   "cannot create cache shard for "
-                                   "%.16s...", key);
-                    entry_ok = false;
-                } else if (!fc_atomic_write(obj_path, obj, obj_len,
-                                            0444) ||
-                           !fc_atomic_write(side_path, side, side_len,
-                                            0600)) {
-                    (void)snprintf(err, err_cap,
-                                   "cannot store entry %.16s...", key);
-                    entry_ok = false;
-                }
-            }
-        }
+        if (entry_ok && cache_dir)
+            entry_ok = fc_admit_entry(cache_dir, key, obj, obj_len, side,
+                                      side_len, err, err_cap);
         if (entry_ok)
             object_bytes += obj_len;
         free(obj);
