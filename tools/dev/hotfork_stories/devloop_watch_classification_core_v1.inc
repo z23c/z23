@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: HOT_FORK story adapter devloop-watch-classification-core.v1
- * for tools/dev/devloop_watch.c.
+ * for tools/dev/devloop_watch_classify.c.
  * Compiled only inside the capsule unity rendered by
  * tools/dev/hotfork_unity.h: phase 1 precedes the owner TU set, phase 2
  * follows it. check-hotfork-stories compiles every unity with the frozen
@@ -11,8 +11,8 @@
 #error "HOT_FORK stories are included only by the generated capsule unity"
 #elif ZCL_HOTFORK_STORY_PHASE == 1
 #define _GNU_SOURCE
-#define ZCL_HOTFORK_DEVLOOP_WATCH_CORE 1
 #include "hotswap/hotfork_capsule.h"
+#include "devloop_watch_classify.h"
 #elif ZCL_HOTFORK_STORY_PHASE == 2
 __attribute__((visibility("hidden"))) bool
 zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
@@ -31,21 +31,25 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
         else \
             failed |= 1u << n; \
     } while (0)
-    HF_CHECK(watch_c_source("tools/dev/a.c") && !watch_c_source("tools/dev/a.h")
-             && !watch_c_source("tools/dev/a.C") && !watch_c_source(NULL));
+    HF_CHECK(zcl_devloop_watch_c_source("tools/dev/a.c")
+             && !zcl_devloop_watch_c_source("tools/dev/a.h")
+             && !zcl_devloop_watch_c_source("tools/dev/a.C")
+             && !zcl_devloop_watch_c_source(NULL));
     const char *all_c[] = {"tools/dev/a.c", "tools/dev/b.c"};
     const char *mixed[] = {"tools/dev/a.c", "tools/dev/b.h"};
-    HF_CHECK(watch_epoch_all_c(all_c, 2) && !watch_epoch_all_c(mixed, 2)
-             && !watch_epoch_all_c(NULL, 2) && !watch_epoch_all_c(all_c, 0));
+    HF_CHECK(zcl_devloop_watch_epoch_all_c(all_c, 2)
+             && !zcl_devloop_watch_epoch_all_c(mixed, 2)
+             && !zcl_devloop_watch_epoch_all_c(NULL, 2)
+             && !zcl_devloop_watch_epoch_all_c(all_c, 0));
     char component[128];
-    watch_component_for_files(all_c, 2, component);
+    zcl_devloop_watch_component_for_files(all_c, 2, component);
     HF_CHECK(strcmp(component, "tools/dev") == 0);
     const char *owners[] = {"tools/dev/a.c",
                             "contexts/commons/modules/vcs/a.c"};
-    watch_component_for_files(owners, 2, component);
+    zcl_devloop_watch_component_for_files(owners, 2, component);
     bool mixed_ok = strcmp(component, "mixed") == 0;
     const char *root[] = {"Makefile"};
-    watch_component_for_files(root, 1, component);
+    zcl_devloop_watch_component_for_files(root, 1, component);
     HF_CHECK(mixed_ok && strcmp(component, "Makefile") == 0);
 #undef HF_CHECK
     snprintf(out->exercised_surface, sizeof(out->exercised_surface),

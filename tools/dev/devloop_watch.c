@@ -1,14 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #define _GNU_SOURCE
-#ifdef ZCL_HOTFORK_DEVLOOP_WATCH_CORE
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <string.h>
-#else
 #include "devloop.h"
 #include "dev_proof.h"
+#include "devloop_watch_classify.h"
 
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -47,50 +42,6 @@
 #else
 #include <process.h>
 #endif
-#endif
-
-#if defined(ZCL_HOTFORK_DEVLOOP_WATCH_CORE) || \
-    ((defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)) && !defined(_WIN32))
-static bool watch_c_source(const char *path)
-{
-    size_t n = path ? strlen(path) : 0;
-    return n > 2 && path[n - 2] == '.' && path[n - 1] == 'c';
-}
-
-static bool watch_epoch_all_c(const char *const *paths, size_t path_count)
-{
-    if (!paths || path_count == 0)
-        return false;
-    for (size_t i = 0; i < path_count; i++)
-        if (!watch_c_source(paths[i]))
-            return false;
-    return true;
-}
-
-static void watch_component_for_files(const char *const *files, size_t count,
-                                      char out[128])
-{
-    out[0] = 0;
-    for (size_t i = 0; i < count; i++) {
-        char component[128];
-        const char *first = strchr(files[i], '/');
-        const char *second = first ? strchr(first + 1, '/') : NULL;
-        size_t len = second ? (size_t)(second - files[i]) : strlen(files[i]);
-        if (len >= sizeof(component))
-            len = sizeof(component) - 1;
-        memcpy(component, files[i], len);
-        component[len] = 0;
-        if (i == 0)
-            (void)snprintf(out, 128, "%s", component);
-        else if (strcmp(out, component) != 0) {
-            (void)snprintf(out, 128, "%s", "mixed");
-            return;
-        }
-    }
-}
-#endif
-
-#ifndef ZCL_HOTFORK_DEVLOOP_WATCH_CORE
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
@@ -1487,7 +1438,7 @@ static bool watch_build_edit_epoch(struct watch_context *ctx,
         platform_time_monotonic_us() - impact_started_us;
     (void)snprintf(epoch->owner, sizeof(epoch->owner), "%s",
                    plan.proof_group ? plan.proof_group : "make_lint_gates");
-    watch_component_for_files(files, count, epoch->component);
+    zcl_devloop_watch_component_for_files(files, count, epoch->component);
 
     size_t new_overlay_slots = 0;
     for (size_t i = 0; i < count; i++) {
@@ -2763,7 +2714,8 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             fast = service_contract_restart_event(ctx.root, files,
                                                   epoch_count);
         if (fast == 0) {
-            if (restart_union_ok && watch_epoch_all_c(files, epoch_count) &&
+            if (restart_union_ok &&
+                zcl_devloop_watch_epoch_all_c(files, epoch_count) &&
                 ctx.restart_sources.count > 0) {
                 proof_count = ctx.restart_sources.count;
                 for (size_t i = 0; i < proof_count; i++)
@@ -2886,5 +2838,4 @@ int zcl_devloop_watch(const char *repo_root)
                                   zcl_devloop_default_watch_publish_mode());
 }
 
-#endif
 #endif

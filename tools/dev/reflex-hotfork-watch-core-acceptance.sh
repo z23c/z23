@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/z23-dev}"
 OWNER_KIND="${ZCL_REFLEX_OWNER_KIND:-watch}"
-SOURCE="$ROOT/tools/dev/devloop_watch.c"
+SOURCE="$ROOT/tools/dev/devloop_watch_classify.c"
 UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"
 OUTPUT="${ZCL_REFLEX_WATCH_CORE_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-watch-core-acceptance.json}"
 STORY='devloop-watch-classification-core.v1'
