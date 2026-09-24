@@ -681,6 +681,34 @@ static bool resident_armed(const char *root)
     if (n <= 0 || (size_t)n >= sizeof(lock)) return false;
     return access(lock, F_OK) == 0;
 }
+
+/* A default post-* proof has no publication delta at the observed remote
+ * tip. Missing refs and malformed output retain the existing enqueue path. */
+static bool proof_refs_same_text(const char *text)
+{
+    const char *line = text ? strchr(text, '\n') : NULL;
+    if (!line || line == text) return false;
+    size_t head_len = (size_t)(line - text);
+    const char *base = line + 1;
+    const char *end = strchr(base, '\n');
+    if (!end || end[1] != '\0' || head_len != (size_t)(end - base) ||
+        head_len >= 65) return false;
+    char head[65], remote[65];
+    memcpy(head, text, head_len);
+    head[head_len] = '\0';
+    memcpy(remote, base, head_len);
+    remote[head_len] = '\0';
+    return oid_text(head) && oid_text(remote) && strcmp(head, remote) == 0;
+}
+
+static bool proof_default_has_no_delta(void)
+{
+    const char *argv[] = {"git", "--no-replace-objects", "rev-parse",
+                          "HEAD", "refs/remotes/origin/main", NULL};
+    char refs[160];
+    return child_capture(argv, refs, sizeof(refs)) == 0 &&
+           proof_refs_same_text(refs);
+}
 #endif
 
 /* A hook never arms a resident the user did not arm; it only re-arms one.
@@ -716,6 +744,7 @@ static int notify_proof(void)
     if (getenv("ZCL_LAND_HOOK_QUIET")) return 0;
     if (!repo_root(root)) return 0;
     if (!resident_armed(root)) return 0;
+    if (proof_default_has_no_delta()) return 0;
     int n = snprintf(binary, sizeof(binary), "%s/build/bin/z23-dev", root);
     if (n <= 0 || (size_t)n >= sizeof(binary))
         return 0;
@@ -1041,6 +1070,27 @@ static int selftest(void)
     return samples[949] < 250000000u ? 0 : 1;
 }
 
+#if !defined(_WIN32)
+static bool proof_refs_selftest(void)
+{
+    bool ok = proof_refs_same_text(
+        "1111111111111111111111111111111111111111\n"
+        "1111111111111111111111111111111111111111\n") &&
+        !proof_refs_same_text(
+        "1111111111111111111111111111111111111111\n"
+        "2222222222222222222222222222222222222222\n") &&
+        !proof_refs_same_text(
+        "1111111111111111111111111111111111111111\n"
+        "refs/remotes/origin/main\n") &&
+        !proof_refs_same_text(
+        "1111111111111111111111111111111111111111\n"
+        "1111111111111111111111111111111111111111\nextra\n");
+    if (!ok)
+        (void)fprintf(stderr, "git-hook-selftest: FAIL case=remote-delta\n");
+    return ok;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     char mode_buffer[64];
@@ -1052,7 +1102,12 @@ int main(int argc, char **argv)
         mode_buffer[mode_len - 4] = 0;
         mode = mode_buffer;
     }
-    if (argc == 2 && strcmp(argv[1], "--selftest") == 0) return selftest();
+    if (argc == 2 && strcmp(argv[1], "--selftest") == 0) {
+#if !defined(_WIN32)
+        if (!proof_refs_selftest()) return 1;
+#endif
+        return selftest();
+    }
     if (argc >= 2 && strncmp(argv[1], "--hook=", 7) == 0)
         mode = argv[1] + 7;
     if (strcmp(mode, "pre-push") == 0) return pre_push();
