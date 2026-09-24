@@ -665,6 +665,14 @@ check_root() {
         printf '%s\n' "${src%.o}.c"
     done < "$work/objs.z" | LC_ALL=C sort -u > "$work/compiled_sources.txt"
 
+    # The frozen sorted list is queried for every declaration below. Load it
+    # once instead of spawning grep and rereading the list for each row.
+    local -A compiled_sources=()
+    local compiled
+    while IFS= read -r compiled; do
+        [ -n "$compiled" ] && compiled_sources["$compiled"]=1
+    done < "$work/compiled_sources.txt"
+
     # ── coverage floor ───────────────────────────────────────────────────
     # Refuse to grade a scan whose coverage it cannot vouch for. See
     # CAP_CLOSURE_COVERAGE_BASELINE above for the reasoning and the measured
@@ -678,7 +686,7 @@ check_root() {
             platform_excluded=$((platform_excluded + 1))
             continue
         fi
-        grep -qxF "$cov_path" "$work/compiled_sources.txt" && continue
+        [ -n "${compiled_sources[$cov_path]+x}" ] && continue
         printf '%s\n' "$cov_path" >> "$work/declared_unobserved.txt"
         unobserved=$((unobserved + 1))
     done
@@ -766,6 +774,16 @@ check_root() {
     ' <(for k in "${!CAP_SYM[@]}"; do printf '%s\t%s\n' "$k" "${CAP_SYM[$k]}"; done) \
       "$work/undef_uw.tsv" > "$work/file_uses.tsv"
 
+    # This membership test also runs once per declared capability. An exact
+    # source/class key avoids a process per lookup and preserves the TSV's
+    # full-field meaning (a prefix class cannot satisfy another class).
+    local -A file_uses=()
+    local use_src use_cls use_key
+    while IFS=$'\t' read -r use_src use_cls; do
+        [ -n "$use_src" ] && [ -n "$use_cls" ] || continue
+        file_uses["$use_src|$use_cls"]=1
+    done < "$work/file_uses.tsv"
+
     # compiled_sources.txt and the coverage floor already ran above, right
     # after the nm passes — this is where symmetry (item 3, below) reads
     # "no object here" as UNOBSERVED (a standalone tool/test binary this
@@ -803,7 +821,7 @@ check_root() {
             missing_src=$((missing_src + 1))
             continue
         fi
-        if ! grep -qxF "$path" "$work/compiled_sources.txt"; then
+        if [ -z "${compiled_sources[$path]+x}" ]; then
             # No object for this source exists anywhere in this scan (a
             # standalone tool or test binary this epoch never links). There
             # is no evidence either way, so a declared capability here is
@@ -813,7 +831,8 @@ check_root() {
         IFS='|' read -ra toks <<< "$raw"
         for tok in "${toks[@]}"; do
             [ -n "$tok" ] && [ "$tok" != "CAP_NONE" ] || continue
-            if ! grep -qF "$(printf '%s\t%s' "$path" "$tok")" "$work/file_uses.tsv"; then
+            use_key="$path|$tok"
+            if [ -z "${file_uses[$use_key]+x}" ]; then
                 if [ "$CAP_CLOSURE_ENFORCE_SYMMETRY" != "1" ]; then
                     platform_unobserved=$((platform_unobserved + 1))
                     continue
