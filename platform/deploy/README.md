@@ -36,9 +36,14 @@ you are new; this page is about operating a host, not about building.
   interactive lane, and orders release proof ahead of ordinary queued work.
   CPU, RAM, and I/O tokens are bounded under the existing development slice;
   [`test-devbuild-broker.sh`](test-devbuild-broker.sh) exercises concurrent
-  admission and queue order with short isolated scopes. It is not installed by
-  the repository. The existing `devbuild` mirror remains the running contract
-  until the shared host has no wrappers still executing its previous code.
+  admission, queue order, and the old-wrapper drain gate with short isolated
+  scopes. It is not installed by the repository. During a host cutover, write
+  the previous script's device/inode and the current nanosecond timestamp to
+  `~/.local/state/development/broker-v1/legacy-inode` before atomically
+  replacing `~/.local/bin/devbuild`. The new script refuses admission while any
+  interpreter still has that old inode open. Keep the prior script as a private
+  rollback copy. The existing `devbuild` mirror describes the pre-cutover
+  contract until installation and qualification complete.
 
 ## What a tracked unit has to earn
 

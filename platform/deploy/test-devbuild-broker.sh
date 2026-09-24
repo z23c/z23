@@ -80,3 +80,20 @@ awk -F '\t' '
     printf 'queue timestamps do not bind admission waits\n' >&2; exit 1;
 }
 printf 'devbuild broker: release proof priority PASS\n'
+
+printf '#!/usr/bin/env bash\nsleep 1.5\n' >"$scratch/legacy.sh"
+bash "$scratch/legacy.sh" & legacy=$!
+sleep 0.1
+printf '%s %s\n' "$(stat -Lc '%d:%i' "$scratch/legacy.sh")" "$(date +%s%N)" \
+    >"$DEVBUILD_BROKER_STATE/legacy-inode"
+gate_start=$(date +%s%N)
+"$root/devbuild-broker" --wait --project z23 --class hotload sleep 0.1 \
+    >"$scratch/post-upgrade.log" 2>&1
+gate_end=$(date +%s%N)
+wait "$legacy"
+[[ ! -e $DEVBUILD_BROKER_STATE/legacy-inode ]] &&
+    ((gate_end - gate_start >= 1000000000)) || {
+        printf 'new admission crossed the old-wrapper drain gate\n' >&2
+        exit 1
+    }
+printf 'devbuild broker: old-wrapper drain gate PASS\n'

@@ -129,6 +129,27 @@ reap() {
     done
 }
 
+# During an atomic host upgrade the installer records the old wrapper's
+# device/inode before replacing its pathname. Bash keeps the script open on
+# fd 255 while an old invocation waits or runs. New admission begins only
+# after every old interpreter has gone; the old wrapper ignores this marker.
+legacy_drained() {
+    local device_inode created_ns fd observed now_ns
+    [[ -f $state/legacy-inode ]] || return 0
+    read -r device_inode created_ns <"$state/legacy-inode" || return 1
+    [[ $device_inode =~ ^[0-9]+:[0-9]+$ && $created_ns =~ ^[0-9]+$ ]] || return 1
+    now_ns=$(date +%s%N)
+    ((now_ns - created_ns >= 1000000000)) || return 1
+    for fd in /proc/[0-9]*/fd/255; do
+        [[ -e $fd ]] || continue
+        observed=$(stat -Lc '%d:%i' "$fd" 2>/dev/null) || continue
+        [[ $observed != "$device_inode" ]] || return 1
+    done
+    rm -f -- "$state/legacy-inode"
+    printf '%s\tlegacy\tdrained\n' "$now_ns" >>"$log_file"
+    return 0
+}
+
 /usr/bin/flock 7
 printf '%s %s %s %s %s %s %s %s %s %s\n' \
     "$$" "$start_tick" "$unit" "$project" "$class" "$cpu" "$ram" "$io" "$priority" "$start_ns" >"$new_file"
@@ -140,6 +161,15 @@ printf '%s\t%s\tqueued\t%s\t%s\t%s\t%s\t%s\n' \
 while :; do
     /usr/bin/flock 7
     reap
+    if ! legacy_drained; then
+        /usr/bin/flock -u 7
+        if ((!wait_for_slot)); then
+            printf 'devbuild: legacy wrapper still active; use --wait\n' >&2
+            exit 75
+        fi
+        sleep 0.5
+        continue
+    fi
     used_cpu=0 used_ram=0 used_io=0 project_ram=0 ordinary=0 active=0
     for file in "$state"/running/*; do
         [[ -f $file ]] || continue
