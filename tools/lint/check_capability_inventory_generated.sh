@@ -144,12 +144,17 @@ compare_doc() {
     diff -u "$candidate" "$TMP/expected.jsonl" >"$TMP/diff.log" 2>&1
 }
 
+report_stale() {
+    echo "FAIL: $DOC is stale or hand-edited." >&2
+    echo "  Regenerate only with: make docs-capability-inventory" >&2
+    head -60 "$TMP/diff.log" | sed 's/^/    /' >&2
+    exit 1
+}
+
+# --selftest derives once and grades the checked-in report against that same
+# derivation, so the lint gate needs no second, identical run.
 if [ "${1:-}" = "--selftest" ]; then
-    if ! compare_doc "$DOC"; then
-        echo "check_capability_inventory_generated selftest: FATAL — baseline is stale" >&2
-        echo "  Fix: make docs-capability-inventory" >&2
-        exit 2
-    fi
+    compare_doc "$DOC" || report_stale
     cp "$DOC" "$TMP/tampered.jsonl"
     printf '%s\n' '{"record":"handwritten_finding"}' >>"$TMP/tampered.jsonl"
     if compare_doc "$TMP/tampered.jsonl"; then
@@ -157,14 +162,10 @@ if [ "${1:-}" = "--selftest" ]; then
         exit 1
     fi
     echo "check_capability_inventory_generated selftest: PASS — clean output passes and a hand edit fails"
+    echo "check_capability_inventory_generated: clean — $capabilities capabilities; $roots_found registered roots resolved"
     exit 0
 fi
 
-if ! compare_doc "$DOC"; then
-    echo "FAIL: $DOC is stale or hand-edited." >&2
-    echo "  Regenerate only with: make docs-capability-inventory" >&2
-    head -60 "$TMP/diff.log" | sed 's/^/    /' >&2
-    exit 1
-fi
+compare_doc "$DOC" || report_stale
 
 echo "check_capability_inventory_generated: clean — $capabilities capabilities; $roots_found registered roots resolved"

@@ -249,7 +249,7 @@ gate_command() {
         check-doc-claims)                  echo './tools/lint/check_doc_claims.sh' ;;
         check-error-doc-refs)              echo './tools/lint/check_error_doc_refs.sh' ;;
         check-api-reference-generated)     echo './tools/lint/check_api_reference_generated.sh' ;;
-        check-capability-inventory-generated) echo './tools/lint/check_capability_inventory_generated.sh --selftest && ./tools/lint/check_capability_inventory_generated.sh' ;;
+        check-capability-inventory-generated) echo './tools/lint/check_capability_inventory_generated.sh --selftest' ;;
         check-generated-artifact-contradictions) echo './tools/lint/check_generated_artifact_contradictions.sh --selftest && ./tools/lint/check_generated_artifact_contradictions.sh' ;;
         check-describe-budget)             echo './tools/lint/check_describe_budget.sh --selftest && ./tools/lint/check_describe_budget.sh' ;;
         check-markdown-links)              echo './tools/lint/check_markdown_links.sh .' ;;

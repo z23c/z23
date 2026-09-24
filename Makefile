@@ -13422,7 +13422,6 @@ docs-capability-inventory: $(CAPABILITY_INVENTORY_TOOL)
 check-capability-inventory-generated:
 	@echo "══ LINT: capability inventory is complete source-derived output ══"
 	@./tools/lint/check_capability_inventory_generated.sh --selftest
-	@./tools/lint/check_capability_inventory_generated.sh
 
 check-generated-artifact-contradictions: $(LINTC_TOOL)
 	@echo "══ LINT: generated artifacts cannot contradict each other ══"
