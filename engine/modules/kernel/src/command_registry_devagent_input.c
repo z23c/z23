@@ -19,9 +19,9 @@
  * zcl_command_registry_input_validate() chain at the same time, and keeping
  * both pushed that file past its recorded ceiling in
  * tools/lint/file_size_policy_baseline.txt, so the two new rules live here
- * instead. The chain in command_registry.c still owns dispatch and the
- * `why` message; these are pure predicates over one already-typed JSON
- * value or a bare key. */
+ * instead. The chain (now in command_registry_input_validate.c) owns
+ * dispatch and the `why` message; these are pure predicates over one
+ * already-typed JSON value or a bare key. */
 
 #include "kernel/command_registry.h"
 

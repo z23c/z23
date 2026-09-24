@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef ZCL_HOTFORK_COMMAND_INPUT_CORE
 static _Atomic uint64_t g_request_sequence = 1;
 
 /* ── Per-leaf latency ring (OS-B2) ───────────────────────────────────────
@@ -549,9 +548,7 @@ bool zcl_command_reply_add_next(struct zcl_command_reply *reply,
     reply->next_count++;
     return true;
 }
-#endif
 
-#ifndef ZCL_HOTFORK_COMMAND_INPUT_CORE
 const struct zcl_command_spec *zcl_command_registry_find(
     const struct zcl_command_registry *registry, const char *path_or_alias,
     bool *was_alias)
@@ -615,40 +612,7 @@ const struct zcl_command_spec *zcl_command_registry_resolve_words(
         *was_alias = best_alias;
     return best;
 }
-#endif
 
-bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
-                                         const struct json_value *input,
-                                         char *why, size_t why_size)
-{
-    if (why && why_size)
-        why[0] = 0;
-    if (!spec || !input || input->type != JSON_OBJ) {
-        if (why) snprintf(why, why_size, "input must be one JSON object");
-        return false;
-    }
-    if (strcmp(spec->input_schema, "zcl.command.empty_input.v1") == 0 &&
-        input->num_children != 0) {
-        if (why) snprintf(why, why_size, "command accepts no input keys");
-        return false;
-    }
-    for (size_t i = 0; i < input->num_children; i++) {
-        const char *key = input->keys[i];
-        if (!command_registry_input_key_declared(spec, input, i, why, why_size))
-            return false;
-        bool type_ok = false;
-        if (!command_registry_input_value_type_ok(spec, key,
-                                                  &input->children[i],
-                                                  &type_ok) ||
-            !type_ok)
-            return command_registry_input_type_why(key, &input->children[i],
-                                                   why, why_size);
-    }
-    return command_registry_input_required_discovery(spec, input, why,
-                                                     why_size);
-}
-
-#ifndef ZCL_HOTFORK_COMMAND_INPUT_CORE
 static void digest_text(struct sha256_ctx *sha, const char *value)
 {
     static const unsigned char separator = 0;
@@ -802,4 +766,3 @@ size_t zcl_command_registry_execute_json(
     zcl_command_reply_free(&reply);
     return result;
 }
-#endif

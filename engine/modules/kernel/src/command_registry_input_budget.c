@@ -7,9 +7,9 @@
  * validator cannot drift apart), same logic, different translation unit.
  *
  * WHY THE DEFAULT IS 4096, AND WHAT IT PROTECTS. The default branch of
- * zcl_command_registry_input_validate() (command_registry.c) types every
- * key the chain does not name as a string and refuses one longer than
- * ZCL_COMMAND_INPUT_STR_MAX. That number is not protecting a parser
+ * zcl_command_registry_input_validate() (command_registry_input_validate.c)
+ * types every key the chain does not name as a string and refuses one
+ * longer than ZCL_COMMAND_INPUT_STR_MAX. That number is not protecting a parser
  * (platform/modules/json bounds nesting depth, not string length), a log
  * line (no dispatch path logs an input value), or the reply frame (replies
  * are built from handler output, never echoed input). It is the "no input

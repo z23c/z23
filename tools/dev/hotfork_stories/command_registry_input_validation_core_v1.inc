@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: HOT_FORK story adapter command-registry-input-validation-core.v1
- * for engine/modules/kernel/src/command_registry.c.
+ * for engine/modules/kernel/src/command_registry_input_validate.c.
  * Compiled only inside the capsule unity rendered by
  * tools/dev/hotfork_unity.h: phase 1 precedes the owner TU set, phase 2
  * follows it. check-hotfork-stories compiles every unity with the frozen
@@ -11,7 +11,6 @@
 #error "HOT_FORK stories are included only by the generated capsule unity"
 #elif ZCL_HOTFORK_STORY_PHASE == 1
 #define _GNU_SOURCE
-#define ZCL_HOTFORK_COMMAND_INPUT_CORE 1
 #include "hotswap/hotfork_capsule.h"
 #elif ZCL_HOTFORK_STORY_PHASE == 2
 static bool hf_valid(const char *path, const char *keys, const char *body)

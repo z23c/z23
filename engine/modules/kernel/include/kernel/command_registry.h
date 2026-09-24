@@ -67,7 +67,7 @@ extern "C" {
  * previously-accepted document would start being refused. Never compare an
  * input length against this directly — ask the budget function. */
 #define ZCL_COMMAND_MAX_INPUT 16384U
-/* Per-key input value bounds, shared by command_registry.c's validator,
+/* Per-key input value bounds, shared by command_registry_input_validate.c,
  * command_registry_input_budget.c's read-frame sizing, and
  * command_registry_devagent_input.c's dev.agent-leaf rules — one constant
  * per bound so no two of those translation units can drift apart.

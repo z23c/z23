@@ -4047,12 +4047,16 @@ static int test_hotfork_descriptor_boundary(void)
          * compiled into it, so its rules resolve from the RESIDENT binary
          * through RTLD_LAZY and a mutation there cannot turn the story red.
          * Descriptor identity stays the OWNER TU however the set was
-         * entered, so one capsule keeps one name in every receipt. */
+         * entered, so one capsule keeps one name in every receipt. The
+         * owner is the validator's own small TU: the dispatcher shell
+         * command_registry.c is outside the set, so the capsule never pays
+         * for compiling it. */
         capsule.owner_id = "kernel.command-input-validation-core.v1";
-        capsule.source_tu = "engine/modules/kernel/src/command_registry.c";
+        capsule.source_tu =
+            "engine/modules/kernel/src/command_registry_input_validate.c";
         capsule.story_id = "command-registry-input-validation-core.v1";
         capsule.story_root =
-            "05ff99d086eac22118ae3ea7627c077becbeb3c17fda049c21bf81b78a8ce237";
+            "c051a5f54e69eb61d541f624bba84ca1d0d9310c68a65e097423c3f89703dfb8";
         capsule.story_fixture_root =
             "dcc2e025037440812fed20b2b0834a0e48b48c30f1df38fa0ac4d941d92c4b2b";
         ASSERT(zcl_devloop_hotfork_descriptor_validate(
@@ -4066,9 +4070,13 @@ static int test_hotfork_descriptor_boundary(void)
         ASSERT(zcl_devloop_hotfork_descriptor_validate(
             "engine/modules/kernel/src/command_registry_devagent_input.c",
             object_root, &capsule));
-        /* A kernel TU outside the set is claimed by no capsule at all. */
+        /* A kernel TU outside the set is claimed by no capsule at all —
+         * including the dispatcher shell the validator moved out of. */
         ASSERT(!zcl_devloop_hotfork_descriptor_validate(
             "engine/modules/kernel/src/command_registry_search.c",
+            object_root, &capsule));
+        ASSERT(!zcl_devloop_hotfork_descriptor_validate(
+            "engine/modules/kernel/src/command_registry.c",
             object_root, &capsule));
         PASS();
     } _test_next:;

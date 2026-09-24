@@ -2677,7 +2677,8 @@ static int t_index_linked_manifest(void)
  * Every other case in this file calls the handler symbol directly, which is
  * exactly the hole that let `zcode package publish plan` ship uncallable:
  * the kernel rejects any input key the leaf does not declare
- * (zcl_command_registry_input_validate, engine/modules/kernel/src/command_registry.c),
+ * (zcl_command_registry_input_validate,
+ * engine/modules/kernel/src/command_registry_input_validate.c),
  * and a direct call never reaches that check. This case builds the operator's
  * real input object, runs it through input_validate FIRST, and only then
  * dispatches through spec->handler — the same two steps the CLI takes. It
