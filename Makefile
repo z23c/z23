@@ -489,7 +489,7 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # therefore owns only the dev epoch; the explicit proof bundle below keeps the
 # complete dev+test-fast graph on platforms that can consume it.
 ZCL_EPOCH_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
-else ifneq ($(filter dev-proof-bundle ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter dev-proof-bundle dev-proof-bundle-prefork ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -1846,7 +1846,7 @@ else ifneq ($(filter fast-compile dev-build-only dev-package-verifier,$(ZCL_DEPF
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
-else ifneq ($(filter dev-proof-bundle,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter dev-proof-bundle dev-proof-bundle-prefork,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
 else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),dev) test-fast)
@@ -4285,7 +4285,7 @@ agent-velocity:
 # child derives live instead of inheriting a sentinel into a real epoch
 # selection. Same command-line-only provenance contract as BUILD_SOURCE_RECORD.
 ZCL_FROZEN_TOOLCHAIN_ARGS := $(if $(strip $(ZCL_EPOCH_PROFILES)),BUILD_COMPILER_ID='$(BUILD_COMPILER_ID)' BUILD_SYSTEM_ID='$(BUILD_SYSTEM_ID)')
-.PHONY: t-locked t-fast-locked t-fast-exact-locked dev-proof-bundle
+.PHONY: t-locked t-fast-locked t-fast-exact-locked dev-proof-bundle dev-proof-bundle-prefork
 t:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
@@ -4343,6 +4343,13 @@ endif
 # execute a suite.
 dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-bin $(DEV_RESTART_PLAN) zcl-nodectl \
 	zclassic23-acme fbsh engine-unit $(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
+
+# The proof worker needs both the runner bundle and every executable read by
+# full lint before its test/lint children fork. Name one Make goal so the shared
+# graph schedules independent tools together under the dev+test-fast profiles.
+dev-proof-bundle-prefork: dev-proof-bundle proof-lint-prebuild \
+	zcl-nodectl zclassic23-acme fbsh engine-unit tools/file_size_policy \
+	fleet-board-bridge git-hook build/bin/z23-lint
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also
@@ -14206,7 +14213,7 @@ endif
 # The proof names this goal explicitly. Derive the gate's closed tool set once
 # during this Make parse, then build it in this Make's existing job graph.
 # Other callers retain the gate's own nested-Make fallback.
-ifneq ($(filter proof-lint-prebuild,$(MAKECMDGOALS)),)
+ifneq ($(filter proof-lint-prebuild dev-proof-bundle-prefork,$(MAKECMDGOALS)),)
 PROOF_LINT_TOOL_TARGETS := $(shell tools/lint/check_standalone_tools_link.sh --list-targets || printf 'PROOF_LINT_TOOL_CATALOG_FAILED')
 ifeq ($(strip $(PROOF_LINT_TOOL_TARGETS)),)
 $(error proof-lint-prebuild tool catalog was empty)
@@ -14216,7 +14223,7 @@ $(error proof-lint-prebuild tool catalog failed)
 endif
 endif
 proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL) tor-provenance-ready $(PROOF_LINT_TOOL_TARGETS)
-ifneq ($(filter proof-lint-prebuild,$(MAKECMDGOALS)),)
+ifneq ($(filter proof-lint-prebuild dev-proof-bundle-prefork,$(MAKECMDGOALS)),)
 	@for tool in $(PROOF_LINT_TOOL_TARGETS); do \
 	  [ -f "$$tool" ] || { echo "proof-lint-prebuild: missing $$tool" >&2; exit 1; }; \
 	done

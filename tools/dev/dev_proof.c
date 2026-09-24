@@ -6620,6 +6620,7 @@ struct dp_worker {
     const char *lint_targets;
     struct zcl_dev_proof_budget lint_budget;
     bool lint_reads_artifacts;
+    bool bundle_built_prefork;
 };
 
 /* The impact plan, closed and rendered once. */
@@ -6938,9 +6939,12 @@ static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
                              char *why, size_t why_len)
 {
     if (why && why_len > 0) why[0] = 0;
+    /* Both sets are needed before either dimension starts. One Make goal
+     * schedules the independent lint tools alongside the test bundle with
+     * the same dev/test-fast epochs and depfiles as dev-proof-bundle. */
     const char *bundle_argv[] = {
         "make", "--no-print-directory", w->make_jobs,
-        "dev-proof-bundle", NULL};
+        "dev-proof-bundle-prefork", NULL};
     struct zcl_dev_proof_budget bundle_budget =
         proof_step_budget(w->paths, "bundle", PROOF_BUNDLE_DEFAULT_MS);
     int64_t bundle_us0 = platform_time_monotonic_us();
@@ -6967,6 +6971,7 @@ static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
         proof_why(why, why_len, "proof_bundle_build_failed");
         return false;
     }
+    w->bundle_built_prefork = true;
 #if defined(__APPLE__)
     /* Compare the executed bundle's plan to the requested
      * flags and graph, binding its mutation token to this
@@ -7007,11 +7012,10 @@ static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
  * proof's lint-gate shard exec'd a half-written build/bin/z23-lint
  * and got rc=127 twice.
  *
- * Admit, then build. The admission is content-checked against the
- * source identity this proof sealed, and marks each entry fresh, so
- * the build below treats them as up to date instead of relinking the
- * dev object graph. Doing it first also means the build is the LAST
- * thing that touches build/ before the fork. */
+ * Admission is content-checked against the sealed source identity and
+ * marks each entry fresh. If the bundle is missing, its single build
+ * also prepares lint tools before either child forks. A reusable bundle
+ * still takes the separate prefork build path below. */
 static void dp_stage_timing_note(const struct proof_paths *paths,
                                   const char *field, int64_t started_us)
 {
@@ -7038,10 +7042,10 @@ static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
         if (!dp_worker_bundle(w, test_selected, why, why_len)) return false;
     }
     dp_stage_timing_note(w->paths, "prefork_admission_ms", stage_us);
-    /* The one build both dimensions share. Nothing after this links
-     * anything until both children have exited. */
+    /* A reusable bundle may still need these tools. A newly built bundle
+     * already prepared them in the same Make graph. */
     stage_us = platform_time_monotonic_us();
-    if ((test_selected || w->lint_reads_artifacts) &&
+    if (!w->bundle_built_prefork && (test_selected || w->lint_reads_artifacts) &&
         !proof_prefork_build(w->paths, w->generation, w->make_jobs,
                              w->lint_reads_artifacts, why, why_len))
         return false;
