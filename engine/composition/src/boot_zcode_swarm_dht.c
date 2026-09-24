@@ -3,7 +3,9 @@
  * Lease table behind boot_zcode_swarm_discovery_tick(): one DHT record
  * discovery per stalled package root, retried with capped exponential
  * backoff, its completed route applied back into the swarm engine as
- * verified provider evidence. See the header for the contract. */
+ * verified provider evidence. The same tick finishes routed carrier
+ * fetches (boot_zcode_package_import_tick). See the header for the
+ * contract. */
 
 #include "config/boot_zcode_swarm_dht.h"
 
@@ -312,4 +314,9 @@ void boot_zcode_swarm_discovery_tick(uint64_t now_mono)
             break;
         }
     }
+    /* The other half of a routed fetch: once the carrier is whole, the
+     * signed package inside it is reconstructed here instead of waiting
+     * for the caller to ask again. CAS-only, inert, same checks as the
+     * request path. */
+    (void)boot_zcode_package_import_tick(engine);
 }

@@ -755,9 +755,9 @@ static bool sw_seed_import_and_classify(struct sw_node *n,
     return true;
 }
 
-static bool sw_seed_in_tree_package(struct sw_node *n, const char *source_dir,
-                                    uint8_t seed, uint64_t sequence,
-                                    uint8_t transport_root[32])
+bool sw_seed_in_tree_package(struct sw_node *n, const char *source_dir,
+                             uint8_t seed, uint64_t sequence,
+                             uint8_t transport_root[32])
 {
     if (!n || !source_dir || !transport_root || !n->store || !n->engine)
         return false;

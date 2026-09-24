@@ -103,6 +103,11 @@ struct vcs_swarm_frame_result sw_answer(
     struct sw_node *n, uint64_t peer,
     const struct vcs_package_swarm_object *want, const uint8_t *bytes,
     size_t bytes_len, uint32_t file_index_override);
+/* Defined in test_zcode_swarm_adversarial.c: prepare, sign, store, pin
+ * and import one in-tree package as a public transport carrier on `n`. */
+bool sw_seed_in_tree_package(struct sw_node *n, const char *source_dir,
+                             uint8_t seed, uint64_t sequence,
+                             uint8_t transport_root[32]);
 
 /* Scenario group runners — test_zcode_swarm.c's entry point calls
  * every one of these in order; each lives in the sibling file its

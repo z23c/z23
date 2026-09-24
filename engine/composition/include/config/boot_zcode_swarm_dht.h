@@ -18,9 +18,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Advance the discovery lane at monotonic second `now_mono`. Safe to
- * call before hosting is up: with no swarm engine registered it is a
- * quiet no-op. */
+/* Advance the discovery lane at monotonic second `now_mono`, then
+ * reconstruct at most one routed carrier whose download completed
+ * (boot_zcode_package_import_tick). Safe to call before hosting is up:
+ * with no swarm engine registered it is a quiet no-op. */
 void boot_zcode_swarm_discovery_tick(uint64_t now_mono);
 
 /* ── test-only controls ────────────────────────────────────────────

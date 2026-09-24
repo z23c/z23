@@ -87,6 +87,12 @@ void boot_zcode_package_import_render(struct vcs_swarm_engine *engine,
                                       const uint8_t transport_root[32],
                                       int fetch_result,
                                       struct json_value *result);
+/* Reconstruct, on the node's own clock, the inner package of every routed
+ * carrier that boot_zcode_package_import_render() admitted while its
+ * download was still moving (at most one per call). Driven from the swarm
+ * DHT lane tick; a quiet no-op with no engine. Returns 1 when a package
+ * was reconstructed this call, else 0. */
+size_t boot_zcode_package_import_tick(struct vcs_swarm_engine *engine);
 void boot_zcode_package_download_render(
     struct json_value *result,
     const struct vcs_swarm_download_status *status);
