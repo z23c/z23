@@ -104,6 +104,44 @@ The separate final-state C23 audit passed 101 prefix cases, 5,151 ranges,
 202 render cases, 101 parser cases and five invalid cases. Its log SHA-256 is
 `482b72a7fa58bb4bd9feda9f063e1397a913a37d2e04092cafe53841357aa371`.
 
+The frozen revision 100 package also passed an independent source build on a
+consenting Linux development host with GCC 14.2.0 under `-std=c23 -Wall
+-Wextra -Werror -pedantic -O2`. The transfer bundle was 51,200 bytes, SHA-256
+`2f265f85fd0e14dd4fb77b949b479efc464544997a905f9d8dc8c76d142b36f7`;
+the receiver matched that hash and all 12 input-manifest entries before
+compiling. The peer checker is `tools/dev/factory-mixed-peer-check.sh`, SHA-256
+`8a94c82adf0dcb2c4de642007b7f3964411bbe967793e9cc8434854e110a669a`.
+The returned result archive matched the sender's SHA-256
+`785131a53b0179af94fdf9d09641cd3bb0389048f3e9a828c7fa2272f4451d0c`.
+Its exhaustive log has the same SHA-256 as the local log above. The peer
+terminal log (`85adfd9283eccdeda6b9ede1c0d19fa196a433088905ce6316a586b0de5e736b`)
+records 101 exact text and 101 exact JSON outputs plus five rejected inputs.
+The peer-built terminal executable SHA-256 is
+`c8ff0c45c5a48574b9ba8a78372778479d89938787d8d63db2a2934670a6c146`.
+This independently checks the final source behavior; it does not establish
+100 remote factory runs, byte-identical cross-compiler executables, or human
+acceptance. The first bundle attempt included `inputs.sha256` in its own
+manifest and correctly failed `sha256sum -c`; the corrected bundle excludes
+the manifest itself.
+
+To repeat the final-state peer check from a freshly generated 100-revision
+corpus, copy `revision-100/pkg` into a private peer-check directory as `pkg`,
+copy `tools/dev/fixtures/factory_mixed/history_exhaustive.c` beside it, then
+create the manifest and bundle:
+
+```bash
+cd PEER_CHECK_DIR
+find ./pkg ./history_exhaustive.c -type f -print0 | sort -z | xargs -0 sha256sum > inputs.sha256
+tar -cf bundle.tar pkg history_exhaustive.c inputs.sha256
+sha256sum bundle.tar
+```
+
+Transfer `bundle.tar` and the checker to a consenting development host,
+compare both transfer hashes, then run
+`bash factory-mixed-peer-check.sh PEER_CHECK_DIR` there. Return `result.tar`
+and compare its SHA-256 before reading its logs. The checker builds fresh
+executables on that host and checks all valid counts and invalid inputs.
+
 The 100 normal factory calls summed to 497.373 s wall, 302.616 s user CPU
 and 185.570 s system CPU. Factory latency was p50 4.186 s, p95 4.548 s,
 p99 30.467 s, maximum 30.511 s. Revisions 91–93 each took about 30 s;
