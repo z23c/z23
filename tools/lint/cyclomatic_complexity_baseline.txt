@@ -421,7 +421,7 @@ contexts/commons/modules/vcs/src/package_store_io.c:store_gc_cas:31
 contexts/commons/modules/vcs/src/package_store_io.c:store_load_manifests:21
 contexts/commons/modules/vcs/src/package_store_io.c:store_mkdir_p:20
 contexts/commons/modules/vcs/src/package_store_io.c:store_package_commit:19
-contexts/commons/modules/vcs/src/package_store_io.c:store_read_file:19
+contexts/commons/modules/vcs/src/package_store_io.c:store_read_file:7
 contexts/commons/modules/vcs/src/package_store_io.c:store_rm_rf:37
 contexts/commons/modules/vcs/src/package_store_io.c:store_sweep_temps:35
 contexts/commons/modules/vcs/src/package_store_possession.c:proof_read_chunk:21

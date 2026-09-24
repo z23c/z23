@@ -714,74 +714,30 @@ static void store_sweep_temps(struct vcs_package_store *store,
 static uint8_t *store_read_file(const char *path, size_t *out_len)
 {
     *out_len = 0;
-#if defined(_WIN32)
-    wchar_t wide[STORE_PATH_MAX];
-    if (!store_wide_path(path, wide))
-        LOG_NULL(STORE_LOG, "invalid UTF-8 path %s", path);
-    HANDLE file = CreateFileW(
-        wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    if (file == INVALID_HANDLE_VALUE)
-        LOG_NULL(STORE_LOG, "open %s: Win32 error %lu", path,
-                 (unsigned long)GetLastError());
-    FILE_ATTRIBUTE_TAG_INFO tag;
-    LARGE_INTEGER size;
-    if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag,
-                                      sizeof(tag)) ||
-        (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
-                               FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
-        !GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
-        (uint64_t)size.QuadPart > VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES) {
-        CloseHandle(file);
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        LOG_NULL(STORE_LOG, "open regular file %s", path);
+    uint64_t size = 0;
+    if (!platform_positioned_file_size(&file, &size) || size == 0 ||
+        size > VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES) {
+        platform_positioned_file_close(&file);
         LOG_NULL(STORE_LOG, "%s: invalid file or size", path);
     }
-    size_t len = (size_t)size.QuadPart;
+    size_t len = (size_t)size;
     uint8_t *buf = zcl_malloc(len, "store_read_file");
     if (!buf) {
-        CloseHandle(file);
+        platform_positioned_file_close(&file);
         LOG_NULL(STORE_LOG, "alloc %zu for %s", len, path);
     }
-    size_t off = 0;
-    while (off < len) {
-        DWORD amount = len - off > UINT32_MAX ? UINT32_MAX
-                                              : (DWORD)(len - off);
-        DWORD got = 0;
-        if (!ReadFile(file, buf + off, amount, &got, NULL) || got == 0) {
-            CloseHandle(file);
-            free(buf);
-            LOG_NULL(STORE_LOG, "read %s", path);
-        }
-        off += got;
+    int64_t got = platform_positioned_file_read(&file, buf, len, 0);
+    platform_positioned_file_close(&file);
+    if (got != (int64_t)len) {
+        free(buf);
+        LOG_NULL(STORE_LOG, "read exact file %s", path);
     }
-    CloseHandle(file);
     *out_len = len;
     return buf;
-#else
-    struct stat st;
-    if (stat(path, &st) != 0)
-        LOG_NULL(STORE_LOG, "stat %s: %s", path, strerror(errno));
-    if (st.st_size <= 0 ||
-        (uint64_t)st.st_size > VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES)
-        LOG_NULL(STORE_LOG, "%s: bad size %lld", path,
-                 (long long)st.st_size);
-    size_t len = (size_t)st.st_size;
-    uint8_t *buf = zcl_malloc(len, "store_read_file");
-    if (!buf)
-        LOG_NULL(STORE_LOG, "alloc %zu for %s", len, path);
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        free(buf);
-        LOG_NULL(STORE_LOG, "open %s: %s", path, strerror(errno));
-    }
-    if (fread(buf, 1, len, f) != len) {
-        fclose(f);
-        free(buf);
-        LOG_NULL(STORE_LOG, "read %s", path);
-    }
-    fclose(f);
-    *out_len = len;
-    return buf;
-#endif
 }
 
 static int store_chunk_hash_cmp(const void *a, const void *b)

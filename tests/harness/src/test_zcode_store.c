@@ -820,6 +820,50 @@ static int t_store_blocked_manifest_recovery(void)
     return failures;
 }
 
+static int t_store_linked_manifest_recovery(void)
+{
+    int failures = 0;
+    char dd[256];
+    struct vcs_package_store *store =
+        zs_open(dd, sizeof(dd), "manifest-link", 1000000u);
+    ZS_CHECK("recovery link: store opens", store != NULL);
+    if (!store)
+        return failures;
+    struct zs_pkg p;
+    const char *paths[] = { "src/linked.c" };
+    const size_t lens[] = { 16 };
+    bool prepared = zs_make_package(&p, 1, paths, lens, 0x81) &&
+        vcs_package_store_put_manifest(store, p.wire, p.wire_len, NULL) ==
+            VCS_PACKAGE_STORE_OK &&
+        zs_put_all(store, &p) == VCS_PACKAGE_STORE_OK;
+    char root_hex[65], leaf[640], outside[512];
+    zs_hex32(p.root, root_hex);
+    snprintf(leaf, sizeof(leaf), "%s/zcode/manifests/%s", dd, root_hex);
+    snprintf(outside, sizeof(outside), "%s/zcode/outside-manifest", dd);
+    vcs_package_store_close(store);
+    prepared = prepared && rename(leaf, outside) == 0 &&
+               symlink("../outside-manifest", leaf) == 0;
+    ZS_CHECK("recovery link: exact manifest linked outside is prepared",
+             prepared);
+    if (prepared) {
+        store = vcs_package_store_open(dd, 1000000u);
+        struct vcs_package_store_status status;
+        ZS_CHECK("recovery link: linked manifest is not tracked",
+                 store && !vcs_package_store_package_status(store, p.root,
+                                                              &status));
+        vcs_package_store_close(store);
+        bool restored = unlink(leaf) == 0 && rename(outside, leaf) == 0;
+        store = restored ? vcs_package_store_open(dd, 1000000u) : NULL;
+        ZS_CHECK("recovery link: same manifest as real leaf is tracked",
+                 store && vcs_package_store_package_status(store, p.root,
+                                                             &status));
+        vcs_package_store_close(store);
+    }
+    zs_free_package(&p);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 int test_zcode_store(void)
 {
     printf("\n=== zcode_store: local content-addressed package store ===\n");
@@ -830,6 +874,7 @@ int test_zcode_store(void)
     failures += t_store_dedup();
     failures += t_store_recovery();
     failures += t_store_blocked_manifest_recovery();
+    failures += t_store_linked_manifest_recovery();
     failures += t_store_corrupt_read_repair();
     failures += t_store_staging_quota();
     failures += t_store_hot_eviction();
