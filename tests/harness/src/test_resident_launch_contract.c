@@ -60,6 +60,7 @@
 #include "presentation/model_render.h"
 #include "../../../contexts/explorer/modules/presentation/src/presentation_focus_internal.h"
 #include "platform/os_proc.h"
+#include "platform/os_sandbox.h"
 #include "platform/time_compat.h"
 #if !defined(_WIN32)
 #include <sched.h>
@@ -71,6 +72,7 @@
 #include "vcs/package_release.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -810,9 +812,12 @@ static char *rlc_splice_text(const char *text, size_t len,
  * artifact digest) to play N+1 / N+2 / B against N in the stage-f trap:
  * the REAL package files with the empty-list render line patched,
  * published as a higher semver and installed by its exact root. */
+enum rlc_preview_fault { RLC_PREVIEW_OK, RLC_PREVIEW_WRONG_ID,
+                         RLC_PREVIEW_CRASH, RLC_PREVIEW_BAD_ABI };
+
 static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
                                        const char *semver, uint64_t sequence,
-                                       const char *list_line,
+                                       const char *list_line, enum rlc_preview_fault fault,
                                        struct rlc_binding *out)
 {
     const char *const paths[] = {
@@ -820,7 +825,6 @@ static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
         "src/ztasks.c", "tests/test_ztasks.c",
     };
     struct rlc_file files[6];
-    char *patched = NULL;
     for (size_t i = 0; i < 6; i++) {
         char path[512];
         (void)snprintf(path, sizeof(path), "%s/%s", RLC_ZTASKS_DIR,
@@ -833,15 +837,43 @@ static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
             return false;
         }
         if (strcmp(paths[i], "app/main.c") == 0) {
-            patched = rlc_splice_text(files[i].content, files[i].len,
-                                      "No tasks yet.", list_line);
-            if (!patched) {
+            char *empty = rlc_splice_text(files[i].content, files[i].len,
+                                          "No tasks yet.", list_line);
+            char *visible = empty ? rlc_splice_text(empty, strlen(empty),
+                "state->tasks[i].done ? \"DONE\" : \"OPEN\"",
+                "state->tasks[i].done ? \"DONE\" : \"TODO\"") : NULL;
+            char *isolated = visible ? rlc_splice_text(visible, strlen(visible),
+                "static int task_preview(char **argv)\n{",
+                "static int task_preview(char **argv)\n{\n"
+                "    char inherited;\n"
+                "    if (getenv(\"Z23_PREVIEW_SECRET\") ||\n"
+                "        read(200, &inherited, 1) >= 0 || errno != EBADF) return 9;") : NULL;
+            free(empty);
+            free(visible);
+            if (isolated && fault != RLC_PREVIEW_OK) {
+                const char *needle = fault == RLC_PREVIEW_WRONG_ID
+                    ? "(unsigned long long)state->tasks[i].id,"
+                    : fault == RLC_PREVIEW_CRASH
+                    ? "static int task_preview(char **argv)\n{"
+                    : "printf(\"READY %s\\n\", argv[2]);";
+                const char *replacement = fault == RLC_PREVIEW_WRONG_ID
+                    ? "(unsigned long long)(state->tasks[i].id + 1u),"
+                    : fault == RLC_PREVIEW_CRASH
+                    ? "static int task_preview(char **argv)\n{\n    raise(SIGSEGV);"
+                    : "printf(\"WRONG %s\\n\", argv[2]);";
+                char *faulted = rlc_splice_text(isolated, strlen(isolated),
+                                                needle, replacement);
+                free(isolated);
+                isolated = faulted;
+            }
+            if (!isolated) {
                 for (size_t j = 0; j <= i; j++)
                     free((void *)files[j].content);
                 return false;
             }
-            files[i].content = patched;
-            files[i].len = strlen(patched);
+            free((void *)files[i].content);
+            files[i].content = isolated;
+            files[i].len = strlen(isolated);
         }
     }
     uint8_t root[32], receipt[32];
@@ -991,7 +1023,22 @@ static int rlc_task_edits(const struct rlc_task_session *session)
     session->update->candidate = rlc_task_identity(session->n1);
     RLC_CHECK("task journey: edit before preview", task_document_apply(session->store, session->document->state.revision,
         TASK_DOCUMENT_EDIT, session->document->state.tasks[0].id, "Edited before preview", session->document).ok);
-    RLC_CHECK("task journey: isolated preview completes", task_update_try(session->update, true, false).ok && rlc_task_wait(session->update));
+    /* The verifier inherits these from its caller. Candidate code probes
+     * both before it renders: the preview child must see neither. */
+    int secret = open("/dev/null", O_RDONLY);
+    bool fd_armed = secret >= 0 && fcntl(200, F_GETFD) < 0 &&
+        errno == EBADF && dup2(secret, 200) == 200;
+    bool private_inputs = fd_armed &&
+        setenv("Z23_PREVIEW_SECRET", "fixture-secret", 1) == 0;
+    if (secret >= 0) (void)close(secret);
+    RLC_CHECK("task journey: inheritable descriptor and environment probe armed", private_inputs);
+    bool previewed = private_inputs && task_update_try(session->update, true, false).ok &&
+        rlc_task_wait(session->update);
+    if (private_inputs) (void)unsetenv("Z23_PREVIEW_SECRET");
+    if (fd_armed) (void)close(200);
+    RLC_CHECK("task journey: NEW compiled preview behavior is visible with no inherited secret",
+        previewed && strstr(session->update->preview, "[TODO] Edited before preview") &&
+        strstr(session->update->active, "[OPEN] Keep this exact task"));
     RLC_CHECK("task journey: edit while preview exists", task_document_apply(session->store, session->document->state.revision,
         TASK_DOCUMENT_EDIT, session->document->state.tasks[0].id, "Newer edit must survive", session->document).ok);
     *session->expected = *session->document;
@@ -1147,6 +1194,127 @@ static int rlc_task_journey(const char *base, const struct rlc_binding *n,
     (void)task_update_finish(&update);
     (void)package_resident_store_close(&store);
     RLC_CHECK("task journey: descriptor count unchanged", counted && os_proc_open_fd_count(&fd_after) && fd_before == fd_after);
+    return failures;
+}
+
+static int rlc_preview_time_order(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* Each sample edits package C, builds a distinct artifact, then observes its
+ * new output through the confined Try path while N remains accepted. */
+static int rlc_task_preview_latency(const char *base, const char *zcode,
+                                    const struct rlc_binding *n)
+{
+    int failures = 0;
+    char verifier[4096];
+    if (!realpath("build/bin/zclassic23-package-verify-dev", verifier)) return 1;
+    struct package_resident_store store = {0};
+    struct task_update update = {0};
+    struct package_resident_identity accepted = rlc_task_identity(n);
+    bool opened = package_resident_store_open_app(&store, base,
+        "contract/task-preview-latency").ok &&
+        task_update_open(&update, base, store.app, verifier, &accepted).ok &&
+        rlc_task_try_keep(&update);
+    RLC_CHECK("preview latency: accepted N serves before edits", opened &&
+        strcmp(update.active, "No tasks yet.\n") == 0);
+    if (!opened) goto done;
+    enum os_sandbox_package_confinement confinement = os_sandbox_package_confinement();
+    RLC_CHECK("preview latency: qualified host confinement is available",
+              confinement != OS_SANDBOX_PACKAGE_CONFINEMENT_NONE);
+    int64_t times[20], build_times[20], preview_times[20];
+    unsigned measured = 0;
+    for (unsigned i = 0; i < 20; ++i) {
+        char version[24], line[64], expected[80];
+        (void)snprintf(version, sizeof(version), "0.%u.0", i + 6u);
+        (void)snprintf(line, sizeof(line), "Preview %02u", i);
+        (void)snprintf(expected, sizeof(expected), "%s\n", line);
+        int64_t started = platform_time_monotonic_us();
+        struct rlc_binding candidate;
+        bool installed = rlc_install_ztasks_variant(base, zcode, version,
+            i + 6u, line, RLC_PREVIEW_OK, &candidate);
+        int64_t built = platform_time_monotonic_us();
+        if (installed) update.candidate = rlc_task_identity(&candidate);
+        bool executed = installed && task_update_try(&update, true, false).ok &&
+            rlc_task_wait(&update);
+        struct package_resident_record record;
+        bool preserved = executed && package_resident_record_read(&store, &record).ok &&
+            package_resident_identity_equal(&record.current, &accepted) &&
+            strcmp(update.active, "No tasks yet.\n") == 0 &&
+            strcmp(update.preview, expected) == 0;
+        RLC_CHECK("preview latency: distinct compiled bytes execute while N stays selected",
+                  preserved);
+        if (!preserved) {
+            printf("preview fallback cycle=%u reason=%s\n", i, update.message);
+            break;
+        }
+        int64_t elapsed = platform_time_monotonic_us() - started;
+        times[measured] = elapsed;
+        build_times[measured] = built - started;
+        preview_times[measured] = elapsed - build_times[measured];
+        ++measured;
+        printf("preview sample=%u root=%s receipt=%s artifact_sha3=%s "
+               "edit_to_behavior_us=%lld build_us=%lld execute_us=%lld "
+               "fallback=none\n", i, candidate.root_hex, candidate.receipt_hex,
+               candidate.sha3, (long long)elapsed,
+               (long long)(built - started),
+               (long long)(elapsed - (built - started)));
+        task_update_cancel(&update);
+        bool returned = task_update_refresh(&update).ok &&
+            rlc_task_wait(&update) && strcmp(update.active, "No tasks yet.\n") == 0;
+        RLC_CHECK("preview latency: accepted N still executes after Try", returned);
+        if (!returned) break;
+    }
+    if (measured == 20) {
+        qsort(times, measured, sizeof(times[0]), rlc_preview_time_order);
+        qsort(build_times, measured, sizeof(build_times[0]), rlc_preview_time_order);
+        qsort(preview_times, measured, sizeof(preview_times[0]), rlc_preview_time_order);
+        printf("preview edit_to_behavior samples=20 p50_us=%lld p95_us=%lld "
+               "build_p50_us=%lld build_p95_us=%lld "
+               "execute_p50_us=%lld execute_p95_us=%lld "
+               "fallbacks=0 accepted_sha3=%s confinement=%d\n",
+               (long long)times[9], (long long)times[18],
+               (long long)build_times[9], (long long)build_times[18],
+               (long long)preview_times[9], (long long)preview_times[18],
+               n->sha3, (int)confinement);
+    }
+    RLC_CHECK("preview latency: all distinct edit-to-behavior samples completed",
+              measured == 20);
+
+    struct task_document document = {0}, expected_data = {0};
+    bool task_added = task_document_apply(&store, 0, TASK_DOCUMENT_ADD, 0,
+        "Preserve this task", &document).ok;
+    expected_data = document;
+    RLC_CHECK("preview faults: accepted task data prepared", task_added);
+    if (task_added) {
+        const enum rlc_preview_fault faults[] = {
+            RLC_PREVIEW_WRONG_ID, RLC_PREVIEW_CRASH, RLC_PREVIEW_BAD_ABI };
+        const char *const labels[] = { "behavior", "crash", "interface" };
+        for (unsigned i = 0; i < 3; ++i) {
+            char version[24], line[64];
+            (void)snprintf(version, sizeof(version), "0.%u.0", i + 26u);
+            (void)snprintf(line, sizeof(line), "Fault %u", i);
+            struct rlc_binding candidate;
+            bool installed = rlc_install_ztasks_variant(base, zcode, version,
+                i + 26u, line, faults[i], &candidate);
+            if (installed) update.candidate = rlc_task_identity(&candidate);
+            bool refused = installed && task_update_try(&update, true, false).ok &&
+                !rlc_task_wait(&update) && update.phase == TASK_UPDATE_FAILED;
+            struct package_resident_record record;
+            bool fallback = refused && package_resident_record_read(&store, &record).ok &&
+                package_resident_identity_equal(&record.current, &accepted) &&
+                task_document_read(&store, &document).ok &&
+                rlc_task_equal(&document, &expected_data);
+            RLC_CHECK("preview faults: bad behavior, crash or interface retains N and data",
+                      fallback);
+            printf("preview fallback kind=%s reason=%s\n", labels[i], update.message);
+        }
+    }
+done:
+    (void)task_update_finish(&update);
+    (void)package_resident_store_close(&store);
     return failures;
 }
 
@@ -2121,11 +2289,11 @@ int test_resident_launch_contract(void)
         struct rlc_binding n1, n2, b;
         bool variants =
             rlc_install_ztasks_variant(base, zcode, "0.3.0", 3,
-                                       "No tasks yet (0.3.0).", &n1) &&
+                                       "No tasks yet (0.3.0).", RLC_PREVIEW_OK, &n1) &&
             rlc_install_ztasks_variant(base, zcode, "0.4.0", 4,
-                                       "No tasks yet (0.4.0).", &n2) &&
+                                       "No tasks yet (0.4.0).", RLC_PREVIEW_OK, &n2) &&
             rlc_install_ztasks_variant(base, zcode, "0.5.0", 5,
-                                       "No tasks yet (0.5.0).", &b);
+                                       "No tasks yet (0.5.0).", RLC_PREVIEW_OK, &b);
         RLC_CHECK("stage f setup: three edited ztasks generations (N+1, "
                   "N+2, B) install through the real lifecycle with "
                   "distinct artifact digests",
@@ -2141,6 +2309,7 @@ int test_resident_launch_contract(void)
             failures += rlc_task_journey(base, &n, &n1, &n2, &broken);
             failures += rlc_stage_f_trap(spec, base, &n, &n1, &n2, &b);
             failures += rlc_stage_f_process_crashes(spec, base, &n, &n1, &n2);
+            failures += rlc_task_preview_latency(base, zcode, &n);
         } else {
             printf("resident_launch_contract: generation variants failed "
                    "to install — the stage-f trap is blocked (counted "

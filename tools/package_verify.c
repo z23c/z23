@@ -1030,8 +1030,16 @@ static _Noreturn void pv_run_child_exec(const char *const argv[],
     (void)setpgid(0, 0);
     close(out_pipe[0]);
     close(err_pipe[0]);
-    (void)dup2(out_pipe[1], STDOUT_FILENO);
-    (void)dup2(err_pipe[1], STDERR_FILENO);
+    if (dup2(out_pipe[1], STDOUT_FILENO) != STDOUT_FILENO ||
+        dup2(err_pipe[1], STDERR_FILENO) != STDERR_FILENO)
+        _exit(PV_CHILD_EXEC_FAIL);
+    /* Preview candidates receive only standard streams. The verifier can
+     * inherit keys, sockets or a database from its caller, and neither exec
+     * nor the filesystem sandbox revokes an inherited descriptor. */
+    if (g_pv_preview_control && !os_proc_close_inherited_fds()) {
+        fprintf(stderr, "confinement: could not close inherited descriptors\n");
+        _exit(PV_CHILD_SANDBOX_FAIL);
+    }
     if (cwd && chdir(cwd) != 0)
         _exit(PV_CHILD_EXEC_FAIL);
     /* Scrub the inherited environment: the operator's shell env can carry
