@@ -5056,11 +5056,9 @@ static struct zcl_dev_proof_budget proof_step_budget(
 
 /* Every exact receipt can authorize publication, regardless of the scratch
  * directory that requested it. Run the same full lint contract everywhere;
- * lint-fast remains the separate edit-feedback target. The lint umbrella's
- * LINT_GATES already includes check-windows-acceptance. Naming that gate as
- * a second Make goal makes it a prerequisite of lint and serializes its
- * cross-links before the parallel gate runner, adding their wall times.
- * `jobs` must outlive argv. */
+ * lint-fast remains the separate edit-feedback target. The lint umbrella
+ * includes Windows acceptance. Only a verified shared TU cache location
+ * enables raw Windows compiler-result reuse. `jobs` must outlive argv. */
 static bool proof_lint_prepare(const char *root, const char *jobs,
                                const char **argv, size_t argv_cap,
                                int64_t *fallback_ms, const char **targets)
@@ -5069,12 +5067,9 @@ static bool proof_lint_prepare(const char *root, const char *jobs,
     if (!jobs || !*jobs || !argv || argv_cap < PROOF_LINT_ARGV_CAP ||
         !fallback_ms || !targets)
         return false;
-    /* The per-TU cache starts empty in this private generation, so its
-     * hashing and result stores are wasted work. Scope the cold setting to
-     * lint: testcache hashes ZCL_ variables, and exporting this lint-only
-     * knob from the shared worker would invalidate unrelated test hits. */
     argv[0] = "env";
-    argv[1] = "ZCL_LINT_TU_CACHE=0";
+    argv[1] = getenv("ZCL_LINT_TU_CACHE_DIR")
+        ? "ZCL_LINT_TU_CACHE=1" : "ZCL_LINT_TU_CACHE=0";
     argv[2] = "make";
     argv[3] = "--no-print-directory";
     argv[4] = jobs;
@@ -5110,6 +5105,31 @@ static bool proof_prepare_environment(void)
     for (size_t i = 0; i < sizeof(unset_names) / sizeof(unset_names[0]); i++)
         if (unsetenv(unset_names[i]) != 0) return false;
     return setenv("ZCL_LINT_CACHE", "0", 1) == 0;
+}
+
+/* The Windows syntax gate caches raw per-TU compiler observations, while
+ * every proof still runs its full classifier and policy. Place only that
+ * gate's strengthened, content-keyed entries under the shared Git directory
+ * so a moved proof generation can see identical work. If the common directory
+ * cannot be named, the gate stays cold in its isolated generation. */
+static void proof_tu_cache_prepare(const struct proof_paths *paths)
+{
+    char marker[PATH_MAX], common[PATH_MAX], cache[PATH_MAX];
+    const char *argv[] = {"git", "rev-parse", "--git-common-dir", NULL};
+    if (!paths)
+        return;
+    int marker_len = snprintf(marker, sizeof(marker), "%s/.git", paths->root);
+    if (marker_len <= 0 || (size_t)marker_len >= sizeof(marker) ||
+        access(marker, F_OK) != 0 ||
+        !git_capture(paths->root, argv, common, sizeof(common)))
+        return;
+    int n = common[0] == '/'
+        ? snprintf(cache, sizeof(cache), "%s/z23-proof-tu-cache-v1", common)
+        : snprintf(cache, sizeof(cache), "%s/%s/z23-proof-tu-cache-v1",
+                   paths->root, common);
+    if (n <= 0 || (size_t)n >= sizeof(cache))
+        return;
+    (void)setenv("ZCL_LINT_TU_CACHE_DIR", cache, 1);
 }
 
 /* Fill the pre-fork make argv: everything EITHER dimension can build, built
@@ -7360,6 +7380,7 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_execution_environment_unavailable");
         return false;
     }
+    proof_tu_cache_prepare(paths);
     int64_t started_us = platform_time_monotonic_us();
     struct proof_phase_clock phases;
     proof_phase_begin(&phases, paths);

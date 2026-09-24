@@ -167,6 +167,40 @@ tu_cache__sha_file() {
     if [ -f "$1" ]; then sha256sum --binary -- "$1" | cut -c1-64; else printf 'absent'; fi
 }
 
+# The shared Windows action invokes a direct GCC driver under exactly this
+# environment. Proof/build/cache bookkeeping is absent from the compiler's
+# child, so a moved candidate's source record or scratch path cannot either
+# affect the observation or spuriously change its key.
+tu_cache__compiler_env_names() {
+    local name
+    while IFS= read -r name; do
+        case "$name" in
+            PWD|OLDPWD|SHLVL|_|MAKEFLAGS|MFLAGS|MAKELEVEL|BUILD_*|ZCL_*|INVOCATION_ID|JOURNAL_STREAM|CODEX_*)
+                if [ "${ZCL_TU_CACHE_SELFTEST_FORCE:-0}" = 1 ] &&
+                   [ "$name" = ZCL_TU_STUB_RUNS ]; then
+                    printf '%s\n' "$name"
+                fi
+                ;;
+            *) printf '%s\n' "$name" ;;
+        esac
+    done < <(compgen -e | LC_ALL=C sort -u)
+}
+
+tu_cache__shared_requested() {
+    [ "$1" = check-windows-cross-syntax ] || return 1
+    case "${ZCL_LINT_TU_CACHE_DIR:-}" in
+        */z23-proof-tu-cache-v1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+tu_cache__shared_active() {
+    case "${ZCL_TU_CACHE_DIR:-}" in
+        */z23-proof-tu-cache-v1/check-windows-cross-syntax/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 tu_cache__disable() {
     TU_CACHE_OFF_REASON="$1"
     ZCL_TU_CACHE_ON=0
@@ -391,6 +425,7 @@ tu_cache_setup() {
     local gate="$1" gate_script="$2" cc="$3" flags_nul="$4" scratch="$5"
     local root="${6:-.}" cachedir="${7:-}"
     local cc_id lib_sha gate_sha flags_sha digest salt gate_root dir
+    local shared=0 policy_sha env_sha make_sha runner_sha exclusions_sha
 
     TU_CACHE_OFF_REASON=""
     ZCL_TU_CACHE_ON=0
@@ -421,7 +456,35 @@ tu_cache_setup() {
         tu_cache__disable "sha256sum is not installed"; return 0
     fi
 
-    cc_id="$("$cc" --version 2>/dev/null | head -1)"
+    if tu_cache__shared_requested "$gate"; then
+        shared=1
+    fi
+    if [ "$shared" = 1 ] &&
+       [ "${ZCL_TU_CACHE_SELFTEST_FORCE:-0}" != 1 ]; then
+        # This action is the direct, fixed MinGW C driver. A caller-supplied
+        # wrapper may read arbitrary environment, so it cannot use this key.
+        if [ "$cc" != x86_64-w64-mingw32-gcc ]; then
+            tu_cache__disable "shared action requires the direct MinGW C driver"
+            return 0
+        fi
+        # The shared generation survives a moved checkout. The compiler
+        # version line alone cannot authorize that reuse: the epoch identity
+        # also binds executable/backend bytes, search roots and header state,
+        # and compiler-affecting environment. Failure means a cold compile.
+        # The MinGW C driver on this host has no cc1plus; this is a C-only
+        # gate. An available native C++ driver is an extra bound input for
+        # the repository's shared fingerprint helper, never an untested
+        # replacement for the real C compiler named by $cc.
+        cc_id="$(tools/dev/build-epoch-key.sh compiler-id "$cc" \
+                  "${CXX:-g++}" "$PWD" 2>/dev/null)"
+        [[ "$cc_id" =~ ^[0-9a-f]{64}$ ]] || {
+            tu_cache__disable "complete compiler identity unavailable"; return 0;
+        }
+    elif [ "$shared" = 1 ]; then
+        cc_id="$(tu_cache__sha_file "$cc")"
+    else
+        cc_id="$("$cc" --version 2>/dev/null | head -1)"
+    fi
     if [ -z "$cc_id" ]; then
         tu_cache__disable "'$cc' printed no version line"; return 0
     fi
@@ -432,15 +495,46 @@ tu_cache_setup() {
     lib_sha="$(tu_cache__sha_file "$TU_CACHE_LIB_PATH")"
     gate_sha="$(tu_cache__sha_file "$gate_script")"
     flags_sha="$(tu_cache__sha_file "$flags_nul")"
-    salt="$(printf 'tu-result-cache/v2\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-        "$gate" "$lib_sha" "$gate_sha" "$cc_id" "$flags_sha" "$digest" |
-        tu_cache__sha_stdin)"
+    if [ "$shared" = 1 ]; then
+        # These govern the harness and policy around the raw compiler result.
+        # A relocated proof may share only when their bytes and the effective
+        # ambient inputs match. The test-only synthetic root uses its private
+        # gate script as policy so no production cache can share its salt.
+        if [ "${ZCL_TU_CACHE_SELFTEST_FORCE:-0}" = 1 ]; then
+            policy_sha="$gate_sha"
+            make_sha="$gate_sha"
+            runner_sha="$gate_sha"
+            exclusions_sha="$gate_sha"
+        else
+            policy_sha="$(tu_cache__sha_file tools/lint/windows_cross_syntax_baseline.txt)"
+            make_sha="$(tu_cache__sha_file Makefile)"
+            runner_sha="$(tu_cache__sha_file tools/lint/run_lint.sh)"
+            exclusions_sha="$(tu_cache__sha_file tools/lint/scan_exclusions.sh)"
+        fi
+        env_sha="$(while IFS= read -r name; do
+            printf '%s=%s\0' "$name" "${!name}"
+        done < <(tu_cache__compiler_env_names) | tu_cache__sha_stdin)"
+        salt="$(printf 'tu-result-cache/shared-v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+            "$gate" "$lib_sha" "$gate_sha" "$cc_id" "$flags_sha" \
+            "$digest" "$policy_sha" "$make_sha" "$runner_sha" \
+            "$exclusions_sha" "$env_sha" \
+            "${ZCL_LINT_PRODUCTION_SCAN:-unset}" | tu_cache__sha_stdin)"
+    else
+        salt="$(printf 'tu-result-cache/v2\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+            "$gate" "$lib_sha" "$gate_sha" "$cc_id" "$flags_sha" "$digest" |
+            tu_cache__sha_stdin)"
+    fi
     if [ "${#salt}" -ne 64 ]; then
         tu_cache__disable "salt derivation produced no digest"; return 0
     fi
 
     if [ -n "$cachedir" ]; then
         gate_root="$cachedir/$gate"
+    elif [[ "${ZCL_LINT_TU_CACHE_DIR:-}" == */z23-proof-tu-cache-v1 ]] &&
+         [ "$shared" = 0 ]; then
+        # The proof's shared path is authorized only for the hardened Windows
+        # action. Other gates keep their original generation-local cache.
+        gate_root="$PWD/.cache/lint-tu/$gate"
     else
         gate_root="${ZCL_LINT_TU_CACHE_DIR:-$PWD/.cache/lint-tu}/$gate"
     fi
@@ -468,7 +562,7 @@ tu_cache_setup() {
 
 tu_cache_plan() {
     local src_list="$1" miss_list="$2"
-    local sha_list count_src count_sha sha path ent erc elen
+    local sha_list count_src count_sha sha path ent erc elen time_macro_files
     local hits=0 misses=0
     local -a miss=()
 
@@ -481,6 +575,28 @@ tu_cache_plan() {
         tu_cache__disable "the gate defined no tu_cache_paths_for callback"
         cat -- "$src_list" > "$miss_list"
         return 0
+    fi
+
+    if tu_cache__shared_active; then
+        # Wall-clock preprocessor macros would make identical source bytes
+        # observe different time or source mtimes. Refuse shared reuse for
+        # the entire action if any scanned TU or includable local text names
+        # one; a false positive only costs a cold compile.
+        time_macro_files="$(tr '\n' '\0' < "$src_list" |
+            xargs -0 -r grep -lE '__DATE__|__TIME__|__TIMESTAMP__' \
+                2>/dev/null || true)"
+        if [ -z "$time_macro_files" ] &&
+           [ -f "$ZCL_TU_CACHE_SCRATCH/tu-cache-include-set.txt" ]; then
+            time_macro_files="$(tr '\n' '\0' < \
+                "$ZCL_TU_CACHE_SCRATCH/tu-cache-include-set.txt" |
+                xargs -0 -r grep -lE '__DATE__|__TIME__|__TIMESTAMP__' \
+                    2>/dev/null || true)"
+        fi
+        if [ -n "$time_macro_files" ]; then
+            tu_cache__disable "time-dependent preprocessor macro in action inputs"
+            cat -- "$src_list" > "$miss_list"
+            return 0
+        fi
     fi
 
     # ONE hashing pass over the whole scan set. This is the only per-TU
@@ -510,7 +626,10 @@ tu_cache_plan() {
             ent="$ZCL_TU_CACHE_DIR/$path.$sha"
             erc=""
             elen=""
-            if [ -f "$ent" ]; then
+            if tu_cache__shared_active &&
+               [ -e "$ent.conflict" ]; then
+                echo "tu-cache: REFUSED conflicting observation for $path" >&2
+            elif [ -f "$ent" ]; then
                 read -r erc elen < "$ent" || { erc=""; elen=""; }
             fi
             if [ -n "$erc" ] && [ -z "${erc//[0-9]/}" ] &&
@@ -599,14 +718,30 @@ tu_cache__store() {
         printf '%s %s\n' "$rc" "$haslog" > "$tmp" 2>/dev/null || {
             rm -f "$tmp"; return 1; }
     fi
-    mv -f "$tmp" "$ent" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    if tu_cache__shared_active; then
+        # Shared proof observations are immutable. A second execution with
+        # the same complete key and different bytes is an identity conflict;
+        # mark it unusable instead of silently replacing either observation.
+        if ! ln -- "$tmp" "$ent" 2>/dev/null; then
+            if ! cmp -s -- "$tmp" "$ent"; then
+                : > "$ent.conflict"
+                echo "tu-cache: REFUSED conflicting observation for $src" >&2
+                rm -f -- "$tmp"
+                return 1
+            fi
+        fi
+        rm -f -- "$tmp"
+    else
+        mv -f "$tmp" "$ent" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    fi
     return 0
 }
 
 tu_cache_run() {
     local log="$1" rcf="$2" cc="$3"
     shift 3
-    local src rc=0 had_errexit=0
+    local src rc=0 had_errexit=0 name
+    local -a compiler_env=()
     src="${!#}"
 
     # Save and restore errexit rather than assuming it: the two callers
@@ -616,7 +751,14 @@ tu_cache_run() {
     # mid-sweep on the first nonzero status.
     case "$-" in *e*) had_errexit=1 ;; esac
     set +e
-    "$cc" "$@" > "$log" 2>&1
+    if tu_cache__shared_active; then
+        while IFS= read -r name; do
+            compiler_env+=("$name=${!name}")
+        done < <(tu_cache__compiler_env_names)
+        env -i "${compiler_env[@]}" "$cc" "$@" > "$log" 2>&1
+    else
+        "$cc" "$@" > "$log" 2>&1
+    fi
     rc=$?
     [ "$had_errexit" = 1 ] && set -e
     printf '%s\n' "$rc" > "$rcf"
@@ -683,6 +825,102 @@ tu_cache__self_sweep() {
                               "$ZCL_TU_SELF_CC" -c "$1"
                  exit 0' _ '{}' >/dev/null 2>&1
     tu_cache_counts
+}
+
+# A relocated proof's identical TU must hit the same shared action; changing
+# a real header must miss; a second, contradictory compiler observation under
+# one key must poison that key rather than replace the first observation.
+tu_cache__shared_selftest() {
+    local base="$1" stub="$2" flags="$3" root
+    local policy="$base/shared-policy.sh" shared_flags="$base/shared-flags.nul"
+    cp -- "$stub" "$policy"
+    cp -- "$flags" "$shared_flags"
+    mkdir -p "$base/shared-a/src" "$base/shared-b/src" \
+             "$base/z23-proof-tu-cache-v1" \
+             "$base/shared-work-a" "$base/shared-work-b"
+    for root in "$base/shared-a" "$base/shared-b"; do
+        printf '#define SHARED_VALUE 1\n' > "$root/src/shared.h"
+        printf '#include "shared.h"\nint shared(void);\n' > "$root/src/u.c"
+    done
+    (
+        cd "$base/shared-a" || exit 1
+        ZCL_LINT_TU_CACHE_DIR="$base/z23-proof-tu-cache-v1"
+        tu_cache_setup check-windows-cross-syntax "$policy" "$stub" "$shared_flags" \
+            "$base/shared-work-a" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache__shared_active || exit 1
+        printf 'src/u.c\n' > "$base/shared-work-a/srcs"
+        tu_cache_paths_for() {
+            TU_LOG="$base/shared-work-a/u.log"
+            TU_RC="$base/shared-work-a/u.rc"
+        }
+        tu_cache_plan "$base/shared-work-a/srcs" "$base/shared-work-a/misses"
+        [ "$(wc -l < "$base/shared-work-a/misses")" = 1 ] || exit 1
+        tu_cache_run "$base/shared-work-a/u.log" "$base/shared-work-a/u.rc" \
+            "$stub" -c src/u.c
+    ) || tu_cache__self_fail "relocated shared cache cold control"
+    (
+        cd "$base/shared-b" || exit 1
+        ZCL_LINT_TU_CACHE_DIR="$base/z23-proof-tu-cache-v1"
+        tu_cache_setup check-windows-cross-syntax "$policy" "$stub" "$shared_flags" \
+            "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache__shared_active || exit 1
+        printf 'src/u.c\n' > "$base/shared-work-b/srcs"
+        tu_cache_paths_for() {
+            TU_LOG="$base/shared-work-b/u.log"
+            TU_RC="$base/shared-work-b/u.rc"
+        }
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ ! -s "$base/shared-work-b/misses" ] || exit 1
+        INVOCATION_ID=another-job CODEX_SESSION_ID=another-worker \
+            tu_cache_setup check-windows-cross-syntax \
+                "$policy" "$stub" "$shared_flags" \
+                "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ ! -s "$base/shared-work-b/misses" ] || exit 1
+        LANG=zz_ZZ tu_cache_setup check-windows-cross-syntax \
+            "$policy" "$stub" "$shared_flags" \
+            "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ "$(wc -l < "$base/shared-work-b/misses")" = 1 ] || exit 1
+        printf '%s\0' -DCHANGED > "$shared_flags"
+        tu_cache_setup check-windows-cross-syntax "$policy" "$stub" \
+            "$shared_flags" "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ "$(wc -l < "$base/shared-work-b/misses")" = 1 ] || exit 1
+        cp -- "$flags" "$shared_flags"
+        printf '# changed harness policy\n' >> "$policy"
+        tu_cache_setup check-windows-cross-syntax "$policy" "$stub" \
+            "$shared_flags" "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ "$(wc -l < "$base/shared-work-b/misses")" = 1 ] || exit 1
+        cp -- "$stub" "$policy"
+        printf '# changed compiler bytes\n' >> "$stub"
+        tu_cache_setup check-windows-cross-syntax "$policy" "$stub" \
+            "$shared_flags" "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ "$(wc -l < "$base/shared-work-b/misses")" = 1 ] || exit 1
+        cp -- "$policy" "$stub"
+        tu_cache_setup check-windows-cross-syntax "$policy" "$stub" \
+            "$shared_flags" "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ ! -s "$base/shared-work-b/misses" ] || exit 1
+        printf '#define SHARED_VALUE 2\n' > src/shared.h
+        tu_cache_setup check-windows-cross-syntax "$policy" "$stub" "$shared_flags" \
+            "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ "$(wc -l < "$base/shared-work-b/misses")" = 1 ] || exit 1
+        printf '#define SHARED_VALUE 1\n' > src/shared.h
+        tu_cache_setup check-windows-cross-syntax "$policy" "$stub" "$shared_flags" \
+            "$base/shared-work-b" . "$ZCL_LINT_TU_CACHE_DIR"
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ ! -s "$base/shared-work-b/misses" ] || exit 1
+        printf 'conflicting compiler observation\n' > "$base/shared-work-b/conflict.log"
+        if tu_cache__store src/u.c 1 "$base/shared-work-b/conflict.log"; then
+            exit 1
+        fi
+        tu_cache_plan "$base/shared-work-b/srcs" "$base/shared-work-b/misses"
+        [ "$(wc -l < "$base/shared-work-b/misses")" = 1 ] || exit 1
+    ) || tu_cache__self_fail "relocated shared HIT, dependency MISS, or conflict REFUSED"
 }
 
 tu_cache_selftest() {
@@ -861,6 +1099,8 @@ END_STUB
     cmp -s "$rdir/cold.rc" "$TU_RC" || tu_cache__self_fail \
         "the real compiler's replayed status differs from its cold status"
 
+    tu_cache__shared_selftest "$base" "$stub" "$flags"
+
     unset ZCL_TU_STUB_RUNS
     unset ZCL_TU_CACHE_SELFTEST_FORCE
     unset -f tu_cache_paths_for
@@ -871,5 +1111,7 @@ END_STUB
     echo "      .c edit busts exactly 1 and reverting it hits again, a stored"
     echo "      FAIL replays as FAIL, ZCL_LINT_TU_CACHE=0 stores none, and"
     echo "      $real_cc replays a real TU byte-for-byte"
+    echo "      relocated shared HIT; environment, flags, harness, compiler and"
+    echo "      header changes MISS; conflicting observation REFUSED"
     return 0
 }
