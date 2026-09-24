@@ -104,7 +104,7 @@ aircraft and HUD, and logged five aircraft before the deliberate 12 s timeout.
 The visually inspected full-frame PNG SHA-256 is
 `38fd50456fb394a84df18956cc2d13cc56daf55163f0caa560f82a1b309873e4`.
 This is a local application preview; the game owner has not recorded an
-acceptance verdict. `make -j8 game-check` currently fails on a pre-existing
+acceptance verdict. At the measurement checkout, `make -j8 game-check` failed on a pre-existing
 `frame` set-but-unused diagnostic in
 `apps/skycombat/src/models/test_multiplayer_complete.c` under `-Werror`.
 
@@ -251,3 +251,52 @@ Revision 2's independently audited report SHA-256 is
 `9ad0317cd4651861af99417aa1b1b4f18ce5994e62b11dc16370231ae6d18a4f`;
 its package root remains
 `6a6756b750b33e840a4f165f84558ac157578463d8664b350058e84f83e370ff`.
+
+## Exact landed SkyCombat follow-up
+
+The separate game-check repair entered the native land queue as candidate
+`b326f50899fa23928563b42d894c00d7e595c9f9`. Three full exact proofs
+were superseded by changes to `origin/main`; none was publication evidence:
+
+| Superseded source | Proof base |
+| --- | --- |
+| `5963dc2cd4df17a09afed8373b9f13eb07d3bbec` | `45e27159a20fdd708c39d440632237dac7f56070` |
+| `97d2b1cc3290d7ecd164206b9c5b714f76778c87` | `e6344acced2cd3778f0c8c1c086ceecb3a40d326` |
+| `0c2ad8174f318e6da13e110fd51e41daafb8deff` | `df8e379e4b85cbd5045b9382f2549ca899c70fe0` |
+
+Queue sequence 32 proved successor
+`b1f19c9b136377a25d5581c9ac5c8d40ba5f94fd` against
+`b1a00ce5177365ffd8f545d7221732b69a7d84a4`. It stopped at
+`PUBLICATION_INTENT_REQUIRED`; after the exact signed intent was attached,
+the receiver independently fetched and verified the remote fast-forward,
+source tree `43757ffe2663bdb9eaae46a6d7f6f677882efaef`, and signer
+`6481aceda6665ada45d96fa0508d0d89002503c4910fb96342d8f26306570226`.
+The verified remote tip is the successor commit above.
+
+An isolated worktree detached at that exact commit ran:
+
+```bash
+make -j8 game-check
+make -j8 game
+sha256sum build/bin/z23-skycombat
+```
+
+`game-check` compiled 71 game and 5 raylib translation units with exit 0 in
+11.559 s (22.797 s user CPU, 2.929 s system CPU); its captured log SHA-256
+was `d6cff351fdaace993b6ed3bd82edd7747fa73a568ecece3e4ab707f5faf69488`.
+`make game` exited 0 in 2.262 s after the object build. The executable
+SHA-256 was
+`9a7a46565f2414bd8ccb5c9ee6ebb7c60b951ea690177f958123993091e4082c`,
+identical to the earlier visually inspected Xvfb preview. The previous frame
+therefore binds to the exact landed executable bytes. Game-check and Git
+publication are code gates; the current owner has not recorded a visual or
+behavior acceptance verdict, and the canonical aircraft package recipe still
+refuses missing `libm`. DEV-accepted and fully accepted counts remain zero.
+
+Native agent mail sequence 353 requested the owner's exact preview verdict;
+sequence 354 gave the land owner the three superseded proof pairs. A
+serialized publication window spanning proof through remote receipt is the
+highest-leverage measured end-to-end throughput repair. It must preserve the
+current-base check, all proof gates, signed intent, and independent remote
+observation. The two-store commit and reproduction cost remains the largest
+measured per-candidate factory component.
