@@ -20,6 +20,7 @@
 
 static const uint8_t result_magic[8] = {'Z','C','P','R','E','S','\r','\n'};
 static const uint8_t receipt_magic[8] = {'Z','C','R','R','C','P','\r','\n'};
+static const uint8_t receipt_v2_magic[8] = {'Z','C','R','R','C','2','\r','\n'};
 
 struct vcs_zcode_publication_index {
     char *repo_root;
@@ -92,6 +93,28 @@ static bool index_receipt(const char *repo_root, const uint8_t address[32],
     zcl_hex_encode(receipt.publication_root, 32, entry->publication_root_hex);
     zcl_hex_encode(receipt.observer_pubkey, 32, entry->signer_pubkey_hex);
     entry->kind = VCS_ZCODE_OBSERVATION_REMOTE_RECEIPT;
+    entry->receipt_version = 1;
+    return true;
+}
+
+static bool index_receipt_v2(const char *repo_root, const uint8_t address[32],
+                             const uint8_t *wire, size_t len,
+                             struct vcs_zcode_publication_observation_entry *entry)
+{
+    struct vcs_zcode_remote_receipt_v2 receipt, checked;
+    uint8_t publisher[32];
+    if (vcs_zcode_remote_receipt_v2_parse(wire, len, &receipt) != VCS_ZCODE_DEV_OK ||
+        !index_intent_signer(repo_root, receipt.observation.publication_root,
+                             publisher) ||
+        !vcs_zcode_remote_receipt_v2_load_verified(repo_root, address,
+            publisher, receipt.observation.observer_pubkey, &checked))
+        return false;
+    zcl_hex_encode(receipt.observation.publication_root, 32,
+                   entry->publication_root_hex);
+    zcl_hex_encode(receipt.observation.observer_pubkey, 32,
+                   entry->signer_pubkey_hex);
+    entry->kind = VCS_ZCODE_OBSERVATION_REMOTE_RECEIPT;
+    entry->receipt_version = 2;
     return true;
 }
 
@@ -102,7 +125,7 @@ static void index_consider(const char *repo_root, const char *hex64,
     size_t len = 0;
     if (!zcl_hex_decode_lower(hex64, address, 32)) return;
     int read_status = vcs_object_load_raw_bounded(repo_root, address,
-        VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES, &wire, &len);
+        VCS_ZCODE_REMOTE_RECEIPT_V2_WIRE_BYTES, &wire, &len);
     if (read_status == -2) return; /* another, larger CAS citizen */
     if (read_status != 0) {
         index->complete = false;
@@ -111,10 +134,12 @@ static void index_consider(const char *repo_root, const char *hex64,
     }
     bool result = len >= 8 && memcmp(wire, result_magic, 8) == 0;
     bool receipt = len >= 8 && memcmp(wire, receipt_magic, 8) == 0;
-    if (result || receipt) {
+    bool receipt_v2 = len >= 8 && memcmp(wire, receipt_v2_magic, 8) == 0;
+    if (result || receipt || receipt_v2) {
         struct vcs_zcode_publication_observation_entry entry = {0};
         bool ok = result ? index_result(repo_root, address, wire, len, &entry)
-                         : index_receipt(repo_root, address, wire, len, &entry);
+                 : receipt ? index_receipt(repo_root, address, wire, len, &entry)
+                           : index_receipt_v2(repo_root, address, wire, len, &entry);
         if (!ok || index->count >= VCS_ZCODE_PUBLICATION_INDEX_MAX_OBSERVATIONS) {
             index->complete = false;
             LOG_ERROR(INDEX_LOG, "invalid or over-cap publication observation %.8s",

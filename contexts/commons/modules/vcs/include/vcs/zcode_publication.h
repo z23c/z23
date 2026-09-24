@@ -77,6 +77,57 @@ bool vcs_zcode_publication_store_verified(
     const char *workspace, const struct vcs_zcode_publication_v1 *intent,
     const uint8_t expected_signer[32], uint8_t out_root[32]);
 
+/* Immutable signed binding between a persisted publication intent and the
+ * transferable Git bundle bytes. The intent supplies candidate, proof set,
+ * target and authority roots; repeating the pair here makes mismatched or
+ * stale attachments fail before dispatch. The bundle digest is SHA-256 over
+ * the complete bundle file, not a Git object ID. A receiving publisher must
+ * independently hash that file and qualify the intent and target grant;
+ * storing this attachment alone never permits a push. */
+#define VCS_ZCODE_PUBLICATION_ATTACHMENT_DOMAIN \
+    "zcl.zcode.publication_attachment.v1"
+#define VCS_ZCODE_PUBLICATION_ATTACHMENT_SIGNING_DOMAIN \
+    "zcl.zcode.publication_attachment.signing.v1"
+#define VCS_ZCODE_PUBLICATION_ATTACHMENT_BODY_BYTES 184u
+#define VCS_ZCODE_PUBLICATION_ATTACHMENT_WIRE_BYTES 248u
+
+struct vcs_zcode_publication_attachment_v1 {
+    uint16_t schema_version;
+    uint8_t publication_root[32];
+    uint8_t bundle_sha256[32];
+    uint8_t expected_base[32];
+    uint8_t head_commit[32];
+    int64_t created_unix;
+    uint8_t author_pubkey[32];
+    uint8_t signature[64];
+};
+
+enum vcs_zcode_dev_error vcs_zcode_publication_attachment_validate(
+    const struct vcs_zcode_publication_attachment_v1 *attachment);
+enum vcs_zcode_dev_error vcs_zcode_publication_attachment_serialize(
+    const struct vcs_zcode_publication_attachment_v1 *attachment,
+    uint8_t out[VCS_ZCODE_PUBLICATION_ATTACHMENT_WIRE_BYTES]);
+enum vcs_zcode_dev_error vcs_zcode_publication_attachment_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_publication_attachment_v1 *out);
+enum vcs_zcode_dev_error vcs_zcode_publication_attachment_root(
+    const struct vcs_zcode_publication_attachment_v1 *attachment,
+    uint8_t out[32]);
+enum vcs_zcode_dev_error vcs_zcode_publication_attachment_seal(
+    struct vcs_zcode_publication_attachment_v1 *attachment,
+    const uint8_t secret[32], const uint8_t pubkey[32]);
+enum vcs_zcode_dev_error vcs_zcode_publication_attachment_verify(
+    const struct vcs_zcode_publication_attachment_v1 *attachment,
+    const uint8_t expected_signer[32]);
+bool vcs_zcode_publication_attachment_store_verified(
+    const char *workspace,
+    const struct vcs_zcode_publication_attachment_v1 *attachment,
+    const uint8_t expected_signer[32], uint8_t out_root[32]);
+bool vcs_zcode_publication_attachment_load_verified(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t expected_signer[32],
+    struct vcs_zcode_publication_attachment_v1 *out);
+
 /* One immutable observation of a publication attempt. ACCEPTED records the
  * client's acknowledgement, not an independently verified remote result.
  * UNKNOWN retains an ambiguous acknowledgement for later reconciliation.
@@ -135,6 +186,8 @@ bool vcs_zcode_publication_result_load_verified(
 /* An observer's immutable statement about a fetched remote ref. The producer
  * must independently fetch and verify the remote, source root, and ancestry
  * evidence before sealing; signature verification alone proves none of them.
+ * V1 storage also requires fetched tip == intended head; advanced tips need a
+ * new version with separately bound head-source and ancestry observations.
  * Store requires a previously persisted publication intent. The codec and CAS
  * checks below do not grant terminal lifecycle status: the receiving policy
  * must verify the referenced remote observations and ancestry separately. */
@@ -177,7 +230,9 @@ enum vcs_zcode_dev_error vcs_zcode_remote_receipt_verify(
     const uint8_t expected_signer[32]);
 
 /* Authenticate both signed statements and bind the immutable candidate's
- * source root to the observer's fetched source root. This does not verify
+ * source root to the observer's fetched source root. The v1 receipt requires
+ * the fetched tip to equal the intended head; later remote advancement needs
+ * separately bound intended-head source and ancestry evidence. This does not verify
  * that the remote ref was fetched, that ancestry was checked, or that the
  * receipt qualifies as terminal under the receiver's policy. */
 bool vcs_zcode_remote_receipt_candidate_matches(
@@ -210,5 +265,51 @@ bool vcs_zcode_remote_receipt_load_verified(
     const char *workspace, const uint8_t root[32],
     const uint8_t publisher_signer[32], const uint8_t observer_signer[32],
     struct vcs_zcode_remote_receipt_v1 *out);
+
+/* A later fetched tip may descend from the intended head. V2 separately
+ * commits the independently checked intended-head source root; the fetched
+ * tip's source root may differ. The ancestry and evidence roots name the
+ * observer's exact observations, which a receiving policy must independently
+ * verify before granting LANDED. These codecs/CAS calls grant no status. */
+#define VCS_ZCODE_REMOTE_RECEIPT_V2_VERSION 2u
+#define VCS_ZCODE_REMOTE_RECEIPT_V2_DOMAIN "zcl.zcode.remote_receipt.v2"
+#define VCS_ZCODE_REMOTE_RECEIPT_V2_SIGNING_DOMAIN \
+    "zcl.zcode.remote_receipt.signing.v2"
+#define VCS_ZCODE_REMOTE_RECEIPT_V2_BODY_BYTES 408u
+#define VCS_ZCODE_REMOTE_RECEIPT_V2_WIRE_BYTES 472u
+
+struct vcs_zcode_remote_receipt_v2 {
+    struct vcs_zcode_remote_receipt_v1 observation;
+    uint8_t intended_head_source_root[32];
+};
+
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_v2_serialize(
+    const struct vcs_zcode_remote_receipt_v2 *receipt,
+    uint8_t out[VCS_ZCODE_REMOTE_RECEIPT_V2_WIRE_BYTES]);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_v2_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_remote_receipt_v2 *out);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_v2_root(
+    const struct vcs_zcode_remote_receipt_v2 *receipt, uint8_t out[32]);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_v2_seal(
+    struct vcs_zcode_remote_receipt_v2 *receipt,
+    const uint8_t secret[32], const uint8_t pubkey[32]);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_v2_verify(
+    const struct vcs_zcode_remote_receipt_v2 *receipt,
+    const uint8_t expected_signer[32]);
+bool vcs_zcode_remote_receipt_v2_candidate_matches(
+    const struct vcs_zcode_remote_receipt_v2 *receipt,
+    const struct vcs_zcode_publication_v1 *intent,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const uint8_t publisher_signer[32],
+    const uint8_t observer_signer[32]);
+bool vcs_zcode_remote_receipt_v2_store_verified(
+    const char *workspace, const struct vcs_zcode_remote_receipt_v2 *receipt,
+    const uint8_t publisher_signer[32], const uint8_t observer_signer[32],
+    uint8_t out_root[32]);
+bool vcs_zcode_remote_receipt_v2_load_verified(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t publisher_signer[32], const uint8_t observer_signer[32],
+    struct vcs_zcode_remote_receipt_v2 *out);
 
 #endif /* ZCL_VCS_ZCODE_PUBLICATION_H */

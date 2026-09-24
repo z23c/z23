@@ -22,6 +22,7 @@ struct vcs_zcode_publication_observation_entry {
     char signer_pubkey_hex[65];
     uint8_t kind;
     uint8_t outcome; /* attempt result only; never remote success */
+    uint8_t receipt_version; /* 1 or 2 for remote receipts; zero for results */
 };
 
 struct vcs_zcode_publication_index;

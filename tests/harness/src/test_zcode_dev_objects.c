@@ -5,6 +5,7 @@
 
 #include "test/public_shape_fixture.h"
 
+#include "dev/dev_git_tree.h"
 #include "base/hex.h"
 #include "base/bytes.h"
 #include "codeindex/codeindex_merkle.h"
@@ -24,6 +25,7 @@
 #include "services/build_fabric_worker.h"
 #include "services/zcode_lane_service.h"
 #include "util/safe_alloc.h"
+#include "util/spawn.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_mapping.h"
 #include "vcs/package_index.h"
@@ -154,6 +156,94 @@ static bool zd_publication_binding_readonly(struct node_db *ndb, const char *wor
     int after = sqlite3_total_changes(ndb->db);
     bool restored = node_db_exec(ndb, prior ? "PRAGMA query_only=ON" : "PRAGMA query_only=OFF");
     return ok && restored && before == after;
+}
+
+static bool zd_publication_binding_persist(struct node_db *ndb,
+    const char *workspace, const char *action,
+    const struct zcode_lane_status *lane, const uint8_t secret[32],
+    const uint8_t signer[32], uint8_t stored_root[32])
+{
+    struct vcs_zcode_publication_v1 intent = {
+        .schema_version = 1,
+        .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+        .target_ref = "refs/heads/main",
+        .created_unix = lane->created_at,
+    };
+    memset(intent.target_identity_root, 7, 32);
+    memset(intent.authority_root, 8, 32); /* No dispatch grant. */
+    memset(intent.expected_base, 1, 20);
+    memset(intent.head_commit, 2, 20);
+    if (!zcl_hex_decode_lower(lane->candidate_root_sha3, intent.candidate_root, 32) ||
+        !zcl_hex_decode_lower(lane->proof_set_root_sha3, intent.proof_set_root, 32) ||
+        vcs_zcode_publication_seal(&intent, secret, signer) != VCS_ZCODE_DEV_OK)
+        return false;
+    struct vcs_zcode_publication_v1 wrong = intent, loaded;
+    wrong.proof_set_root[0] ^= 1;
+    if (vcs_zcode_publication_seal(&wrong, secret, signer) != VCS_ZCODE_DEV_OK)
+        return false;
+    uint8_t wrong_root[32], refused_root[32];
+    struct zcode_accepted_work_status accepted;
+    memset(refused_root, 0xa5, sizeof(refused_root));
+    memset(&accepted, 0xa5, sizeof(accepted));
+    if (vcs_zcode_publication_root(&wrong, wrong_root) != VCS_ZCODE_DEV_OK ||
+        zcode_publication_store_accepted(ndb, workspace,
+            lane->receipt_root_sha3, lane->task_root_sha3,
+            lane->proof_policy_root_sha3, action, &wrong, signer,
+            lane->created_at, refused_root, &accepted).ok ||
+        zcl_bytes_any_set(refused_root, sizeof(refused_root)) ||
+        zcl_bytes_any_set((const uint8_t *)&accepted, sizeof(accepted)) ||
+        vcs_object_has(workspace, wrong_root))
+        return false;
+    if (!zcode_publication_store_accepted(ndb, workspace,
+            lane->receipt_root_sha3, lane->task_root_sha3,
+            lane->proof_policy_root_sha3, action, &intent, signer,
+            lane->created_at, stored_root, &accepted).ok ||
+        memcmp(accepted.accepted.proof_set_root, intent.proof_set_root, 32) != 0 ||
+        !vcs_zcode_publication_load_verified(workspace, stored_root,
+                                              signer, &loaded) ||
+        memcmp(&loaded, &intent, sizeof(intent)) != 0)
+        return false;
+    uint8_t repeated[32];
+    return zcode_publication_store_accepted(ndb, workspace,
+        lane->receipt_root_sha3, lane->task_root_sha3,
+        lane->proof_policy_root_sha3, action, &intent, signer,
+        lane->created_at, repeated, &accepted).ok &&
+        memcmp(repeated, stored_root, sizeof(repeated)) == 0;
+}
+
+static bool zd_publication_attachment_persist(struct node_db *ndb,
+    const char *workspace, const char *action,
+    const struct zcode_lane_status *lane, const uint8_t secret[32],
+    const uint8_t signer[32], const uint8_t publication_root[32],
+    uint8_t attachment_root[32])
+{
+    struct vcs_zcode_publication_v1 intent;
+    if (!vcs_zcode_publication_load_verified(workspace, publication_root,
+                                             signer, &intent))
+        return false;
+    struct vcs_zcode_publication_attachment_v1 attachment = {
+        .schema_version = 1,
+        .created_unix = lane->created_at,
+    };
+    memcpy(attachment.publication_root, publication_root, 32);
+    memcpy(attachment.expected_base, intent.expected_base, 32);
+    memcpy(attachment.head_commit, intent.head_commit, 32);
+    memset(attachment.bundle_sha256, 9, 32); /* Isolated fixture bundle. */
+    if (vcs_zcode_publication_attachment_seal(&attachment, secret, signer) !=
+            VCS_ZCODE_DEV_OK)
+        return false;
+    struct zcode_accepted_work_status accepted;
+    if (!zcode_publication_attachment_store_accepted(ndb, workspace,
+            lane->receipt_root_sha3, lane->task_root_sha3,
+            lane->proof_policy_root_sha3, action, publication_root,
+            &attachment, signer, lane->created_at, attachment_root,
+            &accepted).ok ||
+        memcmp(accepted.accepted.proof_set_root, intent.proof_set_root, 32) != 0)
+        return false;
+    struct vcs_zcode_publication_attachment_v1 loaded;
+    return vcs_zcode_publication_attachment_load_verified(workspace,
+        attachment_root, signer, &loaded) &&
+        memcmp(&loaded, &attachment, sizeof(attachment)) == 0;
 }
 
 static void zd_root(uint8_t out[32], uint8_t value)
@@ -4620,8 +4710,28 @@ static int test_zd_improve_command(void)
             &proven_status).ok);
         ASSERT(zd_publication_binding_readonly(&ndb, workspace, action_id, &proven_status,
                                       proven_secret, proven_key));
+        uint8_t persisted_publication_root[32], persisted_attachment_root[32];
+        ASSERT(zd_publication_binding_persist(&ndb, workspace, action_id,
+            &proven_status, proven_secret, proven_key,
+            persisted_publication_root));
+        ASSERT(zd_publication_attachment_persist(&ndb, workspace, action_id,
+            &proven_status, proven_secret, proven_key,
+            persisted_publication_root, persisted_attachment_root));
         memset(proven_secret, 0, sizeof(proven_secret));
         node_db_close(&ndb);
+        struct vcs_zcode_publication_v1 restarted_intent;
+        uint8_t expected_candidate_root[32];
+        ASSERT(vcs_zcode_publication_load_verified(workspace,
+            persisted_publication_root, proven_key, &restarted_intent));
+        struct vcs_zcode_publication_attachment_v1 restarted_attachment;
+        ASSERT(vcs_zcode_publication_attachment_load_verified(workspace,
+            persisted_attachment_root, proven_key, &restarted_attachment));
+        ASSERT(memcmp(restarted_attachment.publication_root,
+                      persisted_publication_root, 32) == 0);
+        ASSERT(zcl_hex_decode_lower(proven_status.candidate_root_sha3,
+                                    expected_candidate_root, 32));
+        ASSERT(memcmp(restarted_intent.candidate_root,
+                      expected_candidate_root, 32) == 0);
         (void)snprintf(accepted_receipt_saved,
                        sizeof(accepted_receipt_saved), "%s",
                        proven_status.receipt_root_sha3);
@@ -7585,6 +7695,91 @@ static int test_zd_publication_intent(void)
     return failures;
 }
 
+static int test_zd_publication_attachment(void)
+{
+    int failures = 0;
+    TEST("publication attachment: signed bundle and exact pair survive restart") {
+        uint8_t seed[32] = {91}, secret[32], signer[32];
+        ed25519_keypair(signer, secret, seed);
+        struct vcs_zcode_publication_v1 intent = {
+            .schema_version = 1,
+            .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+            .target_ref = "refs/heads/main",
+            .created_unix = 1000,
+        };
+        memset(intent.candidate_root, 1, 32);
+        memset(intent.proof_set_root, 2, 32);
+        memset(intent.target_identity_root, 3, 32);
+        memset(intent.authority_root, 4, 32);
+        memset(intent.expected_base, 5, 20);
+        memset(intent.head_commit, 6, 20);
+        ASSERT_EQ(vcs_zcode_publication_seal(&intent, secret, signer),
+                  VCS_ZCODE_DEV_OK);
+        struct vcs_zcode_publication_attachment_v1 attachment = {
+            .schema_version = 1,
+            .created_unix = 1001,
+        };
+        ASSERT_EQ(vcs_zcode_publication_root(&intent, attachment.publication_root),
+                  VCS_ZCODE_DEV_OK);
+        memset(attachment.bundle_sha256, 7, 32);
+        memcpy(attachment.expected_base, intent.expected_base, 32);
+        memcpy(attachment.head_commit, intent.head_commit, 32);
+        ASSERT_EQ(vcs_zcode_publication_attachment_seal(&attachment, secret, signer),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t root[32], stored[32];
+        ASSERT_EQ(vcs_zcode_publication_attachment_root(&attachment, root),
+                  VCS_ZCODE_DEV_OK);
+        char dir[512];
+        test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "publication_attachment");
+        ASSERT(vcs_object_store_init(dir));
+        ASSERT(!vcs_zcode_publication_attachment_store_verified(
+            dir, &attachment, signer, stored));
+        ASSERT(!vcs_object_has(dir, root));
+        ASSERT(vcs_zcode_publication_store_verified(dir, &intent, signer, stored));
+        ASSERT(vcs_zcode_publication_attachment_store_verified(
+            dir, &attachment, signer, stored));
+        ASSERT(memcmp(stored, root, 32) == 0);
+        struct vcs_zcode_publication_attachment_v1 loaded;
+        ASSERT(vcs_zcode_publication_attachment_load_verified(
+            dir, root, signer, &loaded));
+        ASSERT(memcmp(&loaded, &attachment, sizeof(loaded)) == 0);
+        uint8_t wire[VCS_ZCODE_PUBLICATION_ATTACHMENT_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_publication_attachment_serialize(&attachment, wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_publication_attachment_parse(wire, sizeof(wire), &loaded),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(&loaded, &attachment, sizeof(loaded)) == 0);
+        wire[10] = 1;
+        ASSERT(vcs_zcode_publication_attachment_parse(wire, sizeof(wire), &loaded)
+               != VCS_ZCODE_DEV_OK);
+        struct vcs_zcode_publication_attachment_v1 wrong = attachment;
+        wrong.bundle_sha256[0] ^= 1;
+        ASSERT(!vcs_zcode_publication_attachment_store_verified(
+            dir, &wrong, signer, stored));
+        wrong = attachment;
+        wrong.expected_base[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_publication_attachment_seal(&wrong, secret, signer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(!vcs_zcode_publication_attachment_store_verified(
+            dir, &wrong, signer, stored));
+        wrong = attachment;
+        wrong.head_commit[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_publication_attachment_seal(&wrong, secret, signer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(!vcs_zcode_publication_attachment_store_verified(
+            dir, &wrong, signer, stored));
+        ASSERT(vcs_zcode_publication_attachment_store_verified(
+            dir, &attachment, signer, stored));
+        ASSERT(memcmp(stored, root, 32) == 0);
+        ASSERT(vcs_zcode_publication_attachment_load_verified(
+            dir, root, signer, &loaded));
+        ASSERT(memcmp(&loaded, &attachment, sizeof(loaded)) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int test_zd_publication_result(void)
 {
     int failures = 0;
@@ -7810,6 +8005,12 @@ static int test_zd_remote_receipt(void)
                   VCS_ZCODE_DEV_OK);
         ASSERT(vcs_zcode_remote_receipt_candidate_matches(
             &receipt, &intent, &candidate, publisher, observer));
+        struct vcs_zcode_remote_receipt_v1 different_tip = receipt;
+        different_tip.fetched_main_tip[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_remote_receipt_seal(
+            &different_tip, observer_secret, observer), VCS_ZCODE_DEV_OK);
+        ASSERT(!vcs_zcode_remote_receipt_candidate_matches(
+            &different_tip, &intent, &candidate, publisher, observer));
         struct vcs_zcode_remote_receipt_v1 different_source = receipt;
         different_source.fetched_main_source_root[0] ^= 1;
         ASSERT_EQ(vcs_zcode_remote_receipt_seal(
@@ -7857,6 +8058,9 @@ static int test_zd_remote_receipt(void)
                   VCS_ZCODE_DEV_OK);
         ASSERT(!vcs_zcode_remote_receipt_store_verified(
             dir, &wrong, publisher, observer, stored));
+        ASSERT(!zcl_bytes_any_set(stored, sizeof(stored)));
+        ASSERT(!vcs_zcode_remote_receipt_store_verified(
+            dir, &different_tip, publisher, observer, stored));
         ASSERT(!zcl_bytes_any_set(stored, sizeof(stored)));
         ASSERT(!vcs_zcode_remote_receipt_store_verified(
             dir, &receipt, publisher, publisher, stored));
@@ -7940,11 +8144,448 @@ static int test_zd_remote_receipt(void)
             projection, dir, intent_root, publisher, &recovery));
         ASSERT_EQ(recovery.state, 0);
         vcs_zcode_publication_index_free(projection);
+        uint8_t wrong_tip_root[32];
+        ASSERT_EQ(vcs_zcode_remote_receipt_root(&different_tip, wrong_tip_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_remote_receipt_serialize(&different_tip, wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_object_put_addressed(dir, wrong_tip_root, wire, sizeof(wire)));
+        ASSERT(!vcs_zcode_remote_receipt_load_verified(
+            dir, wrong_tip_root, publisher, observer, &loaded));
+        ASSERT_EQ(loaded.schema_version, 0);
+        struct vcs_zcode_remote_receipt_v2 advanced = {
+            .observation = receipt,
+        };
+        advanced.observation.schema_version =
+            VCS_ZCODE_REMOTE_RECEIPT_V2_VERSION;
+        advanced.observation.fetched_main_tip[0] ^= 1;
+        advanced.observation.fetched_main_source_root[0] ^= 1;
+        memcpy(advanced.intended_head_source_root,
+               candidate.candidate_source_root, 32);
+        ASSERT_EQ(vcs_zcode_remote_receipt_v2_seal(
+            &advanced, observer_secret, observer), VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_zcode_remote_receipt_v2_candidate_matches(
+            &advanced, &intent, &candidate, publisher, observer));
+        struct vcs_zcode_remote_receipt_v2 wrong_head_source = advanced;
+        wrong_head_source.intended_head_source_root[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_remote_receipt_v2_seal(
+            &wrong_head_source, observer_secret, observer), VCS_ZCODE_DEV_OK);
+        ASSERT(!vcs_zcode_remote_receipt_v2_candidate_matches(
+            &wrong_head_source, &intent, &candidate, publisher, observer));
+        struct vcs_zcode_remote_receipt_v2 inconsistent_exact = advanced;
+        memcpy(inconsistent_exact.observation.fetched_main_tip,
+               intent.head_commit, 32);
+        ASSERT_EQ(vcs_zcode_remote_receipt_v2_seal(
+            &inconsistent_exact, observer_secret, observer), VCS_ZCODE_DEV_OK);
+        ASSERT(!vcs_zcode_remote_receipt_v2_candidate_matches(
+            &inconsistent_exact, &intent, &candidate, publisher, observer));
+        uint8_t advanced_root[32], advanced_wire[VCS_ZCODE_REMOTE_RECEIPT_V2_WIRE_BYTES];
+        ASSERT(!vcs_zcode_remote_receipt_v2_store_verified(
+            dir, &wrong_head_source, publisher, observer, stored));
+        ASSERT(!zcl_bytes_any_set(stored, sizeof(stored)));
+        ASSERT(!vcs_zcode_remote_receipt_v2_store_verified(
+            dir, &inconsistent_exact, publisher, observer, stored));
+        ASSERT(!zcl_bytes_any_set(stored, sizeof(stored)));
+        ASSERT(vcs_zcode_remote_receipt_v2_store_verified(
+            dir, &advanced, publisher, observer, stored));
+        ASSERT_EQ(vcs_zcode_remote_receipt_v2_root(&advanced, advanced_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(stored, advanced_root, 32) == 0);
+        struct vcs_zcode_remote_receipt_v2 advanced_loaded;
+        ASSERT(vcs_zcode_remote_receipt_v2_load_verified(
+            dir, advanced_root, publisher, observer, &advanced_loaded));
+        ASSERT(memcmp(&advanced, &advanced_loaded, sizeof(advanced)) == 0);
+        ASSERT_EQ(vcs_zcode_remote_receipt_v2_serialize(
+            &advanced, advanced_wire), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_remote_receipt_v2_parse(
+            advanced_wire, sizeof(advanced_wire), &advanced_loaded),
+            VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(&advanced, &advanced_loaded, sizeof(advanced)) == 0);
+        ASSERT(vcs_zcode_remote_receipt_parse(
+            advanced_wire, sizeof(advanced_wire), &loaded) != VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_zcode_remote_receipt_v2_parse(
+            wire, sizeof(wire), &advanced_loaded) != VCS_ZCODE_DEV_OK);
+        ASSERT(!vcs_zcode_remote_receipt_v2_load_verified(
+            dir, advanced_root, publisher, publisher, &advanced_loaded));
+        ASSERT_EQ(advanced_loaded.observation.schema_version, 0);
+        ASSERT(zd_index_drop_object(dir, misplaced_root));
+        ASSERT(zd_index_drop_object(dir, wrong_tip_root));
+        projection = vcs_zcode_publication_index_build(dir);
+        ASSERT(projection != NULL);
+        ASSERT(vcs_zcode_publication_index_complete(projection));
+        ASSERT_EQ(vcs_zcode_publication_index_count(projection), 2);
+        size_t v1_count = 0, v2_count = 0;
+        for (size_t i = 0; i < vcs_zcode_publication_index_count(projection); i++) {
+            entry = vcs_zcode_publication_index_at(projection, i);
+            ASSERT(entry != NULL);
+            ASSERT_EQ(entry->kind, VCS_ZCODE_OBSERVATION_REMOTE_RECEIPT);
+            if (entry->receipt_version == 1) v1_count++;
+            if (entry->receipt_version == 2) v2_count++;
+        }
+        ASSERT_EQ(v1_count, 1);
+        ASSERT_EQ(v2_count, 1);
+        ASSERT(vcs_zcode_publication_index_recovery(
+            projection, dir, intent_root, publisher, &recovery));
+        ASSERT_EQ(recovery.state, VCS_ZCODE_RECOVERY_RECONCILE_REMOTE);
+        ASSERT_EQ(recovery.remote_receipts, 2);
+        vcs_zcode_publication_index_free(projection);
         test_rm_rf(dir);
         PASS();
     } _test_next:;
     return failures;
 }
+
+#ifndef _WIN32
+static bool zd_git_run(const char *const args[], char *out, size_t cap)
+{
+    if (!out || cap < 2) return false;
+    out[0] = '\0';
+    const char *argv[36] = { "/usr/bin/env", "-i", "PATH=/usr/bin:/bin",
+        "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_TERMINAL_PROMPT=0", "git" };
+    size_t n = 8;
+    for (size_t i = 0; args[i]; i++) {
+        if (n + 1 >= sizeof(argv) / sizeof(argv[0])) return false;
+        argv[n++] = args[i];
+    }
+    struct zcl_spawn_binary_observation observed = {0};
+    struct zcl_result result = zcl_spawn_capture_binary(argv, out,
+        cap - 1, 10000, &observed);
+    if (!result.ok) return false;
+    out[observed.output_len] = '\0';
+    return true;
+}
+
+static bool zd_git_head(const char *work, char out[65])
+{
+    char bytes[128];
+    const char *args[] = { "-C", work, "rev-parse", "HEAD", NULL };
+    if (!zd_git_run(args, bytes, sizeof(bytes)) || strlen(bytes) != 41 ||
+        bytes[40] != '\n') return false;
+    memcpy(out, bytes, 40);
+    out[40] = '\0';
+    return true;
+}
+
+static int test_zd_git_remote_observation(void)
+{
+    int failures = 0;
+    TEST("Git remote observation fetches and verifies exact ancestry and source") {
+        char root[512], remote[700], work[700], path[750], output[128];
+        char base[65], head[65], later[65];
+        test_make_tmpdir(root, sizeof(root), "zcode_dev", "git_remote");
+        ASSERT((size_t)snprintf(remote, sizeof(remote), "%s/remote.git", root) < sizeof(remote));
+        ASSERT((size_t)snprintf(work, sizeof(work), "%s/work", root) < sizeof(work));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/source.c", work) < sizeof(path));
+        ASSERT(zd_git_run((const char *const[]){ "init", "--bare", "--quiet", remote, NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "init", "--quiet", work, NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "config", "user.name", "Fixture", NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "config", "user.email", "fixture@example.invalid", NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_write_text(path, "int a = 1;\n"));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "add", "source.c", NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "commit", "-qm", "base", NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_git_head(work, base));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "push", "--quiet",
+            remote, "HEAD:refs/heads/main", NULL }, output, sizeof(output)));
+        ASSERT(zd_write_text(path, "int a = 2;\n"));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "commit", "-qam", "head", NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_git_head(work, head));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "push", "--quiet",
+            remote, "HEAD:refs/heads/main", NULL }, output, sizeof(output)));
+        struct zcl_dev_git_tree intended = {0};
+        ASSERT(zcl_dev_git_tree_read(work, head, 10000, &intended).ok);
+        uint8_t identity[32] = {1};
+        struct zcl_dev_git_remote_observation first, advanced;
+        ASSERT(zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, intended.file_manifest_root,
+            intended.source_closure_root, NULL, 0, 20000, &first).ok);
+        ASSERT(first.complete);
+        ASSERT_STR_EQ(first.fetched_tip, head);
+        ASSERT(memcmp(first.intended_source_root, first.fetched_source_root, 32) == 0);
+        const char *invalid_refs[] = {
+            "refs/heads/main@{1}", "refs/heads/a..b", "refs/heads/a.lock",
+            "refs/heads/a//b", "refs/heads/.hidden", "refs/heads/a.",
+            "refs/tags/main"
+        };
+        for (size_t i = 0; i < sizeof(invalid_refs) / sizeof(invalid_refs[0]); i++) {
+            memset(&advanced, 0xa5, sizeof(advanced));
+            ASSERT(!zcl_dev_git_remote_observe(remote, invalid_refs[i], identity,
+                base, head, intended.file_manifest_root,
+                intended.source_closure_root, NULL, 0, 20000, &advanced).ok);
+            ASSERT(!zcl_bytes_any_set((const uint8_t *)&advanced, sizeof(advanced)));
+        }
+        memset(&advanced, 0xa5, sizeof(advanced));
+        ASSERT(!zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            head, head, intended.file_manifest_root,
+            intended.source_closure_root, NULL, 0, 20000, &advanced).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&advanced, sizeof(advanced)));
+        ASSERT(zd_write_text(path, "int a = 3;\n"));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "commit", "-qam", "later", NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_git_head(work, later));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "push", "--quiet",
+            remote, "HEAD:refs/heads/main", NULL }, output, sizeof(output)));
+        ASSERT(zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, intended.file_manifest_root,
+            intended.source_closure_root, NULL, 0, 20000, &advanced).ok);
+        ASSERT(advanced.complete);
+        ASSERT_STR_EQ(advanced.fetched_tip, later);
+        ASSERT(memcmp(advanced.intended_source_root, advanced.fetched_source_root, 32) != 0);
+        ASSERT(memcmp(first.evidence_root, advanced.evidence_root, 32) != 0);
+        uint8_t wrong_source[32];
+        memcpy(wrong_source, intended.file_manifest_root, 32);
+        wrong_source[0] ^= 1;
+        memset(&advanced, 0xa5, sizeof(advanced));
+        ASSERT(!zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, wrong_source, intended.source_closure_root,
+            NULL, 0, 20000, &advanced).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&advanced, sizeof(advanced)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "reset", "--hard", base, NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_write_text(path, "int a = 9;\n"));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "commit", "-qam", "sibling", NULL },
+                          output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "push", "--quiet", "--force",
+            remote, "HEAD:refs/heads/main", NULL }, output, sizeof(output)));
+        ASSERT(!zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, intended.file_manifest_root,
+            intended.source_closure_root, NULL, 0, 20000, &advanced).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&advanced, sizeof(advanced)));
+        zcl_dev_git_tree_free(&intended);
+        test_rm_rf(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+struct zd_gitlink_publication_fixture {
+    uint8_t intent_root[32];
+    uint8_t attachment_root[32];
+    uint8_t signer[32];
+    uint8_t target_identity[32];
+    char bundle[800];
+};
+
+static bool zd_gitlink_publication_make(const char *work,
+    const char *base, const char *head, const uint8_t source_root[32],
+    struct zd_gitlink_publication_fixture *out)
+{
+    uint8_t seed[32] = {61}, secret[32];
+    ed25519_keypair(out->signer, secret, seed);
+    struct vcs_zcode_candidate_v1 candidate = {
+        .schema_version = 1, .sequence = 1, .created_unix = 1000,
+    };
+    memset(candidate.task_root, 1, 32);
+    memset(candidate.base_source_root, 2, 32);
+    memset(candidate.patch_root, 3, 32);
+    memcpy(candidate.candidate_source_root, source_root, 32);
+    memset(candidate.adapter_policy_root, 4, 32);
+    memcpy(candidate.author_pubkey, out->signer, 32);
+    uint8_t candidate_root[32], wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    if (vcs_zcode_candidate_root(&candidate, candidate_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_serialize(&candidate, wire) != VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(work, candidate_root, wire, sizeof(wire)))
+        return false;
+    struct vcs_zcode_publication_v1 intent = {
+        .schema_version = 1,
+        .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+        .target_ref = "refs/heads/main", .created_unix = 1001,
+    };
+    memcpy(intent.candidate_root, candidate_root, 32);
+    memset(intent.proof_set_root, 5, 32);
+    memset(intent.target_identity_root, 6, 32);
+    memset(intent.authority_root, 7, 32);
+    memcpy(out->target_identity, intent.target_identity_root, 32);
+    if (!zcl_hex_decode_lower(base, intent.expected_base, 20) ||
+        !zcl_hex_decode_lower(head, intent.head_commit, 20) ||
+        vcs_zcode_publication_seal(&intent, secret, out->signer) != VCS_ZCODE_DEV_OK ||
+        !vcs_zcode_publication_store_verified(work, &intent, out->signer,
+            out->intent_root))
+        return false;
+    struct vcs_zcode_publication_attachment_v1 attachment = {
+        .schema_version = 1, .created_unix = 1002,
+    };
+    memcpy(attachment.publication_root, out->intent_root, 32);
+    memcpy(attachment.expected_base, intent.expected_base, 32);
+    memcpy(attachment.head_commit, intent.head_commit, 32);
+    if ((size_t)snprintf(out->bundle, sizeof(out->bundle),
+            "%s/.zvcs/test.bundle", work) >= sizeof(out->bundle) ||
+        !zd_write_text(out->bundle, "abc") ||
+        !zcl_hex_decode_lower(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            attachment.bundle_sha256, 32) ||
+        vcs_zcode_publication_attachment_seal(&attachment, secret,
+            out->signer) != VCS_ZCODE_DEV_OK ||
+        !vcs_zcode_publication_attachment_store_verified(work, &attachment,
+            out->signer, out->attachment_root))
+        return false;
+    return true;
+}
+
+static int test_zd_git_remote_dependency(void)
+{
+    int failures = 0;
+    TEST("Git remote observation verifies pinned gitlink bytes at both commits") {
+        char root[512], remote[700], work[700], dependency[700];
+        char source[750], dep_source[750], output[128];
+        char base[65], head[65], dep_head[65], later_dep[65];
+        test_make_tmpdir(root, sizeof(root), "zcode_dev", "git_remote_dependency");
+        ASSERT((size_t)snprintf(remote, sizeof(remote), "%s/remote.git", root) < sizeof(remote));
+        ASSERT((size_t)snprintf(work, sizeof(work), "%s/work", root) < sizeof(work));
+        ASSERT((size_t)snprintf(dependency, sizeof(dependency), "%s/dependency", root) < sizeof(dependency));
+        ASSERT((size_t)snprintf(source, sizeof(source), "%s/source.c", work) < sizeof(source));
+        ASSERT((size_t)snprintf(dep_source, sizeof(dep_source), "%s/part.c", dependency) < sizeof(dep_source));
+        ASSERT(zd_git_run((const char *const[]){ "init", "--bare", "--quiet", remote, NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "init", "--quiet", work, NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "init", "--quiet", dependency, NULL }, output, sizeof(output)));
+        const char *repos[] = { work, dependency };
+        for (size_t i = 0; i < 2; i++) {
+            ASSERT(zd_git_run((const char *const[]){ "-C", repos[i], "config", "user.name", "Fixture", NULL }, output, sizeof(output)));
+            ASSERT(zd_git_run((const char *const[]){ "-C", repos[i], "config", "user.email", "fixture@example.invalid", NULL }, output, sizeof(output)));
+        }
+        ASSERT(zd_write_text(dep_source, "int part = 1;\n"));
+        ASSERT(zd_git_run((const char *const[]){ "-C", dependency, "add", "part.c", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", dependency, "commit", "-qm", "pinned", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_head(dependency, dep_head));
+        ASSERT(zd_write_text(source, "int a = 1;\n"));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "add", "source.c", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "update-index", "--add", "--cacheinfo", "160000", dep_head, "vendor/dep", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "commit", "-qm", "base", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_head(work, base));
+        ASSERT(zd_write_text(source, "int a = 2;\n"));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "add", "source.c", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "commit", "-qm", "head", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_head(work, head));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "push", "--quiet", remote,
+            "HEAD:refs/heads/main", NULL }, output, sizeof(output)));
+        struct zcl_dev_git_tree super = {0}, pinned = {0};
+        ASSERT(zcl_dev_git_tree_read(work, head, 10000, &super).ok);
+        ASSERT_EQ(super.gitlinks, 1);
+        ASSERT(zcl_dev_git_tree_read(dependency, dep_head, 10000, &pinned).ok);
+        struct zcl_dev_git_dependency_input input = {
+            .path = "vendor/dep", .repo_locator = dependency,
+        };
+        memcpy(input.expected_source_closure_root, pinned.source_closure_root, 32);
+        uint8_t source_root[32];
+        ASSERT(chmod(source, 0644) == 0);
+        ASSERT_EQ(vcs_tree_capture_path(work, source_root), 0);
+        struct zcl_dev_git_source_check source_check = {0};
+        struct zcl_dev_git_dependency_check pinned_check = {0};
+        ASSERT(!zcl_dev_git_tree_check_source(work, head, source_root,
+            10000, &source_check).ok);
+        ASSERT_EQ(source_check.gitlinks, 1);
+        ASSERT(!source_check.complete_content_matches);
+        struct zcl_result source_result = zcl_dev_git_tree_check_source_with_dependencies(work, head,
+            source_root, super.source_closure_root, &input, 1, 10000,
+            &source_check, &pinned_check);
+        ASSERT(source_result.ok);
+        ASSERT(source_check.complete_content_matches && pinned_check.complete);
+        ASSERT_EQ(pinned_check.dependencies_verified, 1);
+        uint8_t wrong_closure[32];
+        memcpy(wrong_closure, super.source_closure_root, 32);
+        wrong_closure[0] ^= 1;
+        memset(&source_check, 0xa5, sizeof(source_check));
+        ASSERT(!zcl_dev_git_tree_check_source_with_dependencies(work, head,
+            source_root, wrong_closure, &input, 1, 10000,
+            &source_check, &pinned_check).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&source_check,
+            sizeof(source_check)));
+        ASSERT(!zcl_dev_git_tree_check_source_with_dependencies(work, head,
+            source_root, super.source_closure_root, NULL, 0, 10000,
+            &source_check, &pinned_check).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&source_check,
+            sizeof(source_check)));
+        struct zd_gitlink_publication_fixture publication = {0};
+        ASSERT(zd_gitlink_publication_make(work, base, head, source_root,
+            &publication));
+        struct zcl_dev_git_publication_check admission = {0};
+        ASSERT(!zcl_dev_git_publication_check(work, publication.intent_root,
+            publication.attachment_root, publication.bundle,
+            publication.signer, publication.target_identity,
+            "refs/heads/main", base, head, 1024, 10000, &admission).ok);
+        ASSERT(zcl_dev_git_publication_check_with_dependencies(work,
+            publication.intent_root, publication.attachment_root,
+            publication.bundle, publication.signer,
+            publication.target_identity, "refs/heads/main", base, head,
+            super.source_closure_root, &input, 1, 1024, 10000,
+            &admission).ok);
+        ASSERT(admission.verified && admission.source.complete_content_matches);
+        memset(&admission, 0xa5, sizeof(admission));
+        ASSERT(!zcl_dev_git_publication_check_with_dependencies(work,
+            publication.intent_root, publication.attachment_root,
+            publication.bundle, publication.signer,
+            publication.target_identity, "refs/heads/main", base, head,
+            wrong_closure, &input, 1, 1024, 10000,
+            &admission).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&admission,
+            sizeof(admission)));
+        uint8_t identity[32] = {1};
+        struct zcl_dev_git_remote_observation observed;
+        ASSERT(zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, super.file_manifest_root, super.source_closure_root,
+            &input, 1, 20000, &observed).ok);
+        ASSERT(observed.complete);
+        ASSERT(zcl_bytes_any_set(observed.intended_verified_dependency_root, 32));
+        ASSERT(memcmp(observed.intended_verified_dependency_root,
+            observed.fetched_verified_dependency_root, 32) == 0);
+        memset(&observed, 0xa5, sizeof(observed));
+        ASSERT(!zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, super.file_manifest_root, super.source_closure_root,
+            NULL, 0, 20000, &observed).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&observed, sizeof(observed)));
+        input.expected_source_closure_root[0] ^= 1;
+        ASSERT(!zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, super.file_manifest_root, super.source_closure_root,
+            &input, 1, 20000, &observed).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&observed, sizeof(observed)));
+        input.expected_source_closure_root[0] ^= 1;
+        ASSERT(zd_git_run((const char *const[]){ "-C", dependency, "commit",
+            "--allow-empty", "-qm", "metadata only", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_head(dependency, later_dep));
+        ASSERT(strcmp(later_dep, dep_head) != 0);
+        struct zcl_dev_git_tree same_bytes = {0};
+        ASSERT(zcl_dev_git_tree_read(dependency, later_dep, 10000, &same_bytes).ok);
+        ASSERT(memcmp(same_bytes.source_closure_root,
+            pinned.source_closure_root, 32) == 0);
+        zcl_dev_git_tree_free(&same_bytes);
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "update-index",
+            "--add", "--cacheinfo", "160000", later_dep, "vendor/dep", NULL },
+            output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "commit", "-qm",
+            "metadata dependency", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "push", "--quiet",
+            remote, "HEAD:refs/heads/main", NULL }, output, sizeof(output)));
+        ASSERT(!zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, super.file_manifest_root, super.source_closure_root,
+            &input, 1, 20000, &observed).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&observed, sizeof(observed)));
+        ASSERT(zd_write_text(dep_source, "int part = 2;\n"));
+        ASSERT(zd_git_run((const char *const[]){ "-C", dependency, "add", "part.c", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", dependency, "commit", "-qm", "changed", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_head(dependency, later_dep));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "update-index", "--add", "--cacheinfo", "160000", later_dep, "vendor/dep", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "commit", "-qm", "advanced dependency", NULL }, output, sizeof(output)));
+        ASSERT(zd_git_run((const char *const[]){ "-C", work, "push", "--quiet", remote,
+            "HEAD:refs/heads/main", NULL }, output, sizeof(output)));
+        ASSERT(!zcl_dev_git_remote_observe(remote, "refs/heads/main", identity,
+            base, head, super.file_manifest_root, super.source_closure_root,
+            &input, 1, 20000, &observed).ok);
+        ASSERT(!zcl_bytes_any_set((const uint8_t *)&observed, sizeof(observed)));
+        zcl_dev_git_tree_free(&super);
+        zcl_dev_git_tree_free(&pinned);
+        test_rm_rf(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 
 int test_zcode_dev_objects(void)
 {
@@ -7957,8 +8598,13 @@ int test_zcode_dev_objects(void)
     failures += test_zd_candidate_review();
     failures += test_zd_lane_receipt();
     failures += test_zd_publication_intent();
+    failures += test_zd_publication_attachment();
     failures += test_zd_publication_result();
     failures += test_zd_remote_receipt();
+#ifndef _WIN32
+    failures += test_zd_git_remote_observation();
+    failures += test_zd_git_remote_dependency();
+#endif
     failures += test_zd_receipt();
     failures += test_zd_work_context();
     failures += test_zd_work_swarm();

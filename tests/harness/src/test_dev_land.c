@@ -27,6 +27,9 @@
 #include "platform/temp_directory.h"
 #include "util/spawn.h"
 #include "dev/dev_git_tree.h"
+#include "base/bytes.h"
+#include "base/hex.h"
+#include "crypto/ed25519.h"
 #include "sha3/sha3.h"
 
 /* Hermetic seams from native_dev_land.c (ZCL_TESTING build): the idle-note
@@ -40,6 +43,8 @@ void zcl_native_dev_land_test_watcher_launch(const char *wt,
 #endif
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
+#include "vcs/zcode_dev.h"
+#include "vcs/zcode_publication.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,6 +104,7 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+    unsetenv("ZCL_LAND_TEST_DIR_SYNC_FAIL");
     unsetenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME");
     unsetenv("ZCL_LAND_TEST_DIE_AFTER_PROOF");
     unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
@@ -127,6 +133,7 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+    unsetenv("ZCL_LAND_TEST_DIR_SYNC_FAIL");
     unsetenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME");
     unsetenv("ZCL_LAND_TEST_DIE_AFTER_PROOF");
     unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
@@ -1092,6 +1099,9 @@ static int test_dev_land_integrated_merge(bool signing_failure)
         ASSERT_STR_EQ(message, expected);
         ASSERT(dlx_git_out(landwt, resolved, observed, sizeof(observed)) == 0);
         ASSERT_STR_EQ(observed, "mine");
+        /* The signed integrated candidate is established. Permit this
+         * fixture's stubbed proof through the unsigned publication seam. */
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
@@ -1603,7 +1613,7 @@ static int test_dev_land_lost_persistence(void)
         "not silently claimed, and the row self-heals") {
         struct dlx_rig rig;
         struct dlx_call c;
-        char landdir[1200], before[64], after[64];
+        char landdir[1200], hook[1400], script[1600], before[64], after[64];
         dlx_isolate("persistfail");
         ASSERT(dlx_rig_make(&rig, "persistfail_rig"));
         ASSERT(dlx_origin_main(&rig, before));
@@ -1620,11 +1630,13 @@ static int test_dev_land_lost_persistence(void)
         dlx_end(&c);
         setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
         dlx_landdir(landdir, sizeof(landdir));
-        /* No write permission on the land dir itself: dl_rewrite_rows can
-         * no longer create queue.jsonl.tmp, but logs/ and wt/ underneath
-         * already exist and are untouched, so the rebase and the real
-         * push still go through. */
-        ASSERT(chmod(landdir, 0500) == 0);
+        /* Lose the outcome write only after the exact push pair has been
+         * durably prepared. Git's pre-push hook runs after that checkpoint. */
+        ASSERT((size_t)snprintf(hook, sizeof(hook), "%s/pre-push",
+                                g_dlx_hooks_ok) < sizeof(hook));
+        ASSERT((size_t)snprintf(script, sizeof(script),
+            "#!/bin/sh\nchmod 0500 '%s'\n", landdir) < sizeof(script));
+        ASSERT(dlx_write(hook, script) && chmod(hook, 0755) == 0);
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
@@ -2794,7 +2806,7 @@ static int test_dev_land_postpush_observation_missing(bool lost_ack)
         ASSERT(dlx_ok(&c));
         const struct json_value *row = json_get(&c.reply.data, "in_flight");
         ASSERT(row && row->type == JSON_OBJ);
-        ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "prove");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "push");
         ASSERT_STR_EQ(json_get_str(json_get(row, "tip")), rig.tip);
         ASSERT_STR_EQ(json_get_str(json_get(row, "base")), before);
         ASSERT_EQ(json_get_int(json_get(row, "attempt")), lost_ack ? 3 : 1);
@@ -2816,6 +2828,175 @@ static int test_dev_land_postpush_observation_missing(bool lost_ack)
         PASS();
     }
 _test_next:;
+    return failures;
+}
+
+static int test_dev_land_prepush_checkpoint(void)
+{
+    int failures = 0;
+    TEST("land: push phase and exact pair are durable before pre-push runs") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], hook[1400], script[1800], base[64];
+        dlx_isolate("prepush_checkpoint");
+        ASSERT(dlx_rig_make(&rig, "prepush_checkpoint_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT((size_t)snprintf(hook, sizeof(hook), "%s/pre-push",
+                                g_dlx_hooks_ok) < sizeof(hook));
+        ASSERT((size_t)snprintf(script, sizeof(script),
+            "#!/bin/sh\n"
+            "grep -F '\"phase\":\"push\"' '%s/queue.jsonl' >/dev/null || exit 73\n"
+            "grep -F '\"base\":\"%s\"' '%s/queue.jsonl' >/dev/null || exit 74\n"
+            "exit 0\n", landdir, base, landdir) < sizeof(script));
+        ASSERT(dlx_write(hook, script) && chmod(hook, 0755) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_prepush_persist_refusal(void)
+{
+    int failures = 0;
+    TEST("land: failed pre-push persistence refuses remote mutation") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], base[64], observed[64];
+        dlx_isolate("prepush_persist_refusal");
+        ASSERT(dlx_rig_make(&rig, "prepush_persist_refusal_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(chmod(landdir, 0500) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_INTENT_PERSIST_FAILED");
+        ASSERT(!c.reply.error.mutated);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, observed));
+        ASSERT_STR_EQ(observed, base);
+        ASSERT(chmod(landdir, 0700) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_prepush_sync_refusal(void)
+{
+    int failures = 0;
+    TEST("land: failed directory sync after checkpoint refuses push and retries") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], observed[64];
+        dlx_isolate("prepush_sync_refusal");
+        ASSERT(dlx_rig_make(&rig, "prepush_sync_refusal_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        setenv("ZCL_LAND_TEST_DIR_SYNC_FAIL", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_INTENT_PERSIST_FAILED");
+        ASSERT(!c.reply.error.mutated);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, observed));
+        ASSERT_STR_EQ(observed, base);
+        unsetenv("ZCL_LAND_TEST_DIR_SYNC_FAIL");
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    unsetenv("ZCL_LAND_TEST_DIR_SYNC_FAIL");
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_missing_publication_intent(void)
+{
+    int failures = 0;
+    TEST("land: a proven pair without canonical intent cannot push") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], observed[64];
+        dlx_isolate("missing_publication_intent");
+        ASSERT(dlx_rig_make(&rig, "missing_publication_intent_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUBLICATION_INTENT_REQUIRED");
+        ASSERT(!c.reply.error.mutated);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, observed));
+        ASSERT_STR_EQ(observed, base);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
     return failures;
 }
 
@@ -3082,7 +3263,7 @@ static int test_dev_land_postpush_result_unconfirmed(void)
         ASSERT(dlx_ok(&c));
         const struct json_value *row = json_get(&c.reply.data, "in_flight");
         ASSERT(row && row->type == JSON_OBJ);
-        ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "prove");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "push");
         ASSERT_STR_EQ(json_get_str(json_get(row, "tip")), rig.tip);
         ASSERT_STR_EQ(json_get_str(json_get(row, "base")), before);
         ASSERT_EQ(json_get_int(json_get(row, "attempt")), 1);
@@ -3450,6 +3631,67 @@ static bool dlx_tree_types_match(const struct zcl_dev_git_tree *tree)
     return executable && symlink_bytes && binary;
 }
 
+static bool dlx_tree_closure_changes_with_gitlink(struct dlx_rig *rig,
+    const uint8_t files_root[32], const uint8_t closure_root[32])
+{
+    char prior_tip[64];
+    (void)snprintf(prior_tip, sizeof(prior_tip), "%s", rig->tip);
+    if (!dlx_gitlink_commit(rig->clone, "dependency", prior_tip,
+                            "unused", rig->tip))
+        return false;
+    struct zcl_dev_git_tree later = {0};
+    struct zcl_result result = zcl_dev_git_tree_read(
+        rig->clone, rig->tip, 10000, &later);
+    bool ok = result.ok && later.gitlinks == 1 &&
+        memcmp(files_root, later.file_manifest_root, 32) == 0 &&
+        memcmp(closure_root, later.source_closure_root, 32) != 0 &&
+        strcmp(later.links[0].oid, prior_tip) == 0;
+    zcl_dev_git_tree_free(&later);
+    return ok;
+}
+
+static bool dlx_tree_dependency_observation(struct dlx_rig *rig,
+    const struct zcl_dev_git_tree *super)
+{
+    struct zcl_dev_git_tree dependency = {0};
+    struct zcl_result result = zcl_dev_git_tree_read(
+        rig->clone, super->links[0].oid, 10000, &dependency);
+    if (!result.ok || dependency.gitlinks != 0) {
+        zcl_dev_git_tree_free(&dependency);
+        return false;
+    }
+    struct zcl_dev_git_dependency_input input = {
+        .path = "dependency", .repo_locator = rig->clone,
+    };
+    memcpy(input.expected_source_closure_root,
+           dependency.source_closure_root, 32);
+    zcl_dev_git_tree_free(&dependency);
+    struct zcl_dev_git_dependency_check check;
+    result = zcl_dev_git_tree_verify_dependencies(rig->clone, rig->tip,
+        &input, 1, 10000, &check);
+    if (!result.ok || !check.complete || check.dependencies_verified != 1 ||
+        memcmp(check.super_source_closure_root,
+               super->source_closure_root, 32) != 0 ||
+        !zcl_bytes_any_set(check.verified_dependency_root, 32))
+        return false;
+    input.expected_source_closure_root[0] ^= 1;
+    memset(&check, 0xa5, sizeof(check));
+    result = zcl_dev_git_tree_verify_dependencies(rig->clone, rig->tip,
+        &input, 1, 10000, &check);
+    if (result.ok || zcl_bytes_any_set((const uint8_t *)&check,
+                                      sizeof(check))) return false;
+    input.expected_source_closure_root[0] ^= 1;
+    input.path = "other";
+    result = zcl_dev_git_tree_verify_dependencies(rig->clone, rig->tip,
+        &input, 1, 10000, &check);
+    if (result.ok || zcl_bytes_any_set((const uint8_t *)&check,
+                                      sizeof(check))) return false;
+    result = zcl_dev_git_tree_verify_dependencies(rig->clone, rig->tip,
+        NULL, 0, 10000, &check);
+    return !result.ok &&
+        !zcl_bytes_any_set((const uint8_t *)&check, sizeof(check));
+}
+
 static bool dlx_tree_malformed_head(struct dlx_rig *rig, const char *a, const char *b,
                                    char head[64])
 {
@@ -3492,8 +3734,18 @@ static int test_dev_land_tree_types(void)
         bool matched = r.ok && tree.files.count == 7 && tree.gitlinks == 1 && tree.symlinks == 1;
         if (matched) matched = !strcmp(tree.links[0].path, "dependency") &&
             !strcmp(tree.links[0].oid, expected_link) && dlx_tree_types_match(&tree);
+        uint8_t files_root[32], closure_root[32];
+        if (matched) {
+            memcpy(files_root, tree.file_manifest_root, 32);
+            memcpy(closure_root, tree.source_closure_root, 32);
+            matched = zcl_bytes_any_set(files_root, 32) &&
+                      zcl_bytes_any_set(closure_root, 32);
+        }
+        if (matched) matched = dlx_tree_dependency_observation(&rig, &tree);
         zcl_dev_git_tree_free(&tree);
         ASSERT(matched);
+        ASSERT(dlx_tree_closure_changes_with_gitlink(&rig,
+            files_root, closure_root));
         PASS();
     } _test_next:;
     return failures;
@@ -3633,6 +3885,12 @@ struct dlx_source_binding_state {
     char seed_path[1200];
     uint8_t source[32];
     uint8_t wrong_root[32];
+    uint8_t publication_root[32];
+    uint8_t attachment_root[32];
+    uint8_t publisher_secret[32];
+    uint8_t publisher_signer[32];
+    char publication_head[80];
+    char bundle_path[1200];
     size_t wire_len;
 };
 
@@ -3690,6 +3948,220 @@ static bool dlx_source_binding_setup(struct dlx_source_binding_state *st)
     if (!dlx_source_binding_setup_fixture(st)) return false;
     if (!dlx_source_binding_setup_admit(st)) return false;
     return true;
+}
+
+static bool dlx_source_attachment_store(struct dlx_source_binding_state *st,
+    const struct vcs_zcode_publication_v1 *intent,
+    const uint8_t publication_root[32], uint8_t attachment_root[32])
+{
+    struct vcs_zcode_publication_attachment_v1 attachment = {
+        .schema_version = 1, .created_unix = intent->created_unix + 1,
+    };
+    memcpy(attachment.publication_root, publication_root, 32);
+    memcpy(attachment.expected_base, intent->expected_base, 32);
+    memcpy(attachment.head_commit, intent->head_commit, 32);
+    return zcl_hex_decode_lower(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            attachment.bundle_sha256, 32) &&
+        vcs_zcode_publication_attachment_seal(&attachment,
+            st->publisher_secret, st->publisher_signer) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_publication_attachment_store_verified(st->rig.clone,
+            &attachment, st->publisher_signer, attachment_root);
+}
+
+static bool dlx_source_publication_fixture(
+    struct dlx_source_binding_state *st,
+    struct vcs_zcode_publication_v1 *out_intent, char base[80])
+{
+    uint8_t seed[32] = {41};
+    ed25519_keypair(st->publisher_signer, st->publisher_secret, seed);
+    struct vcs_zcode_candidate_v1 candidate = {
+        .schema_version = 1, .sequence = 1, .created_unix = 1000,
+    };
+    memset(candidate.task_root, 1, 32);
+    memset(candidate.base_source_root, 2, 32);
+    memset(candidate.patch_root, 3, 32);
+    memcpy(candidate.candidate_source_root, st->source, 32);
+    memset(candidate.adapter_policy_root, 4, 32);
+    memcpy(candidate.author_pubkey, st->publisher_signer, 32);
+    uint8_t candidate_root[32], candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    if (vcs_zcode_candidate_root(&candidate, candidate_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_serialize(&candidate, candidate_wire) != VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(st->rig.clone, candidate_root,
+                                  candidate_wire, sizeof(candidate_wire)))
+        return false;
+    if (!dlx_origin_main(&st->rig, base)) return false;
+    struct vcs_zcode_publication_v1 intent = {
+        .schema_version = 1,
+        .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+        .target_ref = "refs/heads/main",
+        .created_unix = 1001,
+    };
+    memcpy(intent.candidate_root, candidate_root, 32);
+    memset(intent.proof_set_root, 5, 32);
+    memset(intent.target_identity_root, 6, 32);
+    memset(intent.authority_root, 7, 32);
+    if (!zcl_hex_decode_lower(base, intent.expected_base, 20) ||
+        !zcl_hex_decode_lower(st->rig.tip, intent.head_commit, 20) ||
+        vcs_zcode_publication_seal(&intent, st->publisher_secret,
+                                   st->publisher_signer) != VCS_ZCODE_DEV_OK)
+        return false;
+    if (!vcs_zcode_publication_store_verified(st->rig.clone, &intent,
+            st->publisher_signer, st->publication_root))
+        return false;
+    (void)snprintf(st->bundle_path, sizeof(st->bundle_path),
+                   "%s/.zvcs/test.bundle", st->rig.clone);
+    if (!dlx_write(st->bundle_path, "abc")) return false;
+    if (!dlx_source_attachment_store(st, &intent, st->publication_root,
+                                     st->attachment_root))
+        return false;
+    (void)snprintf(st->publication_head, sizeof(st->publication_head), "%s",
+                   st->rig.tip);
+    *out_intent = intent;
+    return true;
+}
+
+static bool dlx_source_publication_binding(struct dlx_source_binding_state *st)
+{
+    struct vcs_zcode_publication_v1 intent;
+    char base[80];
+    if (!dlx_source_publication_fixture(st, &intent, base)) return false;
+    struct zcl_dev_git_publication_check checked = {0};
+    struct zcl_result result = zcl_dev_git_publication_check(st->rig.clone,
+        st->publication_root, st->attachment_root, st->bundle_path,
+        st->publisher_signer, intent.target_identity_root,
+        intent.target_ref, base, st->rig.tip, 1024, 10000, &checked);
+    if (!result.ok || !checked.verified ||
+        memcmp(checked.attachment_root, st->attachment_root, 32) != 0 ||
+        memcmp(checked.source_root, st->source, 32) != 0 ||
+        strcmp(checked.expected_base, base) != 0 ||
+        strcmp(checked.head, st->rig.tip) != 0)
+        return false;
+    memset(&checked, 0xa5, sizeof(checked));
+    result = zcl_dev_git_publication_check(st->rig.clone, st->publication_root,
+        st->attachment_root, st->bundle_path, st->publisher_signer,
+        intent.target_identity_root, "refs/heads/other", base,
+        st->rig.tip, 1024, 10000, &checked);
+    if (result.ok || zcl_bytes_any_set((const uint8_t *)&checked, sizeof(checked)))
+        return false;
+    uint8_t wrong_target[32];
+    memcpy(wrong_target, intent.target_identity_root, 32);
+    wrong_target[0] ^= 1;
+    result = zcl_dev_git_publication_check(st->rig.clone, st->publication_root,
+        st->attachment_root, st->bundle_path, st->publisher_signer,
+        wrong_target, intent.target_ref, base, st->rig.tip,
+        1024, 10000, &checked);
+    if (result.ok || zcl_bytes_any_set((const uint8_t *)&checked, sizeof(checked)))
+        return false;
+    result = zcl_dev_git_publication_check(st->rig.clone, st->publication_root,
+        st->attachment_root, st->bundle_path, st->publisher_signer,
+        intent.target_identity_root, intent.target_ref,
+        st->rig.tip, st->rig.tip, 1024, 10000, &checked);
+    return !result.ok &&
+        !zcl_bytes_any_set((const uint8_t *)&checked, sizeof(checked));
+}
+
+static bool dlx_source_publication_bundle_refusals(
+    struct dlx_source_binding_state *st)
+{
+    struct vcs_zcode_publication_v1 intent;
+    char base[80];
+    if (!vcs_zcode_publication_load_verified(st->rig.clone,
+            st->publication_root, st->publisher_signer, &intent) ||
+        !dlx_origin_main(&st->rig, base) ||
+        !dlx_write(st->bundle_path, "abd"))
+        return false;
+    struct zcl_dev_git_publication_check checked;
+    memset(&checked, 0xa5, sizeof(checked));
+    struct zcl_result result = zcl_dev_git_publication_check(st->rig.clone,
+        st->publication_root, st->attachment_root, st->bundle_path,
+        st->publisher_signer, intent.target_identity_root, intent.target_ref,
+        base, st->rig.tip, 1024, 10000, &checked);
+    if (result.ok || strcmp(result.message,
+            "git-publication: actual bundle digest mismatch") != 0 ||
+        zcl_bytes_any_set((const uint8_t *)&checked, sizeof(checked)) ||
+        !dlx_write(st->bundle_path, "abc"))
+        return false;
+    result = zcl_dev_git_publication_check(st->rig.clone,
+        st->publication_root, st->attachment_root, st->bundle_path,
+        st->publisher_signer, intent.target_identity_root, intent.target_ref,
+        base, st->rig.tip, 2, 10000, &checked);
+    return !result.ok &&
+        !zcl_bytes_any_set((const uint8_t *)&checked, sizeof(checked));
+}
+
+static bool dlx_source_publication_content_drift(
+    struct dlx_source_binding_state *st)
+{
+    struct vcs_zcode_publication_v1 intent;
+    if (!vcs_zcode_publication_load_verified(st->rig.clone,
+            st->publication_root, st->publisher_signer, &intent))
+        return false;
+    char base[80];
+    if (!dlx_origin_main(&st->rig, base)) return false;
+    /* The new head descends from the base, but its committed content is no
+     * longer the candidate's source. A freshly signed intent cannot hide it. */
+    if (!zcl_hex_decode_lower(st->rig.tip, intent.head_commit, 20) ||
+        vcs_zcode_publication_seal(&intent, st->publisher_secret,
+                                   st->publisher_signer) != VCS_ZCODE_DEV_OK)
+        return false;
+    uint8_t drift_root[32];
+    if (!vcs_zcode_publication_store_verified(st->rig.clone, &intent,
+            st->publisher_signer, drift_root))
+        return false;
+    uint8_t drift_attachment_root[32];
+    if (!dlx_source_attachment_store(st, &intent, drift_root,
+                                     drift_attachment_root))
+        return false;
+    struct zcl_dev_git_publication_check checked;
+    memset(&checked, 0xa5, sizeof(checked));
+    struct zcl_result result = zcl_dev_git_publication_check(st->rig.clone,
+        drift_root, drift_attachment_root, st->bundle_path,
+        st->publisher_signer, intent.target_identity_root,
+        intent.target_ref, base, st->rig.tip, 1024, 10000, &checked);
+    if (result.ok || strcmp(result.message,
+            "git-publication: committed source differs from candidate") != 0 ||
+        zcl_bytes_any_set((const uint8_t *)&checked, sizeof(checked)))
+        return false;
+    return true;
+}
+
+static bool dlx_source_publication_competing_base(
+    struct dlx_source_binding_state *st)
+{
+    struct vcs_zcode_publication_v1 intent;
+    uint8_t drift_root[32];
+    if (!vcs_zcode_publication_load_verified(st->rig.clone,
+            st->publication_root, st->publisher_signer, &intent))
+        return false;
+    /* A competing base younger than the frozen head passes pair equality,
+     * but fails the independent fast-forward ancestry check. */
+    if (!zcl_hex_decode_lower(st->rig.tip, intent.expected_base, 20) ||
+        !zcl_hex_decode_lower(st->publication_head, intent.head_commit, 20) ||
+        vcs_zcode_publication_seal(&intent, st->publisher_secret,
+                                   st->publisher_signer) != VCS_ZCODE_DEV_OK ||
+        !vcs_zcode_publication_store_verified(st->rig.clone, &intent,
+            st->publisher_signer, drift_root))
+        return false;
+    uint8_t drift_attachment_root[32];
+    if (!dlx_source_attachment_store(st, &intent, drift_root,
+                                     drift_attachment_root))
+        return false;
+    struct zcl_dev_git_publication_check checked;
+    memset(&checked, 0xa5, sizeof(checked));
+    struct zcl_result result = zcl_dev_git_publication_check(st->rig.clone, drift_root,
+        drift_attachment_root, st->bundle_path, st->publisher_signer,
+        intent.target_identity_root, intent.target_ref,
+        st->rig.tip, st->publication_head, 1024, 10000, &checked);
+    return !result.ok && strcmp(result.message,
+        "git-publication: expected base is not an ancestor") == 0 &&
+        !zcl_bytes_any_set((const uint8_t *)&checked, sizeof(checked));
+}
+
+static bool dlx_source_publication_drift(struct dlx_source_binding_state *st)
+{
+    return dlx_source_publication_content_drift(st) &&
+           dlx_source_publication_competing_base(st);
 }
 
 /* Bounded admission refuses a wrong structural root, an over-large declared
@@ -3842,7 +4314,10 @@ static int test_dev_land_source_binding(void)
         struct dlx_source_binding_state st = {0};
         ASSERT(dlx_source_binding_setup(&st));
         ASSERT(dlx_source_binding_bounds(&st));
+        ASSERT(dlx_source_publication_binding(&st));
+        ASSERT(dlx_source_publication_bundle_refusals(&st));
         ASSERT(dlx_source_binding_drift(&st));
+        ASSERT(dlx_source_publication_drift(&st));
         PASS();
     } _test_next:;
 #endif
@@ -4460,9 +4935,227 @@ static bool dlx_priority_successor_status(struct dlx_call *c,
     return ok;
 }
 
+static int test_dev_land_signed_intent(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: signed Git intent gates push and yields a remote receipt") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], remote[64];
+        dlx_isolate("signed_intent");
+        ASSERT(dlx_rig_make(&rig, "signed_intent_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUBLICATION_INTENT_REQUIRED");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, base);
+        dlx_begin(&c, "attach");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "attached");
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *outcomes = dlx_arr(&c, "outcomes");
+        ASSERT(outcomes && outcomes->num_children == 1);
+        ASSERT(strlen(json_get_str(json_get(&outcomes->children[0],
+                                          "remote_source"))) == 40);
+        ASSERT(strlen(json_get_str(json_get(&outcomes->children[0],
+                                          "remote_signature"))) == 128);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, rig.tip);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
+static int test_dev_land_signed_tamper(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: tampered signed intent refuses before remote mutation") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], remote[64], land[1200], path[1400];
+        char wire[8192];
+        size_t len = 0;
+        dlx_isolate("signed_tamper");
+        ASSERT(dlx_rig_make(&rig, "signed_tamper_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "attach");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+        ASSERT(dlx_slurp(path, wire, sizeof(wire) - 1, &len));
+        wire[len] = '\0';
+        char *field = strstr(wire, "\"publication_signature\":\"");
+        ASSERT(field != NULL);
+        field += strlen("\"publication_signature\":\"");
+        ASSERT(*field == '0' || (*field >= '1' && *field <= '9') ||
+               (*field >= 'a' && *field <= 'f'));
+        *field = *field == '0' ? '1' : '0';
+        ASSERT(dlx_write(path, wire));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUBLICATION_INTENT_INVALID");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, base);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
+static int test_dev_land_signed_stale(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: signed pair rejects a moved base and retains successor work") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], stranger[64], remote[64];
+        dlx_isolate("signed_stale");
+        ASSERT(dlx_rig_make(&rig, "signed_stale_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "attach");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        const char *branch[] = { "checkout", "--quiet", "-B", "side", base,
+                                 NULL };
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+        ASSERT(dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_commit(rig.clone, "stranger.txt", "other\n", stranger));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "queued");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, stranger);
+        ASSERT(dlx_queue_has_one());
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
+static int test_dev_land_signed_recovery(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: signed remote recovery records receipt without replaying push") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char land[1200], wt[1400], wrapper[1400], marker[1400];
+        char script[3000];
+        dlx_isolate("signed_recovery");
+        ASSERT(dlx_rig_make(&rig, "signed_recovery_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "attach");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(wt, sizeof(wt), "%s/wt", land);
+        (void)snprintf(wrapper, sizeof(wrapper), "%s/refuse-replay", land);
+        (void)snprintf(marker, sizeof(marker), "%s/replay-attempted", land);
+        (void)snprintf(script, sizeof(script),
+                       "#!/bin/sh\nprintf 'attempted\\n' > '%s'\nexit 91\n",
+                       marker);
+        ASSERT(dlx_write(wrapper, script));
+        ASSERT(chmod(wrapper, 0700) == 0);
+        const char *intercept[] = { "config", "remote.origin.receivepack",
+                                    wrapper, NULL };
+        ASSERT(dlx_git(wt, intercept) == 0);
+        char update[128];
+        (void)snprintf(update, sizeof(update), "%s:refs/heads/main", rig.tip);
+        const char *remote_effect[] = { "fetch", "--quiet", rig.clone,
+                                        update, NULL };
+        ASSERT(dlx_git(rig.bare, remote_effect) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT(strlen(dlx_str(&c, "remote_signature")) == 128);
+        ASSERT(!dlx_file_exists(marker));
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
 int test_dev_land(void)
 {
     int failures = 0;
+    failures += test_dev_land_signed_intent();
+    failures += test_dev_land_signed_tamper();
+    failures += test_dev_land_signed_stale();
+    failures += test_dev_land_signed_recovery();
     failures += test_dev_land_watcher_admission();
     failures += test_dev_land_long_proof_root();
     failures += test_dev_land_malformed_queue_refusal();
@@ -5181,6 +5874,10 @@ int test_dev_land(void)
     failures += test_dev_land_drain_adoption();
     failures += test_dev_land_postpush_observation_missing(false);
     failures += test_dev_land_postpush_observation_missing(true);
+    failures += test_dev_land_prepush_checkpoint();
+    failures += test_dev_land_prepush_persist_refusal();
+    failures += test_dev_land_prepush_sync_refusal();
+    failures += test_dev_land_missing_publication_intent();
     failures += test_dev_land_postpush_result_unconfirmed();
     failures += test_dev_land_expected_base_race();
     failures += test_dev_land_recovery_ignores_replace_refs();

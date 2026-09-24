@@ -76,4 +76,28 @@ struct zcl_result zcode_publication_check_accepted_readonly(
     const uint8_t expected_signer[32], int64_t now,
     struct zcode_accepted_work_status *out);
 
+/* Persist the exact signed intent only after the accepted-work chain and
+ * action projection qualify. A successful return identifies a reloaded CAS
+ * object that survives a publisher restart; it does not grant dispatch.
+ * Target authority, Git content and fast-forward checks remain mandatory at
+ * the landing boundary. Refusal clears out_root and out. */
+struct zcl_result zcode_publication_store_accepted(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *task_root, const char *policy_root, const char *action_id,
+    const struct vcs_zcode_publication_v1 *intent,
+    const uint8_t expected_signer[32], int64_t now,
+    uint8_t out_root[32], struct zcode_accepted_work_status *out);
+
+/* Attach a signed bundle digest only to an already persisted intent whose
+ * accepted task, candidate, proof set and action still qualify. This checks
+ * the signed binding and durable CAS object; the caller must independently
+ * hash the actual bundle and qualify target/ref authority before dispatch. */
+struct zcl_result zcode_publication_attachment_store_accepted(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *task_root, const char *policy_root, const char *action_id,
+    const uint8_t publication_root[32],
+    const struct vcs_zcode_publication_attachment_v1 *attachment,
+    const uint8_t expected_signer[32], int64_t now,
+    uint8_t out_root[32], struct zcode_accepted_work_status *out);
+
 #endif /* ZCL_SERVICES_ZCODE_LANE_SERVICE_H */

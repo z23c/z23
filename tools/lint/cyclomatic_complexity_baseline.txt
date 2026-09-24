@@ -338,7 +338,6 @@ contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_validate:47
 contexts/commons/modules/vcs/src/package_attest_transport.c:vcs_package_attest_transport_file:21
 contexts/commons/modules/vcs/src/package_badge.c:vcs_badge_error_string:16
 contexts/commons/modules/vcs/src/package_badge.c:vcs_badge_plan_assemble:16
-contexts/commons/modules/vcs/src/package_badge.c:vcs_badge_policy_load:12
 contexts/commons/modules/vcs/src/package_badge.c:vcs_badge_store_contributor_badges:21
 contexts/commons/modules/vcs/src/package_badge_eligible.c:belig_facts_ledger:17
 contexts/commons/modules/vcs/src/package_badge_eligible.c:belig_facts_publish:16
@@ -376,9 +375,6 @@ contexts/commons/modules/vcs/src/package_prepare.c:vcs_package_scan_layout:21
 contexts/commons/modules/vcs/src/package_prepare.c:vcs_package_scan_layout#2:20
 contexts/commons/modules/vcs/src/package_prepare_schema.c:prepare_meta_closed:39
 contexts/commons/modules/vcs/src/package_public_shape.c:shape_eval_local:19
-contexts/commons/modules/vcs/src/package_public_shape.c:shape_release_signs:13
-contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_load_releases:14
-contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_read_chunk:15
 contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_rule_string:20
 contexts/commons/modules/vcs/src/package_rank.c:vcs_rank_contributor:17
 contexts/commons/modules/vcs/src/package_rank.c:vcs_rank_projection_from_facts:21
@@ -421,7 +417,6 @@ contexts/commons/modules/vcs/src/package_store_io.c:store_gc_cas:31
 contexts/commons/modules/vcs/src/package_store_io.c:store_load_manifests:21
 contexts/commons/modules/vcs/src/package_store_io.c:store_mkdir_p:20
 contexts/commons/modules/vcs/src/package_store_io.c:store_package_commit:19
-contexts/commons/modules/vcs/src/package_store_io.c:store_read_file:7
 contexts/commons/modules/vcs/src/package_store_io.c:store_rm_rf:37
 contexts/commons/modules/vcs/src/package_store_io.c:store_sweep_temps:35
 contexts/commons/modules/vcs/src/package_store_possession.c:proof_read_chunk:21
@@ -2543,7 +2538,6 @@ platform/modules/util/src/telemetry_render.c:telemetry_render:22
 platform/modules/util/src/template.c:render_impl:28
 platform/modules/util/src/thread_profile.c:thread_profile_sample:28
 platform/modules/util/src/thread_registry.c:thread_registry_spawn:17
-platform/modules/util/src/trace.c:trace_end:13
 platform/modules/util/src/util.c:ReadConfigFile:29
 tests/harness/differential/groth16_parity_oracle.c:build_corpus:32
 tests/harness/differential/groth16_parity_oracle.c:check_decode_corpus:26
@@ -3618,13 +3612,10 @@ tools/command/native_dev_hotswap.c:registry_probe_cb:36
 tools/command/native_dev_hotswap.c:rpc_dev_hotswap_native:19
 tools/command/native_dev_hotswap.c:service_resident_observation_append:24
 tools/command/native_dev_land.c:dl_dependency_repair_one:36
-tools/command/native_dev_land.c:dl_encode_row:18
 tools/command/native_dev_land.c:dl_escape:17
 tools/command/native_dev_land.c:dl_materialize_file:47
-tools/command/native_dev_land.c:dl_proof_read:13
 tools/command/native_dev_land.c:dl_regen_run:21
 tools/command/native_dev_land.c:dl_status:40
-tools/command/native_dev_land.c:dl_step_resume:13
 tools/command/native_dev_land.c:dl_step_start:19
 tools/command/native_dev_land.c:dl_submit:22
 tools/command/native_dev_land.c:dl_worktree_ok:17

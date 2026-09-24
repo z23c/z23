@@ -119,20 +119,26 @@
 #include "dependency_links.h"
 
 #include "base/safe_alloc.h"
+#include "base/hex.h"
 #include "config/command_catalog.h"
+#include "crypto/sha256.h"
 #include "json/json.h"
 #include "platform/file_clone.h"
 #include "platform/file_metadata.h"
 #include "platform/logical_cpu.h"
 #include "platform/os_proc.h"
+#include "platform/private_file.h"
+#include "platform/positioned_file.h"
 #include "platform/ram_scratch.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
+#include "util/file_tree_ops.h"
 
 #include "command/native_dev_loop_command.h"
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 #include "dev_proof.h"
+#include "dev_proof_signer.h"
 #endif
 
 #include <ctype.h>
@@ -646,6 +652,17 @@ struct dl_row {
     char local[80];
     char tree[80];
     char proof_intent[176];
+    /* Signed Git landing intent, bound to the exact proven pair. The bundle
+     * lives under land/ and its digest is checked again before dispatch. */
+    char publication_target[65];
+    char publication_proof[65];
+    char publication_bundle[65];
+    char publication_signer[65];
+    char publication_signature[129];
+    char remote_tip[65];
+    char remote_source[65];
+    char remote_signer[65];
+    char remote_signature[129];
     char pushed[80];
     char dimension[48];
     char log_path[4096];
@@ -701,9 +718,58 @@ static bool dl_row_pair_ok(const struct dl_row *r)
     return true;
 }
 
+static bool dl_hex_ok(const char *s, size_t length)
+{
+    if (!s || strlen(s) != length)
+        return false;
+    for (size_t i = 0; i < length; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') ||
+              (s[i] >= 'a' && s[i] <= 'f')))
+            return false;
+    return true;
+}
+
+static bool dl_publication_shape_ok(const struct dl_row *r)
+{
+    bool present = r->publication_target[0] || r->publication_proof[0] ||
+        r->publication_bundle[0] || r->publication_signer[0] ||
+        r->publication_signature[0];
+    if (!present)
+        return true;
+    return dl_hex_ok(r->publication_target, 64) &&
+        dl_hex_ok(r->publication_proof, 64) &&
+        dl_hex_ok(r->publication_bundle, 64) &&
+        dl_hex_ok(r->publication_signer, 64) &&
+        dl_hex_ok(r->publication_signature, 128);
+}
+
+static bool dl_remote_receipt_shape_ok(const struct dl_row *r)
+{
+    bool present = r->remote_tip[0] || r->remote_source[0] ||
+        r->remote_signer[0] || r->remote_signature[0];
+    if (!present) return true;
+    return dl_sha_ok(r->remote_tip) && dl_sha_ok(r->remote_source) &&
+        dl_hex_ok(r->remote_signer, 64) &&
+        dl_hex_ok(r->remote_signature, 128);
+}
+
+static void dl_publication_clear(struct dl_row *r)
+{
+    r->publication_target[0] = '\0';
+    r->publication_proof[0] = '\0';
+    r->publication_bundle[0] = '\0';
+    r->publication_signer[0] = '\0';
+    r->publication_signature[0] = '\0';
+    r->remote_tip[0] = '\0';
+    r->remote_source[0] = '\0';
+    r->remote_signer[0] = '\0';
+    r->remote_signature[0] = '\0';
+}
+
 static bool dl_row_semantics_ok(const struct dl_row *r)
 {
-    return dl_row_state_ok(r) && dl_row_phase_ok(r) && dl_row_pair_ok(r);
+    return dl_row_state_ok(r) && dl_row_phase_ok(r) && dl_row_pair_ok(r) &&
+           dl_publication_shape_ok(r) && dl_remote_receipt_shape_ok(r);
 }
 
 static bool dl_priority_parse(struct dl_row *r, long long priority,
@@ -747,6 +813,24 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
     (void)dl_line_str(line, "tree", r->tree, sizeof(r->tree));
     (void)dl_line_str(line, "proof_intent", r->proof_intent,
                       sizeof(r->proof_intent));
+    (void)dl_line_str(line, "publication_target", r->publication_target,
+                      sizeof(r->publication_target));
+    (void)dl_line_str(line, "publication_proof", r->publication_proof,
+                      sizeof(r->publication_proof));
+    (void)dl_line_str(line, "publication_bundle", r->publication_bundle,
+                      sizeof(r->publication_bundle));
+    (void)dl_line_str(line, "publication_signer", r->publication_signer,
+                      sizeof(r->publication_signer));
+    (void)dl_line_str(line, "publication_signature", r->publication_signature,
+                      sizeof(r->publication_signature));
+    (void)dl_line_str(line, "remote_tip", r->remote_tip,
+                      sizeof(r->remote_tip));
+    (void)dl_line_str(line, "remote_source", r->remote_source,
+                      sizeof(r->remote_source));
+    (void)dl_line_str(line, "remote_signer", r->remote_signer,
+                      sizeof(r->remote_signer));
+    (void)dl_line_str(line, "remote_signature", r->remote_signature,
+                      sizeof(r->remote_signature));
     (void)dl_line_str(line, "tip_pushed", r->pushed, sizeof(r->pushed));
     (void)dl_line_str(line, "dimension", r->dimension, sizeof(r->dimension));
     (void)dl_line_str(line, "log_path", r->log_path, sizeof(r->log_path));
@@ -764,12 +848,49 @@ static bool dl_escape_proof_fields(const struct dl_row *r,
            dl_escape(r->proof_intent, intent, 352);
 }
 
+struct dl_publication_escapes {
+    char target[130], proof[130], bundle[130], signer[130];
+    char signature[258], remote_tip[130], remote_source[130];
+    char remote_signer[130], remote_signature[258];
+};
+
+static bool dl_escape_start_fields(const struct dl_row *r, char ts[128],
+                                    char tip[160], char wt[8192],
+                                    char note[2048], char state[64],
+                                    char phase[64])
+{
+    return dl_escape(r->ts, ts, 128) && dl_escape(r->tip, tip, 160) &&
+        dl_escape(r->worktree, wt, 8192) &&
+        dl_escape(r->note, note, 2048) &&
+        dl_escape(r->state, state, 64) &&
+        dl_escape(r->phase, phase, 64);
+}
+
+static bool dl_escape_publication_fields(const struct dl_row *r,
+                                          struct dl_publication_escapes *e)
+{
+    return dl_escape(r->publication_target, e->target, sizeof(e->target)) &&
+        dl_escape(r->publication_proof, e->proof, sizeof(e->proof)) &&
+        dl_escape(r->publication_bundle, e->bundle, sizeof(e->bundle)) &&
+        dl_escape(r->publication_signer, e->signer, sizeof(e->signer)) &&
+        dl_escape(r->publication_signature, e->signature,
+                  sizeof(e->signature)) &&
+        dl_escape(r->remote_tip, e->remote_tip, sizeof(e->remote_tip)) &&
+        dl_escape(r->remote_source, e->remote_source,
+                  sizeof(e->remote_source)) &&
+        dl_escape(r->remote_signer, e->remote_signer,
+                  sizeof(e->remote_signer)) &&
+        dl_escape(r->remote_signature, e->remote_signature,
+                  sizeof(e->remote_signature));
+}
+
 static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                           size_t *len_out)
 {
     char e_ts[128], e_tip[160], e_wt[8192], e_note[2048], e_state[64];
     char e_phase[64], e_base[160], e_local[160], e_tree[160];
     char e_intent[352], e_pushed[160];
+    struct dl_publication_escapes p;
     /* r->detail is char[256]; dl_escape() can expand a raw control byte
      * (anything but \n/\r/\t) into a 6-byte "\u00XX" sequence, so an
      * ALL-control-byte detail needs up to 255*6=1530 bytes to escape
@@ -783,13 +904,10 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
     int w;
     if (!r || !out || cap == 0)
         return false;
-    if (!dl_escape(r->ts, e_ts, sizeof(e_ts)) ||
-        !dl_escape(r->tip, e_tip, sizeof(e_tip)) ||
-        !dl_escape(r->worktree, e_wt, sizeof(e_wt)) ||
-        !dl_escape(r->note, e_note, sizeof(e_note)) ||
-        !dl_escape(r->state, e_state, sizeof(e_state)) ||
-        !dl_escape(r->phase, e_phase, sizeof(e_phase)) ||
+    if (!dl_escape_start_fields(r, e_ts, e_tip, e_wt, e_note, e_state,
+                                e_phase) ||
         !dl_escape_proof_fields(r, e_base, e_local, e_tree, e_intent) ||
+        !dl_escape_publication_fields(r, &p) ||
         !dl_escape(r->pushed, e_pushed, sizeof(e_pushed)) ||
         !dl_escape(r->dimension, e_dim, sizeof(e_dim)) ||
         !dl_escape(r->log_path, e_log, sizeof(e_log)) ||
@@ -801,11 +919,19 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  "\"phase\":\"%s\",\"attempt\":%lld,\"started\":%lld,"
                  "\"base\":\"%s\",\"local\":\"%s\",\"tree\":\"%s\","
                  "\"proof_intent\":\"%s\",\"tip_pushed\":\"%s\","
+                 "\"publication_target\":\"%s\",\"publication_proof\":\"%s\","
+                 "\"publication_bundle\":\"%s\",\"publication_signer\":\"%s\","
+                 "\"publication_signature\":\"%s\","
+                 "\"remote_tip\":\"%s\",\"remote_source\":\"%s\","
+                 "\"remote_signer\":\"%s\",\"remote_signature\":\"%s\","
                  "\"dimension\":\"%s\",\"log_path\":\"%s\","
                  "\"detail\":\"%s\"}\n",
                  r->seq, r->priority_seq, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
                  r->attempt, r->started, e_base, e_local, e_tree, e_intent,
-                 e_pushed, e_dim, e_log, e_detail);
+                 e_pushed, p.target, p.proof, p.bundle, p.signer, p.signature,
+                 p.remote_tip, p.remote_source, p.remote_signer,
+                 p.remote_signature,
+                 e_dim, e_log, e_detail);
     if (w <= 0 || (size_t)w >= cap)
         return false;
     if (len_out)
@@ -907,8 +1033,28 @@ static const char *dl_reason_or_path(const char *why, const char *path)
     return why && why[0] ? why : path;
 }
 
-/* Whole-file rewrite under the row lock: temp file plus rename, so a
- * concurrent reader never sees a half-written queue. */
+static bool dl_queue_file_flush(FILE *f)
+{
+    if (fflush(f) != 0)
+        return false;
+#if defined(_WIN32)
+    return _commit(_fileno(f)) == 0;
+#else
+    return fsync(fileno(f)) == 0;
+#endif
+}
+
+static bool dl_queue_parent_flush(const char *landdir)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    if (getenv("ZCL_LAND_TEST_DIR_SYNC_FAIL"))
+        return false;
+#endif
+    return platform_private_parent_flush(landdir);
+}
+
+/* Whole-file rewrite under the row lock: flush the file before rename and
+ * the parent after rename, so a pre-push checkpoint survives a restart. */
 static bool dl_rewrite_rows(const char *landdir, const char *qpath,
                             const struct dl_row *rows, size_t n)
 {
@@ -939,6 +1085,11 @@ static bool dl_rewrite_rows(const char *landdir, const char *qpath,
         }
     }
     free(line);
+    if (!dl_queue_file_flush(f)) {
+        (void)fclose(f);
+        (void)unlink(tmp);
+        return false;
+    }
     if (fclose(f) != 0) {
         (void)unlink(tmp);
         return false;
@@ -953,7 +1104,7 @@ static bool dl_rewrite_rows(const char *landdir, const char *qpath,
         (void)unlink(tmp);
         return false;
     }
-    return true;
+    return dl_queue_parent_flush(landdir);
 }
 
 /* ── locks ─────────────────────────────────────────────────────────────── */
@@ -2975,6 +3126,22 @@ static bool dl_push_proof_action(struct json_value *obj,
     return ok;
 }
 
+static bool dl_push_publication_fields(struct json_value *obj,
+                                        const struct dl_row *r)
+{
+    return json_push_kv_str(obj, "publication_target",
+                            r->publication_target) &&
+           json_push_kv_str(obj, "publication_proof",
+                            r->publication_proof) &&
+           json_push_kv_str(obj, "publication_bundle",
+                            r->publication_bundle) &&
+           json_push_kv_str(obj, "publication_signer",
+                            r->publication_signer) &&
+           json_push_kv_str(obj, "remote_tip", r->remote_tip) &&
+           json_push_kv_str(obj, "remote_source", r->remote_source) &&
+           json_push_kv_str(obj, "remote_signer", r->remote_signer);
+}
+
 static bool dl_push_inflight(struct json_value *obj, const struct dl_row *r,
                              const char *proof_root, long long now)
 {
@@ -2990,6 +3157,7 @@ static bool dl_push_inflight(struct json_value *obj, const struct dl_row *r,
            json_push_kv_str(obj, "local", r->local) &&
            json_push_kv_str(obj, "tree", r->tree) &&
            json_push_kv_str(obj, "proof_intent", r->proof_intent) &&
+           dl_push_publication_fields(obj, r) &&
            dl_push_proof_action(obj, r, proof_root);
 }
 
@@ -3006,6 +3174,11 @@ static bool dl_push_outcome_row(struct json_value *arr,
          json_push_kv_str(&item, "state", r->state) &&
          json_push_kv_int(&item, "attempt", r->attempt) &&
          json_push_kv_str(&item, "tip_pushed", r->pushed) &&
+         json_push_kv_str(&item, "remote_tip", r->remote_tip) &&
+         json_push_kv_str(&item, "remote_source", r->remote_source) &&
+         json_push_kv_str(&item, "remote_signer", r->remote_signer) &&
+         json_push_kv_str(&item, "remote_signature",
+                          r->remote_signature) &&
          json_push_kv_str(&item, "dimension", r->dimension) &&
          json_push_kv_str(&item, "log_path", r->log_path) &&
          json_push_kv_str(&item, "detail", r->detail) &&
@@ -3319,6 +3492,7 @@ static bool dl_requeue_successor(const struct dl_dirs *d, struct dl_row *row,
     successor.base[0] = '\0';
     successor.tree[0] = '\0';
     successor.proof_intent[0] = '\0';
+    dl_publication_clear(&successor);
     successor.dimension[0] = '\0';
     for (size_t i = at + 1; i < nrows; i++) rows[i - 1] = rows[i];
     rows[nrows - 1] = successor;
@@ -3346,6 +3520,16 @@ static void dl_step_reply(struct zcl_command_reply *reply,
         (void)json_push_kv_int(&reply->data, "attempt", row->attempt);
         if (row->pushed[0])
             (void)json_push_kv_str(&reply->data, "tip_pushed", row->pushed);
+        if (row->remote_signature[0]) {
+            (void)json_push_kv_str(&reply->data, "remote_tip",
+                                   row->remote_tip);
+            (void)json_push_kv_str(&reply->data, "remote_source",
+                                   row->remote_source);
+            (void)json_push_kv_str(&reply->data, "remote_signer",
+                                   row->remote_signer);
+            (void)json_push_kv_str(&reply->data, "remote_signature",
+                                   row->remote_signature);
+        }
         if (row->dimension[0])
             (void)json_push_kv_str(&reply->data, "dimension",
                                    row->dimension);
@@ -5242,12 +5426,68 @@ static bool dl_step_after_rebase(const struct dl_dirs *d, struct dl_row *row,
 
 /* A missing observation and a reconciled landing both finish this step.
  * Only a fresh remote that does not contain the candidate permits proof. */
+static bool dl_publication_verify(const struct dl_dirs *d,
+                                   const struct dl_row *row);
+static bool dl_publication_remote_observe(const struct dl_dirs *d,
+                                           const struct dl_row *row,
+                                           char tip[65], char source[65]);
+static bool dl_publication_receipt_seal(struct dl_row *row);
+static bool dl_publication_receipt_verify(const struct dl_row *row);
+
+static bool dl_reconcile_signed_landing(const struct dl_dirs *d,
+                                        struct dl_row *row,
+                                        const char *observed_main,
+                                        struct zcl_command_reply *reply)
+{
+        char output[512];
+        const char *ancestor[] = { "--no-replace-objects", "merge-base",
+            "--is-ancestor", row->local, observed_main, NULL };
+        if (dl_git(d->wt, ancestor, output, sizeof(output),
+                   DL_GIT_TIMEOUT_MS) != 0)
+            return false;
+        if (!dl_publication_verify(d, row)) {
+            dl_fail(reply, "PUBLICATION_INTENT_INVALID", "observe_remote",
+                    "stored Git landing intent no longer verifies", d->land);
+            return true;
+        }
+        if (!row->remote_signature[0]) {
+            if (!dl_publication_remote_observe(d, row, row->remote_tip,
+                                                row->remote_source) ||
+                !dl_publication_receipt_seal(row) ||
+                !dl_commit_row(d, row, false)) {
+                dl_fail(reply, "REMOTE_RECEIPT_UNAVAILABLE", "observe_remote",
+                        "independent fetch or signed receipt persistence failed",
+                        d->land);
+                return true;
+            }
+        }
+        if (!dl_publication_receipt_verify(row)) {
+            dl_fail(reply, "REMOTE_RECEIPT_INVALID", "observe_remote",
+                    "persisted independent remote receipt is invalid",
+                    d->land);
+            return true;
+        }
+        (void)snprintf(row->pushed, sizeof(row->pushed), "%s", row->local);
+        (void)snprintf(row->state, sizeof(row->state), "landed");
+        row->phase[0] = '\0';
+        (void)snprintf(row->detail, sizeof(row->detail), "%s",
+                       "independent fetch, source and ancestry receipt verified");
+        if (dl_commit_or_report(d, row, true, reply, "landed"))
+            dl_step_reply(reply, row, "landed");
+        return true;
+}
+
 static bool dl_reconcile_landing(const struct dl_dirs *d, struct dl_row *row,
                                   char observed_main[80], bool mutated,
                                   struct zcl_command_reply *reply)
 {
     if (!dl_observe_remote_main(d, row, observed_main, mutated, reply))
         return true;
+    if (row->publication_signature[0])
+        return dl_reconcile_signed_landing(d, row, observed_main, reply);
+    const char *allow_unsigned = dl_allow_unsigned();
+    if (!(allow_unsigned && strcmp(allow_unsigned, "1") == 0 && dl_stub()))
+        return false;
     if (!dl_already_landed(d, row, observed_main))
         return false;
     if (dl_commit_or_report(d, row, true, reply, "landed"))
@@ -5274,6 +5514,7 @@ static bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row)
     if (!dl_sha_ok(tree))
         return false;
     (void)snprintf(row->tree, sizeof(row->tree), "%s", tree);
+    dl_publication_clear(row);
     n = snprintf(row->proof_intent, sizeof(row->proof_intent), "%s@%s",
                  row->local, row->base);
     return n > 0 && (size_t)n < sizeof(row->proof_intent);
@@ -5447,6 +5688,385 @@ static bool dl_push_proven_pair(const struct dl_dirs *d,
     return dl_git(d->wt, push, out, out_cap, DL_GIT_TIMEOUT_MS) == 0;
 }
 
+/* Git landing has its own local publication intent. It binds the existing
+ * exact proof and configured origin, not a Commons package publication. */
+static bool dl_publication_file_sha256(const char *path, uint64_t max_bytes,
+                                        char out[65])
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    struct sha256_ctx hash;
+    uint8_t bytes[65536], digest[32];
+    uint64_t offset = 0;
+    bool ok;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        return false;
+    ok = platform_positioned_file_snapshot(&file, &before) &&
+         before.size > 0 && before.size <= max_bytes;
+    sha256_init(&hash);
+    while (ok && offset < before.size) {
+        size_t want = before.size - offset > sizeof(bytes) ? sizeof(bytes) :
+                      (size_t)(before.size - offset);
+        int64_t got = platform_positioned_file_read(&file, bytes, want, offset);
+        if (got <= 0) { ok = false; break; }
+        sha256_write(&hash, bytes, (size_t)got);
+        offset += (uint64_t)got;
+    }
+    ok = ok && platform_positioned_file_snapshot(&file, &after) &&
+         platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (!ok) return false;
+    sha256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
+    return true;
+}
+
+static bool dl_publication_target(const struct dl_dirs *d, char out[65])
+{
+    char fetch[4096], push[4096];
+    const char *fetch_args[] = { "remote", "get-url", "origin", NULL };
+    const char *push_args[] = { "remote", "get-url", "--push", "origin", NULL };
+    static const char domain[] = "zcl.dev_land.git_target.v1\nrefs/heads/main\n";
+    struct sha256_ctx hash;
+    uint8_t digest[32];
+    if (dl_git(d->wt, fetch_args, fetch, sizeof(fetch), DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(d->wt, push_args, push, sizeof(push), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(fetch);
+    dl_trim(push);
+    if (!fetch[0] || strcmp(fetch, push) != 0 ||
+        strchr(fetch, '\n') || strchr(fetch, '\r'))
+        return false;
+    sha256_init(&hash);
+    sha256_write(&hash, (const uint8_t *)domain, sizeof(domain) - 1);
+    sha256_write(&hash, (const uint8_t *)fetch, strlen(fetch));
+    sha256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
+    return true;
+}
+
+static bool dl_publication_bundle_path(const struct dl_dirs *d,
+                                        const struct dl_row *row,
+                                        char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "%s/publication.%lld.%.40s.bundle",
+                     d->land, row->seq, row->local);
+    return dl_sha_ok(row->local) && n > 0 && (size_t)n < cap;
+}
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static bool dl_publication_tree_check(const struct dl_dirs *d,
+                                       const struct dl_row *row)
+{
+    char rev[96], observed[128], pair[176];
+    if (snprintf(rev, sizeof(rev), "%s^{tree}", row->local) >=
+            (int)sizeof(rev) ||
+        snprintf(pair, sizeof(pair), "%s@%s", row->local, row->base) >=
+            (int)sizeof(pair) || strcmp(pair, row->proof_intent) != 0)
+        return false;
+    const char *args[] = { "rev-parse", "--verify", "--quiet", rev, NULL };
+    if (dl_git(d->wt, args, observed, sizeof(observed), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(observed);
+    return strcmp(observed, row->tree) == 0;
+}
+#endif
+
+static bool dl_publication_message(const struct dl_row *row,
+                                    char *out, size_t cap)
+{
+    static const char domain[] = "zcl.dev_land.publication_intent.v1";
+    int n;
+    if (!row || !dl_hex_ok(row->publication_target, 64) ||
+        !dl_hex_ok(row->publication_proof, 64) ||
+        !dl_hex_ok(row->publication_bundle, 64) ||
+        !dl_sha_ok(row->base) || !dl_sha_ok(row->local) ||
+        !dl_sha_ok(row->tree) || !row->proof_intent[0])
+        return false;
+    n = snprintf(out, cap,
+        "%s\noperator\nrefs/heads/main\n%lld\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
+        domain, row->seq, row->publication_target, row->base, row->local,
+        row->tree, row->publication_proof, row->publication_bundle,
+        row->proof_intent);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool dl_publication_proof_digest(const struct dl_dirs *d,
+                                         const struct dl_row *row,
+                                         char digest[65]);
+
+static bool dl_publication_verify(const struct dl_dirs *d,
+                                   const struct dl_row *row)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    char message[1024], target[65], bundle_path[4096 + 128];
+    char bundle[65], proof[65];
+    uint8_t signer[32], signature[64];
+    const char *why = NULL;
+    if (!dl_publication_shape_ok(row) ||
+        !row->publication_signature[0] ||
+        !dl_publication_message(row, message, sizeof(message)) ||
+        !zcl_hex_decode_lower(row->publication_signer, signer, sizeof(signer)) ||
+        !zcl_hex_decode_lower(row->publication_signature, signature,
+                              sizeof(signature)) ||
+        !zcl_dev_proof_signer_verify((const uint8_t *)message, strlen(message),
+            signer, signature, &why) ||
+        !dl_publication_tree_check(d, row) ||
+        !dl_publication_target(d, target) ||
+        strcmp(target, row->publication_target) != 0 ||
+        !dl_publication_bundle_path(d, row, bundle_path,
+                                    sizeof(bundle_path)) ||
+        !dl_publication_file_sha256(bundle_path, 512u * 1024u * 1024u,
+                                    bundle) ||
+        strcmp(bundle, row->publication_bundle) != 0 ||
+        !dl_publication_proof_digest(d, row, proof) ||
+        strcmp(proof, row->publication_proof) != 0)
+        return false;
+    return true;
+#else
+    (void)d; (void)row;
+    return false;
+#endif
+}
+
+static bool dl_publication_bundle_make(const struct dl_dirs *d,
+                                        const struct dl_row *row,
+                                        char digest[65])
+{
+#if defined(_WIN32)
+    (void)d; (void)row; (void)digest;
+    return false;
+#else
+    char path[4096 + 128], tmp[4096 + 160], excluded[80];
+    char head[128], output[2048];
+    int fd;
+    if (!dl_publication_bundle_path(d, row, path, sizeof(path)) ||
+        snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid()) >=
+            (int)sizeof(tmp) ||
+        snprintf(excluded, sizeof(excluded), "^%s", row->base) >=
+            (int)sizeof(excluded))
+        return false;
+    const char *head_args[] = { "rev-parse", "HEAD", NULL };
+    if (dl_git(d->wt, head_args, head, sizeof(head), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(head);
+    if (strcmp(head, row->local) != 0)
+        return false;
+    const char *create[] = { "bundle", "create", tmp, "HEAD", excluded, NULL };
+    const char *verify[] = { "bundle", "verify", tmp, NULL };
+    bool ok = dl_git(d->wt, create, output, sizeof(output), DL_GIT_TIMEOUT_MS) == 0 &&
+              dl_git(d->wt, verify, output, sizeof(output), DL_GIT_TIMEOUT_MS) == 0;
+    if (ok) {
+        fd = open(tmp, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        ok = fd >= 0 && fsync(fd) == 0;
+        if (fd >= 0) (void)close(fd);
+    }
+    if (ok)
+        ok = rename(tmp, path) == 0 && dl_queue_parent_flush(d->land);
+    if (!ok) {
+        (void)unlink(tmp);
+        return false;
+    }
+    return dl_publication_file_sha256(path, 512u * 1024u * 1024u, digest);
+#endif
+}
+
+static bool dl_publication_proof_digest(const struct dl_dirs *d,
+                                         const struct dl_row *row,
+                                         char digest[65])
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
+    if (dl_stub() && strcmp(dl_stub(), "pass") == 0) {
+        struct sha256_ctx hash;
+        uint8_t bytes[32];
+        static const char domain[] = "zcl.dev_land.test_proof_stub.v1";
+        sha256_init(&hash);
+        sha256_write(&hash, (const uint8_t *)domain, sizeof(domain) - 1);
+        sha256_write(&hash, (const uint8_t *)row->proof_intent,
+                     strlen(row->proof_intent));
+        sha256_finalize(&hash, bytes);
+        zcl_hex_encode(bytes, sizeof(bytes), digest);
+        return true;
+    }
+#endif
+    struct zcl_dev_proof_status status = {0};
+    return !dl_stub() &&
+        zcl_dev_proof_status_read(d->wt, row->local, row->base, &status) &&
+        status.state == ZCL_DEV_PROOF_STATE_PASSED &&
+        dl_publication_file_sha256(status.receipt_path, 1024u * 1024u,
+                                   digest);
+#else
+    (void)d; (void)row; (void)digest;
+    return false;
+#endif
+}
+
+static bool dl_publication_sign(struct dl_row *row)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    char message[1024];
+    uint8_t signer[32], signature[64];
+    const char *why = NULL;
+    if (!dl_publication_message(row, message, sizeof(message)) ||
+        !zcl_dev_proof_signer_sign((const uint8_t *)message, strlen(message),
+                                   signer, signature, &why))
+        return false;
+    zcl_hex_encode(signer, sizeof(signer), row->publication_signer);
+    zcl_hex_encode(signature, sizeof(signature), row->publication_signature);
+    return true;
+#else
+    (void)row;
+    return false;
+#endif
+}
+
+static bool dl_publication_fetched_objects_check(const char *scratch,
+                                                  const struct dl_row *row,
+                                                  const char *tip,
+                                                  char source[65])
+{
+    char output[2048], head_tree_rev[96], tip_tree_rev[96];
+    char head_tree[128], tip_tree[128];
+    const char *base_head[] = { "--no-replace-objects", "merge-base",
+        "--is-ancestor", row->base, row->local, NULL };
+    const char *head_tip[] = { "--no-replace-objects", "merge-base",
+        "--is-ancestor", row->local, tip, NULL };
+    if (dl_git(scratch, base_head, output, sizeof(output), DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(scratch, head_tip, output, sizeof(output), DL_GIT_TIMEOUT_MS) != 0 ||
+        snprintf(head_tree_rev, sizeof(head_tree_rev), "%s^{tree}",
+                 row->local) >= (int)sizeof(head_tree_rev) ||
+        snprintf(tip_tree_rev, sizeof(tip_tree_rev), "%s^{tree}", tip) >=
+            (int)sizeof(tip_tree_rev))
+        return false;
+    const char *head_tree_args[] = { "rev-parse", "--verify", head_tree_rev,
+                                    NULL };
+    const char *tip_tree_args[] = { "rev-parse", "--verify", tip_tree_rev,
+                                   NULL };
+    const char *fsck[] = { "fsck", "--strict", "--no-reflogs", NULL };
+    if (dl_git(scratch, head_tree_args, head_tree, sizeof(head_tree),
+               DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(scratch, tip_tree_args, tip_tree, sizeof(tip_tree),
+               DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(scratch, fsck, output, sizeof(output), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(head_tree);
+    dl_trim(tip_tree);
+    if (!dl_sha_ok(tip_tree) || strcmp(head_tree, row->tree) != 0)
+        return false;
+    (void)snprintf(source, 65, "%s", tip_tree);
+    return true;
+}
+
+/* Fetch into a new object store: neither the lander's tracking ref nor its
+ * local object database is evidence that the remote contains these bytes. */
+static bool dl_publication_remote_observe(const struct dl_dirs *d,
+                                           const struct dl_row *row,
+                                           char tip[65], char source[65])
+{
+#if defined(_WIN32)
+    (void)d; (void)row; (void)tip; (void)source;
+    return false;
+#else
+    char scratch[4096 + 96], locator[4096], output[2048];
+    char target[65];
+    bool ok = false;
+    tip[0] = '\0';
+    source[0] = '\0';
+    if (!dl_publication_target(d, target) ||
+        strcmp(target, row->publication_target) != 0 ||
+        snprintf(scratch, sizeof(scratch), "%s/observe.%lld.XXXXXX",
+                 d->land, row->seq) >= (int)sizeof(scratch) ||
+        !mkdtemp(scratch))
+        return false;
+    const char *remote[] = { "remote", "get-url", "origin", NULL };
+    const char *init[] = { "init", "--bare", "--quiet", NULL };
+    if (dl_git(d->wt, remote, locator, sizeof(locator), DL_GIT_TIMEOUT_MS) != 0)
+        goto done;
+    dl_trim(locator);
+    if (!locator[0] || locator[0] == '-' || strchr(locator, '\n'))
+        goto done;
+    const char *fetch[] = { "fetch", "--quiet", "--no-tags", "--refmap=",
+                           "--", locator, "refs/heads/main", NULL };
+    const char *fetched[] = { "rev-parse", "--verify", "FETCH_HEAD", NULL };
+    if (dl_git(scratch, init, output, sizeof(output), DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(scratch, fetch, output, sizeof(output), DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(scratch, fetched, output, sizeof(output), DL_GIT_TIMEOUT_MS) != 0)
+        goto done;
+    dl_trim(output);
+    if (!dl_sha_ok(output)) goto done;
+    (void)snprintf(tip, 65, "%s", output);
+    ok = dl_publication_fetched_objects_check(scratch, row, tip, source);
+done:
+    if (!zcl_tree_remove(scratch).ok) ok = false;
+    if (!ok) { tip[0] = '\0'; source[0] = '\0'; }
+    return ok;
+#endif
+}
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static bool dl_publication_receipt_message(const struct dl_row *row,
+                                             char *out, size_t cap)
+{
+    int n;
+    if (!dl_publication_shape_ok(row) ||
+        !row->publication_signature[0] ||
+        !dl_sha_ok(row->remote_tip) || !dl_sha_ok(row->remote_source))
+        return false;
+    n = snprintf(out, cap,
+        "zcl.dev_land.remote_receipt.v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
+        row->publication_target, row->publication_signature,
+        row->base, row->local, row->tree, row->remote_tip,
+        row->remote_source);
+    return n > 0 && (size_t)n < cap;
+}
+#endif
+
+static bool dl_publication_receipt_seal(struct dl_row *row)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    char message[1024];
+    uint8_t signer[32], signature[64];
+    const char *why = NULL;
+    if (!dl_publication_receipt_message(row, message, sizeof(message)) ||
+        !zcl_dev_proof_signer_sign((const uint8_t *)message, strlen(message),
+                                   signer, signature, &why))
+        return false;
+    zcl_hex_encode(signer, sizeof(signer), row->remote_signer);
+    zcl_hex_encode(signature, sizeof(signature), row->remote_signature);
+    return true;
+#else
+    (void)row;
+    return false;
+#endif
+}
+
+static bool dl_publication_receipt_verify(const struct dl_row *row)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    char message[1024];
+    uint8_t signer[32], signature[64];
+    const char *why = NULL;
+    return dl_remote_receipt_shape_ok(row) &&
+        row->remote_signature[0] &&
+        dl_publication_receipt_message(row, message, sizeof(message)) &&
+        zcl_hex_decode_lower(row->remote_signer, signer, sizeof(signer)) &&
+        zcl_hex_decode_lower(row->remote_signature, signature,
+                             sizeof(signature)) &&
+        zcl_dev_proof_signer_verify((const uint8_t *)message, strlen(message),
+                                    signer, signature, &why);
+#else
+    (void)row;
+    return false;
+#endif
+}
+
+static bool dl_resume_phase_ready(const char *phase)
+{
+    return strcmp(phase, "prove") == 0 || strcmp(phase, "push") == 0;
+}
+
 /* A changed base invalidates only this exact proof pair. Keep the submitted
  * time and queue position through bounded retries, then yield to other queued
  * work. The old pair stays in the attempt log and proof store, never as
@@ -5460,8 +6080,18 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
                    "superseded proof local=%.64s base=%.64s tree=%.64s\n",
                    row->local, row->base, row->tree);
     dl_log(row, prior);
+    if (row->publication_signature[0]) {
+        char signed_prior[512];
+        (void)snprintf(signed_prior, sizeof(signed_prior),
+            "stale signed intent target=%.64s proof=%.64s bundle=%.64s "
+            "signer=%.64s signature=%.128s\n",
+            row->publication_target, row->publication_proof,
+            row->publication_bundle, row->publication_signer,
+            row->publication_signature);
+        dl_log(row, signed_prior);
+    }
     row->attempt++;
-    if (row->attempt > DL_ATTEMPT_MAX) {
+    if (row->publication_signature[0] || row->attempt > DL_ATTEMPT_MAX) {
         long long predecessor = row->seq;
         (void)snprintf(row->detail, sizeof(row->detail),
                        "main moved to %.12s; successor of seq=%lld",
@@ -5480,6 +6110,7 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
     (void)snprintf(row->phase, sizeof(row->phase), "rebase");
     row->dimension[0] = '\0';
     row->proof_intent[0] = '\0';
+    dl_publication_clear(row);
     (void)snprintf(row->detail, sizeof(row->detail),
                    "origin/main moved to %.64s; successor queued",
                    observed_main);
@@ -5489,11 +6120,67 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
         dl_step_reply(reply, row, "rebased");
 }
 
+static bool dl_push_intent_ready(const struct dl_dirs *d,
+                                 const struct dl_row *row,
+                                 struct zcl_command_reply *reply)
+{
+    const char *allow_unsigned = dl_allow_unsigned();
+    bool fixture_unsigned = allow_unsigned && strcmp(allow_unsigned, "1") == 0 &&
+                            dl_stub() != NULL;
+    if (!fixture_unsigned && !row->publication_signature[0]) {
+        (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED,
+                               "PUBLICATION_INTENT_REQUIRED", "push_intent",
+                               true, false,
+                               "canonical signed publication intent is required before push",
+                               d->land);
+        return false;
+    }
+    if (row->publication_signature[0] && !dl_publication_verify(d, row)) {
+        dl_fail(reply, "PUBLICATION_INTENT_INVALID", "push_intent",
+                "signed Git landing intent or attached bundle changed",
+                d->land);
+        return false;
+    }
+    return true;
+}
+
 static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply)
 {
     char buf[DL_GIT_CAP], observed_main[80];
+    /* The legacy pair receipt is proof of a build, not publication authority.
+     * Keep unsigned landing confined to the existing isolated test fixture;
+     * production must wait for a verified, durable canonical intent. */
+    if (!dl_push_intent_ready(d, row, reply))
+        return;
+    if (!dl_observe_remote_main(d, row, observed_main, false, reply))
+        return;
+    if (strcmp(observed_main, row->base) != 0) {
+        dl_step_successor(d, row, observed_main, reply);
+        return;
+    }
+    /* A restart must be able to distinguish an unattempted proven pair from
+     * a push whose result was lost. Commit the exact pair and transition
+     * before Git can mutate the remote; failed persistence forbids dispatch. */
+    /* Reflush even when a prior attempt left phase=push: a failed directory
+     * sync can leave the renamed row visible without proving its durability. */
     (void)snprintf(row->phase, sizeof(row->phase), "push");
+    if (!dl_commit_row(d, row, false)) {
+        dl_log(row, "pre-push checkpoint failed; remote untouched\n");
+        (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED,
+                               "PUSH_INTENT_PERSIST_FAILED", "push_intent",
+                               true, false,
+                               "cannot persist the exact push pair; retry before dispatch",
+                               d->land);
+        (void)snprintf(reply->error.next_action,
+                       sizeof(reply->error.next_action), "%s",
+                       "z23-dev dev land step");
+        return;
+    }
     {
         /* No --no-verify: this pushes through the installed pre-push hook
          * like everyone else. dl_wt_ensure() already armed d->wt's own
@@ -5536,9 +6223,7 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
     }
     /* A successful push acknowledgement is not a fresh remote observation.
      * Keep the inflight request until the remote independently confirms it. */
-    if (!dl_observe_remote_main(d, row, observed_main, true, reply))
-        return;
-    if (!dl_already_landed(d, row, observed_main)) {
+    if (!dl_reconcile_landing(d, row, observed_main, true, reply)) {
         dl_log(row, "post-push remote main does not confirm the candidate; "
                     "retaining request for retry\n");
         (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
@@ -5552,10 +6237,6 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
                        "%s", "z23-dev dev land step");
         return;
     }
-    (void)snprintf(row->detail, sizeof(row->detail), "%s",
-                   "independently observed the candidate on origin/main");
-    if (dl_commit_or_report(d, row, true, reply, "landed"))
-        dl_step_reply(reply, row, "landed");
 }
 
 static bool dl_resume_proof_read(const struct dl_dirs *d, struct dl_row *row,
@@ -5648,7 +6329,7 @@ static void dl_test_die_after_proof(void)
      * first, the same way dl_step_start does before ever starting one. */
     if (dl_reconcile_landing(d, row, observed_main, false, reply))
         return;
-    if (strcmp(row->phase, "prove") != 0) {
+    if (!dl_resume_phase_ready(row->phase)) {
         /* A step died between phases. Re-drive from the rebase rather than
          * guessing what the dead step had already done. */
         (void)snprintf(row->phase, sizeof(row->phase), "rebase");
@@ -5995,6 +6676,98 @@ static void dl_drive(const struct zcl_command_request *req,
 
 /* ── dispatcher ────────────────────────────────────────────────────────── */
 
+static void dl_attach_seal(const struct dl_dirs *d, struct dl_row *row,
+                            const char *qpath,
+                            struct zcl_command_reply *reply)
+{
+    char observed[80], output[512], message[1024];
+    if (!dl_publication_proof_digest(d, row, row->publication_proof)) {
+        dl_fail(reply, "PUBLICATION_PROOF_REQUIRED", "attach",
+                "exact signed proof receipt is not PASS", row->proof_intent);
+        return;
+    }
+    if (!dl_observe_remote_main(d, row, observed, false, reply))
+        return;
+    if (strcmp(observed, row->base) != 0) {
+        dl_fail(reply, "EXPECTED_BASE_MISMATCH", "attach",
+                "remote main moved; preserve this pair and cut a successor",
+                observed);
+        return;
+    }
+    const char *ancestry[] = { "--no-replace-objects", "merge-base",
+        "--is-ancestor", row->base, row->local, NULL };
+    if (dl_git(d->wt, ancestry, output, sizeof(output), DL_GIT_TIMEOUT_MS) != 0 ||
+        !dl_publication_target(d, row->publication_target) ||
+        !dl_publication_bundle_make(d, row, row->publication_bundle) ||
+        !dl_publication_sign(row) ||
+        !dl_publication_message(row, message, sizeof(message)) ||
+        !dl_publication_verify(d, row)) {
+        dl_fail(reply, "PUBLICATION_INTENT_INVALID", "attach",
+                "cannot seal exact target, proof, base, head and bundle",
+                d->land);
+        return;
+    }
+    if (!dl_commit_row(d, row, false)) {
+        dl_fail(reply, "PUBLICATION_INTENT_PERSIST_FAILED", "attach",
+                "signed landing intent was not durable; push remains blocked",
+                qpath);
+        return;
+    }
+    dl_step_reply(reply, row, "attached");
+}
+
+static void dl_attach(const struct zcl_command_request *req,
+                      struct zcl_command_reply *reply)
+{
+    struct dl_dirs d;
+    struct dl_row *rows = NULL, row = {0};
+    size_t count = 0;
+    long long seq = 0;
+    char qpath[4096 + 32];
+    int slot;
+    bool found = false;
+    if (!dl_seq_in(req, &seq)) {
+        dl_fail(reply, "BAD_INPUT", "attach",
+                "attach needs the exact live request sequence", "input.seq");
+        return;
+    }
+    if (!dl_dirs_make(&d) ||
+        snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.land) >=
+            (int)sizeof(qpath)) {
+        dl_fail(reply, "STATE_DIR_FAILED", "attach",
+                "cannot resolve the existing landing queue", "platform_state_root");
+        return;
+    }
+    slot = dl_step_lock(d.land);
+    if (slot < 0) { dl_step_busy(reply, d.land); return; }
+    if (!dl_load_rows(qpath, &rows, &count, NULL, 0)) {
+        dl_fail(reply, "QUEUE_READ_FAILED", "attach",
+                "cannot read the existing landing queue", qpath);
+        goto done;
+    }
+    for (size_t i = 0; i < count; i++)
+        if (rows[i].seq == seq) { row = rows[i]; found = true; break; }
+    if (!found || strcmp(row.state, "inflight") != 0 ||
+        !dl_resume_phase_ready(row.phase) ||
+        !dl_sha_ok(row.base) || !dl_sha_ok(row.local)) {
+        dl_fail(reply, "PUBLICATION_PAIR_UNAVAILABLE", "attach",
+                "attach requires one live exact proven pair", "dev land status");
+        goto done;
+    }
+    if (row.publication_signature[0]) {
+        if (!dl_publication_verify(&d, &row))
+            dl_fail(reply, "PUBLICATION_INTENT_INVALID", "attach",
+                    "stored signed intent or attachment is invalid", qpath);
+        else
+            dl_step_reply(reply, &row, "attached");
+        goto done;
+    }
+    dl_attach_seal(&d, &row, qpath, reply);
+done:
+    free(rows);
+    dl_unlock(slot);
+}
+
 void zcl_native_handle_dev_land(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
@@ -6003,19 +6776,23 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
         return;
     if (!request || !request->input) {
         dl_fail(reply, "BAD_INPUT", "route",
-                "dev land needs an action: submit|status|step|drive|cancel",
+                "dev land needs an action: submit|attach|status|step|drive|cancel",
                 "request.input was missing");
         return;
     }
     action = dl_str(request, "action");
     if (!action) {
         dl_fail(reply, "BAD_INPUT", "route",
-                "dev land needs an action: submit|status|step|drive|cancel",
+                "dev land needs an action: submit|attach|status|step|drive|cancel",
                 "input.action missing or empty");
         return;
     }
     if (strcmp(action, "submit") == 0) {
         dl_submit(request, reply);
+        return;
+    }
+    if (strcmp(action, "attach") == 0) {
+        dl_attach(request, reply);
         return;
     }
     if (strcmp(action, "status") == 0) {
@@ -6035,6 +6812,6 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
         return;
     }
     dl_fail(reply, "UNKNOWN_ACTION", "route",
-            "action is one of submit|status|step|drive|cancel",
+            "action is one of submit|attach|status|step|drive|cancel",
             "input.action unknown");
 }

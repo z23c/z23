@@ -1,14 +1,22 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Observe exact committed Git blobs, paths and modes through isolated metadata. */
 #include "dev_git_tree.h"
+#include "base/bytes.h"
+#include "base/hex.h"
+#include "base/serialize_le.h"
+#include "crypto/sha256.h"
 #include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
 #include "platform/temp_directory.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
+#include "util/file_tree_ops.h"
 #include "vcs/vcs_object.h"
 #include "vcs/vcs.h"
+#include "vcs/zcode_dev.h"
+#include "vcs/zcode_publication.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -223,6 +231,45 @@ static int dgt_path_compare(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
+static int dgt_link_compare(const void *a, const void *b)
+{
+    const struct zcl_dev_gitlink *left = a, *right = b;
+    return strcmp(left->path, right->path);
+}
+
+static struct zcl_result dgt_source_closure(
+    struct zcl_dev_git_tree *tree)
+{
+    if (!vcs_manifest_tree_hash(&tree->files, tree->file_manifest_root))
+        return ZCL_ERR(-1, "git-tree: file manifest root unavailable");
+    if (tree->gitlinks > 1)
+        qsort(tree->links, tree->gitlinks, sizeof(*tree->links), dgt_link_compare);
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    static const char domain[] = "zcl.dev.git_source_closure.v1";
+    sha3_256_write(&hash, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&hash, tree->file_manifest_root, 32);
+    uint8_t count[8];
+    zcl_write_u64_le(count, tree->gitlinks);
+    sha3_256_write(&hash, count, sizeof(count));
+    for (size_t i = 0; i < tree->gitlinks; i++) {
+        const struct zcl_dev_gitlink *link = &tree->links[i];
+        size_t path_len = strlen(link->path), oid_len = strlen(link->oid);
+        uint8_t path_size[2], oid[32], oid_bytes = (uint8_t)(oid_len / 2u);
+        if (path_len == 0 || path_len > UINT16_MAX ||
+            !dgt_oid(link->oid, oid_len) ||
+            !zcl_hex_decode_lower(link->oid, oid, oid_bytes))
+            return ZCL_ERR(-1, "git-tree: invalid source dependency");
+        zcl_write_u16_le(path_size, (uint16_t)path_len);
+        sha3_256_write(&hash, path_size, sizeof(path_size));
+        sha3_256_write(&hash, (const uint8_t *)link->path, path_len);
+        sha3_256_write(&hash, &oid_bytes, 1);
+        sha3_256_write(&hash, oid, oid_bytes);
+    }
+    sha3_256_finalize(&hash, tree->source_closure_root);
+    return ZCL_OK;
+}
+
 static bool dgt_ancestor_present(const struct dgt_context *ctx, const char *path)
 {
     char prefix[VCS_PATH_MAX];
@@ -302,7 +349,9 @@ static struct zcl_result dgt_records(
             return ZCL_ERR(-1, "git-tree: processing deadline exhausted");
     }
     vcs_manifest_sort(&tree->files);
-    return dgt_paths_check(ctx);
+    struct zcl_result result = dgt_paths_check(ctx);
+    if (result.ok) result = dgt_source_closure(tree);
+    return result;
 }
 
 static struct zcl_result dgt_read(
@@ -349,6 +398,395 @@ struct zcl_result zcl_dev_git_tree_read(
         zcl_dev_git_tree_free(out);
     }
     return r;
+#endif
+}
+
+static bool dgt_dependency_inputs_valid(const char *repo, const char *head,
+    const struct zcl_dev_git_dependency_input *inputs, size_t input_count,
+    int timeout_ms, const struct zcl_dev_git_dependency_check *out)
+{
+    return out && repo && head && (!input_count || inputs) &&
+        input_count <= 32768u && timeout_ms > 0;
+}
+
+#ifndef _WIN32
+static struct zcl_result dgt_dependency_link_check(
+    const struct zcl_dev_gitlink *link,
+    const struct zcl_dev_git_dependency_input *input,
+    int64_t deadline, struct sha3_256_ctx *hash)
+{
+    if (!input->path || !input->repo_locator || !input->repo_locator[0] ||
+        strcmp(input->path, link->path) != 0 ||
+        !zcl_bytes_any_set(input->expected_source_closure_root, 32))
+        return ZCL_ERR(-1, "git-dependencies: locator or pinned path mismatch");
+    int64_t left = deadline - platform_time_monotonic_ms();
+    if (left <= 0)
+        return ZCL_ERR(-1, "git-dependencies: observation deadline exhausted");
+    struct zcl_dev_git_tree dependency = {0};
+    struct zcl_result result = zcl_dev_git_tree_read(input->repo_locator,
+        link->oid, left > INT_MAX ? INT_MAX : (int)left, &dependency);
+    if (result.ok && (dependency.gitlinks != 0 ||
+        memcmp(dependency.source_closure_root,
+               input->expected_source_closure_root, 32) != 0))
+        result = ZCL_ERR(-1, "git-dependencies: pinned source closure mismatch");
+    if (result.ok) {
+        size_t path_len = strlen(link->path), oid_len = strlen(link->oid);
+        uint8_t path_size[2], oid[32], oid_bytes = (uint8_t)(oid_len / 2u);
+        zcl_write_u16_le(path_size, (uint16_t)path_len);
+        if (!zcl_hex_decode_lower(link->oid, oid, oid_bytes))
+            result = ZCL_ERR(-1, "git-dependencies: invalid pinned object");
+        if (result.ok) {
+            sha3_256_write(hash, path_size, sizeof(path_size));
+            sha3_256_write(hash, (const uint8_t *)link->path, path_len);
+            sha3_256_write(hash, &oid_bytes, 1);
+            sha3_256_write(hash, oid, oid_bytes);
+            sha3_256_write(hash, dependency.source_closure_root, 32);
+        }
+    }
+    zcl_dev_git_tree_free(&dependency);
+    return result;
+}
+#endif
+
+struct zcl_result zcl_dev_git_tree_verify_dependencies(
+    const char *repo, const char *head,
+    const struct zcl_dev_git_dependency_input *inputs, size_t input_count,
+    int timeout_ms, struct zcl_dev_git_dependency_check *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!dgt_dependency_inputs_valid(repo, head, inputs, input_count,
+                                     timeout_ms, out))
+        return ZCL_ERR(-1, "git-dependencies: missing bounded inputs");
+#ifdef _WIN32
+    return ZCL_ERR(-1, "git-dependencies: native Git observation unavailable on Windows");
+#else
+    int64_t deadline = platform_time_monotonic_ms() + timeout_ms;
+    struct zcl_dev_git_tree super = {0};
+    struct zcl_result result = zcl_dev_git_tree_read(
+        repo, head, timeout_ms, &super);
+    if (!result.ok) return result;
+    if (super.gitlinks != input_count) {
+        zcl_dev_git_tree_free(&super);
+        return ZCL_ERR(-1, "git-dependencies: incomplete gitlink coverage");
+    }
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    static const char domain[] = "zcl.dev.git_dependency_observation.v1";
+    sha3_256_write(&hash, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&hash, super.source_closure_root, 32);
+    uint8_t count[8];
+    zcl_write_u64_le(count, input_count);
+    sha3_256_write(&hash, count, sizeof(count));
+    for (size_t i = 0; i < input_count; i++) {
+        result = dgt_dependency_link_check(&super.links[i], &inputs[i],
+                                           deadline, &hash);
+        if (!result.ok) break;
+    }
+    if (result.ok) {
+        memcpy(out->super_source_closure_root, super.source_closure_root, 32);
+        sha3_256_finalize(&hash, out->verified_dependency_root);
+        out->dependencies_verified = input_count;
+        out->complete = true;
+    }
+    zcl_dev_git_tree_free(&super);
+    return result;
+#endif
+}
+
+#ifndef _WIN32
+static struct zcl_result dgt_remote_run(int64_t deadline,
+    const char *const args[], void *out, size_t cap, size_t *out_len)
+{
+    *out_len = 0;
+    int64_t left = deadline - platform_time_monotonic_ms();
+    if (left <= 0) return ZCL_ERR(-1, "git-remote: observation deadline exhausted");
+    const char *argv[40] = {
+        "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LC_ALL=C",
+        "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=file:ssh:https",
+        "git", "--no-replace-objects", "-c", "protocol.allow=never",
+        "-c", "protocol.file.allow=always", "-c", "protocol.ssh.allow=always",
+        "-c", "protocol.https.allow=always",
+    };
+    size_t n = 18;
+    for (size_t i = 0; args[i]; i++) {
+        if (n + 1 >= sizeof(argv) / sizeof(argv[0]))
+            return ZCL_ERR(-1, "git-remote: argument budget exceeded");
+        argv[n++] = args[i];
+    }
+    argv[n] = NULL;
+    struct zcl_spawn_binary_observation observation = {0};
+    struct zcl_result result = zcl_spawn_capture_binary(argv, out, cap,
+        left > INT_MAX ? INT_MAX : (int)left, &observation);
+    if (result.ok) *out_len = observation.output_len;
+    return result;
+}
+
+static bool dgt_remote_ref_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+}
+
+static bool dgt_remote_ref_component(const char *s, size_t n)
+{
+    if (!n || s[0] == '.' || s[n - 1] == '.') return false;
+    if (n >= 5 && memcmp(s + n - 5, ".lock", 5) == 0) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!dgt_remote_ref_char(c)) return false;
+        if (i && c == '.' && s[i - 1] == '.') return false;
+    }
+    return true;
+}
+
+static bool dgt_remote_ref_valid(const char *ref)
+{
+    if (!ref) return false;
+    size_t n = strnlen(ref, VCS_ZCODE_PUBLICATION_REF_BYTES);
+    if (n <= 11 || n >= VCS_ZCODE_PUBLICATION_REF_BYTES ||
+        strncmp(ref, "refs/heads/", 11) != 0) return false;
+    size_t start = 11;
+    for (size_t i = start; i <= n; i++) {
+        if (i != n && ref[i] != '/') continue;
+        if (!dgt_remote_ref_component(ref + start, i - start)) return false;
+        start = i + 1;
+    }
+    return true;
+}
+
+static struct zcl_result dgt_remote_fetch(int64_t deadline,
+    const char *scratch, const char *locator, const char *ref,
+    size_t oid_len, char tip[65])
+{
+    char output[128]; size_t got = 0;
+    char template[PLATFORM_TEMP_PATH_MAX + 16];
+    if ((size_t)snprintf(template, sizeof(template), "%s/template", scratch) >= sizeof(template) ||
+        platform_directory_create(template, 0700) != 0)
+        return ZCL_ERR(-1, "git-remote: empty hook template unavailable");
+    const char *init_sha1[] = { "init", "--bare", "--quiet", "--template", template, scratch, NULL };
+    const char *init_sha256[] = {
+        "init", "--bare", "--quiet", "--object-format=sha256", "--template", template, scratch, NULL
+    };
+    struct zcl_result result = dgt_remote_run(deadline,
+        oid_len == 64 ? init_sha256 : init_sha1, output, sizeof(output), &got);
+    if (!result.ok) return ZCL_ERR(-1, "git-remote: private repository initialization failed");
+    char refspec[VCS_ZCODE_PUBLICATION_REF_BYTES + 32];
+    int written = snprintf(refspec, sizeof(refspec),
+        "%s:refs/heads/observed", ref);
+    if (written <= 0 || (size_t)written >= sizeof(refspec))
+        return ZCL_ERR(-1, "git-remote: target ref exceeds bound");
+    const char *fetch[] = { "--git-dir", scratch, "fetch", "--quiet",
+        "--no-tags", "--no-write-fetch-head", "--depth=128", locator,
+        refspec, NULL };
+    result = dgt_remote_run(deadline, fetch, output, sizeof(output), &got);
+    if (!result.ok) return ZCL_ERR(-1, "git-remote: fresh target fetch failed");
+    const char *resolve[] = { "--git-dir", scratch, "rev-parse", "--verify",
+        "refs/heads/observed^{commit}", NULL };
+    result = dgt_remote_run(deadline, resolve, output, sizeof(output), &got);
+    if (!result.ok || got != oid_len + 1 || output[oid_len] != '\n')
+        return ZCL_ERR(-1, "git-remote: fetched tip is not one exact commit");
+    memcpy(tip, output, oid_len);
+    tip[oid_len] = '\0';
+    if (!dgt_oid(tip, oid_len))
+        return ZCL_ERR(-1, "git-remote: malformed fetched tip");
+    return ZCL_OK;
+}
+
+static struct zcl_result dgt_remote_ancestry(int64_t deadline,
+    const char *scratch, const char *base, const char *head,
+    const char *tip)
+{
+    char output[32]; size_t got = 0;
+    const char *first[] = { "--git-dir", scratch, "merge-base",
+        "--is-ancestor", base, head, NULL };
+    const char *second[] = { "--git-dir", scratch, "merge-base",
+        "--is-ancestor", head, tip, NULL };
+    if (!dgt_remote_run(deadline, first, output, sizeof(output), &got).ok ||
+        !dgt_remote_run(deadline, second, output, sizeof(output), &got).ok)
+        return ZCL_ERR(-1, "git-remote: expected ancestry unavailable or divergent");
+    return ZCL_OK;
+}
+
+static void dgt_remote_roots(const uint8_t target[32], const char *ref,
+    const char *base, const char *head,
+    const struct zcl_dev_git_remote_observation *observation,
+    uint8_t ancestry[32], uint8_t evidence[32])
+{
+    size_t oid_bytes = strlen(head) / 2u, ref_len = strlen(ref);
+    uint8_t base_oid[32], head_oid[32], tip_oid[32], ref_size[2];
+    (void)zcl_hex_decode_lower(base, base_oid, oid_bytes);
+    (void)zcl_hex_decode_lower(head, head_oid, oid_bytes);
+    (void)zcl_hex_decode_lower(observation->fetched_tip, tip_oid, oid_bytes);
+    zcl_write_u16_le(ref_size, (uint16_t)ref_len);
+    static const char ancestry_domain[] = "zcl.dev.git_remote_ancestry.v1";
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const uint8_t *)ancestry_domain, sizeof(ancestry_domain));
+    sha3_256_write(&hash, target, 32);
+    sha3_256_write(&hash, ref_size, sizeof(ref_size));
+    sha3_256_write(&hash, (const uint8_t *)ref, ref_len);
+    sha3_256_write(&hash, base_oid, oid_bytes);
+    sha3_256_write(&hash, head_oid, oid_bytes);
+    sha3_256_write(&hash, tip_oid, oid_bytes);
+    sha3_256_finalize(&hash, ancestry);
+    static const char evidence_domain[] = "zcl.dev.git_remote_observation.v2";
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const uint8_t *)evidence_domain, sizeof(evidence_domain));
+    sha3_256_write(&hash, ancestry, 32);
+    sha3_256_write(&hash, observation->intended_source_root, 32);
+    sha3_256_write(&hash, observation->fetched_source_root, 32);
+    sha3_256_write(&hash, observation->intended_closure_root, 32);
+    sha3_256_write(&hash, observation->fetched_closure_root, 32);
+    sha3_256_write(&hash, observation->intended_verified_dependency_root, 32);
+    sha3_256_write(&hash, observation->fetched_verified_dependency_root, 32);
+    sha3_256_finalize(&hash, evidence);
+}
+
+static struct zcl_result dgt_remote_dependencies(int64_t deadline,
+    const char *scratch, const char *head, const char *tip,
+    const struct zcl_dev_git_dependency_input *dependencies,
+    size_t dependency_count, struct zcl_dev_git_remote_observation *out)
+{
+    int64_t left = deadline - platform_time_monotonic_ms();
+    if (left <= 0) return ZCL_ERR(-1, "git-remote: dependency deadline exhausted");
+    struct zcl_dev_git_dependency_check intended = {0}, fetched = {0};
+    struct zcl_result result = zcl_dev_git_tree_verify_dependencies(
+        scratch, head, dependencies, dependency_count,
+        left > INT_MAX ? INT_MAX : (int)left, &intended);
+    if (!result.ok) return result;
+    left = deadline - platform_time_monotonic_ms();
+    if (left <= 0) return ZCL_ERR(-1, "git-remote: tip dependency deadline exhausted");
+    result = zcl_dev_git_tree_verify_dependencies(scratch, tip,
+        dependencies, dependency_count,
+        left > INT_MAX ? INT_MAX : (int)left, &fetched);
+    if (result.ok) {
+        memcpy(out->intended_verified_dependency_root,
+               intended.verified_dependency_root, 32);
+        memcpy(out->fetched_verified_dependency_root,
+               fetched.verified_dependency_root, 32);
+    }
+    return result;
+}
+
+static bool dgt_remote_links_match(const struct zcl_dev_git_tree *intended,
+    const struct zcl_dev_git_tree *fetched)
+{
+    if (intended->gitlinks != fetched->gitlinks) return false;
+    for (size_t i = 0; i < intended->gitlinks; i++) {
+        if (strcmp(intended->links[i].path, fetched->links[i].path) != 0 ||
+            strcmp(intended->links[i].oid, fetched->links[i].oid) != 0)
+            return false;
+    }
+    return true;
+}
+
+static struct zcl_result dgt_remote_sources(int64_t deadline,
+    const char *scratch, const char *head, const uint8_t source_root[32],
+    const uint8_t closure_root[32],
+    const struct zcl_dev_git_dependency_input *dependencies,
+    size_t dependency_count,
+    struct zcl_dev_git_remote_observation *out)
+{
+    int64_t left = deadline - platform_time_monotonic_ms();
+    if (left <= 0) return ZCL_ERR(-1, "git-remote: source deadline exhausted");
+    struct zcl_dev_git_tree intended = {0}, fetched = {0};
+    struct zcl_result result = zcl_dev_git_tree_read(scratch, head,
+        left > INT_MAX ? INT_MAX : (int)left, &intended);
+    if (result.ok) {
+        left = deadline - platform_time_monotonic_ms();
+        result = left <= 0 ? ZCL_ERR(-1, "git-remote: tip deadline exhausted")
+            : zcl_dev_git_tree_read(scratch, out->fetched_tip,
+                left > INT_MAX ? INT_MAX : (int)left, &fetched);
+    }
+    if (result.ok && (intended.gitlinks != dependency_count ||
+        !dgt_remote_links_match(&intended, &fetched) ||
+        memcmp(intended.file_manifest_root, source_root, 32) != 0 ||
+        memcmp(intended.source_closure_root, closure_root, 32) != 0))
+        result = ZCL_ERR(-1, "git-remote: unresolved dependency or intended source mismatch");
+    if (result.ok) result = dgt_remote_dependencies(deadline, scratch,
+        head, out->fetched_tip, dependencies, dependency_count, out);
+    if (result.ok) {
+        memcpy(out->intended_source_root, intended.file_manifest_root, 32);
+        memcpy(out->fetched_source_root, fetched.file_manifest_root, 32);
+        memcpy(out->intended_closure_root, intended.source_closure_root, 32);
+        memcpy(out->fetched_closure_root, fetched.source_closure_root, 32);
+    }
+    zcl_dev_git_tree_free(&intended);
+    zcl_dev_git_tree_free(&fetched);
+    return result;
+}
+#endif
+
+static bool dgt_remote_roots_present(const uint8_t target[32],
+    const uint8_t source[32], const uint8_t closure[32])
+{
+    return target && source && closure &&
+        zcl_bytes_any_set(target, 32) && zcl_bytes_any_set(source, 32) &&
+        zcl_bytes_any_set(closure, 32);
+}
+
+static bool dgt_remote_inputs_present(const char *locator, const char *ref,
+    const uint8_t target[32], const char *base, const char *head,
+    const uint8_t source[32], const uint8_t closure[32],
+    const struct zcl_dev_git_dependency_input *dependencies,
+    size_t dependency_count, int timeout_ms,
+    const struct zcl_dev_git_remote_observation *out)
+{
+    return out && locator && locator[0] && locator[0] != '-' && ref &&
+        base && head && timeout_ms > 0 &&
+        dependency_count <= 32768u &&
+        (!dependency_count || dependencies) &&
+        dgt_remote_roots_present(target, source, closure);
+}
+
+struct zcl_result zcl_dev_git_remote_observe(
+    const char *target_locator, const char *target_ref,
+    const uint8_t target_identity_root[32],
+    const char *expected_base, const char *intended_head,
+    const uint8_t expected_head_source_root[32],
+    const uint8_t expected_head_closure_root[32],
+    const struct zcl_dev_git_dependency_input *dependencies,
+    size_t dependency_count,
+    int timeout_ms, struct zcl_dev_git_remote_observation *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!dgt_remote_inputs_present(target_locator, target_ref,
+            target_identity_root, expected_base, intended_head,
+            expected_head_source_root, expected_head_closure_root,
+            dependencies, dependency_count,
+            timeout_ms, out))
+        return ZCL_ERR(-1, "git-remote: missing bounded observation inputs");
+#ifdef _WIN32
+    return ZCL_ERR(-1, "git-remote: native Git observation unavailable on Windows");
+#else
+    size_t oid_len = strlen(intended_head);
+    if (!dgt_remote_ref_valid(target_ref) ||
+        !dgt_oid(intended_head, oid_len) || !dgt_oid(expected_base, oid_len) ||
+        strcmp(expected_base, intended_head) == 0)
+        return ZCL_ERR(-1, "git-remote: exact ref/base/head required");
+    int64_t deadline = platform_time_monotonic_ms() + timeout_ms;
+    char scratch[PLATFORM_TEMP_PATH_MAX] = {0};
+    if (!platform_temp_directory_create("z23-git-remote-", scratch, sizeof(scratch)))
+        return ZCL_ERR(-1, "git-remote: private fetch store unavailable");
+    struct zcl_dev_git_remote_observation staged = {0};
+    struct zcl_result result = dgt_remote_fetch(deadline, scratch,
+        target_locator, target_ref, oid_len, staged.fetched_tip);
+    if (result.ok) result = dgt_remote_ancestry(deadline, scratch,
+        expected_base, intended_head, staged.fetched_tip);
+    if (result.ok) result = dgt_remote_sources(deadline, scratch,
+        intended_head, expected_head_source_root,
+        expected_head_closure_root, dependencies, dependency_count, &staged);
+    if (result.ok) {
+        dgt_remote_roots(target_identity_root, target_ref, expected_base,
+            intended_head, &staged, staged.verified_ancestry_root,
+            staged.evidence_root);
+        staged.complete = true;
+    }
+    if (!zcl_tree_remove(scratch).ok)
+        result = ZCL_ERR(-1, "git-remote: private fetch cleanup failed");
+    if (result.ok) *out = staged;
+    return result;
 #endif
 }
 
@@ -401,7 +839,7 @@ static void dgt_extra_check(const struct vcs_manifest *expected,
 static struct zcl_result dgt_source_observe(
     const char *repo, const char *head, const uint8_t source_root[32],
     int64_t deadline, const struct vcs_manifest *expected,
-    struct zcl_dev_git_source_check *out)
+    bool allow_pinned_links, struct zcl_dev_git_source_check *out)
 {
     int64_t remaining = deadline - platform_time_monotonic_ms();
     if (remaining <= 0) return ZCL_ERR(-1, "git-source: manifest deadline exhausted");
@@ -419,7 +857,9 @@ static struct zcl_result dgt_source_observe(
     (void)snprintf(check.head, sizeof(check.head), "%s", head);
     check.observed = true;
     *out = check;
-    if (!check.complete_content_matches)
+    if (!check.complete_content_matches &&
+        !(allow_pinned_links && check.source_projection_matches &&
+          !check.excluded && !check.symlinks && check.gitlinks))
         return ZCL_ERR(-1, "git-source: content unresolved (missing=%zu changed=%zu unexpected=%zu excluded=%zu links=%zu symlinks=%zu modes=%zu)",
             check.missing, check.changed, check.unexpected, check.excluded,
             check.gitlinks, check.symlinks, check.unrepresentable_modes);
@@ -444,8 +884,279 @@ struct zcl_result zcl_dev_git_tree_check_source(
                                DGT_ENTRY_MAX, &expected))
         return ZCL_ERR(-1, "git-source: canonical source manifest unavailable");
     struct zcl_result r = dgt_source_observe(repo, head, source_root,
-                                            deadline, &expected, out);
+                                            deadline, &expected, false, out);
     vcs_manifest_free(&expected);
     return r;
+#endif
+}
+
+static bool dgt_pinned_source_inputs_valid(
+    const char *repo, const char *head, const uint8_t source_root[32],
+    const uint8_t expected_closure_root[32],
+    const struct zcl_dev_git_dependency_input *dependencies,
+    size_t dependency_count, int timeout_ms,
+    const struct zcl_dev_git_source_check *out,
+    const struct zcl_dev_git_dependency_check *dependency_out)
+{
+    return out && dependency_out && expected_closure_root && repo && head &&
+        source_root && timeout_ms > 0 &&
+        (!dependency_count || dependencies);
+}
+
+struct zcl_result zcl_dev_git_tree_check_source_with_dependencies(
+    const char *repo, const char *head, const uint8_t source_root[32],
+    const uint8_t expected_closure_root[32],
+    const struct zcl_dev_git_dependency_input *dependencies,
+    size_t dependency_count, int timeout_ms,
+    struct zcl_dev_git_source_check *out,
+    struct zcl_dev_git_dependency_check *dependency_out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (dependency_out) memset(dependency_out, 0, sizeof(*dependency_out));
+    if (!dgt_pinned_source_inputs_valid(repo, head, source_root,
+            expected_closure_root, dependencies, dependency_count,
+            timeout_ms, out, dependency_out))
+        return ZCL_ERR(-1, "git-source: missing pinned dependency inputs");
+#ifdef _WIN32
+    return ZCL_ERR(-1, "git-source: native Git observation unavailable on Windows");
+#else
+    if (!dgt_oid(head, strlen(head)))
+        return ZCL_ERR(-1, "git-source: exact head required");
+    int64_t deadline = platform_time_monotonic_ms() + timeout_ms;
+    struct vcs_manifest expected;
+    if (!vcs_tree_load_bounded(repo, source_root, 8u * 1024u * 1024u,
+                               DGT_ENTRY_MAX, &expected))
+        return ZCL_ERR(-1, "git-source: canonical source manifest unavailable");
+    struct zcl_dev_git_source_check source = {0};
+    struct zcl_result result = dgt_source_observe(repo, head, source_root,
+        deadline, &expected, true, &source);
+    vcs_manifest_free(&expected);
+    if (!result.ok) return result;
+    int64_t left = deadline - platform_time_monotonic_ms();
+    if (left <= 0)
+        return ZCL_ERR(-1, "git-source: dependency deadline exhausted");
+    struct zcl_dev_git_dependency_check verified = {0};
+    result = zcl_dev_git_tree_verify_dependencies(repo, head,
+        dependencies, dependency_count,
+        left > INT_MAX ? INT_MAX : (int)left, &verified);
+    if (!result.ok || !verified.complete ||
+        memcmp(verified.super_source_closure_root,
+               expected_closure_root, 32) != 0 ||
+        verified.dependencies_verified != source.gitlinks)
+        return ZCL_ERR(-1, "git-source: pinned dependency closure mismatch");
+    source.complete_content_matches = true;
+    *out = source;
+    *dependency_out = verified;
+    return ZCL_OK;
+#endif
+}
+
+#ifndef _WIN32
+static bool dgt_bundle_sha256(const char *path, uint64_t max_bytes,
+                              int64_t deadline, uint8_t out[32])
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path)) return false;
+    bool ok = platform_positioned_file_snapshot(&file, &before) &&
+              before.size <= max_bytes;
+    struct sha256_ctx hash;
+    sha256_init(&hash);
+    uint8_t bytes[65536];
+    uint64_t offset = 0;
+    while (ok && offset < before.size) {
+        if (platform_time_monotonic_ms() >= deadline) { ok = false; break; }
+        size_t want = before.size - offset > sizeof(bytes) ? sizeof(bytes) :
+                      (size_t)(before.size - offset);
+        int64_t got = platform_positioned_file_read(&file, bytes, want, offset);
+        if (got <= 0) { ok = false; break; }
+        sha256_write(&hash, bytes, (size_t)got);
+        offset += (uint64_t)got;
+    }
+    ok = ok && platform_time_monotonic_ms() < deadline &&
+         platform_positioned_file_snapshot(&file, &after) &&
+         platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (ok) sha256_finalize(&hash, out);
+    return ok;
+}
+
+static struct zcl_result dgt_publication_bundle_check(
+    const char *repo, const uint8_t publication_root[32],
+    const uint8_t attachment_root[32], const char *bundle_path,
+    const uint8_t publisher_signer[32], uint64_t max_bundle_bytes,
+    int64_t deadline, uint8_t digest[32])
+{
+    struct vcs_zcode_publication_attachment_v1 attachment;
+    if (!vcs_zcode_publication_attachment_load_verified(repo, attachment_root,
+            publisher_signer, &attachment) ||
+        memcmp(attachment.publication_root, publication_root, 32) != 0)
+        return ZCL_ERR(-1, "git-publication: signed bundle attachment unavailable");
+    if (!dgt_bundle_sha256(bundle_path, max_bundle_bytes, deadline, digest) ||
+        memcmp(digest, attachment.bundle_sha256, 32) != 0)
+        return ZCL_ERR(-1, "git-publication: actual bundle digest mismatch");
+    return ZCL_OK;
+}
+
+static bool dgt_publication_coordinates(
+    const struct vcs_zcode_publication_v1 *intent,
+    const uint8_t expected_target_identity_root[32],
+    const char *expected_target_ref, const char *expected_base,
+    const char *head)
+{
+    size_t oid_chars = intent->git_object_format == VCS_ZCODE_PUBLICATION_GIT_OID_20
+        ? 40u : 64u;
+    if (!dgt_oid(expected_base, oid_chars) || !dgt_oid(head, oid_chars) ||
+        strcmp(expected_base, head) == 0 ||
+        strcmp(intent->target_ref, expected_target_ref) != 0 ||
+        memcmp(intent->target_identity_root,
+               expected_target_identity_root, 32) != 0)
+        return false;
+    char sealed_base[65], sealed_head[65];
+    zcl_hex_encode(intent->expected_base, oid_chars / 2u, sealed_base);
+    zcl_hex_encode(intent->head_commit, oid_chars / 2u, sealed_head);
+    return strcmp(sealed_base, expected_base) == 0 &&
+           strcmp(sealed_head, head) == 0;
+}
+
+static bool dgt_publication_candidate(const char *repo,
+    const uint8_t candidate_root[32], struct vcs_zcode_candidate_v1 *candidate)
+{
+    uint8_t *wire = NULL, checked_root[32];
+    size_t wire_len = 0;
+    bool ok = vcs_object_load_raw_bounded(repo, candidate_root,
+            VCS_ZCODE_CANDIDATE_WIRE_BYTES, &wire, &wire_len) == 0 &&
+        vcs_zcode_candidate_parse(wire, wire_len, candidate) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_root(candidate, checked_root) == VCS_ZCODE_DEV_OK &&
+        memcmp(checked_root, candidate_root, 32) == 0;
+    free(wire);
+    return ok;
+}
+
+static struct zcl_result dgt_publication_source(
+    const char *repo, const char *expected_base, const char *head,
+    const uint8_t source_root[32],
+    const uint8_t expected_closure_root[32],
+    const struct zcl_dev_git_dependency_input *dependencies,
+    size_t dependency_count, int timeout_ms,
+    struct zcl_dev_git_source_check *source)
+{
+    struct dgt_context ctx = {0};
+    ctx.deadline = platform_time_monotonic_ms() + timeout_ms;
+    const char *ancestry[] = {
+        "merge-base", "--is-ancestor", expected_base, head, NULL
+    };
+    char output[64];
+    size_t output_len = 0;
+    if (!dgt_run(&ctx, repo, false, ancestry, output, sizeof(output),
+                 &output_len).ok)
+        return ZCL_ERR(-1, "git-publication: expected base is not an ancestor");
+    int64_t left = ctx.deadline - platform_time_monotonic_ms();
+    if (left <= 0)
+        return ZCL_ERR(-1, "git-publication: source comparison deadline exhausted");
+    struct zcl_result result;
+    if (expected_closure_root) {
+        struct zcl_dev_git_dependency_check verified;
+        result = zcl_dev_git_tree_check_source_with_dependencies(repo, head,
+            source_root, expected_closure_root, dependencies, dependency_count,
+            left > INT_MAX ? INT_MAX : (int)left, source, &verified);
+    } else {
+        result = zcl_dev_git_tree_check_source(repo, head, source_root,
+            left > INT_MAX ? INT_MAX : (int)left, source);
+    }
+    if (!result.ok || !source->complete_content_matches)
+        return ZCL_ERR(-1, "git-publication: committed source differs from candidate");
+    return ZCL_OK;
+}
+#endif
+
+static bool dgt_publication_inputs_valid(
+    const char *repo, const uint8_t publication_root[32],
+    const uint8_t attachment_root[32], const char *bundle_path,
+    const uint8_t publisher_signer[32],
+    const uint8_t expected_target_identity_root[32],
+    const char *expected_target_ref, const char *expected_base,
+    const char *head, uint64_t max_bundle_bytes, int timeout_ms,
+    const struct zcl_dev_git_publication_check *out)
+{
+    return out && repo && publication_root && attachment_root &&
+        bundle_path && bundle_path[0] && publisher_signer &&
+        expected_target_identity_root && expected_target_ref &&
+        expected_base && head && max_bundle_bytes > 0 && timeout_ms > 0;
+}
+
+struct zcl_result zcl_dev_git_publication_check(
+    const char *repo, const uint8_t publication_root[32],
+    const uint8_t attachment_root[32], const char *bundle_path,
+    const uint8_t publisher_signer[32],
+    const uint8_t expected_target_identity_root[32],
+    const char *expected_target_ref, const char *expected_base,
+    const char *head, uint64_t max_bundle_bytes, int timeout_ms,
+    struct zcl_dev_git_publication_check *out)
+{
+    return zcl_dev_git_publication_check_with_dependencies(repo,
+        publication_root, attachment_root, bundle_path, publisher_signer,
+        expected_target_identity_root, expected_target_ref, expected_base,
+        head, NULL, NULL, 0, max_bundle_bytes, timeout_ms, out);
+}
+
+struct zcl_result zcl_dev_git_publication_check_with_dependencies(
+    const char *repo, const uint8_t publication_root[32],
+    const uint8_t attachment_root[32], const char *bundle_path,
+    const uint8_t publisher_signer[32],
+    const uint8_t expected_target_identity_root[32],
+    const char *expected_target_ref, const char *expected_base,
+    const char *head, const uint8_t expected_closure_root[32],
+    const struct zcl_dev_git_dependency_input *dependencies,
+    size_t dependency_count, uint64_t max_bundle_bytes, int timeout_ms,
+    struct zcl_dev_git_publication_check *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!dgt_publication_inputs_valid(repo, publication_root, attachment_root,
+            bundle_path, publisher_signer, expected_target_identity_root,
+            expected_target_ref, expected_base, head, max_bundle_bytes,
+            timeout_ms, out) || (dependency_count && !dependencies))
+        return ZCL_ERR(-1, "git-publication: missing bounded inputs");
+#ifdef _WIN32
+    return ZCL_ERR(-1, "git-publication: native Git observation unavailable on Windows");
+#else
+    int64_t deadline = platform_time_monotonic_ms() + timeout_ms;
+    struct vcs_zcode_publication_v1 intent;
+    if (!vcs_zcode_publication_load_verified(repo, publication_root,
+                                              publisher_signer, &intent))
+        return ZCL_ERR(-1, "git-publication: signed intent unavailable");
+    if (!dgt_publication_coordinates(&intent, expected_target_identity_root,
+            expected_target_ref, expected_base, head))
+        return ZCL_ERR(-1, "git-publication: target or exact pair mismatch");
+    uint8_t bundle_sha256[32];
+    struct zcl_result result = dgt_publication_bundle_check(repo,
+        publication_root, attachment_root, bundle_path, publisher_signer,
+        max_bundle_bytes, deadline, bundle_sha256);
+    if (!result.ok) return result;
+    struct vcs_zcode_candidate_v1 candidate;
+    if (!dgt_publication_candidate(repo, intent.candidate_root, &candidate))
+        return ZCL_ERR(-1, "git-publication: canonical candidate unavailable");
+    struct zcl_dev_git_source_check source = {0};
+    int64_t left = deadline - platform_time_monotonic_ms();
+    if (left <= 0)
+        return ZCL_ERR(-1, "git-publication: admission deadline exhausted");
+    result = dgt_publication_source(repo, expected_base,
+        head, candidate.candidate_source_root, expected_closure_root,
+        dependencies, dependency_count,
+        left > INT_MAX ? INT_MAX : (int)left, &source);
+    if (!result.ok) return result;
+
+    memcpy(out->publication_root, publication_root, 32);
+    memcpy(out->attachment_root, attachment_root, 32);
+    memcpy(out->bundle_sha256, bundle_sha256, 32);
+    memcpy(out->candidate_root, intent.candidate_root, 32);
+    memcpy(out->source_root, candidate.candidate_source_root, 32);
+    (void)snprintf(out->expected_base, sizeof(out->expected_base), "%s",
+                   expected_base);
+    (void)snprintf(out->head, sizeof(out->head), "%s", head);
+    out->source = source;
+    out->verified = true;
+    return ZCL_OK;
 #endif
 }

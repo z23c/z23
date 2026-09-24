@@ -1885,7 +1885,7 @@ ZCL_COMMAND_DEV_READ(
  * reads the proof's own answer and fast-forwards origin/main. */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land", "dev", "",
-    "Queue a tip; prove and push without waiting",
+    "Queue a tip; attach signed Git intent, prove and push without waiting",
     "One durable landing queue over the owner-private state root: submit "
     "checks that the tip exists, is signed, and shares history with "
     "origin/main, then appends {seq, tip, worktree, note} to "
@@ -1905,11 +1905,13 @@ ZCL_COMMAND_DEV_COMMAND(
     "time through bounded moving-base retries before yielding to other "
     "queued work, and retries a "
     "host-load failure up to three times; "
-    "cancel drops one request by sequence number. Every state change also "
+    "attach seals the exact proven Git pair and bundle under the local "
+    "operator identity before a push; cancel drops one request by sequence "
+    "number. Every state change also "
     "appends to the agent mail outbox when one exists, so an agent learns "
     "the outcome by pulling rather than by waiting. Integration calls Git "
     "without a shell; drive executes the existing bounded proof worker.", 65536,
-    "land,submit,step,drive,status,cancel,queue,proof,push,rebase,async",
+    "land,submit,attach,step,drive,status,cancel,queue,proof,push,rebase,async",
     "zcl.land_input.v1", "zcl.land.v1",
     "action,tip,worktree,note,seq,json", "action",
     "z23-dev dev land drive",

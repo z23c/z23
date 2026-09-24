@@ -458,6 +458,63 @@ struct zcl_result zcode_publication_check_accepted_readonly(
     return ZCL_OK;
 }
 
+struct zcl_result zcode_publication_store_accepted(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *task_root, const char *policy_root, const char *action_id,
+    const struct vcs_zcode_publication_v1 *intent,
+    const uint8_t expected_signer[32], int64_t now,
+    uint8_t out_root[32], struct zcode_accepted_work_status *out)
+{
+    if (out_root) memset(out_root, 0, 32);
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out_root || !out)
+        return ZCL_ERR(-1, "publication-store-output-invalid");
+    struct zcode_accepted_work_status staged = {0};
+    struct zcl_result result = zcode_publication_check_accepted_readonly(
+        ndb, workspace, accepted_root, task_root, policy_root, action_id,
+        intent, expected_signer, now, &staged);
+    if (!result.ok) return result;
+    if (!vcs_zcode_publication_store_verified(workspace, intent,
+                                               expected_signer, out_root))
+        return ZCL_ERR(-1, "publication-intent-persist-failed");
+    *out = staged;
+    return ZCL_OK;
+}
+
+struct zcl_result zcode_publication_attachment_store_accepted(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *task_root, const char *policy_root, const char *action_id,
+    const uint8_t publication_root[32],
+    const struct vcs_zcode_publication_attachment_v1 *attachment,
+    const uint8_t expected_signer[32], int64_t now,
+    uint8_t out_root[32], struct zcode_accepted_work_status *out)
+{
+    if (out_root) memset(out_root, 0, 32);
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out_root || !out || !publication_root || !attachment ||
+        !expected_signer || now <= 0)
+        return ZCL_ERR(-1, "publication-attachment-input-invalid");
+    struct vcs_zcode_publication_v1 intent;
+    if (!vcs_zcode_publication_load_verified(workspace, publication_root,
+                                             expected_signer, &intent))
+        return ZCL_ERR(-1, "publication-intent-not-persisted");
+    if (memcmp(attachment->publication_root, publication_root, 32) != 0 ||
+        attachment->created_unix > now ||
+        vcs_zcode_publication_attachment_verify(attachment,
+            expected_signer) != VCS_ZCODE_DEV_OK)
+        return ZCL_ERR(-1, "publication-attachment-signature-or-binding-invalid");
+    struct zcode_accepted_work_status staged = {0};
+    struct zcl_result result = zcode_publication_check_accepted_readonly(
+        ndb, workspace, accepted_root, task_root, policy_root, action_id,
+        &intent, expected_signer, now, &staged);
+    if (!result.ok) return result;
+    if (!vcs_zcode_publication_attachment_store_verified(workspace, attachment,
+            expected_signer, out_root))
+        return ZCL_ERR(-1, "publication-attachment-persist-failed");
+    *out = staged;
+    return ZCL_OK;
+}
+
 static struct zcl_result lane_prior_validate(
     const char *workspace, const struct db_zcode_lane_receipt *prior,
     const struct vcs_zcode_task_v1 *task,
