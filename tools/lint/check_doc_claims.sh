@@ -152,7 +152,16 @@ gate_rc() {
     # `--scan` invocation, or a driver too old to export the directory)
     # falls straight through to running the gate directly, exactly as
     # before this change.
+    # A driver that lists its gates (requested.list) records verdicts for
+    # those only; waiting on any other name burned the full timeout before
+    # falling through. Measured 2026-09-24: lint-fast runs 6 gates, four
+    # oracle gates named by docs are not among them, and this gate took
+    # 738 s, 720 of it polling for verdicts that could never be written.
     local vdir="${ZCL_LINT_GATES_DIR_X:-}" start
+    if [ -n "$vdir" ] && [ -f "$vdir/requested.list" ] &&
+       ! grep -qxF -- "$g" "$vdir/requested.list"; then
+        vdir=""
+    fi
     if [ -n "$vdir" ] && [ -d "$vdir" ]; then
         start="$SECONDS"
         while (( SECONDS - start < GATE_TIMEOUT_SEC )); do
@@ -533,6 +542,35 @@ selfcheck() {
         st_fail=2
     fi
 
+    # (c2) NOT IN THIS RUN: a driver that lists its gates and omits this one
+    #      will never record its verdict, so gate_rc must run the gate at
+    #      once rather than poll. The timeout is long enough that a poll would
+    #      be seen, and the seeded verdict (7) must not be the answer.
+    printf '        zzz_verdict_absent_gate) echo '"'"'exit 43'"'"' ;;\n' > "$vr_table"
+    printf '%s\n' zzz_verdict_other_gate > "$vr_dir/requested.list"
+    GATE_TIMEOUT_SEC=30
+    unset 'GATE_RC[zzz_verdict_absent_gate]'
+    local vr_t0="$SECONDS"
+    got="$(gate_rc zzz_verdict_absent_gate)"
+    GATE_TIMEOUT_SEC="$vr_old_timeout"
+    if [ "$got" != 43 ] || (( SECONDS - vr_t0 > 5 )); then
+        echo "FAIL: check_doc_claims verdict-reuse self-check broken — a gate" >&2
+        echo "      absent from the driver's requested.list must run at once;" >&2
+        echo "      got '$got' after $((SECONDS - vr_t0)) s, wanted 43 without waiting." >&2
+        st_fail=2
+    fi
+    # Listed gates still wait for and reuse the driver's verdict.
+    printf '        zzz_verdict_other_gate) echo '"'"'exit 99'"'"' ;;\n' > "$vr_table"
+    printf '%s\n' 7 > "$vr_dir/zzz_verdict_other_gate.rc"
+    unset 'GATE_RC[zzz_verdict_other_gate]'
+    got="$(gate_rc zzz_verdict_other_gate)"
+    if [ "$got" != 7 ]; then
+        echo "FAIL: check_doc_claims verdict-reuse self-check broken — a gate" >&2
+        echo "      named in requested.list did not reuse its verdict (got '$got')." >&2
+        st_fail=2
+    fi
+    rm -f "$vr_dir/requested.list"
+
     # (d) ONE RUN PER GATE PER INVOCATION: two claims naming the same oracle
     #     gate run it once. The scratch command appends a line per run.
     unset ZCL_LINT_GATES_DIR_X
@@ -556,7 +594,8 @@ selfcheck() {
     GATE_TABLE="$vr_old_table"
     if [ -n "$vr_old_vdir" ]; then export ZCL_LINT_GATES_DIR_X="$vr_old_vdir"
     else unset ZCL_LINT_GATES_DIR_X; fi
-    unset 'GATE_RC[zzz_verdict_reuse_gate]' 'GATE_RC[zzz_verdict_fallback_gate]'
+    unset 'GATE_RC[zzz_verdict_reuse_gate]' 'GATE_RC[zzz_verdict_fallback_gate]' \
+          'GATE_RC[zzz_verdict_absent_gate]' 'GATE_RC[zzz_verdict_other_gate]'
     rm -rf "$vr_dir"
 
     rm -rf "$tmp"

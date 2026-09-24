@@ -546,6 +546,9 @@ main() {
     rm -rf "$GATES_DIR"
     mkdir -p "$GATES_DIR"
     export ZCL_LINT_GATES_DIR_X="$GATES_DIR"
+    # The gates this run will record a verdict for. A gate reading verdicts
+    # (check-doc-claims) waits only for these; any other name never gets one.
+    printf '%s\n' "${gates[@]}" > "$GATES_DIR/requested.list"
     find "$STATE_DIR/gates" -maxdepth 1 -type d -name 'run.*' -mmin +120 \
          -exec rm -rf {} + 2>/dev/null || true
 
