@@ -28,8 +28,8 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
             out->checks_passed++; \
     } while (0)
     uint8_t zero[32] = {0}, one[32] = {1};
-    HF_CHECK(!publication_root_nonzero(zero));
-    HF_CHECK(publication_root_nonzero(one));
+    HF_CHECK(!zcl_bytes_any_set(zero, 32));
+    HF_CHECK(zcl_bytes_any_set(one, 32));
     struct vcs_devloop_publication_job job = {
         .version = VCS_DEVLOOP_PUBLICATION_JOB_VERSION};
     memset(job.vcs_commit_root, 1, 32);

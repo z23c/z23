@@ -49,12 +49,16 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     char *headers[] = {"include/a.h"};
     char *sources[] = {"src/a.c", "include/b.c"};
     char *tests[] = {"tests/a.c"};
-    struct vcs_package_recipe recipe;
-    memset(&recipe, 0, sizeof(recipe));
-    recipe.public_headers = (struct vcs_package_recipe_strings){headers, 1, 1};
-    recipe.sources = (struct vcs_package_recipe_strings){sources, 2, 2};
-    recipe.test_sources = (struct vcs_package_recipe_strings){tests, 1, 1};
-    HF_CHECK(zwork_scopes(&recipe, scopes)
+    /* zwork_scopes() takes the prepared package since a2fbd77c4a; an empty
+     * manifest and no package metadata keep this the recipe-only scope. */
+    struct vcs_package_prepared scoped;
+    memset(&scoped, 0, sizeof(scoped));
+    scoped.recipe.public_headers =
+        (struct vcs_package_recipe_strings){headers, 1, 1};
+    scoped.recipe.sources = (struct vcs_package_recipe_strings){sources, 2, 2};
+    scoped.recipe.test_sources =
+        (struct vcs_package_recipe_strings){tests, 1, 1};
+    HF_CHECK(zwork_scopes(&scoped, false, scopes)
              && strcmp(scopes, "include,src,tests") == 0);
     struct vcs_package_prepared prepared;
     memset(&prepared, 0, sizeof(prepared));

@@ -50,8 +50,8 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     HF_CHECK(!workspace_manifest_key_allowed(NULL, true));
     uint8_t zero[32] = {0}, nonzero[32] = {0};
     nonzero[17] = 1;
-    HF_CHECK(workspace_root_is_zero(zero));
-    HF_CHECK(!workspace_root_is_zero(nonzero));
+    HF_CHECK(zcl_bytes_all_zero(zero, 32));
+    HF_CHECK(!zcl_bytes_all_zero(nonzero, 32));
 #undef HF_CHECK
     snprintf(out->exercised_surface, sizeof(out->exercised_surface),
              ZCL_HOTFORK_EXERCISED_SURFACE);

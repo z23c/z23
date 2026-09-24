@@ -13,8 +13,9 @@
 #define _GNU_SOURCE
 #include "hotswap/hotfork_capsule.h"
 #include "hotswap/hotswap_service.h"
-#define zcl_hotswap_service_acquire(...) NULL
-#define zcl_hotswap_service_release(...) ((void)0)
+#define zcl_hotswap_service_acquire(service_id, lease) \
+    ((void)(service_id), (void)(lease), NULL)
+#define zcl_hotswap_service_release(lease) ((void)(lease))
 #elif ZCL_HOTFORK_STORY_PHASE == 2
 #undef zcl_hotswap_service_release
 #undef zcl_hotswap_service_acquire

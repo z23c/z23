@@ -13,8 +13,9 @@
 #define _GNU_SOURCE
 #include "hotswap/hotfork_capsule.h"
 #include "hotswap/hotswap_service.h"
-#define zcl_hotswap_service_acquire(...) NULL
-#define zcl_hotswap_service_release(...) ((void)0)
+#define zcl_hotswap_service_acquire(service_id, lease) \
+    ((void)(service_id), (void)(lease), NULL)
+#define zcl_hotswap_service_release(lease) ((void)(lease))
 #define zcl_hotswap_service_generation(...) 0
 #elif ZCL_HOTFORK_STORY_PHASE == 2
 #undef zcl_hotswap_service_generation
@@ -52,7 +53,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     checkpoint.test_loc = 1;
     HF_CHECK(!corpus_checkpoint_renderable(&checkpoint, &total)
              && !corpus_checkpoint_renderable(NULL, &total));
-    struct vcs_zcode_c23_corpus_entry_v1 entries[2] = {{0}};
+    struct vcs_zcode_c23_corpus_entry_v1 entries[2] = {};
     entries[0].production_loc = 3;
     entries[0].test_loc = 2;
     entries[0].physical_lines = 6;
