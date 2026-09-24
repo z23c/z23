@@ -1270,7 +1270,7 @@ CACHED_CFLAGS = $(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(CFLAG
 BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
-ZCL_DEV_LINKER ?= $(shell tools/dev/dev-linker-select.sh)
+ZCL_DEV_LINKER ?= $(eval ZCL_DEV_LINKER := $(shell tools/dev/dev-linker-select.sh))$(ZCL_DEV_LINKER)
 # PE/COFF relocatable links are supported by the MinGW platform linker, while
 # lld-link rejects the ELF-style `-r` option.  Keep the measured fast linker
 # for executable links and use the platform linker for frozen restart bases.
