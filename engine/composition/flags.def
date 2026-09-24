@@ -317,6 +317,8 @@ Z23_FLAG("ZCL_CAP_CLOSURE_COVERAGE_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_capability_closure.sh:153")
 Z23_FLAG("ZCL_CAP_CLOSURE_ENFORCE_SYMMETRY", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_capability_closure.sh:168")
+Z23_FLAG("ZCL_CAP_CLOSURE_SOURCE_RECORD", "env_build", "-", "-",
+          "Reuse the parent Make source record for the same checkout's read-only compiler flag query")
 Z23_FLAG("ZCL_CC", "env_build", "clang", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:137")
 Z23_FLAG("ZCL_CC_JOBS", "env_build", "6", "-",
@@ -1914,9 +1916,9 @@ Z23_FLAG("ZCL_REMOTE_DRY_RUN", "env_build", "1", "-",
 Z23_FLAG("ZCL_REMOTE_GUARD_ACTION", "env_build", "-", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:125")
 Z23_FLAG("ZCL_REMOTE_HOST", "make_var", "-", "-",
-          "first use Makefile:5935; documented at docs/AGENT_API.md:1338: make remote-node-plan ZCL_REMOTE_HOST=<ssh-host> to compare a remote node's")
+          "first use Makefile:5933; documented at docs/AGENT_API.md:1338: make remote-node-plan ZCL_REMOTE_HOST=<ssh-host> to compare a remote node's")
 Z23_FLAG("ZCL_REMOTE_HOSTS", "make_var", "-", "-",
-          "undocumented; first use Makefile:5932")
+          "undocumented; first use Makefile:5935")
 Z23_FLAG("ZCL_REMOTE_INSTALL_ARTIFACT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:117")
 Z23_FLAG("ZCL_REMOTE_INSTALL_BIN", "env_build", "-", "-",
