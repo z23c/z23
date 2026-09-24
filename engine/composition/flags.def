@@ -107,9 +107,9 @@ Z23_FLAG("ZCL_AGENT_JSONQ", "env_build", "build/bin/jsonq", "-",
 Z23_FLAG("ZCL_AGENT_LIVE_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-doctor.sh:153")
 Z23_FLAG("ZCL_AGENT_LOOP_BIN", "make_var", "0", "-",
-          "first use Makefile:5866; documented at docs/AGENT_API.md:1145: cache-aware make fast-ci checks; set ZCL_AGENT_LOOP_BIN=1 to also link")
+          "first use Makefile:5868; documented at docs/AGENT_API.md:1145: cache-aware make fast-ci checks; set ZCL_AGENT_LOOP_BIN=1 to also link")
 Z23_FLAG("ZCL_AGENT_LOOP_DEPLOY", "make_var", "-", "-",
-          "first use Makefile:5867; documented at docs/AGENT_API.md:1146: build/bin/z23-dev. ZCL_AGENT_LOOP_DEPLOY=stage|dev cannot bypass")
+          "first use Makefile:5869; documented at docs/AGENT_API.md:1146: build/bin/z23-dev. ZCL_AGENT_LOOP_DEPLOY=stage|dev cannot bypass")
 Z23_FLAG("ZCL_AGENT_RELEASE_BIN", "env_build", "build/bin/zclassic23", "-",
           "undocumented; first use tools/dev/agent-doctor.sh:158")
 Z23_FLAG("ZCL_AGENT_SESSION", "env_runtime", "-", "-",
@@ -294,7 +294,7 @@ Z23_FLAG("ZCL_C3_RUN_ID", "env_build", "-", "-",
 Z23_FLAG("ZCL_C3_SNAPSHOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:50")
 Z23_FLAG("ZCL_C3_STOPWATCH_HISTORY", "make_var", "-", "-",
-          "undocumented; first use Makefile:8755")
+          "undocumented; first use Makefile:8757")
 Z23_FLAG("ZCL_C3_TIP_DATADIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:77")
 Z23_FLAG("ZCL_C6_EXE_SHA_CMD", "env_build", "-", "-",
@@ -506,7 +506,7 @@ Z23_FLAG("ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEPLOY_EXPECT_SOURCE_ID", "env_build", "-", "-",
           "undocumented; first use tools/deploy_verify.sh:576")
 Z23_FLAG("ZCL_DEPLOY_FROZEN_CANDIDATE", "make_var", "-", "-",
-          "undocumented; first use Makefile:10406")
+          "undocumented; first use Makefile:10408")
 Z23_FLAG("ZCL_DEPLOY_GUARD_NATIVE_JSON", "env_build", "-", "-",
           "undocumented; first use tools/deploy_guard.sh:124")
 Z23_FLAG("ZCL_DEPLOY_GUARD_RPC_TIMEOUT", "env_build", "5", "-",
@@ -568,7 +568,7 @@ Z23_FLAG("ZCL_DEV_ALLOW_REINDEX_DROPIN", "env_build", "0", "-",
 Z23_FLAG("ZCL_DEV_ALLOW_REJECTED_GENERATION", "env_build", "0", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:573")
 Z23_FLAG("ZCL_DEV_ARTIFACT_CACHE", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:2469")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:2496")
 Z23_FLAG("ZCL_DEV_BENCH_ACTIVATE", "env_build", "0", "-",
           "first use tools/dev/dev-loop-bench.sh:20; documented at docs/AGENT_API.md:1224: and separate hot-swap/reload SLO verdicts. With ZCL_DEV_BENCH_ACTIVATE=1")
 Z23_FLAG("ZCL_DEV_BENCH_CMD_CONTROLLER", "env_build", "-", "-",
@@ -612,7 +612,7 @@ Z23_FLAG("ZCL_DEV_DEPLOY_BUILD", "env_build", "fast", "-",
 Z23_FLAG("ZCL_DEV_FAILURE_TEST_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/native-dev-failure-selftest.sh:9")
 Z23_FLAG("ZCL_DEV_GENERATION_ROOT", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:1591")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:1596")
 Z23_FLAG("ZCL_DEV_GIT_EXE", "env_runtime", "-", "-",
           "undocumented; first use cognition/modules/science/src/code_growth.c:164")
 Z23_FLAG("ZCL_DEV_HISTORY_BASE_REF", "env_build", "-", "-",
@@ -630,11 +630,11 @@ Z23_FLAG("ZCL_DEV_LINKER_RUNS", "env_build", "3", "-",
 Z23_FLAG("ZCL_DEV_LOOP_TEST_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/native-dev-loop-wait-selftest.sh:8")
 Z23_FLAG("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:2472")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:2499")
 Z23_FLAG("ZCL_DEVLOOP_TEST_PROCESS", "env_test", "-", "-",
-          "first use tests/harness/src/test_dev_platform.c:2470; documented at docs/work/HOTSWAP.md:311: ZCL_DEVLOOP_TEST_PROCESS=1 fixture opt-in; release builds retain the literal")
+          "first use tests/harness/src/test_dev_platform.c:2497; documented at docs/work/HOTSWAP.md:311: ZCL_DEVLOOP_TEST_PROCESS=1 fixture opt-in; release builds retain the literal")
 Z23_FLAG("ZCL_DEV_NATIVE_ACTIVATION", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:1548")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:1546")
 Z23_FLAG("ZCL_DEV_PID_COMMAND", "env_build", "-", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:785")
 Z23_FLAG("ZCL_DEV_PREFLIGHT_COMMAND", "env_build", "-", "-",
@@ -708,7 +708,7 @@ Z23_FLAG("ZCL_DEV_SKIP_BUILD", "env_build", "0", "-",
 Z23_FLAG("ZCL_DEV_SOURCE_ID", "env_build", "-", "-",
           "first use tools/dev/deploy-dev-lane.sh:484; documented at docs/AGENT_API.md:1141: ZCL_DEV_SOURCE_ID nor an activation environment switch can authorize a")
 Z23_FLAG("ZCL_DEV_SOURCE_ROOT", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/testcache.c:611")
+          "undocumented; first use tests/harness/src/testcache.c:642")
 Z23_FLAG("ZCL_DEV_START_COMMAND", "env_build", "-", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:765")
 Z23_FLAG("ZCL_DEV_STOP_COMMAND", "env_build", "-", "-",
@@ -734,7 +734,7 @@ Z23_FLAG("ZCL_DEV_WATCH_DEPLOY_COMMAND", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEV_WATCH_INITIAL", "env_build", "0", "-",
           "undocumented; first use tools/dev/watch-dev-lane.sh:21")
 Z23_FLAG("ZCL_DEV_WATCH_MODE", "make_var", "verify", "-",
-          "undocumented; first use Makefile:5892")
+          "undocumented; first use Makefile:5894")
 Z23_FLAG("ZCL_DEV_WATCH_ONCE", "env_build", "0", "-",
           "undocumented; first use tools/dev/watch-dev-lane.sh:20")
 Z23_FLAG("ZCL_DEV_WATCH_ONCE_FILES", "env_build", "-", "-",
@@ -852,7 +852,7 @@ Z23_FLAG("ZCL_FAST_CACHE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_FAST_CACHE_RESET", "env_build", "0", "-",
           "first use tools/agent_fast_ci.sh:463; documented at docs/AGENT_API.md:1283: ZCL_FAST_CACHE_RESET=1 to clear the green-input cache, or")
 Z23_FLAG("ZCL_FAST_CC", "make_var", "-", "-",
-          "first use Makefile:4694; documented at docs/AGENT_API.md:1275: Override with ZCL_FAST_CC='ccache cc'. Use ZCL_FAST_JOBS=N,")
+          "first use Makefile:4696; documented at docs/AGENT_API.md:1275: Override with ZCL_FAST_CC='ccache cc'. Use ZCL_FAST_JOBS=N,")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES", "env_build", "-", "-",
           "first use tools/agent_fast_ci.sh:235; documented at docs/work/fast-path.md:123: ZCL_FAST_CHANGED_FILES_ONLY=1 when ZCL_FAST_CHANGED_FILES[_FILE] is already")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES_FILE", "env_build", "-", "-",
@@ -1185,9 +1185,9 @@ Z23_FLAG("ZCL_HOTSWAP_SWAPPABLE_MANIFEST", "env_build", "-", "-",
 Z23_FLAG("ZCL_HOTSWAP_SYMBOLS_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-symbols.sh:58")
 Z23_FLAG("ZCL_HOTSWAP_TEST_AUTH", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1773")
+          "undocumented; first use tests/harness/src/test_parallel.c:1775")
 Z23_FLAG("ZCL_HOTSWAP_TEST_MODULE", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1738")
+          "undocumented; first use tests/harness/src/test_parallel.c:1740")
 Z23_FLAG("ZCL_HOTSWAP_VERIFY_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-verify.sh:43")
 Z23_FLAG("ZCL_HUMAN", "env_test", "-", "-",
@@ -1579,7 +1579,7 @@ Z23_FLAG("ZCL_NETCRAWL_ONION_PER_ROUND", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_NETCRAWL_ONION_TIMEOUT_MS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_crawler.c:198")
 Z23_FLAG("ZCL_NETDISRUPT_STOPWATCH_HISTORY", "make_var", "-", "-",
-          "undocumented; first use Makefile:8856")
+          "undocumented; first use Makefile:8858")
 Z23_FLAG("ZCL_NETMON_INTERVAL_SECS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_monitor.c:127")
 Z23_FLAG("ZCL_NETMON_RETAIN_ROWS", "env_runtime", "-", "-",
@@ -1916,9 +1916,9 @@ Z23_FLAG("ZCL_REMOTE_DRY_RUN", "env_build", "1", "-",
 Z23_FLAG("ZCL_REMOTE_GUARD_ACTION", "env_build", "-", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:125")
 Z23_FLAG("ZCL_REMOTE_HOST", "make_var", "-", "-",
-          "first use Makefile:5933; documented at docs/AGENT_API.md:1338: make remote-node-plan ZCL_REMOTE_HOST=<ssh-host> to compare a remote node's")
+          "first use Makefile:5934; documented at docs/AGENT_API.md:1338: make remote-node-plan ZCL_REMOTE_HOST=<ssh-host> to compare a remote node's")
 Z23_FLAG("ZCL_REMOTE_HOSTS", "make_var", "-", "-",
-          "undocumented; first use Makefile:5935")
+          "undocumented; first use Makefile:5937")
 Z23_FLAG("ZCL_REMOTE_INSTALL_ARTIFACT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:117")
 Z23_FLAG("ZCL_REMOTE_INSTALL_BIN", "env_build", "-", "-",
@@ -2210,7 +2210,7 @@ Z23_FLAG("ZCL_SOAK_EVIDENCE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_SOAK_EXE_SHA_CMD", "env_build", "-", "-",
           "Collector test seam for running-image digest; first use tools/scripts/soak_evidence.sh:233")
 Z23_FLAG("ZCL_SOAK_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:8721")
+          "undocumented; first use Makefile:8723")
 Z23_FLAG("ZCL_SOAK_LAG_WARN", "env_build", "-", "-",
           "undocumented; first use tools/scripts/lane_health.sh:46")
 Z23_FLAG("ZCL_SOAK_NOW", "env_build", "-", "-",
@@ -2284,11 +2284,11 @@ Z23_FLAG("ZCL_STATUS_REASON_GATE_SCAN_GLOB", "env_build", "-", "-",
 Z23_FLAG("ZCL_STICKY_REQUIRE_ALL", "env_build", "0", "-",
           "undocumented; first use tools/scripts/sticky_matrix.sh:36")
 Z23_FLAG("ZCL_STICKY_VERDICT_DIR", "make_var", "-", "-",
-          "undocumented; first use Makefile:8510")
+          "undocumented; first use Makefile:8512")
 Z23_FLAG("ZCL_STOPWATCH_CHECKPOINT_HEIGHT", "env_build", "3056758", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:135")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:8756")
+          "undocumented; first use Makefile:8758")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_NOW", "env_build", "-", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:489")
 Z23_FLAG("ZCL_STOPWATCH_ORACLE_LAG_BUDGET", "env_build", "2000", "-",
@@ -2382,13 +2382,13 @@ Z23_FLAG("ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST", "env_build", "-", "-",
 Z23_FLAG("ZCL_TELEMETRY_SCAN_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:277")
 Z23_FLAG("ZCL_TEST_CACHE", "env_test", "-", "-",
-          "first use tests/harness/src/test_parallel.c:2008; documented at docs/work/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
+          "first use tests/harness/src/test_parallel.c:2123; documented at docs/work/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
 Z23_FLAG("ZCL_TEST_CACHE_DUMP", "env_test", "-", "-",
-          "first use tests/harness/src/test_parallel.c:2106; documented at docs/work/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
+          "first use tests/harness/src/test_parallel.c:2229; documented at docs/work/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
 Z23_FLAG("ZCL_TESTCACHE_STORE_ROOT", "env_test", "-", "-",
-          "first use tests/harness/src/testcache.c:629; documented at docs/zrc/0007-asynchronous-p2p-landing.md:171: 3. **Unpin the verdict store.** dev_proof.c sets ZCL_TESTCACHE_STORE_ROOT")
+          "first use tests/harness/src/testcache.c:660; documented at docs/zrc/0007-asynchronous-p2p-landing.md:171: 3. **Unpin the verdict store.** dev_proof.c sets ZCL_TESTCACHE_STORE_ROOT")
 Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1951")
+          "undocumented; first use tests/harness/src/test_parallel.c:2066")
 Z23_FLAG("ZCL_TEST_FORK_ROLE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_boot_phase.c:459")
 Z23_FLAG("ZCL_TEST_LOG", "env_build", "/invalid", "-",
