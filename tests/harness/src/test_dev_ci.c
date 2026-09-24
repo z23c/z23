@@ -49,6 +49,7 @@
 /* Commit ids the fixtures record, plus one nothing ever records. */
 #define DCX_TIP "1111111111111111111111111111111111111111"
 #define DCX_BASE "2222222222222222222222222222222222222222"
+#define DCX_LOCAL "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define DCX_LANDED "3333333333333333333333333333333333333333"
 #define DCX_FAILED "4444444444444444444444444444444444444444"
 #define DCX_STRANGER "9999999999999999999999999999999999999999"
@@ -205,27 +206,28 @@ static long long dcx_now(void)
  * empty worktree is the "origin only" case its own parser allows. */
 static void dcx_land_row(char *out, size_t cap, long long seq, const char *tip,
                          const char *state, const char *phase,
-                         long long started, const char *base)
+                         long long started, const char *base,
+                         const char *local)
 {
     int n = snprintf(out, cap,
         "{\"seq\":%lld,\"ts\":\"2026-09-19T00:00:00Z\",\"tip\":\"%s\","
         "\"worktree\":\"\",\"note\":\"lane %lld\",\"state\":\"%s\","
         "\"phase\":\"%s\",\"attempt\":1,\"started\":%lld,\"base\":\"%s\","
-        "\"local\":\"\",\"tip_pushed\":\"\",\"dimension\":\"\","
+        "\"local\":\"%s\",\"tip_pushed\":\"\",\"dimension\":\"\","
         "\"log_path\":\"\",\"detail\":\"\"}\n",
-        seq, tip, seq, state, phase, started, base);
+        seq, tip, seq, state, phase, started, base, local);
     if (n < 0 || (size_t)n >= cap)
         dcx_fail("land row does not fit");
 }
 
-static void dcx_seed_land(void)
+static void dcx_seed_land_with_local(const char *local)
 {
     char dir[DCX_BUF], path[DCX_BUF], queued[DCX_BUF], flight[DCX_BUF];
     char both[DCX_BUF * 2];
     dcx_dir(g_dcx_root, "land", dir, sizeof(dir));
-    dcx_land_row(queued, sizeof(queued), 1, DCX_TIP, "queued", "", 0, "");
+    dcx_land_row(queued, sizeof(queued), 1, DCX_TIP, "queued", "", 0, "", "");
     dcx_land_row(flight, sizeof(flight), 2, DCX_TIP, "inflight", "prove",
-                 dcx_now() - 60, DCX_BASE);
+                 dcx_now() - 60, DCX_BASE, local);
     if ((size_t)snprintf(both, sizeof(both), "%s%s", queued, flight) >=
         sizeof(both))
         dcx_fail("land queue does not fit");
@@ -245,6 +247,11 @@ static void dcx_seed_land(void)
         "\"phase\":\"\",\"attempt\":1,\"started\":0,\"base\":\"\","
         "\"local\":\"\",\"tip_pushed\":\"\",\"dimension\":\"TEST\","
         "\"log_path\":\"/logs/a4.log\",\"detail\":\"gate red\"}\n");
+}
+
+static void dcx_seed_land(void)
+{
+    dcx_seed_land_with_local(DCX_LOCAL);
 }
 
 /* One dev.agent.queue row in exactly the schema dvq_parse_row accepts. */
@@ -833,6 +840,30 @@ _test_next:;
     return failures;
 }
 
+static int dcx_t_land_unpaired_proof(void)
+{
+    int failures = 0;
+
+    TEST("ci: an in-flight proof without its local SHA leaves landing unknown") {
+        struct dcx_call c;
+        dcx_isolate("land_unpaired_proof");
+        dcx_seed_land_with_local("");
+        dcx_seed_units(30, true);
+        dcx_begin(&c, "{\"topic\":\"status\"}");
+        ASSERT(dcx_run(&c));
+        ASSERT(dcx_ok(&c));
+        ASSERT(!dcx_answered(&c, "dev.land"));
+        ASSERT(strcmp(dcx_str(&c.reply.data, "land"), "unknown") == 0);
+        ASSERT(json_get(&c.reply.data, "land_queued") == NULL);
+        dcx_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dcx_restore();
+    return failures;
+}
+
 /* ── receipt for a SHA ───────────────────────────────────────────────── */
 
 static int dcx_t_receipt_found(void)
@@ -1076,6 +1107,7 @@ int test_dev_ci(void)
     failures += dcx_t_worker_no_claim();
     failures += dcx_t_worker_unmeasured();
     failures += dcx_t_land_unreadable();
+    failures += dcx_t_land_unpaired_proof();
     failures += dcx_t_receipt_found();
     failures += dcx_t_receipt_unknown();
     failures += dcx_t_receipt_refusals();
