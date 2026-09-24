@@ -499,7 +499,7 @@ struct multi_reach_ctx {
 struct multi_network {
   size_t node_count;
   struct vcs_zcode_dht_service *service[MULTI_MAX_NODES];
-  char dir[MULTI_MAX_NODES][80];
+  char dir[MULTI_MAX_NODES][PATH_MAX];
   uint8_t noise[MULTI_MAX_NODES][32];
   uint8_t node_id[MULTI_MAX_NODES][32];
   struct multi_reach_ctx reach[MULTI_MAX_NODES];
