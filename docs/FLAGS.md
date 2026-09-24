@@ -67,7 +67,12 @@ files, or zero reads) rather than reporting a false "clean". For every row
 whose `why_` names a `first use <path>:<line>` site, the gate also opens
 that file and checks the flag's exact name appears on that line, so a
 stale or wrong pointer (a moved read, an error-message string, a different
-flag's line) fails the gate instead of going unnoticed. See
+flag's line) fails the gate instead of going unnoticed. A pointer that only
+drifted (the cited flag still reads somewhere else in the same file) can be
+repaired automatically with `z23-lint check-flag-registry --fix-pointers`,
+which rewrites each drifted pointer's line number to that nearest read and
+leaves a row whose flag no longer reads anywhere in that file for a human.
+See
 `tools/lint/lintc/gate_flag_registry.c` and
 `tools/lint/lintc/gate_flag_registry_first_use.c` for the implementation
 and `tools/lint/check_lint_gate_wiring.sh` for how every lint gate,

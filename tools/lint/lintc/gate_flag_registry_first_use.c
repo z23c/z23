@@ -95,53 +95,90 @@ static int fru_name_on_line(const char *line, const char *name)
     return 0;
 }
 
-/* Opens path (relative to the repo root, same convention as the rest of
- * this gate) and checks whether its cited line reads name. Returns 0 when
- * it does, 1 with reason filled in for a violation the caller reports and
- * keeps scanning past, or -1 when the file exists but can't be read at
- * all — the caller treats that as UNPROVEN and stops immediately rather
- * than guessing. */
-static int fru_open_check(const char *path, int line, const char *name,
-                          char *reason, size_t rcap)
+/* The shared scan behind both fru_open_check and fru_pointer_status: reads
+ * every line of path once, and reports whether the cited line reads name
+ * (*hit: line existed; *found: it read the name), plus the line NUMBER
+ * nearest line that does read name anywhere in the file (*near, 0 if none —
+ * the repair target when the cited line drifted), and the file's total line
+ * count (*lines, for a "line past end" message). Returns 0 on a completed
+ * scan, 1 when the file is missing (stat failed — none of the out params
+ * are touched), or -1 when the file exists but can't be opened for read —
+ * the caller treats that as UNPROVEN and stops immediately rather than
+ * guessing. */
+static int fru_scan(const char *path, int line, const char *name, int *hit,
+                    int *found, int *near, int *lines)
 {
     struct stat st;
-    if (stat(path, &st) != 0) {
-        snprintf(reason, rcap, "file missing");
+    if (stat(path, &st) != 0)
         return 1;
-    }
     FILE *f = fopen(path, "r");
     if (!f)
         return -1;
     char *l = NULL;
     size_t cap = 0;
     ssize_t nread;
-    int lineno = 0, hit = 0, found = 0, near = 0;
+    int lineno = 0;
+    *hit = *found = *near = 0;
     /* The whole file is read: when the cited line is stale, the line
-     * NEAREST it that does read the name is named in the reason, so a
-     * pointer that only drifted (an insertion above it) is a copy-paste
-     * fix. The gate itself stays exact: a drifted pointer still fails. */
+     * NEAREST it that does read the name is found, so a pointer that only
+     * drifted (an insertion above it) is a copy-paste fix. */
     while ((nread = getline(&l, &cap, f)) >= 0) {
         lineno++;
         int on = fru_name_on_line(l, name);
-        if (on && (!near || abs(lineno - line) < abs(near - line)))
-            near = lineno;
+        if (on && (!*near || abs(lineno - line) < abs(*near - line)))
+            *near = lineno;
         if (lineno == line) {
-            hit = 1;
-            found = on;
+            *hit = 1;
+            *found = on;
         }
     }
     free(l);
     fclose(f);
+    *lines = lineno;
+    return 0;
+}
+
+/* Opens path (relative to the repo root, same convention as the rest of
+ * this gate) and checks whether its cited line reads name. Returns 0 when
+ * it does, 1 with reason filled in for a violation the caller reports and
+ * keeps scanning past, or -1 when the file exists but can't be read at
+ * all — the caller treats that as UNPROVEN and stops immediately rather
+ * than guessing. The gate itself stays exact: a drifted pointer still fails,
+ * even though the nearest read named in the reason is exactly what
+ * --fix-pointers would rewrite it to. */
+static int fru_open_check(const char *path, int line, const char *name,
+                          char *reason, size_t rcap)
+{
+    int hit, found, near, lines;
+    int rc = fru_scan(path, line, name, &hit, &found, &near, &lines);
+    if (rc != 0) {
+        if (rc == 1)
+            snprintf(reason, rcap, "file missing");
+        return rc == 1 ? 1 : -1;
+    }
     if (hit && found)
         return 0;
     if (near)
         snprintf(reason, rcap, "%s; nearest read now at %s:%d",
                  hit ? "name absent" : "line past end", path, near);
     else if (!hit)
-        snprintf(reason, rcap, "line past end (%d lines)", lineno);
+        snprintf(reason, rcap, "line past end (%d lines)", lines);
     else
         snprintf(reason, rcap, "name absent");
     return 1;
+}
+
+/* See gate_flag_registry_priv.h for the contract. */
+int fru_pointer_status(const char *path, int line, const char *name, int *near)
+{
+    int hit, found, lines;
+    *near = 0;
+    int rc = fru_scan(path, line, name, &hit, &found, near, &lines);
+    if (rc == -1)
+        return -1;
+    if (rc == 1 || !(hit && found))
+        return (rc == 0 && *near) ? 1 : 2;
+    return 0;
 }
 
 static int fru_check_one(const struct fr_row *row, FILE *out)
@@ -191,6 +228,10 @@ int fru_check_rows(const struct fr_row *rows, int n, FILE *out, int *verified)
     if (violations == 0)
         return 0;
     return fprintf(out, "flag_registry: %d first-use pointer(s) do not"
-                   " read their flag\n", violations) < 0
+                   " read their flag — run `z23-lint check-flag-registry"
+                   " --fix-pointers` to repair a drifted pointer to the"
+                   " flag's nearest current read in the same file (a row"
+                   " whose flag is no longer read there at all is left for"
+                   " a human)\n", violations) < 0
         ? die("z23-lint: write failed\n", "") : 1;
 }

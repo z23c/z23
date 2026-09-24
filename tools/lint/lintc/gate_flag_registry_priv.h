@@ -37,4 +37,15 @@ struct fr_row {
 int fru_parse_pointer(const char *why, char *path, size_t pathcap, int *line);
 int fru_check_rows(const struct fr_row *rows, int n, FILE *out, int *verified);
 
+/* fru_pointer_status: proves (or disproves) one row's cited "first use
+ * <path>:<line>" the same way fru_check_rows does, but hands the verdict
+ * back instead of formatting a FAIL line — the seam --fix-pointers repairs
+ * from. Returns 0 when the cited line already reads the flag (nothing to
+ * fix), 1 when it is drifted but some OTHER line in the same file still
+ * reads the same flag (*near left at that line — the repair target), 2
+ * when it is drifted and no line in the file reads the flag at all (*near
+ * left at 0 — not fixable, still a human's problem), or -1 when the cited
+ * file exists but can't be opened (die-worthy, same as fru_check_rows). */
+int fru_pointer_status(const char *path, int line, const char *name, int *near);
+
 #endif

@@ -495,8 +495,144 @@ static int fr_run_impl(const char *def_path, const char *ls_cmd,
     return fr_reconcile(rows, n, head_date, ctx.reads, out);
 }
 
+/* ── --fix-pointers ──────────────────────────────────────────────────── */
+
+/* Rewrites the single "first use <path>:<old_line>" token for one drifted
+ * row to "first use <path>:<new_line>", in place inside buf (capacity
+ * bufcap, NUL-terminated). Only the digits after the token's final colon
+ * move; every other byte — including the path, the quotes around it, and
+ * everything outside this one token — is untouched. Returns 0 on success,
+ * -1 when the exact old token can't be found (a parser/state mismatch the
+ * caller treats as fatal, never a silent no-op) or the rewrite would not
+ * fit in bufcap. */
+static int fr_fix_apply(char *buf, size_t bufcap, const char *path,
+                        int old_line, int new_line)
+{
+    char needle[FR_FU_PATH + 48];
+    int nlen = snprintf(needle, sizeof needle, "first use %s:%d", path,
+                        old_line);
+    if (nlen <= 0 || (size_t)nlen >= sizeof needle)
+        return -1;
+    /* ":31" must not match the prefix of another row's ":314". */
+    char *hit = strstr(buf, needle);
+    while (hit && hit[nlen] >= '0' && hit[nlen] <= '9')
+        hit = strstr(hit + 1, needle);
+    if (!hit)
+        return -1;
+    const char *colon = strrchr(needle, ':');
+    size_t prefix_len = (size_t)(colon - needle) + 1;
+    char *digits_at = hit + prefix_len;
+    size_t old_digits_len = (size_t)nlen - prefix_len;
+    char newdigits[16];
+    int dlen = snprintf(newdigits, sizeof newdigits, "%d", new_line);
+    if (dlen <= 0 || (size_t)dlen >= (int)sizeof newdigits)
+        return -1;
+    size_t buflen = strlen(buf);
+    size_t tail_at = (size_t)(digits_at - buf) + old_digits_len;
+    size_t tail_len = buflen - tail_at + 1; /* +1 carries the NUL along */
+    size_t new_buflen = buflen - old_digits_len + (size_t)dlen;
+    if (new_buflen + 1 > bufcap)
+        return -1;
+    memmove(digits_at + dlen, buf + tail_at, tail_len);
+    memcpy(digits_at, newdigits, (size_t)dlen);
+    return 0;
+}
+
+/* Same temp-file-then-rename shape as gate_shell_host_assumptions.c's
+ * shl_write_baseline: the catalog is never observed half-written, whether
+ * the process dies mid-write or races a concurrent reader. */
+static int fr_fix_write_atomic(const char *path, const char *buf)
+{
+    char tmp[512];
+    if (ovf(snprintf(tmp, sizeof tmp, "%s.tmp", path), sizeof tmp))
+        return 2;
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", tmp);
+    size_t len = strlen(buf);
+    int rc = 0;
+    if (fwrite(buf, 1, len, f) != len)
+        rc = die("z23-lint: write failed: %s\n", tmp);
+    if (fclose(f) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", tmp);
+    if (rc == 0 && rename(tmp, path) != 0)
+        rc = die("z23-lint: rename failed: %s\n", path);
+    return rc;
+}
+
+/* One row's repair decision: skipped (not a numeric first-use pointer, or
+ * already correct), rewritten in defbuf and reported, or left for a human
+ * (with a reason) and reported. Never touches the ":auto" component-file
+ * convention — that pointer names no line to move to. */
+static int fr_fix_one(struct fr_row *row, char *defbuf, size_t defcap,
+                      FILE *out, int *fixed, int *unfixed)
+{
+    if (!row->fu_present || row->fu_line == -1)
+        return 0;
+    int near = 0;
+    int status = fru_pointer_status(row->fu_path, row->fu_line, row->name,
+                                    &near);
+    if (status == -1)
+        return die("z23-lint: flag_registry: first-use pointer file "
+                   "unreadable: %s\n", row->fu_path);
+    if (status == 0)
+        return 0;
+    if (status == 2) {
+        (*unfixed)++;
+        return fprintf(out, "flag_registry: %s first use %s:%d not fixed —"
+                      " %s is no longer read anywhere in that file; a human"
+                      " must repoint or remove the row\n", row->name,
+                      row->fu_path, row->fu_line, row->name) < 0
+            ? die("z23-lint: write failed\n", "") : 0;
+    }
+    if (fr_fix_apply(defbuf, defcap, row->fu_path, row->fu_line, near))
+        return die("z23-lint: flag_registry: --fix-pointers: could not "
+                   "locate %s's own first-use token to rewrite\n", row->name);
+    (*fixed)++;
+    return fprintf(out, "flag_registry: fixed %s first use %s:%d -> :%d\n",
+                  row->name, row->fu_path, row->fu_line, near) < 0
+        ? die("z23-lint: write failed\n", "") : 0;
+}
+
+/* Repairs every drifted numeric first-use pointer in def_path to the
+ * nearest current read of the same flag in the same file, rewriting the
+ * catalog atomically once (never for zero fixes — an all-clean or
+ * all-unfixable run leaves the file byte-identical, which is what makes a
+ * second run a no-op). Returns 0 when nothing is left unfixed, 1 when some
+ * row still needs a human, 2 on a hard error. */
+static int fr_run_fix(const char *def_path, FILE *out)
+{
+    static char defbuf[FR_DEF_BUF];
+    static struct fr_row rows[FR_MAX];
+
+    if (fr_read_file(def_path, defbuf, sizeof defbuf))
+        return 2;
+    int n = 0;
+    if (fr_parse_def_buf(defbuf, rows, FR_MAX, &n))
+        return 2;
+
+    int fixed = 0, unfixed = 0;
+    for (int i = 0; i < n; i++) {
+        int rc = fr_fix_one(&rows[i], defbuf, sizeof defbuf, out, &fixed,
+                            &unfixed);
+        if (rc)
+            return rc;
+    }
+    if (fixed > 0) {
+        int rc = fr_fix_write_atomic(def_path, defbuf);
+        if (rc)
+            return rc;
+    }
+    if (fprintf(out, "flag_registry: --fix-pointers: %d rewritten, %d left"
+               " for a human\n", fixed, unfixed) < 0)
+        return die("z23-lint: write failed\n", "");
+    return unfixed > 0 ? 1 : 0;
+}
+
 int check_flag_registry_run(int argc, char **argv)
 {
+    if (argc == 1 && strcmp(argv[0], "--fix-pointers") == 0)
+        return fr_run_fix(k_def_path, stdout);
     if (argc == 1 && strcmp(argv[0], "--key-inputs") == 0) {
         /* The optional action cache must hash every first-use pointer target,
          * including a future target outside the tracked scan pathspec. Emit
@@ -763,6 +899,68 @@ static int fr_st_auto_component_cases(FILE *out, char *ob, size_t obcap)
     return bad;
 }
 
+/* --fix-pointers: drifted pointer -> fixed, absent read -> left for a
+ * human (never rewritten), and a second run over the already-fixed file
+ * is a byte-identical no-op — the three behaviors the landing failure
+ * this repair mode targets (ZCL_COMMONS_DEMO_RECORD 3149 -> 3164) needs
+ * proved, the same way fr_st_case proves the strict check. */
+static int fr_st_fix_cases(FILE *out, char *ob, size_t obcap)
+{
+    static char defbuf[FR_DEF_BUF];
+    int bad = 0;
+
+    bad |= csr_write("./fix_filler.c",
+            "int z(void){ return getenv(\"ZCL_FIX_FILLER\") != 0; }\n");
+    bad |= csr_write("./fix_ok.c",
+            "int a(void){ return 0; }\n"
+            "int b(void){ return 0; }\n"
+            "int c(void){ return 0; }\n"
+            "int d(void){ return 0; }\n"
+            "int f(void){ return getenv(\"ZCL_FIX_OK\") != 0; }\n");
+    bad |= csr_write("./fix_gone.c", "int a(void){ return 0; }\n");
+    bad |= csr_write("./f.def",
+            "Z23_FLAG(\"ZCL_FIX_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
+            "Z23_FLAG(\"ZCL_FIX_OK\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fix_ok.c:2\")\n"
+            "Z23_FLAG(\"ZCL_FIX_GONE\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fix_gone.c:1\")\n");
+    if (bad)
+        return 1;
+
+    /* Run 1: one drifted (fixable) row, one absent-read (unfixable) row. */
+    int rc = fr_run_fix("./f.def", out);
+    bad |= csr_slurp(out, ob, obcap) || psp_st_reset(out);
+    bad |= rc != 1
+        || strstr(ob, "fixed ZCL_FIX_OK first use ./fix_ok.c:2 -> :5") == NULL
+        || strstr(ob, "ZCL_FIX_GONE first use ./fix_gone.c:1 not fixed") == NULL
+        || strstr(ob, "1 rewritten, 1 left for a human") == NULL;
+
+    /* The drifted row now reads correctly; the unfixable one is untouched
+     * (still fails, still needs a human) — a fully independent re-parse
+     * and re-scan proves the file itself, not just the report line. */
+    bad |= fr_read_file("./f.def", defbuf, sizeof defbuf) != 0;
+    bad |= strstr(defbuf, "first use ./fix_ok.c:5") == NULL;
+    bad |= strstr(defbuf, "first use ./fix_gone.c:1") == NULL;
+    rc = fr_run_impl("./f.def", "printf '%s\\0' fix_filler.c fix_ok.c fix_gone.c",
+                     "2026-01-01", out);
+    bad |= csr_slurp(out, ob, obcap) || psp_st_reset(out);
+    bad |= rc != 1
+        || strstr(ob, "ZCL_FIX_GONE first use ./fix_gone.c:1 does not read it") == NULL;
+
+    /* Run 2, over the just-repaired file: the fixable row is now correct,
+     * so nothing moves and the file is byte-identical to run 1's output —
+     * a second --fix-pointers is a no-op, never a re-rewrite. */
+    static char before[FR_DEF_BUF];
+    memcpy(before, defbuf, sizeof before);
+    rc = fr_run_fix("./f.def", out);
+    bad |= csr_slurp(out, ob, obcap) || psp_st_reset(out);
+    bad |= rc != 1 || strstr(ob, "0 rewritten, 1 left for a human") == NULL;
+    bad |= fr_read_file("./f.def", defbuf, sizeof defbuf) != 0;
+    bad |= strcmp(before, defbuf) != 0;
+
+    return bad;
+}
+
 static void fr_st_cleanup(void)
 {
     unlink("./f.def");
@@ -780,6 +978,9 @@ static void fr_st_cleanup(void)
     unlink("./fu_secret.c");
     unlink("./fu_auto_a.sh");
     unlink("./fu_auto_b.sh");
+    unlink("./fix_filler.c");
+    unlink("./fix_ok.c");
+    unlink("./fix_gone.c");
 }
 
 int check_flag_registry_selftest(void)
@@ -806,6 +1007,7 @@ int check_flag_registry_selftest(void)
     int bad = fr_st_core_cases(out, ob, sizeof ob);
     bad |= fr_st_first_use_cases(out, ob, sizeof ob);
     bad |= fr_st_auto_component_cases(out, ob, sizeof ob);
+    bad |= fr_st_fix_cases(out, ob, sizeof ob);
     fflush(stdout);
     fflush(stderr);
 
