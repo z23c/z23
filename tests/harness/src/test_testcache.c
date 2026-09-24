@@ -1894,6 +1894,11 @@ int test_testcache(void)
                      !p.cacheable);
             TC_CHECK("and it says so with a stable reason code",
                      p.code == TESTCACHE_R_NO_INCLUDE_GRAPH);
+            testcache_probe_group_proof(tc, "test_demo_entry",
+                                       ZCL_TEST_PROOF_STRESS, &p);
+            TC_CHECK("activated proof with missing graph has no reusable key",
+                     !p.key_valid && !p.cacheable && !p.hit &&
+                     p.code == TESTCACHE_R_NO_INCLUDE_GRAPH);
             testcache_close(tc);
         }
     }

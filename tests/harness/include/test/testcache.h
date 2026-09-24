@@ -92,8 +92,9 @@ const char *testcache_reason_label(enum testcache_reason r);
 
 /* The per-group cache decision. */
 struct testcache_probe {
-    /* Derived identity within the verified closure model. It does not alone
-     * prove complete behavior and may be valid when reuse remains forbidden. */
+    /* Derived identity only when the observed source/include closure is
+     * complete. It does not alone prove behavior; activated contracts can
+     * carry this identity while still requiring fresh execution. */
     bool    key_valid;
     bool    cacheable;    /* false => the group MUST run this time */
     bool    hit;          /* true  => a stored PASS exists at this exact key */

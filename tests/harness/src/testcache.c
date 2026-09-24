@@ -536,22 +536,11 @@ static void trc_wrap_proof_key(
     sha3_256_finalize(&ctx, out_key);
 }
 
-/* Fold the closure into the SHA3 key. Files are already sorted by
- * codeindex_forward_closure. Returns false on a file-read failure; sets
- * *stale when any input is newer than the include graph that produced it.
- *
- * `lenient` is set only for an activated proof-contract group: that group is
- * never marked cacheable (activation skips the cacheable=true assignment
- * entirely), so a closure entry this box's include graph can no longer read —
- * typically a stale depfile still naming a file a refactor moved or deleted —
- * must not block the run or the receipt. Fold in a domain-tagged marker for
- * that one entry instead of its bytes, so two different missing inputs still
- * key differently, and keep going. A non-activated (real caching) probe never
- * sets this: an unreadable input there stays a hard failure, because a wrong
- * or incomplete key there could mint a false cache HIT. */
+/* Fold the complete closure into the SHA3 key. An activated proof runs fresh,
+ * but its key can later identify an observation offered for reuse. It must
+ * meet the same closure requirements as an ordinary cache key. */
 static bool trc_compute_key(struct testcache *tc, const char *group_name,
-                            int n_closure, uint8_t out_key[32], bool *stale,
-                            bool lenient)
+                            int n_closure, uint8_t out_key[32], bool *stale)
 {
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
@@ -578,14 +567,7 @@ static bool trc_compute_key(struct testcache *tc, const char *group_name,
         const char *p = tc->closure[i];
         uint8_t fh[32];
         int64_t mt = 0;
-        if (!trc_file_hash(tc, p, fh, &mt)) {
-            if (!lenient)
-                return false;
-            static const uint8_t MISSING_TAG = 0xFF;
-            sha3_256_write(&ctx, &MISSING_TAG, 1);
-            sha3_256_write(&ctx, (const unsigned char *)p, strlen(p) + 1);
-            continue;
-        }
+        if (!trc_file_hash(tc, p, fh, &mt)) return false;
         if (mt > tc->dep_newest_ns)
             *stale = true;
         sha3_256_write(&ctx, (const unsigned char *)p, strlen(p) + 1);
@@ -805,15 +787,9 @@ static void testcache_probe_group_internal(
         return;
     }
 
-    /* No depfiles at all => the include graph is ABSENT, not empty. Every
-     * closure would then be call-graph-only: a strictly smaller set that is
-     * never reported truncated and so looks complete. Refuse the whole
-     * keyspace rather than mint header-free keys for an ORDINARY (cacheable)
-     * probe. An activated proof-contract group is never marked cacheable
-     * either way (see the `activated` branch below), so a header-free key is
-     * merely a less complete provenance record for it, not an unsound cache
-     * decision — proceed instead of refusing the whole run. */
-    if (tc->dep_count == 0 && !activated) {
+    /* No depfiles means the include closure is unknown. Even a freshly run
+     * proof cannot mint a reusable key from that incomplete input set. */
+    if (tc->dep_count == 0) {
         out->code = TESTCACHE_R_NO_INCLUDE_GRAPH;
         snprintf(out->reason, sizeof(out->reason),
                  "no depfiles under build/ (include graph absent)");
@@ -834,7 +810,7 @@ static void testcache_probe_group_internal(
         snprintf(out->reason, sizeof(out->reason), "entry symbol unresolved");
         return;
     }
-    if (truncated && !activated) {
+    if (truncated) {
         out->code = TESTCACHE_R_TRUNCATED;
         snprintf(out->reason, sizeof(out->reason),
                  "closure truncated (%d files, cap hit)", nc);
@@ -865,15 +841,13 @@ static void testcache_probe_group_internal(
     }
 
     bool stale = false;
-    if (!trc_compute_key(tc, group_name, nc, out->key, &stale, activated)) {
+    if (!trc_compute_key(tc, group_name, nc, out->key, &stale)) {
         out->code = TESTCACHE_R_FILE_UNREADABLE;
         snprintf(out->reason, sizeof(out->reason), "input file unreadable");
         return;
     }
-    /* An input newer than every depfile cannot be described by the graph those
-     * depfiles built: an include added since is invisible to this key. Same
-     * reasoning as above — moot for a group that is never marked cacheable. */
-    if (stale && !activated) {
+    /* An input newer than every depfile may have new unseen dependencies. */
+    if (stale) {
         out->code = TESTCACHE_R_GRAPH_STALE;
         snprintf(out->reason, sizeof(out->reason),
                  "input newer than include graph (rebuild to refresh)");
