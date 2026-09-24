@@ -226,28 +226,65 @@ while :; do
     used_cpu=$((legacy_qedc * 8))
     used_ram=$((legacy_qedc * 24))
     used_io=$legacy_qedc
-    project_ram=0 project_ordinary=0
+    qedc_ram=$((legacy_qedc * 24)) z23_ram=0
+    qedc_ordinary=$legacy_qedc z23_ordinary=0
     ordinary=$legacy_qedc active=$legacy_qedc
     for file in "$state"/running/*; do
         [[ -f $file ]] || continue
         read -r _ _ _ p c cp mem disk _ _ <"$file"
         ((used_cpu+=cp, used_ram+=mem, used_io+=disk, active+=1)) || true
-        [[ $p != "$project" ]] || ((project_ram+=mem)) || true
-        [[ $p != "$project" || $c == hotload ]] || ((project_ordinary+=1)) || true
+        if [[ $p == qedc ]]; then
+            ((qedc_ram+=mem)) || true
+            [[ $c == hotload ]] || ((qedc_ordinary+=1)) || true
+        elif [[ $p == z23 ]]; then
+            ((z23_ram+=mem)) || true
+            [[ $c == hotload ]] || ((z23_ordinary+=1)) || true
+        fi
         [[ $c == hotload ]] || ((ordinary+=1)) || true
     done
+    fits_candidate() {
+        local candidate_project=$1 candidate_class=$2 candidate_cpu=$3
+        local candidate_ram=$4 candidate_io=$5 candidate_ram_used=0
+        local candidate_ordinary=0
+        if [[ $candidate_project == exclusive ]]; then
+            ((active == 0))
+            return
+        fi
+        if [[ $candidate_project == qedc ]]; then
+            candidate_ram_used=$qedc_ram
+            candidate_ordinary=$qedc_ordinary
+        else
+            candidate_ram_used=$z23_ram
+            candidate_ordinary=$z23_ordinary
+        fi
+        ((used_cpu + candidate_cpu <= 28 && used_ram + candidate_ram <= 48 &&
+          used_io + candidate_io <= 4 && candidate_ram_used + candidate_ram <= 24 &&
+          active < 4)) || return 1
+        [[ $candidate_class == hotload ]] && return 0
+        if [[ $candidate_class == legacy ]]; then
+            ((ordinary < 3 && candidate_ordinary < 2))
+        else
+            ((ordinary < 3 && candidate_ordinary < 2 &&
+              used_cpu + candidate_cpu <= 24 && used_ram + candidate_ram <= 44 &&
+              used_io + candidate_io <= 3))
+        fi
+    }
     now_s=$(date +%s)
     best_id= best_score=-999999 best_ns=9999999999999999999
     hot_id= hot_score=-999999 hot_ns=9999999999999999999
     for file in "$state"/queue/*; do
         [[ -f $file ]] || continue
-        read -r _ _ _ _ queued_class _ _ _ pri queued_ns epoch <"$file"
+        read -r _ _ _ queued_project queued_class queued_cpu queued_ram queued_io pri queued_ns epoch <"$file"
         # A request started under the first cutover broker cannot pass its
         # global old-wrapper gate. Keep its place for when that gate drains,
         # but do not let it block newer compatible work meanwhile.
         if [[ -e $state/legacy-inode && $epoch != broker-v2 ]]; then
             continue
         fi
+        # An older request that cannot fit must not hold the queue head while
+        # a compatible request from the other project waits behind it.
+        fits_candidate "$queued_project" "$queued_class" "$queued_cpu" \
+            "$queued_ram" "$queued_io" || continue
         score=$((pri + (now_s - queued_ns / 1000000000)))
         if [[ $queued_class == hotload ]]; then
             if ((score > hot_score)) || { ((score == hot_score)) && ((queued_ns < hot_ns)); }; then
@@ -263,19 +300,7 @@ while :; do
     if [[ $class == hotload && $hot_id == "$id" ]] ||
        { [[ -z $hot_id && $best_id == "$id" ]] ||
          [[ $best_id == "$id" && $class != hotload ]]; }; then
-        if [[ $project == exclusive ]]; then
-            ((active == 0)) && admitted=1
-        elif ((used_cpu + cpu <= 28 && used_ram + ram <= 48 && used_io + io <= 4 &&
-                project_ram + ram <= 24 && active < 4)); then
-            if [[ $class == hotload ]]; then
-                admitted=1
-            elif [[ $class == legacy ]] && ((ordinary < 3 && project_ordinary < 2)); then
-                admitted=1
-            elif ((ordinary < 3 && project_ordinary < 2 &&
-                    used_cpu + cpu <= 24 && used_ram + ram <= 44 && used_io + io <= 3)); then
-                admitted=1
-            fi
-        fi
+        fits_candidate "$project" "$class" "$cpu" "$ram" "$io" && admitted=1
     fi
     if ((admitted)); then
         available=$(awk '$1 == "MemAvailable:" {print $2}' /proc/meminfo)

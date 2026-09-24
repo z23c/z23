@@ -93,6 +93,27 @@ awk -F '\t' '
 }
 printf 'devbuild broker: release proof priority PASS\n'
 
+"$root/devbuild-broker" --wait --project qedc --class normal sleep 2 \
+    >"$scratch/qedc-head-running.log" 2>&1 & one=$!
+for _ in {1..100}; do
+    grep -q 'admitted' "$scratch/qedc-head-running.log" 2>/dev/null && break
+    sleep 0.05
+done
+grep -q 'admitted' "$scratch/qedc-head-running.log" || {
+    printf 'QEDC head fixture did not enter\n' >&2; exit 1;
+}
+"$root/devbuild-broker" --wait --project qedc --class legacy true \
+    >"$scratch/qedc-head-blocked.log" 2>&1 & two=$!
+sleep 0.1
+"$root/devbuild-broker" --wait --project z23 --class normal true \
+    >"$scratch/z23-behind-head.log" 2>&1
+kill -0 "$one" 2>/dev/null || {
+    printf 'incompatible QEDC queue head blocked fitting Z23 work\n' >&2
+    exit 1
+}
+wait "$one" "$two"
+printf 'devbuild broker: incompatible queue head does not block fitting work PASS\n'
+
 "$root/devbuild-broker" --wait --project z23 --class normal \
     bash -c 'sleep 20 & exit 0' >"$scratch/orphan.log" 2>&1
 orphan_id=$(awk -F '\t' '$3 == "queued" {id=$2} END {print id}' \
