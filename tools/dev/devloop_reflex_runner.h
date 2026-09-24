@@ -113,6 +113,10 @@ struct zcl_reflex_runner_outcome {
  * images run the runner loop; other hosts return rc=2 without running. */
 bool zcl_reflex_runner_dispatch(int argc, char **argv, int *rc);
 
+/* Branch-free form for a host main(): exits the process with the runner's
+ * status when argv selects the runner; otherwise returns and does nothing. */
+void zcl_reflex_runner_exit_if_requested(int argc, char **argv);
+
 /* Run one candidate in a fresh confined child of the warm runner. Returns
  * true when a runner reply was obtained (out->available); false with
  * out->reason on any spawn/transport/verification failure. Never executes

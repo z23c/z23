@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -388,6 +389,17 @@ static int runner_recv(void *frame, size_t len, int *fd_out)
     return 1;
 }
 
+static bool request_strings_terminated(const struct zcl_reflex_request *r)
+{
+    return memchr(r->expected_sha256, 0, sizeof(r->expected_sha256)) &&
+        memchr(r->owner_id, 0, sizeof(r->owner_id)) &&
+        memchr(r->source_tu, 0, sizeof(r->source_tu)) &&
+        memchr(r->candidate_object_root, 0, sizeof(r->candidate_object_root)) &&
+        memchr(r->story_id, 0, sizeof(r->story_id)) &&
+        memchr(r->story_root, 0, sizeof(r->story_root)) &&
+        memchr(r->story_fixture_root, 0, sizeof(r->story_fixture_root));
+}
+
 static bool request_valid(const struct zcl_reflex_request *r)
 {
     return r->head.magic == ZCL_REFLEX_WIRE_MAGIC &&
@@ -397,14 +409,7 @@ static bool request_valid(const struct zcl_reflex_request *r)
         (r->mode == ZCL_REFLEX_MODE_HOT_FORK ||
          r->mode == ZCL_REFLEX_MODE_HOT_SHADOW) &&
         r->timeout_ms > 0 && r->timeout_ms <= 60000u &&
-        memchr(r->expected_sha256, 0, sizeof(r->expected_sha256)) &&
-        strlen(r->expected_sha256) == 64 &&
-        memchr(r->owner_id, 0, sizeof(r->owner_id)) &&
-        memchr(r->source_tu, 0, sizeof(r->source_tu)) &&
-        memchr(r->candidate_object_root, 0, sizeof(r->candidate_object_root)) &&
-        memchr(r->story_id, 0, sizeof(r->story_id)) &&
-        memchr(r->story_root, 0, sizeof(r->story_root)) &&
-        memchr(r->story_fixture_root, 0, sizeof(r->story_fixture_root));
+        request_strings_terminated(r) && strlen(r->expected_sha256) == 64;
 }
 
 static void reply_error(struct zcl_reflex_reply *reply, const char *error)
@@ -582,4 +587,11 @@ bool zcl_reflex_runner_dispatch(int argc, char **argv, int *rc)
     *rc = 2;
 #endif
     return true;
+}
+
+void zcl_reflex_runner_exit_if_requested(int argc, char **argv)
+{
+    int rc = 0;
+    if (zcl_reflex_runner_dispatch(argc, argv, &rc))
+        exit(rc);
 }

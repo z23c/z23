@@ -2036,11 +2036,7 @@ int main(int argc, char **argv)
     /* The clean-zygote reflex runner re-execs THIS binary when a test drives
      * the resident runner client. Exact argv shape, dispatched before any
      * suite setup, exactly as main.c dispatches it before node boot. */
-    {
-        int runner_rc = 0;
-        if (zcl_reflex_runner_dispatch(argc, argv, &runner_rc))
-            return runner_rc;
-    }
+    zcl_reflex_runner_exit_if_requested(argc, argv);
 #if defined(_WIN32)
     /* Windows worker entry. The parent cannot fork(), so child_spawn()
      * re-execs this binary with --child-run=<idx> --child-out=<path> per

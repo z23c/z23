@@ -423,13 +423,32 @@ static bool outcome_story_green(const struct zcl_reflex_runner_spec *spec,
         r->observation.checks_run == r->observation.checks_passed;
 }
 
-static void outcome_from_reply(const struct zcl_reflex_runner_spec *spec,
-                               const struct zcl_reflex_reply *reply,
+/* The runner process's own verdict: exact image, clean exit, no deadline. */
+static bool outcome_process_clean(const struct zcl_reflex_runner_spec *spec,
+                                  const struct zcl_reflex_reply *reply)
+{
+    return reply->report_complete && !reply->timed_out &&
+        !reply->cancelled && reply->seals_verified &&
+        reply->child_exit_code == 0 && reply->child_signal == 0 &&
+        strcmp(reply->runner_sha256, spec->artifact_sha256) == 0;
+}
+
+/* The confined child's verdict: every confinement step held before the
+ * candidate ran, and the mapped bytes are the requested bytes. */
+static bool outcome_child_confined(const struct zcl_reflex_runner_spec *spec,
+                                   const struct zcl_reflex_child_report *r)
+{
+    return strcmp(r->runtime_module_sha256, spec->artifact_sha256) == 0 &&
+        r->hash_verified && r->descriptor_valid && r->sandboxed &&
+        r->wx_installed && r->candidate_executed && r->story_ok &&
+        r->env_count == 0 && r->inherited_fd_count == 0;
+}
+
+static void outcome_copy_reply(const struct zcl_reflex_reply *reply,
                                struct zcl_reflex_runner_outcome *out)
 {
-    const struct zcl_reflex_child_report *r = &reply->report;
     out->available = true;
-    out->report = *r;
+    out->report = reply->report;
     out->timed_out = reply->timed_out;
     out->cancelled = reply->cancelled;
     out->report_complete = reply->report_complete;
@@ -440,6 +459,14 @@ static void outcome_from_reply(const struct zcl_reflex_runner_spec *spec,
     out->runner_total_us = reply->total_us;
     (void)snprintf(out->runner_sha256, sizeof(out->runner_sha256), "%s",
                    reply->runner_sha256);
+}
+
+static void outcome_from_reply(const struct zcl_reflex_runner_spec *spec,
+                               const struct zcl_reflex_reply *reply,
+                               struct zcl_reflex_runner_outcome *out)
+{
+    const struct zcl_reflex_child_report *r = &reply->report;
+    outcome_copy_reply(reply, out);
     if (reply->report_complete) {
         out->confine_us = r->confine_us;
         out->dlopen_us = r->dlopen_us;
@@ -449,15 +476,9 @@ static void outcome_from_reply(const struct zcl_reflex_runner_spec *spec,
         out->address_space_fresh = zcl_reflex_resident_canary != 0 &&
             r->resident_canary_seen == 0;
     }
-    out->green = reply->report_complete && !reply->timed_out &&
-        !reply->cancelled && reply->seals_verified &&
-        reply->child_exit_code == 0 && reply->child_signal == 0 &&
-        strcmp(reply->runner_sha256, spec->artifact_sha256) == 0 &&
-        strcmp(r->runtime_module_sha256, spec->artifact_sha256) == 0 &&
-        r->hash_verified && r->descriptor_valid && r->sandboxed &&
-        r->wx_installed && r->candidate_executed && r->story_ok &&
-        r->env_count == 0 && r->inherited_fd_count == 0 &&
-        out->address_space_fresh && outcome_story_green(spec, r);
+    out->green = outcome_process_clean(spec, reply) &&
+        outcome_child_confined(spec, r) && out->address_space_fresh &&
+        outcome_story_green(spec, r);
     if (reply->error[0]) outcome_reason(out, reply->error);
     else if (reply->report_complete && r->error[0])
         outcome_reason(out, r->error);
