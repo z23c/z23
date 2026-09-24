@@ -33,6 +33,10 @@ if [[ $project == auto ]]; then
 fi
 case $project in qedc|z23|exclusive) ;; *) printf 'devbuild: unknown project: %s\n' "$project" >&2; exit 64 ;; esac
 if ((!class_explicit)); then
+    if (($# >= 4)) && [[ $1 == */z23-dev || $1 == z23-dev ]] &&
+       [[ $2 == dev && $3 == proof && $4 == step ]]; then
+        class=release
+    fi
     for argument in "$@"; do
         case $argument in
             commons-demo|*/commons_journey_acceptance.sh) class=background ;;

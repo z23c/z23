@@ -19,6 +19,12 @@ cc -std=c23 -Wall -Wextra -Werror -pedantic \
 [[ $("$root/devbuild-broker" --plan --project z23 make commons-demo) == *'class=background '* ]] || {
     printf 'commons-demo did not select background admission\n' >&2; exit 1;
 }
+[[ $("$root/devbuild-broker" --plan --project z23 build/bin/z23-dev dev proof step) == *'class=release '* ]] || {
+    printf 'direct proof step did not select release admission\n' >&2; exit 1;
+}
+[[ $("$root/devbuild-broker" --plan --project z23 --class legacy build/bin/z23-dev dev proof step) == *'class=legacy '* ]] || {
+    printf 'explicit proof class was overridden\n' >&2; exit 1;
+}
 
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 2 >"$scratch/one.log" 2>&1 & one=$!
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 2 >"$scratch/two.log" 2>&1 & two=$!
