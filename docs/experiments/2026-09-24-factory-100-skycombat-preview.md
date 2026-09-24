@@ -72,9 +72,9 @@ promoted to release qualification.
 ## Adversarial verdicts
 
 The eleven current fault scripts returned their expected verdicts. The
-fault ledger SHA-256 is
+original fault ledger SHA-256 is
 `ee58642fd77047c8152d511358606d8e477a6dd35b99d1c67ff5b63dc3a0e517`.
-Its rows bind each case to exact logs and reports. `wrong` was compile-valid
+It records one incorrect report binding, corrected below. `wrong` was compile-valid
 but failed its behavioral test. `interface` passed the new package factory
 while an old C23 client failed to compile against the renamed public API;
 this executable counterexample disproves any inferred backward-compatibility
@@ -94,6 +94,46 @@ for mode in wrong interface stale contradictory partial dependency worker \
     "test-tmp/factory100-faults-$mode-new"
 done
 ```
+
+### Fault evidence binding correction
+
+The original `contradictory` ledger row names the untouched report SHA-256
+`c4fab579b40bb1dae61d065adcb3a74225ef5a2f3d5018a53aacf06e222f35b2`.
+The audit actually consumed `altered.json` at SHA-256
+`a9c76df7fecad2287ec02d4e5b35cf5e509410ce25bfe52f12a2aa8c640c4164`.
+The top-level verdict log names that altered root and says `REFUSE quick receipt
+ids differ`. The original ledger is retained unchanged. The new auditor
+refuses it with `ledger binding mismatch: contradictory`; the negative-control
+stderr SHA-256 is
+`b6cc3c4b6e0b352f4ce279c70b1c3e718baa82207a924a98e96fdc80f814b26c`.
+
+The reproducible runner now records the evaluated report, complete package
+file-manifest digest, verdict log, duplicate second report, and worker or
+publisher recovery report for every mode. It reran all eleven modes with their
+expected outcomes, including same-store recovery after both deaths:
+
+```bash
+tools/dev/factory-fault-matrix.sh \
+  test-tmp/factory-100-current-20260924 \
+  test-tmp/factory-fault-matrix-new
+```
+
+The runner SHA-256 is
+`95a1ffad5da9adc754eea0496b5904df5f89ebd52980fa686e4c595ce83b78d4`;
+the auditor SHA-256 is
+`d699ce26bf660a14996c70555c71ce3f69ea94b47e7140e29645b67364382394`.
+The fresh run's ledger SHA-256 is
+`d244684c67dc3d4dea641e914b733b5e89aac71cb91b11e9318082a1415a37ee`;
+its source/report/log evidence matrix SHA-256 is
+`7d55b8eb5e5da3cf991c3334b227f4ca222ca59598f0507ff8a11a839b9c72b3`.
+The publisher-death evaluated report is explicitly `unavailable`; the recovery
+report is a separate root. The refusal verdicts are unchanged by this
+correction.
+
+Dedicated feature, refactor, and UI progressions were not run as part of the
+100-revision data/compute corpus. One-publisher 100-release progression,
+owner acceptance, and node synchronization under package load remain unrun or
+unobserved; their throughput and safety cannot be inferred from these ledgers.
 
 ## Real SkyCombat app and independent verifier control
 
