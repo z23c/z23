@@ -596,19 +596,19 @@ static bool group_cache_hit_marked(struct group_result *results, size_t i,
     }
     return true;
 }
-
-/* --cache-probe-only reporting: one line per selected group (never an
- * aggregate key), a SUMMARY the caller's parser checks its line count
- * against, and the STATS ledger for the 1/8/32 cost table. */
+static bool selected_all_external(const struct group_result *results);
+enum cache_mode { CACHE_OFF, CACHE_ON, CACHE_COLD_AUDIT };
+static void print_external_probe_only(const struct group_result *results);
+static void external_cache_prepare(const struct group_result *, size_t, enum cache_mode *);
 static void print_probe_only(const struct group_result *results,
                              const struct testcache_probe *probes,
                              const struct testcache *tc)
 {
     size_t n = 0, reuse = 0, uncacheable = 0;
     if (!tc || !probes) {
-        /* No verified graph behind the verdicts (allocation downgrade):
-         * emit no SUMMARY, so the caller's self-check refuses the account
-         * instead of reading zeroed slots as a decision. */
+        if (selected_all_external(results)) {
+            print_external_probe_only(results); return;
+        }
         printf("PROBE-ERROR no-verified-graph\n");
         return;
     }
@@ -2121,7 +2121,7 @@ int main(int argc, char **argv)
     /* Resolve the cache mode. Precedence: --cold-audit > --no-cache >
      * (--cache | ZCL_TEST_CACHE!=0) > OFF. OFF reproduces the historical
      * behavior byte-for-byte (none of the cache code below runs). */
-    enum cache_mode { CACHE_OFF, CACHE_ON, CACHE_COLD_AUDIT } cache_mode;
+    enum cache_mode cache_mode;
     {
         const char *env = getenv("ZCL_TEST_CACHE");
         bool env_on = env && env[0] && strcmp(env, "0") != 0;
@@ -2234,6 +2234,8 @@ int main(int argc, char **argv)
         printf("test_parallel: %zu params-heavy group(s) gated out "
                "(set ZCL_PARAMS_TESTS=1 or use --only/--exact to run)\n",
                params_gated);
+
+    external_cache_prepare(results, pre_skipped, &cache_mode);
 
     /* ── Content-addressed cache: probe every group's forward input closure,
      * and in CACHE_ON mark the provable HITS as CACHED so they are never
@@ -2669,4 +2671,45 @@ int main(int argc, char **argv)
     free(slots);
     free(results);
     return (failed_groups == 0 && audit_diverged == 0) ? 0 : 1;
+}
+
+/* The exact external-input denylist refuses cache reuse before any key or
+ * graph lookup. For an entirely denied selection, graph work has no value. */
+static bool selected_all_external(const struct group_result *results)
+{
+    size_t selected = 0;
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped) continue;
+        selected++;
+        if (!testcache_group_is_denylisted(g_groups[i].name)) return false;
+    }
+    return selected > 0;
+}
+
+static void print_external_probe_only(const struct group_result *results)
+{
+    size_t selected = 0;
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped) continue;
+        selected++;
+        printf("PROBE %s UNCACHEABLE external-input-denylist -\n",
+               g_groups[i].name);
+    }
+    printf("PROBE-SUMMARY groups=%zu would_reuse=0 must_run=%zu "
+           "uncacheable=%zu\n", selected, selected, selected);
+    printf("PROBE-STATS graph_opens=0 depfiles=0 closure_queries=0 "
+           "file_hash_reads=0 memo_hits=0 sha3_bytes=0 "
+           "verdict_lookups=0 verdict_hits=0\n");
+}
+
+static void external_cache_prepare(const struct group_result *results,
+                                   size_t pre_skipped, enum cache_mode *mode)
+{
+    if (*mode != CACHE_ON || !selected_all_external(results)) return;
+    size_t selected = g_num_groups - pre_skipped;
+    printf("test_parallel: cache PLAN — 0 cacheable, 0 cache HIT "
+           "(will NOT run), %zu will run\n", selected);
+    printf("test_parallel: cacheability by reason:\n"
+           "  %-32s %zu\n", "external-input-denylist", selected);
+    *mode = CACHE_OFF;
 }
