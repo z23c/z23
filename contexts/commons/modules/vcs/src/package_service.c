@@ -527,15 +527,48 @@ static void svc_apply_no_credit(struct vcs_service_book *book,
 
 static DIR *svc_open_events(struct vcs_service_book **book_io)
 {
-    DIR *dir = opendir((*book_io)->events_dir);
-    if (dir || errno == ENOENT)
+    int fd = open((*book_io)->events_dir,
+                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT)
+        return NULL;
+    DIR *dir = fd >= 0 ? fdopendir(fd) : NULL;
+    if (dir)
         return dir;
     int open_errno = errno;
+    if (fd >= 0)
+        close(fd);
     LOG_ERROR(SERVICE_LOG, "cannot open service events %s: %s",
               (*book_io)->events_dir, strerror(open_errno));
     free(*book_io);
     *book_io = NULL;
     return NULL;
+}
+
+static bool svc_read_event_wire(DIR *dir, const char *name,
+                                uint8_t wire[VCS_SERVICE_WIRE_BYTES])
+{
+    int fd = openat(dirfd(dir), name,
+                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
+        return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size != VCS_SERVICE_WIRE_BYTES) {
+        close(fd);
+        return false;
+    }
+    FILE *f = fdopen(fd, "rb");
+    if (!f) {
+        close(fd);
+        return false;
+    }
+    size_t got = fread(wire, 1, VCS_SERVICE_WIRE_BYTES, f);
+    int extra = fgetc(f);
+    bool complete = got == VCS_SERVICE_WIRE_BYTES && extra == EOF &&
+                    !ferror(f);
+    if (fclose(f) != 0)
+        complete = false;
+    return complete;
 }
 
 struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
@@ -586,8 +619,8 @@ struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
         memcpy(names[name_count], ent->d_name, 65);
         name_count++;
     }
-    closedir(dir);
     if (scan_failed) {
+        closedir(dir);
         free(names);
         vcs_service_book_free(book);
         LOG_NULL(SERVICE_LOG, "event scan alloc");
@@ -605,26 +638,16 @@ struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
     }
 
     for (size_t i = 0; i < name_count; i++) {
-        char path[4400];
-        int pn = snprintf(path, sizeof(path), "%s/%.64s", book->events_dir,
-                          names[i]);
-        if (pn <= 0 || (size_t)pn >= sizeof(path)) {
-            book->corrupt++;
-            continue;
-        }
         uint8_t wire[VCS_SERVICE_WIRE_BYTES];
-        FILE *f = fopen(path, "rb");
-        if (!f) {
+        if (!svc_read_event_wire(dir, names[i], wire)) {
+            LOG_WARN(SERVICE_LOG, "skipping unreadable or linked event %.16s",
+                     names[i]);
             book->corrupt++;
             continue;
         }
-        size_t got = fread(wire, 1, sizeof(wire), f);
-        int extra = fgetc(f);
-        fclose(f);
         struct svc_event e;
         uint8_t file_id[32], want_id[32];
-        if (got != sizeof(wire) || extra != EOF ||
-            !svc_wire_decode(wire, got, &e) ||
+        if (!svc_wire_decode(wire, sizeof(wire), &e) ||
             !zcl_hex_decode_lower(names[i], file_id, 32)) {
             LOG_WARN(SERVICE_LOG, "skipping corrupt event wire %.16s",
                      names[i]);
@@ -712,6 +735,7 @@ struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
         }
         book->event_count++;
     }
+    closedir(dir);
     free(names);
     return book;
 }

@@ -410,7 +410,7 @@ contexts/commons/modules/vcs/src/package_score.c:vcs_score_release_compute:38
 contexts/commons/modules/vcs/src/package_score.c:vcs_score_scan_file:23
 contexts/commons/modules/vcs/src/package_service.c:svc_credit:16
 contexts/commons/modules/vcs/src/package_service.c:svc_wire_decode:31
-contexts/commons/modules/vcs/src/package_service.c:vcs_service_book_load:45
+contexts/commons/modules/vcs/src/package_service.c:vcs_service_book_load:41
 contexts/commons/modules/vcs/src/package_store.c:store_pick_victim:17
 contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_get_chunk:25
 contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_open:21

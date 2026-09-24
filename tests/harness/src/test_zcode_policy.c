@@ -955,6 +955,61 @@ static int t_book(void)
     return failures;
 }
 
+static int zpy_book_check_linked_event(const char *zcode,
+                                        const char *outside,
+                                        const char *event)
+{
+    int failures = 0;
+    struct vcs_service_book *book = vcs_service_book_load(zcode);
+    ZPY_CHECK("book: linked event cannot import external credit",
+              book && vcs_service_book_event_count(book) == 0 &&
+              vcs_service_book_corrupt_count(book) == 1);
+    vcs_service_book_free(book);
+    bool restored = unlink(event) == 0 && rename(outside, event) == 0;
+    book = restored ? vcs_service_book_load(zcode) : NULL;
+    ZPY_CHECK("book: same real event still replays",
+              book && vcs_service_book_event_count(book) == 1);
+    vcs_service_book_free(book);
+    return failures;
+}
+
+static int t_book_linked_event(void)
+{
+    int failures = 0;
+    char zcode[4400], events[4400], outside[4400], event[4400] = {0};
+    snprintf(zcode, sizeof(zcode), "test-tmp/zpy_link_%ld/zcode",
+             (long)getpid());
+    zpy_rm_rf(zcode);
+    bool ready = zpy_mkdir_p(zcode);
+    uint8_t key[33], request[32];
+    zpy_pub(0x79, key);
+    zpy_root(0x7a, request);
+    struct vcs_service_book *book = ready ? vcs_service_book_load(zcode) : NULL;
+    ready = book && vcs_service_credit_upload(book, key, request, 42, 20000)
+                        == VCS_SERVICE_CREDIT_OK &&
+            vcs_service_book_event_count(book) == 1;
+    vcs_service_book_free(book);
+    snprintf(events, sizeof(events), "%s/service/events", zcode);
+    snprintf(outside, sizeof(outside), "%s/outside-event", zcode);
+    DIR *dir = ready ? opendir(events) : NULL;
+    struct dirent *ent;
+    while (dir && (ent = readdir(dir)) != NULL) {
+        if (strlen(ent->d_name) == 64) {
+            snprintf(event, sizeof(event), "%s/%s", events, ent->d_name);
+            break;
+        }
+    }
+    if (dir)
+        closedir(dir);
+    ready = ready && event[0] && rename(event, outside) == 0 &&
+            symlink("../../outside-event", event) == 0;
+    ZPY_CHECK("book: valid event linked under its real ID is prepared", ready);
+    if (ready)
+        failures += zpy_book_check_linked_event(zcode, outside, event);
+    zpy_rm_rf(zcode);
+    return failures;
+}
+
 
 /* ── 5. the typed commands over fixture datadirs ────────────────────── */
 
@@ -2215,6 +2270,7 @@ int test_zcode_policy(void)
     failures += t_tiers();
     failures += t_decisions();
     failures += t_book();
+    failures += t_book_linked_event();
     failures += t_seed_commands();
     failures += t_service_receipt();
     failures += t_receipt_accept();
