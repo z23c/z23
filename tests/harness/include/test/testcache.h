@@ -66,6 +66,8 @@ struct testcache *testcache_open_snapshot(
     const char *repo_root, const char *const *changed_sources,
     size_t changed_source_count);
 void testcache_close(struct testcache *tc);
+/* The exact CAS root used by this handle's addressed verdict records. */
+const char *testcache_store_root(const struct testcache *tc);
 
 /* Why a group was (not) cacheable. A STABLE identity for histogram bucketing —
  * it deliberately carries no volatile data (counts, paths), unlike the free-text

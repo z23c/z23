@@ -757,6 +757,11 @@ void testcache_close(struct testcache *tc)
     free(tc);
 }
 
+const char *testcache_store_root(const struct testcache *tc)
+{
+    return tc ? tc->store_root : NULL;
+}
+
 const char *testcache_toolkey(void)
 {
     return ZCL_TESTCACHE_TOOLKEY;

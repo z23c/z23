@@ -20,12 +20,15 @@
 
 #include "test/test_core.h"
 #include "test/testcache.h"
+#include "dev_proof_observation.h"
+#include "vcs/vcs_object.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #define TC_FIX "test-tmp/tc_cache_fix"
 #define TC_STORE "test-tmp/tc_cache_store"
@@ -1643,6 +1646,178 @@ static int tc_missing_graph_activated(struct testcache *tc)
     return failures;
 }
 
+static int tc_observation_forged(const uint8_t key[32], const uint8_t pass[32])
+{
+    int failures = 0;
+    char why[96];
+    size_t ineligible = 0;
+    uint8_t forged[32], roots[2][32];
+    struct zcl_dev_verdict_leaf_v1 bad = {0};
+    memcpy(bad.key, key, 32);
+    memcpy(bad.group, "test_demo_entry", sizeof("test_demo_entry"));
+    bad.group_len = sizeof("test_demo_entry") - 1;
+    bad.verdict = ZCL_DEV_VERDICT_LEAF_FAIL;
+    bad.observed_unix = (uint64_t)time(NULL);
+    bad.log_seq = 1;
+    bool forged_ok = zcl_dev_verdict_leaf_sign(&bad, why, sizeof(why));
+    bad.signature[0] ^= 1u;
+    forged_ok = forged_ok && zcl_dev_verdict_leaf_root(&bad, forged,
+        why, sizeof(why));
+    uint8_t wire[ZCL_DEV_VERDICT_LEAF_WIRE_BYTES];
+    forged_ok = forged_ok && zcl_dev_verdict_leaf_serialize(&bad,
+        wire, why, sizeof(why)) &&
+        vcs_object_put_addressed(TC_FIX, forged, wire, sizeof(wire));
+    TC_CHECK("forged signed-wire fixture persists separately", forged_ok);
+    if (forged_ok) {
+        memcpy(roots[0], pass, 32);
+        memcpy(roots[1], forged, 32);
+        TC_CHECK("forged FAIL has no veto authority",
+            zcl_dev_observation_admit(TC_FIX, key, "test_demo_entry",
+                (const uint8_t (*)[32])roots, 2, &ineligible,
+                why, sizeof(why)) == ZCL_DEV_OBSERVATION_PASS &&
+                ineligible == 1);
+    }
+    return failures;
+}
+
+static int tc_observation_conflict(const uint8_t key[32], const uint8_t pass[32])
+{
+    int failures = 0;
+    char why[96];
+    size_t ineligible = 0;
+    uint8_t fail[32], roots[2][32], absent[32] = {0};
+    memcpy(roots[0], pass, 32);
+    bool made_fail = zcl_dev_observation_record(TC_FIX, key,
+        "test_demo_entry", ZCL_DEV_VERDICT_LEAF_FAIL, 19,
+        fail, why, sizeof(why));
+    TC_CHECK("real FAIL has a distinct durable root", made_fail &&
+             memcmp(pass, fail, 32) != 0);
+    if (made_fail) {
+        memcpy(roots[1], fail, 32);
+        TC_CHECK("eligible PASS and FAIL coexist and refuse",
+            zcl_dev_observation_admit(TC_FIX, key, "test_demo_entry",
+                (const uint8_t (*)[32])roots, 2, &ineligible,
+                why, sizeof(why)) == ZCL_DEV_OBSERVATION_CONFLICT &&
+                strcmp(why, "proof_observation_conflict") == 0);
+    }
+    memcpy(roots[1], absent, 32);
+    TC_CHECK("missing required root refuses even beside PASS",
+        zcl_dev_observation_admit(TC_FIX, key, "test_demo_entry",
+            (const uint8_t (*)[32])roots, 2, &ineligible,
+            why, sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING &&
+            strcmp(why, "observation_object_missing") == 0);
+    uint8_t other_key[32];
+    memcpy(other_key, key, 32);
+    other_key[0] ^= 1u;
+    TC_CHECK("changed input cannot reuse prior signed PASS",
+        zcl_dev_observation_admit(TC_FIX, other_key, "test_demo_entry",
+            (const uint8_t (*)[32])roots, 1, &ineligible,
+            why, sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING &&
+            ineligible == 1);
+    return failures;
+}
+
+static int tc_observation_cross_tree(const uint8_t key[32], const uint8_t pass[32])
+{
+    int failures = 0;
+    char why[96];
+    size_t ineligible = 0;
+    struct testcache_probe p = {0};
+    TC_CHECK("signed observation second candidate tree prepared",
+        system("rm -rf " TC_FIX2 " && cp -r " TC_FIX " " TC_FIX2
+               " && rm -rf " TC_FIX2 "/.zvcs " TC_FIX2 "/signing-state") == 0);
+    struct testcache *tc = testcache_open(TC_FIX2);
+    if (tc) {
+        testcache_probe_group(tc, "test_demo_entry", &p);
+        testcache_close(tc);
+    }
+    TC_CHECK("unchanged second candidate admits signed PASS",
+        p.key_valid && memcmp(p.key, key, 32) == 0 &&
+        zcl_dev_observation_admit(TC_FIX, p.key, "test_demo_entry",
+            (const uint8_t (*)[32])pass, 1, &ineligible,
+            why, sizeof(why)) == ZCL_DEV_OBSERVATION_PASS);
+    bool edited = mk_write(TC_FIX2, "core/modules/net/include/net/tc.h", TC_H_B) &&
+        mk_write(TC_FIX2, "build/obj/tc_top.d",
+            "build/obj/tc_top.o: core/modules/net/src/tc_top.c "
+            "core/modules/net/include/net/tc.h "
+            "core/modules/net/include/net/tc_registry.def\n") &&
+        mk_write(TC_FIX2, "build/obj/tc_mid.d",
+            "build/obj/tc_mid.o: core/modules/net/src/tc_mid.c "
+            "core/modules/net/include/net/tc.h\n") &&
+        mk_write(TC_FIX2, "build/obj/tc_leaf.d",
+            "build/obj/tc_leaf.o: core/modules/net/src/tc_leaf.c "
+            "core/modules/net/include/net/tc.h\n") &&
+        mk_write(TC_FIX2, "build/obj/tc_other.d",
+            "build/obj/tc_other.o: core/modules/net/src/tc_other.c "
+            "core/modules/net/include/net/tc.h\n");
+    TC_CHECK("second candidate shared header changes", edited);
+    memset(&p, 0, sizeof(p));
+    tc = edited ? testcache_open(TC_FIX2) : NULL;
+    if (tc) {
+        testcache_probe_group(tc, "test_demo_entry", &p);
+        testcache_close(tc);
+    }
+    TC_CHECK("changed shared input refuses signed PASS reuse",
+        p.key_valid && memcmp(p.key, key, 32) != 0 &&
+        zcl_dev_observation_admit(TC_FIX, p.key, "test_demo_entry",
+            (const uint8_t (*)[32])pass, 1, &ineligible,
+            why, sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING &&
+        ineligible == 1);
+    TC_CHECK("signed observation second tree removed",
+             system("rm -rf " TC_FIX2) == 0);
+    return failures;
+}
+
+static int tc_observation_roundtrip(void)
+{
+    int failures = 0;
+    struct tc_envsave saved;
+    char state[4096], why[96];
+    tc_env_capture(&saved, "XDG_STATE_HOME");
+    bool ready = getcwd(state, sizeof(state)) != NULL;
+    if (ready) {
+        size_t used = strlen(state);
+        ready = used + sizeof("/" TC_FIX "/signing-state") < sizeof(state);
+        if (ready) memcpy(state + used, "/" TC_FIX "/signing-state",
+                          sizeof("/" TC_FIX "/signing-state"));
+    }
+    ready = ready && write_fixture(TC_LEAF_A, TC_OTHER_A, TC_H_A) &&
+            mkdir(state, 0700) == 0 &&
+            setenv("XDG_STATE_HOME", state, 1) == 0;
+    TC_CHECK("observation fixture and private signer state ready", ready);
+    struct testcache_probe p = {0};
+    struct testcache *tc = ready ? testcache_open(TC_FIX) : NULL;
+    if (tc) {
+        testcache_probe_group(tc, "test_demo_entry", &p);
+        testcache_close(tc);
+    }
+    TC_CHECK("observation starts with a complete actual input key",
+             p.key_valid && p.cacheable);
+    if (p.key_valid) {
+        uint8_t pass[32];
+        size_t ineligible = 0;
+        bool made_pass = zcl_dev_observation_record(TC_FIX, p.key,
+            "test_demo_entry", ZCL_DEV_VERDICT_LEAF_PASS, 17,
+            pass, why, sizeof(why));
+        TC_CHECK("fresh runner PASS is signed and stored by observation root",
+                 made_pass);
+        if (made_pass) {
+            uint8_t roots[1][32];
+            memcpy(roots[0], pass, 32);
+            TC_CHECK("one eligible PASS admits its exact input",
+                zcl_dev_observation_admit(TC_FIX, p.key, "test_demo_entry",
+                    (const uint8_t (*)[32])roots, 1, &ineligible,
+                    why, sizeof(why)) == ZCL_DEV_OBSERVATION_PASS &&
+                ineligible == 0);
+            failures += tc_observation_cross_tree(p.key, pass);
+            failures += tc_observation_forged(p.key, pass);
+            failures += tc_observation_conflict(p.key, pass);
+        }
+    }
+    tc_env_restore(&saved, "XDG_STATE_HOME");
+    return failures;
+}
+
 static int tc_unadmissible_group(struct testcache *tc)
 {
     int failures = 0;
@@ -2506,6 +2681,7 @@ int test_testcache(void)
     failures += tc_batch_special();
     failures += tc_batch_restart_crosstree();
     failures += tc_batch_perf();
+    failures += tc_observation_roundtrip();
 
     system("rm -rf " TC_FIX " " TC_STORE);
     tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");

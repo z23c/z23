@@ -49,6 +49,8 @@
 #include "test_group_catalog.h"
 #include "test/test_helpers.h"
 #include "test/testcache.h"
+#include "dev_proof_observation.h"
+#include "base/hex.h"
 #include "event/event.h"
 #include "util/signal_handler.h"
 #include "util/clientversion.h"
@@ -1903,6 +1905,119 @@ static void raise_stack_limit(void)
 #endif
 }
 
+/* Selection retains the ordinary params opt-in even during a focused proof. */
+static size_t gate_params_groups(struct group_result *results,
+                                const char *only)
+{
+    size_t gated = 0;
+    if (getenv("ZCL_PARAMS_TESTS") == NULL && !only) {
+        for (size_t i = 0; i < g_num_groups; i++) {
+            if (results[i].skipped || !group_is_params_heavy(g_groups[i].name))
+                continue;
+            results[i].status = 0;
+            results[i].skipped = 1;
+            gated++;
+        }
+    }
+    if (gated)
+        printf("test_parallel: %zu params-heavy group(s) gated out "
+               "(set ZCL_PARAMS_TESTS=1 or use --only/--exact to run)\n",
+               gated);
+    return gated;
+}
+
+static bool cache_snapshot_selection_valid(bool snapshot, size_t changed_count,
+                                           bool cache_requested)
+{
+    return snapshot == (changed_count > 0) &&
+           (!snapshot || cache_requested);
+}
+
+static bool exact_selection_valid(bool exact, const char *only)
+{
+    if (!exact) return true;
+    const char *missing = NULL;
+    size_t missing_len = 0;
+    if (exact_selector_set_valid(only, &missing, &missing_len)) return true;
+    fprintf(stderr, "test_parallel: --exact contains no registered group: "
+                    "%.*s\n", (int)missing_len, missing ? missing : "");
+    return false;
+}
+
+/* A cache hit, SKIP, load-flaky rerun, or missing closure is not a fresh
+ * qualifying observation. The exact reason is returned before any signing. */
+static const char *observation_ineligible_reason(
+    const struct group_result *result, const struct testcache_probe *probe)
+{
+    if (!result->measured || result->cached)
+        return "observation_not_independently_executed";
+    if (result->skip_markers || result->env_unobserved ||
+        result->load_flaky || result->load_unobserved || result->wedged)
+        return "observation_execution_incomplete";
+    if (!probe || !probe->key_valid)
+        return "observation_input_closure_incomplete";
+    return NULL;
+}
+
+static bool emit_one_group_observation(const char *name,
+    const struct group_result *result, const struct testcache_probe *probe,
+    const char *store_root)
+{
+    enum zcl_dev_verdict_leaf_verdict verdict =
+        !result->signaled && result->exit_code == 0
+            ? ZCL_DEV_VERDICT_LEAF_PASS : ZCL_DEV_VERDICT_LEAF_FAIL;
+    uint8_t root[ZCL_DEV_PROOF_ROOT_BYTES];
+    char why[96] = {0};
+    uint64_t elapsed_ms = result->wall_seconds > 0
+        ? (uint64_t)(result->wall_seconds * 1000.0) : 0;
+    if (!zcl_dev_observation_record(store_root, probe->key, name,
+            verdict, elapsed_ms, root, why, sizeof(why))) {
+        printf("OBSERVATION REFUSE group=%s reason=%s\n", name,
+               why[0] ? why : "observation_store_failed");
+        return false;
+    }
+    enum zcl_dev_observation_verdict admitted =
+        zcl_dev_observation_admit(store_root, probe->key, name,
+            (const uint8_t (*)[32])&root, 1, NULL, why, sizeof(why));
+    if (admitted != (verdict == ZCL_DEV_VERDICT_LEAF_PASS
+                        ? ZCL_DEV_OBSERVATION_PASS
+                        : ZCL_DEV_OBSERVATION_FAIL)) {
+        printf("OBSERVATION REFUSE group=%s reason=%s\n", name,
+               why[0] ? why : "observation_admission_mismatch");
+        return false;
+    }
+    char root_hex[65], key_hex[65];
+    zcl_hex_encode(root, sizeof(root), root_hex);
+    zcl_hex_encode(probe->key, sizeof(probe->key), key_hex);
+    printf("OBSERVATION group=%s verdict=%s key=%s root=%s "
+           "source=independent_execution\n", name,
+           verdict == ZCL_DEV_VERDICT_LEAF_PASS ? "PASS" : "FAIL",
+           key_hex, root_hex);
+    return true;
+}
+
+/* Self-admission proves runner bytes crossed CAS and the receiver codec. A
+ * later proof set must still establish complete required roots and coverage. */
+static int emit_group_observations(const struct group_result *results,
+    const struct testcache_probe *probes, const char *store_root)
+{
+    int refused = 0;
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped) continue;
+        const struct testcache_probe *probe = probes ? &probes[i] : NULL;
+        const char *reason = observation_ineligible_reason(&results[i], probe);
+        if (reason) {
+            printf("OBSERVATION REFUSE group=%s reason=%s\n",
+                   g_groups[i].name, reason);
+            refused++;
+        } else if (!emit_one_group_observation(g_groups[i].name, &results[i],
+                                               probe, store_root)) {
+            refused++;
+        }
+    }
+    return refused;
+}
+
 int main(int argc, char **argv)
 {
     struct timespec process_start;
@@ -2012,6 +2127,7 @@ int main(int argc, char **argv)
     bool cli_no_cache = false;   /* --no-cache */
     bool cli_cold_audit = false; /* --cold-audit */
     bool cli_probe_only = false; /* --cache-probe-only */
+    bool cli_emit_observations = false;
     struct capsule_state cap_state;
     bool activate_proof_contracts = false;
     memset(&cap_state, 0, sizeof(cap_state));
@@ -2068,6 +2184,8 @@ int main(int argc, char **argv)
             cli_cold_audit = true;
         } else if (strcmp(argv[i], "--cache-probe-only") == 0) {
             cli_probe_only = true;
+        } else if (strcmp(argv[i], "--emit-observations") == 0) {
+            cli_emit_observations = true;
         } else if (cli_opt_capsule(argv[i], &cap_state.cli)) {
             /* --write-capsule/--use-capsule/--capsule-*: honored only with
              * --cache; otherwise silently ignored like the cache env. */
@@ -2080,7 +2198,8 @@ int main(int argc, char **argv)
                     "[--only=SUBSTR|--exact=FULL_ID[,FULL...]] "
                     "[--cache|--no-cache] "
                     "[--cache-snapshot --changed-source=PATH] "
-                    "[--cold-audit] [--activate-proof-contracts] "
+                    "[--cold-audit] [--emit-observations] "
+                    "[--activate-proof-contracts] "
                     "[--cache-probe-only] "
                     "[--write-capsule=PATH|--use-capsule=PATH "
                     "--capsule-source-id=ID --capsule-mutation-id=ID "
@@ -2089,8 +2208,8 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if (cache_snapshot != (changed_source_count > 0) ||
-        (cache_snapshot && !cli_cache)) {
+    if (!cache_snapshot_selection_valid(cache_snapshot, changed_source_count,
+                                        cli_cache)) {
         fprintf(stderr, "test_parallel: cache snapshot requires --cache and "
                         "one or more --changed-source paths\n");
         return 2;
@@ -2102,7 +2221,11 @@ int main(int argc, char **argv)
                 "exact selector and a valid proof-contract catalog\n");
         return 2;
     }
-
+    if (cli_emit_observations && (!cli_cold_audit || !only_exact)) {
+        fprintf(stderr, "test_parallel: --emit-observations requires "
+                        "--cold-audit and --exact\n");
+        return 2;
+    }
     /* Diagnostic surface: ZCL_TEST_CACHE_DUMP=<group> prints the group's forward
      * input closure, its content key, and its cacheability, then exits — the
      * operator/proof lens onto what the cache would key on. */
@@ -2149,22 +2272,19 @@ int main(int argc, char **argv)
             cache_mode = CACHE_OFF;
     }
 
+    if (cli_emit_observations && cache_mode != CACHE_COLD_AUDIT) {
+        fprintf(stderr, "test_parallel: observation emission requires "
+                        "an unchanged linked test image and cold audit\n");
+        return 2;
+    }
+
     if (list_only) {
         for (size_t i = 0; i < g_num_groups; i++)
             printf("%s\n", g_groups[i].name);
         return 0;
     }
 
-    if (only_exact) {
-        const char *missing = NULL;
-        size_t missing_len = 0;
-        if (!exact_selector_set_valid(only, &missing, &missing_len)) {
-            fprintf(stderr,
-                    "test_parallel: --exact contains no registered group: "
-                    "%.*s\n", (int)missing_len, missing ? missing : "");
-            return 2;
-        }
-    }
+    if (!exact_selection_valid(only_exact, only)) return 2;
 
     ensure_tmp_dir();
 
@@ -2215,25 +2335,9 @@ int main(int argc, char **argv)
      * explicitly selected via --only/--exact (which leaves results[i].skipped
      * clear for the matching group). Folded into pre_skipped so they are not
      * dispatched and are excluded from the pass/fail denominator. */
-    bool params_opt_in = getenv("ZCL_PARAMS_TESTS") != NULL;
-    size_t params_gated = 0;
-    /* An explicit selector is itself the opt-in for a params-heavy group,
-     * so skip the gate entirely when a selector is in effect (the matching group
-     * is the only one left unskipped above). */
-    if (!params_opt_in && !only) {
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped) continue;
-            if (!group_is_params_heavy(g_groups[i].name)) continue;
-            results[i].status = 0;              /* excludes from dispatch */
-            results[i].skipped = 1;
-            params_gated++;
-        }
-        pre_skipped += params_gated;
-    }
-    if (params_gated > 0)
-        printf("test_parallel: %zu params-heavy group(s) gated out "
-               "(set ZCL_PARAMS_TESTS=1 or use --only/--exact to run)\n",
-               params_gated);
+    /* An explicit selector opts into its selected params-heavy group. */
+    size_t params_gated = gate_params_groups(results, only);
+    pre_skipped += params_gated;
 
     external_cache_prepare(results, pre_skipped, &cache_mode);
 
@@ -2248,6 +2352,11 @@ int main(int argc, char **argv)
     if (cache_mode != CACHE_OFF) {
         probes = calloc(g_num_groups, sizeof(*probes));
         if (!probes) {
+            if (cli_emit_observations) {
+                fprintf(stderr, "OBSERVATION REFUSE reason=observation_probe_unavailable\n");
+                free(results);
+                return 1;
+            }
             fprintf(stderr, "test_parallel: probe calloc failed — "
                             "running every group uncached\n");
             testcache_close(tc);
@@ -2266,10 +2375,16 @@ int main(int argc, char **argv)
                            cache_snapshot, changed_sources,
                            changed_source_count,
                            &cap_state) != ACQUIRE_OK) {
-            fprintf(stderr, "test_parallel: cache probe failed (open or "
-                            "alloc) — running every group uncached\n");
             testcache_close(tc);
             tc = NULL;
+            if (cli_emit_observations) {
+                fprintf(stderr, "OBSERVATION REFUSE reason=observation_probe_unavailable\n");
+                free(probes);
+                free(results);
+                return 1;
+            }
+            fprintf(stderr, "test_parallel: cache probe failed (open or "
+                            "alloc) — running every group uncached\n");
             cache_mode = CACHE_OFF;
         } else {
         /* CACHE_ON: a provable stored PASS at the current key means the group
@@ -2600,6 +2715,7 @@ int main(int argc, char **argv)
      * soundness bug and fails the run loudly (over and above the failing group
      * already counting toward failed_groups). */
     int audit_diverged = 0;
+    int observation_refused = 0;
     if (cache_mode != CACHE_OFF) {
         size_t cached_n = 0, ran = 0, stored = 0, audit_hits = 0;
         for (size_t i = 0; i < g_num_groups; i++) {
@@ -2664,13 +2780,17 @@ int main(int argc, char **argv)
                    "%d divergence(s)\n", audit_hits, audit_diverged);
         else if (stored > 0)
             printf("cache: stored %zu fresh PASS verdict(s)\n", stored);
+        if (cli_emit_observations)
+            observation_refused = emit_group_observations(results, probes,
+                                        testcache_store_root(tc));
         testcache_close(tc);
         free(probes);
     }
 
     free(slots);
     free(results);
-    return (failed_groups == 0 && audit_diverged == 0) ? 0 : 1;
+    return (failed_groups == 0 && audit_diverged == 0 &&
+            observation_refused == 0) ? 0 : 1;
 }
 
 /* The exact external-input denylist refuses cache reuse before any key or
