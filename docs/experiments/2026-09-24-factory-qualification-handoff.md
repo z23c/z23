@@ -2,7 +2,7 @@
 
 # Factory qualification handoff
 
-Snapshot: 2026-09-24T22:41:35Z. Requery native status before changing a
+Snapshot: 2026-09-24T22:58:39Z. Requery native status before changing a
 queue, proof, candidate, or node. This record separates measured local
 verification from owner preview and operator acceptance.
 
@@ -74,6 +74,17 @@ recipe passing isolation does not amend the canonical recipe. The repaired
 game `make game-check` passed at the landed exact executable bytes. No app
 release or operator install follows from the owner's visual verdict alone.
 
+The accepted preview covers the complete SkyCombat game executable at source
+commit `255990bfdc48e0c7e6f966aa2e8d6e678b25ca40`. The Commons control
+package named `qualification/skycombat-aircraft` copies one aircraft source,
+its header, raylib headers, and a focused flight test. Its package root
+`9a2c62d39213dd36a2e05ca064ac011d100ff429f92eecedd2f2682307495acc`
+does not identify the previewed game executable. Fixing its `libm` declaration
+would qualify that component recipe only. A release of the accepted preview
+requires an exact candidate that binds the complete game source and resulting
+executable, the owner's existing verdict bound to that identity, and native
+acceptance receipts.
+
 An isolated local regtest node stayed responsive at height 0 during factory
 load (100 baseline, 539 during, one after successful block-count RPC), but
 its log emitted `catchup: final commit missing tip hash` before workload and
@@ -100,26 +111,31 @@ failed three of 212 gates on the qualification files: the C23 auditor lacked
 a purpose comment, four backticked generated-package paths were unmarked,
 and the handoff included an operator home path. The operator-path gate's
 source-derived identity prong then flagged other unchanged files. The
-corrected source now passes `check-file-purpose`, `check-doc-inline-paths`,
+corrected source passes `check-file-purpose`, `check-doc-inline-paths`,
 `check-no-operator-paths`, and `lint-fast`; its final-state peer bundle was
-rebuilt and rechecked at the roots above. A corrected signed successor must
-be submitted and receive a new full exact proof. At snapshot, the native land
-queue was idle. Cancelled seq39 and seq40 are not publication evidence.
+rebuilt and rechecked at the roots above. The signed successor received full
+exact proof and landed as native seq42 at
+`b984548202b55ce230eb9caf1ffaf0a13a43d6fc`, source tree
+`0aa42709fa78eea24a10ec54940aca98a4d0486d`. The independent remote
+receipt verified signer and ancestry. This evidence publication is not app
+acceptance. Cancelled seq39 and seq40 are not publication evidence.
 
 | Rank | Measured blocker | Owner |
 | ---: | --- | --- |
 | 1 | Exact publication proofs and moving-base retries cost 11,085 s and 6,682 s end to end for seq38/37; stale hook bytes also wasted one full seq38 attempt. | Native land/proof owner |
 | 2 | Two-store `add_commit` and `reproduce_build` cost 396.966/497.373 s (79.8%) in the mixed serial factory run. | Commons factory owner |
-| 3 | SkyCombat's canonical aircraft recipe refuses undeclared `libm`, preventing the accepted visual preview from becoming a package release. | SkyCombat and Commons recipe owners |
+| 3 | This qualification has no complete-game Commons candidate bound to the accepted preview; the aircraft control recipe separately refuses undeclared `libm`. | SkyCombat and Commons recipe owners |
 | 4 | Height-0 node observations and pre-existing catchup errors leave chain-sync safety under package load unqualified. | Public-node owner |
 
 The highest-leverage throughput repair is reuse of mandatory unit evidence
 only when exact input closure and receiver policy permit it across Git-base
 movement, followed by fresh mandatory publication evidence and independent
 remote observation. The [`FORWARD_PLAN.md`](../work/FORWARD_PLAN.md) already
-requires this. Native mail sequences 419, 431, 432, and 447 bind the measured
-factory and land costs to their owners. The immediate app release prerequisite
-is a canonical declared `libm` recipe that passes the real confined verifier.
+requires this. Native mail sequences 419, 431, 432, 447, and 458 bind the
+measured factory and land costs to their owners. The immediate app release
+step is an exact complete-game candidate with a real preview-to-source binding;
+the aircraft component must also declare `libm` before its own package can
+pass the confined verifier.
 
 ## Immediate continuation
 
@@ -127,23 +143,19 @@ is a canonical declared `libm` recipe that passes the real confined verifier.
 git fetch origin main
 git rev-parse HEAD origin/main
 build/bin/z23-dev dev land status
-build/bin/z23-dev dev agent mail pull --since=447
+build/bin/z23-dev dev agent mail pull --since=458
 ```
 
 Use a built `z23-dev` whose command catalog includes `dev.land`; the above
-`build/bin` path is a command template for a checkout with that binary. If
-the proof settles, advance the native land queue with `dev land drive` or
-`dev land step` according to its live `discover describe dev.land` contract.
-If a proof is in flight, read its exact root, local commit, and remote base
-from `dev land status` before invoking `dev proof status`. If it reaches
-`PUBLICATION_INTENT_REQUIRED`, attach only the exact proven
-pair's signed intent with `dev land attach`, then drive and verify the remote
-receipt and SHA. Do not run another build in the private landing worktree
-while its proof is active. Submit the corrected qualification successor and
-repair the canonical SkyCombat libm declaration under the app
-owner's source ownership, rerun its exact factory verifier, and obtain the
-remaining native acceptance receipts. Never infer release acceptance from
-the accepted frame.
+`build/bin` path is a command template for a checkout with that binary. If a
+proof is in flight, read its exact root, local commit, and remote base from
+`dev land status` before invoking `dev proof status`. Do not run another build
+in the private landing worktree while its proof is active. Establish a
+complete-game candidate under the app owner's source ownership, bind the
+accepted preview to that exact candidate, and run the real publication and
+local acceptance journey. Repair and reverify the aircraft component recipe
+separately. Never infer release acceptance from the accepted frame or from
+the component control.
 
 Full commands and raw roots are in
 [`2026-09-24-factory-mixed-100.md`](./2026-09-24-factory-mixed-100.md),
