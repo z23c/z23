@@ -97,3 +97,19 @@ wait "$legacy"
         exit 1
     }
 printf 'devbuild broker: old-wrapper drain gate PASS\n'
+
+"$root/devbuild-broker" --wait --project z23 sleep 1 >"$scratch/z23-legacy.log" 2>&1 & one=$!
+"$root/devbuild-broker" --wait --project qedc sleep 1 >"$scratch/qedc-legacy.log" 2>&1 & two=$!
+for _ in {1..100}; do
+    legacy_admitted=$(awk -F '\t' '$3 == "admitted" && $5 == "legacy" {n++} END {print n+0}' \
+        "$DEVBUILD_BROKER_STATE/events.tsv")
+    [[ $legacy_admitted == 2 ]] && break
+    sleep 0.05
+done
+[[ $legacy_admitted == 2 ]] || {
+    printf 'old default project jobs did not overlap\n' >&2; exit 1;
+}
+wait "$one" "$two"
+grep -q 'RAM 24G' "$scratch/z23-legacy.log"
+grep -q 'RAM 24G' "$scratch/qedc-legacy.log"
+printf 'devbuild broker: legacy 24 GiB project compatibility PASS\n'

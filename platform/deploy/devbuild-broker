@@ -5,7 +5,7 @@ set -euo pipefail
 
 wait_for_slot=0
 project=${DEVBUILD_PROJECT:-auto}
-class=normal
+class=legacy
 plan=0
 exclusive=0
 while (($#)); do
@@ -32,6 +32,7 @@ if [[ $project == auto ]]; then
 fi
 case $project in qedc|z23|exclusive) ;; *) printf 'devbuild: unknown project: %s\n' "$project" >&2; exit 64 ;; esac
 case $class in
+    legacy) cpu=12; ram=24; io=1; weight=20; priority=100 ;;
     hotload) cpu=4; ram=4; io=1; weight=40; priority=300 ;;
     release) cpu=16; ram=20; io=2; weight=30; priority=200 ;;
     normal) cpu=8; ram=8; io=1; weight=20; priority=100 ;;
@@ -205,6 +206,8 @@ while :; do
                 project_ram + ram <= 24 && active < 3)); then
             if [[ $class == hotload ]]; then
                 admitted=1
+            elif [[ $class == legacy ]] && ((ordinary < 2)); then
+                admitted=1
             elif ((ordinary < 2 && used_cpu + cpu <= 24 && used_ram + ram <= 44 && used_io + io <= 3)); then
                 admitted=1
             fi
@@ -234,7 +237,9 @@ done
 
 printf 'devbuild: %s/%s admitted after %s ns, CPU %s, RAM %sG, I/O tokens %s\n' \
     "$project" "$class" "$((admitted_ns-start_ns))" "$cpu" "$ram" "$io" >&2
-quota="$((cpu * 100))%"
+# The slice enforces the collective 28-CPU ceiling. A scope may borrow unused
+# CPUs up to that ceiling; admission tokens and CPUWeight arbitrate contention.
+quota="$((worker_cores * 100))%"
 systemd-run --user --scope --quiet --unit="$unit" --slice=development.slice \
     --property="CPUQuota=$quota" --property="MemoryMax=${ram}G" \
     --property=MemorySwapMax=0 --property="CPUWeight=$weight" \

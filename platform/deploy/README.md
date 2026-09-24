@@ -34,7 +34,10 @@ you are new; this page is about operating a host, not about building.
 - **[`devbuild-broker`](devbuild-broker)** — a staged Linux replacement for the
   host scheduler. It admits two ordinary heavy lanes, reserves an additional
   interactive lane, and orders release proof ahead of ordinary queued work.
-  CPU, RAM, and I/O tokens are bounded under the existing development slice;
+  Explicit `--class normal` jobs request 8 GiB each. Unclassified calls retain
+  the legacy 24 GiB per-project memory ceiling, with unused CPU available
+  through the existing collective development slice. CPU, RAM, and I/O
+  admission tokens are bounded under that slice;
   [`test-devbuild-broker.sh`](test-devbuild-broker.sh) exercises concurrent
   admission, queue order, and the old-wrapper drain gate with short isolated
   scopes. It is not installed by the repository. During a host cutover, write
