@@ -263,12 +263,13 @@ static bool fc_hash_object_stream(const char *path, uint64_t size,
                                   uint32_t chunk_count,
                                   uint8_t file_sha3_out[32])
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
     uint8_t *buf = zcl_malloc(VCS_PACKAGE_CHUNK_BYTES, "fastobj-carrier-chunk");
     if (!buf) {
-        close(fd);
+        platform_positioned_file_close(&file);
         return false;
     }
     struct sha3_256_ctx whole;
@@ -282,10 +283,9 @@ static bool fc_hash_object_stream(const char *path, uint64_t size,
             want = (size_t)(size - hashed_bytes);
         size_t got = 0;
         while (got < want) {
-            ssize_t n = read(fd, buf + got, want - got);
+            int64_t n = platform_positioned_file_read(
+                &file, buf + got, want - got, hashed_bytes + got);
             if (n < 0) {
-                if (errno == EINTR)
-                    continue;
                 ok = false;
                 break;
             }
@@ -310,7 +310,7 @@ static bool fc_hash_object_stream(const char *path, uint64_t size,
     if (ok && (hashed_chunks != chunk_count || hashed_bytes != size))
         ok = false;
     free(buf);
-    close(fd);
+    platform_positioned_file_close(&file);
     if (ok)
         sha3_256_finalize(&whole, file_sha3_out);
     return ok;
@@ -532,14 +532,16 @@ bool vcs_fastobj_carrier_export(const char *cache_dir,
             : (uint32_t)(((uint64_t)st.st_size +
                           VCS_PACKAGE_CHUNK_BYTES - 1u) /
                          VCS_PACKAGE_CHUNK_BYTES);
-        int fd = open(obj_path, O_RDONLY | O_CLOEXEC);
-        uint8_t *buf = fd >= 0 ? zcl_malloc(VCS_PACKAGE_CHUNK_BYTES,
-                                             "fastobj-admit-obj") : NULL;
-        if (fd < 0 || !buf) {
+        struct platform_positioned_file file;
+        platform_positioned_file_init(&file);
+        bool opened = platform_positioned_file_open(&file, obj_path);
+        uint8_t *buf = opened ? zcl_malloc(VCS_PACKAGE_CHUNK_BYTES,
+                                           "fastobj-admit-obj") : NULL;
+        if (!opened || !buf) {
             (void)snprintf(err, err_cap, "entry %.16s...: object reopen "
                          "failed", entries[i].key);
-            if (fd >= 0)
-                close(fd);
+            if (opened)
+                platform_positioned_file_close(&file);
             free(buf);
             ok = false;
             break;
@@ -547,10 +549,10 @@ bool vcs_fastobj_carrier_export(const char *cache_dir,
         for (uint32_t c = 0; ok && c < chunks; c++) {
             size_t want = VCS_PACKAGE_CHUNK_BYTES, got = 0;
             while (got < want) {
-                ssize_t n = read(fd, buf + got, want - got);
+                int64_t n = platform_positioned_file_read(
+                    &file, buf + got, want - got,
+                    (uint64_t)c * VCS_PACKAGE_CHUNK_BYTES + got);
                 if (n < 0) {
-                    if (errno == EINTR)
-                        continue;
                     break;
                 }
                 if (n == 0)
@@ -566,7 +568,7 @@ bool vcs_fastobj_carrier_export(const char *cache_dir,
                 ok = false;
             }
         }
-        close(fd);
+        platform_positioned_file_close(&file);
         free(buf);
         if (ok) {
             enum vcs_package_store_result wr =
