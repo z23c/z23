@@ -2,7 +2,7 @@
 
 # Factory qualification handoff
 
-Snapshot: 2026-09-24T22:58:39Z. Requery native status before changing a
+Snapshot: 2026-09-24T23:21:22Z. Requery native status before changing a
 queue, proof, candidate, or node. This record separates measured local
 verification from owner preview and operator acceptance.
 
@@ -85,6 +85,15 @@ requires an exact candidate that binds the complete game source and resulting
 executable, the owner's existing verdict bound to that identity, and native
 acceptance receipts.
 
+The frozen complete-game source subsequently rebuilt locally to the exact
+accepted executable SHA-256. A second development peer built the same source
+with GCC 14.2.0 and rendered a 1920×1080 frame; its executable and frame have
+different roots from the owner's GCC 16.1.1 preview. The first peer refused
+missing X11 development headers. These are source-build and render evidence,
+not a Commons candidate or owner acceptance of the peer artifact. Exact roots,
+commands, compiler cohorts, cost, and node-health limitations are in the
+[complete-game peer experiment](./2026-09-24-skycombat-fullgame-peer.md).
+
 An isolated local regtest node stayed responsive at height 0 during factory
 load (100 baseline, 539 during, one after successful block-count RPC), but
 its log emitted `catchup: final commit missing tip hash` before workload and
@@ -161,4 +170,5 @@ Full commands and raw roots are in
 [`2026-09-24-factory-mixed-100.md`](./2026-09-24-factory-mixed-100.md),
 [`2026-09-24-factory-100-skycombat-preview.md`](./2026-09-24-factory-100-skycombat-preview.md),
 [`2026-09-24-factory-adversarial-qualification.md`](./2026-09-24-factory-adversarial-qualification.md),
+the [complete-game peer experiment](./2026-09-24-skycombat-fullgame-peer.md),
 and the landed second-peer and isolated-node evidence commit named above.
