@@ -193,13 +193,24 @@ show_cache_stats() {
 
 make_fast() {
     local started rc
+    local -a epoch_args=()
     resolve_fast_jobs
     [ -n "$FROZEN_SOURCE_RECORD" ] ||
         fail "internal source record was not prepared before nested Make"
+    # The ff caller has already fingerprinted this exact compiler and build
+    # system while holding the checkout lock. Keep those values on Make's
+    # command line; the recipe-time epoch session still verifies them live.
+    if [ "$FAST_FF_LOCKED" = 1 ] &&
+       [ "$FAST_CC" = "${BUILD_COMPILER_CC:-}" ] &&
+       [[ "${BUILD_COMPILER_ID:-}" =~ ^[0-9a-f]{64}$ ]] &&
+       [[ "${BUILD_SYSTEM_ID:-}" =~ ^[0-9a-f]{64}$ ]]; then
+        epoch_args=("BUILD_COMPILER_ID=$BUILD_COMPILER_ID"
+                    "BUILD_SYSTEM_ID=$BUILD_SYSTEM_ID")
+    fi
     fast_trace_now_us
     started="$FAST_TRACE_NOW_US"
     if make -j"$FAST_JOBS" CC="$FAST_CC" \
-        BUILD_SOURCE_RECORD="$FROZEN_SOURCE_RECORD" "$@"; then
+        BUILD_SOURCE_RECORD="$FROZEN_SOURCE_RECORD" "${epoch_args[@]}" "$@"; then
         rc=0
     else
         rc=$?

@@ -4812,7 +4812,7 @@ dev-failure-execution-id:
 ff:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) $(CHECKOUT_LOCK_MODE) "$(CHECKOUT_LOCK)" -- \
-	  env ZCL_FAST_BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" \
+	  env ZCL_FAST_BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" BUILD_COMPILER_CC="$(CC)" BUILD_COMPILER_ID="$(BUILD_COMPILER_ID)" BUILD_SYSTEM_ID="$(BUILD_SYSTEM_ID)" \
 	  ZCL_FAST_CC="$${ZCL_FAST_CC:-$(CC)}" tools/agent_fast_ci.sh ff
 
 # Changed-scope edit proof: fresh compilation-database recipes for directly
