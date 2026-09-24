@@ -1080,6 +1080,25 @@ static int t_resident_binding_types(void)
     return failures;
 }
 
+static int t_policy_fact_types(void)
+{
+    int failures = 0;
+    const char *path = "zcode.package.policy.limits";
+    const char *keys[] = {
+        "earned_score", "uploaded_bytes", "downloaded_bytes"
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        CIB_CHECK("policy fact accepts zero", cib_accepts_int(path, keys[i], 0));
+        CIB_CHECK("policy fact accepts the largest JSON integer",
+                  cib_accepts_int(path, keys[i], INT64_MAX));
+        CIB_CHECK("policy fact refuses negative input",
+                  !cib_accepts_int(path, keys[i], -1));
+        CIB_CHECK("policy fact refuses string input",
+                  !cib_accepts(path, keys[i], 3, NULL, 0));
+    }
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
@@ -1103,6 +1122,7 @@ int test_command_input_bounds(void)
     failures += t_resident_execution_grant();
     failures += t_local_acceptance_boolean();
     failures += t_resident_binding_types();
+    failures += t_policy_fact_types();
     printf("=== command_input_bounds complete: %d failure(s) ===\n", failures);
     return failures;
 }

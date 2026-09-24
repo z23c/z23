@@ -5282,14 +5282,14 @@ endif
 # and remain available regardless.
 $(HOTSWAP_ACTION_PLAN): Makefile engine/composition/hotswap_swappable.def \
 		engine/composition/hotswap_islands.def engine/composition/hotswap_services.def \
-		engine/composition/hotswap_shadow_owners.def engine/composition/hotfork_capsules.def
+		engine/composition/hotswap_shadow_owners.def engine/composition/hotfork_capsules.def tools/dev/hotswap-module-fast.sh
 	@set -eu; \
 	mkdir -p "$(dir $@)"; \
 	tmp="$$(mktemp "$(dir $@).flags.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	{ \
 	  printf '%s\n' '# zcl.hotswap_fast_flags.v1 — frozen resident action plan'; \
-	  printf 'CC=%s\n' '$(CC)'; \
+	  printf 'CC=%s\nCXX=%s\n' '$(CC)' '$(CXX)'; \
 	  printf 'COMPILER_ID=%s\n' '$(BUILD_COMPILER_ID)'; \
 	  printf 'DEV_CFLAGS=%s\n' '$(DEV_LIVE_CFLAGS)'; \
 	  printf 'HOTSWAP_MODULE_LDFLAGS=%s\n' '$(HOTSWAP_MODULE_LDFLAGS)'; \
@@ -5375,7 +5375,7 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	cp -- "$$o" "$$cache_o"; \
 	chmod u+w "$$cache_o"; \
 	mv -f -- "$$tmp_d" "$$cache_d"; \
-	printf '%s\n' '$(CC) $(DEV_CFLAGS)' > "$$cache_cmd"; \
+	printf '%s\n' '$(CC) $(DEV_CFLAGS) $(BUILD_COMPILER_ID)' > "$$cache_cmd"; \
 	printf '%s\n' "$$so" > "$$cache_ptr"; \
 	trap - EXIT HUP INT TERM; \
 	echo "hotswap-module-so: linked multi-leaf module candidate $$so ($$src)" >&2; \

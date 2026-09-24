@@ -5067,7 +5067,9 @@ ZCL_COMMAND_READY_READ(
     "and verified byte counters. Every number is a local rate limit, never a "
     "ban: the new-user row is the free allowance an unscored peer always "
     "keeps. `ratio_milli` is this node's own local upload/download accounting "
-    "in thousandths, never a ledger fact. `resident_booted` and "
+    "in thousandths, never a ledger fact. `score_to_contributor` shows "
+    "the earned score still needed for the contributor tier. "
+    "`resident_booted` and "
     "`resident_dispatches` report the resident process counters, which a "
     "reloaded generation of this leaf reads rather than copies.",
     4096,

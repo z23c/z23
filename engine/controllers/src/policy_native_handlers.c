@@ -109,7 +109,10 @@ char *zcl_native_policy_limits_body(const struct json_value *args,
     }
 
     const struct vcs_policy_limits *lim = vcs_policy_limits_for(tier);
-    uint64_t ratio = vcs_policy_ratio_milli(up, down);
+    const uint64_t ratio = vcs_policy_ratio_milli(up, down);
+    const uint64_t score_to_contributor =
+        score < VCS_POLICY_TIER_CONTRIBUTOR_MIN_SCORE
+            ? VCS_POLICY_TIER_CONTRIBUTOR_MIN_SCORE - score : 0u;
 
     /* The resident counters. These four symbols live ONLY in the resident
      * sibling, so a module .so imports them from the host: the numbers below
@@ -124,6 +127,7 @@ char *zcl_native_policy_limits_body(const struct json_value *args,
 
     int n = snprintf(out, PNH_LIMITS_CAP,
         "{\"tier\":\"%s\",\"tier_source\":\"%s\",\"ratio_milli\":%llu,"
+        "\"score_to_contributor\":%llu,"
         "\"publish_per_week\":%llu,\"weekly_download_bytes\":%llu,"
         "\"max_concurrent_downloads\":%llu,\"queue_priority\":%llu,"
         "\"pin_allowance_bytes\":%llu,\"announces_per_hour\":%llu,"
@@ -131,6 +135,7 @@ char *zcl_native_policy_limits_body(const struct json_value *args,
         "\"resident_booted\":%s,\"resident_dispatches\":%llu}",
         vcs_policy_tier_string(tier), source,
         (unsigned long long)ratio,
+        (unsigned long long)score_to_contributor,
         (unsigned long long)lim->publish_per_week,
         (unsigned long long)lim->weekly_download_bytes,
         (unsigned long long)lim->max_concurrent_downloads,

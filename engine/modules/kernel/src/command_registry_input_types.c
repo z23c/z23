@@ -217,6 +217,9 @@ static bool cr_match_int_table(const char *key, const struct json_value *value,
         { "depth", 1, 1000000 },
         /* fleet.steer.grant bearer lifetime: 0 means no expiry. */
         { "ttl_seconds", 0, 2592000 },
+        { "earned_score", 0, INT64_MAX },
+        { "uploaded_bytes", 0, INT64_MAX },
+        { "downloaded_bytes", 0, INT64_MAX },
     };
     for (size_t i = 0; i < sizeof(k_bounds) / sizeof(k_bounds[0]); i++) {
         if (strcmp(key, k_bounds[i].key) != 0)

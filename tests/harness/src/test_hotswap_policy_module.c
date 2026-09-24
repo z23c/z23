@@ -97,6 +97,8 @@ static int t_empty_input_renders_the_free_allowance(void)
         ASSERT(json_get(&doc, "error") == NULL);
         ASSERT_STR_EQ(json_get_str(json_get(&doc, "tier")), "new-user");
         ASSERT_STR_EQ(json_get_str(json_get(&doc, "tier_source")), "derived");
+        ASSERT_EQ(json_get_int(json_get(&doc, "score_to_contributor")),
+                  (int64_t)VCS_POLICY_TIER_CONTRIBUTOR_MIN_SCORE);
 
         const struct vcs_policy_limits *free_row =
             vcs_policy_limits_for(VCS_POLICY_TIER_NEW_USER);
@@ -130,6 +132,7 @@ static int t_facts_derive_the_tier(void)
         free(body);
         ASSERT_STR_EQ(json_get_str(json_get(&doc, "tier")), "verified-seeder");
         ASSERT_STR_EQ(json_get_str(json_get(&doc, "tier_source")), "derived");
+        ASSERT_EQ(json_get_int(json_get(&doc, "score_to_contributor")), 0);
         ASSERT_EQ(json_get_int(json_get(&doc, "ratio_milli")),
                   (int64_t)vcs_policy_ratio_milli(536870912u, 1048576u));
         json_free(&doc);

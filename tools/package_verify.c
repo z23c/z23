@@ -158,6 +158,7 @@ static int pv_main_windows(void)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #if defined(__APPLE__)
 #include <libkern/OSByteOrder.h>
@@ -2919,9 +2920,53 @@ static bool pv_fast_cache_expected_sha3(const char *side_path,
     return expect_ok;
 }
 
-static int pv_fast_cache_lookup(const char *cache_dir, const uint8_t key[32],
-                                const char *obj_file, char *err,
-                                size_t err_cap)
+/* The object and its sidecar form one logical entry. A per-key lock keeps
+ * readers away from an in-progress pair and serializes competing writers. */
+static int pv_fast_cache_lock(const char *cache_dir, const uint8_t key[32],
+                              char *err, size_t err_cap)
+{
+    char obj_path[4400], side_path[4400], lock_path[4408];
+    if (!pv_fastobj_paths(cache_dir, key, obj_path, sizeof(obj_path),
+                          side_path, sizeof(side_path))) {
+        (void)snprintf(err, err_cap, "fast-cache lock path overflow");
+        return -1;
+    }
+    char *slash = strrchr(obj_path, '/');
+    if (!slash) {
+        (void)snprintf(err, err_cap, "fast-cache lock shard missing");
+        return -1;
+    }
+    *slash = '\0';
+    if (!pv_mkdir_p(obj_path, 0700)) {
+        (void)snprintf(err, err_cap, "fast-cache lock shard unavailable");
+        return -1;
+    }
+    *slash = '/';
+    if (snprintf(lock_path, sizeof(lock_path), "%s.lock", obj_path) >=
+        (int)sizeof(lock_path)) {
+        (void)snprintf(err, err_cap, "fast-cache lock path overflow");
+        return -1;
+    }
+    int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        (void)snprintf(err, err_cap, "cannot open fast-cache key lock: %s",
+                       strerror(errno));
+        return -1;
+    }
+    while (flock(fd, LOCK_EX) != 0) {
+        if (errno == EINTR) continue;
+        (void)snprintf(err, err_cap, "cannot lock fast-cache key: %s",
+                       strerror(errno));
+        (void)close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int pv_fast_cache_lookup_locked(const char *cache_dir,
+                                       const uint8_t key[32],
+                                       const char *obj_file, char *err,
+                                       size_t err_cap)
 {
     char obj_path[4400], side_path[4400];
     if (!pv_fastobj_paths(cache_dir, key, obj_path, sizeof(obj_path),
@@ -2976,6 +3021,19 @@ static int pv_fast_cache_lookup(const char *cache_dir, const uint8_t key[32],
     g_pv_fast_hits++;
     g_pv_fast_reused_bytes += bytes;
     return 1;
+}
+
+static int pv_fast_cache_lookup(const char *cache_dir, const uint8_t key[32],
+                                const char *obj_file, char *err,
+                                size_t err_cap)
+{
+    int lock_fd = pv_fast_cache_lock(cache_dir, key, err, err_cap);
+    if (lock_fd < 0) return -1;
+    int result = pv_fast_cache_lookup_locked(cache_dir, key, obj_file,
+                                              err, err_cap);
+    (void)flock(lock_fd, LOCK_UN);
+    (void)close(lock_fd);
+    return result;
 }
 
 /* Store a freshly compiled object + sidecar under its key. An existing
@@ -3038,7 +3096,7 @@ static bool pv_fast_cache_write_new(const char *obj_path,
     return true;
 }
 
-static bool pv_fast_cache_store(struct pv_plan_ctx *ctx,
+static bool pv_fast_cache_store_locked(struct pv_plan_ctx *ctx,
                                 const char *cache_dir, const uint8_t key[32],
                                 const char *profile, const char *target,
                                 const uint8_t capsule_root[32],
@@ -3092,6 +3150,28 @@ static bool pv_fast_cache_store(struct pv_plan_ctx *ctx,
                                         side_len, err, err_cap);
     free(side);
     return wrote;
+}
+
+static bool pv_fast_cache_store(struct pv_plan_ctx *ctx,
+                                const char *cache_dir, const uint8_t key[32],
+                                const char *profile, const char *target,
+                                const uint8_t capsule_root[32],
+                                const struct pv_compile_args *args,
+                                const uint8_t preproc[32], const char *rel,
+                                const uint8_t package_root[32],
+                                const uint8_t recipe_root[32],
+                                const uint8_t lock_root[32],
+                                const char *obj_file, char *err,
+                                size_t err_cap)
+{
+    int lock_fd = pv_fast_cache_lock(cache_dir, key, err, err_cap);
+    if (lock_fd < 0) return false;
+    bool stored = pv_fast_cache_store_locked(ctx, cache_dir, key, profile,
+        target, capsule_root, args, preproc, rel, package_root, recipe_root,
+        lock_root, obj_file, err, err_cap);
+    (void)flock(lock_fd, LOCK_UN);
+    (void)close(lock_fd);
+    return stored;
 }
 
 /* The ZBuild V1 action is deliberately narrower than package verification:

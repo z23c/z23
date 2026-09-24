@@ -463,18 +463,29 @@ static bool pf_cli(const char *bin_dir, const char *extra_flag,
 {
     char bin[PF_PATH_CAP];
     if (snprintf(bin, sizeof(bin), "%s/zclassic23", bin_dir) >=
-        (int)sizeof(bin))
-        LOG_FAIL(PF_LOG, "binary path overflow");
+        (int)sizeof(bin)) {
+        (void)snprintf(error, error_cap, "%s: binary path overflow",
+                       command_words);
+        LOG_ERROR(PF_LOG, "%s", error);
+        return false;
+    }
     /* Split the command path into words. */
     char *words_copy = strdup(command_words);
-    if (!words_copy)
-        LOG_FAIL(PF_LOG, "command words dup");
+    if (!words_copy) {
+        (void)snprintf(error, error_cap, "%s: command words allocation",
+                       command_words);
+        LOG_ERROR(PF_LOG, "%s", error);
+        return false;
+    }
     char *argv[16];
     pf_cli_build_argv(bin, extra_flag, words_copy, argv);
     char *out = zcl_malloc(PF_CLI_STDOUT_CAP, "factory.cli.out");
     if (!out) {
         free(words_copy);
-        LOG_FAIL(PF_LOG, "cli stdout alloc");
+        (void)snprintf(error, error_cap, "%s: CLI output allocation",
+                       command_words);
+        LOG_ERROR(PF_LOG, "%s", error);
+        return false;
     }
     int rc = pf_spawn(argv, (const uint8_t *)input,
                       input ? strlen(input) : 0, out, PF_CLI_STDOUT_CAP);

@@ -197,9 +197,9 @@ make_fast() {
     resolve_fast_jobs
     [ -n "$FROZEN_SOURCE_RECORD" ] ||
         fail "internal source record was not prepared before nested Make"
-    # The ff caller has already fingerprinted this exact compiler and build
-    # system while holding the checkout lock. Keep those values on Make's
-    # command line; the recipe-time epoch session still verifies them live.
+    # Reuse a real parent fingerprint under the checkout lock. A zero
+    # sentinel means nested Make must derive and verify the identity itself.
+    # The recipe-time epoch session still verifies a reused identity live.
     if [ "$FAST_FF_LOCKED" = 1 ] &&
        [ "$FAST_CC" = "${BUILD_COMPILER_CC:-}" ] &&
        [[ "${BUILD_COMPILER_ID:-}" =~ ^[0-9a-f]{64}$ ]] &&
