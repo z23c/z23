@@ -261,6 +261,11 @@ ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap c3-mutex-probe c3-sp
 	$(ZCL_GUI_APP_GOALS)
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
 
+# This lint leaf builds only its standalone C23 census tool and compares its
+# complete source-derived report. It consumes no node objects, vendor archives,
+# generated view headers, or compile epoch. Mixed goals keep the full parse.
+ZCL_INVENTORY_LINT_ONLY := $(if $(filter check-capability-inventory-generated,$(MAKECMDGOALS)),$(if $(filter-out check-capability-inventory-generated,$(MAKECMDGOALS)),,1),)
+
 # The module recipes compile one TU (or declared island) directly with $(CC),
 # never through make's %.o pattern rules. t-hotswap runs an already-linked
 # harness, so these goals need no object depfile graphs. Unlike
@@ -268,7 +273,7 @@ ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out
 # BUILD_SOURCE_RECORD below), so they deliberately stay out of
 # ZCL_HOTSWAP_LOOP_GOALS above (that set fakes a zero identity). This wider
 # set only gates the depfile-graph import skip.
-ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) hotswap-module-so \
+ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) check-capability-inventory-generated hotswap-module-so \
 	t-hotswap hotswap-test-so
 ZCL_HOTSWAP_DEPFILE_LEAN_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_DEPFILE_LEAN_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -359,7 +364,7 @@ ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest
 	build/bin/z23-headless-run.exe
 # Build queries and game-only goals need no node vendor configure.
 ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) check-capability-inventory-generated game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -387,7 +392,9 @@ VIEW_BOOTSTRAP_MK := build/identity/view-inputs-ready.mk
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
 ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
+ifeq ($(ZCL_INVENTORY_LINT_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
+endif
 endif
 endif
 endif
@@ -439,7 +446,7 @@ endif
 # derives a new token, so cross-invocation supersession detection (a real
 # source edit between two separate builds) is untouched; see the session
 # cache in tools/dev/source-identity.sh.
-BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY),1,)
+BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY)$(ZCL_INVENTORY_LINT_ONLY),1,)
 BUILD_INVOCATION_PID := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell printf '%s' $$PPID)))
 BUILD_INVOCATION_START := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell tools/dev/process-start-token.sh '$(BUILD_INVOCATION_PID)' 2>/dev/null)))
 BUILD_INVOCATION_ID := $(if $(BUILD_EPOCH_CLEAN_ONLY),clean,$(strip $(shell printf '%s\0%s' '$(BUILD_INVOCATION_PID)' '$(BUILD_INVOCATION_START)' | sha256sum | awk '{print $$1}')))
@@ -526,6 +533,10 @@ BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
 # The hot-swap loop recipe re-derives any identity it needs through the
 # authoritative nested make; the zero record is never stamped into an artifact.
+BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
+else ifeq ($(ZCL_INVENTORY_LINT_ONLY),1)
+# The standalone inventory tool has no source-record or node epoch input;
+# its lint recipe still scans and compares the complete public-header census.
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else
 BUILD_SOURCE_RECORD := $(shell ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh capture-record 2>/dev/null || echo unknown 0 unknown)
