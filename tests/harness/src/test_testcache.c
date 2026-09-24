@@ -957,7 +957,7 @@ static int tc_batch_restart_crosstree(void)
     TC_CHECK("restart reuses eight eligible PASSes",
              tc_cross_tree_probe(TC_FIX, ptrs, k1, true));
     TC_CHECK("second physical tree copies the fixture",
-             tc_shell("rm -rf %s && cp -pR %s %s && rm -rf %s/.zvcs",
+             tc_shell("rm -rf %s && cp -rp %s %s && rm -rf %s/.zvcs",
                       TC_FIX2, TC_FIX, TC_FIX2, TC_FIX2));
     TC_CHECK("unchanged second candidate reuses eight PASSes",
              tc_cross_tree_probe(TC_FIX2, ptrs, k1, true));
@@ -1771,7 +1771,7 @@ static int tc_observation_cross_tree(const uint8_t key[32], const uint8_t pass[3
     size_t ineligible = 0;
     struct testcache_probe p = {0};
     TC_CHECK("signed observation second candidate tree prepared",
-        tc_shell("rm -rf %s && cp -r %s %s && rm -rf %s/.zvcs %s/signing-state",
+        tc_shell("rm -rf %s && cp -rp %s %s && rm -rf %s/.zvcs %s/signing-state",
                  TC_FIX2, TC_FIX, TC_FIX2, TC_FIX2, TC_FIX2));
     struct testcache *tc = testcache_open(TC_FIX2);
     if (tc) {
