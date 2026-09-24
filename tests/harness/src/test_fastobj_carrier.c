@@ -1068,6 +1068,39 @@ static int fcw_linked_object_refusal(const char *base, const char *cache,
     return failures;
 }
 
+static int fcw_linked_shard_refusal(const char *base, const char *cache,
+                                   const char *key,
+                                   struct vcs_package_store *store,
+                                   uint8_t root[32],
+                                   struct vcs_fastobj_carrier_stats *stats,
+                                   char *err, size_t err_cap)
+{
+    int failures = 0;
+    char linked[4096], shard[4096], outside[4096];
+    bool prepared = snprintf(linked, sizeof(linked), "%s/linked-shard",
+                             base) < (int)sizeof(linked) &&
+                    fcw_rm_rf(linked) && fcw_copy_tree(cache, linked) &&
+                    snprintf(shard, sizeof(shard), "%s/objects/%.2s",
+                             linked, key) < (int)sizeof(shard) &&
+                    snprintf(outside, sizeof(outside), "%s/outside-shard",
+                             base) < (int)sizeof(outside) &&
+                    rename(shard, outside) == 0 &&
+                    symlink("../../outside-shard", shard) == 0;
+    FC_CHECK("export linked shard fixture is prepared", prepared);
+    if (!prepared)
+        return failures;
+    bool refused = !vcs_fastobj_carrier_export(linked, store, root, stats,
+                                               err, err_cap);
+    FC_CHECK("export refuses a linked cache shard",
+             refused && strstr(err, "linked cache shard"));
+    bool restored = unlink(shard) == 0 &&
+                    rename(outside, shard) == 0;
+    FC_CHECK("same shard as real directory exports",
+             restored && vcs_fastobj_carrier_export(linked, store, root,
+                                                    stats, err, err_cap));
+    return failures;
+}
+
 static int test_fastobj_carrier_platform_arm(void)
 {
     int failures = 0;
@@ -1641,6 +1674,9 @@ static int test_fastobj_carrier_platform_arm(void)
         failures += fcw_linked_object_refusal(base, cacheA, key, nodeA,
                                                rootL, &stRef, err,
                                                sizeof(err));
+        failures += fcw_linked_shard_refusal(base, cacheA, key, nodeA,
+                                              rootL, &stRef, err,
+                                              sizeof(err));
 
         /* R4: a hand-built carrier whose sidecar is filed under a key it
          * does not hash to — ADMIT must refuse at the destination. */

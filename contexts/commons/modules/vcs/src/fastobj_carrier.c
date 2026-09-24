@@ -31,12 +31,15 @@
 
 static const char carrier_dir[] = VCS_FASTOBJ_CARRIER_DIR "/";
 /* ── small local io helpers (the contexts/commons/modules/vcs revert convention) ─────────── */
-static bool fc_read_file(const char *path, size_t cap, uint8_t **out,
-                         size_t *out_len)
+static bool fc_read_file(const char *cache_dir, const char *relative,
+                         size_t cap, uint8_t **out, size_t *out_len)
 {
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path))
+    bool opened = cache_dir
+        ? platform_positioned_file_open_beneath(&file, cache_dir, relative)
+        : platform_positioned_file_open(&file, relative);
+    if (!opened)
         return false;
     uint64_t size = 0;
     if (!platform_positioned_file_size(&file, &size) || size > cap) {
@@ -130,6 +133,53 @@ static bool fc_is_lower_hex(const char *s, size_t n)
     return true;
 }
 
+static bool fc_cache_relative_paths(const char *key, char *obj,
+                                    size_t obj_cap, char *side,
+                                    size_t side_cap)
+{
+    if (!key || strlen(key) != 64u || !fc_is_lower_hex(key, 64u))
+        return false;
+    int on = snprintf(obj, obj_cap, "objects/%.2s/%s.o", key, key + 2);
+    int sn = snprintf(side, side_cap, "objects/%.2s/%s.json", key,
+                      key + 2);
+    return on > 0 && (size_t)on < obj_cap && sn > 0 &&
+           (size_t)sn < side_cap;
+}
+
+static DIR *fc_open_shard(DIR *shards, const char *name, bool *skip,
+                          char *err, size_t err_cap)
+{
+    *skip = false;
+    struct stat st;
+    if (fstatat(dirfd(shards), name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        (void)snprintf(err, err_cap,
+                       "cache shard %.2s changed during scan", name);
+        return NULL;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        (void)snprintf(err, err_cap, "linked cache shard %.2s", name);
+        return NULL;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        *skip = true;
+        return NULL;
+    }
+    int fd = openat(dirfd(shards), name,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        (void)snprintf(err, err_cap,
+                       "cache shard %.2s changed during open", name);
+        return NULL;
+    }
+    DIR *d = fdopendir(fd);
+    if (!d) {
+        close(fd);
+        (void)snprintf(err, err_cap,
+                       "cache shard %.2s cannot be scanned", name);
+    }
+    return d;
+}
+
 /* ── entry scanning ─────────────────────────────────────────────────── */
 
 /* One cache entry: the full 64-hex key (shard dir + basename) and which
@@ -157,9 +207,26 @@ static bool fc_scan_cache(const char *cache_dir, struct fc_entry **entries,
         (void)snprintf(err, err_cap, "cache path overflow");
         return false;
     }
-    DIR *shards = opendir(objects);
+    int rootfd = open(cache_dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+                                 O_CLOEXEC);
+    if (rootfd < 0) {
+        (void)snprintf(err, err_cap,
+                       "cache root unavailable or linked: %s", cache_dir);
+        return false;
+    }
+    int objectsfd = openat(rootfd, "objects", O_RDONLY | O_DIRECTORY |
+                                              O_NOFOLLOW | O_CLOEXEC);
+    close(rootfd);
+    if (objectsfd < 0) {
+        (void)snprintf(err, err_cap,
+                       "objects/ unavailable or linked under %s", cache_dir);
+        return false;
+    }
+    DIR *shards = fdopendir(objectsfd);
     if (!shards) {
-        (void)snprintf(err, err_cap, "no objects/ under %s", cache_dir);
+        close(objectsfd);
+        (void)snprintf(err, err_cap, "cannot scan objects/ under %s",
+                       cache_dir);
         return false;
     }
     struct fc_entry *list = NULL;
@@ -170,17 +237,14 @@ static bool fc_scan_cache(const char *cache_dir, struct fc_entry **entries,
         /* The shard directory name IS the key's first two hex chars. */
         if (strlen(sh->d_name) != 2 || !fc_is_lower_hex(sh->d_name, 2))
             continue;
-        char shard[4096];
-        int sn = snprintf(shard, sizeof(shard), "%s/%s", objects,
-                          sh->d_name);
-        if (sn <= 0 || (size_t)sn >= sizeof(shard))
-            continue;
-        struct stat sst;
-        if (stat(shard, &sst) != 0 || !S_ISDIR(sst.st_mode))
-            continue;
-        DIR *d = opendir(shard);
-        if (!d)
-            continue;
+        bool skip = false;
+        DIR *d = fc_open_shard(shards, sh->d_name, &skip, err, err_cap);
+        if (!d) {
+            if (skip)
+                continue;
+            ok = false;
+            break;
+        }
         struct dirent *e;
         while ((e = readdir(d)) != NULL) {
             size_t namelen = strlen(e->d_name);
@@ -258,14 +322,15 @@ static bool fc_scan_cache(const char *cache_dir, struct fc_entry **entries,
  * content.v2 chunk identity) and the whole-file SHA3-256 in one pass,
  * without holding the object in memory. Exactly `size` bytes must be
  * consumed across exactly chunk_count chunks. */
-static bool fc_hash_object_stream(const char *path, uint64_t size,
+static bool fc_hash_object_stream(const char *cache_dir,
+                                  const char *relative, uint64_t size,
                                   uint8_t *chunk_hashes_out,
                                   uint32_t chunk_count,
                                   uint8_t file_sha3_out[32])
 {
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path))
+    if (!platform_positioned_file_open_beneath(&file, cache_dir, relative))
         return false;
     uint8_t *buf = zcl_malloc(VCS_PACKAGE_CHUNK_BYTES, "fastobj-carrier-chunk");
     if (!buf) {
@@ -316,6 +381,23 @@ static bool fc_hash_object_stream(const char *path, uint64_t size,
     return ok;
 }
 
+static bool fc_open_cache_object(const char *cache_dir, const char *key,
+                                 struct platform_positioned_file *file,
+                                 uint64_t *size)
+{
+    char obj_rel[96], side_rel[96];
+    if (!fc_cache_relative_paths(key, obj_rel, sizeof(obj_rel), side_rel,
+                                 sizeof(side_rel)) ||
+        !platform_positioned_file_open_beneath(file, cache_dir, obj_rel))
+        return false;
+    if (!platform_positioned_file_size(file, size) ||
+        *size > FASTOBJ_CARRIER_MAX_OBJECT_BYTES) {
+        platform_positioned_file_close(file);
+        return false;
+    }
+    return true;
+}
+
 /* Verify one cache entry pair: sidecar schema + key-at-filename + object
  * hash. Only the sidecar is held in memory; the object is streamed. */
 static bool fc_verify_entry(const char *cache_dir, const char *key,
@@ -326,9 +408,12 @@ static bool fc_verify_entry(const char *cache_dir, const char *key,
                             char *err, size_t err_cap)
 {
     char obj_path[4096], side_path[4096];
+    char obj_rel[96], side_rel[96];
     if (!vcs_fastobj_cache_paths(cache_dir, key, obj_path,
                                  sizeof(obj_path), side_path,
-                                 sizeof(side_path))) {
+                                 sizeof(side_path)) ||
+        !fc_cache_relative_paths(key, obj_rel, sizeof(obj_rel), side_rel,
+                                 sizeof(side_rel))) {
         (void)snprintf(err, err_cap, "entry %.16s...: path overflow", key);
         return false;
     }
@@ -340,8 +425,8 @@ static bool fc_verify_entry(const char *cache_dir, const char *key,
                        key);
         return false;
     }
-    if (!fc_read_file(side_path, VCS_FASTOBJ_SIDECAR_MAX_BYTES, side_out,
-                      side_len)) {
+    if (!fc_read_file(cache_dir, side_rel, VCS_FASTOBJ_SIDECAR_MAX_BYTES,
+                      side_out, side_len)) {
         (void)snprintf(err, err_cap, "entry %.16s...: sidecar unreadable",
                        key);
         return false;
@@ -354,8 +439,8 @@ static bool fc_verify_entry(const char *cache_dir, const char *key,
         return false;
     }
     uint64_t size = (uint64_t)st.st_size;
-    if (!fc_hash_object_stream(obj_path, size, chunk_hashes, chunk_count,
-                               object_sha3_out)) {
+    if (!fc_hash_object_stream(cache_dir, obj_rel, size, chunk_hashes,
+                               chunk_count, object_sha3_out)) {
         free(*side_out);
         *side_out = NULL;
         (void)snprintf(err, err_cap,
@@ -511,41 +596,32 @@ bool vcs_fastobj_carrier_export(const char *cache_dir,
     /* Stream each object's chunks in from disk again at put time; the
      * sidecar is small enough to admit whole. */
     for (size_t i = 0; ok && i < count; i++) {
-        char obj_cpath[4096], side_cpath[4096], obj_path[4096],
-             side_path[4096];
+        char obj_cpath[4096], side_cpath[4096];
         (void)snprintf(obj_cpath, sizeof(obj_cpath), "%s%s.o", carrier_dir,
                        entries[i].key);
         (void)snprintf(side_cpath, sizeof(side_cpath), "%s%s.json",
                        carrier_dir, entries[i].key);
-        (void)vcs_fastobj_cache_paths(cache_dir, entries[i].key, obj_path,
-                                      sizeof(obj_path), side_path,
-                                      sizeof(side_path));
-        struct stat st;
-        if (stat(obj_path, &st) != 0) {
-            (void)snprintf(err, err_cap, "entry %.16s...: object vanished",
-                           entries[i].key);
-            ok = false;
-            break;
-        }
-        uint32_t chunks = st.st_size == 0
-            ? 0u
-            : (uint32_t)(((uint64_t)st.st_size +
-                          VCS_PACKAGE_CHUNK_BYTES - 1u) /
-                         VCS_PACKAGE_CHUNK_BYTES);
         struct platform_positioned_file file;
         platform_positioned_file_init(&file);
-        bool opened = platform_positioned_file_open(&file, obj_path);
+        uint64_t size = 0;
+        bool opened = fc_open_cache_object(cache_dir, entries[i].key,
+                                           &file, &size);
         uint8_t *buf = opened ? zcl_malloc(VCS_PACKAGE_CHUNK_BYTES,
                                            "fastobj-admit-obj") : NULL;
         if (!opened || !buf) {
             (void)snprintf(err, err_cap, "entry %.16s...: object reopen "
-                         "failed", entries[i].key);
+                         "unreadable or over cap",
+                           entries[i].key);
             if (opened)
                 platform_positioned_file_close(&file);
             free(buf);
             ok = false;
             break;
         }
+        uint32_t chunks = size == 0
+            ? 0u
+            : (uint32_t)((size + VCS_PACKAGE_CHUNK_BYTES - 1u) /
+                         VCS_PACKAGE_CHUNK_BYTES);
         for (uint32_t c = 0; ok && c < chunks; c++) {
             size_t want = VCS_PACKAGE_CHUNK_BYTES, got = 0;
             while (got < want) {
@@ -746,11 +822,12 @@ static bool fc_carrier_apply(const char *cache_dir,
                 uint8_t *eobj = NULL, *eside = NULL;
                 size_t eobj_len = 0, eside_len = 0;
                 bool same = have_obj && have_side &&
-                    fc_read_file(obj_path,
+                    fc_read_file(NULL, obj_path,
                                  FASTOBJ_CARRIER_MAX_OBJECT_BYTES, &eobj,
                                  &eobj_len) &&
-                    fc_read_file(side_path, VCS_FASTOBJ_SIDECAR_MAX_BYTES,
-                                 &eside, &eside_len) &&
+                    fc_read_file(NULL, side_path,
+                                 VCS_FASTOBJ_SIDECAR_MAX_BYTES, &eside,
+                                 &eside_len) &&
                     eobj_len == obj_len && eside_len == side_len &&
                     memcmp(eobj, obj, obj_len) == 0 &&
                     memcmp(eside, side, side_len) == 0;

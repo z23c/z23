@@ -324,8 +324,8 @@ contexts/commons/modules/vcs/src/build_execution_observation.c:vcs_build_executi
 contexts/commons/modules/vcs/src/fastobj.c:vcs_fastobj_sidecar_verify:28
 contexts/commons/modules/vcs/src/fastobj_carrier.c:fc_carrier_apply:45
 contexts/commons/modules/vcs/src/fastobj_carrier.c:fc_hash_object_stream:17
-contexts/commons/modules/vcs/src/fastobj_carrier.c:fc_scan_cache:33
-contexts/commons/modules/vcs/src/fastobj_carrier.c:vcs_fastobj_carrier_export:52
+contexts/commons/modules/vcs/src/fastobj_carrier.c:fc_scan_cache:32
+contexts/commons/modules/vcs/src/fastobj_carrier.c:vcs_fastobj_carrier_export:51
 contexts/commons/modules/vcs/src/fastobj_carrier_fetch.c:vcs_fastobj_carrier_fetch:22
 contexts/commons/modules/vcs/src/moderation_attestation_compose.c:zcl_moderation_compose_v1:22
 contexts/commons/modules/vcs/src/moderation_attestation_object.c:attest_shape:21
