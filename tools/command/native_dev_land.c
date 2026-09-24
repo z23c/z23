@@ -5940,11 +5940,13 @@ static int dl_drive_proof(struct zcl_command_reply *reply)
 
 /* The dispatcher owns an initialized reply. Between drive cycles, release
  * its prior data before writing the next step's result. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static void dl_drive_reply_reset(struct zcl_command_reply *reply)
 {
     zcl_command_reply_free(reply);
     zcl_command_reply_init(reply, "zcl.land.v1");
 }
+#endif
 
 /* One bounded integrator session. Proof holds the shared step guard rather
  * than the exclusive preparation slot. A PASS is followed immediately by a
