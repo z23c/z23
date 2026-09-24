@@ -237,6 +237,66 @@ static bool cin_edit_both(const char *live, const char *reference,
            cin_write_unit(reference, index, revision);
 }
 
+static bool cin_include_is(const char *root, const char *expected)
+{
+    struct codeindex *index = codeindex_open(root);
+    if (!index) return false;
+    char includes[2][256];
+    int count = codeindex_includes_of_file(index, cin_units[0], includes, 2);
+    bool ok = count == 1 && strcmp(includes[0], expected) == 0;
+    codeindex_close(index);
+    return ok;
+}
+
+static bool cin_depfile_seed(const char *live, const char *reference)
+{
+    static const char depfile[] =
+        "build/fixture.o: lib/net/src/alpha.c lib/net/src/beta.c\n";
+    return cin_write_file(live, "build/fixture.d", depfile) &&
+           cin_write_file(reference, "build/fixture.d", depfile) &&
+           cin_agrees(live, reference, NULL);
+}
+
+static bool cin_depfile_rewrite_same(const char *live, const char *reference)
+{
+    /* A compiler can rewrite a depfile without changing any prerequisite.
+     * Its stat seal moves, but exact bytes keep the cloned include rows valid. */
+    static const char depfile[] =
+        "build/fixture.o: lib/net/src/alpha.c lib/net/src/beta.c\n";
+    return cin_write_file(live, "build/fixture.d", depfile) &&
+           cin_write_file(reference, "build/fixture.d", depfile) &&
+           cin_edit_both(live, reference, 0, 7) &&
+           cin_agrees(live, reference, NULL) &&
+           cin_include_is(live, "lib/net/src/beta.c") &&
+           cin_include_is(reference, "lib/net/src/beta.c") &&
+           cin_exists(live, "index.kv.spare");
+}
+
+static bool cin_depfile_rewrite_changed(const char *live,
+                                        const char *reference)
+{
+    static const char changed_depfile[] =
+        "build/fixture.o: lib/net/src/alpha.c lib/net/src/gamma.c\n";
+    return cin_write_file(live, "build/fixture.d", changed_depfile) &&
+           cin_write_file(reference, "build/fixture.d", changed_depfile) &&
+           cin_edit_both(live, reference, 0, 8) &&
+           cin_agrees(live, reference, NULL) &&
+           cin_include_is(live, "lib/net/src/gamma.c") &&
+           !cin_exists(live, "index.kv.spare");
+}
+
+static int cin_depfile_cases(const char *live, const char *reference)
+{
+    int failures = 0;
+    CIN_CHECK("depfile fixtures match a cold rebuild",
+              cin_depfile_seed(live, reference));
+    CIN_CHECK("identical depfile rewrite preserves incremental include rows",
+              cin_depfile_rewrite_same(live, reference));
+    CIN_CHECK("changed depfile bytes force a cold include rebuild",
+              cin_depfile_rewrite_changed(live, reference));
+    return failures;
+}
+
 int test_codeindex_incremental(void)
 {
     int failures = 0;
@@ -259,6 +319,8 @@ int test_codeindex_incremental(void)
     int baseline_files = 0;
     CIN_CHECK("cold builds of identical trees are identical",
               cin_agrees(live, reference, &baseline_files));
+
+    failures += cin_depfile_cases(live, reference);
 
     /* One file. The narrowest incremental case and the one the dev loop
      * actually runs; the spare it leaves behind is what makes the NEXT

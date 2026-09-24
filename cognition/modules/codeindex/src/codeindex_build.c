@@ -614,19 +614,31 @@ static bool rebuild_generation_current(struct ci_store *store)
                sizeof(CI_SCHEMA_VERSION) - 1) == 0;
 }
 
-/* Do the compiler inputs the store's include edges came from still look
- * exactly as they did when it was published? */
+/* A rewritten depfile may have a new stat key but identical bytes. In that
+ * case the stored include edges remain exact, so only the stat seal needs to
+ * advance with the next incremental generation. A changed byte or an
+ * unstable scan retains the full rebuild path. */
 static bool rebuild_deps_unchanged(struct ci_store *store,
+                                   const char *root,
                                    const uint8_t current_dep_stat[32])
 {
-    uint8_t stored_dep_stat[32];
-    size_t dep_len = 0;
-    bool dep_found = false;
-    return store &&
-        ci_store_meta_get(store, "dep_stat_root_sha3", stored_dep_stat,
-                          sizeof(stored_dep_stat), &dep_len, &dep_found) &&
-        dep_found && dep_len == sizeof(stored_dep_stat) &&
-        memcmp(stored_dep_stat, current_dep_stat, 32) == 0;
+    uint8_t stored_dep_stat[32], stored_dep_root[32];
+    uint8_t scanned_dep_stat[32], scanned_dep_root[32];
+    size_t stat_len = 0, root_len = 0;
+    bool stat_found = false, root_found = false;
+    if (!store || !ci_store_meta_get(store, "dep_stat_root_sha3",
+                                      stored_dep_stat, sizeof(stored_dep_stat),
+                                      &stat_len, &stat_found) ||
+        !stat_found || stat_len != sizeof(stored_dep_stat))
+        return false;
+    if (memcmp(stored_dep_stat, current_dep_stat, 32) == 0) return true;
+    return ci_store_meta_get(store, "dep_root_sha3", stored_dep_root,
+                             sizeof(stored_dep_root), &root_len, &root_found) &&
+           root_found && root_len == sizeof(stored_dep_root) &&
+           ci_deps_scan_roots(root, NULL, NULL, scanned_dep_root,
+                              scanned_dep_stat) &&
+           memcmp(scanned_dep_stat, current_dep_stat, 32) == 0 &&
+           memcmp(scanned_dep_root, stored_dep_root, 32) == 0;
 }
 
 /* The one question that decides whether this checkout's OWN previous
@@ -639,7 +651,7 @@ static bool rebuild_can_patch_in_place(struct codeindex *ci,
     return ci->store && cost->snapshot_used && !cost->full_rescan &&
            !cost->inventory_changed &&
            rebuild_generation_current(ci->store) &&
-           rebuild_deps_unchanged(ci->store, current_dep_stat);
+           rebuild_deps_unchanged(ci->store, ci->root, current_dep_stat);
 }
 
 /* The staging inode must still be the private single-linked regular file this
