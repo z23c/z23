@@ -177,8 +177,11 @@ An isolated Xvfb run opened the 1920×1080 game window, rendered the city,
 aircraft and HUD, and logged five aircraft before the deliberate 12 s timeout.
 The visually inspected full-frame PNG SHA-256 is
 `38fd50456fb394a84df18956cc2d13cc56daf55163f0caa560f82a1b309873e4`.
-This is a local application preview; the game owner has not recorded an
-acceptance verdict. At the measurement checkout, `make -j8 game-check` failed on a pre-existing
+This is a local application preview. The game owner subsequently accepted the
+exact binary and frame as a visual preview; the decision and remaining gates
+are recorded in the [qualification handoff](./2026-09-24-factory-qualification-handoff.md).
+At the measurement checkout,
+`make -j8 game-check` failed on a pre-existing
 `frame` set-but-unused diagnostic in
 `apps/skycombat/src/models/test_multiplayer_complete.c` under `-Werror`.
 
@@ -363,9 +366,10 @@ SHA-256 was
 `9a7a46565f2414bd8ccb5c9ee6ebb7c60b951ea690177f958123993091e4082c`,
 identical to the earlier visually inspected Xvfb preview. The previous frame
 therefore binds to the exact landed executable bytes. Game-check and Git
-publication are code gates; the current owner has not recorded a visual or
-behavior acceptance verdict, and the canonical aircraft package recipe still
-refuses missing `libm`. DEV-accepted and fully accepted counts remain zero.
+publication are code gates. The owner subsequently accepted those binary and
+frame roots as a visual preview, while the canonical aircraft package recipe
+still refuses missing `libm`. DEV-accepted and fully accepted counts remain
+zero.
 
 Native agent mail sequence 353 requested the owner's exact preview verdict;
 sequence 354 gave the land owner the three superseded proof pairs. A
