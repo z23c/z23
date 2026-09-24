@@ -4920,6 +4920,17 @@ static bool dp_generation_docs_tools(const struct proof_paths *paths,
                                      const char *generation,
                                      char *why, size_t why_len);
 
+static void dp_generation_stage_note(const struct proof_paths *paths,
+                                     const char *stage, int64_t started_us)
+{
+    if (!paths || !stage) return;
+    char value[32];
+    int64_t elapsed_us = platform_time_monotonic_us() - started_us;
+    int n = snprintf(value, sizeof(value), "%lld", (long long)elapsed_us);
+    if (n > 0 && (size_t)n < sizeof(value))
+        (void)zcl_dev_proof_phase_note(paths->phases, stage, value);
+}
+
 static bool generation_prepare(const struct proof_paths *paths,
                                const char *local,
                                struct platform_ram_scratch_lease *ram_lease,
@@ -4928,6 +4939,7 @@ static bool generation_prepare(const struct proof_paths *paths,
                                char *why, size_t why_len)
 {
     char root_parent[PATH_MAX], parent[PATH_MAX], generation_tag[33];
+    int64_t stage_started_us = platform_time_monotonic_us();
     if (!dp_generation_parent_dir(paths->root, root_parent, why, why_len))
         return false;
     dp_generation_tag(paths->root, local, generation_tag);
@@ -4944,20 +4956,31 @@ static bool generation_prepare(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_generation_path_invalid");
         return false;
     }
+    dp_generation_stage_note(paths, "generation_pool_setup_us",
+                             stage_started_us);
     dp_generation_storage_note(paths, ram_root, ram_backed,
                                ram_reserve_refused, generation);
+    stage_started_us = platform_time_monotonic_us();
     if (!dp_generation_checkout(paths, generation, local, why, why_len))
         return false;
+    dp_generation_stage_note(paths, "generation_checkout_us",
+                             stage_started_us);
+    stage_started_us = platform_time_monotonic_us();
     if (!generation_gitlink_prepare(paths, generation, why, why_len))
         return false;
     if (!dp_generation_dependencies(paths->root, generation, why, why_len))
         return false;
     if (!generation_hooks_configure(generation, why, why_len))
         return false;
+    dp_generation_stage_note(paths, "generation_dependencies_us",
+                             stage_started_us);
+    stage_started_us = platform_time_monotonic_us();
     if (!worktree_exact(generation, local, false, why, why_len)) {
         proof_why(why, why_len, "proof_generation_not_exact");
         return false;
     }
+    dp_generation_stage_note(paths, "generation_exactness_us",
+                             stage_started_us);
     /* The sealed bytes are exactly what the dimensions would prove. Refuse
      * stale generated docs here — read-only, with the file and its regen
      * command named — rather than after the minutes-long proof the lint
@@ -4966,12 +4989,19 @@ static bool generation_prepare(const struct proof_paths *paths,
      * warm-seeded), so provision exactly those two tools first; without
      * them every script exec-fails and every proof refuses as stale docs.
      * Only untracked build outputs are written, never the sealed bytes. */
+    stage_started_us = platform_time_monotonic_us();
     if (!dp_generation_docs_tools(paths, generation, why, why_len))
         return false;
+    dp_generation_stage_note(paths, "generation_docs_tools_us",
+                             stage_started_us);
+    stage_started_us = platform_time_monotonic_us();
     if (!dp_generation_docs_fresh(generation, why, why_len))
         return false;
+    dp_generation_stage_note(paths, "generation_docs_fresh_us",
+                             stage_started_us);
     /* Close the lazy-bootstrap race before any dimension's `make` process
      * exists for this generation (see generation_zcc_bootstrap). */
+    stage_started_us = platform_time_monotonic_us();
     generation_zcc_bootstrap(generation);
     /* Stamp the generation as taken before the slow preparation below.
      * The .z23p pool is shared by every checkout under this parent, so a
@@ -4993,6 +5023,8 @@ static bool generation_prepare(const struct proof_paths *paths,
      * every statement that can set `why`. Placed here it has no reachable
      * way to change what this function returns or reports. */
     generation_pool_reap(paths, parent, generation);
+    dp_generation_stage_note(paths, "generation_warm_and_reap_us",
+                             stage_started_us);
     return true;
 }
 
