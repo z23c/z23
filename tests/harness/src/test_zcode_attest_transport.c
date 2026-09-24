@@ -493,6 +493,49 @@ static int t_offer_admit(void)
     return failures;
 }
 
+static int t_linked_offer(void)
+{
+    int failures = 0;
+    uint8_t pkg[32], rel[32], recipe[32], id[32] = {0};
+    zat_pattern_root(0x26, pkg);
+    zat_pattern_root(0x56, rel);
+    zat_pattern_root(0x96, recipe);
+    uint8_t wire[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+    size_t wire_len = 0;
+    bool prepared = zat_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pkg, rel,
+                             recipe, 0x28, wire, &wire_len, id);
+    struct zat_node node = {0};
+    prepared = prepared && zat_node_open(&node, "linked-offer");
+    char leaf[1200], outside[700];
+    zat_attest_path(&node, id, leaf, sizeof(leaf));
+    snprintf(outside, sizeof(outside), "%s/outside-attestation",
+             node.datadir);
+    bool filed = false, already = false;
+    prepared = prepared &&
+        vcs_package_attest_transport_file(node.zcode, wire, wire_len, id,
+                                          &filed, &already) ==
+            VCS_PACKAGE_ATTEST_TRANSPORT_OK && filed &&
+        rename(leaf, outside) == 0 &&
+        symlink("../../outside-attestation", leaf) == 0;
+    ZAT_CHECK("linked offer: exact signed wire outside store is prepared",
+              prepared);
+    if (prepared) {
+        struct vcs_package_attest_transport_outcome out;
+        ZAT_CHECK("linked offer: external wire is absent from local shelf",
+                  vcs_package_attest_transport_offer(node.store, node.zcode,
+                                                     id, &out) ==
+                      VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ABSENT);
+        bool restored = unlink(leaf) == 0 && rename(outside, leaf) == 0;
+        ZAT_CHECK("linked offer: same real leaf is offerable",
+                  restored &&
+                  vcs_package_attest_transport_offer(node.store, node.zcode,
+                                                     id, &out) ==
+                      VCS_PACKAGE_ATTEST_TRANSPORT_OK);
+    }
+    zat_node_close(&node);
+    return failures;
+}
+
 /* ── 3. the binding check ───────────────────────────────────────────── */
 
 static int t_binding(void)
@@ -724,6 +767,7 @@ int test_zcode_attest_transport(void)
     int failures = 0;
     failures += t_root();
     failures += t_offer_admit();
+    failures += t_linked_offer();
     failures += t_binding();
     failures += t_conflict();
     failures += t_admitting_is_not_accepting();

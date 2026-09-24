@@ -24,6 +24,7 @@
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/positioned_file.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -70,23 +71,25 @@ static enum vcs_package_attest_transport_result att_done(
     return result;
 }
 
-/* Read one bounded file whole. False when missing, unreadable, empty, or
- * larger than `cap` — trailing bytes mean these are not the exact object.
- * `buf` must hold cap + 1 bytes: the extra byte is what makes "exactly
- * cap bytes" distinguishable from "cap bytes and more to come". */
+/* Read one regular file whole without following a link at any path component.
+ * False when missing, unreadable, empty, or larger than `cap`. */
 static bool att_read_bounded(const char *path, uint8_t *buf, size_t cap,
                              size_t *out_len)
 {
     *out_len = 0;
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
-    size_t len = fread(buf, 1, cap + 1u, f);
-    bool ok = !ferror(f) && len > 0 && len <= cap;
-    fclose(f);
+    uint64_t size = 0;
+    bool ok = platform_positioned_file_size(&file, &size) &&
+              size > 0 && size <= cap &&
+              platform_positioned_file_read(&file, buf, (size_t)size, 0) ==
+                  (int64_t)size;
+    platform_positioned_file_close(&file);
     if (!ok)
         return false;
-    *out_len = len;
+    *out_len = (size_t)size;
     return true;
 }
 
