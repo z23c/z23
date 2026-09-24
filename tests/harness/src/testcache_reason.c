@@ -6,23 +6,23 @@
 
 const char *testcache_reason_label(enum testcache_reason r)
 {
-    switch (r) {
-    case TESTCACHE_R_OK:               return "cacheable";
-    case TESTCACHE_R_NO_HANDLE:        return "no-cache-handle";
-    case TESTCACHE_R_EXTERNAL_INPUT:   return "external-input-denylist";
-    case TESTCACHE_R_CLOSURE_ERROR:    return "closure-query-error";
-    case TESTCACHE_R_ENTRY_UNRESOLVED: return "entry-symbol-unresolved";
-    case TESTCACHE_R_TRUNCATED:        return "closure-truncated";
-    case TESTCACHE_R_EMPTY_CLOSURE:    return "empty-closure";
-    case TESTCACHE_R_FILE_UNREADABLE:  return "input-file-unreadable";
-    case TESTCACHE_R_NO_INCLUDE_GRAPH: return "no-include-graph";
-    case TESTCACHE_R_GRAPH_STALE:      return "input-newer-than-include-graph";
-    case TESTCACHE_R_CHANGED_INPUT:    return "changed-input-runs-fresh";
-    case TESTCACHE_R_ACTIVE_PROOF_CONTRACT:
-        return "active-proof-contract";
-    case TESTCACHE_R_PROOF_CONTRACT_INVALID:
-        return "invalid-proof-contract";
-    case TESTCACHE_R__COUNT:           break;
-    }
-    return "unknown";
+    static const char *const labels[TESTCACHE_R__COUNT] = {
+        [TESTCACHE_R_OK] = "cacheable",
+        [TESTCACHE_R_NO_HANDLE] = "no-cache-handle",
+        [TESTCACHE_R_EXTERNAL_INPUT] = "external-input-denylist",
+        [TESTCACHE_R_CLOSURE_ERROR] = "closure-query-error",
+        [TESTCACHE_R_ENTRY_UNRESOLVED] = "entry-symbol-unresolved",
+        [TESTCACHE_R_TRUNCATED] = "closure-truncated",
+        [TESTCACHE_R_EMPTY_CLOSURE] = "empty-closure",
+        [TESTCACHE_R_FILE_UNREADABLE] = "input-file-unreadable",
+        [TESTCACHE_R_NO_INCLUDE_GRAPH] = "no-include-graph",
+        [TESTCACHE_R_GRAPH_STALE] = "input-newer-than-include-graph",
+        [TESTCACHE_R_CHANGED_INPUT] = "changed-input-runs-fresh",
+        [TESTCACHE_R_ACTIVE_PROOF_CONTRACT] = "active-proof-contract",
+        [TESTCACHE_R_PROOF_CONTRACT_INVALID] = "invalid-proof-contract",
+        [TESTCACHE_R_HARNESS_GRAPH] = "harness-include-graph-incomplete",
+        [TESTCACHE_R_GROUP_UNADMISSIBLE] = "group-unadmissible",
+    };
+    return (unsigned)r < TESTCACHE_R__COUNT && labels[r]
+        ? labels[r] : "unknown";
 }

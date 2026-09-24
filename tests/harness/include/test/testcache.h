@@ -84,6 +84,8 @@ enum testcache_reason {
     TESTCACHE_R_CHANGED_INPUT,     /* resident snapshot closure reaches edit */
     TESTCACHE_R_ACTIVE_PROOF_CONTRACT, /* activated exact proof always runs */
     TESTCACHE_R_PROOF_CONTRACT_INVALID, /* unknown activation policy */
+    TESTCACHE_R_HARNESS_GRAPH,     /* runner policy TU depfile is incomplete */
+    TESTCACHE_R_GROUP_UNADMISSIBLE, /* group exceeds signed leaf name bound */
     TESTCACHE_R__COUNT
 };
 

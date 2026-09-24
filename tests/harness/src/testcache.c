@@ -17,6 +17,7 @@
  * costs a re-run, never correctness. */
 
 #include "test/testcache.h"
+#include "dev_proof_receipt.h"
 
 #include "codeindex/codeindex.h"
 #include "vcs/vcs_object.h"
@@ -536,21 +537,67 @@ static void trc_wrap_proof_key(
     sha3_256_finalize(&ctx, out_key);
 }
 
+/* The two common translation units can change every group's execution or
+ * cache policy without appearing in a group's call graph. Hash their source
+ * and compiler-reported transitive prerequisites. No depfile row for either
+ * unit means the common harness closure is unknown, even when some other TU
+ * supplied enough depfiles to make the graph look live. */
+static bool trc_hash_harness(struct testcache *tc, struct sha3_256_ctx *sha,
+                             bool *stale, bool *graph_incomplete)
+{
+    static const char *const units[] = {
+        "tests/harness/src/test_parallel.c",
+        "tests/harness/src/testcache.c",
+    };
+    char deps[64][256];
+    for (size_t u = 0; u < sizeof(units) / sizeof(units[0]); u++) {
+        uint8_t hash[32];
+        int64_t mtime = 0;
+        if (!trc_file_hash(tc, units[u], hash, &mtime)) return false;
+        if (mtime > tc->dep_newest_ns) *stale = true;
+        sha3_256_write(sha, (const uint8_t *)units[u], strlen(units[u]) + 1);
+        sha3_256_write(sha, hash, sizeof(hash));
+        int offset = 0;
+        for (;;) {
+            int n = codeindex_includes_of_file_page(tc->ci, units[u], offset,
+                                                     deps, 64);
+            if (n < 0 || offset + n > TRC_MAX_CLOSURE ||
+                (n == 0 && offset == 0)) {
+                *graph_incomplete = true;
+                return false;
+            }
+            if (n == 0) break;
+            for (int i = 0; i < n; i++) {
+                if (!trc_file_hash(tc, deps[i], hash, &mtime)) return false;
+                if (mtime > tc->dep_newest_ns) *stale = true;
+                sha3_256_write(sha, (const uint8_t *)deps[i],
+                               strlen(deps[i]) + 1);
+                sha3_256_write(sha, hash, sizeof(hash));
+            }
+            offset += n;
+        }
+    }
+    return true;
+}
+
 /* Fold the complete closure into the SHA3 key. An activated proof runs fresh,
  * but its key can later identify an observation offered for reuse. It must
  * meet the same closure requirements as an ordinary cache key. */
 static bool trc_compute_key(struct testcache *tc, const char *group_name,
-                            int n_closure, uint8_t out_key[32], bool *stale)
+                            int n_closure, uint8_t out_key[32], bool *stale,
+                            bool *graph_incomplete)
 {
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
 
-    /* v4 retires v3 PASS records minted while activated proof contracts still
+    /* v5 adds the common harness source and generated include closure. v4
+     * records lacked this input and cannot safely be reused. v4 had already
+     * retired v3 PASS records minted while activated proof contracts still
      * shared this ordinary keyspace. Active proofs now bypass lookup/storage;
      * retiring v3 also prevents one of those old records becoming reachable
      * if its contract row is later removed. v3 first rejected skipped PASSes,
      * and v2 added the coverage-gating environment over v1. */
-    static const char DOMAIN[] = "zcl.testcache.key.v4";
+    static const char DOMAIN[] = "zcl.testcache.key.v5";
     sha3_256_write(&ctx, (const unsigned char *)DOMAIN, sizeof(DOMAIN)); /* +NUL */
 
     const char *tk = ZCL_TESTCACHE_TOOLKEY;
@@ -558,6 +605,7 @@ static bool trc_compute_key(struct testcache *tc, const char *group_name,
     sha3_256_write(&ctx, tc->envkey, sizeof(tc->envkey));
     sha3_256_write(&ctx, (const unsigned char *)group_name,
                    strlen(group_name) + 1);
+    if (!trc_hash_harness(tc, &ctx, stale, graph_incomplete)) return false;
 
     unsigned char le[4];
     trc_put_u32le(le, (uint32_t)n_closure);
@@ -780,6 +828,12 @@ static void testcache_probe_group_internal(
         snprintf(out->reason, sizeof(out->reason), "no cache handle");
         return;
     }
+    if (strlen(group_name) > ZCL_DEV_VERDICT_LEAF_GROUP_MAX) {
+        out->code = TESTCACHE_R_GROUP_UNADMISSIBLE;
+        snprintf(out->reason, sizeof(out->reason),
+                 "group exceeds signed observation name bound");
+        return;
+    }
 
     if (group_reads_external_inputs(group_name)) {
         out->code = TESTCACHE_R_EXTERNAL_INPUT;
@@ -840,10 +894,14 @@ static void testcache_probe_group_internal(
         }
     }
 
-    bool stale = false;
-    if (!trc_compute_key(tc, group_name, nc, out->key, &stale)) {
-        out->code = TESTCACHE_R_FILE_UNREADABLE;
-        snprintf(out->reason, sizeof(out->reason), "input file unreadable");
+    bool stale = false, harness_graph_incomplete = false;
+    if (!trc_compute_key(tc, group_name, nc, out->key, &stale,
+                         &harness_graph_incomplete)) {
+        out->code = harness_graph_incomplete ? TESTCACHE_R_HARNESS_GRAPH
+                                             : TESTCACHE_R_FILE_UNREADABLE;
+        snprintf(out->reason, sizeof(out->reason), "%s",
+                 harness_graph_incomplete ? "harness depfile graph incomplete"
+                                          : "input file unreadable");
         return;
     }
     /* An input newer than every depfile may have new unseen dependencies. */

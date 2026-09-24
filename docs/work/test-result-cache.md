@@ -22,8 +22,8 @@ SUITE VERDICT mode=<cold|cached> groups_total=N groups_ran=N groups_cached=N \
 
 `groups_ran` is the count actually forked, and it is the first number to read.
 Only a skip-free fresh PASS is stored; a zero-exit group that prints `SKIP (`
-never becomes a reusable PASS. The v3 key domain retires older records that
-could have been stored before this rule existed.
+never becomes a reusable PASS. The v5 key domain also retires records that
+did not bind the shared runner and cache-policy source inputs.
 
 `load_flaky` counts groups that FAILed or were WEDGED once under the shared,
 contended worker pool and then PASSED alone, with the pool otherwise idle
@@ -144,9 +144,16 @@ ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>
 
 For group `test_<x>` the key is `SHA3-256` over, in order: a domain tag; the
 compiled-in **toolchain + compile-flags fingerprint**; the **coverage-gating
-environment digest**; the group name; and, for every file in the group's
-**forward (callee) input closure** sorted by path, the file's path and its
-`SHA3-256` content hash.
+environment digest**; the group name; the source and compiler-reported
+transitive prerequisites of `test_parallel.c` and `testcache.c`; and, for every
+file in the group's **forward (callee) input closure** sorted by path, the
+file's path and its `SHA3-256` content hash. The two common translation units
+affect every group's execution or cache policy but do not appear in its callee
+closure. Their include edges are paged to an exact end witness; a missing or
+unreadable common input, absent depfile edge set, or truncated page refuses
+reuse. A group name beyond the signed observation leaf's 127-byte bound also
+refuses a reusable key. Fixture-reading groups remain uncacheable until their external inputs
+have a complete declared closure.
 
 The forward closure is `codeindex_forward_closure()`
 (`cognition/modules/codeindex/src/codeindex_impact.c`) — the mirror of the `code impact`
@@ -210,6 +217,9 @@ A group is **UNCACHEABLE (always runs)** when its inputs cannot be bounded:
   smaller set that is never flagged `truncated` and therefore looks complete. On
   a fresh clone or after `make clean`, every key would otherwise cover zero
   headers,
+- **the common harness graph is incomplete** — either runner-policy translation
+  unit lacks compiler-reported prerequisite edges, even if unrelated depfiles
+  make the overall graph look present,
 - **an input is newer than the include graph** — if any closure file's mtime is
   newer than the newest depfile the graph was built from, the graph cannot
   describe that file, so an include added since is invisible to the key.

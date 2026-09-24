@@ -137,6 +137,31 @@ static const char *TC_DEF_B =
     "TC_ROW(beta, 2)\n"
     "TC_ROW(gamma, 3)\n";
 
+static const char *TC_RUNNER_A = "int main(void) { return 0; }\n";
+static const char *TC_RUNNER_B = "int main(void) { return 1; }\n";
+
+static bool write_harness_sources(const char *root)
+{
+    return mk_write(root, "tests/harness/src/test_parallel.c", TC_RUNNER_A) &&
+           mk_write(root, "tests/harness/src/testcache.c",
+                    "int cache_policy(void) { return 1; }\n") &&
+           mk_write(root, "tests/harness/include/test/test_core.h",
+                    "#define TEST_CORE 1\n") &&
+           mk_write(root, "tests/harness/include/test/testcache.h",
+                    "#define TEST_CACHE 1\n");
+}
+
+static bool write_harness_depfiles(const char *root)
+{
+    return mk_write(root, "build/obj/test_parallel.d",
+                    "build/obj/test_parallel.o: "
+                    "tests/harness/src/test_parallel.c "
+                    "tests/harness/include/test/test_core.h\n") &&
+           mk_write(root, "build/obj/testcache.d",
+                    "build/obj/testcache.o: tests/harness/src/testcache.c "
+                    "tests/harness/include/test/testcache.h\n");
+}
+
 /* Write the fixture with the given leaf/other/header/def variants + depfiles so
  * the include closure resolves. Sources are written BEFORE depfiles so the
  * depfiles are always the newest bytes in the fixture — the include-graph
@@ -144,7 +169,8 @@ static const char *TC_DEF_B =
 static bool write_fixture_full(const char *leaf, const char *other,
                                const char *hdr, const char *def)
 {
-    return mk_write(TC_FIX, "core/modules/net/src/tc_top.c", TC_TOP) &&
+    return write_harness_sources(TC_FIX) &&
+           mk_write(TC_FIX, "core/modules/net/src/tc_top.c", TC_TOP) &&
            mk_write(TC_FIX, "core/modules/net/src/tc_mid.c", TC_MID) &&
            mk_write(TC_FIX, "core/modules/net/src/tc_leaf.c", leaf) &&
            mk_write(TC_FIX, "core/modules/net/src/tc_other.c", other) &&
@@ -162,7 +188,8 @@ static bool write_fixture_full(const char *leaf, const char *other,
                     "core/modules/net/include/net/tc.h\n") &&
            mk_write(TC_FIX, "build/obj/tc_other.d",
                     "build/obj/tc_other.o: core/modules/net/src/tc_other.c "
-                    "core/modules/net/include/net/tc.h\n");
+                    "core/modules/net/include/net/tc.h\n") &&
+           write_harness_depfiles(TC_FIX);
 }
 
 static bool write_fixture(const char *leaf, const char *other, const char *hdr)
@@ -345,12 +372,13 @@ static bool write_batch_depfiles(void)
                        "core/modules/net/include/net/tc.h\n");
     for (int i = 1; i <= TC_QN; i++)
         if (!tc_write_q_depfile(i)) ok = false;
-    return ok;
+    return write_harness_depfiles(TC_FIX) && ok;
 }
 
 static bool write_batch_fixture(void)
 {
-    bool ok = mk_write(TC_FIX, "core/modules/net/src/tc_top.c", TC_TOP) &&
+    bool ok = write_harness_sources(TC_FIX) &&
+              mk_write(TC_FIX, "core/modules/net/src/tc_top.c", TC_TOP) &&
               mk_write(TC_FIX, "core/modules/net/src/tc_mid.c", TC_MID) &&
               mk_write(TC_FIX, "core/modules/net/src/tc_leaf.c", TC_LEAF_A) &&
               mk_write(TC_FIX, "core/modules/net/src/tc_other.c", TC_OTHER_A) &&
@@ -481,10 +509,10 @@ static int tc_batch_stats(void)
         testcache_stats(tc, &s);
         TC_CHECK("8 overlapping closures cost 8 closure queries",
                  s.closure_queries == 8);
-        TC_CHECK("12 unique files read once (8 private + 4 shared)",
-                 s.file_hash_reads == 12);
-        TC_CHECK("the other 28 file visits hit the memo",
-                 s.file_hash_memo_hits == 8u * 5u - 12u);
+        TC_CHECK("16 unique files read once (8 private, 4 shared, 4 harness)",
+                 s.file_hash_reads == 16);
+        TC_CHECK("the other 56 file visits hit the memo",
+                 s.file_hash_memo_hits == 8u * 9u - 16u);
         TC_CHECK("content bytes flow through SHA3",
                  s.sha3_content_bytes > 0);
         TC_CHECK("one verdict lookup per cacheable group",
@@ -496,7 +524,7 @@ static int tc_batch_stats(void)
         struct testcache_stats s2;
         testcache_stats(tc, &s2);
         TC_CHECK("second batch reads no file twice",
-                 s2.file_hash_reads == 12);
+                 s2.file_hash_reads == 16);
         TC_CHECK("stored PASSes all hit",
                  s2.verdict_lookups == 16 && s2.verdict_hits == 8);
         testcache_stats_reset(tc);
@@ -835,6 +863,23 @@ static bool tc_cross_tree_probe(const char *root, const char *const *names,
     return ok;
 }
 
+static bool tc_harness_graph_refuses(const char *name)
+{
+    struct testcache *tc = testcache_open(TC_FIX2);
+    bool refused = false;
+    if (tc) {
+        struct testcache_probe p;
+        testcache_probe_group(tc, name, &p);
+        refused = !p.key_valid && !p.cacheable && !p.hit &&
+                  p.code == TESTCACHE_R_HARNESS_GRAPH;
+        testcache_probe_group_proof(tc, name, ZCL_TEST_PROOF_STRESS, &p);
+        refused = refused && !p.key_valid && !p.cacheable && !p.hit &&
+                  p.code == TESTCACHE_R_HARNESS_GRAPH;
+        testcache_close(tc);
+    }
+    return refused;
+}
+
 /* Acceptance 8: keys and stored PASSes survive a handle restart and a
  * second physical tree; only changed actual closure bytes force a miss. */
 static int tc_batch_restart_crosstree(void)
@@ -886,6 +931,15 @@ static int tc_batch_restart_crosstree(void)
                       "core/modules/net/include/net/tc_registry.def\n"));
     TC_CHECK("shared dependency invalidates all eight PASSes",
              tc_cross_tree_probe(TC_FIX2, ptrs, k1, false));
+    TC_CHECK("second candidate edits common runner source",
+             mk_write(TC_FIX2, "core/modules/net/include/net/tc.h", TC_H_A) &&
+             mk_write(TC_FIX2, "tests/harness/src/test_parallel.c",
+                      TC_RUNNER_B) && write_harness_depfiles(TC_FIX2));
+    TC_CHECK("runner edit invalidates all eight PASSes",
+             tc_cross_tree_probe(TC_FIX2, ptrs, k1, false));
+    TC_CHECK("missing runner depfile is a named refusal",
+             system("rm -f " TC_FIX2 "/build/obj/test_parallel.d") == 0 &&
+             tc_harness_graph_refuses(ptrs[0]));
     TC_CHECK("second tree removed", system("rm -rf " TC_FIX2) == 0);
     tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
     return failures;
@@ -1076,7 +1130,7 @@ static int tc_cap_phase_verify(const struct testcache_probe *batch,
                                               &info, why, sizeof(why));
     bool same;
     TC_CHECK("capsule consumes with identical bindings", consumed);
-    same = consumed && info.n_slots == 8 && info.dep_count == 36;
+    same = consumed && info.n_slots == 8 && info.dep_count == 38;
     for (int i = 0; same && i < 8; i++)
         if (!tc_capslot_equal(&batch[i], &slots[i].probe)) same = false;
     TC_CHECK("every slot returns byte-identical (34-slot parity shape)",
@@ -1577,6 +1631,32 @@ static int tc_non_test_controls_stable(void)
     return failures;
 }
 
+static int tc_missing_graph_activated(struct testcache *tc)
+{
+    int failures = 0;
+    struct testcache_probe p;
+    testcache_probe_group_proof(tc, "test_demo_entry",
+                               ZCL_TEST_PROOF_STRESS, &p);
+    TC_CHECK("activated proof with missing graph has no reusable key",
+             !p.key_valid && !p.cacheable && !p.hit &&
+             p.code == TESTCACHE_R_NO_INCLUDE_GRAPH);
+    return failures;
+}
+
+static int tc_unadmissible_group(struct testcache *tc)
+{
+    int failures = 0;
+    char long_name[160];
+    memset(long_name, 'a', sizeof(long_name) - 1);
+    long_name[sizeof(long_name) - 1] = 0;
+    struct testcache_probe p;
+    testcache_probe_group(tc, long_name, &p);
+    TC_CHECK("group too long for signed leaf has no reusable key",
+             !p.key_valid && !p.cacheable && !p.hit &&
+             p.code == TESTCACHE_R_GROUP_UNADMISSIBLE);
+    return failures;
+}
+
 int test_testcache(void)
 {
     int failures = 0;
@@ -1593,6 +1673,7 @@ int test_testcache(void)
         struct testcache *tc = testcache_open(TC_FIX);
         TC_CHECK("testcache_open succeeds", tc != NULL);
         if (tc) {
+            failures += tc_unadmissible_group(tc);
             struct testcache_probe p;
             testcache_probe_group(tc, "test_demo_entry", &p);
             TC_CHECK("entry is cacheable", p.cacheable);
@@ -1908,11 +1989,7 @@ int test_testcache(void)
                      !p.cacheable);
             TC_CHECK("and it says so with a stable reason code",
                      p.code == TESTCACHE_R_NO_INCLUDE_GRAPH);
-            testcache_probe_group_proof(tc, "test_demo_entry",
-                                       ZCL_TEST_PROOF_STRESS, &p);
-            TC_CHECK("activated proof with missing graph has no reusable key",
-                     !p.key_valid && !p.cacheable && !p.hit &&
-                     p.code == TESTCACHE_R_NO_INCLUDE_GRAPH);
+            failures += tc_missing_graph_activated(tc);
             testcache_close(tc);
         }
     }
@@ -2226,9 +2303,9 @@ int test_testcache(void)
                            "focused receipt invalid reason=self_skips") &&
              file_contains("tools/agent_fast_ci.sh",
                            "focused receipt invalid reason=accounting"));
-    TC_CHECK("v4 key retires proof-policy-blind and pre-skip PASS records",
+    TC_CHECK("v5 key binds shared harness and retires older PASS records",
              file_contains("tests/harness/src/testcache.c",
-                           "zcl.testcache.key.v4"));
+                           "zcl.testcache.key.v5"));
     /* The label has to describe the run, not the flag. Keying it on cache_mode
      * made `ZCL_TEST_CACHE=1 ... --only=<group>` report "mode=cached ...
      * groups_cached=0" and the (CACHED) headline for a run in which everything
