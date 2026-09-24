@@ -19,6 +19,7 @@
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/positioned_file.h"
 #include "sha3/sha3.h"
 #include "vcs/package_manifest.h"
 
@@ -150,16 +151,18 @@ static bool pkgcap_read_file(const char *path, size_t max_bytes,
 {
     *out = NULL;
     *out_len = 0;
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path)) return false;
     size_t cap = 65536;
     if (cap > max_bytes + 1) cap = max_bytes + 1;
     char *buf = zcl_malloc(cap, "pkgcap.file");
     if (!buf) {
-        (void)fclose(f);
+        platform_positioned_file_close(&file);
         return false;
     }
     size_t len = 0;
+    bool failed = false;
     for (;;) {
         if (len == cap) {
             if (cap > max_bytes) break; /* one byte past the cap: refuse */
@@ -168,19 +171,23 @@ static bool pkgcap_read_file(const char *path, size_t max_bytes,
             char *grown = zcl_realloc(buf, next, "pkgcap.file");
             if (!grown) {
                 free(buf);
-                (void)fclose(f);
+                platform_positioned_file_close(&file);
                 return false;
             }
             buf = grown;
             cap = next;
         }
-        size_t got = fread(buf + len, 1, cap - len, f);
-        len += got;
+        int64_t got = platform_positioned_file_read(
+            &file, buf + len, cap - len, len);
+        if (got < 0) {
+            failed = true;
+            break;
+        }
+        len += (size_t)got;
         if (got == 0) break;
     }
     bool overflow = len > max_bytes;
-    bool failed = ferror(f) != 0;
-    (void)fclose(f);
+    platform_positioned_file_close(&file);
     if (overflow || failed) {
         free(buf);
         return false;

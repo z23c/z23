@@ -34,6 +34,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #define PCC_CHECK(name, expr)                                    \
     do {                                                         \
@@ -416,6 +419,38 @@ static int t_unproven_unreadable_source(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static int t_linked_source(void)
+{
+    int failures = 0;
+    struct pcc_case c;
+    if (!pcc_case_open(&c, "linked-source")) return 1;
+    bool built = pcc_write_table(c.table, "CAP_NETWORK", NULL) &&
+                 pcc_write(c.dir, "src/inert.c",
+                           "int add(int a, int b) { return a + b; }\n") &&
+                 pcc_write_manifest(c.dir, "", "\"src/inert.c\"");
+    char leaf[640], outside[640];
+    snprintf(leaf, sizeof(leaf), "%s/src/inert.c", c.dir);
+    snprintf(outside, sizeof(outside), "%s/outside.c", c.dir);
+    built = built && rename(leaf, outside) == 0 &&
+            symlink("../outside.c", leaf) == 0;
+    PCC_CHECK("C5: exact listed source linked outside is prepared", built);
+    if (built) {
+        struct vcs_pkgcap_report r;
+        pcc_run(&c, c.table, NULL, &r);
+        PCC_CHECK("C5: linked source is UNPROVEN, not cleared",
+                  r.verdict == VCS_PKGCAP_UNPROVEN &&
+                  r.rule == VCS_PKGCAP_RULE_SOURCE_UNREADABLE);
+        bool restored = unlink(leaf) == 0 && rename(outside, leaf) == 0;
+        pcc_run(&c, c.table, NULL, &r);
+        PCC_CHECK("C5: same real source is VERIFIED",
+                  restored && r.verdict == VCS_PKGCAP_VERIFIED);
+    }
+    pcc_case_close(&c);
+    return failures;
+}
+#endif
+
 /* ── D. a substituted table is detected ──────────────────────────── */
 
 static int t_substituted_table(void)
@@ -723,6 +758,9 @@ int test_package_capability_claim(void)
     failures += t_unproven_absent_claim();
     failures += t_unproven_claim_not_reached();
     failures += t_unproven_unreadable_source();
+#if !defined(_WIN32)
+    failures += t_linked_source();
+#endif
     failures += t_substituted_table();
     failures += t_list_ends();
     failures += t_scanner_exclusions();
