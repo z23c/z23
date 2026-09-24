@@ -29,4 +29,16 @@ enum zcl_dev_observation_verdict zcl_dev_observation_admit(
     const uint8_t (*roots)[ZCL_DEV_PROOF_ROOT_BYTES], size_t n_roots,
     size_t *ineligible, char *why, size_t why_len);
 
+/* Classify the proposed roots together with the receiver's independently
+ * retained roots for this key. A proposer cannot suppress a known eligible
+ * contradiction by omitting it. The caller must obtain known_roots from its
+ * own complete index; this API does not establish index completeness. */
+enum zcl_dev_observation_verdict zcl_dev_observation_admit_known(
+    const char *store_root,
+    const uint8_t key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES], const char *group,
+    const uint8_t (*proposed_roots)[ZCL_DEV_PROOF_ROOT_BYTES],
+    size_t n_proposed,
+    const uint8_t (*known_roots)[ZCL_DEV_PROOF_ROOT_BYTES], size_t n_known,
+    size_t *ineligible, char *why, size_t why_len);
+
 #endif

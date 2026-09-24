@@ -24,14 +24,49 @@
 #include "vcs/vcs_object.h"
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-#define TC_FIX "test-tmp/tc_cache_fix"
-#define TC_STORE "test-tmp/tc_cache_store"
+/* Each runner process owns its fixture tree. Two independent proof/test
+ * processes can now exercise this group concurrently without deleting each
+ * other's source, depfiles, signer state, or CAS objects. */
+static const char *tc_path(unsigned slot)
+{
+    static pid_t owner;
+    static char paths[5][80];
+    pid_t pid = getpid();
+    if (owner != pid) {
+        (void)snprintf(paths[0], sizeof(paths[0]),
+                       "test-tmp/tc_cache_fix.%ld", (long)pid);
+        (void)snprintf(paths[1], sizeof(paths[1]),
+                       "test-tmp/tc_cache_store.%ld", (long)pid);
+        (void)snprintf(paths[2], sizeof(paths[2]),
+                       "test-tmp/tc_cache_fix2.%ld", (long)pid);
+        (void)snprintf(paths[3], sizeof(paths[3]),
+                       "test-tmp/tc_capsule.%ld", (long)pid);
+        (void)snprintf(paths[4], sizeof(paths[4]),
+                       "test-tmp/tc_capsule2.%ld", (long)pid);
+        owner = pid;
+    }
+    return slot < 5 ? paths[slot] : NULL;
+}
+
+static bool tc_shell(const char *fmt, ...)
+{
+    char cmd[512];
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(cmd, sizeof(cmd), fmt, args);
+    va_end(args);
+    return n >= 0 && (size_t)n < sizeof(cmd) && system(cmd) == 0;
+}
+
+#define TC_FIX tc_path(0)
+#define TC_STORE tc_path(1)
 
 #define TC_CHECK(name, expr) do {                                    \
     if (expr) { printf("  testcache: %s... OK\n", (name)); }         \
@@ -316,7 +351,7 @@ static void tc_env_restore(struct tc_envsave *s, const char *name)
  * something real to share. Each helper returns its own failure count so
  * test_testcache() itself stays at its pinned complexity. */
 #define TC_QN 32
-#define TC_FIX2 "test-tmp/tc_cache_fix2"
+#define TC_FIX2 tc_path(2)
 
 static void tc_qname(int i, char out[64])
 {
@@ -448,7 +483,7 @@ static int tc_batch_parity(void)
     ptrs[TC_QN + 1] = "test_no_such_symbol_zzz";
     TC_CHECK("batch fixture writes", write_batch_fixture());
     TC_CHECK("batch verdict store starts empty",
-             system("rm -rf " TC_FIX "/.zvcs") == 0);
+             tc_shell("rm -rf %s/.zvcs", TC_FIX));
     TC_CHECK("every batch entry is cacheable for seeding",
              tc_batch_seed(names));
     static struct testcache_probe solo[TC_QN + 2], batched[TC_QN + 2];
@@ -499,7 +534,7 @@ static int tc_batch_stats(void)
     }
     TC_CHECK("stats fixture writes", write_batch_fixture());
     TC_CHECK("stats verdict store starts empty",
-             system("rm -rf " TC_FIX "/.zvcs") == 0);
+             tc_shell("rm -rf %s/.zvcs", TC_FIX));
     struct testcache *tc = testcache_open(TC_FIX);
     TC_CHECK("stats cache opens", tc != NULL);
     if (tc) {
@@ -635,7 +670,7 @@ static int tc_batch_invalidation(void)
     }
     TC_CHECK("matrix fixture writes", write_batch_fixture());
     TC_CHECK("matrix verdict store starts empty",
-             system("rm -rf " TC_FIX "/.zvcs") == 0);
+             tc_shell("rm -rf %s/.zvcs", TC_FIX));
     static uint8_t k0[TC_QN][32];
     static uint8_t k2[TC_QN][32];
     TC_CHECK("baseline keys stored for all 32",
@@ -739,12 +774,12 @@ static int tc_batch_failclosed(void)
     }
     TC_CHECK("fail-closed fixture writes", write_batch_fixture());
     TC_CHECK("fail-closed verdict store starts empty",
-             system("rm -rf " TC_FIX "/.zvcs") == 0);
+             tc_shell("rm -rf %s/.zvcs", TC_FIX));
     TC_CHECK("leaf touched newer than its depfiles",
-             system("touch " TC_FIX "/core/modules/net/src/tc_leaf.c") == 0);
+             tc_shell("touch %s/core/modules/net/src/tc_leaf.c", TC_FIX));
     TC_CHECK("stale graph fails every slot closed", tc_fc_stale(ptrs));
     TC_CHECK("depfile tree removed (fresh-clone shape)",
-             system("rm -rf " TC_FIX "/build") == 0);
+             tc_shell("rm -rf %s/build", TC_FIX));
     TC_CHECK("missing graph fails every slot closed", tc_fc_missing(ptrs));
     TC_CHECK("fixture restored for the env split", write_batch_fixture());
     static uint8_t kn[8][32];
@@ -832,7 +867,7 @@ static int tc_batch_special(void)
     }
     TC_CHECK("special fixture writes", write_batch_fixture());
     TC_CHECK("special verdict store starts empty",
-             system("rm -rf " TC_FIX "/.zvcs") == 0);
+             tc_shell("rm -rf %s/.zvcs", TC_FIX));
     static const enum zcl_test_proof_contract mixed[8] = {
         ZCL_TEST_PROOF_STRESS, ZCL_TEST_PROOF_NONE, ZCL_TEST_PROOF_NONE,
         ZCL_TEST_PROOF_NONE, ZCL_TEST_PROOF_NONE, ZCL_TEST_PROOF_NONE,
@@ -898,7 +933,7 @@ static int tc_batch_restart_crosstree(void)
     struct tc_envsave caller_store;
     tc_env_capture(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
     TC_CHECK("receiver verdict store starts empty",
-             system("rm -rf " TC_STORE) == 0 &&
+             tc_shell("rm -rf %s", TC_STORE) &&
              mkdir(TC_STORE, 0755) == 0 &&
              setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
     uint8_t k1[8][32] = {{0}};
@@ -922,8 +957,8 @@ static int tc_batch_restart_crosstree(void)
     TC_CHECK("restart reuses eight eligible PASSes",
              tc_cross_tree_probe(TC_FIX, ptrs, k1, true));
     TC_CHECK("second physical tree copies the fixture",
-             system("rm -rf " TC_FIX2 " && cp -pR " TC_FIX " " TC_FIX2
-                    " && rm -rf " TC_FIX2 "/.zvcs") == 0);
+             tc_shell("rm -rf %s && cp -pR %s %s && rm -rf %s/.zvcs",
+                      TC_FIX2, TC_FIX, TC_FIX2, TC_FIX2));
     TC_CHECK("unchanged second candidate reuses eight PASSes",
              tc_cross_tree_probe(TC_FIX2, ptrs, k1, true));
     TC_CHECK("second candidate edits shared header",
@@ -941,9 +976,9 @@ static int tc_batch_restart_crosstree(void)
     TC_CHECK("runner edit invalidates all eight PASSes",
              tc_cross_tree_probe(TC_FIX2, ptrs, k1, false));
     TC_CHECK("missing runner depfile is a named refusal",
-             system("rm -f " TC_FIX2 "/build/obj/test_parallel.d") == 0 &&
+             tc_shell("rm -f %s/build/obj/test_parallel.d", TC_FIX2) &&
              tc_harness_graph_refuses(ptrs[0]));
-    TC_CHECK("second tree removed", system("rm -rf " TC_FIX2) == 0);
+    TC_CHECK("second tree removed", tc_shell("rm -rf %s", TC_FIX2));
     tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
     return failures;
 }
@@ -964,7 +999,7 @@ static int tc_batch_perf(void)
     }
     TC_CHECK("perf fixture writes", write_batch_fixture());
     TC_CHECK("perf verdict store starts empty",
-             system("rm -rf " TC_FIX "/.zvcs") == 0);
+             tc_shell("rm -rf %s/.zvcs", TC_FIX));
     static struct testcache_probe out[TC_QN];
     uint64_t t0 = tc_now_ms();
     for (int i = 0; i < TC_QN; i++) {
@@ -1003,8 +1038,8 @@ static int tc_batch_perf(void)
  * INTEGRITY ONLY — it never addresses a verdict and never gates a skip by
  * itself; every slot still carries its own key/code/cacheable/hit. Each
  * helper returns its own failure count so test_testcache() stays pinned. */
-#define TC_CAP "test-tmp/tc_capsule.bin"
-#define TC_CAP2 "test-tmp/tc_capsule2.bin"
+#define TC_CAP tc_path(3)
+#define TC_CAP2 tc_path(4)
 
 /* The standard 8-slot set: six ordinary entries, one activated
  * proof-contract slot, one denylisted slot. */
@@ -1158,7 +1193,7 @@ static int tc_cap_phase_fit(const struct testcache_capsule_bindings *bind)
     TC_CHECK("capsule that cannot fit its slots refuses",
              !testcache_capsule_consume(TC_CAP, bind, slots, 4, &info,
                                         why, sizeof(why)));
-    TC_CHECK("capsule scratch removed", system("rm -f " TC_CAP) == 0);
+    TC_CHECK("capsule scratch removed", tc_shell("rm -f %s", TC_CAP));
     return failures;
 }
 
@@ -1173,7 +1208,7 @@ static int tc_capsule_roundtrip(void)
     tc_cap_ptrs(names, ptrs, mixed);
     TC_CHECK("capsule fixture writes", write_batch_fixture());
     TC_CHECK("capsule verdict store starts empty",
-             system("rm -rf " TC_FIX "/.zvcs") == 0);
+             tc_shell("rm -rf %s/.zvcs", TC_FIX));
     failures += tc_cap_phase_seed(ptrs, mixed, batch);
     tc_cap_bindings(&bind);
     failures += tc_cap_phase_write(ptrs, mixed, batch, &bind);
@@ -1254,7 +1289,7 @@ static int tc_capsule_tamper(void)
                                             &bind, slots, 8, &info, why, sizeof(why)));
     }
     TC_CHECK("tamper scratch removed",
-             system("rm -f " TC_CAP " " TC_CAP2) == 0);
+             tc_shell("rm -f %s %s", TC_CAP, TC_CAP2));
     return failures;
 }
 
@@ -1355,7 +1390,7 @@ static int tc_capsule_bindings(void)
         TC_CHECK("optional bindings absent both sides still pass", ok);
     }
     TC_CHECK("bindings scratch removed",
-             system("rm -f " TC_CAP " " TC_CAP2) == 0);
+             tc_shell("rm -f %s %s", TC_CAP, TC_CAP2));
     tc_env_restore(&cap_st, "ZCL_STRESS_TESTS");
     return failures;
 }
@@ -1436,7 +1471,7 @@ static int tc_reverify_seed(const char **ptrs, struct testcache_probe *batch)
     int failures = 0;
     TC_CHECK("reverify fixture writes", write_batch_fixture());
     TC_CHECK("reverify store starts empty",
-             system("rm -rf " TC_STORE) == 0 &&
+             tc_shell("rm -rf %s", TC_STORE) &&
              mkdir(TC_STORE, 0755) == 0 &&
              setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
     {
@@ -1475,7 +1510,7 @@ static int tc_reverify_unbacked(const struct testcache_capsule_slot *slots,
     int failures = 0;
     static struct testcache_probe out[2];
     TC_CHECK("backing store removed",
-             system("rm -rf " TC_STORE) == 0);
+             tc_shell("rm -rf %s", TC_STORE));
     testcache_capsule_apply(slots, 2, want, 2, out, TC_STORE);
     TC_CHECK("unbacked HITs demote, flags cleared",
              !out[0].hit && !out[1].hit &&
@@ -1676,6 +1711,12 @@ static int tc_observation_forged(const uint8_t key[32], const uint8_t pass[32])
                 (const uint8_t (*)[32])roots, 2, &ineligible,
                 why, sizeof(why)) == ZCL_DEV_OBSERVATION_PASS &&
                 ineligible == 1);
+        TC_CHECK("receiver-known forged FAIL has no veto authority",
+            zcl_dev_observation_admit_known(TC_FIX, key, "test_demo_entry",
+                (const uint8_t (*)[32])pass, 1,
+                (const uint8_t (*)[32])forged, 1, &ineligible,
+                why, sizeof(why)) == ZCL_DEV_OBSERVATION_PASS &&
+                ineligible == 1);
     }
     return failures;
 }
@@ -1697,6 +1738,12 @@ static int tc_observation_conflict(const uint8_t key[32], const uint8_t pass[32]
         TC_CHECK("eligible PASS and FAIL coexist and refuse",
             zcl_dev_observation_admit(TC_FIX, key, "test_demo_entry",
                 (const uint8_t (*)[32])roots, 2, &ineligible,
+                why, sizeof(why)) == ZCL_DEV_OBSERVATION_CONFLICT &&
+                strcmp(why, "proof_observation_conflict") == 0);
+        TC_CHECK("omitted receiver-known FAIL still refuses",
+            zcl_dev_observation_admit_known(TC_FIX, key, "test_demo_entry",
+                (const uint8_t (*)[32])pass, 1,
+                (const uint8_t (*)[32])fail, 1, &ineligible,
                 why, sizeof(why)) == ZCL_DEV_OBSERVATION_CONFLICT &&
                 strcmp(why, "proof_observation_conflict") == 0);
     }
@@ -1724,8 +1771,8 @@ static int tc_observation_cross_tree(const uint8_t key[32], const uint8_t pass[3
     size_t ineligible = 0;
     struct testcache_probe p = {0};
     TC_CHECK("signed observation second candidate tree prepared",
-        system("rm -rf " TC_FIX2 " && cp -r " TC_FIX " " TC_FIX2
-               " && rm -rf " TC_FIX2 "/.zvcs " TC_FIX2 "/signing-state") == 0);
+        tc_shell("rm -rf %s && cp -r %s %s && rm -rf %s/.zvcs %s/signing-state",
+                 TC_FIX2, TC_FIX, TC_FIX2, TC_FIX2, TC_FIX2));
     struct testcache *tc = testcache_open(TC_FIX2);
     if (tc) {
         testcache_probe_group(tc, "test_demo_entry", &p);
@@ -1764,7 +1811,7 @@ static int tc_observation_cross_tree(const uint8_t key[32], const uint8_t pass[3
             why, sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING &&
         ineligible == 1);
     TC_CHECK("signed observation second tree removed",
-             system("rm -rf " TC_FIX2) == 0);
+             tc_shell("rm -rf %s", TC_FIX2));
     return failures;
 }
 
@@ -1777,9 +1824,9 @@ static int tc_observation_roundtrip(void)
     bool ready = getcwd(state, sizeof(state)) != NULL;
     if (ready) {
         size_t used = strlen(state);
-        ready = used + sizeof("/" TC_FIX "/signing-state") < sizeof(state);
-        if (ready) memcpy(state + used, "/" TC_FIX "/signing-state",
-                          sizeof("/" TC_FIX "/signing-state"));
+        int n = snprintf(state + used, sizeof(state) - used,
+                         "/%s/signing-state", TC_FIX);
+        ready = n > 0 && (size_t)n < sizeof(state) - used;
     }
     ready = ready && write_fixture(TC_LEAF_A, TC_OTHER_A, TC_H_A) &&
             mkdir(state, 0700) == 0 &&
@@ -1838,7 +1885,8 @@ int test_testcache(void)
     struct tc_envsave caller_store;
     tc_env_capture(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
     unsetenv("ZCL_TESTCACHE_STORE_ROOT");
-    system("rm -rf " TC_FIX " " TC_STORE);
+    (void)tc_shell("rm -rf %s %s %s %s %s", TC_FIX, TC_STORE,
+                   TC_FIX2, TC_CAP, TC_CAP2);
 
     /* ── Phase A: cacheable, miss, store, hit ── */
     uint8_t keyA[32];
@@ -1940,7 +1988,7 @@ int test_testcache(void)
 
     /* ── Phase A2: receipt storage is independent from source inspection ── */
     TC_CHECK("separate verdict store starts empty",
-             system("rm -rf " TC_STORE) == 0 &&
+             tc_shell("rm -rf %s", TC_STORE) &&
              mkdir(TC_STORE, 0755) == 0 &&
              setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
     {
@@ -1978,7 +2026,7 @@ int test_testcache(void)
      * clear, and storing over a flaky key with an ordinary PASS clears the
      * flag (a later genuine uncontended pass is not stuck flaky forever). */
     TC_CHECK("flaky-phase store starts empty",
-             system("rm -rf " TC_STORE) == 0 &&
+             tc_shell("rm -rf %s", TC_STORE) &&
              mkdir(TC_STORE, 0755) == 0 &&
              setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
     {
@@ -2153,7 +2201,7 @@ int test_testcache(void)
     TC_CHECK("restore pristine fixture", write_fixture(TC_LEAF_A, TC_OTHER_A,
                                                        TC_H_A));
     TC_CHECK("remove every depfile (simulate a fresh/cleaned tree)",
-             system("rm -rf " TC_FIX "/build") == 0);
+             tc_shell("rm -rf %s/build", TC_FIX));
     {
         struct testcache *tc = testcache_open(TC_FIX);
         if (tc) {
@@ -2198,7 +2246,7 @@ int test_testcache(void)
      * empty source tree, and clearing it is what makes the assertion mean the
      * same thing under `make t-fast` and under ZCL_STRESS_TESTS=1. */
     TC_CHECK("clear verdicts stored by earlier phases",
-             system("rm -rf " TC_FIX "/.zvcs/objects") == 0);
+             tc_shell("rm -rf %s/.zvcs/objects", TC_FIX));
 
     uint8_t key_nostress[32];
     bool have_nostress = false;
@@ -2683,7 +2731,8 @@ int test_testcache(void)
     failures += tc_batch_perf();
     failures += tc_observation_roundtrip();
 
-    system("rm -rf " TC_FIX " " TC_STORE);
+    (void)tc_shell("rm -rf %s %s %s %s %s", TC_FIX, TC_STORE,
+                   TC_FIX2, TC_CAP, TC_CAP2);
     tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
     printf("test_testcache: %d failure(s)\n", failures);
     return failures;
