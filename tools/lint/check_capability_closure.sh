@@ -894,10 +894,24 @@ check_root() {
     # paren) inside a quoted asm string.
     local pat='(^|[^A-Za-z0-9_])syscall\(|int[[:space:]]+\$0x80|svc[[:space:]]+#|"[[:space:]]*syscall[[:space:]\\]'
     local f granted5 hit
+    : > "$work/raw_scan_sources.z"
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         granted5="${CAP_MOD_UNION_RAW[$f]:-}"
         [ -n "$granted5" ] && cap_closure_grants "$granted5" "CAP_PRIVILEGE" && continue
+        printf '%s\0' "$f" >> "$work/raw_scan_sources.z"
+    done <<< "$src_list"
+    : > "$work/raw_hit_sources.txt"
+    if [ -s "$work/raw_scan_sources.z" ]; then
+        # grep -l reads each unprivileged source once in bounded xargs batches.
+        # Reopen only matching files below to retain the original line-number
+        # evidence. No match exits 1, as it did for each former per-file grep.
+        (cd "$root" && xargs -0 grep -lE -- "$pat" \
+            < "$work/raw_scan_sources.z") \
+            > "$work/raw_hit_sources.txt" 2>/dev/null || true
+    fi
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
         hit="$(grep -nE "$pat" "$root/$f" 2>/dev/null || true)"
         if [ -n "$hit" ]; then
             echo "check_capability_closure: VIOLATION — $f reaches the kernel through a"
@@ -905,7 +919,7 @@ check_root() {
             printf '%s\n' "$hit" | sed 's/^/    /'
             syscall_violations=$((syscall_violations + 1))
         fi
-    done <<< "$src_list"
+    done < "$work/raw_hit_sources.txt"
     violations=$((violations + syscall_violations))
 
     echo "check_capability_closure: scanned $n_obj objects under $epoch,"
@@ -1485,8 +1499,21 @@ EOF
         'ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/owned.c", CAP_NETWORK, "fixture")'
     expect_reject "P3: central and source-owned duplicate refuses" "duplicate central row" "$d" || rc=1
 
+    # Q. The batched source scan still reports an actual raw syscall with
+    # its owning file, even when that file has no object in this epoch.
+    d="$FIXTURE_ROOT/q"; mkdir -p "$d/fixture_src"
+    make_epoch "$d"
+    fixture_symbols "$d"
+    fixture_module_rows "$d"
+    cat > "$d/fixture_src/raw_user.c" <<'EOF'
+extern long syscall(long, ...);
+long raw_use(void) { return syscall(0); }
+EOF
+    expect_reject "Q: raw syscall in an uncompiled source still refuses" \
+                  "raw syscall" "$d" || rc=1
+
     if [ "$rc" -eq 0 ]; then
-        echo "== selftest: PASS (19/19) =="
+        echo "== selftest: PASS (20/20) =="
     else
         echo "== selftest: FAIL =="
     fi
