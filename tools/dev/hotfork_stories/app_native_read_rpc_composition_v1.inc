@@ -72,7 +72,9 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     json_init(&doc);
     parsed = body && json_read(&doc, body, strlen(body));
     value = parsed ? json_get(&doc, "messages") : NULL;
-    HF_CHECK(body && strcmp(hf_method, "msg_inbox") == 0
+    /* The inbox body calls the msg_inbox_index RPC and still wraps a
+     * legacy bare-array reply as {"messages":[...]}. */
+    HF_CHECK(body && strcmp(hf_method, "msg_inbox_index") == 0
              && strcmp(hf_params, "<null>") == 0 && parsed && value
              && value->type == JSON_ARR && json_size(value) == 0);
     json_free(&doc);

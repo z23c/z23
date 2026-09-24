@@ -60,16 +60,18 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
         (struct vcs_package_recipe_strings){tests, 1, 1};
     HF_CHECK(zwork_scopes(&scoped, false, scopes)
              && strcmp(scopes, "include,src,tests") == 0);
+    /* Source bytes count every C23 (.c/.h) manifest file plus recipe
+     * members; a non-C23, non-member file stays out of the total. */
     struct vcs_package_prepared prepared;
     memset(&prepared, 0, sizeof(prepared));
     char *prepared_sources[] = {"src/a.c", "src/missing.c"};
     struct vcs_package_file files[2] = {{.path = "src/a.c", .size = 11},
-                                        {.path = "other.c", .size = 99}};
+                                        {.path = "other.txt", .size = 99}};
     prepared.recipe.sources =
         (struct vcs_package_recipe_strings){prepared_sources, 2, 2};
     prepared.manifest = (struct vcs_package_manifest){files, 2, 2};
     HF_CHECK(zwork_source_bytes(&prepared) == 11);
-    prepared_sources[1] = "other.c";
+    prepared_sources[1] = "other.txt";
     prepared.manifest.files[0].size = UINT64_MAX;
     prepared.manifest.files[1].size = 1;
     HF_CHECK(zwork_source_bytes(&prepared) == 0);

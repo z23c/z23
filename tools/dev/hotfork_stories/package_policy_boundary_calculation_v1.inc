@@ -90,9 +90,9 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
                        vcs_policy_check_pin(VCS_POLICY_TIER_EARNED_CONTRIBUTOR,
                                             0, 1)));
     HF_CHECK(hf_dec(true, NULL,
-                    vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 3))
+                    vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 63))
              && hf_dec(false, VCS_POLICY_RULE_ANNOUNCE_RATE,
-                       vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 4)));
+                       vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 64)));
     HF_CHECK(
         hf_dec(true, NULL,
                vcs_policy_check_request_burst(VCS_POLICY_TIER_NEW_USER, 511))

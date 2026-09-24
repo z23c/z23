@@ -41,10 +41,12 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
         && zcl_test_group_requires_exclusive_run(
             "test_validate_parallel_determinism")
         && !zcl_test_group_requires_exclusive_run("test_dev_platform"));
+    /* test_dev_platform became a semantic leaf in 0a32c833f2; the non-leaf
+     * side of this check uses a test source that is still an ordinary one. */
     HF_CHECK(zcl_test_group_source_is_semantic_leaf(
                  "tests/harness/src/test_stage_repair_coin_backfill.c")
              && !zcl_test_group_source_is_semantic_leaf(
-                 "tests/harness/src/test_dev_platform.c"));
+                 "tests/harness/src/test_vcs_core.c"));
     HF_CHECK(zcl_test_group_resolve_exact("dev_platform", resolved)
              && strcmp(resolved, "test_dev_platform") == 0);
     HF_CHECK(zcl_test_group_resolve_exact("test_dev_platform", resolved)
