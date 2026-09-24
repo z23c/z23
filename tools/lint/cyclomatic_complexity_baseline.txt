@@ -2804,8 +2804,8 @@ tests/harness/src/test_dev_land.c:test_dev_land:63
 tests/harness/src/test_dev_platform.c:dp_hotswap_cache_fixture_init:17
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:59
-tests/harness/src/test_dev_platform.c:run_hotswap_artifact_cache_fixture:83
-tests/harness/src/test_dev_platform.c:run_resident_restart_fixture:209
+tests/harness/src/test_dev_platform.c:run_hotswap_artifact_cache_fixture:81
+tests/harness/src/test_dev_platform.c:run_resident_restart_fixture:199
 tests/harness/src/test_dev_proof_signer.c:dps_git_rig:16
 tests/harness/src/test_devagent_mail.c:test_devagent_mail:36
 tests/harness/src/test_devagent_queue.c:test_devagent_queue:34
