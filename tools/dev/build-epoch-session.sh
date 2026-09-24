@@ -86,8 +86,25 @@ find_make_owner()
 
 process_parent()
 {
-    local pid="$1" ppid=""
+    local pid="$1" ppid="" stat_line="" stat_tail="" state="" ignored=""
     case "$HOST_SYSTEM" in
+        Linux*)
+            if IFS= read -r stat_line < "/proc/$pid/stat" 2>/dev/null; then
+                # comm is parenthesized and may contain spaces or ')'. Strip
+                # through its last closing delimiter before reading PPID.
+                case "$stat_line" in
+                    *') '*)
+                        stat_tail="${stat_line##*) }"
+                        read -r state ppid ignored <<< "$stat_tail"
+                        if [[ "$ppid" =~ ^[1-9][0-9]*$ ]]; then
+                            printf '%s\n' "$ppid"
+                            return 0
+                        fi
+                        ;;
+                esac
+            fi
+            ps -p "$pid" -o ppid= 2>/dev/null || true
+            ;;
         MINGW*|MSYS*)
             ppid=$(sed -n '1p' "/proc/$pid/ppid" 2>/dev/null)
             # MSYS/Cygwin /proc is sparse for orphan or init-parented
@@ -103,6 +120,14 @@ process_comm()
 {
     local pid="$1" comm=""
     case "$HOST_SYSTEM" in
+        Linux*)
+            if IFS= read -r comm < "/proc/$pid/comm" 2>/dev/null &&
+               [ -n "$comm" ]; then
+                printf '%s\n' "$comm"
+                return 0
+            fi
+            ps -p "$pid" -o comm= 2>/dev/null || true
+            ;;
         MINGW*|MSYS*)
             comm=$(sed -n 's/^Name:[[:space:]]*//p' "/proc/$pid/status" \
                 2>/dev/null)
