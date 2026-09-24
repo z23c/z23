@@ -13,6 +13,9 @@ cleanup() {
     rm -rf -- "$scratch"
 }
 trap cleanup EXIT
+cc -std=c23 -Wall -Wextra -Werror -pedantic \
+    "$root/../../tools/dev/fixtures/devbuild_broker/identity.c" \
+    -o "$scratch/identity"
 [[ $("$root/devbuild-broker" --plan --project z23 make commons-demo) == *'class=background '* ]] || {
     printf 'commons-demo did not select background admission\n' >&2; exit 1;
 }
@@ -87,7 +90,7 @@ printf 'devbuild broker: release proof priority PASS\n'
 printf '#!/usr/bin/env bash\nsleep 1.5\n:\n' >"$scratch/legacy.sh"
 bash "$scratch/legacy.sh" & legacy=$!
 sleep 0.1
-printf '%s %s\n' "$(stat -Lc '%d:%i' "$scratch/legacy.sh")" "$(date +%s%N)" \
+printf '%s %s\n' "$("$scratch/identity" "$scratch/legacy.sh")" "$(date +%s%N)" \
     >"$DEVBUILD_BROKER_STATE/legacy-inode"
 gate_start=$(date +%s%N)
 "$root/devbuild-broker" --wait --project z23 --class hotload sleep 0.1 \
@@ -120,7 +123,7 @@ printf 'devbuild broker: legacy 24 GiB project compatibility PASS\n'
 printf '#!/usr/bin/env bash\nsleep 5\n:\n' >"$scratch/qedc-legacy.sh"
 bash "$scratch/qedc-legacy.sh" --project qedc & legacy=$!
 sleep 0.1
-printf '%s %s\n' "$(stat -Lc '%d:%i' "$scratch/qedc-legacy.sh")" "$(date +%s%N)" \
+printf '%s %s\n' "$("$scratch/identity" "$scratch/qedc-legacy.sh")" "$(date +%s%N)" \
     >"$DEVBUILD_BROKER_STATE/legacy-inode"
 old_tick=$(awk '{print $22}' "/proc/$$/stat")
 printf '%s %s %s z23 legacy 12 24 1 100 %s\n' \
