@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
-BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
+BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/z23-dev}"
 SOURCE="$ROOT/tools/command/native_zcode_source_bundle_command.c"
 OUTPUT="${ZCL_REFLEX_SOURCE_BUNDLE_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-source-bundle-acceptance.json}"
 

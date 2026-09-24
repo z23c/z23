@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
-BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
+BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/z23-dev}"
 SOURCE="$ROOT/contexts/commons/modules/vcs/src/source_package_transport.c"
 OUTPUT="${ZCL_REFLEX_TRANSPORT_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-transport-acceptance.json}"
 

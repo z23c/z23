@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
-BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
+BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/z23-dev}"
 SOURCE="$ROOT/tools/dev/test_group_catalog.c"
 UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"
 OUTPUT="${ZCL_REFLEX_TEST_CATALOG_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-test-catalog-acceptance.json}"
@@ -122,8 +122,8 @@ jq -e --arg object "$(jq -r '.data.candidate_object_root' <<<"$green_result")" \
 
 mutant="$(mktemp "$ROOT/tools/dev/.reflex-test-catalog-red.XXXXXX")"
 cp -p -- "$SOURCE" "$mutant"
-perl -0pi -e 's/fnmatch\(g_proof_families\[i\]\.full_id_glob, full_id, 0\) == 0/fnmatch(g_proof_families[i].full_id_glob, full_id, 0) != 0/' "$mutant"
-[[ "$(LC_ALL=C grep -c 'fnmatch(g_proof_families\[i\].full_id_glob, full_id, 0) != 0' "$mutant")" -eq 1 ]] ||
+perl -0pi -e 's/ platform_glob_match\(g_proof_families\[i\]\.full_id_glob,/ !platform_glob_match(g_proof_families[i].full_id_glob,/' "$mutant"
+[[ "$(LC_ALL=C grep -c '!platform_glob_match(g_proof_families\[i\].full_id_glob,' "$mutant")" -eq 1 ]] ||
     fail 'compile-valid semantic mutation was not staged'
 drive_candidate "$mutant" STORY_RED
 red_result="$result"

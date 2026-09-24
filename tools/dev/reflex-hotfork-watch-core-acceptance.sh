@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
-BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
+BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/z23-dev}"
 OWNER_KIND="${ZCL_REFLEX_OWNER_KIND:-watch}"
 SOURCE="$ROOT/tools/dev/devloop_watch.c"
 UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"

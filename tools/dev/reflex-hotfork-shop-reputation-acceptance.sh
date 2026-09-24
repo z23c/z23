@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
-BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
+BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/z23-dev}"
 SOURCE="$ROOT/contexts/market/controllers/src/shop_native_reputation.c"
 UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"
 OUTPUT="${ZCL_REFLEX_SHOP_REPUTATION_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-shop-reputation-acceptance.json}"
