@@ -24,6 +24,7 @@
 #if ZCL_HOTSWAP_NATIVE_AVAILABLE
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -616,6 +617,68 @@ bool zcl_hotswap_service_activate_so(
     return zcl_hotswap_service_activate_so_any(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
 }
+
+static const struct zcl_hotswap_service_contract *service_contract_for(
+    const struct zcl_hotswap_service_contract *const *contracts,
+    size_t contract_count,
+    const struct zcl_hotswap_service_candidate *candidate)
+{
+    for (size_t i = 0; i < contract_count; i++)
+        if (contracts && contracts[i] &&
+            equal_text(contracts[i]->service_id, candidate->service_id))
+            return contracts[i];
+    return NULL;
+}
+
+/* Verify-only probe of an already-open, already-confined image descriptor.
+ * The mapping is the kernel's /proc/self/fd link for exactly that inode; no
+ * pathname is resolved. `loaded` runs after the descriptor is resolved and
+ * the resident contract selected, before any candidate function executes. */
+bool zcl_hotswap_service_probe_fd_any(
+    int image_fd,
+    const struct zcl_hotswap_service_contract *const *contracts,
+    size_t contract_count, zcl_hotswap_service_loaded_fn loaded,
+    void *loaded_ctx, struct zcl_hotswap_service_report *report)
+{
+    if (!report)
+        LOG_FAIL("hotswap.service", "probe report is NULL");
+    memset(report, 0, sizeof(*report));
+    report->verify_only = true;
+    char pinned[PATH_MAX];
+    if (image_fd < 0 || !platform_fd_path(pinned, sizeof(pinned), image_fd,
+                                          NULL))
+        return reject(report, "path", false, "image descriptor unavailable");
+    void *handle = dlopen(pinned, RTLD_NOW | RTLD_LOCAL);
+    if (!handle)
+        return reject(report, "dlopen", false, dlerror());
+    dlerror();
+    const struct zcl_hotswap_service_candidate *candidate =
+        dlsym(handle, ZCL_HOTSWAP_SERVICE_SYMBOL);
+    const char *sym_error = dlerror();
+    if (sym_error || !candidate) {
+        (void)dlclose(handle);
+        return reject(report, "symbol", false,
+                      "artifact does not export a service descriptor");
+    }
+    report->recognized = true;
+    const struct zcl_hotswap_service_contract *contract =
+        service_contract_for(contracts, contract_count, candidate);
+    copy_text(report->service_id, sizeof(report->service_id),
+              candidate->service_id);
+    char why[192] = {0};
+    bool ok = false;
+    if (!contract)
+        ok = reject(report, "service", true,
+                    "service id has no resident frozen contract; select DEV_RESTART");
+    else if (loaded && !loaded(loaded_ctx, why, sizeof(why)))
+        ok = reject(report, "confine", false,
+                    why[0] ? why : "post-load confinement failed");
+    else
+        ok = zcl_hotswap_service_publish(contract, candidate, false, report);
+    report->recognized = true;
+    (void)dlclose(handle);
+    return ok;
+}
 #else
 #define ZCL_HOTSWAP_SERVICE_UNAVAILABLE 1
 #endif /* Linux */
@@ -647,6 +710,21 @@ bool zcl_hotswap_service_activate_so(
     const struct zcl_hotswap_service_contract *contracts[] = {contract};
     return zcl_hotswap_service_activate_so_any(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
+}
+
+bool zcl_hotswap_service_probe_fd_any(
+    int image_fd,
+    const struct zcl_hotswap_service_contract *const *contracts,
+    size_t contract_count, zcl_hotswap_service_loaded_fn loaded,
+    void *loaded_ctx, struct zcl_hotswap_service_report *report)
+{
+    (void)image_fd; (void)contracts; (void)contract_count;
+    (void)loaded; (void)loaded_ctx;
+    if (!report)
+        LOG_FAIL("hotswap.service", "probe report is NULL");
+    memset(report, 0, sizeof(*report));
+    return reject(report, hotswap_native_unavailable_stage(), false,
+                  hotswap_native_unavailable_reason());
 }
 #endif /* ZCL_HOTSWAP_SERVICE_UNAVAILABLE */
 #undef ZCL_HOTSWAP_SERVICE_UNAVAILABLE

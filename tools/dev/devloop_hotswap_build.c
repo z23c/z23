@@ -22,6 +22,7 @@
 #include "json/json.h"
 #include "services/dev_reflex_policy_service.h"
 #include "hotswap/hotfork_capsule.h"
+#include "devloop_reflex_runner.h"
 #include "platform/os_sandbox.h"
 #include "platform/directory_compat.h"
 #include "platform/path_compat.h"
@@ -2478,43 +2479,195 @@ static bool hs_resident_call(const char *artifact, bool activate,
     return hs_resident_response_ok(response, activate, why, why_len);
 }
 
-struct hs_shadow_wire {
-    uint32_t magic;
-    int64_t child_enter_us;
-    int64_t module_hash_us;
-    char runtime_module_sha256[65];
-    struct zcl_hotswap_service_report report;
-};
-
+/* Candidate stories never execute in this process, and never in a fork of it.
+ * HOT_SHADOW and HOT_FORK both hand the exact sealed image to the clean-zygote
+ * reflex runner (devloop_reflex_runner.h): a fresh exec of this image with an
+ * empty environment and one control socket, whose disposable child confines
+ * itself BEFORE mapping candidate bytes. Frozen contracts and fixtures are the
+ * runner's own copies from this same image. No RPC, node, wallet, SQLite,
+ * network, publication, or full-program link exists on this path, and an
+ * unavailable runner is an unavailable story, never an unconfined one.
+ *
+ * The stage fields below (load_or_spawn_us/execute_us/module_hash_us) keep
+ * the same JSON contract a resident-fork prior version wrote, for
+ * tools/dev/reflex-reactor-bench.sh's stage breakdown: load_or_spawn_us is
+ * everything before the story runs (runner fork + confinement + dlopen),
+ * execute_us is the story itself, and module_hash_us is the sealed image's
+ * one digest computation, which now happens once in this process before the
+ * runner ever sees the artifact (zcl_reflex_runner_outcome.seal_us) rather
+ * than again inside a resident fork. */
 static void hs_shadow_append_metrics(struct json_value *response,
-                                     const struct hs_shadow_wire *wire,
-                                     bool valid, int64_t started)
+                                     const struct zcl_reflex_runner_outcome *run,
+                                     bool valid)
 {
-    (void)json_push_kv_str(response, "loaded_mapping_root",
-                           valid ? wire->runtime_module_sha256 : "");
     (void)json_push_kv_int(response, "load_or_spawn_us",
-                           valid ? wire->child_enter_us - started +
-                                   wire->report.load_us : 0);
+                           valid ? run->fork_us + run->confine_us +
+                                   run->dlopen_us : 0);
     (void)json_push_kv_int(response, "execute_us",
-                           valid ? wire->report.execute_us : 0);
+                           valid ? run->story_us : 0);
     (void)json_push_kv_int(response, "module_hash_us",
-                           valid ? wire->module_hash_us : 0);
+                           valid ? run->seal_us : 0);
 }
-
-#define HS_SHADOW_WIRE_MAGIC UINT32_C(0x48535331)
-
-/* The watcher itself is the persistent shadow parent: contracts, registry,
- * dependency state, and immutable fixtures are already resident. Each
- * candidate gets a disposable fork, maps only the tiny service .so, runs the
- * resident-frozen KAT, reports one fixed-size result, and exits. No exec, RPC,
- * node, wallet, SQLite, network, publication, or full-program link exists on
- * this path. */
 static void hs_sha3_root(const char *text, char out[65])
 {
     uint8_t digest[32];
     sha3_256((const uint8_t *)text, strlen(text), digest);
     zcl_hex_encode(digest, sizeof(digest), out);
 }
+
+#if !defined(_WIN32)
+static const char *hs_runner_status(bool ok,
+                                    const struct zcl_reflex_runner_outcome *run)
+{
+    if (ok) return "green";
+    return run->available ? "red" : "unavailable";
+}
+
+static bool hs_runner_forked(const struct zcl_reflex_runner_outcome *run)
+{
+    return run->available && (run->report_complete || run->child_signal != 0 ||
+                              run->child_exit_code >= 0);
+}
+
+/* Measured isolation and stage timings, identical for both story kinds. */
+static void hs_runner_receipt(struct json_value *response,
+                              const struct zcl_reflex_runner_outcome *run)
+{
+    const struct zcl_reflex_child_report *r = &run->report;
+    (void)json_push_kv_str(response, "runner", "zygote_exec");
+    (void)json_push_kv_bool(response, "runner_available", run->available);
+    (void)json_push_kv_bool(response, "runner_warm", run->runner_warm);
+    (void)json_push_kv_int(response, "runner_pid", run->runner_pid);
+    (void)json_push_kv_int(response, "env_inherited_count",
+                           run->env_inherited_count);
+    (void)json_push_kv_int(response, "inherited_fd_count",
+                           run->inherited_fd_count);
+    (void)json_push_kv_bool(response, "address_space_fresh",
+                            run->address_space_fresh);
+    (void)json_push_kv_bool(response, "sealed_image", run->seals_verified);
+    (void)json_push_kv_bool(response, "sandboxed", r->sandboxed);
+    (void)json_push_kv_bool(response, "network_blocked", r->sandboxed);
+    (void)json_push_kv_bool(response, "datadir_blocked", r->sandboxed);
+    (void)json_push_kv_bool(response, "confined_before_load", r->sandboxed);
+    (void)json_push_kv_bool(response, "wx_enforced", r->wx_installed);
+    (void)json_push_kv_int(response, "runner_spawn_us", run->spawn_us);
+    (void)json_push_kv_int(response, "runner_seal_us", run->seal_us);
+    (void)json_push_kv_int(response, "runner_fork_us", run->fork_us);
+    (void)json_push_kv_int(response, "runner_confine_us", run->confine_us);
+    (void)json_push_kv_int(response, "runner_dlopen_us", run->dlopen_us);
+    (void)json_push_kv_int(response, "runner_story_us", run->story_us);
+    (void)json_push_kv_int(response, "runner_total_us", run->runner_total_us);
+    (void)json_push_kv_int(response, "child_signal", run->child_signal);
+    (void)json_push_kv_int(response, "child_exit_code", run->child_exit_code);
+}
+
+static bool hs_shadow_roots(const char *source, const char *story_id,
+                            const struct zcl_reflex_runner_outcome *run,
+                            bool valid, char story_root[65],
+                            char fixture_root[65], char observation_root[65])
+{
+    const struct zcl_hotswap_service_report *svc = &run->report.service;
+    const char *service_id = valid ? svc->service_id : "invalid";
+    char story_preimage[768], fixture_preimage[512], observation[768];
+    int story_n = snprintf(story_preimage, sizeof(story_preimage),
+        "zcl.dev.story.v1\n%s\n%s\n%s\n", source, story_id, service_id);
+    int fixture_n = snprintf(fixture_preimage, sizeof(fixture_preimage),
+        "zcl.dev.story.fixture.v1\n%s\n%s\n", story_id, service_id);
+    int observation_n = snprintf(observation, sizeof(observation),
+        "zcl.dev.story.observation.v1\n%s\n%s\n%d\n%d\n%d\n%d\n%s\n",
+        service_id, valid ? svc->stage : "invalid", svc->recognized, svc->ok,
+        svc->verify_only, svc->probed, run->report.runtime_module_sha256);
+    if (story_n <= 0 || story_n >= (int)sizeof(story_preimage) ||
+        fixture_n <= 0 || fixture_n >= (int)sizeof(fixture_preimage) ||
+        observation_n <= 0 || observation_n >= (int)sizeof(observation))
+        return false;
+    hs_sha3_root(story_preimage, story_root);
+    hs_sha3_root(fixture_preimage, fixture_root);
+    hs_sha3_root(observation, observation_root);
+    return true;
+}
+
+static void hs_shadow_failure(const struct zcl_reflex_runner_outcome *run,
+                              bool valid, char *out, size_t out_len)
+{
+    const char *service_error = run->report.service.error;
+    if (run->cancelled)
+        (void)snprintf(out, out_len, "shadow story superseded");
+    else if (run->timed_out)
+        (void)snprintf(out, out_len, "shadow story exceeded 1000 ms");
+    else if (!run->available)
+        (void)snprintf(out, out_len, "reflex runner unavailable: %s",
+                       run->reason[0] ? run->reason : "unknown");
+    else if (valid && service_error[0])
+        (void)snprintf(out, out_len, "%s", service_error);
+    else if (run->reason[0])
+        (void)snprintf(out, out_len, "%s", run->reason);
+    else
+        (void)snprintf(out, out_len, "shadow story worker returned no valid "
+                                     "frozen-KAT receipt");
+}
+
+static void hs_shadow_receipt_body(
+    struct json_value *response, const char *source, const char *story_id,
+    const struct zcl_devloop_hotswap_build_receipt *build,
+    const struct zcl_reflex_runner_outcome *run, bool ok, bool valid)
+{
+    const struct zcl_reflex_child_report *r = &run->report;
+    (void)json_push_kv_str(response, "schema", "zcl.dev_shadow_story.v2");
+    (void)json_push_kv_str(response, "mode", "HOT_SHADOW_CORE");
+    (void)json_push_kv_str(response, "feedback_class", "HOT_SHADOW_CORE");
+    (void)json_push_kv_str(response, "status", hs_runner_status(ok, run));
+    (void)json_push_kv_bool(response, "forked", hs_runner_forked(run));
+    (void)json_push_kv_bool(response, "exec_process", false);
+    (void)json_push_kv_bool(response, "activated", false);
+    (void)json_push_kv_bool(response, "forbidden_effects_absent",
+                            run->available && r->sandboxed);
+    (void)json_push_kv_str(response, "candidate_object_root",
+                           build->candidate_object_sha256);
+    (void)json_push_kv_str(response, "candidate_module_root",
+                           build->artifact_sha256);
+    (void)json_push_kv_str(response, "loaded_mapping_root",
+                           r->runtime_module_sha256);
+    (void)json_push_kv_bool(response, "candidate_bytes_executed",
+                            valid && r->candidate_executed);
+    hs_shadow_append_metrics(response, run, valid);
+    (void)json_push_kv_str(response, "story_id", story_id);
+    (void)json_push_kv_str(response, "exercised_owner_surface", source);
+}
+
+static bool hs_shadow_receipt(
+    const char *source, const char *story_id,
+    const struct zcl_devloop_hotswap_build_receipt *build,
+    const struct zcl_reflex_runner_outcome *run, int64_t elapsed_us,
+    struct json_value *response, char *why, size_t why_len)
+{
+    const struct zcl_reflex_child_report *r = &run->report;
+    bool valid = run->available && run->report_complete &&
+        strcmp(r->runtime_module_sha256, build->artifact_sha256) == 0;
+    char story_root[65] = {0}, fixture_root[65] = {0};
+    char observation_root[65] = {0};
+    bool ok = hs_shadow_roots(source, story_id, run, valid, story_root,
+                              fixture_root, observation_root) && run->green;
+    json_init(response); json_set_object(response);
+    hs_shadow_receipt_body(response, source, story_id, build, run, ok, valid);
+    (void)json_push_kv_str(response, "story_root", story_root);
+    (void)json_push_kv_str(response, "story_fixture_root", fixture_root);
+    (void)json_push_kv_str(response, "observation_root", observation_root);
+    (void)json_push_kv_int(response, "elapsed_us", elapsed_us);
+    hs_runner_receipt(response, run);
+    if (valid) {
+        (void)json_push_kv_str(response, "service_id", r->service.service_id);
+        (void)json_push_kv_str(response, "probe_stage", r->service.stage);
+    }
+    if (!ok) {
+        char message[256];
+        hs_shadow_failure(run, valid, message, sizeof(message));
+        hs_why(why, why_len, message);
+        (void)json_push_kv_str(response, "error", message);
+    }
+    return ok;
+}
+#endif /* !_WIN32 */
 
 static bool hs_shadow_probe(
                             const char *source,
@@ -2543,172 +2696,32 @@ static bool hs_shadow_probe(
     (void)json_push_kv_str(response, "error", message);
     return false;
 #else
-    int pipefd[2] = {-1, -1};
     int64_t started = platform_time_monotonic_us();
-    const char *artifact = build ? build->artifact_path : NULL;
     const char *story_id = source
         ? zcl_hotswap_service_probe_for_source(source) : NULL;
     if (!source || !story_id || !story_id[0] || !build ||
         strlen(build->candidate_object_sha256) != 64 ||
-        strlen(build->artifact_sha256) != 64 || !artifact || !response ||
-        !elapsed_us ||
-        platform_pipe_cloexec_nonblock(pipefd) != 0) {
-        hs_why(why, why_len, "shadow runner pipe unavailable");
+        strlen(build->artifact_sha256) != 64 || !response || !elapsed_us) {
+        hs_why(why, why_len, "shadow runner input invalid");
         return false;
     }
-    pid_t child = fork();
-    if (child < 0) {
-        close(pipefd[0]); close(pipefd[1]);
-        hs_why(why, why_len, "shadow runner fork unavailable");
-        return false;
-    }
-    if (child == 0) {
-        close(pipefd[0]);
-        struct hs_shadow_wire wire = {
-            .magic = HS_SHADOW_WIRE_MAGIC,
-            .child_enter_us = platform_time_monotonic_us(),
-        };
-        int64_t hash_started = platform_time_monotonic_us();
-        bool hashed = hs_sha256_file(artifact, wire.runtime_module_sha256);
-        wire.module_hash_us = platform_time_monotonic_us() - hash_started;
-        if (hashed)
-            (void)zcl_native_hotswap_service_probe_local(
-                artifact, &wire.report);
-        const uint8_t *p = (const uint8_t *)&wire;
-        size_t left = sizeof(wire);
-        while (left > 0) {
-            ssize_t wrote = write(pipefd[1], p, left);
-            if (wrote > 0) {
-                p += (size_t)wrote;
-                left -= (size_t)wrote;
-            } else if (wrote < 0 && errno == EINTR) {
-                continue;
-            } else {
-                break;
-            }
-        }
-        close(pipefd[1]);
-        _exit(left == 0 ? 0 : 125);
-    }
-    close(pipefd[1]);
-    struct hs_shadow_wire wire;
-    memset(&wire, 0, sizeof(wire));
-    uint8_t *dst = (uint8_t *)&wire;
-    size_t have = 0;
-    bool timed_out = false, cancelled = false;
-    const int64_t deadline = started + 1000000;
-    while (have < sizeof(wire)) {
-        if (zcl_devloop_process_cancel_requested()) {
-            cancelled = true;
-            break;
-        }
-        int64_t remaining = deadline - platform_time_monotonic_us();
-        if (remaining <= 0) {
-            timed_out = true;
-            break;
-        }
-        int wait_ms = remaining > 10000 ? 10 : (int)((remaining + 999) / 1000);
-        struct pollfd pfd = {.fd = pipefd[0], .events = POLLIN | POLLHUP};
-        int ready = poll(&pfd, 1, wait_ms);
-        if (ready < 0 && errno == EINTR) continue;
-        if (ready < 0) break;
-        if (ready == 0) continue;
-        ssize_t got = read(pipefd[0], dst + have, sizeof(wire) - have);
-        if (got > 0) have += (size_t)got;
-        else if (got == 0) break;
-        else if (errno != EAGAIN && errno != EINTR) break;
-    }
-    close(pipefd[0]);
-    if (timed_out || cancelled || have != sizeof(wire))
-        (void)kill(child, SIGKILL);
-    int status = 0;
-    pid_t waited;
-    do {
-        waited = waitpid(child, &status, 0);
-    } while (waited < 0 && errno == EINTR);
+    const struct zcl_reflex_runner_spec spec = {
+        .mode = ZCL_REFLEX_MODE_HOT_SHADOW,
+        .artifact_path = build->artifact_path,
+        .artifact_sha256 = build->artifact_sha256,
+        .owner_id = story_id,
+        .source_tu = source,
+        .candidate_object_root = build->candidate_object_sha256,
+        .story_id = story_id,
+        .timeout_ms = 1000,
+    };
+    struct zcl_reflex_runner_outcome run;
+    (void)zcl_reflex_runner_run(&spec, &run);
     *elapsed_us = platform_time_monotonic_us() - started;
-    bool valid = waited == child && !timed_out && !cancelled &&
-        have == sizeof(wire) &&
-        wire.magic == HS_SHADOW_WIRE_MAGIC && WIFEXITED(status) &&
-        WEXITSTATUS(status) == 0 &&
-        strcmp(wire.runtime_module_sha256, build->artifact_sha256) == 0;
-    bool ok = valid && wire.report.recognized && wire.report.ok &&
-        wire.report.verify_only && wire.report.probed &&
-        !wire.report.activated;
-    json_init(response); json_set_object(response);
-    char story_preimage[768], fixture_preimage[512], observation[768];
-    char story_root[65] = {0}, fixture_root[65] = {0};
-    char observation_root[65] = {0};
-    int story_n = snprintf(story_preimage, sizeof(story_preimage),
-        "zcl.dev.story.v1\n%s\n%s\n%s\n", source, story_id,
-        valid ? wire.report.service_id : "invalid");
-    int fixture_n = snprintf(fixture_preimage, sizeof(fixture_preimage),
-        "zcl.dev.story.fixture.v1\n%s\n%s\n", story_id,
-        valid ? wire.report.service_id : "invalid");
-    int observation_n = snprintf(observation, sizeof(observation),
-        "zcl.dev.story.observation.v1\n%s\n%s\n%d\n%d\n%d\n%d\n%s\n",
-        valid ? wire.report.service_id : "invalid",
-        valid ? wire.report.stage : "invalid", wire.report.recognized,
-        wire.report.ok, wire.report.verify_only, wire.report.probed,
-        wire.runtime_module_sha256);
-    if (story_n <= 0 || story_n >= (int)sizeof(story_preimage) ||
-        fixture_n <= 0 || fixture_n >= (int)sizeof(fixture_preimage) ||
-        observation_n <= 0 || observation_n >= (int)sizeof(observation))
-        ok = false;
-    else {
-        hs_sha3_root(story_preimage, story_root);
-        hs_sha3_root(fixture_preimage, fixture_root);
-        hs_sha3_root(observation, observation_root);
-    }
-    (void)json_push_kv_str(response, "schema", "zcl.dev_shadow_story.v2");
-    (void)json_push_kv_str(response, "mode", "HOT_SHADOW_CORE");
-    (void)json_push_kv_str(response, "feedback_class", "HOT_SHADOW_CORE");
-    (void)json_push_kv_str(response, "status", ok ? "green" : "red");
-    (void)json_push_kv_bool(response, "forked", true);
-    (void)json_push_kv_bool(response, "exec_process", false);
-    (void)json_push_kv_bool(response, "activated", false);
-    (void)json_push_kv_bool(response, "forbidden_effects_absent", true);
-    (void)json_push_kv_str(response, "candidate_object_root",
-                           build->candidate_object_sha256);
-    (void)json_push_kv_str(response, "candidate_module_root",
-                           build->artifact_sha256);
-    (void)json_push_kv_bool(response, "candidate_bytes_executed",
-                            valid && wire.report.recognized);
-    hs_shadow_append_metrics(response, &wire, valid, started);
-    (void)json_push_kv_str(response, "story_id", story_id);
-    (void)json_push_kv_str(response, "story_root", story_root);
-    (void)json_push_kv_str(response, "story_fixture_root", fixture_root);
-    (void)json_push_kv_str(response, "observation_root", observation_root);
-    (void)json_push_kv_str(response, "exercised_owner_surface", source);
-    (void)json_push_kv_int(response, "elapsed_us", *elapsed_us);
-    if (valid) {
-        (void)json_push_kv_str(response, "service_id",
-                               wire.report.service_id);
-        (void)json_push_kv_str(response, "probe_stage", wire.report.stage);
-    }
-    if (!ok) {
-        const char *message = cancelled ? "shadow story superseded" :
-            timed_out ? "shadow story exceeded 1000 ms" :
-            valid && wire.report.error[0] ? wire.report.error :
-            "shadow story worker returned no valid frozen-KAT receipt";
-        hs_why(why, why_len, message);
-        (void)json_push_kv_str(response, "error", message);
-    }
-    return ok;
+    return hs_shadow_receipt(source, story_id, build, &run, *elapsed_us,
+                             response, why, why_len);
 #endif
 }
-
-struct hs_hotfork_wire {
-    uint32_t magic;
-    bool descriptor_valid;
-    bool sandboxed;
-    bool candidate_executed;
-    bool story_ok;
-    char runtime_module_sha256[65];
-    struct zcl_hotfork_observation_v1 observation;
-};
-
-#define HS_HOTFORK_WIRE_MAGIC UINT32_C(0x48465731)
 
 static bool hs_hotfork_descriptor_identity_matches(
     const struct zcl_hotfork_capsule_v1 *capsule,
@@ -2760,43 +2773,116 @@ bool zcl_devloop_hotfork_descriptor_validate(
 }
 
 #if !defined(_WIN32)
-static bool hs_hotfork_child_confine(int report_fd)
+static void hs_hotfork_process_failure(
+    const struct hs_hotfork_def *def,
+    const struct zcl_reflex_runner_outcome *run, char *out, size_t out_len)
 {
-    long max_fd = sysconf(_SC_OPEN_MAX);
-    if (max_fd < 0 || max_fd > 65536) max_fd = 4096;
-    for (int fd = 0; fd < (int)max_fd; fd++)
-        if (fd != report_fd) (void)close(fd);
-    if (!os_sandbox_no_new_privs()) return false;
-    struct zcl_result landlock = os_sandbox_landlock_restrict(NULL, 0);
-    if (!landlock.ok) return false;
-    size_t denied_count = 0;
-    const int *denied = os_sandbox_session_denied_syscalls(&denied_count);
-    struct zcl_result seccomp =
-        os_sandbox_seccomp_deny(denied, denied_count, true);
-    return seccomp.ok;
+    if (run->cancelled)
+        (void)snprintf(out, out_len, "HOT_FORK story superseded");
+    else if (run->timed_out)
+        (void)snprintf(out, out_len, "HOT_FORK story exceeded %u ms",
+                       def->max_time_ms);
+    else if (!run->available)
+        (void)snprintf(out, out_len, "HOT_FORK runner unavailable: %s",
+                       run->reason[0] ? run->reason : "unknown");
+    else if (run->child_signal)
+        (void)snprintf(out, out_len, "HOT_FORK child terminated by signal %d",
+                       run->child_signal);
+    else if (run->child_exit_code > 0)
+        (void)snprintf(out, out_len, "HOT_FORK child exited with code %d",
+                       run->child_exit_code);
+    else
+        out[0] = '\0';
 }
 
-struct hs_hotfork_visit_ctx {
-    const struct hs_hotfork_def *def;
-    const struct zcl_devloop_hotswap_build_receipt *build;
-    struct hs_hotfork_wire *wire;
-    int report_fd;
-};
-
-static bool hs_hotfork_visit(
-    const struct zcl_hotfork_capsule_v1 *capsule, void *opaque)
+static const char *hs_hotfork_candidate_failure(
+    const struct zcl_reflex_runner_outcome *run,
+    const struct zcl_devloop_hotswap_build_receipt *build)
 {
-    struct hs_hotfork_visit_ctx *ctx = opaque;
-    ctx->wire->descriptor_valid =
-        hs_hotfork_descriptor_matches(capsule, ctx->def, ctx->build);
-    if (!ctx->wire->descriptor_valid)
-        return false;
-    ctx->wire->sandboxed = hs_hotfork_child_confine(ctx->report_fd);
-    if (!ctx->wire->sandboxed)
-        return false;
-    ctx->wire->candidate_executed = true;
-    ctx->wire->story_ok = capsule->run_story(&ctx->wire->observation);
-    return ctx->wire->story_ok;
+    const struct zcl_reflex_child_report *r = &run->report;
+    if (!run->report_complete ||
+        strcmp(r->runtime_module_sha256, build->artifact_sha256) != 0)
+        return "HOT_FORK child returned no valid bounded receipt";
+    if (!r->sandboxed) return "HOT_FORK authority sandbox unavailable";
+    if (!r->descriptor_valid) return "HOT_FORK descriptor binding mismatch";
+    if (!r->wx_installed) return "HOT_FORK W^X layer unavailable";
+    if (!run->address_space_fresh || run->env_inherited_count ||
+        run->inherited_fd_count)
+        return "HOT_FORK runner isolation not proven";
+    return "HOT_FORK candidate story rejected its frozen fixture";
+}
+
+static void hs_hotfork_receipt_body(
+    struct json_value *response, const struct hs_hotfork_def *def,
+    const struct zcl_devloop_hotswap_build_receipt *build,
+    const struct zcl_reflex_runner_outcome *run, bool ok)
+{
+    const struct zcl_reflex_child_report *r = &run->report;
+    (void)json_push_kv_str(response, "schema", "zcl.dev_hotfork_story.v1");
+    (void)json_push_kv_str(response, "mode", "HOT_FORK");
+    (void)json_push_kv_str(response, "feedback_class", def->feedback_class);
+    (void)json_push_kv_str(response, "status", hs_runner_status(ok, run));
+    (void)json_push_kv_bool(response, "forked", hs_runner_forked(run));
+    (void)json_push_kv_bool(response, "activated", false);
+    (void)json_push_kv_bool(response, "forbidden_effects_absent", ok);
+    (void)json_push_kv_str(response, "candidate_object_root",
+                           build->candidate_object_sha256);
+    (void)json_push_kv_str(response, "candidate_module_root",
+                           build->artifact_sha256);
+    (void)json_push_kv_str(response, "loaded_mapping_root",
+                           r->runtime_module_sha256);
+    (void)json_push_kv_bool(response, "candidate_bytes_executed",
+                            r->candidate_executed);
+    (void)json_push_kv_str(response, "story_id", def->story_id);
+    (void)json_push_kv_str(response, "story_fixture_id", def->fixture_id);
+    (void)json_push_kv_str(response, "story_adapter", def->adapter_id);
+    (void)json_push_kv_int(response, "story_timeout_ms", def->max_time_ms);
+    (void)json_push_kv_str(response, "forbidden_effect_mask",
+                           def->forbidden_effect_mask);
+    (void)json_push_kv_str(response, "exercised_owner_surface",
+                           def->exercised_surface);
+    (void)json_push_kv_int(response, "story_checks_run",
+                           r->observation.checks_run);
+    (void)json_push_kv_int(response, "story_checks_passed",
+                           r->observation.checks_passed);
+    (void)json_push_kv_str(response, "story_detail", r->observation.detail);
+}
+
+static bool hs_hotfork_receipt(
+    const struct hs_hotfork_def *def,
+    const struct zcl_devloop_hotswap_build_receipt *build,
+    const struct zcl_reflex_runner_outcome *run, int64_t elapsed_us,
+    struct json_value *response, char *why, size_t why_len)
+{
+    const struct zcl_reflex_child_report *r = &run->report;
+    bool ok = run->green &&
+        strcmp(r->observation.exercised_surface, def->exercised_surface) == 0;
+    char story_root[65], fixture_root[65], observation_root[65];
+    hs_hotfork_story_roots(def, story_root, fixture_root);
+    char observation[768];
+    (void)snprintf(observation, sizeof(observation),
+        "zcl.dev.hotfork.observation.v1\n%s\n%u\n%u\n%s\n%s\n",
+        def->owner_id, r->observation.checks_run,
+        r->observation.checks_passed, r->observation.exercised_surface,
+        r->observation.detail);
+    hs_sha3_root(observation, observation_root);
+    json_init(response); json_set_object(response);
+    hs_hotfork_receipt_body(response, def, build, run, ok);
+    (void)json_push_kv_str(response, "story_root", story_root);
+    (void)json_push_kv_str(response, "story_fixture_root", fixture_root);
+    (void)json_push_kv_str(response, "observation_root", observation_root);
+    (void)json_push_kv_int(response, "elapsed_us", elapsed_us);
+    hs_runner_receipt(response, run);
+    if (!ok) {
+        char message[256];
+        hs_hotfork_process_failure(def, run, message, sizeof(message));
+        if (!message[0])
+            (void)snprintf(message, sizeof(message), "%s",
+                           hs_hotfork_candidate_failure(run, build));
+        hs_why(why, why_len, message);
+        (void)json_push_kv_str(response, "error", message);
+    }
+    return ok;
 }
 
 static bool hs_hotfork_probe(
@@ -2805,157 +2891,30 @@ static bool hs_hotfork_probe(
     struct json_value *response, int64_t *elapsed_us,
     char *why, size_t why_len)
 {
-    int pipefd[2] = {-1, -1};
     int64_t started = platform_time_monotonic_us();
-    if (!def || !build || !response || !elapsed_us ||
-        platform_pipe_cloexec_nonblock(pipefd) != 0) {
-        hs_why(why, why_len, "HOT_FORK report pipe unavailable");
+    if (!def || !build || !response || !elapsed_us) {
+        hs_why(why, why_len, "HOT_FORK input invalid");
         return false;
     }
-    pid_t child = fork();
-    if (child < 0) {
-        close(pipefd[0]); close(pipefd[1]);
-        hs_why(why, why_len, "HOT_FORK child unavailable");
-        return false;
-    }
-    if (child == 0) {
-        close(pipefd[0]);
-        struct hs_hotfork_wire wire = {.magic = HS_HOTFORK_WIRE_MAGIC};
-        struct hs_hotfork_visit_ctx visit = {
-            .def = def, .build = build, .wire = &wire,
-            .report_fd = pipefd[1],
-        };
-        (void)zcl_hotswap_hotfork_visit_so(
-            build->artifact_path, build->artifact_sha256,
-            hs_hotfork_visit, &visit, wire.runtime_module_sha256);
-        const uint8_t *cursor = (const uint8_t *)&wire;
-        size_t left = sizeof(wire);
-        while (left > 0) {
-            ssize_t wrote = write(pipefd[1], cursor, left);
-            if (wrote > 0) {
-                cursor += (size_t)wrote; left -= (size_t)wrote;
-            } else if (wrote < 0 && errno == EINTR) {
-                continue;
-            } else break;
-        }
-        _exit(left == 0 ? 0 : 125);
-    }
-    close(pipefd[1]);
-    struct hs_hotfork_wire wire = {0};
-    uint8_t *dst = (uint8_t *)&wire;
-    size_t have = 0;
-    bool timed_out = false, cancelled = false;
-    const int64_t deadline = started + (int64_t)def->max_time_ms * 1000;
-    while (have < sizeof(wire)) {
-        if (zcl_devloop_process_cancel_requested()) {
-            cancelled = true; break;
-        }
-        int64_t remaining = deadline - platform_time_monotonic_us();
-        if (remaining <= 0) { timed_out = true; break; }
-        struct pollfd pfd = {.fd = pipefd[0], .events = POLLIN | POLLHUP};
-        int wait_ms = remaining > 10000 ? 10 : (int)((remaining + 999) / 1000);
-        int ready = poll(&pfd, 1, wait_ms);
-        if (ready < 0 && errno == EINTR) continue;
-        if (ready < 0) break;
-        if (ready == 0) continue;
-        ssize_t got = read(pipefd[0], dst + have, sizeof(wire) - have);
-        if (got > 0) have += (size_t)got;
-        else if (got == 0) break;
-        else if (errno != EAGAIN && errno != EINTR) break;
-    }
-    close(pipefd[0]);
-    if (timed_out || cancelled || have != sizeof(wire))
-        (void)kill(child, SIGKILL);
-    int status = 0;
-    pid_t waited;
-    do { waited = waitpid(child, &status, 0); }
-    while (waited < 0 && errno == EINTR);
-    *elapsed_us = platform_time_monotonic_us() - started;
-    int child_signal = waited == child && WIFSIGNALED(status)
-        ? WTERMSIG(status) : 0;
-    int child_exit_code = waited == child && WIFEXITED(status)
-        ? WEXITSTATUS(status) : -1;
-    bool valid = waited == child && WIFEXITED(status) &&
-        WEXITSTATUS(status) == 0 && !timed_out && !cancelled &&
-        have == sizeof(wire) && wire.magic == HS_HOTFORK_WIRE_MAGIC &&
-        strcmp(wire.runtime_module_sha256, build->artifact_sha256) == 0;
-    bool ok = valid && wire.descriptor_valid && wire.sandboxed &&
-        wire.candidate_executed && wire.story_ok &&
-        wire.observation.magic == ZCL_HOTFORK_OBSERVATION_MAGIC &&
-        wire.observation.checks_run > 0 &&
-        wire.observation.checks_run == wire.observation.checks_passed &&
-        strcmp(wire.observation.exercised_surface,
-               def->exercised_surface) == 0;
-    char story_root[65], fixture_root[65], observation_root[65];
+    char story_root[65], fixture_root[65];
     hs_hotfork_story_roots(def, story_root, fixture_root);
-    char observation[768];
-    (void)snprintf(observation, sizeof(observation),
-        "zcl.dev.hotfork.observation.v1\n%s\n%u\n%u\n%s\n%s\n",
-        def->owner_id, wire.observation.checks_run,
-        wire.observation.checks_passed,
-        wire.observation.exercised_surface, wire.observation.detail);
-    hs_sha3_root(observation, observation_root);
-    json_init(response); json_set_object(response);
-    (void)json_push_kv_str(response, "schema", "zcl.dev_hotfork_story.v1");
-    (void)json_push_kv_str(response, "mode", "HOT_FORK");
-    (void)json_push_kv_str(response, "feedback_class", def->feedback_class);
-    (void)json_push_kv_str(response, "status", ok ? "green" : "red");
-    (void)json_push_kv_bool(response, "forked", true);
-    (void)json_push_kv_bool(response, "activated", false);
-    (void)json_push_kv_bool(response, "sandboxed", wire.sandboxed);
-    (void)json_push_kv_bool(response, "network_blocked", wire.sandboxed);
-    (void)json_push_kv_bool(response, "datadir_blocked", wire.sandboxed);
-    (void)json_push_kv_bool(response, "forbidden_effects_absent", ok);
-    (void)json_push_kv_str(response, "candidate_object_root",
-                           build->candidate_object_sha256);
-    (void)json_push_kv_str(response, "candidate_module_root",
-                           build->artifact_sha256);
-    (void)json_push_kv_str(response, "loaded_mapping_root",
-                           wire.runtime_module_sha256);
-    (void)json_push_kv_bool(response, "candidate_bytes_executed",
-                            wire.candidate_executed);
-    (void)json_push_kv_str(response, "story_id", def->story_id);
-    (void)json_push_kv_str(response, "story_fixture_id", def->fixture_id);
-    (void)json_push_kv_str(response, "story_adapter", def->adapter_id);
-    (void)json_push_kv_int(response, "story_timeout_ms", def->max_time_ms);
-    (void)json_push_kv_str(response, "forbidden_effect_mask",
-                           def->forbidden_effect_mask);
-    (void)json_push_kv_str(response, "story_root", story_root);
-    (void)json_push_kv_str(response, "story_fixture_root", fixture_root);
-    (void)json_push_kv_str(response, "observation_root", observation_root);
-    (void)json_push_kv_str(response, "exercised_owner_surface",
-                           def->exercised_surface);
-    (void)json_push_kv_int(response, "story_checks_run",
-                           wire.observation.checks_run);
-    (void)json_push_kv_int(response, "story_checks_passed",
-                           wire.observation.checks_passed);
-    (void)json_push_kv_str(response, "story_detail",
-                           wire.observation.detail);
-    (void)json_push_kv_int(response, "elapsed_us", *elapsed_us);
-    (void)json_push_kv_int(response, "child_signal", child_signal);
-    (void)json_push_kv_int(response, "child_exit_code", child_exit_code);
-    if (!ok) {
-        char timeout_message[96];
-        char signal_message[96];
-        char exit_message[96];
-        (void)snprintf(timeout_message, sizeof(timeout_message),
-                       "HOT_FORK story exceeded %u ms", def->max_time_ms);
-        (void)snprintf(signal_message, sizeof(signal_message),
-                       "HOT_FORK child terminated by signal %d", child_signal);
-        (void)snprintf(exit_message, sizeof(exit_message),
-                       "HOT_FORK child exited with code %d", child_exit_code);
-        const char *message = cancelled ? "HOT_FORK story superseded" :
-            timed_out ? timeout_message :
-            child_signal ? signal_message :
-            child_exit_code > 0 ? exit_message :
-            !valid ? "HOT_FORK child returned no valid bounded receipt" :
-            !wire.descriptor_valid ? "HOT_FORK descriptor binding mismatch" :
-            !wire.sandboxed ? "HOT_FORK authority sandbox unavailable" :
-            "HOT_FORK candidate story rejected its frozen fixture";
-        hs_why(why, why_len, message);
-        (void)json_push_kv_str(response, "error", message);
-    }
-    return ok;
+    const struct zcl_reflex_runner_spec spec = {
+        .mode = ZCL_REFLEX_MODE_HOT_FORK,
+        .artifact_path = build->artifact_path,
+        .artifact_sha256 = build->artifact_sha256,
+        .owner_id = def->owner_id,
+        .source_tu = def->source_tu,
+        .candidate_object_root = build->candidate_object_sha256,
+        .story_id = def->story_id,
+        .story_root = story_root,
+        .story_fixture_root = fixture_root,
+        .timeout_ms = def->max_time_ms,
+    };
+    struct zcl_reflex_runner_outcome run;
+    (void)zcl_reflex_runner_run(&spec, &run);
+    *elapsed_us = platform_time_monotonic_us() - started;
+    return hs_hotfork_receipt(def, build, &run, *elapsed_us, response, why,
+                              why_len);
 }
 #else /* _WIN32 */
 /* The HOT_FORK runner is a fork()ed, seccomp/landlock-confined child that

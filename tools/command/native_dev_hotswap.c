@@ -55,13 +55,14 @@
 #include <string.h>
 
 #ifdef ZCL_DEV_BUILD
+#define NATIVE_SERVICE_CONTRACT_COUNT 15u
 
-static bool probe_service_any(const char *so_path,
-                              const char *resolved_datadir,
-                              bool activate,
-                              struct zcl_hotswap_service_report *report)
+/* The resident-frozen service contracts, in one list shared by the resident
+ * RPC probe and the confined zygote child's descriptor probe. */
+static size_t native_service_contracts(
+    const struct zcl_hotswap_service_contract *out[NATIVE_SERVICE_CONTRACT_COUNT])
 {
-    const struct zcl_hotswap_service_contract *service_contracts[] = {
+    const struct zcl_hotswap_service_contract *list[] = {
         zcl_native_dev_reflex_policy_service_contract(),
         zcl_native_zcode_corpus_service_contract(),
         zcl_native_zcode_economics_service_contract(),
@@ -78,15 +79,34 @@ static bool probe_service_any(const char *so_path,
         zcl_native_shop_want_view_service_contract(),
         zcl_native_vault_intent_decision_service_contract(),
     };
-    return zcl_hotswap_service_activate_so_any(
-        so_path, resolved_datadir, activate, service_contracts,
-        sizeof(service_contracts) / sizeof(service_contracts[0]), report);
+    static_assert(sizeof(list) / sizeof(list[0]) ==
+                      NATIVE_SERVICE_CONTRACT_COUNT,
+                  "native service contract list size");
+    memcpy(out, list, sizeof(list));
+    return NATIVE_SERVICE_CONTRACT_COUNT;
 }
 
-bool zcl_native_hotswap_service_probe_local(
-    const char *so_path, struct zcl_hotswap_service_report *report)
+static bool probe_service_any(const char *so_path,
+                              const char *resolved_datadir,
+                              bool activate,
+                              struct zcl_hotswap_service_report *report)
 {
-    return probe_service_any(so_path, "", false, report);
+    const struct zcl_hotswap_service_contract
+        *contracts[NATIVE_SERVICE_CONTRACT_COUNT];
+    size_t count = native_service_contracts(contracts);
+    return zcl_hotswap_service_activate_so_any(
+        so_path, resolved_datadir, activate, contracts, count, report);
+}
+
+bool zcl_native_hotswap_service_probe_fd(
+    int image_fd, zcl_hotswap_service_loaded_fn loaded, void *loaded_ctx,
+    struct zcl_hotswap_service_report *report)
+{
+    const struct zcl_hotswap_service_contract
+        *contracts[NATIVE_SERVICE_CONTRACT_COUNT];
+    size_t count = native_service_contracts(contracts);
+    return zcl_hotswap_service_probe_fd_any(image_fd, contracts, count, loaded,
+                                            loaded_ctx, report);
 }
 
 /* The resident node's own datadir, captured at RPC registration (boot) time.
@@ -786,10 +806,13 @@ bool register_dev_native_hotswap_rpc(struct rpc_table *table,
 
 #else /* !ZCL_DEV_BUILD — release: no resident hot-swap RPC surface */
 
-bool zcl_native_hotswap_service_probe_local(
-    const char *so_path, struct zcl_hotswap_service_report *report)
+bool zcl_native_hotswap_service_probe_fd(
+    int image_fd, zcl_hotswap_service_loaded_fn loaded, void *loaded_ctx,
+    struct zcl_hotswap_service_report *report)
 {
-    (void)so_path;
+    (void)image_fd;
+    (void)loaded;
+    (void)loaded_ctx;
     if (report)
         memset(report, 0, sizeof(*report));
     return false;

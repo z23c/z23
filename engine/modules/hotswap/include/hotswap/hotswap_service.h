@@ -122,6 +122,22 @@ bool zcl_hotswap_service_activate_so_any(
     const struct zcl_hotswap_service_contract *const *contracts,
     size_t contract_count, struct zcl_hotswap_service_report *report);
 
+/* Post-load hook for the descriptor probe: runs after the candidate is mapped
+ * and its resident contract selected, before any candidate function executes
+ * (a confined child uses it to install W^X). Returning false refuses. */
+typedef bool (*zcl_hotswap_service_loaded_fn)(void *ctx, char *why,
+                                              size_t why_sz);
+
+/* Dev-only VERIFY-ONLY probe of an already-open image descriptor (a sealed
+ * memfd) in an already-confined disposable process. Never activates, never
+ * resolves a pathname, never publishes a generation. Release builds return a
+ * typed unavailable report and never dlopen. */
+bool zcl_hotswap_service_probe_fd_any(
+    int image_fd,
+    const struct zcl_hotswap_service_contract *const *contracts,
+    size_t contract_count, zcl_hotswap_service_loaded_fn loaded,
+    void *loaded_ctx, struct zcl_hotswap_service_report *report);
+
 /* Manifest-derived build/classification authority. */
 const char *zcl_hotswap_service_source_for_path(const char *path);
 const char *zcl_hotswap_service_contract_source_for_path(const char *path);

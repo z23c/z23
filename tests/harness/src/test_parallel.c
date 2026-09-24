@@ -45,6 +45,7 @@
 #include "hotswap/hotswap_module.h"
 #include "kernel/command_registry.h"
 #include "session/agent_broker.h"
+#include "devloop_reflex_runner.h"
 #include "test/test_group_selector.h"
 #include "test_group_catalog.h"
 #include "test/test_helpers.h"
@@ -2031,6 +2032,14 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--metaverse-agent-confined") == 0)
             return agent_confined_mode_main(argc, argv);
+    }
+    /* The clean-zygote reflex runner re-execs THIS binary when a test drives
+     * the resident runner client. Exact argv shape, dispatched before any
+     * suite setup, exactly as main.c dispatches it before node boot. */
+    {
+        int runner_rc = 0;
+        if (zcl_reflex_runner_dispatch(argc, argv, &runner_rc))
+            return runner_rc;
     }
 #if defined(_WIN32)
     /* Windows worker entry. The parent cannot fork(), so child_spawn()

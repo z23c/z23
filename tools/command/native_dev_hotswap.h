@@ -13,6 +13,7 @@
 #define ZCL_TOOLS_NATIVE_DEV_HOTSWAP_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,13 +53,16 @@ void zcl_native_hotswap_probe_rendered_clear(void);
 
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
-/* Verify one pure service module entirely inside the caller. This never
- * activates a generation and never reaches RPC/network/storage. It exists so
- * the warm watcher can fork a disposable HOT_SHADOW child over resident
- * frozen contracts and fixtures. Non-dev builds return false without loading
- * code, preserving the release/test containment boundary. */
-bool zcl_native_hotswap_service_probe_local(
-    const char *so_path, struct zcl_hotswap_service_report *report);
+/* Verify one pure service module from an already-open image descriptor inside
+ * an already-confined disposable process (the clean-zygote reflex runner's
+ * child). Never activates a generation, never resolves a pathname, never
+ * reaches RPC/network/storage. `loaded` runs after mapping and before any
+ * candidate function. Non-dev builds return false without loading code,
+ * preserving the release/test containment boundary. */
+bool zcl_native_hotswap_service_probe_fd(
+    int image_fd, bool (*loaded)(void *ctx, char *why, size_t why_sz),
+    void *loaded_ctx,
+    struct zcl_hotswap_service_report *report);
 
 #ifdef __cplusplus
 }

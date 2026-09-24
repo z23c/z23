@@ -36,12 +36,16 @@ struct zcl_hotfork_capsule_v1 {
 typedef bool (*zcl_hotfork_capsule_visit_fn)(
     const struct zcl_hotfork_capsule_v1 *capsule, void *ctx);
 
-/* Pins and hashes the exact module inode, resolves its sole descriptor, and
- * lends that descriptor to `visit` for the lifetime of the mapping. This is
- * development-only; release builds refuse without opening or loading. */
-bool zcl_hotswap_hotfork_visit_so(
-    const char *so_path, const char *expected_sha256,
+/* Hashes the already-open image descriptor (normally a sealed memfd held by
+ * an already-confined disposable child), maps exactly that inode through its
+ * /proc/self/fd link, resolves its sole descriptor, and lends that descriptor
+ * to `visit` for the lifetime of the mapping. There is no pathname variant:
+ * the caller must confine BEFORE calling, because mapping runs ELF
+ * constructors. `err` (optional) receives the first refusal reason. This is
+ * development-only; release builds refuse without loading. */
+bool zcl_hotswap_hotfork_visit_fd(
+    int image_fd, const char *expected_sha256,
     zcl_hotfork_capsule_visit_fn visit, void *ctx,
-    char actual_sha256[65]);
+    char actual_sha256[65], char *err, size_t err_cap);
 
 #endif /* ZCL_HOTSWAP_HOTFORK_CAPSULE_H */

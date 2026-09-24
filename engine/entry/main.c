@@ -57,6 +57,7 @@
 #include "command/native_devagent.h" /* Windows confined worker child */
 #ifdef ZCL_DEV_BUILD
 #include "devloop.h"
+#include "devloop_reflex_runner.h" /* clean-zygote reflex runner */
 #endif
 #include "session/agent_broker.h"       /* confined metaverse agent + broker modes */
 #include "services/agent_broker_provider.h" /* the broker's real authority, composed pre-fork */
@@ -212,6 +213,12 @@ static void report_app_init_failed(const struct app_context *ctx)
 static bool main_dispatch_dev_ui_modes(int argc, char **argv, int *rc)
 {
 #ifdef ZCL_DEV_BUILD
+    /* Clean-zygote reflex runner: a fresh exec of this image with an empty
+     * environment and one control socket. Dispatched before ANY argument
+     * parsing, config, datadir or log initialization, so the runner never
+     * reads configuration, a datadir or keys. Exact argv shape only. */
+    if (zcl_reflex_runner_dispatch(argc, argv, rc))
+        return true;
     if (argc == 2 && strcmp(argv[1], "--source-record") == 0) {
         printf("%s 1 %s\n", zcl_build_source_id_sha256(),
                zcl_build_source_mutation_sha256());

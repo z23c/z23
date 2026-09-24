@@ -4,6 +4,7 @@
 #include "test/test_core.h"
 #include "keys/key.h"
 #include "chain/chainparams.h"
+#include "devloop_reflex_runner.h"
 #include <signal.h>
 
 /* This ISA oracle is registered as its own proof group.  Keep its serial-runner
@@ -39,6 +40,11 @@ static int test_make_lint_gates_family(void)
 
 int main(int argc, char **argv)
 {
+    /* Clean-zygote reflex runner re-exec of this binary (exact argv shape),
+     * dispatched before any global test init. */
+    int runner_rc = 0;
+    if (zcl_reflex_runner_dispatch(argc, argv, &runner_rc))
+        return runner_rc;
     setbuf(stdout, NULL); /* Unbuffered for test progress visibility */
     int failures = 0;
 

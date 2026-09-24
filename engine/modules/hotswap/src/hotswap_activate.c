@@ -1508,46 +1508,57 @@ static bool artifact_sha256_fd(int fd, char hex_out[65])
     return true;
 }
 
-bool zcl_hotswap_hotfork_visit_so(
-    const char *so_path, const char *expected_sha256,
-    zcl_hotfork_capsule_visit_fn visit, void *ctx,
-    char actual_sha256[65])
+/* Descriptor-bound HOT_FORK visit. The caller already confined this process
+ * and holds the sealed image at `image_fd`; nothing is opened by pathname
+ * except the kernel's own /proc/self/fd magic link for that same inode, so
+ * the bytes hashed here are exactly the bytes mapped. */
+static bool hotfork_visit_fail(char *err, size_t err_cap, const char *what)
 {
-    if (!so_path || !expected_sha256 || strlen(expected_sha256) != 64 ||
+    if (err && err_cap)
+        act_copy(err, err_cap, what);
+    return false;
+}
+
+bool zcl_hotswap_hotfork_visit_fd(
+    int image_fd, const char *expected_sha256,
+    zcl_hotfork_capsule_visit_fn visit, void *ctx,
+    char actual_sha256[65], char *err, size_t err_cap)
+{
+    if (image_fd < 0 || !expected_sha256 || strlen(expected_sha256) != 64 ||
         !visit || !actual_sha256)
-        return false;
+        return hotfork_visit_fail(err, err_cap, "invalid HOT_FORK visit input");
     actual_sha256[0] = '\0';
-    int fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;
-    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        !artifact_sha256_fd(fd, actual_sha256) ||
-        strcmp(actual_sha256, expected_sha256) != 0) {
-        if (fd >= 0) (void)close(fd);
-        return false;
-    }
+    if (fstat(image_fd, &st) != 0 || !S_ISREG(st.st_mode))
+        return hotfork_visit_fail(err, err_cap, "image is not a regular file");
+    if (!artifact_sha256_fd(image_fd, actual_sha256) ||
+        strcmp(actual_sha256, expected_sha256) != 0)
+        return hotfork_visit_fail(err, err_cap, "image digest mismatch");
     char pinned[PATH_MAX];
-    if (!platform_fd_path(pinned, sizeof(pinned), fd, NULL)) {
-        (void)close(fd);
-        return false;
-    }
+    if (!platform_fd_path(pinned, sizeof(pinned), image_fd, NULL))
+        return hotfork_visit_fail(err, err_cap, "image fd path unavailable");
 #if defined(__APPLE__)
     /* A/B-by-fd unavailable on Darwin; silence unused params, fail closed. */
     (void)visit; (void)ctx;
-    (void)close(fd);
-    return false;
+    return hotfork_visit_fail(err, err_cap,
+                              "descriptor-bound load unavailable on Darwin");
 #else
     void *handle = dlopen(pinned, RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
-        (void)close(fd);
-        return false;
+        const char *why = dlerror();
+        return hotfork_visit_fail(err, err_cap, why ? why : "dlopen failed");
     }
     dlerror();
     const struct zcl_hotfork_capsule_v1 *capsule =
         dlsym(handle, ZCL_HOTFORK_CAPSULE_SYMBOL);
     const char *sym_error = dlerror();
-    bool ok = !sym_error && capsule && visit(capsule, ctx);
+    if (sym_error || !capsule) {
+        (void)dlclose(handle);
+        return hotfork_visit_fail(err, err_cap,
+                                  "artifact exports no HOT_FORK capsule");
+    }
+    bool ok = visit(capsule, ctx);
     (void)dlclose(handle);
-    (void)close(fd);
     return ok;
 #endif
 }
@@ -2230,17 +2241,19 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
     return false;
 }
 
-bool zcl_hotswap_hotfork_visit_so(
-    const char *so_path, const char *expected_sha256,
+bool zcl_hotswap_hotfork_visit_fd(
+    int image_fd, const char *expected_sha256,
     zcl_hotfork_capsule_visit_fn visit, void *ctx,
-    char actual_sha256[65])
+    char actual_sha256[65], char *err, size_t err_cap)
 {
-    (void)so_path;
+    (void)image_fd;
     (void)expected_sha256;
     (void)visit;
     (void)ctx;
     if (actual_sha256)
         actual_sha256[0] = '\0';
+    if (err && err_cap)
+        act_copy(err, err_cap, hotswap_native_unavailable_reason());
     return false;
 }
 
