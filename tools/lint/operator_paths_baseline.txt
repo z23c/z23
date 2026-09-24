@@ -331,7 +331,6 @@ B contexts/commons/corpus/report-000040.json 66
 B contexts/commons/corpus/report-000041.json 73
 B contexts/commons/corpus/report-000042.json 73
 B contexts/commons/services/include/services/zcode_pointer.h 1
-B docs/work/HANDOFF_2026-09-04.md 1
 B platform/deploy/install-host-watchdog.sh 1
 B platform/deploy/zclassic23-host-watchdog.sh 1
 B platform/deploy/zclassic23-standby.env.example 1
