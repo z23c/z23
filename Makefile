@@ -3617,6 +3617,44 @@ $(TEST_PARALLEL_REL_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 endif
 
+# ── Clean-zygote reflex runner proof images ───────────────────────────────
+# test_reflex_runner.c drives the production runner client with REAL
+# candidate capsules: ONE fixture source compiled once per behavior kind
+# (hostile canary probes, green, behavior regression, hang, crash, socket,
+# post-load exec mapping). They live outside $(BUILD_DIR)/hotswap on
+# purpose: the runner maps a sealed memfd by descriptor, never a path, so
+# no path confinement applies, and their deliberately hostile imports
+# (open/socket/mmap) must not enter the module import gate that directory
+# feeds. Linked with $(HOTSWAP_MODULE_LDFLAGS) like every capsule.
+REFLEX_RUNNER_FIXTURE_SRC = tests/harness/fixtures/reflex_runner_fixture.c
+REFLEX_RUNNER_FIXTURE_KINDS = canary green regress loop segv socket wx
+REFLEX_RUNNER_FIXTURE_SOS = $(foreach k,$(REFLEX_RUNNER_FIXTURE_KINDS),\
+	$(BUILD_DIR)/fixtures/reflex_runner/zcl_reflex_fixture_$(k).so)
+
+$(BUILD_DIR)/fixtures/reflex_runner/zcl_reflex_fixture_%.so: \
+		$(REFLEX_RUNNER_FIXTURE_SRC) \
+		tests/harness/fixtures/reflex_runner_fixture.h \
+		engine/modules/hotswap/include/hotswap/hotfork_capsule.h
+	@mkdir -p $(dir $@)
+	@set -eu; \
+	tmp_o="$$(mktemp "$(dir $@).rrfix.XXXXXX.o")"; \
+	tmp_so="$$(mktemp "$(dir $@).rrfix.XXXXXX.so")"; \
+	trap 'rm -f "$$tmp_o" "$$tmp_so"' EXIT HUP INT TERM; \
+	$(CC) $(TEST_FAST_CFLAGS) -fPIC -DZCL_REFLEX_FIXTURE_KIND_$* \
+	  -c -o "$$tmp_o" $(REFLEX_RUNNER_FIXTURE_SRC); \
+	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o"; \
+	mv -f -- "$$tmp_so" "$@"; \
+	rm -f "$$tmp_o"; \
+	trap - EXIT HUP INT TERM
+
+ifeq ($(ZCL_HOST_OS),Linux)
+$(BIN_DIR)/test_zcl: | $(REFLEX_RUNNER_FIXTURE_SOS)
+$(TEST_PARALLEL_BIN): | $(REFLEX_RUNNER_FIXTURE_SOS)
+$(TEST_PARALLEL_FAST_BIN): | $(REFLEX_RUNNER_FIXTURE_SOS)
+$(TEST_PARALLEL_REL_CANDIDATE): | $(REFLEX_RUNNER_FIXTURE_SOS)
+$(TEST_PARALLEL_FAST_CANDIDATE): | $(REFLEX_RUNNER_FIXTURE_SOS)
+endif
+
 # Same contract for the resident_launch_contract group's fixture children:
 # the group's reference launches exec these images, so a missing fixture is a
 # broken build, never a skip.

@@ -1401,6 +1401,7 @@ int main(int argc, char **argv)
     failures += test_hotswap_service_registry();
     { extern int test_hotswap_shelf(void); failures += test_hotswap_shelf(); }
     { extern int test_hotswap_rollback(void); failures += test_hotswap_rollback(); }
+    { extern int test_reflex_runner(void); failures += test_reflex_runner(); }
     failures += test_dev_platform();
     { extern int test_dev_platform_shard_01(void);
       extern int test_dev_platform_shard_02(void);

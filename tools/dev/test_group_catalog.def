@@ -288,6 +288,7 @@ ZCL_TEST_GROUP(dev_platform_shard_05)
 ZCL_TEST_GROUP(dev_platform_shard_06)
 ZCL_TEST_GROUP(dev_platform_shard_07)
 ZCL_TEST_GROUP(dev_platform_shard_08)
+ZCL_TEST_GROUP(reflex_runner)
 ZCL_TEST_GROUP(dev_app_scaffold)
 /* One dapp's signed App events crossing between two node databases through
  * the real pull wire, and every way that crossing is refused. */
