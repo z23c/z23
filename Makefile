@@ -357,9 +357,9 @@ VENDOR_REPAIR_REQUESTED := $(filter $(VENDOR_REPAIR_GOALS),$(MAKECMDGOALS))
 # vendor work before that containment exists. Mixed goals retain bootstrap.
 ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest \
 	build/bin/z23-headless-run.exe
-# Read-only build queries link nothing and must not start a vendor configure.
+# Build queries and game-only goals need no node vendor configure.
 ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS),$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1415,7 +1415,7 @@ TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCH
 ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest install-hooks setup \
-	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) \
+	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe \
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
@@ -1454,7 +1454,7 @@ endif
 # not bootstrap.
 ifeq ($(ZCL_TOR),stub)
 $(warning ZCL_TOR=stub - LINKING THE OFFLINE TOR STUB. This binary is stamped tor=stub: it cannot reach the onion network, it refuses -tor and onion-node mode at runtime, and no ship or install step will accept it. Drop ZCL_TOR=stub for a real-Tor node.)
-else ifneq ($(strip $(TOR_MISSING_ARCHIVES)),)
+else ifneq ($(strip $(if $(strip $(ZCL_TOR_LINK_REQUESTED)),$(TOR_MISSING_ARCHIVES))),)
 $(warning no Tor archives under $(ZCL_TOR_TREE) - anything linked now gets the OFFLINE TOR STUB and is stamped tor=stub. Run `make tor-full` (or `make tor-ready`, which copies them from a sibling checkout when it can).)
 endif
 # All dependencies bundled in vendor/lib as static archives.

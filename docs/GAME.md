@@ -22,7 +22,9 @@ lint gate ignore them, so a headless or header-less host is never blocked by
 the game. `make game` probes for the platform headers first and, if they are
 missing, prints one typed line — `game_platform_headers_missing: <what>` — and
 exits 2 instead of a wall of compiler errors. `make game-check` needs no
-window and is what a headless gate box proves.
+window and is what a headless gate box proves. These game-only goals build no
+node vendor archive or embedded Tor archive; mixed game and node goals retain
+the node's vendor and Tor prerequisites.
 
 ## Controls
 

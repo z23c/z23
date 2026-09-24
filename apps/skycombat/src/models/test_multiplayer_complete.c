@@ -82,7 +82,6 @@ int main(void) {
     
     // Simulation variables
     float total_time = 0;
-    int frame = 0;
     float last_kill_health[MAX_MANAGED_AIRCRAFT] = {100, 100, 100, 100, 100};
     int total_powerup_collections = 0;
     
@@ -180,7 +179,6 @@ int main(void) {
         }
         
         total_time += DT;
-        frame++;
     }
     
     // Match ended
