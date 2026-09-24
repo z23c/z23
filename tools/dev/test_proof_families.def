@@ -15,3 +15,4 @@ ZCL_TEST_PROOF_FAMILY("oracle_policy", "test_*oracle")
  * prefix and derives its members from the catalog: whatever shard, realroot,
  * partition or heavy group the registry carries is what the token selects. */
 ZCL_TEST_PROOF_FAMILY("make_lint_gates", "test_make_lint_gates*")
+ZCL_TEST_PROOF_FAMILY("block_index_projection", "test_block_index_projection*")

@@ -1710,6 +1710,23 @@ int main(int argc, char **argv)
     { extern int test_coins_view_kv(void);
       failures += test_coins_view_kv(); }
     failures += test_block_index_projection();
+    { extern int test_block_index_projection_shard_01(void);
+      extern int test_block_index_projection_shard_02(void);
+      extern int test_block_index_projection_shard_03(void);
+      extern int test_block_index_projection_shard_04(void);
+      extern int test_block_index_projection_shard_05(void);
+      extern int test_block_index_projection_shard_06(void);
+      extern int test_block_index_projection_shard_07(void);
+      extern int test_block_index_projection_shard_08(void);
+    failures += test_block_index_projection_shard_01();
+    failures += test_block_index_projection_shard_02();
+    failures += test_block_index_projection_shard_03();
+    failures += test_block_index_projection_shard_04();
+    failures += test_block_index_projection_shard_05();
+    failures += test_block_index_projection_shard_06();
+    failures += test_block_index_projection_shard_07();
+    failures += test_block_index_projection_shard_08();
+    }
     failures += test_block_index_rebuild();
     failures += test_block_index_topup();
     failures += test_block_index_node_db_topup();

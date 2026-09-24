@@ -47,6 +47,7 @@
 #include "storage/block_index_projection.h"
 #include "storage/event_log.h"
 #include "storage/event_log_payloads.h"
+#include "test_group_catalog.h"
 #include "../../../engine/modules/storage/src/block_index_projection_internal.h"
 
 #include <errno.h>
@@ -885,14 +886,23 @@ done:
 
 static bool emit_n_headers(event_log_t *log, uint32_t seed0, int n)
 {
+    /* These records are projection input, not an event-log durability test.
+     * Publish the same complete wire once before catch_up instead of paying
+     * two fsync barriers for each of thousands of synthetic events. */
+    event_log_set_deferred_sync(log, true);
+    bool appended = true;
     for (int i = 0; i < n; i++) {
         struct ev_block_header h;
         uint8_t sol[8] = {0};
         make_header(&h, sol, sizeof(sol), seed0 + (uint32_t)i, i, 0x20);
-        if (!emit_header(log, &h, sol))
-            return false;
+        if (!emit_header(log, &h, sol)) {
+            appended = false;
+            break;
+        }
     }
-    return true;
+    bool flushed = event_log_flush(log);
+    event_log_set_deferred_sync(log, false);
+    return appended && flushed;
 }
 
 static int run_catch_up_wal_budget(int *failures)
@@ -1208,30 +1218,167 @@ static int run_cache_file(int *failures)
     return *failures - start;
 }
 
-int test_block_index_projection(void)
+/* One case table is the coverage authority for the eight forked groups.
+ * Every case owns a PID-specific database directory; the process-local memory,
+ * storage and environment overrides cannot cross shard children. */
+#define BIP_SHARD_COUNT 8u
+struct bip_case {
+    const char *name;
+    int (*run)(int *failures);
+    unsigned shard;
+};
+
+static const struct bip_case g_bip_cases[] = {
+    {"payload_roundtrip", run_payload_roundtrip, 0},
+    {"open_close_clean", run_open_close_clean, 1},
+    {"page_cache_pragmas", run_page_cache_pragmas, 2},
+    {"cache_budget", run_cache_budget, 3},
+    {"cache_prefetch", run_cache_prefetch, 4},
+    {"cache_file", run_cache_file, 5},
+    {"single_header_consumed", run_single_header_consumed, 6},
+    {"get_by_height", run_get_by_height, 7},
+    {"iterate_canonical", run_iterate_canonical, 0},
+    {"replay_idempotent", run_replay_idempotent, 1},
+    {"reorg_replace", run_reorg_replace, 2},
+    {"commitment_canonical", run_commitment_canonical, 3},
+    {"resume_from_partial", run_resume_from_partial, 4},
+    {"collision_accounting_cached_stmt", run_collision_accounting_cached_stmt, 5},
+    {"bound_dirty_delta", run_bound_dirty_delta, 6},
+    {"catch_up_wal_budget", run_catch_up_wal_budget, 7},
+    {"catch_up_wal_reader", run_catch_up_wal_reader, 0},
+};
+
+#define BIP_CASE_COUNT (sizeof(g_bip_cases) / sizeof(g_bip_cases[0]))
+
+static const char *const g_bip_env_keys[] = {
+    "HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "TMPDIR",
+};
+
+struct bip_saved_env {
+    char *value[sizeof(g_bip_env_keys) / sizeof(g_bip_env_keys[0])];
+    bool present[sizeof(g_bip_env_keys) / sizeof(g_bip_env_keys[0])];
+};
+
+static bool bip_restore_env(struct bip_saved_env *saved)
 {
-    printf("\n=== block_index_projection tests ===\n");
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(g_bip_env_keys) / sizeof(g_bip_env_keys[0]); i++) {
+        int rc = saved->present[i]
+            ? setenv(g_bip_env_keys[i], saved->value[i], 1)
+            : unsetenv(g_bip_env_keys[i]);
+        if (rc != 0) ok = false;
+        free(saved->value[i]);
+        saved->value[i] = NULL;
+    }
+    return ok;
+}
+
+static bool bip_private_env(struct bip_saved_env *saved, const char *root)
+{
+    for (size_t i = 0; i < sizeof(g_bip_env_keys) / sizeof(g_bip_env_keys[0]); i++) {
+        const char *value = getenv(g_bip_env_keys[i]);
+        saved->present[i] = value != NULL;
+        if (value) {
+            saved->value[i] = strdup(value);
+            if (!saved->value[i]) {
+                for (size_t j = 0; j < i; j++) free(saved->value[j]);
+                return false;
+            }
+        }
+    }
+    for (size_t i = 0; i < sizeof(g_bip_env_keys) / sizeof(g_bip_env_keys[0]); i++) {
+        if (setenv(g_bip_env_keys[i], root, 1) != 0) {
+            (void)bip_restore_env(saved);
+            return false;
+        }
+    }
+    return true;
+}
+
+static int bip_run_shard(unsigned shard)
+{
     int failures = 0;
+    char private_root[PATH_MAX];
+    if (!test_mkdtemp(private_root, sizeof(private_root), "bip_shard")) {
+        perror("block_index_projection: private shard directory");
+        return 1;
+    }
+    struct bip_saved_env saved = {0};
+    if (!bip_private_env(&saved, private_root)) {
+        fprintf(stderr, "block_index_projection: private environment failed\n");
+        (void)test_rm_rf_recursive(private_root);
+        return 1;
+    }
+    printf("\n=== block_index_projection shard %u pid=%ld ===\n",
+           shard + 1u, (long)getpid());
+    bool private_ok = true;
+    for (size_t i = 0; i < sizeof(g_bip_env_keys) / sizeof(g_bip_env_keys[0]); i++) {
+        const char *value = getenv(g_bip_env_keys[i]);
+        if (!value || strcmp(value, private_root) != 0) private_ok = false;
+    }
+    printf("block_index_projection: private HOME/state/cache/config/TMPDIR... %s\n",
+           private_ok ? "OK" : "FAIL");
+    if (!private_ok) failures++;
     bip_ensure_root();
-
-    run_payload_roundtrip(&failures);
-    run_open_close_clean(&failures);
-    run_page_cache_pragmas(&failures);
-    run_cache_budget(&failures);
-    run_cache_prefetch(&failures);
-    run_cache_file(&failures);
-    run_single_header_consumed(&failures);
-    run_get_by_height(&failures);
-    run_iterate_canonical(&failures);
-    run_replay_idempotent(&failures);
-    run_reorg_replace(&failures);
-    run_commitment_canonical(&failures);
-    run_resume_from_partial(&failures);
-    run_collision_accounting_cached_stmt(&failures);
-    run_bound_dirty_delta(&failures);
-    run_catch_up_wal_budget(&failures);
-    run_catch_up_wal_reader(&failures);
-
-    printf("block_index_projection: %d failures\n", failures);
+    for (size_t i = 0; i < BIP_CASE_COUNT; i++) {
+        if (g_bip_cases[i].shard != shard) continue;
+        int64_t start = platform_time_monotonic_ms();
+        (void)g_bip_cases[i].run(&failures);
+        int64_t end = platform_time_monotonic_ms();
+        printf("[bip-case] shard=%u name=%s ms=%" PRId64 " failures=%d\n",
+               shard + 1u, g_bip_cases[i].name,
+               end >= start ? end - start : -1, failures);
+    }
+    if (!bip_restore_env(&saved)) failures++;
+    if (test_rm_rf_recursive(private_root) != 0) failures++;
+    printf("block_index_projection shard %u: %d failures\n",
+           shard + 1u, failures);
     return failures;
 }
+
+int test_block_index_projection(void)
+{
+    int failed = 0;
+    int *failures = &failed;
+    unsigned counts[BIP_SHARD_COUNT] = {0};
+    bool unique = true;
+    for (size_t i = 0; i < BIP_CASE_COUNT; i++) {
+        if (g_bip_cases[i].shard >= BIP_SHARD_COUNT) {
+            unique = false;
+            continue;
+        }
+        counts[g_bip_cases[i].shard]++;
+        for (size_t j = 0; j < i; j++)
+            if (g_bip_cases[i].run == g_bip_cases[j].run ||
+                strcmp(g_bip_cases[i].name, g_bip_cases[j].name) == 0)
+                unique = false;
+    }
+    size_t owned = 0;
+    for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) owned += counts[i];
+    BIP_CHECK("partition: all 17 cases have one owner",
+              BIP_CASE_COUNT == 17u && owned == BIP_CASE_COUNT && unique);
+    bool nonempty = true;
+    for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) nonempty &= counts[i] > 0;
+    BIP_CHECK("partition: every shard carries work", nonempty);
+    const char *plans[] = {"block_index_projection"};
+    char expanded[BIP_SHARD_COUNT + 1u][ZCL_TEST_GROUP_FULL_MAX];
+    bool truncated = false;
+    size_t selected = zcl_test_group_expand_plan(plans, 1, expanded,
+                                                  BIP_SHARD_COUNT + 1u,
+                                                  &truncated);
+    BIP_CHECK("partition: proof plan names all eight registered shards",
+              selected == BIP_SHARD_COUNT + 1u && !truncated);
+    return failed;
+}
+
+#define BIP_SHARD_FN(tag, index) \
+    int test_block_index_projection_shard_##tag(void) { return bip_run_shard(index); }
+BIP_SHARD_FN(01, 0)
+BIP_SHARD_FN(02, 1)
+BIP_SHARD_FN(03, 2)
+BIP_SHARD_FN(04, 3)
+BIP_SHARD_FN(05, 4)
+BIP_SHARD_FN(06, 5)
+BIP_SHARD_FN(07, 6)
+BIP_SHARD_FN(08, 7)
+#undef BIP_SHARD_FN
