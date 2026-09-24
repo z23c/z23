@@ -25,7 +25,7 @@ SOURCES=(
     platform/modules/base/src/log_level.c
     platform/modules/sha3/src/sha3.c
 )
-GEN="$TMP/gen_capability_inventory"
+GEN="${2:-$TMP/gen_capability_inventory}"
 LIBS=()
 case "$(uname -s 2>/dev/null || true)" in
     MINGW*|MSYS*)
@@ -34,7 +34,7 @@ case "$(uname -s 2>/dev/null || true)" in
             platform/modules/platform/src/positioned_file.c
         )
         LIBS+=( -ladvapi32 )
-        GEN="$GEN.exe"
+        if [ -z "${2:-}" ]; then GEN="$GEN.exe"; fi
         ;;
 esac
 
@@ -45,7 +45,12 @@ if [ ! -f "$DOC" ]; then
 fi
 
 CC_BIN="${CC:-cc}"
-if ! "$CC_BIN" -std=c23 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
+if [ -n "${2:-}" ]; then
+    if [ ! -x "$GEN" ]; then
+        echo "check_capability_inventory_generated: FATAL — generator absent: $GEN" >&2
+        exit 2
+    fi
+elif ! "$CC_BIN" -std=c23 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
         -O2 -Wall -Wextra \
         -Werror -pedantic -Icognition/modules/codeindex/include -Icognition/modules/codeindex/src \
         -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/sha3/include \
