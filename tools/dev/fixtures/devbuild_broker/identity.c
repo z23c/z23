@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
+ * purpose: Report a script's device and inode for the broker cutover fixture.
+ */
 #include <inttypes.h>
 #include <stdio.h>
 #include <sys/stat.h>
