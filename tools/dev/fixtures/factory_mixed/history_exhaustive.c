@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * purpose: independently check every final-history prefix, range, render,
+ * parser, and invalid-input boundary in the generated C23 package.
+ */
 #include "history.h"
 
 #include <errno.h>

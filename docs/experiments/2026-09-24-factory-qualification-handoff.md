@@ -2,7 +2,7 @@
 
 # Factory qualification handoff
 
-Snapshot: 2026-09-24T21:54:00Z. Requery native status before changing a
+Snapshot: 2026-09-24T22:41:35Z. Requery native status before changing a
 queue, proof, candidate, or node. This record separates measured local
 verification from owner preview and operator acceptance.
 
@@ -25,10 +25,10 @@ verification from owner preview and operator acceptance.
 
 | Evidence | Result and root |
 | --- | --- |
-| Mixed 100-revision qualification tip | Signed commit `17e730705e9393c6db61cf2a79e400745b0319a6`; base experiment commit `81d632f4d3dea19afab33523f17edf43642b369c` |
+| Frozen mixed measurement and peer evidence | Signed measurement commit `81d632f4d3dea19afab33523f17edf43642b369c`; peer-evidence commit `17e730705e9393c6db61cf2a79e400745b0319a6` |
 | Frozen factory ledger | `7fc17ab494d13240eb17e5b23f8dd61226c49de4591093653d4d6e86115c006c` |
-| Revision 100 source | `src/history.c` SHA-256 `aa68289413d3cd13fd7c752c9aa6521027856bcf08423622115feb1c751d885b`; package root `654b455776cf1ac7996c052c9e260477ae9e574266084f2975e04fa0ce61dc82` |
-| Independent final-state peer | GCC 14.2.0; input bundle SHA-256 `2f265f85fd0e14dd4fb77b949b479efc464544997a905f9d8dc8c76d142b36f7`; returned archive `785131a53b0179af94fdf9d09641cd3bb0389048f3e9a828c7fa2272f4451d0c` |
+| Revision 100 source | `src/history.c` <!-- doc-path-ok: generated package path --> SHA-256 `aa68289413d3cd13fd7c752c9aa6521027856bcf08423622115feb1c751d885b`; package root `654b455776cf1ac7996c052c9e260477ae9e574266084f2975e04fa0ce61dc82` |
+| Independent final-state peer | GCC 14.2.0; input bundle SHA-256 `253727787a3e5a441fc68c1f57de9f0c61c9c79dd993dc6acfaf5997e8ebef2b`; returned archive `04ad314b5dad0dcdacc6cc28e88fec7f4840786da63086af52b6a0eef0efa475` |
 | SkyCombat preview | Source commit `255990bfdc48e0c7e6f966aa2e8d6e678b25ca40`; game executable SHA-256 `9a7a46565f2414bd8ccb5c9ee6ebb7c60b951ea690177f958123993091e4082c`; 1920×1080 frame SHA-256 `38fd50456fb394a84df18956cc2d13cc56daf55163f0caa560f82a1b309873e4` |
 | SkyCombat preview decision | The owner answered **“Preview accepted; continue qualification”** and **“Accept this preview”** for those exact binary/frame roots in this session. This is visual-preview acceptance, not a signed Commons publication or DEV/full acceptance receipt. |
 
@@ -81,28 +81,45 @@ again later. Remote peer node state was already blocked by bootstrap trust.
 Chain synchronization safety under load remains unqualified; the public-node
 owner received native mail sequence 407.
 
-## Live publication state at snapshot
+## Publication state at snapshot
 
-The native land queue has seq38 in flight for same-publisher evidence tip
-`ab697cb3b49f71dff0894aa2529bd85b4026862b`. Its exact proof pair is
-`0a745b42964a7325062c6aaa4278145dad29e0d2@95f9a85d95e7620de77a1b2814769a81b7418743`.
-The proof worker was running at snapshot; `origin/main` had advanced to
-`247c32071629ceb0b58e1f36be8e5b75f6161c19`, so the receiver may mark
-this pair superseded. Preserve the worker and requery before invoking another
-step. Seq37 (`125f8753222a4c41399d5a88b547b10d1bdfc64a`) queues second-peer
-and isolated-node evidence. Seq40 (`17e730705e9393c6db61cf2a79e400745b0319a6`)
-queues the mixed workload and final-state peer evidence. The older seq39 was
-cancelled after its successor seq40 was queued. None of these queue receipts
-is publication evidence.
+Native land seq38 independently observed the same-publisher evidence on
+`origin/main` at `1effa8fe671d06044adedc38f0b456ac4366a2fb`, source tree
+`121e02d13e63f38fe43687756856a69c7de3ff8f`. Seq37 independently
+observed second-peer and isolated-node evidence at
+`284d854af96ae9165e036589b4773a765f1cdc46`, source tree
+`2a5ed3c6f9ee7fa368fd607d15f21392e31aca5b`. Their native outcomes bind
+the remote signer and fast-forward ancestry. Submission-to-remote-receipt
+latencies were 11,085 s and 6,682 s, respectively. These are evidence
+publication latencies, not application acceptance latencies.
 
-Three earlier full seq36 proofs were superseded when `main` advanced. This
-repeated 15–25 minute end-to-end cost is the current publication bottleneck.
-The land owner received native mail sequences 411 and 422. The highest-leverage
-repair is reuse of mandatory unit evidence only when exact input closure and
-receiver policy permit it across base movement, followed by fresh mandatory
-publication evidence and independent remote observation. The
-[`FORWARD_PLAN.md`](../work/FORWARD_PLAN.md) already requires this. The factory
-owner received the measured 79.8% commit/reproduce share in native mail 419.
+Seq41 (`836287f7176c3359023f9130d48fec639d5c39c0`) failed its first full
+proof with no receipt. Its test dimension passed: 16 required groups executed
+and two eligible hotswap groups reused input-bound cache evidence. Full lint
+failed three of 212 gates on the qualification files: the C23 auditor lacked
+a purpose comment, four backticked generated-package paths were unmarked,
+and the handoff included an operator home path. The operator-path gate's
+source-derived identity prong then flagged other unchanged files. The
+corrected source now passes `check-file-purpose`, `check-doc-inline-paths`,
+`check-no-operator-paths`, and `lint-fast`; its final-state peer bundle was
+rebuilt and rechecked at the roots above. A corrected signed successor must
+be submitted and receive a new full exact proof. At snapshot, the native land
+queue was idle. Cancelled seq39 and seq40 are not publication evidence.
+
+| Rank | Measured blocker | Owner |
+| ---: | --- | --- |
+| 1 | Exact publication proofs and moving-base retries cost 11,085 s and 6,682 s end to end for seq38/37; stale hook bytes also wasted one full seq38 attempt. | Native land/proof owner |
+| 2 | Two-store `add_commit` and `reproduce_build` cost 396.966/497.373 s (79.8%) in the mixed serial factory run. | Commons factory owner |
+| 3 | SkyCombat's canonical aircraft recipe refuses undeclared `libm`, preventing the accepted visual preview from becoming a package release. | SkyCombat and Commons recipe owners |
+| 4 | Height-0 node observations and pre-existing catchup errors leave chain-sync safety under package load unqualified. | Public-node owner |
+
+The highest-leverage throughput repair is reuse of mandatory unit evidence
+only when exact input closure and receiver policy permit it across Git-base
+movement, followed by fresh mandatory publication evidence and independent
+remote observation. The [`FORWARD_PLAN.md`](../work/FORWARD_PLAN.md) already
+requires this. Native mail sequences 419, 431, 432, and 447 bind the measured
+factory and land costs to their owners. The immediate app release prerequisite
+is a canonical declared `libm` recipe that passes the real confined verifier.
 
 ## Immediate continuation
 
@@ -110,22 +127,20 @@ owner received the measured 79.8% commit/reproduce share in native mail 419.
 git fetch origin main
 git rev-parse HEAD origin/main
 build/bin/z23-dev dev land status
-build/bin/z23-dev dev agent mail pull --since=422
-build/bin/z23-dev dev proof status \
-  --root=/home/bob/.local/state/z23/dev/land/wt \
-  --local_commit=0a745b42964a7325062c6aaa4278145dad29e0d2 \
-  --remote_base=95f9a85d95e7620de77a1b2814769a81b7418743
+build/bin/z23-dev dev agent mail pull --since=447
 ```
 
 Use a built `z23-dev` whose command catalog includes `dev.land`; the above
 `build/bin` path is a command template for a checkout with that binary. If
 the proof settles, advance the native land queue with `dev land drive` or
 `dev land step` according to its live `discover describe dev.land` contract.
-If it reaches `PUBLICATION_INTENT_REQUIRED`, attach only the exact proven
+If a proof is in flight, read its exact root, local commit, and remote base
+from `dev land status` before invoking `dev proof status`. If it reaches
+`PUBLICATION_INTENT_REQUIRED`, attach only the exact proven
 pair's signed intent with `dev land attach`, then drive and verify the remote
 receipt and SHA. Do not run another build in the private landing worktree
-while its proof is active. Continue seq37 and seq40 after the higher-priority
-row settles. Repair the canonical SkyCombat libm declaration under the app
+while its proof is active. Submit the corrected qualification successor and
+repair the canonical SkyCombat libm declaration under the app
 owner's source ownership, rerun its exact factory verifier, and obtain the
 remaining native acceptance receipts. Never infer release acceptance from
 the accepted frame.
@@ -134,4 +149,4 @@ Full commands and raw roots are in
 [`2026-09-24-factory-mixed-100.md`](./2026-09-24-factory-mixed-100.md),
 [`2026-09-24-factory-100-skycombat-preview.md`](./2026-09-24-factory-100-skycombat-preview.md),
 [`2026-09-24-factory-adversarial-qualification.md`](./2026-09-24-factory-adversarial-qualification.md),
-and the queued second-peer and isolated-node evidence commits named above.
+and the landed second-peer and isolated-node evidence commit named above.

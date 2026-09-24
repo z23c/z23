@@ -59,9 +59,9 @@ regression and refused its wrong-prefix candidate; that ledger SHA-256 is
 
 | Final revision evidence | SHA-256 or exact root |
 | --- | --- |
-| `src/history.c` | `aa68289413d3cd13fd7c752c9aa6521027856bcf08423622115feb1c751d885b` |
-| `include/history.h` | `7f65da05b66fea1323010821658d2decb0554360c102b28bbb6b6e555b76dd8f` |
-| `examples/history_cli.c` | `df7d5be683eca5d940bf959afd070786a37b2e7ad601d11dc654dc4246ed3ed9` |
+| `src/history.c` <!-- doc-path-ok: generated package path --> | `aa68289413d3cd13fd7c752c9aa6521027856bcf08423622115feb1c751d885b` |
+| `include/history.h` <!-- doc-path-ok: generated package path --> | `7f65da05b66fea1323010821658d2decb0554360c102b28bbb6b6e555b76dd8f` |
+| `examples/history_cli.c` <!-- doc-path-ok: generated package path --> | `df7d5be683eca5d940bf959afd070786a37b2e7ad601d11dc654dc4246ed3ed9` |
 | Package root | `654b455776cf1ac7996c052c9e260477ae9e574266084f2975e04fa0ce61dc82` |
 | Factory report | `d7163905b7b4744bd463d25c5bd7bba256efea81a7d268aafd5f010ec4811745` |
 | Quick receipt ID | `f2e1dae32dcb0c844c945dbed35b6dbf5a101551885d70284e21ff880ba8bd19` |
@@ -107,12 +107,14 @@ The separate final-state C23 audit passed 101 prefix cases, 5,151 ranges,
 The frozen revision 100 package also passed an independent source build on a
 consenting Linux development host with GCC 14.2.0 under `-std=c23 -Wall
 -Wextra -Werror -pedantic -O2`. The transfer bundle was 51,200 bytes, SHA-256
-`2f265f85fd0e14dd4fb77b949b479efc464544997a905f9d8dc8c76d142b36f7`;
+`253727787a3e5a441fc68c1f57de9f0c61c9c79dd993dc6acfaf5997e8ebef2b`;
 the receiver matched that hash and all 12 input-manifest entries before
 compiling. The peer checker is `tools/dev/factory-mixed-peer-check.sh`, SHA-256
 `8a94c82adf0dcb2c4de642007b7f3964411bbe967793e9cc8434854e110a669a`.
+The bundled final-state C23 auditor SHA-256 is
+`842b92c54cf5b6991a5a28c0008de961fe4e10efb7e447b48ffae64b56e8dd10`.
 The returned result archive matched the sender's SHA-256
-`785131a53b0179af94fdf9d09641cd3bb0389048f3e9a828c7fa2272f4451d0c`.
+`04ad314b5dad0dcdacc6cc28e88fec7f4840786da63086af52b6a0eef0efa475`.
 Its exhaustive log has the same SHA-256 as the local log above. The peer
 terminal log (`85adfd9283eccdeda6b9ede1c0d19fa196a433088905ce6316a586b0de5e736b`)
 records 101 exact text and 101 exact JSON outputs plus five rejected inputs.
