@@ -69,6 +69,40 @@ same-publisher releases: the existing weekly publisher limit refused the
 second release in the prior same-store trial. No DEV fast-lane result is
 promoted to release qualification.
 
+### Same-publisher state preservation control
+
+`tools/dev/factory-same-store-lineage.sh` replayed revisions 1 and 2 in the
+same two isolated stores with one publisher key. It explicitly tried publisher
+sequences 1 and 2 for revision 2. The script SHA-256 is
+`6df7fadc890c57dfb88b1a9fbbac929fcbe8882dc6c110bc33f756242ec2fa69`;
+the three-case ledger SHA-256 is
+`9e08d11197127dbf942aec152b0af950ef9e40f2cddfb5134f1f777fc5d32c09`.
+GCC 16.1.1 ran it on AMD Ryzen 7 PRO 8840U on
+`2026-09-24T19:08:58+00:00`.
+
+```bash
+tools/dev/factory-same-store-lineage.sh \
+  test-tmp/factory-100-current-20260924 \
+  test-tmp/same-store-lineage-new
+```
+
+| Candidate | Sequence | Factory exit | Wall s | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| Revision 1 | 1 | 0 | 3.784 | Admitted in both isolated stores |
+| Revision 2 | 1 | 1 | 0.088 | Refused `publisher-equivocation` |
+| Revision 2 | 2 | 1 | 0.149 | Refused `PUBLISH_FREQUENCY_LIMIT` |
+
+Revision 1's package root was
+`ae5a1e60d75e76390713a428cc91d1c0a5c26d3357f068206d28fcd3b3c295cf`.
+The installed file manifest in each store retained SHA-256
+`eeef6d647c40b65ca2d7f146880403d975b9e855074833a8b04eee3f01586623`
+before and after both refused revision-2 attempts. Revision 1 admission is
+not human acceptance. This control proves the earlier artifact survived two
+refusals; it also shows why the 100 isolated-publisher results cannot be
+reported as 100 successive same-publisher releases. A legitimate fast DEV
+lane or policy-respecting longer-term release schedule needs separate
+qualification; neither refusal is a reason to weaken the release gate.
+
 ## Adversarial verdicts
 
 The eleven current fault scripts returned their expected verdicts. The
