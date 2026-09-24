@@ -1065,6 +1065,52 @@ static int t_chunk_rules(void)
     return failures;
 }
 
+static int t_linked_chunk_source(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256], pkgdir[512], victim[640], outside[512];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "source-link");
+    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
+    struct zp_pkg p;
+    bool prepared = zp_make_package(&p, pkgdir) &&
+                    zp_use_recipe(&p.manifest);
+    struct vcs_package_release release;
+    prepared = prepared && zp_release(&release, 0x13, 1u,
+                                      "alice/source-link", "MIT", p.root);
+    char *release_hex = prepared ? zp_release_hex(&release, NULL, NULL) : NULL;
+    char *manifest_hex = prepared ? zp_hex(p.wire, p.wire_len) : NULL;
+    snprintf(victim, sizeof(victim), "%s/src/ring.c", pkgdir);
+    snprintf(outside, sizeof(outside), "%s/outside-ring.c", dd);
+    prepared = prepared && release_hex && manifest_hex &&
+               rename(victim, outside) == 0 &&
+               symlink("../../outside-ring.c", victim) == 0;
+    ZP_CHECK("chunks: exact source linked outside package is prepared",
+             prepared);
+    if (prepared) {
+        struct zp_cmd c;
+        zp_publish_input(&c, dd, release_hex, manifest_hex, pkgdir);
+        zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
+        ZP_CHECK("chunks: linked source cannot pass publish plan",
+                 !json_get_bool(json_get(&c.reply.data, "valid")) &&
+                 zp_failure_rule(&c.reply, 0) &&
+                 strcmp(zp_failure_rule(&c.reply, 0),
+                        "chunk-source-missing") == 0);
+        zp_cmd_free(&c);
+        bool restored = unlink(victim) == 0 && rename(outside, victim) == 0;
+        zp_publish_input(&c, dd, release_hex, manifest_hex, pkgdir);
+        zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
+        ZP_CHECK("chunks: same source as real leaf passes plan",
+                 restored && json_get_bool(json_get(&c.reply.data, "valid")));
+        zp_cmd_free(&c);
+    }
+    free(release_hex);
+    free(manifest_hex);
+    zp_pkg_free(&p);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 /* ── 5: commit roundtrip + idempotence + failed-plan commit ─────────── */
 /* A valid candidate commits locally and performs no network action. */
 static int zp_commit_valid_and_chunks(struct zp_cmd *c)
@@ -3200,6 +3246,7 @@ int test_zcode_publish(void)
     failures += t_license_rules();
     failures += t_structure_rules();
     failures += t_chunk_rules();
+    failures += t_linked_chunk_source();
     failures += t_commit_roundtrip();
     failures += t_acceptance_replay();
     failures += t_search();

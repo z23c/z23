@@ -239,35 +239,46 @@ bool vcs_package_publish_read_chunk(
         *rule_out = VCS_PACKAGE_PUBLISH_RULE_IO;
         return false;
     }
-    FILE *f = fopen(path, "rb");
-    if (!f) {
+    struct platform_positioned_file source;
+    platform_positioned_file_init(&source);
+    if (!platform_positioned_file_open_beneath(&source, dir, file->path)) {
+        LOG_ERROR(PUBLISH_LOG, "chunk source unavailable: %s", path);
         *rule_out = VCS_PACKAGE_PUBLISH_RULE_CHUNK_MISSING;
         return false;
     }
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        LOG_ERROR(PUBLISH_LOG, "seek %s", path);
+    uint64_t size = 0;
+    if (!platform_positioned_file_size(&source, &size)) {
+        platform_positioned_file_close(&source);
+        LOG_ERROR(PUBLISH_LOG, "size %s", path);
         *rule_out = VCS_PACKAGE_PUBLISH_RULE_IO;
         return false;
     }
-    long size = ftell(f);
-    if (size < 0 || (uint64_t)size != file->size) {
-        fclose(f);
+    if (size != file->size) {
+        platform_positioned_file_close(&source);
+        LOG_ERROR(PUBLISH_LOG, "chunk source size mismatch: %s", path);
         *rule_out = VCS_PACKAGE_PUBLISH_RULE_CHUNK_SIZE;
         return false;
     }
     uint64_t offset = (uint64_t)chunk_index * VCS_PACKAGE_CHUNK_BYTES;
+    if (offset > file->size) {
+        platform_positioned_file_close(&source);
+        LOG_ERROR(PUBLISH_LOG, "chunk %u exceeds source %s", chunk_index,
+                  path);
+        *rule_out = VCS_PACKAGE_PUBLISH_RULE_IO;
+        return false;
+    }
     size_t want = (size_t)(file->size - offset);
     if (want > VCS_PACKAGE_CHUNK_BYTES)
         want = VCS_PACKAGE_CHUNK_BYTES;
-    if (fseek(f, (long)offset, SEEK_SET) != 0 ||
-        (want > 0 && fread(buf, 1, want, f) != want)) {
-        fclose(f);
+    if (want > 0 &&
+        platform_positioned_file_read(&source, buf, want, offset) !=
+            (int64_t)want) {
+        platform_positioned_file_close(&source);
         LOG_ERROR(PUBLISH_LOG, "read %s chunk %u", path, chunk_index);
         *rule_out = VCS_PACKAGE_PUBLISH_RULE_IO;
         return false;
     }
-    fclose(f);
+    platform_positioned_file_close(&source);
     *len_out = want;
     return true;
 }

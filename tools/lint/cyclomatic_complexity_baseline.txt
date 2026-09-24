@@ -378,7 +378,7 @@ contexts/commons/modules/vcs/src/package_prepare_schema.c:prepare_meta_closed:39
 contexts/commons/modules/vcs/src/package_public_shape.c:shape_eval_local:19
 contexts/commons/modules/vcs/src/package_public_shape.c:shape_release_signs:13
 contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_load_releases:14
-contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_read_chunk:16
+contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_read_chunk:15
 contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_rule_string:20
 contexts/commons/modules/vcs/src/package_rank.c:vcs_rank_contributor:17
 contexts/commons/modules/vcs/src/package_rank.c:vcs_rank_projection_from_facts:21
