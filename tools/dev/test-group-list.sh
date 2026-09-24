@@ -106,35 +106,57 @@ params_gated() {
     ' "$RUNNER"
 }
 
+# Membership is answered from associative sets built once per process. The
+# proof resolver asks one lookup per registered group per plan token, and the
+# impact-rule check asks several per rule row, so a lookup that rescans the
+# whole ~28 KB registry text turns one --check-impact-rules pass into ~13 s of
+# string scanning. The sets hold exactly the names registered() prints.
 REGISTERED_CACHE=""
-FAMILY_CACHE=""
+REGISTERED_LOADED=0
+declare -A REGISTERED_SET=()
+FAMILY_LOADED=0
+FAMILY_TOKENS=()
+FAMILY_GLOBS=()
 
 load_registered_cache() {
-    [ -n "$REGISTERED_CACHE" ] || REGISTERED_CACHE="$(registered)"
+    local name
+    [ "$REGISTERED_LOADED" = 1 ] && return 0
+    REGISTERED_CACHE="$(registered)"
+    while IFS= read -r name; do
+        [ -n "$name" ] && REGISTERED_SET["$name"]=1
+    done <<<"$REGISTERED_CACHE"
+    REGISTERED_LOADED=1
+}
+
+# True when $1 is one registered FULL name (never a substring of one).
+is_registered() {
+    [ -n "$1" ] && [ -n "${REGISTERED_SET["$1"]+x}" ]
 }
 
 load_family_cache() {
-    [ -n "$FAMILY_CACHE" ] || FAMILY_CACHE="$(awk -F'"' \
+    local family glob
+    [ "$FAMILY_LOADED" = 1 ] && return 0
+    while IFS=$'\t' read -r family glob; do
+        [ -n "$family" ] && [ -n "$glob" ] || continue
+        FAMILY_TOKENS+=("$family")
+        FAMILY_GLOBS+=("$glob")
+    done < <(awk -F'"' \
         '/^[[:space:]]*ZCL_TEST_PROOF_FAMILY\(/ {print $2 "\t" $4}' \
-        "$FAMILIES")"
+        "$FAMILIES")
+    FAMILY_LOADED=1
 }
 
 resolve_exact() {
-    local needle="$1" candidate hit="" count=0 haystack
+    local needle="$1" candidate hit="" count=0
     case "$needle" in
         ''|*[!A-Za-z_0-9]*) return 1 ;;
     esac
     load_registered_cache
-    haystack="
-${REGISTERED_CACHE}
-"
     for candidate in "$needle" "test_$needle" "spec_$needle"; do
-        case "$haystack" in
-            *$'\n'"$candidate"$'\n'*)
-                hit="$candidate"
-                count=$((count + 1))
-                ;;
-        esac
+        if is_registered "$candidate"; then
+            hit="$candidate"
+            count=$((count + 1))
+        fi
     done
     [ "$count" = 1 ] || return 1
     printf '%s\n' "$hit"
@@ -145,31 +167,29 @@ ${REGISTERED_CACHE}
 # primary ID, while a registry full name may additionally belong to one of
 # these declared aggregates.
 proof_plan_token_selects_full() {
-    local token="$1" full="$2" family glob haystack
+    local token="$1" full="$2" i
     load_registered_cache
-    haystack="
-${REGISTERED_CACHE}
-"
-    case "$haystack" in
-        *$'\n'"$token"$'\n'*) [ "$token" = "$full" ]; return ;;
-    esac
+    if is_registered "$token"; then
+        [ "$token" = "$full" ]
+        return
+    fi
     case "$full" in
         *"$token"*) return 0 ;;
     esac
     load_family_cache
-    while IFS=$'\t' read -r family glob; do
-        [ -n "$family" ] && [ -n "$glob" ] || continue
-        if [ "$token" = "$family" ] && [[ "$full" == $glob ]]; then
+    for i in "${!FAMILY_TOKENS[@]}"; do
+        if [ "$token" = "${FAMILY_TOKENS[$i]}" ] &&
+           [[ "$full" == ${FAMILY_GLOBS[$i]} ]]; then
             return 0
         fi
-    done <<<"$FAMILY_CACHE"
+    done
     return 1
 }
 
 check_impact_rules() {
     local rules="$1" rule_line patterns plan group test_file pattern source_group selected
-    local bad=0 registered_tests tracked_haystack
-    declare -A matched_plans=()
+    local bad=0 registered_tests
+    declare -A matched_plans=() tracked_tests=()
     [ -f "$rules" ] || {
         echo "test-group-list: impact rules missing: $rules" >&2
         return 2
@@ -177,9 +197,9 @@ check_impact_rules() {
     load_registered_cache
     registered_tests="$(git ls-files --cached --others --exclude-standard -- \
         'tests/harness/src/test_*.c')"
-    tracked_haystack="
-${registered_tests}
-"
+    while IFS= read -r test_file; do
+        [ -n "$test_file" ] && tracked_tests["$test_file"]=1
+    done <<<"$registered_tests"
     while IFS=$'\034' read -r rule_line patterns plan; do
         case "$patterns" in
             *[![:space:]]*) ;;
@@ -211,10 +231,7 @@ ${registered_tests}
             esac
             while IFS= read -r test_file; do
                 [ -n "$test_file" ] || continue
-                case "$tracked_haystack" in
-                    *$'\n'"$test_file"$'\n'*) ;;
-                    *) continue ;;
-                esac
+                [ -n "${tracked_tests["$test_file"]+x}" ] || continue
                 matched_plans["$test_file"]="${matched_plans[$test_file]:-}$plan "
             done < <(compgen -G "$pattern" || true)
         done
@@ -230,13 +247,9 @@ ${registered_tests}
         [ -n "$test_file" ] || continue
         plan="${matched_plans[$test_file]:-}"
         [ -n "$plan" ] || continue
-        source_group="$(basename "$test_file" .c)"
-        case "
-${REGISTERED_CACHE}
-" in
-            *$'\n'"$source_group"$'\n'*) ;;
-            *) continue ;;
-        esac
+        source_group="${test_file##*/}"
+        source_group="${source_group%.c}"
+        is_registered "$source_group" || continue
         selected=0
         for group in $plan; do
             if proof_plan_token_selects_full "$group" "$source_group"; then
@@ -254,6 +267,7 @@ ${REGISTERED_CACHE}
 
 resolve_proof() {
     local needle candidate resolved="" exact family_count
+    declare -A resolved_set=()
     load_registered_cache
     for needle in "$@"; do
         # The exact primary is the fail-closed admission check. A canonical
@@ -264,14 +278,12 @@ resolve_proof() {
         while IFS= read -r candidate; do
             [ -n "$candidate" ] || continue
             if proof_plan_token_selects_full "$needle" "$candidate"; then
-                    family_count=$((family_count + 1))
-                    case "
-${resolved}
-" in
-                        *$'\n'"$candidate"$'\n'*) ;;
-                        *) resolved="${resolved}${candidate}
-" ;;
-                    esac
+                family_count=$((family_count + 1))
+                if [ -z "${resolved_set["$candidate"]+x}" ]; then
+                    resolved_set["$candidate"]=1
+                    resolved="${resolved}${candidate}
+"
+                fi
             fi
         done <<<"$REGISTERED_CACHE"
         [ "$family_count" -gt 0 ] || return 1
