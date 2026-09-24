@@ -24,6 +24,10 @@ C23 revisions each generated, compiled, ran the local binary, tested, and
 passed the real two-store factory. The compile-valid wrong-prefix revision
 built and ran, failed its behavior test, and was not factory-verified.
 DEV-accepted and fully accepted counts remain zero.
+Each normal revision added one useful value-source line while preserving and
+testing every earlier prefix; the stage counts also equal useful edit LOC for
+this four-revision slice. Generated test code and package scaffolding are
+excluded from that LOC count.
 
 | Stage | Normal useful revisions | Wrong behavior |
 | --- | ---: | ---: |
