@@ -50,7 +50,9 @@ you are new; this page is about operating a host, not about building.
   reserved in its token accounting. Unknown or exclusive old invocations
   block all new admission. A request queued by the first cutover build stays
   pending until its own global drain gate clears; newer compatible requests
-  can pass it during that interval. Keep the prior script as a private rollback copy.
+  can pass it during that interval. When a command returns, the broker stops
+  its scope if a detached child remains and retains the lease until the scope
+  is inactive. Keep the prior script as a private rollback copy.
   The existing `devbuild` mirror describes the pre-cutover contract until
   installation and qualification complete.
 

@@ -87,6 +87,26 @@ awk -F '\t' '
 }
 printf 'devbuild broker: release proof priority PASS\n'
 
+"$root/devbuild-broker" --wait --project z23 --class normal \
+    bash -c 'sleep 20 & exit 0' >"$scratch/orphan.log" 2>&1
+orphan_id=$(awk -F '\t' '$3 == "queued" {id=$2} END {print id}' \
+    "$DEVBUILD_BROKER_STATE/events.tsv")
+for _ in {1..40}; do
+    scope_state=$(systemctl --user show "devbuild-$orphan_id.scope" \
+        -p ActiveState --value 2>/dev/null || true)
+    [[ $scope_state == inactive || $scope_state == failed ]] && break
+    sleep 0.1
+done
+[[ $scope_state == inactive || $scope_state == failed ]] || {
+    printf 'detached child held the completed scope open\n' >&2; exit 1;
+}
+"$root/devbuild-broker" --wait --project z23 --class normal true \
+    >"$scratch/post-orphan.log" 2>&1
+[[ ! -e $DEVBUILD_BROKER_STATE/running/$orphan_id ]] || {
+    printf 'completed scope retained its broker lease\n' >&2; exit 1;
+}
+printf 'devbuild broker: completed scope contains detached child PASS\n'
+
 printf '#!/usr/bin/env bash\nsleep 1.5\n:\n' >"$scratch/legacy.sh"
 bash "$scratch/legacy.sh" & legacy=$!
 sleep 0.1

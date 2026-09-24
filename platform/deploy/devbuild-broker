@@ -98,13 +98,29 @@ scope_done() {
 }
 cleanup() {
     local rc=$?
+    local stop_requested=0
     /usr/bin/flock 7
     rm -f -- "$new_file"
     if [[ -e $queue_file ]]; then
         rm -f -- "$queue_file"
         printf '%s\t%s\tcancel\t%s\t%s\t%s\n' "$(date +%s%N)" "$id" "$project" "$class" "$rc" >>"$log_file"
     fi
+    /usr/bin/flock -u 7
+    # systemd-run returns with the command's status, but a detached fixture
+    # child can keep its scope (and all broker tokens) alive. Once the wrapper
+    # returns, its work is finished or cancelled: ask systemd to contain any
+    # descendants. Keep the lease until the scope is actually inactive.
+    if [[ -e $run_file ]] && ! scope_done "$unit"; then
+        if systemctl --user stop --no-block "$unit" >/dev/null 2>&1; then
+            stop_requested=1
+        fi
+    fi
+    /usr/bin/flock 7
     if [[ -e $run_file ]]; then
+        if ((stop_requested)); then
+            printf '%s\t%s\tscope_stop_requested\t%s\t%s\t%s\n' \
+                "$(date +%s%N)" "$id" "$project" "$class" "$rc" >>"$log_file"
+        fi
         if scope_done "$unit"; then
             rm -f -- "$run_file"
             printf '%s\t%s\trelease\t%s\t%s\t%s\n' "$(date +%s%N)" "$id" "$project" "$class" "$rc" >>"$log_file"
