@@ -13,6 +13,9 @@ cleanup() {
     rm -rf -- "$scratch"
 }
 trap cleanup EXIT
+[[ $("$root/devbuild-broker" --plan --project z23 make commons-demo) == *'class=background '* ]] || {
+    printf 'commons-demo did not select background admission\n' >&2; exit 1;
+}
 
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 2 >"$scratch/one.log" 2>&1 & one=$!
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 2 >"$scratch/two.log" 2>&1 & two=$!
@@ -81,7 +84,7 @@ awk -F '\t' '
 }
 printf 'devbuild broker: release proof priority PASS\n'
 
-printf '#!/usr/bin/env bash\nsleep 1.5\n' >"$scratch/legacy.sh"
+printf '#!/usr/bin/env bash\nsleep 1.5\n:\n' >"$scratch/legacy.sh"
 bash "$scratch/legacy.sh" & legacy=$!
 sleep 0.1
 printf '%s %s\n' "$(stat -Lc '%d:%i' "$scratch/legacy.sh")" "$(date +%s%N)" \
@@ -113,3 +116,30 @@ wait "$one" "$two"
 grep -q 'RAM 24G' "$scratch/z23-legacy.log"
 grep -q 'RAM 24G' "$scratch/qedc-legacy.log"
 printf 'devbuild broker: legacy 24 GiB project compatibility PASS\n'
+
+printf '#!/usr/bin/env bash\nsleep 5\n:\n' >"$scratch/qedc-legacy.sh"
+bash "$scratch/qedc-legacy.sh" --project qedc & legacy=$!
+sleep 0.1
+printf '%s %s\n' "$(stat -Lc '%d:%i' "$scratch/qedc-legacy.sh")" "$(date +%s%N)" \
+    >"$DEVBUILD_BROKER_STATE/legacy-inode"
+"$root/devbuild-broker" --wait --project z23 --class normal sleep 2 \
+    >"$scratch/foreign-one.log" 2>&1 & one=$!
+"$root/devbuild-broker" --wait --project z23 --class normal sleep 2 \
+    >"$scratch/foreign-two.log" 2>&1 & two=$!
+"$root/devbuild-broker" --wait --project z23 --class hotload sleep 0.1 \
+    >"$scratch/foreign-upgrade.log" 2>&1
+kill -0 "$legacy" 2>/dev/null || {
+    printf 'foreign-project work waited for old QEDC wrapper\n' >&2; exit 1;
+}
+kill -0 "$one" 2>/dev/null && kill -0 "$two" 2>/dev/null || {
+    printf 'two normal lanes did not overlap with hotload and old QEDC\n' >&2
+    exit 1
+}
+wait "$one" "$two"
+wait "$legacy"
+"$root/devbuild-broker" --wait --project z23 --class normal true \
+    >"$scratch/drained-upgrade.log" 2>&1
+[[ ! -e $DEVBUILD_BROKER_STATE/legacy-inode ]] || {
+    printf 'foreign-project marker did not drain\n' >&2; exit 1;
+}
+printf 'devbuild broker: bounded Z23 overlap during old QEDC drain PASS\n'

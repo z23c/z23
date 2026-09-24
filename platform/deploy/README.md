@@ -37,16 +37,20 @@ you are new; this page is about operating a host, not about building.
   Explicit `--class normal` jobs request 8 GiB each. Unclassified calls retain
   the legacy 24 GiB per-project memory ceiling, with unused CPU available
   through the existing collective development slice. CPU, RAM, and I/O
-  admission tokens are bounded under that slice;
+  admission tokens are bounded under that slice. A direct `make commons-demo`
+  command is automatically assigned the background class;
   [`test-devbuild-broker.sh`](test-devbuild-broker.sh) exercises concurrent
   admission, queue order, and the old-wrapper drain gate with short isolated
   scopes. It is not installed by the repository. During a host cutover, write
   the previous script's device/inode and the current nanosecond timestamp to
   `~/.local/state/development/broker-v1/legacy-inode` before atomically
   replacing `~/.local/bin/devbuild`. The new script refuses admission while any
-  interpreter still has that old inode open. Keep the prior script as a private
-  rollback copy. The existing `devbuild` mirror describes the pre-cutover
-  contract until installation and qualification complete.
+  interpreter from the same project still has that old inode open. While only
+  old QEDC wrappers remain, a Z23 job may enter with one 24 GiB QEDC lease
+  reserved in its token accounting. Unknown or exclusive old invocations
+  block all new admission. Keep the prior script as a private rollback copy.
+  The existing `devbuild` mirror describes the pre-cutover contract until
+  installation and qualification complete.
 
 ## What a tracked unit has to earn
 

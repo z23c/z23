@@ -6,13 +6,14 @@ set -euo pipefail
 wait_for_slot=0
 project=${DEVBUILD_PROJECT:-auto}
 class=legacy
+class_explicit=0
 plan=0
 exclusive=0
 while (($#)); do
     case $1 in
         --wait) wait_for_slot=1; shift ;;
         --project) (($# >= 2)) || exit 64; project=$2; shift 2 ;;
-        --class) (($# >= 2)) || exit 64; class=$2; shift 2 ;;
+        --class) (($# >= 2)) || exit 64; class=$2; class_explicit=1; shift 2 ;;
         --exclusive) exclusive=1; shift ;;
         --plan) plan=1; shift ;;
         --) shift; break ;;
@@ -31,8 +32,15 @@ if [[ $project == auto ]]; then
     esac
 fi
 case $project in qedc|z23|exclusive) ;; *) printf 'devbuild: unknown project: %s\n' "$project" >&2; exit 64 ;; esac
+if ((!class_explicit)); then
+    for argument in "$@"; do
+        case $argument in
+            commons-demo|*/commons_journey_acceptance.sh) class=background ;;
+        esac
+    done
+fi
 case $class in
-    legacy) cpu=12; ram=24; io=1; weight=20; priority=100 ;;
+    legacy) cpu=8; ram=24; io=1; weight=40; priority=100 ;;
     hotload) cpu=4; ram=4; io=1; weight=40; priority=300 ;;
     release) cpu=16; ram=20; io=2; weight=30; priority=200 ;;
     normal) cpu=8; ram=8; io=1; weight=20; priority=100 ;;
@@ -135,7 +143,9 @@ reap() {
 # fd 255 while an old invocation waits or runs. New admission begins only
 # after every old interpreter has gone; the old wrapper ignores this marker.
 legacy_drained() {
-    local device_inode created_ns fd observed now_ns
+    local device_inode created_ns fd observed now_ns pid command_line cwd
+    local old_qedc=0 old_other=0
+    legacy_qedc=0
     [[ -f $state/legacy-inode ]] || return 0
     read -r device_inode created_ns <"$state/legacy-inode" || return 1
     [[ $device_inode =~ ^[0-9]+:[0-9]+$ && $created_ns =~ ^[0-9]+$ ]] || return 1
@@ -144,8 +154,30 @@ legacy_drained() {
     for fd in /proc/[0-9]*/fd/255; do
         [[ -e $fd ]] || continue
         observed=$(stat -Lc '%d:%i' "$fd" 2>/dev/null) || continue
-        [[ $observed != "$device_inode" ]] || return 1
+        [[ $observed == "$device_inode" ]] || continue
+        pid=${fd#/proc/}; pid=${pid%%/*}
+        command_line=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) || return 1
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || return 1
+        if [[ $command_line == *' --exclusive '* ||
+              $command_line == *' --project exclusive '* ]]; then
+            old_other=1
+        elif [[ $command_line == *' --project qedc '* ]] ||
+           { [[ $command_line != *' --project '* ]] &&
+             [[ $cwd == */qedc/* || $cwd == */qedc ]]; }; then
+            old_qedc=1
+        else
+            old_other=1
+        fi
     done
+    if ((old_qedc || old_other)); then
+        if ((old_qedc && ! old_other)) && [[ $project == z23 ]]; then
+            # The old QEDC project lock still permits only one 24 GiB job.
+            # Reserve that job's tokens while admitting bounded Z23 work.
+            legacy_qedc=1
+            return 0
+        fi
+        return 1
+    fi
     rm -f -- "$state/legacy-inode"
     printf '%s\tlegacy\tdrained\n' "$now_ns" >>"$log_file"
     return 0
@@ -171,12 +203,17 @@ while :; do
         sleep 0.5
         continue
     fi
-    used_cpu=0 used_ram=0 used_io=0 project_ram=0 ordinary=0 active=0
+    used_cpu=$((legacy_qedc * 8))
+    used_ram=$((legacy_qedc * 24))
+    used_io=$legacy_qedc
+    project_ram=0 project_ordinary=0
+    ordinary=$legacy_qedc active=$legacy_qedc
     for file in "$state"/running/*; do
         [[ -f $file ]] || continue
         read -r _ _ _ p c cp mem disk _ _ <"$file"
         ((used_cpu+=cp, used_ram+=mem, used_io+=disk, active+=1)) || true
         [[ $p != "$project" ]] || ((project_ram+=mem)) || true
+        [[ $p != "$project" || $c == hotload ]] || ((project_ordinary+=1)) || true
         [[ $c == hotload ]] || ((ordinary+=1)) || true
     done
     now_s=$(date +%s)
@@ -203,12 +240,13 @@ while :; do
         if [[ $project == exclusive ]]; then
             ((active == 0)) && admitted=1
         elif ((used_cpu + cpu <= 28 && used_ram + ram <= 48 && used_io + io <= 4 &&
-                project_ram + ram <= 24 && active < 3)); then
+                project_ram + ram <= 24 && active < 4)); then
             if [[ $class == hotload ]]; then
                 admitted=1
-            elif [[ $class == legacy ]] && ((ordinary < 2)); then
+            elif [[ $class == legacy ]] && ((ordinary < 3 && project_ordinary < 2)); then
                 admitted=1
-            elif ((ordinary < 2 && used_cpu + cpu <= 24 && used_ram + ram <= 44 && used_io + io <= 3)); then
+            elif ((ordinary < 3 && project_ordinary < 2 &&
+                    used_cpu + cpu <= 24 && used_ram + ram <= 44 && used_io + io <= 3)); then
                 admitted=1
             fi
         fi
