@@ -2,7 +2,7 @@
 
 # Factory qualification handoff
 
-Snapshot: 2026-09-24T23:21:22Z. Requery native status before changing a
+Snapshot: 2026-09-24T23:58:45Z. Requery native status before changing a
 queue, proof, candidate, or node. This record separates measured local
 verification from owner preview and operator acceptance.
 
@@ -94,6 +94,14 @@ not a Commons candidate or owner acceptance of the peer artifact. Exact roots,
 commands, compiler cohorts, cost, and node-health limitations are in the
 [complete-game peer experiment](./2026-09-24-skycombat-fullgame-peer.md).
 
+An [executable factory control](./2026-09-24-skycombat-platform-link-boundary.md)
+now fixes the package recipe and changes only its declared program. A plain
+C23 program passed both confined store builds and reproductions; one calling
+the game's X11 platform API was refused at the first confined build as
+`BUILD_NOT_INSTALLABLE`. Both package roots, their shared recipe root, and
+reports are recorded there. The real game's X11/OpenGL dependency needs a
+qualified receiver-policy recipe in addition to a complete-game candidate.
+
 An isolated local regtest node stayed responsive at height 0 during factory
 load (100 baseline, 539 during, one after successful block-count RPC), but
 its log emitted `catchup: final commit missing tip hash` before workload and
@@ -133,7 +141,7 @@ acceptance. Cancelled seq39 and seq40 are not publication evidence.
 | ---: | --- | --- |
 | 1 | Exact publication proofs and moving-base retries cost 11,085 s and 6,682 s end to end for seq38/37; stale hook bytes also wasted one full seq38 attempt. | Native land/proof owner |
 | 2 | Two-store `add_commit` and `reproduce_build` cost 396.966/497.373 s (79.8%) in the mixed serial factory run. | Commons factory owner |
-| 3 | This qualification has no complete-game Commons candidate bound to the accepted preview; the aircraft control recipe separately refuses undeclared `libm`. | SkyCombat and Commons recipe owners |
+| 3 | This qualification has no complete-game Commons candidate bound to the accepted preview; a matched X11 program is refused by the confined factory, and the aircraft control separately refuses undeclared `libm`. | SkyCombat and Commons recipe owners |
 | 4 | Height-0 node observations and pre-existing catchup errors leave chain-sync safety under package load unqualified. | Public-node owner |
 
 The highest-leverage throughput repair is reuse of mandatory unit evidence
@@ -142,9 +150,9 @@ movement, followed by fresh mandatory publication evidence and independent
 remote observation. The [`FORWARD_PLAN.md`](../work/FORWARD_PLAN.md) already
 requires this. Native mail sequences 419, 431, 432, 447, and 458 bind the
 measured factory and land costs to their owners. The immediate app release
-step is an exact complete-game candidate with a real preview-to-source binding;
-the aircraft component must also declare `libm` before its own package can
-pass the confined verifier.
+step is an exact complete-game candidate with a real preview-to-source binding
+and a qualified platform dependency recipe. The aircraft component must also
+declare `libm` before its own package can pass the confined verifier.
 
 ## Immediate continuation
 
@@ -171,4 +179,5 @@ Full commands and raw roots are in
 [`2026-09-24-factory-100-skycombat-preview.md`](./2026-09-24-factory-100-skycombat-preview.md),
 [`2026-09-24-factory-adversarial-qualification.md`](./2026-09-24-factory-adversarial-qualification.md),
 the [complete-game peer experiment](./2026-09-24-skycombat-fullgame-peer.md),
+the [platform-link control](./2026-09-24-skycombat-platform-link-boundary.md),
 and the landed second-peer and isolated-node evidence commit named above.
