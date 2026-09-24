@@ -2895,6 +2895,7 @@ static char *pv_fastobj_sidecar(struct pv_plan_ctx *ctx, const char *profile,
  * the caller fails the run closed). */
 /* Read and validate a fast-cache sidecar's committed object_sha3. */
 static bool pv_fast_cache_expected_sha3(const char *side_path,
+                                        const uint8_t key[32],
                                         uint8_t expect[32], char *err,
                                         size_t err_cap)
 {
@@ -2905,19 +2906,12 @@ static bool pv_fast_cache_expected_sha3(const char *side_path,
                        side_path);
         return false;
     }
-    struct json_value doc;
-    json_init(&doc);
-    bool parsed = json_read(&doc, (const char *)sbuf, slen);
+    char key_hex[65];
+    zcl_hex_encode(key, 32, key_hex);
+    bool parsed = vcs_fastobj_sidecar_verify(sbuf, slen, key_hex, expect,
+                                             err, err_cap);
     free(sbuf);
-    const char *osha =
-        parsed ? json_get_str(json_get(&doc, "object_sha3")) : NULL;
-    bool expect_ok = osha && strlen(osha) == 64 &&
-                     zcl_hex_decode(osha, expect, 32);
-    json_free(&doc);
-    if (!expect_ok)
-        (void)snprintf(err, err_cap, "fast cache sidecar invalid: %.200s",
-                       side_path);
-    return expect_ok;
+    return parsed;
 }
 
 /* The object and its sidecar form one logical entry. A per-key lock keeps
@@ -2990,7 +2984,7 @@ static int pv_fast_cache_lookup_locked(const char *cache_dir,
         return -1;
     }
     uint8_t expect[32];
-    if (!pv_fast_cache_expected_sha3(side_path, expect, err, err_cap))
+    if (!pv_fast_cache_expected_sha3(side_path, key, expect, err, err_cap))
         return -1;
     uint8_t actual[32];
     uint64_t bytes = 0;
@@ -3039,21 +3033,31 @@ static int pv_fast_cache_lookup(const char *cache_dir, const uint8_t key[32],
 /* Store a freshly compiled object + sidecar under its key. An existing
  * entry is byte-verified (idempotent), never overwritten; a mismatch is
  * corruption. False with err set (the caller fails the run closed). */
-/* Does the fast-cache entry already at obj_path/side_path byte-match the
- * freshly compiled object/sidecar? */
+/* A shared compile key may serve distinct package roots. Require both
+ * sidecars to bind that key and the stored bytes to match the new object. */
 static bool pv_fast_cache_existing_matches(const char *obj_path,
                                            const char *side_path,
+                                           const uint8_t key[32],
                                            const uint8_t newsha[32],
                                            uint64_t nbytes, const char *side,
                                            size_t side_len)
 {
-    uint8_t ex[32];
+    uint8_t ex[32], old_claim[32], new_claim[32];
     uint64_t ebytes = 0;
     size_t eslen = 0;
     uint8_t *es = pv_read_file(side_path, PV_FASTOBJ_SIDECAR_CAP, &eslen);
-    bool same = pv_sha3_file(obj_path, ex, &ebytes) &&
-                memcmp(ex, newsha, 32) == 0 && ebytes == nbytes && es &&
-                eslen == side_len && memcmp(es, side, eslen) == 0;
+    char key_hex[65], err[240];
+    zcl_hex_encode(key, 32, key_hex);
+    bool same = es &&
+                vcs_fastobj_sidecar_verify(es, eslen, key_hex, old_claim,
+                                           err, sizeof(err)) &&
+                vcs_fastobj_sidecar_verify((const uint8_t *)side, side_len,
+                                           key_hex, new_claim, err,
+                                           sizeof(err)) &&
+                memcmp(old_claim, newsha, 32) == 0 &&
+                memcmp(new_claim, newsha, 32) == 0 &&
+                pv_sha3_file(obj_path, ex, &ebytes) &&
+                memcmp(ex, newsha, 32) == 0 && ebytes == nbytes;
     free(es);
     return same;
 }
@@ -3133,7 +3137,7 @@ static bool pv_fast_cache_store_locked(struct pv_plan_ctx *ctx,
     if (stat(obj_path, &st) == 0 || stat(side_path, &st) == 0) {
         /* Entry materialized between the lookup and now: byte-verify,
          * never overwrite. */
-        bool same = pv_fast_cache_existing_matches(obj_path, side_path,
+        bool same = pv_fast_cache_existing_matches(obj_path, side_path, key,
                                                    newsha, nbytes, side,
                                                    side_len);
         free(side);
