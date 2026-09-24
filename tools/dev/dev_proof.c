@@ -6980,9 +6980,22 @@ static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
  * the build below treats them as up to date instead of relinking the
  * dev object graph. Doing it first also means the build is the LAST
  * thing that touches build/ before the fork. */
+static void dp_stage_timing_note(const struct proof_paths *paths,
+                                  const char *field, int64_t started_us)
+{
+    if (!paths || !paths->phases[0]) return;
+    int64_t elapsed_ms =
+        (platform_time_monotonic_us() - started_us) / 1000;
+    char value[32];
+    int n = snprintf(value, sizeof(value), "%lld", (long long)elapsed_ms);
+    if (elapsed_ms >= 0 && n > 0 && (size_t)n < sizeof(value))
+        (void)zcl_dev_proof_phase_note(paths->phases, field, value);
+}
+
 static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
                               char *why, size_t why_len)
 {
+    int64_t stage_us = platform_time_monotonic_us();
     bool inputs_ready = !test_selected || test_binary_path(w->paths, w->binary);
     inputs_ready = inputs_ready &&
         proof_generation_inputs_prepare(
@@ -6992,16 +7005,21 @@ static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
     if (!inputs_ready) {
         if (!dp_worker_bundle(w, test_selected, why, why_len)) return false;
     }
+    dp_stage_timing_note(w->paths, "prefork_admission_ms", stage_us);
     /* The one build both dimensions share. Nothing after this links
      * anything until both children have exited. */
+    stage_us = platform_time_monotonic_us();
     if ((test_selected || w->lint_reads_artifacts) &&
         !proof_prefork_build(w->paths, w->generation, w->make_jobs,
                              w->lint_reads_artifacts, why, why_len))
         return false;
+    dp_stage_timing_note(w->paths, "prefork_make_ms", stage_us);
+    stage_us = platform_time_monotonic_us();
     if (test_selected &&
         !test_helpers_hash(w->generation, w->generation_binary, w->admitted,
                            w->depfile_root, w->helper_root, why, why_len))
         return false;
+    dp_stage_timing_note(w->paths, "prefork_helper_hash_ms", stage_us);
     proof_phase_mark(w->phases, "prefork_inputs_and_build");
     return true;
 }
@@ -7315,6 +7333,7 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
                                         const char *log_path,
                                         char *why, size_t why_len)
 {
+    int64_t stage_us = platform_time_monotonic_us();
     char jobs[16];
     if (!proof_make_jobs_arg(jobs)) {
         proof_why(why, why_len, "proof_job_count_unavailable");
@@ -7348,6 +7367,8 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
             run_step_why(why, why_len, "original-plan", &report);
         return false;
     }
+    dp_stage_timing_note(paths, "original_make_ms", stage_us);
+    stage_us = platform_time_monotonic_us();
     if (!worktree_exact(root, local, true, why, why_len)) return false;
     uint8_t flags[32], graph[32];
     struct dev_source_record plan_source = {0};
@@ -7358,6 +7379,7 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_prepared_build_plan_source_changed");
         return false;
     }
+    dp_stage_timing_note(paths, "original_plan_verify_ms", stage_us);
     return true;
 }
 
