@@ -16,6 +16,7 @@ struct inv_ev_cap_order {
 };
 struct inv_ev_body_order { int index; const struct inv_body *body; };
 struct inv_ev_body_mark { bool reached; char group[128]; };
+struct inv_ev_resolved_ref { int from; int to; };
 
 static int inv_ev_symbol_cmp(const void *a, const void *b)
 {
@@ -330,6 +331,38 @@ static int inv_ev_resolve_body(const struct inv_ev_body_order *order,
     return found;
 }
 
+/* Body lookup depends only on the frozen scan and include visibility.
+ * Resolve each edge once before fixed-point propagation; -2 means the
+ * callee has no body, while -1 retains an ambiguous body candidate. */
+static struct inv_ev_resolved_ref *inv_ev_resolve_refs(
+    const struct inv_scan *scan, const struct ci_inventory_report *report,
+    const struct inv_ev_body_order *order, const uint8_t *cap_files,
+    size_t stride)
+{
+    struct inv_ev_resolved_ref *edges = zcl_malloc(
+        (size_t)scan->ref_count * sizeof(*edges),
+        "ci_inventory_resolved_refs");
+    if (scan->ref_count && !edges) return NULL;
+    for (int i = 0; i < scan->ref_count; i++) {
+        edges[i].from = -1;
+        edges[i].to = -2;
+        if (!scan->refs[i].enclosing[0]) continue;
+        edges[i].from = inv_ev_resolve_body(order, scan->body_count, scan,
+            report, cap_files, stride, scan->refs[i].enclosing,
+            scan->refs[i].file_index);
+        if (edges[i].from < 0) continue;
+        int begin = inv_ev_body_lower(order, scan->body_count,
+                                      scan->refs[i].callee);
+        if (begin >= scan->body_count ||
+            strcmp(order[begin].body->name, scan->refs[i].callee) != 0)
+            continue;
+        edges[i].to = inv_ev_resolve_body(order, scan->body_count, scan,
+            report, cap_files, stride, scan->refs[i].callee,
+            scan->refs[i].file_index);
+    }
+    return edges;
+}
+
 static bool inv_ev_root_gap_push(struct ci_inventory_report *report,
                                  const struct inv_registered_group *group,
                                  const char *reason, const char *proof)
@@ -414,19 +447,20 @@ bool inv_registered_reachability(const struct inv_scan *scan,
             report->ambiguous_registered_test_roots++;
         }
     }
+    struct inv_ev_resolved_ref *edges = inv_ev_resolve_refs(scan, report,
+        order, cap_files, stride);
+    if (scan->ref_count && !edges) {
+        free(order); free(marks); free(caps); free(cap_files);
+        return false;
+    }
     bool changed;
     int rounds = 0;
     do {
         changed = false;
         for (int i = 0; i < scan->ref_count; i++) {
-            if (!scan->refs[i].enclosing[0]) continue;
-            int from = inv_ev_resolve_body(order, scan->body_count, scan, report,
-                cap_files, stride, scan->refs[i].enclosing,
-                scan->refs[i].file_index);
+            int from = edges[i].from;
             if (from < 0 || !marks[from].reached) continue;
-            int to = inv_ev_resolve_body(order, scan->body_count, scan, report,
-                cap_files, stride, scan->refs[i].callee,
-                scan->refs[i].file_index);
+            int to = edges[i].to;
             if (to < 0 || marks[to].reached) continue;
             marks[to].reached = true;
             inv_cpy(marks[to].group, sizeof(marks[to].group), marks[from].group);
@@ -435,19 +469,9 @@ bool inv_registered_reachability(const struct inv_scan *scan,
         rounds++;
     } while (changed && rounds <= scan->body_count);
     for (int i = 0; i < scan->ref_count; i++) {
-        if (!scan->refs[i].enclosing[0]) continue;
-        int from = inv_ev_resolve_body(order, scan->body_count, scan, report,
-            cap_files, stride, scan->refs[i].enclosing,
-            scan->refs[i].file_index);
+        int from = edges[i].from;
         if (from < 0 || !marks[from].reached) continue;
-        int begin = inv_ev_body_lower(order, scan->body_count,
-                                      scan->refs[i].callee);
-        if (begin >= scan->body_count ||
-            strcmp(order[begin].body->name, scan->refs[i].callee) != 0)
-            continue;
-        if (inv_ev_resolve_body(order, scan->body_count, scan, report,
-                cap_files, stride, scan->refs[i].callee,
-                scan->refs[i].file_index) < 0)
+        if (edges[i].to == -1)
             report->ambiguous_test_call_edges++;
     }
     for (int i = 0; i < report->symbol_count; i++) {
@@ -475,6 +499,6 @@ bool inv_registered_reachability(const struct inv_scan *scan,
                       CI_INVENTORY_TEST_REGISTERED_REACHABLE)
             cap->registered_test_symbols++;
     }
-    free(order); free(marks); free(caps); free(cap_files);
+    free(order); free(marks); free(caps); free(cap_files); free(edges);
     return true;
 }

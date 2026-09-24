@@ -105,7 +105,7 @@ cognition/modules/codeindex/src/codeindex_inventory_body.c:inv_read_registered_g
 cognition/modules/codeindex/src/codeindex_inventory_body.c:inv_scan_bodies:39
 cognition/modules/codeindex/src/codeindex_inventory_body.c:inv_scan_includes:27
 cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_count_uses:44
-cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_registered_reachability:47
+cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_registered_reachability:45
 cognition/modules/codeindex/src/codeindex_inventory_scan.c:inv_collect_dir:20
 cognition/modules/codeindex/src/codeindex_inventory_scan.c:inv_collect_dir#2:22
 cognition/modules/codeindex/src/codeindex_inventory_scan.c:inv_read_arm_symbol_baseline:36
