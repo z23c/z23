@@ -184,8 +184,8 @@ legacy_drained() {
 }
 
 /usr/bin/flock 7
-printf '%s %s %s %s %s %s %s %s %s %s\n' \
-    "$$" "$start_tick" "$unit" "$project" "$class" "$cpu" "$ram" "$io" "$priority" "$start_ns" >"$new_file"
+printf '%s %s %s %s %s %s %s %s %s %s %s\n' \
+    "$$" "$start_tick" "$unit" "$project" "$class" "$cpu" "$ram" "$io" "$priority" "$start_ns" broker-v2 >"$new_file"
 mv -- "$new_file" "$queue_file"
 printf '%s\t%s\tqueued\t%s\t%s\t%s\t%s\t%s\n' \
     "$start_ns" "$id" "$project" "$class" "$cpu" "$ram" "$io" >>"$log_file"
@@ -221,7 +221,13 @@ while :; do
     hot_id= hot_score=-999999 hot_ns=9999999999999999999
     for file in "$state"/queue/*; do
         [[ -f $file ]] || continue
-        read -r _ _ _ _ queued_class _ _ _ pri queued_ns <"$file"
+        read -r _ _ _ _ queued_class _ _ _ pri queued_ns epoch <"$file"
+        # A request started under the first cutover broker cannot pass its
+        # global old-wrapper gate. Keep its place for when that gate drains,
+        # but do not let it block newer compatible work meanwhile.
+        if [[ -e $state/legacy-inode && $epoch != broker-v2 ]]; then
+            continue
+        fi
         score=$((pri + (now_s - queued_ns / 1000000000)))
         if [[ $queued_class == hotload ]]; then
             if ((score > hot_score)) || { ((score == hot_score)) && ((queued_ns < hot_ns)); }; then

@@ -122,6 +122,10 @@ bash "$scratch/qedc-legacy.sh" --project qedc & legacy=$!
 sleep 0.1
 printf '%s %s\n' "$(stat -Lc '%d:%i' "$scratch/qedc-legacy.sh")" "$(date +%s%N)" \
     >"$DEVBUILD_BROKER_STATE/legacy-inode"
+old_tick=$(awk '{print $22}' "/proc/$$/stat")
+printf '%s %s %s z23 legacy 12 24 1 100 %s\n' \
+    "$$" "$old_tick" old-waiter.scope "$(( $(date +%s%N) - 10000000000 ))" \
+    >"$DEVBUILD_BROKER_STATE/queue/old-waiter"
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 2 \
     >"$scratch/foreign-one.log" 2>&1 & one=$!
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 2 \
@@ -136,6 +140,7 @@ kill -0 "$one" 2>/dev/null && kill -0 "$two" 2>/dev/null || {
     exit 1
 }
 wait "$one" "$two"
+rm -f -- "$DEVBUILD_BROKER_STATE/queue/old-waiter"
 wait "$legacy"
 "$root/devbuild-broker" --wait --project z23 --class normal true \
     >"$scratch/drained-upgrade.log" 2>&1
