@@ -502,7 +502,7 @@ else ifneq ($(filter lint lint-cached lint-cold-audit lint-preflight,$(ZCL_EPOCH
 # check-capability-closure (one of its gates) reads the same dev-obj epoch.
 ZCL_EPOCH_PROFILES := dev
 else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
-ZCL_EPOCH_PROFILES := test-fast
+ZCL_EPOCH_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked,$(ZCL_EPOCH_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-strict
 else ifneq ($(filter t-asan test-asan asan-ci zcode-package-asan,$(ZCL_EPOCH_SINGLE_GOAL)),)
@@ -1849,7 +1849,7 @@ ZCL_DEPFILE_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
 else ifneq ($(filter dev-proof-bundle,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
 else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
-ZCL_DEPFILE_PROFILES := test-fast
+ZCL_DEPFILE_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-strict
 else ifneq ($(filter t-asan test-asan asan-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
@@ -3692,10 +3692,10 @@ $(TEST_TSAN_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_TSAN_
 $(TEST_TSAN_LINK_RSP): $(TEST_TSAN_OBJS)
 	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$@,$(TEST_TSAN_OBJS))) test -s "$@"
 
-# Both active runners execute groups that spawn the fixed external package
-# verifier. Build that exact in-tree helper here, not only on the public
-# test-parallel wrapper: fast-ci/pre-push invokes the active fast runner
-# directly, and a clean checkout must not depend on a leftover binary.
+# Both active runners need the fixed package verifier. The source-wide fast
+# runner also needs the gateway and dev node: its fleet group exits with an
+# empty log when either is missing. Build these exact fixtures before tests;
+# a clean checkout must not depend on a leftover binary.
 LINKED_TEST_ENV := env -u ZCL_HOTSWAP_TEST_MODULE \
 	-u ZCL_HOTSWAP_TEST_AUTH
 
@@ -3714,8 +3714,8 @@ test-parallel-fast-active:
 	  $(MAKE) --no-print-directory test-parallel-fast-active-locked
 
 test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
-	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
-	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint $(BIN_DIR)/z23-fleet-gateway $(ZCLASSIC23_DEV_BIN)
+	$(ZCL_TEST_STACK_SETUP) && Z23_TEST_GATEWAY_BIN="$(BIN_DIR)/z23-fleet-gateway" Z23_TEST_NODE_BIN="$(ZCLASSIC23_DEV_BIN)" $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
 
 .PHONY: test-parallel
 # Checkout-locked (see CHECKOUT_LOCK above): the make_lint_gates exclusive lane

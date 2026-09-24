@@ -858,7 +858,7 @@ static int tc_batch_restart_crosstree(void)
         TC_CHECK("restart produces the same 8 keys", stable);
     }
     TC_CHECK("second physical tree copies the fixture",
-             system("rm -rf " TC_FIX2 " && cp -r " TC_FIX " " TC_FIX2
+             system("rm -rf " TC_FIX2 " && cp -pR " TC_FIX " " TC_FIX2
                     " && rm -rf " TC_FIX2 "/.zvcs") == 0);
     {
         struct testcache *tc = testcache_open(TC_FIX2);
