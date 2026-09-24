@@ -4075,6 +4075,228 @@ static int test_hotfork_descriptor_boundary(void)
     return failures;
 }
 
+/* HOT_FORK story adapters are real C files (tools/dev/hotfork_stories/),
+ * rendered into the capsule unity after the owner TU set. This drives one
+ * real owner through the whole reflex path in an isolated fixture root:
+ * the real owner bytes and the real story file, compiled with a real
+ * compiler, forked and dlopen'ed. The unchanged owner must reach
+ * STORY_GREEN, a compile-valid behavioral mutation STORY_RED, and the
+ * artifact cache key must move with the owner or story bytes and with
+ * nothing else. */
+static const char k_dp_hf_root[] = "test-tmp/dev_hotfork_story";
+static const char k_dp_hf_cache[] = "test-tmp/dev_hotfork_story_cache";
+static const char k_dp_hf_owner[] =
+    "contexts/commons/modules/vcs/src/package_policy.c";
+static const char k_dp_hf_story[] =
+    "tools/dev/hotfork_stories/package_policy_boundary_calculation_v1.inc";
+static const char k_dp_hf_rule[] = "publishes_this_week >= ";
+
+struct dp_hf_seen {
+    int event;
+    char phase[32];
+    char key[65];
+    char detail[96];
+};
+
+static bool dp_hf_slurp(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    size_t n = fread(buf, 1, cap - 1, f);
+    bool whole = !ferror(f) && feof(f);
+    fclose(f);
+    buf[n] = 0;
+    return whole && n > 0;
+}
+
+static bool dp_hf_fixture_init(const char *cwd, const char *owner,
+                               const char *story)
+{
+    char flags[PATH_MAX * 4];
+    int n = snprintf(
+        flags, sizeof(flags),
+        "CC=cc\nCXX=g++\n"
+        "COMPILER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "DEV_CFLAGS=-DZCL_DEV_BUILD -std=c23 -Wall -Wextra -Werror -pedantic"
+        " -I%s/engine/modules/hotswap/include"
+        " -I%s/contexts/commons/modules/vcs/include"
+        " -I%s/platform/modules/base/include\n"
+        "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
+        cwd, cwd, cwd);
+    static const char *const defs[] = {
+        "engine/composition/hotswap_swappable.def",
+        "engine/composition/hotswap_islands.def",
+        "engine/composition/hotswap_services.def",
+        "engine/composition/hotswap_shadow_owners.def",
+        "engine/composition/hotfork_capsules.def",
+    };
+    bool ok = n > 0 && n < (int)sizeof(flags) &&
+        dp_mk_write(k_dp_hf_root, "Makefile", "# fixture\n");
+    for (size_t i = 0; ok && i < sizeof(defs) / sizeof(defs[0]); i++)
+        ok = dp_mk_write(k_dp_hf_root, defs[i], "/* fixture */\n");
+    /* The action plan is written last so it is never older than its inputs. */
+    return ok && dp_mk_write(k_dp_hf_root, k_dp_hf_owner, owner) &&
+           dp_mk_write(k_dp_hf_root, k_dp_hf_story, story) &&
+           dp_mk_write(k_dp_hf_root, "build/hotswap-fast/flags.env", flags);
+}
+
+static void dp_hf_copy(char *out, size_t cap, const char *value)
+{
+    (void)snprintf(out, cap, "%s", value ? value : "");
+}
+
+/* One save of the owner through the HOT_FORK path; `seen` gets the event
+ * code plus the published verdict's phase, cache key and story detail. */
+static bool dp_hf_drive(struct dp_hf_seen *seen)
+{
+    static char verdict[16384];
+    static unsigned save_seq;
+    const char *paths[] = { k_dp_hf_owner };
+    char epoch[65];
+    memset(seen, 0, sizeof(*seen));
+    /* The watcher binds every save to a 64-hex edit epoch before the batch
+     * event; STORY_GREEN's proof handoff refuses an unbound save. */
+    snprintf(epoch, sizeof(epoch), "%064x", ++save_seq);
+    if (!zcl_devloop_event_edit_epoch_set(epoch))
+        return false;
+    seen->event = zcl_devloop_hotfork_batch_event(
+        k_dp_hf_root, paths, 1, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
+    (void)zcl_devloop_event_edit_epoch_set("");
+    size_t n = read_native_cycle(k_dp_hf_root, verdict, sizeof(verdict));
+    struct json_value doc = {0};
+    if (n == 0 || !json_read(&doc, verdict, n)) {
+        fprintf(stderr, "hotfork story drive: event=%d published no verdict "
+                "(%zu bytes)\n", seen->event, n);
+        return false;
+    }
+    dp_hf_copy(seen->phase, sizeof(seen->phase),
+               json_get_str(json_get(&doc, "phase")));
+    dp_hf_copy(seen->key, sizeof(seen->key),
+               json_get_str(json_get(json_get(&doc, "build_receipt"),
+                                     "artifact_cache_key")));
+    dp_hf_copy(seen->detail, sizeof(seen->detail),
+               json_get_str(json_get(&doc, "story_detail")));
+    json_free(&doc);
+    return strlen(seen->key) == 64;
+}
+
+static bool dp_hf_expect(const char *stage, const struct dp_hf_seen *seen,
+                         const char *phase, const char *detail)
+{
+    int want_event = strcmp(phase, "STORY_GREEN") == 0
+        ? ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING
+        : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
+    bool ok = seen->event == want_event && strcmp(seen->phase, phase) == 0 &&
+        strstr(seen->detail, detail) != NULL;
+    if (!ok)
+        fprintf(stderr, "hotfork story stage %s: event=%d phase=%s detail=%s "
+                "(want %s %s)\n", stage, seen->event, seen->phase,
+                seen->detail, phase, detail);
+    return ok;
+}
+
+/* Green, unchanged re-save, owner mutation, owner restore. */
+static bool dp_hf_owner_cycle(const char *owner, char *mutated,
+                              struct dp_hf_seen *green)
+{
+    struct dp_hf_seen seen;
+    if (!dp_hf_drive(green) ||
+        !dp_hf_expect("green", green, "STORY_GREEN", "checks=15/15") ||
+        !dp_hf_drive(&seen) ||
+        !dp_hf_expect("unchanged", &seen, "STORY_GREEN", "checks=15/15") ||
+        strcmp(seen.key, green->key) != 0)
+        return false;
+    /* `>=` becomes `>`: still compiles, but a new user may now publish a
+     * second time in one week, which the story refuses. */
+    char *rule = strstr(mutated, k_dp_hf_rule);
+    if (!rule)
+        return false;
+    memmove(rule + sizeof(k_dp_hf_rule) - 3, rule + sizeof(k_dp_hf_rule) - 2,
+            strlen(rule + sizeof(k_dp_hf_rule) - 2) + 1);
+    if (!dp_mk_write(k_dp_hf_root, k_dp_hf_owner, mutated) ||
+        !dp_hf_drive(&seen) ||
+        !dp_hf_expect("mutated", &seen, "STORY_RED", "checks=14/15") ||
+        strcmp(seen.key, green->key) == 0 ||
+        !dp_mk_write(k_dp_hf_root, k_dp_hf_owner, owner) ||
+        !dp_hf_drive(&seen) ||
+        !dp_hf_expect("restored", &seen, "STORY_GREEN", "checks=15/15"))
+        return false;
+    return strcmp(seen.key, green->key) == 0;
+}
+
+/* A comment-only story edit is new story bytes: new key, same verdict. */
+static bool dp_hf_story_cycle(const char *story, char *edited,
+                              const struct dp_hf_seen *green)
+{
+    struct dp_hf_seen seen;
+    size_t n = strlen(story);
+    if (snprintf(edited, n + 64, "%s/* story comment edit */\n", story) <= 0 ||
+        !dp_mk_write(k_dp_hf_root, k_dp_hf_story, edited) ||
+        !dp_hf_drive(&seen) ||
+        !dp_hf_expect("story-edit", &seen, "STORY_GREEN", "checks=15/15") ||
+        strcmp(seen.key, green->key) == 0 ||
+        !dp_mk_write(k_dp_hf_root, k_dp_hf_story, story) ||
+        !dp_hf_drive(&seen))
+        return false;
+    return strcmp(seen.key, green->key) == 0;
+}
+
+/* The fixture's cache and workspace state (under $HOME) stay in test-tmp;
+ * the prior HOME is restored afterwards. The cycle stream is reset from
+ * epoch 0 because no watcher owns this fixture root. */
+static bool dp_hf_env(const char *cwd, bool set)
+{
+    static char saved_home[PATH_MAX];
+    if (!set)
+        return dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE") == 0 &&
+               dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS") == 0 &&
+               (saved_home[0]
+                    ? platform_environment_set("HOME", saved_home, 1) == 0
+                    : dp_environment_unset("HOME") == 0);
+    const char *home = getenv("HOME");
+    char cache[PATH_MAX], state_home[PATH_MAX], why[160] = {0};
+    dp_hf_copy(saved_home, sizeof(saved_home), home);
+    bool ok = snprintf(cache, sizeof(cache), "%s/%s", cwd, k_dp_hf_cache) <
+                  (int)sizeof(cache) &&
+        snprintf(state_home, sizeof(state_home), "%s/%s/home", cwd,
+                 k_dp_hf_cache) < (int)sizeof(state_home) &&
+        platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) == 0 &&
+        platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+        platform_environment_set("HOME", state_home, 1) == 0;
+    return ok && zcl_devloop_cycle_stream_reset(k_dp_hf_root, 0, why,
+                                                sizeof(why));
+}
+
+static int test_hotfork_story_file_green_and_red(void)
+{
+    int failures = 0;
+    TEST("dev platform: HOT_FORK story file drives STORY_GREEN, a behavioral mutation STORY_RED, and the cache key") {
+        static char owner[16384], mutated[16384], story[16384], edited[16448];
+        char cwd[PATH_MAX];
+        struct dp_hf_seen green;
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        ASSERT(!getenv("ZCL_DEV_ARTIFACT_CACHE") &&
+               !getenv("ZCL_DEVLOOP_TEST_PROCESS"));
+        ASSERT(dp_hf_slurp(k_dp_hf_owner, owner, sizeof(owner)));
+        ASSERT(dp_hf_slurp(k_dp_hf_story, story, sizeof(story)));
+        memcpy(mutated, owner, sizeof(owner));
+        test_rm_rf_recursive(k_dp_hf_root);
+        test_rm_rf_recursive(k_dp_hf_cache);
+        ASSERT(dp_hf_fixture_init(cwd, owner, story));
+        ASSERT(dp_hf_env(cwd, true));
+        bool owner_ok = dp_hf_owner_cycle(owner, mutated, &green);
+        bool story_ok = owner_ok && dp_hf_story_cycle(story, edited, &green);
+        ASSERT(dp_hf_env(cwd, false));
+        test_rm_rf_recursive(k_dp_hf_root);
+        test_rm_rf_recursive(k_dp_hf_cache);
+        ASSERT(owner_ok);
+        ASSERT(story_ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_template_generator_concurrency(void)
 {
     int failures = 0;
@@ -4296,6 +4518,7 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_failure_store, 5),
     DP_CASE(test_distill_first_error, 7),
     DP_CASE(test_hotswap_artifact_cache, 5),
+    DP_CASE(test_hotfork_story_file_green_and_red, 5),
     DP_CASE(test_resident_restart_builder, 4),
 #if defined(__APPLE__)
     DP_CASE(test_darwin_attested_descriptor_process, 4),
@@ -4441,7 +4664,7 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 40u + (unsigned)(
+    if (DP_CASE_COUNT != 41u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else
