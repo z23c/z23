@@ -14204,7 +14204,7 @@ endif
 # would throw that admission away.
 .PHONY: proof-lint-prebuild
 proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL) tor-provenance-ready
-	@./tools/lint/check_standalone_tools_link.sh --build-only
+	+@./tools/lint/check_standalone_tools_link.sh --build-only
 	@echo "proof-lint-prebuild: every target the lint dimension can build is fresh"
 
 # One screen of truth from the LAST recorded lint and test runs — reads only
