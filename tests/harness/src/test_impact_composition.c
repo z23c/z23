@@ -3116,6 +3116,7 @@ static int test_ic_proof_checker_binaries(void)
         static const char *const checkers[] = {
             "build/bin/z23-lint",
             "build/bin/z23-fleet-observe",
+            "build/bin/gen_capability_inventory",
         };
         char why[256] = {0};
         for (size_t i = 0; i < sizeof(checkers) / sizeof(checkers[0]); i++) {
@@ -5523,6 +5524,7 @@ static const char *const ic_gen_dep_files[] = {
 #endif
     "build/bin/z23-lint",
     "build/bin/z23-fleet-observe",
+    "build/bin/gen_capability_inventory",
 };
 
 static int test_ic_generation_dependencies_survive_vendor_cleanup(void)
@@ -5968,12 +5970,17 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
                             stubs[i]) < (int)sizeof(script));
             ASSERT(chmod(script, 0755) == 0);
         }
+        ASSERT(ic_write(generation, stubs[0],
+                        "#!/bin/sh\n"
+                        "test \"$#\" -eq 1 && "
+                        "test \"$1\" = build/bin/gen_capability_inventory\n"));
         /* The provisioned checker binaries a sealed generation carries
          * after the docs-tools step; without them no fresh verdict below
          * could be told apart from a missing toolchain. */
         static const char *const tools[] = {
             "build/bin/z23-lint",
             "build/bin/z23-fleet-observe",
+            "build/bin/gen_capability_inventory",
         };
         for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
             ASSERT(ic_write(generation, tools[i], ""));
@@ -6037,6 +6044,7 @@ static int test_ic_generation_docs_fresh_refuses_missing_tools(void)
         static const char *const tools[] = {
             "build/bin/z23-lint",
             "build/bin/z23-fleet-observe",
+            "build/bin/gen_capability_inventory",
         };
         char generation[4096], script[4352], cmd[8704];
         test_make_tmpdir(generation, sizeof(generation),
@@ -6111,14 +6119,6 @@ static int test_ic_generation_docs_tools_builds_the_checker_binaries(void)
     int failures = 0;
     TEST("proof generation: docs-fresh checker binaries are provisioned "
          "before the read-only verification") {
-        /* The exact binaries the four docs-fresh gate scripts exec. The
-         * inventory checker compiles its own with cc and the doc-counts
-         * gate is pure shell, so only these two are built. */
-        static const char *const tools[] = {
-            "build/bin/z23-lint",
-            "build/bin/z23-fleet-observe",
-        };
-        const size_t tool_count = sizeof(tools) / sizeof(tools[0]);
         const char *argv[8];
         char jobs[] = "-j4";
 
@@ -6128,9 +6128,8 @@ static int test_ic_generation_docs_tools_builds_the_checker_binaries(void)
         ASSERT(strcmp(argv[2], jobs) == 0);
         size_t argc = 0;
         while (argv[argc]) argc++;
-        ASSERT(argc == 3 + tool_count);
-        for (size_t i = 0; i < tool_count; i++)
-            ASSERT(ic_argv_has(argv, tools[i]));
+        ASSERT(argc == 4);
+        ASSERT(strcmp(argv[3], "docs-proof-tools") == 0);
 
         /* Refused, never truncated, when the caller has no room. */
         ASSERT(!zcl_dev_proof_test_docs_tools_argv(jobs, argv, 7));

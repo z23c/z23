@@ -4668,6 +4668,7 @@ static bool dp_generation_dependencies(const char *root,
          * can only add fail-closed friction here, never false admission. */
         "build/bin/z23-lint",
         "build/bin/z23-fleet-observe",
+        "build/bin/gen_capability_inventory",
 #if defined(__linux__)
         /* Order-only test-binary prerequisites that no admitted executable
          * links against: the rollback group dlopens these fixture images by
@@ -4718,32 +4719,34 @@ struct dp_docs_fresh_artifact {
     const char *rel;
     const char *check;
     const char *regen;
+    const char *tool_arg;
 };
 
 static const struct dp_docs_fresh_artifact DP_DOCS_FRESH[] = {
     { "docs/CAPABILITY_INVENTORY.jsonl",
       "tools/lint/check_capability_inventory_generated.sh",
-      "make docs-capability-inventory" },
+      "make docs-capability-inventory", "build/bin/gen_capability_inventory" },
     { "docs/agent/EXECUTOR_HEURISTICS.md",
       "tools/lint/check_fleet_facts.sh",
-      "make docs-executor-routing" },
+      "make docs-executor-routing", NULL },
     { "docs/agent/EXECUTOR_HEURISTICS.md",
       "tools/lint/check_fleet_observations.sh",
-      "make docs-executor-routing" },
+      "make docs-executor-routing", NULL },
     { "docs/CODEBASE_MAP.md",
       "tools/scripts/check_doc_counts.sh",
-      "make fix-doc-counts" },
+      "make fix-doc-counts", NULL },
 };
 #define DP_DOCS_FRESH_N (sizeof(DP_DOCS_FRESH) / sizeof(DP_DOCS_FRESH[0]))
 
 /* The checker binaries a sealed generation must carry before any checker
- * above may run: check_fleet_facts.sh execs z23-lint and
- * check_fleet_observations.sh execs z23-fleet-observe. One canonical list
- * feeds both the provisioning step and the fresh gate below, so the gate
- * can never drift out of sync with what provisioning provides. */
+ * above may run: check_fleet_facts.sh execs z23-lint,
+ * check_fleet_observations.sh execs z23-fleet-observe, and the inventory
+ * checker takes the already-built generator. This list gates the fresh
+ * check and mirrors the docs-proof-tools Make prerequisite set. */
 static const char *const DP_DOCS_TOOLS[] = {
     "build/bin/z23-lint",
     "build/bin/z23-fleet-observe",
+    "build/bin/gen_capability_inventory",
 };
 #define DP_DOCS_TOOLS_N (sizeof(DP_DOCS_TOOLS) / sizeof(DP_DOCS_TOOLS[0]))
 
@@ -4823,7 +4826,7 @@ static bool dp_docs_fresh_run_checker(
                    artifact->check);
         return false;
     }
-    const char *argv[] = { script, NULL };
+    const char *argv[] = { script, artifact->tool_arg, NULL };
     char out[4096];
     bool timed_out = false;
     int rc = zcl_spawn_capture_merged_observed(argv, out, sizeof(out),
@@ -4878,29 +4881,24 @@ bool zcl_dev_proof_test_generation_docs_fresh(const char *generation,
 #endif
 
 /* Cap for the docs-tools build argv below: make, --no-print-directory,
- * jobs, two checker binaries, NULL. */
+ * jobs, the proof-tools target, NULL. */
 #define DP_DOCS_TOOLS_ARGV_CAP 8
 
-/* The checker binaries the docs-fresh gate execs out of the sealed
- * generation (DP_DOCS_TOOLS, shared with the gate so provisioning and
- * verification can never name different binaries).
- * check_capability_inventory_generated.sh compiles its own checker with cc
- * and check_doc_counts.sh is pure shell, so only these two need
- * provisioning; both are direct-cc tools with no generated inputs, so
- * they build in a bare generation. `jobs` is stored by pointer and must
- * outlive argv. */
+/* Build the three standalone checkers in one lean Make graph. The array
+ * above is also the freshness gate's required-tool list. `jobs` is stored
+ * by pointer and must outlive argv. */
 static bool dp_docs_tools_argv(const char *jobs, const char **argv,
                                size_t argv_cap)
 {
     size_t n = 0;
-    _Static_assert(3 + DP_DOCS_TOOLS_N + 1 <= DP_DOCS_TOOLS_ARGV_CAP,
-                   "docs-tools argv cap covers make, jobs, binaries, NULL");
+    _Static_assert(5 <= DP_DOCS_TOOLS_ARGV_CAP,
+                   "docs-tools argv cap covers make, jobs, target, NULL");
     if (!jobs || !*jobs || !argv || argv_cap < DP_DOCS_TOOLS_ARGV_CAP)
         return false;
     argv[n++] = "make";
     argv[n++] = "--no-print-directory";
     argv[n++] = jobs;
-    for (size_t i = 0; i < DP_DOCS_TOOLS_N; i++) argv[n++] = DP_DOCS_TOOLS[i];
+    argv[n++] = "docs-proof-tools";
     argv[n] = NULL;
     return true;
 }
@@ -5865,12 +5863,10 @@ static bool proof_make_jobs_arg(char out[16])
     return platform_build_jobs_arg(out);
 }
 
-/* Build the two checker binaries the docs-fresh gate execs, inside the
+/* Build the three checker binaries the docs-fresh gate execs, inside the
  * sealed generation and before the read-only verification runs. A bare
- * generation carries neither (binaries are never warm-seeded), and the
- * gate scripts have no fallback: without this step every script
- * exec-fails and the proof refuses as stale docs even when every file
- * is fresh. The tools build from the sealed sources, so the verdict
+ * generation carries none, and the gate scripts have no fallback. The tools
+ * build from the sealed sources, so the verdict
  * still binds to the sealed bytes; only untracked build outputs change.
  * A build failure is its own typed refusal, never a pass. */
 static bool dp_generation_docs_tools(const struct proof_paths *paths,
