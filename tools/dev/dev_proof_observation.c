@@ -2,12 +2,12 @@
  * purpose: Persist and verify signed per-group runner observations. */
 #include "dev_proof_observation_admission.h"
 
+#include "platform/time_compat.h"
 #include "vcs/vcs_object.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define OBSERVATION_MAX_ROOTS 8192u
 
@@ -55,7 +55,7 @@ bool zcl_dev_observation_record(const char *store_root,
     if (!store_root || !store_root[0] || !key || !group || !root ||
         strlen(group) > ZCL_DEV_VERDICT_LEAF_GROUP_MAX)
         return obs_fail(why, why_len, "observation_arguments_invalid");
-    time_t now = time(NULL);
+    int64_t now = platform_time_wall_unix();
     if (now <= 0)
         return obs_fail(why, why_len, "observation_clock_unavailable");
     struct zcl_dev_verdict_leaf_v1 leaf = {0};
