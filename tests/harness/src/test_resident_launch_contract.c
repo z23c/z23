@@ -815,6 +815,41 @@ static char *rlc_splice_text(const char *text, size_t len,
 enum rlc_preview_fault { RLC_PREVIEW_OK, RLC_PREVIEW_WRONG_ID,
                          RLC_PREVIEW_CRASH, RLC_PREVIEW_BAD_ABI };
 
+static char *rlc_patch_ztasks_app(const char *source, size_t length,
+                                  const char *list_line,
+                                  enum rlc_preview_fault fault)
+{
+    char *empty = rlc_splice_text(source, length, "No tasks yet.", list_line);
+    char *visible = empty ? rlc_splice_text(empty, strlen(empty),
+        "state->tasks[i].done ? \"DONE\" : \"OPEN\"",
+        "state->tasks[i].done ? \"DONE\" : \"TODO\"") : NULL;
+    char *isolated = visible ? rlc_splice_text(visible, strlen(visible),
+        "static int task_preview(char **argv)\n{",
+        "static int task_preview(char **argv)\n{\n"
+        "    char inherited;\n"
+        "    if (getenv(\"Z23_PREVIEW_SECRET\") ||\n"
+        "        read(200, &inherited, 1) >= 0 || errno != EBADF) return 9;") : NULL;
+    free(empty);
+    free(visible);
+    if (isolated && fault != RLC_PREVIEW_OK) {
+        const char *needle = fault == RLC_PREVIEW_WRONG_ID
+            ? "(unsigned long long)state->tasks[i].id,"
+            : fault == RLC_PREVIEW_CRASH
+            ? "static int task_preview(char **argv)\n{"
+            : "printf(\"READY %s\\n\", argv[2]);";
+        const char *replacement = fault == RLC_PREVIEW_WRONG_ID
+            ? "(unsigned long long)(state->tasks[i].id + 1u),"
+            : fault == RLC_PREVIEW_CRASH
+            ? "static int task_preview(char **argv)\n{\n    raise(SIGSEGV);"
+            : "printf(\"WRONG %s\\n\", argv[2]);";
+        char *faulted = rlc_splice_text(isolated, strlen(isolated),
+                                        needle, replacement);
+        free(isolated);
+        isolated = faulted;
+    }
+    return isolated;
+}
+
 static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
                                        const char *semver, uint64_t sequence,
                                        const char *list_line, enum rlc_preview_fault fault,
@@ -837,35 +872,8 @@ static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
             return false;
         }
         if (strcmp(paths[i], "app/main.c") == 0) {
-            char *empty = rlc_splice_text(files[i].content, files[i].len,
-                                          "No tasks yet.", list_line);
-            char *visible = empty ? rlc_splice_text(empty, strlen(empty),
-                "state->tasks[i].done ? \"DONE\" : \"OPEN\"",
-                "state->tasks[i].done ? \"DONE\" : \"TODO\"") : NULL;
-            char *isolated = visible ? rlc_splice_text(visible, strlen(visible),
-                "static int task_preview(char **argv)\n{",
-                "static int task_preview(char **argv)\n{\n"
-                "    char inherited;\n"
-                "    if (getenv(\"Z23_PREVIEW_SECRET\") ||\n"
-                "        read(200, &inherited, 1) >= 0 || errno != EBADF) return 9;") : NULL;
-            free(empty);
-            free(visible);
-            if (isolated && fault != RLC_PREVIEW_OK) {
-                const char *needle = fault == RLC_PREVIEW_WRONG_ID
-                    ? "(unsigned long long)state->tasks[i].id,"
-                    : fault == RLC_PREVIEW_CRASH
-                    ? "static int task_preview(char **argv)\n{"
-                    : "printf(\"READY %s\\n\", argv[2]);";
-                const char *replacement = fault == RLC_PREVIEW_WRONG_ID
-                    ? "(unsigned long long)(state->tasks[i].id + 1u),"
-                    : fault == RLC_PREVIEW_CRASH
-                    ? "static int task_preview(char **argv)\n{\n    raise(SIGSEGV);"
-                    : "printf(\"WRONG %s\\n\", argv[2]);";
-                char *faulted = rlc_splice_text(isolated, strlen(isolated),
-                                                needle, replacement);
-                free(isolated);
-                isolated = faulted;
-            }
+            char *isolated = rlc_patch_ztasks_app(files[i].content,
+                                                   files[i].len, list_line, fault);
             if (!isolated) {
                 for (size_t j = 0; j <= i; j++)
                     free((void *)files[j].content);
@@ -1203,6 +1211,86 @@ static int rlc_preview_time_order(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+struct rlc_preview_context {
+    const char *base, *zcode;
+    struct package_resident_store *store;
+    struct task_update *update;
+    struct package_resident_identity accepted;
+};
+
+static bool rlc_preview_sample(struct rlc_preview_context *ctx, unsigned i,
+                               int64_t *total_us, int64_t *build_us,
+                               int64_t *execute_us)
+{
+    char version[24], line[64], expected[80];
+    (void)snprintf(version, sizeof(version), "0.%u.0", i + 6u);
+    (void)snprintf(line, sizeof(line), "Preview %02u", i);
+    (void)snprintf(expected, sizeof(expected), "%s\n", line);
+    int64_t started = platform_time_monotonic_us();
+    struct rlc_binding candidate;
+    bool installed = rlc_install_ztasks_variant(ctx->base, ctx->zcode,
+        version, i + 6u, line, RLC_PREVIEW_OK, &candidate);
+    int64_t built = platform_time_monotonic_us();
+    if (installed) ctx->update->candidate = rlc_task_identity(&candidate);
+    bool executed = installed && task_update_try(ctx->update, true, false).ok &&
+        rlc_task_wait(ctx->update);
+    struct package_resident_record record;
+    bool preserved = executed && package_resident_record_read(ctx->store, &record).ok &&
+        package_resident_identity_equal(&record.current, &ctx->accepted) &&
+        strcmp(ctx->update->active, "No tasks yet.\n") == 0 &&
+        strcmp(ctx->update->preview, expected) == 0;
+    if (!preserved) {
+        printf("preview fallback cycle=%u reason=%s\n", i, ctx->update->message);
+        return false;
+    }
+    *total_us = platform_time_monotonic_us() - started;
+    *build_us = built - started;
+    *execute_us = *total_us - *build_us;
+    printf("preview sample=%u root=%s receipt=%s artifact_sha3=%s "
+           "edit_to_behavior_us=%lld build_us=%lld execute_us=%lld "
+           "fallback=none\n", i, candidate.root_hex, candidate.receipt_hex,
+           candidate.sha3, (long long)*total_us,
+           (long long)*build_us, (long long)*execute_us);
+    task_update_cancel(ctx->update);
+    return task_update_refresh(ctx->update).ok &&
+        rlc_task_wait(ctx->update) &&
+        strcmp(ctx->update->active, "No tasks yet.\n") == 0;
+}
+
+static int rlc_preview_fault_cases(struct rlc_preview_context *ctx)
+{
+    int failures = 0;
+    struct task_document document = {0}, expected_data = {0};
+    bool task_added = task_document_apply(ctx->store, 0, TASK_DOCUMENT_ADD, 0,
+        "Preserve this task", &document).ok;
+    expected_data = document;
+    RLC_CHECK("preview faults: accepted task data prepared", task_added);
+    if (!task_added) return failures;
+    const enum rlc_preview_fault faults[] = {
+        RLC_PREVIEW_WRONG_ID, RLC_PREVIEW_CRASH, RLC_PREVIEW_BAD_ABI };
+    const char *const labels[] = { "behavior", "crash", "interface" };
+    for (unsigned i = 0; i < 3; ++i) {
+        char version[24], line[64];
+        (void)snprintf(version, sizeof(version), "0.%u.0", i + 26u);
+        (void)snprintf(line, sizeof(line), "Fault %u", i);
+        struct rlc_binding candidate;
+        bool installed = rlc_install_ztasks_variant(ctx->base, ctx->zcode,
+            version, i + 26u, line, faults[i], &candidate);
+        if (installed) ctx->update->candidate = rlc_task_identity(&candidate);
+        bool refused = installed && task_update_try(ctx->update, true, false).ok &&
+            !rlc_task_wait(ctx->update) && ctx->update->phase == TASK_UPDATE_FAILED;
+        struct package_resident_record record;
+        bool fallback = refused && package_resident_record_read(ctx->store, &record).ok &&
+            package_resident_identity_equal(&record.current, &ctx->accepted) &&
+            task_document_read(ctx->store, &document).ok &&
+            rlc_task_equal(&document, &expected_data);
+        RLC_CHECK("preview faults: bad behavior, crash or interface retains N and data",
+                  fallback);
+        printf("preview fallback kind=%s reason=%s\n", labels[i], ctx->update->message);
+    }
+    return failures;
+}
+
 /* Each sample edits package C, builds a distinct artifact, then observes its
  * new output through the confined Try path while N remains accepted. */
 static int rlc_task_preview_latency(const char *base, const char *zcode,
@@ -1214,6 +1302,7 @@ static int rlc_task_preview_latency(const char *base, const char *zcode,
     struct package_resident_store store = {0};
     struct task_update update = {0};
     struct package_resident_identity accepted = rlc_task_identity(n);
+    struct rlc_preview_context ctx = { base, zcode, &store, &update, accepted };
     bool opened = package_resident_store_open_app(&store, base,
         "contract/task-preview-latency").ok &&
         task_update_open(&update, base, store.app, verifier, &accepted).ok &&
@@ -1227,45 +1316,12 @@ static int rlc_task_preview_latency(const char *base, const char *zcode,
     int64_t times[20], build_times[20], preview_times[20];
     unsigned measured = 0;
     for (unsigned i = 0; i < 20; ++i) {
-        char version[24], line[64], expected[80];
-        (void)snprintf(version, sizeof(version), "0.%u.0", i + 6u);
-        (void)snprintf(line, sizeof(line), "Preview %02u", i);
-        (void)snprintf(expected, sizeof(expected), "%s\n", line);
-        int64_t started = platform_time_monotonic_us();
-        struct rlc_binding candidate;
-        bool installed = rlc_install_ztasks_variant(base, zcode, version,
-            i + 6u, line, RLC_PREVIEW_OK, &candidate);
-        int64_t built = platform_time_monotonic_us();
-        if (installed) update.candidate = rlc_task_identity(&candidate);
-        bool executed = installed && task_update_try(&update, true, false).ok &&
-            rlc_task_wait(&update);
-        struct package_resident_record record;
-        bool preserved = executed && package_resident_record_read(&store, &record).ok &&
-            package_resident_identity_equal(&record.current, &accepted) &&
-            strcmp(update.active, "No tasks yet.\n") == 0 &&
-            strcmp(update.preview, expected) == 0;
-        RLC_CHECK("preview latency: distinct compiled bytes execute while N stays selected",
-                  preserved);
-        if (!preserved) {
-            printf("preview fallback cycle=%u reason=%s\n", i, update.message);
-            break;
-        }
-        int64_t elapsed = platform_time_monotonic_us() - started;
-        times[measured] = elapsed;
-        build_times[measured] = built - started;
-        preview_times[measured] = elapsed - build_times[measured];
-        ++measured;
-        printf("preview sample=%u root=%s receipt=%s artifact_sha3=%s "
-               "edit_to_behavior_us=%lld build_us=%lld execute_us=%lld "
-               "fallback=none\n", i, candidate.root_hex, candidate.receipt_hex,
-               candidate.sha3, (long long)elapsed,
-               (long long)(built - started),
-               (long long)(elapsed - (built - started)));
-        task_update_cancel(&update);
-        bool returned = task_update_refresh(&update).ok &&
-            rlc_task_wait(&update) && strcmp(update.active, "No tasks yet.\n") == 0;
-        RLC_CHECK("preview latency: accepted N still executes after Try", returned);
+        bool returned = rlc_preview_sample(&ctx, i, &times[i],
+                                            &build_times[i], &preview_times[i]);
+        RLC_CHECK("preview latency: distinct edited candidate executes and N stays usable",
+                  returned);
         if (!returned) break;
+        ++measured;
     }
     if (measured == 20) {
         qsort(times, measured, sizeof(times[0]), rlc_preview_time_order);
@@ -1283,35 +1339,7 @@ static int rlc_task_preview_latency(const char *base, const char *zcode,
     RLC_CHECK("preview latency: all distinct edit-to-behavior samples completed",
               measured == 20);
 
-    struct task_document document = {0}, expected_data = {0};
-    bool task_added = task_document_apply(&store, 0, TASK_DOCUMENT_ADD, 0,
-        "Preserve this task", &document).ok;
-    expected_data = document;
-    RLC_CHECK("preview faults: accepted task data prepared", task_added);
-    if (task_added) {
-        const enum rlc_preview_fault faults[] = {
-            RLC_PREVIEW_WRONG_ID, RLC_PREVIEW_CRASH, RLC_PREVIEW_BAD_ABI };
-        const char *const labels[] = { "behavior", "crash", "interface" };
-        for (unsigned i = 0; i < 3; ++i) {
-            char version[24], line[64];
-            (void)snprintf(version, sizeof(version), "0.%u.0", i + 26u);
-            (void)snprintf(line, sizeof(line), "Fault %u", i);
-            struct rlc_binding candidate;
-            bool installed = rlc_install_ztasks_variant(base, zcode, version,
-                i + 26u, line, faults[i], &candidate);
-            if (installed) update.candidate = rlc_task_identity(&candidate);
-            bool refused = installed && task_update_try(&update, true, false).ok &&
-                !rlc_task_wait(&update) && update.phase == TASK_UPDATE_FAILED;
-            struct package_resident_record record;
-            bool fallback = refused && package_resident_record_read(&store, &record).ok &&
-                package_resident_identity_equal(&record.current, &accepted) &&
-                task_document_read(&store, &document).ok &&
-                rlc_task_equal(&document, &expected_data);
-            RLC_CHECK("preview faults: bad behavior, crash or interface retains N and data",
-                      fallback);
-            printf("preview fallback kind=%s reason=%s\n", labels[i], update.message);
-        }
-    }
+    failures += rlc_preview_fault_cases(&ctx);
 done:
     (void)task_update_finish(&update);
     (void)package_resident_store_close(&store);
