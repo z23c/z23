@@ -5149,6 +5149,10 @@ _test_next:;
     return failures;
 }
 
+#if !defined(_WIN32)
+static int test_dev_land_rebase_regen_cases(void);
+#endif
+
 int test_dev_land(void)
 {
     int failures = 0;
@@ -7002,6 +7006,7 @@ int test_dev_land(void)
     failures += test_dev_land_regen_refreshes_plan_on_identical_rewrite();
     failures += test_dev_land_regen_leaves_plan_alone_when_untouched();
     failures += test_dev_land_final_plan_preparation();
+    failures += test_dev_land_rebase_regen_cases();
 
 #endif /* !defined(_WIN32) */
 
@@ -7013,3 +7018,367 @@ _test_next:;
         printf("test_dev_land: %d FAILED\n", failures);
     return failures;
 }
+
+/* ── rebase regeneration for tips that carry merges ───────────────────────
+ *
+ * The shape that stranded land queue row 30: a long-lived candidate that
+ * merged origin/main into itself (resolving the inventory, and sometimes
+ * real source, by hand), then main moved again before it landed. A plain
+ * `git rebase` replays each non-merge commit and throws those resolutions
+ * away, so a later replayed commit conflicts on real source and the
+ * generated-artifact auto-resolve correctly declines. The cases below pin
+ * the landing path that keeps the candidate's resolved tree instead, and
+ * the ones that must still refuse. */
+#if !defined(_WIN32)
+
+struct dlx_mtip {
+    char m1[64];  /* main after the train the candidate merged */
+    char m2[64];  /* main after the train that raced it */
+    char tip[64]; /* the submitted candidate tip */
+};
+
+/* A commit signed by the clone's AMBIENT signer (dlx_sign_arm): the lander
+ * refuses to queue an unsigned tip outside the unsigned fixture seam. */
+static bool dlx_mtip_commit(const char *dir, const char *msg, char out[64])
+{
+    const char *add[] = { "add", "-A", NULL };
+    const char *commit[] = { "commit", "--quiet", "--no-verify", "-m", msg,
+                             NULL };
+    const char *head[] = { "rev-parse", "HEAD", NULL };
+    if (dlx_git(dir, add) != 0 || dlx_git(dir, commit) != 0)
+        return false;
+    return dlx_git_out(dir, head, out, 64) == 0 && strlen(out) == 40;
+}
+
+static bool dlx_mtip_write2(const char *dir, const char *inv_body,
+                            const char *path, const char *body)
+{
+    return dlx_write_dep(dir, "docs/CAPABILITY_INVENTORY.jsonl", inv_body) &&
+           dlx_write_dep(dir, path, body);
+}
+
+static bool dlx_mtip_step(const char *dir, const char *inv_body,
+                          const char *path, const char *body,
+                          const char *msg, char out[64])
+{
+    return dlx_mtip_write2(dir, inv_body, path, body) &&
+           dlx_mtip_commit(dir, msg, out);
+}
+
+/* base on main ; candidate c1 (a.txt, inventory) on branch cand ; main M1
+ * (a.txt, inventory) pushed ; left on cand. */
+static bool dlx_mtip_diverge(struct dlx_rig *rig, struct dlx_mtip *out)
+{
+    char scratch[64];
+    const char *c = rig->clone;
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    const char *to_cand[] = { "checkout", "--quiet", "-b", "cand", NULL };
+    const char *to_main[] = { "checkout", "--quiet", "main", NULL };
+    const char *back[] = { "checkout", "--quiet", "cand", NULL };
+    return dlx_mtip_step(c, "base\n", "a.txt", "base\n", "base", scratch) &&
+           dlx_git(c, push) == 0 && dlx_git(c, to_cand) == 0 &&
+           dlx_mtip_step(c, "mine1\n", "a.txt", "mine1\n", "candidate one",
+                         scratch) &&
+           dlx_git(c, to_main) == 0 &&
+           dlx_mtip_step(c, "theirs1\n", "a.txt", "theirs1\n", "train one",
+                         out->m1) &&
+           dlx_git(c, push) == 0 && dlx_git(c, back) == 0;
+}
+
+/* ...then the candidate merges M1 resolving a.txt and the inventory by
+ * hand ; candidate c2 (c.txt, inventory, and b.txt when `source_conflict`)
+ * is the submitted tip ; main M2 (b.txt, inventory) is pushed. The
+ * candidate's net change against M1 meets M2 only on the inventory unless
+ * `source_conflict`. */
+static bool dlx_mtip_rig(struct dlx_rig *rig, bool source_conflict,
+                         struct dlx_mtip *out)
+{
+    char scratch[64];
+    const char *c = rig->clone;
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    const char *to_main[] = { "checkout", "--quiet", "main", NULL };
+    const char *merge[] = { "-c", "user.name=land", "-c",
+                            "user.email=land@z23.invalid", "merge",
+                            "--quiet", "--no-edit", "--no-gpg-sign", "main",
+                            NULL };
+    if (!dlx_mtip_diverge(rig, out))
+        return false;
+    /* Conflicts on a.txt and the inventory by construction; the hand
+     * resolution is exactly what a per-commit replay throws away. */
+    (void)dlx_git(c, merge);
+    if (!dlx_mtip_step(c, "merged\n", "a.txt", "merged\n", "integrate main",
+                       scratch))
+        return false;
+    if (source_conflict && !dlx_write_dep(c, "b.txt", "mine2\n"))
+        return false;
+    return dlx_mtip_step(c, "mine2\n", "c.txt", "mine2\n", "candidate two",
+                         out->tip) &&
+           dlx_git(c, to_main) == 0 &&
+           dlx_mtip_step(c, "theirs2\n", "b.txt", "theirs2\n", "train two",
+                         out->m2) &&
+           dlx_git(c, push) == 0;
+}
+
+static bool dlx_land_log_has(const char *needle)
+{
+    char landdir[1200], path[1300], log[65536];
+    size_t len = 0;
+    dlx_landdir(landdir, sizeof(landdir));
+    (void)snprintf(path, sizeof(path), "%s/logs/land-1-a1.log", landdir);
+    if (!dlx_slurp(path, log, sizeof(log) - 1, &len))
+        return false;
+    log[len] = '\0';
+    return strstr(log, needle) != NULL;
+}
+
+static int test_dev_land_merge_tip_regenerates(void)
+{
+    int failures = 0;
+    TEST("land: a merge-bearing tip that main moved past keeps its resolved "
+         "tree and auto-regenerates the inventory instead of conflicting") {
+        struct dlx_rig rig;
+        struct dlx_mtip m;
+        struct dlx_call c;
+        char landwt[1300], out[512], expect[256];
+        const char *subject[] = { "log", "-1", "--format=%s", NULL };
+        const char *sig_head[] = { "log", "-1", "--format=%G?", "HEAD",
+                                   NULL };
+        const char *sig_cand[] = { "log", "-1", "--format=%G?", "HEAD~1",
+                                   NULL };
+        const char *parent[] = { "show", "-s", "--format=%P", "HEAD~1",
+                                 NULL };
+        const char *body[] = { "log", "-1", "--format=%B", "HEAD~1", NULL };
+        const char *a_txt[] = { "show", "HEAD:a.txt", NULL };
+        const char *b_txt[] = { "show", "HEAD:b.txt", NULL };
+        const char *c_txt[] = { "show", "HEAD:c.txt", NULL };
+        const char *head[] = { "rev-parse", "HEAD", NULL };
+        const char *remote[] = { "rev-parse", "main", NULL };
+        char prepared[64];
+        dlx_isolate("mtipregen");
+        ASSERT(dlx_rig_make(&rig, "mtipregen_rig"));
+        ASSERT(dlx_sign_arm(rig.clone, "mtipregen_key"));
+        ASSERT(dlx_mtip_rig(&rig, false, &m));
+        /* Production signing throughout the rebase step. */
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
+        dlx_submit(&c, &rig, m.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "rebase: regenerated docs/CAPABILITY_INVENTORY.jsonl")
+               != NULL);
+        dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        ASSERT(dlx_git_out(landwt, subject, out, sizeof(out)) == 0);
+        ASSERT(strncmp(out, "Regenerate the capability inventory after "
+                            "rebasing onto ",
+                       strlen("Regenerate the capability inventory after "
+                              "rebasing onto ")) == 0);
+        /* The candidate's hand resolution survived; main's later train and
+         * the candidate's later work are both present. */
+        ASSERT(dlx_git_out(landwt, a_txt, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, "merged");
+        ASSERT(dlx_git_out(landwt, b_txt, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, "theirs2");
+        ASSERT(dlx_git_out(landwt, c_txt, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, "mine2");
+        /* One linear candidate commit on the new main, then the
+         * regeneration commit, both signed by the lander's signer. */
+        ASSERT(dlx_git_out(landwt, parent, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, m.m2);
+        ASSERT(dlx_git_out(landwt, sig_cand, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, "G");
+        ASSERT(dlx_git_out(landwt, sig_head, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, "G");
+        ASSERT(dlx_git_out(landwt, body, out, sizeof(out)) == 0);
+        (void)snprintf(expect, sizeof(expect), "Original-Candidate: %s",
+                       m.tip);
+        ASSERT(strstr(out, expect) != NULL);
+        (void)snprintf(expect, sizeof(expect), "Original-Base: %s", m.m1);
+        ASSERT(strstr(out, expect) != NULL);
+        /* A replayed candidate's own source tree is not claimed. */
+        ASSERT(strstr(out, "Source-Tree:") == NULL);
+        ASSERT(dlx_land_log_has("rebase: regenerated "
+                                "docs/CAPABILITY_INVENTORY.jsonl"));
+        ASSERT(dlx_land_log_has("linearized merge-bearing candidate "));
+        /* And it lands. */
+        ASSERT(dlx_git_out(landwt, head, prepared, sizeof(prepared)) == 0);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        ASSERT(dlx_git_out(rig.bare, remote, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, prepared);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_merge_tip_source_conflict(void)
+{
+    int failures = 0;
+    TEST("land: a merge-bearing tip with a real source conflict beside the "
+         "generated one is still a conflict") {
+        struct dlx_rig rig;
+        struct dlx_mtip m;
+        struct dlx_call c;
+        char out[64];
+        const char *remote[] = { "rev-parse", "main", NULL };
+        dlx_isolate("mtipsrc");
+        ASSERT(dlx_rig_make(&rig, "mtipsrc_rig"));
+        ASSERT(dlx_sign_arm(rig.clone, "mtipsrc_key"));
+        ASSERT(dlx_mtip_rig(&rig, true, &m));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
+        dlx_submit(&c, &rig, m.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
+        ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
+        ASSERT(strstr(dlx_str(&c, "detail"), "b.txt") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "docs/CAPABILITY_INVENTORY.jsonl") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "rebase: regenerated") ==
+               NULL);
+        dlx_end(&c);
+        ASSERT(dlx_git_out(rig.bare, remote, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, m.m2);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* A linear two-commit tip whose FIRST replayed commit conflicts only on
+ * the inventory and whose SECOND conflicts on real source: the conflict
+ * outcome is unchanged (it names the original unmerged list), and the
+ * attempt log now says why the auto-resolve stopped. Row 30's a2 log said
+ * only "rebase conflict: docs/CAPABILITY_INVENTORY.jsonl". */
+static int test_dev_land_late_conflict_named(void)
+{
+    int failures = 0;
+    TEST("land: an auto-resolve that stops on a later replayed commit "
+         "names the path that stopped it") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char scratch[64], tip[64];
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
+                               NULL };
+        const char *to_cand[] = { "checkout", "--quiet", "-b", "cand",
+                                  NULL };
+        const char *to_main[] = { "checkout", "--quiet", "main", NULL };
+        dlx_isolate("lateconf");
+        ASSERT(dlx_rig_make(&rig, "lateconf_rig"));
+        ASSERT(dlx_mtip_write2(rig.clone, "base\n", "a.txt", "base\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "base", scratch));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_git(rig.clone, to_cand) == 0);
+        ASSERT(dlx_mtip_write2(rig.clone, "mine1\n", "x.txt", "mine1\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "candidate one", scratch));
+        ASSERT(dlx_mtip_write2(rig.clone, "mine2\n", "a.txt", "mine2\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "candidate two", tip));
+        ASSERT(dlx_git(rig.clone, to_main) == 0);
+        ASSERT(dlx_mtip_write2(rig.clone, "theirs\n", "a.txt", "theirs\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "train", scratch));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_sign_arm(rig.clone, "lateconf_key"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
+        ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
+        ASSERT_STR_EQ(dlx_str(&c, "detail"),
+                      "docs/CAPABILITY_INVENTORY.jsonl");
+        dlx_end(&c);
+        ASSERT(dlx_land_log_has("rebase auto-resolve stopped: a replayed "
+                                "commit conflicted outside the regenerated "
+                                "artifacts: "));
+        ASSERT(dlx_land_log_has("a.txt"));
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* The real generator (a make target in the rig's Makefile, no stub) exits
+ * nonzero after the auto-resolve: the row fails in the rebase dimension
+ * and names the artifact and the target, and nothing is pushed. */
+static int test_dev_land_regen_generator_fails(void)
+{
+    int failures = 0;
+    TEST("land: a regenerate command that fails after the auto-resolve "
+         "refuses the row by name") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char tip[64], before[64], out[64];
+        const char *remote[] = { "rev-parse", "main", NULL };
+        dlx_isolate("regengenfail");
+        ASSERT(dlx_rig_make_docregen(&rig, "regengenfail_rig", "@false",
+                                     "@:", "@:"));
+        ASSERT(dlx_regen_conflict(&rig, NULL, tip));
+        ASSERT(dlx_git_out(rig.bare, remote, before, sizeof(before)) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
+        ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "regenerating docs/CAPABILITY_INVENTORY.jsonl "
+                      "(docs-capability-inventory) failed after "
+                      "auto-resolving the rebase") != NULL);
+        dlx_end(&c);
+        ASSERT(dlx_git_out(rig.bare, remote, out, sizeof(out)) == 0);
+        ASSERT_STR_EQ(out, before);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_rebase_regen_cases(void)
+{
+    int failures = 0;
+    failures += test_dev_land_merge_tip_regenerates();
+    failures += test_dev_land_merge_tip_source_conflict();
+    failures += test_dev_land_late_conflict_named();
+    failures += test_dev_land_regen_generator_fails();
+    return failures;
+}
+
+#endif /* !defined(_WIN32) */

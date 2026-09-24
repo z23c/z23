@@ -3771,7 +3771,10 @@ static bool dl_regen_stub_write(const char *wt, const char *rel)
 /* One make target in the landing worktree — a generator or a gate. Same
  * spawn seam, same transcript handling and same actionable-line triage as
  * dl_lint_fast() below: generation uses the same `make` execution path.
- * `line` receives the first
+ * Trust: the targets are the CANDIDATE's own Makefile recipes, run in the
+ * private landing worktree -- the tree whose tools the lint and prebuild
+ * below already build and execute -- so this adds no execution exposure
+ * the landing did not already have. `line` receives the first
  * line a person can act on when the target failed. */
 static int dl_regen_make(const struct dl_dirs *d, struct dl_row *row,
                          const char *target, char *line, size_t line_cap)
@@ -4005,6 +4008,30 @@ static int dl_regen_run(const struct dl_dirs *d, struct dl_row *row,
     return 1;
 }
 
+/* Why an auto-resolve that already settled one replayed commit handed a
+ * later one back as a conflict. An empty list means `rebase --continue`
+ * failed without leaving an unmerged path: the replayed commit itself was
+ * refused, the signer included -- no unsigned commit is ever made here. */
+static void dl_regen_stop_log(struct dl_row *row, const char *paths)
+{
+    char note[DL_REGEN_PATHS_CAP + 160];
+    if (!paths || !paths[0]) {
+        dl_log(row, "rebase auto-resolve stopped: git rebase --continue "
+                    "failed with no unmerged path (the replayed commit, or "
+                    "its signature, was refused)\n");
+        return;
+    }
+    (void)snprintf(note, sizeof(note),
+                   "rebase auto-resolve stopped: a replayed commit "
+                   "conflicted outside the regenerated artifacts: %.*s\n",
+                   (int)DL_REGEN_PATHS_CAP, paths);
+    for (char *p = note; p[0] && p[1]; p++) {
+        if (*p == '\n')
+            *p = ' ';
+    }
+    dl_log(row, note);
+}
+
 /* Drive a conflicted rebase to completion when — and only when — every
  * conflicted path is a regenerated artifact, on every replayed commit.
  *
@@ -4055,9 +4082,13 @@ static int dl_rebase_autoresolve(const struct dl_dirs *d, struct dl_row *row,
         dl_trim(paths);
         /* A nonzero continue with no unmerged paths is a rebase failure
          * this cannot name; so is one naming anything outside the table.
-         * Both fall back to the caller's ordinary conflict outcome. */
-        if (!dl_regen_only(paths, seen))
+         * Both fall back to the caller's ordinary conflict outcome, whose
+         * detail names only the FIRST commit's unmerged list -- so the
+         * attempt log says what actually stopped the auto-resolve. */
+        if (!dl_regen_only(paths, seen)) {
+            dl_regen_stop_log(row, paths);
             return 0;
+        }
     }
     (void)snprintf(why, why_cap, "%s",
                    "the rebase kept conflicting on regenerated artifacts "
@@ -4066,15 +4097,23 @@ static int dl_rebase_autoresolve(const struct dl_dirs *d, struct dl_row *row,
 }
 
 /* Preserve the resolved source while giving the integrated proposal a linear
- * publication identity. The queue retains the original submitted tip. */
+ * publication identity. The queue retains the original submitted tip.
+ * `replay` marks a commit dl_rebase() will replay onto a newer main, where
+ * its parent and tree both change: its message then records only what stays
+ * true after that replay, the submitted tip and the base it was cut from. */
 static bool dl_linear_commit(const struct dl_dirs *d, struct dl_row *row,
-    const char *base, const char *tree, char commit[80])
+    const char *base, const char *tree, bool replay, char commit[80])
 {
     char message[512];
-    (void)snprintf(message, sizeof(message),
-        "Prepare integrated candidate for linear publication\n\n"
-        "Original-Candidate: %s\nIntegrated-Base: %s\nSource-Tree: %s",
-        row->tip, base, tree);
+    if (replay)
+        (void)snprintf(message, sizeof(message),
+            "Prepare candidate for linear publication\n\n"
+            "Original-Candidate: %s\nOriginal-Base: %s", row->tip, base);
+    else
+        (void)snprintf(message, sizeof(message),
+            "Prepare integrated candidate for linear publication\n\n"
+            "Original-Candidate: %s\nIntegrated-Base: %s\nSource-Tree: %s",
+            row->tip, base, tree);
     const char *allow = dl_allow_unsigned();
     bool fixture = allow && strcmp(allow, "1") == 0 && dl_stub() != NULL;
     const char *args[10];
@@ -4092,8 +4131,24 @@ static bool dl_linear_commit(const struct dl_dirs *d, struct dl_row *row,
     return dl_rev_parse(d->wt, commit, checked) && strcmp(commit, checked) == 0;
 }
 
+static void dl_linear_log(struct dl_row *row, const char *base,
+    const char *commit, const char *tree, bool replay)
+{
+    char note[480];
+    if (replay)
+        (void)snprintf(note, sizeof(note),
+            "linearized merge-bearing candidate %s as %s at merge-base %s "
+            "with exact tree %s; replaying it onto current main\n",
+            row->tip, commit, base, tree);
+    else
+        (void)snprintf(note, sizeof(note),
+            "prepared linear candidate %s from %s with exact tree %s\n",
+            commit, row->tip, tree);
+    dl_log(row, note);
+}
+
 static bool dl_linearize(const struct dl_dirs *d, struct dl_row *row,
-    const char *base, char *why, size_t why_cap)
+    const char *base, bool replay, char *why, size_t why_cap)
 {
     char range[160], merges[80], tree[80], commit[80], checked[80];
     (void)snprintf(range, sizeof(range), "%s..%s", base, row->tip);
@@ -4108,18 +4163,41 @@ static bool dl_linearize(const struct dl_dirs *d, struct dl_row *row,
     if (dl_git(d->wt, tree_args, tree, sizeof(tree), DL_GIT_TIMEOUT_MS) != 0)
         return false;
     dl_trim(tree);
-    if (!dl_linear_commit(d, row, base, tree, commit) ||
+    if (!dl_linear_commit(d, row, base, tree, replay, commit) ||
         dl_git(d->wt, checkout_args, NULL, 0, DL_GIT_TIMEOUT_MS) != 0 ||
         dl_git(d->wt, tree_args, checked, sizeof(checked), DL_GIT_TIMEOUT_MS) != 0)
         return false;
     dl_trim(checked);
     if (strcmp(tree, checked) != 0) return false;
-    char note[320];
-    (void)snprintf(note, sizeof(note),
-        "prepared linear candidate %s from %s with exact tree %s\n",
-        commit, row->tip, tree);
-    dl_log(row, note);
+    dl_linear_log(row, base, commit, tree, replay);
     return true;
+}
+
+/* A tip main has moved past is rebased, and a plain `git rebase` replays
+ * each non-merge commit one at a time, DISCARDING the conflict resolutions
+ * the tip's own merges of main recorded. A long-lived candidate that merged
+ * main into itself (resolving the generated inventory and real source by
+ * hand) therefore re-conflicts on a later replayed commit, on source it had
+ * already resolved; the generated-artifact auto-resolve correctly declines
+ * that, and the row ends as a conflict nobody needed (land queue row 30,
+ * docs/CAPABILITY_INVENTORY.jsonl). Cut the tip's exact tree as ONE commit
+ * on merge-base(main, tip) first -- the same tree-preserving step and the
+ * same signer an integrated tip takes above -- so the rebase replays the
+ * candidate's net change once and conflicts only where that net change and
+ * main's newer work really overlap. A tip with no merges past the merge
+ * base is replayed commit by commit exactly as before. */
+static bool dl_linearize_for_rebase(const struct dl_dirs *d,
+    struct dl_row *row, const char *observed_main, char *why, size_t why_cap)
+{
+    char mb[80];
+    const char *mb_args[] = { "--no-replace-objects", "merge-base",
+                              observed_main, row->tip, NULL };
+    /* No common ancestor (or none git will name): there is no base to cut
+     * against, and the rebase below reports that the way it always has. */
+    if (dl_git(d->wt, mb_args, mb, sizeof(mb), DL_GIT_TIMEOUT_MS) != 0)
+        return true;
+    dl_trim(mb);
+    return !mb[0] || dl_linearize(d, row, mb, true, why, why_cap);
 }
 
 /* Resolve and check out the exact submitted tip in the private worktree. */
@@ -4165,7 +4243,9 @@ static bool dl_tip_checkout(const struct dl_dirs *d, struct dl_row *row,
         return false;
     }
     *integrated = ancestor == 0;
-    return !*integrated || dl_linearize(d, row, observed_main, why, why_cap);
+    if (*integrated)
+        return dl_linearize(d, row, observed_main, false, why, why_cap);
+    return dl_linearize_for_rebase(d, row, observed_main, why, why_cap);
 }
 
 /* Rebase the row's tip onto origin/main inside the private landing
