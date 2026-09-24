@@ -158,6 +158,10 @@ case "$CAP_CLOSURE_HOST_OS" in
     MINGW*|MSYS*|CYGWIN*) CAP_CLOSURE_HOST_OS=Windows ;;
     *) CAP_CLOSURE_HOST_OS=Other ;;
 esac
+# Selftests change HOST_OS to exercise target selection, but nm remains the
+# native host tool. Preserve the existing defined-only pass off Linux.
+CAP_CLOSURE_NM_ONE_PASS=0
+[ "$CAP_CLOSURE_HOST_OS" = Linux ] && CAP_CLOSURE_NM_ONE_PASS=1
 
 # Linux produced the portable declaration snapshot and remains the
 # shrink-only symmetry authority. Darwin still enforces closure and every
@@ -621,10 +625,9 @@ check_root() {
     }
     trap 'rm -rf "$work"' RETURN
 
-    # Freeze the object list ONCE and reuse it for both nm passes, so a
-    # build actively adding/removing objects underneath this scan (this repo
-    # normally runs several agent lanes against one checkout) cannot hand the
-    # undefined-symbol pass and the defined-symbol pass two different sets.
+    # Freeze the object list ONCE, so a build actively adding/removing
+    # objects underneath this scan (this repo normally runs several agent
+    # lanes against one checkout) cannot change the evidence set.
     # restart-base.o is a generated relocatable aggregate of the exact object
     # list already scanned below. Treating it as an ordinary TU both doubles
     # every undefined edge and invents a nonexistent restart-base.c owner.
@@ -653,20 +656,35 @@ check_root() {
     # undefined-only mode, making strong and weak references
     # indistinguishable and unparsable. The full symbol listing retains the
     # type on GNU and Darwin; undef_uw.tsv below performs the exact filter.
-    xargs -0 nm --print-file-name < "$work/objs.z" 2>"$work/nm_u.err" \
-        | cap_closure_parse_nm > "$work/undef.tsv"
-    local nm_u_rc="${PIPESTATUS[0]}"
-    xargs -0 nm -U --print-file-name < "$work/objs.z" 2>"$work/nm_U.err" \
-        | cap_closure_parse_nm > "$work/defined.tsv"
-    local nm_U_rc="${PIPESTATUS[0]}"
-    if [ "$nm_u_rc" -ne 0 ] || [ "$nm_U_rc" -ne 0 ] \
-       || [ -s "$work/nm_u.err" ] || [ -s "$work/nm_U.err" ]; then
+    xargs -0 nm --print-file-name < "$work/objs.z" 2>"$work/nm.err" \
+        | cap_closure_parse_nm > "$work/symbols.tsv"
+    local nm_rc="${PIPESTATUS[0]}"
+    if [ "$nm_rc" -ne 0 ] || [ -s "$work/nm.err" ]; then
         echo "check_capability_closure: UNPROVEN — nm reported an error scanning"
-        echo "  $epoch (rc=$nm_u_rc/$nm_U_rc). Likely a concurrent build rewriting"
+        echo "  $epoch (rc=$nm_rc). Likely a concurrent build rewriting"
         echo "  an object underneath this scan. Refusing to trust a partial read:"
-        cat "$work/nm_u.err" "$work/nm_U.err" 2>/dev/null | sed 's/^/    /'
+        sed 's/^/    /' "$work/nm.err"
         return 2
     fi
+    if [ "$CAP_CLOSURE_NM_ONE_PASS" -eq 1 ]; then
+        # GNU nm's full listing already has both sides. On Linux U/w/v are
+        # exactly the undefined rows omitted by -U; the frozen production
+        # epoch's defined rows were compared byte for byte before this change.
+        awk -F'\t' '$2 != "U" && $2 != "w" && $2 != "v"' \
+            "$work/symbols.tsv" > "$work/defined.tsv"
+    else
+        xargs -0 nm -U --print-file-name < "$work/objs.z" \
+            2>"$work/nm_defined.err" | cap_closure_parse_nm \
+            > "$work/defined.tsv"
+        local nm_defined_rc="${PIPESTATUS[0]}"
+        if [ "$nm_defined_rc" -ne 0 ] || [ -s "$work/nm_defined.err" ]; then
+            echo "check_capability_closure: UNPROVEN — nm reported an error scanning"
+            echo "  $epoch (defined-only rc=$nm_defined_rc). Refusing to trust a partial read:"
+            sed 's/^/    /' "$work/nm_defined.err"
+            return 2
+        fi
+    fi
+    mv "$work/symbols.tsv" "$work/undef.tsv"
 
     # Every source file that actually has an object IN THIS SCAN (regardless
     # of whether the object has any symbols) — the evidence set for symmetry
