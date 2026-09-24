@@ -471,6 +471,30 @@ static int test_registry_exact_resolution(void)
         ASSERT(rc == 1);
         ASSERT(out[0] == '\0');
 
+        /* Registry membership is whole-name only. A strict prefix or suffix
+         * of a registered name (test_api) is not itself registered, so a
+         * lookup that degraded into substring or prefix matching fails here. */
+        rc = capture_command(
+            "tools/dev/test-group-list.sh --resolve-exact test_ap 2>&1", out,
+            sizeof(out));
+        ASSERT(rc == 1);
+        ASSERT(out[0] == '\0');
+        rc = capture_command(
+            "tools/dev/test-group-list.sh --resolve-exact est_api 2>&1", out,
+            sizeof(out));
+        ASSERT(rc == 1);
+        ASSERT(out[0] == '\0');
+
+        /* Two plan tokens that select the same group print it once, in
+         * first-selected order. */
+        rc = capture_command(
+            "tools/dev/test-group-list.sh --resolve-proof test_api api 2>&1",
+            out, sizeof(out));
+        ASSERT(rc == 0);
+        ASSERT(strncmp(out, "test_api\n", strlen("test_api\n")) == 0);
+        ASSERT(strstr(out + 1, "\ntest_api\n") == NULL);
+        ASSERT(strstr(out, "test_native_api_contract\n") != NULL);
+
         rc = capture_command(
             "tools/dev/test-group-list.sh --check-impact-rules 2>&1", out,
             sizeof(out));
