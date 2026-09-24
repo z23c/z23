@@ -1709,13 +1709,19 @@ main() {
             # rung 1: compile the complete current source inventory.
             run_rung compile compile_changed_gate
 
-            # rung 2: source-wide fast tests do not consume mapped paths.
-            # The resident edit epoch already classified the changed files;
-            # repeating that Git walk here cannot affect this proof set.
-            run_rung source-wide-tests run_test_proof
-
-            # rung 3: fast lint gates.
-            run_rung lint-fast make_fast lint-fast
+            # The locked default ladder can run tests and lint in one Make
+            # graph. The test target is a prerequisite of lint-fast there, so
+            # a test failure still stops before lint. Strict and unlocked
+            # callers retain their existing separate entry points.
+            if [ "$FAST_FF_LOCKED" = 1 ] &&
+               [ "${ZCL_FAST_STRICT_TESTS:-0}" = 0 ]; then
+                fast_trace_now_us
+                log "source-wide tests then lint-fast in one Make graph start_us=$FAST_TRACE_NOW_US"
+                run_rung source-wide-tests-and-lint make_fast ff-test-lint
+            else
+                run_rung source-wide-tests run_test_proof
+                run_rung lint-fast make_fast lint-fast
+            fi
 
             # Non-fatal index-freshness probe (see compdb_freshness_notice).
             compdb_freshness_notice

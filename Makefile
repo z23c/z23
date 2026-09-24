@@ -501,8 +501,8 @@ else ifneq ($(filter lint lint-cached lint-cold-audit lint-preflight,$(ZCL_EPOCH
 # post-link toolchain-integrity check. lint-preflight shares this because
 # check-capability-closure (one of its gates) reads the same dev-obj epoch.
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
-ZCL_EPOCH_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked,$(ZCL_EPOCH_SINGLE_GOAL)),dev) test-fast)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_EPOCH_SINGLE_GOAL)),)
+ZCL_EPOCH_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_EPOCH_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-strict
 else ifneq ($(filter t-asan test-asan asan-ci zcode-package-asan,$(ZCL_EPOCH_SINGLE_GOAL)),)
@@ -1848,8 +1848,8 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),
 ZCL_DEPFILE_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
 else ifneq ($(filter dev-proof-bundle,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
-else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
-ZCL_DEPFILE_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),dev) test-fast)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+ZCL_DEPFILE_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-strict
 else ifneq ($(filter t-asan test-asan asan-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
@@ -14652,3 +14652,19 @@ c3-tip-seam: $(BIN_DIR)/c3-tip-seam-probe.o
 $(BIN_DIR)/c3-tip-seam-probe.o: tests/harness/fixtures/c3_tip_seam_probe.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -c $< -o $@
+# The resident ff ladder already holds the checkout lock and compiled the
+# source inventory. Reuse this Make parse for its tests and fast lint. This
+# dependency is scoped to the explicit ff-test-lint goal; ordinary lint-fast
+# and test targets retain their independent entry points.
+.PHONY: ff-test-lint ff-test-lint-tests-done
+ifneq ($(filter ff-test-lint,$(MAKECMDGOALS)),)
+test-parallel-fast-active-locked: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) \
+	$(FILE_SIZE_POLICY_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN)
+ff-test-lint-tests-done: test-parallel-fast-active-locked
+	@printf '[agent-fast-ci stage] phase=source-wide-tests.done epoch_s=%s\n' "$$(date +%s)" >&2
+lint-fast: ff-test-lint-tests-done
+ifeq ($(ZCL_LINT_SERIAL),1)
+$(LINT_FAST_GATES): ff-test-lint-tests-done
+endif
+endif
+ff-test-lint: lint-fast
