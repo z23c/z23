@@ -815,65 +815,79 @@ static int tc_batch_special(void)
     return failures;
 }
 
-/* Acceptance 8: keys survive a handle restart and a second physical tree
- * (depfile-relative, content-addressed — the v5 identity at fixture
- * scale). */
+/* One receiver store serves an identical second candidate tree, but a real
+ * shared-header edit in that tree invalidates all eight observed inputs. */
+static bool tc_cross_tree_probe(const char *root, const char *const *names,
+                                const uint8_t keys[8][32], bool want_hit)
+{
+    struct testcache *tc = testcache_open(root);
+    bool ok = tc != NULL;
+    if (tc) {
+        struct testcache_probe out[8];
+        ok = testcache_probe_groups(tc, names, NULL, 8, out);
+        for (int i = 0; ok && i < 8; i++) {
+            bool same = memcmp(keys[i], out[i].key, 32) == 0;
+            if (!out[i].cacheable || out[i].hit != want_hit ||
+                same != want_hit) ok = false;
+        }
+        testcache_close(tc);
+    }
+    return ok;
+}
+
+/* Acceptance 8: keys and stored PASSes survive a handle restart and a
+ * second physical tree; only changed actual closure bytes force a miss. */
 static int tc_batch_restart_crosstree(void)
 {
     int failures = 0;
-    static char names[8][64];
-    static const char *ptrs[8];
+    char names[8][64];
+    const char *ptrs[8];
     for (int i = 0; i < 8; i++) {
         tc_qname(i + 1, names[i]);
         ptrs[i] = names[i];
     }
     TC_CHECK("restart fixture writes", write_batch_fixture());
-    TC_CHECK("restart verdict store starts empty",
-             system("rm -rf " TC_FIX "/.zvcs") == 0);
-    static uint8_t k1[8][32];
-    static struct testcache_probe reopen[8];
+    struct tc_envsave caller_store;
+    tc_env_capture(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
+    TC_CHECK("receiver verdict store starts empty",
+             system("rm -rf " TC_STORE) == 0 &&
+             mkdir(TC_STORE, 0755) == 0 &&
+             setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
+    uint8_t k1[8][32] = {{0}};
     {
         struct testcache *tc = testcache_open(TC_FIX);
         bool ok = tc != NULL;
         if (tc) {
-            static struct testcache_probe first[8];
+            struct testcache_probe first[8];
             ok = testcache_probe_groups(tc, ptrs, NULL, 8, first);
-            for (int i = 0; ok && i < 8; i++)
-                memcpy(k1[i], first[i].key, 32);
+            for (int i = 0; ok && i < 8; i++) {
+                if (!first[i].cacheable || first[i].hit) ok = false;
+                else {
+                    memcpy(k1[i], first[i].key, 32);
+                    testcache_store_pass(tc, first[i].key);
+                }
+            }
             testcache_close(tc);
         }
-        TC_CHECK("first-tree keys captured", ok);
+        TC_CHECK("first candidate stores eight exact PASS inputs", ok);
     }
-    {
-        struct testcache *tc = testcache_open(TC_FIX);
-        bool ok = tc != NULL;
-        if (tc) {
-            ok = testcache_probe_groups(tc, ptrs, NULL, 8, reopen);
-            testcache_close(tc);
-        }
-        bool stable = ok;
-        for (int i = 0; stable && i < 8; i++)
-            if (!reopen[i].cacheable ||
-                memcmp(k1[i], reopen[i].key, 32) != 0) stable = false;
-        TC_CHECK("restart produces the same 8 keys", stable);
-    }
+    TC_CHECK("restart reuses eight eligible PASSes",
+             tc_cross_tree_probe(TC_FIX, ptrs, k1, true));
     TC_CHECK("second physical tree copies the fixture",
              system("rm -rf " TC_FIX2 " && cp -pR " TC_FIX " " TC_FIX2
                     " && rm -rf " TC_FIX2 "/.zvcs") == 0);
-    {
-        struct testcache *tc = testcache_open(TC_FIX2);
-        bool ok = tc != NULL;
-        if (tc) {
-            static struct testcache_probe out[8];
-            ok = testcache_probe_groups(tc, ptrs, NULL, 8, out);
-            for (int i = 0; ok && i < 8; i++)
-                if (!out[i].cacheable ||
-                    memcmp(k1[i], out[i].key, 32) != 0) ok = false;
-            testcache_close(tc);
-        }
-        TC_CHECK("cross-tree produces the same 8 keys", ok);
-    }
+    TC_CHECK("unchanged second candidate reuses eight PASSes",
+             tc_cross_tree_probe(TC_FIX2, ptrs, k1, true));
+    TC_CHECK("second candidate edits shared header",
+             mk_write(TC_FIX2, "core/modules/net/include/net/tc.h", TC_H_B) &&
+             mk_write(TC_FIX2, "build/obj/tc_q01.d",
+                      "build/obj/tc_q01.o: core/modules/net/src/tc_q01.c "
+                      "core/modules/net/include/net/tc.h "
+                      "core/modules/net/include/net/tc_registry.def\n"));
+    TC_CHECK("shared dependency invalidates all eight PASSes",
+             tc_cross_tree_probe(TC_FIX2, ptrs, k1, false));
     TC_CHECK("second tree removed", system("rm -rf " TC_FIX2) == 0);
+    tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
     return failures;
 }
 
