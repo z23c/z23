@@ -4219,6 +4219,9 @@ $(MVP_LEDGER_BIN): tools/dev/mvp_ledger.c tools/dev/mvp_ledger_tsv.c \
 	    -Iplatform/modules/platform/include -Iplatform/modules/util/include \
 	    -o $@ $^
 .PHONY: check-capability-closure
+# Make already captured this exact record before dispatching lint. Pass it to
+# the read-only CFLAGS query so that query does not walk the source tree again.
+check-capability-closure lint lint-preflight: export ZCL_CAP_CLOSURE_SOURCE_RECORD := $(BUILD_SOURCE_RECORD)
 check-capability-closure:
 	@./tools/lint/check_capability_closure.sh --selftest
 	@./tools/lint/check_capability_closure.sh

@@ -455,11 +455,27 @@ CAP_CLOSURE_DEFINED_MACRO_LOADED=0
 
 cap_closure_load_defined_macros() {
     local root="$1" text tok name
+    local -a query=(print-CFLAGS)
     CAP_CLOSURE_DEFINED_MACRO=()
     if [ -n "${CAP_CLOSURE_CFLAGS_OVERRIDE+x}" ]; then
         text="$CAP_CLOSURE_CFLAGS_OVERRIDE"
     else
-        text="$(cd "$root" && MAKEFLAGS= make -s print-CFLAGS 2>/dev/null)" || text=""
+        # The parent Make already paid for and verified this source record.
+        # Reuse it only for the same checkout's read-only flag query; fixture
+        # roots and direct script runs retain their ordinary Make path.
+        if [ "$root" = "$REPO_ROOT" ] &&
+           [ -n "${ZCL_CAP_CLOSURE_SOURCE_RECORD:-}" ]; then
+            query+=("BUILD_SOURCE_RECORD=$ZCL_CAP_CLOSURE_SOURCE_RECORD")
+        fi
+        if ! text="$(cd "$root" && MAKEFLAGS= make -s "${query[@]}" 2>/dev/null)"; then
+            if [ "$root" = "$REPO_ROOT" ]; then
+                echo "check_capability_closure: FATAL — cannot read current CFLAGS" >&2
+                return 1
+            fi
+            # Minimal negative fixtures have no Makefile. Keep their empty
+            # macro set so they still exercise the declared-capability rule.
+            text=""
+        fi
     fi
     for tok in $text; do
         case "$tok" in
@@ -840,7 +856,10 @@ check_root() {
                 local co_macros
                 # Populate the cache in this shell; command substitution
                 # would discard it and rerun make for every capability.
-                [ "$CAP_CLOSURE_DEFINED_MACRO_LOADED" -eq 1 ] || cap_closure_load_defined_macros "$root"
+                if [ "$CAP_CLOSURE_DEFINED_MACRO_LOADED" -ne 1 ] &&
+                   ! cap_closure_load_defined_macros "$root"; then
+                    return 2
+                fi
                 if co_macros="$(cap_closure_compiled_out_macros "$path" "$root")"; then
                     echo "check_capability_closure: UNOBSERVED (compiled out: $co_macros) —"
                     echo "  $path declares $tok but its primary implementation never"
