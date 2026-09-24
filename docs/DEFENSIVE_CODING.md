@@ -1394,6 +1394,7 @@ add/remove a gate.
 - `check-installed-acceptance-tools`
 - `check-standalone-tools-link`
 - `check-arena-view-stub`
+- `check-hotfork-stories`
 - `check-app-bundle-reproducible`
 - `check-no-operator-paths`
 - `check-no-unattended-publish`

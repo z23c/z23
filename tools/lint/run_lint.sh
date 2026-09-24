@@ -217,6 +217,7 @@ gate_command() {
         check-flag-registry)               echo './tools/lint/check_flag_registry.sh --selftest && ./tools/lint/check_flag_registry.sh' ;;
         check-standalone-tools-link)       echo './tools/lint/check_standalone_tools_link.sh' ;;
         check-arena-view-stub)             echo './tools/lint/check_arena_view_stub.sh --selftest && ./tools/lint/check_arena_view_stub.sh' ;;
+        check-hotfork-stories)             echo './tools/lint/check_hotfork_stories.sh --selftest && ./tools/lint/check_hotfork_stories.sh' ;;
         check-app-bundle-reproducible)     echo './tools/lint/check_app_bundle_reproducible.sh --selftest && ./tools/lint/check_app_bundle_reproducible.sh' ;;
         check-live-datadir-isolation)      echo './tools/lint/check_live_datadir_isolation.sh --selftest && ./tools/lint/check_live_datadir_isolation.sh' ;;
         check-no-operator-paths)           echo './tools/lint/check_no_operator_paths.sh --selftest && ./tools/lint/check_no_operator_paths.sh' ;;

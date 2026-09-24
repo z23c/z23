@@ -100,6 +100,8 @@ static const struct lint_gate k_gates[] = {
       check_mint_skip_crypto_offline_only_selftest },
     { "check-equihash-params", check_equihash_params_run, check_equihash_params_selftest },
     { "check-arena-view-stub", check_arena_view_stub_run, check_arena_view_stub_selftest },
+    { "check-hotfork-stories", check_hotfork_stories_run,
+      check_hotfork_stories_selftest },
     { "check-cyclomatic-complexity", check_cyclomatic_complexity_run,
       check_cyclomatic_complexity_selftest },
     { "check-framework-shape", check_framework_shape_run,

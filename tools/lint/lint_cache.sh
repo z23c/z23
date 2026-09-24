@@ -150,6 +150,8 @@ lint_cache_never_reason() {
             echo "runs 'make' and links 18 tool binaries — depends on build/ state and the toolchain" ;;
         check-arena-view-stub)
             echo "invokes the host C compiler -fsyntax-only over tools/arena_view.c — like check-toolchain, the verdict depends on the installed toolchain" ;;
+        check-hotfork-stories)
+            echo "invokes the frozen action plan compiler (build/hotswap-fast/flags.env) -fsyntax-only over every HOT_FORK capsule unity — the verdict depends on build/ state and the installed toolchain" ;;
         check-build-epoch-integrity)
             echo "keys on the installed compiler id and 'make --version', and runs cc probes on a miss" ;;
         check-clang-portability)

@@ -286,6 +286,8 @@ int check_equihash_params_run(int argc, char **argv);
 int check_equihash_params_selftest(void);
 int check_arena_view_stub_run(int argc, char **argv);
 int check_arena_view_stub_selftest(void);
+int check_hotfork_stories_run(int argc, char **argv);
+int check_hotfork_stories_selftest(void);
 int check_cyclomatic_complexity_run(int argc, char **argv);
 int check_cyclomatic_complexity_selftest(void);
 int check_framework_shape_run(int argc, char **argv);

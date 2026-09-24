@@ -5636,6 +5636,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_doc_index.c \
     tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c tools/lint/lintc/gate_zcode_packages.c \
     tools/lint/lintc/gate_source_fences.c tools/lint/lintc/gate_compile_fixture.c \
+    tools/lint/lintc/gate_hotfork_stories.c \
     tools/lint/lintc/gate_function_complexity.c \
     tools/lint/lintc/gate_framework_shape.c \
     tools/lint/lintc/gate_zclassicd_reach.c \
@@ -5796,13 +5797,15 @@ LINT_FAST_GATES := \
     check-pipefail-status-pipe \
     check-doc-counts \
     check-orient-facts \
-    check-arena-view-stub
+    check-arena-view-stub \
+    check-hotfork-stories
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN)
+lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN) \
+		$(HOTSWAP_ACTION_PLAN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
@@ -7112,6 +7115,18 @@ check-arena-view-stub: $(LINTC_TOOL)
 	@echo "══ LINT: arena_view compiles against the raylib stub ══"
 	@./tools/lint/check_arena_view_stub.sh --selftest
 	@./tools/lint/check_arena_view_stub.sh
+
+# Every HOT_FORK capsule unity (owner TU set + its story adapter in
+# tools/dev/hotfork_stories/) compiles with the frozen resident action plan.
+# Nothing else compiles those units, so without this gate an owner API change
+# silently turns the owner's reflex feedback COMPILE_RED. The gate object
+# #includes the manifest and the shared renderer, so it rebuilds with them.
+build/lintc-obj/gate_hotfork_stories.o: engine/composition/hotfork_capsules.def \
+	tools/dev/hotfork_unity.h
+check-hotfork-stories: $(LINTC_TOOL) $(HOTSWAP_ACTION_PLAN)
+	@echo "══ LINT: every HOT_FORK capsule unity compiles ══"
+	@./tools/lint/check_hotfork_stories.sh --selftest
+	@./tools/lint/check_hotfork_stories.sh
 $(BIN_DIR)/arena_frame: tools/arena_frame.c tools/arena_hud.c \
 		contexts/commons/packages/zdogview/src/zdogview.c \
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
@@ -14157,6 +14172,7 @@ LINT_GATES := \
     check-installed-acceptance-tools \
     check-standalone-tools-link \
     check-arena-view-stub \
+    check-hotfork-stories \
     check-app-bundle-reproducible \
     check-no-operator-paths \
     check-no-unattended-publish \
