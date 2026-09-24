@@ -2677,10 +2677,10 @@ static bool hs_shadow_probe(
                             char *why, size_t why_len)
 {
 #if defined(_WIN32)
-    /* The shadow runner is a disposable fork() that maps an ELF module
-     * through the POSIX loader and polls a pipe for the wire struct; none
-     * of fork/dlopen/pipe-poll exists on this lane. Report unavailable
-     * honestly — never a fake green or red story. */
+    /* The shadow story runs only in the Linux clean-zygote reflex runner
+     * (exec'd runner, sealed memfd, Landlock/seccomp child, ELF module);
+     * none of that exists on this lane. Report unavailable honestly —
+     * never a fake green or red story. */
     (void)source;
     (void)build;
     if (elapsed_us) *elapsed_us = 0;
@@ -2917,9 +2917,9 @@ static bool hs_hotfork_probe(
                               why_len);
 }
 #else /* _WIN32 */
-/* The HOT_FORK runner is a fork()ed, seccomp/landlock-confined child that
- * executes a candidate ELF module and reports over a polled pipe; none of
- * that machinery exists on this lane. Report unavailable honestly. */
+/* HOT_FORK candidates run only in a confined child of the Linux
+ * clean-zygote reflex runner; none of that machinery exists on this lane.
+ * Report unavailable honestly. */
 static bool hs_hotfork_probe(
     const struct hs_hotfork_def *def,
     const struct zcl_devloop_hotswap_build_receipt *build,
@@ -2934,7 +2934,7 @@ static bool hs_hotfork_probe(
     (void)json_push_kv_str(response, "status", "unavailable");
     (void)json_push_kv_bool(response, "forked", false);
     const char *message = "HOT_FORK runner unavailable on Windows "
-                          "(fork + seccomp/landlock + ELF module probe)";
+                          "(clean-zygote runner + seccomp/landlock + ELF module)";
     hs_why(why, why_len, message);
     (void)json_push_kv_str(response, "error", message);
     return false;

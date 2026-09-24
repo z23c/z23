@@ -69,9 +69,10 @@ wallet/database/value authority  ---> immutable copied snapshot
 
 Its five-case KAT is the smallest executable user story: current funds permit
 an exact reservation, while stale money, bad fees, insufficient funds and the
-development cap refuse. The candidate runs as `HOT_SHADOW` in a forked child
-against frozen fixtures. It cannot acquire wallet, database, network, reducer,
-custody, supervisor, deployment or publication authority.
+development cap refuse. The candidate runs as `HOT_SHADOW` in a confined child
+of the clean zygote runner against frozen fixtures. It cannot acquire wallet,
+database, network, reducer, custody, supervisor, deployment or publication
+authority.
 
 ## Before extraction: exact trace
 
@@ -117,19 +118,62 @@ gaps or bad seals. `dev drive` waits with inotify, closing the check/sleep race;
 there is no polling sleep.
 
 The candidate builder keeps its frozen action/dependency plan and artifact
-cache warm, invokes the compiler and module linker directly, then forks the
-preloaded parent for the story. No command shell, Make parser, test runner or
-full-program linker enters the reflex. Exact affected proof starts only after
+cache warm, invokes the compiler and module linker directly, then hands the
+artifact to the clean zygote runner for the story. No command shell, Make
+parser, test runner or full-program linker enters the reflex. Exact affected proof starts only after
 the story. Scheduling remembers the prior failed exact group for the task,
 then runs the goal story, cheap likely regression, direct owner invariant and
 the complete affected batch; priority changes, required proof does not.
+
+## Clean zygote runner
+
+The resident never forks itself to run candidate bytes, because a fork would
+copy its heap, environment and descriptors into the candidate. On first use it
+execs `/proc/self/exe` once as `z23-dev __reflex-runner`, with an empty
+environment, stdio on `/dev/null` and exactly one extra descriptor: a
+`SOCK_SEQPACKET` control socket at fd 3. It keeps that runner warm. The runner
+sets `PDEATHSIG`, checks that its peer is its parent, sets `no_new_privs` and
+closes every other descriptor. It never reads config, datadir or keys. Its
+hello frame must report zero environment entries, zero extra descriptors and a
+zeroed resident canary, or the resident refuses it.
+
+For each candidate, the resident verifies the artifact SHA-256, copies it into
+a sealed memfd (`WRITE|SHRINK|GROW`), and sends a fixed versioned request plus
+that memfd over `SCM_RIGHTS`. The runner checks the seals, re-hashes the
+image, then forks a disposable child. The child runs these steps in order:
+
+1. Close every descriptor except the image and the report pipe.
+2. Lower the rlimits.
+3. Enter Landlock deny-all and the seccomp session deny-list.
+4. Re-hash the image.
+5. `dlopen("/proc/self/fd/N")`.
+6. Add the W^X seccomp layer.
+7. Run the `HOT_FORK` story or the `HOT_SHADOW` service probe.
+
+The runner relays a fixed report with fork, confine, dlopen and story timings
+and the exit status or signal. At the deadline it kills the child with
+`SIGKILL`, and it survives crashing children. Any spawn, transport, seal,
+digest or confinement failure is a named red or unavailable result. There is
+no unconfined fallback.
+
+Receipts add `runner:"zygote_exec"`, `env_inherited_count`,
+`inherited_fd_count`, `address_space_fresh` and the stage timings. Windows and
+macOS report the runner as unavailable. `make t-fast-exact
+ONLY=reflex_runner` proves the runner with hostile fixture images:
+
+- Environment, global, file, socket and parent-descriptor canaries, probed in
+  the constructor and in the story.
+- A regression goes red and leaves the last green root unchanged.
+- An infinite loop and a `SIGSEGV` go red, and the same runner survives both.
+- Socket and W^X attempts end in `SIGSYS`.
+- A digest mismatch fails closed.
 
 ## Dependency map and latency firewall
 
 ```text
 REFLEX
   inotify -> resident path/blob epoch -> direct module compile/link
-          -> forked HOT_SHADOW story -> volatile event
+          -> zygote-runner HOT_SHADOW story -> volatile event
 
 ASYNC PROOF
   exact path floor + code-index closure -> failure-first focused groups
