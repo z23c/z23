@@ -629,8 +629,8 @@ static bool work_slot_has_active_track(const struct vcs_zcode_work_node *node,
 {
     for (size_t i = 0; i < sizeof(node->tracks) / sizeof(node->tracks[0]); i++) {
         const struct work_track *track = &node->tracks[i];
-        if (track->used && track->inbound && track->worker_slot == slot &&
-            !track->finished && !track->cancelled && !track->expired)
+        if (track->used && track->inbound && track->receiver_admitted &&
+            track->worker_slot == slot && !track->finished && !track->cancelled && !track->expired)
             return true;
     }
     return false;

@@ -2282,6 +2282,116 @@ static int test_zd_work_node_independent_domains(void)
     return failures;
 }
 
+static int test_zd_work_node_refused_attachment_cancel(void)
+{
+    int failures = 0;
+    TEST("zcode_dev: rejected attachment cannot keep a physical run alive") {
+        struct vcs_zcode_work_node *worker = vcs_zcode_work_node_create();
+        ASSERT(worker);
+        ASSERT(vcs_zcode_work_node_peer_add(worker, 21));
+        ASSERT(vcs_zcode_work_node_peer_add(worker, 22));
+        uint8_t worker_seed[32], worker_secret[32], worker_key[32];
+        uint8_t requester_seed[32], requester_secret[32], requester_key[32];
+        zd_root(worker_seed, 160);
+        zd_root(requester_seed, 161);
+        ed25519_keypair(worker_key, worker_secret, worker_seed);
+        ed25519_keypair(requester_key, requester_secret, requester_seed);
+        struct vcs_zcode_work_capability_v1 cap = {0};
+        zd_root(cap.toolchain_capsule_root, 162);
+        cap.work_kinds = UINT32_C(1) << VCS_ZCODE_WORK_BUILD;
+        cap.target = VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3;
+        cap.confinement = VCS_ZCODE_WORK_CONFINEMENT_V1_MASK;
+        cap.max_cpu_seconds = 60;
+        cap.max_memory_bytes = UINT64_C(512) * 1024 * 1024;
+        cap.max_output_bytes = UINT64_C(64) * 1024 * 1024;
+        cap.max_lease_seconds = 120;
+        cap.slots = cap.queue_headroom = 1;
+        cap.expires_unix = 2000;
+        ASSERT(vcs_zcode_work_capability_seal(
+            &cap, worker_secret, worker_key));
+        ASSERT(vcs_zcode_work_node_set_local_signer(
+            worker, worker_secret, worker_key));
+        ASSERT(vcs_zcode_work_node_set_local_capability(worker, &cap));
+        uint8_t frame[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
+        size_t frame_len = 0;
+        uint64_t peer = 0;
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            worker, 21, &peer, frame, &frame_len));
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            worker, 22, &peer, frame, &frame_len));
+        struct vcs_zcode_work_request_v1 request = {0};
+        request.request_id = 960;
+        zd_root(request.task_root, 163);
+        zd_root(request.candidate_root, 164);
+        zd_root(request.action_root, 165);
+        zd_root(request.input_root, 166);
+        zd_root(request.context_root, 167);
+        zd_root(request.proof_policy_root, 168);
+        memcpy(request.toolchain_capsule_root, cap.toolchain_capsule_root, 32);
+        request.work_kind = VCS_ZCODE_WORK_BUILD;
+        request.target = cap.target;
+        request.max_cpu_seconds = cap.max_cpu_seconds;
+        request.max_memory_bytes = cap.max_memory_bytes;
+        request.max_output_bytes = cap.max_output_bytes;
+        request.deadline_unix = 1100;
+        ASSERT(vcs_zcode_work_request_seal(
+            &request, requester_secret, requester_key));
+        struct vcs_zcode_work_swarm_message message = {
+            .type = VCS_ZCODE_WORK_SWARM_REQUEST,
+            .body.request = request,
+        };
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            worker, 21, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            worker, 21, &peer, frame, &frame_len));
+        struct vcs_zcode_work_request_v1 physical;
+        ASSERT(vcs_zcode_work_node_next_request(worker, &peer, &physical));
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            worker, 21, request.request_id, 1000, 4096));
+        struct vcs_zcode_work_request_v1 attached = request;
+        attached.request_id++;
+        ASSERT(vcs_zcode_work_request_seal(
+            &attached, requester_secret, requester_key));
+        message.body.request = attached;
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            worker, 22, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            worker, 22, &peer, frame, &frame_len));
+        struct vcs_zcode_work_swarm_message admission;
+        ASSERT(vcs_zcode_work_swarm_parse(frame, frame_len, &admission));
+        ASSERT_EQ(admission.body.admission.disposition,
+                  VCS_ZCODE_WORK_ADMISSION_ATTACHED);
+        ASSERT(vcs_zcode_work_node_next_request(worker, &peer, &physical));
+        ASSERT_EQ(physical.request_id, attached.request_id);
+        /* The receiver refuses this subscriber before mark_action_ready. */
+        struct vcs_zcode_work_cancel_v1 cancel = {
+            .request_id = request.request_id,
+        };
+        memcpy(cancel.task_root, request.task_root, 32);
+        ASSERT(vcs_zcode_work_cancel_seal(
+            &cancel, requester_secret, requester_key));
+        message.type = VCS_ZCODE_WORK_SWARM_CANCEL;
+        message.body.cancel = cancel;
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            worker, 21, frame, frame_len, 1001), VCS_ZCODE_WORK_NODE_OK);
+        struct vcs_zcode_work_cancel_v1 queued_cancel;
+        ASSERT(vcs_zcode_work_node_next_cancel(
+            worker, &peer, &queued_cancel));
+        ASSERT_EQ(queued_cancel.request_id, request.request_id);
+        ASSERT(!vcs_zcode_work_node_next_cancel(
+            worker, &peer, &queued_cancel));
+        vcs_zcode_work_node_free(worker);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_zd_work_node(void)
 {
     int failures = 0;
@@ -9154,6 +9264,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_work_node_cancel_generation();
     failures += test_zd_work_node_atomic_admission();
     failures += test_zd_work_node_independent_domains();
+    failures += test_zd_work_node_refused_attachment_cancel();
     failures += test_zd_work_node();
     failures += test_zd_work_node_projection();
     failures += test_zd_work_node_three();
