@@ -1884,6 +1884,18 @@ static int test_zd_work_node_atomic_admission(void)
         ASSERT(vcs_zcode_work_node_mark_action_ready(
             b, 21, qa.request_id, 1000, 4096));
 
+        struct vcs_zcode_work_swarm_message replay = {
+            .type = VCS_ZCODE_WORK_SWARM_REQUEST, .body.request = qa,
+        };
+        zd_root(replay.body.request.action_root, 121);
+        ASSERT(vcs_zcode_work_request_seal(
+            &replay.body.request, a_secret, a_key));
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &replay, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            b, 21, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_REPLAY);
+        ASSERT(!vcs_zcode_work_node_next_request(b, &peer, &physical));
+
         struct vcs_zcode_work_request_v1 attached = qa;
         attached.request_id = 902;
         ASSERT(vcs_zcode_work_request_seal(&attached, c_secret, c_key));

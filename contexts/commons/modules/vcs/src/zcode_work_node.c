@@ -1011,19 +1011,17 @@ static enum vcs_zcode_work_node_result work_handle_request(
 {
     if (!node->has_local_capability || !node->has_local_signer)
         return VCS_ZCODE_WORK_NODE_NOT_LOCAL_WORKER;
-    if (!work_capability_matches(&node->local_capability, request, now) ||
-        (node->local_capability.confinement &
-         VCS_ZCODE_WORK_CONFINEMENT_V1_MASK) !=
-            VCS_ZCODE_WORK_CONFINEMENT_V1_MASK) {
+    if (!work_capability_matches(&node->local_capability, request, now)) {
         return work_queue_admission(
             node, peer, request, VCS_ZCODE_WORK_ADMISSION_REFUSED,
             VCS_ZCODE_WORK_ADMISSION_REASON_POLICY, UINT16_MAX, 0, 0)
                 ? VCS_ZCODE_WORK_NODE_OK : VCS_ZCODE_WORK_NODE_FULL;
     }
-
     struct work_track *existing = work_find_track(
         node, peer, request->request_id, true);
     if (existing) {
+        if (memcmp(existing->request.signature, request->signature, 64))
+            return VCS_ZCODE_WORK_NODE_REPLAY;
         uint8_t disposition = existing->expired
             ? VCS_ZCODE_WORK_ADMISSION_REFUSED
             : existing->admission_disposition;
