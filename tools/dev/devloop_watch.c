@@ -16,6 +16,7 @@
 #include "platform/file_watch_compat.h"
 #include "platform/directory_compat.h"
 #include "platform/directory_watcher.h"
+#include "platform/os_proc.h"
 #include "platform/private_directory.h"
 #include "platform/process_lock.h"
 #include "platform/os_proc.h"
@@ -326,23 +327,16 @@ static int64_t watch_timeval_us(struct timeval tv)
  * sum own and ancestor cpu.stat. Resolved once; forked workers inherit. */
 static size_t watch_cgroup_stat_paths(char paths[][PATH_MAX], size_t cap)
 {
-    char line[PATH_MAX];
-    FILE *f = fopen("/proc/self/cgroup", "re");
-    bool found = false;
-    while (f && !found && fgets(line, sizeof(line), f))
-        found = strncmp(line, "0::/", 4) == 0;
-    if (f)
-        fclose(f);
-    if (!found)
+    static const char mount[] = "/sys/fs/cgroup";
+    char dir[PATH_MAX];
+    if (!os_proc_cgroup_dir(dir, sizeof(dir)) ||
+        strncmp(dir, mount, sizeof(mount) - 1) != 0)
         return 0;
-    line[strcspn(line, "\n")] = 0;
-    char *rel = line + 3;
     size_t count = 0;
-    while (count < cap && strlen(rel) > 1) {
-        int n = snprintf(paths[count], PATH_MAX, "/sys/fs/cgroup%s/cpu.stat",
-                         rel);
+    while (count < cap && strlen(dir) > sizeof(mount) - 1) {
+        int n = snprintf(paths[count], PATH_MAX, "%s/cpu.stat", dir);
         count += n > 0 && n < PATH_MAX;
-        *strrchr(rel, '/') = 0;
+        *strrchr(dir, '/') = 0;
     }
     return count;
 }
