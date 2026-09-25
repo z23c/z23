@@ -34,7 +34,7 @@ static void shadow_lint_why(char *why, size_t why_len, const char *fmt, ...)
 
 /* ── premise rows ─────────────────────────────────────────────────────── */
 
-#define SHADOW_LINT_FIELDS 6
+#define SHADOW_LINT_FIELDS 7
 
 static bool shadow_lint_u32(const char *s, size_t n, uint32_t *out)
 {
@@ -95,7 +95,8 @@ static bool shadow_lint_row(const char *line, size_t n,
            shadow_lint_u32(f[2], len[2], &r->units) &&
            shadow_lint_u32(f[3], len[3], &r->fresh) &&
            shadow_lint_selection(f[4], len[4], &r->enabled) &&
-           shadow_lint_u32(f[5], len[5], &r->select_ms) && r->units > 0 &&
+           shadow_lint_u32(f[5], len[5], &r->select_ms) &&
+           shadow_lint_u32(f[6], len[6], &r->always_ms) && r->units > 0 &&
            r->fresh <= r->units;
 }
 
@@ -176,13 +177,15 @@ uint64_t zcl_shadow_lint_gate_ms(const struct zcl_shadow_lint_premise *row,
     if (premise_priced) *premise_priced = false;
     if (!row || !row->enabled || row->units == 0 || row->fresh > row->units)
         return gate_ms;
-    uint64_t share = ((uint64_t)gate_ms + row->units - 1u) / row->units;
+    uint64_t always = row->always_ms < gate_ms ? row->always_ms : gate_ms;
+    uint64_t rest = (uint64_t)gate_ms - always;
+    uint64_t share = (rest + row->units - 1u) / row->units;
     if (share < ZCL_SHADOW_LINT_UNIT_FLOOR_MS)
         share = ZCL_SHADOW_LINT_UNIT_FLOOR_MS;
     if (premise_priced) *premise_priced = true;
     uint64_t units_ms = share * row->fresh;
-    if (units_ms > gate_ms) units_ms = gate_ms;
-    return (uint64_t)row->select_ms + units_ms;
+    if (units_ms > rest) units_ms = rest;
+    return (uint64_t)row->select_ms + always + units_ms;
 }
 
 /* ── tally ────────────────────────────────────────────────────────────── */

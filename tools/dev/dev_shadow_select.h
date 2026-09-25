@@ -352,10 +352,13 @@ enum zcl_shadow_predict_mode {
  * path set, textual include closure, own baseline rows) at the candidate and
  * at a verified base. A unit may inherit the base's PASS iff those bytes are
  * equal. One row per entry and declared gate:
- *   id  gate  units  fresh  selection(enabled|disabled)  select_ms
- * select_ms is the measured wall time of that one select run. A gate with no
- * row, or with selection disabled, is priced at its full weight. Nothing here
- * is a verdict: the landing proof still runs every lint gate. */
+ *   id  gate  units  fresh  selection(enabled|disabled)  select_ms  always_ms
+ * select_ms is the measured wall time of that one select run. always_ms is
+ * the part of the gate that runs whatever the selection says: a catalog-row
+ * gate's global part and any shared input its rows build (0 for a gate that
+ * is only its units). A gate with no row, or with selection disabled, is
+ * priced at its full weight. Nothing here is a verdict: the landing proof
+ * still runs every lint gate. */
 struct zcl_shadow_lint_premise {
     char id[ZCL_SHADOW_ID_MAX];
     char gate[ZCL_SHADOW_NAME_MAX];
@@ -363,6 +366,7 @@ struct zcl_shadow_lint_premise {
     uint32_t fresh;
     bool enabled;
     uint32_t select_ms;
+    uint32_t always_ms;
 };
 
 struct zcl_shadow_lint_premises {
@@ -385,9 +389,10 @@ zcl_shadow_lint_premise_find(const struct zcl_shadow_lint_premises *p,
 #define ZCL_SHADOW_LINT_UNIT_FLOOR_MS 1000u
 
 /* Predicted fresh cost of one lint gate. Without a usable row it is gate_ms
- * and *premise_priced is false. With one it is the select run plus every
- * fresh unit at max(ceil(gate_ms / units), the floor above), except that the
- * units part never exceeds gate_ms: once the select run has shown how many
+ * and *premise_priced is false. With one it is the select run, plus the
+ * always-run part a = min(always_ms, gate_ms), plus every fresh unit at
+ * max(ceil((gate_ms - a) / units), the floor above), except that the units
+ * part never exceeds gate_ms - a: once the select run has shown how many
  * units are fresh, running the whole gate is the fallback. The select run is
  * always paid, so a selection that inherits nothing costs more than none. */
 uint64_t zcl_shadow_lint_gate_ms(const struct zcl_shadow_lint_premise *row,

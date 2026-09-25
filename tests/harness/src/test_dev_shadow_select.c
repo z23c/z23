@@ -432,7 +432,7 @@ static bool ss_row_graph_consistent(const struct zcl_shadow_result *r)
  * lint gates are priced: every corpus entry carries rows for exactly the
  * SS_LINT_PREMISE_GATES gates that declare a premise in
  * tools/lint/lintc/selection_gates.def. */
-enum { SS_LINT_PREMISE_GATES = 6 };
+enum { SS_LINT_PREMISE_GATES = 7 };
 
 static bool ss_row_classes_consistent(const struct zcl_shadow_result *r)
 {
@@ -866,22 +866,25 @@ static int ss_test_lint_premise(void)
         static struct zcl_shadow_lint_premises p;
         char why[96];
         static const char *const bad[] = {
-            "x\tg\t10\t11\tenabled\t5\n",           /* more fresh than units */
-            "x\tg\t0\t0\tenabled\t5\n",             /* no units */
-            "x\tg\t10\t1\tmaybe\t5\n",              /* unknown selection */
-            "x\tg\t10\t1\tenabled\n",               /* short row */
-            "x\tg\t10\t1\tenabled\t5\nx\tg\t10\t1\tenabled\t5\n",
-            "x\tg\t10\t-1\tenabled\t5\n",           /* not a count */
+            "x\tg\t10\t11\tenabled\t5\t0\n",        /* more fresh than units */
+            "x\tg\t0\t0\tenabled\t5\t0\n",          /* no units */
+            "x\tg\t10\t1\tmaybe\t5\t0\n",           /* unknown selection */
+            "x\tg\t10\t1\tenabled\t5\n",            /* short row */
+            "x\tg\t10\t1\tenabled\t5\t0\nx\tg\t10\t1\tenabled\t5\t0\n",
+            "x\tg\t10\t-1\tenabled\t5\t0\n",        /* not a count */
+            "x\tg\t10\t1\tenabled\t5\t0\t0\n",      /* long row */
+            "x\tg\t10\t1\tenabled\t5\tall\n",       /* always part not a count */
         };
         for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
             ASSERT(!zcl_shadow_lint_premises_parse(bad[i], strlen(bad[i]), &p,
                                                    why, sizeof(why)));
-        const char *good = "# c\nx\tg\t1000\t2\tenabled\t7000\n"
-                           "x\th\t1000\t0\tdisabled\t7000\n"
-                           "x\tk\t10\t10\tenabled\t7000\n";
+        const char *good = "# c\nx\tg\t1000\t2\tenabled\t7000\t0\n"
+                           "x\th\t1000\t0\tdisabled\t7000\t0\n"
+                           "x\tk\t10\t10\tenabled\t7000\t0\n"
+                           "x\ta\t72\t4\tenabled\t9000\t18000\n";
         ASSERT(zcl_shadow_lint_premises_parse(good, strlen(good), &p, why,
                                               sizeof(why)));
-        ASSERT_EQ(p.count, (size_t)3);
+        ASSERT_EQ(p.count, (size_t)4);
         bool priced = true;
         /* No row, or selection disabled: the whole gate. */
         ASSERT_EQ(zcl_shadow_lint_gate_ms(NULL, 120000, &priced),
@@ -909,6 +912,16 @@ static int ss_test_lint_premise(void)
                                           3000, &priced),
                   (uint64_t)(7000 + 3000));
         ASSERT(priced);
+        /* An always-run part is paid whole, and only the rest of the
+         * weight is shared among the units: ceil(97700 / 72) = 1357. */
+        const struct zcl_shadow_lint_premise *a =
+            zcl_shadow_lint_premise_find(&p, "x", "a");
+        ASSERT_EQ(zcl_shadow_lint_gate_ms(a, 115700, &priced),
+                  (uint64_t)(9000 + 18000 + 4 * 1357));
+        ASSERT(priced);
+        /* The always-run part never exceeds the gate: select plus gate. */
+        ASSERT_EQ(zcl_shadow_lint_gate_ms(a, 10000, &priced),
+                  (uint64_t)(9000 + 10000));
         zcl_shadow_lint_premises_free(&p);
         PASS();
     } _test_next:;
