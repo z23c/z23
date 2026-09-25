@@ -13,7 +13,8 @@
  *     2. the object's DT_PREINIT_ARRAY (executables only under glibc, but
  *        present in a DSO is a fact worth knowing),
  *     3. DT_INIT,
- *     4. every function pointer in DT_INIT_ARRAY.
+ *     4. every function pointer in DT_INIT_ARRAY,
+ *     5. GNU IFUNC and IRELATIVE resolvers while applying relocations.
  *
  * All four run before hotswap_module_admit() has looked at a single field. A
  * module that fails admission has, at that point, already run arbitrary code
@@ -275,6 +276,12 @@ struct hotswap_elf_facts {
      * — i.e. from the same structures the linker uses to size that table,
      * never from a section header. */
     size_t   dynamic_symbol_count;
+
+    /* STT_GNU_IFUNC symbols can invoke a resolver during relocation at
+     * dlopen(), before dlsym() or module admission. Secure admission requires
+     * zero even when DT_INIT and the initializer arrays are absent. */
+    size_t   ifunc_symbol_count;
+    bool     has_irelative_relocation;
 
     /* Dynamic symbols with st_shndx == SHN_UNDEF and a non-empty name: the
      * symbols this module imports from the host at load time. Under the

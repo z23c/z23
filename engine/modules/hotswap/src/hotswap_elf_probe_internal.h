@@ -46,6 +46,9 @@
 #define SHDR64_SIZE      64
 #define DYN64_SIZE       16
 #define SYM64_SIZE       24
+#define RELA64_SIZE      24
+#define STT_GNU_IFUNC_   10u
+#define R_X86_64_IRELATIVE_ 37u
 
 #define PT_LOAD_         1
 #define PT_DYNAMIC_      2
@@ -61,6 +64,10 @@
 #define DT_NULL_             0
 #define DT_NEEDED_           1
 #define DT_HASH_             4
+#define DT_PLTRELSZ_         2
+#define DT_RELA_             7
+#define DT_RELASZ_           8
+#define DT_RELAENT_          9
 #define DT_STRTAB_           5
 #define DT_SYMTAB_           6
 #define DT_STRSZ_            10
@@ -68,6 +75,11 @@
 #define DT_INIT_             12
 #define DT_FINI_             13
 #define DT_RPATH_            15
+#define DT_REL_              17
+#define DT_RELSZ_            18
+#define DT_RELENT_           19
+#define DT_PLTREL_           20
+#define DT_JMPREL_           23
 #define DT_INIT_ARRAY_       25
 #define DT_FINI_ARRAY_       26
 #define DT_INIT_ARRAYSZ_     27

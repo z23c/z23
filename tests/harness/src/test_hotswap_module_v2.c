@@ -799,6 +799,48 @@ static int t_elf_probe_rejects_deception(void)
             err, sizeof(err)));
         close(fd); unlink(path);
 
+        /* A defined GNU IFUNC symbol is a pre-dlsym execution path even
+         * when the artifact has no DT_INIT or initializer arrays. */
+        elf_fixture(image, false, false);
+        elf_put32(image + 1536 + 4, 4); /* DT_HASH nchain: one extra symbol */
+        image[1280 + 72 + 4] = 0x1a;    /* STB_GLOBAL | STT_GNU_IFUNC */
+        elf_put16(image + 1280 + 72 + 6, 1);
+        fd = fixture_fd(image, path);
+        ASSERT(fd >= 0);
+        ASSERT(hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
+        ASSERT(facts.ifunc_symbol_count == 1);
+        ASSERT(!hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
+            err, sizeof(err)));
+        ASSERT(strstr(err, "IFUNC") != NULL);
+        close(fd); unlink(path);
+
+        /* IRELATIVE can call a local resolver without an IFUNC dynsym entry. */
+        elf_fixture(image, false, false);
+        elf_dyn(image, 5, 7, 0x10000 + 1900); /* DT_RELA */
+        elf_dyn(image, 6, 8, 24);             /* DT_RELASZ */
+        elf_dyn(image, 7, 9, 24);             /* DT_RELAENT */
+        elf_dyn(image, 8, 0, 0);
+        elf_put64(image + 1900 + 8, 37);     /* R_X86_64_IRELATIVE */
+        fd = fixture_fd(image, path);
+        ASSERT(fd >= 0);
+        ASSERT(hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
+        ASSERT(facts.has_irelative_relocation);
+        ASSERT(!hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
+            err, sizeof(err)));
+        ASSERT(strstr(err, "IRELATIVE") != NULL);
+        close(fd); unlink(path);
+
+        /* The dynamic hash's symbol count must cover every relocation's
+         * symbol index; otherwise an IFUNC could hide past the audited walk. */
+        elf_put64(image + 1900 + 8, (UINT64_C(3) << 32) | 1u);
+        fd = fixture_fd(image, path);
+        ASSERT(fd >= 0);
+        ASSERT(!hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
+        ASSERT(strstr(err, "relocation") != NULL);
+        close(fd); unlink(path);
+
         elf_fixture(image, true, false);
         elf_put64(image + 2048 + 128 + 16, 0x10000 + 1664 + 8);
         fd = fixture_fd(image, path);

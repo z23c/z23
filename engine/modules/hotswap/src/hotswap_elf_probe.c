@@ -186,6 +186,107 @@ static bool vaddr_to_off(const struct img *im, const unsigned char *phtab,
     return false;
 }
 
+/* A local IRELATIVE resolver is called by ld.so while applying relocations,
+ * before dlopen returns. Inspect both the ordinary and PLT RELA tables. */
+static bool rela_has_irelative(const struct img *im,
+                               const unsigned char *phtab, uint16_t phnum,
+                               uint64_t vaddr, uint64_t size,
+                               uint64_t symcount, bool *found)
+{
+    if (size == 0) return true;
+    if (size > im->n || size % RELA64_SIZE != 0) return false;
+    uint64_t off = 0;
+    if (!vaddr_to_off(im, phtab, phnum, vaddr, size, &off)) return false;
+    const unsigned char *rela = at(im, off, size);
+    if (!rela) return false;
+    for (uint64_t i = 0; i < size; i += RELA64_SIZE) {
+        uint64_t info = rd64(rela + i + 8);
+        if ((info >> 32) >= symcount) return false;
+        if ((uint32_t)info == R_X86_64_IRELATIVE_)
+            *found = true;
+    }
+    return true;
+}
+
+struct reloc_dynamic {
+    uint64_t rela, relasz, relaent, jmprel, pltrelsz, pltrel;
+    bool have_rela, have_relasz, have_relaent;
+    bool have_jmprel, have_pltrelsz, have_pltrel;
+};
+
+static bool reloc_unique(uint64_t *slot, bool *seen, uint64_t value)
+{
+    if (*seen) return false;
+    *slot = value;
+    *seen = true;
+    return true;
+}
+
+static bool reloc_dynamic_tag(struct reloc_dynamic *r,
+                              uint64_t tag, uint64_t value)
+{
+    switch (tag) {
+    case DT_RELA_:
+        return reloc_unique(&r->rela, &r->have_rela, value);
+    case DT_RELASZ_:
+        return reloc_unique(&r->relasz, &r->have_relasz, value);
+    case DT_RELAENT_:
+        return reloc_unique(&r->relaent, &r->have_relaent, value);
+    case DT_JMPREL_:
+        return reloc_unique(&r->jmprel, &r->have_jmprel, value);
+    case DT_PLTRELSZ_:
+        return reloc_unique(&r->pltrelsz, &r->have_pltrelsz, value);
+    case DT_PLTREL_:
+        return reloc_unique(&r->pltrel, &r->have_pltrel, value);
+    case DT_REL_:
+    case DT_RELSZ_:
+    case DT_RELENT_:
+        return false; /* unsupported table could hide a resolver */
+    default:
+        return true;
+    }
+}
+
+static bool reloc_dynamic_inspect(const struct img *im,
+                                  const unsigned char *phtab, uint16_t phnum,
+                                  const struct reloc_dynamic *r,
+                                  uint64_t symcount, bool *found)
+{
+    if (r->have_rela != r->have_relasz ||
+        r->have_rela != r->have_relaent ||
+        (r->have_rela && r->relaent != RELA64_SIZE))
+        return false;
+    if (r->have_rela && !rela_has_irelative(
+            im, phtab, phnum, r->rela, r->relasz, symcount, found))
+        return false;
+    if (r->have_jmprel != r->have_pltrelsz ||
+        r->have_jmprel != r->have_pltrel ||
+        (r->have_jmprel && r->pltrel != DT_RELA_))
+        return false;
+    if (r->have_jmprel && !rela_has_irelative(
+            im, phtab, phnum, r->jmprel, r->pltrelsz, symcount, found))
+        return false;
+    return true;
+}
+
+static const char *dynamic_segment_reason(bool present, uint64_t size)
+{
+    if (!present)
+        return "no PT_DYNAMIC segment: not a dynamically linked shared object";
+    if (size == 0 || size % DYN64_SIZE != 0)
+        return "PT_DYNAMIC size is not a positive multiple of 16";
+    return NULL;
+}
+
+static const char *relocation_reason(
+    const struct img *im, const unsigned char *phtab, uint16_t phnum,
+    const struct reloc_dynamic *reloc, uint64_t symcount, bool *irelative)
+{
+    if (!reloc_dynamic_inspect(im, phtab, phnum, reloc, symcount, irelative))
+        return "relocation tables are incomplete, unsupported, or out of bounds";
+    return NULL;
+}
+
 /* ── section header cross-check ─────────────────────────────────────────── */
 
 /* Validates the section header table and, where it overlaps the dynamic
@@ -464,11 +565,9 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
             have_dyn  = true;
         }
     }
-    if (!have_dyn)
-        REFUSE("no PT_DYNAMIC segment: not a dynamically linked shared object");
-    if (dyn_size == 0 || dyn_size % DYN64_SIZE != 0)
-        REFUSE("PT_DYNAMIC size %llu is not a positive multiple of %u",
-               (unsigned long long)dyn_size, DYN64_SIZE);
+    const char *dynamic_problem = dynamic_segment_reason(have_dyn, dyn_size);
+    if (dynamic_problem)
+        REFUSE("%s", dynamic_problem);
     if (dyn_size / DYN64_SIZE > ZCL_HOTSWAP_ELF_PROBE_MAX_DYNAMIC)
         REFUSE("PT_DYNAMIC holds %llu entries, over the %u cap",
                (unsigned long long)(dyn_size / DYN64_SIZE),
@@ -495,6 +594,7 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
 
     uint64_t d_symtab = 0, d_strtab = 0, d_strsz = 0, d_syment = 0;
     uint64_t d_hash = 0, d_gnu_hash = 0;
+    struct reloc_dynamic reloc = {0};
     uint64_t d_init_array = 0, d_fini_array = 0, d_preinit_array = 0;
     uint64_t d_init_arraysz = 0, d_fini_arraysz = 0, d_preinit_arraysz = 0;
     bool have_symtab = false, have_strtab = false, have_strsz = false;
@@ -583,6 +683,9 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
             out->has_runpath = true;
             break;
         default:
+            if (!reloc_dynamic_tag(&reloc, tag, val))
+                REFUSE("malformed or unsupported relocation dynamic tag %llu",
+                       (unsigned long long)tag);
             break;
         }
     }
@@ -698,6 +801,11 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
     if (symcount == 0 || symcount > ZCL_HOTSWAP_ELF_PROBE_MAX_DYNSYMS)
         REFUSE("dynamic symbol count %llu is zero or over the %u cap",
                (unsigned long long)symcount, ZCL_HOTSWAP_ELF_PROBE_MAX_DYNSYMS);
+    dynamic_problem = relocation_reason(
+        &im, phtab, e_phnum, &reloc, symcount,
+        &out->has_irelative_relocation);
+    if (dynamic_problem)
+        REFUSE("%s", dynamic_problem);
 
     uint64_t symoff = 0;
     if (!vaddr_to_off(&im, phtab, e_phnum, d_symtab, symcount * SYM64_SIZE, &symoff))
@@ -713,6 +821,8 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
     for (uint64_t i = 0; i < symcount; i++) {
         const unsigned char *sy = symtab + (size_t)(i * SYM64_SIZE);
         uint32_t st_name  = rd32(sy + 0);
+        out->ifunc_symbol_count +=
+            (size_t)((sy[4] & 0x0fu) == STT_GNU_IFUNC_);
         uint16_t st_shndx = rd16(sy + 6);
         uint64_t st_value = rd64(sy + 8);
         uint64_t st_size  = rd64(sy + 16);
@@ -903,6 +1013,18 @@ static bool runtime_import_allowed(const char *name)
     return false;
 }
 
+static const char *pre_map_early_code_reason(
+    const struct hotswap_elf_facts *facts)
+{
+    if (facts->has_dt_init)
+        return "module carries DT_INIT; code would run before admission";
+    if (facts->ifunc_symbol_count != 0)
+        return "module carries an IFUNC resolver symbol that may run at dlopen";
+    if (facts->has_irelative_relocation)
+        return "module carries an IRELATIVE resolver relocation that runs at dlopen";
+    return NULL;
+}
+
 bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
                                const char expected_core_seal_root[65],
                                uint32_t expected_abi,
@@ -913,9 +1035,9 @@ bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
     if (!facts || !expected_core_seal_root)
         return fail(NULL, err, err_cap, "missing pre-map policy input");
 
-    if (facts->has_dt_init)
-        return fail(NULL, err, err_cap,
-                    "module carries DT_INIT; code would run before admission");
+    const char *early_code = pre_map_early_code_reason(facts);
+    if (early_code)
+        return fail(NULL, err, err_cap, "%s", early_code);
     if (facts->init_array_entries != 0 ||
         facts->preinit_array_entries != 0)
         return fail(NULL, err, err_cap,
