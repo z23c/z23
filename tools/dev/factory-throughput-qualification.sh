@@ -4,8 +4,8 @@
 set -euo pipefail
 
 if [[ $# -lt 2 || $# -gt 3 || ! $2 =~ ^(1|2|4|8|16)$ ||
-      ! ${3:-0} =~ ^[0-7]$ ]]; then
-    printf 'usage: %s NEW_OUTPUT_DIR CONCURRENCY(1|2|4|8|16) [REVISION_OFFSET(0..7)]\n' "$0" >&2
+      ! ${3:-0} =~ ^([0-9]|1[0-5])$ ]]; then
+    printf 'usage: %s NEW_OUTPUT_DIR CONCURRENCY(1|2|4|8|16) [REVISION_OFFSET(0..15)]\n' "$0" >&2
     exit 2
 fi
 run_start_ns=$(date +%s%N)
@@ -38,11 +38,19 @@ awk -F: '/model name/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}' \
 pubkey=$(cat "$output/publisher.pub")
 
 # Each revision adds one user-visible statistic while retaining all earlier tests.
-names=(digits tabs ascii_letters high_bytes carriage_returns spaces nuls newlines)
+names=(digits tabs ascii_letters high_bytes carriage_returns spaces nuls newlines
+       uppercase lowercase ascii_controls nonascii ascii_nonspace whitespace
+       zero_or_newline alnum)
 conditions=("c >= '0' && c <= '9'" "c == '\\t'" \
     "(c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')" \
-    'c >= 128' "c == '\\r'" "c == ' '" "c == 0" "c == '\\n'")
-expected=(1 1 1 1 1 1 1 1)
+    'c >= 128' "c == '\\r'" "c == ' '" "c == 0" "c == '\\n'" \
+    "c >= 'A' && c <= 'Z'" "c >= 'a' && c <= 'z'" \
+    'c < 32 || c == 127' 'c >= 128' \
+    "c < 128 && c != ' '" \
+    "c == '\\t' || c == '\\r' || c == ' ' || c == '\\n'" \
+    "c == 0 || c == '\\n'" \
+    "(c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')")
+expected=(1 1 1 1 1 1 1 1 1 0 4 1 6 4 2 2)
 
 make_revision()
 {
@@ -93,7 +101,7 @@ EOF
 
 mkdir "$output/variants"
 new_loc=(0)
-for ((revision=1; revision<=8; revision++)); do
+for ((revision=1; revision<=16; revision++)); do
     make_revision "$revision" "$output/variants/revision-$revision"
     if ((revision == 1)); then
         prior="$root/tools/dev/fixtures/commons_journey/textstat"
@@ -151,7 +159,7 @@ EOF
             "$package/src/textstat.c" "$case_dir/preview.c" \
             -o "$case_dir/preview" > "$case_dir/preview-build.log" 2>&1 && \
             "$case_dir/preview" > "$case_dir/preview.log" 2>&1 && \
-            [[ $(cat "$case_dir/preview.log") == 1 ]]; then
+            [[ $(cat "$case_dir/preview.log") == "${expected[revision-1]}" ]]; then
             previewed_loc=$generated_loc
         fi
         preview_end_ns=$(date +%s%N)
@@ -199,8 +207,8 @@ EOF
 
 batch_start_ns=$(date +%s%N)
 for ((job=1; job<=concurrency; job++)); do
-    revision=$(((revision_offset + job - 1) % 8 + 1))
-    duplicate=$((job > 8 ? 1 : 0))
+    revision=$(((revision_offset + job - 1) % 16 + 1))
+    duplicate=$((job > 16 ? 1 : 0))
     dispatch_ns=$(date +%s%N)
     run_case "$job" "$revision" "$duplicate" "$dispatch_ns" &
 done

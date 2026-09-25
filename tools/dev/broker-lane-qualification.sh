@@ -102,7 +102,7 @@ for ((lane=0; lane<width; lane++)); do
     mkdir "$output/lane-$lane"
     devbuild --wait --class normal --compact "${width_args[@]}" bash \
         tools/dev/factory-throughput-qualification.sh \
-        "$output/lane-$lane/factory" 2 "$(((lane * 2) % 8))" \
+        "$output/lane-$lane/factory" 2 "$(((lane * 2) % 16))" \
         >"$output/lane-$lane/broker.log" 2>&1 & pids+=("$!")
 done
 failed=0

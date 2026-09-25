@@ -61,3 +61,43 @@ throughput. The factory ledger proves compile, preview, test and offline
 independent-store checks. It does not publish a Commons package or produce a
 remote observation receipt, so accepted C23 LOC/hour remains unmeasured here.
 Those stages require a separate end-to-end qualification.
+
+## Sixteen distinct factory revisions and eight-lane node load
+
+The factory fixture now generates 16 cumulative, test-checked C23 statistics.
+The revision offset and preview expected value are bound to the requested
+statistic, so every revision is a distinct source and every preview checks its
+actual result. The bounded ledgers live under `test-tmp/factory-distinct-{2,4,8,16}-20260925/`
+and `test-tmp/factory-rev9-20260925/` for the one-change point. All 31 jobs
+across the five runs compiled, previewed, tested and passed the offline
+factory, with zero duplicate source hashes. One normal broker scope with eight
+CPU slots admitted each batch; this is offered concurrency inside that scope,
+not proof that the host admitted the same number of independent broker lanes.
+
+| Offered changes | Batch wall | Good/distinct | CPU sum | Peak job RSS |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 3.773 s | 1/1 | 3.135 s | 97,792 KiB |
+| 2 | 6.032 s | 2/2 | 5.843 s | 97,792 KiB |
+| 4 | 12.280 s | 4/4 | 18.416 s | 98,048 KiB |
+| 8 | 13.846 s | 8/8 | 36.197 s | 98,048 KiB |
+| 16 | 5.261 s | 16/16 | 66.522 s | 98,304 KiB |
+
+The nonmonotonic wall times show why these short batches cannot establish a
+sustained rate under concurrent host work. The 16-change run's
+`fully_accepted_loc` remains zero: it does not include publication or remote
+observation.
+
+An eight compact-lane isolated-node trial with the old eight-revision fixture
+admitted 8/8 lanes, passed 16/16 factory jobs, but duplicated eight source
+hashes; node RPC baseline/load p95 was 9/10 ms. Its raw record is
+`test-tmp/broker-shared-node-8-v5b-20260925/`. The first distinct-revision
+trial admitted 8/8 and produced 16 unique roots, but six previews failed
+because the harness expected a result of one for every statistic. Its node RPC
+p95 rose from 8 to 151 ms. After fixing preview expectations, the next trial
+admitted only 4/8 lanes within the 30 s bound under concurrent shared-host
+work. All eight admitted factory jobs passed, while node RPC p95 rose from 8
+to 136 ms. The records are
+`test-tmp/broker-shared-node-8-distinct-20260925/` and
+`test-tmp/broker-shared-node-8-distinct-v2-20260925/`. Neither trial qualifies
+eight lanes for default admission: one violates the node latency target and
+the other does not admit the requested width. The default remains two.
