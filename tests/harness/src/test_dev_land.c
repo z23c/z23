@@ -922,6 +922,45 @@ static bool dlx_regen_conflict(struct dlx_rig *rig, const char *extra,
     return dlx_git(rig->clone, push) == 0;
 }
 
+/* Reproduce the host configuration that hid a generated-file conflict from
+ * dev.land: rerere has a previous resolution and autoupdate stages it during
+ * rebase. First teach rerere the exact conflict with a throwaway merge, then
+ * verify a raw rebase leaves no unmerged path before giving the same tip to
+ * the lander. The fixture changes only its isolated Git rig. */
+static bool dlx_rerere_autoupdate_prime(struct dlx_rig *rig)
+{
+    char upstream[64], unmerged[512];
+    const char *enable[] = { "config", "rerere.enabled", "true", NULL };
+    const char *autoupdate[] = { "config", "rerere.autoupdate", "true", NULL };
+    const char *merge[] = { "merge", "--no-ff", "keep-tip", NULL };
+    const char *ours[] = { "checkout", "--ours", "--",
+                           "docs/CAPABILITY_INVENTORY.jsonl",
+                           "docs/CODEBASE_MAP.md", NULL };
+    const char *rerere[] = { "rerere", NULL };
+    const char *merge_abort[] = { "merge", "--abort", NULL };
+    const char *checkout_tip[] = { "checkout", "--quiet", "keep-tip", NULL };
+    const char *rebase[] = { "rebase", upstream, NULL };
+    const char *diff_u[] = { "diff", "--name-only", "--diff-filter=U", NULL };
+    const char *rebase_abort[] = { "rebase", "--abort", NULL };
+    const char *checkout_main[] = { "checkout", "--quiet", "main", NULL };
+
+    if (!dlx_origin_main(rig, upstream) ||
+        dlx_git(rig->clone, enable) != 0 ||
+        dlx_git(rig->clone, autoupdate) != 0 ||
+        dlx_git(rig->clone, merge) == 0 ||
+        dlx_git(rig->clone, ours) != 0 ||
+        dlx_git(rig->clone, rerere) != 0 ||
+        dlx_git(rig->clone, merge_abort) != 0 ||
+        dlx_git(rig->clone, checkout_tip) != 0)
+        return false;
+    bool stopped = dlx_git(rig->clone, rebase) != 0;
+    bool staged = stopped &&
+        dlx_git_out(rig->clone, diff_u, unmerged, sizeof(unmerged)) == 0 &&
+        unmerged[0] == '\0';
+    return dlx_git(rig->clone, rebase_abort) == 0 &&
+           dlx_git(rig->clone, checkout_main) == 0 && staged;
+}
+
 /* The landing worktree's checkout directory, where the regeneration commit
  * this leaf makes has to be observable. */
 static void dlx_land_wt(char *out, size_t cap)
@@ -6926,6 +6965,42 @@ int test_dev_land(void)
          * main rejects an unsigned commit. */
         ASSERT(dlx_git_out(landwt, log_sig, sig, sizeof(sig)) == 0);
         ASSERT(strcmp(sig, "N") != 0);
+        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: rerere autoupdate cannot hide a previously resolved "
+        "generated-artifact conflict from the rebase classifier") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char tip[64], landwt[1300], configured[16];
+        const char *get_autoupdate[] = { "config", "--get",
+                                         "rerere.autoupdate", NULL };
+        dlx_isolate("regenrerere");
+        ASSERT(dlx_rig_make(&rig, "regenrerere_rig"));
+        ASSERT(dlx_regen_conflict(&rig, NULL, tip));
+        ASSERT(dlx_rerere_autoupdate_prime(&rig));
+        ASSERT(dlx_sign_arm(rig.clone, "regenrerere_key"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "rebase: regenerated docs/CAPABILITY_INVENTORY.jsonl,")
+               != NULL);
+        dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        ASSERT(dlx_git_out(landwt, get_autoupdate, configured,
+                           sizeof(configured)) == 0);
+        ASSERT(strcmp(configured, "true") == 0);
         unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
         dlx_restore();
         PASS();

@@ -4048,9 +4048,9 @@ static int dl_rebase_autoresolve(const struct dl_dirs *d, struct dl_row *row,
                                  char *why, size_t why_cap)
 {
     const char *staged_args[] = { "diff", "--cached", "--quiet", NULL };
-    const char *cont_args[] = { "-c", "core.editor=true", "rebase",
-                                "--continue", NULL };
-    const char *skip_args[] = { "rebase", "--skip", NULL };
+    const char *cont_args[] = { "-c", "rerere.autoupdate=false", "-c",
+                                "core.editor=true", "rebase", "--continue", NULL };
+    const char *skip_args[] = { "-c", "rerere.autoupdate=false", "rebase", "--skip", NULL };
     const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U",
                                     NULL };
     size_t recheck_cap = paths_cap < DL_REGEN_PATHS_CAP ? paths_cap
@@ -4262,9 +4262,9 @@ static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
 {
     char buf[DL_GIT_CAP];
     bool integrated = false;
-    const char *rebase_args[] = { "--no-replace-objects", "rebase", observed_main, NULL };
-    const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U",
-                                    NULL };
+    const char *rebase_args[] = { "--no-replace-objects", "-c",
+                                  "rerere.autoupdate=false", "rebase", observed_main, NULL };
+    const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U", NULL };
     const char *abort_args[] = { "rebase", "--abort", NULL };
     if (regen_note && regen_note_cap)
         regen_note[0] = '\0';
