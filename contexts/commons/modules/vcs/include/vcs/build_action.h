@@ -201,4 +201,161 @@ bool vcs_build_action_v1_root_for_kind(
 bool vcs_build_action_v1_root(const struct vcs_build_action_v1 *action,
                               uint8_t out[32]);
 
+/* ---- Action preimage v2: the exact inputs of one build action ----------
+ *
+ * v1 above names a sealed, fixed action: flags and environment are registry
+ * constants. v2 records what one real action actually consumed, as a
+ * self-describing byte string that can be stored as a content-addressed
+ * object and re-derived by any receiver:
+ *
+ *   preimage = MAGIC || field(1) || field(2) || ... || field(11)
+ *   field    = u8 tag || u32le payload_len || payload
+ *   root     = SHA3-256(VCS_ACTION_ROOT_V2_DOMAIN || preimage)
+ *
+ * Every field is present exactly once, in tag order. Inside a payload, text
+ * is u32le length || bytes, counts are u32le, digests are 32 raw bytes. An
+ * empty harness/fixtures/policy field is a zero-length payload under its
+ * tag, never 32 zero bytes. Encoding is canonical: the decoder refuses any
+ * byte string the encoder would not produce (order, duplicates, trailing
+ * bytes, unregistered environment names, and any absolute host path).
+ *
+ * Paths are repo-relative ("a/b.h", "." for the checkout root) or
+ * sysroot-relative ("@sys/usr/include"). Text may name the virtual tokens
+ * "@root" (the checkout root), "@out/..." (declared outputs) and the fixed
+ * virtual roots in VCS_ACTION_V2_VIRTUAL_ROOTS; nothing else absolute is
+ * accepted. No field carries a hostname, uid, pid or timestamp. */
+#define VCS_ACTION_PREIMAGE_V2_MAGIC "zcl.action_preimage.v2"
+#define VCS_ACTION_ROOT_V2_DOMAIN "zcl.action_root.v2"
+#define VCS_ACTION_PREIMAGE_V2_MAX_BYTES (16u * 1024u * 1024u)
+#define VCS_ACTION_PREIMAGE_V2_MAX_ITEMS 65536u
+#define VCS_ACTION_PREIMAGE_V2_MAX_TEXT 4096u
+/* Absolute spellings that name the same virtual location on every host. */
+#define VCS_ACTION_V2_VIRTUAL_ROOTS "/zbuild", "/zclassic23"
+
+enum vcs_action_field_v2 {
+    VCS_ACTION_FIELD_V2_NONE = 0,
+    VCS_ACTION_FIELD_V2_STAGE = 1,
+    VCS_ACTION_FIELD_V2_SOURCE = 2,
+    VCS_ACTION_FIELD_V2_GENERATED = 3,
+    VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP = 4,
+    VCS_ACTION_FIELD_V2_TOOLCHAIN = 5,
+    VCS_ACTION_FIELD_V2_FLAGS = 6,
+    VCS_ACTION_FIELD_V2_ENV = 7,
+    VCS_ACTION_FIELD_V2_ABI = 8,
+    VCS_ACTION_FIELD_V2_HARNESS = 9,
+    VCS_ACTION_FIELD_V2_FIXTURES = 10,
+    VCS_ACTION_FIELD_V2_POLICY = 11,
+    VCS_ACTION_FIELD_V2_COUNT = 12,
+};
+
+/* "stage", "source", "generated", "negative_lookup", "toolchain", "flags",
+ * "env", "abi", "harness", "fixtures", "policy"; NULL for anything else. */
+const char *vcs_action_field_v2_name(enum vcs_action_field_v2 field);
+
+/* One input file: canonical path plus SHA3-256 of its bytes. */
+struct vcs_action_input_v2 {
+    const char *path;
+    uint8_t sha3[32];
+};
+
+/* Probed name. The name was looked up in search_dirs[0 .. search_prefix-1]
+ * and in every includer dir; each such (dir, name) is asserted absent unless
+ * it appears in the present list. */
+struct vcs_action_probe_v2 {
+    const char *name;
+    uint32_t search_prefix;
+};
+
+enum vcs_action_present_kind_v2 {
+    VCS_ACTION_PRESENT_V2_REGULAR = 1, /* followed by the file's SHA3 */
+    VCS_ACTION_PRESENT_V2_OTHER = 2,   /* directory, device, dangling link */
+};
+
+/* A probed location that was observed to exist. */
+struct vcs_action_present_v2 {
+    const char *dir;
+    const char *name;
+    uint8_t kind;
+    uint8_t sha3[32];
+};
+
+struct vcs_action_abi_v2 {
+    const char *name;
+    uint32_t version;
+};
+
+struct vcs_action_root_ref_v2 {
+    bool present;
+    uint8_t root[32];
+};
+
+/* Field order of the wire, and the order the table test iterates. */
+struct vcs_action_preimage_v2 {
+    const char *stage_kind;
+    uint32_t stage_version;
+    const struct vcs_action_input_v2 *sources;   /* strictly path-sorted */
+    size_t source_count;
+    const struct vcs_action_input_v2 *generated; /* strictly path-sorted */
+    size_t generated_count;
+    const char *const *search_dirs;              /* compiler search order */
+    size_t search_dir_count;
+    const char *const *includer_dirs;            /* strictly sorted */
+    size_t includer_dir_count;
+    const struct vcs_action_probe_v2 *probes;    /* strictly name-sorted */
+    size_t probe_count;
+    const struct vcs_action_present_v2 *present; /* sorted by (dir, name) */
+    size_t present_count;
+    uint8_t toolchain_root[32];
+    const char *const *argv;                     /* order preserved */
+    size_t argc;
+    const char *const *env;                      /* NAME=value, name-sorted */
+    size_t env_count;
+    const struct vcs_action_abi_v2 *abi;         /* strictly name-sorted */
+    size_t abi_count;
+    struct vcs_action_root_ref_v2 harness;
+    struct vcs_action_root_ref_v2 fixtures;
+    struct vcs_action_root_ref_v2 policy;
+};
+
+/* A decoded preimage owns its storage; `view` points into it. */
+struct vcs_action_preimage_v2_decoded {
+    struct vcs_action_preimage_v2 view;
+    void *storage;
+};
+
+/* Canonical token checks shared by the encoder, decoder, and derivers. */
+bool vcs_action_v2_path_canonical(const char *path, bool allow_dot);
+bool vcs_action_v2_name_canonical(const char *name);
+bool vcs_action_v2_text_canonical(const char *text);
+/* True when a path spelled at text[i] would be read as a path start: the
+ * beginning of the text, after one of `=,:;"' ` or after a glued option
+ * such as -I/-isystem/-o. Derivers use this to rewrite host spellings to
+ * @root/@sys tokens by exactly the rule the canonical check enforces. */
+bool vcs_action_v2_path_boundary(const char *text, size_t i);
+/* The closed environment allowlist for v2 compile actions. Anything outside
+ * it can never enter a preimage, so it cannot change a root. */
+bool vcs_action_v2_env_allowlisted(const char *name, size_t name_len);
+
+/* Encode `in` canonically into a fresh zcl_malloc buffer (free() it). Any
+ * non-canonical input is refused with a reason in `why`. */
+bool vcs_action_preimage_v2_encode(const struct vcs_action_preimage_v2 *in,
+                                   uint8_t **out, size_t *out_len,
+                                   char *why, size_t why_len);
+/* Strictly parse and validate stored bytes. Release with _decoded_free. */
+bool vcs_action_preimage_v2_decode(
+    const uint8_t *bytes, size_t len,
+    struct vcs_action_preimage_v2_decoded *out, char *why, size_t why_len);
+void vcs_action_preimage_v2_decoded_free(
+    struct vcs_action_preimage_v2_decoded *decoded);
+/* Validate, then SHA3-256(domain || bytes). A non-canonical byte string is
+ * refused rather than given a root. */
+bool vcs_action_root_v2_from_bytes(const uint8_t *bytes, size_t len,
+                                   uint8_t out[32], char *why, size_t why_len);
+/* First field (in tag order) whose payload differs between two valid
+ * preimages; VCS_ACTION_FIELD_V2_NONE when identical. False when either
+ * input is not a valid preimage. */
+bool vcs_action_preimage_v2_first_diff(const uint8_t *a, size_t a_len,
+                                       const uint8_t *b, size_t b_len,
+                                       enum vcs_action_field_v2 *out);
+
 #endif /* ZCL_VCS_BUILD_ACTION_H */
