@@ -321,7 +321,7 @@ Z23_FLAG("ZCL_CAP_CLOSURE_SOURCE_RECORD", "env_build", "-", "-",
           "Reuse the parent Make source record for the same checkout's read-only compiler flag query")
 Z23_FLAG("ZCL_CC", "env_build", "clang", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:137")
-Z23_FLAG("ZCL_CC_JOBS", "env_build", "6", "-",
+Z23_FLAG("ZCL_CC_JOBS", "env_build", "ZCL_HOST_JOBS/2", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:532")
 Z23_FLAG("ZCL_CHECKOUT_LOCK_HELD", "env_build", "0", "-",
           "undocumented; first use tools/dev/checkout-lock.sh:41")

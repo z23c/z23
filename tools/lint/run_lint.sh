@@ -48,7 +48,8 @@
 #   ZCL_LINT_TIMING_DIR  artifact dir (default .cache/lint-timing)
 #   ZCL_LINT_VERBOSE=1   print the full per-gate timing table, not just top 10
 #   ZCL_CC_JOBS           nested compiler workers per compiler-sweep gate;
-#                         defaults to 1 under this parallel driver
+#                         defaults to half of ZCL_HOST_JOBS, clamped 6..16,
+#                         when a sweep gate runs, else 1
 #   ZCL_TOOLS_LINK_JOBS   nested standalone-link workers; defaults to 1 here
 #   ZCL_FUZZ_REPLAY_JOBS  nested fuzz-replay workers; defaults to 1 here
 #   ZCL_LINT_CACHE=1     opt in to the result cache (same as --cache)
@@ -535,7 +536,7 @@ main() {
     # check-windows-cross-syntax (2339 mingw TUs, ~490 CPU-seconds cold)
     # set the lint wall.
     local sweep_host sweep_jobs
-    sweep_host="${ZCL_HOST_JOBS:-$(nproc 2>/dev/null || echo 8)}"
+    sweep_host="${ZCL_HOST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}"
     [[ "$sweep_host" =~ ^[0-9]+$ ]] || sweep_host=8
     sweep_jobs=$((sweep_host / 2))
     [ "$sweep_jobs" -ge 6 ] || sweep_jobs=6
@@ -628,6 +629,12 @@ main() {
     local -A is_pole=()
     local pole
     for pole in $LONG_POLE_FIRST; do
+        # A misspelled or retired name would silently stop ordering anything.
+        if ! gate_command "$pole" >/dev/null; then
+            echo "run_lint.sh: FATAL — LONG_POLE_FIRST names '$pole'," \
+                 "which has no gate_command() entry" >&2
+            exit 2
+        fi
         is_pole["$pole"]=1
         for g in "${par_gates[@]}"; do
             [ "$g" = "$pole" ] && ordered_gates+=("$g")
