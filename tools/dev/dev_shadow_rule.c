@@ -63,12 +63,12 @@ zcl_shadow_contract_change_name(enum zcl_shadow_contract_change change)
 enum zcl_shadow_fallback
 zcl_shadow_classify(const struct zcl_shadow_scope_facts *facts)
 {
-    if (!facts || facts->bytes_mismatch || facts->plan_refused)
-        return ZCL_SHADOW_FALLBACK_CONFLICT;
+    if (!facts || facts->bytes_mismatch) return ZCL_SHADOW_FALLBACK_CONFLICT;
     if (facts->consensus_policy) return ZCL_SHADOW_FALLBACK_POLICY;
     if (facts->build_graph_input || facts->generated_input)
         return ZCL_SHADOW_FALLBACK_DEPENDENCY_CHANGE;
-    if (facts->negative_lookup || facts->closure_universal)
+    if (facts->negative_lookup || facts->closure_universal ||
+        facts->plan_refused)
         return ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE;
     return ZCL_SHADOW_FALLBACK_NONE;
 }

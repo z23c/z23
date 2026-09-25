@@ -336,6 +336,8 @@ static int ss_test_classifier(void)
         f.closure_universal = true;
         ASSERT(zcl_shadow_classify(&f) == ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE);
         f.closure_universal = false;
+        f.plan_refused = true;
+        ASSERT(zcl_shadow_classify(&f) == ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE);
         f.negative_lookup = true;
         ASSERT(zcl_shadow_classify(&f) == ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE);
         f.generated_input = true;

@@ -483,19 +483,23 @@ static void shadow_predict(const struct shadow_pricing *p,
 
 static bool shadow_plan(const struct zcl_shadow_eval_ctx *ctx,
                         const struct zcl_shadow_entry *e,
-                        struct zcl_devloop_plan *plan, bool *refused)
+                        struct zcl_devloop_plan *plan, bool *refused,
+                        char *reason_out, size_t reason_cap)
 {
     const char *files[ZCL_SHADOW_MAX_FILES];
     for (size_t i = 0; i < e->file_count; i++) files[i] = e->files[i];
     *refused = false;
     if (!zcl_devloop_plan_files(files, e->file_count, plan)) {
         *refused = true;
+        (void)snprintf(reason_out, reason_cap, "plan_files_refused");
         return true;
     }
     if (!zcl_devloop_plan_add_closure(ctx->root, files, e->file_count, plan))
         return false;
     const char *reason = "";
     *refused = !zcl_devloop_plan_proof_admissible(plan, &reason);
+    if (*refused)
+        (void)snprintf(reason_out, reason_cap, "%s", reason ? reason : "");
     return true;
 }
 
@@ -588,7 +592,9 @@ static bool shadow_evaluate_plan(const struct zcl_shadow_eval_ctx *ctx,
 {
     bool refused = false;
     struct shadow_marks m;
-    bool ok = shadow_marks_init(&m) && shadow_plan(ctx, e, plan, &refused) &&
+    bool ok = shadow_marks_init(&m) &&
+              shadow_plan(ctx, e, plan, &refused, out->selector_reason,
+                          sizeof(out->selector_reason)) &&
               shadow_select(ctx, e, plan, refused, &m, &out->graph) &&
               shadow_count_build(ctx->root, e, out);
     if (!ok) {

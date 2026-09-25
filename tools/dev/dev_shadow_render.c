@@ -72,7 +72,7 @@ static bool shadow_render_main(FILE *out, const struct zcl_shadow_result *r)
         "fallback_reason=%s predict=%s selector_obligations=%u/%u "
         "selector_cost_ms=%llu lint_gates=%u/%u lint_cost_ms=%llu "
         "mandatory_independent=%u validation_cost_us=%llu selector=%s "
-        "bytes=%s build_graph=%s unweighted=%u\n",
+        "bytes=%s build_graph=%s unweighted=%u selector_reason=%s\n",
         r->id, zcl_shadow_kind_name(r->kind), r->component, before, after,
         zcl_shadow_contract_change_name(r->patch.contract_change),
         r->build_invalidated, r->build_total, fresh, total, total - fresh,
@@ -90,7 +90,8 @@ static bool shadow_render_main(FILE *out, const struct zcl_shadow_result *r)
         (unsigned long long)r->validation_cost_us,
         r->selector_universal ? "universal" : "exact",
         r->bytes_verified ? "verified" : "MISMATCH",
-        r->build_known ? "complete" : "partial", r->unweighted) > 0;
+        r->build_known ? "complete" : "partial", r->unweighted,
+        r->selector_reason[0] ? r->selector_reason : "-") > 0;
 }
 
 bool zcl_shadow_render_graph(FILE *out, const struct zcl_shadow_result *r)

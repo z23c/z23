@@ -172,7 +172,8 @@ bool zcl_shadow_path_is_build_graph(const char *path);
 /* ── Fallback classification ──────────────────────────────────────────── */
 struct zcl_shadow_scope_facts {
     bool bytes_mismatch;    /* frozen patch SHA3 differs from the bytes */
-    bool plan_refused;      /* plan builder refused or plan inadmissible */
+    bool plan_refused;      /* plan builder refused or plan inadmissible:
+                             * the selector could not name the scope */
     bool consensus_policy;  /* consensus surface or sealed core */
     bool build_graph_input; /* Makefile / *.mk: flags and graph moved */
     bool generated_input;   /* a generator input: output bytes unindexed */
@@ -319,6 +320,7 @@ struct zcl_shadow_result {
      * obligation can be re-run by name. Empty for a universal selection;
      * ends in "..." when it did not fit. */
     char selected_names[ZCL_SHADOW_NAMES_MAX];
+    char selector_reason[96];       /* why the plan was refused, or "" */
     uint64_t lint_cost_ms;          /* the lint share of every bill above */
     struct zcl_shadow_proof_graph graph;
     /* The rule-enabled prediction: ALL, or exactly these groups plus every
