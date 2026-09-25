@@ -303,6 +303,10 @@ printf '%s\0' -I. >> "$INC_NUL"
 # TOOLS_INCLUDES: command/native_command.h lives at tools/command/, not
 # under a directory named include. Same -Itools the node build uses.
 printf '%s\0' -Itools -Itools/dev -Itools/mind >> "$INC_NUL"
+# `|| true`: under parallel lint another gate can remove its scratch
+# directory while this walk is inside it, find exits nonzero, and pipefail
+# would end the gate with no message. A walk that really found nothing is
+# still caught by the INC_COUNT floor below.
 find . \( -path './.git' -o -path './.git/*' \
           -o -path './build' -o -path './build/*' \
           -o -path './test-tmp' -o -path './test-tmp/*' \
@@ -312,7 +316,7 @@ find . \( -path './.git' -o -path './.git/*' \
      -o -type d -name include -print0 2>/dev/null |
     while IFS= read -r -d '' d; do
         printf '%s\0' "-I$d"
-    done >> "$INC_NUL"
+    done >> "$INC_NUL" || true
 
 # Private headers sit next to their .c files (codeindex_priv.h,
 # *_internal.h). The Windows-acceptance catalog already passes those as

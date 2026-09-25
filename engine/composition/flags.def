@@ -966,7 +966,7 @@ Z23_FLAG("ZCL_GATE_OUT", "env_build", "-", "-",
 Z23_FLAG("ZCL_GATE_SCAN_LOG", "env_build", "-", "-",
           "undocumented; first use tools/lint/gate_lib.sh:82")
 Z23_FLAG("ZCL_GATE_TEST_COMPAT_HEADER", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:530")
+          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:534")
 Z23_FLAG("ZCL_GATE_WIRING_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_lint_gate_wiring.c:672")
 Z23_FLAG("ZCL_GC_MAIN_REF", "env_build", "main", "-",
