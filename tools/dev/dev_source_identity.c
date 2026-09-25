@@ -6,12 +6,24 @@
 #include "codeindex/codeindex_merkle.h"
 #include "base/hex.h"
 #include "crypto/sha256.h"
+#include "crypto/sha3.h"
 #include "platform/time_compat.h"
+#include "util/safe_alloc.h"
 
 #include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -405,4 +417,310 @@ const char *zcl_dev_source_admission_name(
     default:
         return "error";
     }
+}
+
+#define SOURCE_NS_MAX_ROOTS 128u
+#if !defined(_WIN32)
+#define SOURCE_NS_MAX_DEPTH 64u
+#define SOURCE_NS_MAX_ENTRIES 200000u
+
+struct source_ns_context {
+    struct sha3_256_ctx root;
+    struct sha3_256_ctx guard;
+    struct { dev_t dev; ino_t ino; } parents[SOURCE_NS_MAX_DEPTH];
+    size_t entries;
+    char *why;
+    size_t why_len;
+};
+
+static bool source_ns_fail(struct source_ns_context *ctx, const char *reason)
+{
+    if (ctx->why && ctx->why_len && !ctx->why[0])
+        (void)snprintf(ctx->why, ctx->why_len, "%s", reason);
+    return false;
+}
+
+static void source_ns_u64(struct sha3_256_ctx *sha, uint64_t value)
+{
+    uint8_t wire[8];
+    for (size_t i = 0; i < sizeof(wire); i++) {
+        wire[i] = (uint8_t)value;
+        value >>= 8;
+    }
+    sha3_256_write(sha, wire, sizeof(wire));
+}
+
+static void source_ns_text(struct sha3_256_ctx *sha, const char *text)
+{
+    size_t len = strlen(text);
+    source_ns_u64(sha, (uint64_t)len);
+    sha3_256_write(sha, (const uint8_t *)text, len);
+}
+
+static long source_ns_mtime_ns(const struct stat *st)
+{
+#if defined(__APPLE__)
+    return st->st_mtimespec.tv_nsec;
+#else
+    return st->st_mtim.tv_nsec;
+#endif
+}
+
+static long source_ns_ctime_ns(const struct stat *st)
+{
+#if defined(__APPLE__)
+    return st->st_ctimespec.tv_nsec;
+#else
+    return st->st_ctim.tv_nsec;
+#endif
+}
+
+static bool source_ns_same_stat(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+           a->st_size == b->st_size && a->st_mtime == b->st_mtime &&
+           a->st_ctime == b->st_ctime &&
+           source_ns_mtime_ns(a) == source_ns_mtime_ns(b) &&
+           source_ns_ctime_ns(a) == source_ns_ctime_ns(b);
+}
+
+static void source_ns_guard_dir(struct source_ns_context *ctx,
+                                const char *rel, const struct stat *st)
+{
+    source_ns_text(&ctx->guard, rel);
+    source_ns_u64(&ctx->guard, (uint64_t)st->st_dev);
+    source_ns_u64(&ctx->guard, (uint64_t)st->st_ino);
+    source_ns_u64(&ctx->guard, (uint64_t)st->st_size);
+    source_ns_u64(&ctx->guard, (uint64_t)st->st_mtime);
+    source_ns_u64(&ctx->guard, (uint64_t)source_ns_mtime_ns(st));
+    source_ns_u64(&ctx->guard, (uint64_t)st->st_ctime);
+    source_ns_u64(&ctx->guard, (uint64_t)source_ns_ctime_ns(st));
+}
+
+static void source_ns_names_free(char **names, size_t count)
+{
+    for (size_t i = 0; i < count; i++) free(names[i]);
+    free(names);
+}
+
+static int source_ns_name_cmp(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static bool source_ns_names(int fd, char ***out, size_t *out_count,
+                            struct source_ns_context *ctx)
+{
+    int read_fd = dup(fd);
+    if (read_fd < 0) return source_ns_fail(ctx, "include_directory_dup_failed");
+    DIR *dir = fdopendir(read_fd);
+    if (!dir) {
+        (void)close(read_fd);
+        return source_ns_fail(ctx, "include_directory_open_failed");
+    }
+    char **names = NULL;
+    size_t count = 0, cap = 0;
+    bool ok = true;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) { ok = errno == 0; break; }
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) continue;
+        if (count == cap) {
+            size_t next = cap ? cap * 2u : 32u;
+            char **grown = zcl_realloc(names, next * sizeof(*names),
+                                       "include namespace names");
+            if (!grown) { ok = false; break; }
+            names = grown;
+            cap = next;
+        }
+        names[count] = zcl_strdup(entry->d_name, "include namespace name");
+        if (!names[count]) { ok = false; break; }
+        count++;
+    }
+    if (closedir(dir) != 0) ok = false;
+    if (!ok) {
+        source_ns_names_free(names, count);
+        return source_ns_fail(ctx, "include_directory_read_failed");
+    }
+    qsort(names, count, sizeof(*names), source_ns_name_cmp);
+    *out = names;
+    *out_count = count;
+    return true;
+}
+
+static bool source_ns_dir(int fd, const char *rel, size_t depth,
+                          struct source_ns_context *ctx);
+
+static bool source_ns_entry(int fd, const char *name, const char *rel,
+                            size_t depth, struct source_ns_context *ctx)
+{
+    struct stat link, target;
+    if (fstatat(fd, name, &link, AT_SYMLINK_NOFOLLOW) != 0)
+        return source_ns_fail(ctx, "include_entry_stat_failed");
+    bool symlink = S_ISLNK(link.st_mode);
+    if (symlink) {
+        char text[PATH_MAX];
+        ssize_t len = readlinkat(fd, name, text, sizeof(text) - 1u);
+        if (len <= 0 || len >= (ssize_t)sizeof(text) - 1)
+            return source_ns_fail(ctx, "include_symlink_target_invalid");
+        text[len] = '\0';
+        source_ns_text(&ctx->root, "link");
+        source_ns_text(&ctx->root, rel);
+        source_ns_text(&ctx->root, text);
+        if (fstatat(fd, name, &target, 0) != 0)
+            return source_ns_fail(ctx, "include_symlink_dangling");
+    } else {
+        target = link;
+    }
+    if (S_ISREG(target.st_mode)) {
+        source_ns_text(&ctx->root, "file");
+        source_ns_text(&ctx->root, rel);
+        return true;
+    }
+    if (!S_ISDIR(target.st_mode))
+        return source_ns_fail(ctx, "include_entry_special_type");
+    source_ns_text(&ctx->root, "directory");
+    source_ns_text(&ctx->root, rel);
+    int child = openat(fd, name, O_RDONLY | O_CLOEXEC | O_DIRECTORY |
+                      (symlink ? 0 : O_NOFOLLOW));
+    if (child < 0) return source_ns_fail(ctx, "include_directory_open_failed");
+    struct stat opened;
+    bool ok = fstat(child, &opened) == 0 &&
+              source_ns_same_stat(&target, &opened) &&
+              source_ns_dir(child, rel, depth + 1u, ctx);
+    if (close(child) != 0) ok = false;
+    return ok ? true : source_ns_fail(ctx, "include_directory_changed");
+}
+
+static bool source_ns_scan_entries(int fd, const char *rel, size_t depth,
+                                   struct source_ns_context *ctx)
+{
+    char **names = NULL;
+    size_t count = 0;
+    if (!source_ns_names(fd, &names, &count, ctx)) return false;
+    bool ok = true;
+    for (size_t i = 0; i < count; i++) {
+        char child_rel[PATH_MAX];
+        int n = snprintf(child_rel, sizeof(child_rel), "%s/%s", rel, names[i]);
+        if (n <= 0 || n >= (int)sizeof(child_rel) ||
+            ++ctx->entries > SOURCE_NS_MAX_ENTRIES ||
+            !source_ns_entry(fd, names[i], child_rel, depth, ctx)) {
+            ok = false;
+            break;
+        }
+    }
+    source_ns_names_free(names, count);
+    return ok;
+}
+
+static bool source_ns_dir(int fd, const char *rel, size_t depth,
+                          struct source_ns_context *ctx)
+{
+    struct stat before, after;
+    if (depth >= SOURCE_NS_MAX_DEPTH || fstat(fd, &before) != 0 ||
+        !S_ISDIR(before.st_mode))
+        return source_ns_fail(ctx, "include_directory_depth_or_stat");
+    for (size_t i = 0; i < depth; i++)
+        if (ctx->parents[i].dev == before.st_dev &&
+            ctx->parents[i].ino == before.st_ino)
+            return source_ns_fail(ctx, "include_directory_cycle");
+    ctx->parents[depth].dev = before.st_dev;
+    ctx->parents[depth].ino = before.st_ino;
+    bool ok = source_ns_scan_entries(fd, rel, depth, ctx);
+    if (fstat(fd, &after) != 0 || !source_ns_same_stat(&before, &after))
+        ok = false;
+    if (ok) source_ns_guard_dir(ctx, rel, &after);
+    return ok ? true : source_ns_fail(ctx, "include_directory_changed");
+}
+
+static bool source_ns_root(const char *cwd, const char *path, size_t index,
+                           struct source_ns_context *ctx)
+{
+    char physical[PATH_MAX], rel[32];
+    int n = path[0] == '/' ? snprintf(physical, sizeof(physical), "%s", path)
+                           : snprintf(physical, sizeof(physical), "%s/%s",
+                                      cwd, path);
+    if (n <= 0 || n >= (int)sizeof(physical))
+        return source_ns_fail(ctx, "include_root_path_too_long");
+    (void)snprintf(rel, sizeof(rel), "root-%zu", index);
+    source_ns_text(&ctx->root, rel);
+    struct stat before, after;
+    if (lstat(physical, &before) != 0) {
+        if (errno != ENOENT)
+            return source_ns_fail(ctx, "include_root_stat_failed");
+        source_ns_text(&ctx->root, "missing");
+        return true;
+    }
+    int fd = open(physical, O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    if (fd < 0 || fstat(fd, &after) != 0 || !S_ISDIR(after.st_mode)) {
+        if (fd >= 0) (void)close(fd);
+        return source_ns_fail(ctx, "include_root_not_directory");
+    }
+    source_ns_text(&ctx->root, "present");
+    bool ok = source_ns_dir(fd, rel, 0, ctx);
+    struct stat final;
+    if (fstat(fd, &final) != 0 || !source_ns_same_stat(&after, &final))
+        ok = false;
+    if (close(fd) != 0) ok = false;
+    return ok ? true : source_ns_fail(ctx, "include_root_changed");
+}
+
+static bool source_ns_once(const char *cwd, const char *const roots[],
+                           size_t count, uint8_t root[32], uint8_t guard[32],
+                           char *why, size_t why_len)
+{
+    struct source_ns_context ctx = {.why = why, .why_len = why_len};
+    static const char domain[] = "zcl.dev_include_namespace.v1";
+    sha3_256_init(&ctx.root);
+    sha3_256_init(&ctx.guard);
+    sha3_256_write(&ctx.root, (const uint8_t *)domain, sizeof(domain));
+    source_ns_u64(&ctx.root, count);
+    for (size_t i = 0; i < count; i++) {
+        if (!roots[i] || !roots[i][0])
+            return source_ns_fail(&ctx, "include_search_root_incomplete");
+        if (!source_ns_root(cwd, roots[i], i, &ctx)) return false;
+    }
+    sha3_256_finalize(&ctx.root, root);
+    sha3_256_finalize(&ctx.guard, guard);
+    return true;
+}
+#endif
+
+static bool source_ns_args_valid(const char *cwd, const char *const roots[],
+                                 size_t count, const uint8_t out[32])
+{
+    return cwd && cwd[0] == '/' && roots && count > 0 &&
+           count <= SOURCE_NS_MAX_ROOTS && out;
+}
+
+bool zcl_dev_include_namespace_v1_root(
+    const char *cwd, const char *const roots[], size_t count,
+    uint8_t out[32], char *why, size_t why_len)
+{
+    if (why && why_len) why[0] = '\0';
+    if (!source_ns_args_valid(cwd, roots, count, out)) {
+        if (why && why_len)
+            (void)snprintf(why, why_len, "include_search_roots_invalid");
+        return false;
+    }
+#if defined(_WIN32)
+    if (why && why_len)
+        (void)snprintf(why, why_len, "include_namespace_unavailable");
+    return false;
+#else
+    uint8_t first[32], second[32], guard_before[32], guard_after[32];
+    if (!source_ns_once(cwd, roots, count, first, guard_before, why, why_len) ||
+        !source_ns_once(cwd, roots, count, second, guard_after, why, why_len))
+        return false;
+    if (memcmp(first, second, 32) != 0 ||
+        memcmp(guard_before, guard_after, 32) != 0) {
+        if (why && why_len)
+            (void)snprintf(why, why_len, "include_namespace_changed");
+        return false;
+    }
+    memcpy(out, first, 32);
+    return true;
+#endif
 }

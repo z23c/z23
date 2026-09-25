@@ -501,6 +501,16 @@ struct dev_source_record {
  * changed by this shadow capture. */
 bool zcl_dev_source_cas_capture(const char *repo_root,
                                 struct dev_source_record *out);
+/* Hash the ordered namespace of explicitly observed compiler include roots.
+ * File contents belong in the positive depfile closure; this root binds
+ * absence/presence, including __has_include decisions. `roots` must be the
+ * complete compiler-observed search list before this can seal an action.
+ * The path spelling is local; only ordered relative entries enter the root.
+ * Missing search directories have a distinct canonical marker. Unreadable,
+ * racing, cyclic, or special entries refuse instead of being skipped. */
+bool zcl_dev_include_namespace_v1_root(
+    const char *cwd, const char *const roots[], size_t count,
+    uint8_t out[32], char *why, size_t why_len);
 bool zcl_dev_source_identity_capture(const char *repo_root,
                                      struct dev_source_record *out,
                                      char *why, size_t why_len);

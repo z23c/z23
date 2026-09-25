@@ -40,6 +40,7 @@
 #include "base/hex.h"
 #include "controllers/agent_controller.h"
 #include "crypto/sha3.h"
+#include "devloop.h"
 #include "json/json.h"
 #include "util/clientversion.h"
 #include "vcs/build_action.h"
@@ -592,6 +593,59 @@ static int sia_precommit_source_action(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static int sia_include_namespace_closure(void)
+{
+    int failures = 0;
+    char work[512] = {0}, root[PATH_MAX], path[PATH_MAX];
+    TEST("include namespace captures absent headers and refuses missing closure") {
+        test_make_tmpdir(work, sizeof(work), "sia", "include-namespace");
+        ASSERT(snprintf(root, sizeof(root), "%s", work) < (int)sizeof(root));
+        ASSERT(snprintf(path, sizeof(path), "%s/include", root) <
+               (int)sizeof(path));
+        ASSERT(mkdir(path, 0700) == 0);
+        const char *roots[] = {"include", "optional"};
+        char why[128];
+        uint8_t before[32], changed[32], restored[32];
+        ASSERT(zcl_dev_include_namespace_v1_root(root, roots, 2,
+                                                 before, why, sizeof(why)));
+        ASSERT(snprintf(path, sizeof(path), "%s/include/feature.h", root) <
+               (int)sizeof(path));
+        ASSERT(sia_write_file(path, "#define FEATURE 1\n"));
+        ASSERT(zcl_dev_include_namespace_v1_root(root, roots, 2,
+                                                 changed, why, sizeof(why)));
+        ASSERT(memcmp(before, changed, 32) != 0);
+        ASSERT(sia_write_file(path, "#define FEATURE 2\n"));
+        ASSERT(zcl_dev_include_namespace_v1_root(root, roots, 2,
+                                                 restored, why, sizeof(why)));
+        ASSERT(memcmp(changed, restored, 32) == 0);
+        ASSERT(unlink(path) == 0);
+        ASSERT(zcl_dev_include_namespace_v1_root(root, roots, 2,
+                                                 restored, why, sizeof(why)));
+        ASSERT(memcmp(before, restored, 32) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/optional", root) <
+               (int)sizeof(path));
+        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(zcl_dev_include_namespace_v1_root(root, roots, 2,
+                                                 changed, why, sizeof(why)));
+        ASSERT(memcmp(before, changed, 32) != 0);
+        ASSERT(rmdir(path) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/include/special", root) <
+               (int)sizeof(path));
+        ASSERT(mkfifo(path, 0600) == 0);
+        ASSERT(!zcl_dev_include_namespace_v1_root(root, roots, 2,
+                                                  changed, why, sizeof(why)));
+        ASSERT(strstr(why, "special_type") != NULL);
+        ASSERT(unlink(path) == 0);
+        ASSERT(!zcl_dev_include_namespace_v1_root(root, roots, 0,
+                                                  changed, why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    if (work[0]) test_rm_rf_recursive(work);
+    return failures;
+}
+#endif
+
 int test_source_identity_authority(void)
 {
     int failures = 0;
@@ -602,6 +656,9 @@ int test_source_identity_authority(void)
     failures += sia_negative_control_positional_reader();
     failures += sia_healthcheck_reader_refuses_ambiguity();
     failures += sia_precommit_source_action();
+#if !defined(_WIN32)
+    failures += sia_include_namespace_closure();
+#endif
     printf("[test_source_identity_authority] %d failure(s)\n", failures);
     return failures;
 }
