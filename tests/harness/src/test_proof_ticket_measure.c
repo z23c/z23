@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Deterministic reuse measurement over issuer checkpoints.
+ * purpose: Deterministic reuse measurement over issuer checkpoints, and the
+ *          per-change admission report over interface contracts.
  *
  * Measurement: 6 candidates (one cold baseline, then candidates changing
  * 1-10% of 200 obligations plus one shared header edit) against three
@@ -7,7 +8,11 @@
  * the same-uid local signer "prove" everything they touch, one issuer
  * signs REUSED provenance for hits, one artifact is tampered in the CAS and
  * one issuer contradicts an honest PASS. Prints one parseable line and
- * requires zero false hits and >95% reuse of unchanged obligations. */
+ * requires zero false hits and >95% reuse of unchanged obligations.
+ *
+ * Admission: a callee component with callers and an unrelated component,
+ * under a private implementation edit, a header/ABI edit, an unknown scope
+ * and a conflict; each prints the owner's per-change report line. */
 
 #include "test/test_core.h"
 
@@ -300,11 +305,237 @@ static int ptm_case_measure(void)
     return failures;
 }
 
+/* ── per-change admission ───────────────────────────────────────────── */
+
+enum { PTA_A0, PTA_A1, PTA_ATEST, PTA_B0, PTA_B1, PTA_BUNIT, PTA_BLINK,
+       PTA_C0, PTA_CUNIT, PTA_CLINK, PTA_D0, PTA_DUNIT, PTA_N };
+
+struct pta_row {
+    const char *name;
+    const char *component;
+    enum vcs_proof_action_class cls;
+    bool caller;        /* integration edge to libA */
+    bool links_callee;  /* executes libA bytes */
+};
+
+static const struct pta_row pta_rows[PTA_N] = {
+    {"libA/a0.o", "libA", VCS_PROOF_ACTION_BUILD, false, false},
+    {"libA/a1.o", "libA", VCS_PROOF_ACTION_BUILD, false, false},
+    {"libA/test", "libA", VCS_PROOF_ACTION_CHECK, false, true},
+    {"libB/b0.o", "libB", VCS_PROOF_ACTION_BUILD, true, false},
+    {"libB/b1.o", "libB", VCS_PROOF_ACTION_BUILD, true, false},
+    {"libB/unit", "libB", VCS_PROOF_ACTION_CHECK, true, false},
+    {"libB/linked", "libB", VCS_PROOF_ACTION_CHECK, true, true},
+    {"libC/c0.o", "libC", VCS_PROOF_ACTION_BUILD, true, false},
+    {"libC/unit", "libC", VCS_PROOF_ACTION_CHECK, true, false},
+    {"libC/linked", "libC", VCS_PROOF_ACTION_CHECK, true, true},
+    {"libD/d0.o", "libD", VCS_PROOF_ACTION_BUILD, false, false},
+    {"libD/unit", "libD", VCS_PROOF_ACTION_CHECK, false, false},
+};
+
+struct pta {
+    struct ptf f;
+    uint32_t a0_version;       /* private implementation of libA */
+    uint32_t header_version;   /* libA public header */
+    struct vcs_component_proof_key_v1 keys[PTA_N];
+    struct vcs_proof_obligation obs[PTA_N];
+    struct vcs_proof_admission_result res[PTA_N];
+    struct vcs_proof_admission_report rep;
+    struct vcs_proof_change change;
+};
+
+static bool pta_contract(uint32_t header_version, uint8_t out[32])
+{
+    char tok[32];
+    snprintf(tok, sizeof(tok), "a_api_v%u", header_version);
+    const char *tokens[3] = {"int", tok, "(int);"};
+    const char *syms[1] = {"a_api:i->i"};
+    struct vcs_component_contract c = {"libA", tokens, 3, syms, 1, NULL, 0};
+    return vcs_component_contract_root(&c, out);
+}
+
+static bool pta_key(struct pta *p, int i)
+{
+    const struct pta_row *row = &pta_rows[i];
+    struct vcs_component_proof_key_v1 *k = &p->keys[i];
+    char text[96];
+    *k = p->f.base;
+    ptf_root(VCS_CPK_UNIT_ID, row->name, k->roots[VCS_CPK_UNIT_ID]);
+    uint32_t v = i == PTA_A0 ? p->a0_version : 0u;
+    snprintf(text, sizeof(text), "%s@%u", row->name, v);
+    ptf_root(VCS_CPK_SOURCE_CLOSURE, text, k->roots[VCS_CPK_SOURCE_CLOSURE]);
+    if (row->links_callee) {
+        snprintf(text, sizeof(text), "libA-impl@%u.%u", p->a0_version,
+                 p->header_version);
+        ptf_root(VCS_CPK_DEPENDENCY_CLOSURE, text,
+                 k->roots[VCS_CPK_DEPENDENCY_CLOSURE]);
+    }
+    if (strcmp(row->component, "libA") == 0 && row->cls == VCS_PROOF_ACTION_BUILD) {
+        snprintf(text, sizeof(text), "a.h@%u", p->header_version);
+        ptf_root(VCS_CPK_DEPENDENCY_CLOSURE, text,
+                 k->roots[VCS_CPK_DEPENDENCY_CLOSURE]);
+    }
+    if (!row->caller) return true;
+    struct vcs_component_edge edge = {"libA", {0}};
+    return pta_contract(p->header_version, edge.contract_root) &&
+           vcs_component_integration_edges_root(
+               &edge, 1, k->roots[VCS_CPK_INTEGRATION_EDGES]);
+}
+
+static bool pta_build(struct pta *p, bool scope_known, uint32_t before_header)
+{
+    for (int i = 0; i < PTA_N; i++) {
+        if (!pta_key(p, i)) return false;
+        p->obs[i] = (struct vcs_proof_obligation){
+            pta_rows[i].name, pta_rows[i].component, pta_rows[i].cls,
+            &p->keys[i], pta_rows[i].caller,
+            strcmp(pta_rows[i].component, "libD") != 0};
+    }
+    p->change.component_id = "libA";
+    p->change.scope_known = scope_known;
+    return pta_contract(before_header, p->change.contract_root_before) &&
+           pta_contract(p->header_version, p->change.contract_root_after);
+}
+
+/* Run fresh obligations on issuers A and B and sync both logs. */
+static bool pta_settle(struct pta *p)
+{
+    for (int i = 0; i < PTA_N; i++) {
+        if (p->res[i].status != VCS_PROOF_ADMIT_FRESH) continue;
+        struct ptf_spec spec = ptf_pass();
+        spec.action_class = pta_rows[i].cls;
+        if (!ptf_emit(&p->f, PTF_A, &p->keys[i], spec, NULL, NULL) ||
+            !ptf_emit(&p->f, PTF_B, &p->keys[i], spec, NULL, NULL))
+            return false;
+    }
+    struct vcs_proof_sync_report rep;
+    return ptf_sync(&p->f, PTF_A, 0, &rep) && ptf_sync(&p->f, PTF_B, 0, &rep);
+}
+
+static bool pta_admit(struct pta *p, const char *label)
+{
+    struct vcs_proof_admission_context ctx = ptf_context(&p->f);
+    char line[512];
+    if (!vcs_proof_admission_run(&ctx, &p->change, p->obs, PTA_N, p->res,
+                                 &p->rep) ||
+        !vcs_proof_admission_report_line(&p->change, &p->rep, line,
+                                         sizeof(line)))
+        return false;
+    printf("\nproof_admission scenario=%s %s\n  caller proofs still valid:",
+           label, line);
+    for (int i = 0; i < PTA_N; i++)
+        if (pta_rows[i].caller && p->res[i].status == VCS_PROOF_ADMIT_REUSED)
+            printf(" %s", pta_rows[i].name);
+    printf("\n");
+    return true;
+}
+
+static bool pta_fresh(const struct pta *p, int i)
+{
+    return p->res[i].status == VCS_PROOF_ADMIT_FRESH;
+}
+
+static int pta_case_private_edit(struct pta *p)
+{
+    int failures = 0;
+    TEST_CASE("proof_admission: private edit keeps caller proofs valid") {
+        p->a0_version++;
+        ASSERT(pta_build(p, true, p->header_version));
+        ASSERT(pta_admit(p, "private-edit"));
+        ASSERT(pta_fresh(p, PTA_A0) && !pta_fresh(p, PTA_A1));
+        ASSERT(pta_fresh(p, PTA_ATEST));
+        ASSERT(!pta_fresh(p, PTA_B0) && !pta_fresh(p, PTA_B1));
+        ASSERT(!pta_fresh(p, PTA_BUNIT) && !pta_fresh(p, PTA_CUNIT));
+        ASSERT(pta_fresh(p, PTA_BLINK) && pta_fresh(p, PTA_CLINK));
+        ASSERT(!pta_fresh(p, PTA_D0) && !pta_fresh(p, PTA_DUNIT));
+        ASSERT_EQ(p->rep.proofs_fresh, 4u);
+        ASSERT_STR_EQ(p->rep.fallback_reason, VCS_PROOF_FALLBACK_NONE);
+        ASSERT(pta_settle(p));
+    } TEST_END
+    return failures;
+}
+
+static int pta_case_header_edit(struct pta *p)
+{
+    int failures = 0;
+    TEST_CASE("proof_admission: header/ABI edit invalidates exactly dependents") {
+        uint32_t before = p->header_version++;
+        ASSERT(pta_build(p, true, before));
+        ASSERT(pta_admit(p, "header-edit"));
+        for (int i = 0; i < PTA_N; i++) {
+            bool dependent = strcmp(pta_rows[i].component, "libD") != 0;
+            ASSERT_EQ(pta_fresh(p, i), dependent);
+        }
+        ASSERT_EQ(p->rep.integration_edges_rerun, 7u);
+        ASSERT_STR_EQ(p->rep.fallback_reason, VCS_PROOF_FALLBACK_DEPENDENCY);
+        ASSERT(pta_settle(p));
+    } TEST_END
+    return failures;
+}
+
+static int pta_case_unknown_scope(struct pta *p)
+{
+    int failures = 0;
+    TEST_CASE("proof_admission: unknown scope runs the whole reach fresh") {
+        ASSERT(pta_build(p, false, p->header_version));
+        ASSERT(pta_admit(p, "unknown-scope"));
+        for (int i = 0; i < PTA_N; i++)
+            ASSERT_EQ(pta_fresh(p, i), p->obs[i].in_reach);
+        ASSERT_STR_EQ(p->rep.fallback_reason,
+                      VCS_PROOF_FALLBACK_UNKNOWN_SCOPE);
+    } TEST_END
+    return failures;
+}
+
+static int pta_case_conflict(struct pta *p)
+{
+    int failures = 0;
+    TEST_CASE("proof_admission: a contradiction falls back to conflict") {
+        ASSERT(pta_build(p, true, p->header_version));
+        struct ptf_spec fail = ptf_fail();
+        struct vcs_proof_sync_report rep;
+        ASSERT(ptf_emit(&p->f, PTF_C, &p->keys[PTA_BUNIT], fail, NULL, NULL));
+        ASSERT(ptf_sync(&p->f, PTF_C, 0, &rep));
+        ASSERT(pta_admit(p, "conflict"));
+        ASSERT(pta_fresh(p, PTA_BUNIT));
+        ASSERT_STR_EQ(p->res[PTA_BUNIT].reason, VCS_PROOF_OBSERVATION_CONFLICT);
+        ASSERT_STR_EQ(p->rep.fallback_reason, VCS_PROOF_FALLBACK_CONFLICT);
+    } TEST_END
+    return failures;
+}
+
+static int pta_cases(void)
+{
+    int failures = 0;
+    struct pta *p = calloc(1, sizeof(*p));
+    if (!p || !ptf_init(&p->f)) {
+        printf("proof_admission: fixture... FAIL (allocation)\n");
+        free(p);
+        return 1;
+    }
+    /* Baseline: every obligation proven by A and B. */
+    bool ok = pta_build(p, true, 0);
+    for (int i = 0; ok && i < PTA_N; i++)
+        p->res[i].status = VCS_PROOF_ADMIT_FRESH;
+    ok = ok && pta_settle(p);
+    failures += ok ? 0 : 1;
+    if (ok) {
+        failures += pta_case_private_edit(p);
+        failures += pta_case_header_edit(p);
+        failures += pta_case_unknown_scope(p);
+        failures += pta_case_conflict(p);
+    }
+    ptf_free(&p->f);
+    free(p);
+    return failures;
+}
+
 int test_proof_ticket_measure(void);
 
 int test_proof_ticket_measure(void)
 {
     int failures = 0;
     failures += ptm_case_measure();
+    failures += pta_cases();
     return failures;
 }

@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Canonical zcl.component_proof_key.v1 preimages and
- *          signed zcl.proof_ticket.v1 observations. */
+ * purpose: Canonical zcl.component_proof_key.v1 preimages, interface
+ *          contract roots and signed zcl.proof_ticket.v1 observations. */
 
 #include "vcs/proof_ticket.h"
 
@@ -24,6 +24,8 @@
 #define CPK_LIST_DOMAIN "zcl.component_proof_key.list.v1"
 #define CPK_ENV_DOMAIN "zcl.component_proof_key.environment.v1"
 #define CPK_GEN_DOMAIN "zcl.component_proof_key.generated.v1"
+#define CPK_EDGE_DOMAIN "zcl.component_proof_key.edges.v1"
+#define CONTRACT_DOMAIN "zcl.component_contract.v1"
 
 #define PTK_MAGIC "Z23PTK1\0"
 #define PTK_VERSION 1u
@@ -201,6 +203,104 @@ bool vcs_component_proof_generated_root(
     sha3_256_finalize(&sha, digest);
     return vcs_component_proof_field_root(VCS_CPK_GENERATED_INPUTS, digest,
                                           sizeof(digest), out);
+}
+
+/* ── Interface contracts and integration edges ──────────────────────── */
+
+static int pt_cmp_str(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Hash `items` as a SET: sorted copy, duplicates refused. */
+static bool pt_sha3_set(struct sha3_256_ctx *sha, const char *const *items,
+                        size_t count)
+{
+    if (!pt_items_present(items, count)) return false;
+    pt_sha3_u64(sha, (uint64_t)count);
+    if (count == 0) return true;
+    const char **sorted = zcl_malloc(count * sizeof(*sorted), "contract_set");
+    if (!sorted) LOG_RETURN(false, PT_LOG, "contract set: out of memory");
+    memcpy(sorted, items, count * sizeof(*sorted));
+    qsort(sorted, count, sizeof(*sorted), pt_cmp_str);
+    bool ok = true;
+    for (size_t i = 0; i < count && ok; i++) {
+        ok = i == 0 || strcmp(sorted[i - 1], sorted[i]) != 0;
+        if (ok) pt_sha3_str(sha, sorted[i]);
+    }
+    free(sorted);
+    if (!ok) LOG_RETURN(false, PT_LOG, "contract set lists a member twice");
+    return true;
+}
+
+bool vcs_component_contract_root(const struct vcs_component_contract *c,
+                                 uint8_t out[VCS_PROOF_ROOT_BYTES])
+{
+    if (!c || !out || !c->component_id || !c->component_id[0] ||
+        !pt_items_present(c->header_tokens, c->header_token_count))
+        LOG_RETURN(false, PT_LOG, "contract root arguments invalid");
+    struct sha3_256_ctx sha;
+    pt_sha3_domain(&sha, CONTRACT_DOMAIN);
+    pt_sha3_str(&sha, c->component_id);
+    pt_sha3_u64(&sha, (uint64_t)c->header_token_count);
+    for (size_t i = 0; i < c->header_token_count; i++)
+        pt_sha3_str(&sha, c->header_tokens[i]);
+    if (!pt_sha3_set(&sha, c->symbols, c->symbol_count) ||
+        !pt_sha3_set(&sha, c->premises, c->premise_count))
+        LOG_RETURN(false, PT_LOG, "contract of %s: symbol/premise set invalid",
+                   c->component_id);
+    sha3_256_finalize(&sha, out);
+    return true;
+}
+
+static int pt_cmp_edge(const void *a, const void *b)
+{
+    const struct vcs_component_edge *x = *(const struct vcs_component_edge *const *)a;
+    const struct vcs_component_edge *y = *(const struct vcs_component_edge *const *)b;
+    return strcmp(x->callee_id, y->callee_id);
+}
+
+static bool pt_edges_hash(const struct vcs_component_edge **sorted,
+                          size_t count, uint8_t digest[VCS_PROOF_ROOT_BYTES])
+{
+    struct sha3_256_ctx sha;
+    pt_sha3_domain(&sha, CPK_EDGE_DOMAIN);
+    pt_sha3_u64(&sha, (uint64_t)count);
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0 && strcmp(sorted[i - 1]->callee_id, sorted[i]->callee_id) == 0)
+            LOG_RETURN(false, PT_LOG, "integration edge to %s listed twice",
+                       sorted[i]->callee_id);
+        if (!pt_nonzero(sorted[i]->contract_root, VCS_PROOF_ROOT_BYTES))
+            LOG_RETURN(false, PT_LOG, "integration edge to %s: zero contract",
+                       sorted[i]->callee_id);
+        pt_sha3_str(&sha, sorted[i]->callee_id);
+        sha3_256_write(&sha, sorted[i]->contract_root, VCS_PROOF_ROOT_BYTES);
+    }
+    sha3_256_finalize(&sha, digest);
+    return true;
+}
+
+bool vcs_component_integration_edges_root(
+    const struct vcs_component_edge *edges, size_t count,
+    uint8_t out[VCS_PROOF_ROOT_BYTES])
+{
+    if (!out || (!edges && count))
+        LOG_RETURN(false, PT_LOG, "integration edges arguments invalid");
+    for (size_t i = 0; i < count; i++)
+        if (!edges[i].callee_id || !edges[i].callee_id[0])
+            LOG_RETURN(false, PT_LOG, "integration edge %zu has no callee", i);
+    const struct vcs_component_edge **sorted = NULL;
+    if (count) {
+        sorted = zcl_malloc(count * sizeof(*sorted), "integration_edges");
+        if (!sorted) LOG_RETURN(false, PT_LOG, "edges: out of memory");
+        for (size_t i = 0; i < count; i++) sorted[i] = &edges[i];
+        qsort(sorted, count, sizeof(*sorted), pt_cmp_edge);
+    }
+    uint8_t digest[VCS_PROOF_ROOT_BYTES];
+    bool ok = pt_edges_hash(sorted, count, digest);
+    free(sorted);
+    return ok && vcs_component_proof_field_root(VCS_CPK_INTEGRATION_EDGES,
+                                                digest, sizeof(digest), out);
 }
 
 /* ── Preimage codec and key ─────────────────────────────────────────── */

@@ -145,6 +145,8 @@ Current implementation (per-unit tickets):
   their byte layouts.
 - `contexts/commons/modules/vcs/include/vcs/proof_reuse.h`: issuer logs,
   receiver sync and the reuse decision.
+- `contexts/commons/modules/vcs/include/vcs/proof_admission.h`: per-change
+  admission.
 
 Four identities are kept separate. None stands in for another:
 
@@ -233,13 +235,23 @@ Four identities are kept separate. None stands in for another:
     - a mismatch is MISS `artifact_bytes_mismatch`, and the decision sets
       `false_hit_refused`;
     - a missing artifact is MISS `artifact_unavailable`.
+- `vcs_proof_admission_run` decides a caller-supplied list of obligations for
+  one change. It reports which obligations it reused and which ran fresh,
+  with reasons. It prints one line with `component`,
+  `contract_root_before/after`, `build_actions_invalidated`,
+  `proof_obligations_invalidated`, `proofs_reused`, `proofs_fresh`,
+  `integration_edges_rerun` and `fallback_reason`. The fallback reason is
+  one of `unknown-scope`, `conflict`, `policy`, `dependency-change` or
+  `none`, in that order of precedence. When the scope is unknown, every
+  obligation in reach runs fresh.
 
 The registered `proof_ticket_reuse` group covers the refusals above. It
 changes one byte in each of the nineteen key fields and also swaps two flags.
 `proof_ticket_measure` runs a deterministic simulation: 6 candidates, 3
 issuers and 200 obligations per candidate. It prints one
 `proof_ticket_reuse_measure` line and requires zero false hits and more than
-95% reuse of unchanged obligations.
+95% reuse of unchanged obligations. It also checks the admission report for
+four cases: a private edit, a header edit, an unknown scope and a conflict.
 Runners do not emit tickets yet, and no separate-uid verifier signs them.
 
 Keep existing `source_root`, `changed_set_root`, `compiler_root`, `flags_root`,

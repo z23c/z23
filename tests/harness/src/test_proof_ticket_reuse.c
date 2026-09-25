@@ -184,6 +184,39 @@ static int ptt_case_field_helpers(void)
     return failures;
 }
 
+static int ptt_case_contract(void)
+{
+    int failures = 0;
+    TEST_CASE("proof_ticket: contract and edge roots bind interface only") {
+        const char *tokens[3] = {"int", "f", "(void);"};
+        const char *syms[2] = {"f:v->i", "g:i->v"};
+        const char *syms_rev[2] = {"g:i->v", "f:v->i"};
+        const char *dup[2] = {"f:v->i", "f:v->i"};
+        struct vcs_component_contract c = {"libA", tokens, 3, syms, 2, NULL, 0};
+        uint8_t r1[32], r2[32], e1[32], e2[32];
+        ASSERT(vcs_component_contract_root(&c, r1));
+        c.symbols = syms_rev;
+        ASSERT(vcs_component_contract_root(&c, r2));
+        ASSERT(memcmp(r1, r2, 32) == 0); /* a set, not a list */
+        c.symbols = dup;
+        ASSERT(!vcs_component_contract_root(&c, r2));
+        c.symbols = syms;
+        c.header_token_count = 2;
+        ASSERT(vcs_component_contract_root(&c, r2));
+        ASSERT(memcmp(r1, r2, 32) != 0);
+        struct vcs_component_edge edges[2] = {{"libB", {0}}, {"libA", {0}}};
+        memcpy(edges[0].contract_root, r2, 32);
+        memcpy(edges[1].contract_root, r1, 32);
+        ASSERT(vcs_component_integration_edges_root(edges, 2, e1));
+        struct vcs_component_edge rev[2] = {edges[1], edges[0]};
+        ASSERT(vcs_component_integration_edges_root(rev, 2, e2));
+        ASSERT(memcmp(e1, e2, 32) == 0);
+        rev[1].callee_id = "libA";
+        ASSERT(!vcs_component_integration_edges_root(rev, 2, e2));
+    } TEST_END
+    return failures;
+}
+
 /* ── decisions ──────────────────────────────────────────────────────── */
 
 static const int PTT_AB[2] = {PTF_A, PTF_B};
@@ -528,6 +561,7 @@ int test_proof_ticket_reuse(void)
     failures += ptt_case_ticket_refusals();
     failures += ptt_case_other_refusals();
     failures += ptt_case_field_helpers();
+    failures += ptt_case_contract();
     failures += ptt_case_baseline_hit();
     for (int f = 0; f < VCS_CPK_FIELD_COUNT; f++)
         failures += ptt_case_field(f);

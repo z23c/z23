@@ -5,6 +5,7 @@
 #ifndef ZCL_TEST_PROOF_TICKET_FIXTURE_H
 #define ZCL_TEST_PROOF_TICKET_FIXTURE_H
 
+#include "vcs/proof_admission.h"
 #include "vcs/proof_reuse.h"
 
 #include <stdbool.h>
@@ -76,6 +77,7 @@ bool ptf_decide(struct ptf *f, const struct vcs_component_proof_key_v1 *key,
                 const struct vcs_proof_reuse_policy *policy,
                 struct vcs_proof_ticket_class *classes, size_t cap,
                 struct vcs_proof_reuse_decision *out);
+struct vcs_proof_admission_context ptf_context(struct ptf *f);
 
 /* Equivocation, artifact and CAS cases (test_proof_ticket_logs.c), run by
  * the proof_ticket_reuse group. Returns the failure count. */

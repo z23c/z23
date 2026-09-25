@@ -233,3 +233,13 @@ bool ptf_decide(struct ptf *f, const struct vcs_component_proof_key_v1 *key,
     };
     return vcs_proof_reuse_decide(f->rx, &req, classes, cap, out);
 }
+
+struct vcs_proof_admission_context ptf_context(struct ptf *f)
+{
+    return (struct vcs_proof_admission_context){
+        .receiver = f->rx,
+        .domain = &f->domain,
+        .policy = &f->policy,
+        .artifacts = &f->source,
+    };
+}

@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Component proof input keys, signed proof tickets and signed
- *          per-issuer log checkpoints (codecs).
+ * purpose: Component proof input keys, interface contract roots, signed
+ *          proof tickets and signed per-issuer log checkpoints (codecs).
  *
  * This is the TICKET object of docs/work/CANONICAL_LIFECYCLE.md (PROOF_SET
  * section). Four identities, never substituted for one another:
@@ -131,6 +131,38 @@ struct vcs_component_proof_generated {
 /* Paths strictly ascending and unique, else refused. */
 bool vcs_component_proof_generated_root(
     const struct vcs_component_proof_generated *inputs, size_t count,
+    uint8_t out[VCS_PROOF_ROOT_BYTES]);
+
+/* ── Interface contracts ──────────────────────────────────────────────────
+ *
+ * contract_root = SHA3-256 over a component's EXPORTED interface: its id,
+ * the normalized public-header token stream (ordered), the exported
+ * symbol/ABI signature set and the declared semantic premise/invariant id
+ * set. A private implementation edit leaves it unchanged; a header, ABI or
+ * premise change moves it. Sets are sorted here; duplicates are refused. */
+struct vcs_component_contract {
+    const char *component_id;
+    const char *const *header_tokens;
+    size_t header_token_count;
+    const char *const *symbols;
+    size_t symbol_count;
+    const char *const *premises;
+    size_t premise_count;
+};
+
+bool vcs_component_contract_root(const struct vcs_component_contract *c,
+                                 uint8_t out[VCS_PROOF_ROOT_BYTES]);
+
+/* One caller->callee interface edge. */
+struct vcs_component_edge {
+    const char *callee_id;
+    uint8_t contract_root[VCS_PROOF_ROOT_BYTES];
+};
+
+/* integration_edges field root over the edge set sorted by callee id; a
+ * callee listed twice is refused. */
+bool vcs_component_integration_edges_root(
+    const struct vcs_component_edge *edges, size_t count,
     uint8_t out[VCS_PROOF_ROOT_BYTES]);
 
 bool vcs_component_proof_key_valid(const struct vcs_component_proof_key_v1 *k);
