@@ -51,6 +51,8 @@
 #include "vcs/zcode_work_context.h"
 #include "vcs/zcode_work_node.h"
 #include "vcs/zcode_work_swarm.h"
+#include "vcs/zcode_observation_mmr.h"
+#include "vcs/signed_evidence.h"
 #include "vcs/zcode_write_scope.h"
 #include "vcs/zcode_patch.h"
 #include "vcs/zcode_candidate_bundle.h"
@@ -70,6 +72,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static bool zd_index_drop_object(const char *workspace,
@@ -8657,6 +8660,106 @@ static int test_zd_git_remote_dependency(void)
 }
 #endif
 
+static int test_zd_observation_mmr(void)
+{
+    int failures = 0;
+    TEST("zcode_dev: signed MMR extension binds exact ordered observation roots") {
+        uint8_t seed[32], secret[32], issuer[32], other[32];
+        uint8_t roots[65][32], changed[2][32], first_changed[3][32];
+        uint8_t checkpoint_root[32];
+        uint8_t wire[VCS_ZCODE_OBSERVATION_MMR_WIRE_BYTES];
+        struct vcs_zcode_observation_mmr_checkpoint first, next, fork, bad;
+        zd_root(seed, 201);
+        ed25519_keypair(issuer, secret, seed);
+        memcpy(other, issuer, 32); other[0] ^= 1;
+        for (size_t i = 0; i < 65; i++) zd_root(roots[i], (uint8_t)(i + 1));
+        ASSERT(vcs_zcode_observation_mmr_extend(NULL, &roots[0][0], 3,
+                                                100, secret, issuer, &first));
+        ASSERT(vcs_zcode_observation_mmr_verify(&first, issuer));
+        ASSERT(vcs_zcode_observation_mmr_verify_extension(
+            NULL, &first, &roots[0][0], 3, issuer));
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            NULL, &first, &roots[0][0], 2, issuer));
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            NULL, &first, &roots[0][0], 4, issuer));
+        memcpy(first_changed, roots, sizeof(first_changed));
+        first_changed[0][0] ^= 1;
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            NULL, &first, &first_changed[0][0], 3, issuer));
+        ASSERT(!vcs_zcode_observation_mmr_verify(&first, other));
+        ASSERT(vcs_zcode_observation_mmr_serialize(&first, wire));
+        ASSERT(vcs_zcode_observation_mmr_parse(wire, sizeof(wire), issuer, &bad));
+        ASSERT(bad.leaf_count == first.leaf_count &&
+               memcmp(bad.peaks, first.peaks, sizeof(first.peaks)) == 0);
+        ASSERT(!vcs_zcode_observation_mmr_parse(wire, sizeof(wire) - 1, issuer, &bad));
+        ASSERT(!vcs_zcode_observation_mmr_parse(wire, sizeof(wire), other, &bad));
+        wire[80] ^= 1;
+        ASSERT(!vcs_zcode_observation_mmr_parse(wire, sizeof(wire), issuer, &bad));
+        ASSERT(vcs_zcode_observation_mmr_extend(&first, &roots[3][0], 2,
+                                                101, secret, issuer, &next));
+        ASSERT(vcs_zcode_observation_mmr_verify_extension(
+            &first, &next, &roots[3][0], 2, issuer));
+        ASSERT_EQ(next.leaf_count, 5u);
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            &first, &next, &roots[3][0], 1, issuer));
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            &first, &next, &roots[3][0], 3, issuer));
+        memcpy(changed, &roots[3][0], sizeof(changed));
+        changed[0][0] ^= 1;
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            &first, &next, &changed[0][0], 2, issuer));
+        memcpy(changed[0], roots[4], 32);
+        memcpy(changed[1], roots[3], 32);
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            &first, &next, &changed[0][0], 2, issuer));
+        bad = next; bad.peaks[0][0] ^= 1;
+        ASSERT(!vcs_zcode_observation_mmr_verify(&bad, issuer));
+        bad = next; bad.signature[0] ^= 1;
+        ASSERT(!vcs_zcode_observation_mmr_verify(&bad, issuer));
+        bad = next; bad.previous_checkpoint_root[0] ^= 1;
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            &first, &bad, &roots[3][0], 2, issuer));
+        memcpy(changed, &roots[3][0], sizeof(changed));
+        changed[1][0] ^= 1;
+        ASSERT(vcs_zcode_observation_mmr_extend(&first, &changed[0][0], 2,
+                                                101, secret, issuer, &fork));
+        ASSERT(vcs_zcode_observation_mmr_verify(&fork, issuer));
+        ASSERT(memcmp(fork.peaks, next.peaks, sizeof(next.peaks)) != 0);
+        ASSERT(!vcs_zcode_observation_mmr_verify_extension(
+            &first, &fork, &roots[3][0], 2, issuer));
+        ASSERT(!vcs_zcode_observation_mmr_extend(
+            &first, &roots[3][0], 0, 101, secret, issuer, &bad));
+        ASSERT(!vcs_zcode_observation_mmr_extend(
+            &first, &roots[0][0], 65, 101, secret, issuer, &bad));
+        memset(changed[0], 0, 32);
+        ASSERT(!vcs_zcode_observation_mmr_extend(
+            &first, &changed[0][0], 1, 101, secret, issuer, &bad));
+        bad = first;
+        bad.leaf_count = UINT32_MAX;
+        for (unsigned level = 0; level < VCS_ZCODE_OBSERVATION_MMR_LEVELS;
+             level++) memcpy(bad.peaks[level], first.peaks[0], 32);
+        ASSERT(vcs_zcode_observation_mmr_root(&bad, checkpoint_root));
+        ASSERT(vcs_signed_evidence_seal_root(checkpoint_root, secret, issuer,
+                                             bad.signature));
+        ASSERT(vcs_zcode_observation_mmr_verify(&bad, issuer));
+        ASSERT(!vcs_zcode_observation_mmr_extend(
+            &bad, &roots[3][0], 1, 101, secret, issuer, &fork));
+        ASSERT(vcs_zcode_observation_mmr_root(&first, checkpoint_root));
+        ASSERT(memcmp(next.previous_checkpoint_root, checkpoint_root, 32) == 0);
+        clock_t cpu_start = clock();
+        for (unsigned i = 0; i < 64; i++)
+            ASSERT(vcs_zcode_observation_mmr_verify_extension(
+                &first, &next, &roots[3][0], 2, issuer));
+        clock_t cpu_end = clock();
+        if (cpu_start != (clock_t)-1 && cpu_end != (clock_t)-1)
+            printf("MMR_VERIFY_PROBE checks=64 cpu_us=%.0f wire_bytes=%u roots_bytes=64\n",
+                   (double)(cpu_end - cpu_start) * 1000000.0 / CLOCKS_PER_SEC,
+                   VCS_ZCODE_OBSERVATION_MMR_WIRE_BYTES);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_dev_objects(void)
 {
     int failures = 0;
@@ -8678,6 +8781,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_receipt();
     failures += test_zd_work_context();
     failures += test_zd_work_swarm();
+    failures += test_zd_observation_mmr();
     failures += test_zd_work_node_duplicate_sessions();
     failures += test_zd_work_node_atomic_admission();
     failures += test_zd_work_node();
