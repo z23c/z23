@@ -966,7 +966,7 @@ Z23_FLAG("ZCL_GATE_OUT", "env_build", "-", "-",
 Z23_FLAG("ZCL_GATE_SCAN_LOG", "env_build", "-", "-",
           "undocumented; first use tools/lint/gate_lib.sh:82")
 Z23_FLAG("ZCL_GATE_TEST_COMPAT_HEADER", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:520")
+          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:530")
 Z23_FLAG("ZCL_GATE_WIRING_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_lint_gate_wiring.c:672")
 Z23_FLAG("ZCL_GC_MAIN_REF", "env_build", "main", "-",
@@ -1461,7 +1461,7 @@ Z23_FLAG("ZCL_METRICS_HTTP_ENABLE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_MIND_STATE_DIR", "env_runtime", "-", "-",
           "undocumented; first use tools/mind/mind_state.c:32")
 Z23_FLAG("ZCL_MINGW_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",
-          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:82")
+          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:92")
 Z23_FLAG("ZCL_MINT_ANCHOR_OUT", "env_runtime", "-", "-",
           "first use engine/composition/src/boot_anchor_snapshot_reachability.c:52; documented at docs/work/fast-path.md:53: $ZCL_MINT_ANCHOR_OUT or <src>/utxo-anchor.snapshot. A refold proof also")
 Z23_FLAG("ZCL_MINT_FORCE_REBUILD", "env_runtime", "-", "-",

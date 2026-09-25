@@ -59,6 +59,16 @@
 # was before the cache existed; run_lint.sh --cold-audit turns it off for
 # you. See that file's header for why the key is sound.
 #
+# COLD COST TODAY: since the scan became NODE_C23_SRCS it is 2339 TUs, not
+# 234. Measured 2026-09-25 on the dev reference host, cache off, standalone:
+# 491 CPU-seconds of compiler time (per TU p50 328 ms, max 971 ms), 84 s wall
+# at 6 workers, 40 s at 28. Nearly every TU reaches <windows.h> through the
+# platform compat headers; preprocessing alone is 46% of the time, much of it
+# looking each system header up through all ~235 -I directories before
+# mingw's own (51k failed opens for one heavy TU). Landing proofs run with
+# the cache off, so under `make lint` run_lint.sh dispatches this gate first
+# and gives it half the host (LONG_POLE_FIRST, ZCL_CC_JOBS).
+#
 # Env:
 #   ZCL_MINGW_CC   compiler (default: x86_64-w64-mingw32-gcc)
 #   ZCL_CC_JOBS    parallel workers (default: nproc, capped at 32)
