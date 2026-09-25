@@ -429,8 +429,11 @@ static bool ss_row_graph_consistent(const struct zcl_shadow_result *r)
 
 /* The class split adds up to the rule's bill, an ALL prediction is all
  * fallback, and the lint premise variant differs from the rule only in how
- * lint gates are priced: every corpus entry carries rows for exactly the two
- * gates that declare a premise. */
+ * lint gates are priced: every corpus entry carries rows for exactly the
+ * SS_LINT_PREMISE_GATES gates that declare a premise in
+ * tools/lint/lintc/selection_gates.def. */
+enum { SS_LINT_PREMISE_GATES = 6 };
+
 static bool ss_row_classes_consistent(const struct zcl_shadow_result *r)
 {
     uint64_t ms = 0;
@@ -446,7 +449,7 @@ static bool ss_row_classes_consistent(const struct zcl_shadow_result *r)
            (!all || r->class_n[ZCL_SHADOW_CLASS_FALLBACK] ==
                         r->predicted_groups) &&
            (all || r->class_n[ZCL_SHADOW_CLASS_FALLBACK] == 0) &&
-           r->lint_premise_gates == 2 &&
+           r->lint_premise_gates == SS_LINT_PREMISE_GATES &&
            r->lint_units_fresh <= r->lint_units_total &&
            r->premise_rule_cost_ms ==
                r->rule_cost_ms - r->lint_cost_ms + r->lint_premise_ms;
@@ -501,7 +504,7 @@ static bool ss_witness_guarded(size_t n)
             return false;
     }
     /* The created header flips the premise path set, so the lint premise
-     * selection inherits no unit of either gate. */
+     * selection inherits no unit of any declared gate. */
     const struct zcl_shadow_result *neg = ss_row(n, "syn-negative-lookup");
     return neg && neg->lint_units_total > 0 &&
            neg->lint_units_fresh == neg->lint_units_total;
