@@ -1,0 +1,69 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Lint premise rows for the shadow selector (tests/harness/src/test_dev_shadow_select.c).
+# Tool: z23-lint built from 18b30d14c2aac519b40b423841cf1aba2e9c9bfb (lane premise-select),
+#   binary sha256 bf7ba773b22f7e336631df2f0b14a707712aeec19999c24f6279ac6053531c32.
+# One run per entry and gate, measured 2026-09-25:
+#   z23-lint select --dry --summary --base=<base> --root=<candidate> \
+#     --objects=<repo> --scratch=<dir> --depth=1024 --gate=<gate>
+# real rows: candidate = `git archive <commit>`, base = <commit>^.
+# syn rows: candidate = `git archive 7a9f354f3f` plus <id>.patch, base = 7a9f354f3f.
+# The base was verified through https://github.com/z23c/z23.git (Landlock on).
+# select_ms is the wall time of that one run (make unit listing, private
+# fetch, hashing and closure); units and fresh are the summary's counts.
+# id	gate	units	fresh	selection	select_ms
+real-01	check-windows-cross-syntax	2339	0	enabled	19907
+real-01	check-clang-portability	2338	1	enabled	10901
+real-02	check-windows-cross-syntax	2339	0	enabled	17757
+real-02	check-clang-portability	2337	1	enabled	9924
+real-03	check-windows-cross-syntax	2339	1	enabled	16302
+real-03	check-clang-portability	2337	1	enabled	10446
+real-04	check-windows-cross-syntax	2339	0	enabled	17674
+real-04	check-clang-portability	2337	0	enabled	10626
+real-05	check-windows-cross-syntax	2339	1	enabled	19012
+real-05	check-clang-portability	2337	1	enabled	10840
+real-06	check-windows-cross-syntax	2339	1	enabled	17175
+real-06	check-clang-portability	2337	1	enabled	10246
+real-07	check-windows-cross-syntax	2339	1	enabled	25325
+real-07	check-clang-portability	2337	1	enabled	14144
+real-08	check-windows-cross-syntax	2339	1	enabled	21383
+real-08	check-clang-portability	2338	1	enabled	11954
+real-09	check-windows-cross-syntax	2339	0	enabled	22922
+real-09	check-clang-portability	2337	0	enabled	10900
+real-10	check-windows-cross-syntax	2339	1	enabled	17204
+real-10	check-clang-portability	2337	1	enabled	12433
+real-11	check-windows-cross-syntax	2339	2	enabled	20926
+real-11	check-clang-portability	2337	2	enabled	10612
+real-12	check-windows-cross-syntax	2339	1	enabled	23176
+real-12	check-clang-portability	2337	1	enabled	12039
+real-13	check-windows-cross-syntax	2339	1	enabled	29188
+real-13	check-clang-portability	2337	1	enabled	17197
+real-14	check-windows-cross-syntax	2339	1	enabled	33994
+real-14	check-clang-portability	2337	1	enabled	18733
+real-15	check-windows-cross-syntax	2339	10	enabled	37206
+real-15	check-clang-portability	2337	10	enabled	14883
+real-16	check-windows-cross-syntax	2339	0	enabled	28320
+real-16	check-clang-portability	2337	1	enabled	14684
+real-17	check-windows-cross-syntax	2339	0	enabled	36317
+real-17	check-clang-portability	2337	0	enabled	11673
+real-18	check-windows-cross-syntax	2339	1	enabled	24258
+real-18	check-clang-portability	2337	1	enabled	13254
+real-19	check-windows-cross-syntax	2337	24	enabled	24970
+real-19	check-clang-portability	2335	24	enabled	12225
+real-20	check-windows-cross-syntax	2339	0	enabled	26932
+real-20	check-clang-portability	2338	0	enabled	14528
+syn-header-decl	check-windows-cross-syntax	2339	30	enabled	16256
+syn-header-decl	check-clang-portability	2338	30	enabled	9783
+syn-abi	check-windows-cross-syntax	2339	30	enabled	19656
+syn-abi	check-clang-portability	2338	30	enabled	9978
+syn-flag	check-windows-cross-syntax	2339	0	enabled	16246
+syn-flag	check-clang-portability	2338	0	enabled	10386
+syn-contract	check-windows-cross-syntax	2339	1	enabled	16270
+syn-contract	check-clang-portability	2338	1	enabled	9944
+syn-private-impl	check-windows-cross-syntax	2339	1	enabled	15304
+syn-private-impl	check-clang-portability	2338	1	enabled	8724
+syn-generated-input	check-windows-cross-syntax	2339	1	enabled	16120
+syn-generated-input	check-clang-portability	2338	1	enabled	8526
+syn-negative-lookup	check-windows-cross-syntax	2339	2339	enabled	16106
+syn-negative-lookup	check-clang-portability	2338	2338	enabled	9282
+syn-macro	check-windows-cross-syntax	2339	10	enabled	15836
+syn-macro	check-clang-portability	2338	10	enabled	8966
