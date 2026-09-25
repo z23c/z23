@@ -23,6 +23,9 @@
 #if defined(__linux__)
 #include <poll.h>
 #endif
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+#include <signal.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -829,6 +832,32 @@ static bool cycle_stream_mark_durable(const char *repo_root, int64_t epoch)
     return ok;
 }
 
+bool zcl_devloop_cycle_stream_marks(const char *repo_root,
+                                    int64_t *latest_out, int64_t *durable_out)
+{
+    char dir[PATH_MAX], workspace[65];
+    if (!latest_out || !durable_out || !repo_root ||
+        !zcl_devloop_workspace_resolve(repo_root, workspace, dir,
+                                       sizeof(dir)))
+        return false;
+    int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    unsigned char header[CYCLE_STREAM_HEADER_SIZE];
+    int fd = private_dir_fd(dirfd)
+        ? cycle_stream_open_at(dirfd, workspace, header) : -1;
+    if (dirfd >= 0)
+        close(dirfd);
+    if (fd < 0)
+        return false;
+    close(fd);
+    uint64_t latest = zcl_read_u64_le(header + 80);
+    uint64_t durable = zcl_read_u64_le(header + 128);
+    if (latest > INT64_MAX || durable > latest)
+        return false;
+    *latest_out = (int64_t)latest;
+    *durable_out = (int64_t)durable;
+    return true;
+}
+
 bool zcl_devloop_cycle_stream_publish(const char *repo_root,
                                       const char *cycle_json,
                                       size_t cycle_len, int64_t *epoch_out,
@@ -1428,6 +1457,66 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_read(
     return result;
 }
 
+/* Set only around wait_after's reads: a waiter must never queue behind a
+ * sealer that holds the cycle lock across journal fsyncs. */
+static _Thread_local bool g_read_after_try_lock;
+
+#if !defined(_WIN32)
+static int cycle_lock_try_shared(int dirfd, bool *busy)
+{
+    int fd = openat(dirfd, "cycle-state.lock",
+                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (!private_regular_fd(fd, NULL)) {
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    if (flock(fd, LOCK_SH | LOCK_NB) == 0)
+        return fd;
+    *busy = errno == EWOULDBLOCK;
+    close(fd);
+    return -1;
+}
+#endif
+
+/* An unanchored read may still need the legacy latest snapshot, which only
+ * the locked path serves, so it keeps blocking semantics. */
+static int cycle_read_lock_open(int dirfd, int64_t after_epoch, bool *busy)
+{
+    *busy = false;
+#if !defined(_WIN32)
+    if (g_read_after_try_lock && after_epoch > 0)
+        return cycle_lock_try_shared(dirfd, busy);
+#else
+    (void)after_epoch;
+#endif
+    return cycle_lock_open(dirfd, false, LOCK_SH);
+}
+
+/* A busy lock means a writer is mid-event. Journal event files are immutable
+ * and SHA3-sealed once complete, so a verified file is the event; a missing
+ * or still-being-written file means "not yet". The next writer close or ring
+ * publish wakes the waiter. Integrity and gap checks stay on the locked path. */
+static enum zcl_devloop_state_lookup cycle_read_lock_refused(
+    int dirfd, const char *workspace, int64_t after_epoch, bool busy,
+    char *out, size_t out_len, size_t *len_out, int64_t *epoch_out,
+    char *why, size_t why_len)
+{
+    enum zcl_devloop_state_lookup result = ZCL_DEVLOOP_STATE_INVALID;
+    int events_fd = busy ? cycle_events_open(dirfd, false) : -1;
+    if (events_fd >= 0) {
+        result = cycle_event_read_at(events_fd, after_epoch + 1, workspace,
+                                     out, out_len, len_out, epoch_out);
+        close(events_fd);
+    }
+    if (busy && result != ZCL_DEVLOOP_STATE_FOUND)
+        result = ZCL_DEVLOOP_STATE_ABSENT;
+    if (!busy)
+        set_why(why, why_len, "cycle_state_lock_missing_or_invalid");
+    close(dirfd);
+    return result;
+}
+
 enum zcl_devloop_state_lookup zcl_devloop_cycle_state_read_after(
     const char *repo_root, int64_t after_epoch, char *out, size_t out_len,
     size_t *len_out, int64_t *epoch_out, char *why, size_t why_len)
@@ -1463,12 +1552,12 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_read_after(
         close(dirfd);
         return volatile_event;
     }
-    int lock_fd = cycle_lock_open(dirfd, false, LOCK_SH);
-    if (lock_fd < 0) {
-        close(dirfd);
-        set_why(why, why_len, "cycle_state_lock_missing_or_invalid");
-        return ZCL_DEVLOOP_STATE_INVALID;
-    }
+    bool lock_busy = false;
+    int lock_fd = cycle_read_lock_open(dirfd, after_epoch, &lock_busy);
+    if (lock_fd < 0)
+        return cycle_read_lock_refused(dirfd, workspace, after_epoch,
+                                       lock_busy, out, out_len, len_out,
+                                       epoch_out, why, why_len);
     char latest[CYCLE_CANONICAL_MAX];
     size_t latest_len = 0;
     int64_t latest_epoch = 0;
@@ -1531,6 +1620,26 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_read_after(
     return current;
 }
 
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static int g_seal_test_kill_after;
+
+void zcl_devloop_cycle_stream_test_kill_after(int events)
+{
+    g_seal_test_kill_after = events > 0 ? events : 0;
+}
+
+static void cycle_stream_test_sealed_one(void)
+{
+    if (g_seal_test_kill_after > 0 && --g_seal_test_kill_after == 0)
+        (void)raise(SIGKILL);
+}
+#elif defined(ZCL_TESTING)
+void zcl_devloop_cycle_stream_test_kill_after(int events) { (void)events; }
+static void cycle_stream_test_sealed_one(void) {}
+#else
+static void cycle_stream_test_sealed_one(void) {}
+#endif
+
 /* Seals ring events (durable_epoch, through_epoch] in order. Each event is
  * journaled durably before the next; only the last moves the pointer. */
 static bool cycle_stream_seal_range(const char *repo_root,
@@ -1557,6 +1666,7 @@ static bool cycle_stream_seal_range(const char *repo_root,
         if (!cycle_state_write_impl(repo_root, event_epoch, body, body_len,
                                     mode, why, why_len))
             return false;
+        cycle_stream_test_sealed_one();
         durable_epoch = event_epoch;
     }
     return true;
@@ -1634,6 +1744,42 @@ bool zcl_devloop_cycle_stream_flush_through(const char *repo_root,
     return ok;
 }
 
+static zcl_devloop_cycle_seal_defer_fn g_cycle_seal_defer;
+static void *g_cycle_seal_defer_opaque;
+
+void zcl_devloop_cycle_stream_seal_defer(zcl_devloop_cycle_seal_defer_fn fn,
+                                         void *opaque)
+{
+    g_cycle_seal_defer = fn;
+    g_cycle_seal_defer_opaque = fn ? opaque : NULL;
+}
+
+bool zcl_devloop_cycle_stream_seal(const char *repo_root,
+                                   int64_t through_epoch,
+                                   char *why, size_t why_len)
+{
+    if (why && why_len)
+        why[0] = 0;
+    if (g_cycle_seal_defer && through_epoch > 0 &&
+        g_cycle_seal_defer(g_cycle_seal_defer_opaque, repo_root,
+                           through_epoch))
+        return true;
+    return zcl_devloop_cycle_stream_flush_through(repo_root, through_epoch,
+                                                  why, why_len);
+}
+
+static enum zcl_devloop_state_lookup cycle_state_try_read_after(
+    const char *repo_root, int64_t after_epoch, char *out, size_t out_len,
+    size_t *len_out, int64_t *epoch_out, char *why, size_t why_len)
+{
+    g_read_after_try_lock = true;
+    enum zcl_devloop_state_lookup result = zcl_devloop_cycle_state_read_after(
+        repo_root, after_epoch, out, out_len, len_out, epoch_out, why,
+        why_len);
+    g_read_after_try_lock = false;
+    return result;
+}
+
 enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
     const char *repo_root, int64_t after_epoch, int timeout_ms,
     char *out, size_t out_len, size_t *len_out, int64_t *epoch_out,
@@ -1692,7 +1838,7 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
         (int64_t)timeout_ms * 1000;
     enum zcl_devloop_state_lookup result;
     for (;;) {
-        result = zcl_devloop_cycle_state_read_after(
+        result = cycle_state_try_read_after(
             repo_root, after_epoch, out, out_len, len_out, epoch_out,
             why, why_len);
         if (result != ZCL_DEVLOOP_STATE_ABSENT)

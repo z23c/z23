@@ -719,6 +719,14 @@ void zcl_devloop_process_cancel_poll_clear(void);
 bool zcl_devloop_watch_commit_preemption_selftest(void);
 /* Real bounded-stream KAT for watcher-local queue backpressure. */
 bool zcl_devloop_watch_stream_backpressure_selftest(const char *repo_root);
+/* The watcher's persistent journal sealer against a real workspace. Returns
+ * NULL on success or the first broken property: stop seals every published
+ * event; a backlog over the bound and a dead sealer each seal inline; rapid
+ * saves past the ring's capacity lose nothing; a proof worker fork keeps
+ * neither the request pipe nor the deferral; a sealer killed inside a batch
+ * leaves a journal that a watcher restart continues without a gap; and no
+ * child process or descriptor outlives the sealer. */
+const char *zcl_devloop_watch_sealer_selftest(const char *repo_root);
 /* Idle-budget exit, landing-root exemption, and stopped-heartbeat reason. */
 bool zcl_devloop_watch_root_is_landing(const char *root);
 bool zcl_devloop_watch_idle_exit_selftest(void);
@@ -820,6 +828,27 @@ bool zcl_devloop_cycle_stream_publish(const char *repo_root,
 bool zcl_devloop_cycle_stream_flush_through(const char *repo_root,
                                             int64_t through_epoch,
                                             char *why, size_t why_len);
+/* A resident owner may accept responsibility for sealing (returns true) so
+ * its reflex loop never waits on journal fsyncs; returning false seals now.
+ * Producers call zcl_devloop_cycle_stream_seal after their event is visible;
+ * without an accepting owner it is exactly flush_through. */
+typedef bool (*zcl_devloop_cycle_seal_defer_fn)(void *opaque,
+                                                const char *repo_root,
+                                                int64_t through_epoch);
+void zcl_devloop_cycle_stream_seal_defer(zcl_devloop_cycle_seal_defer_fn fn,
+                                         void *opaque);
+bool zcl_devloop_cycle_stream_seal(const char *repo_root,
+                                   int64_t through_epoch,
+                                   char *why, size_t why_len);
+/* The ring's newest published epoch and its durable watermark (the newest
+ * epoch already sealed into the journal). */
+bool zcl_devloop_cycle_stream_marks(const char *repo_root,
+                                    int64_t *latest_out, int64_t *durable_out);
+#if defined(ZCL_TESTING)
+/* Test seam: this process SIGKILLs itself after sealing `events` more
+ * journal events (0 disarms), to crash a sealer inside a batch. */
+void zcl_devloop_cycle_stream_test_kill_after(int events);
+#endif
 /* Move a latest pointer left behind the journal tail (a flusher died inside
  * a batch) onto the tail event. A no-op when they already agree. */
 bool zcl_devloop_cycle_state_heal(const char *repo_root, char *why,
@@ -842,7 +871,9 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_read_after(
 
 /* Wait for the first exact event after `after_epoch`. The directory watch is
  * armed before the first read, closing the check/sleep race; producers wake it
- * through the bounded volatile ring. On timeout, epoch_out retains the exact
+ * through the bounded volatile ring. A sealer holding the cycle lock never
+ * delays it: a busy lock reads the sealed event file without the lock, and
+ * an event that is in neither place is not yet published. On timeout, epoch_out retains the exact
  * caller anchor so recovery evidence cannot regress to zero. */
 enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
     const char *repo_root, int64_t after_epoch, int timeout_ms,
