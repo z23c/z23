@@ -11,7 +11,9 @@
  *   1. parent-death signal + parent identity check
  *   2. close every descriptor except the sealed image and the report pipe
  *   3. rlimits (core 0, fsize 0, nofile small, AS/cpu bounded)
- *   4. no_new_privs, Landlock deny-all, seccomp session deny-list (no W^X yet)
+ *   4. no_new_privs, Landlock deny-all, seccomp session deny-list, then the
+ *      runner/leaf layers (io_uring, pidfd, userfaultfd, kcmp,
+ *      process_madvise, kill family, setsid/setpgid) — no W^X yet
  *   5. re-hash the sealed image and compare
  *   6. map it through /proc/self/fd/N (constructors run HERE, confined)
  *   7. second seccomp layer: PROT_EXEC mmap/mprotect denied (W^X)
@@ -167,6 +169,54 @@ static bool child_rlimits(uint32_t timeout_ms)
     return os_sandbox_set_rlimits(&lim).ok;
 }
 
+/* Kernel surfaces the shared session deny-set does not name. The runner
+ * installs this layer before it serves anything (fail-closed), and every
+ * candidate child inherits it across fork. io_uring executes socket, connect
+ * and openat as ring operations that never pass through the seccomp syscall
+ * filter, so a ring would reopen the network the session set closes.
+ * pidfd_open/pidfd_getfd/kcmp/process_madvise and ptrace/process_vm_* reach
+ * into other processes; userfaultfd is an exploitation primitive. The runner
+ * itself uses none of them. */
+static const int g_runner_denied[] = {
+#ifdef SYS_io_uring_setup
+    SYS_io_uring_setup,
+#endif
+#ifdef SYS_io_uring_enter
+    SYS_io_uring_enter,
+#endif
+#ifdef SYS_io_uring_register
+    SYS_io_uring_register,
+#endif
+#ifdef SYS_pidfd_open
+    SYS_pidfd_open,
+#endif
+#ifdef SYS_pidfd_getfd
+    SYS_pidfd_getfd,
+#endif
+#ifdef SYS_userfaultfd
+    SYS_userfaultfd,
+#endif
+#ifdef SYS_kcmp
+    SYS_kcmp,
+#endif
+#ifdef SYS_process_madvise
+    SYS_process_madvise,
+#endif
+    SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev,
+};
+
+/* The candidate leaf additionally signals nothing and never leaves its
+ * session: kill/tkill/tgkill would let candidate bytes SIGKILL any same-uid
+ * process (the runner, the resident, a node). The runner keeps kill() — it
+ * must kill a child at the deadline — so these are leaf-only. */
+static const int g_leaf_denied[] = {
+#ifdef SYS_pidfd_send_signal
+    SYS_pidfd_send_signal,
+#endif
+    SYS_kill, SYS_tkill, SYS_tgkill, SYS_rt_sigqueueinfo,
+    SYS_rt_tgsigqueueinfo, SYS_setsid, SYS_setpgid,
+};
+
 static bool child_confine(struct zcl_reflex_child_report *report,
                           const struct zcl_reflex_request *request,
                           int image_fd, int report_fd, int runner_pid)
@@ -193,6 +243,14 @@ static bool child_confine(struct zcl_reflex_child_report *report,
     const int *denied = os_sandbox_session_denied_syscalls(&denied_count);
     if (!os_sandbox_seccomp_deny(denied, denied_count, false).ok)
         return child_note(report, "seccomp", "seccomp deny-list unavailable"),
+               false;
+    /* The runner layer is inherited already; re-installing it keeps the leaf
+     * self-sufficient if a future runner variant ever skipped it. */
+    if (!os_sandbox_seccomp_deny(g_runner_denied, sizeof(g_runner_denied) /
+                                 sizeof(g_runner_denied[0]), false).ok ||
+        !os_sandbox_seccomp_deny(g_leaf_denied, sizeof(g_leaf_denied) /
+                                 sizeof(g_leaf_denied[0]), false).ok)
+        return child_note(report, "seccomp", "leaf deny-list unavailable"),
                false;
     report->env_count = zcl_reflex_env_count();
     report->inherited_fd_count = zcl_reflex_count_fds_except(keep, 2);
@@ -554,7 +612,9 @@ static bool runner_enter(void)
     struct sigaction ignore = {.sa_handler = SIG_IGN};
     return prctl(PR_SET_PDEATHSIG, SIGKILL) == 0 && runner_peer_is_parent() &&
         os_sandbox_no_new_privs() && zcl_reflex_close_all_except(keep, 4) &&
-        chdir("/") == 0 && sigaction(SIGPIPE, &ignore, NULL) == 0;
+        chdir("/") == 0 && sigaction(SIGPIPE, &ignore, NULL) == 0 &&
+        os_sandbox_seccomp_deny(g_runner_denied, sizeof(g_runner_denied) /
+                                sizeof(g_runner_denied[0]), false).ok;
 }
 
 static int runner_main(void)

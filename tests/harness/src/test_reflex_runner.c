@@ -16,6 +16,8 @@
  *   - a regression that is not red, or that replaces the accepted green root;
  *   - a hang or crash that takes the runner down with it;
  *   - a socket or new executable mapping that is permitted;
+ *   - io_uring (network past the syscall filter), pidfd_open/kill on the
+ *     runner, or fork/execve from a constructor or story that is permitted;
  *   - any unconfined fallback when the artifact cannot be sealed/verified.
  */
 
@@ -266,6 +268,49 @@ static int t_socket_and_wx_are_killed(void)
     return failures;
 }
 
+/* An escape probe is contained when the candidate was killed by the seccomp
+ * layers (SIGSYS) or its call merely failed ("refused:"), never "escaped:". */
+static bool rr_escape_contained(const struct rr_case *c)
+{
+    const char *detail = c->out.report.observation.detail;
+    bool refused = strncmp(detail, "refused:", 8) == 0;
+    return c->out.available && !c->out.green &&
+        strncmp(detail, "escaped:", 8) != 0 &&
+        (c->out.child_signal == SIGSYS || refused);
+}
+
+/* io_uring would carry socket/connect past the syscall filter; pidfd and
+ * kill reach the runner itself; fork/exec from the constructor (at dlopen)
+ * or the story would leave the confined leaf. Every one is contained and the
+ * SAME runner serves the next candidate green. */
+static int t_kernel_escape_surfaces_are_denied(void)
+{
+    static const char *const kinds[] = {
+        "iouring", "pidfd", "killparent", "forkctor", "forkstory",
+        "execctor", "execstory",
+    };
+    int failures = 0;
+    TEST("reflex runner: io_uring, pidfd, kill(parent), fork and execve from "
+         "constructor or story are denied; runner survives") {
+        struct rr_case warm;
+        ASSERT(rr_run(&warm, "green", 1000));
+        ASSERT(warm.out.green);
+        for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+            struct rr_case c;
+            ASSERT(rr_run(&c, kinds[i], 1000));
+            ASSERT(rr_escape_contained(&c));
+            ASSERT_EQ(c.out.runner_pid, warm.out.runner_pid);
+        }
+        struct rr_case after;
+        ASSERT(rr_run(&after, "green", 1000));
+        ASSERT(after.out.green);
+        ASSERT(after.out.runner_warm);
+        ASSERT_EQ(after.out.runner_pid, warm.out.runner_pid);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Fail closed: an artifact whose sealed bytes are not the requested digest,
  * or that cannot be read, never reaches a runner and is never green. */
 static int t_unverifiable_artifact_fails_closed(void)
@@ -303,6 +348,7 @@ int test_reflex_runner(void)
     failures += t_green_then_regression_keeps_accepted_root();
     failures += t_hang_and_crash_do_not_kill_runner();
     failures += t_socket_and_wx_are_killed();
+    failures += t_kernel_escape_surfaces_are_denied();
     failures += t_unverifiable_artifact_fails_closed();
     zcl_reflex_runner_shutdown();
     printf("=== reflex_runner: %d failures ===\n", failures);
