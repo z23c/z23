@@ -644,6 +644,67 @@ static int sia_include_namespace_closure(void)
     if (work[0]) test_rm_rf_recursive(work);
     return failures;
 }
+
+static int sia_include_search_semantics(void)
+{
+    int failures = 0;
+    char work[512] = {0}, path[PATH_MAX], cmd[PATH_MAX * 4];
+    TEST("ordered include roots catch earlier headers and __has_include") {
+        test_make_tmpdir(work, sizeof(work), "sia", "include-search");
+        ASSERT(snprintf(path, sizeof(path), "%s/first", work) <
+               (int)sizeof(path));
+        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/second", work) <
+               (int)sizeof(path));
+        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/second/choice.h", work) <
+               (int)sizeof(path));
+        ASSERT(sia_write_file(path, "#define CHOICE 2\n"));
+        ASSERT(snprintf(path, sizeof(path), "%s/unit.c", work) <
+               (int)sizeof(path));
+        ASSERT(sia_write_file(path,
+            "#if __has_include(<choice.h>)\n#include <choice.h>\n"
+            "#else\n#define CHOICE 0\n#endif\nint selected = CHOICE;\n"
+            "#if __has_include(<optional.h>)\nint optional = 1;\n"
+            "#else\nint optional = 0;\n#endif\n"));
+        ASSERT(snprintf(cmd, sizeof(cmd),
+                        "cc -std=c23 -E -P -x c -I '%s/first' "
+                        "-I '%s/second' '%s/unit.c'", work, work, work) <
+               (int)sizeof(cmd));
+        const char *roots[] = {"first", "second"};
+        uint8_t before[32], changed[32];
+        char why[128], output[512];
+        ASSERT(zcl_dev_include_namespace_v1_root(
+            work, roots, 2, before, why, sizeof(why)));
+        ASSERT(sia_capture(cmd, output, sizeof(output)));
+        ASSERT(strstr(output, "int selected = 2;") != NULL);
+        ASSERT(strstr(output, "int optional = 0;") != NULL);
+        ASSERT(snprintf(path, sizeof(path), "%s/first/choice.h", work) <
+               (int)sizeof(path));
+        ASSERT(sia_write_file(path, "#define CHOICE 1\n"));
+        ASSERT(zcl_dev_include_namespace_v1_root(
+            work, roots, 2, changed, why, sizeof(why)));
+        ASSERT(memcmp(before, changed, 32) != 0);
+        ASSERT(sia_capture(cmd, output, sizeof(output)));
+        ASSERT(strstr(output, "int selected = 1;") != NULL);
+        ASSERT(snprintf(path, sizeof(path), "%s/first/optional.h", work) <
+               (int)sizeof(path));
+        ASSERT(sia_write_file(path, "/* presence only */\n"));
+        memcpy(before, changed, 32);
+        ASSERT(zcl_dev_include_namespace_v1_root(
+            work, roots, 2, changed, why, sizeof(why)));
+        ASSERT(memcmp(before, changed, 32) != 0);
+        ASSERT(sia_capture(cmd, output, sizeof(output)));
+        ASSERT(strstr(output, "int optional = 1;") != NULL);
+        const char *reversed[] = {"second", "first"};
+        ASSERT(zcl_dev_include_namespace_v1_root(
+            work, reversed, 2, before, why, sizeof(why)));
+        ASSERT(memcmp(before, changed, 32) != 0);
+        PASS();
+    } _test_next:;
+    if (work[0]) test_rm_rf_recursive(work);
+    return failures;
+}
 #endif
 
 int test_source_identity_authority(void)
@@ -658,6 +719,7 @@ int test_source_identity_authority(void)
     failures += sia_precommit_source_action();
 #if !defined(_WIN32)
     failures += sia_include_namespace_closure();
+    failures += sia_include_search_semantics();
 #endif
     printf("[test_source_identity_authority] %d failure(s)\n", failures);
     return failures;

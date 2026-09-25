@@ -3332,6 +3332,39 @@ static int test_zd_improve_command(void)
                       task_root, candidate_root, &execution, same_key),
                   VCS_ZCODE_ACTION_INPUT_OK);
         ASSERT(memcmp(component_key, same_key, 32) == 0);
+        struct vcs_zcode_candidate_v1 repeated_candidate = candidate;
+        repeated_candidate.sequence++;
+        repeated_candidate.created_unix++;
+        uint8_t repeated_candidate_root[32];
+        ASSERT_EQ(vcs_zcode_candidate_root(&repeated_candidate,
+                                           repeated_candidate_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(candidate_root, repeated_candidate_root, 32) != 0);
+        struct vcs_zcode_action_input_v1 repeated_input = action_input;
+        memcpy(repeated_input.candidate_root, repeated_candidate_root, 32);
+        ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
+                      workspace, &task, &repeated_candidate,
+                      &repeated_input, task_root, repeated_candidate_root,
+                      &execution, same_key),
+                  VCS_ZCODE_ACTION_INPUT_OK);
+        ASSERT(memcmp(component_key, same_key, 32) == 0);
+        struct vcs_zcode_task_v1 repeated_task = task;
+        repeated_task.expires_unix++;
+        uint8_t repeated_task_root[32];
+        ASSERT_EQ(vcs_zcode_task_root(&repeated_task, repeated_task_root),
+                  VCS_ZCODE_DEV_OK);
+        memcpy(repeated_candidate.task_root, repeated_task_root, 32);
+        ASSERT_EQ(vcs_zcode_candidate_root(&repeated_candidate,
+                                           repeated_candidate_root),
+                  VCS_ZCODE_DEV_OK);
+        memcpy(repeated_input.task_root, repeated_task_root, 32);
+        memcpy(repeated_input.candidate_root, repeated_candidate_root, 32);
+        ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
+                      workspace, &repeated_task, &repeated_candidate,
+                      &repeated_input, repeated_task_root,
+                      repeated_candidate_root, &execution, same_key),
+                  VCS_ZCODE_ACTION_INPUT_OK);
+        ASSERT(memcmp(component_key, same_key, 32) == 0);
         execution.policy_generation++;
         ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
                       workspace, &task, &candidate, &action_input,
