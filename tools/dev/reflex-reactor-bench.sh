@@ -11,6 +11,17 @@ RUNS="${ZCL_REFLEX_BENCH_RUNS:-31}"
 OUTPUT="${ZCL_REFLEX_BENCH_OUTPUT:-$ROOT/build/dev-loop/reflex-reactor-benchmark.json}"
 CLOCK_BIN="$ROOT/build/dev-loop/reflex-monotonic-edit"
 MARKER='ZCL_REFLEX_BENCH:'
+# --ab-pairs N runs only the interleaved MISS/HIT cost study; --ab-output
+# names its receipt and --ab-label records the cache configuration under test.
+AB_PAIRS=0 AB_OUTPUT='' AB_LABEL='artifact-cache-default'
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --ab-pairs) AB_PAIRS="${2:-}"; shift 2 ;;
+        --ab-output) AB_OUTPUT="${2:-}"; shift 2 ;;
+        --ab-label) AB_LABEL="${2:-}"; shift 2 ;;
+        *) printf 'reflex-reactor-bench: unknown argument %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
 
 fail() { printf 'reflex-reactor-bench: %s\n' "$*" >&2; exit 2; }
 proc_cpu_ticks()
@@ -80,12 +91,11 @@ after="$(jq -er '.data.epoch' <<<"$begin")" ||
 first_epoch="$after"
 nonce_base="$(( $(date +%s%N) % 99999900 ))"
 
-# Optional MISS/HIT A/B on this same warm watcher (ZCL_REFLEX_BENCH_AB_PAIRS).
+# Optional MISS/HIT A/B on this same warm watcher (--ab-pairs N).
 # Candidate A is admitted once; then each pair is a distinct-nonce MISS
 # followed by the exact bytes of A (HIT unless the artifact cache is off).
 # Two trailing edits flush the last pair's cycle and proof-worker traces.
-AB_PAIRS="${ZCL_REFLEX_BENCH_AB_PAIRS:-0}"
-AB_OUTPUT="${ZCL_REFLEX_BENCH_AB_OUTPUT:-$ROOT/build/dev-loop/reflex-hit-cost.json}"
+AB_OUTPUT="${AB_OUTPUT:-$ROOT/build/dev-loop/reflex-hit-cost.json}"
 [[ "$AB_PAIRS" =~ ^[0-9]+$ && "$AB_PAIRS" -le 200 ]] ||
     fail 'AB_PAIRS must be 0..200'
 ab_edit()
@@ -133,7 +143,7 @@ if [[ "$AB_PAIRS" -gt 0 ]]; then
     jq -n -f "$ROOT/tools/dev/fixtures/reflex_reactor/hit_cost.jq" \
         --slurpfile samples "$samples" --slurpfile events "$events" \
         --arg source_tu 'contexts/wallet/services/src/vault_intent_decision_service.c' \
-        --arg artifact_cache "${ZCL_DEV_ARTIFACT_CACHE:-default}" \
+        --arg artifact_cache "$AB_LABEL" \
         --argjson pairs "$AB_PAIRS" >"$AB_OUTPUT"
     jq -e --argjson pairs "$AB_PAIRS" '
       (.samples|map(select(.kind=="miss" or .kind=="hit"))|length)==2*$pairs and

@@ -1573,17 +1573,25 @@ bool zcl_devloop_hotswap_build(
         goto fail;
     }
     size_t before_n = 0, after_n = 0;
+    int64_t dependency_started = platform_time_monotonic_us();
+    receipt->inputs_us = dependency_started - started;
     bool have_baseline = hs_depfile_read(root, cached_dep, before, &before_n,
                                          true);
+    receipt->dependency_hash_us =
+        platform_time_monotonic_us() - dependency_started;
     if (have_baseline &&
         hs_cache_key(&plan, root, owner, before, before_n,
                      receipt->artifact_cache_key) &&
         hs_cache_root(cache_root)) {
+        int64_t lookup_started = platform_time_monotonic_us();
+        receipt->key_us = lookup_started - started;
         cache_fd = hs_cache_lock(cache_root, receipt->artifact_cache_key,
                                  cache_obj, cache_so, cache_hash);
-        if (cache_fd >= 0 &&
+        bool cache_hit = cache_fd >= 0 &&
             hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
-                            receipt)) {
+                            receipt);
+        receipt->lookup_us = platform_time_monotonic_us() - lookup_started;
+        if (cache_hit) {
             receipt->artifact_cache_hit = true;
             receipt->dependency_count = (uint32_t)before_n;
             (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu),
