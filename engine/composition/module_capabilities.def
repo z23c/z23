@@ -1283,6 +1283,8 @@ ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_signer.c", CAP_FS_WRITE, "custodies t
 ZCL_MODULE_CAPABILITY("tools/dev/fleet_enrol_facts.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/dev/fleet_enrol_store.c", CAP_FS_WRITE, "custodies this owner's machine roster and spent-invite list under the state root, and appends the ONE restricted port-forwarding line the ssh bridge adds to the operator's authorized_keys")
 ZCL_MODULE_CAPABILITY("tools/dev/dev_workspace.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "")
+ZCL_MODULE_CAPABILITY("tools/dev/devloop_action_root.c", CAP_FS_READ|CAP_FS_WRITE, "derives one compile's action preimage: hashes the files its depfile names and stats every include location probed before each hit")
+ZCL_MODULE_CAPABILITY("tools/dev/devloop_action_root_store.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "asks the build's own compiler driver for its built-in include search list, sysroot and linker (cc -E -v, -print-sysroot, -print-prog-name), records the allowlisted part of the environment the compile child inherits, and stores preimages content-addressed")
 ZCL_MODULE_CAPABILITY("tools/dev/devloop_app.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/dev/devloop_app_scaffold.c", CAP_FS_READ|CAP_FS_WRITE, "materializes one conventional App resource slice into the checkout: reads each target to classify it, then writes every planned file as a temp file renamed into place; it refuses, having written nothing, when a target exists with different content")
 ZCL_MODULE_CAPABILITY("tools/dev/devloop_app_slice.c", CAP_FS_WRITE, "names its own refusals on the native diagnostic stream while resolving the checkout root the slice is computed against")

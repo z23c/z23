@@ -11,6 +11,7 @@
 #include "build_action_v2_priv.h"
 
 #include "base/safe_alloc.h"
+#include "base/serialize_le.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -586,16 +587,10 @@ static void av2_put(struct av2_buf *b, const void *p, size_t n)
     b->len += n;
 }
 
-static void av2_u32_at(uint8_t *dst, uint32_t v)
-{
-    for (unsigned i = 0; i < 4; i++)
-        dst[i] = (uint8_t)((v >> (8U * i)) & 0xffU);
-}
-
 static void av2_put_u32(struct av2_buf *b, uint32_t v)
 {
     uint8_t le[4];
-    av2_u32_at(le, v);
+    zcl_write_u32_le(le, v);
     av2_put(b, le, sizeof(le));
 }
 
@@ -622,7 +617,7 @@ static size_t av2_field_begin(struct av2_buf *b, enum vcs_action_field_v2 f)
 static void av2_field_end(struct av2_buf *b, size_t at)
 {
     if (!b->failed)
-        av2_u32_at(b->data + at, (uint32_t)(b->len - at - 4));
+        zcl_write_u32_le(b->data + at, (uint32_t)(b->len - at - 4));
 }
 
 static void av2_put_texts(struct av2_buf *b, const char *const *v, size_t n)

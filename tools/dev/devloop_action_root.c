@@ -24,7 +24,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -374,7 +373,7 @@ static bool ar_sha3_file(const char *path, uint8_t out[32])
     ar_memo_key(&after, &again);
     if (!ar_memo_same(&key, &again))
         return false; /* changed while hashing: no stable identity */
-    if ((int64_t)time(NULL) - key.mtime_s >= AR_MEMO_SETTLE_S)
+    if (platform_time_wall_unix() - key.mtime_s >= AR_MEMO_SETTLE_S)
         ar_memo_store(path, &key, out);
     return true;
 }

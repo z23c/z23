@@ -404,19 +404,19 @@ static void refuse_env_name(struct codec_fixture *f)
 static void refuse_env_value(struct codec_fixture *f)
 {
     f->env[codec_env_at(f, "CPATH")] =
-        (struct vcs_action_env_v2){ "CPATH", true, "/home/someone/inc" };
+        (struct vcs_action_env_v2){ "CPATH", true, "/srv/host-a/inc" };
 }
 static void refuse_argv_abs(struct codec_fixture *f)
 {
-    f->argv[1] = "-I/home/someone/include";
+    f->argv[1] = "-I/srv/host-a/include";
 }
 static void refuse_argv_eq(struct codec_fixture *f)
 {
-    f->argv[1] = "-DROOT=/home/someone";
+    f->argv[1] = "-DROOT=/srv/host-a";
 }
 static void refuse_source_abs(struct codec_fixture *f)
 {
-    f->sources[0].path = "/home/someone/defs.h";
+    f->sources[0].path = "/srv/host-a/defs.h";
 }
 static void refuse_source_order(struct codec_fixture *f)
 {
@@ -459,7 +459,7 @@ static void refuse_argc_zero(struct codec_fixture *f) { f->p.argc = 0; }
 static void refuse_link_argc(struct codec_fixture *f) { f->p.linker.argc = 0; }
 static void refuse_ld_abs(struct codec_fixture *f)
 {
-    f->p.linker.ld = "/home/someone/bin/ld";
+    f->p.linker.ld = "/srv/host-a/bin/ld";
 }
 static void refuse_sysroot_zero(struct codec_fixture *f)
 {
@@ -722,7 +722,7 @@ static bool fx_init(struct fx *x, const char *tag)
     x->vfrom[2] = x->so;
     x->vto[2] = "@out/module";
     x->env[0] = "LANG=C";
-    x->env[1] = "HOME=/home/fixture-user";
+    x->env[1] = "HOME=/srv/fixture-home";
     x->env[2] = "SOURCE_DATE_EPOCH=0";
     x->env[3] = NULL;
     x->system_dirs[0] = "/usr/include";
@@ -908,7 +908,7 @@ static void test_derive_sysroot(struct fx *x,
              ok && fx_same(x, b));
     x->req.sysroot = "/opt/fixture-sdk";
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_SYSROOT);
-    x->req.sysroot = "/home/somebody/sdk";
+    x->req.sysroot = "/srv/host-b/sdk";
     ok = ok && fx_refused(x);
     x->req.sysroot = NULL;
     AR_CHECK("sysroot: a driver sysroot moves the root; a host one is "
@@ -933,7 +933,7 @@ static void test_derive_linker(struct fx *x,
     x->req.linker.links = false;
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
     x->req.linker.links = true;
-    x->req.linker.ld = "/home/somebody/bin/ld";
+    x->req.linker.ld = "/srv/host-b/bin/ld";
     ok = ok && fx_refused(x);
     x->req.linker.ld = x->ld;
     AR_CHECK("linker: a stage that stops at the object differs; a linker "
@@ -1006,14 +1006,14 @@ static void test_derive_env(struct fx *x,
     x->env[3] = NULL;
     AR_CHECK("env: an allowlisted variable set empty differs from unset",
              ok && fx_same(x, b));
-    x->env[1] = "HOME=/home/somebody-else";
+    x->env[1] = "HOME=/srv/host-c";
     ok = fx_same(x, b);
     x->env[3] = "PATH=/opt/other/bin:/usr/bin";
     ok = ok && fx_same(x, b);
-    x->env[1] = "HOME=/home/fixture-user";
+    x->env[1] = "HOME=/srv/fixture-home";
     x->env[3] = NULL;
     AR_CHECK("env: non-allowlisted variables never reach the root", ok);
-    x->env[3] = "CPATH=/home/somebody/include";
+    x->env[3] = "CPATH=/srv/host-b/include";
     ok = fx_refused(x);
     x->env[3] = "LANG=C";
     ok = ok && fx_refused(x);
@@ -1025,7 +1025,7 @@ static void test_derive_env(struct fx *x,
 static void test_derive_refusals(struct fx *x)
 {
     const char *saved = x->argv[3];
-    x->argv[3] = "-I/home/somebody/include";
+    x->argv[3] = "-I/srv/host-b/include";
     bool ok = fx_refused(x);
     x->argv[3] = saved;
     AR_CHECK("an include dir outside the checkout is refused", ok);

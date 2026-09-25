@@ -9,6 +9,7 @@
 #include "build_action_v2_priv.h"
 
 #include "base/safe_alloc.h"
+#include "base/serialize_le.h"
 #include "sha3/sha3.h"
 
 #include <stdlib.h>
@@ -59,8 +60,7 @@ static uint32_t av2_get_u32(struct av2_reader *r)
     uint8_t le[4] = {0};
     if (!av2_take(r, le, sizeof(le)))
         return 0;
-    return (uint32_t)le[0] | ((uint32_t)le[1] << 8) |
-           ((uint32_t)le[2] << 16) | ((uint32_t)le[3] << 24);
+    return zcl_read_u32_le(le);
 }
 
 static uint8_t av2_get_u8(struct av2_reader *r)
@@ -389,13 +389,11 @@ bool vcs_action_preimage_v2_decode(
     const uint8_t *bytes, size_t len,
     struct vcs_action_preimage_v2_decoded *out, char *why, size_t why_len)
 {
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
     size_t off[VCS_ACTION_FIELD_V2_COUNT] = {0};
     size_t plen[VCS_ACTION_FIELD_V2_COUNT] = {0};
-    if (!out) {
-        av2_why(why, why_len, "decode output is missing", NULL);
-        return false;
-    }
-    memset(out, 0, sizeof(*out));
     if (!av2_spans(bytes, len, off, plen)) {
         av2_why(why, why_len, "preimage framing is invalid", NULL);
         return false;
