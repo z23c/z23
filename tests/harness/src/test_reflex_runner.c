@@ -410,67 +410,94 @@ static int t_runner_stage_timings(void)
 
 static bool rr_fd_open(int fd) { return fcntl(fd, F_GETFD) >= 0; }
 
-/* Child body of the descriptor proof. Prints its own verdict lines and
- * returns the number of failed checks (exit status). */
-static int rr_fd_child_run(int result_fd)
+/* Raise RLIMIT_NOFILE so fd 70000 is legal where the hard limit allows it;
+ * otherwise report that sub-case as SKIP with the reason. */
+static int rr_fd_child_limit(bool *high)
 {
-    int bad = 0;
-    const int keep[] = {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, result_fd};
     struct rlimit lim;
     if (getrlimit(RLIMIT_NOFILE, &lim) != 0) return 100;
-    bool high = lim.rlim_max == RLIM_INFINITY || lim.rlim_max > RR_HIGH_FD;
-    lim.rlim_cur = high ? (rlim_t)RR_HIGH_FD + 1 : lim.rlim_max;
+    *high = lim.rlim_max == RLIM_INFINITY || lim.rlim_max > RR_HIGH_FD;
+    lim.rlim_cur = *high ? (rlim_t)RR_HIGH_FD + 1 : lim.rlim_max;
     if (setrlimit(RLIMIT_NOFILE, &lim) != 0) return 101;
-    /* Independent ground truth: the kernel's close_range leaves exactly the
-     * kept set; then exactly three (or two) known descriptors are opened. */
-    for (int fd = 0; fd < 3; fd++)
-        if (!rr_fd_open(fd)) {
-            int null_fd = open("/dev/null", O_RDWR);
-            if (null_fd < 0) return 106;
-            if (null_fd != fd && dup2(null_fd, fd) != fd) return 106;
-        }
+    if (!*high)
+        printf("SKIP fd %d sub-case: hard RLIMIT_NOFILE=%llu <= %d; ",
+               RR_HIGH_FD, (unsigned long long)lim.rlim_max, RR_HIGH_FD);
+    return 0;
+}
+
+/* Descriptor proof setup, in the forked child: make 0..2 real, close
+ * everything else but `result_fd` with the kernel's own close_range
+ * (independent ground truth), then open exactly one descriptor and dup it to
+ * 1500 and (when *high) 70000. Returns 0 or a setup error code. */
+static int rr_fd_child_setup(int result_fd, bool *high, int *base)
+{
+    int rc = rr_fd_child_limit(high);
+    if (rc != 0) return rc;
+    for (int fd = 0; fd < 3; fd++) {
+        int null_fd = rr_fd_open(fd) ? fd : open("/dev/null", O_RDWR);
+        if (null_fd < 0 || (null_fd != fd && dup2(null_fd, fd) != fd))
+            return 106;
+    }
     if ((result_fd > 3 &&
          syscall(SYS_close_range, 3u, (unsigned)result_fd - 1u, 0) != 0) ||
         syscall(SYS_close_range, (unsigned)result_fd + 1u, ~0u, 0) != 0)
         return 102;
-    int base = open("/dev/null", O_RDONLY);
-    if (base < 0 || dup2(base, RR_MID_FD) != RR_MID_FD) return 103;
-    if (high && dup2(base, RR_HIGH_FD) != RR_HIGH_FD) return 104;
-    if (!high)
-        printf("SKIP fd %d sub-case: hard RLIMIT_NOFILE=%llu <= %d; ",
-               RR_HIGH_FD, (unsigned long long)lim.rlim_max, RR_HIGH_FD);
+    *base = open("/dev/null", O_RDONLY);
+    if (*base < 0 || dup2(*base, RR_MID_FD) != RR_MID_FD) return 103;
+    if (*high && dup2(*base, RR_HIGH_FD) != RR_HIGH_FD) return 104;
+    return 0;
+}
+
+/* close_range disabled: the enumeration fallback must close all three (or
+ * two) descriptors, keep the kept ones, and the census must be exact both
+ * before (3 or 2) and after (0). Returns the number of failed checks. */
+static int rr_fd_child_fallback(const int keep[static 4], int base, bool high)
+{
+    int bad = 0;
     uint32_t want = high ? 3u : 2u;
     uint32_t counted = zcl_reflex_count_fds_except(keep, 4);
-    if (counted != want) {
-        printf("count before close=%u want %u; ", counted, want);
-        bad++;
-    }
+    if (counted != want)
+        bad++, printf("count before close=%u want %u; ", counted, want);
     zcl_reflex_testing_use_close_range(false);
-    bool closed = zcl_reflex_close_all_except(keep, 4);
-    if (!closed) { printf("fallback close returned false; "); bad++; }
+    if (!zcl_reflex_close_all_except(keep, 4))
+        bad++, printf("fallback close returned false; ");
     if (rr_fd_open(base) || rr_fd_open(RR_MID_FD) ||
-        (high && rr_fd_open(RR_HIGH_FD))) {
-        printf("fallback left fds open base=%d %d=%d %d=%d; ", base,
-               RR_MID_FD, rr_fd_open(RR_MID_FD), RR_HIGH_FD,
-               rr_fd_open(RR_HIGH_FD));
-        bad++;
-    }
+        (high && rr_fd_open(RR_HIGH_FD)))
+        bad++, printf("fallback left fds open base=%d %d=%d %d=%d; ", base,
+                      RR_MID_FD, rr_fd_open(RR_MID_FD), RR_HIGH_FD,
+                      rr_fd_open(RR_HIGH_FD));
     for (size_t i = 0; i < 4; i++)
-        if (!rr_fd_open(keep[i])) { printf("kept fd %d lost; ", keep[i]); bad++; }
+        if (!rr_fd_open(keep[i]))
+            bad++, printf("kept fd %d lost; ", keep[i]);
     counted = zcl_reflex_count_fds_except(keep, 4);
-    if (counted != 0) { printf("count after close=%u; ", counted); bad++; }
-    /* Enumeration impossible and close_range off: refuse, never "done". */
+    if (counted != 0) bad++, printf("count after close=%u; ", counted);
+    return bad;
+}
+
+/* Enumeration impossible and close_range off: refuse, never "done". */
+static int rr_fd_child_refusal(const int keep[static 4], int result_fd)
+{
+    int bad = 0;
     zcl_reflex_testing_set_fd_dir("/nonexistent/reflex-fd-dir");
     if (dup2(result_fd, RR_MID_FD) != RR_MID_FD) return 105;
-    if (zcl_reflex_close_all_except(keep, 4)) {
-        printf("close without enumeration returned true; ");
-        bad++;
-    }
-    if (zcl_reflex_count_fds_except(keep, 4) != UINT32_MAX) {
-        printf("census without enumeration did not fail closed; ");
-        bad++;
-    }
+    if (zcl_reflex_close_all_except(keep, 4))
+        bad++, printf("close without enumeration returned true; ");
+    if (zcl_reflex_count_fds_except(keep, 4) != UINT32_MAX)
+        bad++, printf("census without enumeration did not fail closed; ");
     return bad;
+}
+
+/* Child body of the descriptor proof. Prints its own verdict lines and
+ * returns the number of failed checks (exit status). */
+static int rr_fd_child_run(int result_fd)
+{
+    const int keep[] = {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, result_fd};
+    bool high = false;
+    int base = -1;
+    int rc = rr_fd_child_setup(result_fd, &high, &base);
+    if (rc != 0) return rc;
+    return rr_fd_child_fallback(keep, base, high) +
+        rr_fd_child_refusal(keep, result_fd);
 }
 
 static int t_fd_hygiene_without_close_range(void)
