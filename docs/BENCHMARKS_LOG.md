@@ -377,3 +377,44 @@ do not substitute for the separate object-cache header/flags/compiler/generated
 input/corruption/interruption matrix or exact commit proof. Local raw evidence:
 `build/ingest-factory-repeat-{before,after}/` and
 `build/ingest-throughput-baseline/factory-{selftest,lint}-2.log`.
+
+## 2026-09-25 — cold `make lint`: long gates first, half-host compiler sweeps
+
+Question: landing proofs run `make lint` with the lint result cache and the
+per-TU cache both off, and one gate, `check-windows-cross-syntax`, set the
+wall. What makes that fresh run faster without skipping or reusing anything?
+
+Conditions: base `48c4e8ca4a`, every run through `devbuild --wait`
+(28 processors, 24 GiB), `make -j8 z23-dev proof-lint-prebuild` first as a
+proof does, then `ZCL_LINT_TU_CACHE=0 ZCL_LINT_CACHE=0 make -j8 lint`. Wall is
+`run_lint.sh`'s own timing line; start offsets come from each gate's `.ms`
+artifact. Every run passed all 213 gates except the two noted below.
+
+The gate itself, standalone and cold: 2339 TUs, 491 CPU-seconds of mingw time
+(per TU p50 328 ms, p99 511 ms, max 971 ms), 84 s wall at 6 workers and 40 s
+at 28. Preprocessing alone (`-E`) is 227 CPU-seconds of that. Process start-up
+is small: the per-TU bash worker costs about 4 ms (8.5 CPU-seconds in all,
+1.7%) and an empty mingw compile about 6 ms, so running several TUs per worker
+was not worth the change. Batching several TUs
+into one compiler call would merge their logs and exit codes, so it was not
+done. A precompiled header would change the order in which headers are seen,
+so it was not done either.
+
+| driver | lint wall | cross-syntax start | cross-syntax ms |
+|---|---|---|---|
+| base (list order, 6 sweep workers), run 1 | 151.2 s | +12.3 s | 101869 |
+| base, run 2 | 133.6 s | +13.1 s | 118250 |
+| long gates first, 6 sweep workers | 100.7 s | +0.2 s | 99625 |
+| long gates first, 14 sweep workers (lane), run 1 | 73.7 s | +0.1 s | 69498 |
+| lane, run 2 | 75.3 s | +0.1 s | 74203 |
+| lane with 28 sweep workers | 75.7 s | +1.0 s | 68975 |
+
+Lane run 1 and the 6-worker run each failed only
+`check-shell-host-assumptions`, because that draft
+counted processors with `nproc`; otherwise lane run 1 ran the same code as
+run 2. Verdict: dispatching the long gates first removes the 12-13 s start
+offset, and half the host for the two compiler sweeps cuts the cross-syntax
+gate by about a third. Together they take lint from 134-151 s to 74-75 s.
+28 sweep workers is no faster: `check-vcs-no-sha1` becomes the longest gate at
+71 s. A seeded Windows-only error in `platform/modules/platform/src/clock.c`
+fails the gate with the same diagnostic line before and after.
