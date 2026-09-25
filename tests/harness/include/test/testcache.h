@@ -279,6 +279,112 @@ void testcache_store_pass_flaky(struct testcache *tc, const uint8_t key[32]);
  * soundness proofs. */
 void testcache_dump_group(struct testcache *tc, const char *group_name);
 
+/* ── action-input accessor ───────────────────────────────────────────────
+ *
+ * The canonical build-action preimage (contexts/commons/modules/vcs/{include/
+ * vcs/build_action.h,src/build_action.c}, landing separately) needs the raw
+ * ingredients a TEST group's action_root is built from. This accessor gathers
+ * exactly those ingredients from testcache's already-computed identity — the
+ * same forward closure, the same allowlisted env, the same toolkey — WITHOUT
+ * adding a new cache key, changing an existing one, or touching cacheability.
+ * It is read-only: it never stores or looks up a verdict.
+ *
+ * Every digest below is domain-tagged with its own "…action…" string, so it
+ * can never collide with (or be confused for) a real testcache_probe_group
+ * key, even though it is derived from the identical bytes.
+ *
+ * Exact vs approximate vs missing (see the accessor's doc comment in
+ * testcache.c for the full accounting):
+ *   - closure paths + content SHA3        EXACT   (identical bytes/order to
+ *                                                   the real key's closure)
+ *   - allowlisted env NAME=VALUE pairs    EXACT   (identical selection/order
+ *                                                   to the real key's envkey)
+ *   - toolkey string                      EXACT   (ZCL_TESTCACHE_TOOLKEY)
+ *   - harness_root                        EXACT closure, same units/order as
+ *                                                 the real key's harness fold
+ *   - `generated` per closure entry       APPROX  (first-512-byte marker
+ *                                                   scan; see doc comment)
+ *   - fixtures_root / `fixture` flag      APPROX  (path-shape heuristic; a
+ *                                                   group that reads fixtures
+ *                                                   OUTSIDE its call-graph
+ *                                                   closure, e.g. dev_platform,
+ *                                                   is invisible to this and
+ *                                                   reports zero fixtures)
+ *   - policy_root                         EXACT for the ordinary (non-
+ *                                                 activated) contract only
+ *   - negative lookups                    MISSING (the test cache has none:
+ *                                                   nothing here records
+ *                                                   "path X was probed and
+ *                                                   does not exist")
+ *   - ABI generation                      MISSING (not a testcache concept;
+ *                                                   the toolchain capsule
+ *                                                   owns it) */
+#define TESTCACHE_ACTION_MAX_CLOSURE 8192   /* == internal TRC_MAX_CLOSURE */
+#define TESTCACHE_ACTION_MAX_ENV 128
+#define TESTCACHE_ACTION_PATH_MAX 256
+#define TESTCACHE_ACTION_ENV_MAX 400
+#define TESTCACHE_ACTION_TOOLKEY_MAX 256
+
+struct testcache_action_closure_entry {
+    char    path[TESTCACHE_ACTION_PATH_MAX]; /* repo-relative, NUL-terminated */
+    uint8_t sha3[32];                        /* content SHA3-256 */
+    bool    generated; /* APPROXIMATE: first-512-byte generated-file marker
+                        * scan (see testcache.c doc comment). Always false
+                        * when no marker is found, including on a genuinely
+                        * generated-but-unmarked file — this is a heuristic,
+                        * not an authority. */
+    bool    fixture;   /* APPROXIMATE: path-shape heuristic (see above) —
+                        * under tests/fixtures/ or tests/harness/fixtures/,
+                        * or a basename containing "fixture". */
+};
+
+struct testcache_action_env_kv {
+    char text[TESTCACHE_ACTION_ENV_MAX]; /* "NAME=VALUE", NUL-terminated */
+};
+
+/* Large (~2.4 MB): heap-allocate or give it static storage, never put it on a
+ * thread's default-size stack. */
+struct testcache_action_inputs {
+    struct testcache_action_closure_entry closure[TESTCACHE_ACTION_MAX_CLOSURE];
+    int  n_closure;
+
+    struct testcache_action_env_kv env[TESTCACHE_ACTION_MAX_ENV];
+    int  n_env;
+    bool env_truncated; /* true iff more than TESTCACHE_ACTION_MAX_ENV
+                         * allowlisted vars were set (env[] holds a sorted
+                         * prefix only) */
+
+    char toolkey[TESTCACHE_ACTION_TOOLKEY_MAX]; /* ZCL_TESTCACHE_TOOLKEY */
+
+    uint8_t harness_root[32];
+    bool    harness_root_valid; /* false: harness depfile graph incomplete,
+                                 * this run cannot bound the harness inputs */
+    bool    harness_root_stale; /* true: a harness input is newer than the
+                                 * include graph (informational only) */
+
+    uint8_t fixtures_root[32]; /* SHA3 over the fixture-shaped subset of
+                                * closure[]; see the `fixture` field above */
+    int     n_fixture_paths;
+
+    uint8_t policy_root[32]; /* ordinary (non-activated) contract identity +
+                              * the denylist verdict below */
+    bool    denylisted;      /* testcache_group_is_denylisted(group_name) */
+};
+
+/* Gather group_name's ordered action-input ingredients through tc (see the
+ * accounting above). Returns false (out fully zeroed) when: tc/group_name is
+ * invalid, the include graph is absent, the entry symbol does not resolve,
+ * the closure is truncated/empty, or any closure file could not be hashed —
+ * exactly the conditions under which a real testcache_probe_group would also
+ * refuse to mint a sound key. A denylisted group still returns true (out-
+ * >denylisted is set) as long as its closure itself is soundly bounded: the
+ * denylist is a CACHEABILITY policy, not a statement that the group's source
+ * closure is unknown, and the caller needs the real ingredients either way.
+ * Never aborts. Uses no absolute paths, hostnames, uids, or mtimes. */
+bool testcache_group_action_inputs(struct testcache *tc,
+                                   const char *group_name,
+                                   struct testcache_action_inputs *out);
+
 /* The compiled-in toolchain+flags fingerprint folded into every key (a compiler
  * OR compile-flag change busts the whole cache). Exposed for the dump surface. */
 const char *testcache_toolkey(void);

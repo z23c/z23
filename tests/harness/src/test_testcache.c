@@ -37,7 +37,7 @@
 static const char *tc_path(unsigned slot)
 {
     static pid_t owner;
-    static char paths[5][80];
+    static char paths[7][80];
     pid_t pid = getpid();
     if (owner != pid) {
         (void)snprintf(paths[0], sizeof(paths[0]),
@@ -50,9 +50,13 @@ static const char *tc_path(unsigned slot)
                        "test-tmp/tc_capsule.%ld", (long)pid);
         (void)snprintf(paths[4], sizeof(paths[4]),
                        "test-tmp/tc_capsule2.%ld", (long)pid);
+        (void)snprintf(paths[5], sizeof(paths[5]),
+                       "test-tmp/tc_action_a.%ld", (long)pid);
+        (void)snprintf(paths[6], sizeof(paths[6]),
+                       "test-tmp/tc_action_b.%ld", (long)pid);
         owner = pid;
     }
-    return slot < 5 ? paths[slot] : NULL;
+    return slot < 7 ? paths[slot] : NULL;
 }
 
 static bool tc_shell(const char *fmt, ...)
@@ -67,6 +71,8 @@ static bool tc_shell(const char *fmt, ...)
 
 #define TC_FIX tc_path(0)
 #define TC_STORE tc_path(1)
+#define TC_AFIX tc_path(5)
+#define TC_AFIX2 tc_path(6)
 
 #define TC_CHECK(name, expr) do {                                    \
     if (expr) { printf("  testcache: %s... OK\n", (name)); }         \
@@ -1891,6 +1897,344 @@ static bool tc_acme_and_agent_policy(void)
            testcache_group_is_denylisted("test_agent_copy_prove");
 }
 
+/* ── Phase AI: testcache_group_action_inputs ─────────────────────────────
+ *
+ * A tiny call chain test_action_entry -> act_mid -> {act_leaf, act_fixture}
+ * under its own header, PLUS a file named act_fixture_helper.c (the
+ * path-shape fixture heuristic matches on basename), so the closure has both
+ * an ordinary source file and a fixture-shaped one. */
+static const char *TCA_TOP =
+    "/* core/modules/act/src/act_top.c — action-input fixture entry. */\n"
+    "#include \"act/act.h\"\n"
+    "int test_action_entry(void)\n"
+    "{\n"
+    "    return act_mid();\n"
+    "}\n";
+
+static const char *TCA_MID =
+    "/* core/modules/act/src/act_mid.c */\n"
+    "#include \"act/act.h\"\n"
+    "int act_mid(void)\n"
+    "{\n"
+    "    return act_leaf() + act_fixture_helper();\n"
+    "}\n";
+
+static const char *TCA_LEAF_A =
+    "/* core/modules/act/src/act_leaf.c — pristine. */\n"
+    "#include \"act/act.h\"\n"
+    "int act_leaf(void)\n"
+    "{\n"
+    "    return 1;\n"
+    "}\n";
+
+static const char *TCA_LEAF_B =
+    "/* core/modules/act/src/act_leaf.c — edited body. */\n"
+    "#include \"act/act.h\"\n"
+    "int act_leaf(void)\n"
+    "{\n"
+    "    return 2;\n"
+    "}\n";
+
+static const char *TCA_FIXTURE_A =
+    "/* core/modules/act/src/act_fixture_helper.c — pristine. */\n"
+    "#include \"act/act.h\"\n"
+    "int act_fixture_helper(void)\n"
+    "{\n"
+    "    return 10;\n"
+    "}\n";
+
+static const char *TCA_FIXTURE_B =
+    "/* core/modules/act/src/act_fixture_helper.c — edited body. */\n"
+    "#include \"act/act.h\"\n"
+    "int act_fixture_helper(void)\n"
+    "{\n"
+    "    return 20;\n"
+    "}\n";
+
+static const char *TCA_H =
+    "/* core/modules/act/include/act/act.h */\n"
+    "#ifndef ACT_H\n"
+    "#define ACT_H\n"
+    "int test_action_entry(void);\n"
+    "int act_mid(void);\n"
+    "int act_leaf(void);\n"
+    "int act_fixture_helper(void);\n"
+    "#endif\n";
+
+static bool write_action_fixture(const char *root, const char *leaf,
+                                 const char *fixture)
+{
+    return write_harness_sources(root) &&
+           write_harness_depfiles(root) &&
+           mk_write(root, "core/modules/act/src/act_top.c", TCA_TOP) &&
+           mk_write(root, "core/modules/act/src/act_mid.c", TCA_MID) &&
+           mk_write(root, "core/modules/act/src/act_leaf.c", leaf) &&
+           mk_write(root, "core/modules/act/src/act_fixture_helper.c",
+                    fixture) &&
+           mk_write(root, "core/modules/act/include/act/act.h", TCA_H) &&
+           mk_write(root, "build/obj/act_top.d",
+                    "build/obj/act_top.o: core/modules/act/src/act_top.c "
+                    "core/modules/act/include/act/act.h\n") &&
+           mk_write(root, "build/obj/act_mid.d",
+                    "build/obj/act_mid.o: core/modules/act/src/act_mid.c "
+                    "core/modules/act/include/act/act.h\n") &&
+           mk_write(root, "build/obj/act_leaf.d",
+                    "build/obj/act_leaf.o: core/modules/act/src/act_leaf.c "
+                    "core/modules/act/include/act/act.h\n") &&
+           mk_write(root, "build/obj/act_fixture_helper.d",
+                    "build/obj/act_fixture_helper.o: "
+                    "core/modules/act/src/act_fixture_helper.c "
+                    "core/modules/act/include/act/act.h\n");
+}
+
+/* Find the (repo-relative) closure entry for `path` and copy its SHA3;
+ * returns false if not present (a hard failure for these tests, since every
+ * path below is one the fixture deliberately puts in the closure). */
+static bool tca_find(const struct testcache_action_inputs *in,
+                     const char *path, uint8_t out[32])
+{
+    for (int i = 0; i < in->n_closure; i++)
+        if (strcmp(in->closure[i].path, path) == 0) {
+            memcpy(out, in->closure[i].sha3, 32);
+            return true;
+        }
+    return false;
+}
+
+static const char *TCA_LEAF_PATH = "core/modules/act/src/act_leaf.c";
+static const char *TCA_FIXTURE_PATH =
+    "core/modules/act/src/act_fixture_helper.c";
+
+/* Absolute-path variant of `rel`, resolved against the current working
+ * directory (never a hostname, uid, or mtime). Two different absolute roots
+ * pointing at byte-identical fixture trees is exactly the "two machines"
+ * case testcache_group_action_inputs must be blind to. */
+static bool tca_abs(const char *rel, char *out, size_t out_len)
+{
+    char cwd[3800];
+    if (!getcwd(cwd, sizeof(cwd)))
+        return false;
+    int w = snprintf(out, out_len, "%s/%s", cwd, rel);
+    return w > 0 && (size_t)w < out_len;
+}
+
+/* Property 1: two different ABSOLUTE repo roots holding byte-identical
+ * fixture trees give byte-identical action inputs (no absolute path,
+ * hostname, uid, or mtime leaks into the result). */
+/* true iff every closure entry (path, sha3, generated, fixture) matches
+ * pairwise between a and b. Split out of tca_dual_root purely to keep that
+ * function's own decision count under the complexity cap. */
+static bool tca_closure_equal(const struct testcache_action_inputs *a,
+                              const struct testcache_action_inputs *b)
+{
+    if (a->n_closure != b->n_closure)
+        return false;
+    for (int i = 0; i < a->n_closure; i++) {
+        if (strcmp(a->closure[i].path, b->closure[i].path) != 0)
+            return false;
+        if (memcmp(a->closure[i].sha3, b->closure[i].sha3, 32) != 0)
+            return false;
+        if (a->closure[i].generated != b->closure[i].generated)
+            return false;
+        if (a->closure[i].fixture != b->closure[i].fixture)
+            return false;
+    }
+    return true;
+}
+
+/* Open root, run testcache_group_action_inputs("test_action_entry", ...)
+ * through it, and close it. Split out of tca_dual_root purely to keep that
+ * function's own decision count under the complexity cap. */
+static bool tca_open_and_probe(const char *root,
+                               struct testcache_action_inputs *out)
+{
+    struct testcache *tc = testcache_open(root);
+    if (!tc)
+        return false;
+    bool ok = testcache_group_action_inputs(tc, "test_action_entry", out);
+    testcache_close(tc);
+    return ok;
+}
+
+static int tca_dual_root(void)
+{
+    int failures = 0;
+    char abs_a[3900], abs_b[3900];
+    TC_CHECK("action fixture A writes",
+             write_action_fixture(TC_AFIX, TCA_LEAF_A, TCA_FIXTURE_A));
+    TC_CHECK("action fixture B writes",
+             write_action_fixture(TC_AFIX2, TCA_LEAF_A, TCA_FIXTURE_A));
+    TC_CHECK("resolve absolute root A", tca_abs(TC_AFIX, abs_a, sizeof(abs_a)));
+    TC_CHECK("resolve absolute root B",
+             tca_abs(TC_AFIX2, abs_b, sizeof(abs_b)));
+    TC_CHECK("the two absolute roots are literally different strings",
+             strcmp(abs_a, abs_b) != 0);
+
+    static struct testcache_action_inputs in_a, in_b;
+    bool ok_a = tca_open_and_probe(abs_a, &in_a);
+    bool ok_b = tca_open_and_probe(abs_b, &in_b);
+    TC_CHECK("action inputs succeed from an absolute root A", ok_a);
+    TC_CHECK("action inputs succeed from an absolute root B", ok_b);
+    bool both_ok = ok_a && ok_b;
+    TC_CHECK("same closure size at two absolute roots",
+             both_ok && in_a.n_closure == in_b.n_closure && in_a.n_closure > 0);
+    TC_CHECK("closure entries identical across absolute roots",
+             both_ok && tca_closure_equal(&in_a, &in_b));
+    TC_CHECK("toolkey identical across absolute roots",
+             both_ok && strcmp(in_a.toolkey, in_b.toolkey) == 0);
+    TC_CHECK("harness root identical across absolute roots",
+             both_ok && in_a.harness_root_valid == in_b.harness_root_valid &&
+                 memcmp(in_a.harness_root, in_b.harness_root, 32) == 0);
+    TC_CHECK("fixtures root identical across absolute roots",
+             both_ok && in_a.n_fixture_paths == in_b.n_fixture_paths &&
+                 memcmp(in_a.fixtures_root, in_b.fixtures_root, 32) == 0);
+    TC_CHECK("policy root identical across absolute roots",
+             both_ok && in_a.denylisted == in_b.denylisted &&
+                 memcmp(in_a.policy_root, in_b.policy_root, 32) == 0);
+    TC_CHECK("env pairs identical across absolute roots (env is process-"
+             "global, not root-derived)",
+             both_ok && in_a.n_env == in_b.n_env);
+    return failures;
+}
+
+/* Property 2: editing a file IN the closure changes exactly that entry's
+ * SHA3, and nothing else about the closure set. */
+static int tca_edit_closure_file(void)
+{
+    int failures = 0;
+    TC_CHECK("action fixture (leaf A) writes",
+             write_action_fixture(TC_AFIX, TCA_LEAF_A, TCA_FIXTURE_A));
+    static struct testcache_action_inputs before;
+    bool ok_before = tca_open_and_probe(TC_AFIX, &before);
+    TC_CHECK("action inputs succeed before the edit", ok_before);
+
+    TC_CHECK("action fixture (leaf B) writes",
+             write_action_fixture(TC_AFIX, TCA_LEAF_B, TCA_FIXTURE_A));
+    static struct testcache_action_inputs after;
+    bool ok_after = tca_open_and_probe(TC_AFIX, &after);
+    TC_CHECK("action inputs succeed after the edit", ok_after);
+    TC_CHECK("closure size unchanged by the edit",
+             ok_before && ok_after && before.n_closure == after.n_closure);
+
+    uint8_t leaf_before[32], leaf_after[32];
+    uint8_t fixture_before[32], fixture_after[32];
+    bool found = ok_before && ok_after &&
+                 tca_find(&before, TCA_LEAF_PATH, leaf_before) &&
+                 tca_find(&after, TCA_LEAF_PATH, leaf_after) &&
+                 tca_find(&before, TCA_FIXTURE_PATH, fixture_before) &&
+                 tca_find(&after, TCA_FIXTURE_PATH, fixture_after);
+    TC_CHECK("both closure paths found before and after", found);
+    TC_CHECK("editing act_leaf.c changes ITS closure entry's SHA3",
+             found && memcmp(leaf_before, leaf_after, 32) != 0);
+    TC_CHECK("editing act_leaf.c leaves act_fixture_helper.c's SHA3 alone",
+             found &&
+                 memcmp(fixture_before, fixture_after, 32) == 0);
+    TC_CHECK("editing act_leaf.c (not fixture-shaped) leaves fixtures_root "
+             "unchanged",
+             ok_before && ok_after &&
+                 memcmp(before.fixtures_root, after.fixtures_root, 32) == 0);
+    return failures;
+}
+
+/* Property 3: editing the fixture-shaped file changes fixtures_root (and
+ * that file's own closure entry) but nothing else. */
+static int tca_edit_fixture_file(void)
+{
+    int failures = 0;
+    TC_CHECK("action fixture (fixture A) writes",
+             write_action_fixture(TC_AFIX, TCA_LEAF_A, TCA_FIXTURE_A));
+    static struct testcache_action_inputs before;
+    bool ok_before = tca_open_and_probe(TC_AFIX, &before);
+    bool fixture_path_flagged = false;
+    if (ok_before)
+        for (int i = 0; i < before.n_closure; i++)
+            if (strcmp(before.closure[i].path, TCA_FIXTURE_PATH) == 0)
+                fixture_path_flagged = before.closure[i].fixture;
+    TC_CHECK("act_fixture_helper.c is classified as a fixture path",
+             ok_before && fixture_path_flagged);
+    TC_CHECK("fixtures_root covers at least the one fixture path",
+             ok_before && before.n_fixture_paths >= 1);
+
+    TC_CHECK("action fixture (fixture B) writes",
+             write_action_fixture(TC_AFIX, TCA_LEAF_A, TCA_FIXTURE_B));
+    static struct testcache_action_inputs after;
+    bool ok_after = tca_open_and_probe(TC_AFIX, &after);
+    TC_CHECK("action inputs succeed after the fixture edit", ok_after);
+    TC_CHECK("editing act_fixture_helper.c changes fixtures_root",
+             ok_before && ok_after &&
+                 memcmp(before.fixtures_root, after.fixtures_root, 32) != 0);
+
+    uint8_t leaf_before[32], leaf_after[32];
+    bool found = ok_before && ok_after &&
+                 tca_find(&before, TCA_LEAF_PATH, leaf_before) &&
+                 tca_find(&after, TCA_LEAF_PATH, leaf_after);
+    TC_CHECK("act_leaf.c found before and after the fixture edit", found);
+    TC_CHECK("editing act_fixture_helper.c leaves act_leaf.c's SHA3 alone",
+             found && memcmp(leaf_before, leaf_after, 32) == 0);
+    return failures;
+}
+
+/* Property 4: a non-allowlisted env var never moves the inputs; an
+ * allowlisted (ZCL_-prefixed) one always does. */
+static int tca_env_allowlist(void)
+{
+    int failures = 0;
+    TC_CHECK("action fixture writes for env test",
+             write_action_fixture(TC_AFIX, TCA_LEAF_A, TCA_FIXTURE_A));
+
+    struct tc_envsave irrelevant_save, allowed_save;
+    tc_env_capture(&irrelevant_save, "TESTCACHE_ACTION_IRRELEVANT_VAR");
+    tc_env_capture(&allowed_save, "ZCL_TESTCACHE_ACTION_TEST_VAR");
+    unsetenv("TESTCACHE_ACTION_IRRELEVANT_VAR");
+    unsetenv("ZCL_TESTCACHE_ACTION_TEST_VAR");
+
+    static struct testcache_action_inputs baseline;
+    bool ok_baseline = false;
+    ok_baseline = tca_open_and_probe(TC_AFIX, &baseline);
+    TC_CHECK("baseline action inputs succeed", ok_baseline);
+
+    setenv("TESTCACHE_ACTION_IRRELEVANT_VAR", "unrelated-value", 1);
+    static struct testcache_action_inputs with_irrelevant;
+    bool ok_irrelevant = false;
+    ok_irrelevant = tca_open_and_probe(TC_AFIX, &with_irrelevant);
+    TC_CHECK("a non-allowlisted env var does not change n_env",
+             ok_baseline && ok_irrelevant &&
+                 baseline.n_env == with_irrelevant.n_env);
+    unsetenv("TESTCACHE_ACTION_IRRELEVANT_VAR");
+
+    setenv("ZCL_TESTCACHE_ACTION_TEST_VAR", "allowlisted-value", 1);
+    static struct testcache_action_inputs with_allowed;
+    bool ok_allowed = false;
+    ok_allowed = tca_open_and_probe(TC_AFIX, &with_allowed);
+    TC_CHECK("an allowlisted (ZCL_-prefixed) env var increases n_env",
+             ok_baseline && ok_allowed &&
+                 with_allowed.n_env == baseline.n_env + 1);
+    bool has_it = false;
+    if (ok_allowed)
+        for (int i = 0; i < with_allowed.n_env; i++)
+            if (strcmp(with_allowed.env[i].text,
+                       "ZCL_TESTCACHE_ACTION_TEST_VAR=allowlisted-value") == 0)
+                has_it = true;
+    TC_CHECK("the allowlisted pair appears verbatim in env[]", has_it);
+    unsetenv("ZCL_TESTCACHE_ACTION_TEST_VAR");
+
+    tc_env_restore(&irrelevant_save, "TESTCACHE_ACTION_IRRELEVANT_VAR");
+    tc_env_restore(&allowed_save, "ZCL_TESTCACHE_ACTION_TEST_VAR");
+    return failures;
+}
+
+static int tc_action_inputs_phase(void)
+{
+    int failures = 0;
+    (void)tc_shell("rm -rf %s %s", TC_AFIX, TC_AFIX2);
+    failures += tca_dual_root();
+    failures += tca_edit_closure_file();
+    failures += tca_edit_fixture_file();
+    failures += tca_env_allowlist();
+    (void)tc_shell("rm -rf %s %s", TC_AFIX, TC_AFIX2);
+    return failures;
+}
+
 int test_testcache(void)
 {
     int failures = 0;
@@ -2742,6 +3086,7 @@ int test_testcache(void)
     failures += tc_batch_restart_crosstree();
     failures += tc_batch_perf();
     failures += tc_observation_roundtrip();
+    failures += tc_action_inputs_phase();
 
     (void)tc_shell("rm -rf %s %s %s %s %s", TC_FIX, TC_STORE,
                    TC_FIX2, TC_CAP, TC_CAP2);
