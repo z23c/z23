@@ -221,7 +221,7 @@ obligation's verdict depends on. The two diverge in both directions:
 
 - **Premise outside the depfile.** syn-negative-lookup invalidates 0 of
   8315 build actions by the depfile graph, yet the new
-  `contexts/commons/modules/vcs/src/codec/cursor.h` captures
+  `contexts/commons/modules/vcs/src/codec/cursor.h` captures <!-- doc-path-ok: created only by the syn-negative-lookup patch -->
   `#include "codec/cursor.h"` for 34 vcs sources. A dry run of
   `make t-fast-exact` recompiled none of them, so incremental make links
   stale objects unless those sources are touched.
