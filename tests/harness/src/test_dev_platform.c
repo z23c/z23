@@ -38,6 +38,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <poll.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #endif
 #if defined(__APPLE__)
@@ -2413,6 +2415,221 @@ static int test_cycle_seal_batch(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+#define DW_CHECK(expr)                                                       \
+    do {                                                                     \
+        if (!(expr)) {                                                       \
+            fprintf(stderr, "drive-wait fixture failed at %s:%d: %s\n",     \
+                    __FILE__, __LINE__, #expr);                              \
+            return false;                                                    \
+        }                                                                    \
+    } while (0)
+
+/* Holds the cycle lock exclusively, as a sealer does across journal fsyncs,
+ * until released or five seconds pass. */
+static pid_t drive_wait_lock_holder(const char *state_dir, int ready_fd,
+                                    int release_fd)
+{
+    pid_t child = fork();
+    if (child != 0)
+        return child;
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/cycle-state.lock", state_dir);
+    int fd = n > 0 && n < PATH_MAX ? open(path, O_RDWR | O_CLOEXEC) : -1;
+    if (fd < 0 || flock(fd, LOCK_EX) != 0 || write(ready_fd, "r", 1) != 1)
+        _exit(1);
+    struct pollfd release = {.fd = release_fd, .events = POLLIN};
+    (void)poll(&release, 1, 5000);
+    _exit(0);
+}
+
+/* Publishes one ring event after 200 ms, without sealing it. */
+static pid_t drive_wait_late_publisher(const char *repo)
+{
+    pid_t child = fork();
+    if (child != 0)
+        return child;
+    char why[192] = {0};
+    int64_t epoch = 0;
+    platform_sleep_ms(200);
+    _exit(zcl_devloop_cycle_stream_publish(
+              repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+              &epoch, why, sizeof(why)) ? 0 : 1);
+}
+
+static bool drive_wait_found(const char *repo, int64_t after,
+                             int64_t expect_epoch)
+{
+    char out[4096], why[192] = {0};
+    size_t len = 0;
+    int64_t epoch = 0;
+    int64_t started = platform_time_monotonic_us();
+    enum zcl_devloop_state_lookup got = zcl_devloop_cycle_state_wait_after(
+        repo, after, 10000, out, sizeof(out), &len, &epoch, why, sizeof(why));
+    int64_t elapsed_ms = (platform_time_monotonic_us() - started) / 1000;
+    if (got == ZCL_DEVLOOP_STATE_FOUND && epoch == expect_epoch &&
+        elapsed_ms < 2000)
+        return true;
+    fprintf(stderr, "drive wait after=%lld: lookup=%d epoch=%lld "
+                    "elapsed=%lld ms why=%s\n",
+            (long long)after, (int)got, (long long)epoch,
+            (long long)elapsed_ms, why);
+    return false;
+}
+
+/* While a writer holds the cycle lock: an event already sealed out of the
+ * ring and an event published later both reach the waiter at once, and an
+ * absent event is an honest timeout rather than INVALID. */
+static bool drive_wait_under_lock(const char *repo, int64_t sealed)
+{
+    char out[4096], why[192] = {0};
+    size_t len = 0;
+    int64_t epoch = 0;
+    DW_CHECK(drive_wait_found(repo, sealed - 1, sealed));
+    pid_t publisher = drive_wait_late_publisher(repo);
+    DW_CHECK(publisher > 0);
+    bool late = drive_wait_found(repo, sealed, sealed + 1);
+    int status = 0;
+    DW_CHECK(waitpid(publisher, &status, 0) == publisher &&
+             WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    DW_CHECK(late);
+    DW_CHECK(zcl_devloop_cycle_state_wait_after(
+                 repo, sealed + 1, 300, out, sizeof(out), &len, &epoch, why,
+                 sizeof(why)) == ZCL_DEVLOOP_STATE_ABSENT &&
+             epoch == sealed + 1);
+    return true;
+}
+
+static bool drive_wait_fixture(const char *repo, const char *state_dir)
+{
+    char why[192] = {0};
+    int64_t epoch = 0;
+    DW_CHECK(zcl_devloop_cycle_state_write(
+        repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1, why,
+        sizeof(why)));
+    int64_t base = seal_batch_pointer_epoch(repo);
+    DW_CHECK(base > 0 &&
+             zcl_devloop_cycle_stream_reset(repo, base, why, sizeof(why)));
+    DW_CHECK(zcl_devloop_cycle_stream_publish(
+                 repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+                 &epoch, why, sizeof(why)) &&
+             zcl_devloop_cycle_stream_flush_through(repo, epoch, why,
+                                                    sizeof(why)));
+    int ready[2] = {-1, -1}, release[2] = {-1, -1};
+    DW_CHECK(pipe(ready) == 0 && pipe(release) == 0);
+    pid_t holder = drive_wait_lock_holder(state_dir, ready[1], release[0]);
+    char byte = 0;
+    bool held = holder > 0 && read(ready[0], &byte, 1) == 1;
+    bool ok = held && drive_wait_under_lock(repo, epoch);
+    int status = 0;
+    bool released = write(release[1], "x", 1) == 1 && holder > 0 &&
+                    waitpid(holder, &status, 0) == holder &&
+                    WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    for (int i = 0; i < 2; i++) {
+        (void)close(ready[i]);
+        (void)close(release[i]);
+    }
+    return ok && released;
+}
+
+static bool run_drive_wait_fixture(void)
+{
+    char home[PATH_MAX], repo[PATH_MAX], state_dir[PATH_MAX];
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    if (getenv("HOME") && !saved_home)
+        return false;
+    test_make_tmpdir(home, sizeof(home), "dev_platform", "drive_wait_lock");
+    bool ok = snprintf(repo, sizeof(repo), "%s/repo", home) > 0 &&
+              mkdir(repo, 0700) == 0 &&
+              platform_environment_set("HOME", home, 1) == 0 &&
+              zcl_devloop_workspace_state_dir(repo, state_dir,
+                                              sizeof(state_dir)) &&
+              drive_wait_fixture(repo, state_dir);
+    if (saved_home) {
+        (void)platform_environment_set("HOME", saved_home, 1);
+        free(saved_home);
+    } else
+        (void)dp_environment_unset("HOME");
+    test_rm_rf_recursive(home);
+    return ok;
+}
+#undef DW_CHECK
+#else
+static bool run_drive_wait_fixture(void)
+{
+    return true; /* flock and inotify waits are POSIX. */
+}
+#endif /* !defined(_WIN32) */
+
+static int test_drive_wait_ignores_seal_lock(void)
+{
+    int failures = 0;
+    TEST("dev platform: drive's event wait is never delayed by a writer holding the cycle lock") {
+        ASSERT(run_drive_wait_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#if !defined(_WIN32)
+/* The selftest runs in a fresh child, so "no child outlived the watcher"
+ * cannot be confused with a resident helper an earlier case left running. */
+static bool run_watch_sealer_isolated(const char *repo)
+{
+    int report[2];
+    if (pipe(report) != 0)
+        return false;
+    pid_t child = fork();
+    if (child == 0) {
+        (void)close(report[0]);
+        const char *broken = zcl_devloop_watch_sealer_selftest(repo);
+        size_t len = broken ? strlen(broken) : 0;
+        bool sent = !broken || write(report[1], broken, len) == (ssize_t)len;
+        _exit(!broken && sent ? 0 : 1);
+    }
+    (void)close(report[1]);
+    char broken[256] = {0};
+    ssize_t n = child > 0 ? read(report[0], broken, sizeof(broken) - 1) : -1;
+    (void)close(report[0]);
+    int status = 0;
+    bool exited = child > 0 && waitpid(child, &status, 0) == child &&
+                  WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!exited)
+        fprintf(stderr, "watch sealer selftest: %s (wait status %d)\n",
+                n > 0 ? broken : "no report", status);
+    return exited && n == 0;
+}
+#endif
+
+static int test_watcher_journal_sealer(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    char home[PATH_MAX] = {0}, repo[PATH_MAX] = {0};
+    const char *current_home = getenv("HOME");
+    char *saved_home = current_home ? strdup(current_home) : NULL;
+    TEST("dev platform: the watcher's journal sealer drains on stop, falls back inline, and survives a crash") {
+        ASSERT(!current_home || saved_home);
+        test_make_tmpdir(home, sizeof(home), "dev_platform", "watch_sealer");
+        int n = snprintf(repo, sizeof(repo), "%s/repo", home);
+        ASSERT(n > 0 && (size_t)n < sizeof(repo));
+        ASSERT(mkdir(repo, 0700) == 0);
+        ASSERT(platform_environment_set("HOME", home, 1) == 0);
+        ASSERT(run_watch_sealer_isolated(repo));
+        PASS();
+    } _test_next:;
+    if (saved_home) {
+        (void)platform_environment_set("HOME", saved_home, 1);
+        free(saved_home);
+    } else {
+        (void)dp_environment_unset("HOME");
+    }
+    if (home[0])
+        test_rm_rf_recursive(home);
+#endif
+    return failures;
+}
+
 /* A4: distill_first_error picks the first actionable line (compiler
  * ": error:" or test FAIL/Assertion/EXPECT) and falls back cleanly when no
  * pattern matches. Exercised via the thin zcl_devloop_distill_first_error
@@ -4711,6 +4928,7 @@ struct dp_shard_case {
 static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_failure_store, 5),
     DP_CASE(test_cycle_seal_batch, 5),
+    DP_CASE(test_drive_wait_ignores_seal_lock, 5),
     DP_CASE(test_distill_first_error, 7),
     DP_CASE(test_hotswap_artifact_cache, 5),
     DP_CASE(test_hotfork_story_file_green_and_red, 5),
@@ -4722,6 +4940,7 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_exact_commit_preempts_edit_proof, 4),
     DP_CASE(test_foreground_cycle_yields_to_commit, 4),
     DP_CASE(test_watcher_stream_backpressure, 4),
+    DP_CASE(test_watcher_journal_sealer, 4),
     DP_CASE(test_watch_idle_exit, 4),
     DP_CASE(test_resident_process_supersession, 4),
     DP_CASE(test_native_source_cas_shadow, 5),
