@@ -144,7 +144,11 @@ image, then forks a disposable child. The child runs these steps in order:
 
 1. Close every descriptor except the image and the report pipe.
 2. Lower the rlimits.
-3. Enter Landlock deny-all and the seccomp session deny-list.
+3. Enter Landlock deny-all, the seccomp session deny-list, and the runner and
+   leaf layers. The runner installs its layer before it serves anything:
+   io_uring, which could issue socket and connect past the syscall filter,
+   plus pidfd, userfaultfd, kcmp, process_madvise, ptrace and process_vm_*.
+   The leaf adds the kill family, pidfd_send_signal, setsid and setpgid.
 4. Re-hash the image.
 5. `dlopen("/proc/self/fd/N")`.
 6. Add the W^X seccomp layer.
@@ -165,7 +169,9 @@ ONLY=reflex_runner` proves the runner with hostile fixture images:
   the constructor and in the story.
 - A regression goes red and leaves the last green root unchanged.
 - An infinite loop and a `SIGSEGV` go red, and the same runner survives both.
-- Socket and W^X attempts end in `SIGSYS`.
+- Socket and W^X attempts end in `SIGSYS`. So do io_uring,
+  `pidfd_open(getppid())`, `kill(getppid())`, and fork or execve from the
+  constructor or the story.
 - A digest mismatch fails closed.
 
 ## Dependency map and latency firewall
