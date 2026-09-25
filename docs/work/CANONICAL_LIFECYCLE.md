@@ -139,6 +139,55 @@ The registered `build_fabric` tests cover signed compile and package observation
 ineligible/forged failures, repeated successes and failure-only nonadmission.
 This does not complete cross-candidate unit reuse or Git publication convergence.
 
+Current implementation (per-unit tickets): `contexts/commons/modules/vcs/include/vcs/proof_ticket.h`
+defines the per-unit input key and TICKET wire, with the byte layouts in the
+header comment:
+
+- `zcl.component_proof_key.v1` is a 496-byte preimage of fifteen nonzero
+  32-byte roots in fixed order: kind, unit_id, source_closure,
+  dependency_closure, toolchain (the toolchain capsule root), target, flags,
+  environment (allowlisted names and values only), abi_generation,
+  build_graph, harness, fixtures, invariants, integration_edges and policy.
+  `input_key` is SHA3-256 over the domain and each length-prefixed field.
+  The preimage is itself a content.v2 blob, so a receiver can fetch it by
+  root, inspect each field and derive the key again.
+- `zcl.proof_ticket.v1` is a fixed 256-byte wire. It holds input_key,
+  key_preimage_root, verdict, a `reproduced` claim, checks run/passed,
+  evidence_root, cpu/wall/bytes cost, created_unix, the producer key and an
+  Ed25519 signature over domain `zcl.proof_ticket.v1` plus bytes [0,192).
+  `observation_root` is SHA3-256 of domain `zcl.proof_ticket_root.v1` plus
+  all 256 bytes. Decoding refuses a wrong length, an unknown schema, nonzero
+  reserved bytes and non-canonical counts.
+- The index maps each key to the set of its observation roots. It only
+  appends and never deduplicates by key. It can be rebuilt from the ticket
+  blobs in a package store.
+- `vcs_proof_reuse_decide` derives the key from the receiver's own preimage.
+  A ticket is ineligible, and kept with a named reason, when:
+  - `key_mismatch`: its key differs from the receiver's key;
+  - `key_preimage_mismatch`: its preimage root differs;
+  - `signer_in_candidate_domain`: the signer is the candidate author, the
+    same-uid local proof signer or another key in the candidate domain
+    (this check runs before the verifier set);
+  - `signer_not_trusted_for_reuse`: the signer is not in the verifier set;
+  - `not_reproduced`: the signer did not claim to rerun the checks itself;
+  - `ticket_stale` or `ticket_from_future`: it fails the freshness check;
+  - `signature_invalid`: its signature does not verify.
+
+  Outcomes:
+  - REFUSE `proof_observation_conflict`: an eligible PASS and an eligible
+    FAIL exist for the same key. The build fabric evaluator uses the same
+    token.
+  - HIT_FAIL: at least one eligible FAIL and no eligible PASS.
+  - HIT: eligible PASS tickets from at least `quorum` distinct signers.
+  - MISS: anything else.
+  - REFUSE: the receiver's preimage policy root differs from its policy.
+
+The registered `proof_ticket_reuse` group covers these rules. It changes one
+byte in each key field and checks every refusal. Its deterministic
+measurement runs 6 candidates × 3 verifier identities × 200 units and prints
+one `proof_ticket_reuse_measure` line; it must report zero false hits.
+Runners do not emit tickets yet, and no separate-uid verifier signs them.
+
 Keep existing `source_root`, `changed_set_root`, `compiler_root`, `flags_root`,
 `environment_root` and `build_graph_root` vocabulary. Wire per-unit observations
 into canonical proof facts before deriving the compatibility pair envelope from

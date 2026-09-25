@@ -724,6 +724,10 @@ static bool ptm_candidate(struct ptm_state *s)
         s->version[u]++;
         if (!ptm_attack(s, u)) return false;
     }
+    if (s->candidate == 2 && (s->version[PTM_BROKEN_UNIT] & 1u) == 0) {
+        s->version[PTM_BROKEN_UNIT]++; /* a candidate that breaks a unit */
+        if (!ptm_attack(s, PTM_BROKEN_UNIT)) return false;
+    }
     if (s->candidate == 4 && !ptm_attack(s, PTM_FLAKY_UNIT)) return false;
     if (s->candidate == 3) s->header++; /* one shared header edit */
     for (uint32_t u = 0; u < PTM_UNITS; u++)
@@ -783,6 +787,7 @@ static int ptt_case_measure(void)
         ASSERT_EQ(r.false_hits, 0u);
         ASSERT_EQ(r.domain_leaks, 0u);
         ASSERT(r.refused >= 1u);       /* the injected contradiction */
+        ASSERT(r.known_fail >= 1u);    /* the broken unit, reused as FAIL */
         ASSERT(r.hit > r.rerun);       /* reuse dominates after warm-up */
     } TEST_END
     return failures;
