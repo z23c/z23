@@ -37,9 +37,12 @@
  */
 
 #include "test/test_core.h"
+#include "base/hex.h"
 #include "controllers/agent_controller.h"
+#include "crypto/sha3.h"
 #include "json/json.h"
 #include "util/clientversion.h"
+#include "vcs/build_action.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -62,6 +65,50 @@ static bool sia_write_exec(const char *path, const char *content)
     if (fclose(f) != 0)
         return false;
     return chmod(path, 0700) == 0;
+}
+
+static bool sia_write_file(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(content, f) >= 0;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+/* Exercise the existing canonical action encoder with a real captured source
+ * identity. Other roots are fixed fixture inputs; this case proves that Git
+ * history is absent from the source slot, not that the fixture closes a real
+ * compiler's toolchain or include search path. */
+static bool sia_fixture_action_root(const char *record, uint8_t out[32])
+{
+    char source[65], complete[8], mutation[65];
+    struct vcs_build_action_v1 action = {0};
+    if (sscanf(record, "%64s %7s %64s", source, complete, mutation) != 3 ||
+        strcmp(complete, "1") != 0 ||
+        !zcl_hex_decode_lower(source, action.source_sha256, 32))
+        return false;
+    vcs_source_manifest_id((const uint8_t *)source, 64,
+                           action.source_cas_sha3);
+    sha3_256((const uint8_t *)"fixture-closure", 15,
+             action.input_root_sha3);
+    sha3_256((const uint8_t *)"fixture-toolchain", 17,
+             action.toolchain_capsule_sha3);
+    vcs_build_action_v1_fixed_flags_root(action.flags_sha3);
+    vcs_build_action_v1_fixed_environment_root(action.environment_sha3);
+    (void)snprintf(action.target, sizeof(action.target), "%s",
+                   VCS_BUILD_TARGET_V1);
+    (void)snprintf(action.profile, sizeof(action.profile), "source-fixture");
+    (void)snprintf(action.virtual_workdir,
+                   sizeof(action.virtual_workdir), "%s",
+                   VCS_BUILD_VIRTUAL_ROOT_V1);
+    (void)snprintf(action.declared_outputs,
+                   sizeof(action.declared_outputs), "%s",
+                   VCS_BUILD_OUTPUT_V1);
+    (void)snprintf(action.resource_policy,
+                   sizeof(action.resource_policy), "%s",
+                   VCS_BUILD_RESOURCE_POLICY_V1);
+    return vcs_build_action_v1_root(&action, out);
 }
 
 /* Capture one line of a command's stdout, newline stripped. */
@@ -414,6 +461,113 @@ static int sia_healthcheck_reader_refuses_ambiguity(void)
     return failures;
 }
 
+static bool sia_fixture_source_record(const char *repo, const char *script,
+                                      char out[160])
+{
+    char cmd[PATH_MAX + 768];
+    int n = snprintf(cmd, sizeof(cmd),
+                     "cd '%s' && '%s' capture-record", repo, script);
+    return n > 0 && (size_t)n < sizeof(cmd) &&
+           sia_capture(cmd, out, 160);
+}
+
+static int sia_precommit_source_action(void)
+{
+    int failures = 0;
+    char work[512] = {0}, repo_root[PATH_MAX];
+    TEST("live source action survives commit and misses semantic edits") {
+        ASSERT(getcwd(repo_root, sizeof(repo_root)) != NULL);
+        test_make_tmpdir(work, sizeof(work), "sia", "precommit-action");
+        char cmd[2048], path[PATH_MAX], script[PATH_MAX];
+        (void)snprintf(script, sizeof(script),
+                       "%s/tools/dev/source-identity.sh", repo_root);
+        (void)snprintf(cmd, sizeof(cmd),
+                       "git init -q '%s' && mkdir -p '%s/core/include' "
+                       "'%s/tests/harness/include/test'", work, work, work);
+        ASSERT(system(cmd) == 0);
+        (void)snprintf(path, sizeof(path), "%s/core/input.c", work);
+        ASSERT(sia_write_file(path,
+            "#include \"shared.h\"\n"
+            "#include \"test_core.h\"\n"
+            "#if __has_include(\"optional.h\")\n"
+            "#include \"optional.h\"\n"
+            "#else\n#define OPTIONAL 0\n#endif\n"
+            "int value(void) { return SHARED + GENERATED + OPTIONAL; }\n"));
+        (void)snprintf(path, sizeof(path), "%s/core/include/shared.h", work);
+        ASSERT(sia_write_file(path, "#define SHARED 1\n"));
+        (void)snprintf(path, sizeof(path),
+                       "%s/tests/harness/include/test/test_core.h", work);
+        ASSERT(sia_write_file(path, "#define GENERATED 2\n"));
+        (void)snprintf(path, sizeof(path), "%s/Makefile", work);
+        ASSERT(sia_write_file(path, "FLAGS=-DVALUE=0\n"));
+        (void)snprintf(cmd, sizeof(cmd), "git -C '%s' add .", work);
+        ASSERT(system(cmd) == 0);
+
+        char before[160], after[160], edited[160];
+        uint8_t action_before[32], action_after[32];
+        ASSERT(sia_fixture_source_record(work, script, before));
+        ASSERT(sia_fixture_action_root(before, action_before));
+        (void)snprintf(cmd, sizeof(cmd),
+                       "git -C '%s' -c user.name=Fixture "
+                       "-c user.email=fixture@example.invalid "
+                       "-c commit.gpgsign=false commit -qm baseline", work);
+        ASSERT(system(cmd) == 0);
+        ASSERT(sia_fixture_source_record(work, script, after));
+        ASSERT_STR_EQ(before, after);
+        ASSERT(sia_fixture_action_root(after, action_after));
+        ASSERT(memcmp(action_before, action_after, 32) == 0);
+
+        (void)snprintf(path, sizeof(path), "%s/core/include/shared.h", work);
+        ASSERT(sia_write_file(path, "#define SHARED 9\n"));
+        ASSERT(sia_fixture_source_record(work, script, edited));
+        ASSERT(strcmp(before, edited) != 0);
+        ASSERT(sia_fixture_action_root(edited, action_after));
+        ASSERT(memcmp(action_before, action_after, 32) != 0);
+        ASSERT(sia_write_file(path, "#define SHARED 1\n"));
+
+        (void)snprintf(path, sizeof(path), "%s/Makefile", work);
+        ASSERT(sia_write_file(path, "FLAGS=-DVALUE=1\n"));
+        ASSERT(sia_fixture_source_record(work, script, edited));
+        ASSERT(strcmp(before, edited) != 0);
+        ASSERT(sia_fixture_action_root(edited, action_after));
+        ASSERT(memcmp(action_before, action_after, 32) != 0);
+        ASSERT(sia_write_file(path, "FLAGS=-DVALUE=0\n"));
+
+        (void)snprintf(path, sizeof(path),
+                       "%s/tests/harness/include/test/test_core.h", work);
+        ASSERT(sia_write_file(path, "#define GENERATED 7\n"));
+        ASSERT(sia_fixture_source_record(work, script, edited));
+        ASSERT(strcmp(before, edited) != 0);
+        ASSERT(sia_fixture_action_root(edited, action_after));
+        ASSERT(memcmp(action_before, action_after, 32) != 0);
+        ASSERT(sia_write_file(path, "#define GENERATED 2\n"));
+
+        char no_header[512], with_header[512];
+        (void)snprintf(cmd, sizeof(cmd),
+                       "cc -std=c23 -E -P -I '%s/core/include' "
+                       "-I '%s/tests/harness/include/test' '%s/core/input.c'",
+                       work, work, work);
+        ASSERT(sia_capture(cmd, no_header, sizeof(no_header)));
+        (void)snprintf(path, sizeof(path), "%s/core/include/optional.h", work);
+        ASSERT(sia_write_file(path, "#define OPTIONAL 11\n"));
+        ASSERT(sia_capture(cmd, with_header, sizeof(with_header)));
+        ASSERT(strcmp(no_header, with_header) != 0);
+        ASSERT(sia_fixture_source_record(work, script, edited));
+        ASSERT(strcmp(before, edited) != 0);
+        ASSERT(sia_fixture_action_root(edited, action_after));
+        ASSERT(memcmp(action_before, action_after, 32) != 0);
+        ASSERT(unlink(path) == 0);
+        ASSERT(sia_fixture_source_record(work, script, edited));
+        ASSERT(strncmp(before, edited, 64) == 0);
+        ASSERT(strcmp(before, edited) != 0); /* ABA token still moved. */
+        ASSERT(sia_fixture_action_root(edited, action_after));
+        ASSERT(memcmp(action_before, action_after, 32) == 0);
+        PASS();
+    } _test_next:;
+    if (work[0]) test_rm_rf_recursive(work);
+    return failures;
+}
+
 int test_source_identity_authority(void)
 {
     int failures = 0;
@@ -423,6 +577,7 @@ int test_source_identity_authority(void)
     failures += sia_binary_reader_is_cwd_invariant();
     failures += sia_negative_control_positional_reader();
     failures += sia_healthcheck_reader_refuses_ambiguity();
+    failures += sia_precommit_source_action();
     printf("[test_source_identity_authority] %d failure(s)\n", failures);
     return failures;
 }
