@@ -86,9 +86,9 @@ The prediction has three cases:
   the build graph is known. Callers and integration edges are carried.
 - **Every selected group** otherwise.
 
-Every lint gate always runs. A second column prices the two per-TU gates
-that declare a premise by their fresh units (see "Where the fresh seconds
-go"); every other gate is billed at its full weight.
+Every lint gate always runs. A second column prices the six gates that
+declare a premise by their select runs and fresh units (see "Lint premise
+lever"); every other gate is billed at its full weight.
 
 The compositional rule (`zcl_shadow_reuse_admit`) needs three things: an
 unchanged contract root, a fresh PASS of the callee's contract obligations
@@ -214,11 +214,12 @@ the largest part of that is one ALL fallback.
 ### Top 15 fresh obligations
 
 Fresh seconds summed over the 20 real entries (`SHADOW-TOP` lines). The
-last column prices the two premise-declaring gates by their fresh units:
+last column prices the six premise-declaring gates by their select runs and
+fresh units (re-measured at the lane head):
 
 | rank | kind | obligation | fresh s | entries | fresh s with lint premise |
 |---|---|---|---|---|---|
-| 1 | lint_gate | `check-windows-cross-syntax` | 2550.1 | 20 | 525.9 |
+| 1 | lint_gate | `check-windows-cross-syntax` | 2550.1 | 20 | 410.6 |
 | 2 | lint_gate | `check-windows-acceptance` | 2314.0 | 20 | 2314.0 |
 | 3 | lint_gate | `check-doc-claims` | 2035.4 | 20 | 2035.4 |
 | 4 | lint_gate | `check-build-epoch-integrity` | 1615.0 | 20 | 1615.0 |
@@ -228,8 +229,8 @@ last column prices the two premise-declaring gates by their fresh units:
 | 8 | lint_gate | `check-vcs-no-sha1` | 1078.7 | 20 | 1078.7 |
 | 9 | test_group | `test_dev_platform_shard_01` | 949.5 | 9 | 949.5 |
 | 10 | test_group | `test_dev_platform_shard_04` | 945.0 | 9 | 945.0 |
-| 11 | lint_gate | `check-clang-portability` | 927.3 | 20 | 301.2 |
-| 12 | lint_gate | `check-no-api-keys` | 857.1 | 20 | 857.1 |
+| 11 | lint_gate | `check-clang-portability` | 927.3 | 20 | 266.0 |
+| 12 | lint_gate | `check-no-api-keys` | 857.1 | 20 | 289.7 |
 | 13 | test_group | `test_dev_platform` | 750.5 | 9 | 750.5 |
 | 14 | lint_gate | `check-zcode-package-registry` | 721.2 | 20 | 721.2 |
 | 15 | lint_gate | `check-capability-inventory-generated` | 710.5 | 20 | 710.5 |
@@ -240,37 +241,209 @@ directly.
 
 ### Lint premise lever
 
-The existing base-relative lint premise selection (`z23-lint select --dry`
-and `z23-lint unit-exec`, lane premise-select at `18b30d14c2`, not yet on
-main) declares premises for exactly two per-TU gates:
-`check-windows-cross-syntax` and `check-clang-portability`. A unit may keep
-the base's PASS iff its premise bytes are unchanged. The premise covers gate
-code, the toolchain pin, the Makefile variable text, the path set, the
-textual include closure and the unit's own baseline rows. That tool was run
-once per corpus entry and gate against a verified base (real: `<commit>^`;
-synthetic: the patched `7a9f354f3f` against itself). The rows are frozen in
-`tools/dev/fixtures/shadow_select/lint_premise.tsv`.
+Base-relative lint premise selection (`z23-lint select --dry` and
+`z23-lint unit-exec`, on main since `d77adf0fc7`) lets a unit keep the
+base's PASS iff its premise bytes are unchanged. The premise covers gate
+code, the toolchain pin, the Makefile text the gate reads, the path set,
+the unit's closure and the unit's own baseline rows. Six gates now declare
+a premise in `tools/lint/lintc/selection_gates.def`:
+
+- two per-TU gates from the first slice, `check-windows-cross-syntax` and
+  `check-clang-portability`;
+- four added by lane lint-premise-decl: `check-no-api-keys`,
+  `check-fortify-masked-decls` and `check-raw-sqlite` per file (the unit
+  premise is the file's own bytes), and `check-windows-platform-seam` per
+  seam TU (the unit premise is the include closure).
+
+That lane also widened what counts as gate code, for all six gates:
+
+- every gate's premise now carries the lint driver (`tools/lint/run_lint.sh`
+  and `tools/lint/lint_cache.sh`) and its own Makefile rule and recipe
+  (`"gate:"` in make_vars). The first two declarations omitted both;
+- a `dir/` entry names every path under it;
+- every word of the gate's Makefile text that names a tree path is gate
+  code. A gate run by `z23-lint` names `LINTC_SRCS`, so every source the
+  binary is built from is in its premise;
+- the include closure of every `.c`/`.h` gate file is gate code. A
+  computed include there means no unit inherits (`gate-computed-include`).
+
+The tool was run once per corpus entry and gate against a verified base
+(real: `<commit>^`; synthetic: the patched `7a9f354f3f` against itself).
+The z23-lint binary was built at `1b2d7bc5eb`. After the rebase onto main
+that commit is `0868432a3e`, and the two trees differ only in
+`docs/CAPABILITY_INVENTORY.jsonl`. The rows are
+frozen in `tools/dev/fixtures/shadow_select/lint_premise.tsv`. The two
+older gates' unit and fresh counts are unchanged on all 28 entries.
 
 Each premise gate is priced as the measured select run plus
 max(gate weight / units, 1 s) per fresh unit. The unit part is capped at the
 whole gate once selection has run. A cold cross-syntax run spent 209 ms CPU
 per unit, so 1 s per unit is about five times the mean. The select run is
-always paid: 8.5–37.2 s wall, mostly the `make` unit listing and the private
-fetch. Every other gate stays at full weight.
+always paid: 8.1–32.1 s wall per gate, mostly the `make` unit listing and
+the private fetch.
 
-| set | fresh s per candidate: rule | rule + lint premise | reuse: rule | rule + lint premise |
-|---|---|---|---|---|
-| real (20) | 2082.3 | 1949.8 | 67.5% | **69.5%** |
-| synthetic (8) | 5804.7 | 5696.7 | 9.3% | 11.0% |
+Re-measured at the lane head. The reference is 6391.9 s per candidate there
+and the rule 2081.7 s (67.4%). With the two first-slice gates only, the rule
+would be 1949.2 s, 69.5%, as before:
 
-The two gates cost 173.9 s per candidate at full weight and 41.4 s with
-the premise rows, almost all of it select runs. The premise tool's own
-fail-closed paths show up on the adversarial entries. syn-negative-lookup
-creates a header, which changes the path set, so all 4677 units are fresh
-and the entry costs 25 s more than without selection. syn-header-decl and
-syn-abi make 60 units fresh, and syn-macro 20.
-syn-flag makes 0 fresh: the dropped `-DZCL_DEV_BUILD` is not in either
-gate's Makefile variables. Both gates declare that as outside their premise.
+| set | fresh s per candidate: rule | rule + lint premise (6 gates) | reuse: rule | two gates | six gates | six gates, one select run |
+|---|---|---|---|---|---|---|
+| real (20) | 2081.7 | 1913.6 | 67.4% | 69.5% | **70.1%** | 70.9% |
+| synthetic (8) | 5795.5 | 5666.2 | 9.3% | 11.0% | 11.4% | 12.2% |
+
+The six gates cost 247.9 s per candidate at full weight. Priced per gate,
+they cost 79.8 s: 68.3 s of select runs and 11.5 s of fresh units. Two of
+the four new gates cost more to select than they weigh:
+`check-fortify-masked-decls` is 11.6 s against 9.2 s, and `check-raw-sqlite`
+is 10.6 s against 9.0 s. Their only benefit is as part of a combined run.
+One `select --dry` run over all six gates pays the walk, fetch and hashing
+once. It took 12.1–18.0 s wall per entry, 13.6 s per candidate on the real
+set. That puts the six gates at 25.2 s per candidate, or 70.9%. The shadow
+test prices the per-gate runs; the combined figure is computed from the same
+rows plus the combined run times.
+
+Per gate on the real set, full weight and then with the premise (select +
+fresh units, s per candidate):
+
+| gate | full | with premise | fresh units / units (20 entries) |
+|---|---|---|---|
+| `check-windows-cross-syntax` | 127.5 | 20.5 | 46 / 46778 |
+| `check-clang-portability` | 46.4 | 13.3 | 49 / 46741 |
+| `check-no-api-keys` | 42.9 | 14.5 | 8464 / 167884 |
+| `check-windows-platform-seam` | 12.9 | 9.3 | 0 / 820 |
+| `check-fortify-masked-decls` | 9.2 | 11.6 | 35 / 85704 |
+| `check-raw-sqlite` | 9.0 | 10.6 | 22 / 93799 |
+
+`check-no-api-keys` goes fully fresh on real-20 (8428 units,
+`gate-code:tools/lint/lintc/gate_hotfork_stories.c`). A `z23-lint` gate's
+premise holds every source of the binary. So any edit to any lint gate
+written in C reruns it whole. That is sound but coarse. Linking the gate
+from its own sources would narrow it.
+
+The premise tool's own fail-closed paths show up on the adversarial entries.
+syn-negative-lookup creates a header, which changes the path set, so all
+22152 units are fresh and the entry costs 64 s more than without selection.
+syn-header-decl makes 65 units fresh, syn-abi 62 and syn-macro 22. syn-flag
+now makes 42 fresh. The dropped `-DZCL_DEV_BUILD` is a Makefile edit, and
+`check-windows-platform-seam` reads the whole Makefile as gate code, so all
+41 of its units rerun. The per-TU gates still declare that define as outside
+their premise.
+
+#### Which gates can declare a premise
+
+A gate is eligible only if its verdict is the conjunction of per-unit
+verdicts. Each unit's verdict may read only that unit's premise plus inputs
+that are the same for every unit: gate code, the toolchain, Makefile text,
+the path set, or a whole baseline carried as gate code. A count floor over
+the path set is eligible, since the path set is in every premise. These are
+not eligible:
+
+- a count, sum or registry over file contents;
+- a graph closure;
+- an "every X has a Y" rule;
+- a gate that builds or runs tree binaries.
+
+Every lint gate at 9 s or more per candidate is listed, heaviest first:
+
+| gate | s/candidate | decision | reason |
+|---|---|---|---|
+| `check-windows-cross-syntax` | 127.5 | declared, per TU (first slice) | one mingw `-fsyntax-only` compile per TU; closure plus own baseline rows |
+| `check-windows-acceptance` | 115.7 | ineligible | reconcile is "every program on disk has a catalog row or registered group", and it compiles the whole catalog through `make` |
+| `check-doc-claims` | 101.8 | ineligible | a claim resolves against the whole tree (`git grep`), and gate-passes and gate-fails claims run other gates |
+| `check-build-epoch-integrity` | 80.8 | ineligible | the depfile self-test includes the real Makefile (51 `$(shell)`, 48 `$(wildcard)`, `-include`s) and runs `make -n`; the epoch self-test uses `build/bin/zcc` and `/proc/loadavg` |
+| `check-capability-closure` | 70.9 | ineligible | `nm` closure over build objects, a symbol registry and a coverage floor |
+| `check-vcs-no-sha1` | 53.9 | ineligible | the batch self-test captures the whole real tree and runs a built helper |
+| `check-clang-portability` | 46.4 | declared, per TU (first slice) | one clang compile per oracle TU; closure plus own baseline rows |
+| `check-no-api-keys` | 42.9 | **declared, per file** | a regex scan of each tracked file's own lines; the skip list is gate code; the 1,000-file floor counts the path set |
+| `check-zcode-package-registry` | 36.1 | ineligible | exact-once source ownership across the registry |
+| `check-capability-inventory-generated` | 35.5 | ineligible | a whole-tree derivation compared with a generated file |
+| `check-outparam-init-before-return` | 31.4 | ineligible | the in-scope type set is every `<T>_free` anywhere in the tree (`tools/lint/check_outparam_init_before_return.sh` line 720), with a floor over it |
+| `check-no-wallclock-assertion` | 22.9 | ineligible | an allowlist-sum ratchet ceiling and a floor over matched content |
+| `check-live-datadir-isolation` | 21.8 | ineligible | baseline sum ceilings |
+| `check-doc-inline-paths` | 21.0 | ineligible | token-count floors over all docs (`fcount` ≥ 200, `dcount` ≥ 100, `tools/lint/check_doc_inline_paths.sh` lines 143–145) |
+| `check-ship-remote-transaction` | 20.8 | not declared | a single whole-gate unit is plausible, but it runs tree-built binaries and its self-test reads the whole Makefile; unproven without a confined run |
+| `check-command-input-keys` | 20.0 | ineligible | callee closure plus cross-leaf consistency |
+| `check-retrieval-historical-evidence` | 19.8 | not declared | runs the tree-built `retrieval-eval` and `jsonq`; as for ship |
+| `check-package-anatomy` | 19.3 | not declared | needs per-directory units, which the unit kinds cannot express yet |
+| `check-no-live-lab-history` | 13.8 | ineligible | duplicate basenames across the tree, and reads of the git index |
+| `check-windows-platform-seam` | 12.9 | **declared, per TU** | one mingw compile per seam file against its own baseline row; the gate reads the Makefile text directly, so the whole Makefile and the baseline are gate code |
+| `check-no-adx-overclaim` | 12.6 | ineligible | a content-selected file set with a count floor, and `make print-includes` |
+| `check-standalone-tools-link` | 12.0 | ineligible | links every Makefile tool |
+| `check-read-leaf-no-boot-ceremony` | 11.1 | ineligible | call-graph closure |
+| `check-host-gc-selftest` | 10.9 | ineligible | reads host `df` free space and runs the real `worktree_gc.sh` |
+| `check-z23-release-install` | 10.7 | not declared | runs the tree-built bootstrap binary; as for ship |
+| `check-cookbook` | 10.0 | ineligible | RUN rows execute `z23-dev` |
+| `check-fortify-masked-decls` | 9.2 | **declared, per file** | each `.c` is comment-stripped and grepped for calls into the masked set; the set is measured from the toolchain alone |
+| `check-raw-sqlite` | 9.0 | **declared, per file** | each finding is judged inside one file; the allowlist is read with comment and space stripping, so all of it is gate code; the only gating count is over the path set |
+
+The 185 gates under 9 s (160.9 s per candidate together) were not
+reviewed.
+
+Two residuals sit outside every premise. The selector prunes `.claude`
+and `vendor/raylib`, but both hold tracked files. `check-no-api-keys` scans
+the two `.claude/skills` files, and `check-fortify-masked-decls` greps the
+six `vendor/raylib` `.c` files. A unit-selected run must always scan those
+fresh. The `.def` comments say so.
+
+#### Soundness evidence
+
+The z23-lint binary was built at `1b2d7bc5eb`, sha256 `1517b9cc…16ad`. For
+each of the four new gates, the verdicts were compared three ways: the full
+gate on the candidate, the full gate on the base, and the unit-selected gate.
+The unit-selected gate keeps the base verdict for inherited units and runs
+the fresh units.
+
+- `check-no-api-keys` runs exactly the fresh units, plus the `.claude`
+  residual, through its `ZCL_API_KEY_SCAN_FILES` entry.
+- The other three have no file-list entry. A fresh unit's verdict is read
+  from the candidate run's per-file report. A fully fresh unit set is the
+  candidate run itself.
+
+These are the checks the lane asked for:
+
+- **(a) Agreement on the frozen corpus.** On all 28 entries × 4 gates the
+  full gate, the base gate and the unit-selected gate were all PASS (112 of
+  112). Two harness failures, not verdict disagreements, were rerun. On
+  real-20 and syn-negative-lookup every `check-no-api-keys` unit was fresh,
+  and the first harness passed all 8428 and 8435 paths in one environment
+  variable (`Argument list too long`). With a fully fresh set taken as the
+  full run, both agree. Their select rows reproduced exactly.
+- **(b) Seeded violation in an unchanged file** (real-01, candidate
+  `c472356ff2`). Each seed made its file fresh with
+  `closure-changed:<file>`, next to the commit's own unit. The full gate
+  and the unit-selected gate both FAILED on the seeded site:
+
+  | gate | seeded file | fresh / units | full | selected |
+  |---|---|---|---|---|
+  | `check-no-api-keys` | `README.md` (a runtime-assembled `ghp_` token) | 2 / 8383 | FAIL | FAIL |
+  | `check-windows-platform-seam` | `platform/modules/platform/src/clock.c` (a `fork()` call) | 1 / 41 | FAIL | FAIL |
+  | `check-fortify-masked-decls` | `engine/services/src/address_index_service.c` (an unguarded `realpath` call) | 2 / 4289 | FAIL | FAIL |
+  | `check-raw-sqlite` | `engine/services/src/replay_verify_service.c` (a `sqlite3_step` call) | 2 / 4695 | FAIL | FAIL |
+
+- **(c) An edit to gate code, a baseline or the driver only** (real-01).
+  Every unit went fresh with `gate-code:<file>` in all 11 cases:
+  - `check-no-api-keys` (8383/8383): `tools/lint/check_no_api_keys.sh`,
+    `tools/lint/lintc/lib.c`, `platform/modules/base/include/base/hex.h`
+    (reached through the lintc include closure) and `tools/lint/run_lint.sh`;
+  - `check-windows-platform-seam` (41/41):
+    `tools/lint/windows_platform_seam_baseline.txt`, `Makefile` and
+    `tools/lint/check_windows_platform_seam.sh`;
+  - `check-fortify-masked-decls` (4289/4289): `tools/lint/strip_c_comments.awk`
+    and `tools/lint/check_fortify_masked_decls.sh`;
+  - `check-raw-sqlite` (4695/4695): `tools/scripts/raw_sqlite_allowlist.txt`
+    and `tools/lint/gate_lib.sh`.
+
+  Real-20 is a live case of the same kind: a new lintc source made every
+  `check-no-api-keys` unit fresh.
+
+The unit tests in `tests/harness/src/test_lint_selection.c` pin the
+mechanism:
+
+- a per-file unit goes fresh on its own bytes only;
+- gate code, a `dir/` entry, a `.c` gate file's closure and the gate's
+  recipe each make every unit fresh;
+- an edit to another Makefile rule makes nothing fresh;
+- a computed include in gate code inherits nothing.
 
 ### Private-implementation edits: is the rule over-expanding?
 
@@ -300,39 +473,40 @@ No, with one exception that needs machinery that does not exist yet.
 
 ### Per entry
 
-Obligations are 213 lint gates plus 1194 groups. Seconds are per candidate.
-The class columns split the rule's fresh seconds.
+Obligations are 213 lint gates plus 1194 groups. Seconds are per candidate,
+at the lane-head reference of 6391.9 s. The class columns split the rule's
+fresh seconds; the premise columns price the six declared gates.
 
 | entry | fresh / total obligations | fresh / total s: rule | fresh / total s: rule + lint premise | reuse: rule | reuse: + lint premise | premise units fresh | lint | floor | direct | caller | integration | fallback |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| real-01 | 239/1407 | 1954/6402 | 1812/6402 | 69.5% | 71.7% | 1/4677 | 1162 | 328 | 465 | 0 | 0 | 0 |
-| real-02 | 242/1407 | 2054/6402 | 1908/6402 | 67.9% | 70.2% | 1/4676 | 1162 | 328 | 564 | 0 | 0 | 0 |
-| real-03 | 256/1407 | 2127/6402 | 1982/6402 | 66.8% | 69.0% | 2/4676 | 1162 | 328 | 570 | 22 | 45 | 0 |
-| real-04 | 234/1407 | 1519/6402 | 1374/6402 | 76.3% | 78.5% | 0/4676 | 1162 | 328 | 30 | 0 | 0 | 0 |
-| real-05 | 231/1407 | 1633/6402 | 1491/6402 | 74.5% | 76.7% | 2/4676 | 1162 | 328 | 144 | 0 | 0 | 0 |
-| real-06 | 232/1407 | 1634/6402 | 1490/6402 | 74.5% | 76.7% | 2/4676 | 1162 | 328 | 145 | 0 | 0 | 0 |
-| real-07 | 232/1407 | 1644/6402 | 1512/6402 | 74.3% | 76.4% | 2/4676 | 1162 | 328 | 155 | 0 | 0 | 0 |
-| real-08 | 241/1407 | 1980/6402 | 1841/6402 | 69.1% | 71.2% | 2/4677 | 1162 | 328 | 491 | 0 | 0 | 0 |
-| real-09 | 234/1407 | 1692/6402 | 1552/6402 | 73.6% | 75.8% | 0/4676 | 1162 | 328 | 203 | 0 | 0 | 0 |
-| real-10 | 230/1407 | 1522/6402 | 1380/6402 | 76.2% | 78.5% | 2/4676 | 1162 | 328 | 33 | 0 | 0 | 0 |
-| real-11 | 230/1407 | 1522/6402 | 1384/6402 | 76.2% | 78.4% | 4/4676 | 1162 | 328 | 33 | 0 | 0 | 0 |
-| real-12 | 300/1407 | 2823/6402 | 2686/6402 | 55.9% | 58.0% | 2/4676 | 1162 | 328 | 216 | 462 | 655 | 0 |
-| real-13 | 235/1407 | 1709/6402 | 1584/6402 | 73.3% | 75.3% | 2/4676 | 1162 | 328 | 220 | 0 | 0 | 0 |
-| real-14 | 260/1407 | 2430/6402 | 2311/6402 | 62.0% | 63.9% | 2/4676 | 1162 | 328 | 608 | 0 | 333 | 0 |
-| real-15 | 235/1407 | 1709/6402 | 1607/6402 | 73.3% | 74.9% | 20/4676 | 1162 | 328 | 220 | 0 | 0 | 0 |
-| real-16 | 239/1407 | 1954/6402 | 1824/6402 | 69.5% | 71.5% | 1/4676 | 1162 | 328 | 465 | 0 | 0 | 0 |
-| real-17 | 226/1407 | 1489/6402 | 1363/6402 | 76.7% | 78.7% | 0/4676 | 1162 | 328 | 0 | 0 | 0 | 0 |
-| real-18 | 1407/1407 | 6402/6402 | 6268/6402 | 0.0% | 2.1% | 2/4676 | 1162 | 0 | 0 | 0 | 0 | 5241 |
-| real-19 | 302/1407 | 2358/6402 | 2269/6402 | 63.2% | 64.6% | 48/4672 | 1162 | 328 | 30 | 156 | 682 | 0 |
-| real-20 | 226/1407 | 1489/6402 | 1357/6402 | 76.7% | 78.8% | 0/4677 | 1162 | 328 | 0 | 0 | 0 | 0 |
-| syn-header-decl | 1407/1407 | 6402/6402 | 6315/6402 | 0.0% | 1.4% | 60/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
-| syn-abi | 1407/1407 | 6402/6402 | 6318/6402 | 0.0% | 1.3% | 60/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
-| syn-flag | 1407/1407 | 6402/6402 | 6255/6402 | 0.0% | 2.3% | 0/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
-| syn-contract | 1407/1407 | 6402/6402 | 6257/6402 | 0.0% | 2.3% | 2/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
-| syn-private-impl | 230/1407 | 1621/6402 | 1473/6402 | 74.7% | 77.0% | 2/4677 | 1162 | 328 | 131 | 0 | 0 | 0 |
-| syn-generated-input | 1407/1407 | 6402/6402 | 6255/6402 | 0.0% | 2.3% | 2/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
-| syn-negative-lookup | 1407/1407 | 6402/6402 | 6428/6402 | 0.0% | -0.4% | 4677/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
-| syn-macro | 1407/1407 | 6402/6402 | 6273/6402 | 0.0% | 2.0% | 20/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+| real-01 | 239/1407 | 1954/6392 | 1790/6392 | 69.4% | 72.0% | 4/22085 | 1162 | 328 | 465 | 0 | 0 | 0 |
+| real-02 | 242/1407 | 2054/6392 | 1877/6392 | 67.9% | 70.6% | 4/22059 | 1162 | 328 | 564 | 0 | 0 | 0 |
+| real-03 | 256/1407 | 2127/6392 | 1951/6392 | 66.7% | 69.5% | 7/22054 | 1162 | 328 | 570 | 22 | 45 | 0 |
+| real-04 | 234/1407 | 1519/6392 | 1350/6392 | 76.2% | 78.9% | 2/22054 | 1162 | 328 | 30 | 0 | 0 | 0 |
+| real-05 | 231/1407 | 1633/6392 | 1458/6392 | 74.4% | 77.2% | 7/22091 | 1162 | 328 | 144 | 0 | 0 | 0 |
+| real-06 | 232/1407 | 1634/6392 | 1466/6392 | 74.4% | 77.1% | 7/22091 | 1162 | 328 | 145 | 0 | 0 | 0 |
+| real-07 | 232/1407 | 1644/6392 | 1470/6392 | 74.3% | 77.0% | 7/22091 | 1162 | 328 | 155 | 0 | 0 | 0 |
+| real-08 | 241/1407 | 1980/6392 | 1813/6392 | 69.0% | 71.6% | 7/22144 | 1162 | 328 | 491 | 0 | 0 | 0 |
+| real-09 | 234/1407 | 1692/6392 | 1510/6392 | 73.5% | 76.4% | 5/22094 | 1162 | 328 | 203 | 0 | 0 | 0 |
+| real-10 | 230/1407 | 1522/6392 | 1344/6392 | 76.2% | 79.0% | 7/22086 | 1162 | 328 | 33 | 0 | 0 | 0 |
+| real-11 | 230/1407 | 1522/6392 | 1368/6392 | 76.2% | 78.6% | 12/22086 | 1162 | 328 | 33 | 0 | 0 | 0 |
+| real-12 | 300/1407 | 2823/6392 | 2645/6392 | 55.8% | 58.6% | 7/22086 | 1162 | 328 | 216 | 462 | 655 | 0 |
+| real-13 | 235/1407 | 1709/6392 | 1532/6392 | 73.3% | 76.0% | 7/22083 | 1162 | 328 | 220 | 0 | 0 | 0 |
+| real-14 | 260/1407 | 2430/6392 | 2255/6392 | 62.0% | 64.7% | 7/22083 | 1162 | 328 | 608 | 0 | 333 | 0 |
+| real-15 | 235/1407 | 1709/6392 | 1552/6392 | 73.3% | 75.7% | 27/22082 | 1162 | 328 | 220 | 0 | 0 | 0 |
+| real-16 | 239/1407 | 1954/6392 | 1776/6392 | 69.4% | 72.2% | 4/22082 | 1162 | 328 | 465 | 0 | 0 | 0 |
+| real-17 | 226/1407 | 1489/6392 | 1314/6392 | 76.7% | 79.4% | 3/22082 | 1162 | 328 | 0 | 0 | 0 | 0 |
+| real-18 | 1407/1407 | 6392/6392 | 6228/6392 | 0.0% | 2.6% | 7/22082 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| real-19 | 302/1407 | 2358/6392 | 2226/6392 | 63.1% | 65.2% | 55/22067 | 1162 | 328 | 30 | 156 | 682 | 0 |
+| real-20 | 226/1407 | 1489/6392 | 1347/6392 | 76.7% | 78.9% | 8430/22144 | 1162 | 328 | 0 | 0 | 0 | 0 |
+| syn-header-decl | 1407/1407 | 6392/6392 | 6272/6392 | 0.0% | 1.9% | 65/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-abi | 1407/1407 | 6392/6392 | 6269/6392 | 0.0% | 1.9% | 62/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-flag | 1407/1407 | 6392/6392 | 6220/6392 | 0.0% | 2.7% | 42/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-contract | 1407/1407 | 6392/6392 | 6220/6392 | 0.0% | 2.7% | 7/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-private-impl | 230/1407 | 1621/6392 | 1445/6392 | 74.6% | 77.4% | 5/22150 | 1162 | 328 | 131 | 0 | 0 | 0 |
+| syn-generated-input | 1407/1407 | 6392/6392 | 6217/6392 | 0.0% | 2.7% | 5/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-negative-lookup | 1407/1407 | 6392/6392 | 6456/6392 | 0.0% | -1.0% | 22152/22152 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-macro | 1407/1407 | 6392/6392 | 6230/6392 | 0.0% | 2.5% | 22/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
 
 Adversarial RED against the reference observations: **0** for the live
 rule (`live_rule=0`). The frozen record keeps its one historical RED
@@ -343,22 +517,27 @@ pins that, and pins that syn-negative-lookup inherits no lint unit.
 
 ### What still blocks more than 90%
 
-90% reuse means at most 640.2 fresh s per candidate. With the lint premise
-rows the rule is at 1949.8 s:
+Re-measured at the lane-head reference of 6391.9 s per candidate. 90% reuse
+means at most 639.2 fresh s per candidate. The rule with six lint premise
+gates is at 1913.6 s, or 1859.0 s with one combined select run:
 
 | remaining fresh s per candidate | s | share of reference | what it would take |
 |---|---|---|---|
-| Lint gates with no premise declaration (all but the two above) | 987.7 | 15.4% | premise declarations. The ten heaviest are `check-windows-acceptance` 115.7, `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9, `check-no-api-keys` 42.9, `check-zcode-package-registry` 36.1, `check-capability-inventory-generated` 35.5, `check-outparam-init-before-return` 31.4 and `check-no-wallclock-assertion` 22.9 (591.9 s together) |
+| Lint gates of 9 s or more, ineligible (18 gates, table above) | 682.2 | 10.7% | restructuring, not a declaration: split each gate's per-file checks from its whole-tree part (catalog reconcile, claim resolution, closures, ratchet sums, floors over content), so that only the whole-tree part must rerun. The five heaviest are `check-windows-acceptance` 115.7, `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9 and `check-vcs-no-sha1` 53.9 |
+| Lint gates under 9 s, not reviewed (185 gates) | 160.9 | 2.5% | a review like the one above; a declared gate still pays about 10 s of select, so most would gain only inside a combined run |
+| Lint gates of 9 s or more, not declared (ship, retrieval, package-anatomy, release-install) | 70.6 | 1.1% | a confined whole-gate run (ship, retrieval, release-install) or a per-directory unit kind (package-anatomy) |
 | floor, `make_lint_gates` family | 311.3 | 4.9% | a premise for the lint-gate test umbrella. `realroot` and `heavy_02` alone are 151.5 s |
-| fallback, real-18 (`unmapped-code-change`) | 262.0 | 4.1% | an impact rule for `engine/services/src/replay_verify_service.c` (selector owner) |
+| fallback, real-18 (`unmapped-code-change`) | 261.5 | 4.1% | an impact rule for `engine/services/src/replay_verify_service.c` (selector owner) |
 | direct test groups | 229.5 | 3.6% | none that is sound (see above) |
 | callers and integration on additive contracts | 117.9 | 1.8% | a base-test re-run (1.2%); real-19's header growth stays |
-| the two premise gates | 41.4 | 0.6% | a cheaper select run |
+| the six premise gates | 79.8 | 1.2% | one combined select run (25.2 s) |
 
-The lint gates alone keep the rule under 84% even if every test group were
-carried. Reaching 90% needs premise declarations covering roughly 660 s per
-candidate of today's undeclared gate weight, and the floor must be carried
-too.
+The ineligible heavy gates alone (682.2 s) exceed the whole 90% budget
+(639.2 s). With every test group carried and every plausible gate declared,
+lint would still leave about 868 s per candidate, 86.4%. Past 90% the heavy
+whole-tree gates have to be split so that their per-file part can be
+selected, and the floor has to be carried too. More premise declarations
+alone cannot get there.
 
 ## Obligations predicted fresh
 
@@ -536,9 +715,19 @@ a 360-byte ticket SHA3 and one Ed25519 verification.
   the named candidate groups, not the whole catalog, so a RED outside that
   bound would go unseen.
 - **The lint premise rows are frozen tool output.** They come from a
-  `z23-lint` built from lane premise-select (`18b30d14c2`), which is not on
-  main. The test cannot recompute them. Once the premise code lands, the
-  shadow evaluation should call it in process and not read a fixture.
+  `z23-lint` built at lane lint-premise-decl (`1b2d7bc5eb`). The first
+  premise slices are on main; the four new declarations are not. The test
+  cannot recompute the rows. The shadow evaluation should call the premise
+  code in process and not read a fixture.
+- **Three of the four new gates have no file-list entry.** Their
+  unit-selected verdicts in the soundness check are read from the full
+  run's per-file report. A real unit-selected run for them needs a
+  file-list entry like the `ZCL_API_KEY_SCAN_FILES` one that
+  `check-no-api-keys` has.
+- **The toolchain pin is still absent.** `check-fortify-masked-decls`
+  measures its masked set from the toolchain, and the per-TU gates compile
+  with it. Until `tools/dev/toolchain.pin` exists, a toolchain change with
+  no tree change is invisible to every premise.
 - **Base-test re-run for additive contract tests** (1.2% of reference on
   the real set) needs a runner that builds the base bytes of a contract test
   against the candidate implementation.

@@ -3,7 +3,8 @@
 # One row per corpus entry and per gate that declares a premise in
 # tools/lint/lintc/selection_gates.def.
 # Tool: z23-lint built from 1b2d7bc5eb7c1404a9b31872030a0ddb4b496642 (lane lint-premise-decl),
-#   binary sha256 1517b9cc0ae0118d166d7cf410a06c0af5729135619cc782ec1353d02abc16ad.
+#   binary sha256 1517b9cc0ae0118d166d7cf410a06c0af5729135619cc782ec1353d02abc16ad;
+#   rebased onto main as 0868432a3e, whose tree differs only in docs/CAPABILITY_INVENTORY.jsonl.
 # One run per entry and gate, measured 2026-09-25:
 #   z23-lint select --dry --base=<base> --root=<candidate> \
 #     --objects=<repo> --scratch=<dir> --depth=1024 --gate=<gate>
