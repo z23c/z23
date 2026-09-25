@@ -103,6 +103,40 @@ static const char *boot_zcode_work_action_kind(uint8_t work_kind, const uint8_t 
         return VCS_BUILD_ACTION_KIND_FUZZ_V1;
     return NULL;
 }
+struct boot_zcode_work_preflight {
+    const char *action_kind;
+    uint8_t action[32], input[32], task[32], candidate[32], policy[32];
+};
+static bool boot_zcode_work_preflight_current(
+    const struct vcs_zcode_work_context_v1 *context,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now,
+    struct boot_zcode_work_preflight *bound)
+{
+    memset(bound, 0, sizeof(*bound));
+    bound->action_kind = boot_zcode_work_action_kind(
+        request->work_kind, context->fixed_input, context->fixed_input_len);
+    if (!bound->action_kind ||
+        vcs_zcode_work_context_action_root_for_kind(
+            context, bound->action_kind, now, bound->action,
+            bound->input) != VCS_ZCODE_WORK_CONTEXT_OK)
+        return false;
+    return vcs_zcode_task_root(&context->task, bound->task) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_root(&context->candidate, bound->candidate) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_policy_root(&context->proof_policy, bound->policy) ==
+            VCS_ZCODE_DEV_OK &&
+        memcmp(bound->action, request->action_root, 32) == 0 &&
+        memcmp(bound->input, request->input_root, 32) == 0 &&
+        memcmp(bound->task, request->task_root, 32) == 0 &&
+        memcmp(bound->candidate, request->candidate_root, 32) == 0 &&
+        memcmp(bound->policy, request->proof_policy_root, 32) == 0 &&
+        memcmp(context->task.toolchain_capsule_root,
+               request->toolchain_capsule_root, 32) == 0 &&
+        request->max_cpu_seconds <= context->task.max_cpu_seconds &&
+        request->max_memory_bytes <= context->task.max_memory_bytes &&
+        request->max_output_bytes <= context->task.max_output_bytes;
+}
 static struct zcl_result boot_zcode_work_replay_current(
     struct node_db *ndb, struct vcs_package_store *store,
     const struct db_build_job *job, const struct db_build_action *action,
@@ -169,42 +203,20 @@ static struct zcl_result boot_zcode_work_admit(
     if (loaded != VCS_ZCODE_WORK_CONTEXT_OK)
         return ZCL_ERR(-1, "context: %s",
                        vcs_zcode_work_context_result_string(loaded));
-    const char *action_kind = boot_zcode_work_action_kind(
-        request->work_kind, context.fixed_input, context.fixed_input_len);
-    uint8_t preflight_action[32], preflight_input[32];
-    uint8_t task_root[32], candidate_root[32], policy_root[32];
-    loaded = action_kind
-        ? vcs_zcode_work_context_action_root_for_kind(
-              &context, action_kind, now, preflight_action, preflight_input)
-        : VCS_ZCODE_WORK_CONTEXT_ACTION;
-    bool bound = loaded == VCS_ZCODE_WORK_CONTEXT_OK &&
-        vcs_zcode_task_root(&context.task, task_root) == VCS_ZCODE_DEV_OK &&
-        vcs_zcode_candidate_root(&context.candidate, candidate_root) ==
-            VCS_ZCODE_DEV_OK &&
-        vcs_zcode_proof_policy_root(&context.proof_policy, policy_root) ==
-            VCS_ZCODE_DEV_OK &&
-        memcmp(preflight_action, request->action_root, 32) == 0 &&
-        memcmp(preflight_input, request->input_root, 32) == 0 &&
-        memcmp(task_root, request->task_root, 32) == 0 &&
-        memcmp(candidate_root, request->candidate_root, 32) == 0 &&
-        memcmp(policy_root, request->proof_policy_root, 32) == 0 &&
-        memcmp(context.task.toolchain_capsule_root,
-               request->toolchain_capsule_root, 32) == 0 &&
-        action_kind != NULL &&
-        request->max_cpu_seconds <= context.task.max_cpu_seconds &&
-        request->max_memory_bytes <= context.task.max_memory_bytes &&
-        request->max_output_bytes <= context.task.max_output_bytes;
-    if (!bound) {
+    struct boot_zcode_work_preflight preflight;
+    if (!boot_zcode_work_preflight_current(
+            &context, request, now, &preflight)) {
         vcs_zcode_work_context_free(&context);
         return ZCL_ERR(-1, "context does not reconstruct the signed request");
     }
     struct vcs_zcode_work_context_roots restored;
     loaded = vcs_zcode_work_context_restore_for_kind(
-        store, request->context_root, s_work_workspace, action_kind, now,
+        store, request->context_root, s_work_workspace,
+        preflight.action_kind, now,
         &restored);
     bool restored_exact = loaded == VCS_ZCODE_WORK_CONTEXT_OK &&
-        memcmp(restored.action_root, preflight_action, 32) == 0 &&
-        memcmp(restored.input_root, preflight_input, 32) == 0 &&
+        memcmp(restored.action_root, preflight.action, 32) == 0 &&
+        memcmp(restored.input_root, preflight.input, 32) == 0 &&
         memcmp(restored.source_manifest_id, context.source_sha256, 32) == 0 &&
         memcmp(restored.source_root,
                context.candidate.candidate_source_root, 32) == 0;
@@ -224,23 +236,23 @@ static struct zcl_result boot_zcode_work_admit(
     job.created_at = job.updated_at = now;
     action.sequence = 0;
     (void)snprintf(action.kind, sizeof(action.kind), "%s",
-                   action_kind);
+                   preflight.action_kind);
     (void)snprintf(action.state, sizeof(action.state), "SNAPSHOTTED");
     zcl_hex_encode(restored.input_root, 32, action.input_root_sha3);
-    zcl_hex_encode(task_root, 32, action.task_root_sha3);
-    zcl_hex_encode(candidate_root, 32, action.candidate_root_sha3);
-    zcl_hex_encode(policy_root, 32, action.proof_policy_root_sha3);
+    zcl_hex_encode(preflight.task, 32, action.task_root_sha3);
+    zcl_hex_encode(preflight.candidate, 32, action.candidate_root_sha3);
+    zcl_hex_encode(preflight.policy, 32, action.proof_policy_root_sha3);
     zcl_hex_encode(request->context_root, 32, action.context_root_sha3);
     (void)snprintf(action.target, sizeof(action.target), "%s",
                    VCS_BUILD_TARGET_V1);
     uint8_t fixed_flags[32], fixed_environment[32];
     const char *workdir = NULL, *output = NULL, *resource = NULL;
     if (!vcs_build_action_v1_descriptors(
-            action_kind, &workdir, &output, &resource) ||
+            preflight.action_kind, &workdir, &output, &resource) ||
         !vcs_build_action_v1_fixed_flags_root_for_kind(
-            action_kind, fixed_flags) ||
+            preflight.action_kind, fixed_flags) ||
         !vcs_build_action_v1_fixed_environment_root_for_kind(
-            action_kind, fixed_environment)) {
+            preflight.action_kind, fixed_environment)) {
         vcs_zcode_work_context_free(&context);
         return ZCL_ERR(-1, "fixed action descriptor disappeared");
     }
@@ -282,6 +294,22 @@ static struct zcl_result boot_zcode_work_attached_admit(
     if (!request || !ndb || !ndb->open || !store ||
         !boot_zcode_work_workspace())
         return ZCL_ERR(-1, "attached work owners unavailable");
+    /* A ready physical slot proves prior admission, not current authority
+     * for this new subscriber. Recheck the signed context at this request's
+     * admission time, including task expiry and its exact action closure. */
+    struct vcs_zcode_work_context_v1 context;
+    enum vcs_zcode_work_context_result loaded =
+        vcs_zcode_work_context_get(store, request->context_root, now,
+                                   &context);
+    if (loaded != VCS_ZCODE_WORK_CONTEXT_OK)
+        return ZCL_ERR(-1, "attached context: %s",
+                       vcs_zcode_work_context_result_string(loaded));
+    struct boot_zcode_work_preflight preflight;
+    bool bound = boot_zcode_work_preflight_current(
+        &context, request, now, &preflight);
+    vcs_zcode_work_context_free(&context);
+    if (!bound)
+        return ZCL_ERR(-1, "attached context does not bind the request");
     char action_id[65];
     zcl_hex_encode(request->action_root, 32, action_id);
     struct db_build_action action;

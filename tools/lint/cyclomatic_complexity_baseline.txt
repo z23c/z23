@@ -1552,7 +1552,7 @@ engine/composition/src/boot_zcode_dht_record_rpc.c:record_result_json:24
 engine/composition/src/boot_zcode_dht_replication_rpc.c:rpc_begin:17
 engine/composition/src/boot_zcode_dht_rpc.c:rpc_publish_impl:46
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_swarm_frame:32
-engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_admit:37
+engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_admit:23
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_publish_results:20
 engine/composition/src/boot_zcode_swarm_dht.c:boot_zcode_swarm_discovery_tick:27
 engine/composition/src/boot_zcode_swarm_receipt.c:boot_zcode_swarm_receipt_frame:16
