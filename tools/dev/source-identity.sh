@@ -486,28 +486,32 @@ for path in vendor/lib/*.a \
     [ -f "$path" ] && printf '%s\0' "$path" >> "$WORK/tracked-source"
 done
 
-# `-Ivendor/include` is global. Several OpenSSL/zlib headers are generated and
-# ignored, but they are compiler inputs just as surely as the linked archives.
-# Recursively inventory their exact current bytes; never allow a socket/FIFO or
-# another unsupported type to hide beneath the include root.
-if [ -e vendor/include ] || [ -L vendor/include ]; then
-    [ -d vendor/include ] && [ ! -L vendor/include ] ||
-        fail "vendor include root is not a real directory"
-    find vendor/include -mindepth 1 ! -type d ! -type f \
-        -print -quit > "$WORK/vendor-include-unsupported" 2>/dev/null ||
-        fail "vendor include input discovery failed"
-    [ ! -s "$WORK/vendor-include-unsupported" ] ||
-        fail "unsupported compiler input beneath vendor/include"
-    find vendor/include -mindepth 1 -type f -print0 \
-        >> "$WORK/tracked-source" 2>/dev/null ||
-        fail "vendor include inventory failed"
-    if [ "$MODE" = verify-mutation ]; then
-        printf 'vendor/include\0' >> "$WORK/source-dirs"
-        find vendor/include -mindepth 1 -type d -print0 \
-            >> "$WORK/source-dirs" 2>/dev/null ||
-            fail "vendor include directory inventory failed"
+# These directories are explicit -I inputs outside BUILD_INPUT_ROOTS.
+# Generated OpenSSL/zlib headers and ignored X11/raylib/RGFW/cross headers can change a
+# compile or an __has_include decision even though Git does not list them.
+# Inventory their exact bytes and every absence/presence change. Do not apply
+# the project's /_ lint-fixture exception here: these vendor files can be
+# named by a compiler include regardless of their basename.
+for include_root in vendor/include vendor/x11/include vendor/raylib/src vendor/rgfw vendor/cross/*/include; do
+    if [ -e "$include_root" ] || [ -L "$include_root" ]; then
+        [ -d "$include_root" ] && [ ! -L "$include_root" ] ||
+            fail "include root is not a real directory: $include_root"
+        find "$include_root" -mindepth 1 ! -type d ! -type f \
+            -print -quit > "$WORK/vendor-include-unsupported" 2>/dev/null ||
+            fail "include input discovery failed: $include_root"
+        [ ! -s "$WORK/vendor-include-unsupported" ] ||
+            fail "unsupported compiler input beneath $include_root"
+        find "$include_root" -mindepth 1 -type f -print0 \
+            >> "$WORK/tracked-source" 2>/dev/null ||
+            fail "include inventory failed: $include_root"
+        if [ "$MODE" = verify-mutation ]; then
+            printf '%s\0' "$include_root" >> "$WORK/source-dirs"
+            find "$include_root" -mindepth 1 -type d -print0 \
+                >> "$WORK/source-dirs" 2>/dev/null ||
+                fail "include directory inventory failed: $include_root"
+        fi
     fi
-fi
+done
 # The nonignored-untracked selector reaches the same ephemeral lint fixtures
 # the recursive walk above prunes: the trust-order gate greps `--untracked`,
 # so its fixture must stay visible to Git while staying out of the build

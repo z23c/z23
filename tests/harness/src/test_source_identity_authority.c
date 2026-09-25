@@ -483,7 +483,8 @@ static int sia_precommit_source_action(void)
                        "%s/tools/dev/source-identity.sh", repo_root);
         (void)snprintf(cmd, sizeof(cmd),
                        "git init -q '%s' && mkdir -p '%s/core/include' "
-                       "'%s/tests/harness/include/test'", work, work, work);
+                       "'%s/tests/harness/include/test' "
+                       "'%s/vendor/x11/include'", work, work, work, work);
         ASSERT(system(cmd) == 0);
         (void)snprintf(path, sizeof(path), "%s/core/input.c", work);
         ASSERT(sia_write_file(path,
@@ -492,7 +493,11 @@ static int sia_precommit_source_action(void)
             "#if __has_include(\"optional.h\")\n"
             "#include \"optional.h\"\n"
             "#else\n#define OPTIONAL 0\n#endif\n"
-            "int value(void) { return SHARED + GENERATED + OPTIONAL; }\n"));
+            "#if __has_include(<x11_optional.h>)\n"
+            "#include <x11_optional.h>\n"
+            "#else\n#define X11_OPTIONAL 0\n#endif\n"
+            "int value(void) { return SHARED + GENERATED + OPTIONAL "
+            "+ X11_OPTIONAL; }\n"));
         (void)snprintf(path, sizeof(path), "%s/core/include/shared.h", work);
         ASSERT(sia_write_file(path, "#define SHARED 1\n"));
         (void)snprintf(path, sizeof(path),
@@ -500,6 +505,8 @@ static int sia_precommit_source_action(void)
         ASSERT(sia_write_file(path, "#define GENERATED 2\n"));
         (void)snprintf(path, sizeof(path), "%s/Makefile", work);
         ASSERT(sia_write_file(path, "FLAGS=-DVALUE=0\n"));
+        (void)snprintf(path, sizeof(path), "%s/.gitignore", work);
+        ASSERT(sia_write_file(path, "vendor/x11/include/*\n"));
         (void)snprintf(cmd, sizeof(cmd), "git -C '%s' add .", work);
         ASSERT(system(cmd) == 0);
 
@@ -545,8 +552,9 @@ static int sia_precommit_source_action(void)
         char no_header[512], with_header[512];
         (void)snprintf(cmd, sizeof(cmd),
                        "cc -std=c23 -E -P -I '%s/core/include' "
-                       "-I '%s/tests/harness/include/test' '%s/core/input.c'",
-                       work, work, work);
+                       "-I '%s/tests/harness/include/test' "
+                       "-I '%s/vendor/x11/include' '%s/core/input.c'",
+                       work, work, work, work);
         ASSERT(sia_capture(cmd, no_header, sizeof(no_header)));
         (void)snprintf(path, sizeof(path), "%s/core/include/optional.h", work);
         ASSERT(sia_write_file(path, "#define OPTIONAL 11\n"));
@@ -562,6 +570,22 @@ static int sia_precommit_source_action(void)
         ASSERT(strcmp(before, edited) != 0); /* ABA token still moved. */
         ASSERT(sia_fixture_action_root(edited, action_after));
         ASSERT(memcmp(action_before, action_after, 32) == 0);
+
+        /* An ignored header under a real -I root is still compiler input.
+         * Creation flips __has_include, so excluding it from the source
+         * inventory would silently reuse the old precommit action. */
+        (void)snprintf(path, sizeof(path),
+                       "%s/vendor/x11/include/x11_optional.h", work);
+        ASSERT(sia_write_file(path, "#define X11_OPTIONAL 13\n"));
+        ASSERT(sia_capture(cmd, with_header, sizeof(with_header)));
+        ASSERT(strcmp(no_header, with_header) != 0);
+        ASSERT(sia_fixture_source_record(work, script, edited));
+        ASSERT(strncmp(before, edited, 64) != 0);
+        ASSERT(sia_fixture_action_root(edited, action_after));
+        ASSERT(memcmp(action_before, action_after, 32) != 0);
+        ASSERT(unlink(path) == 0);
+        ASSERT(sia_fixture_source_record(work, script, edited));
+        ASSERT(strncmp(before, edited, 64) == 0);
         PASS();
     } _test_next:;
     if (work[0]) test_rm_rf_recursive(work);
