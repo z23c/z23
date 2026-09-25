@@ -283,3 +283,62 @@ uint64_t zcl_shadow_validation_ns_per_obligation(void)
     if (ok != ROUNDS || elapsed <= 0) return 0;
     return (uint64_t)elapsed / ROUNDS;
 }
+
+/* ── sensitivity and eligibility ──────────────────────────────────────── */
+
+enum zcl_shadow_sensitivity
+zcl_shadow_obligation_sensitivity(enum zcl_shadow_obligation kind)
+{
+    return kind == ZCL_SHADOW_OBLIGATION_TEST_GROUP
+               ? ZCL_SHADOW_SENSITIVITY_IMAGE
+               : ZCL_SHADOW_SENSITIVITY_SOURCE;
+}
+
+const char *zcl_shadow_sensitivity_name(enum zcl_shadow_sensitivity s)
+{
+    return s == ZCL_SHADOW_SENSITIVITY_IMAGE ? "image" : "source";
+}
+
+static const char *const shadow_eligibility_names[] = {
+    "eligible",
+    "source_sensitive_changed_source",
+    "compositional_rule_refused",
+    "execution_inputs_incomplete",
+    "execution_inputs_differ",
+    "no_prior_verdict",
+    "same_uid_local_verdict",
+    "verdict_not_independent",
+};
+
+const char *zcl_shadow_eligibility_name(enum zcl_shadow_eligibility e)
+{
+    if ((unsigned)e >= ZCL_SHADOW_ELIGIBILITY__COUNT) return "unknown";
+    return shadow_eligibility_names[e];
+}
+
+enum zcl_shadow_eligibility
+zcl_shadow_reuse_eligible(const struct zcl_shadow_eligibility_claim *claim)
+{
+    if (!claim || claim->sensitivity != ZCL_SHADOW_SENSITIVITY_IMAGE)
+        return ZCL_SHADOW_INELIGIBLE_SOURCE_SENSITIVE;
+    if (claim->source_changed) return ZCL_SHADOW_INELIGIBLE_SOURCE_SENSITIVE;
+    if (claim->rule != ZCL_SHADOW_REUSE_ADMIT)
+        return ZCL_SHADOW_INELIGIBLE_RULE;
+    if (claim->missing_key_fields != 0)
+        return ZCL_SHADOW_INELIGIBLE_INPUTS_INCOMPLETE;
+    if (!claim->inputs_match) return ZCL_SHADOW_INELIGIBLE_INPUTS_DIFFER;
+    switch (claim->source) {
+    case ZCL_SHADOW_SOURCE_SIGNED_INDEPENDENT: return ZCL_SHADOW_ELIGIBLE;
+    case ZCL_SHADOW_SOURCE_LOCAL_SAME_UID:
+        return ZCL_SHADOW_INELIGIBLE_SAME_UID;
+    case ZCL_SHADOW_SOURCE_LOCAL_OTHER_UID:
+        return ZCL_SHADOW_INELIGIBLE_NOT_INDEPENDENT;
+    case ZCL_SHADOW_SOURCE_NONE: break;
+    }
+    return ZCL_SHADOW_INELIGIBLE_NO_VERDICT;
+}
+
+static_assert(sizeof(shadow_eligibility_names) /
+                      sizeof(shadow_eligibility_names[0]) ==
+                  ZCL_SHADOW_ELIGIBILITY__COUNT,
+              "one name per eligibility verdict");

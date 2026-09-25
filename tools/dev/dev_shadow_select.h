@@ -241,6 +241,59 @@ const char *zcl_shadow_reuse_name(enum zcl_shadow_reuse decision);
 enum zcl_shadow_reuse
 zcl_shadow_reuse_admit(const struct zcl_shadow_reuse_claim *claim);
 
+/* ── Obligation sensitivity and reuse eligibility ─────────────────────────
+ *
+ * SOURCE-sensitive obligations (lint, review, syntax) read changed source
+ * directly: a changed source ALWAYS reruns them, whatever the built image
+ * did. IMAGE-sensitive obligations (tests) read built artifacts: an unchanged
+ * output artifact may stop propagation to them, never to a source gate. */
+enum zcl_shadow_sensitivity {
+    ZCL_SHADOW_SENSITIVITY_SOURCE = 0,
+    ZCL_SHADOW_SENSITIVITY_IMAGE,
+};
+
+/* Where a prior verdict came from. Only a signed verdict produced by an
+ * independent executor is receivable: a verdict this uid wrote is writable
+ * by the candidate it would admit (the fail-closed same-uid decision). */
+enum zcl_shadow_verdict_source {
+    ZCL_SHADOW_SOURCE_NONE = 0,
+    ZCL_SHADOW_SOURCE_LOCAL_SAME_UID,
+    ZCL_SHADOW_SOURCE_LOCAL_OTHER_UID,
+    ZCL_SHADOW_SOURCE_SIGNED_INDEPENDENT,
+};
+
+struct zcl_shadow_eligibility_claim {
+    enum zcl_shadow_sensitivity sensitivity;
+    bool source_changed;         /* a source the obligation reads changed */
+    enum zcl_shadow_reuse rule;  /* compositional rule; ADMIT if unaffected */
+    uint32_t missing_key_fields; /* execution inputs the lookup key omits */
+    bool inputs_match;           /* every bound execution input is equal */
+    enum zcl_shadow_verdict_source source;
+};
+
+enum zcl_shadow_eligibility {
+    ZCL_SHADOW_ELIGIBLE = 0,
+    ZCL_SHADOW_INELIGIBLE_SOURCE_SENSITIVE,
+    ZCL_SHADOW_INELIGIBLE_RULE,
+    ZCL_SHADOW_INELIGIBLE_INPUTS_INCOMPLETE,
+    ZCL_SHADOW_INELIGIBLE_INPUTS_DIFFER,
+    ZCL_SHADOW_INELIGIBLE_NO_VERDICT,
+    ZCL_SHADOW_INELIGIBLE_SAME_UID,
+    ZCL_SHADOW_INELIGIBLE_NOT_INDEPENDENT,
+    ZCL_SHADOW_ELIGIBILITY__COUNT
+};
+
+enum zcl_shadow_sensitivity
+zcl_shadow_obligation_sensitivity(enum zcl_shadow_obligation kind);
+const char *zcl_shadow_sensitivity_name(enum zcl_shadow_sensitivity s);
+const char *zcl_shadow_eligibility_name(enum zcl_shadow_eligibility e);
+/* A prior verdict may stand in for a fresh run only when every condition
+ * holds; the first failing one is the answer. The order is fixed: a changed
+ * source outranks the rule, the rule outranks the key, the key outranks the
+ * verdict's provenance. */
+enum zcl_shadow_eligibility
+zcl_shadow_reuse_eligible(const struct zcl_shadow_eligibility_claim *claim);
+
 /* ── Proof dependency graph ───────────────────────────────────────────────
  *
  * Kept apart from the build graph (which TUs recompile). A selected group
@@ -328,6 +381,23 @@ struct zcl_shadow_result {
     enum zcl_shadow_predict_mode predict_mode;
     uint32_t predicted_groups;
     char predicted_names[ZCL_SHADOW_NAMES_MAX];
+    /* Longest single obligation in a set: the floor of its wall time with
+     * unlimited workers. */
+    uint32_t critical_rule_ms;
+    uint32_t critical_reference_ms;
+    /* Reuse the prediction relies on: reference groups not predicted fresh,
+     * each judged by zcl_shadow_reuse_eligible() against the verdicts this
+     * host can offer. eligible_cost_ms is the fresh bill when only eligible
+     * reuse is taken. */
+    uint32_t carried_groups;
+    uint32_t eligible_groups;
+    uint32_t carried_by_reason[ZCL_SHADOW_ELIGIBILITY__COUNT];
+    uint64_t eligible_cost_ms;
+    /* Why the rule could not carry callers ("" when it did). */
+    char rule_block[48];
+    /* The predicted-fresh groups by layer, for the hand-off; "..." marks a
+     * list that did not fit (predicted_names is complete). */
+    char fresh_layer_names[ZCL_SHADOW_LAYER__COUNT][16384];
 };
 
 /* Premise fields, named after zcl.component_proof_key.v1. */
@@ -393,6 +463,10 @@ bool zcl_shadow_render_totals(FILE *out, const struct zcl_shadow_result *rows,
                               size_t count);
 /* One `SHADOW-GRAPH` line: the proof dependency graph, per layer. */
 bool zcl_shadow_render_graph(FILE *out, const struct zcl_shadow_result *r);
+/* The hand-off: `SHADOW-FRESH` lines naming every obligation predicted
+ * fresh with its reason, and one `SHADOW-CARRIED` line giving the
+ * eligibility reasons of everything the prediction did not rerun. */
+bool zcl_shadow_render_fresh(FILE *out, const struct zcl_shadow_result *r);
 
 /* ── Prediction before proof, then comparison ─────────────────────────────
  *

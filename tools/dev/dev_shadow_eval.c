@@ -443,6 +443,90 @@ static void shadow_names_of(const struct shadow_marks *m, const bool *bits,
     }
 }
 
+static uint32_t shadow_lint_max(const struct shadow_pricing *p)
+{
+    uint32_t max = 0;
+    for (size_t i = 0; i < p->w->count; i++)
+        if (p->w->rows[i].kind == ZCL_SHADOW_OBLIGATION_LINT_GATE &&
+            p->w->rows[i].mean_ms > max)
+            max = p->w->rows[i].mean_ms;
+    return max;
+}
+
+static void shadow_rule_block(bool all, struct zcl_shadow_result *out)
+{
+    const char *why = "";
+    if (all)
+        why = "fallback";
+    else if (out->patch.contract_change == ZCL_SHADOW_CONTRACT_MOVED)
+        why = "contract_moved";
+    else if (out->patch.contract_change == ZCL_SHADOW_CONTRACT_ADDITIVE)
+        why = "contract_additive";
+    else if (out->private_readers > 0)
+        why = "private_reader";
+    else if (!out->build_known)
+        why = "build_graph_unknown";
+    (void)snprintf(out->rule_block, sizeof(out->rule_block), "%s", why);
+}
+
+/* A carried obligation's standing today: it reads no changed source and the
+ * rule (or the absence of any dependency) admits it, but the only verdicts
+ * this host holds were written by its own uid, under a key that folds the
+ * whole source tree into one root. */
+static enum zcl_shadow_eligibility
+shadow_carried_eligibility(const struct zcl_shadow_result *out)
+{
+    struct zcl_shadow_eligibility_claim claim = {
+        .sensitivity = ZCL_SHADOW_SENSITIVITY_IMAGE,
+        .source_changed = false,
+        .rule = ZCL_SHADOW_REUSE_ADMIT,
+        .missing_key_fields = out->key_gap_fields,
+        .inputs_match = out->key_gap_fields == 0,
+        .source = ZCL_SHADOW_SOURCE_LOCAL_SAME_UID,
+    };
+    return zcl_shadow_reuse_eligible(&claim);
+}
+
+static void shadow_carry(const struct shadow_pricing *p, size_t i,
+                         enum zcl_shadow_eligibility why,
+                         struct zcl_shadow_result *out)
+{
+    uint32_t ignored = 0;
+    out->carried_groups++;
+    out->carried_by_reason[why]++;
+    if (why != ZCL_SHADOW_ELIGIBLE) return;
+    out->eligible_groups++;
+    out->eligible_cost_ms -=
+        shadow_group_ms(p, zcl_test_group_catalog_at(i), &ignored);
+}
+
+static void shadow_keep(const struct shadow_pricing *p,
+                        const struct shadow_marks *m, size_t i,
+                        struct zcl_shadow_result *out)
+{
+    uint32_t ignored = 0;
+    uint64_t ms = shadow_group_ms(p, zcl_test_group_catalog_at(i), &ignored);
+    out->predicted_groups++;
+    out->rule_cost_ms += ms;
+    if (ms > out->critical_rule_ms) out->critical_rule_ms = (uint32_t)ms;
+    if (m->selected[i]) out->graph.predicted[shadow_layer_of(m, i)]++;
+}
+
+static void shadow_layer_names(struct shadow_marks *m,
+                               struct zcl_shadow_result *out)
+{
+    bool *bits = zcl_calloc(m->n, sizeof(bool), "shadow_layer_bits");
+    if (!bits) return;
+    for (unsigned layer = 0; layer < ZCL_SHADOW_LAYER__COUNT; layer++) {
+        for (size_t i = 0; i < m->n; i++)
+            bits[i] = m->predicted[i] && m->selected[i] &&
+                      shadow_layer_of(m, i) == (enum zcl_shadow_layer)layer;
+        shadow_names_of(m, bits, out->fresh_layer_names[layer],
+                        sizeof(out->fresh_layer_names[layer]));
+    }
+    free(bits);
+}
+
 /* The reuse-enabled selector's prediction, fixed before any proof runs:
  *  - a fallback reason, or a selector that could not enumerate, runs the
  *    reference (ALL);
@@ -450,7 +534,9 @@ static void shadow_names_of(const struct shadow_marks *m, const bool *bits,
  *    no private reader, build graph known), only the contract layer runs
  *    fresh and callers and integration edges are carried;
  *  - otherwise every selected group runs.
- * Lint gates always run. rule_cost_ms is this prediction's bill. */
+ * Lint gates are source-sensitive and always run. rule_cost_ms is this
+ * prediction's bill; eligible_cost_ms is the bill when only reuse that is
+ * receivable today is taken. */
 static void shadow_predict(const struct shadow_pricing *p,
                            struct shadow_marks *m, bool rule_ok,
                            struct zcl_shadow_result *out)
@@ -458,25 +544,35 @@ static void shadow_predict(const struct shadow_pricing *p,
     bool all = out->fallback != ZCL_SHADOW_FALLBACK_NONE ||
                out->selector_universal;
     uint32_t ignored = 0;
+    enum zcl_shadow_eligibility carried = shadow_carried_eligibility(out);
     out->predict_mode = all ? ZCL_SHADOW_PREDICT_ALL : ZCL_SHADOW_PREDICT_EXACT;
     out->rule_cost_ms = out->lint_cost_ms;
+    out->eligible_cost_ms = out->reference_cost_ms;
+    out->critical_rule_ms = out->critical_reference_ms = shadow_lint_max(p);
+    shadow_rule_block(all, out);
     for (size_t i = 0; i < m->n; i++) {
+        uint64_t ms = m->reference[i] ? shadow_group_ms(
+                          p, zcl_test_group_catalog_at(i), &ignored) : 0;
+        if (ms > out->critical_reference_ms)
+            out->critical_reference_ms = (uint32_t)ms;
         bool keep = all ? m->reference[i]
                         : m->selected[i] && (!rule_ok || m->floor[i]);
         if (!all && m->selected[i] && !keep) out->rule_reusable++;
-        if (!keep) continue;
-        m->predicted[i] = true;
-        out->predicted_groups++;
-        out->rule_cost_ms +=
-            shadow_group_ms(p, zcl_test_group_catalog_at(i), &ignored);
-        if (m->selected[i]) out->graph.predicted[shadow_layer_of(m, i)]++;
+        if (keep) {
+            m->predicted[i] = true;
+            shadow_keep(p, m, i, out);
+        } else if (m->reference[i]) {
+            shadow_carry(p, i, carried, out);
+        }
     }
     if (!out->selector_universal)
         shadow_names_of(m, m->selected, out->selected_names,
                         sizeof(out->selected_names));
-    if (!all)
+    if (!all) {
         shadow_names_of(m, m->predicted, out->predicted_names,
                         sizeof(out->predicted_names));
+        shadow_layer_names(m, out);
+    }
 }
 
 /* ── evaluation ───────────────────────────────────────────────────────── */

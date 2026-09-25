@@ -398,6 +398,8 @@ static int ss_test_corpus_refusals(void)
     return failures;
 }
 
+/* eligible_groups == 0 is the fail-closed guard: the only prior verdicts a
+ * host offers are its own uid's, and those never stand in for a run. */
 static bool ss_row_consistent(const struct zcl_shadow_result *r)
 {
     const struct zcl_shadow_proof_graph *g = &r->graph;
@@ -416,6 +418,10 @@ static bool ss_row_consistent(const struct zcl_shadow_result *r)
            layered == r->groups_selected &&
            g->collision_groups <= r->groups_selected &&
            r->lint_cost_ms <= r->rule_cost_ms &&
+           r->eligible_groups == 0 &&
+           r->eligible_cost_ms == r->reference_cost_ms &&
+           r->carried_groups + r->predicted_groups >= r->groups_reference &&
+           r->critical_rule_ms <= r->critical_reference_ms &&
            r->build_invalidated <= r->build_total &&
            r->edges_selected <= r->groups_selected &&
            r->premise_groups <= r->groups_reference &&
@@ -679,6 +685,61 @@ static int ss_test_compare_refusals(void)
     return failures;
 }
 
+static int ss_test_eligibility(void)
+{
+    int failures = 0;
+    TEST("shadow select: reuse needs image sensitivity, the rule, a full key and an independent verdict") {
+        struct zcl_shadow_eligibility_claim c = {
+            .sensitivity = ZCL_SHADOW_SENSITIVITY_IMAGE,
+            .source_changed = false,
+            .rule = ZCL_SHADOW_REUSE_ADMIT,
+            .missing_key_fields = 0,
+            .inputs_match = true,
+            .source = ZCL_SHADOW_SOURCE_SIGNED_INDEPENDENT,
+        };
+        ASSERT(zcl_shadow_reuse_eligible(&c) == ZCL_SHADOW_ELIGIBLE);
+        struct zcl_shadow_eligibility_claim x = c;
+        x.sensitivity = ZCL_SHADOW_SENSITIVITY_SOURCE;
+        ASSERT(zcl_shadow_reuse_eligible(&x) ==
+               ZCL_SHADOW_INELIGIBLE_SOURCE_SENSITIVE);
+        x = c;
+        x.source_changed = true;
+        ASSERT(zcl_shadow_reuse_eligible(&x) ==
+               ZCL_SHADOW_INELIGIBLE_SOURCE_SENSITIVE);
+        x = c;
+        x.rule = ZCL_SHADOW_REUSE_REFUSE_CONTRACT_STALE_IMPL;
+        ASSERT(zcl_shadow_reuse_eligible(&x) == ZCL_SHADOW_INELIGIBLE_RULE);
+        x = c;
+        x.missing_key_fields = 1u << ZCL_SHADOW_FIELD_UNIT_ID;
+        ASSERT(zcl_shadow_reuse_eligible(&x) ==
+               ZCL_SHADOW_INELIGIBLE_INPUTS_INCOMPLETE);
+        x = c;
+        x.inputs_match = false;
+        ASSERT(zcl_shadow_reuse_eligible(&x) ==
+               ZCL_SHADOW_INELIGIBLE_INPUTS_DIFFER);
+        x = c;
+        x.source = ZCL_SHADOW_SOURCE_LOCAL_SAME_UID;
+        ASSERT(zcl_shadow_reuse_eligible(&x) ==
+               ZCL_SHADOW_INELIGIBLE_SAME_UID);
+        x.source = ZCL_SHADOW_SOURCE_LOCAL_OTHER_UID;
+        ASSERT(zcl_shadow_reuse_eligible(&x) ==
+               ZCL_SHADOW_INELIGIBLE_NOT_INDEPENDENT);
+        x.source = ZCL_SHADOW_SOURCE_NONE;
+        ASSERT(zcl_shadow_reuse_eligible(&x) ==
+               ZCL_SHADOW_INELIGIBLE_NO_VERDICT);
+        ASSERT(zcl_shadow_reuse_eligible(NULL) != ZCL_SHADOW_ELIGIBLE);
+        /* A lint gate is source-sensitive whatever else holds. */
+        ASSERT(zcl_shadow_obligation_sensitivity(
+                   ZCL_SHADOW_OBLIGATION_LINT_GATE) ==
+               ZCL_SHADOW_SENSITIVITY_SOURCE);
+        ASSERT(zcl_shadow_obligation_sensitivity(
+                   ZCL_SHADOW_OBLIGATION_TEST_GROUP) ==
+               ZCL_SHADOW_SENSITIVITY_IMAGE);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_shadow_select(void)
 {
     int failures = 0;
@@ -692,6 +753,7 @@ int test_dev_shadow_select(void)
     failures += ss_test_corpus_refusals();
     failures += ss_test_compare();
     failures += ss_test_compare_refusals();
+    failures += ss_test_eligibility();
     failures += ss_test_live_report();
     return failures;
 }
