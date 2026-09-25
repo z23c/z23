@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for dev_shadow_eval.c. */
+ZCL_MODULE_CAPABILITY("tools/dev/dev_shadow_eval.c", CAP_FS_READ|CAP_FS_WRITE, "reads frozen synthetic patch fixtures and formats evaluation refusals; runs the selector read-only")

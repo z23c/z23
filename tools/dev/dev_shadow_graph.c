@@ -157,36 +157,52 @@ static bool shadow_hops_resolve(struct codeindex *ci,
     return ok;
 }
 
-bool zcl_shadow_explained_selections(const char *root,
-                                     const struct zcl_shadow_entry *e,
-                                     const struct zcl_devloop_plan *plan,
-                                     bool *explained, uint32_t *hops_out,
-                                     uint32_t *collisions_out)
+static bool shadow_hops_answer(const char *root,
+                               const struct zcl_shadow_entry *e,
+                               struct shadow_hop *hops, size_t count)
 {
-    if (!root || !e || !plan || !explained) return false;
-    *hops_out = *collisions_out = 0;
-    for (size_t i = 0; i < plan->selections_len; i++) explained[i] = true;
-    struct shadow_hop *hops =
-        zcl_calloc(ZCL_DEVLOOP_MAX_PLAN_SELECTIONS, sizeof(*hops), "shadow_hop");
-    if (!hops) return false;
-    size_t count = shadow_hops_collect(plan, hops);
-    struct codeindex *ci = count ? codeindex_open_existing(root) : NULL;
-    bool ok = count == 0 ||
-              (ci && codeindex_include_edge_count(ci) > 0 &&
-               shadow_hops_resolve(ci, e, hops, count));
-    if (ci) codeindex_close(ci);
-    if (!ok) {
-        free(hops);
-        return count > 0; /* no include graph: nothing is claimed as waste */
-    }
-    *hops_out = (uint32_t)count;
+    struct codeindex *ci = codeindex_open_existing(root);
+    if (!ci) return false;
+    bool ok = codeindex_include_edge_count(ci) > 0 &&
+              shadow_hops_resolve(ci, e, hops, count);
+    codeindex_close(ci);
+    return ok;
+}
+
+static void shadow_hops_apply(const struct zcl_devloop_plan *plan,
+                              const struct shadow_hop *hops, size_t count,
+                              bool *explained, uint32_t *collisions_out)
+{
     for (size_t i = 0; i < plan->selections_len; i++) {
         const struct zcl_devloop_selection *s = &plan->selections[i];
         if (s->dim != ZCL_DEVLOOP_DIM_SEMANTIC) continue;
         for (size_t j = 0; j < count; j++)
             if (strcmp(hops[j].via, s->via) == 0) explained[i] = hops[j].legit;
     }
-    for (size_t j = 0; j < count; j++) *collisions_out += hops[j].legit ? 0u : 1u;
+    for (size_t j = 0; j < count; j++)
+        *collisions_out += hops[j].legit ? 0u : 1u;
+}
+
+bool zcl_shadow_explained_selections(const char *root,
+                                     const struct zcl_shadow_entry *e,
+                                     const struct zcl_devloop_plan *plan,
+                                     bool *explained, uint32_t *hops_out,
+                                     uint32_t *collisions_out)
+{
+    if (!root || !e || !plan || !explained || !hops_out || !collisions_out)
+        return false;
+    *hops_out = *collisions_out = 0;
+    for (size_t i = 0; i < plan->selections_len; i++) explained[i] = true;
+    struct shadow_hop *hops = zcl_calloc(ZCL_DEVLOOP_MAX_PLAN_SELECTIONS,
+                                         sizeof(*hops), "shadow_hop");
+    if (!hops) return false;
+    size_t count = shadow_hops_collect(plan, hops);
+    /* No include graph, or a query that failed: every selection stays
+     * explained, because unknown is never reported as waste. */
+    if (count > 0 && shadow_hops_answer(root, e, hops, count)) {
+        *hops_out = (uint32_t)count;
+        shadow_hops_apply(plan, hops, count, explained, collisions_out);
+    }
     free(hops);
     return true;
 }

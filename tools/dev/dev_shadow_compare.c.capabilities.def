@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for dev_shadow_compare.c. */
+ZCL_MODULE_CAPABILITY("tools/dev/dev_shadow_compare.c", CAP_FS_WRITE, "writes the prediction and comparison rows to the caller's stream")

@@ -356,6 +356,16 @@ static size_t shadow_skip_comment(const char *s, size_t n, size_t i)
 
 /* Comments dropped, every whitespace run collapsed to one space, trimmed.
  * Literals are kept byte-exact. */
+static bool shadow_is_blank(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static bool shadow_is_comment(const char *s, size_t n, size_t i)
+{
+    return s[i] == '/' && i + 1 < n && (s[i + 1] == '*' || s[i + 1] == '/');
+}
+
 static bool shadow_normalize(const char *s, size_t n, struct shadow_buf *out)
 {
     bool ok = true, space = false;
@@ -363,14 +373,9 @@ static bool shadow_normalize(const char *s, size_t n, struct shadow_buf *out)
     if (!shadow_buf_put(out, "", 0)) return false;
     for (size_t i = 0; i < n && ok;) {
         char c = s[i];
-        if (c == '/' && i + 1 < n && (s[i + 1] == '*' || s[i + 1] == '/')) {
-            i = shadow_skip_comment(s, n, i);
+        if (shadow_is_comment(s, n, i) || shadow_is_blank(c)) {
+            i = shadow_is_blank(c) ? i + 1 : shadow_skip_comment(s, n, i);
             space = true;
-            continue;
-        }
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-            space = true;
-            i++;
             continue;
         }
         if (space && out->len > 0) ok = shadow_buf_put(out, " ", 1);
@@ -469,26 +474,25 @@ static bool shadow_begin_file(struct shadow_patch_state *st, const char *line,
     return true;
 }
 
+static bool shadow_put_line(struct shadow_buf *buf, const char *body,
+                            size_t n)
+{
+    return shadow_buf_put(buf, body, n) && shadow_buf_put(buf, "\n", 1);
+}
+
 static bool shadow_body_line(struct shadow_patch_state *st, const char *line,
                              size_t len)
 {
     if (!st->current_contract || len == 0) return true;
     const char *body = line + 1;
     size_t n = len - 1;
-    bool ok = true;
-    if (line[0] == ' ' || line[0] == '-')
-        ok = shadow_buf_put(&st->side_before, body, n) &&
-             shadow_buf_put(&st->side_before, "\n", 1);
-    if (ok && (line[0] == ' ' || line[0] == '+'))
-        ok = shadow_buf_put(&st->side_after, body, n) &&
-             shadow_buf_put(&st->side_after, "\n", 1);
-    if (ok && line[0] == '-')
-        ok = shadow_buf_put(&st->removed, body, n) &&
-             shadow_buf_put(&st->removed, "\n", 1);
-    if (ok && line[0] == '+')
-        ok = shadow_buf_put(&st->added, body, n) &&
-             shadow_buf_put(&st->added, "\n", 1);
-    return ok;
+    char mark = line[0];
+    bool before = mark == ' ' || mark == '-';
+    bool after = mark == ' ' || mark == '+';
+    bool ok = !before || shadow_put_line(&st->side_before, body, n);
+    ok = ok && (!after || shadow_put_line(&st->side_after, body, n));
+    ok = ok && (mark != '-' || shadow_put_line(&st->removed, body, n));
+    return ok && (mark != '+' || shadow_put_line(&st->added, body, n));
 }
 
 static bool shadow_patch_line(struct shadow_patch_state *st, const char *line,

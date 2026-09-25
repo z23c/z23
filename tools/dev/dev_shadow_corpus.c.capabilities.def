@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for dev_shadow_corpus.c. */
+ZCL_MODULE_CAPABILITY("tools/dev/dev_shadow_corpus.c", CAP_FS_WRITE, "formats refusal reasons for malformed corpus, weight and patch bytes into caller buffers")

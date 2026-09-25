@@ -527,6 +527,23 @@ static void shadow_layer_names(struct shadow_marks *m,
     free(bits);
 }
 
+static void shadow_predict_one(const struct shadow_pricing *p,
+                               struct shadow_marks *m, size_t i, bool all,
+                               bool rule_ok,
+                               enum zcl_shadow_eligibility carried,
+                               struct zcl_shadow_result *out)
+{
+    bool keep = all ? m->reference[i]
+                    : m->selected[i] && (!rule_ok || m->floor[i]);
+    if (!all && m->selected[i] && !keep) out->rule_reusable++;
+    if (keep) {
+        m->predicted[i] = true;
+        shadow_keep(p, m, i, out);
+    } else if (m->reference[i]) {
+        shadow_carry(p, i, carried, out);
+    }
+}
+
 /* The reuse-enabled selector's prediction, fixed before any proof runs:
  *  - a fallback reason, or a selector that could not enumerate, runs the
  *    reference (ALL);
@@ -555,15 +572,7 @@ static void shadow_predict(const struct shadow_pricing *p,
                           p, zcl_test_group_catalog_at(i), &ignored) : 0;
         if (ms > out->critical_reference_ms)
             out->critical_reference_ms = (uint32_t)ms;
-        bool keep = all ? m->reference[i]
-                        : m->selected[i] && (!rule_ok || m->floor[i]);
-        if (!all && m->selected[i] && !keep) out->rule_reusable++;
-        if (keep) {
-            m->predicted[i] = true;
-            shadow_keep(p, m, i, out);
-        } else if (m->reference[i]) {
-            shadow_carry(p, i, carried, out);
-        }
+        shadow_predict_one(p, m, i, all, rule_ok, carried, out);
     }
     if (!out->selector_universal)
         shadow_names_of(m, m->selected, out->selected_names,

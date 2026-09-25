@@ -401,34 +401,43 @@ static int ss_test_corpus_refusals(void)
     return failures;
 }
 
-/* eligible_groups == 0 is the fail-closed guard: the only prior verdicts a
- * host offers are its own uid's, and those never stand in for a run. */
-static bool ss_row_consistent(const struct zcl_shadow_result *r)
+static bool ss_row_costs_consistent(const struct zcl_shadow_result *r)
 {
-    const struct zcl_shadow_proof_graph *g = &r->graph;
-    uint32_t layered = g->nodes[ZCL_SHADOW_LAYER_CONTRACT] +
-                       g->nodes[ZCL_SHADOW_LAYER_CALLER] +
-                       g->nodes[ZCL_SHADOW_LAYER_INTEGRATION];
     bool fallback = r->predict_mode == ZCL_SHADOW_PREDICT_ALL;
-    return r->bytes_verified && r->groups_reference > 0 &&
-           r->lint_reference == 213 && r->lint_selected == r->lint_reference &&
-           r->fresh_cost_ms <= r->reference_cost_ms &&
+    return r->fresh_cost_ms <= r->reference_cost_ms &&
            r->rule_cost_ms <= r->reference_cost_ms &&
            (fallback || r->rule_cost_ms <= r->fresh_cost_ms) &&
            (!fallback || r->predicted_groups == r->groups_reference) &&
            fallback == (r->fallback != ZCL_SHADOW_FALLBACK_NONE ||
                         r->selector_universal) &&
-           layered == r->groups_selected &&
-           g->collision_groups <= r->groups_selected &&
            r->lint_cost_ms <= r->rule_cost_ms &&
+           r->critical_rule_ms <= r->critical_reference_ms;
+}
+
+static bool ss_row_graph_consistent(const struct zcl_shadow_result *r)
+{
+    const struct zcl_shadow_proof_graph *g = &r->graph;
+    uint32_t layered = g->nodes[ZCL_SHADOW_LAYER_CONTRACT] +
+                       g->nodes[ZCL_SHADOW_LAYER_CALLER] +
+                       g->nodes[ZCL_SHADOW_LAYER_INTEGRATION];
+    return layered == r->groups_selected &&
+           g->collision_groups <= r->groups_selected &&
+           r->build_invalidated <= r->build_total &&
+           r->edges_selected <= r->groups_selected &&
+           r->premise_groups <= r->groups_reference;
+}
+
+/* eligible_groups == 0 is the fail-closed guard: the only prior verdicts a
+ * host offers are its own uid's, and those never stand in for a run. */
+static bool ss_row_consistent(const struct zcl_shadow_result *r)
+{
+    return r->bytes_verified && r->groups_reference > 0 &&
+           r->lint_reference == 213 && r->lint_selected == r->lint_reference &&
            r->eligible_groups == 0 &&
            r->eligible_cost_ms == r->reference_cost_ms &&
            r->carried_groups + r->predicted_groups >= r->groups_reference &&
-           r->critical_rule_ms <= r->critical_reference_ms &&
-           r->build_invalidated <= r->build_total &&
-           r->edges_selected <= r->groups_selected &&
-           r->premise_groups <= r->groups_reference &&
-           (unsigned)r->fallback < ZCL_SHADOW_FALLBACK__COUNT;
+           (unsigned)r->fallback < ZCL_SHADOW_FALLBACK__COUNT &&
+           ss_row_costs_consistent(r) && ss_row_graph_consistent(r);
 }
 
 static const struct zcl_shadow_result *ss_row(size_t n, const char *id)
