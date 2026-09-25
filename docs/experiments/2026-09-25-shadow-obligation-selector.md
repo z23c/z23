@@ -214,13 +214,13 @@ the largest part of that is one ALL fallback.
 ### Top 15 fresh obligations
 
 Fresh seconds summed over the 20 real entries (`SHADOW-TOP` lines). The
-last column prices the six premise-declaring gates by their select runs and
-fresh units (re-measured at the lane head):
+last column prices the seven premise-declaring gates by their select runs,
+always-run parts and fresh units (re-measured at the lane head):
 
 | rank | kind | obligation | fresh s | entries | fresh s with lint premise |
 |---|---|---|---|---|---|
 | 1 | lint_gate | `check-windows-cross-syntax` | 2550.1 | 20 | 410.6 |
-| 2 | lint_gate | `check-windows-acceptance` | 2314.0 | 20 | 2314.0 |
+| 2 | lint_gate | `check-windows-acceptance` | 2314.0 | 20 | 670.3 |
 | 3 | lint_gate | `check-doc-claims` | 2035.4 | 20 | 2035.4 |
 | 4 | lint_gate | `check-build-epoch-integrity` | 1615.0 | 20 | 1615.0 |
 | 5 | test_group | `test_make_lint_gates_realroot` | 1548.1 | 20 | 1548.1 |
@@ -245,7 +245,7 @@ Base-relative lint premise selection (`z23-lint select --dry` and
 `z23-lint unit-exec`, on main since `d77adf0fc7`) lets a unit keep the
 base's PASS iff its premise bytes are unchanged. The premise covers gate
 code, the toolchain pin, the Makefile text the gate reads, the path set,
-the unit's closure and the unit's own baseline rows. Six gates now declare
+the unit's closure and the unit's own baseline rows. Seven gates now declare
 a premise in `tools/lint/lintc/selection_gates.def`:
 
 - two per-TU gates from the first slice, `check-windows-cross-syntax` and
@@ -253,7 +253,9 @@ a premise in `tools/lint/lintc/selection_gates.def`:
 - four added by lane lint-premise-decl: `check-no-api-keys`,
   `check-fortify-masked-decls` and `check-raw-sqlite` per file (the unit
   premise is the file's own bytes), and `check-windows-platform-seam` per
-  seam TU (the unit premise is the include closure).
+  seam TU (the unit premise is the include closure);
+- `check-windows-acceptance` per catalog row, added by lane winacc-split
+  after splitting the gate (see "Splitting check-windows-acceptance").
 
 That lane also widened what counts as gate code, for all six gates:
 
@@ -286,10 +288,19 @@ Re-measured at the lane head. The reference is 6391.9 s per candidate there
 and the rule 2081.7 s (67.4%). With the two first-slice gates only, the rule
 would be 1949.2 s, 69.5%, as before:
 
-| set | fresh s per candidate: rule | rule + lint premise (6 gates) | reuse: rule | two gates | six gates | six gates, one select run |
-|---|---|---|---|---|---|---|
-| real (20) | 2081.7 | 1913.6 | 67.4% | 69.5% | **70.1%** | 70.9% |
-| synthetic (8) | 5795.5 | 5666.2 | 9.3% | 11.0% | 11.4% | 12.2% |
+| set | fresh s per candidate: rule | rule + lint premise (7 gates) | reuse: rule | two gates | six gates | seven gates | seven gates, one select run |
+|---|---|---|---|---|---|---|---|
+| real (20) | 2081.7 | 1831.4 | 67.4% | 69.5% | 70.1% | **71.3%** | 72.2% |
+| synthetic (8) | 5795.5 | 5608.1 | 9.3% | 11.0% | 11.4% | 12.3% | 13.1% |
+
+The six-gate columns are the lint-premise-decl lane's figures (1913.6 s real,
+5666.2 s synthetic). The seven-gate columns add `check-windows-acceptance`
+at its select run, its always-run part and its fresh rows. The one-run
+column subtracts the per-gate select runs and adds one combined `select
+--dry` over all seven gates, measured on the same 28 entries: 16.4–35.0 s
+wall per entry, 21.0 s per candidate on the real set. That run shared the
+host with the corpus builds, so it is slower than the six-gate run's
+13.6 s.
 
 The six gates cost 247.9 s per candidate at full weight. Priced per gate,
 they cost 79.8 s: 68.3 s of select runs and 11.5 s of fresh units. Two of
@@ -302,8 +313,16 @@ set. That puts the six gates at 25.2 s per candidate, or 70.9%. The shadow
 test prices the per-gate runs; the combined figure is computed from the same
 rows plus the combined run times.
 
+`check-windows-acceptance` weighs 115.7 s and is priced at 33.5 s per
+candidate: 9.9 s of select run, 18.1 s always run and 5.5 s of fresh rows.
+The always-run part is the global part (1.8 s) plus the private sqlite
+archive (16.3 s CPU). The four rows that link that archive never inherit, so
+the archive is built on every candidate. The rest of the weight, 97.6 s, is
+shared among the 72 rows at 1.36 s each. `lint_premise.tsv` carries this
+as a seventh column, `always_ms`, which is 0 for the other six gates.
+
 Per gate on the real set, full weight and then with the premise (select +
-fresh units, s per candidate):
+always-run part + fresh units, s per candidate):
 
 | gate | full | with premise | fresh units / units (20 entries) |
 |---|---|---|---|
@@ -313,6 +332,7 @@ fresh units, s per candidate):
 | `check-windows-platform-seam` | 12.9 | 9.3 | 0 / 820 |
 | `check-fortify-masked-decls` | 9.2 | 11.6 | 35 / 85704 |
 | `check-raw-sqlite` | 9.0 | 10.6 | 22 / 93799 |
+| `check-windows-acceptance` | 115.7 | 33.5 | 81 / 1440 (80 of them the always-fresh sqlite rows) |
 
 `check-no-api-keys` goes fully fresh on real-20 (8428 units,
 `gate-code:tools/lint/lintc/gate_hotfork_stories.c`). A `z23-lint` gate's
@@ -348,7 +368,7 @@ Every lint gate at 9 s or more per candidate is listed, heaviest first:
 | gate | s/candidate | decision | reason |
 |---|---|---|---|
 | `check-windows-cross-syntax` | 127.5 | declared, per TU (first slice) | one mingw `-fsyntax-only` compile per TU; closure plus own baseline rows |
-| `check-windows-acceptance` | 115.7 | ineligible | reconcile is "every program on disk has a catalog row or registered group", and it compiles the whole catalog through `make` |
+| `check-windows-acceptance` | 115.7 | **split; declared, per catalog row** | the global part (self-test, reconcile "every program on disk has a row", `make -n` over the whole cross-link) always runs, about 1.8 s; the mingw compile-and-link of each row reads only the tree paths its row names plus their include closures, shown under Landlock for all 68 rows with a finite premise. The 4 rows that link the private sqlite archive (built from the untracked, pinned `vendor/sqlite3.c`) never inherit <!-- doc-path-ok: untracked vendored amalgamation installed by build_vendor.sh --> |
 | `check-doc-claims` | 101.8 | ineligible | a claim resolves against the whole tree (`git grep`), and gate-passes and gate-fails claims run other gates |
 | `check-build-epoch-integrity` | 80.8 | ineligible | the depfile self-test includes the real Makefile (51 `$(shell)`, 48 `$(wildcard)`, `-include`s) and runs `make -n`; the epoch self-test uses `build/bin/zcc` and `/proc/loadavg` |
 | `check-capability-closure` | 70.9 | ineligible | `nm` closure over build objects, a symbol registry and a coverage floor |
@@ -445,6 +465,98 @@ mechanism:
 - an edit to another Makefile rule makes nothing fresh;
 - a computed include in gate code inherits nothing.
 
+#### Splitting check-windows-acceptance
+
+`tools/lint/check_windows_acceptance.sh` now has two parts. Run with no
+argument it still does both, so the full gate's verdict is unchanged.
+
+- **Global part (`--global`)**: the thirteen-case self-test, the reconcile
+  ("every acceptance program on disk has a catalog row or a registered
+  group", with its count floors) and `make -n` planning the whole
+  cross-link. Planning evaluates every row and every generated view header
+  the Makefile remakes at parse time. Measured cost: 1.14 s + 0.08 s + 0.48 s
+  wall, about 1.8 s of CPU. It always runs.
+- **Per-row part (`--row=ID...`)**: the mingw compile and link of exactly
+  the named rows. It refuses (exit 2) any id not in the active catalog. A
+  cold cross-link of all 72 rows at `-j8` took 20.1 s wall and 108.2 s CPU.
+  Of that, 16.3 s is the private sqlite archive and the rest averages
+  1.25 s per row (largest `dev_train_keep`, 5.5 s).
+
+The unit kind is new: `SELECTION_UNITS_CATALOG_ROWS`, in
+`tools/lint/lintc/premise_catalog.c`. It gives one unit per id in the
+literal `ZCL_WINDOWS_ACCEPTANCE_TESTS` list. A row's premise has three
+parts:
+
+- the text of its own four variables (`_SOURCES`, `_FLAGS`, `_LIBS`,
+  `_LIBDEPS`) and every catalog variable they reference;
+- the include closure of every tree path those words name;
+- the catalog residue (every line no row owns, comments outside `define`
+  blocks excepted), which is gate-wide.
+
+The whole Makefile and `engine/composition/lib_module_order.def` are gate
+code. Every word of a row must be syntax, a reference to a catalog
+variable, a tree path, or a flag whose pieces are tree paths or plain
+text. Anything else makes the row computed, and a computed row never
+inherits. The four rows that link `$(ZCL_WINDOWS_ACCEPTANCE_SQLITE)` are
+computed this way: the archive is built from `vendor/sqlite3.c`, which is <!-- doc-path-ok: untracked vendored amalgamation installed by build_vendor.sh -->
+untracked (installed by `tools/scripts/build_vendor.sh`, pinned by
+`SQLITE_C_SHA`). Those rows are `consensus_export_fd_io_refusal`,
+`database_lifetime`, `mint_anchor_preflight_refusal` and `sqlite_vfs_dir`.
+A catalog list that is not a literal list of ids is refused (exit 2).
+
+**Locality evidence.** Every row with a finite premise (68 of 72) was
+compiled and linked under `z23-lint unit-exec` (Landlock). Only that row's
+computed premise was readable, and all 68 passed. The negative control
+dropped one header from the `rng` row's grants and came back
+`PREMISE_INCOMPLETE` (3). No row's closure contains any of the three
+generated view headers. `unit-exec` needed `--toolchain=/usr/share/mingw-w64`,
+because the mingw C headers live under a root that
+`tools/lint/lintc/unit_exec.c` does not list as a toolchain root.
+
+The z23-lint binary was built at `b089f792ba`, sha256 `9a2a7176…94d2`.
+
+- **(a) Agreement on the frozen corpus.** On all 28 entries the full gate
+  on the candidate, the full gate on the base and the unit-selected run
+  all PASSED. The unit-selected run is the global part plus a cross-link of
+  exactly the fresh rows in an emptied directory. Fresh rows per entry: the
+  4 sqlite rows everywhere, plus
+  - `package_lifecycle_store_refusal` on real-11;
+  - `package_prepare` on syn-header-decl, syn-abi, syn-contract and
+    syn-private-impl;
+  - all 68 other rows on syn-flag (`gate-code:Makefile`) and
+    syn-negative-lookup (`path-set-changed`).
+
+  In the same combined runs, the six older gates' counts equal the frozen
+  rows on all 28 entries (168 of 168).
+- **(b) A Windows-only break in a file exactly one row depends on**
+  (real-01; the seed is `#if defined(_WIN32)` / `#error` / `#endif`):
+
+  | seeded file | fresh rows (finite) | full | selected |
+  |---|---|---|---|
+  | `tests/harness/src/rng_acceptance.c` (a row's own source) | `rng`, `closure-changed` | FAIL (`#error` in `rng.exe`) | FAIL (same) |
+  | `contexts/wallet/services/include/services/wallet_recovery_service.h` (a header in one row's closure) | `wallet_recovery_directory`, `closure-changed` | FAIL | FAIL |
+
+- **(c) A catalog-completeness violation** (real-01). Two cases:
+  - A new program, `platform/modules/platform/tests/test_seeded_orphan.c`, <!-- doc-path-ok: seeded in a scratch tree, never committed -->
+    with no row. The reconcile in the global part FAILS ("acceptance
+    program(s) on disk that NOTHING accounts for"), in both the full and
+    the selected run. The path set changed, so all 68 finite rows went
+    fresh.
+  - An id added to the list without sources. The global part FAILS in
+    both runs, and the new id is fresh as `unit-new`.
+- **(d) Gate-code-only edits** (real-01). All 68 finite rows went fresh
+  with `gate-code:<file>` for each of `tools/lint/check_windows_acceptance.sh`,
+  `tools/scripts/sh_str.sh`, `Makefile`, `tools/lint/run_lint.sh` and
+  `engine/composition/lib_module_order.def`. Edits to the catalog itself:
+  - a new shared variable made all 68 fresh as `catalog-residue`;
+  - a new comment line made none fresh;
+  - `ZCL_WINDOWS_ACCEPTANCE_rng_FLAGS += …` made only `rng` fresh, as
+    `catalog-row-changed`.
+
+`tests/harness/src/test_lint_selection.c` pins the mechanism on a fixture
+catalog: closure, row text, a missing source, residue, comment, a new row,
+a Makefile edit and a non-literal list refusal.
+
 ### Private-implementation edits: is the rule over-expanding?
 
 No, with one exception that needs machinery that does not exist yet.
@@ -475,38 +587,38 @@ No, with one exception that needs machinery that does not exist yet.
 
 Obligations are 213 lint gates plus 1194 groups. Seconds are per candidate,
 at the lane-head reference of 6391.9 s. The class columns split the rule's
-fresh seconds; the premise columns price the six declared gates.
+fresh seconds; the premise columns price the seven declared gates.
 
 | entry | fresh / total obligations | fresh / total s: rule | fresh / total s: rule + lint premise | reuse: rule | reuse: + lint premise | premise units fresh | lint | floor | direct | caller | integration | fallback |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| real-01 | 239/1407 | 1954/6392 | 1790/6392 | 69.4% | 72.0% | 4/22085 | 1162 | 328 | 465 | 0 | 0 | 0 |
-| real-02 | 242/1407 | 2054/6392 | 1877/6392 | 67.9% | 70.6% | 4/22059 | 1162 | 328 | 564 | 0 | 0 | 0 |
-| real-03 | 256/1407 | 2127/6392 | 1951/6392 | 66.7% | 69.5% | 7/22054 | 1162 | 328 | 570 | 22 | 45 | 0 |
-| real-04 | 234/1407 | 1519/6392 | 1350/6392 | 76.2% | 78.9% | 2/22054 | 1162 | 328 | 30 | 0 | 0 | 0 |
-| real-05 | 231/1407 | 1633/6392 | 1458/6392 | 74.4% | 77.2% | 7/22091 | 1162 | 328 | 144 | 0 | 0 | 0 |
-| real-06 | 232/1407 | 1634/6392 | 1466/6392 | 74.4% | 77.1% | 7/22091 | 1162 | 328 | 145 | 0 | 0 | 0 |
-| real-07 | 232/1407 | 1644/6392 | 1470/6392 | 74.3% | 77.0% | 7/22091 | 1162 | 328 | 155 | 0 | 0 | 0 |
-| real-08 | 241/1407 | 1980/6392 | 1813/6392 | 69.0% | 71.6% | 7/22144 | 1162 | 328 | 491 | 0 | 0 | 0 |
-| real-09 | 234/1407 | 1692/6392 | 1510/6392 | 73.5% | 76.4% | 5/22094 | 1162 | 328 | 203 | 0 | 0 | 0 |
-| real-10 | 230/1407 | 1522/6392 | 1344/6392 | 76.2% | 79.0% | 7/22086 | 1162 | 328 | 33 | 0 | 0 | 0 |
-| real-11 | 230/1407 | 1522/6392 | 1368/6392 | 76.2% | 78.6% | 12/22086 | 1162 | 328 | 33 | 0 | 0 | 0 |
-| real-12 | 300/1407 | 2823/6392 | 2645/6392 | 55.8% | 58.6% | 7/22086 | 1162 | 328 | 216 | 462 | 655 | 0 |
-| real-13 | 235/1407 | 1709/6392 | 1532/6392 | 73.3% | 76.0% | 7/22083 | 1162 | 328 | 220 | 0 | 0 | 0 |
-| real-14 | 260/1407 | 2430/6392 | 2255/6392 | 62.0% | 64.7% | 7/22083 | 1162 | 328 | 608 | 0 | 333 | 0 |
-| real-15 | 235/1407 | 1709/6392 | 1552/6392 | 73.3% | 75.7% | 27/22082 | 1162 | 328 | 220 | 0 | 0 | 0 |
-| real-16 | 239/1407 | 1954/6392 | 1776/6392 | 69.4% | 72.2% | 4/22082 | 1162 | 328 | 465 | 0 | 0 | 0 |
-| real-17 | 226/1407 | 1489/6392 | 1314/6392 | 76.7% | 79.4% | 3/22082 | 1162 | 328 | 0 | 0 | 0 | 0 |
-| real-18 | 1407/1407 | 6392/6392 | 6228/6392 | 0.0% | 2.6% | 7/22082 | 1162 | 0 | 0 | 0 | 0 | 5230 |
-| real-19 | 302/1407 | 2358/6392 | 2226/6392 | 63.1% | 65.2% | 55/22067 | 1162 | 328 | 30 | 156 | 682 | 0 |
-| real-20 | 226/1407 | 1489/6392 | 1347/6392 | 76.7% | 78.9% | 8430/22144 | 1162 | 328 | 0 | 0 | 0 | 0 |
-| syn-header-decl | 1407/1407 | 6392/6392 | 6272/6392 | 0.0% | 1.9% | 65/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
-| syn-abi | 1407/1407 | 6392/6392 | 6269/6392 | 0.0% | 1.9% | 62/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
-| syn-flag | 1407/1407 | 6392/6392 | 6220/6392 | 0.0% | 2.7% | 42/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
-| syn-contract | 1407/1407 | 6392/6392 | 6220/6392 | 0.0% | 2.7% | 7/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
-| syn-private-impl | 230/1407 | 1621/6392 | 1445/6392 | 74.6% | 77.4% | 5/22150 | 1162 | 328 | 131 | 0 | 0 | 0 |
-| syn-generated-input | 1407/1407 | 6392/6392 | 6217/6392 | 0.0% | 2.7% | 5/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
-| syn-negative-lookup | 1407/1407 | 6392/6392 | 6456/6392 | 0.0% | -1.0% | 22152/22152 | 1162 | 0 | 0 | 0 | 0 | 5230 |
-| syn-macro | 1407/1407 | 6392/6392 | 6230/6392 | 0.0% | 2.5% | 22/22150 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| real-01 | 239/1407 | 1954/6392 | 1707/6392 | 69.4% | 73.3% | 8/22157 | 1162 | 328 | 465 | 0 | 0 | 0 |
+| real-02 | 242/1407 | 2054/6392 | 1794/6392 | 67.9% | 71.9% | 8/22131 | 1162 | 328 | 564 | 0 | 0 | 0 |
+| real-03 | 256/1407 | 2127/6392 | 1868/6392 | 66.7% | 70.8% | 11/22126 | 1162 | 328 | 570 | 22 | 45 | 0 |
+| real-04 | 234/1407 | 1519/6392 | 1267/6392 | 76.2% | 80.2% | 6/22126 | 1162 | 328 | 30 | 0 | 0 | 0 |
+| real-05 | 231/1407 | 1633/6392 | 1375/6392 | 74.4% | 78.5% | 11/22163 | 1162 | 328 | 144 | 0 | 0 | 0 |
+| real-06 | 232/1407 | 1634/6392 | 1384/6392 | 74.4% | 78.4% | 11/22163 | 1162 | 328 | 145 | 0 | 0 | 0 |
+| real-07 | 232/1407 | 1644/6392 | 1390/6392 | 74.3% | 78.3% | 11/22163 | 1162 | 328 | 155 | 0 | 0 | 0 |
+| real-08 | 241/1407 | 1980/6392 | 1731/6392 | 69.0% | 72.9% | 11/22216 | 1162 | 328 | 491 | 0 | 0 | 0 |
+| real-09 | 234/1407 | 1692/6392 | 1429/6392 | 73.5% | 77.6% | 9/22166 | 1162 | 328 | 203 | 0 | 0 | 0 |
+| real-10 | 230/1407 | 1522/6392 | 1263/6392 | 76.2% | 80.2% | 11/22158 | 1162 | 328 | 33 | 0 | 0 | 0 |
+| real-11 | 230/1407 | 1522/6392 | 1287/6392 | 76.2% | 79.9% | 17/22158 | 1162 | 328 | 33 | 0 | 0 | 0 |
+| real-12 | 300/1407 | 2823/6392 | 2564/6392 | 55.8% | 59.9% | 11/22158 | 1162 | 328 | 216 | 462 | 655 | 0 |
+| real-13 | 235/1407 | 1709/6392 | 1448/6392 | 73.3% | 77.4% | 11/22155 | 1162 | 328 | 220 | 0 | 0 | 0 |
+| real-14 | 260/1407 | 2430/6392 | 2175/6392 | 62.0% | 66.0% | 11/22155 | 1162 | 328 | 608 | 0 | 333 | 0 |
+| real-15 | 235/1407 | 1709/6392 | 1471/6392 | 73.3% | 77.0% | 31/22154 | 1162 | 328 | 220 | 0 | 0 | 0 |
+| real-16 | 239/1407 | 1954/6392 | 1695/6392 | 69.4% | 73.5% | 8/22154 | 1162 | 328 | 465 | 0 | 0 | 0 |
+| real-17 | 226/1407 | 1489/6392 | 1232/6392 | 76.7% | 80.7% | 7/22154 | 1162 | 328 | 0 | 0 | 0 | 0 |
+| real-18 | 1407/1407 | 6392/6392 | 6144/6392 | 0.0% | 3.9% | 11/22154 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| real-19 | 302/1407 | 2358/6392 | 2143/6392 | 63.1% | 66.5% | 59/22139 | 1162 | 328 | 30 | 156 | 682 | 0 |
+| real-20 | 226/1407 | 1489/6392 | 1265/6392 | 76.7% | 80.2% | 8434/22216 | 1162 | 328 | 0 | 0 | 0 | 0 |
+| syn-header-decl | 1407/1407 | 6392/6392 | 6190/6392 | 0.0% | 3.2% | 70/22222 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-abi | 1407/1407 | 6392/6392 | 6187/6392 | 0.0% | 3.2% | 67/22222 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-flag | 1407/1407 | 6392/6392 | 6230/6392 | 0.0% | 2.5% | 114/22222 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-contract | 1407/1407 | 6392/6392 | 6140/6392 | 0.0% | 3.9% | 12/22222 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-private-impl | 230/1407 | 1621/6392 | 1363/6392 | 74.6% | 78.7% | 10/22222 | 1162 | 328 | 131 | 0 | 0 | 0 |
+| syn-generated-input | 1407/1407 | 6392/6392 | 6137/6392 | 0.0% | 4.0% | 9/22222 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-negative-lookup | 1407/1407 | 6392/6392 | 6467/6392 | 0.0% | -1.2% | 22224/22224 | 1162 | 0 | 0 | 0 | 0 | 5230 |
+| syn-macro | 1407/1407 | 6392/6392 | 6151/6392 | 0.0% | 3.8% | 26/22222 | 1162 | 0 | 0 | 0 | 0 | 5230 |
 
 Adversarial RED against the reference observations: **0** for the live
 rule (`live_rule=0`). The frozen record keeps its one historical RED
@@ -518,23 +630,23 @@ pins that, and pins that syn-negative-lookup inherits no lint unit.
 ### What still blocks more than 90%
 
 Re-measured at the lane-head reference of 6391.9 s per candidate. 90% reuse
-means at most 639.2 fresh s per candidate. The rule with six lint premise
-gates is at 1913.6 s, or 1859.0 s with one combined select run:
+means at most 639.2 fresh s per candidate. The rule with seven lint premise
+gates is at 1831.4 s, or 1774.3 s with one combined select run:
 
 | remaining fresh s per candidate | s | share of reference | what it would take |
 |---|---|---|---|
-| Lint gates of 9 s or more, ineligible (18 gates, table above) | 682.2 | 10.7% | restructuring, not a declaration: split each gate's per-file checks from its whole-tree part (catalog reconcile, claim resolution, closures, ratchet sums, floors over content), so that only the whole-tree part must rerun. The five heaviest are `check-windows-acceptance` 115.7, `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9 and `check-vcs-no-sha1` 53.9 |
+| Lint gates of 9 s or more, ineligible (17 gates, table above) | 566.5 | 8.9% | restructuring, not a declaration: split each gate's per-file checks from its whole-tree part (claim resolution, closures, ratchet sums, floors over content), so that only the whole-tree part must rerun, as `check-windows-acceptance` now is. The five heaviest are `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9 and `check-zcode-package-registry` 36.1 |
 | Lint gates under 9 s, not reviewed (185 gates) | 160.9 | 2.5% | a review like the one above; a declared gate still pays about 10 s of select, so most would gain only inside a combined run |
 | Lint gates of 9 s or more, not declared (ship, retrieval, package-anatomy, release-install) | 70.6 | 1.1% | a confined whole-gate run (ship, retrieval, release-install) or a per-directory unit kind (package-anatomy) |
 | floor, `make_lint_gates` family | 311.3 | 4.9% | a premise for the lint-gate test umbrella. `realroot` and `heavy_02` alone are 151.5 s |
 | fallback, real-18 (`unmapped-code-change`) | 261.5 | 4.1% | an impact rule for `engine/services/src/replay_verify_service.c` (selector owner) |
 | direct test groups | 229.5 | 3.6% | none that is sound (see above) |
 | callers and integration on additive contracts | 117.9 | 1.8% | a base-test re-run (1.2%); real-19's header growth stays |
-| the six premise gates | 79.8 | 1.2% | one combined select run (25.2 s) |
+| the seven premise gates | 113.3 | 1.8% | one combined select run (56.2 s) |
 
-The ineligible heavy gates alone (682.2 s) exceed the whole 90% budget
+The ineligible heavy gates alone (566.5 s) take 89% of the whole 90% budget
 (639.2 s). With every test group carried and every plausible gate declared,
-lint would still leave about 868 s per candidate, 86.4%. Past 90% the heavy
+lint would still leave about 784 s per candidate, 87.7%. Past 90% the heavy
 whole-tree gates have to be split so that their per-file part can be
 selected, and the floor has to be carried too. More premise declarations
 alone cannot get there.
