@@ -1012,6 +1012,22 @@ static void pv_run_child_apply_env(const char *const env_pairs[])
     }
 }
 
+/* Exec and Landlock do not revoke inherited descriptors. Apply this to every
+ * package child, including compiler plugins, before any candidate may run. */
+static void pv_run_child_close_authority(void)
+{
+    int null_fd = open("/dev/null", O_RDONLY);
+    if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) != STDIN_FILENO) {
+        fprintf(stderr, "confinement: could not replace inherited stdin\n");
+        _exit(PV_CHILD_SANDBOX_FAIL);
+    }
+    if (null_fd > STDERR_FILENO) close(null_fd);
+    if (!os_proc_close_inherited_fds()) {
+        fprintf(stderr, "confinement: could not close inherited descriptors\n");
+        _exit(PV_CHILD_SANDBOX_FAIL);
+    }
+}
+
 /* The forked child's whole body: never returns (always _exit or execvp). */
 static _Noreturn void pv_run_child_exec(const char *const argv[],
                                         const char *cwd,
@@ -1034,13 +1050,7 @@ static _Noreturn void pv_run_child_exec(const char *const argv[],
     if (dup2(out_pipe[1], STDOUT_FILENO) != STDOUT_FILENO ||
         dup2(err_pipe[1], STDERR_FILENO) != STDERR_FILENO)
         _exit(PV_CHILD_EXEC_FAIL);
-    /* Preview candidates receive only standard streams. The verifier can
-     * inherit keys, sockets or a database from its caller, and neither exec
-     * nor the filesystem sandbox revokes an inherited descriptor. */
-    if (g_pv_preview_control && !os_proc_close_inherited_fds()) {
-        fprintf(stderr, "confinement: could not close inherited descriptors\n");
-        _exit(PV_CHILD_SANDBOX_FAIL);
-    }
+    pv_run_child_close_authority();
     if (cwd && chdir(cwd) != 0)
         _exit(PV_CHILD_EXEC_FAIL);
     /* Scrub the inherited environment: the operator's shell env can carry
