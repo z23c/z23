@@ -353,12 +353,19 @@ static bool av2_input_named(const struct vcs_action_preimage_v2 *in,
     return false;
 }
 
-/* The lookup names a real input and its hit agrees with the search order. */
+/* The lookup names a real input and its hit agrees with the search order,
+ * or it is a conditional lookup (hit_dir "") over the whole search order. */
 static bool av2_lookup_hit_ok(const struct vcs_action_preimage_v2 *in,
                               const struct vcs_action_lookup_v2 *l,
                               long *hit_includer)
 {
     char joined[VCS_ACTION_PREIMAGE_V2_MAX_TEXT];
+    if (l->hit_dir && !l->hit_dir[0]) {
+        /* Conditional lookup: no hit, every search dir is probed. */
+        *hit_includer = -1;
+        return vcs_action_v2_name_canonical(l->name) &&
+               l->search_prefix == in->search_dir_count;
+    }
     if (!vcs_action_v2_name_canonical(l->name) ||
         !vcs_action_v2_path_canonical(l->hit_dir, true) ||
         l->search_prefix > in->search_dir_count)

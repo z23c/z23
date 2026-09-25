@@ -2,8 +2,9 @@
  *
  * Content-addressed storage of zcl.action_preimage.v2 objects, the per-unit
  * "what changed since last time" cause, and the hotload compile hook that
- * reports an action_root in every hot-swap build receipt. Emission only:
- * nothing here changes the artifact cache key or what the build does.
+ * reports an action_root in every hot-swap build receipt, and the same
+ * derivation (never stored) that the hot-swap artifact cache key binds.
+ * Nothing here changes what the build runs.
  */
 
 #if !defined(_WIN32)
@@ -281,6 +282,7 @@ bool zcl_action_root_record(const char *store_dir, const char *unit,
  * runs for a link. */
 struct ars_driver {
     char driver[512];
+    uint8_t bytes[32]; /* ars_driver_bytes of `driver` when captured */
     char dirs[ARS_SYSTEM_DIR_MAX][PATH_MAX];
     size_t count;
     char sysroot[PATH_MAX];
@@ -459,6 +461,42 @@ static bool ars_driver_capture(const char *cc, struct ars_driver *d,
 }
 #endif
 
+#if !defined(_WIN32)
+/* The plan's compiler command may be a wrapper ("zcc cc", a script): every
+ * program word it names is resolved as execvp would and bound by the SHA3 of
+ * its bytes, so new bytes at the same path move the toolchain root. A word
+ * that is not an option and does not resolve to a program misses. */
+static bool ars_driver_bytes(const char *cc, uint8_t out[32])
+{
+    static const char domain[] = "zcl.action_root.hotload_driver.v1";
+    char text[512];
+    const char *argv[ARS_ARG_MAX];
+    if (snprintf(text, sizeof(text), "%s", cc) >= (int)sizeof(text))
+        return false;
+    size_t argc = zcl_argv_split(text, argv, ARS_ARG_MAX);
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    size_t programs = 0;
+    for (size_t i = 0; i < argc; i++) {
+        char path[PATH_MAX];
+        uint8_t digest[32];
+        if (argv[i][0] == '-')
+            continue;
+        if (snprintf(path, sizeof(path), "%s", argv[i]) >= (int)sizeof(path) ||
+            !ars_resolve_program(path) ||
+            !zcl_action_root_file_sha3(path, digest))
+            return false;
+        sha3_256_write(&sha, digest, sizeof(digest));
+        programs++;
+    }
+    sha3_256_finalize(&sha, out);
+    return programs > 0;
+}
+#endif
+
+/* Driver facts are re-captured whenever the driver's bytes change or the
+ * built-in search list becomes uncanonical; `miss` names the refusal. */
 static bool ars_driver_facts(const char *cc, struct ars_driver *out,
                              char miss[40])
 {
@@ -471,10 +509,15 @@ static bool ars_driver_facts(const char *cc, struct ars_driver *out,
 #else
     if (miss)
         miss[0] = '\0';
+    uint8_t bytes[32];
+    if (!ars_driver_bytes(cc, bytes))
+        return false;
     pthread_mutex_lock(&g_driver_mu);
-    bool ok = g_driver.valid && strcmp(g_driver.driver, cc) == 0;
+    bool ok = g_driver.valid && strcmp(g_driver.driver, cc) == 0 &&
+              memcmp(g_driver.bytes, bytes, sizeof(bytes)) == 0;
     if (!ok) {
         ok = ars_driver_capture(cc, &g_driver, miss);
+        memcpy(g_driver.bytes, bytes, sizeof(bytes));
         g_driver.valid = ok;
     }
     if (ok)
@@ -734,8 +777,9 @@ static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
                             struct ars_miss *m)
 {
     struct zcl_action_root_request *r = &h->req;
+    uint8_t capsule_root[32];
     if (!vcs_toolchain_capsule_v1_capture(&h->capsule) ||
-        !vcs_toolchain_capsule_v1_root(&h->capsule, r->toolchain_root)) {
+        !vcs_toolchain_capsule_v1_root(&h->capsule, capsule_root)) {
         ars_miss_set(m, "toolchain_unavailable",
                      "toolchain capsule unavailable", NULL);
         return false;
@@ -748,9 +792,19 @@ static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
                          "a canonical, capacity-fitting list", k->cc);
         else
             ars_miss_set(m, "driver_facts_unavailable",
-                         "compiler driver facts unavailable", k->cc);
+                         "compiler driver facts or program bytes unavailable",
+                         k->cc);
         return false;
     }
+    /* The capsule is the host toolchain; the plan's own driver command (a
+     * wrapper, a cache, another compiler) is bound by its program bytes. */
+    static const char domain[] = "zcl.action_root.hotload_toolchain.v1";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, capsule_root, sizeof(capsule_root));
+    sha3_256_write(&sha, h->driver.bytes, sizeof(h->driver.bytes));
+    sha3_256_finalize(&sha, r->toolchain_root);
     if (!ars_hook_argv(h, k)) {
         ars_miss_set(m, "argv_unavailable",
                      "compile argv or depfile input unavailable", k->depfile);
@@ -915,12 +969,48 @@ void zcl_devloop_action_root_hotfork(
     ars_hook_run(&k, unit, receipt);
 }
 
+bool zcl_devloop_action_root_key(
+    const char *root, const char *owner, const char *cc, const char *cflags,
+    const char *ldflags, const char *unity, const char *depfile,
+    char root_hex[65], char miss[40])
+{
+    if (!root_hex || !miss)
+        return false;
+    root_hex[0] = '\0';
+    miss[0] = '\0';
+    const struct ars_compile k = { root, owner, cc, cflags,
+                                   unity ? "" : ldflags, depfile, unity };
+    struct ars_miss m = {0};
+    struct zcl_action_root_result result = {0};
+    bool ok = ars_hook_derive(&k, &result, &m);
+    if (ok)
+        (void)snprintf(root_hex, 65, "%s", result.root_hex);
+    else
+        (void)snprintf(miss, 40, "%s", m.code[0] ? m.code : "unclassified");
+    zcl_action_root_result_free(&result);
+    return ok;
+}
+
 void zcl_devloop_action_root_emit(
     struct json_value *receipt_json,
     const struct zcl_devloop_hotswap_build_receipt *build)
 {
-    if (!receipt_json || !build ||
-        (!build->action_root[0] && !build->action_root_miss[0]))
+    if (!receipt_json || !build)
+        return;
+    if (build->cache_key_action_root[0] || build->cache_key_miss[0]) {
+        (void)json_push_kv_str(receipt_json, "artifact_cache_key_schema",
+                               "zcl.dev_artifact_cache.hotswap.v2");
+        if (build->cache_key_action_root[0])
+            (void)json_push_kv_str(receipt_json,
+                                   "artifact_cache_key_action_root",
+                                   build->cache_key_action_root);
+        else
+            (void)json_push_kv_str(receipt_json, "artifact_cache_key_miss",
+                                   build->cache_key_miss);
+        (void)json_push_kv_int(receipt_json, "artifact_cache_key_us",
+                               build->cache_key_us);
+    }
+    if (!build->action_root[0] && !build->action_root_miss[0])
         return;
     (void)json_push_kv_str(receipt_json, "action_root_schema",
                            VCS_ACTION_PREIMAGE_V2_MAGIC);

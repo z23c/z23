@@ -176,7 +176,7 @@ static void av2_get_lookup(struct av2_reader *r, struct av2_storage *s,
                            struct vcs_action_lookup_v2 *l)
 {
     l->name = av2_get_text(r, s);
-    l->hit_dir = av2_get_text(r, s);
+    l->hit_dir = av2_get_text_any(r, s, true); /* "" = conditional lookup */
     l->search_prefix = av2_get_u32(r);
     struct vcs_action_present_v2 *p =
         av2_get_array(r, &l->present_count, sizeof(*p), 5);

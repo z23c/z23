@@ -762,20 +762,62 @@ static bool hs_normalize_root(const char *text, const char *root,
     return true;
 }
 
+/* The compile a cache key names, for its action root: the source TU the
+ * compiler is told about, the HOT_FORK capsule unity (NULL for a hot-swap
+ * module), and the depfile whose closure the key binds. */
+struct hs_key_action {
+    const char *source_tu;
+    const char *unity;
+    const char *depfile;
+};
+
+/* Derive the action root (devloop_action_root.h) the key binds: it adds the
+ * ordered include lookups that had to miss, conditional include tests, the
+ * normalized argv, the allowlisted environment and the toolchain and driver
+ * bytes to the positive closure below. No root means no key: the caller
+ * compiles and shares nothing through the cache. */
+static bool hs_cache_key_root(const struct hs_action_plan *plan,
+                              const char *root,
+                              const struct hs_key_action *action,
+                              struct zcl_devloop_hotswap_build_receipt *receipt,
+                              char root_hex[65])
+{
+    char miss[40];
+    int64_t started = platform_time_monotonic_us();
+    bool ok = zcl_devloop_action_root_key(
+        root, action->source_tu, plan->cc, plan->cflags, plan->ldflags,
+        action->unity, action->depfile, root_hex, miss);
+    receipt->cache_key_us += platform_time_monotonic_us() - started;
+    if (ok)
+        (void)snprintf(receipt->cache_key_action_root,
+                       sizeof(receipt->cache_key_action_root), "%s",
+                       root_hex);
+    else if (!receipt->cache_key_miss[0])
+        (void)snprintf(receipt->cache_key_miss,
+                       sizeof(receipt->cache_key_miss), "%s", miss);
+    return ok;
+}
+
 static bool hs_cache_key(const struct hs_action_plan *plan,
                          const char *root, const char *owner,
                          const struct hs_dep *deps, size_t dep_count,
+                         const struct hs_key_action *action,
+                         struct zcl_devloop_hotswap_build_receipt *receipt,
                          char out[65])
 {
-    static const char domain[] = "zcl.dev_artifact_cache.hotswap.v1";
-    char normalized_cflags[HS_PLAN_TEXT_MAX];
+    /* v2: v1 keys bound only the positive closure, so a header appearing
+     * earlier in the search order served a stale object; they never hit. */
+    static const char domain[] = "zcl.dev_artifact_cache.hotswap.v2";
+    char normalized_cflags[HS_PLAN_TEXT_MAX], action_root[65];
     if (!hs_normalize_root(plan->cflags, root, normalized_cflags,
-                           sizeof(normalized_cflags)))
+                           sizeof(normalized_cflags)) ||
+        !hs_cache_key_root(plan, root, action, receipt, action_root))
         return false;
     struct sha256_ctx ctx;
     unsigned char digest[SHA256_OUTPUT_SIZE];
     sha256_init(&ctx);
     hs_key_field(&ctx, "domain", domain, sizeof(domain) - 1);
+    hs_key_field(&ctx, "action_root", action_root, strlen(action_root));
     hs_key_field(&ctx, "compiler", plan->compiler_id,
                  strlen(plan->compiler_id));
     hs_key_field(&ctx, "cc", plan->cc, strlen(plan->cc));
@@ -1581,7 +1623,8 @@ bool zcl_devloop_hotswap_build(
         platform_time_monotonic_us() - dependency_started;
     if (have_baseline &&
         hs_cache_key(&plan, root, owner, before, before_n,
-                     receipt->artifact_cache_key) &&
+                     &(const struct hs_key_action){ owner, NULL, cached_dep },
+                     receipt, receipt->artifact_cache_key) &&
         hs_cache_root(cache_root)) {
         int64_t lookup_started = platform_time_monotonic_us();
         receipt->key_us = lookup_started - started;
@@ -1641,17 +1684,17 @@ bool zcl_devloop_hotswap_build(
     if (!have_baseline) {
         memcpy(before, after, after_n * sizeof(*after));
         before_n = after_n;
-        if (!hs_cache_key(&plan, root, owner, before, before_n,
-                          receipt->artifact_cache_key) ||
-            !hs_cache_root(cache_root)) {
-            free(before);
-            free(after);
-            hs_why(why, why_len,
-                   "could not bind cold dependency closure");
-            goto fail;
-        }
-        cache_fd = hs_cache_lock(cache_root, receipt->artifact_cache_key,
-                                 cache_obj, cache_so, cache_hash);
+        /* No complete action root, no key: compile uncached (MISS). The
+         * second compile below still proves the discovered closure. */
+        bool keyed = hs_cache_key(
+                         &plan, root, owner, before, before_n,
+                         &(const struct hs_key_action){ owner, NULL, tmp_d },
+                         receipt, receipt->artifact_cache_key) &&
+                     hs_cache_root(cache_root);
+        cache_fd = keyed ? hs_cache_lock(cache_root,
+                                         receipt->artifact_cache_key,
+                                         cache_obj, cache_so, cache_hash)
+                         : -1;
         if (cache_fd >= 0 &&
             hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
                             receipt)) {
@@ -1712,7 +1755,9 @@ bool zcl_devloop_hotswap_build(
                                     why, why_len);
     char post_key[65] = {0};
     if (stable && receipt->artifact_cache_key[0] &&
-        (!hs_cache_key(&plan, root, owner, after, after_n, post_key) ||
+        (!hs_cache_key(&plan, root, owner, after, after_n,
+                       &(const struct hs_key_action){ owner, NULL, cached_dep },
+                       receipt, post_key) ||
          strcmp(post_key, receipt->artifact_cache_key) != 0)) {
         hs_why(why, why_len,
                "artifact cache key changed across dependency verification");
@@ -2238,7 +2283,9 @@ static bool hs_hotfork_build(
         platform_time_monotonic_us() - dependency_started;
     if (have_baseline &&
         hs_cache_key(&plan, root, key_owner, before, before_n,
-                     receipt->artifact_cache_key) &&
+                     &(const struct hs_key_action){ def->source_tu, unity,
+                                                    cached_dep },
+                     receipt, receipt->artifact_cache_key) &&
         hs_cache_root_for("hotfork-v1", cache_root)) {
         int64_t lookup_started = platform_time_monotonic_us();
         receipt->key_us = lookup_started - started;
@@ -2279,16 +2326,17 @@ static bool hs_hotfork_build(
     if (!have_baseline) {
         memcpy(before, after, after_n * sizeof(*after));
         before_n = after_n;
-        if (!hs_cache_key(&plan, root, key_owner, before, before_n,
-                          receipt->artifact_cache_key) ||
-            !hs_cache_root_for("hotfork-v1", cache_root)) {
-            free(before); free(after);
-            hs_why(why, why_len,
-                   "could not bind cold HOT_FORK dependency closure");
-            goto fail;
-        }
-        cache_fd = hs_cache_lock(cache_root, receipt->artifact_cache_key,
-                                 cache_obj, cache_so, cache_hash);
+        /* No complete action root, no key: compile uncached (MISS). */
+        bool keyed = hs_cache_key(
+                         &plan, root, key_owner, before, before_n,
+                         &(const struct hs_key_action){ def->source_tu,
+                                                        unity, dep },
+                         receipt, receipt->artifact_cache_key) &&
+                     hs_cache_root_for("hotfork-v1", cache_root);
+        cache_fd = keyed ? hs_cache_lock(cache_root,
+                                         receipt->artifact_cache_key,
+                                         cache_obj, cache_so, cache_hash)
+                         : -1;
         if (cache_fd >= 0 &&
             hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
                             receipt)) {
@@ -2335,7 +2383,10 @@ static bool hs_hotfork_build(
                                     why, why_len);
     char post_key[65] = {0};
     if (stable && receipt->artifact_cache_key[0] &&
-        (!hs_cache_key(&plan, root, key_owner, after, after_n, post_key) ||
+        (!hs_cache_key(&plan, root, key_owner, after, after_n,
+                       &(const struct hs_key_action){ def->source_tu, unity,
+                                                      cached_dep },
+                       receipt, post_key) ||
          strcmp(post_key, receipt->artifact_cache_key) != 0))
         stable = false;
     free(before); free(after);

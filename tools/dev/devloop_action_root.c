@@ -275,6 +275,7 @@ struct ar_memo {
     uint64_t dev, ino, size;
     int64_t mtime_s, mtime_ns, ctime_s, ctime_ns;
     uint8_t sha3[32];
+    bool conditional; /* the bytes spell a conditional include test */
 };
 
 static pthread_mutex_t g_memo_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -319,7 +320,7 @@ static size_t ar_memo_slot(const char *path)
 }
 
 static bool ar_memo_lookup(const char *path, const struct ar_memo *key,
-                           uint8_t sha3[32])
+                           uint8_t sha3[32], bool *conditional)
 {
     size_t base = ar_memo_slot(path);
     bool hit = false;
@@ -327,8 +328,10 @@ static bool ar_memo_lookup(const char *path, const struct ar_memo *key,
     for (size_t k = 0; k < AR_MEMO_PROBE && !hit; k++) {
         const struct ar_memo *m = &g_memo[(base + k) % AR_MEMO_SLOTS];
         hit = m->path && strcmp(m->path, path) == 0 && ar_memo_same(m, key);
-        if (hit)
+        if (hit) {
             memcpy(sha3, m->sha3, 32);
+            *conditional = m->conditional;
+        }
     }
     pthread_mutex_unlock(&g_memo_mu);
     return hit;
@@ -336,7 +339,7 @@ static bool ar_memo_lookup(const char *path, const struct ar_memo *key,
 
 /* Reuse the path's slot, else a free one, else the last probed slot. */
 static void ar_memo_store(const char *path, const struct ar_memo *key,
-                          const uint8_t sha3[32])
+                          const uint8_t sha3[32], bool conditional)
 {
     size_t base = ar_memo_slot(path);
     pthread_mutex_lock(&g_memo_mu);
@@ -352,20 +355,68 @@ static void ar_memo_store(const char *path, const struct ar_memo *key,
         *slot = *key;
         slot->path = copy;
         memcpy(slot->sha3, sha3, 32);
+        slot->conditional = conditional;
     } else {
         free(copy);
     }
     pthread_mutex_unlock(&g_memo_mu);
 }
 
-static bool ar_sha3_stream(FILE *f, uint8_t out[32])
+/* ---- conditional include tests ----------------------------------------- */
+
+/* __has_include, __has_include_next and __has_embed ask whether a name
+ * resolves without necessarily adding it to the depfile, so the closure
+ * alone cannot bind their answer. A file that spells one is re-read for the
+ * names it asks about (see ar_cond_lookups_build). Length of the longest
+ * word ("__has_include") minus one bytes carry across read chunks. */
+#define AR_COND_CARRY 12u
+
+static bool ar_ident_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Length of the conditional-test word starting at text[i], else 0. */
+static size_t ar_cond_word(const char *text, size_t len, size_t i)
+{
+    static const char *const words[] = {
+        "__has_include_next", "__has_include", "__has_embed",
+    };
+    if (text[i] != '_' || (i > 0 && ar_ident_char(text[i - 1])))
+        return 0;
+    for (size_t w = 0; w < sizeof(words) / sizeof(words[0]); w++) {
+        size_t n = strlen(words[w]);
+        if (i + n <= len && memcmp(text + i, words[w], n) == 0 &&
+            (i + n == len || !ar_ident_char(text[i + n])))
+            return n;
+    }
+    return 0;
+}
+
+static bool ar_cond_present(const char *text, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (ar_cond_word(text, len, i))
+            return true;
+    return false;
+}
+
+static bool ar_sha3_stream(FILE *f, uint8_t out[32], bool *conditional)
 {
     struct sha3_256_ctx sha;
-    unsigned char buf[65536];
-    size_t n;
+    char buf[AR_COND_CARRY + 65536];
+    size_t n, carry = 0;
     sha3_256_init(&sha);
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-        sha3_256_write(&sha, buf, n);
+    *conditional = false;
+    while ((n = fread(buf + carry, 1, sizeof(buf) - carry, f)) > 0) {
+        sha3_256_write(&sha, (const unsigned char *)buf + carry, n);
+        size_t window = carry + n;
+        if (!*conditional)
+            *conditional = ar_cond_present(buf, window);
+        carry = window < AR_COND_CARRY ? window : AR_COND_CARRY;
+        memmove(buf, buf + window - carry, carry);
+    }
     if (ferror(f))
         return false;
     sha3_256_finalize(&sha, out);
@@ -373,20 +424,22 @@ static bool ar_sha3_stream(FILE *f, uint8_t out[32])
 }
 
 /* SHA3-256 of a regular file's bytes, memoized by (dev, ino, size, mtime,
- * ctime) once the file has settled. */
-static bool ar_sha3_file(const char *path, uint8_t out[32])
+ * ctime) once the file has settled, and whether those bytes spell a
+ * conditional include test. */
+static bool ar_sha3_file_scan(const char *path, uint8_t out[32],
+                              bool *conditional)
 {
     struct stat before, after;
     struct ar_memo key = {0};
     if (stat(path, &before) != 0 || !S_ISREG(before.st_mode))
         return false;
     ar_memo_key(&before, &key);
-    if (ar_memo_lookup(path, &key, out))
+    if (ar_memo_lookup(path, &key, out, conditional))
         return true;
     FILE *f = fopen(path, "rb");
     if (!f)
         return false;
-    bool ok = ar_sha3_stream(f, out);
+    bool ok = ar_sha3_stream(f, out, conditional);
     fclose(f);
     struct ar_memo again = {0};
     if (!ok || stat(path, &after) != 0)
@@ -395,8 +448,14 @@ static bool ar_sha3_file(const char *path, uint8_t out[32])
     if (!ar_memo_same(&key, &again))
         return false; /* changed while hashing: no stable identity */
     if (platform_time_wall_unix() - key.mtime_s >= AR_MEMO_SETTLE_S)
-        ar_memo_store(path, &key, out);
+        ar_memo_store(path, &key, out, *conditional);
     return true;
+}
+
+static bool ar_sha3_file(const char *path, uint8_t out[32])
+{
+    bool conditional = false;
+    return ar_sha3_file_scan(path, out, &conditional);
 }
 
 static char *ar_read_all(const char *path, size_t max, size_t *len)
@@ -420,23 +479,36 @@ static char *ar_read_all(const char *path, size_t max, size_t *len)
 /* Generated inputs may spell the checkout root (a unity wrapper includes
  * members by absolute path); hash them with the root rewritten to @root so
  * the same generation in another worktree has the same identity. */
-static bool ar_sha3_generated(const struct ar_ctx *c, const char *path,
-                              uint8_t out[32])
+static bool ar_sha3_generated_text(const struct ar_ctx *c, const char *text,
+                                   size_t len, uint8_t out[32])
 {
-    size_t len = 0;
-    char *text = ar_read_all(path, AR_GENERATED_MAX, &len);
-    if (!text || memchr(text, '\0', len)) {
-        free(text);
+    if (memchr(text, '\0', len))
         return false;
-    }
     size_t cap = 2 * len + 64;
     char *norm = zcl_malloc(cap, "action root generated text");
     bool ok = norm && ar_rewrite(c, text, norm, cap);
     if (ok)
         zcl_sha3_256((const unsigned char *)norm, strlen(norm), out);
     free(norm);
+    return ok;
+}
+
+static bool ar_sha3_generated_scan(const struct ar_ctx *c, const char *path,
+                                   uint8_t out[32], bool *conditional)
+{
+    size_t len = 0;
+    char *text = ar_read_all(path, AR_GENERATED_MAX, &len);
+    bool ok = text && ar_sha3_generated_text(c, text, len, out);
+    *conditional = ok && ar_cond_present(text, len);
     free(text);
     return ok;
+}
+
+static bool ar_sha3_generated(const struct ar_ctx *c, const char *path,
+                              uint8_t out[32])
+{
+    bool conditional = false;
+    return ar_sha3_generated_scan(c, path, out, &conditional);
 }
 
 /* ---- dependency closure ------------------------------------------------ */
@@ -448,6 +520,7 @@ struct ar_dep {
     char token[PATH_MAX];
     char fs[PATH_MAX];
     bool generated;
+    bool conditional; /* spells a conditional include test */
     uint8_t sha3[32];
 };
 
@@ -474,6 +547,7 @@ struct ar_state {
     struct ar_list includers_fs;
     struct ar_lookup *lookups;
     size_t lookup_n, lookup_cap;
+    struct ar_list cond_names;   /* conditional-test names, first seen */
     struct vcs_action_present_v2 *present;
     size_t present_n, present_cap;
     struct ar_list argv;
@@ -521,7 +595,7 @@ static bool ar_virtual_dep_add(struct ar_state *s)
     }
     (void)snprintf(d->fs, PATH_MAX, "%s", req->virtual_input_path);
     d->generated = true;
-    if (!ar_sha3_generated(&s->c, d->fs, d->sha3)) {
+    if (!ar_sha3_generated_scan(&s->c, d->fs, d->sha3, &d->conditional)) {
         ar_dep_miss(s, d);
         return false;
     }
@@ -569,8 +643,9 @@ static bool ar_dep_add(struct ar_state *s, const char *raw)
     if (ar_dep_seen(s, d->token))
         return true;
     d->generated = strncmp(d->token, "build/", 6) == 0;
-    bool hashed = d->generated ? ar_sha3_generated(&s->c, d->fs, d->sha3)
-                               : ar_sha3_file(d->fs, d->sha3);
+    bool hashed = d->generated
+        ? ar_sha3_generated_scan(&s->c, d->fs, d->sha3, &d->conditional)
+        : ar_sha3_file_scan(d->fs, d->sha3, &d->conditional);
     if (!hashed) {
         ar_dep_miss(s, d);
         return false;
@@ -671,6 +746,7 @@ static bool ar_search_flag_unsupported(const char *arg)
     static const char *const refused[] = {
         "-nostdinc", "--sysroot", "-isysroot", "-iprefix", "-iwithprefix",
         "-imultilib", "-B", "-specs", "--specs", "-fuse-ld", "--ld-path",
+        "--embed-dir",
     };
     if (strcmp(arg, "-I-") == 0)
         return true;
@@ -894,6 +970,100 @@ static bool ar_lookups_build(struct ar_state *s)
                     "dependency has no include lookup", s->deps[i].token);
             return false;
         }
+    return true;
+}
+
+/* ---- conditional lookups ----------------------------------------------- */
+
+#define AR_COND_TEXT_MAX (16u * 1024u * 1024u)
+
+static bool ar_cond_name_add(struct ar_state *s, const char *name, size_t n)
+{
+    char text[AR_TEXT_MAX];
+    if (n == 0 || n >= sizeof(text))
+        return false;
+    memcpy(text, name, n);
+    text[n] = '\0';
+    if (!vcs_action_v2_name_canonical(text))
+        return false;
+    for (size_t i = 0; i < s->cond_names.n; i++)
+        if (strcmp(s->cond_names.v[i], text) == 0)
+            return true;
+    return ar_list_push(&s->cond_names, text);
+}
+
+static size_t ar_skip_space(const char *text, size_t len, size_t j)
+{
+    while (j < len && (text[j] == ' ' || text[j] == '\t'))
+        j++;
+    return j;
+}
+
+/* One conditional test at text[i] (word length w). A bare word (#ifdef
+ * __has_include, defined(__has_include)) asks nothing; a literal "name" or
+ * <name> is recorded; any other argument (a macro) cannot be bound. Returns
+ * the index to resume at, or 0 on a miss. */
+static size_t ar_cond_test(struct ar_state *s, const char *text, size_t len,
+                           size_t i, size_t w, const char *token)
+{
+    size_t j = ar_skip_space(text, len, i + w);
+    if (j >= len || text[j] != '(')
+        return j;
+    j = ar_skip_space(text, len, j + 1);
+    char close = j < len && text[j] == '"' ? '"'
+               : j < len && text[j] == '<' ? '>' : 0;
+    size_t start = j + 1, end = start;
+    while (close && end < len && text[end] != close && text[end] != '\n')
+        end++;
+    if (!close || end >= len || text[end] != close ||
+        !ar_cond_name_add(s, text + start, end - start)) {
+        ar_fail(&s->c, "conditional_lookup_unbound",
+                "conditional include test has no literal header name", token);
+        return 0;
+    }
+    return end;
+}
+
+/* Re-read one dependency that spells a conditional test; the bytes read
+ * must be the bytes the closure hashed. */
+static bool ar_cond_scan_dep(struct ar_state *s, const struct ar_dep *d)
+{
+    size_t len = 0;
+    uint8_t sha3[32];
+    char *text = ar_read_all(d->fs, AR_COND_TEXT_MAX, &len);
+    bool ok = text && (d->generated
+                           ? ar_sha3_generated_text(&s->c, text, len, sha3)
+                           : (zcl_sha3_256((const unsigned char *)text, len,
+                                           sha3), true)) &&
+              memcmp(sha3, d->sha3, 32) == 0;
+    if (!ok)
+        ar_fail(&s->c, "dependency_unreadable",
+                "dependency changed while its conditional tests were read",
+                d->token);
+    for (size_t i = 0; ok && i < len; i++) {
+        size_t w = ar_cond_word(text, len, i);
+        if (w) {
+            size_t next = ar_cond_test(s, text, len, i, w, d->token);
+            ok = next != 0;
+            i = next;
+        }
+    }
+    free(text);
+    return ok;
+}
+
+/* Every name a conditional test in the closure asks about becomes one
+ * conditional lookup (vcs_action_lookup_v2, hit_dir ""), probed at every
+ * includer and search dir, after the ordinary lookups. */
+static bool ar_cond_lookups_build(struct ar_state *s)
+{
+    for (size_t i = 0; i < s->dep_n; i++)
+        if (s->deps[i].conditional && !ar_cond_scan_dep(s, &s->deps[i]))
+            return false;
+    for (size_t i = 0; i < s->cond_names.n; i++)
+        if (!ar_lookup_add(s, s->cond_names.v[i], "",
+                           (uint32_t)s->search.n))
+            return false;
     return true;
 }
 
@@ -1287,6 +1457,7 @@ static void ar_state_free(struct ar_state *s)
     ar_list_free(&s->includers);
     ar_list_free(&s->includers_fs);
     free(s->lookups);
+    ar_list_free(&s->cond_names);
     free(s->present);
     ar_list_free(&s->argv);
     ar_list_free(&s->link_argv);
@@ -1320,7 +1491,7 @@ static bool ar_derive_steps(struct ar_state *s,
 {
     return ar_depfile_load(s) && ar_search_build(s) &&
            ar_includers_build(s) && ar_lookups_build(s) &&
-           ar_probes_run(s) &&
+           ar_cond_lookups_build(s) && ar_probes_run(s) &&
            ar_argv_list(s, &s->argv, s->c.req->argv, s->c.req->argc) &&
            ar_env_build(s) && ar_sysroot_build(s) && ar_linker_build(s) &&
            ar_encode(s, out);
@@ -1380,4 +1551,9 @@ void zcl_action_root_result_free(struct zcl_action_root_result *out)
     free(out->preimage);
     out->preimage = NULL;
     out->preimage_len = 0;
+}
+
+bool zcl_action_root_file_sha3(const char *path, uint8_t out[32])
+{
+    return path && out && ar_sha3_file(path, out);
 }

@@ -17,6 +17,12 @@
  * location is asserted absent, or what is there is recorded. A header that
  * later appears earlier in the search order therefore changes the root
  * before anything recompiles.
+ *
+ * Conditional tests. __has_include, __has_include_next and __has_embed can
+ * change what compiles without adding a dependency. Every closure file that
+ * spells one is re-read; each literal name it asks about is one conditional
+ * lookup probed at every includer and search dir. A test whose argument is
+ * not a literal name misses (conditional_lookup_unbound).
  */
 
 #ifndef ZCL_DEVLOOP_ACTION_ROOT_H
@@ -109,7 +115,8 @@ struct zcl_action_root_request {
  * dependency_outside_repo, dependency_missing, dependency_unreadable,
  * dependency_duplicate, producer_unknown, include_dir_outside_repo,
  * search_class_conflict, search_too_large, search_flag_unsupported,
- * includer_unavailable, lookup_unavailable, probe_unreadable,
+ * includer_unavailable, lookup_unavailable, conditional_lookup_unbound,
+ * probe_unreadable,
  * probe_overflow, argv_noncanonical, env_duplicate, env_noncanonical,
  * builtin_dir_noncanonical, sysroot_noncanonical, linker_unavailable,
  * linker_missing, encode_refused, out_of_memory. The hooks add
@@ -137,6 +144,9 @@ struct zcl_action_root_result {
 bool zcl_action_root_derive(const struct zcl_action_root_request *req,
                             struct zcl_action_root_result *out);
 void zcl_action_root_result_free(struct zcl_action_root_result *out);
+/* SHA3-256 of a regular file's bytes, memoized by its stat identity once
+ * settled (the same digest the derivation records). */
+bool zcl_action_root_file_sha3(const char *path, uint8_t out[32]);
 
 /* <ZCL_DEV_ARTIFACT_CACHE or ~/.cache/zclassic23/dev-artifacts>/
  * action-preimage-v2, created if absent. */
@@ -173,6 +183,15 @@ void zcl_devloop_action_root_hotfork(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *unity, const char *depfile,
     struct zcl_devloop_hotswap_build_receipt *receipt);
+/* The root the hot-swap / HOT_FORK artifact cache key binds: the same
+ * derivation as the hooks above (`unity` NULL for a hot-swap module, the
+ * live capsule unity for HOT_FORK), over the given depfile, never stored.
+ * False with a stable miss code (above) whenever any input cannot be bound
+ * completely; the caller then compiles and caches nothing, never keys. */
+bool zcl_devloop_action_root_key(
+    const char *root, const char *owner, const char *cc, const char *cflags,
+    const char *ldflags, const char *unity, const char *depfile,
+    char root_hex[65], char miss[40]);
 /* Append the action_root* fields to a zcl.hotswap_build_receipt.v1 object. */
 struct json_value;
 void zcl_devloop_action_root_emit(

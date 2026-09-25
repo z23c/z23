@@ -306,7 +306,15 @@ struct vcs_action_present_v2 {
  * is asserted ABSENT unless it is listed in `present` (strictly increasing
  * slots). A search hit has search_dirs[search_prefix] == hit_dir; an
  * includer hit has search_prefix == 0. Lookups keep derivation order (the
- * compiler's inclusion order); a repeated (hit_dir, name) is refused. */
+ * compiler's inclusion order); a repeated (hit_dir, name) is refused.
+ *
+ * A conditional lookup (a __has_include / __has_include_next / __has_embed
+ * name, whose answer need not add a dependency) has hit_dir "" (encoded as
+ * empty text) and search_prefix == search_dir_count: its probe sequence is
+ * every includer dir, then every search dir, and nothing is excluded. What
+ * exists there is listed in `present`; everything else is asserted ABSENT,
+ * so a header that appears anywhere the test could have found it moves the
+ * root. */
 struct vcs_action_lookup_v2 {
     const char *name;
     const char *hit_dir;
