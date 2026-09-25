@@ -16,8 +16,10 @@
  *   - a regression that is not red, or that replaces the accepted green root;
  *   - a hang or crash that takes the runner down with it;
  *   - a socket or new executable mapping that is permitted;
- *   - io_uring (network past the syscall filter), pidfd_open/kill on the
- *     runner, or fork/execve from a constructor or story that is permitted;
+ *   - io_uring (network past the syscall filter), pidfd_open or kill that the
+ *     runner's startup probes see permitted (the runner then refuses hello);
+ *   - pidfd_open/kill on the runner, or fork/execve from a constructor or
+ *     story, permitted to candidate code;
  *   - any unconfined fallback when the artifact cannot be sealed/verified.
  */
 
@@ -279,14 +281,16 @@ static bool rr_escape_contained(const struct rr_case *c)
         (c->out.child_signal == SIGSYS || refused);
 }
 
-/* io_uring would carry socket/connect past the syscall filter; pidfd and
- * kill reach the runner itself; fork/exec from the constructor (at dlopen)
- * or the story would leave the confined leaf. Every one is contained and the
- * SAME runner serves the next candidate green. */
+/* io_uring would carry socket/connect past the syscall filter: the runner
+ * proves at startup, under exactly the leaf filter stack, that
+ * io_uring_setup, pidfd_open and kill are killed, or it never says hello.
+ * Candidate code then tries pidfd and kill on the runner itself, and fork/exec
+ * from the constructor (at dlopen) or the story. Every one is contained and
+ * the SAME runner serves the next candidate green. */
 static int t_kernel_escape_surfaces_are_denied(void)
 {
     static const char *const kinds[] = {
-        "iouring", "pidfd", "killparent", "forkctor", "forkstory",
+        "pidfd", "killparent", "forkctor", "forkstory",
         "execctor", "execstory",
     };
     int failures = 0;
@@ -295,6 +299,7 @@ static int t_kernel_escape_surfaces_are_denied(void)
         struct rr_case warm;
         ASSERT(rr_run(&warm, "green", 1000));
         ASSERT(warm.out.green);
+        ASSERT_EQ(warm.out.runner_deny_probes, ZCL_REFLEX_DENY_PROBES);
         for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
             struct rr_case c;
             ASSERT(rr_run(&c, kinds[i], 1000));

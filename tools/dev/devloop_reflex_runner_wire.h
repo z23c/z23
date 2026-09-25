@@ -13,7 +13,10 @@
 
 #define ZCL_REFLEX_WIRE_MAGIC UINT32_C(0x5a524e31)   /* "ZRN1" */
 #define ZCL_REFLEX_REPORT_MAGIC UINT32_C(0x5a524352) /* "ZRCR" */
-#define ZCL_REFLEX_WIRE_ABI 1u
+#define ZCL_REFLEX_WIRE_ABI 2u
+/* Kernel-surface probes the runner must see killed (SIGSYS) under the leaf
+ * filters before it may serve: io_uring_setup, pidfd_open, kill. */
+#define ZCL_REFLEX_DENY_PROBES 3u
 
 enum zcl_reflex_frame_kind {
     ZCL_REFLEX_FRAME_HELLO = 1,
@@ -36,6 +39,7 @@ struct zcl_reflex_hello {
     uint32_t env_count;
     uint32_t fd_count;
     uint64_t resident_canary_seen;
+    uint32_t deny_probes_killed; /* of ZCL_REFLEX_DENY_PROBES */
 };
 
 struct zcl_reflex_request {

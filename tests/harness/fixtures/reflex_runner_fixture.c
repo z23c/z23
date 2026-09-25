@@ -14,8 +14,9 @@
  *   segv    — crashes with SIGSEGV
  *   socket  — asks for a socket; the seccomp session deny-list kills it
  *   wx      — asks for new executable memory after load; W^X kills it
- *   iouring    — io_uring_setup (a ring would issue socket/connect past the
- *                syscall filter); the runner deny layer kills it
+ *   (io_uring_setup is probed by the runner itself at startup, under exactly
+ *   this leaf filter stack: a tracked fixture may not hand-roll a raw
+ *   system call.)
  *   pidfd      — pidfd_open(getppid()) on the runner; killed
  *   killparent — kill(getppid(), SIGKILL); killed, and the runner survives
  *   forkctor / forkstory — fork() from the constructor / the story; killed
@@ -41,16 +42,10 @@
 #include <sys/mman.h>
 #include <signal.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <unistd.h>
-
-/* Generic-table numbers (identical on every Linux arch since 5.1/5.3), for
- * libc headers that predate them. */
-#ifndef SYS_io_uring_setup
-#define SYS_io_uring_setup 425
-#endif
-#ifndef SYS_pidfd_open
-#define SYS_pidfd_open 434
+#if __has_include(<sys/pidfd.h>)
+#include <sys/pidfd.h> /* glibc >= 2.36 wraps pidfd_open */
+#define ZCL_REFLEX_FIXTURE_HAVE_PIDFD 1
 #endif
 
 /* Escape probes: `rc` is the syscall's return. Success means the sandbox let
@@ -218,8 +213,7 @@ static bool fixture_story(struct zcl_hotfork_observation_v1 *out)
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     return fixture_finish(out, 1, page == MAP_FAILED ? 1u : 0u,
                           "exec mapping returned");
-#elif defined(ZCL_REFLEX_FIXTURE_KIND_iouring) || \
-    defined(ZCL_REFLEX_FIXTURE_KIND_pidfd) || \
+#elif defined(ZCL_REFLEX_FIXTURE_KIND_pidfd) || \
     defined(ZCL_REFLEX_FIXTURE_KIND_killparent) || \
     defined(ZCL_REFLEX_FIXTURE_KIND_forkstory) || \
     defined(ZCL_REFLEX_FIXTURE_KIND_execstory) || \
@@ -227,13 +221,14 @@ static bool fixture_story(struct zcl_hotfork_observation_v1 *out)
     defined(ZCL_REFLEX_FIXTURE_KIND_execctor)
     char detail[96];
     errno = 0;
-#if defined(ZCL_REFLEX_FIXTURE_KIND_iouring)
-    unsigned char params[120] = {0}; /* struct io_uring_params, zeroed */
-    bool escaped = escape_detail(syscall(SYS_io_uring_setup, 8u, params),
-                                 "io_uring_setup", detail, sizeof(detail));
+#if defined(ZCL_REFLEX_FIXTURE_KIND_pidfd) && \
+    defined(ZCL_REFLEX_FIXTURE_HAVE_PIDFD)
+    bool escaped = escape_detail(pidfd_open(getppid(), 0u), "pidfd_open",
+                                 detail, sizeof(detail));
 #elif defined(ZCL_REFLEX_FIXTURE_KIND_pidfd)
-    bool escaped = escape_detail(syscall(SYS_pidfd_open, getppid(), 0u),
-                                 "pidfd_open", detail, sizeof(detail));
+    errno = ENOSYS; /* libc without a wrapper; the runner's startup probe
+                       still proves pidfd_open is killed */
+    bool escaped = escape_detail(-1, "pidfd_open", detail, sizeof(detail));
 #elif defined(ZCL_REFLEX_FIXTURE_KIND_killparent)
     bool escaped = escape_detail(kill(getppid(), SIGKILL), "kill_parent",
                                  detail, sizeof(detail));

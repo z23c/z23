@@ -169,9 +169,12 @@ ONLY=reflex_runner` proves the runner with hostile fixture images:
   the constructor and in the story.
 - A regression goes red and leaves the last green root unchanged.
 - An infinite loop and a `SIGSEGV` go red, and the same runner survives both.
-- Socket and W^X attempts end in `SIGSYS`. So do io_uring,
-  `pidfd_open(getppid())`, `kill(getppid())`, and fork or execve from the
-  constructor or the story.
+- Socket and W^X attempts end in `SIGSYS`. So do `pidfd_open(getppid())`,
+  `kill(getppid())`, and fork or execve from the constructor or the story.
+- Before it serves anything, the runner forks one probe per surface under
+  exactly the leaf filters: `io_uring_setup`, `pidfd_open` and `kill`. Each
+  probe must die by `SIGSYS`. Otherwise the runner sends no hello, and the
+  resident reports it unavailable.
 - A digest mismatch fails closed.
 
 ## Dependency map and latency firewall

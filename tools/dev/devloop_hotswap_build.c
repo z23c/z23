@@ -2538,6 +2538,8 @@ static void hs_runner_receipt(struct json_value *response,
     (void)json_push_kv_bool(response, "runner_available", run->available);
     (void)json_push_kv_bool(response, "runner_warm", run->runner_warm);
     (void)json_push_kv_int(response, "runner_pid", run->runner_pid);
+    (void)json_push_kv_int(response, "runner_deny_probes_killed",
+                           run->runner_deny_probes);
     (void)json_push_kv_int(response, "env_inherited_count",
                            run->env_inherited_count);
     (void)json_push_kv_int(response, "inherited_fd_count",

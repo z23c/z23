@@ -47,6 +47,22 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+
+/* Generic-table numbers (identical on every Linux arch) for libc headers that
+ * predate them, so the deny layer can never silently omit io_uring or pidfd
+ * and the startup probe always tests the real syscall. */
+#ifndef SYS_io_uring_setup
+#define SYS_io_uring_setup 425
+#endif
+#ifndef SYS_io_uring_enter
+#define SYS_io_uring_enter 426
+#endif
+#ifndef SYS_io_uring_register
+#define SYS_io_uring_register 427
+#endif
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
 #endif
 
 #if defined(__linux__)
@@ -217,6 +233,21 @@ static const int g_leaf_denied[] = {
     SYS_rt_tgsigqueueinfo, SYS_setsid, SYS_setpgid,
 };
 
+/* Every candidate leaf's syscall filters: the shared session deny-set, the
+ * runner layer again (already inherited; re-installing keeps the leaf
+ * self-sufficient if a future runner variant ever skipped it) and the
+ * leaf-only signalling layer. The runner's startup probes use exactly this. */
+static bool child_install_filters(void)
+{
+    size_t denied_count = 0;
+    const int *denied = os_sandbox_session_denied_syscalls(&denied_count);
+    return os_sandbox_seccomp_deny(denied, denied_count, false).ok &&
+        os_sandbox_seccomp_deny(g_runner_denied, sizeof(g_runner_denied) /
+                                sizeof(g_runner_denied[0]), false).ok &&
+        os_sandbox_seccomp_deny(g_leaf_denied, sizeof(g_leaf_denied) /
+                                sizeof(g_leaf_denied[0]), false).ok;
+}
+
 static bool child_confine(struct zcl_reflex_child_report *report,
                           const struct zcl_reflex_request *request,
                           int image_fd, int report_fd, int runner_pid)
@@ -239,18 +270,8 @@ static bool child_confine(struct zcl_reflex_child_report *report,
      * not see it either. */
     if (!zcl_reflex_close_all_except(keep, 2))
         return child_note(report, "fds", "ruleset close failed"), false;
-    size_t denied_count = 0;
-    const int *denied = os_sandbox_session_denied_syscalls(&denied_count);
-    if (!os_sandbox_seccomp_deny(denied, denied_count, false).ok)
-        return child_note(report, "seccomp", "seccomp deny-list unavailable"),
-               false;
-    /* The runner layer is inherited already; re-installing it keeps the leaf
-     * self-sufficient if a future runner variant ever skipped it. */
-    if (!os_sandbox_seccomp_deny(g_runner_denied, sizeof(g_runner_denied) /
-                                 sizeof(g_runner_denied[0]), false).ok ||
-        !os_sandbox_seccomp_deny(g_leaf_denied, sizeof(g_leaf_denied) /
-                                 sizeof(g_leaf_denied[0]), false).ok)
-        return child_note(report, "seccomp", "leaf deny-list unavailable"),
+    if (!child_install_filters())
+        return child_note(report, "seccomp", "seccomp deny-lists unavailable"),
                false;
     report->env_count = zcl_reflex_env_count();
     report->inherited_fd_count = zcl_reflex_count_fds_except(keep, 2);
@@ -617,9 +638,45 @@ static bool runner_enter(void)
                                 sizeof(g_runner_denied[0]), false).ok;
 }
 
+/* Before serving, prove the leaf filters bite on THIS kernel: one disposable
+ * child per surface enters exactly the candidate filter stack and makes the
+ * call. Only death by SIGSYS counts; a runner whose filters let any probe
+ * through refuses to say hello, so the resident reports the runner
+ * unavailable instead of running candidates behind a hollow filter. */
+[[noreturn]] static void runner_probe_child(unsigned which)
+{
+    unsigned char params[120] = {0}; /* struct io_uring_params, zeroed */
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || !child_install_filters())
+        _exit(2);
+    if (which == 0) (void)syscall(SYS_io_uring_setup, 8u, params);
+    else if (which == 1) (void)syscall(SYS_pidfd_open, getppid(), 0u);
+    else (void)kill(getppid(), 0);
+    _exit(0);
+}
+
+static uint32_t runner_deny_probes(void)
+{
+    uint32_t killed = 0;
+    for (unsigned which = 0; which < ZCL_REFLEX_DENY_PROBES; which++) {
+        pid_t child = fork();
+        if (child == 0) runner_probe_child(which);
+        int status = 0;
+        pid_t waited = -1;
+        if (child > 0)
+            do { waited = waitpid(child, &status, 0); }
+            while (waited < 0 && errno == EINTR);
+        if (waited == child && WIFSIGNALED(status) &&
+            WTERMSIG(status) == SIGSYS)
+            killed++;
+    }
+    return killed;
+}
+
 static int runner_main(void)
 {
     if (!runner_enter()) return 3;
+    uint32_t probes_killed = runner_deny_probes();
+    if (probes_killed != ZCL_REFLEX_DENY_PROBES) return 5;
     const int keep[] = {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO,
                         ZCL_REFLEX_RUNNER_CONTROL_FD};
     struct zcl_reflex_hello hello = {
@@ -627,6 +684,7 @@ static int runner_main(void)
         .env_count = zcl_reflex_env_count(),
         .fd_count = zcl_reflex_count_fds_except(keep, 4),
         .resident_canary_seen = zcl_reflex_resident_canary,
+        .deny_probes_killed = probes_killed,
     };
     frame_head(&hello.head, ZCL_REFLEX_FRAME_HELLO, sizeof(hello), 0);
     if (!runner_send(&hello, sizeof(hello))) return 4;

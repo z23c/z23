@@ -184,6 +184,11 @@ static bool runner_await_hello(struct zcl_reflex_runner_outcome *out)
         g_runner.hello.resident_canary_seen != 0)
         return outcome_reason(out, "reflex runner is not a clean zygote"),
                false;
+    /* Its own startup probes must have seen every kernel-surface filter bite
+     * (the runner refuses to say hello otherwise; this re-checks the claim). */
+    if (g_runner.hello.deny_probes_killed != ZCL_REFLEX_DENY_PROBES)
+        return outcome_reason(out, "reflex runner deny filters not enforced"),
+               false;
     return true;
 }
 
@@ -247,6 +252,7 @@ static bool runner_ensure_locked(struct zcl_reflex_runner_outcome *out)
     out->runner_pid = (int)g_runner.pid;
     out->runner_env_count = g_runner.hello.env_count;
     out->runner_fd_count = g_runner.hello.fd_count;
+    out->runner_deny_probes = g_runner.hello.deny_probes_killed;
     return true;
 }
 

@@ -96,6 +96,7 @@ struct zcl_reflex_runner_outcome {
     uint32_t inherited_fd_count;
     uint32_t runner_env_count;
     uint32_t runner_fd_count;
+    uint32_t runner_deny_probes; /* startup kernel-surface probes killed */
     int64_t spawn_us;        /* 0 when warm */
     int64_t seal_us;         /* resident memfd copy + hash */
     int64_t fork_us;
