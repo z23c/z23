@@ -631,8 +631,22 @@ static void boot_zcode_work_observe_results(int64_t now)
             LOG_ERROR("net.zcode_swarm", "work result FIFO changed");
             break;
         }
-        LOG_INFO("net.zcode_swarm", "remote receipt %s observed untrusted",
-                 receipt_id);
+        char task_id[65], candidate_id[65], action_id[65];
+        zcl_hex_encode(request.task_root, 32, task_id);
+        zcl_hex_encode(request.candidate_root, 32, candidate_id);
+        zcl_hex_encode(request.action_root, 32, action_id);
+        /* The receipt and proof event are durable here; this is still an
+         * untrusted remote observation, not receiver proof acceptance. Count
+         * distinct durable bindings, since a crash can repeat this log. */
+        LOG_INFO("zcode.proof_perf",
+                 "schema=zcl.async_proof_perf.v1 "
+                 "stage=requester_result_lifecycle_bound "
+                 "task=%s candidate=%s action=%s request_id=%llu "
+                 "peer=%llu receipt_root=%s at_unix_us=%lld",
+                 task_id, candidate_id, action_id,
+                 (unsigned long long)request.request_id,
+                 (unsigned long long)peer, receipt_id,
+                 (long long)platform_time_realtime_us());
     }
 }
 static bool boot_zcode_work_refresh(struct boot_svc_ctx *svc, int64_t wall)
