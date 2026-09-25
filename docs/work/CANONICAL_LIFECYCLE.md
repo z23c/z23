@@ -168,6 +168,11 @@ objects disabled, then binds the remote update to that exact expected base.
 The expected-base lease cannot authorize non-fast-forward history replacement.
 Its crash reconciliation is not the immutable intent/result/remote-receipt
 chain defined here.
+The signed Git-row adapter retains an ambiguous push checkpoint as UNKNOWN
+and observes the remote again without redispatching that intent. Its status
+view reports canonical `acceptance_state=unknown`, including for historical
+`landed` queue outcomes, because those rows do not carry the canonical
+publication and REMOTE_RECEIPT roots.
 `tools/ship.sh` still contains `git push --no-verify origin main`; retire that
 publication path without granting deployment authority. Retain the existing
 publish-callsite gate. Use both verified fast-forward ancestry and a server-side

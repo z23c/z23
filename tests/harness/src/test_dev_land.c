@@ -5015,6 +5015,8 @@ static int test_dev_land_signed_intent(void)
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *outcomes = dlx_arr(&c, "outcomes");
         ASSERT(outcomes && outcomes->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&outcomes->children[0],
+                                          "acceptance_state")), "unknown");
         ASSERT(strlen(json_get_str(json_get(&outcomes->children[0],
                                           "remote_source"))) == 40);
         ASSERT(strlen(json_get_str(json_get(&outcomes->children[0],
@@ -5188,6 +5190,201 @@ _test_next:;
     return failures;
 }
 
+static int test_dev_land_signed_lost_ack(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: lost signed push acknowledgement stays UNKNOWN and does not replay") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], remote[64], land[1200], wt[1400];
+        char wrapper[1400], marker[1400], script[3000], attempts[128];
+        size_t attempts_len = 0;
+        dlx_isolate("signed_lost_ack");
+        ASSERT(dlx_rig_make(&rig, "signed_lost_ack_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "attach");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(wt, sizeof(wt), "%s/wt", land);
+        (void)snprintf(wrapper, sizeof(wrapper), "%s/lose-ack", land);
+        (void)snprintf(marker, sizeof(marker), "%s/dispatch-count", land);
+        (void)snprintf(script, sizeof(script),
+                       "#!/bin/sh\nprintf 'attempted\\n' >> '%s'\nexit 91\n",
+                       marker);
+        ASSERT(dlx_write(wrapper, script));
+        ASSERT(chmod(wrapper, 0700) == 0);
+        const char *intercept[] = { "config", "remote.origin.receivepack",
+                                    wrapper, NULL };
+        ASSERT(dlx_git(wt, intercept) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_OUTCOME_UNKNOWN");
+        ASSERT_STR_EQ(dlx_str(&c, "observed_remote_tip"), base);
+        ASSERT_STR_EQ(dlx_str(&c, "head_commit"), rig.tip);
+        ASSERT_STR_EQ(dlx_str(&c, "dispatch_state"), "unknown");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, base);
+        ASSERT(dlx_slurp(marker, attempts, sizeof(attempts), &attempts_len));
+        ASSERT(attempts_len == strlen("attempted\n"));
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *steer = json_get(&c.reply.data, "steer");
+        const struct json_value *inflight =
+            json_get(&c.reply.data, "in_flight");
+        ASSERT(steer != NULL);
+        ASSERT(inflight != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(inflight, "acceptance_state")),
+                      "unknown");
+        ASSERT_STR_EQ(json_get_str(json_get(inflight, "dispatch_state")),
+                      "unknown");
+        ASSERT_STR_EQ(json_get_str(json_get(inflight, "detail")),
+                      "signed push outcome unknown; await independent remote receipt");
+        ASSERT_STR_EQ(json_get_str(json_get(steer,
+                                          "first_missing_transition")),
+                      "remote_receipt");
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_OUTCOME_UNKNOWN");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(marker, attempts, sizeof(attempts), &attempts_len));
+        ASSERT(attempts_len == strlen("attempted\n"));
+        char sibling[64];
+        const char *branch[] = { "checkout", "--quiet", "-B", "side", base,
+                                 NULL };
+        ASSERT(dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_commit(rig.clone, "side.txt", "other\n", sibling));
+        char update_side[128];
+        (void)snprintf(update_side, sizeof(update_side),
+                       "%s:refs/heads/main", sibling);
+        const char *fetch_side[] = { "fetch", "--quiet", rig.clone,
+                                     update_side, NULL };
+        ASSERT(dlx_git(rig.bare, fetch_side) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_OUTCOME_UNKNOWN");
+        ASSERT_STR_EQ(dlx_str(&c, "observed_remote_tip"), sibling);
+        dlx_end(&c);
+        ASSERT(dlx_slurp(marker, attempts, sizeof(attempts), &attempts_len));
+        ASSERT(attempts_len == strlen("attempted\n"));
+        char update[128];
+        (void)snprintf(update, sizeof(update), "+%s:refs/heads/main", rig.tip);
+        const char *remote_effect[] = { "fetch", "--quiet", rig.clone,
+                                        update, NULL };
+        ASSERT(dlx_git(rig.bare, remote_effect) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT(strlen(dlx_str(&c, "remote_signature")) == 128);
+        dlx_end(&c);
+        ASSERT(dlx_slurp(marker, attempts, sizeof(attempts), &attempts_len));
+        ASSERT(attempts_len == strlen("attempted\n"));
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
+static int test_dev_land_signed_publisher_death(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: publisher death after signed remote mutation recovers receipt") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], remote[64], hook[1400], wrapper[1400], marker[1400];
+        char received[32];
+        size_t received_len = 0;
+        int child_status = 0;
+        dlx_isolate("signed_publisher_death");
+        ASSERT(dlx_rig_make(&rig, "signed_publisher_death_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "attach");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        (void)snprintf(hook, sizeof(hook), "%s/hooks/post-receive", rig.bare);
+        (void)snprintf(wrapper, sizeof(wrapper), "%s.receive-pack", rig.bare);
+        (void)snprintf(marker, sizeof(marker),
+                       "%s/hooks/receive-invocations", rig.bare);
+        ASSERT(dlx_write(wrapper, "#!/bin/sh\n"
+            "printf 'invoked\\n' >> \"$1/hooks/receive-invocations\" || exit 73\n"
+            "exec git-receive-pack \"$@\"\n"));
+        ASSERT(chmod(wrapper, 0700) == 0);
+        char land[1200], wt[1400];
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(wt, sizeof(wt), "%s/wt", land);
+        const char *intercept[] = { "config", "remote.origin.receivepack",
+                                    wrapper, NULL };
+        ASSERT(dlx_git(wt, intercept) == 0);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            struct dlx_call cc;
+            char script[256];
+            (void)alarm(30);
+            (void)snprintf(script, sizeof(script),
+                           "#!/bin/sh\nkill -KILL %ld\n", (long)getpid());
+            if (!dlx_write(hook, script) || chmod(hook, 0700) != 0)
+                _exit(2);
+            dlx_begin(&cc, "step");
+            (void)dlx_run(&cc);
+            _exit(90);
+        }
+        ASSERT(dlx_wait_child(child, &child_status) == child);
+        ASSERT(WIFSIGNALED(child_status) && WTERMSIG(child_status) == SIGKILL);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, rig.tip);
+        ASSERT(dlx_slurp(marker, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, 8);
+        ASSERT(memcmp(received, "invoked\n", 8) == 0);
+        ASSERT(unlink(hook) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT(strlen(dlx_str(&c, "remote_signature")) == 128);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, rig.tip);
+        ASSERT(dlx_slurp(marker, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, 8);
+        ASSERT(memcmp(received, "invoked\n", 8) == 0);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
 #if !defined(_WIN32)
 static int test_dev_land_rebase_regen_cases(void);
 #endif
@@ -5199,6 +5396,8 @@ int test_dev_land(void)
     failures += test_dev_land_signed_tamper();
     failures += test_dev_land_signed_stale();
     failures += test_dev_land_signed_recovery();
+    failures += test_dev_land_signed_lost_ack();
+    failures += test_dev_land_signed_publisher_death();
     failures += test_dev_land_watcher_admission();
     failures += test_dev_land_long_proof_root();
     failures += test_dev_land_malformed_queue_refusal();

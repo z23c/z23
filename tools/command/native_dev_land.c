@@ -2715,7 +2715,7 @@ static const char *dl_missing_of(const struct dl_row *row)
     if (strcmp(row->phase, "prove") == 0)
         return "proof";
     if (strcmp(row->phase, "push") == 0)
-        return "push";
+        return row->publication_signature[0] ? "remote_receipt" : "push";
     return "other";
 }
 
@@ -3142,6 +3142,17 @@ static bool dl_push_publication_fields(struct json_value *obj,
            json_push_kv_str(obj, "remote_signer", r->remote_signer);
 }
 
+static bool dl_push_inflight_evidence(struct json_value *obj,
+                                       const struct dl_row *r)
+{
+    return json_push_kv_str(obj, "detail", r->detail) &&
+           json_push_kv_str(obj, "dispatch_state",
+                            strcmp(r->phase, "push") == 0 ? "unknown" :
+                            "not_attempted") &&
+           /* The queue has no canonical publication or receipt roots. */
+           json_push_kv_str(obj, "acceptance_state", "unknown");
+}
+
 static bool dl_push_inflight(struct json_value *obj, const struct dl_row *r,
                              const char *proof_root, long long now)
 {
@@ -3157,6 +3168,7 @@ static bool dl_push_inflight(struct json_value *obj, const struct dl_row *r,
            json_push_kv_str(obj, "local", r->local) &&
            json_push_kv_str(obj, "tree", r->tree) &&
            json_push_kv_str(obj, "proof_intent", r->proof_intent) &&
+           dl_push_inflight_evidence(obj, r) &&
            dl_push_publication_fields(obj, r) &&
            dl_push_proof_action(obj, r, proof_root);
 }
@@ -3172,6 +3184,7 @@ static bool dl_push_outcome_row(struct json_value *arr,
          json_push_kv_str(&item, "ts", r->ts) &&
          json_push_kv_str(&item, "tip", r->tip) &&
          json_push_kv_str(&item, "state", r->state) &&
+         json_push_kv_str(&item, "acceptance_state", "unknown") &&
          json_push_kv_int(&item, "attempt", r->attempt) &&
          json_push_kv_str(&item, "tip_pushed", r->pushed) &&
          json_push_kv_str(&item, "remote_tip", r->remote_tip) &&
@@ -6226,6 +6239,44 @@ static bool dl_push_intent_ready(const struct dl_dirs *d,
     return true;
 }
 
+/* A durable push checkpoint says dispatch MAY have happened. If its reply was
+ * lost and an independent fetch does not yet contain the head, the receiver
+ * cannot distinguish a rejected mutation from an unsettled one. Keep the
+ * exact intent for observation; never dispatch it a second time. */
+static void dl_push_outcome_unknown(const struct dl_dirs *d,
+                                    struct dl_row *row,
+                                    const char *observed_main,
+                                    struct zcl_command_reply *reply)
+{
+    static const char detail[] =
+        "signed push outcome unknown; await independent remote receipt";
+    if (strcmp(row->detail, detail) != 0) {
+        (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
+        if (!dl_commit_row(d, row, false)) {
+            dl_fail(reply, "PUSH_OUTCOME_PERSIST_FAILED", "observe_remote",
+                    "cannot retain the unresolved signed push checkpoint", d->land);
+            return;
+        }
+    }
+    (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
+    (void)json_push_kv_str(&reply->data, "expected_base", row->base);
+    (void)json_push_kv_str(&reply->data, "head_commit", row->local);
+    (void)json_push_kv_str(&reply->data, "publication_target",
+                           row->publication_target);
+    (void)json_push_kv_str(&reply->data, "observed_remote_tip",
+                           observed_main ? observed_main : "");
+    (void)json_push_kv_str(&reply->data, "dispatch_state", "unknown");
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED,
+                           "PUSH_OUTCOME_UNKNOWN", "observe_remote",
+                           true, false,
+                           "signed push outcome is unresolved; observe the exact remote before a successor",
+                           observed_main ? observed_main : "remote observation unavailable");
+    (void)snprintf(reply->error.next_action,
+                   sizeof(reply->error.next_action), "%s",
+                   "z23-dev dev land step");
+}
+
 static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply)
 {
@@ -6277,6 +6328,10 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
             dl_log(row, "\n");
             if (dl_reconcile_landing(d, row, observed_main, true, reply))
                 return;
+            if (row->publication_signature[0]) {
+                dl_push_outcome_unknown(d, row, observed_main, reply);
+                return;
+            }
             if (strcmp(observed_main, row->base) != 0) {
                 dl_step_successor(d, row, observed_main, reply);
                 return;
@@ -6409,6 +6464,11 @@ static void dl_test_die_after_proof(void)
      * first, the same way dl_step_start does before ever starting one. */
     if (dl_reconcile_landing(d, row, observed_main, false, reply))
         return;
+    if (strcmp(row->phase, "push") == 0 &&
+        row->publication_signature[0]) {
+        dl_push_outcome_unknown(d, row, observed_main, reply);
+        return;
+    }
     if (!dl_resume_phase_ready(row->phase)) {
         /* A step died between phases. Re-drive from the rebase rather than
          * guessing what the dead step had already done. */
