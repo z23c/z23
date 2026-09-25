@@ -732,7 +732,7 @@ AGENT_IMPACT_RULE("core/modules/net/src/msg_tx.c", "msg_handlers mempool accept_
 AGENT_IMPACT_RULE("engine/composition/include/config/runtime.h", "boot_phase make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/util/src/boot_status.c|platform/modules/util/include/util/boot_status.h|platform/modules/util/src/boot_phase.c|platform/modules/util/include/util/boot_phase.h|tests/harness/src/test_boot_status.c|tests/harness/src/test_boot_phase.c|engine/services/src/block_index_loader_topup.c|engine/services/src/block_index_projection_flat_bind.c|engine/services/src/block_index_integrity.c", "boot_status boot_phase block_index_topup sd_notify command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/util/src/sysinit.c|platform/modules/util/include/util/sysinit.h|tests/harness/src/test_sysinit.c|engine/composition/src/boot.c|engine/composition/src/boot_services.c|engine/composition/include/config/boot.h|tools/lint/check_sysinit_ordering.sh|tools/lint/sysinit_ordering_golden.txt", "sysinit boot_phase boot_matrix make_lint_gates")
-AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/include/platform/os_sandbox.h|tools/lint/check_sandbox_wired.sh|engine/controllers/src/diagnostics_registry.c", "os_sandbox sysinit syncdiag_rpc make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_landlock_linux.c|platform/modules/platform/src/os_sandbox_landlock_internal.h|platform/modules/platform/include/platform/os_sandbox.h|tools/lint/check_sandbox_wired.sh|engine/controllers/src/diagnostics_registry.c", "os_sandbox sysinit syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_accept_to_mempool.c", "accept_to_mempool")
 AGENT_IMPACT_RULE("core/consensus/src/locktime.c|core/consensus/include/domain/consensus/locktime.h|core/modules/validation/include/validation/contextual_check_tx.h|core/modules/validation/src/contextual_check_tx.c|core/modules/validation/src/accept_to_mempool.c|core/modules/validation/src/check_block.c|tests/harness/src/test_tx_expiry_locktime_adversarial.c", "tx_expiry_locktime_adversarial domain_consensus_locktime locktime_edge bip113_bip65 accept_to_mempool check_block_edge")
 AGENT_IMPACT_RULE("tests/harness/src/test_mempool.c", "mempool")
@@ -1078,13 +1078,13 @@ AGENT_IMPACT_RULE("engine/composition/src/boot_legacy_blocks.c|engine/compositio
  * process-confinement builders in platform/modules/platform — no_new_privs, Landlock,
  * seccomp-bpf deny-list, rlimits, userns helpers, and the enter() profile
  * composer. Parity-safe; not yet wired into boot. */
-AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/include/platform/os_sandbox.h|tests/harness/src/test_os_sandbox.c", "os_sandbox make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_landlock_linux.c|platform/modules/platform/src/os_sandbox_landlock_internal.h|platform/modules/platform/include/platform/os_sandbox.h|tests/harness/src/test_os_sandbox.c", "os_sandbox make_lint_gates")
 /* Mesh terminal worker cage (P0-terminal lane): the terminal-worker profile
  * (session deny-set minus the fork/exec family, per-terminal Landlock grant,
  * rlimits, W^X) and the attack acceptance that must beat it — /etc/shadow,
  * sockets, exec outside the grant, W^X, ptrace, budget overruns, and the
  * granted fbsh running (and failing to escape) inside. */
-AGENT_IMPACT_RULE("tests/harness/src/test_terminal_worker_sandbox.c|platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_terminal_worker.c|platform/modules/platform/include/platform/os_sandbox.h", "terminal_worker_sandbox os_sandbox make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/test_terminal_worker_sandbox.c|platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_landlock_linux.c|platform/modules/platform/src/os_sandbox_terminal_worker.c|platform/modules/platform/include/platform/os_sandbox.h", "terminal_worker_sandbox os_sandbox make_lint_gates")
 /* Confined terminal worker (P0-terminal lane): the PTY worker engine that
  * spawns the granted shell inside the cage, pumps both directions under
  * hard byte budgets, and ends every session with a named close reason and
@@ -1121,7 +1121,7 @@ AGENT_IMPACT_RULE("engine/composition/fleet_airship_rules.def|engine/composition
  * the SERVICES_RUNNING boundary): the allow-set + installer in os_sandbox, its
  * boot wiring, the -confine flag, the named blocker binding, and the
  * reproducible allow-list derivation harness (test_confine). */
-AGENT_IMPACT_RULE("tests/harness/src/test_confine.c|platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/include/platform/os_sandbox.h|engine/composition/src/boot.c|engine/composition/include/config/boot.h|engine/entry/main.c|engine/conditions/include/conditions/blocker_remedy_bindings.def", "confine os_sandbox make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/test_confine.c|platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_landlock_linux.c|platform/modules/platform/include/platform/os_sandbox.h|engine/composition/src/boot.c|engine/composition/include/config/boot.h|engine/entry/main.c|engine/conditions/include/conditions/blocker_remedy_bindings.def", "confine os_sandbox make_lint_gates")
 /* 2026-07-13 sovereign-state hardening slice: contained exporter/validator,
  * snapsync verify/apply TUs, evidence authority binding, loader topup, and
  * the test files the slice touched. */
@@ -1385,7 +1385,7 @@ AGENT_IMPACT_RULE("engine/composition/src/boot_zcode_swarm_receipt.c|engine/comp
  * grant-recording / path-grant predicate / typed-refusal primitives in
  * os_sandbox, boot's request notation, and the suite that proves a hot-swap
  * module open is EACCES under a datadir-only Landlock grant. */
-AGENT_IMPACT_RULE("tests/harness/src/test_os_sandbox_hotswap_interaction.c|platform/modules/platform/src/os_sandbox_witness.c|platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/include/platform/os_sandbox.h|engine/controllers/include/controllers/diagnostics_dumpers.def", "os_sandbox_hotswap_interaction os_sandbox confine syncdiag_rpc make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/test_os_sandbox_hotswap_interaction.c|platform/modules/platform/src/os_sandbox_witness.c|platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_landlock_linux.c|platform/modules/platform/include/platform/os_sandbox.h|engine/controllers/include/controllers/diagnostics_dumpers.def", "os_sandbox_hotswap_interaction os_sandbox confine syncdiag_rpc make_lint_gates")
 /* wf/supervision — three named faults of the upper layer (undrained hot-swap
  * generation, config reload divergence, service declaration divergence). */
 AGENT_IMPACT_RULE("engine/modules/hotswap/src/hotswap_retire_blocker.c|engine/modules/hotswap/include/hotswap/hotswap_retire_blocker.h|engine/composition/src/boot_declaration_drift.c|engine/composition/include/config/boot_declaration_drift.h|engine/modules/hotswap/src/hotswap_activate.c", "blocker blocker_history supervisor make_lint_gates")
@@ -1736,7 +1736,7 @@ AGENT_IMPACT_RULE("engine/controllers/src/policy_native_handlers.c|engine/contro
  * these files must run the group that pins that invariant, the sandbox
  * builders, and the two build-fabric groups that execute a real confined
  * compile. */
-AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/include/platform/os_sandbox.h|tests/harness/src/test_sandbox_process_budget.c|tools/package_verify.c|tools/zcode_adapter_runner.c|engine/services/src/build_fabric_worker.c", "sandbox_process_budget os_sandbox build_fabric zcode_dev_objects make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_landlock_linux.c|platform/modules/platform/src/os_sandbox_landlock_internal.h|platform/modules/platform/include/platform/os_sandbox.h|tests/harness/src/test_sandbox_process_budget.c|tools/package_verify.c|tools/zcode_adapter_runner.c|engine/services/src/build_fabric_worker.c", "sandbox_process_budget os_sandbox build_fabric zcode_dev_objects make_lint_gates")
 /* LANE lint-gate-wiring: adding a lint gate is a TWO-FILE operation — the
  * Makefile gets a check-* target plus a LINT_GATES line, and
  * tools/lint/run_lint.sh's gate_command() case table gets the invocation,

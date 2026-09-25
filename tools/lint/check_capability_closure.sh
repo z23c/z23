@@ -183,9 +183,11 @@ cap_closure_coverage_applicable() {
     case "$CAP_CLOSURE_HOST_OS:$path" in
         Linux:platform/modules/platform/src/os_sandbox_stub.c|\
         Darwin:platform/modules/platform/src/os_sandbox_linux.c|\
+        Darwin:platform/modules/platform/src/os_sandbox_landlock_linux.c|\
         Darwin:platform/modules/platform/src/os_sandbox_package_linux.c|\
         Darwin:platform/modules/util/src/self_backtrace.c|\
         Windows:platform/modules/platform/src/os_sandbox_linux.c|\
+        Windows:platform/modules/platform/src/os_sandbox_landlock_linux.c|\
         Windows:platform/modules/platform/src/os_sandbox_package_linux.c|\
         Windows:contexts/commons/modules/vcs/src/vcs_devloop.c|\
         Windows:tools/package_verify.c)
