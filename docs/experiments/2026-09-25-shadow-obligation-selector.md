@@ -86,7 +86,9 @@ The prediction has three cases:
   the build graph is known. Callers and integration edges are carried.
 - **Every selected group** otherwise.
 
-Lint gates are always fresh.
+Every lint gate always runs. A second column prices the two per-TU gates
+that declare a premise by their fresh units (see "Where the fresh seconds
+go"); every other gate is billed at its full weight.
 
 The compositional rule (`zcl_shadow_reuse_admit`) needs three things: an
 unchanged contract root, a fresh PASS of the callee's contract obligations
@@ -169,6 +171,194 @@ groups; seconds are per candidate:
 | syn-generated-input | generated_input | none | dependency-change | all | 1406/1406 | 6402 | 6402 | 6402 | 0.0% | 258 / 258 | 0 |
 | syn-negative-lookup | negative_lookup | none | unknown-scope | all | 1406/1406 | 6402 | 1633 | 6402 | 0.0% | 258 / 258 | 0 |
 | syn-macro | macro | moved | unknown-scope | all | 1406/1406 | 6402 | 1527 | 6402 | 0.0% | 258 / 258 | 0 |
+
+## Where the fresh seconds go
+
+Measured 2026-09-25 on the host above, on `lane/muse-shadow-reuse90-20260925`
+from `e1cbb7fe4a`. The report comes from the same test group; that run was a
+PASS with 0 skipped. The catalog now has 1194 host-admitted groups (1407
+obligations with the 213 lint gates). **Everything here is a shadow
+prediction.** Every lint gate and every selected group still runs in the
+landing proof. Eligible reuse stays 0 until verdicts come from a separate
+uid (see "Measured numbers").
+
+### Classes
+
+Each obligation the rule predicts fresh falls in exactly one class
+(`SHADOW-CLASS` and `SHADOW-CLASS-TOTAL` lines):
+
+- **lint**: the 213 lint gates;
+- **floor**: the 13-group `make_lint_gates` family. The impact rules attach
+  it to almost every change, and any path no rule maps falls back to it;
+- **direct**: the rest of the contract layer, meaning the groups the
+  changed files name through the impact rules;
+- **caller** and **integration**: groups on those layers that the rule could
+  not carry;
+- **fallback**: every test group of an entry predicted ALL.
+
+The real set is 20 narrow commits, 128,048 s of reference:
+
+| class | fresh obligations (20 entries) | fresh s | s per candidate | share of reference |
+|---|---|---|---|---|
+| lint gates | 4260 | 23231.1 | 1161.6 | 18.1% |
+| floor (`make_lint_gates` family) | 247 | 6226.5 | 311.3 | 4.9% |
+| direct test groups | 167 | 4589.9 | 229.5 | 3.6% |
+| caller test groups | 31 | 641.1 | 32.1 | 0.5% |
+| integration test groups | 132 | 1715.9 | 85.8 | 1.3% |
+| fallback to ALL (real-18) | 1194 | 5240.9 | 262.0 | 4.1% |
+| **total** | **6031 / 28140** | **41645.4** | **2082.3** | **32.5%** |
+
+Lint gates are 56% of the bill. Test groups outside the floor are 29%, and
+the largest part of that is one ALL fallback.
+
+### Top 15 fresh obligations
+
+Fresh seconds summed over the 20 real entries (`SHADOW-TOP` lines). The
+last column prices the two premise-declaring gates by their fresh units:
+
+| rank | kind | obligation | fresh s | entries | fresh s with lint premise |
+|---|---|---|---|---|---|
+| 1 | lint_gate | `check-windows-cross-syntax` | 2550.1 | 20 | 525.9 |
+| 2 | lint_gate | `check-windows-acceptance` | 2314.0 | 20 | 2314.0 |
+| 3 | lint_gate | `check-doc-claims` | 2035.4 | 20 | 2035.4 |
+| 4 | lint_gate | `check-build-epoch-integrity` | 1615.0 | 20 | 1615.0 |
+| 5 | test_group | `test_make_lint_gates_realroot` | 1548.1 | 20 | 1548.1 |
+| 6 | test_group | `test_make_lint_gates_heavy_02` | 1482.6 | 20 | 1482.6 |
+| 7 | lint_gate | `check-capability-closure` | 1418.4 | 20 | 1418.4 |
+| 8 | lint_gate | `check-vcs-no-sha1` | 1078.7 | 20 | 1078.7 |
+| 9 | test_group | `test_dev_platform_shard_01` | 949.5 | 9 | 949.5 |
+| 10 | test_group | `test_dev_platform_shard_04` | 945.0 | 9 | 945.0 |
+| 11 | lint_gate | `check-clang-portability` | 927.3 | 20 | 301.2 |
+| 12 | lint_gate | `check-no-api-keys` | 857.1 | 20 | 857.1 |
+| 13 | test_group | `test_dev_platform` | 750.5 | 9 | 750.5 |
+| 14 | lint_gate | `check-zcode-package-registry` | 721.2 | 20 | 721.2 |
+| 15 | lint_gate | `check-capability-inventory-generated` | 710.5 | 20 | 710.5 |
+
+Ten of the fifteen are lint gates. Two are the floor's heaviest shards,
+and three are the `dev_platform` family that the `tools/dev` rules name
+directly.
+
+### Lint premise lever
+
+The existing base-relative lint premise selection (`z23-lint select --dry`
+and `z23-lint unit-exec`, lane premise-select at `18b30d14c2`, not yet on
+main) declares premises for exactly two per-TU gates:
+`check-windows-cross-syntax` and `check-clang-portability`. A unit may keep
+the base's PASS iff its premise bytes are unchanged. The premise covers gate
+code, the toolchain pin, the Makefile variable text, the path set, the
+textual include closure and the unit's own baseline rows. That tool was run
+once per corpus entry and gate against a verified base (real: `<commit>^`;
+synthetic: the patched `7a9f354f3f` against itself). The rows are frozen in
+`tools/dev/fixtures/shadow_select/lint_premise.tsv`.
+
+Each premise gate is priced as the measured select run plus
+max(gate weight / units, 1 s) per fresh unit. The unit part is capped at the
+whole gate once selection has run. A cold cross-syntax run spent 209 ms CPU
+per unit, so 1 s per unit is about five times the mean. The select run is
+always paid: 8.5–37.2 s wall, mostly the `make` unit listing and the private
+fetch. Every other gate stays at full weight.
+
+| set | fresh s per candidate: rule | rule + lint premise | reuse: rule | rule + lint premise |
+|---|---|---|---|---|
+| real (20) | 2082.3 | 1949.8 | 67.5% | **69.5%** |
+| synthetic (8) | 5804.7 | 5696.7 | 9.3% | 11.0% |
+
+The two gates cost 173.9 s per candidate at full weight and 41.4 s with
+the premise rows, almost all of it select runs. The premise tool's own
+fail-closed paths show up on the adversarial entries. syn-negative-lookup
+creates a header, which changes the path set, so all 4677 units are fresh
+and the entry costs 25 s more than without selection. syn-header-decl and
+syn-abi make 60 units fresh, and syn-macro 20.
+syn-flag makes 0 fresh: the dropped `-DZCL_DEV_BUILD` is not in either
+gate's Makefile variables. Both gates declare that as outside their premise.
+
+### Private-implementation edits: is the rule over-expanding?
+
+No, with one exception that needs machinery that does not exist yet.
+
+- On the 15 real entries whose contract did not move, the rule already
+  carries every caller and integration group: caller and integration are 0
+  on all of them. What stays fresh is floor plus direct.
+- Narrowing direct to the callee's own contract test would be unsound. In
+  syn-private-impl the callee's own group, `codec_cursor`, passes on the
+  buggy implementation. The two required groups, `zcode_package_registry`
+  and `zcode_swarm_net`, are direct only because the impact rules name
+  them for `codec/`. An own-test-only contract layer would be RED 2 against
+  `observed.tsv`.
+- The rule keeps callers on four entries whose contract is ADDITIVE:
+  2357.0 s in total, 1.8% of reference. For real-03, real-12 and real-14
+  the only contract growth is in the component's own test file
+  (`test_codeindex_*`, `test_vcs_*`). Added test lines cannot be trusted:
+  an added `#define` or an inserted `|| 1` weakens an old assertion without
+  removing a line. The sound rule is the existing compositional rule, with
+  the contract root taken over the header plus the **base** test bytes. It
+  would need the base version of the contract test to run fresh against the
+  new implementation. Nothing runs an old test file against a new tree
+  today, so this stays fresh. It would carry 1518.1 s (1.2% of reference).
+  real-19's growth is in a public header, so its callers stay fresh either
+  way.
+
+### Per entry
+
+Obligations are 213 lint gates plus 1194 groups. Seconds are per candidate.
+The class columns split the rule's fresh seconds.
+
+| entry | fresh / total obligations | fresh / total s: rule | fresh / total s: rule + lint premise | reuse: rule | reuse: + lint premise | premise units fresh | lint | floor | direct | caller | integration | fallback |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| real-01 | 239/1407 | 1954/6402 | 1812/6402 | 69.5% | 71.7% | 1/4677 | 1162 | 328 | 465 | 0 | 0 | 0 |
+| real-02 | 242/1407 | 2054/6402 | 1908/6402 | 67.9% | 70.2% | 1/4676 | 1162 | 328 | 564 | 0 | 0 | 0 |
+| real-03 | 256/1407 | 2127/6402 | 1982/6402 | 66.8% | 69.0% | 2/4676 | 1162 | 328 | 570 | 22 | 45 | 0 |
+| real-04 | 234/1407 | 1519/6402 | 1374/6402 | 76.3% | 78.5% | 0/4676 | 1162 | 328 | 30 | 0 | 0 | 0 |
+| real-05 | 231/1407 | 1633/6402 | 1491/6402 | 74.5% | 76.7% | 2/4676 | 1162 | 328 | 144 | 0 | 0 | 0 |
+| real-06 | 232/1407 | 1634/6402 | 1490/6402 | 74.5% | 76.7% | 2/4676 | 1162 | 328 | 145 | 0 | 0 | 0 |
+| real-07 | 232/1407 | 1644/6402 | 1512/6402 | 74.3% | 76.4% | 2/4676 | 1162 | 328 | 155 | 0 | 0 | 0 |
+| real-08 | 241/1407 | 1980/6402 | 1841/6402 | 69.1% | 71.2% | 2/4677 | 1162 | 328 | 491 | 0 | 0 | 0 |
+| real-09 | 234/1407 | 1692/6402 | 1552/6402 | 73.6% | 75.8% | 0/4676 | 1162 | 328 | 203 | 0 | 0 | 0 |
+| real-10 | 230/1407 | 1522/6402 | 1380/6402 | 76.2% | 78.5% | 2/4676 | 1162 | 328 | 33 | 0 | 0 | 0 |
+| real-11 | 230/1407 | 1522/6402 | 1384/6402 | 76.2% | 78.4% | 4/4676 | 1162 | 328 | 33 | 0 | 0 | 0 |
+| real-12 | 300/1407 | 2823/6402 | 2686/6402 | 55.9% | 58.0% | 2/4676 | 1162 | 328 | 216 | 462 | 655 | 0 |
+| real-13 | 235/1407 | 1709/6402 | 1584/6402 | 73.3% | 75.3% | 2/4676 | 1162 | 328 | 220 | 0 | 0 | 0 |
+| real-14 | 260/1407 | 2430/6402 | 2311/6402 | 62.0% | 63.9% | 2/4676 | 1162 | 328 | 608 | 0 | 333 | 0 |
+| real-15 | 235/1407 | 1709/6402 | 1607/6402 | 73.3% | 74.9% | 20/4676 | 1162 | 328 | 220 | 0 | 0 | 0 |
+| real-16 | 239/1407 | 1954/6402 | 1824/6402 | 69.5% | 71.5% | 1/4676 | 1162 | 328 | 465 | 0 | 0 | 0 |
+| real-17 | 226/1407 | 1489/6402 | 1363/6402 | 76.7% | 78.7% | 0/4676 | 1162 | 328 | 0 | 0 | 0 | 0 |
+| real-18 | 1407/1407 | 6402/6402 | 6268/6402 | 0.0% | 2.1% | 2/4676 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+| real-19 | 302/1407 | 2358/6402 | 2269/6402 | 63.2% | 64.6% | 48/4672 | 1162 | 328 | 30 | 156 | 682 | 0 |
+| real-20 | 226/1407 | 1489/6402 | 1357/6402 | 76.7% | 78.8% | 0/4677 | 1162 | 328 | 0 | 0 | 0 | 0 |
+| syn-header-decl | 1407/1407 | 6402/6402 | 6315/6402 | 0.0% | 1.4% | 60/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+| syn-abi | 1407/1407 | 6402/6402 | 6318/6402 | 0.0% | 1.3% | 60/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+| syn-flag | 1407/1407 | 6402/6402 | 6255/6402 | 0.0% | 2.3% | 0/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+| syn-contract | 1407/1407 | 6402/6402 | 6257/6402 | 0.0% | 2.3% | 2/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+| syn-private-impl | 230/1407 | 1621/6402 | 1473/6402 | 74.7% | 77.0% | 2/4677 | 1162 | 328 | 131 | 0 | 0 | 0 |
+| syn-generated-input | 1407/1407 | 6402/6402 | 6255/6402 | 0.0% | 2.3% | 2/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+| syn-negative-lookup | 1407/1407 | 6402/6402 | 6428/6402 | 0.0% | -0.4% | 4677/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+| syn-macro | 1407/1407 | 6402/6402 | 6273/6402 | 0.0% | 2.0% | 20/4677 | 1162 | 0 | 0 | 0 | 0 | 5241 |
+
+Adversarial RED against the reference observations: **0** for the live
+rule (`live_rule=0`). The frozen record keeps its one historical RED
+(`syn-contract:test_zcode_recipe`) and the landing selector's five. Every
+entry kind that must expand still predicts ALL for test groups: contract,
+negative-lookup, flag, header, ABI, macro and generated-input. The test
+pins that, and pins that syn-negative-lookup inherits no lint unit.
+
+### What still blocks more than 90%
+
+90% reuse means at most 640.2 fresh s per candidate. With the lint premise
+rows the rule is at 1949.8 s:
+
+| remaining fresh s per candidate | s | share of reference | what it would take |
+|---|---|---|---|
+| 211 lint gates with no premise declaration | 987.7 | 15.4% | premise declarations. The ten heaviest are `check-windows-acceptance` 115.7, `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9, `check-no-api-keys` 42.9, `check-zcode-package-registry` 36.1, `check-capability-inventory-generated` 35.5, `check-outparam-init-before-return` 31.4 and `check-no-wallclock-assertion` 22.9 (591.9 s together) |
+| floor, `make_lint_gates` family | 311.3 | 4.9% | a premise for the lint-gate test umbrella. `realroot` and `heavy_02` alone are 151.5 s |
+| fallback, real-18 (`unmapped-code-change`) | 262.0 | 4.1% | an impact rule for `engine/services/src/replay_verify_service.c` (selector owner) |
+| direct test groups | 229.5 | 3.6% | none that is sound (see above) |
+| callers and integration on additive contracts | 117.9 | 1.8% | a base-test re-run (1.2%); real-19's header growth stays |
+| the two premise gates | 41.4 | 0.6% | a cheaper select run |
+
+The lint gates alone keep the rule under 84% even if every test group were
+carried. Reaching 90% needs premise declarations covering roughly 660 s per
+candidate of today's undeclared gate weight, and the floor must be carried
+too.
 
 ## Obligations predicted fresh
 
@@ -345,3 +535,10 @@ a 360-byte ticket SHA3 and one Ed25519 verification.
 - **The reference runs are bounded.** Each covers the selector's groups plus
   the named candidate groups, not the whole catalog, so a RED outside that
   bound would go unseen.
+- **The lint premise rows are frozen tool output.** They come from a
+  `z23-lint` built from lane premise-select (`18b30d14c2`), which is not on
+  main. The test cannot recompute them. Once the premise code lands, the
+  shadow evaluation should call it in process and not read a fixture.
+- **Base-test re-run for additive contract tests** (1.2% of reference on
+  the real set) needs a runner that builds the base bytes of a contract test
+  against the candidate implementation.
