@@ -2132,6 +2132,28 @@ static int test_zd_work_node_atomic_admission(void)
             c, 12, frame, frame_len, 1001), VCS_ZCODE_WORK_NODE_OK);
         ASSERT(vcs_zcode_work_node_next_admission(c, &peer, &admission));
         ASSERT_EQ(admission.disposition, VCS_ZCODE_WORK_ADMISSION_ATTACHED);
+        /* A later requester lease cannot attach to a physical slot whose
+         * earlier deadline would expire it before the signed request does. */
+        struct vcs_zcode_work_request_v1 later_deadline = attached;
+        later_deadline.request_id = 906;
+        later_deadline.deadline_unix++;
+        ASSERT(vcs_zcode_work_request_seal(
+            &later_deadline, c_secret, c_key));
+        refused_message.body.request = later_deadline;
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &refused_message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            b, 22, frame, frame_len, 1001), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            b, 22, &peer, frame, &frame_len));
+        ASSERT(vcs_zcode_work_swarm_parse(
+            frame, frame_len, &refused_admission));
+        ASSERT_EQ(refused_admission.type, VCS_ZCODE_WORK_SWARM_ADMISSION);
+        ASSERT_EQ(refused_admission.body.admission.disposition,
+                  VCS_ZCODE_WORK_ADMISSION_BUSY);
+        ASSERT_EQ(refused_admission.body.admission.reason,
+                  VCS_ZCODE_WORK_ADMISSION_REASON_NO_SLOT);
+        ASSERT(!vcs_zcode_work_node_next_request(b, &peer, &physical));
         ASSERT_EQ(vcs_zcode_work_node_publish_result(
                       b, 21, &result, &result_requests_queued),
                   VCS_ZCODE_WORK_NODE_OK);

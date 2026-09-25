@@ -57,27 +57,22 @@ struct work_frame {
     size_t len;
     uint8_t bytes[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
 };
-
 struct work_request_event {
     uint64_t peer;
     struct vcs_zcode_work_request_v1 request;
 };
-
 struct work_cancel_event {
     uint64_t peer;
     struct vcs_zcode_work_cancel_v1 cancel;
 };
-
 struct work_result_event {
     uint64_t peer;
     struct vcs_zcode_work_result_v1 result;
 };
-
 struct work_progress_event {
     uint64_t peer;
     struct vcs_zcode_work_progress_v1 progress;
 };
-
 struct work_admission_event {
     uint64_t peer;
     struct vcs_zcode_work_admission_v1 admission;
@@ -965,7 +960,12 @@ static enum vcs_zcode_work_node_result work_replay_admission(
                           : node->slots[existing->worker_slot].deadline_unix)
             ? VCS_ZCODE_WORK_NODE_OK : VCS_ZCODE_WORK_NODE_FULL;
 }
-
+static bool work_attachment_fits(const struct work_slot *slot,
+                                 const struct vcs_zcode_work_request_v1 *request)
+{
+    return request->work_kind == VCS_ZCODE_WORK_BUILD &&
+           request->deadline_unix <= slot->deadline_unix;
+}
 static enum vcs_zcode_work_node_result work_handle_request(
     struct vcs_zcode_work_node *node, uint64_t peer,
     const struct vcs_zcode_work_request_v1 *request, int64_t now)
@@ -989,7 +989,8 @@ static enum vcs_zcode_work_node_result work_handle_request(
             VCS_ZCODE_WORK_ADMISSION_REASON_BINDING, UINT16_MAX, 0, 0)
                 ? VCS_ZCODE_WORK_NODE_OK : VCS_ZCODE_WORK_NODE_FULL;
     }
-    if (action_slot >= 0 && request->work_kind != VCS_ZCODE_WORK_BUILD)
+    if (action_slot >= 0 &&
+        !work_attachment_fits(&node->slots[action_slot], request))
         return work_queue_admission(
             node, peer, request, VCS_ZCODE_WORK_ADMISSION_BUSY,
             VCS_ZCODE_WORK_ADMISSION_REASON_NO_SLOT, UINT16_MAX, 0, 0)
@@ -1493,7 +1494,6 @@ bool vcs_zcode_work_node_outbound_request(
     pthread_mutex_unlock(&node->lock);
     return present;
 }
-
 WORK_PEEK(vcs_zcode_work_node_peek_result, result, results,
           struct vcs_zcode_work_result_v1)
 WORK_PEEK(vcs_zcode_work_node_peek_progress, progress, progresses,

@@ -311,8 +311,7 @@ static struct zcl_result boot_zcode_work_attached_admit(
     bool completed = strcmp(action.state, "ACCEPTED") == 0 ||
         strcmp(action.state, "CACHE_HIT") == 0;
     if (!completed)
-        return boot_zcode_work_active_state(action.state) ||
-            strcmp(action.state, "FAILED") == 0 ? ZCL_OK :
+        return boot_zcode_work_active_state(action.state) ? ZCL_OK :
             ZCL_ERR(-1, "attached action is terminal: %s", action.state);
     return ZCL_ERR(-1,
                    "completed attachment lacks authenticated toolchain closure");
