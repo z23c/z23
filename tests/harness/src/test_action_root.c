@@ -430,6 +430,10 @@ static void refuse_source_order(struct codec_fixture *f)
 {
     f->sources[0].path = "src/zz.h";
 }
+static void refuse_source_conflict(struct codec_fixture *f)
+{
+    f->sources[0].path = "src/unit.c"; /* same path, another content hash */
+}
 static void refuse_search_dup(struct codec_fixture *f)
 {
     f->search[1] = "inc_a";
@@ -491,6 +495,7 @@ static void test_codec_refusals(void)
         { "an absolute path after '='", refuse_argv_eq },
         { "an absolute source path", refuse_source_abs },
         { "an unsorted source list", refuse_source_order },
+        { "one source path with two content hashes", refuse_source_conflict },
         { "a repeated search dir", refuse_search_dup },
         { "an unsorted includer list", refuse_includer_order },
         { "environment names out of allowlist order", refuse_env_order },
@@ -874,8 +879,9 @@ static void test_derive_shadow_and_removal(
              ok && fx_same(x, b));
 }
 
-/* Lookups keep inclusion order; a closure that names one file twice or a
- * dir in two search classes is refused. */
+/* Lookups keep inclusion order. GCC names a header once per route that
+ * reached it, so a repeated path is dropped (first occurrence kept); a dir
+ * in two search classes is refused. */
 static void test_derive_lookups(struct fx *x,
                                 const struct zcl_action_root_result *b)
 {
@@ -887,8 +893,14 @@ static void test_derive_lookups(struct fx *x,
              "the root", ok && fx_same(x, b));
     ok = fx_depfile_text(x, " build/gen/unity.c %R/src/unit.c src/local.h "
                             "inc_b/defs.h src/local.h") &&
-         fx_miss(x, "dependency_duplicate") && fx_depfile(x, true);
-    AR_CHECK("lookups: a closure naming one file twice is refused", ok);
+         fx_same(x, b);
+    AR_CHECK("lookups: a depfile naming one header twice derives the root "
+             "of the depfile naming it once", ok && fx_depfile(x, true));
+    ok = fx_depfile_text(x, " build/gen/unity.c %R/src/unit.c src/local.h "
+                            "inc_b/defs.h %R/src/local.h %R/inc_b/defs.h") &&
+         fx_same(x, b);
+    AR_CHECK("lookups: a header repeated under another spelling of the same "
+             "path derives the same root", ok && fx_depfile(x, true));
     const char *saved = x->argv[3];
     x->argv[3] = "-isysteminc_b";
     ok = fx_miss(x, "search_class_conflict");

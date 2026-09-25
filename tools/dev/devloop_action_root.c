@@ -34,6 +34,7 @@
 #define AR_TEXT_MAX 4096u
 #define AR_MEMO_SLOTS 8192u
 #define AR_MEMO_PROBE 16u
+#define AR_DEP_SEEN_SLOTS (2u * ZCL_ACTION_ROOT_MAX_DEPS)
 /* A file modified this recently may change again within the same mtime
  * tick, so its digest is never memoized ("racily clean"). */
 #define AR_MEMO_SETTLE_S 3
@@ -475,6 +476,7 @@ struct ar_state {
     uint8_t collect2_sha3[32];
     char *env_value[AR_ENV_MAX]; /* by allowlist index; NULL = unset */
     uint32_t probes;
+    uint32_t dep_seen[AR_DEP_SEEN_SLOTS]; /* deps index + 1, 0 = empty */
 };
 
 /* A depfile that names a file which is gone (stale) or unreadable. */
@@ -518,6 +520,27 @@ static bool ar_virtual_dep_add(struct ar_state *s)
     return true;
 }
 
+/* GCC names one file once per route that reached it (<x.h>, then "x.h"
+ * from another header). The closure is a set: a repeated path is dropped
+ * and its first occurrence keeps its inclusion-order place. True when
+ * `token` is already recorded; otherwise deps[dep_n] is recorded. */
+static bool ar_dep_seen(struct ar_state *s, const char *token)
+{
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)token; *p; p++)
+        h = (h ^ *p) * 16777619u;
+    for (size_t k = 0; k < AR_DEP_SEEN_SLOTS; k++) {
+        uint32_t *slot = &s->dep_seen[(h + k) % AR_DEP_SEEN_SLOTS];
+        if (*slot == 0) {
+            *slot = (uint32_t)s->dep_n + 1u;
+            return false;
+        }
+        if (strcmp(s->deps[*slot - 1u].token, token) == 0)
+            return true;
+    }
+    return false;
+}
+
 static bool ar_dep_add(struct ar_state *s, const char *raw)
 {
     if (strstr(raw, "build/hotswap-fast/.resident-"))
@@ -534,6 +557,8 @@ static bool ar_dep_add(struct ar_state *s, const char *raw)
                 "dependency has no canonical spelling", raw);
         return false;
     }
+    if (ar_dep_seen(s, d->token))
+        return true;
     d->generated = strncmp(d->token, "build/", 6) == 0;
     bool hashed = d->generated ? ar_sha3_generated(&s->c, d->fs, d->sha3)
                                : ar_sha3_file(d->fs, d->sha3);
@@ -1056,7 +1081,9 @@ static const uint8_t *ar_producer(const struct zcl_action_root_request *req,
     return NULL;
 }
 
-/* Inputs are a set: sorted, and a dependency named twice is refused. */
+/* Inputs are a set: sorted. The depfile walk already drops a repeated
+ * path, so a token recorded twice here is an internal inconsistency and is
+ * refused rather than merged. */
 struct ar_inputs {
     struct vcs_action_input_v2 *sources;
     struct vcs_action_generated_v2 *generated;
