@@ -132,13 +132,67 @@ const char *zcl_reflex_observation_invalid(
     return NULL;
 }
 
-/* Today's reap: wait without a deadline. */
-void zcl_reflex_reap_bounded(pid_t child, int64_t deadline_us,
-                             struct zcl_reflex_reap *out)
+/* ── bounded reap + seccomp layer census ────────────────────────────────── */
+
+/* Longest single sleep while waiting for a leaf to exit: SIGCHLD normally
+ * wakes the wait at once; the step only bounds a lost wakeup. */
+#define REFLEX_REAP_STEP_US 5000
+
+/* Seccomp_filters of /proc/<pid>/status (pid 0 = this process). */
+static bool reflex_seccomp_filters(pid_t pid, uint32_t *out)
 {
-    (void)deadline_us;
-    memset(out, 0, sizeof(*out));
-    out->exit_code = -1;
+    char path[48];
+    if (pid == 0) (void)snprintf(path, sizeof(path), "/proc/self/status");
+    else (void)snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char buf[4096];
+    size_t have = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
+        if (n > 0 && (have += (size_t)n) < sizeof(buf) - 1) continue;
+        if (n < 0 && errno == EINTR) continue;
+        break;
+    }
+    (void)close(fd);
+    buf[have] = '\0';
+    const char *key = "\nSeccomp_filters:\t";
+    const char *p = strstr(buf, key);
+    if (!p) return false;
+    p += strlen(key);
+    uint64_t value = 0;
+    const char *digits = p;
+    for (; *p >= '0' && *p <= '9' && value <= UINT32_MAX; p++)
+        value = value * 10u + (uint64_t)(*p - '0');
+    if (p == digits || value > UINT32_MAX) return false;
+    *out = (uint32_t)value;
+    return true;
+}
+
+/* True once `child` has exited (it stays a zombie: WNOWAIT). */
+static bool reflex_child_exited(pid_t child, bool block, bool *failed)
+{
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    int flags = WEXITED | WNOWAIT | (block ? 0 : WNOHANG);
+    int rc;
+    do { rc = waitid(P_PID, (id_t)child, &info, flags); }
+    while (rc < 0 && errno == EINTR);
+    if (rc < 0) *failed = true;
+    return rc == 0 && info.si_pid == child;
+}
+
+static void reflex_wait_sigchld(const sigset_t *chld, int64_t deadline_us)
+{
+    int64_t remaining = deadline_us - platform_time_monotonic_us();
+    if (remaining <= 0) return;
+    if (remaining > REFLEX_REAP_STEP_US) remaining = REFLEX_REAP_STEP_US;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = (long)remaining * 1000L};
+    (void)sigtimedwait(chld, NULL, &ts);
+}
+
+static void reflex_reap_status(pid_t child, struct zcl_reflex_reap *out)
+{
     int status = 0;
     pid_t waited;
     do { waited = waitpid(child, &status, 0); }
@@ -146,6 +200,34 @@ void zcl_reflex_reap_bounded(pid_t child, int64_t deadline_us,
     out->reaped = waited == child;
     if (out->reaped && WIFEXITED(status)) out->exit_code = WEXITSTATUS(status);
     if (out->reaped && WIFSIGNALED(status)) out->signal = WTERMSIG(status);
+}
+
+void zcl_reflex_reap_bounded(pid_t child, int64_t deadline_us,
+                             struct zcl_reflex_reap *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->exit_code = -1;
+    sigset_t chld, old;
+    (void)sigemptyset(&chld);
+    (void)sigaddset(&chld, SIGCHLD);
+    bool masked = pthread_sigmask(SIG_BLOCK, &chld, &old) == 0;
+    bool failed = false;
+    while (!reflex_child_exited(child, false, &failed) && !failed) {
+        if (platform_time_monotonic_us() < deadline_us) {
+            reflex_wait_sigchld(&chld, deadline_us);
+            continue;
+        }
+        /* Past the deadline and still alive: SIGKILL cannot be caught,
+         * blocked or ignored, so the blocking wait below ends. */
+        (void)kill(child, SIGKILL);
+        out->killed_at_deadline = true;
+        (void)reflex_child_exited(child, true, &failed);
+        break;
+    }
+    out->filters_read = !failed &&
+        reflex_seccomp_filters(child, &out->seccomp_filters);
+    reflex_reap_status(child, out);
+    if (masked) (void)pthread_sigmask(SIG_SETMASK, &old, NULL);
 }
 
 /* ── descriptor hygiene ─────────────────────────────────────────────────── */
@@ -744,17 +826,18 @@ static bool runner_collect_step(struct collect_state *st,
     return n > 0 || (n < 0 && errno == EINTR);
 }
 
-static void runner_reap(pid_t child, struct zcl_reflex_reply *reply)
+/* What the runner itself saw of the leaf's end: exit status or signal, and a
+ * leaf that closed its pipe but outlived its deadline (killed, named RED). */
+static void runner_record_reap(const struct zcl_reflex_reap *reap, bool eof,
+                               struct zcl_reflex_reply *reply)
 {
-    int status = 0;
-    pid_t waited;
-    do { waited = waitpid(child, &status, 0); }
-    while (waited < 0 && errno == EINTR);
-    reply->child_exit_code = -1;
-    if (waited == child && WIFEXITED(status))
-        reply->child_exit_code = WEXITSTATUS(status);
-    if (waited == child && WIFSIGNALED(status))
-        reply->child_signal = WTERMSIG(status);
+    reply->child_exit_code = reap->exit_code;
+    reply->child_signal = reap->signal;
+    if (eof && reap->killed_at_deadline) {
+        reply->timed_out = true;
+        reply_error(reply, "leaf outlived its deadline after closing its "
+                           "report pipe");
+    }
 }
 
 /* Fork, collect, kill at deadline, reap. Returns false only when the resident
@@ -782,9 +865,12 @@ static bool runner_execute(const struct zcl_reflex_request *request,
         .deadline_us = started + (int64_t)request->timeout_ms * 1000,
     };
     while (!st.eof && runner_collect_step(&st, reply)) {}
-    if (!st.eof) (void)kill(child, SIGKILL);
     (void)close(pipefd[0]);
-    runner_reap(child, reply);
+    /* The whole leaf lives within one deadline: after EOF it must still exit
+     * by it; after a timeout or a cancel it is killed now. */
+    struct zcl_reflex_reap reap;
+    zcl_reflex_reap_bounded(child, st.eof ? st.deadline_us : 0, &reap);
+    runner_record_reap(&reap, st.eof, reply);
     reply->report_complete = st.have == sizeof(reply->report) &&
         reply->report.magic == ZCL_REFLEX_REPORT_MAGIC &&
         reply->report.abi == ZCL_REFLEX_WIRE_ABI;
