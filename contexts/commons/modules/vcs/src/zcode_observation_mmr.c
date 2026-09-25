@@ -84,6 +84,55 @@ static bool zom_append(struct vcs_zcode_observation_mmr_checkpoint *c,
     return false;
 }
 
+static bool zom_batch_valid(const uint8_t *roots, size_t count,
+                            const uint8_t issuer[32])
+{
+    return roots && issuer && zcl_bytes_any_set(issuer, 32) && count > 0 &&
+        count <= VCS_ZCODE_OBSERVATION_MMR_BATCH_MAX;
+}
+
+static bool zom_append_batch(struct vcs_zcode_observation_mmr_checkpoint *c,
+                             const uint8_t *roots, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (!zom_append(c, roots + i * 32)) return false;
+    return true;
+}
+
+static bool zom_prepare_next(
+    const struct vcs_zcode_observation_mmr_checkpoint *previous,
+    size_t count, int64_t observed_unix, const uint8_t issuer[32],
+    struct vcs_zcode_observation_mmr_checkpoint *next)
+{
+    *next = (struct vcs_zcode_observation_mmr_checkpoint){ .schema_version = 1 };
+    if (previous) {
+        uint8_t prior_root[32];
+        if (!vcs_zcode_observation_mmr_verify(previous, issuer) ||
+            previous->observed_unix > observed_unix ||
+            count > UINT32_MAX - previous->leaf_count ||
+            !vcs_zcode_observation_mmr_root(previous, prior_root)) return false;
+        *next = *previous;
+        memcpy(next->previous_checkpoint_root, prior_root, 32);
+    }
+    memcpy(next->issuer, issuer, 32);
+    next->observed_unix = observed_unix;
+    return true;
+}
+
+static bool zom_link_valid(
+    const struct vcs_zcode_observation_mmr_checkpoint *previous,
+    const struct vcs_zcode_observation_mmr_checkpoint *next,
+    size_t count, const uint8_t issuer[32])
+{
+    uint8_t prior_root[32];
+    return vcs_zcode_observation_mmr_verify(previous, issuer) &&
+        next->observed_unix >= previous->observed_unix &&
+        count <= UINT32_MAX - previous->leaf_count &&
+        next->leaf_count == previous->leaf_count + count &&
+        vcs_zcode_observation_mmr_root(previous, prior_root) &&
+        memcmp(next->previous_checkpoint_root, prior_root, 32) == 0;
+}
+
 bool vcs_zcode_observation_mmr_root(
     const struct vcs_zcode_observation_mmr_checkpoint *c, uint8_t out[32])
 {
@@ -152,23 +201,12 @@ bool vcs_zcode_observation_mmr_extend(
     const uint8_t secret[32], const uint8_t issuer[32],
     struct vcs_zcode_observation_mmr_checkpoint *out)
 {
-    struct vcs_zcode_observation_mmr_checkpoint next = { .schema_version = 1 };
-    uint8_t prior_root[32], root[32];
-    if (!roots || !secret || !issuer || !out || !zcl_bytes_any_set(issuer, 32) ||
-        root_count == 0 || root_count > VCS_ZCODE_OBSERVATION_MMR_BATCH_MAX ||
-        observed_unix <= 0) return false;
-    if (previous) {
-        if (!vcs_zcode_observation_mmr_verify(previous, issuer) ||
-            previous->observed_unix > observed_unix ||
-            root_count > UINT32_MAX - previous->leaf_count ||
-            !vcs_zcode_observation_mmr_root(previous, prior_root)) return false;
-        next = *previous;
-        memcpy(next.previous_checkpoint_root, prior_root, 32);
-    }
-    memcpy(next.issuer, issuer, 32);
-    next.observed_unix = observed_unix;
-    for (size_t i = 0; i < root_count; i++)
-        if (!zom_append(&next, roots + i * 32)) return false;
+    struct vcs_zcode_observation_mmr_checkpoint next;
+    uint8_t root[32];
+    if (!secret || !out || observed_unix <= 0 ||
+        !zom_batch_valid(roots, root_count, issuer) ||
+        !zom_prepare_next(previous, root_count, observed_unix, issuer, &next) ||
+        !zom_append_batch(&next, roots, root_count)) return false;
     if (!vcs_zcode_observation_mmr_root(&next, root) ||
         !vcs_signed_evidence_seal_root(root, secret, issuer, next.signature) ||
         !vcs_zcode_observation_mmr_verify(&next, issuer))
@@ -185,25 +223,17 @@ bool vcs_zcode_observation_mmr_verify_extension(
     struct vcs_zcode_observation_mmr_checkpoint computed = {
         .schema_version = 1
     };
-    uint8_t prior_root[32];
-    if (!next || !roots || !expected_issuer ||
-        root_count == 0 || root_count > VCS_ZCODE_OBSERVATION_MMR_BATCH_MAX ||
+    if (!next || !zom_batch_valid(roots, root_count, expected_issuer) ||
         !vcs_zcode_observation_mmr_verify(next, expected_issuer)) return false;
     if (!previous) {
         if (next->leaf_count != root_count ||
             zcl_bytes_any_set(next->previous_checkpoint_root, 32)) return false;
         memcpy(computed.issuer, expected_issuer, 32);
     } else {
-        if (!vcs_zcode_observation_mmr_verify(previous, expected_issuer) ||
-            next->observed_unix < previous->observed_unix ||
-            root_count > UINT32_MAX - previous->leaf_count ||
-            next->leaf_count != previous->leaf_count + root_count ||
-            !vcs_zcode_observation_mmr_root(previous, prior_root) ||
-            memcmp(next->previous_checkpoint_root, prior_root, 32) != 0)
+        if (!zom_link_valid(previous, next, root_count, expected_issuer))
             return false;
         computed = *previous;
     }
-    for (size_t i = 0; i < root_count; i++)
-        if (!zom_append(&computed, roots + i * 32)) return false;
+    if (!zom_append_batch(&computed, roots, root_count)) return false;
     return memcmp(computed.peaks, next->peaks, sizeof(next->peaks)) == 0;
 }

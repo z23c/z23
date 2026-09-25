@@ -53,3 +53,23 @@ The exact tested source SHA-256 values were:
 | `zcode_observation_mmr.h` | `eed2ba18359b502f1c95f2bf649a8f66dd3a31b7c243f1e1c2057fe383e6ce0e` |
 | `zcode_observation_mmr.c` | `cffe34d7e693596d287aa1b872249c8bd64ac317a5468de84d807dcd3b68cf03` |
 | `test_zcode_dev_objects.c` | `be8fd22d96331894d719647d021f66ec0e67234bbd9b5e56bba333e6d3079eec` |
+
+After integration with `origin/main`
+`7a9f354f3f7996383c0e7c858346ac29a5ad8957`, the same command passed
+1/1 groups with zero skips. The combined-tree log SHA-256 is
+`b84049738eb2d9eb2c27d7a3db74bd227362f9dcf4be963cc05d9a37da25c74b`.
+The group body took 11,005 ms. Its process-CPU probe printed
+`MMR_VERIFY_PROBE checks=64 cpu_us=130271 wire_bytes=1168 roots_bytes=64`:
+2.035 ms per two-root extension verification in that run. The exact combined
+source SHA-256 values are:
+
+| File | SHA-256 |
+| --- | --- |
+| `zcode_observation_mmr.h` | `eed2ba18359b502f1c95f2bf649a8f66dd3a31b7c243f1e1c2057fe383e6ce0e` |
+| `zcode_observation_mmr.c` | `2f82dd5addc807268b3d30b3e50854796d3c26885e80769bfda3ab92c333705f` |
+| `test_zcode_dev_objects.c` | `fa488ce2f7c0cc7a955966f81d19982b5722a8112f4d3e82f52ac9ac6fc950d5` |
+
+The combined source passed `make CC=gcc -j2 lint-fast` 33/33 gates. Log
+SHA-256: `0a27dbafbb02be3605aa5a6cbf6c039dfb18475fa30625fe8324d9863d3722a3`.
+The generated inventory check passed with log SHA-256
+`0c5bc76b7af47b137970570c3382464d67328aac5fee037151a3322da31f3b47`.
