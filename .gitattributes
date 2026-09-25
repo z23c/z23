@@ -42,6 +42,10 @@ vendor/**    linguist-vendored
 vendor/rgfw/**      -whitespace
 vendor/qrcodegen/** -whitespace
 vendor/typography/stb_truetype.h -whitespace
+# Seeded-bug patches for the shadow selector corpus. A blank context line in a
+# unified diff is a single space, and each patch is pinned by its SHA3 in
+# corpus.tsv, so the bytes cannot be trimmed.
+tools/dev/fixtures/shadow_select/*.patch -whitespace
 
 # Non-C assets (view templates, styles, config, fixtures, data).
 *.chtml      linguist-generated
