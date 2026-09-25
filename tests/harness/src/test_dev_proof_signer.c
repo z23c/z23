@@ -1000,6 +1000,10 @@ static int test_dps_local_observation_stale(void)
                                    &domain, 1, &result);
         ASSERT(result.result == ZCL_DEV_OBSERVATION_MISS);
         ASSERT(result.stale_count == 2);
+        query.now_unix = 0;
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_UNAVAILABLE);
         query.now_unix = 1002;
         memset(domain.producer_pubkey, 0x7a, 32);
         zcl_dev_observation_lookup(&query, objects, 2, true,

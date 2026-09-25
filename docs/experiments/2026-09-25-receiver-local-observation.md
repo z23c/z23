@@ -99,3 +99,10 @@ A receiver cache keyed by exact observation roots and local policy generation
 is a next measured optimization, not an implemented shortcut. This note does
 not claim a fleet hit, duplicate job avoided, payload byte saved, or release
 qualification.
+
+The combined-tree review added an unavailable result for `now_unix == 0`,
+because a missing receiver clock cannot establish freshness. The added
+negative assertion passed in the combined 1/1 `dev_proof_signer` group, log
+SHA-256 `f23cf007772b2b4c7fdc8bdd4aa43024114398598c70eabd8c5b0a3e68a865c6`.
+The signed lane measurements above apply to its earlier source SHA and are
+not relabeled as measurements of this revision.

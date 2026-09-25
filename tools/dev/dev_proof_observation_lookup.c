@@ -22,7 +22,7 @@ static bool nonzero(const uint8_t root[ZCL_DEV_PROOF_ROOT_BYTES])
 static bool valid_query(const struct zcl_dev_observation_query *query,
                         size_t domain_count)
 {
-    return query && query->group && query->group[0] &&
+    return query && query->group && query->group[0] && query->now_unix != 0 &&
            nonzero(query->key) &&
            query->required_independent_domains != 0 &&
            query->required_independent_domains <= domain_count;
