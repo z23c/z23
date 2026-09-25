@@ -504,6 +504,8 @@ ZCL_CAPABILITY_SYMBOL("readdir", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("rewinddir", CAP_FS_READ,
     "Restarts enumeration through an already-open directory handle.")
 ZCL_CAPABILITY_SYMBOL("readlink", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("readlinkat", CAP_FS_READ,
+    "Reads a symlink target relative to a directory descriptor.")
 ZCL_CAPABILITY_SYMBOL("realpath", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("rewind", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_column_blob", CAP_FS_READ,

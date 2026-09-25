@@ -395,7 +395,7 @@ cap_closure_load_module_rows() {
     # table. Each names exactly its sibling .c file; duplicate central rows
     # and malformed/misplaced declarations refuse rather than silently merge.
     sidecars="$(
-        for dir in "$root"/{core,engine,contexts,cognition,platform}; do
+        for dir in "$root"/{core,engine,contexts,cognition,platform,tools}; do
             [ -d "$dir" ] || continue
             find "$dir" -name '*.c.capabilities.def' -print
         done | LC_ALL=C sort

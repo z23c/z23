@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/dev/dev_source_identity.c", CAP_FS_READ|CAP_FS_WRITE, "Source capture reads checkout and compiler include directories; its existing snapshot path writes development CAS objects.")
