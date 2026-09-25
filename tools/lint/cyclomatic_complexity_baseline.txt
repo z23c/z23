@@ -2454,7 +2454,6 @@ platform/modules/platform/src/os_proc.c:os_proc_cmdline_has_token:18
 platform/modules/platform/src/os_proc.c:os_proc_pid_exe_path:19
 platform/modules/platform/src/os_proc.c:os_proc_pid_start_token:23
 platform/modules/platform/src/os_proc.c:os_proc_uptime_seconds:18
-platform/modules/platform/src/os_sandbox_linux.c:os_sandbox_landlock_restrict:21
 platform/modules/platform/src/positioned_file.c:platform_positioned_file_is_private:28
 platform/modules/platform/src/positioned_file.c:platform_positioned_file_open_beneath:41
 platform/modules/platform/src/positioned_file.c:platform_positioned_file_open_beneath#2:19
