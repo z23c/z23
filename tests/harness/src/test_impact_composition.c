@@ -2757,6 +2757,54 @@ static int test_ic_proof_steps_run_concurrently(void)
     return failures;
 }
 
+/* A proof step runs candidate code. A descriptor the worker holds (a lock,
+ * a signer, a socket) must not reach it: the pathname sandbox cannot revoke
+ * an fd that is already open. Plant one without O_CLOEXEC at a fixed number
+ * and require the step to see neither it nor the worker's stdin. */
+static int test_ic_proof_step_inherits_no_extra_fd(void)
+{
+    int failures = 0;
+    TEST("proof budget: a step child inherits only its log streams and /dev/null stdin") {
+        char state[4096], log[4096], marker[4096];
+        ic_budget_fixture("fdhygiene", state);
+        snprintf(log, sizeof(log), "%s/fd.log", state);
+        snprintf(marker, sizeof(marker), "%s/planted-signer", state);
+        int planted_fd = 77;
+        ASSERT(fcntl(planted_fd, F_GETFD) == -1 && errno == EBADF);
+        int opened = open(marker, O_CREAT | O_RDWR, 0600);  /* no O_CLOEXEC */
+        ASSERT(opened >= 0);
+        ASSERT(dup2(opened, planted_fd) == planted_fd);
+        close(opened);
+        const char *argv[] = {
+            "/bin/sh", "-c",
+            "if [ -e /dev/fd/77 ]; then echo fd77=LEAKED; else echo fd77=closed; fi; "
+#if defined(__linux__)
+            "echo stdin=$(readlink /proc/$$/fd/0)"
+#else
+            "echo stdin=/dev/null"
+#endif
+            , NULL};
+        struct zcl_dev_proof_budget budget = {
+            .budget_ms = 30000, .ceiling_ms = 60000, .no_progress_ms = 30000};
+        struct zcl_dev_proof_step step = {0};
+        bool started = zcl_dev_proof_step_start(&step, ".", log, argv, &budget);
+        int settled = started ? (int)zcl_dev_proof_steps_wait(&step, 1) : -1;
+        close(planted_fd);
+        ASSERT(started && settled == 1 && step.report.rc == 0);
+        char body[512] = {0};
+        FILE *f = fopen(log, "r");
+        ASSERT(f != NULL);
+        size_t got = fread(body, 1, sizeof(body) - 1, f);
+        fclose(f);
+        body[got] = '\0';
+        ASSERT(strstr(body, "fd77=closed") != NULL);
+        ASSERT(strstr(body, "LEAKED") == NULL);
+        ASSERT(strstr(body, "stdin=/dev/null") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 #endif
 
 static int test_ic_proof_generation_prefers_ram_when_it_fits(void)
@@ -7365,6 +7413,7 @@ int test_impact_composition(void)
     failures += test_ic_proof_run_watched_kills_only_the_silent();
     failures += test_ic_proof_budget_cancellation();
     failures += test_ic_proof_steps_run_concurrently();
+    failures += test_ic_proof_step_inherits_no_extra_fd();
 #endif
     failures += test_ic_proof_generation_prefers_ram_when_it_fits();
 #if !defined(_WIN32)

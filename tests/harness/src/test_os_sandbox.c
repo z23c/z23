@@ -645,6 +645,267 @@ static int c_tsync_method_is_tsync(void)
     return 0;
 }
 
+/* ── Landlock: every right handled, not just read/write ──────────────────
+ *
+ * Landlock ALLOWS a right the ruleset does not handle. These children are
+ * granted ONE scratch dir (read+write+create) and then try each right the
+ * old builder left unhandled against a sibling dir OUTSIDE the grant that
+ * the same uid owns. Each attempt must fail with EACCES. Every child first
+ * performs the same operation on the outside dir BEFORE restricting, so a
+ * pass cannot come from the filesystem refusing the operation anyway. */
+
+static char g_adv_grant[1024];
+static char g_adv_out[1024];
+
+static int adv_path(char *buf, size_t n, const char *dir, const char *leaf)
+{
+    int w = snprintf(buf, n, "%s/%s", dir, leaf);
+    return w > 0 && (size_t)w < n ? 0 : 1;
+}
+
+static int adv_confine_to_grant(void)
+{
+    struct os_sandbox_path_rule rules[] = {{
+        .path = g_adv_grant, .allow_read = true, .allow_write = true,
+        .allow_create = true }};
+    if (!os_sandbox_no_new_privs()) return 70;
+    return os_sandbox_landlock_restrict(rules, 1).ok ? 0 : 71;
+}
+
+static int adv_denied(int rc) { return rc != 0 && errno == EACCES ? 0 : 1; }
+
+static int c_adv_symlink_outside(void)
+{
+    char ctl[1100], probe[1100], inside[1100];
+    if (adv_path(ctl, sizeof ctl, g_adv_out, "ctl.link") ||
+        adv_path(probe, sizeof probe, g_adv_out, "evil.link") ||
+        adv_path(inside, sizeof inside, g_adv_grant, "ok.link")) return 60;
+    if (symlink("/etc/passwd", ctl) != 0) return 61;
+    if (adv_confine_to_grant() != 0) return 62;
+    if (adv_denied(symlink("/etc/passwd", probe))) return 10;
+    if (symlink("/etc/passwd", inside) != 0) return 11;
+    return 0;
+}
+
+static int c_adv_mkfifo_outside(void)
+{
+    char ctl[1100], probe[1100], inside[1100];
+    if (adv_path(ctl, sizeof ctl, g_adv_out, "ctl.fifo") ||
+        adv_path(probe, sizeof probe, g_adv_out, "evil.fifo") ||
+        adv_path(inside, sizeof inside, g_adv_grant, "ok.fifo")) return 60;
+    if (mkfifo(ctl, 0600) != 0) return 61;
+    if (adv_confine_to_grant() != 0) return 62;
+    if (adv_denied(mkfifo(probe, 0600))) return 10;
+    if (mkfifo(inside, 0600) != 0) return 11;
+    return 0;
+}
+
+static int adv_bind_unix(const char *leaf)
+{
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -2;
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    (void)snprintf(a.sun_path, sizeof a.sun_path, "%s", leaf);
+    int rc = bind(s, (struct sockaddr *)&a, sizeof a);
+    int e = errno;
+    close(s);
+    errno = e;
+    return rc;
+}
+
+static int c_adv_bind_unix_outside(void)
+{
+    /* Relative socket names keep sun_path short however deep the checkout
+     * is; the kernel still resolves (and Landlock still checks) the full
+     * path beneath the cwd. */
+    if (chdir(g_adv_out) != 0) return 60;
+    if (adv_bind_unix("ctl.sock") != 0) return 61;
+    if (adv_confine_to_grant() != 0) return 62;
+    if (adv_denied(adv_bind_unix("evil.sock"))) return 10;
+    if (chdir(g_adv_grant) != 0) return 63;
+    if (adv_bind_unix("ok.sock") != 0) return 11;
+    return 0;
+}
+
+static int c_adv_truncate_outside(void)
+{
+    char victim[1100];
+    if (adv_path(victim, sizeof victim, g_adv_out, "victim.key")) return 60;
+    int fd = open(victim, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return 61;
+    ssize_t w = write(fd, "secret-key-bytes", 16);
+    close(fd);
+    if (w != 16) return 62;
+    if (truncate(victim, 16) != 0) return 63;  /* control: uid may truncate */
+    if (adv_confine_to_grant() != 0) return 64;
+    if (adv_denied(truncate(victim, 0))) return 10;
+    struct stat st;
+    if (stat(victim, &st) != 0 || st.st_size != 16) return 12;
+    return 0;
+}
+
+static int c_adv_mknod_outside(void)
+{
+    char ctl[1100], probe[1100];
+    if (adv_path(ctl, sizeof ctl, g_adv_out, "ctl.node") ||
+        adv_path(probe, sizeof probe, g_adv_out, "evil.node")) return 60;
+    /* Control: an unprivileged mknod of a character device reaches the
+     * capability check and fails EPERM; confined, Landlock's MAKE_CHAR check
+     * runs first and answers EACCES. A regular-file mknod is MAKE_REG. */
+    dev_t null_dev = (dev_t)((1u << 8) | 3u);
+    if (mknod(ctl, S_IFCHR | 0600, null_dev) == 0 || errno != EPERM) return 61;
+    if (mknod(ctl, S_IFREG | 0600, 0) != 0) return 62;
+    if (adv_confine_to_grant() != 0) return 63;
+    if (adv_denied(mknod(probe, S_IFCHR | 0600, null_dev))) return 10;
+    if (adv_denied(mknod(probe, S_IFREG | 0600, 0))) return 11;
+    if (adv_denied(mkdir(probe, 0700))) return 12;
+    return 0;
+}
+
+static int c_adv_rename_across_dirs_inside(void)
+{
+    char a[1100], b[1100], from[1100], to[1100];
+    if (adv_path(a, sizeof a, g_adv_grant, "ra") ||
+        adv_path(b, sizeof b, g_adv_grant, "rb") ||
+        adv_path(from, sizeof from, a, "moved") ||
+        adv_path(to, sizeof to, b, "moved")) return 60;
+    if (mkdir(a, 0700) != 0 || mkdir(b, 0700) != 0) return 61;
+    int fd = open(from, O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
+    if (fd < 0) return 62;
+    close(fd);
+    if (adv_confine_to_grant() != 0) return 63;
+    if (rename(from, to) != 0) return 10;
+    if (access(to, F_OK) != 0 || access(from, F_OK) == 0) return 11;
+    return 0;
+}
+
+/* A caller that never sets allow_create (the node profiles) keeps create and
+ * unlink beneath its WRITE grant — SQLite needs its WAL/journal — but no
+ * longer anywhere else. */
+static int c_adv_write_implies_create_only_inside(void)
+{
+    char inside[1100], outside[1100];
+    if (adv_path(inside, sizeof inside, g_adv_grant, "wal") ||
+        adv_path(outside, sizeof outside, g_adv_out, "evil.dir")) return 60;
+    struct os_sandbox_path_rule rules[] = {{
+        .path = g_adv_grant, .allow_read = true, .allow_write = true }};
+    if (!os_sandbox_no_new_privs()) return 70;
+    if (!os_sandbox_landlock_restrict(rules, 1).ok) return 71;
+    int fd = open(inside, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return 10;
+    close(fd);
+    if (unlink(inside) != 0) return 11;
+    if (adv_denied(mkdir(outside, 0700))) return 12;
+    return 0;
+}
+
+static int c_adv_no_rules_denies_all_writes(void)
+{
+    char outside[1100];
+    if (adv_path(outside, sizeof outside, g_adv_out, "nothing")) return 60;
+    if (!os_sandbox_no_new_privs()) return 70;
+    if (!os_sandbox_landlock_restrict(NULL, 0).ok) return 71;
+    if (adv_denied(mkdir(outside, 0700))) return 10;
+    if (adv_denied(symlink("/etc/passwd", outside))) return 11;
+    if (adv_denied(mkfifo(outside, 0600))) return 12;
+    return 0;
+}
+
+/* ── Landlock TCP port rules (ABI >= 4) ──────────────────────────────── */
+
+static int adv_free_tcp_port(uint16_t *port)
+{
+    int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return 1;
+    struct sockaddr_in a = { .sin_family = AF_INET,
+                             .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t len = sizeof a;
+    int rc = bind(s, (struct sockaddr *)&a, sizeof a) != 0 ||
+             getsockname(s, (struct sockaddr *)&a, &len) != 0;
+    close(s);
+    *port = ntohs(a.sin_port);
+    return rc || *port == 0;
+}
+
+static int adv_tcp(uint16_t port, bool do_bind)
+{
+    int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -2;
+    int one = 1;
+    (void)setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port),
+                             .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    int rc = do_bind ? bind(s, (struct sockaddr *)&a, sizeof a)
+                     : connect(s, (struct sockaddr *)&a, sizeof a);
+    int e = errno;
+    close(s);
+    errno = e;
+    return rc;
+}
+
+static int c_tcp_port_rules(void)
+{
+    uint16_t granted = 0, other = 0;
+    if (adv_free_tcp_port(&granted) || adv_free_tcp_port(&other)) return 60;
+    if (granted == other) return 61;
+    struct os_sandbox_tcp_port_rule tcp[] = {{ .port = granted,
+                                               .allow_bind = true }};
+    struct os_sandbox_landlock_policy policy = {
+        .restrict_tcp = true, .tcp_rules = tcp, .n_tcp_rules = 1 };
+    if (!os_sandbox_no_new_privs()) return 70;
+    struct zcl_result r = os_sandbox_landlock_restrict_policy(&policy);
+    if (!r.ok) return 71;
+    if (adv_tcp(granted, true) != 0) return 10;
+    if (adv_denied(adv_tcp(other, true))) return 11;
+    /* A closed loopback port answers ECONNREFUSED; only Landlock says EACCES. */
+    if (adv_denied(adv_tcp(other, false))) return 12;
+    return 0;
+}
+
+static int c_tcp_policy_refusals(void)
+{
+    struct os_sandbox_tcp_port_rule open_port = { .port = 1, .allow_bind = true };
+    struct os_sandbox_tcp_port_rule empty = { .port = 1 };
+    struct os_sandbox_landlock_policy unrestricted = {
+        .tcp_rules = &open_port, .n_tcp_rules = 1 };
+    struct os_sandbox_landlock_policy no_access = {
+        .restrict_tcp = true, .tcp_rules = &empty, .n_tcp_rules = 1 };
+    if (!os_sandbox_no_new_privs()) return 70;
+    struct zcl_result a = os_sandbox_landlock_restrict_policy(&unrestricted);
+    struct zcl_result b = os_sandbox_landlock_restrict_policy(&no_access);
+    struct zcl_result c = os_sandbox_landlock_restrict_policy(NULL);
+    if (a.ok || a.code != OS_SANDBOX_ERR_INVALID_ARG) return 10;
+    if (b.ok || b.code != OS_SANDBOX_ERR_INVALID_ARG) return 11;
+    if (c.ok || c.code != OS_SANDBOX_ERR_INVALID_ARG) return 12;
+    /* Nothing was applied: this process is still unconfined. */
+    int fd = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 13;
+    close(fd);
+    if (os_sandbox_landlock_restricted_count() != 0) return 14;
+    return 0;
+}
+
+/* On a kernel below ABI 4 the TCP half cannot be enforced: the call must
+ * refuse with the named code and apply NOTHING, not a filesystem-only
+ * domain. Runs on every host; on ABI >= 4 it proves the opposite branch. */
+static int c_tcp_fail_closed_contract(void)
+{
+    struct os_sandbox_path_rule rules[] = {{
+        .path = g_adv_grant, .allow_read = true }};
+    struct os_sandbox_landlock_policy policy = {
+        .fs_rules = rules, .n_fs_rules = 1, .restrict_tcp = true };
+    if (!os_sandbox_no_new_privs()) return 70;
+    struct zcl_result r = os_sandbox_landlock_restrict_policy(&policy);
+    if (os_sandbox_landlock_tcp_supported())
+        return r.ok ? 0 : 10;
+    if (r.ok || r.code != OS_SANDBOX_ERR_LANDLOCK_NET_UNAVAILABLE) return 11;
+    if (os_sandbox_landlock_restricted_count() != 0) return 12;
+    int fd = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 13;
+    close(fd);
+    return 0;
+}
+
 /* ── userns map round-trip (userns-gated) ──────────────────────────────── */
 
 static int userns_map_roundtrip(void)
@@ -685,6 +946,8 @@ int test_os_sandbox(void)
     test_make_tmpdir(g_sess_dir, sizeof g_sess_dir, "os_sandbox", "sess");
     test_make_tmpdir(g_node_dir, sizeof g_node_dir, "os_sandbox", "node");
     test_fmt_tmpdir(g_fsize_path, sizeof g_fsize_path, "os_sandbox", "fsize");
+    test_make_tmpdir(g_adv_grant, sizeof g_adv_grant, "os_sandbox", "grant");
+    test_make_tmpdir(g_adv_out, sizeof g_adv_out, "os_sandbox", "outside");
 
     /* ── builders in isolation ─────────────────────────────────────── */
     SB_CHECK("no_new_privs succeeds in child", sb_run_child(c_no_new_privs) == 0);
@@ -713,6 +976,43 @@ int test_os_sandbox(void)
     SB_CHECK("landlock retrofit: pre-existing thread unconfined pre-join, "
              "confined post-join, idempotent 2nd call, count +2 total",
              sb_run_child(c_landlock_retrofit_join) == 0);
+
+    /* Landlock: every right handled. Outside the one grant each of these
+     * is EACCES; inside it the same operations still work. */
+    SB_CHECK("landlock: symlink outside grant -> EACCES, inside ok",
+             sb_run_child(c_adv_symlink_outside) == 0);
+    SB_CHECK("landlock: mkfifo outside grant -> EACCES, inside ok",
+             sb_run_child(c_adv_mkfifo_outside) == 0);
+    SB_CHECK("landlock: bind AF_UNIX path outside grant -> EACCES, inside ok",
+             sb_run_child(c_adv_bind_unix_outside) == 0);
+    SB_CHECK("landlock: mknod chr/reg + mkdir outside grant -> EACCES",
+             sb_run_child(c_adv_mknod_outside) == 0);
+    SB_CHECK("landlock: no rules -> mkdir/symlink/mkfifo anywhere EACCES",
+             sb_run_child(c_adv_no_rules_denies_all_writes) == 0);
+    SB_CHECK("landlock: write-only grant keeps create inside, not outside",
+             sb_run_child(c_adv_write_implies_create_only_inside) == 0);
+    if (abi >= 3)
+        SB_CHECK("landlock: truncate() of an owned file outside grant -> EACCES",
+                 sb_run_child(c_adv_truncate_outside) == 0);
+    else
+        printf("os_sandbox: SKIP truncate (Landlock ABI %d < 3 cannot "
+               "handle TRUNCATE)\n", abi);
+    if (abi >= 2)
+        SB_CHECK("landlock: cross-directory rename inside grant succeeds",
+                 sb_run_child(c_adv_rename_across_dirs_inside) == 0);
+    else
+        printf("os_sandbox: SKIP cross-dir rename (Landlock ABI %d < 2 "
+               "always denies reparenting)\n", abi);
+    SB_CHECK("landlock policy: malformed TCP rules refused, nothing applied",
+             sb_run_child(c_tcp_policy_refusals) == 0);
+    SB_CHECK("landlock policy: TCP needs ABI>=4 or refuses applying nothing",
+             sb_run_child(c_tcp_fail_closed_contract) == 0);
+    if (os_sandbox_landlock_tcp_supported())
+        SB_CHECK("landlock policy: TCP bind/connect limited to granted port",
+                 sb_run_child(c_tcp_port_rules) == 0);
+    else
+        printf("os_sandbox: SKIP TCP port enforcement (Landlock ABI %d < 4)\n",
+               abi);
 
     /* ── the composed profile ──────────────────────────────────────── */
     SB_CHECK("enter(SESSION_CHILD): alive, reads grant, /etc/passwd EACCES",
@@ -785,6 +1085,8 @@ int test_os_sandbox(void)
     test_rm_rf_recursive(g_ll2_dir);
     test_rm_rf_recursive(g_sess_dir);
     test_rm_rf_recursive(g_node_dir);
+    test_rm_rf_recursive(g_adv_grant);
+    test_rm_rf_recursive(g_adv_out);
     unlink(g_fsize_path);
 
     printf("=== os_sandbox tests done: %d failure(s) ===\n", failures);
