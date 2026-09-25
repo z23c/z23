@@ -14,6 +14,7 @@
 #include "vcs/build_artifact_manifest.h"
 #include "vcs/package_build.h"
 #include "vcs/package_store.h"
+#include "vcs/proof_ticket.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_work_output.h"
@@ -731,7 +732,7 @@ static struct zcl_result bf_proof_evaluate(
         valid_count++;
     }
     if (bf_observations_conflict(valid, valid_count))
-        return ZCL_ERR(-1, "proof_observation_conflict");
+        return ZCL_ERR(-1, VCS_PROOF_OBSERVATION_CONFLICT);
     /* Failed observations remain immutable in CAS and in the receipt ledger,
      * but cannot satisfy any positive proof dimension or be promoted. */
     valid_count = bf_successful_observations(valid, valid_count);
