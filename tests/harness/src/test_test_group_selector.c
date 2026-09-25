@@ -717,6 +717,39 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_resolve_exact("test_api", full));
         ASSERT(strcmp(full, "test_api") == 0);
         ASSERT(!zcl_test_group_resolve_exact("api_missing", full));
+        /* The indexed catalog must answer exactly like a linear scan: for
+         * every row, its bare name, and a missing sibling, count the rows a
+         * resolve can name and require the same verdict and the same row. */
+        for (size_t row = 0; row < zcl_test_group_catalog_count(); row++) {
+            const char *cat = zcl_test_group_catalog_at(row);
+            ASSERT(zcl_test_group_catalog_contains(cat));
+            const char *bare = strchr(cat, '_') ? strchr(cat, '_') + 1 : cat;
+            char missing[ZCL_TEST_GROUP_FULL_MAX + 8];
+            snprintf(missing, sizeof(missing), "%s_zz", cat);
+            ASSERT(!zcl_test_group_catalog_contains(missing));
+            const char *probes[] = { cat, bare, missing };
+            for (size_t p = 0; p < 3; p++) {
+                char want_t[ZCL_TEST_GROUP_FULL_MAX + 8];
+                char want_s[ZCL_TEST_GROUP_FULL_MAX + 8];
+                snprintf(want_t, sizeof(want_t), "test_%s", probes[p]);
+                snprintf(want_s, sizeof(want_s), "spec_%s", probes[p]);
+                size_t hits = 0;
+                const char *hit = NULL;
+                for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+                    const char *c = zcl_test_group_catalog_at(i);
+                    if (strcmp(c, probes[p]) == 0 || strcmp(c, want_t) == 0 ||
+                        strcmp(c, want_s) == 0) {
+                        hit = c;
+                        hits++;
+                    }
+                }
+                char got[ZCL_TEST_GROUP_FULL_MAX];
+                bool ok = zcl_test_group_resolve_exact(probes[p], got);
+                ASSERT(ok == (hits == 1));
+                if (ok)
+                    ASSERT(strcmp(got, hit) == 0);
+            }
+        }
         ASSERT(zcl_test_group_plan_selects("test_api", "test_api"));
         ASSERT(!zcl_test_group_plan_selects("test_api",
                                             "test_native_api_contract"));

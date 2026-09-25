@@ -4,8 +4,10 @@
 #include "test_group_catalog.h"
 #include "platform/glob_match.h"
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *const g_test_groups[] = {
@@ -62,14 +64,50 @@ const char *zcl_test_group_catalog_at(size_t index)
     return index < zcl_test_group_catalog_count() ? g_test_groups[index] : NULL;
 }
 
+/* Plan selection asks "is this id in the catalog" and "which catalog row does
+ * this id name" once per (catalog row x plan group) pair. A linear strcmp scan
+ * per question made one plan ~3e9 instructions (1178 rows). The catalog is
+ * immutable, so sort row pointers once and answer by binary search. */
+#define CATALOG_ROWS (sizeof(g_test_groups) / sizeof(g_test_groups[0]))
+static const char *g_sorted_groups[CATALOG_ROWS];
+static pthread_once_t g_sorted_once = PTHREAD_ONCE_INIT;
+
+static int catalog_row_cmp(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static void catalog_sort_once(void)
+{
+    for (size_t i = 0; i < CATALOG_ROWS; i++)
+        g_sorted_groups[i] = g_test_groups[i];
+    qsort(g_sorted_groups, CATALOG_ROWS, sizeof(g_sorted_groups[0]),
+          catalog_row_cmp);
+}
+
+/* Rows equal to `id`, so a duplicated catalog row still reads as ambiguous. */
+static size_t catalog_matches(const char *id, const char **hit)
+{
+    pthread_once(&g_sorted_once, catalog_sort_once);
+    size_t lo = 0, hi = CATALOG_ROWS;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (strcmp(g_sorted_groups[mid], id) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    size_t n = 0;
+    while (lo + n < CATALOG_ROWS && strcmp(g_sorted_groups[lo + n], id) == 0)
+        n++;
+    if (n > 0 && hit)
+        *hit = g_sorted_groups[lo];
+    return n;
+}
+
 bool zcl_test_group_catalog_contains(const char *full_id)
 {
     if (!full_id || !full_id[0])
         return false;
-    for (size_t i = 0; i < zcl_test_group_catalog_count(); i++)
-        if (strcmp(g_test_groups[i], full_id) == 0)
-            return true;
-    return false;
+    return catalog_matches(full_id, NULL) > 0;
 }
 
 bool zcl_test_group_requires_exclusive_run(const char *full_id)
@@ -181,17 +219,11 @@ bool zcl_test_group_resolve_exact(
     char spec_id[ZCL_TEST_GROUP_FULL_MAX];
     int tn = snprintf(test_id, sizeof(test_id), "test_%s", id);
     int sn = snprintf(spec_id, sizeof(spec_id), "spec_%s", id);
-    for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
-        const char *full = g_test_groups[i];
-        if (strcmp(full, id) == 0 ||
-            (tn > 0 && (size_t)tn < sizeof(test_id) &&
-             strcmp(full, test_id) == 0) ||
-            (sn > 0 && (size_t)sn < sizeof(spec_id) &&
-             strcmp(full, spec_id) == 0)) {
-            hit = full;
-            hits++;
-        }
-    }
+    hits += catalog_matches(id, &hit);
+    if (tn > 0 && (size_t)tn < sizeof(test_id) && strcmp(test_id, id) != 0)
+        hits += catalog_matches(test_id, &hit);
+    if (sn > 0 && (size_t)sn < sizeof(spec_id) && strcmp(spec_id, id) != 0)
+        hits += catalog_matches(spec_id, &hit);
     if (hits != 1 || strlen(hit) >= ZCL_TEST_GROUP_FULL_MAX)
         return false;
     snprintf(out, ZCL_TEST_GROUP_FULL_MAX, "%s", hit);
