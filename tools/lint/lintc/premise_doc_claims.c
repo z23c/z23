@@ -170,10 +170,11 @@ static int symbol_claim(struct doc_walk *w, const char *spec)
     return push_prefix(w, lit);
 }
 
-/* One annotation body, already cut; tokens split on spaces and tabs. */
-static int claim_body(struct doc_walk *w, char *body)
+/* Split body on spaces and tabs in place, as the shell's default IFS
+ * splits a line (no newline can occur). Returns the token count; only the
+ * first DOC_TOKENS_MAX are stored. */
+static size_t split_tokens(char *body, char **tok)
 {
-    char *tok[DOC_TOKENS_MAX];
     size_t n = 0;
     for (char *p = body; *p;) {
         while (*p == ' ' || *p == '\t')
@@ -190,32 +191,58 @@ static int claim_body(struct doc_walk *w, char *body)
             *q++ = '\0';
         p = q;
     }
-    if (n == 2 && (strcmp(tok[0], "file-present") == 0
-                   || strcmp(tok[0], "file-absent") == 0))
+    return n;
+}
+
+static bool is_either(const char *s, const char *a, const char *b)
+{
+    return strcmp(s, a) == 0 || strcmp(s, b) == 0;
+}
+
+/* One annotation body, already cut. */
+static int claim_body(struct doc_walk *w, char *body)
+{
+    char *tok[DOC_TOKENS_MAX];
+    size_t n = split_tokens(body, tok);
+    if (n == 2 && is_either(tok[0], "file-present", "file-absent"))
         file_claim(w, tok[1]);
-    else if (n == 3 && (strcmp(tok[0], "symbol-present") == 0
-                        || strcmp(tok[0], "symbol-absent") == 0))
+    else if (n == 3 && is_either(tok[0], "symbol-present", "symbol-absent"))
         return symbol_claim(w, tok[2]);
     return 0;
+}
+
+/* The length of the UTF-8 sequence led by c, or 0 for a byte no sequence
+ * starts with (a continuation byte, an overlong 2-byte lead, above U+10FFFF). */
+static size_t utf8_lead(unsigned c)
+{
+    if (c < 0x80)
+        return 1;
+    if (c >= 0xC2 && c <= 0xDF)
+        return 2;
+    if ((c & 0xF0) == 0xE0)
+        return 3;
+    return c >= 0xF0 && c <= 0xF4 ? 4 : 0;
+}
+
+/* The second byte's range, which excludes overlongs and surrogates. */
+static bool utf8_second_ok(unsigned c, unsigned b)
+{
+    unsigned lo = c == 0xE0 ? 0xA0 : c == 0xF0 ? 0x90 : 0x80;
+    unsigned hi = c == 0xED ? 0x9F : c == 0xF4 ? 0x8F : 0xBF;
+    return b >= lo && b <= hi;
 }
 
 static bool utf8_valid(const unsigned char *s, size_t n)
 {
     for (size_t i = 0; i < n;) {
-        unsigned c = s[i];
-        size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2
-                   : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
-        if (len == 0 || i + len > n || (len == 2 && c < 0xC2)
-            || (len == 4 && c > 0xF4))
+        size_t len = utf8_lead(s[i]);
+        if (len == 0 || len > n - i)
             return false;
-        for (size_t j = 1; j < len; j++)
+        if (len > 1 && !utf8_second_ok(s[i], s[i + 1]))
+            return false;
+        for (size_t j = 2; j < len; j++)
             if ((s[i + j] & 0xC0) != 0x80)
                 return false;
-        if ((len == 3 && c == 0xE0 && s[i + 1] < 0xA0)
-            || (len == 3 && c == 0xED && s[i + 1] > 0x9F)
-            || (len == 4 && c == 0xF0 && s[i + 1] < 0x90)
-            || (len == 4 && c == 0xF4 && s[i + 1] > 0x8F))
-            return false;
         i += len;
     }
     return true;
