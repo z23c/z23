@@ -438,4 +438,24 @@ bool vcs_action_preimage_v2_first_diff(const uint8_t *a, size_t a_len,
                                        const uint8_t *b, size_t b_len,
                                        enum vcs_action_field_v2 *out);
 
+/* Fill the six caller-supplied roots of struct vcs_build_input_closure_v1
+ * from a valid v2 preimage, each from the bytes its own v2 field already
+ * binds (the field roots above):
+ *   positive_sha3    = field root of SOURCE
+ *   negative_sha3    = field root of NEGATIVE_LOOKUP
+ *   generated_sha3   = field root of GENERATED
+ *   harness_sha3     = field root of HARNESS
+ *   policy_sha3      = field root of POLICY
+ *   build_graph_sha3 = SHA3(VCS_ACTION_BUILD_GRAPH_V2_DOMAIN || the field
+ *                      roots of STAGE, TOOLCHAIN, SYSROOT, LINKER, FLAGS,
+ *                      ENV, ABI, FIXTURES in that order)
+ * so every preimage byte lands in exactly one closure slot. An absent
+ * harness or policy root is refused, never filled with a stand-in. The v2
+ * root and vcs_build_input_closure_v1_root() of this output are separate
+ * identities over the same bytes; neither is derived from the other. */
+#define VCS_ACTION_BUILD_GRAPH_V2_DOMAIN "zcl.action_build_graph.v2"
+bool vcs_action_preimage_v2_input_closure(
+    const uint8_t *bytes, size_t len, struct vcs_build_input_closure_v1 *out,
+    char *why, size_t why_len);
+
 #endif /* ZCL_VCS_BUILD_ACTION_H */

@@ -447,6 +447,21 @@ bool vcs_action_root_v2_from_bytes(const uint8_t *bytes, size_t len,
     return true;
 }
 
+/* SHA3(domain || tag || payload) of one field, spans already validated. */
+static void av2_field_digest(const uint8_t *bytes, const size_t *off,
+                             const size_t *plen, enum vcs_action_field_v2 field,
+                             uint8_t out[32])
+{
+    static const char domain[] = VCS_ACTION_FIELD_ROOT_V2_DOMAIN;
+    uint8_t tag = (uint8_t)field;
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const unsigned char *)domain, sizeof(domain));
+    sha3_256_write(&sha, &tag, 1);
+    sha3_256_write(&sha, bytes + off[field], plen[field]);
+    sha3_256_finalize(&sha, out);
+}
+
 bool vcs_action_preimage_v2_field_root(const uint8_t *bytes, size_t len,
                                        enum vcs_action_field_v2 field,
                                        uint8_t out[32])
@@ -457,14 +472,59 @@ bool vcs_action_preimage_v2_field_root(const uint8_t *bytes, size_t len,
         field >= VCS_ACTION_FIELD_V2_COUNT || !av2_valid(bytes, len, NULL, 0) ||
         !av2_spans(bytes, len, off, plen))
         return false;
-    static const char domain[] = VCS_ACTION_FIELD_ROOT_V2_DOMAIN;
-    uint8_t tag = (uint8_t)field;
+    av2_field_digest(bytes, off, plen, field, out);
+    return true;
+}
+
+/* The v2 fields that make up the build graph slot: every field that is not
+ * one of the other five closure classes, in tag order. */
+static const enum vcs_action_field_v2 g_graph_fields[] = {
+    VCS_ACTION_FIELD_V2_STAGE,   VCS_ACTION_FIELD_V2_TOOLCHAIN,
+    VCS_ACTION_FIELD_V2_SYSROOT, VCS_ACTION_FIELD_V2_LINKER,
+    VCS_ACTION_FIELD_V2_FLAGS,   VCS_ACTION_FIELD_V2_ENV,
+    VCS_ACTION_FIELD_V2_ABI,     VCS_ACTION_FIELD_V2_FIXTURES,
+};
+
+bool vcs_action_preimage_v2_input_closure(
+    const uint8_t *bytes, size_t len, struct vcs_build_input_closure_v1 *out,
+    char *why, size_t why_len)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    size_t off[VCS_ACTION_FIELD_V2_COUNT] = {0};
+    size_t plen[VCS_ACTION_FIELD_V2_COUNT] = {0};
+    if (!av2_valid(bytes, len, why, why_len) ||
+        !av2_spans(bytes, len, off, plen))
+        return false;
+    if (plen[VCS_ACTION_FIELD_V2_HARNESS] == 0 ||
+        plen[VCS_ACTION_FIELD_V2_POLICY] == 0) {
+        vcs_action_v2_set_why(why, why_len,
+                              "input closure needs a harness and a policy root",
+                              NULL);
+        return false;
+    }
+    av2_field_digest(bytes, off, plen, VCS_ACTION_FIELD_V2_SOURCE,
+                     out->positive_sha3);
+    av2_field_digest(bytes, off, plen, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP,
+                     out->negative_sha3);
+    av2_field_digest(bytes, off, plen, VCS_ACTION_FIELD_V2_GENERATED,
+                     out->generated_sha3);
+    av2_field_digest(bytes, off, plen, VCS_ACTION_FIELD_V2_HARNESS,
+                     out->harness_sha3);
+    av2_field_digest(bytes, off, plen, VCS_ACTION_FIELD_V2_POLICY,
+                     out->policy_sha3);
+    static const char domain[] = VCS_ACTION_BUILD_GRAPH_V2_DOMAIN;
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const unsigned char *)domain, sizeof(domain));
-    sha3_256_write(&sha, &tag, 1);
-    sha3_256_write(&sha, bytes + off[field], plen[field]);
-    sha3_256_finalize(&sha, out);
+    for (size_t i = 0; i < sizeof(g_graph_fields) / sizeof(g_graph_fields[0]);
+         i++) {
+        uint8_t field_root[32];
+        av2_field_digest(bytes, off, plen, g_graph_fields[i], field_root);
+        sha3_256_write(&sha, field_root, 32);
+    }
+    sha3_256_finalize(&sha, out->build_graph_sha3);
     return true;
 }
 
