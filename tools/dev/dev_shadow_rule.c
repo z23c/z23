@@ -12,7 +12,7 @@
 
 static const char *const shadow_kind_names[ZCL_SHADOW_KIND__COUNT] = {
     "real", "header_decl", "abi", "flag", "contract", "private_impl",
-    "generated_input", "negative_lookup",
+    "generated_input", "negative_lookup", "macro",
 };
 
 const char *zcl_shadow_kind_name(enum zcl_shadow_kind kind)

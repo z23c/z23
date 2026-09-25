@@ -36,6 +36,7 @@ enum zcl_shadow_kind {
     ZCL_SHADOW_KIND_PRIVATE_IMPL,
     ZCL_SHADOW_KIND_GENERATED_INPUT,
     ZCL_SHADOW_KIND_NEGATIVE_LOOKUP,
+    ZCL_SHADOW_KIND_MACRO,
     ZCL_SHADOW_KIND__COUNT
 };
 
@@ -239,6 +240,52 @@ const char *zcl_shadow_reuse_name(enum zcl_shadow_reuse decision);
 enum zcl_shadow_reuse
 zcl_shadow_reuse_admit(const struct zcl_shadow_reuse_claim *claim);
 
+/* ── Proof dependency graph ───────────────────────────────────────────────
+ *
+ * Kept apart from the build graph (which TUs recompile). A selected group
+ * sits on exactly one layer:
+ *   CONTRACT     the changed unit's own contract and invariant obligations:
+ *                the groups its changed files name through the impact rules;
+ *   CALLER       groups reached through the reverse-caller or reverse-include
+ *                closure from a file inside the changed component, or through
+ *                an opaque rule;
+ *   INTEGRATION  groups reached through a file of another component: the
+ *                obligations that bind this contract to a consumer.
+ * Contract invalidates callers, callers invalidate integration; the rule
+ * below decides how far an edit actually propagates. */
+enum zcl_shadow_layer {
+    ZCL_SHADOW_LAYER_CONTRACT = 0,
+    ZCL_SHADOW_LAYER_CALLER,
+    ZCL_SHADOW_LAYER_INTEGRATION,
+    ZCL_SHADOW_LAYER__COUNT
+};
+
+const char *zcl_shadow_layer_name(enum zcl_shadow_layer layer);
+
+struct zcl_shadow_proof_graph {
+    uint32_t nodes[ZCL_SHADOW_LAYER__COUNT];   /* selected groups per layer */
+    uint64_t ms[ZCL_SHADOW_LAYER__COUNT];
+    uint32_t predicted[ZCL_SHADOW_LAYER__COUNT]; /* predicted fresh per layer */
+    /* Over-approximation named, not fixed: groups the selector reached ONLY
+     * through a reverse-caller hop whose file includes no header of any
+     * component the walk legitimately reached. codeindex_callers() matches
+     * callees by bare name, so a file-local `static` of the same name in an
+     * unrelated TU widens the closure. */
+    uint32_t collision_groups;
+    uint64_t collision_ms;
+    uint32_t caller_hops;                      /* SEMANTIC via files examined */
+    uint32_t collision_hops;                   /* of those, unexplained */
+};
+
+/* What the reuse-enabled selector PREDICTS must run fresh, written before any
+ * reference run. ALL means the reference itself (a fallback fired). */
+enum zcl_shadow_predict_mode {
+    ZCL_SHADOW_PREDICT_EXACT = 0,
+    ZCL_SHADOW_PREDICT_ALL,
+};
+
+#define ZCL_SHADOW_NAMES_MAX 32768u
+
 /* ── Evaluation against the live selector ─────────────────────────────── */
 struct zcl_shadow_result {
     char id[ZCL_SHADOW_ID_MAX];
@@ -268,6 +315,17 @@ struct zcl_shadow_result {
     uint64_t validation_cost_us;
     uint32_t premise_fields;        /* bit per zcl_shadow_field */
     uint32_t key_gap_fields;        /* premise fields the lookup key lacks */
+    /* Exact plans only: the selected groups, comma-separated, so a skipped
+     * obligation can be re-run by name. Empty for a universal selection;
+     * ends in "..." when it did not fit. */
+    char selected_names[ZCL_SHADOW_NAMES_MAX];
+    uint64_t lint_cost_ms;          /* the lint share of every bill above */
+    struct zcl_shadow_proof_graph graph;
+    /* The rule-enabled prediction: ALL, or exactly these groups plus every
+     * lint gate. predicted_cost_ms == rule_cost_ms. */
+    enum zcl_shadow_predict_mode predict_mode;
+    uint32_t predicted_groups;
+    char predicted_names[ZCL_SHADOW_NAMES_MAX];
 };
 
 /* Premise fields, named after zcl.component_proof_key.v1. */
@@ -309,11 +367,107 @@ bool zcl_shadow_evaluate(const struct zcl_shadow_eval_ctx *ctx,
                          struct zcl_shadow_result *out, char *why,
                          size_t why_len);
 
+/* A module's directory: everything before its src/, include/ or tests/, else
+ * the file's directory. */
+void zcl_shadow_component_of(const char *path, char *out, size_t cap);
+
+/* For each plan selection, whether the include graph explains it. Only
+ * reverse-caller (SEMANTIC) hops can be unexplained: one whose TU reads no
+ * header of the changed component, nor of a component an explained hop
+ * already reached, came from a bare-name caller match. With no include
+ * graph, every selection is explained (unknown is never waste). `explained`
+ * holds plan->selections_len entries. */
+struct zcl_devloop_plan;
+bool zcl_shadow_explained_selections(const char *root,
+                                     const struct zcl_shadow_entry *e,
+                                     const struct zcl_devloop_plan *plan,
+                                     bool *explained, uint32_t *hops_out,
+                                     uint32_t *collisions_out);
+
 /* One `SHADOW` line per entry, one `SHADOW-PREMISE` line, and the totals and
  * key-gap lines from zcl_shadow_render_totals(). */
 bool zcl_shadow_render_entry(FILE *out, const struct zcl_shadow_result *r);
 bool zcl_shadow_render_totals(FILE *out, const struct zcl_shadow_result *rows,
                               size_t count);
+/* One `SHADOW-GRAPH` line: the proof dependency graph, per layer. */
+bool zcl_shadow_render_graph(FILE *out, const struct zcl_shadow_result *r);
+
+/* ── Prediction before proof, then comparison ─────────────────────────────
+ *
+ * predicted.tsv is written from the live selector BEFORE any reference run
+ * and committed; its SHA3 is quoted in the experiment record. One row:
+ *   id  selector_mode  selector_groups  rule_mode  rule_groups
+ * mode is `all` or `exact`; groups are comma-separated full names, or `-`.
+ * `selector` is what the landing selector runs today; `rule` is what the
+ * reuse-enabled selector would run. Lint gates are never skipped by either.
+ *
+ * observed.tsv records the conservative reference run under each patch:
+ *   id  group  base  patched  evidence
+ * base and patched are pass|fail|not-run; evidence names the log. */
+struct zcl_shadow_prediction {
+    char id[ZCL_SHADOW_ID_MAX];
+    enum zcl_shadow_predict_mode selector_mode;
+    enum zcl_shadow_predict_mode rule_mode;
+    char selector_names[ZCL_SHADOW_NAMES_MAX];
+    char rule_names[ZCL_SHADOW_NAMES_MAX];
+};
+
+struct zcl_shadow_predictions {
+    struct zcl_shadow_prediction *rows;
+    size_t count;
+};
+
+/* Writes exactly the row zcl_shadow_predictions_parse() reads back. Refuses
+ * a result whose name lists did not fit, so no prediction is ever recorded
+ * narrower than the selector's answer. */
+bool zcl_shadow_render_prediction(FILE *out, const struct zcl_shadow_result *r);
+bool zcl_shadow_predictions_parse(const char *text, size_t len,
+                                  struct zcl_shadow_predictions *out,
+                                  char *why, size_t why_len);
+void zcl_shadow_predictions_free(struct zcl_shadow_predictions *p);
+const struct zcl_shadow_prediction *
+zcl_shadow_prediction_find(const struct zcl_shadow_predictions *p,
+                           const char *id);
+
+struct zcl_shadow_observation {
+    char id[ZCL_SHADOW_ID_MAX];
+    char group[ZCL_SHADOW_NAME_MAX];
+    enum zcl_shadow_verdict base;
+    enum zcl_shadow_verdict patched;
+};
+
+struct zcl_shadow_observations {
+    struct zcl_shadow_observation *rows;
+    size_t count;
+};
+
+bool zcl_shadow_observations_parse(const char *text, size_t len,
+                                   struct zcl_shadow_observations *out,
+                                   char *why, size_t why_len);
+void zcl_shadow_observations_free(struct zcl_shadow_observations *o);
+
+/* An obligation the change made REQUIRED: it fails under the patch, or its
+ * verdict differs from the base. A group that was not run is not evidence. */
+bool zcl_shadow_obligation_required(const struct zcl_shadow_observation *o);
+/* Exact membership in a comma-separated name list. */
+bool zcl_shadow_names_contain(const char *names, const char *group);
+
+struct zcl_shadow_comparison {
+    uint32_t observed;          /* reference groups run for this entry */
+    uint32_t required;
+    uint32_t red_selector;      /* required but outside the landing selector */
+    uint32_t red_rule;          /* required but outside the rule prediction */
+    char first_red_selector[ZCL_SHADOW_NAME_MAX];
+    char first_red_rule[ZCL_SHADOW_NAME_MAX];
+};
+
+/* RED is any required obligation a prediction did not name. `all` covers
+ * everything. False on a NULL argument only. */
+bool zcl_shadow_compare(const struct zcl_shadow_prediction *p,
+                        const struct zcl_shadow_observations *obs,
+                        struct zcl_shadow_comparison *out);
+bool zcl_shadow_render_comparison(FILE *out, const char *id,
+                                  const struct zcl_shadow_comparison *c);
 
 #ifdef __cplusplus
 }

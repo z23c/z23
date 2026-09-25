@@ -37,6 +37,9 @@ struct shadow_marks {
     bool *selected;
     bool *floor;
     bool *edge;
+    bool *explained;   /* reached by an include-explained selection */
+    bool *name_only;   /* reached by an unexplained caller hop */
+    bool *predicted;   /* the rule-enabled fresh set */
 };
 
 static void shadow_marks_free(struct shadow_marks *m)
@@ -45,6 +48,9 @@ static void shadow_marks_free(struct shadow_marks *m)
     free(m->selected);
     free(m->floor);
     free(m->edge);
+    free(m->explained);
+    free(m->name_only);
+    free(m->predicted);
 }
 
 static bool shadow_marks_init(struct shadow_marks *m)
@@ -55,7 +61,11 @@ static bool shadow_marks_init(struct shadow_marks *m)
     m->selected = zcl_calloc(m->n, sizeof(bool), "shadow_sel");
     m->floor = zcl_calloc(m->n, sizeof(bool), "shadow_floor");
     m->edge = zcl_calloc(m->n, sizeof(bool), "shadow_edge");
-    return m->n > 0 && m->reference && m->selected && m->floor && m->edge;
+    m->explained = zcl_calloc(m->n, sizeof(bool), "shadow_expl");
+    m->name_only = zcl_calloc(m->n, sizeof(bool), "shadow_name_only");
+    m->predicted = zcl_calloc(m->n, sizeof(bool), "shadow_pred");
+    return m->n > 0 && m->reference && m->selected && m->floor && m->edge &&
+           m->explained && m->name_only && m->predicted;
 }
 
 static size_t shadow_catalog_index(const char *full)
@@ -103,24 +113,6 @@ static bool shadow_mark_reference(const char *root, struct shadow_marks *m)
     return true;
 }
 
-/* A module's directory: everything before its src/, include/ or tests/. */
-static void shadow_component_of(const char *path, char *out, size_t cap)
-{
-    static const char *const cuts[] = {"/src/", "/include/", "/tests/"};
-    size_t len = strlen(path);
-    for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
-        const char *hit = strstr(path, cuts[i]);
-        if (hit && (size_t)(hit - path) < len) len = (size_t)(hit - path);
-    }
-    if (len == strlen(path)) {
-        const char *slash = strrchr(path, '/');
-        len = slash ? (size_t)(slash - path) : 0;
-    }
-    if (len >= cap) len = cap - 1;
-    memcpy(out, path, len);
-    out[len] = '\0';
-}
-
 /* Cross-component edges: graph-dimension selections reached through a file
  * outside the changed component. */
 static bool shadow_mark_edges(const struct zcl_devloop_plan *plan,
@@ -130,13 +122,37 @@ static bool shadow_mark_edges(const struct zcl_devloop_plan *plan,
         const struct zcl_devloop_selection *s = &plan->selections[i];
         if (s->dim == ZCL_DEVLOOP_DIM_OPAQUE) continue;
         char via_component[ZCL_SHADOW_PATH_MAX];
-        shadow_component_of(s->via, via_component, sizeof(via_component));
+        zcl_shadow_component_of(s->via, via_component, sizeof(via_component));
         if (strcmp(via_component, component) == 0) continue;
         struct shadow_mark_sink sink = {m->edge};
         if (!zcl_test_group_family_expand(s->group, shadow_mark_visit, &sink))
             return false;
     }
     return true;
+}
+
+/* Which selected groups the include graph explains and which only a bare
+ * caller-name match reached (the codeindex_callers() name-only lookup). */
+static bool shadow_mark_explained(const char *root,
+                                  const struct zcl_shadow_entry *e,
+                                  const struct zcl_devloop_plan *plan,
+                                  struct shadow_marks *m,
+                                  struct zcl_shadow_proof_graph *g)
+{
+    bool *explained = zcl_calloc(plan->selections_len + 1, sizeof(bool),
+                                 "shadow_explained");
+    if (!explained) return false;
+    bool ok = zcl_shadow_explained_selections(root, e, plan, explained,
+                                              &g->caller_hops,
+                                              &g->collision_hops);
+    for (size_t i = 0; ok && i < plan->selections_len; i++) {
+        struct shadow_mark_sink sink = {explained[i] ? m->explained
+                                                     : m->name_only};
+        ok = zcl_test_group_family_expand(plan->selections[i].group,
+                                          shadow_mark_visit, &sink);
+    }
+    free(explained);
+    return ok;
 }
 
 /* ── patch bytes ──────────────────────────────────────────────────────── */
@@ -362,6 +378,30 @@ static uint64_t shadow_lint_ms(const struct shadow_pricing *p, uint32_t *count)
     return sum;
 }
 
+static enum zcl_shadow_layer shadow_layer_of(const struct shadow_marks *m,
+                                             size_t i)
+{
+    if (m->floor[i]) return ZCL_SHADOW_LAYER_CONTRACT;
+    return m->edge[i] ? ZCL_SHADOW_LAYER_INTEGRATION : ZCL_SHADOW_LAYER_CALLER;
+}
+
+static void shadow_price_selected(const struct shadow_pricing *p,
+                                  const struct shadow_marks *m, size_t i,
+                                  struct zcl_shadow_result *out)
+{
+    uint64_t ms = shadow_group_ms(p, zcl_test_group_catalog_at(i),
+                                  &out->unweighted);
+    enum zcl_shadow_layer layer = shadow_layer_of(m, i);
+    out->groups_selected++;
+    out->fresh_cost_ms += ms;
+    out->graph.nodes[layer]++;
+    out->graph.ms[layer] += ms;
+    if (!m->floor[i] && !m->explained[i] && m->name_only[i]) {
+        out->graph.collision_groups++;
+        out->graph.collision_ms += ms;
+    }
+}
+
 static void shadow_price(const struct shadow_pricing *p,
                          const struct shadow_marks *m,
                          struct zcl_shadow_result *out)
@@ -369,16 +409,14 @@ static void shadow_price(const struct shadow_pricing *p,
     uint32_t lint_count = 0, ignored = 0;
     uint64_t lint = shadow_lint_ms(p, &lint_count);
     out->lint_selected = out->lint_reference = lint_count;
+    out->lint_cost_ms = lint;
     out->fresh_cost_ms = out->reference_cost_ms = lint;
     for (size_t i = 0; i < m->n; i++) {
-        const char *full = zcl_test_group_catalog_at(i);
-        if (m->selected[i]) {
-            out->groups_selected++;
-            out->fresh_cost_ms += shadow_group_ms(p, full, &out->unweighted);
-        }
+        if (m->selected[i]) shadow_price_selected(p, m, i, out);
         if (m->reference[i]) {
             out->groups_reference++;
-            out->reference_cost_ms += shadow_group_ms(p, full, &ignored);
+            out->reference_cost_ms +=
+                shadow_group_ms(p, zcl_test_group_catalog_at(i), &ignored);
         }
         out->floor_groups += m->floor[i] ? 1u : 0u;
         out->edges_selected += (m->edge[i] && m->selected[i]) ? 1u : 0u;
@@ -386,24 +424,59 @@ static void shadow_price(const struct shadow_pricing *p,
     }
 }
 
-/* The compositional rule, applied in shadow: when the contract root did not
- * move and no changed private file is read by another TU, every selected
- * caller outside the changed component's own floor is reusable provided the
- * floor passes fresh. Its cost leaves the fresh bill. */
-static void shadow_price_rule(const struct shadow_pricing *p,
-                              const struct shadow_marks *m, bool admissible,
-                              struct zcl_shadow_result *out)
+/* Comma-separated catalog names of `bits`; "..." marks a list that did not
+ * fit, which zcl_shadow_render_prediction() refuses to record. */
+static void shadow_names_of(const struct shadow_marks *m, const bool *bits,
+                            char *out, size_t cap)
 {
-    out->rule_cost_ms = out->fresh_cost_ms;
-    out->rule_reusable = 0;
-    if (!admissible) return;
-    uint32_t ignored = 0;
+    size_t pos = 0;
+    out[0] = '\0';
     for (size_t i = 0; i < m->n; i++) {
-        if (!m->selected[i] || m->floor[i]) continue;
-        out->rule_reusable++;
-        out->rule_cost_ms -=
-            shadow_group_ms(p, zcl_test_group_catalog_at(i), &ignored);
+        if (!bits[i]) continue;
+        int n = snprintf(out + pos, cap - pos, "%s%s", pos ? "," : "",
+                         zcl_test_group_catalog_at(i));
+        if (n <= 0 || (size_t)n >= cap - pos) {
+            (void)snprintf(out + (pos > cap - 4 ? cap - 4 : pos), 4, "...");
+            return;
+        }
+        pos += (size_t)n;
     }
+}
+
+/* The reuse-enabled selector's prediction, fixed before any proof runs:
+ *  - a fallback reason, or a selector that could not enumerate, runs the
+ *    reference (ALL);
+ *  - otherwise, when the compositional rule holds (contract root unchanged,
+ *    no private reader, build graph known), only the contract layer runs
+ *    fresh and callers and integration edges are carried;
+ *  - otherwise every selected group runs.
+ * Lint gates always run. rule_cost_ms is this prediction's bill. */
+static void shadow_predict(const struct shadow_pricing *p,
+                           struct shadow_marks *m, bool rule_ok,
+                           struct zcl_shadow_result *out)
+{
+    bool all = out->fallback != ZCL_SHADOW_FALLBACK_NONE ||
+               out->selector_universal;
+    uint32_t ignored = 0;
+    out->predict_mode = all ? ZCL_SHADOW_PREDICT_ALL : ZCL_SHADOW_PREDICT_EXACT;
+    out->rule_cost_ms = out->lint_cost_ms;
+    for (size_t i = 0; i < m->n; i++) {
+        bool keep = all ? m->reference[i]
+                        : m->selected[i] && (!rule_ok || m->floor[i]);
+        if (!all && m->selected[i] && !keep) out->rule_reusable++;
+        if (!keep) continue;
+        m->predicted[i] = true;
+        out->predicted_groups++;
+        out->rule_cost_ms +=
+            shadow_group_ms(p, zcl_test_group_catalog_at(i), &ignored);
+        if (m->selected[i]) out->graph.predicted[shadow_layer_of(m, i)]++;
+    }
+    if (!out->selector_universal)
+        shadow_names_of(m, m->selected, out->selected_names,
+                        sizeof(out->selected_names));
+    if (!all)
+        shadow_names_of(m, m->predicted, out->predicted_names,
+                        sizeof(out->predicted_names));
 }
 
 /* ── evaluation ───────────────────────────────────────────────────────── */
@@ -429,7 +502,8 @@ static bool shadow_plan(const struct zcl_shadow_eval_ctx *ctx,
 static bool shadow_select(const struct zcl_shadow_eval_ctx *ctx,
                           const struct zcl_shadow_entry *e,
                           const struct zcl_devloop_plan *plan, bool refused,
-                          struct shadow_marks *m)
+                          struct shadow_marks *m,
+                          struct zcl_shadow_proof_graph *g)
 {
     if (!shadow_mark_reference(ctx->root, m)) return false;
     if (refused || plan->closure_universal) {
@@ -440,10 +514,11 @@ static bool shadow_select(const struct zcl_shadow_eval_ctx *ctx,
                                    plan->closure_groups_len, m->selected)) {
         return false;
     }
-    if (refused) return true;
+    if (refused || plan->closure_universal) return true;
     return shadow_mark_tokens(plan->path_groups, plan->path_groups_len,
                               m->floor) &&
-           shadow_mark_edges(plan, e->component, m);
+           shadow_mark_edges(plan, e->component, m) &&
+           shadow_mark_explained(ctx->root, e, plan, m, g);
 }
 
 static void shadow_scope(const struct zcl_shadow_entry *e,
@@ -514,7 +589,7 @@ static bool shadow_evaluate_plan(const struct zcl_shadow_eval_ctx *ctx,
     bool refused = false;
     struct shadow_marks m;
     bool ok = shadow_marks_init(&m) && shadow_plan(ctx, e, plan, &refused) &&
-              shadow_select(ctx, e, plan, refused, &m) &&
+              shadow_select(ctx, e, plan, refused, &m, &out->graph) &&
               shadow_count_build(ctx->root, e, out);
     if (!ok) {
         shadow_eval_why(why, why_len, "selector_unavailable_%s", e->id);
@@ -535,9 +610,9 @@ static bool shadow_evaluate_plan(const struct zcl_shadow_eval_ctx *ctx,
     bool rule_ok = out->fallback == ZCL_SHADOW_FALLBACK_NONE &&
                    out->patch.contract_change == ZCL_SHADOW_CONTRACT_NONE &&
                    out->build_known && out->private_readers == 0;
-    shadow_price_rule(&p, &m, rule_ok, out);
-    uint32_t reused = out->groups_reference > out->groups_selected
-                          ? out->groups_reference - out->groups_selected : 0;
+    shadow_predict(&p, &m, rule_ok, out);
+    uint32_t reused = out->groups_reference > out->predicted_groups
+                          ? out->groups_reference - out->predicted_groups : 0;
     out->validation_cost_us = (uint64_t)reused * ctx->validation_ns / 1000u;
     shadow_marks_free(&m);
     return true;

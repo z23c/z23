@@ -152,6 +152,9 @@ static int ss_test_synthetic_facts(void)
         ASSERT(p.contract_change == ZCL_SHADOW_CONTRACT_MOVED);
         ASSERT(ss_patch_facts("syn-abi", &p, &sha) && sha);
         ASSERT(p.contract_change == ZCL_SHADOW_CONTRACT_MOVED);
+        ASSERT(ss_patch_facts("syn-macro", &p, &sha) && sha);
+        ASSERT(p.contract_change == ZCL_SHADOW_CONTRACT_MOVED);
+        ASSERT(p.contract_hunks == 1);
         ASSERT(ss_patch_facts("syn-negative-lookup", &p, &sha) && sha);
         ASSERT(p.file_count == 1 && p.created[0]);
         ASSERT(p.contract_change == ZCL_SHADOW_CONTRACT_NONE);
@@ -395,10 +398,22 @@ static int ss_test_corpus_refusals(void)
 
 static bool ss_row_consistent(const struct zcl_shadow_result *r)
 {
+    const struct zcl_shadow_proof_graph *g = &r->graph;
+    uint32_t layered = g->nodes[ZCL_SHADOW_LAYER_CONTRACT] +
+                       g->nodes[ZCL_SHADOW_LAYER_CALLER] +
+                       g->nodes[ZCL_SHADOW_LAYER_INTEGRATION];
+    bool fallback = r->predict_mode == ZCL_SHADOW_PREDICT_ALL;
     return r->bytes_verified && r->groups_reference > 0 &&
            r->lint_reference == 213 && r->lint_selected == r->lint_reference &&
            r->fresh_cost_ms <= r->reference_cost_ms &&
-           r->rule_cost_ms <= r->fresh_cost_ms &&
+           r->rule_cost_ms <= r->reference_cost_ms &&
+           (fallback || r->rule_cost_ms <= r->fresh_cost_ms) &&
+           (!fallback || r->predicted_groups == r->groups_reference) &&
+           fallback == (r->fallback != ZCL_SHADOW_FALLBACK_NONE ||
+                        r->selector_universal) &&
+           layered == r->groups_selected &&
+           g->collision_groups <= r->groups_selected &&
+           r->lint_cost_ms <= r->rule_cost_ms &&
            r->build_invalidated <= r->build_total &&
            r->edges_selected <= r->groups_selected &&
            r->premise_groups <= r->groups_reference &&
@@ -413,22 +428,31 @@ static const struct zcl_shadow_result *ss_row(size_t n, const char *id)
 }
 
 /* Regressions for the false-hit witnesses in
- * docs/experiments/2026-09-25-shadow-obligation-selector.md: a shadow policy
- * must never answer "none" for these, and the rule must keep no caller. */
+ * docs/experiments/2026-09-25-shadow-obligation-selector.md: a changed
+ * build graph, generator input or shadowing header must expand the
+ * prediction to the reference, and a moved contract (declaration, layout,
+ * macro, assertion) must carry no caller. */
 static bool ss_witness_guarded(size_t n)
 {
-    static const char *const witnesses[] = {
+    static const char *const expand[] = {
         "syn-flag", "syn-generated-input", "syn-negative-lookup",
     };
-    for (size_t i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); i++) {
-        const struct zcl_shadow_result *r = ss_row(n, witnesses[i]);
+    static const char *const moved[] = {
+        "syn-contract", "syn-header-decl", "syn-abi", "syn-macro",
+    };
+    for (size_t i = 0; i < sizeof(expand) / sizeof(expand[0]); i++) {
+        const struct zcl_shadow_result *r = ss_row(n, expand[i]);
         if (!r || r->fallback == ZCL_SHADOW_FALLBACK_NONE ||
-            r->rule_reusable != 0)
+            r->predict_mode != ZCL_SHADOW_PREDICT_ALL || r->rule_reusable != 0)
             return false;
     }
-    const struct zcl_shadow_result *c = ss_row(n, "syn-contract");
-    return c && c->rule_reusable == 0 &&
-           c->patch.contract_change == ZCL_SHADOW_CONTRACT_MOVED;
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        const struct zcl_shadow_result *r = ss_row(n, moved[i]);
+        if (!r || r->rule_reusable != 0 ||
+            r->patch.contract_change != ZCL_SHADOW_CONTRACT_MOVED)
+            return false;
+    }
+    return true;
 }
 
 static bool ss_evaluate_all(size_t *count)
@@ -452,6 +476,100 @@ static bool ss_evaluate_all(size_t *count)
     return ok;
 }
 
+/* The live prediction rows, in the exact predicted.tsv format, so the frozen
+ * file can be regenerated from this output and compared with it. */
+static bool ss_print_predictions(size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (fputs("SHADOW-PREDICT\t", stdout) < 0 ||
+            !zcl_shadow_render_prediction(stdout, &ss_rows[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool ss_load_predictions(struct zcl_shadow_predictions *p)
+{
+    size_t len = 0;
+    char why[128] = "";
+    char *text = ss_slurp(SS_FIXTURE_DIR "/predicted.tsv", &len);
+    bool ok = text && zcl_shadow_predictions_parse(text, len, p, why,
+                                                   sizeof(why));
+    if (!ok) printf("predictions: %s\n", text ? why : "predicted.tsv absent");
+    if (ok) {
+        uint8_t digest[32];
+        char hex[65];
+        zcl_sha3_256((const uint8_t *)text, len, digest);
+        for (size_t i = 0; i < 32; i++)
+            (void)snprintf(hex + 2 * i, 3, "%02x", digest[i]);
+        printf("SHADOW-PREDICT-FILE rows=%zu sha3=%s\n", p->count, hex);
+    }
+    free(text);
+    return ok;
+}
+
+static bool ss_load_observations(struct zcl_shadow_observations *o)
+{
+    size_t len = 0;
+    char why[128] = "";
+    char *text = ss_slurp(SS_FIXTURE_DIR "/observed.tsv", &len);
+    bool ok = text && zcl_shadow_observations_parse(text, len, o, why,
+                                                    sizeof(why));
+    if (!ok) printf("observations: %s\n", text ? why : "observed.tsv absent");
+    free(text);
+    return ok;
+}
+
+/* Frozen prediction against the reference run: any required obligation the
+ * rule prediction did not name is RED. The live prediction is held to the
+ * same observations, so a selector change that drops a witness fails here. */
+static bool ss_compare_one(const struct zcl_shadow_prediction *frozen,
+                           const struct zcl_shadow_result *live,
+                           const struct zcl_shadow_observations *obs,
+                           uint32_t *red)
+{
+    struct zcl_shadow_comparison c;
+    if (!zcl_shadow_compare(frozen, obs, &c) ||
+        !zcl_shadow_render_comparison(stdout, frozen->id, &c))
+        return false;
+    *red += c.red_rule;
+    static struct zcl_shadow_prediction now;
+    memset(&now, 0, sizeof(now));
+    (void)snprintf(now.id, sizeof(now.id), "%s", live->id);
+    now.selector_mode = live->selector_universal ? ZCL_SHADOW_PREDICT_ALL
+                                                 : ZCL_SHADOW_PREDICT_EXACT;
+    now.rule_mode = live->predict_mode;
+    (void)snprintf(now.selector_names, sizeof(now.selector_names), "%s",
+                   live->selected_names);
+    (void)snprintf(now.rule_names, sizeof(now.rule_names), "%s",
+                   live->predicted_names);
+    if (now.rule_mode != frozen->rule_mode ||
+        strcmp(now.rule_names, frozen->rule_names) != 0)
+        printf("SHADOW-PREDICT-DRIFT id=%s\n", live->id);
+    if (!zcl_shadow_compare(&now, obs, &c)) return false;
+    if (c.red_rule) printf("SHADOW-LIVE-RED id=%s group=%s\n", live->id,
+                           c.first_red_rule);
+    *red += c.red_rule;
+    return true;
+}
+
+static bool ss_compare_all(size_t n, uint32_t *red)
+{
+    struct zcl_shadow_predictions p = {0};
+    struct zcl_shadow_observations o = {0};
+    bool ok = ss_load_predictions(&p) && ss_load_observations(&o);
+    *red = 0;
+    for (size_t i = 0; ok && i < n; i++) {
+        const struct zcl_shadow_prediction *frozen =
+            zcl_shadow_prediction_find(&p, ss_rows[i].id);
+        if (!frozen) printf("prediction missing for %s\n", ss_rows[i].id);
+        ok = frozen && ss_compare_one(frozen, &ss_rows[i], &o, red);
+    }
+    zcl_shadow_predictions_free(&p);
+    zcl_shadow_observations_free(&o);
+    return ok;
+}
+
 static int ss_test_live_report(void)
 {
     int failures = 0;
@@ -467,6 +585,93 @@ static int ss_test_live_report(void)
             ASSERT(ss_row_consistent(&ss_rows[i]));
         }
         ASSERT(ss_witness_guarded(n));
+        ASSERT(ss_print_predictions(n));
+        uint32_t red = 0;
+        ASSERT(ss_compare_all(n, &red));
+        ASSERT_EQ(red, (uint32_t)0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ss_test_compare(void)
+{
+    int failures = 0;
+    TEST("shadow select: a required obligation outside a prediction is RED") {
+        ASSERT(zcl_shadow_names_contain("test_a,test_ab", "test_ab"));
+        ASSERT(zcl_shadow_names_contain("test_a,test_ab", "test_a"));
+        ASSERT(!zcl_shadow_names_contain("test_ab,test_abc", "test_a"));
+        ASSERT(!zcl_shadow_names_contain("", "test_a"));
+        struct zcl_shadow_observation o = {"x", "test_a",
+                                           ZCL_SHADOW_VERDICT_PASS,
+                                           ZCL_SHADOW_VERDICT_PASS};
+        ASSERT(!zcl_shadow_obligation_required(&o));
+        o.patched = ZCL_SHADOW_VERDICT_FAIL;
+        ASSERT(zcl_shadow_obligation_required(&o));
+        o.base = ZCL_SHADOW_VERDICT_FAIL;
+        o.patched = ZCL_SHADOW_VERDICT_PASS;
+        ASSERT(zcl_shadow_obligation_required(&o));
+        o.patched = ZCL_SHADOW_VERDICT_NOT_RUN;
+        ASSERT(!zcl_shadow_obligation_required(&o));
+
+        const char *obs_text =
+            "# id group base patched evidence\n"
+            "x\ttest_a\tpass\tfail\tlog-a\n"
+            "x\ttest_b\tpass\tpass\tlog-b\n"
+            "y\ttest_a\tpass\tfail\tlog-c\n";
+        struct zcl_shadow_observations obs = {0};
+        char why[96];
+        ASSERT(zcl_shadow_observations_parse(obs_text, strlen(obs_text), &obs,
+                                             why, sizeof(why)));
+        ASSERT_EQ(obs.count, (size_t)3);
+        static struct zcl_shadow_predictions p;
+        const char *pred_text = "x\texact\ttest_b\tall\t-\n"
+                                "y\tall\t-\texact\ttest_b,test_c\n";
+        ASSERT(zcl_shadow_predictions_parse(pred_text, strlen(pred_text), &p,
+                                            why, sizeof(why)));
+        struct zcl_shadow_comparison c;
+        ASSERT(zcl_shadow_compare(zcl_shadow_prediction_find(&p, "x"), &obs,
+                                  &c));
+        ASSERT(c.observed == 2 && c.required == 1);
+        ASSERT(c.red_selector == 1 && c.red_rule == 0);
+        ASSERT_STR_EQ(c.first_red_selector, "test_a");
+        ASSERT(zcl_shadow_compare(zcl_shadow_prediction_find(&p, "y"), &obs,
+                                  &c));
+        ASSERT(c.red_selector == 0 && c.red_rule == 1);
+        zcl_shadow_predictions_free(&p);
+        zcl_shadow_observations_free(&obs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ss_test_compare_refusals(void)
+{
+    int failures = 0;
+    TEST("shadow select: predictions and observations are refused, never repaired") {
+        static struct zcl_shadow_predictions p;
+        struct zcl_shadow_observations o = {0};
+        char why[96];
+        static const char *const bad_predictions[] = {
+            "x\tall\ttest_a\texact\t-\n",         /* all carries a list */
+            "x\tsome\t-\texact\t-\n",             /* unknown mode */
+            "x\texact\ttest_a,...\texact\t-\n",   /* truncated list */
+            "x\texact\t-\texact\t-\nx\texact\t-\texact\t-\n", /* duplicate */
+            "x\texact\t-\texact\n",               /* short row */
+        };
+        for (size_t i = 0; i < sizeof(bad_predictions) / sizeof(char *); i++)
+            ASSERT(!zcl_shadow_predictions_parse(bad_predictions[i],
+                                                 strlen(bad_predictions[i]),
+                                                 &p, why, sizeof(why)));
+        static const char *const bad_observations[] = {
+            "x\ttest_a\tpass\tmaybe\tlog\n",
+            "x\ttest_a\tpass\tfail\tlog\nx\ttest_a\tpass\tpass\tlog\n",
+            "x\ttest_a\tpass\tfail\n",
+        };
+        for (size_t i = 0; i < sizeof(bad_observations) / sizeof(char *); i++)
+            ASSERT(!zcl_shadow_observations_parse(bad_observations[i],
+                                                  strlen(bad_observations[i]),
+                                                  &o, why, sizeof(why)));
         PASS();
     } _test_next:;
     return failures;
@@ -483,6 +688,8 @@ int test_dev_shadow_select(void)
     failures += ss_test_unchanged_abi_is_not_enough();
     failures += ss_test_classifier();
     failures += ss_test_corpus_refusals();
+    failures += ss_test_compare();
+    failures += ss_test_compare_refusals();
     failures += ss_test_live_report();
     return failures;
 }

@@ -1,0 +1,16 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Shadow-selection corpus entry syn-macro: lower the public ASTRO_YEAR_MAX
+# refusal bound; no declaration, layout or function body changes.
+diff --git a/platform/modules/astro/include/astro/astro_time.h b/platform/modules/astro/include/astro/astro_time.h
+index 5f10421a15..fe3d5e2df0 100644
+--- a/platform/modules/astro/include/astro/astro_time.h
++++ b/platform/modules/astro/include/astro/astro_time.h
+@@ -45,7 +45,7 @@
+  * theory in this module is not merely imprecise, it is wrong by degrees, so
+  * the range is a refusal boundary rather than an overflow guard. */
+ #define ASTRO_YEAR_MIN (-4000)
+-#define ASTRO_YEAR_MAX 9999
++#define ASTRO_YEAR_MAX 8999
+ 
+ /* A civil instant, proleptic Gregorian. All fields are as written on a
+  * calendar and a clock: month 1..12, day 1..(length of that month), hour
