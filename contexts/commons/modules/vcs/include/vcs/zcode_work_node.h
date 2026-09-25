@@ -132,6 +132,11 @@ size_t vcs_zcode_work_node_inbound_requests(
 bool vcs_zcode_work_node_inbound_request(
     struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
     struct vcs_zcode_work_request_v1 *out, bool *cancelled);
+/* A drained cancellation applies only to its cancelled lease. A later live
+ * lease for the same immutable action supersedes it before ZBuild is touched. */
+bool vcs_zcode_work_node_cancel_still_current(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
+    const uint8_t action_root[32]);
 bool vcs_zcode_work_node_outbound_request(
     struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
     struct vcs_zcode_work_request_v1 *out);

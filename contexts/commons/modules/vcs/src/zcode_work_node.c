@@ -1360,20 +1360,22 @@ bool vcs_zcode_work_node_next_progress(
     return true;
 }
 
-bool vcs_zcode_work_node_peek_request(
-    struct vcs_zcode_work_node *node, uint64_t *peer_out,
-    struct vcs_zcode_work_request_v1 *out)
-{
-    if (!node || !peer_out || !out) return false;
-    pthread_mutex_lock(&node->lock);
-    bool present = node->request_count > 0;
-    if (present) {
-        *peer_out = node->requests[node->request_pos].peer;
-        *out = node->requests[node->request_pos].request;
-    }
-    pthread_mutex_unlock(&node->lock);
-    return present;
+#define WORK_PEEK(name, field, array, type) \
+bool name(struct vcs_zcode_work_node *node, uint64_t *peer_out, type *out) \
+{ \
+    if (!node || !peer_out || !out) return false; \
+    pthread_mutex_lock(&node->lock); \
+    bool present = node->field##_count > 0; \
+    if (present) { \
+        *peer_out = node->array[node->field##_pos].peer; \
+        *out = node->array[node->field##_pos].field; \
+    } \
+    pthread_mutex_unlock(&node->lock); \
+    return present; \
 }
+
+WORK_PEEK(vcs_zcode_work_node_peek_request, request, requests,
+          struct vcs_zcode_work_request_v1)
 static struct work_slot *work_ready_slot(
     struct vcs_zcode_work_node *node, uint64_t peer,
     uint64_t request_id, int64_t now)
@@ -1453,6 +1455,28 @@ bool vcs_zcode_work_node_inbound_request(
     return present;
 }
 
+bool vcs_zcode_work_node_cancel_still_current(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
+    const uint8_t action_root[32])
+{
+    if (!node || !peer || !request_id || !action_root) return false;
+    pthread_mutex_lock(&node->lock);
+    const struct work_track *track = work_find_track(
+        node, peer, request_id, true);
+    bool current = track && track->inbound && track->cancelled &&
+        memcmp(track->request.action_root, action_root, 32) == 0;
+    if (current) {
+        int slot_at = work_find_action_slot(node, action_root);
+        /* A newer lease or live subscriber supersedes the old cancellation. */
+        if (slot_at >= 0 &&
+            (node->slots[slot_at].generation != track->lease_generation ||
+             work_slot_has_active_track(node, (uint16_t)slot_at)))
+            current = false;
+    }
+    pthread_mutex_unlock(&node->lock);
+    return current;
+}
+
 bool vcs_zcode_work_node_outbound_request(
     struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
     struct vcs_zcode_work_request_v1 *out)
@@ -1466,32 +1490,7 @@ bool vcs_zcode_work_node_outbound_request(
     return present;
 }
 
-bool vcs_zcode_work_node_peek_result(
-    struct vcs_zcode_work_node *node, uint64_t *peer_out,
-    struct vcs_zcode_work_result_v1 *out)
-{
-    if (!node || !peer_out || !out) return false;
-    pthread_mutex_lock(&node->lock);
-    bool present = node->result_count > 0;
-    if (present) {
-        *peer_out = node->results[node->result_pos].peer;
-        *out = node->results[node->result_pos].result;
-    }
-    pthread_mutex_unlock(&node->lock);
-    return present;
-}
-
-bool vcs_zcode_work_node_peek_progress(
-    struct vcs_zcode_work_node *node, uint64_t *peer_out,
-    struct vcs_zcode_work_progress_v1 *out)
-{
-    if (!node || !peer_out || !out) return false;
-    pthread_mutex_lock(&node->lock);
-    bool present = node->progress_count > 0;
-    if (present) {
-        *peer_out = node->progresses[node->progress_pos].peer;
-        *out = node->progresses[node->progress_pos].progress;
-    }
-    pthread_mutex_unlock(&node->lock);
-    return present;
-}
+WORK_PEEK(vcs_zcode_work_node_peek_result, result, results,
+          struct vcs_zcode_work_result_v1)
+WORK_PEEK(vcs_zcode_work_node_peek_progress, progress, progresses,
+          struct vcs_zcode_work_progress_v1)

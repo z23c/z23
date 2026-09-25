@@ -251,7 +251,7 @@ static void boot_zcode_work_admission_success(
                  "schema=zcl.async_proof_perf.v1 action=%s "
                  "stage=remote_attach at_unix_us=%lld admission_us=%lld "
                  "verified_context_bytes_reused=%llu "
-                 "context_restore_avoided=1 duplicate_execution_avoided=1",
+                 "context_restore_avoided=1 inflight_attachment=1",
                  action_id, (long long)platform_time_realtime_us(),
                  (long long)(admission_us < 0 ? 0 : admission_us),
                  (unsigned long long)reused_bytes);
@@ -314,6 +314,9 @@ static void boot_zcode_work_drain_cancels(int64_t now)
         if (!vcs_zcode_work_node_inbound_request(
                 s_work, peer, cancel.request_id, &request, &cancelled) ||
             !cancelled)
+            continue;
+        if (!vcs_zcode_work_node_cancel_still_current(
+                s_work, peer, cancel.request_id, request.action_root))
             continue;
         char action_id[65];
         zcl_hex_encode(request.action_root, 32, action_id);
