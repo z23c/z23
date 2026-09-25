@@ -84,6 +84,22 @@ struct vcs_build_action_v1 {
     uint64_t sequence;
 };
 
+/* The exact input closure for a local compile or proof action. Callers must
+ * derive every root from observed bytes and searches; a missing root refuses
+ * the action rather than silently omitting that input class. Negative closure
+ * binds searched names that were absent, including __has_include probes. */
+struct vcs_build_input_closure_v1 {
+    uint8_t positive_sha3[32];
+    uint8_t negative_sha3[32];
+    uint8_t generated_sha3[32];
+    uint8_t build_graph_sha3[32];
+    uint8_t harness_sha3[32];
+    uint8_t policy_sha3[32];
+};
+
+bool vcs_build_input_closure_v1_root(
+    const struct vcs_build_input_closure_v1 *closure, uint8_t out[32]);
+
 bool vcs_toolchain_capsule_v1_root(
     const struct vcs_toolchain_capsule_v1 *capsule, uint8_t out[32]);
 /* Capture the toolchain capsule by content for the current platform:

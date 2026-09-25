@@ -92,6 +92,38 @@ static bool build_text_valid(const char *value, size_t cap)
     return value && value[0] && strnlen(value, cap) < cap;
 }
 
+static bool build_root_present(const uint8_t root[32])
+{
+    uint8_t any = 0;
+    for (size_t i = 0; i < 32; i++) any |= root[i];
+    return any != 0;
+}
+
+bool vcs_build_input_closure_v1_root(
+    const struct vcs_build_input_closure_v1 *closure, uint8_t out[32])
+{
+    if (!closure || !out ||
+        !build_root_present(closure->positive_sha3) ||
+        !build_root_present(closure->negative_sha3) ||
+        !build_root_present(closure->generated_sha3) ||
+        !build_root_present(closure->build_graph_sha3) ||
+        !build_root_present(closure->harness_sha3) ||
+        !build_root_present(closure->policy_sha3))
+        return false;
+    static const char domain[] = "zcl.build_input_closure.v1";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, closure->positive_sha3, 32);
+    sha3_256_write(&sha, closure->negative_sha3, 32);
+    sha3_256_write(&sha, closure->generated_sha3, 32);
+    sha3_256_write(&sha, closure->build_graph_sha3, 32);
+    sha3_256_write(&sha, closure->harness_sha3, 32);
+    sha3_256_write(&sha, closure->policy_sha3, 32);
+    sha3_256_finalize(&sha, out);
+    return true;
+}
+
 static bool build_stat_equal(
     const struct platform_positioned_file_snapshot *a,
     const struct platform_positioned_file_snapshot *b)

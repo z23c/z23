@@ -3966,9 +3966,41 @@ static int test_bf_candidate_query_partial(void)
     return failures;
 }
 
+static int test_bf_input_closure_root(void)
+{
+    int failures = 0;
+    TEST("action input closure binds every required input class") {
+        struct vcs_build_input_closure_v1 closure = {0};
+        uint8_t *roots[] = {
+            closure.positive_sha3, closure.negative_sha3,
+            closure.generated_sha3, closure.build_graph_sha3,
+            closure.harness_sha3, closure.policy_sha3,
+        };
+        uint8_t baseline[32], changed[32];
+        ASSERT(!vcs_build_input_closure_v1_root(&closure, baseline));
+        for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+            roots[i][0] = (uint8_t)(i + 1);
+        ASSERT(vcs_build_input_closure_v1_root(&closure, baseline));
+        ASSERT(vcs_build_input_closure_v1_root(&closure, changed));
+        ASSERT(memcmp(baseline, changed, sizeof(baseline)) == 0);
+        for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+            roots[i][1] = 1;
+            ASSERT(vcs_build_input_closure_v1_root(&closure, changed));
+            ASSERT(memcmp(baseline, changed, sizeof(baseline)) != 0);
+            roots[i][1] = 0;
+            roots[i][0] = 0;
+            ASSERT(!vcs_build_input_closure_v1_root(&closure, changed));
+            roots[i][0] = (uint8_t)(i + 1);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_build_fabric(void)
 {
     int failures = 0;
+    failures += test_bf_input_closure_root();
     failures += test_bf_migration();
     failures += test_bf_candidate_query_errors();
     failures += test_bf_candidate_query_partial();
