@@ -640,3 +640,66 @@ size_t vcs_zcode_work_result_quorum(
     if (count < required) memset(output_root, 0, 32);
     return count;
 }
+
+bool vcs_zcode_work_capability_allows(
+    const struct vcs_zcode_work_capability_v1 *cap,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now)
+{
+    return cap && request && now < cap->expires_unix &&
+           request->deadline_unix > now && cap->queue_headroom > 0 &&
+           request->deadline_unix - now <= cap->max_lease_seconds &&
+           (cap->work_kinds & (UINT32_C(1) << request->work_kind)) != 0 &&
+           (cap->confinement & VCS_ZCODE_WORK_CONFINEMENT_V1_MASK) ==
+               VCS_ZCODE_WORK_CONFINEMENT_V1_MASK &&
+           cap->target == request->target &&
+           memcmp(cap->toolchain_capsule_root,
+                  request->toolchain_capsule_root, 32) == 0 &&
+           request->max_cpu_seconds <= cap->max_cpu_seconds &&
+           request->max_memory_bytes <= cap->max_memory_bytes &&
+           request->max_output_bytes <= cap->max_output_bytes;
+}
+
+bool vcs_zcode_work_capability_matches(
+    const struct vcs_zcode_work_capability_v1 *cap,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now)
+{
+    if (!cap) return false;
+    struct vcs_zcode_work_capability_v1 available = *cap;
+    available.queue_headroom = available.slots;
+    return vcs_zcode_work_capability_allows(&available, request, now);
+}
+
+bool vcs_zcode_work_same_action_binding(
+    const struct vcs_zcode_work_request_v1 *a,
+    const struct vcs_zcode_work_request_v1 *b)
+{
+    return memcmp(a->task_root, b->task_root, 32) == 0 &&
+        memcmp(a->candidate_root, b->candidate_root, 32) == 0 &&
+        memcmp(a->action_root, b->action_root, 32) == 0 &&
+        memcmp(a->input_root, b->input_root, 32) == 0 &&
+        memcmp(a->context_root, b->context_root, 32) == 0 &&
+        memcmp(a->proof_policy_root, b->proof_policy_root, 32) == 0 &&
+        memcmp(a->toolchain_capsule_root,
+               b->toolchain_capsule_root, 32) == 0 &&
+        a->work_kind == b->work_kind && a->target == b->target &&
+        a->max_cpu_seconds == b->max_cpu_seconds &&
+        a->max_memory_bytes == b->max_memory_bytes &&
+        a->max_output_bytes == b->max_output_bytes;
+}
+
+bool vcs_zcode_work_same_result(const struct vcs_zcode_work_result_v1 *a,
+                      const struct vcs_zcode_work_result_v1 *b)
+{
+    struct vcs_zcode_work_swarm_message ma = {
+        .type = VCS_ZCODE_WORK_SWARM_RESULT, .body.result = *a,
+    };
+    struct vcs_zcode_work_swarm_message mb = {
+        .type = VCS_ZCODE_WORK_SWARM_RESULT, .body.result = *b,
+    };
+    uint8_t wa[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
+    uint8_t wb[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
+    size_t la = 0, lb = 0;
+    return vcs_zcode_work_swarm_serialize(&ma, wa, sizeof(wa), &la) &&
+        vcs_zcode_work_swarm_serialize(&mb, wb, sizeof(wb), &lb) &&
+        la == lb && memcmp(wa, wb, la) == 0;
+}

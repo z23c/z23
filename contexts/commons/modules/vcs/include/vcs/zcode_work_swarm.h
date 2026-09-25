@@ -216,4 +216,17 @@ size_t vcs_zcode_work_result_quorum(
     const uint8_t (*approved_signers)[32], size_t approved_count,
     size_t required, uint8_t output_root[32]);
 
+/* Pure receiver-side matching of signed capability, action, and result wires. */
+bool vcs_zcode_work_capability_allows(
+    const struct vcs_zcode_work_capability_v1 *cap,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now);
+bool vcs_zcode_work_capability_matches(
+    const struct vcs_zcode_work_capability_v1 *cap,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now);
+bool vcs_zcode_work_same_action_binding(
+    const struct vcs_zcode_work_request_v1 *a,
+    const struct vcs_zcode_work_request_v1 *b);
+bool vcs_zcode_work_same_result(const struct vcs_zcode_work_result_v1 *a,
+                                const struct vcs_zcode_work_result_v1 *b);
+
 #endif /* ZCL_VCS_ZCODE_WORK_SWARM_H */

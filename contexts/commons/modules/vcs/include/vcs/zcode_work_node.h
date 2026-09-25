@@ -121,6 +121,11 @@ bool vcs_zcode_work_node_peek_request(
 bool vcs_zcode_work_node_mark_action_ready(
     struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
     int64_t now, uint64_t context_bytes);
+/* The receiver rejected a request after the transport reserved a slot.
+ * Send a signed terminal refusal so the requester does not retain a live
+ * GRANTED/ATTACHED admission until its lease expires. */
+bool vcs_zcode_work_node_refuse_inbound(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id);
 bool vcs_zcode_work_node_action_ready(
     struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
     int64_t now, uint64_t *context_bytes);

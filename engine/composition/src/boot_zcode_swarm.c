@@ -330,7 +330,7 @@ static bool boot_zcode_work_context_available(
         store, request->context_root, status) && status->complete;
 }
 
-static void boot_zcode_work_admission_success(
+static bool boot_zcode_work_admission_success(
     const struct vcs_zcode_work_request_v1 *request, uint64_t peer,
     int64_t now, const struct vcs_package_store_status *status,
     bool reused, uint64_t reused_bytes, int64_t admission_us)
@@ -340,7 +340,7 @@ static void boot_zcode_work_admission_success(
         reused ? reused_bytes : status->total_bytes);
     if (!marked) {
         LOG_WARN("net.zcode_swarm", "admitted request lost its worker slot");
-        return;
+        return false;
     }
     if (reused) {
         char action_id[65];
@@ -359,6 +359,27 @@ static void boot_zcode_work_admission_success(
     }
     boot_zcode_work_progress_context_ready(
         s_work, peer, request, s_work_secret, s_work_pubkey, now);
+    return true;
+}
+static bool boot_zcode_work_resolve_admission(
+    const struct vcs_zcode_work_request_v1 *request, uint64_t peer,
+    int64_t now, const struct vcs_package_store_status *status,
+    bool reused, uint64_t reused_bytes, int64_t admission_us,
+    struct zcl_result admitted)
+{
+    if (admitted.ok && boot_zcode_work_admission_success(
+            request, peer, now, status, reused, reused_bytes, admission_us))
+        return true;
+    if (!vcs_zcode_work_node_refuse_inbound(s_work, peer, request->request_id)) {
+        LOG_ERROR("net.zcode_swarm",
+                  "request %llu terminal refusal could not be queued",
+                  (unsigned long long)request->request_id);
+        return false;
+    }
+    if (!admitted.ok)
+        LOG_WARN("net.zcode_swarm", "request %llu refused: %s",
+                 (unsigned long long)request->request_id, admitted.message);
+    return true;
 }
 static void boot_zcode_work_drain_admissions(int64_t now)
 {
@@ -379,6 +400,9 @@ static void boot_zcode_work_drain_admissions(int64_t now)
             ? boot_zcode_work_attached_admit(&request, now)
             : boot_zcode_work_admit(&request, now);
         admission_us = platform_time_monotonic_us() - admission_us;
+        if (!boot_zcode_work_resolve_admission(
+                &request, peer, now, &status, reused, reused_bytes,
+                admission_us, admitted)) break;
         uint64_t drained_peer = 0;
         struct vcs_zcode_work_request_v1 drained;
         if (!vcs_zcode_work_node_next_request(
@@ -387,14 +411,6 @@ static void boot_zcode_work_drain_admissions(int64_t now)
             LOG_ERROR("net.zcode_swarm", "work admission FIFO changed");
             break;
         }
-        if (!admitted.ok)
-            LOG_WARN("net.zcode_swarm", "request %llu refused: %s",
-                     (unsigned long long)request.request_id,
-                     admitted.message);
-        else
-            boot_zcode_work_admission_success(
-                &request, peer, now, &status, reused, reused_bytes,
-                admission_us);
     }
 }
 static void boot_zcode_work_drain_cancels(int64_t now)

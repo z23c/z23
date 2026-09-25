@@ -30,6 +30,7 @@ struct work_track {
     bool cancelled;
     bool expired;
     bool receiver_admitted;
+    bool admission_sent;
     uint64_t peer;
     uint8_t worker_signer[32];
     uint8_t progress_stage;
@@ -558,52 +559,6 @@ size_t vcs_zcode_work_node_capable_peers(
     return count;
 }
 
-static bool work_capability_allows(
-    const struct vcs_zcode_work_capability_v1 *cap,
-    const struct vcs_zcode_work_request_v1 *request, int64_t now)
-{
-    return cap && request && now < cap->expires_unix &&
-           request->deadline_unix > now && cap->queue_headroom > 0 &&
-           request->deadline_unix - now <= cap->max_lease_seconds &&
-           (cap->work_kinds & (UINT32_C(1) << request->work_kind)) != 0 &&
-           (cap->confinement & VCS_ZCODE_WORK_CONFINEMENT_V1_MASK) ==
-               VCS_ZCODE_WORK_CONFINEMENT_V1_MASK &&
-           cap->target == request->target &&
-           memcmp(cap->toolchain_capsule_root,
-                  request->toolchain_capsule_root, 32) == 0 &&
-           request->max_cpu_seconds <= cap->max_cpu_seconds &&
-           request->max_memory_bytes <= cap->max_memory_bytes &&
-           request->max_output_bytes <= cap->max_output_bytes;
-}
-
-static bool work_capability_matches(
-    const struct vcs_zcode_work_capability_v1 *cap,
-    const struct vcs_zcode_work_request_v1 *request, int64_t now)
-{
-    if (!cap) return false;
-    struct vcs_zcode_work_capability_v1 available = *cap;
-    available.queue_headroom = available.slots;
-    return work_capability_allows(&available, request, now);
-}
-
-static bool work_same_action_binding(
-    const struct vcs_zcode_work_request_v1 *a,
-    const struct vcs_zcode_work_request_v1 *b)
-{
-    return memcmp(a->task_root, b->task_root, 32) == 0 &&
-        memcmp(a->candidate_root, b->candidate_root, 32) == 0 &&
-        memcmp(a->action_root, b->action_root, 32) == 0 &&
-        memcmp(a->input_root, b->input_root, 32) == 0 &&
-        memcmp(a->context_root, b->context_root, 32) == 0 &&
-        memcmp(a->proof_policy_root, b->proof_policy_root, 32) == 0 &&
-        memcmp(a->toolchain_capsule_root,
-               b->toolchain_capsule_root, 32) == 0 &&
-        a->work_kind == b->work_kind && a->target == b->target &&
-        a->max_cpu_seconds == b->max_cpu_seconds &&
-        a->max_memory_bytes == b->max_memory_bytes &&
-        a->max_output_bytes == b->max_output_bytes;
-}
-
 static int work_find_action_slot(const struct vcs_zcode_work_node *node,
                                  const uint8_t action_root[32])
 {
@@ -680,23 +635,6 @@ static struct work_track *work_add_track(struct vcs_zcode_work_node *node)
     return NULL;
 }
 
-static bool work_same_result(const struct vcs_zcode_work_result_v1 *a,
-                             const struct vcs_zcode_work_result_v1 *b)
-{
-    struct vcs_zcode_work_swarm_message ma = {
-        .type = VCS_ZCODE_WORK_SWARM_RESULT, .body.result = *a,
-    };
-    struct vcs_zcode_work_swarm_message mb = {
-        .type = VCS_ZCODE_WORK_SWARM_RESULT, .body.result = *b,
-    };
-    uint8_t wa[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
-    uint8_t wb[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
-    size_t la = 0, lb = 0;
-    return vcs_zcode_work_swarm_serialize(&ma, wa, sizeof(wa), &la) &&
-        vcs_zcode_work_swarm_serialize(&mb, wb, sizeof(wb), &lb) &&
-        la == lb && memcmp(wa, wb, la) == 0;
-}
-
 static bool work_has_expired_outbound_binding(
     const struct vcs_zcode_work_node *node,
     const struct vcs_zcode_work_request_v1 *request)
@@ -706,21 +644,21 @@ static bool work_has_expired_outbound_binding(
         if (track->used && !track->inbound && track->expired &&
             !track->cancelled &&
             track->request.request_id == request->request_id &&
-            work_same_action_binding(&track->request, request))
+            vcs_zcode_work_same_action_binding(&track->request, request))
             return true;
     }
     return false;
 }
 
-static void work_remove_queued_action(struct vcs_zcode_work_node *node,
-                                      const uint8_t action_root[32])
+static void work_remove_queued_request(struct vcs_zcode_work_node *node,
+                                       uint64_t peer, uint64_t request_id)
 {
     size_t kept = 0;
     for (size_t i = 0; i < node->request_count; i++) {
         size_t src = (node->request_pos + i) %
                      VCS_ZCODE_WORK_NODE_MAX_REQUESTS;
-        if (memcmp(node->requests[src].request.action_root,
-                   action_root, 32) == 0)
+        if (node->requests[src].peer == peer &&
+            node->requests[src].request.request_id == request_id)
             continue;
         size_t dst = (node->request_pos + kept) %
                      VCS_ZCODE_WORK_NODE_MAX_REQUESTS;
@@ -758,12 +696,12 @@ enum vcs_zcode_work_node_result vcs_zcode_work_node_submit(
              * enforces its own live capacity on receipt, so stale signed
              * zero headroom must not prevent sending this exact immutable
              * retry forever.  All other signed limits remain mandatory. */
-            allowed = work_capability_matches(
+            allowed = vcs_zcode_work_capability_matches(
                 &node->peers[peer_at].capability, request, now);
         } else {
             struct vcs_zcode_work_capability_v1 effective =
                 work_effective_capability(node, peer_at);
-            allowed = work_capability_allows(&effective, request, now);
+            allowed = vcs_zcode_work_capability_allows(&effective, request, now);
         }
         if (!allowed)
             result = VCS_ZCODE_WORK_NODE_CAPABILITY_MISMATCH;
@@ -771,7 +709,7 @@ enum vcs_zcode_work_node_result vcs_zcode_work_node_submit(
     else if (result == VCS_ZCODE_WORK_NODE_OK && capacity_retry) {
         struct vcs_zcode_work_capability_v1 effective =
             work_effective_capability(node, peer_at);
-        if (!work_capability_allows(&effective, request, now))
+        if (!vcs_zcode_work_capability_allows(&effective, request, now))
             result = VCS_ZCODE_WORK_NODE_CAPABILITY_MISMATCH;
     }
     else if (result == VCS_ZCODE_WORK_NODE_OK)
@@ -1002,6 +940,12 @@ static enum vcs_zcode_work_node_result work_handle_capability(
     return VCS_ZCODE_WORK_NODE_OK;
 }
 
+static bool work_replay_slot_current(const struct vcs_zcode_work_node *node,
+                                     const struct work_track *track)
+{
+    return node->slots[track->worker_slot].used &&
+           node->slots[track->worker_slot].generation == track->lease_generation;
+}
 static enum vcs_zcode_work_node_result work_replay_admission(
     struct vcs_zcode_work_node *node, uint64_t peer,
     const struct vcs_zcode_work_request_v1 *request,
@@ -1009,6 +953,16 @@ static enum vcs_zcode_work_node_result work_replay_admission(
 {
     if (memcmp(existing->request.signature, request->signature, 64))
         return VCS_ZCODE_WORK_NODE_REPLAY;
+    if (!existing->admission_sent && !existing->expired)
+        return VCS_ZCODE_WORK_NODE_OK;
+    if (existing->admission_disposition == VCS_ZCODE_WORK_ADMISSION_REFUSED)
+        return work_queue_admission(
+            node, peer, request, VCS_ZCODE_WORK_ADMISSION_REFUSED,
+            VCS_ZCODE_WORK_ADMISSION_REASON_POLICY, UINT16_MAX, 0, 0)
+                ? VCS_ZCODE_WORK_NODE_OK : VCS_ZCODE_WORK_NODE_FULL;
+    if (existing->finished || existing->cancelled) return VCS_ZCODE_WORK_NODE_OK;
+    if (!work_replay_slot_current(node, existing))
+        return VCS_ZCODE_WORK_NODE_OK;
     return work_queue_admission(
         node, peer, request,
         existing->expired ? VCS_ZCODE_WORK_ADMISSION_REFUSED
@@ -1028,7 +982,7 @@ static enum vcs_zcode_work_node_result work_handle_request(
 {
     if (!node->has_local_capability || !node->has_local_signer)
         return VCS_ZCODE_WORK_NODE_NOT_LOCAL_WORKER;
-    if (!work_capability_matches(&node->local_capability, request, now)) {
+    if (!vcs_zcode_work_capability_matches(&node->local_capability, request, now)) {
         return work_queue_admission(
             node, peer, request, VCS_ZCODE_WORK_ADMISSION_REFUSED,
             VCS_ZCODE_WORK_ADMISSION_REASON_POLICY, UINT16_MAX, 0, 0)
@@ -1039,7 +993,7 @@ static enum vcs_zcode_work_node_result work_handle_request(
     if (existing) return work_replay_admission(node, peer, request, existing);
     int action_slot = work_find_action_slot(node, request->action_root);
     if (action_slot >= 0 &&
-        !work_same_action_binding(&node->slots[action_slot].binding, request)) {
+        !vcs_zcode_work_same_action_binding(&node->slots[action_slot].binding, request)) {
         return work_queue_admission(
             node, peer, request, VCS_ZCODE_WORK_ADMISSION_REFUSED,
             VCS_ZCODE_WORK_ADMISSION_REASON_BINDING, UINT16_MAX, 0, 0)
@@ -1082,13 +1036,6 @@ static enum vcs_zcode_work_node_result work_handle_request(
     }
     uint8_t disposition = attached ? VCS_ZCODE_WORK_ADMISSION_ATTACHED
                                    : VCS_ZCODE_WORK_ADMISSION_GRANTED;
-    if (!work_queue_admission(node, peer, request, disposition,
-                              VCS_ZCODE_WORK_ADMISSION_REASON_NONE,
-                              (uint16_t)action_slot, slot->generation,
-                              slot->deadline_unix)) {
-        if (!attached) memset(slot, 0, sizeof(*slot));
-        return VCS_ZCODE_WORK_NODE_FULL;
-    }
     memset(track, 0, sizeof(*track));
     track->used = true;
     track->inbound = true;
@@ -1133,11 +1080,11 @@ static enum vcs_zcode_work_node_result work_handle_cancel(
         node->cancels[event].peer = peer;
         node->cancels[event].cancel = *cancel;
         node->cancel_count++;
-        work_remove_queued_action(node, track->request.action_root);
         if (worker_slot < sizeof(node->slots) / sizeof(node->slots[0]))
             memset(&node->slots[worker_slot], 0,
                    sizeof(node->slots[worker_slot]));
     }
+    work_remove_queued_request(node, peer, cancel->request_id);
     return VCS_ZCODE_WORK_NODE_OK;
 }
 
@@ -1155,7 +1102,7 @@ static enum vcs_zcode_work_node_result work_handle_result(
             vcs_zcode_work_result_verify(
                 &track->request, result_row,
                 node->peers[peer_at].capability.signer_pubkey) &&
-            work_same_result(&track->result, result_row))
+            vcs_zcode_work_same_result(&track->result, result_row))
             return VCS_ZCODE_WORK_NODE_OK;
         return VCS_ZCODE_WORK_NODE_REPLAY;
     }
@@ -1179,6 +1126,16 @@ static enum vcs_zcode_work_node_result work_handle_result(
     return VCS_ZCODE_WORK_NODE_OK;
 }
 
+static enum vcs_zcode_work_node_result work_replayed_admission_result(
+    const struct work_track *track,
+    const struct vcs_zcode_work_admission_v1 *admission)
+{
+    return track->admission_disposition == admission->disposition &&
+           track->worker_slot == admission->slot &&
+           track->lease_generation == admission->lease_generation
+        ? VCS_ZCODE_WORK_NODE_OK : VCS_ZCODE_WORK_NODE_BINDING;
+}
+
 static enum vcs_zcode_work_node_result work_handle_admission(
     struct vcs_zcode_work_node *node, int peer_at, uint64_t peer,
     const struct vcs_zcode_work_admission_v1 *admission)
@@ -1192,12 +1149,13 @@ static enum vcs_zcode_work_node_result work_handle_admission(
             &track->request, admission,
             node->peers[peer_at].capability.signer_pubkey))
         return VCS_ZCODE_WORK_NODE_BINDING;
-    if (track->admission_disposition != 0) {
-        return track->admission_disposition == admission->disposition &&
-               track->worker_slot == admission->slot &&
-               track->lease_generation == admission->lease_generation
-            ? VCS_ZCODE_WORK_NODE_OK : VCS_ZCODE_WORK_NODE_BINDING;
-    }
+    bool late_refusal =
+        (track->admission_disposition == VCS_ZCODE_WORK_ADMISSION_GRANTED ||
+         track->admission_disposition == VCS_ZCODE_WORK_ADMISSION_ATTACHED) &&
+        admission->disposition == VCS_ZCODE_WORK_ADMISSION_REFUSED &&
+        !track->finished && !track->cancelled;
+    if (track->admission_disposition != 0 && !late_refusal)
+        return work_replayed_admission_result(track, admission);
     if (node->admission_count >= VCS_ZCODE_WORK_NODE_MAX_RESULTS)
         return VCS_ZCODE_WORK_NODE_FULL;
     size_t event = (node->admission_pos + node->admission_count) %
@@ -1389,7 +1347,7 @@ static struct work_slot *work_ready_slot(
     struct work_slot *slot = &node->slots[track->worker_slot];
     if (!slot->used || slot->generation != track->lease_generation ||
         now >= slot->deadline_unix || now >= track->request.deadline_unix ||
-        !work_same_action_binding(&slot->binding, &track->request))
+        !vcs_zcode_work_same_action_binding(&slot->binding, &track->request))
         return NULL;
     return slot;
 }
@@ -1400,13 +1358,53 @@ bool vcs_zcode_work_node_mark_action_ready(
     if (!node || peer == 0 || request_id == 0 || now < 0) return false;
     pthread_mutex_lock(&node->lock);
     struct work_slot *slot = work_ready_slot(node, peer, request_id, now);
+    struct work_track *track = work_find_track(node, peer, request_id, true);
+    if (slot && !track->admission_sent &&
+        !work_queue_admission(
+            node, peer, &track->request, track->admission_disposition,
+            VCS_ZCODE_WORK_ADMISSION_REASON_NONE, track->worker_slot,
+            slot->generation, slot->deadline_unix))
+        slot = NULL;
     if (slot) {
+        track->admission_sent = true;
         if (!slot->action_ready) slot->context_bytes = context_bytes;
         slot->action_ready = true;
-        work_find_track(node, peer, request_id, true)->receiver_admitted = true;
+        track->receiver_admitted = true;
     }
     pthread_mutex_unlock(&node->lock);
     return slot != NULL;
+}
+static bool work_already_refused(const struct work_track *track)
+{
+    return track && track->admission_sent && track->finished &&
+           track->admission_disposition == VCS_ZCODE_WORK_ADMISSION_REFUSED;
+}
+bool vcs_zcode_work_node_refuse_inbound(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id)
+{
+    if (!node || peer == 0 || request_id == 0) return false;
+    pthread_mutex_lock(&node->lock);
+    struct work_track *track = work_find_track(node, peer, request_id, true);
+    bool refused = false;
+    if (work_already_refused(track))
+        refused = true;
+    else if (track && !track->receiver_admitted && !track->finished &&
+        !track->cancelled &&
+        work_queue_admission(
+            node, peer, &track->request, VCS_ZCODE_WORK_ADMISSION_REFUSED,
+            VCS_ZCODE_WORK_ADMISSION_REASON_POLICY, UINT16_MAX, 0, 0)) {
+        track->admission_disposition = VCS_ZCODE_WORK_ADMISSION_REFUSED;
+        track->admission_sent = true;
+        track->finished = true;
+        uint16_t slot = track->worker_slot;
+        if (!work_slot_has_active_track(node, slot) &&
+            slot < sizeof(node->slots) / sizeof(node->slots[0]) &&
+            node->slots[slot].generation == track->lease_generation)
+            memset(&node->slots[slot], 0, sizeof(node->slots[slot]));
+        refused = true;
+    }
+    pthread_mutex_unlock(&node->lock);
+    return refused;
 }
 bool vcs_zcode_work_node_action_ready(
     struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
