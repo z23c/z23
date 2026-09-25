@@ -46,3 +46,15 @@ engine/modules/storage/src/projection_store.c
 # value, so the two are not a drop-in swap; pinning until a raw-uptime
 # accessor exists on the platform seam.
 engine/entry/main_cli_modes.c
+# tools/dev/devloop_reflex_runner.c: open("/proc/self/exe", O_CLOEXEC) is the
+# race-free way to get a descriptor for the clean-zygote reflex runner's
+# fork+exec — the same PERMANENT-exemption class as
+# platform/modules/util/src/authority_receipt.c above (race-free
+# running-binary access), plus a second, stronger reason platform/os_proc.h's
+# os_proc_open_self_exe() cannot satisfy: it returns a FILE* from a plain
+# fopen(), whose fd is not close-on-exec, so it can leak into an unrelated
+# exec() from another thread in this (possibly multithreaded) resident
+# during the window before this fd is used. The whole point of this file is
+# fd hygiene into the runner, so the O_CLOEXEC atomicity has to be at the
+# open() call itself.
+tools/dev/devloop_reflex_runner.c
