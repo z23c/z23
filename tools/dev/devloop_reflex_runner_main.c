@@ -111,12 +111,75 @@ bool zcl_reflex_sha256_fd(int fd, char out[65])
     return lseek(fd, 0, SEEK_SET) == 0;
 }
 
+/* ── report frames, validation, bounded reap (pre-hardening forms) ─────── */
+
+#if defined(ZCL_TESTING)
+static bool g_close_range_enabled = true;
+void zcl_reflex_testing_use_close_range(bool enabled)
+{
+    g_close_range_enabled = enabled;
+}
+void zcl_reflex_testing_set_fd_dir(const char *path) { (void)path; }
+#endif
+
+/* Today's acceptance: one blob of the right total length, no order check. */
+enum zcl_reflex_frames_status zcl_reflex_frames_parse(
+    const uint8_t *bytes, size_t len, struct zcl_reflex_frames *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (len != sizeof(out->preload) + sizeof(out->observation))
+        return out->status = ZCL_REFLEX_FRAMES_TRUNCATED;
+    memcpy(&out->preload, bytes, sizeof(out->preload));
+    memcpy(&out->observation, bytes + sizeof(out->preload),
+           sizeof(out->observation));
+    out->preload_present = out->observation_present = true;
+    return out->status = ZCL_REFLEX_FRAMES_OK;
+}
+
+const char *zcl_reflex_frames_reason(enum zcl_reflex_frames_status status)
+{
+    return status == ZCL_REFLEX_FRAMES_OK ? "" : "report incomplete";
+}
+
+/* Today's resident uses report strings without checking them. */
+const char *zcl_reflex_preload_invalid(const struct zcl_reflex_preload_frame *f)
+{
+    (void)f;
+    return NULL;
+}
+
+const char *zcl_reflex_observation_invalid(
+    const struct zcl_reflex_observation_frame *f)
+{
+    (void)f;
+    return NULL;
+}
+
+/* Today's reap: wait without a deadline. */
+void zcl_reflex_reap_bounded(pid_t child, int64_t deadline_us,
+                             struct zcl_reflex_reap *out)
+{
+    (void)deadline_us;
+    memset(out, 0, sizeof(*out));
+    out->exit_code = -1;
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    out->reaped = waited == child;
+    if (out->reaped && WIFEXITED(status)) out->exit_code = WEXITSTATUS(status);
+    if (out->reaped && WIFSIGNALED(status)) out->signal = WTERMSIG(status);
+}
+
 /* ── descriptor hygiene ─────────────────────────────────────────────────── */
 
 static bool close_span(unsigned lo, unsigned hi)
 {
     if (lo > hi) return true;
 #ifdef SYS_close_range
+#if defined(ZCL_TESTING)
+    if (g_close_range_enabled)
+#endif
     if (syscall(SYS_close_range, lo, hi, 0) == 0) return true;
 #endif
     unsigned cap = hi > 65535u ? 65535u : hi;

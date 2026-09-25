@@ -49,11 +49,16 @@ int test_reflex_runner(void)
 #include "../fixtures/reflex_runner_fixture.h"
 #include "platform/time_compat.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define RR_DIR "build/fixtures/reflex_runner/zcl_reflex_fixture_"
@@ -344,6 +349,409 @@ static int t_unverifiable_artifact_fails_closed(void)
     return failures;
 }
 
+/* Timing census: the runner's own stage timings over RR_BENCH_RUNS warm green
+ * runs, printed as p50/p95 so a before/after change is measured, not guessed. */
+#define RR_BENCH_RUNS 40
+
+static int rr_cmp_i64(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+static void rr_bench_print(const char *label, int64_t *v, size_t n)
+{
+    qsort(v, n, sizeof(v[0]), rr_cmp_i64);
+    printf("%s p50=%lld p95=%lld ", label, (long long)v[n / 2],
+           (long long)v[(n * 95) / 100]);
+}
+
+static int t_runner_stage_timings(void)
+{
+    int failures = 0;
+    static int64_t fork_us[RR_BENCH_RUNS], confine_us[RR_BENCH_RUNS],
+        dlopen_us[RR_BENCH_RUNS], story_us[RR_BENCH_RUNS],
+        total_us[RR_BENCH_RUNS], wall_us[RR_BENCH_RUNS];
+    TEST("reflex runner: stage timings over warm green runs") {
+        struct rr_case warm;
+        ASSERT(rr_prepare(&warm, "green", 1000));
+        ASSERT(zcl_reflex_runner_run(&warm.spec, &warm.out));
+        ASSERT(warm.out.green);
+        for (size_t i = 0; i < RR_BENCH_RUNS; i++) {
+            struct rr_case c;
+            ASSERT(rr_prepare(&c, "green", 1000));
+            int64_t started = platform_time_monotonic_us();
+            ASSERT(zcl_reflex_runner_run(&c.spec, &c.out));
+            wall_us[i] = platform_time_monotonic_us() - started;
+            ASSERT(c.out.green);
+            fork_us[i] = c.out.fork_us;
+            confine_us[i] = c.out.confine_us;
+            dlopen_us[i] = c.out.dlopen_us;
+            story_us[i] = c.out.story_us;
+            total_us[i] = c.out.runner_total_us;
+        }
+        printf("[runs=%d ", RR_BENCH_RUNS);
+        rr_bench_print("fork_us", fork_us, RR_BENCH_RUNS);
+        rr_bench_print("confine_us", confine_us, RR_BENCH_RUNS);
+        rr_bench_print("dlopen_us", dlopen_us, RR_BENCH_RUNS);
+        rr_bench_print("story_us", story_us, RR_BENCH_RUNS);
+        rr_bench_print("total_us", total_us, RR_BENCH_RUNS);
+        rr_bench_print("wall_us", wall_us, RR_BENCH_RUNS);
+        printf("] ");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── unit proofs of the runner's own hygiene and parsing ─────────────────── */
+
+#define RR_HIGH_FD 70000
+#define RR_MID_FD 1500
+
+static bool rr_fd_open(int fd) { return fcntl(fd, F_GETFD) >= 0; }
+
+/* Child body of the descriptor proof. Prints its own verdict lines and
+ * returns the number of failed checks (exit status). */
+static int rr_fd_child_run(int result_fd)
+{
+    int bad = 0;
+    const int keep[] = {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, result_fd};
+    struct rlimit lim;
+    if (getrlimit(RLIMIT_NOFILE, &lim) != 0) return 100;
+    bool high = lim.rlim_max == RLIM_INFINITY || lim.rlim_max > RR_HIGH_FD;
+    lim.rlim_cur = high ? (rlim_t)RR_HIGH_FD + 1 : lim.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &lim) != 0) return 101;
+    /* Independent ground truth: the kernel's close_range leaves exactly the
+     * kept set; then exactly three (or two) known descriptors are opened. */
+    for (int fd = 0; fd < 3; fd++)
+        if (!rr_fd_open(fd)) {
+            int null_fd = open("/dev/null", O_RDWR);
+            if (null_fd < 0) return 106;
+            if (null_fd != fd && dup2(null_fd, fd) != fd) return 106;
+        }
+    if ((result_fd > 3 &&
+         syscall(SYS_close_range, 3u, (unsigned)result_fd - 1u, 0) != 0) ||
+        syscall(SYS_close_range, (unsigned)result_fd + 1u, ~0u, 0) != 0)
+        return 102;
+    int base = open("/dev/null", O_RDONLY);
+    if (base < 0 || dup2(base, RR_MID_FD) != RR_MID_FD) return 103;
+    if (high && dup2(base, RR_HIGH_FD) != RR_HIGH_FD) return 104;
+    if (!high)
+        printf("SKIP fd %d sub-case: hard RLIMIT_NOFILE=%llu <= %d; ",
+               RR_HIGH_FD, (unsigned long long)lim.rlim_max, RR_HIGH_FD);
+    uint32_t want = high ? 3u : 2u;
+    uint32_t counted = zcl_reflex_count_fds_except(keep, 4);
+    if (counted != want) {
+        printf("count before close=%u want %u; ", counted, want);
+        bad++;
+    }
+    zcl_reflex_testing_use_close_range(false);
+    bool closed = zcl_reflex_close_all_except(keep, 4);
+    if (!closed) { printf("fallback close returned false; "); bad++; }
+    if (rr_fd_open(base) || rr_fd_open(RR_MID_FD) ||
+        (high && rr_fd_open(RR_HIGH_FD))) {
+        printf("fallback left fds open base=%d %d=%d %d=%d; ", base,
+               RR_MID_FD, rr_fd_open(RR_MID_FD), RR_HIGH_FD,
+               rr_fd_open(RR_HIGH_FD));
+        bad++;
+    }
+    for (size_t i = 0; i < 4; i++)
+        if (!rr_fd_open(keep[i])) { printf("kept fd %d lost; ", keep[i]); bad++; }
+    counted = zcl_reflex_count_fds_except(keep, 4);
+    if (counted != 0) { printf("count after close=%u; ", counted); bad++; }
+    /* Enumeration impossible and close_range off: refuse, never "done". */
+    zcl_reflex_testing_set_fd_dir("/nonexistent/reflex-fd-dir");
+    if (dup2(result_fd, RR_MID_FD) != RR_MID_FD) return 105;
+    if (zcl_reflex_close_all_except(keep, 4)) {
+        printf("close without enumeration returned true; ");
+        bad++;
+    }
+    if (zcl_reflex_count_fds_except(keep, 4) != UINT32_MAX) {
+        printf("census without enumeration did not fail closed; ");
+        bad++;
+    }
+    return bad;
+}
+
+static int t_fd_hygiene_without_close_range(void)
+{
+    int failures = 0;
+    TEST("reflex runner: close_all_except without close_range closes fds "
+         "1500 and 70000; census exact; no enumeration refuses") {
+        int pfd[2];
+        ASSERT(pipe2(pfd, O_CLOEXEC) == 0);
+        (void)fflush(stdout);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            (void)close(pfd[0]);
+            int rc = rr_fd_child_run(pfd[1]);
+            (void)fflush(stdout);
+            _exit(rc > 120 ? 120 : rc);
+        }
+        (void)close(pfd[1]);
+        (void)close(pfd[0]);
+        int status = 0;
+        ASSERT(waitpid(child, &status, 0) == child);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void rr_hex(char *dst, char c)
+{
+    memset(dst, c, 64);
+    dst[64] = '\0';
+}
+
+static void rr_preload_valid(struct zcl_reflex_preload_frame *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->head = (struct zcl_reflex_report_head){
+        .magic = ZCL_REFLEX_REPORT_MAGIC, .abi = ZCL_REFLEX_WIRE_ABI,
+        .kind = ZCL_REFLEX_REPORT_PRELOAD, .size = sizeof(*f),
+    };
+    f->hash_verified = 1;
+    f->sandboxed = 1;
+    rr_hex(f->runtime_module_sha256, 'a');
+    (void)snprintf(f->stage, sizeof(f->stage), "preload");
+}
+
+static void rr_observation_valid(struct zcl_reflex_observation_frame *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->head = (struct zcl_reflex_report_head){
+        .magic = ZCL_REFLEX_REPORT_MAGIC, .abi = ZCL_REFLEX_WIRE_ABI,
+        .kind = ZCL_REFLEX_REPORT_OBSERVATION, .size = sizeof(*f),
+    };
+    f->story_ok = 1;
+    f->descriptor_valid = 1;
+    f->candidate_executed = 1;
+    (void)snprintf(f->observation.detail, sizeof(f->observation.detail), "ok");
+    rr_hex(f->service.loaded_image_sha256, 'b');
+}
+
+/* One malformed preload: `why` must be non-NULL and name `field`. */
+static bool rr_preload_refused(const struct zcl_reflex_preload_frame *f,
+                               const char *field)
+{
+    const char *why = zcl_reflex_preload_invalid(f);
+    printf("[%s -> %s] ", field, why ? why : "ACCEPTED");
+    return why && strstr(why, field);
+}
+
+static bool rr_observation_refused(
+    const struct zcl_reflex_observation_frame *f, const char *field)
+{
+    const char *why = zcl_reflex_observation_invalid(f);
+    printf("[%s -> %s] ", field, why ? why : "ACCEPTED");
+    return why && strstr(why, field);
+}
+
+static int t_report_strings_validated_before_use(void)
+{
+    int failures = 0;
+    TEST("reflex runner: unterminated or malformed report fields are "
+         "refused by name before any use") {
+        struct zcl_reflex_preload_frame p;
+        rr_preload_valid(&p);
+        ASSERT(zcl_reflex_preload_invalid(&p) == NULL);
+        rr_preload_valid(&p); memset(p.stage, 'x', sizeof(p.stage));
+        ASSERT(rr_preload_refused(&p, "stage"));
+        rr_preload_valid(&p); memset(p.error, 'x', sizeof(p.error));
+        ASSERT(rr_preload_refused(&p, "error"));
+        rr_preload_valid(&p);
+        memset(p.runtime_module_sha256, 'a', sizeof(p.runtime_module_sha256));
+        ASSERT(rr_preload_refused(&p, "runtime_module_sha256"));
+        rr_preload_valid(&p); p.runtime_module_sha256[10] = 'A';
+        ASSERT(rr_preload_refused(&p, "runtime_module_sha256"));
+        rr_preload_valid(&p); p.runtime_module_sha256[63] = '\0';
+        ASSERT(rr_preload_refused(&p, "runtime_module_sha256"));
+        rr_preload_valid(&p); p.runtime_module_sha256[0] = '\0';
+        ASSERT(rr_preload_refused(&p, "runtime_module_sha256"));
+        rr_preload_valid(&p); p.sandboxed = 2;
+        ASSERT(rr_preload_refused(&p, "sandboxed"));
+
+        struct zcl_reflex_observation_frame o;
+        rr_observation_valid(&o);
+        ASSERT(zcl_reflex_observation_invalid(&o) == NULL);
+        rr_observation_valid(&o);
+        memset(o.observation.detail, 'x', sizeof(o.observation.detail));
+        ASSERT(rr_observation_refused(&o, "observation.detail"));
+        rr_observation_valid(&o);
+        memset(o.observation.exercised_surface, 'x',
+               sizeof(o.observation.exercised_surface));
+        ASSERT(rr_observation_refused(&o, "observation.exercised_surface"));
+        rr_observation_valid(&o); memset(o.stage, 'x', sizeof(o.stage));
+        ASSERT(rr_observation_refused(&o, "stage"));
+        rr_observation_valid(&o); memset(o.error, 'x', sizeof(o.error));
+        ASSERT(rr_observation_refused(&o, "error"));
+        rr_observation_valid(&o);
+        memset(o.service.error, 'x', sizeof(o.service.error));
+        ASSERT(rr_observation_refused(&o, "service.error"));
+        rr_observation_valid(&o);
+        memset(o.service.service_id, 'x', sizeof(o.service.service_id));
+        ASSERT(rr_observation_refused(&o, "service.service_id"));
+        rr_observation_valid(&o); o.service.loaded_image_sha256[5] = 'g';
+        ASSERT(rr_observation_refused(&o, "service.loaded_image_sha256"));
+        rr_observation_valid(&o);
+        memset(o.service.loaded_image_sha3_256, 'c',
+               sizeof(o.service.loaded_image_sha3_256));
+        ASSERT(rr_observation_refused(&o, "service.loaded_image_sha3_256"));
+        rr_observation_valid(&o); o.story_ok = 0xff;
+        ASSERT(rr_observation_refused(&o, "story_ok"));
+        rr_observation_valid(&o);
+        unsigned char *svc = (unsigned char *)&o.service;
+        svc[offsetof(struct zcl_hotswap_service_report, ok)] = 7;
+        ASSERT(rr_observation_refused(&o, "service.ok"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+struct rr_stream {
+    uint8_t bytes[4 * sizeof(struct zcl_reflex_observation_frame)];
+    size_t len;
+};
+
+static void rr_put(struct rr_stream *s, const void *frame, size_t len)
+{
+    memcpy(s->bytes + s->len, frame, len);
+    s->len += len;
+}
+
+static bool rr_parse_is(const struct rr_stream *s, const char *label,
+                        enum zcl_reflex_frames_status want,
+                        struct zcl_reflex_frames *out)
+{
+    enum zcl_reflex_frames_status got =
+        zcl_reflex_frames_parse(s->bytes, s->len, out);
+    printf("[%s: %u \"%s\"] ", label, (unsigned)got,
+           zcl_reflex_frames_reason(got));
+    return got == want && out->status == (uint32_t)want &&
+        (want == ZCL_REFLEX_FRAMES_OK ||
+         zcl_reflex_frames_reason(got)[0] != '\0');
+}
+
+static int t_report_frames_parse_by_name(void)
+{
+    int failures = 0;
+    TEST("reflex runner: two-frame report; missing, duplicate, out-of-order, "
+         "wrong-size, unknown-kind and trailing bytes are named RED") {
+        struct zcl_reflex_preload_frame p;
+        struct zcl_reflex_observation_frame o;
+        rr_preload_valid(&p);
+        rr_observation_valid(&o);
+        struct zcl_reflex_frames f;
+        struct rr_stream s = {0};
+        rr_put(&s, &p, sizeof(p)); rr_put(&s, &o, sizeof(o));
+        ASSERT(rr_parse_is(&s, "valid", ZCL_REFLEX_FRAMES_OK, &f));
+        ASSERT(f.preload_present && f.observation_present);
+        ASSERT_STR_EQ(f.preload.runtime_module_sha256, p.runtime_module_sha256);
+        ASSERT_STR_EQ(f.observation.observation.detail, "ok");
+
+        s.len = 0;
+        ASSERT(rr_parse_is(&s, "empty", ZCL_REFLEX_FRAMES_PRELOAD_MISSING, &f));
+        ASSERT(!f.preload_present);
+        rr_put(&s, &p, sizeof(p));
+        ASSERT(rr_parse_is(&s, "preload-only",
+                           ZCL_REFLEX_FRAMES_OBSERVATION_MISSING, &f));
+        ASSERT(f.preload_present && !f.observation_present);
+        s.len = 0; rr_put(&s, &o, sizeof(o)); rr_put(&s, &p, sizeof(p));
+        ASSERT(rr_parse_is(&s, "out-of-order", ZCL_REFLEX_FRAMES_OUT_OF_ORDER,
+                           &f));
+        ASSERT(!f.preload_present);
+        s.len = 0; rr_put(&s, &p, sizeof(p)); rr_put(&s, &p, sizeof(p));
+        ASSERT(rr_parse_is(&s, "second-preload", ZCL_REFLEX_FRAMES_DUPLICATE,
+                           &f));
+        s.len = 0; rr_put(&s, &p, sizeof(p)); rr_put(&s, &o, sizeof(o));
+        rr_put(&s, &o, sizeof(o));
+        ASSERT(rr_parse_is(&s, "second-observation",
+                           ZCL_REFLEX_FRAMES_DUPLICATE, &f));
+        ASSERT(!f.observation_present || f.status != ZCL_REFLEX_FRAMES_OK);
+        s.len = 0; rr_put(&s, &p, sizeof(p)); rr_put(&s, &o, sizeof(o));
+        rr_put(&s, "z", 1);
+        ASSERT(rr_parse_is(&s, "trailing", ZCL_REFLEX_FRAMES_TRAILING, &f));
+        s.len = 0; rr_put(&s, &p, sizeof(p)); rr_put(&s, &o, sizeof(o) / 2);
+        ASSERT(rr_parse_is(&s, "truncated", ZCL_REFLEX_FRAMES_TRUNCATED, &f));
+
+        struct zcl_reflex_preload_frame bad = p;
+        bad.head.magic ^= 1u;
+        s.len = 0; rr_put(&s, &bad, sizeof(bad)); rr_put(&s, &o, sizeof(o));
+        ASSERT(rr_parse_is(&s, "magic", ZCL_REFLEX_FRAMES_BAD_MAGIC, &f));
+        bad = p; bad.head.abi = ZCL_REFLEX_WIRE_ABI - 1u;
+        s.len = 0; rr_put(&s, &bad, sizeof(bad)); rr_put(&s, &o, sizeof(o));
+        ASSERT(rr_parse_is(&s, "abi", ZCL_REFLEX_FRAMES_BAD_ABI, &f));
+        bad = p; bad.head.kind = 9u;
+        s.len = 0; rr_put(&s, &bad, sizeof(bad)); rr_put(&s, &o, sizeof(o));
+        ASSERT(rr_parse_is(&s, "kind", ZCL_REFLEX_FRAMES_UNKNOWN_KIND, &f));
+        bad = p; bad.head.size = sizeof(bad) - 8u;
+        s.len = 0; rr_put(&s, &bad, sizeof(bad)); rr_put(&s, &o, sizeof(o));
+        ASSERT(rr_parse_is(&s, "size", ZCL_REFLEX_FRAMES_WRONG_SIZE, &f));
+        struct zcl_reflex_observation_frame obad = o;
+        obad.head.kind = 77u;
+        s.len = 0; rr_put(&s, &p, sizeof(p)); rr_put(&s, &obad, sizeof(obad));
+        ASSERT(rr_parse_is(&s, "observation-kind",
+                           ZCL_REFLEX_FRAMES_UNKNOWN_KIND, &f));
+        ASSERT(f.preload_present && !f.observation_present);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The leaf closes its end of the report pipe, then refuses to exit. */
+static int t_reap_is_bounded_after_eof(void)
+{
+    int failures = 0;
+    TEST("reflex runner: a leaf that closes its pipe and sleeps is killed "
+         "at the deadline and reaped") {
+        int pfd[2];
+        ASSERT(pipe2(pfd, O_CLOEXEC) == 0);
+        (void)fflush(stdout);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            (void)close(pfd[0]);
+            (void)close(pfd[1]);
+            (void)sleep(3);
+            _exit(0);
+        }
+        (void)close(pfd[1]);
+        char byte;
+        ssize_t n;
+        do { n = read(pfd[0], &byte, 1); } while (n < 0 && errno == EINTR);
+        (void)close(pfd[0]);
+        ASSERT_EQ(n, 0);
+        int64_t started = platform_time_monotonic_us();
+        struct zcl_reflex_reap reap;
+        zcl_reflex_reap_bounded(child, started + 200000, &reap);
+        int64_t waited = platform_time_monotonic_us() - started;
+        printf("[waited=%lldus killed=%d signal=%d exit=%d filters_read=%d] ",
+               (long long)waited, reap.killed_at_deadline, reap.signal,
+               reap.exit_code, reap.filters_read);
+        ASSERT(reap.reaped);
+        ASSERT(reap.killed_at_deadline);
+        ASSERT_EQ(reap.signal, SIGKILL);
+        ASSERT(waited >= 150000 && waited < 1500000);
+
+        (void)fflush(stdout);
+        pid_t quick = fork();
+        ASSERT(quick >= 0);
+        if (quick == 0) _exit(7);
+        started = platform_time_monotonic_us();
+        zcl_reflex_reap_bounded(quick, started + 2000000, &reap);
+        waited = platform_time_monotonic_us() - started;
+        ASSERT(reap.reaped && !reap.killed_at_deadline);
+        ASSERT_EQ(reap.exit_code, 7);
+        ASSERT(reap.filters_read);
+        ASSERT(waited < 1000000);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_reflex_runner(void);
 int test_reflex_runner(void)
 {
@@ -355,6 +763,11 @@ int test_reflex_runner(void)
     failures += t_socket_and_wx_are_killed();
     failures += t_kernel_escape_surfaces_are_denied();
     failures += t_unverifiable_artifact_fails_closed();
+    failures += t_runner_stage_timings();
+    failures += t_fd_hygiene_without_close_range();
+    failures += t_report_strings_validated_before_use();
+    failures += t_report_frames_parse_by_name();
+    failures += t_reap_is_bounded_after_eof();
     zcl_reflex_runner_shutdown();
     printf("=== reflex_runner: %d failures ===\n", failures);
     return failures;
