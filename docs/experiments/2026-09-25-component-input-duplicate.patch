@@ -1,0 +1,37 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+
+diff --git a/tests/harness/src/test_zcode_dev_objects.c b/tests/harness/src/test_zcode_dev_objects.c
+index dc291e660..15a26b23d 100644
+--- a/tests/harness/src/test_zcode_dev_objects.c
++++ b/tests/harness/src/test_zcode_dev_objects.c
+@@ -1798,7 +1798,7 @@ static int test_zd_work_node_atomic_admission(void)
+         cap.max_memory_bytes = UINT64_C(512) * 1024 * 1024;
+         cap.max_output_bytes = UINT64_C(64) * 1024 * 1024;
+         cap.max_lease_seconds = 120;
+-        cap.slots = cap.queue_headroom = 1;
++        cap.slots = cap.queue_headroom = 2;
+         cap.expires_unix = 2000;
+         ASSERT(vcs_zcode_work_capability_seal(&cap, b_secret, b_key));
+         ASSERT(vcs_zcode_work_node_set_local_signer(b, b_secret, b_key));
+@@ -1856,8 +1856,19 @@ static int test_zd_work_node_atomic_admission(void)
+         ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+             c, 12, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_OK);
+         ASSERT(vcs_zcode_work_node_next_admission(c, &peer, &admission));
+-        ASSERT_EQ(admission.disposition, VCS_ZCODE_WORK_ADMISSION_BUSY);
+-        ASSERT_EQ(admission.reason, VCS_ZCODE_WORK_ADMISSION_REASON_NO_SLOT);
++        struct vcs_zcode_work_request_v1 duplicate_first, duplicate_second;
++        bool first_job = vcs_zcode_work_node_next_request(
++            b, &peer, &duplicate_first);
++        bool second_job = vcs_zcode_work_node_next_request(
++            b, &peer, &duplicate_second);
++        printf("COMPONENT_INPUT_PROBE jobs=%u same_input=%u distinct_action=%u disposition=%u\n",
++               (unsigned)first_job + (unsigned)second_job,
++               first_job && second_job && memcmp(duplicate_first.input_root,
++                                                  duplicate_second.input_root, 32) == 0,
++               first_job && second_job && memcmp(duplicate_first.action_root,
++                                                  duplicate_second.action_root, 32) != 0,
++               admission.disposition);
++        ASSERT_EQ(admission.disposition, VCS_ZCODE_WORK_ADMISSION_ATTACHED);
+         struct vcs_zcode_work_capability_v1 observed_capability;
+         ASSERT(vcs_zcode_work_node_peer_capability(
+             c, 12, 1000, &observed_capability));
