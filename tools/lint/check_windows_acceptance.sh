@@ -46,9 +46,21 @@
 # cached. The reconcile step runs either way: it needs no compiler at all, so
 # a contributor without mingw still gets the catalog checked.
 #
+# ── THE SPLIT (shadow premise selection only) ───────────────────────────────
+# The verdict is the conjunction of a global part and one part per catalog
+# row. The global part (--self-test, then --global: reconcile, and make
+# planning the whole cross-link) reads the whole catalog, the registry and
+# the Makefile's evaluation, so it always runs. A row's part (--row=ID)
+# cross-links that one program in a fresh output directory; it reads only
+# the row's catalog text, its sources' include closures and gate code. See
+# SELECTION_UNITS_CATALOG_ROWS in tools/lint/lintc/selection_gates.def. The
+# plain invocation is unchanged and still runs every part.
+#
 # Usage:
 #   tools/lint/check_windows_acceptance.sh             # the gate
 #   tools/lint/check_windows_acceptance.sh --self-test # prove it can go red
+#   tools/lint/check_windows_acceptance.sh --global    # reconcile + make plan
+#   tools/lint/check_windows_acceptance.sh --row=ID... # cross-link these rows
 #
 # Env:
 #   ZCL_WINDOWS_ACCEPTANCE_ROOT  tree to reconcile (default: this repo).
@@ -505,8 +517,9 @@ run_selftest() {
     expect_red "9. an active ID without _SOURCES is caught" \
                "active acceptance IDs and _SOURCES IDs differ" "$d" || rc=1
 
-    selftest_cross_link_jobs || rc=1; if [ "$rc" -eq 0 ]; then
-        echo "══ self-test: PASS (10/10) — this gate is proven able to go red ══"
+    selftest_cross_link_jobs || rc=1
+    selftest_split || rc=1; if [ "$rc" -eq 0 ]; then
+        echo "══ self-test: PASS (13/13) — this gate is proven able to go red ══"
     else
         echo "══ self-test: FAIL ══"
     fi
@@ -516,8 +529,10 @@ run_selftest() {
 main() {
     case "${1:-}" in
         --self-test) run_selftest; exit $? ;;
+        --global) global_main; exit $? ;;
+        --row=*) rows_main "$@"; exit $? ;;
         "") ;;
-        *) echo "usage: $0 [--self-test]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--self-test | --global | --row=ID...]" >&2; exit 2 ;;
     esac
     reconcile_root "${ZCL_WINDOWS_ACCEPTANCE_ROOT:-$REPO_ROOT}" || exit 1
     compile_step
@@ -564,6 +579,101 @@ selftest_cross_link_jobs() {
     esac
     echo "SELF-TEST FAIL: 10. the cross-link must clear MAKEFLAGS and name -j14; ran: ${seen:-nothing}"
     return 1
+}
+
+# ── the split: --global and --row=ID ────────────────────────────────────────
+# --global is everything that reads more than one row: the reconcile above,
+# and make planning the whole cross-link with `-n`. Planning evaluates the
+# entire Makefile (every $(shell), $(wildcard) and $(error) guard, and the
+# rule each row generates), so an input that breaks evaluation fails here
+# even when no row's own premise moved.
+global_main() {
+    reconcile_root "${ZCL_WINDOWS_ACCEPTANCE_ROOT:-$REPO_ROOT}" || return 1
+    local plan="$REPO_ROOT/build/tests/windows-plan" out
+    if ! out="$(MAKEFLAGS= make -C "$REPO_ROOT" -n --no-print-directory \
+            ZCL_WINDOWS_ACCEPTANCE_DIR="$plan" windows-acceptance-compile 2>&1)"; then
+        echo "check-windows-acceptance: FAIL: make cannot plan the cross-link:"
+        printf '%s\n' "$out" | tail -20 | sed 's/^/    /'
+        return 1
+    fi
+    echo "check-windows-acceptance: global PASS — make plans the cross-link of every catalog row"
+}
+
+# --row=ID... cross-links exactly the named rows. The output directory is
+# emptied first, so no binary from an earlier run can stand in for a link
+# (the catalog rules name sources, not headers, as prerequisites). Every ID
+# must be an active catalog row; anything else is a refusal, never a skip.
+rows_main() {
+    local known arg id ids=""
+    known="$(catalog_tests "$REPO_ROOT")"
+    for arg in "$@"; do
+        id="${arg#--row=}"
+        if [ "$id" = "$arg" ] || [ -z "$id" ] || ! list_has "$known" "$id"; then
+            echo "check-windows-acceptance: REFUSE: '$arg' does not name an active catalog row" >&2
+            return 2
+        fi
+        ids="$ids $id"
+    done
+    # shellcheck disable=SC2086 # ids are catalog identifiers, checked above
+    compile_rows $ids
+}
+
+compile_rows() {
+    local cc="${ZCL_WINDOWS_ACCEPTANCE_CC:-x86_64-w64-mingw32-gcc}"
+    if ! command -v "$cc" >/dev/null 2>&1; then
+        if [ "${ZCL_REQUIRE_MINGW:-0}" = 1 ]; then
+            printf '%s\n' "check-windows-acceptance: FAIL (required compiler $cc is unavailable)" >&2
+            return 2
+        fi
+        printf '%s\n' "check-windows-acceptance: UNOBSERVED ($cc not installed; no row was cross-linked)"
+        return 0
+    fi
+    local dir="$REPO_ROOT/build/tests/windows-rows" id targets=()
+    rm -rf "$dir"
+    for id in "$@"; do targets+=("$dir/$id.exe"); done
+    MAKEFLAGS= make -C "$REPO_ROOT" -j"$(cross_link_jobs)" --no-print-directory \
+        ZCL_WINDOWS_ACCEPTANCE_DIR="$dir" "${targets[@]}" || return 1
+    for id in "$@"; do
+        if [ ! -s "$dir/$id.exe" ]; then
+            printf '%s\n' "check-windows-acceptance: FAIL: missing/empty $dir/$id.exe" >&2
+            return 1
+        fi
+    done
+    printf 'check-windows-acceptance: rows cross-link PASS (%s row(s))\n' "$#"
+}
+
+# Self-test cases 11-13: a stub make records what the split modes run.
+selftest_split() {
+    local stub="$FIXTURE_ROOT/stub-split" seen rc
+    mkdir -p "$stub"
+    printf '#!/bin/sh\nprintf "%%s|%%s\\n" "${MAKEFLAGS-}" "$*" > "%s/argv"\nexit "${STUB_MAKE_RC:-0}"\n' \
+        "$stub" > "$stub/make"
+    chmod +x "$stub/make"
+    (PATH="$stub:$PATH" ZCL_WINDOWS_ACCEPTANCE_CC=true rows_main --row=planted_not_a_row) \
+        >/dev/null 2>&1; rc=$?
+    if [ "$rc" -ne 2 ] || [ -e "$stub/argv" ]; then
+        echo "SELF-TEST FAIL: 11. --row naming no catalog row must refuse (2) before make; rc=$rc"
+        return 1
+    fi
+    echo "  self-test ok (RED): 11. --row naming no catalog row refuses without running make"
+    (PATH="$stub:$PATH" MAKEFLAGS='-j28' ZCL_HOST_JOBS=28 ZCL_WINDOWS_ACCEPTANCE_CC=true \
+        rows_main --row=rng) >/dev/null 2>&1; rc=$?
+    seen="$(cat "$stub/argv" 2>/dev/null || true)"
+    case "$rc|$seen" in
+        "1||"*" ZCL_WINDOWS_ACCEPTANCE_DIR=$REPO_ROOT/build/tests/windows-rows $REPO_ROOT/build/tests/windows-rows/rng.exe") ;;
+        *) echo "SELF-TEST FAIL: 12. --row=rng must link only rng.exe and fail without it; rc=$rc ran: ${seen:-nothing}"
+           return 1 ;;
+    esac
+    echo "  self-test ok (RED): 12. --row=rng names only rng.exe and fails when no binary appears"
+    (PATH="$stub:$PATH" STUB_MAKE_RC=2 global_main) >/dev/null 2>&1; rc=$?
+    seen="$(cat "$stub/argv" 2>/dev/null || true)"
+    case "$rc|$seen" in
+        "1||"*"-n "*"windows-acceptance-compile") ;;
+        *) echo "SELF-TEST FAIL: 13. --global must fail when make cannot plan; rc=$rc ran: ${seen:-nothing}"
+           return 1 ;;
+    esac
+    echo "  self-test ok (RED): 13. --global fails when make cannot plan the cross-link"
+    return 0
 }
 
 main "$@"
