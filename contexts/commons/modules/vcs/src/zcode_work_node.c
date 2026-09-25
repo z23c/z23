@@ -1092,7 +1092,7 @@ static enum vcs_zcode_work_node_result work_handle_result(
         if (track->finished && !track->cancelled && track->has_result &&
             vcs_zcode_work_result_verify(
                 &track->request, result_row,
-                node->peers[peer_at].capability.signer_pubkey) &&
+                track->worker_signer) &&
             vcs_zcode_work_same_result(&track->result, result_row))
             return VCS_ZCODE_WORK_NODE_OK;
         return VCS_ZCODE_WORK_NODE_REPLAY;
@@ -1101,8 +1101,7 @@ static enum vcs_zcode_work_node_result work_handle_result(
         now >= node->peers[peer_at].capability.expires_unix)
         return VCS_ZCODE_WORK_NODE_CAPABILITY_STALE;
     if (!vcs_zcode_work_result_verify(
-            &track->request, result_row,
-            node->peers[peer_at].capability.signer_pubkey))
+            &track->request, result_row, track->worker_signer))
         return VCS_ZCODE_WORK_NODE_BINDING;
     if (node->result_count >= VCS_ZCODE_WORK_NODE_MAX_RESULTS)
         return VCS_ZCODE_WORK_NODE_FULL;
@@ -1137,8 +1136,7 @@ static enum vcs_zcode_work_node_result work_handle_admission(
     if (!node->peers[peer_at].has_capability)
         return VCS_ZCODE_WORK_NODE_CAPABILITY_STALE;
     if (!vcs_zcode_work_admission_verify_for_request(
-            &track->request, admission,
-            node->peers[peer_at].capability.signer_pubkey))
+            &track->request, admission, track->worker_signer))
         return VCS_ZCODE_WORK_NODE_BINDING;
     bool late_refusal =
         (track->admission_disposition == VCS_ZCODE_WORK_ADMISSION_GRANTED ||
@@ -1180,8 +1178,7 @@ static enum vcs_zcode_work_node_result work_handle_progress(
         now >= node->peers[peer_at].capability.expires_unix)
         return VCS_ZCODE_WORK_NODE_CAPABILITY_STALE;
     if (!vcs_zcode_work_progress_verify_for_request(
-            &track->request, progress,
-            node->peers[peer_at].capability.signer_pubkey))
+            &track->request, progress, track->worker_signer))
         return VCS_ZCODE_WORK_NODE_BINDING;
     if (progress->stage <= track->progress_stage)
         return VCS_ZCODE_WORK_NODE_REPLAY;

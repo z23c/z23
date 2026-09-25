@@ -506,6 +506,26 @@ static bool boot_zcode_work_result_publishable(
     return false;
 }
 
+static size_t boot_zcode_work_skip_published_siblings(
+    struct vcs_zcode_work_request_v1 *requests, uint64_t *peers,
+    size_t *count, size_t source)
+{
+    size_t kept = source + 1;
+    for (size_t i = kept; i < *count; i++) {
+        if (memcmp(requests[i].action_root, requests[source].action_root,
+                   sizeof(requests[i].action_root)) == 0)
+            continue;
+        requests[kept] = requests[i];
+        peers[kept] = peers[i];
+        kept++;
+    }
+    /* One physical slot published a separately bound RESULT for every
+     * admitted subscriber. Remove its siblings from this snapshot. */
+    size_t skipped = *count - kept;
+    *count = kept;
+    return skipped;
+}
+
 static void boot_zcode_work_publish_results(int64_t now)
 {
     struct node_db *ndb = app_runtime_node_db();
@@ -567,6 +587,9 @@ static void boot_zcode_work_publish_results(int64_t now)
                 vcs_zcode_work_node_publish_result(
                     s_work, peers[i], &result, &result_requests_queued);
             if (published == VCS_ZCODE_WORK_NODE_OK) {
+                size_t scans_avoided =
+                    boot_zcode_work_skip_published_siblings(
+                        requests, peers, &count, i);
                 struct vcs_zcode_work_swarm_message message = {
                     .type = VCS_ZCODE_WORK_SWARM_RESULT,
                     .body.result = result,
@@ -575,11 +598,12 @@ static void boot_zcode_work_publish_results(int64_t now)
                          "schema=zcl.async_proof_perf.v1 action=%s "
                          "stage=worker_result_publish at_unix_us=%lld "
                          "result_wire_bytes=%zu result_requests_queued=%zu "
-                         "extra_result_requests_queued=%zu",
+                         "extra_result_requests_queued=%zu "
+                         "duplicate_result_scans_avoided=%zu",
                          action_id, (long long)platform_time_realtime_us(),
                          vcs_zcode_work_swarm_wire_size(&message),
                          result_requests_queued,
-                         result_requests_queued - 1);
+                         result_requests_queued - 1, scans_avoided);
                 /* publish_result released the physical worker slot. A
                  * requester that observed signed BUSY must see a strictly
                  * newer signed capacity fact now; waiting for the periodic
