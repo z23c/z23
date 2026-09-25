@@ -333,6 +333,41 @@ static void component_key_hash(
     sha3_256_finalize(&sha, out);
 }
 
+/* The whole candidate tree is deliberately part of v1. A manifest root
+ * alone does not show that every source blob is still present and readable.
+ * Qualify every blob under the task's source budget before offering this
+ * tree as a reusable computation input. */
+static enum vcs_zcode_action_input_result component_tree_verify(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate)
+{
+    struct vcs_manifest tree;
+    if (!vcs_tree_load(repo_root, candidate->candidate_source_root, &tree))
+        return VCS_ZCODE_ACTION_INPUT_CAS;
+    enum vcs_zcode_action_input_result result = VCS_ZCODE_ACTION_INPUT_OK;
+    uint64_t total = 0;
+    if (tree.count > VCS_PACKAGE_MAX_FILES)
+        result = VCS_ZCODE_ACTION_INPUT_LIMIT;
+    for (size_t i = 0; result == VCS_ZCODE_ACTION_INPUT_OK &&
+                       i < tree.count; i++) {
+        const struct vcs_entry *entry = &tree.entries[i];
+        if (!S_ISREG(entry->mode) || entry->size > SIZE_MAX ||
+            entry->size > task->max_context_bytes - total) {
+            result = VCS_ZCODE_ACTION_INPUT_LIMIT;
+            break;
+        }
+        uint8_t *bytes = NULL;
+        size_t len = 0;
+        if (vcs_object_get(repo_root, entry->blob, VCS_TAG_BLOB,
+                           &bytes, &len) != 0 || len != entry->size)
+            result = VCS_ZCODE_ACTION_INPUT_CAS;
+        free(bytes);
+        total += entry->size;
+    }
+    vcs_manifest_free(&tree);
+    return result;
+}
+
 enum vcs_zcode_action_input_result vcs_zcode_component_input_key_derive_cas(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
@@ -350,6 +385,8 @@ enum vcs_zcode_action_input_result vcs_zcode_component_input_key_derive_cas(
         vcs_zcode_action_input_validate_for_candidate(
             repo_root, task, candidate, input, task_root,
             candidate_root, input->work_kind);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
+    result = component_tree_verify(repo_root, task, candidate);
     if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
     component_key_hash(candidate, input, execution, out);
     return VCS_ZCODE_ACTION_INPUT_OK;

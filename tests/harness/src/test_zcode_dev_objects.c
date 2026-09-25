@@ -73,6 +73,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+
+static bool zd_index_drop_object(const char *workspace,
+                                 const uint8_t root[32]);
 #include <unistd.h>
 
 static bool zd_index_drop_object(const char *workspace,
@@ -2578,6 +2581,50 @@ static int test_zd_work_node_three(void)
     return failures;
 }
 
+static bool zd_missing_source_blob_refuses_key(
+    const char *workspace, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_action_input_v1 *input,
+    const uint8_t task_root[32], const uint8_t candidate_root[32],
+    const struct vcs_zcode_component_execution_v1 *execution,
+    const uint8_t expected_key[32])
+{
+    struct vcs_manifest tree;
+    if (!vcs_tree_load(workspace, candidate->candidate_source_root, &tree))
+        return false;
+    size_t at = 0;
+    while (at < tree.count && strcmp(tree.entries[at].path, input->path) == 0)
+        at++;
+    bool okay = false;
+    if (at < tree.count) {
+        uint8_t missing[32], restored[32], key[32];
+        uint8_t *saved = NULL;
+        size_t len = 0;
+        memcpy(missing, tree.entries[at].blob, 32);
+        if (vcs_object_get(workspace, missing, VCS_TAG_BLOB,
+                           &saved, &len) == 0) {
+            bool dropped = zd_index_drop_object(workspace, missing);
+            enum vcs_zcode_action_input_result refused = dropped
+                ? vcs_zcode_component_input_key_derive_cas(
+                      workspace, task, candidate, input, task_root,
+                      candidate_root, execution, key)
+                : VCS_ZCODE_ACTION_INPUT_OK;
+            bool repaired = dropped && vcs_object_put(
+                workspace, saved, len, VCS_TAG_BLOB, restored);
+            okay = repaired && memcmp(missing, restored, 32) == 0 &&
+                refused == VCS_ZCODE_ACTION_INPUT_CAS &&
+                vcs_zcode_component_input_key_derive_cas(
+                    workspace, task, candidate, input, task_root,
+                    candidate_root, execution, key) ==
+                    VCS_ZCODE_ACTION_INPUT_OK &&
+                memcmp(key, expected_key, 32) == 0;
+            free(saved);
+        }
+    }
+    vcs_manifest_free(&tree);
+    return okay;
+}
+
 static int test_zd_improve_command(void)
 {
     int failures = 0;
@@ -3332,6 +3379,9 @@ static int test_zd_improve_command(void)
                       task_root, candidate_root, &execution, same_key),
                   VCS_ZCODE_ACTION_INPUT_OK);
         ASSERT(memcmp(component_key, same_key, 32) == 0);
+        ASSERT(zd_missing_source_blob_refuses_key(
+            workspace, &task, &candidate, &action_input,
+            task_root, candidate_root, &execution, component_key));
         struct vcs_zcode_candidate_v1 repeated_candidate = candidate;
         repeated_candidate.sequence++;
         repeated_candidate.created_unix++;
