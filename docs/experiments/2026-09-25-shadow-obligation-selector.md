@@ -348,7 +348,7 @@ rows the rule is at 1949.8 s:
 
 | remaining fresh s per candidate | s | share of reference | what it would take |
 |---|---|---|---|
-| 211 lint gates with no premise declaration | 987.7 | 15.4% | premise declarations. The ten heaviest are `check-windows-acceptance` 115.7, `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9, `check-no-api-keys` 42.9, `check-zcode-package-registry` 36.1, `check-capability-inventory-generated` 35.5, `check-outparam-init-before-return` 31.4 and `check-no-wallclock-assertion` 22.9 (591.9 s together) |
+| Lint gates with no premise declaration (all but the two above) | 987.7 | 15.4% | premise declarations. The ten heaviest are `check-windows-acceptance` 115.7, `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9, `check-no-api-keys` 42.9, `check-zcode-package-registry` 36.1, `check-capability-inventory-generated` 35.5, `check-outparam-init-before-return` 31.4 and `check-no-wallclock-assertion` 22.9 (591.9 s together) |
 | floor, `make_lint_gates` family | 311.3 | 4.9% | a premise for the lint-gate test umbrella. `realroot` and `heavy_02` alone are 151.5 s |
 | fallback, real-18 (`unmapped-code-change`) | 262.0 | 4.1% | an impact rule for `engine/services/src/replay_verify_service.c` (selector owner) |
 | direct test groups | 229.5 | 3.6% | none that is sound (see above) |
