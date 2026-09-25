@@ -1896,6 +1896,19 @@ static int test_bf_content_contracts(void)
         action.environment_sha3[0] ^= 1;
         ASSERT(vcs_build_action_v1_root(&action, action_b));
         ASSERT(memcmp(action_a, action_b, 32) != 0);
+        uint8_t *required_roots[] = {
+            action.source_sha256, action.source_cas_sha3,
+            action.input_root_sha3, action.toolchain_capsule_sha3,
+            action.flags_sha3, action.environment_sha3,
+        };
+        for (size_t i = 0; i < sizeof(required_roots) /
+                                   sizeof(required_roots[0]); i++) {
+            uint8_t saved[32];
+            memcpy(saved, required_roots[i], sizeof(saved));
+            memset(required_roots[i], 0, sizeof(saved));
+            ASSERT(!vcs_build_action_v1_root(&action, action_b));
+            memcpy(required_roots[i], saved, sizeof(saved));
+        }
         ASSERT_EQ(vcs_build_action_v1_work_kind(VCS_BUILD_ACTION_KIND_V1),
                   VCS_ZCODE_WORK_BUILD);
         ASSERT_EQ(vcs_build_action_v1_work_kind(

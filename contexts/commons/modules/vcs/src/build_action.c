@@ -598,6 +598,16 @@ bool vcs_toolchain_capsule_v1_root(
     return true;
 }
 
+static bool build_action_roots_present(const struct vcs_build_action_v1 *action)
+{
+    return build_root_present(action->source_sha256) &&
+           build_root_present(action->source_cas_sha3) &&
+           build_root_present(action->input_root_sha3) &&
+           build_root_present(action->toolchain_capsule_sha3) &&
+           build_root_present(action->flags_sha3) &&
+           build_root_present(action->environment_sha3);
+}
+
 bool vcs_build_action_v1_root_for_kind(
     const char *kind, const struct vcs_build_action_v1 *action,
     uint8_t out[32])
@@ -606,6 +616,7 @@ bool vcs_build_action_v1_root_for_kind(
     if (!action || !out ||
         !vcs_build_action_v1_descriptors(
             kind, &workdir, &output, &resource) ||
+        !build_action_roots_present(action) ||
         !build_text_valid(action->target, sizeof(action->target)) ||
         !build_text_valid(action->profile, sizeof(action->profile)) ||
         !build_text_valid(action->virtual_workdir,
