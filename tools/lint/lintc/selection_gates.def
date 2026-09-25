@@ -1,19 +1,33 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * purpose: the per-TU gates premise selection can describe, and the policy
+ * purpose: the per-TU and per-file gates premise selection can describe, and the policy
  * files that are part of every one of their premises.
  *
  * SELECTION_REMOTE(locator)   where the base's anchoring tip is read
  * SELECTION_POLICY(path)      selection engine and policy bytes; an edit to
  *                             any of them makes every unit of every gate fresh
- * SELECTION_GATE(name, units, gate_files, make_vars, baselines)
- *   units       how the gate enumerates its translation units
+ * SELECTION_GATE(name, units, filter, gate_files, make_vars, baselines)
+ *   units       how the gate enumerates its units: the TUs of a per-TU gate
+ *               (unit premise: include closure), or SELECTION_UNITS_FILES
+ *               for a per-file gate (unit premise: the file's own bytes), or
+ *               SELECTION_UNITS_TUS for filtered per-TU units (premise: the
+ *               include closure)
+ *   filter      SELECTION_UNITS_FILES and _TUS only: POSIX ERE over tree
+ *               paths, "" for every path. It must match a SUPERSET of what
+ *               the gate scans: a scanned file outside the unit set would
+ *               never be rerun.
  *   gate_files  space-separated: the gate script plus everything it sources
- *               or reads as code (helpers, force-included headers, defs)
+ *               or reads as code (helpers, force-included headers, defs);
+ *               "dir/" names every path under dir. The include closure of
+ *               each .c/.h is gate code too.
  *   make_vars   space-separated Makefile variables whose text the gate
- *               reads; referenced variables are followed automatically
+ *               reads; referenced variables are followed automatically.
+ *               Every word of that text naming a tree path is gate code, so
+ *               LINTC_SRCS brings in every source z23-lint is built from.
  *   baselines   space-separated baseline files; a unit's own rows are its
- *               premise, the rest of the file is not
+ *               premise, the rest of the file is not. A gate-wide baseline,
+ *               allowlist or ratchet whose rows are not keyed by unit goes
+ *               in gate_files, so every unit carries all of it.
  *
  * Toolchain identity is the in-tree pin tools/dev/toolchain.pin (absent
  * until the pin slice lands; absence is itself a hashed state).
@@ -31,16 +45,76 @@ SELECTION_POLICY("tools/lint/lintc/selection.c")
 SELECTION_POLICY("tools/lint/lintc/unit_exec.c")
 SELECTION_POLICY("tools/lint/lintc/selection_gates.def")
 
-SELECTION_GATE("check-windows-cross-syntax", SELECTION_UNITS_NODE_C23_WINDOWS,
+/* Every gate runs through the lint driver's invocation table (run_lint.sh,
+ * which sources lint_cache.sh) and its Makefile rule ("gate:" in make_vars).
+ * A gate run by z23-lint names the variables that build it; their words
+ * bring in every linked source and, through the closure, every header. */
+#define SELECTION_DRIVER "tools/lint/run_lint.sh tools/lint/lint_cache.sh"
+#define SELECTION_LINTC_VARS "LINTC_SRCS LINTC_NODE_SRCS LINTC_CFLAGS"
+
+SELECTION_GATE("check-windows-cross-syntax", SELECTION_UNITS_NODE_C23_WINDOWS, "",
     "tools/lint/check_windows_cross_syntax.sh tools/lint/gate_lib.sh "
-    "tools/lint/tu_result_cache.sh tests/harness/include/test/windows_compat.h",
-    "ZCL_WINDOWS_API_FLOOR ZCL_PLATFORM_CPPFLAGS",
+    "tools/lint/tu_result_cache.sh tests/harness/include/test/windows_compat.h "
+    SELECTION_DRIVER,
+    "check-windows-cross-syntax: ZCL_WINDOWS_API_FLOOR ZCL_PLATFORM_CPPFLAGS",
     "tools/lint/windows_cross_syntax_baseline.txt")
 
-SELECTION_GATE("check-clang-portability", SELECTION_UNITS_CLANG_ORACLE,
+SELECTION_GATE("check-clang-portability", SELECTION_UNITS_CLANG_ORACLE, "",
     "tools/lint/check_clang_portability.sh tools/lint/gate_lib.sh "
     "tools/lint/repo_shape.sh tools/lint/tu_result_cache.sh "
-    "engine/composition/lib_module_order.def",
-    "PRODUCT_CONTEXTS APP_DIRS CORE_CONTEXTS APPLICATION_CONTEXTS",
+    "engine/composition/lib_module_order.def " SELECTION_DRIVER,
+    "check-clang-portability: PRODUCT_CONTEXTS APP_DIRS CORE_CONTEXTS "
+    "APPLICATION_CONTEXTS",
     "tools/lint/portability_baseline.clang.txt "
     "tools/lint/portability_baseline.gcc.txt")
+
+/* Per-file: each tracked file's verdict is a regex scan of its own lines
+ * (gate_git_scan_a.c nak_scan_file). The skip list (vendor/, fuzz seeds,
+ * binary extensions, the gate script) is gate code, so the unit set is
+ * every path. The 1,000-file floor counts tracked paths: the path set.
+ * Residual: tracked files under a pruned directory (.claude/) are scanned
+ * by the gate but are in no premise, so a unit-selected run scans them
+ * fresh every time. */
+SELECTION_GATE("check-no-api-keys", SELECTION_UNITS_FILES, "",
+    "tools/lint/check_no_api_keys.sh " SELECTION_DRIVER,
+    "check-no-api-keys: " SELECTION_LINTC_VARS,
+    "")
+
+/* Per-TU: each seam file is compiled alone with mingw -fsyntax-only; its
+ * count is compared with its own baseline row. The gate reads the API floor,
+ * ZCL_PLATFORM_CPPFLAGS and the host-OS exemption guard straight out of the
+ * Makefile text, so the whole Makefile is gate code; the baseline goes in
+ * with it. Include roots and the file-count floor come from the path set. */
+SELECTION_GATE("check-windows-platform-seam", SELECTION_UNITS_TUS,
+    "^platform/modules/platform/src/[^/]+\\.c$",
+    "tools/lint/check_windows_platform_seam.sh tools/lint/gate_lib.sh "
+    "tools/lint/repo_shape.sh engine/composition/lib_module_order.def "
+    "Makefile tools/lint/windows_platform_seam_baseline.txt " SELECTION_DRIVER,
+    "check-windows-platform-seam:",
+    "")
+
+/* Per-file: each .c the prefilter names is comment-stripped and grepped
+ * for calls into the masked set, which the gate measures from the
+ * toolchain alone, so it is carried by the toolchain pin. The baseline is
+ * empty by design. Residual: tracked .c files under a pruned directory
+ * (vendor/raylib/) are grepped by the gate but are in no premise, so a
+ * unit-selected run scans them fresh every time. */
+SELECTION_GATE("check-fortify-masked-decls", SELECTION_UNITS_FILES, "\\.c$",
+    "tools/lint/check_fortify_masked_decls.sh tools/lint/strip_c_comments.awk "
+    SELECTION_DRIVER,
+    "check-fortify-masked-decls:",
+    "")
+
+/* Per-file: raw sqlite3_step lines, node.db sqlite3_exec DML, and wallet
+ * projection DML in controllers and services are each judged inside one
+ * file. The allowlist is whole-file keyed but read with comment and space
+ * stripping, so all of it is gate code. The only count that gates (context
+ * files >= 2) is over the path set. */
+SELECTION_GATE("check-raw-sqlite", SELECTION_UNITS_FILES,
+    "^(core|engine|contexts|cognition|platform|tools)/.*\\.[ch]$",
+    "tools/scripts/check_raw_sqlite.sh tools/scripts/raw_sqlite_allowlist.txt "
+    "tools/lint/scan_exclusions.sh tools/lint/gate_lib.sh "
+    "tools/lint/repo_shape.sh engine/composition/lib_module_order.def "
+    SELECTION_DRIVER,
+    "check-raw-sqlite:",
+    "")

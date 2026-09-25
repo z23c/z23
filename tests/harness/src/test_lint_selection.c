@@ -620,9 +620,133 @@ static int test_lsel_ux_compiler_premise(void)
     return failures;
 }
 
+/* A per-file gate run by a tool built from tree sources: tool.c's header
+ * chain, a source named only by a Makefile value, a "cfg/" prefix and the
+ * gate's own rule are gate code; each unit is its own bytes. */
+static const char *const k_tool_files[] = { "lint/tool.c", "cfg/" };
+static const char *const k_tool_vars[] = { "check-x:", "TOOL_SRCS" };
+static const struct premise_gate k_tool_gate = {
+    .name = "fixture-file-gate",
+    .gate_files = k_tool_files, .n_gate_files = 2,
+    .make_vars = k_tool_vars, .n_make_vars = 2,
+    .pin = "toolchain.pin", .unit_self = true,
+};
+
+static const char k_tool_makefile[] =
+    "TOOL_SRCS = lint/extra.c\n"
+    "check-x: tool\n"
+    "\t@./tool --scan\n"
+    "check-y:\n"
+    "\t@true\n";
+
+static bool lsel_tool_fixture(struct lsel_fx *fx)
+{
+    return lsel_fixture(fx) && lsel_write(fx, "Makefile", k_tool_makefile)
+           && lsel_write(fx, "lint/tool.c", "#include \"tool.h\"\n")
+           && lsel_write(fx, "lint/tool.h", "#include \"dep.h\"\n")
+           && lsel_write(fx, "lint/dep.h", "int dep;\n")
+           && lsel_write(fx, "lint/extra.c", "int extra;\n")
+           && lsel_write(fx, "cfg/policy.txt", "strict\n")
+           && lsel_commit_all(fx, "tool gate");
+}
+
+/* Write rel, evaluate the tool gate, and require a.c and b.c to carry the
+ * given reasons ("premise-equal" means the unit inherits). */
+static int lsel_tool_eval(struct lsel_fx *fx, const char *rel, const char *text,
+                          const char *want_a, const char *want_b)
+{
+    struct premise_base_opts opts = {
+        .objects = fx->repo, .remote = fx->repo, .ref = "refs/heads/main",
+        .base = fx->base, .scratch = fx->scratch,
+    };
+    struct premise_unit u[2] = { { .unit = "a.c" }, { .unit = "b.c" } };
+    struct premise_session s;
+    int rc = lsel_write(fx, rel, text) ? 0 : 2;
+    if (rc == 0)
+        rc = premise_session_open(&s, fx->repo, &opts, true, stderr);
+    if (rc == 0) {
+        rc = premise_gate_eval(&s, &k_tool_gate, u, 2, stderr);
+        premise_session_close(&s);
+    }
+    bool inherit_a = strcmp(want_a, "premise-equal") == 0;
+    bool inherit_b = strcmp(want_b, "premise-equal") == 0;
+    if (rc == 0 && (strcmp(u[0].reason, want_a) || strcmp(u[1].reason, want_b)
+                    || u[0].would_inherit != inherit_a
+                    || u[1].would_inherit != inherit_b))
+        rc = 1;
+    if (rc)
+        printf("after %s: want %s / %s, got %s / %s\n", rel, want_a, want_b,
+               u[0].reason, u[1].reason);
+    return rc;
+}
+
+static int lsel_tool_all(struct lsel_fx *fx, const char *rel, const char *text,
+                         const char *want)
+{
+    return lsel_tool_eval(fx, rel, text, want, want);
+}
+
+static const char k_tool_makefile_lax[] =
+    "TOOL_SRCS = lint/extra.c\ncheck-x: tool\n\t@./tool --scan --lax\n"
+    "check-y:\n\t@true\n";
+static const char k_tool_makefile_other[] =
+    "TOOL_SRCS = lint/extra.c\ncheck-x: tool\n\t@./tool --scan\n"
+    "check-y:\n\t@false\n";
+
+static int test_lsel_per_file_gate(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: a per-file unit is its own bytes; the tool's "
+              "header chain, Makefile-named sources, prefix files and rule "
+              "are gate code") {
+        struct lsel_fx fx;
+        const char *eq = "premise-equal";
+        ASSERT(lsel_tool_fixture(&fx));
+        /* A header two includes below a.c is no premise of a per-file unit;
+         * a.c's own bytes are. */
+        ASSERT_EQ(lsel_tool_all(&fx, "inc/y.h", "int y;\nint y2;\n", eq), 0);
+        ASSERT_EQ(lsel_tool_eval(&fx, "a.c", "#include \"x.h\"\nint a2;\n",
+                                 "closure-changed:a.c", eq), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "a.c", "#include \"x.h\"\nint a;\n", eq), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "lint/dep.h", "int dep2;\n",
+                                "gate-code:lint/dep.h"), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "lint/dep.h", "int dep;\n", eq), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "lint/extra.c", "int extra2;\n",
+                                "gate-code:lint/extra.c"), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "lint/extra.c", "int extra;\n", eq), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "cfg/policy.txt", "lax\n",
+                                "gate-code:cfg/policy.txt"), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "cfg/policy.txt", "strict\n", eq), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "Makefile", k_tool_makefile_lax,
+                                "make-value:check-x:"), 0);
+        ASSERT_EQ(lsel_tool_all(&fx, "Makefile", k_tool_makefile_other, eq), 0);
+        test_rm_rf_recursive(fx.dir);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_gate_code_computed(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: a computed include in gate code keeps every "
+              "unit fresh") {
+        struct lsel_fx fx;
+        const char *computed = "#define T \"dep.h\"\n#include T\n";
+        ASSERT(lsel_tool_fixture(&fx));
+        ASSERT(lsel_write(&fx, "lint/tool.h", computed));
+        ASSERT(lsel_commit_all(&fx, "computed include in gate code"));
+        ASSERT_EQ(lsel_tool_all(&fx, "lint/tool.h", computed,
+                                "gate-computed-include"), 0);
+        test_rm_rf_recursive(fx.dir);
+    } TEST_END
+    return failures;
+}
+
 int test_lint_selection(void)
 {
     int failures = 0;
+    failures += test_lsel_per_file_gate();
+    failures += test_lsel_gate_code_computed();
     failures += test_lsel_unchanged_inherits();
     failures += test_lsel_deep_header();
     failures += test_lsel_shadow_header();

@@ -33,11 +33,14 @@
 enum selection_units {
     SELECTION_UNITS_NODE_C23_WINDOWS,
     SELECTION_UNITS_CLANG_ORACLE,
+    SELECTION_UNITS_FILES,   /* per-file: filter paths, unit premise = own bytes */
+    SELECTION_UNITS_TUS,     /* per-TU: filter paths, unit premise = closure */
 };
 
 struct selection_gate_row {
     const char *name;
     enum selection_units units;
+    const char *filter;
     const char *gate_files;
     const char *make_vars;
     const char *baselines;
@@ -45,7 +48,7 @@ struct selection_gate_row {
 
 #define SELECTION_REMOTE(url) static const char k_remote[] = url;
 #define SELECTION_POLICY(path)
-#define SELECTION_GATE(n, u, f, m, b)
+#define SELECTION_GATE(n, u, r, f, m, b)
 #include "selection_gates.def"
 #undef SELECTION_REMOTE
 #undef SELECTION_POLICY
@@ -53,7 +56,7 @@ struct selection_gate_row {
 
 #define SELECTION_REMOTE(url)
 #define SELECTION_POLICY(path) path,
-#define SELECTION_GATE(n, u, f, m, b)
+#define SELECTION_GATE(n, u, r, f, m, b)
 static const char *const k_policy[] = {
 #include "selection_gates.def"
 };
@@ -61,7 +64,7 @@ static const char *const k_policy[] = {
 #undef SELECTION_GATE
 
 #define SELECTION_POLICY(path)
-#define SELECTION_GATE(n, u, f, m, b) { n, u, f, m, b },
+#define SELECTION_GATE(n, u, r, f, m, b) { n, u, r, f, m, b },
 static const struct selection_gate_row k_rows[] = {
 #include "selection_gates.def"
 };
@@ -172,6 +175,7 @@ static int spec_build(struct gate_spec *sp, const struct selection_gate_row *r)
         .n_make_vars = sp->vars.n,
         .baselines = (const char *const *)sp->baselines.v,
         .n_baselines = sp->baselines.n,
+        .unit_self = r->units == SELECTION_UNITS_FILES,
     };
     return rc;
 }
@@ -241,18 +245,23 @@ static int units_node_c23(const char *root, struct strv *out, FILE *err)
     return rc;
 }
 
-static int units_clang(const struct premise_tree *t, struct strv *out,
-                       FILE *err)
+/* Every candidate path the pattern matches; skip_fixtures drops paths with a
+ * "/_" component, as the clang oracle does. A per-file gate names a pattern
+ * that is a superset of what it scans: a scanned path outside the unit set
+ * would never be rerun. */
+static int units_regex(const struct premise_tree *t, const char *pattern,
+                       bool skip_fixtures, struct strv *out, FILE *err)
 {
     regex_t re;
-    if (regcomp(&re, k_clang_oracle, REG_EXTENDED | REG_NOSUB) != 0) {
-        fprintf(err, "select: clang oracle pattern does not compile\n");
+    if (regcomp(&re, pattern, REG_EXTENDED | REG_NOSUB) != 0) {
+        fprintf(err, "select: unit pattern does not compile: %s\n", pattern);
         return 2;
     }
     int rc = 0;
     for (size_t i = 0; rc == 0 && i < t->count; i++) {
         const char *path = t->entries[i].path;
-        if (!strstr(path, "/_") && regexec(&re, path, 0, NULL, 0) == 0)
+        if (!(skip_fixtures && strstr(path, "/_"))
+            && regexec(&re, path, 0, NULL, 0) == 0)
             rc = strv_add(out, path, strlen(path));
     }
     regfree(&re);
@@ -335,9 +344,14 @@ static int gate_units(const struct select_opts *o, struct premise_session *s,
                       const struct selection_gate_row *r, struct strv *units,
                       FILE *err)
 {
-    int rc = r->units == SELECTION_UNITS_NODE_C23_WINDOWS
-                 ? units_node_c23(o->root, units, err)
-                 : units_clang(&s->cand, units, err);
+    int rc = 0;
+    if (r->units == SELECTION_UNITS_NODE_C23_WINDOWS)
+        rc = units_node_c23(o->root, units, err);
+    else if (r->units == SELECTION_UNITS_CLANG_ORACLE)
+        rc = units_regex(&s->cand, k_clang_oracle, true, units, err);
+    else
+        rc = units_regex(&s->cand, r->filter[0] ? r->filter : ".", false,
+                         units, err);
     strv_sort_unique(units);
     return rc;
 }

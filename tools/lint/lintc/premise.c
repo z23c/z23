@@ -295,9 +295,20 @@ static void closure_free(struct closure *c)
     memset(c, 0, sizeof *c);
 }
 
-static int unit_closure(struct premise_session *s, const char *unit,
-                        struct closure *c, FILE *err)
+static int unit_closure(struct premise_session *s, const struct premise_gate *g,
+                        const char *unit, struct closure *c, FILE *err)
 {
+    if (g->unit_self) {
+        const struct premise_entry *e = premise_tree_find(&s->cand, unit);
+        if (!e)
+            return 1;
+        c->idx = malloc(sizeof *c->idx); // raw-alloc-ok:lint-runtime
+        if (!c->idx)
+            return 2;
+        c->idx[0] = (size_t)(e - s->cand.entries);
+        c->n = 1;
+        return 0;
+    }
     int rc = premise_include_closure(&s->cand, unit, &c->idx, &c->n, &c->ext,
                                      &c->next, &c->computed, err);
     if (rc == 0 && c->next > 1)
@@ -310,7 +321,7 @@ static int unit_eval(struct premise_session *s, const struct premise_gate *g,
                      FILE *err)
 {
     struct closure cl = { 0 };
-    int rc = unit_closure(s, u->unit, &cl, err);
+    int rc = unit_closure(s, g, u->unit, &cl, err);
     if (rc == 1) {
         snprintf(u->reason, sizeof u->reason, "unit-missing");
         return 0;
@@ -337,20 +348,185 @@ static int unit_eval(struct premise_session *s, const struct premise_gate *g,
     return rc;
 }
 
+/* ── gate code expansion ─────────────────────────────────────────────── */
+
+/* The gate code a unit's verdict can depend on, as candidate paths: each
+ * declared gate file ("dir/" = every path under dir), each path a word of
+ * the declared Makefile values names, and the include closure of every
+ * .c/.h among them. The base side hashes this same list; a path the base
+ * adds under a prefix or a closure also changes the path set. */
+struct code_list {
+    const char **v;
+    size_t n, cap;
+    bool computed;
+};
+
+static int code_push(struct code_list *cl, const char *path)
+{
+    if (cl->n == cl->cap) {
+        size_t cap = cl->cap ? cl->cap * 2 : 64;
+        const char **grown = realloc(cl->v, cap * sizeof *grown); // raw-alloc-ok:lint-runtime
+        if (!grown)
+            return 2;
+        cl->v = grown;
+        cl->cap = cap;
+    }
+    cl->v[cl->n++] = path;
+    return 0;
+}
+
+static int code_prefix(struct code_list *cl, const struct premise_tree *t,
+                       const char *prefix)
+{
+    size_t k = strlen(prefix);
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < t->count; i++)
+        if (strncmp(t->entries[i].path, prefix, k) == 0)
+            rc = code_push(cl, t->entries[i].path);
+    return rc;
+}
+
+static bool word_sep(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\\';
+}
+
+/* Push the tree path spelled by p[0..n), if there is one. */
+static int code_word(struct code_list *cl, const struct premise_tree *t,
+                     const char *p, size_t n)
+{
+    char word[PREMISE_PATH_MAX];
+    if (n == 0 || n >= sizeof word)
+        return 0;
+    memcpy(word, p, n);
+    word[n] = '\0';
+    const struct premise_entry *e = premise_tree_find(t, word);
+    return e ? code_push(cl, e->path) : 0;
+}
+
+/* Every whitespace- or backslash-separated word of text that is a path. */
+static int code_words(struct code_list *cl, const struct premise_tree *t,
+                      const char *text)
+{
+    int rc = 0;
+    for (const char *p = text; rc == 0 && p && *p;) {
+        while (*p && word_sep(*p))
+            p++;
+        const char *q = p;
+        while (*q && !word_sep(*q))
+            q++;
+        rc = code_word(cl, t, p, (size_t)(q - p));
+        p = q;
+    }
+    return rc;
+}
+
+static int code_make(struct code_list *cl, struct premise_tree *t,
+                     const struct premise_gate *g, FILE *err)
+{
+    if (g->n_make_vars == 0)
+        return 0;
+    uint8_t *mk = NULL;
+    size_t len = 0;
+    int rc = premise_tree_read(t, g->makefile ? g->makefile : "Makefile", &mk,
+                               &len, err);
+    if (rc == 2)
+        return 2;
+    struct premise_make_value *vals = NULL;
+    size_t nvals = 0;
+    rc = premise_make_values(mk, len, g->make_vars, g->n_make_vars, &vals,
+                             &nvals);
+    free(mk);
+    for (size_t i = 0; rc == 0 && i < nvals; i++)
+        rc = code_words(cl, t, vals[i].text);
+    premise_make_values_free(vals, nvals);
+    return rc;
+}
+
+static bool code_is_c(const char *path)
+{
+    size_t n = strlen(path);
+    return n > 2 && path[n - 2] == '.' && (path[n - 1] == 'c' || path[n - 1] == 'h');
+}
+
+static int code_closures(struct code_list *cl, struct premise_tree *t,
+                         FILE *err)
+{
+    size_t declared = cl->n;
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < declared; i++) {
+        if (!code_is_c(cl->v[i]) || !premise_tree_find(t, cl->v[i]))
+            continue;
+        size_t *idx = NULL, nidx = 0, next = 0;
+        char **ext = NULL;
+        bool computed = false;
+        rc = premise_include_closure(t, cl->v[i], &idx, &nidx, &ext, &next,
+                                     &computed, err);
+        cl->computed = cl->computed || computed;
+        for (size_t j = 0; rc == 0 && j < nidx; j++)
+            rc = code_push(cl, t->entries[idx[j]].path);
+        free(idx);
+        free(ext);
+    }
+    return rc;
+}
+
+static int cmp_cstr(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static int code_expand(struct premise_session *s, const struct premise_gate *g,
+                       struct code_list *cl, FILE *err)
+{
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < g->n_gate_files; i++) {
+        const char *f = g->gate_files[i];
+        size_t k = strlen(f);
+        rc = k > 0 && f[k - 1] == '/' ? code_prefix(cl, &s->cand, f)
+                                      : code_push(cl, f);
+    }
+    if (rc == 0)
+        rc = code_make(cl, &s->cand, g, err);
+    if (rc == 0)
+        rc = code_closures(cl, &s->cand, err);
+    if (rc || cl->n < 2)
+        return rc;
+    qsort(cl->v, cl->n, sizeof *cl->v, cmp_cstr);
+    size_t w = 1;
+    for (size_t i = 1; i < cl->n; i++)
+        if (strcmp(cl->v[i], cl->v[w - 1]) != 0)
+            cl->v[w++] = cl->v[i];
+    cl->n = w;
+    return 0;
+}
+
 int premise_gate_eval(struct premise_session *s, const struct premise_gate *g,
                       struct premise_unit *units, size_t n, FILE *err)
 {
+    struct code_list cl = { 0 };
+    int rc = code_expand(s, g, &cl, err);
+    struct premise_gate eg = *g;
+    eg.gate_files = cl.v;
+    eg.n_gate_files = cl.n;
     struct side c = { .t = &s->cand }, b = { .t = &s->base };
-    int rc = side_load(&c, g, err);
+    if (rc == 0)
+        rc = side_load(&c, &eg, err);
     if (rc == 0 && s->base_verified)
-        rc = side_load(&b, g, err);
+        rc = side_load(&b, &eg, err);
     for (size_t i = 0; rc == 0 && i < n; i++) {
         units[i].would_inherit = false;
         units[i].base_root_known = false;
-        rc = unit_eval(s, g, &c, &b, &units[i], err);
+        rc = unit_eval(s, &eg, &c, &b, &units[i], err);
+        if (rc == 0 && cl.computed) {
+            units[i].would_inherit = false;
+            snprintf(units[i].reason, sizeof units[i].reason,
+                     "gate-computed-include");
+        }
     }
     side_free(&c);
     side_free(&b);
+    free(cl.v);
     return rc;
 }
 
@@ -395,17 +571,21 @@ int premise_unit_grants(struct premise_session *s, const struct premise_gate *g,
                         const char *unit, FILE *out, FILE *err)
 {
     struct closure cl = { 0 };
-    int rc = unit_closure(s, unit, &cl, err);
-    if (rc == 0 && cl.computed)
+    struct code_list code = { 0 };
+    int rc = code_expand(s, g, &code, err);
+    if (rc == 0)
+        rc = unit_closure(s, g, unit, &cl, err);
+    if (rc == 0 && (cl.computed || code.computed))
         rc = 1;
     for (size_t i = 0; rc == 0 && i < cl.n; i++)
         rc = grant_line(out, &s->cand, s->cand.entries[cl.idx[i]].path);
-    for (size_t i = 0; rc == 0 && i < g->n_gate_files; i++)
-        rc = grant_line(out, &s->cand, g->gate_files[i]);
+    for (size_t i = 0; rc == 0 && i < code.n; i++)
+        rc = grant_line(out, &s->cand, code.v[i]);
     for (size_t i = 0; rc == 0 && i < g->n_baselines; i++)
         rc = grant_line(out, &s->cand, g->baselines[i]);
     if (rc == 0)
         rc = grant_line(out, &s->cand, g->pin ? g->pin : "tools/dev/toolchain.pin");
     closure_free(&cl);
+    free(code.v);
     return rc;
 }

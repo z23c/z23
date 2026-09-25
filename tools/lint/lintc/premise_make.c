@@ -6,7 +6,9 @@
  * conditional branch, define/endef blocks, override/export prefixes), then
  * every variable those definitions reference, to a fixpoint. Unexpanded
  * text is the value: a change anywhere in that text flips the premise, and
- * a Makefile edit elsewhere does not.
+ * a Makefile edit elsewhere does not. A name ending in ':' names a target:
+ * its rule headers and recipe lines are the value, so the command a gate
+ * runs is premise too.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -114,9 +116,63 @@ static const char *block_end(const char *p, const char *end)
     return end;
 }
 
+/* A rule header naming target: a column-0 logical line whose text before
+ * its first ':' holds target as a whole word, with no '=' before that ':'
+ * and no '=' right after it (an assignment is not a rule). */
+static bool blank(char c)
+{
+    return c == ' ' || c == '\t';
+}
+
+/* target appears in [p, colon) as a whole blank-separated word. */
+static bool header_names(const char *p, const char *colon, const char *target,
+                         size_t n)
+{
+    for (const char *w = p; w + n <= colon; w++)
+        if (memcmp(w, target, n) == 0 && (w == p || blank(w[-1]))
+            && (w + n == colon || blank(w[n])))
+            return true;
+    return false;
+}
+
+static bool rule_header(const char *p, const char *stop, const char *target,
+                        size_t n)
+{
+    if (p >= stop || *p == '\t' || *p == '#')
+        return false;
+    const char *colon = memchr(p, ':', (size_t)(stop - p));
+    if (!colon || memchr(p, '=', (size_t)(colon - p))
+        || (colon + 1 < stop && colon[1] == '='))
+        return false;
+    return header_names(p, colon, target, n);
+}
+
+/* "target:" — every rule header for target and the recipe lines under it.
+ * The gate's invocation is this text, so it is premise like a value. */
+static int collect_rule(const char *mk, size_t len, const char *name,
+                        struct mk_text *out)
+{
+    const char *p = mk, *end = mk + len;
+    size_t n = strlen(name) - 1;
+    int rc = 0;
+    while (rc == 0 && p < end) {
+        const char *stop = logical_end(p, end);
+        bool hit = rule_header(p, stop, name, n);
+        while (hit && stop + 1 < end && stop[1] == '\t')
+            stop = logical_end(stop + 1, end);
+        if (hit)
+            rc = text_add(out, p, (size_t)(stop - p));
+        p = stop < end ? stop + 1 : end;
+    }
+    return rc;
+}
+
 static int collect_var(const char *mk, size_t len, const char *name,
                        struct mk_text *out)
 {
+    size_t k = strlen(name);
+    if (k > 1 && name[k - 1] == ':')
+        return collect_rule(mk, len, name, out);
     const char *p = mk, *end = mk + len;
     int rc = 0;
     while (rc == 0 && p < end) {

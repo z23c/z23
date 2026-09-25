@@ -16,17 +16,26 @@
  * opaque locators handed to Git, never hashed by z23 code, and every root
  * below is SHA3-256 over file bytes with the ZVCS blob tag.
  *
- * Premise of one unit (a translation unit of a per-TU gate):
+ * Premise of one unit (a translation unit of a per-TU gate, or one file of
+ * a per-file gate):
  *   gate root    gate code bytes, the toolchain pin bytes, and the textual
  *                values of the Makefile variables the gate reads (plus every
- *                variable those values reference);
+ *                variable those values reference). Gate code is the declared
+ *                gate files, where "dir/" names every path under dir, plus
+ *                every path a word of those Makefile values names, plus the
+ *                include closure of each .c/.h among them — so a gate run by
+ *                a binary built from tree sources carries those sources and
+ *                their headers. A computed include there means no unit of
+ *                the gate inherits;
  *   path set     the sorted set of paths in the tree — it answers every
  *                "does this header exist" lookup, so an added shadowing
  *                header flips every unit;
  *   closure      the over-approximate textual include closure of the unit
  *                (every #include/#include_next/#embed, ignoring #if, each
  *                name resolved against EVERY tracked path it could name);
- *                a macro-computed include makes the unit never inheritable;
+ *                a macro-computed include makes the unit never inheritable.
+ *                A per-file gate (unit_self) reads only the unit's bytes, so
+ *                its closure is the unit alone;
  *   baseline     the unit's own rows in the gate's baseline files.
  */
 #ifndef Z23_LINT_PREMISE_H
@@ -89,6 +98,7 @@ struct premise_gate {
     size_t n_baselines;
     const char *makefile;  /* NULL: "Makefile" */
     const char *pin;       /* NULL: "tools/dev/toolchain.pin" */
+    bool unit_self;        /* the unit's closure is its own bytes only */
 };
 
 struct premise_unit {
