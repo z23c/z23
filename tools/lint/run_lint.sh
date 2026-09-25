@@ -88,6 +88,19 @@ BUDGET_SEC="${ZCL_LINT_BUDGET_SEC:-75}"
 SERIAL_PROLOGUE=" check-git-hooks-installed "
 SERIAL_EPILOGUE=" check-cookbook "
 
+# Parallel gates handed to the worker pool BEFORE every other gate, in this
+# order. Dispatch order changes no gate's command, input or verdict — every
+# requested gate still runs exactly once — it only decides which gate waits
+# for a free worker. The pool used to take gates in LINT_GATES order, which
+# put these compiler sweeps and link runs at positions 180-200 of ~210, so
+# the longest gate of the whole run started last and the run's wall was its
+# start offset PLUS its own duration. Longest-first is the classic fix for
+# that list-scheduling tail. Listed by measured cold cost, largest first;
+# see the lint timing table (ZCL_LINT_VERBOSE=1) before editing.
+LONG_POLE_FIRST="check-windows-cross-syntax check-standalone-tools-link
+    check-build-epoch-integrity check-clang-portability check-vcs-no-sha1
+    check-windows-acceptance check-outparam-init-before-return"
+
 # ── Gate invocation table ────────────────────────────────────────────────
 # One entry per check-* gate in the Makefile lint umbrella (LINT_GATES). The
 # command must reproduce the gate's Make recipe EXACTLY (script path, args,
@@ -512,9 +525,24 @@ main() {
     # raising their default here is already scoped to them without
     # touching how any other gate is dispatched: every other gate simply
     # never looks at this variable, at any value.
+    #
+    # Their width is half the processors this run may use, clamped to
+    # [6, 16] — the same half-the-host rule check-standalone-tools-link
+    # already uses for its nested make. Both sweeps are dispatched first
+    # (LONG_POLE_FIRST), so they overlap the short gates for the first few
+    # seconds and then run nearly alone. A fixed 6 left most of a 28-way
+    # grant idle for the second half of the run while
+    # check-windows-cross-syntax (2339 mingw TUs, ~490 CPU-seconds cold)
+    # set the lint wall.
+    local sweep_host sweep_jobs
+    sweep_host="${ZCL_HOST_JOBS:-$(nproc 2>/dev/null || echo 8)}"
+    [[ "$sweep_host" =~ ^[0-9]+$ ]] || sweep_host=8
+    sweep_jobs=$((sweep_host / 2))
+    [ "$sweep_jobs" -ge 6 ] || sweep_jobs=6
+    [ "$sweep_jobs" -le 16 ] || sweep_jobs=16
     case " ${gates[*]} " in
         *' check-clang-portability '*|*' check-windows-cross-syntax '*)
-            export ZCL_CC_JOBS="${ZCL_CC_JOBS:-6}" ;;
+            export ZCL_CC_JOBS="${ZCL_CC_JOBS:-$sweep_jobs}" ;;
         *) export ZCL_CC_JOBS="${ZCL_CC_JOBS:-1}" ;;
     esac
     export ZCL_TOOLS_LINK_JOBS="${ZCL_TOOLS_LINK_JOBS:-1}"
@@ -595,13 +623,34 @@ main() {
         esac
     done
 
+    # Long poles first (see LONG_POLE_FIRST), then the rest in list order.
+    local -a ordered_gates=()
+    local -A is_pole=()
+    local pole
+    for pole in $LONG_POLE_FIRST; do
+        is_pole["$pole"]=1
+        for g in "${par_gates[@]}"; do
+            [ "$g" = "$pole" ] && ordered_gates+=("$g")
+        done
+    done
+    for g in "${par_gates[@]}"; do
+        [ -n "${is_pole[$g]:-}" ] || ordered_gates+=("$g")
+    done
+    # Reordering, never selection: the pool gets exactly the gates it got
+    # before. Refuse to run a different set than was requested.
+    if [ "${#ordered_gates[@]}" -ne "${#par_gates[@]}" ]; then
+        echo "run_lint.sh: FATAL — long-pole ordering produced" \
+             "${#ordered_gates[@]} gates from ${#par_gates[@]}" >&2
+        exit 2
+    fi
+
     local run_start run_end wall_ms
     run_start="$(now_ms)"
     for g in "${serial_gates[@]}"; do
         worker "$g"
     done
-    if [ "${#par_gates[@]}" -gt 0 ]; then
-        printf '%s\n' "${par_gates[@]}" | \
+    if [ "${#ordered_gates[@]}" -gt 0 ]; then
+        printf '%s\n' "${ordered_gates[@]}" | \
             xargs -r -P "$JOBS" -n1 "$0" --worker
     fi
     for g in "${final_gates[@]}"; do
