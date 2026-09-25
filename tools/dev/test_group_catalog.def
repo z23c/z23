@@ -297,6 +297,7 @@ ZCL_TEST_GROUP(impact_composition)
  * signers.allow trust list, and the pre-push admission decision over both. */
 ZCL_TEST_GROUP(dev_proof_signer)
 ZCL_TEST_GROUP(proof_ticket_reuse)
+ZCL_TEST_GROUP(proof_ticket_measure)
 ZCL_TEST_GROUP(dev_activation)
 ZCL_TEST_GROUP(devagent_surface)
 ZCL_TEST_GROUP(dev_fleet)

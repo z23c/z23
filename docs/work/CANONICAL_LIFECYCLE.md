@@ -139,53 +139,107 @@ The registered `build_fabric` tests cover signed compile and package observation
 ineligible/forged failures, repeated successes and failure-only nonadmission.
 This does not complete cross-candidate unit reuse or Git publication convergence.
 
-Current implementation (per-unit tickets): `contexts/commons/modules/vcs/include/vcs/proof_ticket.h`
-defines the per-unit input key and TICKET wire, with the byte layouts in the
-header comment:
+Current implementation (per-unit tickets):
 
-- `zcl.component_proof_key.v1` is a 496-byte preimage of fifteen nonzero
-  32-byte roots in fixed order: kind, unit_id, source_closure,
-  dependency_closure, toolchain (the toolchain capsule root), target, flags,
-  environment (allowlisted names and values only), abi_generation,
-  build_graph, harness, fixtures, invariants, integration_edges and policy.
-  `input_key` is SHA3-256 over the domain and each length-prefixed field.
-  The preimage is itself a content.v2 blob, so a receiver can fetch it by
-  root, inspect each field and derive the key again.
-- `zcl.proof_ticket.v1` is a fixed 256-byte wire. It holds input_key,
-  key_preimage_root, verdict, a `reproduced` claim, checks run/passed,
-  evidence_root, cpu/wall/bytes cost, created_unix, the producer key and an
-  Ed25519 signature over domain `zcl.proof_ticket.v1` plus bytes [0,192).
-  `observation_root` is SHA3-256 of domain `zcl.proof_ticket_root.v1` plus
-  all 256 bytes. Decoding refuses a wrong length, an unknown schema, nonzero
-  reserved bytes and non-canonical counts.
-- The index maps each key to the set of its observation roots. It only
-  appends and never deduplicates by key. It can be rebuilt from the ticket
-  blobs in a package store.
-- `vcs_proof_reuse_decide` derives the key from the receiver's own preimage.
-  A ticket is ineligible, and kept with a named reason, when:
-  - `key_mismatch`: its key differs from the receiver's key;
-  - `key_preimage_mismatch`: its preimage root differs;
-  - `signer_in_candidate_domain`: the signer is the candidate author, the
-    same-uid local proof signer or another key in the candidate domain
-    (this check runs before the verifier set);
-  - `signer_not_trusted_for_reuse`: the signer is not in the verifier set;
-  - `not_reproduced`: the signer did not claim to rerun the checks itself;
-  - `ticket_stale` or `ticket_from_future`: it fails the freshness check;
-  - `signature_invalid`: its signature does not verify.
+- `contexts/commons/modules/vcs/include/vcs/proof_ticket.h`: the codecs and
+  their byte layouts.
+- `contexts/commons/modules/vcs/include/vcs/proof_reuse.h`: issuer logs,
+  receiver sync and the reuse decision.
+
+Four identities are kept separate. None stands in for another:
+
+| Identity | Definition |
+|---|---|
+| source identity | the preimage's `source_closure` root |
+| action key | `input_key` of `zcl.component_proof_key.v1` |
+| artifact identity | `artifact_root`, SHA3-256 of the output bytes |
+| observation root | SHA3-256 of the complete signed ticket |
+
+- `zcl.component_proof_key.v1` is a 624-byte preimage of nineteen nonzero
+  roots in fixed order: kind, unit_id, source_closure, dependency_closure,
+  negative_lookups, generated_inputs, toolchain, linker, sysroot, target,
+  flags, environment, abi_generation, build_graph, harness, fixtures,
+  invariants, integration_edges and policy.
+  - negative_lookups: include and namespace probes that did not exist, in
+    search order.
+  - generated_inputs: generated inputs, each with the action key of the
+    action that produced it.
+  - flags: the argv in its original order.
+  - environment: allowlisted names and their values.
+  - integration_edges: the sorted set of (callee, callee `contract_root`)
+    pairs. `contract_root` covers a component's exported interface: its
+    normalized public-header tokens, its exported symbol and ABI signature
+    set, and its declared premise ids. It never covers implementation bytes.
+    An obligation that executes callee bytes also binds the callee's
+    implementation in dependency_closure.
+
+  The preimage is a content.v2 blob, so a receiver can fetch it and derive
+  the key again.
+- `zcl.proof_ticket.v1` is a fixed 360-byte wire. It carries:
+  - verdict;
+  - `basis`: EXECUTED, or REUSED together with the observation root it
+    reused;
+  - `action_class`: BUILD or CHECK;
+  - input_key, key_preimage_root, source_root, artifact_root and
+    evidence_root;
+  - checks run and passed, and cpu, wall and byte costs;
+  - created_unix and issuer_seq;
+  - the producer key and an Ed25519 signature under domain
+    `zcl.proof_ticket.v1`.
+- Each issuer appends its own tickets to a Merkle Mountain Range
+  (`chain/mmr.h`); the leaf is the observation root. A 224-byte
+  `zcl.proof_checkpoint.v1` signs leaf_count, the MMR root, a peaks root and
+  the previous checkpoint root. A receiver sync takes a checkpoint plus only
+  the tickets after the receiver's verified prefix. It accepts them only
+  when that delta reproduces the signed root and peaks. A covered ticket is
+  authenticated by its issuer's checkpoint signature, so the decision
+  itself runs no Ed25519.
+- The issuer is marked equivocating, and every signed checkpoint involved is
+  retained, when any of these holds:
+  - two signed checkpoints have the same leaf_count and different roots;
+  - a checkpoint names a predecessor that already has another child;
+  - issuer-signed delta tickets at their positions fail to reproduce a
+    signed root.
+
+  A delta that fails to reproduce the root and contains a ticket without a
+  valid signature is refused as `delta_invalid`. It marks nothing.
+- `vcs_proof_reuse_decide` derives the key from the receiver's own
+  preimage. It reads the verifier set, revocations, candidate domain and
+  policy root from the current request on every decision; ingest never
+  caches authority. A ticket is ineligible, and kept with its reason, for
+  any of these:
+
+  | Reason | Condition |
+  |---|---|
+  | `key_preimage_mismatch` | the preimage root differs |
+  | `source_mismatch` | the source identity differs |
+  | `action_class_mismatch` | the action class differs |
+  | `signer_in_candidate_domain` | the candidate author, the same-uid local proof signer or another domain key signed it (checked before the verifier set) |
+  | `signer_revoked` | the signer is revoked |
+  | `signer_not_trusted_for_reuse` | the signer is not in the verifier set |
+  | `reused_not_independent` | basis is REUSED; it never counts toward quorum |
+  | `ticket_stale` or `ticket_from_future` | it fails the freshness check |
+  | `issuer_equivocation` | the issuer is marked equivocating |
+  | `not_checkpointed` | no verified checkpoint covers it |
 
   Outcomes:
-  - REFUSE `proof_observation_conflict`: an eligible PASS and an eligible
-    FAIL exist for the same key. The build fabric evaluator uses the same
-    token.
+  - REFUSE `proof_observation_conflict`, the build fabric's token, when:
+    - an eligible PASS and an eligible FAIL exist for the same key; or
+    - eligible BUILD passes name different artifacts.
   - HIT_FAIL: at least one eligible FAIL and no eligible PASS.
-  - HIT: eligible PASS tickets from at least `quorum` distinct signers.
-  - MISS: anything else.
-  - REFUSE: the receiver's preimage policy root differs from its policy.
+  - HIT: at least `quorum` distinct EXECUTED signers passed. For a BUILD
+    action, the receiver first fetches the artifact by `artifact_root` and
+    hashes it:
+    - a mismatch is MISS `artifact_bytes_mismatch`, and the decision sets
+      `false_hit_refused`;
+    - a missing artifact is MISS `artifact_unavailable`.
 
-The registered `proof_ticket_reuse` group covers these rules. It changes one
-byte in each key field and checks every refusal. Its deterministic
-measurement runs 6 candidates × 3 verifier identities × 200 units and prints
-one `proof_ticket_reuse_measure` line; it must report zero false hits.
+The registered `proof_ticket_reuse` group covers the refusals above. It
+changes one byte in each of the nineteen key fields and also swaps two flags.
+`proof_ticket_measure` runs a deterministic simulation: 6 candidates, 3
+issuers and 200 obligations per candidate. It prints one
+`proof_ticket_reuse_measure` line and requires zero false hits and more than
+95% reuse of unchanged obligations.
 Runners do not emit tickets yet, and no separate-uid verifier signs them.
 
 Keep existing `source_root`, `changed_set_root`, `compiler_root`, `flags_root`,
