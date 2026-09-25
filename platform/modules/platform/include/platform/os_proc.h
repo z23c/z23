@@ -250,6 +250,12 @@ bool os_proc_open_fd_count(size_t *out);
  * refuse exec. Windows returns unavailable (its launchers use handle lists). */
 bool os_proc_close_inherited_fds(void);
 
+/* The same complete post-fork descriptor scrub, retaining one open report
+ * pipe descriptor above stderr. Invalid or closed keep_fd fails before any
+ * descriptor is closed. Use only in a freshly forked, single-threaded child;
+ * Windows reports unavailable. */
+bool os_proc_close_inherited_fds_except(int keep_fd);
+
 /* ── Per-THREAD kernel work counters ─────────────────────────────────────
  *
  * The counters a liveness check needs in order to tell a thread that is

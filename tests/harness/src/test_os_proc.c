@@ -24,6 +24,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #define OSPROC_CHECK(name, expr) do { \
     printf("os_proc: %s... ", (name)); \
@@ -130,6 +137,72 @@ static int os_proc_cgroup_stat_fixture_checks(void)
     return failures;
 }
 
+/* A descriptor above the child's lowered limit is still inherited. The
+ * report pipe must survive the scrub while that unrelated descriptor dies. */
+#if !defined(_WIN32)
+static void os_proc_close_if_open(int fd)
+{
+    if (fd >= 0) (void)close(fd);
+}
+
+static void os_proc_preserved_report_child(int report[2], int high)
+{
+    (void)close(report[0]);
+    struct rlimit limit;
+    bool bounded = getrlimit(RLIMIT_NOFILE, &limit) == 0;
+    if (bounded && limit.rlim_cur > 64) {
+        limit.rlim_cur = 64;
+        bounded = setrlimit(RLIMIT_NOFILE, &limit) == 0;
+    }
+    bool scrubbed = bounded &&
+        os_proc_close_inherited_fds_except(report[1]);
+    bool high_closed = fcntl(high, F_GETFD) == -1 && errno == EBADF;
+    bool report_open = fcntl(report[1], F_GETFD) >= 0;
+    char result = scrubbed && high_closed && report_open ? 'Y' : 'N';
+    (void)write(report[1], &result, 1);
+    _exit(result == 'Y' ? 0 : 1);
+}
+
+static int os_proc_preserved_report_parent(int report[2], int secret[2],
+                                            int high, pid_t child)
+{
+    int failures = 0;
+    os_proc_close_if_open(report[1]);
+    os_proc_close_if_open(secret[0]);
+    os_proc_close_if_open(secret[1]);
+    os_proc_close_if_open(high);
+    char result = 0;
+    ssize_t got = report[0] >= 0 ? read(report[0], &result, 1) : -1;
+    os_proc_close_if_open(report[0]);
+    int status = 0;
+    pid_t waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    OSPROC_CHECK("scrub preserves report and closes inherited high FD",
+                 child > 0 && waited == child && got == 1 && result == 'Y' &&
+                 WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    return failures;
+}
+#endif
+
+static int os_proc_preserved_report_fd_checks(void)
+{
+#if defined(_WIN32)
+    return 0;
+#else
+    int failures = 0;
+    int report[2] = {-1, -1}, secret[2] = {-1, -1};
+    int high = -1;
+    pid_t child = -1;
+    bool ready = pipe(report) == 0 && pipe(secret) == 0;
+    if (ready) high = fcntl(secret[0], F_DUPFD, 200);
+    if (ready && high >= 0) child = fork();
+    if (child == 0) os_proc_preserved_report_child(report, high);
+    failures += os_proc_preserved_report_parent(report, secret, high, child);
+    OSPROC_CHECK("invalid report FD refuses before closing anything",
+                 !os_proc_close_inherited_fds_except(-1) && errno == EINVAL);
+    return failures;
+#endif
+}
+
 int test_os_proc(void);
 int test_os_proc(void)
 {
@@ -137,6 +210,7 @@ int test_os_proc(void)
     int failures = 0;
 
     failures += os_proc_cgroup_stat_fixture_checks();
+    failures += os_proc_preserved_report_fd_checks();
 
     OSPROC_CHECK("native Linux release classification",
                  os_proc_environment_classify_kernel_release(

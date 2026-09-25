@@ -30,6 +30,7 @@
 #else
 #include <signal.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #endif
@@ -631,6 +632,59 @@ bool os_proc_close_inherited_fds(void)
         if (fd > STDERR_FILENO && fd != own && close(fd) != 0 &&
             errno != EBADF)
             ok = false;
+    }
+    int saved = errno;
+    if (closedir(directory) != 0)
+        return false; // raw-return-ok:caller-logs-context
+    if (!ok) errno = saved;
+    return ok;
+#endif
+}
+
+#if !defined(_WIN32)
+static bool os_proc_close_fd_except_entry(const struct dirent *entry,
+                                          int own, int keep_fd)
+{
+    if (entry->d_name[0] == '.') return true;
+    char *end = NULL;
+    errno = 0;
+    long number = strtol(entry->d_name, &end, 10);
+    if (errno || !end || *end || number < 0 || number > INT_MAX) {
+        errno = EINVAL;
+        return false;
+    }
+    int fd = (int)number;
+    if (fd <= STDERR_FILENO || fd == own || fd == keep_fd) return true;
+    return close(fd) == 0 || errno == EBADF;
+}
+#endif
+
+bool os_proc_close_inherited_fds_except(int keep_fd)
+{
+#if defined(_WIN32)
+    (void)keep_fd;
+    errno = ENOSYS;
+    return false; // raw-return-ok:caller-logs-context
+#else
+    if (keep_fd <= STDERR_FILENO) {
+        errno = EINVAL;
+        return false; // raw-return-ok:caller-logs-context
+    }
+    struct stat kept;
+    if (fstat(keep_fd, &kept) < 0)
+        return false; // raw-return-ok:caller-logs-context
+    DIR *directory = opendir("/dev/fd");
+    if (!directory) return false; // raw-return-ok:caller-logs-context
+    int own = dirfd(directory);
+    bool ok = own >= 0;
+    while (ok) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) {
+            ok = errno == 0;
+            break;
+        }
+        ok = os_proc_close_fd_except_entry(entry, own, keep_fd);
     }
     int saved = errno;
     if (closedir(directory) != 0)

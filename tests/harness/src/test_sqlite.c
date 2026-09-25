@@ -34,6 +34,7 @@
 #include <time.h>
 #include <unistd.h>
 
+static int64_t sqlite_test_expected_cache_kib(void);
 /* Read a single-value PRAGMA off an open connection. Returns -1 when the
  * statement does not produce a row, so a missing setting can never be
  * mistaken for a setting of zero — which for wal_autocheckpoint is exactly
@@ -2578,7 +2579,6 @@ static void check_sqlite_46_sqlite_pragma_tuning_cache_size_and_mmap(int *failur
     printf("SQLite PRAGMA tuning: cache_size and mmap_size locked... ");
     struct node_db ndb;
     bool ok = node_db_open(&ndb, ":memory:");
-
     sqlite3_stmt *s = NULL;
     int64_t cache_pages = 0;
     int64_t mmap_bytes = 0;
@@ -2600,8 +2600,8 @@ static void check_sqlite_46_sqlite_pragma_tuning_cache_size_and_mmap(int *failur
     }
 
     /* Negative cache_size in SQLite = "abs(N) KiB". */
-    int64_t expected_cache_kib = hw_profile_sqlite_cache_kib(
-        hw_profile_ram_bytes(), 16 * 1024, 64 * 1024);
+    int64_t expected_cache_kib =
+        sqlite_test_expected_cache_kib();
     ok = ok && (cache_pages == -expected_cache_kib);
     /* mmap may be silently clamped to 0 on a :memory: database
      * depending on the SQLite build, so accept either the derived
@@ -3662,4 +3662,21 @@ int test_sqlite(void) {
     failures += check_sqlite_projection_writer_reservation();
 
     return failures;
+}
+
+static int64_t sqlite_test_expected_cache_kib(void)
+{
+    int64_t effective_ram = hw_profile_ram_bytes();
+    struct os_proc_mem mem;
+    if (os_proc_mem_read(&mem)) {
+        int64_t cap = mem.cgroup_high > 0 ? mem.cgroup_high : mem.cgroup_max;
+        if (cap > 0 && (effective_ram <= 0 || cap < effective_ram))
+            effective_ram = cap;
+    }
+    /* The proof scheduler can impose a smaller cgroup than host RAM.
+     * The live DB's 16 MiB ceiling is mandatory at or below 4 GiB. */
+    int64_t ceiling_kib = effective_ram > 0 &&
+        effective_ram <= 4LL * 1024 * 1024 * 1024 ? 16 * 1024 : 64 * 1024;
+    return hw_profile_sqlite_cache_kib(effective_ram, 16 * 1024,
+                                        ceiling_kib);
 }
