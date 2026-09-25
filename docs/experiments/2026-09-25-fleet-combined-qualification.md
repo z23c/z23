@@ -106,3 +106,33 @@ scan pass (log SHA-256
 `934e15508c791334f4a6c1a830c83fb7dec60c59fa65d43983733b85c56ba322`).
 No baseline row or gate threshold changed. A new combined test and full lint
 verdict are required for this source revision.
+
+## Refreshed combined source
+
+Fresh `origin/main` advanced to
+`42fa6e2bcd5e13f006c4aebab22eb656275221a6`. The integration reviewed
+and merged its signed hotswap commits, then regenerated the one capability
+inventory. The combined MMR source SHA-256 after replacing the private codec
+is `d7ce86c0ef600cc5180cd10ce9d22999422756cd28b6d6cffc68c2d9e73196fb`.
+The merged local tip before this note is
+`27ce73649d15db8d388fda63f08e2db5f5cc6824`.
+
+| Gate on merged source | Result | Log SHA-256 |
+| --- | --- | --- |
+| `make CC=gcc -j8 t-fast ONLY=zcode_dev_objects` | 1/1, zero skips, 23 s wall | `b0824b9ec66d90d9a6b7d69d1376bc8a6feb84334d4344e2ee9bf7af200f0228` |
+| `make CC=gcc -j8 t-fast ONLY=dev_proof_signer` | 1/1, zero skips, 5 s wall | `6fa6d547ee69171984cb0bf0e89332ee31b5363701807a1013913cd0e23d73a0` |
+| `make CC=gcc -j8 t-fast ONLY=zcode_swarm` | 4/4, zero skips, 78 s wall | `a6f3ab1dbfde03f2cbd97708b5dc94a2ec3c9fd25cede7e232e4fabac44c6c92` |
+| Capability closure, byte codec, inventory, architecture, flag registry | pass | `2d3a073979edc9de2fcfa47d0366e042054edc24f9cabe60436f77446e924d9c` |
+| `make CC=gcc -j8 lint-fast` | 33/33 | `46ec45449512f04ae63ff616f5679a5adcd684afca43c198ef63ba3936da5ec1` |
+
+The prior exact proof measured 464.422 s for 101 impacted test groups, 76
+cacheable but zero hits, and 336.725 s for prerequisite inputs and build.
+Full lint ran concurrently and failed; its terminal dimension time was not
+sealed, so these components do not sum to action wall time. The single
+highest-leverage proposed fix is policy-bound exact
+group reuse: the producer must bind the selected harness, source and
+dependency closure, compiler/flags, sandbox policy, generation and signed
+observation; the receiver then checks independent trust and all missing
+artifacts before skipping an eligible group. Current receiver lookup and MMR
+are components, not that completed reuse path. The number of groups or
+seconds such a fix would save remains unmeasured.
