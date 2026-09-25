@@ -447,6 +447,12 @@ static void service_report_to_reply(
     json_push_kv_int(&reply->data, "generation",
                      (int64_t)report->generation);
     json_push_kv_str(&reply->data, "service_id", report->service_id);
+    if (report->loaded_image_sha256[0])
+        json_push_kv_str(&reply->data, "loaded_image_sha256",
+                         report->loaded_image_sha256);
+    if (report->loaded_image_sha3_256[0])
+        json_push_kv_str(&reply->data, "loaded_image_sha3_256",
+                         report->loaded_image_sha3_256);
     json_push_kv_str(&reply->data, "stage", report->stage);
     if (report->error[0])
         json_push_kv_str(&reply->data, "error", report->error);

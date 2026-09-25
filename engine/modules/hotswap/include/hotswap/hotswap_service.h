@@ -81,6 +81,9 @@ struct zcl_hotswap_service_report {
     int64_t load_us;
     int64_t execute_us;
     char service_id[96];
+    /* Digest of the immutable image handed to dlopen, when one was mapped. */
+    char loaded_image_sha256[65];
+    char loaded_image_sha3_256[65];
     char stage[32];
     char error[256];
 };

@@ -5,19 +5,29 @@
 
 #include "hotswap/hotswap.h"
 #include "hotswap/hotswap_module.h"
+#include "hotswap/hotswap_artifact_digest.h"
+#include "hotswap/hotswap_elf_probe.h"
+#include "hotswap/hotswap_sealed_image.h"
 
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/fd_path.h"
 #include "platform/time_compat.h"
+#include "base/hex.h"
+#include "crypto/sha256.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
 #if ZCL_HOTSWAP_NATIVE_AVAILABLE
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 #endif
 
 struct service_slot {
@@ -395,6 +405,98 @@ static pthread_mutex_t g_handle_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct service_handle_slot g_handles[ZCL_HOTSWAP_SERVICE_MAX];
 static size_t g_handle_count;
 
+static bool service_image_sha256(int fd, char digest_hex[65])
+{
+    if (lseek(fd, 0, SEEK_SET) < 0) return false;
+    struct sha256_ctx ctx;
+    sha256_init(&ctx);
+    unsigned char bytes[64 * 1024];
+    for (;;) {
+        ssize_t count = read(fd, bytes, sizeof(bytes));
+        if (count > 0) { sha256_write(&ctx, bytes, (size_t)count); continue; }
+        if (count == 0) break;
+        if (errno != EINTR) return false;
+    }
+    if (lseek(fd, 0, SEEK_SET) < 0) return false;
+    unsigned char digest[SHA256_OUTPUT_SIZE];
+    sha256_finalize(&ctx, digest);
+    zcl_hex_encode(digest, sizeof(digest), digest_hex);
+    return true;
+}
+
+static bool service_image_shape_ok(int fd, char *why, size_t why_sz)
+{
+    struct hotswap_elf_facts facts;
+    if (!hotswap_elf_probe_fd(fd, &facts, why, why_sz)) return false;
+    if (facts.has_dt_init || facts.init_array_entries ||
+        facts.preinit_array_entries || facts.ifunc_symbol_count ||
+        facts.has_irelative_relocation) {
+        copy_text(why, why_sz, "service image has pre-load executable code");
+        return false;
+    }
+    if (facts.has_runpath || facts.needed_truncated) {
+        copy_text(why, why_sz, "service image has unbounded dependencies");
+        return false;
+    }
+    for (size_t i = 0; i < facts.needed_count; i++)
+        if (strcmp(facts.needed[i], "libc.so.6") != 0 &&
+            strcmp(facts.needed[i], "libm.so.6") != 0) {
+            copy_text(why, why_sz, "service image has an unapproved dependency");
+            return false;
+        }
+    return true;
+}
+
+static int service_sealed_image(const char *path, char sha256[65],
+                                char sha3[65],
+                                char *why, size_t why_sz)
+{
+    int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (source < 0 || fstat(source, &st) != 0 || !S_ISREG(st.st_mode)) {
+        if (source >= 0) (void)close(source);
+        copy_text(why, why_sz, "cannot pin a regular service artifact");
+        return -1;
+    }
+    int image = hotswap_sealed_image_from_fd(source, why, why_sz);
+    (void)close(source);
+    if (image < 0) return -1;
+    if (!service_image_shape_ok(image, why, why_sz) ||
+        !service_image_sha256(image, sha256) ||
+        !hotswap_artifact_sha3_fd(image, sha3)) {
+        if (!why[0]) copy_text(why, why_sz, "cannot hash sealed service image");
+        (void)close(image);
+        return -1;
+    }
+    return image;
+}
+
+static void *service_open_image(const char *path, char sha256[65],
+                                char sha3[65],
+                                int64_t *load_us,
+                                struct zcl_hotswap_service_report *report)
+{
+    char why[256] = {0};
+    int image = service_sealed_image(path, sha256, sha3, why, sizeof(why));
+    if (image < 0) {
+        (void)reject(report, "image", false, why);
+        return NULL;
+    }
+    char pinned[64];
+    if (!platform_fd_path(pinned, sizeof(pinned), image, NULL)) {
+        (void)close(image);
+        (void)reject(report, "image", false,
+                     "cannot name sealed service image");
+        return NULL;
+    }
+    int64_t started = platform_time_monotonic_us();
+    void *handle = dlopen(pinned, RTLD_NOW | RTLD_LOCAL);
+    *load_us = platform_time_monotonic_us() - started;
+    (void)close(image);
+    if (!handle) (void)reject(report, "dlopen", false, dlerror());
+    return handle;
+}
+
 static void service_close_after_quiesce(void *handle)
 {
     if (!handle) return;
@@ -426,15 +528,18 @@ bool zcl_hotswap_service_activate_so_any(
     if (request_activate &&
         !hotswap_activation_authorized(resolved_datadir, why, sizeof(why)))
         return reject(report, "authorize", false, why);
-    int64_t load_started = platform_time_monotonic_us();
-    void *handle = dlopen(so_path, RTLD_NOW | RTLD_LOCAL);
-    if (!handle)
-        return reject(report, "dlopen", false, dlerror());
+    int64_t load_us = 0;
+    char sha256[65] = {0}, sha3[65] = {0};
+    void *handle = service_open_image(so_path, sha256, sha3, &load_us, report);
+    if (!handle) return false;
+    copy_text(report->loaded_image_sha256,
+              sizeof(report->loaded_image_sha256), sha256);
+    copy_text(report->loaded_image_sha3_256,
+              sizeof(report->loaded_image_sha3_256), sha3);
     dlerror();
     const struct zcl_hotswap_service_candidate *candidate =
         dlsym(handle, ZCL_HOTSWAP_SERVICE_SYMBOL);
     const char *sym_error = dlerror();
-    int64_t load_us = platform_time_monotonic_us() - load_started;
     if (sym_error || !candidate) {
         (void)dlclose(handle);
         return reject(report, "symbol", false,
@@ -456,8 +561,13 @@ bool zcl_hotswap_service_activate_so_any(
         return reject(report, "service", true,
                       "service id has no resident frozen contract; select DEV_RESTART");
     }
-    if (!zcl_hotswap_service_publish(contract, candidate, request_activate,
-                                     report)) {
+    bool published = zcl_hotswap_service_publish(
+        contract, candidate, request_activate, report);
+    copy_text(report->loaded_image_sha256,
+              sizeof(report->loaded_image_sha256), sha256);
+    copy_text(report->loaded_image_sha3_256,
+              sizeof(report->loaded_image_sha3_256), sha3);
+    if (!published) {
         report->load_us = load_us;
         report->recognized = true;
         (void)dlclose(handle);

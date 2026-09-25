@@ -749,7 +749,7 @@ ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_elf_probe.c", CAP_FS_W
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_loader.c", CAP_FS_READ|CAP_DYNLOAD, "loads a dev-only hot-swap generation's shared object with dlopen() after reading it from the module directory")
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_macho_probe.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_sealed_image.c", CAP_FS_WRITE|CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_service.c", CAP_DYNLOAD|CAP_FS_WRITE|CAP_CLOCK, "publishes the pure service vtable a hot-swap module exposes after it has been dlopen()'d")
+ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_service.c", CAP_DYNLOAD|CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "pins, seals, hashes, and loads a service image before publishing its pure vtable")
 ZCL_MODULE_CAPABILITY("platform/modules/json/src/json.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/kernel/src/command_registry.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/kernel/src/service_kernel.c", CAP_FS_WRITE, "")
