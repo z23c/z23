@@ -3070,11 +3070,12 @@ CHAOS_SIM_SRCS = tools/sim/sim_peer.c
 # group proves, and linking the CLI's entry point would collide with the
 # harness's own.
 TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
-# The premise-selection core (no main) is proven by the lint_selection group.
-# It drives POSIX Git subprocesses, so Windows hosts leave it out.
+# The premise-selection core and the unit-exec runner (no main) are proven by
+# the lint_selection group.
+# They drive POSIX Git and fork/exec, so Windows hosts leave them out.
 LINTC_PREMISE_CORE_SRCS = tools/lint/lintc/premise.c tools/lint/lintc/premise_tree.c \
 	tools/lint/lintc/premise_git.c tools/lint/lintc/premise_include.c \
-	tools/lint/lintc/premise_make.c
+	tools/lint/lintc/premise_make.c tools/lint/lintc/unit_exec.c
 TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS))
 
 # test.c and test_parallel.c each own their own main() — never both in
@@ -5684,14 +5685,20 @@ EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 LINTC_TOOL = $(BIN_DIR)/z23-lint
 LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     -D_POSIX_C_SOURCE=200809L -Iplatform/modules/base/include \
-    -Iplatform/modules/sha3/include \
+    -Iplatform/modules/sha3/include -Iplatform/modules/platform/include \
+    -Iplatform/modules/util/include \
     $(ZCL_PLATFORM_CPPFLAGS) $(REPRO_CFLAGS)
 # Base-relative premise selection (tools/lint/lintc/premise.h): the premise
-# core and its `select --dry` / `premise` subcommands. Information only.
+# core, its `select --dry` / `premise` subcommands, and `unit-exec`, the
+# Landlocked runner that holds a unit to its declared premise.
 LINTC_PREMISE_SRCS = $(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/selection.c
 # Repository sources z23-lint links as-is (compiled with LINTC_CFLAGS into
-# build/lintc-obj/node/): SHA3-256 for premise roots.
-LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c
+# build/lintc-obj/node/): SHA3-256 for premise roots, and the os_sandbox
+# confinement builders (Landlock + seccomp on Linux; the refusing stub
+# elsewhere) that unit-exec enters.
+LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c $(ZCL_TOOL_SANDBOX_SRC) \
+    platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
+    platform/modules/base/src/safe_alloc.c
 LINTC_NODE_OBJS = $(LINTC_NODE_SRCS:%.c=build/lintc-obj/node/%.o)
 LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_hotswap_candidates_ledger.c tools/lint/lintc/gate_source_patterns.c \
     tools/lint/lintc/gate_pattern_small.c tools/lint/lintc/gate_wire_dial.c \

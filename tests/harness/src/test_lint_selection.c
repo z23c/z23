@@ -20,6 +20,10 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -381,6 +385,241 @@ static int test_lsel_non_ancestor(void)
     return failures;
 }
 
+/* ── unit-exec: the Landlocked unit runner ─────────────────────────────── */
+
+struct lsel_ux {
+    char dir[PATH_MAX];
+    char root[PATH_MAX];
+    char scratch[PATH_MAX];
+    char premise[PATH_MAX];
+};
+
+static bool lsel_ux_file(const char *dir, const char *rel, const char *text)
+{
+    char path[PATH_MAX * 2];
+    (void)snprintf(path, sizeof(path), "%s/%s", dir, rel);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return false;
+    bool ok = fputs(text, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+/* root/{a.c, secret.txt, sub/inner.txt}; the premise declares a.c only. */
+static bool lsel_ux_fixture(struct lsel_ux *ux)
+{
+    memset(ux, 0, sizeof(*ux));
+    if (!test_mkdtemp(ux->dir, sizeof(ux->dir), "lintunit"))
+        return false;
+    (void)snprintf(ux->root, sizeof(ux->root), "%s/root", ux->dir);
+    (void)snprintf(ux->scratch, sizeof(ux->scratch), "%s/scratch", ux->dir);
+    (void)snprintf(ux->premise, sizeof(ux->premise), "%s/premise.txt", ux->dir);
+    char sub[PATH_MAX + 8];
+    (void)snprintf(sub, sizeof(sub), "%s/sub", ux->root);
+    return mkdir(ux->root, 0755) == 0 && mkdir(ux->scratch, 0700) == 0
+           && mkdir(sub, 0755) == 0
+           && lsel_ux_file(ux->root, "a.c", "int a;\n")
+           && lsel_ux_file(ux->root, "secret.txt", "undeclared\n")
+           && lsel_ux_file(ux->root, "sub/inner.txt", "listed?\n")
+           && lsel_ux_file(ux->dir, "premise.txt", "a.c\n");
+}
+
+/* Run `z23-lint unit-exec` in-process over the fixture; returns its code. */
+static int lsel_ux_run(const struct lsel_ux *ux, bool no_landlock,
+                       const char *const *cmd)
+{
+    char root[PATH_MAX + 16], premise[PATH_MAX + 16], scratch[PATH_MAX + 16];
+    (void)snprintf(root, sizeof(root), "--root=%s", ux->root);
+    (void)snprintf(premise, sizeof(premise), "--premise=%s", ux->premise);
+    (void)snprintf(scratch, sizeof(scratch), "--scratch=%s", ux->scratch);
+    char *argv[16] = { root, premise, scratch };
+    int n = 3;
+    if (no_landlock)
+        argv[n++] = (char *)"--no-landlock";
+    argv[n++] = (char *)"--";
+    for (size_t i = 0; cmd[i] && n < 15; i++)
+        argv[n++] = (char *)cmd[i];
+    argv[n] = NULL;
+    fflush(NULL);
+    return lint_unit_exec_main(n, argv);
+}
+
+static int test_lsel_ux_declared_and_undeclared(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: unit-exec reads its premise, an undeclared "
+              "read is PREMISE_INCOMPLETE") {
+        struct lsel_ux ux;
+        ASSERT(lsel_ux_fixture(&ux));
+        const char *ok[] = { "cat", "a.c", NULL };
+        const char *bad[] = { "cat", "secret.txt", NULL };
+        ASSERT_EQ(lsel_ux_run(&ux, false, ok), 0);
+        ASSERT_EQ(lsel_ux_run(&ux, false, bad), 3);
+        test_rm_rf_recursive(ux.dir);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_ux_read_dir(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: unit-exec refuses an undeclared directory "
+              "listing") {
+        struct lsel_ux ux;
+        ASSERT(lsel_ux_fixture(&ux));
+        const char *ls_sub[] = { "ls", "sub", NULL };
+        const char *ls_root[] = { "ls", ".", NULL };
+        ASSERT_EQ(lsel_ux_run(&ux, false, ls_sub), 3);
+        ASSERT_EQ(lsel_ux_run(&ux, false, ls_root), 3);
+        /* A directory can never be declared: its rule would grant the
+         * whole subtree. The runner refuses before running anything. */
+        ASSERT(lsel_ux_file(ux.dir, "premise.txt", "a.c\nsub\n"));
+        const char *ok[] = { "cat", "a.c", NULL };
+        ASSERT_EQ(lsel_ux_run(&ux, false, ok), 2);
+        test_rm_rf_recursive(ux.dir);
+    } TEST_END
+    return failures;
+}
+
+/* A regular file directly in the real $HOME, which no unit may read. */
+static bool lsel_home_file(char *out, size_t cap)
+{
+    const char *home = getenv("HOME");
+    DIR *d = home ? opendir(home) : NULL;
+    struct dirent *de;
+    bool found = false;
+    while (d && !found && (de = readdir(d)) != NULL) {
+        struct stat st;
+        (void)snprintf(out, cap, "%s/%s", home, de->d_name);
+        found = lstat(out, &st) == 0 && S_ISREG(st.st_mode)
+                && access(out, R_OK) == 0;
+    }
+    if (d)
+        closedir(d);
+    return found;
+}
+
+static int test_lsel_ux_home(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: unit-exec refuses a $HOME read") {
+        struct lsel_ux ux;
+        char victim[PATH_MAX * 2];
+        ASSERT(lsel_ux_fixture(&ux));
+        ASSERT(lsel_home_file(victim, sizeof(victim)));
+        const char *cmd[] = { "cat", victim, NULL };
+        ASSERT_EQ(lsel_ux_run(&ux, false, cmd), 3);
+        /* The unit's own HOME is its private scratch, and that works. */
+        const char *own[] = { "sh", "-c", "echo x > \"$HOME/own\" && cat \"$HOME/own\"",
+                              NULL };
+        ASSERT_EQ(lsel_ux_run(&ux, false, own), 0);
+        test_rm_rf_recursive(ux.dir);
+    } TEST_END
+    return failures;
+}
+
+static int lsel_listener(int *port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    socklen_t len = sizeof(a);
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (fd < 0 || bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0
+        || listen(fd, 4) != 0 || getsockname(fd, (struct sockaddr *)&a, &len) != 0) {
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    *port = ntohs(a.sin_port);
+    return fd;
+}
+
+static int test_lsel_ux_tcp(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: unit-exec refuses a TCP connect") {
+        struct lsel_ux ux;
+        int port = 0;
+        int fd = lsel_listener(&port);
+        ASSERT(fd >= 0);
+        ASSERT(lsel_ux_fixture(&ux));
+        char script[128];
+        (void)snprintf(script, sizeof(script),
+                       "exec 3<>/dev/tcp/127.0.0.1/%d && echo connected", port);
+        /* Control: the same connect succeeds outside the domain. */
+        const char *plain[] = { "/usr/bin/env", "bash", "-c", script, NULL };
+        char out[64] = "";
+        ASSERT_EQ(zcl_spawn_capture(plain, out, sizeof(out), 10000), 0);
+        ASSERT(strstr(out, "connected") != NULL);
+        const char *cmd[] = { "bash", "-c", script, NULL };
+        ASSERT_EQ(lsel_ux_run(&ux, false, cmd), 5);
+        close(fd);
+        test_rm_rf_recursive(ux.dir);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_ux_forced_off(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: Landlock forced off runs nothing and inherits "
+              "nothing") {
+        struct lsel_ux ux;
+        struct lsel_fx fx;
+        struct premise_unit u[2];
+        char why[PREMISE_REASON_MAX], marker[PATH_MAX + 16];
+        ASSERT(lsel_ux_fixture(&ux));
+        (void)snprintf(marker, sizeof(marker), "%s/ran", ux.scratch);
+        const char *touch[] = { "touch", marker, NULL };
+        ASSERT_EQ(lsel_ux_run(&ux, true, touch), 4);
+        ASSERT(access(marker, F_OK) != 0);
+        ASSERT_EQ(lsel_ux_run(&ux, false, touch), 0);
+        ASSERT(access(marker, F_OK) == 0);
+        /* The same unchanged candidate that inherits when confined. */
+        ASSERT(lsel_fixture(&fx));
+        ASSERT_EQ(lsel_eval(&fx, NULL, false, u, why, sizeof(why)), 0);
+        ASSERT_STR_EQ(why, "landlock-unavailable");
+        ASSERT(!u[0].would_inherit && !u[1].would_inherit);
+        ASSERT_STR_EQ(u[0].reason, "landlock-unavailable");
+        ASSERT(memcmp(u[0].action_root, u[0].base_root, PREMISE_HASH_BYTES) == 0);
+        test_rm_rf_recursive(fx.dir);
+        test_rm_rf_recursive(ux.dir);
+    } TEST_END
+    return failures;
+}
+
+/* The premise the selection core computes is enough for a real compiler,
+ * and dropping one closure file from it fails the unit closed. */
+static int test_lsel_ux_compiler_premise(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: a computed premise compiles under unit-exec; "
+              "a premise missing a header is PREMISE_INCOMPLETE") {
+        struct lsel_fx fx;
+        struct lsel_ux ux;
+        struct premise_session s;
+        ASSERT(lsel_fixture(&fx));
+        ASSERT(lsel_ux_fixture(&ux));
+        (void)snprintf(ux.root, sizeof(ux.root), "%s", fx.repo);
+        FILE *out = fopen(ux.premise, "w");
+        ASSERT(out != NULL);
+        ASSERT_EQ(premise_session_open(&s, fx.repo, NULL, true, stderr), 0);
+        int rc = premise_unit_grants(&s, &k_gate, "a.c", out, stderr);
+        premise_session_close(&s);
+        ASSERT(fclose(out) == 0);
+        ASSERT_EQ(rc, 0);
+        const char *cc[] = { "cc", "-fsyntax-only", "-Iinc", "a.c", NULL };
+        ASSERT_EQ(lsel_ux_run(&ux, false, cc), 0);
+        ASSERT(lsel_ux_file(ux.dir, "premise.txt", "a.c\ninc/x.h\n"));
+        ASSERT_EQ(lsel_ux_run(&ux, false, cc), 3);
+        test_rm_rf_recursive(ux.dir);
+        test_rm_rf_recursive(fx.dir);
+    } TEST_END
+    return failures;
+}
+
 int test_lint_selection(void)
 {
     int failures = 0;
@@ -392,6 +631,12 @@ int test_lint_selection(void)
     failures += test_lsel_computed_include();
     failures += test_lsel_tampered_tree();
     failures += test_lsel_non_ancestor();
+    failures += test_lsel_ux_declared_and_undeclared();
+    failures += test_lsel_ux_read_dir();
+    failures += test_lsel_ux_home();
+    failures += test_lsel_ux_tcp();
+    failures += test_lsel_ux_forced_off();
+    failures += test_lsel_ux_compiler_premise();
     return failures;
 }
 

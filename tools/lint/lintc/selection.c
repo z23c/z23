@@ -28,6 +28,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "platform/os_sandbox.h"
+
 enum selection_units {
     SELECTION_UNITS_NODE_C23_WINDOWS,
     SELECTION_UNITS_CLANG_ORACLE,
@@ -447,7 +449,9 @@ int lint_select_main(int argc, char **argv)
         return 2;
     }
     struct premise_session s;
-    int rc = premise_session_open(&s, o.root, &o.base, !o.no_landlock, stderr);
+    /* Inheritance needs the unit-exec domain: no Landlock, nothing inherits. */
+    bool confined = !o.no_landlock && os_sandbox_landlock_abi() >= 1;
+    int rc = premise_session_open(&s, o.root, &o.base, confined, stderr);
     for (size_t i = 0; rc == 0 && i < sizeof k_rows / sizeof *k_rows; i++)
         if (gate_wanted(&o, k_rows[i].name))
             rc = select_gate(&o, &s, &k_rows[i], stdout, stderr);

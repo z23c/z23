@@ -173,4 +173,7 @@ void premise_make_values_free(struct premise_make_value *v, size_t n);
 int lint_select_main(int argc, char **argv);
 int lint_premise_main(int argc, char **argv);
 
+/* unit_exec.c */
+int lint_unit_exec_main(int argc, char **argv);
+
 #endif

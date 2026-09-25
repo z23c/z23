@@ -28,6 +28,7 @@ SELECTION_POLICY("tools/lint/lintc/premise_git.c")
 SELECTION_POLICY("tools/lint/lintc/premise_include.c")
 SELECTION_POLICY("tools/lint/lintc/premise_make.c")
 SELECTION_POLICY("tools/lint/lintc/selection.c")
+SELECTION_POLICY("tools/lint/lintc/unit_exec.c")
 SELECTION_POLICY("tools/lint/lintc/selection_gates.def")
 
 SELECTION_GATE("check-windows-cross-syntax", SELECTION_UNITS_NODE_C23_WINDOWS,

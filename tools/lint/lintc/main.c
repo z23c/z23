@@ -277,6 +277,7 @@ static const struct {
     int (*main)(int argc, char **argv);
 } k_tools[] = {
     { "select", lint_select_main },
+    { "unit-exec", lint_unit_exec_main },
     { "premise", lint_premise_main },
 };
 
