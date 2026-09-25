@@ -12,6 +12,8 @@
 #define VCS_ZCODE_ACTION_INPUT_VERSION 1u
 #define VCS_ZCODE_ACTION_INPUT_HEADER_BYTES 216u
 #define VCS_ZCODE_ACTION_INPUT_ROOT_DOMAIN "zcl.zcode.action_input.v1"
+#define VCS_ZCODE_COMPONENT_INPUT_KEY_DOMAIN \
+    "zcl.zcode.component_input_key.v1"
 
 /* Whole-package actions accept no caller-selected source or executable.
  * This fixed wire binds the already-authoritative task recipe and dependency
@@ -45,6 +47,28 @@ struct vcs_zcode_action_input_v1 {
     size_t payload_len;
 };
 
+/* Execution closure for a reusable lookup key. The caller must independently
+ * derive every root from the bytes or policy used by the executor. This API
+ * checks nonzero roots and task-bound toolchain/policy roots, but cannot prove
+ * that arbitrary compiler, environment, graph or harness roots are honest.
+ * The key omits task, candidate, action, producer, verdict and time; those
+ * remain bound by independently verified observation and action receipts. */
+struct vcs_zcode_component_execution_v1 {
+    uint8_t toolchain_capsule_root[32];
+    uint8_t compiler_root[32];
+    uint8_t flags_root[32];
+    uint8_t environment_root[32];
+    uint8_t build_graph_root[32];
+    uint8_t harness_root[32];
+    uint8_t proof_policy_root[32];
+    uint8_t sandbox_policy_root[32];
+    uint32_t policy_generation;
+    uint8_t target;
+    uint32_t max_cpu_seconds;
+    uint64_t max_memory_bytes;
+    uint64_t max_output_bytes;
+};
+
 struct vcs_zcode_package_action_input_v1 {
     uint16_t schema_version;
     uint8_t task_root[32];
@@ -75,6 +99,19 @@ enum vcs_zcode_action_input_result vcs_zcode_action_input_parse(
     struct vcs_zcode_action_input_v1 *out);
 enum vcs_zcode_action_input_result vcs_zcode_action_input_root(
     const struct vcs_zcode_action_input_v1 *input, uint8_t out[32]);
+
+/* Verify action-input CAS membership and derive a lookup key from the supplied
+ * physical computation closure. A matching key never grants proof or
+ * acceptance: the receiver still verifies artifact bytes, signatures,
+ * freshness, trust domains, contradictory observations and the requested
+ * action binding. */
+enum vcs_zcode_action_input_result vcs_zcode_component_input_key_derive_cas(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_action_input_v1 *input,
+    const uint8_t task_root[32], const uint8_t candidate_root[32],
+    const struct vcs_zcode_component_execution_v1 *execution,
+    uint8_t out[32]);
 
 /* Re-derive all semantic roots and prove path/payload membership in the
  * immutable candidate source manifest. */

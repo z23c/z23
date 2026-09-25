@@ -265,6 +265,96 @@ enum vcs_zcode_action_input_result vcs_zcode_action_input_root(
     return VCS_ZCODE_ACTION_INPUT_OK;
 }
 
+static bool component_execution_valid(
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_component_execution_v1 *execution)
+{
+    const uint8_t *closure[] = {
+        execution->toolchain_capsule_root, execution->compiler_root,
+        execution->flags_root, execution->environment_root,
+        execution->build_graph_root, execution->harness_root,
+        execution->proof_policy_root, execution->sandbox_policy_root,
+    };
+    for (size_t i = 0; i < sizeof(closure) / sizeof(closure[0]); i++)
+        if (!zcl_bytes_any_set(closure[i], 32)) return false;
+    return execution->policy_generation != 0 && execution->target != 0 &&
+           execution->max_cpu_seconds != 0 &&
+           execution->max_memory_bytes != 0 &&
+           execution->max_output_bytes != 0 &&
+           execution->max_cpu_seconds <= task->max_cpu_seconds &&
+           execution->max_memory_bytes <= task->max_memory_bytes &&
+           execution->max_output_bytes <= task->max_output_bytes &&
+           memcmp(execution->toolchain_capsule_root,
+                  task->toolchain_capsule_root, 32) == 0 &&
+           memcmp(execution->proof_policy_root,
+                  task->proof_policy_root, 32) == 0;
+}
+
+static void component_key_hash(
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_action_input_v1 *input,
+    const struct vcs_zcode_component_execution_v1 *execution,
+    uint8_t out[32])
+{
+    const uint8_t *closure[] = {
+        execution->toolchain_capsule_root, execution->compiler_root,
+        execution->flags_root, execution->environment_root,
+        execution->build_graph_root, execution->harness_root,
+        execution->proof_policy_root, execution->sandbox_policy_root,
+    };
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    static const char domain[] = VCS_ZCODE_COMPONENT_INPUT_KEY_DOMAIN;
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, &input->work_kind, 1);
+    sha3_256_write(&sha, input->candidate_source_root, 32);
+    sha3_256_write(&sha, candidate->adapter_policy_root, 32);
+    sha3_256_write(&sha, input->dependency_lock_root, 32);
+    sha3_256_write(&sha, input->acceptance_tests_root, 32);
+    sha3_256_write(&sha, input->payload_blob_root, 32);
+    uint8_t scalar[8];
+    size_t path_len = strlen(input->path);
+    vcs_wr_u16le(scalar, (uint16_t)path_len);
+    sha3_256_write(&sha, scalar, 2);
+    sha3_256_write(&sha, (const uint8_t *)input->path, path_len);
+    vcs_wr_u64le(scalar, input->payload_len);
+    sha3_256_write(&sha, scalar, 8);
+    for (size_t i = 0; i < sizeof(closure) / sizeof(closure[0]); i++)
+        sha3_256_write(&sha, closure[i], 32);
+    vcs_wr_u32le(scalar, execution->policy_generation);
+    sha3_256_write(&sha, scalar, 4);
+    sha3_256_write(&sha, &execution->target, 1);
+    vcs_wr_u32le(scalar, execution->max_cpu_seconds);
+    sha3_256_write(&sha, scalar, 4);
+    vcs_wr_u64le(scalar, execution->max_memory_bytes);
+    sha3_256_write(&sha, scalar, 8);
+    vcs_wr_u64le(scalar, execution->max_output_bytes);
+    sha3_256_write(&sha, scalar, 8);
+    sha3_256_finalize(&sha, out);
+}
+
+enum vcs_zcode_action_input_result vcs_zcode_component_input_key_derive_cas(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_action_input_v1 *input,
+    const uint8_t task_root[32], const uint8_t candidate_root[32],
+    const struct vcs_zcode_component_execution_v1 *execution,
+    uint8_t out[32])
+{
+    if (!repo_root || !task || !candidate || !input || !task_root ||
+        !candidate_root || !execution || !out)
+        return VCS_ZCODE_ACTION_INPUT_NULL;
+    if (!component_execution_valid(task, execution))
+        return VCS_ZCODE_ACTION_INPUT_BINDING;
+    enum vcs_zcode_action_input_result result =
+        vcs_zcode_action_input_validate_for_candidate(
+            repo_root, task, candidate, input, task_root,
+            candidate_root, input->work_kind);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
+    component_key_hash(candidate, input, execution, out);
+    return VCS_ZCODE_ACTION_INPUT_OK;
+}
+
 enum vcs_zcode_action_input_result
 vcs_zcode_action_input_validate_for_candidate(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,

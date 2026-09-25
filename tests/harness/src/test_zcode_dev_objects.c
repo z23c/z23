@@ -3304,6 +3304,50 @@ static int test_zd_improve_command(void)
                       workspace, &task, &candidate, &action_input,
                       task_root, candidate_root, VCS_ZCODE_WORK_BUILD),
                   VCS_ZCODE_ACTION_INPUT_OK);
+        struct vcs_zcode_component_execution_v1 execution = {0};
+        memcpy(execution.toolchain_capsule_root,
+               task.toolchain_capsule_root, 32);
+        memcpy(execution.proof_policy_root, task.proof_policy_root, 32);
+        zd_root(execution.compiler_root, 202);
+        zd_root(execution.flags_root, 203);
+        zd_root(execution.environment_root, 204);
+        zd_root(execution.build_graph_root, 205);
+        zd_root(execution.harness_root, 206);
+        zd_root(execution.sandbox_policy_root, 207);
+        execution.policy_generation = 1;
+        execution.target = VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3;
+        execution.max_cpu_seconds = task.max_cpu_seconds;
+        execution.max_memory_bytes = task.max_memory_bytes;
+        execution.max_output_bytes = task.max_output_bytes;
+        uint8_t component_key[32], same_key[32], drift_key[32];
+        ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
+                      workspace, &task, &candidate, &action_input,
+                      task_root, candidate_root, &execution, component_key),
+                  VCS_ZCODE_ACTION_INPUT_OK);
+        ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
+                      workspace, &task, &candidate, &action_input,
+                      task_root, candidate_root, &execution, same_key),
+                  VCS_ZCODE_ACTION_INPUT_OK);
+        ASSERT(memcmp(component_key, same_key, 32) == 0);
+        execution.policy_generation++;
+        ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
+                      workspace, &task, &candidate, &action_input,
+                      task_root, candidate_root, &execution, drift_key),
+                  VCS_ZCODE_ACTION_INPUT_OK);
+        ASSERT(memcmp(component_key, drift_key, 32) != 0);
+        execution.policy_generation--;
+        memset(execution.environment_root, 0, 32);
+        ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
+                      workspace, &task, &candidate, &action_input,
+                      task_root, candidate_root, &execution, drift_key),
+                  VCS_ZCODE_ACTION_INPUT_BINDING);
+        zd_root(execution.environment_root, 204);
+        action_input.payload[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
+                      workspace, &task, &candidate, &action_input,
+                      task_root, candidate_root, &execution, drift_key),
+                  VCS_ZCODE_ACTION_INPUT_BINDING);
+        action_input.payload[0] ^= 1u;
         action_input.payload[0] ^= 1u;
         ASSERT_EQ(vcs_zcode_action_input_validate_for_candidate(
                       workspace, &task, &candidate, &action_input,
