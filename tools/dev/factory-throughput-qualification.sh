@@ -3,14 +3,16 @@
 # Measure bounded factory throughput for cumulative edits to the textstat package.
 set -euo pipefail
 
-if [[ $# != 2 || ! $2 =~ ^(1|2|4|8|16)$ ]]; then
-    printf 'usage: %s NEW_OUTPUT_DIR CONCURRENCY(1|2|4|8|16)\n' "$0" >&2
+if [[ $# -lt 2 || $# -gt 3 || ! $2 =~ ^(1|2|4|8|16)$ ||
+      ! ${3:-0} =~ ^[0-7]$ ]]; then
+    printf 'usage: %s NEW_OUTPUT_DIR CONCURRENCY(1|2|4|8|16) [REVISION_OFFSET(0..7)]\n' "$0" >&2
     exit 2
 fi
 run_start_ns=$(date +%s%N)
 root=$(cd "$(dirname "$0")/../.." && pwd -P)
 output=$(realpath -m "$1")
 concurrency=$2
+revision_offset=${3:-0}
 [[ ! -e $output ]] || { printf 'output exists: %s\n' "$output" >&2; exit 2; }
 mkdir -m 700 -p "$output/bin"
 for binary in package-factory zclassic23 zclassic23-package-sign \
@@ -197,7 +199,7 @@ EOF
 
 batch_start_ns=$(date +%s%N)
 for ((job=1; job<=concurrency; job++)); do
-    revision=$(((job - 1) % 8 + 1))
+    revision=$(((revision_offset + job - 1) % 8 + 1))
     duplicate=$((job > 8 ? 1 : 0))
     dispatch_ns=$(date +%s%N)
     run_case "$job" "$revision" "$duplicate" "$dispatch_ns" &

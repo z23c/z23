@@ -6,8 +6,9 @@ root=$(cd "$(dirname "$0")" && pwd)
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/devbuild-broker-test.XXXXXX")
 export DEVBUILD_BROKER_STATE="$scratch/state"
 one= two= hot= third= proof=
+compact_pids=()
 cleanup() {
-    for pid in "$one" "$two" "$hot" "$third" "$proof"; do
+    for pid in "$one" "$two" "$hot" "$third" "$proof" "${compact_pids[@]}"; do
         [[ -z $pid ]] || wait "$pid" 2>/dev/null || true
     done
     rm -rf -- "$scratch"
@@ -24,6 +25,12 @@ cc -std=c23 -Wall -Wextra -Werror -pedantic \
 }
 [[ $("$root/devbuild-broker" --plan --project z23 --class legacy build/bin/z23-dev dev proof step) == *'class=legacy '* ]] || {
     printf 'explicit proof class was overridden\n' >&2; exit 1;
+}
+[[ $("$root/devbuild-broker" --plan --project z23 --class normal --compact true) == *'class=compact cpu_tokens=3 ram_gib=2 io_tokens=1 '* ]] || {
+    printf 'compact normal request did not select bounded admission\n' >&2; exit 1;
+}
+[[ $("$root/devbuild-broker" --plan --project z23 --class normal --compact --qualification-width 8 true) == *'qualification_width=8 '* ]] || {
+    printf 'explicit compact qualification width was not planned\n' >&2; exit 1;
 }
 
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 2 >"$scratch/one.log" 2>&1 & one=$!
@@ -61,6 +68,7 @@ awk -F '\t' '
 }
 printf 'devbuild broker: two normal lanes, reserved hotload lane, queue and release PASS\n'
 
+
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 1 >"$scratch/four.log" 2>&1 & one=$!
 "$root/devbuild-broker" --wait --project z23 --class normal sleep 1 >"$scratch/five.log" 2>&1 & two=$!
 for _ in {1..100}; do
@@ -92,6 +100,7 @@ awk -F '\t' '
     printf 'queue timestamps do not bind admission waits\n' >&2; exit 1;
 }
 printf 'devbuild broker: release proof priority PASS\n'
+
 
 "$root/devbuild-broker" --wait --project qedc --class normal sleep 2 \
     >"$scratch/qedc-head-running.log" 2>&1 & one=$!
@@ -125,6 +134,79 @@ printf '%s %s %s qedc legacy 8 24 1 100 %s broker-v2\n' \
 }
 rm -f -- "$DEVBUILD_BROKER_STATE/queue/old-queue"
 printf 'devbuild broker: prior-wrapper queue stays isolated during upgrade PASS\n'
+
+"$root/devbuild-broker" --wait --project z23 --class normal --compact sleep 1 \
+    >"$scratch/default-compact-one.log" 2>&1 & one=$!
+"$root/devbuild-broker" --wait --project z23 --class normal --compact sleep 1 \
+    >"$scratch/default-compact-two.log" 2>&1 & two=$!
+for _ in {1..100}; do
+    default_admitted=$(awk -F '\t' '$3 == "admitted" && $5 == "compact" {n++} END {print n+0}' \
+        "$DEVBUILD_BROKER_STATE/events.tsv")
+    [[ $default_admitted == 2 ]] && break
+    sleep 0.05
+done
+[[ $default_admitted == 2 ]] || {
+    printf 'two default compact lanes did not enter\n' >&2; exit 1;
+}
+if "$root/devbuild-broker" --project z23 --class normal --compact true \
+    >"$scratch/default-compact-third.log" 2>&1; then
+    printf 'third default compact lane bypassed the two-lane cap\n' >&2
+    exit 1
+fi
+wait "$one" "$two"
+printf 'devbuild broker: default compact admission stays at two lanes PASS\n'
+
+for _ in {1..8}; do
+    "$root/devbuild-broker" --wait --project z23 --class normal --compact --qualification-width 8 sleep 2 \
+        >"$scratch/compact-$_.log" 2>&1 & compact_pids+=("$!")
+done
+for _ in {1..100}; do
+    compact_admitted=$(awk -F '\t' '$3 == "admitted" && $5 == "compact" {n++} END {print n+0}' \
+        "$DEVBUILD_BROKER_STATE/events.tsv")
+    [[ $compact_admitted == 10 ]] && break
+    sleep 0.05
+done
+[[ $compact_admitted == 10 ]] || {
+    printf 'eight compact normal lanes did not overlap\n' >&2; exit 1;
+}
+"$root/devbuild-broker" --wait --project z23 --class hotload sleep 0.1 \
+    >"$scratch/compact-hot.log" 2>&1
+for pid in "${compact_pids[@]}"; do
+    kill -0 "$pid" 2>/dev/null || {
+        printf 'compact lane finished before reserved hotload admission\n' >&2
+        exit 1
+    }
+done
+wait "${compact_pids[@]}"
+compact_pids=()
+printf 'devbuild broker: eight compact lanes retain interactive capacity PASS\n'
+
+"$root/devbuild-broker" --wait --project z23 --class hotload sleep 2 \
+    >"$scratch/hot-first.log" 2>&1 & hot=$!
+for _ in {1..100}; do
+    grep -q 'admitted' "$scratch/hot-first.log" 2>/dev/null && break
+    sleep 0.05
+done
+grep -q 'admitted' "$scratch/hot-first.log" || {
+    printf 'hotload-first fixture did not enter\n' >&2; exit 1;
+}
+for _ in {1..8}; do
+    "$root/devbuild-broker" --wait --project z23 --class normal --compact --qualification-width 8 sleep 1 \
+        >"$scratch/compact-after-hot-$_.log" 2>&1 & compact_pids+=("$!")
+done
+for _ in {1..100}; do
+    compact_admitted=$(awk -F '\t' '$3 == "admitted" && $5 == "compact" {n++} END {print n+0}' \
+        "$DEVBUILD_BROKER_STATE/events.tsv")
+    [[ $compact_admitted == 18 ]] && break
+    sleep 0.05
+done
+[[ $compact_admitted == 18 ]] && kill -0 "$hot" 2>/dev/null || {
+    printf 'hotload-first lease blocked eight fitting compact lanes\n' >&2
+    exit 1
+}
+wait "${compact_pids[@]}" "$hot"
+compact_pids=()
+printf 'devbuild broker: hotload-first reserve is released to compact lanes PASS\n'
 
 "$root/devbuild-broker" --wait --project z23 --class normal \
     bash -c 'sleep 20 & exit 0' >"$scratch/orphan.log" 2>&1

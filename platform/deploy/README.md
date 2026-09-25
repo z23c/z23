@@ -37,7 +37,15 @@ you are new; this page is about operating a host, not about building.
   Explicit `--class normal` jobs request 8 GiB each. Unclassified calls retain
   the legacy 24 GiB per-project memory ceiling, with unused CPU available
   through the existing collective development slice. CPU, RAM, and I/O
-  admission tokens are bounded under that slice. Direct `dev proof step`
+  admission tokens are bounded under that slice. `--class normal --compact`
+  requests a 2 GiB / 3 CPU-token lane for measured small C23 factory work;
+  the ordinary host default remains two lanes. An explicit
+  `--qualification-width 4|8` allows a bounded trial while retaining a
+  4 CPU / 4 GiB interactive reservation. Host and node-health evidence
+  determines whether that width can become normal policy;
+  [`broker-lane-qualification.sh`](../../tools/dev/broker-lane-qualification.sh)
+  records one isolated node beside separately admitted factory lanes.
+  Direct `dev proof step`
   commands use the 20 GiB release class; direct `make commons-demo`
   commands use the background class;
   [`test-devbuild-broker.sh`](test-devbuild-broker.sh) exercises concurrent
@@ -54,7 +62,8 @@ you are new; this page is about operating a host, not about building.
   can pass it during that interval. When a command returns, the broker stops
   its scope if a detached child remains and retains the lease until the scope
   is inactive. A later compatible broker upgrade keeps prior waiters in the
-  original queue and puts new waiters in `queue-v3`; both versions count the
+  original queue and puts new waiters in a versioned queue (`queue-v5`
+  currently); both versions count the
   same running leases under one mutex. Keep the prior script as a private
   rollback copy.
   The existing `devbuild` mirror describes the pre-cutover contract until

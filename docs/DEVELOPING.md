@@ -127,14 +127,14 @@ devbuild --wait make -j"$(nproc)" lint
 devbuild --plan                        # what a slot would grant; runs nothing
 ```
 
-`devbuild` is **not part of this repository and is not installed by any
-target here.** It is a host program, shared with a second unrelated project,
-that holds one exclusive `flock(2)` per project, refuses a job when the host
-has under 24 GiB available, and runs what you gave it inside a
-`systemd-run --user --scope` with a CPU quota, a memory ceiling and a CPU
-pinning that deliberately leaves the first two physical cores of every socket
-free for the node. Its exact contract, and a byte-identical reference copy of
-the program, are in [`../platform/deploy/devbuild`](../platform/deploy/devbuild).
+`devbuild` is **not installed by any repository target.** It is a shared host
+program with a bounded CPU, RAM and I/O class broker. It refuses admission
+when the host has under 24 GiB available, and runs commands inside a
+`systemd-run --user --scope` with a CPU quota, a memory ceiling and CPU
+pinning that leaves two physical cores outside the development slice. Its
+current source and host contract are in
+[`../platform/deploy/devbuild-broker`](../platform/deploy/devbuild-broker) and
+[`../platform/deploy/README.md`](../platform/deploy/README.md).
 [`../platform/deploy/README.md`](../platform/deploy/README.md) is the door to
 the rest of that directory: which units a host runs, which of them a clone
 gets, and why the remainder stay host-local.
