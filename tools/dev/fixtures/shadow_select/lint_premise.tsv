@@ -10,6 +10,13 @@
 #   run the same way on the same entries and bases, measured 2026-09-25; the six
 #   older gates' counts in a combined run with that binary equal the rows above
 #   on all 28 entries (168 of 168).
+# check-doc-claims rows: z23-lint built from b47b449e4e (lane docclaims-split),
+#   binary sha256 b445b3bffcc413f6dd8621969fae5972ee73382ad20d71e0faca686054a1a105
+#   (reproduced byte-identical on a second host), run the same way on the same
+#   entries and bases, measured 2026-09-25; the seven older gates' counts in a
+#   combined run with that binary equal the rows above on all 28 entries
+#   (196 of 196). always_ms=2100 is the measured --global part with
+#   driver-recorded oracle verdicts (max of three cold-cache runs, 2.06 s).
 # One run per entry and gate, measured 2026-09-25:
 #   z23-lint select --dry --base=<base> --root=<candidate> \
 #     --objects=<repo> --scratch=<dir> --depth=1024 --gate=<gate>
@@ -30,6 +37,7 @@ real-01	check-windows-platform-seam	41	0	enabled	10059	0
 real-01	check-fortify-masked-decls	4289	1	enabled	11794	0
 real-01	check-raw-sqlite	4695	1	enabled	11823	0
 real-01	check-windows-acceptance	72	4	enabled	9442	18140
+real-01	check-doc-claims	356	1	enabled	9139	2100
 real-02	check-windows-cross-syntax	2339	0	enabled	17413	0
 real-02	check-clang-portability	2337	1	enabled	9828	0
 real-02	check-no-api-keys	8366	1	enabled	10678	0
@@ -37,6 +45,7 @@ real-02	check-windows-platform-seam	41	0	enabled	9871	0
 real-02	check-fortify-masked-decls	4286	1	enabled	10859	0
 real-02	check-raw-sqlite	4690	1	enabled	9071	0
 real-02	check-windows-acceptance	72	4	enabled	8292	18140
+real-02	check-doc-claims	351	1	enabled	9205	2100
 real-03	check-windows-cross-syntax	2339	1	enabled	15190	0
 real-03	check-clang-portability	2337	1	enabled	9040	0
 real-03	check-no-api-keys	8361	2	enabled	9999	0
@@ -44,6 +53,7 @@ real-03	check-windows-platform-seam	41	0	enabled	11094	0
 real-03	check-fortify-masked-decls	4286	2	enabled	10084	0
 real-03	check-raw-sqlite	4690	1	enabled	9319	0
 real-03	check-windows-acceptance	72	4	enabled	9206	18140
+real-03	check-doc-claims	349	1	enabled	9220	2100
 real-04	check-windows-cross-syntax	2339	0	enabled	18515	0
 real-04	check-clang-portability	2337	0	enabled	11845	0
 real-04	check-no-api-keys	8361	1	enabled	11059	0
@@ -51,6 +61,7 @@ real-04	check-windows-platform-seam	41	0	enabled	9816	0
 real-04	check-fortify-masked-decls	4286	1	enabled	12401	0
 real-04	check-raw-sqlite	4690	0	enabled	13192	0
 real-04	check-windows-acceptance	72	4	enabled	9290	18140
+real-04	check-doc-claims	349	1	enabled	8547	2100
 real-05	check-windows-cross-syntax	2339	1	enabled	17404	0
 real-05	check-clang-portability	2337	1	enabled	9367	0
 real-05	check-no-api-keys	8402	2	enabled	10313	0
@@ -58,6 +69,7 @@ real-05	check-windows-platform-seam	41	0	enabled	9262	0
 real-05	check-fortify-masked-decls	4284	2	enabled	10092	0
 real-05	check-raw-sqlite	4688	1	enabled	9645	0
 real-05	check-windows-acceptance	72	4	enabled	8909	18140
+real-05	check-doc-claims	399	2	enabled	8731	2100
 real-06	check-windows-cross-syntax	2339	1	enabled	15874	0
 real-06	check-clang-portability	2337	1	enabled	20223	0
 real-06	check-no-api-keys	8402	2	enabled	9816	0
@@ -65,6 +77,7 @@ real-06	check-windows-platform-seam	41	0	enabled	9295	0
 real-06	check-fortify-masked-decls	4284	2	enabled	9331	0
 real-06	check-raw-sqlite	4688	1	enabled	8406	0
 real-06	check-windows-acceptance	72	4	enabled	9194	18140
+real-06	check-doc-claims	399	3	enabled	16019	2100
 real-07	check-windows-cross-syntax	2339	1	enabled	16536	0
 real-07	check-clang-portability	2337	1	enabled	8711	0
 real-07	check-no-api-keys	8402	2	enabled	10256	0
@@ -72,6 +85,7 @@ real-07	check-windows-platform-seam	41	0	enabled	10080	0
 real-07	check-fortify-masked-decls	4284	2	enabled	10831	0
 real-07	check-raw-sqlite	4688	1	enabled	10371	0
 real-07	check-windows-acceptance	72	4	enabled	11349	18140
+real-07	check-doc-claims	399	2	enabled	11444	2100
 real-08	check-windows-cross-syntax	2339	1	enabled	22669	0
 real-08	check-clang-portability	2338	1	enabled	10744	0
 real-08	check-no-api-keys	8428	2	enabled	12235	0
@@ -79,6 +93,7 @@ real-08	check-windows-platform-seam	41	0	enabled	9216	0
 real-08	check-fortify-masked-decls	4295	2	enabled	9615	0
 real-08	check-raw-sqlite	4703	1	enabled	9939	0
 real-08	check-windows-acceptance	72	4	enabled	10144	18140
+real-08	check-doc-claims	361	1	enabled	13109	2100
 real-09	check-windows-cross-syntax	2339	0	enabled	16795	0
 real-09	check-clang-portability	2337	0	enabled	8633	0
 real-09	check-no-api-keys	8405	2	enabled	9586	0
@@ -86,6 +101,7 @@ real-09	check-windows-platform-seam	41	0	enabled	8499	0
 real-09	check-fortify-masked-decls	4284	2	enabled	8716	0
 real-09	check-raw-sqlite	4688	1	enabled	8422	0
 real-09	check-windows-acceptance	72	4	enabled	11227	18140
+real-09	check-doc-claims	400	1	enabled	14125	2100
 real-10	check-windows-cross-syntax	2339	1	enabled	16881	0
 real-10	check-clang-portability	2337	1	enabled	9565	0
 real-10	check-no-api-keys	8397	2	enabled	10430	0
@@ -93,6 +109,7 @@ real-10	check-windows-platform-seam	41	0	enabled	8166	0
 real-10	check-fortify-masked-decls	4284	2	enabled	8452	0
 real-10	check-raw-sqlite	4688	1	enabled	9203	0
 real-10	check-windows-acceptance	72	4	enabled	11051	18140
+real-10	check-doc-claims	395	2	enabled	13373	2100
 real-11	check-windows-cross-syntax	2339	2	enabled	22416	0
 real-11	check-clang-portability	2337	2	enabled	14881	0
 real-11	check-no-api-keys	8397	3	enabled	12805	0
@@ -100,6 +117,7 @@ real-11	check-windows-platform-seam	41	0	enabled	11107	0
 real-11	check-fortify-masked-decls	4284	3	enabled	10855	0
 real-11	check-raw-sqlite	4688	2	enabled	10458	0
 real-11	check-windows-acceptance	72	5	enabled	9016	18140
+real-11	check-doc-claims	395	2	enabled	14935	2100
 real-12	check-windows-cross-syntax	2339	1	enabled	16995	0
 real-12	check-clang-portability	2337	1	enabled	9860	0
 real-12	check-no-api-keys	8397	2	enabled	10305	0
@@ -107,6 +125,7 @@ real-12	check-windows-platform-seam	41	0	enabled	8364	0
 real-12	check-fortify-masked-decls	4284	2	enabled	8906	0
 real-12	check-raw-sqlite	4688	1	enabled	8726	0
 real-12	check-windows-acceptance	72	4	enabled	10723	18140
+real-12	check-doc-claims	395	3	enabled	12690	2100
 real-13	check-windows-cross-syntax	2339	1	enabled	17006	0
 real-13	check-clang-portability	2337	1	enabled	9785	0
 real-13	check-no-api-keys	8395	2	enabled	10617	0
@@ -114,6 +133,7 @@ real-13	check-windows-platform-seam	41	0	enabled	8487	0
 real-13	check-fortify-masked-decls	4283	2	enabled	8804	0
 real-13	check-raw-sqlite	4688	1	enabled	8598	0
 real-13	check-windows-acceptance	72	4	enabled	8324	18140
+real-13	check-doc-claims	394	2	enabled	12511	2100
 real-14	check-windows-cross-syntax	2339	1	enabled	16477	0
 real-14	check-clang-portability	2337	1	enabled	9302	0
 real-14	check-no-api-keys	8395	2	enabled	10298	0
@@ -121,6 +141,7 @@ real-14	check-windows-platform-seam	41	0	enabled	9760	0
 real-14	check-fortify-masked-decls	4283	2	enabled	9656	0
 real-14	check-raw-sqlite	4688	1	enabled	9641	0
 real-14	check-windows-acceptance	72	4	enabled	12022	18140
+real-14	check-doc-claims	394	2	enabled	12142	2100
 real-15	check-windows-cross-syntax	2339	10	enabled	17159	0
 real-15	check-clang-portability	2337	10	enabled	9182	0
 real-15	check-no-api-keys	8394	3	enabled	10435	0
@@ -128,6 +149,7 @@ real-15	check-windows-platform-seam	41	0	enabled	9368	0
 real-15	check-fortify-masked-decls	4283	2	enabled	9075	0
 real-15	check-raw-sqlite	4688	2	enabled	8152	0
 real-15	check-windows-acceptance	72	4	enabled	11188	18140
+real-15	check-doc-claims	393	2	enabled	10700	2100
 real-16	check-windows-cross-syntax	2339	0	enabled	16208	0
 real-16	check-clang-portability	2337	1	enabled	9408	0
 real-16	check-no-api-keys	8394	1	enabled	10959	0
@@ -135,6 +157,7 @@ real-16	check-windows-platform-seam	41	0	enabled	10013	0
 real-16	check-fortify-masked-decls	4283	1	enabled	9827	0
 real-16	check-raw-sqlite	4688	1	enabled	9527	0
 real-16	check-windows-acceptance	72	4	enabled	11408	18140
+real-16	check-doc-claims	393	1	enabled	9529	2100
 real-17	check-windows-cross-syntax	2339	0	enabled	16916	0
 real-17	check-clang-portability	2337	0	enabled	15639	0
 real-17	check-no-api-keys	8394	1	enabled	10189	0
@@ -142,6 +165,7 @@ real-17	check-windows-platform-seam	41	0	enabled	8891	0
 real-17	check-fortify-masked-decls	4283	1	enabled	9682	0
 real-17	check-raw-sqlite	4688	1	enabled	8746	0
 real-17	check-windows-acceptance	72	4	enabled	9411	18140
+real-17	check-doc-claims	393	1	enabled	9628	2100
 real-18	check-windows-cross-syntax	2339	1	enabled	32126	0
 real-18	check-clang-portability	2337	1	enabled	8825	0
 real-18	check-no-api-keys	8394	2	enabled	9157	0
@@ -149,6 +173,7 @@ real-18	check-windows-platform-seam	41	0	enabled	8487	0
 real-18	check-fortify-masked-decls	4283	2	enabled	9535	0
 real-18	check-raw-sqlite	4688	1	enabled	8855	0
 real-18	check-windows-acceptance	72	4	enabled	8079	18140
+real-18	check-doc-claims	393	1	enabled	11831	2100
 real-19	check-windows-cross-syntax	2337	24	enabled	16036	0
 real-19	check-clang-portability	2335	24	enabled	9937	0
 real-19	check-no-api-keys	8389	3	enabled	9188	0
@@ -156,6 +181,7 @@ real-19	check-windows-platform-seam	41	0	enabled	8209	0
 real-19	check-fortify-masked-decls	4281	2	enabled	8718	0
 real-19	check-raw-sqlite	4684	2	enabled	9203	0
 real-19	check-windows-acceptance	72	4	enabled	9298	18140
+real-19	check-doc-claims	393	1	enabled	10166	2100
 real-20	check-windows-cross-syntax	2339	0	enabled	15297	0
 real-20	check-clang-portability	2338	0	enabled	9136	0
 real-20	check-no-api-keys	8428	8428	enabled	9918	0
@@ -163,6 +189,7 @@ real-20	check-windows-platform-seam	41	0	enabled	8425	0
 real-20	check-fortify-masked-decls	4295	1	enabled	9070	0
 real-20	check-raw-sqlite	4703	1	enabled	8643	0
 real-20	check-windows-acceptance	72	4	enabled	10179	18140
+real-20	check-doc-claims	361	1	enabled	13599	2100
 syn-header-decl	check-windows-cross-syntax	2339	30	enabled	15706	0
 syn-header-decl	check-clang-portability	2338	30	enabled	8298	0
 syn-header-decl	check-no-api-keys	8434	2	enabled	10561	0
@@ -170,6 +197,7 @@ syn-header-decl	check-windows-platform-seam	41	0	enabled	8766	0
 syn-header-decl	check-fortify-masked-decls	4295	1	enabled	10194	0
 syn-header-decl	check-raw-sqlite	4703	2	enabled	9280	0
 syn-header-decl	check-windows-acceptance	72	5	enabled	8843	18140
+syn-header-decl	check-doc-claims	364	1	enabled	12415	2100
 syn-abi	check-windows-cross-syntax	2339	30	enabled	15933	0
 syn-abi	check-clang-portability	2338	30	enabled	8986	0
 syn-abi	check-no-api-keys	8434	1	enabled	11822	0
@@ -177,6 +205,7 @@ syn-abi	check-windows-platform-seam	41	0	enabled	9189	0
 syn-abi	check-fortify-masked-decls	4295	0	enabled	8830	0
 syn-abi	check-raw-sqlite	4703	1	enabled	8680	0
 syn-abi	check-windows-acceptance	72	5	enabled	8599	18140
+syn-abi	check-doc-claims	364	1	enabled	15200	2100
 syn-flag	check-windows-cross-syntax	2339	0	enabled	15803	0
 syn-flag	check-clang-portability	2338	0	enabled	10041	0
 syn-flag	check-no-api-keys	8434	1	enabled	9705	0
@@ -184,6 +213,7 @@ syn-flag	check-windows-platform-seam	41	41	enabled	8068	0
 syn-flag	check-fortify-masked-decls	4295	0	enabled	10003	0
 syn-flag	check-raw-sqlite	4703	0	enabled	8788	0
 syn-flag	check-windows-acceptance	72	72	enabled	9231	18140
+syn-flag	check-doc-claims	364	4	enabled	9616	2100
 syn-contract	check-windows-cross-syntax	2339	1	enabled	17191	0
 syn-contract	check-clang-portability	2338	1	enabled	10175	0
 syn-contract	check-no-api-keys	8434	2	enabled	11231	0
@@ -191,6 +221,7 @@ syn-contract	check-windows-platform-seam	41	0	enabled	9412	0
 syn-contract	check-fortify-masked-decls	4295	2	enabled	10224	0
 syn-contract	check-raw-sqlite	4703	1	enabled	10635	0
 syn-contract	check-windows-acceptance	72	5	enabled	11279	18140
+syn-contract	check-doc-claims	364	1	enabled	10266	2100
 syn-private-impl	check-windows-cross-syntax	2339	1	enabled	17932	0
 syn-private-impl	check-clang-portability	2338	1	enabled	9233	0
 syn-private-impl	check-no-api-keys	8434	1	enabled	10501	0
@@ -198,6 +229,7 @@ syn-private-impl	check-windows-platform-seam	41	0	enabled	10343	0
 syn-private-impl	check-fortify-masked-decls	4295	1	enabled	9708	0
 syn-private-impl	check-raw-sqlite	4703	1	enabled	9367	0
 syn-private-impl	check-windows-acceptance	72	5	enabled	9360	18140
+syn-private-impl	check-doc-claims	364	1	enabled	11561	2100
 syn-generated-input	check-windows-cross-syntax	2339	1	enabled	17108	0
 syn-generated-input	check-clang-portability	2338	1	enabled	10413	0
 syn-generated-input	check-no-api-keys	8434	2	enabled	11466	0
@@ -205,6 +237,7 @@ syn-generated-input	check-windows-platform-seam	41	0	enabled	8852	0
 syn-generated-input	check-fortify-masked-decls	4295	0	enabled	10197	0
 syn-generated-input	check-raw-sqlite	4703	1	enabled	10125	0
 syn-generated-input	check-windows-acceptance	72	4	enabled	11557	18140
+syn-generated-input	check-doc-claims	364	1	enabled	10884	2100
 syn-negative-lookup	check-windows-cross-syntax	2339	2339	enabled	16079	0
 syn-negative-lookup	check-clang-portability	2338	2338	enabled	10136	0
 syn-negative-lookup	check-no-api-keys	8435	8435	enabled	11927	0
@@ -212,6 +245,7 @@ syn-negative-lookup	check-windows-platform-seam	41	41	enabled	8066	0
 syn-negative-lookup	check-fortify-masked-decls	4295	4295	enabled	9166	0
 syn-negative-lookup	check-raw-sqlite	4704	4704	enabled	8776	0
 syn-negative-lookup	check-windows-acceptance	72	72	enabled	10682	18140
+syn-negative-lookup	check-doc-claims	364	364	enabled	11077	2100
 syn-macro	check-windows-cross-syntax	2339	10	enabled	15387	0
 syn-macro	check-clang-portability	2338	10	enabled	9127	0
 syn-macro	check-no-api-keys	8434	1	enabled	10607	0
@@ -219,3 +253,4 @@ syn-macro	check-windows-platform-seam	41	0	enabled	9048	0
 syn-macro	check-fortify-masked-decls	4295	0	enabled	10033	0
 syn-macro	check-raw-sqlite	4703	1	enabled	9718	0
 syn-macro	check-windows-acceptance	72	4	enabled	13430	18140
+syn-macro	check-doc-claims	364	1	enabled	9821	2100
