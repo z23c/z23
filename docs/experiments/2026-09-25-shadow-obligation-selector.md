@@ -288,19 +288,21 @@ Re-measured at the lane head. The reference is 6391.9 s per candidate there
 and the rule 2081.7 s (67.4%). With the two first-slice gates only, the rule
 would be 1949.2 s, 69.5%, as before:
 
-| set | fresh s per candidate: rule | rule + lint premise (7 gates) | reuse: rule | two gates | six gates | seven gates | seven gates, one select run |
-|---|---|---|---|---|---|---|---|
-| real (20) | 2081.7 | 1831.4 | 67.4% | 69.5% | 70.1% | **71.3%** | 72.2% |
-| synthetic (8) | 5795.5 | 5608.1 | 9.3% | 11.0% | 11.4% | 12.3% | 13.1% |
+| set | fresh s per candidate: rule | rule + lint premise (8 gates) | reuse: rule | two gates | six gates | seven gates | eight gates | eight gates, one select run |
+|---|---|---|---|---|---|---|---|---|
+| real (20) | 2081.7 | 1744.9 | 67.4% | 69.5% | 70.1% | 71.3% | **72.7%** | 73.7% |
+| synthetic (8) | 5795.5 | 5533.5 | 9.3% | 11.0% | 11.4% | 12.3% | 13.4% | 14.4% |
 
 The six-gate columns are the lint-premise-decl lane's figures (1913.6 s real,
-5666.2 s synthetic). The seven-gate columns add `check-windows-acceptance`
-at its select run, its always-run part and its fresh rows. The one-run
-column subtracts the per-gate select runs and adds one combined `select
---dry` over all seven gates, measured on the same 28 entries: 16.4–35.0 s
-wall per entry, 21.0 s per candidate on the real set. That run shared the
-host with the corpus builds, so it is slower than the six-gate run's
-13.6 s.
+5666.2 s synthetic). The seven-gate column added `check-windows-acceptance`
+(1831.4 s real, 5608.1 s synthetic; 72.2% with one combined select run). The
+eight-gate columns add `check-doc-claims` at its select run, its always-run
+part and its fresh documents. The one-run column subtracts the per-gate
+select runs (90.0 s real, 87.2 s synthetic) and adds one combined `select
+--dry` over all eight gates, measured on the same 28 entries: 25.1 s real,
+22.2 s synthetic per candidate, 16.4–71.2 s wall per entry. Those runs
+shared the host with the corpus builds, so they are slower than the
+six-gate run's 13.6 s.
 
 The six gates cost 247.9 s per candidate at full weight. Priced per gate,
 they cost 79.8 s: 68.3 s of select runs and 11.5 s of fresh units. Two of
@@ -639,8 +641,94 @@ A split of the global part itself would need a different kind of change:
   coreutils and `cc` as well as the scripts.
 
 Neither fits the current unit kinds, so neither is proposed here. Reuse on
-the real set stays 71.3% (1831.4 s per candidate) and
-`tools/dev/fixtures/shadow_select/lint_premise.tsv` is unchanged.
+the real set is 72.7% with the eight declared gates (below);
+`tools/dev/fixtures/shadow_select/lint_premise.tsv` gains no
+`check-vcs-no-sha1` row.
+
+#### Splitting check-doc-claims
+
+`tools/lint/check_doc_claims.sh` now has two parts. Run with no argument it
+still does both, so the full gate's verdict is unchanged.
+
+- **Global part (`--global`)**: the self-check (which gains a split case
+  proving the two parts are disjoint and together the plain run), the
+  scan-set floor, every `gate-passes` and `gate-fails` claim in every
+  document, the claim floor and the entry-document language scan. An oracle
+  claim waits on another gate's verdict and the floors count the whole
+  tree, so this part always runs. Measured: 0.91 s warm with the driver's
+  recorded oracle verdicts, at most 2.06 s of three cold-cache runs
+  (priced `always_ms=2100`); standalone, with the four oracle gates run
+  inline, 10.7 s warm.
+- **Per-document part (`--doc=PATH...`)**: every other annotation of the
+  named tracked documents. Each PATH must be a document of the full scan
+  set; anything else is refused (exit 2), never skipped. All 27
+  claim-carrying documents of the current tree evaluate in 1.1 s.
+
+The unit kind is `SELECTION_UNITS_DOC_CLAIMS`
+(`tools/lint/lintc/premise_doc_claims.c`): one unit per tracked document.
+A unit's premise is the document's own bytes plus every tree path its
+non-oracle claims can read: a `file-present`/`file-absent` claim reads only
+the path set (when the path is not pruned, crosses no symlink, and the file
+system agrees with the path set about it); a `symbol-present`/
+`symbol-absent` claim reads every tracked path under its pathspec's literal
+prefix. Anything unbounded — pathspec magic, an absolute path, a backslash,
+a dot component, a prefix reaching a pruned directory, a NUL or invalid
+UTF-8 on the annotation line, a path the file system and the path set
+disagree about, or the document itself being a symlink — makes the unit
+computed, and a computed unit never inherits.
+
+The z23-lint binary was built at `b47b449e4e`, sha256 `b445b3bf…a105`,
+reproduced byte-identical on a second host.
+
+- **(a) Agreement on the frozen corpus.** On all 28 entries the full gate
+  on the candidate, the full gate on the base, the lane head's plain run
+  and the unit-selected run agree. 27 entries pass everywhere.
+  syn-header-decl fails everywhere through an oracle claim: the synthetic
+  tree's `check-package-anatomy` exits 2, and the plain run, the lane
+  head's plain run and the selected run all propagate that verdict
+  identically (the oracle claims are the global part's). In the same
+  combined runs, the seven older gates' counts equal the frozen rows on all
+  28 entries (196 of 196). Fresh documents per entry: the one
+  always-computed document plus the commit's own (1–3 on the real set), 4
+  on syn-flag (`make-value`), and all 364 on syn-negative-lookup
+  (`path-set-changed`).
+- **(b) Seeded claim breaks** (real-01, candidate `c472356ff2`; full and
+  selected runs both FAIL on the seeded site, and only the owning document
+  goes fresh unless the path set itself changed):
+
+  | seed | fresh / units | full | selected |
+  |---|---|---|---|
+  | rename a symbol a `symbol-present` claim binds | 2 / 356 (`closure-changed`) | FAIL | FAIL |
+  | delete a file a `file-present` claim binds | 356 / 356 (`path-set-changed`) | FAIL | FAIL |
+  | add a false `file-present` claim to a document | 2 / 356 | FAIL | FAIL |
+  | add a false `symbol-present` claim to a document | 2 / 356 | FAIL | FAIL |
+  | add a false `gate-fails` oracle claim to a document | 2 / 356 | FAIL | FAIL |
+- **(c) Inputs that must NOT rerun anything**: a byte edit to a file named
+  only by `file-present`, an untracked ignored file, an untracked ignored
+  `*.md` carrying a false claim, a byte edit to a tracked file no claim or
+  unit names, and a byte edit to the generated
+  `docs/CAPABILITY_INVENTORY.jsonl` each left every bounded unit fresh=1
+  (the always-computed document only) and the verdicts unchanged.
+- **(d) Inputs that must rerun everything**: a new tracked document
+  (`unit-new`), a new tracked file no claim names, and each gate-code edit
+  (`check_doc_claims.sh`, `gate_lib.sh`, `run_lint.sh`, `lint_cache.sh`,
+  `lintc/premise.c`, the gate's Makefile recipe) made every unit fresh
+  (`path-set-changed` / `unit-new` / `gate-code:` / `make-value:`); an
+  unrelated Makefile variable made only the three documents whose claims
+  name the Makefile fresh (`closure-changed:Makefile`).
+
+`tests/harness/src/test_lint_selection.c` pins the mechanism on eight
+fixture documents: bounded claims, each unbounded rule, gate-code
+freshness, and a symlinked document never inheriting.
+
+**Pricing.** Gate weight 101772 ms; the select run costs 8.5–16.0 s per
+entry standalone (mean 11.5 s on the real set) and the eight-gate combined
+run averaged 25.1 s (16.4–71.2 s); the always-run part is 2.1 s; each fresh
+document pays the 1 s floor. The shadow real set drops to 1744.9 s per
+candidate, **72.7%** reuse (72.2% with seven gates), or 1680.0 s and 73.7%
+with one combined select run; the synthetic set is 5533.5 s, 13.4%. The
+gate's own price per narrow candidate is about 14 s against 101.8 s
+unselected.
 
 ### Private-implementation edits: is the rule over-expanding?
 
@@ -715,23 +803,23 @@ pins that, and pins that syn-negative-lookup inherits no lint unit.
 ### What still blocks more than 90%
 
 Re-measured at the lane-head reference of 6391.9 s per candidate. 90% reuse
-means at most 639.2 fresh s per candidate. The rule with seven lint premise
-gates is at 1831.4 s, or 1774.3 s with one combined select run:
+means at most 639.2 fresh s per candidate. The rule with eight lint premise
+gates is at 1744.9 s, or 1680.0 s with one combined select run:
 
 | remaining fresh s per candidate | s | share of reference | what it would take |
 |---|---|---|---|
-| Lint gates of 9 s or more, ineligible (17 gates, table above) | 566.5 | 8.9% | restructuring, not a declaration: split each gate's per-file checks from its whole-tree part (claim resolution, closures, ratchet sums, floors over content), so that only the whole-tree part must rerun, as `check-windows-acceptance` now is. The five heaviest are `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9 and `check-zcode-package-registry` 36.1. `check-vcs-no-sha1` was measured and cannot gain from a split: its per-file part is 0.04 s of 33.2 s CPU |
+| Lint gates of 9 s or more, ineligible (16 gates, table above) | 464.7 | 7.3% | restructuring, not a declaration: split each gate's per-file checks from its whole-tree part (claim resolution, closures, ratchet sums, floors over content), so that only the whole-tree part must rerun, as `check-windows-acceptance` and `check-doc-claims` now are. The four heaviest are `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9 and `check-zcode-package-registry` 36.1. `check-vcs-no-sha1` was measured and cannot gain from a split: its per-file part is 0.04 s of 33.2 s CPU |
 | Lint gates under 9 s, not reviewed (185 gates) | 160.9 | 2.5% | a review like the one above; a declared gate still pays about 10 s of select, so most would gain only inside a combined run |
 | Lint gates of 9 s or more, not declared (ship, retrieval, package-anatomy, release-install) | 70.6 | 1.1% | a confined whole-gate run (ship, retrieval, release-install) or a per-directory unit kind (package-anatomy) |
 | floor, `make_lint_gates` family | 311.3 | 4.9% | a premise for the lint-gate test umbrella. `realroot` and `heavy_02` alone are 151.5 s |
 | fallback, real-18 (`unmapped-code-change`) | 261.5 | 4.1% | an impact rule for `engine/services/src/replay_verify_service.c` (selector owner) |
 | direct test groups | 229.5 | 3.6% | none that is sound (see above) |
 | callers and integration on additive contracts | 117.9 | 1.8% | a base-test re-run (1.2%); real-19's header growth stays |
-| the seven premise gates | 113.3 | 1.8% | one combined select run (56.2 s) |
+| the eight premise gates | 128.2 | 2.0% | one combined select run (64.9 s) |
 
-The ineligible heavy gates alone (566.5 s) take 89% of the whole 90% budget
+The ineligible heavy gates alone (464.7 s) take 73% of the whole 90% budget
 (639.2 s). With every test group carried and every plausible gate declared,
-lint would still leave about 784 s per candidate, 87.7%. Past 90% the heavy
+lint would still leave about 696 s per candidate, 89.1%. Past 90% the heavy
 whole-tree gates have to be split so that their per-file part can be
 selected, and the floor has to be carried too. More premise declarations
 alone cannot get there.
