@@ -432,7 +432,7 @@ static bool ss_row_graph_consistent(const struct zcl_shadow_result *r)
  * lint gates are priced: every corpus entry carries rows for exactly the
  * SS_LINT_PREMISE_GATES gates that declare a premise in
  * tools/lint/lintc/selection_gates.def. */
-enum { SS_LINT_PREMISE_GATES = 7 };
+enum { SS_LINT_PREMISE_GATES = 8 };
 
 static bool ss_row_classes_consistent(const struct zcl_shadow_result *r)
 {
