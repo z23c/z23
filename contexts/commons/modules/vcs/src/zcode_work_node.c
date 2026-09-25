@@ -2,12 +2,9 @@
  * purpose: Bounded requester-owned ZCODE work state over package peers. */
 
 #include "vcs/zcode_work_node.h"
+#include "zcode_work_node_internal.h"
 
 #include "base/bytes.h"
-#include "base/hex.h"
-#include "crypto/sha3.h"
-#include "json/json.h"
-#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -15,99 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct work_peer {
-    bool used;
-    uint64_t id;
-    bool has_capability;
-    bool busy_observed;
-    struct vcs_zcode_work_capability_v1 capability;
-};
-
-struct work_track {
-    bool used;
-    bool inbound;
-    bool finished;
-    bool cancelled;
-    bool expired;
-    bool receiver_admitted;
-    bool admission_sent;
-    uint64_t peer;
-    uint8_t worker_signer[32];
-    uint8_t progress_stage;
-    uint8_t admission_disposition;
-    uint16_t worker_slot;
-    uint64_t lease_generation;
-    int64_t worker_capability_expires;
-    int64_t result_last_queued;
-    bool has_result;
-    struct vcs_zcode_work_request_v1 request;
-    struct vcs_zcode_work_result_v1 result;
-};
-
-struct work_slot {
-    bool used;
-    bool action_ready;
-    uint64_t generation;
-    uint64_t context_bytes;
-    int64_t deadline_unix;
-    struct vcs_zcode_work_request_v1 binding;
-};
-struct work_frame {
-    uint64_t peer;
-    size_t len;
-    uint8_t bytes[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
-};
-struct work_request_event {
-    uint64_t peer;
-    struct vcs_zcode_work_request_v1 request;
-};
-struct work_cancel_event {
-    uint64_t peer;
-    struct vcs_zcode_work_cancel_v1 cancel;
-};
-struct work_result_event {
-    uint64_t peer;
-    struct vcs_zcode_work_result_v1 result;
-};
-struct work_progress_event {
-    uint64_t peer;
-    struct vcs_zcode_work_progress_v1 progress;
-};
-struct work_admission_event {
-    uint64_t peer;
-    struct vcs_zcode_work_admission_v1 admission;
-};
-
-struct vcs_zcode_work_node {
-    pthread_mutex_t lock;
-    struct work_peer peers[VCS_ZCODE_WORK_NODE_MAX_PEERS];
-    struct work_track tracks[VCS_ZCODE_WORK_NODE_MAX_REQUESTS * 2u];
-    bool has_local_capability;
-    struct vcs_zcode_work_capability_v1 local_capability;
-    bool has_local_signer;
-    uint8_t local_signer_secret[32];
-    uint8_t local_signer_pubkey[32];
-    uint64_t next_lease_generation;
-    struct work_slot slots[64];
-    struct work_frame outbound[VCS_ZCODE_WORK_NODE_MAX_OUTBOUND];
-    size_t outbound_pos, outbound_count;
-    struct work_request_event requests[VCS_ZCODE_WORK_NODE_MAX_REQUESTS];
-    size_t request_pos, request_count;
-    struct work_cancel_event cancels[VCS_ZCODE_WORK_NODE_MAX_REQUESTS];
-    size_t cancel_pos, cancel_count;
-    struct work_result_event results[VCS_ZCODE_WORK_NODE_MAX_RESULTS];
-    size_t result_pos, result_count;
-    struct work_progress_event progresses[VCS_ZCODE_WORK_NODE_MAX_RESULTS];
-    size_t progress_pos, progress_count;
-    struct work_admission_event admissions[VCS_ZCODE_WORK_NODE_MAX_RESULTS];
-    size_t admission_pos, admission_count;
-};
 
 static struct vcs_zcode_work_node *g_work_node;
-#define ZCODE_WORK_PROJECTED_WORKERS_MAX 8u
 
-static struct vcs_zcode_work_capability_v1 work_effective_capability(
-    const struct vcs_zcode_work_node *node, int peer_at);
 
 struct vcs_zcode_work_node *vcs_zcode_work_node_create(void)
 {
@@ -158,165 +65,6 @@ struct vcs_zcode_work_node *vcs_zcode_work_node_global(void)
     return g_work_node;
 }
 
-static void work_signer_fingerprint(const uint8_t signer[32], char out[65])
-{
-    static const char domain[] = "zcl.zcode.work.signer.fingerprint.v1";
-    struct sha3_256_ctx hash;
-    uint8_t digest[32];
-    sha3_256_init(&hash);
-    sha3_256_write(&hash, (const uint8_t *)domain, sizeof(domain) - 1u);
-    sha3_256_write(&hash, signer, 32);
-    sha3_256_finalize(&hash, digest);
-    zcl_hex_encode(digest, sizeof(digest), out);
-}
-
-static const char *work_target_name(uint32_t target)
-{
-    return target == VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3
-        ? "linux-x86_64-v3" : "unknown";
-}
-
-static void work_push_kind_names(struct json_value *row, uint32_t mask)
-{
-    static const struct {
-        uint8_t kind;
-        const char *name;
-    } kinds[] = {
-        { VCS_ZCODE_WORK_PROPOSE, "propose" }, { VCS_ZCODE_WORK_BUILD, "build" },
-        { VCS_ZCODE_WORK_TEST, "test" }, { VCS_ZCODE_WORK_FUZZ, "fuzz" },
-        { VCS_ZCODE_WORK_REVIEW, "review" }, { VCS_ZCODE_WORK_REPRODUCE, "reproduce" },
-        { VCS_ZCODE_WORK_DIAGNOSE, "diagnose" },
-    };
-    struct json_value names = {0};
-    json_set_array(&names);
-    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
-        if ((mask & (UINT32_C(1) << kinds[i].kind)) == 0) continue;
-        struct json_value name = {0};
-        json_set_str(&name, kinds[i].name);
-        json_push_back(&names, &name);
-        json_free(&name);
-    }
-    json_push_kv(row, "work_kinds", &names);
-    json_free(&names);
-}
-
-static void work_push_confinement_names(struct json_value *row, uint32_t mask)
-{
-    static const struct {
-        uint32_t bit;
-        const char *name;
-    } facts[] = {
-        { VCS_ZCODE_WORK_CONFINEMENT_LANDLOCK, "landlock" },
-        { VCS_ZCODE_WORK_CONFINEMENT_SECCOMP, "seccomp" },
-        { VCS_ZCODE_WORK_CONFINEMENT_RLIMITS, "rlimits" },
-        { VCS_ZCODE_WORK_CONFINEMENT_NO_NETWORK, "no_network" },
-    };
-    struct json_value names = {0};
-    json_set_array(&names);
-    for (size_t i = 0; i < sizeof(facts) / sizeof(facts[0]); i++) {
-        if ((mask & facts[i].bit) == 0) continue;
-        struct json_value name = {0};
-        json_set_str(&name, facts[i].name);
-        json_push_back(&names, &name);
-        json_free(&name);
-    }
-    json_push_kv(row, "confinement", &names);
-    json_free(&names);
-}
-
-static void work_push_worker(struct json_value *workers, uint64_t peer_id,
-                             const struct vcs_zcode_work_capability_v1 *cap)
-{
-    char signer[65], toolchain[65];
-    work_signer_fingerprint(cap->signer_pubkey, signer);
-    zcl_hex_encode(cap->toolchain_capsule_root, 32, toolchain);
-    struct json_value row = {0};
-    json_set_object(&row);
-    json_push_kv_int(&row, "peer_id", (int64_t)peer_id);
-    json_push_kv_str(&row, "signer_fingerprint_sha3", signer);
-    json_push_kv_str(&row, "toolchain_capsule_root", toolchain);
-    json_push_kv_str(&row, "target", work_target_name(cap->target));
-    json_push_kv_int(&row, "work_kinds_mask", (int64_t)cap->work_kinds);
-    work_push_kind_names(&row, cap->work_kinds);
-    json_push_kv_int(&row, "confinement_mask", (int64_t)cap->confinement);
-    work_push_confinement_names(&row, cap->confinement);
-    json_push_kv_int(&row, "max_cpu_seconds", cap->max_cpu_seconds);
-    json_push_kv_int(&row, "max_memory_bytes", (int64_t)cap->max_memory_bytes);
-    json_push_kv_int(&row, "max_output_bytes", (int64_t)cap->max_output_bytes);
-    json_push_kv_int(&row, "max_lease_seconds", cap->max_lease_seconds);
-    json_push_kv_int(&row, "slots", cap->slots);
-    json_push_kv_int(&row, "queue_headroom", cap->queue_headroom);
-    json_push_kv_int(&row, "expires_unix", cap->expires_unix);
-    json_push_kv_str(&row, "freshness", "fresh");
-    json_push_back(workers, &row);
-    json_free(&row);
-}
-
-bool vcs_zcode_work_node_dump_state_json(struct json_value *out,
-                                         const char *key)
-{
-    (void)key;
-    if (!out) {
-        LOG_FAIL("zcode_work", "dump_state_json: out is NULL");
-    }
-    json_set_object(out);
-    struct vcs_zcode_work_node *node = g_work_node;
-    if (!node) {
-        json_push_kv_bool(out, "enabled", false);
-        json_push_kv_int(out, "worker_capacity", 0);
-        json_push_kv_int(out, "worker_active", 0);
-        json_push_kv_int(out, "worker_available", 0);
-        json_push_kv_int(out, "capable_peers", 0);
-        json_push_kv_int(out, "total", 0);
-        json_push_kv_int(out, "returned", 0);
-        json_push_kv_bool(out, "truncated", false);
-        struct json_value workers = {0};
-        json_set_array(&workers);
-        json_push_kv(out, "workers", &workers);
-        json_free(&workers);
-        json_push_kv_str(out, "next_action", "z23 join");
-        return true;
-    }
-    int64_t now = platform_time_wall_unix();
-    pthread_mutex_lock(&node->lock);
-    size_t capacity = node->has_local_capability
-        ? node->local_capability.slots : 0;
-    if (capacity > sizeof(node->slots) / sizeof(node->slots[0]))
-        capacity = sizeof(node->slots) / sizeof(node->slots[0]);
-    size_t active = 0;
-    for (size_t i = 0; i < capacity; i++)
-        active += node->slots[i].used ? 1u : 0u;
-    size_t total = 0, returned = 0;
-    struct json_value workers = {0};
-    json_set_array(&workers);
-    for (size_t i = 0; i < VCS_ZCODE_WORK_NODE_MAX_PEERS; i++) {
-        if (!node->peers[i].used || !node->peers[i].has_capability ||
-            now <= 0 || now >= node->peers[i].capability.expires_unix)
-            continue;
-        total++;
-        if (returned >= ZCODE_WORK_PROJECTED_WORKERS_MAX) continue;
-        struct vcs_zcode_work_capability_v1 effective =
-            work_effective_capability(node, (int)i);
-        work_push_worker(&workers, node->peers[i].id, &effective);
-        returned++;
-    }
-    json_push_kv_bool(out, "enabled", node->has_local_capability);
-    json_push_kv_int(out, "worker_capacity", (int64_t)capacity);
-    json_push_kv_int(out, "worker_active", (int64_t)active);
-    json_push_kv_int(out, "worker_available", (int64_t)(capacity - active));
-    json_push_kv_int(out, "capable_peers", (int64_t)total);
-    json_push_kv_int(out, "total", (int64_t)total);
-    json_push_kv_int(out, "returned", (int64_t)returned);
-    json_push_kv_bool(out, "truncated", returned < total);
-    json_push_kv(out, "workers", &workers);
-    json_free(&workers);
-    json_push_kv_str(out, "next_action",
-        node->has_local_capability
-            ? "zcode work toolchain"
-            : "z23 join");
-    pthread_mutex_unlock(&node->lock);
-    return true;
-}
 
 static int work_peer_slot(const struct vcs_zcode_work_node *node,
                           uint64_t peer)
@@ -333,7 +81,8 @@ static int work_peer_slot(const struct vcs_zcode_work_node *node,
  * one physical worker's capacity.  The signed queue_headroom remains an
  * upper bound; this local projection only subtracts leases this requester
  * already owns.  Caller holds node->lock. */
-static struct vcs_zcode_work_capability_v1 work_effective_capability(
+struct vcs_zcode_work_capability_v1
+zcode_work_node_effective_capability_internal(
     const struct vcs_zcode_work_node *node, int peer_at)
 {
     struct vcs_zcode_work_capability_v1 effective =
@@ -516,7 +265,7 @@ bool vcs_zcode_work_node_peer_capability(
     int slot = work_peer_slot(node, peer);
     bool ok = slot >= 0 && node->peers[slot].has_capability &&
               now < node->peers[slot].capability.expires_unix;
-    if (ok) *out = work_effective_capability(node, slot);
+    if (ok) *out = zcode_work_node_effective_capability_internal(node, slot);
     pthread_mutex_unlock(&node->lock);
     return ok;
 }
@@ -533,7 +282,7 @@ size_t vcs_zcode_work_node_capable_peers(
             now >= node->peers[i].capability.expires_unix)
             continue;
         peers[count] = node->peers[i].id;
-        capabilities[count] = work_effective_capability(node, (int)i);
+        capabilities[count] = zcode_work_node_effective_capability_internal(node, (int)i);
         count++;
     }
     pthread_mutex_unlock(&node->lock);
@@ -609,10 +358,86 @@ static struct work_track *work_find_track(struct vcs_zcode_work_node *node,
     return NULL;
 }
 
-static struct work_track *work_add_track(struct vcs_zcode_work_node *node)
+static bool work_event_matches(
+    const struct work_track *track, uint64_t peer, uint64_t request_id)
+{
+    return track->peer == peer && track->request.request_id == request_id;
+}
+
+static bool work_track_has_pending_event(
+    const struct vcs_zcode_work_node *node, const struct work_track *track)
+{
+    if (track->inbound) {
+        for (size_t i = 0; i < node->request_count; i++) {
+            size_t at = (node->request_pos + i) %
+                        VCS_ZCODE_WORK_NODE_MAX_REQUESTS;
+            if (work_event_matches(
+                    track, node->requests[at].peer,
+                    node->requests[at].request.request_id))
+                return true;
+        }
+        for (size_t i = 0; i < node->cancel_count; i++) {
+            size_t at = (node->cancel_pos + i) %
+                        VCS_ZCODE_WORK_NODE_MAX_REQUESTS;
+            if (work_event_matches(
+                    track, node->cancels[at].peer,
+                    node->cancels[at].cancel.request_id))
+                return true;
+        }
+    } else {
+        for (size_t i = 0; i < node->result_count; i++) {
+            size_t at = (node->result_pos + i) %
+                        VCS_ZCODE_WORK_NODE_MAX_RESULTS;
+            if (work_event_matches(
+                    track, node->results[at].peer,
+                    node->results[at].result.request_id))
+                return true;
+        }
+        for (size_t i = 0; i < node->admission_count; i++) {
+            size_t at = (node->admission_pos + i) %
+                        VCS_ZCODE_WORK_NODE_MAX_RESULTS;
+            if (work_event_matches(
+                    track, node->admissions[at].peer,
+                    node->admissions[at].admission.request_id))
+                return true;
+        }
+        for (size_t i = 0; i < node->progress_count; i++) {
+            size_t at = (node->progress_pos + i) %
+                        VCS_ZCODE_WORK_NODE_MAX_RESULTS;
+            if (work_event_matches(
+                    track, node->progresses[at].peer,
+                    node->progresses[at].progress.request_id))
+                return true;
+        }
+    }
+    return false;
+}
+
+static struct work_track *work_add_track(
+    struct vcs_zcode_work_node *node, int64_t now)
 {
     for (size_t i = 0; i < sizeof(node->tracks) / sizeof(node->tracks[0]); i++)
         if (!node->tracks[i].used) return &node->tracks[i];
+    /* Keep exact replay and late-result tombstones while space is free.
+     * Under pressure, a past-deadline lease can no longer authorize work;
+     * evicting it changes a late frame from LEASE_EXPIRED to UNREQUESTED,
+     * both of which refuse it. Pending cancellation must still reach the
+     * physical job, and a live local slot still owns its binding. */
+    for (size_t i = 0; i < sizeof(node->tracks) / sizeof(node->tracks[0]); i++) {
+        struct work_track *track = &node->tracks[i];
+        if (now < track->request.deadline_unix ||
+            (!track->finished && !track->cancelled && !track->expired) ||
+            work_track_has_pending_event(node, track))
+            continue;
+        if (track->inbound && track->worker_slot <
+                sizeof(node->slots) / sizeof(node->slots[0]) &&
+            node->slots[track->worker_slot].used &&
+            node->slots[track->worker_slot].generation ==
+                track->lease_generation)
+            continue;
+        memset(track, 0, sizeof(*track));
+        return track;
+    }
     return NULL;
 }
 
@@ -681,7 +506,7 @@ enum vcs_zcode_work_node_result vcs_zcode_work_node_submit(
                 &node->peers[peer_at].capability, request, now);
         } else {
             struct vcs_zcode_work_capability_v1 effective =
-                work_effective_capability(node, peer_at);
+                zcode_work_node_effective_capability_internal(node, peer_at);
             allowed = vcs_zcode_work_capability_allows(&effective, request, now);
         }
         if (!allowed)
@@ -689,14 +514,14 @@ enum vcs_zcode_work_node_result vcs_zcode_work_node_submit(
     }
     else if (result == VCS_ZCODE_WORK_NODE_OK && capacity_retry) {
         struct vcs_zcode_work_capability_v1 effective =
-            work_effective_capability(node, peer_at);
+            zcode_work_node_effective_capability_internal(node, peer_at);
         if (!vcs_zcode_work_capability_allows(&effective, request, now))
             result = VCS_ZCODE_WORK_NODE_CAPABILITY_MISMATCH;
     }
     else if (result == VCS_ZCODE_WORK_NODE_OK)
         result = VCS_ZCODE_WORK_NODE_REPLAY;
     struct work_track *track = result == VCS_ZCODE_WORK_NODE_OK
-        ? (capacity_retry ? existing : work_add_track(node)) : NULL;
+        ? (capacity_retry ? existing : work_add_track(node, now)) : NULL;
     if (result == VCS_ZCODE_WORK_NODE_OK && !track)
         result = VCS_ZCODE_WORK_NODE_FULL;
     if (result == VCS_ZCODE_WORK_NODE_OK) {
@@ -1009,7 +834,7 @@ static enum vcs_zcode_work_node_result work_handle_request(
             VCS_ZCODE_WORK_ADMISSION_REASON_CAPACITY, UINT16_MAX, 0, 0)
                 ? VCS_ZCODE_WORK_NODE_OK : VCS_ZCODE_WORK_NODE_FULL;
 
-    struct work_track *track = work_add_track(node);
+    struct work_track *track = work_add_track(node, now);
     if (!track)
         return work_queue_admission(
             node, peer, request, VCS_ZCODE_WORK_ADMISSION_REFUSED,

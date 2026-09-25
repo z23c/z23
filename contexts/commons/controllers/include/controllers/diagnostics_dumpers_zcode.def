@@ -25,7 +25,7 @@
                "peer capabilities with explicit truncation; signer keys are "
                "fingerprinted and no request, signature, or key data leaves "
                "the process",
-               "contexts/commons/modules/vcs/src/zcode_work_node.c",
+               "contexts/commons/modules/vcs/src/zcode_work_node_state.c",
                "tests/harness/src/test_zcode_dev_objects.c"),
 
     DIAG_ENTRY("zcode_dht", boot_zcode_dht_dump_state_json,
