@@ -136,3 +136,24 @@ observation; the receiver then checks independent trust and all missing
 artifacts before skipping an eligible group. Current receiver lookup and MMR
 are components, not that completed reuse path. The number of groups or
 seconds such a fix would save remains unmeasured.
+
+## Latest signed main merge
+
+On 2026-09-25 UTC, remote main was
+`205cd056eb87c303366b91fae995b959dc94bc8e`. The integration reviewed
+and merged its signed land conflict-classifier fix, then regenerated the
+inventory. The combined merge tip before this note is
+`1324123a02f24301ab28cb03dc65fafd997817dd`.
+
+| Latest combined gate | Outcome | Log SHA-256 |
+| --- | --- | --- |
+| `make CC=gcc -j8 t-fast ONLY=dev_land` | 1/1, zero skips, 119.4 s test body | `20fe4aea5851e5be86d4c2c76642d87c2d6338e79442db4be6ed7a542cc19c38` |
+| `make CC=gcc -j8 t-fast ONLY=zcode_dev_objects` | 1/1, zero skips | `8d3345ba98468b9427d1a3591d6a5401d807172685fb5b87e2f550acb3946fcd` |
+| `make CC=gcc -j8 t-fast ONLY=dev_proof_signer` | 1/1, zero skips | `1355af943f9c4969178ab73c70eb6fdf5c75d11e8434ca0730ea140fe394d423` |
+| `make CC=gcc -j8 t-fast ONLY=zcode_swarm` | 4/4, zero skips | `289196e737f94a3573cd7d953be6324151b7eaf14d49b6173f94b1cafabcafe3` |
+| Capability, codec, inventory, architecture, flag gates | pass | `2d3a073979edc9de2fcfa47d0366e042054edc24f9cabe60436f77446e924d9c` |
+| `make CC=gcc -j8 lint-fast` | 33/33 | `736edbe35f8ae593c7064ebf9f46a7a01bc4a39441c2198c0f13f14156639e47` |
+
+The prior land action remains a failed proof, and the refreshed source has
+no full signed publication receipt or remote observation yet. No DEV or
+release acceptance is inferred from these local gates.
