@@ -13,6 +13,7 @@
 
 #include "test/test_core.h"
 
+#include "chain/mmr.h"
 #include "test/proof_ticket_fixture.h"
 #include "vcs/package_store.h"
 
@@ -299,7 +300,7 @@ static int ptt_case_uncheckpointed(void)
         ASSERT(ptt_decide(&g_f.base, VCS_PROOF_ACTION_CHECK, NULL, cls, &d));
         ASSERT_EQ(d.outcome, VCS_PROOF_REUSE_MISS);
         ASSERT_STR_EQ(cls[0].reason, VCS_PROOF_TICKET_NOT_CHECKPOINTED);
-        ASSERT_STR_EQ(cls[1].reason, VCS_PROOF_TICKET_NOT_CHECKPOINTED);
+        ASSERT_STR_EQ(cls[1].reason, VCS_PROOF_TICKET_SIGNATURE_INVALID);
         /* A relay that swaps in the forged bytes cannot extend coverage. */
         uint8_t cp[VCS_PROOF_CHECKPOINT_WIRE_BYTES];
         ASSERT(vcs_proof_issuer_log_checkpoint(g_f.logs[PTF_B], 9, cp));
@@ -311,6 +312,62 @@ static int ptt_case_uncheckpointed(void)
         ASSERT_EQ(rep.outcome, VCS_PROOF_SYNC_REFUSED);
         ASSERT_STR_EQ(rep.reason, VCS_PROOF_SYNC_WHY_DELTA);
         ASSERT(!vcs_proof_receiver_issuer_equivocating(g_f.rx, g_f.pub[PTF_B]));
+    } TEST_END
+    return failures;
+}
+
+static int ptt_case_forged_ticket_under_signed_checkpoint(void)
+{
+    int failures = 0;
+    TEST_CASE("proof_ticket: signed checkpoint cannot cover forged ticket") {
+        ASSERT(ptt_fresh());
+        uint8_t ticket[VCS_PROOF_TICKET_WIRE_BYTES];
+        uint8_t root[32], checkpoint[VCS_PROOF_CHECKPOINT_WIRE_BYTES];
+        ASSERT(ptf_emit(&g_f, PTF_A, &g_f.base, ptf_pass(), ticket, NULL));
+        ticket[300] ^= 0x40; /* Keep the canonical body; break Ed25519. */
+        ASSERT(vcs_proof_ticket_observation_root(ticket, sizeof(ticket), root));
+        struct mmr log;
+        mmr_init(&log);
+        mmr_append(&log, root);
+        struct vcs_proof_checkpoint_v1 cp = {0};
+        cp.leaf_count = 1;
+        cp.created_unix = 1790000001u;
+        mmr_root(&log, cp.mmr_root);
+        ASSERT(vcs_proof_checkpoint_peaks_root(&log, cp.peaks_root));
+        ASSERT(vcs_proof_checkpoint_sign(&cp, g_f.seed[PTF_A]));
+        ASSERT(vcs_proof_checkpoint_encode(&cp, checkpoint));
+        ASSERT(vcs_proof_checkpoint_signature_valid(&cp));
+        const uint8_t *delta[1] = {ticket};
+        size_t lengths[1] = {sizeof(ticket)};
+        struct vcs_proof_sync_report rep;
+        ASSERT(vcs_proof_receiver_sync(g_f.rx, checkpoint, sizeof(checkpoint),
+                                       delta, lengths, 1, &rep));
+        ASSERT_EQ(rep.outcome, VCS_PROOF_SYNC_REFUSED);
+        ASSERT_STR_EQ(rep.reason, VCS_PROOF_SYNC_WHY_DELTA);
+        ASSERT_EQ(vcs_proof_receiver_issuer_leaves(g_f.rx, g_f.pub[PTF_A]),
+                  (uint64_t)0);
+        ASSERT_EQ(vcs_proof_receiver_issuer_checkpoints(g_f.rx, g_f.pub[PTF_A]),
+                  (size_t)0);
+    } TEST_END
+    return failures;
+}
+
+static int ptt_case_forged_ticket_classification(void)
+{
+    int failures = 0;
+    TEST_CASE("proof_ticket: classifier checks retained ticket signature") {
+        ASSERT(ptt_fresh());
+        uint8_t ticket[VCS_PROOF_TICKET_WIRE_BYTES];
+        ASSERT(ptf_emit(&g_f, PTF_A, &g_f.base, ptf_pass(), ticket, NULL));
+        ticket[300] ^= 0x40;
+        ASSERT(vcs_proof_receiver_add_ticket(g_f.rx, ticket, sizeof(ticket),
+                                             NULL));
+        struct vcs_proof_ticket_class cls[PTT_CLASS_CAP];
+        struct vcs_proof_reuse_decision d;
+        ASSERT(ptt_decide(&g_f.base, VCS_PROOF_ACTION_CHECK, NULL, cls, &d));
+        ASSERT_EQ(d.outcome, VCS_PROOF_REUSE_MISS);
+        ASSERT_EQ(d.tickets_seen, 1u);
+        ASSERT_STR_EQ(cls[0].reason, VCS_PROOF_TICKET_SIGNATURE_INVALID);
     } TEST_END
     return failures;
 }
@@ -567,6 +624,8 @@ int test_proof_ticket_reuse(void)
         failures += ptt_case_field(f);
     failures += ptt_case_flag_order();
     failures += ptt_case_uncheckpointed();
+    failures += ptt_case_forged_ticket_under_signed_checkpoint();
+    failures += ptt_case_forged_ticket_classification();
     failures += ptt_case_domain_signer(PTF_AUTHOR, "candidate author");
     failures += ptt_case_domain_signer(PTF_LOCAL, "same-uid local proof");
     failures += ptt_case_domain_signer(PTF_EXTRA, "candidate-domain extra");

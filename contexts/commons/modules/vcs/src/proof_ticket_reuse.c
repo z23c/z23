@@ -110,7 +110,9 @@ static void ptr_classify(const struct ptr_local *l, const struct pr_entry *e,
     c->verdict = t.verdict;
     memcpy(c->producer_pubkey, t.producer_pubkey, VCS_PROOF_PUBKEY_BYTES);
     memcpy(c->artifact_root, t.artifact_root, VCS_PROOF_ROOT_BYTES);
-    const char *why = ptr_identity(l, &t);
+    const char *why = vcs_proof_ticket_signature_valid(&t)
+        ? NULL : VCS_PROOF_TICKET_SIGNATURE_INVALID;
+    if (!why) why = ptr_identity(l, &t);
     if (!why) why = ptr_authority(l, &t);
     if (!why) why = ptr_coverage(l, e);
     c->eligible = why == NULL;

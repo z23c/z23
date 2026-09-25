@@ -41,10 +41,20 @@ struct pr_entry *pr_entry_find(const struct vcs_proof_receiver *r,
     return NULL;
 }
 
-static bool pr_entries_reserve(struct vcs_proof_receiver *r)
+static bool pr_entries_reserve(struct vcs_proof_receiver *r, size_t additional)
 {
-    if (r->count < r->cap) return true;
-    size_t cap = r->cap ? r->cap * 2u : 64u;
+    if (additional > SIZE_MAX - r->count)
+        LOG_RETURN(false, PRV_LOG, "receiver ticket count overflow");
+    size_t needed = r->count + additional;
+    if (needed <= r->cap) return true;
+    size_t cap = r->cap ? r->cap : 64u;
+    while (cap < needed) {
+        if (cap > SIZE_MAX / 2u) {
+            cap = needed;
+            break;
+        }
+        cap *= 2u;
+    }
     if (cap > SIZE_MAX / sizeof(struct pr_entry))
         LOG_RETURN(false, PRV_LOG, "receiver ticket capacity overflow");
     struct pr_entry *grown =
@@ -62,7 +72,7 @@ struct pr_entry *pr_entry_put(struct vcs_proof_receiver *r,
 {
     struct pr_entry *e = pr_entry_find(r, root);
     if (e) return e;
-    if (!pr_entries_reserve(r)) return NULL;
+    if (!pr_entries_reserve(r, 1)) return NULL;
     e = &r->entries[r->count++];
     memset(e, 0, sizeof(*e));
     memcpy(e->input_key, t->input_key, VCS_PROOF_ROOT_BYTES);
@@ -253,6 +263,7 @@ static bool pr_delta_shape(const struct pr_sync *s, uint8_t (*roots)[32],
         struct vcs_proof_ticket_v1 *t = &tickets[i];
         if (!s->delta[i] ||
             !vcs_proof_ticket_decode(s->delta[i], s->lens[i], t) ||
+            !vcs_proof_ticket_signature_valid(t) ||
             memcmp(t->producer_pubkey, s->c.issuer_pubkey, 32) != 0 ||
             t->issuer_seq != base + i ||
             !vcs_proof_ticket_observation_root(s->delta[i], s->lens[i],
@@ -278,6 +289,11 @@ static bool pr_commit(struct pr_sync *s, const struct mmr *next,
                       const struct vcs_proof_ticket_v1 *tickets,
                       uint8_t (*roots)[32])
 {
+    /* No covered ticket or verified checkpoint becomes visible unless all
+     * receiver storage needed by this delta is available. */
+    if (!pr_entries_reserve(s->r, s->n))
+        return pr_done(s->out, VCS_PROOF_SYNC_REFUSED,
+                       VCS_PROOF_SYNC_WHY_RESOURCES);
     if (!pr_retain(s->is, s, true))
         return pr_done(s->out, VCS_PROOF_SYNC_REFUSED,
                        VCS_PROOF_SYNC_WHY_RESOURCES);
