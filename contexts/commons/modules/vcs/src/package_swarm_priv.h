@@ -159,6 +159,13 @@ static inline bool vcs_swarm_peer_was_announced(const struct swarm_peer *peer,
     return false;
 }
 
+static inline enum vcs_swarm_fetch_result vcs_swarm_cached_fetch_result(
+    const struct vcs_package_store_status *status, uint64_t ceiling)
+{
+    return ceiling > 0 && status->total_bytes > ceiling
+        ? VCS_SWARM_FETCH_BYTE_LIMIT : VCS_SWARM_FETCH_ALREADY_COMPLETE;
+}
+
 /* Lock held. Implemented in package_swarm_node.c. */
 bool peer_advertises(const struct swarm_peer *peer, const uint8_t root[32]);
 uint32_t advertisers_of(const struct vcs_swarm_engine *engine,

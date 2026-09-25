@@ -358,6 +358,51 @@ static int bound_case_lift_authority(struct sw_node *n, struct sw_pkg *p,
     return failures;
 }
 
+static int bound_case_cached_complete(uint64_t bound)
+{
+    int failures = 0;
+    struct sw_node node;
+    struct sw_pkg package;
+    uint8_t key[33];
+    sw_key(95, key);
+    const uint64_t peer = 905;
+    if (!sw_node_open(&node, "cached_bound", sw_score_contributor) ||
+        !sw_make_package(&package, 1, 33))
+        return 1;
+    const uint64_t peers[1] = { peer };
+    uint32_t max_inflight = 0;
+    SW_CHECK("provider bound: ordinary peer rebinds",
+             vcs_swarm_engine_peer_add(node.engine, peer, key));
+    sw_announce(node.engine, peer, &package);
+    SW_CHECK("provider bound: ordinary fetch starts",
+             vcs_swarm_engine_fetch(node.engine, package.root, SW_DAY, 1) ==
+                 VCS_SWARM_FETCH_OK);
+    SW_CHECK("provider bound: ordinary fetch completes",
+             sw_drive_complete(&node, peers, 1, &package, &max_inflight));
+    SW_CHECK("provider bound: completed scheduler slot obeys new ceiling",
+             vcs_swarm_engine_fetch_from_bounded(
+                 node.engine, package.root, SW_DAY, 7, &peer, 1, bound) ==
+                 VCS_SWARM_FETCH_BYTE_LIMIT);
+    vcs_swarm_engine_free(node.engine);
+    node.engine = vcs_swarm_engine_create(
+        node.store, node.book, node.zcode_dir, sw_score_contributor, NULL);
+    SW_CHECK("provider bound: completed CAS survives restart",
+             node.engine != NULL);
+    SW_CHECK("provider bound: stored complete root obeys new ceiling",
+             vcs_swarm_engine_fetch_from_bounded(
+                 node.engine, package.root, SW_DAY, 8, &peer, 1, bound) ==
+                 VCS_SWARM_FETCH_BYTE_LIMIT);
+    SW_CHECK("provider bound: compatible cached root remains reusable",
+             vcs_swarm_engine_fetch_from_bounded(
+                 node.engine, package.root, SW_DAY, 8, &peer, 1,
+                 VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES) ==
+                 VCS_SWARM_FETCH_ALREADY_COMPLETE);
+    sw_free_package(&package);
+    sw_node_close(&node);
+    test_rm_rf_recursive(node.datadir);
+    return failures;
+}
+
 int t_swarm_bounded_provider(void)
 {
     int failures = 0;
@@ -379,6 +424,7 @@ int t_swarm_bounded_provider(void)
     failures += bound_case_oversized_manifest_fails(&n, &p, peer, key,
                                                     bound);
     failures += bound_case_lift_authority(&n, &p, peer, bound);
+    failures += bound_case_cached_complete(bound);
 
     sw_free_package(&p);
     sw_node_close(&n);

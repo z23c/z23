@@ -1689,7 +1689,7 @@ static enum vcs_swarm_fetch_result swarm_fetch(
                 engine->store, package_root, &complete_status) &&
             complete_status.complete) {
             pthread_mutex_unlock(&engine->lock);
-            return VCS_SWARM_FETCH_ALREADY_COMPLETE;
+            return vcs_swarm_cached_fetch_result(&complete_status, maximum_package_bytes);
         }
         /* COMPLETE is a possession cache, never authority. A verified read
          * may have quarantined a corrupt CAS object since this slot last ran;
@@ -1736,7 +1736,7 @@ static enum vcs_swarm_fetch_result swarm_fetch(
                                          &st) && st.tracked;
     if (already_tracked && st.complete) {
         pthread_mutex_unlock(&engine->lock);
-        return VCS_SWARM_FETCH_ALREADY_COMPLETE;
+        return vcs_swarm_cached_fetch_result(&st, maximum_package_bytes);
     }
     /* Prefer a free, then durable-complete, then failed slot. */
     int slot = -1, complete_slot = -1, failed_slot = -1;

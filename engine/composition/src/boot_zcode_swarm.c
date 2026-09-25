@@ -50,6 +50,8 @@
 #include <unistd.h>
 #define ZCODE_SWARM_SYNC_PERIOD_SEC 15
 #define ZCODE_SWARM_TICK_PERIOD_SEC 1
+static_assert(VCS_ZCODE_TASK_MAX_OUTPUT_BYTES <= UINT64_MAX - 32u,
+              "signed output limit must leave room for action binding");
 static zcl_mutex_t s_lock;
 static bool s_lock_init;
 static struct vcs_swarm_engine *s_engine;   /* owned here */
@@ -584,6 +586,46 @@ static const uint8_t *boot_zcode_work_request_context_root(
             ? NULL : request->context_root;
 }
 
+static uint64_t boot_zcode_work_fetch_limit(
+    const struct vcs_zcode_work_swarm_message *message, uint64_t peer)
+{
+    if (message->type == VCS_ZCODE_WORK_SWARM_REQUEST)
+        return VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES;
+    if (message->type != VCS_ZCODE_WORK_SWARM_RESULT)
+        return 0;
+    struct vcs_zcode_work_request_v1 request;
+    if (!vcs_zcode_work_node_outbound_request(
+            s_work, peer, message->body.result.request_id, &request))
+        return 0;
+    /* The signed request is validated at <= 4 GiB, leaving ample room for
+     * the output carrier's 32-byte action root in this uint64_t sum. */
+    uint64_t limit = request.max_output_bytes + 32u;
+    return limit < VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES
+        ? limit : VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES;
+}
+
+static void boot_zcode_work_fetch(
+    struct vcs_swarm_engine *engine,
+    const struct vcs_zcode_work_swarm_message *message,
+    const uint8_t wanted[32], uint64_t peer, int64_t day, uint64_t now)
+{
+    uint64_t limit = boot_zcode_work_fetch_limit(message, peer);
+    enum vcs_swarm_fetch_result fetched = limit
+        ? vcs_swarm_engine_fetch_from_bounded(
+            engine, wanted, day, now, &peer, 1, limit)
+        : VCS_SWARM_FETCH_BAD_INPUT;
+    if (fetched == VCS_SWARM_FETCH_OK ||
+        fetched == VCS_SWARM_FETCH_ALREADY_COMPLETE) {
+        vcs_swarm_engine_schedule_ready(engine, day, now);
+        return;
+    }
+    char wanted_hex[65];
+    zcl_hex_encode(wanted, 32, wanted_hex);
+    LOG_WARN("net.zcode_swarm", "work root %s fetch refused: %s limit=%llu",
+             wanted_hex, vcs_swarm_fetch_result_string(fetched),
+             (unsigned long long)limit);
+}
+
 bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
                             const uint8_t *payload, size_t payload_len,
                             void *ctx)
@@ -644,15 +686,11 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
                         &message.body.request, peer_id, (int64_t)now)
                     : message.type == VCS_ZCODE_WORK_SWARM_RESULT
                     ? message.body.result.output_root : NULL;
-                if (wanted) {
-                    /* The accepted signed work frame binds this immutable
-                     * root to the authenticated transport sender.  Fetch
-                     * directly from that session instead of waiting behind
-                     * the independent broadcast-ANNOUNCE quota. */
-                    (void)vcs_swarm_engine_fetch_from(
-                        engine, wanted, day, now, &peer_id, 1);
-                    vcs_swarm_engine_schedule_ready(engine, day, now);
-                }
+                /* The accepted signed frame binds this root to the
+                 * authenticated sender; the fetch remains asynchronous. */
+                if (wanted)
+                    boot_zcode_work_fetch(engine, &message, wanted,
+                                          peer_id, day, now);
                 /* Network callbacks may advance only the in-memory swarm.
                  * SQLite-backed admission/projection remains owned by the
                  * periodic service lane; doing it here races foreground
