@@ -1,0 +1,26 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+
+diff --git a/tests/harness/src/test_zcode_swarm_transfer.c b/tests/harness/src/test_zcode_swarm_transfer.c
+index 6de1832f6..4b83fcc38 100644
+--- a/tests/harness/src/test_zcode_swarm_transfer.c
++++ b/tests/harness/src/test_zcode_swarm_transfer.c
+@@ -362,2 +362,5 @@ static int resume_case_finish(struct sw_node *n, struct sw_pkg *p,
+     sw_announce(n->engine, peer, p);
++    struct vcs_service_key_totals before = {0};
++    SW_CHECK("pre-resume verified byte total",
++             vcs_service_key_totals(n->book, key, SW_DAY, &before));
+     uint32_t max_inflight = 0;
+@@ -377,2 +380,10 @@ static int resume_case_finish(struct sw_node *n, struct sw_pkg *p,
+              totals.verified_bytes_downloaded == served);
++    if (totals.verified_bytes_downloaded >=
++        before.verified_bytes_downloaded)
++        printf("CHUNK_RESUME_PROBE fresh_payload=%llu preverified=%llu resume_payload=%llu avoided_on_resume=%llu\n",
++               (unsigned long long)served,
++               (unsigned long long)before.verified_bytes_downloaded,
++               (unsigned long long)(totals.verified_bytes_downloaded -
++                                    before.verified_bytes_downloaded),
++               (unsigned long long)before.verified_bytes_downloaded);
+     return failures;
+@@ -925,2 +936 @@ int t_swarm_blob_transfer(void)
+ }
+-
