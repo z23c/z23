@@ -1755,7 +1755,7 @@ fail:
     }
     receipt->total_us = platform_time_monotonic_us() - started;
     zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                    plan.ldflags, cached_dep, receipt);
+                                    plan.ldflags, NULL, receipt);
     return false;
 }
 
@@ -2375,6 +2375,8 @@ success:
     if (cache_fd >= 0) {
         (void)flock(cache_fd, LOCK_UN); (void)close(cache_fd);
     }
+    zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
+                                    unity, cached_dep, receipt);
     (void)unlink(unity); (void)unlink(descriptor);
     (void)unlink(candidate_obj); (void)unlink(descriptor_obj);
     if (dep[0]) (void)unlink(dep);
@@ -2385,6 +2387,8 @@ fail:
     if (cache_fd >= 0) {
         (void)flock(cache_fd, LOCK_UN); (void)close(cache_fd);
     }
+    zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
+                                    unity, NULL, receipt);
     if (unity[0]) (void)unlink(unity);
     if (descriptor[0]) (void)unlink(descriptor);
     if (candidate_obj[0]) (void)unlink(candidate_obj);

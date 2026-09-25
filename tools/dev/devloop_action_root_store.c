@@ -16,6 +16,7 @@
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "hotswap/hotfork_capsule.h"
 #include "hotswap/hotswap.h"
 #include "hotswap/hotswap_module.h"
 #include "hotswap/hotswap_service.h"
@@ -446,6 +447,7 @@ struct ars_argv {
     char source_define[320];
     char service_define[320];
     char input[PATH_MAX];
+    char unity_token[320];
     const char *v[ARS_ARG_MAX];
     size_t n;
     char link_cc[512];
@@ -528,20 +530,70 @@ static const char *const *ars_environ(void)
 #endif
 }
 
-static void ars_policy_root(uint8_t out[32])
+/* Mirror of hs_run_hotfork_compile(): the capsule unity is compiled from a
+ * temporary .resident-* spelling, recorded under the stable token
+ * build/hotswap-fast/<owner>.hotfork-unity.c (a virtual generated input). */
+static bool ars_hotfork_argv(const char *root, const char *owner,
+                             const char *cc, const char *cflags,
+                             struct ars_argv *a)
 {
-    static const char policy[] =
-        "zcl.action_policy.v2\0hotswap.compile+link;timeout_ms=30000;"
-        "env=inherited-allowlist;network=ambient";
-    zcl_sha3_256((const unsigned char *)policy, sizeof(policy), out);
+    char safe[256];
+    (void)snprintf(a->cc, sizeof(a->cc), "%s", cc);
+    (void)snprintf(a->cflags, sizeof(a->cflags), "%s", cflags);
+    if (!ars_safe_name(owner, safe) ||
+        snprintf(a->unity_token, sizeof(a->unity_token),
+                 "build/hotswap-fast/%s.hotfork-unity.c", safe) >=
+            (int)sizeof(a->unity_token) ||
+        snprintf(a->input, sizeof(a->input), "%s/%s", root, a->unity_token) >=
+            (int)sizeof(a->input))
+        return false;
+    a->n = zcl_argv_split(a->cc, a->v, ARS_ARG_MAX);
+    a->n += zcl_argv_split(a->cflags, a->v + a->n, ARS_ARG_MAX - a->n);
+    static const char *const tail[] = {
+        "-fPIC", "-fvisibility=hidden", "-MD", "-MF", "@out/depfile",
+        "-c", "-o", "@out/object",
+    };
+    size_t tail_n = sizeof(tail) / sizeof(tail[0]);
+    if (a->n == 0 || a->n + tail_n + 2 >= ARS_ARG_MAX)
+        return false;
+    for (size_t i = 0; i < tail_n; i++)
+        a->v[a->n++] = tail[i];
+    a->v[a->n++] = a->input;
+    a->v[a->n] = NULL;
+    return true;
 }
 
-struct ars_hook {
-    struct ars_argv argv;
-    struct ars_driver driver;
-    const char *system_dirs[ARS_SYSTEM_DIR_MAX];
-    struct vcs_toolchain_capsule_v1 capsule;
-    struct zcl_action_root_request req;
+/* Mirror of hs_run_hotfork_link(): no plan link flags; the version script,
+ * module, candidate object and descriptor object are declared outputs. */
+static bool ars_hotfork_link_argv(const char *cc, struct ars_argv *a)
+{
+    (void)snprintf(a->link_cc, sizeof(a->link_cc), "%s", cc);
+    a->link_n = zcl_argv_split(a->link_cc, a->link, ARS_ARG_MAX);
+    static const char *const tail[] = {
+        "-shared", "-nostartfiles", "-Wl,--build-id=none", "-Wl,-z,relro",
+        "-Wl,-z,noexecstack", "-Wl,-Bsymbolic",
+        "-Wl,--version-script=@out/version-script", "-o", "@out/module",
+        "@out/object", "@out/descriptor",
+    };
+    size_t tail_n = sizeof(tail) / sizeof(tail[0]);
+    if (a->link_n == 0 || a->link_n + tail_n + 1 >= ARS_ARG_MAX)
+        return false;
+    for (size_t i = 0; i < tail_n; i++)
+        a->link[a->link_n++] = tail[i];
+    a->link[a->link_n] = NULL;
+    return true;
+}
+
+/* What differs between the hot-swap module action and the HOT_FORK capsule
+ * action: stage, the ABI the artifact is loaded against, and the policy. */
+struct ars_stage {
+    const char *kind;
+    uint32_t version;
+    uint32_t abi_generation;
+    const struct vcs_action_abi_v2 *abi;
+    size_t abi_count;
+    const char *policy;
+    size_t policy_len;
 };
 
 /* The generation a hotload module is loaded against is the host ABI; the
@@ -551,48 +603,105 @@ static const struct vcs_action_abi_v2 g_hotswap_abi[] = {
     { "hotswap_module", ZCL_HOTSWAP_MODULE_ABI_V3 },
     { "hotswap_service", ZCL_HOTSWAP_SERVICE_ABI_V1 },
 };
+static const struct vcs_action_abi_v2 g_hotfork_abi[] = {
+    { "hotfork_capsule", ZCL_HOTFORK_CAPSULE_ABI_V1 },
+};
+static const char g_hotswap_policy[] =
+    "zcl.action_policy.v2\0hotswap.compile+link;timeout_ms=30000;"
+    "env=inherited-allowlist;network=ambient";
+static const char g_hotfork_policy[] =
+    "zcl.action_policy.v2\0hotfork.compile+descriptor+link;timeout_ms=30000;"
+    "env=inherited-allowlist;network=ambient";
+
+static const struct ars_stage g_hotswap_stage = {
+    ZCL_ACTION_ROOT_STAGE_HOTSWAP, ZCL_ACTION_ROOT_STAGE_HOTSWAP_VERSION,
+    ZCL_HOTSWAP_HOST_ABI_V4, g_hotswap_abi,
+    sizeof(g_hotswap_abi) / sizeof(g_hotswap_abi[0]), g_hotswap_policy,
+    sizeof(g_hotswap_policy),
+};
+static const struct ars_stage g_hotfork_stage = {
+    ZCL_ACTION_ROOT_STAGE_HOTFORK, ZCL_ACTION_ROOT_STAGE_HOTFORK_VERSION,
+    ZCL_HOTFORK_CAPSULE_ABI_V1, g_hotfork_abi,
+    sizeof(g_hotfork_abi) / sizeof(g_hotfork_abi[0]), g_hotfork_policy,
+    sizeof(g_hotfork_policy),
+};
+
+struct ars_hook {
+    struct ars_argv argv;
+    struct ars_driver driver;
+    const char *system_dirs[ARS_SYSTEM_DIR_MAX];
+    struct vcs_toolchain_capsule_v1 capsule;
+    struct zcl_action_root_request req;
+};
 
 struct ars_compile {
     const char *root, *owner, *cc, *cflags, *ldflags, *depfile;
+    const char *unity; /* HOT_FORK: the live unity file; NULL for hot-swap */
 };
 
+/* The first miss wins: a stable code plus a human detail. */
+struct ars_miss {
+    char code[40];
+    char why[192];
+};
+
+static void ars_miss_set(struct ars_miss *m, const char *code,
+                         const char *what, const char *arg)
+{
+    if (!m->code[0])
+        (void)snprintf(m->code, sizeof(m->code), "%s", code);
+    ars_why(m->why, sizeof(m->why), what, arg);
+}
+
+static bool ars_hook_argv(struct ars_hook *h, const struct ars_compile *k)
+{
+    if (k->unity)
+        return ars_hotfork_argv(k->root, k->owner, k->cc, k->cflags,
+                                &h->argv) &&
+               ars_hotfork_link_argv(k->cc, &h->argv);
+    return ars_hotswap_argv(k->owner, k->cc, k->cflags, k->depfile,
+                            &h->argv) &&
+           ars_hotswap_link_argv(k->cc, k->ldflags, &h->argv);
+}
+
 static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
-                            char *why, size_t why_len)
+                            struct ars_miss *m)
 {
     struct zcl_action_root_request *r = &h->req;
     if (!vcs_toolchain_capsule_v1_capture(&h->capsule) ||
         !vcs_toolchain_capsule_v1_root(&h->capsule, r->toolchain_root)) {
-        ars_why(why, why_len, "toolchain capsule unavailable", NULL);
+        ars_miss_set(m, "toolchain_unavailable",
+                     "toolchain capsule unavailable", NULL);
         return false;
     }
     if (!ars_driver_facts(k->cc, &h->driver)) {
-        ars_why(why, why_len, "compiler driver facts unavailable", k->cc);
+        ars_miss_set(m, "driver_facts_unavailable",
+                     "compiler driver facts unavailable", k->cc);
         return false;
     }
-    if (!ars_hotswap_argv(k->owner, k->cc, k->cflags, k->depfile,
-                          &h->argv) ||
-        !ars_hotswap_link_argv(k->cc, k->ldflags, &h->argv)) {
-        ars_why(why, why_len, "compile argv or depfile input unavailable",
-                k->depfile);
+    if (!ars_hook_argv(h, k)) {
+        ars_miss_set(m, "argv_unavailable",
+                     "compile argv or depfile input unavailable", k->depfile);
         return false;
     }
     return true;
 }
 
-static bool ars_hook_request(struct ars_hook *h, const struct ars_compile *k,
-                             char *why, size_t why_len)
+static void ars_hook_request(struct ars_hook *h, const struct ars_compile *k)
 {
+    const struct ars_stage *st = k->unity ? &g_hotfork_stage
+                                          : &g_hotswap_stage;
     struct zcl_action_root_request *r = &h->req;
-    if (!ars_hook_inputs(h, k, why, why_len))
-        return false;
     for (size_t i = 0; i < h->driver.count; i++)
         h->system_dirs[i] = h->driver.dirs[i];
     r->root = k->root;
-    r->stage_kind = ZCL_ACTION_ROOT_STAGE_HOTSWAP;
-    r->stage_version = ZCL_ACTION_ROOT_STAGE_HOTSWAP_VERSION;
+    r->stage_kind = st->kind;
+    r->stage_version = st->version;
     r->argv = h->argv.v;
     r->argc = h->argv.n;
     r->depfile = k->depfile;
+    r->virtual_input_token = k->unity ? h->argv.unity_token : NULL;
+    r->virtual_input_path = k->unity;
     r->system_dirs = h->system_dirs;
     r->system_dir_count = h->driver.count;
     r->sysroot = h->driver.sysroot;
@@ -603,52 +712,109 @@ static bool ars_hook_request(struct ars_hook *h, const struct ars_compile *k,
         .argv = h->argv.link, .argc = h->argv.link_n,
     };
     r->environ = ars_environ();
-    r->abi_generation = ZCL_HOTSWAP_HOST_ABI_V4;
-    r->abi = g_hotswap_abi;
-    r->abi_count = sizeof(g_hotswap_abi) / sizeof(g_hotswap_abi[0]);
+    r->abi_generation = st->abi_generation;
+    r->abi = st->abi;
+    r->abi_count = st->abi_count;
     r->policy.present = true;
-    ars_policy_root(r->policy.root);
+    zcl_sha3_256((const unsigned char *)st->policy, st->policy_len,
+                 r->policy.root);
+}
+
+/* A build that did not complete never observed this attempt's closure, and
+ * a depfile that is gone names nothing: both are misses, not roots. */
+static bool ars_hook_closure_known(const struct ars_compile *k,
+                                   struct ars_miss *m)
+{
+    if (!k->root || !k->owner || !k->cc || !k->cflags || !k->ldflags) {
+        ars_miss_set(m, "request_incomplete",
+                     "hotload compile identity is incomplete", NULL);
+        return false;
+    }
+    if (!k->depfile) {
+        ars_miss_set(m, "closure_unobserved",
+                     "the build did not complete, so this attempt's "
+                     "dependency closure was never observed", k->owner);
+        return false;
+    }
+    if (access(k->depfile, F_OK) != 0) {
+        ars_miss_set(m, "depfile_missing", "dependency file is absent",
+                     k->owner);
+        return false;
+    }
     return true;
 }
 
 static bool ars_hook_derive(const struct ars_compile *k,
                             struct zcl_action_root_result *result,
-                            char *why, size_t why_len)
+                            struct ars_miss *m)
 {
-    if (!k->root || !k->owner || !k->cc || !k->cflags || !k->ldflags ||
-        !k->depfile) {
-        ars_why(why, why_len, "hotload compile identity is incomplete", NULL);
+    if (!ars_hook_closure_known(k, m))
         return false;
-    }
     struct ars_hook *h = zcl_calloc(1, sizeof(*h), "action root hook");
     if (!h) {
-        ars_why(why, why_len, "action root hook allocation failed", NULL);
+        ars_miss_set(m, "out_of_memory", "action root hook allocation failed",
+                     NULL);
         return false;
     }
-    bool ok = ars_hook_request(h, k, why, why_len) &&
-              zcl_action_root_derive(&h->req, result);
-    if (!ok)
-        ars_why(why, why_len,
-                result->why[0] ? result->why : "action root refused", NULL);
+    bool ok = ars_hook_inputs(h, k, m);
+    if (ok) {
+        ars_hook_request(h, k);
+        ok = zcl_action_root_derive(&h->req, result);
+        if (!ok)
+            ars_miss_set(m, result->miss[0] ? result->miss : "encode_refused",
+                         result->why[0] ? result->why : "action root refused",
+                         NULL);
+    }
     free(h);
     return ok;
 }
 
-static void ars_hook_store(const char *owner,
+static void ars_hook_store(const char *unit,
                            const struct zcl_action_root_result *result,
                            struct zcl_devloop_hotswap_build_receipt *receipt,
-                           char *why, size_t why_len)
+                           struct ars_miss *m)
 {
     char store[PATH_MAX];
     if (zcl_action_root_store_dir(store, sizeof(store)) &&
-        zcl_action_root_record(store, owner, result,
+        zcl_action_root_record(store, unit, result,
                                receipt->action_root_cause,
-                               sizeof(receipt->action_root_cause), why,
-                               why_len))
+                               sizeof(receipt->action_root_cause), m->why,
+                               sizeof(m->why)))
         (void)snprintf(receipt->action_root, sizeof(receipt->action_root),
                        "%s", result->root_hex);
     else
-        ars_why(why, why_len, "action root store unavailable", NULL);
+        ars_miss_set(m, "store_unavailable", "action root store unavailable",
+                     NULL);
+}
+
+static void ars_hook_run(const struct ars_compile *k, const char *unit,
+                         struct zcl_devloop_hotswap_build_receipt *receipt)
+{
+    receipt->action_root[0] = '\0';
+    receipt->action_root_cause[0] = '\0';
+    receipt->action_root_miss[0] = '\0';
+    receipt->action_root_miss_detail[0] = '\0';
+    struct ars_miss m = {0};
+    struct zcl_action_root_result result = {0};
+    int64_t started = platform_time_monotonic_us();
+    bool derived = ars_hook_derive(k, &result, &m);
+    receipt->action_root_us = platform_time_monotonic_us() - started;
+    receipt->action_root_probes = result.probes;
+    receipt->action_root_present = result.present;
+    int64_t store_started = platform_time_monotonic_us();
+    if (derived)
+        ars_hook_store(unit, &result, receipt, &m);
+    receipt->action_root_store_us =
+        platform_time_monotonic_us() - store_started;
+    if (!receipt->action_root[0]) {
+        receipt->action_root_cause[0] = '\0';
+        ars_miss_set(&m, "unclassified", "action root missed", NULL);
+        (void)snprintf(receipt->action_root_miss,
+                       sizeof(receipt->action_root_miss), "%s", m.code);
+        (void)snprintf(receipt->action_root_miss_detail,
+                       sizeof(receipt->action_root_miss_detail), "%s", m.why);
+    }
+    zcl_action_root_result_free(&result);
 }
 
 void zcl_devloop_action_root_hotswap(
@@ -658,27 +824,23 @@ void zcl_devloop_action_root_hotswap(
 {
     if (!receipt)
         return;
-    receipt->action_root[0] = '\0';
-    receipt->action_root_cause[0] = '\0';
-    receipt->action_root_refused[0] = '\0';
-    char why[192] = {0};
-    struct zcl_action_root_result result = {0};
-    const struct ars_compile k = { root, owner, cc, cflags, ldflags,
-                                   depfile };
-    int64_t started = platform_time_monotonic_us();
-    bool derived = ars_hook_derive(&k, &result, why, sizeof(why));
-    receipt->action_root_us = platform_time_monotonic_us() - started;
-    receipt->action_root_probes = result.probes;
-    receipt->action_root_present = result.present;
-    int64_t store_started = platform_time_monotonic_us();
-    if (derived)
-        ars_hook_store(owner, &result, receipt, why, sizeof(why));
-    receipt->action_root_store_us =
-        platform_time_monotonic_us() - store_started;
-    if (!receipt->action_root[0])
-        (void)snprintf(receipt->action_root_refused,
-                       sizeof(receipt->action_root_refused), "%s", why);
-    zcl_action_root_result_free(&result);
+    const struct ars_compile k = { root, owner, cc, cflags, ldflags, depfile,
+                                   NULL };
+    ars_hook_run(&k, owner, receipt);
+}
+
+void zcl_devloop_action_root_hotfork(
+    const char *root, const char *owner, const char *cc, const char *cflags,
+    const char *unity, const char *depfile,
+    struct zcl_devloop_hotswap_build_receipt *receipt)
+{
+    if (!receipt)
+        return;
+    char unit[320];
+    (void)snprintf(unit, sizeof(unit), "hotfork:%s", owner ? owner : "");
+    const struct ars_compile k = { root, owner, cc, cflags, "",
+                                   depfile, unity ? unity : "" };
+    ars_hook_run(&k, unit, receipt);
 }
 
 void zcl_devloop_action_root_emit(
@@ -686,7 +848,7 @@ void zcl_devloop_action_root_emit(
     const struct zcl_devloop_hotswap_build_receipt *build)
 {
     if (!receipt_json || !build ||
-        (!build->action_root[0] && !build->action_root_refused[0]))
+        (!build->action_root[0] && !build->action_root_miss[0]))
         return;
     (void)json_push_kv_str(receipt_json, "action_root_schema",
                            VCS_ACTION_PREIMAGE_V2_MAGIC);
@@ -696,8 +858,16 @@ void zcl_devloop_action_root_emit(
         (void)json_push_kv_str(receipt_json, "action_root_cause",
                                build->action_root_cause);
     } else {
-        (void)json_push_kv_str(receipt_json, "action_root_refused",
-                               build->action_root_refused);
+        struct json_value none;
+        json_init(&none);
+        json_set_null(&none);
+        (void)json_push_kv(receipt_json, "action_root", &none);
+        json_free(&none);
+        (void)json_push_kv_str(receipt_json, "action_root_cause", "miss");
+        (void)json_push_kv_str(receipt_json, "action_root_miss_reason",
+                               build->action_root_miss);
+        (void)json_push_kv_str(receipt_json, "action_root_miss_detail",
+                               build->action_root_miss_detail);
     }
     (void)json_push_kv_int(receipt_json, "action_root_ms",
                            build->action_root_us / 1000);

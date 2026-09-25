@@ -173,7 +173,18 @@ struct ar_ctx {
     size_t root_len;
     char *why;
     size_t why_len;
+    char *miss;
+    size_t miss_len;
 };
+
+/* Record the first miss: a stable code plus a human detail. */
+static void ar_fail(const struct ar_ctx *c, const char *code,
+                    const char *what, const char *arg)
+{
+    if (c->miss && c->miss_len && !c->miss[0])
+        (void)snprintf(c->miss, c->miss_len, "%s", code);
+    ar_why(c->why, c->why_len, what, arg);
+}
 
 /* Token and filesystem path for an absolute, normalized spelling: inside
  * the checkout it is repo-relative, under a system prefix "@sys/...". */
@@ -466,27 +477,68 @@ struct ar_state {
     uint32_t probes;
 };
 
+/* A depfile that names a file which is gone (stale) or unreadable. */
+static void ar_dep_miss(struct ar_state *s, const struct ar_dep *d)
+{
+    if (platform_file_shape_read(d->fs) == PLATFORM_FILE_SHAPE_MISSING)
+        ar_fail(&s->c, "dependency_missing", "dependency no longer exists",
+                d->token);
+    else
+        ar_fail(&s->c, "dependency_unreadable",
+                "dependency could not be hashed", d->token);
+}
+
+/* The HOT_FORK unity reaches the compiler under a temporary spelling that
+ * never enters the root; it is recorded under its stable token instead. */
+static bool ar_virtual_dep_add(struct ar_state *s)
+{
+    const struct zcl_action_root_request *req = s->c.req;
+    if (!req->virtual_input_token)
+        return true;
+    char raw[PATH_MAX];
+    struct ar_dep *d = &s->deps[s->dep_n];
+    int n = snprintf(raw, sizeof(raw), "%s/%s", req->root,
+                     req->virtual_input_token);
+    if (n <= 0 || n >= (int)sizeof(raw) || !req->virtual_input_path ||
+        !ar_tokenize(&s->c, raw, d->token, d->fs) ||
+        strcmp(d->token, req->virtual_input_token) != 0 ||
+        strncmp(d->token, "build/", 6) != 0) {
+        ar_fail(&s->c, "request_incomplete",
+                "virtual input has no canonical generated token",
+                req->virtual_input_token);
+        return false;
+    }
+    (void)snprintf(d->fs, PATH_MAX, "%s", req->virtual_input_path);
+    d->generated = true;
+    if (!ar_sha3_generated(&s->c, d->fs, d->sha3)) {
+        ar_dep_miss(s, d);
+        return false;
+    }
+    s->dep_n++;
+    return true;
+}
+
 static bool ar_dep_add(struct ar_state *s, const char *raw)
 {
     if (strstr(raw, "build/hotswap-fast/.resident-"))
         return true; /* bounded temporary wrapper, never source authority */
     if (s->dep_n >= ZCL_ACTION_ROOT_MAX_DEPS) {
-        ar_why(s->c.why, s->c.why_len, "dependency closure too large", NULL);
+        ar_fail(&s->c, "closure_too_large", "dependency closure too large",
+                NULL);
         return false;
     }
     struct ar_dep *d = &s->deps[s->dep_n];
     if (!ar_tokenize(&s->c, raw, d->token, d->fs) ||
         strcmp(d->token, ".") == 0) {
-        ar_why(s->c.why, s->c.why_len,
-               "dependency has no canonical spelling", raw);
+        ar_fail(&s->c, "dependency_outside_repo",
+                "dependency has no canonical spelling", raw);
         return false;
     }
     d->generated = strncmp(d->token, "build/", 6) == 0;
     bool hashed = d->generated ? ar_sha3_generated(&s->c, d->fs, d->sha3)
                                : ar_sha3_file(d->fs, d->sha3);
     if (!hashed) {
-        ar_why(s->c.why, s->c.why_len, "dependency could not be hashed",
-               d->token);
+        ar_dep_miss(s, d);
         return false;
     }
     s->dep_n++;
@@ -506,6 +558,18 @@ static char *ar_depfile_rule(char *text, size_t len)
     return colon;
 }
 
+static void ar_depfile_miss(struct ar_state *s, bool read)
+{
+    const char *code = "depfile_malformed";
+    if (!read)
+        code = platform_file_shape_read(s->c.req->depfile) ==
+                       PLATFORM_FILE_SHAPE_MISSING
+                   ? "depfile_missing"
+                   : "depfile_unreadable";
+    ar_fail(&s->c, code, "dependency file absent, unreadable or malformed",
+            NULL);
+}
+
 /* Walk the first rule's prerequisites. */
 static bool ar_depfile_load(struct ar_state *s)
 {
@@ -513,12 +577,11 @@ static bool ar_depfile_load(struct ar_state *s)
     char *text = ar_read_all(s->c.req->depfile, AR_DEPFILE_MAX, &len);
     char *colon = text ? ar_depfile_rule(text, len) : NULL;
     if (!colon) {
+        ar_depfile_miss(s, text != NULL);
         free(text);
-        ar_why(s->c.why, s->c.why_len, "dependency file absent or malformed",
-               NULL);
         return false;
     }
-    bool ok = true;
+    bool ok = ar_virtual_dep_add(s);
     char *save = NULL;
     for (char *tok = strtok_r(colon + 1, " \t\r\n", &save); ok && tok;
          tok = strtok_r(NULL, " \t\r\n", &save)) {
@@ -529,7 +592,7 @@ static bool ar_depfile_load(struct ar_state *s)
     }
     free(text);
     if (ok && s->dep_n == 0) {
-        ar_why(s->c.why, s->c.why_len, "dependency closure is empty", NULL);
+        ar_fail(&s->c, "closure_empty", "dependency closure is empty", NULL);
         ok = false;
     }
     return ok;
@@ -579,8 +642,8 @@ static bool ar_search_add(struct ar_state *s, const char *raw, int cls)
 {
     char token[PATH_MAX], fs[PATH_MAX];
     if (!ar_tokenize(&s->c, raw, token, fs)) {
-        ar_why(s->c.why, s->c.why_len,
-               "include dir has no canonical spelling", raw);
+        ar_fail(&s->c, "include_dir_outside_repo",
+                "include dir has no canonical spelling", raw);
         return false;
     }
     for (size_t i = 0; i < s->search.n; i++) {
@@ -588,12 +651,12 @@ static bool ar_search_add(struct ar_state *s, const char *raw, int cls)
             continue;
         if (s->search_cls[i] == (unsigned char)cls)
             return true;
-        ar_why(s->c.why, s->c.why_len,
-               "include dir named in two search classes", token);
+        ar_fail(&s->c, "search_class_conflict",
+                "include dir named in two search classes", token);
         return false;
     }
     if (s->search.n >= AR_SEARCH_MAX) {
-        ar_why(s->c.why, s->c.why_len, "too many include dirs", NULL);
+        ar_fail(&s->c, "search_too_large", "too many include dirs", NULL);
         return false;
     }
     s->search_cls[s->search.n] = (unsigned char)cls;
@@ -627,9 +690,9 @@ static bool ar_argv_refused(struct ar_state *s, const char *const *argv,
 {
     for (size_t i = 0; i < argc; i++)
         if (ar_search_flag_unsupported(argv[i])) {
-            ar_why(s->c.why, s->c.why_len,
-                   "argv changes the built-in include search or linker",
-                   argv[i]);
+            ar_fail(&s->c, "search_flag_unsupported",
+                    "argv changes the built-in include search or linker",
+                    argv[i]);
             return true;
         }
     return false;
@@ -689,8 +752,8 @@ static bool ar_includers_build(struct ar_state *s)
         char dir[PATH_MAX];
         if (!ar_dirname(s->deps[i].token, dir) ||
             !ar_list_push(&s->includers, dir)) {
-            ar_why(s->c.why, s->c.why_len, "includer dir unavailable",
-                   s->deps[i].token);
+            ar_fail(&s->c, "includer_unavailable", "includer dir unavailable",
+                    s->deps[i].token);
             return false;
         }
     }
@@ -761,8 +824,8 @@ static bool ar_lookups_build(struct ar_state *s)
 {
     for (size_t i = 0; i < s->dep_n; i++)
         if (!ar_lookups_for_dep(s, &s->deps[i])) {
-            ar_why(s->c.why, s->c.why_len, "dependency has no include lookup",
-                   s->deps[i].token);
+            ar_fail(&s->c, "lookup_unavailable",
+                    "dependency has no include lookup", s->deps[i].token);
             return false;
         }
     return true;
@@ -793,8 +856,8 @@ static bool ar_present_add(struct ar_state *s, uint32_t slot, const char *dir,
                                    ? ar_sha3_generated(&s->c, path, p->sha3)
                                    : ar_sha3_file(path, p->sha3));
     if (!hashed) {
-        ar_why(s->c.why, s->c.why_len, "present probe could not be hashed",
-               path);
+        ar_fail(&s->c, "probe_unreadable", "present probe could not be hashed",
+                path);
         return false;
     }
     s->present_n++;
@@ -808,14 +871,15 @@ static bool ar_probe(struct ar_state *s, uint32_t slot, const char *dir,
     int n = snprintf(path, sizeof(path), "%s/%s", dir_fs, name);
     s->probes++;
     if (n <= 0 || n >= (int)sizeof(path)) {
-        ar_why(s->c.why, s->c.why_len, "probe path overflow", name);
+        ar_fail(&s->c, "probe_overflow", "probe path overflow", name);
         return false;
     }
     enum platform_file_shape shape = platform_file_shape_read(path);
     if (shape == PLATFORM_FILE_SHAPE_MISSING)
         return true;
     if (shape == PLATFORM_FILE_SHAPE_UNREADABLE) {
-        ar_why(s->c.why, s->c.why_len, "probe location is unreadable", name);
+        ar_fail(&s->c, "probe_unreadable", "probe location is unreadable",
+                name);
         return false;
     }
     struct stat st;
@@ -860,8 +924,8 @@ static bool ar_text_add(struct ar_state *s, struct ar_list *l,
     char text[AR_TEXT_MAX];
     if (!ar_rewrite(&s->c, raw, text, sizeof(text)) ||
         !vcs_action_v2_text_canonical(text)) {
-        ar_why(s->c.why, s->c.why_len, "argument has no canonical spelling",
-               raw);
+        ar_fail(&s->c, "argv_noncanonical",
+                "argument has no canonical spelling", raw);
         return false;
     }
     return ar_list_push(l, text);
@@ -906,14 +970,14 @@ static bool ar_env_build(struct ar_state *s)
             continue;
         char value[AR_TEXT_MAX];
         if (s->env_value[slot]) {
-            ar_why(s->c.why, s->c.why_len,
-                   "environment names an allowlisted variable twice", env[i]);
+            ar_fail(&s->c, "env_duplicate",
+                    "environment names an allowlisted variable twice", env[i]);
             return false;
         }
         if (!ar_rewrite(&s->c, eq + 1, value, sizeof(value)) ||
             (value[0] && !vcs_action_v2_text_canonical(value))) {
-            ar_why(s->c.why, s->c.why_len,
-                   "environment value has no canonical spelling", env[i]);
+            ar_fail(&s->c, "env_noncanonical",
+                    "environment value has no canonical spelling", env[i]);
             return false;
         }
         s->env_value[slot] = zcl_strdup(value, "action root env value");
@@ -931,16 +995,16 @@ static bool ar_sysroot_build(struct ar_state *s)
         char token[PATH_MAX];
         if (!ar_tokenize(&s->c, req->system_dirs[i], token, fs) ||
             !ar_list_push(&s->builtin, token)) {
-            ar_why(s->c.why, s->c.why_len,
-                   "builtin include dir has no canonical spelling",
-                   req->system_dirs[i]);
+            ar_fail(&s->c, "builtin_dir_noncanonical",
+                    "builtin include dir has no canonical spelling",
+                    req->system_dirs[i]);
             return false;
         }
     }
     if (req->sysroot && req->sysroot[0] &&
         !ar_tokenize(&s->c, req->sysroot, s->sysroot, fs)) {
-        ar_why(s->c.why, s->c.why_len, "sysroot has no canonical spelling",
-               req->sysroot);
+        ar_fail(&s->c, "sysroot_noncanonical",
+                "sysroot has no canonical spelling", req->sysroot);
         return false;
     }
     return true;
@@ -952,8 +1016,8 @@ static bool ar_linker_file(struct ar_state *s, const char *raw,
     char fs[PATH_MAX];
     if (!ar_tokenize(&s->c, raw, token, fs) || strcmp(token, ".") == 0 ||
         !ar_sha3_file(fs, sha3)) {
-        ar_why(s->c.why, s->c.why_len,
-               "linker has no canonical spelling or is unreadable", raw);
+        ar_fail(&s->c, "linker_unavailable",
+                "linker has no canonical spelling or is unreadable", raw);
         return false;
     }
     return true;
@@ -965,7 +1029,7 @@ static bool ar_linker_build(struct ar_state *s)
     if (!l->links)
         return true;
     if (!l->ld || !l->argv || l->argc == 0) {
-        ar_why(s->c.why, s->c.why_len, "linking stage names no linker", NULL);
+        ar_fail(&s->c, "linker_missing", "linking stage names no linker", NULL);
         return false;
     }
     return !ar_argv_refused(s, l->argv, l->argc) &&
@@ -999,6 +1063,26 @@ struct ar_inputs {
     size_t source_n, generated_n;
 };
 
+/* A generated input names its producer, or carries the explicit unknown
+ * marker; a request that requires producers misses instead. */
+static bool ar_generated_add(struct ar_state *s, struct ar_inputs *in,
+                             const struct ar_dep *d)
+{
+    const uint8_t *key = ar_producer(s->c.req, d->token);
+    if (!key && s->c.req->require_producers) {
+        ar_fail(&s->c, "producer_unknown",
+                "generated input has no known producer", d->token);
+        return false;
+    }
+    struct vcs_action_generated_v2 *g = &in->generated[in->generated_n++];
+    g->path = d->token;
+    memcpy(g->sha3, d->sha3, 32);
+    g->producer_known = key != NULL;
+    if (key)
+        memcpy(g->producer_action_key, key, 32);
+    return true;
+}
+
 static bool ar_inputs_build(struct ar_state *s, struct ar_inputs *in)
 {
     size_t n = s->dep_n;
@@ -1017,17 +1101,10 @@ static bool ar_inputs_build(struct ar_state *s, struct ar_inputs *in)
     for (size_t i = 0; ok && i < n; i++) {
         ok = i == 0 || strcmp(v[i - 1]->token, v[i]->token) != 0;
         if (!ok) {
-            ar_why(s->c.why, s->c.why_len, "dependency named twice",
-                   v[i]->token);
+            ar_fail(&s->c, "dependency_duplicate", "dependency named twice",
+                    v[i]->token);
         } else if (v[i]->generated) {
-            struct vcs_action_generated_v2 *g =
-                &in->generated[in->generated_n++];
-            const uint8_t *key = ar_producer(s->c.req, v[i]->token);
-            g->path = v[i]->token;
-            memcpy(g->sha3, v[i]->sha3, 32);
-            g->producer_known = key != NULL;
-            if (key)
-                memcpy(g->producer_action_key, key, 32);
+            ok = ar_generated_add(s, in, v[i]);
         } else {
             in->sources[in->source_n].path = v[i]->token;
             memcpy(in->sources[in->source_n++].sha3, v[i]->sha3, 32);
@@ -1150,7 +1227,7 @@ static void ar_state_free(struct ar_state *s)
 }
 
 static bool ar_request_valid(const struct zcl_action_root_request *req,
-                             char *why, size_t why_len)
+                             struct zcl_action_root_result *out)
 {
     char norm[PATH_MAX];
     size_t allow_n = 0;
@@ -1160,8 +1237,13 @@ static bool ar_request_valid(const struct zcl_action_root_request *req,
               allow_n <= AR_ENV_MAX &&
               ar_lex_normalize(req->root, norm, sizeof(norm)) &&
               strcmp(norm, req->root) == 0 && strcmp(req->root, "/") != 0;
-    if (!ok)
-        ar_why(why, why_len, "action root request is incomplete", NULL);
+    if (!ok) {
+        const struct ar_ctx c = { .why = out->why, .why_len = sizeof(out->why),
+                                  .miss = out->miss,
+                                  .miss_len = sizeof(out->miss) };
+        ar_fail(&c, "request_incomplete", "action root request is incomplete",
+                NULL);
+    }
     return ok;
 }
 
@@ -1176,6 +1258,18 @@ static bool ar_derive_steps(struct ar_state *s,
            ar_encode(s, out);
 }
 
+/* Every failed derivation carries a miss code and no root. */
+static void ar_derive_missed(bool allocated, struct zcl_action_root_result *out)
+{
+    const struct ar_ctx c = { .why = out->why, .why_len = sizeof(out->why),
+                              .miss = out->miss,
+                              .miss_len = sizeof(out->miss) };
+    ar_fail(&c, allocated ? "encode_refused" : "out_of_memory",
+            "action root derivation failed", NULL);
+    memset(out->root, 0, sizeof(out->root));
+    out->root_hex[0] = '\0';
+}
+
 bool zcl_action_root_derive(const struct zcl_action_root_request *req,
                             struct zcl_action_root_result *out)
 {
@@ -1183,19 +1277,19 @@ bool zcl_action_root_derive(const struct zcl_action_root_request *req,
         return false;
     memset(out, 0, sizeof(*out));
     int64_t started = platform_time_monotonic_us();
-    if (!ar_request_valid(req, out->why, sizeof(out->why)))
+    if (!ar_request_valid(req, out))
         return false;
     struct ar_state *s = zcl_calloc(1, sizeof(*s), "action root state");
     if (s) {
         s->c = (struct ar_ctx){ req, strlen(req->root), out->why,
-                                sizeof(out->why) };
+                                sizeof(out->why), out->miss,
+                                sizeof(out->miss) };
         s->deps = zcl_calloc(ZCL_ACTION_ROOT_MAX_DEPS, sizeof(*s->deps),
                              "action root dependency closure");
     }
     bool ok = s && s->deps && ar_derive_steps(s, out);
     if (!ok)
-        ar_why(out->why, sizeof(out->why), "action root derivation failed",
-               NULL);
+        ar_derive_missed(s && s->deps, out);
     if (s) {
         out->lookups = (uint32_t)s->lookup_n;
         out->probes = s->probes;

@@ -30,6 +30,8 @@
 
 #define ZCL_ACTION_ROOT_STAGE_HOTSWAP "c23.compile.hotswap-module"
 #define ZCL_ACTION_ROOT_STAGE_HOTSWAP_VERSION 1u
+#define ZCL_ACTION_ROOT_STAGE_HOTFORK "c23.compile.hotfork-capsule"
+#define ZCL_ACTION_ROOT_STAGE_HOTFORK_VERSION 1u
 /* Directory under the dev-artifact content store holding preimage objects
  * (<root hex>.preimage) and the last root per unit (last/<unit>.root). */
 #define ZCL_ACTION_ROOT_STORE_LANE "action-preimage-v2"
@@ -65,6 +67,12 @@ struct zcl_action_root_request {
     size_t virtual_count;
     /* Compiler depfile (-MD) naming the dependency closure. */
     const char *depfile;
+    /* A generated main input the depfile names only by a temporary
+     * spelling (the HOT_FORK unity under build/hotswap-fast/.resident-*):
+     * recorded first, under the stable repo-relative `virtual_input_token`
+     * (which must lie under build/), hashed from `virtual_input_path`. */
+    const char *virtual_input_token;
+    const char *virtual_input_path;
     /* The compiler's built-in #include <...> dirs, absolute, in order. */
     const char *const *system_dirs;
     size_t system_dir_count;
@@ -76,6 +84,9 @@ struct zcl_action_root_request {
      * recorded with the explicit unknown-producer marker. */
     const struct zcl_action_root_producer *producers;
     size_t producer_count;
+    /* When set, a generated input with no known producer is a miss
+     * (producer_unknown) instead of carrying the unknown-producer marker. */
+    bool require_producers;
     /* NULL-terminated NAME=value list; only allowlisted names are kept. */
     const char *const *environ;
     uint8_t toolchain_root[32];
@@ -87,6 +98,18 @@ struct zcl_action_root_request {
     struct vcs_action_root_ref_v2 policy;
 };
 
+/* Miss codes. An incomplete or non-canonical closure yields no root and
+ * exactly one of: request_incomplete, depfile_missing, depfile_unreadable,
+ * depfile_malformed, closure_empty, closure_too_large,
+ * dependency_outside_repo, dependency_missing, dependency_unreadable,
+ * dependency_duplicate, producer_unknown, include_dir_outside_repo,
+ * search_class_conflict, search_too_large, search_flag_unsupported,
+ * includer_unavailable, lookup_unavailable, probe_unreadable,
+ * probe_overflow, argv_noncanonical, env_duplicate, env_noncanonical,
+ * builtin_dir_noncanonical, sysroot_noncanonical, linker_unavailable,
+ * linker_missing, encode_refused, out_of_memory. The hooks add
+ * closure_unobserved (the build did not complete), toolchain_unavailable,
+ * driver_facts_unavailable, argv_unavailable and store_unavailable. */
 struct zcl_action_root_result {
     uint8_t root[32];
     char root_hex[65];
@@ -98,7 +121,10 @@ struct zcl_action_root_result {
     uint32_t lookups;    /* include lookups recorded */
     uint32_t probes;     /* probed locations actually examined */
     uint32_t present;    /* probed locations that exist */
-    char why[256];       /* refusal reason when derive returns false */
+    /* When derive returns false: a stable miss code (above) and detail.
+     * No root is ever produced for an incomplete closure. */
+    char miss[40];
+    char why[256];
 };
 
 bool zcl_action_root_derive(const struct zcl_action_root_request *req,
@@ -125,12 +151,20 @@ bool zcl_action_root_load(const char *store_dir, const char *root_hex,
 /* The hotload compile hook. Fills the action_root* fields of `receipt` for
  * the module compile and link that zcl_devloop_hotswap_build() runs for
  * `owner` (argv rebuilt by the same recipe as its compile and link steps,
- * closure from the published depfile). Never fails the build: a refusal is
- * recorded in receipt->action_root_refused. */
+ * closure from the published depfile, or NULL when the build did not
+ * complete). Never fails the build: an incomplete closure is recorded as
+ * receipt->action_root_miss (a code above) and never as a root. */
 struct zcl_devloop_hotswap_build_receipt;
 void zcl_devloop_action_root_hotswap(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *depfile,
+    struct zcl_devloop_hotswap_build_receipt *receipt);
+/* The same for a HOT_FORK capsule build (hs_hotfork_build): `unity` is the
+ * live capsule unity file, recorded under a stable generated token;
+ * `depfile` is the published candidate depfile, or NULL on failure. */
+void zcl_devloop_action_root_hotfork(
+    const char *root, const char *owner, const char *cc, const char *cflags,
+    const char *unity, const char *depfile,
     struct zcl_devloop_hotswap_build_receipt *receipt);
 /* Append the action_root* fields to a zcl.hotswap_build_receipt.v1 object. */
 struct json_value;

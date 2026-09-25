@@ -22,7 +22,14 @@
  *      root; a stored preimage re-derives its root after load, a tampered
  *      stored object is refused.
  *   4. The hotload hook fills a receipt (first -> hit -> source) and the
- *      receipt JSON carries action_root.
+ *      receipt JSON carries action_root; the HOT_FORK capsule hook ignores
+ *      the temporary unity spelling and keys on its content.
+ *   5. Missing data is a MISS, never a guessed root: a missing, malformed
+ *      or stale depfile, an unreadable or out-of-tree dependency, and an
+ *      unknown producer where one is required each yield no root and a
+ *      stable miss code; the receipt JSON says action_root null.
+ *   6. Snapshot, not commit: a dirty edit and its commit derive the same
+ *      root, and so do two commits whose closure bytes are identical.
  *
  * All fixture state lives under ./test-tmp/. */
 
@@ -35,6 +42,7 @@
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
+#include "util/spawn.h"
 #include "vcs/build_action.h"
 
 #include <stdio.h>
@@ -741,12 +749,18 @@ static bool fx_derive(const struct fx *x, struct zcl_action_root_result *out)
     return ok;
 }
 
-static bool fx_refused(const struct fx *x)
+/* The derivation misses with exactly `code` and yields no root at all. */
+static bool fx_miss(const struct fx *x, const char *code)
 {
     struct zcl_action_root_result r = {0};
-    bool refused = !zcl_action_root_derive(&x->req, &r);
+    bool missed = !zcl_action_root_derive(&x->req, &r);
+    bool ok = missed && strcmp(r.miss, code) == 0 && !r.root_hex[0] &&
+              !r.preimage;
+    if (!ok)
+        printf("    expected miss %s, got %s (%s)\n", code,
+               missed ? r.miss : "a root", r.why);
     zcl_action_root_result_free(&r);
-    return refused;
+    return ok;
 }
 
 /* The derived root differs from `base` and the first differing field is
@@ -847,8 +861,10 @@ static void test_derive_shadow_and_removal(
          fx_differs(x, b, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP);
     AR_CHECK("headers: a changed file at a probed location moves the root",
              ok);
-    bool refused = fx_remove(x->root, "src/local.h") && fx_refused(x);
-    AR_CHECK("headers: a removed header named by a stale depfile is refused",
+    bool refused = fx_remove(x->root, "src/local.h") &&
+                   fx_miss(x, "dependency_missing");
+    AR_CHECK("headers: a removed header named by a stale depfile misses "
+             "(dependency_missing)",
              refused);
     ok = fx_depfile(x, false) &&
          fx_differs(x, b, VCS_ACTION_FIELD_V2_SOURCE) &&
@@ -871,11 +887,11 @@ static void test_derive_lookups(struct fx *x,
              "the root", ok && fx_same(x, b));
     ok = fx_depfile_text(x, " build/gen/unity.c %R/src/unit.c src/local.h "
                             "inc_b/defs.h src/local.h") &&
-         fx_refused(x) && fx_depfile(x, true);
+         fx_miss(x, "dependency_duplicate") && fx_depfile(x, true);
     AR_CHECK("lookups: a closure naming one file twice is refused", ok);
     const char *saved = x->argv[3];
     x->argv[3] = "-isysteminc_b";
-    ok = fx_refused(x);
+    ok = fx_miss(x, "search_class_conflict");
     x->argv[3] = saved;
     AR_CHECK("lookups: a dir named in two search classes is refused", ok);
 }
@@ -909,7 +925,7 @@ static void test_derive_sysroot(struct fx *x,
     x->req.sysroot = "/opt/fixture-sdk";
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_SYSROOT);
     x->req.sysroot = "/srv/host-b/sdk";
-    ok = ok && fx_refused(x);
+    ok = ok && fx_miss(x, "sysroot_noncanonical");
     x->req.sysroot = NULL;
     AR_CHECK("sysroot: a driver sysroot moves the root; a host one is "
              "refused", ok && fx_same(x, b));
@@ -926,7 +942,7 @@ static void test_derive_linker(struct fx *x,
     x->link_argv[1] = "-static";
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
     x->link_argv[1] = "-fuse-ld=gold";
-    ok = ok && fx_refused(x);
+    ok = ok && fx_miss(x, "search_flag_unsupported");
     x->link_argv[1] = "-shared";
     AR_CHECK("linker: link flags move the root; -fuse-ld is refused",
              ok && fx_same(x, b));
@@ -934,7 +950,7 @@ static void test_derive_linker(struct fx *x,
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
     x->req.linker.links = true;
     x->req.linker.ld = "/srv/host-b/bin/ld";
-    ok = ok && fx_refused(x);
+    ok = ok && fx_miss(x, "linker_unavailable");
     x->req.linker.ld = x->ld;
     AR_CHECK("linker: a stage that stops at the object differs; a linker "
              "outside the checkout or system is refused", ok && fx_same(x, b));
@@ -1014,9 +1030,9 @@ static void test_derive_env(struct fx *x,
     x->env[3] = NULL;
     AR_CHECK("env: non-allowlisted variables never reach the root", ok);
     x->env[3] = "CPATH=/srv/host-b/include";
-    ok = fx_refused(x);
+    ok = fx_miss(x, "env_noncanonical");
     x->env[3] = "LANG=C";
-    ok = ok && fx_refused(x);
+    ok = ok && fx_miss(x, "env_duplicate");
     x->env[3] = NULL;
     AR_CHECK("env: a host path value or a repeated allowlisted name is "
              "refused, not normalized", ok && fx_same(x, b));
@@ -1026,20 +1042,139 @@ static void test_derive_refusals(struct fx *x)
 {
     const char *saved = x->argv[3];
     x->argv[3] = "-I/srv/host-b/include";
-    bool ok = fx_refused(x);
+    bool ok = fx_miss(x, "include_dir_outside_repo");
     x->argv[3] = saved;
     AR_CHECK("an include dir outside the checkout is refused", ok);
     char outside[PATH_MAX + 64], text[2 * PATH_MAX + 96];
     (void)snprintf(outside, sizeof(outside), "%s-outside/leak.h", x->root);
     (void)snprintf(text, sizeof(text), "build/obj.o: src/unit.c %s\n",
                    outside);
-    ok = fx_write(x->root, "build/unit.d", text) && fx_refused(x) &&
+    ok = fx_write(x->root, "build/unit.d", text) &&
+         fx_miss(x, "dependency_outside_repo") &&
          fx_depfile(x, true);
-    AR_CHECK("a dependency outside the checkout is refused", ok);
+    AR_CHECK("miss: a dependency outside the checkout and every system "
+             "prefix yields no root (dependency_outside_repo)", ok);
     x->argv[3] = "-nostdinc";
-    ok = fx_refused(x);
+    ok = fx_miss(x, "search_flag_unsupported");
     x->argv[3] = saved;
     AR_CHECK("a flag that moves the built-in include search is refused", ok);
+}
+
+/* Unreadable for this user: mode 000, or (as root, who reads anything) a
+ * directory where the header was. `on` false restores the header. */
+static bool fx_unreadable(struct fx *x, const char *rel, bool on)
+{
+    char full[PATH_MAX];
+    if (snprintf(full, sizeof(full), "%s/%s", x->root, rel) >=
+        (int)sizeof(full))
+        return false;
+    if (geteuid() != 0)
+        return chmod(full, on ? 0 : 0600) == 0;
+    if (on)
+        return unlink(full) == 0 && mkdir(full, 0700) == 0;
+    return rmdir(full) == 0 && fx_write(x->root, rel, "int local(void);\n");
+}
+
+/* Missing data is a MISS: no root, an explicit reason, never a guess. */
+static void test_derive_misses(struct fx *x,
+                               const struct zcl_action_root_result *b)
+{
+    bool ok = fx_remove(x->root, "build/unit.d") &&
+              fx_miss(x, "depfile_missing") && fx_depfile(x, true);
+    AR_CHECK("miss: a missing depfile yields no root (depfile_missing)",
+             ok && fx_same(x, b));
+    ok = fx_write(x->root, "build/unit.d", "no rule here\n") &&
+         fx_miss(x, "depfile_malformed") && fx_depfile(x, true);
+    AR_CHECK("miss: a depfile with no rule yields no root "
+             "(depfile_malformed)", ok);
+    ok = fx_depfile_text(x, " build/gen/unity.c %R/src/unit.c src/gone.h "
+                            "src/local.h inc_b/defs.h") &&
+         fx_miss(x, "dependency_missing") && fx_depfile(x, true);
+    AR_CHECK("miss: a stale depfile naming a file that no longer exists "
+             "yields no root (dependency_missing)", ok);
+    ok = fx_unreadable(x, "src/local.h", true) &&
+         fx_miss(x, "dependency_unreadable");
+    ok = fx_unreadable(x, "src/local.h", false) && ok;
+    AR_CHECK("miss: an unreadable dependency yields no root "
+             "(dependency_unreadable)", ok && fx_same(x, b));
+    struct zcl_action_root_result r = {0};
+    x->req.require_producers = true;
+    ok = fx_miss(x, "producer_unknown");
+    x->req.producer_count = 1;
+    ok = ok && fx_derive(x, &r);
+    x->req.producer_count = 0;
+    x->req.require_producers = false;
+    zcl_action_root_result_free(&r);
+    AR_CHECK("miss: a generated input with no known producer, where one is "
+             "required, yields no root (producer_unknown)", ok);
+    x->req.virtual_input_token = "src/unit-unity.c";
+    x->req.virtual_input_path = x->unity_in;
+    ok = fx_miss(x, "request_incomplete");
+    x->req.virtual_input_token = NULL;
+    x->req.virtual_input_path = NULL;
+    AR_CHECK("miss: a virtual input outside build/ is refused", ok);
+}
+
+/* git with a fixed identity and no hooks or signing; `out` gets stdout. */
+static bool fx_git(const char *root, const char *const *args, char *out,
+                   size_t cap)
+{
+    const char *argv[24] = {
+        "git", "-C", root, "-c", "user.name=Z23 Test",
+        "-c", "user.email=z23-test@example.invalid",
+        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+    };
+    size_t n = 11;
+    for (size_t i = 0; args[i] && n + 1 < 24; i++)
+        argv[n++] = args[i];
+    argv[n] = NULL;
+    char buf[4096] = {0};
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_merged_observed(argv, buf, sizeof(buf), 30000,
+                                               &timed_out);
+    if (rc != 0 || timed_out)
+        printf("    git %s: rc=%d %s\n", args[0], rc, buf);
+    if (out)
+        (void)snprintf(out, cap, "%.*s", (int)strcspn(buf, "\n"), buf);
+    return rc == 0 && !timed_out;
+}
+
+/* Stage everything and commit it; `head` gets the new commit id. */
+static bool fx_git_commit(const char *root, const char *message,
+                          char head[128])
+{
+    static const char *const add[] = { "add", "-A", NULL };
+    static const char *const rev[] = { "rev-parse", "HEAD", NULL };
+    const char *commit[] = { "commit", "-q", "-m", message, NULL };
+    return fx_git(root, add, NULL, 0) && fx_git(root, commit, NULL, 0) &&
+           fx_git(root, rev, head, 128) && strlen(head) >= 40;
+}
+
+/* Roots derive from content bytes, never from commit or tree ids: a dirty
+ * edit and its commit agree, and two commits with different trees but
+ * identical closure bytes agree. */
+static void test_derive_snapshot_not_commit(void)
+{
+    static const char *const init[] = { "init", "-q", NULL };
+    struct fx *g = zcl_calloc(1, sizeof(*g), "action root git fixture");
+    struct zcl_action_root_result dirty = {0};
+    char c0[128] = {0}, c1[128] = {0}, c2[128] = {0};
+    bool ok = g && fx_init(g, "git") && fx_git(g->root, init, NULL, 0) &&
+              fx_git_commit(g->root, "one", c0) &&
+              fx_write(g->root, "src/local.h", "int local(short);\n") &&
+              fx_derive(g, &dirty) && fx_git_commit(g->root, "two", c1) &&
+              fx_same(g, &dirty);
+    AR_CHECK("snapshot: a dirty worktree edit and the commit of it derive "
+             "the identical root", ok);
+    ok = ok && fx_write(g->root, "NOTES.txt", "outside the closure\n") &&
+         fx_git_commit(g->root, "one", c2) && strcmp(c1, c2) != 0 &&
+         fx_same(g, &dirty);
+    AR_CHECK("snapshot: two commits with different trees and identical "
+             "closure bytes derive the identical root", ok);
+    zcl_action_root_result_free(&dirty);
+    if (g)
+        test_rm_rf_recursive(g->root);
+    free(g);
 }
 
 static void test_derive_cross_worktree(const struct zcl_action_root_result *a)
@@ -1138,6 +1273,85 @@ static void test_derive_causes(struct fx *x,
 
 /* ---- 4. hotload hook ------------------------------------------------ */
 
+/* A build that did not complete, or whose depfile is gone, reports
+ * action_root null with a miss reason; the receipt JSON says so. */
+static void test_hook_misses(struct fx *x, const char *cflags)
+{
+    struct zcl_devloop_hotswap_build_receipt r = {0};
+    zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
+                                    "-shared", NULL, &r);
+    struct json_value doc;
+    json_init(&doc);
+    json_set_object(&doc);
+    zcl_devloop_action_root_emit(&doc, &r);
+    const struct json_value *root = json_get(&doc, "action_root");
+    const char *cause = json_get_str(json_get(&doc, "action_root_cause"));
+    const char *why = json_get_str(json_get(&doc, "action_root_miss_reason"));
+    AR_CHECK("hook: a build that did not complete reports action_root null "
+             "with miss_reason closure_unobserved",
+             !r.action_root[0] && root && root->type == JSON_NULL &&
+                 cause && strcmp(cause, "miss") == 0 && why &&
+                 strcmp(why, "closure_unobserved") == 0 &&
+                 r.action_root_miss_detail[0]);
+    json_free(&doc);
+    char gone[PATH_MAX + 16];
+    (void)snprintf(gone, sizeof(gone), "%s/build/gone.d", x->root);
+    zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
+                                    "-shared", gone, &r);
+    AR_CHECK("hook: a missing depfile reports miss_reason depfile_missing",
+             !r.action_root[0] &&
+                 strcmp(r.action_root_miss, "depfile_missing") == 0);
+}
+
+/* The HOT_FORK capsule compiles a unity from a temporary .resident-* path:
+ * the temporary spelling never reaches the root, its content does. */
+static void test_hotfork_hook(struct fx *x, const char *cflags)
+{
+    char dep[PATH_MAX + 16], a[PATH_MAX + 64], b[PATH_MAX + 64];
+    char text[2 * PATH_MAX + 128], unity[PATH_MAX + 32];
+    (void)snprintf(dep, sizeof(dep), "%s/build/hotfork.d", x->root);
+    (void)snprintf(a, sizeof(a), "%s/build/hotswap-fast/.resident-aaaaaa.c",
+                   x->root);
+    (void)snprintf(b, sizeof(b), "%s/build/hotswap-fast/.resident-bbbbbb.c",
+                   x->root);
+    (void)snprintf(unity, sizeof(unity), "#include \"%s/src/unit.c\"\n",
+                   x->root);
+    (void)snprintf(text, sizeof(text), "build/obj.o: %s %s/src/unit.c "
+                   "src/local.h inc_b/defs.h\n", a, x->root);
+    struct zcl_devloop_hotswap_build_receipt h1 = {0}, h2 = {0}, h3 = {0};
+    bool ok = fx_write(x->root, "build/hotfork.d", text) &&
+              fx_write(x->root, "build/hotswap-fast/.resident-aaaaaa.c",
+                       unity) &&
+              fx_write(x->root, "build/hotswap-fast/.resident-bbbbbb.c",
+                       unity);
+    zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, a,
+                                    dep, &h1);
+    zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, b,
+                                    dep, &h2);
+    ok = ok && fx_write(x->root, "build/hotswap-fast/.resident-bbbbbb.c",
+                        "/* adapter v2 */\n#include \"src/unit.c\"\n");
+    zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, b,
+                                    dep, &h3);
+    if (!h1.action_root[0])
+        printf("    hotfork hook missed: %s %s\n", h1.action_root_miss,
+               h1.action_root_miss_detail);
+    AR_CHECK("hotfork hook: first capsule compile reports cause=first",
+             ok && strlen(h1.action_root) == 64 &&
+                 strcmp(h1.action_root_cause, "first") == 0);
+    AR_CHECK("hotfork hook: the same unity at another temporary path is a hit",
+             strcmp(h2.action_root, h1.action_root) == 0 &&
+                 strcmp(h2.action_root_cause, "hit") == 0);
+    AR_CHECK("hotfork hook: a changed unity reports cause=generated",
+             strlen(h3.action_root) == 64 &&
+                 strcmp(h3.action_root_cause, "generated") == 0);
+    zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, a,
+                                    NULL, &h1);
+    AR_CHECK("hotfork hook: a failed capsule build misses "
+             "(closure_unobserved)",
+             !h1.action_root[0] &&
+                 strcmp(h1.action_root_miss, "closure_unobserved") == 0);
+}
+
 static void test_hotswap_hook(struct fx *x)
 {
     char cache[PATH_MAX], prior[PATH_MAX] = {0};
@@ -1159,7 +1373,7 @@ static void test_hotswap_hook(struct fx *x)
                                     "-shared", x->depfile, &r3);
     ok = ok && fx_write(x->root, "src/local.h", "int local(void);\n");
     if (!r1.action_root[0])
-        printf("    hook refused: %s\n", r1.action_root_refused);
+        printf("    hook refused: %s\n", r1.action_root_miss_detail);
     printf("    hook: first=%s %lldus, again=%s %lldus, edit=%s %lldus, "
            "probes=%u present=%u\n", r1.action_root_cause,
            (long long)r1.action_root_us, r2.action_root_cause,
@@ -1186,6 +1400,8 @@ static void test_hotswap_hook(struct fx *x)
                  json_get_str(json_get(&doc, "action_root_cause")) &&
                  json_get(&doc, "action_root_ms"));
     json_free(&doc);
+    test_hook_misses(x, cflags);
+    test_hotfork_hook(x, cflags);
     if (prior[0])
         (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", prior, 1);
     else
@@ -1217,6 +1433,7 @@ static void test_derivation(void)
         test_derive_roots(x, &base);
         test_derive_env(x, &base);
         test_derive_refusals(x);
+        test_derive_misses(x, &base);
         test_derive_cross_worktree(&base);
         test_derive_store(x, &base);
         test_derive_causes(x, &base);
@@ -1239,5 +1456,6 @@ int test_action_root(void)
     test_codec_refusals();
     test_codec_tamper();
     test_derivation();
+    test_derive_snapshot_not_commit();
     return g_failures;
 }
