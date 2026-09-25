@@ -3,35 +3,12 @@
 #include "vcs/zcode_observation_mmr.h"
 
 #include "base/bytes.h"
+#include "base/serialize_le.h"
 #include "vcs/signed_evidence.h"
 
 #include <string.h>
 
 #define ZOM_BODY_BYTES 1104u
-
-static void zom_u32(uint8_t out[4], uint32_t value)
-{
-    for (unsigned i = 0; i < 4; i++) out[i] = (uint8_t)(value >> (8u * i));
-}
-
-static void zom_u64(uint8_t out[8], uint64_t value)
-{
-    for (unsigned i = 0; i < 8; i++) out[i] = (uint8_t)(value >> (8u * i));
-}
-
-static uint32_t zom_read_u32(const uint8_t in[4])
-{
-    uint32_t value = 0;
-    for (unsigned i = 0; i < 4; i++) value |= (uint32_t)in[i] << (8u * i);
-    return value;
-}
-
-static uint64_t zom_read_u64(const uint8_t in[8])
-{
-    uint64_t value = 0;
-    for (unsigned i = 0; i < 8; i++) value |= (uint64_t)in[i] << (8u * i);
-    return value;
-}
 
 static bool zom_shape(const struct vcs_zcode_observation_mmr_checkpoint *c)
 {
@@ -49,7 +26,7 @@ static bool zom_leaf(uint32_t index, const uint8_t root[32], uint8_t out[32])
     static const char domain[] = "zcl.zcode.observation_mmr.leaf.v1";
     uint8_t body[36];
     if (!root || !zcl_bytes_any_set(root, 32) || !out) return false;
-    zom_u32(body, index);
+    zcl_write_u32_le(body, index);
     memcpy(body + 4, root, 32);
     return vcs_signed_evidence_root(domain, sizeof(domain), body, sizeof(body), out);
 }
@@ -59,7 +36,7 @@ static bool zom_parent(unsigned level, const uint8_t left[32],
 {
     static const char domain[] = "zcl.zcode.observation_mmr.parent.v1";
     uint8_t body[68];
-    zom_u32(body, level);
+    zcl_write_u32_le(body, level);
     memcpy(body + 4, left, 32);
     memcpy(body + 36, right, 32);
     return vcs_signed_evidence_root(domain, sizeof(domain), body, sizeof(body), out);
@@ -139,10 +116,10 @@ bool vcs_zcode_observation_mmr_root(
     static const char domain[] = "zcl.zcode.observation_mmr.checkpoint.v1";
     uint8_t body[ZOM_BODY_BYTES];
     if (!out || !zom_shape(c)) return false;
-    zom_u32(body, c->schema_version);
+    zcl_write_u32_le(body, c->schema_version);
     memcpy(body + 4, c->issuer, 32);
-    zom_u32(body + 36, c->leaf_count);
-    zom_u64(body + 40, (uint64_t)c->observed_unix);
+    zcl_write_u32_le(body + 36, c->leaf_count);
+    zcl_write_u64_le(body + 40, (uint64_t)c->observed_unix);
     memcpy(body + 48, c->previous_checkpoint_root, 32);
     memcpy(body + 80, c->peaks, sizeof(c->peaks));
     return vcs_signed_evidence_root(domain, sizeof(domain), body, sizeof(body), out);
@@ -165,10 +142,10 @@ bool vcs_zcode_observation_mmr_serialize(
 {
     if (!wire || !c || !vcs_zcode_observation_mmr_verify(c, c->issuer))
         return false;
-    zom_u32(wire, c->schema_version);
+    zcl_write_u32_le(wire, c->schema_version);
     memcpy(wire + 4, c->issuer, 32);
-    zom_u32(wire + 36, c->leaf_count);
-    zom_u64(wire + 40, (uint64_t)c->observed_unix);
+    zcl_write_u32_le(wire + 36, c->leaf_count);
+    zcl_write_u64_le(wire + 40, (uint64_t)c->observed_unix);
     memcpy(wire + 48, c->previous_checkpoint_root, 32);
     memcpy(wire + 80, c->peaks, sizeof(c->peaks));
     memcpy(wire + ZOM_BODY_BYTES, c->signature, 64);
@@ -182,11 +159,11 @@ bool vcs_zcode_observation_mmr_parse(
     struct vcs_zcode_observation_mmr_checkpoint c = {0};
     if (!wire || wire_len != VCS_ZCODE_OBSERVATION_MMR_WIRE_BYTES ||
         !expected_issuer || !out) return false;
-    if (zom_read_u64(wire + 40) > INT64_MAX) return false;
-    c.schema_version = zom_read_u32(wire);
+    if (zcl_read_u64_le(wire + 40) > INT64_MAX) return false;
+    c.schema_version = zcl_read_u32_le(wire);
     memcpy(c.issuer, wire + 4, 32);
-    c.leaf_count = zom_read_u32(wire + 36);
-    c.observed_unix = (int64_t)zom_read_u64(wire + 40);
+    c.leaf_count = zcl_read_u32_le(wire + 36);
+    c.observed_unix = (int64_t)zcl_read_u64_le(wire + 40);
     memcpy(c.previous_checkpoint_root, wire + 48, 32);
     memcpy(c.peaks, wire + 80, sizeof(c.peaks));
     memcpy(c.signature, wire + ZOM_BODY_BYTES, 64);

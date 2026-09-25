@@ -75,3 +75,34 @@ unchanged source/header/compiler/flags/build-graph inputs while retaining
 source-epoch quarantine and all existing gates. The proof owner received the
 exact observations in native mail rows 588 and 589. This integration makes no
 claim that the proposed fix is implemented.
+
+## Full-proof counterexample and correction
+
+Native land action seq1 built signed commit
+`9b614d1d9e9edd8d2c41a244540f7fd831503af2` against the same main base.
+Its full impacted suite passed 101/101 groups with zero skips in 464.422 s,
+but full lint refused `check_capability_closure`: the new local lookup's error
+diagnostics reached `CAP_FS_WRITE` without a `module_capabilities.def` row.
+The failed lint log SHA-256 is
+`b3e1e70fa3a16e533a5cbfea656cb9b75c491718dd7202def959af1344110622`;
+the passing test log SHA-256 is
+`aaba48bdf53c732b679fd215459f8c1ad94acfb42a5bc6980fa7a1bc11ccf3f0`.
+Land seq1 settled failed, with no receipt or push. The integration adds a
+`CAP_FS_WRITE` row for that exact source, describing its diagnostic-stream
+use. `make CC=gcc check-capability-closure` then passed without a gate change
+(log SHA-256
+`29ab58eb4836019232ab9e654b538e18057b75e1ca846568d2f295fc5f440eea`).
+This correction still requires a new signed tip and complete normal proof.
+
+The complete local lint rerun exposed a second independent RED gate:
+`check-byte-order-codec-single` refused private integer packing in
+`zcode_observation_mmr.c`; its wrapper selftest had exited 1 without a
+diagnostic, while the production scan named that file. The complete RED lint
+log SHA-256 is
+`b79f2af617d4995f63214e8b06a1ff2f083ee8f878096a686b98841fa6325300`.
+The MMR implementation now calls the canonical `base/serialize_le.h` codec
+for every 32- and 64-bit wire field. The direct gate's selftest and production
+scan pass (log SHA-256
+`934e15508c791334f4a6c1a830c83fb7dec60c59fa65d43983733b85c56ba322`).
+No baseline row or gate threshold changed. A new combined test and full lint
+verdict are required for this source revision.
