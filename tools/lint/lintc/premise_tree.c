@@ -40,6 +40,20 @@ bool premise_path_pruned(const char *path)
     return false;
 }
 
+/* A path beginning with prefix lies under a pruned root when the prefix is
+ * itself inside one, or when it is a leading piece of one. */
+bool premise_prefix_reaches_pruned(const char *prefix)
+{
+    size_t k = strlen(prefix);
+    for (size_t i = 0; i < sizeof k_pruned / sizeof k_pruned[0]; i++) {
+        size_t n = strlen(k_pruned[i]);
+        if (k <= n ? strncmp(k_pruned[i], prefix, k) == 0
+                   : strncmp(prefix, k_pruned[i], n) == 0 && prefix[n] == '/')
+            return true;
+    }
+    return false;
+}
+
 int premise_tree_add(struct premise_tree *t, const char *path, const char *oid,
                      bool symlink)
 {

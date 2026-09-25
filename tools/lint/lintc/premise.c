@@ -351,6 +351,10 @@ static int unit_closure(struct premise_session *s, const struct premise_gate *g,
                  ? premise_catalog_row_closure(&s->cand, g->catalog, unit,
                                                &c->idx, &c->n, &c->ext,
                                                &c->next, &c->computed, err)
+             : g->doc_claims
+                 ? premise_doc_claims_closure(&s->cand, unit, &c->idx, &c->n,
+                                              &c->ext, &c->next, &c->computed,
+                                              err)
                  : premise_include_closure(&s->cand, unit, &c->idx, &c->n,
                                            &c->ext, &c->next, &c->computed,
                                            err);

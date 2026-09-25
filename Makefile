@@ -3075,7 +3075,8 @@ TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
 # They drive POSIX Git and fork/exec, so Windows hosts leave them out.
 LINTC_PREMISE_CORE_SRCS = tools/lint/lintc/premise.c tools/lint/lintc/premise_tree.c \
 	tools/lint/lintc/premise_git.c tools/lint/lintc/premise_include.c \
-	tools/lint/lintc/premise_make.c tools/lint/lintc/premise_catalog.c tools/lint/lintc/unit_exec.c
+	tools/lint/lintc/premise_make.c tools/lint/lintc/premise_catalog.c \
+	tools/lint/lintc/premise_doc_claims.c tools/lint/lintc/unit_exec.c
 TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS))
 
 # test.c and test_parallel.c each own their own main() — never both in

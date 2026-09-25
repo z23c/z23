@@ -789,36 +789,46 @@ static bool lsel_cat_fixture(struct lsel_fx *fx)
            && lsel_commit_all(fx, "catalog");
 }
 
-/* Replace rel with text (NULL: leave the tree), evaluate the named rows,
- * and require each to carry its reason. */
-static int lsel_cat_eval(struct lsel_fx *fx, const char *rel, const char *text,
-                         const char *const *ids, const char *const *want,
-                         size_t n)
+/* Replace rel with text (NULL: leave the tree), evaluate the named units of
+ * gate g, and require each to carry its reason. */
+static int lsel_units_eval(struct lsel_fx *fx, const struct premise_gate *g,
+                           const char *rel, const char *text,
+                           const char *const *ids, const char *const *want,
+                           size_t n)
 {
     struct premise_base_opts opts = {
         .objects = fx->repo, .remote = fx->repo, .ref = "refs/heads/main",
         .base = fx->base, .scratch = fx->scratch,
     };
-    struct premise_unit u[4];
+    struct premise_unit u[12];
     struct premise_session s;
     memset(u, 0, sizeof(u));
+    if (n > sizeof(u) / sizeof(u[0]))
+        return 2;
     for (size_t i = 0; i < n; i++)
         u[i].unit = ids[i];
     int rc = !rel || lsel_write(fx, rel, text) ? 0 : 2;
     if (rc == 0)
         rc = premise_session_open(&s, fx->repo, &opts, true, stderr);
     if (rc == 0) {
-        rc = premise_gate_eval(&s, &k_cat_gate, u, n, stderr);
+        rc = premise_gate_eval(&s, g, u, n, stderr);
         premise_session_close(&s);
     }
     for (size_t i = 0; rc == 0 && i < n; i++)
         if (strcmp(u[i].reason, want[i]) != 0
             || u[i].would_inherit != (strcmp(want[i], "premise-equal") == 0)) {
-            printf("after %s: row %s want %s, got %s\n", rel ? rel : "-",
+            printf("after %s: unit %s want %s, got %s\n", rel ? rel : "-",
                    ids[i], want[i], u[i].reason);
             rc = 1;
         }
     return rc;
+}
+
+static int lsel_cat_eval(struct lsel_fx *fx, const char *rel, const char *text,
+                         const char *const *ids, const char *const *want,
+                         size_t n)
+{
+    return lsel_units_eval(fx, &k_cat_gate, rel, text, ids, want, n);
 }
 
 static int lsel_cat_two(struct lsel_fx *fx, const char *rel, const char *text,
@@ -900,10 +910,112 @@ static int test_lsel_catalog_refusal(void)
     return failures;
 }
 
+/* ── doc-claims units ──────────────────────────────────────────────────── */
+
+/* one.md binds a symbol to one header and to a glob; two.md binds a path
+ * and an oracle gate; plain.md binds nothing. The last five are each
+ * unbounded by one rule: pathspec magic, a prefix reaching a pruned
+ * directory, a pruned path, a path the file system and the path set
+ * disagree about, and a path through a symlink. */
+static const char *const k_doc_ids[] = {
+    "docs/one.md", "docs/two.md", "docs/plain.md", "docs/magic.md",
+    "docs/reach.md", "docs/pruned.md", "docs/empty.md", "docs/link.md",
+};
+enum { LSEL_DOCS = sizeof(k_doc_ids) / sizeof(k_doc_ids[0]), LSEL_BOUND = 3 };
+
+static const char k_doc_two[] =
+    "a.c exists.\n<!-- claim: file-present a.c -->\n"
+    "The oracle holds.\n<!-- claim: gate-passes check-x -->\n";
+
+static const char *const k_doc_files[] = { "gate.sh" };
+static const struct premise_gate k_doc_gate = {
+    .name = "fixture-doc-claims-gate",
+    .gate_files = k_doc_files, .n_gate_files = 1,
+    .pin = "toolchain.pin", .doc_claims = true,
+};
+
+static bool lsel_doc_fixture(struct lsel_fx *fx)
+{
+    char empty[PATH_MAX * 2], link[PATH_MAX * 2];
+    bool ok = lsel_fixture(fx)
+        && lsel_write(fx, "docs/one.md",
+                      "x is declared.\n<!-- claim: symbol-present x inc/x.h -->\n"
+                      "```\n<!-- claim: symbol-absent zz src/*.c # fenced -->\n```\n")
+        && lsel_write(fx, "docs/two.md", k_doc_two)
+        && lsel_write(fx, "docs/plain.md", "No claims here.\n")
+        && lsel_write(fx, "docs/magic.md",
+                      "<!-- claim: symbol-present a :(glob)*.c -->\n")
+        && lsel_write(fx, "docs/reach.md",
+                      "<!-- claim: symbol-absent a vendor/r*.c -->\n")
+        && lsel_write(fx, "docs/pruned.md",
+                      "<!-- claim: file-absent build/out -->\n")
+        && lsel_write(fx, "docs/empty.md", "<!-- claim: file-absent empty -->\n")
+        && lsel_write(fx, "docs/link.md",
+                      "<!-- claim: file-present lnk/x.h -->\n")
+        && lsel_write(fx, "src/s.c", "int s;\n");
+    (void)snprintf(link, sizeof(link), "%s/lnk", fx->repo);
+    ok = ok && symlink("inc", link) == 0 && lsel_commit_all(fx, "docs");
+    /* Git keeps no empty directory, so only the file system has this one. */
+    (void)snprintf(empty, sizeof(empty), "%s/empty", fx->repo);
+    return ok && mkdir(empty, 0755) == 0;
+}
+
+/* Evaluate every fixture document; the first LSEL_BOUND want the given
+ * reasons, the unbounded rest always want computed-include. */
+static int lsel_doc_eval(struct lsel_fx *fx, const char *rel, const char *text,
+                         const char *one, const char *two, const char *plain)
+{
+    const char *want[LSEL_DOCS] = { one, two, plain };
+    for (size_t i = LSEL_BOUND; i < LSEL_DOCS; i++)
+        want[i] = "computed-include";
+    return lsel_units_eval(fx, &k_doc_gate, rel, text, k_doc_ids, want,
+                           LSEL_DOCS);
+}
+
+static int test_lsel_doc_claims(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: a document reruns on its own bytes and the "
+              "files its claims name; an unbounded claim keeps it fresh") {
+        struct lsel_fx fx;
+        const char *eq = "premise-equal";
+        char two[sizeof(k_doc_two) + 32];
+        ASSERT(lsel_doc_fixture(&fx));
+        ASSERT_EQ(lsel_doc_eval(&fx, NULL, NULL, eq, eq, eq), 0);
+        /* A file a symbol claim names, directly or through a glob, reruns
+         * that document alone; a fenced example still counts. */
+        ASSERT_EQ(lsel_doc_eval(&fx, "inc/x.h", "#include \"y.h\"\n",
+                                "closure-changed:inc/x.h", eq, eq), 0);
+        ASSERT_EQ(lsel_doc_eval(&fx, "inc/x.h", "#include \"y.h\"\nint x;\n",
+                                eq, eq, eq), 0);
+        ASSERT_EQ(lsel_doc_eval(&fx, "src/s.c", "int s2;\n",
+                                "closure-changed:src/s.c", eq, eq), 0);
+        ASSERT_EQ(lsel_doc_eval(&fx, "src/s.c", "int s;\n", eq, eq, eq), 0);
+        /* file-present reads the path set only; an oracle claim is the
+         * global part's, so a.c's bytes and the named gate change nothing. */
+        ASSERT_EQ(lsel_doc_eval(&fx, "a.c", "int a2;\n", eq, eq, eq), 0);
+        ASSERT_EQ(lsel_doc_eval(&fx, "a.c", "#include \"x.h\"\nint a;\n",
+                                eq, eq, eq), 0);
+        /* The document's own text is its premise, oracle claims included. */
+        (void)snprintf(two, sizeof(two), "%s", k_doc_two);
+        memcpy(strstr(two, "gate-passes"), "gate-fails ", 11);
+        ASSERT_EQ(lsel_doc_eval(&fx, "docs/two.md", two, eq,
+                                "closure-changed:docs/two.md", eq), 0);
+        ASSERT_EQ(lsel_doc_eval(&fx, "docs/two.md", k_doc_two, eq, eq, eq), 0);
+        /* Gate code reruns every document. */
+        ASSERT_EQ(lsel_doc_eval(&fx, "gate.sh", "#!/bin/sh\necho gate2\n",
+                                "gate-code:gate.sh", "gate-code:gate.sh",
+                                "gate-code:gate.sh"), 0);
+        test_rm_rf_recursive(fx.dir);
+    } TEST_END
+    return failures;
+}
+
 
 int test_lint_selection(void)
 {
     int failures = 0;
+    failures += test_lsel_doc_claims();
     failures += test_lsel_per_file_gate();
     failures += test_lsel_gate_code_computed();
     failures += test_lsel_catalog_rows();

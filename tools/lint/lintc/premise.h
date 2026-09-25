@@ -42,6 +42,10 @@
  * Its unit closure is the union of the closures of every tree path the
  * row's variables name, the row's own variable text is part of the unit,
  * and the catalog residue (the lines no row owns) is part of the gate.
+ *
+ * A doc-claims gate (premise_gate.doc_claims set) names units by document
+ * path. Its unit closure is the document plus every tree path its claims
+ * other than gate-passes/gate-fails can read (premise_doc_claims.c).
  */
 #ifndef Z23_LINT_PREMISE_H
 #define Z23_LINT_PREMISE_H
@@ -105,6 +109,7 @@ struct premise_gate {
     const char *pin;       /* NULL: "tools/dev/toolchain.pin" */
     bool unit_self;        /* the unit's closure is its own bytes only */
     const char *catalog;   /* non-NULL: units are this catalog's row ids */
+    bool doc_claims;       /* units are documents; closure = claim reads */
 };
 
 struct premise_unit {
@@ -162,6 +167,8 @@ int premise_tree_hash(struct premise_tree *t, struct premise_entry *e,
 int premise_tree_walk(struct premise_tree *t, const char *root, FILE *err);
 void premise_tree_free(struct premise_tree *t);
 bool premise_path_pruned(const char *path);
+/* Some path beginning with prefix could lie under a pruned directory. */
+bool premise_prefix_reaches_pruned(const char *prefix);
 
 int premise_git_open(const struct premise_base_opts *opts,
                      struct premise_tree *base, char *why, size_t why_cap,
@@ -212,6 +219,14 @@ int premise_catalog_row_closure(struct premise_tree *t, const char *catalog,
                                 const char *id, size_t **out, size_t *nout,
                                 char ***ext, size_t *next, bool *computed,
                                 FILE *err);
+
+/* premise_doc_claims.c: one tracked document of check-doc-claims. Like
+ * premise_include_closure: the document and every tree path its claims
+ * other than gate-passes/gate-fails read; computed when one of them is
+ * unbounded. 1 when the candidate has no such path. */
+int premise_doc_claims_closure(struct premise_tree *t, const char *unit,
+                               size_t **out, size_t *nout, char ***ext,
+                               size_t *next, bool *computed, FILE *err);
 
 
 /* ── z23-lint subcommands (selection.c) ────────────────────────────────── */

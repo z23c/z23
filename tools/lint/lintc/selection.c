@@ -36,6 +36,7 @@ enum selection_units {
     SELECTION_UNITS_FILES,   /* per-file: filter paths, unit premise = own bytes */
     SELECTION_UNITS_TUS,     /* per-TU: filter paths, unit premise = closure */
     SELECTION_UNITS_CATALOG_ROWS, /* per row: filter names the catalog */
+    SELECTION_UNITS_DOC_CLAIMS, /* per document: filter paths, premise = claim reads */
 };
 
 struct selection_gate_row {
@@ -178,6 +179,7 @@ static int spec_build(struct gate_spec *sp, const struct selection_gate_row *r)
         .n_baselines = sp->baselines.n,
         .unit_self = r->units == SELECTION_UNITS_FILES,
         .catalog = r->units == SELECTION_UNITS_CATALOG_ROWS ? r->filter : NULL,
+        .doc_claims = r->units == SELECTION_UNITS_DOC_CLAIMS,
     };
     return rc;
 }
@@ -307,7 +309,7 @@ static void print_unit(FILE *out, const char *gate, const struct premise_unit *u
 struct select_opts {
     struct premise_base_opts base;
     const char *root;
-    const char *gates[8];
+    const char *gates[16];
     size_t ngates;
     bool dry;
     bool summary;
@@ -422,7 +424,7 @@ static int parse_flag(struct select_opts *o, const char *a)
         o->no_landlock = true;
     else if (opt_val(a, "--depth", &v))
         o->base.depth = (unsigned)strtoul(v, NULL, 10);
-    else if (opt_val(a, "--gate", &v) && o->ngates < 8)
+    else if (opt_val(a, "--gate", &v) && o->ngates < sizeof o->gates / sizeof *o->gates)
         o->gates[o->ngates++] = v;
     else
         return 2;

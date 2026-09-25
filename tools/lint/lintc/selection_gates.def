@@ -13,9 +13,11 @@
  *               SELECTION_UNITS_TUS for filtered per-TU units (premise: the
  *               include closure), or SELECTION_UNITS_CATALOG_ROWS for
  *               one unit per catalog row (unit premise: the row's own
- *               variable text and the closure of every path it names)
+ *               variable text and the closure of every path it names), or
+ *               SELECTION_UNITS_DOC_CLAIMS for one unit per document
+ *               (unit premise: the paths its non-oracle claims read)
  *   filter      the catalog path for SELECTION_UNITS_CATALOG_ROWS. For
- *               SELECTION_UNITS_FILES and _TUS: POSIX ERE over tree
+ *               SELECTION_UNITS_FILES, _TUS and _DOC_CLAIMS: POSIX ERE over tree
  *               paths, "" for every path. It must match a SUPERSET of what
  *               the gate scans: a scanned file outside the unit set would
  *               never be rerun.
@@ -45,6 +47,7 @@ SELECTION_POLICY("tools/lint/lintc/premise_git.c")
 SELECTION_POLICY("tools/lint/lintc/premise_include.c")
 SELECTION_POLICY("tools/lint/lintc/premise_make.c")
 SELECTION_POLICY("tools/lint/lintc/premise_catalog.c")
+SELECTION_POLICY("tools/lint/lintc/premise_doc_claims.c")
 SELECTION_POLICY("tools/lint/lintc/selection.c")
 SELECTION_POLICY("tools/lint/lintc/unit_exec.c")
 SELECTION_POLICY("tools/lint/lintc/selection_gates.def")
@@ -143,4 +146,22 @@ SELECTION_GATE("check-windows-acceptance", SELECTION_UNITS_CATALOG_ROWS,
     "engine/composition/lib_module_order.def "
     SELECTION_DRIVER,
     "check-windows-acceptance:",
+    "")
+
+/* Per document: check_doc_claims.sh --doc=PATH evaluates every annotation
+ * of one tracked document except gate-passes/gate-fails. A unit reads its
+ * own bytes, the path set (file-present/absent), and the tracked files
+ * each symbol claim's git pathspec can match: every path with the
+ * pathspec's literal prefix (tools/lint/lintc/premise_doc_claims.c). An
+ * unbounded claim (pathspec magic, a prefix reaching a pruned directory,
+ * a path crossing a symlink or disagreeing with the path set) keeps its
+ * document fresh. The global part (--global: the self-check, which runs
+ * check-no-utxo-projection; every oracle claim, each running or waiting
+ * for another gate; the floors; the entry-document language scan) always
+ * runs; it is priced separately. Residual: the tracked documents under a
+ * pruned directory (.claude/, vendor/raylib/) are scanned by the gate but
+ * are in no premise, so a unit-selected run scans them fresh every time. */
+SELECTION_GATE("check-doc-claims", SELECTION_UNITS_DOC_CLAIMS, "\\.md$",
+    "tools/lint/check_doc_claims.sh tools/lint/gate_lib.sh " SELECTION_DRIVER,
+    "check-doc-claims:",
     "")
