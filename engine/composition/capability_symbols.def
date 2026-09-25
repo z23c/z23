@@ -1035,6 +1035,8 @@ ZCL_CAPABILITY_SYMBOL("pthread_setaffinity_np", CAP_HARMLESS,
     "is about authority, and affinity is not authority.")
 ZCL_CAPABILITY_SYMBOL("pthread_setname_np", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("pthread_setspecific", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("pthread_sigmask", CAP_HARMLESS,
+    "Blocks or unblocks signals for the calling thread of this process.")
 ZCL_CAPABILITY_SYMBOL("pthread_tryjoin_np", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("qsort", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("raise", CAP_HARMLESS,
@@ -1085,6 +1087,7 @@ ZCL_CAPABILITY_SYMBOL("setvbuf", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("SHA256", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sigaction", CAP_HARMLESS,
     "Installs a handler in this process and reaches nothing outside it.")
+ZCL_CAPABILITY_SYMBOL("sigaddset", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sigaltstack", CAP_HARMLESS,
     "Points this process own signal handling at a different stack.")
 ZCL_CAPABILITY_SYMBOL("sigemptyset", CAP_HARMLESS, "")
