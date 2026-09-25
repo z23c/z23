@@ -158,6 +158,45 @@ the complete affected batch; priority changes, required proof does not.
 
 ## Clean zygote runner
 
+### Threat model
+
+- **Attacker:** candidate native code in the confined leaf child, from the
+  first ELF constructor that `dlopen` runs onward. It controls the leaf's
+  whole address space, every byte it writes to the report pipe, and when and
+  how the leaf exits.
+- **Assets:** the verdict and every host-owned claim in it (image digest,
+  confinement, descriptor and environment census, resident canary, process
+  outcome, W^X layer count); the runner and resident processes; their
+  descriptors; every other process on the host.
+- **Trusted:** the resident, the runner, and the leaf child up to the instant
+  before `dlopen`. Nothing the leaf says after that point is trusted.
+- **Guarantees:**
+  - Every host-owned claim comes from a fixed pre-load frame the leaf writes
+    before any candidate byte is mapped, or from the runner's own
+    observation: exit status, signal, deadline, and the leaf's final seccomp
+    layer count read from `/proc/<pid>/status`.
+  - The leaf refuses to map the candidate when any pre-load claim fails.
+  - After `dlopen` the candidate contributes only one bounded observation
+    frame, which is data. A second pre-load frame, a duplicate or malformed
+    observation, an unknown kind, a wrong size, a missing frame or trailing
+    bytes is RED with a named reason.
+  - The candidate cannot signal, fork, exec, open sockets or files, create
+    executable memory during its story, or outlive its deadline.
+  - Descriptor hygiene uses `close_range`, falling back to a full
+    `/proc/self/fd` enumeration. Where neither works it refuses. The census
+    is the same full enumeration, never a bounded range.
+- **Non-guarantees:**
+  - A story verdict is a self-report. Candidate code can claim its own story
+    or HOT_SHADOW frozen KAT passed, because both run in its address space.
+  - The descriptor binding check and the W^X install run after constructors.
+    A hostile constructor can bypass the binding check. It can also make its
+    own executable memory before W^X exists, or replace the W^X layer with a
+    decoy filter.
+  - Descriptors a candidate opens die with the leaf. The post-story census
+    that reports them is candidate-influenced data.
+  - Side channels, CPU and memory pressure within the rlimits, and kernel
+    exploits are out of scope.
+
 The resident never forks itself to run candidate bytes, because a fork would
 copy its heap, environment and descriptors into the candidate. On first use it
 execs `/proc/self/exe` once as `z23-dev __reflex-runner`, with an empty
