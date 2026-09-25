@@ -228,6 +228,7 @@ struct st_group_result {
     size_t changed_paths;
     size_t probe_runs;
     uint64_t total, cacheable, unchanged, invalidated, uncacheable;
+    uint64_t pairs_ok, pairs_failed; /* merged totals only */
     int64_t probe_us;
 };
 

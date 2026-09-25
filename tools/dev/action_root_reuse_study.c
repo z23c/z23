@@ -180,7 +180,9 @@ static bool st_seed_mutate(const struct st_ctx *c, struct st_snap *s,
     case ST_SEED_HEADER:
         return st_append(path, "/* action-root study: seeded edit */\n");
     case ST_SEED_GENERATED:
-        return st_append(path, "\n/* action-root study: seeded edit */\n");
+        /* A rule, not a comment: the generator minifies comments away,
+         * and an edit that leaves the header byte-identical may reuse. */
+        return st_append(path, "\n.zcl-action-root-study-seed{color:red}\n");
     case ST_SEED_DELETE: {
         const char *argv[] = { "rm", "--", path, NULL };
         return st_run_quiet(argv);
@@ -253,8 +255,7 @@ static void st_seed_one(const struct st_tu *base, const struct st_tu *v,
 }
 
 static void st_seed_report(FILE *out, const struct st_seed_arg *a,
-                           const struct st_seed_tally *t, bool ok,
-                           bool immutable)
+                           const struct st_seed_tally *t, bool ok)
 {
     char fields[256] = {0};
     size_t o = 0;
@@ -264,9 +265,9 @@ static void st_seed_report(FILE *out, const struct st_seed_arg *a,
                                   vcs_action_field_v2_name(f)
                                       ? vcs_action_field_v2_name(f) : "none",
                                   (unsigned long long)t->field[f]);
-    fprintf(out, "%s\t%s\t%d\t%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t"
+    fprintf(out, "%s\t%s\t%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t"
             "%llu\t%llu\t%s\t%s\n", st_seed_name(a->kind), a->target, ok,
-            immutable, (unsigned long long)t->affected,
+            (unsigned long long)t->affected,
             (unsigned long long)t->changed, (unsigned long long)t->miss,
             (unsigned long long)t->reuse, (unsigned long long)t->f_changed,
             (unsigned long long)t->f_miss, (unsigned long long)t->f_reuse,
@@ -293,7 +294,7 @@ static void st_seed_run(struct st_run *r, const struct st_snap *base,
         if (u)
             st_seed_one(b, u, st_tu_affected(a, b), &t);
     }
-    st_seed_report(out, a, &t, ok, v.immutable);
+    st_seed_report(out, a, &t, ok);
     st_snap_drop(&v);
     st_snap_free(&v);
 }
@@ -509,7 +510,7 @@ static bool st_study(struct st_ctx *c)
         "child\tok\tcommitted_actions\tapplied_actions\trooted\tequal\t"
         "differ\tmissing\n");
     FILE *adv = st_open_out(c, "adversarial.tsv",
-        "seed\ttarget\tok\timmutable\taffected\tB_changed\tB_miss\tB_reuse\t"
+        "seed\ttarget\tok\taffected\tB_changed\tB_miss\tB_reuse\t"
         "forced_changed\tforced_miss\tforced_reuse\tunaffected\t"
         "unaffected_reuse\tverdict\tfirst_diff_fields\n");
     FILE *sum = st_open_out(c, "summary.txt", NULL);

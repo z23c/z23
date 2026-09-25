@@ -436,6 +436,8 @@ void st_group_merge(struct st_group_result *into,
     into->uncacheable += g->uncacheable;
     into->probe_runs += g->probe_runs;
     into->probe_us += g->probe_us;
+    into->pairs_ok += g->ok;
+    into->pairs_failed += !g->ok;
 }
 
 /* Per-snapshot coverage: every action has a root or an explicit MISS. */
@@ -562,9 +564,12 @@ void st_summary_totals(FILE *s, const char *set, struct st_totals *t)
     st_print_reasons(s, "pair-miss-B", &t->b.miss_reasons);
     fprintf(s, "%s a_b_root_disagreements=%llu\n", set,
             (unsigned long long)t->ab_violations);
-    fprintf(s, "%s tests groups=%llu cacheable=%llu unchanged=%llu (%.2f%% "
+    fprintf(s, "%s tests pairs_probed=%llu pairs_failed=%llu groups=%llu "
+            "cacheable=%llu unchanged=%llu (%.2f%% "
             "of cacheable) invalidated=%llu uncacheable=%llu probe_runs=%zu "
-            "probe_us=%lld\n", set, (unsigned long long)t->g.total,
+            "probe_us=%lld\n", set, (unsigned long long)t->g.pairs_ok,
+            (unsigned long long)t->g.pairs_failed,
+            (unsigned long long)t->g.total,
             (unsigned long long)t->g.cacheable,
             (unsigned long long)t->g.unchanged,
             st_share(t->g.unchanged, t->g.cacheable),

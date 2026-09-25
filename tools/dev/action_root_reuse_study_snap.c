@@ -429,7 +429,7 @@ static bool st_snap_archive(const struct st_ctx *c, struct st_snap *s)
     int64_t t0 = platform_time_monotonic_us();
     const char *archive[] = { "git", "-C", c->repo, "archive",
                               "--format=tar", "-o", s->tar, s->sha, NULL };
-    const char *extract[] = { "tar", "-xf", s->tar, "-C", s->dir, NULL };
+    const char *extract[] = { "tar", "-xpf", s->tar, "-C", s->dir, NULL };
     bool ok = st_rm_rf(s->dir) && st_mkdir_p(s->dir) &&
               st_run_quiet(archive) && st_run_quiet(extract);
     s->archive_us = platform_time_monotonic_us() - t0;
@@ -478,12 +478,44 @@ static bool st_snap_parse(const struct st_ctx *c, struct st_snap *s)
     return ok && s->test_flags;
 }
 
-/* Tracked bytes unchanged by the parse: `tar -d` against the archive. */
-static void st_snap_verify(struct st_snap *s)
+/* A `tar -d` finding that is not about the bytes: the archive records
+ * uid/gid 0 and an unprivileged extract cannot reproduce them. Every other
+ * finding (contents, size, mode, mtime, missing file) is a real change. */
+static bool st_owner_only(const char *line, size_t n)
+{
+    static const char *const ok[] = { ": Uid differs", ": Gid differs" };
+    for (size_t i = 0; i < 2; i++) {
+        size_t k = strlen(ok[i]);
+        if (n >= k && memcmp(line + n - k, ok[i], k) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* The extracted tree still equals the archived commit byte for byte (extra
+ * untracked build outputs are not in the archive and are ignored). Mutated
+ * snapshots (seeds, invariance) differ by design and are not checked. */
+static void st_snap_verify(const struct st_ctx *c, struct st_snap *s)
 {
     const char *argv[] = { "tar", "-df", s->tar, "-C", s->dir, NULL };
     struct st_proc p;
-    s->immutable = st_run(argv, ST_SMALL_CAP, &p);
+    bool clean = st_run(argv, ST_MAKE_CAP, &p);
+    bool owner_only = p.out && p.exit_code == 1 && p.len < ST_MAKE_CAP;
+    const char *bad = NULL;
+    size_t bad_n = 0;
+    for (const char *l = p.out; !clean && owner_only && l && *l;) {
+        size_t n = strcspn(l, "\n");
+        if (n && !st_owner_only(l, n)) {
+            owner_only = false;
+            bad = l;
+            bad_n = n;
+        }
+        l += n + (l[n] == '\n');
+    }
+    s->immutable = clean || owner_only;
+    if (!s->immutable)
+        fprintf(c->log, "snapshot %s differs from its archive: %.*s\n",
+                s->label, (int)bad_n, bad ? bad : "(tar -d failed)");
     st_proc_free(&p);
 }
 
@@ -546,23 +578,33 @@ static bool st_lists_equal(const struct st_list *a, const struct st_list *b)
     return true;
 }
 
-/* `cc <flags> -MM` in the snapshot: its exact prerequisite list. */
+/* `cc <flags> -E -MMD` in the snapshot: its exact prerequisite list. Full
+ * preprocessing, not `-MM` alone: in dependency-only mode the compiler
+ * treats a missing `<...>` header as an absent system header and exits 0
+ * with that header silently left out of the list. */
 static bool st_preprocess(const struct st_snap *s, struct st_tu *t,
                           const char *depfile, char *why, size_t why_len)
 {
     const char *argv[ST_MAX_ARGS];
     size_t n = 0;
+    if (t->flag_hi - t->flag_lo + 16 > ST_MAX_ARGS) {
+        (void)snprintf(why, why_len, "argv-too-long");
+        return false;
+    }
     argv[n++] = "env";
     argv[n++] = "-C";
     argv[n++] = s->dir;
     argv[n++] = t->argv.v[0];
-    for (size_t i = t->flag_lo; i < t->flag_hi && n + 8 < ST_MAX_ARGS; i++)
+    for (size_t i = t->flag_lo; i < t->flag_hi; i++)
         argv[n++] = t->argv.v[i];
-    argv[n++] = "-MM";
+    argv[n++] = "-E";
+    argv[n++] = "-MMD";
     argv[n++] = "-MF";
     argv[n++] = depfile;
     argv[n++] = "-MT";
     argv[n++] = "@out/object";
+    argv[n++] = "-o";
+    argv[n++] = "/dev/null";
     argv[n++] = t->src;
     argv[n] = NULL;
     int64_t t0 = platform_time_monotonic_us();
@@ -570,7 +612,8 @@ static bool st_preprocess(const struct st_snap *s, struct st_tu *t,
     bool ok = st_run(argv, ST_SMALL_CAP, &p);
     t->pp_us = platform_time_monotonic_us() - t0;
     if (!ok)
-        (void)snprintf(why, why_len, "%.*s", (int)strcspn(p.out, "\n"),
+        (void)snprintf(why, why_len, "%.*s",
+                       (int)strcspn(p.out ? p.out : "", "\n"),
                        p.out ? p.out : "");
     st_proc_free(&p);
     return ok;
@@ -591,6 +634,14 @@ static void st_miss_from_why(struct st_outcome *o, const char *why)
     st_miss(o, cls);
 }
 
+/* A dev object is linked statically, never loaded across an ABI boundary,
+ * so it binds no hotload ABI. The v2 preimage still requires a nonzero
+ * generation; this study-local constant is the same for every snapshot and
+ * therefore can neither cause nor hide a root difference. */
+static const struct vcs_action_abi_v2 g_st_abi[] = {
+    { "c23_dev_object", 1u },
+};
+
 static bool st_derive(const struct st_ctx *c, const struct st_snap *s,
                       const struct st_tu *t, const char *depfile,
                       struct st_outcome *o, uint8_t **pre, size_t *pre_len)
@@ -607,6 +658,9 @@ static bool st_derive(const struct st_ctx *c, const struct st_snap *s,
         .sysroot = c->tc.sysroot,
         .linker = { .links = false },
         .environ = (const char *const *)environ,
+        .abi_generation = 1u,
+        .abi = g_st_abi,
+        .abi_count = sizeof(g_st_abi) / sizeof(g_st_abi[0]),
     };
     memcpy(req.toolchain_root, c->tc.root, 32);
     memcpy(req.sysroot_objects_sha3, c->tc.sysroot_objects, 32);
@@ -738,9 +792,9 @@ bool st_snap_load(const struct st_ctx *c, struct st_snap *s,
         s->ok = false;
     }
     s->ok = s->ok && st_snap_parse(c, s);
-    if (s->ok)
-        st_snap_verify(s);
     s->ok = s->ok && st_snap_actions(c, s, forced, keep_deps);
+    if (s->ok && !mutate)
+        st_snap_verify(c, s);
     fprintf(c->log, "snapshot %s %s ok=%d immutable=%d tus=%zu "
             "archive_us=%lld parse_us=%lld %s\n", s->label, s->sha, s->ok,
             s->immutable, s->n, (long long)s->archive_us,
