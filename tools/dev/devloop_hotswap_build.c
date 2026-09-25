@@ -57,7 +57,6 @@
  * leaves use O_EXCL or live below a component-validated cache directory. */
 #define O_NOFOLLOW 0
 #endif
-#define fsync(fd) _commit(fd)
 #else
 #include <sys/file.h>
 #include <sys/syscall.h>
@@ -873,10 +872,15 @@ static bool hs_copy_stream(int source_fd, int temp_fd)
     }
 }
 
-/* Seal the freshly written temp file read-only-and-durable, verify its
- * digest matches, then publish it under target by hardlink; if target was
- * concurrently published by another builder, that is success too provided
- * its content already matches. */
+/* Verify the freshly written read-only temp file's digest, then publish it
+ * under target by hardlink; if target was concurrently published by another
+ * builder, that is success too provided its content already matches.
+ *
+ * Candidate artifacts are reflex inputs, not acceptance evidence: every
+ * consumer re-verifies them by content (the cache lookup re-hashes, the
+ * story compares its loaded mapping root), so publication never waits for a
+ * storage acknowledgement; on a host with busy disks an fsync here was the
+ * largest stage between a save and its story. */
 static bool hs_copy_publish_finish(const char *temp, const char *target,
                                    const char expected_sha256[65])
 {
@@ -932,9 +936,9 @@ static bool hs_copy_publish(const char *source, const char *target,
     if (close(source_fd) != 0)
         ok = false;
 #if defined(_WIN32)
-    if (ok && (_chmod(temp, _S_IREAD) != 0 || _commit(temp_fd) != 0))
+    if (ok && _chmod(temp, _S_IREAD) != 0)
 #else
-    if (ok && (fchmod(temp_fd, 0444) != 0 || fsync(temp_fd) != 0))
+    if (ok && fchmod(temp_fd, 0444) != 0)
 #endif
         ok = false;
     if (close(temp_fd) != 0)
@@ -1023,9 +1027,11 @@ static bool hs_cache_publish(const char *cache_obj, const char *cache_so,
                   0600);
     if (fd < 0)
         return false;
+    /* No storage acknowledgement: hs_cache_lookup() re-hashes the .so against
+     * this line, so a torn entry is a miss that recompiles, never a hit. */
     char line[66];
     (void)snprintf(line, sizeof(line), "%s\n", hash);
-    bool ok = write(fd, line, 65) == 65 && fsync(fd) == 0;
+    bool ok = write(fd, line, 65) == 65;
     int close_rc = close(fd);
     ok = ok && close_rc == 0;
     if (!ok) {
@@ -1383,7 +1389,9 @@ static bool hs_unity_source_write_members(
                         owner) < (int)sizeof(owner_full) &&
          hs_regular(owner_full, NULL) &&
          fprintf(f, "#include \"%s\"\n", owner_full) > 0;
-    return ok && fflush(f) == 0 && fsync(fileno(f)) == 0;
+    /* A compile input consumed at once; hs_unity_source_publish() replaces
+     * any differing wrapper, so it needs no storage acknowledgement. */
+    return ok && fflush(f) == 0;
 }
 
 static bool hs_unity_source_publish(const char *temp, char out[PATH_MAX],

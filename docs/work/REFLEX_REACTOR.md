@@ -120,8 +120,13 @@ there is no polling sleep.
 The candidate builder keeps its frozen action/dependency plan and artifact
 cache warm, invokes the compiler and module linker directly, then hands the
 artifact to the clean zygote runner for the story. No command shell, Make
-parser, test runner or full-program linker enters the reflex. Exact affected proof starts only after
-the story. Scheduling remembers the prior failed exact group for the task,
+parser, test runner or full-program linker enters the reflex. Publishing a
+candidate artifact (the worktree module copy and the host artifact-cache entry)
+verifies its SHA-256 but never waits for a storage acknowledgement: every
+consumer re-verifies the bytes, and a torn cache entry fails verification
+instead of being served. On a host with busy disks those fsync calls had been
+the largest single stage between a save and its story. Exact affected proof
+starts only after the story. Scheduling remembers the prior failed exact group for the task,
 then runs the goal story, cheap likely regression, direct owner invariant and
 the complete affected batch; priority changes, required proof does not.
 
