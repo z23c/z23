@@ -319,7 +319,7 @@ static int hfs_root(char *root, size_t cap)
 static int64_t hfs_now_ms(void)
 {
     struct timespec ts;
-    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts); // platform-ok: z23-lint links no platform library; elapsed time for the report line only
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
