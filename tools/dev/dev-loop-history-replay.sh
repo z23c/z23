@@ -29,6 +29,22 @@ monotonic_ns()
       'printf "%.0f\n", clock_gettime(CLOCK_MONOTONIC) * 1000000000'
 }
 
+# The history producer owns this schema. Keep the self-test and runtime on
+# the same reader so a producer version change cannot silently strand replay.
+valid_history()
+{
+    jq -e '
+      .schema == "zcl.dev_loop_history_benchmark.v2" and
+      (.history.frozen_rows_sha256 | type == "string" and
+       test("^[0-9a-f]{64}$")) and
+      (.representative_benchmark | type == "array") and
+      (.representative_benchmark | length > 0) and
+      all(.representative_benchmark[];
+        (.path | type == "string" and length > 0) and
+        (.class | type == "string" and length > 0) and
+        (.frequency | type == "number" and . > 0))' "$1" >/dev/null
+}
+
 aggregate()
 {
     local samples="$1" output="$2" source_head="${3:-selftest}"
@@ -150,11 +166,24 @@ aggregate()
 
 self_test()
 {
-    local scratch samples receipt
+    local scratch samples receipt history i feedback_us status bound green failure
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/zcl-dev-replay-selftest.XXXXXX")"
     trap "rm -rf -- '$scratch'" EXIT INT TERM
     samples="$scratch/samples.jsonl"
     receipt="$scratch/receipt.json"
+    history="$scratch/history.json"
+    jq -n --arg digest "$(printf 'a%.0s' {1..64})" '
+      {schema:"zcl.dev_loop_history_benchmark.v2",
+       history:{frozen_rows_sha256:$digest},
+       representative_benchmark:[
+         {path:"a.c",class:"requires_fast_restart",frequency:2}]}' \
+      >"$history"
+    valid_history "$history" || fail 'current v2 history producer rejected'
+    jq '.schema="zcl.dev_loop_history_benchmark.v1"' "$history" \
+      >"$scratch/old-history.json"
+    if valid_history "$scratch/old-history.json"; then
+        fail 'old history schema was silently accepted'
+    fi
     printf '%s\n' \
       '{"path":"a.c","class":"requires_fast_restart","frequency":2,"reflex_us":200000,"feedback_us":1000000,"result_bound":true,"feedback_green":true,"failure_capsule":"","compiler_processes":2,"linker_processes":2,"test_processes":1,"probe_processes":1,"make_processes":0,"shell_processes":0,"lto_invocations":0,"complete_graph_links":2,"source_byte_accounting_complete":true,"source_guard_bytes_read":100,"source_bytes_total":1000,"changed_source_bytes":10}' \
       '{"path":"b.c","class":"requires_fast_restart","frequency":1,"reflex_us":400000,"feedback_us":4000000,"result_bound":true,"feedback_green":true,"failure_capsule":"","compiler_processes":2,"linker_processes":2,"test_processes":1,"probe_processes":1,"make_processes":0,"shell_processes":0,"lto_invocations":0,"complete_graph_links":2,"source_byte_accounting_complete":true,"source_guard_bytes_read":200,"source_bytes_total":1000,"changed_source_bytes":20}' \
@@ -179,6 +208,51 @@ self_test()
       .bytes_scanned.changed_source_bytes == 60 and
       .bytes_scanned.source_bytes_total_max == 1000' \
       "$receipt" >/dev/null || fail 'weighted aggregation contract regressed'
+    : >"$samples"
+    for ((i = 1; i <= 20; i++)); do
+        feedback_us=$((1000000 + i * 1000))
+        status=passed bound=true green=true failure=''
+        if [ "$i" -eq 19 ]; then
+            feedback_us=4000000 status=red green=false
+            failure=FROZEN_ORACLE_REJECTED
+        elif [ "$i" -eq 20 ]; then
+            feedback_us=6000000 status=timeout bound=false green=false
+            failure=WAIT_TIMEOUT
+        fi
+        jq -cn --argjson i "$i" --arg status "$status" \
+          --argjson feedback_us "$feedback_us" \
+          --argjson bound "$bound" --argjson green "$green" \
+          --arg failure "$failure" '
+          {path:("sample-"+($i|tostring)+".c"),
+           class:"requires_fast_restart",frequency:1,
+           status:$status,result_bound:$bound,feedback_green:$green,
+           reflex_us:($feedback_us/2),feedback_us:$feedback_us,
+           failure_capsule:$failure,
+           compiler_processes:1,linker_processes:1,
+           test_processes:1,probe_processes:1,
+           make_processes:0,shell_processes:0,lto_invocations:0,
+           complete_graph_links:0,
+           source_byte_accounting_complete:true,
+           source_guard_bytes_read:10,source_bytes_total:100,
+           changed_source_bytes:1}' >>"$samples"
+    done
+    aggregate "$samples" "$receipt"
+    jq -e '
+      .status == "partial" and .representative_paths == 20 and
+      .weighted_edit_occurrences == 20 and
+      (.samples | length) == 20 and
+      .latency.feedback_p50_us == 1010000 and
+      .latency.feedback_p95_us == 4000000 and
+      .coverage.trustworthy_under_5s_occurrences == 18 and
+      .samples[18].status == "red" and
+      .samples[18].failure_capsule == "FROZEN_ORACLE_REJECTED" and
+      .samples[19].status == "timeout" and
+      .samples[19].failure_capsule == "WAIT_TIMEOUT" and
+      .samples[19].result_bound == false' "$receipt" >/dev/null ||
+      fail '20-row RED/timeout replay accounting regressed'
+    cmp -s <(jq -csS '.' "$samples") \
+           <(jq -cS '.samples' "$receipt") ||
+      fail 'raw replay rows were dropped or altered'
     printf '{"path":"bad"}\n' >"$samples"
     if aggregate "$samples" "$receipt" 2>/dev/null; then
         fail 'malformed sample was accepted'
@@ -204,8 +278,7 @@ command -v sha256sum >/dev/null || fail 'sha256sum is required'
 if [ ! -r "$HISTORY" ]; then
     "$ROOT/tools/dev/dev-loop-history-bench.sh" run
 fi
-jq -e '.schema == "zcl.dev_loop_history_benchmark.v1" and
-       (.representative_benchmark|type) == "array"' "$HISTORY" >/dev/null ||
+valid_history "$HISTORY" ||
     fail 'history benchmark receipt is invalid'
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/zcl-dev-history-replay.XXXXXX")"
