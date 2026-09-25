@@ -2,6 +2,7 @@
  * purpose: Canonical codec and quorum verification for P2P ZCODE work. */
 
 #include "vcs/zcode_work_swarm.h"
+#include "vcs/zcode_work_node.h"
 
 #include "base/bytes.h"
 #include "codec/cursor.h"
@@ -23,6 +24,19 @@
 #define ZCWS_ADMISSION_BYTES 200u
 
 static const uint8_t zcws_magic[4] = { 'Z', 'C', 'W', 'S' };
+
+const char *vcs_zcode_work_node_result_string(
+    enum vcs_zcode_work_node_result r)
+{
+    static const char *const names[] = {
+        "ok", "malformed-frame", "unknown-peer", "capability-stale",
+        "work-lease-expired", "capability-mismatch", "replayed-work-frame",
+        "unrequested-result", "request-result-binding", "bounded-queue-full",
+        "local-worker-disabled",
+    };
+    return r >= 0 && (size_t)r < sizeof(names) / sizeof(names[0])
+        ? names[r] : "unknown";
+}
 
 static bool zcws_zero(const uint8_t *value, size_t len)
 {

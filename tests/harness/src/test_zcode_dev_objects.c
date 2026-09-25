@@ -2429,6 +2429,16 @@ static int test_zd_work_node_refused_attachment_cancel(void)
             &message, frame, sizeof(frame), &frame_len));
         ASSERT_EQ(vcs_zcode_work_node_handle_frame(
             worker, 22, frame, frame_len, 1001), VCS_ZCODE_WORK_NODE_OK);
+        /* Pending context A must not hold ready C behind it. A stays
+         * tracked, so later cancellation still removes only A. */
+        ASSERT(!vcs_zcode_work_node_defer_request(
+            worker, 22, following.request_id));
+        ASSERT(vcs_zcode_work_node_defer_request(
+            worker, 22, pending.request_id));
+        ASSERT(vcs_zcode_work_node_next_request(worker, &peer, &physical));
+        ASSERT_EQ(physical.request_id, following.request_id);
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            worker, 22, following.request_id, 1001, 4096));
         struct vcs_zcode_work_cancel_v1 pending_cancel = {
             .request_id = pending.request_id,
         };
@@ -2441,11 +2451,7 @@ static int test_zd_work_node_refused_attachment_cancel(void)
             &message, frame, sizeof(frame), &frame_len));
         ASSERT_EQ(vcs_zcode_work_node_handle_frame(
             worker, 22, frame, frame_len, 1001), VCS_ZCODE_WORK_NODE_OK);
-        ASSERT(vcs_zcode_work_node_next_request(worker, &peer, &physical));
-        ASSERT_EQ(physical.request_id, following.request_id);
         ASSERT(!vcs_zcode_work_node_next_request(worker, &peer, &physical));
-        ASSERT(vcs_zcode_work_node_mark_action_ready(
-            worker, 22, following.request_id, 1001, 4096));
         struct vcs_zcode_work_cancel_v1 cancel = {
             .request_id = request.request_id,
         };

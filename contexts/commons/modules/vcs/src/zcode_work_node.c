@@ -109,24 +109,10 @@ struct vcs_zcode_work_node {
 };
 
 static struct vcs_zcode_work_node *g_work_node;
-
 #define ZCODE_WORK_PROJECTED_WORKERS_MAX 8u
 
 static struct vcs_zcode_work_capability_v1 work_effective_capability(
     const struct vcs_zcode_work_node *node, int peer_at);
-
-const char *vcs_zcode_work_node_result_string(
-    enum vcs_zcode_work_node_result r)
-{
-    static const char *const names[] = {
-        "ok", "malformed-frame", "unknown-peer", "capability-stale",
-        "work-lease-expired", "capability-mismatch", "replayed-work-frame",
-        "unrequested-result", "request-result-binding", "bounded-queue-full",
-        "local-worker-disabled",
-    };
-    return r >= 0 && (size_t)r < sizeof(names) / sizeof(names[0])
-        ? names[r] : "unknown";
-}
 
 struct vcs_zcode_work_node *vcs_zcode_work_node_create(void)
 {
@@ -1336,6 +1322,22 @@ bool name(struct vcs_zcode_work_node *node, uint64_t *peer_out, type *out) \
 
 WORK_PEEK(vcs_zcode_work_node_peek_request, request, requests,
           struct vcs_zcode_work_request_v1)
+bool vcs_zcode_work_node_defer_request(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id)
+{
+    if (!node || !peer || !request_id) return false;
+    pthread_mutex_lock(&node->lock);
+    bool matches = node->request_count > 0 &&
+        node->requests[node->request_pos].peer == peer &&
+        node->requests[node->request_pos].request.request_id == request_id;
+    if (matches && node->request_count > 1) {
+        size_t tail = (node->request_pos + node->request_count) % VCS_ZCODE_WORK_NODE_MAX_REQUESTS;
+        node->requests[tail] = node->requests[node->request_pos];
+        node->request_pos = (node->request_pos + 1u) % VCS_ZCODE_WORK_NODE_MAX_REQUESTS;
+    }
+    pthread_mutex_unlock(&node->lock);
+    return matches;
+}
 static struct work_slot *work_ready_slot(
     struct vcs_zcode_work_node *node, uint64_t peer,
     uint64_t request_id, int64_t now)

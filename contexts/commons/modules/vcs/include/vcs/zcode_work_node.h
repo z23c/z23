@@ -115,6 +115,10 @@ bool vcs_zcode_work_node_next_request(
 bool vcs_zcode_work_node_peek_request(
     struct vcs_zcode_work_node *node, uint64_t *peer_out,
     struct vcs_zcode_work_request_v1 *out);
+/* A context fetch is pending: retain the exact signed request and let the
+ * next queued request reach admission during this service tick. */
+bool vcs_zcode_work_node_defer_request(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id);
 /* Mark one exact inbound action ready only after the caller has verified its
  * context and committed the build-fabric admission. Attached requesters can
  * then reuse that action without transferring or restoring context again. */

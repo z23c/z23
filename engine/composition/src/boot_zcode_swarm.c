@@ -381,36 +381,61 @@ static bool boot_zcode_work_resolve_admission(
                  (unsigned long long)request->request_id, admitted.message);
     return true;
 }
+enum boot_zcode_work_drain_step {
+    BOOT_ZCODE_WORK_STOP = 0,
+    BOOT_ZCODE_WORK_DEFERRED,
+    BOOT_ZCODE_WORK_HANDLED,
+};
+
+static enum boot_zcode_work_drain_step boot_zcode_work_drain_one(
+    const struct vcs_zcode_work_request_v1 *request, uint64_t peer, int64_t now)
+{
+    uint64_t reused_bytes = 0;
+    bool reused = false;
+    struct vcs_package_store_status status = {0};
+    if (!boot_zcode_work_context_available(
+            request, peer, now, &status, &reused, &reused_bytes))
+        return vcs_zcode_work_node_defer_request(
+            s_work, peer, request->request_id)
+            ? BOOT_ZCODE_WORK_DEFERRED : BOOT_ZCODE_WORK_STOP;
+    int64_t admission_us = platform_time_monotonic_us();
+    struct zcl_result admitted = reused
+        ? boot_zcode_work_attached_admit(request, now)
+        : boot_zcode_work_admit(request, now);
+    admission_us = platform_time_monotonic_us() - admission_us;
+    if (!boot_zcode_work_resolve_admission(
+            request, peer, now, &status, reused, reused_bytes,
+            admission_us, admitted)) return BOOT_ZCODE_WORK_STOP;
+    uint64_t drained_peer = 0;
+    struct vcs_zcode_work_request_v1 drained;
+    if (!vcs_zcode_work_node_next_request(
+            s_work, &drained_peer, &drained) || drained_peer != peer ||
+        drained.request_id != request->request_id) {
+        LOG_ERROR("net.zcode_swarm", "work admission FIFO changed");
+        return BOOT_ZCODE_WORK_STOP;
+    }
+    return BOOT_ZCODE_WORK_HANDLED;
+}
+
 static void boot_zcode_work_drain_admissions(int64_t now)
 {
     if (!s_work || !s_svc || !s_svc->app_ctx || !s_svc->app_ctx->build_worker) return;
-    for (;;) {
+    uint64_t first_peer = 0, first_id = 0;
+    for (size_t attempt = 0; attempt < VCS_ZCODE_WORK_NODE_MAX_REQUESTS;
+         attempt++) {
         uint64_t peer = 0;
         struct vcs_zcode_work_request_v1 request;
-        if (!vcs_zcode_work_node_peek_request(s_work, &peer, &request))
+        if (!vcs_zcode_work_node_peek_request(s_work, &peer, &request)) break;
+        if (first_id && peer == first_peer && request.request_id == first_id)
             break;
-        uint64_t reused_bytes = 0;
-        bool reused = false;
-        struct vcs_package_store_status status = {0};
-        if (!boot_zcode_work_context_available(
-                &request, peer, now, &status, &reused, &reused_bytes))
-            break;
-        int64_t admission_us = platform_time_monotonic_us();
-        struct zcl_result admitted = reused
-            ? boot_zcode_work_attached_admit(&request, now)
-            : boot_zcode_work_admit(&request, now);
-        admission_us = platform_time_monotonic_us() - admission_us;
-        if (!boot_zcode_work_resolve_admission(
-                &request, peer, now, &status, reused, reused_bytes,
-                admission_us, admitted)) break;
-        uint64_t drained_peer = 0;
-        struct vcs_zcode_work_request_v1 drained;
-        if (!vcs_zcode_work_node_next_request(
-                s_work, &drained_peer, &drained) || drained_peer != peer ||
-            drained.request_id != request.request_id) {
-            LOG_ERROR("net.zcode_swarm", "work admission FIFO changed");
-            break;
+        if (!first_id) {
+            first_peer = peer;
+            first_id = request.request_id;
         }
+        enum boot_zcode_work_drain_step step =
+            boot_zcode_work_drain_one(&request, peer, now);
+        if (step == BOOT_ZCODE_WORK_STOP) break;
+        if (step == BOOT_ZCODE_WORK_HANDLED) first_id = 0;
     }
 }
 static void boot_zcode_work_drain_cancels(int64_t now)
