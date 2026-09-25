@@ -10,6 +10,7 @@
  * Child ordering is the security argument, so it is spelled out:
  *   1. parent-death signal + parent identity check
  *   2. close every descriptor except the sealed image and the report pipe
+ *      (close_range, else a full /proc/self/fd enumeration, else refuse)
  *   3. rlimits (core 0, fsize 0, nofile small, AS/cpu bounded)
  *   4. no_new_privs, Landlock deny-all, seccomp session deny-list, then the
  *      runner/leaf layers (io_uring, pidfd, userfaultfd, kcmp,
@@ -31,6 +32,7 @@
 #include "platform/time_compat.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,22 +79,6 @@ uint32_t zcl_reflex_env_count(void)
     return count;
 }
 
-static bool fd_kept(int fd, const int *keep, size_t keep_count)
-{
-    for (size_t i = 0; i < keep_count; i++)
-        if (keep[i] == fd) return true;
-    return false;
-}
-
-uint32_t zcl_reflex_count_fds_except(const int *keep, size_t keep_count)
-{
-    uint32_t count = 0;
-    for (int fd = 0; fd < 1024; fd++)
-        if (!fd_kept(fd, keep, keep_count) && fcntl(fd, F_GETFD) >= 0)
-            count++;
-    return count;
-}
-
 bool zcl_reflex_sha256_fd(int fd, char out[65])
 {
     if (fd < 0 || !out || lseek(fd, 0, SEEK_SET) < 0) return false;
@@ -112,15 +98,6 @@ bool zcl_reflex_sha256_fd(int fd, char out[65])
 }
 
 /* ── report frames, validation, bounded reap (pre-hardening forms) ─────── */
-
-#if defined(ZCL_TESTING)
-static bool g_close_range_enabled = true;
-void zcl_reflex_testing_use_close_range(bool enabled)
-{
-    g_close_range_enabled = enabled;
-}
-void zcl_reflex_testing_set_fd_dir(const char *path) { (void)path; }
-#endif
 
 /* Today's acceptance: one blob of the right total length, no order check. */
 enum zcl_reflex_frames_status zcl_reflex_frames_parse(
@@ -173,19 +150,152 @@ void zcl_reflex_reap_bounded(pid_t child, int64_t deadline_us,
 
 /* ── descriptor hygiene ─────────────────────────────────────────────────── */
 
-static bool close_span(unsigned lo, unsigned hi)
-{
-    if (lo > hi) return true;
-#ifdef SYS_close_range
+#define REFLEX_FD_DIR "/proc/self/fd"
+
 #if defined(ZCL_TESTING)
-    if (g_close_range_enabled)
+static bool g_close_range_enabled = true;
+static const char *g_fd_dir = REFLEX_FD_DIR;
+
+void zcl_reflex_testing_use_close_range(bool enabled)
+{
+    g_close_range_enabled = enabled;
+}
+
+void zcl_reflex_testing_set_fd_dir(const char *path)
+{
+    g_fd_dir = path ? path : REFLEX_FD_DIR;
+}
+
+static bool reflex_close_range_enabled(void) { return g_close_range_enabled; }
+static const char *reflex_fd_dir(void) { return g_fd_dir; }
+#else
+static bool reflex_close_range_enabled(void) { return true; }
+static const char *reflex_fd_dir(void) { return REFLEX_FD_DIR; }
 #endif
-    if (syscall(SYS_close_range, lo, hi, 0) == 0) return true;
-#endif
-    unsigned cap = hi > 65535u ? 65535u : hi;
-    for (unsigned fd = lo; fd <= cap; fd++)
-        (void)close((int)fd);
+
+static bool fd_kept(int fd, const int *keep, size_t keep_count)
+{
+    for (size_t i = 0; i < keep_count; i++)
+        if (keep[i] == fd) return true;
+    return false;
+}
+
+/* Kernel linux_dirent64 layout (getdents64(2)); glibc's struct is not used
+ * so the walk needs no allocation and no libc directory stream. */
+struct reflex_dirent64 {
+    uint64_t d_ino;
+    int64_t d_off;
+    unsigned short d_reclen;
+    unsigned char d_type;
+    char d_name[];
+};
+
+static bool fd_name_parse(const char *name, int *fd_out)
+{
+    long value = 0;
+    if (!name[0]) return false;
+    for (const char *p = name; *p; p++) {
+        if (*p < '0' || *p > '9' || value > (INT_MAX - 9) / 10) return false;
+        value = value * 10 + (*p - '0');
+    }
+    *fd_out = (int)value;
     return true;
+}
+
+/* Handles one getdents64 batch: each listed descriptor other than `dir_fd`
+ * and the kept set is closed (when `close_them`) and counted. */
+static long fd_batch(const unsigned char *buf, long len, int dir_fd,
+                     const int *keep, size_t keep_count, bool close_them)
+{
+    long handled = 0;
+    for (long off = 0; off < len;) {
+        const struct reflex_dirent64 *d =
+            (const struct reflex_dirent64 *)(const void *)(buf + off);
+        if (d->d_reclen == 0) return -1;
+        off += d->d_reclen;
+        int fd = -1;
+        if (!fd_name_parse(d->d_name, &fd) || fd == dir_fd ||
+            fd_kept(fd, keep, keep_count))
+            continue;
+        if (close_them) (void)close(fd);
+        handled++;
+    }
+    return handled;
+}
+
+/* One full pass over an open fd directory from its start. Returns the number
+ * of descriptors handled, or -1 when the directory cannot be read. Uses only
+ * async-signal-safe syscalls (it runs between fork and exec). */
+static long fd_dir_pass(int dir_fd, const int *keep, size_t keep_count,
+                        bool close_them)
+{
+    alignas(8) unsigned char buf[4096];
+    long handled = 0;
+    if (lseek(dir_fd, 0, SEEK_SET) != 0) return -1;
+    for (;;) {
+        long n = syscall(SYS_getdents64, dir_fd, buf, sizeof(buf));
+        if (n == 0) return handled;
+        if (n < 0 && errno == EINTR) continue;
+        long batch = n < 0 ? -1
+            : fd_batch(buf, n, dir_fd, keep, keep_count, close_them);
+        if (batch < 0) return -1;
+        handled += batch;
+    }
+}
+
+uint32_t zcl_reflex_count_fds_in(int dir_fd, const int *keep,
+                                 size_t keep_count)
+{
+    long counted = dir_fd >= 0
+        ? fd_dir_pass(dir_fd, keep, keep_count, false) : -1;
+    return counted < 0 || counted >= (long)UINT32_MAX ? UINT32_MAX
+                                                      : (uint32_t)counted;
+}
+
+uint32_t zcl_reflex_count_fds_except(const int *keep, size_t keep_count)
+{
+    int dir_fd = open(reflex_fd_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    uint32_t counted = zcl_reflex_count_fds_in(dir_fd, keep, keep_count);
+    if (dir_fd >= 0) (void)close(dir_fd);
+    return counted;
+}
+
+/* close_range over every gap between the sorted kept descriptors. False
+ * when the kernel (or the test seam) has no close_range. */
+static bool close_spans_by_range(const int *sorted, size_t count)
+{
+#ifdef SYS_close_range
+    if (!reflex_close_range_enabled()) return false;
+    unsigned lo = 0;
+    for (size_t i = 0; i < count; i++) {
+        unsigned kept = (unsigned)sorted[i];
+        if (kept > lo && syscall(SYS_close_range, lo, kept - 1u, 0) != 0)
+            return false;
+        lo = kept + 1u;
+    }
+    return syscall(SYS_close_range, lo, ~0u, 0) == 0;
+#else
+    (void)sorted;
+    (void)count;
+    return false;
+#endif
+}
+
+/* Enumerate the fd directory and close every non-kept descriptor, repeating
+ * until a pass finds nothing left. The directory descriptor is skipped while
+ * walking and closed last. False when enumeration is impossible. */
+static bool close_by_enumeration(const int *keep, size_t keep_count)
+{
+    int dir_fd = open(reflex_fd_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0) return false;
+    bool clean = false;
+    for (int pass = 0; pass < 4 && !clean; pass++) {
+        long closed = fd_dir_pass(dir_fd, keep, keep_count, true);
+        if (closed < 0) break;
+        clean = closed == 0;
+    }
+    (void)close(dir_fd);
+    return clean;
 }
 
 bool zcl_reflex_close_all_except(const int *keep, size_t keep_count)
@@ -197,13 +307,9 @@ bool zcl_reflex_close_all_except(const int *keep, size_t keep_count)
         for (size_t j = i; j > 0 && sorted[j - 1] > sorted[j]; j--) {
             int t = sorted[j]; sorted[j] = sorted[j - 1]; sorted[j - 1] = t;
         }
-    unsigned lo = 0;
-    for (size_t i = 0; i < keep_count; i++) {
-        if (sorted[i] < 0) return false;
-        if ((unsigned)sorted[i] > lo) (void)close_span(lo, (unsigned)sorted[i] - 1u);
-        lo = (unsigned)sorted[i] + 1u;
-    }
-    return close_span(lo, ~0u);
+    if (sorted[0] < 0) return false;
+    return close_spans_by_range(sorted, keep_count) ||
+        close_by_enumeration(sorted, keep_count);
 }
 
 static bool write_all(int fd, const void *data, size_t len)
@@ -311,6 +417,27 @@ static bool child_install_filters(void)
                                 sizeof(g_leaf_denied[0]), false).ok;
 }
 
+/* Landlock deny-all, then close the ruleset descriptor os_sandbox retains
+ * (this single-threaded child never joins threads, so the candidate must not
+ * see it), then the syscall layers. `keep` holds the image, the report pipe
+ * and the pre-opened census directory. */
+static bool child_enter_sandbox(struct zcl_reflex_child_report *report,
+                                const int keep[static 3])
+{
+    if (!os_sandbox_landlock_restrict(NULL, 0).ok)
+        return child_note(report, "landlock", "Landlock deny-all unavailable"),
+               false;
+    if (!zcl_reflex_close_all_except(keep, 3))
+        return child_note(report, "fds", "ruleset close failed"), false;
+    if (!child_install_filters())
+        return child_note(report, "seccomp", "seccomp deny-lists unavailable"),
+               false;
+    return true;
+}
+
+/* The census directory is opened before Landlock (which would refuse it
+ * later) and read after the last filter, so the count is a full enumeration
+ * of the confined leaf, not a bounded range. */
 static bool child_confine(struct zcl_reflex_child_report *report,
                           const struct zcl_reflex_request *request,
                           int image_fd, int report_fd, int runner_pid)
@@ -325,21 +452,19 @@ static bool child_confine(struct zcl_reflex_child_report *report,
         return child_note(report, "rlimits", "rlimit lowering failed"), false;
     if (!os_sandbox_no_new_privs())
         return child_note(report, "no_new_privs", "no_new_privs failed"), false;
-    if (!os_sandbox_landlock_restrict(NULL, 0).ok)
-        return child_note(report, "landlock", "Landlock deny-all unavailable"),
+    int census = open(reflex_fd_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (census < 0)
+        return child_note(report, "census", "descriptor census unavailable"),
                false;
-    /* os_sandbox retains the Landlock ruleset descriptor for thread retrofit
-     * joins; this single-threaded child never joins, so the candidate must
-     * not see it either. */
-    if (!zcl_reflex_close_all_except(keep, 2))
-        return child_note(report, "fds", "ruleset close failed"), false;
-    if (!child_install_filters())
-        return child_note(report, "seccomp", "seccomp deny-lists unavailable"),
-               false;
-    report->env_count = zcl_reflex_env_count();
-    report->inherited_fd_count = zcl_reflex_count_fds_except(keep, 2);
-    report->resident_canary_seen = zcl_reflex_resident_canary;
-    return true;
+    const int keep3[] = {image_fd, report_fd, census};
+    bool confined = child_enter_sandbox(report, keep3);
+    if (confined) {
+        report->env_count = zcl_reflex_env_count();
+        report->inherited_fd_count = zcl_reflex_count_fds_in(census, keep3, 3);
+        report->resident_canary_seen = zcl_reflex_resident_canary;
+    }
+    (void)close(census);
+    return confined;
 }
 
 /* Second layer, installed after the mapping exists and before any candidate

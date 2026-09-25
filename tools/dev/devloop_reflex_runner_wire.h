@@ -192,12 +192,19 @@ void zcl_reflex_testing_set_fd_dir(const char *path);
     const struct zcl_reflex_request *request, int image_fd, int report_fd,
     int runner_pid);
 
-/* Close every descriptor except the listed ones (close_range where the
- * kernel has it, a bounded loop otherwise). */
+/* Close every descriptor except the listed ones (at most 8): close_range
+ * where the kernel has it, otherwise a full allocation-free /proc/self/fd
+ * enumeration. False (a refusal) when neither is possible. Async-signal-safe. */
 bool zcl_reflex_close_all_except(const int *keep, size_t keep_count);
 
-/* Count open descriptors in [0, 1024) not in `keep`. */
+/* Count every open descriptor not in `keep` by full /proc/self/fd
+ * enumeration; UINT32_MAX when the enumeration is impossible. */
 uint32_t zcl_reflex_count_fds_except(const int *keep, size_t keep_count);
+
+/* Same census through an already-open fd directory (not itself counted),
+ * for a caller that can no longer open paths. */
+uint32_t zcl_reflex_count_fds_in(int dir_fd, const int *keep,
+                                 size_t keep_count);
 
 /* Number of entries in this process's environment. */
 uint32_t zcl_reflex_env_count(void);
