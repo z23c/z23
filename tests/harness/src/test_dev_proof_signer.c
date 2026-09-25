@@ -18,9 +18,11 @@
 
 #include "base/hex.h"
 #include "crypto/ed25519.h"
+#include "dev_proof_observation_lookup.h"
 #include "dev_proof_receipt.h"
 #include "dev_proof_signer.h"
 #include "sha3/sha3.h"
+#include "vcs/vcs_object.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -793,6 +795,294 @@ static int test_dps_leaf_bounds(void)
     return failures;
 }
 
+static bool dps_observation_object(struct zcl_dev_verdict_leaf_v1 *leaf,
+    uint8_t wire[ZCL_DEV_VERDICT_LEAF_WIRE_BYTES],
+    struct zcl_dev_observation_object *object)
+{
+    char why[128];
+    if (!zcl_dev_verdict_leaf_sign(leaf, why, sizeof(why)) ||
+        !zcl_dev_verdict_leaf_serialize(leaf, wire, why, sizeof(why)) ||
+        !zcl_dev_verdict_leaf_root(leaf, object->root, why, sizeof(why)))
+        return false;
+    object->wire = wire;
+    object->wire_len = ZCL_DEV_VERDICT_LEAF_WIRE_BYTES;
+    return true;
+}
+
+static bool dps_measure_observation_lookup(
+    const struct zcl_dev_observation_query *query,
+    const struct zcl_dev_observation_object objects[2],
+    const struct zcl_dev_observation_domain *domain)
+{
+    struct zcl_dev_observation_result_detail result;
+    struct timespec wall_start, wall_end;
+    if (clock_gettime(CLOCK_MONOTONIC, &wall_start) != 0) return false;
+    clock_t cpu_start = clock();
+    for (unsigned i = 0; i < 100; i++)
+        zcl_dev_observation_lookup(query, objects, 2, true,
+                                   domain, 1, &result);
+    clock_t cpu_end = clock();
+    if (clock_gettime(CLOCK_MONOTONIC, &wall_end) != 0 ||
+        result.result != ZCL_DEV_OBSERVATION_CONFLICT) return false;
+    uint64_t wall_ns = (uint64_t)(
+        (int64_t)(wall_end.tv_sec - wall_start.tv_sec) * 1000000000 +
+        (int64_t)(wall_end.tv_nsec - wall_start.tv_nsec));
+    uint64_t cpu_ns = (uint64_t)(cpu_end - cpu_start) * 1000000000u /
+                      CLOCKS_PER_SEC;
+    printf("LOCAL_OBSERVATION_LOOKUP iterations=100 roots=2 wall_ns=%llu cpu_ns=%llu\n",
+           (unsigned long long)wall_ns, (unsigned long long)cpu_ns);
+    return true;
+}
+
+static bool dps_observation_pair(
+    struct zcl_dev_verdict_leaf_v1 *pass,
+    struct zcl_dev_verdict_leaf_v1 *fail,
+    uint8_t wires[2][ZCL_DEV_VERDICT_LEAF_WIRE_BYTES],
+    struct zcl_dev_observation_object objects[2],
+    struct zcl_dev_observation_domain *domain,
+    struct zcl_dev_observation_query *query)
+{
+    *pass = dps_leaf();
+    *fail = dps_leaf();
+    pass->observed_unix = 1000;
+    fail->observed_unix = 1001;
+    fail->verdict = ZCL_DEV_VERDICT_LEAF_FAIL;
+    fail->log_seq = 2;
+    memset(fail->prev_log_head, 0x39, sizeof(fail->prev_log_head));
+    if (!dps_observation_object(pass, wires[0], &objects[0]) ||
+        !dps_observation_object(fail, wires[1], &objects[1])) return false;
+    memcpy(domain->producer_pubkey, pass->producer_pubkey, 32);
+    memset(domain->domain_root, 0x71, 32);
+    memcpy(query->key, pass->key, 32);
+    query->group = pass->group;
+    query->now_unix = 1002;
+    query->max_age_seconds = 60;
+    query->required_independent_domains = 1;
+    return true;
+}
+
+static int test_dps_local_observation_lookup(void)
+{
+    int failures = 0;
+    TEST("receiver-local lookup retains conflicting signed verdicts and refuses incomplete evidence") {
+        dps_isolate("observation_lookup");
+        struct zcl_dev_verdict_leaf_v1 pass, fail;
+        uint8_t wires[2][ZCL_DEV_VERDICT_LEAF_WIRE_BYTES];
+        struct zcl_dev_observation_object objects[2] = {0};
+        struct zcl_dev_observation_domain domain = {0};
+        struct zcl_dev_observation_query query = {0};
+        struct zcl_dev_observation_result_detail result;
+        ASSERT(dps_observation_pair(&pass, &fail, wires, objects,
+                                    &domain, &query));
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_CONFLICT);
+        ASSERT(result.pass_count == 1 && result.fail_count == 1);
+        ASSERT(result.pass_root_indices[0] == 0 &&
+               result.fail_root_indices[0] == 1);
+        ASSERT(dps_measure_observation_lookup(&query, objects, &domain));
+        zcl_dev_observation_lookup(&query, objects, 1, false,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_UNAVAILABLE);
+        zcl_dev_observation_lookup(&query, objects, 1, true,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_PASS_EVIDENCE);
+        objects[1].wire = NULL;
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_UNAVAILABLE);
+        objects[1].wire = wires[1];
+        wires[1][264] ^= 1;
+        struct zcl_dev_verdict_leaf_v1 forged;
+        char forged_why[96];
+        ASSERT(zcl_dev_verdict_leaf_parse(wires[1], sizeof(wires[1]),
+                                           &forged, forged_why,
+                                           sizeof(forged_why)));
+        ASSERT(zcl_dev_verdict_leaf_root(&forged, objects[1].root,
+                                          forged_why, sizeof(forged_why)));
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_PASS_EVIDENCE);
+        ASSERT(result.invalid_count == 1 && result.fail_count == 0);
+        wires[1][264] ^= 1;
+        ASSERT(zcl_dev_verdict_leaf_root(&fail, objects[1].root,
+                                          forged_why, sizeof(forged_why)));
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool dps_measure_observation_cas(
+    const struct zcl_dev_observation_query *query,
+    const uint8_t roots[2][32],
+    const struct zcl_dev_observation_domain *domain)
+{
+    struct zcl_dev_observation_result_detail result;
+    struct timespec wall_start, wall_end;
+    if (clock_gettime(CLOCK_MONOTONIC, &wall_start) != 0) return false;
+    clock_t cpu_start = clock();
+    for (unsigned i = 0; i < 25; i++)
+        zcl_dev_observation_lookup_local(g_dps_state, query, roots, 2,
+                                          true, domain, 1, &result);
+    clock_t cpu_end = clock();
+    if (clock_gettime(CLOCK_MONOTONIC, &wall_end) != 0 ||
+        result.result != ZCL_DEV_OBSERVATION_CONFLICT) return false;
+    uint64_t wall_ns = (uint64_t)(
+        (int64_t)(wall_end.tv_sec - wall_start.tv_sec) * 1000000000 +
+        (int64_t)(wall_end.tv_nsec - wall_start.tv_nsec));
+    uint64_t cpu_ns = (uint64_t)(cpu_end - cpu_start) * 1000000000u /
+                      CLOCKS_PER_SEC;
+    printf("LOCAL_OBSERVATION_CAS_LOOKUP iterations=25 roots=2 wall_ns=%llu cpu_ns=%llu\n",
+           (unsigned long long)wall_ns, (unsigned long long)cpu_ns);
+    return true;
+}
+
+static int test_dps_local_observation_cas(void)
+{
+    int failures = 0;
+    TEST("receiver-local CAS lookup reads exact roots and refuses a missing object") {
+        dps_isolate("observation_cas");
+        struct zcl_dev_verdict_leaf_v1 pass, fail;
+        uint8_t wires[2][ZCL_DEV_VERDICT_LEAF_WIRE_BYTES];
+        uint8_t roots[2][32];
+        struct zcl_dev_observation_object objects[2] = {0};
+        struct zcl_dev_observation_domain domain = {0};
+        struct zcl_dev_observation_query query = {0};
+        struct zcl_dev_observation_result_detail result;
+        ASSERT(dps_observation_pair(&pass, &fail, wires, objects,
+                                    &domain, &query));
+        memcpy(roots[0], objects[0].root, 32);
+        memcpy(roots[1], objects[1].root, 32);
+        ASSERT(vcs_object_store_init(g_dps_state));
+        ASSERT(vcs_object_put_addressed(g_dps_state, roots[0],
+                                         wires[0], sizeof(wires[0])));
+        ASSERT(vcs_object_put_addressed(g_dps_state, roots[1],
+                                         wires[1], sizeof(wires[1])));
+        zcl_dev_observation_lookup_local(g_dps_state, &query,
+                                          (const uint8_t (*)[32])roots,
+                                          2, true, &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_CONFLICT);
+        ASSERT(dps_measure_observation_cas(&query,
+                                            (const uint8_t (*)[32])roots,
+                                            &domain));
+        roots[1][0] ^= 1;
+        zcl_dev_observation_lookup_local(g_dps_state, &query,
+                                          (const uint8_t (*)[32])roots,
+                                          2, true, &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_UNAVAILABLE);
+        roots[1][0] ^= 1;
+        zcl_dev_observation_lookup_local(g_dps_state, &query,
+                                          (const uint8_t (*)[32])roots,
+                                          1, false, &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_UNAVAILABLE);
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dps_local_observation_stale(void)
+{
+    int failures = 0;
+    TEST("receiver-local lookup refuses stale, wrong-domain and corrupt evidence") {
+        dps_isolate("observation_stale");
+        struct zcl_dev_verdict_leaf_v1 pass, fail;
+        uint8_t wires[2][ZCL_DEV_VERDICT_LEAF_WIRE_BYTES];
+        struct zcl_dev_observation_object objects[2] = {0};
+        struct zcl_dev_observation_domain domain = {0};
+        struct zcl_dev_observation_query query = {0};
+        struct zcl_dev_observation_result_detail result;
+        ASSERT(dps_observation_pair(&pass, &fail, wires, objects,
+                                    &domain, &query));
+        query.now_unix = 2000;
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_MISS);
+        ASSERT(result.stale_count == 2);
+        query.now_unix = 1002;
+        memset(domain.producer_pubkey, 0x7a, 32);
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_MISS);
+        ASSERT(result.invalid_count == 2);
+        memcpy(domain.producer_pubkey, pass.producer_pubkey, 32);
+        wires[1][176] ^= 1;
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   &domain, 1, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_UNAVAILABLE);
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dps_local_observation_domains(void)
+{
+    int failures = 0;
+    TEST("receiver-local lookup requires independent receiver-mapped domains") {
+        dps_isolate("observation_domains");
+        struct zcl_dev_verdict_leaf_v1 local = dps_leaf(), remote;
+        uint8_t wires[2][ZCL_DEV_VERDICT_LEAF_WIRE_BYTES];
+        uint8_t seed[32], pubkey[32], secret[32];
+        uint8_t message[sizeof(DPS_LEAF_DOMAIN) - 1u +
+                        ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES];
+        struct zcl_dev_observation_object objects[2] = {0};
+        struct zcl_dev_observation_domain domains[2] = {0};
+        struct zcl_dev_observation_query query = {0};
+        struct zcl_dev_observation_result_detail result;
+        char why[128], allow_path[PATH_MAX], allowed[66];
+        local.observed_unix = 1000;
+        ASSERT(dps_observation_object(&local, wires[0], &objects[0]));
+        remote = local;
+        remote.log_seq = 2;
+        memset(remote.prev_log_head, 0x39, 32);
+        memset(seed, 0x72, sizeof(seed));
+        ed25519_keypair(pubkey, secret, seed);
+        ASSERT(zcl_dev_verdict_leaf_serialize(&remote, wires[1], why, sizeof(why)));
+        memcpy(message, DPS_LEAF_DOMAIN, sizeof(DPS_LEAF_DOMAIN) - 1u);
+        memcpy(message + sizeof(DPS_LEAF_DOMAIN) - 1u, wires[1],
+               ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES);
+        memcpy(wires[1] + ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES,
+               pubkey, 32);
+        ed25519_sign(wires[1] + ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES + 32,
+                     message, sizeof(message), seed, pubkey);
+        ASSERT(zcl_dev_verdict_leaf_parse(wires[1], sizeof(wires[1]),
+                                           &remote, why, sizeof(why)));
+        ASSERT(zcl_dev_verdict_leaf_root(&remote, objects[1].root,
+                                          why, sizeof(why)));
+        objects[1].wire = wires[1];
+        objects[1].wire_len = sizeof(wires[1]);
+        ASSERT(dps_allow_path(allow_path, sizeof(allow_path)));
+        zcl_hex_encode(pubkey, 32, allowed);
+        allowed[64] = '\n'; allowed[65] = 0;
+        ASSERT(dps_write(allow_path, allowed, 65, 0600));
+        memcpy(domains[0].producer_pubkey, local.producer_pubkey, 32);
+        memset(domains[0].domain_root, 0x41, 32);
+        memcpy(domains[1].producer_pubkey, pubkey, 32);
+        memset(domains[1].domain_root, 0x42, 32);
+        memcpy(query.key, local.key, 32);
+        query.group = local.group;
+        query.now_unix = 1001;
+        query.max_age_seconds = 60;
+        query.required_independent_domains = 2;
+        zcl_dev_observation_lookup(&query, objects, 1, true,
+                                   domains, 2, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_INSUFFICIENT_DOMAINS);
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   domains, 2, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_PASS_EVIDENCE);
+        ASSERT(result.independent_domains == 2 && result.pass_count == 2);
+        memcpy(domains[1].domain_root, domains[0].domain_root, 32);
+        zcl_dev_observation_lookup(&query, objects, 2, true,
+                                   domains, 2, &result);
+        ASSERT(result.result == ZCL_DEV_OBSERVATION_INSUFFICIENT_DOMAINS);
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_proof_signer(void)
 {
     int failures = 0;
@@ -804,6 +1094,10 @@ int test_dev_proof_signer(void)
     failures += test_dps_leaf_round_trip();
     failures += test_dps_leaf_tamper();
     failures += test_dps_leaf_bounds();
+    failures += test_dps_local_observation_lookup();
+    failures += test_dps_local_observation_cas();
+    failures += test_dps_local_observation_stale();
+    failures += test_dps_local_observation_domains();
 #if !defined(_WIN32)
     failures += test_dps_hook_admission();
     failures += test_dps_hook_running_eta();
