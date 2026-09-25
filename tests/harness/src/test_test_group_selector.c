@@ -976,6 +976,46 @@ static bool selector_output_contains(const char *out, const char *expected)
     return false;
 }
 
+/* Landing proofs start the runner with --no-cache so that no environment can
+ * re-enable verdict reuse (tools/dev/dev_proof.c, dp_test_dimension_argv).
+ * Control: ZCL_TEST_CACHE=1 alone turns the cache on, which prints its PLAN
+ * (or its fail-safe downgrade) before dispatch. With --no-cache on the
+ * command line the same environment must leave every cache path unexecuted
+ * and the group must run. */
+static int test_runner_no_cache_outranks_env(void)
+{
+    int failures = 0;
+    TEST("test group selector: --no-cache outranks ZCL_TEST_CACHE=1") {
+        static char out[1024 * 1024];
+        char exe[PATH_MAX];
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        ASSERT(exe[0] != '\0');
+        char command[PATH_MAX + 320];
+        int n = snprintf(command, sizeof(command),
+                         "env ZCL_TEST_CACHE=1 \"%s\" --jobs=1 "
+                         "--exact=test_hex_codec 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        int rc = capture_command(command, out, sizeof(out));
+        dump_bad_rc("nested env cache control", rc, 0, out);
+        ASSERT(rc == 0);
+        ASSERT(strstr(out, "cache PLAN") != NULL ||
+               strstr(out, "cache probe failed") != NULL);
+        n = snprintf(command, sizeof(command),
+                     "env ZCL_TEST_CACHE=1 \"%s\" --jobs=1 "
+                     "--exact=test_hex_codec --no-cache 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        rc = capture_command(command, out, sizeof(out));
+        dump_bad_rc("nested --no-cache over ZCL_TEST_CACHE=1", rc, 0, out);
+        ASSERT(rc == 0);
+        ASSERT(strstr(out, "cache PLAN") == NULL);
+        ASSERT(strstr(out, "cache probe failed") == NULL);
+        ASSERT(strstr(out, "SUITE VERDICT mode=cold") != NULL);
+        ASSERT(strstr(out, "groups_ran=1 groups_cached=0") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_runner_exact_selection(void)
 {
     int failures = 0;
@@ -1053,34 +1093,6 @@ static int test_runner_exact_selection(void)
         ASSERT(selector_timing_zero(timing_row, "env_unobserved"));
         ASSERT(selector_timing_zero(timing_row, "load_flaky"));
         json_free(&timing);
-
-        /* Landing proofs start the runner with --no-cache so that no
-         * environment can re-enable verdict reuse (tools/dev/dev_proof.c,
-         * dp_test_dimension_argv). Control: ZCL_TEST_CACHE=1 alone turns
-         * the cache on, which prints its PLAN (or its fail-safe downgrade)
-         * before dispatch. With --no-cache on the command line the same
-         * environment must leave every cache path unexecuted and the group
-         * must run. */
-        n = snprintf(command, sizeof(command),
-                     "env ZCL_TEST_CACHE=1 \"%s\" --jobs=1 "
-                     "--exact=test_hex_codec 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        dump_bad_rc("nested env cache control", rc, 0, out);
-        ASSERT(rc == 0);
-        ASSERT(strstr(out, "cache PLAN") != NULL ||
-               strstr(out, "cache probe failed") != NULL);
-        n = snprintf(command, sizeof(command),
-                     "env ZCL_TEST_CACHE=1 \"%s\" --jobs=1 "
-                     "--exact=test_hex_codec --no-cache 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        dump_bad_rc("nested --no-cache over ZCL_TEST_CACHE=1", rc, 0, out);
-        ASSERT(rc == 0);
-        ASSERT(strstr(out, "cache PLAN") == NULL);
-        ASSERT(strstr(out, "cache probe failed") == NULL);
-        ASSERT(strstr(out, "SUITE VERDICT mode=cold") != NULL);
-        ASSERT(strstr(out, "groups_ran=1 groups_cached=0") != NULL);
 
         n = snprintf(command, sizeof(command), "\"%s\" --source-id 2>&1",
                      exe);
@@ -1264,6 +1276,7 @@ int test_test_group_selector(void)
     failures += test_native_catalog_resolution();
     failures += test_process_sensitive_groups_are_catalog_exclusive();
     failures += test_runner_exact_selection();
+    failures += test_runner_no_cache_outranks_env();
     failures += test_assert_macros_report_where_and_what();
     failures += test_assert_messages_name_file_line_and_values();
     return failures;
