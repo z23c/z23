@@ -343,6 +343,94 @@ enum zcl_shadow_predict_mode {
 
 #define ZCL_SHADOW_NAMES_MAX 32768u
 
+/* ── Lint premise prediction (shadow only) ────────────────────────────────
+ *
+ * The rows come from the existing base-relative lint premise selection,
+ * `z23-lint select --dry --summary --gate=NAME` (lane premise-select,
+ * tools/lint/lintc/premise*.c). For each per-TU gate that declares a premise,
+ * it hashes every unit's premise (gate code, pin, Makefile variable text,
+ * path set, textual include closure, own baseline rows) at the candidate and
+ * at a verified base. A unit may inherit the base's PASS iff those bytes are
+ * equal. One row per entry and declared gate:
+ *   id  gate  units  fresh  selection(enabled|disabled)  select_ms
+ * select_ms is the measured wall time of that one select run. A gate with no
+ * row, or with selection disabled, is priced at its full weight. Nothing here
+ * is a verdict: the landing proof still runs every lint gate. */
+struct zcl_shadow_lint_premise {
+    char id[ZCL_SHADOW_ID_MAX];
+    char gate[ZCL_SHADOW_NAME_MAX];
+    uint32_t units;
+    uint32_t fresh;
+    bool enabled;
+    uint32_t select_ms;
+};
+
+struct zcl_shadow_lint_premises {
+    struct zcl_shadow_lint_premise *rows;
+    size_t count;
+};
+
+bool zcl_shadow_lint_premises_parse(const char *text, size_t len,
+                                    struct zcl_shadow_lint_premises *out,
+                                    char *why, size_t why_len);
+void zcl_shadow_lint_premises_free(struct zcl_shadow_lint_premises *p);
+const struct zcl_shadow_lint_premise *
+zcl_shadow_lint_premise_find(const struct zcl_shadow_lint_premises *p,
+                             const char *id, const char *gate);
+
+/* The least one fresh unit (one syntax-only compile) is charged. Measured:
+ * a cold check-windows-cross-syntax run (ZCL_LINT_TU_CACHE=0, 8 jobs) spent
+ * 491 s CPU on 2349 units, 209 ms per unit; this charges about five times
+ * that. The mean per-unit share of the gate's weight is used when larger. */
+#define ZCL_SHADOW_LINT_UNIT_FLOOR_MS 1000u
+
+/* Predicted fresh cost of one lint gate. Without a usable row it is gate_ms
+ * and *premise_priced is false. With one it is the select run plus every
+ * fresh unit at max(ceil(gate_ms / units), the floor above), except that the
+ * units part never exceeds gate_ms: once the select run has shown how many
+ * units are fresh, running the whole gate is the fallback. The select run is
+ * always paid, so a selection that inherits nothing costs more than none. */
+uint64_t zcl_shadow_lint_gate_ms(const struct zcl_shadow_lint_premise *row,
+                                 uint32_t gate_ms, bool *premise_priced);
+
+/* Where a predicted-fresh obligation's cost comes from. FLOOR is the
+ * make_lint_gates umbrella family, which the impact rules attach to almost
+ * every change and to any path no rule maps. DIRECT is the rest of the
+ * contract layer. FALLBACK is every test group of an entry predicted ALL. */
+enum zcl_shadow_class {
+    ZCL_SHADOW_CLASS_LINT = 0,
+    ZCL_SHADOW_CLASS_FLOOR,
+    ZCL_SHADOW_CLASS_DIRECT,
+    ZCL_SHADOW_CLASS_CALLER,
+    ZCL_SHADOW_CLASS_INTEGRATION,
+    ZCL_SHADOW_CLASS_FALLBACK,
+    ZCL_SHADOW_CLASS__COUNT
+};
+
+#define ZCL_SHADOW_FLOOR_FAMILY "make_lint_gates"
+
+const char *zcl_shadow_class_name(enum zcl_shadow_class c);
+
+/* Fresh seconds per obligation summed over the entries evaluated with it:
+ * the input of the top-N table. Lint rows are indexed like the weights'
+ * rows; group rows like the test group catalog. */
+struct zcl_shadow_tally {
+    const struct zcl_shadow_weights *weights;
+    size_t groups;
+    uint64_t *group_ms;
+    uint32_t *group_entries;
+    uint64_t *lint_ms;          /* full gate weight, the rule without premise */
+    uint64_t *lint_premise_ms;  /* priced by the lint premise rows */
+    uint32_t *lint_entries;
+};
+
+bool zcl_shadow_tally_init(struct zcl_shadow_tally *t,
+                           const struct zcl_shadow_weights *weights);
+void zcl_shadow_tally_free(struct zcl_shadow_tally *t);
+/* `SHADOW-TOP` lines: the k largest fresh obligations by summed seconds. */
+bool zcl_shadow_render_top(FILE *out, const struct zcl_shadow_tally *t,
+                           size_t k);
+
 /* ── Evaluation against the live selector ─────────────────────────────── */
 struct zcl_shadow_result {
     char id[ZCL_SHADOW_ID_MAX];
@@ -401,6 +489,18 @@ struct zcl_shadow_result {
     /* The predicted-fresh groups by layer, for the hand-off; "..." marks a
      * list that did not fit (predicted_names is complete). */
     char fresh_layer_names[ZCL_SHADOW_LAYER__COUNT][16384];
+    /* The rule's fresh bill (rule_cost_ms) split by obligation class, with
+     * every lint gate at full weight. */
+    uint32_t class_n[ZCL_SHADOW_CLASS__COUNT];
+    uint64_t class_ms[ZCL_SHADOW_CLASS__COUNT];
+    /* The same prediction with lint gates priced by the lint premise rows:
+     * premise_rule_cost_ms = rule_cost_ms - lint_cost_ms + lint_premise_ms.
+     * Gates without a row keep their full weight. */
+    uint64_t lint_premise_ms;
+    uint64_t premise_rule_cost_ms;
+    uint32_t lint_premise_gates;    /* gates priced by a usable row */
+    uint32_t lint_units_total;
+    uint32_t lint_units_fresh;
 };
 
 /* Premise fields, named after zcl.component_proof_key.v1. */
@@ -435,6 +535,10 @@ struct zcl_shadow_eval_ctx {
     const char *fixture_dir;          /* holds <id>.patch */
     const struct zcl_shadow_weights *weights;
     uint64_t validation_ns;           /* from the call above */
+    /* Optional: lint premise rows (NULL prices every gate in full) and a
+     * tally the evaluation adds this entry's fresh obligations to. */
+    const struct zcl_shadow_lint_premises *lint_premises;
+    struct zcl_shadow_tally *tally;
 };
 
 bool zcl_shadow_evaluate(const struct zcl_shadow_eval_ctx *ctx,

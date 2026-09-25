@@ -125,13 +125,37 @@ bool zcl_shadow_render_graph(FILE *out, const struct zcl_shadow_result *r)
         (unsigned long long)g->collision_ms) > 0;
 }
 
+/* The rule's fresh bill split by obligation class, and the same bill with
+ * lint gates priced by the lint premise rows. Shadow prediction only. */
+static bool shadow_render_classes(FILE *out, const struct zcl_shadow_result *r)
+{
+    uint32_t total = r->groups_reference + r->lint_reference;
+    if (fprintf(out, "SHADOW-CLASS id=%s", r->id) <= 0) return false;
+    for (unsigned c = 0; c < ZCL_SHADOW_CLASS__COUNT; c++)
+        if (fprintf(out, " %s=%u/%.1f",
+                    zcl_shadow_class_name((enum zcl_shadow_class)c),
+                    r->class_n[c], (double)r->class_ms[c] / 1000.0) <= 0)
+            return false;
+    return fprintf(out,
+        " fresh=%u/%u fresh_s=%.1f/%.1f lint_premise_s=%.1f "
+        "lint_premise_gates=%u lint_units_fresh=%u/%u "
+        "fresh_s_with_lint_premise=%.1f/%.1f\n",
+        shadow_rule_fresh(r), total, (double)r->rule_cost_ms / 1000.0,
+        (double)r->reference_cost_ms / 1000.0,
+        (double)r->lint_premise_ms / 1000.0, r->lint_premise_gates,
+        r->lint_units_fresh, r->lint_units_total,
+        (double)r->premise_rule_cost_ms / 1000.0,
+        (double)r->reference_cost_ms / 1000.0) > 0;
+}
+
 bool zcl_shadow_render_entry(FILE *out, const struct zcl_shadow_result *r)
 {
     if (!out || !r || !shadow_render_main(out, r)) return false;
     char fields[256], gaps[256];
     shadow_fields_text(r->premise_fields, fields, sizeof(fields));
     shadow_fields_text(r->key_gap_fields, gaps, sizeof(gaps));
-    if (!zcl_shadow_render_graph(out, r) || !zcl_shadow_render_fresh(out, r))
+    if (!zcl_shadow_render_graph(out, r) || !zcl_shadow_render_fresh(out, r) ||
+        !shadow_render_classes(out, r))
         return false;
     return fprintf(out,
         "SHADOW-PREMISE id=%s build_deps_tus=%u private_readers=%u "
@@ -165,6 +189,9 @@ struct shadow_totals {
     uint64_t obligations_fresh, obligations_total;
     uint64_t name_only_ms, name_only_groups;
     uint64_t block_ms[SHADOW_BLOCK__COUNT];
+    uint64_t premise_rule_ms;
+    uint64_t class_ms[ZCL_SHADOW_CLASS__COUNT];
+    uint64_t class_n[ZCL_SHADOW_CLASS__COUNT];
     size_t fallbacks[ZCL_SHADOW_FALLBACK__COUNT];
 };
 
@@ -197,6 +224,11 @@ static void shadow_totals_add(struct shadow_totals *t,
     t->name_only_groups += r->graph.collision_groups;
     t->block_ms[SHADOW_BLOCK_LINT] += r->lint_cost_ms;
     t->block_ms[shadow_block_of(r)] += r->rule_cost_ms - r->lint_cost_ms;
+    t->premise_rule_ms += r->premise_rule_cost_ms;
+    for (unsigned c = 0; c < ZCL_SHADOW_CLASS__COUNT; c++) {
+        t->class_ms[c] += r->class_ms[c];
+        t->class_n[c] += r->class_n[c];
+    }
     if ((unsigned)r->fallback < ZCL_SHADOW_FALLBACK__COUNT)
         t->fallbacks[r->fallback]++;
 }
@@ -269,6 +301,40 @@ static bool shadow_render_blockers(FILE *out, const char *name,
             return false;
     }
     return true;
+}
+
+/* The rule's fresh bill by obligation class, and the savings once lint
+ * gates are priced by the lint premise rows. Shadow prediction only: no
+ * obligation here is eligible for reuse today. */
+static bool shadow_render_class_totals(FILE *out, const char *name,
+                                       const struct shadow_totals *t)
+{
+    if (t->entries == 0) return true;
+    double n = (double)t->entries;
+    for (unsigned c = 0; c < ZCL_SHADOW_CLASS__COUNT; c++)
+        if (fprintf(out,
+                    "SHADOW-CLASS-TOTAL set=%s class=%s fresh_obligations=%llu "
+                    "fresh_s=%.1f fresh_s_per_candidate=%.1f "
+                    "share_of_reference_pct=%.1f\n",
+                    name, zcl_shadow_class_name((enum zcl_shadow_class)c),
+                    (unsigned long long)t->class_n[c],
+                    (double)t->class_ms[c] / 1000.0,
+                    (double)t->class_ms[c] / 1000.0 / n,
+                    shadow_pct(t->class_ms[c], t->reference_ms)) <= 0)
+            return false;
+    uint64_t rule_saved = t->reference_ms > t->rule_ms
+                              ? t->reference_ms - t->rule_ms : 0;
+    uint64_t premise_saved = t->reference_ms > t->premise_rule_ms
+                                 ? t->reference_ms - t->premise_rule_ms : 0;
+    return fprintf(out,
+        "SHADOW-LINT-PREMISE set=%s fresh_s_per_candidate_rule=%.1f "
+        "fresh_s_per_candidate_rule_lint_premise=%.1f "
+        "savings_pct_rule=%.1f savings_pct_rule_lint_premise=%.1f "
+        "prediction=shadow_only eligible_now=0\n",
+        name, (double)t->rule_ms / 1000.0 / n,
+        (double)t->premise_rule_ms / 1000.0 / n,
+        shadow_pct(rule_saved, t->reference_ms),
+        shadow_pct(premise_saved, t->reference_ms)) > 0;
 }
 
 static uint64_t shadow_avoidable(const struct zcl_shadow_result *r)
@@ -351,6 +417,8 @@ bool zcl_shadow_render_totals(FILE *out, const struct zcl_shadow_result *rows,
            shadow_render_set(out, "all", &all) &&
            shadow_render_blockers(out, "real", &real) &&
            shadow_render_blockers(out, "all", &all) &&
+           shadow_render_class_totals(out, "real", &real) &&
+           shadow_render_class_totals(out, "synthetic", &synthetic) &&
            shadow_render_avoidable(out, rows, count) &&
            shadow_render_key_gaps(out, rows, count);
 }

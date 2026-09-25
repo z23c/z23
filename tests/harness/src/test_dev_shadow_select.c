@@ -427,11 +427,37 @@ static bool ss_row_graph_consistent(const struct zcl_shadow_result *r)
            r->premise_groups <= r->groups_reference;
 }
 
+/* The class split adds up to the rule's bill, an ALL prediction is all
+ * fallback, and the lint premise variant differs from the rule only in how
+ * lint gates are priced: every corpus entry carries rows for exactly the two
+ * gates that declare a premise. */
+static bool ss_row_classes_consistent(const struct zcl_shadow_result *r)
+{
+    uint64_t ms = 0;
+    uint32_t n = 0;
+    for (unsigned c = 0; c < ZCL_SHADOW_CLASS__COUNT; c++) {
+        ms += r->class_ms[c];
+        n += r->class_n[c];
+    }
+    bool all = r->predict_mode == ZCL_SHADOW_PREDICT_ALL;
+    return ms == r->rule_cost_ms &&
+           n == r->predicted_groups + r->lint_selected &&
+           r->class_ms[ZCL_SHADOW_CLASS_LINT] == r->lint_cost_ms &&
+           (!all || r->class_n[ZCL_SHADOW_CLASS_FALLBACK] ==
+                        r->predicted_groups) &&
+           (all || r->class_n[ZCL_SHADOW_CLASS_FALLBACK] == 0) &&
+           r->lint_premise_gates == 2 &&
+           r->lint_units_fresh <= r->lint_units_total &&
+           r->premise_rule_cost_ms ==
+               r->rule_cost_ms - r->lint_cost_ms + r->lint_premise_ms;
+}
+
 /* eligible_groups == 0 is the fail-closed guard: the only prior verdicts a
  * host offers are its own uid's, and those never stand in for a run. */
 static bool ss_row_consistent(const struct zcl_shadow_result *r)
 {
     return r->bytes_verified && r->groups_reference > 0 &&
+           ss_row_classes_consistent(r) &&
            r->lint_reference == 213 && r->lint_selected == r->lint_reference &&
            r->eligible_groups == 0 &&
            r->eligible_cost_ms == r->reference_cost_ms &&
@@ -474,26 +500,61 @@ static bool ss_witness_guarded(size_t n)
             r->patch.contract_change != ZCL_SHADOW_CONTRACT_MOVED)
             return false;
     }
-    return true;
+    /* The created header flips the premise path set, so the lint premise
+     * selection inherits no unit of either gate. */
+    const struct zcl_shadow_result *neg = ss_row(n, "syn-negative-lookup");
+    return neg && neg->lint_units_total > 0 &&
+           neg->lint_units_fresh == neg->lint_units_total;
 }
 
-static bool ss_evaluate_all(size_t *count)
+static bool ss_load_lint_premises(struct zcl_shadow_lint_premises *p)
 {
-    struct zcl_shadow_weights w = {0};
-    if (!ss_load_weights(&w)) return false;
-    struct zcl_shadow_eval_ctx ctx = {
-        ".", SS_FIXTURE_DIR, &w, zcl_shadow_validation_ns_per_obligation()};
-    bool ok = ctx.validation_ns > 0;
+    size_t len = 0;
+    char why[128] = "";
+    char *text = ss_slurp(SS_FIXTURE_DIR "/lint_premise.tsv", &len);
+    bool ok = text && zcl_shadow_lint_premises_parse(text, len, p, why,
+                                                     sizeof(why));
+    if (!ok) printf("lint premises: %s\n", text ? why : "lint_premise.tsv absent");
+    free(text);
+    return ok;
+}
+
+/* Real entries feed the top-obligation tally; synthetic ones do not. */
+static bool ss_evaluate_rows(struct zcl_shadow_eval_ctx *ctx,
+                             struct zcl_shadow_tally *tally, size_t *count)
+{
+    bool ok = ctx->validation_ns > 0;
     *count = 0;
     for (size_t i = 0; ok && i < ss_corpus.count; i++) {
         char why[160] = "";
-        ok = zcl_shadow_evaluate(&ctx, &ss_corpus.entries[i], &ss_rows[i],
+        bool real = ss_corpus.entries[i].kind == ZCL_SHADOW_KIND_REAL;
+        ctx->tally = real ? tally : NULL;
+        ok = zcl_shadow_evaluate(ctx, &ss_corpus.entries[i], &ss_rows[i],
                                  why, sizeof(why));
         if (!ok) printf("evaluate %s: %s\n", ss_corpus.entries[i].id, why);
         ok = ok && zcl_shadow_render_entry(stdout, &ss_rows[i]);
         *count += ok ? 1u : 0u;
     }
-    ok = ok && zcl_shadow_render_totals(stdout, ss_rows, *count);
+    return ok;
+}
+
+static bool ss_evaluate_all(size_t *count)
+{
+    struct zcl_shadow_weights w = {0};
+    struct zcl_shadow_lint_premises lp = {0};
+    struct zcl_shadow_tally tally = {0};
+    *count = 0;
+    bool ok = ss_load_weights(&w) && ss_load_lint_premises(&lp) &&
+              zcl_shadow_tally_init(&tally, &w);
+    struct zcl_shadow_eval_ctx ctx = {
+        ".", SS_FIXTURE_DIR, &w, ok ? zcl_shadow_validation_ns_per_obligation()
+                                    : 0,
+        &lp, NULL};
+    ok = ok && ss_evaluate_rows(&ctx, &tally, count);
+    ok = ok && zcl_shadow_render_totals(stdout, ss_rows, *count) &&
+         zcl_shadow_render_top(stdout, &tally, 15);
+    zcl_shadow_tally_free(&tally);
+    zcl_shadow_lint_premises_free(&lp);
     zcl_shadow_weights_free(&w);
     return ok;
 }
@@ -795,9 +856,66 @@ static int ss_test_eligibility(void)
     return failures;
 }
 
+static int ss_test_lint_premise(void)
+{
+    int failures = 0;
+    TEST("shadow select: lint premise rows are refused, never repaired, and price only fresh units") {
+        static struct zcl_shadow_lint_premises p;
+        char why[96];
+        static const char *const bad[] = {
+            "x\tg\t10\t11\tenabled\t5\n",           /* more fresh than units */
+            "x\tg\t0\t0\tenabled\t5\n",             /* no units */
+            "x\tg\t10\t1\tmaybe\t5\n",              /* unknown selection */
+            "x\tg\t10\t1\tenabled\n",               /* short row */
+            "x\tg\t10\t1\tenabled\t5\nx\tg\t10\t1\tenabled\t5\n",
+            "x\tg\t10\t-1\tenabled\t5\n",           /* not a count */
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+            ASSERT(!zcl_shadow_lint_premises_parse(bad[i], strlen(bad[i]), &p,
+                                                   why, sizeof(why)));
+        const char *good = "# c\nx\tg\t1000\t2\tenabled\t7000\n"
+                           "x\th\t1000\t0\tdisabled\t7000\n"
+                           "x\tk\t10\t10\tenabled\t7000\n";
+        ASSERT(zcl_shadow_lint_premises_parse(good, strlen(good), &p, why,
+                                              sizeof(why)));
+        ASSERT_EQ(p.count, (size_t)3);
+        bool priced = true;
+        /* No row, or selection disabled: the whole gate. */
+        ASSERT_EQ(zcl_shadow_lint_gate_ms(NULL, 120000, &priced),
+                  (uint64_t)120000);
+        ASSERT(!priced);
+        ASSERT_EQ(zcl_shadow_lint_gate_ms(zcl_shadow_lint_premise_find(
+                                              &p, "x", "h"),
+                                          120000, &priced),
+                  (uint64_t)120000);
+        ASSERT(!priced);
+        ASSERT(!zcl_shadow_lint_premise_find(&p, "y", "g"));
+        /* Enabled: the select run plus each fresh unit at the floor. */
+        const struct zcl_shadow_lint_premise *g =
+            zcl_shadow_lint_premise_find(&p, "x", "g");
+        ASSERT_EQ(zcl_shadow_lint_gate_ms(g, 120000, &priced),
+                  (uint64_t)(7000 + 2 * ZCL_SHADOW_LINT_UNIT_FLOOR_MS));
+        ASSERT(priced);
+        /* A heavy gate's mean share outranks the floor. */
+        ASSERT_EQ(zcl_shadow_lint_gate_ms(g, 5000000, &priced),
+                  (uint64_t)(7000 + 2 * 5000));
+        /* Every unit fresh: the select run was paid, then the whole gate
+         * runs, never ten single-unit charges above its weight. */
+        ASSERT_EQ(zcl_shadow_lint_gate_ms(zcl_shadow_lint_premise_find(
+                                              &p, "x", "k"),
+                                          3000, &priced),
+                  (uint64_t)(7000 + 3000));
+        ASSERT(priced);
+        zcl_shadow_lint_premises_free(&p);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_shadow_select(void)
 {
     int failures = 0;
+    failures += ss_test_lint_premise();
     failures += ss_test_corpus_frozen();
     failures += ss_test_weights();
     failures += ss_test_synthetic_facts();

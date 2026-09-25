@@ -953,6 +953,7 @@ DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 # docs/experiments/2026-09-25-shadow-obligation-selector.md): it links into
 # the dev binary and the test harness, never the release node.
 SHADOW_SELECT_SRCS = tools/dev/dev_shadow_rule.c tools/dev/dev_shadow_corpus.c \
+	tools/dev/dev_shadow_lint.c \
 	tools/dev/dev_shadow_eval.c tools/dev/dev_shadow_render.c \
 	tools/dev/dev_shadow_graph.c tools/dev/dev_shadow_compare.c
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \

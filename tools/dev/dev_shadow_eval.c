@@ -40,6 +40,7 @@ struct shadow_marks {
     bool *explained;   /* reached by an include-explained selection */
     bool *name_only;   /* reached by an unexplained caller hop */
     bool *predicted;   /* the rule-enabled fresh set */
+    bool *umbrella;    /* the ZCL_SHADOW_FLOOR_FAMILY expansion */
 };
 
 static void shadow_marks_free(struct shadow_marks *m)
@@ -51,6 +52,7 @@ static void shadow_marks_free(struct shadow_marks *m)
     free(m->explained);
     free(m->name_only);
     free(m->predicted);
+    free(m->umbrella);
 }
 
 static bool shadow_marks_init(struct shadow_marks *m)
@@ -64,8 +66,9 @@ static bool shadow_marks_init(struct shadow_marks *m)
     m->explained = zcl_calloc(m->n, sizeof(bool), "shadow_expl");
     m->name_only = zcl_calloc(m->n, sizeof(bool), "shadow_name_only");
     m->predicted = zcl_calloc(m->n, sizeof(bool), "shadow_pred");
+    m->umbrella = zcl_calloc(m->n, sizeof(bool), "shadow_umbrella");
     return m->n > 0 && m->reference && m->selected && m->floor && m->edge &&
-           m->explained && m->name_only && m->predicted;
+           m->explained && m->name_only && m->predicted && m->umbrella;
 }
 
 static size_t shadow_catalog_index(const char *full)
@@ -353,6 +356,8 @@ struct shadow_pricing {
     const struct zcl_shadow_weights *w;
     uint32_t median_group;
     uint32_t median_gate;
+    const struct zcl_shadow_lint_premises *premises; /* NULL: full lint */
+    struct zcl_shadow_tally *tally;                  /* NULL: no tally */
 };
 
 static uint64_t shadow_group_ms(const struct shadow_pricing *p,
@@ -453,6 +458,43 @@ static uint32_t shadow_lint_max(const struct shadow_pricing *p)
     return max;
 }
 
+static void shadow_lint_gate(const struct shadow_pricing *p, size_t row,
+                             const char *id, struct zcl_shadow_result *out)
+{
+    const struct zcl_shadow_weight *w = &p->w->rows[row];
+    const struct zcl_shadow_lint_premise *premise =
+        zcl_shadow_lint_premise_find(p->premises, id, w->name);
+    bool priced = false;
+    uint64_t ms = zcl_shadow_lint_gate_ms(premise, w->mean_ms, &priced);
+    out->lint_premise_ms += ms;
+    if (priced) {
+        out->lint_premise_gates++;
+        out->lint_units_total += premise->units;
+        out->lint_units_fresh += premise->fresh;
+    }
+    if (p->tally) {
+        p->tally->lint_ms[row] += w->mean_ms;
+        p->tally->lint_premise_ms[row] += ms;
+        p->tally->lint_entries[row]++;
+    }
+}
+
+/* Every lint gate stays in the prediction. A gate whose premise rows let
+ * units inherit is priced as its select run plus its fresh units; every
+ * other gate, and every gate of an entry with no rows, at full weight. */
+static void shadow_price_lint_premise(const struct shadow_pricing *p,
+                                      struct zcl_shadow_result *out)
+{
+    out->class_n[ZCL_SHADOW_CLASS_LINT] = out->lint_selected;
+    out->class_ms[ZCL_SHADOW_CLASS_LINT] = out->lint_cost_ms;
+    out->lint_premise_ms = 0;
+    for (size_t i = 0; i < p->w->count; i++)
+        if (p->w->rows[i].kind == ZCL_SHADOW_OBLIGATION_LINT_GATE)
+            shadow_lint_gate(p, i, out->id, out);
+    out->premise_rule_cost_ms =
+        out->rule_cost_ms - out->lint_cost_ms + out->lint_premise_ms;
+}
+
 static void shadow_rule_block(bool all, struct zcl_shadow_result *out)
 {
     const char *why = "";
@@ -500,14 +542,35 @@ static void shadow_carry(const struct shadow_pricing *p, size_t i,
         shadow_group_ms(p, zcl_test_group_catalog_at(i), &ignored);
 }
 
+static enum zcl_shadow_class shadow_class_of(const struct shadow_marks *m,
+                                             size_t i, bool all)
+{
+    if (all) return ZCL_SHADOW_CLASS_FALLBACK;
+    if (m->umbrella[i]) return ZCL_SHADOW_CLASS_FLOOR;
+    switch (shadow_layer_of(m, i)) {
+    case ZCL_SHADOW_LAYER_CONTRACT: return ZCL_SHADOW_CLASS_DIRECT;
+    case ZCL_SHADOW_LAYER_CALLER: return ZCL_SHADOW_CLASS_CALLER;
+    case ZCL_SHADOW_LAYER_INTEGRATION:
+    case ZCL_SHADOW_LAYER__COUNT: break;
+    }
+    return ZCL_SHADOW_CLASS_INTEGRATION;
+}
+
 static void shadow_keep(const struct shadow_pricing *p,
-                        const struct shadow_marks *m, size_t i,
+                        const struct shadow_marks *m, size_t i, bool all,
                         struct zcl_shadow_result *out)
 {
     uint32_t ignored = 0;
     uint64_t ms = shadow_group_ms(p, zcl_test_group_catalog_at(i), &ignored);
+    enum zcl_shadow_class c = shadow_class_of(m, i, all);
     out->predicted_groups++;
     out->rule_cost_ms += ms;
+    out->class_n[c]++;
+    out->class_ms[c] += ms;
+    if (p->tally && i < p->tally->groups) {
+        p->tally->group_ms[i] += ms;
+        p->tally->group_entries[i]++;
+    }
     if (ms > out->critical_rule_ms) out->critical_rule_ms = (uint32_t)ms;
     if (m->selected[i]) out->graph.predicted[shadow_layer_of(m, i)]++;
 }
@@ -538,7 +601,7 @@ static void shadow_predict_one(const struct shadow_pricing *p,
     if (!all && m->selected[i] && !keep) out->rule_reusable++;
     if (keep) {
         m->predicted[i] = true;
-        shadow_keep(p, m, i, out);
+        shadow_keep(p, m, i, all, out);
     } else if (m->reference[i]) {
         shadow_carry(p, i, carried, out);
     }
@@ -582,6 +645,7 @@ static void shadow_predict(const struct shadow_pricing *p,
                         sizeof(out->predicted_names));
         shadow_layer_names(m, out);
     }
+    shadow_price_lint_premise(p, out);
 }
 
 /* ── evaluation ───────────────────────────────────────────────────────── */
@@ -614,7 +678,11 @@ static bool shadow_select(const struct zcl_shadow_eval_ctx *ctx,
                           struct shadow_marks *m,
                           struct zcl_shadow_proof_graph *g)
 {
-    if (!shadow_mark_reference(ctx->root, m)) return false;
+    struct shadow_mark_sink umbrella = {m->umbrella};
+    if (!shadow_mark_reference(ctx->root, m) ||
+        !zcl_test_group_family_expand(ZCL_SHADOW_FLOOR_FAMILY,
+                                      shadow_mark_visit, &umbrella))
+        return false;
     if (refused || plan->closure_universal) {
         memcpy(m->selected, m->reference, m->n * sizeof(bool));
     } else if (!shadow_mark_tokens(plan->path_groups, plan->path_groups_len,
@@ -715,6 +783,8 @@ static bool shadow_evaluate_plan(const struct zcl_shadow_eval_ctx *ctx,
                                   ZCL_SHADOW_OBLIGATION_TEST_GROUP),
         zcl_shadow_weights_median(ctx->weights,
                                   ZCL_SHADOW_OBLIGATION_LINT_GATE),
+        ctx->lint_premises,
+        ctx->tally,
     };
     shadow_price(&p, &m, out);
     out->premise_fields = shadow_premise_fields(&out->patch, plan);
