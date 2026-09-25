@@ -2048,14 +2048,41 @@ static void dev_drive_merge_publication(
     json_free(&input);
 }
 
+static void dev_drive_finish_timed(
+    struct json_value *compact, struct json_value *cycle,
+    struct zcl_command_reply *reply, int64_t drive_started_us,
+    int64_t drive_wait_us)
+{
+    if (!json_push_kv_int(compact, "drive_wait_us", drive_wait_us) ||
+        !json_push_kv_int(compact, "drive_ready_us",
+                          platform_time_monotonic_us() - drive_started_us)) {
+        json_free(compact);
+        json_free(cycle);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "DEV_DRIVE_PROJECTION_INVALID", "project",
+                               false, false,
+                               "drive timing exceeded the bounded response",
+                               "cycle");
+        return;
+    }
+    json_free(&reply->data);
+    json_init(&reply->data);
+    json_copy(&reply->data, compact);
+    json_free(compact);
+    json_free(cycle);
+}
+
 void zcl_native_handle_dev_drive(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
+    int64_t drive_started_us = platform_time_monotonic_us();
     struct json_value cycle;
     json_init(&cycle);
     int64_t epoch = 0;
     if (!dev_drive_wait_cycle(request, &cycle, &epoch, reply))
         return;
+    int64_t drive_wait_us = platform_time_monotonic_us() - drive_started_us;
 
     struct json_value compact;
     const struct dev_reflex_policy_service_v1 *policy =
@@ -2124,11 +2151,8 @@ void zcl_native_handle_dev_drive(
                        : "z23-dev dev diagnose latest");
         (void)json_push_kv_str(&compact, "next_command", next);
     }
-    json_free(&reply->data);
-    json_init(&reply->data);
-    json_copy(&reply->data, &compact);
-    json_free(&compact);
-    json_free(&cycle);
+    dev_drive_finish_timed(&compact, &cycle, reply, drive_started_us,
+                           drive_wait_us);
 }
 
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */

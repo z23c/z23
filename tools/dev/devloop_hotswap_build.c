@@ -3979,9 +3979,26 @@ static bool hs_resident_call(const char *artifact, bool activate,
 
 struct hs_shadow_wire {
     uint32_t magic;
+    int64_t child_enter_us;
+    int64_t module_hash_us;
     char runtime_module_sha256[65];
     struct zcl_hotswap_service_report report;
 };
+
+static void hs_shadow_append_metrics(struct json_value *response,
+                                     const struct hs_shadow_wire *wire,
+                                     bool valid, int64_t started)
+{
+    (void)json_push_kv_str(response, "loaded_mapping_root",
+                           valid ? wire->runtime_module_sha256 : "");
+    (void)json_push_kv_int(response, "load_or_spawn_us",
+                           valid ? wire->child_enter_us - started +
+                                   wire->report.load_us : 0);
+    (void)json_push_kv_int(response, "execute_us",
+                           valid ? wire->report.execute_us : 0);
+    (void)json_push_kv_int(response, "module_hash_us",
+                           valid ? wire->module_hash_us : 0);
+}
 
 #define HS_SHADOW_WIRE_MAGIC UINT32_C(0x48535331)
 
@@ -4046,8 +4063,14 @@ static bool hs_shadow_probe(
     }
     if (child == 0) {
         close(pipefd[0]);
-        struct hs_shadow_wire wire = {.magic = HS_SHADOW_WIRE_MAGIC};
-        if (hs_sha256_file(artifact, wire.runtime_module_sha256))
+        struct hs_shadow_wire wire = {
+            .magic = HS_SHADOW_WIRE_MAGIC,
+            .child_enter_us = platform_time_monotonic_us(),
+        };
+        int64_t hash_started = platform_time_monotonic_us();
+        bool hashed = hs_sha256_file(artifact, wire.runtime_module_sha256);
+        wire.module_hash_us = platform_time_monotonic_us() - hash_started;
+        if (hashed)
             (void)zcl_native_hotswap_service_probe_local(
                 artifact, &wire.report);
         const uint8_t *p = (const uint8_t *)&wire;
@@ -4150,6 +4173,7 @@ static bool hs_shadow_probe(
                            build->artifact_sha256);
     (void)json_push_kv_bool(response, "candidate_bytes_executed",
                             valid && wire.report.recognized);
+    hs_shadow_append_metrics(response, &wire, valid, started);
     (void)json_push_kv_str(response, "story_id", story_id);
     (void)json_push_kv_str(response, "story_root", story_root);
     (void)json_push_kv_str(response, "story_fixture_root", fixture_root);
@@ -4684,6 +4708,8 @@ static bool hs_emit_event(const char *root, const char *source,
                             changed_path_count > 1 && published);
     (void)json_push_kv_int(&doc, "elapsed_us", elapsed_us);
     (void)json_push_kv_int(&doc, "elapsed_ms", elapsed_us / 1000);
+    (void)json_push_kv_int(&doc, "event_monotonic_us",
+                           platform_time_monotonic_us());
     (void)json_push_kv_int(&doc, "make_processes", 0);
     (void)json_push_kv_int(&doc, "shell_processes", 0);
     (void)json_push_kv_int(&doc, "git_operations", 0);

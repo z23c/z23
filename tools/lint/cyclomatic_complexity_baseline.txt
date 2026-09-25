@@ -3949,14 +3949,13 @@ tools/dev/devloop_process.c:process_run_impl#2:69
 tools/dev/devloop_watch.c:add_watch_recursive:21
 tools/dev/devloop_watch.c:collect_events:24
 tools/dev/devloop_watch.c:watch_build_edit_epoch:18
-tools/dev/devloop_watch.c:watch_emit_edit_seen:20
 tools/dev/devloop_watch.c:watch_emit_impact_ready:51
 tools/dev/devloop_watch.c:watch_emit_proof_pending:20
 tools/dev/devloop_watch.c:watch_emit_superseded:20
 tools/dev/devloop_watch.c:zcl_devloop_watch_commit_preemption_selftest:20
 tools/dev/devloop_watch.c:zcl_devloop_watch_idle_exit_selftest:36
 tools/dev/devloop_watch.c:zcl_devloop_watch_mode_until:17
-tools/dev/devloop_watch.c:zcl_devloop_watch_mode_until#2:90
+tools/dev/devloop_watch.c:zcl_devloop_watch_mode_until#2:89
 tools/dev/devloop_watch.c:zcl_devloop_watch_stream_backpressure_selftest:48
 tools/dev/fleet_enrol_codec.c:fe_relay_valid:16
 tools/dev/fleet_enrol_codec.c:fleet_enrol_onion_valid:17

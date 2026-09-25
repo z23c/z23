@@ -8,6 +8,7 @@
 
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/time_compat.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -321,7 +322,10 @@ bool zcl_hotswap_service_publish(
         return reject(report, "kat", true,
                       "frozen KAT identity changed; select DEV_RESTART");
     char why[192] = {0};
-    if (!contract->frozen_kat(candidate->vtable, why, sizeof(why)))
+    int64_t execute_started = platform_time_monotonic_us();
+    bool kat_ok = contract->frozen_kat(candidate->vtable, why, sizeof(why));
+    report->execute_us = platform_time_monotonic_us() - execute_started;
+    if (!kat_ok)
         return reject(report, "kat", false,
                       why[0] ? why : "frozen KAT failed");
     report->probed = true;
@@ -422,6 +426,7 @@ bool zcl_hotswap_service_activate_so_any(
     if (request_activate &&
         !hotswap_activation_authorized(resolved_datadir, why, sizeof(why)))
         return reject(report, "authorize", false, why);
+    int64_t load_started = platform_time_monotonic_us();
     void *handle = dlopen(so_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle)
         return reject(report, "dlopen", false, dlerror());
@@ -429,6 +434,7 @@ bool zcl_hotswap_service_activate_so_any(
     const struct zcl_hotswap_service_candidate *candidate =
         dlsym(handle, ZCL_HOTSWAP_SERVICE_SYMBOL);
     const char *sym_error = dlerror();
+    int64_t load_us = platform_time_monotonic_us() - load_started;
     if (sym_error || !candidate) {
         (void)dlclose(handle);
         return reject(report, "symbol", false,
@@ -452,10 +458,12 @@ bool zcl_hotswap_service_activate_so_any(
     }
     if (!zcl_hotswap_service_publish(contract, candidate, request_activate,
                                      report)) {
+        report->load_us = load_us;
         report->recognized = true;
         (void)dlclose(handle);
         return false;
     }
+    report->load_us = load_us;
     report->recognized = true;
     if (!request_activate) {
         (void)dlclose(handle);

@@ -286,6 +286,7 @@ struct watch_context {
                       [ZCL_DEVLOOP_PATH_MAX];
     size_t proof_pending_count;
     enum zcl_devloop_publish_mode proof_pending_mode;
+    bool proof_pending_story;
     /* This iteration's exact-commit verdict, established at the reactor
      * loop head and read (never recomputed) by the cancel poll. */
     bool commit_preempts;
@@ -1208,6 +1209,14 @@ static int watch_edit_cycle(struct watch_context *ctx)
     const char *files[ZCL_DEVLOOP_RESTART_SOURCE_MAX];
     for (size_t i = 0; i < ctx->proof_pending_count; i++)
         files[i] = ctx->proof_pending[i];
+    if (ctx->proof_pending_story) {
+        int ready = zcl_devloop_restart_story_prove_event(
+            ctx->root, files, ctx->proof_pending_count,
+            ctx->proof_pending_mode);
+        if (ready != ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING &&
+            ready != ZCL_DEVLOOP_RESTART_EVENT_FALLBACK_PENDING)
+            return ready == ZCL_DEVLOOP_RESTART_EVENT_FINAL ? 0 : 1;
+    }
     return zcl_devloop_run_cycle_mode(ctx->root, files, ctx->proof_pending_count,
                                       ctx->proof_pending_mode);
 }
@@ -1249,6 +1258,7 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
     ctx->proof_worker_pid = child;
     ctx->proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
     ctx->proof_pending_count = 0;
+    ctx->proof_pending_story = false;
     return true;
 }
 
@@ -1351,7 +1361,8 @@ static bool watch_commit_proof_start(struct watch_context *ctx,
 
 static bool watch_proof_schedule(
     struct watch_context *ctx, const char *const *files, size_t count,
-    enum zcl_devloop_publish_mode publish_mode, int watcher_lock_fd)
+    enum zcl_devloop_publish_mode publish_mode, bool story_proof,
+    int watcher_lock_fd)
 {
     if (!ctx || !files || count == 0 ||
         count > ZCL_DEVLOOP_RESTART_SOURCE_MAX)
@@ -1364,6 +1375,7 @@ static bool watch_proof_schedule(
     }
     ctx->proof_pending_count = count;
     ctx->proof_pending_mode = publish_mode;
+    ctx->proof_pending_story = story_proof;
     return watch_proof_start(ctx, watcher_lock_fd);
 }
 
@@ -1695,6 +1707,26 @@ bool zcl_devloop_watch_stream_backpressure_selftest(const char *repo_root)
 }
 #endif
 
+static bool watch_edit_seen_header(struct json_value *doc,
+                                   const struct watch_context *ctx)
+{
+    return json_push_kv_str(doc, "schema", "zcl.dev_cycle.v1") &&
+        json_push_kv_str(doc, "producer", "reflex-reactor") &&
+        json_push_kv_str(doc, "status", "edit_seen") &&
+        json_push_kv_str(doc, "action", "reflex") &&
+        json_push_kv_str(doc, "reason", "source_mutation_observed") &&
+        json_push_kv_str(doc, "phase", "EDIT_SEEN") &&
+        json_push_kv_bool(doc, "runtime_published", false) &&
+        json_push_kv_bool(doc, "proof_complete", false) &&
+        json_push_kv_int(doc, "event_monotonic_us",
+                         platform_time_monotonic_us()) &&
+        json_push_kv_int(
+            doc, "elapsed_us",
+            ctx->first_mutation_us > 0
+                ? platform_time_monotonic_us() - ctx->first_mutation_us : 0) &&
+        json_push_kv_int(doc, "file_count", (int64_t)ctx->changed_count);
+}
+
 static bool watch_emit_edit_seen(struct watch_context *ctx)
 {
     if (!ctx || ctx->changed_count == 0)
@@ -1702,20 +1734,7 @@ static bool watch_emit_edit_seen(struct watch_context *ctx)
     struct json_value doc, files;
     json_init(&doc); json_set_object(&doc);
     json_init(&files); json_set_array(&files);
-    bool ok = json_push_kv_str(&doc, "schema", "zcl.dev_cycle.v1") &&
-        json_push_kv_str(&doc, "producer", "reflex-reactor") &&
-        json_push_kv_str(&doc, "status", "edit_seen") &&
-        json_push_kv_str(&doc, "action", "reflex") &&
-        json_push_kv_str(&doc, "reason", "source_mutation_observed") &&
-        json_push_kv_str(&doc, "phase", "EDIT_SEEN") &&
-        json_push_kv_bool(&doc, "runtime_published", false) &&
-        json_push_kv_bool(&doc, "proof_complete", false) &&
-        json_push_kv_int(
-            &doc, "elapsed_us",
-            ctx->first_mutation_us > 0
-                ? platform_time_monotonic_us() - ctx->first_mutation_us : 0) &&
-        json_push_kv_int(&doc, "file_count",
-                         (int64_t)ctx->changed_count);
+    bool ok = watch_edit_seen_header(&doc, ctx);
     for (size_t i = 0; ok && i < ctx->changed_count; i++) {
         struct json_value item;
         json_init(&item); json_set_str(&item, ctx->changed[i]);
@@ -2632,7 +2651,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             const char *files[] = {"Makefile"};
             if (!watch_proof_schedule(
                     &ctx, files, 1, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY,
-                    lock_fd)) {
+                    false, lock_fd)) {
                 fprintf(stderr,
                         "[devloop] watch: conservative macOS cycle could not "
                         "be scheduled\n");
@@ -2765,13 +2784,10 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
          * Only after publishing it do we build/run the exact affected proof.
          * The ordinary restart lane reaches this same state after its focused
          * receipt, so both converge here without duplicating scheduling. */
-        if (fast == ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING &&
+        bool story_proof = fast == ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING &&
             epoch_count == 1 &&
             strcmp(files[0],
-                   "contexts/wallet/services/src/vault_intent_decision_service.c") == 0) {
-            fast = zcl_devloop_restart_story_prove_event(
-                ctx.root, files, epoch_count, publish_mode);
-        }
+                   "contexts/wallet/services/src/vault_intent_decision_service.c") == 0;
         /* Keep the same warm owner moving through conservative complete proof
          * after focused feedback. New filesystem activity cancels this work;
          * stale epochs never anchor. */
@@ -2784,7 +2800,8 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             } else {
                 if (!watch_proof_schedule(
                         &ctx, proof_files, proof_count,
-                        ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY, lock_fd)) {
+                        ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY,
+                        story_proof, lock_fd)) {
                     fprintf(stderr,
                             "[devloop] complete proof worker schedule failed\n");
                     g_watch_stop = 1;

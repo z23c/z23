@@ -78,6 +78,8 @@ struct zcl_hotswap_service_report {
     bool rolled_back;
     bool dev_restart;
     uint32_t generation;
+    int64_t load_us;
+    int64_t execute_us;
     char service_id[96];
     char stage[32];
     char error[256];

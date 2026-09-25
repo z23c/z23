@@ -1853,7 +1853,7 @@ Z23_FLAG("ZCL_RECOVERY_PHRASE", "env_runtime", "-", "-",
           "first use contexts/wallet/controllers/src/wallet_recovery_native_handlers.c:309; documented at docs/CUSTODY_MODEL.md:106: ZCL_RECOVERY_PHRASE. Rebuilding installs spending keys, so a rescan over")
 Z23_FLAG("ZCL_REFLEX_BENCH_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-reactor-bench.sh:11")
-Z23_FLAG("ZCL_REFLEX_BENCH_RUNS", "env_build", "20", "-",
+Z23_FLAG("ZCL_REFLEX_BENCH_RUNS", "env_build", "31", "-",
           "undocumented; first use tools/dev/reflex-reactor-bench.sh:10")
 Z23_FLAG("ZCL_REFLEX_COMMAND_INPUT_CORE_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-hotfork-watch-core-acceptance.sh:49")

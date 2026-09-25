@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
-# purpose: Reproduce the 20-distinct-edit zero-wait reactor latency gate.
+# purpose: Measure distinct executed edits through the resident reflex gate.
 
 set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
 SOURCE="$ROOT/contexts/wallet/services/src/vault_intent_decision_service.c"
-RUNS="${ZCL_REFLEX_BENCH_RUNS:-20}"
+RUNS="${ZCL_REFLEX_BENCH_RUNS:-31}"
 OUTPUT="${ZCL_REFLEX_BENCH_OUTPUT:-$ROOT/build/dev-loop/reflex-reactor-benchmark.json}"
+CLOCK_BIN="$ROOT/build/dev-loop/reflex-monotonic-edit"
 MARKER='ZCL_REFLEX_BENCH:'
 
 fail() { printf 'reflex-reactor-bench: %s\n' "$*" >&2; exit 2; }
@@ -22,12 +23,34 @@ proc_cpu_ticks()
       print $f[11] + $f[12] + $f[13] + $f[14], "\n";
     ' "/proc/$pid/stat"
 }
-[[ "$RUNS" =~ ^[0-9]+$ && "$RUNS" -ge 1 && "$RUNS" -le 99 ]] ||
-    fail 'RUNS must be 1..99'
+[[ "$RUNS" =~ ^[0-9]+$ && "$RUNS" -ge 2 && "$RUNS" -le 99 ]] ||
+    fail 'RUNS must be 2..99 (first is cold; the rest are warm)'
 [[ -x "$BIN" ]] || fail "missing dev binary: $BIN"
 [[ "$(LC_ALL=C grep -c "${MARKER} 00000000" "$SOURCE")" == 1 ]] ||
     fail 'benchmark marker is absent or already modified'
 command -v jq >/dev/null || fail 'jq is required'
+mkdir -p "$ROOT/build/dev-loop"
+cc -std=c23 -Wall -Wextra -Werror -pedantic \
+    "$ROOT/tools/dev/fixtures/reflex_reactor/monotonic_edit.c" \
+    -o "$CLOCK_BIN"
+
+# Change instructions in the candidate's exercised decision function. The
+# volatile read forces the nonce into the module's code; the frozen story
+# executes this branch and still requires its original exact decisions.
+stage_candidate()
+{
+    local nonce="$1" path="$2" value=$((10#$1))
+    awk -v nonce="$nonce" -v value="$value" '
+        /ZCL_REFLEX_BENCH: 00000000/ {sub(/00000000/, nonce)}
+        {print}
+        /    memset\(decision, 0, sizeof\(\*decision\)\);/ {
+            print "    volatile unsigned reflex_nonce = " value "u;"
+            print "    if (reflex_nonce == 100000000u) return false;"
+        }
+    ' "$backup" >"$path"
+    [[ $(grep -c 'volatile unsigned reflex_nonce' "$path") == 1 ]] ||
+        fail 'could not stage the executable nonce'
+}
 
 backup="$(mktemp "${TMPDIR:-/tmp}/zcl-reflex-source.XXXXXX")"
 samples="$(mktemp "${TMPDIR:-/tmp}/zcl-reflex-samples.XXXXXX")"
@@ -56,26 +79,31 @@ nonce_base="$(( $(date +%s%N) % 99999900 ))"
 clock_ticks="$(getconf CLK_TCK)"
 [[ "$clock_ticks" =~ ^[1-9][0-9]*$ ]] || fail 'CLK_TCK unavailable'
 cpu_start_ticks="$(proc_cpu_ticks "$watcher_id")"
-main_start_ns="$(date +%s%N)"
+main_start_us="$("$CLOCK_BIN")"
 
 for ((i = 1; i <= RUNS; i++)); do
     nonce="$(printf '%08d' $(((nonce_base + i) % 100000000)))"
     staged="$(mktemp "$ROOT/engine/services/src/.reflex-bench.XXXXXX")"
-    sed "s/${MARKER} 00000000/${MARKER} ${nonce}/" "$backup" >"$staged"
+    stage_candidate "$nonce" "$staged"
     chmod --reference="$SOURCE" "$staged"
-    start_ns="$(date +%s%N)"
-    mv -f "$staged" "$SOURCE"
+    start_us="$("$CLOCK_BIN" "$staged" "$SOURCE")"
     result="$($BIN dev drive --input="{\"after_epoch\":$after,\"wait_for_edit\":true,\"timeout_ms\":5000}")"
-    end_ns="$(date +%s%N)"
+    end_us="$("$CLOCK_BIN")"
     jq -e '.ok == true and .data.event == "STORY_GREEN" and
            .data.runtime_published == false and
+           .data.candidate_bytes_executed == true and
+           .data.loaded_mapping_root == .data.candidate_module_root and
            (.data.edit_epoch | test("^[0-9a-f]{64}$"))' \
         <<<"$result" >/dev/null || fail "run $i did not return STORY_GREEN"
     after="$(jq -r '.data.epoch' <<<"$result")"
     jq -c --argjson run "$i" \
-        --argjson wall_us "$(((end_ns - start_ns) / 1000))" \
+        --argjson start_us "$start_us" --argjson end_us "$end_us" \
+        --argjson wall_us "$((end_us - start_us))" \
         '{run:$run,epoch:.data.epoch,edit_epoch:.data.edit_epoch,
           story_us:.data.feedback_us,drive_dispatch_us:.elapsed_us,
+          drive_wait_us:.data.drive_wait_us,
+          drive_ready_us:.data.drive_ready_us,
+          start_monotonic_us:$start_us,end_monotonic_us:$end_us,
           wall_us:$wall_us}' <<<"$result" >>"$samples"
 done
 
@@ -84,29 +112,33 @@ done
 # authority shell is never loaded, invoked, or published by the benchmark.
 staged="$(mktemp "$ROOT/engine/services/src/.reflex-bench-red.XXXXXX")"
 red_nonce="$(printf '%08d' $(((nonce_base + RUNS + 1) % 100000000)))"
-sed -e "s/${MARKER} 00000000/${MARKER} ${red_nonce}/" \
-    -e 's/decision->code = VAULT_INTENT_DECISION_ALLOW;/decision->code = VAULT_INTENT_DECISION_INSUFFICIENT_FUNDS;/' \
-    "$backup" >"$staged"
+stage_candidate "$red_nonce" "$staged"
+awk '{sub(/decision->code = VAULT_INTENT_DECISION_ALLOW;/,
+          "decision->code = VAULT_INTENT_DECISION_INSUFFICIENT_FUNDS;"); print}' \
+    "$staged" >"${staged}.red"
+mv "${staged}.red" "$staged"
 [[ "$(LC_ALL=C grep -c 'decision->code = VAULT_INTENT_DECISION_INSUFFICIENT_FUNDS;' "$staged")" == 1 ]] ||
     fail 'could not stage the behavior-red candidate'
 chmod --reference="$SOURCE" "$staged"
-red_start_ns="$(date +%s%N)"
-mv -f "$staged" "$SOURCE"
+red_start_us="$("$CLOCK_BIN" "$staged" "$SOURCE")"
 red_result="$($BIN dev drive --input="{\"after_epoch\":$after,\"wait_for_edit\":true,\"timeout_ms\":5000}")"
-red_end_ns="$(date +%s%N)"
+red_end_us="$("$CLOCK_BIN")"
 jq -e '.ok == true and .data.event == "STORY_RED" and
        .data.runtime_published == false and
+       .data.candidate_bytes_executed == true and
+       .data.loaded_mapping_root == .data.candidate_module_root and
        (.data.edit_epoch | test("^[0-9a-f]{64}$")) and
        .data.feedback_us < 1000000' <<<"$red_result" >/dev/null ||
     fail 'compile-valid behavior regression did not return STORY_RED under 1s'
 red_feedback_us="$(jq -er '.data.feedback_us' <<<"$red_result")"
-red_wall_us="$(((red_end_ns - red_start_ns) / 1000))"
+red_wall_us="$((red_end_us - red_start_us))"
 after="$(jq -r '.data.epoch' <<<"$red_result")"
 last_epoch="$after"
-main_end_ns="$(date +%s%N)"
+main_end_us="$("$CLOCK_BIN")"
 cpu_end_ticks="$(proc_cpu_ticks "$watcher_id")"
 cpu_time_us="$(((cpu_end_ticks - cpu_start_ticks) * 1000000 / clock_ticks))"
-main_wall_us="$(((main_end_ns - main_start_ns) / 1000))"
+watcher_peak_rss_kb="$(awk '$1 == "VmHWM:" {print $2}' "/proc/$watcher_id/status")"
+main_wall_us="$((main_end_us - main_start_us))"
 
 # Measure exact edit/revert cache service on the same warm watcher. Two
 # distinct green candidates are admitted once, then alternated. Every timed
@@ -116,14 +148,13 @@ candidate_a="$(printf '%08d' $(((nonce_base + RUNS + 2) % 100000000)))"
 candidate_b="$(printf '%08d' $(((nonce_base + RUNS + 3) % 100000000)))"
 run_green_candidate()
 {
-    local nonce="$1" label="${2:-}" staged start_ns end_ns result raw epoch
+    local nonce="$1" label="${2:-}" staged start_us end_us result raw epoch
     staged="$(mktemp "$ROOT/engine/services/src/.reflex-cache.XXXXXX")"
-    sed "s/${MARKER} 00000000/${MARKER} ${nonce}/" "$backup" >"$staged"
+    stage_candidate "$nonce" "$staged"
     chmod --reference="$SOURCE" "$staged"
-    start_ns="$(date +%s%N)"
-    mv -f "$staged" "$SOURCE"
+    start_us="$("$CLOCK_BIN" "$staged" "$SOURCE")"
     result="$($BIN dev drive --input="{\"after_epoch\":$after,\"wait_for_edit\":true,\"timeout_ms\":5000}")"
-    end_ns="$(date +%s%N)"
+    end_us="$("$CLOCK_BIN")"
     jq -e '.ok == true and .data.event == "STORY_GREEN" and
            .data.runtime_published == false' <<<"$result" >/dev/null ||
         fail "cache candidate $nonce did not return STORY_GREEN"
@@ -140,7 +171,7 @@ run_green_candidate()
     jq -cn --arg label "$label" --argjson epoch "$epoch" \
       --argjson feedback_us "$(jq -r '.data.elapsed_us' <<<"$raw")" \
       --argjson runner_us "$(jq -r '.data.resident.elapsed_us' <<<"$raw")" \
-      --argjson wall_us "$(((end_ns - start_ns) / 1000))" \
+      --argjson wall_us "$((end_us - start_us))" \
       '{label:$label,epoch:$epoch,feedback_us:$feedback_us,
         runner_us:$runner_us,wall_us:$wall_us,
         compiler_processes:0,linker_processes:0}' >>"$cache_samples"
@@ -176,6 +207,7 @@ jq -n --slurpfile samples "$samples" --slurpfile events "$events" \
     --argjson red_feedback_us "$red_feedback_us" \
     --argjson red_wall_us "$red_wall_us" \
     --argjson cpu_time_us "$cpu_time_us" \
+    --argjson watcher_peak_rss_kb "$watcher_peak_rss_kb" \
     --argjson main_wall_us "$main_wall_us" '
   def pct($v; $p):
     ($v | sort) as $s |
@@ -205,8 +237,63 @@ jq -n --slurpfile samples "$samples" --slurpfile events "$events" \
            $events[$i-1].phase=="SUPERSEDED") |
     $events[$i].elapsed_us] as $cancel |
   [$samples[]|.wall_us] as $wall |
+  [$samples[] as $sample |
+    ([$events[]|select(.edit_epoch==$sample.edit_epoch)]) as $bound |
+    ([$events[]|select(.phase=="EDIT_SEEN")][$sample.run-1]) as $edit_event |
+    ([$bound[]|select(.phase=="IMPACT_READY")][0]) as $impact_event |
+    ([$bound[]|select(.phase=="COMPILE_GREEN")][0]) as $compile_event |
+    ([$bound[]|select(.phase=="STORY_GREEN")][0]) as $story_event |
+    {run:$sample.run,edit_epoch:$sample.edit_epoch,
+     candidate_module_root:$story_event.candidate_module_root,
+     loaded_mapping_root:$story_event.loaded_mapping_root,
+     candidate_bytes_executed:$story_event.candidate_bytes_executed,
+     edit_detect_us:($edit_event.event_monotonic_us-
+                     $sample.start_monotonic_us),
+     impact_us:$impact_event.impact_calculation_us,
+     compile_us:$compile_event.build_receipt.compile_us,
+     link_us:$compile_event.build_receipt.link_us,
+     load_or_spawn_us:$story_event.resident.load_or_spawn_us,
+     execute_us:$story_event.resident.execute_us,
+     module_hash_us:$story_event.resident.module_hash_us,
+     visible_reply_us:($sample.end_monotonic_us-
+                       $story_event.event_monotonic_us),
+     drive_wait_us:$sample.drive_wait_us,
+     drive_ready_us:$sample.drive_ready_us,
+     unaccounted_us:($story_event.event_monotonic_us-
+       $sample.start_monotonic_us-
+       (($impact_event.impact_calculation_us//0)+
+        ($compile_event.build_receipt.compile_us//0)+
+        ($compile_event.build_receipt.link_us//0)+
+        ($story_event.resident.load_or_spawn_us//0)+
+        ($story_event.resident.execute_us//0))),
+     total_us:$sample.wall_us,
+     compiler_processes:$compile_event.build_receipt.compiler_processes,
+     linker_processes:$compile_event.build_receipt.linker_processes,
+     process_spawns:(($compile_event.build_receipt.compiler_processes//0)+
+                     ($compile_event.build_receipt.linker_processes//0)+1),
+     drive_client_spawns:1,
+     plan_cache_hit:$compile_event.build_receipt.plan_cache_hit,
+     artifact_cache_hit:$compile_event.build_receipt.artifact_cache_hit}]
+    as $stages |
+  [$stages[]|select(.run>1)] as $warm_stages |
+  [$stages[]|.candidate_module_root]|unique as $module_roots |
   {schema:"zcl.reflex_reactor_benchmark.v1",source_tu:$source_tu,
    runs:$runs,
+   stage_samples:$stages,
+   cold_stage:$stages[0],
+   warm_stage:{count:($warm_stages|length),
+     edit_detect_us:metric([$warm_stages[]|.edit_detect_us]),
+     impact_us:metric([$warm_stages[]|.impact_us]),
+     compile_us:metric([$warm_stages[]|.compile_us]),
+     link_us:metric([$warm_stages[]|.link_us]),
+     load_or_spawn_us:metric([$warm_stages[]|.load_or_spawn_us]),
+     execute_us:metric([$warm_stages[]|.execute_us]),
+     visible_reply_us:metric([$warm_stages[]|.visible_reply_us]),
+     drive_wait_us:metric([$warm_stages[]|.drive_wait_us]),
+     drive_ready_us:metric([$warm_stages[]|.drive_ready_us]),
+     unaccounted_us:metric([$warm_stages[]|.unaccounted_us]),
+     total_us:metric([$warm_stages[]|.total_us])},
+   executed_distinct_module_roots:($module_roots|length),
    latency:{edit_seen:metric($edit),impact_ready:metric($impact),
             immutable_epoch_creation:metric($epoch_create),
             impact_calculation:metric($impact_calc),
@@ -221,6 +308,7 @@ jq -n --slurpfile samples "$samples" --slurpfile events "$events" \
    resources:{cpu:{scope:"resident_watcher_plus_reaped_children",
                   cpu_time_us:$cpu_time_us,wall_us:$main_wall_us,
                   usage_percent:(100*$cpu_time_us/$main_wall_us)},
+              watcher_peak_rss_kb:$watcher_peak_rss_kb,
               changed_bytes_read:byte_metric($bytes_read)},
    exact_cache:{edit:{feedback:metric([$cache_samples[]|
                        select(.label=="exact_edit")|.feedback_us]),
@@ -269,16 +357,30 @@ jq -n --slurpfile samples "$samples" --slurpfile events "$events" \
 
 jq -e --argjson runs "$RUNS" '
   .runs==$runs and .event_counts.EDIT_SEEN==($runs+1) and
+  .warm_stage.count==($runs-1) and
+  .executed_distinct_module_roots==$runs and
+  (.stage_samples|all(.candidate_bytes_executed==true and
+    .loaded_mapping_root==.candidate_module_root and
+    .compiler_processes>=1 and .linker_processes==1 and
+    .process_spawns==(.compiler_processes+2) and
+    .drive_client_spawns==1 and
+    .edit_detect_us>=0 and .impact_us>=0 and .compile_us>0 and
+    .link_us>0 and .load_or_spawn_us>0 and .execute_us>0 and
+    .visible_reply_us>=0 and .total_us>0)) and
+  (.stage_samples|all(.drive_wait_us>=0 and
+    .drive_ready_us>=.drive_wait_us)) and
   .event_counts.IMPACT_READY==($runs+1) and
   .event_counts.COMPILE_GREEN==($runs+1) and
   .event_counts.STORY_GREEN==$runs and .event_counts.STORY_RED==1 and
-  .process_trace.compiler_processes==($runs+1) and
+  .process_trace.compiler_processes>=($runs+1) and
+  .process_trace.compiler_processes<=($runs+2) and
   .process_trace.module_linker_processes==($runs+1) and
   .process_trace.shadow_forks==($runs+1) and
   .process_trace.foreground_test_processes==0 and
   .latency.immutable_epoch_creation.count==($runs+1) and
   .latency.impact_calculation.count==($runs+1) and
-  .latency.cancellation_to_new_impact.count==$runs and
+  .event_counts.PROOF_PENDING==$runs and
+  .latency.cancellation_to_new_impact.count==0 and
   .resources.changed_bytes_read.count==($runs+1) and
   .resources.cpu.wall_us>0 and .resources.cpu.cpu_time_us>0 and
   .exact_cache.edit.feedback.count==10 and
