@@ -1876,6 +1876,13 @@ static int test_zd_work_node_atomic_admission(void)
         ASSERT(vcs_zcode_work_node_next_request(b, &peer, &physical));
         ASSERT_EQ(physical.request_id, qa.request_id);
         ASSERT(!vcs_zcode_work_node_next_request(b, &peer, &physical));
+        uint64_t context_bytes = 0;
+        ASSERT(!vcs_zcode_work_node_action_ready(
+            b, 21, qa.request_id, 1000, &context_bytes));
+        ASSERT(!vcs_zcode_work_node_mark_action_ready(
+            b, 22, qa.request_id, 1000, 4096));
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            b, 21, qa.request_id, 1000, 4096));
 
         struct vcs_zcode_work_request_v1 attached = qa;
         attached.request_id = 902;
@@ -1895,6 +1902,11 @@ static int test_zd_work_node_atomic_admission(void)
         ASSERT(vcs_zcode_work_node_next_request(b, &peer, &physical));
         ASSERT_EQ(physical.request_id, attached.request_id);
         ASSERT(!vcs_zcode_work_node_next_request(b, &peer, &physical));
+        ASSERT(vcs_zcode_work_node_action_ready(
+            b, 22, attached.request_id, 1000, &context_bytes));
+        ASSERT_EQ(context_bytes, 4096);
+        ASSERT(!vcs_zcode_work_node_action_ready(
+            b, 22, attached.request_id, 1100, NULL));
 
         struct vcs_zcode_work_swarm_message request_message = {
             .type = VCS_ZCODE_WORK_SWARM_REQUEST, .body.request = qa,
@@ -1946,6 +1958,8 @@ static int test_zd_work_node_atomic_admission(void)
         ASSERT_EQ(received.request_id, qa.request_id);
         ASSERT(vcs_zcode_work_node_next_result(c, &peer, &received));
         ASSERT_EQ(received.request_id, attached.request_id);
+        ASSERT(!vcs_zcode_work_node_action_ready(
+            b, 22, attached.request_id, 1002, NULL));
 
         /* Slot release is a capacity transition, not a timer event. The
          * worker publishes a strictly newer signed capability immediately;

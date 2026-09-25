@@ -115,6 +115,15 @@ bool vcs_zcode_work_node_next_request(
 bool vcs_zcode_work_node_peek_request(
     struct vcs_zcode_work_node *node, uint64_t *peer_out,
     struct vcs_zcode_work_request_v1 *out);
+/* Mark one exact inbound action ready only after the caller has verified its
+ * context and committed the build-fabric admission. Attached requesters can
+ * then reuse that action without transferring or restoring context again. */
+bool vcs_zcode_work_node_mark_action_ready(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
+    int64_t now, uint64_t context_bytes);
+bool vcs_zcode_work_node_action_ready(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
+    int64_t now, uint64_t *context_bytes);
 /* Snapshot unfinished inbound tracks. The request remains tracked after its
  * admission event is drained, allowing a durable ZBuild result to be returned. */
 size_t vcs_zcode_work_node_inbound_requests(

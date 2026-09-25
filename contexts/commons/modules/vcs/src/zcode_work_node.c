@@ -44,11 +44,12 @@ struct work_track {
 
 struct work_slot {
     bool used;
+    bool action_ready;
     uint64_t generation;
+    uint64_t context_bytes;
     int64_t deadline_unix;
     struct vcs_zcode_work_request_v1 binding;
 };
-
 struct work_frame {
     uint64_t peer;
     size_t len;
@@ -1375,7 +1376,47 @@ bool vcs_zcode_work_node_peek_request(
     pthread_mutex_unlock(&node->lock);
     return present;
 }
-
+static struct work_slot *work_ready_slot(
+    struct vcs_zcode_work_node *node, uint64_t peer,
+    uint64_t request_id, int64_t now)
+{
+    struct work_track *track = work_find_track(node, peer, request_id, true);
+    if (!track || track->finished || track->cancelled || track->expired ||
+        track->worker_slot >= sizeof(node->slots) / sizeof(node->slots[0]))
+        return NULL;
+    struct work_slot *slot = &node->slots[track->worker_slot];
+    if (!slot->used || slot->generation != track->lease_generation ||
+        now >= slot->deadline_unix || now >= track->request.deadline_unix ||
+        !work_same_action_binding(&slot->binding, &track->request))
+        return NULL;
+    return slot;
+}
+bool vcs_zcode_work_node_mark_action_ready(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
+    int64_t now, uint64_t context_bytes)
+{
+    if (!node || peer == 0 || request_id == 0 || now < 0) return false;
+    pthread_mutex_lock(&node->lock);
+    struct work_slot *slot = work_ready_slot(node, peer, request_id, now);
+    if (slot && !slot->action_ready) {
+        slot->action_ready = true;
+        slot->context_bytes = context_bytes;
+    }
+    pthread_mutex_unlock(&node->lock);
+    return slot != NULL;
+}
+bool vcs_zcode_work_node_action_ready(
+    struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
+    int64_t now, uint64_t *context_bytes)
+{
+    if (!node || peer == 0 || request_id == 0 || now < 0) return false;
+    pthread_mutex_lock(&node->lock);
+    struct work_slot *slot = work_ready_slot(node, peer, request_id, now);
+    bool ready = slot && slot->action_ready;
+    if (ready && context_bytes) *context_bytes = slot->context_bytes;
+    pthread_mutex_unlock(&node->lock);
+    return ready;
+}
 size_t vcs_zcode_work_node_inbound_requests(
     struct vcs_zcode_work_node *node, uint64_t *peers,
     struct vcs_zcode_work_request_v1 *requests, size_t max)

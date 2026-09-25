@@ -224,6 +224,46 @@ static struct zcl_result boot_zcode_work_admit(
         return ZCL_ERR(-1, "remote action is terminal: %s", current.state);
     return ZCL_OK;
 }
+static bool boot_zcode_work_context_available(
+    const struct vcs_zcode_work_request_v1 *request, uint64_t peer,
+    int64_t now, struct vcs_package_store_status *status,
+    bool *reused, uint64_t *reused_bytes)
+{
+    *reused = vcs_zcode_work_node_action_ready(
+        s_work, peer, request->request_id, now, reused_bytes);
+    if (*reused) return true;
+    struct vcs_package_store *store = vcs_package_store_global();
+    return store && vcs_package_store_package_status(
+        store, request->context_root, status) && status->complete;
+}
+
+static void boot_zcode_work_admission_success(
+    const struct vcs_zcode_work_request_v1 *request, uint64_t peer,
+    int64_t now, const struct vcs_package_store_status *status,
+    bool reused, uint64_t reused_bytes, int64_t admission_us)
+{
+    if (reused) {
+        char action_id[65];
+        zcl_hex_encode(request->action_root, 32, action_id);
+        LOG_INFO("zcode.proof_perf",
+                 "schema=zcl.async_proof_perf.v1 action=%s "
+                 "stage=remote_attach at_unix_us=%lld admission_us=%lld "
+                 "verified_context_bytes_reused=%llu "
+                 "context_restore_avoided=1 duplicate_execution_avoided=1",
+                 action_id, (long long)platform_time_realtime_us(),
+                 (long long)(admission_us < 0 ? 0 : admission_us),
+                 (unsigned long long)reused_bytes);
+    } else {
+        if (!vcs_zcode_work_node_mark_action_ready(
+                s_work, peer, request->request_id, now,
+                status->total_bytes))
+            LOG_WARN("net.zcode_swarm", "admitted action lost its worker slot");
+        boot_zcode_work_perf_admission(
+            request, status, s_engine, admission_us);
+    }
+    boot_zcode_work_progress_context_ready(
+        s_work, peer, request, s_work_secret, s_work_pubkey, now);
+}
 static void boot_zcode_work_drain_admissions(int64_t now)
 {
     if (!s_work || !s_svc || !s_svc->app_ctx || !s_svc->app_ctx->build_worker) return;
@@ -232,13 +272,15 @@ static void boot_zcode_work_drain_admissions(int64_t now)
         struct vcs_zcode_work_request_v1 request;
         if (!vcs_zcode_work_node_peek_request(s_work, &peer, &request))
             break;
-        struct vcs_package_store_status status;
-        struct vcs_package_store *store = vcs_package_store_global();
-        if (!store || !vcs_package_store_package_status(
-                store, request.context_root, &status) || !status.complete)
+        uint64_t reused_bytes = 0;
+        bool reused = false;
+        struct vcs_package_store_status status = {0};
+        if (!boot_zcode_work_context_available(
+                &request, peer, now, &status, &reused, &reused_bytes))
             break;
         int64_t admission_us = platform_time_monotonic_us();
-        struct zcl_result admitted = boot_zcode_work_admit(&request, now);
+        struct zcl_result admitted = reused ? ZCL_OK
+            : boot_zcode_work_admit(&request, now);
         admission_us = platform_time_monotonic_us() - admission_us;
         uint64_t drained_peer = 0;
         struct vcs_zcode_work_request_v1 drained;
@@ -252,11 +294,10 @@ static void boot_zcode_work_drain_admissions(int64_t now)
             LOG_WARN("net.zcode_swarm", "request %llu refused: %s",
                      (unsigned long long)request.request_id,
                      admitted.message);
-        else {
-            boot_zcode_work_perf_admission(&request, &status, s_engine, admission_us);
-            boot_zcode_work_progress_context_ready(
-                s_work, peer, &request, s_work_secret, s_work_pubkey, now);
-        }
+        else
+            boot_zcode_work_admission_success(
+                &request, peer, now, &status, reused, reused_bytes,
+                admission_us);
     }
 }
 static void boot_zcode_work_drain_cancels(int64_t now)
@@ -528,6 +569,21 @@ static struct vcs_swarm_engine *boot_zcode_swarm_ensure(
     return s_engine;
 }
 
+static const uint8_t *boot_zcode_work_request_context_root(
+    const struct vcs_zcode_work_request_v1 *request,
+    uint64_t peer, int64_t now)
+{
+    struct vcs_zcode_work_request_v1 tracked;
+    bool cancelled = false;
+    if (!vcs_zcode_work_node_inbound_request(
+            s_work, peer, request->request_id, &tracked, &cancelled) ||
+        cancelled || memcmp(tracked.signature, request->signature, 64) != 0)
+        return NULL;
+    return vcs_zcode_work_node_action_ready(
+        s_work, peer, request->request_id, now, NULL)
+            ? NULL : request->context_root;
+}
+
 bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
                             const uint8_t *payload, size_t payload_len,
                             void *ctx)
@@ -584,7 +640,8 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
             struct vcs_zcode_work_swarm_message message;
             if (vcs_zcode_work_swarm_parse(payload, payload_len, &message)) {
                 const uint8_t *wanted = message.type == VCS_ZCODE_WORK_SWARM_REQUEST
-                    ? message.body.request.context_root
+                    ? boot_zcode_work_request_context_root(
+                        &message.body.request, peer_id, (int64_t)now)
                     : message.type == VCS_ZCODE_WORK_SWARM_RESULT
                     ? message.body.result.output_root : NULL;
                 if (wanted) {
