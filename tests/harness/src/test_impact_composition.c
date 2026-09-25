@@ -6643,6 +6643,7 @@ static int test_ic_foreground_execution_busy(void)
         ASSERT_STR_EQ(status.detail, "proof_execution_busy");
         ASSERT_STR_EQ(why, "proof_execution_busy");
         ASSERT(zcl_dev_proof_test_edit_lifetime(f.root));
+        ASSERT(zcl_dev_proof_test_edit_stop_cancels(f.root));
         ASSERT(ic_landing_request_unchanged(&f));
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");

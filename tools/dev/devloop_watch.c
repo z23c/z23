@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #endif
 #include <stdio.h>
@@ -337,6 +338,40 @@ static void proof_worker_signal(int sig)
 {
     (void)sig;
     zcl_devloop_process_cancel_request();
+}
+
+/* Stop and supersede signal a worker the moment fork() returns, usually
+ * before the child has run: a signal delivered there reached the inherited
+ * watcher handler, and the child's own cancel reset then erased it, so the
+ * obsolete proof ran to completion while the stopping reactor blocked in
+ * watch_proof_join(). Hold SIGINT/SIGTERM across fork() until the child has
+ * reset its cancel state and installed its own handler; a signal sent at any
+ * point after fork() then cancels the worker. Returns fork()'s result. */
+static pid_t watch_proof_worker_fork(struct watch_context *ctx,
+                                     int watcher_lock_fd)
+{
+    sigset_t stop_signals, previous;
+    (void)sigemptyset(&stop_signals);
+    (void)sigaddset(&stop_signals, SIGINT);
+    (void)sigaddset(&stop_signals, SIGTERM);
+    if (pthread_sigmask(SIG_BLOCK, &stop_signals, &previous) != 0)
+        return -1;
+    pid_t child = fork();
+    if (child == 0) {
+#if defined(__APPLE__)
+        platform_directory_watcher_close(&ctx->directory_watcher);
+#else
+        close(ctx->fd);
+#endif
+        if (ctx->stop_endpoint_ready) close(ctx->stop_fd);
+        close(watcher_lock_fd);
+        zcl_devloop_process_cancel_clear();
+        zcl_devloop_process_cancel_poll_clear();
+        signal(SIGINT, proof_worker_signal);
+        signal(SIGTERM, proof_worker_signal);
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &previous, NULL);
+    return child;
 }
 
 static void watch_proof_reap(struct watch_context *ctx)
@@ -1162,8 +1197,11 @@ static int watch_edit_cycle(struct watch_context *ctx)
 #if defined(ZCL_TESTING)
     if (watch_test_edit_ready >= 0) {
         char release = 0;
-        bool ok = write(watch_test_edit_ready, "r", 1) == 1;
-        return ok && read(watch_test_edit_release, &release, 1) == 1 ? 0 : 1;
+        bool ok = write(watch_test_edit_ready, "r", 1) == 1 &&
+                  read(watch_test_edit_release, &release, 1) == 1;
+        /* Report whether a stop signal reached this worker's cancel state. */
+        const char *cancel = zcl_devloop_process_cancel_requested() ? "c" : "n";
+        return ok && write(watch_test_edit_ready, cancel, 1) == 1 ? 0 : 1;
     }
 #endif
     const char *files[ZCL_DEVLOOP_RESTART_SOURCE_MAX];
@@ -1186,30 +1224,23 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
     if (!ctx)
         return false;
     watch_proof_reap(ctx);
-    if (ctx->proof_worker_pid > 1 || ctx->proof_pending_count == 0)
+    /* A stop that arrived during the reflex (for example while the journal
+     * flush waited on storage) must not be answered by forking the proof it
+     * is about to cancel. */
+    if (g_watch_stop || ctx->proof_worker_pid > 1 ||
+        ctx->proof_pending_count == 0)
         return true;
     int execution = -1;
     char why[160] = {0};
     int ready = zcl_dev_proof_execution_acquire(ctx->root, &execution,
                                                 why, sizeof(why));
     if (ready <= 0) return ready == 0;
-    pid_t child = fork();
+    pid_t child = watch_proof_worker_fork(ctx, watcher_lock_fd);
     if (child < 0) {
         zcl_dev_proof_execution_release(execution);
         return false;
     }
     if (child == 0) {
-#if defined(__APPLE__)
-        platform_directory_watcher_close(&ctx->directory_watcher);
-#else
-        close(ctx->fd);
-#endif
-        if (ctx->stop_endpoint_ready) close(ctx->stop_fd);
-        close(watcher_lock_fd);
-        zcl_devloop_process_cancel_clear();
-        zcl_devloop_process_cancel_poll_clear();
-        signal(SIGINT, proof_worker_signal);
-        signal(SIGTERM, proof_worker_signal);
         int rc = watch_edit_cycle(ctx);
         zcl_dev_proof_execution_release(execution);
         _exit(rc == 0 ? 0 : 1);
@@ -1285,6 +1316,67 @@ bool zcl_dev_proof_test_edit_lifetime(const char *root)
     (void)close(release[1]);
     return ok;
 }
+
+/* One round of the stop race: start a worker under the watcher's own SIGTERM
+ * handler, signal it the instant fork() returns exactly as watch_proof_stop()
+ * does, and require the worker to report that the cancel reached it. */
+static bool watch_test_edit_stop_round(struct watch_context *ctx)
+{
+    int ready[2], release[2];
+    if (pipe(ready) != 0) return false;
+    if (pipe(release) != 0) {
+        (void)close(ready[0]);
+        (void)close(ready[1]);
+        return false;
+    }
+    watch_test_edit_ready = ready[1];
+    watch_test_edit_release = release[0];
+    ctx->proof_pending_count = 1;
+    bool ok = watch_proof_start(ctx, -1) && ctx->proof_worker_pid > 1;
+    watch_test_edit_ready = watch_test_edit_release = -1;
+    if (ok) {
+        watch_proof_stop(ctx);
+        struct pollfd channel = {.fd = ready[0], .events = POLLIN};
+        char first = 0, cancel = 0;
+        bool observed = poll(&channel, 1, 5000) == 1 &&
+                        read(ready[0], &first, 1) == 1;
+        bool released = write(release[1], "r", 1) == 1;
+        bool reported = poll(&channel, 1, 5000) == 1 &&
+                        read(ready[0], &cancel, 1) == 1;
+        watch_proof_join(ctx);
+        ok = observed && released && reported && cancel == 'c' &&
+             ctx->proof_worker_pid == 0;
+    }
+    (void)close(ready[0]);
+    (void)close(ready[1]);
+    (void)close(release[0]);
+    (void)close(release[1]);
+    return ok;
+}
+
+bool zcl_dev_proof_test_edit_stop_cancels(const char *root)
+{
+    struct watch_context ctx = {.fd = -1};
+#if defined(__APPLE__)
+    platform_directory_watcher_init(&ctx.directory_watcher);
+#endif
+    if (!root || snprintf(ctx.root, sizeof(ctx.root), "%s", root) >=
+                     (int)sizeof(ctx.root)) return false;
+    /* A stop requested before the fork starts no worker at all. */
+    ctx.proof_pending_count = 1;
+    g_watch_stop = 1;
+    bool ok = watch_proof_start(&ctx, -1) && ctx.proof_worker_pid == 0;
+    g_watch_stop = 0;
+    struct sigaction watcher = {.sa_handler = watch_signal}, previous;
+    (void)sigemptyset(&watcher.sa_mask);
+    watcher.sa_flags = SA_RESTART;
+    if (sigaction(SIGTERM, &watcher, &previous) != 0) return false;
+    for (int round = 0; ok && round < 16; round++)
+        ok = watch_test_edit_stop_round(&ctx);
+    (void)sigaction(SIGTERM, &previous, NULL);
+    zcl_devloop_process_cancel_clear();
+    return ok;
+}
 #endif
 
 static bool watch_commit_proof_start(struct watch_context *ctx,
@@ -1292,23 +1384,12 @@ static bool watch_commit_proof_start(struct watch_context *ctx,
 {
     if (!ctx) return false;
     watch_proof_reap(ctx);
-    if (!watch_commit_proof_claimable(ctx) ||
+    if (g_watch_stop || !watch_commit_proof_claimable(ctx) ||
         !zcl_dev_proof_queue_has_pending(ctx->root))
         return true;
-    pid_t child = fork();
+    pid_t child = watch_proof_worker_fork(ctx, watcher_lock_fd);
     if (child < 0) return false;
     if (child == 0) {
-#if defined(__APPLE__)
-        platform_directory_watcher_close(&ctx->directory_watcher);
-#else
-        close(ctx->fd);
-#endif
-        if (ctx->stop_endpoint_ready) close(ctx->stop_fd);
-        close(watcher_lock_fd);
-        zcl_devloop_process_cancel_clear();
-        zcl_devloop_process_cancel_poll_clear();
-        signal(SIGINT, proof_worker_signal);
-        signal(SIGTERM, proof_worker_signal);
         char why[256] = {0};
         int rc = zcl_dev_proof_queue_run_next(ctx->root, why, sizeof(why));
         if (rc < 0)

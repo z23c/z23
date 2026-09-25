@@ -252,6 +252,10 @@ int zcl_devloop_test_closure_file_cap(int indexed, size_t changed_count);
  * whole catalog. 0 (the default) means the production cap. Values outside
  * (0, ZCL_DEVLOOP_MAX_PLAN_GROUPS) are ignored. */
 extern size_t zcl_devloop_test_plan_group_cap;
+/* Watcher stop fixture: a stop requested before the proof fork starts no
+ * worker, and a SIGTERM sent the instant fork() returns must reach the
+ * worker's cancel state instead of being erased by the child's reset. */
+bool zcl_dev_proof_test_edit_stop_cancels(const char *root);
 #endif
 
 /* The forked child's own convention for a pre-exec setup failure (setsid,
