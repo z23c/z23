@@ -42,6 +42,7 @@
 #include "util/util.h"
 #include "services/build_fabric_worker.h"
 #include "services/build_fabric_service.h"
+#include "services/build_fabric_cache.h"
 #include "supervisors/domains.h"
 #include <stdatomic.h>
 #include <stdio.h>
@@ -101,6 +102,56 @@ static const char *boot_zcode_work_action_kind(uint8_t work_kind, const uint8_t 
     if (work_kind == VCS_ZCODE_WORK_FUZZ)
         return VCS_BUILD_ACTION_KIND_FUZZ_V1;
     return NULL;
+}
+static struct zcl_result boot_zcode_work_replay_current(
+    struct node_db *ndb, struct vcs_package_store *store,
+    const struct db_build_job *job, const struct db_build_action *action,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now,
+    uint64_t *verified_bytes, uint8_t receipt_root[32])
+{
+    if (request->work_kind != VCS_ZCODE_WORK_BUILD ||
+        strcmp(action->kind, VCS_BUILD_ACTION_KIND_V1) != 0)
+        return ZCL_ERR(-1, "completed attachment requires fresh execution");
+    bool hit = false;
+    uint64_t bytes = 0;
+    struct vcs_zcode_work_receipt_v1 receipt;
+    struct zcl_result replay = build_fabric_cache_replay_receipt(
+        ndb, s_work_workspace, store, job, action, now, &hit,
+        &receipt, &bytes);
+    if (!replay.ok) return replay;
+    if (!hit || bytes > request->max_output_bytes ||
+        memcmp(receipt.signer_pubkey, s_work_pubkey, 32) != 0)
+        return ZCL_ERR(-1, "completed build lacks current exact proof");
+    if (receipt_root && vcs_zcode_work_receipt_id(
+            &receipt, receipt_root) != VCS_ZCODE_DEV_OK)
+        return ZCL_ERR(-1, "completed build receipt root is invalid");
+    if (verified_bytes) *verified_bytes = bytes;
+    return ZCL_OK;
+}
+static struct zcl_result boot_zcode_work_admit_planned(
+    struct node_db *ndb, struct vcs_package_store *store,
+    const struct db_build_job *job, const struct db_build_action *action,
+    const struct db_build_action *current,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now)
+{
+    if (strcmp(current->state, "ACCEPTED") == 0 &&
+        request->work_kind == VCS_ZCODE_WORK_BUILD) {
+        uint64_t bytes = 0;
+        struct zcl_result replay = boot_zcode_work_replay_current(
+            ndb, store, job, action, request, now, &bytes, NULL);
+        if (!replay.ok) return replay;
+        LOG_INFO("zcode.proof_perf",
+                 "schema=zcl.async_proof_perf.v1 action=%s "
+                 "stage=historical_receipt_lookup hit=1 "
+                 "verified_output_bytes=%llu physical_runs_claimed=0",
+                 action->action_id, (unsigned long long)bytes);
+        return ZCL_OK;
+    }
+    if (strcmp(current->state, "SNAPSHOTTED") == 0)
+        return build_fabric_submit(ndb, job->job_id, now);
+    if (!boot_zcode_work_active_state(current->state))
+        return ZCL_ERR(-1, "remote action is terminal: %s", current->state);
+    return ZCL_OK;
 }
 /* Rebuild content.v2 into the fixed action; only ZBuild state is mutable. */
 static struct zcl_result boot_zcode_work_admit(
@@ -220,11 +271,32 @@ static struct zcl_result boot_zcode_work_admit(
     struct db_build_action current;
     if (!db_build_action_find(ndb, action.action_id, &current))
         return ZCL_ERR(-1, "planned remote action disappeared");
-    if (strcmp(current.state, "SNAPSHOTTED") == 0)
-        return build_fabric_submit(ndb, job.job_id, now);
-    if (!boot_zcode_work_active_state(current.state))
-        return ZCL_ERR(-1, "remote action is terminal: %s", current.state);
-    return ZCL_OK;
+    return boot_zcode_work_admit_planned(
+        ndb, store, &job, &action, &current, request, now);
+}
+static struct zcl_result boot_zcode_work_attached_admit(
+    const struct vcs_zcode_work_request_v1 *request, int64_t now)
+{
+    struct node_db *ndb = app_runtime_node_db();
+    struct vcs_package_store *store = vcs_package_store_global();
+    if (!request || !ndb || !ndb->open || !store ||
+        !boot_zcode_work_workspace())
+        return ZCL_ERR(-1, "attached work owners unavailable");
+    char action_id[65];
+    zcl_hex_encode(request->action_root, 32, action_id);
+    struct db_build_action action;
+    struct db_build_job job;
+    if (!db_build_action_find(ndb, action_id, &action) ||
+        !db_build_job_find(ndb, action.job_id, &job))
+        return ZCL_ERR(-1, "attached action is unavailable");
+    bool completed = strcmp(action.state, "ACCEPTED") == 0 ||
+        strcmp(action.state, "CACHE_HIT") == 0;
+    if (!completed)
+        return boot_zcode_work_active_state(action.state) ||
+            strcmp(action.state, "FAILED") == 0 ? ZCL_OK :
+            ZCL_ERR(-1, "attached action is terminal: %s", action.state);
+    return boot_zcode_work_replay_current(
+        ndb, store, &job, &action, request, now, NULL, NULL);
 }
 static bool boot_zcode_work_context_available(
     const struct vcs_zcode_work_request_v1 *request, uint64_t peer,
@@ -244,6 +316,13 @@ static void boot_zcode_work_admission_success(
     int64_t now, const struct vcs_package_store_status *status,
     bool reused, uint64_t reused_bytes, int64_t admission_us)
 {
+    bool marked = vcs_zcode_work_node_mark_action_ready(
+        s_work, peer, request->request_id, now,
+        reused ? reused_bytes : status->total_bytes);
+    if (!marked) {
+        LOG_WARN("net.zcode_swarm", "admitted request lost its worker slot");
+        return;
+    }
     if (reused) {
         char action_id[65];
         zcl_hex_encode(request->action_root, 32, action_id);
@@ -256,10 +335,6 @@ static void boot_zcode_work_admission_success(
                  (long long)(admission_us < 0 ? 0 : admission_us),
                  (unsigned long long)reused_bytes);
     } else {
-        if (!vcs_zcode_work_node_mark_action_ready(
-                s_work, peer, request->request_id, now,
-                status->total_bytes))
-            LOG_WARN("net.zcode_swarm", "admitted action lost its worker slot");
         boot_zcode_work_perf_admission(
             request, status, s_engine, admission_us);
     }
@@ -281,7 +356,8 @@ static void boot_zcode_work_drain_admissions(int64_t now)
                 &request, peer, now, &status, &reused, &reused_bytes))
             break;
         int64_t admission_us = platform_time_monotonic_us();
-        struct zcl_result admitted = reused ? ZCL_OK
+        struct zcl_result admitted = reused
+            ? boot_zcode_work_attached_admit(&request, now)
             : boot_zcode_work_admit(&request, now);
         admission_us = platform_time_monotonic_us() - admission_us;
         uint64_t drained_peer = 0;
@@ -331,6 +407,46 @@ static void boot_zcode_work_drain_cancels(int64_t now)
         }
     }
 }
+static bool boot_zcode_work_result_state(const char *state)
+{
+    return strcmp(state, "ACCEPTED") == 0 ||
+        strcmp(state, "CACHE_HIT") == 0 || strcmp(state, "FAILED") == 0;
+}
+
+static bool boot_zcode_work_exact_result_current(
+    struct node_db *ndb, const struct db_build_action *action,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now,
+    bool *exact_positive, uint8_t receipt_root[32])
+{
+    *exact_positive = request->work_kind == VCS_ZCODE_WORK_BUILD &&
+        strcmp(action->kind, VCS_BUILD_ACTION_KIND_V1) == 0 &&
+        (strcmp(action->state, "ACCEPTED") == 0 ||
+         strcmp(action->state, "CACHE_HIT") == 0);
+    if (!*exact_positive) return true;
+    struct db_build_job job;
+    struct vcs_package_store *store = vcs_package_store_global();
+    if (!store || !db_build_job_find(ndb, action->job_id, &job))
+        return false;
+    return boot_zcode_work_replay_current(
+        ndb, store, &job, action, request, now,
+        NULL, receipt_root).ok;
+}
+
+static bool boot_zcode_work_result_publishable(
+    struct node_db *ndb, const struct db_build_action *action,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now,
+    bool *exact_positive, uint8_t receipt_root[32])
+{
+    if (!boot_zcode_work_result_state(action->state)) return false;
+    if (boot_zcode_work_exact_result_current(
+            ndb, action, request, now, exact_positive, receipt_root))
+        return true;
+    LOG_WARN("net.zcode_swarm",
+             "request %llu current exact result refused",
+             (unsigned long long)request->request_id);
+    return false;
+}
+
 static void boot_zcode_work_publish_results(int64_t now)
 {
     struct node_db *ndb = app_runtime_node_db();
@@ -350,9 +466,11 @@ static void boot_zcode_work_publish_results(int64_t now)
         boot_zcode_work_progress_execution_started(
             s_work, peers[i], &requests[i], &action,
             s_work_secret, s_work_pubkey);
-        if (strcmp(action.state, "ACCEPTED") != 0 &&
-             strcmp(action.state, "CACHE_HIT") != 0 &&
-             strcmp(action.state, "FAILED") != 0)
+        bool exact_positive = false;
+        uint8_t current_receipt_root[32] = {0};
+        if (!boot_zcode_work_result_publishable(
+                ndb, &action, &requests[i], now, &exact_positive,
+                current_receipt_root))
             continue;
         struct db_build_receipt receipts[8];
         int receipt_count = db_build_job_receipts(
@@ -363,6 +481,8 @@ static void boot_zcode_work_publish_results(int64_t now)
             size_t wire_len = 0;
             if (!zcl_hex_decode_lower(receipts[j].work_receipt_sha3,
                                       receipt_root, 32) ||
+                (exact_positive && memcmp(
+                    receipt_root, current_receipt_root, 32) != 0) ||
                 vcs_object_load_raw(s_work_workspace, receipt_root, &wire,
                                     &wire_len) != 0)
                 continue;

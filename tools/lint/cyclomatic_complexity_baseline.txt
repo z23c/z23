@@ -721,10 +721,10 @@ contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_get
 contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_parse:29
 contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_restore_for_kind:17
 contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_serialize:21
-contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_publish_result:31
+contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_publish_result:22
 contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_submit:27
 contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_tick:26
-contexts/commons/modules/vcs/src/zcode_work_node.c:work_handle_request:28
+contexts/commons/modules/vcs/src/zcode_work_node.c:work_handle_request:24
 contexts/commons/modules/vcs/src/zcode_work_output.c:vcs_zcode_work_output_get:23
 contexts/commons/modules/vcs/src/zcode_work_swarm.c:vcs_zcode_work_result_quorum:21
 contexts/commons/modules/vcs/src/zcode_work_swarm.c:vcs_zcode_work_result_verify:19
@@ -1552,7 +1552,7 @@ engine/composition/src/boot_zcode_dht_record_rpc.c:record_result_json:24
 engine/composition/src/boot_zcode_dht_replication_rpc.c:rpc_begin:17
 engine/composition/src/boot_zcode_dht_rpc.c:rpc_publish_impl:46
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_swarm_frame:32
-engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_admit:39
+engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_admit:37
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_publish_results:20
 engine/composition/src/boot_zcode_swarm_dht.c:boot_zcode_swarm_discovery_tick:27
 engine/composition/src/boot_zcode_swarm_receipt.c:boot_zcode_swarm_receipt_frame:16

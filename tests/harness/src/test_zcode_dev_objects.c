@@ -2033,6 +2033,52 @@ static int test_zd_work_node_atomic_admission(void)
         ASSERT(!vcs_zcode_work_node_action_ready(
             b, 22, attached.request_id, 1100, NULL));
 
+        /* A second exact subscriber may be transport-attached while its
+         * receiver admission is refused. It must not inherit the admitted
+         * subscriber's result when the shared physical slot publishes. */
+        struct vcs_zcode_work_request_v1 refused = attached;
+        refused.request_id = 904;
+        ASSERT(vcs_zcode_work_request_seal(&refused, c_secret, c_key));
+        struct vcs_zcode_work_swarm_message refused_message = {
+            .type = VCS_ZCODE_WORK_SWARM_REQUEST,
+            .body.request = refused,
+        };
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &refused_message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            b, 22, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            b, 22, &peer, frame, &frame_len));
+        struct vcs_zcode_work_swarm_message refused_admission;
+        ASSERT(vcs_zcode_work_swarm_parse(
+            frame, frame_len, &refused_admission));
+        ASSERT_EQ(refused_admission.type, VCS_ZCODE_WORK_SWARM_ADMISSION);
+        ASSERT_EQ(refused_admission.body.admission.disposition,
+                  VCS_ZCODE_WORK_ADMISSION_ATTACHED);
+        ASSERT(vcs_zcode_work_node_next_request(b, &peer, &physical));
+        ASSERT_EQ(physical.request_id, refused.request_id);
+
+        struct vcs_zcode_work_request_v1 smaller_limit = attached;
+        smaller_limit.request_id = 905;
+        smaller_limit.max_output_bytes = 1;
+        ASSERT(vcs_zcode_work_request_seal(
+            &smaller_limit, c_secret, c_key));
+        refused_message.body.request = smaller_limit;
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &refused_message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            b, 22, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            b, 22, &peer, frame, &frame_len));
+        ASSERT(vcs_zcode_work_swarm_parse(
+            frame, frame_len, &refused_admission));
+        ASSERT_EQ(refused_admission.type, VCS_ZCODE_WORK_SWARM_ADMISSION);
+        ASSERT_EQ(refused_admission.body.admission.disposition,
+                  VCS_ZCODE_WORK_ADMISSION_REFUSED);
+        ASSERT_EQ(refused_admission.body.admission.reason,
+                  VCS_ZCODE_WORK_ADMISSION_REASON_BINDING);
+        ASSERT(!vcs_zcode_work_node_next_request(b, &peer, &physical));
+
         struct vcs_zcode_work_swarm_message request_message = {
             .type = VCS_ZCODE_WORK_SWARM_REQUEST, .body.request = qa,
         };
@@ -2068,6 +2114,12 @@ static int test_zd_work_node_atomic_admission(void)
 
         struct vcs_zcode_work_result_v1 result;
         zd_swarm_result(&result, &qa, 122, 110);
+        struct vcs_zcode_work_result_v1 unadmitted = result;
+        unadmitted.request_id = attached.request_id;
+        ASSERT_EQ(vcs_zcode_work_node_publish_result(b, 22, &unadmitted),
+                  VCS_ZCODE_WORK_NODE_BINDING);
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            b, 22, attached.request_id, 1001, 4096));
         ASSERT_EQ(vcs_zcode_work_node_publish_result(b, 21, &result),
                   VCS_ZCODE_WORK_NODE_OK);
         ASSERT(vcs_zcode_work_node_next_outbound(
@@ -2078,6 +2130,8 @@ static int test_zd_work_node_atomic_admission(void)
             b, 22, &peer, frame, &frame_len));
         ASSERT_EQ(vcs_zcode_work_node_handle_frame(
             c, 12, frame, frame_len, 1002), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(!vcs_zcode_work_node_next_outbound(
+            b, 22, &peer, frame, &frame_len));
         struct vcs_zcode_work_result_v1 received;
         ASSERT(vcs_zcode_work_node_next_result(a, &peer, &received));
         ASSERT_EQ(received.request_id, qa.request_id);
@@ -2093,6 +2147,7 @@ static int test_zd_work_node_atomic_admission(void)
                       &received.receipt, second_observation), VCS_ZCODE_DEV_OK);
         ASSERT_EQ(memcmp(first_observation, second_observation,
                          sizeof(first_observation)), 0);
+        ASSERT(!vcs_zcode_work_node_next_result(c, &peer, &received));
         ASSERT(!vcs_zcode_work_node_action_ready(
             b, 22, attached.request_id, 1002, NULL));
 
@@ -2250,9 +2305,13 @@ static int test_zd_work_node(void)
         uint64_t inbound_peers[2];
         struct vcs_zcode_work_request_v1 inbound_requests[2];
         ASSERT_EQ(vcs_zcode_work_node_inbound_requests(
-            worker, inbound_peers, inbound_requests, 2), 1);
+            worker, inbound_peers, inbound_requests, 2), 0);
         ASSERT(vcs_zcode_work_node_next_request(worker, &peer_out, &received));
         ASSERT_EQ(received.request_id, 700);
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            worker, 22, received.request_id, 1000, 4096));
+        ASSERT_EQ(vcs_zcode_work_node_inbound_requests(
+            worker, inbound_peers, inbound_requests, 2), 1);
         struct vcs_zcode_work_progress_v1 progress;
         zd_swarm_progress(&progress, &received,
                           VCS_ZCODE_WORK_PROGRESS_EXECUTION_STARTED,
@@ -2645,6 +2704,8 @@ static int test_zd_work_node_three(void)
             a, &peer, &observed_admission));
         struct vcs_zcode_work_request_v1 c_request;
         ASSERT(vcs_zcode_work_node_next_request(c, &peer, &c_request));
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            c, 31, c_request.request_id, 1100, 4096));
         struct vcs_zcode_work_result_v1 result;
         zd_swarm_result(&result, &c_request, 99, 91);
         ASSERT_EQ(vcs_zcode_work_node_publish_result(c, 31, &result),
@@ -2683,6 +2744,8 @@ static int test_zd_work_node_three(void)
         ASSERT(vcs_zcode_work_node_next_admission(
             b, &peer, &observed_admission));
         ASSERT(vcs_zcode_work_node_next_request(c, &peer, &c_request));
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            c, 32, c_request.request_id, 1200, 4096));
         zd_swarm_result(&result, &c_request, 101, 91);
         ASSERT_EQ(vcs_zcode_work_node_publish_result(c, 32, &result),
                   VCS_ZCODE_WORK_NODE_OK);

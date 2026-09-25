@@ -16,6 +16,7 @@
 #include "models/build_fabric.h"
 #include "services/build_fabric_cache.h"
 #include "services/build_fabric_service.h"
+#include "services/build_fabric_worker_evidence.h"
 #include "vcs/build_action.h"
 #include "vcs/build_execution_observation.h"
 #include "vcs/package_store.h"
@@ -566,7 +567,21 @@ static bool zs_cache_plan(const char *workspace, struct db_build_job *job,
 {
     uint8_t source_sha[32], source_root[32], toolchain[32], policy[32];
     memset(toolchain, 0x33, sizeof(toolchain));
-    memset(policy, 0x66, sizeof(policy));
+    struct vcs_zcode_proof_policy_v1 proof_policy = {
+        .schema_version = VCS_ZCODE_DEV_VERSION,
+        .required_proofs = VCS_ZCODE_PROOF_COMPILE,
+        .minimum_compile_receipts = 1,
+        .minimum_matching_receipts = 1,
+        .maximum_proof_age_seconds = 3600,
+    };
+    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+    if (vcs_zcode_proof_policy_root(&proof_policy, policy) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_proof_policy_serialize(&proof_policy, policy_wire) !=
+            VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(workspace, policy, policy_wire,
+                                  sizeof(policy_wire)))
+        return false;
 
     if (!zs_cache_plan_write_source(workspace, source_sha, source_root))
         return false;
@@ -682,6 +697,38 @@ static bool zs_cache_observation(
     return true;
 }
 
+static bool zs_cache_sign_work_receipt(
+    const char *workspace, const struct db_build_action *action,
+    struct db_build_receipt *receipt, const uint8_t output_root[32],
+    const uint8_t secret[32], const uint8_t pubkey[32])
+{
+    uint8_t task_root[32], candidate_root[32], evidence_root[32];
+    uint8_t *task_wire = NULL, *candidate_wire = NULL;
+    size_t task_len = 0, candidate_len = 0;
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_candidate_v1 candidate;
+    bool closure_ok =
+        zcl_hex_decode_lower(action->task_root_sha3, task_root, 32) &&
+        zcl_hex_decode_lower(action->candidate_root_sha3,
+                             candidate_root, 32) &&
+        zcl_hex_decode_lower(receipt->observation_sha3, evidence_root, 32) &&
+        vcs_object_load_raw(workspace, task_root, &task_wire,
+                            &task_len) == 0 &&
+        vcs_object_load_raw(workspace, candidate_root, &candidate_wire,
+                            &candidate_len) == 0 &&
+        vcs_zcode_task_parse(task_wire, task_len, &task) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_parse(candidate_wire, candidate_len,
+                                  &candidate) == VCS_ZCODE_DEV_OK;
+    free(task_wire);
+    free(candidate_wire);
+    return closure_ok && build_fabric_worker_canonical_receipt(
+        workspace, action, &task, &candidate, output_root, 149, 150,
+        evidence_root, VCS_ZCODE_WORK_BUILD, VCS_ZCODE_WORK_PASS, 0,
+        "fixture:isolation=complete,network=0", secret, pubkey,
+        receipt->work_receipt_sha3).ok;
+}
+
 static bool zs_cache_accept(
     struct node_db *ndb, const char *workspace, struct db_build_job *job,
     struct db_build_action *action, const uint8_t output_root[32],
@@ -726,6 +773,9 @@ static bool zs_cache_accept(
     if (!zs_cache_observation(
             workspace, job, action, output_root, output, output_len,
             receipt.observation_sha3))
+        return false;
+    if (!zs_cache_sign_work_receipt(
+            workspace, action, &receipt, output_root, secret, pubkey))
         return false;
     (void)snprintf(receipt.confinement, sizeof(receipt.confinement),
                    "fixture:isolation=complete,network=0");
@@ -850,6 +900,94 @@ static int store_case_exact_cache_stable_identity(
              stable_after.st_dev == stable_before.st_dev &&
              stable_after.st_ino == stable_before.st_ino &&
              stable_after.st_mtime == stable_before.st_mtime);
+    return failures;
+}
+
+static int store_case_exact_cache_replay_tampered_receipt(
+    struct exact_cache_ctx *ctx)
+{
+    int failures = 0;
+    struct db_build_receipt rows[2];
+    uint8_t root[32], *wire = NULL;
+    size_t wire_len = 0;
+    char path[1400];
+    bool loaded = db_build_job_receipts(
+            ctx->ndb, ctx->job->job_id, rows, 2) == 1 &&
+        zcl_hex_decode_lower(rows[0].work_receipt_sha3, root, 32) &&
+        vcs_object_load_raw(ctx->dd, root, &wire, &wire_len) == 0 &&
+        zs_addressed_path(ctx->dd, root, path, sizeof(path));
+    ZS_CHECK("exact cache: replay receipt CAS loads for tamper fixture",
+             loaded);
+    if (loaded) {
+        FILE *poison = fopen(path, "wb");
+        bool written = poison && fwrite("bad", 1, 3, poison) == 3;
+        if (poison) written = fclose(poison) == 0 && written;
+        ZS_CHECK("exact cache: replay receipt CAS tampered", written);
+        bool hit = true;
+        uint64_t bytes = 1;
+        struct vcs_zcode_work_receipt_v1 receipt;
+        struct zcl_result reused = build_fabric_cache_replay_receipt(
+            ctx->ndb, ctx->dd, ctx->store, ctx->job, ctx->action, 160,
+            &hit, &receipt, &bytes);
+        ZS_CHECK("exact cache: tampered signed receipt refuses replay",
+                 !reused.ok && !hit && bytes == 0);
+        bool repaired = false;
+        ZS_CHECK("exact cache: replay receipt CAS repairs exactly",
+                 vcs_object_put_addressed_repair(
+                     ctx->dd, root, wire, wire_len, &repaired) && repaired);
+    }
+    free(wire);
+    return failures;
+}
+
+static int store_case_exact_cache_replay(
+    struct exact_cache_ctx *ctx, size_t expected_len)
+{
+    int failures = 0;
+    bool hit = false;
+    uint64_t verified_bytes = 0;
+    struct vcs_zcode_work_receipt_v1 receipt;
+    struct db_build_receipt before[2], after[2];
+    int prior = db_build_job_receipts(
+        ctx->ndb, ctx->job->job_id, before, 2);
+    struct zcl_result reused = build_fabric_cache_replay_receipt(
+        ctx->ndb, ctx->dd, ctx->store, ctx->job, ctx->action, 160,
+        &hit, &receipt, &verified_bytes);
+    ZS_CHECK("exact cache: historical signed BUILD receipt reuses bytes",
+             reused.ok && hit && verified_bytes == expected_len &&
+             receipt.status == VCS_ZCODE_WORK_PASS &&
+             receipt.work_kind == VCS_ZCODE_WORK_BUILD &&
+             vcs_zcode_work_receipt_verify(
+                 &receipt, receipt.signer_pubkey) == VCS_ZCODE_DEV_OK);
+    int following = db_build_job_receipts(
+        ctx->ndb, ctx->job->job_id, after, 2);
+    ZS_CHECK("exact cache: replay mints no second execution receipt",
+             prior == 1 && following == 1 &&
+             strcmp(before[0].receipt_id, after[0].receipt_id) == 0);
+    struct db_build_action independent = *ctx->action;
+    (void)snprintf(independent.kind, sizeof(independent.kind), "%s",
+                   VCS_BUILD_ACTION_KIND_TEST_V1);
+    hit = true;
+    reused = build_fabric_cache_replay_receipt(
+        ctx->ndb, ctx->dd, ctx->store, ctx->job, &independent, 160,
+        &hit, &receipt, &verified_bytes);
+    ZS_CHECK("exact cache: independent TEST domain never replays BUILD",
+             reused.ok && !hit && verified_bytes == 0);
+    struct db_build_action changed_input = *ctx->action;
+    changed_input.input_root_sha3[0] =
+        changed_input.input_root_sha3[0] == '0' ? '1' : '0';
+    hit = true;
+    reused = build_fabric_cache_replay_receipt(
+        ctx->ndb, ctx->dd, ctx->store, ctx->job, &changed_input, 160,
+        &hit, &receipt, &verified_bytes);
+    ZS_CHECK("exact cache: changed verified input refuses replay",
+             !reused.ok && !hit && verified_bytes == 0);
+    hit = true;
+    reused = build_fabric_cache_replay_receipt(
+        ctx->ndb, ctx->dd, ctx->store, ctx->job, ctx->action, 4000,
+        &hit, &receipt, &verified_bytes);
+    ZS_CHECK("exact cache: stale historical proof does not hit",
+             reused.ok && !hit && verified_bytes == 0);
     return failures;
 }
 
@@ -1071,6 +1209,8 @@ int t_store_exact_cache_restore(void)
                                               output_root);
     failures += store_case_exact_cache_accept_and_restore(
         &ctx, object, sizeof(object), output_root);
+    failures += store_case_exact_cache_replay(&ctx, sizeof(object));
+    failures += store_case_exact_cache_replay_tampered_receipt(&ctx);
     failures += store_case_exact_cache_stable_identity(&ctx);
     failures += store_case_exact_cache_missing_source_blob(&ctx);
     failures += store_case_exact_cache_miss_and_repair(&ctx, object,
@@ -1086,4 +1226,3 @@ int t_store_exact_cache_restore(void)
     test_rm_rf_recursive(dd);
     return failures;
 }
-

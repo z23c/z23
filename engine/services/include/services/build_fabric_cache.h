@@ -6,7 +6,9 @@
 
 #include "base/result.h"
 #include "models/build_fabric.h"
+#include "vcs/zcode_dev.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 struct vcs_package_store;
@@ -39,5 +41,19 @@ struct zcl_result build_fabric_cache_restore(
     struct vcs_package_store *store, const struct db_build_job *expected_job,
     const struct db_build_action *expected_action, const char *destination,
     struct build_fabric_cache_report *report);
+
+/* Read one historical, locally executed BUILD receipt for an identical
+ * immutable action. A hit rechecks the source/input closure, signed receipt,
+ * output carrier and CURRENT proof policy including conflicting observations.
+ * It returns the original signed receipt: replay never mints another proof.
+ * A missing or stale receipt is a miss; corrupt or contradictory evidence is
+ * a named refusal. The caller must still bind it to each signed request and
+ * enforce that request's output limit. */
+struct zcl_result build_fabric_cache_replay_receipt(
+    struct node_db *ndb, const char *workspace,
+    struct vcs_package_store *store, const struct db_build_job *expected_job,
+    const struct db_build_action *expected_action, int64_t now, bool *hit,
+    struct vcs_zcode_work_receipt_v1 *receipt,
+    uint64_t *verified_output_bytes);
 
 #endif /* ZCL_SERVICES_BUILD_FABRIC_CACHE_H */

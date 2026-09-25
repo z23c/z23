@@ -215,7 +215,8 @@ static bool bfc_receipt_matches(
 
 static bool bfc_has_one_accepted_receipt(
     struct node_db *ndb, const char *workspace,
-    const struct db_build_job *job, const struct db_build_action *action)
+    const struct db_build_job *job, const struct db_build_action *action,
+    struct db_build_receipt *out)
 {
     struct db_build_receipt *rows = zcl_malloc(
         BFC_RECEIPT_SCAN_CAP * sizeof(*rows), "build.cache.receipts");
@@ -238,6 +239,7 @@ static bool bfc_has_one_accepted_receipt(
         bfc_receipt_signature_valid(ndb, accepted) &&
         build_fabric_observation_verify(
             workspace, job, action, accepted).ok;
+    if (valid && out) *out = *accepted;
     free(rows);
     return valid;
 }
@@ -338,7 +340,7 @@ struct zcl_result build_fabric_cache_restore(
     if (strcmp(action.state, "ACCEPTED") != 0 ||
         !action.output_root_sha3[0])
         return ZCL_OK;
-    if (!bfc_has_one_accepted_receipt(ndb, workspace, &job, &action))
+    if (!bfc_has_one_accepted_receipt(ndb, workspace, &job, &action, NULL))
         return bfc_corrupt(report,
                            "accepted action lacks one canonical local receipt");
     uint8_t action_root[32], output_root[32], *bytes = NULL;
@@ -365,5 +367,244 @@ struct zcl_result build_fabric_cache_restore(
     (void)snprintf(report->output_root_sha3,
                    sizeof(report->output_root_sha3), "%s",
                    action.output_root_sha3);
+    return ZCL_OK;
+}
+
+struct bfc_replay_roots {
+    uint8_t task[32], candidate[32], action[32], input[32], output[32];
+    uint8_t policy[32], toolchain[32], observation[32], lease[32];
+};
+
+static bool bfc_replay_roots_decode(
+    const struct db_build_job *job, const struct db_build_action *action,
+    const struct db_build_receipt *accepted, struct bfc_replay_roots *roots)
+{
+    return zcl_hex_decode_lower(action->task_root_sha3, roots->task, 32) &&
+        zcl_hex_decode_lower(action->candidate_root_sha3,
+                             roots->candidate, 32) &&
+        zcl_hex_decode_lower(action->action_id, roots->action, 32) &&
+        zcl_hex_decode_lower(action->input_root_sha3, roots->input, 32) &&
+        zcl_hex_decode_lower(action->output_root_sha3, roots->output, 32) &&
+        zcl_hex_decode_lower(action->proof_policy_root_sha3,
+                             roots->policy, 32) &&
+        zcl_hex_decode_lower(job->toolchain_sha3, roots->toolchain, 32) &&
+        zcl_hex_decode_lower(accepted->observation_sha3,
+                             roots->observation, 32) &&
+        zcl_hex_decode_lower(accepted->lease_id, roots->lease, 32);
+}
+
+static bool bfc_replay_receipt_binds(
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct db_build_receipt *accepted,
+    const struct bfc_replay_roots *roots)
+{
+    return memcmp(receipt->task_root, roots->task, 32) == 0 &&
+        memcmp(receipt->candidate_root, roots->candidate, 32) == 0 &&
+        memcmp(receipt->action_root, roots->action, 32) == 0 &&
+        memcmp(receipt->input_root, roots->input, 32) == 0 &&
+        memcmp(receipt->output_root, roots->output, 32) == 0 &&
+        memcmp(receipt->proof_policy_root, roots->policy, 32) == 0 &&
+        memcmp(receipt->toolchain_capsule_root, roots->toolchain, 32) == 0 &&
+        memcmp(receipt->evidence_root, roots->observation, 32) == 0 &&
+        memcmp(receipt->lease_id, roots->lease, 32) == 0 &&
+        receipt->work_kind == VCS_ZCODE_WORK_BUILD &&
+        receipt->exit_status == accepted->exit_status &&
+        receipt->status == VCS_ZCODE_WORK_PASS;
+}
+
+static bool bfc_replay_args_valid(
+    struct node_db *ndb, const char *workspace,
+    const struct vcs_package_store *store,
+    const struct db_build_job *job, const struct db_build_action *action,
+    int64_t now, const bool *hit,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const uint64_t *verified_output_bytes)
+{
+    return ndb && ndb->open && workspace && store && job && action &&
+        now > 0 && hit && receipt && verified_output_bytes;
+}
+
+static struct zcl_result bfc_replay_record_current(
+    struct node_db *ndb, const char *workspace,
+    const struct db_build_job *expected_job,
+    const struct db_build_action *expected_action, int64_t now,
+    struct db_build_job *job, struct db_build_action *action,
+    struct db_build_receipt *accepted, bool *eligible)
+{
+    *eligible = false;
+    if (!bfc_plan_current(expected_job, expected_action) ||
+        !bfc_input_current(workspace, expected_job, expected_action))
+        return ZCL_ERR(-1, "historical replay immutable input is invalid");
+    if (!db_build_job_find(ndb, expected_job->job_id, job) ||
+        !db_build_action_find(ndb, expected_action->action_id, action))
+        return ZCL_OK;
+    if (!bfc_job_same(job, expected_job) ||
+        !bfc_action_same(action, expected_action) ||
+        !bfc_plan_current(job, action))
+        return ZCL_ERR(-1, "historical replay durable plan differs");
+    if ((strcmp(action->state, "ACCEPTED") != 0 &&
+         strcmp(action->state, "CACHE_HIT") != 0) ||
+        !action->output_root_sha3[0])
+        return ZCL_OK;
+    if (!bfc_has_one_accepted_receipt(
+            ndb, workspace, job, action, accepted))
+        return ZCL_ERR(-1, "historical replay lacks one local receipt");
+    struct build_fabric_proof_evaluation proof;
+    struct zcl_result evaluated = build_fabric_proof_evaluate_readonly(
+        ndb, workspace, action->action_id, now, &proof);
+    if (!evaluated.ok) return evaluated;
+    *eligible = proof.compile_satisfied &&
+        strcmp(proof.output_root_sha3, action->output_root_sha3) == 0;
+    return ZCL_OK;
+}
+
+static struct zcl_result bfc_replay_signed_receipt_load(
+    struct node_db *ndb, const char *workspace,
+    const struct db_build_receipt *accepted,
+    const struct bfc_replay_roots *roots,
+    struct vcs_zcode_work_receipt_v1 *receipt,
+    struct db_build_worker *worker)
+{
+    uint8_t receipt_root[32], checked[32], signer[32], *wire = NULL;
+    size_t wire_len = 0;
+    if (!zcl_hex_decode_lower(accepted->work_receipt_sha3,
+                              receipt_root, 32) ||
+        vcs_object_load_raw_bounded(
+            workspace, receipt_root, VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES,
+            &wire, &wire_len) != 0) {
+        free(wire);
+        return ZCL_ERR(-1, "historical replay receipt CAS unavailable");
+    }
+    bool valid = wire_len == VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES &&
+        vcs_zcode_work_receipt_parse(wire, wire_len, receipt) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_validate(receipt) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(receipt, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(checked, receipt_root, 32) == 0 &&
+        db_build_worker_find(ndb, accepted->worker_id, worker) &&
+        zcl_hex_decode_lower(worker->signer_pubkey, signer, 32) &&
+        vcs_zcode_work_receipt_verify(receipt, signer) == VCS_ZCODE_DEV_OK &&
+        bfc_replay_receipt_binds(receipt, accepted, roots);
+    free(wire);
+    if (!valid) {
+        memset(receipt, 0, sizeof(*receipt));
+        return ZCL_ERR(-1, "historical replay receipt is invalid");
+    }
+    return ZCL_OK;
+}
+
+static bool bfc_replay_policy_load(
+    const char *workspace, const uint8_t root[32],
+    struct vcs_zcode_proof_policy_v1 *policy)
+{
+    uint8_t checked[32], *wire = NULL;
+    size_t wire_len = 0;
+    bool valid = vcs_object_load_raw_bounded(
+            workspace, root, VCS_ZCODE_PROOF_POLICY_WIRE_BYTES,
+            &wire, &wire_len) == 0 &&
+        vcs_zcode_proof_policy_parse(wire, wire_len, policy) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_policy_root(policy, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(root, checked, 32) == 0;
+    free(wire);
+    return valid;
+}
+
+static bool bfc_replay_candidate_valid(
+    const char *workspace, const struct bfc_replay_roots *roots,
+    const struct vcs_zcode_work_receipt_v1 *receipt, int64_t now)
+{
+    uint8_t *task_wire = NULL, *candidate_wire = NULL;
+    size_t task_len = 0, candidate_len = 0;
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_candidate_v1 candidate;
+    bool valid = vcs_object_load_raw_bounded(
+            workspace, roots->task, VCS_ZCODE_TASK_WIRE_BYTES,
+            &task_wire, &task_len) == 0 &&
+        vcs_object_load_raw_bounded(
+            workspace, roots->candidate, VCS_ZCODE_CANDIDATE_WIRE_BYTES,
+            &candidate_wire, &candidate_len) == 0 &&
+        vcs_zcode_task_parse(task_wire, task_len, &task) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_parse(candidate_wire, candidate_len,
+                                  &candidate) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_validate_for_candidate(
+            &task, &candidate, receipt,
+            now < task.expires_unix ? now : task.expires_unix - 1) ==
+            VCS_ZCODE_DEV_OK;
+    free(task_wire);
+    free(candidate_wire);
+    return valid;
+}
+
+static struct zcl_result bfc_replay_receipt_current(
+    const char *workspace, const struct bfc_replay_roots *roots,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct db_build_worker *worker, int64_t now, bool *eligible)
+{
+    *eligible = false;
+    struct vcs_zcode_proof_policy_v1 policy;
+    if (!bfc_replay_policy_load(workspace, roots->policy, &policy))
+        return ZCL_ERR(-1, "historical replay policy is invalid");
+    if (!bfc_replay_candidate_valid(workspace, roots, receipt, now))
+        return ZCL_ERR(-1, "historical replay receipt candidate is invalid");
+    /* A newer matching proof must never refresh this old physical run. */
+    *eligible = !worker->revoked &&
+        (worker->expires_at == 0 || now < worker->expires_at) &&
+        receipt->finished_unix <= now &&
+        (policy.maximum_proof_age_seconds == 0 ||
+         receipt->finished_unix >=
+             now - (int64_t)policy.maximum_proof_age_seconds);
+    return ZCL_OK;
+}
+
+struct zcl_result build_fabric_cache_replay_receipt(
+    struct node_db *ndb, const char *workspace,
+    struct vcs_package_store *store, const struct db_build_job *expected_job,
+    const struct db_build_action *expected_action, int64_t now, bool *hit,
+    struct vcs_zcode_work_receipt_v1 *receipt,
+    uint64_t *verified_output_bytes)
+{
+    if (hit) *hit = false;
+    if (receipt) memset(receipt, 0, sizeof(*receipt));
+    if (verified_output_bytes) *verified_output_bytes = 0;
+    if (!bfc_replay_args_valid(
+            ndb, workspace, store, expected_job, expected_action, now,
+            hit, receipt, verified_output_bytes))
+        return ZCL_ERR(-1, "historical replay requires complete inputs");
+    if (strcmp(expected_action->kind, VCS_BUILD_ACTION_KIND_V1) != 0)
+        return ZCL_OK; /* independently executed obligations remain fresh */
+    struct db_build_job job;
+    struct db_build_action action;
+    struct db_build_receipt accepted;
+    bool eligible = false;
+    struct zcl_result selected = bfc_replay_record_current(
+        ndb, workspace, expected_job, expected_action, now,
+        &job, &action, &accepted, &eligible);
+    if (!selected.ok || !eligible) return selected;
+    struct bfc_replay_roots roots;
+    if (!bfc_replay_roots_decode(&job, &action, &accepted, &roots))
+        return ZCL_ERR(-1, "historical replay roots are malformed");
+    uint8_t *output = NULL;
+    size_t output_len = 0;
+    enum vcs_zcode_work_output_result got = vcs_zcode_work_output_get(
+        store, roots.output, roots.action, &output, &output_len);
+    free(output);
+    if (got == VCS_ZCODE_WORK_OUTPUT_ABSENT) return ZCL_OK;
+    if (got != VCS_ZCODE_WORK_OUTPUT_OK)
+        return ZCL_ERR(-1, "historical replay output: %s",
+                       vcs_zcode_work_output_result_string(got));
+    struct db_build_worker worker;
+    struct zcl_result loaded = bfc_replay_signed_receipt_load(
+        ndb, workspace, &accepted, &roots, receipt, &worker);
+    if (!loaded.ok) return loaded;
+    struct zcl_result current = bfc_replay_receipt_current(
+        workspace, &roots, receipt, &worker, now, &eligible);
+    if (!current.ok || !eligible) {
+        memset(receipt, 0, sizeof(*receipt));
+        return current;
+    }
+    *verified_output_bytes = output_len;
+    *hit = true;
     return ZCL_OK;
 }
