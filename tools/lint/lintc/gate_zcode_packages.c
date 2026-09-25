@@ -39,7 +39,8 @@ static const char *const k_zpr_groups[] = {
 };
 static const char *const k_zpr_optional[] = {
     "platform/modules/platform/src/os_sandbox_package_linux.c",
-    "platform/modules/platform/src/os_sandbox_terminal_worker.c"
+    "platform/modules/platform/src/os_sandbox_terminal_worker.c",
+    "platform/modules/platform/src/os_sandbox_landlock_linux.c"
 };
 static const char *const k_zpr_codec[] = {
     "contexts/commons/modules/vcs/src/package_release.c",

@@ -476,8 +476,9 @@ bool zcl_dev_proof_step_start(struct zcl_dev_proof_step *step, const char *root,
             dup2(fd, STDERR_FILENO) < 0)
             _exit(127);
         if (fd > STDERR_FILENO) close(fd);
-#if defined(__APPLE__)
-        /* A pathname sandbox cannot revoke inherited open-file authority.
+        /* Neither Seatbelt nor Landlock revokes inherited open-file
+         * authority: an fd the worker holds (a lock, a signer, a socket) is
+         * usable by generation code whatever the pathname sandbox says.
          * Keep only the log streams and inert stdin before executing any
          * generation code. Census the real descriptors, not the current
          * descriptor limit, which may have been lowered since they opened. */
@@ -495,7 +496,6 @@ bool zcl_dev_proof_step_start(struct zcl_dev_proof_step *step, const char *root,
                           strerror(errno));
             _exit(127);
         }
-#endif
         execvp(argv[0], (char *const *)argv);
         _exit(127);
     }

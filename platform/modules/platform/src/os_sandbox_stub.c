@@ -340,6 +340,18 @@ struct zcl_result os_sandbox_landlock_restrict(
     return unavailable("Landlock");
 }
 
+bool os_sandbox_landlock_tcp_supported(void) { return false; }
+
+struct zcl_result os_sandbox_landlock_restrict_policy(
+    const struct os_sandbox_landlock_policy *policy)
+{
+    if (policy && policy->restrict_tcp)
+        return ZCL_ERR(OS_SANDBOX_ERR_LANDLOCK_NET_UNAVAILABLE,
+                       "Landlock TCP port rules are unavailable on this "
+                       "operating system; nothing was applied");
+    return unavailable("Landlock");
+}
+
 struct zcl_result os_sandbox_landlock_apply_to_self(void)
 {
     return unavailable("Landlock");

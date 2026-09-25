@@ -17,9 +17,14 @@
  *   no_new_privs alone, or Landlock alone — and os_sandbox_enter() composes
  *   a named `struct os_sandbox_profile` in the one correct order.
  *
- * Empirical grounding (docs/work/session-substrate-probes.md, run on the
- * target box: Ubuntu 24.04.3, kernel 6.8.0-111, uid 1000, rootless):
- *   - unprivileged user namespaces WORK (unshare/clone stack CLONE_NEWUSER|…)
+ * Empirical grounding (docs/work/session-substrate-probes.md, first run on
+ * Ubuntu 24.04.3, kernel 6.8.0-111, uid 1000, rootless; re-checked
+ * 2026-09-25 on kernel 6.8.0-139):
+ *   - unprivileged user namespaces are REFUSED on the maintainer host:
+ *     kernel.apparmor_restrict_unprivileged_userns=1 makes `unshare -U -r`
+ *     fail ("write failed /proc/self/uid_map: Operation not permitted")
+ *     unless the binary runs under an AppArmor profile that grants userns.
+ *     Never assume a namespace sandbox exists.
  *   - a hand-rolled seccomp-bpf deny-list (no libseccomp) KILLs execve
  *   - Landlock ABI v4, outside-grant open→EACCES, pre-opened fd survives
  *   - prctl(PR_SET_NO_NEW_PRIVS) succeeds
@@ -31,10 +36,12 @@
  *   - seccomp: PR_SET_SECCOMP filter mode (kernel >= 3.5); SECCOMP_RET_
  *     KILL_PROCESS is preferred (>= 4.14) and falls back where the header
  *     lacks it.
- *   - user namespaces: rootless (CONFIG_USER_NS + unprivileged_userns_clone,
- *     AND the calling process AppArmor-unconfined — see the probes doc). A
- *     capability probe lets callers degrade to the Landlock+seccomp+rlimits
- *     profile on a host that answers EPERM.
+ *   - user namespaces: need CONFIG_USER_NS, unprivileged_userns_clone, AND
+ *     either kernel.apparmor_restrict_unprivileged_userns=0 or an AppArmor
+ *     profile that grants userns to this binary. Ubuntu 24.04 defaults to
+ *     the restriction, so the common answer is EPERM. Callers must probe
+ *     os_sandbox_userns_available() and use the Landlock+seccomp+rlimits
+ *     profile when it answers false.
  *   - Target of record: kernel 6.8.
  *
  * Thread-safety: these builders MUTATE the calling process/thread state and
@@ -74,18 +81,36 @@ enum os_sandbox_err {
     OS_SANDBOX_ERR_TOO_MANY_RULES       = -9,  /* filter would overflow bound */
     OS_SANDBOX_ERR_CONFINEMENT_UNAVAILABLE = -10,
     OS_SANDBOX_ERR_SEATBELT              = -11,
+    OS_SANDBOX_ERR_LANDLOCK_NET_UNAVAILABLE = -12, /* TCP rules need ABI >= 4 */
 };
 
 /* A single path grant for the Landlock builder: everything BENEATH `path`
  * (the path is opened O_PATH and used as a path-beneath anchor) gets the
- * requested access. Directories should set allow_read to also permit
- * READ_DIR/listing. allow_execute adds LANDLOCK_ACCESS_FS_EXECUTE (running
- * binaries beneath the path); allow_create adds the directory-mutation
- * rights (MAKE_REG/MAKE_DIR/REMOVE_FILE/REMOVE_DIR) a writable working
- * tree needs — allow_write alone is WRITE_FILE (modify existing files),
- * which cannot create new ones. The execute/create flags exist for the
- * external package verifier's build children (slice 6); the node profiles
- * leave both false. */
+ * requested access.
+ *
+ * The builder HANDLES every filesystem right the running kernel's Landlock
+ * ABI knows (ABI 1 file/dir/make/remove bits, REFER from ABI 2, TRUNCATE
+ * from ABI 3, IOCTL_DEV from ABI 5). A handled right is denied everywhere
+ * except beneath a rule that grants it, so an ungranted path cannot be
+ * written, truncated, linked into, or used to make symlinks, FIFOs,
+ * sockets or device nodes. Rights a rule grants:
+ *
+ *   allow_read    READ_FILE + READ_DIR.
+ *   allow_execute EXECUTE.
+ *   allow_write   WRITE_FILE + TRUNCATE + IOCTL_DEV (modify existing files).
+ *   allow_create  MAKE_REG/DIR/SYM/FIFO/SOCK/CHAR/BLOCK, REMOVE_FILE/DIR and
+ *                 REFER (create, remove, and rename/link across directories
+ *                 inside the grant).
+ *
+ * Two implications keep older callers working without widening them past
+ * what they had before this builder handled every right:
+ *   - when NO rule sets allow_execute, allow_read also grants EXECUTE;
+ *   - when NO rule sets allow_create, allow_write also grants the
+ *     allow_create set (the node profiles need SQLite WAL/shm/journal
+ *     create+unlink under the datadir and never set allow_create).
+ * Directory-only bits are masked off for a rule whose path is not a
+ * directory. Zero rules means every filesystem access opened after the
+ * restriction is denied. */
 struct os_sandbox_path_rule {
     const char *path;
     bool        allow_read;
@@ -231,6 +256,46 @@ int os_sandbox_landlock_abi(void);
  * abort). Requires no_new_privs (or CAP_SYS_ADMIN) to have run first. */
 struct zcl_result os_sandbox_landlock_restrict(
     const struct os_sandbox_path_rule *rules, size_t n_rules);
+
+/* One TCP port grant for os_sandbox_landlock_restrict_policy(). `port` is in
+ * host byte order. At least one of allow_bind / allow_connect must be set. */
+struct os_sandbox_tcp_port_rule {
+    uint16_t port;
+    bool     allow_bind;     /* LANDLOCK_ACCESS_NET_BIND_TCP    */
+    bool     allow_connect;  /* LANDLOCK_ACCESS_NET_CONNECT_TCP */
+};
+
+/* A full Landlock policy: the filesystem rules above plus optional TCP port
+ * rules. When restrict_tcp is true, the ruleset handles NET_BIND_TCP and
+ * NET_CONNECT_TCP: every TCP bind(2)/connect(2) is denied (EACCES) except
+ * for the ports tcp_rules grant. This covers TCP only; UDP, AF_UNIX and raw
+ * sockets are not restricted by it (use seccomp for those). */
+struct os_sandbox_landlock_policy {
+    const struct os_sandbox_path_rule    *fs_rules;
+    size_t                                n_fs_rules;
+    bool                                  restrict_tcp;
+    const struct os_sandbox_tcp_port_rule *tcp_rules;
+    size_t                                n_tcp_rules;
+};
+
+/* True iff this kernel's Landlock ABI (>= 4) can enforce TCP port rules. */
+bool os_sandbox_landlock_tcp_supported(void);
+
+/* Apply `policy` as one Landlock domain — ONE-WAY, same ordering and
+ * no_new_privs requirements as os_sandbox_landlock_restrict(), which is this
+ * call with restrict_tcp=false.
+ *
+ * Fail-closed contract for the TCP half: when restrict_tcp is true and the
+ * running kernel's ABI is below 4 (or the build lacks Landlock), this returns
+ * OS_SANDBOX_ERR_LANDLOCK_NET_UNAVAILABLE and applies NOTHING — no
+ * filesystem-only domain is installed as a partial substitute. A caller that
+ * asked for TCP confinement must then refuse to run the confined work; it
+ * must not retry without restrict_tcp to get a green result. tcp_rules with
+ * restrict_tcp=false, or a rule that grants neither bind nor connect, is
+ * OS_SANDBOX_ERR_INVALID_ARG (a port rule without the restriction would
+ * silently allow every port). */
+struct zcl_result os_sandbox_landlock_restrict_policy(
+    const struct os_sandbox_landlock_policy *policy);
 
 /* The session child's denied-syscall set (execve/execveat, the clone/fork
  * family, the socket family, ptrace/process_vm_*, mount family, bpf, kexec,

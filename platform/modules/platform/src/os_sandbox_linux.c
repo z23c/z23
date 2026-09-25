@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 
 #include "platform/os_sandbox.h"
+#include "os_sandbox_landlock_internal.h"
 
 #include "util/log_macros.h"
 
@@ -380,11 +381,6 @@ static int ll_create_ruleset(const struct landlock_ruleset_attr *attr,
 {
     return (int)syscall(__NR_landlock_create_ruleset, attr, size, flags);
 }
-static int ll_add_rule(int ruleset_fd, enum landlock_rule_type type,
-                       const void *attr, uint32_t flags)
-{
-    return (int)syscall(__NR_landlock_add_rule, ruleset_fd, type, attr, flags);
-}
 static int ll_restrict_self(int ruleset_fd, uint32_t flags)
 {
     return (int)syscall(__NR_landlock_restrict_self, ruleset_fd, flags);
@@ -403,106 +399,27 @@ int os_sandbox_landlock_abi(void)
 #endif
 }
 
-struct zcl_result os_sandbox_landlock_restrict(
-    const struct os_sandbox_path_rule *rules, size_t n_rules)
+/* The ruleset itself is built by os_sandbox_landlock_linux.c (every right
+ * the ABI knows, plus optional TCP ports); this half enters it and keeps
+ * the witness honest. See os_sandbox_landlock_internal.h. */
+struct zcl_result os_sandbox_landlock_enforce_ruleset(
+    int ruleset_fd, int abi, const struct os_sandbox_path_rule *rules,
+    size_t n_rules)
 {
 #ifndef ZCL_HAVE_LANDLOCK
+    (void)abi;
     (void)rules;
     (void)n_rules;
+    if (ruleset_fd >= 0)
+        close(ruleset_fd);
     return ZCL_ERR(OS_SANDBOX_ERR_LANDLOCK_UNAVAILABLE,
                    "Landlock headers absent at build time");
 #else
-    int abi = os_sandbox_landlock_abi();
-    if (abi < 0)
-        return ZCL_ERR(OS_SANDBOX_ERR_LANDLOCK_UNAVAILABLE,
-                       "Landlock unavailable on this kernel (ABI probe failed)");
-    if (n_rules > 0 && rules == NULL)
-        return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG, "n_rules>0 but rules==NULL");
-
-    /* Handle only the FS accesses this ABI knows about (forward-compatible).
-     * ABI 1 introduced the file/dir bits; later ABIs add refer/truncate/net —
-     * we do not enforce those here, so we do not need to handle them. The
-     * execute/make/remove bits join the handled set ONLY when at least one
-     * rule asks for them (allow_execute / allow_create): a handled-but-
-     * ungranted right is DENIED everywhere, so handling them unconditionally
-     * silently revoked file creation/removal for every pre-existing caller
-     * (node -confine profiles never set those flags — test_confine caught
-     * this). */
-    uint64_t handled = LANDLOCK_ACCESS_FS_READ_FILE |
-                       LANDLOCK_ACCESS_FS_WRITE_FILE |
-                       LANDLOCK_ACCESS_FS_READ_DIR;
-    for (size_t i = 0; i < n_rules; i++) {
-        if (rules[i].allow_execute)
-            handled |= LANDLOCK_ACCESS_FS_EXECUTE;
-        if (rules[i].allow_create)
-            handled |= LANDLOCK_ACCESS_FS_MAKE_REG |
-                       LANDLOCK_ACCESS_FS_MAKE_DIR |
-                       LANDLOCK_ACCESS_FS_REMOVE_FILE |
-                       LANDLOCK_ACCESS_FS_REMOVE_DIR;
-    }
-
-    struct landlock_ruleset_attr rattr = { .handled_access_fs = handled };
-    int ruleset_fd = ll_create_ruleset(&rattr, sizeof(rattr), 0);
-    if (ruleset_fd < 0)
-        return ZCL_ERR(OS_SANDBOX_ERR_LANDLOCK_SYSCALL,
-                       "landlock_create_ruleset failed errno=%d (%s)",
-                       errno, strerror(errno));
-
-    for (size_t i = 0; i < n_rules; i++) {
-        const struct os_sandbox_path_rule *r = &rules[i];
-        if (r->path == NULL) {
-            close(ruleset_fd);
-            return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG,
-                           "path rule %zu has NULL path", i);
-        }
-        uint64_t allow = 0;
-        if (r->allow_read)  allow |= LANDLOCK_ACCESS_FS_READ_FILE |
-                                     LANDLOCK_ACCESS_FS_READ_DIR;
-        if (r->allow_write) allow |= LANDLOCK_ACCESS_FS_WRITE_FILE;
-        if (r->allow_execute) allow |= LANDLOCK_ACCESS_FS_EXECUTE;
-        if (r->allow_create)
-            allow |= LANDLOCK_ACCESS_FS_MAKE_REG |
-                     LANDLOCK_ACCESS_FS_MAKE_DIR |
-                     LANDLOCK_ACCESS_FS_REMOVE_FILE |
-                     LANDLOCK_ACCESS_FS_REMOVE_DIR;
-        allow &= handled;
-
-        int path_fd = open(r->path, O_PATH | O_CLOEXEC);
-        if (path_fd < 0) {
-            close(ruleset_fd);
-            return ZCL_ERR(OS_SANDBOX_ERR_LANDLOCK_SYSCALL,
-                           "open(O_PATH) %s failed errno=%d (%s)",
-                           r->path, errno, strerror(errno));
-        }
-        /* Directory-only access bits (READ_DIR and the make/remove family)
-         * are rejected with EINVAL when the path is a regular FILE (e.g.
-         * /proc/self/status, /etc/resolv.conf). Probe the fd and mask the
-         * dir-only bits off for a non-directory so a caller can grant either
-         * a dir tree or a single file uniformly. */
-        struct stat pst;
-        if (fstat(path_fd, &pst) == 0 && !S_ISDIR(pst.st_mode))
-            allow &= ~(uint64_t)(LANDLOCK_ACCESS_FS_READ_DIR |
-                                 LANDLOCK_ACCESS_FS_MAKE_REG |
-                                 LANDLOCK_ACCESS_FS_MAKE_DIR |
-                                 LANDLOCK_ACCESS_FS_REMOVE_FILE |
-                                 LANDLOCK_ACCESS_FS_REMOVE_DIR);
-        struct landlock_path_beneath_attr pb = {
-            .allowed_access = allow,
-            .parent_fd = path_fd,
-        };
-        int rc = ll_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &pb, 0);
-        close(path_fd);
-        if (rc != 0) {
-            close(ruleset_fd);
-            return ZCL_ERR(OS_SANDBOX_ERR_LANDLOCK_SYSCALL,
-                           "landlock_add_rule %s failed errno=%d (%s)",
-                           r->path, errno, strerror(errno));
-        }
-        /* Stage the grant for the confinement witness. Staging (not
-         * publishing) here keeps the visible grant set empty until the domain
-         * is actually live — a half-built ruleset restricts nothing. */
-        sandbox_grant_stage(i, r);
-    }
+    /* Stage the grants for the confinement witness. Staging (not
+     * publishing) keeps the visible grant set empty until the domain is
+     * actually live — a half-built ruleset restricts nothing. */
+    for (size_t i = 0; i < n_rules; i++)
+        sandbox_grant_stage(i, &rules[i]);
 
     if (ll_restrict_self(ruleset_fd, 0) != 0) {
         int e = errno;
