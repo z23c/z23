@@ -15,8 +15,11 @@
  * rlimits, enters Landlock deny-all and the seccomp session deny-list, re-hashes
  * the memfd, and only then maps it (dlopen of /proc/self/fd/N). A second
  * seccomp layer denies PROT_EXEC mmap/mprotect before the story or frozen KAT
- * runs. The runner relays a fixed-size report with its own timings and the
- * child's exit status, kills the child at the deadline, and survives crashes.
+ * runs. The child reports in two fixed frames on one pipe: a pre-load frame
+ * of its confinement, re-hash and census facts written BEFORE the candidate
+ * is mapped, and one observation frame after the story. The runner adds what
+ * it saw itself (exit status or signal, deadline, the leaf's final seccomp
+ * layer count), kills the child at the deadline, and survives crashes.
  *
  * Everything fails closed: an unavailable runner or a failed confinement step
  * is a named red/unavailable story, never an unconfined fallback.
@@ -55,11 +58,13 @@ struct zcl_reflex_runner_spec {
     uint32_t timeout_ms;
 };
 
-/* Fixed-size report the confined child writes. Versioned by the enclosing
- * reply; never parsed as text. */
+/* The resident's validated view of one leaf. Environment facts (hash,
+ * sandbox, census, canary, confine timing) come only from the pre-load
+ * frame; wx_installed is the runner's own observation; story_ok,
+ * descriptor_valid, candidate_executed, the post-load timings, observation
+ * and service come from the observation frame and are candidate-influenced
+ * data. Every string here was checked for termination before it was copied. */
 struct zcl_reflex_child_report {
-    uint32_t magic;
-    uint32_t abi;
     bool hash_verified;
     bool descriptor_valid;
     bool sandboxed;

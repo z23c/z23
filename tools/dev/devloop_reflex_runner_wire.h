@@ -15,10 +15,16 @@
 
 #define ZCL_REFLEX_WIRE_MAGIC UINT32_C(0x5a524e31)   /* "ZRN1" */
 #define ZCL_REFLEX_REPORT_MAGIC UINT32_C(0x5a524352) /* "ZRCR" */
-#define ZCL_REFLEX_WIRE_ABI 2u
+/* 3: the leaf reports in two frames (pre-load, observation) and the reply
+ * carries the runner's own reap and seccomp-layer observations. */
+#define ZCL_REFLEX_WIRE_ABI 3u
 /* Kernel-surface probes the runner must see killed (SIGSYS) under the leaf
  * filters before it may serve: io_uring_setup, pidfd_open, kill. */
 #define ZCL_REFLEX_DENY_PROBES 3u
+/* Seccomp layers a leaf adds before load (session, runner, leaf) and the one
+ * W^X layer it adds after; the runner checks the leaf's final count. */
+#define ZCL_REFLEX_LEAF_PRELOAD_FILTERS 3u
+#define ZCL_REFLEX_LEAF_WX_FILTERS 1u
 
 enum zcl_reflex_frame_kind {
     ZCL_REFLEX_FRAME_HELLO = 1,
@@ -55,21 +61,6 @@ struct zcl_reflex_request {
     char story_id[128];
     char story_root[65];
     char story_fixture_root[65];
-};
-
-struct zcl_reflex_reply {
-    struct zcl_reflex_frame_head head;
-    bool report_complete;
-    bool timed_out;
-    bool cancelled;
-    bool seals_verified;
-    int32_t child_exit_code;
-    int32_t child_signal;
-    int64_t fork_us;
-    int64_t total_us;
-    char runner_sha256[65];
-    char error[160];
-    struct zcl_reflex_child_report report;
 };
 
 /* ── leaf report frames (report pipe, leaf -> runner) ─────────────────────
@@ -145,6 +136,27 @@ struct zcl_reflex_frames {
     struct zcl_reflex_observation_frame observation;
 };
 
+/* Runner -> resident. Everything outside `frames` is the runner's own
+ * observation of the leaf; `frames` is exactly what the leaf wrote, parsed
+ * but not yet validated (the resident validates every field before use). */
+struct zcl_reflex_reply {
+    struct zcl_reflex_frame_head head;
+    bool timed_out;
+    bool cancelled;
+    bool seals_verified;
+    bool reap_timed_out;  /* closed its pipe, then outlived the deadline */
+    bool wx_observed;     /* leaf ended with exactly one layer past pre-load */
+    int32_t child_exit_code;
+    int32_t child_signal;
+    uint32_t runner_seccomp_filters;
+    uint32_t leaf_seccomp_filters;
+    int64_t fork_us;
+    int64_t total_us;
+    char runner_sha256[65];
+    char error[160];
+    struct zcl_reflex_frames frames;
+};
+
 /* Parse the complete byte sequence the leaf wrote. A frame is copied out only
  * when its head and size are exact and it arrives in its slot; the status
  * names the first defect. PRELOAD may be present while the status is not OK
@@ -186,8 +198,10 @@ void zcl_reflex_testing_use_close_range(bool enabled);
 void zcl_reflex_testing_set_fd_dir(const char *path);
 #endif
 
-/* Runner-side child: confine, verify, load by descriptor, run, report. Never
- * returns; exits with 0 after a complete report write, 125 otherwise. */
+/* Runner-side child: confine, re-hash, write the pre-load frame, then load
+ * by descriptor, run and write the observation frame. Never returns; exits 0
+ * after its frames are written (only the pre-load frame when a pre-load claim
+ * failed), 125 when a write fails. */
 [[noreturn]] void zcl_reflex_runner_child_main(
     const struct zcl_reflex_request *request, int image_fd, int report_fd,
     int runner_pid);

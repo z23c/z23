@@ -12,13 +12,18 @@
  *   2. close every descriptor except the sealed image and the report pipe
  *      (close_range, else a full /proc/self/fd enumeration, else refuse)
  *   3. rlimits (core 0, fsize 0, nofile small, AS/cpu bounded)
- *   4. no_new_privs, Landlock deny-all, seccomp session deny-list, then the
- *      runner/leaf layers (io_uring, pidfd, userfaultfd, kcmp,
- *      process_madvise, kill family, setsid/setpgid) — no W^X yet
+ *   4. no_new_privs, open the census directory, Landlock deny-all, seccomp
+ *      session deny-list, then the runner/leaf layers (io_uring, pidfd,
+ *      userfaultfd, kcmp, process_madvise, kill family, setsid/setpgid) —
+ *      no W^X yet; census every remaining descriptor, close the directory
  *   5. re-hash the sealed image and compare
- *   6. map it through /proc/self/fd/N (constructors run HERE, confined)
- *   7. second seccomp layer: PROT_EXEC mmap/mprotect denied (W^X)
- *   8. run the story / frozen KAT, write one fixed-size report, _exit
+ *   6. write the PRE-LOAD frame; map nothing if any claim in it failed
+ *   7. map it through /proc/self/fd/N (constructors run HERE, confined)
+ *   8. second seccomp layer: PROT_EXEC mmap/mprotect denied (W^X)
+ *   9. run the story / frozen KAT, write the OBSERVATION frame, _exit
+ * The runner reads both frames, kills the leaf at its deadline (also when it
+ * closed its pipe but will not exit), reads the exited leaf's seccomp layer
+ * count, and reaps it.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* pipe2, SO_PEERCRED/struct ucred, MSG_CMSG_CLOEXEC */
@@ -34,6 +39,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,55 +73,100 @@
 #endif
 #endif
 
-#if defined(__linux__)
 
-extern char **environ;
+/* ── leaf report frames (pure; every host) ─────────────────────────────── */
 
-uint32_t zcl_reflex_env_count(void)
+static enum zcl_reflex_frames_status frames_set(
+    struct zcl_reflex_frames *out, enum zcl_reflex_frames_status status)
 {
-    uint32_t count = 0;
-    for (char **e = environ; e && *e; e++)
-        count++;
-    return count;
+    out->status = (uint32_t)status;
+    return status;
 }
 
-bool zcl_reflex_sha256_fd(int fd, char out[65])
+/* Checks one frame head at `p` (with `left` bytes remaining) for an exact,
+ * known, complete frame and returns its kind through *kind. */
+static enum zcl_reflex_frames_status frame_check(const uint8_t *p, size_t left,
+                                                 uint32_t *kind)
 {
-    if (fd < 0 || !out || lseek(fd, 0, SEEK_SET) < 0) return false;
-    struct sha256_ctx ctx;
-    sha256_init(&ctx);
-    unsigned char buf[64 * 1024];
-    for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
-        if (n > 0) { sha256_write(&ctx, buf, (size_t)n); continue; }
-        if (n == 0) break;
-        if (errno != EINTR) return false;
-    }
-    unsigned char digest[SHA256_OUTPUT_SIZE];
-    sha256_finalize(&ctx, digest);
-    zcl_hex_encode(digest, sizeof(digest), out);
-    return lseek(fd, 0, SEEK_SET) == 0;
+    struct zcl_reflex_report_head head;
+    if (left < sizeof(head)) return ZCL_REFLEX_FRAMES_TRUNCATED;
+    memcpy(&head, p, sizeof(head));
+    if (head.magic != ZCL_REFLEX_REPORT_MAGIC) return ZCL_REFLEX_FRAMES_BAD_MAGIC;
+    if (head.abi != ZCL_REFLEX_WIRE_ABI) return ZCL_REFLEX_FRAMES_BAD_ABI;
+    size_t want = 0;
+    if (head.kind == ZCL_REFLEX_REPORT_PRELOAD)
+        want = sizeof(struct zcl_reflex_preload_frame);
+    else if (head.kind == ZCL_REFLEX_REPORT_OBSERVATION)
+        want = sizeof(struct zcl_reflex_observation_frame);
+    else
+        return ZCL_REFLEX_FRAMES_UNKNOWN_KIND;
+    if (head.size != want) return ZCL_REFLEX_FRAMES_WRONG_SIZE;
+    if (left < want) return ZCL_REFLEX_FRAMES_TRUNCATED;
+    *kind = head.kind;
+    return ZCL_REFLEX_FRAMES_OK;
 }
 
-/* ── report frames, validation, bounded reap (pre-hardening forms) ─────── */
+/* Bytes after the observation frame: a further well-formed frame head is a
+ * duplicate; anything else is trailing garbage. */
+static enum zcl_reflex_frames_status frames_tail(const uint8_t *p, size_t left)
+{
+    struct zcl_reflex_report_head head;
+    if (left < sizeof(head)) return ZCL_REFLEX_FRAMES_TRAILING;
+    memcpy(&head, p, sizeof(head));
+    bool known = head.kind == ZCL_REFLEX_REPORT_PRELOAD ||
+        head.kind == ZCL_REFLEX_REPORT_OBSERVATION;
+    return head.magic == ZCL_REFLEX_REPORT_MAGIC &&
+            head.abi == ZCL_REFLEX_WIRE_ABI && known
+        ? ZCL_REFLEX_FRAMES_DUPLICATE : ZCL_REFLEX_FRAMES_TRAILING;
+}
 
-/* Today's acceptance: one blob of the right total length, no order check. */
 enum zcl_reflex_frames_status zcl_reflex_frames_parse(
     const uint8_t *bytes, size_t len, struct zcl_reflex_frames *out)
 {
     memset(out, 0, sizeof(*out));
-    if (len != sizeof(out->preload) + sizeof(out->observation))
-        return out->status = ZCL_REFLEX_FRAMES_TRUNCATED;
+    if (len == 0 || !bytes)
+        return frames_set(out, ZCL_REFLEX_FRAMES_PRELOAD_MISSING);
+    uint32_t kind = 0;
+    enum zcl_reflex_frames_status status = frame_check(bytes, len, &kind);
+    if (status != ZCL_REFLEX_FRAMES_OK) return frames_set(out, status);
+    if (kind != ZCL_REFLEX_REPORT_PRELOAD)
+        return frames_set(out, ZCL_REFLEX_FRAMES_OUT_OF_ORDER);
     memcpy(&out->preload, bytes, sizeof(out->preload));
-    memcpy(&out->observation, bytes + sizeof(out->preload),
-           sizeof(out->observation));
-    out->preload_present = out->observation_present = true;
-    return out->status = ZCL_REFLEX_FRAMES_OK;
+    out->preload_present = true;
+    size_t off = sizeof(out->preload);
+    if (off == len)
+        return frames_set(out, ZCL_REFLEX_FRAMES_OBSERVATION_MISSING);
+    status = frame_check(bytes + off, len - off, &kind);
+    if (status != ZCL_REFLEX_FRAMES_OK) return frames_set(out, status);
+    if (kind != ZCL_REFLEX_REPORT_OBSERVATION)
+        return frames_set(out, ZCL_REFLEX_FRAMES_DUPLICATE);
+    memcpy(&out->observation, bytes + off, sizeof(out->observation));
+    out->observation_present = true;
+    off += sizeof(out->observation);
+    if (off == len) return frames_set(out, ZCL_REFLEX_FRAMES_OK);
+    return frames_set(out, frames_tail(bytes + off, len - off));
 }
 
 const char *zcl_reflex_frames_reason(enum zcl_reflex_frames_status status)
 {
-    return status == ZCL_REFLEX_FRAMES_OK ? "" : "report incomplete";
+    static const char *const reasons[] = {
+        [ZCL_REFLEX_FRAMES_OK] = "",
+        [ZCL_REFLEX_FRAMES_PRELOAD_MISSING] = "leaf report: pre-load frame missing",
+        [ZCL_REFLEX_FRAMES_OBSERVATION_MISSING] =
+            "leaf report: observation frame missing",
+        [ZCL_REFLEX_FRAMES_TRUNCATED] = "leaf report: frame truncated",
+        [ZCL_REFLEX_FRAMES_BAD_MAGIC] = "leaf report: frame magic wrong",
+        [ZCL_REFLEX_FRAMES_BAD_ABI] = "leaf report: frame ABI wrong",
+        [ZCL_REFLEX_FRAMES_UNKNOWN_KIND] = "leaf report: unknown frame kind",
+        [ZCL_REFLEX_FRAMES_WRONG_SIZE] = "leaf report: frame size wrong",
+        [ZCL_REFLEX_FRAMES_OUT_OF_ORDER] =
+            "leaf report: observation frame before pre-load frame",
+        [ZCL_REFLEX_FRAMES_DUPLICATE] = "leaf report: duplicated frame",
+        [ZCL_REFLEX_FRAMES_TRAILING] = "leaf report: trailing bytes",
+    };
+    if ((size_t)status >= sizeof(reasons) / sizeof(reasons[0]))
+        return "leaf report: unknown frames status";
+    return reasons[status];
 }
 
 /* ── report field validation (before any use) ──────────────────────────── */
@@ -226,102 +277,34 @@ const char *zcl_reflex_observation_invalid(
     return observation_service_invalid(&f->service);
 }
 
-/* ── bounded reap + seccomp layer census ────────────────────────────────── */
+#if defined(__linux__)
 
-/* Longest single sleep while waiting for a leaf to exit: SIGCHLD normally
- * wakes the wait at once; the step only bounds a lost wakeup. */
-#define REFLEX_REAP_STEP_US 5000
+extern char **environ;
 
-/* Seccomp_filters of /proc/<pid>/status (pid 0 = this process). */
-static bool reflex_seccomp_filters(pid_t pid, uint32_t *out)
+uint32_t zcl_reflex_env_count(void)
 {
-    char path[48];
-    if (pid == 0) (void)snprintf(path, sizeof(path), "/proc/self/status");
-    else (void)snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return false;
-    char buf[4096];
-    size_t have = 0;
+    uint32_t count = 0;
+    for (char **e = environ; e && *e; e++)
+        count++;
+    return count;
+}
+
+bool zcl_reflex_sha256_fd(int fd, char out[65])
+{
+    if (fd < 0 || !out || lseek(fd, 0, SEEK_SET) < 0) return false;
+    struct sha256_ctx ctx;
+    sha256_init(&ctx);
+    unsigned char buf[64 * 1024];
     for (;;) {
-        ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
-        if (n > 0 && (have += (size_t)n) < sizeof(buf) - 1) continue;
-        if (n < 0 && errno == EINTR) continue;
-        break;
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n > 0) { sha256_write(&ctx, buf, (size_t)n); continue; }
+        if (n == 0) break;
+        if (errno != EINTR) return false;
     }
-    (void)close(fd);
-    buf[have] = '\0';
-    const char *key = "\nSeccomp_filters:\t";
-    const char *p = strstr(buf, key);
-    if (!p) return false;
-    p += strlen(key);
-    uint64_t value = 0;
-    const char *digits = p;
-    for (; *p >= '0' && *p <= '9' && value <= UINT32_MAX; p++)
-        value = value * 10u + (uint64_t)(*p - '0');
-    if (p == digits || value > UINT32_MAX) return false;
-    *out = (uint32_t)value;
-    return true;
-}
-
-/* True once `child` has exited (it stays a zombie: WNOWAIT). */
-static bool reflex_child_exited(pid_t child, bool block, bool *failed)
-{
-    siginfo_t info;
-    memset(&info, 0, sizeof(info));
-    int flags = WEXITED | WNOWAIT | (block ? 0 : WNOHANG);
-    int rc;
-    do { rc = waitid(P_PID, (id_t)child, &info, flags); }
-    while (rc < 0 && errno == EINTR);
-    if (rc < 0) *failed = true;
-    return rc == 0 && info.si_pid == child;
-}
-
-static void reflex_wait_sigchld(const sigset_t *chld, int64_t deadline_us)
-{
-    int64_t remaining = deadline_us - platform_time_monotonic_us();
-    if (remaining <= 0) return;
-    if (remaining > REFLEX_REAP_STEP_US) remaining = REFLEX_REAP_STEP_US;
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = (long)remaining * 1000L};
-    (void)sigtimedwait(chld, NULL, &ts);
-}
-
-static void reflex_reap_status(pid_t child, struct zcl_reflex_reap *out)
-{
-    int status = 0;
-    pid_t waited;
-    do { waited = waitpid(child, &status, 0); }
-    while (waited < 0 && errno == EINTR);
-    out->reaped = waited == child;
-    if (out->reaped && WIFEXITED(status)) out->exit_code = WEXITSTATUS(status);
-    if (out->reaped && WIFSIGNALED(status)) out->signal = WTERMSIG(status);
-}
-
-void zcl_reflex_reap_bounded(pid_t child, int64_t deadline_us,
-                             struct zcl_reflex_reap *out)
-{
-    memset(out, 0, sizeof(*out));
-    out->exit_code = -1;
-    sigset_t chld, old;
-    (void)sigemptyset(&chld);
-    (void)sigaddset(&chld, SIGCHLD);
-    bool masked = pthread_sigmask(SIG_BLOCK, &chld, &old) == 0;
-    bool failed = false;
-    while (!reflex_child_exited(child, false, &failed) && !failed) {
-        if (platform_time_monotonic_us() < deadline_us) {
-            reflex_wait_sigchld(&chld, deadline_us);
-            continue;
-        }
-        /* Past the deadline and still alive: SIGKILL cannot be caught,
-         * blocked or ignored, so the blocking wait below ends. */
-        (void)kill(child, SIGKILL);
-        out->killed_at_deadline = true;
-        (void)reflex_child_exited(child, true, &failed);
-        break;
-    }
-    out->filters_read = !failed &&
-        reflex_seccomp_filters(child, &out->seccomp_filters);
-    reflex_reap_status(child, out);
-    if (masked) (void)pthread_sigmask(SIG_SETMASK, &old, NULL);
+    unsigned char digest[SHA256_OUTPUT_SIZE];
+    sha256_finalize(&ctx, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
+    return lseek(fd, 0, SEEK_SET) == 0;
 }
 
 /* ── descriptor hygiene ─────────────────────────────────────────────────── */
@@ -504,17 +487,17 @@ static bool write_all(int fd, const void *data, size_t len)
 
 struct child_ctx {
     const struct zcl_reflex_request *request;
-    struct zcl_reflex_child_report *report;
+    struct zcl_reflex_observation_frame *obs;
     int64_t load_started_us;
     int64_t story_started_us;
 };
 
-static void child_note(struct zcl_reflex_child_report *report,
-                       const char *stage, const char *error)
+/* Both frames carry stage[32] + error[160]; the first error wins. */
+static void child_note(char stage[static 32], char error[static 160],
+                       const char *at, const char *why)
 {
-    (void)snprintf(report->stage, sizeof(report->stage), "%s", stage);
-    if (error && !report->error[0])
-        (void)snprintf(report->error, sizeof(report->error), "%s", error);
+    (void)snprintf(stage, 32, "%s", at);
+    if (why && !error[0]) (void)snprintf(error, 160, "%s", why);
 }
 
 static bool child_rlimits(uint32_t timeout_ms)
@@ -581,7 +564,8 @@ static const int g_leaf_denied[] = {
 /* Every candidate leaf's syscall filters: the shared session deny-set, the
  * runner layer again (already inherited; re-installing keeps the leaf
  * self-sufficient if a future runner variant ever skipped it) and the
- * leaf-only signalling layer. The runner's startup probes use exactly this. */
+ * leaf-only signalling layer — ZCL_REFLEX_LEAF_PRELOAD_FILTERS layers. The
+ * runner's startup probes use exactly this. */
 static bool child_install_filters(void)
 {
     size_t denied_count = 0;
@@ -597,60 +581,81 @@ static bool child_install_filters(void)
  * (this single-threaded child never joins threads, so the candidate must not
  * see it), then the syscall layers. `keep` holds the image, the report pipe
  * and the pre-opened census directory. */
-static bool child_enter_sandbox(struct zcl_reflex_child_report *report,
+static bool child_enter_sandbox(struct zcl_reflex_preload_frame *pre,
                                 const int keep[static 3])
 {
     if (!os_sandbox_landlock_restrict(NULL, 0).ok)
-        return child_note(report, "landlock", "Landlock deny-all unavailable"),
-               false;
+        return child_note(pre->stage, pre->error, "landlock",
+                          "Landlock deny-all unavailable"), false;
     if (!zcl_reflex_close_all_except(keep, 3))
-        return child_note(report, "fds", "ruleset close failed"), false;
+        return child_note(pre->stage, pre->error, "fds",
+                          "ruleset close failed"), false;
     if (!child_install_filters())
-        return child_note(report, "seccomp", "seccomp deny-lists unavailable"),
-               false;
+        return child_note(pre->stage, pre->error, "seccomp",
+                          "seccomp deny-lists unavailable"), false;
     return true;
 }
 
-/* The census directory is opened before Landlock (which would refuse it
- * later) and read after the last filter, so the count is a full enumeration
- * of the confined leaf, not a bounded range. */
-static bool child_confine(struct zcl_reflex_child_report *report,
+/* Everything the resident may believe about the leaf's environment is
+ * established here, before a candidate byte is mapped. The census directory
+ * is opened before Landlock (which would refuse it later) and read after the
+ * last filter, so the count is a full enumeration of the confined leaf. */
+static bool child_confine(struct zcl_reflex_preload_frame *pre,
                           const struct zcl_reflex_request *request,
                           int image_fd, int report_fd, int runner_pid)
 {
     const int keep[] = {image_fd, report_fd};
     if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != runner_pid)
-        return child_note(report, "parent", "runner parent identity lost"),
-               false;
+        return child_note(pre->stage, pre->error, "parent",
+                          "runner parent identity lost"), false;
     if (!zcl_reflex_close_all_except(keep, 2))
-        return child_note(report, "fds", "descriptor close failed"), false;
+        return child_note(pre->stage, pre->error, "fds",
+                          "descriptor close failed"), false;
     if (!child_rlimits(request->timeout_ms))
-        return child_note(report, "rlimits", "rlimit lowering failed"), false;
+        return child_note(pre->stage, pre->error, "rlimits",
+                          "rlimit lowering failed"), false;
     if (!os_sandbox_no_new_privs())
-        return child_note(report, "no_new_privs", "no_new_privs failed"), false;
+        return child_note(pre->stage, pre->error, "no_new_privs",
+                          "no_new_privs failed"), false;
     int census = open(reflex_fd_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (census < 0)
-        return child_note(report, "census", "descriptor census unavailable"),
-               false;
+        return child_note(pre->stage, pre->error, "census",
+                          "descriptor census unavailable"), false;
     const int keep3[] = {image_fd, report_fd, census};
-    bool confined = child_enter_sandbox(report, keep3);
+    bool confined = child_enter_sandbox(pre, keep3);
     if (confined) {
-        report->env_count = zcl_reflex_env_count();
-        report->inherited_fd_count = zcl_reflex_count_fds_in(census, keep3, 3);
-        report->resident_canary_seen = zcl_reflex_resident_canary;
+        pre->env_count = zcl_reflex_env_count();
+        pre->inherited_fd_count = zcl_reflex_count_fds_in(census, keep3, 3);
+        pre->resident_canary_seen = zcl_reflex_resident_canary;
     }
     (void)close(census);
     return confined;
 }
 
-/* Second layer, installed after the mapping exists and before any candidate
- * function runs: no new executable memory for the rest of the child's life. */
-static bool child_install_wx(struct zcl_reflex_child_report *report)
+/* The leaf's own re-hash of the sealed bytes, before they are mapped. */
+static bool child_prehash(struct zcl_reflex_preload_frame *pre,
+                          const struct zcl_reflex_request *request,
+                          int image_fd)
 {
-    report->wx_installed = os_sandbox_seccomp_deny(NULL, 0, true).ok;
-    if (!report->wx_installed)
-        child_note(report, "wx", "W^X seccomp layer unavailable");
-    return report->wx_installed;
+    bool ok = zcl_reflex_sha256_fd(image_fd, pre->runtime_module_sha256) &&
+        strcmp(pre->runtime_module_sha256, request->expected_sha256) == 0;
+    if (!ok)
+        child_note(pre->stage, pre->error, "hash",
+                   "sealed image digest mismatch in child");
+    return ok;
+}
+
+/* Second layer, installed after the mapping exists and before any candidate
+ * function runs: no new executable memory for the rest of the child's life.
+ * Constructors already ran, so the runner — not this frame — decides whether
+ * the layer exists, from the leaf's final seccomp layer count. */
+static bool child_install_wx(struct zcl_reflex_observation_frame *obs)
+{
+    bool installed = os_sandbox_seccomp_deny(NULL, 0, true).ok;
+    if (!installed)
+        child_note(obs->stage, obs->error, "wx",
+                   "W^X seccomp layer unavailable");
+    return installed;
 }
 
 static bool text_eq(const char *candidate, const char *expected)
@@ -678,97 +683,215 @@ static bool child_hotfork_visit(
     const struct zcl_hotfork_capsule_v1 *capsule, void *opaque)
 {
     struct child_ctx *ctx = opaque;
-    struct zcl_reflex_child_report *report = ctx->report;
-    report->dlopen_us = platform_time_monotonic_us() - ctx->load_started_us;
-    report->descriptor_valid = child_descriptor_matches(capsule, ctx->request);
-    if (!report->descriptor_valid)
-        return child_note(report, "descriptor",
+    struct zcl_reflex_observation_frame *obs = ctx->obs;
+    obs->dlopen_us = platform_time_monotonic_us() - ctx->load_started_us;
+    obs->descriptor_valid = child_descriptor_matches(capsule, ctx->request);
+    if (!obs->descriptor_valid)
+        return child_note(obs->stage, obs->error, "descriptor",
                           "HOT_FORK descriptor binding mismatch"), false;
-    if (!child_install_wx(report)) return false;
-    report->candidate_executed = true;
-    child_note(report, "story", NULL);
+    if (!child_install_wx(obs)) return false;
+    obs->candidate_executed = 1;
+    child_note(obs->stage, obs->error, "story", NULL);
     int64_t started = platform_time_monotonic_us();
-    report->story_ok = capsule->run_story(&report->observation);
-    report->story_us = platform_time_monotonic_us() - started;
-    return report->story_ok;
+    bool ok = capsule->run_story(&obs->observation);
+    obs->story_us = platform_time_monotonic_us() - started;
+    obs->story_ok = ok;
+    return ok;
 }
 
 static void child_run_hotfork(struct child_ctx *ctx, int image_fd)
 {
-    struct zcl_reflex_child_report *report = ctx->report;
+    struct zcl_reflex_observation_frame *obs = ctx->obs;
     char err[160] = {0};
+    char mapped[65] = {0};
     ctx->load_started_us = platform_time_monotonic_us();
     (void)zcl_hotswap_hotfork_visit_fd(
         image_fd, ctx->request->expected_sha256, child_hotfork_visit, ctx,
-        report->runtime_module_sha256, err, sizeof(err));
-    report->hash_verified = strcmp(report->runtime_module_sha256,
-                                   ctx->request->expected_sha256) == 0;
-    if (err[0]) child_note(report, "load", err);
+        mapped, err, sizeof(err));
+    if (err[0]) child_note(obs->stage, obs->error, "load", err);
 }
 
 static bool child_service_loaded(void *opaque, char *why, size_t why_sz)
 {
     struct child_ctx *ctx = opaque;
-    struct zcl_reflex_child_report *report = ctx->report;
-    report->dlopen_us = platform_time_monotonic_us() - ctx->load_started_us;
-    report->descriptor_valid = true;
-    if (!child_install_wx(report)) {
-        (void)snprintf(why, why_sz, "%s", report->error);
+    struct zcl_reflex_observation_frame *obs = ctx->obs;
+    obs->dlopen_us = platform_time_monotonic_us() - ctx->load_started_us;
+    obs->descriptor_valid = 1;
+    if (!child_install_wx(obs)) {
+        (void)snprintf(why, why_sz, "%s", obs->error);
         return false;
     }
-    report->candidate_executed = true;
-    child_note(report, "story", NULL);
+    obs->candidate_executed = 1;
+    child_note(obs->stage, obs->error, "story", NULL);
     ctx->story_started_us = platform_time_monotonic_us();
     return true;
 }
 
 static void child_run_shadow(struct child_ctx *ctx, int image_fd)
 {
-    struct zcl_reflex_child_report *report = ctx->report;
+    struct zcl_reflex_observation_frame *obs = ctx->obs;
     ctx->load_started_us = platform_time_monotonic_us();
-    report->hash_verified =
-        zcl_reflex_sha256_fd(image_fd, report->runtime_module_sha256) &&
-        strcmp(report->runtime_module_sha256,
-               ctx->request->expected_sha256) == 0;
-    if (!report->hash_verified) {
-        child_note(report, "hash", "sealed image digest mismatch in child");
-        return;
-    }
     bool ok = zcl_native_hotswap_service_probe_fd(
-        image_fd, child_service_loaded, ctx, &report->service);
+        image_fd, child_service_loaded, ctx, &obs->service);
     if (ctx->story_started_us)
-        report->story_us = platform_time_monotonic_us() - ctx->story_started_us;
-    const struct zcl_hotswap_service_report *svc = &report->service;
-    report->story_ok = ok && svc->recognized && svc->ok && svc->probed &&
+        obs->story_us = platform_time_monotonic_us() - ctx->story_started_us;
+    const struct zcl_hotswap_service_report *svc = &obs->service;
+    obs->story_ok = ok && svc->recognized && svc->ok && svc->probed &&
         svc->verify_only && !svc->activated;
-    if (!report->story_ok)
-        child_note(report, svc->stage[0] ? svc->stage : "probe",
+    if (!obs->story_ok)
+        child_note(obs->stage, obs->error, svc->stage[0] ? svc->stage : "probe",
                    svc->error[0] ? svc->error : "frozen KAT rejected");
+}
+
+static bool reflex_mode_known(uint32_t mode)
+{
+    return mode == ZCL_REFLEX_MODE_HOT_FORK ||
+        mode == ZCL_REFLEX_MODE_HOT_SHADOW;
+}
+
+/* Frame (a): written before the candidate is mapped. Returns whether every
+ * pre-load claim holds; the leaf maps nothing otherwise. */
+static bool child_preload(const struct zcl_reflex_request *request,
+                          int image_fd, int report_fd, int runner_pid)
+{
+    struct zcl_reflex_preload_frame pre = {
+        .head = {.magic = ZCL_REFLEX_REPORT_MAGIC, .abi = ZCL_REFLEX_WIRE_ABI,
+                 .kind = ZCL_REFLEX_REPORT_PRELOAD, .size = sizeof(pre)},
+    };
+    pre.start_us = platform_time_monotonic_us();
+    pre.sandboxed = child_confine(&pre, request, image_fd, report_fd,
+                                  runner_pid);
+    pre.hash_verified = pre.sandboxed && child_prehash(&pre, request, image_fd);
+    bool mode_ok = reflex_mode_known(request->mode);
+    if (!mode_ok)
+        child_note(pre.stage, pre.error, "mode", "unknown reflex mode");
+    else if (pre.hash_verified)
+        child_note(pre.stage, pre.error, "preload", NULL);
+    pre.confine_us = platform_time_monotonic_us() - pre.start_us;
+    if (!write_all(report_fd, &pre, sizeof(pre))) _exit(125);
+    return pre.sandboxed && pre.hash_verified && mode_ok;
 }
 
 [[noreturn]] void zcl_reflex_runner_child_main(
     const struct zcl_reflex_request *request, int image_fd, int report_fd,
     int runner_pid)
 {
-    struct zcl_reflex_child_report report = {
-        .magic = ZCL_REFLEX_REPORT_MAGIC, .abi = ZCL_REFLEX_WIRE_ABI,
+    if (!child_preload(request, image_fd, report_fd, runner_pid)) _exit(0);
+    struct zcl_reflex_observation_frame obs = {
+        .head = {.magic = ZCL_REFLEX_REPORT_MAGIC, .abi = ZCL_REFLEX_WIRE_ABI,
+                 .kind = ZCL_REFLEX_REPORT_OBSERVATION, .size = sizeof(obs)},
     };
-    report.start_us = platform_time_monotonic_us();
-    report.sandboxed = child_confine(&report, request, image_fd, report_fd,
-                                     runner_pid);
-    report.confine_us = platform_time_monotonic_us() - report.start_us;
-    struct child_ctx ctx = {.request = request, .report = &report};
-    if (report.sandboxed && request->mode == ZCL_REFLEX_MODE_HOT_FORK)
+    struct child_ctx ctx = {.request = request, .obs = &obs};
+    if (request->mode == ZCL_REFLEX_MODE_HOT_FORK)
         child_run_hotfork(&ctx, image_fd);
-    else if (report.sandboxed && request->mode == ZCL_REFLEX_MODE_HOT_SHADOW)
+    else
         child_run_shadow(&ctx, image_fd);
-    else if (report.sandboxed)
-        child_note(&report, "mode", "unknown reflex mode");
-    bool wrote = write_all(report_fd, &report, sizeof(report));
-    _exit(wrote ? 0 : 125);
+    _exit(write_all(report_fd, &obs, sizeof(obs)) ? 0 : 125);
+}
+
+/* ── bounded reap + seccomp layer census ────────────────────────────────── */
+
+/* Longest single sleep while waiting for a leaf to exit: SIGCHLD normally
+ * wakes the wait at once; the step only bounds a lost wakeup. */
+#define REFLEX_REAP_STEP_US 5000
+
+/* Seccomp_filters of /proc/<pid>/status (pid 0 = this process). */
+static bool reflex_seccomp_filters(pid_t pid, uint32_t *out)
+{
+    char path[48];
+    if (pid == 0) (void)snprintf(path, sizeof(path), "/proc/self/status");
+    else (void)snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char buf[4096];
+    size_t have = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
+        if (n > 0 && (have += (size_t)n) < sizeof(buf) - 1) continue;
+        if (n < 0 && errno == EINTR) continue;
+        break;
+    }
+    (void)close(fd);
+    buf[have] = '\0';
+    const char *key = "\nSeccomp_filters:\t";
+    const char *p = strstr(buf, key);
+    if (!p) return false;
+    p += strlen(key);
+    uint64_t value = 0;
+    const char *digits = p;
+    for (; *p >= '0' && *p <= '9' && value <= UINT32_MAX; p++)
+        value = value * 10u + (uint64_t)(*p - '0');
+    if (p == digits || value > UINT32_MAX) return false;
+    *out = (uint32_t)value;
+    return true;
+}
+
+/* True once `child` has exited (it stays a zombie: WNOWAIT). */
+static bool reflex_child_exited(pid_t child, bool block, bool *failed)
+{
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    int flags = WEXITED | WNOWAIT | (block ? 0 : WNOHANG);
+    int rc;
+    do { rc = waitid(P_PID, (id_t)child, &info, flags); }
+    while (rc < 0 && errno == EINTR);
+    if (rc < 0) *failed = true;
+    return rc == 0 && info.si_pid == child;
+}
+
+static void reflex_wait_sigchld(const sigset_t *chld, int64_t deadline_us)
+{
+    int64_t remaining = deadline_us - platform_time_monotonic_us();
+    if (remaining <= 0) return;
+    if (remaining > REFLEX_REAP_STEP_US) remaining = REFLEX_REAP_STEP_US;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = (long)remaining * 1000L};
+    (void)sigtimedwait(chld, NULL, &ts);
+}
+
+static void reflex_reap_status(pid_t child, struct zcl_reflex_reap *out)
+{
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    out->reaped = waited == child;
+    if (out->reaped && WIFEXITED(status)) out->exit_code = WEXITSTATUS(status);
+    if (out->reaped && WIFSIGNALED(status)) out->signal = WTERMSIG(status);
+}
+
+void zcl_reflex_reap_bounded(pid_t child, int64_t deadline_us,
+                             struct zcl_reflex_reap *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->exit_code = -1;
+    sigset_t chld, old;
+    (void)sigemptyset(&chld);
+    (void)sigaddset(&chld, SIGCHLD);
+    bool masked = pthread_sigmask(SIG_BLOCK, &chld, &old) == 0;
+    bool failed = false;
+    while (!reflex_child_exited(child, false, &failed) && !failed) {
+        if (platform_time_monotonic_us() < deadline_us) {
+            reflex_wait_sigchld(&chld, deadline_us);
+            continue;
+        }
+        /* Past the deadline and still alive: SIGKILL cannot be caught,
+         * blocked or ignored, so the blocking wait below ends. */
+        (void)kill(child, SIGKILL);
+        out->killed_at_deadline = true;
+        (void)reflex_child_exited(child, true, &failed);
+        break;
+    }
+    out->filters_read = !failed &&
+        reflex_seccomp_filters(child, &out->seccomp_filters);
+    reflex_reap_status(child, out);
+    if (masked) (void)pthread_sigmask(SIG_SETMASK, &old, NULL);
 }
 
 /* ── runner process ─────────────────────────────────────────────────────── */
+
+/* The runner's own seccomp layer count after runner_enter; every leaf must
+ * end with exactly this plus its pre-load layers plus the one W^X layer. */
+static uint32_t g_runner_filters;
 
 static void frame_head(struct zcl_reflex_frame_head *head, uint32_t kind,
                        uint32_t size, uint64_t sequence)
@@ -849,8 +972,7 @@ static bool request_valid(const struct zcl_reflex_request *r)
         r->head.abi == ZCL_REFLEX_WIRE_ABI &&
         r->head.kind == ZCL_REFLEX_FRAME_REQUEST &&
         r->head.size == sizeof(*r) &&
-        (r->mode == ZCL_REFLEX_MODE_HOT_FORK ||
-         r->mode == ZCL_REFLEX_MODE_HOT_SHADOW) &&
+        reflex_mode_known(r->mode) &&
         r->timeout_ms > 0 && r->timeout_ms <= 60000u &&
         request_strings_terminated(r) && strlen(r->expected_sha256) == 64;
 }
@@ -880,13 +1002,33 @@ static bool runner_verify_image(int image_fd,
     return true;
 }
 
+/* Room for both frames plus one more frame head, so a duplicate is named as
+ * such; anything past that is drained and dropped (the parse already fails). */
+#define REFLEX_REPORT_CAP \
+    (sizeof(struct zcl_reflex_preload_frame) + \
+     sizeof(struct zcl_reflex_observation_frame) + \
+     sizeof(struct zcl_reflex_report_head))
+
 struct collect_state {
     int report_fd;
     int64_t deadline_us;
     size_t have;
     bool eof;
     bool control_closed;
+    uint8_t bytes[REFLEX_REPORT_CAP];
 };
+
+static bool runner_collect_read(struct collect_state *st)
+{
+    uint8_t drain[256];
+    ssize_t n = st->have < sizeof(st->bytes)
+        ? read(st->report_fd, st->bytes + st->have,
+               sizeof(st->bytes) - st->have)
+        : read(st->report_fd, drain, sizeof(drain));
+    if (n > 0 && st->have < sizeof(st->bytes)) st->have += (size_t)n;
+    if (n == 0) st->eof = true;
+    return n > 0 || (n < 0 && errno == EINTR);
+}
 
 /* One poll step. Returns false when collection is over. */
 static bool runner_collect_step(struct collect_state *st,
@@ -910,25 +1052,25 @@ static bool runner_collect_step(struct collect_state *st,
         reply->cancelled = true;
         return false;
     }
-    if (!pfd[0].revents) return true;
-    uint8_t *dst = (uint8_t *)&reply->report;
-    ssize_t n = st->have < sizeof(reply->report)
-        ? read(st->report_fd, dst + st->have, sizeof(reply->report) - st->have)
-        : read(st->report_fd, &(uint8_t){0}, 1);
-    if (n > 0 && st->have < sizeof(reply->report)) st->have += (size_t)n;
-    if (n == 0) st->eof = true;
-    return n > 0 || (n < 0 && errno == EINTR);
+    return !pfd[0].revents || runner_collect_read(st);
 }
 
-/* What the runner itself saw of the leaf's end: exit status or signal, and a
- * leaf that closed its pipe but outlived its deadline (killed, named RED). */
+/* What the runner itself saw of the leaf's end: exit status or signal, a
+ * leaf that outlived its deadline after closing its pipe, and whether it
+ * ended with exactly one seccomp layer beyond its pre-load stack (W^X). */
 static void runner_record_reap(const struct zcl_reflex_reap *reap, bool eof,
                                struct zcl_reflex_reply *reply)
 {
     reply->child_exit_code = reap->exit_code;
     reply->child_signal = reap->signal;
+    reply->leaf_seccomp_filters = reap->seccomp_filters;
+    reply->runner_seccomp_filters = g_runner_filters;
+    reply->wx_observed = reap->filters_read &&
+        reap->seccomp_filters == g_runner_filters +
+            ZCL_REFLEX_LEAF_PRELOAD_FILTERS + ZCL_REFLEX_LEAF_WX_FILTERS;
     if (eof && reap->killed_at_deadline) {
         reply->timed_out = true;
+        reply->reap_timed_out = true;
         reply_error(reply, "leaf outlived its deadline after closing its "
                            "report pipe");
     }
@@ -954,7 +1096,8 @@ static bool runner_execute(const struct zcl_reflex_request *request,
         (void)close(pipefd[0]);
         return reply_error(reply, "candidate fork failed"), true;
     }
-    struct collect_state st = {
+    struct collect_state st;
+    st = (struct collect_state){
         .report_fd = pipefd[0],
         .deadline_us = started + (int64_t)request->timeout_ms * 1000,
     };
@@ -965,11 +1108,10 @@ static bool runner_execute(const struct zcl_reflex_request *request,
     struct zcl_reflex_reap reap;
     zcl_reflex_reap_bounded(child, st.eof ? st.deadline_us : 0, &reap);
     runner_record_reap(&reap, st.eof, reply);
-    reply->report_complete = st.have == sizeof(reply->report) &&
-        reply->report.magic == ZCL_REFLEX_REPORT_MAGIC &&
-        reply->report.abi == ZCL_REFLEX_WIRE_ABI;
-    if (reply->report_complete && reply->report.start_us >= started)
-        reply->fork_us = reply->report.start_us - started;
+    (void)zcl_reflex_frames_parse(st.bytes, st.have, &reply->frames);
+    if (reply->frames.preload_present &&
+        reply->frames.preload.start_us >= started)
+        reply->fork_us = reply->frames.preload.start_us - started;
     reply->total_us = platform_time_monotonic_us() - started;
     return !st.control_closed;
 }
@@ -981,10 +1123,12 @@ static bool runner_serve_one(void)
     int image_fd = -1;
     int got = runner_recv(&request, sizeof(request), &image_fd);
     if (got == 0) return false;
-    struct zcl_reflex_reply reply = {0};
+    struct zcl_reflex_reply reply;
+    reply = (struct zcl_reflex_reply){0};
     frame_head(&reply.head, ZCL_REFLEX_FRAME_REPLY, sizeof(reply),
                got > 0 ? request.head.sequence : 0);
     reply.child_exit_code = -1;
+    reply.frames.status = ZCL_REFLEX_FRAMES_PRELOAD_MISSING;
     bool keep_running = true;
     if (got < 0 || image_fd < 0 || !request_valid(&request))
         reply_error(&reply, "malformed reflex request");
@@ -1045,6 +1189,9 @@ static int runner_main(void)
     if (!runner_enter()) return 3;
     uint32_t probes_killed = runner_deny_probes();
     if (probes_killed != ZCL_REFLEX_DENY_PROBES) return 5;
+    /* Without its own layer count the runner cannot observe a leaf's W^X
+     * layer, so every verdict would be unprovable: refuse to serve. */
+    if (!reflex_seccomp_filters(0, &g_runner_filters)) return 6;
     const int keep[] = {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO,
                         ZCL_REFLEX_RUNNER_CONTROL_FD};
     struct zcl_reflex_hello hello = {

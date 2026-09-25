@@ -80,6 +80,15 @@ bool zcl_reflex_runner_last_green(const char *source_tu, char out[65])
     return found;
 }
 
+static bool lower_hex64(const char *s)
+{
+    if (!s || strlen(s) != 64) return false;
+    for (size_t i = 0; i < 64; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+            return false;
+    return true;
+}
+
 static void outcome_reason(struct zcl_reflex_runner_outcome *out,
                            const char *reason)
 {
@@ -265,15 +274,6 @@ static bool copy_field(char *dst, size_t cap, const char *src)
     return true;
 }
 
-static bool lower_hex64(const char *s)
-{
-    if (!s || strlen(s) != 64) return false;
-    for (size_t i = 0; i < 64; i++)
-        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
-            return false;
-    return true;
-}
-
 static bool request_build(const struct zcl_reflex_runner_spec *spec,
                           struct zcl_reflex_request *r)
 {
@@ -429,18 +429,19 @@ static bool outcome_story_green(const struct zcl_reflex_runner_spec *spec,
         r->observation.checks_run == r->observation.checks_passed;
 }
 
-/* The runner process's own verdict: exact image, clean exit, no deadline. */
+/* The runner's own verdict: exact image, both frames well formed, clean exit
+ * inside the deadline, and exactly one W^X layer observed past pre-load. */
 static bool outcome_process_clean(const struct zcl_reflex_runner_spec *spec,
                                   const struct zcl_reflex_reply *reply)
 {
-    return reply->report_complete && !reply->timed_out &&
-        !reply->cancelled && reply->seals_verified &&
-        reply->child_exit_code == 0 && reply->child_signal == 0 &&
+    return reply->frames.status == ZCL_REFLEX_FRAMES_OK &&
+        !reply->timed_out && !reply->cancelled && reply->seals_verified &&
+        reply->wx_observed && reply->child_exit_code == 0 &&
+        reply->child_signal == 0 &&
         strcmp(reply->runner_sha256, spec->artifact_sha256) == 0;
 }
 
-/* The confined child's verdict: every confinement step held before the
- * candidate ran, and the mapped bytes are the requested bytes. */
+/* Pre-load claims plus the observation bits a GREEN story needs. */
 static bool outcome_child_confined(const struct zcl_reflex_runner_spec *spec,
                                    const struct zcl_reflex_child_report *r)
 {
@@ -450,44 +451,121 @@ static bool outcome_child_confined(const struct zcl_reflex_runner_spec *spec,
         r->env_count == 0 && r->inherited_fd_count == 0;
 }
 
+static bool reply_digest_ok(const char *s, size_t cap)
+{
+    if (!memchr(s, '\0', cap)) return false;
+    return s[0] == '\0' || lower_hex64(s);
+}
+
+/* Every string and flag the resident may touch, checked before any use:
+ * the runner's own fields, then each frame the leaf delivered. */
+static const char *reply_invalid(const struct zcl_reflex_reply *reply)
+{
+    const struct zcl_reflex_frames *f = &reply->frames;
+    if (!memchr(reply->error, '\0', sizeof(reply->error)))
+        return "reflex reply error unterminated";
+    if (!reply_digest_ok(reply->runner_sha256, sizeof(reply->runner_sha256)))
+        return "reflex reply runner_sha256 is not 64 lowercase hex";
+    const char *why = f->preload_present
+        ? zcl_reflex_preload_invalid(&f->preload) : NULL;
+    if (!why && f->observation_present)
+        why = zcl_reflex_observation_invalid(&f->observation);
+    return why;
+}
+
+static void outcome_take_preload(const struct zcl_reflex_preload_frame *p,
+                                 struct zcl_reflex_child_report *r)
+{
+    r->hash_verified = p->hash_verified == 1u;
+    r->sandboxed = p->sandboxed == 1u;
+    r->env_count = p->env_count;
+    r->inherited_fd_count = p->inherited_fd_count;
+    r->resident_canary_seen = p->resident_canary_seen;
+    r->start_us = p->start_us;
+    r->confine_us = p->confine_us;
+    memcpy(r->runtime_module_sha256, p->runtime_module_sha256,
+           sizeof(r->runtime_module_sha256));
+    memcpy(r->stage, p->stage, sizeof(r->stage));
+    memcpy(r->error, p->error, sizeof(r->error));
+}
+
+static void outcome_take_observation(
+    const struct zcl_reflex_observation_frame *o,
+    struct zcl_reflex_child_report *r)
+{
+    r->story_ok = o->story_ok == 1u;
+    r->descriptor_valid = o->descriptor_valid == 1u;
+    r->candidate_executed = o->candidate_executed == 1u;
+    r->dlopen_us = o->dlopen_us;
+    r->story_us = o->story_us;
+    r->observation = o->observation;
+    r->service = o->service;
+    memcpy(r->stage, o->stage, sizeof(r->stage));
+    if (!r->error[0]) memcpy(r->error, o->error, sizeof(r->error));
+}
+
 static void outcome_copy_reply(const struct zcl_reflex_reply *reply,
                                struct zcl_reflex_runner_outcome *out)
 {
     out->available = true;
-    out->report = reply->report;
     out->timed_out = reply->timed_out;
     out->cancelled = reply->cancelled;
-    out->report_complete = reply->report_complete;
     out->seals_verified = reply->seals_verified;
     out->child_exit_code = reply->child_exit_code;
     out->child_signal = reply->child_signal;
     out->fork_us = reply->fork_us;
     out->runner_total_us = reply->total_us;
-    (void)snprintf(out->runner_sha256, sizeof(out->runner_sha256), "%s",
-                   reply->runner_sha256);
+    out->report.wx_installed = reply->wx_observed;
+}
+
+/* Assemble the validated view. Names the first cause: the runner's error,
+ * then the leaf's pre-load refusal, then a framing defect, then the story. */
+static void outcome_assemble(const struct zcl_reflex_reply *reply,
+                             struct zcl_reflex_runner_outcome *out)
+{
+    const struct zcl_reflex_frames *f = &reply->frames;
+    struct zcl_reflex_child_report *r = &out->report;
+    memcpy(out->runner_sha256, reply->runner_sha256,
+           sizeof(out->runner_sha256));
+    if (f->preload_present) {
+        outcome_take_preload(&f->preload, r);
+        out->confine_us = r->confine_us;
+        out->env_inherited_count = r->env_count;
+        out->inherited_fd_count = r->inherited_fd_count;
+        out->address_space_fresh = zcl_reflex_resident_canary != 0 &&
+            r->resident_canary_seen == 0;
+    }
+    if (f->observation_present) {
+        outcome_take_observation(&f->observation, r);
+        out->dlopen_us = r->dlopen_us;
+        out->story_us = r->story_us;
+    }
+    out->report_complete = f->status == ZCL_REFLEX_FRAMES_OK;
+    if (reply->error[0]) outcome_reason(out, reply->error);
+    if (f->preload_present && f->preload.error[0])
+        outcome_reason(out, f->preload.error);
+    if (!out->report_complete)
+        outcome_reason(out, zcl_reflex_frames_reason(
+                                (enum zcl_reflex_frames_status)f->status));
+    if (r->error[0]) outcome_reason(out, r->error);
 }
 
 static void outcome_from_reply(const struct zcl_reflex_runner_spec *spec,
                                const struct zcl_reflex_reply *reply,
                                struct zcl_reflex_runner_outcome *out)
 {
-    const struct zcl_reflex_child_report *r = &reply->report;
     outcome_copy_reply(reply, out);
-    if (reply->report_complete) {
-        out->confine_us = r->confine_us;
-        out->dlopen_us = r->dlopen_us;
-        out->story_us = r->story_us;
-        out->env_inherited_count = r->env_count;
-        out->inherited_fd_count = r->inherited_fd_count;
-        out->address_space_fresh = zcl_reflex_resident_canary != 0 &&
-            r->resident_canary_seen == 0;
+    const char *invalid = reply_invalid(reply);
+    if (invalid) {
+        /* Nothing from a malformed reply reaches the outcome but its name. */
+        LOG_WARN("devloop.reflex", "runner reply refused: %s", invalid);
+        outcome_reason(out, invalid);
+        return;
     }
+    outcome_assemble(reply, out);
     out->green = outcome_process_clean(spec, reply) &&
-        outcome_child_confined(spec, r) && out->address_space_fresh &&
-        outcome_story_green(spec, r);
-    if (reply->error[0]) outcome_reason(out, reply->error);
-    else if (reply->report_complete && r->error[0])
-        outcome_reason(out, r->error);
+        outcome_child_confined(spec, &out->report) &&
+        out->address_space_fresh && outcome_story_green(spec, &out->report);
 }
 
 bool zcl_reflex_runner_run(const struct zcl_reflex_runner_spec *spec,
