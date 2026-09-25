@@ -8,6 +8,7 @@
 #include "vcs/package_store.h"
 
 #include "base/log_macros.h"
+#include "base/safe_alloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -48,7 +49,8 @@ static bool ptr_index_reserve(struct vcs_proof_ticket_index *index)
         LOG_RETURN(false, PTR_LOG, "ticket index capacity overflow at %zu",
                    index->cap);
     struct vcs_proof_ticket_index_entry *grown =
-        realloc(index->entries, cap * sizeof(*grown));
+        zcl_realloc(index->entries, cap * sizeof(*grown),
+                    "proof_ticket_index");
     if (!grown)
         LOG_RETURN(false, PTR_LOG, "ticket index: out of memory (%zu entries)",
                    cap);
@@ -127,7 +129,7 @@ bool vcs_proof_ticket_index_rebuild(struct vcs_proof_ticket_index *index,
     if (!index || !store)
         LOG_RETURN(false, PTR_LOG, "ticket index rebuild: null argument");
     struct vcs_package_store_summary *rows =
-        calloc(PTR_REBUILD_BATCH, sizeof(*rows));
+        zcl_calloc(PTR_REBUILD_BATCH, sizeof(*rows), "proof_ticket_rebuild");
     if (!rows)
         LOG_RETURN(false, PTR_LOG, "ticket index rebuild: out of memory");
     size_t n = vcs_package_store_list_summaries(store, true, rows,
