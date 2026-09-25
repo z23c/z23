@@ -3258,7 +3258,7 @@ static const char *watch_sealer_test_backlog(struct watch_context *ctx,
     if (!failed && kill(ctx->sealer.pid, SIGSTOP) != 0)
         failed = "sealer stall";
     if (!failed)
-        failed = watch_sealer_test_publish(ctx, 100);
+        failed = watch_sealer_test_publish(ctx, 70);
     if (!failed && (ctx->sealer.inline_backlog == 0 ||
                     ctx->trace.seals_inline == 0 ||
                     ctx->sealer.deferred == 0))
