@@ -372,7 +372,7 @@ Every lint gate at 9 s or more per candidate is listed, heaviest first:
 | `check-doc-claims` | 101.8 | ineligible | a claim resolves against the whole tree (`git grep`), and gate-passes and gate-fails claims run other gates |
 | `check-build-epoch-integrity` | 80.8 | ineligible | the depfile self-test includes the real Makefile (51 `$(shell)`, 48 `$(wildcard)`, `-include`s) and runs `make -n`; the epoch self-test uses `build/bin/zcc` and `/proc/loadavg` |
 | `check-capability-closure` | 70.9 | ineligible | `nm` closure over build objects, a symbol registry and a coverage floor |
-| `check-vcs-no-sha1` | 53.9 | ineligible | the batch self-test captures the whole real tree and runs a built helper |
+| `check-vcs-no-sha1` | 53.9 | **measured; ineligible, not split** | 99.9% of its CPU is the global part: the source-identity self-tests build a helper with the host `cc`, drive host `git` in sandboxes, and capture the whole real checkout, ignored inputs included. The only per-file part is the `z23-lint` scan, 0.04 s CPU. A split would add a select run and save nothing (see "check-vcs-no-sha1: measured, not split") |
 | `check-clang-portability` | 46.4 | declared, per TU (first slice) | one clang compile per oracle TU; closure plus own baseline rows |
 | `check-no-api-keys` | 42.9 | **declared, per file** | a regex scan of each tracked file's own lines; the skip list is gate code; the 1,000-file floor counts the path set |
 | `check-zcode-package-registry` | 36.1 | ineligible | exact-once source ownership across the registry |
@@ -557,6 +557,91 @@ The z23-lint binary was built at `b089f792ba`, sha256 `9a2a7176…94d2`.
 catalog: closure, row text, a missing source, residue, comment, a new row,
 a Makefile edit and a non-literal list refusal.
 
+#### check-vcs-no-sha1: measured, not split
+
+The gate was measured to decide whether it could be split like
+`check-windows-acceptance`. It cannot gain anything, so it declares no
+premise and its code is unchanged.
+
+The Makefile rule (`check-vcs-no-sha1`) runs three commands:
+
+1. `z23-lint check-vcs-no-sha1`
+   (`tools/lint/lintc/gate_vcs_sha1_fence.c`). This is a fixture self-test
+   in a private temporary directory, then `vcs_scan_tree`. The scan greps
+   the 342 `.c`, `.h`, `.sh` and `Makefile` files under
+   `contexts/commons/modules/vcs` for
+   `sha[-_]?1`. It checks the Git calls in `tools/dev/source-identity.sh`
+   against an allowlist, sweeps 16 fixed authority files for SHA-1
+   primitives, and checks several properties of the Makefile.
+2. `tools/dev/source-identity-selftest.sh`. It starts
+   `tools/dev/source-identity-batch-selftest.sh` in the background (line
+   18), then drives the host `git` (line 8) through more than 50 capture,
+   verify and race-injection cases in a sandbox repository.
+3. `tools/dev/sovereign-source-identity-selftest.sh`, a sandbox-only test
+   of the ZVCS identity adapter.
+
+The batch self-test gets its helper from
+`tools/dev/source-identity-batch-bootstrap.sh` (line 10). That script
+compiles `tools/dev/source_identity_batch.c` with the host `cc`
+(bootstrap lines 73 and 83–87) whenever the binary is older than its
+inputs. The test then captures the real checkout twice, once through the
+native helper and once through the portable path, and requires the two
+records to be equal (batch self-test lines 213–219). `source-identity.sh`
+inventories Git-ignored static archives, generated vendor headers and
+every file under the C23 source roots whatever the ignore rules say (lines
+8–11, and the ignored-directory walk at line 552). Those files are outside
+the tracked path set, so no unit premise can name them.
+
+A seeded case shows this. A Git-ignored symlink was added under
+`vendor/include/openssl/`, which changes no tracked byte and no tracked
+path. The three recipe commands were then run directly, without the
+Makefile parse. `z23-lint` passed and the sovereign self-test passed.
+`source-identity-selftest.sh` FAILED: the batch self-test's whole-tree
+native capture stopped with "unsupported compiler input beneath
+vendor/include". With the seed removed, the batch self-test passed again.
+A premise over tracked bytes would have carried the base's PASS here.
+
+Measured on this host under `devbuild`, each part run alone. Ranges are
+two runs; the two captures were run once each:
+
+| part | CPU s | wall s | kind |
+|---|---|---|---|
+| Makefile parse (`make -n check-vcs-no-sha1`) | 2.8 | 15.5 | global |
+| `z23-lint check-vcs-no-sha1`: self-test plus scan | 0.04 | 0.1–1.4 | the only per-file candidate |
+| `source-identity-selftest.sh`, batch self-test included | 30.4–30.5 | 57.5–62.9 | global |
+| of which the batch self-test | 11.1–11.2 | 11.6–13.2 | global |
+| of which the two whole-tree captures (native 4.3, portable 3.1) | 7.4 | 9.0 | global |
+| `sovereign-source-identity-selftest.sh` | 0.2 | 0.7–1.3 | global |
+| the whole rule (`make check-vcs-no-sha1`) | 33.2 | 92.2 | |
+
+Only the scan could be split per file. Its checks depend only on each
+file's bytes plus the gate code. The Makefile checks read only the
+Makefile, and the delegation check reads exactly two fixed files
+(`vcs_delegation_checked`, lines 461–480). The scan is 0.04 s CPU of
+33.2, about 0.1% of the rule. Everything else is the global part defined
+above:
+
+- self-tests;
+- a helper built by the host compiler;
+- host `git` behaviour;
+- a whole-checkout record that reads ignored files.
+
+It would always run. A premise gate is priced as its select run plus its
+always-run part plus its fresh units. Here that is 8–32 s of select plus
+about the whole weight, which is more than the 53.9 s the gate costs
+unselected. Declaring it would lower reuse.
+
+A split of the global part itself would need a different kind of change:
+
+- moving the whole-checkout parity case out of the lint gate, for example
+  into a test group keyed on the helper's sources;
+- caching the sandbox self-tests on a key that binds the host `git`,
+  coreutils and `cc` as well as the scripts.
+
+Neither fits the current unit kinds, so neither is proposed here. Reuse on
+the real set stays 71.3% (1831.4 s per candidate) and
+`tools/dev/fixtures/shadow_select/lint_premise.tsv` is unchanged.
+
 ### Private-implementation edits: is the rule over-expanding?
 
 No, with one exception that needs machinery that does not exist yet.
@@ -635,7 +720,7 @@ gates is at 1831.4 s, or 1774.3 s with one combined select run:
 
 | remaining fresh s per candidate | s | share of reference | what it would take |
 |---|---|---|---|
-| Lint gates of 9 s or more, ineligible (17 gates, table above) | 566.5 | 8.9% | restructuring, not a declaration: split each gate's per-file checks from its whole-tree part (claim resolution, closures, ratchet sums, floors over content), so that only the whole-tree part must rerun, as `check-windows-acceptance` now is. The five heaviest are `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9 and `check-zcode-package-registry` 36.1 |
+| Lint gates of 9 s or more, ineligible (17 gates, table above) | 566.5 | 8.9% | restructuring, not a declaration: split each gate's per-file checks from its whole-tree part (claim resolution, closures, ratchet sums, floors over content), so that only the whole-tree part must rerun, as `check-windows-acceptance` now is. The five heaviest are `check-doc-claims` 101.8, `check-build-epoch-integrity` 80.8, `check-capability-closure` 70.9, `check-vcs-no-sha1` 53.9 and `check-zcode-package-registry` 36.1. `check-vcs-no-sha1` was measured and cannot gain from a split: its per-file part is 0.04 s of 33.2 s CPU |
 | Lint gates under 9 s, not reviewed (185 gates) | 160.9 | 2.5% | a review like the one above; a declared gate still pays about 10 s of select, so most would gain only inside a combined run |
 | Lint gates of 9 s or more, not declared (ship, retrieval, package-anatomy, release-install) | 70.6 | 1.1% | a confined whole-gate run (ship, retrieval, release-install) or a per-directory unit kind (package-anatomy) |
 | floor, `make_lint_gates` family | 311.3 | 4.9% | a premise for the lint-gate test umbrella. `realroot` and `heavy_02` alone are 151.5 s |
