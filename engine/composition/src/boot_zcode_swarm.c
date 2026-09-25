@@ -563,9 +563,10 @@ static void boot_zcode_work_publish_results(int64_t now)
             /* ANNOUNCE before RESULT: package frames drain first, so the
              * result-triggered fetch already knows its exact provider. */
             (void)vcs_swarm_engine_announce_to(s_engine, peers[i]);
+            size_t result_requests_queued = 0;
             enum vcs_zcode_work_node_result published =
                 vcs_zcode_work_node_publish_result(
-                    s_work, peers[i], &result);
+                    s_work, peers[i], &result, &result_requests_queued);
             if (published == VCS_ZCODE_WORK_NODE_OK) {
                 struct vcs_zcode_work_swarm_message message = {
                     .type = VCS_ZCODE_WORK_SWARM_RESULT,
@@ -574,9 +575,12 @@ static void boot_zcode_work_publish_results(int64_t now)
                 LOG_INFO("zcode.proof_perf",
                          "schema=zcl.async_proof_perf.v1 action=%s "
                          "stage=worker_result_publish at_unix_us=%lld "
-                         "result_wire_bytes=%zu",
+                         "result_wire_bytes=%zu result_requests_queued=%zu "
+                         "extra_result_requests_queued=%zu",
                          action_id, (long long)platform_time_realtime_us(),
-                         vcs_zcode_work_swarm_wire_size(&message));
+                         vcs_zcode_work_swarm_wire_size(&message),
+                         result_requests_queued,
+                         result_requests_queued - 1);
                 /* publish_result released the physical worker slot. A
                  * requester that observed signed BUSY must see a strictly
                  * newer signed capacity fact now; waiting for the periodic

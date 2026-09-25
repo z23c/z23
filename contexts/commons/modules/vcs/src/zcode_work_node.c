@@ -753,7 +753,6 @@ enum vcs_zcode_work_node_result vcs_zcode_work_node_cancel(
     pthread_mutex_unlock(&node->lock);
     return result;
 }
-
 static bool work_result_recipient(const struct work_track *origin,
                                   const struct work_track *candidate)
 {
@@ -762,11 +761,15 @@ static bool work_result_recipient(const struct work_track *origin,
         candidate->receiver_admitted && !candidate->finished &&
         !candidate->cancelled && !candidate->expired;
 }
-
+static void work_result_count_set(size_t *out, size_t count)
+{
+    if (out) *out = count;
+}
 enum vcs_zcode_work_node_result vcs_zcode_work_node_publish_result(
     struct vcs_zcode_work_node *node, uint64_t peer,
-    const struct vcs_zcode_work_result_v1 *result_row)
+    const struct vcs_zcode_work_result_v1 *result_row, size_t *result_requests_queued)
 {
+    work_result_count_set(result_requests_queued, 0);
     if (!node || !result_row) return VCS_ZCODE_WORK_NODE_MALFORMED;
     pthread_mutex_lock(&node->lock);
     struct work_track *track = work_find_track(
@@ -826,14 +829,15 @@ enum vcs_zcode_work_node_result vcs_zcode_work_node_publish_result(
             recipient->result = message.body.result;
             recipient->result_last_queued = 0;
         }
-        if (result == VCS_ZCODE_WORK_NODE_OK)
+        if (result == VCS_ZCODE_WORK_NODE_OK) {
+            work_result_count_set(result_requests_queued, recipients);
             memset(&node->slots[track->worker_slot], 0,
                    sizeof(node->slots[track->worker_slot]));
+        }
     }
     pthread_mutex_unlock(&node->lock);
     return result;
 }
-
 size_t vcs_zcode_work_node_requeue_results(
     struct vcs_zcode_work_node *node, int64_t now)
 {
@@ -1305,7 +1309,6 @@ bool vcs_zcode_work_node_next_progress(
     pthread_mutex_unlock(&node->lock);
     return true;
 }
-
 #define WORK_PEEK(name, field, array, type) \
 bool name(struct vcs_zcode_work_node *node, uint64_t *peer_out, type *out) \
 { \
@@ -1319,7 +1322,6 @@ bool name(struct vcs_zcode_work_node *node, uint64_t *peer_out, type *out) \
     pthread_mutex_unlock(&node->lock); \
     return present; \
 }
-
 WORK_PEEK(vcs_zcode_work_node_peek_request, request, requests,
           struct vcs_zcode_work_request_v1)
 bool vcs_zcode_work_node_defer_request(
@@ -1458,7 +1460,6 @@ bool vcs_zcode_work_node_inbound_request(
     pthread_mutex_unlock(&node->lock);
     return present;
 }
-
 bool vcs_zcode_work_node_cancel_still_current(
     struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
     const uint8_t action_root[32])
@@ -1480,7 +1481,6 @@ bool vcs_zcode_work_node_cancel_still_current(
     pthread_mutex_unlock(&node->lock);
     return current;
 }
-
 bool vcs_zcode_work_node_outbound_request(
     struct vcs_zcode_work_node *node, uint64_t peer, uint64_t request_id,
     struct vcs_zcode_work_request_v1 *out)

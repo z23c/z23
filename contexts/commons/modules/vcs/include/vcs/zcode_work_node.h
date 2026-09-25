@@ -84,10 +84,14 @@ enum vcs_zcode_work_node_result vcs_zcode_work_node_cancel(
     struct vcs_zcode_work_node *node, uint64_t peer,
     const struct vcs_zcode_work_cancel_v1 *cancel);
 
-/* Worker response for a request previously drained from next_request. */
+/* Worker response for a request previously drained from next_request.
+ * result_requests_queued counts worker-local RESULT frames queued for distinct
+ * admitted requests. It proves neither delivery nor requester acceptance;
+ * it is zero on refusal and may be NULL. */
 enum vcs_zcode_work_node_result vcs_zcode_work_node_publish_result(
     struct vcs_zcode_work_node *node, uint64_t peer,
-    const struct vcs_zcode_work_result_v1 *result);
+    const struct vcs_zcode_work_result_v1 *result,
+    size_t *result_requests_queued);
 /* RESULT has no transport acknowledgement. Retain the exact verified frame
  * and requeue it at a bounded interval until the request's signed deadline;
  * the requester accepts an exact duplicate idempotently. */
