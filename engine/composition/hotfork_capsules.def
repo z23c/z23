@@ -10,8 +10,7 @@
  * every receipt and is the identity the story root is sealed over.
  *
  * sibling_tus is the rest of the capsule's TU SET — a '|'-separated list of
- * repo-relative .c paths,     "engine/modules/kernel/src/command_registry_input_validate.c",
-    "engine/modules/kernel/src/command_registry_input_types.c|"" when the owner stands alone. The builder
+ * repo-relative .c paths, "" when the owner stands alone. The builder
  * #includes the owner and then each sibling in declaration order, and an
  * edit to ANY TU in the set selects this capsule. A rule the story claims to
  * exercise that lives in a TU OUTSIDE the set is not observed at all: the
