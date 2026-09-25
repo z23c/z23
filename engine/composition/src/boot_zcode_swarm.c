@@ -137,6 +137,9 @@ static bool boot_zcode_work_preflight_current(
         request->max_memory_bytes <= context->task.max_memory_bytes &&
         request->max_output_bytes <= context->task.max_output_bytes;
 }
+/* Verify the selected result of an already-admitted physical run. This is
+ * never sufficient authority to admit a new request for completed work:
+ * the current toolchain capsule does not bind every executable tool byte. */
 static struct zcl_result boot_zcode_work_replay_current(
     struct node_db *ndb, struct vcs_package_store *store,
     const struct db_build_job *job, const struct db_build_action *action,
@@ -163,24 +166,13 @@ static struct zcl_result boot_zcode_work_replay_current(
     return ZCL_OK;
 }
 static struct zcl_result boot_zcode_work_admit_planned(
-    struct node_db *ndb, struct vcs_package_store *store,
-    const struct db_build_job *job, const struct db_build_action *action,
-    const struct db_build_action *current,
-    const struct vcs_zcode_work_request_v1 *request, int64_t now)
+    struct node_db *ndb, const struct db_build_job *job,
+    const struct db_build_action *current, int64_t now)
 {
-    if (strcmp(current->state, "ACCEPTED") == 0 &&
-        request->work_kind == VCS_ZCODE_WORK_BUILD) {
-        uint64_t bytes = 0;
-        struct zcl_result replay = boot_zcode_work_replay_current(
-            ndb, store, job, action, request, now, &bytes, NULL);
-        if (!replay.ok) return replay;
-        LOG_INFO("zcode.proof_perf",
-                 "schema=zcl.async_proof_perf.v1 action=%s "
-                 "stage=historical_receipt_lookup hit=1 "
-                 "verified_output_bytes=%llu physical_runs_claimed=0",
-                 action->action_id, (unsigned long long)bytes);
-        return ZCL_OK;
-    }
+    if (strcmp(current->state, "ACCEPTED") == 0 ||
+        strcmp(current->state, "CACHE_HIT") == 0)
+        return ZCL_ERR(-1,
+                       "completed work lacks authenticated toolchain closure");
     if (strcmp(current->state, "SNAPSHOTTED") == 0)
         return build_fabric_submit(ndb, job->job_id, now);
     if (!boot_zcode_work_active_state(current->state))
@@ -283,8 +275,7 @@ static struct zcl_result boot_zcode_work_admit(
     struct db_build_action current;
     if (!db_build_action_find(ndb, action.action_id, &current))
         return ZCL_ERR(-1, "planned remote action disappeared");
-    return boot_zcode_work_admit_planned(
-        ndb, store, &job, &action, &current, request, now);
+    return boot_zcode_work_admit_planned(ndb, &job, &current, now);
 }
 static struct zcl_result boot_zcode_work_attached_admit(
     const struct vcs_zcode_work_request_v1 *request, int64_t now)
@@ -323,8 +314,8 @@ static struct zcl_result boot_zcode_work_attached_admit(
         return boot_zcode_work_active_state(action.state) ||
             strcmp(action.state, "FAILED") == 0 ? ZCL_OK :
             ZCL_ERR(-1, "attached action is terminal: %s", action.state);
-    return boot_zcode_work_replay_current(
-        ndb, store, &job, &action, request, now, NULL, NULL);
+    return ZCL_ERR(-1,
+                   "completed attachment lacks authenticated toolchain closure");
 }
 static bool boot_zcode_work_context_available(
     const struct vcs_zcode_work_request_v1 *request, uint64_t peer,
