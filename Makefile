@@ -496,7 +496,7 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # therefore owns only the dev epoch; the explicit proof bundle below keeps the
 # complete dev+test-fast graph on platforms that can consume it.
 ZCL_EPOCH_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
-else ifneq ($(filter dev-proof-bundle dev-proof-bundle-prefork ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter dev-proof-bundle dev-proof-bundle-prefork ff action-root-reuse-study,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -941,7 +941,10 @@ DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 	tools/dev/z23_git_hook.c \
 	tools/dev/z23_doctor.c \
 	tools/dev/fleet_observe_main.c \
-	tools/dev/mvp_ledger_main.c
+	tools/dev/mvp_ledger_main.c \
+	tools/dev/action_root_reuse_study.c \
+	tools/dev/action_root_reuse_study_eval.c \
+	tools/dev/action_root_reuse_study_snap.c
 # The mutation harness proper (operators + campaign core) has no main() and
 # is proved by the registered `mutation_harness` group, so it is linked into
 # the dev binary and the test harness but kept out of the release node — a
@@ -4282,6 +4285,59 @@ $(MVP_LEDGER_BIN): tools/dev/mvp_ledger.c tools/dev/mvp_ledger_tsv.c \
 	    -Iplatform/modules/json/include -Iplatform/modules/base/include \
 	    -Iplatform/modules/platform/include -Iplatform/modules/util/include \
 	    -o $@ $^
+# action-root-reuse-study: the offline experiment behind
+# docs/experiments/2026-09-25-action-root-reuse.md. It extracts immutable
+# snapshots of recent first-parent main commits (plus --pick'ed small edits),
+# derives the v2 action_root of every dev compile action in each, and reports
+# how much compile and test-cache evidence would survive each commit. Its
+# three sources carry the only main() and are kept out of every node, dev and
+# test link via DEV_STANDALONE_SRCS; the sources named here are the whole
+# dependency set. The run needs one real build's depfiles and the fast test
+# harness (for its content-keyed cache probe), so it names both.
+ACTION_ROOT_STUDY_BIN = $(BIN_DIR)/action-root-reuse-study$(ZCL_HOST_EXEEXT)
+ACTION_ROOT_STUDY_SCRATCH ?= $(HOME)/.local/state/zclassic23/scratch/action-root-study
+ACTION_ROOT_STUDY_OUT ?= $(ACTION_ROOT_STUDY_SCRATCH)/out
+ACTION_ROOT_STUDY_MAIN_REF ?= origin/main
+ACTION_ROOT_STUDY_CORPUS ?= 30
+ACTION_ROOT_STUDY_JOBS ?= 8
+ACTION_ROOT_STUDY_PICKS ?= comment=34252340c4 whitespace=bf79a0782e \
+	body=c472356ff2 body2=1f5790fc70 header=b3e9c0bddb \
+	header2=03558ceabb makeflag=9ae2b83949 makefile=6ae2602c0f \
+	gen-flags=247c320716 gen-inventory=3922dee99136d42195413a93fe9d966fda857525
+.PHONY: action-root-reuse-study-bin action-root-reuse-study
+action-root-reuse-study-bin: $(ACTION_ROOT_STUDY_BIN)
+$(ACTION_ROOT_STUDY_BIN): tools/dev/action_root_reuse_study.c \
+		tools/dev/action_root_reuse_study_eval.c \
+		tools/dev/action_root_reuse_study_snap.c \
+		tools/dev/devloop_action_root.c \
+		contexts/commons/modules/vcs/src/build_action.c \
+		contexts/commons/modules/vcs/src/build_action_v2.c \
+		contexts/commons/modules/vcs/src/build_action_v2_decode.c \
+		platform/modules/platform/src/clock.c \
+		platform/modules/platform/src/file_metadata.c \
+		platform/modules/platform/src/positioned_file.c \
+		platform/modules/platform/src/toolchain.c \
+		platform/modules/sha3/src/sha3.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/base/src/log_level.c \
+		platform/modules/base/src/result.c \
+		platform/modules/util/src/spawn.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror $(ZCL_WARN_FORMAT_TRUNCATION) \
+	    $(ZCL_PLATFORM_CPPFLAGS) -D_POSIX_C_SOURCE=200809L -Itools/dev \
+	    $(ZCL_ALL_INCLUDES) -o $@ $^ -lpthread
+action-root-reuse-study: $(ACTION_ROOT_STUDY_BIN) \
+		$(TEST_PARALLEL_FAST_CANDIDATE) dev-bin
+	@mkdir -p '$(ACTION_ROOT_STUDY_OUT)'
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(ACTION_ROOT_STUDY_BIN) \
+	  --repo='$(CURDIR)' --scratch='$(ACTION_ROOT_STUDY_SCRATCH)' \
+	  --out='$(ACTION_ROOT_STUDY_OUT)' --build-obj='$(abspath $(DEV_OBJ_DIR))' \
+	  --test-obj='$(abspath $(TEST_FAST_OBJ_DIR))' \
+	  --test-bin='$(abspath $(TEST_PARALLEL_FAST_CANDIDATE))' \
+	  --main-ref='$(ACTION_ROOT_STUDY_MAIN_REF)' \
+	  --corpus=$(ACTION_ROOT_STUDY_CORPUS) --jobs=$(ACTION_ROOT_STUDY_JOBS) \
+	  $(addprefix --pick=,$(ACTION_ROOT_STUDY_PICKS))
+
 .PHONY: check-capability-closure
 # Make already captured this exact record before dispatching lint. Pass it to
 # the read-only CFLAGS query so that query does not walk the source tree again.
