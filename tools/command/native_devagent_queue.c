@@ -116,8 +116,11 @@
 #include "command/native_devagent.h"
 
 #include "base/safe_alloc.h"
+#include "base/hex.h"
+#include "crypto/sha256.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
+#include "platform/positioned_file.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
@@ -468,6 +471,64 @@ static bool dvq_read_file(const char *path, char *out, size_t cap,
     (void)fclose(f);
     if (len_out)
         *len_out = n;
+    return true;
+}
+
+/* Hash bytes from one stable, regular file handle. A changed file yields no
+ * root, so an outcome cannot bind a mixture of two artifact versions. */
+static bool dvq_hash_open_file(struct platform_positioned_file *file,
+                               const struct platform_positioned_file_snapshot *before,
+                               struct sha256_ctx *hash, char *text)
+{
+    uint8_t block[8192];
+    uint64_t offset = 0;
+    while (offset < before->size) {
+        size_t want = before->size - offset > sizeof(block) ? sizeof(block) :
+                      (size_t)(before->size - offset);
+        int64_t got = platform_positioned_file_read(file, block, want, offset);
+        if (got <= 0)
+            return false;
+        sha256_write(hash, block, (size_t)got);
+        if (text)
+            memcpy(text + offset, block, (size_t)got);
+        offset += (uint64_t)got;
+    }
+    if (text) {
+        if (memchr(text, '\0', (size_t)offset) != NULL)
+            return false;
+        text[offset] = '\0';
+    }
+    return true;
+}
+
+static bool dvq_file_sha256(const char *root, const char *relative,
+                            uint64_t max_bytes,
+                            char out[65], char *text, size_t text_cap)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    struct sha256_ctx hash;
+    uint8_t digest[SHA256_OUTPUT_SIZE];
+    bool ok;
+    if (!root || !relative || !out || (text && text_cap == 0))
+        return false;
+    out[0] = '\0';
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, root, relative))
+        return false;
+    ok = platform_positioned_file_snapshot(&file, &before) &&
+         before.size <= max_bytes &&
+         (!text || before.size < text_cap);
+    sha256_init(&hash);
+    if (ok)
+        ok = dvq_hash_open_file(&file, &before, &hash, text);
+    ok = ok && platform_positioned_file_snapshot(&file, &after) &&
+         platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (!ok)
+        return false;
+    sha256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
     return true;
 }
 
@@ -2799,6 +2860,30 @@ struct dvq_usage {
     long long wall_ms;
 };
 
+struct dvq_outcome_timing {
+    long long seq;
+    char queued_ts[64];
+    long long started_unix;
+};
+
+struct dvq_artifact_roots {
+    char receipt_sha256[65];
+    char candidate_sha256[65];
+};
+
+static bool dvq_sha256_text_ok(const char *text)
+{
+    size_t i;
+    if (!text || strlen(text) != 64)
+        return false;
+    for (i = 0; i < 64; i++) {
+        if (!((text[i] >= '0' && text[i] <= '9') ||
+              (text[i] >= 'a' && text[i] <= 'f')))
+            return false;
+    }
+    return true;
+}
+
 static void dvq_usage_unknown(struct dvq_usage *u)
 {
     u->tokens = -1;
@@ -2820,19 +2905,279 @@ static void dvq_usage_from_text(const char *text, struct dvq_usage *u)
         u->wall_ms = v;
 }
 
-static bool dvq_receipt_verdict(const char *path, char *out, size_t cap,
-                                struct dvq_usage *usage)
+static bool dvq_digit(char c)
 {
-    char text[DVQ_LINE_CAP];
-    if (usage)
-        dvq_usage_unknown(usage);
-    if (!path || !out || cap == 0)
+    return c >= '0' && c <= '9';
+}
+
+static bool dvq_receipt_digits(const char *s, size_t len, size_t *p)
+{
+    if (*p >= len || !dvq_digit(s[*p]))
         return false;
-    if (!dvq_read_file(path, text, sizeof(text), NULL))
+    do { (*p)++; } while (*p < len && dvq_digit(s[*p]));
+    return true;
+}
+
+static bool dvq_receipt_number_suffix(const char *s, size_t len, size_t *p)
+{
+    if (*p < len && s[*p] == '.') {
+        (*p)++;
+        if (!dvq_receipt_digits(s, len, p)) return false;
+    }
+    if (*p < len && (s[*p] == 'e' || s[*p] == 'E')) {
+        (*p)++;
+        if (*p < len && (s[*p] == '+' || s[*p] == '-')) (*p)++;
+        if (!dvq_receipt_digits(s, len, p)) return false;
+    }
+    return *p >= len || !dvq_digit(s[*p]);
+}
+
+static bool dvq_receipt_number(const char *s, size_t len, size_t *position)
+{
+    size_t p = *position;
+    if (s[p] == '-') p++;
+    if (p >= len) return false;
+    if (s[p] == '0') {
+        p++;
+    } else {
+        if (s[p] < '1' || s[p] > '9') return false;
+        (void)dvq_receipt_digits(s, len, &p);
+    }
+    if (!dvq_receipt_number_suffix(s, len, &p)) return false;
+    *position = p - 1;
+    return true;
+}
+
+/* The shared parser accepts a few non-JSON spellings. Reject them before
+ * parsing a cross-verifier receipt; json_read checks the remaining grammar. */
+struct dvq_receipt_scan {
+    bool in_string, escaped, unicode_escape, verdict_value;
+    bool candidate_value, candidate_inexact;
+    size_t string_start;
+};
+
+static bool dvq_receipt_string_end(const char *text, size_t len, size_t i,
+                                   struct dvq_receipt_scan *scan)
+{
+    size_t next = i + 1;
+    while (next < len && (text[next] == ' ' || text[next] == '\t' ||
+           text[next] == '\n' || text[next] == '\r')) next++;
+    if (next < len && text[next] == ':') {
+        size_t raw_len = i - scan->string_start - 1;
+        if (scan->unicode_escape) return false;
+        scan->verdict_value = raw_len == 7 &&
+            memcmp(text + scan->string_start + 1, "verdict", 7) == 0;
+        scan->candidate_value = raw_len == 9 &&
+            memcmp(text + scan->string_start + 1, "candidate", 9) == 0;
+    } else {
+        if (scan->unicode_escape && scan->verdict_value) return false;
+        if (scan->unicode_escape && scan->candidate_value)
+            scan->candidate_inexact = true;
+        scan->verdict_value = false;
+        scan->candidate_value = false;
+    }
+    scan->in_string = false;
+    return true;
+}
+
+static bool dvq_receipt_string_char(const char *text, size_t len, size_t *i,
+                                    struct dvq_receipt_scan *scan)
+{
+    unsigned char c = (unsigned char)text[*i];
+    if (scan->escaped) {
+        scan->escaped = false;
+        if (c != 'u') return true;
+        if (*i + 4 >= len) return false;
+        for (size_t j = 1; j <= 4; j++)
+            if (!isxdigit((unsigned char)text[*i + j])) return false;
+        scan->unicode_escape = true;
+        *i += 4;
+        return true;
+    }
+    if (c == '\\') { scan->escaped = true; return true; }
+    if (c == '"') return dvq_receipt_string_end(text, len, *i, scan);
+    return c >= 0x20;
+}
+
+static bool dvq_receipt_scan_finish(const struct dvq_receipt_scan *scan,
+                                    bool *candidate_inexact)
+{
+    if (!scan || !candidate_inexact || scan->in_string || scan->escaped)
         return false;
-    if (usage)
-        dvq_usage_from_text(text, usage);
-    return dvq_line_str(text, "verdict", out, cap);
+    *candidate_inexact = scan->candidate_inexact;
+    return true;
+}
+
+static bool dvq_receipt_lexically_strict(const char *text,
+                                         bool *candidate_inexact)
+{
+    struct dvq_receipt_scan scan = {0};
+    size_t len = strlen(text);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (scan.in_string) {
+            if (!dvq_receipt_string_char(text, len, &i, &scan)) return false;
+        } else if (c == '"') {
+            scan.in_string = true;
+            scan.unicode_escape = false;
+            scan.string_start = i;
+        } else if (c == '-' || (c >= '0' && c <= '9')) {
+            if (!dvq_receipt_number(text, len, &i)) return false;
+        } else if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+            return false;
+        }
+    }
+    return dvq_receipt_scan_finish(&scan, candidate_inexact);
+}
+
+struct dvq_receipt_values {
+    const struct json_value *verdict, *candidate, *tokens, *tokens_used, *wall;
+};
+
+static bool dvq_receipt_collect(const struct json_value *doc,
+                                struct dvq_receipt_values *fields)
+{
+    for (size_t i = 0; i < doc->num_children; i++) {
+        const char *key = doc->keys[i];
+        const struct json_value *item = &doc->children[i];
+        if (!key) return false;
+        if (strcmp(key, "verdict") == 0) {
+            if (fields->verdict) return false;
+            fields->verdict = item;
+        }
+        if (strcmp(key, "candidate") == 0) {
+            if (fields->candidate) return false;
+            fields->candidate = item;
+        }
+        if (strcmp(key, "tokens") == 0) {
+            if (fields->tokens) return false;
+            fields->tokens = item;
+        }
+        if (strcmp(key, "tokens_used") == 0) {
+            if (fields->tokens_used) return false;
+            fields->tokens_used = item;
+        }
+        if (strcmp(key, "wall_ms") == 0) {
+            if (fields->wall) return false;
+            fields->wall = item;
+        }
+    }
+    return true;
+}
+
+static bool dvq_receipt_saturated(const struct json_value *value)
+{
+    return value && value->type == JSON_INT &&
+           (value->val.i == LLONG_MAX || value->val.i == LLONG_MIN);
+}
+
+static bool dvq_receipt_binding_valid(const struct dvq_receipt_values *f,
+                                      size_t cap)
+{
+    if (!f->verdict || f->verdict->type != JSON_STR || !f->verdict->val.s ||
+        !f->verdict->val.s[0] || strlen(f->verdict->val.s) >= cap)
+        return false;
+    if (f->candidate && (f->candidate->type != JSON_STR ||
+                         !f->candidate->val.s))
+        return false;
+    return true;
+}
+
+static bool dvq_receipt_usage_valid(const struct dvq_receipt_values *f)
+{
+    if (f->tokens && f->tokens_used &&
+        (f->tokens->type != JSON_INT || f->tokens_used->type != JSON_INT ||
+         f->tokens->val.i != f->tokens_used->val.i))
+        return false;
+    return !dvq_receipt_saturated(f->tokens) &&
+           !dvq_receipt_saturated(f->tokens_used) &&
+           !dvq_receipt_saturated(f->wall);
+}
+
+static void dvq_receipt_usage(const struct dvq_receipt_values *f,
+                              struct dvq_usage *usage)
+{
+    if (!usage) return;
+    dvq_usage_unknown(usage);
+    if (f->tokens && f->tokens->type == JSON_INT && f->tokens->val.i >= 0)
+        usage->tokens = f->tokens->val.i;
+    else if (f->tokens_used && f->tokens_used->type == JSON_INT &&
+             f->tokens_used->val.i >= 0)
+        usage->tokens = f->tokens_used->val.i;
+    if (f->wall && f->wall->type == JSON_INT && f->wall->val.i >= 0)
+        usage->wall_ms = f->wall->val.i;
+}
+
+static bool dvq_receipt_fields(const char *text, char *verdict, size_t cap,
+                               char candidate[80], struct dvq_usage *usage)
+{
+    struct json_value doc;
+    struct dvq_receipt_values fields = {0};
+    bool ok = false, candidate_inexact = false;
+    json_init(&doc);
+    candidate[0] = '\0';
+    /* This parser does not decode Unicode escapes to their JSON key bytes.
+     * Reject them so another verifier cannot see a different field name. */
+    if (!dvq_receipt_lexically_strict(text, &candidate_inexact)) goto done;
+    if (!json_read(&doc, text, strlen(text)) || doc.type != JSON_OBJ)
+        goto done;
+    if (!dvq_receipt_collect(&doc, &fields) ||
+        !dvq_receipt_binding_valid(&fields, cap) ||
+        !dvq_receipt_usage_valid(&fields)) goto done;
+    (void)snprintf(verdict, cap, "%s", fields.verdict->val.s);
+    /* The shared JSON parser substitutes '?' for Unicode escapes. Preserve
+     * the receipt's verdict, but never hash a path with substituted bytes. */
+    if (fields.candidate && !candidate_inexact &&
+        dvq_name_ok(fields.candidate->val.s) &&
+        strlen(fields.candidate->val.s) < 80)
+        (void)snprintf(candidate, 80, "%s", fields.candidate->val.s);
+    if (usage) {
+        dvq_receipt_usage(&fields, usage);
+    }
+    ok = true;
+done:
+    json_free(&doc);
+    return ok;
+}
+
+static void dvq_candidate_root(const char *engine, const char *name,
+                               long long attempt, const char *candidate,
+                               char root[65])
+{
+    char relative[256];
+    int written;
+    if (!candidate[0]) return;
+    written = snprintf(relative, sizeof(relative), "%s/a%lld/%s",
+                       name, attempt, candidate);
+    if (written > 0 && (size_t)written < sizeof(relative))
+        (void)dvq_file_sha256(engine, relative, DVQ_FILE_CAP, root, NULL, 0);
+}
+
+static bool dvq_receipt_verdict(const char *engine, const char *name,
+                                long long attempt, char *out, size_t cap,
+                                struct dvq_usage *usage,
+                                struct dvq_artifact_roots *roots)
+{
+    char text[DVQ_LINE_CAP], candidate[80], relative[256];
+    int written;
+    if (usage) dvq_usage_unknown(usage);
+    if (roots) memset(roots, 0, sizeof(*roots));
+    if (!engine || !dvq_name_ok(name) || attempt <= 0 || !out ||
+        cap == 0 || !roots)
+        return false;
+    written = snprintf(relative, sizeof(relative), "%s/a%lld/receipt.json",
+                       name, attempt);
+    if (written <= 0 || (size_t)written >= sizeof(relative) ||
+        !dvq_file_sha256(engine, relative, sizeof(text) - 1,
+                         roots->receipt_sha256, text, sizeof(text)))
+        return false;
+    if (!dvq_receipt_fields(text, out, cap, candidate, usage)) {
+        roots->receipt_sha256[0] = '\0';
+        return false;
+    }
+    dvq_candidate_root(engine, name, attempt, candidate,
+                       roots->candidate_sha256);
+    return true;
 }
 
 /* A usage field into an outcome item: the number when stated, JSON null
@@ -2851,10 +3196,72 @@ static bool dvq_push_usage_field(struct json_value *item, const char *key,
     return ok;
 }
 
+static bool dvq_push_sha256_field(struct json_value *item, const char *key,
+                                   const char *value)
+{
+    struct json_value empty;
+    bool ok;
+    if (dvq_sha256_text_ok(value))
+        return json_push_kv_str(item, key, value);
+    json_init(&empty);
+    json_set_null(&empty);
+    ok = json_push_kv(item, key, &empty);
+    json_free(&empty);
+    return ok;
+}
+
+static bool dvq_push_optional_text(struct json_value *item, const char *key,
+                                   const char *value)
+{
+    struct json_value empty;
+    bool ok;
+    if (value && value[0])
+        return json_push_kv_str(item, key, value);
+    json_init(&empty);
+    json_set_null(&empty);
+    ok = json_push_kv(item, key, &empty);
+    json_free(&empty);
+    return ok;
+}
+
+static bool dvq_push_outcome_identity(struct json_value *item,
+                                      const char *name, long long attempt,
+                                      const char *verdict, long long rc,
+                                      const char *ts)
+{
+    return json_push_kv_str(item, "name", name) &&
+           json_push_kv_int(item, "attempt", attempt) &&
+           json_push_kv_str(item, "verdict", verdict) &&
+           json_push_kv_int(item, "rc", rc) &&
+           json_push_kv_str(item, "ts", ts ? ts : "");
+}
+
+static bool dvq_push_outcome_measure(
+    struct json_value *item, const struct dvq_usage *usage,
+    const struct dvq_artifact_roots *roots,
+    const struct dvq_outcome_timing *timing)
+{
+    return dvq_push_usage_field(item, "seq", timing && timing->seq > 0 ?
+                                timing->seq : -1) &&
+           dvq_push_optional_text(item, "queued_ts",
+                                  timing ? timing->queued_ts : NULL) &&
+           dvq_push_usage_field(item, "started_unix",
+                                timing && timing->started_unix > 0 ?
+                                timing->started_unix : -1) &&
+           dvq_push_usage_field(item, "tokens_used", usage->tokens) &&
+           dvq_push_usage_field(item, "wall_ms", usage->wall_ms) &&
+           dvq_push_sha256_field(item, "receipt_sha256",
+                                 roots ? roots->receipt_sha256 : NULL) &&
+           dvq_push_sha256_field(item, "candidate_sha256",
+                                 roots ? roots->candidate_sha256 : NULL);
+}
+
 static bool dvq_push_outcome(struct json_value *arr, const char *name,
                              long long attempt, const char *verdict,
                              long long rc, const char *ts,
-                             const struct dvq_usage *usage)
+                             const struct dvq_usage *usage,
+                             const struct dvq_artifact_roots *roots,
+                             const struct dvq_outcome_timing *timing)
 {
     struct json_value item;
     struct dvq_usage none;
@@ -2865,13 +3272,8 @@ static bool dvq_push_outcome(struct json_value *arr, const char *name,
     }
     json_init(&item);
     json_set_object(&item);
-    ok = json_push_kv_str(&item, "name", name) &&
-         json_push_kv_int(&item, "attempt", attempt) &&
-         json_push_kv_str(&item, "verdict", verdict) &&
-         json_push_kv_int(&item, "rc", rc) &&
-         json_push_kv_str(&item, "ts", ts ? ts : "") &&
-         dvq_push_usage_field(&item, "tokens_used", usage->tokens) &&
-         dvq_push_usage_field(&item, "wall_ms", usage->wall_ms) &&
+    ok = dvq_push_outcome_identity(&item, name, attempt, verdict, rc, ts) &&
+         dvq_push_outcome_measure(&item, usage, roots, timing) &&
          json_push_back(arr, &item);
     json_free(&item);
     return ok;
@@ -2944,6 +3346,13 @@ static long long dvq_reclaim_orphans(const char *engine, struct dvq_row *rows,
     return reclaimed;
 }
 
+static bool dvq_receipt_since(const char *path, time_t stamp)
+{
+    struct stat st;
+    return stat(path, &st) == 0 &&
+           (stamp == 0 || st.st_mtime >= stamp);
+}
+
 static void dvq_reap(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
@@ -3011,7 +3420,12 @@ static void dvq_reap(const struct zcl_command_request *req,
         long long rc = -1;
         bool have_receipt = false;
         struct dvq_usage usage;
+        struct dvq_artifact_roots roots = {0};
+        struct dvq_outcome_timing timing = {.seq = r->seq,
+                                            .started_unix = r->started};
         dvq_usage_unknown(&usage);
+        (void)snprintf(timing.queued_ts, sizeof(timing.queued_ts), "%s",
+                       r->ts);
         if (strcmp(r->state, "running") != 0)
             continue;
         if (snprintf(dir, sizeof(dir), "%s/%s/a%lld", d.engine, r->name,
@@ -3032,8 +3446,7 @@ static void dvq_reap(const struct zcl_command_request *req,
          * is still new. Already-recorded receipts are excluded by the
          * .seen check above, so widening the comparison cannot
          * double-record. */
-        if (stat(receipt, &st) == 0 && (stamp == 0 || st.st_mtime >= stamp))
-            have_receipt = true;
+        have_receipt = dvq_receipt_since(receipt, stamp);
         runtext = (char *)zcl_malloc(DVQ_FILE_CAP, "devagent.queue.runout");
         if (!runtext)
             continue;
@@ -3046,15 +3459,15 @@ static void dvq_reap(const struct zcl_command_request *req,
             continue;
         }
         if (have_receipt) {
-            if (!dvq_receipt_verdict(receipt, verdict, sizeof(verdict),
-                                     &usage))
+            if (!dvq_receipt_verdict(d.engine, r->name, r->attempt,
+                                     verdict, sizeof(verdict), &usage, &roots))
                 (void)snprintf(verdict, sizeof(verdict), "unknown");
         } else {
             (void)snprintf(verdict, sizeof(verdict), "no-receipt");
         }
         dvq_now_iso(ots);
         if (!dvq_push_outcome(&outcomes, r->name, r->attempt, verdict, rc,
-                              ots, &usage)) {
+                              ots, &usage, &roots, &timing)) {
             free(runtext);
             json_free(&outcomes);
             free(rows);
@@ -3064,9 +3477,12 @@ static void dvq_reap(const struct zcl_command_request *req,
             return;
         }
         {
-            char esc_verdict[256];
+            char esc_verdict[256], esc_queued_ts[128];
+            char receipt_field[70], candidate_field[70];
             int w;
-            if (!dvq_escape(verdict, esc_verdict, sizeof(esc_verdict))) {
+            if (!dvq_escape(verdict, esc_verdict, sizeof(esc_verdict)) ||
+                !dvq_escape(r->ts, esc_queued_ts,
+                            sizeof(esc_queued_ts))) {
                 free(runtext);
                 json_free(&outcomes);
                 free(rows);
@@ -3075,12 +3491,27 @@ static void dvq_reap(const struct zcl_command_request *req,
                          "cannot encode the outcome row", opath);
                 return;
             }
+            if (roots.receipt_sha256[0])
+                (void)snprintf(receipt_field, sizeof(receipt_field),
+                               "\"%s\"", roots.receipt_sha256);
+            else
+                (void)snprintf(receipt_field, sizeof(receipt_field), "null");
+            if (roots.candidate_sha256[0])
+                (void)snprintf(candidate_field, sizeof(candidate_field),
+                               "\"%s\"", roots.candidate_sha256);
+            else
+                (void)snprintf(candidate_field, sizeof(candidate_field), "null");
             w = snprintf(oline, sizeof(oline),
                          "{\"ts\":\"%s\",\"name\":\"%s\",\"attempt\":"
                          "%lld,\"verdict\":\"%s\",\"rc\":%lld,"
-                         "\"tokens_used\":%lld,\"wall_ms\":%lld}\n",
+                         "\"seq\":%lld,\"queued_ts\":\"%s\","
+                         "\"started_unix\":%lld,"
+                         "\"tokens_used\":%lld,\"wall_ms\":%lld,"
+                         "\"receipt_sha256\":%s,\"candidate_sha256\":%s}\n",
                          ots, r->name, r->attempt, esc_verdict, rc,
-                         usage.tokens, usage.wall_ms);
+                         r->seq, esc_queued_ts, r->started,
+                         usage.tokens, usage.wall_ms,
+                         receipt_field, candidate_field);
             if (w <= 0 || (size_t)w >= sizeof(oline) ||
                 !dvq_append_row(opath, oline, (size_t)w)) {
                 free(runtext);
@@ -3467,6 +3898,8 @@ static void dvq_status(const struct zcl_command_request *req,
                 long long rc;
                 char ts[64];
                 struct dvq_usage usage;
+                struct dvq_artifact_roots roots;
+                struct dvq_outcome_timing timing;
             } last[10];
             size_t kept = 0;
             char *save = NULL, *line;
@@ -3486,6 +3919,7 @@ static void dvq_status(const struct zcl_command_request *req,
                         last[k - 1] = last[k];
                     kept--;
                 }
+                memset(&last[kept], 0, sizeof(last[kept]));
                 (void)snprintf(last[kept].name, sizeof(last[kept].name),
                                "%s", name);
                 last[kept].attempt = attempt;
@@ -3494,14 +3928,28 @@ static void dvq_status(const struct zcl_command_request *req,
                 last[kept].rc = rc;
                 (void)snprintf(last[kept].ts, sizeof(last[kept].ts), "%s",
                                ts);
+                (void)dvq_line_int(line, "seq", &last[kept].timing.seq);
+                (void)dvq_line_str(line, "queued_ts",
+                                   last[kept].timing.queued_ts,
+                                   sizeof(last[kept].timing.queued_ts));
+                (void)dvq_line_int(line, "started_unix",
+                                   &last[kept].timing.started_unix);
                 dvq_usage_from_text(line, &last[kept].usage);
+                memset(&last[kept].roots, 0, sizeof(last[kept].roots));
+                (void)dvq_line_str(line, "receipt_sha256",
+                                   last[kept].roots.receipt_sha256,
+                                   sizeof(last[kept].roots.receipt_sha256));
+                (void)dvq_line_str(line, "candidate_sha256",
+                                   last[kept].roots.candidate_sha256,
+                                   sizeof(last[kept].roots.candidate_sha256));
                 kept++;
             }
             for (size_t k = 0; k < kept; k++) {
                 if (!dvq_push_outcome(&outcomes, last[k].name,
                                       last[k].attempt, last[k].verdict,
                                       last[k].rc, last[k].ts,
-                                      &last[k].usage))
+                                      &last[k].usage, &last[k].roots,
+                                      &last[k].timing))
                     break;
             }
         }

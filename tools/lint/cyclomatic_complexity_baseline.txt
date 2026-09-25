@@ -2806,7 +2806,7 @@ tests/harness/src/test_dev_platform.c:run_hotswap_artifact_cache_fixture:81
 tests/harness/src/test_dev_platform.c:run_resident_restart_fixture:199
 tests/harness/src/test_dev_proof_signer.c:dps_git_rig:16
 tests/harness/src/test_devagent_mail.c:test_devagent_mail:36
-tests/harness/src/test_devagent_queue.c:test_devagent_queue:34
+tests/harness/src/test_devagent_queue.c:test_devagent_queue:28
 tests/harness/src/test_devagent_rules.c:test_devagent_rules:19
 tests/harness/src/test_devagent_triage.c:test_devagent_triage:20
 tests/harness/src/test_directory_watcher.c:directory_watcher_filtered_probe:32

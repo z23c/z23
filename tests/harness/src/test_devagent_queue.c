@@ -301,13 +301,18 @@ static const char k_dvx_fake[] =
     "[ -n \"$st\" ] || exit 2\n"
     "printf '%s\\n' \"$@\" > \"$st/argv.log\"\n"
     "if [ \"${RATELIMIT:-0}\" = \"1\" ]; then\n"
-    "  printf '{\"verdict\":\"FAIL\",\"reason\":\"refused\"}\\n' "
-    "> \"$st/receipt.json\"\n"
+    "  printf '{\"verdict\":\"FAIL\",\"tokens\":31,\"wall_ms\":47,"
+    "\"reason\":\"refused\"}\\n' "
+    "> \"$st/receipt.tmp\"\n"
+    "  mv \"$st/receipt.tmp\" \"$st/receipt.json\"\n"
     "  echo \"dispatching $st\"\n"
     "  echo \"response_refused: rate_limited by vendor\"\n"
     "  echo \"rc=1\"\n"
     "else\n"
-    "  printf '{\"verdict\":\"PASS\"}\\n' > \"$st/receipt.json\"\n"
+    "  printf 'queue candidate\\n' > \"$st/candidate.diff\"\n"
+    "  printf '{\"verdict\":\"PASS\",\"candidate\":\"candidate.diff\","
+    "\"tokens\":17,\"wall_ms\":23}\\n' > \"$st/receipt.tmp\"\n"
+    "  mv \"$st/receipt.tmp\" \"$st/receipt.json\"\n"
     "  echo \"dispatching $st\"\n"
     "  echo \"rc=0\"\n"
     "fi\n"
@@ -651,6 +656,433 @@ _test_next:;
     return failures;
 }
 
+/* Historical cost and artifact identity remain separate observations. */
+static int dvx_historical_root_case(void)
+{
+    int failures = 0;
+    TEST("queue: historical outcome without artifact roots keeps its cost") {
+        struct dvx_call c;
+        const struct json_value *rows, *row;
+        char qd[1100], outcomes[1200];
+        dvx_isolate("historicalroots");
+        dvx_post(&c, "leaf", "pending", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_queuedir(qd, sizeof(qd));
+        (void)snprintf(outcomes, sizeof(outcomes), "%s/outcomes.jsonl", qd);
+        ASSERT(dvx_write(outcomes,
+                         "{\"ts\":\"2026-09-25T00:00:00Z\",\"name\":\"legacy\","
+                         "\"attempt\":1,\"verdict\":\"FAIL\",\"rc\":1,"
+                         "\"tokens_used\":7,\"wall_ms\":11}\n"));
+        dvx_verb(&c, "status", true);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        rows = dvx_arr(&c, "outcomes");
+        ASSERT(rows != NULL && rows->num_children == 1);
+        row = &rows->children[0];
+        ASSERT(json_get(row, "receipt_sha256") != NULL &&
+               json_get(row, "receipt_sha256")->type == JSON_NULL);
+        ASSERT(json_get(row, "candidate_sha256") != NULL &&
+               json_get(row, "candidate_sha256")->type == JSON_NULL);
+        ASSERT(json_get(row, "seq") != NULL &&
+               json_get(row, "seq")->type == JSON_NULL);
+        ASSERT(json_get(row, "queued_ts") != NULL &&
+               json_get(row, "queued_ts")->type == JSON_NULL);
+        ASSERT(json_get(row, "started_unix") != NULL &&
+               json_get(row, "started_unix")->type == JSON_NULL);
+        ASSERT_EQ(json_get_int(json_get(row, "tokens_used")), 7);
+        ASSERT_EQ(json_get_int(json_get(row, "wall_ms")), 11);
+        dvx_end(&c);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    dvx_restore();
+    return failures;
+}
+
+#if !defined(_WIN32)
+static int dvx_receipt_root_cases(void)
+{
+    int failures = 0;
+    TEST("queue: ambiguous receipt bytes cannot name candidate bytes") {
+        struct dvx_call c, r;
+        char bindir[512], wt[512], qd[1100], receipt[1300], path[9000];
+        const struct json_value *rows, *row;
+        const char *names[] = {"duplicate", "escaped", "overflow",
+                               "conflict", "leadingzero", "rawnewline",
+                               "verdictunicode"};
+        const char *bodies[] = {
+            "{\"verdict\":\"PASS\",\"candidate\":\"candidate.diff\","
+            "\"candidate\":\"other.diff\",\"tokens\":17}\n",
+            "{\"verdict\":\"PASS\",\"candidate\":\"candidate.diff\","
+            "\"cand\\u0069date\":\"other.diff\",\"tokens\":17}\n",
+            "{\"verdict\":\"PASS\",\"candidate\":\"candidate.diff\","
+            "\"tokens\":99999999999999999999999999999999}\n",
+            "{\"verdict\":\"PASS\",\"candidate\":\"candidate.diff\","
+            "\"tokens\":17,\"tokens_used\":18}\n",
+            "{\"verdict\":\"PASS\",\"candidate\":\"candidate.diff\","
+            "\"tokens\":01}\n",
+            "{\"verdict\":\"PA\nSS\",\"candidate\":\"candidate.diff\"}\n",
+            "{\"verdict\":\"P\\u0041SS\",\"candidate\":\"candidate.diff\"}\n"
+        };
+        dvx_isolate("ambiguous-receipt");
+        ASSERT(dvx_fake_on_path("ambiguousbin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("ambiguouswt", wt, sizeof(wt)));
+        (void)snprintf(path, sizeof(path), "%s:%s", bindir, g_dvx_saved_path);
+        setenv("PATH", path, 1);
+        dvx_queuedir(qd, sizeof(qd));
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            dvx_post(&c, "leaf", names[i], NULL, NULL, NULL, NULL, -1);
+            ASSERT(dvx_run(&c));
+            ASSERT(dvx_ok(&c));
+            dvx_end(&c);
+            dvx_verb(&c, "next", false);
+            ASSERT(dvx_run(&c));
+            ASSERT(dvx_ok(&c));
+            dvx_end(&c);
+            (void)snprintf(receipt, sizeof(receipt),
+                           "%s/../engine/%s/a1/receipt.json", qd, names[i]);
+            ASSERT(dvx_poll(receipt, 150));
+            ASSERT(dvx_write(receipt, bodies[i]));
+            dvx_verb(&r, "reap", false);
+            ASSERT(dvx_run(&r));
+            ASSERT(dvx_ok(&r));
+            rows = dvx_arr(&r, "outcomes");
+            ASSERT(rows && rows->num_children == 1);
+            row = &rows->children[0];
+            ASSERT_STR_EQ(json_get_str(json_get(row, "verdict")), "unknown");
+            ASSERT(json_get(row, "receipt_sha256")->type == JSON_NULL);
+            ASSERT(json_get(row, "candidate_sha256")->type == JSON_NULL);
+            dvx_end(&r);
+        }
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("queue: escaped worker provenance keeps exact artifact roots") {
+        struct dvx_call c, r;
+        char bindir[512], wt[512], qd[1100], receipt[1300], path[9000];
+        const struct json_value *rows, *row, *root;
+        dvx_isolate("escaped-provenance");
+        ASSERT(dvx_fake_on_path("provenancebin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("provenancewt", wt, sizeof(wt)));
+        (void)snprintf(path, sizeof(path), "%s:%s", bindir, g_dvx_saved_path);
+        setenv("PATH", path, 1);
+        dvx_post(&c, "leaf", "provenance", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_queuedir(qd, sizeof(qd));
+        (void)snprintf(receipt, sizeof(receipt),
+                       "%s/../engine/provenance/a1/receipt.json", qd);
+        ASSERT(dvx_poll(receipt, 150));
+        ASSERT(dvx_write(receipt,
+                         "{\"verdict\":\"PASS\",\"candidate\":\"candidate.diff\","
+                         "\"tokens\":17,\"wall_ms\":23,"
+                         "\"source\":\"line\\u000d literal \\\\u\"}\n"));
+        dvx_verb(&r, "reap", false);
+        ASSERT(dvx_run(&r));
+        ASSERT(dvx_ok(&r));
+        rows = dvx_arr(&r, "outcomes");
+        ASSERT(rows && rows->num_children == 1);
+        row = &rows->children[0];
+        ASSERT_STR_EQ(json_get_str(json_get(row, "verdict")), "PASS");
+        root = json_get(row, "receipt_sha256");
+        ASSERT(root && root->type == JSON_STR && strlen(root->val.s) == 64);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "candidate_sha256")),
+                      "57cb3c681d8e20b291dbd7eec190205f7b2dcb2d200017ede904832666bd36b8");
+        dvx_end(&r);
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("queue: symlinked attempt directory cannot supply artifact roots") {
+        struct dvx_call c, r;
+        char bindir[512], wt[512], qd[1100], receipt[1300], attempt[1300];
+        char moved[1300], path[9000];
+        const struct json_value *rows, *row;
+        dvx_isolate("linked-attempt");
+        ASSERT(dvx_fake_on_path("linkedbin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("linkedwt", wt, sizeof(wt)));
+        (void)snprintf(path, sizeof(path), "%s:%s", bindir, g_dvx_saved_path);
+        setenv("PATH", path, 1);
+        dvx_post(&c, "leaf", "linked", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_queuedir(qd, sizeof(qd));
+        (void)snprintf(attempt, sizeof(attempt),
+                       "%s/../engine/linked/a1", qd);
+        (void)snprintf(moved, sizeof(moved),
+                       "%s/../engine/linked/a1-moved", qd);
+        (void)snprintf(receipt, sizeof(receipt), "%s/receipt.json", attempt);
+        ASSERT(dvx_poll(receipt, 150));
+        ASSERT(rename(attempt, moved) == 0);
+        ASSERT(symlink("a1-moved", attempt) == 0);
+        dvx_verb(&r, "reap", false);
+        ASSERT(dvx_run(&r));
+        ASSERT(dvx_ok(&r));
+        rows = dvx_arr(&r, "outcomes");
+        ASSERT(rows && rows->num_children == 1);
+        row = &rows->children[0];
+        ASSERT_STR_EQ(json_get_str(json_get(row, "verdict")), "unknown");
+        ASSERT(json_get(row, "receipt_sha256")->type == JSON_NULL);
+        ASSERT(json_get(row, "candidate_sha256")->type == JSON_NULL);
+        dvx_end(&r);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    dvx_restore();
+    return failures;
+}
+
+static int dvx_unresolved_candidate_root_case(void)
+{
+    int failures = 0;
+    TEST("queue: escaped candidate path retains verdict without a false root") {
+        struct dvx_call c, r;
+        char bindir[512], wt[512], qd[1100], receipt[1300], path[9000];
+        const struct json_value *rows, *row, *root;
+        dvx_isolate("escaped-candidate");
+        ASSERT(dvx_fake_on_path("escapecandbin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("escapecandwt", wt, sizeof(wt)));
+        (void)snprintf(path, sizeof(path), "%s:%s", bindir, g_dvx_saved_path);
+        setenv("PATH", path, 1);
+        dvx_post(&c, "leaf", "escapecand", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        dvx_end(&c);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        dvx_end(&c);
+        dvx_queuedir(qd, sizeof(qd));
+        (void)snprintf(receipt, sizeof(receipt),
+                       "%s/../engine/escapecand/a1/receipt.json", qd);
+        ASSERT(dvx_poll(receipt, 150));
+        ASSERT(dvx_write(receipt,
+                         "{\"verdict\":\"PASS\",\"candidate\":"
+                         "\"candidate\\u002ediff\",\"tokens\":17}\n"));
+        dvx_verb(&r, "reap", false);
+        ASSERT(dvx_run(&r) && dvx_ok(&r));
+        rows = dvx_arr(&r, "outcomes");
+        ASSERT(rows && rows->num_children == 1);
+        row = &rows->children[0];
+        ASSERT_STR_EQ(json_get_str(json_get(row, "verdict")), "PASS");
+        root = json_get(row, "receipt_sha256");
+        ASSERT(root && root->type == JSON_STR && strlen(root->val.s) == 64);
+        root = json_get(row, "candidate_sha256");
+        ASSERT(root && root->type == JSON_NULL);
+        dvx_end(&r);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    dvx_restore();
+    return failures;
+}
+#endif /* !defined(_WIN32) */
+
+#if !defined(_WIN32)
+static int dvx_receipt_cost_cases(void)
+{
+    int failures = 0;
+    TEST("queue: next launches the fake, reap records its PASS") {
+        struct dvx_call c, r;
+        char bindir[512], wt[512], qd[1100], receipt[1300];
+        const struct json_value *rows;
+        char path[9000];
+        dvx_isolate("launch");
+        ASSERT(dvx_fake_on_path("launchbin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("launchwt", wt, sizeof(wt)));
+        (void)snprintf(path, sizeof(path), "%s:%s", bindir,
+                       g_dvx_saved_path);
+        setenv("PATH", path, 1);
+        dvx_post(&c, "leaf", "launched", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "state"), "running");
+        ASSERT_STR_EQ(dvx_str(&c, "name"), "launched");
+        ASSERT_STR_EQ(dvx_str(&c, "worktree"), wt);
+        ASSERT(dvx_str(&c, "pid_or_unit")[0] != '\0');
+        dvx_end(&c);
+        dvx_queuedir(qd, sizeof(qd));
+        (void)snprintf(receipt, sizeof(receipt), "%s/../engine/launched/a1/"
+                                                 "receipt.json",
+                       qd);
+        ASSERT(dvx_poll(receipt, 150));
+        /* The dispatch pins the shell's argv: group, territory, consent,
+         * and a composed task file the run can read. */
+        {
+            char argvlog[1300], taskfile[1300], argv[4096], task[256];
+            FILE *f;
+            (void)snprintf(argvlog, sizeof(argvlog),
+                           "%s/../engine/launched/a1/argv.log", qd);
+            (void)snprintf(taskfile, sizeof(taskfile),
+                           "%s/../engine/launched/a1/task.txt", qd);
+            f = fopen(argvlog, "r");
+            ASSERT(f != NULL);
+            if (f) {
+                size_t n = fread(argv, 1, sizeof(argv) - 1, f);
+                argv[n] = '\0';
+                (void)fclose(f);
+                ASSERT(strstr(argv, "--yes-dispatch") != NULL);
+                ASSERT(strstr(argv, "--group") != NULL);
+                ASSERT(strstr(argv, "devagent_launched") != NULL);
+                ASSERT(strstr(argv, "--territory") != NULL);
+            }
+            f = fopen(taskfile, "r");
+            ASSERT(f != NULL);
+            if (f) {
+                size_t n = fread(task, 1, sizeof(task) - 1, f);
+                task[n] = '\0';
+                (void)fclose(f);
+                ASSERT(strstr(task, "kind: fix-gate") != NULL);
+            }
+        }
+        dvx_verb(&r, "reap", false);
+        ASSERT(dvx_run(&r));
+        ASSERT(dvx_ok(&r));
+        rows = dvx_arr(&r, "outcomes");
+        ASSERT(rows != NULL);
+        ASSERT_EQ((long long)rows->num_children, 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "name")),
+                      "launched");
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "verdict")),
+                      "PASS");
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0],
+                                            "receipt_sha256")),
+                      "e2e65de83072530e02b0a7d58d37a03eb9a075a31ae6f8815d6eaf5fd38e1395");
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0],
+                                            "candidate_sha256")),
+                      "57cb3c681d8e20b291dbd7eec190205f7b2dcb2d200017ede904832666bd36b8");
+        ASSERT(json_get_int(json_get(&rows->children[0], "seq")) > 0);
+        ASSERT(strlen(json_get_str(json_get(&rows->children[0],
+                                             "queued_ts"))) == 20);
+        ASSERT(json_get_int(json_get(&rows->children[0],
+                                     "started_unix")) > 0);
+        ASSERT_EQ(json_get_int(json_get(&rows->children[0], "tokens_used")),
+                  17);
+        ASSERT_EQ(json_get_int(json_get(&rows->children[0], "wall_ms")), 23);
+        dvx_end(&r);
+        dvx_verb(&r, "status", true);
+        ASSERT(dvx_run(&r));
+        ASSERT(dvx_ok(&r));
+        rows = dvx_arr(&r, "outcomes");
+        ASSERT(rows != NULL && rows->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0],
+                                            "receipt_sha256")),
+                      "e2e65de83072530e02b0a7d58d37a03eb9a075a31ae6f8815d6eaf5fd38e1395");
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0],
+                                            "candidate_sha256")),
+                      "57cb3c681d8e20b291dbd7eec190205f7b2dcb2d200017ede904832666bd36b8");
+        ASSERT(json_get_int(json_get(&rows->children[0], "seq")) > 0);
+        ASSERT(strlen(json_get_str(json_get(&rows->children[0],
+                                             "queued_ts"))) == 20);
+        ASSERT(json_get_int(json_get(&rows->children[0],
+                                     "started_unix")) > 0);
+        dvx_end(&r);
+        ASSERT_EQ(dvx_queued_count("launched"), 0);
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("queue: a rate-limit run.out requeues with attempt 2") {
+        struct dvx_call c, r;
+        char bindir[512], wt[512], qd[1100], receipt[1300];
+        const struct json_value *rows;
+        int64_t found = 0;
+        dvx_isolate("ratelimit");
+        ASSERT(dvx_fake_on_path("ratelimitbin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("ratelimitwt", wt, sizeof(wt)));
+        {
+            char path[9000];
+            (void)snprintf(path, sizeof(path), "%s:%s", bindir,
+                           g_dvx_saved_path);
+            setenv("PATH", path, 1);
+        }
+        setenv("RATELIMIT", "1", 1);
+        dvx_post(&c, "leaf", "throttled", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "state"), "running");
+        dvx_end(&c);
+        unsetenv("RATELIMIT");
+        dvx_queuedir(qd, sizeof(qd));
+        (void)snprintf(receipt, sizeof(receipt), "%s/../engine/throttled/a1/"
+                                                 "receipt.json",
+                       qd);
+        ASSERT(dvx_poll(receipt, 150));
+        dvx_verb(&r, "reap", false);
+        ASSERT(dvx_run(&r));
+        ASSERT(dvx_ok(&r));
+        rows = dvx_arr(&r, "outcomes");
+        ASSERT(rows != NULL);
+        ASSERT_EQ((long long)rows->num_children, 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "name")),
+                      "throttled");
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0],
+                                            "receipt_sha256")),
+                      "79a20e4be564bfa7862f9bc76bdd8727167b835ca03d2dcd5a3aa189673e5614");
+        ASSERT(json_get(&rows->children[0], "candidate_sha256") != NULL &&
+               json_get(&rows->children[0], "candidate_sha256")->type ==
+                   JSON_NULL);
+        ASSERT_EQ(json_get_int(json_get(&rows->children[0], "tokens_used")),
+                  31);
+        ASSERT_EQ(json_get_int(json_get(&rows->children[0], "wall_ms")), 47);
+        for (size_t i = 0; i < rows->num_children; i++) {
+            const struct json_value *a =
+                json_get(&rows->children[i], "attempt");
+            if (a && a->type == JSON_INT && json_get_int(a) == 1)
+                found++;
+        }
+        ASSERT_EQ(found, 1);
+        dvx_end(&r);
+        dvx_verb(&r, "status", true);
+        ASSERT(dvx_run(&r));
+        ASSERT(dvx_ok(&r));
+        rows = dvx_arr(&r, "outcomes");
+        ASSERT(rows != NULL && rows->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0],
+                                            "receipt_sha256")),
+                      "79a20e4be564bfa7862f9bc76bdd8727167b835ca03d2dcd5a3aa189673e5614");
+        ASSERT(json_get(&rows->children[0], "candidate_sha256") != NULL &&
+               json_get(&rows->children[0], "candidate_sha256")->type ==
+                   JSON_NULL);
+        ASSERT_EQ(json_get_int(json_get(&rows->children[0], "tokens_used")),
+                  31);
+        ASSERT_EQ(json_get_int(json_get(&rows->children[0], "wall_ms")), 47);
+        dvx_end(&r);
+        /* The refusal is back in line as attempt 2. */
+        ASSERT_EQ(dvx_queued_count("throttled"), 1);
+        ASSERT_EQ(dvx_queued_attempt("throttled"), 2);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    dvx_restore();
+    return failures;
+}
+#endif /* !defined(_WIN32) */
+
+
 int test_devagent_queue(void);
 int test_devagent_queue(void)
 {
@@ -850,132 +1282,13 @@ int test_devagent_queue(void)
         PASS();
     }
 
-#if !defined(_WIN32)
-    TEST("queue: next launches the fake, reap records its PASS") {
-        struct dvx_call c, r;
-        char bindir[512], wt[512], qd[1100], receipt[1300];
-        const struct json_value *rows;
-        char path[9000];
-        dvx_isolate("launch");
-        ASSERT(dvx_fake_on_path("launchbin", bindir, sizeof(bindir)));
-        ASSERT(dvx_pool("launchwt", wt, sizeof(wt)));
-        (void)snprintf(path, sizeof(path), "%s:%s", bindir,
-                       g_dvx_saved_path);
-        setenv("PATH", path, 1);
-        dvx_post(&c, "leaf", "launched", NULL, NULL, NULL, NULL, -1);
-        ASSERT(dvx_run(&c));
-        ASSERT(dvx_ok(&c));
-        dvx_end(&c);
-        dvx_verb(&c, "next", false);
-        ASSERT(dvx_run(&c));
-        ASSERT(dvx_ok(&c));
-        ASSERT_STR_EQ(dvx_str(&c, "state"), "running");
-        ASSERT_STR_EQ(dvx_str(&c, "name"), "launched");
-        ASSERT_STR_EQ(dvx_str(&c, "worktree"), wt);
-        ASSERT(dvx_str(&c, "pid_or_unit")[0] != '\0');
-        dvx_end(&c);
-        dvx_queuedir(qd, sizeof(qd));
-        (void)snprintf(receipt, sizeof(receipt), "%s/../engine/launched/a1/"
-                                                 "receipt.json",
-                       qd);
-        ASSERT(dvx_poll(receipt, 150));
-        /* The dispatch pins the shell's argv: group, territory, consent,
-         * and a composed task file the run can read. */
-        {
-            char argvlog[1300], taskfile[1300], argv[4096], task[256];
-            FILE *f;
-            (void)snprintf(argvlog, sizeof(argvlog),
-                           "%s/../engine/launched/a1/argv.log", qd);
-            (void)snprintf(taskfile, sizeof(taskfile),
-                           "%s/../engine/launched/a1/task.txt", qd);
-            f = fopen(argvlog, "r");
-            ASSERT(f != NULL);
-            if (f) {
-                size_t n = fread(argv, 1, sizeof(argv) - 1, f);
-                argv[n] = '\0';
-                (void)fclose(f);
-                ASSERT(strstr(argv, "--yes-dispatch") != NULL);
-                ASSERT(strstr(argv, "--group") != NULL);
-                ASSERT(strstr(argv, "devagent_launched") != NULL);
-                ASSERT(strstr(argv, "--territory") != NULL);
-            }
-            f = fopen(taskfile, "r");
-            ASSERT(f != NULL);
-            if (f) {
-                size_t n = fread(task, 1, sizeof(task) - 1, f);
-                task[n] = '\0';
-                (void)fclose(f);
-                ASSERT(strstr(task, "kind: fix-gate") != NULL);
-            }
-        }
-        dvx_verb(&r, "reap", false);
-        ASSERT(dvx_run(&r));
-        ASSERT(dvx_ok(&r));
-        rows = dvx_arr(&r, "outcomes");
-        ASSERT(rows != NULL);
-        ASSERT_EQ((long long)rows->num_children, 1);
-        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "name")),
-                      "launched");
-        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "verdict")),
-                      "PASS");
-        dvx_end(&r);
-        ASSERT_EQ(dvx_queued_count("launched"), 0);
-        dvx_restore();
-        PASS();
-    }
+    failures += dvx_historical_root_case();
 
-    TEST("queue: a rate-limit run.out requeues with attempt 2") {
-        struct dvx_call c, r;
-        char bindir[512], wt[512], qd[1100], receipt[1300];
-        const struct json_value *rows;
-        int64_t found = 0;
-        dvx_isolate("ratelimit");
-        ASSERT(dvx_fake_on_path("ratelimitbin", bindir, sizeof(bindir)));
-        ASSERT(dvx_pool("ratelimitwt", wt, sizeof(wt)));
-        {
-            char path[9000];
-            (void)snprintf(path, sizeof(path), "%s:%s", bindir,
-                           g_dvx_saved_path);
-            setenv("PATH", path, 1);
-        }
-        setenv("RATELIMIT", "1", 1);
-        dvx_post(&c, "leaf", "throttled", NULL, NULL, NULL, NULL, -1);
-        ASSERT(dvx_run(&c));
-        ASSERT(dvx_ok(&c));
-        dvx_end(&c);
-        dvx_verb(&c, "next", false);
-        ASSERT(dvx_run(&c));
-        ASSERT(dvx_ok(&c));
-        ASSERT_STR_EQ(dvx_str(&c, "state"), "running");
-        dvx_end(&c);
-        unsetenv("RATELIMIT");
-        dvx_queuedir(qd, sizeof(qd));
-        (void)snprintf(receipt, sizeof(receipt), "%s/../engine/throttled/a1/"
-                                                 "receipt.json",
-                       qd);
-        ASSERT(dvx_poll(receipt, 150));
-        dvx_verb(&r, "reap", false);
-        ASSERT(dvx_run(&r));
-        ASSERT(dvx_ok(&r));
-        rows = dvx_arr(&r, "outcomes");
-        ASSERT(rows != NULL);
-        ASSERT_EQ((long long)rows->num_children, 1);
-        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "name")),
-                      "throttled");
-        for (size_t i = 0; i < rows->num_children; i++) {
-            const struct json_value *a =
-                json_get(&rows->children[i], "attempt");
-            if (a && a->type == JSON_INT && json_get_int(a) == 1)
-                found++;
-        }
-        ASSERT_EQ(found, 1);
-        dvx_end(&r);
-        /* The refusal is back in line as attempt 2. */
-        ASSERT_EQ(dvx_queued_count("throttled"), 1);
-        ASSERT_EQ(dvx_queued_attempt("throttled"), 2);
-        dvx_restore();
-        PASS();
-    }
+#if !defined(_WIN32)
+    failures += dvx_receipt_cost_cases();
+
+    failures += dvx_receipt_root_cases();
+    failures += dvx_unresolved_candidate_root_case();
 
     TEST("queue: the oldest queued row launches first") {
         struct dvx_call c;
