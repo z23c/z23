@@ -118,18 +118,112 @@ const char *zcl_reflex_frames_reason(enum zcl_reflex_frames_status status)
     return status == ZCL_REFLEX_FRAMES_OK ? "" : "report incomplete";
 }
 
-/* Today's resident uses report strings without checking them. */
+/* ── report field validation (before any use) ──────────────────────────── */
+
+static bool text_terminated(const char *s, size_t cap)
+{
+    return memchr(s, '\0', cap) != NULL;
+}
+
+static bool lower_hex_digit(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+}
+
+/* Exactly 64 lowercase hex digits then NUL, or (when allowed) empty. */
+static bool digest_field_ok(const char *s, size_t cap, bool allow_empty)
+{
+    if (cap < 65 || !text_terminated(s, cap)) return false;
+    if (s[0] == '\0') return allow_empty;
+    for (size_t i = 0; i < 64; i++)
+        if (!lower_hex_digit(s[i])) return false;
+    return s[64] == '\0';
+}
+
+static bool flag_byte_ok(const void *base, size_t offset)
+{
+    unsigned char byte;
+    memcpy(&byte, (const unsigned char *)base + offset, 1);
+    return byte <= 1u;
+}
+
 const char *zcl_reflex_preload_invalid(const struct zcl_reflex_preload_frame *f)
 {
-    (void)f;
+    if (!f) return "pre-load frame absent";
+    if (f->hash_verified > 1u) return "pre-load hash_verified flag malformed";
+    if (f->sandboxed > 1u) return "pre-load sandboxed flag malformed";
+    if (!digest_field_ok(f->runtime_module_sha256,
+                         sizeof(f->runtime_module_sha256),
+                         f->hash_verified == 0u))
+        return "pre-load runtime_module_sha256 is not 64 lowercase hex";
+    if (!text_terminated(f->stage, sizeof(f->stage)))
+        return "pre-load stage unterminated";
+    if (!text_terminated(f->error, sizeof(f->error)))
+        return "pre-load error unterminated";
+    return NULL;
+}
+
+struct reflex_flag_field {
+    size_t offset;
+    const char *why;
+};
+
+#define REFLEX_SERVICE_FLAG(name) \
+    {offsetof(struct zcl_hotswap_service_report, name), \
+     "observation service." #name " flag malformed"}
+
+static const struct reflex_flag_field g_service_flags[] = {
+    REFLEX_SERVICE_FLAG(recognized), REFLEX_SERVICE_FLAG(ok),
+    REFLEX_SERVICE_FLAG(verify_only), REFLEX_SERVICE_FLAG(activated),
+    REFLEX_SERVICE_FLAG(probed), REFLEX_SERVICE_FLAG(rolled_back),
+    REFLEX_SERVICE_FLAG(dev_restart),
+};
+
+#undef REFLEX_SERVICE_FLAG
+
+static const char *observation_service_invalid(
+    const struct zcl_hotswap_service_report *s)
+{
+    for (size_t i = 0; i < sizeof(g_service_flags) / sizeof(g_service_flags[0]);
+         i++)
+        if (!flag_byte_ok(s, g_service_flags[i].offset))
+            return g_service_flags[i].why;
+    if (!text_terminated(s->service_id, sizeof(s->service_id)))
+        return "observation service.service_id unterminated";
+    if (!digest_field_ok(s->loaded_image_sha256,
+                         sizeof(s->loaded_image_sha256), true))
+        return "observation service.loaded_image_sha256 is not 64 lowercase hex";
+    if (!digest_field_ok(s->loaded_image_sha3_256,
+                         sizeof(s->loaded_image_sha3_256), true))
+        return "observation service.loaded_image_sha3_256 is not 64 lowercase "
+               "hex";
+    if (!text_terminated(s->stage, sizeof(s->stage)))
+        return "observation service.stage unterminated";
+    if (!text_terminated(s->error, sizeof(s->error)))
+        return "observation service.error unterminated";
     return NULL;
 }
 
 const char *zcl_reflex_observation_invalid(
     const struct zcl_reflex_observation_frame *f)
 {
-    (void)f;
-    return NULL;
+    if (!f) return "observation frame absent";
+    if (f->story_ok > 1u) return "observation story_ok flag malformed";
+    if (f->descriptor_valid > 1u)
+        return "observation descriptor_valid flag malformed";
+    if (f->candidate_executed > 1u)
+        return "observation candidate_executed flag malformed";
+    if (!text_terminated(f->stage, sizeof(f->stage)))
+        return "observation stage unterminated";
+    if (!text_terminated(f->error, sizeof(f->error)))
+        return "observation error unterminated";
+    if (!text_terminated(f->observation.exercised_surface,
+                         sizeof(f->observation.exercised_surface)))
+        return "observation observation.exercised_surface unterminated";
+    if (!text_terminated(f->observation.detail,
+                         sizeof(f->observation.detail)))
+        return "observation observation.detail unterminated";
+    return observation_service_invalid(&f->service);
 }
 
 /* ── bounded reap + seccomp layer census ────────────────────────────────── */
