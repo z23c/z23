@@ -6,6 +6,7 @@
 
 #include "vcs/blob_store.h"
 
+#include "base/bytes.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -40,13 +41,6 @@ static const char *const cpk_field_names[VCS_CPK_FIELD_COUNT] = {
     "target", "flags", "environment", "abi_generation", "build_graph",
     "harness", "fixtures", "invariants", "integration_edges", "policy",
 };
-
-static bool pt_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 static void pt_sha3_domain(struct sha3_256_ctx *sha, const char *domain)
 {
@@ -190,8 +184,8 @@ bool vcs_component_proof_generated_root(
         const struct vcs_component_proof_generated *g = &inputs[i];
         if (!g->path || !g->path[0] ||
             (i > 0 && strcmp(inputs[i - 1].path, g->path) >= 0) ||
-            !pt_nonzero(g->content_root, VCS_PROOF_ROOT_BYTES) ||
-            !pt_nonzero(g->producer_key, VCS_PROOF_ROOT_BYTES))
+            !zcl_bytes_any_set(g->content_root, VCS_PROOF_ROOT_BYTES) ||
+            !zcl_bytes_any_set(g->producer_key, VCS_PROOF_ROOT_BYTES))
             LOG_RETURN(false, PT_LOG,
                        "generated input %zu not canonical (paths ascending, "
                        "unique; roots nonzero)", i);
@@ -270,7 +264,7 @@ static bool pt_edges_hash(const struct vcs_component_edge **sorted,
         if (i > 0 && strcmp(sorted[i - 1]->callee_id, sorted[i]->callee_id) == 0)
             LOG_RETURN(false, PT_LOG, "integration edge to %s listed twice",
                        sorted[i]->callee_id);
-        if (!pt_nonzero(sorted[i]->contract_root, VCS_PROOF_ROOT_BYTES))
+        if (!zcl_bytes_any_set(sorted[i]->contract_root, VCS_PROOF_ROOT_BYTES))
             LOG_RETURN(false, PT_LOG, "integration edge to %s: zero contract",
                        sorted[i]->callee_id);
         pt_sha3_str(&sha, sorted[i]->callee_id);
@@ -309,7 +303,7 @@ bool vcs_component_proof_key_valid(const struct vcs_component_proof_key_v1 *k)
 {
     if (!k) return false;
     for (size_t f = 0; f < VCS_CPK_FIELD_COUNT; f++)
-        if (!pt_nonzero(k->roots[f], VCS_PROOF_ROOT_BYTES)) return false;
+        if (!zcl_bytes_any_set(k->roots[f], VCS_PROOF_ROOT_BYTES)) return false;
     return true;
 }
 
@@ -427,20 +421,20 @@ static bool ptk_links_valid(const struct vcs_proof_ticket_v1 *t)
     bool wants_artifact = t->action_class == VCS_PROOF_ACTION_BUILD &&
                           t->verdict == VCS_PROOF_VERDICT_PASS;
     bool wants_ref = t->basis == VCS_PROOF_BASIS_REUSED;
-    return pt_nonzero(t->artifact_root, VCS_PROOF_ROOT_BYTES) ==
+    return zcl_bytes_any_set(t->artifact_root, VCS_PROOF_ROOT_BYTES) ==
                wants_artifact &&
-           pt_nonzero(t->basis_ref, VCS_PROOF_ROOT_BYTES) == wants_ref;
+           zcl_bytes_any_set(t->basis_ref, VCS_PROOF_ROOT_BYTES) == wants_ref;
 }
 
 bool vcs_proof_ticket_body_valid(const struct vcs_proof_ticket_v1 *t)
 {
     if (!t || !ptk_enums_valid(t) || !ptk_links_valid(t)) return false;
     return ptk_counts_valid(t) && t->created_unix != 0 &&
-           pt_nonzero(t->input_key, VCS_PROOF_ROOT_BYTES) &&
-           pt_nonzero(t->key_preimage_root, VCS_PROOF_ROOT_BYTES) &&
-           pt_nonzero(t->source_root, VCS_PROOF_ROOT_BYTES) &&
-           pt_nonzero(t->evidence_root, VCS_PROOF_ROOT_BYTES) &&
-           pt_nonzero(t->producer_pubkey, VCS_PROOF_PUBKEY_BYTES);
+           zcl_bytes_any_set(t->input_key, VCS_PROOF_ROOT_BYTES) &&
+           zcl_bytes_any_set(t->key_preimage_root, VCS_PROOF_ROOT_BYTES) &&
+           zcl_bytes_any_set(t->source_root, VCS_PROOF_ROOT_BYTES) &&
+           zcl_bytes_any_set(t->evidence_root, VCS_PROOF_ROOT_BYTES) &&
+           zcl_bytes_any_set(t->producer_pubkey, VCS_PROOF_PUBKEY_BYTES);
 }
 
 /* Bytes [0,296): everything the signature covers. */
@@ -479,7 +473,7 @@ static void ptk_message(const struct vcs_proof_ticket_v1 *t,
 bool vcs_proof_ticket_sign(struct vcs_proof_ticket_v1 *t,
                            const uint8_t seed[32])
 {
-    if (!t || !seed || !pt_nonzero(seed, 32))
+    if (!t || !seed || !zcl_bytes_any_set(seed, 32))
         LOG_RETURN(false, PT_LOG, "ticket sign: missing ticket or seed");
     uint8_t secret[32];
     ed25519_keypair(t->producer_pubkey, secret, seed);
@@ -509,7 +503,7 @@ bool vcs_proof_ticket_encode(const struct vcs_proof_ticket_v1 *t,
 {
     if (!out || !vcs_proof_ticket_body_valid(t))
         LOG_RETURN(false, PT_LOG, "ticket encode: body not canonical");
-    if (!pt_nonzero(t->signature, VCS_PROOF_SIGNATURE_BYTES))
+    if (!zcl_bytes_any_set(t->signature, VCS_PROOF_SIGNATURE_BYTES))
         LOG_RETURN(false, PT_LOG, "ticket encode: unsigned ticket refused");
     ptk_put_signed(t, out);
     memcpy(out + VCS_PROOF_TICKET_SIGNED_BYTES, t->signature,
@@ -558,7 +552,7 @@ bool vcs_proof_ticket_decode(const uint8_t *wire, size_t len,
     memset(&parsed, 0, sizeof(parsed));
     ptk_read(wire, &parsed);
     if (!vcs_proof_ticket_body_valid(&parsed) ||
-        !pt_nonzero(parsed.signature, VCS_PROOF_SIGNATURE_BYTES))
+        !zcl_bytes_any_set(parsed.signature, VCS_PROOF_SIGNATURE_BYTES))
         LOG_RETURN(false, PT_LOG, "ticket decode: non-canonical values");
     *out = parsed;
     return true;

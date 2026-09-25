@@ -6,6 +6,7 @@
 
 #include "chain/mmr.h"
 
+#include "base/bytes.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -23,13 +24,6 @@
 #define PCK_PEAKS_DOMAIN "zcl.proof_checkpoint.peaks.v1"
 #define PCK_SIGN_MESSAGE_BYTES \
     ((sizeof(PCK_SIGN_DOMAIN) - 1u) + VCS_PROOF_CHECKPOINT_SIGNED_BYTES)
-
-static bool pck_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 static void pck_hash(const char *domain, const uint8_t *bytes, size_t len,
                      uint8_t out[VCS_PROOF_ROOT_BYTES])
@@ -57,9 +51,9 @@ bool vcs_proof_checkpoint_peaks_root(const struct mmr *m,
 static bool pck_body_valid(const struct vcs_proof_checkpoint_v1 *c)
 {
     return c && c->leaf_count >= 1 && c->created_unix != 0 &&
-           pck_nonzero(c->issuer_pubkey, VCS_PROOF_PUBKEY_BYTES) &&
-           pck_nonzero(c->mmr_root, VCS_PROOF_ROOT_BYTES) &&
-           pck_nonzero(c->peaks_root, VCS_PROOF_ROOT_BYTES);
+           zcl_bytes_any_set(c->issuer_pubkey, VCS_PROOF_PUBKEY_BYTES) &&
+           zcl_bytes_any_set(c->mmr_root, VCS_PROOF_ROOT_BYTES) &&
+           zcl_bytes_any_set(c->peaks_root, VCS_PROOF_ROOT_BYTES);
 }
 
 static void pck_put_signed(const struct vcs_proof_checkpoint_v1 *c,
@@ -86,7 +80,7 @@ static void pck_message(const struct vcs_proof_checkpoint_v1 *c,
 bool vcs_proof_checkpoint_sign(struct vcs_proof_checkpoint_v1 *c,
                                const uint8_t seed[32])
 {
-    if (!c || !seed || !pck_nonzero(seed, 32))
+    if (!c || !seed || !zcl_bytes_any_set(seed, 32))
         LOG_RETURN(false, PCK_LOG, "checkpoint sign: missing input or seed");
     uint8_t secret[32];
     ed25519_keypair(c->issuer_pubkey, secret, seed);
@@ -116,7 +110,7 @@ bool vcs_proof_checkpoint_encode(const struct vcs_proof_checkpoint_v1 *c,
                                  uint8_t out[VCS_PROOF_CHECKPOINT_WIRE_BYTES])
 {
     if (!out || !pck_body_valid(c) ||
-        !pck_nonzero(c->signature, VCS_PROOF_SIGNATURE_BYTES))
+        !zcl_bytes_any_set(c->signature, VCS_PROOF_SIGNATURE_BYTES))
         LOG_RETURN(false, PCK_LOG, "checkpoint encode: not canonical/signed");
     pck_put_signed(c, out);
     memcpy(out + VCS_PROOF_CHECKPOINT_SIGNED_BYTES, c->signature,
@@ -144,7 +138,7 @@ bool vcs_proof_checkpoint_decode(const uint8_t *wire, size_t len,
     c.created_unix = zcl_read_u64_le(wire + 152);
     memcpy(c.signature, wire + 160, VCS_PROOF_SIGNATURE_BYTES);
     if (!pck_body_valid(&c) ||
-        !pck_nonzero(c.signature, VCS_PROOF_SIGNATURE_BYTES))
+        !zcl_bytes_any_set(c.signature, VCS_PROOF_SIGNATURE_BYTES))
         LOG_RETURN(false, PCK_LOG, "checkpoint decode: non-canonical values");
     *out = c;
     return true;
@@ -173,7 +167,7 @@ struct vcs_proof_issuer_log {
 
 struct vcs_proof_issuer_log *vcs_proof_issuer_log_new(const uint8_t seed[32])
 {
-    if (!seed || !pck_nonzero(seed, 32))
+    if (!seed || !zcl_bytes_any_set(seed, 32))
         LOG_RETURN(NULL, PCK_LOG, "issuer log: missing seed");
     struct vcs_proof_issuer_log *log =
         zcl_calloc(1, sizeof(*log), "proof_issuer_log");
