@@ -3422,6 +3422,13 @@ static int test_zd_improve_command(void)
                   VCS_ZCODE_ACTION_INPUT_OK);
         ASSERT(memcmp(component_key, drift_key, 32) != 0);
         execution.policy_generation--;
+        execution.flags_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
+                      workspace, &task, &candidate, &action_input,
+                      task_root, candidate_root, &execution, drift_key),
+                  VCS_ZCODE_ACTION_INPUT_OK);
+        ASSERT(memcmp(component_key, drift_key, 32) != 0);
+        execution.flags_root[0] ^= 1u;
         memset(execution.environment_root, 0, 32);
         ASSERT_EQ(vcs_zcode_component_input_key_derive_cas(
                       workspace, &task, &candidate, &action_input,
