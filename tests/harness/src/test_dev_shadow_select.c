@@ -338,6 +338,9 @@ static int ss_test_classifier(void)
         f.closure_universal = false;
         f.plan_refused = true;
         ASSERT(zcl_shadow_classify(&f) == ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE);
+        f.plan_refused = false;
+        f.contract_moved = true;
+        ASSERT(zcl_shadow_classify(&f) == ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE);
         f.negative_lookup = true;
         ASSERT(zcl_shadow_classify(&f) == ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE);
         f.generated_input = true;
@@ -438,8 +441,9 @@ static const struct zcl_shadow_result *ss_row(size_t n, const char *id)
 /* Regressions for the false-hit witnesses in
  * docs/experiments/2026-09-25-shadow-obligation-selector.md: a changed
  * build graph, generator input or shadowing header must expand the
- * prediction to the reference, and a moved contract (declaration, layout,
- * macro, assertion) must carry no caller. */
+ * prediction to the reference, and so must a moved contract (declaration,
+ * layout, macro, assertion): syn-contract showed the caller closure missing
+ * test_zcode_recipe behind a proof-owner file. */
 static bool ss_witness_guarded(size_t n)
 {
     static const char *const expand[] = {
@@ -457,6 +461,7 @@ static bool ss_witness_guarded(size_t n)
     for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
         const struct zcl_shadow_result *r = ss_row(n, moved[i]);
         if (!r || r->rule_reusable != 0 ||
+            r->predict_mode != ZCL_SHADOW_PREDICT_ALL ||
             r->patch.contract_change != ZCL_SHADOW_CONTRACT_MOVED)
             return false;
     }
@@ -531,48 +536,80 @@ static bool ss_load_observations(struct zcl_shadow_observations *o)
 /* Frozen prediction against the reference run: any required obligation the
  * rule prediction did not name is RED. The live prediction is held to the
  * same observations, so a selector change that drops a witness fails here. */
+/* RED tallies. `frozen_*` compare the committed predicted.tsv (written
+ * before any reference run) with observed.tsv, so they never move; `live_*`
+ * hold today's code to the same observations. */
+struct ss_red {
+    uint32_t frozen_rule;
+    uint32_t frozen_selector;
+    uint32_t live_rule;
+    uint32_t live_selector;
+    char frozen_rule_first[ZCL_SHADOW_ID_MAX + ZCL_SHADOW_NAME_MAX + 2];
+};
+
+static void ss_live_prediction(const struct zcl_shadow_result *live,
+                               struct zcl_shadow_prediction *now)
+{
+    memset(now, 0, sizeof(*now));
+    (void)snprintf(now->id, sizeof(now->id), "%s", live->id);
+    now->selector_mode = live->selector_universal ? ZCL_SHADOW_PREDICT_ALL
+                                                  : ZCL_SHADOW_PREDICT_EXACT;
+    now->rule_mode = live->predict_mode;
+    (void)snprintf(now->selector_names, sizeof(now->selector_names), "%s",
+                   live->selected_names);
+    (void)snprintf(now->rule_names, sizeof(now->rule_names), "%s",
+                   live->predicted_names);
+}
+
 static bool ss_compare_one(const struct zcl_shadow_prediction *frozen,
                            const struct zcl_shadow_result *live,
                            const struct zcl_shadow_observations *obs,
-                           uint32_t *red)
+                           struct ss_red *red)
 {
     struct zcl_shadow_comparison c;
     if (!zcl_shadow_compare(frozen, obs, &c) ||
         !zcl_shadow_render_comparison(stdout, frozen->id, &c))
         return false;
-    *red += c.red_rule;
+    if (c.red_rule && red->frozen_rule == 0)
+        (void)snprintf(red->frozen_rule_first,
+                       sizeof(red->frozen_rule_first), "%s:%s", frozen->id,
+                       c.first_red_rule);
+    red->frozen_rule += c.red_rule;
+    red->frozen_selector += c.red_selector;
     static struct zcl_shadow_prediction now;
-    memset(&now, 0, sizeof(now));
-    (void)snprintf(now.id, sizeof(now.id), "%s", live->id);
-    now.selector_mode = live->selector_universal ? ZCL_SHADOW_PREDICT_ALL
-                                                 : ZCL_SHADOW_PREDICT_EXACT;
-    now.rule_mode = live->predict_mode;
-    (void)snprintf(now.selector_names, sizeof(now.selector_names), "%s",
-                   live->selected_names);
-    (void)snprintf(now.rule_names, sizeof(now.rule_names), "%s",
-                   live->predicted_names);
+    ss_live_prediction(live, &now);
     if (now.rule_mode != frozen->rule_mode ||
         strcmp(now.rule_names, frozen->rule_names) != 0)
-        printf("SHADOW-PREDICT-DRIFT id=%s\n", live->id);
+        printf("SHADOW-PREDICT-DRIFT id=%s rule_mode=%s\n", live->id,
+               now.rule_mode == ZCL_SHADOW_PREDICT_ALL ? "all" : "exact");
     if (!zcl_shadow_compare(&now, obs, &c)) return false;
-    if (c.red_rule) printf("SHADOW-LIVE-RED id=%s group=%s\n", live->id,
-                           c.first_red_rule);
-    *red += c.red_rule;
+    printf("SHADOW-LIVE-COMPARE id=%s required=%u red_selector=%u "
+           "red_rule=%u first_red_selector=%s first_red_rule=%s\n",
+           live->id, c.required, c.red_selector, c.red_rule,
+           c.first_red_selector[0] ? c.first_red_selector : "-",
+           c.first_red_rule[0] ? c.first_red_rule : "-");
+    red->live_rule += c.red_rule;
+    red->live_selector += c.red_selector;
     return true;
 }
 
-static bool ss_compare_all(size_t n, uint32_t *red)
+static bool ss_compare_all(size_t n, struct ss_red *red)
 {
     struct zcl_shadow_predictions p = {0};
     struct zcl_shadow_observations o = {0};
     bool ok = ss_load_predictions(&p) && ss_load_observations(&o);
-    *red = 0;
+    memset(red, 0, sizeof(*red));
     for (size_t i = 0; ok && i < n; i++) {
         const struct zcl_shadow_prediction *frozen =
             zcl_shadow_prediction_find(&p, ss_rows[i].id);
         if (!frozen) printf("prediction missing for %s\n", ss_rows[i].id);
         ok = frozen && ss_compare_one(frozen, &ss_rows[i], &o, red);
     }
+    printf("SHADOW-RED frozen_rule=%u frozen_selector=%u live_rule=%u "
+           "live_selector=%u frozen_rule_first=%s\n",
+           red->frozen_rule, red->frozen_selector, red->live_rule,
+           red->live_selector,
+           red->frozen_rule_first[0] ? red->frozen_rule_first : "-");
     zcl_shadow_predictions_free(&p);
     zcl_shadow_observations_free(&o);
     return ok;
@@ -594,9 +631,18 @@ static int ss_test_live_report(void)
         }
         ASSERT(ss_witness_guarded(n));
         ASSERT(ss_print_predictions(n));
-        uint32_t red = 0;
+        struct ss_red red;
         ASSERT(ss_compare_all(n, &red));
-        ASSERT_EQ(red, (uint32_t)0);
+        /* Today's prediction misses no required obligation. */
+        ASSERT_EQ(red.live_rule, (uint32_t)0);
+        /* The frozen record keeps its one RED: a moved contract predicted
+         * as the selector's own set missed test_zcode_recipe, whose
+         * decoder reaches the callee through a proof-owner file the caller
+         * closure stops at. The landing selector missed five. */
+        ASSERT_EQ(red.frozen_rule, (uint32_t)1);
+        ASSERT_STR_EQ(red.frozen_rule_first,
+                      "syn-contract:test_zcode_recipe");
+        ASSERT_EQ(red.frozen_selector, (uint32_t)5);
         PASS();
     } _test_next:;
     return failures;

@@ -638,6 +638,8 @@ static void shadow_scope(const struct zcl_shadow_entry *e,
     }
     f.negative_lookup =
         (out->premise_fields & (1u << ZCL_SHADOW_FIELD_NEGATIVE_LOOKUPS)) != 0;
+    f.contract_moved =
+        out->patch.contract_change == ZCL_SHADOW_CONTRACT_MOVED;
     out->fallback = zcl_shadow_classify(&f);
     out->selector_universal = refused || plan->closure_universal;
 }

@@ -68,7 +68,7 @@ zcl_shadow_classify(const struct zcl_shadow_scope_facts *facts)
     if (facts->build_graph_input || facts->generated_input)
         return ZCL_SHADOW_FALLBACK_DEPENDENCY_CHANGE;
     if (facts->negative_lookup || facts->closure_universal ||
-        facts->plan_refused)
+        facts->plan_refused || facts->contract_moved)
         return ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE;
     return ZCL_SHADOW_FALLBACK_NONE;
 }

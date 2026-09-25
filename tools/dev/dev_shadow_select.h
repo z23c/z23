@@ -179,6 +179,9 @@ struct zcl_shadow_scope_facts {
     bool generated_input;   /* a generator input: output bytes unindexed */
     bool negative_lookup;   /* a created header can satisfy an old miss */
     bool closure_universal; /* selector could not enumerate the closure */
+    /* The contract moved. The caller closure stops at proof-owner files,
+     * so it cannot bound the consumers of a moved contract. */
+    bool contract_moved;
 };
 
 enum zcl_shadow_fallback
