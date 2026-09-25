@@ -1534,3 +1534,89 @@ the registered queue selection passed 3/3 with zero skips (log SHA-256
 Strict GCC C23 syntax passed, and `lint-fast` passed all 33 gates (log
 SHA-256 `60b29f3b405d18fe0843bac1e91c449ced9dd9f5d1a04c0c9703b38d7bab0d94`).
 These focused passes do not replace the failed full proof.
+
+## Exact proof and remotely observed source landing
+
+The queue correction and source-derived capability inventory were committed as
+signed tip `a59495eda6ddd6f4a1ce916227cebcbc45d20ba3` on base
+`005f2e706f6a45e1f35c7b7510a079da7d70b055`. The tip's source tree is
+`9636c80be5ebe763517be85f9a34a80b7b149f6f`. Native proof status
+validated its sealed PASS receipt, SHA-256
+`89ef2a2b5317ae4f2e037d4a03bf0b67091ccf1ab593d6030b9fdeb40c63aac6`.
+The receipt appeared 942 seconds after the worker's recorded start. Its lint
+dimension passed in 504.277 seconds (log SHA-256
+`dcb29f1cae49c9fea57e4e99f62e4b487c02b9e5762ba8fb9111e912b4941867`);
+its test dimension passed 72 fresh groups with zero final failures or skips in
+577.992 seconds (log SHA-256
+`78c0ce9927703df797b8c83bf26d19cbb5209367d4aa9fda413d185a73074edc`).
+Three groups were load-sensitive in the shared pool and passed on isolated
+retry. Lint and test overlapped; their durations are not additive CPU time.
+
+A normal `git push origin HEAD:main` passed the exact local pre-push receipt
+gate but GitHub refused merge commit `088d9fe524f2fd79621cb8a04c0a141c9dbffa4b`
+under main's no-merge-commit rule. The native landing queue accepted the
+submitted tip twice while the first submit response was delayed. Row 2 was
+cancelled before execution; row 1 alone proceeded. Its adapter produced signed
+one-parent commit `be66c893e9b299d572a8ca38da197a4f4273eeb6` on the same
+base and verified that its tree remained exactly
+`9636c80be5ebe763517be85f9a34a80b7b149f6f`.
+
+That new commit required a second full proof. The request recorded Unix time
+`1790371952`; the worker started at `1790372038`, so request-to-worker wait
+was 86 seconds. The explicit native proof step took 927.583 seconds and
+validated sealed PASS receipt SHA-256
+`d83dcaa746a621c7a8739ad897af1dbb1b8e82070321981db93270506ac074f5`.
+Full lint passed 213 gates in 544.184 seconds (log SHA-256
+`927ab6473ab1943a62c72b3312576fc3d2a53e573b8c665ff7bb32e7a17c15fe`).
+The test dimension passed 72 fresh groups, zero final failures or skips, in
+616.149 seconds (log SHA-256
+`50808583311331706455cc4822500f01343d63d7994ba971d76d43b2aebf4de6`).
+Two groups each reached 301 seconds of output silence in the concurrent pool
+and passed alone. Those abandoned attempts overlapped. Output silence is not
+CPU idle, and no child CPU/wait split was recorded for these proofs.
+
+The native `dev land attach --seq=1` sealed publication target
+`9828f759e60eb32fba3716d8985cc7a5922b621c463b46b22a47f1cf7ed7f617`,
+proof `d83dcaa746a621c7a8739ad897af1dbb1b8e82070321981db93270506ac074f5`,
+bundle `655e61078fce630196b04fb6894524ed106a8a52746c2dab473b5337e551f185`
+and signer
+`6481aceda6665ada45d96fa0508d0d89002503c4910fb96342d8f26306570226`
+before push. The landing adapter then independently fetched main, verified
+source and ancestry, and recorded row 1 as `landed`. The outcome ledger at
+that checkpoint had SHA-256
+`155c8498baf0791fd8ffb38be187cd0fe4e10ac84835ff80c05cc2b0f8fa3463`.
+A separate `git ls-remote origin refs/heads/main` returned `be66c893...`;
+the fetched commit was signed and its tree matched the original tip. The
+landing row's remote signature records this local independent observation.
+It is a Git source landing, not the canonical task-to-candidate-to-action
+`REMOTE_RECEIPT` object or application acceptance.
+
+The exact base-to-landed-tree diff has 476 added and 28 removed product C23
+lines in `native_devagent_queue.c`, 440 added and 127 removed C23 test lines,
+14 added fixture C23 lines, and 16 added plus 16 removed generated inventory
+lines. These are gross diff counts, not accepted novel application LOC. The
+submitted 65-commit proposal history had no explicit revert commits. The
+frozen 100-edit workload
+still has zero DEV and zero full application acceptances; therefore the
+cost-weighted accepted-output-loss denominator remains zero and the ranking
+remains undefined. The newest batch exposes 927.583 seconds of second proof
+wall time with zero reuse, plus two overlapping 301-second shared-pool wedges.
+It does not establish that this entire time would be avoidable under current
+independence policy. Fleet mail receipts 818 and 825 route the exact measured
+loss, tree root and minimal closure-qualified reuse proposal to the proof
+owner. The first missing authenticated cost edge remains queue attempt to
+canonical task/action; neither the signed landing row nor its Git SHA repairs
+that join.
+
+| Lifecycle stage | Evidence in this landed row | Canonical acceptance state |
+| --- | --- | --- |
+| NEED and JOB | Queue row 1 names the submitted Git tip and base | No signed task or job root in the row |
+| CANDIDATE | Submitted tip `a59495eda6ddd6f4a1ce916227cebcbc45d20ba3`; landed tip `be66c893e9b299d572a8ca38da197a4f4273eeb6`; equal tree `9636c80be5ebe763517be85f9a34a80b7b149f6f` | No signed candidate root binding either tip to the task |
+| PROOF_SET | Sealed pair receipt SHA-256 `89ef2a2b5317ae4f2e037d4a03bf0b67091ccf1ab593d6030b9fdeb40c63aac6` and `d83dcaa746a621c7a8739ad897af1dbb1b8e82070321981db93270506ac074f5` passed | No candidate-bound proof-set root or independent app run |
+| PUBLICATION | Signed local target `9828f759e60eb32fba3716d8985cc7a5922b621c463b46b22a47f1cf7ed7f617`, proof and bundle roots above | No canonical publication object root |
+| REMOTE_RECEIPT | Independent Git fetch observed `be66c893e9b299d572a8ca38da197a4f4273eeb6` and tree `9636c80be5ebe763517be85f9a34a80b7b149f6f` | No canonical remote-receipt root or application receiver acceptance |
+
+The separate frozen mixed-100 ledger reports 100 generated, 100 buildable,
+100 previewed, 100 tested and 100 locally verified edits; it reports zero
+DEV-accepted and zero fully accepted edits. This Git landing changes none of
+those acceptance counts.
