@@ -1054,6 +1054,34 @@ static int test_runner_exact_selection(void)
         ASSERT(selector_timing_zero(timing_row, "load_flaky"));
         json_free(&timing);
 
+        /* Landing proofs start the runner with --no-cache so that no
+         * environment can re-enable verdict reuse (tools/dev/dev_proof.c,
+         * dp_test_dimension_argv). Control: ZCL_TEST_CACHE=1 alone turns
+         * the cache on, which prints its PLAN (or its fail-safe downgrade)
+         * before dispatch. With --no-cache on the command line the same
+         * environment must leave every cache path unexecuted and the group
+         * must run. */
+        n = snprintf(command, sizeof(command),
+                     "env ZCL_TEST_CACHE=1 \"%s\" --jobs=1 "
+                     "--exact=test_hex_codec 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        rc = capture_command(command, out, sizeof(out));
+        dump_bad_rc("nested env cache control", rc, 0, out);
+        ASSERT(rc == 0);
+        ASSERT(strstr(out, "cache PLAN") != NULL ||
+               strstr(out, "cache probe failed") != NULL);
+        n = snprintf(command, sizeof(command),
+                     "env ZCL_TEST_CACHE=1 \"%s\" --jobs=1 "
+                     "--exact=test_hex_codec --no-cache 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        rc = capture_command(command, out, sizeof(out));
+        dump_bad_rc("nested --no-cache over ZCL_TEST_CACHE=1", rc, 0, out);
+        ASSERT(rc == 0);
+        ASSERT(strstr(out, "cache PLAN") == NULL);
+        ASSERT(strstr(out, "cache probe failed") == NULL);
+        ASSERT(strstr(out, "SUITE VERDICT mode=cold") != NULL);
+        ASSERT(strstr(out, "groups_ran=1 groups_cached=0") != NULL);
+
         n = snprintf(command, sizeof(command), "\"%s\" --source-id 2>&1",
                      exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
