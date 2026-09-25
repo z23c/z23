@@ -114,8 +114,15 @@ The progressive stream is a 64-slot bounded local ring ahead of an append-only,
 SHA3-sealed journal. Ring publication has no fsync or storage acknowledgement.
 After the action-changing event is visible, `flush-through` seals every epoch
 in order; the journal remains evidence authority and restart recovery rejects
-gaps or bad seals. `dev drive` waits with inotify, closing the check/sleep race;
-there is no polling sleep.
+gaps or bad seals. Inside the watcher that seal is a request to one persistent
+sealer child, so reading the next save never waits on journal fsyncs. A
+backlog of more than 32 unsealed epochs, or a sealer that has exited, seals in
+the watcher instead; a proof worker seals what was requested before it runs;
+stop closes the request pipe, lets the sealer drain, and seals any remainder
+before reporting stopped. `dev drive` waits with inotify, closing the
+check/sleep race; there is no polling sleep, and a sealer holding the cycle
+lock never delays it, because a busy lock reads the completed sealed event
+file directly.
 
 The candidate builder keeps its frozen action/dependency plan and artifact
 cache warm, invokes the compiler and module linker directly, then hands the

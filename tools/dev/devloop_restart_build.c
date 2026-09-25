@@ -3048,7 +3048,7 @@ static bool rr_emit_event_publish(const char *root, char *wire, size_t n)
     if (zcl_devloop_cycle_stream_publish(root, wire, n, &epoch,
                                          state_why, sizeof(state_why))) {
         (void)fwrite(wire, 1, n, stdout); (void)fflush(stdout);
-        if (!zcl_devloop_cycle_stream_flush_through(
+        if (!zcl_devloop_cycle_stream_seal(
                 root, epoch, state_why, sizeof(state_why))) {
             fprintf(stderr,
                     "[devloop] async restart journal flush failed: %s\n",

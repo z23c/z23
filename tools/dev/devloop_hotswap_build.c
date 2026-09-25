@@ -3375,7 +3375,7 @@ static bool hs_emit_event(const char *root, const char *source,
     }
     (void)fwrite(wire, 1, n, stdout);
     (void)fflush(stdout);
-    if (flush_after && !zcl_devloop_cycle_stream_flush_through(
+    if (flush_after && !zcl_devloop_cycle_stream_seal(
                            root, epoch, state_why, sizeof(state_why))) {
         fprintf(stderr, "[devloop] async event journal flush failed: %s\n",
                 state_why[0] ? state_why : "unknown");
