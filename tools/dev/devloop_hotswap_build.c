@@ -11,6 +11,7 @@
 #define _GNU_SOURCE
 #include "devloop.h"
 #include "hotfork_unity.h"
+#include "devloop_action_root.h"
 
 #include "base/hex.h"
 #include "crypto/sha256.h"
@@ -1583,6 +1584,8 @@ bool zcl_devloop_hotswap_build(
             (void)unlink(tmp_o);
             (void)unlink(tmp_d);
             (void)unlink(tmp_so);
+            zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
+                                            cached_dep, receipt);
             return true;
         }
         if (cache_fd >= 0) {
@@ -1653,6 +1656,8 @@ bool zcl_devloop_hotswap_build(
             (void)close(cache_fd);
             (void)unlink(tmp_o);
             (void)unlink(tmp_so);
+            zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
+                                            cached_dep, receipt);
             return true;
         }
         if (cache_fd >= 0) {
@@ -1736,6 +1741,8 @@ bool zcl_devloop_hotswap_build(
         (void)flock(cache_fd, LOCK_UN);
         (void)close(cache_fd);
     }
+    zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
+                                    cached_dep, receipt);
     return true;
 
 fail:
@@ -1747,6 +1754,8 @@ fail:
         (void)close(cache_fd);
     }
     receipt->total_us = platform_time_monotonic_us() - started;
+    zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
+                                    cached_dep, receipt);
     return false;
 }
 
@@ -3228,6 +3237,7 @@ static bool hs_emit_event(const char *root, const char *source,
         (void)json_push_kv_int(&receipt, "publish_us", build->publish_us);
         (void)json_push_kv_int(&receipt, "build_total_us", build->total_us);
         (void)json_push_kv_int(&receipt, "activation_us", activation_us);
+        zcl_devloop_action_root_emit(&receipt, build);
         (void)json_push_kv(&doc, "build_receipt", &receipt);
         json_free(&receipt);
     }

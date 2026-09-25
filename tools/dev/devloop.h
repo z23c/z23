@@ -295,6 +295,16 @@ struct zcl_devloop_hotswap_build_receipt {
     uint32_t dependency_count;
     uint32_t compiler_processes;
     uint32_t linker_processes;
+    /* zcl.action_preimage.v2 identity of this compile (devloop_action_root.h).
+     * Reported only: it does not key the artifact cache above. Exactly one of
+     * action_root / action_root_refused is set after a build attempt. */
+    char action_root[65];
+    char action_root_cause[24];
+    char action_root_refused[192];
+    int64_t action_root_us;
+    int64_t action_root_store_us;
+    uint32_t action_root_probes;
+    uint32_t action_root_present;
 };
 
 /* Build exactly one compiled-allowlist source TU under the cached action plan
