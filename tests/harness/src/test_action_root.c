@@ -3,19 +3,21 @@
  * test_action_root — zcl.action_preimage.v2 (vcs/build_action.h) and its
  * compile derivation (tools/dev/devloop_action_root.h).
  *
- *   1. Codec: canonical encode, strict decode, byte-exact re-encode, a
- *      single-field-change table over every field (root differs AND the
- *      first differing field is named), an empty harness distinct from a
- *      zero root, refusal of host paths / unsorted / unregistered inputs,
- *      and every single-bit tamper of a stored preimage either refused or
- *      given a different root.
+ *   1. Codec: canonical encode, strict decode, byte-exact re-encode, per-
+ *      field roots, a single-field-change table over all 13 fields (root
+ *      differs AND the first differing field is named), absent spelled
+ *      apart from zero / empty, a refusal table (host paths, unsorted or
+ *      duplicate sets, environment out of allowlist order or repeated,
+ *      lookups that miss or disagree with the search order), and every
+ *      single-bit tamper of a stored preimage refused or re-rooted.
  *   2. Derivation on a fixture tree: flags (-D add, -D value, reorder, -O),
  *      a #define in an included header, header content, a NEW shadowing
  *      header in an earlier search dir and in an includer dir (negative
- *      lookups, depfile unchanged), header removal, the capsule sysroot,
- *      harness/fixtures/policy, allowlisted vs non-allowlisted environment,
- *      and ABI generation each change the root; restoring the input
- *      restores the root.
+ *      lookups, depfile unchanged), inclusion order, header removal, the
+ *      toolchain capsule, the sysroot, the linker, generated inputs and
+ *      their producers, harness/fixtures/policy, allowlisted vs
+ *      non-allowlisted environment, and ABI generation each change the
+ *      root in exactly their own field; restoring the input restores it.
  *   3. Identity: the same fixture at two absolute roots derives the SAME
  *      root; a stored preimage re-derives its root after load, a tampered
  *      stored object is refused.
@@ -58,16 +60,62 @@ static void ar_fill(uint8_t out[32], uint8_t seed)
 
 struct codec_fixture {
     struct vcs_action_input_v2 sources[2];
-    struct vcs_action_input_v2 generated[1];
+    struct vcs_action_generated_v2 generated[1];
     const char *search[3];
-    const char *includers[2];
-    struct vcs_action_probe_v2 probes[2];
+    const char *includers[3];
     struct vcs_action_present_v2 present[1];
+    struct vcs_action_lookup_v2 lookups[3];
+    const char *builtin[1];
+    const char *link_argv[5];
     const char *argv[5];
-    const char *env[2];
+    struct vcs_action_env_v2 env[16];
     struct vcs_action_abi_v2 abi[2];
     struct vcs_action_preimage_v2 p;
 };
+
+static void codec_env_init(struct codec_fixture *f)
+{
+    size_t n = 0;
+    const char *const *allow = vcs_action_v2_env_allowlist(&n);
+    for (size_t i = 0; i < n && i < 16; i++) {
+        f->env[i] = (struct vcs_action_env_v2){ allow[i], false, NULL };
+        if (strcmp(allow[i], "LANG") == 0)
+            f->env[i] = (struct vcs_action_env_v2){ allow[i], true, "C" };
+        if (strcmp(allow[i], "SOURCE_DATE_EPOCH") == 0)
+            f->env[i] = (struct vcs_action_env_v2){ allow[i], true, "0" };
+    }
+    f->p.env = f->env;
+    f->p.env_count = n;
+}
+
+static size_t codec_env_at(const struct codec_fixture *f, const char *name)
+{
+    for (size_t i = 0; i < f->p.env_count; i++)
+        if (strcmp(f->env[i].name, name) == 0)
+            return i;
+    return 0;
+}
+
+/* Inputs inc/defs.h, src/unit.c and generated build/gen/unity.c; search
+ * order inc_a, inc, @sys/usr/include; three lookups, one probe hit. */
+static void codec_fixture_lookups(struct codec_fixture *f)
+{
+    f->search[0] = "inc_a";
+    f->search[1] = "inc";
+    f->search[2] = "@sys/usr/include";
+    f->includers[0] = "build/gen";
+    f->includers[1] = "inc";
+    f->includers[2] = "src";
+    f->present[0] = (struct vcs_action_present_v2){
+        .slot = 1, .kind = VCS_ACTION_PRESENT_V2_REGULAR };
+    ar_fill(f->present[0].sha3, 4);
+    f->lookups[0] = (struct vcs_action_lookup_v2){ "unity.c", "build/gen", 0,
+                                                   NULL, 0 };
+    f->lookups[1] = (struct vcs_action_lookup_v2){ "unit.c", "src", 0,
+                                                   f->present, 1 };
+    f->lookups[2] = (struct vcs_action_lookup_v2){ "defs.h", "inc", 1,
+                                                   NULL, 0 };
+}
 
 static void codec_fixture_init(struct codec_fixture *f)
 {
@@ -78,48 +126,39 @@ static void codec_fixture_init(struct codec_fixture *f)
     ar_fill(f->sources[1].sha3, 2);
     f->generated[0].path = "build/gen/unity.c";
     ar_fill(f->generated[0].sha3, 3);
-    f->search[0] = "inc_a";
-    f->search[1] = "inc";
-    f->search[2] = "@sys/usr/include";
-    f->includers[0] = "inc";
-    f->includers[1] = "src";
-    f->probes[0] = (struct vcs_action_probe_v2){ "defs.h", 1 };
-    f->probes[1] = (struct vcs_action_probe_v2){ "unit.c", 0 };
-    f->present[0] = (struct vcs_action_present_v2){
-        .dir = "src", .name = "unit.c",
-        .kind = VCS_ACTION_PRESENT_V2_REGULAR };
-    ar_fill(f->present[0].sha3, 2);
-    f->argv[0] = "cc";
-    f->argv[1] = "-DFOO=1";
-    f->argv[2] = "-ffile-prefix-map=@root=/zclassic23";
-    f->argv[3] = "-o";
-    f->argv[4] = "@out/object";
-    f->env[0] = "LANG=C";
-    f->env[1] = "SOURCE_DATE_EPOCH=0";
+    codec_fixture_lookups(f);
+    f->builtin[0] = "@sys/usr/include";
+    static const char *const link[] = { "cc", "-shared", "-o", "@out/module",
+                                        "@out/object" };
+    memcpy(f->link_argv, link, sizeof(link));
+    static const char *const argv[] = { "cc", "-DFOO=1",
+                                        "-ffile-prefix-map=@root=/zclassic23",
+                                        "-o", "@out/object" };
+    memcpy(f->argv, argv, sizeof(argv));
     f->abi[0] = (struct vcs_action_abi_v2){ "hotswap_module", 3 };
     f->abi[1] = (struct vcs_action_abi_v2){ "hotswap_service", 1 };
     struct vcs_action_preimage_v2 *p = &f->p;
-    p->stage_kind = "c23.compile.test";
-    p->stage_version = 1;
-    p->sources = f->sources;
-    p->source_count = 2;
-    p->generated = f->generated;
-    p->generated_count = 1;
-    p->search_dirs = f->search;
-    p->search_dir_count = 3;
-    p->includer_dirs = f->includers;
-    p->includer_dir_count = 2;
-    p->probes = f->probes;
-    p->probe_count = 2;
-    p->present = f->present;
-    p->present_count = 1;
+    *p = (struct vcs_action_preimage_v2){
+        .stage_kind = "c23.compile.test", .stage_version = 1,
+        .sources = f->sources, .source_count = 2,
+        .generated = f->generated, .generated_count = 1,
+        .search_dirs = f->search, .search_dir_count = 3,
+        .includer_dirs = f->includers, .includer_dir_count = 3,
+        .lookups = f->lookups, .lookup_count = 3,
+        .argv = f->argv, .argc = 5, .abi_generation = 4,
+        .abi = f->abi, .abi_count = 2,
+    };
+    p->sysroot = (struct vcs_action_sysroot_v2){
+        .sysroot = NULL, .builtin_dirs = f->builtin, .builtin_dir_count = 1 };
+    ar_fill(p->sysroot.objects_sha3, 5);
+    p->linker = (struct vcs_action_linker_v2){
+        .links = true, .ld = "@sys/usr/bin/ld",
+        .collect2 = "@sys/usr/libexec/gcc/collect2",
+        .argv = f->link_argv, .argc = 5 };
+    ar_fill(p->linker.ld_sha3, 6);
+    ar_fill(p->linker.collect2_sha3, 7);
     ar_fill(p->toolchain_root, 9);
-    p->argv = f->argv;
-    p->argc = 5;
-    p->env = f->env;
-    p->env_count = 2;
-    p->abi = f->abi;
-    p->abi_count = 2;
+    codec_env_init(f);
     p->harness.present = true;
     ar_fill(p->harness.root, 10);
     p->fixtures.present = true;
@@ -187,25 +226,67 @@ static void test_codec_roundtrip(void)
     free(bytes);
 }
 
+/* A per-field root binds one field only: an env change leaves the flags
+ * root alone and moves the env root. */
+static void test_codec_field_roots(void)
+{
+    struct codec_fixture a, b;
+    codec_fixture_init(&a);
+    codec_fixture_init(&b);
+    b.env[codec_env_at(&b, "LANG")].value = "C.UTF-8";
+    uint8_t ra[32], rb[32], fa[32], fb[32], ea[32], eb[32];
+    uint8_t *ba = NULL, *bb = NULL;
+    size_t la = 0, lb = 0;
+    bool ok = codec_root(&a.p, ra, &ba, &la) && codec_root(&b.p, rb, &bb, &lb) &&
+              vcs_action_preimage_v2_field_root(ba, la,
+                                                VCS_ACTION_FIELD_V2_FLAGS, fa) &&
+              vcs_action_preimage_v2_field_root(bb, lb,
+                                                VCS_ACTION_FIELD_V2_FLAGS, fb) &&
+              vcs_action_preimage_v2_field_root(ba, la,
+                                                VCS_ACTION_FIELD_V2_ENV, ea) &&
+              vcs_action_preimage_v2_field_root(bb, lb,
+                                                VCS_ACTION_FIELD_V2_ENV, eb) &&
+              memcmp(fa, fb, 32) == 0 && memcmp(ea, eb, 32) != 0 &&
+              memcmp(fa, ea, 32) != 0;
+    AR_CHECK("field roots: an env change moves only the env field root", ok);
+    AR_CHECK("field roots: a reserved or unknown field has no root",
+             ba && !vcs_action_preimage_v2_field_root(
+                       ba, la, VCS_ACTION_FIELD_V2_RESERVED_INVARIANTS, fa) &&
+                 !vcs_action_preimage_v2_field_root(
+                     ba, la, VCS_ACTION_FIELD_V2_NONE, fa));
+    free(ba);
+    free(bb);
+}
+
 typedef void (*codec_mutator)(struct codec_fixture *f);
 
 static void mut_stage(struct codec_fixture *f) { f->p.stage_version = 2; }
 static void mut_source(struct codec_fixture *f) { f->sources[1].sha3[5] ^= 1; }
 static void mut_generated(struct codec_fixture *f)
 {
-    f->generated[0].sha3[0] ^= 1;
+    f->generated[0].producer_known = true;
+    ar_fill(f->generated[0].producer_action_key, 13);
 }
 static void mut_negative(struct codec_fixture *f)
 {
-    f->probes[0].search_prefix = 0;
+    f->present[0].kind = VCS_ACTION_PRESENT_V2_OTHER;
 }
 static void mut_toolchain(struct codec_fixture *f)
 {
     f->p.toolchain_root[31] ^= 1;
 }
+static void mut_sysroot(struct codec_fixture *f)
+{
+    f->p.sysroot.objects_sha3[0] ^= 1;
+}
+static void mut_linker(struct codec_fixture *f) { f->p.linker.ld_sha3[0] ^= 1; }
 static void mut_flags(struct codec_fixture *f) { f->argv[1] = "-DFOO=2"; }
-static void mut_env(struct codec_fixture *f) { f->env[1] = "SOURCE_DATE_EPOCH=1"; }
-static void mut_abi(struct codec_fixture *f) { f->abi[0].version = 4; }
+static void mut_env(struct codec_fixture *f)
+{
+    f->env[codec_env_at(f, "TZ")] =
+        (struct vcs_action_env_v2){ "TZ", true, "UTC" };
+}
+static void mut_abi(struct codec_fixture *f) { f->p.abi_generation = 5; }
 static void mut_harness(struct codec_fixture *f) { f->p.harness.root[0] ^= 1; }
 static void mut_fixtures(struct codec_fixture *f) { f->p.fixtures.root[0] ^= 1; }
 static void mut_policy(struct codec_fixture *f) { f->p.policy.root[0] ^= 1; }
@@ -221,6 +302,8 @@ static void test_codec_field_table(void)
         { VCS_ACTION_FIELD_V2_GENERATED, mut_generated },
         { VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP, mut_negative },
         { VCS_ACTION_FIELD_V2_TOOLCHAIN, mut_toolchain },
+        { VCS_ACTION_FIELD_V2_SYSROOT, mut_sysroot },
+        { VCS_ACTION_FIELD_V2_LINKER, mut_linker },
         { VCS_ACTION_FIELD_V2_FLAGS, mut_flags },
         { VCS_ACTION_FIELD_V2_ENV, mut_env },
         { VCS_ACTION_FIELD_V2_ABI, mut_abi },
@@ -261,51 +344,176 @@ static void test_codec_field_table(void)
     free(base_bytes);
 }
 
+static bool codec_roots_differ(const struct codec_fixture *a,
+                               const struct codec_fixture *b)
+{
+    uint8_t ra[32], rb[32];
+    return codec_root(&a->p, ra, NULL, NULL) &&
+           codec_root(&b->p, rb, NULL, NULL) && memcmp(ra, rb, 32) != 0;
+}
+
+/* Absent is spelled as absent: an empty payload or an explicit marker,
+ * never zeros, and never confused with an empty value. */
 static void test_codec_empty_is_not_zero(void)
 {
     struct codec_fixture a, b;
     codec_fixture_init(&a);
     codec_fixture_init(&b);
     a.p.harness.present = false;
-    b.p.harness.present = true;
     memset(b.p.harness.root, 0, 32);
-    uint8_t ra[32], rb[32];
     AR_CHECK("an empty harness root hashes apart from a zero root",
-             codec_root(&a.p, ra, NULL, NULL) &&
-                 codec_root(&b.p, rb, NULL, NULL) && memcmp(ra, rb, 32) != 0);
+             codec_roots_differ(&a, &b));
+    codec_fixture_init(&a);
+    codec_fixture_init(&b);
+    a.p.fixtures.present = false;
+    b.p.harness.present = false;
+    AR_CHECK("an absent fixtures root is not an absent harness root",
+             codec_roots_differ(&a, &b));
+    codec_fixture_init(&a);
+    codec_fixture_init(&b);
+    b.env[codec_env_at(&b, "TZ")] =
+        (struct vcs_action_env_v2){ "TZ", true, "" };
+    AR_CHECK("an unset allowlisted variable differs from one set empty",
+             codec_roots_differ(&a, &b));
+    codec_fixture_init(&a);
+    codec_fixture_init(&b);
+    a.p.linker = (struct vcs_action_linker_v2){ .links = false };
+    AR_CHECK("a stage that does not link is its own linker spelling",
+             codec_roots_differ(&a, &b));
+    codec_fixture_init(&a);
+    a.p.linker.collect2 = NULL;
+    AR_CHECK("a driver without collect2 is its own linker spelling",
+             codec_roots_differ(&a, &b));
+    codec_fixture_init(&a);
+    b.p.sysroot.sysroot = "@sys/opt/sysroot";
+    AR_CHECK("a driver sysroot differs from none", codec_roots_differ(&a, &b));
+}
+
+static void refuse_env_order(struct codec_fixture *f)
+{
+    struct vcs_action_env_v2 t = f->env[0];
+    f->env[0] = f->env[1];
+    f->env[1] = t;
+}
+static void refuse_env_dup(struct codec_fixture *f) { f->env[1] = f->env[0]; }
+static void refuse_env_short(struct codec_fixture *f) { f->p.env_count--; }
+static void refuse_env_name(struct codec_fixture *f)
+{
+    f->env[0].name = "HOME";
+}
+static void refuse_env_value(struct codec_fixture *f)
+{
+    f->env[codec_env_at(f, "CPATH")] =
+        (struct vcs_action_env_v2){ "CPATH", true, "/home/someone/inc" };
+}
+static void refuse_argv_abs(struct codec_fixture *f)
+{
+    f->argv[1] = "-I/home/someone/include";
+}
+static void refuse_argv_eq(struct codec_fixture *f)
+{
+    f->argv[1] = "-DROOT=/home/someone";
+}
+static void refuse_source_abs(struct codec_fixture *f)
+{
+    f->sources[0].path = "/home/someone/defs.h";
+}
+static void refuse_source_order(struct codec_fixture *f)
+{
+    f->sources[0].path = "src/zz.h";
+}
+static void refuse_search_dup(struct codec_fixture *f)
+{
+    f->search[1] = "inc_a";
+}
+static void refuse_includer_order(struct codec_fixture *f)
+{
+    f->includers[0] = "zz";
+}
+static void refuse_lookup_miss(struct codec_fixture *f)
+{
+    f->lookups[2].name = "nowhere.h";
+}
+static void refuse_lookup_dup(struct codec_fixture *f)
+{
+    f->lookups[1] = f->lookups[0];
+}
+static void refuse_lookup_hit_order(struct codec_fixture *f)
+{
+    f->lookups[2].search_prefix = 2;
+}
+static void refuse_present_beyond(struct codec_fixture *f)
+{
+    f->present[0].slot = 3; /* unit.c probes includer slots 0..2 only */
+}
+static void refuse_present_at_hit(struct codec_fixture *f)
+{
+    f->present[0].slot = 2; /* slot 2 is src, the hit itself */
+}
+static void refuse_producer_zero(struct codec_fixture *f)
+{
+    f->generated[0].producer_known = true;
+}
+static void refuse_abi_zero(struct codec_fixture *f) { f->p.abi_generation = 0; }
+static void refuse_argc_zero(struct codec_fixture *f) { f->p.argc = 0; }
+static void refuse_link_argc(struct codec_fixture *f) { f->p.linker.argc = 0; }
+static void refuse_ld_abs(struct codec_fixture *f)
+{
+    f->p.linker.ld = "/home/someone/bin/ld";
+}
+static void refuse_sysroot_zero(struct codec_fixture *f)
+{
+    memset(f->p.sysroot.objects_sha3, 0, 32);
+}
+static void refuse_builtin_dup(struct codec_fixture *f)
+{
+    static const char *const dup[] = { "@sys/usr/include",
+                                       "@sys/usr/include" };
+    f->p.sysroot.builtin_dirs = dup;
+    f->p.sysroot.builtin_dir_count = 2;
 }
 
 static void test_codec_refusals(void)
 {
-    struct codec_fixture f;
-    codec_fixture_init(&f);
-    f.argv[1] = "-I/home/someone/include";
-    AR_CHECK("an absolute host path in argv is refused", codec_refused(&f.p));
-    codec_fixture_init(&f);
-    f.argv[1] = "-DROOT=/home/someone";
-    AR_CHECK("an absolute path after '=' is refused", codec_refused(&f.p));
-    codec_fixture_init(&f);
-    f.sources[0].path = "/home/someone/defs.h";
-    AR_CHECK("an absolute source path is refused", codec_refused(&f.p));
-    codec_fixture_init(&f);
-    f.sources[0].path = "src/zz.h";
-    AR_CHECK("an unsorted source list is refused", codec_refused(&f.p));
-    codec_fixture_init(&f);
-    f.search[1] = "inc_a";
-    AR_CHECK("a repeated search dir is refused", codec_refused(&f.p));
-    codec_fixture_init(&f);
-    f.env[0] = "HOME=/zbuild/home";
-    AR_CHECK("a non-allowlisted environment name is refused",
-             codec_refused(&f.p));
-    codec_fixture_init(&f);
-    f.present[0].dir = "inc_a";
-    f.present[0].name = "unit.c";
-    AR_CHECK("a present location outside the probed set is refused",
-             codec_refused(&f.p));
-    codec_fixture_init(&f);
-    f.p.argc = 0;
-    AR_CHECK("an action without argv is refused", codec_refused(&f.p));
+    static const struct {
+        const char *name;
+        codec_mutator mutate;
+    } rows[] = {
+        { "an absolute host path in argv", refuse_argv_abs },
+        { "an absolute path after '='", refuse_argv_eq },
+        { "an absolute source path", refuse_source_abs },
+        { "an unsorted source list", refuse_source_order },
+        { "a repeated search dir", refuse_search_dup },
+        { "an unsorted includer list", refuse_includer_order },
+        { "environment names out of allowlist order", refuse_env_order },
+        { "a duplicate environment name", refuse_env_dup },
+        { "an environment missing an allowlisted name", refuse_env_short },
+        { "a non-allowlisted environment name", refuse_env_name },
+        { "an environment value naming a host path", refuse_env_value },
+        { "a lookup whose hit is not an input", refuse_lookup_miss },
+        { "a repeated lookup", refuse_lookup_dup },
+        { "a lookup whose hit disagrees with the search order",
+          refuse_lookup_hit_order },
+        { "a present slot beyond the probe sequence", refuse_present_beyond },
+        { "a present entry at the hit itself", refuse_present_at_hit },
+        { "a known producer with a zero action key", refuse_producer_zero },
+        { "a zero ABI generation", refuse_abi_zero },
+        { "an action without argv", refuse_argc_zero },
+        { "a linking stage without link argv", refuse_link_argc },
+        { "a linker at a host path", refuse_ld_abs },
+        { "a zero sysroot object digest", refuse_sysroot_zero },
+        { "a repeated builtin include dir", refuse_builtin_dup },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        struct codec_fixture f;
+        codec_fixture_init(&f);
+        rows[i].mutate(&f);
+        char name[128];
+        (void)snprintf(name, sizeof(name), "refused: %s", rows[i].name);
+        AR_CHECK(name, codec_refused(&f.p));
+    }
 }
+
 
 /* Every single-bit flip of a stored preimage is refused or re-roots. */
 static void test_codec_tamper(void)
@@ -345,21 +553,26 @@ static void test_codec_tamper(void)
     free(bytes);
 }
 
+
 /* ---- 2/3. derivation fixture ---------------------------------------- */
 
 struct fx {
     char root[PATH_MAX];
     char depfile[PATH_MAX];
     char obj[PATH_MAX];
+    char so[PATH_MAX];
+    char ld[PATH_MAX];
     char prefix_map[PATH_MAX + 64];
     char include_b[PATH_MAX + 8];
     char unity_in[PATH_MAX];
     const char *argv[24];
-    const char *vfrom[2];
-    const char *vto[2];
-    const char *env[5];
+    const char *link_argv[8];
+    const char *vfrom[3];
+    const char *vto[3];
+    const char *env[6];
     const char *system_dirs[1];
     struct vcs_action_abi_v2 abi[1];
+    struct zcl_action_root_producer producers[1];
     struct zcl_action_root_request req;
 };
 
@@ -389,20 +602,40 @@ static bool fx_remove(const char *root, const char *rel)
                (int)sizeof(full) && unlink(full) == 0;
 }
 
-static bool fx_depfile(struct fx *x, bool with_local)
+/* The depfile's prerequisites after "build/obj.o:"; "%R" is the root. */
+static bool fx_depfile_text(struct fx *x, const char *deps)
 {
     char text[4 * PATH_MAX];
-    (void)snprintf(text, sizeof(text),
-                   "build/obj.o: build/gen/unity.c %s/src/unit.c%s \\\n"
-                   " inc_b/defs.h\n",
-                   x->root, with_local ? " src/local.h" : "");
+    size_t o = (size_t)snprintf(text, sizeof(text), "build/obj.o:");
+    for (const char *p = deps; *p && o + PATH_MAX + 2 < sizeof(text); p++) {
+        if (p[0] == '%' && p[1] == 'R') {
+            o += (size_t)snprintf(text + o, sizeof(text) - o, "%s", x->root);
+            p++;
+        } else {
+            text[o++] = *p;
+        }
+    }
+    text[o++] = '\n';
+    text[o] = '\0';
     return fx_write(x->root, "build/unit.d", text);
 }
 
+static bool fx_depfile(struct fx *x, bool with_local)
+{
+    return fx_depfile_text(x, with_local
+        ? " build/gen/unity.c %R/src/unit.c src/local.h \\\n inc_b/defs.h"
+        : " build/gen/unity.c %R/src/unit.c \\\n inc_b/defs.h");
+}
+
+/* build/gen/local.h spells the checkout root and sits where the quote
+ * include of local.h is probed, so a present generated probe must hash
+ * root-independently for two worktrees to agree. */
 static bool fx_tree(struct fx *x)
 {
-    char unity[PATH_MAX + 32];
+    char unity[PATH_MAX + 32], gen[PATH_MAX + 64];
     (void)snprintf(unity, sizeof(unity), "#include \"%s/src/unit.c\"\n",
+                   x->root);
+    (void)snprintf(gen, sizeof(gen), "#define GEN_ROOT \"%s/build\"\n",
                    x->root);
     return fx_write(x->root, "inc_a/.keep", "") &&
            fx_write(x->root, "inc_b/defs.h", "#define X 1\n") &&
@@ -411,6 +644,8 @@ static bool fx_tree(struct fx *x)
                     "#include \"local.h\"\n#include <defs.h>\n"
                     "int unit(void) { return X; }\n") &&
            fx_write(x->root, "build/gen/unity.c", unity) &&
+           fx_write(x->root, "build/gen/local.h", gen) &&
+           fx_write(x->root, "tools/ld", "fixture linker v1\n") &&
            fx_depfile(x, true);
 }
 
@@ -421,6 +656,8 @@ static void fx_argv(struct fx *x)
     (void)snprintf(x->include_b, sizeof(x->include_b), "-I%s/inc_b",
                    x->root);
     (void)snprintf(x->obj, sizeof(x->obj), "%s/build/obj.o", x->root);
+    (void)snprintf(x->so, sizeof(x->so), "%s/build/obj.so", x->root);
+    (void)snprintf(x->ld, sizeof(x->ld), "%s/tools/ld", x->root);
     (void)snprintf(x->unity_in, sizeof(x->unity_in), "%s/build/gen/unity.c",
                    x->root);
     const char *argv[] = {
@@ -430,6 +667,41 @@ static void fx_argv(struct fx *x)
     memcpy(x->argv, argv, sizeof(argv));
     x->req.argv = x->argv;
     x->req.argc = sizeof(argv) / sizeof(argv[0]);
+    const char *link[] = { "cc", "-shared", "-o", x->so, x->obj };
+    memcpy(x->link_argv, link, sizeof(link));
+    x->req.linker = (struct zcl_action_root_linker){
+        .links = true, .ld = x->ld, .collect2 = NULL,
+        .argv = x->link_argv, .argc = sizeof(link) / sizeof(link[0]),
+    };
+}
+
+static void fx_request(struct fx *x)
+{
+    struct zcl_action_root_request *r = &x->req;
+    r->root = x->root;
+    r->stage_kind = "c23.compile.fixture";
+    r->stage_version = 1;
+    r->virtual_from = x->vfrom;
+    r->virtual_to = x->vto;
+    r->virtual_count = 3;
+    r->depfile = x->depfile;
+    r->system_dirs = x->system_dirs;
+    r->system_dir_count = 1;
+    r->sysroot = NULL;
+    ar_fill(r->sysroot_objects_sha3, 44);
+    r->producers = x->producers;
+    r->producer_count = 0;
+    r->environ = x->env;
+    ar_fill(r->toolchain_root, 40);
+    r->abi_generation = 1;
+    r->abi = x->abi;
+    r->abi_count = 1;
+    r->harness.present = true;
+    ar_fill(r->harness.root, 41);
+    r->fixtures.present = true;
+    ar_fill(r->fixtures.root, 42);
+    r->policy.present = true;
+    ar_fill(r->policy.root, 43);
 }
 
 static bool fx_init(struct fx *x, const char *tag)
@@ -447,36 +719,20 @@ static bool fx_init(struct fx *x, const char *tag)
     x->vto[0] = "@out/object";
     x->vfrom[1] = x->depfile;
     x->vto[1] = "@out/depfile";
+    x->vfrom[2] = x->so;
+    x->vto[2] = "@out/module";
     x->env[0] = "LANG=C";
     x->env[1] = "HOME=/home/fixture-user";
     x->env[2] = "SOURCE_DATE_EPOCH=0";
     x->env[3] = NULL;
     x->system_dirs[0] = "/usr/include";
     x->abi[0] = (struct vcs_action_abi_v2){ "fixture_abi", 1 };
-    struct zcl_action_root_request *r = &x->req;
-    r->root = x->root;
-    r->stage_kind = "c23.compile.fixture";
-    r->stage_version = 1;
-    r->virtual_from = x->vfrom;
-    r->virtual_to = x->vto;
-    r->virtual_count = 2;
-    r->depfile = x->depfile;
-    r->system_dirs = x->system_dirs;
-    r->system_dir_count = 1;
-    r->environ = x->env;
-    ar_fill(r->toolchain_root, 40);
-    r->abi = x->abi;
-    r->abi_count = 1;
-    r->harness.present = true;
-    ar_fill(r->harness.root, 41);
-    r->fixtures.present = true;
-    ar_fill(r->fixtures.root, 42);
-    r->policy.present = true;
-    ar_fill(r->policy.root, 43);
+    x->producers[0].path = "build/gen/unity.c";
+    ar_fill(x->producers[0].action_key, 45);
+    fx_request(x);
     return true;
 }
 
-/* Derive; *field names the first difference from `base` when given. */
 static bool fx_derive(const struct fx *x, struct zcl_action_root_result *out)
 {
     bool ok = zcl_action_root_derive(&x->req, out);
@@ -485,6 +741,16 @@ static bool fx_derive(const struct fx *x, struct zcl_action_root_result *out)
     return ok;
 }
 
+static bool fx_refused(const struct fx *x)
+{
+    struct zcl_action_root_result r = {0};
+    bool refused = !zcl_action_root_derive(&x->req, &r);
+    zcl_action_root_result_free(&r);
+    return refused;
+}
+
+/* The derived root differs from `base` and the first differing field is
+ * exactly `want`. */
 static bool fx_differs(const struct fx *x,
                        const struct zcl_action_root_result *base,
                        enum vcs_action_field_v2 want)
@@ -566,22 +832,52 @@ static void test_derive_headers(struct fx *x,
          fx_remove(x->root, "inc_a/defs.h");
     AR_CHECK("headers: a new shadowing header in an earlier search dir "
              "moves the root before any recompile", ok && fx_same(x, b));
-    ok = fx_write(x->root, "src/defs.h", "#define X 4\n") &&
-         fx_differs(x, b, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP) &&
-         fx_remove(x->root, "src/defs.h");
+}
+
+/* Shadows in the includer's dir, a changed probed file, and removal. */
+static void test_derive_shadow_and_removal(
+    struct fx *x, const struct zcl_action_root_result *b)
+{
+    bool ok = fx_write(x->root, "src/defs.h", "#define X 4\n") &&
+              fx_differs(x, b, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP) &&
+              fx_remove(x->root, "src/defs.h");
     AR_CHECK("headers: a new shadowing header in the includer's own dir "
              "moves the root", ok && fx_same(x, b));
-    struct zcl_action_root_result stale = {0};
-    bool refused = fx_remove(x->root, "src/local.h") &&
-                   !zcl_action_root_derive(&x->req, &stale);
+    ok = fx_write(x->root, "build/gen/local.h", "#define GEN_ROOT 0\n") &&
+         fx_differs(x, b, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP);
+    AR_CHECK("headers: a changed file at a probed location moves the root",
+             ok);
+    bool refused = fx_remove(x->root, "src/local.h") && fx_refused(x);
     AR_CHECK("headers: a removed header named by a stale depfile is refused",
              refused);
     ok = fx_depfile(x, false) &&
          fx_differs(x, b, VCS_ACTION_FIELD_V2_SOURCE) &&
          fx_write(x->root, "src/local.h", "int local(void);\n") &&
-         fx_depfile(x, true);
+         fx_depfile(x, true) && fx_tree(x);
     AR_CHECK("headers: removing a header from the closure moves the root",
              ok && fx_same(x, b));
+}
+
+/* Lookups keep inclusion order; a closure that names one file twice or a
+ * dir in two search classes is refused. */
+static void test_derive_lookups(struct fx *x,
+                                const struct zcl_action_root_result *b)
+{
+    bool ok = fx_depfile_text(x, " build/gen/unity.c inc_b/defs.h "
+                                 "%R/src/unit.c src/local.h") &&
+              fx_differs(x, b, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP) &&
+              fx_depfile(x, true);
+    AR_CHECK("lookups: the same closure in another inclusion order moves "
+             "the root", ok && fx_same(x, b));
+    ok = fx_depfile_text(x, " build/gen/unity.c %R/src/unit.c src/local.h "
+                            "inc_b/defs.h src/local.h") &&
+         fx_refused(x) && fx_depfile(x, true);
+    AR_CHECK("lookups: a closure naming one file twice is refused", ok);
+    const char *saved = x->argv[3];
+    x->argv[3] = "-isysteminc_b";
+    ok = fx_refused(x);
+    x->argv[3] = saved;
+    AR_CHECK("lookups: a dir named in two search classes is refused", ok);
 }
 
 static void test_derive_sysroot(struct fx *x,
@@ -598,12 +894,74 @@ static void test_derive_sysroot(struct fx *x,
     bool ok = vcs_toolchain_capsule_v1_root(&capsule, x->req.toolchain_root);
     struct zcl_action_root_result first = {0};
     ok = ok && fx_derive(x, &first);
-    capsule.sysroot_sha3[3] ^= 0x40;
+    capsule.compiler_backend_sha3[3] ^= 0x40;
     ok = ok && vcs_toolchain_capsule_v1_root(&capsule, x->req.toolchain_root) &&
          fx_differs(x, &first, VCS_ACTION_FIELD_V2_TOOLCHAIN);
     zcl_action_root_result_free(&first);
     memcpy(x->req.toolchain_root, saved, 32);
-    AR_CHECK("sysroot: a changed capsule sysroot_sha3 moves the root",
+    AR_CHECK("toolchain: a changed compiler backend moves the root",
+             ok && fx_same(x, b));
+    x->req.sysroot_objects_sha3[3] ^= 0x40;
+    ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_SYSROOT);
+    x->req.sysroot_objects_sha3[3] ^= 0x40;
+    AR_CHECK("sysroot: changed sysroot objects move the root",
+             ok && fx_same(x, b));
+    x->req.sysroot = "/opt/fixture-sdk";
+    ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_SYSROOT);
+    x->req.sysroot = "/home/somebody/sdk";
+    ok = ok && fx_refused(x);
+    x->req.sysroot = NULL;
+    AR_CHECK("sysroot: a driver sysroot moves the root; a host one is "
+             "refused", ok && fx_same(x, b));
+}
+
+static void test_derive_linker(struct fx *x,
+                               const struct zcl_action_root_result *b)
+{
+    bool ok = fx_write(x->root, "tools/ld", "fixture linker v2\n") &&
+              fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER) &&
+              fx_write(x->root, "tools/ld", "fixture linker v1\n");
+    AR_CHECK("linker: a different ld binary moves the root",
+             ok && fx_same(x, b));
+    x->link_argv[1] = "-static";
+    ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
+    x->link_argv[1] = "-fuse-ld=gold";
+    ok = ok && fx_refused(x);
+    x->link_argv[1] = "-shared";
+    AR_CHECK("linker: link flags move the root; -fuse-ld is refused",
+             ok && fx_same(x, b));
+    x->req.linker.links = false;
+    ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
+    x->req.linker.links = true;
+    x->req.linker.ld = "/home/somebody/bin/ld";
+    ok = ok && fx_refused(x);
+    x->req.linker.ld = x->ld;
+    AR_CHECK("linker: a stage that stops at the object differs; a linker "
+             "outside the checkout or system is refused", ok && fx_same(x, b));
+}
+
+static void test_derive_generated(struct fx *x,
+                                  const struct zcl_action_root_result *b)
+{
+    x->req.producer_count = 1;
+    bool ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_GENERATED);
+    struct zcl_action_root_result known = {0};
+    ok = ok && fx_derive(x, &known);
+    x->producers[0].action_key[0] ^= 1;
+    ok = ok && known.preimage &&
+         fx_differs(x, &known, VCS_ACTION_FIELD_V2_GENERATED);
+    x->producers[0].action_key[0] ^= 1;
+    x->req.producer_count = 0;
+    zcl_action_root_result_free(&known);
+    AR_CHECK("generated: a known producer replaces the unknown-producer "
+             "marker, and its key moves the root", ok && fx_same(x, b));
+    char unity[PATH_MAX + 64];
+    (void)snprintf(unity, sizeof(unity),
+                   "#include \"%s/src/unit.c\"\n/* regenerated */\n",
+                   x->root);
+    ok = fx_write(x->root, "build/gen/unity.c", unity) &&
+         fx_differs(x, b, VCS_ACTION_FIELD_V2_GENERATED) && fx_tree(x);
+    AR_CHECK("generated: regenerated content moves the root",
              ok && fx_same(x, b));
 }
 
@@ -625,10 +983,14 @@ static void test_derive_roots(struct fx *x,
     x->req.policy.root[0] ^= 1;
     AR_CHECK("policy: a changed policy root moves the root",
              ok && fx_same(x, b));
-    x->abi[0].version = 2;
+    x->req.abi_generation = 2;
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_ABI);
+    x->req.abi_generation = 1;
+    x->abi[0].version = 2;
+    ok = ok && fx_differs(x, b, VCS_ACTION_FIELD_V2_ABI);
     x->abi[0].version = 1;
-    AR_CHECK("abi: a new ABI generation moves the root", ok && fx_same(x, b));
+    AR_CHECK("abi: a new ABI generation or component version moves the root",
+             ok && fx_same(x, b));
 }
 
 static void test_derive_env(struct fx *x,
@@ -639,6 +1001,11 @@ static void test_derive_env(struct fx *x,
     x->env[2] = "SOURCE_DATE_EPOCH=0";
     AR_CHECK("env: an allowlisted variable change moves the root",
              ok && fx_same(x, b));
+    x->env[3] = "TZ=";
+    ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_ENV);
+    x->env[3] = NULL;
+    AR_CHECK("env: an allowlisted variable set empty differs from unset",
+             ok && fx_same(x, b));
     x->env[1] = "HOME=/home/somebody-else";
     ok = fx_same(x, b);
     x->env[3] = "PATH=/opt/other/bin:/usr/bin";
@@ -647,29 +1014,30 @@ static void test_derive_env(struct fx *x,
     x->env[3] = NULL;
     AR_CHECK("env: non-allowlisted variables never reach the root", ok);
     x->env[3] = "CPATH=/home/somebody/include";
-    struct zcl_action_root_result r = {0};
-    ok = !zcl_action_root_derive(&x->req, &r);
+    ok = fx_refused(x);
+    x->env[3] = "LANG=C";
+    ok = ok && fx_refused(x);
     x->env[3] = NULL;
-    AR_CHECK("env: an allowlisted value naming a host path is refused", ok);
+    AR_CHECK("env: a host path value or a repeated allowlisted name is "
+             "refused, not normalized", ok && fx_same(x, b));
 }
 
 static void test_derive_refusals(struct fx *x)
 {
-    struct zcl_action_root_result r = {0};
     const char *saved = x->argv[3];
     x->argv[3] = "-I/home/somebody/include";
-    bool ok = !zcl_action_root_derive(&x->req, &r);
+    bool ok = fx_refused(x);
     x->argv[3] = saved;
     AR_CHECK("an include dir outside the checkout is refused", ok);
     char outside[PATH_MAX + 64], text[2 * PATH_MAX + 96];
     (void)snprintf(outside, sizeof(outside), "%s-outside/leak.h", x->root);
     (void)snprintf(text, sizeof(text), "build/obj.o: src/unit.c %s\n",
                    outside);
-    ok = fx_write(x->root, "build/unit.d", text) &&
-         !zcl_action_root_derive(&x->req, &r) && fx_depfile(x, true);
+    ok = fx_write(x->root, "build/unit.d", text) && fx_refused(x) &&
+         fx_depfile(x, true);
     AR_CHECK("a dependency outside the checkout is refused", ok);
     x->argv[3] = "-nostdinc";
-    ok = !zcl_action_root_derive(&x->req, &r);
+    ok = fx_refused(x);
     x->argv[3] = saved;
     AR_CHECK("a flag that moves the built-in include search is refused", ok);
 }
@@ -678,10 +1046,17 @@ static void test_derive_cross_worktree(const struct zcl_action_root_result *a)
 {
     struct fx *y = zcl_calloc(1, sizeof(*y), "action root fixture b");
     struct zcl_action_root_result r = {0};
-    bool ok = y && fx_init(y, "b") && fx_derive(y, &r) &&
-              memcmp(r.root, a->root, 32) == 0 &&
+    enum vcs_action_field_v2 field = VCS_ACTION_FIELD_V2_COUNT;
+    bool derived = y && fx_init(y, "b") && fx_derive(y, &r);
+    bool ok = derived && memcmp(r.root, a->root, 32) == 0 &&
               r.preimage_len == a->preimage_len &&
               memcmp(r.preimage, a->preimage, a->preimage_len) == 0;
+    if (derived && !ok &&
+        vcs_action_preimage_v2_first_diff(a->preimage, a->preimage_len,
+                                          r.preimage, r.preimage_len, &field))
+        printf("    cross-worktree first differing field: %s\n",
+               vcs_action_field_v2_name(field) ? vcs_action_field_v2_name(field)
+                                               : "none");
     AR_CHECK("cross-worktree: the same tree at another absolute root "
              "derives the identical root and preimage", ok);
     if (y)
@@ -776,12 +1151,12 @@ static void test_hotswap_hook(struct fx *x)
     struct zcl_devloop_hotswap_build_receipt r1 = {0}, r2 = {0}, r3 = {0};
     const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1";
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    x->depfile, &r1);
+                                    "-shared", x->depfile, &r1);
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    x->depfile, &r2);
+                                    "-shared", x->depfile, &r2);
     ok = ok && fx_write(x->root, "src/local.h", "int local(long);\n");
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    x->depfile, &r3);
+                                    "-shared", x->depfile, &r3);
     ok = ok && fx_write(x->root, "src/local.h", "int local(void);\n");
     if (!r1.action_root[0])
         printf("    hook refused: %s\n", r1.action_root_refused);
@@ -825,16 +1200,20 @@ static void test_derivation(void)
     bool ok = x && fx_init(x, "a") && fx_derive(x, &base);
     AR_CHECK("fixture derives a root", ok && strlen(base.root_hex) == 64);
     if (ok) {
-        printf("    fixture: %u sources, %u generated, %u names, "
+        printf("    fixture: %u sources, %u generated, %u lookups, "
                "%u probes, %u present, %zu preimage bytes, %lldus\n",
-               base.source_count, base.generated_count, base.probe_names,
+               base.source_count, base.generated_count, base.lookups,
                base.probes, base.present, base.preimage_len,
                (long long)base.derive_us);
         AR_CHECK("stability: deriving twice without change gives one root",
                  fx_same(x, &base));
         test_derive_flags(x, &base);
         test_derive_headers(x, &base);
+        test_derive_shadow_and_removal(x, &base);
+        test_derive_lookups(x, &base);
         test_derive_sysroot(x, &base);
+        test_derive_linker(x, &base);
+        test_derive_generated(x, &base);
         test_derive_roots(x, &base);
         test_derive_env(x, &base);
         test_derive_refusals(x);
@@ -854,6 +1233,7 @@ int test_action_root(void)
     g_failures = 0;
     printf("action_root: zcl.action_preimage.v2 codec and derivation\n");
     test_codec_roundtrip();
+    test_codec_field_roots();
     test_codec_field_table();
     test_codec_empty_is_not_zero();
     test_codec_refusals();

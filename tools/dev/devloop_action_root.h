@@ -4,15 +4,19 @@
  * real compile: the exact source closure a compiler depfile names, the
  * include lookups that had to MISS for that closure to be chosen, the
  * normalized argv, the allowlisted environment, the toolchain capsule root,
- * and the ABI generation. The derivation reads files and stats paths; it
- * runs no compiler and never changes what the build does.
+ * the sysroot, the linker, and the ABI generation. The derivation reads
+ * files and stats paths; it runs no compiler and never changes what the
+ * build does.
  *
- * Negative lookups. For a dependency found as dirK/rel, every search dir J
- * before K, and every directory of a file in the closure (a conservative
- * superset of "the including file's own dir" for quote includes), is a
- * probed location (dirJ, rel). The preimage asserts each probed location
- * absent, or records what is there. A header that later appears earlier in
- * the search order therefore changes the root before anything recompiles.
+ * Negative lookups. For every dependency, in depfile (inclusion) order,
+ * each way the compiler could have reached it is one lookup: rel below
+ * search dir K probes search dirs 0..K-1 first; the dependency's own dir
+ * (a quote include beside its includer) needs no search dir. Every lookup
+ * also probes every other directory of a file in the closure (a
+ * conservative superset of "the including file's own dir"). Each probed
+ * location is asserted absent, or what is there is recorded. A header that
+ * later appears earlier in the search order therefore changes the root
+ * before anything recompiles.
  */
 
 #ifndef ZCL_DEVLOOP_ACTION_ROOT_H
@@ -30,6 +34,21 @@
  * (<root hex>.preimage) and the last root per unit (last/<unit>.root). */
 #define ZCL_ACTION_ROOT_STORE_LANE "action-preimage-v2"
 #define ZCL_ACTION_ROOT_MAX_DEPS 4096u
+
+/* The action key of the action that produced one generated input. */
+struct zcl_action_root_producer {
+    const char *path;       /* canonical token, e.g. "build/gen/x.h" */
+    uint8_t action_key[32];
+};
+
+/* The link step of the same action, as the compiler driver resolves it. */
+struct zcl_action_root_linker {
+    bool links;
+    const char *ld;          /* absolute, as `cc -print-prog-name=ld` */
+    const char *collect2;    /* absolute, or NULL when the driver has none */
+    const char *const *argv; /* link argv exactly as executed */
+    size_t argc;
+};
 
 struct zcl_action_root_request {
     /* Canonical absolute checkout root (realpath, no trailing slash). */
@@ -49,9 +68,18 @@ struct zcl_action_root_request {
     /* The compiler's built-in #include <...> dirs, absolute, in order. */
     const char *const *system_dirs;
     size_t system_dir_count;
+    /* `cc -print-sysroot`, absolute; NULL or "" when the driver has none. */
+    const char *sysroot;
+    uint8_t sysroot_objects_sha3[32];
+    struct zcl_action_root_linker linker;
+    /* Known producers of generated inputs; any other generated input is
+     * recorded with the explicit unknown-producer marker. */
+    const struct zcl_action_root_producer *producers;
+    size_t producer_count;
     /* NULL-terminated NAME=value list; only allowlisted names are kept. */
     const char *const *environ;
     uint8_t toolchain_root[32];
+    uint32_t abi_generation;
     const struct vcs_action_abi_v2 *abi;
     size_t abi_count;
     struct vcs_action_root_ref_v2 harness;
@@ -67,7 +95,7 @@ struct zcl_action_root_result {
     int64_t derive_us;
     uint32_t source_count;
     uint32_t generated_count;
-    uint32_t probe_names;
+    uint32_t lookups;    /* include lookups recorded */
     uint32_t probes;     /* probed locations actually examined */
     uint32_t present;    /* probed locations that exist */
     char why[256];       /* refusal reason when derive returns false */
@@ -95,14 +123,15 @@ bool zcl_action_root_load(const char *store_dir, const char *root_hex,
                           char *why, size_t why_len);
 
 /* The hotload compile hook. Fills the action_root* fields of `receipt` for
- * the module compile that zcl_devloop_hotswap_build() runs for `owner`
- * (argv rebuilt by the same recipe as its compile step, closure from the
- * published depfile). Never fails the build: a refusal is recorded in
- * receipt->action_root_refused. */
+ * the module compile and link that zcl_devloop_hotswap_build() runs for
+ * `owner` (argv rebuilt by the same recipe as its compile and link steps,
+ * closure from the published depfile). Never fails the build: a refusal is
+ * recorded in receipt->action_root_refused. */
 struct zcl_devloop_hotswap_build_receipt;
 void zcl_devloop_action_root_hotswap(
     const char *root, const char *owner, const char *cc, const char *cflags,
-    const char *depfile, struct zcl_devloop_hotswap_build_receipt *receipt);
+    const char *ldflags, const char *depfile,
+    struct zcl_devloop_hotswap_build_receipt *receipt);
 /* Append the action_root* fields to a zcl.hotswap_build_receipt.v1 object. */
 struct json_value;
 void zcl_devloop_action_root_emit(

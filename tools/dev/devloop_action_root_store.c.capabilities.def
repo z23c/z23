@@ -1,0 +1,4 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the action preimage store and the
+ * hotload compile hook. */
+ZCL_MODULE_CAPABILITY("tools/dev/devloop_action_root_store.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "asks the build's own compiler driver for its built-in include search list, sysroot and linker (cc -E -v, -print-sysroot, -print-prog-name) and records the allowlisted part of the environment the compile child inherits")

@@ -1585,7 +1585,7 @@ bool zcl_devloop_hotswap_build(
             (void)unlink(tmp_d);
             (void)unlink(tmp_so);
             zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                            cached_dep, receipt);
+                                            plan.ldflags, cached_dep, receipt);
             return true;
         }
         if (cache_fd >= 0) {
@@ -1657,7 +1657,7 @@ bool zcl_devloop_hotswap_build(
             (void)unlink(tmp_o);
             (void)unlink(tmp_so);
             zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                            cached_dep, receipt);
+                                            plan.ldflags, cached_dep, receipt);
             return true;
         }
         if (cache_fd >= 0) {
@@ -1742,7 +1742,7 @@ bool zcl_devloop_hotswap_build(
         (void)close(cache_fd);
     }
     zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                    cached_dep, receipt);
+                                    plan.ldflags, cached_dep, receipt);
     return true;
 
 fail:
@@ -1755,7 +1755,7 @@ fail:
     }
     receipt->total_us = platform_time_monotonic_us() - started;
     zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                    cached_dep, receipt);
+                                    plan.ldflags, cached_dep, receipt);
     return false;
 }
 

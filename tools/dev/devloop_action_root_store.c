@@ -188,13 +188,11 @@ bool zcl_action_root_load(const char *store_dir, const char *root_hex,
     return true;
 }
 
-/* Safe single-component file name for one unit (repo-relative path). */
-static bool ars_unit_file(const char *store_dir, const char *unit,
-                          char out[PATH_MAX])
+/* Map a repo-relative unit path to one safe file-name component. */
+static bool ars_safe_name(const char *unit, char safe[256])
 {
-    char safe[256];
     size_t n = unit ? strlen(unit) : 0;
-    if (n == 0 || n >= sizeof(safe))
+    if (n == 0 || n >= 256)
         return false;
     for (size_t i = 0; i <= n; i++) {
         unsigned char c = (unsigned char)unit[i];
@@ -202,8 +200,16 @@ static bool ars_unit_file(const char *store_dir, const char *unit,
                     (c >= '0' && c <= '9') || c == '.' || c == '-' || !c;
         safe[i] = keep ? (char)c : '_';
     }
-    char dir[PATH_MAX];
-    return snprintf(dir, sizeof(dir), "%s/last", store_dir) <
+    return true;
+}
+
+/* Safe single-component file name for one unit (repo-relative path). */
+static bool ars_unit_file(const char *store_dir, const char *unit,
+                          char out[PATH_MAX])
+{
+    char safe[256], dir[PATH_MAX];
+    return ars_safe_name(unit, safe) &&
+           snprintf(dir, sizeof(dir), "%s/last", store_dir) <
                (int)sizeof(dir) && ars_mkdirs(dir) &&
            snprintf(out, PATH_MAX, "%s/%s.root", dir, safe) < PATH_MAX;
 }
@@ -269,18 +275,23 @@ bool zcl_action_root_record(const char *store_dir, const char *unit,
 
 /* ---- hotload compile hook ---------------------------------------------- */
 
-/* The compiler's built-in #include <...> list, asked once per driver. */
-struct ars_system_dirs {
+/* What the compiler driver reports about itself, asked once per driver:
+ * its built-in #include <...> list, its sysroot, and the ld / collect2 it
+ * runs for a link. */
+struct ars_driver {
     char driver[512];
     char dirs[ARS_SYSTEM_DIR_MAX][PATH_MAX];
     size_t count;
+    char sysroot[PATH_MAX];
+    char ld[PATH_MAX];
+    char collect2[PATH_MAX];
     bool valid;
 };
 
-static pthread_mutex_t g_system_mu = PTHREAD_MUTEX_INITIALIZER;
-static struct ars_system_dirs g_system;
+static pthread_mutex_t g_driver_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct ars_driver g_driver;
 
-static bool ars_system_parse(const char *out, struct ars_system_dirs *sd)
+static bool ars_system_parse(const char *out, struct ars_driver *sd)
 {
     const char *p = strstr(out, "#include <...> search starts here:");
     const char *end = strstr(out, "End of search list.");
@@ -303,37 +314,105 @@ static bool ars_system_parse(const char *out, struct ars_system_dirs *sd)
     return sd->count > 0;
 }
 
-static bool ars_system_dirs(const char *cc, struct ars_system_dirs *out)
+#if !defined(_WIN32)
+/* Run `cc <args...>` and capture merged output. */
+static bool ars_driver_ask(const char *cc, const char *const *args,
+                           char *capture, size_t cap)
+{
+    char text[512];
+    const char *argv[ARS_ARG_MAX];
+    (void)snprintf(text, sizeof(text), "%s", cc);
+    size_t argc = zcl_argv_split(text, argv, ARS_ARG_MAX - 8);
+    for (size_t i = 0; argc && args[i] && argc < ARS_ARG_MAX - 1; i++)
+        argv[argc++] = args[i];
+    argv[argc] = NULL;
+    bool timed_out = false;
+    return argc > 1 &&
+           zcl_spawn_capture_merged_observed(argv, capture, cap, 10000,
+                                             &timed_out) == 0 &&
+           !timed_out;
+}
+
+/* First output line of `cc <arg>`, trimmed; "" when the line is empty. */
+static bool ars_driver_line(const char *cc, const char *arg, char out[PATH_MAX])
+{
+    char capture[PATH_MAX];
+    const char *args[] = { arg, NULL };
+    if (!ars_driver_ask(cc, args, capture, sizeof(capture)))
+        return false;
+    size_t n = strcspn(capture, "\r\n");
+    while (n > 0 && capture[n - 1] == ' ')
+        n--;
+    return snprintf(out, PATH_MAX, "%.*s", (int)n, capture) < PATH_MAX;
+}
+
+/* A driver that prints a bare program name runs it from PATH; resolve it
+ * the same way. The answer is recorded by content, so PATH itself never
+ * enters the preimage. */
+static bool ars_resolve_program(char path[PATH_MAX])
+{
+    if (strchr(path, '/'))
+        return path[0] == '/' && access(path, X_OK) == 0;
+    const char *env = getenv("PATH");
+    char name[256];
+    if (!env || !path[0] || snprintf(name, sizeof(name), "%s", path) >=
+                                (int)sizeof(name))
+        return false;
+    for (const char *p = env; *p;) {
+        size_t n = strcspn(p, ":");
+        char candidate[PATH_MAX];
+        struct stat st;
+        if (n > 0 && p[0] == '/' &&
+            snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)n, p,
+                     name) < (int)sizeof(candidate) &&
+            stat(candidate, &st) == 0 && S_ISREG(st.st_mode) &&
+            access(candidate, X_OK) == 0) {
+            (void)snprintf(path, PATH_MAX, "%s", candidate);
+            return true;
+        }
+        p += n + (p[n] == ':');
+    }
+    return false;
+}
+
+static bool ars_driver_capture(const char *cc, struct ars_driver *d)
+{
+    static const char *const search[] = { "-xc", "-E", "-v", "/dev/null",
+                                          NULL };
+    char capture[16384];
+    memset(d, 0, sizeof(*d));
+    (void)snprintf(d->driver, sizeof(d->driver), "%s", cc);
+    if (!ars_driver_ask(cc, search, capture, sizeof(capture)) ||
+        !ars_system_parse(capture, d) ||
+        !ars_driver_line(cc, "-print-sysroot", d->sysroot) ||
+        !ars_driver_line(cc, "-print-prog-name=ld", d->ld) ||
+        !ars_resolve_program(d->ld) ||
+        !ars_driver_line(cc, "-print-prog-name=collect2", d->collect2))
+        return false;
+    /* Only an absolute answer is a collect2 this driver runs; a driver
+     * without one (Clang) echoes the bare name back. */
+    if (d->collect2[0] != '/' || access(d->collect2, X_OK) != 0)
+        d->collect2[0] = '\0';
+    return true;
+}
+#endif
+
+static bool ars_driver_facts(const char *cc, struct ars_driver *out)
 {
 #if defined(_WIN32)
     (void)cc;
     (void)out;
     return false;
 #else
-    pthread_mutex_lock(&g_system_mu);
-    bool ok = g_system.valid && strcmp(g_system.driver, cc) == 0;
+    pthread_mutex_lock(&g_driver_mu);
+    bool ok = g_driver.valid && strcmp(g_driver.driver, cc) == 0;
     if (!ok) {
-        char text[512], capture[16384];
-        const char *argv[ARS_ARG_MAX];
-        (void)snprintf(text, sizeof(text), "%s", cc);
-        size_t argc = zcl_argv_split(text, argv, ARS_ARG_MAX - 5);
-        argv[argc++] = "-xc";
-        argv[argc++] = "-E";
-        argv[argc++] = "-v";
-        argv[argc++] = "/dev/null";
-        argv[argc] = NULL;
-        bool timed_out = false;
-        memset(&g_system, 0, sizeof(g_system));
-        ok = argc > 4 &&
-             zcl_spawn_capture_merged_observed(argv, capture, sizeof(capture),
-                                               10000, &timed_out) == 0 &&
-             !timed_out && ars_system_parse(capture, &g_system);
-        g_system.valid = ok;
-        (void)snprintf(g_system.driver, sizeof(g_system.driver), "%s", cc);
+        ok = ars_driver_capture(cc, &g_driver);
+        g_driver.valid = ok;
     }
     if (ok)
-        *out = g_system;
-    pthread_mutex_unlock(&g_system_mu);
+        *out = g_driver;
+    pthread_mutex_unlock(&g_driver_mu);
     return ok;
 #endif
 }
@@ -369,6 +448,10 @@ struct ars_argv {
     char input[PATH_MAX];
     const char *v[ARS_ARG_MAX];
     size_t n;
+    char link_cc[512];
+    char ldflags[4096];
+    const char *link[ARS_ARG_MAX];
+    size_t link_n;
 };
 
 /* Mirror of hs_run_compile() in devloop_hotswap_build.c: the same driver,
@@ -410,6 +493,26 @@ static bool ars_hotswap_argv(const char *owner, const char *cc,
     return true;
 }
 
+/* Mirror of hs_run_link(): driver, link flags, -o module, the object. */
+static bool ars_hotswap_link_argv(const char *cc, const char *ldflags,
+                                  struct ars_argv *a)
+{
+    (void)snprintf(a->link_cc, sizeof(a->link_cc), "%s", cc);
+    if (snprintf(a->ldflags, sizeof(a->ldflags), "%s", ldflags) >=
+        (int)sizeof(a->ldflags))
+        return false;
+    a->link_n = zcl_argv_split(a->link_cc, a->link, ARS_ARG_MAX);
+    a->link_n += zcl_argv_split(a->ldflags, a->link + a->link_n,
+                                ARS_ARG_MAX - a->link_n);
+    if (a->link_n == 0 || a->link_n + 4 >= ARS_ARG_MAX)
+        return false;
+    a->link[a->link_n++] = "-o";
+    a->link[a->link_n++] = "@out/module";
+    a->link[a->link_n++] = "@out/object";
+    a->link[a->link_n] = NULL;
+    return true;
+}
+
 #if !defined(_WIN32)
 extern char **environ;
 #endif
@@ -419,7 +522,7 @@ extern char **environ;
 static const char *const *ars_environ(void)
 {
 #if defined(_WIN32)
-    return NULL; /* unreachable: the include search probe refuses first */
+    return NULL; /* unreachable: the driver probe refuses first */
 #else
     return (const char *const *)environ;
 #endif
@@ -428,69 +531,92 @@ static const char *const *ars_environ(void)
 static void ars_policy_root(uint8_t out[32])
 {
     static const char policy[] =
-        "zcl.action_policy.v2\0hotswap.compile;timeout_ms=30000;"
+        "zcl.action_policy.v2\0hotswap.compile+link;timeout_ms=30000;"
         "env=inherited-allowlist;network=ambient";
     zcl_sha3_256((const unsigned char *)policy, sizeof(policy), out);
 }
 
 struct ars_hook {
     struct ars_argv argv;
-    struct ars_system_dirs system;
+    struct ars_driver driver;
     const char *system_dirs[ARS_SYSTEM_DIR_MAX];
     struct vcs_toolchain_capsule_v1 capsule;
     struct zcl_action_root_request req;
 };
 
-static bool ars_hook_request(struct ars_hook *h, const char *root,
-                             const char *owner, const char *cc,
-                             const char *cflags, const char *depfile,
-                             char *why, size_t why_len)
+/* The generation a hotload module is loaded against is the host ABI; the
+ * module and service ABIs are listed by name beside it. */
+static const struct vcs_action_abi_v2 g_hotswap_abi[] = {
+    { "hotswap_host", ZCL_HOTSWAP_HOST_ABI_V4 },
+    { "hotswap_module", ZCL_HOTSWAP_MODULE_ABI_V3 },
+    { "hotswap_service", ZCL_HOTSWAP_SERVICE_ABI_V1 },
+};
+
+struct ars_compile {
+    const char *root, *owner, *cc, *cflags, *ldflags, *depfile;
+};
+
+static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
+                            char *why, size_t why_len)
 {
-    static const struct vcs_action_abi_v2 abi[] = {
-        { "hotswap_host", ZCL_HOTSWAP_HOST_ABI_V4 },
-        { "hotswap_module", ZCL_HOTSWAP_MODULE_ABI_V3 },
-        { "hotswap_service", ZCL_HOTSWAP_SERVICE_ABI_V1 },
-    };
     struct zcl_action_root_request *r = &h->req;
     if (!vcs_toolchain_capsule_v1_capture(&h->capsule) ||
         !vcs_toolchain_capsule_v1_root(&h->capsule, r->toolchain_root)) {
         ars_why(why, why_len, "toolchain capsule unavailable", NULL);
         return false;
     }
-    if (!ars_system_dirs(cc, &h->system)) {
-        ars_why(why, why_len, "compiler include search list unavailable", cc);
+    if (!ars_driver_facts(k->cc, &h->driver)) {
+        ars_why(why, why_len, "compiler driver facts unavailable", k->cc);
         return false;
     }
-    if (!ars_hotswap_argv(owner, cc, cflags, depfile, &h->argv)) {
+    if (!ars_hotswap_argv(k->owner, k->cc, k->cflags, k->depfile,
+                          &h->argv) ||
+        !ars_hotswap_link_argv(k->cc, k->ldflags, &h->argv)) {
         ars_why(why, why_len, "compile argv or depfile input unavailable",
-                depfile);
+                k->depfile);
         return false;
     }
-    for (size_t i = 0; i < h->system.count; i++)
-        h->system_dirs[i] = h->system.dirs[i];
-    r->root = root;
+    return true;
+}
+
+static bool ars_hook_request(struct ars_hook *h, const struct ars_compile *k,
+                             char *why, size_t why_len)
+{
+    struct zcl_action_root_request *r = &h->req;
+    if (!ars_hook_inputs(h, k, why, why_len))
+        return false;
+    for (size_t i = 0; i < h->driver.count; i++)
+        h->system_dirs[i] = h->driver.dirs[i];
+    r->root = k->root;
     r->stage_kind = ZCL_ACTION_ROOT_STAGE_HOTSWAP;
     r->stage_version = ZCL_ACTION_ROOT_STAGE_HOTSWAP_VERSION;
     r->argv = h->argv.v;
     r->argc = h->argv.n;
-    r->depfile = depfile;
+    r->depfile = k->depfile;
     r->system_dirs = h->system_dirs;
-    r->system_dir_count = h->system.count;
+    r->system_dir_count = h->driver.count;
+    r->sysroot = h->driver.sysroot;
+    memcpy(r->sysroot_objects_sha3, h->capsule.sysroot_sha3, 32);
+    r->linker = (struct zcl_action_root_linker){
+        .links = true, .ld = h->driver.ld,
+        .collect2 = h->driver.collect2[0] ? h->driver.collect2 : NULL,
+        .argv = h->argv.link, .argc = h->argv.link_n,
+    };
     r->environ = ars_environ();
-    r->abi = abi;
-    r->abi_count = sizeof(abi) / sizeof(abi[0]);
+    r->abi_generation = ZCL_HOTSWAP_HOST_ABI_V4;
+    r->abi = g_hotswap_abi;
+    r->abi_count = sizeof(g_hotswap_abi) / sizeof(g_hotswap_abi[0]);
     r->policy.present = true;
     ars_policy_root(r->policy.root);
     return true;
 }
 
-static bool ars_hook_derive(const char *root, const char *owner,
-                            const char *cc, const char *cflags,
-                            const char *depfile,
+static bool ars_hook_derive(const struct ars_compile *k,
                             struct zcl_action_root_result *result,
                             char *why, size_t why_len)
 {
-    if (!root || !owner || !cc || !cflags || !depfile) {
+    if (!k->root || !k->owner || !k->cc || !k->cflags || !k->ldflags ||
+        !k->depfile) {
         ars_why(why, why_len, "hotload compile identity is incomplete", NULL);
         return false;
     }
@@ -499,8 +625,7 @@ static bool ars_hook_derive(const char *root, const char *owner,
         ars_why(why, why_len, "action root hook allocation failed", NULL);
         return false;
     }
-    bool ok = ars_hook_request(h, root, owner, cc, cflags, depfile, why,
-                               why_len) &&
+    bool ok = ars_hook_request(h, k, why, why_len) &&
               zcl_action_root_derive(&h->req, result);
     if (!ok)
         ars_why(why, why_len,
@@ -528,7 +653,8 @@ static void ars_hook_store(const char *owner,
 
 void zcl_devloop_action_root_hotswap(
     const char *root, const char *owner, const char *cc, const char *cflags,
-    const char *depfile, struct zcl_devloop_hotswap_build_receipt *receipt)
+    const char *ldflags, const char *depfile,
+    struct zcl_devloop_hotswap_build_receipt *receipt)
 {
     if (!receipt)
         return;
@@ -537,9 +663,10 @@ void zcl_devloop_action_root_hotswap(
     receipt->action_root_refused[0] = '\0';
     char why[192] = {0};
     struct zcl_action_root_result result = {0};
+    const struct ars_compile k = { root, owner, cc, cflags, ldflags,
+                                   depfile };
     int64_t started = platform_time_monotonic_us();
-    bool derived = ars_hook_derive(root, owner, cc, cflags, depfile, &result,
-                                   why, sizeof(why));
+    bool derived = ars_hook_derive(&k, &result, why, sizeof(why));
     receipt->action_root_us = platform_time_monotonic_us() - started;
     receipt->action_root_probes = result.probes;
     receipt->action_root_present = result.present;

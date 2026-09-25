@@ -72,14 +72,6 @@ static bool ar_list_push(struct ar_list *l, const char *s)
     return true;
 }
 
-static bool ar_list_has(const struct ar_list *l, const char *s)
-{
-    for (size_t i = 0; i < l->n; i++)
-        if (strcmp(l->v[i], s) == 0)
-            return true;
-    return false;
-}
-
 static void ar_list_free(struct ar_list *l)
 {
     for (size_t i = 0; i < l->n; i++)
@@ -111,6 +103,31 @@ static void ar_list_sort_unique(struct ar_list *l)
 
 /* ---- path tokens ------------------------------------------------------- */
 
+/* Apply one path segment to out[0..*used): "." is dropped, ".." pops the
+ * last segment (refused above the start), anything else is appended. */
+static bool ar_lex_segment(const char *p, size_t n, bool absolute, char *out,
+                           size_t *used, size_t cap)
+{
+    if (n == 0 || (n == 1 && p[0] == '.'))
+        return true;
+    if (n == 2 && p[0] == '.' && p[1] == '.') {
+        if (*used == 0)
+            return false;
+        while (*used > 0 && out[*used - 1] != '/')
+            (*used)--;
+        if (*used > 0)
+            (*used)--;
+        return true;
+    }
+    if (*used + n + 2 >= cap)
+        return false;
+    if (*used > 0 || absolute)
+        out[(*used)++] = '/';
+    memcpy(out + *used, p, n);
+    *used += n;
+    return true;
+}
+
 /* Lexically collapse "", "." and ".." segments. Absolute stays absolute;
  * a ".." that would climb above the start is refused. */
 static bool ar_lex_normalize(const char *in, char *out, size_t cap)
@@ -119,27 +136,16 @@ static bool ar_lex_normalize(const char *in, char *out, size_t cap)
     size_t used = 0;
     const char *p = in;
     while (*p) {
-        while (*p == '/') p++;
+        while (*p == '/')
+            p++;
         const char *end = strchr(p, '/');
         size_t n = end ? (size_t)(end - p) : strlen(p);
-        if (n == 0 || (n == 1 && p[0] == '.')) {
-            p += n;
-            continue;
-        }
-        if (n == 2 && p[0] == '.' && p[1] == '.') {
-            if (used == 0) return false;
-            while (used > 0 && out[used - 1] != '/') used--;
-            if (used > 0) used--;
-            p += n;
-            continue;
-        }
-        if (used + n + 2 >= cap) return false;
-        if (used > 0 || absolute) out[used++] = '/';
-        memcpy(out + used, p, n);
-        used += n;
+        if (!ar_lex_segment(p, n, absolute, out, &used, cap))
+            return false;
         p += n;
     }
-    if (used == 0 && absolute) out[used++] = '/';
+    if (used == 0 && absolute)
+        out[used++] = '/';
     out[used] = '\0';
     return true;
 }
@@ -170,28 +176,39 @@ struct ar_ctx {
     size_t why_len;
 };
 
+/* Token and filesystem path for an absolute, normalized spelling: inside
+ * the checkout it is repo-relative, under a system prefix "@sys/...". */
+static int ar_tokenize_absolute(const struct ar_ctx *c, const char *norm,
+                                char token[PATH_MAX], char fs[PATH_MAX])
+{
+    const char *root = c->req->root;
+    if (strncmp(norm, root, c->root_len) == 0 &&
+        (norm[c->root_len] == '\0' || norm[c->root_len] == '/')) {
+        const char *rel = norm + c->root_len;
+        (void)snprintf(token, PATH_MAX, "%s", rel[0] ? rel + 1 : ".");
+        return snprintf(fs, PATH_MAX, "%s", norm);
+    }
+    if (!ar_system_path(norm))
+        return -1;
+    int n = snprintf(token, PATH_MAX, "@sys%s", norm);
+    return n > 0 && n < PATH_MAX ? snprintf(fs, PATH_MAX, "%s", norm) : -1;
+}
+
 /* Map a host spelling (absolute, or relative to the root) to its canonical
  * token and the filesystem path to read. */
 static bool ar_tokenize(const struct ar_ctx *c, const char *raw,
                         char token[PATH_MAX], char fs[PATH_MAX])
 {
     char norm[PATH_MAX];
-    const char *root = c->req->root;
     int n = -1;
     if (!raw || !raw[0] || !ar_lex_normalize(raw, norm, sizeof(norm)))
         return false;
     if (norm[0] != '/') {
         (void)snprintf(token, PATH_MAX, "%s", norm[0] ? norm : ".");
-        n = snprintf(fs, PATH_MAX, "%s%s%s", root, norm[0] ? "/" : "", norm);
-    } else if (strncmp(norm, root, c->root_len) == 0 &&
-               (norm[c->root_len] == '\0' || norm[c->root_len] == '/')) {
-        const char *rel = norm + c->root_len;
-        (void)snprintf(token, PATH_MAX, "%s", rel[0] ? rel + 1 : ".");
-        n = snprintf(fs, PATH_MAX, "%s", norm);
-    } else if (ar_system_path(norm)) {
-        n = snprintf(token, PATH_MAX, "@sys%s", norm);
-        if (n > 0 && n < PATH_MAX)
-            n = snprintf(fs, PATH_MAX, "%s", norm);
+        n = snprintf(fs, PATH_MAX, "%s%s%s", c->req->root,
+                     norm[0] ? "/" : "", norm);
+    } else {
+        n = ar_tokenize_absolute(c, norm, token, fs);
     }
     return n > 0 && n < PATH_MAX &&
            vcs_action_v2_path_canonical(token, true);
@@ -404,11 +421,25 @@ static bool ar_sha3_generated(const struct ar_ctx *c, const char *path,
 
 /* ---- dependency closure ------------------------------------------------ */
 
+#define AR_SEARCH_MAX 1024u
+#define AR_ENV_MAX 32u
+
 struct ar_dep {
     char token[PATH_MAX];
     char fs[PATH_MAX];
     bool generated;
     uint8_t sha3[32];
+};
+
+/* One lookup under construction; its present entries live in the shared
+ * pool at [present_at, present_at + present_n). */
+struct ar_lookup {
+    const char *name;     /* points into a dep token */
+    const char *hit_dir;  /* points into search or includers */
+    uint32_t search_prefix;
+    long hit_includer;
+    size_t present_at;
+    size_t present_n;
 };
 
 struct ar_state {
@@ -417,14 +448,22 @@ struct ar_state {
     size_t dep_n;
     struct ar_list search;       /* tokens, compiler order */
     struct ar_list search_fs;
+    unsigned char search_cls[AR_SEARCH_MAX];
+    struct ar_list builtin;      /* builtin dir tokens, driver order */
     struct ar_list includers;    /* sorted tokens */
     struct ar_list includers_fs;
-    struct vcs_action_probe_v2 *names;
-    size_t name_n, name_cap;
+    struct ar_lookup *lookups;
+    size_t lookup_n, lookup_cap;
     struct vcs_action_present_v2 *present;
     size_t present_n, present_cap;
     struct ar_list argv;
-    struct ar_list env;
+    struct ar_list link_argv;
+    char sysroot[PATH_MAX];
+    char ld[PATH_MAX];
+    char collect2[PATH_MAX];
+    uint8_t ld_sha3[32];
+    uint8_t collect2_sha3[32];
+    char *env_value[AR_ENV_MAX]; /* by allowlist index; NULL = unset */
     uint32_t probes;
 };
 
@@ -455,17 +494,25 @@ static bool ar_dep_add(struct ar_state *s, const char *raw)
     return true;
 }
 
-/* Fold "\\\n" continuations, then walk the first rule's prerequisites. */
+/* Fold "\\\n" continuations in place and return the first rule's colon
+ * (a ':' followed by whitespace, so "C:/x" never ends the target). */
+static char *ar_depfile_rule(char *text, size_t len)
+{
+    for (size_t i = 0; i + 1 < len; i++)
+        if (text[i] == '\\' && (text[i + 1] == '\n' || text[i + 1] == '\r'))
+            text[i] = text[i + 1] = ' ';
+    char *colon = strchr(text, ':');
+    while (colon && colon[1] && !strchr(" \t\r\n", colon[1]))
+        colon = strchr(colon + 1, ':');
+    return colon;
+}
+
+/* Walk the first rule's prerequisites. */
 static bool ar_depfile_load(struct ar_state *s)
 {
     size_t len = 0;
     char *text = ar_read_all(s->c.req->depfile, AR_DEPFILE_MAX, &len);
-    for (size_t i = 0; text && i + 1 < len; i++)
-        if (text[i] == '\\' && (text[i + 1] == '\n' || text[i + 1] == '\r'))
-            text[i] = text[i + 1] = ' ';
-    char *colon = text ? strchr(text, ':') : NULL;
-    while (colon && colon[1] && !strchr(" \t\r\n", colon[1]))
-        colon = strchr(colon + 1, ':');
+    char *colon = text ? ar_depfile_rule(text, len) : NULL;
     if (!colon) {
         free(text);
         ar_why(s->c.why, s->c.why_len, "dependency file absent or malformed",
@@ -510,13 +557,13 @@ static int ar_search_option(const char *arg, const char **value)
     return -1;
 }
 
-/* Flags that move the built-in search list away from what system_dirs
- * describes. Refused rather than approximated. */
+/* Flags that move the built-in search list or the linker away from what
+ * the request describes. Refused rather than approximated. */
 static bool ar_search_flag_unsupported(const char *arg)
 {
     static const char *const refused[] = {
         "-nostdinc", "--sysroot", "-isysroot", "-iprefix", "-iwithprefix",
-        "-imultilib", "-B", "-specs", "--specs",
+        "-imultilib", "-B", "-specs", "--specs", "-fuse-ld", "--ld-path",
     };
     if (strcmp(arg, "-I-") == 0)
         return true;
@@ -526,7 +573,10 @@ static bool ar_search_flag_unsupported(const char *arg)
     return false;
 }
 
-static bool ar_search_add(struct ar_state *s, const char *raw)
+/* The compiler drops a repeated dir within one class and keeps the first;
+ * a dir named in two classes (an -I that is also a system dir) is resolved
+ * by rules this derivation does not model, so it is refused. */
+static bool ar_search_add(struct ar_state *s, const char *raw, int cls)
 {
     char token[PATH_MAX], fs[PATH_MAX];
     if (!ar_tokenize(&s->c, raw, token, fs)) {
@@ -534,8 +584,20 @@ static bool ar_search_add(struct ar_state *s, const char *raw)
                "include dir has no canonical spelling", raw);
         return false;
     }
-    if (ar_list_has(&s->search, token))
-        return true; /* the compiler ignores a repeated dir */
+    for (size_t i = 0; i < s->search.n; i++) {
+        if (strcmp(s->search.v[i], token) != 0)
+            continue;
+        if (s->search_cls[i] == (unsigned char)cls)
+            return true;
+        ar_why(s->c.why, s->c.why_len,
+               "include dir named in two search classes", token);
+        return false;
+    }
+    if (s->search.n >= AR_SEARCH_MAX) {
+        ar_why(s->c.why, s->c.why_len, "too many include dirs", NULL);
+        return false;
+    }
+    s->search_cls[s->search.n] = (unsigned char)cls;
     return ar_list_push(&s->search, token) && ar_list_push(&s->search_fs, fs);
 }
 
@@ -544,7 +606,7 @@ static bool ar_search_collect(struct ar_state *s, int want)
     const struct zcl_action_root_request *req = s->c.req;
     if (want == AR_Q_BUILTIN) {
         for (size_t i = 0; i < req->system_dir_count; i++)
-            if (!ar_search_add(s, req->system_dirs[i]))
+            if (!ar_search_add(s, req->system_dirs[i], want))
                 return false;
         return true;
     }
@@ -555,21 +617,30 @@ static bool ar_search_collect(struct ar_state *s, int want)
             continue;
         if (!value && i + 1 < req->argc)
             value = req->argv[++i];
-        if (!value || !ar_search_add(s, value))
+        if (!value || !ar_search_add(s, value, want))
             return false;
     }
     return true;
 }
 
+static bool ar_argv_refused(struct ar_state *s, const char *const *argv,
+                            size_t argc)
+{
+    for (size_t i = 0; i < argc; i++)
+        if (ar_search_flag_unsupported(argv[i])) {
+            ar_why(s->c.why, s->c.why_len,
+                   "argv changes the built-in include search or linker",
+                   argv[i]);
+            return true;
+        }
+    return false;
+}
+
 static bool ar_search_build(struct ar_state *s)
 {
     const struct zcl_action_root_request *req = s->c.req;
-    for (size_t i = 0; i < req->argc; i++)
-        if (ar_search_flag_unsupported(req->argv[i])) {
-            ar_why(s->c.why, s->c.why_len,
-                   "argv changes the built-in include search", req->argv[i]);
-            return false;
-        }
+    if (ar_argv_refused(s, req->argv, req->argc))
+        return false;
     for (int cls = 0; cls < AR_Q_COUNT; cls++)
         if (!ar_search_collect(s, cls))
             return false;
@@ -634,74 +705,72 @@ static bool ar_includers_build(struct ar_state *s)
     return true;
 }
 
-static bool ar_name_add(struct ar_state *s, const char *name, uint32_t prefix)
+static long ar_includer_index(const struct ar_state *s, const char *dir)
 {
-    if (s->name_n == s->name_cap) {
-        size_t cap = s->name_cap ? s->name_cap * 2 : 256;
-        struct vcs_action_probe_v2 *grown = zcl_realloc(
-            s->names, cap * sizeof(*grown), "action root probe names");
+    char *const *hit = bsearch(&dir, s->includers.v, s->includers.n,
+                               sizeof(char *), ar_str_cmp);
+    return hit ? (long)(hit - s->includers.v) : -1;
+}
+
+static bool ar_lookup_add(struct ar_state *s, const char *name,
+                          const char *hit_dir, uint32_t prefix)
+{
+    if (s->lookup_n == s->lookup_cap) {
+        size_t cap = s->lookup_cap ? s->lookup_cap * 2 : 256;
+        struct ar_lookup *grown = zcl_realloc(
+            s->lookups, cap * sizeof(*grown), "action root lookups");
         if (!grown)
             return false;
-        s->names = grown;
-        s->name_cap = cap;
+        s->lookups = grown;
+        s->lookup_cap = cap;
     }
-    char *copy = zcl_strdup(name, "action root probe name");
-    if (!copy)
+    s->lookups[s->lookup_n++] = (struct ar_lookup){
+        .name = name, .hit_dir = hit_dir, .search_prefix = prefix,
+        .hit_includer = ar_includer_index(s, hit_dir),
+    };
+    return true;
+}
+
+/* Every way the compiler could have reached one dependency, in search
+ * order: as rel below each search dir that holds it, then by its own dir
+ * (a quote include beside its includer) unless a search dir already is
+ * that dir. Lookups keep depfile order, the order of first inclusion. */
+static bool ar_lookups_for_dep(struct ar_state *s, const struct ar_dep *d)
+{
+    char dir[PATH_MAX];
+    bool own_dir_done = false;
+    if (!ar_dirname(d->token, dir))
         return false;
-    s->names[s->name_n].name = copy;
-    s->names[s->name_n].search_prefix = prefix;
-    s->name_n++;
+    for (size_t k = 0; k < s->search.n; k++) {
+        const char *rel = ar_below(d->token, s->search.v[k]);
+        if (!rel)
+            continue;
+        own_dir_done |= strcmp(s->search.v[k], dir) == 0;
+        if (!ar_lookup_add(s, rel, s->search.v[k], (uint32_t)k))
+            return false;
+    }
+    if (own_dir_done)
+        return true;
+    long at = ar_includer_index(s, dir);
+    const char *slash = strrchr(d->token, '/');
+    return at >= 0 &&
+           ar_lookup_add(s, slash ? slash + 1 : d->token,
+                         s->includers.v[at], 0);
+}
+
+static bool ar_lookups_build(struct ar_state *s)
+{
+    for (size_t i = 0; i < s->dep_n; i++)
+        if (!ar_lookups_for_dep(s, &s->deps[i])) {
+            ar_why(s->c.why, s->c.why_len, "dependency has no include lookup",
+                   s->deps[i].token);
+            return false;
+        }
     return true;
 }
 
-static int ar_name_cmp(const void *a, const void *b)
-{
-    const struct vcs_action_probe_v2 *x = a, *y = b;
-    return strcmp(x->name, y->name);
-}
-
-/* Merge repeated names; a name probes every search dir before the LATEST
- * position any dependency was found at under that name. */
-static void ar_names_merge(struct ar_state *s)
-{
-    if (s->name_n < 2)
-        return;
-    qsort(s->names, s->name_n, sizeof(*s->names), ar_name_cmp);
-    size_t w = 1;
-    for (size_t i = 1; i < s->name_n; i++) {
-        struct vcs_action_probe_v2 *last = &s->names[w - 1];
-        if (strcmp(last->name, s->names[i].name) == 0) {
-            if (s->names[i].search_prefix > last->search_prefix)
-                last->search_prefix = s->names[i].search_prefix;
-            free((char *)s->names[i].name);
-        } else {
-            s->names[w++] = s->names[i];
-        }
-    }
-    s->name_n = w;
-}
-
-static bool ar_names_build(struct ar_state *s)
-{
-    for (size_t i = 0; i < s->dep_n; i++) {
-        const char *token = s->deps[i].token;
-        for (size_t k = 0; k < s->search.n; k++) {
-            const char *rel = ar_below(token, s->search.v[k]);
-            if (rel && !ar_name_add(s, rel, (uint32_t)k))
-                return false;
-        }
-        for (size_t k = 0; k < s->includers.n; k++) {
-            const char *rel = ar_below(token, s->includers.v[k]);
-            if (rel && !ar_name_add(s, rel, 0))
-                return false;
-        }
-    }
-    ar_names_merge(s);
-    return true;
-}
-
-static bool ar_present_add(struct ar_state *s, const char *dir,
-                           const char *name, const char *path, bool regular)
+static bool ar_present_add(struct ar_state *s, uint32_t slot, const char *dir,
+                           const char *path, bool regular)
 {
     if (s->present_n == s->present_cap) {
         size_t cap = s->present_cap ? s->present_cap * 2 : 256;
@@ -714,21 +783,27 @@ static bool ar_present_add(struct ar_state *s, const char *dir,
     }
     struct vcs_action_present_v2 *p = &s->present[s->present_n];
     memset(p, 0, sizeof(*p));
-    p->dir = dir;
-    p->name = name;
+    p->slot = slot;
     p->kind = regular ? VCS_ACTION_PRESENT_V2_REGULAR
                       : VCS_ACTION_PRESENT_V2_OTHER;
-    if (regular && !ar_sha3_file(path, p->sha3)) {
+    /* A generated file is hashed as its root-independent spelling, exactly
+     * like a generated input, so a probe hit cannot leak the checkout. */
+    bool generated = strncmp(dir, "build/", 6) == 0 ||
+                     strcmp(dir, "build") == 0;
+    bool hashed = !regular || (generated
+                                   ? ar_sha3_generated(&s->c, path, p->sha3)
+                                   : ar_sha3_file(path, p->sha3));
+    if (!hashed) {
         ar_why(s->c.why, s->c.why_len, "present probe could not be hashed",
-               name);
+               path);
         return false;
     }
     s->present_n++;
     return true;
 }
 
-static bool ar_probe(struct ar_state *s, const char *dir, const char *dir_fs,
-                     const char *name)
+static bool ar_probe(struct ar_state *s, uint32_t slot, const char *dir,
+                     const char *dir_fs, const char *name)
 {
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s", dir_fs, name);
@@ -746,44 +821,39 @@ static bool ar_probe(struct ar_state *s, const char *dir, const char *dir_fs,
     }
     struct stat st;
     bool regular = stat(path, &st) == 0 && S_ISREG(st.st_mode);
-    return ar_present_add(s, dir, name, path, regular);
+    return ar_present_add(s, slot, dir, path, regular);
 }
 
-static bool ar_includer_has(const struct ar_state *s, const char *dir)
+/* Run one lookup's probe sequence in slot order: every includer dir but
+ * the hit's own, then search dirs before the hit. */
+static bool ar_lookup_probe(struct ar_state *s, struct ar_lookup *l)
 {
-    return bsearch(&dir, s->includers.v, s->includers.n, sizeof(char *),
-                   ar_str_cmp) != NULL;
-}
-
-static int ar_present_cmp(const void *a, const void *b)
-{
-    const struct vcs_action_present_v2 *x = a, *y = b;
-    int c = strcmp(x->dir, y->dir);
-    return c ? c : strcmp(x->name, y->name);
+    size_t inc = s->includers.n;
+    l->present_at = s->present_n;
+    for (size_t d = 0; d < inc; d++) {
+        if ((long)d == l->hit_includer)
+            continue;
+        if (!ar_probe(s, (uint32_t)d, s->includers.v[d],
+                      s->includers_fs.v[d], l->name))
+            return false;
+    }
+    for (uint32_t j = 0; j < l->search_prefix; j++)
+        if (!ar_probe(s, (uint32_t)(inc + j), s->search.v[j],
+                      s->search_fs.v[j], l->name))
+            return false;
+    l->present_n = s->present_n - l->present_at;
+    return true;
 }
 
 static bool ar_probes_run(struct ar_state *s)
 {
-    for (size_t i = 0; i < s->name_n; i++) {
-        const struct vcs_action_probe_v2 *p = &s->names[i];
-        for (size_t d = 0; d < s->includers.n; d++)
-            if (!ar_probe(s, s->includers.v[d], s->includers_fs.v[d],
-                          p->name))
-                return false;
-        for (uint32_t j = 0; j < p->search_prefix; j++) {
-            if (ar_includer_has(s, s->search.v[j]))
-                continue; /* already probed as an includer dir */
-            if (!ar_probe(s, s->search.v[j], s->search_fs.v[j], p->name))
-                return false;
-        }
-    }
-    if (s->present_n > 1)
-        qsort(s->present, s->present_n, sizeof(*s->present),
-              ar_present_cmp);
+    for (size_t i = 0; i < s->lookup_n; i++)
+        if (!ar_lookup_probe(s, &s->lookups[i]))
+            return false;
     return true;
 }
 
-/* ---- argv and environment ---------------------------------------------- */
+/* ---- argv, environment, sysroot, linker -------------------------------- */
 
 static bool ar_text_add(struct ar_state *s, struct ar_list *l,
                         const char *raw)
@@ -798,141 +868,269 @@ static bool ar_text_add(struct ar_state *s, struct ar_list *l,
     return ar_list_push(l, text);
 }
 
-static bool ar_argv_build(struct ar_state *s)
+static bool ar_argv_list(struct ar_state *s, struct ar_list *out,
+                         const char *const *argv, size_t argc)
 {
     const struct zcl_action_root_request *req = s->c.req;
-    for (size_t i = 0; i < req->argc; i++) {
-        const char *arg = req->argv[i];
+    for (size_t i = 0; i < argc; i++) {
+        const char *arg = argv[i];
         for (size_t v = 0; v < req->virtual_count; v++)
             if (strcmp(arg, req->virtual_from[v]) == 0)
                 arg = req->virtual_to[v];
-        if (!ar_text_add(s, &s->argv, arg))
+        if (!ar_text_add(s, out, arg))
             return false;
     }
     return true;
 }
 
-static int ar_env_cmp(const void *a, const void *b)
+static long ar_env_slot(const char *entry, size_t name_len)
 {
-    const char *x = *(char *const *)a, *y = *(char *const *)b;
-    size_t xn = strcspn(x, "="), yn = strcspn(y, "=");
-    int c = memcmp(x, y, xn < yn ? xn : yn);
-    return c ? c : (xn > yn) - (xn < yn);
+    size_t count = 0;
+    const char *const *allow = vcs_action_v2_env_allowlist(&count);
+    for (size_t i = 0; i < count; i++)
+        if (strlen(allow[i]) == name_len &&
+            memcmp(allow[i], entry, name_len) == 0)
+            return (long)i;
+    return -1;
 }
 
-static bool ar_env_seen(const struct ar_list *l, const char *entry,
-                        size_t name_len)
-{
-    for (size_t i = 0; i < l->n; i++)
-        if (strncmp(l->v[i], entry, name_len + 1) == 0)
-            return true;
-    return false;
-}
-
+/* The whole allowlist, each name set or explicitly unset. An environment
+ * that names one allowlisted variable twice is ambiguous (which one the
+ * child sees depends on the libc) and is refused, not normalized. */
 static bool ar_env_build(struct ar_state *s)
 {
     const char *const *env = s->c.req->environ;
     for (size_t i = 0; env && env[i]; i++) {
         const char *eq = strchr(env[i], '=');
-        size_t name_len = eq ? (size_t)(eq - env[i]) : 0;
-        if (!eq || !vcs_action_v2_env_allowlisted(env[i], name_len) ||
-            ar_env_seen(&s->env, env[i], name_len))
+        long slot = eq ? ar_env_slot(env[i], (size_t)(eq - env[i])) : -1;
+        if (slot < 0)
             continue;
-        char entry[AR_TEXT_MAX];
-        int n = snprintf(entry, sizeof(entry), "%.*s=", (int)name_len,
-                         env[i]);
-        if (n <= 0 || !ar_rewrite(&s->c, eq + 1, entry + n,
-                                  sizeof(entry) - (size_t)n) ||
-            (entry[n] && !vcs_action_v2_text_canonical(entry + n))) {
+        char value[AR_TEXT_MAX];
+        if (s->env_value[slot]) {
+            ar_why(s->c.why, s->c.why_len,
+                   "environment names an allowlisted variable twice", env[i]);
+            return false;
+        }
+        if (!ar_rewrite(&s->c, eq + 1, value, sizeof(value)) ||
+            (value[0] && !vcs_action_v2_text_canonical(value))) {
             ar_why(s->c.why, s->c.why_len,
                    "environment value has no canonical spelling", env[i]);
             return false;
         }
-        if (!ar_list_push(&s->env, entry))
+        s->env_value[slot] = zcl_strdup(value, "action root env value");
+        if (!s->env_value[slot])
             return false;
     }
-    if (s->env.n > 1)
-        qsort(s->env.v, s->env.n, sizeof(char *), ar_env_cmp);
     return true;
+}
+
+static bool ar_sysroot_build(struct ar_state *s)
+{
+    const struct zcl_action_root_request *req = s->c.req;
+    char fs[PATH_MAX];
+    for (size_t i = 0; i < req->system_dir_count; i++) {
+        char token[PATH_MAX];
+        if (!ar_tokenize(&s->c, req->system_dirs[i], token, fs) ||
+            !ar_list_push(&s->builtin, token)) {
+            ar_why(s->c.why, s->c.why_len,
+                   "builtin include dir has no canonical spelling",
+                   req->system_dirs[i]);
+            return false;
+        }
+    }
+    if (req->sysroot && req->sysroot[0] &&
+        !ar_tokenize(&s->c, req->sysroot, s->sysroot, fs)) {
+        ar_why(s->c.why, s->c.why_len, "sysroot has no canonical spelling",
+               req->sysroot);
+        return false;
+    }
+    return true;
+}
+
+static bool ar_linker_file(struct ar_state *s, const char *raw,
+                           char token[PATH_MAX], uint8_t sha3[32])
+{
+    char fs[PATH_MAX];
+    if (!ar_tokenize(&s->c, raw, token, fs) || strcmp(token, ".") == 0 ||
+        !ar_sha3_file(fs, sha3)) {
+        ar_why(s->c.why, s->c.why_len,
+               "linker has no canonical spelling or is unreadable", raw);
+        return false;
+    }
+    return true;
+}
+
+static bool ar_linker_build(struct ar_state *s)
+{
+    const struct zcl_action_root_linker *l = &s->c.req->linker;
+    if (!l->links)
+        return true;
+    if (!l->ld || !l->argv || l->argc == 0) {
+        ar_why(s->c.why, s->c.why_len, "linking stage names no linker", NULL);
+        return false;
+    }
+    return !ar_argv_refused(s, l->argv, l->argc) &&
+           ar_linker_file(s, l->ld, s->ld, s->ld_sha3) &&
+           (!l->collect2 ||
+            ar_linker_file(s, l->collect2, s->collect2, s->collect2_sha3)) &&
+           ar_argv_list(s, &s->link_argv, l->argv, l->argc);
 }
 
 /* ---- assembly ---------------------------------------------------------- */
 
-static int ar_input_cmp(const void *a, const void *b)
+static int ar_dep_cmp(const void *a, const void *b)
 {
-    const struct vcs_action_input_v2 *x = a, *y = b;
-    return strcmp(x->path, y->path);
+    const struct ar_dep *const *x = a, *const *y = b;
+    return strcmp((*x)->token, (*y)->token);
 }
 
-/* Split the closure into sorted, de-duplicated source and generated
- * lists (one allocation, sources first). */
-static struct vcs_action_input_v2 *ar_inputs(const struct ar_state *s,
-                                             size_t *sources,
-                                             size_t *generated)
+static const uint8_t *ar_producer(const struct zcl_action_root_request *req,
+                                  const char *token)
 {
-    struct vcs_action_input_v2 *v =
-        zcl_calloc(s->dep_n ? s->dep_n : 1, sizeof(*v), "action root inputs");
-    size_t n[2] = {0, 0};
-    for (int pass = 0; v && pass < 2; pass++) {
-        struct vcs_action_input_v2 *base = v + (pass ? n[0] : 0);
-        for (size_t i = 0; i < s->dep_n; i++) {
-            if (s->deps[i].generated != (pass == 1))
-                continue;
-            base[n[pass]].path = s->deps[i].token;
-            memcpy(base[n[pass]].sha3, s->deps[i].sha3, 32);
-            n[pass]++;
-        }
-        qsort(base, n[pass], sizeof(*base), ar_input_cmp);
-        size_t w = n[pass] ? 1 : 0;
-        for (size_t i = 1; i < n[pass]; i++)
-            if (strcmp(base[w - 1].path, base[i].path) != 0)
-                base[w++] = base[i];
-        n[pass] = w;
+    for (size_t i = 0; i < req->producer_count; i++)
+        if (strcmp(req->producers[i].path, token) == 0)
+            return req->producers[i].action_key;
+    return NULL;
+}
+
+/* Inputs are a set: sorted, and a dependency named twice is refused. */
+struct ar_inputs {
+    struct vcs_action_input_v2 *sources;
+    struct vcs_action_generated_v2 *generated;
+    size_t source_n, generated_n;
+};
+
+static bool ar_inputs_build(struct ar_state *s, struct ar_inputs *in)
+{
+    size_t n = s->dep_n;
+    const struct ar_dep **v = zcl_calloc(n, sizeof(*v), "action root deps");
+    in->sources = zcl_calloc(n, sizeof(*in->sources), "action root sources");
+    in->generated = zcl_calloc(n, sizeof(*in->generated),
+                               "action root generated");
+    if (!v || !in->sources || !in->generated) {
+        free(v);
+        return false;
     }
-    *sources = n[0];
-    *generated = n[1];
+    for (size_t i = 0; i < n; i++)
+        v[i] = &s->deps[i];
+    qsort(v, n, sizeof(*v), ar_dep_cmp);
+    bool ok = true;
+    for (size_t i = 0; ok && i < n; i++) {
+        ok = i == 0 || strcmp(v[i - 1]->token, v[i]->token) != 0;
+        if (!ok) {
+            ar_why(s->c.why, s->c.why_len, "dependency named twice",
+                   v[i]->token);
+        } else if (v[i]->generated) {
+            struct vcs_action_generated_v2 *g =
+                &in->generated[in->generated_n++];
+            const uint8_t *key = ar_producer(s->c.req, v[i]->token);
+            g->path = v[i]->token;
+            memcpy(g->sha3, v[i]->sha3, 32);
+            g->producer_known = key != NULL;
+            if (key)
+                memcpy(g->producer_action_key, key, 32);
+        } else {
+            in->sources[in->source_n].path = v[i]->token;
+            memcpy(in->sources[in->source_n++].sha3, v[i]->sha3, 32);
+        }
+    }
+    free(v);
+    return ok;
+}
+
+static struct vcs_action_lookup_v2 *ar_lookup_views(const struct ar_state *s)
+{
+    struct vcs_action_lookup_v2 *v =
+        zcl_calloc(s->lookup_n ? s->lookup_n : 1, sizeof(*v),
+                   "action root lookup views");
+    for (size_t i = 0; v && i < s->lookup_n; i++) {
+        const struct ar_lookup *l = &s->lookups[i];
+        v[i] = (struct vcs_action_lookup_v2){
+            .name = l->name, .hit_dir = l->hit_dir,
+            .search_prefix = l->search_prefix,
+            .present = l->present_n ? s->present + l->present_at : NULL,
+            .present_count = l->present_n,
+        };
+    }
     return v;
 }
 
-static bool ar_encode(struct ar_state *s, struct zcl_action_root_result *out)
+static void ar_env_views(const struct ar_state *s,
+                         struct vcs_action_env_v2 env[AR_ENV_MAX],
+                         size_t *count)
+{
+    const char *const *allow = vcs_action_v2_env_allowlist(count);
+    for (size_t i = 0; i < *count && i < AR_ENV_MAX; i++)
+        env[i] = (struct vcs_action_env_v2){
+            .name = allow[i], .set = s->env_value[i] != NULL,
+            .value = s->env_value[i],
+        };
+}
+
+static void ar_preimage_fill(const struct ar_state *s,
+                             const struct ar_inputs *in,
+                             const struct vcs_action_lookup_v2 *lookups,
+                             struct vcs_action_preimage_v2 *p)
 {
     const struct zcl_action_root_request *req = s->c.req;
-    size_t source_n = 0, generated_n = 0;
-    struct vcs_action_input_v2 *inputs = ar_inputs(s, &source_n,
-                                                   &generated_n);
-    if (!inputs) {
-        ar_why(out->why, sizeof(out->why), "input list allocation failed",
-               NULL);
-        return false;
-    }
-    struct vcs_action_preimage_v2 p = {
+    *p = (struct vcs_action_preimage_v2){
         .stage_kind = req->stage_kind, .stage_version = req->stage_version,
-        .sources = inputs, .source_count = source_n,
-        .generated = inputs + source_n, .generated_count = generated_n,
+        .sources = in->sources, .source_count = in->source_n,
+        .generated = in->generated, .generated_count = in->generated_n,
         .search_dirs = (const char *const *)s->search.v,
         .search_dir_count = s->search.n,
         .includer_dirs = (const char *const *)s->includers.v,
         .includer_dir_count = s->includers.n,
-        .probes = s->names, .probe_count = s->name_n,
-        .present = s->present, .present_count = s->present_n,
+        .lookups = lookups, .lookup_count = s->lookup_n,
         .argv = (const char *const *)s->argv.v, .argc = s->argv.n,
-        .env = (const char *const *)s->env.v, .env_count = s->env.n,
+        .abi_generation = req->abi_generation,
         .abi = req->abi, .abi_count = req->abi_count,
         .harness = req->harness, .fixtures = req->fixtures,
         .policy = req->policy,
     };
-    memcpy(p.toolchain_root, req->toolchain_root, 32);
-    bool ok = vcs_action_preimage_v2_encode(&p, &out->preimage,
-                                            &out->preimage_len, out->why,
-                                            sizeof(out->why)) &&
-              vcs_action_root_v2_from_bytes(out->preimage, out->preimage_len,
-                                            out->root, out->why,
-                                            sizeof(out->why));
-    free(inputs);
+    memcpy(p->toolchain_root, req->toolchain_root, 32);
+    p->sysroot = (struct vcs_action_sysroot_v2){
+        .sysroot = s->sysroot[0] ? s->sysroot : NULL,
+        .builtin_dirs = (const char *const *)s->builtin.v,
+        .builtin_dir_count = s->builtin.n,
+    };
+    memcpy(p->sysroot.objects_sha3, req->sysroot_objects_sha3, 32);
+    p->linker = (struct vcs_action_linker_v2){
+        .links = req->linker.links, .ld = s->ld,
+        .collect2 = s->collect2[0] ? s->collect2 : NULL,
+        .argv = (const char *const *)s->link_argv.v, .argc = s->link_argv.n,
+    };
+    memcpy(p->linker.ld_sha3, s->ld_sha3, 32);
+    memcpy(p->linker.collect2_sha3, s->collect2_sha3, 32);
+}
+
+static bool ar_encode(struct ar_state *s, struct zcl_action_root_result *out)
+{
+    struct ar_inputs in = {0};
+    struct vcs_action_lookup_v2 *lookups = ar_lookup_views(s);
+    struct vcs_action_env_v2 env[AR_ENV_MAX];
+    size_t env_n = 0;
+    bool ok = lookups && ar_inputs_build(s, &in);
+    if (ok) {
+        struct vcs_action_preimage_v2 p;
+        ar_preimage_fill(s, &in, lookups, &p);
+        ar_env_views(s, env, &env_n);
+        p.env = env;
+        p.env_count = env_n;
+        ok = vcs_action_preimage_v2_encode(&p, &out->preimage,
+                                           &out->preimage_len, out->why,
+                                           sizeof(out->why)) &&
+             vcs_action_root_v2_from_bytes(out->preimage, out->preimage_len,
+                                           out->root, out->why,
+                                           sizeof(out->why));
+    }
     if (ok)
         zcl_hex_encode(out->root, 32, out->root_hex);
-    out->source_count = (uint32_t)source_n;
-    out->generated_count = (uint32_t)generated_n;
+    out->source_count = (uint32_t)in.source_n;
+    out->generated_count = (uint32_t)in.generated_n;
+    free(in.sources);
+    free(in.generated);
+    free(lookups);
     return ok;
 }
 
@@ -941,27 +1139,42 @@ static void ar_state_free(struct ar_state *s)
     free(s->deps);
     ar_list_free(&s->search);
     ar_list_free(&s->search_fs);
+    ar_list_free(&s->builtin);
     ar_list_free(&s->includers);
     ar_list_free(&s->includers_fs);
-    for (size_t i = 0; i < s->name_n; i++)
-        free((char *)s->names[i].name);
-    free(s->names);
+    free(s->lookups);
     free(s->present);
     ar_list_free(&s->argv);
-    ar_list_free(&s->env);
+    ar_list_free(&s->link_argv);
+    for (size_t i = 0; i < AR_ENV_MAX; i++)
+        free(s->env_value[i]);
 }
 
 static bool ar_request_valid(const struct zcl_action_root_request *req,
                              char *why, size_t why_len)
 {
     char norm[PATH_MAX];
+    size_t allow_n = 0;
+    (void)vcs_action_v2_env_allowlist(&allow_n);
     bool ok = req && req->root && req->root[0] == '/' && req->depfile &&
               req->argv && req->argc > 0 && req->stage_kind &&
+              allow_n <= AR_ENV_MAX &&
               ar_lex_normalize(req->root, norm, sizeof(norm)) &&
               strcmp(norm, req->root) == 0 && strcmp(req->root, "/") != 0;
     if (!ok)
         ar_why(why, why_len, "action root request is incomplete", NULL);
     return ok;
+}
+
+static bool ar_derive_steps(struct ar_state *s,
+                            struct zcl_action_root_result *out)
+{
+    return ar_depfile_load(s) && ar_search_build(s) &&
+           ar_includers_build(s) && ar_lookups_build(s) &&
+           ar_probes_run(s) &&
+           ar_argv_list(s, &s->argv, s->c.req->argv, s->c.req->argc) &&
+           ar_env_build(s) && ar_sysroot_build(s) && ar_linker_build(s) &&
+           ar_encode(s, out);
 }
 
 bool zcl_action_root_derive(const struct zcl_action_root_request *req,
@@ -973,22 +1186,24 @@ bool zcl_action_root_derive(const struct zcl_action_root_request *req,
     int64_t started = platform_time_monotonic_us();
     if (!ar_request_valid(req, out->why, sizeof(out->why)))
         return false;
-    struct ar_state s = {
-        .c = { req, strlen(req->root), out->why, sizeof(out->why) },
-    };
-    s.deps = zcl_calloc(ZCL_ACTION_ROOT_MAX_DEPS, sizeof(*s.deps),
-                        "action root dependency closure");
-    bool ok = s.deps && ar_depfile_load(&s) && ar_search_build(&s) &&
-              ar_includers_build(&s) && ar_names_build(&s) &&
-              ar_probes_run(&s) && ar_argv_build(&s) && ar_env_build(&s) &&
-              ar_encode(&s, out);
+    struct ar_state *s = zcl_calloc(1, sizeof(*s), "action root state");
+    if (s) {
+        s->c = (struct ar_ctx){ req, strlen(req->root), out->why,
+                                sizeof(out->why) };
+        s->deps = zcl_calloc(ZCL_ACTION_ROOT_MAX_DEPS, sizeof(*s->deps),
+                             "action root dependency closure");
+    }
+    bool ok = s && s->deps && ar_derive_steps(s, out);
     if (!ok)
         ar_why(out->why, sizeof(out->why), "action root derivation failed",
                NULL);
-    out->probe_names = (uint32_t)s.name_n;
-    out->probes = s.probes;
-    out->present = (uint32_t)s.present_n;
-    ar_state_free(&s);
+    if (s) {
+        out->lookups = (uint32_t)s->lookup_n;
+        out->probes = s->probes;
+        out->present = (uint32_t)s->present_n;
+        ar_state_free(s);
+        free(s);
+    }
     out->derive_us = platform_time_monotonic_us() - started;
     if (ok)
         out->why[0] = '\0';

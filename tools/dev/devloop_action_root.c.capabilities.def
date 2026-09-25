@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for action root derivation. */
+ZCL_MODULE_CAPABILITY("tools/dev/devloop_action_root.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
