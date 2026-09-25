@@ -4531,88 +4531,6 @@ static void dp_generation_warm(const struct proof_paths *paths,
     (void)warm_start_generation(paths, parent, generation, local, warm);
 }
 
-/* Seed the generation's test-verdict store from the submitting checkout.
- *
- * ZRC-0007 probe-before-build: a candidate that probes (runs cacheable
- * groups) in the checkout stores PASS verdicts in <root>/.zvcs/objects,
- * addressed by the exact per-group key (closure + toolchain + flags + env).
- * Copying those addressed records into the generation lets its test
- * dimension HIT them instead of re-running every group cold.
- *
- * Best-effort and never trusted: absence (a fresh clone has no store yet)
- * means a cold run; a copy failure is one stderr line and a cold run.
- * Corrupt, stale, or mismatched records fail closed at lookup time inside
- * testcache (magic/status/key-echo re-verified, graph freshness
- * re-checked), and only PASS is ever stored, so nothing copied here can
- * turn a group green that the generation's own inputs would fail.
- *
- * The in-flight `tmp/` shard is never copied: those are partially written
- * puts, not addressed verdicts, and the generation's store recreates tmp on
- * its first put. Each shard copies through dependency_materialize, so
- * symlink containment and mtime preservation match every other
- * prerequisite. A concurrent checkout put racing the copy is safe by
- * construction: completed verdicts rename atomically into their shard
- * (copied whole or not at all) and partials live only under tmp/. */
-static void dp_generation_verdict_store(const char *root,
-                                        const char *generation)
-{
-    char source[PATH_MAX], target[PATH_MAX];
-    if (snprintf(source, sizeof(source), "%s/.zvcs/objects",
-                 root) >= (int)sizeof(source) ||
-        snprintf(target, sizeof(target), "%s/.zvcs/objects",
-                 generation) >= (int)sizeof(target)) {
-        fprintf(stderr,
-                "[devproof] verdict seed: path too long, generation runs cold\n");
-        return;
-    }
-    DIR *dir = opendir(source);
-    if (!dir) {
-        if (errno != ENOENT) {
-            fprintf(stderr,
-                    "[devproof] verdict seed: cannot read %s (%s), generation runs cold\n",
-                    source, strerror(errno));
-        }
-        return;
-    }
-    /* The objects/ level itself must exist: the per-shard materialize
-     * below only ever creates its single final level. */
-    if (!dp_seed_dir_ensure(target)) {
-        fprintf(stderr,
-                "[devproof] verdict seed: cannot prepare %s (%s), generation runs cold\n",
-                target, strerror(errno));
-        closedir(dir);
-        return;
-    }
-    bool ok = true;
-    int copy_errno = 0;
-    for (struct dirent *entry = readdir(dir); entry;
-         entry = readdir(dir)) {
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0 ||
-            strcmp(entry->d_name, "tmp") == 0)
-            continue;
-        char child_source[PATH_MAX], child_target[PATH_MAX];
-        if (!dp_child_paths(source, target, entry->d_name, child_source,
-                            child_target) ||
-            !dependency_materialize(child_source, child_target)) {
-            /* Capture here: a later successful readdir may overwrite
-             * errno (end-of-directory), which would misreport the cause. */
-            copy_errno = errno;
-            ok = false;
-            break;
-        }
-    }
-    if (closedir(dir) != 0) {
-        copy_errno = errno;
-        ok = false;
-    }
-    if (!ok) {
-        fprintf(stderr,
-                "[devproof] verdict seed: copy failed (%s), generation runs cold\n",
-                strerror(copy_errno));
-    }
-}
-
 static bool dp_generation_dependencies(const char *root,
                                         const char *generation,
                                         char *why, size_t why_len)
@@ -4692,10 +4610,16 @@ static bool dp_generation_dependencies(const char *root,
         if (!dp_generation_dependency(root, generation,
                                       dependencies[i], why, why_len))
             return false;
-    /* Advisory verdict seeding (ZRC-0007 probe-before-build): never fails
-     * the prepare. A generation without seeded verdicts runs every group
-     * cold, exactly as before this slice. */
-    dp_generation_verdict_store(root, generation);
+    /* The submitting checkout's test-verdict store (.zvcs/objects) is
+     * deliberately not in the list above. Its records are unsigned PASS
+     * entries that any process running as this uid can write, and the
+     * candidate being proved runs as this uid: its tests could plant a PASS
+     * at the exact key a later proof looks up, and that group would count
+     * as passing without executing. Reused verdicts may shape acceptance
+     * only when a separate account, outside the candidate's trust domain,
+     * reproduced and signed them. Until such a verifier is qualified the
+     * test dimension runs every selected group fresh
+     * (dp_test_dimension_argv), so nothing is carried over. */
     return true;
 }
 
@@ -5128,14 +5052,20 @@ static bool proof_lint_targets_are_full(const char *targets)
 
 /* This runs in the isolated proof worker before any generation build. An
  * interactive Make dry run, replacement gate list, diagnostic dump, or
- * unsigned lint cache must never become a signed publication observation. */
+ * unsigned lint or test cache must never become a signed publication
+ * observation. The test runner's own switches go too: ZCL_TEST_CACHE would
+ * turn reuse on for any runner started without an explicit mode,
+ * ZCL_TEST_CACHE_DUMP makes the runner print one group's key and exit
+ * without running anything, and ZCL_TESTCACHE_STORE_ROOT names a verdict
+ * store the candidate can write. */
 static bool proof_prepare_environment(void)
 {
     static const char *const unset_names[] = {
         "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES",
         "ZCL_LINT_CACHE_DUMP", "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
         "ZCL_LINT_MODE", "ZCL_LINT_TU_CACHE", "ZCL_LINT_TU_CACHE_DIR",
-        "ZCL_LINT_TU_CACHE_GENERATIONS",
+        "ZCL_LINT_TU_CACHE_GENERATIONS", "ZCL_TEST_CACHE",
+        "ZCL_TEST_CACHE_DUMP", "ZCL_TESTCACHE_STORE_ROOT",
     };
     for (size_t i = 0; i < sizeof(unset_names) / sizeof(unset_names[0]); i++)
         if (unsetenv(unset_names[i]) != 0) return false;
@@ -5485,9 +5415,9 @@ bool zcl_dev_proof_test_preflight_parse(const char *bytes, size_t len,
 #endif
 
 /* Capsule scratch path beside the proof logs: ephemeral cycle state, never
- * published, never executed — the dimension's fallback is a fresh probe
- * when it is absent. Takes plain strings so the helper stays above the
- * worker struct. */
+ * published, never executed, and never read back by the cold test
+ * dimension. Takes plain strings so the helper stays above the worker
+ * struct. */
 static bool dp_capsule_path(const char *logs, const char *key,
                             char out[PATH_MAX])
 {
@@ -5497,7 +5427,7 @@ static bool dp_capsule_path(const char *logs, const char *key,
     return n > 0 && n < PATH_MAX;
 }
 
-/* The five capsule arguments both runner children share. All values are
+/* The five capsule arguments a runner child takes. All values are
  * fixed-length sealed bindings, so fixed buffers with one upfront length
  * gate cannot truncate. */
 static int dp_capsule_argv(struct zcl_dev_proof_capsule_argv *o, bool write,
@@ -5615,12 +5545,24 @@ static bool test_log_account(const char *path,
     dim->reused = counts.reused;
     dim->failed = counts.failed;
     dim->skipped = counts.skipped;
+    /* groups_cached must be zero: the runner is started cold, so a nonzero
+     * count means some verdict was admitted without executing, and no
+     * verifier outside the candidate's trust domain exists to vouch for
+     * it. Refuse rather than record it as reuse. */
     return (uint64_t)counts.total ==
                (uint64_t)counts.ran + counts.reused + counts.gated &&
-           (uint64_t)counts.ran + counts.reused == dim->selected &&
+           counts.reused == 0 && counts.ran == dim->selected &&
            counts.failed == 0 && counts.skipped == 0 &&
            counts.unobserved == 0;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_log_account(const char *path,
+                                    struct zcl_dev_proof_dimension *dim)
+{
+    return path && dim && test_log_account(path, dim);
+}
+#endif
 
 /* One dimension in flight. Dimensions that do not feed each other are started
  * together and finished together; each keeps its own log, budget, receipt root
@@ -5687,7 +5629,10 @@ static bool dimension_finish(const struct proof_paths *paths,
          * when the accounting then refuses the run. */
         (void)zcl_dev_proof_timing_ingest_test_log(paths->state, run->log);
         if (!test_log_account(run->log, run->dim)) {
-            proof_why(why, why_len, "test_accounting_incomplete");
+            proof_why(why, why_len,
+                      run->dim->reused
+                          ? "test_reuse_unqualified_no_verifier_account"
+                          : "test_accounting_incomplete");
             return false;
         }
     } else {
@@ -6897,10 +6842,10 @@ static bool dp_worker_test_env(struct dp_worker *w, char *why, size_t why_len)
         return false;
     }
     if (!proof_stress_tests_env_prepare(why, why_len)) return false;
-    if (setenv("ZCL_TESTCACHE_STORE_ROOT", w->paths->root, 1) != 0) {
-        proof_why(why, why_len, "test_cache_store_root_unavailable");
-        return false;
-    }
+    /* No ZCL_TESTCACHE_STORE_ROOT: pointing the runner at the submitting
+     * checkout's store let every proof read, and admit, PASS records the
+     * candidate's own tests could write. proof_prepare_environment() has
+     * already removed any inherited value. */
     if (snprintf(w->only, sizeof(w->only), "--exact=%s", w->groups) >=
         (int)sizeof(w->only)) {
         proof_why(why, why_len, "test_selection_invalid_or_truncated");
@@ -7058,32 +7003,49 @@ static void dp_worker_lint_wall_note(const struct dp_worker *w,
     }
 }
 
+/* The test dimension's runner argv. `--no-cache` is the runner's explicit
+ * cold mode and outranks ZCL_TEST_CACHE, so no inherited or planted
+ * environment can turn verdict reuse back on: every selected group
+ * executes in this proof, and the runner opens no verdict store and stores
+ * nothing. A reused test verdict may shape acceptance only once a separate
+ * account outside the candidate's trust domain reproduces and signs it;
+ * until that verifier is qualified the proof records
+ * `test-reuse: unqualified(no_verifier_account)` and runs cold. Returns the
+ * argc written (argv NULL-terminated), or 0 when argv_cap is too small. */
+#define DP_TEST_DIMENSION_ARGC 4u
+static size_t dp_test_dimension_argv(const char *binary, const char *only,
+                                     const char **argv, size_t argv_cap)
+{
+    if (!binary || !binary[0] || !only || !only[0] || !argv ||
+        argv_cap < DP_TEST_DIMENSION_ARGC + 1)
+        return 0;
+    argv[0] = binary;
+    argv[1] = only;
+    argv[2] = "--no-cache";
+    argv[3] = "--activate-proof-contracts";
+    argv[4] = NULL;
+    return DP_TEST_DIMENSION_ARGC;
+}
+
+#if defined(ZCL_TESTING)
+size_t zcl_dev_proof_test_dimension_argv(const char *binary, const char *only,
+                                         const char **argv, size_t argv_cap)
+{
+    return dp_test_dimension_argv(binary, only, argv, argv_cap);
+}
+#endif
+
+/* The phases.txt line naming whether this proof may admit reused test
+ * verdicts. There is no verifier account for test verdicts yet, so the
+ * answer is always the same refusal; the line exists so a reader of
+ * phases.txt sees why the test dimension ran every group. */
+#define DP_TEST_REUSE_UNQUALIFIED \
+    "test-reuse: unqualified(no_verifier_account)"
+
 /* Lint proves the source; the test dimension proves the built
  * runner. Neither feeds the other, so both children are launched
  * before either is waited on and the proof pays for the longer of the
  * two rather than their sum. */
-/* Capsule consume flags for the test dimension: the preflight's capsule
- * under the same sealed bindings it launched with. Capsule assembly
- * never fails the proof: a short return runs the dimension without it,
- * which fresh-probes exactly as before. */
-static void dp_test_capsule_flags(struct dp_worker *w,
-                                  const char **test_argv, size_t *test_argc,
-                                  struct zcl_dev_proof_capsule_argv *cap_args)
-{
-    char capsule_path[PATH_MAX];
-    char graph_hex[65];
-    size_t i;
-    if (!dp_capsule_path(w->execution.logs, w->execution.key, capsule_path))
-        return;
-    zcl_hex_encode(w->depfile_root, 32, graph_hex);
-    if (dp_capsule_argv(cap_args, false, capsule_path,
-                        w->sealed_source_id, w->sealed_mutation_id,
-                        w->source_before.cas_root_sha3, graph_hex) != 5)
-        return;
-    for (i = 0; i < 5; i++)
-        test_argv[(*test_argc)++] = cap_args->argv[i];
-}
-
 static bool dp_worker_dimensions_run(struct dp_worker *w,
                                      struct zcl_dev_proof_dimension *lint,
                                      struct zcl_dev_proof_dimension *test,
@@ -7091,19 +7053,16 @@ static bool dp_worker_dimensions_run(struct dp_worker *w,
 {
     struct proof_dimension_run runs[2];
     size_t run_count = 0;
-    /* The test dimension consumes the preflight's capsule when it
-     * validates (same sealed bindings it launched under); otherwise it
-     * fresh-probes exactly as before. Capsule assembly never fails the
-     * proof: a short argv simply runs without it. */
-    struct zcl_dev_proof_capsule_argv cap_args;
-    const char *test_argv[10];
-    size_t test_argc = 0;
-    test_argv[test_argc++] = w->generation_binary;
-    test_argv[test_argc++] = w->only;
-    test_argv[test_argc++] = "--cache";
-    test_argv[test_argc++] = "--activate-proof-contracts";
-    dp_test_capsule_flags(w, test_argv, &test_argc, &cap_args);
-    test_argv[test_argc] = NULL;
+    /* Cold by construction: the preflight's probe capsule is not handed
+     * over, because consuming it would re-admit its cache HITs. */
+    const char *test_argv[DP_TEST_DIMENSION_ARGC + 1] = {0};
+    if (test->selected &&
+        dp_test_dimension_argv(w->generation_binary, w->only, test_argv,
+                               sizeof(test_argv) / sizeof(test_argv[0])) !=
+            DP_TEST_DIMENSION_ARGC) {
+        proof_why(why, why_len, "test_runner_argv_invalid");
+        return false;
+    }
     struct zcl_dev_proof_budget test_budget =
         zcl_dev_proof_test_budget(w->paths->state, w->groups, test->selected);
     if (lint->selected &&
@@ -7174,25 +7133,25 @@ static bool dp_preflight_log_read(const char *path, char **bytes, size_t *len)
 }
 
 /* The routed-group preflight: probe the candidate's whole required set
- * through the runner's batch path BEFORE the test dimension decides what
- * still needs execution, and serialize that one decision as a probe
- * capsule beside scratch so the dimension consumes it instead of
- * reopening. Advisory only, by construction: the runner keeps execution
- * authority, so a missing binary, a failed spawn, or an unparseable log
- * costs one phase note ("unavailable, the runner decides") and never the
- * proof — and a missing or refused capsule just fresh-probes. Runs after
- * the prefork step so the generation's depfiles, admitted runner, and
- * seeded verdicts are exactly what the dimension below will see. The
- * cycle's tree-stability trust is unchanged (worker lease plus the
- * publish-time identity recheck); the capsule only adds replay protection
- * across cycles via its sealed bindings. */
+ * through the runner's batch path and record what a verdict cache WOULD
+ * reuse. Advisory only: the test dimension below runs cold
+ * (dp_test_dimension_argv) and never consumes this probe or its capsule,
+ * so would_reuse is a measurement for the day a separate-uid verifier
+ * qualifies, not a count of skipped groups. The probe reads only the
+ * generation's own store, never the submitting checkout's. A missing
+ * binary, a failed spawn, or an unparseable log costs one phase note
+ * ("unavailable") and never the proof. Runs after the prefork step so the
+ * generation's depfiles and admitted runner are exactly what the dimension
+ * below will see. The capsule stays in scratch with its sealed bindings;
+ * nothing reads it back. */
 static void dp_worker_test_preflight(struct dp_worker *w)
 {
-    const char *argv[11];
+    const char *argv[13];
     char log[PATH_MAX];
     char capsule[PATH_MAX];
+    char store_env[PATH_MAX + 32];
     char graph_hex[65];
-    char note[160];
+    char note[192];
     char *bytes = NULL;
     size_t len = 0, n = 0;
     struct zcl_dev_proof_preflight pf;
@@ -7204,6 +7163,13 @@ static void dp_worker_test_preflight(struct dp_worker *w)
     if (snprintf(log, sizeof(log), "%s/%s.test-preflight.log",
                  w->execution.logs, w->execution.key) >= (int)sizeof(log))
         return;
+    /* Pin the probe to the generation's own store: an inherited
+     * ZCL_DEV_SOURCE_ROOT would otherwise aim it at the checkout's. */
+    if (snprintf(store_env, sizeof(store_env), "ZCL_TESTCACHE_STORE_ROOT=%s",
+                 w->generation) >= (int)sizeof(store_env))
+        return;
+    argv[n++] = "env";
+    argv[n++] = store_env;
     argv[n++] = w->generation_binary;
     argv[n++] = w->only;
     argv[n++] = "--cache";
@@ -7228,14 +7194,14 @@ static void dp_worker_test_preflight(struct dp_worker *w)
     if (!dp_preflight_log_read(log, &bytes, &len) ||
         !dp_preflight_parse(bytes, len, &pf)) {
         (void)zcl_dev_proof_phase_note(w->paths->phases, "test_preflight",
-                                       "unavailable_runner_decides");
+                                       "advisory unavailable");
         free(bytes);
         return;
     }
     free(bytes);
     (void)snprintf(note, sizeof(note),
-                   "groups=%u would_reuse=%u must_run=%u uncacheable=%u "
-                   "capsule=%s",
+                   "advisory groups=%u would_reuse=%u must_run=%u "
+                   "uncacheable=%u admitted=0 capsule=%s",
                    pf.groups, pf.would_reuse, pf.must_run, pf.uncacheable,
                    cap_argc == 5 && access(capsule, F_OK) == 0 ? "written"
                                                                : "absent");
@@ -7258,6 +7224,9 @@ static bool dp_worker_dimensions(struct dp_worker *w, char *why,
     if (!dp_worker_lint_plan(w, lint, test, why, why_len)) return false;
     w->only[0] = 0;
     if (test->selected && !dp_worker_test_env(w, why, why_len)) return false;
+    if (test->selected && w->paths->phases[0])
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "test_reuse_admit",
+                                       DP_TEST_REUSE_UNQUALIFIED);
     if (!dp_worker_prefork(w, test->selected != 0, why, why_len)) return false;
     if (test->selected) dp_worker_test_preflight(w);
     if (!dp_worker_dimensions_run(w, lint, test, why, why_len)) return false;

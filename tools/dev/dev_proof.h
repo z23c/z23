@@ -260,11 +260,12 @@ bool zcl_dev_proof_wait(const char *repo_root,
                         struct zcl_dev_proof_status *out);
 
 /* The routed-group preflight account: what one batch probe of the whole
- * required set reported. would_reuse + must_run == groups always; the test
- * dimension re-derives the same split when it executes, so this is
- * advisory and never execution authority. Declared unconditionally: the
- * proof worker fills it in production, the seam below exposes its parser
- * to tests. */
+ * required set reported. would_reuse + must_run == groups always. It is
+ * advisory and never execution authority: the test dimension runs every
+ * selected group cold until a separate-uid verifier qualifies, so
+ * would_reuse only measures what reuse could save. Declared
+ * unconditionally: the proof worker fills it in production, the seam below
+ * exposes its parser to tests. */
 struct zcl_dev_proof_preflight {
     uint32_t groups;
     uint32_t would_reuse;
@@ -272,12 +273,12 @@ struct zcl_dev_proof_preflight {
     uint32_t uncacheable;
 };
 
-/* The five capsule arguments shared by both runner children (write vs use
- * plus the four sealed bindings). Storage travels with the struct so the
- * argv pointers stay valid through the spawn; the worker fills one on its
- * stack, the seam below exposes the same builder to tests. Declared
- * unconditionally so every compilation of dev_proof.c sees the same layout;
- * only the seam function is test-gated. */
+/* The five capsule arguments a runner child takes (write vs use plus the
+ * four sealed bindings). Storage travels with the struct so the argv
+ * pointers stay valid through the spawn; the worker fills one on its
+ * stack for the advisory preflight, the seam below exposes the same
+ * builder to tests. Declared unconditionally so every compilation of
+ * dev_proof.c sees the same layout; only the seam function is test-gated. */
 struct zcl_dev_proof_capsule_argv {
     char capsule[192];
     char sid[96];
@@ -315,11 +316,25 @@ bool zcl_dev_proof_test_build_test_selector(
  * proof cycle or spawning a runner. */
 bool zcl_dev_proof_test_preflight_parse(const char *bytes, size_t len,
                                         struct zcl_dev_proof_preflight *out);
+/* Seam for the fail-closed test dimension: the exact runner argv the proof
+ * worker launches. It carries the runner's explicit cold mode, so a test
+ * can prove no cached verdict is admitted without spawning a runner.
+ * Returns the argc written (argv NULL-terminated), or 0 on bad input or a
+ * too-small argv_cap. */
+size_t zcl_dev_proof_test_dimension_argv(const char *binary, const char *only,
+                                         const char **argv, size_t argv_cap);
+/* Seam for the test-dimension accounting: the exact reader that turns the
+ * runner's SUITE VERDICT line into the receipt's test counts. `dim->selected`
+ * is the input; it refuses a log with any failed, skipped, unobserved or
+ * cached (reused) group. */
+bool zcl_dev_proof_test_log_account(const char *path,
+                                    struct zcl_dev_proof_dimension *dim);
 /* Seam for the capsule argv builder: the exact flags the worker hands the
- * preflight (write=true) and the test dimension (write=false), so a test
- * can prove both children receive the same bindings without driving a
- * proof cycle. Returns 5 with argv[0..4] set and argv[5] NULL, or 0 on
- * any bad input or argv_cap < 6. */
+ * advisory preflight (write=true), and the use form (write=false) a
+ * qualified reuse path would hand a consumer, so a test can prove both
+ * forms carry the same bindings without driving a proof cycle. The proof's
+ * test dimension takes neither while it runs cold. Returns 5 with
+ * argv[0..4] set and argv[5] NULL, or 0 on any bad input or argv_cap < 6. */
 int zcl_dev_proof_test_capsule_argv(bool write, const char *capsule_path,
                                     const char *source_id,
                                     const char *mutation_id,

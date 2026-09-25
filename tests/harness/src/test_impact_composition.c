@@ -68,6 +68,7 @@
 #include "platform/time_compat.h"
 #include "kernel/command_registry.h"
 #include "test/testcache.h"
+#include "vcs/vcs_object.h"
 #include "test_group_catalog.h"
 #include "test_group_host_need.h"
 
@@ -5280,11 +5281,17 @@ static bool ic_proof_environment_child(void)
         "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES",
         "ZCL_LINT_CACHE_DUMP", "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
         "ZCL_LINT_TU_CACHE", "ZCL_LINT_TU_CACHE_DIR",
-        "ZCL_LINT_TU_CACHE_GENERATIONS",
+        "ZCL_LINT_TU_CACHE_GENERATIONS", "ZCL_TEST_CACHE",
+        "ZCL_TEST_CACHE_DUMP", "ZCL_TESTCACHE_STORE_ROOT",
     };
     for (size_t i = 0; i < sizeof(cleared) / sizeof(cleared[0]); i++) {
         if (setenv(cleared[i], "--just-print", 1) != 0) return false;
     }
+    /* A value the runner would honour: reuse on, pointed at a store the
+     * candidate can write. The proof must drop both. */
+    if (setenv("ZCL_TEST_CACHE", "1", 1) != 0 ||
+        setenv("ZCL_TESTCACHE_STORE_ROOT", "/checkout", 1) != 0)
+        return false;
     if (setenv("ZCL_LINT_CACHE", "1", 1) != 0 ||
         setenv("ZCL_LINT_MODE", "UPDATE", 1) != 0 ||
         !zcl_dev_proof_test_prepare_environment())
@@ -5638,16 +5645,19 @@ static int test_ic_generation_dependencies_survive_vendor_cleanup(void)
     return failures;
 }
 
-/* ZRC-0007 probe-before-build: the checkout's addressed verdict records
- * seed the generation, but in-flight tmp/ partials never travel. A donor
- * without a store still prepares (cold, not refused — the first TEST in
- * this file's generation suite already covers that shape). */
-static int test_ic_generation_verdict_seed(void)
+/* A landing proof must fail closed on reused test verdicts. The candidate
+ * runs as the proof's own uid, so its tests can write the submitting
+ * checkout's verdict store; a PASS it plants at a group's exact key used to
+ * travel into the generation and be HIT there instead of executing. Forge
+ * exactly such a record (the testcache PASS layout: magic, status, key
+ * echo) and prove the generation receives no verdict store at all. */
+static int test_ic_generation_refuses_forged_verdict(void)
 {
     int failures = 0;
-    TEST("proof generation: verdict store seeds shards but never tmp partials") {
+    TEST("proof generation: a forged checkout PASS record never reaches the generation") {
         char donor[4096], generation[4096], vpath[4096];
         char why[256] = {0};
+        uint8_t key[32], record[56];
         test_make_tmpdir(donor, sizeof(donor), "gen_verdict", "donor");
         test_make_tmpdir(generation, sizeof(generation), "gen_verdict",
                          "copy");
@@ -5656,27 +5666,115 @@ static int test_ic_generation_verdict_seed(void)
              ++i)
             ASSERT(ic_write(donor, ic_gen_dep_files[i],
                             "fixture dependency bytes\n"));
-        static const char verdict[] = "ZTCACHE1-seeded-verdict-record-bytes";
-        ASSERT(ic_write(donor, ".zvcs/objects/ab/verdict-address-record",
-                        verdict));
-        ASSERT(ic_write(donor, ".zvcs/objects/tmp/.9.0",
-                        "partial put bytes"));
+        for (size_t i = 0; i < sizeof(key); ++i)
+            key[i] = (uint8_t)(0xa5u ^ (uint8_t)(i * 7u));
+        memset(record, 0, sizeof(record));
+        memcpy(record, "ZTCACHE1", 8);
+        record[8] = 1u; /* PASS */
+        memcpy(record + 16, key, sizeof(key));
+        ASSERT(vcs_object_store_init(donor));
+        ASSERT(vcs_object_put_addressed(donor, key, record, sizeof(record)));
+        ASSERT(vcs_object_has(donor, key));
         ASSERT(zcl_dev_proof_test_generation_dependencies(
             donor, generation, why, sizeof(why)));
-        ASSERT(snprintf(vpath, sizeof(vpath),
-                        "%s/.zvcs/objects/ab/verdict-address-record",
-                        generation) < (int)sizeof(vpath));
-        FILE *seeded = fopen(vpath, "rb");
-        ASSERT(seeded != NULL);
-        char seed_bytes[64] = {0};
-        size_t seed_count = fread(seed_bytes, 1, sizeof(seed_bytes) - 1,
-                                  seeded);
-        ASSERT(fclose(seeded) == 0);
-        ASSERT(seed_count == strlen(verdict));
-        ASSERT(memcmp(seed_bytes, verdict, strlen(verdict)) == 0);
-        ASSERT(snprintf(vpath, sizeof(vpath), "%s/.zvcs/objects/tmp",
-                        generation) < (int)sizeof(vpath));
+        ASSERT(!vcs_object_has(generation, key));
+        ASSERT(snprintf(vpath, sizeof(vpath), "%s/.zvcs", generation) <
+               (int)sizeof(vpath));
         ASSERT(access(vpath, F_OK) != 0);
+        ASSERT(test_rm_rf_recursive(donor) == 0);
+        ASSERT(test_rm_rf_recursive(generation) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The test dimension's runner argv carries the runner's explicit cold mode,
+ * which outranks ZCL_TEST_CACHE, and nothing that would admit a cached
+ * verdict: no --cache, no probe-only, no capsule to consume. */
+static int test_ic_proof_test_dimension_runs_cold(void)
+{
+    int failures = 0;
+    TEST("proof test dimension: the runner starts cold and admits no cached verdict") {
+        const char *argv[8];
+        const char *small[4];
+        size_t argc = zcl_dev_proof_test_dimension_argv(
+            "/gen/build/bin/test_parallel", "--exact=test_a,test_b", argv,
+            sizeof(argv) / sizeof(argv[0]));
+        ASSERT(argc == 4);
+        ASSERT(strcmp(argv[0], "/gen/build/bin/test_parallel") == 0);
+        ASSERT(strcmp(argv[1], "--exact=test_a,test_b") == 0);
+        ASSERT(strcmp(argv[2], "--no-cache") == 0);
+        ASSERT(strcmp(argv[3], "--activate-proof-contracts") == 0);
+        ASSERT(argv[4] == NULL);
+        for (size_t i = 0; i < argc; ++i) {
+            ASSERT(strcmp(argv[i], "--cache") != 0);
+            ASSERT(strcmp(argv[i], "--cache-probe-only") != 0);
+            ASSERT(strncmp(argv[i], "--use-capsule", 13) != 0);
+        }
+        ASSERT(zcl_dev_proof_test_dimension_argv(
+                   "/gen/build/bin/test_parallel", "--exact=test_a", small,
+                   sizeof(small) / sizeof(small[0])) == 0);
+        ASSERT(zcl_dev_proof_test_dimension_argv(
+                   NULL, "--exact=test_a", argv,
+                   sizeof(argv) / sizeof(argv[0])) == 0);
+        ASSERT(zcl_dev_proof_test_dimension_argv(
+                   "/gen/build/bin/test_parallel", "", argv,
+                   sizeof(argv) / sizeof(argv[0])) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* One SUITE VERDICT fixture through the proof's own accounting. */
+static bool ic_test_log_case(const char *dir, const char *name,
+                             const char *verdict, uint32_t selected,
+                             struct zcl_dev_proof_dimension *dim)
+{
+    char path[4096];
+    if (!ic_write(dir, name, verdict) ||
+        snprintf(path, sizeof(path), "%s/%s", dir, name) >=
+            (int)sizeof(path))
+        return false;
+    memset(dim, 0, sizeof(*dim));
+    dim->selected = selected;
+    return zcl_dev_proof_test_log_account(path, dim);
+}
+
+/* The receipt's test dimension records reused == 0. A run that reports any
+ * cached group (a forged or inherited PASS served without executing) is
+ * refused, not counted as reuse, and a group that fails its fresh run fails
+ * the proof. */
+static int test_ic_proof_test_accounting_refuses_reuse(void)
+{
+    int failures = 0;
+    TEST("proof test accounting: cached groups and fresh failures both refuse") {
+        char dir[4096];
+        struct zcl_dev_proof_dimension dim;
+        test_make_tmpdir(dir, sizeof(dir), "proof_test_account", "logs");
+        ASSERT(ic_test_log_case(dir, "cold.log",
+            "SUITE VERDICT mode=cold groups_total=3 groups_ran=2 "
+            "groups_cached=0 groups_gated=1 groups_failed=0 self_skips=0 "
+            "env_unobserved=0 load_flaky=0 toolkey=t\n", 2, &dim));
+        ASSERT(dim.ran == 2);
+        ASSERT(dim.reused == 0);
+        ASSERT(dim.failed == 0);
+        /* Every other count is in order: only the served HIT refuses. */
+        ASSERT(!ic_test_log_case(dir, "cached.log",
+            "SUITE VERDICT mode=cached groups_total=3 groups_ran=1 "
+            "groups_cached=1 groups_gated=1 groups_failed=0 self_skips=0 "
+            "env_unobserved=0 load_flaky=0 toolkey=t\n", 2, &dim));
+        ASSERT(dim.reused == 1);
+        ASSERT(!ic_test_log_case(dir, "all_cached.log",
+            "SUITE VERDICT mode=cached groups_total=2 groups_ran=0 "
+            "groups_cached=2 groups_gated=0 groups_failed=0 self_skips=0 "
+            "env_unobserved=0 load_flaky=0 toolkey=t\n", 2, &dim));
+        ASSERT(!ic_test_log_case(dir, "fresh_fail.log",
+            "SUITE VERDICT mode=cold groups_total=2 groups_ran=2 "
+            "groups_cached=0 groups_gated=0 groups_failed=1 self_skips=0 "
+            "env_unobserved=0 load_flaky=0 toolkey=t\n", 2, &dim));
+        ASSERT(dim.failed == 1);
+        ASSERT(dim.reused == 0);
+        ASSERT(test_rm_rf_recursive(dir) == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -5768,11 +5866,13 @@ static int test_ic_preflight_parse(void)
     return failures;
 }
 
-/* Capsule flag plumbing: the worker hands both runner children the same
- * five capsule arguments (write vs use + the four sealed bindings), so the
- * test dimension's acceptance check compares the capsule against the exact
- * values that gated its launch. One TEST block per function — ASSERT jumps
- * to the function's single _test_next label. */
+/* Capsule flag plumbing: the write and use forms carry the same five
+ * capsule arguments (write vs use + the four sealed bindings), so a
+ * consumer's acceptance check compares the capsule against the exact
+ * values that gated its launch. Only the advisory preflight takes the
+ * write form today; the proof's test dimension runs cold and takes
+ * neither. One TEST block per function — ASSERT jumps to the function's
+ * single _test_next label. */
 static int test_ic_capsule_argv_write(void)
 {
     int failures = 0;
@@ -5798,7 +5898,7 @@ static int test_ic_capsule_argv_write(void)
 static int test_ic_capsule_argv_use(void)
 {
     int failures = 0;
-    TEST("proof capsule: dimension argv carries use + same bindings") {
+    TEST("proof capsule: use-form argv carries use + same bindings") {
         const char *argv[8] = {0};
         int argc = zcl_dev_proof_test_capsule_argv(
             false, "/tmp/x.probe-capsule", "sid", "mid", "cas", "gr", argv,
@@ -7398,7 +7498,9 @@ int test_impact_composition(void)
     failures += test_ic_generation_docs_fresh_refuses_stale();
     failures += test_ic_generation_docs_fresh_refuses_missing_tools();
     failures += test_ic_generation_dependencies_survive_vendor_cleanup();
-    failures += test_ic_generation_verdict_seed();
+    failures += test_ic_generation_refuses_forged_verdict();
+    failures += test_ic_proof_test_dimension_runs_cold();
+    failures += test_ic_proof_test_accounting_refuses_reuse();
     failures += test_ic_preflight_parse();
     failures += test_ic_capsule_argv_write();
     failures += test_ic_capsule_argv_use();
