@@ -1,0 +1,27 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Shadow-selection corpus entry syn-private-impl: a private refactor of
+# reader_u16_payload with no header change; seeded bug rejects a non-empty
+# payload that exactly fills the caller capacity.
+
+diff --git a/platform/modules/codec/src/cursor.c b/platform/modules/codec/src/cursor.c
+index 6f37e12b6c..031be62bae 100644
+--- a/platform/modules/codec/src/cursor.c
++++ b/platform/modules/codec/src/cursor.c
+@@ -211,13 +211,15 @@ static bool reader_u16_payload(struct zcl_codec_reader *reader,
+         return false;
+     }
+     uint16_t value = zcl_read_u16_le(reader->buffer + reader->position);
++    size_t payload = value;
+     size_t total;
+-    if (!zcl_size_add(2u, value, &total) ||
++    if (!zcl_size_add(2u, payload, &total) ||
+         total > zcl_codec_reader_remaining(reader)) {
+         reader->error = ZCL_CODEC_BOUNDS;
+         return false;
+     }
+-    if ((size_t)value > capacity) {
++    /* A payload must leave the caller's buffer at least one spare byte. */
++    if (payload > capacity || (payload == capacity && payload != 0)) {
+         reader->error = ZCL_CODEC_LENGTH;
+         return false;
+     }

@@ -1,0 +1,17 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Shadow-selection corpus entry syn-generated-input: a quoting edit to the
+# install script the Makefile compiles into install_script_gen.h.
+
+diff --git a/platform/packaging/install/install_from_source.sh b/platform/packaging/install/install_from_source.sh
+index ae018b6c67..c8deecba13 100755
+--- a/platform/packaging/install/install_from_source.sh
++++ b/platform/packaging/install/install_from_source.sh
+@@ -26,7 +26,7 @@ SRC="${Z23_SRC:-$HOME/z23}"
+ # The server that serves this file rewrites this literal placeholder to
+ # its own build commit before responding; an empty value means the
+ # running node could not name one, and this script falls back to main.
+-Z23_PIN="__Z23_PIN__"
++Z23_PIN='__Z23_PIN__'
+ 
+ die() {
+     echo "install_from_source: $*" >&2

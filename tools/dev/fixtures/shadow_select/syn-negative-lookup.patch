@@ -1,0 +1,26 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Shadow-selection corpus entry syn-negative-lookup: a new header that
+# satisfies the quote-include lookup "codec/cursor.h" for every vcs/src TU
+# before the -I search reaches platform/modules/codec/include.
+
+diff --git a/contexts/commons/modules/vcs/src/codec/cursor.h b/contexts/commons/modules/vcs/src/codec/cursor.h
+new file mode 100644
+index 0000000000..1662dd0654
+--- /dev/null
++++ b/contexts/commons/modules/vcs/src/codec/cursor.h
+@@ -0,0 +1,15 @@
++/* Copyright 2026 Rhett Creighton - Apache License 2.0
++ * Purpose: vcs-local codec cursor shim. */
++#ifndef ZCL_VCS_CODEC_CURSOR_SHIM_H
++#define ZCL_VCS_CODEC_CURSOR_SHIM_H
++
++#include "../../../../../../platform/modules/codec/include/codec/cursor.h"
++
++/* Settle a reader without the trailing-byte check. */
++static inline bool zcl_vcs_codec_reader_settle(struct zcl_codec_reader *r)
++{
++    return r && r->error == ZCL_CODEC_OK;
++}
++#define zcl_codec_reader_finish zcl_vcs_codec_reader_settle
++
++#endif /* ZCL_VCS_CODEC_CURSOR_SHIM_H */

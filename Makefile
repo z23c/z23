@@ -949,6 +949,11 @@ DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 MUTATION_LIB_SRCS = tools/dev/mutation_ops.c tools/dev/mutation_run.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
+# Shadow proof-obligation selection is report-only (see
+# docs/experiments/2026-09-25-shadow-obligation-selector.md): it links into
+# the dev binary and the test harness, never the release node.
+SHADOW_SELECT_SRCS = tools/dev/dev_shadow_rule.c tools/dev/dev_shadow_corpus.c \
+	tools/dev/dev_shadow_eval.c tools/dev/dev_shadow_render.c
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_app_scaffold.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_watch_classify.c tools/dev/devloop_process.c \
@@ -958,7 +963,7 @@ DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/dev_proof_budget.c \
 	tools/dev/dev_proof_receipt.c tools/dev/dev_proof_signer.c \
 	tools/dev/dev_proof_observation.c \
-	tools/dev/dev_proof_observation_lookup.c \
+	tools/dev/dev_proof_observation_lookup.c $(SHADOW_SELECT_SRCS) \
 	$(MUTATION_LIB_SRCS)
 DEVLOOP_SRCS = $(filter-out $(DEV_ONLY_SRCS),$(DEVLOOP_ALL_SRCS))
 
@@ -3052,7 +3057,7 @@ TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c
 	tools/dev/dev_proof.c tools/dev/dev_proof_budget.c \
 	tools/dev/dev_proof_receipt.c tools/dev/dev_proof_signer.c \
 	tools/dev/dev_proof_observation.c \
-	tools/dev/dev_proof_observation_lookup.c \
+	tools/dev/dev_proof_observation_lookup.c $(SHADOW_SELECT_SRCS) \
 	$(MUTATION_LIB_SRCS)
 SPEC_SRCS = $(wildcard tests/harness/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c

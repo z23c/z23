@@ -1,0 +1,17 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Shadow-selection corpus entry syn-flag: drop the one -DZCL_DEV_BUILD define the
+# fast test tree gives the hot-swap activation object.
+
+diff --git a/Makefile b/Makefile
+index aaca9da108..685f9e7418 100644
+--- a/Makefile
++++ b/Makefile
+@@ -10056,7 +10056,7 @@ TESTCACHE_TOOLKEY_CPPFLAGS = \
+ #     "the module cannot diverge from the linked binary".
+ HOTSWAP_TEST_LOADER_REL = engine/modules/hotswap/src/hotswap_activate.o
+ TEST_FAST_OBJECT_CFLAGS = $(TEST_FAST_CFLAGS)
+-$(TEST_FAST_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_FAST_OBJECT_CFLAGS += -DZCL_DEV_BUILD
++$(TEST_FAST_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_FAST_OBJECT_CFLAGS +=
+ $(TEST_FAST_OBJ_DIR)/tests/harness/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS += \
+   -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_FAST_COMPILE_EPOCH)\"
+ $(TEST_FAST_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)

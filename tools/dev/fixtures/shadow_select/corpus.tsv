@@ -1,0 +1,38 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Frozen shadow-selection corpus (tests/harness/src/test_dev_shadow_select.c).
+# id	kind	component	commit	patch_sha3	files
+# real rows: small landed commits on main (1-3 C files); commit is the landed
+#   commit and patch_sha3 is SHA3-256 of
+#   git -c core.quotepath=off -c diff.noprefix=false -c diff.mnemonicPrefix=false
+#       --no-pager diff-tree -p --no-color --no-renames --no-ext-diff
+#       --full-index <commit>^ <commit>
+# syn rows: adversarial changes with a seeded compile-valid bug; commit is the
+#   base they apply to and patch_sha3 is SHA3-256 of <id>.patch in this
+#   directory.
+real-01	real	tools/dev	c472356ff23410164ea6fbe101a3d8934cdb8956	8639effa21dbb27c63f2884dc03f2dccd50770e87b56babdb996bd9061bbcfc6	tools/dev/dev_proof_observation.c
+real-02	real	tools/dev	0f63425e8a4e12fc9c380afa69d23632241e2ccb	fa1f1bb6f8f0189bd057f4055532ab2f0bc7d1cbec51121a16bebf0e6a659098	tools/dev/z23_git_hook.c
+real-03	real	cognition/modules/codeindex	0ae37117abfd706ce766e812c6426c2760fbdcd8	3d291417266d8d9edae9e061e5c703000a5a55ed91eab64d3b2a1298adb43bfa	cognition/modules/codeindex/src/codeindex_build.c,tests/harness/src/test_codeindex_incremental.c
+real-04	real	tests/harness	25e5480e6a7632590593082593708bd5cc2920f9	32dec4b52442c14a21a626f4f53f0613facea6cfd5f7e46571bec8cae2e38132	tests/harness/src/test_parallel.c
+real-05	real	contexts/commons/modules/vcs	d4c707b345eca40d8438f0c1eebb85ae907953f5	dae5a53e9aff93804e1b01ad578bf4266efca2de8dfdc4435f4001b7944652c5	contexts/commons/modules/vcs/src/package_verify_capabilities.c,tests/harness/src/test_package_capability_claim.c
+real-06	real	contexts/commons/modules/vcs	da7042ac4fdf0b771edd233b9ce87734750731a6	823273dd25ed9e2cc5b8e76a36933deff97b4d34c34f3945460aedc37f0bae6b	contexts/commons/modules/vcs/src/package_swarm_node.c,tests/harness/src/test_zcode_swarm.c
+real-07	real	contexts/commons/modules/vcs	6ca59bf60404b27d9ed2fff451d1e22efade6e39	18e0c697a046d920dabd263a26f3bf3d8f457f93dbbd8cf7f46e7e47130bef04	contexts/commons/modules/vcs/src/package_attest_transport.c,tests/harness/src/test_zcode_attest_transport.c
+real-08	real	tools/dev	3a8cb14e18fe31a8666a1340fdf88adbea545ca0	8e5ebea0812fdb5d719385c2903b73df808bf9eeb8f660b4116ee37061fe702f	tests/harness/src/test_test_group_selector.c,tools/dev/test_group_catalog.c
+real-09	real	tools	178cee2ba42d17e4f9164723f744655a223f2edf	0ef15e901e2572fd369dad7680f2db53aa66a23f05e28273998154111c126ad9	tests/harness/src/test_resident_launch_contract.c,tools/package_verify.c
+real-10	real	contexts/commons/services	5d2fb8fcd6a212293e1421155072c6638742eda1	0233c942bb4b0c281f4d2323023be622f632fd0c601c139d4737d2f252b42d33	contexts/commons/services/src/package_lifecycle.c,tests/harness/src/test_zcode_add.c
+real-11	real	contexts/commons/services	ccc825b51813fa13767c16a0bf3364e0c8f29ea4	fe7971a3df5dd346abbef8b8b7963e7c2e59cdee5f94e7d69a79c1ddf138f04f	contexts/commons/services/src/package_lifecycle.c,contexts/commons/services/src/package_lifecycle_store.c,tests/harness/src/test_zcode_add.c
+real-12	real	contexts/commons/modules/vcs	2854c1d68670c75547380ccd2944172061d5496a	6cc56b28ea5b970edbd08a58a9840b98d499bbf10201624a244134bc6eb44687	contexts/commons/modules/vcs/src/vcs.c,tests/harness/src/test_vcs_core.c
+real-13	real	contexts/commons/modules/vcs	88631d5aa4dffe836b84740e2652084ea30b3c5a	5ea7a3ae101b2cd7d9227d7a613e67d0885b3e4451ac946f383d0964767edecd	contexts/commons/modules/vcs/src/zcode_publication.c,tests/harness/src/test_zcode_dev_objects.c
+real-14	real	contexts/commons/modules/vcs	406eb6360c7b4c43c9cd15a3b2b2371b33d1486a	479a49e42e3dafec0f950d8decb84a99c5563aa72781cc46c56b2c5897101265	contexts/commons/modules/vcs/src/package_mapping.c,tests/harness/src/test_vcs_devloop.c
+real-15	real	contexts/commons/modules/vcs	6cab055c98ae79eeec7e771953555121115ce842	bfdfcefc5a8a39a1c4e57917dcb442a4471c4e62aecc051fb94e2b5a9ca0ac99	contexts/commons/modules/vcs/include/vcs/zcode_work_context.h,contexts/commons/modules/vcs/src/zcode_work_context.c,tests/harness/src/test_zcode_dev_objects.c
+real-16	real	tools/dev	9b1ce4393e819c58a8111c7a1a2620faa1dfce44	69f67da8c17fad190ac11e746cab6d22b2dee01593f942364db17886a1ca9d50	tools/dev/devloop_watch.c
+real-17	real	tools/soak	0441ce3214539e6fdc1386013d8e8ac6d48a3321	b7ddb58e544696abce5d775f2f7c112ef623fc719e53c65caf24d6724867f2b7	tools/soak/main.c
+real-18	real	engine/services	77a4d8c8cfb2a21cdc83832a6fcf509d70b4ae3c	a8baf718fc62fd9242b25cffc4e81c88395cba88b2558362ec4983b320380a58	engine/services/src/replay_verify_service.c,tests/harness/src/test_replay_verify.c
+real-19	real	engine/controllers	e6359393a32a8b88d0e651ac4af6ffadaae267b9	daf84e16d1adfe134e5424deef6644dbe69b0d20f8bfcf2703ce6948c95bfb08	engine/controllers/include/controllers/diagnostics_internal.h,engine/controllers/src/diagnostics_mvp.c,tests/harness/src/test_syncdiag_operator.c
+real-20	real	tools/lint/lintc	2a158c1dedcdfb076e5495b43b6d4ce129b98bba	5940abdfc903096e31b1c34d1cf9018272a89033c6a85c5fb63f119ec52dfc4b	tools/lint/lintc/gate_hotfork_stories.c
+syn-header-decl	header_decl	platform/modules/codec	7a9f354f3f7996383c0e7c858346ac29a5ad8957	dc01be22bc702ead99a927fc72544b1fe2867b261fd70c037d4fb69d0c4447fc	platform/modules/codec/include/codec/cursor.h,platform/modules/codec/src/cursor.c
+syn-abi	abi	platform/modules/codec	7a9f354f3f7996383c0e7c858346ac29a5ad8957	a4d10ebda06c89aa6c613b3627370866d4b9d8ffac73dd09b32a8ac0b08d5e0f	platform/modules/codec/include/codec/cursor.h
+syn-flag	flag	engine/modules/hotswap	7a9f354f3f7996383c0e7c858346ac29a5ad8957	766244f7561fda60107035c84bf8e187fc8d71782120a8aa20c68ebce747ff24	Makefile
+syn-contract	contract	platform/modules/codec	7a9f354f3f7996383c0e7c858346ac29a5ad8957	a3f2ceeff98e80ab64d85634444c1b06057b8f1f3b08d9d5772d1ce7fb40ad88	platform/modules/codec/src/cursor.c,tests/harness/src/test_codec_cursor.c
+syn-private-impl	private_impl	platform/modules/codec	7a9f354f3f7996383c0e7c858346ac29a5ad8957	f54eaa6d6208a6ec8a2ac4054ac44dc7699c55b73e090ffcf8519f2b9ca62fe9	platform/modules/codec/src/cursor.c
+syn-generated-input	generated_input	platform/packaging/install	7a9f354f3f7996383c0e7c858346ac29a5ad8957	45cbd9f63d28f6825b8d33a0432a9a48701af2a261442107616e4d573f1fba59	platform/packaging/install/install_from_source.sh
+syn-negative-lookup	negative_lookup	platform/modules/codec	7a9f354f3f7996383c0e7c858346ac29a5ad8957	45739fd038237143116d3e313ce65c58a5d467ce2c123708e68f54c0e418be83	contexts/commons/modules/vcs/src/codec/cursor.h

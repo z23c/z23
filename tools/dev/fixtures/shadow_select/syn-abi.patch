@@ -1,0 +1,18 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Shadow-selection corpus entry syn-abi: reorder zcl_codec_reader and narrow its
+# length to 16 bits; every function signature is unchanged.
+
+diff --git a/platform/modules/codec/include/codec/cursor.h b/platform/modules/codec/include/codec/cursor.h
+index 347b235816..80c58d2603 100644
+--- a/platform/modules/codec/include/codec/cursor.h
++++ b/platform/modules/codec/include/codec/cursor.h
+@@ -17,8 +17,8 @@ enum zcl_codec_error {
+ 
+ struct zcl_codec_reader {
+     const uint8_t *buffer;
+-    size_t length;
+     size_t position;
++    uint16_t length;
+     enum zcl_codec_error error;
+ };
+ 

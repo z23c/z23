@@ -1,0 +1,38 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Shadow-selection corpus entry syn-header-decl: const-qualify zcl_codec_reader_finish;
+# the const implementation can no longer record ZCL_CODEC_TRAILING.
+
+diff --git a/platform/modules/codec/include/codec/cursor.h b/platform/modules/codec/include/codec/cursor.h
+index 347b235816..66805c5f0f 100644
+--- a/platform/modules/codec/include/codec/cursor.h
++++ b/platform/modules/codec/include/codec/cursor.h
+@@ -36,7 +36,7 @@ void zcl_codec_writer_init(struct zcl_codec_writer *writer, void *buffer,
+                            size_t capacity);
+ size_t zcl_codec_reader_remaining(const struct zcl_codec_reader *reader);
+ size_t zcl_codec_writer_remaining(const struct zcl_codec_writer *writer);
+-bool zcl_codec_reader_finish(struct zcl_codec_reader *reader);
++bool zcl_codec_reader_finish(const struct zcl_codec_reader *reader);
+ bool zcl_codec_writer_finish(const struct zcl_codec_writer *writer,
+                              size_t *written);
+ 
+diff --git a/platform/modules/codec/src/cursor.c b/platform/modules/codec/src/cursor.c
+index 6f37e12b6c..34ebc3fb81 100644
+--- a/platform/modules/codec/src/cursor.c
++++ b/platform/modules/codec/src/cursor.c
+@@ -73,14 +73,10 @@ static bool writer_need(struct zcl_codec_writer *writer, size_t length)
+     return true;
+ }
+ 
+-bool zcl_codec_reader_finish(struct zcl_codec_reader *reader)
++bool zcl_codec_reader_finish(const struct zcl_codec_reader *reader)
+ {
+     if (!reader || reader->error != ZCL_CODEC_OK) return false;
+-    if (reader->position != reader->length) {
+-        reader->error = ZCL_CODEC_TRAILING;
+-        return false;
+-    }
+-    return true;
++    return reader->position == reader->length;
+ }
+ 
+ bool zcl_codec_writer_finish(const struct zcl_codec_writer *writer,
