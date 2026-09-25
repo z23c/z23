@@ -335,6 +335,10 @@ int premise_doc_claims_closure(struct premise_tree *t, const char *unit,
     uint8_t *bytes = NULL;
     size_t len = 0;
     int rc = push(&w, (size_t)(self - t->entries));
+    /* A symlink document's evaluated bytes are its target's, which the path
+     * set does not bind; it never inherits. */
+    if (self->symlink)
+        w.computed = true;
     if (rc == 0 && !self->symlink)
         rc = premise_tree_read(t, unit, &bytes, &len, err);
     if (rc == 0 && !self->symlink)

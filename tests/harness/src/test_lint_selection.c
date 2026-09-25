@@ -913,13 +913,16 @@ static int test_lsel_catalog_refusal(void)
 /* ── doc-claims units ──────────────────────────────────────────────────── */
 
 /* one.md binds a symbol to one header and to a glob; two.md binds a path
- * and an oracle gate; plain.md binds nothing. The last five are each
+ * and an oracle gate; plain.md binds nothing. The last six are each
  * unbounded by one rule: pathspec magic, a prefix reaching a pruned
  * directory, a pruned path, a path the file system and the path set
- * disagree about, and a path through a symlink. */
+ * disagree about, a path through a symlink, and a document that is itself
+ * a symlink (its evaluated bytes are the target's, which the path set does
+ * not bind). */
 static const char *const k_doc_ids[] = {
     "docs/one.md", "docs/two.md", "docs/plain.md", "docs/magic.md",
     "docs/reach.md", "docs/pruned.md", "docs/empty.md", "docs/link.md",
+    "docs/selflink.md",
 };
 enum { LSEL_DOCS = sizeof(k_doc_ids) / sizeof(k_doc_ids[0]), LSEL_BOUND = 3 };
 
@@ -954,7 +957,9 @@ static bool lsel_doc_fixture(struct lsel_fx *fx)
                       "<!-- claim: file-present lnk/x.h -->\n")
         && lsel_write(fx, "src/s.c", "int s;\n");
     (void)snprintf(link, sizeof(link), "%s/lnk", fx->repo);
-    ok = ok && symlink("inc", link) == 0 && lsel_commit_all(fx, "docs");
+    ok = ok && symlink("inc", link) == 0;
+    (void)snprintf(link, sizeof(link), "%s/docs/selflink.md", fx->repo);
+    ok = ok && symlink("plain.md", link) == 0 && lsel_commit_all(fx, "docs");
     /* Git keeps no empty directory, so only the file system has this one. */
     (void)snprintf(empty, sizeof(empty), "%s/empty", fx->repo);
     return ok && mkdir(empty, 0755) == 0;
