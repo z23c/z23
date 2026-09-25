@@ -15,8 +15,11 @@
  * might read) is residue and in every row's premise. Comment lines outside
  * a define block are not residue. A row's text is followed through every
  * variable it references, so a row reading another row's variable carries
- * that text too. Any expansion other than a plain $(NAME) reference makes
- * the row's premise unbounded, and the row then never inherits.
+ * that text too. Any expansion other than a plain $(NAME) reference, and
+ * any word that is not a tree path, a flag or a reference to a variable the
+ * catalog defines (a make-built archive, an untracked file, a variable only
+ * the Makefile defines), makes the row's premise unbounded, and the row
+ * then never inherits.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -355,33 +358,107 @@ static int walk_path(struct row_walk *w, const struct premise_entry *e)
     return rc;
 }
 
-/* Words of a row's text, split at blanks, backslashes and the punctuation a
- * compiler flag wraps a file name in (-Wl,a,b  --opt=path  @file  -l:x),
- * so every tree path the text can name reaches the premise. */
-static bool path_sep(char c)
+/* ── the words of a row ───────────────────────────────────────────────────
+ * Every make word of a row's text (split at blanks and backslashes) must be
+ * accounted for: its own syntax (a name it defines, an unconditional
+ * assignment operator), a $(NAME) reference to a variable the catalog
+ * defines (that text is walked too), a tree path (walked with its include
+ * closure), or a flag. A flag's pieces (split at '=', ',', '@' and ':') that
+ * name tree paths are walked as well, so -Wl,--script=path or @file
+ * cannot hide a file. Any other word (a make-built archive, an untracked
+ * file, a variable only the Makefile defines, a conditional assignment)
+ * names something the tree cannot bound, and the row never inherits. */
+
+static const struct premise_entry *tree_word(const struct premise_tree *t,
+                                             const char *p, size_t n)
 {
-    return list_sep(c) || c == '=' || c == ',' || c == '@' || c == ':';
+    char word[PREMISE_PATH_MAX];
+    if (n == 0 || n >= sizeof word)
+        return NULL;
+    memcpy(word, p, n);
+    word[n] = '\0';
+    return premise_tree_find(t, word);
 }
 
-static int walk_text(struct row_walk *w, const char *text)
+static bool catalog_ref(const char *p, size_t n,
+                        const struct premise_make_value *vals, size_t nvals)
+{
+    char close = n > 3 && p[0] == '$' ? (p[1] == '(' ? ')' : p[1] == '{' ? '}' : 0)
+                                      : 0;
+    if (!close || p[n - 1] != close)
+        return false;
+    for (size_t i = 0; i < nvals; i++)
+        if (vals[i].text && word_is(p + 2, n - 3, vals[i].name))
+            return true;
+    return false;
+}
+
+static bool syntax_word(const char *p, size_t n,
+                        const struct premise_make_value *vals, size_t nvals)
+{
+    static const char *const k_syntax[] = { ":=", "::=", "=", "+=", "define",
+                                            "endef" };
+    for (size_t i = 0; i < sizeof k_syntax / sizeof *k_syntax; i++)
+        if (word_is(p, n, k_syntax[i]))
+            return true;
+    for (size_t i = 0; i < nvals; i++)
+        if (word_is(p, n, vals[i].name))
+            return true;
+    return catalog_ref(p, n, vals, nvals);
+}
+
+static bool piece_sep(char c)
+{
+    return c == '=' || c == ',' || c == '@' || c == ':';
+}
+
+static int walk_pieces(struct row_walk *w, const char *p, size_t n)
+{
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < n;) {
+        while (i < n && piece_sep(p[i]))
+            i++;
+        size_t j = i;
+        while (j < n && !piece_sep(p[j]))
+            j++;
+        const struct premise_entry *e = tree_word(w->t, p + i, j - i);
+        if (e)
+            rc = walk_path(w, e);
+        i = j;
+    }
+    return rc;
+}
+
+static int walk_word(struct row_walk *w, const char *p, size_t n,
+                     const struct premise_make_value *vals, size_t nvals)
+{
+    if (syntax_word(p, n, vals, nvals))
+        return 0;
+    const struct premise_entry *e = tree_word(w->t, p, n);
+    if (e)
+        return walk_path(w, e);
+    if (p[0] == '-' || p[0] == '@') {
+        bool response = p[0] == '@';
+        if (response && !tree_word(w->t, p + 1, n - 1))
+            w->computed = true;
+        return walk_pieces(w, p, n);
+    }
+    w->computed = true;
+    return 0;
+}
+
+static int walk_text(struct row_walk *w, const char *text,
+                     const struct premise_make_value *vals, size_t nvals)
 {
     int rc = 0;
     for (const char *p = text; rc == 0 && p && *p;) {
-        while (*p && path_sep(*p))
+        while (*p && list_sep(*p))
             p++;
         const char *q = p;
-        while (*q && !path_sep(*q))
+        while (*q && !list_sep(*q))
             q++;
-        char word[PREMISE_PATH_MAX];
-        size_t n = (size_t)(q - p);
-        const struct premise_entry *e = NULL;
-        if (n > 0 && n < sizeof word) {
-            memcpy(word, p, n);
-            word[n] = '\0';
-            e = premise_tree_find(w->t, word);
-        }
-        if (e)
-            rc = walk_path(w, e);
+        if (q > p)
+            rc = walk_word(w, p, (size_t)(q - p), vals, nvals);
         p = q;
     }
     return rc;
@@ -405,49 +482,7 @@ static void walk_unique(struct row_walk *w)
     w->n = k;
 }
 
-/* A row can link a make-built artifact through a variable the catalog does
- * not define (today $(ZCL_WINDOWS_ACCEPTANCE_SQLITE), the private archive).
- * For every variable the row's text reaches, its Makefile definitions and
- * the rule whose target is spelled $(NAME) or ${NAME} join the row: every
- * tree path in that text (the archive's vendored source) is walked like a
- * row source. The rest of the Makefile is gate code already. */
-static int walk_makefile(struct row_walk *w, const char *makefile,
-                         const struct premise_make_value *vals, size_t nvals)
-{
-    enum { REF_FORMS = 3 };
-    char (*names)[CAT_ID_MAX * 2] = calloc(nvals * REF_FORMS + 1, sizeof *names); // raw-alloc-ok:lint-runtime
-    const char **list = calloc(nvals * REF_FORMS + 1, sizeof *list); // raw-alloc-ok:lint-runtime
-    uint8_t *mk = NULL;
-    size_t len = 0, n = 0;
-    int rc = names && list ? 0 : 2;
-    for (size_t i = 0; rc == 0 && i < nvals; i++, n += REF_FORMS) {
-        const char *v = vals[i].name;
-        size_t cap = sizeof names[n];
-        int a = snprintf(names[n], cap, "%s", v);
-        int b = snprintf(names[n + 1], cap, "$(%s):", v);
-        int c = snprintf(names[n + 2], cap, "${%s}:", v);
-        rc = a < 0 || b < 0 || c < 0 || (size_t)b >= cap || (size_t)c >= cap
-                 ? 2 : 0;
-        for (size_t j = 0; j < REF_FORMS; j++)
-            list[n + j] = names[n + j];
-    }
-    if (rc == 0 && premise_tree_read(w->t, makefile, &mk, &len, w->err) == 2)
-        rc = 2;
-    struct premise_make_value *mv = NULL;
-    size_t nmv = 0;
-    if (rc == 0)
-        rc = premise_make_values(mk, len, list, n, &mv, &nmv);
-    for (size_t i = 0; rc == 0 && i < nmv; i++)
-        rc = walk_text(w, mv[i].text);
-    premise_make_values_free(mv, nmv);
-    free(mk);
-    free(list);
-    free(names);
-    return rc;
-}
-
 int premise_catalog_row_closure(struct premise_tree *t, const char *catalog,
-                                const char *makefile,
                                 const char *id, size_t **out, size_t *nout,
                                 char ***ext, size_t *next, bool *computed,
                                 FILE *err)
@@ -462,9 +497,7 @@ int premise_catalog_row_closure(struct premise_tree *t, const char *catalog,
     if (rc == 0)
         rc = row_values(&c, id, &vals, &nvals, &w.computed);
     for (size_t i = 0; rc == 0 && i < nvals; i++)
-        rc = walk_text(&w, vals[i].text);
-    if (rc == 0)
-        rc = walk_makefile(&w, makefile, vals, nvals);
+        rc = walk_text(&w, vals[i].text, vals, nvals);
     premise_make_values_free(vals, nvals);
     premise_catalog_close(&c);
     if (rc) {

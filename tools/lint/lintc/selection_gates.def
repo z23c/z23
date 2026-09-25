@@ -128,8 +128,9 @@ SELECTION_GATE("check-raw-sqlite", SELECTION_UNITS_FILES,
  * the row's sources. A row reads its own four variables (<P>ID_SOURCES,
  * _FLAGS, _LIBS, _LIBDEPS), every tree path they name with its include
  * closure, and the catalog residue (tools/lint/lintc/premise_catalog.c).
- * A row that links the private sqlite archive reaches vendor/sqlite3.c
- * through the archive's rule; its computed include keeps those rows fresh.
+ * The four rows that link $(ZCL_WINDOWS_ACCEPTANCE_SQLITE) name a variable
+ * only the Makefile defines: a private archive built from the untracked
+ * vendor/sqlite3.c. Those rows have no finite premise and always rerun.
  * Make evaluates the whole Makefile to build any row (exported
  * variables, target-specific assignments, the generated rule), so all of
  * it is gate code, as is the module list its $(error) guard reads. The

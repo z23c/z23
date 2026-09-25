@@ -745,7 +745,7 @@ static int test_lsel_gate_code_computed(void)
 /* ── catalog-row units ─────────────────────────────────────────────────── */
 
 /* Rows one and two build from their own sources; row three links an
- * archive whose Makefile rule compiles a source with a computed include. */
+ * archive only the Makefile defines, so no tree path bounds its premise. */
 static const char k_cat_makefile[] =
     "LIBX := out/libx.a\n"
     "$(LIBX): vendor/x.c\n"
@@ -851,6 +851,10 @@ static int test_lsel_catalog_rows(void)
         (void)snprintf(cat, sizeof(cat), "%s", k_cat);
         memcpy(strstr(cat, "-DTWO"), "-DTWX", 5);
         ASSERT_EQ(lsel_cat_two(&fx, "cat.mk", cat, eq, "catalog-row-changed"), 0);
+        /* A row naming a file the tree does not hold has no finite premise. */
+        (void)snprintf(cat, sizeof(cat), "%s", k_cat);
+        memcpy(strstr(cat, "src/two.c"), "src/tw0.c", 9);
+        ASSERT_EQ(lsel_cat_two(&fx, "cat.mk", cat, eq, "computed-include"), 0);
         (void)snprintf(cat, sizeof(cat), "%s", k_cat);
         memcpy(strstr(cat, "-lshared"), "-lshaRED", 8);
         ASSERT_EQ(lsel_cat_two(&fx, "cat.mk", cat, residue, residue), 0);

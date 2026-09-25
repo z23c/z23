@@ -209,7 +209,6 @@ int premise_catalog_row_root(const struct premise_catalog *c, const char *id,
 /* Like premise_include_closure for one row id; 1 when the candidate
  * catalog has no such row. */
 int premise_catalog_row_closure(struct premise_tree *t, const char *catalog,
-                                const char *makefile,
                                 const char *id, size_t **out, size_t *nout,
                                 char ***ext, size_t *next, bool *computed,
                                 FILE *err);

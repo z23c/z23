@@ -348,10 +348,7 @@ static int unit_closure(struct premise_session *s, const struct premise_gate *g,
         return 0;
     }
     int rc = g->catalog
-                 ? premise_catalog_row_closure(&s->cand, g->catalog,
-                                               g->makefile ? g->makefile
-                                                           : "Makefile",
-                                               unit,
+                 ? premise_catalog_row_closure(&s->cand, g->catalog, unit,
                                                &c->idx, &c->n, &c->ext,
                                                &c->next, &c->computed, err)
                  : premise_include_closure(&s->cand, unit, &c->idx, &c->n,
