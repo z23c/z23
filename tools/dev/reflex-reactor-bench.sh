@@ -79,6 +79,71 @@ after="$(jq -er '.data.epoch' <<<"$begin")" ||
     fail 'warm watcher did not return its event cursor'
 first_epoch="$after"
 nonce_base="$(( $(date +%s%N) % 99999900 ))"
+
+# Optional MISS/HIT A/B on this same warm watcher (ZCL_REFLEX_BENCH_AB_PAIRS).
+# Candidate A is admitted once; then each pair is a distinct-nonce MISS
+# followed by the exact bytes of A (HIT unless the artifact cache is off).
+# Two trailing edits flush the last pair's cycle and proof-worker traces.
+AB_PAIRS="${ZCL_REFLEX_BENCH_AB_PAIRS:-0}"
+AB_OUTPUT="${ZCL_REFLEX_BENCH_AB_OUTPUT:-$ROOT/build/dev-loop/reflex-hit-cost.json}"
+[[ "$AB_PAIRS" =~ ^[0-9]+$ && "$AB_PAIRS" -le 200 ]] ||
+    fail 'AB_PAIRS must be 0..200'
+ab_edit()
+{
+    local nonce="$1" kind="$2" pair="$3" staged start_us end_us result
+    staged="$(mktemp "$ROOT/engine/services/src/.reflex-ab.XXXXXX")"
+    stage_candidate "$nonce" "$staged"
+    chmod --reference="$SOURCE" "$staged"
+    start_us="$("$CLOCK_BIN" "$staged" "$SOURCE")"
+    result="$($BIN dev drive --input="{\"after_epoch\":$after,\"wait_for_edit\":true,\"timeout_ms\":5000}")"
+    end_us="$("$CLOCK_BIN")"
+    jq -e '.ok == true and .data.event == "STORY_GREEN" and
+           .data.candidate_bytes_executed == true and
+           .data.loaded_mapping_root == .data.candidate_module_root' \
+        <<<"$result" >/dev/null || fail "A/B $kind $pair did not return STORY_GREEN"
+    after="$(jq -er '.data.epoch' <<<"$result")"
+    jq -c --arg kind "$kind" --argjson pair "$pair" \
+        --argjson start_us "$start_us" --argjson end_us "$end_us" \
+        '{kind:$kind,pair:$pair,edit_epoch:.data.edit_epoch,
+          start_monotonic_us:$start_us,end_monotonic_us:$end_us,
+          drive_wait_us:.data.drive_wait_us}' <<<"$result" >>"$samples"
+}
+if [[ "$AB_PAIRS" -gt 0 ]]; then
+    ab_a="$(printf '%08d' $(((nonce_base + 1) % 100000000)))"
+    ab_edit "$ab_a" warmup 0
+    ab_edit "$(printf '%08d' $(((nonce_base + 2) % 100000000)))" warmup 0
+    for ((i = 1; i <= AB_PAIRS; i++)); do
+        ab_edit "$(printf '%08d' $(((nonce_base + 2 + i) % 100000000)))" miss "$i"
+        ab_edit "$ab_a" hit "$i"
+    done
+    ab_edit "$(printf '%08d' $(((nonce_base + AB_PAIRS + 3) % 100000000)))" trailer 0
+    ab_edit "$ab_a" trailer 0
+    "$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id}" >/dev/null
+    watcher_id=0
+    cp -p "$backup" "$SOURCE"
+    cursor="$first_epoch"
+    while [[ "$cursor" -lt "$after" ]]; do
+        result="$($BIN dev loop wait --input="{\"after_epoch\":$cursor,\"timeout_ms\":100}")"
+        jq -e '.ok == true' <<<"$result" >/dev/null ||
+            fail "sealed event $((cursor + 1)) was unavailable"
+        cursor="$(jq -r '.data.epoch' <<<"$result")"
+        jq -c '.data' <<<"$result" >>"$events"
+    done
+    mkdir -p "$(dirname "$AB_OUTPUT")"
+    jq -n -f "$ROOT/tools/dev/fixtures/reflex_reactor/hit_cost.jq" \
+        --slurpfile samples "$samples" --slurpfile events "$events" \
+        --arg source_tu 'contexts/wallet/services/src/vault_intent_decision_service.c' \
+        --arg artifact_cache "${ZCL_DEV_ARTIFACT_CACHE:-default}" \
+        --argjson pairs "$AB_PAIRS" >"$AB_OUTPUT"
+    jq -e --argjson pairs "$AB_PAIRS" '
+      (.samples|map(select(.kind=="miss" or .kind=="hit"))|length)==2*$pairs and
+      (.samples|all(.candidate_bytes_executed==true and
+        .loaded_mapping_root==.candidate_module_root))' "$AB_OUTPUT" >/dev/null ||
+        fail 'A/B receipt lost a sample or an executed-bytes binding'
+    jq -r --arg output "$AB_OUTPUT" '
+      "reflex-hit-cost: miss_wall_p50=\(.summary.miss.wall_us.p50_us)us hit_wall_p50=\(.summary.hit.wall_us.p50_us)us receipt=\($output)"' "$AB_OUTPUT"
+    exit 0
+fi
 clock_ticks="$(getconf CLK_TCK)"
 [[ "$clock_ticks" =~ ^[1-9][0-9]*$ ]] || fail 'CLK_TCK unavailable'
 cpu_start_ticks="$(proc_cpu_ticks "$watcher_id")"

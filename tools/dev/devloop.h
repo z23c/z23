@@ -294,6 +294,17 @@ struct zcl_devloop_hotswap_build_receipt {
     int64_t link_us;
     int64_t publish_us;
     int64_t total_us;
+    /* Stage costs of one resident action, monotonic microseconds; zero when
+     * the stage was not reached. key_us runs from the build start through
+     * the artifact cache key (plan, generated inputs, dependency hashing);
+     * lookup_us covers the per-key lock, byte verification and worktree
+     * materialization of a verified cached module. */
+    int64_t inputs_us;
+    int64_t dependency_hash_us;
+    int64_t key_us;
+    int64_t lookup_us;
+    int64_t verify_us;
+    int64_t materialize_us;
     bool plan_cache_hit;
     bool artifact_cache_hit;
     uint32_t dependency_count;

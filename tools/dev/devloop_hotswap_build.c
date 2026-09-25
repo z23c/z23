@@ -993,19 +993,25 @@ static bool hs_cache_lookup(const char *root, const char *safe,
                             struct zcl_devloop_hotswap_build_receipt *receipt)
 {
     char expected[65], actual[65], object_sha256[65];
+    int64_t verify_started = platform_time_monotonic_us();
     if (!hs_regular(cache_hash, NULL) || !hs_regular(cache_so, NULL) ||
         !hs_regular(cache_obj, NULL) ||
         !hs_read_hash(cache_hash, expected) ||
         !hs_sha256_file(cache_so, actual) || strcmp(expected, actual) != 0 ||
         !hs_sha256_file(cache_obj, object_sha256))
         return false;
+    int64_t materialize_started = platform_time_monotonic_us();
+    receipt->verify_us = materialize_started - verify_started;
     (void)snprintf(receipt->candidate_object_sha256,
                    sizeof(receipt->candidate_object_sha256), "%s",
                    object_sha256);
     (void)snprintf(receipt->artifact_sha256,
                    sizeof(receipt->artifact_sha256), "%s", actual);
-    return hs_publish_artifact_path(root, safe, cache_so, actual,
-                                    receipt->artifact_path);
+    bool published = hs_publish_artifact_path(root, safe, cache_so, actual,
+                                              receipt->artifact_path);
+    receipt->materialize_us =
+        platform_time_monotonic_us() - materialize_started;
+    return published;
 }
 
 static bool hs_cache_publish(const char *cache_obj, const char *cache_so,
@@ -2216,17 +2222,25 @@ static bool hs_hotfork_build(
         goto fail;
     }
     size_t before_n = 0, after_n = 0;
+    int64_t dependency_started = platform_time_monotonic_us();
+    receipt->inputs_us = dependency_started - started;
     bool have_baseline = hs_depfile_read(root, cached_dep, before, &before_n,
                                          true);
+    receipt->dependency_hash_us =
+        platform_time_monotonic_us() - dependency_started;
     if (have_baseline &&
         hs_cache_key(&plan, root, key_owner, before, before_n,
                      receipt->artifact_cache_key) &&
         hs_cache_root_for("hotfork-v1", cache_root)) {
+        int64_t lookup_started = platform_time_monotonic_us();
+        receipt->key_us = lookup_started - started;
         cache_fd = hs_cache_lock(cache_root, receipt->artifact_cache_key,
                                  cache_obj, cache_so, cache_hash);
-        if (cache_fd >= 0 &&
+        bool cache_hit = cache_fd >= 0 &&
             hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
-                            receipt)) {
+                            receipt);
+        receipt->lookup_us = platform_time_monotonic_us() - lookup_started;
+        if (cache_hit) {
             receipt->artifact_cache_hit = true;
             receipt->dependency_count = (uint32_t)before_n;
             (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu),
@@ -3148,6 +3162,39 @@ static bool hs_proof_handoff(
     return hs_proof_handoff_emit(out, &handoff);
 }
 
+/* Per-stage cost of the resident action, kept beside (not inside) the build
+ * receipt so a cache hit can be compared stage by stage with a miss. Only
+ * the compile event carries it; the story event repeats the same build and
+ * must stay inside the bounded event slot. */
+static void hs_emit_build_stages(
+    struct json_value *doc,
+    const struct zcl_devloop_hotswap_build_receipt *build,
+    const struct json_value *resident)
+{
+    if (!build || resident)
+        return;
+    struct json_value stages;
+    json_init(&stages);
+    json_set_object(&stages);
+    (void)json_push_kv_str(&stages, "schema", "zcl.hotswap_build_stages.v1");
+    (void)json_push_kv_int(&stages, "plan_load_us", build->plan_load_us);
+    (void)json_push_kv_int(&stages, "inputs_us", build->inputs_us);
+    (void)json_push_kv_int(&stages, "dependency_hash_us",
+                           build->dependency_hash_us);
+    (void)json_push_kv_int(&stages, "key_us", build->key_us);
+    (void)json_push_kv_int(&stages, "lookup_us", build->lookup_us);
+    (void)json_push_kv_int(&stages, "verify_us", build->verify_us);
+    (void)json_push_kv_int(&stages, "materialize_us", build->materialize_us);
+    (void)json_push_kv_int(&stages, "compile_us", build->compile_us);
+    (void)json_push_kv_int(&stages, "link_us", build->link_us);
+    (void)json_push_kv_int(&stages, "publish_us", build->publish_us);
+    (void)json_push_kv_int(&stages, "build_total_us", build->total_us);
+    (void)json_push_kv_bool(&stages, "artifact_cache_hit",
+                            build->artifact_cache_hit);
+    (void)json_push_kv(doc, "build_stages", &stages);
+    json_free(&stages);
+}
+
 static bool hs_emit_event(const char *root, const char *source,
                           size_t changed_path_count,
                           const char *status, const char *phase,
@@ -3204,6 +3251,7 @@ static bool hs_emit_event(const char *root, const char *source,
     (void)json_push_kv_int(&doc, "sqlite_operations", 0);
     (void)json_push_kv_int(&doc, "full_tree_scans", 0);
     (void)json_push_kv_str(&doc, "source_tu", source);
+    hs_emit_build_stages(&doc, build, resident);
     if (why && why[0])
         (void)json_push_kv_str(&doc, "failure_capsule", why);
     if (process && process->output_len) {

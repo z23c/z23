@@ -37,9 +37,7 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <sys/file.h>
-#if defined(__APPLE__)
 #include <sys/resource.h>
-#endif
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -202,6 +200,50 @@ enum watch_proof_worker_kind {
     WATCH_PROOF_WORKER_COMMIT,
 };
 
+/* CPU accounting for one reflex cycle: the watcher itself, children it
+ * reaped (compiler, linker, story fork, proof worker), and CFS throttling of
+ * its cgroup and ancestors (Linux; zero elsewhere). */
+struct watch_cpu_sample {
+    int64_t self_user_us;
+    int64_t self_sys_us;
+    int64_t children_user_us;
+    int64_t children_sys_us;
+    int64_t throttled_us;
+    int64_t throttled_periods;
+};
+
+/* Monotonic stage marks of one reflex cycle, from the first relevant source
+ * event the watcher reads to its return to the idle wait. The cycle is
+ * reported on the next IMPACT_READY because its tail (journal flush, proof
+ * scheduling) runs after the story reply is already visible. */
+struct watch_cycle_trace {
+    char edit_epoch[65];
+    int64_t idle_wait_us;
+    int64_t fs_event_us;
+    int64_t impact_ready_us;
+    int64_t reflex_return_us;
+    int64_t stream_flushed_us;
+    int64_t proof_scheduled_us;
+    int64_t cycle_end_us;
+    struct watch_cpu_sample start;
+    struct watch_cpu_sample end;
+    uint32_t proof_workers_spawned;
+    bool active;
+    bool complete;
+};
+
+/* One exited downstream proof worker, with its own rusage from wait4. */
+struct watch_proof_record {
+    char edit_epoch[65];
+    int64_t spawned_us;
+    int64_t cancel_us;
+    int64_t reaped_us;
+    int64_t user_us;
+    int64_t sys_us;
+    int exit_code;
+    int signal;
+};
+
 struct watch_context {
     int fd;
     int singleton_lock_fd;
@@ -248,6 +290,14 @@ struct watch_context {
     size_t proof_pending_count;
     enum zcl_devloop_publish_mode proof_pending_mode;
     bool proof_pending_story;
+    char proof_worker_epoch[65];
+    int64_t proof_worker_spawned_us;
+    int64_t proof_worker_cancel_us;
+    struct watch_proof_record proof_reaped[4];
+    size_t proof_reaped_count;
+    struct watch_cycle_trace trace;
+    struct watch_cycle_trace trace_prior;
+    int64_t trace_next_fs_event_us;
     /* This iteration's exact-commit verdict, established at the reactor
      * loop head and read (never recomputed) by the cancel poll. */
     bool commit_preempts;
@@ -263,6 +313,247 @@ struct watch_context {
 };
 
 static volatile sig_atomic_t g_watch_stop;
+
+static int64_t watch_timeval_us(struct timeval tv)
+{
+    return (int64_t)tv.tv_sec * 1000000 + (int64_t)tv.tv_usec;
+}
+
+#if defined(__linux__)
+#define WATCH_CGROUP_LEVELS 8
+
+/* cgroup v2 reports CFS throttling in the cgroup whose cpu.max bound it, so
+ * sum own and ancestor cpu.stat. Resolved once; forked workers inherit. */
+static size_t watch_cgroup_stat_paths(char paths[][PATH_MAX], size_t cap)
+{
+    char line[PATH_MAX];
+    FILE *f = fopen("/proc/self/cgroup", "re");
+    bool found = false;
+    while (f && !found && fgets(line, sizeof(line), f))
+        found = strncmp(line, "0::/", 4) == 0;
+    if (f)
+        fclose(f);
+    if (!found)
+        return 0;
+    line[strcspn(line, "\n")] = 0;
+    char *rel = line + 3;
+    size_t count = 0;
+    while (count < cap && strlen(rel) > 1) {
+        int n = snprintf(paths[count], PATH_MAX, "/sys/fs/cgroup%s/cpu.stat",
+                         rel);
+        count += n > 0 && n < PATH_MAX;
+        *strrchr(rel, '/') = 0;
+    }
+    return count;
+}
+
+static int64_t watch_cpu_stat_field(const char *text, const char *key)
+{
+    const char *at = strstr(text, key);
+    long long value = 0;
+    return at && sscanf(at + strlen(key), "%lld", &value) == 1
+        ? (int64_t)value : 0;
+}
+
+static void watch_cgroup_throttle(struct watch_cpu_sample *sample)
+{
+    static char paths[WATCH_CGROUP_LEVELS][PATH_MAX];
+    static size_t count;
+    static bool resolved;
+    if (!resolved) {
+        count = watch_cgroup_stat_paths(paths, WATCH_CGROUP_LEVELS);
+        resolved = true;
+    }
+    for (size_t i = 0; i < count; i++) {
+        char text[1024];
+        FILE *f = fopen(paths[i], "re");
+        size_t n = f ? fread(text, 1, sizeof(text) - 1, f) : 0;
+        if (f)
+            fclose(f);
+        text[n] = 0;
+        sample->throttled_us += watch_cpu_stat_field(text, "\nthrottled_usec ");
+        sample->throttled_periods +=
+            watch_cpu_stat_field(text, "\nnr_throttled ");
+    }
+}
+#endif
+
+static void watch_cpu_sample_take(struct watch_cpu_sample *sample)
+{
+    memset(sample, 0, sizeof(*sample));
+    struct rusage self, children;
+    if (getrusage(RUSAGE_SELF, &self) == 0) {
+        sample->self_user_us = watch_timeval_us(self.ru_utime);
+        sample->self_sys_us = watch_timeval_us(self.ru_stime);
+    }
+    if (getrusage(RUSAGE_CHILDREN, &children) == 0) {
+        sample->children_user_us = watch_timeval_us(children.ru_utime);
+        sample->children_sys_us = watch_timeval_us(children.ru_stime);
+    }
+#if defined(__linux__)
+    watch_cgroup_throttle(sample);
+#endif
+}
+
+static void watch_trace_start(struct watch_context *ctx, int64_t fs_event_us)
+{
+    int64_t idle_wait_us = ctx->trace.idle_wait_us;
+    memset(&ctx->trace, 0, sizeof(ctx->trace));
+    ctx->trace.idle_wait_us = idle_wait_us;
+    ctx->trace.fs_event_us = fs_event_us;
+    ctx->trace.active = true;
+    watch_cpu_sample_take(&ctx->trace.start);
+}
+
+/* The first relevant mutation after a reset opens a cycle trace; one that
+ * arrives while a cycle is still running opens the next trace at its end. */
+static void watch_trace_event(struct watch_context *ctx, int64_t event_us)
+{
+    if (!ctx->trace.active)
+        watch_trace_start(ctx, event_us);
+    else if (ctx->trace_next_fs_event_us == 0)
+        ctx->trace_next_fs_event_us = event_us;
+}
+
+static void watch_trace_idle(struct watch_context *ctx)
+{
+    if (!ctx->trace.active && ctx->trace.idle_wait_us == 0)
+        ctx->trace.idle_wait_us = platform_time_monotonic_us();
+}
+
+static void watch_trace_mark(int64_t *mark)
+{
+    *mark = platform_time_monotonic_us();
+}
+
+static void watch_trace_end(struct watch_context *ctx)
+{
+    if (!ctx->trace.active)
+        return;
+    ctx->trace.cycle_end_us = platform_time_monotonic_us();
+    watch_cpu_sample_take(&ctx->trace.end);
+    (void)snprintf(ctx->trace.edit_epoch, sizeof(ctx->trace.edit_epoch),
+                   "%s", zcl_devloop_event_edit_epoch());
+    ctx->trace.active = false;
+    ctx->trace.complete = true;
+    ctx->trace_prior = ctx->trace;
+    int64_t next_event_us = ctx->trace_next_fs_event_us;
+    memset(&ctx->trace, 0, sizeof(ctx->trace));
+    ctx->trace_next_fs_event_us = 0;
+    if (next_event_us > 0)
+        watch_trace_start(ctx, next_event_us);
+}
+
+static void watch_proof_record_exit(struct watch_context *ctx, int status,
+                                    const struct rusage *usage)
+{
+    if (ctx->proof_worker_kind != WATCH_PROOF_WORKER_EDIT)
+        return;
+    size_t cap = sizeof(ctx->proof_reaped) / sizeof(ctx->proof_reaped[0]);
+    if (ctx->proof_reaped_count == cap) {
+        memmove(&ctx->proof_reaped[0], &ctx->proof_reaped[1],
+                (cap - 1) * sizeof(ctx->proof_reaped[0]));
+        ctx->proof_reaped_count--;
+    }
+    struct watch_proof_record *record =
+        &ctx->proof_reaped[ctx->proof_reaped_count++];
+    memset(record, 0, sizeof(*record));
+    (void)snprintf(record->edit_epoch, sizeof(record->edit_epoch), "%s",
+                   ctx->proof_worker_epoch);
+    record->spawned_us = ctx->proof_worker_spawned_us;
+    record->cancel_us = ctx->proof_worker_cancel_us;
+    record->reaped_us = platform_time_monotonic_us();
+    record->user_us = usage ? watch_timeval_us(usage->ru_utime) : -1;
+    record->sys_us = usage ? watch_timeval_us(usage->ru_stime) : -1;
+    record->exit_code = usage && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    record->signal = usage && WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+}
+
+static bool watch_trace_push_cpu(struct json_value *doc,
+                                 const struct watch_cycle_trace *t)
+{
+    return json_push_kv_int(doc, "watcher_user_us",
+                            t->end.self_user_us - t->start.self_user_us) &&
+        json_push_kv_int(doc, "watcher_sys_us",
+                         t->end.self_sys_us - t->start.self_sys_us) &&
+        json_push_kv_int(doc, "children_user_us",
+                         t->end.children_user_us - t->start.children_user_us) &&
+        json_push_kv_int(doc, "children_sys_us",
+                         t->end.children_sys_us - t->start.children_sys_us) &&
+        json_push_kv_int(doc, "cgroup_throttled_us",
+                         t->end.throttled_us - t->start.throttled_us) &&
+        json_push_kv_int(doc, "cgroup_throttled_periods",
+                         t->end.throttled_periods -
+                             t->start.throttled_periods);
+}
+
+static bool watch_trace_push_cycle(struct json_value *doc,
+                                   const struct watch_cycle_trace *t)
+{
+    struct json_value cycle;
+    json_init(&cycle);
+    json_set_object(&cycle);
+    bool ok = json_push_kv_str(&cycle, "edit_epoch", t->edit_epoch) &&
+        json_push_kv_int(&cycle, "idle_wait_us", t->idle_wait_us) &&
+        json_push_kv_int(&cycle, "fs_event_us", t->fs_event_us) &&
+        json_push_kv_int(&cycle, "impact_ready_us", t->impact_ready_us) &&
+        json_push_kv_int(&cycle, "reflex_return_us", t->reflex_return_us) &&
+        json_push_kv_int(&cycle, "stream_flushed_us", t->stream_flushed_us) &&
+        json_push_kv_int(&cycle, "proof_scheduled_us",
+                         t->proof_scheduled_us) &&
+        json_push_kv_int(&cycle, "cycle_end_us", t->cycle_end_us) &&
+        json_push_kv_int(&cycle, "proof_workers_spawned",
+                         (int64_t)t->proof_workers_spawned) &&
+        watch_trace_push_cpu(&cycle, t) &&
+        json_push_kv(doc, "prior_cycle", &cycle);
+    json_free(&cycle);
+    return ok;
+}
+
+static bool watch_trace_push_proofs(struct json_value *doc,
+                                    const struct watch_context *ctx)
+{
+    struct json_value list;
+    json_init(&list);
+    json_set_array(&list);
+    bool ok = true;
+    for (size_t i = 0; ok && i < ctx->proof_reaped_count; i++) {
+        const struct watch_proof_record *r = &ctx->proof_reaped[i];
+        struct json_value item;
+        json_init(&item);
+        json_set_object(&item);
+        ok = json_push_kv_str(&item, "edit_epoch", r->edit_epoch) &&
+            json_push_kv_int(&item, "spawned_us", r->spawned_us) &&
+            json_push_kv_int(&item, "cancel_us", r->cancel_us) &&
+            json_push_kv_int(&item, "reaped_us", r->reaped_us) &&
+            json_push_kv_int(&item, "user_us", r->user_us) &&
+            json_push_kv_int(&item, "sys_us", r->sys_us) &&
+            json_push_kv_int(&item, "exit_code", r->exit_code) &&
+            json_push_kv_int(&item, "signal", r->signal) &&
+            json_push_back(&list, &item);
+        json_free(&item);
+    }
+    ok = ok && json_push_kv(doc, "proof_workers_reaped", &list);
+    json_free(&list);
+    return ok;
+}
+
+/* Attach the last completed cycle and any reaped downstream proof workers
+ * to the next IMPACT_READY exactly once. */
+static bool watch_trace_emit(struct watch_context *ctx,
+                             struct json_value *doc, bool ok)
+{
+    if (!ok)
+        return false;
+    if (ctx->trace_prior.complete &&
+        !watch_trace_push_cycle(doc, &ctx->trace_prior))
+        return false;
+    if (ctx->proof_reaped_count > 0 && !watch_trace_push_proofs(doc, ctx))
+        return false;
+    ctx->trace_prior.complete = false;
+    ctx->proof_reaped_count = 0;
+    return true;
+}
 
 /* A public service contract header is intentionally outside the live island:
  * changing ABI/schema/wire/KAT bytes invalidates the resident frozen contract.
@@ -379,8 +670,12 @@ static void watch_proof_reap(struct watch_context *ctx)
     if (!ctx || ctx->proof_worker_pid <= 1)
         return;
     int status = 0;
-    pid_t got = waitpid(ctx->proof_worker_pid, &status, WNOHANG);
+    struct rusage usage;
+    memset(&usage, 0, sizeof(usage));
+    pid_t got = wait4(ctx->proof_worker_pid, &status, WNOHANG, &usage);
     if (got == ctx->proof_worker_pid || (got < 0 && errno == ECHILD)) {
+        watch_proof_record_exit(ctx, status,
+                                got == ctx->proof_worker_pid ? &usage : NULL);
         ctx->proof_worker_pid = 0;
         ctx->proof_worker_kind = WATCH_PROOF_WORKER_NONE;
     }
@@ -401,6 +696,7 @@ static void watch_proof_cancel(struct watch_context *ctx)
      * through devloop_process. Do not wait here: this function also runs on
      * the first byte of a newer edit, whose reflex must start immediately. */
     (void)kill(ctx->proof_worker_pid, SIGTERM);
+    ctx->proof_worker_cancel_us = platform_time_monotonic_us();
 }
 
 static void watch_proof_stop(struct watch_context *ctx)
@@ -1249,6 +1545,11 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
     (void)close(execution);
     ctx->proof_worker_pid = child;
     ctx->proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
+    ctx->proof_worker_spawned_us = platform_time_monotonic_us();
+    ctx->proof_worker_cancel_us = 0;
+    (void)snprintf(ctx->proof_worker_epoch, sizeof(ctx->proof_worker_epoch),
+                   "%s", zcl_devloop_event_edit_epoch());
+    ctx->trace.proof_workers_spawned++;
     ctx->proof_pending_count = 0;
     ctx->proof_pending_story = false;
     return true;
@@ -1850,6 +2151,7 @@ static bool watch_emit_impact_ready(struct watch_context *ctx,
         json_push_kv_int(&doc, "network_operations", 0) &&
         json_push_kv_int(&doc, "sqlite_operations", 0) &&
         json_push_kv_int(&doc, "full_tree_scans", 0);
+    ok = watch_trace_emit(ctx, &doc, ok);
     for (size_t i = 0; ok && i < epoch->blob_count; i++) {
         const struct watch_edit_blob *blob = &epoch->blobs[i];
         char previous_hex[65] = {0}, new_hex[65] = {0};
@@ -2118,6 +2420,7 @@ static void add_changed(struct watch_context *ctx, const char *path)
          * watcher remains the sole producer of the replacement epoch. */
         watch_proof_cancel(ctx);
         ctx->first_mutation_us = platform_time_monotonic_us();
+        watch_trace_event(ctx, ctx->first_mutation_us);
     }
     snprintf(ctx->changed[ctx->changed_count],
              sizeof(ctx->changed[ctx->changed_count]), "%s", path);
@@ -2738,6 +3041,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             ctx.proof_worker_pid > 1)
             watch_idle_touch(&ctx);
         if (ctx.changed_count == 0 && !ctx.prepared_epoch_ready) {
+            watch_trace_idle(&ctx);
             int prc = watch_wait_for_events(&ctx, stop ? 100 : 1000);
             if (g_watch_stop) break;
             if (prc < 0) {
@@ -2884,6 +3188,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             if (!impact_already_emitted &&
                 !watch_emit_impact_ready(&ctx, &edit_epoch))
                 break;
+            watch_trace_mark(&ctx.trace.impact_ready_us);
         } else {
             (void)zcl_devloop_event_edit_epoch_set("");
             fprintf(stderr,
@@ -2932,6 +3237,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             fast = zcl_devloop_restart_event(
                 ctx.root, proof_files, proof_count, publish_mode);
         }
+        watch_trace_mark(&ctx.trace.reflex_return_us);
         /* Candidate emitters seal through their already-visible terminal
          * reflex event. Retire the watcher's matching queue entries now so a
          * save during asynchronous proof has the full bounded queue. */
@@ -2939,6 +3245,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             g_watch_stop = 1;
             fast = ZCL_DEVLOOP_RESTART_EVENT_FINAL;
         }
+        watch_trace_mark(&ctx.trace.stream_flushed_us);
         /* A green HOT_SHADOW story is already useful foreground knowledge.
          * Only after publishing it do we build/run the exact affected proof.
          * The ordinary restart lane reaches this same state after its focused
@@ -2968,6 +3275,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             }
             fast = ZCL_DEVLOOP_RESTART_EVENT_FINAL;
         }
+        watch_trace_mark(&ctx.trace.proof_scheduled_us);
         if (fast == 0) {
             /* APPLY authority is intentionally narrower than the generic
              * cycle: only one compiled-allowlist island may publish live.
@@ -2982,6 +3290,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             break;
         bool superseded = ctx.changed_count > 0;
         zcl_devloop_process_cancel_clear();
+        watch_trace_end(&ctx);
         if (superseded) {
             if (!watch_emit_superseded(&ctx) || !watch_stream_flush(&ctx)) {
                 fprintf(stderr,
