@@ -14189,6 +14189,8 @@ LINT_GATES := \
 # with a completely empty failure log.
 # The umbrella also runs capability-closure and cookbook checks over the DEV
 # object graph, and several gates inspect the confined dev package verifier.
+# The HOT_FORK story gate also reads the frozen fast flags plan directly;
+# build it here before the parallel lint driver bypasses check-* Make recipes.
 # Name those artifacts here so a parallel cold lint never depends on ambient
 # output from an earlier development build. Keep one set for all three
 # umbrellas: run_lint.sh dispatches the same gate set in cold, cached, and
@@ -14199,7 +14201,7 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL) \
 	$(BIN_DIR)/z23_bounded_run $(BIN_DIR)/agent_sha3 $(RETRIEVAL_EVAL_BIN) \
 	$(BIN_DIR)/z23-fleet-observe \
-	$(TOR_PROVENANCE_BIN) $(GIT_HOOK_BIN)
+	$(TOR_PROVENANCE_BIN) $(GIT_HOOK_BIN) $(HOTSWAP_ACTION_PLAN)
 # tor-provenance-ready runs BEFORE the lint driver ever forks a gate script:
 # run_lint.sh (both the parallel dispatcher above and the serial LINT_GATES
 # chain below) executes gate SCRIPTS directly, not Make recipes, so a

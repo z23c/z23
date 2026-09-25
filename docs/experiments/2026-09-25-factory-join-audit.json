@@ -1,0 +1,110 @@
+{
+  "schema": "z23.factory_join_audit.v1",
+  "observed_utc_date": "2026-09-25",
+  "scope": "local development host ledgers and two independently observed origin/main commits",
+  "sources": {
+    "queue_outcomes": "<platform_state_root>/queue/outcomes.jsonl",
+    "land_outcomes": "<platform_state_root>/land/outcomes.jsonl",
+    "proof_logs": [
+      "build/dev-loop/reflex-proof-step.log",
+      "build/dev-loop/reflex-proof-final.log",
+      "build/dev-loop/broker-variant-proof.log",
+      "build/dev-loop/broker-variant-proof-rebase.log"
+    ],
+    "accepted_identity_check": "git merge-base --is-ancestor SHA origin/main"
+  },
+  "join_coverage": {
+    "queue_rows": 24,
+    "queue_rows_with_positive_tokens_used": 8,
+    "queue_rows_with_model": 0,
+    "queue_rows_with_task_root": 0,
+    "queue_rows_with_candidate_root": 0,
+    "land_rows": 326,
+    "land_rows_with_task_root": 0,
+    "land_rows_with_candidate_root": 0,
+    "land_rows_with_remote_sha_field": 0,
+    "land_rows_by_state": {
+      "landed": 99,
+      "failed": 110,
+      "conflict": 58,
+      "cancelled": 59
+    }
+  },
+  "accepted_changes": [
+    {
+      "accepted_remote_sha": "613962f320a1039a11bf4e7bd41e3cc1f62a438a",
+      "task_root": null,
+      "candidate_root": null,
+      "model_id": null,
+      "model_effort": null,
+      "unique_tokens": null,
+      "proof_attempts_observed": [
+        {
+          "remote_base": "1cfb123a5dcf656beea656023fd006ce2c7aa5fa",
+          "queue_us": 74398325,
+          "service_us": 421983014,
+          "receipt_reused": false
+        },
+        {
+          "remote_base": "f6d1fc7679ef96dc16f7211c8870aa3600bca420",
+          "queue_us": 64186544,
+          "service_us": 325680083,
+          "receipt_reused": false
+        }
+      ],
+      "gross_added_lines": {
+        "implementation_c23": 107,
+        "test_c23": 30,
+        "generated_inventory": 7,
+        "shell_test_glue": 129,
+        "documentation_and_raw_evidence": 2951,
+        "other": 2
+      },
+      "novel_retained_c23_lines": null,
+      "retained_at_14_days": null
+    },
+    {
+      "accepted_remote_sha": "57813cedc859a1d538d75d0f958d1344e78918ea",
+      "task_root": null,
+      "candidate_root": null,
+      "model_id": null,
+      "model_effort": null,
+      "unique_tokens": null,
+      "proof_attempts_observed": [
+        {
+          "remote_base": "613962f320a1039a11bf4e7bd41e3cc1f62a438a",
+          "queue_us": 110745794,
+          "service_us": 289729522,
+          "receipt_reused": false
+        },
+        {
+          "remote_base": "040810e34e222df26d0a8c5fc262f6446b3b047a",
+          "queue_us": 119415851,
+          "service_us": 264952789,
+          "receipt_reused": false
+        }
+      ],
+      "gross_added_lines": {
+        "implementation_c23": 0,
+        "test_c23": 0,
+        "generated_inventory": 0,
+        "shell_test_glue": 18,
+        "documentation_and_raw_evidence": 40,
+        "other": 0
+      },
+      "novel_retained_c23_lines": null,
+      "retained_at_14_days": null
+    }
+  ],
+  "station_capacity_per_day": {
+    "token": null,
+    "agent": null,
+    "compile": null,
+    "proof": null,
+    "review": null,
+    "landing": null,
+    "accepted_novel_c23_output": null
+  },
+  "largest_observed_stage_for_these_changes": "fresh proof service",
+  "interpretation": "Four observed proof attempts all ran fresh after changing remote bases. These two changes do not establish fleet station capacities, proof invalidation fraction, unique token use, retained novel C23, or a 100k/day or 300k/day requirement. Null means unmeasured, never zero."
+}
