@@ -35,6 +35,7 @@ enum selection_units {
     SELECTION_UNITS_CLANG_ORACLE,
     SELECTION_UNITS_FILES,   /* per-file: filter paths, unit premise = own bytes */
     SELECTION_UNITS_TUS,     /* per-TU: filter paths, unit premise = closure */
+    SELECTION_UNITS_CATALOG_ROWS, /* per row: filter names the catalog */
 };
 
 struct selection_gate_row {
@@ -176,6 +177,7 @@ static int spec_build(struct gate_spec *sp, const struct selection_gate_row *r)
         .baselines = (const char *const *)sp->baselines.v,
         .n_baselines = sp->baselines.n,
         .unit_self = r->units == SELECTION_UNITS_FILES,
+        .catalog = r->units == SELECTION_UNITS_CATALOG_ROWS ? r->filter : NULL,
     };
     return rc;
 }
@@ -340,12 +342,31 @@ static bool gate_wanted(const struct select_opts *o, const char *name)
     return false;
 }
 
+/* The candidate catalog's literal row list. An absent catalog or a list
+ * that is not literal is a failure, never an empty unit set. */
+static int units_catalog(struct premise_session *s, const char *catalog,
+                         struct strv *out, FILE *err)
+{
+    struct premise_catalog c;
+    int rc = premise_catalog_open(&s->cand, catalog, &c, err);
+    if (rc == 0 && !c.present) {
+        fprintf(err, "select: catalog %s is absent\n", catalog);
+        rc = 2;
+    }
+    for (size_t i = 0; rc == 0 && i < c.nids; i++)
+        rc = strv_add(out, c.ids[i], strlen(c.ids[i]));
+    premise_catalog_close(&c);
+    return rc;
+}
+
 static int gate_units(const struct select_opts *o, struct premise_session *s,
                       const struct selection_gate_row *r, struct strv *units,
                       FILE *err)
 {
     int rc = 0;
-    if (r->units == SELECTION_UNITS_NODE_C23_WINDOWS)
+    if (r->units == SELECTION_UNITS_CATALOG_ROWS)
+        rc = units_catalog(s, r->filter, units, err);
+    else if (r->units == SELECTION_UNITS_NODE_C23_WINDOWS)
         rc = units_node_c23(o->root, units, err);
     else if (r->units == SELECTION_UNITS_CLANG_ORACLE)
         rc = units_regex(&s->cand, k_clang_oracle, true, units, err);

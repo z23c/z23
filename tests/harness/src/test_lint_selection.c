@@ -742,11 +742,168 @@ static int test_lsel_gate_code_computed(void)
     return failures;
 }
 
+/* ── catalog-row units ─────────────────────────────────────────────────── */
+
+/* Rows one and two build from their own sources; row three links an
+ * archive whose Makefile rule compiles a source with a computed include. */
+static const char k_cat_makefile[] =
+    "LIBX := out/libx.a\n"
+    "$(LIBX): vendor/x.c\n"
+    "\tcc -c vendor/x.c -o $@\n"
+    "include cat.mk\n";
+
+static const char k_cat[] =
+    "# the catalog\n"
+    "SHARED_LIB := -lshared\n"
+    "ZCL_WINDOWS_ACCEPTANCE_TESTS := \\\n"
+    "\tone \\\n"
+    "\ttwo \\\n"
+    "\tthree\n"
+    "ZCL_WINDOWS_ACCEPTANCE_one_SOURCES := \\\n"
+    "\tsrc/one.c \\\n"
+    "\tsrc/common.c\n"
+    "ZCL_WINDOWS_ACCEPTANCE_one_LIBS := $(SHARED_LIB)\n"
+    "ZCL_WINDOWS_ACCEPTANCE_two_SOURCES := src/two.c\n"
+    "ZCL_WINDOWS_ACCEPTANCE_two_FLAGS := -DTWO\n"
+    "ZCL_WINDOWS_ACCEPTANCE_three_SOURCES := src/three.c\n"
+    "ZCL_WINDOWS_ACCEPTANCE_three_LIBDEPS := $(LIBX)\n";
+
+static const char *const k_cat_files[] = { "gate.sh", "Makefile" };
+static const struct premise_gate k_cat_gate = {
+    .name = "fixture-catalog-gate",
+    .gate_files = k_cat_files, .n_gate_files = 2,
+    .pin = "toolchain.pin", .catalog = "cat.mk",
+};
+
+static bool lsel_cat_fixture(struct lsel_fx *fx)
+{
+    return lsel_fixture(fx) && lsel_write(fx, "Makefile", k_cat_makefile)
+           && lsel_write(fx, "cat.mk", k_cat)
+           && lsel_write(fx, "inc/one.h", "int one;\n")
+           && lsel_write(fx, "inc/two.h", "int two;\n")
+           && lsel_write(fx, "src/one.c", "#include \"one.h\"\n")
+           && lsel_write(fx, "src/common.c", "int common;\n")
+           && lsel_write(fx, "src/two.c", "#include \"two.h\"\n")
+           && lsel_write(fx, "src/three.c", "int three;\n")
+           && lsel_write(fx, "vendor/x.c", "#define H <stdio.h>\n#include H\n")
+           && lsel_commit_all(fx, "catalog");
+}
+
+/* Replace rel with text (NULL: leave the tree), evaluate the named rows,
+ * and require each to carry its reason. */
+static int lsel_cat_eval(struct lsel_fx *fx, const char *rel, const char *text,
+                         const char *const *ids, const char *const *want,
+                         size_t n)
+{
+    struct premise_base_opts opts = {
+        .objects = fx->repo, .remote = fx->repo, .ref = "refs/heads/main",
+        .base = fx->base, .scratch = fx->scratch,
+    };
+    struct premise_unit u[4];
+    struct premise_session s;
+    memset(u, 0, sizeof(u));
+    for (size_t i = 0; i < n; i++)
+        u[i].unit = ids[i];
+    int rc = !rel || lsel_write(fx, rel, text) ? 0 : 2;
+    if (rc == 0)
+        rc = premise_session_open(&s, fx->repo, &opts, true, stderr);
+    if (rc == 0) {
+        rc = premise_gate_eval(&s, &k_cat_gate, u, n, stderr);
+        premise_session_close(&s);
+    }
+    for (size_t i = 0; rc == 0 && i < n; i++)
+        if (strcmp(u[i].reason, want[i]) != 0
+            || u[i].would_inherit != (strcmp(want[i], "premise-equal") == 0)) {
+            printf("after %s: row %s want %s, got %s\n", rel ? rel : "-",
+                   ids[i], want[i], u[i].reason);
+            rc = 1;
+        }
+    return rc;
+}
+
+static int lsel_cat_two(struct lsel_fx *fx, const char *rel, const char *text,
+                        const char *want_one, const char *want_two)
+{
+    const char *ids[] = { "one", "two" };
+    const char *want[] = { want_one, want_two };
+    return lsel_cat_eval(fx, rel, text, ids, want, 2);
+}
+
+static int test_lsel_catalog_rows(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: a catalog row reruns on its own sources, "
+              "closure and text; residue and gate code rerun every row") {
+        struct lsel_fx fx;
+        const char *eq = "premise-equal";
+        const char *residue = "catalog-residue:cat.mk";
+        char cat[sizeof(k_cat) + 128];
+        ASSERT(lsel_cat_fixture(&fx));
+        const char *ids3[] = { "one", "two", "three" };
+        const char *want3[] = { eq, eq, "computed-include" };
+        ASSERT_EQ(lsel_cat_eval(&fx, NULL, NULL, ids3, want3, 3), 0);
+        ASSERT_EQ(lsel_cat_two(&fx, "inc/two.h", "int two2;\n", eq,
+                               "closure-changed:inc/two.h"), 0);
+        ASSERT_EQ(lsel_cat_two(&fx, "inc/two.h", "int two;\n", eq, eq), 0);
+        ASSERT_EQ(lsel_cat_two(&fx, "src/common.c", "int common2;\n",
+                               "closure-changed:src/common.c", eq), 0);
+        ASSERT_EQ(lsel_cat_two(&fx, "src/common.c", "int common;\n", eq, eq), 0);
+        (void)snprintf(cat, sizeof(cat), "%s", k_cat);
+        memcpy(strstr(cat, "-DTWO"), "-DTWX", 5);
+        ASSERT_EQ(lsel_cat_two(&fx, "cat.mk", cat, eq, "catalog-row-changed"), 0);
+        (void)snprintf(cat, sizeof(cat), "%s", k_cat);
+        memcpy(strstr(cat, "-lshared"), "-lshaRED", 8);
+        ASSERT_EQ(lsel_cat_two(&fx, "cat.mk", cat, residue, residue), 0);
+        (void)snprintf(cat, sizeof(cat), "# the catalog, reworded\n%s",
+                       k_cat + strlen("# the catalog\n"));
+        ASSERT_EQ(lsel_cat_two(&fx, "cat.mk", cat, eq, eq), 0);
+        /* A new row reusing a tracked source: the others still inherit. */
+        const char *tail = strstr(k_cat, "\tthree\n");
+        (void)snprintf(cat, sizeof(cat), "%.*s\tthree \\\n\tfour\n%s"
+                       "ZCL_WINDOWS_ACCEPTANCE_four_SOURCES := src/two.c\n",
+                       (int)(tail - k_cat), k_cat, tail + strlen("\tthree\n"));
+        const char *ids4[] = { "one", "two", "four" };
+        const char *want4[] = { eq, eq, "unit-new" };
+        ASSERT_EQ(lsel_cat_eval(&fx, "cat.mk", cat, ids4, want4, 3), 0);
+        ASSERT_EQ(lsel_cat_two(&fx, "cat.mk", k_cat, eq, eq), 0);
+        char mk[sizeof(k_cat_makefile) + 32];
+        (void)snprintf(mk, sizeof(mk), "%sexport CPATH := inc\n",
+                       k_cat_makefile);
+        ASSERT_EQ(lsel_cat_two(&fx, "Makefile", mk, "gate-code:Makefile",
+                               "gate-code:Makefile"), 0);
+        test_rm_rf_recursive(fx.dir);
+    } TEST_END
+    return failures;
+}
+
+/* A row list that is not literal is refused, never read as no rows. */
+static int test_lsel_catalog_refusal(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: a computed catalog row list is refused") {
+        struct lsel_fx fx;
+        struct premise_catalog c;
+        struct premise_session s;
+        ASSERT(lsel_cat_fixture(&fx));
+        ASSERT(lsel_write(&fx, "cat.mk",
+                          "ZCL_WINDOWS_ACCEPTANCE_TESTS := $(shell ls src)\n"));
+        ASSERT_EQ(premise_session_open(&s, fx.repo, NULL, false, stderr), 0);
+        ASSERT_EQ(premise_catalog_open(&s.cand, "cat.mk", &c, stderr), 2);
+        premise_catalog_close(&c);
+        premise_session_close(&s);
+        test_rm_rf_recursive(fx.dir);
+    } TEST_END
+    return failures;
+}
+
+
 int test_lint_selection(void)
 {
     int failures = 0;
     failures += test_lsel_per_file_gate();
     failures += test_lsel_gate_code_computed();
+    failures += test_lsel_catalog_rows();
+    failures += test_lsel_catalog_refusal();
     failures += test_lsel_unchanged_inherits();
     failures += test_lsel_deep_header();
     failures += test_lsel_shadow_header();

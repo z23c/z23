@@ -1968,7 +1968,7 @@ Z23_FLAG("ZCL_REPRO_REFERENCE_BIN", "env_build", "-", "-",
 Z23_FLAG("ZCL_REQUIRE_BACKUP_VERIFIED", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/recovery_policy.c:106")
 Z23_FLAG("ZCL_REQUIRE_MINGW", "env_build", "0", "-",
-          "first use tools/lint/check_windows_acceptance.sh:367; documented at docs/DEFENSIVE_CODING.md:1018: | **check-windows-platform-seam** | RATCHET | Windows portability of the platform seam:...")
+          "first use tools/lint/check_windows_acceptance.sh:379; documented at docs/DEFENSIVE_CODING.md:1018: | **check-windows-platform-seam** | RATCHET | Windows portability of the platform seam:...")
 Z23_FLAG("ZCL_RESULT_DISCARD_SCAN_DIRS_FOR_TEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_source_patterns.c:408")
 Z23_FLAG("ZCL_RETIRED_PROTOCOL_ROOT", "env_runtime", "-", "-",
@@ -2525,13 +2525,13 @@ Z23_FLAG("ZCL_WAL_MAX_BYTES", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_WATCH_TEST_LOG", "env_build", "-", "-",
           "undocumented; first use tools/dev/watch-dev-lane.sh:1035")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",
-          "undocumented; first use tools/lint/check_windows_acceptance.sh:358")
+          "undocumented; first use tools/lint/check_windows_acceptance.sh:370")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_windows_acceptance_guard.c:474")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_SCRATCH", "env_build", "-", "-",
           "first use tools/lint/lintc/gate_windows_acceptance_guard_selftest.c:334; documented at docs/experiments/2026-09-03-muse-vs-glm-lint-gate.md:27: | /tmp, python, jq, perl | none used; fixtures under $HOME/.local/state/zclassic23/scra...")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_windows_acceptance.sh:522")
+          "undocumented; first use tools/lint/check_windows_acceptance.sh:537")
 Z23_FLAG("ZCL_WRS_DIR", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_wallet_recovery_safety.c:624")
 Z23_FLAG("ZCL_WRS_GO", "env_test", "-", "-",

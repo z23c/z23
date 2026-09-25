@@ -29,6 +29,8 @@ struct side {
     size_t nvals;
     uint8_t *baseline[SIDE_BASELINES];
     size_t baseline_len[SIDE_BASELINES];
+    struct premise_catalog cat;          /* catalog-row gates only */
+    uint8_t residue[PREMISE_HASH_BYTES];
 };
 
 static void put_str(struct sha3_256_ctx *h, const char *s)
@@ -103,10 +105,21 @@ static int side_make(struct side *s, const struct premise_gate *g, FILE *err)
     return 0;
 }
 
+/* A catalog-row gate's residue is gate-wide: every row carries it. */
+static int side_catalog(struct side *s, const struct premise_gate *g, FILE *err)
+{
+    if (!g->catalog)
+        return 0;
+    if (premise_catalog_open(s->t, g->catalog, &s->cat, err)
+        || premise_catalog_residue(&s->cat, s->residue))
+        return 2;
+    return 0;
+}
+
 static int side_load(struct side *s, const struct premise_gate *g, FILE *err)
 {
     if (g->n_baselines > SIDE_BASELINES || side_code(s, g, err)
-        || side_make(s, g, err))
+        || side_make(s, g, err) || side_catalog(s, g, err))
         return 2;
     for (size_t i = 0; i < g->n_baselines; i++)
         if (premise_tree_read(s->t, g->baselines[i], &s->baseline[i],
@@ -118,6 +131,8 @@ static int side_load(struct side *s, const struct premise_gate *g, FILE *err)
     sha3_256_write(&h, s->code, PREMISE_HASH_BYTES);
     sha3_256_write(&h, s->make, PREMISE_HASH_BYTES);
     sha3_256_write(&h, s->pin, PREMISE_HASH_BYTES);
+    if (g->catalog)
+        sha3_256_write(&h, s->residue, PREMISE_HASH_BYTES);
     sha3_256_finalize(&h, s->gate);
     return 0;
 }
@@ -127,6 +142,7 @@ static void side_free(struct side *s)
     premise_make_values_free(s->vals, s->nvals);
     for (size_t i = 0; i < SIDE_BASELINES; i++)
         free(s->baseline[i]);
+    premise_catalog_close(&s->cat);
 }
 
 /* The unit's rows: lines whose first whitespace-delimited token is unit. */
@@ -200,6 +216,7 @@ static int closure_root(struct side *s, const struct premise_tree *cand,
 struct unit_parts {
     uint8_t closure[PREMISE_HASH_BYTES];
     uint8_t rows[PREMISE_HASH_BYTES];
+    uint8_t row[PREMISE_HASH_BYTES];     /* catalog-row gates: own text */
     uint8_t root[PREMISE_HASH_BYTES];
 };
 
@@ -208,7 +225,10 @@ static int unit_parts(struct side *s, const struct premise_tree *cand,
                       const struct closure *c, struct unit_parts *p,
                       const char **first_diff, FILE *err)
 {
-    if (closure_root(s, cand, c, p->closure, first_diff, err))
+    bool computed = false;
+    if (closure_root(s, cand, c, p->closure, first_diff, err)
+        || (g->catalog
+            && premise_catalog_row_root(&s->cat, unit, p->row, &computed)))
         return 2;
     rows_root(s, g, unit, p->rows);
     struct sha3_256_ctx h;
@@ -219,6 +239,8 @@ static int unit_parts(struct side *s, const struct premise_tree *cand,
     put_str(&h, unit);
     sha3_256_write(&h, p->closure, PREMISE_HASH_BYTES);
     sha3_256_write(&h, p->rows, PREMISE_HASH_BYTES);
+    if (g->catalog)
+        sha3_256_write(&h, p->row, PREMISE_HASH_BYTES);
     sha3_256_finalize(&h, p->root);
     return 0;
 }
@@ -261,8 +283,23 @@ static void gate_reason(struct premise_unit *u, const struct premise_gate *g,
     else if (differ(c->make, b->make))
         snprintf(u->reason, sizeof u->reason, "make-value:%s",
                  first_make_diff(c, b));
+    else if (g->catalog && differ(c->residue, b->residue))
+        snprintf(u->reason, sizeof u->reason, "catalog-residue:%s",
+                 g->catalog);
     else
         snprintf(u->reason, sizeof u->reason, "pin");
+}
+
+/* The unit's own text: its baseline rows, or its catalog row. */
+static const char *text_reason(const struct premise_gate *g,
+                               const struct unit_parts *pc,
+                               const struct unit_parts *pb)
+{
+    if (differ(pc->rows, pb->rows))
+        return "baseline-rows-changed";
+    if (g->catalog && differ(pc->row, pb->row))
+        return "catalog-row-changed";
+    return NULL;
 }
 
 static void decide(struct premise_session *s, const struct premise_gate *g,
@@ -270,13 +307,14 @@ static void decide(struct premise_session *s, const struct premise_gate *g,
                    const struct unit_parts *pc, const struct unit_parts *pb,
                    const char *first_diff)
 {
+    const char *text = text_reason(g, pc, pb);
     u->would_inherit = false;
     if (differ(c->gate, b->gate))
         gate_reason(u, g, c, b);
     else if (differ(s->cand.path_set_root, s->base.path_set_root))
         snprintf(u->reason, sizeof u->reason, "path-set-changed");
-    else if (differ(pc->rows, pb->rows))
-        snprintf(u->reason, sizeof u->reason, "baseline-rows-changed");
+    else if (text)
+        snprintf(u->reason, sizeof u->reason, "%s", text);
     else if (differ(pc->closure, pb->closure))
         snprintf(u->reason, sizeof u->reason, "closure-changed:%s",
                  first_diff ? first_diff : "(external names)");
@@ -309,11 +347,28 @@ static int unit_closure(struct premise_session *s, const struct premise_gate *g,
         c->n = 1;
         return 0;
     }
-    int rc = premise_include_closure(&s->cand, unit, &c->idx, &c->n, &c->ext,
-                                     &c->next, &c->computed, err);
+    int rc = g->catalog
+                 ? premise_catalog_row_closure(&s->cand, g->catalog,
+                                               g->makefile ? g->makefile
+                                                           : "Makefile",
+                                               unit,
+                                               &c->idx, &c->n, &c->ext,
+                                               &c->next, &c->computed, err)
+                 : premise_include_closure(&s->cand, unit, &c->idx, &c->n,
+                                           &c->ext, &c->next, &c->computed,
+                                           err);
     if (rc == 0 && c->next > 1)
         qsort(c->ext, c->next, sizeof *c->ext, cmp_str);
     return rc;
+}
+
+/* A path unit exists in the base tree; a catalog row, in the base list. */
+static bool unit_in_base(const struct premise_session *s,
+                         const struct premise_gate *g, const struct side *b,
+                         const char *unit)
+{
+    return g->catalog ? premise_catalog_has(&b->cat, unit)
+                      : premise_tree_find(&s->base, unit) != NULL;
 }
 
 static int unit_eval(struct premise_session *s, const struct premise_gate *g,
@@ -340,7 +395,7 @@ static int unit_eval(struct premise_session *s, const struct premise_gate *g,
         snprintf(u->reason, sizeof u->reason, "computed-include");
     else if (rc == 0 && !s->base_verified)
         snprintf(u->reason, sizeof u->reason, "%s", s->disabled);
-    else if (rc == 0 && !premise_tree_find(&s->base, u->unit))
+    else if (rc == 0 && !unit_in_base(s, g, b, u->unit))
         snprintf(u->reason, sizeof u->reason, "unit-new");
     else if (rc == 0)
         decide(s, g, u, c, b, &pc, &pb, first_diff);
@@ -585,6 +640,8 @@ int premise_unit_grants(struct premise_session *s, const struct premise_gate *g,
         rc = grant_line(out, &s->cand, g->baselines[i]);
     if (rc == 0)
         rc = grant_line(out, &s->cand, g->pin ? g->pin : "tools/dev/toolchain.pin");
+    if (rc == 0 && g->catalog)
+        rc = grant_line(out, &s->cand, g->catalog);
     closure_free(&cl);
     free(code.v);
     return rc;

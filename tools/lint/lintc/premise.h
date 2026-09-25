@@ -37,6 +37,11 @@
  *                A per-file gate (unit_self) reads only the unit's bytes, so
  *                its closure is the unit alone;
  *   baseline     the unit's own rows in the gate's baseline files.
+ *
+ * A catalog-row gate (premise_gate.catalog set) names units by row id.
+ * Its unit closure is the union of the closures of every tree path the
+ * row's variables name, the row's own variable text is part of the unit,
+ * and the catalog residue (the lines no row owns) is part of the gate.
  */
 #ifndef Z23_LINT_PREMISE_H
 #define Z23_LINT_PREMISE_H
@@ -99,6 +104,7 @@ struct premise_gate {
     const char *makefile;  /* NULL: "Makefile" */
     const char *pin;       /* NULL: "tools/dev/toolchain.pin" */
     bool unit_self;        /* the unit's closure is its own bytes only */
+    const char *catalog;   /* non-NULL: units are this catalog's row ids */
 };
 
 struct premise_unit {
@@ -176,6 +182,37 @@ int premise_make_values(const uint8_t *mk, size_t len,
                         const char *const *vars, size_t nvars,
                         struct premise_make_value **out, size_t *nout);
 void premise_make_values_free(struct premise_make_value *v, size_t n);
+/* The makefile text minus every definition of an owned variable (a define
+ * block whole) and minus comment lines outside define blocks. */
+int premise_make_residue(const uint8_t *mk, size_t len,
+                         const char *const *owned, size_t nowned, char **out,
+                         size_t *out_len);
+
+/* premise_catalog.c: catalog-row units (see the file comment there). */
+struct premise_catalog {
+    uint8_t *mk;
+    size_t len;
+    bool present;          /* the catalog file exists on this side */
+    char **ids;            /* the literal row list, in catalog order */
+    size_t nids;
+};
+/* 0 (an absent catalog is present=false with no rows), or 2 when the file
+ * cannot be read or its row list is not a literal list of ids. */
+int premise_catalog_open(struct premise_tree *t, const char *path,
+                         struct premise_catalog *c, FILE *err);
+void premise_catalog_close(struct premise_catalog *c);
+bool premise_catalog_has(const struct premise_catalog *c, const char *id);
+int premise_catalog_residue(const struct premise_catalog *c,
+                            uint8_t out[PREMISE_HASH_BYTES]);
+int premise_catalog_row_root(const struct premise_catalog *c, const char *id,
+                             uint8_t out[PREMISE_HASH_BYTES], bool *computed);
+/* Like premise_include_closure for one row id; 1 when the candidate
+ * catalog has no such row. */
+int premise_catalog_row_closure(struct premise_tree *t, const char *catalog,
+                                const char *makefile,
+                                const char *id, size_t **out, size_t *nout,
+                                char ***ext, size_t *next, bool *computed,
+                                FILE *err);
 
 
 /* ── z23-lint subcommands (selection.c) ────────────────────────────────── */

@@ -8,7 +8,8 @@
  * text is the value: a change anywhere in that text flips the premise, and
  * a Makefile edit elsewhere does not. A name ending in ':' names a target:
  * its rule headers and recipe lines are the value, so the command a gate
- * runs is premise too.
+ * runs is premise too. premise_make_residue() is the complement a catalog
+ * needs: the text left once the owned variables' definitions are removed.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -266,6 +267,59 @@ int premise_make_values(const uint8_t *mk, size_t len,
     qsort(vals, w.n, sizeof *vals, cmp_value);
     *out = vals;
     *nout = w.n;
+    return 0;
+}
+
+/* ── residue: the text no owned variable accounts for ─────────────────── */
+
+static bool comment_line(const char *p, const char *stop)
+{
+    p = skip_sp(p, stop);
+    return p < stop && *p == '#';
+}
+
+/* A `define` block of any name is one span: its body is the variable's
+ * value, so a '#' line inside it is text, never a comment. */
+static bool opens_block(const char *p, const char *stop)
+{
+    p = skip_prefix(skip_sp(p, stop), stop);
+    return (size_t)(stop - p) > 7 && memcmp(p, "define", 6) == 0
+           && (p[6] == ' ' || p[6] == '\t');
+}
+
+static bool owned_line(const char *p, const char *stop,
+                       const char *const *owned, size_t nowned)
+{
+    for (size_t i = 0; i < nowned; i++)
+        if (defines(p, stop, owned[i]))
+            return true;
+    return false;
+}
+
+int premise_make_residue(const uint8_t *mk, size_t len,
+                         const char *const *owned, size_t nowned, char **out,
+                         size_t *out_len)
+{
+    const char *p = (const char *)mk, *end = p + len;
+    struct mk_text text = { 0 };
+    int rc = 0;
+    while (rc == 0 && p < end) {
+        const char *stop = logical_end(p, end);
+        bool block = opens_block(p, stop);
+        bool skip = owned_line(p, stop, owned, nowned)
+                    || (!block && comment_line(p, stop));
+        if (block)
+            stop = block_end(stop < end ? stop + 1 : end, end);
+        if (!skip)
+            rc = text_add(&text, p, (size_t)(stop - p));
+        p = stop < end ? stop + 1 : end;
+    }
+    if (rc) {
+        free(text.buf);
+        return rc;
+    }
+    *out = text.buf;
+    *out_len = text.len;
     return 0;
 }
 

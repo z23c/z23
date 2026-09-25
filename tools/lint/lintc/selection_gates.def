@@ -11,8 +11,11 @@
  *               (unit premise: include closure), or SELECTION_UNITS_FILES
  *               for a per-file gate (unit premise: the file's own bytes), or
  *               SELECTION_UNITS_TUS for filtered per-TU units (premise: the
- *               include closure)
- *   filter      SELECTION_UNITS_FILES and _TUS only: POSIX ERE over tree
+ *               include closure), or SELECTION_UNITS_CATALOG_ROWS for
+ *               one unit per catalog row (unit premise: the row's own
+ *               variable text and the closure of every path it names)
+ *   filter      the catalog path for SELECTION_UNITS_CATALOG_ROWS. For
+ *               SELECTION_UNITS_FILES and _TUS: POSIX ERE over tree
  *               paths, "" for every path. It must match a SUPERSET of what
  *               the gate scans: a scanned file outside the unit set would
  *               never be rerun.
@@ -41,6 +44,7 @@ SELECTION_POLICY("tools/lint/lintc/premise_tree.c")
 SELECTION_POLICY("tools/lint/lintc/premise_git.c")
 SELECTION_POLICY("tools/lint/lintc/premise_include.c")
 SELECTION_POLICY("tools/lint/lintc/premise_make.c")
+SELECTION_POLICY("tools/lint/lintc/premise_catalog.c")
 SELECTION_POLICY("tools/lint/lintc/selection.c")
 SELECTION_POLICY("tools/lint/lintc/unit_exec.c")
 SELECTION_POLICY("tools/lint/lintc/selection_gates.def")
@@ -117,4 +121,25 @@ SELECTION_GATE("check-raw-sqlite", SELECTION_UNITS_FILES,
     "tools/lint/repo_shape.sh engine/composition/lib_module_order.def "
     SELECTION_DRIVER,
     "check-raw-sqlite:",
+    "")
+
+/* Per catalog row: check_windows_acceptance.sh --row=ID cross-links one
+ * program in an emptied output directory, one mingw compile-and-link of
+ * the row's sources. A row reads its own four variables (<P>ID_SOURCES,
+ * _FLAGS, _LIBS, _LIBDEPS), every tree path they name with its include
+ * closure, and the catalog residue (tools/lint/lintc/premise_catalog.c).
+ * A row that links the private sqlite archive reaches vendor/sqlite3.c
+ * through the archive's rule; its computed include keeps those rows fresh.
+ * Make evaluates the whole Makefile to build any row (exported
+ * variables, target-specific assignments, the generated rule), so all of
+ * it is gate code, as is the module list its $(error) guard reads. The
+ * global part (--self-test, then --global: reconcile, and make planning
+ * the whole cross-link, which also runs every generator the Makefile
+ * remakes before any goal) always runs; it is priced separately. */
+SELECTION_GATE("check-windows-acceptance", SELECTION_UNITS_CATALOG_ROWS,
+    "platform/modules/platform/tests/windows_acceptance.mk",
+    "tools/lint/check_windows_acceptance.sh tools/scripts/sh_str.sh Makefile "
+    "engine/composition/lib_module_order.def "
+    SELECTION_DRIVER,
+    "check-windows-acceptance:",
     "")
