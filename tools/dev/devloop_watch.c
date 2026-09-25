@@ -2790,6 +2790,13 @@ static bool watch_start_event_stream(struct watch_context *ctx)
     char latest[ZCL_DEVLOOP_CYCLE_JSON_MAX], why[160] = {0};
     size_t latest_len = 0;
     int64_t durable_epoch = 0;
+    /* The ring restarts after the pointer's epoch, so the pointer must first
+     * reach the journal tail a killed flusher may have left it behind. */
+    if (!zcl_devloop_cycle_state_heal(ctx->root, why, sizeof(why))) {
+        fprintf(stderr, "[devloop] event stream anchor heal failed: %s\n",
+                why[0] ? why : "unknown");
+        return false;
+    }
     enum zcl_devloop_state_lookup state = zcl_devloop_cycle_state_read(
         ctx->root, latest, sizeof(latest), &latest_len, &durable_epoch,
         why, sizeof(why));

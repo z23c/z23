@@ -2235,6 +2235,184 @@ static int test_failure_store(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static bool seal_batch_copy_file(const char *from, const char *to)
+{
+    char body[32768];
+    FILE *in = fopen(from, "r");
+    if (!in)
+        return false;
+    size_t len = fread(body, 1, sizeof(body), in);
+    bool ok = !ferror(in) && len > 0 && len < sizeof(body);
+    if (fclose(in) != 0 || !ok)
+        return false;
+    int fd = open(to, O_WRONLY | O_TRUNC | O_CLOEXEC);
+    ok = fd >= 0 && write(fd, body, len) == (ssize_t)len && fsync(fd) == 0;
+    if (fd >= 0 && close(fd) != 0)
+        ok = false;
+    return ok;
+}
+
+static int64_t seal_batch_pointer_epoch(const char *repo)
+{
+    char out[4096], why[192] = {0};
+    size_t len = 0;
+    int64_t epoch = -1;
+    if (zcl_devloop_cycle_state_read(repo, out, sizeof(out), &len, &epoch,
+                                     why, sizeof(why)) !=
+        ZCL_DEVLOOP_STATE_FOUND)
+        return -1;
+    return epoch;
+}
+
+#define SB_CHECK(expr)                                                       \
+    do {                                                                     \
+        if (!(expr)) {                                                       \
+            fprintf(stderr, "seal-batch fixture failed at %s:%d: %s\n",     \
+                    __FILE__, __LINE__, #expr);                              \
+            return false;                                                    \
+        }                                                                    \
+    } while (0)
+
+static bool seal_batch_event_path(const char *state_dir, int64_t epoch,
+                                  char out[PATH_MAX])
+{
+    int n = snprintf(out, PATH_MAX, "%s/cycle-events/%020lld.json",
+                     state_dir, (long long)epoch);
+    return n > 0 && n < PATH_MAX;
+}
+
+static const char g_seal_batch_event[] =
+    "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
+    "\"status\":\"impact_ready\",\"action\":\"reflex\","
+    "\"reason\":\"fixture\",\"phase\":\"IMPACT_READY\","
+    "\"runtime_published\":false,\"elapsed_ms\":2,\"files\":[]}";
+
+/* One flush journals three ring events and moves the latest pointer once;
+ * a second heal is a no-op. */
+static bool seal_batch_flush(const char *repo, const char *state_dir,
+                             int64_t epochs[4])
+{
+    static const char anchor[] =
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
+        "\"status\":\"passed\",\"action\":\"check\","
+        "\"reason\":\"fixture\",\"phase\":\"verify\","
+        "\"runtime_published\":false,\"elapsed_ms\":1,\"files\":[]}";
+    char why[192] = {0}, event_path[PATH_MAX];
+    /* No state yet: healing creates nothing and succeeds. */
+    SB_CHECK(zcl_devloop_cycle_state_heal(repo, why, sizeof(why)) &&
+             access(state_dir, F_OK) != 0);
+    SB_CHECK(zcl_devloop_cycle_state_write(repo, anchor, sizeof(anchor) - 1,
+                                           why, sizeof(why)));
+    int64_t base = seal_batch_pointer_epoch(repo);
+    SB_CHECK(base > 0 &&
+             zcl_devloop_cycle_stream_reset(repo, base, why, sizeof(why)));
+    for (int64_t i = 0; i < 3; i++)
+        SB_CHECK(zcl_devloop_cycle_stream_publish(
+                     repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+                     &epochs[i], why, sizeof(why)) &&
+                 epochs[i] == base + 1 + i);
+    SB_CHECK(zcl_devloop_cycle_stream_flush_through(repo, epochs[2], why,
+                                                    sizeof(why)));
+    for (size_t i = 0; i < 3; i++)
+        SB_CHECK(seal_batch_event_path(state_dir, epochs[i], event_path) &&
+                 access(event_path, F_OK) == 0);
+    SB_CHECK(seal_batch_pointer_epoch(repo) == epochs[2]);
+    SB_CHECK(zcl_devloop_cycle_state_heal(repo, why, sizeof(why)) &&
+             seal_batch_pointer_epoch(repo) == epochs[2]);
+    return true;
+}
+
+/* A flusher killed after journaling the batch's first event leaves the
+ * pointer on that event. Healing adopts the verified tail, and inside a live
+ * stream the next flush heals first so its epoch does not collide. */
+static bool seal_batch_heal(const char *repo, const char *state_dir,
+                            const char *pointer, int64_t epochs[4])
+{
+    char why[192] = {0}, event_path[PATH_MAX];
+    SB_CHECK(seal_batch_event_path(state_dir, epochs[0], event_path) &&
+             seal_batch_copy_file(event_path, pointer) &&
+             seal_batch_pointer_epoch(repo) == epochs[0]);
+    SB_CHECK(zcl_devloop_cycle_state_heal(repo, why, sizeof(why)) &&
+             seal_batch_pointer_epoch(repo) == epochs[2]);
+    SB_CHECK(seal_batch_copy_file(event_path, pointer) &&
+             seal_batch_pointer_epoch(repo) == epochs[0]);
+    SB_CHECK(zcl_devloop_cycle_stream_publish(
+                 repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+                 &epochs[3], why, sizeof(why)) &&
+             epochs[3] == epochs[2] + 1);
+    SB_CHECK(zcl_devloop_cycle_stream_flush_through(repo, epochs[3], why,
+                                                    sizeof(why)) &&
+             seal_batch_pointer_epoch(repo) == epochs[3]);
+    return true;
+}
+
+/* A damaged tail event is never adopted: healing and flushing refuse and
+ * the pointer stays where it was. */
+static bool seal_batch_damaged_tail(const char *repo, const char *state_dir,
+                                    const char *pointer,
+                                    const int64_t epochs[4])
+{
+    char why[192] = {0}, event_path[PATH_MAX];
+    SB_CHECK(seal_batch_event_path(state_dir, epochs[2], event_path) &&
+             seal_batch_copy_file(event_path, pointer) &&
+             seal_batch_pointer_epoch(repo) == epochs[2]);
+    SB_CHECK(seal_batch_event_path(state_dir, epochs[3], event_path));
+    int fd = open(event_path, O_WRONLY | O_CLOEXEC);
+    SB_CHECK(fd >= 0 && pwrite(fd, "X", 1, 0) == 1 && close(fd) == 0);
+    SB_CHECK(!zcl_devloop_cycle_state_heal(repo, why, sizeof(why)) &&
+             strcmp(why, "cycle_state_heal_failed") == 0);
+    SB_CHECK(!zcl_devloop_cycle_stream_flush_through(repo, epochs[3], why,
+                                                     sizeof(why)) &&
+             seal_batch_pointer_epoch(repo) == epochs[2]);
+    return true;
+}
+
+static bool run_cycle_seal_batch_fixture(void)
+{
+    char home[PATH_MAX], repo[PATH_MAX], state_dir[PATH_MAX];
+    char pointer[PATH_MAX];
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    if (getenv("HOME") && !saved_home)
+        return false;
+    test_make_tmpdir(home, sizeof(home), "dev_platform", "cycle_seal_batch");
+    int64_t epochs[4] = {0};
+    bool ok = snprintf(repo, sizeof(repo), "%s/repo", home) > 0 &&
+              mkdir(repo, 0700) == 0 &&
+              platform_environment_set("HOME", home, 1) == 0 &&
+              zcl_devloop_workspace_state_dir(repo, state_dir,
+                                              sizeof(state_dir)) &&
+              snprintf(pointer, sizeof(pointer), "%s/native-cycle.json",
+                       state_dir) > 0 &&
+              seal_batch_flush(repo, state_dir, epochs) &&
+              seal_batch_heal(repo, state_dir, pointer, epochs) &&
+              seal_batch_damaged_tail(repo, state_dir, pointer, epochs);
+    if (saved_home) {
+        (void)platform_environment_set("HOME", saved_home, 1);
+        free(saved_home);
+    } else
+        (void)dp_environment_unset("HOME");
+    test_rm_rf_recursive(home);
+    return ok;
+}
+#undef SB_CHECK
+#else
+static bool run_cycle_seal_batch_fixture(void)
+{
+    return true; /* The journal fixture paths and modes are POSIX. */
+}
+#endif /* !defined(_WIN32) */
+
+static int test_cycle_seal_batch(void)
+{
+    int failures = 0;
+    TEST("dev platform: a journal flush batch moves the pointer once and heals a lagging pointer") {
+        ASSERT(run_cycle_seal_batch_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* A4: distill_first_error picks the first actionable line (compiler
  * ": error:" or test FAIL/Assertion/EXPECT) and falls back cleanly when no
  * pattern matches. Exercised via the thin zcl_devloop_distill_first_error
@@ -4532,6 +4710,7 @@ struct dp_shard_case {
 #define DP_CASE(fn, owner) {#fn, fn, owner}
 static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_failure_store, 5),
+    DP_CASE(test_cycle_seal_batch, 5),
     DP_CASE(test_distill_first_error, 7),
     DP_CASE(test_hotswap_artifact_cache, 5),
     DP_CASE(test_hotfork_story_file_green_and_red, 5),

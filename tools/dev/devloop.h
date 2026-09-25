@@ -814,10 +814,16 @@ bool zcl_devloop_cycle_stream_publish(const char *repo_root,
                                       char *why, size_t why_len);
 /* Seal every volatile event through `through_epoch` in epoch order. Producers
  * call this only after the action-changing event is visible; storage latency
- * therefore cannot delay reflex feedback. */
+ * therefore cannot delay reflex feedback. Flushers serialize on a workspace
+ * seal lock; each event is durable before the next, and the latest pointer
+ * moves once, at the batch's last event. */
 bool zcl_devloop_cycle_stream_flush_through(const char *repo_root,
                                             int64_t through_epoch,
                                             char *why, size_t why_len);
+/* Move a latest pointer left behind the journal tail (a flusher died inside
+ * a batch) onto the tail event. A no-op when they already agree. */
+bool zcl_devloop_cycle_state_heal(const char *repo_root, char *why,
+                                  size_t why_len);
 bool zcl_devloop_cycle_state_write_epoch(const char *repo_root,
                                          int64_t reserved_epoch,
                                          const char *cycle_json,
