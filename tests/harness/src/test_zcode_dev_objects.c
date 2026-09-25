@@ -2217,6 +2217,50 @@ static int test_zd_work_node_atomic_admission(void)
         ASSERT(vcs_zcode_work_swarm_parse(frame, frame_len, &parsed));
         ASSERT_EQ(parsed.body.admission.disposition,
                   VCS_ZCODE_WORK_ADMISSION_GRANTED);
+        struct vcs_zcode_work_request_v1 surviving = qbusy;
+        surviving.request_id = 907;
+        ASSERT(vcs_zcode_work_request_seal(&surviving, c_secret, c_key));
+        request_message.body.request = surviving;
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &request_message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            b, 22, frame, frame_len, 1002), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(vcs_zcode_work_node_next_request(b, &peer, &physical));
+        ASSERT_EQ(physical.request_id, surviving.request_id);
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            b, 22, surviving.request_id, 1002, 4096));
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            b, 22, &peer, frame, &frame_len));
+        ASSERT(vcs_zcode_work_swarm_parse(frame, frame_len, &parsed));
+        ASSERT_EQ(parsed.body.admission.disposition,
+                  VCS_ZCODE_WORK_ADMISSION_ATTACHED);
+        struct vcs_zcode_work_cancel_v1 cancel_one = {
+            .request_id = qbusy.request_id,
+        };
+        memcpy(cancel_one.task_root, qbusy.task_root, 32);
+        ASSERT(vcs_zcode_work_cancel_seal(
+            &cancel_one, c_secret, c_key));
+        request_message.type = VCS_ZCODE_WORK_SWARM_CANCEL;
+        request_message.body.cancel = cancel_one;
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &request_message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            b, 22, frame, frame_len, 1002), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(!vcs_zcode_work_node_next_cancel(b, &peer, &cancel_one));
+        zd_swarm_result(&result, &surviving, 123, 110);
+        ASSERT_EQ(vcs_zcode_work_node_publish_result(
+                      b, 22, &result, &result_requests_queued),
+                  VCS_ZCODE_WORK_NODE_OK);
+        ASSERT_EQ(result_requests_queued, 1u);
+        ASSERT(vcs_zcode_work_node_next_outbound(
+            b, 22, &peer, frame, &frame_len));
+        ASSERT(vcs_zcode_work_swarm_parse(frame, frame_len, &parsed));
+        ASSERT_EQ(parsed.type, VCS_ZCODE_WORK_SWARM_RESULT);
+        ASSERT_EQ(parsed.body.result.request_id, surviving.request_id);
+        ASSERT(vcs_zcode_work_result_verify(
+            &surviving, &parsed.body.result, b_key));
+        ASSERT(!vcs_zcode_work_node_next_outbound(
+            b, 22, &peer, frame, &frame_len));
         vcs_zcode_work_node_free(a);
         vcs_zcode_work_node_free(b);
         vcs_zcode_work_node_free(c);
