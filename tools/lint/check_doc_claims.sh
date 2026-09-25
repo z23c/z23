@@ -80,6 +80,24 @@
 # printed after the matcher has demonstrated it still fires (the discipline
 # tools/scripts/check_doc_counts.sh established).
 #
+# THE SPLIT (shadow premise selection only). The verdict is the conjunction
+# of a global part and one part per tracked document. The plain invocation
+# is unchanged and still runs every part.
+#   --global     the self-check, the scan-set floor, every gate-passes and
+#                gate-fails claim in every document, the claim floor and
+#                the entry-document language scan. An oracle claim runs
+#                another gate, and the floors count the whole tree, so this
+#                part always runs.
+#   --doc=PATH   every other claim of the named tracked documents
+#                (file-present/absent, symbol-present/absent, and any
+#                malformed or unknown annotation). Such a claim reads only
+#                its own document, the path set, and the tracked files its
+#                pathspec names. Each PATH must be a document of the full
+#                scan set; anything else is refused (exit 2), never skipped.
+# Which annotations each part owns is decided by the first token alone, so
+# the two parts evaluate disjoint claims whose union is the full run's. See
+# SELECTION_UNITS_DOC_CLAIMS in tools/lint/lintc/selection_gates.def.
+#
 # Exit: 0 clean, 1 stale/malformed claim, 2 hollow scan set or broken matcher.
 set -uo pipefail
 
@@ -102,6 +120,11 @@ declare -A GATE_RC=()
 violations=()
 claims_parsed=0
 reliance_docs_scanned=0
+# Which annotations scan_file evaluates: all (the plain run), gate (only
+# gate-passes/gate-fails, the global part) or doc (every other annotation,
+# the per-document part). Every annotation is counted in claims_parsed.
+CLAIM_PART=all
+claims_left=0          # annotations counted but owned by the other part
 
 # ── Predicate evaluation ─────────────────────────────────────────────────────
 
@@ -218,6 +241,21 @@ gate_prime() {
     gate_rc "${tok[1]}" >/dev/null
 }
 
+# claim_owned <body> — 0 when CLAIM_PART evaluates this annotation. The
+# first token alone decides, split exactly as eval_claim splits it, so the
+# gate and doc parts are disjoint and together cover every annotation.
+claim_owned() {
+    [ "$CLAIM_PART" = all ] && return 0
+    local body="${1%%#*}" oracle=1
+    set -f
+    # shellcheck disable=SC2206
+    local -a tok=( $body )
+    set +f
+    case "${tok[0]:-}" in gate-passes|gate-fails) oracle=0 ;; esac
+    if [ "$CLAIM_PART" = gate ]; then return "$oracle"; fi
+    [ "$oracle" -ne 0 ]
+}
+
 # eval_claim <body> — evaluate one annotation body.
 # Prints a human reason on stdout; returns 0 hold, 1 stale, 2 malformed.
 eval_claim() {
@@ -318,6 +356,10 @@ scan_file() {
         body="${line#*claim:}"
         body="${body%%-->*}"
         claims_parsed=$((claims_parsed + 1))
+        if ! claim_owned "$body"; then
+            claims_left=$((claims_left + 1))
+            continue
+        fi
         gate_prime "$body"
         reason="$(eval_claim "$body")"; rc=$?
         [ "$rc" -eq 0 ] && continue
@@ -589,8 +631,42 @@ selfcheck() {
         echo "      runs=${got// /} violations=${#violations[@]} claims=$claims_parsed" >&2
         st_fail=2
     fi
-    violations=(); claims_parsed=0
-    unset 'GATE_RC[check-zzz-doc-claims-unlisted]' 'GATE_RC[check-zzz-doc-claims-memo]'
+    # (e) THE SPLIT: the doc part never runs an oracle gate and the gate
+    #     part evaluates nothing else; each reports only its own stale
+    #     claim, both count all three annotations, and the plain run
+    #     reports both. The doc part goes first, so a run it caused would
+    #     show in split.count.
+    printf '        check-zzz-doc-claims-split) echo '"'"'echo run >> %s/split.count; exit 3'"'"' ;;\n' \
+        "$vr_dir" > "$vr_table"
+    printf '%s\n' "Holds." "<!-- claim: file-present Makefile -->" \
+        "Stale file claim." "<!-- claim: file-absent Makefile -->" \
+        "Stale oracle claim." "<!-- claim: gate-passes check-zzz-doc-claims-split -->" \
+        > "$vr_dir/split.md"
+    unset 'GATE_RC[check-zzz-doc-claims-split]'
+    local part got_part=""
+    for part in doc gate all; do
+        CLAIM_PART="$part"; violations=(); claims_parsed=0; claims_left=0
+        scan_file "$vr_dir/split.md" "split.md"
+        got_part="$got_part $part:${#violations[@]}/$claims_parsed/$claims_left"
+        case "$part:${violations[*]}" in
+            doc:*gate-passes*|gate:*file-absent*) got_part="$got_part(wrong-claim)" ;;
+        esac
+        if [ "$part" = doc ] && [ -e "$vr_dir/split.count" ]; then
+            got_part="$got_part(oracle-ran)"
+        fi
+    done
+    CLAIM_PART=all
+    if [ "$got_part" != " doc:1/3/1 gate:1/3/2 all:2/3/0" ]; then
+        echo "FAIL: check_doc_claims split self-check broken — the doc part must" >&2
+        echo "      report only the stale file claim without running the oracle," >&2
+        echo "      the gate part only the stale oracle claim, the plain run both." >&2
+        echo "      Want ' doc:1/3/1 gate:1/3/2 all:2/3/0', got '$got_part'." >&2
+        st_fail=2
+    fi
+
+    violations=(); claims_parsed=0; claims_left=0
+    unset 'GATE_RC[check-zzz-doc-claims-unlisted]' 'GATE_RC[check-zzz-doc-claims-memo]' \
+          'GATE_RC[check-zzz-doc-claims-split]'
     GATE_TABLE="$vr_old_table"
     if [ -n "$vr_old_vdir" ]; then export ZCL_LINT_GATES_DIR_X="$vr_old_vdir"
     else unset ZCL_LINT_GATES_DIR_X; fi
@@ -605,17 +681,34 @@ selfcheck() {
 # ── Argument handling ────────────────────────────────────────────────────────
 mode=scan
 extra_paths=()
+doc_args=()
+set_mode() { # one mode per invocation; --scan combines with none of the split
+    if [ "$mode" != scan ] && [ "$mode" != "$1" ]; then
+        echo "check_doc_claims: --$mode and --$1 cannot be combined" >&2
+        exit 2
+    fi
+    mode="$1"
+}
 while [ $# -gt 0 ]; do
     case "$1" in
-        --selftest) mode=selftest; shift ;;
-        --list)     mode=list; shift ;;
+        --selftest) set_mode selftest; shift ;;
+        --list)     set_mode list; shift ;;
+        --global)   set_mode global; shift ;;
+        --doc=*)    set_mode doc; doc_args+=("${1#--doc=}"); shift ;;
         --scan)     extra_paths+=("${2:?--scan needs a PATH}"); shift 2 ;;
         --scan=*)   extra_paths+=("${1#--scan=}"); shift ;;
-        --help|-h)  sed -n '2,80p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --help|-h)  sed -n '2,100p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         .)          shift ;;                       # `make lint` passes the root
         *) echo "check_doc_claims: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
+case "$mode" in
+    global|doc)
+        if [ "${#extra_paths[@]}" -gt 0 ]; then
+            echo "check_doc_claims: --$mode covers tracked documents only; it does not combine with --scan" >&2
+            exit 2
+        fi ;;
+esac
 
 # ── Build the scan set ───────────────────────────────────────────────────────
 scan_files=()
@@ -641,6 +734,52 @@ else
     done < <(git ls-files -- '*.md' 2>/dev/null)
 fi
 
+# report_violations — print the FAIL block for the collected violations.
+report_violations() {
+    echo ""
+    echo "FAIL: ${#violations[@]} document claim(s) no longer hold."
+    printf '  %s\n' "${violations[@]}"
+    echo ""
+    echo "Fix: the CODE is authoritative."
+    echo "  - STALE: correct the prose, then re-bind the annotation to what is now true."
+    echo "    A 'gate-passes'/'gate-fails' oracle that flipped means the work the item"
+    echo "    describes finished (or regressed) — say so, do not re-dispatch it."
+    echo "  - MALFORMED: fix the annotation. Syntax:"
+    echo "      <!-- claim: file-present|file-absent <path> -->"
+    echo "      <!-- claim: symbol-present|symbol-absent <symbol> <git-pathspec> -->"
+    echo "      <!-- claim: gate-passes|gate-fails <check-*-gate> -->"
+    echo "    (documented in docs/DEFENSIVE_CODING.md under check-doc-claims)"
+}
+
+# ── The per-document part (--doc=PATH...) ───────────────────────────────────
+# Every PATH must be a document the plain run scans; anything else is a
+# refusal. No self-check here: the global part runs it on every candidate.
+doc_main() {
+    local -A in_set=()
+    local f
+    for f in "${scan_files[@]}"; do in_set["$f"]=1; done
+    for f in "${doc_args[@]}"; do
+        if [ -z "$f" ] || [ -z "${in_set["$f"]+x}" ]; then
+            echo "check_doc_claims: REFUSE: '$f' is not a tracked, regular *.md document of the scan set" >&2
+            return 2
+        fi
+    done
+    CLAIM_PART=doc
+    for f in "${doc_args[@]}"; do
+        scan_file "$f"
+    done
+    if [ "${#violations[@]}" -ne 0 ]; then
+        report_violations
+        return 1
+    fi
+    echo "check_doc_claims: docs PASS — $((claims_parsed - claims_left)) bound claim(s) across ${#doc_args[@]} document(s) hold; $claims_left oracle claim(s) there belong to --global"
+}
+
+if [ "$mode" = doc ]; then
+    doc_main
+    exit $?
+fi
+
 # ── Self-check runs before anything is trusted ───────────────────────────────
 selfcheck || exit $?
 
@@ -648,7 +787,8 @@ if [ "$mode" = selftest ]; then
     echo "check_doc_claims: selftest PASS — evaluator fires in both directions"
     echo "  (file-present/absent, symbol-present/absent, gate-passes/fails,"
     echo "   fenced examples skipped, malformed annotations reported,"
-    echo "   positive-reliance phrases rejected without banning precise terms)"
+    echo "   positive-reliance phrases rejected without banning precise terms,"
+    echo "   the --global and --doc parts disjoint and together the plain run)"
     exit 0
 fi
 
@@ -662,7 +802,23 @@ else
 fi
 
 # ── Scan ─────────────────────────────────────────────────────────────────────
-for f in "${scan_files[@]}"; do
+# The global part evaluates only oracle claims, and only a document holding
+# the bytes "claim:" can carry an annotation, so it reads just those. A
+# grep error is a refusal, never an empty set.
+claim_docs=("${scan_files[@]}")
+if [ "$mode" = global ]; then
+    CLAIM_PART=gate
+    claim_docs=()
+    grep_out="$(LC_ALL=C grep -lF -e 'claim:' -- "${scan_files[@]}")"
+    case $? in
+        0|1) ;;
+        *) echo "check_doc_claims: FATAL — cannot search the scan set for annotations" >&2; exit 2 ;;
+    esac
+    while IFS= read -r f; do
+        [ -n "$f" ] && claim_docs+=("$f")
+    done <<< "$grep_out"
+fi
+for f in "${claim_docs[@]}"; do
     scan_file "$f"
 done
 
@@ -711,22 +867,14 @@ fi
 
 # ── Report ───────────────────────────────────────────────────────────────────
 if [ "${#violations[@]}" -ne 0 ]; then
-    echo ""
-    echo "FAIL: ${#violations[@]} document claim(s) no longer hold."
-    printf '  %s\n' "${violations[@]}"
-    echo ""
-    echo "Fix: the CODE is authoritative."
-    echo "  - STALE: correct the prose, then re-bind the annotation to what is now true."
-    echo "    A 'gate-passes'/'gate-fails' oracle that flipped means the work the item"
-    echo "    describes finished (or regressed) — say so, do not re-dispatch it."
-    echo "  - MALFORMED: fix the annotation. Syntax:"
-    echo "      <!-- claim: file-present|file-absent <path> -->"
-    echo "      <!-- claim: symbol-present|symbol-absent <symbol> <git-pathspec> -->"
-    echo "      <!-- claim: gate-passes|gate-fails <check-*-gate> -->"
-    echo "    (documented in docs/DEFENSIVE_CODING.md under check-doc-claims)"
+    report_violations
     exit 1
 fi
 
+if [ "$mode" = global ]; then
+    echo "check_doc_claims: global PASS — $((claims_parsed - claims_left)) oracle claim(s) hold; $claims_parsed bound claim(s) across ${#claim_docs[@]} of ${#scan_files[@]} document(s) meet the floor; $reliance_docs_scanned entry document(s) reject positive-reliance claims; self-check fired as expected"
+    exit 0
+fi
 echo "check_doc_claims: clean — $claims_parsed bound claim(s) across ${#scan_files[@]} document(s) all hold; $reliance_docs_scanned entry document(s) reject positive-reliance claims; self-check fired as expected"
 if [ "$external" -eq 1 ] && [ "$claims_parsed" -eq 0 ]; then
     echo "  ZERO COVERAGE, not a clean bill of health: none of the"
