@@ -192,10 +192,10 @@ Four identities are kept separate. None stands in for another:
   (`chain/mmr.h`); the leaf is the observation root. A 224-byte
   `zcl.proof_checkpoint.v1` signs leaf_count, the MMR root, a peaks root and
   the previous checkpoint root. A receiver sync takes a checkpoint plus only
-  the tickets after the receiver's verified prefix. It accepts them only
-  when that delta reproduces the signed root and peaks. A covered ticket is
-  authenticated by its issuer's checkpoint signature, so the decision
-  itself runs no Ed25519.
+  the tickets after the receiver's verified prefix. It verifies every delta
+  ticket's Ed25519 signature before checking that the delta reproduces the
+  signed root and peaks. Coverage requires both checks. The reuse decision
+  verifies each retained ticket's signature again before eligibility.
 - The issuer is marked equivocating, and every signed checkpoint involved is
   retained, when any of these holds:
   - two signed checkpoints have the same leaf_count and different roots;
@@ -203,8 +203,9 @@ Four identities are kept separate. None stands in for another:
   - issuer-signed delta tickets at their positions fail to reproduce a
     signed root.
 
-  A delta that fails to reproduce the root and contains a ticket without a
-  valid signature is refused as `delta_invalid`. It marks nothing.
+  A delta containing a ticket without a valid signature is refused as
+  `delta_invalid`, even if its bytes reproduce the signed root. It marks
+  nothing.
 - `vcs_proof_reuse_decide` derives the key from the receiver's own
   preimage. It reads the verifier set, revocations, candidate domain and
   policy root from the current request on every decision; ingest never

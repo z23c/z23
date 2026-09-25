@@ -88,8 +88,8 @@ static const char *ptr_authority(const struct ptr_local *l,
 }
 
 /* Log facts: the issuer is not equivocating and a verified checkpoint
- * covers this exact observation. Coverage is what authenticates the
- * ticket: the issuer's checkpoint signature commits to its root. */
+ * covers this exact observation. The caller checks the ticket's own
+ * signature separately before this coverage check. */
 static const char *ptr_coverage(const struct ptr_local *l,
                                 const struct pr_entry *e)
 {
