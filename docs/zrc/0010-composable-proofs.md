@@ -167,8 +167,12 @@ file is a projection of it. Record key = leaf key; value = leaf value from
 §1 plus served-log bytes. Cached test verdicts are keyed by
 `trc_compute_key` (`tests/harness/src/testcache.c:512-555`) from
 `testcache_probe_group` (`tests/harness/src/testcache.c:710-712`). The
-runner's `ZCL_TESTCACHE_STORE_ROOT` pin (`tools/dev/dev_proof.c:4342-4344`)
-is lifted to the node's replicated table, still keyed by digest.
+proof no longer pins `ZCL_TESTCACHE_STORE_ROOT` to its checkout: that
+unsigned store is writable by the candidate's own uid, so landing proofs
+run their test dimension cold (`--no-cache`) and record `reused=0` until a
+separate-uid verifier qualifies. The replicated table, still keyed by
+digest, is where admissible verdicts will come from, and only rows that
+verifier signed count.
 
 **Hits are exact.** A stale closure is a miss. `tu_result_cache.sh` keys a
 TU on compiler identity, flags, and TU bytes plus an include-set digest

@@ -82,6 +82,40 @@ failing group alone on an unloaded box, and a lucky result would be stored — s
 the group would be skipped forever. Forcing the retry cold keeps it an
 independent second opinion instead of a flake-laundering machine.
 
+## Landing proofs never admit a cached verdict
+
+A landing proof (`z23-dev dev proof`, `tools/dev/dev_proof.c`) runs its test
+dimension with `--no-cache`, the runner's explicit cold mode. It outranks
+`ZCL_TEST_CACHE`, so no inherited or planted environment can turn reuse back
+on: every selected group executes, and the runner opens no verdict store and
+stores nothing. The proof worker also clears `ZCL_TEST_CACHE`,
+`ZCL_TEST_CACHE_DUMP` and `ZCL_TESTCACHE_STORE_ROOT` before any child runs,
+does not copy the submitting checkout's `.zvcs/objects` into the proof
+generation, and refuses a test log whose `SUITE VERDICT` reports any
+`groups_cached`; the receipt's test dimension therefore always records
+`reused=0`.
+
+The reason is the trust boundary, not the cache's soundness. A PASS record is
+unsigned and lives in a directory any process of this uid can write, and the
+candidate being proved runs as that same uid. Its tests could plant a PASS at
+a group's exact key, and a proof that honoured the store would then count that
+group as passing without running it. Reused verdicts may shape acceptance only
+when a separate account, outside the candidate's trust domain, reproduced and
+signed them. No such verifier exists for test verdicts yet, so every proof
+writes
+
+    test_reuse_admit=test-reuse: unqualified(no_verifier_account)
+
+to its `phases.txt`. What re-enables reuse is qualifying that separate-uid
+verifier, the same boundary the lint result cache waits on; widening the
+same-user cache does not.
+
+The proof still runs one probe before the test dimension
+(`--cache --cache-probe-only` against the generation's own store) and records
+it as `test_preflight=advisory groups=N would_reuse=N must_run=N
+uncacheable=N admitted=0 capsule=...`. It is a measurement only: nothing in
+the dimension reads the probe or its capsule.
+
 ## Using it (inner dev loop)
 
 ```bash
@@ -243,6 +277,11 @@ loudly:
    ```
 
 ## Cold open in proof generations (STRETCH decision: rebuild stands)
+
+Since landing proofs stopped admitting cached verdicts (above), only the
+advisory preflight probe still opens the code index inside a generation, and
+the test dimension no longer consumes a capsule. The analysis below still
+governs any future reuse path.
 
 A proof generation is a fresh checkout (`generation_prepare` re-checkouts
 every cycle), so no verified code-index snapshot exists under its root and

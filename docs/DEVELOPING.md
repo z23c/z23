@@ -893,6 +893,16 @@ Policy 4 refuses earlier receipts, which could cover only the fast subset,
 and names missing mandatory lint as `receipt_lint_required`. The worker
 clears inherited Make execution overrides and lint cache diagnostics, and
 forces fresh lint using each gate's declared policy before building a generation.
+The test dimension is cold the same way: the runner starts with `--no-cache`,
+the worker clears `ZCL_TEST_CACHE`, `ZCL_TEST_CACHE_DUMP` and
+`ZCL_TESTCACHE_STORE_ROOT`, the checkout's `.zvcs/objects` verdict store is
+never copied into the generation, and a log reporting any `groups_cached` is
+refused, so the receipt's test dimension always records `reused=0`. Those PASS
+records are unsigned and writable by the uid the candidate runs as; reuse
+comes back only when a separate-uid verifier qualifies. `phases.txt` records
+`test_reuse_admit=test-reuse: unqualified(no_verifier_account)` and an
+`advisory` `test_preflight` probe count that admits nothing
+([`work/test-result-cache.md`](work/test-result-cache.md)).
 `make lint-fast` remains available for feedback while editing. The generation
 is handed the built artifacts the
 full gate set reads (the confined package verifier, `build/bin/z23-dev`,

@@ -152,8 +152,10 @@ the candidate needs no build at all.
 Four changes in `tools/dev/dev_proof.c` and its neighbours make that skip real.
 Today the group key is computed inside the test binary, which exists only after
 the compile dimension has run `make build-only` and the bundle step has run
-`make dev-proof-bundle`; the runner then sets the verdict store root to the
-local checkout before probing. So:
+`make dev-proof-bundle`. The proof's test dimension then runs every selected
+group cold (`--no-cache`), because the only verdict store it could read is the
+unsigned, same-uid `.zvcs/objects` store a candidate's own tests can write;
+see "Trust" below. So:
 
 1. **Move the keyer out of the test binary.** The closure walk and the depfile
    graph it depends on (`codeindex_forward_closure`,
@@ -168,10 +170,13 @@ local checkout before probing. So:
    (`contexts/commons/modules/vcs/include/vcs/build_action.h`) — content of the
    compiler driver, backend, assembler version, sysroot, target probes and ABI
    files, with no mtime and no path.
-3. **Unpin the verdict store.** `dev_proof.c` sets `ZCL_TESTCACHE_STORE_ROOT`
-   to its own checkout root, which makes every verdict box-local. It points at
-   the node's replicated verdict store instead, so a row another node signed is
-   visible to this prover.
+3. **Read signed verdicts, not the same-user store.** `dev_proof.c` used to
+   set `ZCL_TESTCACHE_STORE_ROOT` to its own checkout root, which made every
+   verdict box-local and, worse, writable by the candidate under proof. It
+   no longer reads any verdict store; the proof clears that variable and runs
+   its test dimension cold. Reuse returns only through the node's replicated
+   table of rows a separate-uid verifier signed, so a row another node signed
+   is visible to this prover and no row the candidate wrote ever counts.
 4. **Probe before the build, not inside the test dimension.** A probe pass runs
    as soon as the routed group set is known and before the compile branch. When
    every routed group has a trusted verdict at its key, the compile and test
@@ -242,6 +247,17 @@ verifies, its signer is on the allowlist, and its `toolchain_fingerprint`
 matches the candidate's. A group is covered when **K** such rows agree. `K` is
 one for keys the owner controls; a higher `K` for keys the owner does not,
 declared by policy rather than by code.
+
+The signer must sit outside the candidate's trust domain. A candidate's build
+and tests run as the proof's uid, so anything that uid can write, including an
+unsigned per-group PASS record or a key the proof itself holds, can be planted
+by the code being judged. Until a separate-uid verifier is qualified, landing
+proofs fail closed: the test dimension runs every group with `--no-cache`, no
+verdict store is copied into or named for the generation, a log reporting any
+`groups_cached` is refused, the receipt records `reused=0`, and `phases.txt`
+says `test_reuse_admit=test-reuse: unqualified(no_verifier_account)`.
+Qualifying that verifier is what re-enables reuse; a faster or larger
+same-user cache does not.
 
 The allowlist becomes signed rows on the same seam instead of a file each box
 edits by hand. The verification mechanism is already right — a pubkey is
@@ -322,7 +338,8 @@ Each stage lands on its own and leaves the tree working.
    client with no wire change.
 2. Land CANDIDATE, PROOF_SET and PUBLICATION as descriptors on that seam,
    with the bundle riding the package swarm.
-3. Move the group keyer out of the test binary and unpin the verdict store.
+3. Move the group keyer out of the test binary and read only signed verdict
+   rows (the same-user store is already refused).
 4. Probe before the build in the prover, so a fully covered candidate skips
    the generation build.
 5. Add the commutation test and turn the queue into a DAG.
