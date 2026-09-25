@@ -3256,3 +3256,6 @@ AGENT_IMPACT_RULE("tools/command/native_fleet_steer.c|tests/harness/src/test_fle
  * but nothing mapped their sources, so a change to the executor would not
  * have run the tests that judge it. */
 AGENT_IMPACT_RULE("contexts/commons/services/src/muse_session.c|contexts/commons/services/src/muse_session_internal.h|contexts/commons/services/src/muse_session_wait.c|tools/command/native_devagent_muse_executor.c|tests/harness/src/test_devagent_muse_run.c|tests/harness/src/test_muse_session.c|tests/harness/include/test/muse_fake_host.h", "devagent_muse_run muse_session devagent_worker make_lint_gates")
+/* Base-relative premise selection: the premise core, its select/premise
+ * subcommands, the gate table, and the suite that judges them. */
+AGENT_IMPACT_RULE("tools/lint/lintc/premise.h|tools/lint/lintc/premise.c|tools/lint/lintc/premise_tree.c|tools/lint/lintc/premise_git.c|tools/lint/lintc/premise_include.c|tools/lint/lintc/premise_make.c|tools/lint/lintc/selection.c|tools/lint/lintc/selection_gates.def|tests/harness/src/test_lint_selection.c", "lint_selection make_lint_gates")

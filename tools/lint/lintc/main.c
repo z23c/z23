@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "lintc.h"
+#include "premise.h"
 
 static const struct lint_gate k_gates[] = {
     { "check-no-python", check_no_python_run, check_no_python_selftest },
@@ -269,6 +270,26 @@ static const struct lint_gate k_gates[] = {
       check_macos_acceptance_selftest },
 };
 
+/* Premise-selection subcommands; they are tools, not gates, so --list and
+ * the gate table never name them. */
+static const struct {
+    const char *name;
+    int (*main)(int argc, char **argv);
+} k_tools[] = {
+    { "select", lint_select_main },
+    { "premise", lint_premise_main },
+};
+
+/* The premise-selection tool named by argv[1], or NULL. */
+static int (*find_tool(const char *name))(int, char **)
+{
+    for (size_t i = 0; i < sizeof k_tools / sizeof k_tools[0]; i++) {
+        if (strcmp(name, k_tools[i].name) == 0)
+            return k_tools[i].main;
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     g_lint_argv0 = argc > 0 ? argv[0] : NULL;
@@ -282,6 +303,9 @@ int main(int argc, char **argv)
     if (argc < 2)
         return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --families\n",
                    "");
+    int (*tool)(int, char **) = find_tool(argv[1]);
+    if (tool)
+        return tool(argc - 2, argv + 2);
     const struct lint_gate *g = NULL;
     for (size_t i = 0; i < sizeof k_gates / sizeof k_gates[0]; i++) {
         if (strcmp(argv[1], k_gates[i].name) == 0)

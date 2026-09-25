@@ -824,6 +824,8 @@ int test_coldimport_restart_fragility(void);
 int test_territory(void);
 /* The MVP experiment ledger (tests/harness/src/test_mvp_ledger.c). */
 int test_mvp_ledger(void);
+/* Base-relative lint premise selection (tests/harness/src/test_lint_selection.c). */
+int test_lint_selection(void);
 
 /* Spec-based user story tests (one per feature area) */
 int spec_wallet_dashboard(void);

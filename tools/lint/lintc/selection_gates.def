@@ -1,0 +1,45 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: the per-TU gates premise selection can describe, and the policy
+ * files that are part of every one of their premises.
+ *
+ * SELECTION_REMOTE(locator)   where the base's anchoring tip is read
+ * SELECTION_POLICY(path)      selection engine and policy bytes; an edit to
+ *                             any of them makes every unit of every gate fresh
+ * SELECTION_GATE(name, units, gate_files, make_vars, baselines)
+ *   units       how the gate enumerates its translation units
+ *   gate_files  space-separated: the gate script plus everything it sources
+ *               or reads as code (helpers, force-included headers, defs)
+ *   make_vars   space-separated Makefile variables whose text the gate
+ *               reads; referenced variables are followed automatically
+ *   baselines   space-separated baseline files; a unit's own rows are its
+ *               premise, the rest of the file is not
+ *
+ * Toolchain identity is the in-tree pin tools/dev/toolchain.pin (absent
+ * until the pin slice lands; absence is itself a hashed state).
+ */
+
+SELECTION_REMOTE("https://github.com/z23c/z23.git")
+
+SELECTION_POLICY("tools/lint/lintc/premise.h")
+SELECTION_POLICY("tools/lint/lintc/premise.c")
+SELECTION_POLICY("tools/lint/lintc/premise_tree.c")
+SELECTION_POLICY("tools/lint/lintc/premise_git.c")
+SELECTION_POLICY("tools/lint/lintc/premise_include.c")
+SELECTION_POLICY("tools/lint/lintc/premise_make.c")
+SELECTION_POLICY("tools/lint/lintc/selection.c")
+SELECTION_POLICY("tools/lint/lintc/selection_gates.def")
+
+SELECTION_GATE("check-windows-cross-syntax", SELECTION_UNITS_NODE_C23_WINDOWS,
+    "tools/lint/check_windows_cross_syntax.sh tools/lint/gate_lib.sh "
+    "tools/lint/tu_result_cache.sh tests/harness/include/test/windows_compat.h",
+    "ZCL_WINDOWS_API_FLOOR ZCL_PLATFORM_CPPFLAGS",
+    "tools/lint/windows_cross_syntax_baseline.txt")
+
+SELECTION_GATE("check-clang-portability", SELECTION_UNITS_CLANG_ORACLE,
+    "tools/lint/check_clang_portability.sh tools/lint/gate_lib.sh "
+    "tools/lint/repo_shape.sh tools/lint/tu_result_cache.sh "
+    "engine/composition/lib_module_order.def",
+    "PRODUCT_CONTEXTS APP_DIRS CORE_CONTEXTS APPLICATION_CONTEXTS",
+    "tools/lint/portability_baseline.clang.txt "
+    "tools/lint/portability_baseline.gcc.txt")

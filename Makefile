@@ -3070,6 +3070,12 @@ CHAOS_SIM_SRCS = tools/sim/sim_peer.c
 # group proves, and linking the CLI's entry point would collide with the
 # harness's own.
 TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
+# The premise-selection core (no main) is proven by the lint_selection group.
+# It drives POSIX Git subprocesses, so Windows hosts leave it out.
+LINTC_PREMISE_CORE_SRCS = tools/lint/lintc/premise.c tools/lint/lintc/premise_tree.c \
+	tools/lint/lintc/premise_git.c tools/lint/lintc/premise_include.c \
+	tools/lint/lintc/premise_make.c
+TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS))
 
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
@@ -3085,7 +3091,7 @@ ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES = $(if $(ZCL_HOST_WINDOWS),\
 	$(ZCL_WINDOWS_ACCEPTANCE_$(t)_SOURCES))),)
 TEST_SRCS_NO_MAIN = $(filter-out tests/harness/src/test.c tests/harness/src/test_parallel.c \
 	$(ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES), $(TEST_SRCS)) \
-	$(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
+	$(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS) $(TEST_LINT_SELECTION_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) tests/harness/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
@@ -5678,7 +5684,15 @@ EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 LINTC_TOOL = $(BIN_DIR)/z23-lint
 LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     -D_POSIX_C_SOURCE=200809L -Iplatform/modules/base/include \
+    -Iplatform/modules/sha3/include \
     $(ZCL_PLATFORM_CPPFLAGS) $(REPRO_CFLAGS)
+# Base-relative premise selection (tools/lint/lintc/premise.h): the premise
+# core and its `select --dry` / `premise` subcommands. Information only.
+LINTC_PREMISE_SRCS = $(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/selection.c
+# Repository sources z23-lint links as-is (compiled with LINTC_CFLAGS into
+# build/lintc-obj/node/): SHA3-256 for premise roots.
+LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c
+LINTC_NODE_OBJS = $(LINTC_NODE_SRCS:%.c=build/lintc-obj/node/%.o)
 LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_hotswap_candidates_ledger.c tools/lint/lintc/gate_source_patterns.c \
     tools/lint/lintc/gate_pattern_small.c tools/lint/lintc/gate_wire_dial.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_tree_walk_selftests.c tools/lint/lintc/gate_git_scan_a.c \
@@ -5800,6 +5814,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_macos_acceptance.c \
     tools/lint/lintc/gate_macos_acceptance_parse.c \
     tools/lint/lintc/gate_macos_acceptance_selftest.c \
+    $(LINTC_PREMISE_SRCS) \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11489,7 +11504,7 @@ endif
 endif
 endif
 
-COV_TEST_SRCS := $(filter-out tests/harness/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
+COV_TEST_SRCS := $(filter-out tests/harness/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS) $(TEST_LINT_SELECTION_SRCS)
 COV_OBJS := $(patsubst %.c,$(COV_BUILD_DIR)/%.o,$(COV_TEST_SRCS) $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS))
 COV_LINK_RSP = $(COV_BUILD_DIR)/link-inputs.rsp
 
@@ -13551,9 +13566,16 @@ build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h
 	$(CC) $(LINTC_CFLAGS) -c -o $@ $<
 	$(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only $<,echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $<")
 
-$(LINTC_TOOL): $(LINTC_OBJS)
+$(LINTC_PREMISE_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o) build/lintc-obj/main.o: \
+	tools/lint/lintc/premise.h tools/lint/lintc/selection_gates.def
+
+build/lintc-obj/node/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(LINTC_CFLAGS) -o $@ $(LINTC_OBJS)
+	$(CC) $(LINTC_CFLAGS) -c -o $@ $<
+
+$(LINTC_TOOL): $(LINTC_OBJS) $(LINTC_NODE_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LINTC_CFLAGS) -o $@ $(LINTC_OBJS) $(LINTC_NODE_OBJS)
 
 .PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)
