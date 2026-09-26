@@ -839,6 +839,9 @@ static void test_derive_allowlist(struct fx *x,
                  fx_same(x, b));
     fx_check_flag(x, b, "argv: an allowlisted -march moves the flags", 6,
                   "-march=x86-64-v3");
+    fx_check_flag(x, b, "argv: a -frandom-seed= string (every dev object "
+                  "carries one) is bound by value and moves the flags", 6,
+                  "-frandom-seed=src/unit.c");
 }
 
 /* A name that climbs ("../defs.h") is bound only as a quote name found
@@ -935,10 +938,18 @@ static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
            snprintf(cc, PATH_MAX, "%s", path) < PATH_MAX;
 }
 
+/* The fake driver strips -mcpu= (it only selects its built-in list); the
+ * host driver is asked with plain flags. */
+static const char *fx_key_cflags(const char *cc)
+{
+    return strcmp(cc, "cc") == 0 ? "-std=c23 -Iinc_a -Iinc_b -DFOO=1"
+                                 : "-std=c23 -Iinc_a -Iinc_b -DFOO=1 -mcpu=alt";
+}
+
 static bool fx_key(struct fx *x, const char *cc, char out[65])
 {
     char miss[40] = {0};
-    const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1 -mcpu=alt";
+    const char *cflags = fx_key_cflags(cc);
     bool ok = zcl_devloop_action_root_key(x->root, "src/unit.c", cc, cflags,
                                           "-shared", NULL, x->depfile, NULL, out,
                                           miss);
@@ -1031,7 +1042,7 @@ static bool fx_as_version(const struct fx *x, char out[128])
 static bool fx_key_miss(struct fx *x, const char *cc, const char *code)
 {
     char key[65] = {0}, miss[40] = {0};
-    const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1 -mcpu=alt";
+    const char *cflags = fx_key_cflags(cc);
     bool missed = !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
                                                cflags, "-shared", NULL,
                                                x->depfile, NULL, key, miss);
