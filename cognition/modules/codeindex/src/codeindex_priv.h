@@ -46,8 +46,10 @@
  * file, symbol, and reference row is sealed by one canonical logical root.
  * "ret2" adds content-addressed per-file scan shards so a changed source can
  * replace only its own derived rows without weakening that logical seal.
- * "ret3" invalidates generations seeded across different depfile graphs. */
-#define CI_SCHEMA_VERSION "ret3"
+ * "ret3" invalidates generations seeded across different depfile graphs.
+ * "ret4" keeps a depfile prerequisite the checkout no longer holds; a ret3
+ * generation dropped that edge while its depfile bytes were unchanged. */
+#define CI_SCHEMA_VERSION "ret4"
 #define CI_STORE_FORMAT "zcl.codeindex.store.v5"
 #define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 
