@@ -472,6 +472,33 @@ int codeindex_impact_closure_bounded(
  * opposite facts, and conflating them is defect D4: a fresh clone would
  * answer every reverse-include question with a confident, complete-looking
  * zero. */
+static enum codeindex_include_dim empty_include_dim(bool refused)
+{
+    return refused ? CODEINDEX_INCLUDE_DIM_TRUNCATED
+                   : CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+}
+
+static enum codeindex_include_dim filled_include_dim(bool refused)
+{
+    return refused ? CODEINDEX_INCLUDE_DIM_TRUNCATED
+                   : CODEINDEX_INCLUDE_DIM_COMPLETE;
+}
+
+static bool include_narrow_refused(const struct codeindex *ci)
+{
+    char bit[4];
+    size_t len = 0;
+    bool found = false;
+    if (!ci || !ci->store)
+        return true;
+    if (!ci_store_meta_get(ci->store, "include_narrow_unsafe", bit, sizeof bit,
+                           &len, &found))
+        return true;
+    if (!found || len != 1)
+        return true;
+    return bit[0] == '1';
+}
+
 const char *codeindex_include_dim_label(enum codeindex_include_dim dim)
 {
     switch (dim) {
@@ -492,12 +519,14 @@ int codeindex_reverse_includes(struct codeindex *ci, const char *path,
         LOG_ERR("codeindex", "bad args to codeindex_reverse_includes");
 
     int64_t edges = ci_store_include_edge_count(ci->store);
+    bool narrow_refused = include_narrow_refused(ci);
     if (edges < 0)
         LOG_ERR("codeindex", "include edge count failed");
     if (edges == 0) {
         /* No depfiles were on disk when this index was built. Every reverse
-         * question is UNANSWERED, not answered with zero. */
-        *dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+         * question is UNANSWERED, not answered with zero. A depfile that
+         * existed but could not be trusted is closure-truncated instead. */
+        *dim = empty_include_dim(narrow_refused);
         return 0;
     }
 
@@ -521,7 +550,7 @@ int codeindex_reverse_includes(struct codeindex *ci, const char *path,
             return n;
         }
     }
-    *dim = CODEINDEX_INCLUDE_DIM_COMPLETE;
+    *dim = filled_include_dim(narrow_refused);
     return n;
 }
 

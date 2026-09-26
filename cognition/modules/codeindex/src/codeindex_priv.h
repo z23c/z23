@@ -393,6 +393,9 @@ typedef void (*ci_dep_cb)(const char *src_relpath, const char *dep_relpath,
  * including an explicit marker when build/ is absent. */
 bool ci_deps_scan(const char *root, ci_dep_cb cb, void *user,
                   uint8_t out_root[32]);
+/* True after the latest deps scan saw a depfile that must not be answered
+ * as a complete narrow include closure. */
+bool ci_deps_include_narrow_unsafe(void);
 bool ci_deps_scan_roots(const char *root, ci_dep_cb cb, void *user,
                         uint8_t exact_out[32], uint8_t stat_out[32]);
 /* Metadata cache key for ci_deps_scan's exact root. Both functions read the

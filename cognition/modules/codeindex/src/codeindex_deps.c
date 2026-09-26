@@ -16,7 +16,10 @@
  * graph, so a registry edit moved no downstream content key and busted no
  * cache. The depfile is the authority; if the compiler read it, it is an edge.
  * A listed path that is not a regular file in this checkout is omitted: a
- * retained epoch can still name a layout this tree no longer has.
+ * retained epoch can still name a layout this tree no longer has. Omitting
+ * that path, or trusting a depfile that is incomplete, older than its
+ * translation unit, or missing a quoted include that exists in the tree,
+ * does not make the include answer complete.
  *
  * Depfiles are written into a per-build compile epoch,
  * `<object-root>/epochs/<64-hex>/`. Every build mints a new epoch and the
@@ -104,6 +107,28 @@ static bool rel_is_regular_file(const char *root, const char *rel)
     return S_ISREG(st.st_mode);
 }
 
+/* Set when a scanned depfile cannot support a complete narrow include answer.
+ * Reset at the start of each deps scan. The build stores the bit. */
+static int g_include_narrow_unsafe;
+
+bool ci_deps_include_narrow_unsafe(void)
+{
+    return g_include_narrow_unsafe != 0;
+}
+
+static void note_include_narrow_unsafe(void)
+{
+    g_include_narrow_unsafe = 1;
+}
+
+static bool dep_prerequisite_kept(const char *root, const char *rel)
+{
+    if (rel_is_regular_file(root, rel))
+        return true;
+    note_include_narrow_unsafe();
+    return false;
+}
+
 /* Parse one depfile's text; emit (src, dep) edges. */
 static void parse_depfile(const char *root, char *text, size_t len,
                           ci_dep_cb cb, void *user)
@@ -140,7 +165,7 @@ static void parse_depfile(const char *root, char *text, size_t len,
             /* Every remaining in-tree prerequisite is an edge — no extension
              * filter (see the file header: *.def registries are prerequisites
              * too, and an allowlist dropped them). */
-            if (have_src && rel_is_regular_file(root, rel))
+            if (have_src && dep_prerequisite_kept(root, rel))
                 cb(src_rel, rel, user);
         }
     }
@@ -352,6 +377,166 @@ static void dep_stat_root_add(struct sha3_256_ctx *sha, const char *relpath,
     dep_sha_write_u64le(sha, st->changed_nanoseconds);
 }
 
+static void note_depfile_incomplete(const char *text, size_t len)
+{
+    if (len == 0)
+        return;
+    if (text[len - 1] != '\n' || (len >= 2 && text[len - 2] == '\\'))
+        note_include_narrow_unsafe();
+}
+
+static bool dep_text_lists(const char *text, const char *token)
+{
+    size_t n = strlen(token);
+    const char *p = text;
+    while ((p = strstr(p, token)) != NULL) {
+        char before = p == text ? ' ' : p[-1];
+        char after = p[n];
+        if ((before == ' ' || before == '\t' || before == '\n' ||
+             before == ':' || before == '/') &&
+            (after == '\0' || after == ' ' || after == '\t' ||
+             after == '\n' || after == '\\' || after == ':'))
+            return true;
+        p += n;
+    }
+    return false;
+}
+
+static bool dep_outside_tree(const char *tok)
+{
+    return tok[0] == '/' || strncmp(tok, "../", 3) == 0 ||
+           (isalpha((unsigned char)tok[0]) && tok[1] == ':');
+}
+
+static void note_changed_includes(const char *root, const char *src,
+                                  const char *dep_text)
+{
+    char path[CI_PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/%s", root, src);
+    if (n <= 0 || (size_t)n >= sizeof path) {
+        note_include_narrow_unsafe();
+        return;
+    }
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        note_include_narrow_unsafe();
+        return;
+    }
+    char line[1024];
+    while (fgets(line, sizeof line, file) != NULL) {
+        char *quoted = strstr(line, "#include \"");
+        char *end;
+        if (!quoted)
+            continue;
+        quoted += 10;
+        end = strchr(quoted, '"');
+        if (!end)
+            continue;
+        *end = '\0';
+        if (!dep_outside_tree(quoted) && rel_is_regular_file(root, quoted) &&
+            !dep_text_lists(dep_text, quoted))
+            note_include_narrow_unsafe();
+    }
+    fclose(file);
+}
+
+static void note_source_newer_than_depfile(
+    const char *root, const char *src,
+    const struct platform_positioned_file_snapshot *dep)
+{
+    char path[CI_PATH_MAX];
+    struct stat st;
+    int n = snprintf(path, sizeof path, "%s/%s", root, src);
+    if (n <= 0 || (size_t)n >= sizeof path || stat(path, &st) != 0) {
+        note_include_narrow_unsafe();
+        return;
+    }
+#if defined(_WIN32)
+    int64_t sec = (int64_t)st.st_mtime;
+    uint32_t nsec = 0;
+#else
+    int64_t sec = (int64_t)st.st_mtim.tv_sec;
+    uint32_t nsec = (uint32_t)st.st_mtim.tv_nsec;
+#endif
+    if (sec > dep->modified_seconds ||
+        (sec == dep->modified_seconds && nsec > dep->modified_nanoseconds))
+        note_include_narrow_unsafe();
+}
+
+static bool dep_take_token(const char *text, size_t len, size_t *io,
+                           char *out, size_t cap)
+{
+    size_t i = *io;
+    size_t start;
+    size_t n;
+    while (i < len && (text[i] == ' ' || text[i] == '\t'))
+        i++;
+    if (i >= len || text[i] == '\n') {
+        *io = i;
+        return false;
+    }
+    start = i;
+    while (i < len && text[i] != ' ' && text[i] != '\t' && text[i] != '\n' &&
+           !(text[i] == '\\' && i + 1 < len && text[i + 1] == '\n'))
+        i++;
+    n = i - start;
+    *io = i;
+    if (n == 0 || n >= cap)
+        return false;
+    memcpy(out, text + start, n);
+    out[n] = '\0';
+    return true;
+}
+
+static void note_depfile_rule_gaps(
+    const char *root, const char *text, size_t len,
+    const struct platform_positioned_file_snapshot *dep)
+{
+    bool after_colon = false;
+    bool saw_source = false;
+    char token[CI_PATH_MAX];
+    size_t i = 0;
+    while (i < len) {
+        if (text[i] == '\\' && i + 1 < len && text[i + 1] == '\n') {
+            i += 2;
+            continue;
+        }
+        if (!after_colon) {
+            if (text[i] == ':')
+                after_colon = true;
+            i++;
+            continue;
+        }
+        if (text[i] == '\n') {
+            after_colon = false;
+            saw_source = false;
+            i++;
+            continue;
+        }
+        if (!dep_take_token(text, len, &i, token, sizeof token))
+            continue;
+        if (dep_outside_tree(token))
+            continue;
+        if (!saw_source && (has_ext(token, ".c") || has_ext(token, ".cc") ||
+                            has_ext(token, ".c23"))) {
+            saw_source = true;
+            note_source_newer_than_depfile(root, token, dep);
+            note_changed_includes(root, token, text);
+            continue;
+        }
+        if (!rel_is_regular_file(root, token))
+            note_include_narrow_unsafe();
+    }
+}
+
+static void note_depfile_narrow_safety(
+    const char *root, const char *text, size_t len,
+    const struct platform_positioned_file_snapshot *dep)
+{
+    note_depfile_incomplete(text, len);
+    note_depfile_rule_gaps(root, text, len, dep);
+}
+
 static bool scan_one_depfile(const char *root, const char *relpath,
                              ci_dep_cb cb, void *user,
                              struct sha3_256_ctx *sha,
@@ -405,6 +590,7 @@ static bool scan_one_depfile(const char *root, const char *relpath,
     sha3_256_write(sha, (const unsigned char *)buf, len);
     ci_test_note_exact_bytes((uint64_t)len);
     if (stat_sha) dep_stat_root_add(stat_sha, relpath, &after);
+    note_depfile_narrow_safety(root, buf, len, &after);
     if (cb) parse_depfile(root, buf, len, cb, user);
     free(buf);
     return true;
@@ -413,6 +599,7 @@ static bool scan_one_depfile(const char *root, const char *relpath,
 static bool deps_scan_exact(const char *root, ci_dep_cb cb, void *user,
                             uint8_t exact_out[32], uint8_t stat_out[32])
 {
+    g_include_narrow_unsafe = 0;
     if (!root || !exact_out)
         LOG_FAIL("codeindex", "null arg to deps_scan");
     char build[CI_PATH_MAX];

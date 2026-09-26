@@ -173,6 +173,12 @@ static bool build_roots_match(const char *root,
     return true;
 }
 
+static bool store_include_narrow_meta(struct ci_store *store)
+{
+    const char *bit = ci_deps_include_narrow_unsafe() ? "1" : "0";
+    return ci_store_meta_set(store, "include_narrow_unsafe", bit, 1);
+}
+
 static bool write_cold_receipt_and_counts(struct ci_store *store,
                                           int64_t build_start_ms,
                                           size_t nids)
@@ -190,6 +196,7 @@ static bool write_cold_receipt_and_counts(struct ci_store *store,
                              (size_t)ms_n) &&
            ci_store_meta_set(store, "build_cold_files", cold_files_text,
                              (size_t)files_n) &&
+           store_include_narrow_meta(store) &&
            ci_store_write_table_count_meta(store);
 }
 

@@ -43,9 +43,11 @@
 #include "json/json.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <utime.h>
 
 #define CI_IMPACT_FIX "test-tmp/code_impact_fix"
 #define CI_CONTEXT_PAGE_EDGES 257
@@ -710,10 +712,145 @@ static int test_code_impact_rule_predicate(void)
     return failures;
 }
 
+/* A depfile that is incomplete, stale, missing a prerequisite, or behind
+ * the source include graph must not be answered as a complete narrow impact.
+ * The clean control stays complete, and the three compile-scope refusals
+ * still fire. */
+#define CI_NARROW_FIX "test-tmp/code_impact_narrow"
+
+static bool ci_narrow_dim(const char *root, const char *path,
+                          char *dim, size_t cap, long long *count)
+{
+    struct zcl_command_reply reply;
+    ci_impact_call(path, root, &reply);
+    const char *got = json_get_str(json_get(&reply.data, "include_dimension"));
+    snprintf(dim, cap, "%s", got ? got : "");
+    *count = json_get_int(json_get(&reply.data, "include_dependent_count"));
+    bool ok = reply.exit_code == ZCL_COMMAND_EXIT_OK;
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+static bool ci_narrow_base(const char *dir, const char *src, const char *dep)
+{
+    return ci_impact_mk_write(dir, "core/modules/net/include/net/real.h",
+                              "int ci_narrow_real(void);\n") &&
+           ci_impact_mk_write(dir, "core/modules/net/src/narrow.c", src) &&
+           ci_impact_mk_write(dir, "build/obj/narrow.d", dep);
+}
+
+static void ci_narrow_touch_source_newer(const char *dir)
+{
+    char dep[512], src[512];
+    struct stat st;
+    snprintf(dep, sizeof dep, "%s/build/obj/narrow.d", dir);
+    snprintf(src, sizeof src, "%s/core/modules/net/src/narrow.c", dir);
+    if (stat(dep, &st) != 0)
+        return;
+    struct utimbuf times;
+    times.actime = st.st_mtime + 5;
+    times.modtime = st.st_mtime + 5;
+    (void)utime(src, &times);
+}
+
+static int ci_narrow_one(const char *name, const char *src, const char *dep,
+                         const char *query, bool expect_complete)
+{
+    int failures = 0;
+    char dir[256];
+    snprintf(dir, sizeof dir, CI_NARROW_FIX "/%s", name);
+    system("rm -rf " CI_NARROW_FIX);
+    bool ready = ci_narrow_base(dir, src, dep);
+    if (strcmp(name, "changed") == 0) {
+        ready = ready && ci_impact_mk_write(
+            dir, "core/modules/net/include/net/extra.h",
+            "int ci_narrow_extra(void);\n");
+    }
+    if (strcmp(name, "stale") == 0)
+        ci_narrow_touch_source_newer(dir);
+    char dim[64] = "";
+    long long count = -1;
+    bool ok = ready && ci_narrow_dim(dir, query, dim, sizeof dim, &count);
+    printf("invariant=unsafe_narrow_include_dimension case=%s "
+           "include_dimension=%s include_dependent_count=%lld ok=%d\n",
+           name, dim, count, ok ? 1 : 0);
+    TEST("code_impact: depfile evidence cannot yield an unsafe narrow impact") {
+        ASSERT(ok);
+        if (expect_complete)
+            ASSERT(strcmp(dim, "complete") == 0 && count >= 1);
+        else
+            ASSERT(strcmp(dim, "complete") != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_impact_unsafe_narrow(void)
+{
+    static const char *const src_plain =
+        "/* narrow */\n#include \"net/real.h\"\nint ci_narrow(void){return 1;}\n";
+    static const char *const dep_clean =
+        "build/obj/narrow.o: core/modules/net/src/narrow.c "
+        "core/modules/net/include/net/real.h\n";
+    static const char *const dep_missing =
+        "build/obj/narrow.o: core/modules/net/src/narrow.c "
+        "core/modules/net/include/net/real.h "
+        "core/modules/net/include/net/missing.h\n";
+    static const char *const dep_incomplete =
+        "build/obj/narrow.o: core/modules/net/src/narrow.c "
+        "core/modules/net/include/net/real.h";
+    static const char *const src_changed =
+        "/* narrow */\n#include \"net/real.h\"\n"
+        "#include \"core/modules/net/include/net/extra.h\"\n"
+        "int ci_narrow(void){return 1;}\n";
+    int failures = 0;
+    failures += ci_narrow_one("clean", src_plain, dep_clean,
+                              "core/modules/net/include/net/real.h", true);
+    failures += ci_narrow_one("missing", src_plain, dep_missing,
+                              "core/modules/net/include/net/missing.h", false);
+    failures += ci_narrow_one("incomplete", src_plain, dep_incomplete,
+                              "core/modules/net/include/net/real.h", false);
+    failures += ci_narrow_one("stale", src_plain, dep_clean,
+                              "core/modules/net/include/net/real.h", false);
+    failures += ci_narrow_one("changed", src_changed, dep_clean,
+                              "core/modules/net/include/net/extra.h", false);
+    system("rm -rf " CI_NARROW_FIX);
+    return failures;
+}
+
+static int test_code_impact_scope_refusals(void)
+{
+    int failures = 0;
+    TEST("code_impact: conflict, incomplete closure, and missing receipt still refuse") {
+        char buf[1024];
+        size_t used = 0;
+        FILE *pipe = popen("tools/agent_fast_ci.sh compile-scope-selftest", "r");
+        ASSERT(pipe != NULL);
+        buf[0] = '\0';
+        while (pipe && used + 1 < sizeof buf) {
+            size_t got = fread(buf + used, 1, sizeof buf - used - 1, pipe);
+            if (got == 0)
+                break;
+            used += got;
+        }
+        buf[used] = '\0';
+        printf("%s\n", buf);
+        int closed = pipe ? pclose(pipe) : 1;
+        ASSERT(closed == 0);
+        ASSERT(strstr(buf, "proof_observation_conflict") != NULL);
+        ASSERT(strstr(buf, "closure_incomplete") != NULL);
+        ASSERT(strstr(buf, "missing_receipt") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_impact(void)
 {
     int failures = 0;
     failures += test_code_impact_rule_predicate();
+    failures += test_code_impact_unsafe_narrow();
+    failures += test_code_impact_scope_refusals();
     failures += test_code_impact_hub();
     failures += test_code_impact_leaf();
     failures += test_code_impact_missing_path();
