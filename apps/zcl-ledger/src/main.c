@@ -237,10 +237,59 @@ static bool parse_command(int argc, char **argv, const char *name,
     return true;
 }
 
+static int fixture_info(const char *path, bool json) {
+    static const uint8_t probe[] = {0xa5, 0x01, 0, 0, 0};
+    static const uint8_t request[] = {0xa5, 0x02, 0, 0, 0};
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return error_result(json, "open_failed", "Cannot open the selected HID device.");
+    struct hidraw_devinfo info;
+    if (ioctl(fd, HIDIOCGRAWINFO, &info) < 0 ||
+        info.vendor != 0x2c97 || info.product != 0) {
+        close(fd);
+        return error_result(json, "not_blue", "The selected device is not a Ledger Blue.");
+    }
+    uint8_t reply[LEDGER_HID_MAX_RESPONSE];
+    size_t length = 0;
+    int matched = ledger_hid_exchange(fd, probe, sizeof probe, reply,
+                                      sizeof reply, &length) == 0 &&
+                  ledger_fixture_probe_parse(reply, length) == 0;
+    if (!matched) {
+        close(fd);
+        return error_result(json, "wrong_app", "Open ZCL Fixture on the Blue first.");
+    }
+    int received = ledger_hid_exchange(fd, request, sizeof request,
+                                       reply, sizeof reply, &length) == 0;
+    close(fd);
+    if (!received)
+        return error_result(json, "no_fixture_response", "Fixture APDU did not answer.");
+    if (length >= 2 && (reply[length - 2] != 0x90 || reply[length - 1] != 0)) {
+        unsigned int status = ((unsigned int)reply[length - 2] << 8) |
+                              reply[length - 1];
+        if (json)
+            printf("{\"ok\":false,\"error\":\"device_status\",\"status\":\"%04x\"}\n",
+                   status);
+        else fprintf(stderr, "Fixture APDU returned status %04x.\n", status);
+        return 1;
+    }
+    char address[ZCL_ADDRESS_SIZE];
+    if (ledger_fixture_key_parse(reply, length) < 0 ||
+        zcl_address_from_pubkey(reply, address) < 0 ||
+        strcmp(address, "t1UYsZVJkLPeMjxEtACvSxfWuNmddpWfxzs") != 0)
+        return error_result(json, "invalid_fixture", "Unexpected fixture public key or address.");
+    if (json)
+        printf("{\"ok\":true,\"fixture\":true,\"address\":\"%s\",\"wallet_address\":false}\n",
+               address);
+    else printf("PUBLIC FIXTURE ONLY; not your wallet address: %s\n", address);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    bool json;
+    if (parse_command(argc, argv, "fixture-address", 3, &json))
+        return fixture_info(argv[argc - 1], json);
     if (argc == 3 && strcmp(argv[1], "address-from-pubkey") == 0)
         return address_from_pubkey(argv[2]);
-    bool json;
     if (parse_command(argc, argv, "devices", 2, &json))
         return list_devices(json);
     if (parse_command(argc, argv, "app-info", 3, &json))
@@ -249,11 +298,12 @@ int main(int argc, char **argv) {
         return probe_info(argv[argc - 1], json);
     if (argc == 3 && strcmp(argv[1], "quit") == 0)
         return quit_app(argv[2]);
-    fprintf(stderr, "Usage: %s address-from-pubkey COMPRESSED_PUBKEY_HEX\n"
+    fprintf(stderr, "Usage: %s fixture-address [--json] /dev/hidrawN\n"
+                    "       %s address-from-pubkey COMPRESSED_PUBKEY_HEX\n"
                     "       %s devices [--json]\n"
                     "       %s app-info [--json] /dev/hidrawN\n"
                     "       %s probe [--json] /dev/hidrawN\n"
                     "       %s quit /dev/hidrawN\n",
-            argv[0], argv[0], argv[0], argv[0], argv[0]);
+            argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
     return 2;
 }

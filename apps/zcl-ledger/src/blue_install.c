@@ -16,11 +16,26 @@
 #include <unistd.h>
 
 enum { TARGET_ID = 0x31010004, MAX_CODE = 65536, CHUNK = 208 };
-static const uint8_t expected_code_hash[32] = {
-    0xb3, 0x87, 0x04, 0xd3, 0x47, 0x6a, 0xc9, 0x91,
-    0x4d, 0xde, 0x5d, 0x81, 0x6d, 0xe8, 0x89, 0x30,
-    0xed, 0x70, 0x5b, 0xdd, 0x53, 0x24, 0x69, 0x03,
-    0x41, 0x9c, 0x1c, 0xb9, 0x62, 0x11, 0xeb, 0x33
+typedef struct {
+    const char *name;
+    uint8_t hash[32];
+} app_profile;
+
+static const app_profile profiles[] = {
+    {
+        "ZCL Probe",
+        {0xb3, 0x87, 0x04, 0xd3, 0x47, 0x6a, 0xc9, 0x91,
+         0x4d, 0xde, 0x5d, 0x81, 0x6d, 0xe8, 0x89, 0x30,
+         0xed, 0x70, 0x5b, 0xdd, 0x53, 0x24, 0x69, 0x03,
+         0x41, 0x9c, 0x1c, 0xb9, 0x62, 0x11, 0xeb, 0x33}
+    },
+    {
+        "ZCL Fixture",
+        {0xf1, 0x0b, 0xc3, 0x66, 0xc6, 0xea, 0xcb, 0xeb,
+         0x58, 0xc6, 0x36, 0x2d, 0xca, 0x39, 0x15, 0x19,
+         0x3d, 0x4b, 0x76, 0x47, 0x7c, 0x89, 0x86, 0x30,
+         0xe7, 0x9e, 0x09, 0x6a, 0xe9, 0x9a, 0xe4, 0xc6}
+    }
 };
 
 typedef struct {
@@ -249,31 +264,39 @@ static int load_segment(installer *device, uint32_t address,
     return no_reply(device, 0, 0, command, 9);
 }
 
-static int install(installer *device, const uint8_t *code, size_t code_length) {
-    static const uint8_t params[] = {
-        0x01, 9, 'Z','C','L',' ','P','r','o','b','e',
-        0x02, 5, '0','.','1','.','0',
-        0x04, 1, 0
-    };
+static int install(installer *device, const uint8_t *code,
+                   size_t code_length, const app_profile *profile) {
+    size_t name_length = strlen(profile->name);
     if (code_length < 1024 || code_length > MAX_CODE || code_length % 64)
         return -1;
+    uint8_t params[2 + 32 + 2 + 5 + 3];
+    size_t params_length = 0;
+    if (name_length > 32) return -1;
+    params[params_length++] = 0x01;
+    params[params_length++] = (uint8_t)name_length;
+    memcpy(params + params_length, profile->name, name_length);
+    params_length += name_length;
+    static const uint8_t suffix[] = {0x02, 5, '0','.','1','.','0', 0x04, 1, 0};
+    memcpy(params + params_length, suffix, sizeof suffix);
+    params_length += sizeof suffix;
     uint8_t create[21] = {0x0b};
     put_be32(create + 1, (uint32_t)code_length);
-    put_be32(create + 9, sizeof params);
+    put_be32(create + 9, (uint32_t)params_length);
     put_be32(create + 17, 1);
-    puts("Creating the ZCL Probe app slot.");
+    printf("Creating the %s app slot.\n", profile->name);
     if (no_reply(device, 0, 0, create, sizeof create) < 0) return -1;
-    puts("Loading the ZCL Probe code.");
+    printf("Loading the %s code.\n", profile->name);
     if (load_segment(device, 0, code, code_length) < 0) return -1;
-    puts("Loading the ZCL Probe name and version.");
+    printf("Loading the %s name and version.\n", profile->name);
     if (load_segment(device, (uint32_t)code_length,
-                     params, sizeof params) < 0) return -1;
-    puts("Committing the ZCL Probe app.");
+                     params, params_length) < 0) return -1;
+    printf("Committing the %s app.\n", profile->name);
     uint8_t commit = 0x09;
     return no_reply(device, 0, 0, &commit, 1);
 }
 
-static int read_binary(const char *path, uint8_t **data, size_t *length) {
+static int read_binary(const char *path, uint8_t **data, size_t *length,
+                       const app_profile **profile) {
     FILE *file = fopen(path, "rb");
     if (!file) return -1;
     uint8_t *bytes = malloc(MAX_CODE + 1);
@@ -282,11 +305,19 @@ static int read_binary(const char *path, uint8_t **data, size_t *length) {
         count >= 1024 && count <= MAX_CODE && count % 64 == 0 ? 0 : -1;
     fclose(file);
     uint8_t hash[32];
-    if (result == 0 && (!SHA256(bytes, count, hash) ||
-        CRYPTO_memcmp(hash, expected_code_hash, sizeof hash) != 0)) {
-        fputs("App image SHA-256 does not match the reviewed ZCL Probe build.\n",
-              stderr);
+    if (result == 0) {
         result = -1;
+        if (SHA256(bytes, count, hash)) {
+            for (size_t i = 0; i < sizeof profiles / sizeof profiles[0]; ++i) {
+                if (CRYPTO_memcmp(hash, profiles[i].hash, sizeof hash) == 0) {
+                    *profile = &profiles[i];
+                    result = 0;
+                    break;
+                }
+            }
+        }
+        if (result < 0)
+            fputs("App image SHA-256 does not match a reviewed build.\n", stderr);
     }
     if (result < 0) free(bytes);
     else { *data = bytes; *length = count; }
@@ -306,41 +337,49 @@ static int open_blue(const char *path) {
 }
 
 static int run_installer(installer *device, bool delete_app, bool channel_only,
+                         const app_profile *profile,
                          const uint8_t *code, size_t code_length) {
     int result = establish_channel(device);
     if (result == 0) result = verify_secure_version(device);
     if (result == 0 && delete_app) {
-        static const uint8_t delete_command[] = {
-            0x0c, 9, 'Z','C','L',' ','P','r','o','b','e'
-        };
+        uint8_t delete_command[2 + 32] = {0x0c};
+        size_t name_length = strlen(profile->name);
+        delete_command[1] = (uint8_t)name_length;
+        memcpy(delete_command + 2, profile->name, name_length);
         result = no_reply(device, 0, 0, delete_command,
-                          sizeof delete_command);
+                          2 + name_length);
     } else if (result == 0 && !channel_only) {
-        puts("Secure channel established; loading ZCL Probe.");
-        result = install(device, code, code_length);
+        printf("Secure channel established; loading %s.\n", profile->name);
+        result = install(device, code, code_length, profile);
     }
     return result;
 }
 
-static void report_result(int result, bool delete_app, bool channel_only) {
-    if (result == 0 && delete_app) puts("ZCL Probe delete command accepted by Ledger Blue.");
+static void report_result(int result, bool delete_app, bool channel_only,
+                          const app_profile *profile) {
+    if (result == 0 && delete_app)
+        printf("%s delete command accepted by Ledger Blue.\n", profile->name);
     else if (result == 0 && channel_only) puts("Ledger Blue secure channel established.");
-    else if (result == 0) puts("ZCL Probe install command accepted by Ledger Blue.");
+    else if (result == 0)
+        printf("%s install command accepted by Ledger Blue.\n", profile->name);
     else fputs("Ledger Blue installation failed. Check its screen.\n", stderr);
 }
 
 int main(int argc, char **argv) {
     bool channel_only = argc == 3 && strcmp(argv[2], "--channel-only") == 0;
-    bool delete_app = argc == 3 && strcmp(argv[2], "--delete") == 0;
+    bool delete_probe = argc == 3 && strcmp(argv[2], "--delete") == 0;
+    bool delete_fixture = argc == 3 && strcmp(argv[2], "--delete-fixture") == 0;
+    bool delete_app = delete_probe || delete_fixture;
     if (argc != 3) {
-        fprintf(stderr, "Usage: %s /dev/hidrawN app.bin|--channel-only|--delete\n", argv[0]);
+        fprintf(stderr, "Usage: %s /dev/hidrawN app.bin|--channel-only|--delete|--delete-fixture\n", argv[0]);
         return 2;
     }
     uint8_t *code = NULL;
     size_t code_length = 0;
+    const app_profile *profile = NULL;
     if (!channel_only && !delete_app &&
-        read_binary(argv[2], &code, &code_length) < 0) {
-        fputs("Expected the reviewed, 64-byte-aligned ZCL Probe binary.\n", stderr);
+        read_binary(argv[2], &code, &code_length, &profile) < 0) {
+        fputs("Expected a reviewed, 64-byte-aligned ZCL Probe or Fixture binary.\n", stderr);
         return 1;
     }
     int fd = open_blue(argv[1]);
@@ -349,9 +388,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     installer device = {.fd = fd};
+    if (delete_app) profile = &profiles[delete_fixture ? 1 : 0];
     int result = run_installer(&device, delete_app, channel_only,
-                               code, code_length);
-    report_result(result, delete_app, channel_only);
+                               profile, code, code_length);
+    report_result(result, delete_app, channel_only, profile);
     OPENSSL_cleanse(&device.channel, sizeof device.channel);
     close(fd);
     free(code);

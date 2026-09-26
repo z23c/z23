@@ -30,4 +30,8 @@ int ledger_hid_decode(const uint8_t report[LEDGER_HID_REPORT_SIZE],
 /* Probe version 1 grants no address or signing capabilities. */
 int ledger_probe_parse(const uint8_t *reply, size_t reply_len);
 
+/* Public fixture APDUs cannot be mistaken for a wallet-derived key. */
+int ledger_fixture_probe_parse(const uint8_t *reply, size_t reply_len);
+int ledger_fixture_key_parse(const uint8_t *reply, size_t reply_len);
+
 #endif

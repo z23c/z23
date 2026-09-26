@@ -59,9 +59,32 @@ static void test_probe_rejects_other_apps_and_permissions(void) {
     assert(ledger_probe_parse(reply, sizeof reply) < 0);
 }
 
+static void test_public_fixture_protocol(void) {
+    uint8_t probe[] = {'Z', 'C', 'L', 3, 0x80, 0x90, 0x00};
+    assert(ledger_fixture_probe_parse(probe, sizeof probe) == 0);
+    probe[4] = 1;
+    assert(ledger_fixture_probe_parse(probe, sizeof probe) < 0);
+    probe[4] = 0x80;
+    assert(ledger_fixture_probe_parse(probe, sizeof probe - 1) < 0);
+    uint8_t key[] = {
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb,
+        0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+        0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28,
+        0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+        0x90, 0x00
+    };
+    assert(ledger_fixture_key_parse(key, sizeof key) == 0);
+    key[0] = 3;
+    assert(ledger_fixture_key_parse(key, sizeof key) < 0);
+    key[0] = 2;
+    key[34] = 1;
+    assert(ledger_fixture_key_parse(key, sizeof key) < 0);
+}
+
 int main(void) {
     test_first_report();
     test_continuation_and_rejection();
     test_probe_rejects_other_apps_and_permissions();
+    test_public_fixture_protocol();
     return 0;
 }

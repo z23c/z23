@@ -4,11 +4,11 @@
 
 This standalone C23 host communicates with Ledger Blue over Linux `hidraw`.
 It reads app information, probes the ZCL device app, exits a running app, and
-installs or deletes the reviewed no-key ZCL Probe image through the Blue's
-secure channel. It does not need Ledger Live, Python, Rust, or a network
-connection at runtime. The host can encode a transparent address from a
-public key supplied separately. It does not derive device keys or addresses,
-sign transactions, or access recovery words.
+installs or deletes the reviewed no-key ZCL Probe or ZCL Fixture images through
+the Blue's secure channel. It does not need Ledger Live, Python, Rust, or a
+network connection at runtime. The host can encode a transparent address from
+a public key supplied separately or by the public fixture app. It does not
+derive device keys or addresses, sign transactions, or access recovery words.
 
 ## Build and test
 
@@ -47,10 +47,15 @@ The separate `zcl-blue-install` executable uses OpenSSL 3's open-source C
 crypto implementation for the Blue's secp256k1 and AES secure channel. It
 checks the Blue's USB product ID, verifies the session's device certificate,
 checks an encrypted target-ID response, and accepts only the pinned ZCL Probe
-binary. `--channel-only` checks the secure channel without installing. The
-installer currently targets the connected Blue v2 (`0x31010004`). See the
+or ZCL Fixture binary. `--channel-only` checks the secure channel without
+installing. The installer targets the connected Blue v2 (`0x31010004`). See the
 [device app instructions](device-blue/README.md) for the exact build and
 install commands.
+
+The [ZCL Fixture](device-blue-fixture/README.md) tests an exact public-key
+reply and host address encoding without touching the device seed. Run
+`zcl-ledger fixture-address --json /dev/hidrawN` while that app is open.
+Its result is explicitly marked as a fixture, never as a wallet address.
 
 The path is an example. `devices --json` returns an `ok` boolean and a
 `devices` array of objects with `path`, `model`, `vendor_id`, and `product_id`.
@@ -91,4 +96,5 @@ states that custom apps cannot be sideloaded onto a retail Nano X. Ledger's
 [Blue-specific legacy Bitcoin app](https://github.com/LedgerHQ/app-bitcoin-legacy/tree/blue-final-release)
 contains a ZClassic variant; it has not been built or installed here. The
 installed ZCL Probe proves only host-device communication, app display, exit,
-and secure loading. It provides no ZCL address or transaction signing.
+and secure loading. The fixture app tests a public constant, not wallet
+derivation or transaction signing.
