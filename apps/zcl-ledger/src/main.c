@@ -237,6 +237,19 @@ static bool parse_command(int argc, char **argv, const char *name,
     return true;
 }
 
+static bool fixture_status_failed(const uint8_t *reply, size_t length,
+                                  bool json) {
+    if (length < 2 || (reply[length - 2] == 0x90 && reply[length - 1] == 0))
+        return false;
+    unsigned int status = ((unsigned int)reply[length - 2] << 8) |
+                          reply[length - 1];
+    if (json)
+        printf("{\"ok\":false,\"error\":\"device_status\",\"status\":\"%04x\"}\n",
+               status);
+    else fprintf(stderr, "Fixture APDU returned status %04x.\n", status);
+    return true;
+}
+
 static int fixture_info(const char *path, bool json) {
     static const uint8_t probe[] = {0xa5, 0x01, 0, 0, 0};
     static const uint8_t request[] = {0xa5, 0x02, 0, 0, 0};
@@ -263,15 +276,8 @@ static int fixture_info(const char *path, bool json) {
     close(fd);
     if (!received)
         return error_result(json, "no_fixture_response", "Fixture APDU did not answer.");
-    if (length >= 2 && (reply[length - 2] != 0x90 || reply[length - 1] != 0)) {
-        unsigned int status = ((unsigned int)reply[length - 2] << 8) |
-                              reply[length - 1];
-        if (json)
-            printf("{\"ok\":false,\"error\":\"device_status\",\"status\":\"%04x\"}\n",
-                   status);
-        else fprintf(stderr, "Fixture APDU returned status %04x.\n", status);
+    if (fixture_status_failed(reply, length, json))
         return 1;
-    }
     char address[ZCL_ADDRESS_SIZE];
     if (ledger_fixture_key_parse(reply, length) < 0 ||
         zcl_address_from_pubkey(reply, address) < 0 ||
