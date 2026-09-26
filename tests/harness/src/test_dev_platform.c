@@ -5679,7 +5679,7 @@ static int test_watch_session_stop_leaves_nothing(void)
     int failures = 0;
     struct dp_fake_watch fake = {0};
     char root[PATH_MAX] = {0};
-    TEST("dev platform: stop by the launched id retires the watcher's whole session") {
+    TEST("dev platform: the session library never signals a running leader and prunes a session that left nothing") {
 #if !defined(__linux__)
         PASS(); /* launch identity needs /proc (exe, cwd, boot_id) */
         goto _test_next;
@@ -5689,19 +5689,24 @@ static int test_watch_session_stop_leaves_nothing(void)
         ASSERT_EQ(dp_lock_text_pid(root), (int64_t)fake.watcher);
         ASSERT_EQ((int)zcl_devloop_watch_session_probe(root, fake.watcher),
                   (int)ZCL_DEVLOOP_WATCH_SESSION_LIVE);
-        /* The owner runs an image not named z23-dev (a staged or renamed
-         * dev binary, or this test): the launch record is its identity. */
-        struct zcl_devloop_watch_stop stop = {
-            .owner_pid = fake.watcher,
-            .budget_ms = 8000};
+        uint64_t born = 0;
+        ASSERT(os_proc_pid_start_token((uint64_t)fake.watcher, &born));
+        struct zcl_devloop_watch_stop stop = {.expect_born = born,
+                                              .budget_ms = 8000};
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
-                  (int)ZCL_DEVLOOP_WATCH_STOPPED);
-        ASSERT(!stop.retired);
-        /* Returned means gone: the proof worker that outlives the lock
-         * release by 1.5 s is part of what was stopped. */
+                  (int)ZCL_DEVLOOP_WATCH_STOP_LEADER_RUNNING);
+        ASSERT_EQ(stop.escalation, 0);
+        ASSERT(dp_pid_running(fake.watcher));
+        /* It leaves as its stop endpoint would make it: the worker is
+         * joined, so nothing of the session is left to retire. */
+        ASSERT(kill(fake.watcher, SIGTERM) == 0);
+        for (int i = 0; i < 400 &&
+             zcl_devloop_process_session_members(fake.watcher, 0) > 0; i++)
+            platform_sleep_ms(10);
         ASSERT_EQ(zcl_devloop_process_session_members(fake.watcher, 0),
                   (size_t)0);
-        ASSERT(!dp_pid_running(fake.worker));
+        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
+                  (int)ZCL_DEVLOOP_WATCH_STOP_GONE);
         ASSERT_EQ((int)zcl_devloop_watch_session_probe(root, fake.watcher),
                   (int)ZCL_DEVLOOP_WATCH_SESSION_ABSENT);
         PASS();
@@ -5717,13 +5722,15 @@ static int test_watch_session_orphaned_worker_stopped(void)
     int failures = 0;
     struct dp_fake_watch fake = {0};
     char root[PATH_MAX] = {0};
-    TEST("dev platform: a killed watcher's surviving proof worker is stopped by the watcher's id") {
+    TEST("dev platform: the session library retires a killed watcher's surviving proof worker by its recorded birth") {
 #if !defined(__linux__)
         PASS(); /* launch identity needs /proc (exe, cwd, boot_id) */
         goto _test_next;
 #endif
         ASSERT(dp_watch_session_root(root, "watch-orphan"));
         ASSERT(dp_fake_watch_start(root, 30000, &fake));
+        uint64_t born = 0;
+        ASSERT(os_proc_pid_start_token((uint64_t)fake.watcher, &born));
         /* OOM or a harness cleanup: the leader dies, its lock with it, and
          * the proof worker keeps running for another 30 s. */
         ASSERT(kill(fake.watcher, SIGKILL) == 0);
@@ -5733,11 +5740,14 @@ static int test_watch_session_orphaned_worker_stopped(void)
                   (int)ZCL_DEVLOOP_WATCH_SESSION_ORPHANED);
         ASSERT_EQ(zcl_devloop_watch_session_retiring(root, 0),
                   (int64_t)fake.watcher);
-        struct zcl_devloop_watch_stop stop = {.owner_pid = 0,
+        struct zcl_devloop_watch_orphan rows[4];
+        ASSERT_EQ(zcl_devloop_watch_session_orphans(root, rows, 4), (size_t)1);
+        ASSERT_EQ(rows[0].pid, (int64_t)fake.watcher);
+        ASSERT_EQ(rows[0].born, born);
+        struct zcl_devloop_watch_stop stop = {.expect_born = born,
                                               .budget_ms = 1000};
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
                   (int)ZCL_DEVLOOP_WATCH_STOPPED);
-        ASSERT(stop.retired);
         ASSERT(stop.escalation >= 1);
         ASSERT_EQ(zcl_devloop_process_session_members(fake.watcher, 0),
                   (size_t)0);
@@ -5756,24 +5766,19 @@ static int test_watch_session_retired_owner_stops(void)
     int failures = 0;
     struct dp_fake_watch old = {0}, owner = {0};
     char root[PATH_MAX] = {0};
-    TEST("dev platform: a watcher that gave up the lock is still stoppable by its id") {
+    TEST("dev platform: a watcher that gave up the lock is refused while it runs, retired by its birth once orphaned, and the current owner is never touched") {
 #if !defined(__linux__)
         PASS(); /* launch identity needs /proc (exe, cwd, boot_id) */
         goto _test_next;
 #endif
         ASSERT(dp_watch_session_root(root, "watch-retired"));
         ASSERT(dp_fake_watch_start(root, 30000, &old));
+        uint64_t born = 0;
+        ASSERT(os_proc_pid_start_token((uint64_t)old.watcher, &born));
         /* It leaves its loop (idle exit, stream error): lock released, the
          * proof worker still running for another 30 s. */
         ASSERT(kill(old.watcher, SIGUSR1) == 0);
-        char lock[PATH_MAX];
-        ASSERT(zcl_devloop_watch_lock_path(root, lock, sizeof(lock)));
-        /* Block until it lets go; the group watchdog bounds a wedge. */
-        int probe = open(lock, O_RDWR | O_CLOEXEC);
-        ASSERT(probe >= 0);
-        bool released = flock(probe, LOCK_EX) == 0;
-        (void)close(probe);
-        ASSERT(released);
+        ASSERT(dp_wait_lock_free(root));
         /* A launcher must not start beside it: that was the duplicate. */
         ASSERT_EQ(zcl_devloop_watch_session_retiring(root, 0),
                   (int64_t)old.watcher);
@@ -5782,14 +5787,19 @@ static int test_watch_session_retired_owner_stops(void)
         ASSERT_EQ(dp_lock_text_pid(root), (int64_t)owner.watcher);
         ASSERT_EQ(zcl_devloop_watch_session_retiring(root, owner.watcher),
                   (int64_t)old.watcher);
-        /* Stopping the begin-reported id stops that session, not the
-         * current owner, and does not wait out the worker's 30 s. */
-        struct zcl_devloop_watch_stop stop = {
-            .owner_pid = owner.watcher,
-            .budget_ms = 1000};
+        /* Its leader still runs: the library refuses it untouched. */
+        struct zcl_devloop_watch_stop stop = {.expect_born = born,
+                                              .budget_ms = 1000};
+        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, old.watcher, &stop),
+                  (int)ZCL_DEVLOOP_WATCH_STOP_LEADER_RUNNING);
+        ASSERT(dp_pid_running(old.worker));
+        /* Once its leader is gone, its birth retires what is left, not the
+         * current owner, without waiting out the worker's 30 s. */
+        ASSERT(kill(old.watcher, SIGKILL) == 0);
+        for (int i = 0; i < 200 && dp_pid_running(old.watcher); i++)
+            platform_sleep_ms(10);
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, old.watcher, &stop),
                   (int)ZCL_DEVLOOP_WATCH_STOPPED);
-        ASSERT(stop.retired);
         ASSERT(stop.escalation >= 1);
         ASSERT_EQ(zcl_devloop_process_session_members(old.watcher, 0),
                   (size_t)0);
@@ -5799,13 +5809,6 @@ static int test_watch_session_retired_owner_stops(void)
         ASSERT_EQ(dp_lock_text_pid(root), (int64_t)owner.watcher);
         ASSERT_EQ(zcl_devloop_watch_session_retiring(root, owner.watcher),
                   (int64_t)0);
-        stop = (struct zcl_devloop_watch_stop){
-            .owner_pid = owner.watcher,
-            .budget_ms = 8000};
-        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, owner.watcher, &stop),
-                  (int)ZCL_DEVLOOP_WATCH_STOPPED);
-        ASSERT_EQ(zcl_devloop_process_session_members(owner.watcher, 0),
-                  (size_t)0);
         PASS();
     } _test_next:;
     dp_fake_watch_reap(&old);
@@ -5836,11 +5839,11 @@ static int test_watch_session_refuses_unproven_pid(void)
         }
         ASSERT(bystander > 1);
         struct zcl_devloop_watch_stop stop = {
-            .owner_pid = owner.watcher,
+            .expect_born = 1,
             .budget_ms = 1000};
-        /* An unrecorded live process that is not the lock owner. */
+        /* An unrecorded live process: no record names it. */
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, bystander, &stop),
-                  (int)ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH);
+                  (int)ZCL_DEVLOOP_WATCH_STOP_NOT_RUNNING);
         /* A record whose birth token is not this process's birth: a
          * recycled pid. It proves nothing, and it is pruned. */
         (void)zcl_devloop_watch_session_record(root, bystander);
@@ -5848,7 +5851,7 @@ static int test_watch_session_refuses_unproven_pid(void)
         ASSERT_EQ((int)zcl_devloop_watch_session_probe(root, bystander),
                   (int)ZCL_DEVLOOP_WATCH_SESSION_ABSENT);
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, bystander, &stop),
-                  (int)ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH);
+                  (int)ZCL_DEVLOOP_WATCH_STOP_NOT_RUNNING);
         /* A forged record for a foreign same-user session leader (a shell,
          * a node, a multiplexer) working in the checkout: its birth token is
          * public, its image is not a dev watcher's. */
@@ -5860,12 +5863,11 @@ static int test_watch_session_refuses_unproven_pid(void)
         ASSERT_EQ(zcl_devloop_watch_session_retiring(root, owner.watcher),
                   (int64_t)0);
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, foreign, &stop),
-                  (int)ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH);
-        ASSERT(dp_pid_running(foreign));
-        /* With the lock free and nothing recorded: not running. */
-        stop.owner_pid = 0;
-        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, bystander, &stop),
                   (int)ZCL_DEVLOOP_WATCH_STOP_NOT_RUNNING);
+        ASSERT(dp_pid_running(foreign));
+        /* The lock owner itself runs: never signalled through here. */
+        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, owner.watcher, &stop),
+                  (int)ZCL_DEVLOOP_WATCH_STOP_LEADER_RUNNING);
         ASSERT(kill(bystander, 0) == 0);
         ASSERT(kill(owner.watcher, 0) == 0);
         ASSERT(kill(owner.worker, 0) == 0);
@@ -5912,8 +5914,7 @@ static int test_watch_session_foreign_orphan_never_signalled(void)
         ASSERT_EQ((int)zcl_devloop_watch_session_probe(root, leader),
                   (int)ZCL_DEVLOOP_WATCH_SESSION_ABSENT);
         ASSERT_EQ(zcl_devloop_watch_session_retiring(root, 0), (int64_t)0);
-        struct zcl_devloop_watch_stop stop = {.owner_pid = 0,
-                                              .budget_ms = 1000};
+        struct zcl_devloop_watch_stop stop = {.budget_ms = 1000};
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, leader, &stop),
                   (int)ZCL_DEVLOOP_WATCH_STOP_NOT_RUNNING);
         ASSERT(zcl_devloop_process_session_members(leader, 0) >= (size_t)1);
@@ -5935,7 +5936,6 @@ static int test_watch_session_foreign_orphan_never_signalled(void)
  * inside the watcher's own session and reports the result. */
 struct dp_inside_stop {
     int result;
-    bool retired;
     int escalation;
 };
 
@@ -5961,16 +5961,16 @@ struct dp_inside_stop {
     pid_t helper = fork();
     if (helper == 0) {
         char go = 0;
+        uint64_t born = 0;
         (void)close(fd);
         (void)close(ready_fd);
-        if (read(cmd_fd, &go, 1) != 1)
+        if (!os_proc_pid_start_token((uint64_t)leader, &born) ||
+            read(cmd_fd, &go, 1) != 1)
             _exit(3);
-        struct zcl_devloop_watch_stop io = {
-            .owner_pid = leader,
-            .budget_ms = 5000};
+        struct zcl_devloop_watch_stop io = {.expect_born = born,
+                                            .budget_ms = 5000};
         struct dp_inside_stop out = {0};
         out.result = (int)zcl_devloop_watch_session_stop(root, leader, &io);
-        out.retired = io.retired;
         out.escalation = io.escalation;
         _exit(write(report_fd, &out, sizeof(out)) == sizeof(out) ? 0 : 4);
     }
@@ -5991,7 +5991,7 @@ static int test_watch_session_stop_from_own_session(void)
     char root[PATH_MAX] = {0};
     pid_t pids[2] = {0, 0};
     int cmd[2] = {-1, -1}, ready[2] = {-1, -1}, report[2] = {-1, -1};
-    TEST("dev platform: a stop run inside the watcher's session stops the leader, never itself") {
+    TEST("dev platform: a stop run inside a leaderless watcher session never signals its own session") {
 #if !defined(__linux__)
         PASS(); /* launch identity needs /proc (exe, cwd, boot_id) */
         goto _test_next;
@@ -6017,17 +6017,18 @@ static int test_watch_session_stop_from_own_session(void)
         ASSERT(read(ready[0], pids, sizeof(pids)) == sizeof(pids));
         ASSERT(pids[0] > 1 && pids[1] > 1);
         ASSERT(zcl_devloop_watch_session_record(root, pids[0]));
+        /* The leader dies; the helper, still in its session, runs the stop. */
+        ASSERT(kill(pids[0], SIGKILL) == 0);
+        ASSERT(dp_wait_lock_free(root));
         char go = 1;
         ASSERT(write(cmd[1], &go, 1) == 1);
         struct dp_inside_stop out = {0};
         struct pollfd wait_report = {.fd = report[0], .events = POLLIN};
         ASSERT(poll(&wait_report, 1, 20000) == 1);
-        /* The helper lived to report: the session sweep spared its caller. */
+        /* The helper lived to report: its own session was refused. */
         ASSERT(read(report[0], &out, sizeof(out)) == sizeof(out));
-        ASSERT_EQ(out.result, (int)ZCL_DEVLOOP_WATCH_STOPPED);
-        ASSERT(!out.retired);
+        ASSERT_EQ(out.result, (int)ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH);
         ASSERT_EQ(out.escalation, 0);
-        ASSERT(!dp_pid_running(pids[0]));
         PASS();
     } _test_next:;
     int *fds[] = {cmd, ready, report};
@@ -6083,10 +6084,9 @@ static int test_watch_session_admit_attach_refuse(void)
         ASSERT_EQ(zcl_devloop_watch_session_admit(root, dp_lock_is_held, 200),
                   (int64_t)fake.watcher);
         ASSERT(!dp_lock_is_held(root));
-        struct zcl_devloop_watch_stop stop = {.owner_pid = 0,
-                                              .budget_ms = 1000};
-        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
-                  (int)ZCL_DEVLOOP_WATCH_STOPPED);
+        dp_fake_watch_reap(&fake);
+        ASSERT_EQ(zcl_devloop_process_session_members(fake.watcher, 0),
+                  (size_t)0);
         /* One that finishes inside the wait admits the launcher. */
         ASSERT(dp_fake_watch_start(root, 300, &brief));
         ASSERT(kill(brief.watcher, SIGUSR1) == 0);
@@ -6199,8 +6199,7 @@ static int dp_assert_unproven_kept(const char *root, pid_t leader,
         ASSERT(dp_path_exists(path));
         ASSERT_EQ(zcl_devloop_watch_session_admit(root, dp_lock_is_held, 200),
                   (int64_t)leader);
-        struct zcl_devloop_watch_stop stop = {.owner_pid = 0,
-                                              .budget_ms = 1000};
+        struct zcl_devloop_watch_stop stop = {.budget_ms = 1000};
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, leader, &stop),
                   (int)ZCL_DEVLOOP_WATCH_STOP_UNPROVEN);
         ASSERT(dp_path_exists(path));
@@ -6342,8 +6341,7 @@ static int test_watch_session_untrusted_record_pruned(void)
                       (int)ZCL_DEVLOOP_WATCH_SESSION_ABSENT);
             ASSERT(!dp_path_exists(path));
             ASSERT_EQ(zcl_devloop_watch_session_retiring(root, 0), (int64_t)0);
-            struct zcl_devloop_watch_stop stop = {.owner_pid = 0,
-                                                  .budget_ms = 1000};
+            struct zcl_devloop_watch_stop stop = {.budget_ms = 1000};
             ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher,
                                                           &stop),
                       (int)ZCL_DEVLOOP_WATCH_STOP_NOT_RUNNING);
@@ -6380,9 +6378,8 @@ static int test_watch_session_stop_binds_birth(void)
          * by: only its bound session endpoint asks it to stop. */
         struct zcl_devloop_watch_stop stop = {.expect_born = born,
                                               .budget_ms = 1000};
-        enum zcl_devloop_watch_stop_result result =
-            zcl_devloop_watch_session_stop(root, fake.watcher, &stop);
-        ASSERT(result != ZCL_DEVLOOP_WATCH_STOPPED);
+        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
+                  (int)ZCL_DEVLOOP_WATCH_STOP_LEADER_RUNNING);
         ASSERT(dp_pid_running(fake.watcher));
         ASSERT(dp_pid_running(fake.worker));
         /* Leaderless: another birth, or none named, is refused untouched. */

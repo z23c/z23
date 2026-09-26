@@ -41,9 +41,20 @@
  * UNPROVEN: it is kept, it is never signalled, and a launcher treats it as
  * a watcher still retiring, so it never forks beside it.
  *
- * Other POSIX systems (macOS) have no /proc: nothing is recorded, only the
- * lock owner whose image is a dev binary can be stopped, and "gone" means
- * its process group is gone — members that left the group are not seen. */
+ * A live leader is never signalled through this library: `dev loop stop`
+ * asks the lock owner to stop through its bound session endpoint
+ * (zcl_devloop_watch_stop_endpoint_path), and only then retires what its
+ * session left behind here. A session whose leader is already gone is
+ * listed by `dev loop status` (retiring_sessions) and stopped by its pid and
+ * recorded birth.
+ *
+ * Reach: a stop signals the members of the recorded session. A process the
+ * proof worker started in a session of its own (setsid) is outside it; when
+ * the worker is SIGKILLed it cannot pass the stop on, so such a process is
+ * not reached and must be found by its own session.
+ *
+ * Other POSIX systems (macOS) have no /proc: nothing is recorded, and only
+ * the lock owner can be stopped, through its endpoint. */
 #define ZCL_DEVLOOP_WATCH_SESSION_DIR_REL ".cache/zcl-dev-watch.d"
 
 enum zcl_devloop_watch_session_state {
@@ -61,31 +72,42 @@ enum zcl_devloop_watch_session_state {
 };
 
 enum zcl_devloop_watch_stop_result {
+    /* The leaderless session was signalled and has no process left. */
     ZCL_DEVLOOP_WATCH_STOPPED = 0,
+    /* No trusted record names `requested` (none, or one disproven). */
     ZCL_DEVLOOP_WATCH_STOP_NOT_RUNNING,
+    /* The record carries another birth than the caller named (or none was
+     * named), or the session is the caller's own: nothing was signalled. */
     ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH,
-    ZCL_DEVLOOP_WATCH_STOP_SIGNAL_FAILED,
+    /* The session kept running through SIGTERM and the SIGKILL tail. */
     ZCL_DEVLOOP_WATCH_STOP_TIMEOUT,
     /* The requested session is recorded but cannot be proven right now:
      * nothing was signalled and the record is kept. */
     ZCL_DEVLOOP_WATCH_STOP_UNPROVEN,
+    /* The recorded leader is still running: refused, nothing signalled. */
+    ZCL_DEVLOOP_WATCH_STOP_LEADER_RUNNING,
+    /* The record carries the named birth and nothing of its session is
+     * left: the record was pruned, nothing was signalled. */
+    ZCL_DEVLOOP_WATCH_STOP_GONE,
 };
 
 struct zcl_devloop_watch_stop {
-    /* in: pid named by the held singleton lock, 0 when the lock is free */
-    int64_t owner_pid;
-    /* in: when nonzero, the birth token the caller's own identity names
-     * (the lock owner's start token from a status receipt); a record
-     * carrying another birth is refused untouched */
+    /* in: the birth token the caller names (a status receipt's start token
+     * or a retiring_sessions row's born); required, and a record carrying
+     * another birth is refused untouched */
     uint64_t expect_born;
-    /* in: cooperative SIGTERM phase; escalation adds a bounded tail */
+    /* in: the session SIGTERM phase; the SIGKILL tail is bounded apart */
     int64_t budget_ms;
-    /* out: the requested watcher had already given up the lock */
-    bool retired;
-    /* out: 0 cooperative exit, 1 session SIGTERM, 2 session SIGKILL */
+    /* out: 0 nothing signalled, 1 session SIGTERM, 2 session SIGKILL */
     int escalation;
     /* out: processes of the session still running when stop returned */
     size_t members_left;
+};
+
+/* A recorded session whose leader is gone and whose survivors are proven. */
+struct zcl_devloop_watch_orphan {
+    int64_t pid;
+    uint64_t born;
 };
 
 /* Record a just-forked watcher leader. Called by the launching parent. */
@@ -106,6 +128,12 @@ enum zcl_devloop_watch_session_state zcl_devloop_watch_session_probe(
 int64_t zcl_devloop_watch_session_retiring(const char *root,
                                            int64_t owner_pid);
 
+/* The ORPHANED sessions recorded under `root`: up to `cap` of them in
+ * `out`; returns how many there are. */
+size_t zcl_devloop_watch_session_orphans(const char *root,
+                                         struct zcl_devloop_watch_orphan *out,
+                                         size_t cap);
+
 /* A launcher's admission: 0 when it may attach to the watcher that owns
  * the lock (`owner_active`) or start one, else the pid of a proven session
  * still running without the lock after waiting up to `budget_ms` for it to
@@ -115,15 +143,11 @@ int64_t zcl_devloop_watch_session_admit(const char *root,
                                         bool (*owner_active)(const char *root),
                                         int64_t budget_ms);
 
-/* Stop exactly the watcher `requested`, and only while a proven record
- * (carrying `expect_born` when the caller names one) confirms it: the lock
- * owner, or a session that no longer owns the lock. A lock owner with no
- * record is refused: `dev loop stop` asks it to stop through its bound
- * session endpoint instead, then passes its leaderless remainder here.
- * Returns STOPPED only after that session has no process left (on macOS:
- * its process group), escalating to a session-wide SIGTERM and then
- * repeated SIGKILL, re-proving the session before every escalation. A
- * caller inside that session signals only the leader. Anything unproven is
+/* Stop the leaderless recorded session `requested` whose record carries
+ * `expect_born`: SIGTERM to every member, then a repeated SIGKILL tail,
+ * re-proving the session before each. Returns STOPPED only once no process
+ * of it is left. A running leader (LEADER_RUNNING), an unproven record
+ * (UNPROVEN), another birth or the caller's own session (ID_MISMATCH) are
  * refused untouched. */
 enum zcl_devloop_watch_stop_result zcl_devloop_watch_session_stop(
     const char *root, int64_t requested, struct zcl_devloop_watch_stop *io);

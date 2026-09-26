@@ -22,20 +22,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #define SESSION_SCHEMA "zcl.dev_watch_session.v2"
 #define SESSION_BOOT_MAX 64
 #define SESSION_MEMBER_MAX 64
-/* After the cooperative phase: session SIGTERM, then session SIGKILL. */
-#define SESSION_TERM_TAIL_MS 2000
+/* A leaderless session gets SIGTERM for its budget, then a SIGKILL tail. */
 #define SESSION_KILL_TAIL_MS 1000
 #define SESSION_DEFAULT_BUDGET_MS 10000
 #define SESSION_POLL_MS 25
 
 struct session_record {
+    /* the file this record was read from */
+    struct stat file;
     uint64_t born;
     char boot[SESSION_BOOT_MAX];
     unsigned long long exe_dev;
@@ -83,15 +83,22 @@ static int session_signal0(int64_t pid)
     return kill((pid_t)pid, 0);
 }
 
-static void session_forget(const char *root, int64_t pid)
+/* Remove the record for `pid` only while it is still the very file that
+ * was judged (`seen`): a launcher that renamed a fresh record over it in
+ * the meantime keeps its record. Nothing seen, nothing removed. */
+static void session_forget(const char *root, int64_t pid,
+                           const struct stat *seen)
 {
 #if defined(ZCL_TESTING)
     if (g_session_hooks.before_forget)
         g_session_hooks.before_forget(root, pid, g_session_hooks.opaque);
 #endif
     char path[PATH_MAX];
-    if (session_path(root, pid, path))
-        (void)unlink(path);
+    struct stat now;
+    if (!seen || !session_path(root, pid, path) || lstat(path, &now) != 0 ||
+        now.st_dev != seen->st_dev || now.st_ino != seen->st_ino)
+        return;
+    (void)unlink(path);
 }
 
 /* EPERM is another user's process: never one of ours. A zombie is dead. */
@@ -298,6 +305,8 @@ static bool session_read(const char *root, int64_t pid,
         return false;
     bool trusted = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
                    st.st_nlink == 1 && owner_only(&st);
+    if (trusted)
+        rec->file = st;
     ssize_t got = trusted ? pread(fd, body, sizeof(body) - 1, 0) : -1;
     (void)close(fd);
     if (got <= 0)
@@ -347,10 +356,14 @@ static enum zcl_devloop_watch_session_state session_orphan_proof(
 static enum zcl_devloop_watch_session_state session_probe_proven(
     int64_t pid, const struct session_record *rec, const struct stat *root_st)
 {
+    /* /proc/<pid>/stat is world-readable: a live pid with another birth is
+     * a reused pid, whoever owns it now (kill(pid, 0) says EPERM for
+     * another user's process and cannot tell). */
     uint64_t now = 0;
-    if (leader_running(pid) && os_proc_pid_start_token((uint64_t)pid, &now)) {
-        if (now != rec->born)
-            return ZCL_DEVLOOP_WATCH_SESSION_ABSENT; /* a recycled pid */
+    bool born_read = os_proc_pid_start_token((uint64_t)pid, &now);
+    if (born_read && now != rec->born)
+        return ZCL_DEVLOOP_WATCH_SESSION_ABSENT;
+    if (born_read && leader_running(pid)) {
         enum proc_match match = proc_match_record(pid, rec);
         if (match == PROC_OTHER)
             return ZCL_DEVLOOP_WATCH_SESSION_ABSENT;
@@ -368,26 +381,30 @@ static enum zcl_devloop_watch_session_state session_probe_proven(
 
 /* Only a disproven record is pruned: untrusted or malformed, written in
  * another boot, or disproven by the running processes. One that cannot be
- * decided right now (no boot id to compare) is kept as UNPROVEN. */
-static enum zcl_devloop_watch_session_state session_probe(const char *root,
-                                                          int64_t pid)
+ * decided right now (no boot id to compare) is kept as UNPROVEN. `seen`
+ * receives the identity of the file that was judged. */
+static enum zcl_devloop_watch_session_state session_probe(
+    const char *root, int64_t pid, struct stat *seen)
 {
     char path[PATH_MAX], boot[SESSION_BOOT_MAX];
     struct session_record rec = {0};
-    struct stat root_st;
-    if (!session_path(root, pid, path) || access(path, F_OK) != 0 ||
+    struct stat root_st, file;
+    if (!session_path(root, pid, path) || lstat(path, &file) != 0 ||
         stat(root, &root_st) != 0)
         return ZCL_DEVLOOP_WATCH_SESSION_ABSENT;
     enum zcl_devloop_watch_session_state state =
         ZCL_DEVLOOP_WATCH_SESSION_ABSENT;
     if (session_read(root, pid, &rec)) {
+        file = rec.file;
         if (!boot_id_read(boot))
-            return ZCL_DEVLOOP_WATCH_SESSION_UNPROVEN;
-        if (strcmp(boot, rec.boot) == 0)
+            state = ZCL_DEVLOOP_WATCH_SESSION_UNPROVEN;
+        else if (strcmp(boot, rec.boot) == 0)
             state = session_probe_proven(pid, &rec, &root_st);
     }
+    if (seen)
+        *seen = file;
     if (state == ZCL_DEVLOOP_WATCH_SESSION_ABSENT)
-        session_forget(root, pid);
+        session_forget(root, pid, &file);
     return state;
 }
 
@@ -397,13 +414,16 @@ static void session_release(const char *root, int64_t pid)
     uint64_t now = 0;
     if (session_read(root, pid, &rec) &&
         os_proc_pid_start_token((uint64_t)pid, &now) && now == rec.born)
-        session_forget(root, pid);
+        session_forget(root, pid, &rec.file);
 }
 
-static bool session_born_is(const char *root, int64_t pid, uint64_t born)
+static bool session_born(const char *root, int64_t pid, uint64_t *born)
 {
     struct session_record rec = {0};
-    return session_read(root, pid, &rec) && rec.born == born;
+    if (!session_read(root, pid, &rec))
+        return false;
+    *born = rec.born;
+    return true;
 }
 #else /* POSIX without /proc: no launch identity is recorded. */
 static bool session_record(const char *root, int64_t pid)
@@ -413,11 +433,12 @@ static bool session_record(const char *root, int64_t pid)
     return false;
 }
 
-static enum zcl_devloop_watch_session_state session_probe(const char *root,
-                                                          int64_t pid)
+static enum zcl_devloop_watch_session_state session_probe(
+    const char *root, int64_t pid, struct stat *seen)
 {
     (void)root;
     (void)pid;
+    (void)seen;
     return ZCL_DEVLOOP_WATCH_SESSION_ABSENT;
 }
 
@@ -427,7 +448,7 @@ static void session_release(const char *root, int64_t pid)
     (void)pid;
 }
 
-static bool session_born_is(const char *root, int64_t pid, uint64_t born)
+static bool session_born(const char *root, int64_t pid, uint64_t *born)
 {
     (void)root;
     (void)pid;
@@ -445,32 +466,86 @@ static int64_t session_name_pid(const char *name)
     return end && *end == 0 && value > 1 && value <= INT_MAX ? value : 0;
 }
 
-static int64_t session_retiring(const char *root, int64_t owner_pid)
+/* Visit each record under `root` with its judged state. A visitor returns
+ * false to stop the walk. */
+typedef bool (*session_visit_fn)(const char *root, int64_t pid,
+                                 enum zcl_devloop_watch_session_state state,
+                                 const struct stat *seen, void *opaque);
+
+static void session_walk(const char *root, session_visit_fn visit,
+                         void *opaque)
 {
     char dir[PATH_MAX];
-    if (!session_dir(root, dir))
-        return 0;
-    DIR *listing = opendir(dir);
+    DIR *listing = session_dir(root, dir) ? opendir(dir) : NULL;
     if (!listing)
-        return 0;
-    int64_t found = 0;
+        return;
     struct dirent *entry;
-    while (found == 0 && (entry = readdir(listing)) != NULL) {
+    while ((entry = readdir(listing)) != NULL) {
         int64_t pid = session_name_pid(entry->d_name);
-        if (pid <= 1 || pid == owner_pid)
+        if (pid <= 1)
             continue;
-        /* An UNPROVEN session may still be a watcher: it is kept and
-         * counted, never forgotten. */
-        enum zcl_devloop_watch_session_state state = session_probe(root, pid);
-        if (state == ZCL_DEVLOOP_WATCH_SESSION_LIVE ||
-            state == ZCL_DEVLOOP_WATCH_SESSION_ORPHANED ||
-            state == ZCL_DEVLOOP_WATCH_SESSION_UNPROVEN)
-            found = pid;
-        else
-            session_forget(root, pid);
+        struct stat seen = {0};
+        enum zcl_devloop_watch_session_state state =
+            session_probe(root, pid, &seen);
+        if (!visit(root, pid, state, &seen, opaque))
+            break;
     }
     (void)closedir(listing);
-    return found;
+}
+
+struct retiring_scan {
+    int64_t owner_pid;
+    int64_t found;
+};
+
+/* An UNPROVEN session may still be a watcher: it is kept and counted,
+ * never forgotten. A GONE one is pruned. */
+static bool retiring_visit(const char *root, int64_t pid,
+                           enum zcl_devloop_watch_session_state state,
+                           const struct stat *seen, void *opaque)
+{
+    struct retiring_scan *scan = opaque;
+    if (pid == scan->owner_pid)
+        return true;
+    if (state == ZCL_DEVLOOP_WATCH_SESSION_LIVE ||
+        state == ZCL_DEVLOOP_WATCH_SESSION_ORPHANED ||
+        state == ZCL_DEVLOOP_WATCH_SESSION_UNPROVEN) {
+        scan->found = pid;
+        return false;
+    }
+    if (state == ZCL_DEVLOOP_WATCH_SESSION_GONE)
+        session_forget(root, pid, seen);
+    return true;
+}
+
+static int64_t session_retiring(const char *root, int64_t owner_pid)
+{
+    struct retiring_scan scan = {.owner_pid = owner_pid};
+    session_walk(root, retiring_visit, &scan);
+    return scan.found;
+}
+
+struct orphan_scan {
+    struct zcl_devloop_watch_orphan *out;
+    size_t cap;
+    size_t count;
+};
+
+static bool orphan_visit(const char *root, int64_t pid,
+                         enum zcl_devloop_watch_session_state state,
+                         const struct stat *seen, void *opaque)
+{
+    struct orphan_scan *scan = opaque;
+    uint64_t born = 0;
+    (void)seen;
+    if (state != ZCL_DEVLOOP_WATCH_SESSION_ORPHANED ||
+        !session_born(root, pid, &born))
+        return true;
+    if (scan->count < scan->cap)
+        scan->out[scan->count] =
+            (struct zcl_devloop_watch_orphan){.pid = pid, .born = born};
+    scan->count++;
+    return true;
 }
 
 static int64_t session_admit(const char *root,
@@ -488,42 +563,22 @@ static int64_t session_admit(const char *root,
     }
 }
 
-static bool lock_held(const char *lock)
-{
-    int fd = open(lock, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
-        return false;
-    bool held = flock(fd, LOCK_EX | LOCK_NB) != 0 &&
-                (errno == EWOULDBLOCK || errno == EAGAIN);
-    (void)close(fd);
-    return held;
-}
-
-/* What one stop is allowed to touch: a recorded session, re-proven by its
- * record before each escalation. */
+/* What one stop is allowed to touch: a leaderless recorded session,
+ * re-proven by its record before each escalation. */
 struct stop_target {
     const char *root;
     int64_t pid;
-    bool group;
-    const char *lock;
 };
 
 static bool target_still_ours(const struct stop_target *t)
 {
-    enum zcl_devloop_watch_session_state state =
-        session_probe(t->root, t->pid);
-    return state == ZCL_DEVLOOP_WATCH_SESSION_LIVE ||
-           state == ZCL_DEVLOOP_WATCH_SESSION_ORPHANED;
+    return session_probe(t->root, t->pid, NULL) ==
+           ZCL_DEVLOOP_WATCH_SESSION_ORPHANED;
 }
 
-/* Quiet means nothing of the session is left (just the leader when it does
- * not lead a group of its own) and, when it owned the checkout, the lock is
- * free again. */
 static bool target_quiet(const struct stop_target *t)
 {
-    if (t->group ? session_running(t->pid) : leader_running(t->pid))
-        return false;
-    return !t->lock || !lock_held(t->lock);
+    return !session_running(t->pid);
 }
 
 /* In the SIGKILL tail every poll kills again, so a member forked while the
@@ -544,66 +599,57 @@ static bool target_wait(const struct stop_target *t, int64_t budget_ms,
 }
 
 /* Never signal the group or session the caller itself belongs to. */
-static bool session_is_group(int64_t pid,
-                             enum zcl_devloop_watch_session_state state)
+static bool session_is_foreign(int64_t pid)
 {
-    if (getpgrp() == (pid_t)pid || getsid(0) == (pid_t)pid)
-        return false;
-    return state == ZCL_DEVLOOP_WATCH_SESSION_ORPHANED ||
-           getpgid((pid_t)pid) == (pid_t)pid;
+    return getpgrp() != (pid_t)pid && getsid(0) != (pid_t)pid;
 }
 
-/* Step 0 asks the live leader to stop: the watcher cancels and joins its
- * own proof worker. Step 1 signals the whole session (the only target once
- * the leader is gone), step 2 kills it. */
+/* Step 1 signals the whole session, step 2 kills it; the session is
+ * re-proven before each. */
 static enum zcl_devloop_watch_stop_result session_drain(
     const struct stop_target *t, int64_t budget_ms,
     struct zcl_devloop_watch_stop *io)
 {
-    static const int k_signal[] = {SIGTERM, SIGTERM, SIGKILL};
-    static const int64_t k_tail_ms[] = {0, SESSION_TERM_TAIL_MS,
-                                        SESSION_KILL_TAIL_MS};
-    int first = leader_running(t->pid) ? 0 : 1;
-    for (int step = first; step < 3; step++) {
-        if (step > 0 && !t->group)
-            break;
-        if (step > 0 && !target_still_ours(t))
+    static const int k_signal[] = {SIGTERM, SIGKILL};
+    const int64_t budgets[] = {budget_ms, SESSION_KILL_TAIL_MS};
+    for (int step = 0; step < 2; step++) {
+        if (!target_still_ours(t))
             return target_quiet(t) ? ZCL_DEVLOOP_WATCH_STOPPED
                                    : ZCL_DEVLOOP_WATCH_STOP_TIMEOUT;
-        io->escalation = step;
-        if (step == 0 && kill((pid_t)t->pid, k_signal[0]) != 0 &&
-            errno != ESRCH)
-            return ZCL_DEVLOOP_WATCH_STOP_SIGNAL_FAILED;
-        if (step > 0)
-            (void)zcl_devloop_process_session_members(t->pid, k_signal[step]);
-        if (target_wait(t, step == first ? budget_ms : k_tail_ms[step],
-                        step == 2))
+        io->escalation = step + 1;
+        (void)zcl_devloop_process_session_members(t->pid, k_signal[step]);
+        if (target_wait(t, budgets[step], step == 1))
             return ZCL_DEVLOOP_WATCH_STOPPED;
     }
     return ZCL_DEVLOOP_WATCH_STOP_TIMEOUT;
 }
 
-/* STOPPED when `requested` may be stopped, otherwise the refusal: only a
- * proven record authorizes a signal, and a caller that names a birth token
- * is refused a record carrying another one. */
+/* The refusal for a record in `state`, or STOPPED when it may be drained:
+ * only a leaderless (ORPHANED) session whose record carries the named
+ * birth, outside the caller's own session. */
 static enum zcl_devloop_watch_stop_result stop_authorize(
-    const char *root, int64_t requested, bool recorded,
-    const struct zcl_devloop_watch_stop *io)
+    const char *root, int64_t requested,
+    enum zcl_devloop_watch_session_state state, uint64_t expect_born)
 {
-    if (!recorded)
-        return io->owner_pid > 1 ? ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH
-                                 : ZCL_DEVLOOP_WATCH_STOP_NOT_RUNNING;
-    if (io->expect_born != 0 &&
-        !session_born_is(root, requested, io->expect_born))
+    uint64_t born = 0;
+    switch (state) {
+    case ZCL_DEVLOOP_WATCH_SESSION_UNPROVEN:
+        return ZCL_DEVLOOP_WATCH_STOP_UNPROVEN;
+    case ZCL_DEVLOOP_WATCH_SESSION_LIVE:
+        return ZCL_DEVLOOP_WATCH_STOP_LEADER_RUNNING;
+    case ZCL_DEVLOOP_WATCH_SESSION_ABSENT:
+        return ZCL_DEVLOOP_WATCH_STOP_NOT_RUNNING;
+    case ZCL_DEVLOOP_WATCH_SESSION_GONE:
+    case ZCL_DEVLOOP_WATCH_SESSION_ORPHANED:
+        break;
+    }
+    if (expect_born == 0 || !session_born(root, requested, &born) ||
+        born != expect_born)
         return ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH;
-    return ZCL_DEVLOOP_WATCH_STOPPED;
-}
-
-static size_t target_members_left(const struct stop_target *t)
-{
-    if (t->group)
-        return zcl_devloop_process_session_members(t->pid, 0);
-    return leader_running(t->pid) ? 1u : 0u;
+    if (state == ZCL_DEVLOOP_WATCH_SESSION_GONE)
+        return ZCL_DEVLOOP_WATCH_STOP_GONE;
+    return session_is_foreign(requested) ? ZCL_DEVLOOP_WATCH_STOPPED
+                                         : ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH;
 }
 
 static enum zcl_devloop_watch_stop_result session_stop(
@@ -611,39 +657,25 @@ static enum zcl_devloop_watch_stop_result session_stop(
 {
     if (!io || requested <= 1)
         return ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH;
-    io->retired = false;
     io->escalation = 0;
     io->members_left = 0;
-    enum zcl_devloop_watch_session_state state = session_probe(root, requested);
-    /* Recorded but neither proven nor disproven: keep it, signal nothing. */
-    if (state == ZCL_DEVLOOP_WATCH_SESSION_UNPROVEN)
-        return ZCL_DEVLOOP_WATCH_STOP_UNPROVEN;
-    if (state == ZCL_DEVLOOP_WATCH_SESSION_GONE)
-        session_forget(root, requested);
-    bool recorded = state == ZCL_DEVLOOP_WATCH_SESSION_LIVE ||
-                    state == ZCL_DEVLOOP_WATCH_SESSION_ORPHANED;
+    struct stat seen = {0};
+    enum zcl_devloop_watch_session_state state =
+        session_probe(root, requested, &seen);
     enum zcl_devloop_watch_stop_result result =
-        stop_authorize(root, requested, recorded, io);
+        stop_authorize(root, requested, state, io->expect_born);
+    if (result == ZCL_DEVLOOP_WATCH_STOP_GONE)
+        session_forget(root, requested, &seen);
     if (result != ZCL_DEVLOOP_WATCH_STOPPED)
         return result;
-    /* A recorded watcher that another watcher has since replaced is still
-     * ours to stop; the current owner is never touched. */
-    bool owner = io->owner_pid == requested;
-    io->retired = !owner;
-    char lock[PATH_MAX];
-    struct stop_target target = {
-        .root = root, .pid = requested,
-        .group = session_is_group(requested, state),
-        .lock = owner && zcl_devloop_watch_lock_path(root, lock, sizeof(lock))
-            ? lock : NULL,
-    };
+    struct stop_target target = {.root = root, .pid = requested};
     result = session_drain(&target,
                            io->budget_ms > 0 ? io->budget_ms
                                              : SESSION_DEFAULT_BUDGET_MS,
                            io);
-    io->members_left = target_members_left(&target);
+    io->members_left = zcl_devloop_process_session_members(requested, 0);
     if (result == ZCL_DEVLOOP_WATCH_STOPPED)
-        session_forget(root, requested);
+        session_forget(root, requested, &seen);
     return result;
 }
 #endif
@@ -679,7 +711,7 @@ enum zcl_devloop_watch_session_state zcl_devloop_watch_session_probe(
     (void)pid;
     return ZCL_DEVLOOP_WATCH_SESSION_ABSENT;
 #else
-    return session_probe(root, pid);
+    return session_probe(root, pid, NULL);
 #endif
 }
 
@@ -706,6 +738,22 @@ int64_t zcl_devloop_watch_session_admit(const char *root,
     return 0;
 #else
     return session_admit(root, owner_active, budget_ms);
+#endif
+}
+
+size_t zcl_devloop_watch_session_orphans(const char *root,
+                                         struct zcl_devloop_watch_orphan *out,
+                                         size_t cap)
+{
+#if defined(_WIN32)
+    (void)root;
+    (void)out;
+    (void)cap;
+    return 0;
+#else
+    struct orphan_scan scan = {.out = out, .cap = out ? cap : 0};
+    session_walk(root, orphan_visit, &scan);
+    return scan.count;
 #endif
 }
 

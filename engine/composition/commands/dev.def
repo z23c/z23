@@ -614,7 +614,9 @@ ZCL_COMMAND_DEV_READ(
     "dev.loop.status", "dev.loop", "dev.loop.heartbeat",
     "Read watcher identity, epoch, and latest verdict",
     "The native watcher's live identity (active, pid, mode) read from its "
-    "lock file, plus the latest persisted cycle verdict. Top-level freshness "
+    "lock file, the leaderless recorded sessions still running "
+    "(retiring_sessions: pid, born), plus the latest persisted cycle "
+    "verdict. Top-level freshness "
     "is current only while that singleton lock is held; when absent, the "
     "same idempotent ensure command is the one exact next action.", 0,
     "loop,status,heartbeat,epoch", "zcl.command.empty_input.v1",
@@ -667,12 +669,16 @@ ZCL_COMMAND_DEV_READ(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.loop.stop", "dev.loop", "", "Stop one identified native watcher",
-    "Confirmation that the identified watcher session exited, plus the "
-    "resulting live loop-status snapshot; watcher_id and watcher_session "
-    "must match the same status receipt.", 0,
+    "Confirmation that the identified watcher session exited and what "
+    "became of its recorded session (session_retired: retired, none, "
+    "unrecorded or mismatch), plus the live loop-status snapshot. "
+    "watcher_id with watcher_session names the lock owner from one status "
+    "receipt; watcher_id with watcher_born names a leaderless "
+    "retiring_sessions row, accepted only while no watcher holds the "
+    "lock.", 0,
     "loop,stop,watcher", "zcl.dev_loop_stop_input.v1",
     "zcl.dev_loop_status.v1",
-    "watcher_id,watcher_session,root,group,owner,failure_id,to,relink_generation,reason,confirm",
+    "watcher_id,watcher_session,watcher_born,root,group,owner,failure_id,to,relink_generation,reason,confirm",
     "watcher_id",
     "z23-dev dev loop stop --input='{\"watcher_id\":123,\"watcher_session\":\"<status-session>\"}'",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
