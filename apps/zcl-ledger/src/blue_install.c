@@ -43,6 +43,8 @@ typedef struct {
     int fd;
     bool secure;
     blue_secure_channel channel;
+    uint8_t version[31];
+    size_t version_length;
 } installer;
 
 static void put_be32(uint8_t *output, uint32_t value) {
@@ -227,11 +229,17 @@ static int verify_secure_version(installer *device) {
     uint8_t command = 0x10, response[256];
     size_t length = 0;
     if (exchange(device, 0, 0, &command, 1, response, sizeof response,
-                 &length) < 0 || length < 4 ||
+                 &length) < 0 || length < 6 || response[4] == 0 ||
+        response[4] > sizeof device->version ||
+        length < 5 + (size_t)response[4] ||
         response[0] != (uint8_t)(TARGET_ID >> 24) ||
         response[1] != (uint8_t)(TARGET_ID >> 16) ||
         response[2] != (uint8_t)(TARGET_ID >> 8) ||
         response[3] != (uint8_t)TARGET_ID) return -1;
+    for (size_t i = 0; i < response[4]; ++i)
+        if (response[5 + i] < 0x20 || response[5 + i] > 0x7e) return -1;
+    device->version_length = response[4];
+    memcpy(device->version, response + 5, device->version_length);
     printf("Verified Ledger Blue target %02x%02x%02x%02x over the secure channel.\n",
            response[0], response[1], response[2], response[3]);
     return 0;
@@ -298,7 +306,8 @@ static int install(installer *device, const uint8_t *code,
     if (ca_key) {
         uint8_t digest[32];
         size_t signature_length = 0;
-        if (blue_ca_app_hash(TARGET_ID, create, code, code_length,
+        if (blue_ca_app_hash(TARGET_ID, device->version,
+                             device->version_length, create, code, code_length,
                              params, params_length, digest) < 0 ||
             blue_ca_sign_digest(ca_key, digest, commit + 2,
                                 &signature_length) < 0) return -1;
@@ -412,15 +421,26 @@ typedef struct {
     bool channel_only, delete_app, enroll, reset;
 } install_args;
 
-static int parse_args(int argc, char **argv, install_args *args) {
-    *args = (install_args){0};
+static bool parse_ca_args(int argc, char **argv, install_args *args) {
     if (argc == 4 && strcmp(argv[2], "--ca-enroll") == 0) {
         args->ca_path = argv[3];
         args->enroll = true;
+    } else if (argc == 4 && strcmp(argv[2], "--ca-channel-only") == 0) {
+        args->ca_path = argv[3];
+        args->channel_only = true;
+    } else if (argc == 4 && strcmp(argv[2], "--ca-delete-fixture") == 0) {
+        args->ca_path = argv[3];
+        args->delete_app = true;
+        args->profile = &profiles[1];
     } else if (argc == 5 && strcmp(argv[2], "--ca-install") == 0) {
         args->ca_path = argv[3];
         args->image_path = argv[4];
-    } else if (argc == 3 && strcmp(argv[2], "--ca-reset") == 0)
+    } else return false;
+    return true;
+}
+
+static bool parse_plain_args(int argc, char **argv, install_args *args) {
+    if (argc == 3 && strcmp(argv[2], "--ca-reset") == 0)
         args->reset = true;
     else if (argc == 3 && strcmp(argv[2], "--channel-only") == 0)
         args->channel_only = true;
@@ -432,8 +452,14 @@ static int parse_args(int argc, char **argv, install_args *args) {
         args->profile = &profiles[1];
     } else if (argc == 3)
         args->image_path = argv[2];
-    else return -1;
-    return 0;
+    else return false;
+    return true;
+}
+
+static int parse_args(int argc, char **argv, install_args *args) {
+    *args = (install_args){0};
+    return parse_ca_args(argc, argv, args) ||
+           parse_plain_args(argc, argv, args) ? 0 : -1;
 }
 
 int main(int argc, char **argv) {
@@ -441,8 +467,10 @@ int main(int argc, char **argv) {
     if (parse_args(argc, argv, &args) < 0) {
         fprintf(stderr, "Usage: %s /dev/hidrawN app.bin|--channel-only|--delete|--delete-fixture|--ca-reset\n"
                         "       %s /dev/hidrawN --ca-enroll PRIVATE_KEY_FILE\n"
+                        "       %s /dev/hidrawN --ca-channel-only PRIVATE_KEY_FILE\n"
+                        "       %s /dev/hidrawN --ca-delete-fixture PRIVATE_KEY_FILE\n"
                         "       %s /dev/hidrawN --ca-install PRIVATE_KEY_FILE app.bin\n",
-                argv[0], argv[0], argv[0]);
+                argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
     uint8_t *code = NULL;

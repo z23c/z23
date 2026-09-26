@@ -13,18 +13,22 @@
 
 static void test_app_hash(void) {
     const uint8_t create[21] = {0x0b};
+    const uint8_t version[] = {'2', '.', '1', '.', '1'};
     const uint8_t code[] = {1, 2, 3};
     const uint8_t params[] = {4, 5};
     const uint8_t expected[32] = {
-        0x62, 0xe2, 0x5d, 0x7a, 0x11, 0x41, 0x09, 0xbd,
-        0xa7, 0xb2, 0x70, 0x5d, 0xf3, 0x1c, 0x3e, 0x27,
-        0x7d, 0xd8, 0x15, 0x9e, 0x3f, 0x00, 0xa7, 0x30,
-        0x3b, 0x49, 0xc7, 0xd1, 0x0b, 0x4d, 0xb2, 0xff
+        0x28, 0xfc, 0x9a, 0xae, 0xb6, 0xbd, 0x1d, 0x71,
+        0x5e, 0x87, 0x98, 0x33, 0x55, 0xae, 0x99, 0x62,
+        0x5e, 0x19, 0xc0, 0x65, 0x4b, 0x12, 0x6e, 0x00,
+        0xfe, 0xe5, 0xea, 0xff, 0x75, 0xf5, 0x04, 0x02
     };
     uint8_t digest[32];
-    assert(blue_ca_app_hash(0x31010004, create, code, sizeof code,
+    assert(blue_ca_app_hash(0x31010004, version, sizeof version,
+                            create, code, sizeof code,
                             params, sizeof params, digest) == 0);
     assert(memcmp(digest, expected, sizeof digest) == 0);
+    assert(blue_ca_app_hash(0x31010004, version, 0, create, code,
+                            sizeof code, params, sizeof params, digest) < 0);
 }
 
 static void test_key_file_and_signature(void) {
@@ -45,8 +49,12 @@ static void test_key_file_and_signature(void) {
     assert(ctx && EVP_PKEY_verify_init(ctx) > 0);
     assert(EVP_PKEY_CTX_set_signature_md(ctx, EVP_sha256()) > 0);
     assert(EVP_PKEY_verify(ctx, signature, length, digest, sizeof digest) == 1);
+    EVP_PKEY_CTX *raw = EVP_PKEY_CTX_new(key, NULL);
+    assert(raw && EVP_PKEY_verify_init(raw) > 0);
+    assert(EVP_PKEY_verify(raw, signature, length, digest, sizeof digest) == 1);
     digest[0] = 2;
     assert(EVP_PKEY_verify(ctx, signature, length, digest, sizeof digest) != 1);
+    EVP_PKEY_CTX_free(raw);
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(key);
     assert(chmod(path, 0644) == 0 && blue_ca_load(path) == NULL);

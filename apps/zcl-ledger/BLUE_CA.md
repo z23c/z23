@@ -34,19 +34,26 @@ build/zcl-ledger/zcl-blue-install /dev/hidrawN --ca-enroll \
 ```
 
 Approve only the expected custom CA prompt on the Blue. The name shown is
-`Z23`. The command does not send the private key to the device. To install a
-reviewed, pinned app with its signature, remove any previous app with the
-same name, then run:
+`Z23`. The command does not send the private key to the device. Verify the
+CA-authenticated channel, then remove any previous ZCL Fixture app and
+install its reviewed, pinned image with a signature:
 
 ```sh
+build/zcl-ledger/zcl-blue-install /dev/hidrawN --ca-channel-only \
+  "$HOME/.local/share/z23/blue-ca.pem"
+build/zcl-ledger/zcl-blue-install /dev/hidrawN --ca-delete-fixture \
+  "$HOME/.local/share/z23/blue-ca.pem"
 build/zcl-ledger/zcl-blue-install /dev/hidrawN --ca-install \
   "$HOME/.local/share/z23/blue-ca.pem" app.bin
 ```
 
-The installer hashes the Blue target ID, the exact create-app parameters,
-the image bytes, and the app parameters in the order BOLOS verifies. It signs
-that digest with ECDSA and includes the signature in the commit command.
-The binary SHA-256 allowlist still applies before USB access.
+The installer hashes the Blue target ID, the firmware version returned by
+the authenticated device, the exact create-app parameters, the image bytes,
+and the app parameters. This matches Ledger's Blue-era loader for target
+`0x31010004`. It signs that digest with ECDSA and includes the signature in
+the commit command. The binary SHA-256 allowlist still applies before USB
+access. This revised hash has passed offline tests but has not yet been
+accepted by the connected Blue.
 
 To remove the custom CA, first delete apps installed through it, enter
 Recovery mode, then use `zcl-blue-install /dev/hidrawN --ca-reset`.
@@ -56,6 +63,10 @@ states that enrolling a custom CA makes the device fail Ledger's Genuine
 Check until the CA and its apps are removed. This is a device trust change,
 not a change to the Ledger recovery words.
 
-The CA path is experimental on the connected Blue until a signed app opens
-without the BOLOS warning and can exit normally. A successful manager APDU
-alone does not prove the warning is gone.
+The connected Blue accepted enrollment of `Z23` in Recovery mode. A channel
+authenticated by that key opened, and a delete command removed the old ZCL
+Fixture icon. Three signed install attempts with the earlier hash format
+returned `6986` at commit, leaving no new icon. The revised hash has not
+been tried on the device. The CA path remains experimental until a signed
+app opens without the BOLOS warning and can exit normally. A successful
+manager APDU alone does not prove the warning is gone.

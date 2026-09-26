@@ -69,11 +69,25 @@ int blue_ca_sign_digest(EVP_PKEY *key, const uint8_t digest[32],
     return result;
 }
 
-int blue_ca_app_hash(uint32_t target, const uint8_t create[21],
+static int hash_image(EVP_MD_CTX *ctx, const uint8_t target_bytes[4],
+                      const uint8_t *version, size_t version_length,
+                      const uint8_t create[21], const uint8_t *code,
+                      size_t code_length, const uint8_t *params,
+                      size_t params_length) {
+    return EVP_DigestUpdate(ctx, target_bytes, 4) > 0 &&
+        EVP_DigestUpdate(ctx, version, version_length) > 0 &&
+        EVP_DigestUpdate(ctx, create + 1, 20) > 0 &&
+        EVP_DigestUpdate(ctx, code, code_length) > 0 &&
+        EVP_DigestUpdate(ctx, params, params_length) > 0 ? 0 : -1;
+}
+
+int blue_ca_app_hash(uint32_t target, const uint8_t *version,
+                     size_t version_length, const uint8_t create[21],
                      const uint8_t *code, size_t code_length,
                      const uint8_t *params, size_t params_length,
                      uint8_t digest[32]) {
-    if (!create || create[0] != 0x0b || !code || !params || !digest)
+    if (!version || version_length == 0 || version_length > 31 ||
+        !create || create[0] != 0x0b || !code || !params || !digest)
         return -1;
     const uint8_t target_bytes[4] = {
         (uint8_t)(target >> 24), (uint8_t)(target >> 16),
@@ -82,10 +96,8 @@ int blue_ca_app_hash(uint32_t target, const uint8_t create[21],
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     unsigned int length = 0;
     int result = ctx && EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) > 0 &&
-        EVP_DigestUpdate(ctx, target_bytes, sizeof target_bytes) > 0 &&
-        EVP_DigestUpdate(ctx, create + 1, 20) > 0 &&
-        EVP_DigestUpdate(ctx, code, code_length) > 0 &&
-        EVP_DigestUpdate(ctx, params, params_length) > 0 &&
+        hash_image(ctx, target_bytes, version, version_length, create,
+                   code, code_length, params, params_length) == 0 &&
         EVP_DigestFinal_ex(ctx, digest, &length) > 0 &&
         length == 32 ? 0 : -1;
     EVP_MD_CTX_free(ctx);
