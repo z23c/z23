@@ -15,6 +15,8 @@
  * exactly like headers. An extension allowlist silently dropped them from the
  * graph, so a registry edit moved no downstream content key and busted no
  * cache. The depfile is the authority; if the compiler read it, it is an edge.
+ * A listed path that is not a regular file in this checkout is omitted: a
+ * retained epoch can still name a layout this tree no longer has.
  *
  * Depfiles are written into a per-build compile epoch,
  * `<object-root>/epochs/<64-hex>/`. Every build mints a new epoch and the
@@ -49,6 +51,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static char *dep_strtok(char *text, const char *delimiters, char **save)
 {
@@ -88,6 +91,19 @@ static bool has_ext(const char *s, const char *ext)
     return a >= b && strcmp(s + a - b, ext) == 0;
 }
 
+/* True when `rel` is a regular file in this checkout. A dangling path left
+ * by an older epoch is omitted; the live epoch still names the file that
+ * exists. */
+static bool rel_is_regular_file(const char *root, const char *rel)
+{
+    char path[CI_PATH_MAX];
+    struct stat st;
+    int n = snprintf(path, sizeof(path), "%s/%s", root, rel);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    if (stat(path, &st) != 0) return false;
+    return S_ISREG(st.st_mode);
+}
+
 /* Parse one depfile's text; emit (src, dep) edges. */
 static void parse_depfile(const char *root, char *text, size_t len,
                           ci_dep_cb cb, void *user)
@@ -124,7 +140,7 @@ static void parse_depfile(const char *root, char *text, size_t len,
             /* Every remaining in-tree prerequisite is an edge — no extension
              * filter (see the file header: *.def registries are prerequisites
              * too, and an allowlist dropped them). */
-            if (have_src)
+            if (have_src && rel_is_regular_file(root, rel))
                 cb(src_rel, rel, user);
         }
     }
