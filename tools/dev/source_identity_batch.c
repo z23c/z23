@@ -135,8 +135,279 @@ static bool same_snapshot(const struct stat *left, const struct stat *right)
 #endif
 }
 
+static uint64_t g_content_bytes_read;
+static uint64_t g_content_bytes_reused;
+static int g_allow_reuse = 1;
+static int g_report_bytes;
+static int g_cache_ready;
+static char g_cache_path[4096];
+static int g_publish_repo_counter;
+
+struct digest_row {
+    char *path;
+    uint64_t dev;
+    uint64_t ino;
+    uint32_t mode;
+    uint64_t size;
+    int64_t mtime_sec;
+    int64_t mtime_nsec;
+    int64_t ctime_sec;
+    int64_t ctime_nsec;
+    uint8_t digest[ZSHA256_DIGEST_LEN];
+};
+
+static struct digest_row *g_rows;
+static size_t g_row_count;
+static size_t g_row_cap;
+static int g_rows_sorted;
+static int g_cache_dirty;
+
+static void row_apply(struct stat *st, const struct digest_row *row)
+{
+    memset(st, 0, sizeof(*st));
+    st->st_dev = (dev_t)row->dev;
+    st->st_ino = (ino_t)row->ino;
+    st->st_mode = (mode_t)row->mode;
+    st->st_size = (off_t)row->size;
+#if defined(__APPLE__)
+    st->st_mtimespec.tv_sec = (time_t)row->mtime_sec;
+    st->st_mtimespec.tv_nsec = row->mtime_nsec;
+    st->st_ctimespec.tv_sec = (time_t)row->ctime_sec;
+    st->st_ctimespec.tv_nsec = row->ctime_nsec;
+#else
+    st->st_mtim.tv_sec = (time_t)row->mtime_sec;
+    st->st_mtim.tv_nsec = row->mtime_nsec;
+    st->st_ctim.tv_sec = (time_t)row->ctime_sec;
+    st->st_ctim.tv_nsec = row->ctime_nsec;
+#endif
+}
+
+static void row_fill(struct digest_row *row, const char *path,
+                     const struct stat *st, const uint8_t digest[ZSHA256_DIGEST_LEN])
+{
+    row->path = strdup(path);
+    row->dev = (uint64_t)st->st_dev;
+    row->ino = (uint64_t)st->st_ino;
+    row->mode = (uint32_t)st->st_mode;
+    row->size = (uint64_t)st->st_size;
+#if defined(__APPLE__)
+    row->mtime_sec = (int64_t)st->st_mtimespec.tv_sec;
+    row->mtime_nsec = (int64_t)st->st_mtimespec.tv_nsec;
+    row->ctime_sec = (int64_t)st->st_ctimespec.tv_sec;
+    row->ctime_nsec = (int64_t)st->st_ctimespec.tv_nsec;
+#else
+    row->mtime_sec = (int64_t)st->st_mtim.tv_sec;
+    row->mtime_nsec = (int64_t)st->st_mtim.tv_nsec;
+    row->ctime_sec = (int64_t)st->st_ctim.tv_sec;
+    row->ctime_nsec = (int64_t)st->st_ctim.tv_nsec;
+#endif
+    if (digest != nullptr)
+        memcpy(row->digest, digest, ZSHA256_DIGEST_LEN);
+}
+
+static int row_cmp(const void *left, const void *right)
+{
+    const struct digest_row *a = left;
+    const struct digest_row *b = right;
+    return strcmp(a->path, b->path);
+}
+
+static int row_matches(const struct digest_row *row, const struct stat *st)
+{
+    struct stat cached;
+    row_apply(&cached, row);
+    return same_snapshot(&cached, st);
+}
+
+static void cache_load(void)
+{
+    if (g_cache_ready)
+        return;
+    g_cache_ready = 1;
+    FILE *file = fopen(g_cache_path, "r");
+    if (file == nullptr)
+        return;
+    char line[8192];
+    while (fgets(line, sizeof line, file) != nullptr) {
+        struct digest_row row;
+        char hex[2 * ZSHA256_DIGEST_LEN + 1u];
+        char path[4096];
+        unsigned long long dev = 0, ino = 0, size = 0;
+        unsigned int mode = 0;
+        long long mtime_sec = 0, mtime_nsec = 0, ctime_sec = 0, ctime_nsec = 0;
+        int matched = sscanf(line,
+                             "%llu %llu %u %llu %lld %lld %lld %lld %64s %4095[^\n]",
+                             &dev, &ino, &mode, &size, &mtime_sec, &mtime_nsec,
+                             &ctime_sec, &ctime_nsec, hex, path);
+        if (matched != 10 || strlen(hex) != 2 * ZSHA256_DIGEST_LEN)
+            continue;
+        if (strchr(path, '\n') != nullptr)
+            continue;
+        memset(&row, 0, sizeof row);
+        row.path = strdup(path);
+        if (row.path == nullptr)
+            continue;
+        row.dev = (uint64_t)dev;
+        row.ino = (uint64_t)ino;
+        row.mode = mode;
+        row.size = (uint64_t)size;
+        row.mtime_sec = (int64_t)mtime_sec;
+        row.mtime_nsec = (int64_t)mtime_nsec;
+        row.ctime_sec = (int64_t)ctime_sec;
+        row.ctime_nsec = (int64_t)ctime_nsec;
+        if (!zcl_hex_decode(hex, row.digest, ZSHA256_DIGEST_LEN)) {
+            free(row.path);
+            continue;
+        }
+        if (g_row_count == g_row_cap) {
+            size_t next = g_row_cap == 0 ? 64 : g_row_cap * 2;
+            struct digest_row *grown = realloc(g_rows, next * sizeof(*g_rows));
+            if (grown == nullptr) {
+                free(row.path);
+                continue;
+            }
+            g_rows = grown;
+            g_row_cap = next;
+        }
+        g_rows[g_row_count++] = row;
+    }
+    fclose(file);
+    if (g_row_count > 1)
+        qsort(g_rows, g_row_count, sizeof(*g_rows), row_cmp);
+    g_rows_sorted = 1;
+}
+
+static struct digest_row *cache_find(const char *path)
+{
+    if (!g_rows_sorted || g_row_count == 0)
+        return nullptr;
+    struct digest_row key;
+    key.path = (char *)path;
+    return bsearch(&key, g_rows, g_row_count, sizeof(*g_rows), row_cmp);
+}
+
+static void cache_remember(const char *path, const struct stat *st,
+                           const uint8_t digest[ZSHA256_DIGEST_LEN])
+{
+    if (strchr(path, '\n') != nullptr)
+        return;
+    struct digest_row *found = cache_find(path);
+    if (found != nullptr) {
+        char *copy = strdup(path);
+        if (copy == nullptr)
+            return;
+        free(found->path);
+        row_fill(found, path, st, digest);
+        free(found->path);
+        found->path = copy;
+        g_cache_dirty = 1;
+        return;
+    }
+    if (g_row_count == g_row_cap) {
+        size_t next = g_row_cap == 0 ? 64 : g_row_cap * 2;
+        struct digest_row *grown = realloc(g_rows, next * sizeof(*g_rows));
+        if (grown == nullptr)
+            return;
+        g_rows = grown;
+        g_row_cap = next;
+    }
+    struct digest_row row;
+    memset(&row, 0, sizeof row);
+    row_fill(&row, path, st, digest);
+    if (row.path == nullptr)
+        return;
+    g_rows[g_row_count++] = row;
+    if (g_row_count > 1)
+        qsort(g_rows, g_row_count, sizeof(*g_rows), row_cmp);
+    g_rows_sorted = 1;
+    g_cache_dirty = 1;
+}
+
+static void cache_save(void)
+{
+    if (!g_cache_dirty || g_cache_path[0] == '\0')
+        return;
+    if (g_row_count > 1)
+        qsort(g_rows, g_row_count, sizeof(*g_rows), row_cmp);
+    g_rows_sorted = 1;
+    char tmp[4200];
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp", g_cache_path);
+    if (n <= 0 || (size_t)n >= sizeof tmp)
+        return;
+    FILE *file = fopen(tmp, "w");
+    if (file == nullptr)
+        return;
+    for (size_t i = 0; i < g_row_count; i++) {
+        const struct digest_row *row = &g_rows[i];
+        char hex[2 * ZSHA256_DIGEST_LEN + 1u];
+        zcl_hex_encode(row->digest, ZSHA256_DIGEST_LEN, hex);
+        if (fprintf(file, "%" PRIu64 " %" PRIu64 " %" PRIu32 " %" PRIu64
+                           " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64
+                           " %s %s\n",
+                    row->dev, row->ino, row->mode, row->size,
+                    row->mtime_sec, row->mtime_nsec,
+                    row->ctime_sec, row->ctime_nsec, hex, row->path) < 0) {
+            fclose(file);
+            unlink(tmp);
+            return;
+        }
+    }
+    if (fclose(file) != 0) {
+        unlink(tmp);
+        return;
+    }
+    if (rename(tmp, g_cache_path) != 0)
+        unlink(tmp);
+    else
+        g_cache_dirty = 0;
+}
+
+static void publish_content_bytes(void)
+{
+    cache_save();
+    if (g_report_bytes) {
+        fprintf(stderr, "content_bytes_read=%" PRIu64 "\n", g_content_bytes_read);
+        fprintf(stderr, "content_bytes_reused=%" PRIu64 "\n", g_content_bytes_reused);
+    }
+    if (!g_publish_repo_counter)
+        return;
+    /* Only record the counter inside an ignored build directory. Writing it
+     * into a sandbox that tracks build/ would change a file the capture is
+     * hashing. */
+    if (system("git check-ignore -q build >/dev/null 2>&1") != 0)
+        return;
+    mkdir("build", 0755);
+    mkdir("build/identity", 0755);
+    FILE *file = fopen("build/identity/content-bytes-read", "w");
+    if (file == nullptr)
+        return;
+    fprintf(file, "content_bytes_read=%" PRIu64 "\ncontent_bytes_reused=%" PRIu64 "\n",
+            g_content_bytes_read, g_content_bytes_reused);
+    fclose(file);
+}
+
+static void cache_init(const char *path, int report_bytes, int publish)
+{
+    if (g_cache_path[0] != '\0')
+        return;
+    if (path == nullptr || path[0] == '\0') {
+        snprintf(g_cache_path, sizeof g_cache_path,
+                 "build/identity/content-digest-cache");
+        g_publish_repo_counter = publish;
+    } else {
+        snprintf(g_cache_path, sizeof g_cache_path, "%s", path);
+        g_publish_repo_counter = 0;
+    }
+    g_report_bytes = report_bytes;
+    static int hooked;
+    if (!hooked) {
+        atexit(publish_content_bytes);
+        hooked = 1;
+    }
+}
+
 static int digest_fd(int fd, const char *path,
-                     uint8_t digest[ZSHA256_DIGEST_LEN])
+                     uint8_t digest[ZSHA256_DIGEST_LEN], uint64_t *read_bytes)
 {
     zsha256_ctx hash;
     zsha256_init(&hash);
@@ -162,6 +433,8 @@ static int digest_fd(int fd, const char *path,
         zsha256_update(&hash, bytes, (size_t)count);
     }
     zsha256_final(&hash, digest);
+    if (read_bytes != nullptr)
+        *read_bytes = total;
     return 0;
 }
 
@@ -193,6 +466,16 @@ static int hash_file(const char *path,
                 path);
         return 1;
     }
+    if (g_cache_path[0] == '\0')
+        cache_init(nullptr, 0, 1);
+
+    cache_load();
+    struct digest_row *cached = cache_find(path);
+    if (g_allow_reuse && cached != nullptr && row_matches(cached, &before)) {
+        memcpy(digest, cached->digest, ZSHA256_DIGEST_LEN);
+        g_content_bytes_reused += (uint64_t)before.st_size;
+        return 0;
+    }
 
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0)
@@ -208,7 +491,8 @@ static int hash_file(const char *path,
         return 1;
     }
 
-    int status = digest_fd(fd, path, digest);
+    uint64_t read_bytes = 0;
+    int status = digest_fd(fd, path, digest, &read_bytes);
     struct stat after;
     if (status == 0 &&
         (fstat(fd, &after) != 0 || !same_snapshot(&opened, &after))) {
@@ -227,6 +511,10 @@ static int hash_file(const char *path,
                 "source-identity-batch: path changed while hashing: %s\n",
                 path);
         status = 1;
+    }
+    if (status == 0) {
+        g_content_bytes_read += read_bytes;
+        cache_remember(path, &before, digest);
     }
     return status;
 }
@@ -1352,8 +1640,24 @@ int main(int argc, char **argv)
                 "<preimage> <gitlink-sidecar> [digest-table]\n");
         return 2;
     }
-    if (argc == 2 && strcmp(argv[1], "hash") == 0)
+    if (argv[1] != nullptr && strcmp(argv[1], "hash") == 0) {
+        const char *cache = nullptr;
+        int report = 0;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--report-bytes") == 0) {
+                report = 1;
+            } else if (strcmp(argv[i], "--cache") == 0 && i + 1 < argc) {
+                cache = argv[++i];
+            } else {
+                fprintf(stderr,
+                        "usage: source-identity-batch hash [--cache FILE] "
+                        "[--report-bytes]\n");
+                return 2;
+            }
+        }
+        cache_init(cache, report, cache == nullptr);
         return batch_path_main(BATCH_HASH);
+    }
     if (argc == 2 && strcmp(argv[1], "mode") == 0)
         return batch_path_main(BATCH_MODE);
     if (argc >= 2)

@@ -26,6 +26,7 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -332,6 +333,138 @@ static bool cin_depfile_omits_missing(const char *live, const char *reference)
            live_present == 1 && ref_present == 1;
 }
 
+static bool cin_file_has(const char *path, const char *needle)
+{
+    FILE *file = fopen(path, "r");
+    char buf[256];
+    bool found = false;
+    if (!file)
+        return false;
+    while (fgets(buf, sizeof buf, file) != nullptr) {
+        if (strstr(buf, needle) != nullptr)
+            found = true;
+    }
+    fclose(file);
+    return found;
+}
+
+static bool cin_prefix_eq(const char *left, const char *right, size_t n)
+{
+    FILE *a = fopen(left, "r");
+    FILE *b = fopen(right, "r");
+    char abuf[80];
+    char bbuf[80];
+    bool same = false;
+    if (!a || !b) {
+        if (a) fclose(a);
+        if (b) fclose(b);
+        return false;
+    }
+    if (fgets(abuf, sizeof abuf, a) != nullptr &&
+        fgets(bbuf, sizeof bbuf, b) != nullptr &&
+        strlen(abuf) >= n && strlen(bbuf) >= n)
+        same = memcmp(abuf, bbuf, n) == 0;
+    fclose(a);
+    fclose(b);
+    return same;
+}
+
+/* The second hash of an unchanged payload must not read those bytes again.
+ * The three compile-scope refusals stay in cin_scope_refusals. */
+static int cin_identity_reread(void)
+{
+    int failures = 0;
+    char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
+    char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
+    char bin[PATH_MAX] = {0};
+    bool ready = platform_temp_directory_create(
+        "z23-identity-bytes-", temporary, sizeof temporary);
+    ready = ready && platform_directory_canonical_real(
+        temporary, workspace, sizeof workspace);
+    FILE *boot = ready ? popen("tools/dev/source-identity-batch-bootstrap.sh", "r")
+                       : nullptr;
+    if (!boot)
+        ready = false;
+    else if (fgets(bin, sizeof bin, boot) == nullptr)
+        ready = false;
+    if (boot && pclose(boot) != 0)
+        ready = false;
+    size_t bin_len = strlen(bin);
+    if (bin_len > 0 && bin[bin_len - 1] == '\n')
+        bin[--bin_len] = '\0';
+    ready = ready && bin_len > 0;
+    static const char payload[] = "static int payload;\n";
+    char payload_path[PATH_MAX];
+    char paths_path[PATH_MAX];
+    char out1[PATH_MAX];
+    char out2[PATH_MAX];
+    char err1[PATH_MAX];
+    char err2[PATH_MAX];
+    int n = ready ? snprintf(payload_path, sizeof payload_path, "%s/payload.c",
+                             workspace) : -1;
+    ready = ready && n > 0 && (size_t)n < sizeof payload_path;
+    n = ready ? snprintf(paths_path, sizeof paths_path, "%s/paths", workspace) : -1;
+    ready = ready && n > 0 && (size_t)n < sizeof paths_path;
+    n = ready ? snprintf(out1, sizeof out1, "%s/out1", workspace) : -1;
+    ready = ready && n > 0 && (size_t)n < sizeof out1;
+    n = ready ? snprintf(out2, sizeof out2, "%s/out2", workspace) : -1;
+    ready = ready && n > 0 && (size_t)n < sizeof out2;
+    n = ready ? snprintf(err1, sizeof err1, "%s/err1", workspace) : -1;
+    ready = ready && n > 0 && (size_t)n < sizeof err1;
+    n = ready ? snprintf(err2, sizeof err2, "%s/err2", workspace) : -1;
+    ready = ready && n > 0 && (size_t)n < sizeof err2;
+    if (ready) {
+        FILE *body = fopen(payload_path, "w");
+        FILE *paths = fopen(paths_path, "wb");
+        ready = body != nullptr && paths != nullptr;
+        if (body) {
+            fputs(payload, body);
+            fclose(body);
+        }
+        if (paths) {
+            fputs("payload.c", paths);
+            fputc('\0', paths);
+            fclose(paths);
+        }
+    }
+    char cmd[4 * PATH_MAX];
+    int first = 1;
+    int second = 1;
+    if (ready) {
+        n = snprintf(cmd, sizeof cmd,
+                     "cd '%s' && '%s' hash --cache '%s/digest-cache' "
+                     "--report-bytes < '%s' > '%s' 2> '%s'",
+                     workspace, bin, workspace, paths_path, out1, err1);
+        first = (n > 0 && (size_t)n < sizeof cmd) ? system(cmd) : 1;
+        n = snprintf(cmd, sizeof cmd,
+                     "cd '%s' && '%s' hash --cache '%s/digest-cache' "
+                     "--report-bytes < '%s' > '%s' 2> '%s'",
+                     workspace, bin, workspace, paths_path, out2, err2);
+        second = (n > 0 && (size_t)n < sizeof cmd) ? system(cmd) : 1;
+    }
+    char paid[64];
+    snprintf(paid, sizeof paid, "content_bytes_read=%zu", strlen(payload));
+    printf("identity_first %s\n", ready && cin_file_has(err1, paid) ? paid : "unread");
+    printf("identity_second ");
+    if (ready && cin_file_has(err2, "content_bytes_read=")) {
+        FILE *err = fopen(err2, "r");
+        char line[128];
+        if (err) {
+            while (fgets(line, sizeof line, err) != nullptr)
+                fputs(line, stdout);
+            fclose(err);
+        }
+    } else {
+        printf("missing\n");
+    }
+    CIN_CHECK("unchanged payload is not read again",
+              ready && first == 0 && second == 0 &&
+              cin_file_has(err1, paid) &&
+              cin_file_has(err2, "content_bytes_read=0") &&
+              cin_prefix_eq(out1, out2, 64));
+    return failures;
+}
+
 static int cin_scope_refusals(void)
 {
     int failures = 0;
@@ -393,6 +526,7 @@ int test_codeindex_incremental(void)
               cin_agrees(live, reference, &baseline_files));
 
     failures += cin_scope_refusals();
+    failures += cin_identity_reread();
     failures += cin_depfile_cases(live, reference);
 
     /* One file. The narrowest incremental case and the one the dev loop
