@@ -211,9 +211,8 @@ struct zcl_action_root_request {
  * holds a same-name program it may take instead), env_influential_unbound,
  * driver_cache_opaque (a word of the driver command is a compile cache or
  * remote compiler no fixed switch turns off), backend_config_unbound (the
- * driver reads a configuration file), input_fs_remote (a closure file lives
- * on a network or FUSE filesystem whose clock T0 cannot trust),
- * argv_unavailable and store_unavailable. */
+ * driver reads a configuration file), argv_unavailable and
+ * store_unavailable. */
 struct zcl_action_root_result {
     uint8_t root[32];
     char root_hex[65];

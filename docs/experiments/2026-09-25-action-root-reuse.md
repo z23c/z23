@@ -242,6 +242,96 @@ child's roots.
 Roots depend on bytes, not on commit identity. They can therefore be derived
 before the commit exists.
 
+## Exact-identity lane, 2026-09-26
+
+This lane makes the v2 root bind the bytes that actually ran for a
+hot-swap compile. It adds the T0 compile-window check, the constructed
+child environment, and the `-###` backend bytes. It also admits
+`-frandom-seed=` in the argv allowlist. The study was rerun at
+`85079c4720` against the same 30-commit corpus.
+
+| Corpus B (70,816 comparisons) | Before the lane | After (`85079c4720`) |
+| --- | ---: | ---: |
+| Equal root (reusable) | 0 | 70,447 (99.48%) |
+| Changed root | 0 | 67 (0.09%) |
+| MISS | 70,814 (100%) | 300 (0.42%) |
+
+The "before" column is a false miss. Every dev action carries
+`-frandom-seed=`, which the argv allowlist did not admit. The after-column
+MISS causes:
+
+- 270 `include_climb_unbound`. Each is a quote include climbing with `..`
+  reached through a search dir, not beside its includer
+  (`tools/dev/devloop_action_root.c:1432`). These are correct refusals of
+  what the model can express. There are 29 distinct include lines, for
+  example `engine/modules/hotswap/src/hotswap_activate.c ->
+  ../../../engine/composition/hotswap_swappable.def`.
+- 30 `argv-binds-source-identity` (`clientversion.c`), unchanged.
+- No `env_*` miss and no `input_changed_during_compile` miss occurred. The
+  environment scrub and T0 caused no false miss.
+
+Costs, measured on a shared host under concurrent load:
+
+| Measure | Value |
+| --- | --- |
+| Derivation per action, corpus B, wall p50 / p95 | 11.4 / 34.1 ms |
+| Derivation per action, CPU p50 / p95 | 5.4 / 22.6 ms |
+| Hot-swap key, warm unchanged save | 377 → 454 µs |
+| Hot-swap key, second worktree (driver re-capture) | 28.7 → 70.3 ms |
+
+The second-worktree cost grew because every driver query now runs under
+`env -i` with the child environment and also asks `-###`. After the
+follow-up below, the fixture measured cold 58.1 ms, warm 459 µs and second
+worktree 51.9 ms.
+
+### Follow-up after review (HOLD)
+
+- A compile cache in the plan's driver command no longer answers a keyed
+  compile. The real plan is `CC=<root>/build/bin/zcc cc`, and zcc keys its
+  toolchain on the cc driver's path, size and mtime only. Every keyed child
+  now carries the fixed `CCACHE_DISABLE=1` and `ZCC_DISABLE=1`, a root
+  exists only for an environment with exactly those entries, and the
+  hot-swap policy text names them. A driver-command word that is an opaque
+  cache (sccache, distcc, icecc and similar, by name or by symlink) misses
+  as `driver_cache_opaque`. Proof: the fixture runs the real zcc binary,
+  swaps the `as` that cc resolves from PATH, and checks that the root moves
+  and that the object is rebuilt by the new assembler. Before the fix the
+  root moved but zcc served the old object.
+- The child environment is built once per build and the same object is
+  passed to every spawn and to the key.
+- A PATH with an empty or relative element misses as `env_path_relative`.
+- `-###` is asked with the plan's full compile flags. Every command line is
+  bound word by word, with driver temporaries spelled `@tmp` and the
+  checkout root spelled `@root`. A Clang `Configuration file:` line misses
+  as `backend_config_unbound`.
+
+### Residual blind spots
+
+These must close before any reuse key that is shared beyond one host
+depends on the root:
+
+- Cross prefixes. gcc may run a machine-prefixed program
+  (`x86_64-linux-gnu-as`) from its prefixes. Only the bare basename is
+  checked for shadowing.
+- The ld LTO plugin bytes are not bound.
+- mmap writes that do not update mtime are invisible to T0. So are a
+  realtime clock stepped backwards, and files on network or FUSE
+  filesystems whose clocks are remote. The statfs refusal
+  (`input_fs_remote`) is named but not implemented. It needs a
+  platform-layer filesystem-type query first.
+- Toolchains that need `LD_LIBRARY_PATH` now fail to build under the
+  constructed environment instead of keying. That is fail-closed, but it
+  is a regression for such hosts.
+- Driver-read files that change without changing the driver's bytes, flags
+  or environment (a specs file edited in place, a Clang configuration file
+  once admitted) do not force a re-capture of the cached driver facts.
+- Clang prints the process cwd into `-###` lines
+  (`-fdebug-compilation-dir`). The driver is asked from the dev loop's cwd,
+  not the compile's.
+- The per-owner `-D...SOURCE_TU` defines and the stage tails
+  (`-fvisibility=hidden`) are not part of the `-###` query. They are bound
+  in the argv field.
+
 ## Limits
 
 - Test-group closures come from one code-index generation: the study
