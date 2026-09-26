@@ -3779,6 +3779,8 @@ static bool dp_probe_left_no_children(const char *marker)
     return gone;
 }
 
+/* hook and marker are absolute; an empty dir keeps dp_mk_write from
+ * prefixing them. */
 static bool dp_probe_hook_write(const char *hook, const char *marker)
 {
     char body[PATH_MAX * 2 + 256];
@@ -3788,7 +3790,7 @@ static bool dp_probe_hook_write(const char *hook, const char *marker)
                      "printf '%%s %%s\\n' \"$$\" \"$!\" >'%s.tmp'\n"
                      "mv '%s.tmp' '%s'\n"
                      "wait\n", marker, marker, marker);
-    return n > 0 && n < (int)sizeof(body) && dp_mk_write(".", hook, body) &&
+    return n > 0 && n < (int)sizeof(body) && dp_mk_write("", hook, body) &&
         chmod(hook, 0700) == 0;
 }
 
@@ -3899,7 +3901,7 @@ static bool dp_restart_event_verdicts_ok(const char *root,
                      "#!/usr/bin/env bash\n"
                      "printf 'int restart_fixture(void) { return 13; }\\n' "
                      ">'%s/%s/tools/dev/restart_fixture.c'\n", cwd, root);
-    if (n <= 0 || n >= (int)sizeof(body) || !dp_mk_write(".", hook, body) ||
+    if (n <= 0 || n >= (int)sizeof(body) || !dp_mk_write("", hook, body) ||
         chmod(hook, 0700) != 0 ||
         platform_environment_set("ZCL_DEVLOOP_TEST_PROBE_HOOK", hook, 1) != 0)
         return false;
