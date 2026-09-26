@@ -28,6 +28,7 @@
 #include "sha3/sha3.h"
 #include "util/spawn.h"
 
+#include <ctype.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -552,6 +553,54 @@ bool zcl_action_root_parse_driver_programs(const char *out,
     return ok;
 }
 
+/* A driver temporary's basename: gcc's cc + 6 alphanumerics + .ext, or
+ * Clang's <stem>-<6 or more lowercase hex>.ext. */
+static bool ars_driver_temp_name(const char *base)
+{
+    const char *dot = strrchr(base, '.');
+    if (!dot || !dot[1] || dot == base)
+        return false;
+    size_t stem = (size_t)(dot - base);
+    bool gcc = stem == 8 && strncmp(base, "cc", 2) == 0;
+    for (size_t i = 2; gcc && i < 8; i++)
+        gcc = isalnum((unsigned char)base[i]) != 0;
+    if (gcc)
+        return true;
+    const char *dash = NULL;
+    for (const char *p = base; p < dot; p++)
+        if (*p == '-')
+            dash = p;
+    size_t hex = dash ? (size_t)(dot - dash - 1) : 0;
+    for (const char *p = dash ? dash + 1 : dot; p < dot; p++)
+        if (!isxdigit((unsigned char)*p) || isupper((unsigned char)*p))
+            return false;
+    return dash && dash > base && hex >= 6;
+}
+
+bool zcl_action_root_canon_driver_word(const char *word, const char *root,
+                                       const char *tmp, char *out,
+                                       size_t cap)
+{
+    size_t tn = strlen(tmp), rn = strlen(root);
+    const char *base = strrchr(word, '/');
+    if (tn && strncmp(word, tmp, tn) == 0 && word[tn] == '/' &&
+        base == word + tn && ars_driver_temp_name(base + 1))
+        return snprintf(out, cap, "@tmp%s", strrchr(base, '.')) < (int)cap;
+    size_t o = 0;
+    for (const char *p = word; *p;) {
+        bool at_root = rn && strncmp(p, root, rn) == 0;
+        const char *piece = at_root ? "@root" : p;
+        size_t n = at_root ? 5 : 1;
+        if (o + n >= cap)
+            return false;
+        memcpy(out + o, piece, n);
+        o += n;
+        p += at_root ? rn : 1;
+    }
+    out[o] = '\0';
+    return true;
+}
+
 #if !defined(_WIN32)
 /* A driver that prints a bare program name runs it from PATH; resolve it
  * the same way. The answer is recorded by content, so PATH itself never
@@ -730,32 +779,6 @@ static void ars_shadow_state(const struct ars_driver *d, uint8_t out[32])
     sha3_256_finalize(&sha, out);
 }
 
-/* A -### word, canonical: a driver temporary (under the child's TMPDIR, or
- * /tmp) becomes "@tmp" plus its suffix, and every spelling of the checkout
- * root becomes "@root", so the same compile in another worktree binds the
- * same lines. */
-static bool ars_canon_word(const char *word, const char *root,
-                           const char *tmp, char *out, size_t cap)
-{
-    size_t tn = strlen(tmp), rn = strlen(root);
-    if (strncmp(word, tmp, tn) == 0 && word[tn] == '/') {
-        const char *base = strrchr(word, '/') + 1, *dot = strrchr(base, '.');
-        return snprintf(out, cap, "@tmp%s", dot ? dot : "") < (int)cap;
-    }
-    size_t o = 0;
-    for (const char *p = word; *p;) {
-        bool at_root = rn && strncmp(p, root, rn) == 0;
-        const char *piece = at_root ? "@root" : p;
-        size_t n = at_root ? 5 : 1;
-        if (o + n >= cap)
-            return false;
-        memcpy(out + o, piece, n);
-        o += n;
-        p += at_root ? rn : 1;
-    }
-    out[o] = '\0';
-    return true;
-}
 
 /* One command line of -### output: each word (quoted or bare) canonical and
  * hashed with its terminator. A word with an escape is refused. */
@@ -776,7 +799,8 @@ static bool ars_line_sha3(struct sha3_256_ctx *sha, const char *p,
         memcpy(word, p, n);
         word[n] = '\0';
         p += n + quoted;
-        if (!ars_canon_word(word, root, tmp, canon, sizeof(canon)))
+        if (!zcl_action_root_canon_driver_word(word, root, tmp, canon,
+                                               sizeof(canon)))
             return false;
         sha3_256_write(sha, (const uint8_t *)canon, strlen(canon) + 1);
     }
@@ -797,8 +821,8 @@ static const char *ars_ask_tmpdir(const struct ars_driver *d)
 /* SHA3 over every command line of -### output (lines that start with a
  * space and are not "(in-process)"). A "Configuration file:" line (Clang)
  * names flags the root does not bind: backend_config_unbound. */
-static bool ars_lines_capture(struct ars_driver *d, const char *out,
-                              char miss[40])
+static bool ars_lines_capture(const struct ars_driver *d, const char *out,
+                              uint8_t lines_sha3[32], char miss[40])
 {
     static const char domain[] = "zcl.action_root.hotload_backend_lines.v1";
     static const char config[] = "Configuration file:";
@@ -822,14 +846,23 @@ static bool ars_lines_capture(struct ars_driver *d, const char *out,
         line = strchr(line, '\n');
         line += line != NULL;
     }
-    sha3_256_finalize(&sha, d->lines_sha3);
+    sha3_256_finalize(&sha, lines_sha3);
     return true;
 }
 
-/* What a compile runs, asked as `cc <every plan flag> -### -c`: the program
- * words are resolved per derivation (ars_backend_sha3), never here, and
- * every command line is bound canonically (ars_lines_capture). */
-static bool ars_programs_capture(struct ars_driver *d, char miss[40])
+/* What one -### query says a compile runs: the canonical lines and the
+ * program words and prefixes. */
+struct ars_programs {
+    uint8_t lines_sha3[32];
+    char backend[ARS_BACKEND_MAX][PATH_MAX];
+    size_t backend_n;
+    char prefixes[ARS_PREFIX_MAX][PATH_MAX];
+    size_t prefix_n;
+};
+
+/* Ask `cc <every plan flag> -### -c` under d->ask_env into `p`. */
+static bool ars_programs_ask(const struct ars_driver *d,
+                             struct ars_programs *p, char miss[40])
 {
     static const char *const hash[] = { "-fPIC", "-###", "-c", "-xc",
                                         "/dev/null", "-o", "/dev/null",
@@ -838,13 +871,54 @@ static bool ars_programs_capture(struct ars_driver *d, char miss[40])
     bool ok = capture &&
               ars_driver_ask_with(d, d->flags, hash, capture,
                                   ARS_HASH_OUT_MAX) &&
-              ars_lines_capture(d, capture, miss) &&
+              ars_lines_capture(d, capture, p->lines_sha3, miss) &&
               zcl_action_root_parse_driver_programs(
-                  capture, d->backend, ARS_BACKEND_MAX, &d->backend_n,
-                  d->prefixes, ARS_PREFIX_MAX, &d->prefix_n);
+                  capture, p->backend, ARS_BACKEND_MAX, &p->backend_n,
+                  p->prefixes, ARS_PREFIX_MAX, &p->prefix_n);
     free(capture);
+    return ok;
+}
+
+/* What a compile runs, asked as `cc <every plan flag> -### -c`: the program
+ * words are resolved per derivation (ars_backend_sha3), never here, and
+ * every command line is bound canonically (ars_lines_capture). */
+static bool ars_programs_capture(struct ars_driver *d, char miss[40])
+{
+    struct ars_programs *p = zcl_calloc(1, sizeof(*p), "driver programs");
+    bool ok = p && ars_programs_ask(d, p, miss);
+    if (ok) {
+        memcpy(d->lines_sha3, p->lines_sha3, sizeof(d->lines_sha3));
+        memcpy(d->backend, p->backend, sizeof(d->backend));
+        memcpy(d->prefixes, p->prefixes, sizeof(d->prefixes));
+        d->backend_n = p->backend_n;
+        d->prefix_n = p->prefix_n;
+    }
+    free(p);
     if (!ok && miss && !miss[0])
         (void)snprintf(miss, 40, "backend_unresolved");
+    return ok;
+}
+
+/* The driver, asked -### again under `env`, still prints the same lines and
+ * names the same programs and prefixes. A driver behind a see-through
+ * wrapper can be replaced in place (update-alternatives, a rewritten exec
+ * target) with no change to the words, flags or environment the cache
+ * checks; a failed query is a mismatch (the caller re-captures, and that
+ * misses). */
+static bool ars_programs_same(struct ars_driver *d,
+                              const struct zcl_action_root_child_env *env)
+{
+    struct ars_programs *p = zcl_calloc(1, sizeof(*p), "driver programs");
+    d->ask_env = env;
+    bool ok = p && ars_programs_ask(d, p, NULL) &&
+              memcmp(p->lines_sha3, d->lines_sha3, 32) == 0 &&
+              p->backend_n == d->backend_n && p->prefix_n == d->prefix_n;
+    for (size_t i = 0; ok && i < p->backend_n; i++)
+        ok = strcmp(p->backend[i], d->backend[i]) == 0;
+    for (size_t i = 0; ok && i < p->prefix_n; i++)
+        ok = strcmp(p->prefixes[i], d->prefixes[i]) == 0;
+    d->ask_env = NULL;
+    free(p);
     return ok;
 }
 
@@ -1080,7 +1154,8 @@ static void ars_env_sha3(const struct zcl_action_root_child_env *env,
 #endif
 
 #if !defined(_WIN32)
-/* g_driver (held under g_driver_mu) still answers `q`. */
+/* g_driver (held under g_driver_mu) still answers `q`, and the driver,
+ * asked -### again, still prints the same lines and programs. */
 static bool ars_driver_cached(const struct ars_ask *q, const uint8_t bytes[32],
                               const uint8_t env_sha3[32])
 {
@@ -1090,7 +1165,8 @@ static bool ars_driver_cached(const struct ars_ask *q, const uint8_t bytes[32],
            strcmp(g_driver.root, q->root) == 0 &&
            memcmp(g_driver.bytes, bytes, 32) == 0 &&
            memcmp(g_driver.env_sha3, env_sha3, 32) == 0 &&
-           ars_driver_fresh(&g_driver);
+           ars_driver_fresh(&g_driver) &&
+           ars_programs_same(&g_driver, q->env);
 }
 #endif
 

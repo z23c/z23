@@ -318,6 +318,15 @@ bool zcl_action_root_parse_builtin_dirs(const char *cc_dash_e_v_output,
                                         size_t dirs_cap, size_t *count_out,
                                         char *miss);
 
+/* One word of a `-###` command line, canonical: a driver temporary directly
+ * under `tmp` (gcc's cc + 6 alphanumerics + .ext, or Clang's
+ * <stem>-<6+ lowercase hex>.ext) becomes "@tmp" plus its suffix; any other
+ * path under `tmp` stays literal; every spelling of `root` becomes "@root".
+ * False when `out` is too small. */
+bool zcl_action_root_canon_driver_word(const char *word, const char *root,
+                                       const char *tmp, char *out,
+                                       size_t cap);
+
 /* Parse `cc -### -c ...` output: every program a command line runs (a line
  * that starts with a space; its first word, quotes stripped; the Clang
  * " (in-process)" marker skipped) into `progs`, and the COMPILER_PATH=

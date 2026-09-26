@@ -1259,6 +1259,34 @@ static void test_key_backend_lines(struct fx *x)
              "(backend_config_unbound)", ok);
 }
 
+/* The inner driver behind the same wrapper is replaced in place (an
+ * update-alternatives flip, a rewritten exec target) with PATH, flags and
+ * environment unchanged: the warm key must see the new -### lines, and an
+ * inner driver that no longer answers must miss, never reuse the old facts. */
+static void test_key_inner_replaced(struct fx *x)
+{
+    const char *path = getenv("PATH");
+    char saved[8192], cc[PATH_MAX], k1[65] = {0}, k2[65] = {0};
+    char k3[65] = {0};
+    bool ok = path && snprintf(saved, sizeof(saved), "%s", path) <
+                          (int)sizeof(saved) &&
+              fx_inner_drivers(x, cc) &&
+              fx_key_inner(x, saved, "d1", cc, k1) &&
+              fx_inner_driver(x, "d1", "", "\\\"-fx-inner-spec\\\" ") &&
+              fx_key(x, cc, k2) && fx_inner_driver(x, "d1", "", "") &&
+              fx_key(x, cc, k3);
+    AR_CHECK("backend: an inner driver replaced in place behind the same "
+             "wrapper and PATH moves the warm key; restored, it returns",
+             ok && strcmp(k1, k2) != 0 && strcmp(k1, k3) == 0);
+    ok = ok && fx_exec(x, "d1/fxinner", "#!/bin/sh\nexit 1\n") &&
+         fx_key_miss(x, cc, "driver_facts_unavailable") &&
+         fx_inner_driver(x, "d1", "", "");
+    if (path)
+        (void)platform_environment_set("PATH", saved, 1);
+    AR_CHECK("backend: an inner driver that stops answering -### misses "
+             "instead of reusing its cached facts", ok);
+}
+
 /* PATH=/usr/bin: with an `as` at the checkout root: the compile child's
  * execvp would run that one; the key misses by name instead. */
 static void test_key_path_relative(struct fx *x)
@@ -1835,6 +1863,7 @@ static void test_derivation(void)
         test_key_path_relative(x);
         test_key_cache_opaque(x);
         test_key_backend_lines(x);
+        test_key_inner_replaced(x);
         test_key_same_name_static(x);
         test_key_cost(x);
     }
@@ -1842,6 +1871,40 @@ static void test_derivation(void)
     if (x)
         test_rm_rf_recursive(x->root);
     free(x);
+}
+
+/* Only a driver temporary under TMPDIR collapses to @tmp; any other path
+ * there stays literal, so two such paths never bind alike. */
+static void test_canon_driver_word(void)
+{
+    static const struct { const char *word, *want; } cases[] = {
+        { "/srv/fx-tmp/ccAb12Z9.s", "@tmp.s" },
+        { "/srv/fx-tmp/null-8f2c1ab0.o", "@tmp.o" },
+        { "/srv/fx-tmp/fxdata-one.h", "/srv/fx-tmp/fxdata-one.h" },
+        { "/srv/fx-tmp/ccshort.s", "/srv/fx-tmp/ccshort.s" },
+        { "/srv/fx-tmp/sub/ccAb12Z9.s", "/srv/fx-tmp/sub/ccAb12Z9.s" },
+        { "-ffile-prefix-map=/srv/fx-root=/z", "-ffile-prefix-map=@root=/z" },
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char out[PATH_MAX];
+        if (!zcl_action_root_canon_driver_word(cases[i].word, "/srv/fx-root",
+                                               "/srv/fx-tmp", out,
+                                               sizeof(out)) ||
+            strcmp(out, cases[i].want) != 0) {
+            printf("    canon %s -> %s\n", cases[i].word, out);
+            ok = false;
+        }
+    }
+    char a[PATH_MAX], b[PATH_MAX];
+    ok = ok &&
+         zcl_action_root_canon_driver_word("/srv/fx-tmp/fxdata-one.h", "/r",
+                                           "/srv/fx-tmp", a, sizeof(a)) &&
+         zcl_action_root_canon_driver_word("/srv/fx-tmp/fxdata-two.h", "/r",
+                                           "/srv/fx-tmp", b, sizeof(b)) &&
+         strcmp(a, b) != 0;
+    AR_CHECK("backend lines: only a driver temporary under TMPDIR becomes "
+             "@tmp; two other paths there stay distinct", ok);
 }
 
 /* A fake `cc -xc -E -v /dev/null` transcript is enough to prove the
@@ -1941,5 +2004,6 @@ int test_action_root(void)
     test_derivation();
     test_derive_snapshot_not_commit();
     test_builtin_dir_parse();
+    test_canon_driver_word();
     return g_failures + codec_failures;
 }

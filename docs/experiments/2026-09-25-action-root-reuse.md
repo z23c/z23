@@ -305,26 +305,53 @@ worktree 51.9 ms.
   checkout root spelled `@root`. A Clang `Configuration file:` line misses
   as `backend_config_unbound`.
 
+Re-asking `-###` on every warm key costs one driver spawn under `env -i`.
+Warm-key cost with the host driver (25 derivations): wall p50/p95 went from
+371/397 µs to 2.9/12.8 ms, and CPU p50/p95 from 371/397 µs to 2.5/2.9 ms. In
+the hot-swap fixture, whose driver is a wrapper script, the warm key went
+from 470 µs to 3.6–13.6 ms, against a build of 13–23 ms.
+
 ### Residual blind spots
 
-These must close before any reuse key that is shared beyond one host
-depends on the root:
+A key consumer already exists. The dev watcher (`devloop_watch.c:2711`)
+calls `zcl_devloop_hotswap_batch_event`, which reaches
+`zcl_devloop_hotswap_build`. That path keys the host-local hot-swap
+artifact cache through `hs_cache_key` and this root. The cache is on by
+default under `~/.cache/zclassic23/dev-artifacts`, or under
+`ZCL_DEV_ARTIFACT_CACHE` (`devloop_hotswap_build.c:730-750`). A blind
+spot below can therefore serve a stale object on one host today. Every
+one of them must close before a key shared beyond one host depends on the
+root.
 
 - Cross prefixes. gcc may run a machine-prefixed program
   (`x86_64-linux-gnu-as`) from its prefixes. Only the bare basename is
   checked for shadowing.
 - The ld LTO plugin bytes are not bound.
-- mmap writes that do not update mtime are invisible to T0. So are a
-  realtime clock stepped backwards, and files on network or FUSE
-  filesystems whose clocks are remote. The statfs refusal
-  (`input_fs_remote`) is named but not implemented. It needs a
-  platform-layer filesystem-type query first.
+- T0 does not see mmap writes that leave mtime unchanged, or a realtime
+  clock stepped backwards.
+- Remote filesystems (item 6, deferred). The `statfs` refusal is not
+  implemented; it needs a filesystem-type query in the platform layer
+  first. It matters only when all of these hold:
+  - a closure input or the checkout lives on NFS, CIFS/SMB or FUSE;
+  - that filesystem stamps files with a clock behind or skewed from this
+    host's, so a write during the compile is stamped before T0;
+  - the write lands inside the compile window;
+  - a later save looks up the host-local artifact cache under the root
+    that compile produced.
+- Opaque compile caches are detected by basename, and by the basename of
+  the resolved symlink target (`ars_cache_opaque`). A copy or hard link of
+  sccache or distcc under another name is not detected. Its bytes are
+  bound, but its cache store is not.
 - Toolchains that need `LD_LIBRARY_PATH` now fail to build under the
   constructed environment instead of keying. That is fail-closed, but it
   is a regression for such hosts.
-- Driver-read files that change without changing the driver's bytes, flags
-  or environment (a specs file edited in place, a Clang configuration file
-  once admitted) do not force a re-capture of the cached driver facts.
+- Every warm key asks the driver `-###` again. A change in the lines or in
+  the program list captures the driver facts again, and a failed query
+  misses. This covers an inner driver replaced in place behind the same
+  wrapper and PATH, and a specs file that changes the lines. A driver-read
+  file that changes only the built-in include list, sysroot or implicit
+  libraries without changing any `-###` line is still caught only by the
+  existing dir, program and library checks.
 - Clang prints the process cwd into `-###` lines
   (`-fdebug-compilation-dir`). The driver is asked from the dev loop's cwd,
   not the compile's.
