@@ -623,16 +623,13 @@ static bool fx_unreadable(struct fx *x, const char *rel, bool on)
     return rmdir(full) == 0 && fx_write(x->root, rel, "int local(void);\n");
 }
 
-/* Missing data is a MISS: no root, an explicit reason, never a guess. */
-static void test_derive_misses(struct fx *x,
-                               const struct zcl_action_root_result *b)
+/* A depfile this parser cannot read exactly is a miss, never a closure
+ * that was cut short or a prerequisite spelling that was guessed. */
+static void test_derive_bad_depfile(struct fx *x,
+                                    const struct zcl_action_root_result *b)
 {
-    bool ok = fx_remove(x->root, "build/unit.d") &&
-              fx_miss(x, "depfile_missing") && fx_depfile(x, true);
-    AR_CHECK("miss: a missing depfile yields no root (depfile_missing)",
-             ok && fx_same(x, b));
-    ok = fx_write(x->root, "build/unit.d", "no rule here\n") &&
-         fx_miss(x, "depfile_malformed") && fx_depfile(x, true);
+    bool ok = fx_write(x->root, "build/unit.d", "no rule here\n") &&
+              fx_miss(x, "depfile_malformed") && fx_depfile(x, true);
     AR_CHECK("miss: a depfile with no rule yields no root "
              "(depfile_malformed)", ok);
     ok = fx_depfile_text(x, " %R/src/unit.c foo\\ bar.h") &&
@@ -653,6 +650,17 @@ static void test_derive_misses(struct fx *x,
     AR_CHECK("miss: a depfile that ends in a dangling continuation "
              "backslash yields no root (depfile_malformed)",
              ok && fx_same(x, b));
+}
+
+/* Missing data is a MISS: no root, an explicit reason, never a guess. */
+static void test_derive_misses(struct fx *x,
+                               const struct zcl_action_root_result *b)
+{
+    bool ok = fx_remove(x->root, "build/unit.d") &&
+              fx_miss(x, "depfile_missing") && fx_depfile(x, true);
+    AR_CHECK("miss: a missing depfile yields no root (depfile_missing)",
+             ok && fx_same(x, b));
+    test_derive_bad_depfile(x, b);
     ok = fx_depfile_text(x, " build/gen/unity.c %R/src/unit.c src/gone.h "
                             "src/local.h inc_b/defs.h") &&
          fx_miss(x, "dependency_missing") && fx_depfile(x, true);

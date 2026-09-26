@@ -311,6 +311,34 @@ static const char *ars_builtin_entry(const char *p, size_t n,
     return NULL;
 }
 
+/* Step `*cursor` (a newline inside the search list) to the next non-empty
+ * entry before `end`: its first byte and its length without leading spaces
+ * or a " (framework directory)" suffix. False once the list is exhausted. */
+static bool ars_builtin_next(const char **cursor, const char *end,
+                             const char **line, size_t *len)
+{
+    const char *p = *cursor;
+    while (p && p < end) {
+        p++;
+        while (*p == ' ')
+            p++;
+        size_t n = strcspn(p, "\r\n");
+        const char *framework = strstr(p, " (framework directory)");
+        if (framework && (size_t)(framework - p) < n)
+            n = (size_t)(framework - p);
+        const char *at = p;
+        p = strchr(p, '\n');
+        if (at < end && n > 0) {
+            *cursor = p;
+            *line = at;
+            *len = n;
+            return true;
+        }
+    }
+    *cursor = p;
+    return false;
+}
+
 bool zcl_action_root_parse_builtin_dirs(const char *out,
                                         char dirs[][PATH_MAX],
                                         size_t dirs_cap, size_t *count_out,
@@ -327,17 +355,10 @@ bool zcl_action_root_parse_builtin_dirs(const char *out,
     if (!p || !end || end < p)
         return false;
     p = strchr(p, '\n');
-    while (!refused && p && p < end) {
-        p++;
-        while (*p == ' ') p++;
-        size_t n = strcspn(p, "\r\n");
-        const char *framework = strstr(p, " (framework directory)");
-        if (framework && (size_t)(framework - p) < n)
-            n = (size_t)(framework - p);
-        if (p < end && n > 0)
-            refused = ars_builtin_entry(p, n, dirs, dirs_cap, &count);
-        p = strchr(p, '\n');
-    }
+    const char *line = NULL;
+    size_t n = 0;
+    while (!refused && ars_builtin_next(&p, end, &line, &n))
+        refused = ars_builtin_entry(line, n, dirs, dirs_cap, &count);
     if (refused) {
         if (miss)
             (void)snprintf(miss, 40, "%s", refused);
