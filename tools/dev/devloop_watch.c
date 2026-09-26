@@ -312,6 +312,8 @@ struct watch_context {
     char proof_worker_epoch[65];
     int64_t proof_worker_spawned_us;
     int64_t proof_worker_cancel_us;
+    /* When stop sent the worker SIGTERM; its kill deadline counts from here. */
+    int64_t proof_worker_stop_us;
     struct watch_proof_record proof_reaped[4];
     size_t proof_reaped_count;
     struct watch_cycle_trace trace;
@@ -999,6 +1001,26 @@ static void watch_sealer_join(struct watch_sealer *s)
     s->pid = 0;
 }
 
+/* Seals every event published to the ring so far. `when` names the point
+ * of stop in the log. False when the ring cannot be read or the seal fails. */
+static bool watch_seal_published(const char *root, const char *when)
+{
+    int64_t latest = 0, durable = 0;
+    char why[160] = {0};
+    if (!zcl_devloop_cycle_stream_marks(root, &latest, &durable)) {
+        fprintf(stderr, "[devloop] event stream unreadable %s; cannot "
+                        "prove every published event is sealed\n", when);
+        return false;
+    }
+    if (latest == durable || zcl_devloop_cycle_stream_flush_through(
+                                 root, latest, why, sizeof(why)))
+        return true;
+    fprintf(stderr, "[devloop] event journal seal %s failed "
+                    "through=%lld: %s\n",
+            when, (long long)latest, why[0] ? why : "unknown");
+    return false;
+}
+
 /* The join waits without a bound once the stop request is sent: a live
  * sealer blocks only on the seal lock or a journal fsync, which the inline
  * seal below would wait on equally, and returning first would report a stop
@@ -1009,20 +1031,7 @@ static bool watch_sealer_finish(struct watch_context *ctx)
     zcl_devloop_cycle_stream_seal_defer(NULL, NULL);
     watch_sealer_join(&ctx->sealer);
     watch_sealer_close_fds(&ctx->sealer);
-    int64_t latest = 0, durable = 0;
-    char why[160] = {0};
-    if (!zcl_devloop_cycle_stream_marks(ctx->root, &latest, &durable)) {
-        fprintf(stderr, "[devloop] event stream unreadable at stop; cannot "
-                        "prove every published event is sealed\n");
-        return false;
-    }
-    if (latest == durable || zcl_devloop_cycle_stream_flush_through(
-                                 ctx->root, latest, why, sizeof(why)))
-        return true;
-    fprintf(stderr, "[devloop] event journal seal at stop failed "
-                    "through=%lld: %s\n",
-            (long long)latest, why[0] ? why : "unknown");
-    return false;
+    return watch_seal_published(ctx->root, "at stop");
 }
 
 /* A forked proof worker neither keeps the request pipe nor defers: it seals
@@ -1144,8 +1153,23 @@ static void watch_proof_stop(struct watch_context *ctx)
     if (!ctx) return;
     ctx->proof_pending_count = 0;
     watch_proof_reap(ctx);
-    if (ctx->proof_worker_pid > 1)
+    if (ctx->proof_worker_pid > 1) {
         (void)kill(ctx->proof_worker_pid, SIGTERM);
+        ctx->proof_worker_stop_us = platform_time_monotonic_us();
+    }
+}
+
+/* What is left of the worker's stop budget: counted from stop's SIGTERM, so
+ * the sealer drain that runs between them does not extend it. */
+static int watch_proof_join_budget_ms(struct watch_context *ctx)
+{
+    int64_t since = ctx->proof_worker_stop_us;
+    ctx->proof_worker_stop_us = 0;
+    if (since <= 0)
+        return WATCH_CHILD_STOP_BUDGET_MS;
+    int64_t spent_ms = (platform_time_monotonic_us() - since) / 1000;
+    return spent_ms >= WATCH_CHILD_STOP_BUDGET_MS
+        ? 0 : WATCH_CHILD_STOP_BUDGET_MS - (int)spent_ms;
 }
 
 /* A worker sent SIGTERM normally exits at its next cancellation poll. One
@@ -1158,7 +1182,8 @@ static void watch_proof_join(struct watch_context *ctx)
     pid_t worker = ctx->proof_worker_pid;
     int status = 0;
     bool killed = false;
-    pid_t got = watch_child_reap_bounded(worker, WATCH_CHILD_STOP_BUDGET_MS,
+    pid_t got = watch_child_reap_bounded(worker,
+                                         watch_proof_join_budget_ms(ctx),
                                          &status, &killed);
     if (killed)
         fprintf(stderr, "[devloop] proof worker %ld did not exit within %d "
@@ -3263,7 +3288,9 @@ static bool watch_start_event_stream(struct watch_context *ctx)
  * report stopped, wait for the cancelled worker (killing it after a bounded
  * wait), and only then release the singleton lock, so no new watcher
  * attaches to this checkout while the watcher or its worker still runs.
- * True when every published event is sealed. */
+ * The cancelled worker may publish its verdict after the sealer drained and
+ * be killed before sealing it, so the ring is sealed once more after the
+ * join. True when every published event is sealed. */
 static bool watch_teardown(struct watch_context *ctx, int lock_fd,
                            bool idle_exit)
 {
@@ -3273,6 +3300,8 @@ static bool watch_teardown(struct watch_context *ctx, int lock_fd,
     watch_emit_stopped_heartbeat(idle_exit);
     watch_backend_close(ctx);
     watch_proof_join(ctx);
+    if (!watch_seal_published(ctx->root, "after the proof worker exited"))
+        sealed = false;
     if (lock_fd >= 0)
         (void)close(lock_fd);
     return sealed;
@@ -4007,12 +4036,52 @@ static const char *watch_sealer_test_ring_gone(struct watch_context *ctx,
     return failed;
 }
 
+/* The stopping watcher's proof worker. Like a real one it holds no copy of
+ * the singleton lock; unlike one, SIGTERM does not cancel it. With
+ * `publish`, SIGTERM makes it publish a cancelled verdict to the ring well
+ * after its watcher's stop-time seal, and it is killed before sealing it. */
+static void watch_sealer_test_stuck_worker(const char *root, int release_fd,
+                                           int armed_fd, bool publish)
+{
+    static const char verdict[] =
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"watch-test\","
+        "\"status\":\"cancelled\",\"action\":\"verify\","
+        "\"reason\":\"term-verdict\",\"phase\":\"verify\","
+        "\"runtime_published\":false,\"files\":[]}";
+    sigset_t term;
+    (void)sigemptyset(&term);
+    (void)sigaddset(&term, SIGTERM);
+    if (publish)
+        (void)pthread_sigmask(SIG_BLOCK, &term, NULL);
+    else
+        (void)signal(SIGTERM, SIG_IGN);
+    if (write(armed_fd, "1", 1) != 1)
+        _exit(1);
+    int64_t epoch = 0;
+    char why[160] = {0};
+    int received = 0;
+    if (publish && (sigwait(&term, &received) != 0 ||
+                    poll(NULL, 0, WATCH_CHILD_STOP_BUDGET_MS / 3) < 0 ||
+                    !zcl_devloop_cycle_stream_publish(
+                        root, verdict, sizeof(verdict) - 1, &epoch, why,
+                        sizeof(why))))
+        _exit(1);
+    char byte = 0;
+    for (;;) {
+        ssize_t n = read(release_fd, &byte, 1);
+        if (n <= 0 && !(n < 0 && errno == EINTR))
+            break;
+    }
+    _exit(0);
+}
+
 /* The stopping watcher (a forked process): holds the singleton lock and a
  * proof worker that ignores SIGTERM and never exits by itself, reports the
  * worker's pid, then tears down. */
 static void watch_sealer_test_teardown_watcher(struct watch_context *ctx,
                                                const char *root,
-                                               int release_fd, int ready_fd)
+                                               int release_fd, int ready_fd,
+                                               bool publish)
 {
     int lock_fd = open_singleton_lock(root, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
     int armed[2] = {-1, -1};
@@ -4020,19 +4089,8 @@ static void watch_sealer_test_teardown_watcher(struct watch_context *ctx,
               pipe(armed) == 0;
     pid_t worker = ok ? fork() : -1;
     if (worker == 0) {
-        /* Like a real proof worker, no copy of the singleton lock; unlike
-         * one, SIGTERM does not cancel it. */
         (void)close(lock_fd);
-        (void)signal(SIGTERM, SIG_IGN);
-        char byte = 0;
-        if (write(armed[1], "1", 1) != 1)
-            _exit(1);
-        for (;;) {
-            ssize_t n = read(release_fd, &byte, 1);
-            if (n <= 0 && !(n < 0 && errno == EINTR))
-                break;
-        }
-        _exit(0);
+        watch_sealer_test_stuck_worker(root, release_fd, armed[1], publish);
     }
     char byte = '0';
     if (worker > 0 && read(armed[0], &byte, 1) != 1)
@@ -4052,13 +4110,15 @@ static const char *watch_sealer_test_teardown_start(struct watch_context *ctx,
                                                     int release[2],
                                                     int ready[2],
                                                     pid_t *watcher,
-                                                    pid_t *worker)
+                                                    pid_t *worker,
+                                                    bool publish)
 {
     *watcher = fork();
     if (*watcher == 0) {
         (void)close(release[1]);
         (void)close(ready[0]);
-        watch_sealer_test_teardown_watcher(ctx, root, release[0], ready[1]);
+        watch_sealer_test_teardown_watcher(ctx, root, release[0], ready[1],
+                                           publish);
     }
     (void)close(release[0]);
     (void)close(ready[1]);
@@ -4092,13 +4152,14 @@ static const char *watch_sealer_test_teardown_reap(pid_t watcher)
  * bounded wait, and releases the singleton lock only once it is gone: the
  * lock is never free while the worker exists, and the stop completes. */
 static const char *watch_sealer_test_teardown_order(struct watch_context *ctx,
-                                                    const char *root)
+                                                    const char *root,
+                                                    bool publish)
 {
     int release[2] = {-1, -1}, ready[2] = {-1, -1};
     pid_t watcher = -1, worker = -1;
     const char *failed = pipe(release) == 0 && pipe(ready) == 0
         ? watch_sealer_test_teardown_start(ctx, root, release, ready,
-                                           &watcher, &worker)
+                                           &watcher, &worker, publish)
         : "teardown fixture";
     int intruder = failed ? -1 : open_singleton_lock(
         root, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
@@ -4119,6 +4180,19 @@ static const char *watch_sealer_test_teardown_order(struct watch_context *ctx,
     }
     if (!failed && !watch_sealer_test_await_unlock(root))
         failed = "a stopped watcher kept its lock";
+    return failed;
+}
+
+/* A proof worker SIGTERMed at stop may publish its cancelled verdict after
+ * the stop-time seal and be killed before sealing it: the stop still seals
+ * that verdict before it releases the lock and reports success. */
+static const char *watch_sealer_test_teardown_unsealed(
+    struct watch_context *ctx, const char *root)
+{
+    const char *failed = watch_sealer_test_teardown_order(ctx, root, true);
+    if (!failed && watch_sealer_test_contiguous(root))
+        failed = "a verdict its SIGTERMed proof worker published during stop "
+                 "was left unsealed";
     return failed;
 }
 
@@ -4196,7 +4270,9 @@ static const char *watch_sealer_test_phases(struct watch_context *ctx,
     watch_sealer_test_note(report, sizeof(report),
                            watch_sealer_test_ring_gone(ctx, root));
     watch_sealer_test_note(report, sizeof(report),
-                           watch_sealer_test_teardown_order(ctx, root));
+                           watch_sealer_test_teardown_order(ctx, root, false));
+    watch_sealer_test_note(report, sizeof(report),
+                           watch_sealer_test_teardown_unsealed(ctx, root));
     watch_sealer_test_note(report, sizeof(report),
                            watch_sealer_test_worker_orphan(ctx));
     watch_sealer_test_note(report, sizeof(report),
