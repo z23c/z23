@@ -860,8 +860,12 @@ static const char *bfat_compose_requester_key(struct bfat_attach_ctx *c)
     struct zcl_result loaded = bfat_load_input(
         c->workspace, &c->job, &c->action, c->now, &input, &c->input_len,
         input_bytes_root, c->refusal, sizeof(c->refusal));
-    if (!loaded.ok)
-        return c->refusal[0] ? c->refusal : loaded.message;
+    if (!loaded.ok) {
+        if (!c->refusal[0])
+            (void)snprintf(c->refusal, sizeof(c->refusal), "%s",
+                           loaded.message);
+        return c->refusal;
+    }
     struct vcs_toolchain_capsule_v1 capsule;
     struct platform_toolchain_descriptor descriptor;
     uint8_t capsule_root[32];
