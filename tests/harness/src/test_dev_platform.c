@@ -42,7 +42,6 @@
 #if !defined(_WIN32)
 #include <poll.h>
 #include <sys/file.h>
-#include <sys/resource.h>
 #include <sys/wait.h>
 #endif
 #if defined(__APPLE__)
@@ -51,6 +50,7 @@
 #include <time.h>
 #include <unistd.h>
 #if !defined(_WIN32)
+#include <sys/resource.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
