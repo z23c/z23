@@ -298,14 +298,16 @@ static bool cin_count_includes(const char *root, int *present, int *missing)
         codeindex_close(index);
         return false;
     }
+    int path_bytes = 0;
     for (int i = 0; i < count; i++) {
+        path_bytes += (int)strlen(includes[i]);
         if (strcmp(includes[i], "lib/net/src/beta.c") == 0) (*present)++;
         if (strcmp(includes[i],
                    "lib/base/include/base/format_attribute.h") == 0)
             (*missing)++;
     }
-    printf("missing_prereq_edges=%d present_prereq_edges=%d include_rows=%d\n",
-           *missing, *present, count);
+    printf("missing_prereq_edges=%d present_prereq_edges=%d include_rows=%d include_path_bytes=%d\n",
+           *missing, *present, count, path_bytes);
     codeindex_close(index);
     return true;
 }
