@@ -44,7 +44,8 @@ A later USB `B0 A7 00 00 00` quit command received `9000`, but BOLOS app-info
 then timed out and the user reported a frozen screen. After restarting the
 Blue, USB re-enumerated and BOLOS 2.1.1 answered. The earlier successful
 on-screen EXIT and fixture APDU remain valid observations. The USB quit path
-is not established as reliable for this app.
+is not established as reliable for this app. The Z23 CLI now rejects `quit`
+before USB access; its touchscreen EXIT remains the verified exit path.
 
 ## Limits
 

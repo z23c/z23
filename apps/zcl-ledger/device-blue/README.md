@@ -58,8 +58,8 @@ build/zcl-ledger/zcl-blue-install /dev/hidraw1 /tmp/zcl-probe.bin
 
 Use the app interface reported by `zcl-ledger devices`; `/dev/hidraw1` is
 only the path observed on the tested laptop. If the running app cannot be
-exited through its touchscreen, run `zcl-ledger quit /dev/hidrawN`. To remove
-the probe from the Blue dashboard, run
+exited through its touchscreen, restart the Blue using its side button. To
+remove the probe from the Blue dashboard, run
 `zcl-blue-install /dev/hidrawN --delete`.
 
 The first installed build flashed repeatedly because it redrew the whole

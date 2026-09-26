@@ -3,7 +3,7 @@
 # ZCL Ledger transport experiment
 
 This standalone C23 host communicates with Ledger Blue over Linux `hidraw`.
-It reads app information, probes the ZCL device app, exits a running app, and
+It reads app information, probes the ZCL device app, and
 installs or deletes the reviewed no-key ZCL Probe or ZCL Fixture images through
 the Blue's secure channel. It does not need Ledger Live, Python, Rust, or a
 network connection at runtime. The host can encode a transparent address from
@@ -38,13 +38,10 @@ After the [ZCL Probe device app](device-blue/README.md) is installed and open,
 reply. Version 1 reports address and signing capabilities as false. The probe
 cannot succeed against BOLOS or a different app.
 
-To exit a running Blue app from USB, including one whose touchscreen is
-unresponsive, use `zcl-ledger quit /dev/hidrawN`. This sends Ledger's
-`B0 A7 00 00 00` quit command. A `9000` reply means that BOLOS acknowledged
-the command; it does not prove that the app exited cleanly. Confirm the Blue's
-home screen and a BOLOS app-info reply before sending manager commands. The
-ZCL Fixture remained unresponsive after acknowledging quit on 2026-09-26;
-it returned to BOLOS 2.1.1 after a user restart. Its on-screen EXIT worked.
+Exit ZCL Fixture with its touchscreen EXIT button. Z23 rejects the `quit`
+command before opening USB: the Blue acknowledged a USB quit request during
+a live test, then froze until a user restart. Confirm the Blue's home screen
+and a BOLOS app-info reply before sending manager commands.
 
 The separate `zcl-blue-install` executable uses OpenSSL 3's open-source C
 crypto implementation for the Blue's secp256k1 and AES secure channel. It

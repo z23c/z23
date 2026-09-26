@@ -176,33 +176,6 @@ static int probe_info(const char *path, bool json) {
     return 0;
 }
 
-static int quit_app(const char *path) {
-    static const uint8_t command[] = {0xb0, 0xa7, 0, 0, 0};
-    int fd = open(path, O_RDWR | O_CLOEXEC);
-    if (fd < 0) return error_result(false, "open_failed", "Cannot open Ledger HID device.");
-    struct hidraw_devinfo info;
-    if (ioctl(fd, HIDIOCGRAWINFO, &info) < 0 ||
-        info.vendor != 0x2c97 || info.product != 0) {
-        close(fd);
-        return error_result(false, "not_blue", "The selected device is not a Ledger Blue.");
-    }
-    uint8_t reply[LEDGER_HID_MAX_RESPONSE];
-    size_t reply_len = 0;
-    int exchanged = ledger_hid_exchange(fd, command, sizeof command, reply,
-                                        sizeof reply, &reply_len);
-    close(fd);
-    if (exchanged < 0)
-        return error_result(false, "no_reply", "Blue did not answer quit command.");
-    uint16_t status = (uint16_t)(((uint16_t)reply[reply_len - 2] << 8) |
-                                  reply[reply_len - 1]);
-    if (reply_len != 2 || status != 0x9000) {
-        fprintf(stderr, "Blue rejected quit command with status %04x.\n", status);
-        return 1;
-    }
-    puts("Blue acknowledged quit; confirm the home screen before manager commands.");
-    return 0;
-}
-
 static int hex_digit(char value) {
     if (value >= '0' && value <= '9') return value - '0';
     if (value >= 'a' && value <= 'f') return value - 'a' + 10;
@@ -303,13 +276,13 @@ int main(int argc, char **argv) {
     if (parse_command(argc, argv, "probe", 3, &json))
         return probe_info(argv[argc - 1], json);
     if (argc == 3 && strcmp(argv[1], "quit") == 0)
-        return quit_app(argv[2]);
+        return error_result(false, "unsupported",
+                            "USB quit froze the Blue in a live test. Use the app's touchscreen EXIT.");
     fprintf(stderr, "Usage: %s fixture-address [--json] /dev/hidrawN\n"
                     "       %s address-from-pubkey COMPRESSED_PUBKEY_HEX\n"
                     "       %s devices [--json]\n"
                     "       %s app-info [--json] /dev/hidrawN\n"
-                    "       %s probe [--json] /dev/hidrawN\n"
-                    "       %s quit /dev/hidrawN\n",
-            argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
+                    "       %s probe [--json] /dev/hidrawN\n",
+            argv[0], argv[0], argv[0], argv[0], argv[0]);
     return 2;
 }
