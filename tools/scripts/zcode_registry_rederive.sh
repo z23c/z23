@@ -485,7 +485,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
                 /"root"/ { gsub(o, w) } { print }
             ' "$j" > "$j.tmp.$$" && mv "$j.tmp.$$" "$j"
             pinned=$((pinned + 1))
-        done < <(LC_ALL=C grep -rl "\"$old_content\"" --include=zcode-package.json . || true)
+        done < <(LC_ALL=C grep -Fl "\"$old_content\"" -- "${PACKAGE_MANIFESTS[@]}" || true)
     fi
 
     echo "  [$round] re-derived $name (${old_content:0:12}… -> ${content:0:12}…), ${pinned} dependent pin(s) updated"

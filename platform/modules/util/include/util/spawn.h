@@ -194,6 +194,14 @@ int zcl_spawn_capture_cancelable(
     const char *const argv[], char *buf, size_t cap, int timeout_ms,
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled);
 
+/* Linux: execute the already-open ELF descriptor while retaining the same
+ * capture, cancellation, and process-group cleanup contract. The caller owns
+ * executable_fd through this call. Other platforms refuse with -1. */
+int zcl_spawn_capture_cancelable_fd(
+    int executable_fd, const char *const argv[], char *buf, size_t cap,
+    int timeout_ms, zcl_spawn_cancel_fn should_cancel, void *cancel_ctx,
+    bool *cancelled);
+
 /* Split `str` in place into whitespace-separated tokens (space/tab/CR/LF),
  * writing a pointer to each into argv[0..n-1] and argv[n] = NULL. `str` is
  * modified (strtok_r). At most `max`-1 tokens are stored (argv must hold

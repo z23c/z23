@@ -280,6 +280,11 @@ struct os_proc_thread_work {
 /* This thread's OS-level thread id, or 0 where the platform has none. */
 long os_proc_self_tid(void);
 
+/* Linux only: require all real/effective/saved UIDs non-root and all
+ * permitted, effective, and ambient capability sets empty. Missing kernel
+ * facts fail closed; other platforms return false. */
+bool os_proc_unprivileged_no_capabilities(void);
+
 /* Read `tid`'s work counters. `tid` must name a thread of THIS process.
  * Returns false when the platform cannot answer, leaving `*out` zeroed.
  * Reads only kernel-generated pseudo-files: no filesystem lock, no

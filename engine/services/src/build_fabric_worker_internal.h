@@ -9,6 +9,7 @@
 
 #include "models/build_fabric.h"
 #include "util/result.h"
+#include "util/spawn.h"
 #include "vcs/zcode_dev.h"
 
 #include <stdbool.h>
@@ -20,17 +21,16 @@ struct zcl_result bfw_worker_path(const char *workspace, char *out,
                                   size_t cap);
 
 struct build_fabric_executor_identity;
-bool bfw_attach_identity_capture(
-    const char *workspace, const char *selected_verifier,
-    uint8_t work_kind, bool package_action,
-    struct build_fabric_executor_identity *out);
-bool bfw_attach_identity_finish(
-    const char *workspace, const char *selected_verifier, bool started,
-    const struct build_fabric_executor_identity *before);
 void bfw_attach_publish_checked(
     bool stable, const char *workspace, const struct db_build_job *job,
     const struct db_build_action *action, const uint8_t input_root[32],
     const struct build_fabric_executor_identity *identity);
+int bfw_attach_spawn(
+    const char *workspace, const char *selected_verifier,
+    uint8_t work_kind, bool package_action, const char *const argv[],
+    char *capture, size_t capture_cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    struct build_fabric_executor_identity *identity, bool *stable);
 
 /* The source tree named by `root_hex` is still exactly in the workspace CAS
  * and still hashes to its own name. */

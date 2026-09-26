@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/wait.h>
 #endif
 #include <time.h>
@@ -135,6 +136,28 @@ static int test_spawn_capture_echo(void)
     } _test_next:;
     return failures;
 }
+
+#if defined(__linux__)
+static int test_spawn_capture_pinned_fd(void)
+{
+    int failures = 0;
+    TEST("spawn: pinned executable ignores a missing pathname") {
+        int fd = open("/bin/echo", O_RDONLY | O_CLOEXEC);
+        ASSERT(fd >= 0);
+        const char *argv[] = { "/no/such/spawn-image",
+                               "pinned-executable-ran", NULL };
+        char buf[128] = {0};
+        int rc = zcl_spawn_capture_cancelable_fd(fd, argv, buf,
+                                                  sizeof(buf), 3000,
+                                                  NULL, NULL, NULL);
+        close(fd);
+        ASSERT(rc == 0);
+        ASSERT(spawn_contains(buf, "pinned-executable-ran"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 
 /* Case 4: capture timeout kills a sleeping child within the budget. */
 static int test_spawn_capture_timeout_kills(void)
@@ -574,6 +597,9 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_detached_writes_log_no_zombie();
     failures += test_spawn_detached_delivers_private_stdin();
     failures += test_spawn_capture_echo();
+#if defined(__linux__)
+    failures += test_spawn_capture_pinned_fd();
+#endif
     failures += test_spawn_capture_timeout_kills();
     failures += test_spawn_capture_eof_remains_bounded();
     failures += test_spawn_capture_inherited_pipe_exits_promptly();

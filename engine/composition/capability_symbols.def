@@ -905,6 +905,8 @@ ZCL_CAPABILITY_SYMBOL("getpid", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("getppid", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("getrlimit", CAP_HARMLESS,
     "Reads a limit. Raising one is setrlimit, which is CAP_PRIVILEGE.")
+ZCL_CAPABILITY_SYMBOL("getresuid", CAP_HARMLESS,
+    "Reads real, effective, and saved user IDs without changing them.")
 ZCL_CAPABILITY_SYMBOL("getuid", CAP_HARMLESS,
     "Reports identity. CAP_PRIVILEGE is the class for changing it.")
 ZCL_CAPABILITY_SYMBOL("gmtime_r", CAP_HARMLESS,

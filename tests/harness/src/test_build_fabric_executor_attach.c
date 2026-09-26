@@ -3,6 +3,9 @@
  * request attaches to the first request's qualified physical result with its
  * own signed receipt, while reproduction requests and poisoned evidence are
  * refused by name and never reach a compiler. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 
 #include "test/test_core.h"
 
@@ -22,6 +25,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
+#include "../../../engine/services/src/build_fabric_attach_identity_internal.h"
+#include "util/spawn.h"
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static const char att_id_b[] =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -34,6 +46,71 @@ static const char att_lease_b[] =
 
 static const uint8_t att_unit[] =
     "int zbuild_fixture(void) { return 23; }\n";
+
+#if defined(__linux__)
+static int att_open_fd_count(void)
+{
+    DIR *dir = opendir("/proc/self/fd");
+    if (!dir) return -1;
+    int count = 0;
+    while (readdir(dir)) count++;
+    closedir(dir);
+    return count;
+}
+
+static bool att_copy_executable(const char *from, const char *to)
+{
+    FILE *source = fopen(from, "rb");
+    if (!source) return false;
+    FILE *target = fopen(to, "wb");
+    if (!target) { fclose(source); return false; }
+    unsigned char buf[65536];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), source)) != 0)
+        if (fwrite(buf, 1, n, target) != n) { ok = false; break; }
+    if (ferror(source)) ok = false;
+    if (fclose(source) != 0) ok = false;
+    if (fclose(target) != 0) ok = false;
+    return ok && chmod(to, 0700) == 0;
+}
+
+static int test_bf_attach_sealed_verifier_aba(void)
+{
+    int failures = 0;
+    TEST("build_fabric_attach: sealed verifier survives A-B-A and closes fd") {
+        char dir[256], path[320];
+        test_make_tmpdir(dir, sizeof(dir), "build_fabric_attach", "verifier-aba");
+        ASSERT(snprintf(path, sizeof(path), "%s/verifier", dir) > 0);
+        ASSERT(att_copy_executable("/bin/echo", path));
+        int before = att_open_fd_count();
+        ASSERT(before >= 0);
+        struct bfat_verifier_snapshot first = { .fd = -1 };
+        ASSERT_RESULT_OK(bfat_verifier_snapshot_open(path, &first));
+        ASSERT((fcntl(first.fd, F_GETFD) & FD_CLOEXEC) != 0);
+        const int seals = F_SEAL_WRITE | F_SEAL_GROW |
+                          F_SEAL_SHRINK | F_SEAL_SEAL;
+        ASSERT((fcntl(first.fd, F_GET_SEALS) & seals) == seals);
+        errno = 0;
+        ASSERT(pwrite(first.fd, "X", 1, 0) == -1 && errno == EPERM);
+        ASSERT(att_copy_executable("/bin/false", path));
+        const char *argv[] = { path, "sealed-A-ran", NULL };
+        char output[128];
+        ASSERT(zcl_spawn_capture_cancelable_fd(first.fd, argv, output,
+                 sizeof(output), 3000, NULL, NULL, NULL) == 0);
+        ASSERT(strstr(output, "sealed-A-ran") != NULL);
+        ASSERT(att_copy_executable("/bin/echo", path));
+        struct bfat_verifier_snapshot restored = { .fd = -1 };
+        ASSERT_RESULT_OK(bfat_verifier_snapshot_open(path, &restored));
+        ASSERT(memcmp(first.bytes, restored.bytes, 32) == 0);
+        bfat_verifier_snapshot_close(&restored);
+        bfat_verifier_snapshot_close(&first);
+        ASSERT(att_open_fd_count() == before);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 
 static bool att_open(struct node_db *ndb, char *dir, size_t dir_cap,
                      char *path, size_t path_cap, const char *tag)
@@ -820,6 +897,9 @@ static int test_bf_attach_reproduction_never_attaches(void)
 int test_build_fabric_attach(void)
 {
     int failures = 0;
+#if defined(__linux__)
+    failures += test_bf_attach_sealed_verifier_aba();
+#endif
     failures += test_bf_attach_executor_key_binds_tool_bytes();
     failures += test_bf_attach_miss_and_poisoned_record();
     failures += test_bf_attach_input_cas_refusals();

@@ -52,6 +52,46 @@
 #include <sys/sysctl.h>
 #endif
 
+#if defined(__linux__)
+static bool os_proc_capability_line_zero(const char *line)
+{
+    const char *value = strchr(line, ':');
+    if (!value) return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long bits = strtoull(value + 1, &end, 16);
+    return errno == 0 && end != value + 1 && bits == 0 &&
+           (*end == '\n' || *end == '\0');
+}
+#endif
+
+bool os_proc_unprivileged_no_capabilities(void)
+{
+#if defined(__linux__)
+    uid_t real, effective, saved;
+    if (getresuid(&real, &effective, &saved) != 0 ||
+        real == 0 || effective == 0 || saved == 0) return false;
+    FILE *status = fopen("/proc/self/status", "r");
+    if (!status) return false;
+    char line[512];
+    unsigned found = 0;
+    bool clean = true;
+    while (fgets(line, sizeof(line), status)) {
+        unsigned bit = strncmp(line, "CapPrm:", 7) == 0 ? 1u :
+                       strncmp(line, "CapEff:", 7) == 0 ? 2u :
+                       strncmp(line, "CapAmb:", 7) == 0 ? 4u : 0u;
+        if (!bit) continue;
+        found |= bit;
+        if (!os_proc_capability_line_zero(line)) { clean = false; break; }
+    }
+    bool read_failed = ferror(status) != 0;
+    bool close_failed = fclose(status) != 0;
+    return !read_failed && !close_failed && clean && found == 7u;
+#else
+    return false;
+#endif
+}
+
 static bool os_proc_ascii_contains_ci(const char *text, const char *needle)
 {
     if (!text || !needle || !needle[0])
