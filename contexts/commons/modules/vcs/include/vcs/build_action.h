@@ -31,6 +31,17 @@
 #define VCS_BUILD_PROFILE_PHYSICAL_REPRODUCTION_V1 "physical-reproduction-v1"
 #define VCS_BUILD_VIRTUAL_ROOT_V1 "/zbuild/src"
 #define VCS_BUILD_OUTPUT_V1 "unit.o"
+/* Fixed compile child runs with cwd at the isolated build directory. These
+ * are the argv/env bytes it receives, independent of the lease locator. */
+#define VCS_BUILD_INPUT_ARG_V1 "../src/unit.i"
+#define VCS_BUILD_OUTPUT_ARG_V1 "unit.o"
+#define VCS_BUILD_ENV_PATH_VALUE_V1 "/usr/local/bin:/usr/bin:/bin"
+#define VCS_BUILD_ENV_LC_ALL_VALUE_V1 "C"
+#define VCS_BUILD_ENV_TMPDIR_V1 "TMPDIR=."
+#define VCS_BUILD_ENV_HOME_V1 "HOME=../src/.home"
+#define VCS_BUILD_ENV_LANG_V1 "LANG=C"
+#define VCS_BUILD_ENV_TZ_V1 "TZ=UTC"
+#define VCS_BUILD_ENV_SOURCE_DATE_EPOCH_V1 "SOURCE_DATE_EPOCH=0"
 #define VCS_BUILD_RESOURCE_POLICY_V1 \
     "cpu=1,cpu_s=120,memory_mb=2048,processes=16,files=64," \
     "file_bytes=268435456,output_bytes=268435456,timeout_s=120,network=0"

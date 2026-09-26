@@ -533,9 +533,9 @@ void vcs_build_action_v1_fixed_flags_root(uint8_t out[32])
         build_hash_text(&sha, arch_flag);
     build_hash_text(&sha, "-fno-ident");
     build_hash_text(&sha, "-c");
-    build_hash_text(&sha, "/zbuild/src/unit.i");
+    build_hash_text(&sha, VCS_BUILD_INPUT_ARG_V1);
     build_hash_text(&sha, "-o");
-    build_hash_text(&sha, "/zbuild/out/unit.o");
+    build_hash_text(&sha, VCS_BUILD_OUTPUT_ARG_V1);
     sha3_256_finalize(&sha, out);
 }
 
@@ -543,9 +543,11 @@ void vcs_build_action_v1_fixed_environment_root(uint8_t out[32])
 {
     static const char domain[] = "zcl.build_action.fixed_environment.v1";
     static const char *const values[] = {
-        "PATH=/usr/local/bin:/usr/bin:/bin", "LC_ALL=C",
-        "LANG=C", "TZ=UTC", "HOME=/zbuild/home",
-        "SOURCE_DATE_EPOCH=0", "TMPDIR=/zbuild/out",
+        "PATH=" VCS_BUILD_ENV_PATH_VALUE_V1,
+        "LC_ALL=" VCS_BUILD_ENV_LC_ALL_VALUE_V1,
+        VCS_BUILD_ENV_TMPDIR_V1, VCS_BUILD_ENV_HOME_V1,
+        VCS_BUILD_ENV_LANG_V1, VCS_BUILD_ENV_TZ_V1,
+        VCS_BUILD_ENV_SOURCE_DATE_EPOCH_V1,
     };
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);

@@ -1061,8 +1061,8 @@ static _Noreturn void pv_run_child_exec(const char *const argv[],
      * this whole-program LTO build. */
     if (platform_clear_environment() != 0)
         _exit(PV_CHILD_EXEC_FAIL);
-    (void)setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
-    (void)setenv("LC_ALL", "C", 1);
+    (void)setenv("PATH", VCS_BUILD_ENV_PATH_VALUE_V1, 1);
+    (void)setenv("LC_ALL", VCS_BUILD_ENV_LC_ALL_VALUE_V1, 1);
     pv_run_child_apply_env(env_pairs);
     /* The parent forwards this pipe (see pr.stderr_buf) into the "failed to
      * launch or arm its sandbox" messages below — without it, a
@@ -3229,8 +3229,27 @@ static int pv_zbuild_compile_parse_args(int argc, char **argv,
     return 0;
 }
 
+static bool pv_zbuild_sibling_layout(const char *src_dir,
+                                     const char *build_dir)
+{
+    size_t src_len = strlen(src_dir), build_len = strlen(build_dir);
+    return src_len >= 4 && build_len >= 6 &&
+        strcmp(src_dir + src_len - 4, "/src") == 0 &&
+        strcmp(build_dir + build_len - 6, "/build") == 0 &&
+        src_len - 4 == build_len - 6 &&
+        memcmp(src_dir, build_dir, src_len - 4) == 0;
+}
+
+static bool pv_zbuild_output_path(const char *build_dir, char output[4200])
+{
+    int n = snprintf(output, 4200, "%s/%s", build_dir, VCS_BUILD_OUTPUT_V1);
+    return n > 0 && (size_t)n < 4200 && access(output, F_OK) != 0;
+}
+
 /* Resolve input/build_dir/output to real, separate, not-yet-existing
- * paths, and derive src_dir. 0 on success. */
+ * paths, and derive src_dir. The compiler later opens ../src/unit.i from
+ * build_dir, so the supplied input path itself must be canonical and direct.
+ * The worker creates the private lease tree and input with O_EXCL. */
 static int pv_zbuild_compile_resolve_paths(const char *input_arg,
                                            const char *output_arg,
                                            char input[4096],
@@ -3243,7 +3262,8 @@ static int pv_zbuild_compile_resolve_paths(const char *input_arg,
         return 3;
     }
     struct stat input_st;
-    if (stat(input, &input_st) != 0 || !S_ISREG(input_st.st_mode) ||
+    if (strcmp(input_arg, input) != 0 ||
+        lstat(input_arg, &input_st) != 0 || !S_ISREG(input_st.st_mode) ||
         input_st.st_size <= 0 ||
         (uint64_t)input_st.st_size > VCS_BUILD_ARTIFACT_MAX_BYTES) {
         fprintf(stdout, "zbuild-error=input-invalid-or-oversize\n");
@@ -3267,8 +3287,11 @@ static int pv_zbuild_compile_resolve_paths(const char *input_arg,
         fprintf(stdout, "zbuild-error=separate-source-and-output-dirs-required\n");
         return 3;
     }
-    int on = snprintf(output, 4200, "%s/%s", build_dir, VCS_BUILD_OUTPUT_V1);
-    if (on <= 0 || (size_t)on >= 4200 || access(output, F_OK) == 0) {
+    if (!pv_zbuild_sibling_layout(src_dir, build_dir)) {
+        fprintf(stdout, "zbuild-error=fixed-sibling-layout-required\n");
+        return 3;
+    }
+    if (!pv_zbuild_output_path(build_dir, output)) {
         fprintf(stdout, "zbuild-error=output-must-not-exist\n");
         return 3;
     }
@@ -3309,8 +3332,7 @@ static int pv_zbuild_compile_prepare_sandbox(
  * architecture flag tokens, then -c <input> -o <output>. arch_flag is a
  * caller-owned scratch buffer (cc_argv keeps pointers into it, so it must
  * outlive cc_argv's use). */
-static void pv_zbuild_compile_argv(const char *input, const char *output,
-                                   char arch_flag[128],
+static void pv_zbuild_compile_argv(char arch_flag[128],
                                    const char *cc_argv[14], size_t *cc_argc)
 {
     size_t n = 0;
@@ -3334,9 +3356,9 @@ static void pv_zbuild_compile_argv(const char *input, const char *output,
     }
     cc_argv[n++] = "-fno-ident";
     cc_argv[n++] = "-c";
-    cc_argv[n++] = input;
+    cc_argv[n++] = VCS_BUILD_INPUT_ARG_V1;
     cc_argv[n++] = "-o";
-    cc_argv[n++] = output;
+    cc_argv[n++] = VCS_BUILD_OUTPUT_ARG_V1;
     cc_argv[n] = NULL;
     *cc_argc = n;
 }
@@ -3440,17 +3462,16 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
         .nofile = PV_ZBUILD_COMPILE_NOFILE,
         .core_bytes = 0,
     };
-    char env_tmpdir[4200], env_home[4200];
-    (void)snprintf(env_tmpdir, sizeof(env_tmpdir), "TMPDIR=%s", build_dir);
-    (void)snprintf(env_home, sizeof(env_home), "HOME=%s", home_dir);
     const char *const env[] = {
-        env_tmpdir, env_home, "LANG=C", "TZ=UTC", "SOURCE_DATE_EPOCH=0",
+        VCS_BUILD_ENV_TMPDIR_V1, VCS_BUILD_ENV_HOME_V1,
+        VCS_BUILD_ENV_LANG_V1, VCS_BUILD_ENV_TZ_V1,
+        VCS_BUILD_ENV_SOURCE_DATE_EPOCH_V1,
         NULL,
     };
     char arch_flag[128];
     const char *cc_argv[14];
     size_t cc_argc = 0;
-    pv_zbuild_compile_argv(input, output, arch_flag, cc_argv, &cc_argc);
+    pv_zbuild_compile_argv(arch_flag, cc_argv, &cc_argc);
     uint8_t input_before[32], input_after[32];
     uint64_t input_before_bytes = 0;
     if (!pv_sha3_file(input, input_before, &input_before_bytes)) {

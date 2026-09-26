@@ -588,6 +588,18 @@ static int test_bf_attach_reproduction_never_attaches(void)
         ASSERT(strcmp(receipt_c.receipt_id, receipt_a.receipt_id) != 0);
         ASSERT(strcmp(receipt_c.action_id, receipt_a.action_id) != 0);
         ASSERT(strcmp(receipt_c.observation_sha3, receipt_a.observation_sha3) != 0);
+        /* Manifests bind different actions; their compiled object bytes must
+         * still agree across the two lease directories. */
+        uint8_t *object_a = NULL, *object_c = NULL;
+        size_t object_a_len = 0, object_c_len = 0;
+        ASSERT(att_read_artifact_bytes(dir, receipt_a.output_sha3,
+                                       &object_a, &object_a_len));
+        ASSERT(att_read_artifact_bytes(dir, receipt_c.output_sha3,
+                                       &object_c, &object_c_len));
+        ASSERT_EQ(object_c_len, object_a_len);
+        ASSERT_EQ(memcmp(object_c, object_a, object_a_len), 0);
+        free(object_a);
+        free(object_c);
         ASSERT(receipt_c.observation_sha3[0] &&
                receipt_a.observation_sha3[0]);
         printf("independent runs preserved: physical compiler runs=2 "
