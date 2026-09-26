@@ -314,6 +314,18 @@ success from a different tip. An unavailable or ambiguous observation leaves
 the operation unresolved; do not blindly repeat the push. The observer verifies
 the remote independently even when it is also the publisher.
 
+Work-lane adapter: for a solution published by DHT POINTER rather than a Git
+ref, `zcode work pull` records the observation as the existing signed
+`vcs_zcode_work_receipt_v1` (kind REPRODUCE) in the observer's
+`<datadir>/zcode` CAS, with conventions fixed in
+`contexts/commons/modules/vcs/include/vcs/zcode_work_pull_receipt.h`:
+`lease_id` is the POINTER record root (publication), `input_root` the fetched
+or already-held package, `output_root` the reconstructed source, `evidence_root`
+the accepted-work root, plus task, candidate, proof policy, toolchain,
+observer key and times. `zcode work receipt` verifies one by root or wire. It
+carries no Git target ref, tip or separate ancestry root; those have no
+meaning for a content-addressed package.
+
 The native hook's preflight ancestry/receipt checks and the landing queue's
 local recovery are not this post-publication object. Connect reconciliation to
 the persisted canonical intent, including a crash after the push but before

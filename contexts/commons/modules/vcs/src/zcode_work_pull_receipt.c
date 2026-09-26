@@ -13,24 +13,26 @@
 const char *vcs_zcode_work_pull_receipt_result_string(
     enum vcs_zcode_work_pull_receipt_result result)
 {
-    switch (result) {
-    case VCS_ZCODE_WORK_PULL_RECEIPT_OK: return "ok";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_NULL: return "null-argument";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_NOT_VERIFIED: return "not-verified";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_NO_POINTER: return "no-pointer-root";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_NO_OBSERVER: return "no-observer-key";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_TIME: return "bad-observation-time";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_SEAL: return "seal-refused";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_STORE: return "store-failed";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_NOT_FOUND: return "not-found";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_CODEC: return "not-canonical";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_ROOT_MISMATCH: return "root-mismatch";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_SIGNATURE: return "signature-refused";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_NOT_PULL: return "not-a-pull-receipt";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_NOT_HELD: return "package-not-held";
-    case VCS_ZCODE_WORK_PULL_RECEIPT_CONTRADICTED: return "contradicted";
-    }
-    return "unknown";
+    static const char *const names[] = {
+        [VCS_ZCODE_WORK_PULL_RECEIPT_OK] = "ok",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_NULL] = "null-argument",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_NOT_VERIFIED] = "not-verified",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_NO_POINTER] = "no-pointer-root",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_NO_OBSERVER] = "no-observer-key",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_TIME] = "bad-observation-time",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_SEAL] = "seal-refused",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_STORE] = "store-failed",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_NOT_FOUND] = "not-found",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_CODEC] = "not-canonical",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_ROOT_MISMATCH] = "root-mismatch",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_SIGNATURE] = "signature-refused",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_NOT_PULL] = "not-a-pull-receipt",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_NOT_HELD] = "package-not-held",
+        [VCS_ZCODE_WORK_PULL_RECEIPT_CONTRADICTED] = "contradicted",
+    };
+    size_t index = (size_t)result;
+    return index < sizeof(names) / sizeof(names[0]) && names[index]
+        ? names[index] : "unknown";
 }
 
 bool vcs_zcode_work_pull_action_root(const uint8_t task_root[32],
