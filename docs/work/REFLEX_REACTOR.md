@@ -212,23 +212,54 @@ a sealed memfd (`WRITE|SHRINK|GROW`), and sends a fixed versioned request plus
 that memfd over `SCM_RIGHTS`. The runner checks the seals, re-hashes the
 image, then forks a disposable child. The child runs these steps in order:
 
-1. Close every descriptor except the image and the report pipe.
-2. Lower the rlimits.
-3. Enter Landlock deny-all, the seccomp session deny-list, and the runner and
-   leaf layers. The runner installs its layer before it serves anything:
-   io_uring, which could issue socket and connect past the syscall filter,
-   plus pidfd, userfaultfd, kcmp, process_madvise, ptrace and process_vm_*.
-   The leaf adds the kill family, pidfd_send_signal, setsid and setpgid.
+1. Close every descriptor except the image and the report pipe, with
+   `close_range` or, without it, a full allocation-free `/proc/self/fd`
+   enumeration (`getdents64`). If neither works the child refuses.
+2. Lower the rlimits and set `no_new_privs`.
+3. Open the census directory, then enter Landlock deny-all, the seccomp
+   session deny-list, and the runner and leaf layers. The runner installs its
+   layer before it serves anything: io_uring, which could issue socket and
+   connect past the syscall filter, plus pidfd, userfaultfd, kcmp,
+   process_madvise, ptrace and process_vm_*. The leaf adds the kill family,
+   pidfd_send_signal, setsid and setpgid. Then count every remaining
+   descriptor through the census directory and close it.
 4. Re-hash the image.
-5. `dlopen("/proc/self/fd/N")`.
-6. Add the W^X seccomp layer.
-7. Run the `HOT_FORK` story or the `HOT_SHADOW` service probe.
+5. Write the **pre-load frame** and stop without mapping anything if any
+   claim in it failed.
+6. `dlopen("/proc/self/fd/N")`.
+7. Add the W^X seccomp layer.
+8. Run the `HOT_FORK` story or the `HOT_SHADOW` service probe, then write the
+   **observation frame**.
 
-The runner relays a fixed report with fork, confine, dlopen and story timings
-and the exit status or signal. At the deadline it kills the child with
-`SIGKILL`, and it survives crashing children. Any spawn, transport, seal,
-digest or confinement failure is a named red or unavailable result. There is
-no unconfined fallback.
+The leaf reports on one pipe in exactly two fixed frames. Each starts with
+magic, ABI, kind and size:
+
+| Frame | Written | Carries | Trust |
+|-------|---------|---------|-------|
+| pre-load | before `dlopen` | confinement installed, the leaf's re-hash and digest, environment count, full descriptor census, resident canary, start and confine timings | host-owned claims |
+| observation | after the story | story bit, descriptor binding, candidate-executed bit, dlopen and story timings, `HOT_FORK` observation, `HOT_SHADOW` service report | candidate-influenced data |
+
+The runner reads the whole byte stream and parses it strictly: pre-load
+first, observation second, nothing after. A missing frame, a second pre-load
+frame, a duplicate observation, an observation before the pre-load frame, a
+wrong size, an unknown kind, a wrong magic or ABI, a truncated frame or
+trailing bytes is RED with a named reason. The runner adds what it saw
+itself: exit status or signal, the deadline, and the exited leaf's
+`Seccomp_filters` from `/proc/<pid>/status`. W^X counts as installed only when
+that equals the runner's own count plus the three pre-load layers plus one.
+At the deadline it kills the child with `SIGKILL`. That includes a child
+that closed its pipe but has not exited by the same deadline, which is RED as
+"leaf outlived its deadline after closing its report pipe". The runner
+survives crashing children.
+
+The resident checks every string and flag in the reply and both frames
+before using any of them. Strings must be NUL-terminated inside their arrays,
+digests exactly 64 lowercase hex, and flag bytes 0 or 1. A bad field is RED
+and names the field. Environment facts come only from the pre-load frame and
+the runner. GREEN needs well-formed frames, a clean exit inside the deadline,
+the observed W^X layer, every pre-load claim, and a passing observation. Any
+spawn, transport, seal, digest, framing or confinement failure is a named red
+or unavailable result. There is no unconfined fallback.
 
 Receipts add `runner:"zygote_exec"`, `env_inherited_count`,
 `inherited_fd_count`, `address_space_fresh` and the stage timings. Windows and
