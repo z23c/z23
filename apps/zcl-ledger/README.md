@@ -97,6 +97,11 @@ reply and host address encoding without touching the device seed. Run
 `zcl-ledger fixture-address --json /dev/hidrawN` while that app is open.
 Its result is explicitly marked as a fixture, never as a wallet address.
 
+The [ZCL Sign Test](device-blue-sign-test/README.md) performs a real
+seed-derived ECDSA signature over a fixed, non-transaction message after a
+touchscreen tap. `zcl-blue-sign-test` verifies the signature and reports the
+public ZCL transparent address. It cannot sign a payment or Sapling spend.
+
 The path is an example. `devices --json` returns an `ok` boolean and a
 `devices` array of objects with `path`, `model`, `vendor_id`, and `product_id`.
 `app-info --json` returns `ok`, `name`, and `version` on success, or `ok: false`
