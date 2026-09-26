@@ -708,7 +708,7 @@ Z23_FLAG("ZCL_DEV_SKIP_BUILD", "env_build", "0", "-",
 Z23_FLAG("ZCL_DEV_SOURCE_ID", "env_build", "-", "-",
           "first use tools/dev/deploy-dev-lane.sh:484; documented at docs/AGENT_API.md:1141: ZCL_DEV_SOURCE_ID nor an activation environment switch can authorize a")
 Z23_FLAG("ZCL_DEV_SOURCE_ROOT", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/testcache.c:642")
+          "undocumented; first use tests/harness/src/testcache.c:650")
 Z23_FLAG("ZCL_DEV_START_COMMAND", "env_build", "-", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:765")
 Z23_FLAG("ZCL_DEV_STOP_COMMAND", "env_build", "-", "-",
@@ -2388,7 +2388,7 @@ Z23_FLAG("ZCL_TEST_CACHE", "env_test", "-", "-",
 Z23_FLAG("ZCL_TEST_CACHE_DUMP", "env_test", "-", "-",
           "first use tests/harness/src/test_parallel.c:2234; documented at docs/work/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
 Z23_FLAG("ZCL_TESTCACHE_STORE_ROOT", "env_test", "-", "-",
-          "first use tests/harness/src/testcache.c:660; documented at docs/zrc/0007-asynchronous-p2p-landing.md:171: 3. **Unpin the verdict store.** dev_proof.c sets ZCL_TESTCACHE_STORE_ROOT")
+          "first use tests/harness/src/testcache.c:668; documented at docs/zrc/0007-asynchronous-p2p-landing.md:171: 3. **Unpin the verdict store.** dev_proof.c sets ZCL_TESTCACHE_STORE_ROOT")
 Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_parallel.c:2071")
 Z23_FLAG("ZCL_TEST_FORK_ROLE", "env_test", "-", "-",
