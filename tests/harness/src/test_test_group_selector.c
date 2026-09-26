@@ -1266,9 +1266,29 @@ static int test_runner_exact_selection(void)
     return failures;
 }
 
+static int test_compile_scope_proof(void)
+{
+    int failures = 0;
+    TEST("compile scope proof narrows one complete TU and keeps refusals") {
+        char out[512];
+        int rc = capture_command("tools/agent_fast_ci.sh compile-scope-selftest",
+                                 out, sizeof(out));
+        ASSERT_EQ(rc, 0);
+        ASSERT(strstr(out, "affected_translation_units") != NULL ||
+               strstr(out, "PASS compile-scope-selftest affected") != NULL);
+        ASSERT(strstr(out, "proof_observation_conflict") != NULL);
+        ASSERT(strstr(out, "closure_incomplete") != NULL);
+        ASSERT(strstr(out, "missing_receipt") != NULL);
+        ASSERT(strstr(out, "verify_record_recipes=0") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_test_group_selector(void)
 {
     int failures = 0;
+    failures += test_compile_scope_proof();
     failures += test_tmpdir_recursive_cleanup();
     failures += test_selector_predicate();
     failures += test_registry_exact_resolution();
