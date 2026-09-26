@@ -402,6 +402,34 @@ static void test_derive_lookups(struct fx *x,
     AR_CHECK("lookups: a dir named in two search classes is refused", ok);
 }
 
+/* A built-in include dir is recorded by its exact spelling, so only a
+ * spelling that is already absolute and lexically normal may enter the
+ * preimage: "/usr/include/../include" or "/usr/include/" would otherwise be
+ * silently rewritten, and an over-long one could only be truncated. */
+static void test_derive_builtin_dirs(struct fx *x,
+                                     const struct zcl_action_root_result *b)
+{
+    static char overlong[PATH_MAX + 16];
+    memset(overlong, 'a', sizeof(overlong) - 1);
+    memcpy(overlong, "/usr/include/", 13);
+    overlong[sizeof(overlong) - 1] = '\0';
+    const char *const bad[] = {
+        "usr/include",          "/usr/include/../include",
+        "/usr/include/",        "/usr//include",
+        "/usr/./include",       overlong,
+    };
+    const char *saved = x->system_dirs[0];
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        x->system_dirs[0] = bad[i];
+        ok = fx_miss(x, "builtin_dir_noncanonical") && ok;
+    }
+    x->system_dirs[0] = saved;
+    AR_CHECK("builtin dirs: a relative, dot-dot, trailing-slash, "
+             "doubled-slash, dot or over-long entry yields no root "
+             "(builtin_dir_noncanonical)", ok && fx_same(x, b));
+}
+
 static void test_derive_sysroot(struct fx *x,
                                 const struct zcl_action_root_result *b)
 {
@@ -443,6 +471,7 @@ static void test_derive_sysroot(struct fx *x,
     x->req.sysroot = NULL;
     AR_CHECK("sysroot: a driver sysroot moves the root; a host one is "
              "refused", ok && fx_same(x, b));
+    test_derive_builtin_dirs(x, b);
 }
 
 static void test_derive_linker(struct fx *x,
@@ -606,6 +635,24 @@ static void test_derive_misses(struct fx *x,
          fx_miss(x, "depfile_malformed") && fx_depfile(x, true);
     AR_CHECK("miss: a depfile with no rule yields no root "
              "(depfile_malformed)", ok);
+    ok = fx_depfile_text(x, " %R/src/unit.c foo\\ bar.h") &&
+         fx_miss(x, "depfile_malformed") && fx_depfile(x, true);
+    AR_CHECK("miss: a depfile token ending in a backslash (a GCC-escaped "
+             "space, not a -MP phony target) yields no root, never a "
+             "closure truncated early (depfile_malformed)", ok);
+    ok = fx_depfile_text(x, " %R/src/unit.c src/local\\#h.h src/local.h") &&
+         fx_miss(x, "depfile_malformed") && fx_depfile(x, true);
+    AR_CHECK("miss: a depfile token carrying a backslash escape this "
+             "parser does not decode yields no root, never a guessed "
+             "spelling (depfile_malformed)", ok);
+    char eof[PATH_MAX + 64];
+    ok = snprintf(eof, sizeof(eof), "build/obj.o: %s/src/unit.c "
+                  "src/local.h \\", x->root) < (int)sizeof(eof) &&
+         fx_write(x->root, "build/unit.d", eof) &&
+         fx_miss(x, "depfile_malformed") && fx_depfile(x, true);
+    AR_CHECK("miss: a depfile that ends in a dangling continuation "
+             "backslash yields no root (depfile_malformed)",
+             ok && fx_same(x, b));
     ok = fx_depfile_text(x, " build/gen/unity.c %R/src/unit.c src/gone.h "
                             "src/local.h inc_b/defs.h") &&
          fx_miss(x, "dependency_missing") && fx_depfile(x, true);
@@ -964,6 +1011,95 @@ static void test_derivation(void)
     free(x);
 }
 
+/* A fake `cc -xc -E -v /dev/null` transcript is enough to prove the
+ * built-in search-list parser refuses rather than truncates: real
+ * compilers never emit these shapes, but a hostile or unusual driver
+ * could, and a miss here means no root, never a partial one. */
+static void test_builtin_dir_parse(void)
+{
+    char dirs[8][PATH_MAX];
+    size_t count = 999;
+    char miss[40];
+
+    const char *noncanonical =
+        "#include <...> search starts here:\n"
+        " /usr/include\n"
+        " relative/not/absolute\n"
+        "End of search list.\n";
+    bool ok = !zcl_action_root_parse_builtin_dirs(noncanonical, dirs, 8,
+                                                  &count, miss) &&
+             strcmp(miss, "builtin_dir_noncanonical") == 0;
+    AR_CHECK("driver facts: a built-in search entry that is not an "
+             "absolute path is a miss, never a silently dropped entry",
+             ok);
+
+    const char *const shapes[] = {
+        " /usr/lib/gcc/x86_64-linux-gnu/14/../../../../include\n",
+        " /usr/include/\n",
+        " /usr/./include\n",
+    };
+    for (size_t i = 0; i < sizeof(shapes) / sizeof(shapes[0]); i++) {
+        char text[512];
+        (void)snprintf(text, sizeof(text),
+                       "#include <...> search starts here:\n"
+                       " /usr/local/include\n%sEnd of search list.\n",
+                       shapes[i]);
+        bool refused =
+            !zcl_action_root_parse_builtin_dirs(text, dirs, 8, &count,
+                                                miss) &&
+            strcmp(miss, "builtin_dir_noncanonical") == 0;
+        AR_CHECK("driver facts: a dot-dot, trailing-slash or dot built-in "
+                 "search entry is a miss, never a rewritten spelling",
+                 refused);
+    }
+
+    size_t long_cap = PATH_MAX + 256;
+    char *long_text = zcl_malloc(long_cap, "action root long builtin dir");
+    AR_CHECK("driver facts: allocate the over-long transcript",
+             long_text != NULL);
+    if (long_text) {
+        size_t w = (size_t)snprintf(long_text, long_cap,
+                                    "#include <...> search starts here:\n"
+                                    " /usr/include/");
+        while (w < PATH_MAX + 40)
+            long_text[w++] = 'a';
+        (void)snprintf(long_text + w, long_cap - w,
+                       "\n /usr/include\nEnd of search list.\n");
+        ok = !zcl_action_root_parse_builtin_dirs(long_text, dirs, 8, &count,
+                                                 miss) &&
+             strcmp(miss, "builtin_dir_overflow") == 0;
+        free(long_text);
+        AR_CHECK("driver facts: a built-in search entry longer than a path "
+                 "buffer is a miss, never a silently dropped entry", ok);
+    }
+
+    char many[8192];
+    size_t o = (size_t)snprintf(many, sizeof(many),
+                                "#include <...> search starts here:\n");
+    for (int i = 0; i < 12; i++)
+        o += (size_t)snprintf(many + o, sizeof(many) - o,
+                              " /usr/include/fixture-dir-%d\n", i);
+    o += (size_t)snprintf(many + o, sizeof(many) - o,
+                          "End of search list.\n");
+    count = 999;
+    ok = !zcl_action_root_parse_builtin_dirs(many, dirs, 8, &count, miss) &&
+        strcmp(miss, "builtin_dir_overflow") == 0;
+    AR_CHECK("driver facts: more built-in search dirs than the hook's "
+             "capacity holds is a miss, never a truncated list", ok);
+
+    const char *fits =
+        "#include <...> search starts here:\n"
+        " /usr/include\n"
+        " /usr/local/include\n"
+        "End of search list.\n";
+    count = 0;
+    ok = zcl_action_root_parse_builtin_dirs(fits, dirs, 8, &count, miss) &&
+        count == 2 && strcmp(dirs[0], "/usr/include") == 0 &&
+        strcmp(dirs[1], "/usr/local/include") == 0;
+    AR_CHECK("driver facts: a canonical, capacity-fitting list still "
+             "parses", ok);
+}
+
 int test_action_root(void)
 {
     printf("action_root: zcl.action_preimage.v2 codec and derivation\n");
@@ -971,5 +1107,6 @@ int test_action_root(void)
     g_failures = 0;
     test_derivation();
     test_derive_snapshot_not_commit();
+    test_builtin_dir_parse();
     return g_failures + codec_failures;
 }

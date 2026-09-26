@@ -292,27 +292,60 @@ struct ars_driver {
 static pthread_mutex_t g_driver_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct ars_driver g_driver;
 
-static bool ars_system_parse(const char *out, struct ars_driver *sd)
+/* Admit one built-in search entry of `n` bytes at `p`, or name why not:
+ * an entry that will not fit a path buffer or the caller's array is an
+ * overflow, one the lexer would rewrite is noncanonical. Either refuses
+ * the whole list rather than drop or approximate one entry, since a root
+ * derived from a partial or rewritten search list is not the real one. */
+static const char *ars_builtin_entry(const char *p, size_t n,
+                                     char dirs[][PATH_MAX], size_t dirs_cap,
+                                     size_t *count)
 {
+    char dir[PATH_MAX];
+    if (n >= PATH_MAX || *count >= dirs_cap)
+        return "builtin_dir_overflow";
+    (void)snprintf(dir, sizeof(dir), "%.*s", (int)n, p);
+    if (!zcl_action_root_builtin_dir_canonical(dir))
+        return "builtin_dir_noncanonical";
+    memcpy(dirs[(*count)++], dir, n + 1);
+    return NULL;
+}
+
+bool zcl_action_root_parse_builtin_dirs(const char *out,
+                                        char dirs[][PATH_MAX],
+                                        size_t dirs_cap, size_t *count_out,
+                                        char *miss)
+{
+    size_t count = 0;
+    const char *refused = NULL;
+    if (miss)
+        miss[0] = '\0';
+    if (count_out)
+        *count_out = 0;
     const char *p = strstr(out, "#include <...> search starts here:");
     const char *end = strstr(out, "End of search list.");
     if (!p || !end || end < p)
         return false;
     p = strchr(p, '\n');
-    sd->count = 0;
-    while (p && p < end && sd->count < ARS_SYSTEM_DIR_MAX) {
+    while (!refused && p && p < end) {
         p++;
         while (*p == ' ') p++;
         size_t n = strcspn(p, "\r\n");
         const char *framework = strstr(p, " (framework directory)");
         if (framework && (size_t)(framework - p) < n)
             n = (size_t)(framework - p);
-        if (p < end && n > 0 && n < PATH_MAX && p[0] == '/')
-            (void)snprintf(sd->dirs[sd->count++], PATH_MAX, "%.*s", (int)n,
-                           p);
+        if (p < end && n > 0)
+            refused = ars_builtin_entry(p, n, dirs, dirs_cap, &count);
         p = strchr(p, '\n');
     }
-    return sd->count > 0;
+    if (refused) {
+        if (miss)
+            (void)snprintf(miss, 40, "%s", refused);
+        return false;
+    }
+    if (count_out)
+        *count_out = count;
+    return count > 0;
 }
 
 #if !defined(_WIN32)
@@ -376,16 +409,23 @@ static bool ars_resolve_program(char path[PATH_MAX])
     return false;
 }
 
-static bool ars_driver_capture(const char *cc, struct ars_driver *d)
+static bool ars_driver_capture(const char *cc, struct ars_driver *d,
+                               char miss[40])
 {
     static const char *const search[] = { "-xc", "-E", "-v", "/dev/null",
                                           NULL };
     char capture[16384];
     memset(d, 0, sizeof(*d));
+    if (miss)
+        miss[0] = '\0';
     (void)snprintf(d->driver, sizeof(d->driver), "%s", cc);
-    if (!ars_driver_ask(cc, search, capture, sizeof(capture)) ||
-        !ars_system_parse(capture, d) ||
-        !ars_driver_line(cc, "-print-sysroot", d->sysroot) ||
+    if (!ars_driver_ask(cc, search, capture, sizeof(capture)))
+        return false;
+    if (!zcl_action_root_parse_builtin_dirs(capture, d->dirs,
+                                            ARS_SYSTEM_DIR_MAX, &d->count,
+                                            miss))
+        return false;
+    if (!ars_driver_line(cc, "-print-sysroot", d->sysroot) ||
         !ars_driver_line(cc, "-print-prog-name=ld", d->ld) ||
         !ars_resolve_program(d->ld) ||
         !ars_driver_line(cc, "-print-prog-name=collect2", d->collect2))
@@ -398,17 +438,22 @@ static bool ars_driver_capture(const char *cc, struct ars_driver *d)
 }
 #endif
 
-static bool ars_driver_facts(const char *cc, struct ars_driver *out)
+static bool ars_driver_facts(const char *cc, struct ars_driver *out,
+                             char miss[40])
 {
 #if defined(_WIN32)
     (void)cc;
     (void)out;
+    if (miss)
+        miss[0] = '\0';
     return false;
 #else
+    if (miss)
+        miss[0] = '\0';
     pthread_mutex_lock(&g_driver_mu);
     bool ok = g_driver.valid && strcmp(g_driver.driver, cc) == 0;
     if (!ok) {
-        ok = ars_driver_capture(cc, &g_driver);
+        ok = ars_driver_capture(cc, &g_driver, miss);
         g_driver.valid = ok;
     }
     if (ok)
@@ -674,9 +719,15 @@ static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
                      "toolchain capsule unavailable", NULL);
         return false;
     }
-    if (!ars_driver_facts(k->cc, &h->driver)) {
-        ars_miss_set(m, "driver_facts_unavailable",
-                     "compiler driver facts unavailable", k->cc);
+    char driver_miss[40] = {0};
+    if (!ars_driver_facts(k->cc, &h->driver, driver_miss)) {
+        if (driver_miss[0])
+            ars_miss_set(m, driver_miss,
+                         "compiler driver's built-in include search is not "
+                         "a canonical, capacity-fitting list", k->cc);
+        else
+            ars_miss_set(m, "driver_facts_unavailable",
+                         "compiler driver facts unavailable", k->cc);
         return false;
     }
     if (!ars_hook_argv(h, k)) {

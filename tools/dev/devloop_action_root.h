@@ -24,9 +24,14 @@
 
 #include "vcs/build_action.h"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 #define ZCL_ACTION_ROOT_STAGE_HOTSWAP "c23.compile.hotswap-module"
 #define ZCL_ACTION_ROOT_STAGE_HOTSWAP_VERSION 1u
@@ -109,7 +114,9 @@ struct zcl_action_root_request {
  * builtin_dir_noncanonical, sysroot_noncanonical, linker_unavailable,
  * linker_missing, encode_refused, out_of_memory. The hooks add
  * closure_unobserved (the build did not complete), toolchain_unavailable,
- * driver_facts_unavailable, argv_unavailable and store_unavailable. */
+ * builtin_dir_overflow (the driver's built-in search list will not fit the
+ * hook's capacity), driver_facts_unavailable, argv_unavailable and
+ * store_unavailable. */
 struct zcl_action_root_result {
     uint8_t root[32];
     char root_hex[65];
@@ -171,5 +178,25 @@ struct json_value;
 void zcl_devloop_action_root_emit(
     struct json_value *receipt_json,
     const struct zcl_devloop_hotswap_build_receipt *build);
+
+/* True when `dir` may be recorded as a built-in include dir by its exact
+ * spelling: absolute, shorter than PATH_MAX, and already lexically normal
+ * (no "." or ".." segment, no doubled or trailing slash). */
+bool zcl_action_root_builtin_dir_canonical(const char *dir);
+
+/* Parse `cc -xc -E -v /dev/null` output between its two search-list
+ * markers into up to `dirs_cap` built-in #include <...> directories.
+ * Every entry must satisfy zcl_action_root_builtin_dir_canonical, and the
+ * list must fit `dirs_cap` entries of PATH_MAX bytes each. A noncanonical
+ * entry sets `miss` to "builtin_dir_noncanonical"; an entry longer than a
+ * path buffer or more entries than `dirs_cap` set "builtin_dir_overflow".
+ * Either is refused (false, *count_out 0), never truncated or filtered
+ * while still returning a usable list. `miss` is a 40-byte buffer (may be
+ * NULL). Exposed so a captured driver transcript can be replayed by a test
+ * without invoking a compiler. */
+bool zcl_action_root_parse_builtin_dirs(const char *cc_dash_e_v_output,
+                                        char dirs[][PATH_MAX],
+                                        size_t dirs_cap, size_t *count_out,
+                                        char *miss);
 
 #endif /* ZCL_DEVLOOP_ACTION_ROOT_H */

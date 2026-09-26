@@ -150,6 +150,15 @@ static bool ar_lex_normalize(const char *in, char *out, size_t cap)
     return true;
 }
 
+bool zcl_action_root_builtin_dir_canonical(const char *dir)
+{
+    char norm[PATH_MAX];
+    size_t n = dir ? strnlen(dir, PATH_MAX) : 0;
+    return n > 0 && n < PATH_MAX && dir[0] == '/' &&
+           ar_lex_normalize(dir, norm, sizeof(norm)) &&
+           strcmp(norm, dir) == 0;
+}
+
 /* System locations whose absolute spelling is the same on every host of a
  * toolchain; anything else outside the checkout is refused. */
 static bool ar_system_path(const char *abs)
@@ -611,8 +620,19 @@ static bool ar_depfile_load(struct ar_state *s)
     for (char *tok = strtok_r(colon + 1, " \t\r\n", &save); ok && tok;
          tok = strtok_r(NULL, " \t\r\n", &save)) {
         size_t n = strlen(tok);
-        if (tok[n - 1] == ':' || tok[n - 1] == '\\')
-            break; /* a -MP phony rule or an escaped space: end of closure */
+        if (tok[n - 1] == ':')
+            break; /* a -MP phony rule: end of closure */
+        if (strchr(tok, '\\')) {
+            /* Continuations are already folded, so any backslash left is
+             * an escape (foo\ bar.h, foo\#bar.h) or a dangling one at end
+             * of file. This parser decodes none of them; never truncate
+             * the closure or guess a spelling and still emit a root. */
+            ar_fail(&s->c, "depfile_malformed",
+                    "dependency file token carries an undecoded backslash "
+                    "escape", tok);
+            ok = false;
+            break;
+        }
         ok = ar_dep_add(s, tok);
     }
     free(text);
@@ -723,10 +743,31 @@ static bool ar_argv_refused(struct ar_state *s, const char *const *argv,
     return false;
 }
 
+/* A built-in dir enters the search order and the preimage by its exact
+ * spelling. One the lexer would rewrite (relative, "..", ".", a doubled or
+ * trailing slash) or that does not fit a path buffer is refused before it
+ * can be normalized into a different dir or truncated into an ambiguous
+ * one. */
+static bool ar_builtin_dirs_canonical(struct ar_state *s)
+{
+    const struct zcl_action_root_request *req = s->c.req;
+    for (size_t i = 0; i < req->system_dir_count; i++) {
+        if (!zcl_action_root_builtin_dir_canonical(req->system_dirs[i])) {
+            ar_fail(&s->c, "builtin_dir_noncanonical",
+                    "builtin include dir is not an absolute, lexically "
+                    "normal path that fits a path buffer",
+                    req->system_dirs[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool ar_search_build(struct ar_state *s)
 {
     const struct zcl_action_root_request *req = s->c.req;
-    if (ar_argv_refused(s, req->argv, req->argc))
+    if (ar_argv_refused(s, req->argv, req->argc) ||
+        !ar_builtin_dirs_canonical(s))
         return false;
     for (int cls = 0; cls < AR_Q_COUNT; cls++)
         if (!ar_search_collect(s, cls))
