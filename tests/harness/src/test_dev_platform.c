@@ -2370,6 +2370,44 @@ static bool seal_batch_damaged_tail(const char *repo, const char *state_dir,
     return true;
 }
 
+/* A flusher killed halfway through writing a journal record leaves no file
+ * under that record's final name (records are staged, then linked whole), so
+ * the next heal and flush continue the journal instead of refusing a torn
+ * tail. */
+static bool seal_batch_torn_write(const char *repo, const char *state_dir,
+                                  const int64_t epochs[4])
+{
+    char why[192] = {0}, event_path[PATH_MAX];
+    int64_t next[2] = {0};
+    for (int i = 0; i < 2; i++)
+        SB_CHECK(zcl_devloop_cycle_stream_publish(
+                     repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+                     &next[i], why, sizeof(why)) &&
+                 next[i] == epochs[3] + 1 + i);
+    pid_t flusher = fork();
+    if (flusher == 0) {
+        /* Record 1 journals next[0]; record 2 is next[1]'s, torn midway. */
+        zcl_devloop_cycle_stream_test_kill_in_write(2);
+        _exit(zcl_devloop_cycle_stream_flush_through(repo, next[1], why,
+                                                     sizeof(why)) ? 0 : 1);
+    }
+    int status = 0;
+    SB_CHECK(flusher > 0 && waitpid(flusher, &status, 0) == flusher &&
+             WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    SB_CHECK(seal_batch_event_path(state_dir, next[0], event_path) &&
+             access(event_path, F_OK) == 0);
+    SB_CHECK(seal_batch_event_path(state_dir, next[1], event_path) &&
+             access(event_path, F_OK) != 0 && errno == ENOENT);
+    SB_CHECK(seal_batch_pointer_epoch(repo) == epochs[3]);
+    SB_CHECK(zcl_devloop_cycle_state_heal(repo, why, sizeof(why)) &&
+             seal_batch_pointer_epoch(repo) == next[0]);
+    SB_CHECK(zcl_devloop_cycle_stream_flush_through(repo, next[1], why,
+                                                    sizeof(why)) &&
+             seal_batch_pointer_epoch(repo) == next[1] &&
+             access(event_path, F_OK) == 0);
+    return true;
+}
+
 static bool run_cycle_seal_batch_fixture(void)
 {
     char home[PATH_MAX], repo[PATH_MAX], state_dir[PATH_MAX];
@@ -2388,6 +2426,7 @@ static bool run_cycle_seal_batch_fixture(void)
                        state_dir) > 0 &&
               seal_batch_flush(repo, state_dir, epochs) &&
               seal_batch_heal(repo, state_dir, pointer, epochs) &&
+              seal_batch_torn_write(repo, state_dir, epochs) &&
               seal_batch_damaged_tail(repo, state_dir, pointer, epochs);
     if (saved_home) {
         (void)platform_environment_set("HOME", saved_home, 1);
@@ -2500,6 +2539,42 @@ static bool drive_wait_under_lock(const char *repo, int64_t sealed)
     return true;
 }
 
+/* A journal file the ring has not yet marked durable is a seal still in
+ * progress: a waiter that cannot take the lock does not read it lock-free. */
+static bool drive_wait_undurable(const char *repo, int64_t sealed)
+{
+    char out[4096], why[192] = {0};
+    size_t len = 0;
+    int64_t epoch = 0;
+    DW_CHECK(zcl_devloop_cycle_state_wait_after(
+                 repo, sealed, 300, out, sizeof(out), &len, &epoch, why,
+                 sizeof(why)) == ZCL_DEVLOOP_STATE_ABSENT &&
+             epoch == sealed);
+    return true;
+}
+
+/* Runs `under` while another process holds the cycle lock exclusively. */
+static bool drive_wait_with_lock(const char *repo, const char *state_dir,
+                                 int64_t epoch,
+                                 bool (*under)(const char *, int64_t))
+{
+    int ready[2] = {-1, -1}, release[2] = {-1, -1};
+    DW_CHECK(pipe(ready) == 0 && pipe(release) == 0);
+    pid_t holder = drive_wait_lock_holder(state_dir, ready[1], release[0]);
+    char byte = 0;
+    bool held = holder > 0 && read(ready[0], &byte, 1) == 1;
+    bool ok = held && under(repo, epoch);
+    int status = 0;
+    bool released = write(release[1], "x", 1) == 1 && holder > 0 &&
+                    waitpid(holder, &status, 0) == holder &&
+                    WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    for (int i = 0; i < 2; i++) {
+        (void)close(ready[i]);
+        (void)close(release[i]);
+    }
+    return ok && released;
+}
+
 static bool drive_wait_fixture(const char *repo, const char *state_dir)
 {
     char why[192] = {0};
@@ -2515,21 +2590,15 @@ static bool drive_wait_fixture(const char *repo, const char *state_dir)
                  &epoch, why, sizeof(why)) &&
              zcl_devloop_cycle_stream_flush_through(repo, epoch, why,
                                                     sizeof(why)));
-    int ready[2] = {-1, -1}, release[2] = {-1, -1};
-    DW_CHECK(pipe(ready) == 0 && pipe(release) == 0);
-    pid_t holder = drive_wait_lock_holder(state_dir, ready[1], release[0]);
-    char byte = 0;
-    bool held = holder > 0 && read(ready[0], &byte, 1) == 1;
-    bool ok = held && drive_wait_under_lock(repo, epoch);
-    int status = 0;
-    bool released = write(release[1], "x", 1) == 1 && holder > 0 &&
-                    waitpid(holder, &status, 0) == holder &&
-                    WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    for (int i = 0; i < 2; i++) {
-        (void)close(ready[i]);
-        (void)close(release[i]);
-    }
-    return ok && released;
+    DW_CHECK(drive_wait_with_lock(repo, state_dir, epoch,
+                                  drive_wait_under_lock));
+    /* The late publisher left epoch + 1 in the ring. Seal it, then restart
+     * the ring one epoch behind the journal: that file is not yet durable
+     * as far as the ring knows. */
+    DW_CHECK(zcl_devloop_cycle_stream_flush_through(repo, epoch + 1, why,
+                                                    sizeof(why)) &&
+             zcl_devloop_cycle_stream_reset(repo, epoch, why, sizeof(why)));
+    return drive_wait_with_lock(repo, state_dir, epoch, drive_wait_undurable);
 }
 
 static bool run_drive_wait_fixture(void)
@@ -2572,6 +2641,198 @@ static int test_drive_wait_ignores_seal_lock(void)
 }
 
 #if !defined(_WIN32)
+#define MW_CHECK(expr)                                                       \
+    do {                                                                     \
+        if (!(expr)) {                                                       \
+            fprintf(stderr, "mirror-write fixture failed at %s:%d: %s\n",   \
+                    __FILE__, __LINE__, #expr);                              \
+            return false;                                                    \
+        }                                                                    \
+    } while (0)
+
+#define MW_EVENTS 26
+
+/* Reasons 0-2: ring events published before the writes; 3-12 and 13-22:
+ * two concurrent ring publishers; 23-25: direct journal writes. */
+static bool mirror_write_reason(size_t k, char reason[32])
+{
+    int r = k < 3 ? snprintf(reason, 32, "ring-%zu", k)
+          : k < 23 ? snprintf(reason, 32, "pub%zu-%zu", (k - 3) / 10,
+                              (k - 3) % 10)
+                   : snprintf(reason, 32, "mirror-%zu", k - 23);
+    return r > 0 && r < 32;
+}
+
+static bool mirror_write_event(size_t k, char body[512], size_t *len)
+{
+    char reason[32];
+    int n = mirror_write_reason(k, reason) ? snprintf(
+        body, 512,
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
+        "\"status\":\"impact_ready\",\"action\":\"reflex\","
+        "\"reason\":\"%s\",\"phase\":\"IMPACT_READY\","
+        "\"runtime_published\":false,\"elapsed_ms\":2,\"files\":[]}",
+        reason) : -1;
+    *len = n > 0 ? (size_t)n : 0;
+    return n > 0 && n < 512;
+}
+
+/* Publishes its ten ring events, pausing inside each epoch reservation. */
+static pid_t mirror_write_publisher(const char *repo, size_t id)
+{
+    pid_t child = fork();
+    if (child != 0)
+        return child;
+    zcl_devloop_cycle_stream_test_publish_pause_ms(2);
+    for (size_t i = 0; i < 10; i++) {
+        char body[512], why[192] = {0};
+        size_t len = 0;
+        int64_t epoch = 0;
+        if (!mirror_write_event(3 + id * 10 + i, body, &len) ||
+            !zcl_devloop_cycle_stream_publish(repo, body, len, &epoch, why,
+                                              sizeof(why)))
+            _exit(1);
+    }
+    _exit(0);
+}
+
+/* Journal epochs (base, tail] hold every event exactly once. */
+static bool mirror_write_journal_agrees(const char *repo, int64_t base,
+                                        int64_t tail)
+{
+    bool seen[MW_EVENTS] = {false};
+    MW_CHECK(tail - base == MW_EVENTS);
+    for (int64_t e = base + 1; e <= tail; e++) {
+        char out[4096], why[192] = {0}, reason[32], key[48];
+        size_t len = 0;
+        int64_t epoch = 0;
+        MW_CHECK(zcl_devloop_cycle_state_read_after(
+                     repo, e - 1, out, sizeof(out), &len, &epoch, why,
+                     sizeof(why)) == ZCL_DEVLOOP_STATE_FOUND &&
+                 epoch == e);
+        size_t matched = MW_EVENTS;
+        for (size_t k = 0; k < MW_EVENTS; k++) {
+            MW_CHECK(mirror_write_reason(k, reason));
+            int n = snprintf(key, sizeof(key), "\"reason\":\"%s\"", reason);
+            if (n > 0 && (size_t)n < sizeof(key) && strstr(out, key))
+                matched = k;
+        }
+        MW_CHECK(matched < MW_EVENTS && !seen[matched]);
+        seen[matched] = true;
+    }
+    return true;
+}
+
+/* An anchor event, then a ring restarted after it holding three unsealed
+ * events. */
+static bool mirror_write_seed(const char *repo, int64_t *base)
+{
+    char why[192] = {0}, body[512];
+    size_t len = 0;
+    int64_t epoch = 0;
+    MW_CHECK(zcl_devloop_cycle_state_write(
+        repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1, why,
+        sizeof(why)));
+    *base = seal_batch_pointer_epoch(repo);
+    MW_CHECK(*base > 0 &&
+             zcl_devloop_cycle_stream_reset(repo, *base, why, sizeof(why)));
+    for (size_t k = 0; k < 3; k++)
+        MW_CHECK(mirror_write_event(k, body, &len) &&
+                 zcl_devloop_cycle_stream_publish(repo, body, len, &epoch,
+                                                  why, sizeof(why)));
+    return true;
+}
+
+/* The publication lock is uncontended in the common case. */
+static bool mirror_write_publish_cost(const char *repo)
+{
+    char why[192] = {0};
+    int64_t epoch = 0;
+    int64_t started = platform_time_monotonic_us();
+    for (int i = 0; i < 200; i++)
+        MW_CHECK(zcl_devloop_cycle_stream_publish(
+            repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1, &epoch,
+            why, sizeof(why)));
+    int64_t per_publish_us = (platform_time_monotonic_us() - started) / 200;
+    fprintf(stderr, "ring publish under its lock: %lld us each\n",
+            (long long)per_publish_us);
+    MW_CHECK(per_publish_us < 5000);
+    return true;
+}
+
+/* Direct journal writes while ring events are still unsealed and two other
+ * processes publish: each write takes a ring epoch after the unsealed ones,
+ * every event is journaled once, and ring and journal agree. */
+static bool mirror_write_fixture(const char *repo)
+{
+    char why[192] = {0}, body[512];
+    size_t len = 0;
+    int64_t base = 0, latest = 0, durable = 0;
+    MW_CHECK(mirror_write_seed(repo, &base));
+    pid_t publishers[2] = {mirror_write_publisher(repo, 0),
+                           mirror_write_publisher(repo, 1)};
+    bool written = true;
+    for (size_t k = 23; k < MW_EVENTS; k++)
+        written = written && mirror_write_event(k, body, &len) &&
+                  zcl_devloop_cycle_state_write(repo, body, len, why,
+                                                sizeof(why));
+    bool joined = true;
+    for (int i = 0; i < 2; i++) {
+        int status = 0;
+        joined = joined && publishers[i] > 0 &&
+                 waitpid(publishers[i], &status, 0) == publishers[i] &&
+                 WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    if (!written)
+        fprintf(stderr, "mirror write refused: %s\n", why);
+    MW_CHECK(written && joined);
+    MW_CHECK(zcl_devloop_cycle_stream_marks(repo, &latest, &durable) &&
+             latest == base + MW_EVENTS);
+    MW_CHECK(zcl_devloop_cycle_stream_flush_through(repo, latest, why,
+                                                    sizeof(why)) &&
+             seal_batch_pointer_epoch(repo) == latest);
+    MW_CHECK(mirror_write_journal_agrees(repo, base, latest));
+    return mirror_write_publish_cost(repo);
+}
+
+static bool run_mirror_write_fixture(void)
+{
+    char home[PATH_MAX], repo[PATH_MAX];
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    if (getenv("HOME") && !saved_home)
+        return false;
+    test_make_tmpdir(home, sizeof(home), "dev_platform", "mirror_write");
+    bool ok = snprintf(repo, sizeof(repo), "%s/repo", home) > 0 &&
+              mkdir(repo, 0700) == 0 &&
+              platform_environment_set("HOME", home, 1) == 0 &&
+              mirror_write_fixture(repo);
+    if (saved_home) {
+        (void)platform_environment_set("HOME", saved_home, 1);
+        free(saved_home);
+    } else
+        (void)dp_environment_unset("HOME");
+    test_rm_rf_recursive(home);
+    return ok;
+}
+#undef MW_CHECK
+#else
+static bool run_mirror_write_fixture(void)
+{
+    return true; /* Concurrent publishers are forked processes. */
+}
+#endif /* !defined(_WIN32) */
+
+static int test_mirror_write_joins_ring(void)
+{
+    int failures = 0;
+    TEST("dev platform: a direct journal write takes the ring's next epoch and never collides with unsealed ring events") {
+        ASSERT(run_mirror_write_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#if !defined(_WIN32)
 /* The selftest runs in a fresh child, so "no child outlived the watcher"
  * cannot be confused with a resident helper an earlier case left running. */
 static bool run_watch_sealer_isolated(const char *repo)
@@ -2608,7 +2869,7 @@ static int test_watcher_journal_sealer(void)
     char home[PATH_MAX] = {0}, repo[PATH_MAX] = {0};
     const char *current_home = getenv("HOME");
     char *saved_home = current_home ? strdup(current_home) : NULL;
-    TEST("dev platform: the watcher's journal sealer drains on stop, falls back inline, and survives a crash") {
+    TEST("dev platform: the watcher's journal sealer drains on stop, falls back inline, survives a crash and SIGTERM, and outlives a killed watcher safely") {
         ASSERT(!current_home || saved_home);
         test_make_tmpdir(home, sizeof(home), "dev_platform", "watch_sealer");
         int n = snprintf(repo, sizeof(repo), "%s/repo", home);
@@ -4929,6 +5190,7 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_failure_store, 5),
     DP_CASE(test_cycle_seal_batch, 5),
     DP_CASE(test_drive_wait_ignores_seal_lock, 5),
+    DP_CASE(test_mirror_write_joins_ring, 5),
     DP_CASE(test_distill_first_error, 7),
     DP_CASE(test_hotswap_artifact_cache, 5),
     DP_CASE(test_hotfork_story_file_green_and_red, 5),
@@ -5078,7 +5340,7 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 44u + (unsigned)(
+    if (DP_CASE_COUNT != 45u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else

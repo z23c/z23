@@ -806,6 +806,9 @@ bool zcl_devloop_workspace_resolve(const char *repo_root, char out_id[65],
                                    char *out_dir, size_t out_dir_len);
 bool zcl_devloop_workspace_state_dir(const char *repo_root,
                                      char *out, size_t out_len);
+/* Journal one new event durably. While the ring is live it goes through the
+ * ring under the seal lock, taking the ring's next epoch after every earlier
+ * ring event is sealed, so journal and ring never disagree on an epoch. */
 bool zcl_devloop_cycle_state_write(const char *repo_root,
                                    const char *cycle_json, size_t cycle_len,
                                    char *why, size_t why_len);
@@ -816,6 +819,11 @@ bool zcl_devloop_cycle_state_write(const char *repo_root,
 bool zcl_devloop_cycle_stream_reset(const char *repo_root,
                                     int64_t durable_epoch,
                                     char *why, size_t why_len);
+/* Heal, read the journal tail and reset the ring after it, all under the seal
+ * lock. durable_out (optional) receives that tail epoch. */
+bool zcl_devloop_cycle_stream_restart(const char *repo_root,
+                                      int64_t *durable_out,
+                                      char *why, size_t why_len);
 bool zcl_devloop_cycle_stream_publish(const char *repo_root,
                                       const char *cycle_json,
                                       size_t cycle_len, int64_t *epoch_out,
@@ -848,6 +856,12 @@ bool zcl_devloop_cycle_stream_marks(const char *repo_root,
 /* Test seam: this process SIGKILLs itself after sealing `events` more
  * journal events (0 disarms), to crash a sealer inside a batch. */
 void zcl_devloop_cycle_stream_test_kill_after(int events);
+/* Test seam: SIGKILL halfway through writing the `records`-th journal record
+ * from now (0 disarms), before it is linked under its final name. */
+void zcl_devloop_cycle_stream_test_kill_in_write(int records);
+/* Test seam: pause `ms` between reserving a ring epoch and writing its slot,
+ * holding the ring publication lock (0 disarms). */
+void zcl_devloop_cycle_stream_test_publish_pause_ms(int ms);
 #endif
 /* Move a latest pointer left behind the journal tail (a flusher died inside
  * a batch) onto the tail event. A no-op when they already agree. */
@@ -872,8 +886,8 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_read_after(
 /* Wait for the first exact event after `after_epoch`. The directory watch is
  * armed before the first read, closing the check/sleep race; producers wake it
  * through the bounded volatile ring. A sealer holding the cycle lock never
- * delays it: a busy lock reads the sealed event file without the lock, and
- * an event that is in neither place is not yet published. On timeout, epoch_out retains the exact
+ * delays it: a busy lock reads the sealed event file without the lock once
+ * the ring marks that epoch durable; anything else is not yet published. On timeout, epoch_out retains the exact
  * caller anchor so recovery evidence cannot regress to zero. */
 enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
     const char *repo_root, int64_t after_epoch, int timeout_ms,

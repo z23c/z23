@@ -20,7 +20,7 @@
 #include <fcntl.h>
 #endif
 #include <limits.h>
-#if defined(__linux__)
+#if !defined(_WIN32)
 #include <poll.h>
 #endif
 #if defined(ZCL_TESTING) && !defined(_WIN32)
@@ -293,7 +293,8 @@ static int ws_unlinkat(int dirfd, const char *leaf, int flags)
                                            true) ? 0 : -1;
 }
 
-static int ws_renameat(int fromfd, const char *from, int tofd, const char *to)
+static int ws_move(int fromfd, const char *from, int tofd, const char *to,
+                   bool no_clobber)
 {
     if (fromfd != tofd || fromfd < 0 || fromfd >= WS_CAP_LIMIT ||
         ws_caps[fromfd].kind != WS_CAP_DIR)
@@ -304,9 +305,23 @@ static int ws_renameat(int fromfd, const char *from, int tofd, const char *to)
                                        &staged))
         return -1;
     bool ok = platform_directory_child_replace(&ws_caps[fromfd].value.dir,
-                                               &staged, to, false);
+                                               &staged, to, no_clobber);
     platform_directory_child_close(&staged);
     return ok ? 0 : -1;
+}
+
+static int ws_renameat(int fromfd, const char *from, int tofd, const char *to)
+{
+    return ws_move(fromfd, from, tofd, to, false);
+}
+
+/* A no-clobber move publishes the staged record exactly once; the staged
+ * name is gone afterwards, so the caller's cleanup unlink finds nothing. */
+static int ws_linkat(int fromfd, const char *from, int tofd, const char *to,
+                     int flags)
+{
+    (void)flags;
+    return ws_move(fromfd, from, tofd, to, true);
 }
 
 static int ws_mkdirat(int dirfd, const char *leaf, int mode)
@@ -348,6 +363,7 @@ static int ws_getpid(void) { return 1; }
 #undef fsync
 #undef unlinkat
 #undef renameat
+#undef linkat
 #undef mkdirat
 #undef mkdir
 #undef getpid
@@ -364,6 +380,7 @@ static int ws_getpid(void) { return 1; }
 #define fsync ws_fsync
 #define unlinkat ws_unlinkat
 #define renameat ws_renameat
+#define linkat ws_linkat
 #define mkdirat ws_mkdirat
 #define mkdir ws_mkdir
 #define getpid ws_getpid
@@ -700,6 +717,18 @@ static int cycle_stream_open_at(int dirfd, const char *workspace,
     return fd;
 }
 
+/* The ring's publication lock (POSIX; the Windows adapter's lock replaces
+ * the file capability, and no Windows watcher owns a ring). */
+static bool cycle_stream_lock_fd(int fd)
+{
+#if !defined(_WIN32)
+    return flock(fd, LOCK_EX) == 0;
+#else
+    (void)fd;
+    return true;
+#endif
+}
+
 bool zcl_devloop_cycle_stream_reset(const char *repo_root,
                                     int64_t durable_epoch,
                                     char *why, size_t why_len)
@@ -728,7 +757,8 @@ bool zcl_devloop_cycle_stream_reset(const char *repo_root,
      * reader could otherwise mistake an old durable_epoch+1 slot for a new
      * event before the watcher publishes anything. Startup is outside the
      * reflex path, so clearing the bounded image costs no edit latency. */
-    bool ok = private_regular_fd(fd, NULL) && ftruncate(fd, 0) == 0 &&
+    bool ok = private_regular_fd(fd, NULL) && cycle_stream_lock_fd(fd) &&
+              ftruncate(fd, 0) == 0 &&
               ftruncate(fd, (off_t)CYCLE_STREAM_FILE_SIZE) == 0;
     unsigned char header[CYCLE_STREAM_HEADER_SIZE] = {0};
     if (ok) {
@@ -750,40 +780,54 @@ bool zcl_devloop_cycle_stream_reset(const char *repo_root,
     return ok;
 }
 
-static bool cycle_stream_publish_at(const char *repo_root, int64_t epoch,
-                                    const char *canonical, size_t len,
-                                    bool require_next, char *why,
-                                    size_t why_len)
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static int g_publish_test_pause_ms;
+
+void zcl_devloop_cycle_stream_test_publish_pause_ms(int ms)
 {
-    char dir[PATH_MAX], workspace[65];
-    if (epoch <= 0 || !canonical || len == 0 ||
-        len >= CYCLE_STREAM_BODY_MAX ||
-        !zcl_devloop_workspace_resolve(repo_root, workspace, dir,
-                                       sizeof(dir))) {
-        set_why(why, why_len, "cycle_stream_event_invalid");
-        return false;
-    }
+    g_publish_test_pause_ms = ms > 0 ? ms : 0;
+}
+
+/* Widens the window between reserving an epoch and writing its slot. */
+static void cycle_stream_test_publish_pause(void)
+{
+    if (g_publish_test_pause_ms > 0)
+        (void)poll(NULL, 0, g_publish_test_pause_ms);
+}
+#elif defined(ZCL_TESTING)
+void zcl_devloop_cycle_stream_test_publish_pause_ms(int ms) { (void)ms; }
+static void cycle_stream_test_publish_pause(void) {}
+#else
+static void cycle_stream_test_publish_pause(void) {}
+#endif
+
+/* Opens the ring holding its publication lock, so reading the latest epoch
+ * and writing the next slot is one step between processes. The header is
+ * read again under the lock. */
+static int cycle_stream_open_locked(const char *repo_root, char workspace[65],
+                                    unsigned char header[136])
+{
+    char dir[PATH_MAX];
+    if (!zcl_devloop_workspace_resolve(repo_root, workspace, dir,
+                                       sizeof(dir)))
+        return -1;
     int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (!private_dir_fd(dirfd)) {
-        if (dirfd >= 0)
-            close(dirfd);
-        set_why(why, why_len, "cycle_stream_directory_invalid");
-        return false;
-    }
-    unsigned char header[CYCLE_STREAM_HEADER_SIZE];
-    int fd = cycle_stream_open_at(dirfd, workspace, header);
-    close(dirfd);
-    if (fd < 0) {
-        set_why(why, why_len, "cycle_stream_unavailable");
-        return false;
-    }
-    uint64_t latest = zcl_read_u64_le(header + 80);
-    if ((require_next && (latest == INT64_MAX || epoch != (int64_t)latest + 1)) ||
-        (!require_next && epoch > (int64_t)latest + 1)) {
+    int fd = private_dir_fd(dirfd)
+        ? cycle_stream_open_at(dirfd, workspace, header) : -1;
+    if (dirfd >= 0)
+        close(dirfd);
+    if (fd >= 0 && (!cycle_stream_lock_fd(fd) ||
+                    !pread_all(fd, header, CYCLE_STREAM_HEADER_SIZE, 0))) {
         close(fd);
-        set_why(why, why_len, "cycle_stream_epoch_mismatch");
-        return false;
+        return -1;
     }
+    return fd;
+}
+
+static bool cycle_stream_write_slot(int fd, const char *workspace,
+                                    int64_t epoch, const char *canonical,
+                                    size_t len)
+{
     unsigned char slot[CYCLE_STREAM_SLOT_SIZE];
     memset(slot, 0, sizeof(slot));
     zcl_write_u64_le(slot, (uint64_t)epoch);
@@ -793,31 +837,51 @@ static bool cycle_stream_publish_at(const char *repo_root, int64_t epoch,
     off_t offset = (off_t)CYCLE_STREAM_HEADER_SIZE +
         (off_t)(((uint64_t)epoch - 1) % CYCLE_STREAM_SLOT_COUNT) *
             (off_t)CYCLE_STREAM_SLOT_SIZE;
-    bool ok = pwrite_all(fd, slot, sizeof(slot), offset);
     unsigned char encoded[8];
     zcl_write_u64_le(encoded, (uint64_t)epoch);
-    if (ok)
-        ok = pwrite_all(fd, encoded, sizeof(encoded), 80);
+    return pwrite_all(fd, slot, sizeof(slot), offset) &&
+           pwrite_all(fd, encoded, sizeof(encoded), 80);
+}
+
+/* Publishes one canonical event. *epoch_io == 0 reserves latest + 1; a
+ * nonzero epoch must be the next one (require_next) or not past it. */
+static bool cycle_stream_publish_at(const char *repo_root, int64_t *epoch_io,
+                                    const char *canonical, size_t len,
+                                    bool require_next, char *why,
+                                    size_t why_len)
+{
+    char workspace[65];
+    unsigned char header[CYCLE_STREAM_HEADER_SIZE];
+    int fd = canonical && len > 0 && len < CYCLE_STREAM_BODY_MAX
+        ? cycle_stream_open_locked(repo_root, workspace, header) : -1;
+    if (fd < 0) {
+        set_why(why, why_len, "cycle_stream_unavailable");
+        return false;
+    }
+    uint64_t latest = zcl_read_u64_le(header + 80);
+    int64_t epoch = *epoch_io > 0 ? *epoch_io
+        : latest < INT64_MAX ? (int64_t)latest + 1 : 0;
+    bool fits = epoch > 0 && (uint64_t)epoch <= latest + 1 &&
+        (!require_next || (uint64_t)epoch == latest + 1);
+    cycle_stream_test_publish_pause();
+    bool ok = fits &&
+        cycle_stream_write_slot(fd, workspace, epoch, canonical, len);
     if (close(fd) != 0)
         ok = false;
     if (!ok)
-        set_why(why, why_len, "cycle_stream_publish_failed");
+        set_why(why, why_len, fits ? "cycle_stream_publish_failed"
+                                   : "cycle_stream_epoch_mismatch");
+    if (ok)
+        *epoch_io = epoch;
     return ok;
 }
 
 static bool cycle_stream_mark_durable(const char *repo_root, int64_t epoch)
 {
-    char dir[PATH_MAX], workspace[65];
-    if (epoch < 0 ||
-        !zcl_devloop_workspace_resolve(repo_root, workspace, dir,
-                                       sizeof(dir)))
-        return false;
-    int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    char workspace[65];
     unsigned char header[CYCLE_STREAM_HEADER_SIZE];
-    int fd = private_dir_fd(dirfd)
-        ? cycle_stream_open_at(dirfd, workspace, header) : -1;
-    if (dirfd >= 0)
-        close(dirfd);
+    int fd = epoch >= 0
+        ? cycle_stream_open_locked(repo_root, workspace, header) : -1;
     if (fd < 0)
         return false;
     uint64_t latest = zcl_read_u64_le(header + 80);
@@ -879,30 +943,9 @@ bool zcl_devloop_cycle_stream_publish(const char *repo_root,
         set_why(why, why_len, "cycle_stream_input_invalid");
         return false;
     }
-    char dir[PATH_MAX], workspace[65];
-    if (!zcl_devloop_workspace_resolve(repo_root, workspace, dir,
-                                       sizeof(dir))) {
-        set_why(why, why_len, "cycle_stream_workspace_unavailable");
-        return false;
-    }
-    int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    unsigned char header[CYCLE_STREAM_HEADER_SIZE];
-    int fd = private_dir_fd(dirfd)
-        ? cycle_stream_open_at(dirfd, workspace, header) : -1;
-    if (dirfd >= 0)
-        close(dirfd);
-    if (fd < 0) {
-        set_why(why, why_len, "cycle_stream_unavailable");
-        return false;
-    }
-    uint64_t latest = zcl_read_u64_le(header + 80);
-    close(fd);
-    if (latest >= INT64_MAX) {
-        set_why(why, why_len, "cycle_stream_epoch_exhausted");
-        return false;
-    }
-    int64_t epoch = (int64_t)latest + 1;
-    ok = cycle_stream_publish_at(repo_root, epoch, canonical, canonical_len,
+    /* Epoch 0 asks the ring to reserve latest + 1 under its lock. */
+    int64_t epoch = 0;
+    ok = cycle_stream_publish_at(repo_root, &epoch, canonical, canonical_len,
                                  true, why, why_len);
     if (ok && epoch_out)
         *epoch_out = epoch;
@@ -1082,28 +1125,41 @@ static enum zcl_devloop_state_lookup cycle_event_read_at(
     return result;
 }
 
-static bool cycle_record_publish_named(int dirfd, const char *name,
-                                       const char *body, size_t body_len,
-                                       bool replace)
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static int g_record_test_kill_in_write;
+
+void zcl_devloop_cycle_stream_test_kill_in_write(int records)
 {
-    char temp[96] = {0};
+    g_record_test_kill_in_write = records > 0 ? records : 0;
+}
+
+/* Dies halfway through writing the armed record. */
+static bool cycle_record_test_torn_write(void)
+{
+    if (g_record_test_kill_in_write > 0 && --g_record_test_kill_in_write == 0)
+        (void)raise(SIGKILL);
+    return true;
+}
+#elif defined(ZCL_TESTING)
+void zcl_devloop_cycle_stream_test_kill_in_write(int records)
+{
+    (void)records;
+}
+static bool cycle_record_test_torn_write(void) { return true; }
+#else
+static bool cycle_record_test_torn_write(void) { return true; }
+#endif
+
+/* Writes a record to a fresh private temp name and makes its bytes durable.
+ * A process killed here leaves only a dot-named temp file behind. */
+static bool cycle_record_stage(int dirfd, const char *body, size_t body_len,
+                               char temp[96])
+{
     int fd = -1;
-    if (!replace) {
-        fd = openat(dirfd, name,
-                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                    0600);
-        bool ok = private_regular_fd(fd, NULL) &&
-                  write_all(fd, body, body_len) && fsync(fd) == 0;
-        if (fd >= 0 && close(fd) != 0)
-            ok = false;
-        if (!ok)
-            (void)unlinkat(dirfd, name, 0);
-        return ok;
-    }
     for (unsigned attempt = 0; attempt < 100; attempt++) {
-        int n = snprintf(temp, sizeof(temp), ".cycle.%ld.%u.tmp",
-                         (long)getpid(), attempt);
-        if (n <= 0 || (size_t)n >= sizeof(temp))
+        int n = snprintf(temp, 96, ".cycle.%ld.%u.tmp", (long)getpid(),
+                         attempt);
+        if (n <= 0 || n >= 96)
             break;
         fd = openat(dirfd, temp,
                     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
@@ -1111,13 +1167,30 @@ static bool cycle_record_publish_named(int dirfd, const char *name,
         if (fd >= 0 || errno != EEXIST)
             break;
     }
-    bool ok = private_regular_fd(fd, NULL) && write_all(fd, body, body_len) &&
-              fsync(fd) == 0;
+    size_t half = body_len / 2;
+    bool ok = private_regular_fd(fd, NULL) && write_all(fd, body, half) &&
+              cycle_record_test_torn_write() &&
+              write_all(fd, body + half, body_len - half) && fsync(fd) == 0;
     if (fd >= 0 && close(fd) != 0)
         ok = false;
-    if (ok)
-        ok = renameat(dirfd, temp, dirfd, name) == 0;
-    if (!ok)
+    if (!ok && fd >= 0)
+        (void)unlinkat(dirfd, temp, 0);
+    return ok;
+}
+
+/* A journal event appears under its final name only complete and durable:
+ * link() refuses an existing name exactly as O_EXCL did. The latest pointer
+ * is replaced atomically by rename. */
+static bool cycle_record_publish_named(int dirfd, const char *name,
+                                       const char *body, size_t body_len,
+                                       bool replace)
+{
+    char temp[96] = {0};
+    if (!cycle_record_stage(dirfd, body, body_len, temp))
+        return false;
+    bool ok = replace ? renameat(dirfd, temp, dirfd, name) == 0
+                      : linkat(dirfd, temp, dirfd, name, 0) == 0;
+    if (!replace || !ok)
         (void)unlinkat(dirfd, temp, 0);
     return ok;
 }
@@ -1355,7 +1428,7 @@ static bool cycle_state_write_impl(const char *repo_root,
     if (ok && mode == CYCLE_WRITE_MIRROR) {
         char stream_why[96] = {0};
         bool mirrored = cycle_stream_publish_at(
-            repo_root, epoch, canonical, canonical_len, true, stream_why,
+            repo_root, &epoch, canonical, canonical_len, true, stream_why,
             sizeof(stream_why));
         if (mirrored)
             (void)cycle_stream_mark_durable(repo_root, epoch);
@@ -1371,14 +1444,6 @@ static bool cycle_state_write_impl(const char *repo_root,
     if (!ok)
         set_why(why, why_len, "cycle_state_publication_failed");
     return ok;
-}
-
-bool zcl_devloop_cycle_state_write(const char *repo_root,
-                                   const char *cycle_json, size_t cycle_len,
-                                   char *why, size_t why_len)
-{
-    return cycle_state_write_impl(repo_root, 0, cycle_json, cycle_len,
-                                  CYCLE_WRITE_MIRROR, why, why_len);
 }
 
 bool zcl_devloop_cycle_state_write_epoch(const char *repo_root,
@@ -1493,17 +1558,33 @@ static int cycle_read_lock_open(int dirfd, int64_t after_epoch, bool *busy)
     return cycle_lock_open(dirfd, false, LOCK_SH);
 }
 
-/* A busy lock means a writer is mid-event. Journal event files are immutable
- * and SHA3-sealed once complete, so a verified file is the event; a missing
- * or still-being-written file means "not yet". The next writer close or ring
- * publish wakes the waiter. Integrity and gap checks stay on the locked path. */
+/* The ring's durable watermark, or 0 when there is no valid ring. */
+static int64_t cycle_stream_durable_at(int dirfd, const char *workspace)
+{
+    unsigned char header[CYCLE_STREAM_HEADER_SIZE];
+    int fd = cycle_stream_open_at(dirfd, workspace, header);
+    if (fd < 0)
+        return 0;
+    close(fd);
+    uint64_t durable = zcl_read_u64_le(header + 128);
+    return durable <= INT64_MAX ? (int64_t)durable : 0;
+}
+
+/* A busy lock means a writer is mid-event. A journal event appears under its
+ * final name only complete, but a lock-free reader takes it only once the
+ * ring marks that epoch durable: the seal that wrote it has finished, so the
+ * file is this ring generation's event. Anything else means "not yet"; the
+ * next durable mark or ring publish wakes the waiter. Integrity and gap
+ * checks stay on the locked path. */
 static enum zcl_devloop_state_lookup cycle_read_lock_refused(
     int dirfd, const char *workspace, int64_t after_epoch, bool busy,
     char *out, size_t out_len, size_t *len_out, int64_t *epoch_out,
     char *why, size_t why_len)
 {
     enum zcl_devloop_state_lookup result = ZCL_DEVLOOP_STATE_INVALID;
-    int events_fd = busy ? cycle_events_open(dirfd, false) : -1;
+    int events_fd = busy && cycle_stream_durable_at(dirfd, workspace) >
+                                after_epoch
+        ? cycle_events_open(dirfd, false) : -1;
     if (events_fd >= 0) {
         result = cycle_event_read_at(events_fd, after_epoch + 1, workspace,
                                      out, out_len, len_out, epoch_out);
@@ -1740,6 +1821,95 @@ bool zcl_devloop_cycle_stream_flush_through(const char *repo_root,
     }
     bool ok = cycle_stream_flush_locked(repo_root, through_epoch, why,
                                         why_len);
+    close(seal_fd);
+    return ok;
+}
+
+/* The journal epoch the ring must continue from: the healed latest pointer. */
+static bool cycle_stream_anchor_locked(const char *repo_root,
+                                       int64_t *durable_out,
+                                       char *why, size_t why_len)
+{
+    char body[CYCLE_CANONICAL_MAX];
+    size_t body_len = 0;
+    *durable_out = 0;
+    if (!zcl_devloop_cycle_state_heal(repo_root, why, why_len))
+        return false;
+    enum zcl_devloop_state_lookup latest = zcl_devloop_cycle_state_read(
+        repo_root, body, sizeof(body), &body_len, durable_out, why, why_len);
+    if (latest == ZCL_DEVLOOP_STATE_ABSENT)
+        *durable_out = 0;
+    return latest != ZCL_DEVLOOP_STATE_INVALID;
+}
+
+/* A new watcher restarts the ring after the journal tail. Holding the seal
+ * lock across heal, read and reset keeps a still-draining sealer from a
+ * previous watcher from sealing into the ring while it is rewritten. */
+bool zcl_devloop_cycle_stream_restart(const char *repo_root,
+                                      int64_t *durable_out,
+                                      char *why, size_t why_len)
+{
+    if (why && why_len)
+        why[0] = 0;
+    int64_t durable = 0;
+    int seal_fd = repo_root && repo_root[0]
+        ? cycle_seal_lock_open(repo_root) : -1;
+    if (seal_fd < 0) {
+        set_why(why, why_len, "cycle_stream_seal_lock_invalid");
+        return false;
+    }
+    bool ok = cycle_stream_anchor_locked(repo_root, &durable, why, why_len) &&
+              zcl_devloop_cycle_stream_reset(repo_root, durable, why,
+                                             why_len);
+    close(seal_fd);
+    if (ok && durable_out)
+        *durable_out = durable;
+    return ok;
+}
+
+/* Under the seal lock. While the ring is the live sequence (it has reached
+ * the journal tail), a new event takes the ring's next epoch and every
+ * earlier unsealed ring event is sealed before it, so the journal never
+ * takes an epoch the ring has handed out. 1 = written; 0 = no live ring, the
+ * caller journals directly; -1 = failed closed. */
+static int cycle_state_write_via_ring(const char *repo_root,
+                                      const char *cycle_json,
+                                      size_t cycle_len,
+                                      char *why, size_t why_len)
+{
+    int64_t ring_latest = 0, ring_durable = 0, anchor = 0, epoch = 0;
+    if (!zcl_devloop_cycle_stream_marks(repo_root, &ring_latest,
+                                        &ring_durable))
+        return 0;
+    if (!cycle_stream_anchor_locked(repo_root, &anchor, why, why_len))
+        return -1;
+    if (ring_latest < anchor)
+        return 0;
+    bool ok = zcl_devloop_cycle_stream_publish(repo_root, cycle_json,
+                                               cycle_len, &epoch, why,
+                                               why_len) &&
+              cycle_stream_flush_locked(repo_root, epoch, why, why_len);
+    return ok ? 1 : -1;
+}
+
+bool zcl_devloop_cycle_state_write(const char *repo_root,
+                                   const char *cycle_json, size_t cycle_len,
+                                   char *why, size_t why_len)
+{
+    if (why && why_len)
+        why[0] = 0;
+    int seal_fd = repo_root && repo_root[0] && cycle_json && cycle_len > 0
+        ? cycle_seal_lock_open(repo_root) : -1;
+    if (seal_fd < 0) {
+        set_why(why, why_len, "cycle_state_seal_lock_invalid");
+        return false;
+    }
+    int routed = cycle_state_write_via_ring(repo_root, cycle_json, cycle_len,
+                                            why, why_len);
+    bool ok = routed == 1 ||
+        (routed == 0 &&
+         cycle_state_write_impl(repo_root, 0, cycle_json, cycle_len,
+                                CYCLE_WRITE_MIRROR, why, why_len));
     close(seal_fd);
     return ok;
 }
