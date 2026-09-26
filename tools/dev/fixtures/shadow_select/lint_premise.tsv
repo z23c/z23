@@ -17,6 +17,11 @@
 #   combined run with that binary equal the rows above on all 28 entries
 #   (196 of 196). always_ms=2100 is the measured --global part with
 #   driver-recorded oracle verdicts (max of three cold-cache runs, 2.06 s).
+#   Verified 2026-09-26 against the lane-head binary (d8d77bbea, which adds
+#   the symlinked-document fail-closed fix): z23-lint sha256
+#   b96968f925d4ef2879594ca6881d4a5b11145b4765972a711a81c1cd8062fecc, built
+#   byte-identical on both hosts, reproduces every check-doc-claims row on
+#   all 28 entries (28 of 28, build/scratch/recount.log on the lane host).
 # One run per entry and gate, measured 2026-09-25:
 #   z23-lint select --dry --base=<base> --root=<candidate> \
 #     --objects=<repo> --scratch=<dir> --depth=1024 --gate=<gate>
