@@ -335,6 +335,132 @@ static bool cin_depfile_keeps_missing(const char *live, const char *reference)
            live_present == 1 && ref_present == 1;
 }
 
+/* The unit that read `dep` is a forward include of the unit AND a reverse
+ * include of `dep` — the second is what code.impact asks when `dep` changes.
+ * Both must hold whether or not `dep` is still in the checkout. A vanished
+ * prerequisite keeps its edge and refuses a complete answer: `want` is
+ * COMPLETE only while every named prerequisite exists. */
+static bool cin_impact_edge(const char *root, const char *dep,
+                            enum codeindex_include_dim want)
+{
+    struct codeindex *index = codeindex_open(root);
+    if (!index) return false;
+    char rows[8][256];
+    bool forward = false, reverse = false;
+    int count = codeindex_includes_of_file(index, cin_units[0], rows, 8);
+    for (int i = 0; i < count; i++)
+        forward = forward || strcmp(rows[i], dep) == 0;
+    enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+    count = codeindex_reverse_includes(index, dep, rows, 8, &dim);
+    for (int i = 0; i < count; i++)
+        reverse = reverse || strcmp(rows[i], cin_units[0]) == 0;
+    codeindex_close(index);
+    printf("impact_edge dep=%s forward=%d reverse=%d dim=%s\n", dep, forward,
+           reverse, codeindex_include_dim_label(dim));
+    return forward && reverse && dim == want;
+}
+
+static bool cin_vanished_edge(const char *root, const char *dep)
+{
+    return cin_impact_edge(root, dep, CODEINDEX_INCLUDE_DIM_TRUNCATED);
+}
+
+/* A depfile naming `dep` for alpha.c, written to `depfile`. */
+static bool cin_write_depfile(const char *root, const char *depfile,
+                              const char *dep)
+{
+    char body[512];
+    int n = snprintf(body, sizeof(body),
+                     "build/fixture.o: lib/net/src/alpha.c %s\n", dep);
+    return n > 0 && (size_t)n < sizeof(body) &&
+           cin_write_file(root, depfile, body);
+}
+
+static bool cin_unlink(const char *root, const char *rel)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", root, rel);
+    return n > 0 && (size_t)n < sizeof(path) && remove(path) == 0;
+}
+
+/* Header existed at compile time, then was deleted. The deletion must
+ * still impact alpha.c, on the incremental open and on a cold rebuild. */
+static bool cin_deleted_header(const char *root)
+{
+    static const char dep[] = "lib/net/include/net/deleted_wire.h";
+    return cin_write_file(root, dep, "#define DELETED_WIRE 1\n") &&
+           cin_write_depfile(root, "build/deleted.d", dep) &&
+           cin_force_cold(root) &&
+           cin_impact_edge(root, dep, CODEINDEX_INCLUDE_DIM_COMPLETE) &&
+           cin_unlink(root, dep) && cin_vanished_edge(root, dep) &&
+           cin_force_cold(root) && cin_vanished_edge(root, dep);
+}
+
+/* Header renamed after the compile: the depfile still names the old path, so
+ * the rename impacts alpha.c through it until the next compile. */
+static bool cin_renamed_header(const char *root)
+{
+    static const char old_dep[] = "lib/net/include/net/old_frame.h";
+    static const char new_dep[] = "lib/net/include/net/new_frame.h";
+    char from[PATH_MAX], to[PATH_MAX];
+    int fn = snprintf(from, sizeof(from), "%s/%s", root, old_dep);
+    int tn = snprintf(to, sizeof(to), "%s/%s", root, new_dep);
+    return fn > 0 && (size_t)fn < sizeof(from) && tn > 0 &&
+           (size_t)tn < sizeof(to) &&
+           cin_write_file(root, old_dep, "#define FRAME 1\n") &&
+           cin_write_depfile(root, "build/renamed.d", old_dep) &&
+           rename(from, to) == 0 && cin_force_cold(root) &&
+           cin_vanished_edge(root, old_dep);
+}
+
+/* A generated header the depfile names but this checkout has not generated. */
+static bool cin_missing_generated(const char *root)
+{
+    static const char dep[] =
+        "contexts/wallet/views/include/views/wallet_templates_gen.h";
+    return cin_write_depfile(root, "build/generated.d", dep) &&
+           cin_force_cold(root) && cin_vanished_edge(root, dep);
+}
+
+/* The live epoch of an epoch-managed object root names a vanished path. The
+ * pointer selects the live graph; it never licenses dropping its edges. */
+static bool cin_stale_epoch(const char *root)
+{
+    static const char epoch[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    static const char dep[] = "lib/base/include/base/retired_layout.h";
+    char depfile[PATH_MAX], pointer[128];
+    int dn = snprintf(depfile, sizeof(depfile), "build/obj/epochs/%s/unit.d",
+                      epoch);
+    int pn = snprintf(pointer, sizeof(pointer), "%s\n", epoch);
+    return dn > 0 && (size_t)dn < sizeof(depfile) && pn > 0 &&
+           (size_t)pn < sizeof(pointer) &&
+           cin_write_depfile(root, depfile, dep) &&
+           cin_write_file(root, "build/obj/.current-epoch", pointer) &&
+           cin_force_cold(root) && cin_vanished_edge(root, dep);
+}
+
+/* Every vanished prerequisite stays an impact edge. Runs on its own fixture so
+ * the extra depfiles never reach the live/reference comparison. */
+static int cin_vanished_cases(const char *workspace)
+{
+    int failures = 0;
+    char root[PATH_MAX];
+    int n = snprintf(root, sizeof(root), "%s/vanished", workspace);
+    bool ready = n > 0 && (size_t)n < sizeof(root) && cin_seed(root);
+    CIN_CHECK("a vanished-prerequisite fixture is ready", ready);
+    if (!ready) return failures;
+    CIN_CHECK("a deleted header still impacts the unit that read it",
+              cin_deleted_header(root));
+    CIN_CHECK("a renamed header's old path still impacts the unit",
+              cin_renamed_header(root));
+    CIN_CHECK("a missing generated prerequisite still impacts the unit",
+              cin_missing_generated(root));
+    CIN_CHECK("the live epoch keeps an edge to a vanished path",
+              cin_stale_epoch(root));
+    return failures;
+}
+
 static bool cin_file_has(const char *path, const char *needle)
 {
     FILE *file = fopen(path, "r");
@@ -569,6 +695,7 @@ int test_codeindex_incremental(void)
     failures += cin_scope_refusals();
     failures += cin_identity_reread();
     failures += cin_depfile_cases(live, reference);
+    failures += cin_vanished_cases(workspace);
 
     /* One file. The narrowest incremental case and the one the dev loop
      * actually runs; the spare it leaves behind is what makes the NEXT
