@@ -861,6 +861,8 @@ Z23_FLAG("ZCL_FAST_CHANGED_FILES_ONLY", "env_build", "0", "-",
           "first use tools/agent_fast_ci.sh:225; documented at docs/AGENT_API.md:1279: ZCL_FAST_CHANGED_FILES_ONLY=1 when an explicit changed-file list is exact,")
 Z23_FLAG("ZCL_FAST_COMPILE", "env_build", "changed", "-",
           "first use tools/agent_fast_ci.sh:16; documented at docs/AGENT_API.md:1276: ZCL_FAST_COMPILE=dev to force full fast-compile,")
+Z23_FLAG("ZCL_FAST_COMPILE_SCOPE_PROOF", "env_build", "-", "-",
+          "undocumented; first use tools/agent_fast_ci.sh:1346")
 Z23_FLAG("ZCL_FAST_DEV_NODE_BIN", "env_build", "build/bin/z23-dev", "-",
           "undocumented; first use tools/agent_fast_ci.sh:33")
 Z23_FLAG("ZCL_FAST_IMPACT_RULES_FILE", "env_build", "-", "-",
