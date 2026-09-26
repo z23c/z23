@@ -820,15 +820,10 @@ static void zpub_commit_finish(
     zpub_bundle_free(bundle);
 }
 
-void zcl_native_handle_zcode_publish_commit(
+/* Verify acceptance, stage the release, and write it into the store. */
+static void zpub_commit_local(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    if (!request || !reply) return;
-    if (zpub_route_live_owner(
-            request, "zcode_publish_commit_owned",
-            "LIVE_PUBLISH_COMMIT_FAILED", "publish", "zcode.publish.commit",
-            reply))
-        return;
     struct zpub_accepted_bundle bundle;
     if (!zpub_normalize(request, reply, &bundle) ||
         !zpub_find_lane_commit(request, reply, &bundle) ||
@@ -855,4 +850,94 @@ void zcl_native_handle_zcode_publish_commit(
 
     zpub_commit_finish(reply, &bundle, &job_binding, release_id,
                        release_wire, release_wire_len, &commit_reply);
+}
+
+#ifdef ZCL_TESTING
+static void (*g_zpub_test_before_lease)(const char *store_datadir);
+
+void zcl_native_zcode_publish_test_before_lease(
+    void (*hook)(const char *store_datadir))
+{
+    g_zpub_test_before_lease = hook;
+}
+#endif
+
+/* Acquire <spelling>/node.db, where spelling is the caller's own when this
+ * process already holds the lease under it (so the hold is shared rather
+ * than contended), and the canonical directory otherwise. */
+static struct node_db *zpub_store_lease_acquire(const char *store_arg,
+                                                const char *store_dir)
+{
+    char raw_db[ZPUB_PATH_MAX];
+    int raw_n = snprintf(raw_db, sizeof(raw_db), "%s/node.db", store_arg);
+    bool held_raw = raw_n > 0 && (size_t)raw_n < sizeof(raw_db) &&
+        node_db_owner_lease_probe(raw_db) == NODE_DB_OWNER_LEASE_OWNED_SELF;
+    struct node_db *lease =
+        zcl_calloc(1, sizeof(*lease), "zcode.publish.store_lease");
+    if (!lease) return NULL;
+    lease->lifetime_owner_lease_slot = -1;
+    int n = snprintf(lease->path, sizeof(lease->path), "%s/node.db",
+                     held_raw ? store_arg : store_dir);
+    if (n > 0 && (size_t)n < sizeof(lease->path) &&
+        node_db_owner_lease_acquire(lease, true))
+        return lease;
+    free(lease);
+    return NULL;
+}
+
+/* No running node holds the package store, so this process writes it. Hold
+ * the store datadir's node.db owner lease for the whole write: a node that
+ * starts meanwhile cannot open the store and build an index that misses
+ * this package, and a node that won the race first is refused here instead
+ * of written behind. Returns false after a retryable refusal; *held is the
+ * lease to release, or NULL when none was needed. */
+static bool zpub_store_lease_take(
+    const struct zcl_command_request *request, struct node_db **held,
+    struct zcl_command_reply *reply)
+{
+    *held = NULL;
+    const char *store_arg = zdev_str(request->input, "datadir");
+    char store_dir[ZPUB_PATH_MAX];
+    /* A missing store directory is refused by normalization; the running
+     * node's own store needs no second lease. */
+    if (!store_arg || !store_arg[0] ||
+        !platform_directory_canonical_real(store_arg, store_dir,
+                                           sizeof(store_dir)) ||
+        zdev_runtime_owns_ledger(store_dir) ||
+        zdev_runtime_owns_ledger(store_arg))
+        return true;
+#ifdef ZCL_TESTING
+    if (g_zpub_test_before_lease) g_zpub_test_before_lease(store_dir);
+#endif
+    *held = zpub_store_lease_acquire(store_arg, store_dir);
+    if (*held) return true;
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+        "LIVE_OWNER_PROBE_FAILED", "ownership", true, false,
+        "a running node took the package store before this command could "
+        "hold it; retry so the command goes to that node", "zcode.publish");
+    return false;
+}
+
+static void zpub_store_lease_drop(struct node_db *held)
+{
+    if (!held) return;
+    node_db_owner_lease_release(held);
+    free(held);
+}
+
+void zcl_native_handle_zcode_publish_commit(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    if (zpub_route_live_owner(
+            request, "zcode_publish_commit_owned",
+            "LIVE_PUBLISH_COMMIT_FAILED", "publish", "zcode.publish.commit",
+            reply))
+        return;
+    struct node_db *store_lease = NULL;
+    if (!zpub_store_lease_take(request, &store_lease, reply))
+        return;
+    zpub_commit_local(request, reply);
+    zpub_store_lease_drop(store_lease);
 }

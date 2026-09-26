@@ -1153,6 +1153,13 @@ void zcl_native_handle_zcode_publish_plan(
 void zcl_native_handle_zcode_publish_commit(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+#ifdef ZCL_TESTING
+/* Runs after publish commit finds no running node holding the package store
+ * and before it takes that store's owner lease, so a test can start an
+ * owner inside that window. NULL clears it. */
+void zcl_native_zcode_publish_test_before_lease(
+    void (*hook)(const char *store_datadir));
+#endif
 
 /* ── zcode.release.* — Sovereign Registry v1: sign/verify zid release
  * records (tools/command/native_zcode_release_command.c). Signing is

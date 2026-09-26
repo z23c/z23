@@ -284,6 +284,7 @@ static bool zdev_live_dispatch_response(
 {
     int64_t decode_started_us = platform_time_monotonic_us();
     struct json_value body;
+    json_init(&body);
     bool parsed = raw && json_read(&body, raw, strlen(raw)) &&
                   body.type == JSON_OBJ;
     free(raw);

@@ -65,6 +65,8 @@
 #include "vcs/zcode_task_context.h"
 #include "vcs/vcs.h"
 #include "config/boot_zcode_async_select.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
 
 #include <secp256k1.h>
 #include <dirent.h>
@@ -9964,6 +9966,198 @@ static int test_zd_publish_routes_to_store_owner(void)
     zd_route_release(store_child, store_release);
     return failures;
 }
+
+/* An owner lease the harness cannot probe is a refusal, never a guess that
+ * the store is free to write. */
+static int test_zd_publish_owner_probe_error(void)
+{
+    int failures = 0;
+    struct json_value input;
+    json_init(&input);
+    TEST("zcode_dev: unreadable store ownership refuses publish") {
+        char workspace[512], store[512], acceptance[512], link[600];
+        test_make_tmpdir(workspace, sizeof(workspace), "zcode_dev",
+                         "probe-workspace");
+        test_make_tmpdir(store, sizeof(store), "zcode_dev", "probe-store");
+        test_make_tmpdir(acceptance, sizeof(acceptance), "zcode_dev",
+                         "probe-acceptance");
+        (void)snprintf(link, sizeof(link), "%s/node.db", store);
+        ASSERT(symlink(acceptance, link) == 0);
+        ASSERT_EQ(node_db_owner_lease_probe(link),
+                  NODE_DB_OWNER_LEASE_PROBE_ERROR);
+        zd_route_input(&input, workspace, store, acceptance);
+        node_rpc_client_set_test_hook(zd_route_rpc_hook);
+        zd_route_answer = "{\"ok\":true,\"data\":{}}";
+        unsigned before = zd_route_calls;
+        for (int commit = 0; commit < 2; commit++) {
+            struct zcl_command_reply reply;
+            zd_route_run(commit != 0, &input, &reply);
+            ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+            ASSERT_STR_EQ(reply.error.code, "LIVE_OWNER_PROBE_FAILED");
+            ASSERT(reply.error.retryable);
+            zcl_command_reply_free(&reply);
+        }
+        ASSERT_EQ(zd_route_calls, before);
+        ASSERT(zd_route_path_absent(store, "zcode"));
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    zd_route_answer = NULL;
+    json_free(&input);
+    return failures;
+}
+
+/* A node that starts over the store after the ownership check and before
+ * the write wins: the one-shot commit cannot take the store's owner lease,
+ * so it refuses instead of writing behind the new node. */
+static pid_t zd_lease_race_child = -1;
+static int zd_lease_race_release = -1;
+
+static void zd_lease_race_start_owner(const char *store_datadir)
+{
+    if (zd_lease_race_child <= 0)
+        zd_lease_race_child = zd_route_hold_datadir(
+            store_datadir, &zd_lease_race_release);
+}
+
+static int test_zd_publish_store_lease(void)
+{
+    int failures = 0;
+    struct json_value input;
+    json_init(&input);
+    TEST("zcode_dev: one-shot publish commit holds the store owner lease") {
+        char workspace[512], store[512], acceptance[512], store_db[600];
+        test_make_tmpdir(workspace, sizeof(workspace), "zcode_dev",
+                         "lease-workspace");
+        test_make_tmpdir(store, sizeof(store), "zcode_dev", "lease-store");
+        test_make_tmpdir(acceptance, sizeof(acceptance), "zcode_dev",
+                         "lease-acceptance");
+        (void)snprintf(store_db, sizeof(store_db), "%s/node.db", store);
+        zd_route_input(&input, workspace, store, acceptance);
+        node_rpc_client_set_test_hook(zd_route_rpc_hook);
+        zd_route_answer = "{\"ok\":true,\"data\":{}}";
+        unsigned before = zd_route_calls;
+
+        zcl_native_zcode_publish_test_before_lease(zd_lease_race_start_owner);
+        struct zcl_command_reply raced;
+        zd_route_run(true, &input, &raced);
+        zcl_native_zcode_publish_test_before_lease(NULL);
+        ASSERT(zd_lease_race_child > 0);
+        ASSERT(raced.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(raced.error.code, "LIVE_OWNER_PROBE_FAILED");
+        ASSERT(raced.error.retryable);
+        zcl_command_reply_free(&raced);
+        ASSERT(zd_route_path_absent(store, "zcode"));
+        zd_route_release(zd_lease_race_child, zd_lease_race_release);
+        zd_lease_race_child = -1;
+        zd_lease_race_release = -1;
+
+        /* Without the race the same commit runs here, refuses the
+         * unaccepted lane, and gives the lease back. */
+        struct zcl_command_reply local;
+        zd_route_run(true, &input, &local);
+        ASSERT(local.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(local.error.code, "LANE_NOT_ACCEPTED");
+        zcl_command_reply_free(&local);
+        ASSERT_EQ(zd_route_calls, before);
+        ASSERT_EQ(node_db_owner_lease_probe(store_db),
+                  NODE_DB_OWNER_LEASE_UNOWNED);
+        ASSERT(zd_route_path_absent(store, "zcode"));
+        PASS();
+    } _test_next:;
+    zcl_native_zcode_publish_test_before_lease(NULL);
+    zd_route_release(zd_lease_race_child, zd_lease_race_release);
+    zd_lease_race_child = -1;
+    zd_lease_race_release = -1;
+    node_rpc_client_set_test_hook(NULL);
+    zd_route_answer = NULL;
+    json_free(&input);
+    return failures;
+}
+
+static void zd_runtime_cleanup(struct db_service *svc)
+{
+    app_runtime_set_current(NULL);
+    db_service_stop(svc);
+}
+
+/* Inside a running node: the node that holds the store verifies acceptance
+ * against the named scratch ledger itself, and never relays a command for a
+ * store or ledger another node holds. */
+static int test_zd_publish_in_running_node(void)
+{
+    int failures = 0;
+    pid_t other_child = -1;
+    int other_release = -1;
+    struct node_db ndb = {0};
+    struct json_value input;
+    json_init(&input);
+    TEST("zcode_dev: running node reverifies or refuses publish routing") {
+        char workspace[512], node_dir[512], other[512], scratch[512];
+        char node_db_path[600];
+        test_make_tmpdir(workspace, sizeof(workspace), "zcode_dev",
+                         "node-workspace");
+        test_make_tmpdir(node_dir, sizeof(node_dir), "zcode_dev",
+                         "node-datadir");
+        test_make_tmpdir(other, sizeof(other), "zcode_dev", "node-other");
+        test_make_tmpdir(scratch, sizeof(scratch), "zcode_dev",
+                         "node-scratch");
+        (void)snprintf(node_db_path, sizeof(node_db_path), "%s/node.db",
+                       node_dir);
+        ASSERT(node_db_open(&ndb, node_db_path));
+        struct db_service svc __attribute__((cleanup(zd_runtime_cleanup)));
+        struct app_runtime_context runtime;
+        memset(&runtime, 0, sizeof(runtime));
+        db_service_init(&svc);
+        ASSERT(db_service_attach(&svc, &ndb));
+        ASSERT(db_service_start(&svc));
+        runtime.db_service = &svc;
+        app_runtime_set_current(&runtime);
+        other_child = zd_route_hold_datadir(other, &other_release);
+        ASSERT(other_child > 0);
+        node_rpc_client_set_test_hook(zd_route_rpc_hook);
+        zd_route_answer = "{\"ok\":true,\"data\":{}}";
+        unsigned before = zd_route_calls;
+
+        /* Store held by another node: this node must not relay. */
+        zd_route_input(&input, workspace, other, scratch);
+        for (int commit = 0; commit < 2; commit++) {
+            struct zcl_command_reply reply;
+            zd_route_run(commit != 0, &input, &reply);
+            ASSERT_STR_EQ(reply.error.code, "PUBLISH_OWNER_MISROUTED");
+            zcl_command_reply_free(&reply);
+        }
+        /* This node's store, another node's acceptance ledger. */
+        json_free(&input);
+        zd_route_input(&input, workspace, node_dir, other);
+        for (int commit = 0; commit < 2; commit++) {
+            struct zcl_command_reply reply;
+            zd_route_run(commit != 0, &input, &reply);
+            ASSERT_STR_EQ(reply.error.code, "PUBLISH_OWNER_SPLIT");
+            zcl_command_reply_free(&reply);
+        }
+        /* This node's store and a scratch acceptance ledger: the node runs
+         * the verification itself and refuses a lane never accepted. */
+        json_free(&input);
+        zd_route_input(&input, workspace, node_dir, scratch);
+        struct zcl_command_reply reverified;
+        zd_route_run(true, &input, &reverified);
+        ASSERT(reverified.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(reverified.error.code, "LANE_NOT_ACCEPTED");
+        zcl_command_reply_free(&reverified);
+        ASSERT_EQ(zd_route_calls, before);
+        ASSERT(zd_route_path_absent(node_dir, "zcode"));
+        ASSERT(zd_route_path_absent(other, "zcode"));
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    zd_route_answer = NULL;
+    json_free(&input);
+    zd_route_release(other_child, other_release);
+    app_runtime_set_current(NULL);
+    if (ndb.open) node_db_close(&ndb);
+    return failures;
+}
 #endif
 
 int test_zcode_dev_objects(void)
@@ -9971,6 +10165,9 @@ int test_zcode_dev_objects(void)
     int failures = 0;
 #if !defined(_WIN32)
     failures += test_zd_publish_routes_to_store_owner();
+    failures += test_zd_publish_owner_probe_error();
+    failures += test_zd_publish_store_lease();
+    failures += test_zd_publish_in_running_node();
 #endif
     failures += test_zd_write_scope();
     failures += test_zd_patch();
