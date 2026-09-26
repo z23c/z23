@@ -1407,11 +1407,13 @@ struct zcl_result build_fabric_attach(
                    c.receipt.receipt_id);
     out_report->disposition = BUILD_FABRIC_ATTACH_HIT;
     out_report->attach_wall_us = platform_time_monotonic_us() - c.started_us;
+    /* Runtime closure capture starts one direct ldd probe for each of the
+     * driver, backend, assembler, and verifier. None is a compiler run. */
     LOG_INFO("zcode.proof_perf",
              "schema=zcl.async_proof_perf.v1 action=%s stage=worker_attach "
              "at_unix_us=%lld executor_key=%s donor_action=%s "
              "donor_receipt=%s requester_receipt=%s input_bytes=%llu "
-             "output_bytes=%llu attach_us=%lld processes=0 "
+             "output_bytes=%llu attach_us=%lld direct_probe_launches=4 "
              "compiler_processes=0 test_processes=0 cache_hit=1 "
              "total_us=%lld",
              c.action.action_id, (long long)platform_time_realtime_us(),

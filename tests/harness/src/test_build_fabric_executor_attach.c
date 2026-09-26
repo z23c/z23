@@ -31,6 +31,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -56,6 +57,17 @@ static int att_open_fd_count(void)
     while (readdir(dir)) count++;
     closedir(dir);
     return count;
+}
+
+static bool att_cpu_us(int who, int64_t *out)
+{
+    struct rusage usage;
+    if (!out || getrusage(who, &usage) != 0) return false;
+    *out = (int64_t)usage.ru_utime.tv_sec * INT64_C(1000000) +
+           usage.ru_utime.tv_usec +
+           (int64_t)usage.ru_stime.tv_sec * INT64_C(1000000) +
+           usage.ru_stime.tv_usec;
+    return true;
 }
 
 static bool att_copy_executable(const char *from, const char *to)
@@ -317,8 +329,20 @@ static int test_bf_attach_avoids_second_compile(void)
          * key, derived from the exact bytes the executor consumed. */
         uint8_t input_bytes_root[32], key[32];
         sha3_256(att_unit, sizeof(att_unit) - 1u, input_bytes_root);
+#if defined(__linux__)
+        int64_t key_self_before, key_child_before;
+        int64_t key_self_after, key_child_after;
+        ASSERT(att_cpu_us(RUSAGE_SELF, &key_self_before));
+        ASSERT(att_cpu_us(RUSAGE_CHILDREN, &key_child_before));
+#endif
+        int64_t key_started_us = platform_time_monotonic_us();
         struct zcl_result composed = build_fabric_executor_key_compose(
             dir, &durable_a, input_bytes_root, key);
+        int64_t key_wall_us = platform_time_monotonic_us() - key_started_us;
+#if defined(__linux__)
+        ASSERT(att_cpu_us(RUSAGE_SELF, &key_self_after));
+        ASSERT(att_cpu_us(RUSAGE_CHILDREN, &key_child_after));
+#endif
         ASSERT_RESULT_OK(composed);
         ASSERT(vcs_object_has(dir, key));
 
@@ -407,9 +431,22 @@ static int test_bf_attach_avoids_second_compile(void)
 
         struct db_build_receipt receipt_b;
         struct build_fabric_attach_report report;
+#if defined(__linux__)
+        int fds_before_attach = att_open_fd_count();
+        int64_t attach_self_before, attach_child_before;
+        int64_t attach_self_after, attach_child_after;
+        ASSERT(fds_before_attach >= 0);
+        ASSERT(att_cpu_us(RUSAGE_SELF, &attach_self_before));
+        ASSERT(att_cpu_us(RUSAGE_CHILDREN, &attach_child_before));
+#endif
         struct zcl_result attached = build_fabric_attach(
             &ndb, dir, NULL, &job_b, &action_b, secret, pubkey, &receipt_b,
             &report);
+#if defined(__linux__)
+        ASSERT(att_cpu_us(RUSAGE_SELF, &attach_self_after));
+        ASSERT(att_cpu_us(RUSAGE_CHILDREN, &attach_child_after));
+        ASSERT(att_open_fd_count() == fds_before_attach);
+#endif
         ASSERT_RESULT_OK(attached);
         ASSERT_EQ(report.disposition, BUILD_FABRIC_ATTACH_HIT);
         ASSERT_EQ(report.compiler_processes, 0);
@@ -483,10 +520,21 @@ static int test_bf_attach_avoids_second_compile(void)
         ASSERT(strcmp(miss.executor_key, key_hex) != 0);
         ASSERT_EQ(att_build_work_entries(dir), entries_before);
         printf("attach cost report: physical_compile_us=%lld "
-               "attach_us=%lld restored_bytes=%llu compiler_runs=1\n",
+               "key_compose_us=%lld attach_us=%lld restored_bytes=%llu "
+               "compiler_runs=1",
                (long long)physical_wall_us,
+               (long long)key_wall_us,
                (long long)report.attach_wall_us,
                (unsigned long long)report.restored_bytes);
+#if defined(__linux__)
+        printf(" key_self_cpu_us=%lld key_child_cpu_us=%lld "
+               "attach_self_cpu_us=%lld attach_child_cpu_us=%lld",
+               (long long)(key_self_after - key_self_before),
+               (long long)(key_child_after - key_child_before),
+               (long long)(attach_self_after - attach_self_before),
+               (long long)(attach_child_after - attach_child_before));
+#endif
+        printf("\n");
 
         /* A second attach of the now-completed action refuses by name. */
         struct build_fabric_attach_report again;
