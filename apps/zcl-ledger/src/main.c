@@ -228,18 +228,25 @@ static int address_from_pubkey(const char *hex) {
     return 0;
 }
 
+static bool parse_command(int argc, char **argv, const char *name,
+                          int base_argc, bool *json) {
+    if (argc != base_argc && argc != base_argc + 1) return false;
+    if (strcmp(argv[1], name) != 0) return false;
+    if (argc == base_argc + 1 && strcmp(argv[2], "--json") != 0) return false;
+    *json = argc == base_argc + 1;
+    return true;
+}
+
 int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "address-from-pubkey") == 0)
         return address_from_pubkey(argv[2]);
-    if ((argc == 2 || argc == 3) && strcmp(argv[1], "devices") == 0 &&
-        (argc == 2 || strcmp(argv[2], "--json") == 0))
-        return list_devices(argc == 3);
-    if ((argc == 3 || argc == 4) && strcmp(argv[1], "app-info") == 0 &&
-        (argc == 3 || strcmp(argv[2], "--json") == 0))
-        return app_info(argv[argc - 1], argc == 4);
-    if ((argc == 3 || argc == 4) && strcmp(argv[1], "probe") == 0 &&
-        (argc == 3 || strcmp(argv[2], "--json") == 0))
-        return probe_info(argv[argc - 1], argc == 4);
+    bool json;
+    if (parse_command(argc, argv, "devices", 2, &json))
+        return list_devices(json);
+    if (parse_command(argc, argv, "app-info", 3, &json))
+        return app_info(argv[argc - 1], json);
+    if (parse_command(argc, argv, "probe", 3, &json))
+        return probe_info(argv[argc - 1], json);
     if (argc == 3 && strcmp(argv[1], "quit") == 0)
         return quit_app(argv[2]);
     fprintf(stderr, "Usage: %s address-from-pubkey COMPRESSED_PUBKEY_HEX\n"

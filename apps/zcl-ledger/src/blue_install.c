@@ -36,6 +36,23 @@ static void put_be32(uint8_t *output, uint32_t value) {
     output[3] = (uint8_t)value;
 }
 
+static int exchange_body(installer *device, uint8_t ins,
+                         const uint8_t *response, size_t response_length,
+                         uint8_t *body, size_t body_capacity, size_t *body_length) {
+    if (device->secure) {
+        if (blue_secure_unwrap(&device->channel, response, response_length,
+                               body, body_capacity, body_length) < 0) {
+            fprintf(stderr, "Invalid secure-channel reply to command %02x.\n", ins);
+            return -1;
+        }
+    } else {
+        if (response_length > body_capacity) return -1;
+        memcpy(body, response, response_length);
+        *body_length = response_length;
+    }
+    return 0;
+}
+
 static int exchange(installer *device, uint8_t ins, uint8_t p1,
                     const uint8_t *data, size_t length,
                     uint8_t *body, size_t body_capacity, size_t *body_length) {
@@ -65,18 +82,8 @@ static int exchange(installer *device, uint8_t ins, uint8_t p1,
         return -1;
     }
     response_length -= 2;
-    if (device->secure) {
-        if (blue_secure_unwrap(&device->channel, response, response_length,
-                               body, body_capacity, body_length) < 0) {
-            fprintf(stderr, "Invalid secure-channel reply to command %02x.\n", ins);
-            return -1;
-        }
-    } else {
-        if (response_length > body_capacity) return -1;
-        memcpy(body, response, response_length);
-        *body_length = response_length;
-    }
-    return 0;
+    return exchange_body(device, ins, response, response_length,
+                         body, body_capacity, body_length);
 }
 
 static int no_reply(installer *device, uint8_t ins, uint8_t p1,
@@ -127,6 +134,34 @@ static int parse_device_certificate(const uint8_t *cert, size_t length,
     return 0;
 }
 
+/* Reads the device issuer and ephemeral certificates, verifies the issuer's
+ * signature over both nonces and the device ephemeral key, and acknowledges.
+ * On success peer holds the device ephemeral public key. */
+static int verify_device_certificates(installer *device, const uint8_t nonce[8],
+                                      const uint8_t device_nonce[8],
+                                      uint8_t peer[65]) {
+    uint8_t first[256], second[256], issuer[65], message[82];
+    size_t first_length = 0, second_length = 0, signature_length = 0;
+    const uint8_t *signature = NULL;
+    if (exchange(device, 0x52, 0, NULL, 0, first, sizeof first,
+                 &first_length) < 0 ||
+        exchange(device, 0x52, 0x80, NULL, 0, second, sizeof second,
+                 &second_length) < 0 ||
+        parse_device_certificate(first, first_length, issuer,
+                                 &signature, &signature_length) < 0 ||
+        parse_device_certificate(second, second_length, peer,
+                                 &signature, &signature_length) < 0)
+        return -1;
+    message[0] = 0x12;
+    memcpy(message + 1, device_nonce, 8);
+    memcpy(message + 9, nonce, 8);
+    memcpy(message + 17, peer, 65);
+    if (blue_verify(issuer, message, sizeof message,
+                    signature, signature_length) < 0 ||
+        no_reply(device, 0x53, 0, NULL, 0) < 0) return -1;
+    return 0;
+}
+
 static int establish_channel(installer *device) {
     uint8_t target[4], nonce[8], reply[256], device_nonce[8];
     size_t length = 0;
@@ -148,25 +183,9 @@ static int establish_channel(installer *device) {
         send_certificate(device, root, ephemeral, 0x80,
                          ephemeral_prefix, sizeof ephemeral_prefix) < 0)
         goto done;
-    uint8_t first[256], second[256], issuer[65], peer[65], message[82];
-    size_t first_length = 0, second_length = 0, signature_length = 0;
-    const uint8_t *signature = NULL;
-    if (exchange(device, 0x52, 0, NULL, 0, first, sizeof first,
-                 &first_length) < 0 ||
-        exchange(device, 0x52, 0x80, NULL, 0, second, sizeof second,
-                 &second_length) < 0 ||
-        parse_device_certificate(first, first_length, issuer,
-                                 &signature, &signature_length) < 0 ||
-        parse_device_certificate(second, second_length, peer,
-                                 &signature, &signature_length) < 0)
+    uint8_t peer[65];
+    if (verify_device_certificates(device, nonce, device_nonce, peer) < 0)
         goto done;
-    message[0] = 0x12;
-    memcpy(message + 1, device_nonce, 8);
-    memcpy(message + 9, nonce, 8);
-    memcpy(message + 17, peer, 65);
-    if (blue_verify(issuer, message, sizeof message,
-                    signature, signature_length) < 0 ||
-        no_reply(device, 0x53, 0, NULL, 0) < 0) goto done;
     uint8_t secret[32];
     if (blue_ecdh(ephemeral, peer, secret) == 0 &&
         blue_secure_init(&device->channel, secret) == 0) {
@@ -274,6 +293,42 @@ static int read_binary(const char *path, uint8_t **data, size_t *length) {
     return result;
 }
 
+static int open_blue(const char *path) {
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    struct hidraw_devinfo info;
+    if (fd < 0 || ioctl(fd, HIDIOCGRAWINFO, &info) < 0 ||
+        info.vendor != 0x2c97 || info.product != 0) {
+        fputs("The selected interface is not a Ledger Blue.\n", stderr);
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int run_installer(installer *device, bool delete_app, bool channel_only,
+                         const uint8_t *code, size_t code_length) {
+    int result = establish_channel(device);
+    if (result == 0) result = verify_secure_version(device);
+    if (result == 0 && delete_app) {
+        static const uint8_t delete_command[] = {
+            0x0c, 9, 'Z','C','L',' ','P','r','o','b','e'
+        };
+        result = no_reply(device, 0, 0, delete_command,
+                          sizeof delete_command);
+    } else if (result == 0 && !channel_only) {
+        puts("Secure channel established; loading ZCL Probe.");
+        result = install(device, code, code_length);
+    }
+    return result;
+}
+
+static void report_result(int result, bool delete_app, bool channel_only) {
+    if (result == 0 && delete_app) puts("ZCL Probe delete command accepted by Ledger Blue.");
+    else if (result == 0 && channel_only) puts("Ledger Blue secure channel established.");
+    else if (result == 0) puts("ZCL Probe install command accepted by Ledger Blue.");
+    else fputs("Ledger Blue installation failed. Check its screen.\n", stderr);
+}
+
 int main(int argc, char **argv) {
     bool channel_only = argc == 3 && strcmp(argv[2], "--channel-only") == 0;
     bool delete_app = argc == 3 && strcmp(argv[2], "--delete") == 0;
@@ -288,32 +343,15 @@ int main(int argc, char **argv) {
         fputs("Expected the reviewed, 64-byte-aligned ZCL Probe binary.\n", stderr);
         return 1;
     }
-    int fd = open(argv[1], O_RDWR | O_CLOEXEC);
-    struct hidraw_devinfo info;
-    if (fd < 0 || ioctl(fd, HIDIOCGRAWINFO, &info) < 0 ||
-        info.vendor != 0x2c97 || info.product != 0) {
-        fputs("The selected interface is not a Ledger Blue.\n", stderr);
-        if (fd >= 0) close(fd);
+    int fd = open_blue(argv[1]);
+    if (fd < 0) {
         free(code);
         return 1;
     }
     installer device = {.fd = fd};
-    int result = establish_channel(&device);
-    if (result == 0) result = verify_secure_version(&device);
-    if (result == 0 && delete_app) {
-        static const uint8_t delete_command[] = {
-            0x0c, 9, 'Z','C','L',' ','P','r','o','b','e'
-        };
-        result = no_reply(&device, 0, 0, delete_command,
-                          sizeof delete_command);
-    } else if (result == 0 && !channel_only) {
-        puts("Secure channel established; loading ZCL Probe.");
-        result = install(&device, code, code_length);
-    }
-    if (result == 0 && delete_app) puts("ZCL Probe delete command accepted by Ledger Blue.");
-    else if (result == 0 && channel_only) puts("Ledger Blue secure channel established.");
-    else if (result == 0) puts("ZCL Probe install command accepted by Ledger Blue.");
-    else fputs("Ledger Blue installation failed. Check its screen.\n", stderr);
+    int result = run_installer(&device, delete_app, channel_only,
+                               code, code_length);
+    report_result(result, delete_app, channel_only);
     OPENSSL_cleanse(&device.channel, sizeof device.channel);
     close(fd);
     free(code);

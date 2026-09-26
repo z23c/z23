@@ -76,6 +76,18 @@ int blue_verify(const uint8_t public_key[65], const uint8_t *message,
     return result;
 }
 
+/* Loads the private scalar into *scalar (owned and cleared by the caller) and
+ * computes shared = scalar * peer, rejecting off-curve and infinity points. */
+static int ecdh_multiply(EVP_PKEY *local, const uint8_t peer[65],
+                         const EC_GROUP *group, BN_CTX *ctx, EC_POINT *point,
+                         EC_POINT *shared, BIGNUM **scalar) {
+    return EVP_PKEY_get_bn_param(local, OSSL_PKEY_PARAM_PRIV_KEY, scalar) > 0 &&
+        EC_POINT_oct2point(group, point, peer, 65, ctx) > 0 &&
+        EC_POINT_is_on_curve(group, point, ctx) == 1 &&
+        EC_POINT_mul(group, shared, NULL, point, *scalar, ctx) > 0 &&
+        EC_POINT_is_at_infinity(group, shared) == 0 ? 0 : -1;
+}
+
 int blue_ecdh(EVP_PKEY *local, const uint8_t peer[65], uint8_t secret[32]) {
     if (!local || !peer || peer[0] != 4 || !secret) return -1;
     BIGNUM *scalar = NULL;
@@ -85,11 +97,7 @@ int blue_ecdh(EVP_PKEY *local, const uint8_t peer[65], uint8_t secret[32]) {
     EC_POINT *shared = group ? EC_POINT_new(group) : NULL;
     uint8_t compressed[33];
     int result = ctx && group && point && shared &&
-        EVP_PKEY_get_bn_param(local, OSSL_PKEY_PARAM_PRIV_KEY, &scalar) > 0 &&
-        EC_POINT_oct2point(group, point, peer, 65, ctx) > 0 &&
-        EC_POINT_is_on_curve(group, point, ctx) == 1 &&
-        EC_POINT_mul(group, shared, NULL, point, scalar, ctx) > 0 &&
-        EC_POINT_is_at_infinity(group, shared) == 0 &&
+        ecdh_multiply(local, peer, group, ctx, point, shared, &scalar) == 0 &&
         EC_POINT_point2oct(group, shared, POINT_CONVERSION_COMPRESSED,
                            compressed, sizeof compressed, ctx) == sizeof compressed &&
         SHA256(compressed, sizeof compressed, secret) ? 0 : -1;
@@ -197,13 +205,32 @@ int blue_secure_wrap(blue_secure_channel *channel, const uint8_t *plain,
     return result;
 }
 
+static bool unwrap_length_invalid(size_t input_length, size_t capacity) {
+    return input_length < 30 || (input_length - 14) % 16 ||
+        input_length - 14 > capacity || input_length - 14 > 240;
+}
+
+/* Strips the 0x80 00.. padding from the decrypted block and, only on success,
+ * reports the plaintext length and advances both chaining IVs. */
+static int unwrap_finish(blue_secure_channel *channel, const uint8_t *plain,
+                         size_t ciphertext_length,
+                         const uint8_t last_ciphertext[16], const uint8_t *mac,
+                         size_t *plain_length) {
+    size_t length = ciphertext_length;
+    while (length && plain[length - 1] == 0) --length;
+    if (!length || plain[length - 1] != 0x80) return -1;
+    *plain_length = length - 1;
+    memcpy(channel->enc_iv, last_ciphertext, 16);
+    memcpy(channel->mac_iv, mac + ciphertext_length - 16, 16);
+    return 0;
+}
+
 int blue_secure_unwrap(blue_secure_channel *channel, const uint8_t *input,
                        size_t input_length, uint8_t *plain, size_t capacity,
                        size_t *plain_length) {
     if (!channel || !input || !plain || !plain_length) return -1;
     if (!input_length) { *plain_length = 0; return 0; }
-    if (input_length < 30 || (input_length - 14) % 16 ||
-        input_length - 14 > capacity || input_length - 14 > 240) return -1;
+    if (unwrap_length_invalid(input_length, capacity)) return -1;
     size_t ciphertext_length = input_length - 14;
     uint8_t mac[240], last_ciphertext[16];
     memcpy(last_ciphertext, input + ciphertext_length - 16, 16);
@@ -214,16 +241,9 @@ int blue_secure_unwrap(blue_secure_channel *channel, const uint8_t *input,
         result = -1;
     if (result == 0) result = aes_cbc(channel->enc_key, channel->enc_iv,
                                       input, ciphertext_length, plain, false);
-    if (result == 0) {
-        size_t length = ciphertext_length;
-        while (length && plain[length - 1] == 0) --length;
-        if (!length || plain[length - 1] != 0x80) result = -1;
-        else {
-            *plain_length = length - 1;
-            memcpy(channel->enc_iv, last_ciphertext, 16);
-            memcpy(channel->mac_iv, mac + ciphertext_length - 16, 16);
-        }
-    }
+    if (result == 0)
+        result = unwrap_finish(channel, plain, ciphertext_length,
+                               last_ciphertext, mac, plain_length);
     if (result < 0) OPENSSL_cleanse(plain, capacity);
     OPENSSL_cleanse(mac, sizeof mac);
     return result;

@@ -59,11 +59,8 @@ static int transfer(int fd, short events, uint8_t *buffer, size_t len,
     return count == (ssize_t)len ? 0 : -1;
 }
 
-int ledger_hid_exchange_timeout(int fd, const uint8_t *apdu, size_t apdu_len,
-                                uint8_t *response, size_t response_cap,
-                                size_t *response_len, int timeout_ms) {
-    if (fd < 0 || !apdu || !apdu_len || apdu_len > UINT16_MAX ||
-        !response || !response_len || response_cap < 2 || timeout_ms < 1) return -1;
+static int send_apdu(int fd, const uint8_t *apdu, size_t apdu_len,
+                     int timeout_ms) {
     uint8_t report[LEDGER_HID_REPORT_SIZE + 1] = {0};
     uint16_t sequence = 0;
     size_t offset = 0;
@@ -76,8 +73,14 @@ int ledger_hid_exchange_timeout(int fd, const uint8_t *apdu, size_t apdu_len,
         if (sequence == UINT16_MAX) return -1;
         ++sequence;
     }
-    sequence = 0;
-    offset = 0;
+    return 0;
+}
+
+static int recv_response(int fd, uint8_t *response, size_t response_cap,
+                         size_t *response_len, int timeout_ms) {
+    uint8_t report[LEDGER_HID_REPORT_SIZE + 1] = {0};
+    uint16_t sequence = 0;
+    size_t offset = 0;
     size_t declared = 0;
     do {
         if (transfer(fd, POLLIN, report, LEDGER_HID_REPORT_SIZE,
@@ -97,6 +100,15 @@ int ledger_hid_exchange_timeout(int fd, const uint8_t *apdu, size_t apdu_len,
     } while (offset < declared);
     *response_len = declared;
     return 0;
+}
+
+int ledger_hid_exchange_timeout(int fd, const uint8_t *apdu, size_t apdu_len,
+                                uint8_t *response, size_t response_cap,
+                                size_t *response_len, int timeout_ms) {
+    if (fd < 0 || !apdu || !apdu_len || apdu_len > UINT16_MAX ||
+        !response || !response_len || response_cap < 2 || timeout_ms < 1) return -1;
+    if (send_apdu(fd, apdu, apdu_len, timeout_ms) < 0) return -1;
+    return recv_response(fd, response, response_cap, response_len, timeout_ms);
 }
 
 int ledger_hid_exchange(int fd, const uint8_t *apdu, size_t apdu_len,
