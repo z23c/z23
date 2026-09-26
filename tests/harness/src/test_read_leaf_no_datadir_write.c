@@ -202,6 +202,11 @@ static const struct rlw_leaf g_rlw_leaves[] = {
      * leaves alone. */
     { "zcode.work.show", zcl_native_handle_zcode_work_status,
       "workspace", RLW_DATADIR_VALUE, "work", RLW_ZID_PUBKEY, NULL },
+    /* A pull receipt is read from <datadir>/zcode by root. The one-shot
+     * read never opens the datadir package store; the fixture holds no
+     * receipt, so the answer is WORK_RECEIPT_NOT_FOUND and nothing moves. */
+    { "zcode.work.receipt", zcl_native_handle_zcode_work_receipt,
+      "receipt_root", RLW_ZID_PUBKEY, NULL, NULL, NULL },
     { "story.focus", zcl_native_handle_story_focus,
       "work", RLW_ZID_PUBKEY, NULL, NULL, NULL },
     { "story.show", zcl_native_handle_story_show,
