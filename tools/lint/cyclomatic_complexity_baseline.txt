@@ -709,7 +709,7 @@ contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_adm
 contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_export:21
 contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_verify_wires:22
 contexts/commons/modules/vcs/src/zcode_task_index.c:index_app_run_valid:39
-contexts/commons/modules/vcs/src/zcode_task_index.c:index_consider_object:45
+contexts/commons/modules/vcs/src/zcode_task_index.c:index_consider_object:39
 contexts/commons/modules/vcs/src/zcode_task_index.c:index_derive_states:66
 contexts/commons/modules/vcs/src/zcode_task_index.c:index_review_valid:16
 contexts/commons/modules/vcs/src/zcode_task_index.c:vcs_zcode_task_index_build:19
