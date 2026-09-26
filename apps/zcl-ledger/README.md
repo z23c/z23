@@ -56,6 +56,27 @@ The optional [user controlled Blue CA](BLUE_CA.md) can sign reviewed apps
 with a locally held key. It changes the device's trust configuration and is
 documented separately from the unsigned diagnostic apps.
 
+## Offline Sapling transaction review
+
+`zcl-tx-review` parses a raw ZCL Sapling-v4 transaction file without opening
+USB. It reports transparent input and output counts, total public output
+value, Sapling spend and output counts, Sprout JoinSplit count, value balance,
+lock time, and expiry height. The parser requires canonical CompactSize
+lengths, checks public value ranges, bounds all arrays and scripts, and
+rejects trailing or truncated bytes.
+
+```sh
+build/zcl-ledger/zcl-tx-review --json transaction.bin
+```
+
+The JSON fields `shielded_details_verified` and `signing_ready` are always
+`false`. Sapling output recipients and amounts are encrypted in the wire
+transaction; this structural parser does not decrypt them or verify proofs,
+signatures, ownership, fee, or consensus validity. It has no key access and
+does not send anything to the Blue. Its portable C23 core compiles for the
+Blue ARM target, but no Blue app with transaction signing has been installed
+or tested.
+
 The [ZCL Fixture](device-blue-fixture/README.md) tests an exact public-key
 reply and host address encoding without touching the device seed. Run
 `zcl-ledger fixture-address --json /dev/hidrawN` while that app is open.
