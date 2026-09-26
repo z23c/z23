@@ -440,6 +440,18 @@ void st_group_merge(struct st_group_result *into,
     into->pairs_failed += !g->ok;
 }
 
+/* Protocol B's first derivation (wall, thread CPU) and its memo-warm
+ * repeat. */
+static void st_sample_b(struct st_totals *t, const struct st_outcome *b)
+{
+    st_sample(&t->us_b, b->us);
+    st_sample(&t->cpu_b, b->cpu_us);
+    if (b->warm_us) {
+        st_sample(&t->warm_b, b->warm_us);
+        st_sample(&t->warm_cpu_b, b->warm_cpu_us);
+    }
+}
+
 /* Per-snapshot coverage: every action has a root or an explicit MISS. */
 void st_snap_account(struct st_totals *t, const struct st_snap *s,
                             FILE *out)
@@ -454,7 +466,7 @@ void st_snap_account(struct st_totals *t, const struct st_snap *s,
         else
             st_reason_add(&t->miss_snap_a, u->a.reason);
         if (u->b.state == ST_ROOT)
-            st_sample(&t->us_b, u->b.us);
+            st_sample_b(t, &u->b);
         else
             st_reason_add(&t->miss_snap_b, u->b.reason);
         if (u->pp_us)
@@ -595,6 +607,15 @@ void st_summary_totals(FILE *s, const char *set, struct st_totals *t)
             t->us_b.n, (long long)st_pct(&t->us_b, 50),
             (long long)st_pct(&t->us_b, 95), (long long)st_sum(&t->us_pp),
             (long long)st_pct(&t->us_pp, 50), (long long)st_pct(&t->us_pp, 95));
+    fprintf(s, "%s derive_cost B first wall p50=%lld p95=%lld cpu p50=%lld "
+            "p95=%lld | warm n=%zu wall p50=%lld p95=%lld cpu p50=%lld "
+            "p95=%lld\n", set, (long long)st_pct(&t->us_b, 50),
+            (long long)st_pct(&t->us_b, 95), (long long)st_pct(&t->cpu_b, 50),
+            (long long)st_pct(&t->cpu_b, 95), t->warm_b.n,
+            (long long)st_pct(&t->warm_b, 50),
+            (long long)st_pct(&t->warm_b, 95),
+            (long long)st_pct(&t->warm_cpu_b, 50),
+            (long long)st_pct(&t->warm_cpu_b, 95));
 }
 
 
@@ -620,6 +641,9 @@ void st_totals_free(struct st_totals *t)
     free(t->us_a.v);
     free(t->us_b.v);
     free(t->us_pp.v);
+    free(t->cpu_b.v);
+    free(t->warm_b.v);
+    free(t->warm_cpu_b.v);
     memset(t, 0, sizeof(*t));
 }
 

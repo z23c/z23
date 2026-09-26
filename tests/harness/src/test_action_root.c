@@ -45,13 +45,16 @@
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
+#include "platform/time_compat.h"
 #include "util/spawn.h"
 #include "vcs/build_action.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static int g_failures;
@@ -895,6 +898,55 @@ static void test_key_driver_facts(struct fx *x)
              "start with an input, misses", ok);
 }
 
+/* CPU of this thread plus every reaped child (the driver queries), us. */
+static int64_t fx_cpu_us(void)
+{
+    struct timespec ts = {0};
+    struct rusage kids = {0};
+    (void)clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    (void)getrusage(RUSAGE_CHILDREN, &kids);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000 +
+           ((int64_t)kids.ru_utime.tv_sec + kids.ru_stime.tv_sec) * 1000000 +
+           kids.ru_utime.tv_usec + kids.ru_stime.tv_usec;
+}
+
+static int fx_i64_cmp(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+#define FX_COST_N 25
+
+/* Extraction cost of the hot-swap key with the host's real driver: the
+ * first call re-asks the driver (the previous key used the fixture
+ * driver), the rest are the resident watcher's warm path. Printed for the
+ * lane measurement; asserted only to derive. */
+static void test_key_cost(struct fx *x)
+{
+    int64_t wall[FX_COST_N], cpu[FX_COST_N];
+    const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1";
+    bool ok = true;
+    for (size_t i = 0; i < FX_COST_N; i++) {
+        char key[65] = {0}, miss[40] = {0};
+        int64_t w = platform_time_monotonic_us(), c = fx_cpu_us();
+        ok = zcl_devloop_action_root_key(x->root, "src/unit.c", "cc", cflags,
+                                         "-shared", NULL, x->depfile, key,
+                                         miss) && ok;
+        wall[i] = platform_time_monotonic_us() - w;
+        cpu[i] = fx_cpu_us() - c;
+    }
+    qsort(wall + 1, FX_COST_N - 1, sizeof(wall[0]), fx_i64_cmp);
+    qsort(cpu + 1, FX_COST_N - 1, sizeof(cpu[0]), fx_i64_cmp);
+    size_t p50 = 1 + (FX_COST_N - 1) / 2, p95 = 1 + (FX_COST_N - 1) * 95 / 100;
+    printf("    key cost: cold wall_us=%lld cpu_us=%lld | warm n=%d wall_us "
+           "p50=%lld p95=%lld cpu_us p50=%lld p95=%lld\n",
+           (long long)wall[0], (long long)cpu[0], FX_COST_N - 1,
+           (long long)wall[p50], (long long)wall[p95], (long long)cpu[p50],
+           (long long)cpu[p95]);
+    AR_CHECK("key cost: the host driver derives a key on every call", ok);
+}
+
 /* Unreadable for this user: mode 000, or (as root, who reads anything) a
  * directory where the header was. `on` false restores the header. */
 static bool fx_unreadable(struct fx *x, const char *rel, bool on)
@@ -1303,6 +1355,7 @@ static void test_derivation(void)
         test_derive_causes(x, &base);
         test_hotswap_hook(x);
         test_key_driver_facts(x);
+        test_key_cost(x);
     }
     zcl_action_root_result_free(&base);
     if (x)

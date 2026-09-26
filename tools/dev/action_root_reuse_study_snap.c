@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define ST_ZERO64 \
     "0000000000000000000000000000000000000000000000000000000000000000"
@@ -733,6 +734,28 @@ static const struct vcs_action_abi_v2 g_st_abi[] = {
     { "c23_dev_object", 1u },
 };
 
+/* Thread CPU time of the calling derivation worker, in microseconds. */
+static int64_t st_thread_cpu_us(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return 0;
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+/* Re-derive at once: every settled closure file is then memoized, so this
+ * is the resident watcher's warm cost for the same action. */
+static void st_derive_warm(const struct zcl_action_root_request *req,
+                           struct st_outcome *o)
+{
+    struct zcl_action_root_result r;
+    int64_t cpu = st_thread_cpu_us();
+    bool ok = zcl_action_root_derive(req, &r);
+    o->warm_cpu_us = st_thread_cpu_us() - cpu;
+    o->warm_us = ok ? r.derive_us : 0;
+    zcl_action_root_result_free(&r);
+}
+
 static bool st_derive(const struct st_ctx *c, const struct st_snap *s,
                       const struct st_tu *t, const char *depfile,
                       struct st_outcome *o, uint8_t **pre, size_t *pre_len)
@@ -756,7 +779,9 @@ static bool st_derive(const struct st_ctx *c, const struct st_snap *s,
     memcpy(req.toolchain_root, c->tc.root, 32);
     memcpy(req.sysroot_objects_sha3, c->tc.sysroot_objects, 32);
     struct zcl_action_root_result r;
+    int64_t cpu = st_thread_cpu_us();
     bool ok = zcl_action_root_derive(&req, &r);
+    o->cpu_us = st_thread_cpu_us() - cpu;
     o->us = r.derive_us;
     if (!ok) {
         st_miss_from_why(o, r.why);
@@ -765,6 +790,7 @@ static bool st_derive(const struct st_ctx *c, const struct st_snap *s,
     o->state = ST_ROOT;
     memcpy(o->root, r.root, 32);
     if (pre) {
+        st_derive_warm(&req, o);
         *pre = r.preimage;
         *pre_len = r.preimage_len;
         r.preimage = NULL;

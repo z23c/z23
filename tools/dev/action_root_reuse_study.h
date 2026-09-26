@@ -111,6 +111,9 @@ struct st_outcome {
     uint8_t root[32];
     char reason[96];
     int64_t us;
+    int64_t cpu_us;      /* thread CPU of the same derivation */
+    int64_t warm_us;     /* an immediate repeat: every settled file memoized */
+    int64_t warm_cpu_us;
 };
 
 struct st_tu {
@@ -260,6 +263,7 @@ struct st_totals {
     uint64_t snaps, snaps_immutable, actions, rooted_a, rooted_b, miss_a,
         miss_b;
     struct st_samples us_a, us_b, us_pp;
+    struct st_samples cpu_b, warm_b, warm_cpu_b;
     struct st_reasons miss_snap_a, miss_snap_b;
 };
 
