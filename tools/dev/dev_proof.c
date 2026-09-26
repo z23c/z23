@@ -7374,9 +7374,84 @@ bool zcl_dev_proof_test_original_plan_prepare(const char *root,
 }
 #endif
 
+/* How long the admitted request sat before this worker began, and how long
+ * the queue's claim lock itself took. The request's monotonic stamp was
+ * written by the submitting process against this host's same monotonic
+ * clock, so the delta is the exact queue wait: every pre-claim deferral
+ * (reactor offer interval, landing-step guard, execution slot, queue lock)
+ * is inside it. Best effort, exactly like the phase clock: a request that
+ * cannot be read costs one measurement line, never the proof. */
+static void proof_queue_wait_note(const struct proof_paths *paths,
+                                  int64_t queue_lock_wait_ms)
+{
+    char request[PATH_MAX];
+    char local[65], base[65];
+    int64_t monotonic = 0;
+    if (!paths || paths->attempt[0] == 0 ||
+        snprintf(request, sizeof(request), "%s/request", paths->attempt) >=
+            (int)sizeof(request))
+        return;
+    if (proof_request_read(request, local, base, NULL, &monotonic)) {
+        int64_t waited = (platform_time_monotonic_us() - monotonic) / 1000;
+        char value[32];
+        int n = snprintf(value, sizeof(value), "%lld",
+                         (long long)(waited > 0 ? waited : 0));
+        if (n > 0 && n < (int)sizeof(value))
+            (void)zcl_dev_proof_phase_note(paths->phases, "queue_wait_ms",
+                                           value);
+    }
+    if (queue_lock_wait_ms >= 0) {
+        char value[32];
+        int n = snprintf(value, sizeof(value), "%lld",
+                         (long long)queue_lock_wait_ms);
+        if (n > 0 && n < (int)sizeof(value))
+            (void)zcl_dev_proof_phase_note(paths->phases,
+                                           "queue_lock_wait_ms", value);
+    }
+}
+
+/* user+system milliseconds between two rusage samples. */
+static int64_t dp_rusage_ms(const struct rusage *before,
+                            const struct rusage *after)
+{
+    int64_t user = (int64_t)(after->ru_utime.tv_sec -
+                             before->ru_utime.tv_sec) * 1000 +
+        (after->ru_utime.tv_usec - before->ru_utime.tv_usec) / 1000;
+    int64_t sys = (int64_t)(after->ru_stime.tv_sec -
+                            before->ru_stime.tv_sec) * 1000 +
+        (after->ru_stime.tv_usec - before->ru_stime.tv_usec) / 1000;
+    return user + sys;
+}
+
+/* The proof's CPU bill beside its wall: the worker's own and everything it
+ * reaped (compiler, lint, test children). Wall alone cannot separate a busy
+ * proof from a parked one; this pair can. Same best-effort rule as the
+ * phase clock. */
+static void proof_cpu_note(const struct proof_paths *paths,
+                           const struct rusage *self_before,
+                           const struct rusage *children_before)
+{
+    struct rusage self_after, children_after;
+    if (!paths || getrusage(RUSAGE_SELF, &self_after) != 0 ||
+        getrusage(RUSAGE_CHILDREN, &children_after) != 0)
+        return;
+    char value[32];
+    int n = snprintf(value, sizeof(value), "%lld",
+                     (long long)dp_rusage_ms(self_before, &self_after));
+    if (n > 0 && n < (int)sizeof(value))
+        (void)zcl_dev_proof_phase_note(paths->phases, "proof_cpu_self_ms",
+                                       value);
+    n = snprintf(value, sizeof(value), "%lld",
+                 (long long)dp_rusage_ms(children_before, &children_after));
+    if (n > 0 && n < (int)sizeof(value))
+        (void)zcl_dev_proof_phase_note(paths->phases,
+                                       "proof_cpu_children_ms", value);
+}
+
 static bool proof_worker(const struct proof_paths *paths,
                          const char *local, const char *base,
                          struct platform_ram_scratch_lease *ram_lease,
+                         int64_t queue_lock_wait_ms,
                          char *why, size_t why_len)
 {
     if (!proof_prepare_environment()) {
@@ -7387,6 +7462,7 @@ static bool proof_worker(const struct proof_paths *paths,
     struct proof_phase_clock phases;
     proof_phase_begin(&phases, paths);
     if (paths->phases[0]) (void)remove(paths->phases);
+    proof_queue_wait_note(paths, queue_lock_wait_ms);
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
     proof_phase_mark(&phases, "worktree_exact_root");
     char prepare_log[PATH_MAX];
@@ -7436,14 +7512,20 @@ static bool proof_worker(const struct proof_paths *paths,
 
 static bool proof_worker_run(const struct proof_paths *paths,
                              const char *local, const char *base,
+                             int64_t queue_lock_wait_ms,
                              char *why, size_t why_len)
 {
     struct sigaction child_action = {0};
     child_action.sa_handler = SIG_DFL;
     sigemptyset(&child_action.sa_mask);
     struct platform_ram_scratch_lease ram_lease = {0};
+    struct rusage self_before, children_before;
+    bool cpu_timed = getrusage(RUSAGE_SELF, &self_before) == 0 &&
+                     getrusage(RUSAGE_CHILDREN, &children_before) == 0;
     bool ok = sigaction(SIGCHLD, &child_action, NULL) == 0 &&
-              proof_worker(paths, local, base, &ram_lease, why, why_len);
+              proof_worker(paths, local, base, &ram_lease,
+                           queue_lock_wait_ms, why, why_len);
+    if (cpu_timed) proof_cpu_note(paths, &self_before, &children_before);
     if (!ok && (!why || !why[0]))
         proof_why(why, why_len, "proof_child_reaping_unavailable");
     if (!ok) {
@@ -7787,12 +7869,15 @@ static int dp_proof_queue_run_guarded(const char *repo_root,
         proof_why(why, why_len, "proof_queue_path_invalid");
         return -1;
     }
+    int64_t queue_lock_begin = platform_time_monotonic_us();
     int fd = open(queue_lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (fd < 0 || flock(fd, LOCK_EX) != 0) {
         if (fd >= 0) close(fd);
         proof_why(why, why_len, "proof_queue_lock_failed");
         return -1;
     }
+    int64_t queue_lock_wait_ms =
+        (platform_time_monotonic_us() - queue_lock_begin) / 1000;
     struct proof_paths pair, attempt;
     int claimed = dp_queue_claim_locked(repo_root, requests, attempts,
                                         requested_local, requested_base,
@@ -7806,7 +7891,8 @@ static int dp_proof_queue_run_guarded(const char *repo_root,
         return -1;
     }
     if (why && why_len) why[0] = 0;
-    (void)proof_worker_run(&attempt, local, base, why, why_len);
+    (void)proof_worker_run(&attempt, local, base, queue_lock_wait_ms,
+                           why, why_len);
     return 1;
 }
 

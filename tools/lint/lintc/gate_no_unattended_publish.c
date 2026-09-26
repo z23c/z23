@@ -59,6 +59,10 @@ static const struct { const char *path; const char *reason; } k_nup_allow[] = {
     { "tools/command/native_dev_land.c",
       "the landing service pushes only a tip whose exact proof receipt "
       "was admitted; see docs/agent/TRAIN_PROTOCOL.md" },
+    { "tools/dev/landed-journey-bench.sh",
+      "measurement harness: every push targets the local bare fixture "
+      "remote it creates inside its own throwaway scratch directory; the "
+      "sandboxed clones can reach no shared remote" },
 };
 #define NUP_NALLOW ((int)(sizeof k_nup_allow / sizeof k_nup_allow[0]))
 

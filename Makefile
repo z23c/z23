@@ -4830,7 +4830,7 @@ fast-changed-compile:
 # import unrelated compiler depfiles.
 watcher-safety-gates: check-core-seal check-consensus-parity check-dev-loop-profiles
 
-.PHONY: check-dev-loop-profiles dev-loop-profile-flags dev-loop-history-bench dev-loop-history-bench-selftest dev-loop-history-replay dev-loop-history-replay-selftest reflex-reactor-bench reflex-coverage-audit reflex-coverage-audit-selftest reflex-hotfork-transport-acceptance reflex-hotfork-source-bundle-acceptance reflex-hotfork-test-catalog-acceptance reflex-hotfork-shop-want-view-acceptance reflex-hotfork-zcode-package-view-acceptance reflex-hotfork-shop-status-acceptance reflex-hotfork-shop-reputation-acceptance reflex-hotfork-zcode-work-acceptance reflex-hotfork-watch-core-acceptance reflex-hotfork-cycle-core-acceptance reflex-hotfork-corpus-core-acceptance reflex-hotfork-plan-core-acceptance reflex-hotfork-shop-want-core-acceptance reflex-hotfork-command-input-core-acceptance reflex-hotfork-native-dev-core-acceptance reflex-hotfork-curve25519-acceptance reflex-hotfork-package-policy-acceptance
+.PHONY: check-dev-loop-profiles dev-loop-profile-flags dev-loop-history-bench dev-loop-history-bench-selftest dev-loop-history-replay dev-loop-history-replay-selftest reflex-reactor-bench landed-journey-bench reflex-coverage-audit reflex-coverage-audit-selftest reflex-hotfork-transport-acceptance reflex-hotfork-source-bundle-acceptance reflex-hotfork-test-catalog-acceptance reflex-hotfork-shop-want-view-acceptance reflex-hotfork-zcode-package-view-acceptance reflex-hotfork-shop-status-acceptance reflex-hotfork-shop-reputation-acceptance reflex-hotfork-zcode-work-acceptance reflex-hotfork-watch-core-acceptance reflex-hotfork-cycle-core-acceptance reflex-hotfork-corpus-core-acceptance reflex-hotfork-plan-core-acceptance reflex-hotfork-shop-want-core-acceptance reflex-hotfork-command-input-core-acceptance reflex-hotfork-native-dev-core-acceptance reflex-hotfork-curve25519-acceptance reflex-hotfork-package-policy-acceptance
 dev-loop-profile-flags:
 	@printf 'DEV_LIVE\t%s\t%s\n' '$(DEV_LIVE_CFLAGS)' '$(HOTSWAP_MODULE_LDFLAGS)'
 	@printf 'DEV_RESTART\t%s\t%s\n' '$(DEV_RESTART_CFLAGS)' '$(DEV_RESTART_LDFLAGS)'
@@ -4870,6 +4870,9 @@ dev-loop-active-bench-selftest:
 
 reflex-reactor-bench: dev-bin
 	@tools/dev/reflex-reactor-bench.sh
+
+landed-journey-bench: dev-bin
+	@tools/dev/landed-journey-bench.sh
 
 reflex-coverage-audit: dev-bin
 	@ZCL_DEV_HISTORY_BASE_REF=HEAD \
@@ -13589,8 +13592,11 @@ $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
 # engine/composition/fleet_facts.def, the one place a routing fact is written
 # and the table `z23 dev know` answers from. Fix a mismatch with this target,
 # never by editing the block in the page.
+# docs-executor-routing execs build/bin/z23-lint through the fleet check
+# scripts, so it must declare the tool like check-zcode-package-standalone does;
+# a cold worktree (the land lane's) has no prebuilt z23-lint otherwise.
 .PHONY: docs-executor-routing
-docs-executor-routing:
+docs-executor-routing: $(BIN_DIR)/z23-lint
 	@./tools/lint/check_fleet_facts.sh --write-doc
 	@./tools/lint/check_fleet_observations.sh --write-doc
 
