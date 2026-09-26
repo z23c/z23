@@ -883,7 +883,9 @@ void zcl_native_handle_zcode_package_source_reproduce(
     json_push_kv_str(&normalized, "plan_token", plan_token);
   struct zcl_command_request forwarded = *request;
   forwarded.input = &normalized;
-  zdn_forward(&forwarded, reply, "zcode_dht_source_reproduction_ack");
+  zdn_forward_within(&forwarded, reply,
+                     "zcode_dht_source_reproduction_ack",
+                     RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS);
   if (reply->exit_code == ZCL_COMMAND_EXIT_OK) {
     const struct json_value *record = json_get(&reply->data, "record");
     const char *source_root = record

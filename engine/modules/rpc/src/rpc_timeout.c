@@ -183,6 +183,8 @@ static const struct rpc_timeout_method_budget k_method_budgets[] = {
     { "generatetoaddress",         RPC_MINING_TIMEOUT_MS },
     { "generate",                  RPC_MINING_TIMEOUT_MS },
     { "zcode_dht_status",          RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS },
+    { "zcode_dht_source_reproduction_ack",
+                                   RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS },
 };
 
 /* Returns the extended budget for `method`, or 0 if the method has no
