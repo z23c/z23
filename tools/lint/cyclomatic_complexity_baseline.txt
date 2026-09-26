@@ -3911,7 +3911,7 @@ tools/dev/dev_workspace.c:zcl_devloop_cycle_state_read_after:30
 tools/dev/dev_workspace.c:zcl_devloop_cycle_state_wait_after:23
 tools/dev/devloop_app.c:zcl_devloop_app_describe_json:19
 tools/dev/devloop_app.c:zcl_devloop_app_simulate_json:23
-tools/dev/devloop_baseline.c:zcl_devloop_baseline_launch:26
+tools/dev/devloop_baseline.c:zcl_devloop_baseline_launch:21
 tools/dev/devloop_cli.c:run_focused:25
 tools/dev/devloop_cli.c:zcl_devloop_cli_main:62
 tools/dev/devloop_cli.c:zcl_devloop_watch_worker_main:22

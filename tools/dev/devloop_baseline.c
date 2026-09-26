@@ -24,6 +24,9 @@
 #include "devloop.h"
 
 #include "vcs/vcs_devloop.h"
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
+#include "platform/os_proc.h"
+#endif
 
 #include <limits.h>
 #include <stdio.h>
@@ -38,6 +41,45 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
+#endif
+
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
+/* The detached baseline worker: stdin from /dev/null, output to the log,
+ * nothing else inherited, then the initial baseline. Never returns. */
+static void baseline_worker(const char *repo_root, const char *log_path)
+{
+    int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int log_fd = open(log_path,
+                      O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (null_fd >= 0) {
+        (void)dup2(null_fd, STDIN_FILENO);
+        close(null_fd);
+    }
+    if (log_fd >= 0) {
+        (void)dup2(log_fd, STDOUT_FILENO);
+        (void)dup2(log_fd, STDERR_FILENO);
+        close(log_fd);
+    }
+    /* This worker never execs, so close-on-exec protects nothing: drop
+     * every inherited descriptor (the watcher's singleton lock, its
+     * journal sealer's request pipe, source watches) so a baseline run
+     * never holds them past the watcher's own lifetime. */
+    if (!os_proc_close_inherited_fds()) {
+        fprintf(stderr, "[vcs.devloop] initial baseline refused: could "
+                        "not close inherited descriptors: %s\n",
+                strerror(errno));
+        _exit(1);
+    }
+
+    struct vcs_devloop_anchor_result result;
+    vcs_devloop_run_initial_baseline(repo_root, &result);
+    if (result.status == VCS_DEVLOOP_ANCHOR_OK)
+        fprintf(stderr, "[vcs.devloop] initial baseline complete\n");
+    else
+        fprintf(stderr, "[vcs.devloop] initial baseline failed: %s\n",
+                result.error[0] ? result.error : "unknown error");
+    _exit(result.status == VCS_DEVLOOP_ANCHOR_OK ? 0 : 1);
+}
 #endif
 
 bool zcl_devloop_baseline_launch(const char *repo_root)
@@ -96,27 +138,7 @@ bool zcl_devloop_baseline_launch(const char *repo_root)
         if (worker > 0)
             _exit(0);
 
-        int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        int log_fd = open(log_path,
-                          O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
-        if (null_fd >= 0) {
-            (void)dup2(null_fd, STDIN_FILENO);
-            close(null_fd);
-        }
-        if (log_fd >= 0) {
-            (void)dup2(log_fd, STDOUT_FILENO);
-            (void)dup2(log_fd, STDERR_FILENO);
-            close(log_fd);
-        }
-
-        struct vcs_devloop_anchor_result result;
-        vcs_devloop_run_initial_baseline(repo_root, &result);
-        if (result.status == VCS_DEVLOOP_ANCHOR_OK)
-            fprintf(stderr, "[vcs.devloop] initial baseline complete\n");
-        else
-            fprintf(stderr, "[vcs.devloop] initial baseline failed: %s\n",
-                    result.error[0] ? result.error : "unknown error");
-        _exit(result.status == VCS_DEVLOOP_ANCHOR_OK ? 0 : 1);
+        baseline_worker(repo_root, log_path);
     }
 
     int status = 0;

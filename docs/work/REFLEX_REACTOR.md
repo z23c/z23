@@ -118,18 +118,24 @@ gaps or bad seals. Inside the watcher that seal is a request to one persistent
 sealer child, so reading the next save never waits on journal fsyncs. A
 backlog of more than 32 unsealed epochs, or a sealer that has exited, seals in
 the watcher instead; a proof worker seals what was requested before it runs;
-stop closes the request pipe, lets the sealer drain, and seals any remainder
-before reporting stopped, exiting nonzero if that seal fails. Only pipe EOF
-stops the sealer (it ignores SIGINT, SIGTERM and SIGHUP), and it keeps the
-watcher singleton lock until it exits, so a watcher killed with seals still
-owed cannot be replaced until its sealer has drained. Journal events are
-staged and then linked whole, so a kill mid-write never leaves a torn event.
-A direct journal write takes the ring's next epoch under the seal lock
-while the ring is live, and ring publication is serialized by a lock on the
-ring file. `dev drive` waits with inotify, closing the check/sleep race;
-there is no polling sleep, and a sealer holding the cycle lock never delays
-it, because a busy lock reads a sealed event file directly once the ring
-marks it durable.
+stop sends the sealer a stop request (so a forked copy of the pipe cannot
+hold it open), lets it drain, and seals any remainder before reporting
+stopped, exiting nonzero if that seal fails or cannot be checked. Only the
+stop request or pipe EOF stops the sealer (it ignores SIGINT, SIGTERM and
+SIGHUP), and it keeps the watcher singleton lock until it exits, so a
+watcher killed with seals still owed cannot be replaced until its sealer has
+drained; a stopping watcher likewise releases the lock only after its proof
+worker has exited, and a proof worker is asked to cancel if its watcher
+dies. A restarting watcher first seals valid ring events past the journal
+tail instead of discarding them. Journal events are staged and then renamed
+into place without replacing anything, so a kill mid-write never leaves a
+torn event, and staging files left by a dead writer are swept under the
+cycle lock. A direct journal write takes the ring's next epoch under the
+seal lock while the ring is live (inside the watcher the sealer then seals
+it), and ring publication is serialized by a lock on the ring file. `dev
+drive` waits with inotify, closing the check/sleep race; there is no polling
+sleep, and a sealer holding the cycle lock never delays it, because a busy
+lock reads a sealed event file directly once the ring marks it durable.
 
 The candidate builder keeps its frozen action/dependency plan and artifact
 cache warm, invokes the compiler and module linker directly, then hands the
