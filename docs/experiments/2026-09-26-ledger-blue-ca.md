@@ -30,7 +30,11 @@ no new baseline pin.
 
 ## Limits
 
-No CA has yet been enrolled on the connected Blue and no signed app has
-been opened. The warning removal remains unverified. Enrolling a CA changes
-the Blue's Genuine Check behavior until the CA and apps installed through it
-are removed, as Ledger's developer guidance states.
+The first live enrollment attempt established a secure channel and verified
+Blue target `0x31010004`. BOLOS rejected the subsequent encrypted CA command
+`0x12` with status `6985` while the device was in normal mode. The Blue
+returned to its home screen. No CA was enrolled and no signed app has been
+opened. Ledger's Blue firmware 2.1 announcement states that CA management
+requires Recovery mode. The warning removal remains unverified. Enrolling a
+CA changes the Blue's Genuine Check behavior until the CA and apps installed
+through it are removed, as Ledger's developer guidance states.

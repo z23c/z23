@@ -22,7 +22,11 @@ the file backed up securely: it controls which custom apps the Blue trusts.
 It is unrelated to the Ledger recovery words and must never be generated
 from or replaced with them.
 
-From the Blue home screen, enroll its public key:
+On Blue firmware 2.1, enter the device's **Recovery mode** before enrolling
+the public key. Ledger restricts CA management to that mode. The normal home
+screen rejects enrollment with status `6985`, leaving the CA unchanged. Use
+the Blue's recovery controls; instructions for Nano buttons do not apply to
+the Blue. Once the Blue is in Recovery mode, run:
 
 ```sh
 build/zcl-ledger/zcl-blue-install /dev/hidrawN --ca-enroll \
@@ -44,9 +48,10 @@ the image bytes, and the app parameters in the order BOLOS verifies. It signs
 that digest with ECDSA and includes the signature in the commit command.
 The binary SHA-256 allowlist still applies before USB access.
 
-To remove the custom CA, first delete apps installed through it, then use
-`zcl-blue-install /dev/hidrawN --ca-reset`. BOLOS may require recovery mode
-for this operation. [Ledger's developer guidance](https://github.com/LedgerHQ/ledger-dev-doc/blob/master/source/userspace/debugging.rst)
+To remove the custom CA, first delete apps installed through it, enter
+Recovery mode, then use `zcl-blue-install /dev/hidrawN --ca-reset`.
+[Ledger's firmware announcement](https://www.ledger.com/new-ledger-blue-firmware-version-2-1)
+specifies the recovery-mode restriction. [Ledger's developer guidance](https://github.com/LedgerHQ/ledger-dev-doc/blob/master/source/userspace/debugging.rst)
 states that enrolling a custom CA makes the device fail Ledger's Genuine
 Check until the CA and its apps are removed. This is a device trust change,
 not a change to the Ledger recovery words.

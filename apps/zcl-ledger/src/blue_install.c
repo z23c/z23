@@ -95,6 +95,9 @@ static int exchange(installer *device, uint8_t ins, uint8_t p1,
     if (status != 0x9000) {
         fprintf(stderr, "Ledger rejected command %02x with status %04x.\n",
                 ins, status);
+        if (status == 0x6985 && ins == 0 && length > 0 &&
+            (data[0] == 0x12 || data[0] == 0x13))
+            fputs("Custom CA changes require Blue Recovery mode.\n", stderr);
         return -1;
     }
     response_length -= 2;
