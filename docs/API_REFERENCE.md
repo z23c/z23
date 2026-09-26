@@ -727,7 +727,7 @@ represented by its children's sections.
 | `dev loop status` (aliases: `dev.loop.heartbeat`) | compat 🔧 → `z23-dev dev loop heartbeat` | read / read / operator · instant/low | none | `zcl.dev_loop_status.v1` | `z23 dev loop status` | Read watcher identity, epoch, and latest verdict — *watcher state is available through the dev binary* |
 | `dev loop wait` | compat 🔧 → `z23-dev dev loop wait` | read / read / operator · persistent/low | `after_epoch`, `timeout_ms` | `zcl.dev_cycle.v1` | `z23 dev loop wait --input='{"after_epoch":41}'` | Wait for one verdict after a cycle epoch — *bounded verdict waiting is available through the dev binary* |
 | `dev loop events` | compat 🔧 → `z23-dev dev loop events --format=jsonl` | read / read / operator · persistent/stream | `after`, `heartbeat_ms` | `zcl.dev_loop_event.v1` | `z23-dev dev loop events --after=41 --format=jsonl` | Stream resumable source and cycle events — *resumable event subscription is available through the dev binary* |
-| `dev loop stop` | compat 🔧 → `z23-dev dev loop stop` | mutate / dev-mutation / **owner** · fast/low | **`watcher_id`**, `watcher_session`, `root`, `group`, `owner`, `failure_id`, `to`, `relink_generation`, `reason`, `confirm` | `zcl.dev_loop_status.v1` | `z23-dev dev loop stop --input='{"watcher_id":123,"watcher_session":"<status-session>"}'` | Stop one identified native watcher — *watcher shutdown requires the dev-only executor* |
+| `dev loop stop` | compat 🔧 → `z23-dev dev loop stop` | mutate / dev-mutation / **owner** · fast/low | **`watcher_id`**, `watcher_session`, `watcher_born`, `root`, `group`, `owner`, `failure_id`, `to`, `relink_generation`, `reason`, `confirm` | `zcl.dev_loop_status.v1` | `z23-dev dev loop stop --input='{"watcher_id":123,"watcher_session":"<status-session>"}'` | Stop one identified native watcher — *watcher shutdown requires the dev-only executor* |
 
 #### `dev.proof` — Exact local push-proof receipts
 
@@ -2002,6 +2002,21 @@ Exit codes: `0` passed/accepted · `1` failed · `2` invalid input/unknown
 command · `3` blocked by a named precondition (includes every `planned`
 leaf) · `4` auth/capability denied · `5` transiently unavailable · `6`
 internal contract failure.
+
+## Stopping a dev watcher
+
+`dev loop stop` takes one of two identities, both copied from
+`dev loop status`. `watcher_id` with `watcher_session` names the watcher
+that holds the checkout's lock; it is asked to stop through its own bound
+endpoint and is never signalled. `watcher_id` with `watcher_born` names a
+row of `retiring_sessions`: a recorded watcher session whose leader is
+already gone. It is accepted only while no watcher holds the lock, and only
+for that exact birth. Its surviving members get SIGTERM, then SIGKILL. The
+reply's `session_retired` says what became of the recorded session:
+`retired`, `none`, `unrecorded` or `mismatch`. A process that a proof
+worker started in a session of its own (setsid) is outside the recorded
+session. If the worker is SIGKILLed it cannot pass the stop on, so the
+stop does not reach that process.
 
 ## Where this is proven, not just documented
 
