@@ -900,7 +900,7 @@ static const char *const k_ar_joined[] = {
     "-fmacro-prefix-map=", "-fvisibility=", "-fcf-protection=",
     "-ftrivial-auto-var-init=", "-fzero-call-used-regs=",
     "-fdiagnostics-color", "-fno-diagnostics-color", "-march=", "-mtune=",
-    "-mcpu=", "-frandom-seed=",
+    "-frandom-seed=",
 };
 
 /* -Wl, items: none names a file the root does not bind. */
@@ -2177,7 +2177,7 @@ bool zcl_action_root_file_sha3(const char *path, uint8_t out[32])
 static void ar_stamp_clock(struct timespec *ts)
 {
 #if defined(CLOCK_REALTIME_COARSE)
-    if (clock_gettime(CLOCK_REALTIME_COARSE, ts) == 0)
+    if (clock_gettime(CLOCK_REALTIME_COARSE, ts) == 0) // platform-ok:inode stamps come from this clock
         return;
 #endif
     if (platform_time_realtime_timespec(ts) != 0) {

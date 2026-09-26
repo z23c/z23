@@ -18,6 +18,7 @@
 #include "devloop_action_root.h"
 
 #include "base/safe_alloc.h"
+#include "platform/clock.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
 
@@ -701,10 +702,7 @@ static const struct vcs_action_abi_v2 g_st_abi[] = {
 /* Thread CPU time of the calling derivation worker, in microseconds. */
 static int64_t st_thread_cpu_us(void)
 {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
-        return 0;
-    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    return clock_thread_cpu_ns() / 1000;
 }
 
 /* Re-derive at once: every settled closure file is then memoized, so this

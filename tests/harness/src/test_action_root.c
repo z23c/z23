@@ -897,7 +897,7 @@ static const char k_fx_as_v1[] =
 static const char k_fx_as_v2[] =
     "#!/bin/sh\necho 'GNU assembler (fixture) 2.42'\n# build 2\n";
 
-/* A driver whose built-in list depends on -mcpu=, that skips sysnew as
+/* A driver whose built-in list depends on -mtune=, that skips sysnew as
  * nonexistent until it exists, and whose libc.so lives in the checkout.
  * Asked what it runs (-###) it names tools/cc1 and tools/as, or prefix/as
  * once that exists in its own program prefix, as GCC would.
@@ -914,16 +914,16 @@ static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
         "*\" -### \"*)\n"
         "  a=\"$R/tools/as\"; [ -x \"$R/prefix/as\" ] && a=\"$R/prefix/as\"\n"
         "  echo \"COMPILER_PATH=$R/prefix/\"\n"
-        "  echo \" \\\"$R/tools/cc1\\\" \\\"-quiet\\\" \\\"-o\\\" \\\"/tmp/x.s\\\"\"\n"
-        "  echo \" $a --64 -o /dev/null /tmp/x.s\"; exit 0;;\n"
+        "  echo \" \\\"$R/tools/cc1\\\" \\\"-quiet\\\" \\\"-o\\\" \\\"$R/x.s\\\"\"\n"
+        "  echo \" $a --64 -o /dev/null $R/x.s\"; exit 0;;\n"
         "*\" -v \"*)\n"
-        "  d=sysdef; case \" $* \" in *\" -mcpu=alt \"*) d=sysalt;; esac\n"
+        "  d=sysdef; case \" $* \" in *\" -mtune=alt \"*) d=sysalt;; esac\n"
         "  [ -d \"$R/sysnew\" ] ||\n"
         "    echo \"ignoring nonexistent directory \\\"$R/sysnew\\\"\"\n"
         "  echo '#include <...> search starts here:'\n"
         "  [ -d \"$R/sysnew\" ] && echo \" $R/sysnew\"\n"
         "  echo \" $R/$d\"; echo 'End of search list.'; exit 0;;\n"
-        "esac\nfor a do shift; case \"$a\" in -mcpu=*) ;;\n"
+        "esac\nfor a do shift; case \"$a\" in -mtune=*) ;;\n"
         "  *) set -- \"$@\" \"$a\";; esac; done\n"
         "exec cc \"$@\"\n", x->root);
     char path[PATH_MAX];
@@ -938,12 +938,12 @@ static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
            snprintf(cc, PATH_MAX, "%s", path) < PATH_MAX;
 }
 
-/* The fake driver strips -mcpu= (it only selects its built-in list); the
+/* The fake driver strips -mtune= (it only selects its built-in list); the
  * host driver is asked with plain flags. */
 static const char *fx_key_cflags(const char *cc)
 {
     return strcmp(cc, "cc") == 0 ? "-std=c23 -Iinc_a -Iinc_b -DFOO=1"
-                                 : "-std=c23 -Iinc_a -Iinc_b -DFOO=1 -mcpu=alt";
+                                 : "-std=c23 -Iinc_a -Iinc_b -DFOO=1 -mtune=alt";
 }
 
 static bool fx_key(struct fx *x, const char *cc, char out[65])
@@ -980,7 +980,7 @@ static void test_key_driver_targets(struct fx *x, const char *cc, char k1[65])
               fx_key(x, cc, k2) && fx_remove(x->root, "sysalt/zopt.h") &&
               fx_write(x->root, "sysdef/zopt.h", "\n") &&
               fx_key(x, cc, k3) && fx_remove(x->root, "sysdef/zopt.h");
-    AR_CHECK("key: built-in dirs are asked with the plan's -mcpu= "
+    AR_CHECK("key: built-in dirs are asked with the plan's -mtune= "
              "(a header in that list moves the key, one in the default "
              "list does not)",
              ok && strcmp(k1, k2) != 0 && strcmp(k1, k3) == 0);
