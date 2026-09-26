@@ -112,6 +112,12 @@ bool vcs_toolchain_capsule_v1_root(
  * compile.  No mtime participates. */
 bool vcs_toolchain_capsule_v1_capture(
     struct vcs_toolchain_capsule_v1 *out);
+/* Return a previously captured capsule and its resolved tool paths only when
+ * its environment and file stamps are still current. Never probes a compiler
+ * or refreshes a stale cache; callers can refuse a speculative reuse. */
+bool vcs_toolchain_capsule_v1_cached(
+    struct vcs_toolchain_capsule_v1 *out,
+    struct platform_toolchain_descriptor *descriptor);
 #ifdef ZCL_TESTING
 void vcs_toolchain_capsule_v1_cache_reset_for_test(void);
 void vcs_toolchain_capsule_v1_cache_stats_for_test(

@@ -30,7 +30,11 @@ struct build_toolchain_file {
 
 struct build_toolchain_cache {
     struct vcs_toolchain_capsule_v1 capsule;
+    struct platform_toolchain_descriptor descriptor;
     struct build_toolchain_file files[BUILD_TOOLCHAIN_FILE_COUNT];
+#if defined(__APPLE__)
+    char developer_selection[PATH_MAX];
+#endif
     uint8_t environment_root[32];
     uint64_t fresh_captures;
     uint64_t cache_hits;
@@ -280,7 +284,8 @@ static void build_toolchain_environment_root(uint8_t out[32])
     static const char *const names[] = {
         "PATH", "LANG", "LC_ALL", "LC_MESSAGES", "GCC_EXEC_PREFIX",
         "COMPILER_PATH", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH",
-        "CPLUS_INCLUDE_PATH", "GCC_SPECS",
+        "CPLUS_INCLUDE_PATH", "GCC_SPECS", "DEVELOPER_DIR", "SDKROOT",
+        "TOOLCHAINS",
     };
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
@@ -293,6 +298,30 @@ static void build_toolchain_environment_root(uint8_t out[32])
     sha3_256_finalize(&sha, out);
 }
 
+#if defined(__APPLE__)
+static bool build_toolchain_developer_selection(char out[PATH_MAX])
+{
+    const char *const argv[] = { "/usr/bin/xcode-select", "-p", NULL };
+    if (zcl_spawn_capture(argv, out, PATH_MAX, 10000) != 0 || !out[0])
+        return false;
+    out[strcspn(out, "\r\n")] = '\0';
+    return out[0] != '\0';
+}
+#endif
+
+static const char *build_toolchain_descriptor_file(
+    const struct platform_toolchain_descriptor *desc, size_t index)
+{
+    if (index == 0) return desc->compiler_driver;
+    if (index == 1) return desc->compiler_backend;
+    if (index == 2) return desc->assembler;
+    if (index < 3 + ZCL_TOOLCHAIN_SYSROOT_COUNT)
+        return desc->sysroot_files[index - 3];
+    if (index < BUILD_TOOLCHAIN_FILE_COUNT)
+        return desc->abi_files[index - 3 - ZCL_TOOLCHAIN_SYSROOT_COUNT];
+    return NULL;
+}
+
 static bool build_toolchain_cache_current(
     const struct build_toolchain_cache *cache,
     const uint8_t environment_root[32])
@@ -300,10 +329,23 @@ static bool build_toolchain_cache_current(
     if (!cache->valid ||
         memcmp(cache->environment_root, environment_root, 32) != 0)
         return false;
+#if defined(__APPLE__)
+    char selection[PATH_MAX];
+    if (!build_toolchain_developer_selection(selection) ||
+        strcmp(selection, cache->developer_selection) != 0)
+        return false;
+#endif
+    char driver_path[PATH_MAX];
+    if (!build_resolve_file(VCS_BUILD_COMPILER_V1, driver_path, NULL) ||
+        strcmp(driver_path, cache->files[0].path) != 0)
+        return false;
     for (size_t i = 0; i < BUILD_TOOLCHAIN_FILE_COUNT; i++) {
+        char resolved[PATH_MAX];
         struct platform_positioned_file_snapshot current;
-        if (!build_resolve_file(cache->files[i].path, (char[PATH_MAX]){0},
-                                &current) ||
+        if (!build_resolve_file(
+                build_toolchain_descriptor_file(&cache->descriptor, i),
+                resolved, &current) ||
+            strcmp(resolved, cache->files[i].path) != 0 ||
             !build_stat_equal(&cache->files[i].stamp, &current))
             return false;
     }
@@ -312,7 +354,8 @@ static bool build_toolchain_cache_current(
 
 static bool build_toolchain_capture_uncached(
     struct vcs_toolchain_capsule_v1 *out,
-    struct build_toolchain_file files[BUILD_TOOLCHAIN_FILE_COUNT])
+    struct build_toolchain_file files[BUILD_TOOLCHAIN_FILE_COUNT],
+    struct platform_toolchain_descriptor *descriptor)
 {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
@@ -380,7 +423,27 @@ static bool build_toolchain_capture_uncached(
         return false;
 
     (void)snprintf(out->target, sizeof(out->target), "%s", desc.target);
+    if (descriptor) *descriptor = desc;
     return true;
+}
+
+bool vcs_toolchain_capsule_v1_cached(
+    struct vcs_toolchain_capsule_v1 *out,
+    struct platform_toolchain_descriptor *descriptor)
+{
+    if (!out || !descriptor) return false;
+    uint8_t environment_root[32];
+    build_toolchain_environment_root(environment_root);
+    if (!build_toolchain_cache_lock()) return false;
+    bool current = build_toolchain_cache_current(&g_toolchain_cache,
+                                                  environment_root);
+    if (current) {
+        *out = g_toolchain_cache.capsule;
+        *descriptor = g_toolchain_cache.descriptor;
+        g_toolchain_cache.cache_hits++;
+    }
+    zcl_mutex_unlock(&g_toolchain_cache_mu);
+    return current;
 }
 
 bool vcs_toolchain_capsule_v1_capture(
@@ -399,11 +462,30 @@ bool vcs_toolchain_capsule_v1_capture(
     }
     struct vcs_toolchain_capsule_v1 captured;
     struct build_toolchain_file files[BUILD_TOOLCHAIN_FILE_COUNT];
-    bool ok = build_toolchain_capture_uncached(&captured, files);
+    struct platform_toolchain_descriptor descriptor;
+#if defined(__APPLE__)
+    char selection_before[PATH_MAX], selection_after[PATH_MAX];
+    if (!build_toolchain_developer_selection(selection_before)) {
+        zcl_mutex_unlock(&g_toolchain_cache_mu);
+        return false;
+    }
+#endif
+    bool ok = build_toolchain_capture_uncached(&captured, files,
+                                                &descriptor);
+#if defined(__APPLE__)
+    ok = ok && build_toolchain_developer_selection(selection_after) &&
+        strcmp(selection_before, selection_after) == 0;
+#endif
     g_toolchain_cache.valid = false;
     if (ok) {
         g_toolchain_cache.capsule = captured;
+        g_toolchain_cache.descriptor = descriptor;
         memcpy(g_toolchain_cache.files, files, sizeof(files));
+#if defined(__APPLE__)
+        (void)snprintf(g_toolchain_cache.developer_selection,
+                       sizeof(g_toolchain_cache.developer_selection), "%s",
+                       selection_after);
+#endif
         memcpy(g_toolchain_cache.environment_root, environment_root, 32);
         g_toolchain_cache.fresh_captures++;
         g_toolchain_cache.valid = true;

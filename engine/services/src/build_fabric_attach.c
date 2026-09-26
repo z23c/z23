@@ -318,6 +318,18 @@ struct zcl_result build_fabric_executor_host_tool_hashes(
     return ZCL_OK;
 }
 
+static struct zcl_result bfat_cached_tool_hashes(
+    const struct platform_toolchain_descriptor *desc,
+    uint8_t driver_sha3[32], uint8_t backend_sha3[32],
+    uint8_t assembler_sha3[32])
+{
+    if (!bfat_sha3_file(desc->compiler_driver, driver_sha3) ||
+        !bfat_sha3_file(desc->compiler_backend, backend_sha3) ||
+        !bfat_sha3_file(desc->assembler, assembler_sha3))
+        return ZCL_ERR(-1, "executor-toolchain-cache-stale: tool bytes");
+    return ZCL_OK;
+}
+
 /* Fill the canonical key fields for one action: recomputes the fixed
  * flags/environment roots for the action kind and refuses a stale declared
  * root. `toolchain_bytes_root` is the caller's current-host tool-bytes root
@@ -851,11 +863,12 @@ static const char *bfat_compose_requester_key(struct bfat_attach_ctx *c)
     if (!loaded.ok)
         return c->refusal[0] ? c->refusal : loaded.message;
     struct vcs_toolchain_capsule_v1 capsule;
+    struct platform_toolchain_descriptor descriptor;
     uint8_t capsule_root[32];
-    if (!vcs_toolchain_capsule_v1_capture(&capsule) ||
+    if (!vcs_toolchain_capsule_v1_cached(&capsule, &descriptor) ||
         !vcs_toolchain_capsule_v1_root(&capsule, capsule_root)) {
         free(input);
-        return "executor-toolchain-capture-failed";
+        return "executor-toolchain-cache-unavailable";
     }
     zcl_hex_encode(capsule_root, 32, c->capsule_hex);
     if (strcmp(c->capsule_hex, c->job.toolchain_sha3) != 0) {
@@ -863,11 +876,20 @@ static const char *bfat_compose_requester_key(struct bfat_attach_ctx *c)
         return "attach-refused-toolchain-capsule-stale";
     }
     uint8_t driver[32], backend[32], assembler[32];
-    struct zcl_result tools = build_fabric_executor_host_tool_hashes(
-        driver, backend, assembler);
+    struct zcl_result tools = bfat_cached_tool_hashes(
+        &descriptor, driver, backend, assembler);
     if (!tools.ok) {
         free(input);
         return "executor-toolchain-capture-failed";
+    }
+    struct vcs_toolchain_capsule_v1 checked_capsule;
+    struct platform_toolchain_descriptor checked_descriptor;
+    if (!vcs_toolchain_capsule_v1_cached(&checked_capsule,
+                                          &checked_descriptor) ||
+        memcmp(&checked_capsule, &capsule, sizeof(capsule)) != 0 ||
+        memcmp(&checked_descriptor, &descriptor, sizeof(descriptor)) != 0) {
+        free(input);
+        return "executor-toolchain-cache-stale";
     }
     build_fabric_executor_toolchain_root(driver, backend, assembler,
                                          c->toolchain_root);
