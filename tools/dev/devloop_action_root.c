@@ -584,6 +584,42 @@ static void ar_dep_miss(struct ar_state *s, const struct ar_dep *d)
                 "dependency could not be hashed", d->token);
 }
 
+/* ---- compile window ------------------------------------------------------ */
+
+/* A stamp at or after the compile start, or in its whole second when the
+ * filesystem keeps no fraction, may postdate what the compiler read. */
+static bool ar_stamp_late(int64_t sec, int64_t nsec,
+                          const struct zcl_action_root_t0 *t0)
+{
+    return sec > t0->sec ||
+           (sec == t0->sec && (nsec >= t0->nsec || nsec == 0));
+}
+
+/* Called after `fs` was hashed: when the request carries the compile start,
+ * the file's ctime and mtime must both precede it. A stat after the hash
+ * that shows no late stamp proves the bytes hashed are the bytes the
+ * compile read (every write since the compile began is stamped late). */
+static bool ar_t0_settled(struct ar_state *s, const char *fs,
+                          const char *token)
+{
+    const struct zcl_action_root_t0 *t0 = &s->c.req->compile_t0;
+    if (!t0->set)
+        return true;
+    struct stat st;
+    struct ar_memo k = {0};
+    if (stat(fs, &st) != 0) {
+        ar_fail(&s->c, "dependency_unreadable",
+                "input could not be re-stated after hashing", token);
+        return false;
+    }
+    ar_memo_key(&st, &k);
+    if (!ar_stamp_late(k.mtime_s, k.mtime_ns, t0) &&
+        !ar_stamp_late(k.ctime_s, k.ctime_ns, t0))
+        return true;
+    ar_fail(&s->c, "input_changed_during_compile",
+            "input was written at or after the compile started", token);
+    return false;
+}
 /* The HOT_FORK unity reaches the compiler under a temporary spelling that
  * never enters the root; it is recorded under its stable token instead. */
 static bool ar_virtual_dep_add(struct ar_state *s)
@@ -610,6 +646,8 @@ static bool ar_virtual_dep_add(struct ar_state *s)
         ar_dep_miss(s, d);
         return false;
     }
+    if (!ar_t0_settled(s, d->fs, d->token))
+        return false;
     s->dep_n++;
     return true;
 }
@@ -661,6 +699,8 @@ static bool ar_dep_add(struct ar_state *s, const char *raw)
         ar_dep_miss(s, d);
         return false;
     }
+    if (!ar_t0_settled(s, d->fs, d->token))
+        return false;
     s->dep_n++;
     return true;
 }
@@ -1484,6 +1524,8 @@ static bool ar_present_add(struct ar_state *s, uint32_t slot, const char *dir,
                 path);
         return false;
     }
+    if (regular && !ar_t0_settled(s, path, path))
+        return false;
     s->present_n++;
     return true;
 }
