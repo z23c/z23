@@ -8,7 +8,8 @@
  * Split out of tools/command/native_dev_land.c (which was already at its
  * file-size ceiling) rather than grown inside it. native_dev_land.c owns
  * the queue and rows; this file owns generated-document refresh and the
- * final Make restart-plan preparation before proof admission.
+ * final Make restart-plan and proof-tool preparation before proof
+ * admission.
  */
 #ifndef ZCL_NATIVE_DEV_LAND_REGEN_H
 #define ZCL_NATIVE_DEV_LAND_REGEN_H
@@ -22,6 +23,16 @@
  * leaves a diagnostic and never accepts a stale file after Make failure. */
 bool zcl_dev_land_restart_plan_prepare(const char *wt, char *why,
                                        size_t why_cap);
+
+/* Ensure the sealed proof's generated-docs checker binaries
+ * (build/bin/z23-lint, z23-fleet-observe, gen_capability_inventory) exist
+ * in the landing worktree: the proof copies them out of this checkout
+ * before any dimension builds inside its generation and refuses the proof
+ * when one is absent. Runs make only when a member is missing; false
+ * leaves a diagnostic naming the exact absent binary or the make
+ * failure. */
+bool zcl_dev_land_proof_tools_prepare(const char *wt, char *why,
+                                      size_t why_cap);
 
 /* Run the regen phase in the already-rebased landing worktree `wt` (HEAD is
  * the row's rebased tip, ancestor of `tip_sha`). `tip_sha` is the original

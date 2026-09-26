@@ -1332,6 +1332,62 @@ static int test_dev_land_regen_refreshes_plan_on_identical_rewrite(void)
     return failures;
 }
 
+/* Exercise the proof-tools preparation adapter: a cold worktree triggers
+ * exactly one docs-proof-tools build, a warm one builds nothing, and both
+ * a make failure and a silent no-produce refuse by name. */
+static int test_dev_land_proof_tools_preparation(void)
+{
+    int failures = 0;
+    TEST("land: proof tools preparation builds the missing checker tools "
+        "exactly once") {
+        char root[1024], path[1200], body[128], why[512];
+        size_t len = 0;
+        test_make_tmpdir(root, sizeof(root), "dev_land", "proof_tools");
+        ASSERT(dlx_write_dep(root, "Makefile",
+            "docs-proof-tools:\n"
+            "\t@mkdir -p build/bin\n"
+            "\t@cp prepared-tool build/bin/z23-lint\n"
+            "\t@cp prepared-tool build/bin/z23-fleet-observe\n"
+            "\t@cp prepared-tool build/bin/gen_capability_inventory\n"
+            "\t@echo built >> build/proof-tools.log\n"));
+        ASSERT(dlx_write_dep(root, "prepared-tool", "tool\n"));
+        ASSERT(zcl_dev_land_proof_tools_prepare(root, why, sizeof(why)));
+        ASSERT((size_t)snprintf(path, sizeof(path),
+                                "%s/build/proof-tools.log", root) <
+               sizeof(path));
+        ASSERT(dlx_slurp(path, body, sizeof(body), &len));
+        ASSERT(len == strlen("built\n"));
+        ASSERT(memcmp(body, "built\n", len) == 0);
+        /* Warm: every tool present, so no second make runs. */
+        ASSERT(zcl_dev_land_proof_tools_prepare(root, why, sizeof(why)));
+        ASSERT(dlx_slurp(path, body, sizeof(body), &len));
+        ASSERT(len == strlen("built\n"));
+        /* A failed make preserves the make failure as the reason. */
+        ASSERT(dlx_write_dep(root, "Makefile",
+            "docs-proof-tools:\n"
+            "\t@echo 'FAIL: proof tools refused' >&2\n\t@exit 1\n"));
+        (void)remove(path);
+        (void)snprintf(path, sizeof(path), "%s/build/bin/z23-fleet-observe",
+                       root);
+        ASSERT(remove(path) == 0);
+        ASSERT(!zcl_dev_land_proof_tools_prepare(root, why, sizeof(why)));
+        ASSERT(strstr(why, "proof tools refused") != NULL);
+        /* A make that succeeds without producing a member refuses with the
+         * exact dependency the proof would later name. */
+        ASSERT(dlx_write_dep(root, "Makefile",
+            "docs-proof-tools:\n"
+            "\t@mkdir -p build/bin\n"
+            "\t@cp prepared-tool build/bin/z23-lint\n"
+            "\t@cp prepared-tool build/bin/gen_capability_inventory\n"));
+        ASSERT(!zcl_dev_land_proof_tools_prepare(root, why, sizeof(why)));
+        ASSERT(strstr(why,
+                      "proof_generation_dependency_unavailable:"
+                      "build/bin/z23-fleet-observe") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Exercise the actual preparation adapter with an existing stale plan. */
 static int test_dev_land_final_plan_preparation(void)
 {
@@ -7290,6 +7346,7 @@ int test_dev_land(void)
     failures += test_dev_land_regen_failure_fails_row();
     failures += test_dev_land_regen_refreshes_plan_on_identical_rewrite();
     failures += test_dev_land_regen_leaves_plan_alone_when_untouched();
+    failures += test_dev_land_proof_tools_preparation();
     failures += test_dev_land_final_plan_preparation();
     failures += test_dev_land_rebase_regen_cases();
 

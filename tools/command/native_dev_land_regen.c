@@ -265,6 +265,64 @@ bool zcl_dev_land_restart_plan_prepare(const char *wt, char *why,
     return true;
 }
 
+/* The sealed proof copies its generated-docs checker binaries out of this
+ * worktree before any dimension builds inside the generation and refuses
+ * the proof when one is absent. A cold worktree — a fresh landing lane or
+ * a new scratch clone — has none of them until something runs their
+ * target; docs-proof-tools is the Makefile's own list of this exact set.
+ * Build only when a member is missing, so a warm worktree pays nothing. */
+static const char *const DLRG_PROOF_TOOLS[] = {
+    "build/bin/z23-lint",
+    "build/bin/z23-fleet-observe",
+    "build/bin/gen_capability_inventory",
+};
+
+static bool dlrg_proof_tool_present(const char *wt, const char *tool,
+                                    char *why, size_t why_cap)
+{
+    char path[4096 + 64];
+    struct stat st;
+    if (snprintf(path, sizeof(path), "%s/%s", wt, tool) >=
+        (int)sizeof(path)) {
+        (void)snprintf(why, why_cap, "proof tool path too long: %s", tool);
+        return false;
+    }
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+bool zcl_dev_land_proof_tools_prepare(const char *wt, char *why,
+                                      size_t why_cap)
+{
+    size_t used = 0, missing = 0, i;
+    if (!wt || !why || why_cap == 0) return false;
+    why[0] = '\0';
+    for (i = 0; i < sizeof(DLRG_PROOF_TOOLS) / sizeof(DLRG_PROOF_TOOLS[0]);
+         i++) {
+        if (!dlrg_proof_tool_present(wt, DLRG_PROOF_TOOLS[i], why, why_cap)) {
+            if (why[0])
+                return false; /* path overflow, not a missing file */
+            missing = 1;
+            break;
+        }
+    }
+    if (!missing)
+        return true;
+    if (dlrg_make(wt, "docs-proof-tools", NULL, 0, &used, why, why_cap) != 0)
+        return false;
+    for (i = 0; i < sizeof(DLRG_PROOF_TOOLS) / sizeof(DLRG_PROOF_TOOLS[0]);
+         i++) {
+        if (!dlrg_proof_tool_present(wt, DLRG_PROOF_TOOLS[i], why, why_cap)) {
+            if (!why[0])
+                (void)snprintf(why, why_cap,
+                               "proof_generation_dependency_unavailable:%s "
+                               "(make docs-proof-tools)",
+                               DLRG_PROOF_TOOLS[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* "<subject>" truncated to DLRG_SUBJECT_MAX bytes, falling back to the
  * short sha when the tip's subject cannot be read at all (an unreadable
  * subject is not a reason to refuse a regen the code otherwise supports). */

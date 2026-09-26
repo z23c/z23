@@ -5413,6 +5413,8 @@ static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
         if (!dl_wt_dependency_links_repair(d, r, stubbed, why, why_cap))
             return false;
     }
+    if (!stubbed && !zcl_dev_land_proof_tools_prepare(d->wt, why, why_cap))
+        return false;
     if (!stubbed && !zcl_dev_land_restart_plan_prepare(d->wt, why, why_cap))
         return false;
     return true;
