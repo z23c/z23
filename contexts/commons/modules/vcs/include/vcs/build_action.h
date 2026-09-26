@@ -36,7 +36,7 @@
  * are the argv/env bytes it receives, independent of the lease locator. */
 #define VCS_BUILD_INPUT_ARG_V1 "../src/unit.i"
 #define VCS_BUILD_OUTPUT_ARG_V1 "unit.o"
-#define VCS_BUILD_ENV_PATH_VALUE_V1 "/usr/local/bin:/usr/bin:/bin"
+#define VCS_BUILD_ENV_PATH_VALUE_V1 "/usr/bin:/bin"
 #define VCS_BUILD_ENV_LC_ALL_VALUE_V1 "C"
 #define VCS_BUILD_ENV_TMPDIR_V1 "TMPDIR=."
 #define VCS_BUILD_ENV_HOME_V1 "HOME=../src/.home"
@@ -140,6 +140,8 @@ struct vcs_fixed_compile_proof_inputs {
     const uint8_t *driver_bytes_sha3;
     const uint8_t *backend_bytes_sha3;
     const uint8_t *assembler_bytes_sha3;
+    const uint8_t *runtime_bytes_sha3;
+    const uint8_t *verifier_bytes_sha3;
     const uint8_t *input_bytes_sha3;
     const uint8_t *proof_policy_root;
     const char *target;

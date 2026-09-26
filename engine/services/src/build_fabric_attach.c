@@ -23,6 +23,7 @@
 #if !defined(_WIN32)
 
 #include "build_fabric_observation_internal.h"
+#include "build_fabric_attach_identity_internal.h"
 #include "build_fabric_worker_internal.h"
 
 #include "base/hex.h"
@@ -65,6 +66,8 @@ struct bfat_key_fields {
     uint8_t environment_root[32];
     uint8_t proof_policy_root[32];
     uint8_t toolchain_root[32];
+    uint8_t runtime_root[32];
+    uint8_t verifier_root[32];
     uint8_t input_bytes_root[32];
     uint8_t component_key[32];
     uint8_t component_preimage_root[32];
@@ -119,6 +122,8 @@ static bool bfat_record_serialize(const struct bfat_key_fields *f,
         bfat_put_labeled(&c, "proof_policy_root", f->proof_policy_root, 32) &&
         bfat_put_labeled(&c, "executor_toolchain_root", f->toolchain_root,
                          32) &&
+        bfat_put_labeled(&c, "runtime_root", f->runtime_root, 32) &&
+        bfat_put_labeled(&c, "verifier_root", f->verifier_root, 32) &&
         bfat_put_labeled(&c, "input_bytes_root", f->input_bytes_root, 32) &&
         bfat_put_labeled(&c, "component_proof_key", f->component_key, 32) &&
         bfat_put_labeled(&c, "component_preimage_root",
@@ -197,6 +202,10 @@ static bool bfat_record_parse(const uint8_t *wire, size_t len,
                           out->proof_policy_root) &&
         bfat_take_labeled(&r, "executor_toolchain_root", NULL, 0,
                           out->toolchain_root) &&
+        bfat_take_labeled(&r, "runtime_root", NULL, 0,
+                          out->runtime_root) &&
+        bfat_take_labeled(&r, "verifier_root", NULL, 0,
+                          out->verifier_root) &&
         bfat_take_labeled(&r, "input_bytes_root", NULL, 0,
                           out->input_bytes_root) &&
         bfat_take_labeled(&r, "component_proof_key", NULL, 0,
@@ -267,82 +276,7 @@ void build_fabric_executor_key_from_parts(
     bfat_record_key(wire, wire_len, out_key);
 }
 
-/* Handle-bound SHA3-256 of one resolved tool file, with a before/after stamp
- * equality proof so the bytes hashed belong to one unchanged file. */
-static bool bfat_sha3_file(const char *path, uint8_t out[32])
-{
-    struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
-    platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open_resolved(&file, path) ||
-        !platform_positioned_file_snapshot(&file, &before)) {
-        platform_positioned_file_close(&file);
-        return false;
-    }
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    uint8_t buf[65536];
-    uint64_t offset = 0;
-    bool ok = true;
-    while (offset < before.size) {
-        size_t want = before.size - offset > sizeof(buf)
-            ? sizeof(buf) : (size_t)(before.size - offset);
-        int64_t got = platform_positioned_file_read(&file, buf, want, offset);
-        if (got <= 0) { ok = false; break; }
-        sha3_256_write(&sha, buf, (size_t)got);
-        offset += (uint64_t)got;
-    }
-    ok = ok && platform_positioned_file_snapshot(&file, &after) &&
-         platform_positioned_file_snapshot_equal(&before, &after);
-    platform_positioned_file_close(&file);
-    if (!ok) return false;
-    sha3_256_finalize(&sha, out);
-    return true;
-}
-
-static bool bfat_toolchain_query(void *ctx, const char *const argv[],
-                                 char *out, size_t cap)
-{
-    (void)ctx;
-    if (zcl_spawn_capture(argv, out, cap, 10000) != 0 || !out[0])
-        return false;
-    out[strcspn(out, "\r\n")] = '\0';
-    return out[0] != '\0';
-}
-
-struct zcl_result build_fabric_executor_host_tool_hashes(
-    uint8_t driver_sha3[32], uint8_t backend_sha3[32],
-    uint8_t assembler_sha3[32])
-{
-    if (!driver_sha3 || !backend_sha3 || !assembler_sha3)
-        return ZCL_ERR(-1, "executor tool hashes require output buffers");
-    struct platform_toolchain_descriptor desc;
-    if (!platform_toolchain_capture_descriptor(bfat_toolchain_query, NULL,
-                                               &desc))
-        return ZCL_ERR(-1, "executor-toolchain-capture-failed: descriptor");
-    if (!bfat_sha3_file(desc.compiler_driver, driver_sha3) ||
-        !bfat_sha3_file(desc.compiler_backend, backend_sha3) ||
-        !bfat_sha3_file(desc.assembler, assembler_sha3))
-        return ZCL_ERR(-1, "executor-toolchain-capture-failed: tool bytes");
-    return ZCL_OK;
-}
-
-static struct zcl_result bfat_cached_tool_hashes(
-    const struct platform_toolchain_descriptor *desc,
-    uint8_t driver_sha3[32], uint8_t backend_sha3[32],
-    uint8_t assembler_sha3[32])
-{
-    if (!bfat_sha3_file(desc->compiler_driver, driver_sha3) ||
-        !bfat_sha3_file(desc->compiler_backend, backend_sha3) ||
-        !bfat_sha3_file(desc->assembler, assembler_sha3))
-        return ZCL_ERR(-1, "executor-toolchain-cache-stale: tool bytes");
-    return ZCL_OK;
-}
-
-/* Fill the canonical key fields for one action: recomputes the fixed
- * flags/environment roots for the action kind and refuses a stale declared
- * root. `toolchain_bytes_root` is the caller's current-host tool-bytes root
- * (computed once per attach/publish and shared across donor recomputes). */
+/* Fill the canonical key fields for one action from checked host identities. */
 static struct zcl_result bfat_fields_for_action(
     const struct db_build_action *action,
     const uint8_t toolchain_bytes_root[32],
@@ -350,6 +284,8 @@ static struct zcl_result bfat_fields_for_action(
     const uint8_t driver_bytes_root[32],
     const uint8_t backend_bytes_root[32],
     const uint8_t assembler_bytes_root[32],
+    const uint8_t runtime_root[32],
+    const uint8_t verifier_root[32],
     const uint8_t input_bytes_root[32], struct bfat_key_fields *out,
     struct vcs_component_proof_key_v1 *proof_out)
 {
@@ -379,12 +315,16 @@ static struct zcl_result bfat_fields_for_action(
                               out->proof_policy_root, 32))
         return ZCL_ERR(-1, "executor-fixed-descriptor-stale: proof policy");
     memcpy(out->toolchain_root, toolchain_bytes_root, 32);
+    memcpy(out->runtime_root, runtime_root, 32);
+    memcpy(out->verifier_root, verifier_root, 32);
     memcpy(out->input_bytes_root, input_bytes_root, 32);
     struct vcs_fixed_compile_proof_inputs proof_inputs = {
         .capsule = capsule,
         .driver_bytes_sha3 = driver_bytes_root,
         .backend_bytes_sha3 = backend_bytes_root,
         .assembler_bytes_sha3 = assembler_bytes_root,
+        .runtime_bytes_sha3 = runtime_root,
+        .verifier_bytes_sha3 = verifier_root,
         .input_bytes_sha3 = input_bytes_root,
         .proof_policy_root = out->proof_policy_root,
         .target = action->target,
@@ -401,10 +341,11 @@ static struct zcl_result bfat_fields_for_action(
 }
 
 struct zcl_result build_fabric_executor_key_compose(
-    const struct db_build_action *action, const uint8_t input_bytes_root[32],
+    const char *workspace, const struct db_build_action *action,
+    const uint8_t input_bytes_root[32],
     uint8_t out_key[32])
 {
-    if (!action || !input_bytes_root || !out_key)
+    if (!workspace || !action || !input_bytes_root || !out_key)
         return ZCL_ERR(-1, "executor key requires action, input, and output");
     uint8_t driver[32], backend[32], assembler[32], toolchain_root[32];
     ZCL_CHECK(build_fabric_executor_host_tool_hashes(driver, backend,
@@ -414,9 +355,17 @@ struct zcl_result build_fabric_executor_key_compose(
     struct vcs_toolchain_capsule_v1 capsule;
     if (!vcs_toolchain_capsule_v1_capture(&capsule))
         return ZCL_ERR(-1, "executor-toolchain-capsule-unavailable");
+    struct platform_toolchain_descriptor descriptor;
+    struct vcs_toolchain_capsule_v1 checked;
+    uint8_t runtime[32], verifier[32];
+    if (!vcs_toolchain_capsule_v1_cached(&checked, &descriptor) ||
+        memcmp(&checked, &capsule, sizeof(capsule)) != 0)
+        return ZCL_ERR(-1, "executor-toolchain-cache-stale");
+    ZCL_CHECK(bfat_runtime_roots(workspace, &descriptor, runtime, verifier));
     struct bfat_key_fields fields;
     ZCL_CHECK(bfat_fields_for_action(action, toolchain_root, &capsule,
                                      driver, backend, assembler,
+                                     runtime, verifier,
                                      input_bytes_root, &fields,
                                      NULL));
     uint8_t wire[BFAT_RECORD_CAP];
@@ -427,11 +376,35 @@ struct zcl_result build_fabric_executor_key_compose(
     return ZCL_OK;
 }
 
+static bool bfat_identity_matches(
+    const struct build_fabric_executor_identity *checked,
+    const uint8_t driver[32], const uint8_t backend[32],
+    const uint8_t assembler[32], const uint8_t runtime[32],
+    const uint8_t verifier[32])
+{
+    return memcmp(driver, checked->driver, 32) == 0 &&
+           memcmp(backend, checked->backend, 32) == 0 &&
+           memcmp(assembler, checked->assembler, 32) == 0 &&
+           memcmp(runtime, checked->runtime, 32) == 0 &&
+           memcmp(verifier, checked->verifier, 32) == 0;
+}
+
+static bool bfat_publish_args_valid(
+    const char *workspace, const struct db_build_job *job,
+    const struct db_build_action *action, const uint8_t input_bytes_root[32],
+    const struct build_fabric_executor_identity *checked_identity)
+{
+    return workspace && job && action && input_bytes_root &&
+           checked_identity;
+}
+
 struct zcl_result build_fabric_executor_key_publish(
     const char *workspace, const struct db_build_job *job,
-    const struct db_build_action *action, const uint8_t input_bytes_root[32])
+    const struct db_build_action *action, const uint8_t input_bytes_root[32],
+    const struct build_fabric_executor_identity *checked_identity)
 {
-    if (!workspace || !job || !action || !input_bytes_root)
+    if (!bfat_publish_args_valid(workspace, job, action, input_bytes_root,
+                                 checked_identity))
         return ZCL_ERR(-1, "executor key publish requires plan and input");
     struct vcs_toolchain_capsule_v1 capsule;
     uint8_t capsule_root[32];
@@ -447,10 +420,21 @@ struct zcl_result build_fabric_executor_key_publish(
                                                      assembler));
     build_fabric_executor_toolchain_root(driver, backend, assembler,
                                          toolchain_root);
+    struct platform_toolchain_descriptor descriptor;
+    struct vcs_toolchain_capsule_v1 checked;
+    uint8_t runtime[32], verifier[32];
+    if (!vcs_toolchain_capsule_v1_cached(&checked, &descriptor) ||
+        memcmp(&checked, &capsule, sizeof(capsule)) != 0)
+        return ZCL_ERR(-1, "executor-toolchain-cache-stale");
+    ZCL_CHECK(bfat_runtime_roots(workspace, &descriptor, runtime, verifier));
+    if (!bfat_identity_matches(checked_identity, driver, backend, assembler,
+                               runtime, verifier))
+        return ZCL_ERR(-1, "executor-key-execution-identity-changed");
     struct bfat_key_fields fields;
     struct vcs_component_proof_key_v1 proof_key;
     ZCL_CHECK(bfat_fields_for_action(action, toolchain_root, &capsule,
                                      driver, backend, assembler,
+                                     runtime, verifier,
                                      input_bytes_root, &fields,
                                      &proof_key));
     uint8_t proof_wire[VCS_CPK_WIRE_BYTES];
@@ -476,10 +460,11 @@ struct zcl_result build_fabric_executor_key_publish(
  * than failing a completed physical build. */
 void build_fabric_executor_key_publish_logged(
     const char *workspace, const struct db_build_job *job,
-    const struct db_build_action *action, const uint8_t input_bytes_root[32])
+    const struct db_build_action *action, const uint8_t input_bytes_root[32],
+    const struct build_fabric_executor_identity *checked_identity)
 {
     struct zcl_result published = build_fabric_executor_key_publish(
-        workspace, job, action, input_bytes_root);
+        workspace, job, action, input_bytes_root, checked_identity);
     if (!published.ok)
         LOG_ERROR("build_fabric",
                   "executor key record not published for %s: %s",
@@ -835,6 +820,8 @@ struct bfat_attach_ctx {
     uint8_t driver_bytes_root[32];
     uint8_t backend_bytes_root[32];
     uint8_t assembler_bytes_root[32];
+    uint8_t runtime_root[32];
+    uint8_t verifier_root[32];
     uint8_t toolchain_root[32];
     uint8_t key[32];
     struct db_build_action donor_action;
@@ -957,6 +944,12 @@ static const char *bfat_compose_requester_key(struct bfat_attach_ctx *c)
     }
     build_fabric_executor_toolchain_root(driver, backend, assembler,
                                          c->toolchain_root);
+    struct zcl_result runtime = bfat_runtime_roots(
+        c->workspace, &descriptor, c->runtime_root, c->verifier_root);
+    if (!runtime.ok) {
+        free(input);
+        return "executor-runtime-closure-missing";
+    }
     c->capsule = capsule;
     memcpy(c->driver_bytes_root, driver, 32);
     memcpy(c->backend_bytes_root, backend, 32);
@@ -965,7 +958,8 @@ static const char *bfat_compose_requester_key(struct bfat_attach_ctx *c)
     struct zcl_result keyed = bfat_fields_for_action(
         &c->action, c->toolchain_root, &c->capsule,
         c->driver_bytes_root, c->backend_bytes_root,
-        c->assembler_bytes_root, input_bytes_root, &fields, NULL);
+        c->assembler_bytes_root, c->runtime_root, c->verifier_root,
+        input_bytes_root, &fields, NULL);
     free(input);
     if (!keyed.ok) {
         (void)snprintf(c->refusal, sizeof(c->refusal), "%s", keyed.message);
@@ -1059,7 +1053,8 @@ static bool bfat_donor_key_matches(const struct bfat_attach_ctx *c,
     struct zcl_result keyed = bfat_fields_for_action(
         candidate, c->toolchain_root, &c->capsule,
         c->driver_bytes_root, c->backend_bytes_root,
-        c->assembler_bytes_root, input_root, &fields, NULL);
+        c->assembler_bytes_root, c->runtime_root, c->verifier_root,
+        input_root, &fields, NULL);
     free(input);
     if (!keyed.ok)
         return false;

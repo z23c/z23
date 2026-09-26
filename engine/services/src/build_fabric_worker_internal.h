@@ -13,6 +13,24 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
+
+/* Resolve the exact verifier executable selected for a physical action. */
+struct zcl_result bfw_worker_path(const char *workspace, char *out,
+                                  size_t cap);
+
+struct build_fabric_executor_identity;
+bool bfw_attach_identity_capture(
+    const char *workspace, const char *selected_verifier,
+    uint8_t work_kind, bool package_action,
+    struct build_fabric_executor_identity *out);
+bool bfw_attach_identity_finish(
+    const char *workspace, const char *selected_verifier, bool started,
+    const struct build_fabric_executor_identity *before);
+void bfw_attach_publish_checked(
+    bool stable, const char *workspace, const struct db_build_job *job,
+    const struct db_build_action *action, const uint8_t input_root[32],
+    const struct build_fabric_executor_identity *identity);
 
 /* The source tree named by `root_hex` is still exactly in the workspace CAS
  * and still hashes to its own name. */

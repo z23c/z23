@@ -93,8 +93,8 @@ static bool bfw_capability_has(const char *capabilities, const char *wanted)
     }
     return false;
 }
-static struct zcl_result bfw_worker_path(const char *workspace,
-                                         char *out, size_t cap)
+struct zcl_result bfw_worker_path(const char *workspace,
+                                  char *out, size_t cap)
 {
     char exe[BFW_PATH_MAX];
     if (!os_proc_exe_path(exe, sizeof(exe)))
@@ -511,11 +511,17 @@ struct zcl_result build_fabric_worker_execute(
         .action_id = action_id,
     };
     bool spawn_cancelled = false;
+    struct build_fabric_executor_identity checked_identity;
+    bool attach_identity_stable = bfw_attach_identity_capture(
+        workspace, paths.worker, work_kind, package_action,
+        &checked_identity);
     int64_t child_cpu_before_us = bfw_children_cpu_us();
     int64_t execution_started_us = platform_time_monotonic_us();
     int rc = zcl_spawn_capture_cancelable(
         spawn_argv, capture, sizeof(capture), execute_timeout,
         bfw_cancel_requested, &cancel_context, &spawn_cancelled);
+    attach_identity_stable = bfw_attach_identity_finish(
+        workspace, paths.worker, attach_identity_stable, &checked_identity);
     int64_t action_execution_us =
         platform_time_monotonic_us() - execution_started_us;
     if (package_action)
@@ -654,8 +660,9 @@ struct zcl_result build_fabric_worker_execute(
          * request can attach to this physical result instead of recompiling.
          * Best-effort: the observation, output, and receipt above stand on
          * their own; a publish failure logs and degrades to a future MISS. */
-        build_fabric_executor_key_publish_logged(
-            workspace, &job, &action, observed_input_bytes_root);
+        bfw_attach_publish_checked(
+            attach_identity_stable, workspace, &job, &action,
+            observed_input_bytes_root, &checked_identity);
     }
     int64_t output_cas_us =
         platform_time_monotonic_us() - output_cas_started_us;

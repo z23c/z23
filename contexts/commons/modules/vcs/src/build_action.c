@@ -215,7 +215,17 @@ static bool build_toolchain_query(void *ctx, const char *const argv[],
                                   char *out, size_t cap)
 {
     (void)ctx;
-    if (zcl_spawn_capture(argv, out, cap, 10000) != 0 || !out[0])
+#if defined(__linux__)
+    if (!argv || !argv[0] || !argv[1] || argv[2]) return false;
+    const char *const fixed_argv[] = {
+        "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LC_ALL=C",
+        argv[0], argv[1], NULL
+    };
+    const char *const *query_argv = fixed_argv;
+#else
+    const char *const *query_argv = argv;
+#endif
+    if (zcl_spawn_capture(query_argv, out, cap, 10000) != 0 || !out[0])
         return false;
     out[strcspn(out, "\r\n")] = '\0';
     return out[0] != '\0';
@@ -702,13 +712,14 @@ static bool build_compile_key_toolchain(
     const struct vcs_fixed_compile_proof_inputs *in,
     struct vcs_component_proof_key_v1 *key)
 {
-    uint8_t capsule_root[32], tool_bytes[128], abi_bytes[64];
+    uint8_t capsule_root[32], tool_bytes[160], abi_bytes[64];
     if (!vcs_toolchain_capsule_v1_root(in->capsule, capsule_root))
         return false;
     memcpy(tool_bytes, capsule_root, 32);
     memcpy(tool_bytes + 32, in->driver_bytes_sha3, 32);
     memcpy(tool_bytes + 64, in->backend_bytes_sha3, 32);
     memcpy(tool_bytes + 96, in->assembler_bytes_sha3, 32);
+    memcpy(tool_bytes + 128, in->runtime_bytes_sha3, 32);
     memcpy(abi_bytes, in->capsule->abi_files_sha3, 32);
     memcpy(abi_bytes + 32, in->capsule->target_probes_sha3, 32);
     memcpy(key->roots[VCS_CPK_SYSROOT], in->capsule->sysroot_sha3, 32);
@@ -761,7 +772,8 @@ static bool build_compile_key_policy(
     sha3_256_finalize(&sha, policy_bytes);
     return vcs_component_proof_field_root(VCS_CPK_BUILD_GRAPH, graph,
                sizeof(graph) - 1, key->roots[VCS_CPK_BUILD_GRAPH]) &&
-           vcs_component_proof_field_root(VCS_CPK_HARNESS, "", 0,
+           vcs_component_proof_field_root(VCS_CPK_HARNESS,
+               in->verifier_bytes_sha3, 32,
                key->roots[VCS_CPK_HARNESS]) &&
            vcs_component_proof_field_root(VCS_CPK_FIXTURES, "", 0,
                key->roots[VCS_CPK_FIXTURES]) &&
@@ -776,9 +788,12 @@ static bool build_compile_key_tools_present(
 {
     return in && in->capsule && in->driver_bytes_sha3 &&
         in->backend_bytes_sha3 && in->assembler_bytes_sha3 &&
+        in->runtime_bytes_sha3 && in->verifier_bytes_sha3 &&
         build_root_present(in->driver_bytes_sha3) &&
         build_root_present(in->backend_bytes_sha3) &&
-        build_root_present(in->assembler_bytes_sha3);
+        build_root_present(in->assembler_bytes_sha3) &&
+        build_root_present(in->runtime_bytes_sha3) &&
+        build_root_present(in->verifier_bytes_sha3);
 }
 
 static bool build_compile_key_inputs_valid(

@@ -50,6 +50,14 @@ struct build_fabric_attach_report {
     uint64_t compiler_processes; /* always 0: attachment never compiles */
 };
 
+struct build_fabric_executor_identity {
+    uint8_t driver[32];
+    uint8_t backend[32];
+    uint8_t assembler[32];
+    uint8_t runtime[32];
+    uint8_t verifier[32];
+};
+
 const char *build_fabric_attach_disposition_string(
     enum build_fabric_attach_disposition disposition);
 
@@ -71,12 +79,16 @@ void build_fabric_executor_key_from_parts(
 struct zcl_result build_fabric_executor_host_tool_hashes(
     uint8_t driver_sha3[32], uint8_t backend_sha3[32],
     uint8_t assembler_sha3[32]);
+struct zcl_result build_fabric_executor_host_runtime_roots(
+    const char *workspace, uint8_t runtime_root[32],
+    uint8_t verifier_root[32]);
 
 /* Full key derivation for one planned action: recomputes the fixed
  * flags/environment roots for the action kind and refuses a stale declared
  * root, hashes the current tool bytes, and binds the exact input bytes. */
 struct zcl_result build_fabric_executor_key_compose(
-    const struct db_build_action *action, const uint8_t input_bytes_root[32],
+    const char *workspace, const struct db_build_action *action,
+    const uint8_t input_bytes_root[32],
     uint8_t out_key[32]);
 
 /* Idempotently store the self-describing executor-key record in the workspace
@@ -84,13 +96,15 @@ struct zcl_result build_fabric_executor_key_compose(
  * physical observation lands. */
 struct zcl_result build_fabric_executor_key_publish(
     const char *workspace, const struct db_build_job *job,
-    const struct db_build_action *action, const uint8_t input_bytes_root[32]);
+    const struct db_build_action *action, const uint8_t input_bytes_root[32],
+    const struct build_fabric_executor_identity *checked_identity);
 
 /* Best-effort publish for the confined worker: logs a failure and returns
  * void so the caller adds no branch to its pinned complexity budget. */
 void build_fabric_executor_key_publish_logged(
     const char *workspace, const struct db_build_job *job,
-    const struct db_build_action *action, const uint8_t input_bytes_root[32]);
+    const struct db_build_action *action, const uint8_t input_bytes_root[32],
+    const struct build_fabric_executor_identity *checked_identity);
 
 /* Attach an eligible duplicate compile request to the qualified physical
  * result of an earlier request WITHOUT re-running the compiler. The

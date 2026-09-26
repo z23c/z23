@@ -241,7 +241,7 @@ static int test_bf_attach_avoids_second_compile(void)
         uint8_t input_bytes_root[32], key[32];
         sha3_256(att_unit, sizeof(att_unit) - 1u, input_bytes_root);
         struct zcl_result composed = build_fabric_executor_key_compose(
-            &durable_a, input_bytes_root, key);
+            dir, &durable_a, input_bytes_root, key);
         ASSERT_RESULT_OK(composed);
         ASSERT(vcs_object_has(dir, key));
 
@@ -251,12 +251,17 @@ static int test_bf_attach_avoids_second_compile(void)
         uint8_t driver[32], backend[32], assembler[32];
         ASSERT_RESULT_OK(build_fabric_executor_host_tool_hashes(
             driver, backend, assembler));
+        uint8_t runtime[32], verifier[32];
+        ASSERT_RESULT_OK(build_fabric_executor_host_runtime_roots(
+            dir, runtime, verifier));
         uint8_t no_proof_policy[32] = {0};
         struct vcs_fixed_compile_proof_inputs proof_inputs = {
             .capsule = &capsule,
             .driver_bytes_sha3 = driver,
             .backend_bytes_sha3 = backend,
             .assembler_bytes_sha3 = assembler,
+            .runtime_bytes_sha3 = runtime,
+            .verifier_bytes_sha3 = verifier,
             .input_bytes_sha3 = input_bytes_root,
             .proof_policy_root = no_proof_policy,
             .target = VCS_BUILD_TARGET_V1,
@@ -377,6 +382,29 @@ static int test_bf_attach_avoids_second_compile(void)
 
         /* No staging area and no compiler process for B. */
         ASSERT_EQ(att_build_work_entries(dir), entries_before);
+
+        /* A distinct, real submitted request with changed compiler input
+         * cannot borrow A's physical result. */
+        static const uint8_t changed_unit[] =
+            "int zbuild_fixture(void) { return 24; }\n";
+        uint8_t changed_root[32];
+        sha3_256(changed_unit, sizeof(changed_unit) - 1u, changed_root);
+        ASSERT(vcs_object_put_addressed(dir, changed_root, changed_unit,
+                                        sizeof(changed_unit) - 1u));
+        struct db_build_job job_c;
+        struct db_build_action action_c;
+        ASSERT(att_plan_request(&ndb, dir, att_id_d, att_id_b, capsule_hex,
+                                changed_root, "dev-x86-64-v3", &job_c,
+                                &action_c));
+        struct db_build_receipt receipt_c;
+        struct build_fabric_attach_report miss;
+        struct zcl_result distinct = build_fabric_attach(
+            &ndb, dir, NULL, &job_c, &action_c, secret, pubkey, &receipt_c,
+            &miss);
+        ASSERT_RESULT_OK(distinct);
+        ASSERT_EQ(miss.disposition, BUILD_FABRIC_ATTACH_MISS);
+        ASSERT(strcmp(miss.executor_key, key_hex) != 0);
+        ASSERT_EQ(att_build_work_entries(dir), entries_before);
         printf("attach cost report: physical_compile_us=%lld "
                "attach_us=%lld restored_bytes=%llu compiler_runs=1\n",
                (long long)physical_wall_us,
@@ -414,6 +442,32 @@ static int test_bf_attach_executor_key_binds_tool_bytes(void)
          * platform_toolchain_capture_descriptor resolves the fixed compiled-in
          * toolchain paths and honors no environment override.) */
         ASSERT(memcmp(capsule.assembler_sha3, assembler, 32) != 0);
+
+        const char *old_compiler_path = getenv("COMPILER_PATH");
+        char *saved_compiler_path = old_compiler_path
+            ? strdup(old_compiler_path) : NULL;
+        ASSERT(!old_compiler_path || saved_compiler_path);
+        ASSERT(setenv("COMPILER_PATH", "/bin", 1) == 0);
+        struct vcs_toolchain_capsule_v1 overridden;
+        bool captured_override = vcs_toolchain_capsule_v1_capture(
+            &overridden);
+        uint8_t driver_override[32], backend_override[32];
+        uint8_t assembler_override[32];
+        struct zcl_result hashed_override =
+            build_fabric_executor_host_tool_hashes(
+                driver_override, backend_override, assembler_override);
+        if (saved_compiler_path) {
+            (void)setenv("COMPILER_PATH", saved_compiler_path, 1);
+            free(saved_compiler_path);
+        } else {
+            (void)unsetenv("COMPILER_PATH");
+        }
+        ASSERT(captured_override);
+        ASSERT_RESULT_OK(hashed_override);
+        ASSERT_EQ(memcmp(&overridden, &capsule, sizeof(capsule)), 0);
+        ASSERT_EQ(memcmp(driver_override, driver, 32), 0);
+        ASSERT_EQ(memcmp(backend_override, backend, 32), 0);
+        ASSERT_EQ(memcmp(assembler_override, assembler, 32), 0);
 
         uint8_t fixed_flags[32], fixed_environment[32], input_root[32];
         ASSERT(vcs_build_action_v1_fixed_flags_root_for_kind(
