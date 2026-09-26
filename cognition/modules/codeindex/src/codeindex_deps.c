@@ -15,11 +15,13 @@
  * exactly like headers. An extension allowlist silently dropped them from the
  * graph, so a registry edit moved no downstream content key and busted no
  * cache. The depfile is the authority; if the compiler read it, it is an edge.
- * A listed path that is not a regular file in this checkout is omitted: a
- * retained epoch can still name a layout this tree no longer has. Omitting
- * that path, or trusting a depfile that is incomplete, older than its
- * translation unit, or missing a quoted include that exists in the tree,
- * does not make the include answer complete.
+ * A listed path that is not a regular file in this checkout is still an edge:
+ * the header was deleted or renamed after the compile, a generated input has
+ * not been generated yet, or the live epoch describes an older layout. The
+ * unit still read that path, so its change must still impact the unit;
+ * dropping the edge would narrow every plan past it. Such a path, a depfile
+ * that is incomplete or older than its translation unit, or a quoted include
+ * the depfile does not list makes the include answer not complete.
  *
  * Depfiles are written into a per-build compile epoch,
  * `<object-root>/epochs/<64-hex>/`. Every build mints a new epoch and the
@@ -94,9 +96,7 @@ static bool has_ext(const char *s, const char *ext)
     return a >= b && strcmp(s + a - b, ext) == 0;
 }
 
-/* True when `rel` is a regular file in this checkout. A dangling path left
- * by an older epoch is omitted; the live epoch still names the file that
- * exists. */
+/* True when `rel` is a regular file in this checkout. */
 static bool rel_is_regular_file(const char *root, const char *rel)
 {
     char path[CI_PATH_MAX];
@@ -121,12 +121,14 @@ static void note_include_narrow_unsafe(void)
     g_include_narrow_unsafe = 1;
 }
 
+/* Every in-tree prerequisite is kept. One this checkout no longer holds stays
+ * an edge and refuses a complete include answer. */
 static bool dep_prerequisite_kept(const char *root, const char *rel)
 {
     if (rel_is_regular_file(root, rel))
         return true;
     note_include_narrow_unsafe();
-    return false;
+    return true;
 }
 
 /* Parse one depfile's text; emit (src, dep) edges. */
