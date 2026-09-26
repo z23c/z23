@@ -285,9 +285,79 @@ static bool cin_depfile_rewrite_changed(const char *live,
            !cin_exists(live, "index.kv.spare");
 }
 
+static bool cin_count_includes(const char *root, int *present, int *missing)
+{
+    struct codeindex *index = codeindex_open(root);
+    char includes[8][256];
+    int count;
+    *present = 0;
+    *missing = 0;
+    if (!index) return false;
+    count = codeindex_includes_of_file(index, cin_units[0], includes, 8);
+    if (count < 0) {
+        codeindex_close(index);
+        return false;
+    }
+    for (int i = 0; i < count; i++) {
+        if (strcmp(includes[i], "lib/net/src/beta.c") == 0) (*present)++;
+        if (strcmp(includes[i],
+                   "lib/base/include/base/format_attribute.h") == 0)
+            (*missing)++;
+    }
+    printf("missing_prereq_edges=%d present_prereq_edges=%d include_rows=%d\n",
+           *missing, *present, count);
+    codeindex_close(index);
+    return true;
+}
+
+/* A retained epoch can name a header this checkout does not contain. The
+ * shipped depfile scan must not keep that path as an include edge. */
+static bool cin_depfile_omits_missing(const char *live, const char *reference)
+{
+    static const char depfile[] =
+        "build/fixture.o: lib/net/src/alpha.c lib/net/src/beta.c "
+        "lib/base/include/base/format_attribute.h\n";
+    int live_present = -1, live_missing = -1;
+    int ref_present = -1, ref_missing = -1;
+    if (!cin_write_file(live, "build/fixture.d", depfile) ||
+        !cin_write_file(reference, "build/fixture.d", depfile) ||
+        !cin_force_cold(live) || !cin_force_cold(reference))
+        return false;
+    if (!cin_count_includes(live, &live_present, &live_missing) ||
+        !cin_count_includes(reference, &ref_present, &ref_missing))
+        return false;
+    return live_missing == 0 && ref_missing == 0 &&
+           live_present == 1 && ref_present == 1;
+}
+
+static int cin_scope_refusals(void)
+{
+    int failures = 0;
+    char buf[1024];
+    size_t used = 0;
+    FILE *pipe = popen("tools/agent_fast_ci.sh compile-scope-selftest", "r");
+    if (!pipe) return 1;
+    buf[0] = '\0';
+    while (used + 1 < sizeof(buf)) {
+        size_t got = fread(buf + used, 1, sizeof(buf) - used - 1, pipe);
+        if (got == 0) break;
+        used += got;
+    }
+    buf[used] = '\0';
+    printf("%s\n", buf);
+    CIN_CHECK("scope proof still refuses conflict, incomplete closure, and missing receipt",
+              pclose(pipe) == 0 &&
+              strstr(buf, "proof_observation_conflict") != NULL &&
+              strstr(buf, "closure_incomplete") != NULL &&
+              strstr(buf, "missing_receipt") != NULL);
+    return failures;
+}
+
 static int cin_depfile_cases(const char *live, const char *reference)
 {
     int failures = 0;
+    CIN_CHECK("depfile omits a prerequisite the checkout does not contain",
+              cin_depfile_omits_missing(live, reference));
     CIN_CHECK("depfile fixtures match a cold rebuild",
               cin_depfile_seed(live, reference));
     CIN_CHECK("identical depfile rewrite preserves incremental include rows",
@@ -320,6 +390,7 @@ int test_codeindex_incremental(void)
     CIN_CHECK("cold builds of identical trees are identical",
               cin_agrees(live, reference, &baseline_files));
 
+    failures += cin_scope_refusals();
     failures += cin_depfile_cases(live, reference);
 
     /* One file. The narrowest incremental case and the one the dev loop
