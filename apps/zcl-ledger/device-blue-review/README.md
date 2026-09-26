@@ -21,10 +21,31 @@ make -C apps/zcl-ledger/device-blue-review \
   CLANGPATH=/path/to/clang/bin/
 ```
 
-The build checks for an empty `.data` section. The host's `zcl-tx-review`
+The build checks for an empty `.data` section. Extract the 15,616-byte code
+image and check its SHA-256 before installing:
+
+```sh
+llvm-objcopy -O binary --only-section=.text \
+  apps/zcl-ledger/device-blue-review/bin/app.elf /tmp/zcl-review.bin
+sha256sum /tmp/zcl-review.bin
+```
+
+The pinned image hash is
+`956bd4b0a12dfd31ffb469fcd34f3d803a94c1593eb2d5db102b914331402b79`.
+Install only on the dedicated test Blue at its home screen using
+`zcl-blue-install /dev/hidrawN --ca-install CA_KEY_FILE /tmp/zcl-review.bin`.
+If the signed install is rejected, the unsigned install command is
+`zcl-blue-install /dev/hidrawN /tmp/zcl-review.bin`; Blue will show its
+non-genuine application warning when the app opens. EXIT returns to home.
+Remove it from home using `zcl-blue-install /dev/hidrawN --ca-delete-review
+CA_KEY_FILE` for a signed install, or `--delete-review` for an unsigned one.
+
+The host's `zcl-tx-review`
 command can compare the app's reply to its own parser using
 `--blue /dev/hidrawN`, once a separately reviewed image is installed and
-open. The install path has not accepted this image in a live test. Running
+open. The signed image installed on the dedicated Blue running BOLOS 2.1.1,
+and a synthetic one-spend, one-output Sapling fixture returned a matching
+summary and exact-byte digest. This is a structural review test only. Running
 the host command without `--blue` only parses a local file.
 
 Protocol commands use CLA `A5`, P1/P2 zero, and one-byte `Lc`:

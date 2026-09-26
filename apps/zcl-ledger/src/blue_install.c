@@ -36,6 +36,13 @@ static const app_profile profiles[] = {
          0x58, 0xc6, 0x36, 0x2d, 0xca, 0x39, 0x15, 0x19,
          0x3d, 0x4b, 0x76, 0x47, 0x7c, 0x89, 0x86, 0x30,
          0xe7, 0x9e, 0x09, 0x6a, 0xe9, 0x9a, 0xe4, 0xc6}
+    },
+    {
+        "ZCL Review",
+        {0x95, 0x6b, 0xd4, 0xb0, 0xa1, 0x2d, 0xfd, 0x31,
+         0xff, 0xb4, 0x69, 0xfc, 0xd3, 0x4f, 0x3d, 0x80,
+         0x3a, 0x94, 0xc1, 0x59, 0x3e, 0xb2, 0xd5, 0xdb,
+         0x10, 0x2b, 0x91, 0x43, 0x31, 0x40, 0x2b, 0x79}
     }
 };
 
@@ -444,6 +451,10 @@ static bool parse_ca_args(int argc, char **argv, install_args *args) {
         args->ca_path = argv[3];
         args->delete_app = true;
         args->profile = &profiles[1];
+    } else if (argc == 4 && strcmp(argv[2], "--ca-delete-review") == 0) {
+        args->ca_path = argv[3];
+        args->delete_app = true;
+        args->profile = &profiles[2];
     } else if (argc == 5 && strcmp(argv[2], "--ca-install") == 0) {
         args->ca_path = argv[3];
         args->image_path = argv[4];
@@ -462,6 +473,9 @@ static bool parse_plain_args(int argc, char **argv, install_args *args) {
     } else if (argc == 3 && strcmp(argv[2], "--delete-fixture") == 0) {
         args->delete_app = true;
         args->profile = &profiles[1];
+    } else if (argc == 3 && strcmp(argv[2], "--delete-review") == 0) {
+        args->delete_app = true;
+        args->profile = &profiles[2];
     } else if (argc == 3)
         args->image_path = argv[2];
     else return false;
@@ -477,19 +491,20 @@ static int parse_args(int argc, char **argv, install_args *args) {
 int main(int argc, char **argv) {
     install_args args;
     if (parse_args(argc, argv, &args) < 0) {
-        fprintf(stderr, "Usage: %s /dev/hidrawN app.bin|--channel-only|--delete|--delete-fixture|--ca-reset\n"
+        fprintf(stderr, "Usage: %s /dev/hidrawN app.bin|--channel-only|--delete|--delete-fixture|--delete-review|--ca-reset\n"
                         "       %s /dev/hidrawN --ca-enroll PRIVATE_KEY_FILE\n"
                         "       %s /dev/hidrawN --ca-channel-only PRIVATE_KEY_FILE\n"
                         "       %s /dev/hidrawN --ca-delete-fixture PRIVATE_KEY_FILE\n"
+                        "       %s /dev/hidrawN --ca-delete-review PRIVATE_KEY_FILE\n"
                         "       %s /dev/hidrawN --ca-install PRIVATE_KEY_FILE app.bin\n",
-                argv[0], argv[0], argv[0], argv[0], argv[0]);
+                argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
     uint8_t *code = NULL;
     size_t code_length = 0;
     if (args.image_path &&
         read_binary(args.image_path, &code, &code_length, &args.profile) < 0) {
-        fputs("Expected a reviewed, 64-byte-aligned ZCL Probe or Fixture binary.\n", stderr);
+        fputs("Expected a reviewed, 64-byte-aligned ZCL Probe, Fixture, or Review binary.\n", stderr);
         return 1;
     }
     EVP_PKEY *ca_key = args.ca_path ? blue_ca_load(args.ca_path) : NULL;

@@ -80,9 +80,9 @@ The optional `--blue` mode sends at most 4,096 transaction bytes to the
 identity, and requires its structural summary and transaction SHA-256 digest
 to match the host's values. This checks the exact bytes received by the Blue;
 it is not the ZIP-243 signing digest or a device approval.
-`blue_parsed` is true only after that comparison succeeds. The Blue app has
-not been installed or tested on the physical device; it has no signing
-command or transaction approval screen. Without `--blue`, the CLI sends
+`blue_parsed` is true only after that comparison succeeds. A synthetic
+one-spend, one-output fixture passed this comparison on a dedicated Blue.
+The app has no signing command or transaction approval screen. Without `--blue`, the CLI sends
 nothing over USB and `blue_parsed` is false.
 
 The [ZCL Fixture](device-blue-fixture/README.md) tests an exact public-key

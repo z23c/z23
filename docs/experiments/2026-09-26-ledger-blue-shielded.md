@@ -88,3 +88,27 @@ updated ARM image still has 15,624 text bytes, zero initialized data bytes,
 and 6,132 BSS bytes. Its app.hex SHA-256 is
 `85bc430c918ed15cbf9a329f6fc0e43d31e37d0a0b8836d86f3c3c4310c3834e`.
 No physical Blue test occurred.
+
+## Live signed review and synthetic Sapling fixture
+
+Recorded: 2026-09-26T07:33:38-04:00 (2026-09-26T11:33:38Z)
+
+The connected dedicated test Blue reported BOLOS 2.1.1 and target
+`0x31010004`. Z23 established a CA-authenticated secure channel using the
+previously enrolled `Z23` CA. The signed install of the pinned 15,616-byte
+`ZCL Review` image returned success at create, load, and commit. The owner
+confirmed the icon appeared, its screen stayed steady, and EXIT returned to
+home. `zcl-ledger app-info` reported `ZCL Review` version `0.1.0` while
+the app was open.
+
+A 1,425-byte synthetic Sapling-v4 fixture had one 384-byte spend description,
+one 948-byte output description, and zeroed proof and signature fields. Its
+SHA-256 was
+`cffdc5b7a7473cd62d4a77bf63ac5f6951b7368735f361acc5603a2d798f658b`.
+The host command
+`zcl-tx-review --json --blue /dev/hidraw1 /tmp/zcl-sapling-review-fixture.bin`
+reported one Sapling spend, one Sapling output, and `blue_parsed:true`.
+The Blue returned the same structural summary and exact-byte SHA-256 as the
+host parser. The fixture's zeroed proofs and signatures are not a valid
+payment. The app has no key or signing operation; this test did not create,
+approve, or broadcast a transaction.
