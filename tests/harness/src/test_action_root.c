@@ -969,18 +969,20 @@ static const char k_fx_as_v2[] =
  * once that exists in its own program prefix, as GCC would.
  * Like GCC, it reports a skipped dir before the search list, never inside
  * it (an entry that is not a canonical dir is refused). */
-static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
+/* The fake driver's text: `line` is printed first when asked -###, and
+ * `arg` is one more cc1 argument (both "" for the plain driver). */
+static int fx_fake_driver_text(const struct fx *x, const char *line,
+                               const char *arg, char *script, size_t cap)
 {
-    char script[4 * PATH_MAX + 1024];
-    int n = snprintf(
-        script, sizeof(script),
+    return snprintf(
+        script, cap,
         "#!/bin/sh\nR='%s'\n"
         "case \" $* \" in\n"
         "*\" -print-file-name=libc.so \"*) echo \"$R/lib/libc.so\"; exit 0;;\n"
-        "*\" -### \"*)\n"
+        "*\" -### \"*)\n%s"
         "  a=\"$R/tools/as\"; [ -x \"$R/prefix/as\" ] && a=\"$R/prefix/as\"\n"
         "  echo \"COMPILER_PATH=$R/prefix/\"\n"
-        "  echo \" \\\"$R/tools/cc1\\\" \\\"-quiet\\\" \\\"-o\\\" \\\"$R/x.s\\\"\"\n"
+        "  echo \" \\\"$R/tools/cc1\\\" \\\"-quiet\\\" %s\\\"-o\\\" \\\"$R/x.s\\\"\"\n"
         "  echo \" $a --64 -o /dev/null $R/x.s\"; exit 0;;\n"
         "*\" -v \"*)\n"
         "  d=sysdef; case \" $* \" in *\" -mtune=alt \"*) d=sysalt;; esac\n"
@@ -991,7 +993,13 @@ static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
         "  echo \" $R/$d\"; echo 'End of search list.'; exit 0;;\n"
         "esac\nfor a do shift; case \"$a\" in -mtune=*) ;;\n"
         "  *) set -- \"$@\" \"$a\";; esac; done\n"
-        "exec cc \"$@\"\n", x->root);
+        "exec cc \"$@\"\n", x->root, line, arg);
+}
+
+static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
+{
+    char script[4 * PATH_MAX + 1024];
+    int n = fx_fake_driver_text(x, "", "", script, sizeof(script));
     char path[PATH_MAX];
     return n > 0 && n < (int)sizeof(script) &&
            fx_write(x->root, "tools/tcc.sh", script) &&
@@ -1188,6 +1196,63 @@ static void test_key_env_influential(struct fx *x)
     (void)unsetenv("GCC_COLORS");
     AR_CHECK("env: a diagnostics-only variable neither reaches the child nor "
              "moves the key", ok);
+}
+
+/* Install fake driver text as root/<dir>/fxinner. */
+static bool fx_inner_driver(struct fx *x, const char *dir, const char *line,
+                            const char *arg)
+{
+    char script[4 * PATH_MAX + 1024], rel[64];
+    int n = fx_fake_driver_text(x, line, arg, script, sizeof(script));
+    return n > 0 && n < (int)sizeof(script) &&
+           snprintf(rel, sizeof(rel), "%s/fxinner", dir) < (int)sizeof(rel) &&
+           fx_exec(x, rel, script);
+}
+
+/* Key the wrapper with root/<dir> first on PATH. */
+static bool fx_key_inner(struct fx *x, const char *saved, const char *dir,
+                         const char *cc, char out[65])
+{
+    char path[8192 + PATH_MAX];
+    return snprintf(path, sizeof(path), "%s/%s:%s", x->root, dir, saved) <
+               (int)sizeof(path) &&
+           platform_environment_set("PATH", path, 1) == 0 &&
+           fx_key(x, cc, out);
+}
+
+/* A wrapper (same bytes) runs an inner driver from PATH. Two inner drivers
+ * that run the same programs but differ in one -### argument key apart;
+ * one that reads a Configuration file misses (backend_config_unbound). */
+static void test_key_backend_lines(struct fx *x)
+{
+    const char *path = getenv("PATH");
+    char saved[8192], cc[PATH_MAX], k1[65] = {0}, k2[65] = {0};
+    char k3[65] = {0};
+    bool ok = path && snprintf(saved, sizeof(saved), "%s", path) <
+                          (int)sizeof(saved) &&
+              fx_exec(x, "tools/wrap.sh", "#!/bin/sh\nexec fxinner \"$@\"\n") &&
+              snprintf(cc, sizeof(cc), "%s/tools/wrap.sh", x->root) <
+                  (int)sizeof(cc) &&
+              fx_inner_driver(x, "d1", "", "") &&
+              fx_inner_driver(x, "d2", "", "\\\"-fx-inner-spec\\\" ") &&
+              fx_inner_driver(x, "d3",
+                              "  echo 'Configuration file: /etc/fx.cfg'\n",
+                              "") &&
+              fx_key_inner(x, saved, "d1", cc, k1) &&
+              fx_key_inner(x, saved, "d2", cc, k2) &&
+              fx_key_inner(x, saved, "d1", cc, k3);
+    AR_CHECK("backend: two inner drivers running the same programs, one -### "
+             "argument apart, key apart; back to the first keys the same",
+             ok && strcmp(k1, k2) != 0 && strcmp(k1, k3) == 0);
+    char with[8192 + PATH_MAX];
+    ok = ok && snprintf(with, sizeof(with), "%s/d3:%s", x->root, saved) <
+                   (int)sizeof(with) &&
+         platform_environment_set("PATH", with, 1) == 0 &&
+         fx_key_miss(x, cc, "backend_config_unbound");
+    if (path)
+        (void)platform_environment_set("PATH", saved, 1);
+    AR_CHECK("backend: a driver that reads a Configuration file misses "
+             "(backend_config_unbound)", ok);
 }
 
 /* PATH=/usr/bin: with an `as` at the checkout root: the compile child's
@@ -1765,6 +1830,7 @@ static void test_derivation(void)
         test_key_env_influential(x);
         test_key_path_relative(x);
         test_key_cache_opaque(x);
+        test_key_backend_lines(x);
         test_key_same_name_static(x);
         test_key_cost(x);
     }

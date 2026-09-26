@@ -284,6 +284,7 @@ bool zcl_action_root_record(const char *store_dir, const char *unit,
  * its built-in #include <...> list, its sysroot, and the ld / collect2 it
  * runs for a link. */
 #define ARS_TARGETS_MAX 1024
+#define ARS_FLAGS_MAX 16384
 
 /* Libraries a -shared link pulls in without naming them; their bytes are
  * bound beside the capsule's crt/libgcc/libc.so.6. */
@@ -296,6 +297,13 @@ static const char *const k_ars_implicit[] = {
 struct ars_driver {
     char driver[512];
     char targets[ARS_TARGETS_MAX]; /* the plan's target flags, asked with */
+    /* The plan's full compile flags and checkout root: -### is asked with
+     * every flag, and each command line it prints is bound canonically
+     * (lines_sha3): an inner driver behind a wrapper, a specs file or a
+     * -march=native expansion changes a line even when no program does. */
+    char flags[ARS_FLAGS_MAX];
+    char root[PATH_MAX];
+    uint8_t lines_sha3[32];
     uint8_t bytes[32]; /* ars_driver_bytes of `driver` when captured */
     char dirs[ARS_SYSTEM_DIR_MAX][PATH_MAX];
     size_t count;
@@ -323,6 +331,15 @@ struct ars_driver {
     /* Set only while capturing: every driver query runs under it. */
     const struct zcl_action_root_child_env *ask_env;
     bool valid;
+};
+
+/* One driver-facts question: the plan's driver command, its target flags
+ * (asked with -E -v and -print-*), its full compile flags (asked with
+ * -###), the checkout root lines are canonical against, and the child
+ * environment every query runs under. */
+struct ars_ask {
+    const char *cc, *targets, *flags, *root;
+    const struct zcl_action_root_child_env *env;
 };
 
 static pthread_mutex_t g_driver_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -585,35 +602,47 @@ static size_t ars_ask_env_argv(const struct ars_driver *d, const char **argv,
     return argc;
 }
 
-/* Run `cc <target flags...> <args...>` under the child environment and
- * capture merged output. Output that fills the buffer is refused, never
- * parsed truncated. */
-static bool ars_driver_ask(const struct ars_driver *d, const char *const *args,
-                           char *capture, size_t cap)
+/* Run `cc <flags...> <args...>` under the child environment and capture
+ * merged output. Flags that would not all fit the argv, and output that
+ * fills the buffer, are refused, never used truncated. */
+static bool ars_driver_ask_with(const struct ars_driver *d, const char *flags,
+                                const char *const *args, char *capture,
+                                size_t cap)
 {
-    char text[512], targets[ARS_TARGETS_MAX], env_path[PATH_MAX];
+    char text[512], env_path[PATH_MAX];
+    char *words = zcl_malloc(ARS_FLAGS_MAX, "driver query flags");
     const char *argv[ARS_ARG_MAX];
     (void)snprintf(text, sizeof(text), "%s", d->driver);
-    (void)snprintf(targets, sizeof(targets), "%s", d->targets);
-    size_t base = ars_ask_env_argv(d, argv, env_path);
-    if (base == 0)
-        return false;
-    size_t words = zcl_argv_split(text, argv + base, ARS_ARG_MAX / 2);
-    size_t argc = base + words;
-    argc += zcl_argv_split(targets, argv + argc, ARS_ARG_MAX / 4);
-    for (size_t i = 0; words && args[i] && argc < ARS_ARG_MAX - 1; i++)
+    size_t base = words ? ars_ask_env_argv(d, argv, env_path) : 0;
+    size_t driver_n = base ? zcl_argv_split(text, argv + base,
+                                            ARS_ARG_MAX / 4) : 0;
+    size_t argc = base + driver_n, room = ARS_ARG_MAX - argc - 16;
+    bool fits = driver_n > 0 && snprintf(words, ARS_FLAGS_MAX, "%s", flags) <
+                                    ARS_FLAGS_MAX;
+    size_t flag_n = fits ? zcl_argv_split(words, argv + argc, room) : 0;
+    fits = fits && flag_n + 1 < room;
+    argc += flag_n;
+    for (size_t i = 0; fits && args[i] && argc < ARS_ARG_MAX - 1; i++)
         argv[argc++] = args[i];
     argv[argc] = NULL;
     bool timed_out = false;
     capture[0] = '\0';
-    bool ok = words > 0 &&
+    bool ok = fits &&
               zcl_spawn_capture_merged_observed(argv, capture, cap, 10000,
                                                 &timed_out) == 0 &&
               !timed_out && strlen(capture) + 1 < cap;
     if (!ok)
         fprintf(stderr, "[action-root] driver query failed or overflowed: "
                         "%.200s %s\n", d->driver, args[0] ? args[0] : "");
+    free(words);
     return ok;
+}
+
+/* The same with the plan's target flags only. */
+static bool ars_driver_ask(const struct ars_driver *d, const char *const *args,
+                           char *capture, size_t cap)
+{
+    return ars_driver_ask_with(d, d->targets, args, capture, cap);
 }
 
 /* First output line of `cc <arg>`, trimmed; "" when the line is empty. */
@@ -701,20 +730,120 @@ static void ars_shadow_state(const struct ars_driver *d, uint8_t out[32])
     sha3_256_finalize(&sha, out);
 }
 
-/* What a compile runs, asked as `cc -### -c`; the words are resolved per
- * derivation (ars_backend_sha3), never here. */
+/* A -### word, canonical: a driver temporary (under the child's TMPDIR, or
+ * /tmp) becomes "@tmp" plus its suffix, and every spelling of the checkout
+ * root becomes "@root", so the same compile in another worktree binds the
+ * same lines. */
+static bool ars_canon_word(const char *word, const char *root,
+                           const char *tmp, char *out, size_t cap)
+{
+    size_t tn = strlen(tmp), rn = strlen(root);
+    if (strncmp(word, tmp, tn) == 0 && word[tn] == '/') {
+        const char *base = strrchr(word, '/') + 1, *dot = strrchr(base, '.');
+        return snprintf(out, cap, "@tmp%s", dot ? dot : "") < (int)cap;
+    }
+    size_t o = 0;
+    for (const char *p = word; *p;) {
+        bool at_root = rn && strncmp(p, root, rn) == 0;
+        const char *piece = at_root ? "@root" : p;
+        size_t n = at_root ? 5 : 1;
+        if (o + n >= cap)
+            return false;
+        memcpy(out + o, piece, n);
+        o += n;
+        p += at_root ? rn : 1;
+    }
+    out[o] = '\0';
+    return true;
+}
+
+/* One command line of -### output: each word (quoted or bare) canonical and
+ * hashed with its terminator. A word with an escape is refused. */
+static bool ars_line_sha3(struct sha3_256_ctx *sha, const char *p,
+                          const char *root, const char *tmp)
+{
+    for (;;) {
+        p += strspn(p, " \t");
+        if (!*p || strchr("\r\n", *p))
+            break;
+        bool quoted = *p == '"';
+        p += quoted;
+        size_t n = strcspn(p, quoted ? "\"\r\n" : " \t\r\n");
+        char word[PATH_MAX], canon[PATH_MAX + 64];
+        if ((quoted && p[n] != '"') || n >= sizeof(word) ||
+            memchr(p, '\\', n))
+            return false;
+        memcpy(word, p, n);
+        word[n] = '\0';
+        p += n + quoted;
+        if (!ars_canon_word(word, root, tmp, canon, sizeof(canon)))
+            return false;
+        sha3_256_write(sha, (const uint8_t *)canon, strlen(canon) + 1);
+    }
+    sha3_256_write(sha, (const uint8_t *)"\n", 1);
+    return true;
+}
+
+/* The child's TMPDIR, where the driver writes its temporaries. */
+static const char *ars_ask_tmpdir(const struct ars_driver *d)
+{
+    for (size_t i = 0; d->ask_env && i < d->ask_env->n; i++)
+        if (strncmp(d->ask_env->v[i], "TMPDIR=", 7) == 0 &&
+            d->ask_env->v[i][7] == '/')
+            return d->ask_env->v[i] + 7;
+    return "/tmp";
+}
+
+/* SHA3 over every command line of -### output (lines that start with a
+ * space and are not "(in-process)"). A "Configuration file:" line (Clang)
+ * names flags the root does not bind: backend_config_unbound. */
+static bool ars_lines_capture(struct ars_driver *d, const char *out,
+                              char miss[40])
+{
+    static const char domain[] = "zcl.action_root.hotload_backend_lines.v1";
+    static const char config[] = "Configuration file:";
+    struct sha3_256_ctx sha;
+    const char *tmp = ars_ask_tmpdir(d);
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    for (const char *line = out; line && *line;) {
+        if (strncmp(line, config, sizeof(config) - 1) == 0) {
+            fprintf(stderr, "[action-root] driver %.200s reads a "
+                            "configuration file\n", d->driver);
+            if (miss)
+                (void)snprintf(miss, 40, "backend_config_unbound");
+            return false;
+        }
+        const char *p = line + strspn(line, " ");
+        bool command = line[0] == ' ' && !strchr("\r\n", *p) &&
+                       strncmp(p, "(in-process)", 12) != 0;
+        if (command && !ars_line_sha3(&sha, p, d->root, tmp))
+            return false;
+        line = strchr(line, '\n');
+        line += line != NULL;
+    }
+    sha3_256_finalize(&sha, d->lines_sha3);
+    return true;
+}
+
+/* What a compile runs, asked as `cc <every plan flag> -### -c`: the program
+ * words are resolved per derivation (ars_backend_sha3), never here, and
+ * every command line is bound canonically (ars_lines_capture). */
 static bool ars_programs_capture(struct ars_driver *d, char miss[40])
 {
-    static const char *const hash[] = { "-###", "-c", "-xc", "/dev/null",
-                                        "-o", "/dev/null", NULL };
+    static const char *const hash[] = { "-fPIC", "-###", "-c", "-xc",
+                                        "/dev/null", "-o", "/dev/null",
+                                        NULL };
     char *capture = zcl_malloc(ARS_HASH_OUT_MAX, "driver -### output");
     bool ok = capture &&
-              ars_driver_ask(d, hash, capture, ARS_HASH_OUT_MAX) &&
+              ars_driver_ask_with(d, d->flags, hash, capture,
+                                  ARS_HASH_OUT_MAX) &&
+              ars_lines_capture(d, capture, miss) &&
               zcl_action_root_parse_driver_programs(
                   capture, d->backend, ARS_BACKEND_MAX, &d->backend_n,
                   d->prefixes, ARS_PREFIX_MAX, &d->prefix_n);
     free(capture);
-    if (!ok && miss)
+    if (!ok && miss && !miss[0])
         (void)snprintf(miss, 40, "backend_unresolved");
     return ok;
 }
@@ -734,9 +863,8 @@ static bool ars_linker_capture(struct ars_driver *d)
     return true;
 }
 
-static bool ars_driver_capture(const char *cc, const char *targets,
-                               const struct zcl_action_root_child_env *env,
-                               struct ars_driver *d, char miss[40])
+static bool ars_driver_capture(const struct ars_ask *q, struct ars_driver *d,
+                               char miss[40])
 {
     static const char *const search[] = { "-xc", "-E", "-v", "/dev/null",
                                           NULL };
@@ -744,10 +872,13 @@ static bool ars_driver_capture(const char *cc, const char *targets,
     memset(d, 0, sizeof(*d));
     if (miss)
         miss[0] = '\0';
-    (void)snprintf(d->driver, sizeof(d->driver), "%s", cc);
-    (void)snprintf(d->targets, sizeof(d->targets), "%s", targets);
-    d->ask_env = env;
-    bool ok = ars_driver_ask(d, search, capture, sizeof(capture)) &&
+    (void)snprintf(d->driver, sizeof(d->driver), "%s", q->cc);
+    (void)snprintf(d->targets, sizeof(d->targets), "%s", q->targets);
+    (void)snprintf(d->root, sizeof(d->root), "%s", q->root);
+    d->ask_env = q->env;
+    bool ok = snprintf(d->flags, sizeof(d->flags), "%s", q->flags) <
+                  (int)sizeof(d->flags) &&
+              ars_driver_ask(d, search, capture, sizeof(capture)) &&
               ars_system_parse(capture, d, miss) &&
               ars_driver_line(d, "-print-sysroot", d->sysroot) &&
               ars_linker_capture(d) && ars_implicit_capture(d) &&
@@ -948,18 +1079,31 @@ static void ars_env_sha3(const struct zcl_action_root_child_env *env,
 }
 #endif
 
+#if !defined(_WIN32)
+/* g_driver (held under g_driver_mu) still answers `q`. */
+static bool ars_driver_cached(const struct ars_ask *q, const uint8_t bytes[32],
+                              const uint8_t env_sha3[32])
+{
+    return g_driver.valid && strcmp(g_driver.driver, q->cc) == 0 &&
+           strcmp(g_driver.targets, q->targets) == 0 &&
+           strcmp(g_driver.flags, q->flags) == 0 &&
+           strcmp(g_driver.root, q->root) == 0 &&
+           memcmp(g_driver.bytes, bytes, 32) == 0 &&
+           memcmp(g_driver.env_sha3, env_sha3, 32) == 0 &&
+           ars_driver_fresh(&g_driver);
+}
+#endif
+
 /* Driver facts are re-captured whenever the driver's bytes, the plan's
- * target flags or the child environment change, a built-in dir it skipped
- * as nonexistent appears, a program it names by path goes, or its program
- * prefixes gain or lose a same-name program; `miss` names the refusal. */
-static bool ars_driver_facts(const char *cc, const char *targets,
-                             const struct zcl_action_root_child_env *env,
-                             struct ars_driver *out, char miss[40])
+ * flags, the root or the child environment change, a built-in dir it
+ * skipped as nonexistent appears, a program it names by path goes, or its
+ * program prefixes gain or lose a same-name program; `miss` names the
+ * refusal. */
+static bool ars_driver_facts(const struct ars_ask *q, struct ars_driver *out,
+                             char miss[40])
 {
 #if defined(_WIN32)
-    (void)cc;
-    (void)targets;
-    (void)env;
+    (void)q;
     (void)out;
     if (miss)
         miss[0] = '\0';
@@ -968,17 +1112,13 @@ static bool ars_driver_facts(const char *cc, const char *targets,
     if (miss)
         miss[0] = '\0';
     uint8_t bytes[32], env_sha3[32];
-    if (!ars_driver_bytes(cc, bytes, miss))
+    if (!ars_driver_bytes(q->cc, bytes, miss))
         return false;
-    ars_env_sha3(env, env_sha3);
+    ars_env_sha3(q->env, env_sha3);
     pthread_mutex_lock(&g_driver_mu);
-    bool ok = g_driver.valid && strcmp(g_driver.driver, cc) == 0 &&
-              strcmp(g_driver.targets, targets) == 0 &&
-              memcmp(g_driver.bytes, bytes, sizeof(bytes)) == 0 &&
-              memcmp(g_driver.env_sha3, env_sha3, sizeof(env_sha3)) == 0 &&
-              ars_driver_fresh(&g_driver);
+    bool ok = ars_driver_cached(q, bytes, env_sha3);
     if (!ok) {
-        ok = ars_driver_capture(cc, targets, env, &g_driver, miss);
+        ok = ars_driver_capture(q, &g_driver, miss);
         memcpy(g_driver.bytes, bytes, sizeof(bytes));
         memcpy(g_driver.env_sha3, env_sha3, sizeof(env_sha3));
         g_driver.valid = ok;
@@ -1309,7 +1449,9 @@ static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
     char targets[ARS_TARGETS_MAX];
     char driver_miss[40] = {0};
     if (!ars_targets(k->cflags, k->unity ? NULL : k->ldflags, targets) ||
-        !ars_driver_facts(k->cc, targets, h->envp, &h->driver, driver_miss) ||
+        !ars_driver_facts(&(const struct ars_ask){ k->cc, targets, k->cflags,
+                                                   k->root, h->envp },
+                          &h->driver, driver_miss) ||
         !ars_implicit_sha3(&h->driver, implicit)) {
         if (driver_miss[0])
             ars_miss_set(m, driver_miss, ars_driver_miss_why(driver_miss),
@@ -1362,13 +1504,14 @@ static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
      * wrapper, a cache, another compiler) is bound by its program bytes,
      * the programs it runs for a compile by theirs, and the libraries its
      * links pull in unnamed by theirs. */
-    static const char domain[] = "zcl.action_root.hotload_toolchain.v3";
+    static const char domain[] = "zcl.action_root.hotload_toolchain.v4";
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
     sha3_256_write(&sha, capsule_root, sizeof(capsule_root));
     sha3_256_write(&sha, h->driver.bytes, sizeof(h->driver.bytes));
     sha3_256_write(&sha, backend, sizeof(backend));
+    sha3_256_write(&sha, h->driver.lines_sha3, sizeof(h->driver.lines_sha3));
     sha3_256_write(&sha, implicit, sizeof(implicit));
     sha3_256_finalize(&sha, r->toolchain_root);
     if (!ars_hook_argv(h, k)) {
