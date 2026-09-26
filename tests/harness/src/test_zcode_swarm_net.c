@@ -125,7 +125,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
-#include <ftw.h>
 #include <sys/wait.h>
 #endif
 #include <unistd.h>
@@ -6297,16 +6296,26 @@ static bool zwn_pull_hold(const struct zwn_pull_fixture *f)
     return ok;
 }
 
-static size_t zwn_pull_object_count;
-
-static int zwn_pull_count_one(const char *path, const struct stat *st,
-                              int type, struct FTW *ftw)
+static size_t zwn_pull_dir_files(const char *dir, int depth)
 {
-    (void)path;
-    (void)st;
-    (void)ftw;
-    zwn_pull_object_count += type == FTW_F ? 1u : 0u;
-    return 0;
+    DIR *d = opendir(dir);
+    size_t count = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+        char path[900];
+        (void)snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (lstat(path, &st) != 0)
+            continue;
+        count += S_ISREG(st.st_mode) ? 1u
+            : S_ISDIR(st.st_mode) && depth > 0
+            ? zwn_pull_dir_files(path, depth - 1) : 0u;
+    }
+    if (d)
+        (void)closedir(d);
+    return count;
 }
 
 /* Files under the observer's CAS; a refused observation must add none. */
@@ -6314,9 +6323,7 @@ static size_t zwn_pull_objects(const struct zwn_pull_fixture *f)
 {
     char root[700];
     (void)snprintf(root, sizeof(root), "%s/.zvcs/objects", f->workspace);
-    zwn_pull_object_count = 0;
-    (void)nftw(root, zwn_pull_count_one, 16, FTW_PHYS);
-    return zwn_pull_object_count;
+    return zwn_pull_dir_files(root, 2);
 }
 
 static void zwn_pull_observation(struct vcs_zcode_work_pull_observation *o,
