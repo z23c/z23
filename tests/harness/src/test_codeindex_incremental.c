@@ -313,9 +313,11 @@ static bool cin_count_includes(const char *root, int *present, int *missing)
     return true;
 }
 
-/* A retained epoch can name a header this checkout does not contain. The
- * shipped depfile scan must not keep that path as an include edge. */
-static bool cin_depfile_omits_missing(const char *live, const char *reference)
+/* A depfile can name a header this checkout no longer contains: the header was
+ * deleted or renamed after the compile. The source still depends on that path,
+ * so the scan keeps the edge. Dropping it would let the deletion impact nothing
+ * and narrow the plan past the unit that read the header. */
+static bool cin_depfile_keeps_missing(const char *live, const char *reference)
 {
     static const char depfile[] =
         "build/fixture.o: lib/net/src/alpha.c lib/net/src/beta.c "
@@ -329,7 +331,7 @@ static bool cin_depfile_omits_missing(const char *live, const char *reference)
     if (!cin_count_includes(live, &live_present, &live_missing) ||
         !cin_count_includes(reference, &ref_present, &ref_missing))
         return false;
-    return live_missing == 0 && ref_missing == 0 &&
+    return live_missing == 1 && ref_missing == 1 &&
            live_present == 1 && ref_present == 1;
 }
 
@@ -530,8 +532,8 @@ static int cin_scope_refusals(void)
 static int cin_depfile_cases(const char *live, const char *reference)
 {
     int failures = 0;
-    CIN_CHECK("depfile omits a prerequisite the checkout does not contain",
-              cin_depfile_omits_missing(live, reference));
+    CIN_CHECK("depfile keeps a prerequisite the checkout no longer contains",
+              cin_depfile_keeps_missing(live, reference));
     CIN_CHECK("depfile fixtures match a cold rebuild",
               cin_depfile_seed(live, reference));
     CIN_CHECK("identical depfile rewrite preserves incremental include rows",
