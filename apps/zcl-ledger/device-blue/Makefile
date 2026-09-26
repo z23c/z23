@@ -29,6 +29,10 @@ CFLAGS += -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 LDFLAGS += -O2 -Wl,-z,noexecstack
 LDLIBS += -lgcc -lc
 
-all: default
+all: default check-image
 
 include $(BOLOS_SDK)/Makefile.rules
+
+check-image: default
+	@data_size=$$($(GCCPATH)arm-none-eabi-size -A bin/app.elf | awk '$$1 == ".data" { print $$2 }'); \
+	  test "$$data_size" = 0 || { echo "Initialized .data requires loader allocation; refusing image" >&2; exit 1; }
