@@ -19,7 +19,6 @@
 #include "platform/os_proc.h"
 #include "platform/private_directory.h"
 #include "platform/process_lock.h"
-#include "platform/os_proc.h"
 #include "platform/rng.h"
 #include "platform/time_compat.h"
 #include "platform/clock.h"
@@ -832,10 +831,11 @@ static int watch_sealer_loop(const char *root, int fd)
 /* The sealer drops the source watch, the watcher's stop endpoint and the
  * request write end but keeps the inherited singleton lock until it exits: a
  * sealer orphaned by a killed watcher still owns sealing, so no new watcher
- * starts and restarts the ring until it has drained. Only the watcher's stop request, or pipe EOF when
- * the watcher died, stops it; SIGINT and SIGTERM reach the watcher, whose
- * stop then drains this child, and a kill mid-seal leaves no torn journal
- * file (records are renamed into place whole). */
+ * starts and restarts the ring until it has drained. Only the watcher's stop
+ * record on the request pipe, or pipe EOF when the watcher died, stops it;
+ * SIGINT and SIGTERM reach the watcher, whose stop then drains this child,
+ * and a kill mid-seal leaves no torn journal file (records are renamed into
+ * place whole). */
 static void watch_sealer_child(struct watch_context *ctx, const int fds[2],
                                const sigset_t *mask)
 {
