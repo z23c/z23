@@ -29,6 +29,7 @@ struct holder {
     char fifo[320];
     int lock_fd;
     int stop_fd;
+    const char *image;
 };
 
 static unsigned long long start_token(long pid)
@@ -61,12 +62,13 @@ static bool boot_id(char out[64])
     return ok && out[0];
 }
 
-/* The launcher's record: pid, birth token, boot, image device and inode. */
+/* The launcher's record: pid, birth token, boot, image device and inode
+ * (the selftest runs this fixture by its absolute path). */
 static bool record_self(const struct holder *h)
 {
     char boot[64], body[256];
     struct stat exe;
-    if (!boot_id(boot) || stat("/proc/self/exe", &exe) != 0 ||
+    if (!boot_id(boot) || h->image[0] != '/' || stat(h->image, &exe) != 0 ||
         (mkdir(".cache/zcl-dev-watch.d", 0700) != 0 && errno != EEXIST))
         return false;
     int n = snprintf(body, sizeof(body),
@@ -126,27 +128,38 @@ static void stop_wait(const struct holder *h)
     }
 }
 
+/* Lead a session of its own, as the launcher's child does: -1 on failure,
+ * 1 in the parent that handed the session to its child, else 0. */
+static int lead_session(void)
+{
+    if (setsid() >= 0) return 0;
+    /* A process-group leader cannot lead a new session: its child can. */
+    pid_t child = fork();
+    if (child != 0) return child > 0 ? 1 : -1;
+    return setsid() < 0 ? -1 : 0;
+}
+
+/* A proof worker: it holds neither the lock nor the endpoint. */
+static pid_t spawn_worker(const struct holder *h)
+{
+    pid_t worker = fork();
+    if (worker != 0) return worker;
+    close(h->lock_fd);
+    close(h->stop_fd);
+    for (;;) pause();
+}
+
 int main(int argc, char **argv)
 {
-    struct holder h = {.lock_fd = -1, .stop_fd = -1};
+    struct holder h = {.lock_fd = -1, .stop_fd = -1, .image = argv[0]};
     bool fifo = argc == 4 && strcmp(argv[1], "fifo") == 0;
     bool orphan = argc == 4 && strcmp(argv[1], "orphan") == 0;
     if (!fifo && !orphan) return 2;
-    if (setsid() < 0) {
-        /* A process-group leader cannot lead a new session: its child can. */
-        pid_t child = fork();
-        if (child != 0) return child > 0 ? 0 : 2;
-        if (setsid() < 0) return 2;
-    }
+    int led = lead_session();
+    if (led != 0) return led > 0 ? 0 : 2;
     if (chdir(argv[2]) != 0) return 2;
     if (!hold(&h)) return 3;
-    pid_t worker = fork();
-    if (worker == 0) {
-        /* A proof worker does not hold the lock or the endpoint. */
-        close(h.lock_fd);
-        close(h.stop_fd);
-        for (;;) pause();
-    }
+    pid_t worker = spawn_worker(&h);
     if (worker < 0 || !ready_write(argv[3], &h, (long)worker)) return 4;
     if (orphan) {
         for (;;) pause();

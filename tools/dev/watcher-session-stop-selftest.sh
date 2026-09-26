@@ -4,20 +4,28 @@
 # watcher stand-ins: a launch refuses beside a killed watcher's surviving
 # worker, a bound stop leaves no process of the session, and a leaderless
 # session is retired only by its exact birth.
+#
+# usage: watcher-session-stop-selftest.sh [dev-binary [holder-fixture.c]]
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-bin="${ZCL_WATCH_SELFTEST_BIN:-$here/build/bin/z23-dev}"
-fixture="${ZCL_WATCH_SELFTEST_FIXTURE:-$here/tools/dev/fixtures/watcher_session_holder.c}"
+bin="${1:-$here/build/bin/z23-dev}"
+fixture="${2:-$here/tools/dev/fixtures/watcher_session_holder.c}"
 [[ -x "$bin" ]] || { printf 'missing dev binary: %s\n' "$bin" >&2; exit 2; }
 scratch="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/z23-watch-session.XXXXXX")" && pwd -P)"
 holders=()
+endpoints=()
 cleanup()
 {
-    local pid
+    local pid path
     for pid in "${holders[@]}"; do
         kill -KILL -- "-$pid" 2>/dev/null || true
     done
+    # A killed holder cannot remove its own stop endpoint.
+    for path in "${endpoints[@]}"; do
+        rm -f -- "$path"
+    done
+    rm -rf -- "$scratch"
 }
 trap cleanup EXIT
 
@@ -51,6 +59,7 @@ start()
     [[ -s "$ready" ]] || fail "$mode holder did not become ready"
     read -r pid worker born session < "$ready"
     holders+=("$pid")
+    endpoints+=("/tmp/z23-watch-stop-$(id -u)-$session")
 }
 
 run()
@@ -107,5 +116,4 @@ grep -q '"session_retired":"retired"' <<<"$out" ||
 gone "$pid" || fail 'leader survived its stop'
 gone "$worker" || fail 'worker survived its session stop'
 
-rm -rf "$scratch"
 printf 'watcher session stop: begin refuses beside an orphan; orphan retired only by its birth; bound stop leaves no process\n'
