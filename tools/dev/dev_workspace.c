@@ -1169,10 +1169,14 @@ static bool cycle_record_stage(int dirfd, const char *body, size_t body_len,
     bool ok = private_regular_fd(fd, NULL) && write_all(fd, body, half) &&
               cycle_record_test_torn_write() &&
               write_all(fd, body + half, body_len - half) && fsync(fd) == 0;
-    if (fd >= 0 && close(fd) != 0)
+    int saved = errno;
+    if (fd >= 0 && close(fd) != 0) {
+        saved = errno;
         ok = false;
+    }
     if (!ok && fd >= 0)
         (void)unlinkat(dirfd, temp, 0);
+    errno = saved;
     return ok;
 }
 
@@ -1408,6 +1412,29 @@ static void cycle_publication_why(char *why, size_t why_len, int error)
                        strerror(error));
 }
 
+/* Publishes one sealed record: the journal event under its epoch's name,
+ * then the latest pointer as `mode` asks. On failure *error is the errno of
+ * the step that failed, taken before any later call can replace it; the
+ * name step sets none of its own, so its failure reports EOVERFLOW. */
+static bool cycle_event_publish(int events_fd, int dirfd, int64_t epoch,
+                                const char *body, size_t body_len,
+                                enum cycle_write_mode mode, int *error)
+{
+    char event_name[32];
+    if (!cycle_event_name(epoch, event_name)) {
+        *error = EOVERFLOW;
+        return false;
+    }
+    errno = 0;
+    if (cycle_record_publish_named(events_fd, event_name, body, body_len,
+                                   false) &&
+        fsync(events_fd) == 0 &&
+        cycle_pointer_publish(dirfd, body, body_len, mode))
+        return true;
+    *error = errno != 0 ? errno : EIO;
+    return false;
+}
+
 static bool cycle_state_write_impl(const char *repo_root,
                                    int64_t reserved_epoch,
                                    const char *cycle_json, size_t cycle_len,
@@ -1541,13 +1568,9 @@ static bool cycle_state_write_impl(const char *repo_root,
     }
     body[body_len++] = '\n';
 
-    char event_name[32];
-    ok = cycle_event_name(epoch, event_name) &&
-         cycle_record_publish_named(events_fd, event_name, body, body_len,
-                                    false) &&
-         fsync(events_fd) == 0 &&
-         cycle_pointer_publish(dirfd, body, body_len, mode);
-    int publish_errno = errno;
+    int publish_errno = 0;
+    ok = cycle_event_publish(events_fd, dirfd, epoch, body, body_len, mode,
+                             &publish_errno);
     close(events_fd);
     if (ok && mode == CYCLE_WRITE_MIRROR) {
         char stream_why[96] = {0};
