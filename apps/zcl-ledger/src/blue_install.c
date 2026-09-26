@@ -1,0 +1,321 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+#define _POSIX_C_SOURCE 200809L
+#include "blue_secure.h"
+#include "ledger_hid.h"
+
+#include <fcntl.h>
+#include <linux/hidraw.h>
+#include <openssl/crypto.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+enum { TARGET_ID = 0x31010004, MAX_CODE = 65536, CHUNK = 208 };
+static const uint8_t expected_code_hash[32] = {
+    0xb3, 0x87, 0x04, 0xd3, 0x47, 0x6a, 0xc9, 0x91,
+    0x4d, 0xde, 0x5d, 0x81, 0x6d, 0xe8, 0x89, 0x30,
+    0xed, 0x70, 0x5b, 0xdd, 0x53, 0x24, 0x69, 0x03,
+    0x41, 0x9c, 0x1c, 0xb9, 0x62, 0x11, 0xeb, 0x33
+};
+
+typedef struct {
+    int fd;
+    bool secure;
+    blue_secure_channel channel;
+} installer;
+
+static void put_be32(uint8_t *output, uint32_t value) {
+    output[0] = (uint8_t)(value >> 24);
+    output[1] = (uint8_t)(value >> 16);
+    output[2] = (uint8_t)(value >> 8);
+    output[3] = (uint8_t)value;
+}
+
+static int exchange(installer *device, uint8_t ins, uint8_t p1,
+                    const uint8_t *data, size_t length,
+                    uint8_t *body, size_t body_capacity, size_t *body_length) {
+    if (!device || length > 225 || (length && !data) || !body || !body_length)
+        return -1;
+    uint8_t apdu[256] = {0xe0, ins, p1, 0, 0};
+    size_t wire_length = length;
+    if (device->secure) {
+        if (blue_secure_wrap(&device->channel, data, length, apdu + 5,
+                             sizeof apdu - 5, &wire_length) < 0) return -1;
+    } else if (length) memcpy(apdu + 5, data, length);
+    apdu[4] = (uint8_t)wire_length;
+    uint8_t response[LEDGER_HID_MAX_RESPONSE];
+    size_t response_length = 0;
+    if (ledger_hid_exchange_timeout(device->fd, apdu, 5 + wire_length,
+                                    response, sizeof response,
+                                    &response_length, 60000) < 0 ||
+        response_length < 2) {
+        fprintf(stderr, "No HID reply to command %02x.\n", ins);
+        return -1;
+    }
+    uint16_t status = (uint16_t)(((uint16_t)response[response_length - 2] << 8) |
+                                  response[response_length - 1]);
+    if (status != 0x9000) {
+        fprintf(stderr, "Ledger rejected command %02x with status %04x.\n",
+                ins, status);
+        return -1;
+    }
+    response_length -= 2;
+    if (device->secure) {
+        if (blue_secure_unwrap(&device->channel, response, response_length,
+                               body, body_capacity, body_length) < 0) {
+            fprintf(stderr, "Invalid secure-channel reply to command %02x.\n", ins);
+            return -1;
+        }
+    } else {
+        if (response_length > body_capacity) return -1;
+        memcpy(body, response, response_length);
+        *body_length = response_length;
+    }
+    return 0;
+}
+
+static int no_reply(installer *device, uint8_t ins, uint8_t p1,
+                    const uint8_t *data, size_t length) {
+    uint8_t body[256];
+    size_t body_length = 0;
+    return exchange(device, ins, p1, data, length,
+                    body, sizeof body, &body_length) == 0 &&
+        body_length == 0 ? 0 : -1;
+}
+
+static int send_certificate(installer *device, EVP_PKEY *signer,
+                            EVP_PKEY *subject, uint8_t p1,
+                            const uint8_t *prefix, size_t prefix_length) {
+    uint8_t public_key[65], message[82], cert[140];
+    if (blue_key_public(subject, public_key) < 0 ||
+        prefix_length > sizeof message - sizeof public_key) return -1;
+    memcpy(message, prefix, prefix_length);
+    memcpy(message + prefix_length, public_key, sizeof public_key);
+    size_t signature_length = sizeof cert - 67;
+    cert[0] = sizeof public_key;
+    memcpy(cert + 1, public_key, sizeof public_key);
+    if (blue_sign(signer, message, prefix_length + sizeof public_key,
+                  cert + 67, &signature_length) < 0 || signature_length > 73)
+        return -1;
+    cert[66] = (uint8_t)signature_length;
+    return no_reply(device, 0x51, p1, cert, 67 + signature_length);
+}
+
+static int parse_device_certificate(const uint8_t *cert, size_t length,
+                                    uint8_t public_key[65],
+                                    const uint8_t **signature,
+                                    size_t *signature_length) {
+    if (!cert || length < 4 || !public_key || !signature || !signature_length)
+        return -1;
+    size_t pos = 0, header_length = cert[pos++];
+    if (header_length > length - pos) return -1;
+    pos += header_length;
+    if (pos >= length || cert[pos++] != 65 || length - pos < 65) return -1;
+    memcpy(public_key, cert + pos, 65);
+    if (public_key[0] != 4) return -1;
+    pos += 65;
+    if (pos >= length) return -1;
+    size_t signature_size = cert[pos++];
+    if (signature_size == 0 || signature_size != length - pos) return -1;
+    *signature = cert + pos;
+    *signature_length = signature_size;
+    return 0;
+}
+
+static int establish_channel(installer *device) {
+    uint8_t target[4], nonce[8], reply[256], device_nonce[8];
+    size_t length = 0;
+    put_be32(target, TARGET_ID);
+    if (exchange(device, 0x04, 0, target, sizeof target,
+                 reply, sizeof reply, &length) < 0 ||
+        RAND_bytes(nonce, sizeof nonce) != 1 ||
+        exchange(device, 0x50, 0, nonce, sizeof nonce,
+                 reply, sizeof reply, &length) < 0 || length < 12) return -1;
+    memcpy(device_nonce, reply + 4, sizeof device_nonce);
+    EVP_PKEY *root = blue_key_generate();
+    EVP_PKEY *ephemeral = blue_key_generate();
+    uint8_t root_prefix = 0x01, ephemeral_prefix[17] = {0x11};
+    memcpy(ephemeral_prefix + 1, nonce, 8);
+    memcpy(ephemeral_prefix + 9, device_nonce, 8);
+    int result = -1;
+    if (!root || !ephemeral ||
+        send_certificate(device, root, root, 0, &root_prefix, 1) < 0 ||
+        send_certificate(device, root, ephemeral, 0x80,
+                         ephemeral_prefix, sizeof ephemeral_prefix) < 0)
+        goto done;
+    uint8_t first[256], second[256], issuer[65], peer[65], message[82];
+    size_t first_length = 0, second_length = 0, signature_length = 0;
+    const uint8_t *signature = NULL;
+    if (exchange(device, 0x52, 0, NULL, 0, first, sizeof first,
+                 &first_length) < 0 ||
+        exchange(device, 0x52, 0x80, NULL, 0, second, sizeof second,
+                 &second_length) < 0 ||
+        parse_device_certificate(first, first_length, issuer,
+                                 &signature, &signature_length) < 0 ||
+        parse_device_certificate(second, second_length, peer,
+                                 &signature, &signature_length) < 0)
+        goto done;
+    message[0] = 0x12;
+    memcpy(message + 1, device_nonce, 8);
+    memcpy(message + 9, nonce, 8);
+    memcpy(message + 17, peer, 65);
+    if (blue_verify(issuer, message, sizeof message,
+                    signature, signature_length) < 0 ||
+        no_reply(device, 0x53, 0, NULL, 0) < 0) goto done;
+    uint8_t secret[32];
+    if (blue_ecdh(ephemeral, peer, secret) == 0 &&
+        blue_secure_init(&device->channel, secret) == 0) {
+        device->secure = true;
+        result = 0;
+    }
+    OPENSSL_cleanse(secret, sizeof secret);
+done:
+    EVP_PKEY_free(ephemeral);
+    EVP_PKEY_free(root);
+    return result;
+}
+
+static int verify_secure_version(installer *device) {
+    uint8_t command = 0x10, response[256];
+    size_t length = 0;
+    if (exchange(device, 0, 0, &command, 1, response, sizeof response,
+                 &length) < 0 || length < 4 ||
+        response[0] != (uint8_t)(TARGET_ID >> 24) ||
+        response[1] != (uint8_t)(TARGET_ID >> 16) ||
+        response[2] != (uint8_t)(TARGET_ID >> 8) ||
+        response[3] != (uint8_t)TARGET_ID) return -1;
+    printf("Verified Ledger Blue target %02x%02x%02x%02x over the secure channel.\n",
+           response[0], response[1], response[2], response[3]);
+    return 0;
+}
+
+static uint16_t crc16(const uint8_t *data, size_t length) {
+    uint16_t crc = 0xffff;
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
+    }
+    return crc;
+}
+
+static int load_segment(installer *device, uint32_t address,
+                        const uint8_t *data, size_t length) {
+    if (length > MAX_CODE) return -1;
+    uint8_t command[1 + 4 + CHUNK];
+    command[0] = 0x05;
+    put_be32(command + 1, address);
+    if (no_reply(device, 0, 0, command, 5) < 0) return -1;
+    for (size_t offset = 0; offset < length; offset += CHUNK) {
+        size_t count = length - offset < CHUNK ? length - offset : CHUNK;
+        command[0] = 0x06;
+        command[1] = (uint8_t)(offset >> 8);
+        command[2] = (uint8_t)offset;
+        memcpy(command + 3, data + offset, count);
+        if (no_reply(device, 0, 0, command, 3 + count) < 0) return -1;
+    }
+    command[0] = 0x07;
+    if (no_reply(device, 0, 0, command, 1) < 0) return -1;
+    uint16_t crc = crc16(data, length);
+    command[0] = 0x08;
+    command[1] = command[2] = 0;
+    put_be32(command + 3, (uint32_t)length);
+    command[7] = (uint8_t)(crc >> 8);
+    command[8] = (uint8_t)crc;
+    return no_reply(device, 0, 0, command, 9);
+}
+
+static int install(installer *device, const uint8_t *code, size_t code_length) {
+    static const uint8_t params[] = {
+        0x01, 9, 'Z','C','L',' ','P','r','o','b','e',
+        0x02, 5, '0','.','1','.','0',
+        0x04, 1, 0
+    };
+    if (code_length < 1024 || code_length > MAX_CODE || code_length % 64)
+        return -1;
+    uint8_t create[21] = {0x0b};
+    put_be32(create + 1, (uint32_t)code_length);
+    put_be32(create + 9, sizeof params);
+    put_be32(create + 17, 1);
+    puts("Creating the ZCL Probe app slot.");
+    if (no_reply(device, 0, 0, create, sizeof create) < 0) return -1;
+    puts("Loading the ZCL Probe code.");
+    if (load_segment(device, 0, code, code_length) < 0) return -1;
+    puts("Loading the ZCL Probe name and version.");
+    if (load_segment(device, (uint32_t)code_length,
+                     params, sizeof params) < 0) return -1;
+    puts("Committing the ZCL Probe app.");
+    uint8_t commit = 0x09;
+    return no_reply(device, 0, 0, &commit, 1);
+}
+
+static int read_binary(const char *path, uint8_t **data, size_t *length) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return -1;
+    uint8_t *bytes = malloc(MAX_CODE + 1);
+    size_t count = bytes ? fread(bytes, 1, MAX_CODE + 1, file) : 0;
+    int result = bytes && !ferror(file) && feof(file) &&
+        count >= 1024 && count <= MAX_CODE && count % 64 == 0 ? 0 : -1;
+    fclose(file);
+    uint8_t hash[32];
+    if (result == 0 && (!SHA256(bytes, count, hash) ||
+        CRYPTO_memcmp(hash, expected_code_hash, sizeof hash) != 0)) {
+        fputs("App image SHA-256 does not match the reviewed ZCL Probe build.\n",
+              stderr);
+        result = -1;
+    }
+    if (result < 0) free(bytes);
+    else { *data = bytes; *length = count; }
+    return result;
+}
+
+int main(int argc, char **argv) {
+    bool channel_only = argc == 3 && strcmp(argv[2], "--channel-only") == 0;
+    bool delete_app = argc == 3 && strcmp(argv[2], "--delete") == 0;
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s /dev/hidrawN app.bin|--channel-only|--delete\n", argv[0]);
+        return 2;
+    }
+    uint8_t *code = NULL;
+    size_t code_length = 0;
+    if (!channel_only && !delete_app &&
+        read_binary(argv[2], &code, &code_length) < 0) {
+        fputs("Expected the reviewed, 64-byte-aligned ZCL Probe binary.\n", stderr);
+        return 1;
+    }
+    int fd = open(argv[1], O_RDWR | O_CLOEXEC);
+    struct hidraw_devinfo info;
+    if (fd < 0 || ioctl(fd, HIDIOCGRAWINFO, &info) < 0 ||
+        info.vendor != 0x2c97 || info.product != 0) {
+        fputs("The selected interface is not a Ledger Blue.\n", stderr);
+        if (fd >= 0) close(fd);
+        free(code);
+        return 1;
+    }
+    installer device = {.fd = fd};
+    int result = establish_channel(&device);
+    if (result == 0) result = verify_secure_version(&device);
+    if (result == 0 && delete_app) {
+        static const uint8_t delete_command[] = {
+            0x0c, 9, 'Z','C','L',' ','P','r','o','b','e'
+        };
+        result = no_reply(&device, 0, 0, delete_command,
+                          sizeof delete_command);
+    } else if (result == 0 && !channel_only) {
+        puts("Secure channel established; loading ZCL Probe.");
+        result = install(&device, code, code_length);
+    }
+    if (result == 0 && delete_app) puts("ZCL Probe delete command accepted by Ledger Blue.");
+    else if (result == 0 && channel_only) puts("Ledger Blue secure channel established.");
+    else if (result == 0) puts("ZCL Probe install command accepted by Ledger Blue.");
+    else fputs("Ledger Blue installation failed. Check its screen.\n", stderr);
+    OPENSSL_cleanse(&device.channel, sizeof device.channel);
+    close(fd);
+    free(code);
+    return result == 0 ? 0 : 1;
+}
