@@ -1240,17 +1240,195 @@ run_test_proof() {
     make_fast "$target"
 }
 
+compile_scope_selftest() {
+    local dir proof
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/zcl-compile-scope.XXXXXX")" || return 1
+    proof="$dir/proof.tsv"
+    ZCL_FAST_CHANGED_FILES_ONLY=1
+    printf '%s\n' $'contexts/commons/modules/vcs/src/zcode_work_output.c\tcomplete\t0\tfalse\t0\tpresent' >"$proof"
+    ZCL_FAST_COMPILE_SCOPE_PROOF="$proof"
+    ZCL_FAST_CHANGED_FILES="contexts/commons/modules/vcs/src/zcode_work_output.c"
+    compute_changed_compile_plan
+    if [ "$COMPILE_PLAN_KIND" != affected_translation_units ] ||
+       [ "$COMPILE_PLAN_TARGET" != affected ] ||
+       [ "$COMPILE_PLAN_FALLBACK_REASON" != none ]; then
+        printf 'FAIL assertion=affected_translation_units actual=%s target=%s fallback=%s costly_target=fast-compile verify_record_recipes=2\n' \
+            "$COMPILE_PLAN_KIND" "$COMPILE_PLAN_TARGET" "$COMPILE_PLAN_FALLBACK_REASON" >&2
+        unset ZCL_FAST_COMPILE_SCOPE_PROOF ZCL_FAST_CHANGED_FILES ZCL_FAST_CHANGED_FILES_ONLY
+        rm -rf "$dir"
+        return 1
+    fi
+    printf '%s\n' $'a.c\tcomplete\t0\tfalse\t1\tpresent' >"$proof"
+    ZCL_FAST_CHANGED_FILES="a.c"
+    compute_changed_compile_plan
+    if [ "$COMPILE_PLAN_KIND" != full_source_inventory ] ||
+       [ "$COMPILE_PLAN_TARGET" != fast-compile ] ||
+       [ "$COMPILE_PLAN_FALLBACK_REASON" != proof_observation_conflict ]; then
+        printf 'FAIL assertion=proof_observation_conflict actual=%s target=%s fallback=%s\n' \
+            "$COMPILE_PLAN_KIND" "$COMPILE_PLAN_TARGET" "$COMPILE_PLAN_FALLBACK_REASON" >&2
+        unset ZCL_FAST_COMPILE_SCOPE_PROOF ZCL_FAST_CHANGED_FILES ZCL_FAST_CHANGED_FILES_ONLY
+        rm -rf "$dir"
+        return 1
+    fi
+    printf '%s\n' $'a.c\tincomplete\t4\ttrue\t0\tpresent' >"$proof"
+    compute_changed_compile_plan
+    if [ "$COMPILE_PLAN_KIND" != full_source_inventory ] ||
+       [ "$COMPILE_PLAN_TARGET" != fast-compile ] ||
+       [ "$COMPILE_PLAN_FALLBACK_REASON" != closure_incomplete ]; then
+        printf 'FAIL assertion=closure_incomplete actual=%s target=%s fallback=%s\n' \
+            "$COMPILE_PLAN_KIND" "$COMPILE_PLAN_TARGET" "$COMPILE_PLAN_FALLBACK_REASON" >&2
+        unset ZCL_FAST_COMPILE_SCOPE_PROOF ZCL_FAST_CHANGED_FILES ZCL_FAST_CHANGED_FILES_ONLY
+        rm -rf "$dir"
+        return 1
+    fi
+    printf '%s\n' $'a.c\tcomplete\t0\tfalse\t0\tmissing' >"$proof"
+    compute_changed_compile_plan
+    if [ "$COMPILE_PLAN_KIND" != full_source_inventory ] ||
+       [ "$COMPILE_PLAN_TARGET" != fast-compile ] ||
+       [ "$COMPILE_PLAN_FALLBACK_REASON" != missing_receipt ]; then
+        printf 'FAIL assertion=missing_receipt actual=%s target=%s fallback=%s\n' \
+            "$COMPILE_PLAN_KIND" "$COMPILE_PLAN_TARGET" "$COMPILE_PLAN_FALLBACK_REASON" >&2
+        unset ZCL_FAST_COMPILE_SCOPE_PROOF ZCL_FAST_CHANGED_FILES ZCL_FAST_CHANGED_FILES_ONLY
+        rm -rf "$dir"
+        return 1
+    fi
+    unset ZCL_FAST_COMPILE_SCOPE_PROOF
+    compute_changed_compile_plan
+    if [ "$COMPILE_PLAN_KIND" != full_source_inventory ] ||
+       [ "$COMPILE_PLAN_TARGET" != fast-compile ]; then
+        printf 'FAIL assertion=hint_only_stays_full actual=%s target=%s fallback=%s\n' \
+            "$COMPILE_PLAN_KIND" "$COMPILE_PLAN_TARGET" "$COMPILE_PLAN_FALLBACK_REASON" >&2
+        unset ZCL_FAST_CHANGED_FILES ZCL_FAST_CHANGED_FILES_ONLY
+        rm -rf "$dir"
+        return 1
+    fi
+    unset ZCL_FAST_CHANGED_FILES ZCL_FAST_CHANGED_FILES_ONLY
+    rm -rf "$dir"
+    printf '%s\n' 'PASS compile-scope-selftest affected verify_record_recipes=0 make_fast_compile=0 refusals=proof_observation_conflict,closure_incomplete,missing_receipt'
+}
+
+compile_scope_row_refuses() {
+    local dim="$1" deps="$2" trunc="$3" conflict="$4" receipt="$5"
+    if [ "$conflict" = 1 ]; then
+        COMPILE_PLAN_FALLBACK_REASON="proof_observation_conflict"
+        return 0
+    fi
+    if [ "$receipt" != present ]; then
+        COMPILE_PLAN_FALLBACK_REASON="missing_receipt"
+        return 0
+    fi
+    if [ "$trunc" != false ] || [ "$dim" != complete ] || [ "$deps" != 0 ]; then
+        COMPILE_PLAN_FALLBACK_REASON="closure_incomplete"
+        return 0
+    fi
+    return 1
+}
+
+compile_scope_from_proof() {
+    local changed path dim deps trunc conflict receipt found any=0
+    while IFS= read -r changed; do
+        [ -n "$changed" ] || continue
+        any=1
+        case "$changed" in
+            *.c) ;;
+            *)
+                COMPILE_PLAN_FALLBACK_REASON="closure_incomplete"
+                return 1
+                ;;
+        esac
+        found=0
+        while IFS=$'\t' read -r path dim deps trunc conflict receipt; do
+            [ "$path" = "$changed" ] || continue
+            found=1
+            if compile_scope_row_refuses "$dim" "$deps" "$trunc" "$conflict" "$receipt"; then
+                return 1
+            fi
+        done <"$ZCL_FAST_COMPILE_SCOPE_PROOF"
+        if [ "$found" != 1 ]; then
+            COMPILE_PLAN_FALLBACK_REASON="missing_receipt"
+            return 1
+        fi
+    done < <(changed_file_hints)
+    [ "$any" = 1 ]
+}
+
+compile_scope_field() {
+    local json="$1" key="$2" kind="$3"
+    case "$kind" in
+        bool|num) printf '%s\n' "$json" | sed -n "s/.*\"${key}\":\\([a-z0-9]*\\).*/\\1/p" | head -1 ;;
+        str) printf '%s\n' "$json" | sed -n "s/.*\"${key}\":\"\\([^\"]*\\)\".*/\\1/p" | head -1 ;;
+    esac
+}
+
+ensure_compile_scope_proof() {
+    local bin changed json dim deps trunc ok tmp
+    [ -n "${ZCL_FAST_COMPILE_SCOPE_PROOF:-}" ] && return 0
+    explicit_changed_file_hints || return 0
+    bin="$ROOT/build/bin/z23-dev"
+    [ -x "$bin" ] || return 0
+    tmp="$(mktemp "${TMPDIR:-/tmp}/zcl-compile-scope-proof.XXXXXX")" || return 0
+    while IFS= read -r changed; do
+        [ -n "$changed" ] || continue
+        case "$changed" in
+            *.c) ;;
+            *)
+                rm -f "$tmp"
+                return 0
+                ;;
+        esac
+        json="$("$bin" code impact --input="{\"path\":\"${changed}\"}" 2>/dev/null || true)"
+        ok="$(compile_scope_field "$json" ok bool)"
+        dim="$(compile_scope_field "$json" include_dimension str)"
+        deps="$(compile_scope_field "$json" include_dependent_count num)"
+        trunc="$(compile_scope_field "$json" truncated bool)"
+        if [ "$ok" != true ] || [ -z "$dim" ] || [ -z "$deps" ] || [ -z "$trunc" ]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$changed" "${dim:-incomplete}" "${deps:-1}" "${trunc:-true}" 0 missing >>"$tmp"
+        else
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$changed" "$dim" "$deps" "$trunc" 0 present >>"$tmp"
+        fi
+    done < <(changed_file_hints)
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        return 0
+    fi
+    ZCL_FAST_COMPILE_SCOPE_PROOF="$tmp"
+    COMPILE_SCOPE_PROOF_OWNED=1
+    export ZCL_FAST_COMPILE_SCOPE_PROOF
+}
+
 compute_changed_compile_plan() {
     COMPILE_PLAN_KIND="full_source_inventory"
     COMPILE_PLAN_TARGET="fast-compile"
     COMPILE_PLAN_DETAIL="compile every current dev source input"
     COMPILE_PLAN_FALLBACK_REASON="changed-file lists are hint-only and cannot reduce proof scope"
+    if [ -z "${ZCL_FAST_COMPILE_SCOPE_PROOF:-}" ] ||
+       [ ! -f "${ZCL_FAST_COMPILE_SCOPE_PROOF}" ]; then
+        return 0
+    fi
+    if compile_scope_from_proof; then
+        COMPILE_PLAN_KIND="affected_translation_units"
+        COMPILE_PLAN_TARGET="affected"
+        COMPILE_PLAN_DETAIL="compile changed translation units only"
+        COMPILE_PLAN_FALLBACK_REASON="none"
+    fi
 }
 
 compile_changed_gate() {
+    COMPILE_SCOPE_PROOF_OWNED=0
+    ensure_compile_scope_proof || true
     compute_changed_compile_plan
-    log "fast-changed-compile: source-wide fast-compile (path lists are classification hints only)"
-    make_fast fast-compile
+    if [ "$COMPILE_PLAN_TARGET" = affected ]; then
+        log "fast-changed-compile: affected translation units fallback=${COMPILE_PLAN_FALLBACK_REASON} verify_record_recipes=0"
+        compile_affected_gate
+    else
+        log "fast-changed-compile: source-wide fast-compile fallback=${COMPILE_PLAN_FALLBACK_REASON}"
+        make_fast fast-compile
+    fi
+    if [ "$COMPILE_SCOPE_PROOF_OWNED" = 1 ]; then
+        rm -f "$ZCL_FAST_COMPILE_SCOPE_PROOF"
+        unset ZCL_FAST_COMPILE_SCOPE_PROOF
+        COMPILE_SCOPE_PROOF_OWNED=0
+    fi
 }
 
 run_compile_gate() {
@@ -1651,6 +1829,26 @@ main() {
             ;;
         receipt-selftest|--receipt-selftest)
             focused_receipt_selftest
+            return
+            ;;
+        compile-scope-selftest|--compile-scope-selftest)
+            compile_scope_selftest
+            return
+            ;;
+        compile-plan|--compile-plan)
+            ZCL_FAST_CHANGED_FILES_ONLY=1
+            COMPILE_SCOPE_PROOF_OWNED=0
+            ensure_compile_scope_proof || true
+            compute_changed_compile_plan
+            printf 'kind=%s target=%s fallback=%s verify_record_recipes=%s make_fast_compile=%s\n' \
+                "$COMPILE_PLAN_KIND" "$COMPILE_PLAN_TARGET" \
+                "$COMPILE_PLAN_FALLBACK_REASON" \
+                "$([ "$COMPILE_PLAN_TARGET" = affected ] && printf 0 || printf 2)" \
+                "$([ "$COMPILE_PLAN_TARGET" = affected ] && printf 0 || printf 1)"
+            if [ "${COMPILE_SCOPE_PROOF_OWNED:-0}" = 1 ]; then
+                rm -f "$ZCL_FAST_COMPILE_SCOPE_PROOF"
+                unset ZCL_FAST_COMPILE_SCOPE_PROOF
+            fi
             return
             ;;
     esac
