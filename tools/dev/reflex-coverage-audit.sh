@@ -128,7 +128,7 @@ drive_to_terminal()
             break
         fi
         case "$event" in
-            STORY_GREEN|STORY_RED|FOCUSED_GREEN|FOCUSED_RED|COMPILE_GREEN|COMPILE_RED)
+            STORY_GREEN|STORY_RED|FOCUSED_GREEN|FOCUSED_PARTIAL|FOCUSED_RED|COMPILE_GREEN|COMPILE_RED)
                 break;;
             PROOF_PENDING|"") break;;
         esac

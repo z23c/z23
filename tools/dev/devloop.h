@@ -421,10 +421,17 @@ struct zcl_devloop_restart_proof_receipt {
     /* Every exact group the complete plan selects, integration-only groups
      * included; group_count is the part this receipt executed. */
     uint32_t groups_selected;
+    /* The non-integration part of groups_selected. A complete focused run
+     * has group_count == groups_immediate_selected. */
+    uint32_t groups_immediate_selected;
     /* Identity of the executed candidate at its rehash, rechecked after the
-     * run (0 where the platform has no stable inode). */
+     * run: device, inode, size and status-change time (0 where the platform
+     * has no stable inode). */
     uint64_t artifact_dev;
     uint64_t artifact_ino;
+    uint64_t artifact_size;
+    int64_t artifact_ctime_sec;
+    int64_t artifact_ctime_nsec;
     bool artifact_cache_hit;
     bool source_identity_overlay;
     bool bounded_proof_deferred;
