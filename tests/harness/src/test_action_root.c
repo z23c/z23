@@ -788,7 +788,9 @@ static void test_derive_climb(struct fx *x,
 }
 
 /* A driver whose built-in list depends on -mcpu=, that skips sysnew as
- * nonexistent until it exists, and whose libc.so lives in the checkout. */
+ * nonexistent until it exists, and whose libc.so lives in the checkout.
+ * Like GCC, it reports a skipped dir before the search list, never inside
+ * it (an entry that is not a canonical dir is refused). */
 static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
 {
     char script[4 * PATH_MAX + 1024];
@@ -799,9 +801,10 @@ static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
         "*\" -print-file-name=libc.so \"*) echo \"$R/lib/libc.so\"; exit 0;;\n"
         "*\" -v \"*)\n"
         "  d=sysdef; case \" $* \" in *\" -mcpu=alt \"*) d=sysalt;; esac\n"
+        "  [ -d \"$R/sysnew\" ] ||\n"
+        "    echo \"ignoring nonexistent directory \\\"$R/sysnew\\\"\"\n"
         "  echo '#include <...> search starts here:'\n"
-        "  if [ -d \"$R/sysnew\" ]; then echo \" $R/sysnew\"; else\n"
-        "    echo \"ignoring nonexistent directory \\\"$R/sysnew\\\"\"; fi\n"
+        "  [ -d \"$R/sysnew\" ] && echo \" $R/sysnew\"\n"
         "  echo \" $R/$d\"; echo 'End of search list.'; exit 0;;\n"
         "esac\nfor a do shift; case \"$a\" in -mcpu=*) ;;\n"
         "  *) set -- \"$@\" \"$a\";; esac; done\n"
