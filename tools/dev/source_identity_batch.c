@@ -261,7 +261,8 @@ static void cache_load(void)
         }
         if (g_row_count == g_row_cap) {
             size_t next = g_row_cap == 0 ? 64 : g_row_cap * 2;
-            struct digest_row *grown = realloc(g_rows, next * sizeof(*g_rows));
+            struct digest_row *grown = zcl_realloc(g_rows, next * sizeof(*g_rows),
+                                                   "digest cache");
             if (grown == nullptr) {
                 free(row.path);
                 continue;
@@ -305,7 +306,8 @@ static void cache_remember(const char *path, const struct stat *st,
     }
     if (g_row_count == g_row_cap) {
         size_t next = g_row_cap == 0 ? 64 : g_row_cap * 2;
-        struct digest_row *grown = realloc(g_rows, next * sizeof(*g_rows));
+        struct digest_row *grown = zcl_realloc(g_rows, next * sizeof(*g_rows),
+                                               "digest cache");
         if (grown == nullptr)
             return;
         g_rows = grown;
@@ -454,6 +456,47 @@ static int emit_hash(const char *path,
     return 0;
 }
 
+static int reuse_snapshot(const char *path, const struct stat *before,
+                          uint8_t digest[ZSHA256_DIGEST_LEN])
+{
+    if (g_cache_path[0] == '\0')
+        cache_init(nullptr, 0, 1);
+    cache_load();
+    struct digest_row *cached = cache_find(path);
+    if (!g_allow_reuse || cached == nullptr || !row_matches(cached, before))
+        return 0;
+    memcpy(digest, cached->digest, ZSHA256_DIGEST_LEN);
+    g_content_bytes_reused += (uint64_t)before->st_size;
+    return 1;
+}
+
+static void record_fresh_digest(const char *path, const struct stat *before,
+                                const uint8_t digest[ZSHA256_DIGEST_LEN],
+                                uint64_t read_bytes)
+{
+    g_content_bytes_read += read_bytes;
+    cache_remember(path, before, digest);
+}
+
+static int open_hash_fd(const char *path, const struct stat *before)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        report_path_error("could not open", path);
+        return -1;
+    }
+    struct stat opened;
+    if (fstat(fd, &opened) == 0 && same_snapshot(before, &opened))
+        return fd;
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    fprintf(stderr,
+            "source-identity-batch: file changed before hashing: %s\n",
+            path);
+    return -1;
+}
+
 static int hash_file(const char *path,
                      uint8_t digest[ZSHA256_DIGEST_LEN])
 {
@@ -466,30 +509,12 @@ static int hash_file(const char *path,
                 path);
         return 1;
     }
-    if (g_cache_path[0] == '\0')
-        cache_init(nullptr, 0, 1);
-
-    cache_load();
-    struct digest_row *cached = cache_find(path);
-    if (g_allow_reuse && cached != nullptr && row_matches(cached, &before)) {
-        memcpy(digest, cached->digest, ZSHA256_DIGEST_LEN);
-        g_content_bytes_reused += (uint64_t)before.st_size;
+    if (reuse_snapshot(path, &before, digest))
         return 0;
-    }
 
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int fd = open_hash_fd(path, &before);
     if (fd < 0)
-        return report_path_error("could not open", path);
-    struct stat opened;
-    if (fstat(fd, &opened) != 0 || !same_snapshot(&before, &opened)) {
-        int saved = errno;
-        close(fd);
-        errno = saved;
-        fprintf(stderr,
-                "source-identity-batch: file changed before hashing: %s\n",
-                path);
         return 1;
-    }
 
     uint64_t read_bytes = 0;
     int status = digest_fd(fd, path, digest, &read_bytes);
@@ -512,10 +537,8 @@ static int hash_file(const char *path,
                 path);
         status = 1;
     }
-    if (status == 0) {
-        g_content_bytes_read += read_bytes;
-        cache_remember(path, &before, digest);
-    }
+    if (status == 0)
+        record_fresh_digest(path, &before, digest, read_bytes);
     return status;
 }
 
@@ -1623,6 +1646,28 @@ static int enumeration_main(int argc, char **argv)
     return enumeration_usage();
 }
 
+static int hash_command(int argc, char **argv)
+{
+    const char *cache = nullptr;
+    int report = 0;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--report-bytes") == 0) {
+            report = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--cache") == 0 && i + 1 < argc) {
+            cache = argv[++i];
+            continue;
+        }
+        fprintf(stderr,
+                "usage: source-identity-batch hash [--cache FILE] "
+                "[--report-bytes]\n");
+        return 2;
+    }
+    cache_init(cache, report, cache == nullptr);
+    return batch_path_main(BATCH_HASH);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "identity") == 0) {
@@ -1640,24 +1685,8 @@ int main(int argc, char **argv)
                 "<preimage> <gitlink-sidecar> [digest-table]\n");
         return 2;
     }
-    if (argv[1] != nullptr && strcmp(argv[1], "hash") == 0) {
-        const char *cache = nullptr;
-        int report = 0;
-        for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "--report-bytes") == 0) {
-                report = 1;
-            } else if (strcmp(argv[i], "--cache") == 0 && i + 1 < argc) {
-                cache = argv[++i];
-            } else {
-                fprintf(stderr,
-                        "usage: source-identity-batch hash [--cache FILE] "
-                        "[--report-bytes]\n");
-                return 2;
-            }
-        }
-        cache_init(cache, report, cache == nullptr);
-        return batch_path_main(BATCH_HASH);
-    }
+    if (argv[1] != nullptr && strcmp(argv[1], "hash") == 0)
+        return hash_command(argc, argv);
     if (argc == 2 && strcmp(argv[1], "mode") == 0)
         return batch_path_main(BATCH_MODE);
     if (argc >= 2)

@@ -69,6 +69,17 @@ static int exchange_body(installer *device, uint8_t ins,
     return 0;
 }
 
+static int exchange_rejected(uint8_t ins, size_t length, const uint8_t *data,
+                            uint16_t status)
+{
+    fprintf(stderr, "Ledger rejected command %02x with status %04x.\n",
+            ins, status);
+    if (status == 0x6985 && ins == 0 && length > 0 &&
+        (data[0] == 0x12 || data[0] == 0x13))
+        fputs("Custom CA changes require Blue Recovery mode.\n", stderr);
+    return -1;
+}
+
 static int exchange(installer *device, uint8_t ins, uint8_t p1,
                     const uint8_t *data, size_t length,
                     uint8_t *body, size_t body_capacity, size_t *body_length) {
@@ -92,14 +103,8 @@ static int exchange(installer *device, uint8_t ins, uint8_t p1,
     }
     uint16_t status = (uint16_t)(((uint16_t)response[response_length - 2] << 8) |
                                   response[response_length - 1]);
-    if (status != 0x9000) {
-        fprintf(stderr, "Ledger rejected command %02x with status %04x.\n",
-                ins, status);
-        if (status == 0x6985 && ins == 0 && length > 0 &&
-            (data[0] == 0x12 || data[0] == 0x13))
-            fputs("Custom CA changes require Blue Recovery mode.\n", stderr);
-        return -1;
-    }
+    if (status != 0x9000)
+        return exchange_rejected(ins, length, data, status);
     response_length -= 2;
     return exchange_body(device, ins, response, response_length,
                          body, body_capacity, body_length);

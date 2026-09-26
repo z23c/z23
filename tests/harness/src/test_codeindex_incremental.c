@@ -369,99 +369,127 @@ static bool cin_prefix_eq(const char *left, const char *right, size_t n)
     return same;
 }
 
+static bool cin_path(char *dst, size_t cap, const char *dir, const char *name)
+{
+    int n = snprintf(dst, cap, "%s/%s", dir, name);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool cin_batch_bin(char *bin, size_t cap)
+{
+    FILE *boot = popen("tools/dev/source-identity-batch-bootstrap.sh", "r");
+    if (!boot)
+        return false;
+    bool ok = fgets(bin, (int)cap, boot) != nullptr;
+    if (pclose(boot) != 0)
+        ok = false;
+    size_t n = strlen(bin);
+    if (n > 0 && bin[n - 1] == '\n')
+        bin[n - 1] = '\0';
+    return ok && bin[0] != '\0';
+}
+
+static bool cin_write_payload(const char *workspace)
+{
+    char payload_path[PATH_MAX];
+    char paths_path[PATH_MAX];
+    if (!cin_path(payload_path, sizeof payload_path, workspace, "payload.c") ||
+        !cin_path(paths_path, sizeof paths_path, workspace, "paths"))
+        return false;
+    FILE *body = fopen(payload_path, "w");
+    FILE *paths = fopen(paths_path, "wb");
+    if (!body || !paths) {
+        if (body)
+            fclose(body);
+        if (paths)
+            fclose(paths);
+        return false;
+    }
+    fputs("static int payload;\n", body);
+    fputs("payload.c", paths);
+    fputc('\0', paths);
+    fclose(body);
+    fclose(paths);
+    return true;
+}
+
+static int cin_hash_once(const char *workspace, const char *bin,
+                         const char *out, const char *err)
+{
+    char cmd[4 * PATH_MAX];
+    int n = snprintf(cmd, sizeof cmd,
+                     "cd '%s' && '%s' hash --cache '%s/digest-cache' "
+                     "--report-bytes < '%s/paths' > '%s' 2> '%s'",
+                     workspace, bin, workspace, workspace, out, err);
+    if (n <= 0 || (size_t)n >= sizeof cmd)
+        return 1;
+    return system(cmd);
+}
+
+static void cin_print_second(const char *err2)
+{
+    printf("identity_second ");
+    FILE *err = fopen(err2, "r");
+    if (!err) {
+        printf("missing\n");
+        return;
+    }
+    char line[128];
+    while (fgets(line, sizeof line, err) != nullptr)
+        fputs(line, stdout);
+    fclose(err);
+}
+
 /* The second hash of an unchanged payload must not read those bytes again.
  * The three compile-scope refusals stay in cin_scope_refusals. */
+static bool cin_identity_ok(bool ready, int first, int second, const char *err1,
+                           const char *err2, const char *out1, const char *out2,
+                           const char *paid)
+{
+    return ready && first == 0 && second == 0 &&
+           cin_file_has(err1, paid) &&
+           cin_file_has(err2, "content_bytes_read=0") &&
+           cin_prefix_eq(out1, out2, 64);
+}
+
 static int cin_identity_reread(void)
 {
     int failures = 0;
     char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
     char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
     char bin[PATH_MAX] = {0};
-    bool ready = platform_temp_directory_create(
-        "z23-identity-bytes-", temporary, sizeof temporary);
-    ready = ready && platform_directory_canonical_real(
-        temporary, workspace, sizeof workspace);
-    FILE *boot = ready ? popen("tools/dev/source-identity-batch-bootstrap.sh", "r")
-                       : nullptr;
-    if (!boot)
-        ready = false;
-    else if (fgets(bin, sizeof bin, boot) == nullptr)
-        ready = false;
-    if (boot && pclose(boot) != 0)
-        ready = false;
-    size_t bin_len = strlen(bin);
-    if (bin_len > 0 && bin[bin_len - 1] == '\n')
-        bin[--bin_len] = '\0';
-    ready = ready && bin_len > 0;
-    static const char payload[] = "static int payload;\n";
-    char payload_path[PATH_MAX];
-    char paths_path[PATH_MAX];
     char out1[PATH_MAX];
     char out2[PATH_MAX];
     char err1[PATH_MAX];
     char err2[PATH_MAX];
-    int n = ready ? snprintf(payload_path, sizeof payload_path, "%s/payload.c",
-                             workspace) : -1;
-    ready = ready && n > 0 && (size_t)n < sizeof payload_path;
-    n = ready ? snprintf(paths_path, sizeof paths_path, "%s/paths", workspace) : -1;
-    ready = ready && n > 0 && (size_t)n < sizeof paths_path;
-    n = ready ? snprintf(out1, sizeof out1, "%s/out1", workspace) : -1;
-    ready = ready && n > 0 && (size_t)n < sizeof out1;
-    n = ready ? snprintf(out2, sizeof out2, "%s/out2", workspace) : -1;
-    ready = ready && n > 0 && (size_t)n < sizeof out2;
-    n = ready ? snprintf(err1, sizeof err1, "%s/err1", workspace) : -1;
-    ready = ready && n > 0 && (size_t)n < sizeof err1;
-    n = ready ? snprintf(err2, sizeof err2, "%s/err2", workspace) : -1;
-    ready = ready && n > 0 && (size_t)n < sizeof err2;
-    if (ready) {
-        FILE *body = fopen(payload_path, "w");
-        FILE *paths = fopen(paths_path, "wb");
-        ready = body != nullptr && paths != nullptr;
-        if (body) {
-            fputs(payload, body);
-            fclose(body);
-        }
-        if (paths) {
-            fputs("payload.c", paths);
-            fputc('\0', paths);
-            fclose(paths);
-        }
-    }
-    char cmd[4 * PATH_MAX];
+    bool ready = platform_temp_directory_create(
+                     "z23-identity-bytes-", temporary, sizeof temporary) &&
+                 platform_directory_canonical_real(
+                     temporary, workspace, sizeof workspace) &&
+                 cin_batch_bin(bin, sizeof bin) &&
+                 cin_write_payload(workspace) &&
+                 cin_path(out1, sizeof out1, workspace, "out1") &&
+                 cin_path(out2, sizeof out2, workspace, "out2") &&
+                 cin_path(err1, sizeof err1, workspace, "err1") &&
+                 cin_path(err2, sizeof err2, workspace, "err2");
     int first = 1;
     int second = 1;
     if (ready) {
-        n = snprintf(cmd, sizeof cmd,
-                     "cd '%s' && '%s' hash --cache '%s/digest-cache' "
-                     "--report-bytes < '%s' > '%s' 2> '%s'",
-                     workspace, bin, workspace, paths_path, out1, err1);
-        first = (n > 0 && (size_t)n < sizeof cmd) ? system(cmd) : 1;
-        n = snprintf(cmd, sizeof cmd,
-                     "cd '%s' && '%s' hash --cache '%s/digest-cache' "
-                     "--report-bytes < '%s' > '%s' 2> '%s'",
-                     workspace, bin, workspace, paths_path, out2, err2);
-        second = (n > 0 && (size_t)n < sizeof cmd) ? system(cmd) : 1;
+        first = cin_hash_once(workspace, bin, out1, err1);
+        second = cin_hash_once(workspace, bin, out2, err2);
     }
+    static const char payload[] = "static int payload;\n";
     char paid[64];
     snprintf(paid, sizeof paid, "content_bytes_read=%zu", strlen(payload));
-    printf("identity_first %s\n", ready && cin_file_has(err1, paid) ? paid : "unread");
-    printf("identity_second ");
-    if (ready && cin_file_has(err2, "content_bytes_read=")) {
-        FILE *err = fopen(err2, "r");
-        char line[128];
-        if (err) {
-            while (fgets(line, sizeof line, err) != nullptr)
-                fputs(line, stdout);
-            fclose(err);
-        }
-    } else {
-        printf("missing\n");
-    }
+    printf("identity_first %s\n",
+           ready && cin_file_has(err1, paid) ? paid : "unread");
+    if (ready)
+        cin_print_second(err2);
+    else
+        printf("identity_second missing\n");
     CIN_CHECK("unchanged payload is not read again",
-              ready && first == 0 && second == 0 &&
-              cin_file_has(err1, paid) &&
-              cin_file_has(err2, "content_bytes_read=0") &&
-              cin_prefix_eq(out1, out2, 64));
+              cin_identity_ok(ready, first, second, err1, err2, out1, out2,
+                              paid));
     return failures;
 }
 
