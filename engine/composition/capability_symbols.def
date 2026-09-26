@@ -1103,6 +1103,10 @@ ZCL_CAPABILITY_SYMBOL("sigaltstack", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("sigemptyset", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("signal", CAP_HARMLESS,
     "Installs a handler in this process and reaches nothing outside it.")
+ZCL_CAPABILITY_SYMBOL("sigtimedwait", CAP_PROCESS,
+    "Only reachable in code that already forked and is waiting out a "
+    "child's exit deadline; kept in the class alongside waitpid so the "
+    "supervision set stays complete and countable.")
 ZCL_CAPABILITY_SYMBOL("smartlist_add", CAP_HARMLESS,
     "Tor container helper, which carries no transport.")
 ZCL_CAPABILITY_SYMBOL("smartlist_free_", CAP_HARMLESS,
