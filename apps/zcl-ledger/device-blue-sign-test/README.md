@@ -30,7 +30,9 @@ sha256sum /tmp/zcl-sign-test.bin
 The pinned 12,544-byte image hash is
 `0fc38931f3344715090953538495c9648b3e475621853ac4c2dc7e568874590b`.
 The build requires zero initialized `.data` bytes. At the Blue home screen,
-install the pinned image with the owner-controlled CA:
+install the pinned image with the owner-controlled CA. The installer limits
+this app to the secp256k1 curve and `m/44'/147'/0'/0/0` in BOLOS install
+metadata; those permissions are necessary for device key derivation:
 
 ```sh
 zcl-blue-install /dev/hidrawN --ca-install CA_KEY_FILE /tmp/zcl-sign-test.bin

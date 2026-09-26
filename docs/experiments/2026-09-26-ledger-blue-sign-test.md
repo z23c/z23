@@ -38,3 +38,44 @@ No physical Blue signing result had occurred at the time of this record.
 The device syscall behavior, touchscreen tap, and signature still require a
 live test. The signer has no transaction parser, approval screen for a
 recipient or amount, Sapling derivation, proof checks, or transaction signing.
+
+## First Blue test and derivation permission correction
+
+Recorded: 2026-09-26T08:18:14-04:00 (2026-09-26T12:18:14Z)
+
+The dedicated Blue reported BOLOS 2.1.1 at its home screen. Z23 installed
+the signed, pinned 12,544-byte image through the owner-controlled CA. The
+owner confirmed the app opened on a steady screen with both buttons. The
+identity APDU returned `5a434c07029000`; before the touchscreen tap, the
+sign command returned `6985`. After the tap, the sign command returned `6804`
+and no public key or signature. The app remained responsive, and EXIT was
+available. In the Blue SDK, low exception value `4` is
+`EXCEPTION_SECURITY`.
+
+The installer had set BOLOS derive-path metadata to a one-byte zero curve
+mask. The open-source Ledger Blue loader encodes secp256k1 as curve mask
+`01` and appends the allowed BIP32 path under install tag `04`. Z23 now uses
+that exact narrow permission for `ZCL Sign Test` while preserving the old
+metadata for review-only apps. A new host test checks the complete tag bytes
+for both cases. Clang Debug sanitizers and GCC Release each passed nine local
+tests after the correction. The host CLI now exposes a device status word
+instead of collapsing it into a generic error. Whether the corrected metadata
+resolves the security exception remains a live test question.
+
+## Corrected permission: physical signing result
+
+Recorded: 2026-09-26T08:20:43-04:00 (2026-09-26T12:20:43Z)
+
+Z23 deleted the failed test app from the Blue at its home screen and
+reinstalled the same SHA-256-pinned image with the narrow secp256k1 derivation
+permission. The owner opened the app and confirmed its screen was steady.
+Before approval, the sign APDU returned `6985`. After one tap of SIGN TEST,
+`zcl-blue-sign-test --json /dev/hidraw1` returned `ok:true`,
+`signature_verified:true`, `transaction_signed:false`, and the expected
+`m/44'/147'/0'/0/0` path. The returned public key was compressed secp256k1,
+and the corresponding transparent address was
+`t1RAmKL4KFauUXGswvMvk66aS5UL33ck1Uz`. This is a seed-derived signature
+over the app's fixed, non-transaction test message. The owner confirmed that
+the screen stayed steady and EXIT returned to the Blue home screen.
+Transaction review,
+transaction signing, and Sapling operations remain unimplemented in this app.

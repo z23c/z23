@@ -13,19 +13,20 @@
 #include <unistd.h>
 
 static int exchange(int fd, const uint8_t command[5], uint8_t *reply,
-                    size_t capacity, size_t *payload_length) {
+                    size_t capacity, size_t *payload_length,
+                    uint16_t *device_status) {
     size_t length = 0;
     if (ledger_hid_exchange(fd, command, 5, reply, capacity, &length) < 0 ||
         length < 2) return -1;
-    uint16_t status = (uint16_t)(((uint16_t)reply[length - 2] << 8) |
-                                  reply[length - 1]);
-    if (status == 0x6985) return 1;
-    if (status != 0x9000) return -1;
+    *device_status = (uint16_t)(((uint16_t)reply[length - 2] << 8) |
+                                 reply[length - 1]);
+    if (*device_status == 0x6985) return 1;
+    if (*device_status != 0x9000) return 2;
     *payload_length = length - 2;
     return 0;
 }
 
-static int sign_test(const char *path, bool json) {
+static int sign_test(const char *path, bool json, uint16_t *device_status) {
     int fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -1;
     struct hidraw_devinfo device;
@@ -38,13 +39,16 @@ static int sign_test(const char *path, bool json) {
     size_t length = 0;
     static const uint8_t identify[] = {0xa5, 0x01, 0, 0, 0};
     static const uint8_t expected[] = {'Z', 'C', 'L', 7, 0x02};
-    if (exchange(fd, identify, reply, sizeof reply, &length) != 0 ||
+    int identified = exchange(fd, identify, reply, sizeof reply, &length,
+                              device_status);
+    if (identified != 0 ||
         length != sizeof expected || memcmp(reply, expected, length) != 0) {
         close(fd);
-        return -1;
+        return identified == 2 ? 2 : -1;
     }
     static const uint8_t sign[] = {0xa5, 0x20, 0, 0, 0};
-    int status = exchange(fd, sign, reply, sizeof reply, &length);
+    int status = exchange(fd, sign, reply, sizeof reply, &length,
+                          device_status);
     close(fd);
     if (status != 0) return status;
     uint8_t pubkey[ZCL_SIGN_TEST_PUBKEY_SIZE];
@@ -69,10 +73,18 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s [--json] /dev/hidrawN\n", argv[0]);
         return 2;
     }
-    int result = sign_test(argv[json ? 2 : 1], json);
+    uint16_t device_status = 0;
+    int result = sign_test(argv[json ? 2 : 1], json, &device_status);
     if (result == 0) return 0;
-    if (json) printf("{\"ok\":false,\"error\":\"%s\"}\n",
-                     result == 1 ? "not_approved" : "sign_test_failed");
+    if (json) {
+        if (result == 2)
+            printf("{\"ok\":false,\"error\":\"device_status\",\"status\":\"%04x\"}\n",
+                   device_status);
+        else printf("{\"ok\":false,\"error\":\"%s\"}\n",
+                    result == 1 ? "not_approved" : "sign_test_failed");
+    } else if (result == 2)
+        fprintf(stderr, "Blue returned status %04x; no signature received.\n",
+                device_status);
     else fputs(result == 1 ? "Tap SIGN TEST on the Blue, then retry.\n" :
                "Blue signing self-test failed; no transaction was signed.\n",
                stderr);
