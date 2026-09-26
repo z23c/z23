@@ -163,6 +163,136 @@ static bool object_parents_flush(const char *repo_root, const uint8_t addr[32])
     return true;
 }
 
+static bool object_final_identity(
+    const char *final, struct platform_positioned_file_snapshot *identity)
+{
+#if !defined(_WIN32)
+    struct stat final_st;
+    if (lstat(final, &final_st) != 0 || !S_ISREG(final_st.st_mode) ||
+        final_st.st_nlink != 2 || final_st.st_uid != geteuid())
+        return false;
+#endif
+    struct platform_positioned_file canonical;
+    platform_positioned_file_init(&canonical);
+    bool have_id = platform_positioned_file_open(&canonical, final) &&
+                   platform_positioned_file_snapshot(&canonical, identity);
+    platform_positioned_file_close(&canonical);
+    return have_id;
+}
+
+static bool object_legacy_alias_find(
+    const char *tmpdir, const struct platform_positioned_file_snapshot *id,
+    char match[VCS_OBJECT_PATH_MAX])
+{
+    struct platform_directory_list files = {0};
+    if (!platform_directory_list_regular_sorted(tmpdir, &files))
+        return false;
+    size_t matches = 0;
+    for (size_t i = 0; i < files.count; i++) {
+        const struct platform_directory_entry *entry = &files.entries[i];
+        if (strncmp(entry->name, ".put.", 5) != 0 ||
+            !entry->snapshot_valid ||
+            entry->volume != id->volume ||
+            entry->file_low != id->file_low ||
+            entry->file_high != id->file_high)
+            continue;
+        char path[VCS_OBJECT_PATH_MAX];
+        int n = snprintf(path, sizeof(path), "%s/%s", tmpdir,
+                         entry->name);
+        if (n <= 0 || (size_t)n >= sizeof(path)) { matches = 2; break; }
+        matches++;
+        if (matches == 1) memcpy(match, path, (size_t)n + 1);
+    }
+    platform_directory_list_free(&files);
+    return matches == 1;
+}
+
+/* Older publishers linked the staged inode into its final CAS name before
+ * removing the staging name. A crash in that interval leaves nlink==2 and a
+ * writable alias. Retire only the one exact alias in our private tmp pool;
+ * any other link shape remains a refusal. Higher layers still verify the
+ * object's content root after this namespace repair. */
+static bool object_recover_legacy_alias(const char *repo_root,
+                                         const char *final)
+{
+    struct platform_file_metadata metadata;
+    if (platform_file_metadata_read(final, &metadata) !=
+        PLATFORM_FILE_METADATA_OK)
+        return false;
+    if (metadata.links == 1) return true;
+    if (metadata.links != 2) return false;
+    struct platform_positioned_file_snapshot final_id;
+    if (!object_final_identity(final, &final_id)) return false;
+    char tmpdir[VCS_OBJECT_PATH_MAX], match[VCS_OBJECT_PATH_MAX] = {0};
+    if (!zvcs_path(repo_root, "objects/tmp", tmpdir, sizeof(tmpdir)) ||
+        !object_legacy_alias_find(tmpdir, &final_id, match))
+        return false;
+    struct platform_private_file alias;
+    platform_private_file_init(&alias);
+    struct platform_private_file_identity identity = {
+        .volume = final_id.volume, .file = final_id.file_low};
+    bool retired = platform_private_file_open_locked(match, &alias) &&
+        platform_private_file_retire_if_identity(&alias, match, &identity);
+    platform_private_file_close(&alias);
+    return retired && platform_private_parent_flush(tmpdir) &&
+        platform_file_metadata_read(final, &metadata) ==
+            PLATFORM_FILE_METADATA_OK && metadata.links == 1;
+}
+
+static bool object_content_equal(const char *path, const uint8_t *content,
+                                  size_t len)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+              platform_positioned_file_snapshot(&file, &before) &&
+              before.size == len;
+    uint8_t chunk[4096];
+    for (size_t offset = 0; ok && offset < len;) {
+        size_t take = len - offset < sizeof(chunk)
+            ? len - offset : sizeof(chunk);
+        ok = platform_positioned_file_read(&file, chunk, take, offset) ==
+                 (int64_t)take && memcmp(chunk, content + offset, take) == 0;
+        offset += take;
+    }
+    ok = ok && platform_positioned_file_snapshot(&file, &after) &&
+         platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    return ok;
+}
+
+static bool object_stage_publish(
+    const char *repo_root, const char *tmp, const char *final,
+    const uint8_t *content, size_t len, bool replace,
+    struct platform_private_file *staged,
+    const struct platform_private_file_identity *staged_identity)
+{
+    bool ok = (len == 0 ||
+               platform_private_file_write_at(staged, content, len, 0)) &&
+              platform_private_file_truncate(staged, len) &&
+              platform_private_file_flush(staged);
+    if (ok && replace)
+        ok = platform_private_file_replace(staged, tmp, final);
+    bool already_exists = false;
+    if (ok && !replace)
+        ok = platform_private_file_publish_no_clobber(
+            staged, tmp, final, &already_exists);
+    if (ok && already_exists)
+        ok = object_recover_legacy_alias(repo_root, final) &&
+             object_content_equal(final, content, len);
+    if (already_exists) {
+        bool retired = platform_private_file_retire_if_identity(
+            staged, tmp, staged_identity);
+        ok = ok && retired;
+    } else if (!ok) {
+        (void)platform_private_file_retire_if_identity(
+            staged, tmp, staged_identity);
+    }
+    platform_private_file_close(staged);
+    return ok;
+}
+
 /* Write content[0..len) into the object addressed by addr, atomically and
  * idempotently. Shared by the content-addressed put and the manifest's
  * structural-address put. */
@@ -175,8 +305,12 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
         LOG_FAIL("vcs", "object path too long");
     struct platform_file_metadata metadata;
     if (!replace && platform_file_metadata_read(final, &metadata) ==
-                        PLATFORM_FILE_METADATA_OK)
-        return object_parents_flush(repo_root, addr);  /* dedup */
+                        PLATFORM_FILE_METADATA_OK) {
+        if (!object_recover_legacy_alias(repo_root, final) ||
+            !object_content_equal(final, content, len))
+            LOG_FAIL("vcs", "existing object differs or has unexplained link");
+        return object_parents_flush(repo_root, addr);
+    }
 
     char hex[65];
     zcl_hex_encode(addr, 32, hex);
@@ -209,21 +343,13 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
     if (!platform_private_file_create(tmp, &staged) ||
         !platform_private_file_identity(&staged, &staged_identity))
         LOG_FAIL("vcs", "open tmp %s: %s", tmp, strerror(errno));
-    bool ok = (len == 0 ||
-               platform_private_file_write_at(&staged, content, len, 0)) &&
-              platform_private_file_truncate(&staged, len) &&
-              platform_private_file_flush(&staged);
-    if (ok && replace)
-        ok = platform_private_file_replace(&staged, tmp, final);
-    if (ok && !replace) {
-        bool already_same = false;
-        ok = platform_private_file_link_no_clobber(
-            tmp, final, &staged_identity, &already_same);
-    }
-    if (!replace || !ok)
-        (void)platform_private_file_retire_if_identity(
-            &staged, tmp, &staged_identity);
-    platform_private_file_close(&staged);
+    bool ok = object_stage_publish(repo_root, tmp, final, content, len,
+                                   replace, &staged, &staged_identity);
+    char tmpdir[VCS_OBJECT_PATH_MAX];
+    if (ok && (!zvcs_path(repo_root, "objects/tmp", tmpdir,
+                          sizeof(tmpdir)) ||
+               !platform_private_parent_flush(tmpdir)))
+        ok = false;
     if (ok) ok = object_parents_flush(repo_root, addr);
     if (!ok) LOG_FAIL("vcs", "durable object publication failed");
     return ok;
@@ -313,6 +439,8 @@ static int object_read(const char *repo_root, const uint8_t addr[32],
     char path[VCS_OBJECT_PATH_MAX];
     if (!object_path(repo_root, addr, path, sizeof(path)))
         LOG_ERR("vcs", "object path too long");
+    if (!object_recover_legacy_alias(repo_root, path))
+        LOG_ERR("vcs", "object has an unexplained hard link");
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;
     platform_positioned_file_init(&file);

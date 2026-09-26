@@ -2024,6 +2024,26 @@ static int t_object_store(const char *repo)
     hex[64] = '\0';
     char opath[4096];
     snprintf(opath, sizeof(opath), "%s/.zvcs/objects/%c%c/%s", repo, hex[0], hex[1], hex + 2);
+#if !defined(_WIN32)
+    char crash_alias[4096];
+    snprintf(crash_alias, sizeof(crash_alias),
+             "%s/.zvcs/objects/tmp/.put.crash-fixture", repo);
+    VC_CHECK("crash fixture links staged CAS name", link(opath, crash_alias) == 0);
+    struct stat linked, repaired;
+    VC_CHECK("crash fixture has two names",
+             stat(opath, &linked) == 0 && linked.st_nlink == 2);
+    uint8_t *recovered_bytes = NULL; size_t recovered_len = 0;
+    VC_CHECK("CAS read repairs exact staged alias",
+             vcs_object_get(repo, h1, VCS_TAG_BLOB,
+                            &recovered_bytes, &recovered_len) == 0);
+    VC_CHECK("recovered CAS bytes remain exact",
+             recovered_len == sizeof(data) && recovered_bytes &&
+             memcmp(recovered_bytes, data, recovered_len) == 0);
+    free(recovered_bytes);
+    VC_CHECK("crash alias retired and CAS has one name",
+             lstat(crash_alias, &repaired) != 0 && errno == ENOENT &&
+             stat(opath, &repaired) == 0 && repaired.st_nlink == 1);
+#endif
     int fd = open(opath, O_WRONLY);
     if (fd >= 0) { uint8_t bad = 0xff; pwrite(fd, &bad, 1, 0); close(fd); }
     uint8_t *g3 = NULL; size_t g3len = 0;

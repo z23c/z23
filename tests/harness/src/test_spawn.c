@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
 #include <sys/wait.h>
@@ -200,6 +201,49 @@ static int test_spawn_capture_eof_remains_bounded(void)
     return failures;
 }
 
+static int test_spawn_capture_inherited_pipe_exits_promptly(void)
+{
+    int failures = 0;
+    TEST("spawn: exited command does not wait for a descendant's stdout") {
+        const char *argv[] = { "/bin/sh", "-c",
+            "(/bin/sleep 5) & printf inherited-pipe; exit 0", NULL };
+        char buf[64] = {0};
+        bool timed_out = true;
+        int64_t start = platform_time_monotonic_ms();
+        int rc = zcl_spawn_capture_observed(
+            argv, buf, sizeof(buf), 3000, &timed_out);
+        int64_t elapsed = platform_time_monotonic_ms() - start;
+        ASSERT(rc == 0);
+        ASSERT(!timed_out);
+        ASSERT(strcmp(buf, "inherited-pipe") == 0);
+        ASSERT(elapsed < 1000);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_capture_inherited_pipe_writing(void)
+{
+    int failures = 0;
+    TEST("spawn: continuously writing descendant cannot hold capture") {
+        const char *argv[] = { "/bin/sh", "-c",
+            "printf direct-exit; (while :; do printf x; done) & exit 0",
+            NULL };
+        char buf[128] = {0};
+        bool timed_out = true;
+        int64_t start = platform_time_monotonic_ms();
+        int rc = zcl_spawn_capture_observed(
+            argv, buf, sizeof(buf), 3000, &timed_out);
+        int64_t elapsed = platform_time_monotonic_ms() - start;
+        ASSERT(rc == 0);
+        ASSERT(!timed_out);
+        ASSERT(strstr(buf, "direct-exit") != NULL);
+        ASSERT(elapsed < 1000);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_capture_cancel_kills(void)
 {
     int failures = 0;
@@ -251,6 +295,45 @@ static int test_spawn_capture_echild_tolerant(void)
 
         ASSERT(rc == 0);
         ASSERT(spawn_contains(buf, "echild-marker"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_capture_echild_inherited_writer(void)
+{
+    int failures = 0;
+    TEST("spawn: SA_NOCLDWAIT capture retires inherited writer group") {
+        struct sigaction old = {0}, sa = {0};
+        sigaction(SIGCHLD, NULL, &old);
+        sa.sa_handler = SIG_DFL;
+        sa.sa_flags = SA_NOCLDWAIT;
+        sigaction(SIGCHLD, &sa, NULL);
+
+        const char *argv[] = { "/bin/sh", "-c",
+            "printf '%s ' \"$$\"; (while :; do printf x; done) & exit 0",
+            NULL };
+        char buf[128] = {0};
+        int64_t start = platform_time_monotonic_ms();
+        int rc = zcl_spawn_capture(argv, buf, sizeof(buf), 3000);
+        int64_t elapsed = platform_time_monotonic_ms() - start;
+        sigaction(SIGCHLD, &old, NULL);
+
+        char *end = NULL;
+        long group = strtol(buf, &end, 10);
+        bool group_gone = false;
+        for (int i = 0; i < 50 && group > 1; i++) {
+            if (kill((pid_t)-group, 0) != 0 && errno == ESRCH) {
+                group_gone = true;
+                break;
+            }
+            struct timespec pause = {.tv_sec = 0, .tv_nsec = 10000000};
+            nanosleep(&pause, NULL); /* real-clock: kernel group teardown has no fake-clock seam */
+        }
+        ASSERT(rc == 0);
+        ASSERT(elapsed < 1000);
+        ASSERT(end && *end == ' ' && group > 1);
+        ASSERT(group_gone);
         PASS();
     } _test_next:;
     return failures;
@@ -493,8 +576,11 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_capture_echo();
     failures += test_spawn_capture_timeout_kills();
     failures += test_spawn_capture_eof_remains_bounded();
+    failures += test_spawn_capture_inherited_pipe_exits_promptly();
+    failures += test_spawn_capture_inherited_pipe_writing();
     failures += test_spawn_capture_cancel_kills();
     failures += test_spawn_capture_echild_tolerant();
+    failures += test_spawn_capture_echild_inherited_writer();
     failures += test_spawn_capture_truncates_oversized();
     failures += test_spawn_capture_real_exit_code();
     failures += test_spawn_pty_capture_observes_terminal();

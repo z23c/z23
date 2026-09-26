@@ -57,6 +57,12 @@ bool platform_private_file_mark_executable(struct platform_private_file *file);
 bool platform_private_file_replace(struct platform_private_file *file,
                                    const char *staging_path,
                                    const char *destination_path);
+/* Move a flushed staged regular file into an absent destination atomically.
+ * An existing destination is reported through already_exists and is never
+ * replaced. The move leaves no second link after a crash. */
+bool platform_private_file_publish_no_clobber(
+    struct platform_private_file *file, const char *staging_path,
+    const char *destination_path, bool *already_exists);
 bool platform_private_file_retire(struct platform_private_file *file,
                                   const char *path);
 /* Delete exactly the regular file held by `file`, refusing if its identity no

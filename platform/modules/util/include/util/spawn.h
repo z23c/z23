@@ -103,7 +103,12 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
  * timeout_ms — if > 0, the child is killed (SIGKILL) and reaped if it has
  *              not exited by the deadline; the bytes captured so far are
  *              still returned in buf. <= 0 means no timeout (wait
- *              indefinitely for EOF on the pipe).
+ *              indefinitely while the direct child remains alive). Once
+ *              that child exits, an inherited writer gets at most a short
+ *              drain window before the original process group is retired.
+ *              A descendant that creates another session is outside this
+ *              process-group contract and still loses the captured pipe when
+ *              the parent closes it.
  *
  * Returns the child's exit status (0-255) when a trustworthy waitpid()
  * result was obtained. Returns 0 when waitpid() fails ECHILD (see the

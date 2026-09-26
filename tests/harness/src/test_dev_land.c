@@ -3333,6 +3333,7 @@ static int test_dev_land_vendor_dependencies(void)
         struct dlx_rig rig;
         struct dlx_call c;
         char wt[1200], check[1400], source[1400], exclude[1400];
+        char abandoned[1500];
         char alias_dir[512], alias[700];
         char aaa_source[1400], aaa_target[1400], aaa_bytes[2][8] = {{0}};
         char second[64], third[64], bytes[3][8] = {{0}};
@@ -3467,6 +3468,13 @@ static int test_dev_land_vendor_dependencies(void)
         ASSERT(unlink(check) == 0);
         ASSERT(link(source, check) == 0);
         ASSERT(stat(source, &st) == 0 && st.st_nlink == 2);
+        /* A prior repair died before rename. The historical PID-only temp
+         * name must not block this exact two-link recovery after PID reuse. */
+        int abandoned_len = snprintf(abandoned, sizeof(abandoned),
+                                     "%s.tmp.%ld", check, (long)getpid());
+        ASSERT(abandoned_len > 0);
+        ASSERT(abandoned_len < (int)sizeof(abandoned));
+        ASSERT(dlx_write(abandoned, "abandoned\n"));
         ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));
         const char *const ignored[] = {
             "check-ignore", "-q", "vendor/lib/libfoo.a", NULL,
@@ -3488,6 +3496,9 @@ static int test_dev_land_vendor_dependencies(void)
         dlx_end(&c);
         ASSERT(stat(source, &st) == 0 && st.st_nlink == 1);
         ASSERT(stat(check, &landed_st) == 0 && landed_st.st_nlink == 1);
+        ASSERT(st.st_ino != landed_st.st_ino);
+        ASSERT(stat(abandoned, &st) == 0 && st.st_nlink == 1);
+        ASSERT(unlink(abandoned) == 0);
         ASSERT(st.st_dev != landed_st.st_dev || st.st_ino != landed_st.st_ino);
         ASSERT((landed_st.st_mode & 07777) == (source_st.st_mode & 07777));
 #if defined(__APPLE__)

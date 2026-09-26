@@ -4434,6 +4434,45 @@ static bool dl_same_file_snapshot(const struct stat *a, const struct stat *b)
 #endif
 }
 
+#if !defined(_WIN32)
+static int dl_materialize_tmp_open(const char *target, char *tmp,
+                                   size_t tmp_size)
+{
+    int n = snprintf(tmp, tmp_size, "%s.tmp.XXXXXX", target);
+    if (n <= 0 || (size_t)n >= tmp_size) return -1;
+    int fd = mkstemp(tmp);
+    if (fd < 0) return -1;
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) == 0) return fd;
+    (void)close(fd);
+    (void)unlink(tmp);
+    return -1;
+}
+
+static bool dl_materialize_parent_flush(const char *target)
+{
+    char parent[4096 + 96];
+    size_t target_len = strlen(target);
+    if (target_len >= sizeof(parent)) return false;
+    memcpy(parent, target, target_len + 1);
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent) return false;
+    *slash = '\0';
+    return platform_private_parent_flush(parent);
+}
+
+static bool dl_materialize_published(const char *target,
+                                     const struct stat *completed,
+                                     bool repair)
+{
+    struct stat observed;
+    bool ok = lstat(target, &observed) == 0 && observed.st_nlink == 1 &&
+              dl_same_inode(completed, &observed) &&
+              dl_same_copy_metadata(completed, &observed);
+    if (ok && repair) ok = dl_materialize_parent_flush(target);
+    return ok;
+}
+#endif
+
 static bool dl_materialize_file(const char *source, const char *target,
                                 const struct stat *source_st,
                                 const char *explained_alias)
@@ -4464,12 +4503,11 @@ static bool dl_materialize_file(const char *source, const char *target,
         (void)close(input);
         return false;
     }
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", target, (long)getpid()) >=
-        (int)sizeof(tmp)) {
-        (void)close(input);
-        return false;
-    }
-    output = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    /* A crash before rename can leave a staged copy. A PID-only name could
+     * collide after PID reuse and hold every later repair of nlink==2.
+     * mkstemp gives each attempt a distinct exclusive name; old staging
+     * debris cannot prevent recovery of the actual target inode. */
+    output = dl_materialize_tmp_open(target, tmp, sizeof(tmp));
     if (output < 0) {
         (void)close(input);
         return false;
@@ -4540,9 +4578,8 @@ static bool dl_materialize_file(const char *source, const char *target,
     if (ok && rename(tmp, target) != 0)
         ok = false;
     if (ok)
-        ok = lstat(target, &observed) == 0 && observed.st_nlink == 1 &&
-             dl_same_inode(&completed, &observed) &&
-             dl_same_copy_metadata(&completed, &observed);
+        ok = dl_materialize_published(target, &completed,
+                                      explained_alias != NULL);
     if (!ok)
         (void)unlink(tmp);
     return ok;
