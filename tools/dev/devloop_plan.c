@@ -971,6 +971,35 @@ static bool append_group_array(char *out, size_t out_sz, size_t *pos,
                    listed < len ? "true" : "false", name, digest_string);
 }
 
+static bool plan_path_selects_full_group(const struct zcl_devloop_plan *plan,
+                                         const char *full_id)
+{
+    for (size_t i = 0; i < plan->path_groups_len; i++)
+        if (zcl_test_group_plan_selects(plan->path_groups[i], full_id))
+            return true;
+    return false;
+}
+
+/* The restart reflex runs only the non-integration part of this set, and
+ * tiers it to the path-owned groups when the whole of it is too large to run
+ * in the foreground. Printing both counts lets a caller see which bound an
+ * owner meets before asking the watcher. */
+static void plan_execution_tier_counts(const struct zcl_devloop_plan *plan,
+                                       size_t *immediate,
+                                       size_t *path_immediate)
+{
+    *immediate = *path_immediate = 0;
+    for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+        const char *full = zcl_test_group_catalog_at(i);
+        if (!plan_selects_full_group(plan, full) ||
+            zcl_test_group_is_integration_only(full))
+            continue;
+        (*immediate)++;
+        if (plan_path_selects_full_group(plan, full))
+            (*path_immediate)++;
+    }
+}
+
 /* Materialize the C-owned proof plan as canonical full IDs. The catalog is
  * already deterministic and unique, so iterating it gives stable order and
  * deduplication without a second registry or a large scratch array. The SHA3
@@ -1024,14 +1053,19 @@ static bool append_execution_set(const struct zcl_devloop_plan *plan,
             listed++;
         }
     }
+    size_t immediate = 0, path_immediate = 0;
+    if (valid)
+        plan_execution_tier_counts(plan, &immediate, &path_immediate);
     return appendf(out, out_sz, pos,
                    "],\"execution_groups_listed\":%zu,"
                    "\"execution_groups_total\":%zu,"
                    "\"execution_groups_abridged\":%s,"
+                   "\"execution_immediate_total\":%zu,"
+                   "\"execution_path_immediate_total\":%zu,"
                    "\"execution_set_valid\":%s,"
                    "\"execution_set_sha3\":\"%s\"",
-                   listed, total, abridged ? "true" : "false",
-                   valid ? "true" : "false", digest_string);
+                   listed, total, abridged ? "true" : "false", immediate,
+                   path_immediate, valid ? "true" : "false", digest_string);
 }
 
 static const char *plan_first_non_live_path(const struct zcl_devloop_plan *plan,
