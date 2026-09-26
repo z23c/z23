@@ -1289,6 +1289,27 @@ static void test_key_inner_replaced(struct fx *x)
              "instead of reusing its cached facts", ok);
 }
 
+/* gcc writes its temporaries under /tmp when TMPDIR names no directory. The
+ * -### re-ask must still collapse them, or every warm key moves. */
+static void test_key_tmpdir_missing(struct fx *x)
+{
+    const char *prior = getenv("TMPDIR");
+    char saved[PATH_MAX] = {0}, gone[PATH_MAX], k1[65] = {0}, k2[65] = {0};
+    bool had = prior != NULL;
+    bool ok = snprintf(saved, sizeof(saved), "%s", had ? prior : "") <
+                  (int)sizeof(saved) &&
+              snprintf(gone, sizeof(gone), "%s/no-such-tmp", x->root) <
+                  (int)sizeof(gone) &&
+              platform_environment_set("TMPDIR", gone, 1) == 0 &&
+              fx_key(x, "cc", k1) && fx_key(x, "cc", k2);
+    if (had)
+        (void)platform_environment_set("TMPDIR", saved, 1);
+    else
+        (void)unsetenv("TMPDIR");
+    AR_CHECK("backend lines: a TMPDIR that names no directory still keys "
+             "the same across two asks", ok && strcmp(k1, k2) == 0);
+}
+
 /* PATH=/usr/bin: with an `as` at the checkout root: the compile child's
  * execvp would run that one; the key misses by name instead. */
 static void test_key_path_relative(struct fx *x)
@@ -1866,6 +1887,7 @@ static void test_derivation(void)
         test_key_cache_opaque(x);
         test_key_backend_lines(x);
         test_key_inner_replaced(x);
+        test_key_tmpdir_missing(x);
         test_key_same_name_static(x);
         test_key_cost(x);
     }

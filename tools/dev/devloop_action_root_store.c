@@ -589,14 +589,27 @@ static bool ars_driver_temp_name(const char *base)
            ars_clang_temp_stem(base, dot);
 }
 
+/* `dir` (the `n` bytes before a basename) is where a driver may put its
+ * temporaries: the child's TMPDIR, or the fallbacks gcc and Clang use when
+ * TMPDIR names no directory. */
+static bool ars_temp_dir(const char *dir, size_t n, const char *tmp)
+{
+    const char *const dirs[] = { tmp, "/tmp", "/var/tmp" };
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+        if (dirs[i][0] && strlen(dirs[i]) == n &&
+            memcmp(dir, dirs[i], n) == 0)
+            return true;
+    return false;
+}
+
 bool zcl_action_root_canon_driver_word(const char *word, const char *root,
                                        const char *tmp, char *out,
                                        size_t cap)
 {
-    size_t tn = strlen(tmp), rn = strlen(root);
+    size_t rn = strlen(root);
     const char *base = strrchr(word, '/');
-    if (tn && strncmp(word, tmp, tn) == 0 && word[tn] == '/' &&
-        base == word + tn && ars_driver_temp_name(base + 1))
+    if (base && ars_temp_dir(word, (size_t)(base - word), tmp) &&
+        ars_driver_temp_name(base + 1))
         return snprintf(out, cap, "@tmp%s", strrchr(base, '.')) < (int)cap;
     size_t o = 0;
     for (const char *p = word; *p;) {

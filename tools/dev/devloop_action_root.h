@@ -319,7 +319,8 @@ bool zcl_action_root_parse_builtin_dirs(const char *cc_dash_e_v_output,
                                         char *miss);
 
 /* One word of a `-###` command line, canonical: a driver temporary directly
- * under `tmp` (gcc's cc + 6 alphanumerics + .ext, or Clang's
+ * under `tmp`, or under the fallback temp dirs gcc and Clang use when TMPDIR
+ * names no directory (gcc's cc + 6 alphanumerics + .ext, or Clang's
  * <stem>-<6+ lowercase hex>.ext) becomes "@tmp" plus its suffix; any other
  * path under `tmp` stays literal; every spelling of `root` becomes "@root".
  * False when `out` is too small. */
