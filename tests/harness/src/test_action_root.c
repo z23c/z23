@@ -419,10 +419,18 @@ static void test_derive_sysroot(struct fx *x,
     capsule.compiler_backend_sha3[3] ^= 0x40;
     ok = ok && vcs_toolchain_capsule_v1_root(&capsule, x->req.toolchain_root) &&
          fx_differs(x, &first, VCS_ACTION_FIELD_V2_TOOLCHAIN);
+    capsule.compiler_backend_sha3[3] ^= 0x40;
+    capsule.assembler_sha3[3] ^= 0x40;
+    bool as_ok =
+        ok &&
+        vcs_toolchain_capsule_v1_root(&capsule, x->req.toolchain_root) &&
+        fx_differs(x, &first, VCS_ACTION_FIELD_V2_TOOLCHAIN);
     zcl_action_root_result_free(&first);
     memcpy(x->req.toolchain_root, saved, 32);
     AR_CHECK("toolchain: a changed compiler backend moves the root",
              ok && fx_same(x, b));
+    AR_CHECK("toolchain: a changed assembler identity moves the root",
+             as_ok && fx_same(x, b));
     x->req.sysroot_objects_sha3[3] ^= 0x40;
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_SYSROOT);
     x->req.sysroot_objects_sha3[3] ^= 0x40;
@@ -444,6 +452,11 @@ static void test_derive_linker(struct fx *x,
               fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER) &&
               fx_write(x->root, "tools/ld", "fixture linker v1\n");
     AR_CHECK("linker: a different ld binary moves the root",
+             ok && fx_same(x, b));
+    x->req.linker.collect2 = x->ld;
+    ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
+    x->req.linker.collect2 = NULL;
+    AR_CHECK("linker: a collect2 the driver resolves moves the root",
              ok && fx_same(x, b));
     x->link_argv[1] = "-static";
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
