@@ -71,15 +71,31 @@ static int exchange_body(installer *device, uint8_t ins,
     return 0;
 }
 
-static int exchange_rejected(uint8_t ins, size_t length, const uint8_t *data,
-                            uint16_t status)
-{
-    fprintf(stderr, "Ledger rejected command %02x with status %04x.\n",
-            ins, status);
-    if (status == 0x6985 && ins == 0 && length > 0 &&
-        (data[0] == 0x12 || data[0] == 0x13))
-        fputs("Custom CA changes require Blue Recovery mode.\n", stderr);
-    return -1;
+static int exchange_send(installer *device, const uint8_t *data, size_t length,
+                         uint8_t *apdu, size_t apdu_capacity,
+                         size_t *wire_length) {
+    *wire_length = length;
+    if (device->secure) {
+        if (blue_secure_wrap(&device->channel, data, length, apdu + 5,
+                             apdu_capacity - 5, wire_length) < 0) return -1;
+    } else if (length) memcpy(apdu + 5, data, length);
+    apdu[4] = (uint8_t)*wire_length;
+    return 0;
+}
+
+static int exchange_check_status(uint8_t ins, const uint8_t *data, size_t length,
+                                 const uint8_t *response, size_t response_length) {
+    uint16_t status = (uint16_t)(((uint16_t)response[response_length - 2] << 8) |
+                                  response[response_length - 1]);
+    if (status != 0x9000) {
+        fprintf(stderr, "Ledger rejected command %02x with status %04x.\n",
+                ins, status);
+        if (status == 0x6985 && ins == 0 && length > 0 &&
+            (data[0] == 0x12 || data[0] == 0x13))
+            fputs("Custom CA changes require Blue Recovery mode.\n", stderr);
+        return -1;
+    }
+    return 0;
 }
 
 static int exchange(installer *device, uint8_t ins, uint8_t p1,
@@ -88,12 +104,10 @@ static int exchange(installer *device, uint8_t ins, uint8_t p1,
     if (!device || length > 225 || (length && !data) || !body || !body_length)
         return -1;
     uint8_t apdu[256] = {0xe0, ins, p1, 0, 0};
-    size_t wire_length = length;
-    if (device->secure) {
-        if (blue_secure_wrap(&device->channel, data, length, apdu + 5,
-                             sizeof apdu - 5, &wire_length) < 0) return -1;
-    } else if (length) memcpy(apdu + 5, data, length);
-    apdu[4] = (uint8_t)wire_length;
+    size_t wire_length = 0;
+    if (exchange_send(device, data, length, apdu, sizeof apdu,
+                      &wire_length) < 0)
+        return -1;
     uint8_t response[LEDGER_HID_MAX_RESPONSE];
     size_t response_length = 0;
     if (ledger_hid_exchange_timeout(device->fd, apdu, 5 + wire_length,
@@ -103,10 +117,8 @@ static int exchange(installer *device, uint8_t ins, uint8_t p1,
         fprintf(stderr, "No HID reply to command %02x.\n", ins);
         return -1;
     }
-    uint16_t status = (uint16_t)(((uint16_t)response[response_length - 2] << 8) |
-                                  response[response_length - 1]);
-    if (status != 0x9000)
-        return exchange_rejected(ins, length, data, status);
+    if (exchange_check_status(ins, data, length, response, response_length) < 0)
+        return -1;
     response_length -= 2;
     return exchange_body(device, ins, response, response_length,
                          body, body_capacity, body_length);
