@@ -3905,7 +3905,7 @@ tools/dev/dev_proof_receipt.c:zcl_dev_proof_receipt_parse:17
 tools/dev/dev_proof_receipt.c:zcl_dev_verdict_leaf_verify:16
 tools/dev/dev_proof_signer.c:signer_allow_line:17
 tools/dev/dev_workspace.c:cycle_record_read_named:23
-tools/dev/dev_workspace.c:cycle_state_write_impl:44
+tools/dev/dev_workspace.c:cycle_state_write_impl:41
 tools/dev/dev_workspace.c:zcl_devloop_cycle_state_read:18
 tools/dev/dev_workspace.c:zcl_devloop_cycle_state_read_after:30
 tools/dev/dev_workspace.c:zcl_devloop_cycle_state_wait_after:23
