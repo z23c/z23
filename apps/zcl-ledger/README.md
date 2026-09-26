@@ -16,16 +16,34 @@ cmake --build build/zcl-ledger
 ctest --test-dir build/zcl-ledger --output-on-failure
 ```
 
-To query an unlocked device, identify its `hidraw` path with `lsusb` and
-`/sys/class/hidraw/*/device/uevent`, then run:
+Find accessible Ledger HID interfaces without Ledger Live:
+
+```sh
+build/zcl-ledger/zcl-ledger devices
+build/zcl-ledger/zcl-ledger devices --json
+```
+
+The Blue exposes more than one HID interface. Query the app interface of an
+unlocked device by its explicit path:
 
 ```sh
 build/zcl-ledger/zcl-ledger app-info /dev/hidraw1
+build/zcl-ledger/zcl-ledger app-info --json /dev/hidraw1
 ```
 
-The path is an example. The command checks Ledger's USB vendor ID before
-sending the app-info APDU. It rejects malformed responses and does not report
-success merely because the USB exchange succeeded.
+The path is an example. `devices --json` returns an `ok` boolean and a
+`devices` array of objects with `path`, `model`, `vendor_id`, and `product_id`.
+`app-info --json` returns `ok`, `name`, and `version` on success, or `ok: false`
+with a stable `error` code on failure. Both commands use exit status zero for
+success and nonzero for failure. App-info checks Ledger's USB vendor ID before
+sending its read-only APDU. It rejects malformed responses and does not report
+success merely because the USB exchange succeeded. Neither command requests
+keys, addresses, or signatures.
+
+`app-info --json` error codes are `open_failed`, `not_ledger`,
+`no_app_info_response`, `device_status`, and `invalid_app_info`. Device
+discovery can return `device_scan_failed`. Each Blue HID interface is listed;
+the caller selects the one that answers app-info.
 
 ## Limits
 

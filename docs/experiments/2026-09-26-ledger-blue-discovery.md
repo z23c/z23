@@ -37,3 +37,22 @@ Identify a public SDK revision matching the Blue 2.1.1 firmware and historical
 ZClassic app, build the app reproducibly, and test it against fixed public
 fixtures before considering installation. Keep the host and any new device
 code in C23. Verify the complete app and dependency code before execution.
+
+## CLI discovery and machine-readable status
+
+Recorded: 2026-09-26T03:08:10-04:00 (2026-09-26T07:08:10Z)
+
+The C23 `zcl-ledger devices --json` command identified two accessible Blue
+interfaces, `/dev/hidraw1` and `/dev/hidraw2`, both with USB ID `2c97:0000`.
+The read-only `app-info --json /dev/hidraw1` command returned
+`{"ok":true,"name":"BOLOS","version":"2.1.1"}`. The other Blue interface
+returned `{"ok":false,"error":"no_app_info_response"}`. Querying `/dev/null`
+returned `{"ok":false,"error":"not_ledger"}`. The latter two commands exited
+with status 1. Clang 22.1.6 built the C23 Debug target with address and
+undefined-behavior sanitizers; its focused `ledger-hid` test passed. GCC 16.1.1
+built the C23 Release target and passed the same test. `jq -e` parsed the live
+discovery and app-info JSON and checked the observed device count, name, and
+version.
+
+This demonstrates discovery and machine-readable device status. It does not
+demonstrate a ZClassic device app, address derivation, or transaction signing.
