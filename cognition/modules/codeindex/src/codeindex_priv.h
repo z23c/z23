@@ -45,8 +45,9 @@
  * "ret1" = the retrieval-integrity generation: every consumer-visible group,
  * file, symbol, and reference row is sealed by one canonical logical root.
  * "ret2" adds content-addressed per-file scan shards so a changed source can
- * replace only its own derived rows without weakening that logical seal. */
-#define CI_SCHEMA_VERSION "ret2"
+ * replace only its own derived rows without weakening that logical seal.
+ * "ret3" invalidates generations seeded across different depfile graphs. */
+#define CI_SCHEMA_VERSION "ret3"
 #define CI_STORE_FORMAT "zcl.codeindex.store.v5"
 #define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 

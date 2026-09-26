@@ -25,6 +25,7 @@
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
 
+#include <sqlite3.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -346,6 +347,105 @@ static int cis_corrupt_donor(const struct cis_repo *repo)
     return failures;
 }
 
+static int cis_different_depfiles(const struct cis_repo *repo)
+{
+    int failures = 0;
+    struct cis_observation donor, built;
+    bool prepared =
+        cis_write_file(repo->main_root, "build/obj/alpha.d",
+                       "build/obj/alpha.o: lib/net/src/alpha.c "
+                       "lib/net/src/beta.c\n") &&
+        cis_write_file(repo->target_root, "build/obj/alpha.d",
+                       "build/obj/alpha.o: lib/net/src/alpha.c "
+                       "lib/net/src/gamma.c\n") &&
+        cis_drop_store(repo->target_root);
+    cis_observe(repo->main_root, &donor);
+    cis_observe(repo->target_root, &built);
+    CIS_CHECK("different depfiles refuse a sibling seed",
+              prepared && donor.opened && built.opened && !built.seeded);
+    struct codeindex *index = codeindex_open(repo->target_root);
+    char includes[4][256] = {{0}};
+    int count = index ? codeindex_includes_of_file(
+        index, "lib/net/src/alpha.c", includes, 4) : -1;
+    CIS_CHECK("cold graph uses the target depfile",
+              count == 1 &&
+              strcmp(includes[0], "lib/net/src/gamma.c") == 0);
+    if (index) codeindex_close(index);
+    return failures;
+}
+
+static int cis_absolute_depfile_paths(const struct cis_repo *repo)
+{
+    int failures = 0;
+    char depfile[PATH_MAX * 2 + 128];
+    int n = snprintf(depfile, sizeof(depfile),
+                     "build/obj/alpha.o: %s/lib/net/src/alpha.c "
+                     "%s/lib/net/src/beta.c\n",
+                     repo->main_root, repo->main_root);
+    bool prepared = n > 0 && (size_t)n < sizeof(depfile) &&
+        cis_write_file(repo->main_root, "build/obj/alpha.d", depfile) &&
+        cis_write_file(repo->target_root, "build/obj/alpha.d", depfile) &&
+        cis_drop_store(repo->target_root);
+    struct cis_observation donor, built;
+    cis_observe(repo->main_root, &donor);
+    struct codeindex *donor_index = codeindex_open(repo->main_root);
+    char donor_includes[4][256] = {{0}};
+    int donor_count = donor_index ? codeindex_includes_of_file(
+        donor_index, "lib/net/src/alpha.c", donor_includes, 4) : -1;
+    CIS_CHECK("donor absolute path yields one include edge",
+              donor_count == 1 &&
+              strcmp(donor_includes[0], "lib/net/src/beta.c") == 0);
+    if (donor_index) codeindex_close(donor_index);
+    cis_observe(repo->target_root, &built);
+    CIS_CHECK("equal bytes with root-dependent paths refuse a seed",
+              prepared && donor.opened && built.opened && !built.seeded);
+    struct codeindex *index = codeindex_open(repo->target_root);
+    char includes[4][256] = {{0}};
+    int count = index ? codeindex_includes_of_file(
+        index, "lib/net/src/alpha.c", includes, 4) : -1;
+    CIS_CHECK("target graph excludes donor absolute paths", count == 0);
+    if (index) codeindex_close(index);
+    return failures;
+}
+
+static int cis_altered_donor_includes(const struct cis_repo *repo)
+{
+    int failures = 0;
+    static const char depfile[] =
+        "build/obj/alpha.o: lib/net/src/alpha.c lib/net/src/beta.c\n";
+    bool prepared =
+        cis_write_file(repo->main_root, "build/obj/alpha.d", depfile) &&
+        cis_write_file(repo->target_root, "build/obj/alpha.d", depfile) &&
+        cis_drop_store(repo->target_root);
+    struct cis_observation donor, built;
+    cis_observe(repo->main_root, &donor);
+    char image[PATH_MAX];
+    sqlite3 *db = NULL;
+    bool altered = cis_derived_path(repo->main_root, "index.kv", image) &&
+                   sqlite3_open_v2(image, &db, SQLITE_OPEN_READWRITE,
+                                   NULL) == SQLITE_OK;
+    if (altered)
+        altered = sqlite3_exec(db,
+            "INSERT INTO includes(file_id,dep_path)"
+            " SELECT id,'lib/wallet/src/epsilon.c' FROM files"
+            " WHERE path='lib/net/src/alpha.c'", NULL, NULL, NULL) ==
+            SQLITE_OK; // raw-sql-ok:codeindex-derived
+    if (db) sqlite3_close(db);
+    cis_observe(repo->target_root, &built);
+    CIS_CHECK("altered donor include row refuses a seed",
+              prepared && donor.opened && altered && built.opened &&
+              !built.seeded);
+    struct codeindex *index = codeindex_open(repo->target_root);
+    char includes[4][256] = {{0}};
+    int count = index ? codeindex_includes_of_file(
+        index, "lib/net/src/alpha.c", includes, 4) : -1;
+    CIS_CHECK("target graph excludes altered donor row",
+              count == 1 &&
+              strcmp(includes[0], "lib/net/src/beta.c") == 0);
+    if (index) codeindex_close(index);
+    return failures;
+}
+
 static int cis_foreign_donor(const struct cis_repo *foreign)
 {
     int failures = 0;
@@ -405,6 +505,9 @@ int test_codeindex_seed(void)
     if (!ready) return failures;
 
     failures += cis_identical_and_near(&repo);
+    failures += cis_different_depfiles(&repo);
+    failures += cis_absolute_depfile_paths(&repo);
+    failures += cis_altered_donor_includes(&repo);
     failures += cis_corrupt_donor(&repo);
     failures += cis_foreign_donor(&foreign);
     failures += cis_owner_refusal(&repo);
