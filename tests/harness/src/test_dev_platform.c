@@ -3953,6 +3953,11 @@ static bool dp_restart_event_partial_ok(const char *root,
             (int)sizeof(path))
             (void)unlink(path);
     }
+    /* The callers are gone; drop the index that still names them. */
+    char index_dir[PATH_MAX];
+    if (snprintf(index_dir, sizeof(index_dir), "%s/.codeindex", root) <
+        (int)sizeof(index_dir))
+        test_rm_rf_recursive(index_dir);
     return ok;
 }
 
