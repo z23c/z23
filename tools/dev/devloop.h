@@ -723,6 +723,12 @@ bool zcl_devloop_process_run(const char *cwd,
 bool zcl_devloop_process_run_test(const char *cwd,
                                   const char *const argv[], int timeout_ms,
                                   struct zcl_devloop_process_result *out);
+/* The same bounded run with exactly `envp` (NULL-terminated NAME=value) as
+ * the child's environment instead of this process's own. */
+bool zcl_devloop_process_run_env(const char *cwd,
+                                 const char *const argv[],
+                                 const char *const envp[], int timeout_ms,
+                                 struct zcl_devloop_process_result *out);
 /* Execute the already-open regular executable at `exec_fd`. The caller owns
  * and closes the fd after return. This pins one inode across identity query +
  * execution even when a stable build/bin alias is atomically republished. */

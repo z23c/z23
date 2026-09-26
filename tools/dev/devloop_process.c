@@ -38,12 +38,17 @@ void zcl_devloop_process_cancel_poll_set(
 void zcl_devloop_process_cancel_poll_clear(void)
 { g_process_cancel_poll = NULL; g_process_cancel_poll_opaque = NULL; }
 
+/* A child started with no environment unless the caller gives one. */
+static const char *const g_process_no_env[] = {NULL};
+
 static bool process_run_impl(const char *cwd, int exec_fd,
-                             const char *const argv[], int timeout_ms,
+                             const char *const argv[],
+                             const char *const envp[], int timeout_ms,
                              bool raise_stack,
                              struct zcl_devloop_process_result *out)
 {
     (void)raise_stack;
+    (void)envp; /* unused only when process execution is compiled out */
     size_t image_len = argv && argv[0] ? strlen(argv[0]) : 0u;
     if (!cwd || !cwd[0] || !argv || !argv[0] || !out || timeout_ms <= 0 ||
         exec_fd >= 0 ||
@@ -60,12 +65,11 @@ static bool process_run_impl(const char *cwd, int exec_fd,
     fprintf(stderr, "[devloop] process execution is disabled outside a dev build\n");
     return false;
 #else
-    static const char *const empty_environment[] = {NULL};
     struct platform_process child;
     platform_process_init(&child);
     struct platform_process_options options = {
         .image = argv[0], .argv = argv, .cwd = cwd,
-        .env = empty_environment, .inherited = NULL, .inherited_count = 0};
+        .env = envp, .inherited = NULL, .inherited_count = 0};
     int64_t started = platform_time_monotonic_us();
     if (!platform_process_start_hidden(&child, &options))
         return false;
@@ -99,17 +103,30 @@ static bool process_run_impl(const char *cwd, int exec_fd,
 bool zcl_devloop_process_run(const char *cwd, const char *const argv[],
                              int timeout_ms,
                              struct zcl_devloop_process_result *out)
-{ return process_run_impl(cwd, -1, argv, timeout_ms, false, out); }
+{ return process_run_impl(cwd, -1, argv, g_process_no_env, timeout_ms, false,
+                          out); }
 
 bool zcl_devloop_process_run_test(const char *cwd, const char *const argv[],
                                   int timeout_ms,
                                   struct zcl_devloop_process_result *out)
-{ return process_run_impl(cwd, -1, argv, timeout_ms, true, out); }
+{ return process_run_impl(cwd, -1, argv, g_process_no_env, timeout_ms, true,
+                          out); }
+
+bool zcl_devloop_process_run_env(const char *cwd, const char *const argv[],
+                                 const char *const envp[], int timeout_ms,
+                                 struct zcl_devloop_process_result *out)
+{
+    return process_run_impl(cwd, -1, argv, envp ? envp : g_process_no_env,
+                            timeout_ms, false, out);
+}
 
 bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
                                 const char *const argv[], int timeout_ms,
                                 struct zcl_devloop_process_result *out)
-{ return process_run_impl(cwd, exec_fd, argv, timeout_ms, false, out); }
+{
+    return process_run_impl(cwd, exec_fd, argv, g_process_no_env, timeout_ms,
+                            false, out);
+}
 
 #else
 
@@ -596,8 +613,16 @@ static bool darwin_spawn_fd_attested(const char *cwd, int exec_fd,
 }
 #endif
 
+/* The environment a child inherits when the caller names none. */
+static const char *const *process_inherited_env(void)
+{
+    extern char **environ;
+    return (const char *const *)environ;
+}
+
 static bool process_run_impl(const char *cwd, int exec_fd,
-                             const char *const argv[], int timeout_ms,
+                             const char *const argv[],
+                             const char *const envp[], int timeout_ms,
                              bool raise_stack,
                              struct zcl_devloop_process_result *out)
 {
@@ -611,6 +636,7 @@ static bool process_run_impl(const char *cwd, int exec_fd,
 #if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
     (void)exec_fd;
     (void)raise_stack;
+    (void)envp;
     fprintf(stderr, "[devloop] process execution is disabled outside a dev build\n");
     return false;
 #else
@@ -693,8 +719,9 @@ static bool process_run_impl(const char *cwd, int exec_fd,
             dup2(fds[1], STDERR_FILENO) < 0)
             _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
         close(fds[1]);
+        extern char **environ;
+        environ = (char **)envp; /* the parent's own, or the bound set */
         if (exec_fd >= 0) {
-            extern char **environ;
             platform_execve_fd(exec_fd, (char *const *)argv, environ);
         } else {
             execvp(argv[0], (char *const *)argv);
@@ -853,14 +880,28 @@ bool zcl_devloop_process_run(const char *cwd,
                              int timeout_ms,
                              struct zcl_devloop_process_result *out)
 {
-    return process_run_impl(cwd, -1, argv, timeout_ms, false, out);
+    return process_run_impl(cwd, -1, argv, process_inherited_env(),
+                            timeout_ms, false, out);
 }
 
 bool zcl_devloop_process_run_test(const char *cwd,
                                   const char *const argv[], int timeout_ms,
                                   struct zcl_devloop_process_result *out)
 {
-    return process_run_impl(cwd, -1, argv, timeout_ms, true, out);
+    return process_run_impl(cwd, -1, argv, process_inherited_env(),
+                            timeout_ms, true, out);
+}
+
+bool zcl_devloop_process_run_env(const char *cwd,
+                                 const char *const argv[],
+                                 const char *const envp[], int timeout_ms,
+                                 struct zcl_devloop_process_result *out)
+{
+    if (!envp) {
+        fprintf(stderr, "[devloop] process: no child environment given\n");
+        return false;
+    }
+    return process_run_impl(cwd, -1, argv, envp, timeout_ms, false, out);
 }
 
 bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
@@ -871,7 +912,8 @@ bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
         fprintf(stderr, "[devloop] process: invalid executable fd\n");
         return false;
     }
-    return process_run_impl(cwd, exec_fd, argv, timeout_ms, false, out);
+    return process_run_impl(cwd, exec_fd, argv, process_inherited_env(),
+                            timeout_ms, false, out);
 }
 
 #endif /* _WIN32 */
