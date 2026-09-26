@@ -908,6 +908,8 @@ static void test_derive_allowlist(struct fx *x,
     fx_check_flag(x, b, "argv: a -frandom-seed= string (every dev object "
                   "carries one) is bound by value and moves the flags", 6,
                   "-frandom-seed=src/unit.c");
+    fx_check_flag(x, b, "argv: an allowlisted -mcpu (ARM plans) moves the "
+                  "flags", 6, "-mcpu=cortex-a72");
 }
 
 /* A name that climbs ("../defs.h") is bound only as a quote name found

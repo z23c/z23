@@ -899,8 +899,8 @@ static const char *const k_ar_joined[] = {
     "-std=", "-ffile-prefix-map=", "-fdebug-prefix-map=",
     "-fmacro-prefix-map=", "-fvisibility=", "-fcf-protection=",
     "-ftrivial-auto-var-init=", "-fzero-call-used-regs=",
-    "-fdiagnostics-color", "-fno-diagnostics-color", "-march=", "-mtune=",
-    "-frandom-seed=",
+    "-fdiagnostics-color", "-fno-diagnostics-color", "-march=", "-mcpu=",
+    "-mtune=", "-frandom-seed=",
 };
 
 /* -Wl, items: none names a file the root does not bind. */
