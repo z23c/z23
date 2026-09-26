@@ -45,7 +45,9 @@ command can compare the app's reply to its own parser using
 `--blue /dev/hidrawN`, once a separately reviewed image is installed and
 open. The signed image installed on the dedicated Blue running BOLOS 2.1.1,
 and a synthetic one-spend, one-output Sapling fixture returned a matching
-summary and exact-byte digest. This is a structural review test only. Running
+summary and exact-byte digest. The owner confirmed the signed app opened
+without BOLOS's non-genuine warning and exited normally. This is a structural
+review test only. Running
 the host command without `--blue` only parses a local file.
 
 Protocol commands use CLA `A5`, P1/P2 zero, and one-byte `Lc`:

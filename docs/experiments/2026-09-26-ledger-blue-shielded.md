@@ -112,3 +112,8 @@ The Blue returned the same structural summary and exact-byte SHA-256 as the
 host parser. The fixture's zeroed proofs and signatures are not a valid
 payment. The app has no key or signing operation; this test did not create,
 approve, or broadcast a transaction.
+
+The owner reopened `ZCL Review` after the test and confirmed it went directly
+to the steady review screen without a `Non genuine application` warning, then
+EXIT returned to home. This observes the locally signed image on this Blue;
+it does not imply Ledger certification or approval of any ZCL payment.
