@@ -1974,7 +1974,7 @@ Z23_FLAG("ZCL_REQUIRE_MINGW", "env_build", "0", "-",
 Z23_FLAG("ZCL_RESULT_DISCARD_SCAN_DIRS_FOR_TEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_source_patterns.c:408")
 Z23_FLAG("ZCL_RETIRED_PROTOCOL_ROOT", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:246")
+          "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:247")
 Z23_FLAG("ZCL_RETRIEVAL_BENCH_KEEP", "env_build", "0", "-",
           "first use tools/dev/retrieval-gold-benchmark.sh:30; documented at docs/experiments/2026-08-31-story-retrieval-product-loop.md:42: ZCL_RETRIEVAL_BENCH_KEEP=1 make retrieval-gold-benchmark performs the")
 Z23_FLAG("ZCL_RETRIEVAL_BENCH_TIMEOUT_SECONDS", "env_build", "300", "-",
@@ -2314,7 +2314,7 @@ Z23_FLAG("ZCL_STORE_LISTING_CHILD_DB", "env_test", "-", "-",
 Z23_FLAG("ZCL_STORE_LISTING_READY", "env_test", "-", "-",
           "path the forked holder process touches once it holds the lease, so the parent's sl_wait_file() can proceed; first use tests/harness/src/test_store_listing.c:962")
 Z23_FLAG("ZCL_STRAY_SCAN_DIRS_FOR_TEST", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:1187")
+          "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:1188")
 Z23_FLAG("ZCL_STRESS_TESTS", "env_test", "-", "-",
           "first use tests/harness/src/test_chain_advance_atomicity.c:377; documented at docs/AGENT_TRAPS.md:246: Onion gates self-SKIPing is SKIP-not-FAIL honesty, not a broken suite.** test_onion_boo...")
 Z23_FLAG("ZCL_SUPDOM_COVERAGE", "env_build", "1", "-",
