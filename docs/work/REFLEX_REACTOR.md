@@ -48,6 +48,12 @@ the mechanical acknowledgements and returns the first action-changing
 diagnostic/story for the new edit. `FOCUSED_GREEN` still keeps
 `proof_complete=false`; only the conservative source-wide proof can create
 reusable acceptance, and only a later human-approved ZVCS boundary may publish.
+A restart owner whose selection exceeds the resident bound, is too wide to
+enumerate, or is universal runs only its explicit path floor. That result is
+`FOCUSED_PARTIAL`, never `FOCUSED_GREEN`: it carries `groups_run`,
+`groups_selected` and the executed candidate's SHA-256, and the conservative
+proof is still queued. A path floor that itself exceeds the bound stays
+`PROOF_PENDING`.
 Verify mode never publishes a runtime.
 
 ## Why this owner
