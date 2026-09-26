@@ -301,64 +301,6 @@ static bool st_split_step(struct st_split *sp, const char **pp)
 
 /* Split one POSIX shell command (quotes and backslashes only; the dry-run
  * lines this reads carry no expansions) into owned words. */
-struct st_split {
-    char *word;
-    size_t w;
-    bool in_word;
-    char quote;
-};
-
-/* One character inside the open quote: true when it was consumed. */
-static bool st_split_quoted(struct st_split *sp, char c)
-{
-    if (!sp->quote)
-        return false;
-    if (c == sp->quote)
-        sp->quote = 0;
-    else
-        sp->word[sp->w++] = c;
-    return true;
-}
-
-static bool st_split_flush(struct st_split *sp, struct st_list *out)
-{
-    bool ok = true;
-    if (sp->in_word) {
-        sp->word[sp->w] = '\0';
-        ok = st_list_push(out, sp->word);
-    }
-    sp->w = 0;
-    sp->in_word = false;
-    return ok;
-}
-
-static bool st_split_char(struct st_split *sp, const char **pp,
-                          struct st_list *out)
-{
-    const char *p = *pp;
-    char c = *p;
-    if (sp->quote == '\'')
-        return st_split_quoted(sp, c);
-    if (c == '\\' && p[1] && (!sp->quote || strchr("\"\\$`", p[1]))) {
-        sp->word[sp->w++] = p[1];
-        *pp = p + 1;
-        sp->in_word = true;
-        return true;
-    }
-    if (st_split_quoted(sp, c))
-        return true;
-    if (c == '\'' || c == '"') {
-        sp->quote = c;
-        sp->in_word = true;
-        return true;
-    }
-    if (c == ' ' || c == '\t' || c == '\n')
-        return st_split_flush(sp, out);
-    sp->word[sp->w++] = c;
-    sp->in_word = true;
-    return true;
-}
-
 static bool st_shell_split(const char *s, struct st_list *out)
 {
     struct st_split sp = { .out = out };
