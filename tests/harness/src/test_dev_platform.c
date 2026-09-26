@@ -3924,6 +3924,10 @@ static const char *const k_dp_wide_callers[] = {
     "tools/dev/devloop_hotswap_build.c",
     "contexts/commons/services/src/zcode_lane_service.c",
     "contexts/commons/services/src/package_lifecycle_store.c",
+    "contexts/commons/controllers/src/metaverse_site_controller.c",
+    "tools/command/native_zcode_task_transport_command.c",
+    "engine/composition/src/boot_msg_callbacks.c",
+    "contexts/market/controllers/src/shop_native_fulfill.c",
 };
 
 /* Reverse callers owned by wide proof rules push the immediate selection
@@ -3962,25 +3966,22 @@ static bool dp_restart_event_verdicts_ok(const char *root,
     /* An earlier stage left restart_second.c owning .init_array; the
      * resident still links that overlay, so restore it first. */
     if (!dp_mk_write(root, "tools/dev/restart_second.c",
-                     "int restart_second(void) { return 8; }\n") ||
-        !dp_restart_event_partial_ok(root, changed))
+                     "int restart_second(void) { return 8; }\n"))
         return false;
+    /* Every ending is checked even after a miss, so one run names them all. */
+    bool partial = dp_restart_event_partial_ok(root, changed);
     int event = zcl_devloop_restart_event(root, changed, 1,
                                           ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
-    if (!dp_restart_event_phase(root, event,
-                                ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING,
-                                "FOCUSED_GREEN"))
-        return false;
+    bool green = dp_restart_event_phase(
+        root, event, ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING, "FOCUSED_GREEN");
     event = dp_restart_event_with_hook(
         root, changed,
         "printf 'int restart_fixture(void) { return 13; }\\n' "
         ">tools/dev/restart_fixture.c");
-    if (!dp_restart_event_phase(root, event,
-                                ZCL_DEVLOOP_RESTART_EVENT_CANCELLED,
-                                "SUPERSEDED") ||
-        !dp_mk_write(root, "tools/dev/restart_fixture.c",
-                     "int restart_fixture(void) { return 7; }\n"))
-        return false;
+    bool superseded = dp_restart_event_phase(
+        root, event, ZCL_DEVLOOP_RESTART_EVENT_CANCELLED, "SUPERSEDED");
+    bool reset = dp_mk_write(root, "tools/dev/restart_fixture.c",
+                             "int restart_fixture(void) { return 7; }\n");
     event = dp_restart_event_with_hook(root, changed,
                                        "chmod 000 tools/dev/restart_second.c");
     char second[PATH_MAX];
@@ -3988,9 +3989,10 @@ static bool dp_restart_event_verdicts_ok(const char *root,
                              "%s/tools/dev/restart_second.c", root) <
                         (int)sizeof(second) &&
                     chmod(second, 0644) == 0;
-    return dp_restart_event_phase(root, event,
-                                  ZCL_DEVLOOP_RESTART_EVENT_FALLBACK_PENDING,
-                                  "PROOF_PENDING") && restored;
+    bool unjudged = dp_restart_event_phase(
+        root, event, ZCL_DEVLOOP_RESTART_EVENT_FALLBACK_PENDING,
+        "PROOF_PENDING");
+    return partial && green && superseded && reset && unjudged && restored;
 }
 
 static bool dp_restart_focused_scope_ok(const char *root,
