@@ -893,13 +893,14 @@ static const char *const k_ar_exact[] = {
     "-O2", "-O3", "-Os", "-Og", "-Oz", "-mno-red-zone",
 };
 
-/* Joined-value families whose value names no file. */
+/* Joined-value families whose value names no file (bound by value: a
+ * -frandom-seed= string changes symbol names in the object). */
 static const char *const k_ar_joined[] = {
     "-std=", "-ffile-prefix-map=", "-fdebug-prefix-map=",
     "-fmacro-prefix-map=", "-fvisibility=", "-fcf-protection=",
     "-ftrivial-auto-var-init=", "-fzero-call-used-regs=",
     "-fdiagnostics-color", "-fno-diagnostics-color", "-march=", "-mtune=",
-    "-mcpu=",
+    "-mcpu=", "-frandom-seed=",
 };
 
 /* -Wl, items: none names a file the root does not bind. */
