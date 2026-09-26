@@ -3511,10 +3511,8 @@ static bool dev_watcher_stop_request_format(
     char path[320], char body[192], size_t *body_len)
 {
     char workspace[65];
-    int path_len = snprintf(path, 320, "/tmp/z23-watch-stop-%lu-%s",
-                            (unsigned long)geteuid(), active->nonce);
     if (!zcl_devloop_workspace_id(repo_root, workspace) ||
-        path_len <= 0 || path_len >= 320)
+        !zcl_devloop_watch_stop_endpoint_path(active->nonce, path))
         return false;
     int n = snprintf(body, 192, "%ld %llu %s %s\n", (long)active->pid,
                      (unsigned long long)active->start_token,

@@ -811,6 +811,11 @@ static inline bool zcl_devloop_landing_queue_lock_path(const char *root,
 /* Canonical-worktree identity and SHA3-sealed cycle state.  Readers never
  * create state. ABSENT is an honest empty result; INVALID must fail closed. */
 bool zcl_devloop_workspace_id(const char *repo_root, char out[65]);
+#if !defined(_WIN32)
+/* The watcher's bound stop endpoint for session `nonce` (64 hex): a FIFO
+ * private to this user, which the watcher creates and the stop writes. */
+bool zcl_devloop_watch_stop_endpoint_path(const char *nonce, char path[320]);
+#endif
 bool zcl_devloop_workspace_resolve(const char *repo_root, char out_id[65],
                                    char *out_dir, size_t out_dir_len);
 bool zcl_devloop_workspace_state_dir(const char *repo_root,

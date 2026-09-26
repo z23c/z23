@@ -6367,41 +6367,128 @@ static int test_watch_session_stop_binds_birth(void)
     int failures = 0;
     struct dp_fake_watch fake = {0};
     char root[PATH_MAX] = {0};
-    TEST("dev platform: a watcher session is signalled only by a proven record carrying the named birth token") {
+    TEST("dev platform: the session library signals only a leaderless recorded session carrying the named birth") {
 #if !defined(__linux__)
         PASS(); /* birth tokens and sessions need /proc */
         goto _test_next;
 #endif
         ASSERT(dp_watch_session_root(root, "watch-birth"));
-        ASSERT(dp_fake_watch_start(root, 100, &fake));
+        ASSERT(dp_fake_watch_start(root, 30000, &fake));
         uint64_t born = 0;
         ASSERT(os_proc_pid_start_token((uint64_t)fake.watcher, &born));
-        /* A caller naming another birth (a stale status receipt) is
-         * refused, and nothing is signalled. */
-        struct zcl_devloop_watch_stop stop = {
-            .owner_pid = fake.watcher, .expect_born = born + 1,
-            .budget_ms = 8000};
-        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
-                  (int)ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH);
+        /* A running leader is never signalled here, whatever it is named
+         * by: only its bound session endpoint asks it to stop. */
+        struct zcl_devloop_watch_stop stop = {.expect_born = born,
+                                              .budget_ms = 1000};
+        enum zcl_devloop_watch_stop_result result =
+            zcl_devloop_watch_session_stop(root, fake.watcher, &stop);
+        ASSERT(result != ZCL_DEVLOOP_WATCH_STOPPED);
         ASSERT(dp_pid_running(fake.watcher));
         ASSERT(dp_pid_running(fake.worker));
-        /* A lock owner with no record is never signalled here: its bound
-         * session endpoint is the only way to ask it to stop. */
-        char path[PATH_MAX], saved[PATH_MAX];
-        ASSERT(dp_record_path(root, fake.watcher, path));
-        ASSERT(snprintf(saved, sizeof(saved), "%s.saved", path) > 0);
-        ASSERT(rename(path, saved) == 0);
-        stop.expect_born = born;
+        /* Leaderless: another birth, or none named, is refused untouched. */
+        ASSERT(kill(fake.watcher, SIGKILL) == 0);
+        ASSERT(dp_wait_lock_free(root));
+        stop.expect_born = born + 1;
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
                   (int)ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH);
-        ASSERT(dp_pid_running(fake.watcher));
-        ASSERT(rename(saved, path) == 0);
+        stop.expect_born = 0;
+        ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
+                  (int)ZCL_DEVLOOP_WATCH_STOP_ID_MISMATCH);
+        ASSERT(dp_pid_running(fake.worker));
+        stop.expect_born = born;
         ASSERT_EQ((int)zcl_devloop_watch_session_stop(root, fake.watcher, &stop),
                   (int)ZCL_DEVLOOP_WATCH_STOPPED);
         ASSERT_EQ(zcl_devloop_process_session_members(fake.watcher, 0),
                   (size_t)0);
         PASS();
     } _test_next:;
+    dp_fake_watch_reap(&fake);
+    if (root[0])
+        (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
+/* A reused pid now owned by another user's session leader: kill(pid, 0)
+ * reports EPERM and its image cannot be read. The birth token in
+ * /proc/<pid>/stat is world-readable and differs from the record's, which
+ * proves the reuse on its own; the record must be pruned, not kept
+ * UNPROVEN (a launcher would refuse beside it forever). */
+static int test_watch_session_reused_pid_other_user(void)
+{
+    int failures = 0;
+    struct dp_fake_watch fake = {0};
+    char root[PATH_MAX] = {0};
+    TEST("dev platform: a record whose pid now has another birth is pruned even when the process cannot be signalled") {
+#if !defined(__linux__)
+        PASS(); /* birth tokens need /proc */
+        goto _test_next;
+#endif
+        ASSERT(dp_watch_session_root(root, "watch-reused"));
+        ASSERT(dp_fake_watch_start(root, 100, &fake));
+        ASSERT(dp_record_corrupt_token(root, fake.watcher));
+        struct zcl_devloop_watch_session_test_hooks hooks = {
+            .signal0_denied_pid = fake.watcher};
+        zcl_devloop_watch_session_test_hooks_set(&hooks);
+        enum zcl_devloop_watch_session_state state =
+            zcl_devloop_watch_session_probe(root, fake.watcher);
+        int64_t retiring = zcl_devloop_watch_session_retiring(root, 0);
+        zcl_devloop_watch_session_test_hooks_set(NULL);
+        ASSERT_EQ((int)state, (int)ZCL_DEVLOOP_WATCH_SESSION_ABSENT);
+        ASSERT_EQ(retiring, (int64_t)0);
+        char path[PATH_MAX];
+        ASSERT(dp_record_path(root, fake.watcher, path));
+        ASSERT(!dp_path_exists(path));
+        ASSERT(dp_pid_running(fake.watcher));
+        PASS();
+    } _test_next:;
+    zcl_devloop_watch_session_test_hooks_set(NULL);
+    dp_fake_watch_reap(&fake);
+    if (root[0])
+        (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
+/* The launcher rewrites a record (a new file renamed over the old) while a
+ * prune of the old one is in flight. */
+static void dp_rewrite_record_once(const char *root, int64_t pid, void *opaque)
+{
+    bool *done = opaque;
+    if (*done)
+        return;
+    *done = true;
+    (void)zcl_devloop_watch_session_record(root, pid);
+}
+
+static int test_watch_session_forget_spares_rewritten_record(void)
+{
+    int failures = 0;
+    struct dp_fake_watch fake = {0};
+    char root[PATH_MAX] = {0};
+    TEST("dev platform: pruning a disproven record never removes a record written in its place") {
+#if !defined(__linux__)
+        PASS(); /* launch identity needs /proc */
+        goto _test_next;
+#endif
+        ASSERT(dp_watch_session_root(root, "watch-forget"));
+        ASSERT(dp_fake_watch_start(root, 100, &fake));
+        ASSERT(dp_record_corrupt_token(root, fake.watcher));
+        bool rewritten = false;
+        struct zcl_devloop_watch_session_test_hooks hooks = {
+            .before_forget = dp_rewrite_record_once, .opaque = &rewritten};
+        zcl_devloop_watch_session_test_hooks_set(&hooks);
+        enum zcl_devloop_watch_session_state state =
+            zcl_devloop_watch_session_probe(root, fake.watcher);
+        zcl_devloop_watch_session_test_hooks_set(NULL);
+        ASSERT_EQ((int)state, (int)ZCL_DEVLOOP_WATCH_SESSION_ABSENT);
+        ASSERT(rewritten);
+        char path[PATH_MAX];
+        ASSERT(dp_record_path(root, fake.watcher, path));
+        ASSERT(dp_path_exists(path));
+        ASSERT_EQ((int)zcl_devloop_watch_session_probe(root, fake.watcher),
+                  (int)ZCL_DEVLOOP_WATCH_SESSION_LIVE);
+        PASS();
+    } _test_next:;
+    zcl_devloop_watch_session_test_hooks_set(NULL);
     dp_fake_watch_reap(&fake);
     if (root[0])
         (void)test_rm_rf_recursive(root);
@@ -6452,6 +6539,8 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_watch_session_unproven_record_kept, 1),
     DP_CASE(test_watch_session_untrusted_record_pruned, 0),
     DP_CASE(test_watch_session_stop_binds_birth, 3),
+    DP_CASE(test_watch_session_reused_pid_other_user, 6),
+    DP_CASE(test_watch_session_forget_spares_rewritten_record, 7),
     DP_CASE(test_ephemeral_fixture_leaves_source_identity, 2),
     DP_CASE(test_native_identity_tokens_match_oracle, 1),
     DP_CASE(test_cold_epoch_integrity_gate, 0),
@@ -6580,7 +6669,7 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 55u + (unsigned)(
+    if (DP_CASE_COUNT != 57u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else

@@ -4323,6 +4323,17 @@ static int open_singleton_lock(const char *repo_root,
     return fd;
 }
 
+/* One spelling of the stop endpoint path for the watcher, `dev loop stop`,
+ * and the tests. */
+bool zcl_devloop_watch_stop_endpoint_path(const char *nonce, char path[320])
+{
+    if (!nonce || !path || strlen(nonce) != 64)
+        return false;
+    int n = snprintf(path, 320, "/tmp/z23-watch-stop-%lu-%s",
+                     (unsigned long)geteuid(), nonce);
+    return n > 0 && n < 320;
+}
+
 static bool watch_stop_endpoint_open(struct watch_context *ctx,
                                      char path[320])
 {
@@ -4334,9 +4345,8 @@ static bool watch_stop_endpoint_open(struct watch_context *ctx,
         !zcl_devloop_workspace_id(ctx->root, ctx->stop_workspace))
         return false;
     zcl_hex_encode(bytes, sizeof(bytes), ctx->stop_nonce);
-    int n = snprintf(path, 320, "/tmp/z23-watch-stop-%lu-%s",
-                     (unsigned long)geteuid(), ctx->stop_nonce);
-    if (n <= 0 || n >= 320 || mkfifo(path, 0600) != 0)
+    if (!zcl_devloop_watch_stop_endpoint_path(ctx->stop_nonce, path) ||
+        mkfifo(path, 0600) != 0)
         return false;
     int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;

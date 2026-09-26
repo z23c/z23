@@ -60,8 +60,35 @@ static bool session_path(const char *root, int64_t pid, char out[PATH_MAX])
     return n > 0 && n < PATH_MAX;
 }
 
+#if defined(ZCL_TESTING)
+static struct zcl_devloop_watch_session_test_hooks g_session_hooks;
+
+void zcl_devloop_watch_session_test_hooks_set(
+    const struct zcl_devloop_watch_session_test_hooks *hooks)
+{
+    g_session_hooks = hooks ? *hooks
+                            : (struct zcl_devloop_watch_session_test_hooks){0};
+}
+#endif
+
+/* kill(pid, 0); a test can make it report another user's process. */
+static int session_signal0(int64_t pid)
+{
+#if defined(ZCL_TESTING)
+    if (g_session_hooks.signal0_denied_pid == pid) {
+        errno = EPERM;
+        return -1;
+    }
+#endif
+    return kill((pid_t)pid, 0);
+}
+
 static void session_forget(const char *root, int64_t pid)
 {
+#if defined(ZCL_TESTING)
+    if (g_session_hooks.before_forget)
+        g_session_hooks.before_forget(root, pid, g_session_hooks.opaque);
+#endif
     char path[PATH_MAX];
     if (session_path(root, pid, path))
         (void)unlink(path);
@@ -70,7 +97,7 @@ static void session_forget(const char *root, int64_t pid)
 /* EPERM is another user's process: never one of ours. A zombie is dead. */
 static bool leader_running(int64_t pid)
 {
-    if (kill((pid_t)pid, 0) != 0)
+    if (session_signal0(pid) != 0)
         return false;
 #if defined(__linux__)
     char path[64], body[512];

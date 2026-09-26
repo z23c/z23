@@ -128,4 +128,19 @@ int64_t zcl_devloop_watch_session_admit(const char *root,
 enum zcl_devloop_watch_stop_result zcl_devloop_watch_session_stop(
     const char *root, int64_t requested, struct zcl_devloop_watch_stop *io);
 
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+/* Deterministic stand-ins for what a test cannot stage: another user's
+ * process behind a reused pid, and a record rewritten while it is judged. */
+struct zcl_devloop_watch_session_test_hooks {
+    /* kill(pid, 0) reports EPERM for this pid (0: none). */
+    int64_t signal0_denied_pid;
+    /* Runs just before a record is removed. */
+    void (*before_forget)(const char *root, int64_t pid, void *opaque);
+    void *opaque;
+};
+/* NULL restores the defaults. */
+void zcl_devloop_watch_session_test_hooks_set(
+    const struct zcl_devloop_watch_session_test_hooks *hooks);
+#endif
+
 #endif
