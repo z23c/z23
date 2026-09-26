@@ -520,7 +520,7 @@ static int hash_file(const char *path,
     int status = digest_fd(fd, path, digest, &read_bytes);
     struct stat after;
     if (status == 0 &&
-        (fstat(fd, &after) != 0 || !same_snapshot(&opened, &after))) {
+        (fstat(fd, &after) != 0 || !same_snapshot(&before, &after))) {
         fprintf(stderr,
                 "source-identity-batch: file changed while hashing: %s\n",
                 path);
