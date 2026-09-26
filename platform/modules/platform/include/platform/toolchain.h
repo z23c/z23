@@ -17,6 +17,7 @@
 #define ZCL_TOOLCHAIN_VERSION_SIZE  256
 #define ZCL_TOOLCHAIN_SYSROOT_COUNT 3
 #define ZCL_TOOLCHAIN_ABI_COUNT     3
+#define ZCL_TOOLCHAIN_LINK_COUNT    3
 
 struct platform_toolchain_descriptor {
     /* Canonical target identity used in build receipts and toolchain capsules,
@@ -38,6 +39,13 @@ struct platform_toolchain_descriptor {
 
     /* ABI/runtime libraries whose bytes vary by compiler/OS version. */
     char abi_files[ZCL_TOOLCHAIN_ABI_COUNT][ZCL_TOOLCHAIN_PATH_SIZE];
+
+    /* Tools whose bytes can alter linked output: the link wrapper and LTO
+     * backend the driver execs plus the linker itself (collect2, lto1, ld
+     * under GCC; ld under Apple Clang, which links with no wrapper). The
+     * platform fills link_file_count slots; zero refuses the capture. */
+    char link_files[ZCL_TOOLCHAIN_LINK_COUNT][ZCL_TOOLCHAIN_PATH_SIZE];
+    size_t link_file_count;
 
     /* Target triple and version strings reported by the driver. */
     char host_triple[ZCL_TOOLCHAIN_VERSION_SIZE];

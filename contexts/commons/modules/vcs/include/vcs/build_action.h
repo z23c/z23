@@ -78,6 +78,7 @@ struct vcs_toolchain_capsule_v1 {
     uint8_t sysroot_sha3[32];
     uint8_t target_probes_sha3[32];
     uint8_t abi_files_sha3[32];
+    uint8_t link_files_sha3[32];
     char target[64];
 };
 
@@ -159,12 +160,15 @@ bool vcs_toolchain_capsule_v1_root(
     const struct vcs_toolchain_capsule_v1 *capsule, uint8_t out[32]);
 /* Capture the toolchain capsule by content for the current platform:
  * driver, compiler backend, assembler --version identity, startup/sysroot
- * objects, target probe output, and ABI/runtime libraries.  The set of files
+ * objects, target probe output, ABI/runtime libraries, and the link tools
+ * whose bytes can alter linked output (link wrapper, LTO backend, linker;
+ * the set is platform-specific).  The set of files
  * is platform-specific (GCC on Linux, Apple Clang on Darwin) and is supplied
  * by lib/platform; this function consumes it without OS-specific branches.
  * Assembler identity is the version string, not the assembler file bytes, so
  * two ordinary hosts with the same assembler version can independently
- * compile.  No mtime participates. */
+ * compile.  No mtime participates. A platform that cannot name its link
+ * tools fails the capture rather than dropping the class. */
 bool vcs_toolchain_capsule_v1_capture(
     struct vcs_toolchain_capsule_v1 *out);
 /* Return a previously captured capsule and its resolved tool paths only when

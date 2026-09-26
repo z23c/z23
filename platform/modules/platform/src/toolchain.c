@@ -443,6 +443,121 @@ const char *platform_toolchain_linker_group_end(void)
 #endif
 }
 
+#if defined(__linux__)
+/* Link-dimension tools whose bytes can alter linked output: the driver's
+ * link wrapper, the LTO codegen backend (links under -flto run it), and
+ * the linker itself. A probe that fails, or a bare-name answer the ld
+ * fallback cannot resolve, refuses the capture — a linker fact is never
+ * silently dropped from the identity. */
+static bool tc_capture_link_files(platform_toolchain_query_fn query_fn,
+                                  void *query_ctx, const char *compiler,
+                                  struct platform_toolchain_descriptor *out)
+{
+    static const char *const link_args[ZCL_TOOLCHAIN_LINK_COUNT] = {
+        "-print-prog-name=collect2",
+        "-print-prog-name=lto1",
+        "-print-prog-name=ld",
+    };
+    for (size_t i = 0; i < ZCL_TOOLCHAIN_LINK_COUNT; i++) {
+        if (!tc_query(query_fn, query_ctx, compiler, link_args[i],
+                      out->link_files[i], sizeof(out->link_files[i])))
+            return false;
+        if (!tc_path_has_separator(out->link_files[i])) {
+            if (i != ZCL_TOOLCHAIN_LINK_COUNT - 1 ||
+                !tc_resolve_tool("/usr/bin/ld", out->link_files[i],
+                                 sizeof(out->link_files[i])))
+                return false;
+        }
+    }
+    out->link_file_count = ZCL_TOOLCHAIN_LINK_COUNT;
+    return true;
+}
+#elif defined(__APPLE__)
+/* Apple Clang links by exec'ing ld directly: no collect2 wrapper and no
+ * separate LTO backend (libLTO lives inside the clang backend already
+ * captured as compiler_backend). The linker alone is the link dimension. */
+static bool tc_capture_link_files(platform_toolchain_query_fn query_fn,
+                                  void *query_ctx, const char *compiler,
+                                  struct platform_toolchain_descriptor *out)
+{
+    if (!tc_query(query_fn, query_ctx, compiler, "-print-prog-name=ld",
+                  out->link_files[0], sizeof(out->link_files[0])) ||
+        !tc_path_has_separator(out->link_files[0]))
+        return false;
+    out->link_file_count = 1;
+    return true;
+}
+#endif
+
+#if defined(__linux__)
+static bool tc_capture_runtime_files(platform_toolchain_query_fn query_fn,
+                                     void *query_ctx, const char *compiler,
+                                     struct platform_toolchain_descriptor *out)
+{
+    static const char *const sysroot_args[ZCL_TOOLCHAIN_SYSROOT_COUNT] = {
+        "-print-file-name=crt1.o",
+        "-print-file-name=crti.o",
+        "-print-file-name=crtn.o",
+    };
+    for (size_t i = 0; i < ZCL_TOOLCHAIN_SYSROOT_COUNT; i++) {
+        if (!tc_query(query_fn, query_ctx, compiler, sysroot_args[i],
+                      out->sysroot_files[i],
+                      sizeof(out->sysroot_files[i])) ||
+            !tc_path_has_separator(out->sysroot_files[i]))
+            return false;
+    }
+
+    static const char *const abi_args[ZCL_TOOLCHAIN_ABI_COUNT] = {
+        "-print-libgcc-file-name",
+        "-print-file-name=crtbegin.o",
+        "-print-file-name=libc.so.6",
+    };
+    for (size_t i = 0; i < ZCL_TOOLCHAIN_ABI_COUNT; i++) {
+        if (!tc_query(query_fn, query_ctx, compiler, abi_args[i],
+                      out->abi_files[i], sizeof(out->abi_files[i])) ||
+            !tc_path_has_separator(out->abi_files[i]))
+            return false;
+    }
+    return true;
+}
+#elif defined(__APPLE__)
+static bool tc_capture_runtime_files(platform_toolchain_query_fn query_fn,
+                                     void *query_ctx, const char *compiler,
+                                     struct platform_toolchain_descriptor *out)
+{
+    char sdk[PATH_MAX];
+    if (!tc_macos_sdk_path(query_fn, query_ctx, sdk, sizeof(sdk)))
+        return false;
+
+    static const char *const sysroot_names[ZCL_TOOLCHAIN_SYSROOT_COUNT] = {
+        "crt1.o", "dylib1.o", "bundle1.o",
+    };
+    for (size_t i = 0; i < ZCL_TOOLCHAIN_SYSROOT_COUNT; i++) {
+        if (!tc_macos_sdk_file(sdk, sysroot_names[i],
+                               out->sysroot_files[i],
+                               sizeof(out->sysroot_files[i])))
+            return false;
+    }
+
+    /* ABI/runtime: compiler runtime from the driver, plus SDK text-based stubs
+     * that pin the libc/libc++ interface this binary was linked against. */
+    if (!tc_query(query_fn, query_ctx, compiler, "-print-libgcc-file-name",
+                  out->abi_files[0], sizeof(out->abi_files[0])) ||
+        !tc_path_has_separator(out->abi_files[0]))
+        return false;
+    static const char *const abi_sdk_names[ZCL_TOOLCHAIN_ABI_COUNT - 1] = {
+        "libSystem.tbd", "libc++.tbd",
+    };
+    for (size_t i = 0; i < ZCL_TOOLCHAIN_ABI_COUNT - 1; i++) {
+        if (!tc_macos_sdk_file(sdk, abi_sdk_names[i],
+                               out->abi_files[i + 1],
+                               sizeof(out->abi_files[i + 1])))
+            return false;
+    }
+    return true;
+}
+#endif
+
 bool platform_toolchain_capture_descriptor(
     platform_toolchain_query_fn query_fn,
     void *query_ctx,
@@ -478,30 +593,11 @@ bool platform_toolchain_capture_descriptor(
             return false;
     }
 
-    static const char *const sysroot_args[ZCL_TOOLCHAIN_SYSROOT_COUNT] = {
-        "-print-file-name=crt1.o",
-        "-print-file-name=crti.o",
-        "-print-file-name=crtn.o",
-    };
-    for (size_t i = 0; i < ZCL_TOOLCHAIN_SYSROOT_COUNT; i++) {
-        if (!tc_query(query_fn, query_ctx, compiler, sysroot_args[i],
-                      out->sysroot_files[i],
-                      sizeof(out->sysroot_files[i])) ||
-            !tc_path_has_separator(out->sysroot_files[i]))
-            return false;
-    }
+    if (!tc_capture_runtime_files(query_fn, query_ctx, compiler, out))
+        return false;
 
-    static const char *const abi_args[ZCL_TOOLCHAIN_ABI_COUNT] = {
-        "-print-libgcc-file-name",
-        "-print-file-name=crtbegin.o",
-        "-print-file-name=libc.so.6",
-    };
-    for (size_t i = 0; i < ZCL_TOOLCHAIN_ABI_COUNT; i++) {
-        if (!tc_query(query_fn, query_ctx, compiler, abi_args[i],
-                      out->abi_files[i], sizeof(out->abi_files[i])) ||
-            !tc_path_has_separator(out->abi_files[i]))
-            return false;
-    }
+    if (!tc_capture_link_files(query_fn, query_ctx, compiler, out))
+        return false;
 
     if (!tc_query(query_fn, query_ctx, compiler, "-dumpmachine",
                   out->host_triple, sizeof(out->host_triple)))
@@ -536,35 +632,11 @@ bool platform_toolchain_capture_descriptor(
         !tc_path_has_separator(out->assembler))
         return false;
 
-    char sdk[PATH_MAX];
-    if (!tc_macos_sdk_path(query_fn, query_ctx, sdk, sizeof(sdk)))
+    if (!tc_capture_link_files(query_fn, query_ctx, compiler, out))
         return false;
 
-    static const char *const sysroot_names[ZCL_TOOLCHAIN_SYSROOT_COUNT] = {
-        "crt1.o", "dylib1.o", "bundle1.o",
-    };
-    for (size_t i = 0; i < ZCL_TOOLCHAIN_SYSROOT_COUNT; i++) {
-        if (!tc_macos_sdk_file(sdk, sysroot_names[i],
-                               out->sysroot_files[i],
-                               sizeof(out->sysroot_files[i])))
-            return false;
-    }
-
-    /* ABI/runtime: compiler runtime from the driver, plus SDK text-based stubs
-     * that pin the libc/libc++ interface this binary was linked against. */
-    if (!tc_query(query_fn, query_ctx, compiler, "-print-libgcc-file-name",
-                  out->abi_files[0], sizeof(out->abi_files[0])) ||
-        !tc_path_has_separator(out->abi_files[0]))
+    if (!tc_capture_runtime_files(query_fn, query_ctx, compiler, out))
         return false;
-    static const char *const abi_sdk_names[ZCL_TOOLCHAIN_ABI_COUNT - 1] = {
-        "libSystem.tbd", "libc++.tbd",
-    };
-    for (size_t i = 0; i < ZCL_TOOLCHAIN_ABI_COUNT - 1; i++) {
-        if (!tc_macos_sdk_file(sdk, abi_sdk_names[i],
-                               out->abi_files[i + 1],
-                               sizeof(out->abi_files[i + 1])))
-            return false;
-    }
 
     if (!tc_query(query_fn, query_ctx, compiler, "-dumpmachine",
                   out->host_triple, sizeof(out->host_triple)))

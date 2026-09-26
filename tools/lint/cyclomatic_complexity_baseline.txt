@@ -2473,7 +2473,7 @@ platform/modules/platform/src/safe_root_read.c:relative_path_valid:19
 platform/modules/platform/src/state_root.c:state_root_repair_acl:16
 platform/modules/platform/src/storage_probe.c:platform_storage_random_read_median_us:19
 platform/modules/platform/src/temp_directory.c:platform_temp_directory_create:23
-platform/modules/platform/src/toolchain.c:platform_toolchain_capture_descriptor:35
+platform/modules/platform/src/toolchain.c:platform_toolchain_capture_descriptor:26
 platform/modules/platform/src/toolchain.c:platform_toolchain_normalize_archive:27
 platform/modules/platform/src/watcher_lease.c:parent_matches:19
 platform/modules/platform/src/watcher_lease.c:platform_watcher_launch_prepare:28

@@ -25,6 +25,76 @@
     else { printf("FAIL\n"); failures++; }                           \
 } while (0)
 
+#if defined(__linux__)
+/* Records which link tools the descriptor capture asks the driver about,
+ * so the tests below can prove the linker byte-identity class is probed —
+ * and that a failed probe refuses the capture instead of dropping the
+ * class from the preimage. */
+struct pt_query_log {
+    int ld_queries;
+    int collect2_queries;
+    int lto1_queries;
+    bool fail_ld;
+};
+
+static bool pt_query_stub(void *ctx, const char *const argv[],
+                          char *out, size_t cap)
+{
+    struct pt_query_log *log = ctx;
+    const char *arg = argv[1];
+    static const char prog_prefix[] = "-print-prog-name=";
+    static const char file_prefix[] = "-print-file-name=";
+    if (strncmp(arg, prog_prefix, sizeof(prog_prefix) - 1) == 0) {
+        const char *prog = arg + sizeof(prog_prefix) - 1;
+        if (strcmp(prog, "ld") == 0) {
+            log->ld_queries++;
+            if (log->fail_ld)
+                return false;
+        } else if (strcmp(prog, "collect2") == 0) {
+            log->collect2_queries++;
+        } else if (strcmp(prog, "lto1") == 0) {
+            log->lto1_queries++;
+        }
+        int n = snprintf(out, cap, "/stub/%s", prog);
+        return n > 0 && (size_t)n < cap;
+    }
+    if (strncmp(arg, file_prefix, sizeof(file_prefix) - 1) == 0) {
+        int n = snprintf(out, cap, "/stub/%s",
+                         arg + sizeof(file_prefix) - 1);
+        return n > 0 && (size_t)n < cap;
+    }
+    if (strcmp(arg, "-print-libgcc-file-name") == 0) {
+        int n = snprintf(out, cap, "%s", "/stub/libgcc.a");
+        return n > 0 && (size_t)n < cap;
+    }
+    int n = snprintf(out, cap, "%s", "stub-version");
+    return n > 0 && (size_t)n < cap;
+}
+
+static int pt_link_probe_checks(void)
+{
+    int failures = 0;
+    struct pt_query_log log = {0};
+    struct platform_toolchain_descriptor desc;
+    PT_CHECK("descriptor capture probes the driver for its linker",
+             platform_toolchain_capture_descriptor(
+                 pt_query_stub, &log, &desc) &&
+             log.ld_queries > 0);
+    PT_CHECK("descriptor capture probes the link driver and LTO backend",
+             log.collect2_queries > 0 && log.lto1_queries > 0);
+    PT_CHECK("descriptor capture reports the full link tool set",
+             desc.link_file_count == ZCL_TOOLCHAIN_LINK_COUNT &&
+             strcmp(desc.link_files[0], "/stub/collect2") == 0 &&
+             strcmp(desc.link_files[1], "/stub/lto1") == 0 &&
+             strcmp(desc.link_files[2], "/stub/ld") == 0);
+    struct pt_query_log failing = { .fail_ld = true };
+    PT_CHECK("descriptor capture refuses an unanswerable linker probe",
+             !platform_toolchain_capture_descriptor(
+                 pt_query_stub, &failing, &desc));
+    return failures;
+}
+#endif
+
 #if defined(__APPLE__)
 static bool pt_write_all(int fd, const void *data, size_t len)
 {
@@ -205,6 +275,10 @@ int test_platform_toolchain(void)
 
     PT_CHECK("descriptor capture rejects NULL query",
              !platform_toolchain_capture_descriptor(NULL, NULL, NULL));
+
+#if defined(__linux__)
+    failures += pt_link_probe_checks();
+#endif
 
 #if defined(__APPLE__)
     {

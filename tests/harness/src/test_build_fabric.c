@@ -1636,6 +1636,22 @@ static int test_bf_assembler_identity_is_version(void)
     return failures;
 }
 
+static int test_bf_linker_identity_bound(void)
+{
+    int failures = 0;
+    TEST("build_fabric: linker tool bytes are captured into the capsule") {
+        struct vcs_toolchain_capsule_v1 capsule;
+        uint8_t zero[32] = {0};
+        vcs_toolchain_capsule_v1_cache_reset_for_test();
+        ASSERT(vcs_toolchain_capsule_v1_capture(&capsule));
+        ASSERT(memcmp(capsule.link_files_sha3, zero, 32) != 0);
+        uint8_t root[32];
+        ASSERT(vcs_toolchain_capsule_v1_root(&capsule, root));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_confined_test_worker(void)
 {
     int failures = 0;
@@ -1864,6 +1880,7 @@ static int test_bf_content_contracts(void)
         memset(capsule.sysroot_sha3, 4, 32);
         memset(capsule.target_probes_sha3, 5, 32);
         memset(capsule.abi_files_sha3, 6, 32);
+        memset(capsule.link_files_sha3, 7, 32);
         (void)snprintf(capsule.target, sizeof(capsule.target), "%s",
                        VCS_BUILD_TARGET_V1);
         uint8_t capsule_a[32], capsule_b[32];
@@ -1871,6 +1888,15 @@ static int test_bf_content_contracts(void)
         capsule.compiler_backend_sha3[0] ^= 1;
         ASSERT(vcs_toolchain_capsule_v1_root(&capsule, capsule_b));
         ASSERT(memcmp(capsule_a, capsule_b, 32) != 0);
+        capsule.compiler_backend_sha3[0] ^= 1;
+        capsule.link_files_sha3[0] ^= 1;
+        ASSERT(vcs_toolchain_capsule_v1_root(&capsule, capsule_b));
+        ASSERT(memcmp(capsule_a, capsule_b, 32) != 0);
+        capsule.link_files_sha3[0] ^= 1;
+        ASSERT(vcs_toolchain_capsule_v1_root(&capsule, capsule_b));
+        ASSERT(memcmp(capsule_a, capsule_b, 32) == 0);
+        capsule.compiler_backend_sha3[0] ^= 1;
+        ASSERT(vcs_toolchain_capsule_v1_root(&capsule, capsule_b));
 
         struct vcs_build_action_v1 action = {0};
         memset(action.source_sha256, 1, 32);
@@ -4029,6 +4055,7 @@ int test_build_fabric(void)
     failures += test_bf_local_enrollment();
     failures += test_bf_toolchain_capture_cache();
     failures += test_bf_assembler_identity_is_version();
+    failures += test_bf_linker_identity_bound();
     failures += test_bf_execution_observation_codec();
     failures += test_bf_worker_identity_capability_honesty();
     failures += test_bf_confined_worker();

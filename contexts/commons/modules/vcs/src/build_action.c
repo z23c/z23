@@ -21,7 +21,9 @@
 #define PATH_MAX 4096
 #endif
 
-#define BUILD_TOOLCHAIN_FILE_COUNT 9
+#define BUILD_TOOLCHAIN_FILE_BASE_COUNT 9
+#define BUILD_TOOLCHAIN_FILE_COUNT \
+    (BUILD_TOOLCHAIN_FILE_BASE_COUNT + ZCL_TOOLCHAIN_LINK_COUNT)
 
 struct build_toolchain_file {
     char path[PATH_MAX];
@@ -327,9 +329,40 @@ static const char *build_toolchain_descriptor_file(
     if (index == 2) return desc->assembler;
     if (index < 3 + ZCL_TOOLCHAIN_SYSROOT_COUNT)
         return desc->sysroot_files[index - 3];
-    if (index < BUILD_TOOLCHAIN_FILE_COUNT)
+    if (index < BUILD_TOOLCHAIN_FILE_BASE_COUNT)
         return desc->abi_files[index - 3 - ZCL_TOOLCHAIN_SYSROOT_COUNT];
+    size_t link_index = index - BUILD_TOOLCHAIN_FILE_BASE_COUNT;
+    if (link_index < desc->link_file_count)
+        return desc->link_files[link_index];
     return NULL;
+}
+
+/* The runtime dimensions of the identity: ABI/runtime files, then the link
+ * tools whose bytes can alter linked output — a linker, link-wrapper, or
+ * LTO-backend swap must move the capsule root before any build or
+ * reproduction runs. A platform that names no link tool fails the capture:
+ * the class is never silently absent from the preimage. */
+static bool build_toolchain_runtime_identity(
+    const struct platform_toolchain_descriptor *desc,
+    struct vcs_toolchain_capsule_v1 *out,
+    struct build_toolchain_file files[], size_t *file_count)
+{
+    static const char *const abi_labels[ZCL_TOOLCHAIN_ABI_COUNT] = {
+        "abi0", "abi1", "abi2",
+    };
+    if (!build_hash_aggregate("zcl.toolchain.abi_files.v1", abi_labels,
+                              ZCL_TOOLCHAIN_ABI_COUNT, desc->abi_files,
+                              out->abi_files_sha3, files, file_count))
+        return false;
+    static const char *const link_labels[ZCL_TOOLCHAIN_LINK_COUNT] = {
+        "link0", "link1", "link2",
+    };
+    return desc->link_file_count > 0 &&
+        desc->link_file_count <= ZCL_TOOLCHAIN_LINK_COUNT &&
+        build_hash_aggregate("zcl.toolchain.link_files.v1", link_labels,
+                             desc->link_file_count, desc->link_files,
+                             out->link_files_sha3, files, file_count) &&
+        *file_count == BUILD_TOOLCHAIN_FILE_BASE_COUNT + desc->link_file_count;
 }
 
 static bool build_toolchain_cache_current(
@@ -350,11 +383,14 @@ static bool build_toolchain_cache_current(
         strcmp(driver_path, cache->files[0].path) != 0)
         return false;
     for (size_t i = 0; i < BUILD_TOOLCHAIN_FILE_COUNT; i++) {
+        /* Platforms fill different link-tool counts; absent slots do not
+         * participate in the staleness comparison. */
+        const char *path =
+            build_toolchain_descriptor_file(&cache->descriptor, i);
+        if (!path) continue;
         char resolved[PATH_MAX];
         struct platform_positioned_file_snapshot current;
-        if (!build_resolve_file(
-                build_toolchain_descriptor_file(&cache->descriptor, i),
-                resolved, &current) ||
+        if (!build_resolve_file(path, resolved, &current) ||
             strcmp(resolved, cache->files[i].path) != 0 ||
             !build_stat_equal(&cache->files[i].stamp, &current))
             return false;
@@ -422,14 +458,7 @@ static bool build_toolchain_capture_uncached(
     }
     sha3_256_finalize(&probes, out->target_probes_sha3);
 
-    static const char *const abi_labels[ZCL_TOOLCHAIN_ABI_COUNT] = {
-        "abi0", "abi1", "abi2",
-    };
-    if (!build_hash_aggregate("zcl.toolchain.abi_files.v1", abi_labels,
-                              ZCL_TOOLCHAIN_ABI_COUNT,
-                              desc.abi_files,
-                              out->abi_files_sha3, files, &file_count) ||
-        file_count != BUILD_TOOLCHAIN_FILE_COUNT)
+    if (!build_toolchain_runtime_identity(&desc, out, files, &file_count))
         return false;
 
     (void)snprintf(out->target, sizeof(out->target), "%s", desc.target);
@@ -941,6 +970,7 @@ bool vcs_toolchain_capsule_v1_root(
     sha3_256_write(&sha, capsule->sysroot_sha3, 32);
     sha3_256_write(&sha, capsule->target_probes_sha3, 32);
     sha3_256_write(&sha, capsule->abi_files_sha3, 32);
+    sha3_256_write(&sha, capsule->link_files_sha3, 32);
     build_hash_text(&sha, capsule->target);
     sha3_256_finalize(&sha, out);
     return true;
