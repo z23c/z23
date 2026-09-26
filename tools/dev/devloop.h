@@ -418,6 +418,13 @@ struct zcl_devloop_restart_proof_receipt {
     uint32_t complete_graph_linker_processes;
     uint32_t test_processes;
     uint32_t source_guard_captures;
+    /* Every exact group the complete plan selects, integration-only groups
+     * included; group_count is the part this receipt executed. */
+    uint32_t groups_selected;
+    /* Identity of the executed candidate at its rehash, rechecked after the
+     * run (0 where the platform has no stable inode). */
+    uint64_t artifact_dev;
+    uint64_t artifact_ino;
     bool artifact_cache_hit;
     bool source_identity_overlay;
     bool bounded_proof_deferred;
@@ -442,7 +449,10 @@ bool zcl_devloop_restart_prove(
 /* Save-cycle tier: executes every selected group except exact integration-only
  * groups. If a reverse-caller closure exceeds the resident bound, it executes
  * the complete explicit path floor and hash-binds the broader closure into the
- * deferred set. proof_complete remains false until every deferred group runs. */
+ * deferred set; a closure too wide to enumerate still runs the complete path
+ * floor and records only its size. bounded_proof_deferred then marks the run
+ * as partial: group_count of groups_selected executed. proof_complete remains
+ * false until every deferred group runs. */
 bool zcl_devloop_restart_prove_immediate(
     const char *repo_root, const char *const *source_tus, size_t source_count,
     const struct zcl_devloop_plan *plan,

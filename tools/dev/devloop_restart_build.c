@@ -2126,11 +2126,20 @@ static bool rr_append_group(char out[4096], const char *group)
 static bool rr_collect_groups_expand(const struct zcl_devloop_plan *plan,
                                      char exact[][ZCL_TEST_GROUP_FULL_MAX],
                                      size_t *total_out,
-                                     size_t *immediate_total_out)
+                                     size_t *immediate_total_out,
+                                     bool *truncated_out)
 {
     const char *why = NULL;
+    *truncated_out = false;
     if (!zcl_devloop_plan_proof_admissible(plan, &why))
         return false;
+    /* A universal closure selects the whole catalog, whatever its listed
+     * closure groups say; only the path floor can run in the foreground. */
+    if (plan->closure_universal) {
+        *total_out = zcl_test_group_catalog_count();
+        *truncated_out = true;
+        return false;
+    }
     const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
     size_t id_count = 0;
     for (size_t i = 0; i < plan->path_groups_len; i++)
@@ -2141,13 +2150,17 @@ static bool rr_collect_groups_expand(const struct zcl_devloop_plan *plan,
     size_t total = zcl_test_group_expand_plan(ids, id_count, exact,
                                                RR_EXACT_GROUP_MAX,
                                                &truncated);
-    if (total == SIZE_MAX || total == 0 || truncated)
+    if (total == SIZE_MAX || total == 0)
         return false;
+    *total_out = total;
+    if (truncated) {
+        *truncated_out = true;
+        return false;
+    }
     size_t immediate_total = 0;
     for (size_t i = 0; i < total; i++)
         if (!zcl_test_group_is_integration_only(exact[i]))
             immediate_total++;
-    *total_out = total;
     *immediate_total_out = immediate_total;
     return true;
 }
@@ -2183,24 +2196,62 @@ static bool rr_collect_groups_classify(
     return *count > 0;
 }
 
+/* The complete selection is too wide to enumerate here. The reflex can still
+ * run the complete explicit path floor, exactly as it does when a narrower
+ * closure exceeds the resident bound: select it on its own, record how many
+ * groups the whole plan selects, and leave the rest to the conservative
+ * proof. Nothing here claims more than group_count of groups_selected. */
+static bool rr_collect_path_floor(const struct zcl_devloop_plan *plan,
+                                  char exact[][ZCL_TEST_GROUP_FULL_MAX],
+                                  size_t selected, char out[4096],
+                                  uint32_t *count, uint32_t *deferred_count,
+                                  bool *bounded_deferred)
+{
+    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS];
+    size_t id_count = 0;
+    for (size_t i = 0; i < plan->path_groups_len; i++)
+        ids[id_count++] = plan->path_groups[i];
+    bool truncated = false;
+    size_t floor = id_count ? zcl_test_group_expand_plan_immediate(
+        ids, id_count, exact, RR_EXACT_GROUP_MAX, &truncated) : 0;
+    if (floor == SIZE_MAX || floor == 0 || truncated || floor >= selected)
+        return false;
+    for (size_t i = 0; i < floor; i++) {
+        if (!rr_append_group(out, exact[i])) return false;
+        (*count)++;
+    }
+    *deferred_count = (uint32_t)(selected - floor);
+    *bounded_deferred = true;
+    return true;
+}
+
 static bool rr_collect_groups(const struct zcl_devloop_plan *plan,
                               bool immediate_only,
                               char out[4096], uint32_t *count,
                               char deferred[4096], uint32_t *deferred_count,
-                              bool *bounded_deferred)
+                              bool *bounded_deferred, uint32_t *selected)
 {
     if (!plan || !out || !count || !deferred || !deferred_count ||
-        !bounded_deferred)
+        !bounded_deferred || !selected)
         return false;
     out[0] = 0;
     deferred[0] = 0;
     *count = 0;
     *deferred_count = 0;
     *bounded_deferred = false;
+    *selected = 0;
     char exact[RR_EXACT_GROUP_MAX][ZCL_TEST_GROUP_FULL_MAX];
-    size_t total, immediate_total;
-    if (!rr_collect_groups_expand(plan, exact, &total, &immediate_total))
-        return false;
+    size_t total = 0, immediate_total = 0;
+    bool truncated = false;
+    if (!rr_collect_groups_expand(plan, exact, &total, &immediate_total,
+                                  &truncated)) {
+        if (!immediate_only || !truncated || total > UINT32_MAX)
+            return false;
+        *selected = (uint32_t)total;
+        return rr_collect_path_floor(plan, exact, total, out, count,
+                                     deferred_count, bounded_deferred);
+    }
+    *selected = (uint32_t)total;
     bool tier_closure = immediate_only &&
         immediate_total > RR_IMMEDIATE_GROUP_MAX;
     return rr_collect_groups_classify(plan, immediate_only, tier_closure,
@@ -2377,7 +2428,8 @@ static bool rr_prove_select_groups(struct rr_prove_ctx *ctx)
                            ctx->receipt->groups, &ctx->receipt->group_count,
                            ctx->receipt->deferred_groups,
                            &ctx->receipt->deferred_group_count,
-                           &ctx->receipt->bounded_proof_deferred)) {
+                           &ctx->receipt->bounded_proof_deferred,
+                           &ctx->receipt->groups_selected)) {
         rr_why(ctx->why, ctx->why_len,
                "affected proof plan is incomplete or has no exact groups");
         return false;
@@ -2390,7 +2442,7 @@ static bool rr_prove_select_groups(struct rr_prove_ctx *ctx)
     }
     rr_sha256_bytes(ctx->receipt->groups, strlen(ctx->receipt->groups),
                     ctx->receipt->groups_sha256);
-    if (ctx->receipt->deferred_group_count > 0)
+    if (ctx->receipt->deferred_groups[0])
         rr_sha256_bytes(ctx->receipt->deferred_groups,
                         strlen(ctx->receipt->deferred_groups),
                         ctx->receipt->deferred_groups_sha256);
@@ -2506,6 +2558,41 @@ static bool rr_prove_compile_and_link(struct rr_prove_ctx *ctx)
     return ok;
 }
 
+/* The receipt names the executed bytes by their SHA-256 at rehash and by the
+ * inode that held them. A run is attributed to that hash only while the same
+ * inode still sits at the candidate path afterwards. */
+static bool rr_artifact_identity(const char *path, uint64_t *dev,
+                                 uint64_t *ino)
+{
+#if defined(_WIN32)
+    *dev = *ino = 0;
+    return rr_regular(path, NULL);
+#else
+    rr_file_stamp st;
+    if (!rr_regular(path, &st))
+        return false;
+    *dev = (uint64_t)st.st_dev;
+    *ino = (uint64_t)st.st_ino;
+    return true;
+#endif
+}
+
+static bool rr_prove_recheck_identity(struct rr_prove_ctx *ctx)
+{
+    uint64_t dev = 0, ino = 0;
+    if (rr_artifact_identity(ctx->receipt->artifact_path, &dev, &ino) &&
+        dev == ctx->receipt->artifact_dev &&
+        ino == ctx->receipt->artifact_ino)
+        return true;
+    ctx->receipt->immediate_proof_complete = false;
+    ctx->receipt->proof_complete = false;
+    rr_why(ctx->why, ctx->why_len,
+           "affected proof candidate was replaced during its run");
+    fprintf(stderr, "[devloop] restart proof: candidate %s changed identity "
+            "during its run\n", ctx->receipt->artifact_path);
+    return false;
+}
+
 static bool rr_prove_verify_after(struct rr_prove_ctx *ctx)
 {
     if (ctx->guard_source) ctx->receipt->source_guard_captures++;
@@ -2515,8 +2602,12 @@ static bool rr_prove_verify_after(struct rr_prove_ctx *ctx)
           !source_after.cas_present ||
           strcmp(ctx->source_before.cas_root_sha3,
                  source_after.cas_root_sha3) != 0)) ||
+        !rr_artifact_identity(ctx->receipt->artifact_path,
+                              &ctx->receipt->artifact_dev,
+                              &ctx->receipt->artifact_ino) ||
         !rr_sha256_file(ctx->receipt->artifact_path,
-                        ctx->receipt->artifact_sha256)) {
+                        ctx->receipt->artifact_sha256) ||
+        !rr_prove_recheck_identity(ctx)) {
         rr_why(ctx->why, ctx->why_len,
                "proof source changed or its candidate could not be rehashed");
         ctx->receipt->total_us = platform_time_monotonic_us() - ctx->started;
@@ -2770,6 +2861,8 @@ static bool rr_restart_prove(
         return false;
     bool ran, summary_ok, accounted;
     rr_prove_run_main_test(&ctx, &ta, &ran, &summary_ok, &accounted);
+    if (receipt->immediate_proof_complete && !rr_prove_recheck_identity(&ctx))
+        return false;
     if (!receipt->immediate_proof_complete) {
         rr_prove_report_failure(&ctx, ran, summary_ok, accounted);
         return false;
@@ -2985,6 +3078,12 @@ static void rr_emit_event_proof_receipt(
     (void)json_push_kv_bool(receipt, "bounded_proof_deferred",
                             proof->bounded_proof_deferred);
     (void)json_push_kv_int(receipt, "group_count", proof->group_count);
+    (void)json_push_kv_int(receipt, "groups_selected",
+                           proof->groups_selected);
+    (void)json_push_kv_int(receipt, "artifact_dev",
+                           (int64_t)proof->artifact_dev);
+    (void)json_push_kv_int(receipt, "artifact_ino",
+                           (int64_t)proof->artifact_ino);
     (void)json_push_kv_int(receipt, "deferred_group_count",
                            proof->deferred_group_count);
     (void)json_push_kv_int(receipt, "groups_ran", proof->groups_ran);
@@ -3025,6 +3124,26 @@ static void rr_emit_event_proof_receipt(
     (void)json_push_kv_int(receipt, "proof_total_us", proof->total_us);
 }
 
+/* Top-level scope of a focused verdict, readable without the receipt: how
+ * many groups ran against how many the plan selects, and which bytes ran.
+ * No restart event carries acceptance or publication authority. */
+static void rr_emit_event_focused_scope(
+    struct json_value *doc,
+    const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    (void)json_push_kv_bool(doc, "receipt_authority", false);
+    if (!proof || proof->group_count == 0)
+        return;
+    (void)json_push_kv_str(doc, "focused_scope",
+                           proof->bounded_proof_deferred ? "partial"
+                                                         : "complete");
+    (void)json_push_kv_int(doc, "groups_run", proof->group_count);
+    (void)json_push_kv_int(doc, "groups_selected", proof->groups_selected);
+    if (proof->artifact_sha256[0])
+        (void)json_push_kv_str(doc, "probe_candidate_sha256",
+                               proof->artifact_sha256);
+}
+
 static void rr_emit_event_next_action(struct json_value *doc,
                                       const char *status)
 {
@@ -3032,6 +3151,8 @@ static void rr_emit_event_next_action(struct json_value *doc,
         doc, "agent_next_action",
         strcmp(status, "feedback_ready") == 0
             ? "candidate runtime and immediate affected proofs are green; run integration proofs before acceptance"
+            : strcmp(status, "focused_partial") == 0
+                ? "candidate path-floor proofs are green; groups_run of groups_selected ran and the conservative proof decides the rest"
             : strcmp(status, "reflex_ready") == 0
                 ? "candidate compile, link, and probe are green; affected proof is running asynchronously"
             : strcmp(status, "impact_ready") == 0
@@ -3135,6 +3256,7 @@ static bool rr_emit_event(
         (void)json_push_kv(&doc, "proof_receipt", &receipt);
         json_free(&receipt);
     }
+    rr_emit_event_focused_scope(&doc, proof);
     rr_emit_event_next_action(&doc, status);
     char wire[16384];
     size_t n = json_write(&doc, wire, sizeof(wire) - 1);
@@ -3311,25 +3433,56 @@ static bool rr_event_prove_phase(struct rr_event_ctx *ctx)
     return ok;
 }
 
+/* Refusals that leave the candidate unjudged. The conservative proof, which
+ * the watcher still schedules, decides it. */
+static bool rr_why_leaves_proof_pending(const char *why)
+{
+    return strstr(why, "proof plan is incomplete") ||
+        strstr(why, "proof set exceeds resident bound") ||
+        strstr(why, "action plan stale") ||
+        strstr(why, "candidate was replaced during its run");
+}
+
+/* A green run of the complete path floor with the rest of the selection
+ * deferred is partial evidence, never FOCUSED_GREEN. */
+static const char *rr_focused_status(
+    bool ok, bool fallback,
+    const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    if (ok)
+        return proof->bounded_proof_deferred ? "focused_partial"
+                                             : "feedback_ready";
+    return fallback ? "fallback_ready" : "rejected";
+}
+
+static const char *rr_focused_detail(
+    bool ok, bool fallback,
+    const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    if (ok)
+        return proof->bounded_proof_deferred ? "path_floor_affected_proofs"
+                                             : "immediate_affected_proofs";
+    return fallback ? "conservative_proof_selected" : "affected_proofs";
+}
+
 static int rr_event_finish(struct rr_event_ctx *ctx, bool ok)
 {
     if (ctx->proof_process.cancelled || zcl_devloop_process_cancel_requested())
         return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
-    bool fallback_pending = !ok &&
-        (strstr(ctx->why, "proof plan is incomplete") ||
-         strstr(ctx->why, "proof set exceeds resident bound") ||
-         strstr(ctx->why, "action plan stale"));
+    /* A newer save landed while this epoch's proof ran. Its result belongs
+     * to no current source: drop it and let the watcher supersede the epoch
+     * rather than report a red against bytes nobody is editing any more. */
+    if (!ok && strstr(ctx->why, "source changed during affected proof"))
+        return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
+    bool fallback_pending = !ok && rr_why_leaves_proof_pending(ctx->why);
     if (fallback_pending) {
         ctx->proof.integration_proof_deferred = true;
         ctx->proof.bounded_proof_deferred = true;
     }
     bool emitted = rr_emit_event(
         ctx->repo_root, ctx->source_tus, ctx->source_count,
-        ok ? "feedback_ready" :
-             fallback_pending ? "fallback_ready" : "rejected",
-        ok ? "immediate_affected_proofs" :
-             fallback_pending ? "conservative_proof_selected"
-                              : "affected_proofs",
+        rr_focused_status(ok, fallback_pending, &ctx->proof),
+        rr_focused_detail(ok, fallback_pending, &ctx->proof),
         platform_time_monotonic_us() - ctx->started, ctx->publish_mode,
         &ctx->build, &ctx->proof,
         ctx->proof_process.output_len ? &ctx->proof_process
@@ -3345,7 +3498,6 @@ static int rr_event_finish(struct rr_event_ctx *ctx, bool ok)
     return fallback_pending ? ZCL_DEVLOOP_RESTART_EVENT_FALLBACK_PENDING
                             : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
 }
-
 int zcl_devloop_restart_event(const char *repo_root,
                               const char *const *source_tus,
                               size_t source_count,
@@ -3427,9 +3579,7 @@ static int rr_story_finish(const char *repo_root,
     if (process->cancelled || zcl_devloop_process_cancel_requested())
         return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
     bool fallback = !ok &&
-        (strstr(why, "proof plan is incomplete") ||
-         strstr(why, "proof set exceeds resident bound") ||
-         strstr(why, "action plan stale") ||
+        (rr_why_leaves_proof_pending(why) ||
          strstr(why, "proof closure refused:"));
     if (fallback) {
         proof->integration_proof_deferred = true;
@@ -3437,9 +3587,8 @@ static int rr_story_finish(const char *repo_root,
     }
     bool emitted = rr_emit_event(
         repo_root, source_tus, source_count,
-        ok ? "feedback_ready" : fallback ? "fallback_ready" : "rejected",
-        ok ? "immediate_affected_proofs" :
-             fallback ? "conservative_proof_selected" : "affected_proofs",
+        rr_focused_status(ok, fallback, proof),
+        rr_focused_detail(ok, fallback, proof),
         platform_time_monotonic_us() - started, publish_mode, NULL, proof,
         process, why, 0, proof->source_guard_captures, 0, 0, false,
         0, 0, plan->closure_snapshot, false);

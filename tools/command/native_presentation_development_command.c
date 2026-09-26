@@ -128,6 +128,7 @@ static int npd_phase(const char *status, const char *phase, bool *red)
     if (strcmp(phase, "STORY_GREEN") == 0) return 4;
     if (strcmp(phase, "STORY_RED") == 0) { *red = true; return 4; }
     if (strcmp(phase, "FOCUSED_GREEN") == 0) return 5;
+    if (strcmp(phase, "FOCUSED_PARTIAL") == 0) return 5;
     if (strcmp(phase, "FOCUSED_RED") == 0) { *red = true; return 5; }
     if (strcmp(phase, "PROOF_PENDING") == 0) return 5;
     if (strcmp(phase, "SUPERSEDED") == 0) { *red = true; return 0; }
@@ -217,6 +218,7 @@ bool zcl_native_presentation_development_model_from_facts(
         current == 4 || (candidate_executed && feedback && feedback[0]),
         proof_complete || (current == 5 &&
             (strcmp(phase, "FOCUSED_GREEN") == 0 ||
+             strcmp(phase, "FOCUSED_PARTIAL") == 0 ||
              strcmp(phase, "FOCUSED_RED") == 0)),
     };
     for (int number = 1; number <= 5; number++)

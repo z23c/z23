@@ -23,6 +23,7 @@ static const char *progress_phase(const char *status, const char *detail)
     if (strcmp(status, "story_red") == 0) return "STORY_RED";
     if (strcmp(status, "focused_green") == 0 ||
         strcmp(status, "feedback_ready") == 0) return "FOCUSED_GREEN";
+    if (strcmp(status, "focused_partial") == 0) return "FOCUSED_PARTIAL";
     if (strcmp(status, "focused_red") == 0) return "FOCUSED_RED";
     if (strcmp(status, "proof_pending") == 0 ||
         strcmp(status, "fallback_ready") == 0) return "PROOF_PENDING";

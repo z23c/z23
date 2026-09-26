@@ -348,6 +348,16 @@ static int test_change_classification(void)
         ASSERT(zcl_devloop_plan_files(docs, 1, &plan));
         ASSERT(plan.action == ZCL_DEVLOOP_CHECK);
         ASSERT(plan.docs_only);
+
+        /* A package lifecycle source maps to its owner groups where it now
+         * lives; an unmapped change refuses the restart reflex outright. */
+        const char *store[] = {
+            "contexts/commons/services/src/package_lifecycle_store.c" };
+        const char *refusal = NULL;
+        ASSERT(zcl_devloop_plan_files(store, 1, &plan));
+        ASSERT(plan.path_groups_len > 0);
+        ASSERT(zcl_devloop_plan_proof_admissible(&plan, &refusal) ||
+               strcmp(refusal, "unmapped-code-change") != 0);
         PASS();
     } _test_next:;
     return failures;
@@ -3679,6 +3689,159 @@ static bool dp_restart_first_identity_ok(
            strlen(receipt->artifact_cache_key) == 64;
 }
 
+/* A candidate that runs the complete path floor of a closure too wide to
+ * enumerate reports exactly that: group_count of groups_selected, bounded
+ * deferral, no complete proof, and the executed bytes by hash and inode. */
+static bool dp_restart_partial_floor_ok(const char *root,
+                                        const char *const *changed,
+                                        const struct zcl_devloop_plan *plan,
+                                        char *why, size_t why_len)
+{
+    struct zcl_devloop_plan universal = *plan;
+    universal.closure_universal = true;
+    struct zcl_devloop_restart_proof_receipt proof = {0};
+    struct zcl_devloop_process_result process = {0};
+    bool ok = zcl_devloop_restart_prove_immediate(
+        root, changed, 1, &universal, &proof, &process, why, why_len);
+    bool shaped = ok && proof.immediate_proof_complete &&
+        !proof.proof_complete && proof.bounded_proof_deferred &&
+        proof.groups_selected == zcl_test_group_catalog_count() &&
+        proof.group_count > 0 && proof.group_count <= 32 &&
+        proof.deferred_group_count ==
+            proof.groups_selected - proof.group_count &&
+        proof.deferred_groups[0] == 0 &&
+        proof.deferred_groups_sha256[0] == 0 &&
+        strstr(proof.groups, "test_dev_platform") &&
+        !strstr(proof.groups, "test_wallet") &&
+        strlen(proof.artifact_sha256) == 64 && proof.artifact_ino != 0;
+    if (!shaped)
+        fprintf(stderr, "partial floor: ok=%d bounded=%d run=%u selected=%u "
+                "deferred=%u\n", ok, proof.bounded_proof_deferred,
+                proof.group_count, proof.groups_selected,
+                proof.deferred_group_count);
+    return shaped;
+}
+
+struct dp_probe_watch {
+    char marker[PATH_MAX];
+    char source[PATH_MAX];
+};
+
+/* The watcher's poll: new filesystem activity arrives once the focused probe
+ * is running. A supersede poll also writes the newer save first. */
+static bool dp_probe_cancel_poll(void *opaque)
+{
+    const struct dp_probe_watch *watch = opaque;
+    if (access(watch->marker, F_OK) != 0)
+        return false;
+    if (watch->source[0]) {
+        FILE *f = fopen(watch->source, "w");
+        if (f) {
+            (void)fputs("int restart_fixture(void) { return 13; }\n", f);
+            (void)fclose(f);
+        }
+    }
+    return true;
+}
+
+static bool dp_pid_gone(long pid)
+{
+    for (int i = 0; i < 300; i++) {
+        if (kill((pid_t)pid, 0) != 0 && errno == ESRCH)
+            return true;
+        struct timespec pause = { .tv_sec = 0, .tv_nsec = 10000000L };
+        (void)nanosleep(&pause, NULL);
+    }
+    return false;
+}
+
+/* Every process the probe started — the candidate, its hook, and the hook's
+ * own background child — is gone once the cancelled probe returns. */
+static bool dp_probe_left_no_children(const char *marker)
+{
+    FILE *f = fopen(marker, "r");
+    long hook = 0, child = 0;
+    bool read = f && fscanf(f, "%ld %ld", &hook, &child) == 2;
+    if (f) (void)fclose(f);
+    bool gone = read && hook > 1 && child > 1 && dp_pid_gone(hook) &&
+        dp_pid_gone(child);
+    if (!gone)
+        fprintf(stderr, "probe children: read=%d hook=%ld child=%ld\n",
+                read, hook, child);
+    return gone;
+}
+
+static bool dp_probe_hook_write(const char *hook, const char *marker)
+{
+    char body[PATH_MAX * 2 + 256];
+    int n = snprintf(body, sizeof(body),
+                     "#!/usr/bin/env bash\n"
+                     "sleep 30 &\n"
+                     "printf '%%s %%s\\n' \"$$\" \"$!\" >'%s.tmp'\n"
+                     "mv '%s.tmp' '%s'\n"
+                     "wait\n", marker, marker, marker);
+    return n > 0 && n < (int)sizeof(body) && dp_mk_write(".", hook, body) &&
+        chmod(hook, 0700) == 0;
+}
+
+/* Stop (or a newer save) mid-probe: the bounded probe is cancelled, never
+ * reported, and reaps every descendant. */
+static bool dp_restart_probe_cancel_ok(const char *root,
+                                       const char *const *changed,
+                                       const struct zcl_devloop_plan *plan,
+                                       bool supersede, char *why,
+                                       size_t why_len)
+{
+    char cwd[PATH_MAX], hook[PATH_MAX];
+    struct dp_probe_watch watch = {0};
+    if (!getcwd(cwd, sizeof(cwd)) ||
+        snprintf(hook, sizeof(hook), "%s/test-tmp/dev_restart_probe_hook_%ld.sh",
+                 cwd, (long)getpid()) >= (int)sizeof(hook) ||
+        snprintf(watch.marker, sizeof(watch.marker),
+                 "%s/test-tmp/dev_restart_probe_pids_%ld", cwd,
+                 (long)getpid()) >= (int)sizeof(watch.marker) ||
+        (supersede &&
+         snprintf(watch.source, sizeof(watch.source),
+                  "%s/%s/tools/dev/restart_fixture.c", cwd, root) >=
+             (int)sizeof(watch.source)) ||
+        !dp_probe_hook_write(hook, watch.marker) ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_PROBE_HOOK", hook, 1) != 0)
+        return false;
+    (void)unlink(watch.marker);
+    struct zcl_devloop_restart_proof_receipt proof = {0};
+    struct zcl_devloop_process_result process = {0};
+    zcl_devloop_process_cancel_poll_set(dp_probe_cancel_poll, &watch);
+    int64_t started = platform_time_monotonic_us();
+    bool ran = zcl_devloop_restart_prove_immediate(
+        root, changed, 1, plan, &proof, &process, why, why_len);
+    int64_t elapsed_ms = (platform_time_monotonic_us() - started) / 1000;
+    zcl_devloop_process_cancel_poll_clear();
+    zcl_devloop_process_cancel_clear();
+    (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROBE_HOOK");
+    bool ok = !ran && process.cancelled && !proof.immediate_proof_complete &&
+        !proof.proof_complete && elapsed_ms < 20000 &&
+        dp_probe_left_no_children(watch.marker);
+    if (!ok)
+        fprintf(stderr, "probe cancel: ran=%d cancelled=%d elapsed=%lldms\n",
+                ran, process.cancelled, (long long)elapsed_ms);
+    (void)unlink(watch.marker);
+    (void)unlink(hook);
+    return ok && (!supersede ||
+        dp_mk_write(root, "tools/dev/restart_fixture.c",
+                    "int restart_fixture(void) { return 7; }\n"));
+}
+
+static bool dp_restart_focused_scope_ok(const char *root,
+                                        const char *const *changed,
+                                        const struct zcl_devloop_plan *plan,
+                                        char *why, size_t why_len)
+{
+    return dp_restart_partial_floor_ok(root, changed, plan, why, why_len) &&
+        dp_restart_probe_cancel_ok(root, changed, plan, false, why,
+                                   why_len) &&
+        dp_restart_probe_cancel_ok(root, changed, plan, true, why, why_len);
+}
+
 static bool run_resident_restart_fixture(void)
 {
     char root[PATH_MAX], cache_rel[PATH_MAX], compiler_rel[PATH_MAX];
@@ -3717,7 +3880,7 @@ static bool run_resident_restart_fixture(void)
         "    grep -q 'build/dev-loop/restart-test-objects/platform/modules/util/src/clientversion.o' \"$rsp\"\n"
         "    ! grep -q 'build/test-obj/fixture/tools/dev/restart_fixture.o' \"$rsp\"\n"
         "    ! grep -q 'build/test-obj/fixture/platform/modules/util/src/clientversion.o' \"$rsp\"\n"
-        "    printf '#!/usr/bin/env bash\\nset -eu\\ngroups= cache=0 snapshot=0 changed=\\nfor arg in \"$@\"; do case \"$arg\" in --exact=*) groups=${arg#--exact=};; --cache) cache=1;; --cache-snapshot) snapshot=1;; --changed-source=*) changed=${arg#--changed-source=};; esac; done\\n[ -n \"$groups\" ]\\n[ \"$cache\" -eq 1 ]\\n[ \"$snapshot\" -eq 1 ]\\n[ \"$changed\" = tools/dev/restart_fixture.c ]\\ncount=1\\nrest=$groups\\nwhile [ \"${rest#*,}\" != \"$rest\" ]; do count=$((count+1)); rest=${rest#*,}; done\\nran=$((count-1))\\nfailed=$ZCL_DEVLOOP_TEST_FAIL_GROUPS\\nprintf \"SUITE VERDICT mode=cached groups_total=921 groups_ran=%%s groups_cached=1 groups_gated=0 groups_failed=%%s self_skips=0\\\\n\" \"$ran\" \"$failed\"\\n[ \"$failed\" -eq 0 ]\\n' >\"$out\"\n"
+        "    printf '#!/usr/bin/env bash\\nset -eu\\ngroups= cache=0 snapshot=0 changed=\\nfor arg in \"$@\"; do case \"$arg\" in --exact=*) groups=${arg#--exact=};; --cache) cache=1;; --cache-snapshot) snapshot=1;; --changed-source=*) changed=${arg#--changed-source=};; esac; done\\n[ -n \"$groups\" ]\\n[ \"$cache\" -eq 1 ]\\n[ \"$snapshot\" -eq 1 ]\\n[ \"$changed\" = tools/dev/restart_fixture.c ]\\n[ -z \"${ZCL_DEVLOOP_TEST_PROBE_HOOK:-}\" ] || \"$ZCL_DEVLOOP_TEST_PROBE_HOOK\"\\ncount=1\\nrest=$groups\\nwhile [ \"${rest#*,}\" != \"$rest\" ]; do count=$((count+1)); rest=${rest#*,}; done\\nran=$((count-1))\\nfailed=$ZCL_DEVLOOP_TEST_FAIL_GROUPS\\nprintf \"SUITE VERDICT mode=cached groups_total=921 groups_ran=%%s groups_cached=1 groups_gated=0 groups_failed=%%s self_skips=0\\\\n\" \"$ran\" \"$failed\"\\n[ \"$failed\" -eq 0 ]\\n' >\"$out\"\n"
         "  else\n"
         "    case \"$base\" in *dev-obj/fixture/restart-base.o) :;; *) exit 9;; esac\n"
         "    grep -q 'build/dev-loop/restart-objects/tools/dev/restart_fixture.o' \"$rsp\"\n"
@@ -4090,6 +4253,8 @@ static bool run_resident_restart_fixture(void)
         !proof.integration_proof_deferred || !proof.bounded_proof_deferred ||
         proof.group_count == 0 || proof.group_count > 32 ||
         proof.deferred_group_count == 0 ||
+        proof.groups_selected !=
+            proof.group_count + proof.deferred_group_count ||
         !strstr(proof.groups, "test_dev_platform") ||
         strstr(proof.groups, "test_wallet") || strstr(proof.groups, "test_net") ||
         !strstr(proof.deferred_groups, "test_wallet") ||
@@ -4144,6 +4309,12 @@ static bool run_resident_restart_fixture(void)
         strcmp(why, "consensus-risk input is excluded from fast restart") != 0 ||
         receipt.compiler_processes != 0 || receipt.linker_processes != 0 ||
         receipt.probe_processes != 0)
+        goto out;
+
+    stage = "focused scope, stop and supersede";
+    why[0] = 0;
+    if (!dp_restart_focused_scope_ok(root, changed, &proof_plan, why,
+                                     sizeof(why)))
         goto out;
     ok = true;
 
@@ -4691,6 +4862,10 @@ static int test_progressive_event_vocabulary(void)
         ASSERT(strcmp(zcl_devloop_progress_phase(
                           "feedback_ready", "immediate_affected_proofs"),
                       "FOCUSED_GREEN") == 0);
+        /* A path-floor run of a wider selection is never FOCUSED_GREEN. */
+        ASSERT(strcmp(zcl_devloop_progress_phase(
+                          "focused_partial", "path_floor_affected_proofs"),
+                      "FOCUSED_PARTIAL") == 0);
         ASSERT(strcmp(zcl_devloop_progress_phase(
                           "rejected", "affected_proofs"),
                       "FOCUSED_RED") == 0);

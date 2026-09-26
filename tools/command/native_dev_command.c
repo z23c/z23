@@ -1998,7 +1998,8 @@ void zcl_native_handle_dev_drive(
         bool proof_pending = explicit_proof_pending || reflex_ready ||
             story_green ||
             (status &&
-             ((strcmp(status, "feedback_ready") == 0 &&
+             (((strcmp(status, "feedback_ready") == 0 ||
+                strcmp(status, "focused_partial") == 0) &&
                json_get_bool(json_get(&cycle,
                                       "immediate_proof_complete"))) ||
               strcmp(status, "fallback_ready") == 0) &&
