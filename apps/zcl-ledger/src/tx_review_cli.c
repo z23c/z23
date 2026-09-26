@@ -3,6 +3,7 @@
 #include "blue_review_protocol.h"
 #include "ledger_hid.h"
 #include "zcl_tx_review.h"
+#include "zcl_tx_script_facts.h"
 #include "zcl_zip243_host.h"
 
 #include <errno.h>
@@ -175,8 +176,11 @@ int main(int argc, char **argv) {
         return 1;
     }
     zcl_tx_review review;
+    zcl_tx_script_facts scripts;
     uint8_t zip_digest[32] = {0};
     int result = zcl_tx_review_parse(wire, length, &review);
+    if (result == 0)
+        result = zcl_tx_script_facts_parse(wire, length, &scripts);
     if (result == 0 && has_branch)
         result = zip243_digest(wire, length, branch_id, zip_digest);
     if (result == 0 && device)
@@ -194,6 +198,9 @@ int main(int argc, char **argv) {
                "\"sapling_spends\":%" PRIu32 ","
                "\"sapling_outputs\":%" PRIu32 ","
                "\"sprout_joinsplits\":%" PRIu32 ","
+               "\"p2sh_outputs\":%" PRIu32 ","
+               "\"op_return_outputs\":%" PRIu32 ","
+               "\"zslp_marker\":%s,"
                "\"transparent_output_zat\":%" PRIu64 ","
                "\"value_balance_zat\":%" PRId64 ","
                "\"lock_time\":%" PRIu32 ","
@@ -203,7 +210,10 @@ int main(int argc, char **argv) {
                "\"blue_parsed\":%s",
                review.transparent_inputs, review.transparent_outputs,
                review.sapling_spends, review.sapling_outputs,
-               review.sprout_joinsplits, review.transparent_output_zat,
+               review.sprout_joinsplits, scripts.p2sh_outputs,
+               scripts.op_return_outputs,
+               scripts.zslp_marker ? "true" : "false",
+               review.transparent_output_zat,
                review.value_balance_zat, review.lock_time,
                review.expiry_height, device ? "true" : "false");
         if (has_branch) {
@@ -220,6 +230,10 @@ int main(int argc, char **argv) {
                review.transparent_inputs, review.transparent_outputs,
                review.sapling_spends, review.sapling_outputs,
                review.sprout_joinsplits);
+        printf("Script outputs: %" PRIu32 " P2SH, %" PRIu32
+               " OP_RETURN; first output has ZSLP marker: %s.\n",
+               scripts.p2sh_outputs, scripts.op_return_outputs,
+               scripts.zslp_marker ? "yes" : "no");
         printf("Public output total: %" PRIu64 " zatoshi; value balance: %" PRId64
                " zatoshi.\n", review.transparent_output_zat,
                review.value_balance_zat);

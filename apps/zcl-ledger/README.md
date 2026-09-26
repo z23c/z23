@@ -64,6 +64,12 @@ value, Sapling spend and output counts, Sprout JoinSplit count, value balance,
 lock time, and expiry height. The parser requires canonical CompactSize
 lengths, checks public value ranges, bounds all arrays and scripts, and
 rejects trailing or truncated bytes.
+It also reports the number of exact P2SH output scripts and OP_RETURN
+outputs, plus whether output zero begins with an SLP token marker. These
+three script facts are checked by the host only, including when `--blue` is
+used. A P2SH output does not establish a multisig threshold; the redeem
+script is needed. An SLP marker does not establish a valid ZSLP transfer;
+token fields, input lineage, and amounts still need verification.
 
 ```sh
 build/zcl-ledger/zcl-tx-review --json transaction.bin
