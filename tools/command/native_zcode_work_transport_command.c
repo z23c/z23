@@ -63,6 +63,12 @@
  * node's signed work receipt in <datadir>/zcode (vcs/zcode_work_pull_receipt.h)
  * — the lifecycle's remote receipt for that pointer — and `zcode work
  * receipt` verifies one by root. A refused row never yields a receipt.
+ * The receipt is signed with the node's build-worker key,
+ * <datadir>/zcode/build-worker.ed25519; a pull that finds a pointer
+ * CREATES that key (mode 0600) when the datadir has none yet. A receipt
+ * binds only a usable (neither conflicted nor superseded) POINTER that
+ * itself names this task and package, and is an observation, never build
+ * evidence: the task index does not count it.
  *
  * A row that fails stays in the report naming its rule. One bad pointer
  * never aborts the pull — the other solvers' packages still land.
@@ -226,7 +232,8 @@ void zcl_native_handle_zcode_work_offer(
 /* A fetch the running node accepted may still be committing its chunks
  * when the fetch reply returns. The pull waits — bounded, once per pull
  * across all rows — for the store to report the package complete, so its
- * verdict reflects the commit it started rather than racing it. */
+ * verdict reflects the commit it started rather than racing it. wait_ms
+ * lowers the bound (0 = do not wait); it can never raise it. */
 #define ZWT_SETTLE_MS INT64_C(15000)
 #define ZWT_SETTLE_POLL_MS 250
 
@@ -234,8 +241,8 @@ void zcl_native_handle_zcode_work_offer(
  * control path that could abort the sweep. */
 struct zwt_row {
     char transport_root[65];
-    char pointer_root[65];    /* record_root of the POINTER naming it */
-    bool pointer_usable;      /* neither conflicted nor superseded */
+    char pointer_root[65];    /* smallest usable POINTER record_root */
+    char pointer_task[65];    /* that record's own semantic_root */
     char fetch_outcome[96];   /* the fetch path's own named verdict */
     bool fetched;
     bool pending;             /* accepted, not complete within the wait */
@@ -263,26 +270,30 @@ struct zwt_pull {
     uint8_t secret[32];
     uint8_t pubkey[32];
     int64_t started_unix;
+    int64_t settle_budget_ms;
     int64_t settle_deadline_ms;
+    bool settle_started;
     uint32_t fetched, admitted, refused, pending, receipts;
 };
 
-static bool zwt_record_usable(const struct json_value *record)
+/* Only a pointer that is neither conflicted nor superseded may be the
+ * publication a receipt binds; among several, the smallest record root,
+ * so the choice does not depend on discovery order. A row whose pointers
+ * are all unusable is still fetched and verified, and records nothing. */
+static void zwt_row_pointer(struct zwt_row *row,
+                            const struct json_value *record,
+                            const char *semantic)
 {
-    return !json_get_bool(json_get(record, "conflicted")) &&
+    const char *pointer = json_get_str(json_get(record, "record_root"));
+    bool usable = !json_get_bool(json_get(record, "conflicted")) &&
         !json_get_bool(json_get(record, "superseded"));
-}
-
-static void zwt_row_pointer(struct zwt_row *row, const char *pointer,
-                            bool usable)
-{
-    if (!pointer || strlen(pointer) != 64)
-        return;
-    if (row->pointer_root[0] && (row->pointer_usable || !usable))
+    if (!usable || !pointer || strlen(pointer) != 64 ||
+        (row->pointer_root[0] && strcmp(pointer, row->pointer_root) >= 0))
         return;
     (void)snprintf(row->pointer_root, sizeof(row->pointer_root), "%s",
                    pointer);
-    row->pointer_usable = usable;
+    (void)snprintf(row->pointer_task, sizeof(row->pointer_task), "%s",
+                   semantic);
 }
 
 static void zwt_row_init(struct zwt_row *row, const char *transport)
@@ -299,8 +310,9 @@ static void zwt_row_init(struct zwt_row *row, const char *transport)
 /* Distinct transport roots, in discovery order, bounded. Two solvers may
  * publish two packages; a republished sequence of the same package
  * collapses here so a solver cannot consume the row budget by
- * republishing. Each row keeps one POINTER record root — a usable one when
- * any exists — as the publication its receipt binds. */
+ * republishing. A record that does not itself name this task — including
+ * one with no semantic_root at all — is ignored, never trusted by
+ * default. */
 static uint32_t zwt_collect(const struct json_value *pointers,
                             const char *task_hex, struct zwt_row *rows,
                             uint32_t cap, bool *truncated)
@@ -313,8 +325,8 @@ static uint32_t zwt_collect(const struct json_value *pointers,
             record ? json_get_str(json_get(record, "transport_root")) : NULL;
         const char *semantic =
             record ? json_get_str(json_get(record, "semantic_root")) : NULL;
-        if (!transport || strlen(transport) != 64 ||
-            (semantic && strcmp(semantic, task_hex) != 0))
+        if (!transport || strlen(transport) != 64 || !semantic ||
+            strcmp(semantic, task_hex) != 0)
             continue;
         uint32_t at = 0;
         while (at < distinct && strcmp(rows[at].transport_root, transport))
@@ -325,9 +337,7 @@ static uint32_t zwt_collect(const struct json_value *pointers,
         }
         if (at == distinct)
             zwt_row_init(&rows[distinct++], transport);
-        zwt_row_pointer(&rows[at],
-                        json_get_str(json_get(record, "record_root")),
-                        zwt_record_usable(record));
+        zwt_row_pointer(&rows[at], record, semantic);
     }
     return distinct;
 }
@@ -347,8 +357,10 @@ static bool zwt_settle(struct zwt_pull *p, const uint8_t root[32],
                        int64_t *waited_ms)
 {
     int64_t start = platform_time_monotonic_ms();
-    if (p->settle_deadline_ms == 0)
-        p->settle_deadline_ms = start + ZWT_SETTLE_MS;
+    if (!p->settle_started) {
+        p->settle_started = true;
+        p->settle_deadline_ms = start + p->settle_budget_ms;
+    }
     bool complete = zwt_store_complete(p->store, root);
     while (!complete && platform_time_monotonic_ms() < p->settle_deadline_ms) {
         platform_sleep_ms(ZWT_SETTLE_POLL_MS);
@@ -408,7 +420,9 @@ static void zwt_pull_row(struct zwt_pull *p, struct zwt_row *row)
      * that fails stays in the report; the sweep continues so one bad or
      * unreachable pointer cannot cost the other solvers' packages. */
     memcpy(o.task_root, p->task_root, 32);
+    memcpy(o.pointer_package_root, o.package_root, 32);
     (void)zcl_hex_decode_lower(row->pointer_root, o.pointer_root, 32);
+    (void)zcl_hex_decode_lower(row->pointer_task, o.pointer_task_root, 32);
     o.started_unix = p->started_unix;
     int64_t now = (int64_t)platform_time_wall_unix();
     o.observed_unix = now < p->started_unix ? p->started_unix : now;
@@ -534,7 +548,12 @@ static void zwt_push_report(struct zcl_command_reply *reply,
         "(receipt_root, in <datadir>/zcode) binding the pointer, package, "
         "task, source, candidate and accepted-work roots; a repeat pull of "
         "the same roots attaches to it (receipt_attached) and a refused row "
-        "never produces one. Check one with zcode work receipt. Choosing "
+        "never produces one, nor does a row whose only pointers are "
+        "conflicted or superseded. The receipt is signed with this node's "
+        "build-worker key (<datadir>/zcode/build-worker.ed25519), which the "
+        "pull creates if the datadir has none yet (observer_pubkey). A pull "
+        "receipt is an observation, never build evidence for the task. "
+        "Check one with zcode work receipt. Choosing "
         "what to do with the source (checkout, reproduce) is a separate, "
         "explicit act. A row that failed stays in the report naming its "
         "rule and never aborts the sweep. Read status: NO_WORK_POINTERS "
@@ -547,6 +566,9 @@ static void zwt_push_report(struct zcl_command_reply *reply,
         "different problems and are never reported as one");
 }
 
+/* Side effect: build_fabric_worker_identity_load creates
+ * <datadir>/zcode/build-worker.ed25519 (0600) when it does not exist yet.
+ * It runs only once at least one pointer names this task. */
 static void zwt_load_observer(struct zwt_pull *p)
 {
     struct db_build_worker worker;
@@ -578,6 +600,29 @@ static bool zwt_pull_cap(const struct zcl_command_request *request,
     }
     *cap = want > (int64_t)ZWT_ROWS_CEILING ? ZWT_ROWS_CEILING
                                             : (uint32_t)want;
+    return true;
+}
+
+/* The optional wait_ms bound on the store-commit wait: absent means the
+ * full ZWT_SETTLE_MS; anything above it is clamped down to it; a negative
+ * or non-integer value is refused rather than guessed at. */
+static bool zwt_pull_wait(const struct zcl_command_request *request,
+                          struct zcl_command_reply *reply, int64_t *budget)
+{
+    *budget = ZWT_SETTLE_MS;
+    const struct json_value *wv = json_get(request->input, "wait_ms");
+    if (!wv)
+        return true;
+    int64_t want = wv->type == JSON_INT ? json_get_int(wv) : -1;
+    if (want < 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_WAIT_MS",
+                               "normalize", false, false,
+                               "wait_ms must be a non-negative integer",
+                               "zcode.work.pull");
+        return false;
+    }
+    *budget = want < ZWT_SETTLE_MS ? want : ZWT_SETTLE_MS;
     return true;
 }
 
@@ -613,7 +658,8 @@ void zcl_native_handle_zcode_work_pull(
     char task_hex[65];
     zcl_hex_encode(p.task_root, 32, task_hex);
     uint32_t cap = ZWT_ROWS_DEFAULT;
-    if (!zwt_pull_cap(request, reply, &cap))
+    if (!zwt_pull_cap(request, reply, &cap) ||
+        !zwt_pull_wait(request, reply, &p.settle_budget_ms))
         return;
 
     struct json_value pointers;

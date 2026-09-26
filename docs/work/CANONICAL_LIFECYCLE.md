@@ -324,7 +324,9 @@ or already-held package, `output_root` the reconstructed source, `evidence_root`
 the accepted-work root, plus task, candidate, proof policy, toolchain,
 observer key and times. `zcode work receipt` verifies one by root or wire. It
 carries no Git target ref, tip or separate ancestry root; those have no
-meaning for a content-addressed package.
+meaning for a content-addressed package. Only a usable POINTER that itself names
+the task and package is bound, and it enters the action root. A pull receipt
+is an observation: the task index never counts it as build evidence.
 
 The native hook's preflight ancestry/receipt checks and the landing queue's
 local recovery are not this post-publication object. Connect reconciliation to

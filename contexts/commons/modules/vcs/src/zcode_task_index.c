@@ -20,6 +20,7 @@
 #include "vcs/zcode_lane.h"
 #include "vcs/zcode_write_scope.h"
 #include "vcs/zcode_work_output.h"
+#include "vcs/zcode_work_pull_receipt.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -60,6 +61,66 @@ static bool index_hex_lower(const char *s, size_t want)
             return false;
     }
     return s[want] == '\0';
+}
+
+/* Project one receipt-magic wire. A verified work-pull observation is
+ * skipped: it is not build evidence (see vcs/zcode_work_pull_receipt.h). */
+static void index_consider_receipt(const uint8_t *wire, size_t len,
+                                   const uint8_t address[32],
+                                   const char *hex64,
+                                   struct vcs_zcode_task_index *index,
+                                   bool *cap_logged)
+{
+    struct vcs_zcode_work_receipt_v1 receipt;
+    uint8_t root[32];
+    bool ok = vcs_zcode_work_receipt_parse(wire, len, &receipt) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(&receipt, root) == VCS_ZCODE_DEV_OK &&
+        memcmp(root, address, 32) == 0 &&
+        vcs_zcode_work_receipt_verify(
+            &receipt, receipt.signer_pubkey) == VCS_ZCODE_DEV_OK;
+    if (!ok) {
+        index->complete = false;
+        LOG_ERROR(INDEX_LOG, "skipping receipt-magic object %.8s: "
+                  "parse, signature, or root agreement failed", hex64);
+    } else if (vcs_zcode_work_pull_receipt_claims_pull(&receipt)) {
+        /* A work-pull observation (vcs/zcode_work_pull_receipt.h) says
+         * a package verified here; it is never build evidence for a
+         * task and must not count, rank or move task state. */
+    } else if (index->receipt_count >= VCS_ZCODE_TASK_INDEX_MAX_RECEIPTS) {
+        index->complete = false;
+        if (!*cap_logged) {
+            LOG_ERROR(INDEX_LOG, "receipt index cap %u reached",
+                      VCS_ZCODE_TASK_INDEX_MAX_RECEIPTS);
+            *cap_logged = true;
+        }
+    } else {
+        struct vcs_zcode_task_receipt_entry *e =
+            &index->receipts[index->receipt_count++];
+        memset(e, 0, sizeof(*e));
+        zcl_hex_encode(receipt.task_root, 32, e->task_root_hex);
+        zcl_hex_encode(receipt.candidate_root, 32,
+                       e->candidate_root_hex);
+        zcl_hex_encode(receipt.proof_policy_root, 32,
+                       e->proof_policy_root_hex);
+        zcl_hex_encode(receipt.toolchain_capsule_root, 32,
+                       e->toolchain_capsule_root_hex);
+        zcl_hex_encode(address, 32, e->receipt_root_hex);
+        zcl_hex_encode(receipt.output_root, 32, e->output_root_hex);
+        zcl_hex_encode(receipt.action_root, 32, e->action_root_hex);
+        zcl_hex_encode(receipt.input_root, 32, e->input_root_hex);
+        zcl_hex_encode(receipt.evidence_root, 32,
+                       e->evidence_root_hex);
+        zcl_hex_encode(receipt.confinement_root, 32,
+                       e->confinement_root_hex);
+        zcl_hex_encode(receipt.signer_pubkey, 32,
+                       e->signer_pubkey_hex);
+        e->work_kind = receipt.work_kind;
+        e->status = receipt.status;
+        e->exit_status = receipt.exit_status;
+        e->started_unix = receipt.started_unix;
+        e->finished_unix = receipt.finished_unix;
+    }
 }
 
 /* Project one CAS object when it is a verified task or candidate wire.
@@ -186,52 +247,7 @@ static void index_consider_object(const char *repo_root, const char *hex64,
         if (parsed) vcs_zcode_agent_context_free(&context);
     } else if (len == VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES &&
                memcmp(wire, receipt_magic, sizeof(receipt_magic)) == 0) {
-        struct vcs_zcode_work_receipt_v1 receipt;
-        uint8_t root[32];
-        bool ok = vcs_zcode_work_receipt_parse(wire, len, &receipt) ==
-                VCS_ZCODE_DEV_OK &&
-            vcs_zcode_work_receipt_id(&receipt, root) == VCS_ZCODE_DEV_OK &&
-            memcmp(root, address, 32) == 0 &&
-            vcs_zcode_work_receipt_verify(
-                &receipt, receipt.signer_pubkey) == VCS_ZCODE_DEV_OK;
-        if (!ok) {
-            index->complete = false;
-            LOG_ERROR(INDEX_LOG, "skipping receipt-magic object %.8s: "
-                      "parse, signature, or root agreement failed", hex64);
-        } else if (index->receipt_count >= VCS_ZCODE_TASK_INDEX_MAX_RECEIPTS) {
-            index->complete = false;
-            if (!*cap_logged) {
-                LOG_ERROR(INDEX_LOG, "receipt index cap %u reached",
-                          VCS_ZCODE_TASK_INDEX_MAX_RECEIPTS);
-                *cap_logged = true;
-            }
-        } else {
-            struct vcs_zcode_task_receipt_entry *e =
-                &index->receipts[index->receipt_count++];
-            memset(e, 0, sizeof(*e));
-            zcl_hex_encode(receipt.task_root, 32, e->task_root_hex);
-            zcl_hex_encode(receipt.candidate_root, 32,
-                           e->candidate_root_hex);
-            zcl_hex_encode(receipt.proof_policy_root, 32,
-                           e->proof_policy_root_hex);
-            zcl_hex_encode(receipt.toolchain_capsule_root, 32,
-                           e->toolchain_capsule_root_hex);
-            zcl_hex_encode(address, 32, e->receipt_root_hex);
-            zcl_hex_encode(receipt.output_root, 32, e->output_root_hex);
-            zcl_hex_encode(receipt.action_root, 32, e->action_root_hex);
-            zcl_hex_encode(receipt.input_root, 32, e->input_root_hex);
-            zcl_hex_encode(receipt.evidence_root, 32,
-                           e->evidence_root_hex);
-            zcl_hex_encode(receipt.confinement_root, 32,
-                           e->confinement_root_hex);
-            zcl_hex_encode(receipt.signer_pubkey, 32,
-                           e->signer_pubkey_hex);
-            e->work_kind = receipt.work_kind;
-            e->status = receipt.status;
-            e->exit_status = receipt.exit_status;
-            e->started_unix = receipt.started_unix;
-            e->finished_unix = receipt.finished_unix;
-        }
+        index_consider_receipt(wire, len, address, hex64, index, cap_logged);
     } else if (len == VCS_ZCODE_LANE_WIRE_BYTES &&
                memcmp(wire, lane_magic, sizeof(lane_magic)) == 0) {
         struct vcs_zcode_lane_receipt_v1 lane;
