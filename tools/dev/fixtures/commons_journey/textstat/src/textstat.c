@@ -16,10 +16,16 @@ size_t textstat_lines(const char *text, size_t len)
 {
     if (!text || len == 0) return 0;
     size_t lines = 0;
-    for (size_t i = 0; i < len; i++)
-        if (text[i] == '\n') lines++;
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == '\r') {
+            lines++;
+            if (i + 1 < len && text[i + 1] == '\n') i++;
+        } else if (text[i] == '\n') {
+            lines++;
+        }
+    }
     /* A final line without its newline still reached the reader's eyes. */
-    if (text[len - 1] != '\n') lines++;
+    if (text[len - 1] != '\n' && text[len - 1] != '\r') lines++;
     return lines;
 }
 

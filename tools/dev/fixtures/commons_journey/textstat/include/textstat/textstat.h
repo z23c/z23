@@ -13,7 +13,7 @@
 
 #include <stddef.h>
 
-/* Number of newline-terminated or trailing lines in [text, text+len). */
+/* Number of CR, LF, or CRLF-terminated or trailing lines in [text, text+len). */
 size_t textstat_lines(const char *text, size_t len);
 
 /* Number of whitespace-separated words in [text, text+len). */

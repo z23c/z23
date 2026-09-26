@@ -26,6 +26,12 @@ int main(void)
         return fail("bytes", textstat_bytes(sample, len), len);
     if (textstat_lines("no newline", 10) != 1)
         return fail("unterminated line", textstat_lines("no newline", 10), 1);
+    if (textstat_lines("a\rb\r", 4) != 2)
+        return fail("CR lines", textstat_lines("a\rb\r", 4), 2);
+    if (textstat_lines("a\r\nb\r\nc", 7) != 3)
+        return fail("CRLF lines", textstat_lines("a\r\nb\r\nc", 7), 3);
+    if (textstat_lines("a\r\nb\r", 5) != 2)
+        return fail("mixed lines", textstat_lines("a\r\nb\r", 5), 2);
     if (textstat_words("   ", 3) != 0)
         return fail("blank words", textstat_words("   ", 3), 0);
     if (textstat_lines(NULL, 4) != 0)
