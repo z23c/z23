@@ -2260,6 +2260,29 @@ static bool rr_collect_groups(const struct zcl_devloop_plan *plan,
                                       deferred_count, bounded_deferred);
 }
 
+/* How many non-integration groups the whole plan selects: the size a
+ * complete focused run has to reach. */
+static uint32_t rr_immediate_selected(const struct zcl_devloop_plan *plan)
+{
+    size_t n = 0;
+    if (plan->closure_universal) {
+        for (size_t i = 0; i < zcl_test_group_catalog_count(); i++)
+            n += zcl_test_group_is_integration_only(
+                     zcl_test_group_catalog_at(i)) ? 0u : 1u;
+    } else {
+        const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+        size_t id_count = 0;
+        for (size_t i = 0; i < plan->path_groups_len; i++)
+            ids[id_count++] = plan->path_groups[i];
+        for (size_t i = 0; i < plan->closure_groups_len; i++)
+            ids[id_count++] = plan->closure_groups[i];
+        bool truncated = false;
+        n = zcl_test_group_expand_plan_immediate(ids, id_count, NULL, 0,
+                                                 &truncated);
+    }
+    return n == SIZE_MAX ? 0u : n > UINT32_MAX ? UINT32_MAX : (uint32_t)n;
+}
+
 static bool rr_plan_matches_sources(const struct zcl_devloop_plan *plan,
                                     const char *const *sources,
                                     size_t source_count)
@@ -2441,6 +2464,8 @@ static bool rr_prove_select_groups(struct rr_prove_ctx *ctx)
                "affected immediate proof set exceeds resident bound");
         return false;
     }
+    ctx->receipt->groups_immediate_selected =
+        rr_immediate_selected(ctx->proof_plan);
     rr_sha256_bytes(ctx->receipt->groups, strlen(ctx->receipt->groups),
                     ctx->receipt->groups_sha256);
     if (ctx->receipt->deferred_groups[0])
@@ -2562,28 +2587,66 @@ static bool rr_prove_compile_and_link(struct rr_prove_ctx *ctx)
 /* The receipt names the executed bytes by their SHA-256 at rehash and by the
  * inode that held them. A run is attributed to that hash only while the same
  * inode still sits at the candidate path afterwards. */
-static bool rr_artifact_identity(const char *path, uint64_t *dev,
-                                 uint64_t *ino)
+struct rr_artifact_stamp {
+    uint64_t dev, ino, size;
+    int64_t ctime_sec, ctime_nsec;
+};
+
+static bool rr_artifact_identity(const char *path,
+                                 struct rr_artifact_stamp *out)
 {
+    memset(out, 0, sizeof(*out));
 #if defined(_WIN32)
-    *dev = *ino = 0;
     return rr_regular(path, NULL);
 #else
     rr_file_stamp st;
     if (!rr_regular(path, &st))
         return false;
-    *dev = (uint64_t)st.st_dev;
-    *ino = (uint64_t)st.st_ino;
+    out->dev = (uint64_t)st.st_dev;
+    out->ino = (uint64_t)st.st_ino;
+    out->size = (uint64_t)st.st_size;
+#if defined(__APPLE__)
+    out->ctime_sec = (int64_t)st.st_ctimespec.tv_sec;
+    out->ctime_nsec = (int64_t)st.st_ctimespec.tv_nsec;
+#else
+    out->ctime_sec = (int64_t)st.st_ctim.tv_sec;
+    out->ctime_nsec = (int64_t)st.st_ctim.tv_nsec;
+#endif
     return true;
 #endif
 }
 
+static bool rr_prove_capture_identity(struct rr_prove_ctx *ctx)
+{
+    struct rr_artifact_stamp stamp;
+    if (!rr_artifact_identity(ctx->receipt->artifact_path, &stamp))
+        return false;
+    ctx->receipt->artifact_dev = stamp.dev;
+    ctx->receipt->artifact_ino = stamp.ino;
+    ctx->receipt->artifact_size = stamp.size;
+    ctx->receipt->artifact_ctime_sec = stamp.ctime_sec;
+    ctx->receipt->artifact_ctime_nsec = stamp.ctime_nsec;
+    return true;
+}
+
+static bool rr_stamp_matches_receipt(
+    const struct rr_artifact_stamp *stamp,
+    const struct zcl_devloop_restart_proof_receipt *receipt)
+{
+    return stamp->dev == receipt->artifact_dev &&
+        stamp->ino == receipt->artifact_ino &&
+        stamp->size == receipt->artifact_size &&
+        stamp->ctime_sec == receipt->artifact_ctime_sec &&
+        stamp->ctime_nsec == receipt->artifact_ctime_nsec;
+}
+
+/* Any result, green or red, is attributed to the rehashed bytes only while
+ * the same unmodified inode still sits at the candidate path. */
 static bool rr_prove_recheck_identity(struct rr_prove_ctx *ctx)
 {
-    uint64_t dev = 0, ino = 0;
-    if (rr_artifact_identity(ctx->receipt->artifact_path, &dev, &ino) &&
-        dev == ctx->receipt->artifact_dev &&
-        ino == ctx->receipt->artifact_ino)
+    struct rr_artifact_stamp stamp;
+    if (rr_artifact_identity(ctx->receipt->artifact_path, &stamp) &&
+        rr_stamp_matches_receipt(&stamp, ctx->receipt))
         return true;
     ctx->receipt->immediate_proof_complete = false;
     ctx->receipt->proof_complete = false;
@@ -2603,9 +2666,7 @@ static bool rr_prove_verify_after(struct rr_prove_ctx *ctx)
           !source_after.cas_present ||
           strcmp(ctx->source_before.cas_root_sha3,
                  source_after.cas_root_sha3) != 0)) ||
-        !rr_artifact_identity(ctx->receipt->artifact_path,
-                              &ctx->receipt->artifact_dev,
-                              &ctx->receipt->artifact_ino) ||
+        !rr_prove_capture_identity(ctx) ||
         !rr_sha256_file(ctx->receipt->artifact_path,
                         ctx->receipt->artifact_sha256) ||
         !rr_prove_recheck_identity(ctx)) {
@@ -2826,6 +2887,26 @@ static void rr_prove_report_failure(struct rr_prove_ctx *ctx, bool ran,
     }
 }
 
+/* Priority and main runs, then one identity check that covers every result:
+ * a replaced candidate voids a red as surely as a green. */
+static bool rr_prove_run_tests(struct rr_prove_ctx *ctx,
+                               struct rr_prove_test_args *ta)
+{
+    bool priority_ok = rr_prove_run_priority(ctx, ta);
+    bool ran = false, summary_ok = false, accounted = false;
+    if (priority_ok)
+        rr_prove_run_main_test(ctx, ta, &ran, &summary_ok, &accounted);
+    if (!rr_prove_recheck_identity(ctx))
+        return false;
+    if (!priority_ok)
+        return false;
+    if (!ctx->receipt->immediate_proof_complete) {
+        rr_prove_report_failure(ctx, ran, summary_ok, accounted);
+        return false;
+    }
+    return true;
+}
+
 static bool rr_restart_prove(
     const char *repo_root, const char *const *source_tus, size_t source_count,
     const struct zcl_devloop_plan *proof_plan,
@@ -2858,17 +2939,7 @@ static bool rr_restart_prove(
     struct rr_prove_test_args ta = {0};
     if (!rr_prove_build_test_args(&ctx, &ta))
         return false;
-    if (!rr_prove_run_priority(&ctx, &ta))
-        return false;
-    bool ran, summary_ok, accounted;
-    rr_prove_run_main_test(&ctx, &ta, &ran, &summary_ok, &accounted);
-    if (receipt->immediate_proof_complete && !rr_prove_recheck_identity(&ctx))
-        return false;
-    if (!receipt->immediate_proof_complete) {
-        rr_prove_report_failure(&ctx, ran, summary_ok, accounted);
-        return false;
-    }
-    return true;
+    return rr_prove_run_tests(&ctx, &ta);
 }
 
 bool zcl_devloop_restart_prove(
@@ -3079,10 +3150,18 @@ static void rr_emit_event_proof_receipt(
     (void)json_push_kv_bool(receipt, "bounded_proof_deferred",
                             proof->bounded_proof_deferred);
     (void)json_push_kv_int(receipt, "group_count", proof->group_count);
+    (void)json_push_kv_int(receipt, "groups_immediate_selected",
+                           proof->groups_immediate_selected);
     (void)json_push_kv_int(receipt, "groups_selected",
                            proof->groups_selected);
     (void)json_push_kv_int(receipt, "artifact_dev",
                            (int64_t)proof->artifact_dev);
+    (void)json_push_kv_int(receipt, "artifact_size",
+                           (int64_t)proof->artifact_size);
+    (void)json_push_kv_int(receipt, "artifact_ctime_sec",
+                           proof->artifact_ctime_sec);
+    (void)json_push_kv_int(receipt, "artifact_ctime_nsec",
+                           proof->artifact_ctime_nsec);
     (void)json_push_kv_int(receipt, "artifact_ino",
                            (int64_t)proof->artifact_ino);
     (void)json_push_kv_int(receipt, "deferred_group_count",
@@ -3125,6 +3204,14 @@ static void rr_emit_event_proof_receipt(
     (void)json_push_kv_int(receipt, "proof_total_us", proof->total_us);
 }
 
+/* Complete means every non-integration group the plan selects ran. */
+static bool rr_proof_partial(
+    const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    return proof->bounded_proof_deferred ||
+        proof->group_count < proof->groups_immediate_selected;
+}
+
 /* Top-level scope of a focused verdict, readable without the receipt: how
  * many groups ran against how many the plan selects, and which bytes ran.
  * No restart event carries acceptance or publication authority. */
@@ -3138,10 +3225,11 @@ static void rr_emit_event_focused_scope(
         strcmp(status, "fallback_ready") == 0)
         return;
     (void)json_push_kv_str(doc, "focused_scope",
-                           proof->bounded_proof_deferred ? "partial"
-                                                         : "complete");
+                           rr_proof_partial(proof) ? "partial" : "complete");
     (void)json_push_kv_int(doc, "groups_run", proof->group_count);
     (void)json_push_kv_int(doc, "groups_selected", proof->groups_selected);
+    (void)json_push_kv_int(doc, "groups_immediate_selected",
+                           proof->groups_immediate_selected);
     if (proof->artifact_sha256[0])
         (void)json_push_kv_str(doc, "probe_candidate_sha256",
                                proof->artifact_sha256);
@@ -3160,6 +3248,8 @@ static void rr_emit_event_next_action(struct json_value *doc,
                 ? "candidate compile, link, and probe are green; affected proof is running asynchronously"
             : strcmp(status, "impact_ready") == 0
                 ? "impact is classified; source identity and candidate diagnostics are running"
+            : strcmp(status, "superseded") == 0
+                ? "a newer save changed the source during this proof; wait for the latest verdict"
             : strcmp(status, "fallback_ready") == 0
                 ? "resident proof was unavailable; conservative integration proof is running"
             : "repair the named restart refusal; no service or source was replaced");
@@ -3289,6 +3379,7 @@ struct rr_event_ctx {
     struct zcl_devloop_process_result proof_process;
     char why[512];
     struct dev_source_record source_before, source_after;
+    bool source_superseded;
 };
 
 static bool rr_event_validate(const char *repo_root,
@@ -3417,10 +3508,11 @@ static bool rr_event_prove_phase(struct rr_event_ctx *ctx)
         return false;
     int64_t guard_started = platform_time_monotonic_us();
     ctx->source_guard_captures++;
-    ok = zcl_dev_source_cas_capture(ctx->repo_root, &ctx->source_after) &&
-         ctx->source_after.cas_present &&
-         strcmp(ctx->source_before.cas_root_sha3,
-                ctx->source_after.cas_root_sha3) == 0;
+    bool captured = zcl_dev_source_cas_capture(ctx->repo_root,
+                                               &ctx->source_after) &&
+        ctx->source_after.cas_present;
+    ok = captured && strcmp(ctx->source_before.cas_root_sha3,
+                            ctx->source_after.cas_root_sha3) == 0;
     ctx->source_guard_us += platform_time_monotonic_us() - guard_started;
     uint64_t combined_bytes = 0;
     ctx->source_byte_accounting_complete = ok &&
@@ -3430,7 +3522,14 @@ static bool rr_event_prove_phase(struct rr_event_ctx *ctx)
                     ctx->source_after.cas_bytes_read, &combined_bytes);
     if (ctx->source_byte_accounting_complete)
         ctx->source_guard_bytes_read = combined_bytes;
-    if (!ok)
+    /* Only a snapshot that was taken and differs proves a newer save. A
+     * snapshot that could not be taken proves nothing about the epoch. */
+    ctx->source_superseded = captured && !ok;
+    if (!captured)
+        rr_why(ctx->why, sizeof(ctx->why),
+               "restart epoch source snapshot could not be recaptured after "
+               "affected proof");
+    else if (!ok)
         rr_why(ctx->why, sizeof(ctx->why),
                "restart epoch source changed during affected proof");
     return ok;
@@ -3443,7 +3542,8 @@ static bool rr_why_leaves_proof_pending(const char *why)
     return strstr(why, "proof plan is incomplete") ||
         strstr(why, "proof set exceeds resident bound") ||
         strstr(why, "action plan stale") ||
-        strstr(why, "candidate was replaced during its run");
+        strstr(why, "candidate was replaced during its run") ||
+        strstr(why, "source snapshot could not be recaptured");
 }
 
 /* A green run of the complete path floor with the rest of the selection
@@ -3453,7 +3553,7 @@ static const char *rr_focused_status(
     const struct zcl_devloop_restart_proof_receipt *proof)
 {
     if (ok)
-        return proof->bounded_proof_deferred ? "focused_partial"
+        return rr_proof_partial(proof) ? "focused_partial"
                                              : "feedback_ready";
     return fallback ? "fallback_ready" : "rejected";
 }
@@ -3463,9 +3563,22 @@ static const char *rr_focused_detail(
     const struct zcl_devloop_restart_proof_receipt *proof)
 {
     if (ok)
-        return proof->bounded_proof_deferred ? "path_floor_affected_proofs"
+        return rr_proof_partial(proof) ? "path_floor_affected_proofs"
                                              : "immediate_affected_proofs";
     return fallback ? "conservative_proof_selected" : "affected_proofs";
+}
+
+static int rr_event_superseded(struct rr_event_ctx *ctx)
+{
+    bool emitted = rr_emit_event(
+        ctx->repo_root, ctx->source_tus, ctx->source_count, "superseded",
+        "source_epoch_cas", platform_time_monotonic_us() - ctx->started,
+        ctx->publish_mode, &ctx->build, NULL, &ctx->build_process, ctx->why,
+        ctx->source_guard_us, ctx->source_guard_captures,
+        ctx->source_guard_bytes_read, ctx->source_bytes_total, false,
+        ctx->impact_us, ctx->closure_us, ctx->plan.closure_snapshot, false);
+    return emitted ? ZCL_DEVLOOP_RESTART_EVENT_CANCELLED
+                   : ZCL_DEVLOOP_RESTART_EVENT_ERROR;
 }
 
 static int rr_event_finish(struct rr_event_ctx *ctx, bool ok)
@@ -3473,10 +3586,10 @@ static int rr_event_finish(struct rr_event_ctx *ctx, bool ok)
     if (ctx->proof_process.cancelled || zcl_devloop_process_cancel_requested())
         return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
     /* A newer save landed while this epoch's proof ran. Its result belongs
-     * to no current source: drop it and let the watcher supersede the epoch
-     * rather than report a red against bytes nobody is editing any more. */
-    if (!ok && strstr(ctx->why, "source changed during affected proof"))
-        return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
+     * to no current source: terminate this epoch as SUPERSEDED here, since
+     * the watcher only does so when it has already queued the change. */
+    if (ctx->source_superseded)
+        return rr_event_superseded(ctx);
     bool fallback_pending = !ok && rr_why_leaves_proof_pending(ctx->why);
     if (fallback_pending) {
         ctx->proof.integration_proof_deferred = true;
