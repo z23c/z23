@@ -51,6 +51,7 @@
 #include "vcs/zcode_publication_index.h"
 #include "vcs/zcode_work_context.h"
 #include "vcs/zcode_work_node.h"
+#include "vcs/zcode_work_pull_receipt.h"
 #include "vcs/zcode_work_swarm.h"
 #include "vcs/zcode_observation_mmr.h"
 #include "vcs/signed_evidence.h"
@@ -9029,6 +9030,154 @@ static int test_zd_publication_result(void)
     return failures;
 }
 
+/* A work pull receipt is the canonical work receipt with fixed pull
+ * conventions. These cases bind that shape without a package: the
+ * derived action root, the fixed confinement statement, REPRODUCE/PASS,
+ * the exact root, and a CAS copy addressed by it. */
+static void zd_pull_receipt_shape(struct vcs_zcode_work_receipt_v1 *r,
+                                  uint8_t fill)
+{
+    memset(r, 0, sizeof(*r));
+    r->schema_version = VCS_ZCODE_DEV_VERSION;
+    uint8_t *roots[] = {
+        r->task_root, r->candidate_root, r->input_root, r->output_root,
+        r->proof_policy_root, r->toolchain_capsule_root, r->lease_id,
+        r->evidence_root,
+    };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        memset(roots[i], fill + (uint8_t)i, 32);
+    (void)vcs_zcode_work_pull_action_root(r->task_root, r->input_root,
+                                          r->action_root);
+    static const char statement[] = VCS_ZCODE_WORK_PULL_CONFINEMENT;
+    sha3_256((const uint8_t *)statement, sizeof(statement) - 1u,
+             r->confinement_root);
+    r->work_kind = VCS_ZCODE_WORK_REPRODUCE;
+    r->status = VCS_ZCODE_WORK_PASS;
+    r->started_unix = 1000;
+    r->finished_unix = 1001;
+}
+
+static int test_zd_work_pull_receipt_shape(const uint8_t secret[32],
+                                           const uint8_t observer[32])
+{
+    int failures = 0;
+    TEST("work pull receipt: only the fixed pull shape verifies") {
+        struct vcs_zcode_work_receipt_v1 r, bad;
+        zd_pull_receipt_shape(&r, 0x40);
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&r, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_check(&r),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        /* The action root names the task AND the package. */
+        bad = r;
+        bad.input_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&bad, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_check(&bad),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_PULL);
+        bad = r;
+        bad.confinement_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&bad, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_check(&bad),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_PULL);
+        bad = r;
+        bad.status = VCS_ZCODE_WORK_REFUSED;
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&bad, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_check(&bad),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_PULL);
+        /* Any unsigned change breaks the observer's signature. */
+        bad = r;
+        bad.lease_id[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_check(&bad),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_SIGNATURE);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_zd_work_pull_receipt_cas(const uint8_t secret[32],
+                                         const uint8_t observer[32])
+{
+    int failures = 0;
+    TEST("work pull receipt: CAS copy loads by its exact root only") {
+        char workspace[512];
+        test_make_tmpdir(workspace, sizeof(workspace), "zcode_dev",
+                         "work-pull-receipt");
+        ASSERT(vcs_object_store_init(workspace));
+        struct vcs_zcode_work_receipt_v1 r, loaded;
+        zd_pull_receipt_shape(&r, 0x60);
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&r, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t root[32], other[32], checked[32];
+        uint8_t wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_work_receipt_id(&r, root), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&r, wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_decode(
+                      wire, sizeof(wire), root, &loaded, checked),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(memcmp(checked, root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(workspace, root, &loaded),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_FOUND);
+        ASSERT(vcs_object_put_addressed(workspace, root, wire, sizeof(wire)));
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(workspace, root, &loaded),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(memcmp(loaded.lease_id, r.lease_id, 32) == 0);
+        ASSERT(memcmp(loaded.signer_pubkey, observer, 32) == 0);
+        /* The same bytes stored under another address are refused there. */
+        memcpy(other, root, 32);
+        other[31] ^= 1u;
+        ASSERT(vcs_object_put_addressed(workspace, other, wire, sizeof(wire)));
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(workspace, other, &loaded),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_ROOT_MISMATCH);
+        ASSERT(!zcl_bytes_any_set(loaded.signer_pubkey, 32));
+        wire[100] ^= 1u;
+        ASSERT(vcs_zcode_work_pull_receipt_decode(
+                   wire, sizeof(wire), NULL, &loaded, checked) !=
+               VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_zd_work_pull_receipt_unverified(const uint8_t secret[32],
+                                                const uint8_t observer[32])
+{
+    int failures = 0;
+    TEST("work pull receipt: nothing verified, nothing recorded") {
+        struct vcs_zcode_work_pull_observation o;
+        memset(&o, 0, sizeof(o));
+        memset(o.task_root, 1, 32);
+        memset(o.package_root, 2, 32);
+        memset(o.pointer_root, 3, 32);
+        o.started_unix = 1000;
+        o.observed_unix = 1001;
+        ASSERT_EQ(vcs_zcode_work_pull_observe(NULL, "/nonexistent", secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_VERIFIED);
+        ASSERT_EQ(o.admit, VCS_ZCODE_WORK_ADMIT_NULL);
+        ASSERT(!zcl_bytes_any_set(o.receipt_root, 32));
+        ASSERT(!zcl_bytes_any_set(o.source_root, 32));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_zd_work_pull_receipt(void)
+{
+    int failures = 0;
+    uint8_t seed[32], secret[32], observer[32];
+    memset(seed, 0x91, sizeof(seed));
+    ed25519_keypair(observer, secret, seed);
+    failures += test_zd_work_pull_receipt_shape(secret, observer);
+    failures += test_zd_work_pull_receipt_unverified(secret, observer);
+    failures += test_zd_work_pull_receipt_cas(secret, observer);
+    memset(secret, 0, sizeof(secret));
+    return failures;
+}
+
 static int test_zd_remote_receipt(void)
 {
     int failures = 0;
@@ -10180,6 +10329,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_publication_attachment();
     failures += test_zd_publication_result();
     failures += test_zd_remote_receipt();
+    failures += test_zd_work_pull_receipt();
 #ifndef _WIN32
     failures += test_zd_git_remote_observation();
     failures += test_zd_git_remote_dependency();

@@ -107,6 +107,12 @@
 #include "vcs/zcode_focus.h"
 #include "vcs/zcode_task_context.h"
 #include "vcs/zcode_lane.h"
+#include "vcs/zcode_work_pull_receipt.h"
+#include "command/native_command.h"
+#include "command/native_zcode_discovery.h"
+#include "controllers/rpc_client.h"
+#include "base/bytes.h"
+#include "base/cleanse.h"
 #include "sha3/sha3.h"
 
 #include <dirent.h>
@@ -119,6 +125,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <ftw.h>
 #include <sys/wait.h>
 #endif
 #include <unistd.h>
@@ -6201,6 +6208,535 @@ static int zwn_t_attestation_corrupt_wire(const struct chain_params *params)
     return failures;
 }
 
+/* ── work pull receipts ───────────────────────────────────────────────
+ * A verified pull leaves one durable signed receipt on the observer; a
+ * repeat attaches to it; anything that does not verify leaves nothing.
+ * The handler is driven through its real record query and fetch paths
+ * with the node RPC and provider discovery replaced by test backends. */
+#if !defined(_WIN32)
+
+#define ZWN_PULL_NOW INT64_C(1700000000)
+
+struct zwn_pull_fixture {
+    char publisher[512];
+    char observer[512];
+    char workspace[600];
+    uint8_t source_root[32];
+    struct test_accepted_work_fixture accepted;
+    struct vcs_source_package_transport transport;
+    char task_hex[65];
+    char package_hex[65];
+    char pointer_hex[65];
+    char source_hex[65];
+};
+
+static bool zwn_pull_publisher_tree(const char *publisher)
+{
+    static const char *const dirs[] = {
+        "engine", "engine/entry", "vendor", "vendor/.cache",
+    };
+    static const char license[] =
+        "                                 Apache License\n"
+        "                           Version 2.0, January 2004\n";
+    static const char program[] = "int main(void) { return 0; }\n";
+    static const char offline[] = "hermetic-offline-input\n";
+    char path[1400];
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+        ok = ok && snprintf(path, sizeof(path), "%s/%s", publisher,
+                            dirs[i]) > 0 && mkdir(path, 0700) == 0;
+    ok = ok && zwn_write_file(publisher, "LICENSE", license,
+                              sizeof(license) - 1u, 0644) &&
+        zwn_write_file(publisher, "engine/entry/main.c", program,
+                       sizeof(program) - 1u, 0644);
+    for (size_t i = 0; i < vcs_source_package_offline_input_count(); i++)
+        ok = ok && zwn_write_file(publisher,
+                                  vcs_source_package_offline_input_path(i),
+                                  offline, sizeof(offline) - 1u, 0600);
+    return ok;
+}
+
+static bool zwn_pull_fixture_create(struct zwn_pull_fixture *f,
+                                    const char *tag, uint8_t seed)
+{
+    memset(f, 0, sizeof(*f));
+    char name[64];
+    (void)snprintf(name, sizeof(name), "pull-%s-publisher", tag);
+    test_make_tmpdir(f->publisher, sizeof(f->publisher), "zcode_swarm_net",
+                     name);
+    (void)snprintf(name, sizeof(name), "pull-%s-observer", tag);
+    test_make_tmpdir(f->observer, sizeof(f->observer), "zcode_swarm_net",
+                     name);
+    (void)snprintf(f->workspace, sizeof(f->workspace), "%s/zcode",
+                   f->observer);
+    vcs_source_package_transport_init(&f->transport);
+    bool ok = zwn_pull_publisher_tree(f->publisher) &&
+        vcs_tree_capture_path(f->publisher, f->source_root) == VCS_OK &&
+        test_accepted_work_fixture_create(f->publisher, f->source_root,
+                                          ZWN_PULL_NOW, seed,
+                                          &f->accepted) &&
+        vcs_source_package_transport_build_accepted(
+            f->publisher, f->source_root,
+            f->accepted.accepted.accepted_work_root, ZWN_PULL_NOW,
+            &f->transport);
+    zcl_hex_encode(f->accepted.accepted.task_root, 32, f->task_hex);
+    zcl_hex_encode(f->transport.package_root, 32, f->package_hex);
+    zcl_hex_encode(f->source_root, 32, f->source_hex);
+    memset(f->pointer_hex, 'c', 64);
+    return ok;
+}
+
+/* Put the package into the observer's datadir store, as the swarm would. */
+static bool zwn_pull_hold(const struct zwn_pull_fixture *f)
+{
+    struct vcs_package_store *store = vcs_package_store_open(
+        f->observer, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    bool ok = store && zwn_store_source_transport(store, &f->transport);
+    if (store)
+        vcs_package_store_close(store);
+    return ok;
+}
+
+static size_t zwn_pull_object_count;
+
+static int zwn_pull_count_one(const char *path, const struct stat *st,
+                              int type, struct FTW *ftw)
+{
+    (void)path;
+    (void)st;
+    (void)ftw;
+    zwn_pull_object_count += type == FTW_F ? 1u : 0u;
+    return 0;
+}
+
+/* Files under the observer's CAS; a refused observation must add none. */
+static size_t zwn_pull_objects(const struct zwn_pull_fixture *f)
+{
+    char root[700];
+    (void)snprintf(root, sizeof(root), "%s/.zvcs/objects", f->workspace);
+    zwn_pull_object_count = 0;
+    (void)nftw(root, zwn_pull_count_one, 16, FTW_PHYS);
+    return zwn_pull_object_count;
+}
+
+static void zwn_pull_observation(struct vcs_zcode_work_pull_observation *o,
+                                 const struct zwn_pull_fixture *f,
+                                 int64_t at)
+{
+    memset(o, 0, sizeof(*o));
+    memcpy(o->task_root, f->accepted.accepted.task_root, 32);
+    memcpy(o->package_root, f->transport.package_root, 32);
+    memset(o->pointer_root, 0xcc, 32);
+    o->started_unix = at;
+    o->observed_unix = at + 1;
+}
+
+/* Every bound root is exactly what the verified chain and pointer say. */
+static bool zwn_pull_bound(const struct vcs_zcode_work_receipt_v1 *r,
+                           const struct zwn_pull_fixture *f,
+                           const uint8_t observer[32])
+{
+    const struct vcs_zcode_accepted_work_v1 *w = &f->accepted.accepted;
+    uint8_t pointer[32], action[32];
+    memset(pointer, 0xcc, sizeof(pointer));
+    (void)vcs_zcode_work_pull_action_root(w->task_root,
+                                          f->transport.package_root, action);
+    const uint8_t *pairs[][2] = {
+        {r->task_root, w->task_root},
+        {r->candidate_root, w->candidate_root},
+        {r->proof_policy_root, w->proof_policy_root},
+        {r->toolchain_capsule_root, w->task.toolchain_capsule_root},
+        {r->evidence_root, w->accepted_work_root},
+        {r->input_root, f->transport.package_root},
+        {r->output_root, f->source_root},
+        {r->lease_id, pointer},
+        {r->action_root, action},
+        {r->signer_pubkey, observer},
+    };
+    bool same = r->work_kind == VCS_ZCODE_WORK_REPRODUCE;
+    for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++)
+        same = same && memcmp(pairs[i][0], pairs[i][1], 32) == 0;
+    return same;
+}
+
+static int zwn_t_work_pull_receipt_refusals(
+    struct vcs_package_store *store, const struct zwn_pull_fixture *f,
+    const uint8_t secret[32], const uint8_t observer[32])
+{
+    int failures = 0;
+    TEST("work pull receipt: a wrong task, an unheld package or a missing "
+         "pointer records nothing") {
+        size_t before = zwn_pull_objects(f);
+        struct vcs_zcode_work_pull_observation o;
+        zwn_pull_observation(&o, f, ZWN_PULL_NOW + 100);
+        o.task_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f->workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_VERIFIED);
+        ASSERT_EQ(o.admit, VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH);
+        ASSERT(!zcl_bytes_any_set(o.receipt_root, 32));
+        zwn_pull_observation(&o, f, ZWN_PULL_NOW + 100);
+        o.package_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f->workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_VERIFIED);
+        ASSERT_EQ(o.admit, VCS_ZCODE_WORK_ADMIT_NOT_RECONSTRUCTIBLE);
+        zwn_pull_observation(&o, f, ZWN_PULL_NOW + 100);
+        memset(o.pointer_root, 0, 32);
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f->workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NO_POINTER);
+        ASSERT_EQ(o.admit, VCS_ZCODE_WORK_ADMIT_OK);
+        ASSERT(!zcl_bytes_any_set(o.receipt_root, 32));
+        ASSERT_EQ(zwn_pull_objects(f), before);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zwn_t_work_pull_receipt_tamper(
+    struct vcs_package_store *store, const struct zwn_pull_fixture *f,
+    const uint8_t secret[32], const uint8_t observer[32],
+    const uint8_t root[32])
+{
+    int failures = 0;
+    TEST("work pull receipt: tampered bytes, a re-signed wrong root or a "
+         "different shape never verify") {
+        struct vcs_zcode_work_receipt_v1 r, forged, loaded;
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(f->workspace, root, &r),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        uint8_t wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES], checked[32];
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&r, wire),
+                  VCS_ZCODE_DEV_OK);
+        wire[200] ^= 1u;
+        ASSERT(vcs_zcode_work_pull_receipt_decode(
+                   wire, sizeof(wire), root, &loaded, checked) !=
+               VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(!zcl_bytes_any_set(checked, 32));
+        forged = r;
+        forged.output_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&forged, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&forged, wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_decode(
+                      wire, sizeof(wire), root, &loaded, checked),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_ROOT_MISMATCH);
+        /* Self-consistent but lying about the source: the bytes held here
+         * contradict it. The honest receipt re-derives exactly. */
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_reverify(store, &forged),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_CONTRADICTED);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_reverify(store, &r),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        forged = r;
+        forged.work_kind = VCS_ZCODE_WORK_TEST;
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&forged, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_check(&forged),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_PULL);
+        uint8_t missing[32];
+        memset(missing, 0x5a, sizeof(missing));
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(f->workspace, missing,
+                                                   &loaded),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_FOUND);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zwn_t_work_pull_receipt_library(void)
+{
+    int failures = 0;
+    struct zwn_pull_fixture f;
+    struct vcs_package_store *store = NULL;
+    uint8_t root[32] = {0}, seed[32], secret[32], observer[32];
+    memset(seed, 0x33, sizeof(seed));
+    ed25519_keypair(observer, secret, seed);
+    TEST("work pull receipt: a verified pull records one signed receipt "
+         "binding exactly the observed roots, and a repeat attaches") {
+        ASSERT(zwn_pull_fixture_create(&f, "lib", 0x6a));
+        ASSERT(zwn_pull_hold(&f));
+        store = vcs_package_store_open(f.observer,
+                                       VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+        ASSERT(store != NULL);
+        struct vcs_zcode_work_pull_observation o;
+        zwn_pull_observation(&o, &f, ZWN_PULL_NOW + 10);
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f.workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(!o.attached);
+        ASSERT(zwn_pull_bound(&o.receipt, &f, observer));
+        memcpy(root, o.receipt_root, 32);
+        struct vcs_zcode_work_receipt_v1 loaded;
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(f.workspace, root,
+                                                   &loaded),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(zwn_pull_bound(&loaded, &f, observer));
+        ASSERT_EQ(loaded.finished_unix, ZWN_PULL_NOW + 11);
+        size_t objects = zwn_pull_objects(&f);
+        zwn_pull_observation(&o, &f, ZWN_PULL_NOW + 50);
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f.workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(o.attached);
+        ASSERT(memcmp(o.receipt_root, root, 32) == 0);
+        ASSERT_EQ(o.receipt.finished_unix, ZWN_PULL_NOW + 11);
+        ASSERT_EQ(zwn_pull_objects(&f), objects);
+        PASS();
+    } _test_next:;
+    if (store) {
+        failures += zwn_t_work_pull_receipt_refusals(store, &f, secret,
+                                                     observer);
+        failures += zwn_t_work_pull_receipt_tamper(store, &f, secret,
+                                                   observer, root);
+        vcs_package_store_close(store);
+    }
+    memory_cleanse(secret, sizeof(secret));
+    return failures;
+}
+
+/* ── the pull and receipt leaves over test backends ─────────────────── */
+
+static const struct zwn_pull_fixture *zwn_pull_leaf_fixture;
+static char zwn_pull_asked_hex[65];
+static bool zwn_pull_route_delivers;
+
+static char *zwn_pull_rpc_hook(const char *method, const char *params_json)
+{
+    (void)params_json;
+    const struct zwn_pull_fixture *f = zwn_pull_leaf_fixture;
+    if (strcmp(method, "zcode_dht_record_begin") == 0)
+        return zcl_strdup(
+            "{\"ok\":true,\"state\":\"pending\","
+            "\"lookup_id\":\"11111111111111111111111111111111\","
+            "\"owner_token\":\"22222222222222222222222222222222\"}",
+            "test.zwn_pull.begin");
+    if (strcmp(method, "zcode_dht_record_cancel") == 0)
+        return zcl_strdup("{\"ok\":true,\"canceled\":true}",
+                          "test.zwn_pull.cancel");
+    if (strcmp(method, "zcode_dht_record_poll") != 0 || !f)
+        return zcl_strdup("{\"ok\":false,\"code\":\"UNEXPECTED_RPC\"}",
+                          "test.zwn_pull.unexpected");
+    char body[1024];
+    int n = snprintf(body, sizeof(body),
+                     "{\"ok\":true,\"state\":\"complete\",\"records\":[{"
+                     "\"kind\":\"pointer\",\"record_root\":\"%s\","
+                     "\"namespace\":\"zclassic23.work\","
+                     "\"semantic_root\":\"%s\",\"transport_root\":\"%s\","
+                     "\"conflicted\":false,\"superseded\":false}]}",
+                     f->pointer_hex, zwn_pull_asked_hex, f->package_hex);
+    return n > 0 && (size_t)n < sizeof(body)
+        ? zcl_strdup(body, "test.zwn_pull.poll") : NULL;
+}
+
+static bool zwn_pull_discover(struct json_value *selector,
+                              struct json_value *result)
+{
+    (void)selector;
+    json_set_object(result);
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv_int(result, "count", 1);
+    return true;
+}
+
+/* Either the publisher is gone (a named refusal), or the running node
+ * accepts the root and commits the bytes after its reply — the pull's own
+ * store handle, opened before, cannot see them without re-reading. */
+static bool zwn_pull_route(struct json_value *selector,
+                           struct json_value *result)
+{
+    (void)selector;
+    json_set_object(result);
+    if (!zwn_pull_route_delivers) {
+        (void)json_push_kv_bool(result, "ok", false);
+        (void)json_push_kv_str(result, "code", "FETCH_REFUSED");
+        (void)json_push_kv_str(result, "error", "no-authenticated-provider");
+        return false;
+    }
+    bool held = zwn_pull_hold(zwn_pull_leaf_fixture);
+    (void)json_push_kv_bool(result, "ok", held);
+    (void)json_push_kv_int(result, "authenticated_providers", 1);
+    (void)json_push_kv_str(result, "fetch_result", "ok");
+    return held;
+}
+
+static void zwn_pull_leaf(const struct zwn_pull_fixture *f, bool receipt,
+                          const char *root_hex, const char *wire_hex,
+                          struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", f->observer);
+    struct zcl_command_request request;
+    memset(&request, 0, sizeof(request));
+    request.input = &input;
+    zcl_command_reply_init(reply, "zcl.zcode_test.v1");
+    if (!receipt) {
+        (void)json_push_kv_str(&input, "task_root", zwn_pull_asked_hex);
+        zcl_native_handle_zcode_work_pull(&request, reply);
+    } else {
+        (void)json_push_kv_str(&input, "receipt_root", root_hex);
+        if (wire_hex)
+            (void)json_push_kv_str(&input, "receipt_hex", wire_hex);
+        zcl_native_handle_zcode_work_receipt(&request, reply);
+    }
+    json_free(&input);
+}
+
+static const struct json_value *zwn_pull_row0(
+    const struct zcl_command_reply *reply)
+{
+    return json_at(json_get(&reply->data, "rows"), 0);
+}
+
+static const char *zwn_pull_row_str(const struct zcl_command_reply *reply,
+                                    const char *key)
+{
+    const char *value = json_get_str(json_get(zwn_pull_row0(reply), key));
+    return value ? value : "";
+}
+
+static int zwn_t_work_pull_leaf_receipt_verify(
+    const struct zwn_pull_fixture *f, const char *root_hex)
+{
+    int failures = 0;
+    TEST("work receipt leaf: verifies the pull receipt by root and refuses "
+         "a tampered wire or an unknown root") {
+        struct zcl_command_reply reply;
+        zwn_pull_leaf(f, true, root_hex, NULL, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_bool(json_get(&reply.data, "verified")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "task_root")),
+                      f->task_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "package_root")),
+                      f->package_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "pointer_root")),
+                      f->pointer_hex);
+        char wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES * 2u + 1u];
+        (void)snprintf(wire, sizeof(wire), "%s",
+                       json_get_str(json_get(&reply.data, "receipt_hex")));
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(strlen(wire), (size_t)VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES * 2u);
+        zwn_pull_leaf(f, true, root_hex, wire, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+        wire[300] = wire[300] == '0' ? '1' : '0';
+        zwn_pull_leaf(f, true, root_hex, wire, &reply);
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(reply.error.code, "WORK_RECEIPT_REFUSED");
+        zcl_command_reply_free(&reply);
+        zwn_pull_leaf(f, true, f->pointer_hex, NULL, &reply);
+        ASSERT_STR_EQ(reply.error.code, "WORK_RECEIPT_NOT_FOUND");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zwn_t_work_pull_leaf_held(void)
+{
+    int failures = 0;
+    struct zwn_pull_fixture f;
+    char root_hex[65] = "";
+    TEST("work pull leaf: after publisher death the held bytes still verify "
+         "and record one receipt; a repeat attaches; a wrong task records "
+         "none") {
+        ASSERT(zwn_pull_fixture_create(&f, "held", 0x6b));
+        ASSERT(zwn_pull_hold(&f));
+        zwn_pull_leaf_fixture = &f;
+        zwn_pull_route_delivers = false;
+        (void)snprintf(zwn_pull_asked_hex, sizeof(zwn_pull_asked_hex), "%s",
+                       f.task_hex);
+        node_rpc_client_set_test_hook(zwn_pull_rpc_hook);
+        zcl_native_zcode_discovery_test_backend(zwn_pull_discover,
+                                                zwn_pull_route);
+        struct zcl_command_reply reply;
+        zwn_pull_leaf(&f, false, NULL, NULL, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "SOLUTIONS_VERIFIED");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "receipts")), 1);
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "fetch_outcome"),
+                      "FETCH_REFUSED");
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "receipt_result"), "ok");
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "pointer_root"),
+                      f.pointer_hex);
+        ASSERT(!json_get_bool(json_get(zwn_pull_row0(&reply),
+                                       "receipt_attached")));
+        (void)snprintf(root_hex, sizeof(root_hex), "%s",
+                       zwn_pull_row_str(&reply, "receipt_root"));
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(strlen(root_hex), (size_t)64);
+        zwn_pull_leaf(&f, false, NULL, NULL, &reply);
+        ASSERT(json_get_bool(json_get(zwn_pull_row0(&reply),
+                                      "receipt_attached")));
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "receipt_root"), root_hex);
+        zcl_command_reply_free(&reply);
+        size_t objects = zwn_pull_objects(&f);
+        zwn_pull_asked_hex[0] = zwn_pull_asked_hex[0] == '0' ? '1' : '0';
+        zwn_pull_leaf(&f, false, NULL, NULL, &reply);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "admitted")), 0);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "receipts")), 0);
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "receipt_result"),
+                      "not-verified");
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "receipt_root"), "");
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(zwn_pull_objects(&f), objects);
+        PASS();
+    } _test_next:;
+    if (root_hex[0])
+        failures += zwn_t_work_pull_leaf_receipt_verify(&f, root_hex);
+    node_rpc_client_set_test_hook(NULL);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    zwn_pull_leaf_fixture = NULL;
+    return failures;
+}
+
+static int zwn_t_work_pull_leaf_settle(void)
+{
+    int failures = 0;
+    struct zwn_pull_fixture f;
+    TEST("work pull leaf: bytes the node commits after accepting the fetch "
+         "are waited for, verified and receipted, never reported "
+         "unreachable") {
+        ASSERT(zwn_pull_fixture_create(&f, "settle", 0x6c));
+        zwn_pull_leaf_fixture = &f;
+        zwn_pull_route_delivers = true;
+        (void)snprintf(zwn_pull_asked_hex, sizeof(zwn_pull_asked_hex), "%s",
+                       f.task_hex);
+        node_rpc_client_set_test_hook(zwn_pull_rpc_hook);
+        zcl_native_zcode_discovery_test_backend(zwn_pull_discover,
+                                                zwn_pull_route);
+        struct zcl_command_reply reply;
+        zwn_pull_leaf(&f, false, NULL, NULL, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "SOLUTIONS_VERIFIED");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "fetched")), 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "admitted")), 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "receipts")), 1);
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "fetch_outcome"), "ok");
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "source_root"), f.source_hex);
+        ASSERT(json_get_int(json_get(zwn_pull_row0(&reply), "settle_ms")) >=
+               0);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    zwn_pull_leaf_fixture = NULL;
+    return failures;
+}
+
+static int zwn_t_work_pull_receipts(void)
+{
+    int failures = 0;
+    failures += zwn_t_work_pull_receipt_library();
+    failures += zwn_t_work_pull_leaf_held();
+    failures += zwn_t_work_pull_leaf_settle();
+    return failures;
+}
+#endif
+
 /* TEMP TIMING INSTRUMENTATION — remove once the wall-time hotspot in this
  * group is identified (see AGENTS lane/slowtests). */
 #include <time.h>
@@ -6249,6 +6785,9 @@ int test_zcode_swarm_net(void)
     ZWN_TIMED(zwn_t_task_hostile_pointer(params));
     ZWN_TIMED(zwn_t_attestation_hostile_pointer(params));
     ZWN_TIMED(zwn_t_attestation_corrupt_wire(params));
+#if !defined(_WIN32)
+    ZWN_TIMED(zwn_t_work_pull_receipts());
+#endif
     if (failures == 0 && g_zwn_sovereign_receipt.ready)
         zwn_print_sovereign_receipt();
     return failures;
