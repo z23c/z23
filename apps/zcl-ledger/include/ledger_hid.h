@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
+#error "The ZCL Ledger host requires ISO C23"
+#endif
+
 enum { LEDGER_HID_REPORT_SIZE = 64, LEDGER_HID_MAX_RESPONSE = 4096 };
 
 /* The payload includes the two-byte application status word. */

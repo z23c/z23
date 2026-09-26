@@ -32,8 +32,11 @@ success merely because the USB exchange succeeded.
 The transport follows Ledger's [HID framing](https://github.com/LedgerHQ/ledgercomm/blob/master/ledgercomm/interfaces/hid_device.py)
 and uses the read-only `B0 01 00 00 00` app-info command from
 [Ledger's client](https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledgerjs/packages/hw-app-btc/src/getAppAndVersion.ts).
-Ledger's [developer guide](https://developers.ledger.com/docs/device-app/beginner/vscode-extension)
-states that custom apps cannot be sideloaded onto Nano X. The C device app
-boilerplate is a [maintenance reference](https://developers.ledger.com/docs/device-app/integration/how-to/app-boilerplate)
-for existing apps; Ledger says new projects must use Rust. No ZCL device app
-or Nano X installation route is established here.
+The build requires ISO C23 and contains no Rust. Ledger's
+[developer guide](https://developers.ledger.com/docs/device-app/beginner/vscode-extension)
+states that custom apps cannot be sideloaded onto a retail Nano X. Ledger's
+[Blue-specific legacy Bitcoin app](https://github.com/LedgerHQ/app-bitcoin-legacy/tree/blue-final-release)
+contains a ZClassic variant; it has not been built or installed here. A
+connected Blue running BOLOS 2.1.1 answered the read-only app-info command,
+but no ZClassic app was visible on its touchscreen. See the
+[Blue experiment](../../docs/experiments/2026-09-26-ledger-blue-discovery.md).
