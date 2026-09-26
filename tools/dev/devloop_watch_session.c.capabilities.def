@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for devloop_watch_session.c. */
+ZCL_MODULE_CAPABILITY("tools/dev/devloop_watch_session.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "records each launched dev watcher session (pid, birth token, boot id, image inode) in an owner-only directory under the checkout's .cache; signals only a session whose running leader still runs that recorded dev image from the checkout in this boot, or whose every readable surviving member runs it with at least one rooted at the checkout, and whose record carries the birth token the caller names; keeps, never signals, a record it can neither prove nor disprove; and bounds each stop phase on the monotonic clock")

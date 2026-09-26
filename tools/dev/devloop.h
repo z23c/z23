@@ -714,6 +714,15 @@ typedef bool (*zcl_devloop_process_cancel_poll_fn)(void *opaque);
 void zcl_devloop_process_cancel_poll_set(
     zcl_devloop_process_cancel_poll_fn poll_fn, void *opaque);
 void zcl_devloop_process_cancel_poll_clear(void);
+/* POSIX: signal (sig > 0) or only count (sig == 0) the live processes of
+ * session `session` — its leader's process group plus, where /proc exists,
+ * members that moved to another group. Returns the members observed. */
+size_t zcl_devloop_process_session_members(int64_t session, int sig);
+/* Linux: the live (non-zombie) members of `session`, up to `cap` of them in
+ * `out`. `complete` is true only when /proc was listed and every member fit;
+ * without /proc nothing is listed and `complete` stays false. */
+size_t zcl_devloop_process_session_list(int64_t session, int64_t *out,
+                                        size_t cap, bool *complete);
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 /* Deterministic process-backed KAT for exact-commit scheduling priority. */
 bool zcl_devloop_watch_commit_preemption_selftest(void);

@@ -182,7 +182,7 @@ void zcl_devloop_process_cancel_poll_clear(void)
 }
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-static pid_t proc_session_id(pid_t pid)
+static pid_t proc_session_id(pid_t pid, char *state_out)
 {
     char path[64], body[1024];
     int n = snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
@@ -205,36 +205,86 @@ static pid_t proc_session_id(pid_t pid)
     if (!fields || sscanf(fields + 1, " %c %ld %ld %ld", &state, &parent,
                           &group, &session) != 4 || session <= 0)
         return -1;
+    if (state_out)
+        *state_out = state;
     return (pid_t)session;
 }
 
-static void signal_session_members(pid_t session, int sig)
+static pid_t proc_entry_pid(const char *name)
+{
+    const unsigned char *p = (const unsigned char *)name;
+    if (!*p)
+        return 0;
+    for (; *p; p++)
+        if (!isdigit(*p))
+            return 0;
+    char *end = NULL;
+    long value = strtol(name, &end, 10);
+    if (!end || *end || value <= 1 || value > INT_MAX)
+        return 0;
+    return (pid_t)value;
+}
+
+/* Signal (sig > 0) or only count (sig == 0) every live member of `session`,
+ * including members that moved to another process group, and collect up to
+ * `cap` member pids into `out`. Zombies are dead and not counted. Returns -1
+ * when /proc cannot be listed. */
+static long sweep_session_members(pid_t session, int sig, int64_t *out,
+                                  size_t cap)
 {
     DIR *proc = opendir("/proc");
     if (!proc)
-        return;
+        return -1;
+    long members = 0;
     struct dirent *entry;
     while ((entry = readdir(proc)) != NULL) {
-        const unsigned char *p = (const unsigned char *)entry->d_name;
-        if (!*p)
+        pid_t member = proc_entry_pid(entry->d_name);
+        char state = 0;
+        if (member <= 1 || proc_session_id(member, &state) != session ||
+            state == 'Z')
             continue;
-        bool digits = true;
-        for (; *p; p++)
-            if (!isdigit(*p)) {
-                digits = false;
-                break;
-            }
-        if (!digits)
-            continue;
-        char *end = NULL;
-        long value = strtol(entry->d_name, &end, 10);
-        if (!end || *end || value <= 1 || value > INT_MAX)
-            continue;
-        pid_t member = (pid_t)value;
-        if (proc_session_id(member) == session)
+        if (out && (size_t)members < cap)
+            out[members] = (int64_t)member;
+        members++;
+        if (sig > 0)
             (void)kill(member, sig);
     }
     closedir(proc);
+    return members;
+}
+
+static long signal_session_members(pid_t session, int sig)
+{
+    return sweep_session_members(session, sig, NULL, 0);
+}
+
+size_t zcl_devloop_process_session_list(int64_t session, int64_t *out,
+                                        size_t cap, bool *complete)
+{
+    if (complete)
+        *complete = false;
+    if (session <= 1 || session > INT_MAX)
+        return 0;
+    long swept = sweep_session_members((pid_t)session, 0, out, cap);
+    if (swept < 0)
+        return 0;
+    if (complete)
+        *complete = (size_t)swept <= cap;
+    return (size_t)swept;
+}
+
+size_t zcl_devloop_process_session_members(int64_t session, int sig)
+{
+    if (session <= 1 || session > INT_MAX)
+        return 0;
+    pid_t leader = (pid_t)session;
+    if (sig > 0)
+        (void)kill(-leader, sig);
+    long swept = signal_session_members(leader, sig);
+    if (swept >= 0)
+        return (size_t)swept;
+    /* No /proc (Darwin): the session's own process group is what is left. */
+    return kill(-leader, 0) == 0 ? 1u : 0u;
 }
 
 static void terminate_child_session(pid_t leader, int sig)
@@ -242,7 +292,7 @@ static void terminate_child_session(pid_t leader, int sig)
     /* The leader may have spawned grandchildren into distinct process groups.
      * Stop its own group first so it cannot race the /proc session sweep. */
     (void)kill(-leader, sig);
-    signal_session_members(leader, sig);
+    (void)signal_session_members(leader, sig);
 }
 #endif
 
@@ -776,8 +826,8 @@ static bool process_run_impl(const char *cwd, int exec_fd,
     }
     /* A bounded command may not daemonize work past its receipt. Reap any
      * descendant process group that stayed in the command's private session. */
-    signal_session_members(pid, SIGTERM);
-    signal_session_members(pid, SIGKILL);
+    (void)signal_session_members(pid, SIGTERM);
+    (void)signal_session_members(pid, SIGKILL);
     size_t output_before = out->output_len;
     drain_output(fds[0], out);
     if (out->first_output_us == 0 && out->output_len > output_before)

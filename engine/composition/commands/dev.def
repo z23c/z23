@@ -672,7 +672,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "must match the same status receipt.", 0,
     "loop,stop,watcher", "zcl.dev_loop_stop_input.v1",
     "zcl.dev_loop_status.v1",
-    "watcher_id,watcher_session,group,owner,failure_id,to,relink_generation,reason,confirm",
+    "watcher_id,watcher_session,root,group,owner,failure_id,to,relink_generation,reason,confirm",
     "watcher_id",
     "z23-dev dev loop stop --input='{\"watcher_id\":123,\"watcher_session\":\"<status-session>\"}'",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,

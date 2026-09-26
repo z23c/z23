@@ -905,8 +905,14 @@ ZCL_CAPABILITY_SYMBOL("geteuid", CAP_HARMLESS,
     "Reports identity. CAP_PRIVILEGE is the class for changing it.")
 ZCL_CAPABILITY_SYMBOL("getgid", CAP_HARMLESS,
     "Reports identity. CAP_PRIVILEGE is the class for changing it.")
+ZCL_CAPABILITY_SYMBOL("getpgid", CAP_HARMLESS,
+    "Reports a process group. setpgid, which changes one, is CAP_PROCESS.")
+ZCL_CAPABILITY_SYMBOL("getpgrp", CAP_HARMLESS,
+    "Reports this process group. setpgid, which changes it, is CAP_PROCESS.")
 ZCL_CAPABILITY_SYMBOL("getpid", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("getppid", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("getsid", CAP_HARMLESS,
+    "Reports a session. setsid, which creates one, is CAP_PROCESS.")
 ZCL_CAPABILITY_SYMBOL("getrlimit", CAP_HARMLESS,
     "Reads a limit. Raising one is setrlimit, which is CAP_PRIVILEGE.")
 ZCL_CAPABILITY_SYMBOL("getresuid", CAP_HARMLESS,

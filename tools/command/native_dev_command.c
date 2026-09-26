@@ -27,6 +27,7 @@
 #include "dev_activation.h"
 #include "dev_failure_store.h"
 #include "devloop.h"
+#include "devloop_watch_session.h"
 #include "test_group_catalog.h"
 #include "kernel/command_registry.h"
 #include "hotswap/hotswap_service.h"
@@ -2955,6 +2956,121 @@ void zcl_native_handle_dev_begin(
     (void)json_push_kv_str(&reply->data, "next_command", next);
 }
 
+/* Launch identity (a proven session record; see devloop_watch_session.h)
+ * names a watcher this checkout's launcher started, whatever its executable
+ * is called; the image-name check remains for watchers launched before
+ * records existed. */
+static bool dev_pid_is_root_watcher(const char *root, dev_pid_t pid)
+{
+    if (zcl_devloop_watch_session_probe(root, (int64_t)pid) ==
+        ZCL_DEVLOOP_WATCH_SESSION_LIVE)
+        return true;
+    return dev_pid_is_watcher(pid);
+}
+
+#if !defined(_WIN32)
+/* Never fork beside a recorded session that is still running. One that is
+ * starting owns the lock within moments and is attached to below; one that
+ * gave up the lock while its proof worker still runs must finish (or be
+ * ended by hand) before another watcher may own this checkout. `dev loop
+ * stop` names only the lock owner, by the session its status receipt shows. */
+static bool dev_watch_owner_active(const char *root)
+{
+    return dev_watcher_active(root, NULL);
+}
+
+static bool dev_watch_admit(const char *root, struct zcl_command_reply *reply)
+{
+    int64_t pending = zcl_devloop_watch_session_admit(
+        root, dev_watch_owner_active, 5000);
+    if (pending <= 1)
+        return true;
+    char evidence[96];
+    (void)snprintf(evidence, sizeof(evidence),
+                   "watcher_id=%lld watcher_ready=false", (long long)pending);
+    dev_emit_loop_status(root, reply);
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+        "WATCHER_RETIRING", "ownership", true, false,
+        "a previous watcher session for this checkout is still running; "
+        "let it finish, or end that session by hand, before starting "
+        "another", evidence);
+    return false;
+}
+
+/* Block until the child closes its end: it has left the launcher's session
+ * and entered the checkout root, which is what its record will be proven
+ * against. */
+static void dev_watch_spawn_settled(int fd)
+{
+    char byte;
+    while (read(fd, &byte, 1) < 0 && errno == EINTR)
+        ;
+    (void)close(fd);
+}
+
+/* The watcher leads its own session, so a stop can retire everything it
+ * forks, and the launcher records that session as soon as it exists:
+ * identity never depends on who last wrote the lock text. The watcher works
+ * from the checkout root and removes its own record when it exits cleanly. */
+static pid_t dev_watch_spawn(const char *root, const char *log,
+                             enum zcl_devloop_publish_mode mode)
+{
+    int settled[2];
+    if (pipe(settled) != 0)
+        return -1;
+    (void)fcntl(settled[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(settled[1], F_SETFD, FD_CLOEXEC);
+    pid_t child = fork();
+    if (child == 0) {
+        (void)close(settled[0]);
+        (void)setsid();
+        bool rooted = chdir(root) == 0;
+        (void)close(settled[1]);
+        int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        int log_fd = open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        if (null_fd >= 0) {
+            (void)dup2(null_fd, STDIN_FILENO);
+            close(null_fd);
+        }
+        if (log_fd >= 0) {
+            (void)dup2(log_fd, STDOUT_FILENO);
+            (void)dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
+        int rc = rooted ? zcl_devloop_watch_mode(root, mode) : 1;
+        zcl_devloop_watch_session_release(root, (int64_t)getpid());
+        (void)fflush(NULL);
+        _exit(rc == 0 ? 0 : 1);
+    }
+    (void)close(settled[1]);
+    if (child < 0) {
+        int fork_errno = errno;
+        (void)close(settled[0]);
+        errno = fork_errno;
+        return child;
+    }
+    dev_watch_spawn_settled(settled[0]);
+    if (!zcl_devloop_watch_session_record(root, (int64_t)child))
+        (void)fprintf(stderr,
+                      "[devloop] watcher %ld for %s has no launch record (%s); "
+                      "`dev loop stop` can name it only while it holds the "
+                      "singleton lock\n",
+                      (long)child, root, strerror(errno));
+    return child;
+}
+#endif
+
+/* A zclassic23 checkout: a canonical directory holding a readable Makefile. */
+static bool dev_checkout_root(const char *requested, char root[PATH_MAX])
+{
+    char makefile[PATH_MAX];
+    if (!requested || !dev_canonical_directory(requested, root))
+        return false;
+    int n = snprintf(makefile, sizeof(makefile), "%s/Makefile", root);
+    return n > 0 && n < (int)sizeof(makefile) && access(makefile, R_OK) == 0;
+}
+
 static void dev_loop_ensure(
     const struct zcl_command_request *request, struct zcl_command_reply *reply,
     bool wait_ready)
@@ -2973,16 +3089,19 @@ static void dev_loop_ensure(
     const struct json_value *root_v = json_get(request->input, "root");
     const char *requested = root_v && root_v->type == JSON_STR
         ? json_get_str(root_v) : dev_source_root(request);
-    char root[PATH_MAX], makefile[PATH_MAX], lock[PATH_MAX], log[PATH_MAX];
-    if (!requested || !dev_canonical_directory(requested, root) ||
-        snprintf(makefile, sizeof(makefile), "%s/Makefile", root) <= 0 ||
-        access(makefile, R_OK) != 0 || !dev_watch_paths(root, lock, log)) {
+    char root[PATH_MAX], lock[PATH_MAX], log[PATH_MAX];
+    if (!dev_checkout_root(requested, root) ||
+        !dev_watch_paths(root, lock, log)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_WATCH_ROOT",
                                "confinement", false, false,
                                "watch root must be a zclassic23 checkout", "root");
         return;
     }
+#if !defined(_WIN32)
+    if (!dev_watch_admit(root, reply))
+        return;
+#endif
     struct dev_watcher_info existing = {0};
     if (dev_watcher_active(root, &existing)) {
         if (existing.publish_mode != requested_mode) {
@@ -3066,29 +3185,12 @@ static void dev_loop_ensure(
     }
     platform_watcher_launch_close(&launch);
 #else
-    pid_t child = fork();
-    if (child < 0) {
+    if (dev_watch_spawn(root, log, requested_mode) < 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "WATCH_FORK_FAILED",
                                "start", false, false,
                                "could not start native watcher", strerror(errno));
         return;
-    }
-    if (child == 0) {
-        (void)setsid();
-        int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        int log_fd = open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
-        if (null_fd >= 0) {
-            (void)dup2(null_fd, STDIN_FILENO);
-            close(null_fd);
-        }
-        if (log_fd >= 0) {
-            (void)dup2(log_fd, STDOUT_FILENO);
-            (void)dup2(log_fd, STDERR_FILENO);
-            close(log_fd);
-        }
-        int rc = zcl_devloop_watch_mode(root, requested_mode);
-        _exit(rc == 0 ? 0 : 1);
     }
 #endif
     if (!wait_ready) {
@@ -3116,7 +3218,7 @@ static void dev_loop_ensure(
     struct zcl_dev_watch_start_info wait_obs = {
         .pid = (int64_t)started.pid,
         .ready = started.ready,
-        .is_watcher = dev_pid_is_watcher(started.pid),
+        .is_watcher = dev_pid_is_root_watcher(root, started.pid),
         .publish_mode = started.publish_mode,
     };
     struct zcl_dev_watch_start_wait_reply_internal wait =
@@ -3320,6 +3422,48 @@ void zcl_native_handle_dev_loop_events(
     json_free(&cycle);
 }
 
+/* The checkout a stop acts on: input `root` when given (it must be a
+ * checkout), so a stop run from any directory can name its watcher's
+ * checkout; otherwise the caller's source root. */
+static bool dev_loop_stop_root(const struct zcl_command_request *request,
+                               char root[PATH_MAX],
+                               struct zcl_command_reply *reply)
+{
+    const struct json_value *root_v = json_get(request->input, "root");
+    if (root_v && root_v->type != JSON_NULL) {
+        if (root_v->type == JSON_STR &&
+            dev_checkout_root(json_get_str(root_v), root))
+            return true;
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "INVALID_WATCH_ROOT",
+                               "normalize", false, false,
+                               "root must be a zclassic23 checkout", "root");
+        return false;
+    }
+    const char *source = dev_source_root(request);
+    if (!dev_canonical_directory(source, root))
+        (void)snprintf(root, PATH_MAX, "%s", source);
+    return true;
+}
+
+/* Names the checkout that was checked, so a stop run from another directory
+ * shows the mismatch. */
+static void dev_loop_stop_not_running(const char *root, int64_t requested,
+                                      struct zcl_command_reply *reply)
+{
+    char evidence[PATH_MAX + 64];
+    (void)snprintf(evidence, sizeof(evidence), "root=%s watcher_id=%lld",
+                   root, (long long)requested);
+    dev_emit_loop_status(root, reply);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED, "WATCHER_NOT_RUNNING",
+                           "stop", false, false,
+                           "no native watcher owns this checkout's lock or is "
+                           "recorded for it; pass root to name another "
+                           "checkout",
+                           evidence);
+}
+
 #if defined(_WIN32)
 static bool dev_loop_stop_signal(const struct dev_watcher_info *active)
 {
@@ -3417,6 +3561,131 @@ static bool dev_loop_stop_signal(const struct dev_watcher_info *active,
 }
 #endif
 
+/* Exactly the session the caller copied from status: the lock owner's pid
+ * and session nonce, still running a watcher image. */
+static bool dev_loop_stop_identify(const char *repo_root, int64_t requested,
+                                   const char *session,
+                                   struct dev_watcher_info *active,
+                                   struct zcl_command_reply *reply)
+{
+    if (!dev_watcher_active(repo_root, active)) {
+        dev_loop_stop_not_running(repo_root, requested, reply);
+        return false;
+    }
+    if ((int64_t)active->pid != requested ||
+        strcmp(active->nonce, session) != 0 ||
+        !dev_pid_is_watcher(active->pid)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "WATCHER_ID_MISMATCH",
+                               "confinement", false, false,
+                               "refusing to signal a different process", "watcher_id");
+        return false;
+    }
+    return true;
+}
+
+static bool dev_loop_stop_request(const char *repo_root,
+                                  const struct dev_watcher_info *active)
+{
+#if defined(_WIN32)
+    (void)repo_root;
+    return dev_loop_stop_signal(active);
+#else
+    return dev_loop_stop_signal(active, repo_root);
+#endif
+}
+
+/* Windows: the lease is released. POSIX: the pid no longer carries the
+ * session's start token. */
+static bool dev_loop_stop_gone(const char *repo_root,
+                               const struct dev_watcher_info *active)
+{
+#if defined(_WIN32)
+    struct dev_watcher_info still = {0};
+    (void)active;
+    return !dev_watcher_active(repo_root, &still);
+#else
+    (void)repo_root;
+    return dev_watcher_session_state(active) == DEV_WATCHER_SESSION_GONE;
+#endif
+}
+
+static bool dev_loop_stop_await(const char *repo_root,
+                                const struct dev_watcher_info *active)
+{
+    for (int i = 0; i < 250; i++) {
+        if (dev_loop_stop_gone(repo_root, active))
+            return true;
+        platform_sleep_ms(20);
+    }
+    return dev_loop_stop_gone(repo_root, active);
+}
+
+#if !defined(_WIN32)
+/* What is still running, so the operator can see how far the stop got. */
+static void dev_loop_stop_timeout(const char *root, int64_t requested,
+                                  const struct zcl_devloop_watch_stop *stop,
+                                  struct zcl_command_reply *reply)
+{
+    char evidence[128];
+    (void)snprintf(evidence, sizeof(evidence),
+                   "watcher_id=%lld members_left=%zu escalation=%d",
+                   (long long)requested, stop->members_left,
+                   stop->escalation);
+    dev_emit_loop_status(root, reply);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, "WATCHER_STOP_TIMEOUT",
+                           "stop", true, false,
+                           "watcher session kept running after SIGTERM and SIGKILL",
+                           evidence);
+}
+
+/* A recorded session that can be neither proven nor disproven right now is
+ * kept (a launcher still refuses beside it) and never signalled. */
+static void dev_loop_stop_unproven(const char *root, int64_t requested,
+                                   struct zcl_command_reply *reply)
+{
+    char evidence[96];
+    (void)snprintf(evidence, sizeof(evidence),
+                   "watcher_id=%lld proven=false", (long long)requested);
+    dev_emit_loop_status(root, reply);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED, "WATCHER_UNPROVEN",
+                           "confinement", true, false,
+                           "the recorded watcher session cannot be proven "
+                           "right now, so nothing was signalled; retry once "
+                           "its processes can be read, or end them by hand",
+                           evidence);
+}
+
+/* The leader has exited. What its recorded session left behind (a proof
+ * worker, a reflex runner) is retired too, but only while the record still
+ * proves that session and carries the start token of the receipt the
+ * caller copied; an unproven remainder is kept and never signalled, and a
+ * record of another birth is not this receipt's to touch. */
+static bool dev_loop_stop_remainder(const char *root,
+                                    const struct dev_watcher_info *active,
+                                    struct zcl_devloop_watch_stop *stop,
+                                    struct zcl_command_reply *reply)
+{
+    *stop = (struct zcl_devloop_watch_stop){
+        .expect_born = active->start_token,
+        .budget_ms = 2000,
+    };
+    enum zcl_devloop_watch_stop_result result =
+        zcl_devloop_watch_session_stop(root, (int64_t)active->pid, stop);
+    if (result == ZCL_DEVLOOP_WATCH_STOP_UNPROVEN) {
+        dev_loop_stop_unproven(root, (int64_t)active->pid, reply);
+        return false;
+    }
+    if (result == ZCL_DEVLOOP_WATCH_STOP_TIMEOUT) {
+        dev_loop_stop_timeout(root, (int64_t)active->pid, stop, reply);
+        return false;
+    }
+    return true;
+}
+#endif
+
 void zcl_native_handle_dev_loop_stop(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -3430,7 +3699,6 @@ void zcl_native_handle_dev_loop_stop(
                                "watcher_id");
         return;
     }
-    struct dev_watcher_info active = {0};
     const char *requested_session =
         json_get_str(json_get(request->input, "watcher_session"));
     if (!requested_session || strlen(requested_session) != 64) {
@@ -3442,30 +3710,13 @@ void zcl_native_handle_dev_loop_stop(
                                "watcher_session");
         return;
     }
-    const char *repo_root = dev_source_root(request);
-    if (!dev_watcher_active(repo_root, &active)) {
-        dev_emit_loop_status(repo_root, reply);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                               ZCL_COMMAND_EXIT_BLOCKED, "WATCHER_NOT_RUNNING",
-                               "stop", false, false,
-                               "no native watcher owns the singleton lock", "");
+    char root[PATH_MAX];
+    struct dev_watcher_info active = {0};
+    if (!dev_loop_stop_root(request, root, reply) ||
+        !dev_loop_stop_identify(root, requested, requested_session, &active,
+                                reply))
         return;
-    }
-    if ((int64_t)active.pid != requested ||
-        strcmp(active.nonce, requested_session) != 0 ||
-        !dev_pid_is_watcher(active.pid)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                               ZCL_COMMAND_EXIT_BLOCKED, "WATCHER_ID_MISMATCH",
-                               "confinement", false, false,
-                               "refusing to signal a different process", "watcher_id");
-        return;
-    }
-#if defined(_WIN32)
-    bool signaled = dev_loop_stop_signal(&active);
-#else
-    bool signaled = dev_loop_stop_signal(&active, repo_root);
-#endif
-    if (!signaled) {
+    if (!dev_loop_stop_request(root, &active)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "WATCHER_STOP_FAILED",
                                "stop", true, false,
@@ -3473,31 +3724,24 @@ void zcl_native_handle_dev_loop_stop(
                                strerror(errno));
         return;
     }
-#if defined(_WIN32)
-    struct dev_watcher_info still = {0};
-#endif
-    for (int i = 0; i < 250; i++) {
-#if defined(_WIN32)
-        if (!dev_watcher_active(repo_root, &still))
-            break;
-#else
-        if (dev_watcher_session_state(&active) == DEV_WATCHER_SESSION_GONE)
-            break;
-#endif
-        platform_sleep_ms(20);
-    }
-    dev_emit_loop_status(repo_root, reply);
-#if defined(_WIN32)
-    if (dev_watcher_active(repo_root, &still))
-#else
-    if (dev_watcher_session_state(&active) != DEV_WATCHER_SESSION_GONE)
-#endif
+    if (!dev_loop_stop_await(root, &active)) {
+        dev_emit_loop_status(root, reply);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "WATCHER_STOP_TIMEOUT",
                                "stop", true, false,
                                "target watcher session remained alive after stop request", "");
-    else
-        (void)json_push_kv_bool(&reply->data, "stopped", true);
+        return;
+    }
+#if !defined(_WIN32)
+    struct zcl_devloop_watch_stop remainder = {0};
+    if (!dev_loop_stop_remainder(root, &active, &remainder, reply))
+        return;
+#endif
+    dev_emit_loop_status(root, reply);
+    (void)json_push_kv_bool(&reply->data, "stopped", true);
+#if !defined(_WIN32)
+    (void)json_push_kv_int(&reply->data, "escalation", remainder.escalation);
+#endif
 }
 
 #if !defined(_WIN32)
