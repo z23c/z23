@@ -264,6 +264,19 @@ bool os_proc_close_inherited_fds_except(int keep_fd);
  * POSIX systems run only the parent check; Windows reports unavailable. */
 bool os_proc_bind_parent_death(int signal_number, uint64_t expected_parent);
 
+/* This process's descriptor directory (/proc/self/fd) opened O_RDONLY |
+ * O_DIRECTORY | O_CLOEXEC, for a caller that walks it with getdents64
+ * without allocating. The call is one open(2), so it is async-signal-safe
+ * and usable between fork and exec. -1 with errno where unavailable
+ * (non-Linux). The caller owns and closes the descriptor. */
+int os_proc_fd_dir_open(void);
+
+/* Seccomp filter layers attached to `pid` (0 = this process): the
+ * Seccomp_filters field of /proc/<pid>/status, still readable for an exited
+ * child that has not been reaped. False where the field or the process
+ * cannot be read (non-Linux, or a kernel before 5.9). */
+bool os_proc_seccomp_filters(uint64_t pid, uint32_t *out);
+
 /* ── Per-THREAD kernel work counters ─────────────────────────────────────
  *
  * The counters a liveness check needs in order to tell a thread that is

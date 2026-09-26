@@ -46,6 +46,7 @@
 #include <unistd.h>
 
 #if defined(__linux__)
+#include "platform/os_proc.h"
 #include "platform/os_sandbox.h"
 
 #include <fcntl.h>
@@ -309,11 +310,11 @@ bool zcl_reflex_sha256_fd(int fd, char out[65])
 
 /* ── descriptor hygiene ─────────────────────────────────────────────────── */
 
-#define REFLEX_FD_DIR "/proc/self/fd"
-
+/* The fd directory comes from platform/os_proc.h (one open(2), safe between
+ * fork and exec); a test may point it elsewhere to make it unavailable. */
 #if defined(ZCL_TESTING)
 static bool g_close_range_enabled = true;
-static const char *g_fd_dir = REFLEX_FD_DIR;
+static const char *g_fd_dir_override;
 
 void zcl_reflex_testing_use_close_range(bool enabled)
 {
@@ -322,14 +323,20 @@ void zcl_reflex_testing_use_close_range(bool enabled)
 
 void zcl_reflex_testing_set_fd_dir(const char *path)
 {
-    g_fd_dir = path ? path : REFLEX_FD_DIR;
+    g_fd_dir_override = path;
 }
 
 static bool reflex_close_range_enabled(void) { return g_close_range_enabled; }
-static const char *reflex_fd_dir(void) { return g_fd_dir; }
+
+static int reflex_fd_dir_open(void)
+{
+    if (g_fd_dir_override)
+        return open(g_fd_dir_override, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    return os_proc_fd_dir_open();
+}
 #else
 static bool reflex_close_range_enabled(void) { return true; }
-static const char *reflex_fd_dir(void) { return REFLEX_FD_DIR; }
+static int reflex_fd_dir_open(void) { return os_proc_fd_dir_open(); }
 #endif
 
 static bool fd_kept(int fd, const int *keep, size_t keep_count)
@@ -413,7 +420,7 @@ uint32_t zcl_reflex_count_fds_in(int dir_fd, const int *keep,
 
 uint32_t zcl_reflex_count_fds_except(const int *keep, size_t keep_count)
 {
-    int dir_fd = open(reflex_fd_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int dir_fd = reflex_fd_dir_open();
     uint32_t counted = zcl_reflex_count_fds_in(dir_fd, keep, keep_count);
     if (dir_fd >= 0) (void)close(dir_fd);
     return counted;
@@ -445,7 +452,7 @@ static bool close_spans_by_range(const int *sorted, size_t count)
  * walking and closed last. False when enumeration is impossible. */
 static bool close_by_enumeration(const int *keep, size_t keep_count)
 {
-    int dir_fd = open(reflex_fd_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int dir_fd = reflex_fd_dir_open();
     if (dir_fd < 0) return false;
     bool clean = false;
     for (int pass = 0; pass < 4 && !clean; pass++) {
@@ -617,7 +624,7 @@ static bool child_confine(struct zcl_reflex_preload_frame *pre,
     if (!os_sandbox_no_new_privs())
         return child_note(pre->stage, pre->error, "no_new_privs",
                           "no_new_privs failed"), false;
-    int census = open(reflex_fd_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int census = reflex_fd_dir_open();
     if (census < 0)
         return child_note(pre->stage, pre->error, "census",
                           "descriptor census unavailable"), false;
@@ -795,37 +802,6 @@ static bool child_preload(const struct zcl_reflex_request *request,
  * wakes the wait at once; the step only bounds a lost wakeup. */
 #define REFLEX_REAP_STEP_US 5000
 
-/* Seccomp_filters of /proc/<pid>/status (pid 0 = this process). */
-static bool reflex_seccomp_filters(pid_t pid, uint32_t *out)
-{
-    char path[48];
-    if (pid == 0) (void)snprintf(path, sizeof(path), "/proc/self/status");
-    else (void)snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return false;
-    char buf[4096];
-    size_t have = 0;
-    for (;;) {
-        ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
-        if (n > 0 && (have += (size_t)n) < sizeof(buf) - 1) continue;
-        if (n < 0 && errno == EINTR) continue;
-        break;
-    }
-    (void)close(fd);
-    buf[have] = '\0';
-    const char *key = "\nSeccomp_filters:\t";
-    const char *p = strstr(buf, key);
-    if (!p) return false;
-    p += strlen(key);
-    uint64_t value = 0;
-    const char *digits = p;
-    for (; *p >= '0' && *p <= '9' && value <= UINT32_MAX; p++)
-        value = value * 10u + (uint64_t)(*p - '0');
-    if (p == digits || value > UINT32_MAX) return false;
-    *out = (uint32_t)value;
-    return true;
-}
-
 /* True once `child` has exited (it stays a zombie: WNOWAIT). */
 static bool reflex_child_exited(pid_t child, bool block, bool *failed)
 {
@@ -882,7 +858,7 @@ void zcl_reflex_reap_bounded(pid_t child, int64_t deadline_us,
         break;
     }
     out->filters_read = !failed &&
-        reflex_seccomp_filters(child, &out->seccomp_filters);
+        os_proc_seccomp_filters((uint64_t)child, &out->seccomp_filters);
     reflex_reap_status(child, out);
     if (masked) (void)pthread_sigmask(SIG_SETMASK, &old, NULL);
 }
@@ -1191,7 +1167,7 @@ static int runner_main(void)
     if (probes_killed != ZCL_REFLEX_DENY_PROBES) return 5;
     /* Without its own layer count the runner cannot observe a leaf's W^X
      * layer, so every verdict would be unprovable: refuse to serve. */
-    if (!reflex_seccomp_filters(0, &g_runner_filters)) return 6;
+    if (!os_proc_seccomp_filters(0, &g_runner_filters)) return 6;
     const int keep[] = {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO,
                         ZCL_REFLEX_RUNNER_CONTROL_FD};
     struct zcl_reflex_hello hello = {

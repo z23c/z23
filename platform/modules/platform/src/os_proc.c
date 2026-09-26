@@ -41,6 +41,7 @@
 
 #if defined(__linux__)
 #include <sys/prctl.h>     /* PR_SET_PDEATHSIG, for os_proc_bind_parent_death() */
+#include <fcntl.h>         /* O_DIRECTORY, for os_proc_fd_dir_open() */
 #include <sys/syscall.h>   /* SYS_gettid, for os_proc_self_tid() */
 #include <unistd.h>
 #endif
@@ -750,6 +751,65 @@ bool os_proc_close_inherited_fds_except(int keep_fd)
         return false; // raw-return-ok:caller-logs-context
     if (!ok) errno = saved;
     return ok;
+#endif
+}
+
+int os_proc_fd_dir_open(void)
+{
+#if defined(__linux__)
+    return open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+#else
+    errno = ENOSYS;
+    return -1; // raw-return-ok:caller-logs-context
+#endif
+}
+
+#if defined(__linux__)
+/* Parses the decimal after "\nSeccomp_filters:\t" in a status text. */
+static bool os_proc_parse_seccomp_filters(const char *status, uint32_t *out)
+{
+    static const char key[] = "\nSeccomp_filters:\t";
+    const char *p = strstr(status, key);
+    if (!p)
+        return false; // raw-return-ok:platform-cannot-answer
+    p += sizeof(key) - 1;
+    uint64_t value = 0;
+    const char *digits = p;
+    for (; *p >= '0' && *p <= '9' && value <= UINT32_MAX; p++)
+        value = value * 10u + (uint64_t)(*p - '0');
+    if (p == digits || value > UINT32_MAX)
+        return false; // raw-return-ok:platform-cannot-answer
+    *out = (uint32_t)value;
+    return true;
+}
+#endif
+
+bool os_proc_seccomp_filters(uint64_t pid, uint32_t *out)
+{
+    if (!out)
+        return false; // raw-return-ok:null-arg
+#if defined(__linux__)
+    char path[48];
+    if (pid == 0) (void)snprintf(path, sizeof(path), "/proc/self/status");
+    else (void)snprintf(path, sizeof(path), "/proc/%llu/status",
+                        (unsigned long long)pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false; // raw-return-ok:platform-cannot-answer
+    char buf[4096];
+    size_t have = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
+        if (n > 0 && (have += (size_t)n) < sizeof(buf) - 1) continue;
+        if (n < 0 && errno == EINTR) continue;
+        break;
+    }
+    (void)close(fd);
+    buf[have] = '\0';
+    return os_proc_parse_seccomp_filters(buf, out);
+#else
+    (void)pid;
+    return false; // raw-return-ok:platform-cannot-answer
 #endif
 }
 

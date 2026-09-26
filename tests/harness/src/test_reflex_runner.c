@@ -47,6 +47,7 @@ int test_reflex_runner(void)
 #include "devloop_reflex_runner.h"
 #include "devloop_reflex_runner_wire.h"
 #include "../fixtures/reflex_runner_fixture.h"
+#include "platform/os_proc.h"
 #include "platform/time_compat.h"
 
 #include <errno.h>
@@ -57,7 +58,6 @@ int test_reflex_runner(void)
 #include <string.h>
 #include <stddef.h>
 #include <sys/resource.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -426,9 +426,9 @@ static int rr_fd_child_limit(bool *high)
 }
 
 /* Descriptor proof setup, in the forked child: make 0..2 real, close
- * everything else but `result_fd` with the kernel's own close_range
- * (independent ground truth), then open exactly one descriptor and dup it to
- * 1500 and (when *high) 70000. Returns 0 or a setup error code. */
+ * everything else but `result_fd` with the platform scrub (an independent
+ * implementation, the ground truth), then open exactly one descriptor and
+ * dup it to 1500 and (when *high) 70000. Returns 0 or a setup error code. */
 static int rr_fd_child_setup(int result_fd, bool *high, int *base)
 {
     int rc = rr_fd_child_limit(high);
@@ -438,10 +438,7 @@ static int rr_fd_child_setup(int result_fd, bool *high, int *base)
         if (null_fd < 0 || (null_fd != fd && dup2(null_fd, fd) != fd))
             return 106;
     }
-    if ((result_fd > 3 &&
-         syscall(SYS_close_range, 3u, (unsigned)result_fd - 1u, 0) != 0) ||
-        syscall(SYS_close_range, (unsigned)result_fd + 1u, ~0u, 0) != 0)
-        return 102;
+    if (!os_proc_close_inherited_fds_except(result_fd)) return 102;
     *base = open("/dev/null", O_RDONLY);
     if (*base < 0 || dup2(*base, RR_MID_FD) != RR_MID_FD) return 103;
     if (*high && dup2(*base, RR_HIGH_FD) != RR_HIGH_FD) return 104;
