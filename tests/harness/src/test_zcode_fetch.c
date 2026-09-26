@@ -616,6 +616,47 @@ static int zf_t_source_reproduction_loop(void)
     return failures;
 }
 
+static int zf_t_source_reproduction_local_complete(void)
+{
+    int failures = 0;
+    TEST("zcode source reproduce: complete local carrier needs no second DHT fetch") {
+        char dd[1024];
+        test_make_tmpdir(dd, sizeof(dd), "zcode_fetch", "reproduce-local");
+        struct zf_pkg pkg;
+        ASSERT(zf_make_package(&pkg, 0x5b));
+        (void)snprintf(zf_reproduction_root,
+                       sizeof(zf_reproduction_root), "%s", pkg.root_hex);
+        struct vcs_package_store *store = vcs_package_store_open(
+            dd, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+        ASSERT(store != NULL);
+        ASSERT(zf_store_package(store, &pkg));
+        vcs_package_store_close(store);
+
+        /* If the command routes again, this provider deliberately refuses.
+         * The resident proof RPC remains the sole source of signed evidence. */
+        zcl_native_zcode_discovery_test_backend(
+            zf_discover_provider, zf_route_provider_refused);
+        zf_reproduction_plan_calls = 0;
+        node_rpc_client_set_test_hook(zf_reproduction_rpc_hook);
+        struct zf_cmd c;
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "mode", "plan");
+        (void)json_push_kv_str(&c.input, "root", pkg.root_hex);
+        zcl_native_handle_zcode_package_source_reproduce(
+            &c.request, &c.reply);
+        ASSERT_EQ(c.reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "status")),
+                      "SOURCE_REPRODUCTION_PROVEN");
+        ASSERT_EQ(zf_reproduction_plan_calls, 1u);
+        zf_cmd_free(&c);
+        zf_free_package(&pkg);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    return failures;
+}
+
 static const struct json_value *zf_possession(const struct zf_cmd *c)
 {
     return json_get(&c->reply.data, "possession");
@@ -1374,6 +1415,7 @@ int test_zcode_fetch(void)
     failures += zf_t_fetch_dht_routed_refused();
     failures += zf_t_fetch_complete();
     failures += zf_t_source_reproduction_loop();
+    failures += zf_t_source_reproduction_local_complete();
     failures += zf_t_peers_one_shot();
     failures += zf_t_peers_possession();
     failures += zf_t_pin_roundtrip();

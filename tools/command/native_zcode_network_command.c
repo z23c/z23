@@ -19,6 +19,7 @@
 #include "vcs/zcode_dht.h"
 #include "vcs/zcode_dht_identity.h"
 #include "vcs/zcode_dht_service.h"
+#include "vcs/package_store.h"
 #include "vcs/source_bundle.h"
 #include "json/json.h"
 
@@ -734,6 +735,86 @@ void zcl_native_handle_zcode_network_storage_ack(
   zdn_forward(request, reply, "zcode_dht_storage_ack");
 }
 
+/* An already imported carrier needs no second provider lookup. The node's
+ * source-reproduction plan still proves possession and reconstructs every
+ * source byte before it signs; this snapshot only avoids redundant network
+ * work. Keep the fetch size bound on the local path too. */
+static bool zdn_source_carrier_local_complete(
+    const struct zcl_command_request *request, const uint8_t root[32]) {
+  const char *datadir = zdn_str(request->input, "datadir");
+  if (!datadir || !datadir[0]) datadir = zcl_native_command_datadir();
+  if (!datadir || !datadir[0]) return false;
+  struct vcs_package_store *store = vcs_package_store_open(
+      datadir, vcs_package_store_quota_bytes());
+  if (!store) return false;
+  struct vcs_package_store_status status = {0};
+  bool complete = vcs_package_store_package_status(store, root, &status) &&
+      status.complete &&
+      status.total_bytes <= VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES;
+  vcs_package_store_close(store);
+  return complete;
+}
+
+static bool zdn_source_reproduce_fetch_ready(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *root_hex,
+    const char *namespace_name, const uint8_t root[32]) {
+  if (zdn_source_carrier_local_complete(request, root)) return true;
+  struct json_value fetch_input;
+  json_init(&fetch_input);
+  json_set_object(&fetch_input);
+  json_push_kv_str(&fetch_input, "root", root_hex);
+  json_push_kv_str(&fetch_input, "namespace", namespace_name);
+  const char *datadir = zdn_str(request->input, "datadir");
+  if (datadir && datadir[0])
+    json_push_kv_str(&fetch_input, "datadir", datadir);
+  json_push_kv_int(&fetch_input, "maximum_bytes",
+                   VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES);
+  struct zcl_command_request fetch_request = *request;
+  fetch_request.input = &fetch_input;
+  struct zcl_command_reply fetch;
+  zcl_command_reply_init(&fetch, "zcl.zcode_package_fetch.v1");
+  zcl_native_handle_zcode_package_fetch(&fetch_request, &fetch);
+  json_free(&fetch_input);
+  if (fetch.exit_code != ZCL_COMMAND_EXIT_OK) {
+    zcl_command_reply_fail(
+        reply, fetch.status, fetch.exit_code,
+        fetch.error.code[0] ? fetch.error.code : "SOURCE_FETCH_FAILED",
+        fetch.error.phase[0] ? fetch.error.phase : "fetch",
+        fetch.error.retryable, false,
+        fetch.error.message[0] ? fetch.error.message
+                               : "source package fetch failed",
+        fetch.error.evidence);
+    zcl_command_reply_free(&fetch);
+    return false;
+  }
+  const char *fetch_result = json_get_str(json_get(&fetch.data, "fetch_result"));
+  if (!fetch_result)
+    fetch_result = json_get_str(json_get(&fetch.data, "result"));
+  bool complete = json_get_bool_or(&fetch.data, "already_complete", false) ||
+      (fetch_result && strcmp(fetch_result, "already-complete") == 0);
+  zcl_command_reply_free(&fetch);
+  if (complete) return true;
+  char retry[320];
+  int n = snprintf(
+      retry, sizeof(retry),
+      "z23 zcode package source reproduce --input='"
+      "{\"mode\":\"plan\",\"root\":\"%s\","
+      "\"namespace\":\"%s\"}'",
+      root_hex, namespace_name);
+  json_push_kv_str(&reply->data, "schema", "zcl.zcode_source_reproduce.v1");
+  json_push_kv_str(&reply->data, "status", "FETCH_PENDING");
+  json_push_kv_str(&reply->data, "package_root", root_hex);
+  json_push_kv_bool(&reply->data, "network_called", true);
+  json_push_kv_bool(&reply->data, "reconstructed", false);
+  json_push_kv_bool(&reply->data, "evidence_signed", false);
+  json_push_kv_str(&reply->data, "blocker",
+                   "authenticated_package_fetch_incomplete");
+  if (n > 0 && (size_t)n < sizeof(retry))
+    json_push_kv_str(&reply->data, "next_command", retry);
+  return false;
+}
+
 void zcl_native_handle_zcode_package_source_reproduce(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply) {
@@ -754,63 +835,9 @@ void zcl_native_handle_zcode_package_source_reproduce(
   if (!namespace_name || !namespace_name[0])
     namespace_name = "zclassic23.source";
 
-  if (strcmp(mode, "plan") == 0) {
-    struct json_value fetch_input;
-    json_init(&fetch_input);
-    json_set_object(&fetch_input);
-    json_push_kv_str(&fetch_input, "root", root_hex);
-    json_push_kv_str(&fetch_input, "namespace", namespace_name);
-    const char *datadir = zdn_str(request->input, "datadir");
-    if (datadir && datadir[0])
-      json_push_kv_str(&fetch_input, "datadir", datadir);
-    json_push_kv_int(&fetch_input, "maximum_bytes",
-                     VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES);
-    struct zcl_command_request fetch_request = *request;
-    fetch_request.input = &fetch_input;
-    struct zcl_command_reply fetch;
-    zcl_command_reply_init(&fetch, "zcl.zcode_package_fetch.v1");
-    zcl_native_handle_zcode_package_fetch(&fetch_request, &fetch);
-    json_free(&fetch_input);
-    if (fetch.exit_code != ZCL_COMMAND_EXIT_OK) {
-      zcl_command_reply_fail(
-          reply, fetch.status, fetch.exit_code,
-          fetch.error.code[0] ? fetch.error.code : "SOURCE_FETCH_FAILED",
-          fetch.error.phase[0] ? fetch.error.phase : "fetch",
-          fetch.error.retryable, false,
-          fetch.error.message[0] ? fetch.error.message
-                                 : "source package fetch failed",
-          fetch.error.evidence);
-      zcl_command_reply_free(&fetch);
-      return;
-    }
-    const char *fetch_result = json_get_str(json_get(&fetch.data, "fetch_result"));
-    if (!fetch_result)
-      fetch_result = json_get_str(json_get(&fetch.data, "result"));
-    bool complete = json_get_bool_or(&fetch.data, "already_complete", false) ||
-        (fetch_result && strcmp(fetch_result, "already-complete") == 0);
-    zcl_command_reply_free(&fetch);
-    if (!complete) {
-      char retry[320];
-      int n = snprintf(
-          retry, sizeof(retry),
-          "z23 zcode package source reproduce --input='"
-          "{\"mode\":\"plan\",\"root\":\"%s\","
-          "\"namespace\":\"%s\"}'",
-          root_hex, namespace_name);
-      json_push_kv_str(&reply->data, "schema",
-                       "zcl.zcode_source_reproduce.v1");
-      json_push_kv_str(&reply->data, "status", "FETCH_PENDING");
-      json_push_kv_str(&reply->data, "package_root", root_hex);
-      json_push_kv_bool(&reply->data, "network_called", true);
-      json_push_kv_bool(&reply->data, "reconstructed", false);
-      json_push_kv_bool(&reply->data, "evidence_signed", false);
-      json_push_kv_str(&reply->data, "blocker",
-                       "authenticated_package_fetch_incomplete");
-      if (n > 0 && (size_t)n < sizeof(retry))
-        json_push_kv_str(&reply->data, "next_command", retry);
-      return;
-    }
-  }
+  if (strcmp(mode, "plan") == 0 &&
+      !zdn_source_reproduce_fetch_ready(request, reply, root_hex,
+                                         namespace_name, root)) return;
 
   struct json_value normalized;
   json_init(&normalized);
