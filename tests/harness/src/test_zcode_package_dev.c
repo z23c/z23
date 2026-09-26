@@ -52,6 +52,7 @@
 #include "vcs/zcode_task_authority_bundle.h"
 #include "vcs/zcode_write_scope.h"
 #include "vcs/zcode_task_index.h"
+#include "vcs/zcode_work_pull_receipt.h"
 
 #include <secp256k1.h>
 #include <stdio.h>
@@ -882,11 +883,60 @@ static bool zpd_receiver_unverified_refuses(const char *workspace,
     return ok;
 }
 
+/* A node that has pulled work holds work-pull receipts, their locator
+ * objects and the confinement statement in the same CAS adoption indexes.
+ * None of them may make that index incomplete or conflict a task. */
+static bool zpd_plant_pull_receipt(const char *receiver)
+{
+    uint8_t seed[32], secret[32], pubkey[32];
+    memset(seed, 0x5d, sizeof(seed));
+    ed25519_keypair(pubkey, secret, seed);
+    struct vcs_zcode_work_receipt_v1 r;
+    memset(&r, 0, sizeof(r));
+    r.schema_version = VCS_ZCODE_DEV_VERSION;
+    uint8_t *roots[] = {
+        r.task_root, r.candidate_root, r.input_root, r.output_root,
+        r.proof_policy_root, r.toolchain_capsule_root, r.lease_id,
+        r.evidence_root,
+    };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        memset(roots[i], 0x70 + (int)i, 32);
+    static const char statement[] = VCS_ZCODE_WORK_PULL_CONFINEMENT;
+    sha3_256((const uint8_t *)statement, sizeof(statement) - 1u,
+             r.confinement_root);
+    r.work_kind = VCS_ZCODE_WORK_REPRODUCE;
+    r.status = VCS_ZCODE_WORK_PASS;
+    r.started_unix = 1000;
+    r.finished_unix = 1001;
+    uint8_t root[32], locator[32], wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    uint8_t pointer[VCS_ZCODE_WORK_PULL_LOCATOR_BYTES];
+    static const char magic[] = VCS_ZCODE_WORK_PULL_LOCATOR_MAGIC;
+    bool ok = vcs_zcode_work_pull_action_root(r.task_root, r.input_root,
+                                              r.lease_id, r.action_root) &&
+        vcs_zcode_work_receipt_seal(&r, secret, pubkey) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_pull_receipt_check(&r) ==
+            VCS_ZCODE_WORK_PULL_RECEIPT_OK &&
+        vcs_zcode_work_receipt_id(&r, root) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_serialize(&r, wire) == VCS_ZCODE_DEV_OK &&
+        vcs_object_store_init(receiver);
+    memory_cleanse(secret, sizeof(secret));
+    vcs_zcode_work_pull_locator_address(&r, locator);
+    memcpy(pointer, magic, sizeof(magic));
+    memcpy(pointer + sizeof(magic), root, 32);
+    return ok && vcs_object_put_addressed(receiver, root, wire, sizeof(wire)) &&
+        vcs_object_put_addressed(receiver, locator, pointer,
+                                 sizeof(pointer)) &&
+        vcs_object_put_addressed(receiver, r.confinement_root,
+                                 (const uint8_t *)statement,
+                                 sizeof(statement) - 1u) &&
+        zpd_receiver_empty(receiver);
+}
+
 static bool zpd_receiver_retry(const char *receiver, const char *datadir,
     const char *task_root, const uint8_t carrier[32], const uint8_t inputs[32])
 {
     uint8_t first_context[32], repeated_context[32];
-    return zpd_fixture(receiver, false) &&
+    return zpd_fixture(receiver, false) && zpd_plant_pull_receipt(receiver) &&
         !zpd_receiver_adopt_once(receiver, datadir, task_root, carrier, inputs,
             "missing_receiver_symbol", first_context, NULL) &&
         zpd_receiver_empty(receiver) &&

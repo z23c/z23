@@ -107,6 +107,7 @@
 #include "vcs/zcode_focus.h"
 #include "vcs/zcode_task_context.h"
 #include "vcs/zcode_lane.h"
+#include "vcs/zcode_task_index.h"
 #include "vcs/zcode_work_pull_receipt.h"
 #include "command/native_command.h"
 #include "command/native_zcode_discovery.h"
@@ -6334,6 +6335,8 @@ static void zwn_pull_observation(struct vcs_zcode_work_pull_observation *o,
     memcpy(o->task_root, f->accepted.accepted.task_root, 32);
     memcpy(o->package_root, f->transport.package_root, 32);
     memset(o->pointer_root, 0xcc, 32);
+    memcpy(o->pointer_task_root, o->task_root, 32);
+    memcpy(o->pointer_package_root, o->package_root, 32);
     o->started_unix = at;
     o->observed_unix = at + 1;
 }
@@ -6347,7 +6350,8 @@ static bool zwn_pull_bound(const struct vcs_zcode_work_receipt_v1 *r,
     uint8_t pointer[32], action[32];
     memset(pointer, 0xcc, sizeof(pointer));
     (void)vcs_zcode_work_pull_action_root(w->task_root,
-                                          f->transport.package_root, action);
+                                          f->transport.package_root, pointer,
+                                          action);
     const uint8_t *pairs[][2] = {
         {r->task_root, w->task_root},
         {r->candidate_root, w->candidate_root},
@@ -6395,9 +6399,180 @@ static int zwn_t_work_pull_receipt_refusals(
                   VCS_ZCODE_WORK_PULL_RECEIPT_NO_POINTER);
         ASSERT_EQ(o.admit, VCS_ZCODE_WORK_ADMIT_OK);
         ASSERT(!zcl_bytes_any_set(o.receipt_root, 32));
+        /* A pointer that names another task or another package binds
+         * nothing, even though this package verifies for this task. */
+        zwn_pull_observation(&o, f, ZWN_PULL_NOW + 100);
+        o.pointer_task_root[5] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f->workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_POINTER_MISMATCH);
+        ASSERT_EQ(o.admit, VCS_ZCODE_WORK_ADMIT_OK);
+        zwn_pull_observation(&o, f, ZWN_PULL_NOW + 100);
+        o.pointer_package_root[5] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f->workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_POINTER_MISMATCH);
+        ASSERT(!zcl_bytes_any_set(o.receipt_root, 32));
         ASSERT_EQ(zwn_pull_objects(f), before);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+/* Overwrite the object at address with bytes, as disk corruption would. */
+static bool zwn_pull_clobber(const struct zwn_pull_fixture *f,
+                             const uint8_t address[32],
+                             const uint8_t *bytes, size_t len)
+{
+    bool repaired = false;
+    return vcs_object_put_addressed_repair(f->workspace, address, bytes, len,
+                                           &repaired) &&
+        repaired;
+}
+
+static int zwn_t_work_pull_receipt_locator(
+    struct vcs_package_store *store, const struct zwn_pull_fixture *f,
+    const uint8_t secret[32], const uint8_t observer[32],
+    const uint8_t root[32])
+{
+    int failures = 0;
+    TEST("work pull receipt: a corrupt or foreign locator is repaired by "
+         "the next pull, and the repaired locator is attached to after") {
+        struct vcs_zcode_work_receipt_v1 first;
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(f->workspace, root,
+                                                   &first),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        uint8_t locator[32];
+        vcs_zcode_work_pull_locator_address(&first, locator);
+        /* The locator is a small pointer object, never a receipt. */
+        uint8_t *held = NULL;
+        size_t held_len = 0;
+        ASSERT_EQ(vcs_object_load_raw(f->workspace, locator, &held,
+                                      &held_len), 0);
+        bool small = held_len == VCS_ZCODE_WORK_PULL_LOCATOR_BYTES &&
+            memcmp(held + held_len - 32u, root, 32) == 0;
+        free(held);
+        ASSERT(small);
+        static const uint8_t garbage[] = "not a locator";
+        ASSERT(zwn_pull_clobber(f, locator, garbage, sizeof(garbage)));
+        struct vcs_zcode_work_pull_observation o;
+        zwn_pull_observation(&o, f, ZWN_PULL_NOW + 200);
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f->workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(!o.attached);
+        uint8_t second[32];
+        memcpy(second, o.receipt_root, 32);
+        ASSERT(memcmp(second, root, 32) != 0);
+        zwn_pull_observation(&o, f, ZWN_PULL_NOW + 300);
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f->workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(o.attached);
+        ASSERT(memcmp(o.receipt_root, second, 32) == 0);
+        /* A well-formed locator naming a valid pull receipt for other
+         * roots (another pointer) is just as invalid. */
+        struct vcs_zcode_work_receipt_v1 other = first;
+        other.lease_id[0] ^= 1u;
+        ASSERT(vcs_zcode_work_pull_action_root(other.task_root,
+                                               other.input_root,
+                                               other.lease_id,
+                                               other.action_root));
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&other, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t other_root[32], other_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_work_receipt_id(&other, other_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&other, other_wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_object_put_addressed(f->workspace, other_root, other_wire,
+                                        sizeof(other_wire)));
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(f->workspace, other_root,
+                                                   &other),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        uint8_t foreign[VCS_ZCODE_WORK_PULL_LOCATOR_BYTES];
+        static const char magic[] = VCS_ZCODE_WORK_PULL_LOCATOR_MAGIC;
+        memcpy(foreign, magic, sizeof(magic));
+        memcpy(foreign + sizeof(magic), other_root, 32);
+        ASSERT(zwn_pull_clobber(f, locator, foreign, sizeof(foreign)));
+        zwn_pull_observation(&o, f, ZWN_PULL_NOW + 400);
+        ASSERT_EQ(vcs_zcode_work_pull_observe(store, f->workspace, secret,
+                                              observer, &o),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        ASSERT(!o.attached);
+        ASSERT(memcmp(o.receipt_root, second, 32) != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static const struct vcs_zcode_task_index_entry *zwn_pull_index_task(
+    const struct vcs_zcode_task_index *index,
+    const struct zwn_pull_fixture *f)
+{
+    return index ? vcs_zcode_task_index_find(index,
+                                             f->accepted.accepted.task_root)
+                 : NULL;
+}
+
+static int zwn_t_work_pull_receipt_index(const struct zwn_pull_fixture *f,
+                                         const uint8_t secret[32],
+                                         const uint8_t observer[32],
+                                         const uint8_t root[32])
+{
+    int failures = 0;
+    struct vcs_zcode_task_index *before = NULL, *after = NULL;
+    TEST("work pull receipt: the observer's task index stays complete, and "
+         "a pull receipt beside the task never counts as its evidence") {
+        after = vcs_zcode_task_index_build(f->workspace, ZWN_PULL_NOW + 500);
+        ASSERT(after && vcs_zcode_task_index_complete(after));
+        vcs_zcode_task_index_free(after);
+        after = NULL;
+        struct vcs_zcode_work_receipt_v1 pulled, control;
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_load(f->workspace, root,
+                                                   &pulled),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        before = vcs_zcode_task_index_build(f->publisher, ZWN_PULL_NOW + 500);
+        const struct vcs_zcode_task_index_entry *b =
+            zwn_pull_index_task(before, f);
+        ASSERT(b && vcs_zcode_task_index_complete(before));
+        ASSERT(b->receipt_count > 0);
+        uint8_t wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES], other[32];
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&pulled, wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_object_put_addressed(f->publisher, root, wire,
+                                        sizeof(wire)));
+        after = vcs_zcode_task_index_build(f->publisher, ZWN_PULL_NOW + 500);
+        const struct vcs_zcode_task_index_entry *a =
+            zwn_pull_index_task(after, f);
+        ASSERT(a && vcs_zcode_task_index_complete(after));
+        ASSERT_EQ(a->receipt_count, b->receipt_count);
+        ASSERT_EQ(a->passing_receipt_count, b->passing_receipt_count);
+        ASSERT_STR_EQ(a->latest_work_receipt_hex, b->latest_work_receipt_hex);
+        ASSERT_STR_EQ(a->state, b->state);
+        vcs_zcode_task_index_free(after);
+        after = NULL;
+        /* Control: the same receipt without either pull marker counts. */
+        control = pulled;
+        memset(control.confinement_root, 0x17, 32);
+        memset(control.action_root, 0x18, 32);
+        ASSERT(!vcs_zcode_work_pull_receipt_claims_pull(&control));
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&control, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&control, wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_id(&control, other),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_object_put_addressed(f->publisher, other, wire,
+                                        sizeof(wire)));
+        after = vcs_zcode_task_index_build(f->publisher, ZWN_PULL_NOW + 500);
+        a = zwn_pull_index_task(after, f);
+        ASSERT(a && vcs_zcode_task_index_complete(after));
+        ASSERT_EQ(a->receipt_count, b->receipt_count + 1u);
+        PASS();
+    } _test_next:;
+    vcs_zcode_task_index_free(before);
+    vcs_zcode_task_index_free(after);
     return failures;
 }
 
@@ -6496,6 +6671,10 @@ static int zwn_t_work_pull_receipt_library(void)
                                                      observer);
         failures += zwn_t_work_pull_receipt_tamper(store, &f, secret,
                                                    observer, root);
+        failures += zwn_t_work_pull_receipt_locator(store, &f, secret,
+                                                    observer, root);
+        failures += zwn_t_work_pull_receipt_index(&f, secret, observer,
+                                                  root);
         vcs_package_store_close(store);
     }
     memory_cleanse(secret, sizeof(secret));
@@ -6506,7 +6685,22 @@ static int zwn_t_work_pull_receipt_library(void)
 
 static const struct zwn_pull_fixture *zwn_pull_leaf_fixture;
 static char zwn_pull_asked_hex[65];
-static bool zwn_pull_route_delivers;
+
+/* How the fake node answers: the fetch route, and the one POINTER record. */
+enum zwn_pull_route_mode {
+    ZWN_PULL_ROUTE_REFUSE,      /* publisher gone: a named refusal */
+    ZWN_PULL_ROUTE_DELIVER,     /* accepts, then commits the bytes */
+    ZWN_PULL_ROUTE_ACCEPT_ONLY, /* accepts, and the bytes never arrive */
+};
+enum zwn_pull_record_mode {
+    ZWN_PULL_RECORD_USABLE,
+    ZWN_PULL_RECORD_CONFLICTED,
+    ZWN_PULL_RECORD_NO_SEMANTIC,
+};
+static enum zwn_pull_route_mode zwn_pull_route_mode;
+static enum zwn_pull_record_mode zwn_pull_record_mode;
+/* wait_ms passed to the pull leaf; INT64_MIN means the key is absent. */
+static int64_t zwn_pull_wait_ms = INT64_MIN;
 
 static char *zwn_pull_rpc_hook(const char *method, const char *params_json)
 {
@@ -6524,14 +6718,20 @@ static char *zwn_pull_rpc_hook(const char *method, const char *params_json)
     if (strcmp(method, "zcode_dht_record_poll") != 0 || !f)
         return zcl_strdup("{\"ok\":false,\"code\":\"UNEXPECTED_RPC\"}",
                           "test.zwn_pull.unexpected");
+    char semantic[96] = "";
+    if (zwn_pull_record_mode != ZWN_PULL_RECORD_NO_SEMANTIC)
+        (void)snprintf(semantic, sizeof(semantic),
+                       "\"semantic_root\":\"%s\",", zwn_pull_asked_hex);
     char body[1024];
     int n = snprintf(body, sizeof(body),
                      "{\"ok\":true,\"state\":\"complete\",\"records\":[{"
                      "\"kind\":\"pointer\",\"record_root\":\"%s\","
                      "\"namespace\":\"zclassic23.work\","
-                     "\"semantic_root\":\"%s\",\"transport_root\":\"%s\","
-                     "\"conflicted\":false,\"superseded\":false}]}",
-                     f->pointer_hex, zwn_pull_asked_hex, f->package_hex);
+                     "%s\"transport_root\":\"%s\","
+                     "\"conflicted\":%s,\"superseded\":false}]}",
+                     f->pointer_hex, semantic, f->package_hex,
+                     zwn_pull_record_mode == ZWN_PULL_RECORD_CONFLICTED
+                         ? "true" : "false");
     return n > 0 && (size_t)n < sizeof(body)
         ? zcl_strdup(body, "test.zwn_pull.poll") : NULL;
 }
@@ -6548,19 +6748,21 @@ static bool zwn_pull_discover(struct json_value *selector,
 
 /* Either the publisher is gone (a named refusal), or the running node
  * accepts the root and commits the bytes after its reply — the pull's own
- * store handle, opened before, cannot see them without re-reading. */
+ * store handle, opened before, cannot see them without re-reading — or it
+ * accepts and the bytes never arrive. */
 static bool zwn_pull_route(struct json_value *selector,
                            struct json_value *result)
 {
     (void)selector;
     json_set_object(result);
-    if (!zwn_pull_route_delivers) {
+    if (zwn_pull_route_mode == ZWN_PULL_ROUTE_REFUSE) {
         (void)json_push_kv_bool(result, "ok", false);
         (void)json_push_kv_str(result, "code", "FETCH_REFUSED");
         (void)json_push_kv_str(result, "error", "no-authenticated-provider");
         return false;
     }
-    bool held = zwn_pull_hold(zwn_pull_leaf_fixture);
+    bool held = zwn_pull_route_mode == ZWN_PULL_ROUTE_ACCEPT_ONLY ||
+        zwn_pull_hold(zwn_pull_leaf_fixture);
     (void)json_push_kv_bool(result, "ok", held);
     (void)json_push_kv_int(result, "authenticated_providers", 1);
     (void)json_push_kv_str(result, "fetch_result", "ok");
@@ -6581,6 +6783,8 @@ static void zwn_pull_leaf(const struct zwn_pull_fixture *f, bool receipt,
     zcl_command_reply_init(reply, "zcl.zcode_test.v1");
     if (!receipt) {
         (void)json_push_kv_str(&input, "task_root", zwn_pull_asked_hex);
+        if (zwn_pull_wait_ms != INT64_MIN)
+            (void)json_push_kv_int(&input, "wait_ms", zwn_pull_wait_ms);
         zcl_native_handle_zcode_work_pull(&request, reply);
     } else {
         (void)json_push_kv_str(&input, "receipt_root", root_hex);
@@ -6652,7 +6856,9 @@ static int zwn_t_work_pull_leaf_held(void)
         ASSERT(zwn_pull_fixture_create(&f, "held", 0x6b));
         ASSERT(zwn_pull_hold(&f));
         zwn_pull_leaf_fixture = &f;
-        zwn_pull_route_delivers = false;
+        zwn_pull_route_mode = ZWN_PULL_ROUTE_REFUSE;
+        zwn_pull_record_mode = ZWN_PULL_RECORD_USABLE;
+        zwn_pull_wait_ms = INT64_MIN;
         (void)snprintf(zwn_pull_asked_hex, sizeof(zwn_pull_asked_hex), "%s",
                        f.task_hex);
         node_rpc_client_set_test_hook(zwn_pull_rpc_hook);
@@ -6708,7 +6914,9 @@ static int zwn_t_work_pull_leaf_settle(void)
          "unreachable") {
         ASSERT(zwn_pull_fixture_create(&f, "settle", 0x6c));
         zwn_pull_leaf_fixture = &f;
-        zwn_pull_route_delivers = true;
+        zwn_pull_route_mode = ZWN_PULL_ROUTE_DELIVER;
+        zwn_pull_record_mode = ZWN_PULL_RECORD_USABLE;
+        zwn_pull_wait_ms = INT64_MIN;
         (void)snprintf(zwn_pull_asked_hex, sizeof(zwn_pull_asked_hex), "%s",
                        f.task_hex);
         node_rpc_client_set_test_hook(zwn_pull_rpc_hook);
@@ -6734,12 +6942,109 @@ static int zwn_t_work_pull_leaf_settle(void)
     return failures;
 }
 
+static void zwn_pull_leaf_backends(const struct zwn_pull_fixture *f,
+                                   enum zwn_pull_route_mode route,
+                                   enum zwn_pull_record_mode record,
+                                   int64_t wait_ms)
+{
+    zwn_pull_leaf_fixture = f;
+    zwn_pull_route_mode = route;
+    zwn_pull_record_mode = record;
+    zwn_pull_wait_ms = wait_ms;
+    (void)snprintf(zwn_pull_asked_hex, sizeof(zwn_pull_asked_hex), "%s",
+                   f->task_hex);
+    node_rpc_client_set_test_hook(zwn_pull_rpc_hook);
+    zcl_native_zcode_discovery_test_backend(zwn_pull_discover,
+                                            zwn_pull_route);
+}
+
+static void zwn_pull_leaf_backends_reset(void)
+{
+    node_rpc_client_set_test_hook(NULL);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    zwn_pull_leaf_fixture = NULL;
+    zwn_pull_wait_ms = INT64_MIN;
+}
+
+static int zwn_t_work_pull_leaf_pending(void)
+{
+    int failures = 0;
+    struct zwn_pull_fixture f;
+    TEST("work pull leaf: an accepted fetch whose bytes never arrive is "
+         "WORK_BYTES_PENDING after the bounded wait and records nothing") {
+        ASSERT(zwn_pull_fixture_create(&f, "pending", 0x6d));
+        zwn_pull_leaf_backends(&f, ZWN_PULL_ROUTE_ACCEPT_ONLY,
+                               ZWN_PULL_RECORD_USABLE, 300);
+        struct zcl_command_reply reply;
+        zwn_pull_leaf(&f, false, NULL, NULL, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "WORK_BYTES_PENDING");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "fetched")), 0);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "admitted")), 0);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "receipts")), 0);
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "receipt_result"),
+                      "not-verified");
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "receipt_root"), "");
+        int64_t waited =
+            json_get_int(json_get(zwn_pull_row0(&reply), "settle_ms"));
+        ASSERT(waited >= 250 && waited < 15000);
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(zwn_pull_objects(&f), (size_t)0);
+        zwn_pull_wait_ms = -5;
+        zwn_pull_leaf(&f, false, NULL, NULL, &reply);
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(reply.error.code, "BAD_WAIT_MS");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    zwn_pull_leaf_backends_reset();
+    return failures;
+}
+
+static int zwn_t_work_pull_leaf_pointer_rules(void)
+{
+    int failures = 0;
+    struct zwn_pull_fixture f;
+    TEST("work pull leaf: a conflicted pointer verifies the package but "
+         "binds no receipt; a record naming no task is ignored") {
+        ASSERT(zwn_pull_fixture_create(&f, "rules", 0x6e));
+        ASSERT(zwn_pull_hold(&f));
+        zwn_pull_leaf_backends(&f, ZWN_PULL_ROUTE_REFUSE,
+                               ZWN_PULL_RECORD_CONFLICTED, 0);
+        struct zcl_command_reply reply;
+        zwn_pull_leaf(&f, false, NULL, NULL, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "SOLUTIONS_VERIFIED");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "admitted")), 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "receipts")), 0);
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "pointer_root"), "");
+        ASSERT_STR_EQ(zwn_pull_row_str(&reply, "receipt_result"),
+                      "no-usable-pointer");
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(zwn_pull_objects(&f), (size_t)0);
+        zwn_pull_record_mode = ZWN_PULL_RECORD_NO_SEMANTIC;
+        zwn_pull_leaf(&f, false, NULL, NULL, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "NO_WORK_POINTERS");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "pointers_seen")), 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data,
+                                        "distinct_transport_roots")), 0);
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(zwn_pull_objects(&f), (size_t)0);
+        PASS();
+    } _test_next:;
+    zwn_pull_leaf_backends_reset();
+    return failures;
+}
+
 static int zwn_t_work_pull_receipts(void)
 {
     int failures = 0;
     failures += zwn_t_work_pull_receipt_library();
     failures += zwn_t_work_pull_leaf_held();
     failures += zwn_t_work_pull_leaf_settle();
+    failures += zwn_t_work_pull_leaf_pending();
+    failures += zwn_t_work_pull_leaf_pointer_rules();
     return failures;
 }
 #endif

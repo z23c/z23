@@ -9047,7 +9047,7 @@ static void zd_pull_receipt_shape(struct vcs_zcode_work_receipt_v1 *r,
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         memset(roots[i], fill + (uint8_t)i, 32);
     (void)vcs_zcode_work_pull_action_root(r->task_root, r->input_root,
-                                          r->action_root);
+                                          r->lease_id, r->action_root);
     static const char statement[] = VCS_ZCODE_WORK_PULL_CONFINEMENT;
     sha3_256((const uint8_t *)statement, sizeof(statement) - 1u,
              r->confinement_root);
@@ -9092,6 +9092,56 @@ static int test_zd_work_pull_receipt_shape(const uint8_t secret[32],
         bad.lease_id[0] ^= 1u;
         ASSERT_EQ(vcs_zcode_work_pull_receipt_check(&bad),
                   VCS_ZCODE_WORK_PULL_RECEIPT_SIGNATURE);
+        /* The action root also names the pointer: a re-signed receipt
+         * moved to another pointer without re-deriving it is refused, and
+         * no pointer at all is never a pull receipt. */
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&bad, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_pull_receipt_check(&bad),
+                  VCS_ZCODE_WORK_PULL_RECEIPT_NOT_PULL);
+        bad = r;
+        memset(bad.lease_id, 0, 32);
+        (void)vcs_zcode_work_pull_action_root(bad.task_root, bad.input_root,
+                                              bad.lease_id, bad.action_root);
+        ASSERT(vcs_zcode_work_receipt_seal(&bad, secret, observer) !=
+               VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_zcode_work_pull_receipt_check(&bad) !=
+               VCS_ZCODE_WORK_PULL_RECEIPT_OK);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_zd_work_pull_receipt_marks(const uint8_t secret[32],
+                                           const uint8_t observer[32])
+{
+    int failures = 0;
+    TEST("work pull receipt: either pull marker keeps a receipt out of "
+         "build evidence; an ordinary receipt carries neither") {
+        struct vcs_zcode_work_receipt_v1 r, other;
+        zd_pull_receipt_shape(&r, 0x50);
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(&r, secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_zcode_work_pull_receipt_claims_pull(&r));
+        other = r;
+        memset(other.confinement_root, 0x21, 32);
+        ASSERT(vcs_zcode_work_pull_receipt_claims_pull(&other));
+        other = r;
+        memset(other.action_root, 0x22, 32);
+        ASSERT(vcs_zcode_work_pull_receipt_claims_pull(&other));
+        memset(other.confinement_root, 0x21, 32);
+        ASSERT(!vcs_zcode_work_pull_receipt_claims_pull(&other));
+        ASSERT(!vcs_zcode_work_pull_receipt_claims_pull(NULL));
+        /* The locator address ignores times and signature only. */
+        uint8_t a[32], b[32];
+        vcs_zcode_work_pull_locator_address(&r, a);
+        other = r;
+        other.finished_unix += 60;
+        vcs_zcode_work_pull_locator_address(&other, b);
+        ASSERT(memcmp(a, b, 32) == 0);
+        other.lease_id[0] ^= 1u;
+        vcs_zcode_work_pull_locator_address(&other, b);
+        ASSERT(memcmp(a, b, 32) != 0);
         PASS();
     } _test_next:;
     return failures;
@@ -9172,6 +9222,7 @@ static int test_zd_work_pull_receipt(void)
     memset(seed, 0x91, sizeof(seed));
     ed25519_keypair(observer, secret, seed);
     failures += test_zd_work_pull_receipt_shape(secret, observer);
+    failures += test_zd_work_pull_receipt_marks(secret, observer);
     failures += test_zd_work_pull_receipt_unverified(secret, observer);
     failures += test_zd_work_pull_receipt_cas(secret, observer);
     memset(secret, 0, sizeof(secret));
