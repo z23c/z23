@@ -3758,7 +3758,7 @@ static bool dp_pid_gone(long pid)
         if (kill((pid_t)pid, 0) != 0 && errno == ESRCH)
             return true;
         struct timespec pause = { .tv_sec = 0, .tv_nsec = 10000000L };
-        (void)nanosleep(&pause, NULL);
+        (void)nanosleep(&pause, NULL); /* real-clock: init reaps a killed session member asynchronously; the kernel offers no fake-clock seam */
     }
     return false;
 }
