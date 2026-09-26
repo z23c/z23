@@ -4282,38 +4282,55 @@ static void dp_zcc_restore(const struct dp_zcc_fx *z)
     test_rm_rf_recursive(z->cache);
 }
 
+/* Cold build with the v1 assembler, then the v2 swap: both keyed. */
+static bool dp_zcc_swap(struct dp_zcc_fx *z,
+                        struct zcl_devloop_hotswap_build_receipt *r1,
+                        struct zcl_devloop_hotswap_build_receipt *r2)
+{
+    return dp_zcc_init(z) && dp_zcc_save(z, r1) &&
+           r1->cache_key_action_root[0] && dp_zcc_write_as(z, true) &&
+           dp_zcc_save(z, r2) && r2->cache_key_action_root[0];
+}
+
+/* The root moved, the object was rebuilt (not served), and the new
+ * assembler is what ran. */
+static bool dp_zcc_verdict(const struct dp_zcc_fx *z,
+                           const struct zcl_devloop_hotswap_build_receipt *r1,
+                           const struct zcl_devloop_hotswap_build_receipt *r2)
+{
+    char mark[PATH_MAX];
+    bool moved = strcmp(r1->cache_key_action_root,
+                        r2->cache_key_action_root) != 0;
+    bool rebuilt = !r2->artifact_cache_hit && r2->compiler_processes > 0 &&
+                   strcmp(r1->candidate_object_sha256,
+                          r2->candidate_object_sha256) != 0;
+    bool ran = snprintf(mark, sizeof(mark), "%s/build/fx-as-v2.ran",
+                        z->abs) < (int)sizeof(mark) &&
+               access(mark, F_OK) == 0;
+    bool ok = moved && rebuilt && ran;
+    printf("    zcc: assembler swap under %s cc: root_moved=%s "
+           "object_rebuilt=%s new_as_ran=%s object=%.12s->%.12s -> %s\n",
+           z->zcc, moved ? "yes" : "NO", rebuilt ? "yes" : "NO",
+           ran ? "yes" : "NO", r1->candidate_object_sha256,
+           r2->candidate_object_sha256, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 static bool run_hotswap_action_root_zcc_fixture(void)
 {
     struct dp_zcc_fx z = {0};
     struct dp_ar_env env;
     struct zcl_devloop_hotswap_build_receipt r1 = {0}, r2 = {0};
-    char mark[PATH_MAX];
     dp_ar_env_save(&env);
     if (!dp_zcc_paths(&z))
         return false;
     test_rm_rf_recursive(z.root);
     test_rm_rf_recursive(z.cache);
-    bool ok = dp_zcc_init(&z) && dp_zcc_save(&z, &r1) &&
-              r1.cache_key_action_root[0] && dp_zcc_write_as(&z, true) &&
-              dp_zcc_save(&z, &r2) && r2.cache_key_action_root[0] &&
-              snprintf(mark, sizeof(mark), "%s/build/fx-as-v2.ran", z.abs) <
-                  (int)sizeof(mark);
-    bool moved = ok && strcmp(r1.cache_key_action_root,
-                              r2.cache_key_action_root) != 0;
-    bool rebuilt = ok && !r2.artifact_cache_hit &&
-                   r2.compiler_processes > 0 &&
-                   strcmp(r1.candidate_object_sha256,
-                          r2.candidate_object_sha256) != 0;
-    bool ran = ok && access(mark, F_OK) == 0;
-    printf("    zcc: assembler swap under %s cc: root_moved=%s "
-           "object_rebuilt=%s new_as_ran=%s object=%.12s->%.12s -> %s\n",
-           z.zcc, moved ? "yes" : "NO", rebuilt ? "yes" : "NO",
-           ran ? "yes" : "NO", r1.candidate_object_sha256,
-           r2.candidate_object_sha256,
-           moved && rebuilt && ran ? "PASS" : "FAIL");
+    bool built = dp_zcc_swap(&z, &r1, &r2);
+    bool ok = dp_zcc_verdict(&z, &r1, &r2) && built;
     dp_ar_env_restore(&env);
     dp_zcc_restore(&z);
-    return moved && rebuilt && ran;
+    return ok;
 }
 
 static int test_hotswap_artifact_cache(void)

@@ -1220,6 +1220,18 @@ static bool fx_key_inner(struct fx *x, const char *saved, const char *dir,
            fx_key(x, cc, out);
 }
 
+/* The wrapper and three inner drivers: d1 plain, d2 one -### argument more,
+ * d3 announcing a Configuration file. */
+static bool fx_inner_drivers(struct fx *x, char cc[PATH_MAX])
+{
+    return fx_exec(x, "tools/wrap.sh", "#!/bin/sh\nexec fxinner \"$@\"\n") &&
+           snprintf(cc, PATH_MAX, "%s/tools/wrap.sh", x->root) < PATH_MAX &&
+           fx_inner_driver(x, "d1", "", "") &&
+           fx_inner_driver(x, "d2", "", "\\\"-fx-inner-spec\\\" ") &&
+           fx_inner_driver(x, "d3",
+                           "  echo 'Configuration file: /etc/fx.cfg'\n", "");
+}
+
 /* A wrapper (same bytes) runs an inner driver from PATH. Two inner drivers
  * that run the same programs but differ in one -### argument key apart;
  * one that reads a Configuration file misses (backend_config_unbound). */
@@ -1227,24 +1239,16 @@ static void test_key_backend_lines(struct fx *x)
 {
     const char *path = getenv("PATH");
     char saved[8192], cc[PATH_MAX], k1[65] = {0}, k2[65] = {0};
-    char k3[65] = {0};
+    char k3[65] = {0}, with[8192 + PATH_MAX];
     bool ok = path && snprintf(saved, sizeof(saved), "%s", path) <
                           (int)sizeof(saved) &&
-              fx_exec(x, "tools/wrap.sh", "#!/bin/sh\nexec fxinner \"$@\"\n") &&
-              snprintf(cc, sizeof(cc), "%s/tools/wrap.sh", x->root) <
-                  (int)sizeof(cc) &&
-              fx_inner_driver(x, "d1", "", "") &&
-              fx_inner_driver(x, "d2", "", "\\\"-fx-inner-spec\\\" ") &&
-              fx_inner_driver(x, "d3",
-                              "  echo 'Configuration file: /etc/fx.cfg'\n",
-                              "") &&
+              fx_inner_drivers(x, cc) &&
               fx_key_inner(x, saved, "d1", cc, k1) &&
               fx_key_inner(x, saved, "d2", cc, k2) &&
               fx_key_inner(x, saved, "d1", cc, k3);
     AR_CHECK("backend: two inner drivers running the same programs, one -### "
              "argument apart, key apart; back to the first keys the same",
              ok && strcmp(k1, k2) != 0 && strcmp(k1, k3) == 0);
-    char with[8192 + PATH_MAX];
     ok = ok && snprintf(with, sizeof(with), "%s/d3:%s", x->root, saved) <
                    (int)sizeof(with) &&
          platform_environment_set("PATH", with, 1) == 0 &&

@@ -3920,11 +3920,11 @@ tools/dev/devloop_cycle.c:finish_cycle:44
 tools/dev/devloop_cycle.c:zcl_devloop_deterministic_compile_failure:18
 tools/dev/devloop_cycle.c:zcl_devloop_run_cycle_mode:96
 tools/dev/devloop_hotswap_build.c:hs_emit_event:36
-tools/dev/devloop_hotswap_build.c:hs_hotfork_build:81
+tools/dev/devloop_hotswap_build.c:hs_hotfork_build:80
 tools/dev/devloop_hotswap_build.c:hs_plan_load_locked:43
 tools/dev/devloop_hotswap_build.c:hs_story_receipt_valid:42
 tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_batch_event:42
-tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:76
+tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:75
 tools/dev/devloop_plan.c:plan_add_closure:49
 tools/dev/devloop_plan.c:plan_json_body:73
 tools/dev/devloop_plan.c:zcl_devloop_path_is_relevant:19
