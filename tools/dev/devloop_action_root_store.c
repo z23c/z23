@@ -553,28 +553,40 @@ bool zcl_action_root_parse_driver_programs(const char *out,
     return ok;
 }
 
-/* A driver temporary's basename: gcc's cc + 6 alphanumerics + .ext, or
- * Clang's <stem>-<6 or more lowercase hex>.ext. */
+/* gcc's temporary: cc + 6 alphanumerics, then the suffix. */
+static bool ars_gcc_temp_stem(const char *base, size_t stem)
+{
+    if (stem != 8 || strncmp(base, "cc", 2) != 0)
+        return false;
+    for (size_t i = 2; i < 8; i++)
+        if (!isalnum((unsigned char)base[i]))
+            return false;
+    return true;
+}
+
+/* Clang's temporary: <stem>-<6 or more lowercase hex>, then the suffix. */
+static bool ars_clang_temp_stem(const char *base, const char *dot)
+{
+    const char *dash = NULL;
+    for (const char *p = base; p < dot; p++)
+        if (*p == '-')
+            dash = p;
+    if (!dash || dash == base || dot - dash - 1 < 6)
+        return false;
+    for (const char *p = dash + 1; p < dot; p++)
+        if (!isxdigit((unsigned char)*p) || isupper((unsigned char)*p))
+            return false;
+    return true;
+}
+
+/* A driver temporary's basename: gcc's or Clang's pattern plus a suffix. */
 static bool ars_driver_temp_name(const char *base)
 {
     const char *dot = strrchr(base, '.');
     if (!dot || !dot[1] || dot == base)
         return false;
-    size_t stem = (size_t)(dot - base);
-    bool gcc = stem == 8 && strncmp(base, "cc", 2) == 0;
-    for (size_t i = 2; gcc && i < 8; i++)
-        gcc = isalnum((unsigned char)base[i]) != 0;
-    if (gcc)
-        return true;
-    const char *dash = NULL;
-    for (const char *p = base; p < dot; p++)
-        if (*p == '-')
-            dash = p;
-    size_t hex = dash ? (size_t)(dot - dash - 1) : 0;
-    for (const char *p = dash ? dash + 1 : dot; p < dot; p++)
-        if (!isxdigit((unsigned char)*p) || isupper((unsigned char)*p))
-            return false;
-    return dash && dash > base && hex >= 6;
+    return ars_gcc_temp_stem(base, (size_t)(dot - base)) ||
+           ars_clang_temp_stem(base, dot);
 }
 
 bool zcl_action_root_canon_driver_word(const char *word, const char *root,
