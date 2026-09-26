@@ -74,6 +74,25 @@ struct zcl_action_root_linker {
     size_t argc;
 };
 
+/* The moment a compile started, on the clock the kernel stamps files with
+ * (zcl_action_root_t0_take). A derivation that runs after that compile
+ * requires every closure file, and every regular file a probe finds, to
+ * carry a ctime and an mtime strictly before it. A stamp at or after it,
+ * or in the same whole second when the filesystem records no fraction,
+ * means the file changed while the compiler ran: the bytes hashed now may
+ * not be the bytes it read, so the derivation misses
+ * (input_changed_during_compile) instead of binding them. */
+struct zcl_action_root_t0 {
+    bool set;
+    int64_t sec;
+    int64_t nsec;
+};
+
+/* Read the file-stamp clock, then wait until it has advanced past that
+ * reading (at most one clock tick): a write that finished before this call
+ * is stamped before the returned T0, a write after it at or after T0. */
+void zcl_action_root_t0_take(struct zcl_action_root_t0 *t0);
+
 struct zcl_action_root_request {
     /* Canonical absolute checkout root (realpath, no trailing slash). */
     const char *root;
@@ -118,6 +137,9 @@ struct zcl_action_root_request {
     struct vcs_action_root_ref_v2 harness;
     struct vcs_action_root_ref_v2 fixtures;
     struct vcs_action_root_ref_v2 policy;
+    /* When the compile this root describes started; see
+     * zcl_action_root_t0. Unset for a derivation before any compile. */
+    struct zcl_action_root_t0 compile_t0;
 };
 
 /* Miss codes. An incomplete or non-canonical closure yields no root and
@@ -181,12 +203,15 @@ bool zcl_action_root_load(const char *store_dir, const char *root_hex,
  * the module compile and link that zcl_devloop_hotswap_build() runs for
  * `owner` (argv rebuilt by the same recipe as its compile and link steps,
  * closure from the published depfile, or NULL when the build did not
- * complete). Never fails the build: an incomplete closure is recorded as
- * receipt->action_root_miss (a code above) and never as a root. */
+ * complete). `t0` is when that compile started (NULL when this derivation
+ * follows no compile, e.g. a cache hit). Never fails the build: an
+ * incomplete closure is recorded as receipt->action_root_miss (a code
+ * above) and never as a root. */
 struct zcl_devloop_hotswap_build_receipt;
 void zcl_devloop_action_root_hotswap(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *depfile,
+    const struct zcl_action_root_t0 *t0,
     struct zcl_devloop_hotswap_build_receipt *receipt);
 /* The same for a HOT_FORK capsule build (hs_hotfork_build): `unity` is the
  * live capsule unity file, recorded under a stable generated token;
@@ -194,16 +219,18 @@ void zcl_devloop_action_root_hotswap(
 void zcl_devloop_action_root_hotfork(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *unity, const char *depfile,
+    const struct zcl_action_root_t0 *t0,
     struct zcl_devloop_hotswap_build_receipt *receipt);
 /* The root the hot-swap / HOT_FORK artifact cache key binds: the same
  * derivation as the hooks above (`unity` NULL for a hot-swap module, the
  * live capsule unity for HOT_FORK), over the given depfile, never stored.
+ * `t0` as for the hooks: set whenever the depfile came from a compile.
  * False with a stable miss code (above) whenever any input cannot be bound
  * completely; the caller then compiles and caches nothing, never keys. */
 bool zcl_devloop_action_root_key(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *unity, const char *depfile,
-    char root_hex[65], char miss[40]);
+    const struct zcl_action_root_t0 *t0, char root_hex[65], char miss[40]);
 /* Append the action_root* fields to a zcl.hotswap_build_receipt.v1 object. */
 struct json_value;
 void zcl_devloop_action_root_emit(

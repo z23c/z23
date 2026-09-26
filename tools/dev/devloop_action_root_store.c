@@ -878,6 +878,7 @@ struct ars_hook {
 struct ars_compile {
     const char *root, *owner, *cc, *cflags, *ldflags, *depfile;
     const char *unity; /* HOT_FORK: the live unity file; NULL for hot-swap */
+    const struct zcl_action_root_t0 *t0; /* the compile start, or NULL */
 };
 
 /* The first miss wins: a stable code plus a human detail. */
@@ -1003,6 +1004,8 @@ static void ars_hook_request(struct ars_hook *h, const struct ars_compile *k)
         .argv = h->argv.link, .argc = h->argv.link_n,
     };
     r->environ = ars_environ();
+    if (k->t0)
+        r->compile_t0 = *k->t0;
     r->abi_generation = st->abi_generation;
     r->abi = st->abi;
     r->abi_count = st->abi_count;
@@ -1111,18 +1114,20 @@ static void ars_hook_run(const struct ars_compile *k, const char *unit,
 void zcl_devloop_action_root_hotswap(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *depfile,
+    const struct zcl_action_root_t0 *t0,
     struct zcl_devloop_hotswap_build_receipt *receipt)
 {
     if (!receipt)
         return;
     const struct ars_compile k = { root, owner, cc, cflags, ldflags, depfile,
-                                   NULL };
+                                   NULL, t0 };
     ars_hook_run(&k, owner, receipt);
 }
 
 void zcl_devloop_action_root_hotfork(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *unity, const char *depfile,
+    const struct zcl_action_root_t0 *t0,
     struct zcl_devloop_hotswap_build_receipt *receipt)
 {
     if (!receipt)
@@ -1130,21 +1135,21 @@ void zcl_devloop_action_root_hotfork(
     char unit[320];
     (void)snprintf(unit, sizeof(unit), "hotfork:%s", owner ? owner : "");
     const struct ars_compile k = { root, owner, cc, cflags, "",
-                                   depfile, unity ? unity : "" };
+                                   depfile, unity ? unity : "", t0 };
     ars_hook_run(&k, unit, receipt);
 }
 
 bool zcl_devloop_action_root_key(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *unity, const char *depfile,
-    char root_hex[65], char miss[40])
+    const struct zcl_action_root_t0 *t0, char root_hex[65], char miss[40])
 {
     if (!root_hex || !miss)
         return false;
     root_hex[0] = '\0';
     miss[0] = '\0';
     const struct ars_compile k = { root, owner, cc, cflags,
-                                   unity ? "" : ldflags, depfile, unity };
+                                   unity ? "" : ldflags, depfile, unity, t0 };
     struct ars_miss m = {0};
     struct zcl_action_root_result result = {0};
     bool ok = ars_hook_derive(&k, &result, &m);

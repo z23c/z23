@@ -1963,3 +1963,33 @@ bool zcl_action_root_file_sha3(const char *path, uint8_t out[32])
 {
     return path && out && ar_sha3_file(path, out);
 }
+
+/* ---- compile start --------------------------------------------------- */
+
+/* The clock file stamps come from: Linux stamps inodes from the coarse
+ * realtime clock, which can lag CLOCK_REALTIME by a tick. */
+static void ar_stamp_clock(struct timespec *ts)
+{
+#if defined(CLOCK_REALTIME_COARSE)
+    if (clock_gettime(CLOCK_REALTIME_COARSE, ts) == 0)
+        return;
+#endif
+    if (platform_time_realtime_timespec(ts) != 0) {
+        ts->tv_sec = (time_t)platform_time_wall_unix();
+        ts->tv_nsec = 0;
+    }
+}
+
+void zcl_action_root_t0_take(struct zcl_action_root_t0 *t0)
+{
+    if (!t0)
+        return;
+    struct timespec first, now;
+    ar_stamp_clock(&first);
+    do {
+        platform_sleep_ms(1);
+        ar_stamp_clock(&now);
+    } while (now.tv_sec == first.tv_sec && now.tv_nsec == first.tv_nsec);
+    *t0 = (struct zcl_action_root_t0){ .set = true, .sec = now.tv_sec,
+                                       .nsec = now.tv_nsec };
+}

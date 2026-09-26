@@ -29,6 +29,7 @@
 #include "services/dev_reflex_policy_service.h"
 #include "sim/social_app_sim.h"
 #include "util/safe_alloc.h"
+#include "vcs/build_action.h"
 #include "wallet/wallet.h"
 
 #include <fcntl.h>
@@ -3384,6 +3385,15 @@ static bool dp_hotswap_fixture_paths(
     return true;
 }
 
+/* Remove root/rel; an absent file is already removed. */
+static bool dp_ar_unlink_in(const char *root, const char *rel)
+{
+    char path[PATH_MAX];
+    return snprintf(path, sizeof(path), "%s/%s", root, rel) <
+               (int)sizeof(path) &&
+           (unlink(path) == 0 || errno == ENOENT);
+}
+
 static bool run_hotswap_artifact_cache_fixture(void)
 {
     char root_a[PATH_MAX], root_b[PATH_MAX], cache_rel[PATH_MAX];
@@ -3405,7 +3415,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
         "[ -n \"$out\" ]\n"
         "if [ \"$compile\" -eq 1 ]; then\n"
         "  extra=\n"
-        "  if [ \"${ZCL_DEVLOOP_TEST_MUTATE_DEPS:-0}\" = 1 ]; then\n"
+        "  if [ -f build/hotswap-fast/mutate-deps ]; then\n"
         "    count_file=build/hotswap-fast/mutation-compile-count\n"
         "    n=$(cat \"$count_file\" 2>/dev/null || echo 0); n=$((n + 1))\n"
         "    printf '%s\\n' \"$n\" >\"$count_file\"\n"
@@ -3544,10 +3554,10 @@ static bool run_hotswap_artifact_cache_fixture(void)
     if (!dp_mk_write(root_b, owner,
                      "int zcl_hotswap_fixture_owner(void) { return 13; }\n") ||
         unlink(dep_path) != 0 ||
-        platform_environment_set("ZCL_DEVLOOP_TEST_MUTATE_DEPS", "1", 1) != 0 ||
+        !dp_mk_write(root_b, "build/hotswap-fast/mutate-deps", "1\n") ||
         zcl_devloop_hotswap_build(root_b, owner, &mutated, &process,
                                   why, sizeof(why)) ||
-        dp_environment_unset("ZCL_DEVLOOP_TEST_MUTATE_DEPS") != 0 ||
+        !dp_ar_unlink_in(root_b, "build/hotswap-fast/mutate-deps") ||
         mutated.compiler_processes != 2 || mutated.linker_processes != 0 ||
         strstr(why, "dependency closure size changed") == NULL)
         goto out;
@@ -3602,7 +3612,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
     ok = true;
 
 out:
-    (void)dp_environment_unset("ZCL_DEVLOOP_TEST_MUTATE_DEPS");
+    (void)dp_ar_unlink_in(root_b, "build/hotswap-fast/mutate-deps");
     if (!ok)
         fprintf(stderr, "hotswap cache fixture failed at %s: %s\n", stage,
                 why[0] ? why : "no build reason");
@@ -3642,6 +3652,7 @@ out:
 static const char g_dp_ar_source[] =
     "#include \"fx_value.h\"\n"
     "#include \"fx_types.h\"\n"
+    "#include \"fx_gen.h\"\n"
     "#if __has_include(\"fx_optional.h\")\n"
     "#include \"fx_optional.h\"\n"
     "#endif\n"
@@ -3652,13 +3663,23 @@ static const char g_dp_ar_source[] =
     "int zcl_hotswap_fixture_economics(void)\n"
     "{\n"
     "    struct fx_pair p = { 1, 2 };\n"
-    "    return p.first * 10000 + FX_VALUE * 1000 + FX_OPTIONAL * 100 +\n"
-    "           ZCL_FX_FLAG * 10 + ZCL_FX_WRAP;\n"
+    "    return FX_GEN * 100000 + p.first * 10000 + FX_VALUE * 1000 +\n"
+    "           FX_OPTIONAL * 100 + ZCL_FX_FLAG * 10 + ZCL_FX_WRAP;\n"
     "}\n";
 static const char g_dp_ar_types[] = "struct fx_pair { int first; int second; };\n";
 static const char g_dp_ar_value[] = "#define FX_VALUE 2\n";
-static const char g_dp_ar_cc_v1[] = "#!/bin/sh\nexec cc \"$@\"\n";
-static const char g_dp_ar_cc_v2[] = "#!/bin/sh\nexec cc -DZCL_FX_WRAP=1 \"$@\"\n";
+/* A generated input: under build/, like every header a build step writes. */
+static const char g_dp_ar_gen[] = "#define FX_GEN 4\n";
+/* Each wrapper records the exact environment its compile was started with
+ * (a driver query from the key derivation passes no -MF and records
+ * nothing). */
+#define DP_AR_CC_ENV \
+    "case \" $* \" in *\" -MF \"*) [ -r /proc/$$/environ ] && " \
+    "tr '\\0' '\\n' </proc/$$/environ >build/fx-cc.env;; esac\n"
+static const char g_dp_ar_cc_v1[] = "#!/bin/sh\n" DP_AR_CC_ENV
+                                    "exec cc \"$@\"\n";
+static const char g_dp_ar_cc_v2[] = "#!/bin/sh\n" DP_AR_CC_ENV
+                                    "exec cc -DZCL_FX_WRAP=1 \"$@\"\n";
 
 struct dp_ar_fx {
     char root_a[PATH_MAX], root_b[PATH_MAX];
@@ -3702,6 +3723,7 @@ static bool dp_ar_flags(const char *root, const char *extra)
         "CC=%s/tools/fx-cc.sh\nCXX=g++\n"
         "COMPILER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "DEV_CFLAGS=-DZCL_DEV_BUILD -std=c23 -O1 -Iinc_early -Iinc_late "
+        "-Ibuild/fx-gen "
         "-ffile-prefix-map=%s=/zclassic23%s\n"
         "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
         canonical, canonical, extra);
@@ -3723,6 +3745,7 @@ static bool dp_ar_init(const char *root)
               dp_mk_write(root, DP_AR_OWNER, g_dp_ar_source) &&
               dp_mk_write(root, "inc_late/fx_value.h", g_dp_ar_value) &&
               dp_mk_write(root, "inc_late/fx_types.h", g_dp_ar_types) &&
+              dp_mk_write(root, "build/fx-gen/fx_gen.h", g_dp_ar_gen) &&
               snprintf(early, sizeof(early), "%s/inc_early", root) <
                   (int)sizeof(early) &&
               platform_directory_create(early, 0755) == 0;
@@ -3920,6 +3943,8 @@ static const struct dp_ar_step g_dp_ar_steps[] = {
       g_dp_ar_value, NULL, NULL },
     { "F1-added-D-flag", NULL, NULL, NULL, " -DZCL_FX_FLAG=1", NULL },
     { "compiler-bytes-same-path", NULL, NULL, NULL, NULL, g_dp_ar_cc_v2 },
+    { "generated-input-change", "build/fx-gen/fx_gen.h", "#define FX_GEN 6\n",
+      g_dp_ar_gen, NULL, NULL },
 };
 
 /* Base build, then an unchanged save that runs no compiler or linker. */
@@ -3987,6 +4012,53 @@ static bool dp_ar_controls(struct dp_ar_fx *fx)
            dp_ar_second_worktree(fx);
 }
 
+static bool dp_ar_env_passthrough(const char *entry, size_t name_len)
+{
+    static const char *const names[] = { "PATH", "HOME", "TMPDIR" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strlen(names[i]) == name_len &&
+            memcmp(names[i], entry, name_len) == 0)
+            return true;
+    return false;
+}
+
+/* The compile child saw only the environment the action root binds: the
+ * allowlisted names and PATH, HOME, TMPDIR. Never the parent's own test
+ * switches, nor the sentinel the fixture sets. Linux reads the record from
+ * /proc; a host without it says SKIP. */
+static bool dp_ar_child_env_bound(const struct dp_ar_fx *fx)
+{
+    char path[PATH_MAX], line[8192];
+    if (snprintf(path, sizeof(path), "%s/build/fx-cc.env", fx->root_a) >=
+        (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        bool proc = access("/proc/self/environ", R_OK) == 0;
+        printf("    child-env: %s\n",
+               proc ? "no record -> FAIL" : "no /proc -> SKIP");
+        return !proc;
+    }
+    bool ok = true;
+    size_t n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        size_t name = strcspn(line, "=");
+        if (!line[name])
+            continue;
+        n++;
+        if (vcs_action_v2_env_allowlisted(line, name) ||
+            dp_ar_env_passthrough(line, name))
+            continue;
+        printf("    child-env: unbound %.*s reached the compile\n",
+               (int)name, line);
+        ok = false;
+    }
+    fclose(f);
+    printf("    child-env: %zu entries -> %s\n", n,
+           ok && n ? "PASS" : "FAIL");
+    return ok && n > 0;
+}
+
 static void dp_ar_cleanup(const struct dp_ar_fx *fx)
 {
     test_rm_rf_recursive(fx->root_a);
@@ -4042,13 +4114,19 @@ static bool run_hotswap_action_root_key_fixture(void)
               platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", fx.cache, 1) ==
                   0 &&
               platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+              platform_environment_set("ZCL_FX_CHILD_ENV_SENTINEL", "leak", 1) ==
+                  0 &&
               dp_ar_controls(&fx);
+    /* Checked beside the steps, not before them: each verdict prints. */
+    bool env_bound = ok && dp_ar_child_env_bound(&fx);
     for (size_t i = 0;
          ok && i < sizeof(g_dp_ar_steps) / sizeof(g_dp_ar_steps[0]); i++)
         ok = dp_ar_falsify(&fx, &g_dp_ar_steps[i]);
     if (!ok)
         fprintf(stderr, "hotswap action-root key fixture failed: %s\n",
                 fx.why[0] ? fx.why : "no build reason");
+    (void)dp_environment_unset("ZCL_FX_CHILD_ENV_SENTINEL");
+    ok = ok && env_bound;
     dp_ar_env_restore(&env);
     dp_ar_cleanup(&fx);
     return ok;

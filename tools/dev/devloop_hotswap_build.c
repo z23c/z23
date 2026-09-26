@@ -769,6 +769,7 @@ struct hs_key_action {
     const char *source_tu;
     const char *unity;
     const char *depfile;
+    const struct zcl_action_root_t0 *t0; /* its compile start, or NULL */
 };
 
 /* Derive the action root (devloop_action_root.h) the key binds: it adds the
@@ -786,7 +787,7 @@ static bool hs_cache_key_root(const struct hs_action_plan *plan,
     int64_t started = platform_time_monotonic_us();
     bool ok = zcl_devloop_action_root_key(
         root, action->source_tu, plan->cc, plan->cflags, plan->ldflags,
-        action->unity, action->depfile, root_hex, miss);
+        action->unity, action->depfile, action->t0, root_hex, miss);
     receipt->cache_key_us += platform_time_monotonic_us() - started;
     if (ok)
         (void)snprintf(receipt->cache_key_action_root,
@@ -1590,6 +1591,7 @@ bool zcl_devloop_hotswap_build(
     char cache_so[PATH_MAX] = {0};
     char cache_hash[PATH_MAX] = {0};
     int cache_fd = -1;
+    struct zcl_action_root_t0 compile_t0 = {0};
     if (snprintf(cached_dep, sizeof(cached_dep),
                  "%s/build/hotswap-fast/%s.d", root, safe) >=
             (int)sizeof(cached_dep) ||
@@ -1632,7 +1634,8 @@ bool zcl_devloop_hotswap_build(
         platform_time_monotonic_us() - dependency_started;
     if (have_baseline &&
         hs_cache_key(&plan, root, owner, before, before_n,
-                     &(const struct hs_key_action){ owner, NULL, cached_dep },
+                     &(const struct hs_key_action){ owner, NULL, cached_dep,
+                                                     NULL },
                      receipt, receipt->artifact_cache_key) &&
         hs_cache_root(cache_root)) {
         int64_t lookup_started = platform_time_monotonic_us();
@@ -1659,7 +1662,8 @@ bool zcl_devloop_hotswap_build(
             (void)unlink(tmp_d);
             (void)unlink(tmp_so);
             zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                            plan.ldflags, cached_dep, receipt);
+                                            plan.ldflags, cached_dep,
+                                            &compile_t0, receipt);
             return true;
         }
         if (cache_fd >= 0) {
@@ -1672,6 +1676,7 @@ bool zcl_devloop_hotswap_build(
         }
     }
     receipt->compiler_processes = 1;
+    zcl_action_root_t0_take(&compile_t0);
     if (!hs_run_compile(&plan, root, owner, compile_input, tmp_o, tmp_d,
                         process,
                         &receipt->compile_us, why, why_len)) {
@@ -1697,7 +1702,8 @@ bool zcl_devloop_hotswap_build(
          * second compile below still proves the discovered closure. */
         bool keyed = hs_cache_key(
                          &plan, root, owner, before, before_n,
-                         &(const struct hs_key_action){ owner, NULL, tmp_d },
+                         &(const struct hs_key_action){ owner, NULL, tmp_d,
+                                                          &compile_t0 },
                          receipt, receipt->artifact_cache_key) &&
                      hs_cache_root(cache_root);
         cache_fd = keyed ? hs_cache_lock(cache_root,
@@ -1731,7 +1737,8 @@ bool zcl_devloop_hotswap_build(
             (void)unlink(tmp_o);
             (void)unlink(tmp_so);
             zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                            plan.ldflags, cached_dep, receipt);
+                                            plan.ldflags, cached_dep,
+                                            &compile_t0, receipt);
             return true;
         }
         if (cache_fd >= 0) {
@@ -1741,6 +1748,7 @@ bool zcl_devloop_hotswap_build(
         }
         int64_t stable_compile_us = 0;
         receipt->compiler_processes++;
+        zcl_action_root_t0_take(&compile_t0);
         if (!hs_run_compile(&plan, root, owner, compile_input, tmp_o, tmp_d,
                             process, &stable_compile_us, why, why_len) ||
             !hs_depfile_read(root, tmp_d, after, &after_n, true)) {
@@ -1765,7 +1773,8 @@ bool zcl_devloop_hotswap_build(
     char post_key[65] = {0};
     if (stable && receipt->artifact_cache_key[0] &&
         (!hs_cache_key(&plan, root, owner, after, after_n,
-                       &(const struct hs_key_action){ owner, NULL, cached_dep },
+                       &(const struct hs_key_action){ owner, NULL, cached_dep,
+                                                        &compile_t0 },
                        receipt, post_key) ||
          strcmp(post_key, receipt->artifact_cache_key) != 0)) {
         hs_why(why, why_len,
@@ -1818,7 +1827,8 @@ bool zcl_devloop_hotswap_build(
         (void)close(cache_fd);
     }
     zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                    plan.ldflags, cached_dep, receipt);
+                                    plan.ldflags, cached_dep,
+                                    &compile_t0, receipt);
     return true;
 
 fail:
@@ -1831,7 +1841,8 @@ fail:
     }
     receipt->total_us = platform_time_monotonic_us() - started;
     zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                    plan.ldflags, NULL, receipt);
+                                    plan.ldflags, NULL, &compile_t0,
+                                    receipt);
     return false;
 }
 
@@ -2243,6 +2254,7 @@ static bool hs_hotfork_build(
     char cache_root[PATH_MAX] = {0}, cache_obj[PATH_MAX] = {0};
     char cache_so[PATH_MAX] = {0}, cache_hash[PATH_MAX] = {0};
     int cache_fd = -1;
+    struct zcl_action_root_t0 compile_t0 = {0};
     if (!hs_temp(unity, sizeof(unity), root, ".c") ||
         !hs_temp(descriptor, sizeof(descriptor), root, ".c") ||
         !hs_temp(candidate_obj, sizeof(candidate_obj), root, ".o") ||
@@ -2293,7 +2305,7 @@ static bool hs_hotfork_build(
     if (have_baseline &&
         hs_cache_key(&plan, root, key_owner, before, before_n,
                      &(const struct hs_key_action){ def->source_tu, unity,
-                                                    cached_dep },
+                                                    cached_dep, NULL },
                      receipt, receipt->artifact_cache_key) &&
         hs_cache_root_for("hotfork-v1", cache_root)) {
         int64_t lookup_started = platform_time_monotonic_us();
@@ -2319,6 +2331,7 @@ static bool hs_hotfork_build(
         }
     }
     receipt->compiler_processes = 1;
+    zcl_action_root_t0_take(&compile_t0);
     if (!hs_run_hotfork_compile(&plan, root, unity, candidate_obj, dep,
                                 process, &receipt->compile_us,
                                 why, why_len) ||
@@ -2339,7 +2352,8 @@ static bool hs_hotfork_build(
         bool keyed = hs_cache_key(
                          &plan, root, key_owner, before, before_n,
                          &(const struct hs_key_action){ def->source_tu,
-                                                        unity, dep },
+                                                        unity, dep,
+                                                        &compile_t0 },
                          receipt, receipt->artifact_cache_key) &&
                      hs_cache_root_for("hotfork-v1", cache_root);
         cache_fd = keyed ? hs_cache_lock(cache_root,
@@ -2371,6 +2385,7 @@ static bool hs_hotfork_build(
         }
         int64_t stable_compile_us = 0;
         receipt->compiler_processes++;
+        zcl_action_root_t0_take(&compile_t0);
         if (!hs_run_hotfork_compile(&plan, root, unity, candidate_obj, dep,
                                     process, &stable_compile_us,
                                     why, why_len) ||
@@ -2394,7 +2409,7 @@ static bool hs_hotfork_build(
     if (stable && receipt->artifact_cache_key[0] &&
         (!hs_cache_key(&plan, root, key_owner, after, after_n,
                        &(const struct hs_key_action){ def->source_tu, unity,
-                                                      cached_dep },
+                                                      cached_dep, &compile_t0 },
                        receipt, post_key) ||
          strcmp(post_key, receipt->artifact_cache_key) != 0))
         stable = false;
@@ -2466,7 +2481,7 @@ success:
         (void)flock(cache_fd, LOCK_UN); (void)close(cache_fd);
     }
     zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
-                                    unity, cached_dep, receipt);
+                                    unity, cached_dep, &compile_t0, receipt);
     (void)unlink(unity); (void)unlink(descriptor);
     (void)unlink(candidate_obj); (void)unlink(descriptor_obj);
     if (dep[0]) (void)unlink(dep);
@@ -2478,7 +2493,7 @@ fail:
         (void)flock(cache_fd, LOCK_UN); (void)close(cache_fd);
     }
     zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
-                                    unity, NULL, receipt);
+                                    unity, NULL, &compile_t0, receipt);
     if (unity[0]) (void)unlink(unity);
     if (descriptor[0]) (void)unlink(descriptor);
     if (candidate_obj[0]) (void)unlink(candidate_obj);

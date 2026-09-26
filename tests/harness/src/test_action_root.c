@@ -81,6 +81,7 @@ struct fx {
     char prefix_map[PATH_MAX + 64];
     char include_b[PATH_MAX + 8];
     char unity_in[PATH_MAX];
+    char unity_text[PATH_MAX + 32]; /* build/gen/unity.c as written */
     const char *argv[24];
     const char *link_argv[8];
     const char *vfrom[3];
@@ -148,8 +149,8 @@ static bool fx_depfile(struct fx *x, bool with_local)
  * root-independently for two worktrees to agree. */
 static bool fx_tree(struct fx *x)
 {
-    char unity[PATH_MAX + 32], gen[PATH_MAX + 64];
-    (void)snprintf(unity, sizeof(unity), "#include \"%s/src/unit.c\"\n",
+    char *unity = x->unity_text, gen[PATH_MAX + 64];
+    (void)snprintf(unity, sizeof(x->unity_text), "#include \"%s/src/unit.c\"\n",
                    x->root);
     (void)snprintf(gen, sizeof(gen), "#define GEN_ROOT \"%s/build\"\n",
                    x->root);
@@ -682,6 +683,91 @@ static void test_derive_env(struct fx *x,
              ok && fx_same(x, b));
 }
 
+/* The root binds exactly the environment it is given: every entry is an
+ * allowlisted name (bound by value) or PATH, HOME, TMPDIR (passed through,
+ * the programs PATH resolves bound by their bytes). Anything else could
+ * steer the compile unbound, so it misses instead of being skipped. */
+static void test_derive_env_unbound(struct fx *x,
+                                    const struct zcl_action_root_result *b)
+{
+    static const char *const unbound[] = {
+        "LD_RUN_PATH=/opt/fx", "LD_LIBRARY_PATH=/opt/fx",
+        "CCC_OVERRIDE_OPTIONS=+-DFOO=2", "FX_UNKNOWN=1",
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(unbound) / sizeof(unbound[0]); i++) {
+        x->env[3] = unbound[i];
+        ok = fx_miss(x, "env_unbound") && ok;
+    }
+    x->env[3] = "TMPDIR=/srv/fixture-tmp";
+    ok = ok && fx_same(x, b);
+    x->env[3] = NULL;
+    AR_CHECK("env: a name neither allowlisted nor passed through misses "
+             "(env_unbound); TMPDIR passes through", ok && fx_same(x, b));
+}
+
+static const char k_fx_embed[] =
+    "#if __has_embed(\"blob.bin\" limit(4))\n#endif\nint local(void);\n";
+
+/* __has_embed asks whether a resource resolves without the depfile ever
+ * naming it: an earlier-dir data file appearing or disappearing moves the
+ * root, and an operand that is not a literal name misses. */
+static void test_derive_embed(struct fx *x,
+                              const struct zcl_action_root_result *b)
+{
+    struct zcl_action_root_result emb = {0}, later = {0};
+    bool ok = fx_write(x->root, "src/local.h", k_fx_embed) &&
+              fx_differs(x, b, VCS_ACTION_FIELD_V2_SOURCE) &&
+              fx_derive(x, &emb) &&
+              fx_write(x->root, "inc_b/blob.bin", "\x01\x02\x03") &&
+              fx_differs(x, &emb, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP) &&
+              fx_derive(x, &later) &&
+              fx_write(x->root, "inc_a/blob.bin", "\x04\x05") &&
+              fx_differs(x, &later, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP) &&
+              fx_remove(x->root, "inc_a/blob.bin") && fx_same(x, &later) &&
+              fx_remove(x->root, "inc_b/blob.bin") && fx_same(x, &emb);
+    AR_CHECK("embed: a data file appearing or disappearing where "
+             "__has_embed looks, earlier dir included, moves the root", ok);
+    ok = fx_write(x->root, "src/local.h",
+                  "#if __has_embed(BLOB_NAME)\n#endif\nint local(void);\n") &&
+         fx_miss(x, "conditional_lookup_unbound") &&
+         fx_write(x->root, "src/local.h", "int local(void);\n") &&
+         fx_same(x, b);
+    AR_CHECK("embed: a __has_embed operand that is not a literal name misses "
+             "(conditional_lookup_unbound)", ok);
+    zcl_action_root_result_free(&emb);
+    zcl_action_root_result_free(&later);
+}
+
+/* A derivation after a compile binds only inputs that settled before it
+ * started: an edit inside the compile window misses, even one reverted to
+ * the exact bytes (the compiler may have read the edit). */
+static void test_derive_compile_window(struct fx *x,
+                                       const struct zcl_action_root_result *b)
+{
+    zcl_action_root_t0_take(&x->req.compile_t0);
+    bool ok = fx_same(x, b);
+    AR_CHECK("compile window: inputs settled before the compile derive the "
+             "same root", ok);
+    ok = fx_write(x->root, "src/local.h", "int local(long);\n") &&
+         fx_miss(x, "input_changed_during_compile") &&
+         fx_write(x->root, "src/local.h", "int local(void);\n") &&
+         fx_miss(x, "input_changed_during_compile");
+    AR_CHECK("compile window: a closure file edited after the compile "
+             "started misses, even reverted to its exact bytes "
+             "(input_changed_during_compile)", ok);
+    zcl_action_root_t0_take(&x->req.compile_t0);
+    ok = fx_same(x, b) && fx_write(x->root, "inc_a/defs.h", "#define X 9\n") &&
+         fx_miss(x, "input_changed_during_compile") &&
+         fx_remove(x->root, "inc_a/defs.h") && fx_same(x, b) &&
+         fx_write(x->root, "build/gen/unity.c", x->unity_text) &&
+         fx_miss(x, "input_changed_during_compile");
+    x->req.compile_t0 = (struct zcl_action_root_t0){0};
+    AR_CHECK("compile window: a header appearing earlier in the search, or a "
+             "generated input rewritten, during the compile misses",
+             ok && fx_same(x, b));
+}
+
 static void test_derive_refusals(struct fx *x)
 {
     const char *saved = x->argv[3];
@@ -790,8 +876,28 @@ static void test_derive_climb(struct fx *x,
              "string it asks nothing", ok && fx_same(x, b));
 }
 
+/* Write `text` at root/rel as an executable. */
+static bool fx_exec(const struct fx *x, const char *rel, const char *text)
+{
+    char path[PATH_MAX];
+    return snprintf(path, sizeof(path), "%s/%s", x->root, rel) <
+               (int)sizeof(path) &&
+           fx_write(x->root, rel, text) && chmod(path, 0700) == 0;
+}
+
+/* The fixture backend: a cc1, and an assembler whose --version line stays
+ * the same across builds that differ only in their bytes. */
+static const char k_fx_cc1_v1[] = "#!/bin/sh\n# fixture cc1 v1\nexit 0\n";
+static const char k_fx_cc1_v2[] = "#!/bin/sh\n# fixture cc1 v2\nexit 0\n";
+static const char k_fx_as_v1[] =
+    "#!/bin/sh\necho 'GNU assembler (fixture) 2.42'\n# build 1\n";
+static const char k_fx_as_v2[] =
+    "#!/bin/sh\necho 'GNU assembler (fixture) 2.42'\n# build 2\n";
+
 /* A driver whose built-in list depends on -mcpu=, that skips sysnew as
  * nonexistent until it exists, and whose libc.so lives in the checkout.
+ * Asked what it runs (-###) it names tools/cc1 and tools/as, or prefix/as
+ * once that exists in its own program prefix, as GCC would.
  * Like GCC, it reports a skipped dir before the search list, never inside
  * it (an entry that is not a canonical dir is refused). */
 static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
@@ -802,6 +908,11 @@ static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
         "#!/bin/sh\nR='%s'\n"
         "case \" $* \" in\n"
         "*\" -print-file-name=libc.so \"*) echo \"$R/lib/libc.so\"; exit 0;;\n"
+        "*\" -### \"*)\n"
+        "  a=\"$R/tools/as\"; [ -x \"$R/prefix/as\" ] && a=\"$R/prefix/as\"\n"
+        "  echo \"COMPILER_PATH=$R/prefix/\"\n"
+        "  echo \" \\\"$R/tools/cc1\\\" \\\"-quiet\\\" \\\"-o\\\" \\\"/tmp/x.s\\\"\"\n"
+        "  echo \" $a --64 -o /dev/null /tmp/x.s\"; exit 0;;\n"
         "*\" -v \"*)\n"
         "  d=sysdef; case \" $* \" in *\" -mcpu=alt \"*) d=sysalt;; esac\n"
         "  [ -d \"$R/sysnew\" ] ||\n"
@@ -816,6 +927,8 @@ static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
     return n > 0 && n < (int)sizeof(script) &&
            fx_write(x->root, "tools/tcc.sh", script) &&
            fx_write(x->root, "lib/libc.so", "GROUP ( libc.so.6 )\n") &&
+           fx_exec(x, "tools/cc1", k_fx_cc1_v1) &&
+           fx_exec(x, "tools/as", k_fx_as_v1) &&
            snprintf(path, sizeof(path), "%s/tools/tcc.sh", x->root) <
                (int)sizeof(path) &&
            chmod(path, 0700) == 0 &&
@@ -827,7 +940,7 @@ static bool fx_key(struct fx *x, const char *cc, char out[65])
     char miss[40] = {0};
     const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1 -mcpu=alt";
     bool ok = zcl_devloop_action_root_key(x->root, "src/unit.c", cc, cflags,
-                                          "-shared", NULL, x->depfile, out,
+                                          "-shared", NULL, x->depfile, NULL, out,
                                           miss);
     if (!ok)
         printf("    key missed: %s\n", miss);
@@ -862,6 +975,8 @@ static void test_key_driver_targets(struct fx *x, const char *cc, char k1[65])
              ok && strcmp(k1, k2) != 0 && strcmp(k1, k3) == 0);
 }
 
+static void test_key_backend(struct fx *x, const char *cc);
+
 static void test_key_driver_facts(struct fx *x)
 {
     char cc[PATH_MAX], k1[65] = {0}, k2[65] = {0}, dir[PATH_MAX];
@@ -887,15 +1002,178 @@ static void test_key_driver_facts(struct fx *x)
                   "int unit(void) { return X; }\n") &&
          !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
                                       "-std=c23 @build/args.rsp", "-shared",
-                                      NULL, x->depfile, k2, miss) &&
+                                      NULL, x->depfile, NULL, k2, miss) &&
          strcmp(miss, "argv_unrecognised") == 0;
     miss[0] = '\0';
     ok = ok && !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
                                             "-std=c23", "build/extra.o -shared",
-                                            NULL, x->depfile, k2, miss) &&
+                                            NULL, x->depfile, NULL, k2, miss) &&
          strcmp(miss, "argv_unrecognised") == 0;
     AR_CHECK("key: a plan that names a response file, or whose link flags "
              "start with an input, misses", ok);
+    test_key_backend(x, cc);
+}
+
+/* `tools/as --version`, first line. */
+static bool fx_as_version(const struct fx *x, char out[128])
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/tools/as", x->root) >=
+        (int)sizeof(path))
+        return false;
+    const char *const argv[] = { path, "--version", NULL };
+    if (zcl_spawn_capture(argv, out, 128, 10000) != 0)
+        return false;
+    out[strcspn(out, "\r\n")] = '\0';
+    return out[0] != '\0';
+}
+
+static bool fx_key_miss(struct fx *x, const char *cc, const char *code)
+{
+    char key[65] = {0}, miss[40] = {0};
+    const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1 -mcpu=alt";
+    bool missed = !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
+                                               cflags, "-shared", NULL,
+                                               x->depfile, NULL, key, miss);
+    bool ok = missed && strcmp(miss, code) == 0 && !key[0];
+    if (!ok)
+        printf("    expected key miss %s, got %s\n", code,
+               missed ? miss : "a key");
+    return ok;
+}
+
+/* A same-name program appearing in the driver's own prefix, then one the
+ * driver would run that is gone. */
+static void test_key_backend_unresolved(struct fx *x, const char *cc,
+                                        const char *k1)
+{
+    char k2[65] = {0};
+    bool ok = fx_exec(x, "prefix/as", k_fx_as_v2) && fx_key(x, cc, k2) &&
+              fx_remove(x->root, "prefix/as");
+    AR_CHECK("backend: an assembler appearing in the driver's own program "
+             "prefix re-asks the driver and moves the key",
+             fx_key_differs_then_same(x, cc, k1, k2, ok));
+    ok = fx_exec(x, "prefix/ld", "#!/bin/sh\n") &&
+         fx_key_miss(x, cc, "backend_unresolved") &&
+         fx_remove(x->root, "prefix/ld") && fx_remove(x->root, "tools/cc1") &&
+         fx_key_miss(x, cc, "backend_unresolved") &&
+         fx_exec(x, "tools/cc1", k_fx_cc1_v1) && fx_key(x, cc, k2) &&
+         strcmp(k1, k2) == 0;
+    AR_CHECK("backend: a program the driver runs that does not resolve, or a "
+             "same-name program its prefix search would take instead, misses "
+             "(backend_unresolved)", ok);
+}
+
+/* The compile backend is whatever the plan's own driver runs, bound by its
+ * bytes: never the host toolchain's cc1, never an assembler's --version. */
+static void test_key_backend(struct fx *x, const char *cc)
+{
+    char k1[65] = {0}, k2[65] = {0}, v1[128] = {0}, v2[128] = {0};
+    bool ok = fx_key(x, cc, k1) && fx_exec(x, "tools/cc1", k_fx_cc1_v2) &&
+              fx_key(x, cc, k2) && fx_exec(x, "tools/cc1", k_fx_cc1_v1);
+    AR_CHECK("backend: new bytes in the cc1 the plan driver runs move the key",
+             fx_key_differs_then_same(x, cc, k1, k2, ok));
+    ok = fx_as_version(x, v1) && fx_exec(x, "tools/as", k_fx_as_v2) &&
+         fx_as_version(x, v2) && strcmp(v1, v2) == 0 && fx_key(x, cc, k2) &&
+         fx_exec(x, "tools/as", k_fx_as_v1);
+    AR_CHECK("backend: an assembler with new bytes and the same --version "
+             "moves the key", fx_key_differs_then_same(x, cc, k1, k2, ok));
+    test_key_backend_unresolved(x, cc, k1);
+}
+
+/* Names that steer a compiler, linker or loader never reach the compile
+ * child; one present in the parent is a named miss, never a silent drop. */
+static void test_key_env_influential(struct fx *x)
+{
+    static const struct { const char *name, *value, *code; } cases[] = {
+        { "CCC_OVERRIDE_OPTIONS", "+-DZCL_FX=1", "env_influential_unbound" },
+        { "LD_RUN_PATH", "/opt/fx-run", "env_influential_unbound" },
+        { "LD_LIBRARY_PATH", "/opt/fx-lib", "env_influential_unbound" },
+        { "GCC_COMPARE_DEBUG", "1", "env_influential_unbound" },
+        { "CPLUS_INCLUDE_PATH", "inc_b", "env_search_unbound" },
+    };
+    char k1[65] = {0}, k2[65] = {0};
+    bool ok = fx_key(x, "cc", k1);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bool had = getenv(cases[i].name) != NULL;
+        ok = !had &&
+             platform_environment_set(cases[i].name, cases[i].value, 1) == 0 &&
+             fx_key_miss(x, "cc", cases[i].code) && ok;
+        (void)unsetenv(cases[i].name);
+    }
+    AR_CHECK("env: CCC_OVERRIDE_OPTIONS, LD_RUN_PATH, LD_LIBRARY_PATH, "
+             "GCC_COMPARE_DEBUG or a search variable in the parent misses "
+             "by name", ok && fx_key(x, "cc", k2) && strcmp(k1, k2) == 0);
+    ok = getenv("GCC_COLORS") == NULL &&
+         platform_environment_set("GCC_COLORS", "error=01;31", 1) == 0 &&
+         fx_key(x, "cc", k2) && strcmp(k1, k2) == 0;
+    (void)unsetenv("GCC_COLORS");
+    AR_CHECK("env: a diagnostics-only variable neither reaches the child nor "
+             "moves the key", ok);
+}
+
+static bool fx_unit_key(struct fx *x, const char *unit, const char *dep,
+                        char out[65])
+{
+    char depfile[PATH_MAX], miss[40] = {0};
+    bool ok = snprintf(depfile, sizeof(depfile), "%s/%s", x->root, dep) <
+                  (int)sizeof(depfile) &&
+              zcl_devloop_action_root_key(x->root, unit, "cc",
+                                          "-std=c23 -Iinc_a -Iinc_b -DFOO=1",
+                                          "-shared", NULL, depfile, NULL, out,
+                                          miss);
+    if (!ok)
+        printf("    %s key missed: %s\n", unit, miss);
+    return ok;
+}
+
+static const char k_fx_same_a[] =
+    "static int helper(void) { return 1; }\n"
+    "int unit_a(void) { return helper(); }\n";
+static const char k_fx_same_a2[] =
+    "static int helper(void) { return 7; }\n"
+    "int unit_a(void) { return helper(); }\n";
+static const char k_fx_same_b[] =
+    "static int helper(void) { return 2; }\n"
+    "int unit_b(void)\n{\n    static int helper = 3;\n    return helper;\n}\n";
+
+/* Edit TU a's static and back: a's key moves and returns, b's never does. */
+static void test_key_same_name_edit(struct fx *x, const char *ka,
+                                    const char *kb)
+{
+    char ka2[65] = {0}, kb2[65] = {0}, ka3[65] = {0};
+    bool ok = fx_write(x->root, "src/a.c", k_fx_same_a2) &&
+              fx_unit_key(x, "src/a.c", "build/a.d", ka2) &&
+              fx_unit_key(x, "src/b.c", "build/b.d", kb2) &&
+              fx_write(x->root, "src/a.c", k_fx_same_a) &&
+              fx_unit_key(x, "src/a.c", "build/a.d", ka3);
+    AR_CHECK("same name: editing one TU's static moves only its own key; the "
+             "shadowing TU's key is unchanged",
+             ok && strcmp(ka, ka2) != 0 && strcmp(kb, kb2) == 0 &&
+                 strcmp(ka, ka3) == 0);
+}
+
+/* Falsification: two TUs define the same static function name (and one
+ * shadows it with a block-scope static). Their keys never alias, and an
+ * edit to one moves only its own key. */
+static void test_key_same_name_static(struct fx *x)
+{
+    char ka[65] = {0}, kb[65] = {0}, kb2[65] = {0};
+    bool ok = fx_write(x->root, "src/a.c", k_fx_same_a) &&
+              fx_write(x->root, "src/b.c", k_fx_same_b) &&
+              fx_write(x->root, "build/a.d", "build/a.o: src/a.c\n") &&
+              fx_write(x->root, "build/b.d", "build/b.o: src/b.c\n") &&
+              fx_unit_key(x, "src/a.c", "build/a.d", ka) &&
+              fx_unit_key(x, "src/b.c", "build/b.d", kb);
+    AR_CHECK("same name: two TUs defining the same static function key apart",
+             ok && strcmp(ka, kb) != 0);
+    if (ok)
+        test_key_same_name_edit(x, ka, kb);
+    ok = ok && fx_write(x->root, "src/b.c", k_fx_same_a) &&
+         fx_unit_key(x, "src/b.c", "build/b.d", kb2) &&
+         fx_write(x->root, "src/b.c", k_fx_same_b);
+    AR_CHECK("same name: byte-identical TUs at two paths still key apart",
+             ok && strcmp(kb2, ka) != 0 && strcmp(kb2, kb) != 0);
 }
 
 /* CPU of this thread plus every reaped child (the driver queries), us. */
@@ -931,7 +1209,7 @@ static void test_key_cost(struct fx *x)
         char key[65] = {0}, miss[40] = {0};
         int64_t w = platform_time_monotonic_us(), c = fx_cpu_us();
         ok = zcl_devloop_action_root_key(x->root, "src/unit.c", "cc", cflags,
-                                         "-shared", NULL, x->depfile, key,
+                                         "-shared", NULL, x->depfile, NULL, key,
                                          miss) && ok;
         wall[i] = platform_time_monotonic_us() - w;
         cpu[i] = fx_cpu_us() - c;
@@ -1192,7 +1470,7 @@ static void test_hook_misses(struct fx *x, const char *cflags)
 {
     struct zcl_devloop_hotswap_build_receipt r = {0};
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", NULL, &r);
+                                    "-shared", NULL, NULL, &r);
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
@@ -1210,7 +1488,7 @@ static void test_hook_misses(struct fx *x, const char *cflags)
     char gone[PATH_MAX + 16];
     (void)snprintf(gone, sizeof(gone), "%s/build/gone.d", x->root);
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", gone, &r);
+                                    "-shared", gone, NULL, &r);
     AR_CHECK("hook: a missing depfile reports miss_reason depfile_missing",
              !r.action_root[0] &&
                  strcmp(r.action_root_miss, "depfile_missing") == 0);
@@ -1238,13 +1516,13 @@ static void test_hotfork_hook(struct fx *x, const char *cflags)
               fx_write(x->root, "build/hotswap-fast/.resident-bbbbbb.c",
                        unity);
     zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, a,
-                                    dep, &h1);
+                                    dep, NULL, &h1);
     zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, b,
-                                    dep, &h2);
+                                    dep, NULL, &h2);
     ok = ok && fx_write(x->root, "build/hotswap-fast/.resident-bbbbbb.c",
                         "/* adapter v2 */\n#include \"src/unit.c\"\n");
     zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, b,
-                                    dep, &h3);
+                                    dep, NULL, &h3);
     if (!h1.action_root[0])
         printf("    hotfork hook missed: %s %s\n", h1.action_root_miss,
                h1.action_root_miss_detail);
@@ -1258,7 +1536,7 @@ static void test_hotfork_hook(struct fx *x, const char *cflags)
              strlen(h3.action_root) == 64 &&
                  strcmp(h3.action_root_cause, "generated") == 0);
     zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, a,
-                                    NULL, &h1);
+                                    NULL, NULL, &h1);
     AR_CHECK("hotfork hook: a failed capsule build misses "
              "(closure_unobserved)",
              !h1.action_root[0] &&
@@ -1278,12 +1556,12 @@ static void test_hotswap_hook(struct fx *x)
     struct zcl_devloop_hotswap_build_receipt r1 = {0}, r2 = {0}, r3 = {0};
     const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1";
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", x->depfile, &r1);
+                                    "-shared", x->depfile, NULL, &r1);
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", x->depfile, &r2);
+                                    "-shared", x->depfile, NULL, &r2);
     ok = ok && fx_write(x->root, "src/local.h", "int local(long);\n");
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", x->depfile, &r3);
+                                    "-shared", x->depfile, NULL, &r3);
     ok = ok && fx_write(x->root, "src/local.h", "int local(void);\n");
     if (!r1.action_root[0])
         printf("    hook refused: %s\n", r1.action_root_miss_detail);
@@ -1340,21 +1618,26 @@ static void test_derivation(void)
         test_derive_headers(x, &base);
         test_derive_shadow_and_removal(x, &base);
         test_derive_conditional(x, &base);
+        test_derive_embed(x, &base);
         test_derive_lookups(x, &base);
         test_derive_sysroot(x, &base);
         test_derive_linker(x, &base);
         test_derive_generated(x, &base);
         test_derive_roots(x, &base);
         test_derive_env(x, &base);
+        test_derive_env_unbound(x, &base);
         test_derive_refusals(x);
         test_derive_allowlist(x, &base);
         test_derive_climb(x, &base);
         test_derive_misses(x, &base);
+        test_derive_compile_window(x, &base);
         test_derive_cross_worktree(&base);
         test_derive_store(x, &base);
         test_derive_causes(x, &base);
         test_hotswap_hook(x);
         test_key_driver_facts(x);
+        test_key_env_influential(x);
+        test_key_same_name_static(x);
         test_key_cost(x);
     }
     zcl_action_root_result_free(&base);
