@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
 #define _POSIX_C_SOURCE 200809L
+#include "blue_ca.h"
 #include "blue_secure.h"
 #include "ledger_hid.h"
 
@@ -177,7 +178,7 @@ static int verify_device_certificates(installer *device, const uint8_t nonce[8],
     return 0;
 }
 
-static int establish_channel(installer *device) {
+static int establish_channel(installer *device, EVP_PKEY *ca_key) {
     uint8_t target[4], nonce[8], reply[256], device_nonce[8];
     size_t length = 0;
     put_be32(target, TARGET_ID);
@@ -187,7 +188,7 @@ static int establish_channel(installer *device) {
         exchange(device, 0x50, 0, nonce, sizeof nonce,
                  reply, sizeof reply, &length) < 0 || length < 12) return -1;
     memcpy(device_nonce, reply + 4, sizeof device_nonce);
-    EVP_PKEY *root = blue_key_generate();
+    EVP_PKEY *root = ca_key ? ca_key : blue_key_generate();
     EVP_PKEY *ephemeral = blue_key_generate();
     uint8_t root_prefix = 0x01, ephemeral_prefix[17] = {0x11};
     memcpy(ephemeral_prefix + 1, nonce, 8);
@@ -210,7 +211,7 @@ static int establish_channel(installer *device) {
     OPENSSL_cleanse(secret, sizeof secret);
 done:
     EVP_PKEY_free(ephemeral);
-    EVP_PKEY_free(root);
+    if (!ca_key) EVP_PKEY_free(root);
     return result;
 }
 
@@ -265,7 +266,8 @@ static int load_segment(installer *device, uint32_t address,
 }
 
 static int install(installer *device, const uint8_t *code,
-                   size_t code_length, const app_profile *profile) {
+                   size_t code_length, const app_profile *profile,
+                   EVP_PKEY *ca_key) {
     size_t name_length = strlen(profile->name);
     if (code_length < 1024 || code_length > MAX_CODE || code_length % 64)
         return -1;
@@ -283,6 +285,19 @@ static int install(installer *device, const uint8_t *code,
     put_be32(create + 1, (uint32_t)code_length);
     put_be32(create + 9, (uint32_t)params_length);
     put_be32(create + 17, 1);
+    uint8_t commit[1 + 1 + 73] = {0x09};
+    size_t commit_length = 1;
+    if (ca_key) {
+        uint8_t digest[32];
+        size_t signature_length = 0;
+        if (blue_ca_app_hash(TARGET_ID, create, code, code_length,
+                             params, params_length, digest) < 0 ||
+            blue_ca_sign_digest(ca_key, digest, commit + 2,
+                                &signature_length) < 0) return -1;
+        OPENSSL_cleanse(digest, sizeof digest);
+        commit[1] = (uint8_t)signature_length;
+        commit_length = 2 + signature_length;
+    }
     printf("Creating the %s app slot.\n", profile->name);
     if (no_reply(device, 0, 0, create, sizeof create) < 0) return -1;
     printf("Loading the %s code.\n", profile->name);
@@ -291,8 +306,7 @@ static int install(installer *device, const uint8_t *code,
     if (load_segment(device, (uint32_t)code_length,
                      params, params_length) < 0) return -1;
     printf("Committing the %s app.\n", profile->name);
-    uint8_t commit = 0x09;
-    return no_reply(device, 0, 0, &commit, 1);
+    return no_reply(device, 0, 0, commit, commit_length);
 }
 
 static int read_binary(const char *path, uint8_t **data, size_t *length,
@@ -336,12 +350,28 @@ static int open_blue(const char *path) {
     return fd;
 }
 
+static int enroll_ca(installer *device, EVP_PKEY *ca_key) {
+    static const char name[] = "Z23";
+    uint8_t command[1 + 1 + sizeof name - 1 + 1 + 65] = {
+        0x12, sizeof name - 1, 'Z', '2', '3', 65
+    };
+    if (blue_key_public(ca_key, command + sizeof command - 65) < 0)
+        return -1;
+    return no_reply(device, 0, 0, command, sizeof command);
+}
+
 static int run_installer(installer *device, bool delete_app, bool channel_only,
                          const app_profile *profile,
-                         const uint8_t *code, size_t code_length) {
-    int result = establish_channel(device);
+                         const uint8_t *code, size_t code_length,
+                         EVP_PKEY *ca_key, bool enroll, bool reset) {
+    int result = establish_channel(device, enroll || reset ? NULL : ca_key);
     if (result == 0) result = verify_secure_version(device);
-    if (result == 0 && delete_app) {
+    if (result == 0 && enroll)
+        result = enroll_ca(device, ca_key);
+    else if (result == 0 && reset) {
+        const uint8_t command = 0x13;
+        result = no_reply(device, 0, 0, &command, 1);
+    } else if (result == 0 && delete_app) {
         uint8_t delete_command[2 + 32] = {0x0c};
         size_t name_length = strlen(profile->name);
         delete_command[1] = (uint8_t)name_length;
@@ -350,14 +380,16 @@ static int run_installer(installer *device, bool delete_app, bool channel_only,
                           2 + name_length);
     } else if (result == 0 && !channel_only) {
         printf("Secure channel established; loading %s.\n", profile->name);
-        result = install(device, code, code_length, profile);
+        result = install(device, code, code_length, profile, ca_key);
     }
     return result;
 }
 
 static void report_result(int result, bool delete_app, bool channel_only,
-                          const app_profile *profile) {
-    if (result == 0 && delete_app)
+                          bool enroll, bool reset, const app_profile *profile) {
+    if (result == 0 && enroll) puts("Blue accepted the Z23 custom CA enrollment command.");
+    else if (result == 0 && reset) puts("Blue accepted the custom CA reset command.");
+    else if (result == 0 && delete_app)
         printf("%s delete command accepted by Ledger Blue.\n", profile->name);
     else if (result == 0 && channel_only) puts("Ledger Blue secure channel established.");
     else if (result == 0)
@@ -365,35 +397,74 @@ static void report_result(int result, bool delete_app, bool channel_only,
     else fputs("Ledger Blue installation failed. Check its screen.\n", stderr);
 }
 
+typedef struct {
+    const char *image_path;
+    const char *ca_path;
+    const app_profile *profile;
+    bool channel_only, delete_app, enroll, reset;
+} install_args;
+
+static int parse_args(int argc, char **argv, install_args *args) {
+    *args = (install_args){0};
+    if (argc == 4 && strcmp(argv[2], "--ca-enroll") == 0) {
+        args->ca_path = argv[3];
+        args->enroll = true;
+    } else if (argc == 5 && strcmp(argv[2], "--ca-install") == 0) {
+        args->ca_path = argv[3];
+        args->image_path = argv[4];
+    } else if (argc == 3 && strcmp(argv[2], "--ca-reset") == 0)
+        args->reset = true;
+    else if (argc == 3 && strcmp(argv[2], "--channel-only") == 0)
+        args->channel_only = true;
+    else if (argc == 3 && strcmp(argv[2], "--delete") == 0) {
+        args->delete_app = true;
+        args->profile = &profiles[0];
+    } else if (argc == 3 && strcmp(argv[2], "--delete-fixture") == 0) {
+        args->delete_app = true;
+        args->profile = &profiles[1];
+    } else if (argc == 3)
+        args->image_path = argv[2];
+    else return -1;
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    bool channel_only = argc == 3 && strcmp(argv[2], "--channel-only") == 0;
-    bool delete_probe = argc == 3 && strcmp(argv[2], "--delete") == 0;
-    bool delete_fixture = argc == 3 && strcmp(argv[2], "--delete-fixture") == 0;
-    bool delete_app = delete_probe || delete_fixture;
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s /dev/hidrawN app.bin|--channel-only|--delete|--delete-fixture\n", argv[0]);
+    install_args args;
+    if (parse_args(argc, argv, &args) < 0) {
+        fprintf(stderr, "Usage: %s /dev/hidrawN app.bin|--channel-only|--delete|--delete-fixture|--ca-reset\n"
+                        "       %s /dev/hidrawN --ca-enroll PRIVATE_KEY_FILE\n"
+                        "       %s /dev/hidrawN --ca-install PRIVATE_KEY_FILE app.bin\n",
+                argv[0], argv[0], argv[0]);
         return 2;
     }
     uint8_t *code = NULL;
     size_t code_length = 0;
-    const app_profile *profile = NULL;
-    if (!channel_only && !delete_app &&
-        read_binary(argv[2], &code, &code_length, &profile) < 0) {
+    if (args.image_path &&
+        read_binary(args.image_path, &code, &code_length, &args.profile) < 0) {
         fputs("Expected a reviewed, 64-byte-aligned ZCL Probe or Fixture binary.\n", stderr);
+        return 1;
+    }
+    EVP_PKEY *ca_key = args.ca_path ? blue_ca_load(args.ca_path) : NULL;
+    if (args.ca_path && !ca_key) {
+        fputs("Cannot load owner-only secp256k1 CA key file.\n", stderr);
+        free(code);
         return 1;
     }
     int fd = open_blue(argv[1]);
     if (fd < 0) {
+        EVP_PKEY_free(ca_key);
         free(code);
         return 1;
     }
     installer device = {.fd = fd};
-    if (delete_app) profile = &profiles[delete_fixture ? 1 : 0];
-    int result = run_installer(&device, delete_app, channel_only,
-                               profile, code, code_length);
-    report_result(result, delete_app, channel_only, profile);
+    int result = run_installer(&device, args.delete_app, args.channel_only,
+                               args.profile, code, code_length, ca_key,
+                               args.enroll, args.reset);
+    report_result(result, args.delete_app, args.channel_only,
+                  args.enroll, args.reset, args.profile);
     OPENSSL_cleanse(&device.channel, sizeof device.channel);
     close(fd);
+    EVP_PKEY_free(ca_key);
     free(code);
     return result == 0 ? 0 : 1;
 }

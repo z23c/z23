@@ -55,6 +55,10 @@ installing. The installer targets the connected Blue v2 (`0x31010004`). See the
 [device app instructions](device-blue/README.md) for the exact build and
 install commands.
 
+The optional [user controlled Blue CA](BLUE_CA.md) can sign reviewed apps
+with a locally held key. It changes the device's trust configuration and is
+documented separately from the unsigned diagnostic apps.
+
 The [ZCL Fixture](device-blue-fixture/README.md) tests an exact public-key
 reply and host address encoding without touching the device seed. Run
 `zcl-ledger fixture-address --json /dev/hidrawN` while that app is open.
