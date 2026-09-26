@@ -667,14 +667,14 @@ ZCL_COMMAND_DEV_READ(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.loop.stop", "dev.loop", "", "Stop one identified native watcher",
-    "Confirmation that the identified watcher process received SIGTERM "
-    "and released its lock, plus the resulting live loop-status "
-    "snapshot; the watcher_id must match exactly.", 0,
+    "Confirmation that the identified watcher session exited, plus the "
+    "resulting live loop-status snapshot; watcher_id and watcher_session "
+    "must match the same status receipt.", 0,
     "loop,stop,watcher", "zcl.dev_loop_stop_input.v1",
     "zcl.dev_loop_status.v1",
-    "watcher_id,group,owner,failure_id,to,relink_generation,reason,confirm",
+    "watcher_id,watcher_session,group,owner,failure_id,to,relink_generation,reason,confirm",
     "watcher_id",
-    "z23 dev loop stop <watcher-id>",
+    "z23-dev dev loop stop --input='{\"watcher_id\":123,\"watcher_session\":\"<status-session>\"}'",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,

@@ -288,6 +288,7 @@ bench_home="$scratch/home"
 mkdir -p "$bench_home" "$scratch/backup"
 : >"$samples"
 watcher_id=0
+watcher_session=""
 
 native()
 {
@@ -301,7 +302,7 @@ stop_watcher()
 {
     if [ "$watcher_id" -gt 1 ]; then
         native dev loop stop \
-          --input="$(jq -cn --argjson id "$watcher_id" '{watcher_id:$id}')" \
+          --input="$(jq -cn --argjson id "$watcher_id" --arg session "$watcher_session" '{watcher_id:$id,watcher_session:$session}')" \
           >/dev/null 2>&1 || true
         watcher_id=0
     fi
@@ -394,6 +395,7 @@ while IFS= read -r row; do
     [ "$(jq -r '.data.created // false' <<<"$ensure")" = true ] ||
         fail 'worktree already has a watcher; refusing to take or stop its lease'
     watcher_id="$(jq -r '.data.watcher_id // 0' <<<"$ensure")"
+    watcher_session="$(jq -er '.data.watcher_session' <<<"$ensure")"
     epoch="$(jq -r '.data.epoch // 0' <<<"$ensure")"
     [[ "$watcher_id" =~ ^[0-9]+$ && "$epoch" =~ ^[0-9]+$ ]] &&
         [ "$watcher_id" -gt 1 ] ||

@@ -87,11 +87,11 @@ jq -e '.schema=="zcl.dev_loop_history_benchmark.v2" and
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/zcl-reflex-coverage.XXXXXX")"
 rows="$scratch/rows.jsonl"; samples="$scratch/samples.jsonl"
-current_source=""; current_backup=""; watcher_id=0
+current_source=""; current_backup=""; watcher_id=0; watcher_session=""
 stop_watcher()
 {
     if [[ "$watcher_id" -gt 1 ]]; then
-        "$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id}" \
+        "$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id,\"watcher_session\":\"$watcher_session\"}" \
             >/dev/null 2>&1 || true
         watcher_id=0
     fi
@@ -163,6 +163,7 @@ while IFS= read -r row; do
 
     begin="$($BIN dev begin)"
     watcher_id="$(jq -er '.data.watcher_id' <<<"$begin")"
+    watcher_session="$(jq -er '.data.watcher_session' <<<"$begin")"
     after="$(jq -er '.data.epoch' <<<"$begin")"
     begin_cursor="$after"
     # Prime the owner once. This admits dependency baselines and contracts in

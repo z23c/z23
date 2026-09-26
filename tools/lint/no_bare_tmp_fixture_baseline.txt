@@ -143,6 +143,7 @@ tests/harness/src/test_zcode_dht_service.c 37
 tests/harness/src/test_zcode_node_command.c 1
 tests/harness/src/test_zcode_package_dev.c 5
 tests/harness/src/test_zslp_store_port.c 3
+tools/command/native_dev_command.c 1
 tools/command/native_devagent_mail.c 1
 tools/command/native_presentation_release_confirmation_command.c 1
 tools/command/native_zcode_source_bundle_command.c 1

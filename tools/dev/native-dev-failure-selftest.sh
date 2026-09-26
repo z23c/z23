@@ -15,12 +15,13 @@ BIN="${ZCL_DEV_FAILURE_TEST_BIN:-$ROOT/build/bin/zclassic23-dev}"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-native-dev-failure.XXXXXX")"
 REPO="$SANDBOX/repo"
 WATCHER_ID=""
+WATCHER_SESSION=""
 
 stop_watcher()
 {
     if [[ -n "$WATCHER_ID" ]]; then
         HOME="$SANDBOX" ZCL_DEV_SOURCE_ROOT="$REPO" \
-            "$BIN" dev loop stop "$WATCHER_ID" >/dev/null 2>&1 || true
+            "$BIN" dev loop stop --input="{\"watcher_id\":$WATCHER_ID,\"watcher_session\":\"$WATCHER_SESSION\"}" >/dev/null 2>&1 || true
     fi
 }
 
@@ -118,6 +119,8 @@ ENSURE="$(native dev loop ensure \
     --input="{\"root\":\"$REPO\",\"mode\":\"verify\"}")"
 WATCHER_ID="$(sed -n 's/.*"watcher_id":\([0-9][0-9]*\).*/\1/p' <<<"$ENSURE")"
 [[ -n "$WATCHER_ID" ]] || fail "watcher id missing"
+WATCHER_SESSION="$(sed -n 's/.*"watcher_session":"\([0-9a-f][0-9a-f]*\)".*/\1/p' <<<"$ENSURE")"
+[[ ${#WATCHER_SESSION} -eq 64 ]] || fail "watcher session missing"
 
 wait_after()
 {

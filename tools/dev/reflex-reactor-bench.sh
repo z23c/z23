@@ -57,10 +57,11 @@ samples="$(mktemp "${TMPDIR:-/tmp}/zcl-reflex-samples.XXXXXX")"
 events="$(mktemp "${TMPDIR:-/tmp}/zcl-reflex-events.XXXXXX")"
 cache_samples="$(mktemp "${TMPDIR:-/tmp}/zcl-reflex-cache.XXXXXX")"
 watcher_id=0
+watcher_session=""
 cleanup()
 {
     if [[ "$watcher_id" -gt 0 ]]; then
-        "$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id}" \
+        "$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id,\"watcher_session\":\"$watcher_session\"}" \
             >/dev/null 2>&1 || true
     fi
     cp -p "$backup" "$SOURCE"
@@ -72,6 +73,8 @@ cp -p "$SOURCE" "$backup"
 begin="$($BIN dev begin)"
 watcher_id="$(jq -er '.data.watcher_id' <<<"$begin")" ||
     fail 'warm watcher did not return an id'
+watcher_session="$(jq -er '.data.watcher_session' <<<"$begin")" ||
+    fail 'warm watcher did not return a session'
 after="$(jq -er '.data.epoch' <<<"$begin")" ||
     fail 'warm watcher did not return its event cursor'
 first_epoch="$after"
@@ -186,8 +189,9 @@ done
 
 # Freeze the event range before restoring the benchmark source. The sealed
 # journal remains readable after the watcher stops.
-"$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id}" >/dev/null
+"$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id,\"watcher_session\":\"$watcher_session\"}" >/dev/null
 watcher_id=0
+watcher_session=""
 cp -p "$backup" "$SOURCE"
 
 cursor="$first_epoch"

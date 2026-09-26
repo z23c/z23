@@ -2466,9 +2466,9 @@ struct dev_watcher_info {
     char mode_name[16];
     bool ready;
     bool proof_queue_ready;
-#if defined(_WIN32)
     uint64_t start_token;
     char nonce[65];
+#if defined(_WIN32)
     char image[PATH_MAX];
 #endif
 };
@@ -2482,10 +2482,59 @@ struct dev_watcher_info {
  * pre-containment watcher, whose historical behavior was auto publication, so
  * it is reported truthfully as legacy-auto. */
 #if !defined(_WIN32)
+static bool dev_watcher_nonce_digit(char digit)
+{
+    return (digit >= '0' && digit <= '9') ||
+           (digit >= 'a' && digit <= 'f');
+}
+
+static bool dev_watcher_parse_session(const char *text,
+                                      struct dev_watcher_info *info_out)
+{
+    errno = 0;
+    char *token_end = NULL;
+    unsigned long long start = strtoull(text, &token_end, 10);
+    if (errno != 0 || token_end == text || start == 0 ||
+        (*token_end != ' ' && *token_end != '\t'))
+        return false;
+    while (*token_end == ' ' || *token_end == '\t') token_end++;
+    if (strcspn(token_end, "\n") != 64) return false;
+    char nonce[65];
+    for (size_t i = 0; i < 64; i++) {
+        char digit = token_end[i];
+        if (!dev_watcher_nonce_digit(digit)) return false;
+        nonce[i] = digit;
+    }
+    nonce[64] = 0;
+    if (token_end[64] != '\n' && token_end[64] != 0) return false;
+    if (info_out) {
+        info_out->start_token = (uint64_t)start;
+        memcpy(info_out->nonce, nonce, sizeof(nonce));
+    }
+    return true;
+}
+
+static bool dev_watcher_parse_capability(char *text,
+                                         struct dev_watcher_info *info_out)
+{
+    static const char capability[] = "proofq1";
+    char *cap_end = text;
+    while (*cap_end && *cap_end != '\n' && *cap_end != ' ' &&
+           *cap_end != '\t') cap_end++;
+    if ((size_t)(cap_end - text) != sizeof(capability) - 1 ||
+        memcmp(text, capability, sizeof(capability) - 1) != 0)
+        return false;
+    if (info_out) info_out->proof_queue_ready = true;
+    while (*cap_end == ' ' || *cap_end == '\t') cap_end++;
+    if (*cap_end != '\n' && *cap_end != 0)
+        return dev_watcher_parse_session(cap_end, info_out);
+    return true;
+}
+
 static bool dev_watcher_active_at(const char *lock,
                                   struct dev_watcher_info *info_out)
 {
-    char buf[64] = {0};
+    char buf[192] = {0};
     if (info_out)
         memset(info_out, 0, sizeof(*info_out));
     if (!lock || !lock[0])
@@ -2551,19 +2600,9 @@ static bool dev_watcher_active_at(const char *lock,
                 return false;
             while (*state_end == ' ' || *state_end == '\t')
                 state_end++;
-            if (*state_end != '\n' && *state_end != 0) {
-                static const char capability[] = "proofq1";
-                char *cap_end = state_end;
-                while (*cap_end && *cap_end != '\n' &&
-                       *cap_end != ' ' && *cap_end != '\t')
-                    cap_end++;
-                if ((size_t)(cap_end - state_end) != sizeof(capability) - 1 ||
-                    memcmp(state_end, capability, sizeof(capability) - 1) != 0)
-                    return false;
-                if (info_out) info_out->proof_queue_ready = true;
-                while (*cap_end == ' ' || *cap_end == '\t') cap_end++;
-                if (*cap_end != '\n' && *cap_end != 0) return false;
-            }
+            if (*state_end != '\n' && *state_end != 0 &&
+                !dev_watcher_parse_capability(state_end, info_out))
+                return false;
         }
     }
     dev_pid_t pid = (dev_pid_t)value;
@@ -2774,6 +2813,8 @@ static void dev_emit_loop_status(const char *repo_root,
     (void)json_push_kv_str(&reply->data, "schema", "zcl.dev_loop_status.v1");
     (void)json_push_kv_bool(&reply->data, "active", active);
     (void)json_push_kv_int(&reply->data, "watcher_id", (int64_t)info.pid);
+    (void)json_push_kv_str(&reply->data, "watcher_session",
+                           info.nonce);
     (void)json_push_kv_str(&reply->data, "mode",
                            active ? info.mode_name : "");
     (void)json_push_kv_bool(&reply->data, "source_snapshot_ready",
@@ -3295,17 +3336,84 @@ static bool dev_loop_stop_signal(const struct dev_watcher_info *active)
         ? platform_process_wait(&watcher, 5000, &exit_code)
         : PLATFORM_PROCESS_WAIT_FAILED;
     bool stopped = waited == PLATFORM_PROCESS_WAIT_EXITED;
-    if (!stopped && authorized)
-        stopped = platform_process_terminate(&watcher, 1) &&
-                  platform_process_wait(&watcher, 5000, &exit_code) ==
-                      PLATFORM_PROCESS_WAIT_EXITED;
     platform_process_close(&watcher);
     return stopped;
 }
 #else
-static bool dev_loop_stop_signal(const struct dev_watcher_info *active)
+enum dev_watcher_session_state {
+    DEV_WATCHER_SESSION_GONE,
+    DEV_WATCHER_SESSION_ALIVE,
+    DEV_WATCHER_SESSION_UNKNOWN
+};
+
+static enum dev_watcher_session_state dev_watcher_session_state(
+    const struct dev_watcher_info *active)
 {
-    return kill((pid_t)active->pid, SIGTERM) == 0;
+    uint64_t start = 0;
+    if (!active || active->pid <= 1 || active->start_token == 0)
+        return DEV_WATCHER_SESSION_UNKNOWN;
+    if (os_proc_pid_start_token(active->pid, &start))
+        return start == active->start_token
+            ? DEV_WATCHER_SESSION_ALIVE : DEV_WATCHER_SESSION_GONE;
+    /* An unreadable process identity does not prove an exit. Signal zero
+     * observes existence without delivering a signal to the PID. */
+    if (kill(active->pid, 0) != 0 && errno == ESRCH)
+        return DEV_WATCHER_SESSION_GONE;
+    return DEV_WATCHER_SESSION_UNKNOWN;
+}
+
+static bool dev_watcher_stop_request_format(
+    const struct dev_watcher_info *active, const char *repo_root,
+    char path[320], char body[192], size_t *body_len)
+{
+    char workspace[65];
+    int path_len = snprintf(path, 320, "/tmp/z23-watch-stop-%lu-%s",
+                            (unsigned long)geteuid(), active->nonce);
+    if (!zcl_devloop_workspace_id(repo_root, workspace) ||
+        path_len <= 0 || path_len >= 320)
+        return false;
+    int n = snprintf(body, 192, "%ld %llu %s %s\n", (long)active->pid,
+                     (unsigned long long)active->start_token,
+                     active->nonce, workspace);
+    if (n <= 0 || n >= 192) return false;
+    *body_len = (size_t)n;
+    return true;
+}
+
+static bool dev_watcher_stop_identity_current(
+    const struct dev_watcher_info *active)
+{
+    uint64_t current_start = 0;
+    return active && active->nonce[0] && active->start_token != 0 &&
+        os_proc_pid_start_token(active->pid, &current_start) &&
+        current_start == active->start_token &&
+        dev_pid_is_watcher(active->pid);
+}
+
+static bool dev_loop_stop_signal(const struct dev_watcher_info *active,
+                                 const char *repo_root)
+{
+    if (!dev_watcher_stop_identity_current(active)) {
+        errno = ESTALE;
+        return false;
+    }
+    char path[320], body[192];
+    size_t body_len = 0;
+    if (!dev_watcher_stop_request_format(active, repo_root, path, body,
+                                         &body_len)) {
+        errno = EINVAL;
+        return false;
+    }
+    int fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    struct stat endpoint;
+    bool valid = fd >= 0 && fstat(fd, &endpoint) == 0 &&
+        S_ISFIFO(endpoint.st_mode) && endpoint.st_uid == geteuid() &&
+        (endpoint.st_mode & 0777) == 0600;
+    bool sent = valid && write(fd, body, body_len) == (ssize_t)body_len;
+    int saved = valid ? EIO : ESTALE;
+    if (fd >= 0) (void)close(fd);
+    if (!sent) errno = saved;
+    return sent;
 }
 #endif
 
@@ -3323,6 +3431,17 @@ void zcl_native_handle_dev_loop_stop(
         return;
     }
     struct dev_watcher_info active = {0};
+    const char *requested_session =
+        json_get_str(json_get(request->input, "watcher_session"));
+    if (!requested_session || strlen(requested_session) != 64) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "INVALID_WATCHER_SESSION", "normalize",
+                               false, false,
+                               "watcher_session must be copied from status",
+                               "watcher_session");
+        return;
+    }
     const char *repo_root = dev_source_root(request);
     if (!dev_watcher_active(repo_root, &active)) {
         dev_emit_loop_status(repo_root, reply);
@@ -3332,32 +3451,51 @@ void zcl_native_handle_dev_loop_stop(
                                "no native watcher owns the singleton lock", "");
         return;
     }
-    if ((int64_t)active.pid != requested || !dev_pid_is_watcher(active.pid)) {
+    if ((int64_t)active.pid != requested ||
+        strcmp(active.nonce, requested_session) != 0 ||
+        !dev_pid_is_watcher(active.pid)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                                ZCL_COMMAND_EXIT_BLOCKED, "WATCHER_ID_MISMATCH",
                                "confinement", false, false,
                                "refusing to signal a different process", "watcher_id");
         return;
     }
-    if (!dev_loop_stop_signal(&active)) {
+#if defined(_WIN32)
+    bool signaled = dev_loop_stop_signal(&active);
+#else
+    bool signaled = dev_loop_stop_signal(&active, repo_root);
+#endif
+    if (!signaled) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "WATCHER_STOP_FAILED",
                                "stop", true, false,
-                               "SIGTERM could not be delivered", strerror(errno));
+                               "bound stop request could not be delivered",
+                               strerror(errno));
         return;
     }
+#if defined(_WIN32)
     struct dev_watcher_info still = {0};
+#endif
     for (int i = 0; i < 250; i++) {
+#if defined(_WIN32)
         if (!dev_watcher_active(repo_root, &still))
             break;
+#else
+        if (dev_watcher_session_state(&active) == DEV_WATCHER_SESSION_GONE)
+            break;
+#endif
         platform_sleep_ms(20);
     }
     dev_emit_loop_status(repo_root, reply);
+#if defined(_WIN32)
     if (dev_watcher_active(repo_root, &still))
+#else
+    if (dev_watcher_session_state(&active) != DEV_WATCHER_SESSION_GONE)
+#endif
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "WATCHER_STOP_TIMEOUT",
                                "stop", true, false,
-                               "watcher retained its lock after SIGTERM", "");
+                               "target watcher session remained alive after stop request", "");
     else
         (void)json_push_kv_bool(&reply->data, "stopped", true);
 }

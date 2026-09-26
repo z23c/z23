@@ -19,10 +19,11 @@ command -v jq >/dev/null || fail 'jq is required'
 backup="$(mktemp "${TMPDIR:-/tmp}/zcl-reflex-shop-want-view.XXXXXX")"
 unrelated_backup="$(mktemp "${TMPDIR:-/tmp}/zcl-reflex-shop-want-view-unrelated.XXXXXX")"
 watcher_id=0
+watcher_session=""
 cleanup()
 {
     if [[ "$watcher_id" -gt 0 ]]; then
-        "$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id}" \
+        "$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id,\"watcher_session\":\"$watcher_session\"}" \
             >/dev/null 2>&1 || true
     fi
     cp -p -- "$backup" "$SOURCE"
@@ -35,6 +36,7 @@ cp -p -- "$UNRELATED" "$unrelated_backup"
 
 begin="$($BIN dev begin)"
 watcher_id="$(jq -er '.data.watcher_id' <<<"$begin")" || fail 'watcher id missing'
+watcher_session="$(jq -er '.data.watcher_session' <<<"$begin")" || fail 'watcher session missing'
 after="$(jq -er '.data.epoch' <<<"$begin")" || fail 'event cursor missing'
 nonce="$(date +%s%N)"
 
@@ -166,8 +168,9 @@ jq -n --arg owner 'contexts/market/controllers/src/shop_native_want_view_contrac
      same_module:($green.data.candidate_module_root==$revert.data.candidate_module_root)},
    runtime_published:false}' >"$OUTPUT"
 
-"$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id}" >/dev/null
+"$BIN" dev loop stop --input="{\"watcher_id\":$watcher_id,\"watcher_session\":\"$watcher_session\"}" >/dev/null
 watcher_id=0
+watcher_session=""
 cp -p -- "$backup" "$SOURCE"
 cp -p -- "$unrelated_backup" "$UNRELATED"
 printf 'reflex-hotfork-shop-want-view-acceptance: PASS receipt=%s\n' "$OUTPUT"

@@ -6,6 +6,7 @@
 #include "devloop_watch_classify.h"
 
 #include "base/safe_alloc.h"
+#include "base/hex.h"
 #include "base/serialize_le.h"
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_merkle.h"
@@ -17,6 +18,8 @@
 #include "platform/directory_watcher.h"
 #include "platform/private_directory.h"
 #include "platform/process_lock.h"
+#include "platform/os_proc.h"
+#include "platform/rng.h"
 #include "platform/time_compat.h"
 #include "platform/clock.h"
 
@@ -200,6 +203,12 @@ enum watch_proof_worker_kind {
 
 struct watch_context {
     int fd;
+    int singleton_lock_fd;
+    int stop_fd;
+    bool stop_endpoint_ready;
+    char stop_nonce[65];
+    char stop_workspace[65];
+    uint64_t stop_start_token;
 #if defined(__APPLE__)
     struct platform_directory_watcher directory_watcher;
     bool watch_backend_failed;
@@ -1195,6 +1204,7 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
 #else
         close(ctx->fd);
 #endif
+        if (ctx->stop_endpoint_ready) close(ctx->stop_fd);
         close(watcher_lock_fd);
         zcl_devloop_process_cancel_clear();
         zcl_devloop_process_cancel_poll_clear();
@@ -1293,6 +1303,7 @@ static bool watch_commit_proof_start(struct watch_context *ctx,
 #else
         close(ctx->fd);
 #endif
+        if (ctx->stop_endpoint_ready) close(ctx->stop_fd);
         close(watcher_lock_fd);
         zcl_devloop_process_cancel_clear();
         zcl_devloop_process_cancel_poll_clear();
@@ -2175,22 +2186,68 @@ static bool collect_events(struct watch_context *ctx)
 #endif
 }
 
+static bool watch_owns_current_lock(const struct watch_context *ctx)
+{
+    char path[PATH_MAX];
+    struct stat held, current;
+    return ctx && ctx->singleton_lock_fd >= 0 &&
+        zcl_devloop_watch_lock_path(ctx->root, path, sizeof(path)) &&
+        fstat(ctx->singleton_lock_fd, &held) == 0 &&
+        lstat(path, &current) == 0 && S_ISREG(current.st_mode) &&
+        held.st_dev == current.st_dev && held.st_ino == current.st_ino;
+}
+
+static bool watch_stop_request_poll(struct watch_context *ctx)
+{
+    if (!ctx || !ctx->stop_endpoint_ready) return false;
+    if (!watch_owns_current_lock(ctx)) {
+        /* A replaced lock retires its former watcher independently of the
+         * stop request. The new lock owner is a separate session. */
+        watch_signal(SIGTERM);
+        return true;
+    }
+    char body[192], expected[192];
+    ssize_t got = read(ctx->stop_fd, body, sizeof(body));
+    int n = snprintf(expected, sizeof(expected), "%ld %llu %s %s\n",
+                     (long)getpid(),
+                     (unsigned long long)ctx->stop_start_token,
+                     ctx->stop_nonce, ctx->stop_workspace);
+    if (got > 0 && n > 0 && n < (int)sizeof(expected) &&
+        got == n && memcmp(body, expected, (size_t)n) == 0) {
+        watch_signal(SIGTERM);
+        return true;
+    }
+    return false;
+}
+
 static int watch_wait_for_events(struct watch_context *ctx, int timeout_ms)
 {
 #if defined(__APPLE__)
+    if (watch_stop_request_poll(ctx)) return 0;
+    if (ctx->stop_endpoint_ready && timeout_ms > 100) timeout_ms = 100;
     enum platform_directory_watch_result result =
         platform_directory_watcher_wait(
             &ctx->directory_watcher,
             timeout_ms > 0 ? (uint32_t)timeout_ms : 0, NULL, NULL);
     bool changed = watch_macos_record_result(ctx, result);
+    (void)watch_stop_request_poll(ctx);
     return ctx->watch_backend_failed ? -1 : (changed ? 1 : 0);
 #else
-    struct pollfd pfd = { .fd = ctx->fd, .events = POLLIN };
+    if (watch_stop_request_poll(ctx)) return 0;
+    struct pollfd pfd[2] = {
+        {.fd = ctx->fd, .events = POLLIN},
+        {.fd = ctx->stop_endpoint_ready ? ctx->stop_fd : -1,
+         .events = POLLIN}
+    };
     int rc;
-    do { rc = poll(&pfd, 1, timeout_ms); }
+    do { rc = poll(pfd, 2, timeout_ms); }
     while (rc < 0 && errno == EINTR);
     if (rc <= 0)
         return rc;
+    if (pfd[1].revents & POLLIN) {
+        (void)watch_stop_request_poll(ctx);
+        if (g_watch_stop) return 0;
+    }
     return collect_events(ctx) ? 1 : 0;
 #endif
 }
@@ -2305,6 +2362,7 @@ static bool prime_source_snapshot(struct watch_context *ctx)
 static bool watch_cancel_poll(void *opaque)
 {
     struct watch_context *ctx = opaque;
+    g_watch_stop |= watch_stop_request_poll(ctx);
     if (g_watch_stop)
         return true;
     bool changed = collect_events(ctx) && ctx->changed_count > 0;
@@ -2395,13 +2453,83 @@ static int open_singleton_lock(const char *repo_root,
     return fd;
 }
 
-static bool mark_singleton_ready(
-    int fd, enum zcl_devloop_publish_mode publish_mode)
+static bool watch_stop_endpoint_open(struct watch_context *ctx,
+                                     char path[320])
 {
-    if (fd < 0 || ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0)
+    uint8_t bytes[32];
+    if (!ctx || !path ||
+        !rng_fill(bytes, sizeof(bytes)) ||
+        !os_proc_pid_start_token((uint64_t)getpid(),
+                                 &ctx->stop_start_token) ||
+        !zcl_devloop_workspace_id(ctx->root, ctx->stop_workspace))
         return false;
-    return dprintf(fd, "%ld %s ready proofq1\n", (long)getpid(),
-                   zcl_devloop_publish_mode_name(publish_mode)) > 0;
+    zcl_hex_encode(bytes, sizeof(bytes), ctx->stop_nonce);
+    int n = snprintf(path, 320, "/tmp/z23-watch-stop-%lu-%s",
+                     (unsigned long)geteuid(), ctx->stop_nonce);
+    if (n <= 0 || n >= 320 || mkfifo(path, 0600) != 0)
+        return false;
+    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    bool ok = fd >= 0 && fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode) &&
+              st.st_uid == geteuid() && (st.st_mode & 0777) == 0600;
+    if (!ok) {
+        if (fd >= 0) close(fd);
+        (void)unlink(path);
+        return false;
+    }
+    ctx->stop_fd = fd;
+    ctx->stop_endpoint_ready = true;
+    return true;
+}
+
+static void watch_stop_endpoint_close(struct watch_context *ctx,
+                                      const char *path)
+{
+    if (!ctx || !ctx->stop_endpoint_ready) return;
+    (void)close(ctx->stop_fd);
+    ctx->stop_endpoint_ready = false;
+    if (path && path[0]) (void)unlink(path);
+}
+
+static bool mark_singleton_ready(
+    int fd, enum zcl_devloop_publish_mode publish_mode,
+    const struct watch_context *ctx)
+{
+    if (fd < 0 || !ctx || !ctx->stop_endpoint_ready ||
+        ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0)
+        return false;
+    return dprintf(fd, "%ld %s ready proofq1 %llu %s\n",
+                            (long)getpid(),
+                            zcl_devloop_publish_mode_name(publish_mode),
+                            (unsigned long long)ctx->stop_start_token,
+                            ctx->stop_nonce) > 0;
+}
+
+static int watch_prepare_root(struct watch_context *ctx,
+                              const char *repo_root)
+{
+    const char *root = repo_root && repo_root[0] ? repo_root : ".";
+    if (!realpath(root, ctx->root)) {
+        fprintf(stderr, "[devloop] watch: cannot resolve repository root: %s\n",
+                strerror(errno));
+        return 2;
+    }
+    char reflex_ccache[PATH_MAX];
+    int cache_n = snprintf(reflex_ccache, sizeof(reflex_ccache),
+                           "%s/.cache/devloop-ccache-v1", ctx->root);
+    if (cache_n <= 0 || (size_t)cache_n >= sizeof(reflex_ccache) ||
+        setenv("CCACHE_DIR", reflex_ccache, 1) != 0 ||
+        setenv("CCACHE_MAXSIZE", "512M", 1) != 0) {
+        fprintf(stderr, "[devloop] watch: compiler cache isolation failed\n");
+        return 1;
+    }
+    char makefile[PATH_MAX];
+    snprintf(makefile, sizeof(makefile), "%s/Makefile", ctx->root);
+    if (access(makefile, R_OK) != 0) {
+        fprintf(stderr, "[devloop] watch: root has no readable Makefile\n");
+        return 2;
+    }
+    return 0;
 }
 
 int zcl_devloop_watch_mode_until(const char *repo_root,
@@ -2410,18 +2538,14 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
 {
     struct watch_context ctx = {0};
     ctx.fd = -1;
+    ctx.singleton_lock_fd = -1;
+    char stop_path[320] = {0};
 #if defined(__APPLE__)
     platform_directory_watcher_init(&ctx.directory_watcher);
 #endif
-    const char *root = repo_root && repo_root[0] ? repo_root : ".";
     const char *mode_name = zcl_devloop_publish_mode_name(publish_mode);
     if (!mode_name) {
         fprintf(stderr, "[devloop] watch: invalid publication mode\n");
-        return 2;
-    }
-    if (!realpath(root, ctx.root)) {
-        fprintf(stderr, "[devloop] watch: cannot resolve repository root: %s\n",
-                strerror(errno));
         return 2;
     }
     /* The resident compiler must not share eviction/cleanup state with full
@@ -2429,26 +2553,18 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
      * story from ~90 ms to ~500 ms even though impact and the candidate were
      * unchanged. This checkout-local bounded cache is warm-service state,
      * outside Git and outside the immutable source epoch. */
-    char reflex_ccache[PATH_MAX];
-    int cache_n = snprintf(reflex_ccache, sizeof(reflex_ccache),
-                           "%s/.cache/devloop-ccache-v1", ctx.root);
-    if (cache_n <= 0 || (size_t)cache_n >= sizeof(reflex_ccache) ||
-        setenv("CCACHE_DIR", reflex_ccache, 1) != 0 ||
-        setenv("CCACHE_MAXSIZE", "512M", 1) != 0) {
-        fprintf(stderr,
-                "[devloop] watch: compiler cache isolation failed\n");
-        return 1;
-    }
-    char makefile[PATH_MAX];
-    snprintf(makefile, sizeof(makefile), "%s/Makefile", ctx.root);
-    if (access(makefile, R_OK) != 0) {
-        fprintf(stderr, "[devloop] watch: root has no readable Makefile\n");
-        return 2;
-    }
+    int prepared = watch_prepare_root(&ctx, repo_root);
+    if (prepared != 0) return prepared;
     int lock_fd = open_singleton_lock(ctx.root, publish_mode);
     if (lock_fd < 0) {
         fprintf(stderr,
                 "[devloop] watch: another watcher owns this worktree lane\n");
+        return 1;
+    }
+    ctx.singleton_lock_fd = lock_fd;
+    if (!watch_stop_endpoint_open(&ctx, stop_path)) {
+        fprintf(stderr, "[devloop] watch: stop endpoint unavailable\n");
+        close(lock_fd);
         return 1;
     }
 #if defined(__APPLE__)
@@ -2456,6 +2572,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         fprintf(stderr,
                 "[devloop] watch: cannot raise bounded kqueue descriptor "
                 "budget: %s\n", strerror(errno));
+        watch_stop_endpoint_close(&ctx, stop_path);
         close(lock_fd);
         return 1;
     }
@@ -2464,6 +2581,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             watch_macos_include_file, &ctx)) {
         fprintf(stderr, "[devloop] watch: recursive kqueue setup failed: %s\n",
                 strerror(errno));
+        watch_stop_endpoint_close(&ctx, stop_path);
         close(lock_fd);
         return 1;
     }
@@ -2474,6 +2592,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                 strerror(errno));
         watch_backend_close(&ctx);
         free(ctx.dirs);
+        watch_stop_endpoint_close(&ctx, stop_path);
         close(lock_fd);
         return 1;
     }
@@ -2483,6 +2602,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                 "[devloop] watch: source snapshot reconciliation failed\n");
         watch_backend_close(&ctx);
         free(ctx.dirs);
+        watch_stop_endpoint_close(&ctx, stop_path);
         close(lock_fd);
         return 1;
     }
@@ -2492,14 +2612,16 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         ci_merkle_free(ctx.verified_tree);
         watch_backend_close(&ctx);
         free(ctx.dirs);
+        watch_stop_endpoint_close(&ctx, stop_path);
         close(lock_fd);
         return 1;
     }
-    if (!mark_singleton_ready(lock_fd, publish_mode)) {
+    if (!mark_singleton_ready(lock_fd, publish_mode, &ctx)) {
         fprintf(stderr,
                 "[devloop] watch: could not publish ready ownership\n");
         watch_backend_close(&ctx);
         free(ctx.dirs);
+        watch_stop_endpoint_close(&ctx, stop_path);
         close(lock_fd);
         return 1;
     }
@@ -2521,6 +2643,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
     bool idle_exit = false;
     ctx.idle_since_us = platform_time_monotonic_us();
     while (!g_watch_stop && !(stop && stop(stop_opaque))) {
+        if (watch_stop_request_poll(&ctx)) break;
         watch_commit_proof_prioritize(&ctx);
         if (!watch_proof_start(&ctx, lock_fd)) {
             fprintf(stderr, "[devloop] complete proof worker start failed\n");
@@ -2535,6 +2658,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             watch_idle_touch(&ctx);
         if (ctx.changed_count == 0 && !ctx.prepared_epoch_ready) {
             int prc = watch_wait_for_events(&ctx, stop ? 100 : 1000);
+            if (g_watch_stop) break;
             if (prc < 0) {
                 fprintf(stderr, "[devloop] watch: event wait failed: %s\n",
                         strerror(errno));
@@ -2583,6 +2707,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                 else if (drc < 0)
                     break;
             }
+            if (g_watch_stop) break;
             /* A commit can arrive while the Darwin vnode burst is being
              * coalesced.  Do not enter the synchronous conservative EDIT
              * cycle after that exact clean request becomes claimable: the
@@ -2654,6 +2779,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                 else if (drc < 0)
                     break;
             }
+            if (g_watch_stop) break;
 
             epoch_count = ctx.changed_count;
             int64_t epoch_seen_us = ctx.first_mutation_us > 0
@@ -2800,6 +2926,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
      * delay the next resident reactor from attaching to this checkout. */
     close(lock_fd);
     watch_proof_join(&ctx);
+    watch_stop_endpoint_close(&ctx, stop_path);
     ci_merkle_free(ctx.verified_tree);
     free(ctx.dirs);
     return 0;

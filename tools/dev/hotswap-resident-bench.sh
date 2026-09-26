@@ -31,12 +31,13 @@ STATE="$HOME/.local/state/zclassic23-dev/workspaces/$workspace_id/native-cycle.j
 backup="$(mktemp "${TMPDIR:-/tmp}/zcl-hotswap-bench.XXXXXX")"
 cp -p "$SOURCE" "$backup"
 watcher_id=0
+watcher_session=""
 cleanup() {
     cp -p "$backup" "$SOURCE"
     rm -f "$backup"
     if [[ "$watcher_id" -gt 0 ]]; then
         "$BIN" -datadir="$DATADIR" -rpcport="$RPC_PORT" dev loop stop \
-            --input="{\"watcher_id\":$watcher_id}" >/dev/null 2>&1 || true
+            --input="{\"watcher_id\":$watcher_id,\"watcher_session\":\"$watcher_session\"}" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT INT TERM
@@ -47,6 +48,8 @@ ensure="$($BIN -datadir="$DATADIR" -rpcport="$RPC_PORT" dev loop ensure \
     --input="{\"root\":\"$canonical_root\",\"mode\":\"auto\"}")"
 watcher_id="$(jq -er '.data.watcher_id' <<<"$ensure")" ||
     fail 'auto watcher did not return an id'
+watcher_session="$(jq -er '.data.watcher_session' <<<"$ensure")" ||
+    fail 'auto watcher did not return a session'
 [[ "$(jq -r '.data.runtime_publication' <<<"$ensure")" == true ]] ||
     fail 'auto watcher is not armed for isolated runtime publication'
 
