@@ -146,7 +146,7 @@ Pair distribution:
   dev profile.
 - **Top cause.** A single header, `hotswap/hotswap_service.h`, accounts for
   45 of the 67 (67.2%). It comes from one commit, `1ece915b06cf` (pair
-  c17), which also changed the cache key of 533 of the test-cache groups. Next is
+  c17), which also invalidated the inputs of 533 groups under test. Next is
   `vcs/zcode_action_input.h` with 11 actions. The remaining 19 distinct
   inputs account for 1 to 4 actions each.
 - **MISS.** The dominant reason is `derive: dependency named twice`: 120 of

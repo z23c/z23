@@ -3262,49 +3262,50 @@ static int test_distill_first_error(void)
     return failures;
 }
 
+/* Every island member of the owner TU must exist in the sandbox: the island
+ * wrapper #includes each one, and a member it cannot stat fails the build
+ * with "island member list is invalid or unwritable".
+ * engine/composition/hotswap_islands.def is the authority for this list —
+ * when a member is added there, add it here too, or this fixture breaks in a
+ * way whose message points at the wrapper rather than at the sandbox. */
+static const char *const g_dp_hotswap_cache_files[][2] = {
+    { "Makefile", "# fixture\n" },
+    { "engine/composition/hotswap_swappable.def", "/* fixture */\n" },
+    { "engine/composition/hotswap_islands.def", "/* fixture */\n" },
+    { "engine/composition/hotswap_services.def", "/* fixture */\n" },
+    { "engine/composition/hotswap_shadow_owners.def", "/* fixture */\n" },
+    { "engine/composition/hotfork_capsules.def", "/* fixture */\n" },
+    { "engine/controllers/src/status_native_handlers.c",
+      "int zcl_hotswap_fixture_owner(void) { return 1; }\n" },
+    { "engine/controllers/src/status_native_helpers.c",
+      "int zcl_hotswap_fixture_helper(void) { return 2; }\n" },
+    { "engine/controllers/src/status_mutation_fixture.h",
+      "#define ZCL_HOTSWAP_MUTATION_FIXTURE 1\n" },
+    { "engine/controllers/src/status_brief_native_handler.c",
+      "int zcl_hotswap_fixture_brief(void) { return 5; }\n" },
+    { "contexts/commons/services/src/zcode_c23_corpus_service.c",
+      "int zcl_hotswap_fixture_service(void) { return 3; }\n" },
+    { "contexts/commons/services/src/zcode_c23_economics_service.c",
+      "#include \"zcode_c23_economics_internal.h\"\n"
+      "int zcl_hotswap_fixture_economics(void) { return 4; }\n" },
+    { "contexts/commons/services/src/zcode_c23_economics_internal.h",
+      "#define ZCL_ECONOMICS_FIXTURE 4\n" },
+};
+
 static bool dp_hotswap_cache_fixture_init(const char *root,
                                           const char *compiler_text)
 {
-    static const char owner_v1[] =
-        "int zcl_hotswap_fixture_owner(void) { return 1; }\n";
-    if (!dp_mk_write(root, "Makefile", "# fixture\n") ||
-        !dp_mk_write(root, "engine/composition/hotswap_swappable.def", "/* fixture */\n") ||
-        !dp_mk_write(root, "engine/composition/hotswap_islands.def", "/* fixture */\n") ||
-        !dp_mk_write(root, "engine/composition/hotswap_services.def", "/* fixture */\n") ||
-        !dp_mk_write(root, "engine/composition/hotswap_shadow_owners.def",
-                     "/* fixture */\n") ||
-        !dp_mk_write(root, "engine/composition/hotfork_capsules.def",
-                     "/* fixture */\n") ||
-        !dp_mk_write(root, "engine/controllers/src/status_native_handlers.c",
-                     owner_v1) ||
-        !dp_mk_write(root, "engine/controllers/src/status_native_helpers.c",
-                     "int zcl_hotswap_fixture_helper(void) { return 2; }\n") ||
-        !dp_mk_write(root, "engine/controllers/src/status_mutation_fixture.h",
-                     "#define ZCL_HOTSWAP_MUTATION_FIXTURE 1\n") ||
-        /* Every island member of the owner TU must exist in the sandbox: the
-         * island wrapper #includes each one, and a member it cannot stat
-         * fails the build with "island member list is invalid or unwritable".
-         * engine/composition/hotswap_islands.def is the authority for this list — when a
-         * member is added there, add it here too, or this fixture breaks in a
-         * way whose message points at the wrapper rather than at the sandbox. */
-        !dp_mk_write(root, "engine/controllers/src/status_brief_native_handler.c",
-                     "int zcl_hotswap_fixture_brief(void) { return 5; }\n") ||
-        !dp_mk_write(root,
-                     "contexts/commons/services/src/zcode_c23_corpus_service.c",
-                     "int zcl_hotswap_fixture_service(void) { return 3; }\n") ||
-        !dp_mk_write(root,
-                     "contexts/commons/services/src/zcode_c23_economics_service.c",
-                     "#include \"zcode_c23_economics_internal.h\"\n"
-                     "int zcl_hotswap_fixture_economics(void) { return 4; }\n") ||
-        !dp_mk_write(root,
-                     "contexts/commons/services/src/zcode_c23_economics_internal.h",
-                     "#define ZCL_ECONOMICS_FIXTURE 4\n") ||
-        /* The compiler lives in the checkout, as the real plan's zcc does, so
-         * the action root the cache key binds spells it @root/tools/... */
-        !dp_mk_write(root, "tools/fake_cc.sh", compiler_text))
-        return false;
+    size_t files = sizeof(g_dp_hotswap_cache_files) /
+                   sizeof(g_dp_hotswap_cache_files[0]);
+    for (size_t i = 0; i < files; i++)
+        if (!dp_mk_write(root, g_dp_hotswap_cache_files[i][0],
+                         g_dp_hotswap_cache_files[i][1]))
+            return false;
+    /* The compiler lives in the checkout, as the real plan's zcc does, so
+     * the action root the cache key binds spells it @root/tools/... */
     char canonical_root[PATH_MAX], compiler[PATH_MAX];
-    if (!platform_directory_canonical_real(root, canonical_root,
+    if (!dp_mk_write(root, "tools/fake_cc.sh", compiler_text) ||
+        !platform_directory_canonical_real(root, canonical_root,
                                            sizeof(canonical_root)) ||
         snprintf(compiler, sizeof(compiler), "%s/tools/fake_cc.sh",
                  canonical_root) >= (int)sizeof(compiler) ||
@@ -3865,36 +3866,46 @@ static bool dp_ar_set(struct dp_ar_fx *fx, const struct dp_ar_step *st,
     return unlink(path) == 0;
 }
 
-/* The change misses with a moved key and rebuilds the fresh object; its
- * revert hits the original entry. */
-static bool dp_ar_falsify(struct dp_ar_fx *fx, const struct dp_ar_step *st)
+/* The change misses with a moved key and rebuilds exactly the object an
+ * independent fresh build makes. */
+static bool dp_ar_change(struct dp_ar_fx *fx, const struct dp_ar_step *st)
 {
     struct zcl_devloop_hotswap_build_receipt r = {0};
     bool hit = false;
-    char fresh[65] = {0}, label[96];
-    (void)snprintf(label, sizeof(label), "%s", st->name);
-    bool ok = dp_ar_set(fx, st, true) &&
-              dp_ar_measured_save(fx, fx->root_a, label, &r, &hit) && !hit &&
-              r.cache_key_action_root[0] &&
-              strcmp(r.artifact_cache_key, fx->base_key) != 0 &&
-              strcmp(r.candidate_object_sha256, fx->base_object) != 0 &&
-              dp_ar_fresh(fx, fresh) &&
+    char fresh[65] = {0};
+    bool saved = dp_ar_set(fx, st, true) &&
+                 dp_ar_measured_save(fx, fx->root_a, st->name, &r, &hit);
+    bool moved = saved && !hit && r.cache_key_action_root[0] &&
+                 strcmp(r.artifact_cache_key, fx->base_key) != 0 &&
+                 strcmp(r.candidate_object_sha256, fx->base_object) != 0;
+    bool ok = moved && dp_ar_fresh(fx, fresh) &&
               strcmp(fresh, r.candidate_object_sha256) == 0;
     printf("    falsify: %s miss=%s object=%.12s fresh=%.12s -> %s\n",
            st->name, hit ? "NO" : "yes", r.candidate_object_sha256, fresh,
            ok ? "PASS" : "FAIL");
-    if (!ok)
-        return false;
+    return ok;
+}
+
+/* The revert hits the original entry. */
+static bool dp_ar_revert(struct dp_ar_fx *fx, const struct dp_ar_step *st)
+{
+    struct zcl_devloop_hotswap_build_receipt r = {0};
+    bool hit = false;
+    char label[96];
     (void)snprintf(label, sizeof(label), "%s-revert", st->name);
-    hit = false;
-    ok = dp_ar_set(fx, st, false) &&
-         dp_ar_measured_save(fx, fx->root_a, label, &r, &hit) &&
-         r.artifact_cache_hit &&
-         strcmp(r.artifact_cache_key, fx->base_key) == 0 &&
-         strcmp(r.candidate_object_sha256, fx->base_object) == 0;
+    bool ok = dp_ar_set(fx, st, false) &&
+              dp_ar_measured_save(fx, fx->root_a, label, &r, &hit) &&
+              r.artifact_cache_hit &&
+              strcmp(r.artifact_cache_key, fx->base_key) == 0 &&
+              strcmp(r.candidate_object_sha256, fx->base_object) == 0;
     printf("    control: %s hit=%s -> %s\n", label,
            r.artifact_cache_hit ? "yes" : "NO", ok ? "PASS" : "FAIL");
     return ok;
+}
+
+static bool dp_ar_falsify(struct dp_ar_fx *fx, const struct dp_ar_step *st)
+{
+    return dp_ar_change(fx, st) && dp_ar_revert(fx, st);
 }
 
 static const struct dp_ar_step g_dp_ar_steps[] = {
@@ -3911,9 +3922,8 @@ static const struct dp_ar_step g_dp_ar_steps[] = {
     { "compiler-bytes-same-path", NULL, NULL, NULL, NULL, g_dp_ar_cc_v2 },
 };
 
-/* Base build, an unchanged save, an edit reverted to identical bytes, and
- * the same tree in a second worktree. */
-static bool dp_ar_controls(struct dp_ar_fx *fx)
+/* Base build, then an unchanged save that runs no compiler or linker. */
+static bool dp_ar_cold_then_unchanged(struct dp_ar_fx *fx)
 {
     struct zcl_devloop_hotswap_build_receipt r = {0};
     bool hit = false;
@@ -3924,10 +3934,16 @@ static bool dp_ar_controls(struct dp_ar_fx *fx)
                    r.artifact_cache_key);
     (void)snprintf(fx->base_object, sizeof(fx->base_object), "%s",
                    r.candidate_object_sha256);
-    if (!dp_ar_measured_save(fx, fx->root_a, "unchanged", &r, &hit) ||
-        !r.artifact_cache_hit || r.compiler_processes != 0 ||
-        r.linker_processes != 0)
-        return false;
+    return dp_ar_measured_save(fx, fx->root_a, "unchanged", &r, &hit) &&
+           r.artifact_cache_hit && r.compiler_processes == 0 &&
+           r.linker_processes == 0;
+}
+
+/* A private-body edit misses; reverted to identical bytes it hits. */
+static bool dp_ar_private_edit(struct dp_ar_fx *fx)
+{
+    struct zcl_devloop_hotswap_build_receipt r = {0};
+    bool hit = false;
     char edited[sizeof(g_dp_ar_source) + 8];
     (void)snprintf(edited, sizeof(edited), "%s", g_dp_ar_source);
     char *body = strstr(edited, "ZCL_FX_WRAP;");
@@ -3936,15 +3952,25 @@ static bool dp_ar_controls(struct dp_ar_fx *fx)
     memcpy(body, "ZCL_FX_WRAP+7;", 14);
     (void)snprintf(body + 14, sizeof(edited) - (size_t)(body - edited) - 14,
                    "\n}\n");
-    hit = false;
-    if (!dp_mk_write(fx->root_a, DP_AR_OWNER, edited) ||
-        !dp_ar_measured_save(fx, fx->root_a, "private-edit", &r, &hit) || hit ||
-        strcmp(r.artifact_cache_key, fx->base_key) == 0 ||
-        !dp_mk_write(fx->root_a, DP_AR_OWNER, g_dp_ar_source) ||
-        !dp_ar_measured_save(fx, fx->root_a, "private-edit-revert", &r, &hit) ||
-        !r.artifact_cache_hit || strcmp(r.artifact_cache_key, fx->base_key) != 0)
-        return false;
-    printf("    control: private-edit-revert hit=yes -> PASS\n");
+    bool missed = dp_mk_write(fx->root_a, DP_AR_OWNER, edited) &&
+                  dp_ar_measured_save(fx, fx->root_a, "private-edit", &r,
+                                      &hit) &&
+                  !hit && strcmp(r.artifact_cache_key, fx->base_key) != 0;
+    bool ok = missed && dp_mk_write(fx->root_a, DP_AR_OWNER, g_dp_ar_source) &&
+              dp_ar_measured_save(fx, fx->root_a, "private-edit-revert", &r,
+                                  &hit) &&
+              r.artifact_cache_hit &&
+              strcmp(r.artifact_cache_key, fx->base_key) == 0;
+    printf("    control: private-edit-revert hit=%s -> %s\n",
+           r.artifact_cache_hit ? "yes" : "NO", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/* The same tree in a second worktree reuses the entry without linking. */
+static bool dp_ar_second_worktree(struct dp_ar_fx *fx)
+{
+    struct zcl_devloop_hotswap_build_receipt r = {0};
+    bool hit = false;
     bool ok = dp_ar_measured_save(fx, fx->root_b, "second-worktree", &r, &hit) &&
               r.artifact_cache_hit && r.compiler_processes == 1 &&
               r.linker_processes == 0 &&
@@ -3953,6 +3979,12 @@ static bool dp_ar_controls(struct dp_ar_fx *fx)
     printf("    control: second-worktree hit=%s -> %s\n",
            r.artifact_cache_hit ? "yes" : "NO", ok ? "PASS" : "FAIL");
     return ok;
+}
+
+static bool dp_ar_controls(struct dp_ar_fx *fx)
+{
+    return dp_ar_cold_then_unchanged(fx) && dp_ar_private_edit(fx) &&
+           dp_ar_second_worktree(fx);
 }
 
 static void dp_ar_cleanup(const struct dp_ar_fx *fx)
@@ -3968,19 +4000,41 @@ static void dp_ar_cleanup(const struct dp_ar_fx *fx)
     }
 }
 
+/* The two environment variables the fixture sets, restored afterwards. */
+struct dp_ar_env {
+    char cache[PATH_MAX];
+    char process[32];
+    bool had_cache, had_process;
+};
+
+static void dp_ar_env_save(struct dp_ar_env *e)
+{
+    const char *cache = getenv("ZCL_DEV_ARTIFACT_CACHE");
+    const char *process = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    e->had_cache = cache && cache[0];
+    e->had_process = process && process[0];
+    (void)snprintf(e->cache, sizeof(e->cache), "%s", e->had_cache ? cache : "");
+    (void)snprintf(e->process, sizeof(e->process), "%s",
+                   e->had_process ? process : "");
+}
+
+static void dp_ar_env_restore(const struct dp_ar_env *e)
+{
+    if (e->had_cache)
+        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", e->cache, 1);
+    else
+        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
+    if (e->had_process)
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", e->process, 1);
+    else
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
+}
+
 static bool run_hotswap_action_root_key_fixture(void)
 {
     struct dp_ar_fx fx = {0};
-    char saved_cache[PATH_MAX] = {0}, saved_process[32] = {0};
-    const char *prior_cache = getenv("ZCL_DEV_ARTIFACT_CACHE");
-    const char *prior_process = getenv("ZCL_DEVLOOP_TEST_PROCESS");
-    bool had_cache = prior_cache && prior_cache[0];
-    bool had_process = prior_process && prior_process[0];
-    if (had_cache)
-        (void)snprintf(saved_cache, sizeof(saved_cache), "%s", prior_cache);
-    if (had_process)
-        (void)snprintf(saved_process, sizeof(saved_process), "%s",
-                       prior_process);
+    struct dp_ar_env env;
+    dp_ar_env_save(&env);
     if (!dp_ar_paths(&fx))
         return false;
     dp_ar_cleanup(&fx);
@@ -3995,14 +4049,7 @@ static bool run_hotswap_action_root_key_fixture(void)
     if (!ok)
         fprintf(stderr, "hotswap action-root key fixture failed: %s\n",
                 fx.why[0] ? fx.why : "no build reason");
-    if (had_cache)
-        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
-    if (had_process)
-        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
+    dp_ar_env_restore(&env);
     dp_ar_cleanup(&fx);
     return ok;
 }
