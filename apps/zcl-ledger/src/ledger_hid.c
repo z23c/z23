@@ -46,10 +46,11 @@ int ledger_hid_decode(const uint8_t report[LEDGER_HID_REPORT_SIZE],
     return 0;
 }
 
-static int transfer(int fd, short events, uint8_t *buffer, size_t len) {
+static int transfer(int fd, short events, uint8_t *buffer, size_t len,
+                    int timeout_ms) {
     struct pollfd pfd = {.fd = fd, .events = events};
     int ready;
-    do ready = poll(&pfd, 1, 3000); while (ready < 0 && errno == EINTR);
+    do ready = poll(&pfd, 1, timeout_ms); while (ready < 0 && errno == EINTR);
     if (ready <= 0 || !(pfd.revents & events)) return -1;
     ssize_t count;
     do {
@@ -58,11 +59,11 @@ static int transfer(int fd, short events, uint8_t *buffer, size_t len) {
     return count == (ssize_t)len ? 0 : -1;
 }
 
-int ledger_hid_exchange(int fd, const uint8_t *apdu, size_t apdu_len,
-                        uint8_t *response, size_t response_cap,
-                        size_t *response_len) {
+int ledger_hid_exchange_timeout(int fd, const uint8_t *apdu, size_t apdu_len,
+                                uint8_t *response, size_t response_cap,
+                                size_t *response_len, int timeout_ms) {
     if (fd < 0 || !apdu || !apdu_len || apdu_len > UINT16_MAX ||
-        !response || !response_len || response_cap < 2) return -1;
+        !response || !response_len || response_cap < 2 || timeout_ms < 1) return -1;
     uint8_t report[LEDGER_HID_REPORT_SIZE + 1] = {0};
     uint16_t sequence = 0;
     size_t offset = 0;
@@ -70,7 +71,7 @@ int ledger_hid_exchange(int fd, const uint8_t *apdu, size_t apdu_len,
         size_t consumed;
         if (ledger_hid_encode(apdu + offset, apdu_len - offset, sequence,
                               report + 1, &consumed) < 0 ||
-            transfer(fd, POLLOUT, report, sizeof report) < 0) return -1;
+            transfer(fd, POLLOUT, report, sizeof report, timeout_ms) < 0) return -1;
         offset += consumed;
         if (sequence == UINT16_MAX) return -1;
         ++sequence;
@@ -79,7 +80,8 @@ int ledger_hid_exchange(int fd, const uint8_t *apdu, size_t apdu_len,
     offset = 0;
     size_t declared = 0;
     do {
-        if (transfer(fd, POLLIN, report, LEDGER_HID_REPORT_SIZE) < 0) return -1;
+        if (transfer(fd, POLLIN, report, LEDGER_HID_REPORT_SIZE,
+                     timeout_ms) < 0) return -1;
         const uint8_t *chunk;
         size_t available;
         if (ledger_hid_decode(report, sequence, &declared, &chunk,
@@ -95,4 +97,11 @@ int ledger_hid_exchange(int fd, const uint8_t *apdu, size_t apdu_len,
     } while (offset < declared);
     *response_len = declared;
     return 0;
+}
+
+int ledger_hid_exchange(int fd, const uint8_t *apdu, size_t apdu_len,
+                        uint8_t *response, size_t response_cap,
+                        size_t *response_len) {
+    return ledger_hid_exchange_timeout(fd, apdu, apdu_len, response,
+                                       response_cap, response_len, 3000);
 }

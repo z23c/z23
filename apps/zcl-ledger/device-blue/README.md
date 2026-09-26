@@ -23,9 +23,9 @@ make -C apps/zcl-ledger/device-blue
 ```
 
 The build requires Clang with ARM `-fropi` support and an ARM GCC linker. It
-uses `-std=c23 -Wall -Wextra -Werror -pedantic`. The app binary and HEX file
-appear under `apps/zcl-ledger/device-blue/bin/`. No Python or Rust is used by
-this build. Do not install this development app on a Blue holding funds.
+uses `-std=c23 -Wall -Wextra -Werror -pedantic`. The ELF and HEX files appear
+under `apps/zcl-ledger/device-blue/bin/`. No Python or Rust is used by this
+build. Do not install this development app on a Blue holding funds.
 
 ## APDU
 
@@ -34,9 +34,44 @@ The app accepts only `A5 01 00 00 00`. Its seven-byte reply is
 and success status. All other instructions are rejected. Z23's C23 host
 parses the exact reply through `zcl-ledger probe [--json] /dev/hidrawN`.
 
-## Installation status
+## Install on the tested Blue v2
 
-This repository does not yet contain a C23 Blue secure-channel installer.
-The app has been cross-compiled and checked for byte-for-byte reproducibility,
-but has not been run in an emulator or installed on a physical Blue. Build
-success does not establish runtime behavior or wallet safety.
+Generate the code section as a raw binary and check its SHA-256:
+
+```sh
+llvm-objcopy -O binary --only-section=.text \
+  apps/zcl-ledger/device-blue/bin/app.elf /tmp/zcl-probe.bin
+sha256sum /tmp/zcl-probe.bin
+```
+
+The reviewed 11,520-byte image has SHA-256
+`b38704d3476ac9914dde5d816de88930ed705bdd53246903419c1cb96211eb33`.
+The installer rejects any other image. Build the C23 host and check the
+secure channel before installing:
+
+```sh
+cmake -S apps/zcl-ledger -B build/zcl-ledger -DCMAKE_C_COMPILER=clang
+cmake --build build/zcl-ledger
+build/zcl-ledger/zcl-blue-install /dev/hidraw1 --channel-only
+build/zcl-ledger/zcl-blue-install /dev/hidraw1 /tmp/zcl-probe.bin
+```
+
+Use the app interface reported by `zcl-ledger devices`; `/dev/hidraw1` is
+only the path observed on the tested laptop. If the running app cannot be
+exited through its touchscreen, run `zcl-ledger quit /dev/hidrawN`. To remove
+the probe from the Blue dashboard, run
+`zcl-blue-install /dev/hidrawN --delete`.
+
+The first installed build flashed repeatedly because it redrew the whole
+screen on every ticker event and did not forward button events. It was exited
+through USB and deleted. The corrected build was installed on the connected
+Blue v2, answered the version-1 probe, displayed a steady screen, and exited
+through its touchscreen. This confirms the no-key probe only; wallet custody
+and ZCL transaction behavior remain unimplemented.
+
+The Blue displays “Non genuine application” when this locally loaded app
+opens because Ledger has not signed it. This warning comes from BOLOS, not
+from the app UI. A custom developer certificate changes the device's trust
+configuration and can affect Ledger's genuine check; it is not enrolled by
+this installer. The current independent install preserves the firmware
+warning rather than disguising the app's provenance.

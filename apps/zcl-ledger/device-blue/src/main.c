@@ -93,11 +93,14 @@ unsigned char io_event(unsigned char channel) {
     case SEPROXYHAL_TAG_FINGER_EVENT:
         UX_FINGER_EVENT(G_io_seproxyhal_spi_buffer);
         break;
+    case SEPROXYHAL_TAG_BUTTON_PUSH_EVENT:
+        UX_BUTTON_PUSH_EVENT(G_io_seproxyhal_spi_buffer);
+        break;
     case SEPROXYHAL_TAG_DISPLAY_PROCESSED_EVENT:
         if (!UX_DISPLAYED()) UX_DISPLAYED_EVENT();
         break;
     case SEPROXYHAL_TAG_TICKER_EVENT:
-        UX_REDISPLAY();
+        UX_TICKER_EVENT(G_io_seproxyhal_spi_buffer, (void)0;);
         break;
     default:
         break;
