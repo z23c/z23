@@ -40,8 +40,11 @@ cannot succeed against BOLOS or a different app.
 
 To exit a running Blue app from USB, including one whose touchscreen is
 unresponsive, use `zcl-ledger quit /dev/hidrawN`. This sends Ledger's
-`B0 A7 00 00 00` quit command. On the connected Blue, it returned success and
-the app-info command then reported BOLOS 2.1.1.
+`B0 A7 00 00 00` quit command. A `9000` reply means that BOLOS acknowledged
+the command; it does not prove that the app exited cleanly. Confirm the Blue's
+home screen and a BOLOS app-info reply before sending manager commands. The
+ZCL Fixture remained unresponsive after acknowledging quit on 2026-09-26;
+it returned to BOLOS 2.1.1 after a user restart. Its on-screen EXIT worked.
 
 The separate `zcl-blue-install` executable uses OpenSSL 3's open-source C
 crypto implementation for the Blue's secp256k1 and AES secure channel. It

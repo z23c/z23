@@ -25,7 +25,8 @@ With the Blue on its home screen, install the pinned image using
 confirm that the display and EXIT work, then reopen it and run
 `zcl-ledger fixture-address --json /dev/hidrawN`. The JSON includes
 `"fixture":true` and `"wallet_address":false`. If the app is unresponsive,
-use `zcl-ledger quit /dev/hidrawN`. From BOLOS, remove it with
+try `zcl-ledger quit /dev/hidrawN`; an acknowledged quit still requires
+confirmation that BOLOS answers. From BOLOS, remove it with
 `zcl-blue-install /dev/hidrawN --delete-fixture`.
 
 Blue warns `Non genuine application` when opening an app without a trusted

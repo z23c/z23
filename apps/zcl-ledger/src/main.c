@@ -199,7 +199,7 @@ static int quit_app(const char *path) {
         fprintf(stderr, "Blue rejected quit command with status %04x.\n", status);
         return 1;
     }
-    puts("Blue accepted the quit command.");
+    puts("Blue acknowledged quit; confirm the home screen before manager commands.");
     return 0;
 }
 

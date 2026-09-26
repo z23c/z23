@@ -3,6 +3,7 @@
 # Ledger Blue public-key fixture
 
 Recorded: 2026-09-26T04:39:35-04:00 (2026-09-26T08:39:35Z)
+Updated: 2026-09-26T04:55:06-04:00 (2026-09-26T08:55:06Z)
 
 ## Question
 
@@ -38,6 +39,12 @@ over USB and returned
 The user confirmed that the screen remained steady after the APDU and EXIT
 still returned to the home screen.
 The BOLOS warning for a non-genuine custom application remains.
+
+A later USB `B0 A7 00 00 00` quit command received `9000`, but BOLOS app-info
+then timed out and the user reported a frozen screen. After restarting the
+Blue, USB re-enumerated and BOLOS 2.1.1 answered. The earlier successful
+on-screen EXIT and fixture APDU remain valid observations. The USB quit path
+is not established as reliable for this app.
 
 ## Limits
 
