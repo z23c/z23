@@ -854,7 +854,13 @@ static bool zdev_improve_finalize_candidate(
         vcs_zcode_task_authority_validate_for_candidate(
             ctx->workspace, &ctx->task, &ctx->candidate);
     if (task_authority != VCS_ZCODE_TASK_AUTHORITY_OK) {
-        zdev_fail(reply, "CANDIDATE_RECIPE_REFUSED",
+        /* Acceptance belongs to the task: editing its tests needs a new
+         * task whose base source already carries them. */
+        zdev_fail(reply,
+            task_authority ==
+                    VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED
+                ? "CANDIDATE_MODIFIED_ACCEPTANCE_TESTS"
+                : "CANDIDATE_RECIPE_REFUSED",
             vcs_zcode_task_authority_result_string(task_authority));
         return false;
     }

@@ -14,6 +14,7 @@
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_lane.h"
+#include "vcs/zcode_task_authority.h"
 #include "vcs/zcode_task_index.h"
 
 #include <stdio.h>
@@ -25,6 +26,21 @@ static bool lane_load_raw(const char *workspace, const char *hex,
 {
     return zcl_hex_decode_lower(hex, root, 32) &&
            vcs_object_load_raw(workspace, root, wire, wire_len) == 0;
+}
+
+/* Every lane, PROVEN included, is judged by the task's acceptance tests. A
+ * candidate that edited them is refused by name, not promoted. */
+static struct zcl_result lane_acceptance_authority(
+    const char *workspace, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate)
+{
+    enum vcs_zcode_task_authority_result result =
+        vcs_zcode_task_authority_validate_for_candidate(
+            workspace, task, candidate);
+    if (result == VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED)
+        return ZCL_ERR(-1, "lane-candidate-modified-acceptance-tests");
+    return result == VCS_ZCODE_TASK_AUTHORITY_OK
+        ? ZCL_OK : ZCL_ERR(-1, "lane-task-authority-invalid");
 }
 
 static struct zcl_result lane_load_context(
@@ -60,7 +76,7 @@ static struct zcl_result lane_load_context(
         free(wire); return ZCL_ERR(-1, "lane-policy-cas-invalid");
     }
     free(wire);
-    return ZCL_OK;
+    return lane_acceptance_authority(workspace, task, candidate);
 }
 
 static bool lane_load_receipt(

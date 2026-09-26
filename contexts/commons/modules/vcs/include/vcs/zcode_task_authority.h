@@ -16,7 +16,21 @@ enum vcs_zcode_task_authority_result {
     VCS_ZCODE_TASK_AUTHORITY_RECIPE,
     VCS_ZCODE_TASK_AUTHORITY_MEMBERSHIP,
     VCS_ZCODE_TASK_AUTHORITY_CAS,
+    /* The candidate tree changes a recipe test source the task named. */
+    VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED,
 };
+
+/* Acceptance belongs to the task author. acceptance_tests_root is the
+ * recipe root: it names the test source PATHS, not their bytes. The bytes
+ * are bound through task.source_root, whose manifest records each test
+ * source's mode, size and tagged blob. The acceptance-tests bytes root is
+ * SHA3-256 over this domain (hashed with its trailing 0x00), the recipe
+ * root, the u16le test-source count, then for each recipe test source in
+ * canonical order: u16le path length, path bytes, u32le mode, u64le size
+ * and the 32-byte tagged blob root. Editing any named test changes it;
+ * editing only non-test files leaves it unchanged. */
+#define VCS_ZCODE_ACCEPTANCE_TESTS_BYTES_DOMAIN \
+    "zcl.zcode.acceptance_tests_bytes.v1"
 
 const char *vcs_zcode_task_authority_result_string(
     enum vcs_zcode_task_authority_result result);
@@ -36,9 +50,19 @@ enum vcs_zcode_task_authority_result vcs_zcode_task_authority_store(
     uint8_t lock_root[32], uint8_t recipe_root[32]);
 
 /* Require both addressed wires and recipe membership in the task's exact
- * base source tree or candidate source tree. */
+ * base source tree or candidate source tree. The candidate form also
+ * requires the candidate tree to carry the task's exact acceptance-test
+ * bytes: a candidate cannot edit the tests it is judged by
+ * (VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED). Changing the tests
+ * requires a new task whose base source already holds them. */
 enum vcs_zcode_task_authority_result vcs_zcode_task_authority_validate(
     const char *repo_root, const struct vcs_zcode_task_v1 *task);
+
+/* Validate the task authority and derive its acceptance-tests bytes root
+ * (VCS_ZCODE_ACCEPTANCE_TESTS_BYTES_DOMAIN) over task.source_root. */
+enum vcs_zcode_task_authority_result vcs_zcode_task_acceptance_tests_bytes_root(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    uint8_t out[32]);
 enum vcs_zcode_task_authority_result
 vcs_zcode_task_authority_validate_for_candidate(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,

@@ -919,6 +919,134 @@ static int test_zd_patch(void)
     return failures;
 }
 
+/* One tiny package tree: src/lib.c plus its acceptance test
+ * tests/test_lib.c, captured into the base workspace's ZVCS CAS. */
+static bool zd_acceptance_tree(const char *store, const char *tag,
+                               const char *lib, const char *test,
+                               uint8_t root[32], char real[4096])
+{
+    char dir[256], path[4400];
+    test_make_tmpdir(dir, sizeof(dir), "zcode_dev", tag);
+    if (!platform_directory_canonical_real(dir, real, 4096)) return false;
+    (void)snprintf(path, sizeof(path), "%s/src", real);
+    if (platform_directory_create(path, 0700) != 0) return false;
+    (void)snprintf(path, sizeof(path), "%s/tests", real);
+    if (platform_directory_create(path, 0700) != 0) return false;
+    (void)snprintf(path, sizeof(path), "%s/src/lib.c", real);
+    if (!zd_write_text(path, lib)) return false;
+    (void)snprintf(path, sizeof(path), "%s/tests/test_lib.c", real);
+    if (!zd_write_text(path, test)) return false;
+    return store
+        ? vcs_tree_capture_into(real, store, root) == VCS_OK
+        : vcs_tree_capture_path(real, root) == VCS_OK;
+}
+
+/* Store the canonical lock and a recipe naming tests/test_lib.c. */
+static bool zd_acceptance_authority(const char *store,
+                                    const uint8_t base_root[32],
+                                    struct vcs_zcode_task_v1 *task)
+{
+    struct vcs_package_lock lock;
+    vcs_package_lock_init(&lock);
+    lock.count = 1;
+    memcpy(lock.nodes[0].root, base_root, 32);
+    (void)snprintf(lock.nodes[0].name, sizeof(lock.nodes[0].name),
+                   "publisher/fixture");
+    (void)snprintf(lock.nodes[0].semver, sizeof(lock.nodes[0].semver),
+                   "1.0.0");
+    struct vcs_package_recipe recipe;
+    vcs_package_recipe_init(&recipe);
+    enum vcs_package_recipe_error error;
+    uint8_t *lock_wire = NULL, *recipe_wire = NULL;
+    size_t lock_len = 0, recipe_len = 0;
+    bool ok = vcs_package_recipe_add_source(&recipe, "src/lib.c", &error) &&
+        vcs_package_recipe_add_test_source(
+            &recipe, "tests/test_lib.c", &error);
+    vcs_package_recipe_set_test_limits(
+        &recipe, 0, 30, UINT64_C(64) * 1024u * 1024u);
+    ok = ok && vcs_package_lock_serialize(&lock, &lock_wire, &lock_len) ==
+            VCS_PACKAGE_DEPS_OK &&
+        vcs_package_recipe_serialize(&recipe, &recipe_wire, &recipe_len) ==
+            VCS_PACKAGE_RECIPE_OK &&
+        vcs_zcode_task_authority_store(
+            store, lock_wire, lock_len, recipe_wire, recipe_len,
+            task->dependency_lock_root, task->acceptance_tests_root) ==
+            VCS_ZCODE_TASK_AUTHORITY_OK;
+    vcs_package_recipe_free(&recipe);
+    free(recipe_wire); free(lock_wire);
+    return ok;
+}
+
+static int test_zd_acceptance_tests_bound(void)
+{
+    int failures = 0;
+    TEST("zcode_dev: task acceptance binds exact test bytes; candidates cannot edit them") {
+        static const char lib[] = "int lib(int x) { return x; }\n";
+        static const char lib_fixed[] = "int lib(int x) { return x + 0; }\n";
+        static const char test[] =
+            "int lib(int);\nint main(void) { return lib(1) == 1 ? 0 : 1; }\n";
+        static const char weakened[] = "int main(void) { return 0; }\n";
+        char store[4096], scan[4096];
+        uint8_t base_root[32], source_edit[32], test_edit[32], both_edit[32];
+        ASSERT(zd_acceptance_tree(NULL, "acc-base", lib, test, base_root,
+                                  store));
+        ASSERT(zd_acceptance_tree(store, "acc-source", lib_fixed, test,
+                                  source_edit, scan));
+        ASSERT(zd_acceptance_tree(store, "acc-test", lib, weakened,
+                                  test_edit, scan));
+        ASSERT(zd_acceptance_tree(store, "acc-both", lib_fixed, weakened,
+                                  both_edit, scan));
+        uint8_t policy_root[32];
+        zd_root(policy_root, 6);
+        struct vcs_zcode_task_v1 task;
+        zd_task(&task, policy_root);
+        memcpy(task.source_root, base_root, 32);
+        ASSERT(zd_acceptance_authority(store, base_root, &task));
+
+        /* Changed test bytes change the root; source-only edits do not. */
+        uint8_t tests_root[32], same_tests[32], new_tests[32];
+        ASSERT_EQ(vcs_zcode_task_acceptance_tests_bytes_root(
+                      store, &task, tests_root), VCS_ZCODE_TASK_AUTHORITY_OK);
+        struct vcs_zcode_task_v1 moved = task;
+        memcpy(moved.source_root, source_edit, 32);
+        ASSERT_EQ(vcs_zcode_task_acceptance_tests_bytes_root(
+                      store, &moved, same_tests), VCS_ZCODE_TASK_AUTHORITY_OK);
+        ASSERT(memcmp(tests_root, same_tests, 32) == 0);
+        struct vcs_zcode_task_v1 next_task = task;
+        memcpy(next_task.source_root, test_edit, 32);
+        ASSERT_EQ(vcs_zcode_task_acceptance_tests_bytes_root(
+                      store, &next_task, new_tests),
+                  VCS_ZCODE_TASK_AUTHORITY_OK);
+        ASSERT(memcmp(tests_root, new_tests, 32) != 0);
+        /* The recipe root names paths only: it cannot see the edit. */
+        ASSERT(memcmp(task.acceptance_tests_root,
+                      next_task.acceptance_tests_root, 32) == 0);
+
+        struct vcs_zcode_candidate_v1 candidate;
+        memset(&candidate, 0, sizeof(candidate));
+        memcpy(candidate.candidate_source_root, source_edit, 32);
+        ASSERT_EQ(vcs_zcode_task_authority_validate_for_candidate(
+                      store, &task, &candidate), VCS_ZCODE_TASK_AUTHORITY_OK);
+        memcpy(candidate.candidate_source_root, test_edit, 32);
+        ASSERT_EQ(vcs_zcode_task_authority_validate_for_candidate(
+                      store, &task, &candidate),
+                  VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED);
+        ASSERT_STR_EQ(vcs_zcode_task_authority_result_string(
+                          VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED),
+                      "candidate-modified-acceptance-tests");
+        memcpy(candidate.candidate_source_root, both_edit, 32);
+        ASSERT_EQ(vcs_zcode_task_authority_validate_for_candidate(
+                      store, &task, &candidate),
+                  VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED);
+        /* New tests need a new task whose base already carries them. */
+        ASSERT_EQ(vcs_zcode_task_authority_validate_for_candidate(
+                      store, &next_task, &candidate),
+                  VCS_ZCODE_TASK_AUTHORITY_OK);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_zd_policy_and_task(void)
 {
     int failures = 0;
@@ -10373,6 +10501,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_patch();
     failures += test_zd_task_context();
     failures += test_zd_agent_context();
+    failures += test_zd_acceptance_tests_bound();
     failures += test_zd_policy_and_task();
     failures += test_zd_candidate_review();
     failures += test_zd_lane_receipt();

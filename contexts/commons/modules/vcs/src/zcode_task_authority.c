@@ -3,6 +3,9 @@
 
 #include "vcs/zcode_task_authority.h"
 
+#include "vcs_priv.h"
+
+#include "crypto/sha3.h"
 #include "vcs/package_deps.h"
 #include "vcs/package_recipe.h"
 #include "vcs/vcs.h"
@@ -22,6 +25,8 @@ const char *vcs_zcode_task_authority_result_string(
     case VCS_ZCODE_TASK_AUTHORITY_MEMBERSHIP:
         return "acceptance-recipe-path-missing";
     case VCS_ZCODE_TASK_AUTHORITY_CAS: return "task-authority-cas-miss";
+    case VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED:
+        return "candidate-modified-acceptance-tests";
     }
     return "unknown";
 }
@@ -87,9 +92,55 @@ enum vcs_zcode_task_authority_result vcs_zcode_task_authority_store(
         ? VCS_ZCODE_TASK_AUTHORITY_OK : VCS_ZCODE_TASK_AUTHORITY_CAS;
 }
 
+static const struct vcs_entry *task_authority_entry(
+    const struct vcs_manifest *manifest, const char *path)
+{
+    size_t lo = 0, hi = manifest->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2u;
+        int cmp = strcmp(manifest->entries[mid].path, path);
+        if (cmp == 0) return &manifest->entries[mid];
+        if (cmp < 0) lo = mid + 1u; else hi = mid;
+    }
+    return NULL;
+}
+
+/* VCS_ZCODE_ACCEPTANCE_TESTS_BYTES_DOMAIN over the recipe root and the exact
+ * manifest entry of every recipe test source. Membership was already
+ * checked; a missing entry still fails closed. */
+static bool task_authority_tests_bytes_root(
+    const struct vcs_package_recipe *recipe, const uint8_t recipe_root[32],
+    const struct vcs_manifest *manifest, uint8_t out[32])
+{
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    static const char domain[] = VCS_ZCODE_ACCEPTANCE_TESTS_BYTES_DOMAIN;
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, recipe_root, 32);
+    uint8_t scalar[8];
+    vcs_wr_u16le(scalar, (uint16_t)recipe->test_sources.count);
+    sha3_256_write(&sha, scalar, 2);
+    for (size_t i = 0; i < recipe->test_sources.count; i++) {
+        const char *path = recipe->test_sources.items[i];
+        const struct vcs_entry *entry = task_authority_entry(manifest, path);
+        if (!entry) return false;
+        size_t path_len = strlen(path);
+        vcs_wr_u16le(scalar, (uint16_t)path_len);
+        sha3_256_write(&sha, scalar, 2);
+        sha3_256_write(&sha, (const uint8_t *)path, path_len);
+        vcs_wr_u32le(scalar, entry->mode);
+        sha3_256_write(&sha, scalar, 4);
+        vcs_wr_u64le(scalar, entry->size);
+        sha3_256_write(&sha, scalar, 8);
+        sha3_256_write(&sha, entry->blob, 32);
+    }
+    sha3_256_finalize(&sha, out);
+    return true;
+}
+
 static enum vcs_zcode_task_authority_result task_authority_validate_tree(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
-    const uint8_t source_root[32])
+    const uint8_t source_root[32], uint8_t tests_root[32])
 {
     uint8_t *lock_wire = NULL, *recipe_wire = NULL;
     size_t lock_len = 0, recipe_len = 0;
@@ -119,19 +170,34 @@ static enum vcs_zcode_task_authority_result task_authority_validate_tree(
         result = VCS_ZCODE_TASK_AUTHORITY_MEMBERSHIP;
     else if (!tree && result == VCS_ZCODE_TASK_AUTHORITY_OK)
         result = VCS_ZCODE_TASK_AUTHORITY_CAS;
+    else if (tree && !task_authority_tests_bytes_root(
+                         &recipe, recipe_root, &manifest, tests_root))
+        result = VCS_ZCODE_TASK_AUTHORITY_MEMBERSHIP;
     if (tree) vcs_manifest_free(&manifest);
     if (parsed) vcs_package_recipe_free(&recipe);
     free(recipe_wire); free(lock_wire);
     return result;
 }
 
+enum vcs_zcode_task_authority_result vcs_zcode_task_acceptance_tests_bytes_root(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    uint8_t out[32])
+{
+    if (!repo_root || !task || !out) return VCS_ZCODE_TASK_AUTHORITY_NULL;
+    return task_authority_validate_tree(
+        repo_root, task, task->source_root, out);
+}
+
 enum vcs_zcode_task_authority_result vcs_zcode_task_authority_validate(
     const char *repo_root, const struct vcs_zcode_task_v1 *task)
 {
-    if (!repo_root || !task) return VCS_ZCODE_TASK_AUTHORITY_NULL;
-    return task_authority_validate_tree(repo_root, task, task->source_root);
+    uint8_t tests_root[32];
+    return vcs_zcode_task_acceptance_tests_bytes_root(
+        repo_root, task, tests_root);
 }
 
+/* The candidate is judged by the task's tests: its tree must carry the
+ * exact recipe test-source entries of the task's base tree. */
 enum vcs_zcode_task_authority_result
 vcs_zcode_task_authority_validate_for_candidate(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
@@ -139,10 +205,16 @@ vcs_zcode_task_authority_validate_for_candidate(
 {
     if (!repo_root || !task || !candidate)
         return VCS_ZCODE_TASK_AUTHORITY_NULL;
+    uint8_t base_tests[32], candidate_tests[32];
     enum vcs_zcode_task_authority_result result =
-        vcs_zcode_task_authority_validate(repo_root, task);
-    return result == VCS_ZCODE_TASK_AUTHORITY_OK
-        ? task_authority_validate_tree(
-              repo_root, task, candidate->candidate_source_root)
-        : result;
+        vcs_zcode_task_acceptance_tests_bytes_root(
+            repo_root, task, base_tests);
+    if (result == VCS_ZCODE_TASK_AUTHORITY_OK)
+        result = task_authority_validate_tree(
+            repo_root, task, candidate->candidate_source_root,
+            candidate_tests);
+    if (result == VCS_ZCODE_TASK_AUTHORITY_OK &&
+        memcmp(base_tests, candidate_tests, 32) != 0)
+        result = VCS_ZCODE_TASK_AUTHORITY_ACCEPTANCE_TESTS_MODIFIED;
+    return result;
 }
