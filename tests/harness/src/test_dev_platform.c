@@ -2370,20 +2370,18 @@ static bool seal_batch_damaged_tail(const char *repo, const char *state_dir,
     return true;
 }
 
-/* A flusher killed halfway through writing a journal record leaves no file
- * under that record's final name (records are staged, then linked whole), so
- * the next heal and flush continue the journal instead of refusing a torn
- * tail. */
-static bool seal_batch_torn_write(const char *repo, const char *state_dir,
-                                  const int64_t epochs[4])
+/* Publishes two ring events and forks a flusher that dies halfway through
+ * writing the second one's journal record. */
+static pid_t seal_batch_torn_flusher(const char *repo, int64_t base,
+                                     int64_t next[2])
 {
-    char why[192] = {0}, event_path[PATH_MAX];
-    int64_t next[2] = {0};
+    char why[192] = {0};
     for (int i = 0; i < 2; i++)
-        SB_CHECK(zcl_devloop_cycle_stream_publish(
-                     repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
-                     &next[i], why, sizeof(why)) &&
-                 next[i] == epochs[3] + 1 + i);
+        if (!zcl_devloop_cycle_stream_publish(
+                repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+                &next[i], why, sizeof(why)) ||
+            next[i] != base + 1 + i)
+            return -1;
     pid_t flusher = fork();
     if (flusher == 0) {
         /* Record 1 journals next[0]; record 2 is next[1]'s, torn midway. */
@@ -2391,6 +2389,19 @@ static bool seal_batch_torn_write(const char *repo, const char *state_dir,
         _exit(zcl_devloop_cycle_stream_flush_through(repo, next[1], why,
                                                      sizeof(why)) ? 0 : 1);
     }
+    return flusher;
+}
+
+/* A flusher killed halfway through writing a journal record leaves no file
+ * under that record's final name (records are staged, then renamed whole),
+ * so the next heal and flush continue the journal instead of refusing a
+ * torn tail. */
+static bool seal_batch_torn_write(const char *repo, const char *state_dir)
+{
+    char why[192] = {0}, event_path[PATH_MAX], staged[PATH_MAX];
+    int64_t next[2] = {0};
+    int64_t base = seal_batch_pointer_epoch(repo);
+    pid_t flusher = seal_batch_torn_flusher(repo, base, next);
     int status = 0;
     SB_CHECK(flusher > 0 && waitpid(flusher, &status, 0) == flusher &&
              WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
@@ -2398,13 +2409,58 @@ static bool seal_batch_torn_write(const char *repo, const char *state_dir,
              access(event_path, F_OK) == 0);
     SB_CHECK(seal_batch_event_path(state_dir, next[1], event_path) &&
              access(event_path, F_OK) != 0 && errno == ENOENT);
-    SB_CHECK(seal_batch_pointer_epoch(repo) == epochs[3]);
+    SB_CHECK(snprintf(staged, sizeof(staged),
+                      "%s/cycle-events/.cycle.%ld.0.tmp", state_dir,
+                      (long)flusher) > 0 &&
+             access(staged, F_OK) == 0);
+    SB_CHECK(seal_batch_pointer_epoch(repo) == base);
     SB_CHECK(zcl_devloop_cycle_state_heal(repo, why, sizeof(why)) &&
              seal_batch_pointer_epoch(repo) == next[0]);
+    /* Heal runs under the cycle lock, where the dead writer's staging file
+     * is known abandoned: it is swept. */
+    SB_CHECK(access(staged, F_OK) != 0 && errno == ENOENT);
     SB_CHECK(zcl_devloop_cycle_stream_flush_through(repo, next[1], why,
                                                     sizeof(why)) &&
              seal_batch_pointer_epoch(repo) == next[1] &&
              access(event_path, F_OK) == 0);
+    return true;
+}
+
+/* An older build published records with link() then unlink(); a kill between
+ * the two left the sealed tail event with a second link under a staging
+ * name, which the single-link check refuses. The next heal sweeps the
+ * staging name under the cycle lock and the journal continues. */
+static bool seal_batch_linked_tail(const char *repo, const char *state_dir,
+                                   const char *pointer)
+{
+    char why[192] = {0}, event_path[PATH_MAX], staged[PATH_MAX];
+    char previous[PATH_MAX];
+    char out[4096];
+    size_t len = 0;
+    int64_t tail = seal_batch_pointer_epoch(repo), epoch = 0;
+    struct stat st;
+    SB_CHECK(tail > 0 && seal_batch_event_path(state_dir, tail, event_path) &&
+             snprintf(staged, sizeof(staged),
+                      "%s/cycle-events/.cycle.4242.0.tmp", state_dir) > 0 &&
+             link(event_path, staged) == 0 && stat(event_path, &st) == 0 &&
+             st.st_nlink == 2);
+    /* The kill also came before the batch moved the pointer. */
+    SB_CHECK(seal_batch_event_path(state_dir, tail - 1, previous) &&
+             seal_batch_copy_file(previous, pointer) &&
+             seal_batch_pointer_epoch(repo) == tail - 1);
+    SB_CHECK(zcl_devloop_cycle_state_read_after(
+                 repo, tail - 1, out, sizeof(out), &len, &epoch, why,
+                 sizeof(why)) == ZCL_DEVLOOP_STATE_INVALID);
+    SB_CHECK(zcl_devloop_cycle_state_heal(repo, why, sizeof(why)) &&
+             access(staged, F_OK) != 0 && stat(event_path, &st) == 0 &&
+             st.st_nlink == 1 && seal_batch_pointer_epoch(repo) == tail);
+    SB_CHECK(zcl_devloop_cycle_stream_publish(
+                 repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+                 &epoch, why, sizeof(why)) &&
+             epoch == tail + 1 &&
+             zcl_devloop_cycle_stream_flush_through(repo, epoch, why,
+                                                    sizeof(why)) &&
+             seal_batch_pointer_epoch(repo) == epoch);
     return true;
 }
 
@@ -2426,7 +2482,8 @@ static bool run_cycle_seal_batch_fixture(void)
                        state_dir) > 0 &&
               seal_batch_flush(repo, state_dir, epochs) &&
               seal_batch_heal(repo, state_dir, pointer, epochs) &&
-              seal_batch_torn_write(repo, state_dir, epochs) &&
+              seal_batch_linked_tail(repo, state_dir, pointer) &&
+              seal_batch_torn_write(repo, state_dir) &&
               seal_batch_damaged_tail(repo, state_dir, pointer, epochs);
     if (saved_home) {
         (void)platform_environment_set("HOME", saved_home, 1);
@@ -2849,7 +2906,7 @@ static bool run_watch_sealer_isolated(const char *repo)
         _exit(!broken && sent ? 0 : 1);
     }
     (void)close(report[1]);
-    char broken[256] = {0};
+    char broken[1024] = {0};
     ssize_t n = child > 0 ? read(report[0], broken, sizeof(broken) - 1) : -1;
     (void)close(report[0]);
     int status = 0;

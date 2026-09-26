@@ -806,9 +806,11 @@ bool zcl_devloop_workspace_resolve(const char *repo_root, char out_id[65],
                                    char *out_dir, size_t out_dir_len);
 bool zcl_devloop_workspace_state_dir(const char *repo_root,
                                      char *out, size_t out_len);
-/* Journal one new event durably. While the ring is live it goes through the
- * ring under the seal lock, taking the ring's next epoch after every earlier
- * ring event is sealed, so journal and ring never disagree on an epoch. */
+/* Journal one new event. While the ring is live it goes through the ring
+ * under the seal lock, taking the ring's next epoch and sealing after every
+ * earlier ring event, so journal and ring never disagree on an epoch. It is
+ * durable on return, except under a resident sealing owner (the watcher),
+ * which seals it off the caller's path as it does every ring event. */
 bool zcl_devloop_cycle_state_write(const char *repo_root,
                                    const char *cycle_json, size_t cycle_len,
                                    char *why, size_t why_len);
@@ -819,8 +821,10 @@ bool zcl_devloop_cycle_state_write(const char *repo_root,
 bool zcl_devloop_cycle_stream_reset(const char *repo_root,
                                     int64_t durable_epoch,
                                     char *why, size_t why_len);
-/* Heal, read the journal tail and reset the ring after it, all under the seal
- * lock. durable_out (optional) receives that tail epoch. */
+/* Under the seal lock: heal, seal any valid ring events past the journal tail,
+ * then reset the ring after the tail. durable_out (optional) receives that
+ * tail epoch. A tail that cannot be sealed (evicted or damaged) does not fail
+ * the restart; `why` then names what was lost. */
 bool zcl_devloop_cycle_stream_restart(const char *repo_root,
                                       int64_t *durable_out,
                                       char *why, size_t why_len);
