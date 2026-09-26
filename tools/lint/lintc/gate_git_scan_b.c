@@ -35,6 +35,7 @@
 
 static const char *const k_rap_drop[] = {
     "__builtin_memcpy",
+    "-mcpu",
     "memcpy_uses_blob_var",
     "memcpys",
     "memcpy",
@@ -261,7 +262,7 @@ static int rap_st_clean(const char *root, FILE *out)
     int rc = 0, code = 0, bad = 0;
     if (ovf(snprintf(path, sizeof path, "%s/clean.c", root), sizeof path))
         bad = 1;
-    else if (csr_write(path, "memcpy(buffer, source, length);\nnumcpus=4\n"))
+    else if (csr_write(path, "memcpy(buffer, source, length);\nnumcpus=4\nCFLAGS += -mcpu=cortex-m0\n"))
         bad = 1;
     rc = rap_git_cmd(root, "add -- clean.c", dump, sizeof dump, &code);
     if (rc || code != 0)

@@ -817,7 +817,8 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "classification_only") != NULL);
         ASSERT(strstr(buf, "fast-changed-compile: source-wide fast-compile")
                != NULL);
-        ASSERT(strstr(buf, "path lists are classification hints only") != NULL);
+        ASSERT(strstr(buf, "changed-file lists are hint-only and cannot reduce "
+                           "proof scope") != NULL);
         ASSERT(strstr(buf, "run_compile_gate") != NULL);
         ASSERT(strstr(buf, "changed|changed-dev|auto") != NULL);
         ASSERT(strstr(buf, "target=\"fast-compile\"") != NULL);
