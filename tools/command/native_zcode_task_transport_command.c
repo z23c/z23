@@ -770,7 +770,7 @@ void zcl_native_handle_zcode_task_pull(
         ztl_fetch_one(request, VCS_ZCODE_TASK_DHT_NAMESPACE,
                       row->transport_root,
                       (int64_t)VCS_ZCODE_TASK_CONTEXT_MAX_PACKAGE_BYTES,
-                      &row->fetched, row->fetch_outcome,
+                      &row->fetched, NULL, row->fetch_outcome,
                       sizeof(row->fetch_outcome));
         fetched += row->fetched ? 1u : 0u;
 

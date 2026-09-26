@@ -404,7 +404,7 @@ void zcl_native_handle_zcode_package_attest_pull(
         ztl_fetch_one(request, VCS_PACKAGE_ATTEST_DHT_NAMESPACE,
                       row->transport_root,
                       (int64_t)VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES,
-                      &row->fetched, row->fetch_outcome,
+                      &row->fetched, NULL, row->fetch_outcome,
                       sizeof(row->fetch_outcome));
         fetched += row->fetched ? 1u : 0u;
 

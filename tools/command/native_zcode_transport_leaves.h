@@ -188,14 +188,19 @@ static bool ztl_query_pointers(const struct zcl_command_request *request,
 
 /* Drive the EXISTING fetch handler for one transport root. Never fails the
  * caller: *fetched_out is set (false on refusal) and the outcome string
- * names whatever verdict came back, so the row can record it. */
+ * names whatever verdict came back, so the row can record it.
+ * accepted_out (optional) is true when the fetch path accepted the root —
+ * already complete, or a download it started that may still be landing. */
 static void ztl_fetch_one(const struct zcl_command_request *request,
                           const char *namespace,
                           const char *transport_root_hex,
                           int64_t maximum_bytes, bool *fetched_out,
-                          char *outcome, size_t outcome_cap)
+                          bool *accepted_out, char *outcome,
+                          size_t outcome_cap)
 {
     *fetched_out = false;
+    if (accepted_out)
+        *accepted_out = false;
     struct json_value input;
     json_init(&input);
     json_set_object(&input);
@@ -218,6 +223,8 @@ static void ztl_fetch_one(const struct zcl_command_request *request,
         zcl_command_reply_free(&fetch);
         return;
     }
+    if (accepted_out)
+        *accepted_out = true;
     const char *verdict = json_get_str(json_get(&fetch.data, "fetch_result"));
     if (!verdict)
         verdict = json_get_str(json_get(&fetch.data, "result"));

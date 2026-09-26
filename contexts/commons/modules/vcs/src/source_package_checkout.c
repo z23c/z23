@@ -772,6 +772,11 @@ static enum vcs_source_package_checkout_result source_package_checkout_common(
             memcpy(metrics->accepted_signer,
                    accepted.expected_signer, 32);
             memcpy(metrics->task_root, accepted.task_root, 32);
+            memcpy(metrics->candidate_root, accepted.candidate_root, 32);
+            memcpy(metrics->proof_policy_root, accepted.proof_policy_root,
+                   32);
+            memcpy(metrics->toolchain_capsule_root,
+                   accepted.task.toolchain_capsule_root, 32);
         }
     }
     source_checkout_loaded_free(&loaded);
@@ -951,14 +956,15 @@ const char *vcs_zcode_work_admit_result_string(
     return "unknown";
 }
 
-enum vcs_zcode_work_admit_result vcs_zcode_work_solution_admit(
+enum vcs_zcode_work_admit_result vcs_zcode_work_solution_admit_metrics(
     struct vcs_package_store *store, const uint8_t package_root[32],
-    const uint8_t expect_task_root[32], uint8_t task_root_out[32],
-    uint8_t source_root_out[32], uint8_t accepted_work_root_out[32])
+    const uint8_t expect_task_root[32], uint8_t source_root_out[32],
+    uint8_t accepted_work_root_out[32],
+    struct vcs_source_package_checkout_metrics *metrics_out)
 {
-    if (task_root_out) memset(task_root_out, 0, 32);
-    if (source_root_out) memset(source_root_out, 0, 32);
-    if (accepted_work_root_out) memset(accepted_work_root_out, 0, 32);
+    memset(source_root_out, 0, 32);
+    memset(accepted_work_root_out, 0, 32);
+    memset(metrics_out, 0, sizeof(*metrics_out));
     if (!store || !package_root)
         return VCS_ZCODE_WORK_ADMIT_NULL;
     uint8_t source_root[32], accepted_work_root[32];
@@ -970,6 +976,28 @@ enum vcs_zcode_work_admit_result vcs_zcode_work_solution_admit(
     if (expect_task_root &&
         memcmp(metrics.task_root, expect_task_root, 32) != 0)
         return VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH;
+    memcpy(source_root_out, source_root, 32);
+    memcpy(accepted_work_root_out, accepted_work_root, 32);
+    *metrics_out = metrics;
+    return VCS_ZCODE_WORK_ADMIT_OK;
+}
+
+enum vcs_zcode_work_admit_result vcs_zcode_work_solution_admit(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t expect_task_root[32], uint8_t task_root_out[32],
+    uint8_t source_root_out[32], uint8_t accepted_work_root_out[32])
+{
+    if (task_root_out) memset(task_root_out, 0, 32);
+    if (source_root_out) memset(source_root_out, 0, 32);
+    if (accepted_work_root_out) memset(accepted_work_root_out, 0, 32);
+    uint8_t source_root[32], accepted_work_root[32];
+    struct vcs_source_package_checkout_metrics metrics;
+    enum vcs_zcode_work_admit_result result =
+        vcs_zcode_work_solution_admit_metrics(
+            store, package_root, expect_task_root, source_root,
+            accepted_work_root, &metrics);
+    if (result != VCS_ZCODE_WORK_ADMIT_OK)
+        return result;
     if (task_root_out) memcpy(task_root_out, metrics.task_root, 32);
     if (source_root_out) memcpy(source_root_out, source_root, 32);
     if (accepted_work_root_out)

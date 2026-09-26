@@ -33,6 +33,12 @@ struct vcs_source_package_checkout_metrics {
      * solves. Filled only on the accepted-work path (the signer is too);
      * never an input, never learned from a lone lane receipt. */
     uint8_t task_root[32];
+    /* The remaining roots of that same verified chain, filled on the same
+     * path: the accepted candidate, the task's proof policy and toolchain
+     * capsule. A pull receipt binds them; nothing here is ever an input. */
+    uint8_t candidate_root[32];
+    uint8_t proof_policy_root[32];
+    uint8_t toolchain_capsule_root[32];
 };
 
 const char *vcs_source_package_checkout_result_string(
@@ -115,5 +121,14 @@ enum vcs_zcode_work_admit_result vcs_zcode_work_solution_admit(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const uint8_t expect_task_root[32], uint8_t task_root_out[32],
     uint8_t source_root_out[32], uint8_t accepted_work_root_out[32]);
+
+/* The same receiver-side check, returning the complete verified chain
+ * metrics (task, candidate, proof policy, toolchain, accepted signer) on OK.
+ * Every output is required and is cleared on refusal. */
+enum vcs_zcode_work_admit_result vcs_zcode_work_solution_admit_metrics(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t expect_task_root[32], uint8_t source_root_out[32],
+    uint8_t accepted_work_root_out[32],
+    struct vcs_source_package_checkout_metrics *metrics_out);
 
 #endif /* ZCL_VCS_SOURCE_PACKAGE_CHECKOUT_H */

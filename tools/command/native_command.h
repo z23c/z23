@@ -1363,6 +1363,10 @@ void zcl_native_handle_zcode_work_offer(
 void zcl_native_handle_zcode_work_pull(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* Verify one durable work pull receipt by root (CAS copy or supplied wire). */
+void zcl_native_handle_zcode_work_receipt(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* zcode task transport leaves — how a posted dev task MOVES between nodes
  * so a stranger can pick it up (native_zcode_task_transport_command.c).
