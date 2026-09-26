@@ -81,6 +81,15 @@ extern "C" {
  * connection failure even though the call ultimately succeeds. Give it the
  * same bounded patience as a wallet mutation — extend, never shorten. */
 #define RPC_MINING_TIMEOUT_MS 60000
+/* zcode network publish reaches the node as zcode_dht_status with
+ * operation=publish. A work POINTER is admitted only after the node
+ * reconstructs the named package in private scratch and reverifies its whole
+ * accepted-work chain; a loaded two-node run measured 24.6 s for that gate.
+ * The generic 10 s ceiling then killed the socket and the caller saw a
+ * refusal for a publish that would have succeeded. The CLI publish leaf
+ * waits exactly this long, and the server budget matches it — extend, never
+ * shorten. Plain status reads on this method still finish in milliseconds. */
+#define RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS 120000
 
 struct rpc_timeout_slot {
     bool     in_use;

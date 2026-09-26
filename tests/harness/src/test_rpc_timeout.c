@@ -240,6 +240,29 @@ static int test_proof_methods_receive_bounded_extension(void)
         close(generic_pair[0]);
         close(generic_pair[1]);
         PASS();
+    }
+    TEST("rpc_timeout: zcode DHT publish outlasts the generic ceiling") {
+        fresh_mgr();
+        int publish_pair[2] = { -1, -1 };
+        int generic_pair[2] = { -1, -1 };
+        ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, publish_pair) == 0);
+        ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, generic_pair) == 0);
+        int publish = rpc_timeout_register(&mgr, publish_pair[0], 0);
+        int generic = rpc_timeout_register(&mgr, generic_pair[0], 0);
+        ASSERT(publish >= 0 && generic >= 0);
+        rpc_timeout_set_method(&mgr, publish, "zcode_dht_status");
+        rpc_timeout_set_method(&mgr, generic, "zcode_dht_peers");
+        ASSERT(RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS > 10000);
+        ASSERT(mgr.slots[publish].timeout_ms ==
+               RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS);
+        ASSERT(mgr.slots[generic].timeout_ms == 10000);
+        rpc_timeout_unregister(&mgr, publish);
+        rpc_timeout_unregister(&mgr, generic);
+        close(publish_pair[0]);
+        close(publish_pair[1]);
+        close(generic_pair[0]);
+        close(generic_pair[1]);
+        PASS();
     } _test_next:;
     return failures;
 }

@@ -6,6 +6,7 @@
 #include "base/hex.h"
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"
+#include "rpc/rpc_timeout.h"
 #include "core/uint256.h"
 #include "crypto/ed25519.h"
 #include "models/zid_identity.h"
@@ -392,7 +393,8 @@ void zcl_native_handle_zcode_network_delegate(
 
 static bool zdn_rpc_body(const struct json_value *input,
                          struct zcl_command_reply *reply,
-                         const char *rpc_method, struct json_value *body) {
+                         const char *rpc_method, struct json_value *body,
+                         long total_ms) {
   if (!reply || !rpc_method || !body)
     return false;
   struct json_value empty;
@@ -411,7 +413,11 @@ static bool zdn_rpc_body(const struct json_value *input,
     return false;
   }
   zcl_native_bridge_ensure_rpc();
-  char *raw = node_rpc_call(rpc_method, params);
+  /* total_ms > 0 is a leaf whose node-side work legitimately outlasts the
+   * generic loopback deadline; the server budget for rpc_method must match. */
+  char *raw = total_ms > 0
+      ? node_rpc_call_deadline(rpc_method, params, 2000, total_ms)
+      : node_rpc_call(rpc_method, params);
   free(params);
   if (!raw) {
     zcl_command_reply_fail(
@@ -456,16 +462,22 @@ static void zdn_apply_body(struct zcl_command_reply *reply,
   reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
 
-static void zdn_forward(const struct zcl_command_request *request,
-                        struct zcl_command_reply *reply,
-                        const char *rpc_method) {
+static void zdn_forward_within(const struct zcl_command_request *request,
+                               struct zcl_command_reply *reply,
+                               const char *rpc_method, long total_ms) {
   if (!request || !reply || !rpc_method)
     return;
   struct json_value body;
-  if (!zdn_rpc_body(request->input, reply, rpc_method, &body))
+  if (!zdn_rpc_body(request->input, reply, rpc_method, &body, total_ms))
     return;
   zdn_apply_body(reply, &body, rpc_method);
   json_free(&body);
+}
+
+static void zdn_forward(const struct zcl_command_request *request,
+                        struct zcl_command_reply *reply,
+                        const char *rpc_method) {
+  zdn_forward_within(request, reply, rpc_method, 0);
 }
 
 
@@ -504,7 +516,7 @@ static void zdn_async_wrapper(const struct json_value *params,
                               const char *cancel_method,
                               uint64_t deadline_seconds) {
   struct json_value body;
-  if (!zdn_rpc_body(params, reply, begin_method, &body))
+  if (!zdn_rpc_body(params, reply, begin_method, &body, 0))
     return;
   if (!json_get_bool_or(&body, "ok", false)) {
     zdn_apply_body(reply, &body, begin_method);
@@ -533,7 +545,7 @@ static void zdn_async_wrapper(const struct json_value *params,
     json_set_object(&poll);
     json_push_kv_str(&poll, "lookup_id", lookup_copy);
     json_push_kv_str(&poll, "owner_token", owner_copy);
-    if (!zdn_rpc_body(&poll, reply, poll_method, &body)) {
+    if (!zdn_rpc_body(&poll, reply, poll_method, &body, 0)) {
       json_free(&poll);
       zdn_release_capability(cancel_method, lookup_copy, owner_copy);
       return;
@@ -709,7 +721,10 @@ void zcl_native_handle_zcode_network_publish(
   json_push_kv_str(&input, "operation", "publish");
   struct zcl_command_request forwarded = *request;
   forwarded.input = &input;
-  zdn_forward(&forwarded, reply, "zcode_dht_status");
+  /* A work pointer is admitted only after the node reconstructs and
+   * reverifies the whole accepted-work package. */
+  zdn_forward_within(&forwarded, reply, "zcode_dht_status",
+                     RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS);
   json_free(&input);
 }
 
