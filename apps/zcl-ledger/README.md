@@ -67,6 +67,8 @@ rejects trailing or truncated bytes.
 
 ```sh
 build/zcl-ledger/zcl-tx-review --json transaction.bin
+# Compute the shielded signature digest with an explicit branch ID:
+build/zcl-ledger/zcl-tx-review --json --branch-id 0x76b809bb transaction.bin
 # After a separately reviewed ZCL Review app is installed and open:
 build/zcl-ledger/zcl-tx-review --json --blue /dev/hidrawN transaction.bin
 ```
@@ -75,11 +77,16 @@ The JSON fields `shielded_details_verified` and `signing_ready` are always
 `false`. Sapling output recipients and amounts are encrypted in the wire
 transaction; this structural parser does not decrypt them or verify proofs,
 signatures, ownership, fee, or consensus validity. It has no key access.
+The optional `--branch-id 0xXXXXXXXX` mode computes a ZIP-243 shielded
+SIGHASH_ALL digest from the full transaction with streaming personalized
+BLAKE2b-256. The caller must determine the ZCL consensus branch for the
+transaction's height; the command does not validate the branch ID or
+consensus validity. With `--blue`, it also compares the Blue's independent
+digest. Both digest values are review data, not signatures or approval.
 The optional `--blue` mode sends at most 4,096 transaction bytes to the
 [ZCL Review app](device-blue-review/README.md), verifies its review-only
 identity, and requires its structural summary and transaction SHA-256 digest
-to match the host's values. This checks the exact bytes received by the Blue;
-it is not the ZIP-243 signing digest or a device approval.
+to match the host's values. This checks the exact bytes received by the Blue.
 `blue_parsed` is true only after that comparison succeeds. A synthetic
 one-spend, one-output fixture passed this comparison on a dedicated Blue.
 The app has no signing command or transaction approval screen. Without `--blue`, the CLI sends

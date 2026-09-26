@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "zcl_tx_review.h"
+#include "zcl_zip243.h"
 
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
 #error "The Blue review protocol requires ISO C23"
@@ -28,7 +29,8 @@ uint16_t blue_review_handle(blue_review_state *state,
                             const uint8_t *apdu, size_t apdu_length,
                             uint8_t *reply, size_t reply_capacity,
                             size_t *reply_length,
-                            blue_review_digest_fn digest);
+                            blue_review_digest_fn digest,
+                            const zcl_zip243_hasher *zip243_hasher);
 
 void blue_review_encode_summary(const zcl_tx_review *review,
                                 uint8_t reply[44]);

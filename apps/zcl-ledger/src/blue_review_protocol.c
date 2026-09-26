@@ -75,7 +75,7 @@ static uint16_t identify(size_t length, uint8_t *reply, size_t capacity,
                          size_t *reply_length) {
     if (length || capacity < 5) return 0x6700;
     memcpy(reply, "ZCL", 3);
-    reply[3] = 5;
+    reply[3] = 6;
     reply[4] = 0x40;
     *reply_length = 5;
     return 0x9000;
@@ -87,16 +87,39 @@ static uint16_t clear_review(blue_review_state *state, size_t length) {
     return 0x9000;
 }
 
+static uint16_t shielded_digest(blue_review_state *state,
+                                 const uint8_t *data, size_t length,
+                                 uint8_t *reply, size_t capacity,
+                                 size_t *reply_length,
+                                 const zcl_zip243_hasher *hasher) {
+    if (length != 4 || capacity < 32) return 0x6700;
+    if (!state->expected || state->received != state->expected) return 0x6985;
+    uint32_t branch_id = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+                         ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+    if (zcl_zip243_shielded_digest(state->wire, state->received, branch_id,
+                                    hasher, reply) < 0)
+        return 0x6a80;
+    *reply_length = 32;
+    return 0x9000;
+}
+
+static uint16_t request_status(const uint8_t *apdu, size_t length) {
+    if (length < 5 || length != 5 + (size_t)apdu[4]) return 0x6700;
+    if (apdu[0] != 0xa5) return 0x6e00;
+    if (apdu[2] != 0 || apdu[3] != 0) return 0x6b00;
+    return 0x9000;
+}
+
 uint16_t blue_review_handle(blue_review_state *state,
                             const uint8_t *apdu, size_t apdu_length,
                             uint8_t *reply, size_t reply_capacity,
                             size_t *reply_length,
-                            blue_review_digest_fn digest) {
+                            blue_review_digest_fn digest,
+                            const zcl_zip243_hasher *zip243_hasher) {
     if (!state || !apdu || !reply || !reply_length) return 0x6a80;
     *reply_length = 0;
-    if (apdu_length < 5 || apdu_length != 5 + (size_t)apdu[4]) return 0x6700;
-    if (apdu[0] != 0xa5) return 0x6e00;
-    if (apdu[2] != 0 || apdu[3] != 0) return 0x6b00;
+    uint16_t status = request_status(apdu, apdu_length);
+    if (status != 0x9000) return status;
     const uint8_t *data = apdu + 5;
     size_t length = apdu[4];
     switch (apdu[1]) {
@@ -106,6 +129,9 @@ uint16_t blue_review_handle(blue_review_state *state,
     case 0x12: return finish_review(state, length, reply,
                                     reply_capacity, reply_length, digest);
     case 0x13: return clear_review(state, length);
+    case 0x14: return shielded_digest(state, data, length, reply,
+                                      reply_capacity, reply_length,
+                                      zip243_hasher);
     default: return 0x6d00;
     }
 }

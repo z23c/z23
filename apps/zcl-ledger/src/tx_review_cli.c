@@ -3,6 +3,7 @@
 #include "blue_review_protocol.h"
 #include "ledger_hid.h"
 #include "zcl_tx_review.h"
+#include "zcl_zip243_host.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -73,7 +74,8 @@ static int send_transaction(int fd, const uint8_t *wire, size_t length) {
 }
 
 static int blue_review(const char *device, const uint8_t *wire, size_t length,
-                       const zcl_tx_review *review) {
+                       const zcl_tx_review *review, bool has_branch,
+                       uint32_t branch_id, const uint8_t zip_digest[32]) {
     if (length > ZCL_BLUE_REVIEW_MAX_BYTES) return -1;
     int fd = open(device, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     struct hidraw_devinfo info;
@@ -84,8 +86,11 @@ static int blue_review(const char *device, const uint8_t *wire, size_t length,
         return -1;
     }
     static const uint8_t probe[] = {0xa5, 1, 0, 0, 0};
-    static const uint8_t identity[] = {'Z', 'C', 'L', 5, 0x40};
+    static const uint8_t identity[] = {'Z', 'C', 'L', 6, 0x40};
     uint8_t final[] = {0xa5, 0x12, 0, 0, 0};
+    uint8_t zip_command[9] = {0xa5, 0x14, 0, 0, 4};
+    for (unsigned i = 0; i < 4; ++i)
+        zip_command[5 + i] = (uint8_t)(branch_id >> (8 * i));
     uint8_t summary[76];
     blue_review_encode_summary(review, summary);
     if (!SHA256(wire, length, summary + 44)) {
@@ -95,14 +100,34 @@ static int blue_review(const char *device, const uint8_t *wire, size_t length,
     int result = send_expected(fd, probe, sizeof probe,
                                identity, sizeof identity) == 0 &&
                  send_transaction(fd, wire, length) == 0 &&
+                 (!has_branch ||
+                  send_expected(fd, zip_command, sizeof zip_command,
+                                zip_digest, 32) == 0) &&
                  send_expected(fd, final, sizeof final,
                                summary, sizeof summary) == 0 ? 0 : -1;
     close(fd);
     return result;
 }
 
+static bool parse_branch(const char *text, uint32_t *branch) {
+    if (strlen(text) != 10 || text[0] != '0' || text[1] != 'x') return false;
+    uint32_t value = 0;
+    for (size_t i = 2; i < 10; ++i) {
+        char digit = text[i];
+        unsigned nibble;
+        if (digit >= '0' && digit <= '9') nibble = (unsigned)(digit - '0');
+        else if (digit >= 'a' && digit <= 'f') nibble = (unsigned)(digit - 'a' + 10);
+        else if (digit >= 'A' && digit <= 'F') nibble = (unsigned)(digit - 'A' + 10);
+        else return false;
+        value = (value << 4) | nibble;
+    }
+    *branch = value;
+    return true;
+}
+
 static bool parse_args(int argc, char **argv, bool *json,
-                       const char **device, const char **file) {
+                       const char **device, bool *has_branch,
+                       uint32_t *branch, const char **file) {
     int index = 1;
     *json = index < argc && strcmp(argv[index], "--json") == 0;
     if (*json) ++index;
@@ -111,16 +136,35 @@ static bool parse_args(int argc, char **argv, bool *json,
         if (++index >= argc) return false;
         *device = argv[index++];
     }
+    *has_branch = index < argc && strcmp(argv[index], "--branch-id") == 0;
+    if (*has_branch) {
+        if (++index >= argc || !parse_branch(argv[index++], branch)) return false;
+    }
     if (index != argc - 1) return false;
     *file = argv[index];
     return true;
 }
 
+static int zip243_digest(const uint8_t *wire, size_t length,
+                         uint32_t branch_id, uint8_t digest[32]) {
+    struct blake2b_ctx context;
+    zcl_zip243_hasher hasher = zcl_zip243_host_hasher(&context);
+    return zcl_zip243_shielded_digest(wire, length, branch_id,
+                                      &hasher, digest);
+}
+
+static void print_hex(const uint8_t *bytes, size_t length) {
+    for (size_t i = 0; i < length; ++i) printf("%02x", bytes[i]);
+}
+
 int main(int argc, char **argv) {
     bool json;
     const char *device, *file;
-    if (!parse_args(argc, argv, &json, &device, &file)) {
-        fprintf(stderr, "Usage: %s [--json] [--blue /dev/hidrawN] TRANSACTION.bin\n",
+    bool has_branch;
+    uint32_t branch_id = 0;
+    if (!parse_args(argc, argv, &json, &device, &has_branch,
+                    &branch_id, &file)) {
+        fprintf(stderr, "Usage: %s [--json] [--blue /dev/hidrawN] [--branch-id 0xXXXXXXXX] TRANSACTION.bin\n",
                 argv[0]);
         return 2;
     }
@@ -131,8 +175,13 @@ int main(int argc, char **argv) {
         return 1;
     }
     zcl_tx_review review;
+    uint8_t zip_digest[32] = {0};
     int result = zcl_tx_review_parse(wire, length, &review);
-    if (result == 0 && device) result = blue_review(device, wire, length, &review);
+    if (result == 0 && has_branch)
+        result = zip243_digest(wire, length, branch_id, zip_digest);
+    if (result == 0 && device)
+        result = blue_review(device, wire, length, &review,
+                             has_branch, branch_id, zip_digest);
     free(wire);
     if (result < 0) {
         fputs("Transaction review failed; no signing was requested.\n", stderr);
@@ -151,12 +200,19 @@ int main(int argc, char **argv) {
                "\"expiry_height\":%" PRIu32 ","
                "\"shielded_details_verified\":false,"
                "\"signing_ready\":false,"
-               "\"blue_parsed\":%s}\n",
+               "\"blue_parsed\":%s",
                review.transparent_inputs, review.transparent_outputs,
                review.sapling_spends, review.sapling_outputs,
                review.sprout_joinsplits, review.transparent_output_zat,
                review.value_balance_zat, review.lock_time,
                review.expiry_height, device ? "true" : "false");
+        if (has_branch) {
+            printf(",\"zip243_branch_id\":\"0x%08" PRIx32 "\",\"zip243_shielded_digest\":\"",
+                   branch_id);
+            print_hex(zip_digest, sizeof zip_digest);
+            printf("\",\"blue_zip243_matched\":%s", device ? "true" : "false");
+        }
+        puts("}");
     } else {
         printf("ZCL Sapling v4: %" PRIu32 " transparent input(s), %" PRIu32
                " output(s), %" PRIu32 " Sapling spend(s), %" PRIu32
@@ -169,6 +225,12 @@ int main(int argc, char **argv) {
                review.value_balance_zat);
         puts("Structural review only. Shielded recipients, amounts, fee, proofs, and signatures are unverified.");
         if (device) puts("The Blue returned the same structural summary; no key operation occurred.");
+        if (has_branch) {
+            printf("ZIP-243 shielded digest for branch 0x%08" PRIx32 ": ", branch_id);
+            print_hex(zip_digest, sizeof zip_digest);
+            putchar('\n');
+            if (device) puts("Blue and host ZIP-243 digests matched; no signing was requested.");
+        }
     }
     return 0;
 }

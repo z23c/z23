@@ -117,3 +117,42 @@ The owner reopened `ZCL Review` after the test and confirmed it went directly
 to the steady review screen without a `Non genuine application` warning, then
 EXIT returned to home. This observes the locally signed image on this Blue;
 it does not imply Ledger certification or approval of any ZCL payment.
+
+## Nano S Sapling signer reference and ZIP-243 review
+
+Recorded: 2026-09-26T07:53:14-04:00 (2026-09-26T11:53:14Z)
+
+Zondax's [Nano S/S+/X Sapling app](https://github.com/Zondax/ledger-zcash)
+is a concrete reference for a host prover and device signer. Its
+[workflow](https://github.com/Zondax/ledger-zcash/blob/main/docs/zcash_workflow.md)
+places transaction construction and Sapling proofs on the host. The device
+checks the resulting transaction, computes the signature hash, and produces
+RedJubjub spend authorization signatures. The
+[APDU specification](https://github.com/Zondax/ledger-zcash/blob/main/docs/APDUSPEC.md)
+separately defines extraction of a proof generating key and extraction of
+spend signatures after check-and-sign. The
+[device source](https://github.com/Zondax/ledger-zcash/blob/main/app/src/crypto.c)
+shows that the proof key sent to the host includes `ak` and `nsk`, together
+with `rcv` and `alpha`; the spend authorization secret stays on the device.
+This reference therefore does not keep every sensitive Sapling key on the
+device. Z23 must define and test that disclosure boundary before adding a
+proving protocol. The Zondax host builder uses Rust; it is a protocol
+reference, not a language dependency for Z23's C23 implementation.
+
+The review-only Blue app now uses a streaming personalized BLAKE2b-256
+implementation through the Blue firmware's hash syscall to compute the
+[ZIP-243](https://zips.z.cash/zip-0243) shielded SIGHASH_ALL digest. The C23
+host computes the same digest independently. The official ZIP-243 vector 1
+transaction (4,118 bytes, branch `0x76b809bb`) gave
+`63d18534de5f2d1c9e169b73f9c783718adbef5c8a7d55b5e7a37affa1dd3ff3`.
+The fixture test checks that changing the final binding signature does not
+change the digest, while changing a hashed transaction byte or branch ID does.
+
+Clang 22.1.6 Debug with address and undefined-behavior sanitizers and GCC
+16.1.1 Release each passed seven local host tests. The Blue app built with
+Clang 22.1.6 C23 and the ARM GCC 16.1.1 linker: 19,968 text bytes, zero
+initialized data bytes, and 6,132 BSS bytes. The extracted text image SHA-256
+was `9de444a3179520d7edf6a60e67417ef5e57942eb3d04d53e73fa1a7f69ad7528`.
+The host CPU was AMD Ryzen 7 PRO 8840U. No physical Blue interaction occurred
+for version 0.2.0 at the time of this record. It has no key derivation,
+approval UI, proof verification, signing command, or transaction broadcast.

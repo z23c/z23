@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
 #include "blue_review_protocol.h"
+#include "zcl_zip243_host.h"
 
 #undef NDEBUG
 #include <assert.h>
@@ -13,8 +14,11 @@ static bool transaction_digest(const uint8_t *wire, size_t length,
 
 static uint16_t call(blue_review_state *state, uint8_t *apdu, size_t length,
                      size_t *reply_length) {
+    struct blake2b_ctx context;
+    zcl_zip243_hasher hasher = zcl_zip243_host_hasher(&context);
     return blue_review_handle(state, apdu, length, apdu, 255,
-                              reply_length, transaction_digest);
+                              reply_length, transaction_digest,
+                              &hasher);
 }
 
 static void test_minimal_review(void) {
@@ -22,7 +26,7 @@ static void test_minimal_review(void) {
     uint8_t apdu[260] = {0xa5, 0x01};
     size_t reply_length = 0;
     assert(call(&state, apdu, 5, &reply_length) == 0x9000);
-    assert(reply_length == 5 && memcmp(apdu, "ZCL\x05\x40", 5) == 0);
+    assert(reply_length == 5 && memcmp(apdu, "ZCL\x06\x40", 5) == 0);
 
     const uint8_t begin[] = {0xa5, 0x10, 0, 0, 2, 29, 0};
     memcpy(apdu, begin, sizeof begin);
@@ -35,8 +39,20 @@ static void test_minimal_review(void) {
     apdu[4] = 29;
     memcpy(apdu + 5, header, sizeof header);
     assert(call(&state, apdu, 34, &reply_length) == 0x9000);
-    apdu[1] = 0x12;
-    apdu[4] = 0;
+    static const uint8_t zip_command[] = {
+        0xa5, 0x14, 0, 0, 4, 0xbb, 0x09, 0xb8, 0x76
+    };
+    memcpy(apdu, zip_command, sizeof zip_command);
+    assert(call(&state, apdu, sizeof zip_command, &reply_length) == 0x9000);
+    assert(reply_length == 32);
+    uint8_t zip_digest[32];
+    uint8_t zip_wire[29] = {4, 0, 0, 0x80, 0x85, 0x20, 0x2f, 0x89};
+    struct blake2b_ctx context;
+    zcl_zip243_hasher hasher = zcl_zip243_host_hasher(&context);
+    assert(zcl_zip243_shielded_digest(zip_wire, sizeof zip_wire, 0x76b809bb,
+                                      &hasher, zip_digest) == 0);
+    assert(memcmp(apdu, zip_digest, 32) == 0);
+    memcpy(apdu, (uint8_t[]){0xa5, 0x12, 0, 0, 0}, 5);
     assert(call(&state, apdu, 5, &reply_length) == 0x9000);
     assert(reply_length == 76);
     for (size_t i = 0; i < 44; ++i) assert(apdu[i] == 0);
@@ -77,8 +93,11 @@ static void test_state_and_bounds(void) {
     assert(call(&state, apdu, 5, &reply_length) == 0x6985);
     apdu[0] = 0;
     assert(call(&state, apdu, 5, &reply_length) == 0x6e00);
+    struct blake2b_ctx context;
+    zcl_zip243_hasher hasher = zcl_zip243_host_hasher(&context);
     assert(blue_review_handle(NULL, apdu, 5, apdu, 255,
-                              &reply_length, transaction_digest) == 0x6a80);
+                              &reply_length, transaction_digest,
+                              &hasher) == 0x6a80);
 }
 
 int main(void) {

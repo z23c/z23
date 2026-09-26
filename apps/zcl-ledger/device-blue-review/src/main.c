@@ -2,6 +2,7 @@
 #include "os.h"
 #include "os_io_seproxyhal.h"
 #include "blue_review_protocol.h"
+#include <string.h>
 
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
 #error "The Ledger Blue app requires ISO C23"
@@ -14,6 +15,22 @@ static blue_review_state review_state;
 static bool transaction_digest(const uint8_t *wire, size_t length,
                                uint8_t digest[32]) {
     return cx_hash_sha256(wire, (unsigned int)length, digest) == 32;
+}
+
+static bool zip243_start(void *context, const uint8_t personal[16]) {
+    uint8_t mutable_personal[16];
+    memcpy(mutable_personal, personal, sizeof mutable_personal);
+    return cx_blake2b_init2(context, 256, NULL, 0,
+                             mutable_personal, sizeof mutable_personal) ==
+                             CX_BLAKE2B;
+}
+
+static bool zip243_update(void *context, const uint8_t *bytes, size_t length) {
+    return (cx_hash)(context, 0, bytes, (unsigned int)length, NULL, 0) >= 0;
+}
+
+static bool zip243_finish(void *context, uint8_t digest[32]) {
+    return (cx_hash)(context, CX_LAST, NULL, 0, digest, 32) == 32;
 }
 
 static const bagl_element_t *exit_app(const bagl_element_t *element) {
@@ -126,10 +143,16 @@ static void answer_command(void) {
                 rx = io_exchange(CHANNEL_APDU, tx);
                 tx = 0;
                 size_t reply_length = 0;
+                cx_blake2b_t zip_context;
+                zcl_zip243_hasher hasher = {
+                    .context = &zip_context, .init = zip243_start,
+                    .update = zip243_update, .final = zip243_finish
+                };
                 sw = blue_review_handle(&review_state, G_io_apdu_buffer,
                                         rx, G_io_apdu_buffer,
                                         sizeof G_io_apdu_buffer - 2,
-                                        &reply_length, transaction_digest);
+                                        &reply_length, transaction_digest,
+                                        &hasher);
                 tx = reply_length;
             }
             CATCH_OTHER(error) {
