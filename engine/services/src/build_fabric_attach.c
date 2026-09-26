@@ -66,6 +66,8 @@ struct bfat_key_fields {
     uint8_t proof_policy_root[32];
     uint8_t toolchain_root[32];
     uint8_t input_bytes_root[32];
+    uint8_t component_key[32];
+    uint8_t component_preimage_root[32];
 };
 
 struct bfat_cursor {
@@ -117,7 +119,10 @@ static bool bfat_record_serialize(const struct bfat_key_fields *f,
         bfat_put_labeled(&c, "proof_policy_root", f->proof_policy_root, 32) &&
         bfat_put_labeled(&c, "executor_toolchain_root", f->toolchain_root,
                          32) &&
-        bfat_put_labeled(&c, "input_bytes_root", f->input_bytes_root, 32);
+        bfat_put_labeled(&c, "input_bytes_root", f->input_bytes_root, 32) &&
+        bfat_put_labeled(&c, "component_proof_key", f->component_key, 32) &&
+        bfat_put_labeled(&c, "component_preimage_root",
+                         f->component_preimage_root, 32);
     if (!ok) return false;
     *out_len = cap - c.left;
     return true;
@@ -194,6 +199,10 @@ static bool bfat_record_parse(const uint8_t *wire, size_t len,
                           out->toolchain_root) &&
         bfat_take_labeled(&r, "input_bytes_root", NULL, 0,
                           out->input_bytes_root) &&
+        bfat_take_labeled(&r, "component_proof_key", NULL, 0,
+                          out->component_key) &&
+        bfat_take_labeled(&r, "component_preimage_root", NULL, 0,
+                          out->component_preimage_root) &&
         r.left == 0;
 }
 
@@ -337,7 +346,12 @@ static struct zcl_result bfat_cached_tool_hashes(
 static struct zcl_result bfat_fields_for_action(
     const struct db_build_action *action,
     const uint8_t toolchain_bytes_root[32],
-    const uint8_t input_bytes_root[32], struct bfat_key_fields *out)
+    const struct vcs_toolchain_capsule_v1 *capsule,
+    const uint8_t driver_bytes_root[32],
+    const uint8_t backend_bytes_root[32],
+    const uint8_t assembler_bytes_root[32],
+    const uint8_t input_bytes_root[32], struct bfat_key_fields *out,
+    struct vcs_component_proof_key_v1 *proof_out)
 {
     uint8_t fixed_flags[32], fixed_environment[32];
     char fixed_flags_hex[65], fixed_environment_hex[65];
@@ -366,6 +380,23 @@ static struct zcl_result bfat_fields_for_action(
         return ZCL_ERR(-1, "executor-fixed-descriptor-stale: proof policy");
     memcpy(out->toolchain_root, toolchain_bytes_root, 32);
     memcpy(out->input_bytes_root, input_bytes_root, 32);
+    struct vcs_fixed_compile_proof_inputs proof_inputs = {
+        .capsule = capsule,
+        .driver_bytes_sha3 = driver_bytes_root,
+        .backend_bytes_sha3 = backend_bytes_root,
+        .assembler_bytes_sha3 = assembler_bytes_root,
+        .input_bytes_sha3 = input_bytes_root,
+        .proof_policy_root = out->proof_policy_root,
+        .target = action->target,
+        .resource_policy = action->resource_policy,
+    };
+    struct vcs_component_proof_key_v1 proof_key;
+    if (!vcs_build_action_v1_compile_proof_key(&proof_inputs, &proof_key) ||
+        !vcs_component_proof_key_derive(&proof_key, out->component_key) ||
+        !vcs_component_proof_key_preimage_root(
+            &proof_key, out->component_preimage_root))
+        return ZCL_ERR(-1, "executor-component-key-incomplete");
+    if (proof_out) *proof_out = proof_key;
     return ZCL_OK;
 }
 
@@ -380,9 +411,14 @@ struct zcl_result build_fabric_executor_key_compose(
                                                      assembler));
     build_fabric_executor_toolchain_root(driver, backend, assembler,
                                          toolchain_root);
+    struct vcs_toolchain_capsule_v1 capsule;
+    if (!vcs_toolchain_capsule_v1_capture(&capsule))
+        return ZCL_ERR(-1, "executor-toolchain-capsule-unavailable");
     struct bfat_key_fields fields;
-    ZCL_CHECK(bfat_fields_for_action(action, toolchain_root,
-                                     input_bytes_root, &fields));
+    ZCL_CHECK(bfat_fields_for_action(action, toolchain_root, &capsule,
+                                     driver, backend, assembler,
+                                     input_bytes_root, &fields,
+                                     NULL));
     uint8_t wire[BFAT_RECORD_CAP];
     size_t wire_len = 0;
     if (!bfat_record_serialize(&fields, wire, sizeof(wire), &wire_len))
@@ -412,8 +448,17 @@ struct zcl_result build_fabric_executor_key_publish(
     build_fabric_executor_toolchain_root(driver, backend, assembler,
                                          toolchain_root);
     struct bfat_key_fields fields;
-    ZCL_CHECK(bfat_fields_for_action(action, toolchain_root,
-                                     input_bytes_root, &fields));
+    struct vcs_component_proof_key_v1 proof_key;
+    ZCL_CHECK(bfat_fields_for_action(action, toolchain_root, &capsule,
+                                     driver, backend, assembler,
+                                     input_bytes_root, &fields,
+                                     &proof_key));
+    uint8_t proof_wire[VCS_CPK_WIRE_BYTES];
+    if (!vcs_component_proof_key_encode(&proof_key, proof_wire) ||
+        !vcs_object_put_addressed(workspace,
+                                  fields.component_preimage_root,
+                                  proof_wire, sizeof(proof_wire)))
+        return ZCL_ERR(-1, "executor-component-preimage-store-failed");
     uint8_t wire[BFAT_RECORD_CAP], key[32];
     size_t wire_len = 0;
     if (!bfat_record_serialize(&fields, wire, sizeof(wire), &wire_len))
@@ -516,6 +561,17 @@ static struct zcl_result bfat_load_input(
             (void)snprintf(refusal, refusal_cap, "input-cas-corrupt");
             return ZCL_ERR(-1, "input-cas-corrupt");
         }
+    }
+    struct vcs_build_input_screen_v1 screen;
+    vcs_build_input_screen_v1_init(&screen);
+    if (!vcs_build_input_screen_v1_update(&screen, *out, *out_len) ||
+        !vcs_build_input_screen_v1_finish(&screen)) {
+        free(*out);
+        *out = NULL;
+        *out_len = 0;
+        (void)snprintf(refusal, refusal_cap,
+                       "input-dependency-closure-unknown");
+        return ZCL_ERR(-1, "input-dependency-closure-unknown");
     }
     sha3_256(*out, *out_len, input_bytes_root);
     return loaded;
@@ -775,6 +831,10 @@ struct bfat_attach_ctx {
     struct db_build_action action;
     char requester_worker_id[BUILD_FABRIC_ID_HEX + 1];
     char capsule_hex[65];
+    struct vcs_toolchain_capsule_v1 capsule;
+    uint8_t driver_bytes_root[32];
+    uint8_t backend_bytes_root[32];
+    uint8_t assembler_bytes_root[32];
     uint8_t toolchain_root[32];
     uint8_t key[32];
     struct db_build_action donor_action;
@@ -897,9 +957,15 @@ static const char *bfat_compose_requester_key(struct bfat_attach_ctx *c)
     }
     build_fabric_executor_toolchain_root(driver, backend, assembler,
                                          c->toolchain_root);
+    c->capsule = capsule;
+    memcpy(c->driver_bytes_root, driver, 32);
+    memcpy(c->backend_bytes_root, backend, 32);
+    memcpy(c->assembler_bytes_root, assembler, 32);
     struct bfat_key_fields fields;
     struct zcl_result keyed = bfat_fields_for_action(
-        &c->action, c->toolchain_root, input_bytes_root, &fields);
+        &c->action, c->toolchain_root, &c->capsule,
+        c->driver_bytes_root, c->backend_bytes_root,
+        c->assembler_bytes_root, input_bytes_root, &fields, NULL);
     free(input);
     if (!keyed.ok) {
         (void)snprintf(c->refusal, sizeof(c->refusal), "%s", keyed.message);
@@ -940,6 +1006,22 @@ static bool bfat_key_record_checked(struct bfat_attach_ctx *c,
         bfat_record_key(record, record_len, record_key);
         ok = memcmp(record_key, c->key, 32) == 0;
     }
+    if (ok) {
+        uint8_t *preimage = NULL;
+        size_t preimage_len = 0;
+        struct vcs_component_proof_key_v1 decoded;
+        uint8_t derived[32];
+        uint8_t root[32];
+        ok = vcs_object_load_raw(c->workspace,
+                                 record_fields.component_preimage_root,
+                                 &preimage, &preimage_len) == 0 &&
+            vcs_component_proof_key_decode(preimage, preimage_len, &decoded) &&
+            vcs_component_proof_key_preimage_root(&decoded, root) &&
+            memcmp(root, record_fields.component_preimage_root, 32) == 0 &&
+            vcs_component_proof_key_derive(&decoded, derived) &&
+            memcmp(derived, record_fields.component_key, 32) == 0;
+        free(preimage);
+    }
     free(record);
     if (!ok) {
         *refusal = "executor-key-record-poisoned";
@@ -975,7 +1057,9 @@ static bool bfat_donor_key_matches(const struct bfat_attach_ctx *c,
         return false;
     struct bfat_key_fields fields;
     struct zcl_result keyed = bfat_fields_for_action(
-        candidate, c->toolchain_root, input_root, &fields);
+        candidate, c->toolchain_root, &c->capsule,
+        c->driver_bytes_root, c->backend_bytes_root,
+        c->assembler_bytes_root, input_root, &fields, NULL);
     free(input);
     if (!keyed.ok)
         return false;

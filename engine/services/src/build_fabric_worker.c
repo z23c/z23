@@ -602,7 +602,7 @@ struct zcl_result build_fabric_worker_execute(
         (void)snprintf(observed_input_marker, sizeof(observed_input_marker),
                        "input_sha3=%s", observed_input_hex);
         if (!strstr(capture, observed_input_marker) ||
-            !strstr(capture, "observed_reads=2") ||
+            !strstr(capture, "observed_reads=3") ||
             !strstr(capture, "observed_writes=1"))
             return bfw_fail(ndb, action_id, lease_id,
                             "physical-observation-incomplete");

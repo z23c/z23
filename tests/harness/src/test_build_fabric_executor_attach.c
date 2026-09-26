@@ -245,6 +245,73 @@ static int test_bf_attach_avoids_second_compile(void)
         ASSERT_RESULT_OK(composed);
         ASSERT(vcs_object_has(dir, key));
 
+        /* The donor also stores the canonical 19-field compiler-action
+         * preimage. Reconstruct it independently from input and host facts,
+         * then verify its CAS bytes and single-input key changes. */
+        uint8_t driver[32], backend[32], assembler[32];
+        ASSERT_RESULT_OK(build_fabric_executor_host_tool_hashes(
+            driver, backend, assembler));
+        uint8_t no_proof_policy[32] = {0};
+        struct vcs_fixed_compile_proof_inputs proof_inputs = {
+            .capsule = &capsule,
+            .driver_bytes_sha3 = driver,
+            .backend_bytes_sha3 = backend,
+            .assembler_bytes_sha3 = assembler,
+            .input_bytes_sha3 = input_bytes_root,
+            .proof_policy_root = no_proof_policy,
+            .target = VCS_BUILD_TARGET_V1,
+            .resource_policy = VCS_BUILD_RESOURCE_POLICY_V1,
+        };
+        struct vcs_component_proof_key_v1 proof_a, proof_changed;
+        ASSERT(vcs_build_action_v1_compile_proof_key(&proof_inputs,
+                                                     &proof_a));
+        uint8_t preimage_root[32], component_key[32];
+        ASSERT(vcs_component_proof_key_preimage_root(&proof_a,
+                                                     preimage_root));
+        ASSERT(vcs_component_proof_key_derive(&proof_a, component_key));
+        uint8_t *preimage_wire = NULL;
+        size_t preimage_len = 0;
+        ASSERT(vcs_object_load_raw(dir, preimage_root, &preimage_wire,
+                                   &preimage_len) == 0);
+        struct vcs_component_proof_key_v1 decoded;
+        ASSERT(vcs_component_proof_key_decode(preimage_wire, preimage_len,
+                                              &decoded));
+        ASSERT_EQ(vcs_component_proof_key_diff(&proof_a, &decoded), 0);
+        free(preimage_wire);
+        uint8_t changed_input[32];
+        memcpy(changed_input, input_bytes_root, 32);
+        changed_input[0] ^= 1u;
+        proof_inputs.input_bytes_sha3 = changed_input;
+        ASSERT(vcs_build_action_v1_compile_proof_key(&proof_inputs,
+                                                     &proof_changed));
+        ASSERT_EQ(vcs_component_proof_key_diff(&proof_a, &proof_changed),
+                  1u << VCS_CPK_SOURCE_CLOSURE);
+        proof_inputs.input_bytes_sha3 = input_bytes_root;
+        uint8_t changed_assembler[32];
+        memcpy(changed_assembler, assembler, 32);
+        changed_assembler[0] ^= 1u;
+        proof_inputs.assembler_bytes_sha3 = changed_assembler;
+        ASSERT(vcs_build_action_v1_compile_proof_key(&proof_inputs,
+                                                     &proof_changed));
+        ASSERT_EQ(vcs_component_proof_key_diff(&proof_a, &proof_changed),
+                  1u << VCS_CPK_TOOLCHAIN);
+        proof_inputs.assembler_bytes_sha3 = assembler;
+        uint8_t changed_backend[32];
+        memcpy(changed_backend, backend, 32);
+        changed_backend[0] ^= 1u;
+        proof_inputs.backend_bytes_sha3 = changed_backend;
+        ASSERT(vcs_build_action_v1_compile_proof_key(&proof_inputs,
+                                                     &proof_changed));
+        ASSERT_EQ(vcs_component_proof_key_diff(&proof_a, &proof_changed),
+                  1u << VCS_CPK_TOOLCHAIN);
+        proof_inputs.backend_bytes_sha3 = backend;
+        uint8_t changed_policy[32] = {1};
+        proof_inputs.proof_policy_root = changed_policy;
+        ASSERT(vcs_build_action_v1_compile_proof_key(&proof_inputs,
+                                                     &proof_changed));
+        ASSERT_EQ(vcs_component_proof_key_diff(&proof_a, &proof_changed),
+                  1u << VCS_CPK_POLICY);
+
         /* Request B: distinct task/candidate/job provenance, identical .i
          * bytes, toolchain, flags, environment, target, policy, profile. */
         struct db_build_job job_b;
@@ -386,6 +453,34 @@ static int test_bf_attach_executor_key_binds_tool_bytes(void)
             VCS_BUILD_RESOURCE_POLICY_V1, VCS_BUILD_OUTPUT_V1, mutated_flags,
             fixed_environment, NULL, toolchain_root, input_root, key_c);
         ASSERT(memcmp(key_a, key_c, 32) != 0);
+        struct vcs_build_input_screen_v1 screen;
+        vcs_build_input_screen_v1_init(&screen);
+        ASSERT(vcs_build_input_screen_v1_update(&screen, att_unit,
+                                                sizeof(att_unit) - 1u));
+        ASSERT(vcs_build_input_screen_v1_finish(&screen));
+        static const uint8_t external_read[] =
+            "__asm__(\".incbin \\\"/etc/hosts\\\"\");\n";
+        vcs_build_input_screen_v1_init(&screen);
+        ASSERT(!vcs_build_input_screen_v1_update(
+            &screen, external_read, sizeof(external_read) - 1u));
+        static const uint8_t spliced_keyword[] =
+            "__as\\\nm__(\".incbin \\\"/etc/hosts\\\"\");\n";
+        vcs_build_input_screen_v1_init(&screen);
+        ASSERT(!vcs_build_input_screen_v1_update(
+            &screen, spliced_keyword, sizeof(spliced_keyword) - 1u));
+        static const uint8_t carriage_return_marker[] =
+            "# 1 \"x\"\r__asm__(\".incbin \\\"/etc/hosts\\\"\");\r";
+        vcs_build_input_screen_v1_init(&screen);
+        ASSERT(!vcs_build_input_screen_v1_update(
+            &screen, carriage_return_marker,
+            sizeof(carriage_return_marker) - 1u));
+        static const uint8_t section_directive[] =
+            "int x __attribute__((section(\".foo\\n.incbin "
+            "\\\"/etc/hosts\\\"\\n\")));\n";
+        vcs_build_input_screen_v1_init(&screen);
+        ASSERT(!vcs_build_input_screen_v1_update(
+            &screen, section_directive,
+            sizeof(section_directive) - 1u));
         PASS();
     } _test_next:;
     return failures;
@@ -516,6 +611,62 @@ static int test_bf_attach_input_cas_refusals(void)
     return failures;
 }
 
+static int test_bf_attach_unobserved_assembler_input_refused(void)
+{
+    int failures = 0;
+    TEST("build_fabric_attach: assembler file input refuses before compiler") {
+        static const uint8_t external_read[] =
+            "__asm__(\".incbin \\\"/etc/hosts\\\"\");\n";
+        struct node_db ndb;
+        char dir[256], path[320];
+        ASSERT(att_open(&ndb, dir, sizeof(dir), path, sizeof(path), "incbin"));
+        ASSERT(vcs_object_store_init(dir));
+        uint8_t input_root[32];
+        sha3_256(external_read, sizeof(external_read) - 1u, input_root);
+        ASSERT(vcs_object_put_addressed(dir, input_root, external_read,
+                                        sizeof(external_read) - 1u));
+        struct vcs_toolchain_capsule_v1 capsule;
+        uint8_t capsule_root[32];
+        char capsule_hex[65];
+        ASSERT(vcs_toolchain_capsule_v1_capture(&capsule));
+        ASSERT(vcs_toolchain_capsule_v1_root(&capsule, capsule_root));
+        zcl_hex_encode(capsule_root, 32, capsule_hex);
+        uint8_t seed[32], pubkey[32], secret[32];
+        memset(seed, 41, sizeof(seed));
+        ed25519_keypair(pubkey, secret, seed);
+        ASSERT(att_approve_worker(&ndb, pubkey,
+                                  (int64_t)platform_time_wall_unix()));
+        struct db_build_job job;
+        struct db_build_action action;
+        ASSERT(att_plan_request(&ndb, dir, att_id_b, att_id_c, capsule_hex,
+                                input_root, "dev-x86-64-v3", &job, &action));
+        struct db_build_receipt receipt;
+        struct build_fabric_attach_report report;
+        struct zcl_result attached = build_fabric_attach(
+            &ndb, dir, NULL, &job, &action, secret, pubkey, &receipt, &report);
+        ASSERT(!attached.ok);
+        ASSERT_STR_EQ(report.refusal, "input-dependency-closure-unknown");
+        ASSERT_EQ(report.compiler_processes, 0);
+        memset(&receipt, 0, sizeof(receipt));
+        att_worker_id_from_pubkey(pubkey, receipt.worker_id);
+        struct db_build_action claimed;
+        bool got = false;
+        ASSERT_RESULT_OK(build_fabric_claim(
+            &ndb, receipt.worker_id, att_lease_b,
+            (int64_t)platform_time_wall_unix(), 300, &claimed, &got));
+        ASSERT(got);
+        struct zcl_result executed = build_fabric_worker_execute(
+            &ndb, dir, dir, action.action_id, att_lease_b, secret, pubkey,
+            &receipt, NULL);
+        ASSERT(!executed.ok);
+        ASSERT_EQ(att_build_work_entries(dir), 0);
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_attach_reproduction_never_attaches(void)
 {
     int failures = 0;
@@ -618,6 +769,7 @@ int test_build_fabric_attach(void)
     failures += test_bf_attach_executor_key_binds_tool_bytes();
     failures += test_bf_attach_miss_and_poisoned_record();
     failures += test_bf_attach_input_cas_refusals();
+    failures += test_bf_attach_unobserved_assembler_input_refused();
     failures += test_bf_attach_avoids_second_compile();
     failures += test_bf_attach_reproduction_never_attaches();
     printf("=== build_fabric_attach: %d failures ===\n", failures);

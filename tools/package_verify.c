@@ -3328,41 +3328,6 @@ static int pv_zbuild_compile_prepare_sandbox(
     return 0;
 }
 
-/* Build the fixed compile argv: compiler, mode flags, the platform's
- * architecture flag tokens, then -c <input> -o <output>. arch_flag is a
- * caller-owned scratch buffer (cc_argv keeps pointers into it, so it must
- * outlive cc_argv's use). */
-static void pv_zbuild_compile_argv(char arch_flag[128],
-                                   const char *cc_argv[14], size_t *cc_argc)
-{
-    size_t n = 0;
-    cc_argv[n++] = VCS_BUILD_COMPILER_V1;
-    cc_argv[n++] = "-x";
-    cc_argv[n++] = "cpp-output";
-    cc_argv[n++] = "-std=c23";
-    cc_argv[n++] = "-O2";
-    if (platform_toolchain_architecture_flag(arch_flag, 128) &&
-        arch_flag[0]) {
-        char *p = arch_flag;
-        while (*p) {
-            while (*p == ' ') p++;
-            if (!*p) break;
-            char *end = p;
-            while (*end && *end != ' ') end++;
-            if (*end) *end++ = '\0';
-            cc_argv[n++] = p;
-            p = end;
-        }
-    }
-    cc_argv[n++] = "-fno-ident";
-    cc_argv[n++] = "-c";
-    cc_argv[n++] = VCS_BUILD_INPUT_ARG_V1;
-    cc_argv[n++] = "-o";
-    cc_argv[n++] = VCS_BUILD_OUTPUT_ARG_V1;
-    cc_argv[n] = NULL;
-    *cc_argc = n;
-}
-
 /* Run the confined compile and classify a launch/timeout/sandbox/nonzero
  * failure. 0 on a clean exit; else the fixed-mode return code (the output
  * file, if any, is already unlinked). */
@@ -3403,6 +3368,26 @@ static bool pv_zbuild_output_shape_ok(const char *output,
     return stat(output, output_st) == 0 && S_ISREG(output_st->st_mode) &&
         output_st->st_size > 0 &&
         (uint64_t)output_st->st_size <= VCS_BUILD_ARTIFACT_MAX_BYTES;
+}
+
+static bool pv_zbuild_input_screen_file(const char *input)
+{
+    FILE *file = fopen(input, "rb");
+    if (!file) return false;
+    struct vcs_build_input_screen_v1 screen;
+    vcs_build_input_screen_v1_init(&screen);
+    uint8_t bytes[8192];
+    bool ok = true;
+    size_t count;
+    while ((count = fread(bytes, 1, sizeof(bytes), file)) > 0) {
+        if (!vcs_build_input_screen_v1_update(&screen, bytes, count)) {
+            ok = false;
+            break;
+        }
+    }
+    ok = ok && !ferror(file) && vcs_build_input_screen_v1_finish(&screen);
+    if (fclose(file) != 0) ok = false;
+    return ok;
 }
 
 static int pv_zbuild_compile_verify_physical(
@@ -3471,9 +3456,16 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
     char arch_flag[128];
     const char *cc_argv[14];
     size_t cc_argc = 0;
-    pv_zbuild_compile_argv(arch_flag, cc_argv, &cc_argc);
+    if (!vcs_build_action_v1_compile_argv(arch_flag, cc_argv, &cc_argc)) {
+        fprintf(stdout, "zbuild-error=compiler-argv-unavailable\n");
+        return 5;
+    }
     uint8_t input_before[32], input_after[32];
     uint64_t input_before_bytes = 0;
+    if (!pv_zbuild_input_screen_file(input)) {
+        fprintf(stdout, "zbuild-error=input-dependency-closure-unknown\n");
+        return 5;
+    }
     if (!pv_sha3_file(input, input_before, &input_before_bytes)) {
         fprintf(stdout, "zbuild-error=input-observation-failed\n");
         return 5;
@@ -3497,7 +3489,7 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
 #else
             "zbuild-ok=1 landlock=1 seccomp=1 rlimits=1 network=0 "
 #endif
-            "compiler=%s bytes=%lld input_sha3=%s observed_reads=2 "
+            "compiler=%s bytes=%lld input_sha3=%s observed_reads=3 "
             "observed_writes=1\n",
             VCS_BUILD_COMPILER_V1, (long long)output_st.st_size,
             input_sha3_hex);

@@ -515,27 +515,52 @@ void vcs_toolchain_capsule_v1_cache_stats_for_test(
 }
 #endif
 
+bool vcs_build_action_v1_compile_argv(char arch_flag[128],
+                                      const char *argv[14], size_t *argc)
+{
+    if (!arch_flag || !argv || !argc ||
+        !platform_toolchain_architecture_flag(arch_flag, 128))
+        return false;
+    size_t n = 0;
+    argv[n++] = VCS_BUILD_COMPILER_V1;
+    argv[n++] = "-x";
+    argv[n++] = "cpp-output";
+    argv[n++] = "-std=c23";
+    argv[n++] = "-O2";
+    char *p = arch_flag;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        if (n >= 8) return false;
+        argv[n++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) *p++ = '\0';
+    }
+    argv[n++] = "-fno-ident";
+    argv[n++] = "-c";
+    argv[n++] = VCS_BUILD_INPUT_ARG_V1;
+    argv[n++] = "-o";
+    argv[n++] = VCS_BUILD_OUTPUT_ARG_V1;
+    argv[n] = NULL;
+    *argc = n;
+    return true;
+}
+
 void vcs_build_action_v1_fixed_flags_root(uint8_t out[32])
 {
     static const char domain[] = "zcl.build_action.fixed_flags.v1";
-    char arch_flag[64];
-    if (!platform_toolchain_architecture_flag(arch_flag, sizeof(arch_flag)))
-        arch_flag[0] = '\0';
+    char arch_flag[128];
+    const char *argv[14];
+    size_t argc = 0;
+    if (!out) return;
+    if (!vcs_build_action_v1_compile_argv(arch_flag, argv, &argc)) {
+        memset(out, 0, 32);
+        return;
+    }
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    build_hash_text(&sha, VCS_BUILD_COMPILER_V1);
-    build_hash_text(&sha, "-x");
-    build_hash_text(&sha, "cpp-output");
-    build_hash_text(&sha, "-std=c23");
-    build_hash_text(&sha, "-O2");
-    if (arch_flag[0])
-        build_hash_text(&sha, arch_flag);
-    build_hash_text(&sha, "-fno-ident");
-    build_hash_text(&sha, "-c");
-    build_hash_text(&sha, VCS_BUILD_INPUT_ARG_V1);
-    build_hash_text(&sha, "-o");
-    build_hash_text(&sha, VCS_BUILD_OUTPUT_ARG_V1);
+    for (size_t i = 0; i < argc; i++) build_hash_text(&sha, argv[i]);
     sha3_256_finalize(&sha, out);
 }
 
@@ -555,6 +580,230 @@ void vcs_build_action_v1_fixed_environment_root(uint8_t out[32])
     for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++)
         build_hash_text(&sha, values[i]);
     sha3_256_finalize(&sha, out);
+}
+
+void vcs_build_input_screen_v1_init(struct vcs_build_input_screen_v1 *screen)
+{
+    if (!screen) return;
+    memset(screen, 0, sizeof(*screen));
+    screen->line_start = true;
+}
+
+static bool build_screen_splice(const struct vcs_build_input_screen_v1 *s,
+                                uint8_t c)
+{
+    size_t n = s->tail_len;
+    return c == '\n' && n >= 1 && s->tail[n - 1] == '\\';
+}
+
+static bool build_screen_escape(const struct vcs_build_input_screen_v1 *s,
+                                uint8_t c)
+{
+    size_t n = s->tail_len;
+    bool trigraph = n >= 2 && s->tail[n - 2] == '?' &&
+        s->tail[n - 1] == '?' && c == '/';
+    bool ucn = n >= 1 && s->tail[n - 1] == '\\' &&
+        (c == 'u' || c == 'U');
+    bool control = c < 0x20u && c != '\t' && c != '\n';
+    return control || build_screen_splice(s, c) || trigraph || ucn;
+}
+
+static bool build_screen_keyword(const struct vcs_build_input_screen_v1 *s,
+                                 uint8_t c)
+{
+    size_t n = s->tail_len;
+    bool asm_word = n >= 2 && s->tail[n - 2] == 'a' &&
+        s->tail[n - 1] == 's' && c == 'm';
+    bool pragma = n >= 6 && memcmp(s->tail + n - 6, "_Pragm", 6) == 0 &&
+        c == 'a';
+    /* GCC emits section attribute text into assembly; embedded newlines can
+     * introduce .incbin without an asm token in the preprocessed C input. */
+    bool section = n >= 6 && memcmp(s->tail + n - 6, "sectio", 6) == 0 &&
+        c == 'n';
+    return !s->marker_line && (asm_word || pragma || section);
+}
+
+static bool build_screen_directive(struct vcs_build_input_screen_v1 *s,
+                                   uint8_t c)
+{
+    if (s->after_hash && c != ' ' && c != '\t') {
+        if (c < '0' || c > '9') return false;
+        s->after_hash = false;
+        s->marker_line = true;
+    } else if (s->line_start && c == '#') {
+        s->after_hash = true;
+        s->line_start = false;
+    } else if (c != ' ' && c != '\t') {
+        s->line_start = false;
+    }
+    return true;
+}
+
+static bool build_screen_byte(struct vcs_build_input_screen_v1 *s, uint8_t c)
+{
+    if (build_screen_escape(s, c) || build_screen_keyword(s, c))
+        return false;
+    if (c == '\n') {
+        s->line_start = true;
+        s->after_hash = false;
+        s->marker_line = false;
+        s->tail_len = 0;
+        return true;
+    }
+    if (!build_screen_directive(s, c)) return false;
+    if (s->tail_len == sizeof(s->tail)) {
+        memmove(s->tail, s->tail + 1, sizeof(s->tail) - 1);
+        s->tail_len--;
+    }
+    s->tail[s->tail_len++] = (char)c;
+    return true;
+}
+
+bool vcs_build_input_screen_v1_update(struct vcs_build_input_screen_v1 *screen,
+                                      const uint8_t *bytes, size_t len)
+{
+    if (!screen || (!bytes && len) || screen->refused) return false;
+    for (size_t i = 0; i < len; i++) {
+        if (!build_screen_byte(screen, bytes[i])) {
+            screen->refused = true;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool vcs_build_input_screen_v1_finish(
+    const struct vcs_build_input_screen_v1 *screen)
+{
+    return screen && !screen->refused && !screen->after_hash;
+}
+
+static bool build_compile_key_closure(
+    const struct vcs_fixed_compile_proof_inputs *in,
+    struct vcs_component_proof_key_v1 *key)
+{
+    memcpy(key->roots[VCS_CPK_SOURCE_CLOSURE], in->input_bytes_sha3, 32);
+    return vcs_component_proof_field_root(VCS_CPK_KIND,
+               VCS_BUILD_ACTION_KIND_V1, strlen(VCS_BUILD_ACTION_KIND_V1),
+               key->roots[VCS_CPK_KIND]) &&
+           vcs_component_proof_field_root(VCS_CPK_UNIT_ID, "unit.i", 6,
+               key->roots[VCS_CPK_UNIT_ID]) &&
+           vcs_component_proof_field_root(VCS_CPK_DEPENDENCY_CLOSURE, "", 0,
+               key->roots[VCS_CPK_DEPENDENCY_CLOSURE]) &&
+           vcs_component_proof_ordered_root(VCS_CPK_NEGATIVE_LOOKUPS,
+               NULL, 0, key->roots[VCS_CPK_NEGATIVE_LOOKUPS]) &&
+           vcs_component_proof_generated_root(NULL, 0,
+               key->roots[VCS_CPK_GENERATED_INPUTS]) &&
+           vcs_component_integration_edges_root(NULL, 0,
+               key->roots[VCS_CPK_INTEGRATION_EDGES]);
+}
+
+static bool build_compile_key_toolchain(
+    const struct vcs_fixed_compile_proof_inputs *in,
+    struct vcs_component_proof_key_v1 *key)
+{
+    uint8_t capsule_root[32], tool_bytes[128], abi_bytes[64];
+    if (!vcs_toolchain_capsule_v1_root(in->capsule, capsule_root))
+        return false;
+    memcpy(tool_bytes, capsule_root, 32);
+    memcpy(tool_bytes + 32, in->driver_bytes_sha3, 32);
+    memcpy(tool_bytes + 64, in->backend_bytes_sha3, 32);
+    memcpy(tool_bytes + 96, in->assembler_bytes_sha3, 32);
+    memcpy(abi_bytes, in->capsule->abi_files_sha3, 32);
+    memcpy(abi_bytes + 32, in->capsule->target_probes_sha3, 32);
+    memcpy(key->roots[VCS_CPK_SYSROOT], in->capsule->sysroot_sha3, 32);
+    return vcs_component_proof_field_root(VCS_CPK_TOOLCHAIN, tool_bytes,
+               sizeof(tool_bytes), key->roots[VCS_CPK_TOOLCHAIN]) &&
+           vcs_component_proof_field_root(VCS_CPK_LINKER, "", 0,
+               key->roots[VCS_CPK_LINKER]) &&
+           vcs_component_proof_field_root(VCS_CPK_ABI_GENERATION, abi_bytes,
+               sizeof(abi_bytes), key->roots[VCS_CPK_ABI_GENERATION]);
+}
+
+static bool build_compile_key_execution(
+    const struct vcs_fixed_compile_proof_inputs *in,
+    struct vcs_component_proof_key_v1 *key)
+{
+    char arch_flag[128];
+    const char *argv[14];
+    size_t argc = 0;
+    static const struct vcs_component_proof_env env[] = {
+        { "HOME", "../src/.home" }, { "LANG", "C" },
+        { "LC_ALL", VCS_BUILD_ENV_LC_ALL_VALUE_V1 },
+        { "PATH", VCS_BUILD_ENV_PATH_VALUE_V1 },
+        { "SOURCE_DATE_EPOCH", "0" }, { "TMPDIR", "." },
+        { "TZ", "UTC" },
+    };
+    return vcs_build_action_v1_compile_argv(arch_flag, argv, &argc) &&
+           vcs_component_proof_field_root(VCS_CPK_TARGET, in->target,
+               strlen(in->target), key->roots[VCS_CPK_TARGET]) &&
+           vcs_component_proof_ordered_root(VCS_CPK_FLAGS, argv, argc,
+               key->roots[VCS_CPK_FLAGS]) &&
+           vcs_component_proof_environment_root(env,
+               sizeof(env) / sizeof(env[0]),
+               key->roots[VCS_CPK_ENVIRONMENT]);
+}
+
+static bool build_compile_key_policy(
+    const struct vcs_fixed_compile_proof_inputs *in,
+    struct vcs_component_proof_key_v1 *key)
+{
+    static const char graph[] = "cpp-output:../src/unit.i->unit.o";
+    static const char invariant[] =
+        "regular canonical input; assembler file-read syntax refused; "
+        "before-after bytes; one read-only object";
+    struct sha3_256_ctx sha;
+    uint8_t policy_bytes[32];
+    sha3_256_init(&sha);
+    build_hash_text(&sha, in->resource_policy);
+    sha3_256_write(&sha, in->proof_policy_root, 32);
+    build_hash_text(&sha, "full package isolation; no network");
+    sha3_256_finalize(&sha, policy_bytes);
+    return vcs_component_proof_field_root(VCS_CPK_BUILD_GRAPH, graph,
+               sizeof(graph) - 1, key->roots[VCS_CPK_BUILD_GRAPH]) &&
+           vcs_component_proof_field_root(VCS_CPK_HARNESS, "", 0,
+               key->roots[VCS_CPK_HARNESS]) &&
+           vcs_component_proof_field_root(VCS_CPK_FIXTURES, "", 0,
+               key->roots[VCS_CPK_FIXTURES]) &&
+           vcs_component_proof_field_root(VCS_CPK_INVARIANTS, invariant,
+               sizeof(invariant) - 1, key->roots[VCS_CPK_INVARIANTS]) &&
+           vcs_component_proof_field_root(VCS_CPK_POLICY, policy_bytes,
+               sizeof(policy_bytes), key->roots[VCS_CPK_POLICY]);
+}
+
+static bool build_compile_key_tools_present(
+    const struct vcs_fixed_compile_proof_inputs *in)
+{
+    return in && in->capsule && in->driver_bytes_sha3 &&
+        in->backend_bytes_sha3 && in->assembler_bytes_sha3 &&
+        build_root_present(in->driver_bytes_sha3) &&
+        build_root_present(in->backend_bytes_sha3) &&
+        build_root_present(in->assembler_bytes_sha3);
+}
+
+static bool build_compile_key_inputs_valid(
+    const struct vcs_fixed_compile_proof_inputs *in)
+{
+    return build_compile_key_tools_present(in) && in->input_bytes_sha3 &&
+        in->proof_policy_root && in->target && in->resource_policy &&
+        build_root_present(in->input_bytes_sha3) &&
+        strcmp(in->target, VCS_BUILD_TARGET_V1) == 0 &&
+        strcmp(in->target, in->capsule->target) == 0 &&
+        strcmp(in->resource_policy, VCS_BUILD_RESOURCE_POLICY_V1) == 0;
+}
+
+bool vcs_build_action_v1_compile_proof_key(
+    const struct vcs_fixed_compile_proof_inputs *in,
+    struct vcs_component_proof_key_v1 *out)
+{
+    if (!out || !build_compile_key_inputs_valid(in))
+        return false;
+    memset(out, 0, sizeof(*out));
+    return build_compile_key_closure(in, out) &&
+           build_compile_key_toolchain(in, out) &&
+           build_compile_key_execution(in, out) &&
+           build_compile_key_policy(in, out) &&
+           vcs_component_proof_key_valid(out);
 }
 
 uint8_t vcs_build_action_v1_work_kind(const char *kind)
@@ -640,7 +889,7 @@ bool vcs_build_action_v1_fixed_flags_root_for_kind(
     if (!out || vcs_build_action_v1_work_kind(kind) == 0) return false;
     if (strcmp(kind, VCS_BUILD_ACTION_KIND_V1) == 0) {
         vcs_build_action_v1_fixed_flags_root(out);
-        return true;
+        return build_root_present(out);
     }
     build_action_kind_descriptor_root(
         "zcl.build_action.fixed_flags.v1", kind, out);

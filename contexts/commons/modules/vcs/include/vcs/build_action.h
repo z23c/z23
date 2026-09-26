@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "platform/toolchain.h"
+#include "vcs/proof_ticket.h"
 
 #define VCS_BUILD_TARGET_V1 (platform_toolchain_canonical_target_string())
 #define VCS_BUILD_COMPILER_V1 "/usr/bin/cc"
@@ -107,6 +108,47 @@ struct vcs_build_input_closure_v1 {
     uint8_t harness_sha3[32];
     uint8_t policy_sha3[32];
 };
+
+/* Actual ordered argv of the fixed, already-preprocessed compiler action.
+ * arch_flag owns any architecture tokens referenced by argv. */
+bool vcs_build_action_v1_compile_argv(char arch_flag[128],
+                                      const char *argv[14], size_t *argc);
+
+/* The fixed compiler action admits only preprocessed C that cannot inject
+ * assembler file reads. Conservative rejection is intentional: inline asm,
+ * pragmas, line splices and non-line-marker directives need a read trace. */
+struct vcs_build_input_screen_v1 {
+    char tail[7];
+    size_t tail_len;
+    bool line_start;
+    bool after_hash;
+    bool marker_line;
+    bool refused;
+};
+void vcs_build_input_screen_v1_init(struct vcs_build_input_screen_v1 *screen);
+bool vcs_build_input_screen_v1_update(struct vcs_build_input_screen_v1 *screen,
+                                      const uint8_t *bytes, size_t len);
+bool vcs_build_input_screen_v1_finish(
+    const struct vcs_build_input_screen_v1 *screen);
+
+/* Build only the compiler action's canonical proof key. The input is the
+ * already-preprocessed unit, so preprocessing searches and generators are
+ * outside this action and have named empty roots. It must not be presented
+ * as a source-to-binary build key. */
+struct vcs_fixed_compile_proof_inputs {
+    const struct vcs_toolchain_capsule_v1 *capsule;
+    const uint8_t *driver_bytes_sha3;
+    const uint8_t *backend_bytes_sha3;
+    const uint8_t *assembler_bytes_sha3;
+    const uint8_t *input_bytes_sha3;
+    const uint8_t *proof_policy_root;
+    const char *target;
+    const char *resource_policy;
+};
+
+bool vcs_build_action_v1_compile_proof_key(
+    const struct vcs_fixed_compile_proof_inputs *inputs,
+    struct vcs_component_proof_key_v1 *out);
 
 bool vcs_build_input_closure_v1_root(
     const struct vcs_build_input_closure_v1 *closure, uint8_t out[32]);
