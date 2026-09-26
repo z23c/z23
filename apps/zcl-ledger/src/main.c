@@ -151,6 +151,30 @@ static int app_info(const char *path, bool json) {
     return result;
 }
 
+static int probe_info(const char *path, bool json) {
+    static const uint8_t command[] = {0xa5, 0x01, 0, 0, 0};
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return error_result(json, "open_failed", "Cannot open the selected HID device.");
+    struct hidraw_devinfo info;
+    if (ioctl(fd, HIDIOCGRAWINFO, &info) < 0 || info.vendor != 0x2c97) {
+        close(fd);
+        return error_result(json, "not_ledger", "The selected HID device is not a Ledger device.");
+    }
+    uint8_t reply[LEDGER_HID_MAX_RESPONSE];
+    size_t reply_len = 0;
+    int exchanged = ledger_hid_exchange(fd, command, sizeof command, reply,
+                                        sizeof reply, &reply_len);
+    close(fd);
+    if (exchanged < 0)
+        return error_result(json, "no_probe_response", "ZCL Probe did not answer.");
+    if (ledger_probe_parse(reply, reply_len) < 0)
+        return error_result(json, "invalid_probe", "The running app is not ZCL Probe version 1.");
+    if (json) puts("{\"ok\":true,\"protocol\":\"zcl-probe\",\"version\":1,\"address\":false,\"signing\":false}");
+    else puts("ZCL Probe 1: address and signing unavailable");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if ((argc == 2 || argc == 3) && strcmp(argv[1], "devices") == 0 &&
         (argc == 2 || strcmp(argv[2], "--json") == 0))
@@ -158,7 +182,12 @@ int main(int argc, char **argv) {
     if ((argc == 3 || argc == 4) && strcmp(argv[1], "app-info") == 0 &&
         (argc == 3 || strcmp(argv[2], "--json") == 0))
         return app_info(argv[argc - 1], argc == 4);
+    if ((argc == 3 || argc == 4) && strcmp(argv[1], "probe") == 0 &&
+        (argc == 3 || strcmp(argv[2], "--json") == 0))
+        return probe_info(argv[argc - 1], argc == 4);
     fprintf(stderr, "Usage: %s devices [--json]\n"
-                    "       %s app-info [--json] /dev/hidrawN\n", argv[0], argv[0]);
+                    "       %s app-info [--json] /dev/hidrawN\n"
+                    "       %s probe [--json] /dev/hidrawN\n",
+            argv[0], argv[0], argv[0]);
     return 2;
 }

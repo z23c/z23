@@ -41,8 +41,27 @@ static void test_continuation_and_rejection(void) {
     assert(ledger_hid_decode(report, 1, &declared, &chunk, &chunk_len) < 0);
 }
 
+static void test_probe_rejects_other_apps_and_permissions(void) {
+    uint8_t reply[] = {'Z', 'C', 'L', 1, 0, 0x90, 0x00};
+    assert(ledger_probe_parse(reply, sizeof reply) == 0);
+    assert(ledger_probe_parse(NULL, sizeof reply) < 0);
+    assert(ledger_probe_parse(reply, sizeof reply - 1) < 0);
+    reply[3] = 2;
+    assert(ledger_probe_parse(reply, sizeof reply) < 0);
+    reply[3] = 1;
+    reply[4] = 1;
+    assert(ledger_probe_parse(reply, sizeof reply) < 0);
+    reply[4] = 0;
+    reply[0] = 'B';
+    assert(ledger_probe_parse(reply, sizeof reply) < 0);
+    reply[0] = 'Z';
+    reply[5] = 0x6d;
+    assert(ledger_probe_parse(reply, sizeof reply) < 0);
+}
+
 int main(void) {
     test_first_report();
     test_continuation_and_rejection();
+    test_probe_rejects_other_apps_and_permissions();
     return 0;
 }

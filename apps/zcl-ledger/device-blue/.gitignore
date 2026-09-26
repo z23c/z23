@@ -1,0 +1,5 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+bin/
+debug/
+dep/
+obj/

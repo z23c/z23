@@ -24,4 +24,7 @@ int ledger_hid_decode(const uint8_t report[LEDGER_HID_REPORT_SIZE],
                       uint16_t sequence, size_t *declared_len,
                       const uint8_t **chunk, size_t *chunk_len);
 
+/* Probe version 1 grants no address or signing capabilities. */
+int ledger_probe_parse(const uint8_t *reply, size_t reply_len);
+
 #endif

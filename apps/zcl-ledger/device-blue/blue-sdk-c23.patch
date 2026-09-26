@@ -1,0 +1,1444 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+diff --git a/Makefile.defines b/Makefile.defines
+index 4e91cef..ca2fde6 100644
+--- a/Makefile.defines
++++ b/Makefile.defines
+@@ -35,11 +35,11 @@ log = $(if $(strip $(VERBOSE)),$1,@$1)
+ 
+ CFLAGS   += -gdwarf-2  -gstrict-dwarf
+ CFLAGS   += -O3 -Os 
+-CFLAGS   += -I/usr/include
++CFLAGS   += -isystem $(ARM_INCLUDE_DIR)
+ CFLAGS   += -fomit-frame-pointer
+ CFLAGS   += -mcpu=cortex-m0 -mthumb 
+ CFLAGS   += -fno-common -mtune=cortex-m0 -mlittle-endian 
+-CFLAGS   += -std=gnu99 -Werror=int-to-pointer-cast -Wall -Wextra #-save-temps
++CFLAGS   += -std=c23 -Werror=int-to-pointer-cast -Wall -Wextra #-save-temps
+ CFLAGS   += -fdata-sections -ffunction-sections -funsigned-char -fshort-enums 
+ CFLAGS   += -mno-unaligned-access 
+ CFLAGS   += -Wno-unused-parameter -Wno-duplicate-decl-specifier
+@@ -50,7 +50,7 @@ AFLAGS += -ggdb2 -O3 -Os -mcpu=cortex-m0 -fno-common -mtune=cortex-m0
+ 
+ LDFLAGS  += -gdwarf-2  -gstrict-dwarf 
+ LDFLAGS  += -O3 -Os
+-LDFLAGS  += -I/usr/include
++LDFLAGS  += -isystem $(ARM_INCLUDE_DIR)
+ LDFLAGS  += -fomit-frame-pointer
+ LDFLAGS  += -Wall 
+ LDFLAGS  += -mcpu=cortex-m0 -mthumb 
+diff --git a/include/os_io_seproxyhal.h b/include/os_io_seproxyhal.h
+index af6e59a..f90c22a 100644
+--- a/include/os_io_seproxyhal.h
++++ b/include/os_io_seproxyhal.h
+@@ -552,7 +552,7 @@ typedef struct bagl_icon_details_s {
+  * Helper function to send the given bitmap splitting into multiple DISPLAY_RAW
+  * packet as the bitmap is not meant to fit in a single SEPROXYHAL packet.
+  */
+-void io_seproxyhal_display_icon(bagl_component_t *icon_component,
++void io_seproxyhal_display_icon(const bagl_component_t *icon_component,
+                                 bagl_icon_details_t *icon_details);
+ 
+ /**
+@@ -560,7 +560,7 @@ void io_seproxyhal_display_icon(bagl_component_t *icon_component,
+  * bitmap transformation
+  */
+ unsigned int
+-io_seproxyhal_display_icon_header_and_colors(bagl_component_t *icon_component,
++io_seproxyhal_display_icon_header_and_colors(const bagl_component_t *icon_component,
+                                              bagl_icon_details_t *icon_details,
+                                              unsigned int *icon_len);
+ 
+diff --git a/lib_stusb/STM32_USB_Device_Library/Core/Src/usbd_core.c b/lib_stusb/STM32_USB_Device_Library/Core/Src/usbd_core.c
+index a081ff5..0eaaef4 100644
+--- a/lib_stusb/STM32_USB_Device_Library/Core/Src/usbd_core.c
++++ b/lib_stusb/STM32_USB_Device_Library/Core/Src/usbd_core.c
+@@ -338,7 +338,7 @@ USBD_StatusTypeDef USBD_LL_DataInStage(USBD_HandleTypeDef *pdev ,uint8_t epnum,
+       if(pep->rem_length > pep->maxpacket)
+       {
+         pep->rem_length -=  pep->maxpacket;
+-        pdev->pData += pep->maxpacket;
++        pdev->pData = (uint8_t *)pdev->pData + pep->maxpacket;
+        
+         /* Prepare endpoint for premature end of transfer */
+         /*
+diff --git a/lib_stusb/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c b/lib_stusb/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
+index 1cc9bef..c5690a6 100644
+--- a/lib_stusb/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
++++ b/lib_stusb/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
+@@ -338,7 +338,7 @@ USBD_StatusTypeDef  USBD_StdEPReq (USBD_HandleTypeDef *pdev , USBD_SetupReqTyped
+ void USBD_GetDescriptor(USBD_HandleTypeDef *pdev , 
+                                USBD_SetupReqTypedef *req)
+ {
+-  uint16_t len;
++  uint16_t len = 0;
+   uint8_t *pbuf;
+   
+     
+@@ -727,11 +727,12 @@ void USBD_CtlStall( USBD_HandleTypeDef *pdev)
+   USBD_LL_StallEP(pdev , 0);
+ }
+ 
+-__weak void USBD_CtlError( USBD_HandleTypeDef *pdev ,
+-                            USBD_SetupReqTypedef *req)
+-{
+-  USBD_CtlStall(pdev);
+-}
++__weak void USBD_CtlError( USBD_HandleTypeDef *pdev ,
++                            USBD_SetupReqTypedef *req)
++{
++  (void)req;
++  USBD_CtlStall(pdev);
++}
+ 
+ 
+ /**
+diff --git a/lib_stusb_impl/u2f_impl.c b/lib_stusb_impl/u2f_impl.c
+index 6c39276..0507763 100644
+--- a/lib_stusb_impl/u2f_impl.c
++++ b/lib_stusb_impl/u2f_impl.c
+@@ -288,3 +288,5 @@ void u2f_message_complete(u2f_service_t *service) {
+ }
+ 
+ #endif
++
++typedef int z23_empty_translation_unit_guard;
+diff --git a/lib_stusb_impl/u2f_io.c b/lib_stusb_impl/u2f_io.c
+index cfcacf1..63957b6 100644
+--- a/lib_stusb_impl/u2f_io.c
++++ b/lib_stusb_impl/u2f_io.c
+@@ -54,3 +54,5 @@ void u2f_io_send(uint8_t *buffer, uint16_t length, u2f_transport_media_t media)
+ 
+ #endif // HAVE_U2F
+ 
++
++typedef int z23_empty_translation_unit_guard;
+diff --git a/lib_stusb_impl/usbd_impl.c b/lib_stusb_impl/usbd_impl.c
+index 7c57973..9881939 100644
+--- a/lib_stusb_impl/usbd_impl.c
++++ b/lib_stusb_impl/usbd_impl.c
+@@ -245,23 +245,23 @@ static const uint8_t const HID_ReportDesc_fido[] = {
+ 
+ #define ARRAY_U2LE(l) (l)&0xFF, (l)>>8
+ 
+-/* USB HID device Configuration Descriptor */
+-static __ALIGN_BEGIN const uint8_t const USBD_CfgDesc[] __ALIGN_END =
+-{
+-  0x09, /* bLength: Configuration Descriptor size */
+-  USB_DESC_TYPE_CONFIGURATION, /* bDescriptorType: Configuration */
+-  ARRAY_U2LE(0x9  /* wTotalLength: Bytes returned */
+-   +0x9+0x9+0x7+0x7 
+-#ifdef HAVE_IO_U2F
+-   +0x9+0x9+0x7+0x7 
+-#endif // HAVE_IO_U2F
+-#ifdef HAVE_USB_CLASS_CCID
+-   +0x9+0x36+0x7+0x7
+-#endif // HAVE_USB_CLASS_CCID
+-#ifdef HAVE_WEBUSB
+-   +0x9+0x7+0x7
+-#endif // HAVE_WEBUSB
+-   ),
++/* USB HID device Configuration Descriptor */
++enum { USBD_CFG_TOTAL_LENGTH = 0x9+0x9+0x9+0x7+0x7
++#ifdef HAVE_IO_U2F
++   +0x9+0x9+0x7+0x7
++#endif
++#ifdef HAVE_USB_CLASS_CCID
++   +0x9+0x36+0x7+0x7
++#endif
++#ifdef HAVE_WEBUSB
++   +0x9+0x7+0x7
++#endif
++};
++static __ALIGN_BEGIN const uint8_t const USBD_CfgDesc[] __ALIGN_END =
++{
++  0x09, /* bLength: Configuration Descriptor size */
++  USB_DESC_TYPE_CONFIGURATION, /* bDescriptorType: Configuration */
++  ARRAY_U2LE(USBD_CFG_TOTAL_LENGTH),
+   1
+ #ifdef HAVE_IO_U2F
+   +1
+@@ -803,10 +803,11 @@ uint8_t  USBD_U2F_DataOut_impl (USBD_HandleTypeDef *pdev,
+ }
+ #endif // HAVE_IO_U2F
+ 
+-uint8_t  USBD_HID_DataIn_impl (USBD_HandleTypeDef *pdev, 
+-                              uint8_t epnum)
+-{
+-  switch (epnum) {
++uint8_t  USBD_HID_DataIn_impl (USBD_HandleTypeDef *pdev,
++                              uint8_t epnum)
++{
++  (void)pdev;
++  switch (epnum) {
+     // HID gen endpoint
+     case (HID_EPIN_ADDR&0x7F):
+       io_usb_hid_sent(io_usb_send_apdu_data);
+diff --git a/src/cx_compliance_141.c b/src/cx_compliance_141.c
+index 540123b..a00cc75 100644
+--- a/src/cx_compliance_141.c
++++ b/src/cx_compliance_141.c
+@@ -229,7 +229,7 @@ int cx_ecschnorr_sign_X(cx_ecfp_private_key_t WIDE *pv_key, int mode,  cx_md_t h
+ 
+ void cx_edward_decompress_point_X(cx_curve_t curve, unsigned char *P) {
+     const unsigned int  domain_length =  cx_ecfp_get_domain_length(curve);
+-    return cx_edward_decompress_point(curve, P, 1+2*domain_length);
++    cx_edward_decompress_point(curve, P, 1+2*domain_length);
+ }
+ 
+ void cx_edward_compress_point_X(cx_curve_t curve, unsigned char *P) {
+@@ -239,7 +239,7 @@ void cx_edward_compress_point_X(cx_curve_t curve, unsigned char *P) {
+ 
+ void cx_eddsa_get_public_key_X(cx_ecfp_private_key_t WIDE *pv_key, cx_md_t hashID, cx_ecfp_public_key_t *pu_key, unsigned char* a, unsigned char* h) {
+     const unsigned int  domain_length =  cx_ecfp_get_domain_length(pu_key->curve);
+-    return cx_eddsa_get_public_key(pv_key, hashID, pu_key, a, domain_length, h, domain_length);
++    cx_eddsa_get_public_key(pv_key, hashID, pu_key, a, domain_length, h, domain_length);
+ }
+ 
+ int cx_eddsa_sign_X(cx_ecfp_private_key_t WIDE *pv_key, 
+@@ -284,4 +284,3 @@ int cx_ecdh_X(cx_ecfp_private_key_t WIDE *key, int mode, unsigned char WIDE *P,
+ #endif
+ 
+ 
+-
+diff --git a/src/os.c b/src/os.c
+index 37efbe5..ff41864 100644
+--- a/src/os.c
++++ b/src/os.c
+@@ -79,7 +79,7 @@ io_usb_hid_receive_status_t io_usb_hid_receive (io_send_t sndfct, unsigned char*
+   switch(G_io_usb_ep_buffer[2]) {
+   case 0x05:
+     // ensure sequence idx is 0 for the first chunk ! 
+-    if (U2BE(G_io_usb_ep_buffer, 3) != G_io_usb_hid_sequence_number) {
++    if ((unsigned int)U2BE(G_io_usb_ep_buffer, 3) != G_io_usb_hid_sequence_number) {
+       // ignore packet
+       goto apdu_reset;
+     }
+@@ -464,4 +464,3 @@ unsigned int os_parse_bertlv(unsigned char* mem, unsigned int mem_len,
+ retret:
+   return ret;
+ }
+-
+diff --git a/src/os_io_seproxyhal.c b/src/os_io_seproxyhal.c
+index c31d390..9b61de4 100644
+--- a/src/os_io_seproxyhal.c
++++ b/src/os_io_seproxyhal.c
+@@ -96,8 +96,10 @@ void io_seproxyhal_handle_usb_event(void) {
+       if (G_io_apdu_media != IO_APDU_MEDIA_NONE) {
+         THROW(EXCEPTION_IO_RESET);
+       }
+-      os_memset(G_io_usb_ep_xfer_len, 0, sizeof(G_io_usb_ep_xfer_len));
+-      os_memset(G_io_usb_ep_timeouts, 0, sizeof(G_io_usb_ep_timeouts));
++      for (unsigned int i = 0; i < IO_USB_MAX_ENDPOINTS; i++) {
++        G_io_usb_ep_xfer_len[i] = 0;
++        G_io_usb_ep_timeouts[i].timeout = 0;
++      }
+       break;
+     case SEPROXYHAL_TAG_USB_EVENT_SOF:
+       USBD_LL_SOF(&USBD_Device);
+@@ -159,8 +161,6 @@ void io_seproxyhal_handle_usb_ep_xfer_event(void) {
+ // TODO add a blocking parameter, for HID KBD sending, or use a USB busy flag per channel to know if 
+ // the transfer has been processed or not. and move on to the next transfer on the same endpoint
+ void io_usb_send_ep(unsigned int ep, unsigned char* buffer, unsigned short length, unsigned int timeout) {
+-  unsigned int rx_len;
+-
+   // don't spoil the timeout :)
+   if (timeout) {
+     timeout++;
+@@ -577,7 +577,7 @@ void io_seproxyhal_display_bitmap(int x, int y, unsigned int w, unsigned int h,
+ }
+ 
+ #ifdef SEPROXYHAL_TAG_SCREEN_DISPLAY_RAW_STATUS
+-unsigned int io_seproxyhal_display_icon_header_and_colors(bagl_component_t* icon_component, bagl_icon_details_t* icon_details, unsigned int* icon_len) {
++unsigned int io_seproxyhal_display_icon_header_and_colors(const bagl_component_t* icon_component, bagl_icon_details_t* icon_details, unsigned int* icon_len) {
+   unsigned int len;
+ 
+   struct display_raw_s {
+@@ -632,8 +632,8 @@ unsigned int io_seproxyhal_display_icon_header_and_colors(bagl_component_t* icon
+   SWAP(raw.w.b[0], raw.w.b[1]);
+   SWAP(raw.h.b[0], raw.h.b[1]);
+ 
+-  io_seproxyhal_spi_send(&raw, sizeof(raw));
+-  io_seproxyhal_spi_send(PIC(icon_details->colors), (1<<raw.bpp)*4);
++  io_seproxyhal_spi_send((const unsigned char *)&raw, sizeof(raw));
++  io_seproxyhal_spi_send((const unsigned char *)PIC(icon_details->colors), (1<<raw.bpp)*4);
+   len -= (1<<raw.bpp)*4;  
+ 
+   // remaining length of bitmap bits to be displayed
+@@ -641,7 +641,7 @@ unsigned int io_seproxyhal_display_icon_header_and_colors(bagl_component_t* icon
+ }
+ #endif // SEPROXYHAL_TAG_SCREEN_DISPLAY_RAW_STATUS
+ 
+-void io_seproxyhal_display_icon(bagl_component_t* icon_component, bagl_icon_details_t* icon_details) {
++void io_seproxyhal_display_icon(const bagl_component_t* icon_component, bagl_icon_details_t* icon_details) {
+   bagl_component_t icon_component_mod;
+   // ensure not being out of bounds in the icon component agianst the declared icon real size
+   os_memmove(&icon_component_mod, icon_component, sizeof(bagl_component_t));
+@@ -655,7 +655,7 @@ void io_seproxyhal_display_icon(bagl_component_t* icon_component, bagl_icon_deta
+   unsigned int icon_off=0;
+ 
+   len = io_seproxyhal_display_icon_header_and_colors(icon_component, icon_details, &icon_len);
+-  io_seproxyhal_spi_send(PIC(icon_details->bitmap), len);
++  io_seproxyhal_spi_send((const unsigned char *)PIC(icon_details->bitmap), len);
+   // advance in the bitmap to be transmitted
+   icon_len -= len;
+   icon_off += len;
+@@ -672,7 +672,7 @@ void io_seproxyhal_display_icon(bagl_component_t* icon_component, bagl_icon_deta
+     G_io_seproxyhal_spi_buffer[1] = (len+1)>>8;
+     G_io_seproxyhal_spi_buffer[2] = (len+1);
+     io_seproxyhal_spi_send(G_io_seproxyhal_spi_buffer, 4);
+-    io_seproxyhal_spi_send(PIC(icon_details->bitmap)+icon_off, len);
++    io_seproxyhal_spi_send((const unsigned char *)(PIC(icon_details->bitmap)+icon_off), len);
+ 
+     icon_len -= len;
+     icon_off += len;
+@@ -1104,13 +1104,11 @@ reply_apdu:
+       rx_len = io_seproxyhal_spi_recv(G_io_seproxyhal_spi_buffer, sizeof(G_io_seproxyhal_spi_buffer), 0);
+ 
+       // can't process split TLV, continue
+-      if (rx_len < 3 && rx_len-3 != U2(G_io_seproxyhal_spi_buffer[1],G_io_seproxyhal_spi_buffer[2])) {
++      if (rx_len < 3 || rx_len-3 != U2(G_io_seproxyhal_spi_buffer[1],G_io_seproxyhal_spi_buffer[2])) {
+         LOG("invalid TLV format\n");
+-      invalid_apdu_packet:
+         G_io_apdu_state = APDU_IDLE;
+         G_io_apdu_length = 0;
+ 
+-      send_last_command:
+         continue;
+       }
+ 
+diff --git a/src/os_printf.c b/src/os_printf.c
+index 96769f4..0c87c99 100644
+--- a/src/os_printf.c
++++ b/src/os_printf.c
+@@ -20,12 +20,14 @@
+ 
+ #include "os.h"
+ 
++#if defined(HAVE_PRINTF) || defined(HAVE_SPRINTF)
+ static const char const g_pcHex[] = {
+     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+ };
+ static const char const g_pcHex_cap[] = {
+     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
+ };
++#endif
+ 
+ #ifdef HAVE_PRINTF
+ 
+@@ -1143,4 +1145,3 @@ error:
+     return 0;
+ }
+ #endif // HAVE_SPRINTF
+-
+diff --git a/src/syscalls.c b/src/syscalls.c
+index 958af53..85e36c9 100644
+--- a/src/syscalls.c
++++ b/src/syscalls.c
+@@ -20,14 +20,14 @@
+   #include "os.h"
+   #include "syscalls.h"
+ 
+-  // avoid a separate asm file, but avoid any intrusion from the compiler
++  // avoid a separate __asm file, but avoid any intrusion from the compiler
+   unsigned int SVC_Call(unsigned int syscall_id, unsigned int * parameters) __attribute__ ((naked));
+   //                    r0                       r1
+   unsigned int SVC_Call(unsigned int syscall_id, unsigned int * parameters) {
+     // delegate svc
+-    asm volatile("svc #1":::"r0","r1");
++    __asm volatile("svc #1":::"r0","r1");
+     // directly return R0 value
+-    asm volatile("bx  lr");
++    __asm volatile("bx  lr");
+   }
+   void check_api_level ( unsigned int apiLevel ) 
+ {
+@@ -36,7 +36,7 @@
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)apiLevel;
+   retid = SVC_Call(SYSCALL_check_api_level_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_check_api_level_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -46,9 +46,9 @@ void reset ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_reset_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_reset_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -63,7 +63,7 @@ void nvm_write ( void * dst_adr, void * src_adr, unsigned int src_len )
+   parameters[1] = (unsigned int)src_adr;
+   parameters[2] = (unsigned int)src_len;
+   retid = SVC_Call(SYSCALL_nvm_write_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_nvm_write_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -73,9 +73,9 @@ unsigned char cx_rng_u8 ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_cx_rng_u8_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rng_u8_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -90,7 +90,7 @@ unsigned char * cx_rng ( unsigned char * buffer, unsigned int len )
+   parameters[0] = (unsigned int)buffer;
+   parameters[1] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_rng_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rng_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -114,7 +114,7 @@ int cx_rng_rfc6979 ( unsigned char * rnd, unsigned int rnd_len, unsigned int has
+   parameters[9] = (unsigned int)V;
+   parameters[10] = (unsigned int)V_len;
+   retid = SVC_Call(SYSCALL_cx_rng_rfc6979_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rng_rfc6979_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -133,7 +133,7 @@ int cx_hash ( cx_hash_t * hash, int mode, const unsigned char * in, unsigned int
+   parameters[4] = (unsigned int)out;
+   parameters[5] = (unsigned int)out_len;
+   retid = SVC_Call(SYSCALL_cx_hash_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hash_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -147,7 +147,7 @@ int cx_ripemd160_init ( cx_ripemd160_t * hash )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)hash;
+   retid = SVC_Call(SYSCALL_cx_ripemd160_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ripemd160_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -161,7 +161,7 @@ int cx_sha224_init ( cx_sha256_t * hash )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)hash;
+   retid = SVC_Call(SYSCALL_cx_sha224_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_sha224_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -175,7 +175,7 @@ int cx_sha256_init ( cx_sha256_t * hash )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)hash;
+   retid = SVC_Call(SYSCALL_cx_sha256_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_sha256_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -192,7 +192,7 @@ int cx_hash_sha256 ( const unsigned char * in, unsigned int len, unsigned char *
+   parameters[2] = (unsigned int)out;
+   parameters[3] = (unsigned int)out_len;
+   retid = SVC_Call(SYSCALL_cx_hash_sha256_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hash_sha256_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -206,7 +206,7 @@ int cx_sha384_init ( cx_sha512_t * hash )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)hash;
+   retid = SVC_Call(SYSCALL_cx_sha384_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_sha384_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -220,7 +220,7 @@ int cx_sha512_init ( cx_sha512_t * hash )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)hash;
+   retid = SVC_Call(SYSCALL_cx_sha512_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_sha512_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -237,7 +237,7 @@ int cx_hash_sha512 ( const unsigned char * in, unsigned int len, unsigned char *
+   parameters[2] = (unsigned int)out;
+   parameters[3] = (unsigned int)out_len;
+   retid = SVC_Call(SYSCALL_cx_hash_sha512_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hash_sha512_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -252,7 +252,7 @@ int cx_sha3_init ( cx_sha3_t * hash, unsigned int size )
+   parameters[0] = (unsigned int)hash;
+   parameters[1] = (unsigned int)size;
+   retid = SVC_Call(SYSCALL_cx_sha3_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_sha3_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -267,7 +267,7 @@ int cx_keccak_init ( cx_sha3_t * hash, unsigned int size )
+   parameters[0] = (unsigned int)hash;
+   parameters[1] = (unsigned int)size;
+   retid = SVC_Call(SYSCALL_cx_keccak_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_keccak_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -283,7 +283,7 @@ int cx_sha3_xof_init ( cx_sha3_t * hash, unsigned int size, unsigned int out_len
+   parameters[1] = (unsigned int)size;
+   parameters[2] = (unsigned int)out_length;
+   retid = SVC_Call(SYSCALL_cx_sha3_xof_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_sha3_xof_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -298,7 +298,7 @@ int cx_groestl_init ( cx_groestl_t * hash, unsigned int size )
+   parameters[0] = (unsigned int)hash;
+   parameters[1] = (unsigned int)size;
+   retid = SVC_Call(SYSCALL_cx_groestl_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_groestl_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -313,7 +313,7 @@ int cx_blake2b_init ( cx_blake2b_t * hash, unsigned int out_len )
+   parameters[0] = (unsigned int)hash;
+   parameters[1] = (unsigned int)out_len;
+   retid = SVC_Call(SYSCALL_cx_blake2b_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_blake2b_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -332,7 +332,7 @@ int cx_blake2b_init2 ( cx_blake2b_t * hash, unsigned int out_len, unsigned char
+   parameters[4] = (unsigned int)perso;
+   parameters[5] = (unsigned int)perso_len;
+   retid = SVC_Call(SYSCALL_cx_blake2b_init2_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_blake2b_init2_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -348,7 +348,7 @@ int cx_hmac_ripemd160_init ( cx_hmac_ripemd160_t * hmac, const unsigned char * k
+   parameters[1] = (unsigned int)key;
+   parameters[2] = (unsigned int)key_len;
+   retid = SVC_Call(SYSCALL_cx_hmac_ripemd160_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hmac_ripemd160_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -364,7 +364,7 @@ int cx_hmac_sha256_init ( cx_hmac_sha256_t * hmac, const unsigned char * key, un
+   parameters[1] = (unsigned int)key;
+   parameters[2] = (unsigned int)key_len;
+   retid = SVC_Call(SYSCALL_cx_hmac_sha256_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hmac_sha256_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -380,7 +380,7 @@ int cx_hmac_sha512_init ( cx_hmac_sha512_t * hmac, const unsigned char * key, un
+   parameters[1] = (unsigned int)key;
+   parameters[2] = (unsigned int)key_len;
+   retid = SVC_Call(SYSCALL_cx_hmac_sha512_init_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hmac_sha512_init_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -399,7 +399,7 @@ int cx_hmac ( cx_hmac_t * hmac, int mode, const unsigned char * in, unsigned int
+   parameters[4] = (unsigned int)mac;
+   parameters[5] = (unsigned int)mac_len;
+   retid = SVC_Call(SYSCALL_cx_hmac_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hmac_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -418,7 +418,7 @@ int cx_hmac_sha512 ( const unsigned char * key, unsigned int key_len, const unsi
+   parameters[4] = (unsigned int)mac;
+   parameters[5] = (unsigned int)mac_len;
+   retid = SVC_Call(SYSCALL_cx_hmac_sha512_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hmac_sha512_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -437,7 +437,7 @@ int cx_hmac_sha256 ( const unsigned char * key, unsigned int key_len, const unsi
+   parameters[4] = (unsigned int)mac;
+   parameters[5] = (unsigned int)mac_len;
+   retid = SVC_Call(SYSCALL_cx_hmac_sha256_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_hmac_sha256_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -457,7 +457,7 @@ void cx_pbkdf2_sha512 ( const unsigned char * password, unsigned short passwordl
+   parameters[5] = (unsigned int)out;
+   parameters[6] = (unsigned int)outLength;
+   retid = SVC_Call(SYSCALL_cx_pbkdf2_sha512_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_pbkdf2_sha512_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -472,7 +472,7 @@ int cx_des_init_key ( const unsigned char * rawkey, unsigned int key_len, cx_des
+   parameters[1] = (unsigned int)key_len;
+   parameters[2] = (unsigned int)key;
+   retid = SVC_Call(SYSCALL_cx_des_init_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_des_init_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -493,7 +493,7 @@ int cx_des_iv ( const cx_des_key_t * key, int mode, const unsigned char * iv, un
+   parameters[6] = (unsigned int)out;
+   parameters[7] = (unsigned int)out_len;
+   retid = SVC_Call(SYSCALL_cx_des_iv_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_des_iv_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -512,7 +512,7 @@ int cx_des ( const cx_des_key_t * key, int mode, const unsigned char * in, unsig
+   parameters[4] = (unsigned int)out;
+   parameters[5] = (unsigned int)out_len;
+   retid = SVC_Call(SYSCALL_cx_des_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_des_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -528,7 +528,7 @@ int cx_aes_init_key ( const unsigned char * rawkey, unsigned int key_len, cx_aes
+   parameters[1] = (unsigned int)key_len;
+   parameters[2] = (unsigned int)key;
+   retid = SVC_Call(SYSCALL_cx_aes_init_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_aes_init_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -549,7 +549,7 @@ int cx_aes_iv ( const cx_aes_key_t * key, int mode, const unsigned char * iv, un
+   parameters[6] = (unsigned int)out;
+   parameters[7] = (unsigned int)out_len;
+   retid = SVC_Call(SYSCALL_cx_aes_iv_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_aes_iv_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -568,7 +568,7 @@ int cx_aes ( const cx_aes_key_t * key, int mode, const unsigned char * in, unsig
+   parameters[4] = (unsigned int)out;
+   parameters[5] = (unsigned int)out_len;
+   retid = SVC_Call(SYSCALL_cx_aes_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_aes_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -586,7 +586,7 @@ int cx_rsa_init_public_key ( const unsigned char * exponent, unsigned int expone
+   parameters[3] = (unsigned int)modulus_len;
+   parameters[4] = (unsigned int)key;
+   retid = SVC_Call(SYSCALL_cx_rsa_init_public_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rsa_init_public_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -604,7 +604,7 @@ int cx_rsa_init_private_key ( const unsigned char * exponent, unsigned int expon
+   parameters[3] = (unsigned int)modulus_len;
+   parameters[4] = (unsigned int)key;
+   retid = SVC_Call(SYSCALL_cx_rsa_init_private_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rsa_init_private_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -623,7 +623,7 @@ int cx_rsa_generate_pair ( unsigned int modulus_len, cx_rsa_public_key_t * publi
+   parameters[4] = (unsigned int)exponent_len;
+   parameters[5] = (unsigned int)externalPQ;
+   retid = SVC_Call(SYSCALL_cx_rsa_generate_pair_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rsa_generate_pair_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -643,7 +643,7 @@ int cx_rsa_sign ( const cx_rsa_private_key_t * key, int mode, cx_md_t hashID, co
+   parameters[5] = (unsigned int)sig;
+   parameters[6] = (unsigned int)sig_len;
+   retid = SVC_Call(SYSCALL_cx_rsa_sign_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rsa_sign_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -663,7 +663,7 @@ int cx_rsa_verify ( const cx_rsa_public_key_t * key, int mode, cx_md_t hashID, c
+   parameters[5] = (unsigned int)sig;
+   parameters[6] = (unsigned int)sig_len;
+   retid = SVC_Call(SYSCALL_cx_rsa_verify_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rsa_verify_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -683,7 +683,7 @@ int cx_rsa_encrypt ( const cx_rsa_public_key_t * key, int mode, cx_md_t hashID,
+   parameters[5] = (unsigned int)enc;
+   parameters[6] = (unsigned int)enc_len;
+   retid = SVC_Call(SYSCALL_cx_rsa_encrypt_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rsa_encrypt_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -703,7 +703,7 @@ int cx_rsa_decrypt ( const cx_rsa_private_key_t * key, int mode, cx_md_t hashID,
+   parameters[5] = (unsigned int)dec;
+   parameters[6] = (unsigned int)dec_len;
+   retid = SVC_Call(SYSCALL_cx_rsa_decrypt_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_rsa_decrypt_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -719,7 +719,7 @@ int cx_ecfp_is_valid_point ( cx_curve_t curve, const unsigned char * P, unsigned
+   parameters[1] = (unsigned int)P;
+   parameters[2] = (unsigned int)P_len;
+   retid = SVC_Call(SYSCALL_cx_ecfp_is_valid_point_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecfp_is_valid_point_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -735,7 +735,7 @@ int cx_ecfp_is_cryptographic_point ( cx_curve_t curve, const unsigned char * P,
+   parameters[1] = (unsigned int)P;
+   parameters[2] = (unsigned int)P_len;
+   retid = SVC_Call(SYSCALL_cx_ecfp_is_cryptographic_point_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecfp_is_cryptographic_point_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -753,7 +753,7 @@ int cx_ecfp_add_point ( cx_curve_t curve, unsigned char * R, const unsigned char
+   parameters[3] = (unsigned int)Q;
+   parameters[4] = (unsigned int)X_len;
+   retid = SVC_Call(SYSCALL_cx_ecfp_add_point_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecfp_add_point_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -771,7 +771,7 @@ int cx_ecfp_scalar_mult ( cx_curve_t curve, unsigned char * P, unsigned int P_le
+   parameters[3] = (unsigned int)k;
+   parameters[4] = (unsigned int)k_len;
+   retid = SVC_Call(SYSCALL_cx_ecfp_scalar_mult_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecfp_scalar_mult_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -788,7 +788,7 @@ int cx_ecfp_init_public_key ( cx_curve_t curve, const unsigned char * rawkey, un
+   parameters[2] = (unsigned int)key_len;
+   parameters[3] = (unsigned int)key;
+   retid = SVC_Call(SYSCALL_cx_ecfp_init_public_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecfp_init_public_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -805,7 +805,7 @@ int cx_ecfp_init_private_key ( cx_curve_t curve, const unsigned char * rawkey, u
+   parameters[2] = (unsigned int)key_len;
+   parameters[3] = (unsigned int)pvkey;
+   retid = SVC_Call(SYSCALL_cx_ecfp_init_private_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecfp_init_private_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -822,7 +822,7 @@ int cx_ecfp_generate_pair ( cx_curve_t curve, cx_ecfp_public_key_t * pubkey, cx_
+   parameters[2] = (unsigned int)privkey;
+   parameters[3] = (unsigned int)keepprivate;
+   retid = SVC_Call(SYSCALL_cx_ecfp_generate_pair_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecfp_generate_pair_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -840,7 +840,7 @@ int cx_ecfp_generate_pair2 ( cx_curve_t curve, cx_ecfp_public_key_t * pubkey, cx
+   parameters[3] = (unsigned int)keepprivate;
+   parameters[4] = (unsigned int)hashID;
+   retid = SVC_Call(SYSCALL_cx_ecfp_generate_pair2_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecfp_generate_pair2_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -861,7 +861,7 @@ int cx_ecschnorr_sign ( const cx_ecfp_private_key_t * pvkey, int mode, cx_md_t h
+   parameters[6] = (unsigned int)sig_len;
+   parameters[7] = (unsigned int)info;
+   retid = SVC_Call(SYSCALL_cx_ecschnorr_sign_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecschnorr_sign_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -881,7 +881,7 @@ int cx_ecschnorr_verify ( const cx_ecfp_public_key_t * pukey, int mode, cx_md_t
+   parameters[5] = (unsigned int)sig;
+   parameters[6] = (unsigned int)sig_len;
+   retid = SVC_Call(SYSCALL_cx_ecschnorr_verify_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecschnorr_verify_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -897,7 +897,7 @@ void cx_edward_compress_point ( cx_curve_t curve, unsigned char * P, unsigned in
+   parameters[1] = (unsigned int)P;
+   parameters[2] = (unsigned int)P_len;
+   retid = SVC_Call(SYSCALL_cx_edward_compress_point_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_edward_compress_point_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -912,7 +912,7 @@ void cx_edward_decompress_point ( cx_curve_t curve, unsigned char * P, unsigned
+   parameters[1] = (unsigned int)P;
+   parameters[2] = (unsigned int)P_len;
+   retid = SVC_Call(SYSCALL_cx_edward_decompress_point_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_edward_decompress_point_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -931,7 +931,7 @@ void cx_eddsa_get_public_key ( const cx_ecfp_private_key_t * pvkey, cx_md_t hash
+   parameters[5] = (unsigned int)h;
+   parameters[6] = (unsigned int)h_len;
+   retid = SVC_Call(SYSCALL_cx_eddsa_get_public_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_eddsa_get_public_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -953,7 +953,7 @@ int cx_eddsa_sign ( const cx_ecfp_private_key_t * pvkey, int mode, cx_md_t hashI
+   parameters[8] = (unsigned int)sig_len;
+   parameters[9] = (unsigned int)info;
+   retid = SVC_Call(SYSCALL_cx_eddsa_sign_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_eddsa_sign_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -975,7 +975,7 @@ int cx_eddsa_verify ( const cx_ecfp_public_key_t * pukey, int mode, cx_md_t hash
+   parameters[7] = (unsigned int)sig;
+   parameters[8] = (unsigned int)sig_len;
+   retid = SVC_Call(SYSCALL_cx_eddsa_verify_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_eddsa_verify_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -996,7 +996,7 @@ int cx_ecdsa_sign ( const cx_ecfp_private_key_t * pvkey, int mode, cx_md_t hashI
+   parameters[6] = (unsigned int)sig_len;
+   parameters[7] = (unsigned int)info;
+   retid = SVC_Call(SYSCALL_cx_ecdsa_sign_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecdsa_sign_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1016,7 +1016,7 @@ int cx_ecdsa_verify ( const cx_ecfp_public_key_t * pukey, int mode, cx_md_t hash
+   parameters[5] = (unsigned int)sig;
+   parameters[6] = (unsigned int)sig_len;
+   retid = SVC_Call(SYSCALL_cx_ecdsa_verify_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecdsa_verify_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1035,7 +1035,7 @@ int cx_ecdh ( const cx_ecfp_private_key_t * pvkey, int mode, const unsigned char
+   parameters[4] = (unsigned int)secret;
+   parameters[5] = (unsigned int)secret_len;
+   retid = SVC_Call(SYSCALL_cx_ecdh_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_ecdh_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1050,7 +1050,7 @@ unsigned short cx_crc16 ( const void * buffer, unsigned int len )
+   parameters[0] = (unsigned int)buffer;
+   parameters[1] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_crc16_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_crc16_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1066,7 +1066,7 @@ unsigned short cx_crc16_update ( unsigned short crc, const void * buffer, unsign
+   parameters[1] = (unsigned int)buffer;
+   parameters[2] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_crc16_update_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_crc16_update_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1082,7 +1082,7 @@ int cx_math_cmp ( const unsigned char * a, const unsigned char * b, unsigned int
+   parameters[1] = (unsigned int)b;
+   parameters[2] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_cmp_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_cmp_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1097,7 +1097,7 @@ int cx_math_is_zero ( const unsigned char * a, unsigned int len )
+   parameters[0] = (unsigned int)a;
+   parameters[1] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_is_zero_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_is_zero_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1114,7 +1114,7 @@ int cx_math_add ( unsigned char * r, const unsigned char * a, const unsigned cha
+   parameters[2] = (unsigned int)b;
+   parameters[3] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_add_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_add_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1131,7 +1131,7 @@ int cx_math_sub ( unsigned char * r, const unsigned char * a, const unsigned cha
+   parameters[2] = (unsigned int)b;
+   parameters[3] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_sub_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_sub_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1148,7 +1148,7 @@ void cx_math_mult ( unsigned char * r, const unsigned char * a, const unsigned c
+   parameters[2] = (unsigned int)b;
+   parameters[3] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_mult_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_mult_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1165,7 +1165,7 @@ void cx_math_addm ( unsigned char * r, const unsigned char * a, const unsigned c
+   parameters[3] = (unsigned int)m;
+   parameters[4] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_addm_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_addm_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1182,7 +1182,7 @@ void cx_math_subm ( unsigned char * r, const unsigned char * a, const unsigned c
+   parameters[3] = (unsigned int)m;
+   parameters[4] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_subm_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_subm_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1199,7 +1199,7 @@ void cx_math_multm ( unsigned char * r, const unsigned char * a, const unsigned
+   parameters[3] = (unsigned int)m;
+   parameters[4] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_multm_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_multm_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1217,7 +1217,7 @@ void cx_math_powm ( unsigned char * r, const unsigned char * a, const unsigned c
+   parameters[4] = (unsigned int)m;
+   parameters[5] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_powm_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_powm_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1233,7 +1233,7 @@ void cx_math_modm ( unsigned char * v, unsigned int len_v, const unsigned char *
+   parameters[2] = (unsigned int)m;
+   parameters[3] = (unsigned int)len_m;
+   retid = SVC_Call(SYSCALL_cx_math_modm_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_modm_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1249,7 +1249,7 @@ void cx_math_invprimem ( unsigned char * r, const unsigned char * a, const unsig
+   parameters[2] = (unsigned int)m;
+   parameters[3] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_invprimem_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_invprimem_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1265,7 +1265,7 @@ void cx_math_invintm ( unsigned char * r, unsigned long int a, const unsigned ch
+   parameters[2] = (unsigned int)m;
+   parameters[3] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_invintm_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_invintm_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1279,7 +1279,7 @@ int cx_math_is_prime ( const unsigned char * p, unsigned int len )
+   parameters[0] = (unsigned int)p;
+   parameters[1] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_is_prime_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_is_prime_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1294,7 +1294,7 @@ void cx_math_next_prime ( unsigned char * n, unsigned int len )
+   parameters[0] = (unsigned int)n;
+   parameters[1] = (unsigned int)len;
+   retid = SVC_Call(SYSCALL_cx_math_next_prime_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_cx_math_next_prime_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1304,9 +1304,9 @@ void os_perso_erase_all ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_perso_erase_all_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_erase_all_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1321,7 +1321,7 @@ void os_perso_set_pin ( unsigned int identity, unsigned char * pin, unsigned int
+   parameters[1] = (unsigned int)pin;
+   parameters[2] = (unsigned int)length;
+   retid = SVC_Call(SYSCALL_os_perso_set_pin_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_set_pin_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1335,7 +1335,7 @@ void os_perso_set_current_identity_pin ( unsigned char * pin, unsigned int lengt
+   parameters[0] = (unsigned int)pin;
+   parameters[1] = (unsigned int)length;
+   retid = SVC_Call(SYSCALL_os_perso_set_current_identity_pin_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_set_current_identity_pin_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1351,7 +1351,7 @@ void os_perso_set_seed ( unsigned int identity, unsigned int algorithm, unsigned
+   parameters[2] = (unsigned int)seed;
+   parameters[3] = (unsigned int)length;
+   retid = SVC_Call(SYSCALL_os_perso_set_seed_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_set_seed_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1370,7 +1370,7 @@ void os_perso_derive_and_set_seed ( unsigned char identity, const char * prefix,
+   parameters[5] = (unsigned int)words;
+   parameters[6] = (unsigned int)words_length;
+   retid = SVC_Call(SYSCALL_os_perso_derive_and_set_seed_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_derive_and_set_seed_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1384,7 +1384,7 @@ void os_perso_set_words ( const unsigned char * words, unsigned int length )
+   parameters[0] = (unsigned int)words;
+   parameters[1] = (unsigned int)length;
+   retid = SVC_Call(SYSCALL_os_perso_set_words_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_set_words_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1394,9 +1394,9 @@ void os_perso_finalize ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_perso_finalize_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_finalize_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1406,9 +1406,9 @@ unsigned int os_perso_isonboarded ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_perso_isonboarded_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_isonboarded_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1426,7 +1426,7 @@ void os_perso_derive_node_bip32 ( cx_curve_t curve, const unsigned int * path, u
+   parameters[3] = (unsigned int)privateKey;
+   parameters[4] = (unsigned int)chain;
+   retid = SVC_Call(SYSCALL_os_perso_derive_node_bip32_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_derive_node_bip32_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1445,7 +1445,7 @@ void os_perso_derive_node_bip32_seed_key ( cx_curve_t curve, const unsigned int
+   parameters[5] = (unsigned int)seed_key;
+   parameters[6] = (unsigned int)seed_key_length;
+   retid = SVC_Call(SYSCALL_os_perso_derive_node_bip32_seed_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_perso_derive_node_bip32_seed_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1458,7 +1458,7 @@ unsigned int os_endorsement_get_code_hash ( unsigned char * buffer )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)buffer;
+   retid = SVC_Call(SYSCALL_os_endorsement_get_code_hash_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_endorsement_get_code_hash_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1473,7 +1473,7 @@ unsigned int os_endorsement_get_public_key ( unsigned char index, unsigned char
+   parameters[0] = (unsigned int)index;
+   parameters[1] = (unsigned int)buffer;
+   retid = SVC_Call(SYSCALL_os_endorsement_get_public_key_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_endorsement_get_public_key_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1488,7 +1488,7 @@ unsigned int os_endorsement_get_public_key_certificate ( unsigned char index, un
+   parameters[0] = (unsigned int)index;
+   parameters[1] = (unsigned int)buffer;
+   retid = SVC_Call(SYSCALL_os_endorsement_get_public_key_certificate_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_endorsement_get_public_key_certificate_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1502,7 +1502,7 @@ unsigned int os_endorsement_key1_get_app_secret ( unsigned char * buffer )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)buffer;
+   retid = SVC_Call(SYSCALL_os_endorsement_key1_get_app_secret_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_endorsement_key1_get_app_secret_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1518,7 +1518,7 @@ unsigned int os_endorsement_key1_sign_data ( unsigned char * src, unsigned int s
+   parameters[1] = (unsigned int)srcLength;
+   parameters[2] = (unsigned int)signature;
+   retid = SVC_Call(SYSCALL_os_endorsement_key1_sign_data_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_endorsement_key1_sign_data_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1534,7 +1534,7 @@ unsigned int os_endorsement_key2_derive_sign_data ( unsigned char * src, unsigne
+   parameters[1] = (unsigned int)srcLength;
+   parameters[2] = (unsigned int)signature;
+   retid = SVC_Call(SYSCALL_os_endorsement_key2_derive_sign_data_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_endorsement_key2_derive_sign_data_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1545,9 +1545,9 @@ unsigned int os_global_pin_is_validated ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_global_pin_is_validated_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_global_pin_is_validated_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1562,7 +1562,7 @@ unsigned int os_global_pin_check ( unsigned char * pin_buffer, unsigned char pin
+   parameters[0] = (unsigned int)pin_buffer;
+   parameters[1] = (unsigned int)pin_length;
+   retid = SVC_Call(SYSCALL_os_global_pin_check_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_global_pin_check_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1573,9 +1573,9 @@ void os_global_pin_invalidate ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_global_pin_invalidate_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_global_pin_invalidate_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1585,9 +1585,9 @@ unsigned int os_global_pin_retries ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_global_pin_retries_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_global_pin_retries_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1598,9 +1598,9 @@ unsigned int os_registry_count ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_registry_count_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_registry_count_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1615,7 +1615,7 @@ void os_registry_get ( unsigned int index, application_t * out_application_entry
+   parameters[0] = (unsigned int)index;
+   parameters[1] = (unsigned int)out_application_entry;
+   retid = SVC_Call(SYSCALL_os_registry_get_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_registry_get_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1628,7 +1628,7 @@ unsigned int os_sched_exec ( unsigned int application_index )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)application_index;
+   retid = SVC_Call(SYSCALL_os_sched_exec_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_sched_exec_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1642,7 +1642,7 @@ void os_sched_exit ( unsigned int exit_code )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)exit_code;
+   retid = SVC_Call(SYSCALL_os_sched_exit_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_sched_exit_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1655,7 +1655,7 @@ void os_ux_register ( bolos_ux_params_t * parameter_ram_pointer )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)parameter_ram_pointer;
+   retid = SVC_Call(SYSCALL_os_ux_register_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_ux_register_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1668,7 +1668,7 @@ unsigned int os_ux ( bolos_ux_params_t * params )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)params;
+   retid = SVC_Call(SYSCALL_os_ux_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_ux_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1682,7 +1682,7 @@ unsigned int os_lib_call ( unsigned int * call_parameters )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)call_parameters;
+   retid = SVC_Call(SYSCALL_os_lib_call_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_lib_call_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1696,7 +1696,7 @@ void os_lib_end ( unsigned int returnvalue )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)returnvalue;
+   retid = SVC_Call(SYSCALL_os_lib_end_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_lib_end_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1709,7 +1709,7 @@ void os_lib_throw ( unsigned int exception )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)exception;
+   retid = SVC_Call(SYSCALL_os_lib_throw_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_lib_throw_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1719,9 +1719,9 @@ unsigned int os_flags ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_flags_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_flags_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1736,7 +1736,7 @@ unsigned int os_version ( unsigned char * version, unsigned int maxlength )
+   parameters[0] = (unsigned int)version;
+   parameters[1] = (unsigned int)maxlength;
+   retid = SVC_Call(SYSCALL_os_version_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_version_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1747,9 +1747,9 @@ unsigned int os_seph_features ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_os_seph_features_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_seph_features_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1764,7 +1764,7 @@ unsigned int os_seph_version ( unsigned char * version, unsigned int maxlength )
+   parameters[0] = (unsigned int)version;
+   parameters[1] = (unsigned int)maxlength;
+   retid = SVC_Call(SYSCALL_os_seph_version_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_seph_version_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1780,7 +1780,7 @@ unsigned int os_setting_get ( unsigned int setting_id, unsigned char * value, un
+   parameters[1] = (unsigned int)value;
+   parameters[2] = (unsigned int)maxlen;
+   retid = SVC_Call(SYSCALL_os_setting_get_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_setting_get_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1796,7 +1796,7 @@ void os_setting_set ( unsigned int setting_id, unsigned char * value, unsigned i
+   parameters[1] = (unsigned int)value;
+   parameters[2] = (unsigned int)length;
+   retid = SVC_Call(SYSCALL_os_setting_set_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_setting_set_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1809,7 +1809,7 @@ void os_get_memory_info ( meminfo_t * meminfo )
+   unsigned int parameters [0+1];
+   parameters[0] = (unsigned int)meminfo;
+   retid = SVC_Call(SYSCALL_os_get_memory_info_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_get_memory_info_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1827,7 +1827,7 @@ unsigned int os_registry_get_tag ( unsigned int appidx, unsigned int * tlvoffset
+   parameters[4] = (unsigned int)buffer;
+   parameters[5] = (unsigned int)maxlength;
+   retid = SVC_Call(SYSCALL_os_registry_get_tag_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_registry_get_tag_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1843,7 +1843,7 @@ unsigned int os_registry_get_current_app_tag ( unsigned int tag, unsigned char *
+   parameters[1] = (unsigned int)buffer;
+   parameters[2] = (unsigned int)maxlen;
+   retid = SVC_Call(SYSCALL_os_registry_get_current_app_tag_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_registry_get_current_app_tag_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1859,7 +1859,7 @@ unsigned int os_customca_verify ( unsigned char * hash, unsigned char * sign, un
+   parameters[1] = (unsigned int)sign;
+   parameters[2] = (unsigned int)sign_length;
+   retid = SVC_Call(SYSCALL_os_customca_verify_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_os_customca_verify_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1874,7 +1874,7 @@ void io_seproxyhal_spi_send ( const unsigned char * buffer, unsigned short lengt
+   parameters[0] = (unsigned int)buffer;
+   parameters[1] = (unsigned int)length;
+   retid = SVC_Call(SYSCALL_io_seproxyhal_spi_send_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_io_seproxyhal_spi_send_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1884,9 +1884,9 @@ unsigned int io_seproxyhal_spi_is_status_sent ( void )
+ {
+   unsigned int ret;
+   unsigned int retid;
+-  unsigned int parameters [0];
++  unsigned int parameters [1];
+   retid = SVC_Call(SYSCALL_io_seproxyhal_spi_is_status_sent_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_io_seproxyhal_spi_is_status_sent_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+@@ -1902,7 +1902,7 @@ unsigned short io_seproxyhal_spi_recv ( unsigned char * buffer, unsigned short m
+   parameters[1] = (unsigned int)maxlength;
+   parameters[2] = (unsigned int)flags;
+   retid = SVC_Call(SYSCALL_io_seproxyhal_spi_recv_ID_IN, parameters);
+-  asm volatile("str r1, %0":"=m"(ret)::"r1");
++  __asm volatile("str r1, %0":"=m"(ret)::"r1");
+   if (retid != SYSCALL_io_seproxyhal_spi_recv_ID_OUT) {
+     THROW(EXCEPTION_SECURITY);
+   }
+diff --git a/src/tcr.c b/src/tcr.c
+index ea1661d..0060197 100644
+--- a/src/tcr.c
++++ b/src/tcr.c
+@@ -271,3 +271,5 @@ void tcr_start(void) {
+ }
+ 
+ #endif // HAVE_TINY_COROUTINE
++
++typedef int z23_empty_translation_unit_guard;

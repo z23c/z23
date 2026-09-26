@@ -1,0 +1,3 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Preserve upstream whitespace in the exact SDK patch.
+blue-sdk-c23.patch -whitespace

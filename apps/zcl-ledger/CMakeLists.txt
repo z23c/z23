@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-add_library(ledger_hid STATIC src/ledger_hid.c)
+add_library(ledger_hid STATIC src/ledger_hid.c src/ledger_probe.c)
 target_include_directories(ledger_hid PUBLIC include)
 target_compile_options(ledger_hid PRIVATE -Wall -Wextra -Werror -pedantic)
 

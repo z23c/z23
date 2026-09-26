@@ -31,6 +31,11 @@ build/zcl-ledger/zcl-ledger app-info /dev/hidraw1
 build/zcl-ledger/zcl-ledger app-info --json /dev/hidraw1
 ```
 
+After the [ZCL Probe device app](device-blue/README.md) is installed and open,
+`zcl-ledger probe --json /dev/hidrawN` checks its exact version 1 capability
+reply. Version 1 reports address and signing capabilities as false. The probe
+cannot succeed against BOLOS or a different app.
+
 The path is an example. `devices --json` returns an `ok` boolean and a
 `devices` array of objects with `path`, `model`, `vendor_id`, and `product_id`.
 `app-info --json` returns `ok`, `name`, and `version` on success, or `ok: false`
