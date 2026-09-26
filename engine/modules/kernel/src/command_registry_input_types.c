@@ -212,6 +212,8 @@ static bool cr_match_int_table(const char *key, const struct json_value *value,
         { "epoch", 0, INT64_MAX },
         { "rpc_port", 0, 65535 },
         { "watcher_id", 2, INT64_MAX },
+        /* dev.loop.stop: a retiring_sessions row's kernel birth token. */
+        { "watcher_born", 1, INT64_MAX },
         { "seconds", 1, 60 },
         { "top_n", 1, 32 },
         { "depth", 1, 1000000 },
