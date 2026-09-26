@@ -1678,6 +1678,62 @@ static bool ar_env_influential(const char *entry, size_t name_len)
     return false;
 }
 
+/* A compile cache in the plan's driver command (zcc, ccache) answers a
+ * compile from its own store, keyed on less than this root binds (zcc keys
+ * the toolchain on the driver's path, size and mtime only), so a new
+ * assembler or cc1 would be served an object the old one built. Every
+ * keyed child runs with both caches off, and a root exists only for an
+ * environment that carries exactly these entries. */
+static const char *const k_ar_cache_off[] = {
+    "CCACHE_DISABLE=1", "ZCC_DISABLE=1",
+};
+#define AR_CACHE_OFF_N (sizeof(k_ar_cache_off) / sizeof(k_ar_cache_off[0]))
+
+/* The k_ar_cache_off slot whose name `entry` carries, or -1. */
+static long ar_env_cache_off_slot(const char *entry, size_t name_len)
+{
+    for (size_t i = 0; i < AR_CACHE_OFF_N; i++) {
+        size_t n = strcspn(k_ar_cache_off[i], "=");
+        if (n == name_len && memcmp(k_ar_cache_off[i], entry, n) == 0)
+            return (long)i;
+    }
+    return -1;
+}
+
+bool zcl_action_root_env_cache_off(const char *entry)
+{
+    for (size_t i = 0; entry && i < AR_CACHE_OFF_N; i++)
+        if (strcmp(entry, k_ar_cache_off[i]) == 0)
+            return true;
+    return false;
+}
+
+/* PATH decides which program every bare word runs. An empty or relative
+ * element makes execvp search the child's cwd (the checkout), which the
+ * programs the root resolves never look at: such a PATH misses. */
+bool zcl_action_root_env_path_absolute(const char *value)
+{
+    if (!value)
+        return false;
+    for (const char *p = value;;) {
+        size_t n = strcspn(p, ":");
+        if (n == 0 || p[0] != '/')
+            return false;
+        if (!p[n])
+            return true;
+        p += n + 1;
+    }
+}
+
+/* PATH=<value> in `parent`, or NULL. */
+static const char *ar_env_path_value(const char *const *parent)
+{
+    for (size_t i = 0; parent && parent[i]; i++)
+        if (strncmp(parent[i], "PATH=", 5) == 0)
+            return parent[i] + 5;
+    return NULL;
+}
+
 const char *zcl_action_root_env_refusal(const char *const *parent,
                                         const char **entry_out)
 {
@@ -1695,6 +1751,12 @@ const char *zcl_action_root_env_refusal(const char *const *parent,
                 *entry_out = parent[i];
             return code;
         }
+    }
+    const char *path = ar_env_path_value(parent);
+    if (path && !zcl_action_root_env_path_absolute(path)) {
+        if (entry_out)
+            *entry_out = path - 5;
+        return "env_path_relative";
     }
     return NULL;
 }
@@ -1737,6 +1799,12 @@ bool zcl_action_root_child_env(const char *const *parent,
             return false;
         }
     }
+    for (size_t i = 0; i < AR_CACHE_OFF_N; i++)
+        if (!ar_child_env_add(out, &used, k_ar_cache_off[i])) {
+            out->n = 0;
+            out->v[0] = NULL;
+            return false;
+        }
     out->v[out->n] = NULL;
     return true;
 }
@@ -1770,6 +1838,33 @@ static bool ar_env_passthrough_once(struct ar_state *s, const char *entry,
         }
         *seen |= 1u << i;
     }
+    if (strncmp(entry, "PATH=", 5) == 0 &&
+        !zcl_action_root_env_path_absolute(entry + 5)) {
+        ar_fail(&s->c, "env_path_relative",
+                "PATH has an empty or relative element, so a bare program "
+                "may run from the checkout", entry);
+        return false;
+    }
+    return true;
+}
+
+/* A compile-cache switch is admitted only with its fixed value (bits 3.. of
+ * `seen`); anything else would let a cache answer the compile. */
+static bool ar_env_cache_off_once(struct ar_state *s, const char *entry,
+                                  long slot, unsigned *seen)
+{
+    unsigned bit = 1u << (3 + (unsigned)slot);
+    if (!zcl_action_root_env_cache_off(entry)) {
+        ar_fail(&s->c, "compile_cache_unbound",
+                "environment lets a compile cache answer the compile", entry);
+        return false;
+    }
+    if (*seen & bit) {
+        ar_fail(&s->c, "env_duplicate",
+                "environment names a compile-cache switch twice", entry);
+        return false;
+    }
+    *seen |= bit;
     return true;
 }
 
@@ -1790,6 +1885,9 @@ static long ar_env_entry(struct ar_state *s, const char *entry,
     }
     if (eq && zcl_action_root_env_passthrough(entry, n))
         return ar_env_passthrough_once(s, entry, n, seen) ? -1 : -2;
+    long fixed = eq ? ar_env_cache_off_slot(entry, n) : -1;
+    if (fixed >= 0)
+        return ar_env_cache_off_once(s, entry, fixed, seen) ? -1 : -2;
     long slot = eq ? ar_env_slot(entry, n) : -1;
     if (slot < 0) {
         ar_fail(&s->c, "env_unbound",
@@ -1831,6 +1929,13 @@ static bool ar_env_build(struct ar_state *s)
                     env[i]);
             return false;
         }
+    }
+    unsigned all_off = ((1u << AR_CACHE_OFF_N) - 1u) << 3;
+    if ((seen & all_off) != all_off) {
+        ar_fail(&s->c, "compile_cache_unbound",
+                "environment does not turn off the compile caches a driver "
+                "command may run (CCACHE_DISABLE=1, ZCC_DISABLE=1)", NULL);
+        return false;
     }
     return true;
 }

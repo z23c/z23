@@ -108,6 +108,9 @@ struct hs_action_plan {
     char ldflags[2048];
     struct stat stamp;
     bool loaded;
+    /* The one child environment this build spawns every compile and link
+     * under and keys by (hs_plan_take); never part of the cached plan. */
+    const struct zcl_action_root_child_env *env;
 };
 
 struct hs_dep {
@@ -477,6 +480,29 @@ static bool hs_plan_load_locked(const char *root, bool *cache_hit,
     return true;
 }
 
+/* This build's plan and the one child environment every compile and link
+ * it spawns runs under; the action root keys by that same object. */
+static bool hs_plan_take(const char *root, struct hs_action_plan *plan,
+                         struct zcl_action_root_child_env *env,
+                         bool *cache_hit, int64_t *load_us, char *why,
+                         size_t why_len)
+{
+    pthread_mutex_lock(&g_plan_mu);
+    bool ok = hs_plan_load_locked(root, cache_hit, load_us, why, why_len);
+    if (ok)
+        *plan = g_plan;
+    pthread_mutex_unlock(&g_plan_mu);
+    plan->env = NULL;
+    if (!ok)
+        return false;
+    if (!zcl_action_root_child_env(zcl_action_root_parent_env(), env)) {
+        hs_why(why, why_len, "child environment will not fit its bound");
+        return false;
+    }
+    plan->env = env;
+    return true;
+}
+
 static bool hs_sha256_digest_file(const char *path,
                                   unsigned char out[SHA256_OUTPUT_SIZE])
 {
@@ -787,7 +813,8 @@ static bool hs_cache_key_root(const struct hs_action_plan *plan,
     int64_t started = platform_time_monotonic_us();
     bool ok = zcl_devloop_action_root_key(
         root, action->source_tu, plan->cc, plan->cflags, plan->ldflags,
-        action->unity, action->depfile, action->t0, root_hex, miss);
+        action->unity, action->depfile, action->t0, plan->env, root_hex,
+        miss);
     receipt->cache_key_us += platform_time_monotonic_us() - started;
     if (ok)
         (void)snprintf(receipt->cache_key_action_root,
@@ -1140,26 +1167,23 @@ static bool hs_temp(char *out, size_t out_len, const char *root,
 #endif
 }
 
-/* Every compile and link child runs under exactly the bound environment
- * (zcl_action_root_child_env): allowlisted names and PATH, HOME, TMPDIR.
- * The cache key binds that set, so nothing else may reach the child. */
-static bool hs_process_run_bound(const char *root, const char *const argv[],
+/* Every compile and link child runs under exactly the build's one bound
+ * environment (plan->env, zcl_action_root_child_env): allowlisted names,
+ * PATH, HOME, TMPDIR and the fixed compile-cache off switches. The cache
+ * key binds that same object, so nothing else may reach the child. */
+static bool hs_process_run_bound(const struct hs_action_plan *plan,
+                                 const char *root, const char *const argv[],
                                  struct zcl_devloop_process_result *result)
 {
-    struct zcl_action_root_child_env *env =
-        zcl_calloc(1, sizeof(*env), "hot-swap child environment");
-    bool built = env && zcl_action_root_child_env(
-                            zcl_action_root_parent_env(), env);
-    bool ran = built &&
-               zcl_devloop_process_run_env(root, argv, env->v, 30000, result);
-    if (!built) {
+    if (!plan->env) {
         memset(result, 0, sizeof(*result));
         result->exit_code = -1;
         fprintf(stderr, "[hotswap-build] child environment unavailable for "
                         "%.200s\n", argv[0]);
+        return false;
     }
-    free(env);
-    return ran;
+    return zcl_devloop_process_run_env(root, argv, plan->env->v, 30000,
+                                       result);
 }
 
 static bool hs_run_compile(const struct hs_action_plan *plan,
@@ -1202,7 +1226,7 @@ static bool hs_run_compile(const struct hs_action_plan *plan,
     argv[argc++] = compile_input;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = hs_process_run_bound(root, argv, result);
+    bool ran = hs_process_run_bound(plan, root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1260,7 +1284,7 @@ static bool hs_run_hotfork_compile(
     argv[argc++] = input;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = hs_process_run_bound(root, argv, result);
+    bool ran = hs_process_run_bound(plan, root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1302,7 +1326,7 @@ static bool hs_run_hotfork_link(
     argv[argc++] = descriptor_obj;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = hs_process_run_bound(root, argv, result);
+    bool ran = hs_process_run_bound(plan, root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1338,7 +1362,7 @@ static bool hs_run_owner_compile(
     argv[argc++] = source_tu;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = hs_process_run_bound(root, argv, result);
+    bool ran = hs_process_run_bound(plan, root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1380,13 +1404,11 @@ static bool hs_shadow_owner_compile(
     char *why, size_t why_len)
 {
     struct hs_action_plan plan = {0};
+    struct zcl_action_root_child_env env;
     bool cache_hit = false;
     int64_t plan_us = 0;
-    pthread_mutex_lock(&g_plan_mu);
-    bool loaded = hs_plan_load_locked(root, &cache_hit, &plan_us,
-                                      why, why_len);
-    if (loaded) plan = g_plan;
-    pthread_mutex_unlock(&g_plan_mu);
+    bool loaded = hs_plan_take(root, &plan, &env, &cache_hit, &plan_us,
+                               why, why_len);
     (void)cache_hit;
     (void)plan_us;
     if (!loaded) return false;
@@ -1546,7 +1568,7 @@ static bool hs_run_link(const struct hs_action_plan *plan,
     argv[argc++] = obj;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = hs_process_run_bound(root, argv, result);
+    bool ran = hs_process_run_bound(plan, root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1586,13 +1608,9 @@ bool zcl_devloop_hotswap_build(
     }
 
     struct hs_action_plan plan = {0};
-    pthread_mutex_lock(&g_plan_mu);
-    bool plan_ok = hs_plan_load_locked(root, &receipt->plan_cache_hit,
-                                       &receipt->plan_load_us, why, why_len);
-    if (plan_ok)
-        plan = g_plan;
-    pthread_mutex_unlock(&g_plan_mu);
-    if (!plan_ok)
+    struct zcl_action_root_child_env env;
+    if (!hs_plan_take(root, &plan, &env, &receipt->plan_cache_hit,
+                      &receipt->plan_load_us, why, why_len))
         return false;
 
     char safe[256];
@@ -1685,7 +1703,7 @@ bool zcl_devloop_hotswap_build(
             (void)unlink(tmp_so);
             zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
                                             plan.ldflags, cached_dep,
-                                            &compile_t0, receipt);
+                                            &compile_t0, plan.env, receipt);
             return true;
         }
         if (cache_fd >= 0) {
@@ -1760,7 +1778,7 @@ bool zcl_devloop_hotswap_build(
             (void)unlink(tmp_so);
             zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
                                             plan.ldflags, cached_dep,
-                                            &compile_t0, receipt);
+                                            &compile_t0, plan.env, receipt);
             return true;
         }
         if (cache_fd >= 0) {
@@ -1850,7 +1868,7 @@ bool zcl_devloop_hotswap_build(
     }
     zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
                                     plan.ldflags, cached_dep,
-                                    &compile_t0, receipt);
+                                    &compile_t0, plan.env, receipt);
     return true;
 
 fail:
@@ -1863,7 +1881,7 @@ fail:
     }
     receipt->total_us = platform_time_monotonic_us() - started;
     zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                    plan.ldflags, NULL, &compile_t0,
+                                    plan.ldflags, NULL, &compile_t0, plan.env,
                                     receipt);
     return false;
 }
@@ -2250,12 +2268,10 @@ static bool hs_hotfork_build(
         return false;
     }
     struct hs_action_plan plan = {0};
-    pthread_mutex_lock(&g_plan_mu);
-    bool plan_ok = hs_plan_load_locked(root, &receipt->plan_cache_hit,
-                                       &receipt->plan_load_us, why, why_len);
-    if (plan_ok) plan = g_plan;
-    pthread_mutex_unlock(&g_plan_mu);
-    if (!plan_ok) return false;
+    struct zcl_action_root_child_env env;
+    if (!hs_plan_take(root, &plan, &env, &receipt->plan_cache_hit,
+                      &receipt->plan_load_us, why, why_len))
+        return false;
 
     char safe[256], key_owner[384];
     size_t source_len = strlen(def->source_tu);
@@ -2503,7 +2519,8 @@ success:
         (void)flock(cache_fd, LOCK_UN); (void)close(cache_fd);
     }
     zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
-                                    unity, cached_dep, &compile_t0, receipt);
+                                    unity, cached_dep, &compile_t0, plan.env,
+                                    receipt);
     (void)unlink(unity); (void)unlink(descriptor);
     (void)unlink(candidate_obj); (void)unlink(descriptor_obj);
     if (dep[0]) (void)unlink(dep);
@@ -2515,7 +2532,8 @@ fail:
         (void)flock(cache_fd, LOCK_UN); (void)close(cache_fd);
     }
     zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
-                                    unity, NULL, &compile_t0, receipt);
+                                    unity, NULL, &compile_t0, plan.env,
+                                    receipt);
     if (unity[0]) (void)unlink(unity);
     if (descriptor[0]) (void)unlink(descriptor);
     if (candidate_obj[0]) (void)unlink(candidate_obj);

@@ -864,11 +864,37 @@ static bool ars_targets(const char *cflags, const char *ldflags,
 }
 
 #if !defined(_WIN32)
+/* A compile cache or remote compiler in the driver command answers from
+ * state the root cannot see (its store, another host). zcc and ccache are
+ * seen through: every keyed child runs with their fixed off switches
+ * (zcl_action_root_child_env), so they exec the driver behind them. These
+ * have no such switch; a word naming one, or a symlink to one (the
+ * masquerade install), misses. A wrapper script is still bound only by its
+ * bytes: what it runs is asked through -### below. */
+static bool ars_cache_opaque(const char *word, const char *resolved)
+{
+    static const char *const names[] = {
+        "sccache", "distcc", "distccd", "icecc", "icerun", "buildcache",
+        "pump", "cachecc1", "clcache", "firebuild", "ccache-swig",
+    };
+    char real[PATH_MAX];
+    const char *bases[2] = { word, realpath(resolved, real) ? real : "" };
+    for (size_t b = 0; b < 2; b++) {
+        const char *slash = strrchr(bases[b], '/');
+        const char *base = slash ? slash + 1 : bases[b];
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+            if (strcmp(base, names[i]) == 0)
+                return true;
+    }
+    return false;
+}
+
 /* The plan's compiler command may be a wrapper ("zcc cc", a script): every
  * program word it names is resolved as execvp would and bound by the SHA3 of
  * its bytes, so new bytes at the same path move the toolchain root. A word
- * that is not an option and does not resolve to a program misses. */
-static bool ars_driver_bytes(const char *cc, uint8_t out[32])
+ * that is not an option and does not resolve to a program misses; one that
+ * is an opaque compile cache misses as driver_cache_opaque. */
+static bool ars_driver_bytes(const char *cc, uint8_t out[32], char miss[40])
 {
     static const char domain[] = "zcl.action_root.hotload_driver.v1";
     char text[512];
@@ -886,8 +912,17 @@ static bool ars_driver_bytes(const char *cc, uint8_t out[32])
         if (argv[i][0] == '-')
             continue;
         if (snprintf(path, sizeof(path), "%s", argv[i]) >= (int)sizeof(path) ||
-            !ars_resolve_program(path) ||
-            !zcl_action_root_file_sha3(path, digest))
+            !ars_resolve_program(path))
+            return false;
+        if (ars_cache_opaque(argv[i], path)) {
+            fprintf(stderr, "[action-root] driver command word %.200s is a "
+                            "compile cache the root cannot see through\n",
+                    argv[i]);
+            if (miss)
+                (void)snprintf(miss, 40, "driver_cache_opaque");
+            return false;
+        }
+        if (!zcl_action_root_file_sha3(path, digest))
             return false;
         sha3_256_write(&sha, digest, sizeof(digest));
         programs++;
@@ -933,7 +968,7 @@ static bool ars_driver_facts(const char *cc, const char *targets,
     if (miss)
         miss[0] = '\0';
     uint8_t bytes[32], env_sha3[32];
-    if (!ars_driver_bytes(cc, bytes))
+    if (!ars_driver_bytes(cc, bytes, miss))
         return false;
     ars_env_sha3(env, env_sha3);
     pthread_mutex_lock(&g_driver_mu);
@@ -1130,10 +1165,12 @@ static const struct vcs_action_abi_v2 g_hotfork_abi[] = {
 };
 static const char g_hotswap_policy[] =
     "zcl.action_policy.v2\0hotswap.compile+link;timeout_ms=30000;"
-    "env=constructed-allowlist+PATH,HOME,TMPDIR;network=ambient";
+    "env=constructed-allowlist+PATH,HOME,TMPDIR+CCACHE_DISABLE=1,"
+    "ZCC_DISABLE=1;network=ambient";
 static const char g_hotfork_policy[] =
     "zcl.action_policy.v2\0hotfork.compile+descriptor+link;timeout_ms=30000;"
-    "env=constructed-allowlist+PATH,HOME,TMPDIR;network=ambient";
+    "env=constructed-allowlist+PATH,HOME,TMPDIR+CCACHE_DISABLE=1,"
+    "ZCC_DISABLE=1;network=ambient";
 
 static const struct ars_stage g_hotswap_stage = {
     ZCL_ACTION_ROOT_STAGE_HOTSWAP, ZCL_ACTION_ROOT_STAGE_HOTSWAP_VERSION,
@@ -1154,13 +1191,16 @@ struct ars_hook {
     const char *system_dirs[ARS_SYSTEM_DIR_MAX];
     struct vcs_toolchain_capsule_v1 capsule;
     struct zcl_action_root_request req;
-    struct zcl_action_root_child_env env; /* the compile child's, exactly */
+    struct zcl_action_root_child_env env; /* built here when none is given */
+    const struct zcl_action_root_child_env *envp; /* the child's, exactly */
 };
 
 struct ars_compile {
     const char *root, *owner, *cc, *cflags, *ldflags, *depfile;
     const char *unity; /* HOT_FORK: the live unity file; NULL for hot-swap */
     const struct zcl_action_root_t0 *t0; /* the compile start, or NULL */
+    /* The environment the build spawned the compile under, or NULL. */
+    const struct zcl_action_root_child_env *env;
 };
 
 /* The first miss wins: a stable code plus a human detail. */
@@ -1210,8 +1250,11 @@ static bool ars_options_first(const char *words)
 /* The compile child sees only the bound set (zcl_action_root_child_env).
  * A parent variable that would steer it misses by name: dropping it
  * silently would key a build the operator did not ask for. Only the
- * variable's name enters the detail, never its value. */
-static bool ars_hook_env(struct ars_hook *h, struct ars_miss *m)
+ * variable's name enters the detail, never its value. The key binds the
+ * very environment object the build spawned under when one is given, so
+ * "the root binds exactly the child's environment" holds by construction. */
+static bool ars_hook_env(struct ars_hook *h, const struct ars_compile *k,
+                         struct ars_miss *m)
 {
     const char *const *parent = zcl_action_root_parent_env();
     const char *entry = NULL;
@@ -1222,15 +1265,39 @@ static bool ars_hook_env(struct ars_hook *h, struct ars_miss *m)
                        (int)strcspn(entry, "="), entry);
         ars_miss_set(m, refusal,
                      "the parent environment sets a variable that steers "
-                     "the compiler, linker or loader", name);
+                     "the compiler, linker, loader or program lookup", name);
         return false;
     }
-    if (!zcl_action_root_child_env(parent, &h->env)) {
+    h->envp = k->env;
+    if (!h->envp && zcl_action_root_child_env(parent, &h->env))
+        h->envp = &h->env;
+    if (!h->envp) {
         ars_miss_set(m, "env_unbound",
                      "the child environment will not fit its bound", NULL);
         return false;
     }
     return true;
+}
+
+/* The detail for a driver-facts miss code (ars_driver_facts). */
+static const char *ars_driver_miss_why(const char *code)
+{
+    static const struct {
+        const char *code, *why;
+    } k[] = {
+        { "backend_unresolved",
+          "the driver would not say which programs a compile runs" },
+        { "backend_config_unbound",
+          "the driver reads a configuration file the root does not bind" },
+        { "driver_cache_opaque",
+          "the driver command runs a compile cache or remote compiler the "
+          "root cannot see through" },
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++)
+        if (strcmp(code, k[i].code) == 0)
+            return k[i].why;
+    return "compiler driver's built-in include search is not a canonical, "
+           "capacity-fitting list";
 }
 
 /* The plan's driver facts under the child environment, then the bytes of
@@ -1242,16 +1309,11 @@ static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
     char targets[ARS_TARGETS_MAX];
     char driver_miss[40] = {0};
     if (!ars_targets(k->cflags, k->unity ? NULL : k->ldflags, targets) ||
-        !ars_driver_facts(k->cc, targets, &h->env, &h->driver, driver_miss) ||
+        !ars_driver_facts(k->cc, targets, h->envp, &h->driver, driver_miss) ||
         !ars_implicit_sha3(&h->driver, implicit)) {
-        if (strcmp(driver_miss, "backend_unresolved") == 0)
-            ars_miss_set(m, driver_miss,
-                         "the driver would not say which programs a compile "
-                         "runs", k->cc);
-        else if (driver_miss[0])
-            ars_miss_set(m, driver_miss,
-                         "compiler driver's built-in include search is not "
-                         "a canonical, capacity-fitting list", k->cc);
+        if (driver_miss[0])
+            ars_miss_set(m, driver_miss, ars_driver_miss_why(driver_miss),
+                         k->cc);
         else
             ars_miss_set(m, "driver_facts_unavailable",
                          "compiler driver facts, program bytes or implicit "
@@ -1293,7 +1355,8 @@ static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
                      "with a word the driver would take as an input", NULL);
         return false;
     }
-    if (!ars_hook_env(h, m) || !ars_hook_driver(h, k, implicit, backend, m))
+    if (!ars_hook_env(h, k, m) ||
+        !ars_hook_driver(h, k, implicit, backend, m))
         return false;
     /* The capsule is the host toolchain; the plan's own driver command (a
      * wrapper, a cache, another compiler) is bound by its program bytes,
@@ -1340,7 +1403,7 @@ static void ars_hook_request(struct ars_hook *h, const struct ars_compile *k)
         .collect2 = h->driver.collect2[0] ? h->driver.collect2 : NULL,
         .argv = h->argv.link, .argc = h->argv.link_n,
     };
-    r->environ = h->env.v;
+    r->environ = h->envp->v;
     if (k->t0)
         r->compile_t0 = *k->t0;
     r->abi_generation = st->abi_generation;
@@ -1452,12 +1515,13 @@ void zcl_devloop_action_root_hotswap(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *depfile,
     const struct zcl_action_root_t0 *t0,
+    const struct zcl_action_root_child_env *env,
     struct zcl_devloop_hotswap_build_receipt *receipt)
 {
     if (!receipt)
         return;
     const struct ars_compile k = { root, owner, cc, cflags, ldflags, depfile,
-                                   NULL, t0 };
+                                   NULL, t0, env };
     ars_hook_run(&k, owner, receipt);
 }
 
@@ -1465,6 +1529,7 @@ void zcl_devloop_action_root_hotfork(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *unity, const char *depfile,
     const struct zcl_action_root_t0 *t0,
+    const struct zcl_action_root_child_env *env,
     struct zcl_devloop_hotswap_build_receipt *receipt)
 {
     if (!receipt)
@@ -1472,21 +1537,24 @@ void zcl_devloop_action_root_hotfork(
     char unit[320];
     (void)snprintf(unit, sizeof(unit), "hotfork:%s", owner ? owner : "");
     const struct ars_compile k = { root, owner, cc, cflags, "",
-                                   depfile, unity ? unity : "", t0 };
+                                   depfile, unity ? unity : "", t0, env };
     ars_hook_run(&k, unit, receipt);
 }
 
 bool zcl_devloop_action_root_key(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *unity, const char *depfile,
-    const struct zcl_action_root_t0 *t0, char root_hex[65], char miss[40])
+    const struct zcl_action_root_t0 *t0,
+    const struct zcl_action_root_child_env *env, char root_hex[65],
+    char miss[40])
 {
     if (!root_hex || !miss)
         return false;
     root_hex[0] = '\0';
     miss[0] = '\0';
     const struct ars_compile k = { root, owner, cc, cflags,
-                                   unity ? "" : ldflags, depfile, unity, t0 };
+                                   unity ? "" : ldflags, depfile, unity, t0,
+                                   env };
     struct ars_miss m = {0};
     struct zcl_action_root_result result = {0};
     bool ok = ars_hook_derive(&k, &result, &m);

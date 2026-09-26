@@ -103,7 +103,10 @@ void zcl_action_root_t0_take(struct zcl_action_root_t0 *t0);
 /* The environment a keyed compile child runs under, built from the bound
  * set only: every allowlisted name (vcs_action_v2_env_allowlist, bound by
  * value) and the pass-through names PATH, HOME and TMPDIR, copied in parent
- * order. Nothing else in the parent reaches the child. */
+ * order, then the fixed compile-cache switches CCACHE_DISABLE=1 and
+ * ZCC_DISABLE=1 (a root exists only for an environment that carries both,
+ * so no compile cache in the driver command answers a keyed compile).
+ * Nothing else in the parent reaches the child. */
 #define ZCL_ACTION_ROOT_CHILD_ENV_MAX 32u
 #define ZCL_ACTION_ROOT_CHILD_ENV_TEXT 32768u
 struct zcl_action_root_child_env {
@@ -119,11 +122,18 @@ bool zcl_action_root_env_passthrough(const char *entry, size_t name_len);
  * False (logged) only when the bound set will not fit. */
 bool zcl_action_root_child_env(const char *const *parent,
                                struct zcl_action_root_child_env *out);
+/* True when `entry` is exactly one of the fixed compile-cache switches
+ * every child environment carries (CCACHE_DISABLE=1, ZCC_DISABLE=1). */
+bool zcl_action_root_env_cache_off(const char *entry);
+/* True when every element of a PATH value is a non-empty absolute dir: an
+ * empty or relative element makes execvp search the child's cwd. */
+bool zcl_action_root_env_path_absolute(const char *value);
 /* The environment this process was started with. */
 const char *const *zcl_action_root_parent_env(void);
 /* A parent variable that would steer the compile, link or driver if the
  * child saw it: a search variable (env_search_unbound) or a known
- * compiler, linker or loader control (env_influential_unbound). The child
+ * compiler, linker or loader control (env_influential_unbound), or a PATH
+ * with an empty or relative element (env_path_relative). The child
  * never sees it, so a key over the child would silently disagree with what
  * the operator asked for: the key misses by name instead. NULL when the
  * parent names none; `entry_out` receives the first offending entry. */
@@ -189,7 +199,7 @@ struct zcl_action_root_request {
  * search_class_conflict, search_too_large, search_flag_unsupported,
  * includer_unavailable, lookup_unavailable, conditional_lookup_unbound,
  * include_climb_unbound, argv_unrecognised, env_search_unbound,
- * env_unbound, probe_unreadable,
+ * env_unbound, env_path_relative, compile_cache_unbound, probe_unreadable,
  * probe_overflow, argv_noncanonical, env_duplicate, env_noncanonical,
  * builtin_dir_noncanonical, sysroot_noncanonical, linker_unavailable,
  * linker_missing, input_changed_during_compile, encode_refused,
@@ -199,6 +209,10 @@ struct zcl_action_root_request {
  * hook's capacity), driver_facts_unavailable, backend_unresolved (a program
  * the driver runs does not resolve to one file, or its own program prefix
  * holds a same-name program it may take instead), env_influential_unbound,
+ * driver_cache_opaque (a word of the driver command is a compile cache or
+ * remote compiler no fixed switch turns off), backend_config_unbound (the
+ * driver reads a configuration file), input_fs_remote (a closure file lives
+ * on a network or FUSE filesystem whose clock T0 cannot trust),
  * argv_unavailable and store_unavailable. */
 struct zcl_action_root_result {
     uint8_t root[32];
@@ -246,7 +260,9 @@ bool zcl_action_root_load(const char *store_dir, const char *root_hex,
  * `owner` (argv rebuilt by the same recipe as its compile and link steps,
  * closure from the published depfile, or NULL when the build did not
  * complete). `t0` is when that compile started (NULL when this derivation
- * follows no compile, e.g. a cache hit). Never fails the build: an
+ * follows no compile, e.g. a cache hit). `env` is the very child
+ * environment the build spawned that compile and link under (built once per
+ * build); NULL builds it from this process's own. Never fails the build: an
  * incomplete closure is recorded as receipt->action_root_miss (a code
  * above) and never as a root. */
 struct zcl_devloop_hotswap_build_receipt;
@@ -254,6 +270,7 @@ void zcl_devloop_action_root_hotswap(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *depfile,
     const struct zcl_action_root_t0 *t0,
+    const struct zcl_action_root_child_env *env,
     struct zcl_devloop_hotswap_build_receipt *receipt);
 /* The same for a HOT_FORK capsule build (hs_hotfork_build): `unity` is the
  * live capsule unity file, recorded under a stable generated token;
@@ -262,6 +279,7 @@ void zcl_devloop_action_root_hotfork(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *unity, const char *depfile,
     const struct zcl_action_root_t0 *t0,
+    const struct zcl_action_root_child_env *env,
     struct zcl_devloop_hotswap_build_receipt *receipt);
 /* The root the hot-swap / HOT_FORK artifact cache key binds: the same
  * derivation as the hooks above (`unity` NULL for a hot-swap module, the
@@ -272,7 +290,9 @@ void zcl_devloop_action_root_hotfork(
 bool zcl_devloop_action_root_key(
     const char *root, const char *owner, const char *cc, const char *cflags,
     const char *ldflags, const char *unity, const char *depfile,
-    const struct zcl_action_root_t0 *t0, char root_hex[65], char miss[40]);
+    const struct zcl_action_root_t0 *t0,
+    const struct zcl_action_root_child_env *env, char root_hex[65],
+    char miss[40]);
 /* Append the action_root* fields to a zcl.hotswap_build_receipt.v1 object. */
 struct json_value;
 void zcl_devloop_action_root_emit(

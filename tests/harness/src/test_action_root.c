@@ -72,6 +72,10 @@ static void ar_fill(uint8_t out[32], uint8_t seed)
 
 /* ---- 2/3. derivation fixture ---------------------------------------- */
 
+/* The test slot: entries before it are the base environment (the fixed
+ * compile-cache switches included), NULL at it ends the list. */
+#define FX_ENV_SLOT 5
+
 struct fx {
     char root[PATH_MAX];
     char depfile[PATH_MAX];
@@ -86,7 +90,7 @@ struct fx {
     const char *link_argv[8];
     const char *vfrom[3];
     const char *vto[3];
-    const char *env[6];
+    const char *env[FX_ENV_SLOT + 2];
     const char *system_dirs[1];
     struct vcs_action_abi_v2 abi[1];
     struct zcl_action_root_producer producers[1];
@@ -241,7 +245,9 @@ static bool fx_init(struct fx *x, const char *tag)
     x->env[0] = "LANG=C";
     x->env[1] = "HOME=/srv/fixture-home";
     x->env[2] = "SOURCE_DATE_EPOCH=0";
-    x->env[3] = NULL;
+    x->env[3] = "CCACHE_DISABLE=1";
+    x->env[4] = "ZCC_DISABLE=1";
+    x->env[FX_ENV_SLOT] = NULL;
     x->system_dirs[0] = "/usr/include";
     x->abi[0] = (struct vcs_action_abi_v2){ "fixture_abi", 1 };
     x->producers[0].path = "build/gen/unity.c";
@@ -649,23 +655,23 @@ static void test_derive_env(struct fx *x,
     x->env[2] = "SOURCE_DATE_EPOCH=0";
     AR_CHECK("env: an allowlisted variable change moves the root",
              ok && fx_same(x, b));
-    x->env[3] = "TZ=";
+    x->env[FX_ENV_SLOT] = "TZ=";
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_ENV);
-    x->env[3] = NULL;
+    x->env[FX_ENV_SLOT] = NULL;
     AR_CHECK("env: an allowlisted variable set empty differs from unset",
              ok && fx_same(x, b));
     x->env[1] = "HOME=/srv/host-c";
     ok = fx_same(x, b);
-    x->env[3] = "PATH=/opt/other/bin:/usr/bin";
+    x->env[FX_ENV_SLOT] = "PATH=/opt/other/bin:/usr/bin";
     ok = ok && fx_same(x, b);
     x->env[1] = "HOME=/srv/fixture-home";
-    x->env[3] = NULL;
+    x->env[FX_ENV_SLOT] = NULL;
     AR_CHECK("env: non-allowlisted variables never reach the root", ok);
-    x->env[3] = "SDKROOT=/srv/host-b/sdk";
+    x->env[FX_ENV_SLOT] = "SDKROOT=/srv/host-b/sdk";
     ok = fx_miss(x, "env_noncanonical");
-    x->env[3] = "LANG=C";
+    x->env[FX_ENV_SLOT] = "LANG=C";
     ok = ok && fx_miss(x, "env_duplicate");
-    x->env[3] = NULL;
+    x->env[FX_ENV_SLOT] = NULL;
     AR_CHECK("env: a host path value or a repeated allowlisted name is "
              "refused, not normalized", ok && fx_same(x, b));
     static const char *const search[] = {
@@ -674,10 +680,10 @@ static void test_derive_env(struct fx *x,
     };
     ok = true;
     for (size_t i = 0; i < sizeof(search) / sizeof(search[0]); i++) {
-        x->env[3] = search[i];
+        x->env[FX_ENV_SLOT] = search[i];
         ok = fx_miss(x, "env_search_unbound") && ok;
     }
-    x->env[3] = NULL;
+    x->env[FX_ENV_SLOT] = NULL;
     AR_CHECK("env: a variable that adds include or library search dirs "
              "misses even when empty (env_search_unbound)",
              ok && fx_same(x, b));
@@ -696,14 +702,74 @@ static void test_derive_env_unbound(struct fx *x,
     };
     bool ok = true;
     for (size_t i = 0; i < sizeof(unbound) / sizeof(unbound[0]); i++) {
-        x->env[3] = unbound[i];
+        x->env[FX_ENV_SLOT] = unbound[i];
         ok = fx_miss(x, "env_unbound") && ok;
     }
-    x->env[3] = "TMPDIR=/srv/fixture-tmp";
+    x->env[FX_ENV_SLOT] = "TMPDIR=/srv/fixture-tmp";
     ok = ok && fx_same(x, b);
-    x->env[3] = NULL;
+    x->env[FX_ENV_SLOT] = NULL;
     AR_CHECK("env: a name neither allowlisted nor passed through misses "
              "(env_unbound); TMPDIR passes through", ok && fx_same(x, b));
+}
+
+/* A compile cache in the driver command (zcc, ccache) would answer the
+ * compile from its own store: a root exists only for an environment that
+ * carries exactly the fixed off switches, once each. */
+static void test_derive_cache_off(struct fx *x,
+                                  const struct zcl_action_root_result *b)
+{
+    x->env[3] = "CCACHE_DISABLE=0";
+    bool ok = fx_miss(x, "compile_cache_unbound");
+    x->env[3] = "CCACHE_DISABLE=1";
+    x->env[4] = NULL;
+    ok = fx_miss(x, "compile_cache_unbound") && ok;
+    x->env[4] = "ZCC_DISABLE=1";
+    x->env[FX_ENV_SLOT] = "ZCC_DISABLE=1";
+    ok = fx_miss(x, "env_duplicate") && ok;
+    x->env[FX_ENV_SLOT] = "ZCC_DISABLE=";
+    ok = fx_miss(x, "compile_cache_unbound") && ok;
+    x->env[FX_ENV_SLOT] = NULL;
+    AR_CHECK("env: a root needs CCACHE_DISABLE=1 and ZCC_DISABLE=1, once "
+             "each; any other value or a missing one misses "
+             "(compile_cache_unbound)", ok && fx_same(x, b));
+    static const char *const parent[] = {
+        "ZCC_DISABLE=0", "CCACHE_DIR=/srv/fx-ccache", "ZCC_DIR=/srv/fx-zcc",
+        "PATH=/usr/bin", "LANG=C", NULL,
+    };
+    struct zcl_action_root_child_env *env = zcl_calloc(1, sizeof(*env),
+                                                       "test child env");
+    ok = env && zcl_action_root_child_env(parent, env) && env->n == 4 &&
+         strcmp(env->v[0], "PATH=/usr/bin") == 0 &&
+         strcmp(env->v[1], "LANG=C") == 0 &&
+         strcmp(env->v[2], "CCACHE_DISABLE=1") == 0 &&
+         strcmp(env->v[3], "ZCC_DISABLE=1") == 0 && env->v[4] == NULL;
+    free(env);
+    AR_CHECK("env: the child environment drops the parent's compile-cache "
+             "settings and carries the fixed off switches", ok);
+}
+
+/* execvp takes an empty or relative PATH element as the child's cwd (the
+ * checkout), which no program the root resolves looks at. */
+static void test_derive_path_relative(struct fx *x,
+                                      const struct zcl_action_root_result *b)
+{
+    static const char *const bad[] = {
+        "PATH=/usr/bin:", "PATH=:/usr/bin", "PATH=/usr/bin::/bin",
+        "PATH=bin:/usr/bin", "PATH=.:/usr/bin", "PATH=",
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        x->env[FX_ENV_SLOT] = bad[i];
+        if (!fx_miss(x, "env_path_relative")) {
+            printf("    PATH admitted: %s\n", bad[i]);
+            ok = false;
+        }
+    }
+    x->env[FX_ENV_SLOT] = "PATH=/usr/local/bin:/usr/bin";
+    ok = ok && fx_same(x, b);
+    x->env[FX_ENV_SLOT] = NULL;
+    AR_CHECK("env: a PATH with an empty or relative element misses "
+             "(env_path_relative); an absolute one passes through", ok);
 }
 
 static const char k_fx_embed[] =
@@ -951,8 +1017,8 @@ static bool fx_key(struct fx *x, const char *cc, char out[65])
     char miss[40] = {0};
     const char *cflags = fx_key_cflags(cc);
     bool ok = zcl_devloop_action_root_key(x->root, "src/unit.c", cc, cflags,
-                                          "-shared", NULL, x->depfile, NULL, out,
-                                          miss);
+                                          "-shared", NULL, x->depfile, NULL, NULL,
+                                          out, miss);
     if (!ok)
         printf("    key missed: %s\n", miss);
     return ok;
@@ -1013,12 +1079,13 @@ static void test_key_driver_facts(struct fx *x)
                   "int unit(void) { return X; }\n") &&
          !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
                                       "-std=c23 @build/args.rsp", "-shared",
-                                      NULL, x->depfile, NULL, k2, miss) &&
+                                      NULL, x->depfile, NULL, NULL, k2, miss) &&
          strcmp(miss, "argv_unrecognised") == 0;
     miss[0] = '\0';
     ok = ok && !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
                                             "-std=c23", "build/extra.o -shared",
-                                            NULL, x->depfile, NULL, k2, miss) &&
+                                            NULL, x->depfile, NULL, NULL, k2,
+                                            miss) &&
          strcmp(miss, "argv_unrecognised") == 0;
     AR_CHECK("key: a plan that names a response file, or whose link flags "
              "start with an input, misses", ok);
@@ -1045,7 +1112,7 @@ static bool fx_key_miss(struct fx *x, const char *cc, const char *code)
     const char *cflags = fx_key_cflags(cc);
     bool missed = !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
                                                cflags, "-shared", NULL,
-                                               x->depfile, NULL, key, miss);
+                                               x->depfile, NULL, NULL, key, miss);
     bool ok = missed && strcmp(miss, code) == 0 && !key[0];
     if (!ok)
         printf("    expected key miss %s, got %s\n", code,
@@ -1123,6 +1190,52 @@ static void test_key_env_influential(struct fx *x)
              "moves the key", ok);
 }
 
+/* PATH=/usr/bin: with an `as` at the checkout root: the compile child's
+ * execvp would run that one; the key misses by name instead. */
+static void test_key_path_relative(struct fx *x)
+{
+    const char *path = getenv("PATH");
+    char saved[8192], bad[8192];
+    bool ok = path && snprintf(saved, sizeof(saved), "%s", path) <
+                          (int)sizeof(saved) &&
+              fx_exec(x, "as", k_fx_as_v2);
+    static const char *const values[] = { "/usr/bin:/bin:", ":/usr/bin:/bin",
+                                          "/usr/bin:.:/bin" };
+    for (size_t i = 0; ok && i < sizeof(values) / sizeof(values[0]); i++)
+        ok = snprintf(bad, sizeof(bad), "%s", values[i]) <
+                 (int)sizeof(bad) &&
+             platform_environment_set("PATH", bad, 1) == 0 &&
+             fx_key_miss(x, "cc", "env_path_relative");
+    if (path)
+        (void)platform_environment_set("PATH", saved, 1);
+    char k[65] = {0};
+    ok = ok && fx_remove(x->root, "as") && fx_key(x, "cc", k);
+    AR_CHECK("key: PATH=/usr/bin: with an `as` at the checkout root misses "
+             "(env_path_relative)", ok);
+}
+
+/* sccache, distcc and the like answer a compile from state no fixed switch
+ * turns off: as a driver-command word, or as a symlink to one, they miss. */
+static void test_key_cache_opaque(struct fx *x)
+{
+    char cc[PATH_MAX * 2], link[PATH_MAX], target[PATH_MAX];
+    bool ok = fx_exec(x, "tools/sccache", "#!/bin/sh\nexec \"$@\"\n") &&
+              snprintf(cc, sizeof(cc), "%s/tools/sccache cc", x->root) <
+                  (int)sizeof(cc) &&
+              fx_key_miss(x, cc, "driver_cache_opaque") &&
+              snprintf(target, sizeof(target), "%s/tools/sccache", x->root) <
+                  (int)sizeof(target) &&
+              snprintf(link, sizeof(link), "%s/tools/mcc", x->root) <
+                  (int)sizeof(link) &&
+              symlink(target, link) == 0 &&
+              fx_key_miss(x, link, "driver_cache_opaque");
+    (void)fx_remove(x->root, "tools/mcc");
+    (void)fx_remove(x->root, "tools/sccache");
+    AR_CHECK("key: a driver command that runs an opaque compile cache "
+             "(sccache by name or by symlink) misses (driver_cache_opaque)",
+             ok);
+}
+
 static bool fx_unit_key(struct fx *x, const char *unit, const char *dep,
                         char out[65])
 {
@@ -1131,8 +1244,8 @@ static bool fx_unit_key(struct fx *x, const char *unit, const char *dep,
                   (int)sizeof(depfile) &&
               zcl_devloop_action_root_key(x->root, unit, "cc",
                                           "-std=c23 -Iinc_a -Iinc_b -DFOO=1",
-                                          "-shared", NULL, depfile, NULL, out,
-                                          miss);
+                                          "-shared", NULL, depfile, NULL, NULL,
+                                          out, miss);
     if (!ok)
         printf("    %s key missed: %s\n", unit, miss);
     return ok;
@@ -1220,8 +1333,8 @@ static void test_key_cost(struct fx *x)
         char key[65] = {0}, miss[40] = {0};
         int64_t w = platform_time_monotonic_us(), c = fx_cpu_us();
         ok = zcl_devloop_action_root_key(x->root, "src/unit.c", "cc", cflags,
-                                         "-shared", NULL, x->depfile, NULL, key,
-                                         miss) && ok;
+                                         "-shared", NULL, x->depfile, NULL, NULL,
+                                         key, miss) && ok;
         wall[i] = platform_time_monotonic_us() - w;
         cpu[i] = fx_cpu_us() - c;
     }
@@ -1481,7 +1594,7 @@ static void test_hook_misses(struct fx *x, const char *cflags)
 {
     struct zcl_devloop_hotswap_build_receipt r = {0};
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", NULL, NULL, &r);
+                                    "-shared", NULL, NULL, NULL, &r);
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
@@ -1499,7 +1612,7 @@ static void test_hook_misses(struct fx *x, const char *cflags)
     char gone[PATH_MAX + 16];
     (void)snprintf(gone, sizeof(gone), "%s/build/gone.d", x->root);
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", gone, NULL, &r);
+                                    "-shared", gone, NULL, NULL, &r);
     AR_CHECK("hook: a missing depfile reports miss_reason depfile_missing",
              !r.action_root[0] &&
                  strcmp(r.action_root_miss, "depfile_missing") == 0);
@@ -1527,13 +1640,13 @@ static void test_hotfork_hook(struct fx *x, const char *cflags)
               fx_write(x->root, "build/hotswap-fast/.resident-bbbbbb.c",
                        unity);
     zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, a,
-                                    dep, NULL, &h1);
+                                    dep, NULL, NULL, &h1);
     zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, b,
-                                    dep, NULL, &h2);
+                                    dep, NULL, NULL, &h2);
     ok = ok && fx_write(x->root, "build/hotswap-fast/.resident-bbbbbb.c",
                         "/* adapter v2 */\n#include \"src/unit.c\"\n");
     zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, b,
-                                    dep, NULL, &h3);
+                                    dep, NULL, NULL, &h3);
     if (!h1.action_root[0])
         printf("    hotfork hook missed: %s %s\n", h1.action_root_miss,
                h1.action_root_miss_detail);
@@ -1547,7 +1660,7 @@ static void test_hotfork_hook(struct fx *x, const char *cflags)
              strlen(h3.action_root) == 64 &&
                  strcmp(h3.action_root_cause, "generated") == 0);
     zcl_devloop_action_root_hotfork(x->root, "src/unit.c", "cc", cflags, a,
-                                    NULL, NULL, &h1);
+                                    NULL, NULL, NULL, &h1);
     AR_CHECK("hotfork hook: a failed capsule build misses "
              "(closure_unobserved)",
              !h1.action_root[0] &&
@@ -1567,12 +1680,12 @@ static void test_hotswap_hook(struct fx *x)
     struct zcl_devloop_hotswap_build_receipt r1 = {0}, r2 = {0}, r3 = {0};
     const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1";
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", x->depfile, NULL, &r1);
+                                    "-shared", x->depfile, NULL, NULL, &r1);
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", x->depfile, NULL, &r2);
+                                    "-shared", x->depfile, NULL, NULL, &r2);
     ok = ok && fx_write(x->root, "src/local.h", "int local(long);\n");
     zcl_devloop_action_root_hotswap(x->root, "src/unit.c", "cc", cflags,
-                                    "-shared", x->depfile, NULL, &r3);
+                                    "-shared", x->depfile, NULL, NULL, &r3);
     ok = ok && fx_write(x->root, "src/local.h", "int local(void);\n");
     if (!r1.action_root[0])
         printf("    hook refused: %s\n", r1.action_root_miss_detail);
@@ -1637,6 +1750,8 @@ static void test_derivation(void)
         test_derive_roots(x, &base);
         test_derive_env(x, &base);
         test_derive_env_unbound(x, &base);
+        test_derive_cache_off(x, &base);
+        test_derive_path_relative(x, &base);
         test_derive_refusals(x);
         test_derive_allowlist(x, &base);
         test_derive_climb(x, &base);
@@ -1648,6 +1763,8 @@ static void test_derivation(void)
         test_hotswap_hook(x);
         test_key_driver_facts(x);
         test_key_env_influential(x);
+        test_key_path_relative(x);
+        test_key_cache_opaque(x);
         test_key_same_name_static(x);
         test_key_cost(x);
     }

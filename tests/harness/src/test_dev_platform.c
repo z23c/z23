@@ -13,6 +13,7 @@
 #include "dev_activation.h"
 #include "dev_failure_store.h"
 #include "devloop.h"
+#include "devloop_action_root.h"
 #include "devloop_watch_session.h"
 #include "kernel/command_registry.h"
 #include "hotswap/hotfork_capsule.h"
@@ -4046,8 +4047,10 @@ static bool dp_ar_child_env_bound(const struct dp_ar_fx *fx)
         if (!line[name])
             continue;
         n++;
+        line[strcspn(line, "\n")] = '\0';
         if (vcs_action_v2_env_allowlisted(line, name) ||
-            dp_ar_env_passthrough(line, name))
+            dp_ar_env_passthrough(line, name) ||
+            zcl_action_root_env_cache_off(line))
             continue;
         printf("    child-env: unbound %.*s reached the compile\n",
                (int)name, line);
@@ -4132,6 +4135,187 @@ static bool run_hotswap_action_root_key_fixture(void)
     return ok;
 }
 
+static bool dp_hf_copy_file(const char *src, const char *dst);
+
+/* ---- the real zcc in the plan's driver command ------------------------- */
+
+/* The plan names the in-tree compile cache (CC=<root>/build/bin/zcc cc) and
+ * the driver resolves `as` from a fixture dir first on PATH. zcc keys its
+ * toolchain on the cc driver's path, size and mtime only, so with its
+ * cache on it would serve the object the old assembler built under the new
+ * root. The keyed child runs with ZCC_DISABLE=1: the new assembler runs. */
+struct dp_zcc_fx {
+    char root[PATH_MAX], abs[PATH_MAX], cache[PATH_MAX];
+    char zcc_src[PATH_MAX], zcc[PATH_MAX], host_as[PATH_MAX];
+    char path0[8192], home0[PATH_MAX];
+    bool had_path, had_home;
+};
+
+/* The assembler the unmodified PATH resolves (never the fixture's). */
+static bool dp_zcc_host_as(char out[PATH_MAX])
+{
+    const char *path = getenv("PATH");
+    for (const char *p = path ? path : ""; *p;) {
+        size_t n = strcspn(p, ":");
+        if (n && p[0] == '/' &&
+            snprintf(out, PATH_MAX, "%.*s/as", (int)n, p) < PATH_MAX &&
+            access(out, X_OK) == 0)
+            return true;
+        p += n + (p[n] == ':');
+    }
+    return false;
+}
+
+/* v1 runs the host assembler; v2 defines one more symbol (new object
+ * bytes) and appends a mark each time it runs. */
+static bool dp_zcc_write_as(const struct dp_zcc_fx *z, bool v2)
+{
+    char text[3 * PATH_MAX], path[PATH_MAX];
+    int n = v2 ? snprintf(text, sizeof(text),
+                          "#!/bin/sh\nprintf x >>'%s/build/fx-as-v2.ran'\n"
+                          "exec '%s' --defsym zcl_fx_as_v2=1 \"$@\"\n",
+                          z->abs, z->host_as)
+               : snprintf(text, sizeof(text), "#!/bin/sh\nexec '%s' \"$@\"\n",
+                          z->host_as);
+    return n > 0 && n < (int)sizeof(text) &&
+           snprintf(path, sizeof(path), "%s/fx-bin/as", z->abs) <
+               (int)sizeof(path) &&
+           dp_mk_write(z->root, "fx-bin/as", text) && chmod(path, 0700) == 0;
+}
+
+static bool dp_zcc_flags(const struct dp_zcc_fx *z)
+{
+    char flags[PATH_MAX * 4];
+    int n = snprintf(
+        flags, sizeof(flags),
+        "CC=%s cc\nCXX=g++\n"
+        "COMPILER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "DEV_CFLAGS=-DZCL_DEV_BUILD -std=c23 -O1 -Iinc_early -Iinc_late "
+        "-Ibuild/fx-gen -ffile-prefix-map=%s=/zclassic23\n"
+        "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
+        z->zcc, z->abs);
+    return n > 0 && n < (int)sizeof(flags) &&
+           dp_mk_write(z->root, "build/hotswap-fast/flags.env", flags);
+}
+
+static bool dp_zcc_paths(struct dp_zcc_fx *z)
+{
+    char cwd[PATH_MAX];
+    long pid = (long)getpid();
+    const char *path = getenv("PATH"), *home = getenv("HOME");
+    z->had_path = path != NULL;
+    z->had_home = home != NULL;
+    return getcwd(cwd, sizeof(cwd)) &&
+           snprintf(z->path0, sizeof(z->path0), "%s", path ? path : "") <
+               (int)sizeof(z->path0) &&
+           snprintf(z->home0, sizeof(z->home0), "%s", home ? home : "") <
+               (int)sizeof(z->home0) &&
+           snprintf(z->root, PATH_MAX, "test-tmp/dev_hotswap_zcc_%ld", pid) <
+               PATH_MAX &&
+           snprintf(z->cache, PATH_MAX, "%s/test-tmp/dev_hotswap_zcc_cache_%ld",
+                    cwd, pid) < PATH_MAX &&
+           snprintf(z->zcc_src, PATH_MAX, "%s/build/bin/zcc", cwd) < PATH_MAX;
+}
+
+/* The real zcc, copied into the fixture checkout where the plan names it
+ * (<root>/build/bin/zcc), as the hot-swap plan does. */
+static bool dp_zcc_install(struct dp_zcc_fx *z)
+{
+    char dir[PATH_MAX];
+    return snprintf(dir, sizeof(dir), "%s/build/bin", z->abs) <
+               (int)sizeof(dir) &&
+           platform_directory_ensure(dir, 0755) &&
+           snprintf(z->zcc, sizeof(z->zcc), "%s/zcc", dir) <
+               (int)sizeof(z->zcc) &&
+           dp_hf_copy_file(z->zcc_src, z->zcc) && chmod(z->zcc, 0700) == 0;
+}
+
+/* Fixture tree, the v1 assembler first on PATH, zcc's own store under the
+ * fixture's HOME, and an empty artifact cache. */
+static bool dp_zcc_init(struct dp_zcc_fx *z)
+{
+    char path[sizeof(z->path0) + PATH_MAX], home[PATH_MAX];
+    if (access(z->zcc_src, X_OK) != 0 || !dp_zcc_host_as(z->host_as)) {
+        printf("    zcc: no %s or no host assembler -> FAIL\n", z->zcc_src);
+        return false;
+    }
+    return dp_ar_init(z->root) &&
+           platform_directory_canonical_real(z->root, z->abs,
+                                             sizeof(z->abs)) &&
+           dp_zcc_install(z) && dp_zcc_flags(z) &&
+           dp_zcc_write_as(z, false) &&
+           snprintf(path, sizeof(path), "%s/fx-bin:%s", z->abs, z->path0) <
+               (int)sizeof(path) &&
+           snprintf(home, sizeof(home), "%s/home", z->abs) <
+               (int)sizeof(home) &&
+           platform_directory_create(home, 0700) == 0 &&
+           platform_environment_set("PATH", path, 1) == 0 &&
+           platform_environment_set("HOME", home, 1) == 0 &&
+           platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", z->cache, 1) ==
+               0 &&
+           platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0;
+}
+
+static bool dp_zcc_save(struct dp_zcc_fx *z,
+                        struct zcl_devloop_hotswap_build_receipt *r)
+{
+    struct dp_ar_fx fx = {0};
+    bool hit = false;
+    int attempts = 0;
+    bool ok = dp_ar_save(&fx, z->root, r, &hit, &attempts);
+    if (!ok || !r->cache_key_action_root[0])
+        printf("    zcc: build ok=%d keyed=%d miss=%s why=%s\n", ok ? 1 : 0,
+               r->cache_key_action_root[0] ? 1 : 0, r->cache_key_miss,
+               fx.why);
+    return ok;
+}
+
+static void dp_zcc_restore(const struct dp_zcc_fx *z)
+{
+    if (z->had_path)
+        (void)platform_environment_set("PATH", z->path0, 1);
+    if (z->had_home)
+        (void)platform_environment_set("HOME", z->home0, 1);
+    else
+        (void)dp_environment_unset("HOME");
+    test_rm_rf_recursive(z->root);
+    test_rm_rf_recursive(z->cache);
+}
+
+static bool run_hotswap_action_root_zcc_fixture(void)
+{
+    struct dp_zcc_fx z = {0};
+    struct dp_ar_env env;
+    struct zcl_devloop_hotswap_build_receipt r1 = {0}, r2 = {0};
+    char mark[PATH_MAX];
+    dp_ar_env_save(&env);
+    if (!dp_zcc_paths(&z))
+        return false;
+    test_rm_rf_recursive(z.root);
+    test_rm_rf_recursive(z.cache);
+    bool ok = dp_zcc_init(&z) && dp_zcc_save(&z, &r1) &&
+              r1.cache_key_action_root[0] && dp_zcc_write_as(&z, true) &&
+              dp_zcc_save(&z, &r2) && r2.cache_key_action_root[0] &&
+              snprintf(mark, sizeof(mark), "%s/build/fx-as-v2.ran", z.abs) <
+                  (int)sizeof(mark);
+    bool moved = ok && strcmp(r1.cache_key_action_root,
+                              r2.cache_key_action_root) != 0;
+    bool rebuilt = ok && !r2.artifact_cache_hit &&
+                   r2.compiler_processes > 0 &&
+                   strcmp(r1.candidate_object_sha256,
+                          r2.candidate_object_sha256) != 0;
+    bool ran = ok && access(mark, F_OK) == 0;
+    printf("    zcc: assembler swap under %s cc: root_moved=%s "
+           "object_rebuilt=%s new_as_ran=%s object=%.12s->%.12s -> %s\n",
+           z.zcc, moved ? "yes" : "NO", rebuilt ? "yes" : "NO",
+           ran ? "yes" : "NO", r1.candidate_object_sha256,
+           r2.candidate_object_sha256,
+           moved && rebuilt && ran ? "PASS" : "FAIL");
+    dp_ar_env_restore(&env);
+    dp_zcc_restore(&z);
+    return moved && rebuilt && ran;
+}
+
 static int test_hotswap_artifact_cache(void)
 {
     int failures = 0;
@@ -4140,6 +4324,9 @@ static int test_hotswap_artifact_cache(void)
         /* The key binds the action root: include topology, flag and
          * compiler changes miss; exact reverts and a second worktree hit. */
         ASSERT(run_hotswap_action_root_key_fixture());
+        /* A real zcc in the driver command never serves a keyed compile:
+         * a new assembler moves the root and rebuilds the object. */
+        ASSERT(run_hotswap_action_root_zcc_fixture());
         PASS();
     } _test_next:;
     return failures;
