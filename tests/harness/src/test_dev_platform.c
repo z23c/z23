@@ -3874,8 +3874,9 @@ static bool dp_restart_event_phase(const char *root, int event, int want,
         !json_get_bool(json_get(&doc, "runtime_published")) &&
         (!focused || dp_focused_event_bound(&doc));
     if (!ok)
-        fprintf(stderr, "restart event: event=%d phase=%s (want %d %s)\n",
-                event, phase ? phase : "(none)", want, want_phase);
+        fprintf(stderr, "restart event: event=%d phase=%s (want %d %s): %s\n",
+                event, phase ? phase : "(none)", want, want_phase,
+                parsed ? verdict : "(no verdict)");
     json_free(&doc);
     return ok;
 }
@@ -3886,6 +3887,11 @@ static bool dp_restart_event_phase(const char *root, int event, int want,
 static bool dp_restart_event_verdicts_ok(const char *root,
                                          const char *const *changed)
 {
+    /* An earlier stage left restart_second.c owning .init_array; the
+     * resident still links that overlay, so restore it first. */
+    if (!dp_mk_write(root, "tools/dev/restart_second.c",
+                     "int restart_second(void) { return 8; }\n"))
+        return false;
     int event = zcl_devloop_restart_event(root, changed, 1,
                                           ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
     if (!dp_restart_event_phase(root, event,
