@@ -179,6 +179,20 @@ include directory must resolve in both the task's exact base ZVCS manifest and
 the admitted candidate manifest. Missing, altered, trailing, root-mismatched,
 or phantom recipe/lock authority is refused before ZBuild planning.
 
+Acceptance belongs to the task author, not the candidate. The acceptance
+root is the recipe root, so it names test source paths only; the test bytes
+are bound through the task's base source tree. The acceptance-tests bytes
+root (`zcl.zcode.acceptance_tests_bytes.v1`) hashes the recipe root and the
+base manifest entry (path, mode, size, tagged blob) of every recipe test
+source: editing a named test changes it and editing anything else does not.
+A candidate whose tree changes any of those entries is refused as
+`candidate-modified-acceptance-tests` (`CANDIDATE_MODIFIED_ACCEPTANCE_TESTS`
+from `zcode work run`) at admission, before worker execution, and on every
+lane promotion, so it can reach neither CANDIDATE nor PROVEN. A change that
+legitimately rewrites its tests is two steps: the requester commits the new,
+still-failing tests to the base workspace and starts a task from that source,
+then the candidate changes only the code.
+
 ### `write_scope.v1`
 
 The write scope is a closed variable-length wire containing 1–64 sorted,

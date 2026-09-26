@@ -5848,6 +5848,102 @@ static int zpd_test_commons_join_front_doors(void)
     return failures;
 }
 
+static bool zpd_work_request(struct json_value *input, const char *root,
+                             const char *work_id, bool adapter)
+{
+    json_init(input); json_set_object(input);
+    return json_push_kv_str(input, "workspace", root) &&
+        json_push_kv_str(input, "work", work_id) &&
+        (!adapter || json_push_kv_str(input, "adapter", "manual"));
+}
+
+/* Acceptance belongs to the task author. A candidate that edits a test the
+ * task's recipe names is refused by name at admission, so no proof and no
+ * PROVEN lane can exist for it; a source-only edit is still admitted. */
+static int zpd_test_candidate_cannot_edit_acceptance_tests(void)
+{
+    int failures = 0;
+    TEST("zcode work: a candidate cannot edit the acceptance tests it is judged by") {
+        char root[256];
+        (void)snprintf(root, sizeof(root),
+                       "test-tmp/zcode-acctests-%ld", (long)getpid());
+        ASSERT(zpd_fixture(root, false));
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", root));
+        ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
+        ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        struct zcl_command_request request = { .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_acctests_start_test.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        char work_id[32];
+        (void)snprintf(work_id, sizeof(work_id), "%s",
+                       json_get_str(json_get(&reply.data, "work_id")));
+        zcl_command_reply_free(&reply); json_free(&input);
+
+        ASSERT(zpd_work_request(&input, root, work_id, true));
+        request.input = &input;
+        zcl_command_reply_init(&reply, "zcl.zcode_acctests_run_test.v1");
+        zcl_native_handle_zcode_work_run(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        char candidate[4400];
+        (void)snprintf(candidate, sizeof(candidate), "%s",
+                       json_get_str(json_get(&reply.data,
+                                             "candidate_workspace")));
+        zcl_command_reply_free(&reply); json_free(&input);
+
+        char path[4500];
+        (void)snprintf(path, sizeof(path), "%s/src/x.c", candidate);
+        ASSERT(zpd_write(path, "int x(void) { return 2; }\n"));
+        (void)snprintf(path, sizeof(path), "%s/tests/test.c", candidate);
+        ASSERT(zpd_write(path, "int main(void) { return 0; /* weak */ }\n"));
+        ASSERT(zpd_work_request(&input, root, work_id, true));
+        request.input = &input;
+        zcl_command_reply_init(&reply, "zcl.zcode_acctests_run_test.v1");
+        zcl_native_handle_zcode_work_run(&request, &reply);
+        if (reply.status == ZCL_COMMAND_STATUS_PASSED ||
+            strcmp(reply.error.code, "CANDIDATE_MODIFIED_ACCEPTANCE_TESTS"))
+            printf("acceptance-test edit: %s: %s\n", reply.error.code,
+                   reply.error.message);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(strcmp(reply.error.code,
+                      "CANDIDATE_MODIFIED_ACCEPTANCE_TESTS") == 0);
+        zcl_command_reply_free(&reply); json_free(&input);
+
+        ASSERT(zpd_work_request(&input, root, work_id, false));
+        request.input = &input;
+        zcl_command_reply_init(&reply, "zcl.zcode_acctests_accept_test.v1");
+        zcl_native_handle_zcode_work_accept(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        zcl_command_reply_free(&reply); json_free(&input);
+
+        /* Restoring the task's exact test bytes admits the same source
+         * edit: the refusal is about the tests, nothing else. */
+        ASSERT(zpd_write(path, "int main(void) { return 0; }\n"));
+        ASSERT(zpd_work_request(&input, root, work_id, true));
+        request.input = &input;
+        zcl_command_reply_init(&reply, "zcl.zcode_acctests_run_test.v1");
+        zcl_native_handle_zcode_work_run(&request, &reply);
+        if (reply.status != ZCL_COMMAND_STATUS_PASSED)
+            printf("source-only edit: %s: %s\n", reply.error.code,
+                   reply.error.message);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        zcl_command_reply_free(&reply); json_free(&input);
+
+        char session_root[4400];
+        (void)snprintf(session_root, sizeof(session_root), "%s", candidate);
+        char *attempt = strrchr(session_root, '/');
+        ASSERT(attempt != NULL);
+        *attempt = '\0';
+        ASSERT(zcl_tree_remove(session_root).ok);
+        zpd_fixture_cleanup(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_package_dev(void)
 {
     const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
@@ -5876,7 +5972,8 @@ int test_zcode_package_dev(void)
                    zpd_test_work_start_package_bounds() +
                    zpd_test_work_toolchain() +
                    zpd_test_commons_join_front_doors() +
-                   zpd_test_admitted_single_interpretation();
+                   zpd_test_admitted_single_interpretation() +
+                   zpd_test_candidate_cannot_edit_acceptance_tests();
     /* Exercise the qualified package verifier on every supported host.
      * Darwin uses Seatbelt and rlimits; full isolation remains required. */
     failures += zpd_test_work_start() +
