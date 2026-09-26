@@ -40,6 +40,7 @@
 #endif
 
 #if defined(__linux__)
+#include <sys/prctl.h>     /* PR_SET_PDEATHSIG, for os_proc_bind_parent_death() */
 #include <sys/syscall.h>   /* SYS_gettid, for os_proc_self_tid() */
 #include <unistd.h>
 #endif
@@ -678,6 +679,24 @@ bool os_proc_close_inherited_fds(void)
         return false; // raw-return-ok:caller-logs-context
     if (!ok) errno = saved;
     return ok;
+#endif
+}
+
+bool os_proc_bind_parent_death(int signal_number, uint64_t expected_parent)
+{
+#if defined(_WIN32)
+    (void)signal_number;
+    (void)expected_parent;
+    errno = ENOSYS;
+    return false; // raw-return-ok:caller-logs-context
+#else
+#if defined(__linux__)
+    if (prctl(PR_SET_PDEATHSIG, signal_number) != 0)
+        return false; // raw-return-ok:caller-logs-context
+#else
+    (void)signal_number;
+#endif
+    return (uint64_t)getppid() == expected_parent;
 #endif
 }
 

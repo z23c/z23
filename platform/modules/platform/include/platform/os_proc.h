@@ -256,6 +256,14 @@ bool os_proc_close_inherited_fds(void);
  * Windows reports unavailable. */
 bool os_proc_close_inherited_fds_except(int keep_fd);
 
+/* In a freshly forked child: ask the kernel to send `signal_number` when the
+ * parent exits, even by SIGKILL (Linux PR_SET_PDEATHSIG), then confirm the
+ * parent is still `expected_parent`, which closes the window where it died
+ * before the request took effect. False when the parent is already gone or
+ * the request failed; the child should then act as if signalled. Other
+ * POSIX systems run only the parent check; Windows reports unavailable. */
+bool os_proc_bind_parent_death(int signal_number, uint64_t expected_parent);
+
 /* ── Per-THREAD kernel work counters ─────────────────────────────────────
  *
  * The counters a liveness check needs in order to tell a thread that is

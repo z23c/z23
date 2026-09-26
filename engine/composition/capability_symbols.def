@@ -209,6 +209,10 @@ ZCL_CAPABILITY_SYMBOL("execve", CAP_PROCESS, "")
 ZCL_CAPABILITY_SYMBOL("execvp", CAP_PROCESS, "")
 ZCL_CAPABILITY_SYMBOL("fexecve", CAP_PROCESS, "")
 ZCL_CAPABILITY_SYMBOL("fork", CAP_PROCESS, "")
+ZCL_CAPABILITY_SYMBOL("getpgid", CAP_PROCESS,
+    "Reads the group of another process, to decide whether a signal must "
+    "reach the whole group. Kept with kill and setpgid, the calls it "
+    "serves.")
 ZCL_CAPABILITY_SYMBOL("kill", CAP_PROCESS,
     "Reaches a process this one did not create. Contrast pthread_kill, "
     "which cannot leave this process.")

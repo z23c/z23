@@ -37,9 +37,6 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
-#if defined(__linux__)
-#include <sys/prctl.h>
-#endif
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -921,41 +918,92 @@ static bool watch_sealer_start(struct watch_context *ctx)
     return true;
 }
 
+/* How long stop gives a child it has asked to exit (a sealer that could not
+ * be sent its stop request, or a proof worker sent SIGTERM) before killing
+ * it. Two such joins stay inside the 5 s that `dev loop stop` waits for the
+ * singleton lock. */
+#define WATCH_CHILD_STOP_BUDGET_MS 2000
+
+/* Waits up to `budget_ms` for child `pid` to exit, then SIGKILLs it, and the
+ * process group too when the child leads one, and reaps it. Journal writes
+ * are kill-safe, so a child killed mid-seal leaves nothing the next seal
+ * does not recover. Returns waitpid's result; *killed says the budget ran
+ * out. */
+static pid_t watch_child_reap_bounded(pid_t pid, int budget_ms, int *status,
+                                      bool *killed)
+{
+    *killed = false;
+    int64_t deadline = platform_time_monotonic_us() +
+                       (int64_t)budget_ms * 1000;
+    for (;;) {
+        pid_t got = waitpid(pid, status, WNOHANG);
+        if (got != 0 && !(got < 0 && errno == EINTR))
+            return got;
+        if (platform_time_monotonic_us() >= deadline)
+            break;
+        (void)poll(NULL, 0, 10);
+    }
+    *killed = true;
+    if (getpgid(pid) == pid)
+        (void)kill(-pid, SIGKILL);
+    (void)kill(pid, SIGKILL);
+    pid_t got;
+    do {
+        got = waitpid(pid, status, 0);
+    } while (got < 0 && errno == EINTR);
+    return got;
+}
+
 /* Stop owns every published event: the stop message (then the pipe's close)
  * lets the sealer drain what it was handed and exit, then anything still
  * unsealed (a failed sealer's range, or an event published without a flush)
  * is sealed here before the watcher reports itself stopped. The explicit
  * message matters: a process forked without exec keeps a copy of the write
- * end, which would otherwise hold back the EOF until it exits. */
+ * end, which would otherwise hold back the EOF until it exits. A stop
+ * message that cannot be sent (a full pipe: the sealer is wedged) gets a
+ * bounded wait, then the sealer is killed. */
 static void watch_sealer_join(struct watch_sealer *s)
 {
+    bool asked = s->fd < 0;
     if (s->fd >= 0) {
         unsigned char stop[8];
         zcl_write_u64_le(stop, WATCH_SEAL_STOP);
-        ssize_t sent = write(s->fd, stop, sizeof(stop));
-        (void)sent;
+        asked = write(s->fd, stop, sizeof(stop)) == (ssize_t)sizeof(stop);
+        if (!asked && s->pid > 0)
+            fprintf(stderr, "[devloop] could not send the event journal "
+                            "sealer %ld its stop request (%s); killing it "
+                            "if it has not exited within %d ms\n",
+                    (long)s->pid, strerror(errno),
+                    WATCH_CHILD_STOP_BUDGET_MS);
         (void)close(s->fd);
     }
     s->fd = -1;
     if (s->pid <= 0)
         return;
     int status = 0;
+    bool killed = false;
     pid_t got;
-    do {
-        got = waitpid(s->pid, &status, 0);
-    } while (got < 0 && errno == EINTR);
+    if (asked) {
+        do {
+            got = waitpid(s->pid, &status, 0);
+        } while (got < 0 && errno == EINTR);
+    } else {
+        got = watch_child_reap_bounded(s->pid, WATCH_CHILD_STOP_BUDGET_MS,
+                                       &status, &killed);
+    }
     if (got != s->pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
         fprintf(stderr, "[devloop] event journal sealer %ld ended with wait "
-                        "status %d; sealing the remainder in the watcher\n",
-                (long)s->pid, got == s->pid ? status : -1);
+                        "status %d%s; sealing the remainder in the watcher\n",
+                (long)s->pid, got == s->pid ? status : -1,
+                killed ? " (killed at stop)" : "");
     s->pid = 0;
 }
 
-/* The join waits without a bound on purpose: a live sealer blocks only on
- * the seal lock or a journal fsync, which the inline seal below would wait
- * on equally, and returning first would report a stop the journal has not
- * reached. False when an event published before stop is not sealed; the
- * watcher then exits nonzero. */
+/* The join waits without a bound once the stop request is sent: a live
+ * sealer blocks only on the seal lock or a journal fsync, which the inline
+ * seal below would wait on equally, and returning first would report a stop
+ * the journal has not reached. False when an event published before stop is
+ * not sealed; the watcher then exits nonzero. */
 static bool watch_sealer_finish(struct watch_context *ctx)
 {
     zcl_devloop_cycle_stream_seal_defer(NULL, NULL);
@@ -1015,13 +1063,8 @@ static void proof_worker_signal(int sig)
  * that request took effect is caught by the parent check that follows. */
 static void watch_proof_worker_bind_parent(pid_t parent)
 {
-#if defined(__linux__)
-    if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || getppid() != parent)
+    if (!os_proc_bind_parent_death(SIGTERM, (uint64_t)parent))
         zcl_devloop_process_cancel_request();
-#else
-    if (getppid() != parent)
-        zcl_devloop_process_cancel_request();
-#endif
 }
 
 /* Stop and supersede signal a worker the moment fork() returns, usually
@@ -1105,16 +1148,22 @@ static void watch_proof_stop(struct watch_context *ctx)
         (void)kill(ctx->proof_worker_pid, SIGTERM);
 }
 
+/* A worker sent SIGTERM normally exits at its next cancellation poll. One
+ * that does not (wedged in a system call, or ignoring the signal) is killed
+ * after a bounded wait, so stop never holds the singleton lock on it. */
 static void watch_proof_join(struct watch_context *ctx)
 {
     if (!ctx || ctx->proof_worker_pid <= 1)
         return;
     pid_t worker = ctx->proof_worker_pid;
     int status = 0;
-    pid_t got;
-    do {
-        got = waitpid(worker, &status, 0);
-    } while (got < 0 && errno == EINTR);
+    bool killed = false;
+    pid_t got = watch_child_reap_bounded(worker, WATCH_CHILD_STOP_BUDGET_MS,
+                                         &status, &killed);
+    if (killed)
+        fprintf(stderr, "[devloop] proof worker %ld did not exit within %d "
+                        "ms of stop; killed it\n",
+                (long)worker, WATCH_CHILD_STOP_BUDGET_MS);
     if (got == worker || (got < 0 && errno == ECHILD)) {
         ctx->proof_worker_pid = 0;
         ctx->proof_worker_kind = WATCH_PROOF_WORKER_NONE;
@@ -3211,10 +3260,10 @@ static bool watch_start_event_stream(struct watch_context *ctx)
 }
 
 /* Ordered teardown: cancel the proof worker, drain the journal sealer,
- * report stopped, wait for the cancelled worker, and only then release the
- * singleton lock, so no new watcher attaches to this checkout while any
- * process of this one still runs. True when every published event is
- * sealed. */
+ * report stopped, wait for the cancelled worker (killing it after a bounded
+ * wait), and only then release the singleton lock, so no new watcher
+ * attaches to this checkout while the watcher or its worker still runs.
+ * True when every published event is sealed. */
 static bool watch_teardown(struct watch_context *ctx, int lock_fd,
                            bool idle_exit)
 {
@@ -3462,21 +3511,26 @@ static const char *watch_sealer_test_worker_fork(struct watch_context *ctx,
     return failed ? failed : stopped;
 }
 
-/* Five ring events, then one producer seal request covering all of them. */
+/* Five ring events ("crash-save-1".."crash-save-5"), then one producer seal
+ * request covering all of them. */
 static const char *watch_sealer_test_batch(struct watch_context *ctx)
 {
-    static const char body[] =
-        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"watch-test\","
-        "\"status\":\"impact_ready\",\"action\":\"reflex\","
-        "\"reason\":\"crash\",\"phase\":\"IMPACT_READY\","
-        "\"runtime_published\":false,\"files\":[]}";
     int64_t epoch = 0;
     char why[160] = {0};
-    for (int i = 0; i < 5; i++)
-        if (!zcl_devloop_cycle_stream_publish(ctx->root, body,
-                                              sizeof(body) - 1, &epoch, why,
-                                              sizeof(why)))
+    for (int i = 1; i <= 5; i++) {
+        char body[256];
+        int n = snprintf(
+            body, sizeof(body),
+            "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"watch-test\","
+            "\"status\":\"impact_ready\",\"action\":\"reflex\","
+            "\"reason\":\"crash-save-%d\",\"phase\":\"IMPACT_READY\","
+            "\"runtime_published\":false,\"files\":[]}",
+            i);
+        if (n <= 0 || (size_t)n >= sizeof(body) ||
+            !zcl_devloop_cycle_stream_publish(ctx->root, body, (size_t)n,
+                                              &epoch, why, sizeof(why)))
             return "crash batch publication";
+    }
     if (!zcl_devloop_cycle_stream_seal(ctx->root, epoch, why, sizeof(why)) ||
         ctx->sealer.deferred != 1)
         return "the crash batch was not handed to the sealer";
@@ -3518,9 +3572,16 @@ static const char *watch_sealer_test_crash(struct watch_context *ctx,
     return failed;
 }
 
+static const char *watch_sealer_test_reasons(const char *root, int64_t base,
+                                             const char *first_tag,
+                                             size_t first,
+                                             const char *second_tag,
+                                             size_t second);
+
 /* A restart after that crash: the pointer heals onto the journal tail, the
  * batch's unsealed ring events are sealed rather than discarded, the fresh
- * ring continues from them, and new saves seal with no gap refusal. */
+ * ring continues from them, and new saves seal with no gap refusal. The
+ * journal then holds the five crash events, in order, then the new saves. */
 static const char *watch_sealer_test_restart(struct watch_context *ctx,
                                              const char *root, int64_t tail)
 {
@@ -3535,7 +3596,12 @@ static const char *watch_sealer_test_restart(struct watch_context *ctx,
     if (!failed)
         failed = watch_sealer_test_publish(ctx, 3);
     const char *stopped = watch_sealer_test_stop(ctx);
-    return failed ? failed : stopped;
+    if (!failed)
+        failed = stopped;
+    if (!failed && watch_sealer_test_reasons(root, tail - 5, "crash-", 5, "",
+                                             3))
+        failed = "the restart did not seal the crash batch's own events";
+    return failed;
 }
 
 /* Waits (bounded) until the sealer has sealed everything published, which
@@ -3779,7 +3845,7 @@ static const char *watch_sealer_test_stop_failure(struct watch_context *ctx,
 
 /* A child forked without exec keeps a copy of the request pipe's write end
  * (a detached baseline worker once did); stop still drains the sealer and
- * returns promptly instead of waiting for that child to exit. */
+ * returns while that child still runs, instead of waiting for it to exit. */
 static const char *watch_sealer_test_held_pipe(struct watch_context *ctx,
                                                const char *root)
 {
@@ -3797,15 +3863,99 @@ static const char *watch_sealer_test_held_pipe(struct watch_context *ctx,
     }
     if (!failed)
         failed = watch_sealer_test_publish(ctx, 2);
-    int64_t started = platform_time_monotonic_us();
     const char *stopped = watch_sealer_test_stop(ctx);
-    int64_t elapsed_ms = (platform_time_monotonic_us() - started) / 1000;
-    if (!failed && elapsed_ms > 3000)
+    if (!failed && (holder <= 0 || waitpid(holder, NULL, WNOHANG) != 0))
         failed = "stop waited on a forked copy of the sealer pipe";
     (void)close(release[0]);
     (void)close(release[1]);
     if (holder > 0)
         (void)waitpid(holder, NULL, 0);
+    return failed ? failed : stopped;
+}
+
+/* Stops the sealer (SIGSTOP) once it has sealed what it holds, hands it two
+ * more events, then fills its request pipe until a write would block. */
+static const char *watch_sealer_test_wedge(struct watch_context *ctx,
+                                           const char *root)
+{
+    pid_t sealer = ctx->sealer.pid;
+    if (!watch_sealer_test_await_durable(root) || kill(sealer, SIGSTOP) != 0)
+        return "wedged sealer fixture";
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    int rc;
+    do {
+        rc = waitid(P_PID, (id_t)sealer, &info, WSTOPPED | WNOWAIT);
+    } while (rc != 0 && errno == EINTR);
+    const char *failed = rc == 0 && info.si_code == CLD_STOPPED
+        ? watch_sealer_test_publish(ctx, 2) : "wedged sealer stop";
+    int64_t latest = 0, durable = 0;
+    if (!failed && !zcl_devloop_cycle_stream_marks(root, &latest, &durable))
+        failed = "ring marks";
+    unsigned char message[8];
+    zcl_write_u64_le(message, (uint64_t)durable);
+    while (!failed && write(ctx->sealer.fd, message, sizeof(message)) ==
+                          (ssize_t)sizeof(message)) {
+    }
+    if (!failed && errno != EAGAIN)
+        failed = "the request pipe did not fill";
+    return failed;
+}
+
+/* Resumes `sealer` if the watcher's stop has not finished within five stop
+ * budgets; exits 3 when it had to. */
+static pid_t watch_sealer_test_watchdog(struct watch_context *ctx,
+                                        pid_t sealer, int cancel[2])
+{
+    pid_t watchdog = fork();
+    if (watchdog != 0)
+        return watchdog;
+    (void)close(ctx->sealer.fd);
+    (void)close(cancel[1]);
+    struct pollfd pfd = {.fd = cancel[0], .events = POLLIN};
+    if (poll(&pfd, 1, 5 * WATCH_CHILD_STOP_BUDGET_MS) != 0)
+        _exit(0);
+    (void)kill(sealer, SIGCONT);
+    _exit(3);
+}
+
+/* Cancels the watchdog; true when it had already resumed the sealer. */
+static bool watch_sealer_test_watchdog_fired(pid_t watchdog, int cancel[2])
+{
+    (void)close(cancel[0]);
+    (void)close(cancel[1]);
+    int status = 0;
+    return watchdog > 0 && waitpid(watchdog, &status, 0) == watchdog &&
+           WIFEXITED(status) && WEXITSTATUS(status) == 3;
+}
+
+/* A sealer that cannot be sent its stop request (wedged, with its request
+ * pipe full) is killed after a bounded wait; stop then seals its backlog in
+ * the watcher and completes. A watchdog that has to resume the sealer shows
+ * a stop that waited on it without bound, instead of hanging the test. */
+static const char *watch_sealer_test_wedged(struct watch_context *ctx,
+                                            const char *root)
+{
+    int cancel[2] = {-1, -1};
+    const char *failed = pipe(cancel) == 0
+        ? watch_sealer_test_open(ctx, root) : "wedged sealer fixture";
+    if (!failed && !watch_sealer_start(ctx))
+        failed = "sealer start";
+    if (!failed)
+        failed = watch_sealer_test_publish(ctx, 1);
+    pid_t sealer = ctx->sealer.pid;
+    if (!failed)
+        failed = watch_sealer_test_wedge(ctx, root);
+    if (failed && sealer > 0)
+        (void)kill(sealer, SIGCONT);
+    pid_t watchdog = failed ? -1
+                            : watch_sealer_test_watchdog(ctx, sealer, cancel);
+    const char *stopped = watch_sealer_test_stop(ctx);
+    if (watch_sealer_test_watchdog_fired(watchdog, cancel) && !failed)
+        failed = "stop waited without bound on a sealer it could not ask "
+                 "to stop";
+    if (!failed && (kill(sealer, 0) == 0 || errno != ESRCH))
+        failed = "a wedged sealer outlived its stop";
     return failed ? failed : stopped;
 }
 
@@ -3858,7 +4008,8 @@ static const char *watch_sealer_test_ring_gone(struct watch_context *ctx,
 }
 
 /* The stopping watcher (a forked process): holds the singleton lock and a
- * proof worker that finishes only when released, then tears down. */
+ * proof worker that ignores SIGTERM and never exits by itself, reports the
+ * worker's pid, then tears down. */
 static void watch_sealer_test_teardown_watcher(struct watch_context *ctx,
                                                const char *root,
                                                int release_fd, int ready_fd)
@@ -3869,8 +4020,8 @@ static void watch_sealer_test_teardown_watcher(struct watch_context *ctx,
               pipe(armed) == 0;
     pid_t worker = ok ? fork() : -1;
     if (worker == 0) {
-        /* Like a real proof worker: no copy of the singleton lock, and a
-         * cancellation that takes a while to finish. */
+        /* Like a real proof worker, no copy of the singleton lock; unlike
+         * one, SIGTERM does not cancel it. */
         (void)close(lock_fd);
         (void)signal(SIGTERM, SIG_IGN);
         char byte = 0;
@@ -3886,9 +4037,11 @@ static void watch_sealer_test_teardown_watcher(struct watch_context *ctx,
     char byte = '0';
     if (worker > 0 && read(armed[0], &byte, 1) != 1)
         byte = '0';
+    pid_t reported = byte == '1' ? worker : 0;
     ctx->proof_worker_pid = worker;
     ctx->proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
-    if (write(ready_fd, &byte, 1) != 1)
+    if (write(ready_fd, &reported, sizeof(reported)) !=
+        (ssize_t)sizeof(reported))
         _exit(1);
     _exit(watch_teardown(ctx, lock_fd, false) ? 0 : 1);
 }
@@ -3898,7 +4051,8 @@ static const char *watch_sealer_test_teardown_start(struct watch_context *ctx,
                                                     const char *root,
                                                     int release[2],
                                                     int ready[2],
-                                                    pid_t *watcher)
+                                                    pid_t *watcher,
+                                                    pid_t *worker)
 {
     *watcher = fork();
     if (*watcher == 0) {
@@ -3909,40 +4063,60 @@ static const char *watch_sealer_test_teardown_start(struct watch_context *ctx,
     (void)close(release[0]);
     (void)close(ready[1]);
     release[0] = ready[1] = -1;
-    char byte = 0;
-    return *watcher > 0 && read(ready[0], &byte, 1) == 1 && byte == '1'
+    return *watcher > 0 &&
+                   read(ready[0], worker, sizeof(*worker)) ==
+                       (ssize_t)sizeof(*worker) &&
+                   *worker > 0
         ? NULL : "teardown watcher setup";
 }
 
-/* A stopping watcher releases the singleton lock only once its proof worker
- * is gone, so no new watcher attaches while the old tree still runs. */
+/* Reaps the stopping watcher, killing it if it has not finished well after
+ * its own stop budget: a watcher that waits on its worker forever fails
+ * here instead of hanging the test. */
+static const char *watch_sealer_test_teardown_reap(pid_t watcher)
+{
+    int status = 0;
+    bool hung = false;
+    pid_t got = watcher > 0
+        ? watch_child_reap_bounded(watcher, 5 * WATCH_CHILD_STOP_BUDGET_MS,
+                                   &status, &hung)
+        : -1;
+    if (hung)
+        return "a stopping watcher hung on a proof worker that ignored "
+               "SIGTERM";
+    return got == watcher && WIFEXITED(status) && WEXITSTATUS(status) == 0
+        ? NULL : "teardown watcher exit";
+}
+
+/* A stopping watcher whose proof worker ignores SIGTERM kills it after a
+ * bounded wait, and releases the singleton lock only once it is gone: the
+ * lock is never free while the worker exists, and the stop completes. */
 static const char *watch_sealer_test_teardown_order(struct watch_context *ctx,
                                                     const char *root)
 {
     int release[2] = {-1, -1}, ready[2] = {-1, -1};
-    pid_t watcher = -1;
+    pid_t watcher = -1, worker = -1;
     const char *failed = pipe(release) == 0 && pipe(ready) == 0
         ? watch_sealer_test_teardown_start(ctx, root, release, ready,
-                                           &watcher)
+                                           &watcher, &worker)
         : "teardown fixture";
-    if (!failed)
-        (void)poll(NULL, 0, 300);
     int intruder = failed ? -1 : open_singleton_lock(
         root, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
-    if (intruder >= 0) {
+    if (intruder >= 0 && kill(worker, 0) == 0)
         failed = "a stopping watcher released its lock while its proof "
                  "worker still ran";
+    if (intruder >= 0)
         (void)close(intruder);
-    }
+    const char *reaped = watch_sealer_test_teardown_reap(watcher);
+    if (!failed)
+        failed = reaped;
+    if (!failed && (kill(worker, 0) == 0 || errno != ESRCH))
+        failed = "a proof worker that ignored SIGTERM outlived its stopped "
+                 "watcher";
     for (int i = 0; i < 2; i++) {
         (void)close(release[i]);
         (void)close(ready[i]);
     }
-    int status = 0;
-    bool exited = watcher > 0 && waitpid(watcher, &status, 0) == watcher &&
-                  WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    if (!failed && !exited)
-        failed = "teardown watcher exit";
     if (!failed && !watch_sealer_test_await_unlock(root))
         failed = "a stopped watcher kept its lock";
     return failed;
@@ -4015,6 +4189,8 @@ static const char *watch_sealer_test_phases(struct watch_context *ctx,
                            watch_sealer_test_orphan(ctx, root));
     watch_sealer_test_note(report, sizeof(report),
                            watch_sealer_test_held_pipe(ctx, root));
+    watch_sealer_test_note(report, sizeof(report),
+                           watch_sealer_test_wedged(ctx, root));
     watch_sealer_test_note(report, sizeof(report),
                            watch_sealer_test_direct_write(ctx, root));
     watch_sealer_test_note(report, sizeof(report),

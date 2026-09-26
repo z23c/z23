@@ -120,17 +120,23 @@ backlog of more than 32 unsealed epochs, or a sealer that has exited, seals in
 the watcher instead; a proof worker seals what was requested before it runs;
 stop sends the sealer a stop request (so a forked copy of the pipe cannot
 hold it open), lets it drain, and seals any remainder before reporting
-stopped, exiting nonzero if that seal fails or cannot be checked. Only the
-stop request or pipe EOF stops the sealer (it ignores SIGINT, SIGTERM and
-SIGHUP), and it keeps the watcher singleton lock until it exits, so a
-watcher killed with seals still owed cannot be replaced until its sealer has
-drained; a stopping watcher likewise releases the lock only after its proof
-worker has exited, and a proof worker is asked to cancel if its watcher
-dies. A restarting watcher first seals valid ring events past the journal
-tail instead of discarding them. Journal events are staged and then renamed
-into place without replacing anything, so a kill mid-write never leaves a
-torn event, and staging files left by a dead writer are swept under the
-cycle lock. A direct journal write takes the ring's next epoch under the
+stopped, exiting nonzero if that seal fails or cannot be checked. A sealer
+that cannot be sent the stop request (its pipe is full) is killed after a
+2 s wait. Only the stop request or pipe EOF stops the sealer (it ignores
+SIGINT, SIGTERM and SIGHUP), and it keeps the watcher singleton lock until it
+exits, so a watcher killed with seals still owed cannot be replaced until its
+sealer has drained; a stopping watcher likewise releases the lock only after
+its proof worker has exited (after SIGTERM and a 2 s wait it is killed),
+and a proof worker is asked to cancel if its watcher dies. A
+restarting watcher first seals valid ring events past the journal tail
+instead of discarding them; a tail the ring has already overwritten is given
+up with its epoch range logged, while a tail the journal cannot take (a full
+or failing disk) refuses the restart. Journal events are staged and then
+renamed into place without replacing anything (link then unlink where the
+filesystem has no such rename), so a kill mid-write never leaves a torn
+event; staging files left by a dead writer are swept under the cycle lock at
+restart, or when one blocks the journal tail.
+A direct journal write takes the ring's next epoch under the
 seal lock while the ring is live (inside the watcher the sealer then seals
 it), and ring publication is serialized by a lock on the ring file. `dev
 drive` waits with inotify, closing the check/sleep race; there is no polling
