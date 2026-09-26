@@ -213,6 +213,28 @@ static bool st_parse_system_dirs(char *text, struct st_toolchain *t)
     return t->dir_count > 0;
 }
 
+/* The child environment every derivation binds, as the hot-swap hook
+ * builds it; a parent variable that would steer a compile is recorded and
+ * misses every action by name, as it would in the hook. */
+static bool st_env_capture(struct st_toolchain *t)
+{
+    const char *const *parent = (const char *const *)environ;
+    const char *entry = NULL;
+    const char *code = zcl_action_root_env_refusal(parent, &entry);
+    if (code) {
+        (void)snprintf(t->env_refusal, sizeof(t->env_refusal), "%s", code);
+        (void)snprintf(t->env_refused_name, sizeof(t->env_refused_name),
+                       "%.*s", (int)strcspn(entry, "="), entry);
+        fprintf(stderr, "study: parent environment sets %s (%s)\n",
+                t->env_refused_name, code);
+    }
+    if (!zcl_action_root_child_env(parent, &t->env)) {
+        fprintf(stderr, "study: child environment will not fit\n");
+        return false;
+    }
+    return true;
+}
+
 bool st_toolchain_capture(struct st_toolchain *t)
 {
     struct vcs_toolchain_capsule_v1 capsule;
@@ -232,7 +254,7 @@ bool st_toolchain_capture(struct st_toolchain *t)
     ok = ok && st_run_line(sysroot, t->sysroot, sizeof(t->sysroot));
     if (!ok)
         fprintf(stderr, "study: compiler driver facts unavailable\n");
-    return ok;
+    return ok && st_env_capture(t);
 }
 
 /* ---- shell-word splitting of one make dry-run command ------------------ */
@@ -700,8 +722,15 @@ static void st_derive_warm(const struct zcl_action_root_request *req,
 
 static bool st_derive(const struct st_ctx *c, const struct st_snap *s,
                       const struct st_tu *t, const char *depfile,
+                      const struct zcl_action_root_t0 *t0,
                       struct st_outcome *o, uint8_t **pre, size_t *pre_len)
 {
+    if (c->tc.env_refusal[0]) {
+        char why[96];
+        (void)snprintf(why, sizeof(why), "env: %s", c->tc.env_refusal);
+        st_miss(o, why);
+        return false;
+    }
     struct zcl_action_root_request req = {
         .root = s->dir,
         .stage_kind = ST_STAGE_KIND,
@@ -713,11 +742,13 @@ static bool st_derive(const struct st_ctx *c, const struct st_snap *s,
         .system_dir_count = c->tc.dir_count,
         .sysroot = c->tc.sysroot,
         .linker = { .links = false },
-        .environ = (const char *const *)environ,
+        .environ = c->tc.env.v,
         .abi_generation = 1u,
         .abi = g_st_abi,
         .abi_count = sizeof(g_st_abi) / sizeof(g_st_abi[0]),
     };
+    if (t0)
+        req.compile_t0 = *t0;
     memcpy(req.toolchain_root, c->tc.root, 32);
     memcpy(req.sysroot_objects_sha3, c->tc.sysroot_objects, 32);
     struct zcl_action_root_result r;
@@ -751,7 +782,8 @@ static void st_tu_protocol_b(struct st_job *j, struct st_tu *t,
         st_miss(&t->b, reason);
         return;
     }
-    (void)st_derive(j->c, j->s, t, snapdep, &t->b, &t->pre, &t->pre_len);
+    (void)st_derive(j->c, j->s, t, snapdep, &t->pp_t0, &t->b, &t->pre,
+                    &t->pre_len);
 }
 
 static void st_tu_protocol_a(struct st_job *j, struct st_tu *t,
@@ -764,9 +796,10 @@ static void st_tu_protocol_a(struct st_job *j, struct st_tu *t,
     else if (!t->lists_equal)
         st_miss(&t->a, "depfile-stale");
     else
-        (void)st_derive(j->c, j->s, t, builddep, &t->a, NULL, NULL);
+        (void)st_derive(j->c, j->s, t, builddep, NULL, &t->a, NULL, NULL);
     if (j->forced && t->build_dep)
-        (void)st_derive(j->c, j->s, t, builddep, &t->forced, NULL, NULL);
+        (void)st_derive(j->c, j->s, t, builddep, NULL, &t->forced, NULL,
+                        NULL);
     else if (j->forced)
         st_miss(&t->forced, "no-build-depfile");
 }
@@ -786,6 +819,7 @@ static void st_tu_run(struct st_job *j, size_t i)
     st_build_depfile(j->c, t, builddep);
     struct st_list build = {0}, snap = {0};
     t->build_dep = st_depfile_list(builddep, &build);
+    zcl_action_root_t0_take(&t->pp_t0);
     t->pp_ok = st_preprocess(j->s, t, snapdep, pp_why, sizeof(pp_why)) &&
                st_depfile_list(snapdep, &snap);
     t->lists_equal = t->pp_ok && t->build_dep && st_lists_equal(&build, &snap);

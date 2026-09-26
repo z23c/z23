@@ -7,6 +7,7 @@
 #ifndef ZCL_ACTION_ROOT_REUSE_STUDY_H
 #define ZCL_ACTION_ROOT_REUSE_STUDY_H
 
+#include "devloop_action_root.h"
 #include "vcs/build_action.h"
 
 #include <stdbool.h>
@@ -80,6 +81,11 @@ struct st_toolchain {
     char dirs[ST_SYSDIR_MAX][PATH_MAX];
     const char *dir_ptr[ST_SYSDIR_MAX];
     size_t dir_count;
+    /* Exactly what a compile child would get; a parent variable that would
+     * steer it (zcl_action_root_env_refusal) misses every action. */
+    struct zcl_action_root_child_env env;
+    char env_refusal[40];
+    char env_refused_name[64];
 };
 
 struct st_ctx {
@@ -125,6 +131,7 @@ struct st_tu {
     bool lists_equal;        /* build depfile == snapshot preprocessor list */
     bool pp_ok;
     int64_t pp_us;
+    struct zcl_action_root_t0 pp_t0; /* when its preprocess started */
     struct st_outcome a;      /* build depfile, verified against snapshot */
     struct st_outcome b;      /* snapshot's own preprocessor depfile */
     struct st_outcome forced; /* build depfile, unverified (seeded edits) */

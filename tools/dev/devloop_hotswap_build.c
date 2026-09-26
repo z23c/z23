@@ -1140,6 +1140,28 @@ static bool hs_temp(char *out, size_t out_len, const char *root,
 #endif
 }
 
+/* Every compile and link child runs under exactly the bound environment
+ * (zcl_action_root_child_env): allowlisted names and PATH, HOME, TMPDIR.
+ * The cache key binds that set, so nothing else may reach the child. */
+static bool hs_process_run_bound(const char *root, const char *const argv[],
+                                 struct zcl_devloop_process_result *result)
+{
+    struct zcl_action_root_child_env *env =
+        zcl_calloc(1, sizeof(*env), "hot-swap child environment");
+    bool built = env && zcl_action_root_child_env(
+                            zcl_action_root_parent_env(), env);
+    bool ran = built &&
+               zcl_devloop_process_run_env(root, argv, env->v, 30000, result);
+    if (!built) {
+        memset(result, 0, sizeof(*result));
+        result->exit_code = -1;
+        fprintf(stderr, "[hotswap-build] child environment unavailable for "
+                        "%.200s\n", argv[0]);
+    }
+    free(env);
+    return ran;
+}
+
 static bool hs_run_compile(const struct hs_action_plan *plan,
                            const char *root, const char *source_tu,
                            const char *compile_input,
@@ -1180,7 +1202,7 @@ static bool hs_run_compile(const struct hs_action_plan *plan,
     argv[argc++] = compile_input;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = zcl_devloop_process_run(root, argv, 30000, result);
+    bool ran = hs_process_run_bound(root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1238,7 +1260,7 @@ static bool hs_run_hotfork_compile(
     argv[argc++] = input;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = zcl_devloop_process_run(root, argv, 30000, result);
+    bool ran = hs_process_run_bound(root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1280,7 +1302,7 @@ static bool hs_run_hotfork_link(
     argv[argc++] = descriptor_obj;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = zcl_devloop_process_run(root, argv, 30000, result);
+    bool ran = hs_process_run_bound(root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1316,7 +1338,7 @@ static bool hs_run_owner_compile(
     argv[argc++] = source_tu;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = zcl_devloop_process_run(root, argv, 30000, result);
+    bool ran = hs_process_run_bound(root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {
@@ -1524,7 +1546,7 @@ static bool hs_run_link(const struct hs_action_plan *plan,
     argv[argc++] = obj;
     argv[argc] = NULL;
     int64_t started = platform_time_monotonic_us();
-    bool ran = zcl_devloop_process_run(root, argv, 30000, result);
+    bool ran = hs_process_run_bound(root, argv, result);
     *elapsed_us = platform_time_monotonic_us() - started;
     if (!ran || result->timed_out || result->term_signal ||
         result->exit_code != 0) {

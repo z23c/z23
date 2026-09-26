@@ -1635,38 +1635,201 @@ static bool ar_env_search(const char *entry, size_t name_len)
     return ar_in(names, sizeof(names) / sizeof(names[0]), entry, name_len);
 }
 
+bool zcl_action_root_env_passthrough(const char *entry, size_t name_len)
+{
+    static const char *const names[] = { "PATH", "HOME", "TMPDIR" };
+    return entry &&
+           ar_in(names, sizeof(names) / sizeof(names[0]), entry, name_len);
+}
+
+static bool ar_env_prefixed(const char *entry, size_t name_len,
+                            const char *prefix)
+{
+    size_t n = strlen(prefix);
+    return name_len > n && memcmp(entry, prefix, n) == 0;
+}
+
+/* Compiler, linker and loader controls a child could act on: flag and
+ * option injection (CCC_OVERRIDE_OPTIONS, QA_OVERRIDE_GCC3_OPTIONS, CL),
+ * loader and link search (LD_*, DYLD_*), driver internals (COLLECT_*,
+ * GCC_*, CLANG_*), and side outputs (DEPENDENCIES_OUTPUT, CC_PRINT_*).
+ * Diagnostics colouring (GCC_COLORS, GCC_URLS) changes no output byte. */
+static bool ar_env_influential(const char *entry, size_t name_len)
+{
+    static const char *const prefixes[] = {
+        "LD_", "DYLD_", "CCC_", "CLANG_", "COLLECT_", "GCC_", "CC_PRINT_",
+        "CC_LOG_",
+    };
+    static const char *const exact[] = {
+        "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "ZERO_AR_DATE",
+        "RC_DEBUG_OPTIONS", "QA_OVERRIDE_GCC3_OPTIONS", "CL", "_CL_",
+    };
+    static const char *const harmless[] = { "GCC_COLORS", "GCC_URLS" };
+    if (ar_in(harmless, sizeof(harmless) / sizeof(harmless[0]), entry,
+              name_len) ||
+        vcs_action_v2_env_allowlisted(entry, name_len))
+        return false;
+    if (ar_in(exact, sizeof(exact) / sizeof(exact[0]), entry, name_len))
+        return true;
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+        if (ar_env_prefixed(entry, name_len, prefixes[i]))
+            return true;
+    return false;
+}
+
+const char *zcl_action_root_env_refusal(const char *const *parent,
+                                        const char **entry_out)
+{
+    if (entry_out)
+        *entry_out = NULL;
+    for (size_t i = 0; parent && parent[i]; i++) {
+        const char *eq = strchr(parent[i], '=');
+        size_t n = eq ? (size_t)(eq - parent[i]) : strlen(parent[i]);
+        const char *code = ar_env_search(parent[i], n)
+            ? "env_search_unbound"
+            : ar_env_influential(parent[i], n) ? "env_influential_unbound"
+                                                : NULL;
+        if (code) {
+            if (entry_out)
+                *entry_out = parent[i];
+            return code;
+        }
+    }
+    return NULL;
+}
+
+static bool ar_child_env_add(struct zcl_action_root_child_env *out,
+                             size_t *used, const char *entry)
+{
+    size_t len = strlen(entry) + 1;
+    if (out->n >= ZCL_ACTION_ROOT_CHILD_ENV_MAX ||
+        len > sizeof(out->text) - *used) {
+        fprintf(stderr, "[action-root] child environment exceeds %u entries "
+                        "or %u bytes at %.64s\n",
+                ZCL_ACTION_ROOT_CHILD_ENV_MAX, ZCL_ACTION_ROOT_CHILD_ENV_TEXT,
+                entry);
+        return false;
+    }
+    memcpy(out->text + *used, entry, len);
+    out->v[out->n++] = out->text + *used;
+    *used += len;
+    return true;
+}
+
+bool zcl_action_root_child_env(const char *const *parent,
+                               struct zcl_action_root_child_env *out)
+{
+    if (!out)
+        return false;
+    out->n = 0;
+    out->v[0] = NULL;
+    size_t used = 0;
+    for (size_t i = 0; parent && parent[i]; i++) {
+        const char *eq = strchr(parent[i], '=');
+        size_t n = eq ? (size_t)(eq - parent[i]) : 0;
+        if (!eq || (!vcs_action_v2_env_allowlisted(parent[i], n) &&
+                    !zcl_action_root_env_passthrough(parent[i], n)))
+            continue;
+        if (!ar_child_env_add(out, &used, parent[i])) {
+            out->n = 0;
+            out->v[0] = NULL;
+            return false;
+        }
+    }
+    out->v[out->n] = NULL;
+    return true;
+}
+
+#if !defined(_WIN32)
+extern char **environ;
+#endif
+
+const char *const *zcl_action_root_parent_env(void)
+{
+#if defined(_WIN32)
+    return NULL; /* keyed builds refuse on Windows before any spawn */
+#else
+    return (const char *const *)environ;
+#endif
+}
+
+/* A pass-through name given twice is as ambiguous as an allowlisted one. */
+static bool ar_env_passthrough_once(struct ar_state *s, const char *entry,
+                                    size_t name_len, unsigned *seen)
+{
+    static const char *const names[] = { "PATH", "HOME", "TMPDIR" };
+    for (unsigned i = 0; i < 3; i++) {
+        if (strlen(names[i]) != name_len ||
+            memcmp(names[i], entry, name_len) != 0)
+            continue;
+        if (*seen & (1u << i)) {
+            ar_fail(&s->c, "env_duplicate",
+                    "environment names a pass-through variable twice", entry);
+            return false;
+        }
+        *seen |= 1u << i;
+    }
+    return true;
+}
+
+/* One entry of the child environment: a search variable misses, a
+ * pass-through name is checked for repeats, an allowlisted name is bound by
+ * value, and anything else could steer the child unbound (env_unbound).
+ * Returns the allowlist slot to bind, -1 when nothing is bound, -2 on a
+ * miss. */
+static long ar_env_entry(struct ar_state *s, const char *entry,
+                         unsigned *seen)
+{
+    const char *eq = strchr(entry, '=');
+    size_t n = eq ? (size_t)(eq - entry) : 0;
+    if (eq && ar_env_search(entry, n)) {
+        ar_fail(&s->c, "env_search_unbound",
+                "environment adds search dirs the root cannot probe", entry);
+        return -2;
+    }
+    if (eq && zcl_action_root_env_passthrough(entry, n))
+        return ar_env_passthrough_once(s, entry, n, seen) ? -1 : -2;
+    long slot = eq ? ar_env_slot(entry, n) : -1;
+    if (slot < 0) {
+        ar_fail(&s->c, "env_unbound",
+                "environment names a variable the root does not bind", entry);
+        return -2;
+    }
+    if (s->env_value[slot]) {
+        ar_fail(&s->c, "env_duplicate",
+                "environment names an allowlisted variable twice", entry);
+        return -2;
+    }
+    return slot;
+}
+
 /* The whole allowlist, each name set or explicitly unset. An environment
  * that names one allowlisted variable twice is ambiguous (which one the
  * child sees depends on the libc) and is refused, not normalized. */
 static bool ar_env_build(struct ar_state *s)
 {
     const char *const *env = s->c.req->environ;
+    unsigned seen = 0;
     for (size_t i = 0; env && env[i]; i++) {
-        const char *eq = strchr(env[i], '=');
-        if (eq && ar_env_search(env[i], (size_t)(eq - env[i]))) {
-            ar_fail(&s->c, "env_search_unbound",
-                    "environment adds search dirs the root cannot probe",
-                    env[i]);
+        long slot = ar_env_entry(s, env[i], &seen);
+        if (slot == -2)
             return false;
-        }
-        long slot = eq ? ar_env_slot(env[i], (size_t)(eq - env[i])) : -1;
         if (slot < 0)
             continue;
-        char value[AR_TEXT_MAX];
-        if (s->env_value[slot]) {
-            ar_fail(&s->c, "env_duplicate",
-                    "environment names an allowlisted variable twice", env[i]);
-            return false;
-        }
-        if (!ar_rewrite(&s->c, eq + 1, value, sizeof(value)) ||
-            (value[0] && !vcs_action_v2_text_canonical(value))) {
+        const char *value = strchr(env[i], '=') + 1;
+        char text[AR_TEXT_MAX];
+        if (!ar_rewrite(&s->c, value, text, sizeof(text)) ||
+            (text[0] && !vcs_action_v2_text_canonical(text))) {
             ar_fail(&s->c, "env_noncanonical",
                     "environment value has no canonical spelling", env[i]);
             return false;
         }
-        s->env_value[slot] = zcl_strdup(value, "action root env value");
-        if (!s->env_value[slot])
+        s->env_value[slot] = zcl_strdup(text, "action root env value");
+        if (!s->env_value[slot]) {
+            ar_fail(&s->c, "out_of_memory", "environment value copy failed",
+                    env[i]);
             return false;
+        }
     }
     return true;
 }

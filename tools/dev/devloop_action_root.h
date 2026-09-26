@@ -33,7 +33,14 @@
  * value names no unbound file, a compile input in the closure or a
  * declared output. Anything else misses (argv_unrecognised). Environment
  * variables that add search dirs (CPATH, LIBRARY_PATH, ...) miss
- * (env_search_unbound) whenever present.
+ * (env_search_unbound) whenever present. The environment is exactly the
+ * child's: a name that is neither allowlisted nor passed through misses
+ * (env_unbound).
+ *
+ * Compile window. When the request carries the compile's start (T0), every
+ * closure file and every regular file a probe finds must carry a ctime and
+ * mtime strictly before it; otherwise the derivation misses
+ * (input_changed_during_compile).
  */
 
 #ifndef ZCL_DEVLOOP_ACTION_ROOT_H
@@ -93,6 +100,36 @@ struct zcl_action_root_t0 {
  * is stamped before the returned T0, a write after it at or after T0. */
 void zcl_action_root_t0_take(struct zcl_action_root_t0 *t0);
 
+/* The environment a keyed compile child runs under, built from the bound
+ * set only: every allowlisted name (vcs_action_v2_env_allowlist, bound by
+ * value) and the pass-through names PATH, HOME and TMPDIR, copied in parent
+ * order. Nothing else in the parent reaches the child. */
+#define ZCL_ACTION_ROOT_CHILD_ENV_MAX 32u
+#define ZCL_ACTION_ROOT_CHILD_ENV_TEXT 32768u
+struct zcl_action_root_child_env {
+    const char *v[ZCL_ACTION_ROOT_CHILD_ENV_MAX + 1]; /* NULL-terminated */
+    size_t n;
+    char text[ZCL_ACTION_ROOT_CHILD_ENV_TEXT];
+};
+
+/* PATH, HOME, TMPDIR: they reach the child, but never the root (the
+ * programs PATH resolves are bound by their bytes). */
+bool zcl_action_root_env_passthrough(const char *entry, size_t name_len);
+/* Build the child environment from `parent` (NULL-terminated NAME=value).
+ * False (logged) only when the bound set will not fit. */
+bool zcl_action_root_child_env(const char *const *parent,
+                               struct zcl_action_root_child_env *out);
+/* The environment this process was started with. */
+const char *const *zcl_action_root_parent_env(void);
+/* A parent variable that would steer the compile, link or driver if the
+ * child saw it: a search variable (env_search_unbound) or a known
+ * compiler, linker or loader control (env_influential_unbound). The child
+ * never sees it, so a key over the child would silently disagree with what
+ * the operator asked for: the key misses by name instead. NULL when the
+ * parent names none; `entry_out` receives the first offending entry. */
+const char *zcl_action_root_env_refusal(const char *const *parent,
+                                        const char **entry_out);
+
 struct zcl_action_root_request {
     /* Canonical absolute checkout root (realpath, no trailing slash). */
     const char *root;
@@ -128,7 +165,9 @@ struct zcl_action_root_request {
     /* When set, a generated input with no known producer is a miss
      * (producer_unknown) instead of carrying the unknown-producer marker. */
     bool require_producers;
-    /* NULL-terminated NAME=value list; only allowlisted names are kept. */
+    /* NULL-terminated NAME=value list: exactly the child's environment
+     * (zcl_action_root_child_env). Allowlisted names are bound by value,
+     * PATH/HOME/TMPDIR pass through; any other name misses (env_unbound). */
     const char *const *environ;
     uint8_t toolchain_root[32];
     uint32_t abi_generation;
@@ -150,14 +189,17 @@ struct zcl_action_root_request {
  * search_class_conflict, search_too_large, search_flag_unsupported,
  * includer_unavailable, lookup_unavailable, conditional_lookup_unbound,
  * include_climb_unbound, argv_unrecognised, env_search_unbound,
- * probe_unreadable,
+ * env_unbound, probe_unreadable,
  * probe_overflow, argv_noncanonical, env_duplicate, env_noncanonical,
  * builtin_dir_noncanonical, sysroot_noncanonical, linker_unavailable,
- * linker_missing, encode_refused, out_of_memory. The hooks add
+ * linker_missing, input_changed_during_compile, encode_refused,
+ * out_of_memory. The hooks add
  * closure_unobserved (the build did not complete), toolchain_unavailable,
  * builtin_dir_overflow (the driver's built-in search list will not fit the
- * hook's capacity), driver_facts_unavailable, argv_unavailable and
- * store_unavailable. */
+ * hook's capacity), driver_facts_unavailable, backend_unresolved (a program
+ * the driver runs does not resolve to one file, or its own program prefix
+ * holds a same-name program it may take instead), env_influential_unbound,
+ * argv_unavailable and store_unavailable. */
 struct zcl_action_root_result {
     uint8_t root[32];
     char root_hex[65];
@@ -256,5 +298,18 @@ bool zcl_action_root_parse_builtin_dirs(const char *cc_dash_e_v_output,
                                         char dirs[][PATH_MAX],
                                         size_t dirs_cap, size_t *count_out,
                                         char *miss);
+
+/* Parse `cc -### -c ...` output: every program a command line runs (a line
+ * that starts with a space; its first word, quotes stripped; the Clang
+ * " (in-process)" marker skipped) into `progs`, and the COMPILER_PATH=
+ * program-prefix dirs into `prefixes`. Every prefix must be absolute.
+ * Refused (false) when nothing runs, a word or list will not fit, or a
+ * quote is unterminated; never truncated. */
+bool zcl_action_root_parse_driver_programs(const char *cc_dash_hash_output,
+                                           char progs[][PATH_MAX],
+                                           size_t progs_cap, size_t *progs_n,
+                                           char prefixes[][PATH_MAX],
+                                           size_t prefixes_cap,
+                                           size_t *prefixes_n);
 
 #endif /* ZCL_DEVLOOP_ACTION_ROOT_H */
