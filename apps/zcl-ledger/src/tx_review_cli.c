@@ -158,6 +158,70 @@ static void print_hex(const uint8_t *bytes, size_t length) {
     for (size_t i = 0; i < length; ++i) printf("%02x", bytes[i]);
 }
 
+static void print_review_json(const zcl_tx_review *review,
+                              const zcl_tx_script_facts *scripts,
+                              const char *device, bool has_branch,
+                              uint32_t branch_id, const uint8_t zip_digest[32]) {
+    printf("{\"ok\":true,\"format\":\"zcl-sapling-v4\","
+           "\"transparent_inputs\":%" PRIu32 ","
+           "\"transparent_outputs\":%" PRIu32 ","
+           "\"sapling_spends\":%" PRIu32 ","
+           "\"sapling_outputs\":%" PRIu32 ","
+           "\"sprout_joinsplits\":%" PRIu32 ","
+           "\"p2sh_outputs\":%" PRIu32 ","
+           "\"op_return_outputs\":%" PRIu32 ","
+           "\"zslp_marker\":%s,"
+           "\"transparent_output_zat\":%" PRIu64 ","
+           "\"value_balance_zat\":%" PRId64 ","
+           "\"lock_time\":%" PRIu32 ","
+           "\"expiry_height\":%" PRIu32 ","
+           "\"shielded_details_verified\":false,"
+           "\"signing_ready\":false,"
+           "\"blue_parsed\":%s",
+           review->transparent_inputs, review->transparent_outputs,
+           review->sapling_spends, review->sapling_outputs,
+           review->sprout_joinsplits, scripts->p2sh_outputs,
+           scripts->op_return_outputs,
+           scripts->zslp_marker ? "true" : "false",
+           review->transparent_output_zat,
+           review->value_balance_zat, review->lock_time,
+           review->expiry_height, device ? "true" : "false");
+    if (has_branch) {
+        printf(",\"zip243_branch_id\":\"0x%08" PRIx32 "\",\"zip243_shielded_digest\":\"",
+               branch_id);
+        print_hex(zip_digest, 32);
+        printf("\",\"blue_zip243_matched\":%s", device ? "true" : "false");
+    }
+    puts("}");
+}
+
+static void print_review_text(const zcl_tx_review *review,
+                              const zcl_tx_script_facts *scripts,
+                              const char *device, bool has_branch,
+                              uint32_t branch_id, const uint8_t zip_digest[32]) {
+    printf("ZCL Sapling v4: %" PRIu32 " transparent input(s), %" PRIu32
+           " output(s), %" PRIu32 " Sapling spend(s), %" PRIu32
+           " Sapling output(s), %" PRIu32 " Sprout JoinSplit(s).\n",
+           review->transparent_inputs, review->transparent_outputs,
+           review->sapling_spends, review->sapling_outputs,
+           review->sprout_joinsplits);
+    printf("Script outputs: %" PRIu32 " P2SH, %" PRIu32
+           " OP_RETURN; first output has ZSLP marker: %s.\n",
+           scripts->p2sh_outputs, scripts->op_return_outputs,
+           scripts->zslp_marker ? "yes" : "no");
+    printf("Public output total: %" PRIu64 " zatoshi; value balance: %" PRId64
+           " zatoshi.\n", review->transparent_output_zat,
+           review->value_balance_zat);
+    puts("Structural review only. Shielded recipients, amounts, fee, proofs, and signatures are unverified.");
+    if (device) puts("The Blue returned the same structural summary; no key operation occurred.");
+    if (has_branch) {
+        printf("ZIP-243 shielded digest for branch 0x%08" PRIx32 ": ", branch_id);
+        print_hex(zip_digest, 32);
+        putchar('\n');
+        if (device) puts("Blue and host ZIP-243 digests matched; no signing was requested.");
+    }
+}
+
 int main(int argc, char **argv) {
     bool json;
     const char *device, *file;
@@ -191,60 +255,11 @@ int main(int argc, char **argv) {
         fputs("Transaction review failed; no signing was requested.\n", stderr);
         return 1;
     }
-    if (json) {
-        printf("{\"ok\":true,\"format\":\"zcl-sapling-v4\","
-               "\"transparent_inputs\":%" PRIu32 ","
-               "\"transparent_outputs\":%" PRIu32 ","
-               "\"sapling_spends\":%" PRIu32 ","
-               "\"sapling_outputs\":%" PRIu32 ","
-               "\"sprout_joinsplits\":%" PRIu32 ","
-               "\"p2sh_outputs\":%" PRIu32 ","
-               "\"op_return_outputs\":%" PRIu32 ","
-               "\"zslp_marker\":%s,"
-               "\"transparent_output_zat\":%" PRIu64 ","
-               "\"value_balance_zat\":%" PRId64 ","
-               "\"lock_time\":%" PRIu32 ","
-               "\"expiry_height\":%" PRIu32 ","
-               "\"shielded_details_verified\":false,"
-               "\"signing_ready\":false,"
-               "\"blue_parsed\":%s",
-               review.transparent_inputs, review.transparent_outputs,
-               review.sapling_spends, review.sapling_outputs,
-               review.sprout_joinsplits, scripts.p2sh_outputs,
-               scripts.op_return_outputs,
-               scripts.zslp_marker ? "true" : "false",
-               review.transparent_output_zat,
-               review.value_balance_zat, review.lock_time,
-               review.expiry_height, device ? "true" : "false");
-        if (has_branch) {
-            printf(",\"zip243_branch_id\":\"0x%08" PRIx32 "\",\"zip243_shielded_digest\":\"",
-                   branch_id);
-            print_hex(zip_digest, sizeof zip_digest);
-            printf("\",\"blue_zip243_matched\":%s", device ? "true" : "false");
-        }
-        puts("}");
-    } else {
-        printf("ZCL Sapling v4: %" PRIu32 " transparent input(s), %" PRIu32
-               " output(s), %" PRIu32 " Sapling spend(s), %" PRIu32
-               " Sapling output(s), %" PRIu32 " Sprout JoinSplit(s).\n",
-               review.transparent_inputs, review.transparent_outputs,
-               review.sapling_spends, review.sapling_outputs,
-               review.sprout_joinsplits);
-        printf("Script outputs: %" PRIu32 " P2SH, %" PRIu32
-               " OP_RETURN; first output has ZSLP marker: %s.\n",
-               scripts.p2sh_outputs, scripts.op_return_outputs,
-               scripts.zslp_marker ? "yes" : "no");
-        printf("Public output total: %" PRIu64 " zatoshi; value balance: %" PRId64
-               " zatoshi.\n", review.transparent_output_zat,
-               review.value_balance_zat);
-        puts("Structural review only. Shielded recipients, amounts, fee, proofs, and signatures are unverified.");
-        if (device) puts("The Blue returned the same structural summary; no key operation occurred.");
-        if (has_branch) {
-            printf("ZIP-243 shielded digest for branch 0x%08" PRIx32 ": ", branch_id);
-            print_hex(zip_digest, sizeof zip_digest);
-            putchar('\n');
-            if (device) puts("Blue and host ZIP-243 digests matched; no signing was requested.");
-        }
-    }
+    if (json)
+        print_review_json(&review, &scripts, device, has_branch,
+                          branch_id, zip_digest);
+    else
+        print_review_text(&review, &scripts, device, has_branch,
+                          branch_id, zip_digest);
     return 0;
 }
