@@ -17,6 +17,7 @@
 #include "json/json.h"
 #include "models/build_fabric.h"
 #include "models/database.h"
+#include "models/database_owner_lease.h"
 #include "models/zcode_lane.h"
 #include "platform/directory_compat.h"
 #include "platform/time_compat.h"
@@ -77,6 +78,9 @@
 static bool zd_index_drop_object(const char *workspace,
                                  const uint8_t root[32]);
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 
 static bool zd_index_drop_object(const char *workspace,
                                  const uint8_t root[32]);
@@ -9759,9 +9763,215 @@ static int test_zd_observation_mmr(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* ── publish routes to the running node that holds the package store ──
+ *
+ * A running node answers package and work-pointer requests from the store
+ * handle it opened at boot. A one-shot write into that node's on-disk store
+ * leaves its handle unaware of the package, so its pointer gate refuses
+ * WORK_NOT_RECONSTRUCTIBLE until restart. Plan and commit must therefore go
+ * to the store's owner even when acceptance_datadir names a different,
+ * unowned ledger, and must never fall back to writing locally. */
+static unsigned zd_route_calls;
+static char zd_route_method[64];
+static char zd_route_params[4096];
+static const char *zd_route_answer;
+
+static char *zd_route_rpc_hook(const char *method, const char *params_json)
+{
+    zd_route_calls++;
+    (void)snprintf(zd_route_method, sizeof(zd_route_method), "%s",
+                   method ? method : "");
+    (void)snprintf(zd_route_params, sizeof(zd_route_params), "%s",
+                   params_json ? params_json : "");
+    return zd_route_answer
+        ? zcl_strdup(zd_route_answer, "test.zcode_dev.route_answer") : NULL;
+}
+
+/* Fork one child that holds <datadir>/node.db the way a running node does.
+ * Returns the child pid (or -1); *release_fd ends the hold when closed. */
+static pid_t zd_route_hold_datadir(const char *datadir, int *release_fd)
+{
+    char db_path[600];
+    *release_fd = -1;
+    int n = snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
+    int ready[2] = { -1, -1 }, done[2] = { -1, -1 };
+    if (n <= 0 || (size_t)n >= sizeof(db_path) || pipe(ready) != 0)
+        return -1;
+    if (pipe(done) != 0) {
+        close(ready[0]); close(ready[1]);
+        return -1;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        close(ready[0]); close(done[1]);
+        struct node_db ndb = {0};
+        if (!node_db_open(&ndb, db_path)) _exit(2);
+        char b = 1;
+        if (write(ready[1], &b, 1) != 1) _exit(3);
+        (void)read(done[0], &b, 1);
+        node_db_close(&ndb);
+        _exit(0);
+    }
+    close(ready[1]); close(done[0]);
+    char b = 0;
+    bool held = child > 0 && read(ready[0], &b, 1) == 1;
+    close(ready[0]);
+    if (!held) {
+        close(done[1]);
+        if (child > 0) (void)waitpid(child, NULL, 0);
+        return -1;
+    }
+    *release_fd = done[1];
+    return child;
+}
+
+static void zd_route_release(pid_t child, int release_fd)
+{
+    if (release_fd >= 0) close(release_fd);
+    if (child > 0) (void)waitpid(child, NULL, 0);
+}
+
+static bool zd_route_path_absent(const char *dir, const char *leaf)
+{
+    char path[600];
+    struct stat st;
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, leaf);
+    return n > 0 && (size_t)n < sizeof(path) && stat(path, &st) != 0 &&
+           errno == ENOENT;
+}
+
+static void zd_route_input(struct json_value *input, const char *workspace,
+                           const char *store, const char *acceptance)
+{
+    json_init(input);
+    json_set_object(input);
+    (void)json_push_kv_str(input, "workspace", workspace);
+    (void)json_push_kv_str(input, "datadir", store);
+    (void)json_push_kv_str(input, "acceptance_datadir", acceptance);
+    (void)json_push_kv_str(input, "source_root",
+        "1111111111111111111111111111111111111111111111111111111111111111");
+    (void)json_push_kv_str(input, "release_hex", "00");
+    (void)json_push_kv_str(input, "publisher_pubkey",
+        "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+}
+
+static void zd_route_run(bool commit, const struct json_value *input,
+                         struct zcl_command_reply *reply)
+{
+    struct zcl_command_request request = {
+        .input = (struct json_value *)input,
+    };
+    zcl_command_reply_init(reply, commit ? "zcl.zcode_publish_commit.v1"
+                                         : "zcl.zcode_publish_plan.v1");
+    if (commit)
+        zcl_native_handle_zcode_publish_commit(&request, reply);
+    else
+        zcl_native_handle_zcode_publish_plan(&request, reply);
+}
+
+static int test_zd_publish_routes_to_store_owner(void)
+{
+    int failures = 0;
+    pid_t store_child = -1, accept_child = -1;
+    int store_release = -1, accept_release = -1;
+    struct json_value input;
+    json_init(&input);
+    TEST("zcode_dev: publish plan/commit route to the live store owner") {
+        char workspace[512], store[512], acceptance[512];
+        test_make_tmpdir(workspace, sizeof(workspace), "zcode_dev",
+                         "route-workspace");
+        test_make_tmpdir(store, sizeof(store), "zcode_dev", "route-store");
+        test_make_tmpdir(acceptance, sizeof(acceptance), "zcode_dev",
+                         "route-acceptance");
+        store_child = zd_route_hold_datadir(store, &store_release);
+        ASSERT(store_child > 0);
+        char store_db[600];
+        (void)snprintf(store_db, sizeof(store_db), "%s/node.db", store);
+        ASSERT_EQ(node_db_owner_lease_probe(store_db),
+                  NODE_DB_OWNER_LEASE_LIVE);
+        zd_route_input(&input, workspace, store, acceptance);
+        char want_store[640], want_acceptance[640];
+        (void)snprintf(want_store, sizeof(want_store), "\"datadir\":\"%s\"",
+                       store);
+        (void)snprintf(want_acceptance, sizeof(want_acceptance),
+                       "\"acceptance_datadir\":\"%s\"", acceptance);
+        node_rpc_client_set_test_hook(zd_route_rpc_hook);
+
+        /* The acceptance ledger is an unowned scratch directory, yet both
+         * surfaces go to the store's owner with the ledger still named. */
+        static const char *const methods[2] = {
+            "zcode_publish_plan_owned", "zcode_publish_commit_owned",
+        };
+        zd_route_answer =
+            "{\"ok\":true,\"data\":{\"stage\":\"routed\"}}";
+        for (int commit = 0; commit < 2; commit++) {
+            unsigned before = zd_route_calls;
+            struct zcl_command_reply reply;
+            zd_route_run(commit != 0, &input, &reply);
+            ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+            ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                          "routed");
+            zcl_command_reply_free(&reply);
+            ASSERT_EQ(zd_route_calls, before + 1u);
+            ASSERT_STR_EQ(zd_route_method, methods[commit]);
+            ASSERT(strstr(zd_route_params, want_store) != NULL);
+            ASSERT(strstr(zd_route_params, want_acceptance) != NULL);
+        }
+
+        /* The owner's own refusal is the answer; it is never retried as a
+         * one-shot write into the owner's store. */
+        zd_route_answer =
+            "{\"ok\":false,\"code\":\"LANE_NOT_ACCEPTED\",\"phase\":"
+            "\"validate\",\"message\":\"not accepted\"}";
+        struct zcl_command_reply refused;
+        zd_route_run(true, &input, &refused);
+        ASSERT(refused.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(refused.error.code, "LANE_NOT_ACCEPTED");
+        zcl_command_reply_free(&refused);
+
+        /* An unreachable owner is a transport refusal, not a fallback. */
+        zd_route_answer = NULL;
+        struct zcl_command_reply unreachable;
+        zd_route_run(true, &input, &unreachable);
+        ASSERT(unreachable.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(unreachable.error.code, "LIVE_ADMISSION_UNAVAILABLE");
+        zcl_command_reply_free(&unreachable);
+
+        /* Store and acceptance ledger held by two different running nodes:
+         * neither can serve the command, so nothing is sent anywhere. */
+        accept_child = zd_route_hold_datadir(acceptance, &accept_release);
+        ASSERT(accept_child > 0);
+        unsigned before_split = zd_route_calls;
+        for (int commit = 0; commit < 2; commit++) {
+            struct zcl_command_reply split;
+            zd_route_run(commit != 0, &input, &split);
+            ASSERT(split.exit_code != ZCL_COMMAND_EXIT_OK);
+            ASSERT_STR_EQ(split.error.code, "PUBLISH_OWNER_SPLIT");
+            zcl_command_reply_free(&split);
+        }
+        ASSERT_EQ(zd_route_calls, before_split);
+
+        /* No attempt above wrote a package tree behind either owner. */
+        ASSERT(zd_route_path_absent(store, "zcode"));
+        ASSERT(zd_route_path_absent(acceptance, "zcode"));
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    zd_route_answer = NULL;
+    json_free(&input);
+    zd_route_release(accept_child, accept_release);
+    zd_route_release(store_child, store_release);
+    return failures;
+}
+#endif
+
 int test_zcode_dev_objects(void)
 {
     int failures = 0;
+#if !defined(_WIN32)
+    failures += test_zd_publish_routes_to_store_owner();
+#endif
     failures += test_zd_write_scope();
     failures += test_zd_patch();
     failures += test_zd_task_context();

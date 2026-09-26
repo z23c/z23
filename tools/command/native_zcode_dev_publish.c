@@ -427,16 +427,117 @@ static bool zpub_plan_render(
     return true;
 }
 
+enum zpub_owner {
+    ZPUB_OWNER_NONE,
+    ZPUB_OWNER_SELF,
+    ZPUB_OWNER_LIVE,
+    ZPUB_OWNER_ERROR,
+};
+
+/* Who holds the node.db lease of one datadir: nobody, this process, or a
+ * different running node. */
+static enum zpub_owner zpub_datadir_owner(const char *datadir)
+{
+    if (!datadir || !datadir[0]) return ZPUB_OWNER_NONE;
+    if (zdev_runtime_owns_ledger(datadir)) return ZPUB_OWNER_SELF;
+    char db_path[ZPUB_PATH_MAX];
+    int n = snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(db_path)) return ZPUB_OWNER_ERROR;
+    switch (node_db_owner_lease_probe(db_path)) {
+    case NODE_DB_OWNER_LEASE_UNOWNED: return ZPUB_OWNER_NONE;
+    case NODE_DB_OWNER_LEASE_OWNED_SELF: return ZPUB_OWNER_SELF;
+    case NODE_DB_OWNER_LEASE_LIVE: return ZPUB_OWNER_LIVE;
+    default: return ZPUB_OWNER_ERROR;
+    }
+}
+
+static bool zpub_same_directory(const char *a, const char *b)
+{
+    char ra[ZPUB_PATH_MAX], rb[ZPUB_PATH_MAX];
+    return a && b && platform_directory_canonical_real(a, ra, sizeof(ra)) &&
+           platform_directory_canonical_real(b, rb, sizeof(rb)) &&
+           strcmp(ra, rb) == 0;
+}
+
+static bool zpub_in_running_node(void)
+{
+    struct node_db *owned = app_runtime_node_db();
+    return owned && app_runtime_node_db_handle_open(owned);
+}
+
+/* Refuse an ownership layout no single process can serve honestly. Returns
+ * true after writing the refusal. */
+static bool zpub_owner_refused(
+    enum zpub_owner store, enum zpub_owner acceptance, bool same_dir,
+    struct zcl_command_reply *reply)
+{
+    if (store == ZPUB_OWNER_ERROR || acceptance == ZPUB_OWNER_ERROR) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "LIVE_OWNER_PROBE_FAILED", "ownership", true, false,
+            "the owner of the package store or acceptance ledger could not "
+            "be determined", "zcode.publish");
+        return true;
+    }
+    /* Two held directories are one owner only when they are the same
+     * directory, or when this process holds both. */
+    bool split = store != ZPUB_OWNER_NONE && acceptance != ZPUB_OWNER_NONE &&
+        !same_dir &&
+        (store == ZPUB_OWNER_LIVE || acceptance == ZPUB_OWNER_LIVE);
+    if (split) {
+        zpub_fail(reply, "PUBLISH_OWNER_SPLIT",
+                  "the package store and the acceptance ledger belong to "
+                  "different running nodes; accept the work on the node "
+                  "that holds the package store, or stop one of them");
+        return true;
+    }
+    return false;
+}
+
+/* A running node serves packages from the store handle it opened at boot.
+ * Writing its on-disk store from any other process leaves that handle
+ * unaware of the package, so the node's work-pointer gate refuses the
+ * pointer until restart. Route to the store's owner first (the forwarded
+ * input still names acceptance_datadir, which the owner reverifies);
+ * only a store no node holds may fall back to the acceptance ledger's
+ * owner or to this process. Returns true once `reply` is final. */
+static bool zpub_route_live_owner(
+    const struct zcl_command_request *request, const char *rpc_method,
+    const char *fallback_code, const char *phase, const char *evidence,
+    struct zcl_command_reply *reply)
+{
+    const char *store_dir = zdev_str(request->input, "datadir");
+    const char *acceptance_dir =
+        zdev_str(request->input, "acceptance_datadir");
+    if (!acceptance_dir || !acceptance_dir[0]) acceptance_dir = store_dir;
+    enum zpub_owner store = zpub_datadir_owner(store_dir);
+    enum zpub_owner acceptance = zpub_datadir_owner(acceptance_dir);
+    bool same_dir = store != ZPUB_OWNER_NONE &&
+        acceptance != ZPUB_OWNER_NONE &&
+        zpub_same_directory(store_dir, acceptance_dir);
+    if (zpub_owner_refused(store, acceptance, same_dir, reply))
+        return true;
+    const char *target = store == ZPUB_OWNER_LIVE ? store_dir
+        : acceptance == ZPUB_OWNER_LIVE ? acceptance_dir : NULL;
+    if (!target) return false;
+    if (zpub_in_running_node()) {
+        zpub_fail(reply, "PUBLISH_OWNER_MISROUTED",
+                  "this node does not hold the named package store or "
+                  "acceptance ledger; submit the command to the node that "
+                  "does");
+        return true;
+    }
+    return zcl_native_forward_live_command(
+        request, target, rpc_method, fallback_code, phase, evidence, reply);
+}
+
 void zcl_native_handle_zcode_publish_plan(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!request || !reply) return;
-    const char *datadir = zdev_str(request->input, "acceptance_datadir");
-    if (!datadir || !datadir[0]) datadir = zdev_str(request->input, "datadir");
-    if (zcl_native_forward_live_command(
-            request, datadir, "zcode_publish_plan_owned",
-            "LIVE_PUBLISH_PLAN_FAILED", "plan", "zcode.publish.plan",
-            reply))
+    if (zpub_route_live_owner(
+            request, "zcode_publish_plan_owned", "LIVE_PUBLISH_PLAN_FAILED",
+            "plan", "zcode.publish.plan", reply))
         return;
     struct zpub_accepted_bundle bundle;
     if (!zpub_normalize(request, reply, &bundle) ||
@@ -723,12 +824,10 @@ void zcl_native_handle_zcode_publish_commit(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!request || !reply) return;
-    const char *datadir = zdev_str(request->input, "acceptance_datadir");
-    if (!datadir || !datadir[0]) datadir = zdev_str(request->input, "datadir");
-    if (zcl_native_forward_live_command(
-            request, datadir, "zcode_publish_commit_owned",
-            "LIVE_PUBLISH_COMMIT_FAILED", "publish",
-            "zcode.publish.commit", reply))
+    if (zpub_route_live_owner(
+            request, "zcode_publish_commit_owned",
+            "LIVE_PUBLISH_COMMIT_FAILED", "publish", "zcode.publish.commit",
+            reply))
         return;
     struct zpub_accepted_bundle bundle;
     if (!zpub_normalize(request, reply, &bundle) ||
