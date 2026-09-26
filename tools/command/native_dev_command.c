@@ -3859,10 +3859,12 @@ static void dev_loop_stop_route(const struct zcl_command_request *request,
                                 const char *root, int64_t requested,
                                 struct zcl_command_reply *reply)
 {
+    /* json_get_str yields "" for an absent key: test presence itself. */
+    bool has_session = json_get(request->input, "watcher_session") != NULL;
     const char *session =
         json_get_str(json_get(request->input, "watcher_session"));
     int64_t born = 0;
-    if (json_get(request->input, "watcher_born") && !session) {
+    if (json_get(request->input, "watcher_born") && !has_session) {
         if (!dev_input_int(request->input, "watcher_born", 0, &born) ||
             born <= 0) {
             dev_loop_stop_invalid("INVALID_WATCHER_BORN",
@@ -3879,7 +3881,7 @@ static void dev_loop_stop_route(const struct zcl_command_request *request,
 #endif
         return;
     }
-    if (!session || strlen(session) != 64 ||
+    if (!has_session || strlen(session) != 64 ||
         json_get(request->input, "watcher_born")) {
         dev_loop_stop_invalid("INVALID_WATCHER_SESSION",
                               "watcher_session must be copied from status "
