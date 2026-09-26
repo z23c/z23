@@ -3885,7 +3885,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # the default `all`), so running build/bin/test_parallel directly after editing a test
 # can false-green an old binary or report "matched no groups" for a new test.
 # `make t ONLY=<group>` always rebuilds the harness first, closing that trap.
-.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-preflight fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
+.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-preflight fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
 
 # ── ONLY= is validated BEFORE anything compiles ──────────────────────────
 # Every focused target below carried its ONLY= check in the RECIPE. Make builds
@@ -6062,10 +6062,13 @@ hotswap-sim: $(TEST_PARALLEL_FAST_CANDIDATE)
 native-dev-loop-wait-selftest: dev-bin
 	@tools/dev/native-dev-loop-wait-selftest.sh
 
+watcher-session-stop-selftest: dev-bin
+	@tools/dev/watcher-session-stop-selftest.sh
+
 native-dev-failure-selftest: dev-bin
 	@tools/dev/native-dev-failure-selftest.sh
 
-dev-loop-selftest: check-dev-loop-profiles dev-loop-history-replay-selftest dev-watch-selftest dev-activation-selftest dev-loop-bench-selftest native-dev-loop-wait-selftest native-dev-failure-selftest hotswap-sim
+dev-loop-selftest: check-dev-loop-profiles dev-loop-history-replay-selftest dev-watch-selftest dev-activation-selftest dev-loop-bench-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest hotswap-sim
 	@echo "dev-loop-selftest: PASS"
 
 remote-node-plan:
