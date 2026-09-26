@@ -7070,7 +7070,7 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 57u + (unsigned)(
+    if (DP_CASE_COUNT != 58u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else
