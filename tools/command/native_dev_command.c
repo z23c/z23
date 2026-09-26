@@ -1956,6 +1956,14 @@ static void dev_drive_finish_timed(
     json_free(cycle);
 }
 
+/* A focused result the conservative proof still has to finish: the complete
+ * immediate selection, or its path floor reported as partial. */
+static bool dev_status_focused_ready(const char *status)
+{
+    return strcmp(status, "feedback_ready") == 0 ||
+        strcmp(status, "focused_partial") == 0;
+}
+
 void zcl_native_handle_dev_drive(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -1998,8 +2006,7 @@ void zcl_native_handle_dev_drive(
         bool proof_pending = explicit_proof_pending || reflex_ready ||
             story_green ||
             (status &&
-             (((strcmp(status, "feedback_ready") == 0 ||
-                strcmp(status, "focused_partial") == 0) &&
+             ((dev_status_focused_ready(status) &&
                json_get_bool(json_get(&cycle,
                                       "immediate_proof_complete"))) ||
               strcmp(status, "fallback_ready") == 0) &&

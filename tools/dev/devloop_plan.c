@@ -985,10 +985,13 @@ static bool plan_path_selects_full_group(const struct zcl_devloop_plan *plan,
  * in the foreground. Printing both counts lets a caller see which bound an
  * owner meets before asking the watcher. */
 static void plan_execution_tier_counts(const struct zcl_devloop_plan *plan,
+                                       bool valid,
                                        size_t *immediate,
                                        size_t *path_immediate)
 {
     *immediate = *path_immediate = 0;
+    if (!valid)
+        return;
     for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
         const char *full = zcl_test_group_catalog_at(i);
         if (!plan_selects_full_group(plan, full) ||
@@ -1053,9 +1056,8 @@ static bool append_execution_set(const struct zcl_devloop_plan *plan,
             listed++;
         }
     }
-    size_t immediate = 0, path_immediate = 0;
-    if (valid)
-        plan_execution_tier_counts(plan, &immediate, &path_immediate);
+    size_t immediate, path_immediate;
+    plan_execution_tier_counts(plan, valid, &immediate, &path_immediate);
     return appendf(out, out_sz, pos,
                    "],\"execution_groups_listed\":%zu,"
                    "\"execution_groups_total\":%zu,"

@@ -2212,15 +2212,16 @@ static bool rr_collect_path_floor(const struct zcl_devloop_plan *plan,
     for (size_t i = 0; i < plan->path_groups_len; i++)
         ids[id_count++] = plan->path_groups[i];
     bool truncated = false;
-    size_t floor = id_count ? zcl_test_group_expand_plan_immediate(
+    size_t floor_count = id_count ? zcl_test_group_expand_plan_immediate(
         ids, id_count, exact, RR_EXACT_GROUP_MAX, &truncated) : 0;
-    if (floor == SIZE_MAX || floor == 0 || truncated || floor >= selected)
+    if (floor_count == SIZE_MAX || floor_count == 0 || truncated ||
+        floor_count >= selected)
         return false;
-    for (size_t i = 0; i < floor; i++) {
+    for (size_t i = 0; i < floor_count; i++) {
         if (!rr_append_group(out, exact[i])) return false;
         (*count)++;
     }
-    *deferred_count = (uint32_t)(selected - floor);
+    *deferred_count = (uint32_t)(selected - floor_count);
     *bounded_deferred = true;
     return true;
 }
@@ -3128,11 +3129,13 @@ static void rr_emit_event_proof_receipt(
  * many groups ran against how many the plan selects, and which bytes ran.
  * No restart event carries acceptance or publication authority. */
 static void rr_emit_event_focused_scope(
-    struct json_value *doc,
+    struct json_value *doc, const char *status,
     const struct zcl_devloop_restart_proof_receipt *proof)
 {
     (void)json_push_kv_bool(doc, "receipt_authority", false);
-    if (!proof || proof->group_count == 0)
+    /* Only a runner that actually executed has a scope to report. */
+    if (!proof || proof->group_count == 0 || proof->test_processes == 0 ||
+        strcmp(status, "fallback_ready") == 0)
         return;
     (void)json_push_kv_str(doc, "focused_scope",
                            proof->bounded_proof_deferred ? "partial"
@@ -3256,7 +3259,7 @@ static bool rr_emit_event(
         (void)json_push_kv(&doc, "proof_receipt", &receipt);
         json_free(&receipt);
     }
-    rr_emit_event_focused_scope(&doc, proof);
+    rr_emit_event_focused_scope(&doc, status, proof);
     rr_emit_event_next_action(&doc, status);
     char wire[16384];
     size_t n = json_write(&doc, wire, sizeof(wire) - 1);
@@ -3498,6 +3501,7 @@ static int rr_event_finish(struct rr_event_ctx *ctx, bool ok)
     return fallback_pending ? ZCL_DEVLOOP_RESTART_EVENT_FALLBACK_PENDING
                             : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
 }
+
 int zcl_devloop_restart_event(const char *repo_root,
                               const char *const *source_tus,
                               size_t source_count,

@@ -10,24 +10,37 @@
 #include <stdio.h>
 #include <string.h>
 
+/* One row per wire status. A table keeps the vocabulary one list a reader can
+ * audit, rather than a chain that grows a branch per stage. */
+static const struct {
+    const char *status;
+    const char *phase;
+} k_progress_phases[] = {
+    { "edit_seen", "EDIT_SEEN" },
+    { "impact_ready", "IMPACT_READY" },
+    { "compile_green", "COMPILE_GREEN" },
+    { "reflex_ready", "COMPILE_GREEN" },
+    { "compile_only", "COMPILE_GREEN" },
+    { "compile_red", "COMPILE_RED" },
+    { "story_green", "STORY_GREEN" },
+    { "story_red", "STORY_RED" },
+    { "focused_green", "FOCUSED_GREEN" },
+    { "feedback_ready", "FOCUSED_GREEN" },
+    /* A path-floor run of a wider selection: never FOCUSED_GREEN. */
+    { "focused_partial", "FOCUSED_PARTIAL" },
+    { "focused_red", "FOCUSED_RED" },
+    { "proof_pending", "PROOF_PENDING" },
+    { "fallback_ready", "PROOF_PENDING" },
+    { "superseded", "SUPERSEDED" },
+};
+
 static const char *progress_phase(const char *status, const char *detail)
 {
     if (!status) return detail ? detail : "";
-    if (strcmp(status, "edit_seen") == 0) return "EDIT_SEEN";
-    if (strcmp(status, "impact_ready") == 0) return "IMPACT_READY";
-    if (strcmp(status, "compile_green") == 0 ||
-        strcmp(status, "reflex_ready") == 0 ||
-        strcmp(status, "compile_only") == 0) return "COMPILE_GREEN";
-    if (strcmp(status, "compile_red") == 0) return "COMPILE_RED";
-    if (strcmp(status, "story_green") == 0) return "STORY_GREEN";
-    if (strcmp(status, "story_red") == 0) return "STORY_RED";
-    if (strcmp(status, "focused_green") == 0 ||
-        strcmp(status, "feedback_ready") == 0) return "FOCUSED_GREEN";
-    if (strcmp(status, "focused_partial") == 0) return "FOCUSED_PARTIAL";
-    if (strcmp(status, "focused_red") == 0) return "FOCUSED_RED";
-    if (strcmp(status, "proof_pending") == 0 ||
-        strcmp(status, "fallback_ready") == 0) return "PROOF_PENDING";
-    if (strcmp(status, "superseded") == 0) return "SUPERSEDED";
+    for (size_t i = 0;
+         i < sizeof(k_progress_phases) / sizeof(k_progress_phases[0]); i++)
+        if (strcmp(status, k_progress_phases[i].status) == 0)
+            return k_progress_phases[i].phase;
     if (strcmp(status, "rejected") == 0)
         return detail && strcmp(detail, "affected_proofs") == 0
             ? "FOCUSED_RED" : "COMPILE_RED";

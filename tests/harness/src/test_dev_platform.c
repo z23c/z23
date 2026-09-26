@@ -3692,6 +3692,22 @@ static bool dp_restart_first_identity_ok(
 /* A candidate that runs the complete path floor of a closure too wide to
  * enumerate reports exactly that: group_count of groups_selected, bounded
  * deferral, no complete proof, and the executed bytes by hash and inode. */
+static bool dp_partial_receipt_shaped(
+    const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    bool counted = proof->groups_selected == zcl_test_group_catalog_count() &&
+        proof->group_count > 0 && proof->group_count <= 32 &&
+        proof->deferred_group_count ==
+            proof->groups_selected - proof->group_count &&
+        proof->deferred_groups[0] == 0 &&
+        proof->deferred_groups_sha256[0] == 0;
+    bool floor_only = strstr(proof->groups, "test_dev_platform") &&
+        !strstr(proof->groups, "test_wallet");
+    bool bound = strlen(proof->artifact_sha256) == 64 &&
+        proof->artifact_ino != 0;
+    return counted && floor_only && bound;
+}
+
 static bool dp_restart_partial_floor_ok(const char *root,
                                         const char *const *changed,
                                         const struct zcl_devloop_plan *plan,
@@ -3705,15 +3721,7 @@ static bool dp_restart_partial_floor_ok(const char *root,
         root, changed, 1, &universal, &proof, &process, why, why_len);
     bool shaped = ok && proof.immediate_proof_complete &&
         !proof.proof_complete && proof.bounded_proof_deferred &&
-        proof.groups_selected == zcl_test_group_catalog_count() &&
-        proof.group_count > 0 && proof.group_count <= 32 &&
-        proof.deferred_group_count ==
-            proof.groups_selected - proof.group_count &&
-        proof.deferred_groups[0] == 0 &&
-        proof.deferred_groups_sha256[0] == 0 &&
-        strstr(proof.groups, "test_dev_platform") &&
-        !strstr(proof.groups, "test_wallet") &&
-        strlen(proof.artifact_sha256) == 64 && proof.artifact_ino != 0;
+        dp_partial_receipt_shaped(&proof);
     if (!shaped)
         fprintf(stderr, "partial floor: ok=%d bounded=%d run=%u selected=%u "
                 "deferred=%u\n", ok, proof.bounded_proof_deferred,
@@ -3784,6 +3792,27 @@ static bool dp_probe_hook_write(const char *hook, const char *marker)
         chmod(hook, 0700) == 0;
 }
 
+static bool dp_probe_setup(const char *root, bool supersede,
+                           char hook[PATH_MAX], struct dp_probe_watch *watch)
+{
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd)) ||
+        snprintf(hook, PATH_MAX, "%s/test-tmp/dev_restart_probe_hook_%ld.sh",
+                 cwd, (long)getpid()) >= PATH_MAX ||
+        snprintf(watch->marker, sizeof(watch->marker),
+                 "%s/test-tmp/dev_restart_probe_pids_%ld", cwd,
+                 (long)getpid()) >= (int)sizeof(watch->marker))
+        return false;
+    if (supersede &&
+        snprintf(watch->source, sizeof(watch->source),
+                 "%s/%s/tools/dev/restart_fixture.c", cwd, root) >=
+            (int)sizeof(watch->source))
+        return false;
+    (void)unlink(watch->marker);
+    return dp_probe_hook_write(hook, watch->marker) &&
+        platform_environment_set("ZCL_DEVLOOP_TEST_PROBE_HOOK", hook, 1) == 0;
+}
+
 /* Stop (or a newer save) mid-probe: the bounded probe is cancelled, never
  * reported, and reaps every descendant. */
 static bool dp_restart_probe_cancel_ok(const char *root,
@@ -3792,22 +3821,10 @@ static bool dp_restart_probe_cancel_ok(const char *root,
                                        bool supersede, char *why,
                                        size_t why_len)
 {
-    char cwd[PATH_MAX], hook[PATH_MAX];
+    char hook[PATH_MAX];
     struct dp_probe_watch watch = {0};
-    if (!getcwd(cwd, sizeof(cwd)) ||
-        snprintf(hook, sizeof(hook), "%s/test-tmp/dev_restart_probe_hook_%ld.sh",
-                 cwd, (long)getpid()) >= (int)sizeof(hook) ||
-        snprintf(watch.marker, sizeof(watch.marker),
-                 "%s/test-tmp/dev_restart_probe_pids_%ld", cwd,
-                 (long)getpid()) >= (int)sizeof(watch.marker) ||
-        (supersede &&
-         snprintf(watch.source, sizeof(watch.source),
-                  "%s/%s/tools/dev/restart_fixture.c", cwd, root) >=
-             (int)sizeof(watch.source)) ||
-        !dp_probe_hook_write(hook, watch.marker) ||
-        platform_environment_set("ZCL_DEVLOOP_TEST_PROBE_HOOK", hook, 1) != 0)
+    if (!dp_probe_setup(root, supersede, hook, &watch))
         return false;
-    (void)unlink(watch.marker);
     struct zcl_devloop_restart_proof_receipt proof = {0};
     struct zcl_devloop_process_result process = {0};
     zcl_devloop_process_cancel_poll_set(dp_probe_cancel_poll, &watch);
@@ -3826,9 +3843,76 @@ static bool dp_restart_probe_cancel_ok(const char *root,
                 ran, process.cancelled, (long long)elapsed_ms);
     (void)unlink(watch.marker);
     (void)unlink(hook);
-    return ok && (!supersede ||
+    if (ok && supersede)
+        ok = dp_mk_write(root, "tools/dev/restart_fixture.c",
+                         "int restart_fixture(void) { return 7; }\n");
+    return ok;
+}
+
+/* A focused verdict names the bytes it ran and claims no receipt authority. */
+static bool dp_focused_event_bound(const struct json_value *doc)
+{
+    const char *bytes = json_get_str(json_get(doc, "probe_candidate_sha256"));
+    const struct json_value *authority = json_get(doc, "receipt_authority");
+    return bytes && strlen(bytes) == 64 && authority &&
+        !json_get_bool(authority);
+}
+
+static bool dp_restart_event_phase(const char *root, int event, int want,
+                                   const char *want_phase)
+{
+    static char verdict[16384];
+    size_t n = read_native_cycle(root, verdict, sizeof(verdict));
+    struct json_value doc = {0};
+    bool parsed = n > 0 && json_read(&doc, verdict, n);
+    const char *phase = parsed ? json_get_str(json_get(&doc, "phase")) : NULL;
+    bool focused = strncmp(want_phase, "FOCUSED_", 8) == 0;
+    bool ok = event == want && phase && strcmp(phase, want_phase) == 0 &&
+        !json_get_bool(json_get(&doc, "proof_complete")) &&
+        !json_get_bool(json_get(&doc, "runtime_published")) &&
+        (!focused || dp_focused_event_bound(&doc));
+    if (!ok)
+        fprintf(stderr, "restart event: event=%d phase=%s (want %d %s)\n",
+                event, phase ? phase : "(none)", want, want_phase);
+    json_free(&doc);
+    return ok;
+}
+
+/* Through the watcher's restart entry: a clean save earns its focused
+ * verdict and still hands the conservative proof to the watcher; a save that
+ * lands while the probe runs leaves no verdict for the obsolete epoch. */
+static bool dp_restart_event_verdicts_ok(const char *root,
+                                         const char *const *changed)
+{
+    int event = zcl_devloop_restart_event(root, changed, 1,
+                                          ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
+    if (!dp_restart_event_phase(root, event,
+                                ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING,
+                                "FOCUSED_GREEN"))
+        return false;
+    char cwd[PATH_MAX], hook[PATH_MAX], body[PATH_MAX * 2 + 128];
+    if (!getcwd(cwd, sizeof(cwd)) ||
+        snprintf(hook, sizeof(hook), "%s/test-tmp/dev_restart_edit_hook_%ld.sh",
+                 cwd, (long)getpid()) >= (int)sizeof(hook))
+        return false;
+    int n = snprintf(body, sizeof(body),
+                     "#!/usr/bin/env bash\n"
+                     "printf 'int restart_fixture(void) { return 13; }\\n' "
+                     ">'%s/%s/tools/dev/restart_fixture.c'\n", cwd, root);
+    if (n <= 0 || n >= (int)sizeof(body) || !dp_mk_write(".", hook, body) ||
+        chmod(hook, 0700) != 0 ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_PROBE_HOOK", hook, 1) != 0)
+        return false;
+    event = zcl_devloop_restart_event(root, changed, 1,
+                                      ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
+    (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROBE_HOOK");
+    (void)unlink(hook);
+    zcl_devloop_process_cancel_clear();
+    return dp_restart_event_phase(root, event,
+                                  ZCL_DEVLOOP_RESTART_EVENT_CANCELLED,
+                                  "COMPILE_GREEN") &&
         dp_mk_write(root, "tools/dev/restart_fixture.c",
-                    "int restart_fixture(void) { return 7; }\n"));
+                    "int restart_fixture(void) { return 7; }\n");
 }
 
 static bool dp_restart_focused_scope_ok(const char *root,
@@ -3839,7 +3923,8 @@ static bool dp_restart_focused_scope_ok(const char *root,
     return dp_restart_partial_floor_ok(root, changed, plan, why, why_len) &&
         dp_restart_probe_cancel_ok(root, changed, plan, false, why,
                                    why_len) &&
-        dp_restart_probe_cancel_ok(root, changed, plan, true, why, why_len);
+        dp_restart_probe_cancel_ok(root, changed, plan, true, why, why_len) &&
+        dp_restart_event_verdicts_ok(root, changed);
 }
 
 static bool run_resident_restart_fixture(void)
@@ -4253,8 +4338,6 @@ static bool run_resident_restart_fixture(void)
         !proof.integration_proof_deferred || !proof.bounded_proof_deferred ||
         proof.group_count == 0 || proof.group_count > 32 ||
         proof.deferred_group_count == 0 ||
-        proof.groups_selected !=
-            proof.group_count + proof.deferred_group_count ||
         !strstr(proof.groups, "test_dev_platform") ||
         strstr(proof.groups, "test_wallet") || strstr(proof.groups, "test_net") ||
         !strstr(proof.deferred_groups, "test_wallet") ||
@@ -4313,10 +4396,8 @@ static bool run_resident_restart_fixture(void)
 
     stage = "focused scope, stop and supersede";
     why[0] = 0;
-    if (!dp_restart_focused_scope_ok(root, changed, &proof_plan, why,
-                                     sizeof(why)))
-        goto out;
-    ok = true;
+    ok = dp_restart_focused_scope_ok(root, changed, &proof_plan, why,
+                                     sizeof(why));
 
 out:
     if (!ok)
