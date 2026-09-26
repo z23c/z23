@@ -798,13 +798,17 @@ bool os_proc_seccomp_filters(uint64_t pid, uint32_t *out)
         return false; // raw-return-ok:platform-cannot-answer
     char buf[4096];
     size_t have = 0;
+    bool read_failed = false;
     for (;;) {
         ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
         if (n > 0 && (have += (size_t)n) < sizeof(buf) - 1) continue;
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0) read_failed = true;
         break;
     }
     (void)close(fd);
+    if (read_failed)
+        return false; // raw-return-ok:platform-cannot-answer
     buf[have] = '\0';
     return os_proc_parse_seccomp_filters(buf, out);
 #else
