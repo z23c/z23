@@ -138,6 +138,26 @@ static bool task_authority_tests_bytes_root(
     return true;
 }
 
+/* Recipe membership in one exact source tree, then that tree's
+ * acceptance-tests bytes root. */
+static enum vcs_zcode_task_authority_result task_authority_tree_tests(
+    const char *repo_root, const struct vcs_package_recipe *recipe,
+    const uint8_t recipe_root[32], const uint8_t source_root[32],
+    uint8_t tests_root[32])
+{
+    struct vcs_manifest manifest;
+    if (!vcs_tree_load(repo_root, source_root, &manifest))
+        return VCS_ZCODE_TASK_AUTHORITY_CAS;
+    char detail[160];
+    bool ok = vcs_package_recipe_files_in_vcs_manifest(
+            recipe, &manifest, detail, sizeof(detail)) &&
+        task_authority_tests_bytes_root(
+            recipe, recipe_root, &manifest, tests_root);
+    vcs_manifest_free(&manifest);
+    return ok ? VCS_ZCODE_TASK_AUTHORITY_OK
+              : VCS_ZCODE_TASK_AUTHORITY_MEMBERSHIP;
+}
+
 static enum vcs_zcode_task_authority_result task_authority_validate_tree(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const uint8_t source_root[32], uint8_t tests_root[32])
@@ -162,19 +182,13 @@ static enum vcs_zcode_task_authority_result task_authority_validate_tree(
     bool parsed = result == VCS_ZCODE_TASK_AUTHORITY_OK &&
         vcs_package_recipe_parse(recipe_wire, recipe_len, &recipe) ==
             VCS_PACKAGE_RECIPE_OK;
-    struct vcs_manifest manifest;
-    bool tree = parsed && vcs_tree_load(repo_root, source_root, &manifest);
-    char detail[160];
-    if (tree && !vcs_package_recipe_files_in_vcs_manifest(
-                    &recipe, &manifest, detail, sizeof(detail)))
-        result = VCS_ZCODE_TASK_AUTHORITY_MEMBERSHIP;
-    else if (!tree && result == VCS_ZCODE_TASK_AUTHORITY_OK)
+    if (parsed) {
+        result = task_authority_tree_tests(
+            repo_root, &recipe, recipe_root, source_root, tests_root);
+        vcs_package_recipe_free(&recipe);
+    } else if (result == VCS_ZCODE_TASK_AUTHORITY_OK) {
         result = VCS_ZCODE_TASK_AUTHORITY_CAS;
-    else if (tree && !task_authority_tests_bytes_root(
-                         &recipe, recipe_root, &manifest, tests_root))
-        result = VCS_ZCODE_TASK_AUTHORITY_MEMBERSHIP;
-    if (tree) vcs_manifest_free(&manifest);
-    if (parsed) vcs_package_recipe_free(&recipe);
+    }
     free(recipe_wire); free(lock_wire);
     return result;
 }
