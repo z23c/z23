@@ -574,25 +574,33 @@ static bool st_opt_path(const char *a, struct st_ctx *c)
            st_opt(a, "--main-ref", c->main_ref, sizeof(c->main_ref));
 }
 
+static bool st_opt_other(const char *a, struct st_ctx *c)
+{
+    if (st_opt_num(a, "--corpus", &c->corpus) ||
+        st_opt_num(a, "--jobs", &c->jobs) ||
+        st_opt_num(a, "--invariance", &c->invariance) ||
+        st_opt_num(a, "--max-actions", &c->max_actions))
+        return true;
+    return strncmp(a, "--pick=", 7) == 0 && st_list_push(&c->picks, a + 7);
+}
+
+static bool st_args_complete(const struct st_ctx *c)
+{
+    return c->repo[0] == '/' && c->scratch[0] == '/' && c->out[0] &&
+           c->build_obj[0] && c->test_obj[0] && c->test_bin[0] &&
+           c->main_ref[0] && c->corpus > 0 && c->jobs > 0;
+}
+
 static bool st_parse_args(int argc, char **argv, struct st_ctx *c)
 {
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        bool hit = st_opt_path(a, c) ||
-                   st_opt_num(a, "--corpus", &c->corpus) ||
-                   st_opt_num(a, "--jobs", &c->jobs) ||
-                   st_opt_num(a, "--invariance", &c->invariance) ||
-                   st_opt_num(a, "--max-actions", &c->max_actions);
-        if (!hit && strncmp(a, "--pick=", 7) == 0)
-            hit = st_list_push(&c->picks, a + 7);
-        if (!hit) {
+        if (!st_opt_path(a, c) && !st_opt_other(a, c)) {
             fprintf(stderr, "study: unknown argument %s\n", a);
             return false;
         }
     }
-    return c->repo[0] == '/' && c->scratch[0] == '/' && c->out[0] &&
-           c->build_obj[0] && c->test_obj[0] && c->test_bin[0] &&
-           c->main_ref[0] && c->corpus > 0 && c->jobs > 0;
+    return st_args_complete(c);
 }
 
 int main(int argc, char **argv)

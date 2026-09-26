@@ -236,62 +236,82 @@ bool st_toolchain_capture(struct st_toolchain *t)
 
 /* ---- shell-word splitting of one make dry-run command ------------------ */
 
+struct st_split {
+    char *word;
+    size_t w;
+    bool in_word;
+    char quote;
+    struct st_list *out;
+};
+
+/* End the current word, if any, and push it. */
+static bool st_split_flush(struct st_split *sp)
+{
+    if (!sp->in_word)
+        return true;
+    sp->word[sp->w] = '\0';
+    sp->w = 0;
+    sp->in_word = false;
+    return st_list_push(sp->out, sp->word);
+}
+
+/* Inside quotes: the matching quote closes them; anything else is kept. */
+static void st_split_quoted(struct st_split *sp, char c)
+{
+    if (c == sp->quote)
+        sp->quote = 0;
+    else
+        sp->word[sp->w++] = c;
+}
+
+/* A backslash escapes the next character outside quotes, and only
+ * " \ $ ` inside double quotes; never inside single quotes. */
+static bool st_split_escapes(const struct st_split *sp, const char *p)
+{
+    return p[0] == '\\' && p[1] && sp->quote != '\'' &&
+           (!sp->quote || strchr("\"\\$`", p[1]));
+}
+
+/* Consume the character at *pp; an escape also consumes the next one. */
+static bool st_split_step(struct st_split *sp, const char **pp)
+{
+    const char *p = *pp;
+    if (st_split_escapes(sp, p)) {
+        sp->word[sp->w++] = p[1];
+        *pp = p + 1;
+        sp->in_word = true;
+        return true;
+    }
+    if (sp->quote) {
+        st_split_quoted(sp, *p);
+        return true;
+    }
+    if (*p == '\'' || *p == '"') {
+        sp->quote = *p;
+        sp->in_word = true;
+        return true;
+    }
+    if (strchr(" \t\n", *p))
+        return st_split_flush(sp);
+    sp->word[sp->w++] = *p;
+    sp->in_word = true;
+    return true;
+}
+
 /* Split one POSIX shell command (quotes and backslashes only; the dry-run
  * lines this reads carry no expansions) into owned words. */
 static bool st_shell_split(const char *s, struct st_list *out)
 {
-    size_t cap = strlen(s) + 1;
-    char *word = zcl_malloc(cap, "study shell word");
-    if (!word)
+    struct st_split sp = { .out = out };
+    sp.word = zcl_malloc(strlen(s) + 1, "study shell word");
+    if (!sp.word)
         return false;
-    size_t w = 0;
-    bool in_word = false, ok = true;
-    char quote = 0;
-    for (const char *p = s; ok && *p; p++) {
-        char c = *p;
-        if (quote == '\'') {
-            if (c == '\'')
-                quote = 0;
-            else
-                word[w++] = c;
-            continue;
-        }
-        if (c == '\\' && p[1] &&
-            (!quote || strchr("\"\\$`", p[1]))) {
-            word[w++] = *++p;
-            in_word = true;
-            continue;
-        }
-        if (quote == '"') {
-            if (c == '"')
-                quote = 0;
-            else
-                word[w++] = c;
-            continue;
-        }
-        if (c == '\'' || c == '"') {
-            quote = c;
-            in_word = true;
-            continue;
-        }
-        if (c == ' ' || c == '\t' || c == '\n') {
-            if (in_word) {
-                word[w] = '\0';
-                ok = st_list_push(out, word);
-                w = 0;
-                in_word = false;
-            }
-            continue;
-        }
-        word[w++] = c;
-        in_word = true;
-    }
-    if (ok && in_word) {
-        word[w] = '\0';
-        ok = st_list_push(out, word);
-    }
-    free(word);
-    return ok && quote == 0;
+    bool ok = true;
+    for (const char *p = s; ok && *p; p++)
+        ok = st_split_step(&sp, &p);
+    ok = ok && st_split_flush(&sp);
+    free(sp.word);
+    return ok && sp.quote == 0;
 }
 
 /* ---- one compile action ------------------------------------------------ */
@@ -343,13 +363,32 @@ static bool st_basename_is(const char *path, const char *name)
     return strcmp(slash ? slash + 1 : path, name) == 0;
 }
 
+/* Index of the "--" word that ends a record's prefix; 0 when absent. */
+static size_t st_words_dash(const struct st_list *w)
+{
+    for (size_t i = 1; i < w->n; i++)
+        if (strcmp(w->v[i], "--") == 0)
+            return i;
+    return 0;
+}
+
+/* The fixed depfile/object tail every study compile appends. */
+static bool st_tu_push_tail(struct st_tu *t)
+{
+    static const char *const tail[] = {
+        "-MMD", "-MP", "-MF", "@out/depfile", "-MT", "@out/object",
+        "-c", "-o", "@out/object",
+    };
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(tail) / sizeof(tail[0]); i++)
+        ok = st_list_push(&t->argv, tail[i]);
+    return ok && st_list_push(&t->argv, t->src);
+}
+
 /* Words of one dry-run record: ZSTUDY_ARGV dep OBJ SRC ... -- CC flags. */
 static bool st_tu_from_words(const struct st_list *w, struct st_tu *t)
 {
-    size_t dash = 0;
-    for (size_t i = 0; i < w->n && !dash; i++)
-        if (strcmp(w->v[i], "--") == 0)
-            dash = i;
+    size_t dash = st_words_dash(w);
     if (w->n < 5 || !dash || dash + 2 >= w->n)
         return false;
     size_t cc = dash + 1;
@@ -366,13 +405,7 @@ static bool st_tu_from_words(const struct st_list *w, struct st_tu *t)
             t->identity = true;
     }
     t->flag_hi = t->argv.n;
-    static const char *const tail[] = {
-        "-MMD", "-MP", "-MF", "@out/depfile", "-MT", "@out/object",
-        "-c", "-o", "@out/object",
-    };
-    for (size_t i = 0; ok && i < sizeof(tail) / sizeof(tail[0]); i++)
-        ok = st_list_push(&t->argv, tail[i]);
-    return ok && st_list_push(&t->argv, t->src);
+    return ok && st_tu_push_tail(t);
 }
 
 /* Join one record's backslash-newline continuations. */
@@ -767,6 +800,7 @@ static bool st_snap_actions(const struct st_ctx *c, struct st_snap *s,
         n = 64;
     unsigned started = 0;
     for (; started < n; started++)
+        /* raw-pthread-ok: offline study tool; bounded workers joined below */
         if (pthread_create(&th[started], NULL, st_worker, &job) != 0)
             break;
     if (started == 0)
