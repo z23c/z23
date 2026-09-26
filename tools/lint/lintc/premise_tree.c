@@ -2,8 +2,8 @@
  *
  * purpose: premise path sets — the candidate generation walked and hashed
  * byte by byte, the base tree listed from a verified private Git store, and
- * one SHA3-256 path-set root over each so an added, removed or renamed path
- * (every "does this header exist" answer) is part of every unit's premise.
+ * one SHA3-256 path-set root over each path and file kind so an added,
+ * removed, renamed or mode-changed path is part of every premise.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -55,7 +55,7 @@ bool premise_prefix_reaches_pruned(const char *prefix)
 }
 
 int premise_tree_add(struct premise_tree *t, const char *path, const char *oid,
-                     bool symlink)
+                     bool symlink, bool executable)
 {
     if (t->count == t->cap) {
         size_t cap = t->cap ? t->cap * 2 : 1024;
@@ -73,6 +73,7 @@ int premise_tree_add(struct premise_tree *t, const char *path, const char *oid,
     if (oid)
         snprintf(e->oid, sizeof e->oid, "%s", oid);
     e->symlink = symlink;
+    e->executable = executable;
     t->count++;
     return 0;
 }
@@ -108,6 +109,12 @@ static void path_set_root(struct premise_tree *t)
     for (size_t i = 0; i < t->count; i++) {
         size_t n = strlen(t->entries[i].path) + 1;
         sha3_256_write(&h, (const unsigned char *)t->entries[i].path, n);
+        /* Git grep skips symlinks and [ -e ] follows them. Executability
+         * also changes whether a gate script can run. Git blob bytes alone
+         * cannot distinguish any of these mode transitions. */
+        unsigned char kind = t->entries[i].symlink ? 3
+                             : t->entries[i].executable ? 2 : 1;
+        sha3_256_write(&h, &kind, 1);
     }
     sha3_256_finalize(&h, t->path_set_root);
 }
@@ -251,8 +258,12 @@ static int walk_entry(struct premise_tree *t, const char *rel, FILE *err)
         return 0;
     if (S_ISDIR(st.st_mode))
         return walk_dir(t, rel, err);
-    if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))
-        return premise_tree_add(t, rel, NULL, S_ISLNK(st.st_mode));
+    if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+        bool executable = S_ISREG(st.st_mode) &&
+            (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+        return premise_tree_add(t, rel, NULL, S_ISLNK(st.st_mode),
+                                executable);
+    }
     return 0;
 }
 

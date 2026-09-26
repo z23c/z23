@@ -27,9 +27,9 @@
  *                a binary built from tree sources carries those sources and
  *                their headers. A computed include there means no unit of
  *                the gate inherits;
- *   path set     the sorted set of paths in the tree — it answers every
- *                "does this header exist" lookup, so an added shadowing
- *                header flips every unit;
+ *   path set     the sorted paths and regular/executable/symlink kinds in the
+ *                tree — they answer existence, Git-grep and gate execution
+ *                lookups, so an added path or a kind change flips every unit;
  *   closure      the over-approximate textual include closure of the unit
  *                (every #include/#include_next/#embed, ignoring #if, each
  *                name resolved against EVERY tracked path it could name);
@@ -69,6 +69,7 @@ struct premise_entry {
     bool hashed;
     bool present;                   /* hash attempt found the file */
     bool symlink;
+    bool executable;
     /* include-closure memo (candidate side only) */
     bool parsed;
     bool computed_include;
@@ -156,7 +157,7 @@ void premise_session_close(struct premise_session *s);
 /* ── internals shared by the premise_*.c files ─────────────────────────── */
 
 int premise_tree_add(struct premise_tree *t, const char *path, const char *oid,
-                     bool symlink);
+                     bool symlink, bool executable);
 int premise_tree_finish(struct premise_tree *t);
 struct premise_entry *premise_tree_find(const struct premise_tree *t,
                                         const char *path);

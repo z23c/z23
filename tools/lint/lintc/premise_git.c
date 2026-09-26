@@ -288,7 +288,11 @@ static int parse_record(struct premise_tree *t, char *rec)
         return 0;
     if (strcmp(type, "blob") != 0)
         return 2;
-    return premise_tree_add(t, path, oid, strcmp(mode, "120000") == 0);
+    if (strcmp(mode, "100644") != 0 && strcmp(mode, "100755") != 0 &&
+        strcmp(mode, "120000") != 0)
+        return 2;
+    return premise_tree_add(t, path, oid, strcmp(mode, "120000") == 0,
+                            strcmp(mode, "100755") == 0);
 }
 
 static int list_base(struct premise_tree *t, const char *base)

@@ -1016,11 +1016,65 @@ static int test_lsel_doc_claims(void)
     return failures;
 }
 
+static int test_lsel_doc_claims_kind_change(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: same-byte file mode changes never inherit a doc verdict") {
+        struct lsel_fx fx;
+        char path[PATH_MAX * 2], grep_out[128];
+        const char *ids[] = { "docs/mode.md" };
+        const char *fresh[] = { "path-set-changed" };
+        const char *grep_args[] = {
+            "grep", "-lwF", "target", "--", "source.txt", NULL
+        };
+
+        ASSERT(lsel_fixture(&fx));
+        ASSERT(lsel_write(&fx, "docs/mode.md",
+                          "<!-- claim: symbol-present target source.txt -->\n"));
+        ASSERT(lsel_write(&fx, "source.txt", "target"));
+        ASSERT(lsel_commit_all(&fx, "regular source claim"));
+        ASSERT_EQ(lsel_git(&fx, grep_args, grep_out, sizeof grep_out), 0);
+        (void)snprintf(path, sizeof path, "%s/source.txt", fx.repo);
+        ASSERT(unlink(path) == 0 && symlink("target", path) == 0);
+        ASSERT(lsel_git(&fx, grep_args, grep_out, sizeof grep_out) != 0);
+        ASSERT_EQ(lsel_units_eval(&fx, &k_doc_gate, NULL, NULL,
+                                  ids, fresh, 1), 0);
+        test_rm_rf_recursive(fx.dir);
+
+        ASSERT(lsel_fixture(&fx));
+        ASSERT(lsel_write(&fx, "docs/mode.md",
+                          "<!-- claim: file-absent source.txt -->\n"));
+        (void)snprintf(path, sizeof path, "%s/source.txt", fx.repo);
+        ASSERT(symlink("missing.txt", path) == 0);
+        ASSERT(lsel_commit_all(&fx, "dangling symlink claim"));
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(unlink(path) == 0);
+        ASSERT(lsel_write(&fx, "source.txt", "missing.txt"));
+        ASSERT(access(path, F_OK) == 0);
+        ASSERT_EQ(lsel_units_eval(&fx, &k_doc_gate, NULL, NULL,
+                                  ids, fresh, 1), 0);
+        test_rm_rf_recursive(fx.dir);
+
+        ASSERT(lsel_fixture(&fx));
+        ASSERT(lsel_write(&fx, "docs/mode.md",
+                          "<!-- claim: symbol-present target source.txt -->\n"));
+        ASSERT(lsel_write(&fx, "source.txt", "target"));
+        ASSERT(lsel_commit_all(&fx, "regular mode claim"));
+        (void)snprintf(path, sizeof path, "%s/source.txt", fx.repo);
+        ASSERT(chmod(path, 0755) == 0);
+        ASSERT_EQ(lsel_units_eval(&fx, &k_doc_gate, NULL, NULL,
+                                  ids, fresh, 1), 0);
+        test_rm_rf_recursive(fx.dir);
+    } TEST_END
+    return failures;
+}
+
 
 int test_lint_selection(void)
 {
     int failures = 0;
     failures += test_lsel_doc_claims();
+    failures += test_lsel_doc_claims_kind_change();
     failures += test_lsel_per_file_gate();
     failures += test_lsel_gate_code_computed();
     failures += test_lsel_catalog_rows();

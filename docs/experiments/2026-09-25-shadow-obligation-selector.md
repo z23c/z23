@@ -719,7 +719,11 @@ reproduced byte-identical on a second host.
 
 `tests/harness/src/test_lint_selection.c` pins the mechanism on eight
 fixture documents: bounded claims, each unbounded rule, gate-code
-freshness, and a symlinked document never inheriting.
+freshness, a symlinked document never inheriting, and same-byte file mode
+changes never inheriting when a claim names the file. The latter covers a
+symbol claim on a regular-to-symlink change and a file-absence claim on a
+dangling-symlink-to-regular change. The 28 frozen corpus counts still agree
+after this mode fix.
 
 **Pricing.** Gate weight 101772 ms; the select run costs 8.5–16.0 s per
 entry standalone (mean 11.5 s on the real set) and the eight-gate combined
@@ -727,8 +731,16 @@ run averaged 25.1 s (16.4–71.2 s); the always-run part is 2.1 s; each fresh
 document pays the 1 s floor. The shadow real set drops to 1744.9 s per
 candidate, **72.7%** reuse (72.2% with seven gates), or 1680.0 s and 73.7%
 with one combined select run; the synthetic set is 5533.5 s, 13.4%. The
-gate's own price per narrow candidate is about 14 s against 101.8 s
-unselected.
+101.8 s full-gate weight is historical CPU accounting, while the roughly
+14 s narrow-candidate figure is a selector estimate; they are not a measured
+same-metric saving. A fresh same-host run on the rebased lane measured the
+full gate at 13.39 s wall and 13.53 s user+system CPU. Selection, global
+checks and fresh-document checks together took 28.95 s wall and 56.95 s
+user+system CPU, **15.56 s more wall and 43.42 s more CPU** than the full
+gate. An ignored `.cache` path outside the pruned tree made the path-set
+premise change and sent all documents fresh in that run. This is an observed
+cost, not a claimed saving; a narrower candidate with no path-set change
+still needs a same-metric measurement.
 
 ### Private-implementation edits: is the rule over-expanding?
 
