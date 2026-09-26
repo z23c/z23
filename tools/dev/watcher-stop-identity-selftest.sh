@@ -38,11 +38,13 @@ wait_ready "$root/idle.ready"
 holder_pid=$!
 wait_ready "$root/forged.ready"
 forged_session="$(awk '{print $6}' "$root/.cache/zcl-dev-watch.lock")"
+(cd "$root" && ZCL_DEV_SOURCE_ROOT="$root" "$bin" dev loop status --input='{}') > "$root/forged-status.json"
+grep -q '"active":false' "$root/forged-status.json"
 if (cd "$root" && ZCL_DEV_SOURCE_ROOT="$root" "$bin" dev loop stop --input="{\"watcher_id\":$idle_pid,\"watcher_session\":\"$forged_session\"}") > "$root/forged.json" 2>&1; then
     printf 'stop accepted a PID that did not own the lock\n' >&2
     exit 1
 fi
-grep -q 'WATCHER_STOP_TIMEOUT' "$root/forged.json"
+grep -q 'WATCHER_NOT_RUNNING' "$root/forged.json"
 kill -0 "$idle_pid"
 kill -0 "$holder_pid"
 kill -TERM "$holder_pid"
@@ -53,6 +55,8 @@ holder_pid=0
 holder_pid=$!
 wait_ready "$root/owner.ready"
 owner_session="$(awk '{print $6}' "$root/.cache/zcl-dev-watch.lock")"
+(cd "$root" && ZCL_DEV_SOURCE_ROOT="$root" "$bin" dev loop status --input='{}') > "$root/owner-status.json"
+grep -q '"active":true' "$root/owner-status.json"
 stale_session="$(printf '%064d' 0)"
 if (cd "$root" && ZCL_DEV_SOURCE_ROOT="$root" "$bin" dev loop stop --input="{\"watcher_id\":$holder_pid,\"watcher_session\":\"$stale_session\"}") > "$root/stale.json" 2>&1; then
     printf 'stop accepted a stale watcher session\n' >&2
@@ -62,6 +66,17 @@ grep -q 'WATCHER_ID_MISMATCH' "$root/stale.json"
 kill -0 "$holder_pid"
 (cd "$root" && ZCL_DEV_SOURCE_ROOT="$root" "$bin" dev loop stop --input="{\"watcher_id\":$holder_pid,\"watcher_session\":\"$owner_session\"}") > "$root/owner.json" 2>&1
 grep -q '"stopped":true' "$root/owner.json"
+wait "$holder_pid"
+holder_pid=0
+cp "$root/z23-dev" "$root/custom-watcher"
+"$root/custom-watcher" hold "$root" self "$root/custom.ready" &
+holder_pid=$!
+wait_ready "$root/custom.ready"
+custom_session="$(awk '{print $6}' "$root/.cache/zcl-dev-watch.lock")"
+(cd "$root" && ZCL_DEV_SOURCE_ROOT="$root" "$bin" dev loop status --input='{}') > "$root/custom-status.json"
+grep -q '"active":true' "$root/custom-status.json"
+(cd "$root" && ZCL_DEV_SOURCE_ROOT="$root" "$bin" dev loop stop --input="{\"watcher_id\":$holder_pid,\"watcher_session\":\"$custom_session\"}") > "$root/custom.json" 2>&1
+grep -q '"stopped":true' "$root/custom.json"
 wait "$holder_pid"
 holder_pid=0
 kill -TERM "$idle_pid"

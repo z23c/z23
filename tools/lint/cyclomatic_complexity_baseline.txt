@@ -3587,7 +3587,7 @@ tools/command/native_dev_command.c:dev_loop_ensure:33
 tools/command/native_dev_command.c:dev_pid_is_watcher:17
 tools/command/native_dev_command.c:dev_publication_lane_lookup:33
 tools/command/native_dev_command.c:dev_reflex_policy_frozen_kat:39
-tools/command/native_dev_command.c:dev_watcher_active_at:41
+tools/command/native_dev_command.c:dev_watcher_active_at:40
 tools/command/native_dev_command.c:dev_watcher_active_windows:34
 tools/command/native_dev_command.c:zcl_dev_publication_advance:159
 tools/command/native_dev_command.c:zcl_dev_publication_collect:50

@@ -67,6 +67,9 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/sysmacros.h>
+#endif
 #else
 #include <io.h>
 #include <windows.h>
@@ -2403,6 +2406,7 @@ static bool dev_watch_paths(const char *repo_root,
 }
 
 typedef uint64_t dev_pid_t;
+static bool dev_pid_is_root_watcher(const char *root, dev_pid_t pid);
 
 #if !defined(_WIN32)
 static bool dev_legacy_watch_lock_path(char lock[PATH_MAX])
@@ -2540,12 +2544,98 @@ static bool dev_watcher_parse_capability(char *text,
     return true;
 }
 
-static bool dev_watcher_active_at(const char *lock,
+#if defined(__linux__)
+/* flock is tied to the open file description.  A different process can hold
+ * the lease while the file still names a live, watcher-looking PID.  Linux's
+ * lock table supplies the actual owner for this one inode. */
+static bool dev_watcher_lock_owned_by(const struct stat *st, dev_pid_t pid)
+{
+    FILE *locks = fopen("/proc/locks", "r");
+    if (!locks) return false;
+    char row[256], kind[16], policy[16], access[16];
+    bool owned = false;
+    while (fgets(row, sizeof(row), locks)) {
+        long owner = 0;
+        unsigned int major_id = 0, minor_id = 0;
+        unsigned long long inode = 0;
+        if (sscanf(row, "%*s %15s %15s %15s %ld %x:%x:%llu",
+                   kind, policy, access, &owner, &major_id, &minor_id,
+                   &inode) != 7 || strcmp(kind, "FLOCK") != 0 ||
+            strcmp(policy, "ADVISORY") != 0 ||
+            strcmp(access, "WRITE") != 0)
+            continue;
+        if ((dev_pid_t)owner == pid && major_id == major(st->st_dev) &&
+            minor_id == minor(st->st_dev) && inode == (unsigned long long)st->st_ino) {
+            owned = true;
+            break;
+        }
+    }
+    (void)fclose(locks);
+    return owned;
+}
+#endif
+
+static bool dev_watcher_lock_snapshot(int fd, char buf[192],
+                                      struct stat *lock_stat)
+{
+    ssize_t n = pread(fd, buf, 191, 0);
+    return n > 0 && fstat(fd, lock_stat) == 0 &&
+        S_ISREG(lock_stat->st_mode);
+}
+
+static bool dev_watcher_record_owner(const char *root,
+                                     const struct stat *lock_stat,
+                                     dev_pid_t pid,
+                                     const struct dev_watcher_info *observed)
+{
+    /* A foreground proof can hold this lock after its watcher exits.  Its
+     * inherited lock text is then a stale receipt, not an active watcher. */
+    uint64_t current_start = 0;
+    if (observed->start_token != 0) {
+        if (!os_proc_pid_start_token(pid, &current_start) ||
+            current_start != observed->start_token)
+            return false;
+    } else if (!dev_pid_is_watcher(pid)) {
+        return false;
+    }
+#if defined(__linux__)
+    if (!dev_watcher_lock_owned_by(lock_stat, pid))
+        return false;
+    /* A ready lock carries its owner's birth and bound stop nonce.  This
+     * remains enough to recognize a custom-named watcher if its optional
+     * launch record could not be written.  A starting lock has no birth yet. */
+    return observed->start_token != 0 || dev_pid_is_root_watcher(root, pid);
+#else
+    (void)lock_stat;
+    return dev_pid_is_root_watcher(root, pid);
+#endif
+}
+
+static bool dev_watcher_publish_verified(
+    const char *root, const struct stat *lock_stat, dev_pid_t pid,
+    struct dev_watcher_info *observed,
+    enum zcl_devloop_publish_mode publish_mode, const char *mode_name,
+    bool ready, struct dev_watcher_info *info_out)
+{
+    if (!dev_watcher_record_owner(root, lock_stat, pid, observed))
+        return false;
+    if (info_out) {
+        observed->pid = pid;
+        observed->publish_mode = publish_mode;
+        observed->ready = ready;
+        (void)snprintf(observed->mode_name, sizeof(observed->mode_name), "%s",
+                       mode_name);
+        *info_out = *observed;
+    }
+    return true;
+}
+
+static bool dev_watcher_active_at(const char *lock, const char *root,
                                   struct dev_watcher_info *info_out)
 {
     char buf[192] = {0};
-    if (info_out)
-        memset(info_out, 0, sizeof(*info_out));
+    struct dev_watcher_info observed = {0};
+    if (info_out) memset(info_out, 0, sizeof(*info_out));
     if (!lock || !lock[0])
         return false;
     /* Presence arms post-commit proof hooks; an observation must not arm one. */
@@ -2561,9 +2651,10 @@ static bool dev_watcher_active_at(const char *lock,
         close(fd);
         return false;
     }
-    ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
+    struct stat lock_stat;
+    bool identified = dev_watcher_lock_snapshot(fd, buf, &lock_stat);
     close(fd);
-    if (n <= 0)
+    if (!identified)
         return false;
     char *end = NULL;
     long value = strtol(buf, &end, 10);
@@ -2610,19 +2701,13 @@ static bool dev_watcher_active_at(const char *lock,
             while (*state_end == ' ' || *state_end == '\t')
                 state_end++;
             if (*state_end != '\n' && *state_end != 0 &&
-                !dev_watcher_parse_capability(state_end, info_out))
+                !dev_watcher_parse_capability(state_end, &observed))
                 return false;
         }
     }
     dev_pid_t pid = (dev_pid_t)value;
-    if (info_out) {
-        info_out->pid = pid;
-        info_out->publish_mode = publish_mode;
-        info_out->ready = ready;
-        (void)snprintf(info_out->mode_name, sizeof(info_out->mode_name), "%s",
-                       mode_name);
-    }
-    return true;
+    return dev_watcher_publish_verified(root, &lock_stat, pid, &observed,
+                                        publish_mode, mode_name, ready, info_out);
 }
 #endif
 
@@ -2729,7 +2814,7 @@ static bool dev_watcher_active(const char *repo_root,
 #else
     char lock[PATH_MAX], log[PATH_MAX], legacy[PATH_MAX];
     bool have_worktree_lock = dev_watch_paths(repo_root, lock, log);
-    if (have_worktree_lock && dev_watcher_active_at(lock, info_out))
+    if (have_worktree_lock && dev_watcher_active_at(lock, repo_root, info_out))
         return true;
     /* Transitional compatibility for a watcher started by a pre-singleflight
      * binary.  Scope the legacy HOME-global lease back to that process's
@@ -2738,7 +2823,7 @@ static bool dev_watcher_active(const char *repo_root,
     struct dev_watcher_info old = {0};
     if (!dev_legacy_watch_lock_path(legacy) ||
         (have_worktree_lock && strcmp(legacy, lock) == 0) ||
-        !dev_watcher_active_at(legacy, &old) ||
+        !dev_watcher_active_at(legacy, repo_root, &old) ||
         !dev_pid_is_watcher(old.pid) ||
         !dev_pid_cwd_matches_root(old.pid, repo_root))
         return false;
@@ -3560,10 +3645,14 @@ static bool dev_watcher_stop_identity_current(
     const struct dev_watcher_info *active, const char *repo_root)
 {
     uint64_t current_start = 0;
+    struct dev_watcher_info current = {0};
     return active && active->nonce[0] && active->start_token != 0 &&
         os_proc_pid_start_token(active->pid, &current_start) &&
         current_start == active->start_token &&
-        dev_pid_is_root_watcher(repo_root, active->pid);
+        dev_watcher_active(repo_root, &current) &&
+        current.pid == active->pid &&
+        current.start_token == active->start_token &&
+        strcmp(current.nonce, active->nonce) == 0;
 }
 
 static bool dev_loop_stop_signal(const struct dev_watcher_info *active,
@@ -3609,8 +3698,7 @@ static bool dev_loop_stop_identify(const char *repo_root, int64_t requested,
         return false;
     }
     if ((int64_t)active->pid != requested ||
-        strcmp(active->nonce, session) != 0 ||
-        !dev_pid_is_root_watcher(repo_root, active->pid)) {
+        strcmp(active->nonce, session) != 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                                ZCL_COMMAND_EXIT_BLOCKED, "WATCHER_ID_MISMATCH",
                                "confinement", false, false,
