@@ -453,11 +453,14 @@ static const char *bfr_store_qualification(
                 VCS_BUILD_RELEASE_EVIDENCE_OK ||
         vcs_build_release_qualification_v2_root(
             &qualification, qualification_root) !=
-                VCS_BUILD_RELEASE_EVIDENCE_OK ||
-        !vcs_object_put_addressed(
+                VCS_BUILD_RELEASE_EVIDENCE_OK)
+        return "qualified-release-cas-write-failed";
+    bool existed = vcs_object_has(workspace, qualification_root);
+    if (!vcs_object_put_addressed(
             workspace, qualification_root, qualification_wire,
             sizeof(qualification_wire)))
-        return "qualified-release-cas-write-failed";
+        return existed ? "qualified-release-cas-poisoned" :
+                         "qualified-release-cas-write-failed";
     uint8_t *stored = NULL;
     size_t stored_len = 0;
     bool stored_exact = vcs_object_load_raw_bounded(

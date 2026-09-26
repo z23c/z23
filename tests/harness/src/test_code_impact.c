@@ -142,6 +142,14 @@ static bool write_context_paging_fixture(void)
     size_t used = (size_t)wrote;
     bool ok = true;
     for (int i = 0; i < CI_CONTEXT_PAGE_EDGES; i++) {
+        char header[96];
+        int header_len = snprintf(header, sizeof(header),
+                                  "core/modules/net/include/net/page_%03d.h", i);
+        if (header_len <= 0 || (size_t)header_len >= sizeof(header) ||
+            !ci_impact_mk_write(CI_IMPACT_FIX, header, "/* paging edge */\n")) {
+            ok = false;
+            break;
+        }
         wrote = snprintf(depfile + used, depfile_cap - used,
                          " core/modules/net/include/net/page_%03d.h", i);
         if (wrote <= 0 || (size_t)wrote >= depfile_cap - used) {

@@ -478,7 +478,7 @@ contexts/commons/modules/vcs/src/vcs_index.c:vcs_index_meta_get:17
 contexts/commons/modules/vcs/src/vcs_manifest.c:build_cb:16
 contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_build:18
 contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_parse:16
-contexts/commons/modules/vcs/src/vcs_object.c:object_write_mode:24
+contexts/commons/modules/vcs/src/vcs_object.c:object_write_mode:20
 contexts/commons/modules/vcs/src/vcs_revert.c:vcs_revert:25
 contexts/commons/modules/vcs/src/vcs_seal.c:vcs_seal_load_globs:21
 contexts/commons/modules/vcs/src/vcs_walk.c:vcs_path_ignored:25
@@ -2461,7 +2461,6 @@ platform/modules/platform/src/private_destination.c:platform_private_destination
 platform/modules/platform/src/private_directory.c:platform_private_directory_create:16
 platform/modules/platform/src/private_file.c:platform_private_file_link_no_clobber:22
 platform/modules/platform/src/private_file.c:platform_private_file_link_no_clobber#2:17
-platform/modules/platform/src/private_file.c:platform_private_file_retire_if_identity#2:23
 platform/modules/platform/src/private_file.c:platform_private_path_resolve:49
 platform/modules/platform/src/process_lifecycle.c:append_arg:20
 platform/modules/platform/src/process_lifecycle.c:environment_block:16
@@ -2524,7 +2523,7 @@ platform/modules/util/src/log_json.c:log_json_escape:23
 platform/modules/util/src/log_rotate.c:log_rotate_if_over:20
 platform/modules/util/src/self_backtrace.c:self_backtrace_dump_all:24
 platform/modules/util/src/shutdown_stagewatch.c:shutdown_stagewatch_read_exit_reason:18
-platform/modules/util/src/spawn.c:spawn_capture_drain:30
+platform/modules/util/src/spawn.c:spawn_capture_drain:25
 platform/modules/util/src/spawn.c:spawn_pty_capture_observed_platform#2:22
 platform/modules/util/src/spawn.c:zcl_argv_split:17
 platform/modules/util/src/spawn.c:zcl_spawn_detached_input#2:33
@@ -3590,7 +3589,7 @@ tools/command/native_dev_command.c:dev_loop_ensure:39
 tools/command/native_dev_command.c:dev_pid_is_watcher:17
 tools/command/native_dev_command.c:dev_publication_lane_lookup:33
 tools/command/native_dev_command.c:dev_reflex_policy_frozen_kat:39
-tools/command/native_dev_command.c:dev_watcher_active_at:51
+tools/command/native_dev_command.c:dev_watcher_active_at:41
 tools/command/native_dev_command.c:dev_watcher_active_windows:34
 tools/command/native_dev_command.c:zcl_dev_publication_advance:159
 tools/command/native_dev_command.c:zcl_dev_publication_collect:50
@@ -3611,7 +3610,7 @@ tools/command/native_dev_hotswap.c:rpc_dev_hotswap_native:19
 tools/command/native_dev_hotswap.c:service_resident_observation_append:24
 tools/command/native_dev_land.c:dl_dependency_repair_one:36
 tools/command/native_dev_land.c:dl_escape:17
-tools/command/native_dev_land.c:dl_materialize_file:47
+tools/command/native_dev_land.c:dl_materialize_file:43
 tools/command/native_dev_land.c:dl_regen_run:21
 tools/command/native_dev_land.c:dl_status:40
 tools/command/native_dev_land.c:dl_step_start:19
@@ -3950,7 +3949,7 @@ tools/dev/devloop_watch.c:watch_emit_superseded:20
 tools/dev/devloop_watch.c:zcl_devloop_watch_commit_preemption_selftest:20
 tools/dev/devloop_watch.c:zcl_devloop_watch_idle_exit_selftest:36
 tools/dev/devloop_watch.c:zcl_devloop_watch_mode_until:17
-tools/dev/devloop_watch.c:zcl_devloop_watch_mode_until#2:89
+tools/dev/devloop_watch.c:zcl_devloop_watch_mode_until#2:87
 tools/dev/devloop_watch.c:zcl_devloop_watch_stream_backpressure_selftest:48
 tools/dev/fleet_enrol_codec.c:fe_relay_valid:16
 tools/dev/fleet_enrol_codec.c:fleet_enrol_onion_valid:17
