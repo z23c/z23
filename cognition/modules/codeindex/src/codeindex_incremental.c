@@ -156,10 +156,24 @@ static bool incremental_source_root(struct ci_store *store, uint8_t out[32])
     return ok;
 }
 
-static bool incremental_stamp_projection_and_counts(struct ci_store *store)
+static bool incremental_refresh_include_narrow(const char *root,
+                                               struct ci_store *store)
+{
+    uint8_t exact[32];
+    uint8_t stat_root[32];
+    const char *bit;
+    if (!ci_deps_scan_roots(root, NULL, NULL, exact, stat_root))
+        return false;
+    bit = ci_deps_include_narrow_unsafe() ? "1" : "0";
+    return ci_store_meta_set(store, "include_narrow_unsafe", bit, 1);
+}
+
+static bool incremental_stamp_projection_and_counts(const char *root,
+                                                    struct ci_store *store)
 {
     uint8_t projection_root[32];
-    return ci_store_retrieval_projection_root(store, projection_root) &&
+    return incremental_refresh_include_narrow(root, store) &&
+           ci_store_retrieval_projection_root(store, projection_root) &&
            ci_store_meta_set(store, CI_RETRIEVAL_PROJECTION_META,
                              projection_root, sizeof(projection_root)) &&
            ci_store_write_table_count_meta(store);
@@ -185,7 +199,7 @@ bool ci_build_store_incremental(const char *root, struct ci_store *store,
              ci_store_meta_set(store, "dep_stat_root_sha3", dep_stat, 32) &&
              ci_store_meta_set(store, "source_merkle_root_sha3", merkle_root, 32);
     if (ok)
-        ok = incremental_stamp_projection_and_counts(store);
+        ok = incremental_stamp_projection_and_counts(root, store);
     if (!ok) {
         if (tx_open) (void)ci_store_rollback(store);
         LOG_FAIL("codeindex", "incremental changed-row replacement failed");

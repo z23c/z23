@@ -739,18 +739,18 @@ static bool ci_narrow_base(const char *dir, const char *src, const char *dep)
            ci_impact_mk_write(dir, "build/obj/narrow.d", dep);
 }
 
-static void ci_narrow_touch_source_newer(const char *dir)
+static void ci_narrow_touch_rel(const char *dir, const char *rel, int delta)
 {
-    char dep[512], src[512];
+    char dep[512], path[512];
     struct stat st;
     snprintf(dep, sizeof dep, "%s/build/obj/narrow.d", dir);
-    snprintf(src, sizeof src, "%s/core/modules/net/src/narrow.c", dir);
+    snprintf(path, sizeof path, "%s/%s", dir, rel);
     if (stat(dep, &st) != 0)
         return;
     struct utimbuf times;
-    times.actime = st.st_mtime + 5;
-    times.modtime = st.st_mtime + 5;
-    (void)utime(src, &times);
+    times.actime = st.st_mtime + delta;
+    times.modtime = st.st_mtime + delta;
+    (void)utime(path, &times);
 }
 
 static int ci_narrow_one(const char *name, const char *src, const char *dep,
@@ -760,14 +760,19 @@ static int ci_narrow_one(const char *name, const char *src, const char *dep,
     char dir[256];
     snprintf(dir, sizeof dir, CI_NARROW_FIX "/%s", name);
     system("rm -rf " CI_NARROW_FIX);
-    bool ready = ci_narrow_base(dir, src, dep);
-    if (strcmp(name, "changed") == 0) {
+    bool ready = true;
+    if (strcmp(name, "quoted") == 0)
+        ready = ci_impact_mk_write(dir, "core/modules/net/include/net/extra.h",
+                                   "int ci_narrow_extra(void);\n");
+    ready = ready && ci_narrow_base(dir, src, dep);
+    if (strcmp(name, "changed") == 0)
         ready = ready && ci_impact_mk_write(
             dir, "core/modules/net/include/net/extra.h",
             "int ci_narrow_extra(void);\n");
-    }
     if (strcmp(name, "stale") == 0)
-        ci_narrow_touch_source_newer(dir);
+        ci_narrow_touch_rel(dir, "core/modules/net/src/narrow.c", 5);
+    if (strcmp(name, "stale-header") == 0)
+        ci_narrow_touch_rel(dir, "core/modules/net/include/net/real.h", 5);
     char dim[64] = "";
     long long count = -1;
     bool ok = ready && ci_narrow_dim(dir, query, dim, sizeof dim, &count);
@@ -803,6 +808,10 @@ static int test_code_impact_unsafe_narrow(void)
         "/* narrow */\n#include \"net/real.h\"\n"
         "#include \"core/modules/net/include/net/extra.h\"\n"
         "int ci_narrow(void){return 1;}\n";
+    static const char *const src_quoted =
+        "/* narrow */\n#include \"net/real.h\"\n"
+        "#include \"net/extra.h\"\n"
+        "int ci_narrow(void){return 1;}\n";
     int failures = 0;
     failures += ci_narrow_one("clean", src_plain, dep_clean,
                               "core/modules/net/include/net/real.h", true);
@@ -814,6 +823,49 @@ static int test_code_impact_unsafe_narrow(void)
                               "core/modules/net/include/net/real.h", false);
     failures += ci_narrow_one("changed", src_changed, dep_clean,
                               "core/modules/net/include/net/extra.h", false);
+    failures += ci_narrow_one("quoted", src_quoted, dep_clean,
+                              "core/modules/net/include/net/real.h", false);
+    failures += ci_narrow_one("stale-header", src_plain, dep_clean,
+                              "core/modules/net/include/net/real.h", false);
+    system("rm -rf " CI_NARROW_FIX);
+    return failures;
+}
+
+static int test_code_impact_incremental_include(void)
+{
+    int failures = 0;
+    const char *dir = CI_NARROW_FIX "/incremental";
+    static const char *const dep =
+        "build/obj/narrow.o: core/modules/net/src/narrow.c "
+        "core/modules/net/include/net/real.h\n";
+    static const char *const src0 =
+        "/* narrow */\n#include \"net/real.h\"\nint ci_narrow(void){return 1;}\n";
+    static const char *const src1 =
+        "/* narrow */\n#include \"net/real.h\"\n#include \"net/extra.h\"\n"
+        "int ci_narrow(void){return 2;}\n";
+    system("rm -rf " CI_NARROW_FIX);
+    bool ready = ci_impact_mk_write(dir, "core/modules/net/include/net/extra.h",
+                                    "int ci_narrow_extra(void);\n") &&
+                 ci_narrow_base(dir, src0, dep);
+    char first[64] = "";
+    char second[64] = "";
+    long long count = -1;
+    bool ok = ready && ci_narrow_dim(dir, "core/modules/net/include/net/real.h",
+                                     first, sizeof first, &count);
+    ok = ok && ci_impact_mk_write(dir, "core/modules/net/src/narrow.c", src1);
+    ci_narrow_touch_rel(dir, "core/modules/net/src/narrow.c", -5);
+    ci_narrow_touch_rel(dir, "core/modules/net/include/net/extra.h", -5);
+    ok = ok && ci_narrow_dim(dir, "core/modules/net/include/net/real.h",
+                             second, sizeof second, &count);
+    printf("invariant=unsafe_narrow_include_dimension case=incremental "
+           "include_dimension=%s then %s ok=%d\n",
+           first, second, ok ? 1 : 0);
+    TEST("code_impact: a later include change is not a complete narrow impact") {
+        ASSERT(ok);
+        ASSERT(strcmp(first, "complete") == 0);
+        ASSERT(strcmp(second, "complete") != 0);
+        PASS();
+    } _test_next:;
     system("rm -rf " CI_NARROW_FIX);
     return failures;
 }
@@ -850,6 +902,7 @@ int test_code_impact(void)
     int failures = 0;
     failures += test_code_impact_rule_predicate();
     failures += test_code_impact_unsafe_narrow();
+    failures += test_code_impact_incremental_include();
     failures += test_code_impact_scope_refusals();
     failures += test_code_impact_hub();
     failures += test_code_impact_leaf();

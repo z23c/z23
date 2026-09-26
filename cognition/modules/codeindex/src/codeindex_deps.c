@@ -408,6 +408,53 @@ static bool dep_outside_tree(const char *tok)
            (isalpha((unsigned char)tok[0]) && tok[1] == ':');
 }
 
+static bool dep_join(char *out, size_t cap, const char *dir, const char *rel)
+{
+    int n = snprintf(out, cap, "%s/%s", dir, rel);
+    return n > 0 && (size_t)n < cap;
+}
+
+static void note_unlisted_regular(const char *root, const char *dep_text,
+                                  const char *rel)
+{
+    if (rel[0] != '\0' && rel_is_regular_file(root, rel) &&
+        !dep_text_lists(dep_text, rel))
+        note_include_narrow_unsafe();
+}
+
+/* A quoted include is part of the closure when it names a regular file at
+ * the checkout root, beside the translation unit, or under that module's
+ * include/ directory. A depfile that does not list that file is not complete. */
+static void note_quoted_resolved(const char *root, const char *src,
+                                 const char *dep_text, const char *quoted)
+{
+    char rel[CI_PATH_MAX];
+    char dir[CI_PATH_MAX];
+    const char *slash = strrchr(src, '/');
+    size_t dlen;
+    note_unlisted_regular(root, dep_text, quoted);
+    if (!slash)
+        return;
+    dlen = (size_t)(slash - src);
+    if (dlen == 0 || dlen >= sizeof dir)
+        return;
+    memcpy(dir, src, dlen);
+    dir[dlen] = '\0';
+    if (dep_join(rel, sizeof rel, dir, quoted))
+        note_unlisted_regular(root, dep_text, rel);
+    {
+        char *src_at = strstr(dir, "/src");
+        char include_dir[CI_PATH_MAX];
+        if (src_at && (src_at[4] == '\0' || src_at[4] == '/')) {
+            int n = snprintf(include_dir, sizeof include_dir, "%.*s/include",
+                             (int)(src_at - dir), dir);
+            if (n > 0 && (size_t)n < sizeof include_dir &&
+                dep_join(rel, sizeof rel, include_dir, quoted))
+                note_unlisted_regular(root, dep_text, rel);
+        }
+    }
+}
+
 static void note_changed_includes(const char *root, const char *src,
                                   const char *dep_text)
 {
@@ -433,9 +480,8 @@ static void note_changed_includes(const char *root, const char *src,
         if (!end)
             continue;
         *end = '\0';
-        if (!dep_outside_tree(quoted) && rel_is_regular_file(root, quoted) &&
-            !dep_text_lists(dep_text, quoted))
-            note_include_narrow_unsafe();
+        if (!dep_outside_tree(quoted))
+            note_quoted_resolved(root, src, dep_text, quoted);
     }
     fclose(file);
 }
@@ -520,12 +566,12 @@ static void note_depfile_rule_gaps(
         if (!saw_source && (has_ext(token, ".c") || has_ext(token, ".cc") ||
                             has_ext(token, ".c23"))) {
             saw_source = true;
-            note_source_newer_than_depfile(root, token, dep);
             note_changed_includes(root, token, text);
-            continue;
         }
         if (!rel_is_regular_file(root, token))
             note_include_narrow_unsafe();
+        else
+            note_source_newer_than_depfile(root, token, dep);
     }
 }
 
