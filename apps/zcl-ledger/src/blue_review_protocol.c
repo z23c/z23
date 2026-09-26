@@ -49,16 +49,25 @@ static uint16_t append_chunk(blue_review_state *state, const uint8_t *data,
 
 static uint16_t finish_review(blue_review_state *state, size_t length,
                               uint8_t *reply, size_t capacity,
-                              size_t *reply_length) {
+                              size_t *reply_length,
+                              blue_review_digest_fn digest) {
     if (length != 0) return 0x6700;
     if (!state->expected || state->received != state->expected) return 0x6985;
     zcl_tx_review review;
     int parsed = zcl_tx_review_parse(state->wire, state->received, &review);
-    state->expected = state->received = 0;
-    if (parsed < 0) return 0x6a80;
-    if (capacity < 44) return 0x6700;
+    if (parsed < 0 || !digest) {
+        state->expected = state->received = 0;
+        return 0x6a80;
+    }
+    if (capacity < 76) {
+        state->expected = state->received = 0;
+        return 0x6700;
+    }
     blue_review_encode_summary(&review, reply);
-    *reply_length = 44;
+    bool hashed = digest(state->wire, state->received, reply + 44);
+    state->expected = state->received = 0;
+    if (!hashed) return 0x6a80;
+    *reply_length = 76;
     return 0x9000;
 }
 
@@ -66,7 +75,7 @@ static uint16_t identify(size_t length, uint8_t *reply, size_t capacity,
                          size_t *reply_length) {
     if (length || capacity < 5) return 0x6700;
     memcpy(reply, "ZCL", 3);
-    reply[3] = 4;
+    reply[3] = 5;
     reply[4] = 0x40;
     *reply_length = 5;
     return 0x9000;
@@ -81,7 +90,8 @@ static uint16_t clear_review(blue_review_state *state, size_t length) {
 uint16_t blue_review_handle(blue_review_state *state,
                             const uint8_t *apdu, size_t apdu_length,
                             uint8_t *reply, size_t reply_capacity,
-                            size_t *reply_length) {
+                            size_t *reply_length,
+                            blue_review_digest_fn digest) {
     if (!state || !apdu || !reply || !reply_length) return 0x6a80;
     *reply_length = 0;
     if (apdu_length < 5 || apdu_length != 5 + (size_t)apdu[4]) return 0x6700;
@@ -94,7 +104,7 @@ uint16_t blue_review_handle(blue_review_state *state,
     case 0x10: return begin_review(state, data, length);
     case 0x11: return append_chunk(state, data, length);
     case 0x12: return finish_review(state, length, reply,
-                                    reply_capacity, reply_length);
+                                    reply_capacity, reply_length, digest);
     case 0x13: return clear_review(state, length);
     default: return 0x6d00;
     }

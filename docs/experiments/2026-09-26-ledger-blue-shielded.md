@@ -71,3 +71,20 @@ approval or Sapling payment. Its fixed touchscreen does not identify the
 recipient, amount, fee, or digest. A future signing app must verify these
 details, bind the user's approval to a specific digest, and pass independent
 cryptographic vectors before it can request key operations.
+
+## Exact-byte transport binding
+
+Recorded: 2026-09-26T06:04:03-04:00 (2026-09-26T10:04:03Z)
+
+The review protocol now returns SHA-256 of all transaction bytes alongside
+the same 44-byte summary. Blue computes it with the firmware hash syscall;
+the host independently computes it with OpenSSL 3. The host fails if either
+the identity, summary, or digest differs. A fixed 29-byte wire vector's
+SHA-256 is
+`0ba4f12d34aa8160563ce2e34b462bc391c78ebb371c4ae572c546c1eadeebfd`,
+verified with `sha256sum` and pinned in the APDU test. This digest checks the
+USB transport's exact bytes; it is not the ZIP-243 signature hash. The
+updated ARM image still has 15,624 text bytes, zero initialized data bytes,
+and 6,132 BSS bytes. Its app.hex SHA-256 is
+`85bc430c918ed15cbf9a329f6fc0e43d31e37d0a0b8836d86f3c3c4310c3834e`.
+No physical Blue test occurred.

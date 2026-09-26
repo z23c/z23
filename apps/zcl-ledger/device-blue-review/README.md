@@ -3,7 +3,8 @@
 # ZCL Review for Ledger Blue
 
 This C23 app accepts up to 4,096 bytes of a raw ZCL Sapling-v4 transaction
-over USB and returns a structural summary. It counts transparent inputs and
+over USB and returns a structural summary and SHA-256 digest of the exact
+transaction bytes. It counts transparent inputs and
 outputs, Sapling spends and outputs, and Sprout JoinSplits. It also reports
 the public output total, value balance, lock time, and expiry height. The
 touchscreen says `NO KEYS OR SIGNING` and has an EXIT button. The app has no
@@ -30,13 +31,14 @@ Protocol commands use CLA `A5`, P1/P2 zero, and one-byte `Lc`:
 
 | INS | Request | Successful response before `9000` |
 | --- | --- | --- |
-| `01` | Empty | `ZCL`, protocol version `04`, review-only capability `40` |
+| `01` | Empty | `ZCL`, protocol version `05`, review-only capability `40` |
 | `10` | Two-byte little-endian transaction length | Empty |
 | `11` | Transaction chunk | Empty |
-| `12` | Empty | 44-byte little-endian structural summary |
+| `12` | Empty | 44-byte little-endian structural summary, then 32-byte SHA-256 digest |
 | `13` | Empty | Empty; clears pending review |
 
 Each chunk is at most 220 bytes from the host CLI. An invalid size or
 truncated transaction fails. `12` consumes the pending review even if the
-transaction is invalid. The summary fields and limitations are documented in
+transaction is invalid. The SHA-256 digest is a transport comparison, not
+the ZIP-243 signing digest or a device approval. The summary fields and limitations are documented in
 the [host guide](../README.md).

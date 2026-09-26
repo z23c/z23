@@ -26,7 +26,7 @@ target_link_libraries(blue_review_protocol PUBLIC zcl_tx_review)
 target_compile_options(blue_review_protocol PRIVATE -Wall -Wextra -Werror -pedantic)
 
 add_executable(zcl-tx-review src/tx_review_cli.c)
-target_link_libraries(zcl-tx-review PRIVATE zcl_tx_review blue_review_protocol ledger_hid)
+target_link_libraries(zcl-tx-review PRIVATE zcl_tx_review blue_review_protocol ledger_hid OpenSSL::Crypto)
 target_compile_options(zcl-tx-review PRIVATE -Wall -Wextra -Werror -pedantic)
 
 add_executable(zcl-ledger src/main.c)
@@ -105,7 +105,7 @@ endif()
 add_test(NAME zcl-tx-review COMMAND test-zcl-tx-review)
 
 add_executable(test-blue-review-protocol tests/test_blue_review_protocol.c)
-target_link_libraries(test-blue-review-protocol PRIVATE blue_review_protocol)
+target_link_libraries(test-blue-review-protocol PRIVATE blue_review_protocol OpenSSL::Crypto)
 target_compile_options(test-blue-review-protocol PRIVATE -Wall -Wextra -Werror -pedantic)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(test-blue-review-protocol PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)

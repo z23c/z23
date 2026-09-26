@@ -11,6 +11,11 @@ unsigned char G_io_seproxyhal_spi_buffer[IO_SEPROXYHAL_BUFFER_SIZE_B];
 ux_state_t ux;
 static blue_review_state review_state;
 
+static bool transaction_digest(const uint8_t *wire, size_t length,
+                               uint8_t digest[32]) {
+    return cx_hash_sha256(wire, (unsigned int)length, digest) == 32;
+}
+
 static const bagl_element_t *exit_app(const bagl_element_t *element) {
     (void)element;
     os_sched_exit(0);
@@ -124,7 +129,7 @@ static void answer_command(void) {
                 sw = blue_review_handle(&review_state, G_io_apdu_buffer,
                                         rx, G_io_apdu_buffer,
                                         sizeof G_io_apdu_buffer - 2,
-                                        &reply_length);
+                                        &reply_length, transaction_digest);
                 tx = reply_length;
             }
             CATCH_OTHER(error) {

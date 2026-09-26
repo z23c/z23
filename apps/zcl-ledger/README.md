@@ -77,7 +77,9 @@ transaction; this structural parser does not decrypt them or verify proofs,
 signatures, ownership, fee, or consensus validity. It has no key access.
 The optional `--blue` mode sends at most 4,096 transaction bytes to the
 [ZCL Review app](device-blue-review/README.md), verifies its review-only
-identity, and requires its structural summary to match the host parser.
+identity, and requires its structural summary and transaction SHA-256 digest
+to match the host's values. This checks the exact bytes received by the Blue;
+it is not the ZIP-243 signing digest or a device approval.
 `blue_parsed` is true only after that comparison succeeds. The Blue app has
 not been installed or tested on the physical device; it has no signing
 command or transaction approval screen. Without `--blue`, the CLI sends

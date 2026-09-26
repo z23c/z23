@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <linux/hidraw.h>
+#include <openssl/sha.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,10 +84,14 @@ static int blue_review(const char *device, const uint8_t *wire, size_t length,
         return -1;
     }
     static const uint8_t probe[] = {0xa5, 1, 0, 0, 0};
-    static const uint8_t identity[] = {'Z', 'C', 'L', 4, 0x40};
+    static const uint8_t identity[] = {'Z', 'C', 'L', 5, 0x40};
     uint8_t final[] = {0xa5, 0x12, 0, 0, 0};
-    uint8_t summary[44];
+    uint8_t summary[76];
     blue_review_encode_summary(review, summary);
+    if (!SHA256(wire, length, summary + 44)) {
+        close(fd);
+        return -1;
+    }
     int result = send_expected(fd, probe, sizeof probe,
                                identity, sizeof identity) == 0 &&
                  send_transaction(fd, wire, length) == 0 &&

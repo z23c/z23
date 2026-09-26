@@ -3,11 +3,18 @@
 
 #undef NDEBUG
 #include <assert.h>
+#include <openssl/sha.h>
 #include <string.h>
+
+static bool transaction_digest(const uint8_t *wire, size_t length,
+                               uint8_t digest[32]) {
+    return SHA256(wire, length, digest) != NULL;
+}
 
 static uint16_t call(blue_review_state *state, uint8_t *apdu, size_t length,
                      size_t *reply_length) {
-    return blue_review_handle(state, apdu, length, apdu, 255, reply_length);
+    return blue_review_handle(state, apdu, length, apdu, 255,
+                              reply_length, transaction_digest);
 }
 
 static void test_minimal_review(void) {
@@ -15,7 +22,7 @@ static void test_minimal_review(void) {
     uint8_t apdu[260] = {0xa5, 0x01};
     size_t reply_length = 0;
     assert(call(&state, apdu, 5, &reply_length) == 0x9000);
-    assert(reply_length == 5 && memcmp(apdu, "ZCL\x04\x40", 5) == 0);
+    assert(reply_length == 5 && memcmp(apdu, "ZCL\x05\x40", 5) == 0);
 
     const uint8_t begin[] = {0xa5, 0x10, 0, 0, 2, 29, 0};
     memcpy(apdu, begin, sizeof begin);
@@ -31,8 +38,15 @@ static void test_minimal_review(void) {
     apdu[1] = 0x12;
     apdu[4] = 0;
     assert(call(&state, apdu, 5, &reply_length) == 0x9000);
-    assert(reply_length == 44);
-    for (size_t i = 0; i < reply_length; ++i) assert(apdu[i] == 0);
+    assert(reply_length == 76);
+    for (size_t i = 0; i < 44; ++i) assert(apdu[i] == 0);
+    static const uint8_t digest[32] = {
+        0x0b, 0xa4, 0xf1, 0x2d, 0x34, 0xaa, 0x81, 0x60,
+        0x56, 0x3c, 0xe2, 0xe3, 0x4b, 0x46, 0x2b, 0xc3,
+        0x91, 0xc7, 0x8e, 0xbb, 0x37, 0x1c, 0x4a, 0xe5,
+        0x72, 0xc5, 0x46, 0xc1, 0xea, 0xde, 0xeb, 0xfd
+    };
+    assert(memcmp(apdu + 44, digest, sizeof digest) == 0);
     assert(call(&state, apdu, 5, &reply_length) == 0x6e00);
 }
 
@@ -64,7 +78,7 @@ static void test_state_and_bounds(void) {
     apdu[0] = 0;
     assert(call(&state, apdu, 5, &reply_length) == 0x6e00);
     assert(blue_review_handle(NULL, apdu, 5, apdu, 255,
-                              &reply_length) == 0x6a80);
+                              &reply_length, transaction_digest) == 0x6a80);
 }
 
 int main(void) {
