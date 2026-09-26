@@ -22,6 +22,7 @@ const char *testcache_reason_label(enum testcache_reason r)
         [TESTCACHE_R_PROOF_CONTRACT_INVALID] = "invalid-proof-contract",
         [TESTCACHE_R_HARNESS_GRAPH] = "harness-include-graph-incomplete",
         [TESTCACHE_R_GROUP_UNADMISSIBLE] = "group-unadmissible",
+        [TESTCACHE_R_INPUT_MISSING] = "input-missing-from-checkout",
     };
     return (unsigned)r < TESTCACHE_R__COUNT && labels[r]
         ? labels[r] : "unknown";

@@ -26,6 +26,7 @@
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,6 +96,7 @@ struct testcache {
     char              changed[TRC_CHANGED_MAX][TRC_PATH_MAX];
     size_t            changed_count;
     bool              snapshot_mode;
+    bool              input_missing;   /* last hash miss: path is absent */
 };
 
 static uint64_t trc_hash_str(const char *s)
@@ -175,7 +177,9 @@ static bool trc_hash_file(const char *root, const char *relpath,
     }
     FILE *fp = fopen(path, "rb");
     if (!fp) {
+        int saved = errno;
         ZCL_LOG_EMIT_AT(ZCL_LOG_WARN, "[testcache] open failed: %s\n", path);
+        errno = saved;
         return false;
     }
     struct stat st;
@@ -208,7 +212,8 @@ static bool trc_hash_file(const char *root, const char *relpath,
 }
 
 /* Memoized content hash + mtime of one closure file. Returns false on read
- * failure (the caller then treats the whole group as UNCACHEABLE). */
+ * failure (the caller then treats the whole group as UNCACHEABLE); an absent
+ * path also raises tc->input_missing so the refusal can say so. */
 static bool trc_file_hash(struct testcache *tc, const char *relpath,
                           uint8_t out[32], int64_t *out_mtime_ns)
 {
@@ -228,8 +233,11 @@ static bool trc_file_hash(struct testcache *tc, const char *relpath,
     uint8_t h[32];
     int64_t mt = 0;
     size_t nbytes = 0;
-    if (!trc_hash_file(tc->root, relpath, h, &mt, &nbytes))
+    errno = 0;
+    if (!trc_hash_file(tc->root, relpath, h, &mt, &nbytes)) {
+        if (errno == ENOENT) tc->input_missing = true;
         return false;
+    }
     tc->stats.file_hash_reads++;
     tc->stats.sha3_content_bytes += (uint64_t)nbytes;
     char *dup = zcl_strdup(relpath, "trc_memo_key");
@@ -811,6 +819,26 @@ static const char *trc_effective_store_root(const char *store_root)
     return (store_root && store_root[0]) ? store_root : ".";
 }
 
+/* Why no key could be formed. The include graph keeps every prerequisite the
+ * compiler listed, including one this checkout no longer holds; that input
+ * has no bytes to hash, so the graph describes an older tree. Say so, rather
+ * than calling it unreadable, and never mint a key without it. */
+static void trc_key_refusal(const struct testcache *tc, bool harness_incomplete,
+                            struct testcache_probe *out)
+{
+    const char *reason = "input file unreadable";
+    out->code = TESTCACHE_R_FILE_UNREADABLE;
+    if (harness_incomplete) {
+        out->code = TESTCACHE_R_HARNESS_GRAPH;
+        reason = "harness depfile graph incomplete";
+    } else if (tc->input_missing) {
+        out->code = TESTCACHE_R_INPUT_MISSING;
+        reason = "include graph names an input the checkout no longer "
+                 "contains (rebuild to refresh)";
+    }
+    snprintf(out->reason, sizeof(out->reason), "%s", reason);
+}
+
 /* Populate *out for group_name. Fail-safe: any failure => uncacheable. */
 static void testcache_probe_group_internal(
     struct testcache *tc, const char *group_name,
@@ -901,13 +929,10 @@ static void testcache_probe_group_internal(
     }
 
     bool stale = false, harness_graph_incomplete = false;
+    tc->input_missing = false;
     if (!trc_compute_key(tc, group_name, nc, out->key, &stale,
                          &harness_graph_incomplete)) {
-        out->code = harness_graph_incomplete ? TESTCACHE_R_HARNESS_GRAPH
-                                             : TESTCACHE_R_FILE_UNREADABLE;
-        snprintf(out->reason, sizeof(out->reason), "%s",
-                 harness_graph_incomplete ? "harness depfile graph incomplete"
-                                          : "input file unreadable");
+        trc_key_refusal(tc, harness_graph_incomplete, out);
         return;
     }
     /* An input newer than every depfile may have new unseen dependencies. */

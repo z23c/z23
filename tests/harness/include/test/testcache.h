@@ -88,6 +88,7 @@ enum testcache_reason {
     TESTCACHE_R_PROOF_CONTRACT_INVALID, /* unknown activation policy */
     TESTCACHE_R_HARNESS_GRAPH,     /* runner policy TU depfile is incomplete */
     TESTCACHE_R_GROUP_UNADMISSIBLE, /* group exceeds signed leaf name bound */
+    TESTCACHE_R_INPUT_MISSING,     /* graph names an input the tree lacks */
     TESTCACHE_R__COUNT
 };
 

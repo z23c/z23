@@ -887,6 +887,64 @@ static int tc_batch_special(void)
     return failures;
 }
 
+/* The selector concern behind dropping vanished prerequisites: a retained
+ * object root whose live epoch still names a header this checkout moved.
+ * The include graph keeps that edge, so the activated proof has no complete
+ * input set: it still runs fresh, mints no identity, and says why. Groups
+ * whose closure never reads the vanished path keep their ordinary answer. */
+#define TC_RETIRED_EPOCH \
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+static bool tc_write_retired_epoch(void)
+{
+    return mk_write(TC_FIX, "build/rel/epochs/" TC_RETIRED_EPOCH "/tc_q01.d",
+                    "build/rel/tc_q01.o: core/modules/net/src/tc_q01.c "
+                    "core/modules/net/include/net/tc.h "
+                    "core/modules/net/include/net/tc_retired.h\n") &&
+           mk_write(TC_FIX, "build/rel/.current-epoch",
+                    TC_RETIRED_EPOCH "\n");
+}
+
+static bool tc_vanished_probe(const char *const *ptrs,
+                              const enum zcl_test_proof_contract *mixed)
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool ok = tc != NULL;
+    if (tc) {
+        static struct testcache_probe out[2];
+        ok = testcache_probe_groups(tc, ptrs, mixed, 2, out);
+        printf("  testcache: vanished input slot0=%s (%s) slot1=%s\n",
+               testcache_reason_label(out[0].code), out[0].reason,
+               testcache_reason_label(out[1].code));
+        ok = ok && !out[0].key_valid && !out[0].cacheable && !out[0].hit &&
+             out[0].code == TESTCACHE_R_INPUT_MISSING &&
+             out[1].cacheable && out[1].code == TESTCACHE_R_OK;
+        testcache_close(tc);
+    }
+    return ok;
+}
+
+static int tc_batch_vanished(void)
+{
+    int failures = 0;
+    static char names[2][64];
+    static const char *ptrs[2];
+    for (int i = 0; i < 2; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    static const enum zcl_test_proof_contract mixed[2] = {
+        ZCL_TEST_PROOF_STRESS, ZCL_TEST_PROOF_NONE,
+    };
+    TC_CHECK("vanished-input fixture writes",
+             write_batch_fixture() && tc_write_retired_epoch());
+    TC_CHECK("a vanished input refuses identity and names the stale graph",
+             tc_vanished_probe(ptrs, mixed));
+    TC_CHECK("retired epoch removed",
+             tc_shell("rm -rf %s/build/rel", TC_FIX));
+    return failures;
+}
+
 /* One receiver store serves an identical second candidate tree, but a real
  * shared-header edit in that tree invalidates all eight observed inputs. */
 static bool tc_cross_tree_probe(const char *root, const char *const *names,
@@ -3083,6 +3141,7 @@ int test_testcache(void)
     failures += tc_batch_invalidation();
     failures += tc_batch_failclosed();
     failures += tc_batch_special();
+    failures += tc_batch_vanished();
     failures += tc_batch_restart_crosstree();
     failures += tc_batch_perf();
     failures += tc_observation_roundtrip();
