@@ -50,3 +50,24 @@ Blue can show a meaningful transaction summary, the host and device agree
 on the exact transaction digest, and the necessary Sapling key derivation and
 RedJubjub operations have independent test vectors. The proving work remains
 on the Z23 host.
+
+## Offline Blue review app build
+
+Recorded: 2026-09-26T06:01:07-04:00 (2026-09-26T10:01:07Z)
+
+The review-only Blue app compiled with Clang 22.1.6 C23 and the ARM GCC
+16.1.1 linker against the locally reviewed Blue SDK. Its linked ELF used
+15,624 text bytes, zero initialized data bytes, and 6,132 BSS bytes
+(`arm-none-eabi-size`). The app.hex SHA-256 was
+`2a300591d5647d416a0504f7105bf4eb627a6e1ac6de63e827d919f9cacf788d`.
+Clang Debug with address and undefined-behavior sanitizers and GCC 16.1.1
+Release each passed six local host tests. The new APDU test covers the
+Blue's in-place request/reply buffer, minimal transaction parsing, state
+transitions, and bounds. No Blue USB or touchscreen test occurred while the
+owner was away.
+
+The Blue app's USB result is a structural summary, not a transaction
+approval or Sapling payment. Its fixed touchscreen does not identify the
+recipient, amount, fee, or digest. A future signing app must verify these
+details, bind the user's approval to a specific digest, and pass independent
+cryptographic vectors before it can request key operations.
