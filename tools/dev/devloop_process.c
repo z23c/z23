@@ -103,22 +103,12 @@ static bool process_run_impl(const char *cwd, int exec_fd,
 bool zcl_devloop_process_run(const char *cwd, const char *const argv[],
                              int timeout_ms,
                              struct zcl_devloop_process_result *out)
-{ return process_run_impl(cwd, -1, argv, g_process_no_env, timeout_ms, false,
-                          out); }
+{ return process_run_impl(cwd, -1, argv, g_process_no_env, timeout_ms, false, out); }
 
 bool zcl_devloop_process_run_test(const char *cwd, const char *const argv[],
                                   int timeout_ms,
                                   struct zcl_devloop_process_result *out)
-{ return process_run_impl(cwd, -1, argv, g_process_no_env, timeout_ms, true,
-                          out); }
-
-bool zcl_devloop_process_run_env(const char *cwd, const char *const argv[],
-                                 const char *const envp[], int timeout_ms,
-                                 struct zcl_devloop_process_result *out)
-{
-    return process_run_impl(cwd, -1, argv, envp ? envp : g_process_no_env,
-                            timeout_ms, false, out);
-}
+{ return process_run_impl(cwd, -1, argv, g_process_no_env, timeout_ms, true, out); }
 
 bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
                                 const char *const argv[], int timeout_ms,
@@ -892,18 +882,6 @@ bool zcl_devloop_process_run_test(const char *cwd,
                             timeout_ms, true, out);
 }
 
-bool zcl_devloop_process_run_env(const char *cwd,
-                                 const char *const argv[],
-                                 const char *const envp[], int timeout_ms,
-                                 struct zcl_devloop_process_result *out)
-{
-    if (!envp) {
-        fprintf(stderr, "[devloop] process: no child environment given\n");
-        return false;
-    }
-    return process_run_impl(cwd, -1, argv, envp, timeout_ms, false, out);
-}
-
 bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
                                 const char *const argv[], int timeout_ms,
                                 struct zcl_devloop_process_result *out)
@@ -917,3 +895,16 @@ bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
 }
 
 #endif /* _WIN32 */
+
+/* One definition for every platform: the child gets exactly `envp`. */
+bool zcl_devloop_process_run_env(const char *cwd,
+                                 const char *const argv[],
+                                 const char *const envp[], int timeout_ms,
+                                 struct zcl_devloop_process_result *out)
+{
+    if (!envp) {
+        fprintf(stderr, "[devloop] process: no child environment given\n");
+        return false;
+    }
+    return process_run_impl(cwd, -1, argv, envp, timeout_ms, false, out);
+}
