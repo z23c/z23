@@ -278,10 +278,16 @@ With a known dependency closure, the executor consults one verified host-local
 artifact cache before starting GCC. Its key binds the compiler capsule,
 compiler command, normalized
 `DEV_LIVE` flags, link flags, island owner, and the path plus SHA-256 of every
-known dependency. Checkout roots embedded in reproducibility flags normalize
-to `${WORKTREE}`; source paths in the dependency closure normalize to paths
-relative to that root. A hit is accepted only when the stored `.so` hashes to
-its separately published marker, then it is hard-linked into the requesting
+known dependency, plus (key v2, `zcl.dev_artifact_cache.hotswap.v2`) the
+action root derived before compiling from that closure: every include lookup
+that had to miss in search order, each `__has_include`/`__has_embed` name,
+the normalized argv, the allowlisted environment, and the toolchain and
+driver program bytes. A closure whose action root cannot be derived
+completely is compiled unkeyed and never shared. Checkout roots embedded in
+reproducibility flags normalize to `${WORKTREE}`; source paths in the
+dependency closure normalize to paths relative to that root. A hit is
+accepted only when the stored `.so` hashes to its separately published
+marker, then it is hard-linked into the requesting
 worktree's content-addressed build directory. A corrupt or partial entry is
 removed under a per-key process lock and rebuilt. Cache hits therefore start
 zero compiler and zero linker processes; their receipts expose

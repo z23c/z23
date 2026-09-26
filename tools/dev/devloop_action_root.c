@@ -367,9 +367,9 @@ static void ar_memo_store(const char *path, const struct ar_memo *key,
 /* __has_include, __has_include_next and __has_embed ask whether a name
  * resolves without necessarily adding it to the depfile, so the closure
  * alone cannot bind their answer. A file that spells one is re-read for the
- * names it asks about (see ar_cond_lookups_build). Length of the longest
- * word ("__has_include") minus one bytes carry across read chunks. */
-#define AR_COND_CARRY 12u
+ * names it asks about (see ar_cond_lookups_build). More than the longest
+ * word ("__has_include_next__") minus one bytes carry across read chunks. */
+#define AR_COND_CARRY 24u
 
 static bool ar_ident_char(char c)
 {
@@ -382,6 +382,7 @@ static size_t ar_cond_word(const char *text, size_t len, size_t i)
 {
     static const char *const words[] = {
         "__has_include_next", "__has_include", "__has_embed",
+        "__has_include_next__", "__has_include__",
     };
     if (text[i] != '_' || (i > 0 && ar_ident_char(text[i - 1])))
         return 0;
@@ -999,19 +1000,76 @@ static size_t ar_skip_space(const char *text, size_t len, size_t j)
     return j;
 }
 
-/* One conditional test at text[i] (word length w). A bare word (#ifdef
- * __has_include, defined(__has_include)) asks nothing; a literal "name" or
- * <name> is recorded; any other argument (a macro) cannot be bound. Returns
- * the index to resume at, or 0 on a miss. */
+/* A comment or a string/character literal opens at text[i]. A ' after an
+ * identifier character is a C23 digit separator, not a literal. */
+static bool ar_lex_opener(const char *t, size_t len, size_t i)
+{
+    if (t[i] == '"')
+        return true;
+    if (t[i] == '\'')
+        return i == 0 || !ar_ident_char(t[i - 1]);
+    return t[i] == '/' && i + 1 < len && (t[i + 1] == '*' || t[i + 1] == '/');
+}
+
+/* Index just past the comment or literal opening at text[i]. */
+static size_t ar_lex_skip(const char *t, size_t len, size_t i)
+{
+    if (t[i] == '/' && t[i + 1] == '*') {
+        for (i += 2; i + 1 < len && !(t[i] == '*' && t[i + 1] == '/'); i++) {}
+        return i + 2 < len ? i + 2 : len;
+    }
+    if (t[i] == '/') {
+        while (i < len && t[i] != '\n')
+            i += t[i] == '\\' ? 2 : 1;
+        return i < len ? i : len;
+    }
+    char quote = t[i];
+    for (i++; i < len && t[i] != quote && t[i] != '\n'; i++)
+        if (t[i] == '\\')
+            i++;
+    return i < len ? i + 1 : len;
+}
+
+/* True when the word at text[i] is only the operand of defined, #ifdef,
+ * #ifndef, #elifdef, #elifndef, #undef or #define: it asks about no name. */
+static bool ar_cond_operand_only(const char *t, size_t i)
+{
+    static const char *const ops[] = {
+        "defined", "ifdef", "ifndef", "elifdef", "elifndef", "undef", "define",
+    };
+    size_t j = i;
+    while (j > 0 && (t[j - 1] == ' ' || t[j - 1] == '\t'))
+        j--;
+    if (j > 0 && t[j - 1] == '(')
+        j--;
+    while (j > 0 && (t[j - 1] == ' ' || t[j - 1] == '\t'))
+        j--;
+    size_t end = j;
+    while (j > 0 && ar_ident_char(t[j - 1]))
+        j--;
+    for (size_t k = 0; k < sizeof(ops) / sizeof(ops[0]); k++)
+        if (end - j == strlen(ops[k]) && memcmp(t + j, ops[k], end - j) == 0)
+            return true;
+    return false;
+}
+
+/* One conditional test at text[i] (word length w). As an operand of
+ * defined / #ifdef / #define it asks nothing; called with a literal "name"
+ * or <name> it is recorded; anything else (a macro argument, the word
+ * passed through another macro) cannot be bound. Returns the index to
+ * resume at, or 0 on a miss. */
 static size_t ar_cond_test(struct ar_state *s, const char *text, size_t len,
                            size_t i, size_t w, const char *token)
 {
+    if (ar_cond_operand_only(text, i))
+        return i + w;
     size_t j = ar_skip_space(text, len, i + w);
-    if (j >= len || text[j] != '(')
-        return j;
-    j = ar_skip_space(text, len, j + 1);
-    char close = j < len && text[j] == '"' ? '"'
-               : j < len && text[j] == '<' ? '>' : 0;
+    char close = 0;
+    if (j < len && text[j] == '(') {
+        j = ar_skip_space(text, len, j + 1);
+        close = j < len && text[j] == '"' ? '"'
+              : j < len && text[j] == '<' ? '>' : 0;
+    }
     size_t start = j + 1, end = start;
     while (close && end < len && text[end] != close && text[end] != '\n')
         end++;
@@ -1021,7 +1079,26 @@ static size_t ar_cond_test(struct ar_state *s, const char *text, size_t len,
                 "conditional include test has no literal header name", token);
         return 0;
     }
-    return end;
+    return end + 1;
+}
+
+/* Walk code outside comments and literals for conditional tests. */
+static bool ar_cond_scan_text(struct ar_state *s, const char *text,
+                              size_t len, const char *token)
+{
+    size_t i = 0;
+    while (i < len) {
+        size_t w = ar_cond_word(text, len, i);
+        if (w) {
+            i = ar_cond_test(s, text, len, i, w, token);
+            if (i == 0)
+                return false;
+        } else {
+            i = ar_lex_opener(text, len, i) ? ar_lex_skip(text, len, i)
+                                            : i + 1;
+        }
+    }
+    return true;
 }
 
 /* Re-read one dependency that spells a conditional test; the bytes read
@@ -1031,23 +1108,19 @@ static bool ar_cond_scan_dep(struct ar_state *s, const struct ar_dep *d)
     size_t len = 0;
     uint8_t sha3[32];
     char *text = ar_read_all(d->fs, AR_COND_TEXT_MAX, &len);
-    bool ok = text && (d->generated
-                           ? ar_sha3_generated_text(&s->c, text, len, sha3)
-                           : (zcl_sha3_256((const unsigned char *)text, len,
-                                           sha3), true)) &&
-              memcmp(sha3, d->sha3, 32) == 0;
-    if (!ok)
+    bool ok = text != NULL;
+    if (ok && d->generated)
+        ok = ar_sha3_generated_text(&s->c, text, len, sha3);
+    else if (ok)
+        zcl_sha3_256((const unsigned char *)text, len, sha3);
+    if (!ok || memcmp(sha3, d->sha3, 32) != 0) {
         ar_fail(&s->c, "dependency_unreadable",
                 "dependency changed while its conditional tests were read",
                 d->token);
-    for (size_t i = 0; ok && i < len; i++) {
-        size_t w = ar_cond_word(text, len, i);
-        if (w) {
-            size_t next = ar_cond_test(s, text, len, i, w, d->token);
-            ok = next != 0;
-            i = next;
-        }
+        free(text);
+        return false;
     }
+    ok = ar_cond_scan_text(s, text, len, d->token);
     free(text);
     return ok;
 }

@@ -373,6 +373,64 @@ static void test_derive_shadow_and_removal(
              ok && fx_same(x, b));
 }
 
+/* A __has_include name need not enter the depfile: it is a conditional
+ * lookup probed at every includer and search dir. */
+static const char k_ar_local_cond[] =
+    "#if __has_include(\"opt.h\") && __has_include_next(<sys/opt.h>)\n"
+    "#endif\nint local(void);\n";
+
+static bool fx_cond_decodes(const struct zcl_action_root_result *r)
+{
+    struct vcs_action_preimage_v2_decoded dec = {0};
+    char why[160] = {0};
+    bool ok = vcs_action_preimage_v2_decode(r->preimage, r->preimage_len,
+                                            &dec, why, sizeof(why));
+    size_t conditional = 0;
+    for (size_t i = 0; ok && i < dec.view.lookup_count; i++)
+        if (!dec.view.lookups[i].hit_dir[0])
+            conditional++;
+    if (ok)
+        vcs_action_preimage_v2_decoded_free(&dec);
+    return ok && conditional == 2;
+}
+
+static void test_derive_conditional(struct fx *x,
+                                    const struct zcl_action_root_result *b)
+{
+    struct zcl_action_root_result cond = {0};
+    bool ok = fx_write(x->root, "src/local.h", k_ar_local_cond) &&
+              fx_differs(x, b, VCS_ACTION_FIELD_V2_SOURCE) &&
+              fx_derive(x, &cond);
+    AR_CHECK("conditional: literal __has_include names become decodable "
+             "conditional lookups", ok && fx_cond_decodes(&cond));
+    ok = ok && fx_write(x->root, "inc_b/opt.h", "#define OPT 1\n") &&
+         fx_differs(x, &cond, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP) &&
+         fx_remove(x->root, "inc_b/opt.h") && fx_same(x, &cond);
+    AR_CHECK("conditional: a header appearing where __has_include looks "
+             "moves the root though the depfile never named it", ok);
+    ok = ok && fx_write(x->root, "src/opt.h", "#define OPT 2\n") &&
+         fx_differs(x, &cond, VCS_ACTION_FIELD_V2_NEGATIVE_LOOKUP) &&
+         fx_remove(x->root, "src/opt.h") && fx_same(x, &cond);
+    AR_CHECK("conditional: a header appearing beside the includer moves the "
+             "root", ok);
+    ok = fx_write(x->root, "src/local.h",
+                  "#if __has_include(OPT_HEADER)\n#endif\n") &&
+         fx_miss(x, "conditional_lookup_unbound");
+    AR_CHECK("conditional: a macro-named __has_include misses "
+             "(conditional_lookup_unbound)", ok);
+    ok = fx_write(x->root, "src/local.h",
+                  "#ifndef __has_include\n#define __has_include(x) 1\n"
+                  "#endif\n#if defined(__has_include)\n#endif\n"
+                  "int local(void);\n") &&
+         fx_differs(x, b, VCS_ACTION_FIELD_V2_SOURCE);
+    AR_CHECK("conditional: defining or testing the word itself asks about "
+             "no name", ok);
+    ok = fx_write(x->root, "src/local.h", "int local(void);\n") &&
+         fx_same(x, b);
+    AR_CHECK("conditional: removing the tests restores the root", ok);
+    zcl_action_root_result_free(&cond);
+}
+
 /* Lookups keep inclusion order. GCC names a header once per route that
  * reached it, so a repeated path is dropped (first occurrence kept); a dir
  * in two search classes is refused. */
@@ -1000,6 +1058,7 @@ static void test_derivation(void)
         test_derive_flags(x, &base);
         test_derive_headers(x, &base);
         test_derive_shadow_and_removal(x, &base);
+        test_derive_conditional(x, &base);
         test_derive_lookups(x, &base);
         test_derive_sysroot(x, &base);
         test_derive_linker(x, &base);

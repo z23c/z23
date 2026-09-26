@@ -42,6 +42,7 @@
 #if !defined(_WIN32)
 #include <poll.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #endif
 #if defined(__APPLE__)
@@ -3262,7 +3263,7 @@ static int test_distill_first_error(void)
 }
 
 static bool dp_hotswap_cache_fixture_init(const char *root,
-                                          const char *compiler)
+                                          const char *compiler_text)
 {
     static const char owner_v1[] =
         "int zcl_hotswap_fixture_owner(void) { return 1; }\n";
@@ -3297,11 +3298,17 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
                      "int zcl_hotswap_fixture_economics(void) { return 4; }\n") ||
         !dp_mk_write(root,
                      "contexts/commons/services/src/zcode_c23_economics_internal.h",
-                     "#define ZCL_ECONOMICS_FIXTURE 4\n"))
+                     "#define ZCL_ECONOMICS_FIXTURE 4\n") ||
+        /* The compiler lives in the checkout, as the real plan's zcc does, so
+         * the action root the cache key binds spells it @root/tools/... */
+        !dp_mk_write(root, "tools/fake_cc.sh", compiler_text))
         return false;
-    char canonical_root[PATH_MAX];
+    char canonical_root[PATH_MAX], compiler[PATH_MAX];
     if (!platform_directory_canonical_real(root, canonical_root,
-                                           sizeof(canonical_root)))
+                                           sizeof(canonical_root)) ||
+        snprintf(compiler, sizeof(compiler), "%s/tools/fake_cc.sh",
+                 canonical_root) >= (int)sizeof(compiler) ||
+        chmod(compiler, 0700) != 0)
         return false;
     char flags[PATH_MAX * 2];
     int n = snprintf(
@@ -3336,8 +3343,15 @@ static bool dp_second_checkout_hit_is_single_link(
         strcmp(cross->artifact_cache_key, built->artifact_cache_key) != 0 ||
         strcmp(cross->artifact_sha256, built->artifact_sha256) != 0 ||
         strcmp(cross->candidate_object_sha256,
-               built->candidate_object_sha256) != 0)
+               built->candidate_object_sha256) != 0) {
+        fprintf(stderr,
+                "cross-checkout: hit=%d cc=%u ld=%u root=%s/%s miss=%s/%s\n",
+                cross->artifact_cache_hit ? 1 : 0, cross->compiler_processes,
+                cross->linker_processes, built->cache_key_action_root,
+                cross->cache_key_action_root, built->cache_key_miss,
+                cross->cache_key_miss);
         return false;
+    }
     struct stat cross_st = {0};
     return stat(cross->artifact_path, &cross_st) == 0 &&
            cross_st.st_nlink == 1 &&
@@ -3376,6 +3390,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
     static const char fake_compiler[] =
         "#!/usr/bin/env bash\n"
         "set -eu\n"
+        "case \" $* \" in *\" -E \"*|*\" -print-\"*) exec cc \"$@\" ;; esac\n"
         "out= dep= source= compile=0\n"
         "while [ \"$#\" -gt 0 ]; do\n"
         "  case \"$1\" in\n"
@@ -3435,10 +3450,8 @@ static bool run_hotswap_artifact_cache_fixture(void)
     test_rm_rf_recursive(root_b);
     test_rm_rf_recursive(cache_rel);
     (void)unlink(compiler_rel);
-    if (!dp_mk_write(".", compiler_rel, fake_compiler) ||
-        chmod(compiler_rel, 0700) != 0 ||
-        !dp_hotswap_cache_fixture_init(root_a, compiler) ||
-        !dp_hotswap_cache_fixture_init(root_b, compiler) ||
+    if (!dp_hotswap_cache_fixture_init(root_a, fake_compiler) ||
+        !dp_hotswap_cache_fixture_init(root_b, fake_compiler) ||
         platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) != 0 ||
         platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0 ||
         platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0)
@@ -3611,11 +3624,397 @@ out:
     return ok;
 }
 
+/* ---- the cache key binds the action root (F1-F3 falsification) ---------
+ *
+ * A real compiler (behind a wrapper script so its bytes can change at the
+ * same path) builds one service owner whose object encodes every input the
+ * v1 key missed. Each change below MUST miss, and the object it rebuilds
+ * MUST equal a fresh independent build (empty cache, no baseline) of the
+ * same tree; reverting it MUST hit the original entry again. Controls: an
+ * edit reverted to identical bytes and the same tree in a second worktree
+ * hit. A hit anywhere a change was pending fails the fixture. */
+
+#define DP_AR_OWNER "contexts/commons/services/src/zcode_c23_economics_service.c"
+#define DP_AR_BASELINE \
+    "build/hotswap-fast/contexts_commons_services_src_zcode_c23_economics_service.c.d"
+
+static const char g_dp_ar_source[] =
+    "#include \"fx_value.h\"\n"
+    "#include \"fx_types.h\"\n"
+    "#if __has_include(\"fx_optional.h\")\n"
+    "#include \"fx_optional.h\"\n"
+    "#endif\n"
+    "#ifndef FX_OPTIONAL\n#define FX_OPTIONAL 0\n#endif\n"
+    "#ifndef ZCL_FX_FLAG\n#define ZCL_FX_FLAG 0\n#endif\n"
+    "#ifndef ZCL_FX_WRAP\n#define ZCL_FX_WRAP 0\n#endif\n"
+    "int zcl_hotswap_fixture_economics(void);\n"
+    "int zcl_hotswap_fixture_economics(void)\n"
+    "{\n"
+    "    struct fx_pair p = { 1, 2 };\n"
+    "    return p.first * 10000 + FX_VALUE * 1000 + FX_OPTIONAL * 100 +\n"
+    "           ZCL_FX_FLAG * 10 + ZCL_FX_WRAP;\n"
+    "}\n";
+static const char g_dp_ar_types[] = "struct fx_pair { int first; int second; };\n";
+static const char g_dp_ar_value[] = "#define FX_VALUE 2\n";
+static const char g_dp_ar_cc_v1[] = "#!/bin/sh\nexec cc \"$@\"\n";
+static const char g_dp_ar_cc_v2[] = "#!/bin/sh\nexec cc -DZCL_FX_WRAP=1 \"$@\"\n";
+
+struct dp_ar_fx {
+    char root_a[PATH_MAX], root_b[PATH_MAX];
+    char cache_rel[PATH_MAX], cache[PATH_MAX];
+    char fresh_rel[PATH_MAX], fresh[PATH_MAX];
+    char base_key[65], base_object[65];
+    unsigned fresh_n;
+    char why[256];
+};
+
+static int64_t dp_ar_cpu_us(void)
+{
+    struct rusage self = {0}, kids = {0};
+    (void)getrusage(RUSAGE_SELF, &self);
+    (void)getrusage(RUSAGE_CHILDREN, &kids);
+    const struct timeval *tv[] = { &self.ru_utime, &self.ru_stime,
+                                   &kids.ru_utime, &kids.ru_stime };
+    int64_t us = 0;
+    for (size_t i = 0; i < sizeof(tv) / sizeof(tv[0]); i++)
+        us += (int64_t)tv[i]->tv_sec * 1000000 + tv[i]->tv_usec;
+    return us;
+}
+
+/* The compiler wrapper lives in the checkout, as the real plan's zcc does:
+ * the action root spells it @root/tools/fx-cc.sh in every worktree. */
+static bool dp_ar_write_cc(const char *root, const char *text)
+{
+    char path[PATH_MAX];
+    return snprintf(path, sizeof(path), "%s/tools/fx-cc.sh", root) <
+               (int)sizeof(path) &&
+           dp_mk_write(root, "tools/fx-cc.sh", text) && chmod(path, 0700) == 0;
+}
+
+static bool dp_ar_flags(const char *root, const char *extra)
+{
+    char canonical[PATH_MAX], flags[PATH_MAX * 3];
+    if (!platform_directory_canonical_real(root, canonical, sizeof(canonical)))
+        return false;
+    int n = snprintf(
+        flags, sizeof(flags),
+        "CC=%s/tools/fx-cc.sh\nCXX=g++\n"
+        "COMPILER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "DEV_CFLAGS=-DZCL_DEV_BUILD -std=c23 -O1 -Iinc_early -Iinc_late "
+        "-ffile-prefix-map=%s=/zclassic23%s\n"
+        "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
+        canonical, canonical, extra);
+    return n > 0 && n < (int)sizeof(flags) &&
+           dp_mk_write(root, "build/hotswap-fast/flags.env", flags);
+}
+
+static bool dp_ar_init(const char *root)
+{
+    static const char *const defs[] = {
+        "engine/composition/hotswap_swappable.def",
+        "engine/composition/hotswap_islands.def",
+        "engine/composition/hotswap_services.def",
+        "engine/composition/hotswap_shadow_owners.def",
+        "engine/composition/hotfork_capsules.def",
+    };
+    char early[PATH_MAX];
+    bool ok = dp_mk_write(root, "Makefile", "# fixture\n") &&
+              dp_mk_write(root, DP_AR_OWNER, g_dp_ar_source) &&
+              dp_mk_write(root, "inc_late/fx_value.h", g_dp_ar_value) &&
+              dp_mk_write(root, "inc_late/fx_types.h", g_dp_ar_types) &&
+              snprintf(early, sizeof(early), "%s/inc_early", root) <
+                  (int)sizeof(early) &&
+              platform_directory_create(early, 0755) == 0;
+    for (size_t i = 0; ok && i < sizeof(defs) / sizeof(defs[0]); i++)
+        ok = dp_mk_write(root, defs[i], "/* fixture */\n");
+    return ok && dp_ar_write_cc(root, g_dp_ar_cc_v1) &&
+           dp_ar_flags(root, "");
+}
+
+static bool dp_ar_paths(struct dp_ar_fx *fx)
+{
+    char cwd[PATH_MAX];
+    long pid = (long)getpid();
+    return getcwd(cwd, sizeof(cwd)) &&
+           snprintf(fx->root_a, PATH_MAX, "test-tmp/dev_hotswap_ar_a_%ld",
+                    pid) < PATH_MAX &&
+           snprintf(fx->root_b, PATH_MAX, "test-tmp/dev_hotswap_ar_b_%ld",
+                    pid) < PATH_MAX &&
+           snprintf(fx->cache_rel, PATH_MAX, "test-tmp/dev_hotswap_ar_cache_%ld",
+                    pid) < PATH_MAX &&
+           snprintf(fx->fresh_rel, PATH_MAX, "test-tmp/dev_hotswap_ar_fresh_%ld",
+                    pid) < PATH_MAX &&
+           snprintf(fx->cache, PATH_MAX, "%s/%s", cwd, fx->cache_rel) <
+               PATH_MAX &&
+           snprintf(fx->fresh, PATH_MAX, "%s/%s", cwd, fx->fresh_rel) <
+               PATH_MAX;
+}
+
+/* One save. The first save after the include topology moved refuses (the
+ * compiled closure is not the keyed baseline; nothing is published) and the
+ * next save builds: at most two attempts, every attempt's hit reported. */
+static bool dp_ar_save(struct dp_ar_fx *fx, const char *root,
+                       struct zcl_devloop_hotswap_build_receipt *out,
+                       bool *any_hit, int *attempts)
+{
+    struct zcl_devloop_process_result process = {0};
+    for (int i = 0; i < 2; i++) {
+        memset(out, 0, sizeof(*out));
+        fx->why[0] = '\0';
+        bool ok = zcl_devloop_hotswap_build(root, DP_AR_OWNER, out, &process,
+                                            fx->why, sizeof(fx->why));
+        *any_hit |= out->artifact_cache_hit;
+        (*attempts)++;
+        if (ok)
+            return true;
+        if (!strstr(fx->why, "dependency closure size changed") &&
+            !strstr(fx->why, "dependency baseline learned new input"))
+            return false;
+    }
+    return false;
+}
+
+/* The same tree built from nothing: an empty cache and no baseline. */
+static bool dp_ar_fresh(struct dp_ar_fx *fx, char object[65])
+{
+    char dir[PATH_MAX], baseline[PATH_MAX];
+    struct zcl_devloop_hotswap_build_receipt r = {0};
+    bool hit = false;
+    int attempts = 0;
+    if (snprintf(dir, sizeof(dir), "%s_%u", fx->fresh, fx->fresh_n++) >=
+            (int)sizeof(dir) ||
+        snprintf(baseline, sizeof(baseline), "%s/%s", fx->root_a,
+                 DP_AR_BASELINE) >= (int)sizeof(baseline) ||
+        platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", dir, 1) != 0)
+        return false;
+    (void)unlink(baseline);
+    bool ok = dp_ar_save(fx, fx->root_a, &r, &hit, &attempts) && !hit &&
+              attempts == 1 && r.compiler_processes == 2;
+    (void)snprintf(object, 65, "%s", r.candidate_object_sha256);
+    return platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", fx->cache, 1) ==
+               0 && ok;
+}
+
+static uint64_t dp_ar_reused_bytes(const struct dp_ar_fx *fx, const char *key)
+{
+    static const char *const ext[] = { "o", "so" };
+    uint64_t bytes = 0;
+    for (size_t i = 0; i < 2; i++) {
+        char path[PATH_MAX];
+        struct stat st;
+        if (snprintf(path, sizeof(path), "%s/hotswap-v1/%s.%s", fx->cache, key,
+                     ext[i]) < (int)sizeof(path) && stat(path, &st) == 0)
+            bytes += (uint64_t)st.st_size;
+    }
+    return bytes;
+}
+
+static void dp_ar_report(const struct dp_ar_fx *fx, const char *step,
+                         const struct zcl_devloop_hotswap_build_receipt *r,
+                         int attempts, int64_t wall_us, int64_t cpu_us)
+{
+    printf("    cache: step=%s hit=%d attempts=%d keyed=%d cc=%u ld=%u "
+           "key_us=%lld build_us=%lld wall_us=%lld cpu_us=%lld "
+           "reused_bytes=%llu\n",
+           step, r->artifact_cache_hit ? 1 : 0, attempts,
+           r->cache_key_action_root[0] ? 1 : 0, r->compiler_processes,
+           r->linker_processes, (long long)r->cache_key_us,
+           (long long)r->total_us, (long long)wall_us, (long long)cpu_us,
+           (unsigned long long)(r->artifact_cache_hit
+                                    ? dp_ar_reused_bytes(fx,
+                                                         r->artifact_cache_key)
+                                    : 0));
+}
+
+static bool dp_ar_measured_save(struct dp_ar_fx *fx, const char *root,
+                                const char *step,
+                                struct zcl_devloop_hotswap_build_receipt *r,
+                                bool *any_hit)
+{
+    int attempts = 0;
+    int64_t wall = platform_time_monotonic_us(), cpu = dp_ar_cpu_us();
+    bool ok = dp_ar_save(fx, root, r, any_hit, &attempts);
+    dp_ar_report(fx, step, r, attempts, platform_time_monotonic_us() - wall,
+                 dp_ar_cpu_us() - cpu);
+    return ok;
+}
+
+struct dp_ar_step {
+    const char *name;
+    const char *rel;     /* file the change writes (NULL: none) */
+    const char *changed; /* its changed text (NULL: the file appears) */
+    const char *base;    /* its original text (NULL: the file is removed) */
+    const char *flags;   /* extra DEV_CFLAGS (NULL: unchanged) */
+    const char *cc;      /* wrapper text (NULL: unchanged) */
+};
+
+static bool dp_ar_set(struct dp_ar_fx *fx, const struct dp_ar_step *st,
+                      bool changed)
+{
+    if (st->flags)
+        return dp_ar_flags(fx->root_a, changed ? st->flags : "");
+    if (st->cc)
+        return dp_ar_write_cc(fx->root_a, changed ? st->cc : g_dp_ar_cc_v1);
+    const char *text = changed ? st->changed : st->base;
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", fx->root_a, st->rel) >=
+        (int)sizeof(path))
+        return false;
+    if (text)
+        return dp_mk_write(fx->root_a, st->rel, text);
+    return unlink(path) == 0;
+}
+
+/* The change misses with a moved key and rebuilds the fresh object; its
+ * revert hits the original entry. */
+static bool dp_ar_falsify(struct dp_ar_fx *fx, const struct dp_ar_step *st)
+{
+    struct zcl_devloop_hotswap_build_receipt r = {0};
+    bool hit = false;
+    char fresh[65] = {0}, label[96];
+    (void)snprintf(label, sizeof(label), "%s", st->name);
+    bool ok = dp_ar_set(fx, st, true) &&
+              dp_ar_measured_save(fx, fx->root_a, label, &r, &hit) && !hit &&
+              r.cache_key_action_root[0] &&
+              strcmp(r.artifact_cache_key, fx->base_key) != 0 &&
+              strcmp(r.candidate_object_sha256, fx->base_object) != 0 &&
+              dp_ar_fresh(fx, fresh) &&
+              strcmp(fresh, r.candidate_object_sha256) == 0;
+    printf("    falsify: %s miss=%s object=%.12s fresh=%.12s -> %s\n",
+           st->name, hit ? "NO" : "yes", r.candidate_object_sha256, fresh,
+           ok ? "PASS" : "FAIL");
+    if (!ok)
+        return false;
+    (void)snprintf(label, sizeof(label), "%s-revert", st->name);
+    hit = false;
+    ok = dp_ar_set(fx, st, false) &&
+         dp_ar_measured_save(fx, fx->root_a, label, &r, &hit) &&
+         r.artifact_cache_hit &&
+         strcmp(r.artifact_cache_key, fx->base_key) == 0 &&
+         strcmp(r.candidate_object_sha256, fx->base_object) == 0;
+    printf("    control: %s hit=%s -> %s\n", label,
+           r.artifact_cache_hit ? "yes" : "NO", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static const struct dp_ar_step g_dp_ar_steps[] = {
+    { "F2-optional-header-appears", "inc_late/fx_optional.h",
+      "#define FX_OPTIONAL 1\n", NULL, NULL, NULL },
+    { "F3-same-name-earlier-in-I", "inc_early/fx_value.h",
+      "#define FX_VALUE 3\n", NULL, NULL, NULL },
+    { "public-struct-field-change", "inc_late/fx_types.h",
+      "struct fx_pair { int second; int first; };\n", g_dp_ar_types, NULL,
+      NULL },
+    { "macro-value-change", "inc_late/fx_value.h", "#define FX_VALUE 5\n",
+      g_dp_ar_value, NULL, NULL },
+    { "F1-added-D-flag", NULL, NULL, NULL, " -DZCL_FX_FLAG=1", NULL },
+    { "compiler-bytes-same-path", NULL, NULL, NULL, NULL, g_dp_ar_cc_v2 },
+};
+
+/* Base build, an unchanged save, an edit reverted to identical bytes, and
+ * the same tree in a second worktree. */
+static bool dp_ar_controls(struct dp_ar_fx *fx)
+{
+    struct zcl_devloop_hotswap_build_receipt r = {0};
+    bool hit = false;
+    if (!dp_ar_measured_save(fx, fx->root_a, "cold", &r, &hit) || hit ||
+        !r.cache_key_action_root[0] || r.compiler_processes != 2)
+        return false;
+    (void)snprintf(fx->base_key, sizeof(fx->base_key), "%s",
+                   r.artifact_cache_key);
+    (void)snprintf(fx->base_object, sizeof(fx->base_object), "%s",
+                   r.candidate_object_sha256);
+    if (!dp_ar_measured_save(fx, fx->root_a, "unchanged", &r, &hit) ||
+        !r.artifact_cache_hit || r.compiler_processes != 0 ||
+        r.linker_processes != 0)
+        return false;
+    char edited[sizeof(g_dp_ar_source) + 8];
+    (void)snprintf(edited, sizeof(edited), "%s", g_dp_ar_source);
+    char *body = strstr(edited, "ZCL_FX_WRAP;");
+    if (!body)
+        return false;
+    memcpy(body, "ZCL_FX_WRAP+7;", 14);
+    (void)snprintf(body + 14, sizeof(edited) - (size_t)(body - edited) - 14,
+                   "\n}\n");
+    hit = false;
+    if (!dp_mk_write(fx->root_a, DP_AR_OWNER, edited) ||
+        !dp_ar_measured_save(fx, fx->root_a, "private-edit", &r, &hit) || hit ||
+        strcmp(r.artifact_cache_key, fx->base_key) == 0 ||
+        !dp_mk_write(fx->root_a, DP_AR_OWNER, g_dp_ar_source) ||
+        !dp_ar_measured_save(fx, fx->root_a, "private-edit-revert", &r, &hit) ||
+        !r.artifact_cache_hit || strcmp(r.artifact_cache_key, fx->base_key) != 0)
+        return false;
+    printf("    control: private-edit-revert hit=yes -> PASS\n");
+    bool ok = dp_ar_measured_save(fx, fx->root_b, "second-worktree", &r, &hit) &&
+              r.artifact_cache_hit && r.compiler_processes == 1 &&
+              r.linker_processes == 0 &&
+              strcmp(r.artifact_cache_key, fx->base_key) == 0 &&
+              strcmp(r.candidate_object_sha256, fx->base_object) == 0;
+    printf("    control: second-worktree hit=%s -> %s\n",
+           r.artifact_cache_hit ? "yes" : "NO", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static void dp_ar_cleanup(const struct dp_ar_fx *fx)
+{
+    test_rm_rf_recursive(fx->root_a);
+    test_rm_rf_recursive(fx->root_b);
+    test_rm_rf_recursive(fx->cache_rel);
+    for (unsigned i = 0; i < fx->fresh_n; i++) {
+        char dir[PATH_MAX];
+        if (snprintf(dir, sizeof(dir), "%s_%u", fx->fresh_rel, i) <
+            (int)sizeof(dir))
+            test_rm_rf_recursive(dir);
+    }
+}
+
+static bool run_hotswap_action_root_key_fixture(void)
+{
+    struct dp_ar_fx fx = {0};
+    char saved_cache[PATH_MAX] = {0}, saved_process[32] = {0};
+    const char *prior_cache = getenv("ZCL_DEV_ARTIFACT_CACHE");
+    const char *prior_process = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    bool had_cache = prior_cache && prior_cache[0];
+    bool had_process = prior_process && prior_process[0];
+    if (had_cache)
+        (void)snprintf(saved_cache, sizeof(saved_cache), "%s", prior_cache);
+    if (had_process)
+        (void)snprintf(saved_process, sizeof(saved_process), "%s",
+                       prior_process);
+    if (!dp_ar_paths(&fx))
+        return false;
+    dp_ar_cleanup(&fx);
+    bool ok = dp_ar_init(fx.root_a) && dp_ar_init(fx.root_b) &&
+              platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", fx.cache, 1) ==
+                  0 &&
+              platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+              dp_ar_controls(&fx);
+    for (size_t i = 0;
+         ok && i < sizeof(g_dp_ar_steps) / sizeof(g_dp_ar_steps[0]); i++)
+        ok = dp_ar_falsify(&fx, &g_dp_ar_steps[i]);
+    if (!ok)
+        fprintf(stderr, "hotswap action-root key fixture failed: %s\n",
+                fx.why[0] ? fx.why : "no build reason");
+    if (had_cache)
+        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
+    else
+        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
+    if (had_process)
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
+    else
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
+    dp_ar_cleanup(&fx);
+    return ok;
+}
+
 static int test_hotswap_artifact_cache(void)
 {
     int failures = 0;
     TEST("dev platform: resident artifacts are exact-input cached across edits and worktrees") {
         ASSERT(run_hotswap_artifact_cache_fixture());
+        /* The key binds the action root: include topology, flag and
+         * compiler changes miss; exact reverts and a second worktree hit. */
+        ASSERT(run_hotswap_action_root_key_fixture());
         PASS();
     } _test_next:;
     return failures;
@@ -5438,20 +5837,86 @@ static bool dp_hf_slurp(const char *path, char *buf, size_t cap)
     return whole && n > 0;
 }
 
+static bool dp_hf_copy_file(const char *src, const char *dst)
+{
+    static char buf[65536];
+    FILE *in = fopen(src, "rb");
+    FILE *out = in ? fopen(dst, "wb") : NULL;
+    bool ok = in && out;
+    size_t n;
+    while (ok && (n = fread(buf, 1, sizeof(buf), in)) > 0)
+        ok = fwrite(buf, 1, n, out) == n;
+    ok = ok && !ferror(in);
+    if (out && fclose(out) != 0)
+        ok = false;
+    if (in)
+        fclose(in);
+    return ok;
+}
+
+static bool dp_hf_mkdirs(const char *path)
+{
+    char tmp[PATH_MAX];
+    if (snprintf(tmp, sizeof(tmp), "%s", path) >= (int)sizeof(tmp))
+        return false;
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        bool ok = platform_directory_ensure(tmp, 0755);
+        *p = '/';
+        if (!ok)
+            return false;
+    }
+    return platform_directory_ensure(tmp, 0755);
+}
+
+/* Copy one checked-in tree (regular files and real directories only) into
+ * the fixture root, so every header the compile reads lies inside the
+ * checkout its action root is derived for. */
+static bool dp_hf_copy_tree(const char *src, const char *dst)
+{
+    struct platform_directory_list dirs = {0}, files = {0};
+    if (!platform_directory_ensure(dst, 0755) ||
+        !platform_directory_list_children_sorted(src, &dirs, &files))
+        return false;
+    bool ok = true;
+    for (size_t pass = 0; pass < 2; pass++) {
+        const struct platform_directory_list *l = pass ? &dirs : &files;
+        for (size_t i = 0; ok && i < l->count; i++) {
+            char from[PATH_MAX], to[PATH_MAX];
+            ok = snprintf(from, sizeof(from), "%s/%s", src,
+                          l->entries[i].name) < (int)sizeof(from) &&
+                 snprintf(to, sizeof(to), "%s/%s", dst, l->entries[i].name) <
+                     (int)sizeof(to) &&
+                 (pass ? dp_hf_copy_tree(from, to)
+                       : dp_hf_copy_file(from, to));
+        }
+    }
+    platform_directory_list_free(&dirs);
+    platform_directory_list_free(&files);
+    return ok;
+}
+
 static bool dp_hf_fixture_init(const char *cwd, const char *owner,
                                const char *story)
 {
+    /* The include trees are copied in: an include dir outside the fixture
+     * checkout has no action root, so the cache key would be refused. */
+    static const char *const includes[] = {
+        "engine/modules/hotswap/include",
+        "contexts/commons/modules/vcs/include",
+        "platform/modules/base/include",
+    };
     char flags[PATH_MAX * 4];
     int n = snprintf(
         flags, sizeof(flags),
         "CC=cc\nCXX=g++\n"
         "COMPILER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "DEV_CFLAGS=-DZCL_DEV_BUILD -std=c23 -Wall -Wextra -Werror -pedantic"
-        " -I%s/engine/modules/hotswap/include"
-        " -I%s/contexts/commons/modules/vcs/include"
-        " -I%s/platform/modules/base/include\n"
+        " -I%s -I%s -I%s\n"
         "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
-        cwd, cwd, cwd);
+        includes[0], includes[1], includes[2]);
     static const char *const defs[] = {
         "engine/composition/hotswap_swappable.def",
         "engine/composition/hotswap_islands.def",
@@ -5463,6 +5928,14 @@ static bool dp_hf_fixture_init(const char *cwd, const char *owner,
         dp_mk_write(k_dp_hf_root, "Makefile", "# fixture\n");
     for (size_t i = 0; ok && i < sizeof(defs) / sizeof(defs[0]); i++)
         ok = dp_mk_write(k_dp_hf_root, defs[i], "/* fixture */\n");
+    for (size_t i = 0; ok && i < sizeof(includes) / sizeof(includes[0]); i++) {
+        char from[PATH_MAX], to[PATH_MAX];
+        ok = snprintf(from, sizeof(from), "%s/%s", cwd, includes[i]) <
+                 (int)sizeof(from) &&
+             snprintf(to, sizeof(to), "%s/%s", k_dp_hf_root, includes[i]) <
+                 (int)sizeof(to) &&
+             dp_hf_mkdirs(to) && dp_hf_copy_tree(from, to);
+    }
     /* The action plan is written last so it is never older than its inputs. */
     return ok && dp_mk_write(k_dp_hf_root, k_dp_hf_owner, owner) &&
            dp_mk_write(k_dp_hf_root, k_dp_hf_story, story) &&

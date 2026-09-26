@@ -809,8 +809,16 @@ static bool hs_cache_key(const struct hs_action_plan *plan,
      * earlier in the search order served a stale object; they never hit. */
     static const char domain[] = "zcl.dev_artifact_cache.hotswap.v2";
     char normalized_cflags[HS_PLAN_TEXT_MAX], action_root[65];
+    char normalized_cc[sizeof(plan->cc) + 64];
+    char normalized_ldflags[sizeof(plan->ldflags) + 64];
+    /* A driver inside the checkout (build/bin/zcc) is spelled per worktree;
+     * its bytes are bound by the action root, so its spelling normalizes. */
     if (!hs_normalize_root(plan->cflags, root, normalized_cflags,
                            sizeof(normalized_cflags)) ||
+        !hs_normalize_root(plan->cc, root, normalized_cc,
+                           sizeof(normalized_cc)) ||
+        !hs_normalize_root(plan->ldflags, root, normalized_ldflags,
+                           sizeof(normalized_ldflags)) ||
         !hs_cache_key_root(plan, root, action, receipt, action_root))
         return false;
     struct sha256_ctx ctx;
@@ -820,10 +828,11 @@ static bool hs_cache_key(const struct hs_action_plan *plan,
     hs_key_field(&ctx, "action_root", action_root, strlen(action_root));
     hs_key_field(&ctx, "compiler", plan->compiler_id,
                  strlen(plan->compiler_id));
-    hs_key_field(&ctx, "cc", plan->cc, strlen(plan->cc));
+    hs_key_field(&ctx, "cc", normalized_cc, strlen(normalized_cc));
     hs_key_field(&ctx, "cflags", normalized_cflags,
                  strlen(normalized_cflags));
-    hs_key_field(&ctx, "ldflags", plan->ldflags, strlen(plan->ldflags));
+    hs_key_field(&ctx, "ldflags", normalized_ldflags,
+                 strlen(normalized_ldflags));
     hs_key_field(&ctx, "owner", owner, strlen(owner));
     for (size_t i = 0; i < dep_count; i++) {
         const char *path = deps[i].path;
