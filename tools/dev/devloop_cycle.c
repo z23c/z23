@@ -1082,16 +1082,22 @@ static int finish_cycle(const struct zcl_devloop_plan *plan,
     body[len++] = '\n';
     body[len] = 0;
     char state_why[160] = {0};
-    bool state_persisted = true;
+    /* True once the verdict reached the stream dev.status reads. Inside a
+     * resident watcher that means published to the ring (not fsynced) and
+     * handed to the sealer, which journals it durably off this path; if the
+     * sealer dies first, the next restart seals it from the ring, or names
+     * its epoch as lost when the slot was overwritten or the host lost power.
+     * Elsewhere it means journaled durably before returning. */
+    bool state_published = true;
     if (repo_root && repo_root[0])
-        state_persisted = zcl_devloop_cycle_state_write(
+        state_published = zcl_devloop_cycle_state_write(
             repo_root, body, len, state_why, sizeof(state_why));
-    if (!state_persisted) {
+    if (!state_published) {
         fprintf(stderr,
-                "[devloop] could not persist native cycle verdict: %s\n",
+                "[devloop] could not publish native cycle verdict: %s\n",
                 state_why[0] ? state_why : "unknown");
-        /* Never print a passing current-cycle claim when durable publication
-         * failed and dev.status would still expose the prior generation. */
+        /* Never print a passing current-cycle claim when publication failed
+         * and dev.status would still expose the prior generation. */
         size_t pos = 0;
         if (!appendf(body, sizeof(body) - 2, &pos,
                      "{\"schema\":\"zcl.dev_cycle.v1\","
@@ -1121,7 +1127,7 @@ static int finish_cycle(const struct zcl_devloop_plan *plan,
     }
     fwrite(body, 1, len, stdout);
     fflush(stdout);
-    int rc = state_persisted && strcmp(status, "passed") == 0 ? 0 : 1;
+    int rc = state_published && strcmp(status, "passed") == 0 ? 0 : 1;
 #ifdef ZCL_DEV_BUILD
     cycle_failure_reset();
 #endif

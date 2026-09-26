@@ -1176,12 +1176,27 @@ static bool cycle_record_stage(int dirfd, const char *body, size_t body_len,
     return ok;
 }
 
-#if !defined(_WIN32)
-/* An atomic rename that refuses an existing destination. Hosts without one
- * refuse outright rather than fall back to a rename that could clobber. */
-static int cycle_rename_noreplace(int fromfd, const char *from, int tofd,
-                                  const char *to)
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static bool g_record_test_force_link;
+
+void zcl_devloop_cycle_stream_test_force_link(bool on)
 {
+    g_record_test_force_link = on;
+}
+#elif defined(ZCL_TESTING)
+void zcl_devloop_cycle_stream_test_force_link(bool on) { (void)on; }
+#endif
+
+#if !defined(_WIN32)
+static int cycle_rename_noreplace_native(int fromfd, const char *from,
+                                         int tofd, const char *to)
+{
+#if defined(ZCL_TESTING)
+    if (g_record_test_force_link) {
+        errno = EINVAL;
+        return -1;
+    }
+#endif
 #if defined(__linux__)
     return renameat2(fromfd, from, tofd, to, RENAME_NOREPLACE);
 #elif defined(__APPLE__)
@@ -1191,16 +1206,33 @@ static int cycle_rename_noreplace(int fromfd, const char *from, int tofd,
     (void)from;
     (void)tofd;
     (void)to;
-    errno = ENOTSUP;
+    errno = ENOSYS;
     return -1;
 #endif
+}
+
+/* An atomic rename that refuses an existing destination. A filesystem
+ * without one (EINVAL or ENOSYS: NFS, eCryptfs, some FUSE mounts) gets
+ * link() then unlink(): link() refuses an existing name the same way, and a
+ * writer killed between the two leaves a staging link that the next heal
+ * sweeps before it trusts the event. */
+static int cycle_rename_noreplace(int fromfd, const char *from, int tofd,
+                                  const char *to)
+{
+    if (cycle_rename_noreplace_native(fromfd, from, tofd, to) == 0)
+        return 0;
+    if (errno != EINVAL && errno != ENOSYS)
+        return -1;
+    if (linkat(fromfd, from, tofd, to, 0) != 0)
+        return -1;
+    (void)unlinkat(fromfd, from, 0);
+    return 0;
 }
 #endif
 
 /* A journal event appears under its final name only complete and durable,
  * in one step: a no-replace rename refuses an existing name exactly as
- * O_EXCL did and leaves no second link to the event behind. The latest
- * pointer is replaced atomically by rename. */
+ * O_EXCL did. The latest pointer is replaced atomically by rename. */
 static bool cycle_record_publish_named(int dirfd, const char *name,
                                        const char *body, size_t body_len,
                                        bool replace)
@@ -1211,20 +1243,22 @@ static bool cycle_record_publish_named(int dirfd, const char *name,
     bool ok = replace
         ? renameat(dirfd, temp, dirfd, name) == 0
         : cycle_rename_noreplace(dirfd, temp, dirfd, name) == 0;
-    if (!ok)
+    if (!ok) {
+        int saved = errno;
         (void)unlinkat(dirfd, temp, 0);
+        errno = saved;
+    }
     return ok;
 }
 
 /* Under the cycle lock every writer's staged record is published or gone,
  * so any `.cycle.*.tmp` left in `dirfd` belongs to a writer that died. It
- * is removed; an older build that linked records also left a second link to
- * a sealed event this way, which the event's single-link check refuses
- * until the leftover is gone. */
+ * is removed; one can be a second link to a sealed event, which the event's
+ * single-link check refuses until the leftover is gone. */
 static void cycle_temps_sweep(int dirfd)
 {
 #if !defined(_WIN32)
-    int scan_fd = dirfd >= 0 ? dup(dirfd) : -1;
+    int scan_fd = dirfd >= 0 ? fcntl(dirfd, F_DUPFD_CLOEXEC, 0) : -1;
     DIR *dir = scan_fd >= 0 ? fdopendir(scan_fd) : NULL;
     if (!dir) {
         if (scan_fd >= 0)
@@ -1234,8 +1268,11 @@ static void cycle_temps_sweep(int dirfd)
     for (struct dirent *e = readdir(dir); e; e = readdir(dir)) {
         size_t len = strlen(e->d_name);
         if (len > 11 && strncmp(e->d_name, ".cycle.", 7) == 0 &&
-            strcmp(e->d_name + len - 4, ".tmp") == 0)
-            (void)unlinkat(dirfd, e->d_name, 0);
+            strcmp(e->d_name + len - 4, ".tmp") == 0 &&
+            unlinkat(dirfd, e->d_name, 0) != 0)
+            fprintf(stderr, "[devloop] could not remove stale journal "
+                            "staging file %s: %s\n",
+                    e->d_name, strerror(errno));
     }
     (void)closedir(dir);
 #else
@@ -1266,33 +1303,54 @@ static bool cycle_pointer_publish(int dirfd, const char *body,
            fsync(dirfd) == 0;
 }
 
-/* Under the cycle lock: if a sealer died inside a batch, the pointer is
- * behind the journal. Each journal event is immutable and verified here, so
- * the pointer takes the tail event's exact bytes. */
-static bool cycle_pointer_heal_locked(int dirfd, const char *workspace)
+/* Walks the journal from `from` to its last contiguous event. */
+static enum zcl_devloop_state_lookup cycle_journal_tail_walk(
+    int events_fd, const char *workspace, int64_t from, int64_t *tail)
 {
     char canonical[CYCLE_CANONICAL_MAX];
     size_t canonical_len = 0;
-    int64_t pointer_epoch = 0;
+    enum zcl_devloop_state_lookup step = ZCL_DEVLOOP_STATE_FOUND;
+    *tail = from;
+    while (step == ZCL_DEVLOOP_STATE_FOUND && *tail < INT64_MAX) {
+        int64_t next = 0;
+        step = cycle_event_read_at(events_fd, *tail + 1, workspace, canonical,
+                                   sizeof(canonical), &canonical_len, &next);
+        if (step == ZCL_DEVLOOP_STATE_FOUND)
+            *tail = next;
+    }
+    return step;
+}
+
+/* Under the cycle lock: if a sealer died inside a batch, the pointer is
+ * behind the journal. Each journal event is immutable and verified here, so
+ * the pointer takes the tail event's exact bytes. Staging files left by dead
+ * writers are swept when `sweep` asks (a watcher restart), and whenever the
+ * walk refuses an event, since such a leftover can be a second link to it;
+ * the directory is not scanned on the ordinary path. */
+static bool cycle_pointer_heal_locked(int dirfd, const char *workspace,
+                                      bool sweep)
+{
+    char canonical[CYCLE_CANONICAL_MAX];
+    size_t canonical_len = 0;
+    int64_t pointer_epoch = 0, tail = 0;
     enum zcl_devloop_state_lookup step = cycle_record_read_at(
         dirfd, workspace, canonical, sizeof(canonical), &canonical_len,
         &pointer_epoch);
-    cycle_temps_sweep(dirfd);
+    if (sweep)
+        cycle_temps_sweep(dirfd);
     int events_fd = step == ZCL_DEVLOOP_STATE_INVALID
         ? CYCLE_EVENTS_INVALID : cycle_events_open(dirfd, false);
-    cycle_temps_sweep(events_fd);
     if (events_fd == CYCLE_EVENTS_ABSENT)
         return true;
     if (events_fd < 0)
         return false;
-    int64_t tail = pointer_epoch;
-    step = ZCL_DEVLOOP_STATE_FOUND;
-    while (step == ZCL_DEVLOOP_STATE_FOUND && tail < INT64_MAX) {
-        int64_t next = 0;
-        step = cycle_event_read_at(events_fd, tail + 1, workspace, canonical,
-                                   sizeof(canonical), &canonical_len, &next);
-        if (step == ZCL_DEVLOOP_STATE_FOUND)
-            tail = next;
+    if (sweep)
+        cycle_temps_sweep(events_fd);
+    step = cycle_journal_tail_walk(events_fd, workspace, pointer_epoch, &tail);
+    if (step == ZCL_DEVLOOP_STATE_INVALID && !sweep) {
+        cycle_temps_sweep(events_fd);
+        step = cycle_journal_tail_walk(events_fd, workspace, pointer_epoch,
+                                       &tail);
     }
     char name[32], body[CYCLE_RECORD_MAX];
     size_t body_len = 0;
@@ -1308,8 +1366,8 @@ static bool cycle_pointer_heal_locked(int dirfd, const char *workspace)
     return ok;
 }
 
-bool zcl_devloop_cycle_state_heal(const char *repo_root, char *why,
-                                  size_t why_len)
+static bool cycle_state_heal_impl(const char *repo_root, bool sweep,
+                                  char *why, size_t why_len)
 {
     if (why && why_len)
         why[0] = 0;
@@ -1324,7 +1382,8 @@ bool zcl_devloop_cycle_state_heal(const char *repo_root, char *why,
         return true;
     int lock_fd = private_dir_fd(dirfd)
         ? cycle_lock_open(dirfd, true, LOCK_EX) : -1;
-    bool ok = lock_fd >= 0 && cycle_pointer_heal_locked(dirfd, workspace);
+    bool ok = lock_fd >= 0 &&
+              cycle_pointer_heal_locked(dirfd, workspace, sweep);
     if (lock_fd >= 0)
         close(lock_fd);
     if (dirfd >= 0)
@@ -1333,6 +1392,20 @@ bool zcl_devloop_cycle_state_heal(const char *repo_root, char *why,
         set_why(why, why_len, lock_fd >= 0 ? "cycle_state_heal_failed"
                                            : "cycle_state_lock_invalid");
     return ok;
+}
+
+bool zcl_devloop_cycle_state_heal(const char *repo_root, char *why,
+                                  size_t why_len)
+{
+    return cycle_state_heal_impl(repo_root, false, why, why_len);
+}
+
+/* Names the storage error behind a failed journal publication. */
+static void cycle_publication_why(char *why, size_t why_len, int error)
+{
+    if (why && why_len)
+        (void)snprintf(why, why_len, "cycle_state_publication_failed:%s",
+                       strerror(error));
 }
 
 static bool cycle_state_write_impl(const char *repo_root,
@@ -1403,8 +1476,6 @@ static bool cycle_state_write_impl(const char *repo_root,
         set_why(why, why_len, "cycle_event_directory_invalid");
         return false;
     }
-    cycle_temps_sweep(dirfd);
-    cycle_temps_sweep(events_fd);
     /* Normally the latest pointer and journal tail agree, making this one
      * failed open. If a process died after sealing an event but before moving
      * the compatibility pointer, recover monotonically instead of reusing or
@@ -1476,6 +1547,7 @@ static bool cycle_state_write_impl(const char *repo_root,
                                     false) &&
          fsync(events_fd) == 0 &&
          cycle_pointer_publish(dirfd, body, body_len, mode);
+    int publish_errno = errno;
     close(events_fd);
     if (ok && mode == CYCLE_WRITE_MIRROR) {
         char stream_why[96] = {0};
@@ -1494,7 +1566,7 @@ static bool cycle_state_write_impl(const char *repo_root,
     close(lock_fd);
     close(dirfd);
     if (!ok)
-        set_why(why, why_len, "cycle_state_publication_failed");
+        cycle_publication_why(why, why_len, publish_errno);
     return ok;
 }
 
@@ -1882,13 +1954,13 @@ static void *g_cycle_seal_defer_opaque;
 
 /* The journal epoch the ring must continue from: the healed latest pointer. */
 static bool cycle_stream_anchor_locked(const char *repo_root,
-                                       int64_t *durable_out,
+                                       int64_t *durable_out, bool sweep,
                                        char *why, size_t why_len)
 {
     char body[CYCLE_CANONICAL_MAX];
     size_t body_len = 0;
     *durable_out = 0;
-    if (!zcl_devloop_cycle_state_heal(repo_root, why, why_len))
+    if (!cycle_state_heal_impl(repo_root, sweep, why, why_len))
         return false;
     enum zcl_devloop_state_lookup latest = zcl_devloop_cycle_state_read(
         repo_root, body, sizeof(body), &body_len, durable_out, why, why_len);
@@ -1899,27 +1971,69 @@ static bool cycle_stream_anchor_locked(const char *repo_root,
 
 /* Under the seal lock: seals what the ring still holds past the journal tail
  * (a killed sealer's batch, or an orphaned producer's event), so a restart
- * does not discard a published event. False (with why) when that tail is
- * evicted or damaged and cannot be sealed. */
+ * does not discard a published event. False (with why) when that tail cannot
+ * be sealed; *ring_latest names the last event the ring handed out. */
 static bool cycle_stream_restart_tail_locked(const char *repo_root,
                                              int64_t *anchor,
+                                             int64_t *ring_latest,
                                              char *why, size_t why_len)
 {
-    int64_t latest = 0, durable = 0;
-    if (!zcl_devloop_cycle_stream_marks(repo_root, &latest, &durable) ||
-        latest <= *anchor)
+    int64_t durable = 0;
+    *ring_latest = 0;
+    if (!zcl_devloop_cycle_stream_marks(repo_root, ring_latest, &durable) ||
+        *ring_latest <= *anchor)
         return true;
-    if (!cycle_stream_flush_locked(repo_root, latest, why, why_len))
+    if (!cycle_stream_flush_locked(repo_root, *ring_latest, why, why_len))
         return false;
-    *anchor = latest;
+    *anchor = *ring_latest;
+    return true;
+}
+
+/* Only a tail the ring itself no longer holds intact (overwritten slots, or a
+ * torn or missing event) is given up. A journal that cannot take a write
+ * (ENOSPC, EIO, a lock or permission failure) keeps the ring as it is. */
+static bool cycle_stream_tail_loss_acceptable(const char *reason)
+{
+    return strcmp(reason, "cycle_stream_flush_range_evicted") == 0 ||
+           strcmp(reason, "cycle_stream_flush_event_missing") == 0;
+}
+
+static bool cycle_stream_restart_locked(const char *repo_root,
+                                        int64_t *durable,
+                                        char *why, size_t why_len)
+{
+    char lost[128] = {0};
+    int64_t ring_latest = 0;
+    if (!cycle_stream_anchor_locked(repo_root, durable, true, why, why_len))
+        return false;
+    if (cycle_stream_restart_tail_locked(repo_root, durable, &ring_latest,
+                                         lost, sizeof(lost)))
+        return zcl_devloop_cycle_stream_reset(repo_root, *durable, why,
+                                              why_len);
+    if (!cycle_stream_tail_loss_acceptable(lost)) {
+        if (why && why_len)
+            (void)snprintf(why, why_len,
+                           "cycle_stream_restart_tail_unsealed:%s", lost);
+        return false;
+    }
+    if (!cycle_stream_anchor_locked(repo_root, durable, true, why, why_len) ||
+        !zcl_devloop_cycle_stream_reset(repo_root, *durable, why, why_len))
+        return false;
+    if (why && why_len)
+        (void)snprintf(why, why_len,
+                       "cycle_stream_restart_tail_lost:epochs=%lld..%lld:%s",
+                       (long long)(*durable + 1), (long long)ring_latest,
+                       lost);
     return true;
 }
 
 /* A new watcher restarts the ring after the journal tail, first sealing any
  * valid ring events past it. Holding the seal lock across heal, sealing,
- * read and reset keeps every other flusher's batch out of the restart. An
- * unsealable tail does not block the restart: the ring restarts after what
- * was sealed and `why` names what was lost, while the call succeeds. */
+ * read and reset keeps every other flusher's batch out of the restart. A
+ * tail the ring no longer holds intact does not block the restart: the ring
+ * restarts after what was sealed, the call succeeds, and `why` names the lost
+ * epoch range. A tail that is intact but cannot be journaled refuses the
+ * restart and leaves the ring untouched. */
 bool zcl_devloop_cycle_stream_restart(const char *repo_root,
                                       int64_t *durable_out,
                                       char *why, size_t why_len)
@@ -1927,23 +2041,14 @@ bool zcl_devloop_cycle_stream_restart(const char *repo_root,
     if (why && why_len)
         why[0] = 0;
     int64_t durable = 0;
-    char lost[128] = {0};
     int seal_fd = repo_root && repo_root[0]
         ? cycle_seal_lock_open(repo_root) : -1;
     if (seal_fd < 0) {
         set_why(why, why_len, "cycle_stream_seal_lock_invalid");
         return false;
     }
-    bool ok = cycle_stream_anchor_locked(repo_root, &durable, why, why_len);
-    if (ok && !cycle_stream_restart_tail_locked(repo_root, &durable, lost,
-                                                sizeof(lost)))
-        ok = cycle_stream_anchor_locked(repo_root, &durable, why, why_len);
-    ok = ok && zcl_devloop_cycle_stream_reset(repo_root, durable, why,
-                                              why_len);
+    bool ok = cycle_stream_restart_locked(repo_root, &durable, why, why_len);
     close(seal_fd);
-    if (ok && lost[0] && why && why_len)
-        (void)snprintf(why, why_len, "cycle_stream_restart_tail_lost:%s",
-                       lost);
     if (ok && durable_out)
         *durable_out = durable;
     return ok;
@@ -1965,7 +2070,7 @@ static int cycle_state_write_via_ring(const char *repo_root,
     if (!zcl_devloop_cycle_stream_marks(repo_root, &ring_latest,
                                         &ring_durable))
         return 0;
-    if (!cycle_stream_anchor_locked(repo_root, &anchor, why, why_len))
+    if (!cycle_stream_anchor_locked(repo_root, &anchor, false, why, why_len))
         return -1;
     if (ring_latest < anchor)
         return 0;
@@ -1993,8 +2098,10 @@ bool zcl_devloop_cycle_state_write(const char *repo_root,
     }
     int routed = cycle_state_write_via_ring(repo_root, cycle_json, cycle_len,
                                             &epoch, why, why_len);
+    /* The direct path heals first: a leftover from a writer killed between
+     * link and unlink is swept when the journal tail walk refuses it. */
     bool ok = routed == 1 || routed == 2 ||
-        (routed == 0 &&
+        (routed == 0 && zcl_devloop_cycle_state_heal(repo_root, why, why_len) &&
          cycle_state_write_impl(repo_root, 0, cycle_json, cycle_len,
                                 CYCLE_WRITE_MIRROR, why, why_len));
     close(seal_fd);

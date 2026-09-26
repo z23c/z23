@@ -821,10 +821,13 @@ bool zcl_devloop_cycle_state_write(const char *repo_root,
 bool zcl_devloop_cycle_stream_reset(const char *repo_root,
                                     int64_t durable_epoch,
                                     char *why, size_t why_len);
-/* Under the seal lock: heal, seal any valid ring events past the journal tail,
- * then reset the ring after the tail. durable_out (optional) receives that
- * tail epoch. A tail that cannot be sealed (evicted or damaged) does not fail
- * the restart; `why` then names what was lost. */
+/* Under the seal lock: heal (sweeping staging files left by dead writers),
+ * seal any valid ring events past the journal tail, then reset the ring after
+ * the tail. durable_out (optional) receives that tail epoch. A tail the ring
+ * no longer holds intact (evicted, torn or missing) does not fail the
+ * restart; `why` then names the lost epoch range. A tail the journal cannot
+ * take (ENOSPC, EIO, permissions, a lock failure) refuses the restart and
+ * leaves the ring untouched. */
 bool zcl_devloop_cycle_stream_restart(const char *repo_root,
                                       int64_t *durable_out,
                                       char *why, size_t why_len);
@@ -866,9 +869,14 @@ void zcl_devloop_cycle_stream_test_kill_in_write(int records);
 /* Test seam: pause `ms` between reserving a ring epoch and writing its slot,
  * holding the ring publication lock (0 disarms). */
 void zcl_devloop_cycle_stream_test_publish_pause_ms(int ms);
+/* Test seam: make the no-replace rename report EINVAL, as on a filesystem
+ * without one, so journal records take the link-then-unlink path. */
+void zcl_devloop_cycle_stream_test_force_link(bool on);
 #endif
 /* Move a latest pointer left behind the journal tail (a flusher died inside
- * a batch) onto the tail event. A no-op when they already agree. */
+ * a batch) onto the tail event. A no-op when they already agree. The
+ * directory is scanned for dead writers' staging files only when the tail
+ * walk refuses an event, since one can be a second link to it. */
 bool zcl_devloop_cycle_state_heal(const char *repo_root, char *why,
                                   size_t why_len);
 bool zcl_devloop_cycle_state_write_epoch(const char *repo_root,

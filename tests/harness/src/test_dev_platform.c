@@ -2395,11 +2395,13 @@ static pid_t seal_batch_torn_flusher(const char *repo, int64_t base,
 /* A flusher killed halfway through writing a journal record leaves no file
  * under that record's final name (records are staged, then renamed whole),
  * so the next heal and flush continue the journal instead of refusing a
- * torn tail. */
+ * torn tail. An ordinary heal does not scan the directory for the dead
+ * writer's staging file; the next watcher restart sweeps it and seals the
+ * ring event the flusher did not reach. */
 static bool seal_batch_torn_write(const char *repo, const char *state_dir)
 {
     char why[192] = {0}, event_path[PATH_MAX], staged[PATH_MAX];
-    int64_t next[2] = {0};
+    int64_t next[2] = {0}, durable = 0;
     int64_t base = seal_batch_pointer_epoch(repo);
     pid_t flusher = seal_batch_torn_flusher(repo, base, next);
     int status = 0;
@@ -2416,13 +2418,134 @@ static bool seal_batch_torn_write(const char *repo, const char *state_dir)
     SB_CHECK(seal_batch_pointer_epoch(repo) == base);
     SB_CHECK(zcl_devloop_cycle_state_heal(repo, why, sizeof(why)) &&
              seal_batch_pointer_epoch(repo) == next[0]);
-    /* Heal runs under the cycle lock, where the dead writer's staging file
-     * is known abandoned: it is swept. */
-    SB_CHECK(access(staged, F_OK) != 0 && errno == ENOENT);
-    SB_CHECK(zcl_devloop_cycle_stream_flush_through(repo, next[1], why,
-                                                    sizeof(why)) &&
+    SB_CHECK(access(staged, F_OK) == 0);
+    SB_CHECK(zcl_devloop_cycle_stream_restart(repo, &durable, why,
+                                              sizeof(why)) &&
+             why[0] == 0 && durable == next[1] &&
              seal_batch_pointer_epoch(repo) == next[1] &&
              access(event_path, F_OK) == 0);
+    SB_CHECK(access(staged, F_OK) != 0 && errno == ENOENT);
+    return true;
+}
+
+/* On a filesystem without a no-replace rename (NFS, eCryptfs, some FUSE
+ * mounts report EINVAL), journal records are published by link() then
+ * unlink(): the batch still seals, each event keeps a single link, and no
+ * staging file is left behind. */
+static bool seal_batch_link_fallback(const char *repo, const char *state_dir)
+{
+    char why[192] = {0}, event_path[PATH_MAX], staged[PATH_MAX];
+    int64_t epochs[2] = {0};
+    struct stat st;
+    zcl_devloop_cycle_stream_test_force_link(true);
+    bool published = true;
+    for (int i = 0; i < 2 && published; i++)
+        published = zcl_devloop_cycle_stream_publish(
+            repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+            &epochs[i], why, sizeof(why));
+    bool sealed = published && zcl_devloop_cycle_stream_flush_through(
+                                   repo, epochs[1], why, sizeof(why));
+    zcl_devloop_cycle_stream_test_force_link(false);
+    if (!sealed)
+        fprintf(stderr, "link-fallback seal: %s\n", why);
+    SB_CHECK(sealed && seal_batch_pointer_epoch(repo) == epochs[1]);
+    for (int i = 0; i < 2; i++)
+        SB_CHECK(seal_batch_event_path(state_dir, epochs[i], event_path) &&
+                 stat(event_path, &st) == 0 && st.st_nlink == 1);
+    SB_CHECK(snprintf(staged, sizeof(staged),
+                      "%s/cycle-events/.cycle.%ld.0.tmp", state_dir,
+                      (long)getpid()) > 0 &&
+             access(staged, F_OK) != 0 && errno == ENOENT);
+    return true;
+}
+
+/* A restart that finds an intact ring tail the journal cannot take (here a
+ * read-only event directory, as ENOSPC or EIO would be) refuses and leaves
+ * the ring untouched; once the journal can take it, the restart seals it. */
+static bool seal_batch_restart_refusal(const char *repo, const char *state_dir)
+{
+    char why[192] = {0}, events_dir[PATH_MAX];
+    int64_t tail = seal_batch_pointer_epoch(repo), epoch = 0;
+    int64_t latest = 0, durable = 0;
+    if (geteuid() == 0)
+        return true; /* root writes through a read-only directory mode */
+    for (int i = 0; i < 2; i++)
+        SB_CHECK(zcl_devloop_cycle_stream_publish(
+            repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+            &epoch, why, sizeof(why)));
+    SB_CHECK(snprintf(events_dir, sizeof(events_dir), "%s/cycle-events",
+                      state_dir) > 0 &&
+             chmod(events_dir, 0500) == 0);
+    bool refused = !zcl_devloop_cycle_stream_restart(repo, &durable, why,
+                                                     sizeof(why));
+    SB_CHECK(chmod(events_dir, 0700) == 0);
+    if (!refused || !strstr(why, "cycle_stream_restart_tail_unsealed:"))
+        fprintf(stderr, "restart over an unwritable journal: %s\n", why);
+    SB_CHECK(refused && strstr(why, "cycle_stream_restart_tail_unsealed:"));
+    SB_CHECK(zcl_devloop_cycle_stream_marks(repo, &latest, &durable) &&
+             latest == tail + 2 && durable == tail &&
+             seal_batch_pointer_epoch(repo) == tail);
+    SB_CHECK(zcl_devloop_cycle_stream_restart(repo, &durable, why,
+                                              sizeof(why)) &&
+             why[0] == 0 && durable == tail + 2 &&
+             seal_batch_pointer_epoch(repo) == tail + 2);
+    return true;
+}
+
+/* A ring tail already overwritten (more events than slots since the journal
+ * tail) cannot be sealed: the restart gives it up, continues after the
+ * journal tail, and names the lost epoch range. */
+static bool seal_batch_restart_loss(const char *repo)
+{
+    char why[192] = {0}, want[128];
+    int64_t tail = seal_batch_pointer_epoch(repo), epoch = 0, durable = 0;
+    int64_t latest = 0;
+    for (int i = 0; i < 70; i++)
+        SB_CHECK(zcl_devloop_cycle_stream_publish(
+            repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1,
+            &epoch, why, sizeof(why)));
+    SB_CHECK(snprintf(want, sizeof(want),
+                      "cycle_stream_restart_tail_lost:epochs=%lld..%lld:"
+                      "cycle_stream_flush_range_evicted",
+                      (long long)(tail + 1), (long long)(tail + 70)) > 0);
+    bool restarted = zcl_devloop_cycle_stream_restart(repo, &durable, why,
+                                                      sizeof(why));
+    if (!restarted || strcmp(why, want) != 0)
+        fprintf(stderr, "restart over an evicted tail: %s\n", why);
+    SB_CHECK(restarted && strcmp(why, want) == 0 && durable == tail);
+    SB_CHECK(zcl_devloop_cycle_stream_marks(repo, &latest, &durable) &&
+             latest == tail && durable == tail &&
+             seal_batch_pointer_epoch(repo) == tail);
+    return true;
+}
+
+/* With no live ring, a direct journal write heals first: a writer killed
+ * between link() and unlink() left the tail event with a second link and the
+ * pointer behind it, and the write still takes the next epoch. */
+static bool seal_batch_linked_direct(const char *repo, const char *state_dir,
+                                     const char *pointer)
+{
+    char why[192] = {0}, event_path[PATH_MAX], staged[PATH_MAX];
+    char previous[PATH_MAX], ring[PATH_MAX];
+    int64_t tail = seal_batch_pointer_epoch(repo);
+    struct stat st;
+    SB_CHECK(tail > 1 && seal_batch_event_path(state_dir, tail, event_path) &&
+             snprintf(staged, sizeof(staged),
+                      "%s/cycle-events/.cycle.4243.0.tmp", state_dir) > 0 &&
+             link(event_path, staged) == 0);
+    SB_CHECK(seal_batch_event_path(state_dir, tail - 1, previous) &&
+             seal_batch_copy_file(previous, pointer) &&
+             snprintf(ring, sizeof(ring), "%s/native-events.ring",
+                      state_dir) > 0 &&
+             unlink(ring) == 0);
+    bool written = zcl_devloop_cycle_state_write(
+        repo, g_seal_batch_event, sizeof(g_seal_batch_event) - 1, why,
+        sizeof(why));
+    if (!written)
+        fprintf(stderr, "direct write over a linked tail: %s\n", why);
+    SB_CHECK(written && seal_batch_pointer_epoch(repo) == tail + 1 &&
+             access(staged, F_OK) != 0 && stat(event_path, &st) == 0 &&
+             st.st_nlink == 1);
     return true;
 }
 
@@ -2464,15 +2587,67 @@ static bool seal_batch_linked_tail(const char *repo, const char *state_dir,
     return true;
 }
 
-static bool run_cycle_seal_batch_fixture(void)
+/* The journal lifecycle in one workspace: batch, heal, a linked tail, then a
+ * damaged tail. */
+static bool seal_batch_chain(const char *repo, const char *state_dir,
+                             const char *pointer, int64_t epochs[4])
+{
+    return seal_batch_heal(repo, state_dir, pointer, epochs) &&
+           seal_batch_linked_tail(repo, state_dir, pointer) &&
+           seal_batch_damaged_tail(repo, state_dir, pointer, epochs);
+}
+
+static bool seal_batch_link_step(const char *repo, const char *state_dir,
+                                 const char *pointer, int64_t epochs[4])
+{
+    (void)pointer;
+    (void)epochs;
+    return seal_batch_link_fallback(repo, state_dir);
+}
+
+static bool seal_batch_torn_step(const char *repo, const char *state_dir,
+                                 const char *pointer, int64_t epochs[4])
+{
+    (void)pointer;
+    (void)epochs;
+    return seal_batch_torn_write(repo, state_dir);
+}
+
+static bool seal_batch_refusal_step(const char *repo, const char *state_dir,
+                                    const char *pointer, int64_t epochs[4])
+{
+    (void)pointer;
+    (void)epochs;
+    return seal_batch_restart_refusal(repo, state_dir);
+}
+
+static bool seal_batch_loss_step(const char *repo, const char *state_dir,
+                                 const char *pointer, int64_t epochs[4])
+{
+    (void)state_dir;
+    (void)pointer;
+    (void)epochs;
+    return seal_batch_restart_loss(repo);
+}
+
+static bool seal_batch_direct_step(const char *repo, const char *state_dir,
+                                   const char *pointer, int64_t epochs[4])
+{
+    (void)epochs;
+    return seal_batch_linked_direct(repo, state_dir, pointer);
+}
+
+typedef bool (*seal_batch_step_fn)(const char *repo, const char *state_dir,
+                                   const char *pointer, int64_t epochs[4]);
+
+/* Runs `step` in a fresh workspace (its own HOME) seeded by one flush batch,
+ * so each property is checked, and fails, on its own. */
+static bool seal_batch_in_workspace(const char *name, seal_batch_step_fn step)
 {
     char home[PATH_MAX], repo[PATH_MAX], state_dir[PATH_MAX];
     char pointer[PATH_MAX];
-    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
-    if (getenv("HOME") && !saved_home)
-        return false;
-    test_make_tmpdir(home, sizeof(home), "dev_platform", "cycle_seal_batch");
     int64_t epochs[4] = {0};
+    test_make_tmpdir(home, sizeof(home), "dev_platform", name);
     bool ok = snprintf(repo, sizeof(repo), "%s/repo", home) > 0 &&
               mkdir(repo, 0700) == 0 &&
               platform_environment_set("HOME", home, 1) == 0 &&
@@ -2481,16 +2656,36 @@ static bool run_cycle_seal_batch_fixture(void)
               snprintf(pointer, sizeof(pointer), "%s/native-cycle.json",
                        state_dir) > 0 &&
               seal_batch_flush(repo, state_dir, epochs) &&
-              seal_batch_heal(repo, state_dir, pointer, epochs) &&
-              seal_batch_linked_tail(repo, state_dir, pointer) &&
-              seal_batch_torn_write(repo, state_dir) &&
-              seal_batch_damaged_tail(repo, state_dir, pointer, epochs);
+              step(repo, state_dir, pointer, epochs);
+    test_rm_rf_recursive(home);
+    return ok;
+}
+
+static bool run_cycle_seal_batch_fixture(void)
+{
+    static const struct {
+        const char *name;
+        seal_batch_step_fn step;
+    } steps[] = {
+        {"cycle_seal_batch", seal_batch_chain},
+        {"cycle_seal_link", seal_batch_link_step},
+        {"cycle_seal_torn", seal_batch_torn_step},
+        {"cycle_seal_refusal", seal_batch_refusal_step},
+        {"cycle_seal_loss", seal_batch_loss_step},
+        {"cycle_seal_direct", seal_batch_direct_step},
+    };
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    if (getenv("HOME") && !saved_home)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++)
+        if (!seal_batch_in_workspace(steps[i].name, steps[i].step))
+            ok = false;
     if (saved_home) {
         (void)platform_environment_set("HOME", saved_home, 1);
         free(saved_home);
     } else
         (void)dp_environment_unset("HOME");
-    test_rm_rf_recursive(home);
     return ok;
 }
 #undef SB_CHECK
