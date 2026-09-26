@@ -281,9 +281,13 @@ compiler command, normalized
 known dependency, plus (key v2, `zcl.dev_artifact_cache.hotswap.v2`) the
 action root derived before compiling from that closure: every include lookup
 that had to miss in search order, each `__has_include`/`__has_embed` name,
-the normalized argv, the allowlisted environment, and the toolchain and
-driver program bytes. A closure whose action root cannot be derived
-completely is compiled unkeyed and never shared. Checkout roots embedded in
+the normalized argv, the allowlisted environment, and the toolchain,
+driver program and implicit link library bytes. A closure whose action
+root cannot be derived completely is compiled unkeyed and never shared:
+any argv word outside the allowlist (response files, plugins, framework or
+`=`-prefixed include dirs, relative `-include`), an include-search
+environment variable such as `CPATH` or `LIBRARY_PATH`, or a `"../"`
+include not found beside its includer. Checkout roots embedded in
 reproducibility flags normalize to `${WORKTREE}`; source paths in the
 dependency closure normalize to paths relative to that root. A hit is
 accepted only when the stored `.so` hashes to its separately published

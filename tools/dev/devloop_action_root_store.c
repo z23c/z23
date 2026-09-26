@@ -280,11 +280,27 @@ bool zcl_action_root_record(const char *store_dir, const char *unit,
 /* What the compiler driver reports about itself, asked once per driver:
  * its built-in #include <...> list, its sysroot, and the ld / collect2 it
  * runs for a link. */
+#define ARS_TARGETS_MAX 1024
+
+/* Libraries a -shared link pulls in without naming them; their bytes are
+ * bound beside the capsule's crt/libgcc/libc.so.6. */
+static const char *const k_ars_implicit[] = {
+    "libc.so", "libc.so.6", "libc_nonshared.a", "libgcc.a", "libgcc_s.so",
+    "libgcc_s.so.1",
+};
+#define ARS_IMPLICIT_N (sizeof(k_ars_implicit) / sizeof(k_ars_implicit[0]))
+
 struct ars_driver {
     char driver[512];
+    char targets[ARS_TARGETS_MAX]; /* the plan's target flags, asked with */
     uint8_t bytes[32]; /* ars_driver_bytes of `driver` when captured */
     char dirs[ARS_SYSTEM_DIR_MAX][PATH_MAX];
     size_t count;
+    /* Built-in dirs the driver skipped as nonexistent: one appearing moves
+     * the search list, so it forces a re-capture. */
+    char absent[ARS_SYSTEM_DIR_MAX][PATH_MAX];
+    size_t absent_n;
+    char implicit[ARS_IMPLICIT_N][PATH_MAX]; /* "" when not found */
     char sysroot[PATH_MAX];
     char ld[PATH_MAX];
     char collect2[PATH_MAX];
@@ -371,15 +387,44 @@ bool zcl_action_root_parse_builtin_dirs(const char *out,
     return count > 0;
 }
 
+static void ars_absent_parse(const char *out, const char *end,
+                             struct ars_driver *sd)
+{
+    static const char mark[] = "ignoring nonexistent directory \"";
+    sd->absent_n = 0;
+    for (const char *p = strstr(out, mark);
+         p && p < end && sd->absent_n < ARS_SYSTEM_DIR_MAX;
+         p = strstr(p, mark)) {
+        p += sizeof(mark) - 1;
+        size_t n = strcspn(p, "\"\r\n");
+        if (p[n] == '"' && n > 0 && n < PATH_MAX && p[0] == '/')
+            (void)snprintf(sd->absent[sd->absent_n++], PATH_MAX, "%.*s",
+                           (int)n, p);
+    }
+}
+
+/* The nonexistent dirs the driver skipped, then the surviving search list
+ * through the testable, refusing parser above. */
+static bool ars_system_parse(const char *out, struct ars_driver *sd,
+                             char miss[40])
+{
+    ars_absent_parse(out, out + strlen(out), sd);
+    return zcl_action_root_parse_builtin_dirs(out, sd->dirs,
+                                              ARS_SYSTEM_DIR_MAX, &sd->count,
+                                              miss);
+}
+
 #if !defined(_WIN32)
-/* Run `cc <args...>` and capture merged output. */
-static bool ars_driver_ask(const char *cc, const char *const *args,
+/* Run `cc <target flags...> <args...>` and capture merged output. */
+static bool ars_driver_ask(const struct ars_driver *d, const char *const *args,
                            char *capture, size_t cap)
 {
-    char text[512];
+    char text[512], targets[ARS_TARGETS_MAX];
     const char *argv[ARS_ARG_MAX];
-    (void)snprintf(text, sizeof(text), "%s", cc);
-    size_t argc = zcl_argv_split(text, argv, ARS_ARG_MAX - 8);
+    (void)snprintf(text, sizeof(text), "%s", d->driver);
+    (void)snprintf(targets, sizeof(targets), "%s", d->targets);
+    size_t argc = zcl_argv_split(text, argv, ARS_ARG_MAX / 2);
+    argc += zcl_argv_split(targets, argv + argc, ARS_ARG_MAX / 4);
     for (size_t i = 0; argc && args[i] && argc < ARS_ARG_MAX - 1; i++)
         argv[argc++] = args[i];
     argv[argc] = NULL;
@@ -391,11 +436,12 @@ static bool ars_driver_ask(const char *cc, const char *const *args,
 }
 
 /* First output line of `cc <arg>`, trimmed; "" when the line is empty. */
-static bool ars_driver_line(const char *cc, const char *arg, char out[PATH_MAX])
+static bool ars_driver_line(const struct ars_driver *d, const char *arg,
+                            char out[PATH_MAX])
 {
     char capture[PATH_MAX];
     const char *args[] = { arg, NULL };
-    if (!ars_driver_ask(cc, args, capture, sizeof(capture)))
+    if (!ars_driver_ask(d, args, capture, sizeof(capture)))
         return false;
     size_t n = strcspn(capture, "\r\n");
     while (n > 0 && capture[n - 1] == ' ')
@@ -432,8 +478,23 @@ static bool ars_resolve_program(char path[PATH_MAX])
     return false;
 }
 
-static bool ars_driver_capture(const char *cc, struct ars_driver *d,
-                               char miss[40])
+/* `cc -print-file-name=X` echoes X back when it finds nothing. */
+static bool ars_implicit_capture(struct ars_driver *d)
+{
+    for (size_t i = 0; i < ARS_IMPLICIT_N; i++) {
+        char arg[64];
+        (void)snprintf(arg, sizeof(arg), "-print-file-name=%s",
+                       k_ars_implicit[i]);
+        if (!ars_driver_line(d, arg, d->implicit[i]))
+            return false;
+        if (d->implicit[i][0] != '/')
+            d->implicit[i][0] = '\0';
+    }
+    return true;
+}
+
+static bool ars_driver_capture(const char *cc, const char *targets,
+                               struct ars_driver *d, char miss[40])
 {
     static const char *const search[] = { "-xc", "-E", "-v", "/dev/null",
                                           NULL };
@@ -442,16 +503,16 @@ static bool ars_driver_capture(const char *cc, struct ars_driver *d,
     if (miss)
         miss[0] = '\0';
     (void)snprintf(d->driver, sizeof(d->driver), "%s", cc);
-    if (!ars_driver_ask(cc, search, capture, sizeof(capture)))
+    (void)snprintf(d->targets, sizeof(d->targets), "%s", targets);
+    if (!ars_driver_ask(d, search, capture, sizeof(capture)))
         return false;
-    if (!zcl_action_root_parse_builtin_dirs(capture, d->dirs,
-                                            ARS_SYSTEM_DIR_MAX, &d->count,
-                                            miss))
+    if (!ars_system_parse(capture, d, miss))
         return false;
-    if (!ars_driver_line(cc, "-print-sysroot", d->sysroot) ||
-        !ars_driver_line(cc, "-print-prog-name=ld", d->ld) ||
+    if (!ars_driver_line(d, "-print-sysroot", d->sysroot) ||
+        !ars_driver_line(d, "-print-prog-name=ld", d->ld) ||
         !ars_resolve_program(d->ld) ||
-        !ars_driver_line(cc, "-print-prog-name=collect2", d->collect2))
+        !ars_driver_line(d, "-print-prog-name=collect2", d->collect2) ||
+        !ars_implicit_capture(d))
         return false;
     /* Only an absolute answer is a collect2 this driver runs; a driver
      * without one (Clang) echoes the bare name back. */
@@ -459,7 +520,74 @@ static bool ars_driver_capture(const char *cc, struct ars_driver *d,
         d->collect2[0] = '\0';
     return true;
 }
+
+/* The captured built-in list still describes the disk: every listed dir
+ * exists and every skipped one is still absent. */
+static bool ars_absent_still(const struct ars_driver *d)
+{
+    for (size_t i = 0; i < d->count; i++)
+        if (access(d->dirs[i], F_OK) != 0)
+            return false;
+    for (size_t i = 0; i < d->absent_n; i++)
+        if (access(d->absent[i], F_OK) == 0)
+            return false;
+    return true;
+}
 #endif
+
+/* SHA3 over the implicit link libraries, re-read every derivation (the
+ * digest memo keys on stat, so an unchanged file is not re-hashed). */
+static bool ars_implicit_sha3(const struct ars_driver *d, uint8_t out[32])
+{
+    static const char domain[] = "zcl.action_root.hotload_implicit_libs.v1";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    for (size_t i = 0; i < ARS_IMPLICIT_N; i++) {
+        uint8_t digest[32] = {0};
+        uint8_t found = d->implicit[i][0] != '\0';
+        if (found && !zcl_action_root_file_sha3(d->implicit[i], digest))
+            return false;
+        sha3_256_write(&sha, (const uint8_t *)k_ars_implicit[i],
+                       strlen(k_ars_implicit[i]) + 1);
+        sha3_256_write(&sha, &found, 1);
+        sha3_256_write(&sha, digest, sizeof(digest));
+    }
+    sha3_256_finalize(&sha, out);
+    return true;
+}
+
+/* The plan's flags that can move the driver's built-in dirs, sysroot or
+ * linker (-m..., --target=, -target X), asked with every driver query. */
+static bool ars_targets(const char *cflags, const char *ldflags,
+                        char out[ARS_TARGETS_MAX])
+{
+    const char *const lists[] = { cflags, ldflags };
+    size_t o = 0;
+    out[0] = '\0';
+    for (size_t l = 0; l < 2; l++) {
+        char text[16384];
+        const char *w[ARS_ARG_MAX];
+        if (snprintf(text, sizeof(text), "%s", lists[l] ? lists[l] : "") >=
+            (int)sizeof(text))
+            return false;
+        size_t n = zcl_argv_split(text, w, ARS_ARG_MAX);
+        for (size_t i = 0; i < n; i++) {
+            bool pair = strcmp(w[i], "-target") == 0 && i + 1 < n;
+            if (strncmp(w[i], "-m", 2) != 0 &&
+                strncmp(w[i], "--target", 8) != 0 && !pair)
+                continue;
+            int k = snprintf(out + o, ARS_TARGETS_MAX - o, "%s%s%s%s",
+                             o ? " " : "", w[i], pair ? " " : "",
+                             pair ? w[i + 1] : "");
+            if (k < 0 || (size_t)k >= ARS_TARGETS_MAX - o)
+                return false;
+            o += (size_t)k;
+            i += pair;
+        }
+    }
+    return true;
+}
 
 #if !defined(_WIN32)
 /* The plan's compiler command may be a wrapper ("zcc cc", a script): every
@@ -495,13 +623,15 @@ static bool ars_driver_bytes(const char *cc, uint8_t out[32])
 }
 #endif
 
-/* Driver facts are re-captured whenever the driver's bytes change or the
- * built-in search list becomes uncanonical; `miss` names the refusal. */
-static bool ars_driver_facts(const char *cc, struct ars_driver *out,
-                             char miss[40])
+/* Driver facts are re-captured whenever the driver's bytes or the plan's
+ * target flags change, a built-in dir it skipped as nonexistent appears, or
+ * the built-in search list becomes uncanonical; `miss` names the refusal. */
+static bool ars_driver_facts(const char *cc, const char *targets,
+                             struct ars_driver *out, char miss[40])
 {
 #if defined(_WIN32)
     (void)cc;
+    (void)targets;
     (void)out;
     if (miss)
         miss[0] = '\0';
@@ -514,9 +644,11 @@ static bool ars_driver_facts(const char *cc, struct ars_driver *out,
         return false;
     pthread_mutex_lock(&g_driver_mu);
     bool ok = g_driver.valid && strcmp(g_driver.driver, cc) == 0 &&
-              memcmp(g_driver.bytes, bytes, sizeof(bytes)) == 0;
+              strcmp(g_driver.targets, targets) == 0 &&
+              memcmp(g_driver.bytes, bytes, sizeof(bytes)) == 0 &&
+              ars_absent_still(&g_driver);
     if (!ok) {
-        ok = ars_driver_capture(cc, &g_driver, miss);
+        ok = ars_driver_capture(cc, targets, &g_driver, miss);
         memcpy(g_driver.bytes, bytes, sizeof(bytes));
         g_driver.valid = ok;
     }
@@ -773,6 +905,25 @@ static bool ars_hook_argv(struct ars_hook *h, const struct ars_compile *k)
            ars_hotswap_link_argv(k->cc, k->ldflags, &h->argv);
 }
 
+/* A plan word "@file" makes the driver read more arguments from a file the
+ * root does not hash ("@out/..." are the derivation's own declared outputs,
+ * so a plan that spells one is refused too). */
+static bool ars_response_file(const char *words)
+{
+    for (const char *p = words; p && *p; p++)
+        if (*p == '@' && (p == words || strchr(" \t\"'", p[-1])))
+            return true;
+    return false;
+}
+
+/* Plan flags follow the driver words in argv; one that does not start with
+ * '-' would read as another driver word. Empty flags are fine. */
+static bool ars_options_first(const char *words)
+{
+    const char *p = words ? words + strspn(words, " \t") : "";
+    return !*p || *p == '-';
+}
+
 static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
                             struct ars_miss *m)
 {
@@ -784,26 +935,40 @@ static bool ars_hook_inputs(struct ars_hook *h, const struct ars_compile *k,
                      "toolchain capsule unavailable", NULL);
         return false;
     }
+    if (ars_response_file(k->cc) || ars_response_file(k->cflags) ||
+        ars_response_file(k->ldflags) || !ars_options_first(k->cflags) ||
+        !ars_options_first(k->ldflags)) {
+        ars_miss_set(m, "argv_unrecognised",
+                     "the plan names a response file, or its flags start "
+                     "with a word the driver would take as an input", NULL);
+        return false;
+    }
+    char targets[ARS_TARGETS_MAX];
+    uint8_t implicit[32];
     char driver_miss[40] = {0};
-    if (!ars_driver_facts(k->cc, &h->driver, driver_miss)) {
+    if (!ars_targets(k->cflags, k->unity ? NULL : k->ldflags, targets) ||
+        !ars_driver_facts(k->cc, targets, &h->driver, driver_miss) ||
+        !ars_implicit_sha3(&h->driver, implicit)) {
         if (driver_miss[0])
             ars_miss_set(m, driver_miss,
                          "compiler driver's built-in include search is not "
                          "a canonical, capacity-fitting list", k->cc);
         else
             ars_miss_set(m, "driver_facts_unavailable",
-                         "compiler driver facts or program bytes unavailable",
-                         k->cc);
+                         "compiler driver facts, program bytes or implicit "
+                         "libraries unavailable", k->cc);
         return false;
     }
     /* The capsule is the host toolchain; the plan's own driver command (a
-     * wrapper, a cache, another compiler) is bound by its program bytes. */
-    static const char domain[] = "zcl.action_root.hotload_toolchain.v1";
+     * wrapper, a cache, another compiler) is bound by its program bytes, and
+     * the libraries its links pull in unnamed by theirs. */
+    static const char domain[] = "zcl.action_root.hotload_toolchain.v2";
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
     sha3_256_write(&sha, capsule_root, sizeof(capsule_root));
     sha3_256_write(&sha, h->driver.bytes, sizeof(h->driver.bytes));
+    sha3_256_write(&sha, implicit, sizeof(implicit));
     sha3_256_finalize(&sha, r->toolchain_root);
     if (!ars_hook_argv(h, k)) {
         ars_miss_set(m, "argv_unavailable",

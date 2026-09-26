@@ -26,6 +26,12 @@
  *      stable miss code; the receipt JSON says action_root null.
  *   6. Snapshot, not commit: a dirty edit and its commit derive the same
  *      root, and so do two commits whose closure bytes are identical.
+ *   7. Fail closed: argv is an allowlist (unknown include-dir flags,
+ *      response files, plugins, relative forced includes, extra inputs
+ *      miss), search-dir environment misses, climbing include names bind
+ *      only beside their includer, and the hot-swap key asks the driver
+ *      with the plan target flags, re-asks when a skipped dir appears and
+ *      binds implicit link libraries.
  *
  * All fixture state lives under ./test-tmp/. */
 
@@ -545,13 +551,29 @@ static void test_derive_linker(struct fx *x,
     x->req.linker.collect2 = NULL;
     AR_CHECK("linker: a collect2 the driver resolves moves the root",
              ok && fx_same(x, b));
-    x->link_argv[1] = "-static";
+    x->link_argv[1] = "-Wl,-z,now";
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
     x->link_argv[1] = "-fuse-ld=gold";
     ok = ok && fx_miss(x, "search_flag_unsupported");
     x->link_argv[1] = "-shared";
     AR_CHECK("linker: link flags move the root; -fuse-ld is refused",
              ok && fx_same(x, b));
+    /* Each names a library, a search dir or an input whose bytes the root
+     * never hashes. */
+    static const char *const unbound[] = {
+        "-static", "-lfoo", "-Ltools", "-Wl,-rpath,/opt/lib",
+        "-Wl,-z,origin", "build/extra.o", "@build/link.rsp",
+    };
+    for (size_t i = 0; i < sizeof(unbound) / sizeof(unbound[0]); i++) {
+        x->link_argv[1] = unbound[i];
+        if (!fx_miss(x, "argv_unrecognised")) {
+            printf("    link word admitted: %s\n", unbound[i]);
+            ok = false;
+        }
+    }
+    x->link_argv[1] = "-shared";
+    AR_CHECK("linker: -static, -l, -L, unknown -Wl, items, extra inputs and "
+             "response files miss (argv_unrecognised)", ok && fx_same(x, b));
     x->req.linker.links = false;
     ok = fx_differs(x, b, VCS_ACTION_FIELD_V2_LINKER);
     x->req.linker.links = true;
@@ -635,13 +657,26 @@ static void test_derive_env(struct fx *x,
     x->env[1] = "HOME=/srv/fixture-home";
     x->env[3] = NULL;
     AR_CHECK("env: non-allowlisted variables never reach the root", ok);
-    x->env[3] = "CPATH=/srv/host-b/include";
+    x->env[3] = "SDKROOT=/srv/host-b/sdk";
     ok = fx_miss(x, "env_noncanonical");
     x->env[3] = "LANG=C";
     ok = ok && fx_miss(x, "env_duplicate");
     x->env[3] = NULL;
     AR_CHECK("env: a host path value or a repeated allowlisted name is "
              "refused, not normalized", ok && fx_same(x, b));
+    static const char *const search[] = {
+        "CPATH=inc_b", "C_INCLUDE_PATH=inc_b", "LIBRARY_PATH=tools",
+        "LIBRARY_PATH=", "COMPILER_PATH=tools", "GCC_EXEC_PREFIX=tools/",
+    };
+    ok = true;
+    for (size_t i = 0; i < sizeof(search) / sizeof(search[0]); i++) {
+        x->env[3] = search[i];
+        ok = fx_miss(x, "env_search_unbound") && ok;
+    }
+    x->env[3] = NULL;
+    AR_CHECK("env: a variable that adds include or library search dirs "
+             "misses even when empty (env_search_unbound)",
+             ok && fx_same(x, b));
 }
 
 static void test_derive_refusals(struct fx *x)
@@ -664,6 +699,197 @@ static void test_derive_refusals(struct fx *x)
     ok = fx_miss(x, "search_flag_unsupported");
     x->argv[3] = saved;
     AR_CHECK("a flag that moves the built-in include search is refused", ok);
+}
+
+/* Argv is an allowlist: a word the derivation does not understand may add
+ * a search dir it never probes or name a file it never hashes, so it
+ * misses rather than hits. Each replaces -Iinc_a (and -Iinc_b for the
+ * two-word forms). */
+static void test_derive_allowlist(struct fx *x,
+                                  const struct zcl_action_root_result *b)
+{
+    static const char *const one[] = {
+        "--include-directory=inc_b", "-I=inc_b", "-isystem=inc_b",
+        "-iquote=inc_b", "-idirafter=inc_b", "-isystem-after",
+        "-iframeworkinc_b", "-Finc_b", "-cxx-isystem",
+        "--system-header-prefix=inc_b", "@build/args.rsp",
+        "-fplugin=tools/plugin.so", "-fplugin-arg-x-y", "-includesrc/local.h",
+        "-include-pch", "-imacrossrc/local.h", "-m32", "--target=x86_64",
+        "-Wp,-include,src/local.h", "-Wa,-I,inc_b", "-fsanitize=address",
+        "-fprofile-use", "-specs=tools/specs", "src/other.c", "-xc++",
+    };
+    static const char *const two[][2] = {
+        { "-include", "src/local.h" }, { "-imacros", "src/local.h" },
+        { "-I", "=inc_b" }, { "-isystem", "=inc_b" }, { "-x", "c++" },
+        { "-target", "x86_64" }, { "-iframework", "inc_b" },
+    };
+    const char *a3 = x->argv[3], *a4 = x->argv[4];
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(one) / sizeof(one[0]); i++) {
+        x->argv[3] = one[i];
+        if (!fx_miss(x, strcmp(one[i], "-specs=tools/specs") == 0
+                            ? "search_flag_unsupported"
+                            : "argv_unrecognised")) {
+            printf("    admitted: %s\n", one[i]);
+            ok = false;
+        }
+    }
+    for (size_t i = 0; i < sizeof(two) / sizeof(two[0]); i++) {
+        x->argv[3] = two[i][0];
+        x->argv[4] = two[i][1];
+        if (!fx_miss(x, "argv_unrecognised")) {
+            printf("    admitted: %s %s\n", two[i][0], two[i][1]);
+            ok = false;
+        }
+    }
+    x->argv[3] = a3;
+    x->argv[4] = a4;
+    AR_CHECK("argv: framework, sysroot-prefixed and unknown include-dir "
+             "flags, response files, plugins, relative forced includes, "
+             "target flags and inputs outside the closure miss", ok &&
+                 fx_same(x, b));
+    fx_check_flag(x, b, "argv: an allowlisted -march moves the flags", 6,
+                  "-march=x86-64-v3");
+}
+
+/* A name that climbs ("../defs.h") is bound only as a quote name found
+ * beside its includer; through a search dir, or as <...>, it misses. */
+static void test_derive_climb(struct fx *x,
+                              const struct zcl_action_root_result *b)
+{
+    bool ok = fx_write(x->root, "src/local.h",
+                       "#include \"../inc_b/defs.h\"\nint local(void);\n") &&
+              fx_differs(x, b, VCS_ACTION_FIELD_V2_SOURCE);
+    AR_CHECK("climb: a quote \"../\" name found beside its includer is bound",
+             ok);
+    static const char *const unbound[] = {
+        "#include \"../defs.h\"\n", "#include <../inc_b/defs.h>\n",
+        "#  include_next \"../inc_b/defs.h\"\n", "#embed \"../x.bin\"\n",
+        "#include \"sub/../../defs.h\"\n", "#import \"..\\\\defs.h\"\n",
+    };
+    for (size_t i = 0; i < sizeof(unbound) / sizeof(unbound[0]); i++) {
+        char text[256];
+        (void)snprintf(text, sizeof(text), "%sint local(void);\n",
+                       unbound[i]);
+        if (!fx_write(x->root, "src/local.h", text) ||
+            !fx_miss(x, "include_climb_unbound")) {
+            printf("    climb admitted: %s", unbound[i]);
+            ok = false;
+        }
+    }
+    ok = ok && fx_write(x->root, "src/local.h",
+                        "/* #include \"../defs.h\" */\nint local(void);\n"
+                        "static const char *p = \"#include <../x.h>\";\n") &&
+         fx_differs(x, b, VCS_ACTION_FIELD_V2_SOURCE);
+    ok = ok && fx_write(x->root, "src/local.h", "int local(void);\n");
+    AR_CHECK("climb: through a search dir, as <...>, as include_next or "
+             "embed it misses (include_climb_unbound); in a comment or a "
+             "string it asks nothing", ok && fx_same(x, b));
+}
+
+/* A driver whose built-in list depends on -mcpu=, that skips sysnew as
+ * nonexistent until it exists, and whose libc.so lives in the checkout. */
+static bool fx_fake_driver(struct fx *x, char cc[PATH_MAX])
+{
+    char script[4 * PATH_MAX + 1024];
+    int n = snprintf(
+        script, sizeof(script),
+        "#!/bin/sh\nR='%s'\n"
+        "case \" $* \" in\n"
+        "*\" -print-file-name=libc.so \"*) echo \"$R/lib/libc.so\"; exit 0;;\n"
+        "*\" -v \"*)\n"
+        "  d=sysdef; case \" $* \" in *\" -mcpu=alt \"*) d=sysalt;; esac\n"
+        "  echo '#include <...> search starts here:'\n"
+        "  if [ -d \"$R/sysnew\" ]; then echo \" $R/sysnew\"; else\n"
+        "    echo \"ignoring nonexistent directory \\\"$R/sysnew\\\"\"; fi\n"
+        "  echo \" $R/$d\"; echo 'End of search list.'; exit 0;;\n"
+        "esac\nfor a do shift; case \"$a\" in -mcpu=*) ;;\n"
+        "  *) set -- \"$@\" \"$a\";; esac; done\n"
+        "exec cc \"$@\"\n", x->root);
+    char path[PATH_MAX];
+    return n > 0 && n < (int)sizeof(script) &&
+           fx_write(x->root, "tools/tcc.sh", script) &&
+           fx_write(x->root, "lib/libc.so", "GROUP ( libc.so.6 )\n") &&
+           snprintf(path, sizeof(path), "%s/tools/tcc.sh", x->root) <
+               (int)sizeof(path) &&
+           chmod(path, 0700) == 0 &&
+           snprintf(cc, PATH_MAX, "%s", path) < PATH_MAX;
+}
+
+static bool fx_key(struct fx *x, const char *cc, char out[65])
+{
+    char miss[40] = {0};
+    const char *cflags = "-std=c23 -Iinc_a -Iinc_b -DFOO=1 -mcpu=alt";
+    bool ok = zcl_devloop_action_root_key(x->root, "src/unit.c", cc, cflags,
+                                          "-shared", NULL, x->depfile, out,
+                                          miss);
+    if (!ok)
+        printf("    key missed: %s\n", miss);
+    return ok;
+}
+
+static bool fx_key_differs_then_same(struct fx *x, const char *cc,
+                                     const char *k1, const char *k2,
+                                     bool ok)
+{
+    char k3[65] = {0};
+    return ok && fx_key(x, cc, k3) && strcmp(k1, k2) != 0 &&
+           strcmp(k1, k3) == 0;
+}
+
+/* The hot-swap key asks the driver with the plan's target flags, re-asks
+ * when a skipped built-in dir appears, and binds implicit link libraries. */
+static void test_key_driver_targets(struct fx *x, const char *cc, char k1[65])
+{
+    char k2[65] = {0}, k3[65] = {0};
+    bool ok = fx_write(x->root, "src/unit.c",
+                       "#include \"local.h\"\n#include <defs.h>\n"
+                       "#if __has_include(<zopt.h>)\n#endif\n"
+                       "int unit(void) { return X; }\n") &&
+              fx_key(x, cc, k1) && fx_write(x->root, "sysalt/zopt.h", "\n") &&
+              fx_key(x, cc, k2) && fx_remove(x->root, "sysalt/zopt.h") &&
+              fx_write(x->root, "sysdef/zopt.h", "\n") &&
+              fx_key(x, cc, k3) && fx_remove(x->root, "sysdef/zopt.h");
+    AR_CHECK("key: built-in dirs are asked with the plan's -mcpu= "
+             "(a header in that list moves the key, one in the default "
+             "list does not)",
+             ok && strcmp(k1, k2) != 0 && strcmp(k1, k3) == 0);
+}
+
+static void test_key_driver_facts(struct fx *x)
+{
+    char cc[PATH_MAX], k1[65] = {0}, k2[65] = {0}, dir[PATH_MAX];
+    if (!fx_fake_driver(x, cc)) {
+        AR_CHECK("key: fake driver fixture", false);
+        return;
+    }
+    test_key_driver_targets(x, cc, k1);
+    (void)snprintf(dir, sizeof(dir), "%s/sysnew", x->root);
+    bool ok = fx_write(x->root, "sysnew/zopt.h", "\n") && fx_key(x, cc, k2) &&
+              fx_remove(x->root, "sysnew/zopt.h") && rmdir(dir) == 0;
+    AR_CHECK("key: a built-in dir the driver skipped as nonexistent that "
+             "appears re-asks the driver and moves the key",
+             fx_key_differs_then_same(x, cc, k1, k2, ok));
+    ok = fx_write(x->root, "lib/libc.so", "GROUP ( libc.so.7 )\n") &&
+         fx_key(x, cc, k2) &&
+         fx_write(x->root, "lib/libc.so", "GROUP ( libc.so.6 )\n");
+    AR_CHECK("key: the bytes of an implicit link library move the key",
+             fx_key_differs_then_same(x, cc, k1, k2, ok));
+    char miss[40] = {0};
+    ok = fx_write(x->root, "src/unit.c",
+                  "#include \"local.h\"\n#include <defs.h>\n"
+                  "int unit(void) { return X; }\n") &&
+         !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
+                                      "-std=c23 @build/args.rsp", "-shared",
+                                      NULL, x->depfile, k2, miss) &&
+         strcmp(miss, "argv_unrecognised") == 0;
+    miss[0] = '\0';
+    ok = ok && !zcl_devloop_action_root_key(x->root, "src/unit.c", cc,
+                                            "-std=c23", "build/extra.o -shared",
+                                            NULL, x->depfile, k2, miss) &&
+         strcmp(miss, "argv_unrecognised") == 0;
+    AR_CHECK("key: a plan that names a response file, or whose link flags "
+             "start with an input, misses", ok);
 }
 
 /* Unreadable for this user: mode 000, or (as root, who reads anything) a
@@ -1066,11 +1292,14 @@ static void test_derivation(void)
         test_derive_roots(x, &base);
         test_derive_env(x, &base);
         test_derive_refusals(x);
+        test_derive_allowlist(x, &base);
+        test_derive_climb(x, &base);
         test_derive_misses(x, &base);
         test_derive_cross_worktree(&base);
         test_derive_store(x, &base);
         test_derive_causes(x, &base);
         test_hotswap_hook(x);
+        test_key_driver_facts(x);
     }
     zcl_action_root_result_free(&base);
     if (x)

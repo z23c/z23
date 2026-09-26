@@ -367,8 +367,11 @@ static void ar_memo_store(const char *path, const struct ar_memo *key,
 /* __has_include, __has_include_next and __has_embed ask whether a name
  * resolves without necessarily adding it to the depfile, so the closure
  * alone cannot bind their answer. A file that spells one is re-read for the
- * names it asks about (see ar_cond_lookups_build). More than the longest
- * word ("__has_include_next__") minus one bytes carry across read chunks. */
+ * names it asks about (see ar_cond_lookups_build). A file that spells a
+ * climbing path ("../", "..\", a name ending "..") is re-read the same way
+ * for #include names that climb (see ar_include_climb). More than the
+ * longest word ("__has_include_next__") minus one bytes carry across read
+ * chunks. */
 #define AR_COND_CARRY 24u
 
 static bool ar_ident_char(char c)
@@ -395,10 +398,17 @@ static size_t ar_cond_word(const char *text, size_t len, size_t i)
     return 0;
 }
 
+/* ".." followed by a separator or a header-name close. */
+static bool ar_climb_at(const char *text, size_t len, size_t i)
+{
+    return text[i] == '.' && i + 2 < len && text[i + 1] == '.' &&
+           strchr("/\\\">", text[i + 2]) != NULL;
+}
+
 static bool ar_cond_present(const char *text, size_t len)
 {
     for (size_t i = 0; i < len; i++)
-        if (ar_cond_word(text, len, i))
+        if (ar_cond_word(text, len, i) || ar_climb_at(text, len, i))
             return true;
     return false;
 }
@@ -807,17 +817,227 @@ static bool ar_search_collect(struct ar_state *s, int want)
     return true;
 }
 
-static bool ar_argv_refused(struct ar_state *s, const char *const *argv,
-                            size_t argc)
+/* ---- argv allowlist ---------------------------------------------------- */
+
+/* Every argv word must be one this derivation understands; anything else
+ * (a response file, a plugin, a framework or sysroot-prefixed include dir,
+ * an input the closure does not hash) misses. Unknown is never a hit. */
+enum { AR_V_TEXT, AR_V_DIR, AR_V_OUT, AR_V_LANG, AR_V_FORCED };
+
+struct ar_valued {
+    const char *opt;
+    unsigned char kind;
+};
+
+static const struct ar_valued k_ar_valued[] = {
+    { "-idirafter", AR_V_DIR }, { "-isystem", AR_V_DIR },
+    { "-iquote", AR_V_DIR }, { "-I", AR_V_DIR }, { "-D", AR_V_TEXT },
+    { "-U", AR_V_TEXT }, { "-MT", AR_V_TEXT }, { "-MQ", AR_V_TEXT },
+    { "-MF", AR_V_OUT }, { "-o", AR_V_OUT }, { "-x", AR_V_LANG },
+    { "-include", AR_V_FORCED }, { "-imacros", AR_V_FORCED },
+};
+
+static const char *const k_ar_exact[] = {
+    "-c", "-pipe", "-pedantic", "-pedantic-errors", "-w", "-MD", "-MMD",
+    "-MP", "-shared", "-nostartfiles", "-bundle", "-fPIC", "-fPIE", "-fpic",
+    "-fpie", "-fno-pic", "-fno-pie", "-fstack-protector",
+    "-fstack-protector-strong", "-fstack-protector-all",
+    "-fno-stack-protector", "-fomit-frame-pointer", "-fno-omit-frame-pointer",
+    "-fcommon", "-fno-common", "-fno-strict-aliasing", "-fwrapv",
+    "-ffunction-sections", "-fdata-sections", "-fno-plt",
+    "-fstack-clash-protection", "-fno-builtin",
+    "-fno-asynchronous-unwind-tables", "-fno-strict-overflow",
+    "-fno-delete-null-pointer-checks", "-fno-lto", "-fcf-protection", "-g",
+    "-g0", "-g1", "-g2", "-g3", "-ggdb", "-gdwarf-4", "-gdwarf-5",
+    "-gno-record-gcc-switches", "-grecord-gcc-switches", "-O", "-O0", "-O1",
+    "-O2", "-O3", "-Os", "-Og", "-Oz", "-mno-red-zone",
+};
+
+/* Joined-value families whose value names no file. */
+static const char *const k_ar_joined[] = {
+    "-std=", "-ffile-prefix-map=", "-fdebug-prefix-map=",
+    "-fmacro-prefix-map=", "-fvisibility=", "-fcf-protection=",
+    "-ftrivial-auto-var-init=", "-fzero-call-used-regs=",
+    "-fdiagnostics-color", "-fno-diagnostics-color", "-march=", "-mtune=",
+    "-mcpu=",
+};
+
+/* -Wl, items: none names a file the root does not bind. */
+static const char *const k_ar_wl[] = {
+    "--build-id=none", "-z", "relro", "now", "noexecstack", "-Bsymbolic",
+    "--version-script=@out/version-script", "-undefined", "dynamic_lookup",
+    "-dead_strip",
+};
+
+static bool ar_in(const char *const *set, size_t n, const char *w, size_t len)
 {
-    for (size_t i = 0; i < argc; i++)
+    for (size_t i = 0; i < n; i++)
+        if (strlen(set[i]) == len && memcmp(set[i], w, len) == 0)
+            return true;
+    return false;
+}
+
+static bool ar_wl_ok(const char *arg)
+{
+    const char *p = arg + 4;
+    size_t n = sizeof(k_ar_wl) / sizeof(k_ar_wl[0]);
+    for (;;) {
+        size_t len = strcspn(p, ",");
+        if (!ar_in(k_ar_wl, n, p, len))
+            return false;
+        if (!p[len])
+            return true;
+        p += len + 1;
+    }
+}
+
+/* A flag that takes no value (or carries a harmless one joined). */
+static bool ar_flag_ok(const char *arg)
+{
+    if (ar_in(k_ar_exact, sizeof(k_ar_exact) / sizeof(k_ar_exact[0]), arg,
+              strlen(arg)))
+        return true;
+    for (size_t i = 0; i < sizeof(k_ar_joined) / sizeof(k_ar_joined[0]); i++)
+        if (strncmp(arg, k_ar_joined[i], strlen(k_ar_joined[i])) == 0)
+            return true;
+    if (strncmp(arg, "-Wl,", 4) == 0)
+        return ar_wl_ok(arg);
+    /* Warnings name no file; -Wp, and -Wa, forward to other programs. */
+    return arg[1] == 'W' && strncmp(arg, "-Wp,", 4) != 0 &&
+           strncmp(arg, "-Wa,", 4) != 0;
+}
+
+static const struct ar_valued *ar_valued_opt(const char *arg)
+{
+    for (size_t i = 0; i < sizeof(k_ar_valued) / sizeof(k_ar_valued[0]); i++)
+        if (strncmp(arg, k_ar_valued[i].opt, strlen(k_ar_valued[i].opt)) == 0)
+            return &k_ar_valued[i];
+    return NULL;
+}
+
+/* A value the derivation can bind: an include dir that is not
+ * sysroot-prefixed ("=dir") or another option's spelling, the C language,
+ * a forced include by absolute path (it is then in the closure). */
+static bool ar_value_ok(unsigned char kind, const char *v)
+{
+    switch (kind) {
+    case AR_V_DIR:
+        return v[0] && v[0] != '=' && v[0] != '-';
+    case AR_V_LANG:
+        return strcmp(v, "c") == 0;
+    case AR_V_FORCED:
+        return v[0] == '/';
+    default:
+        return true;
+    }
+}
+
+static const char *ar_mapped(const struct ar_state *s, const char *arg)
+{
+    const struct zcl_action_root_request *req = s->c.req;
+    for (size_t v = 0; v < req->virtual_count; v++)
+        if (strcmp(arg, req->virtual_from[v]) == 0)
+            return req->virtual_to[v];
+    return arg;
+}
+
+/* A compile input must be hashed by the closure; a link input must be a
+ * declared output (the compile's object, a descriptor). */
+static bool ar_input_ok(const struct ar_state *s, const char *arg, bool link,
+                        const char *object)
+{
+    if (strncmp(arg, "@out/", 5) == 0)
+        return link;
+    if (link)
+        return object && strcmp(arg, object) == 0;
+    char token[PATH_MAX], fs[PATH_MAX];
+    if (arg[0] == '@' || !ar_tokenize(&s->c, arg, token, fs))
+        return false;
+    for (size_t i = 0; i < s->dep_n; i++)
+        if (strcmp(s->deps[i].token, token) == 0)
+            return true;
+    return false;
+}
+
+/* Words from index `at`: returns how many it consumed, 0 when refused. */
+static size_t ar_arg_step(const struct ar_state *s, const char *const *argv,
+                          size_t argc, size_t at, bool link,
+                          const char *object)
+{
+    const char *arg = ar_mapped(s, argv[at]);
+    if (arg[0] != '-')
+        return ar_input_ok(s, arg, link, object) ? 1 : 0;
+    const struct ar_valued *v = ar_valued_opt(arg);
+    if (!v)
+        return ar_flag_ok(arg) ? 1 : 0;
+    const char *joined = arg + strlen(v->opt);
+    if (joined[0])
+        return ar_value_ok(v->kind, joined) ? 1 : 0;
+    return at + 1 < argc && ar_value_ok(v->kind, ar_mapped(s, argv[at + 1]))
+               ? 2 : 0;
+}
+
+/* The compile's -o value, which the link step may name as its input. */
+static const char *ar_compile_object(const struct ar_state *s)
+{
+    const struct zcl_action_root_request *req = s->c.req;
+    for (size_t i = 0; i + 1 < req->argc; i++)
+        if (strcmp(req->argv[i], "-o") == 0)
+            return ar_mapped(s, req->argv[i + 1]);
+    return NULL;
+}
+
+static size_t ar_driver_words(const char *const *argv, size_t argc)
+{
+    size_t i = 0;
+    while (i < argc && argv[i][0] != '-' && argv[i][0] != '@')
+        i++;
+    return i;
+}
+
+/* The leading words before the first option are the driver command, bound
+ * by the caller's toolchain root; the link step must run the same driver,
+ * so a word slipped in before its first option is never taken for it. */
+static bool ar_driver_ok(const struct ar_state *s, const char *const *argv,
+                         size_t n, bool link)
+{
+    const struct zcl_action_root_request *req = s->c.req;
+    if (n == 0 || !link)
+        return n > 0;
+    if (ar_driver_words(req->argv, req->argc) != n)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(argv[i], req->argv[i]) != 0)
+            return false;
+    return true;
+}
+
+static bool ar_argv_admitted(struct ar_state *s, const char *const *argv,
+                             size_t argc, bool link)
+{
+    const char *object = link ? ar_compile_object(s) : NULL;
+    size_t i = ar_driver_words(argv, argc);
+    if (!ar_driver_ok(s, argv, i, link)) {
+        ar_fail(&s->c, "argv_unrecognised",
+                "argv names no driver, or the link runs another", argv[0]);
+        return false;
+    }
+    while (i < argc) {
         if (ar_search_flag_unsupported(argv[i])) {
             ar_fail(&s->c, "search_flag_unsupported",
                     "argv changes the built-in include search or linker",
                     argv[i]);
-            return true;
+            return false;
         }
-    return false;
+        size_t used = ar_arg_step(s, argv, argc, i, link, object);
+        if (used == 0) {
+            ar_fail(&s->c, "argv_unrecognised",
+                    "argv word the action root cannot bind", argv[i]);
+            return false;
+        }
+        i += used;
+    }
+    return true;
 }
 
 /* A built-in dir enters the search order and the preimage by its exact
@@ -843,7 +1063,7 @@ static bool ar_builtin_dirs_canonical(struct ar_state *s)
 static bool ar_search_build(struct ar_state *s)
 {
     const struct zcl_action_root_request *req = s->c.req;
-    if (ar_argv_refused(s, req->argv, req->argc) ||
+    if (!ar_argv_admitted(s, req->argv, req->argc, false) ||
         !ar_builtin_dirs_canonical(s))
         return false;
     for (int cls = 0; cls < AR_Q_COUNT; cls++)
@@ -1011,18 +1231,25 @@ static bool ar_lex_opener(const char *t, size_t len, size_t i)
     return t[i] == '/' && i + 1 < len && (t[i + 1] == '*' || t[i + 1] == '/');
 }
 
+static size_t ar_skip_block_comment(const char *t, size_t len, size_t i)
+{
+    for (i += 2; i + 1 < len && !(t[i] == '*' && t[i + 1] == '/'); i++) {}
+    return i + 2 < len ? i + 2 : len;
+}
+
+static size_t ar_skip_line_comment(const char *t, size_t len, size_t i)
+{
+    while (i < len && t[i] != '\n')
+        i += t[i] == '\\' ? 2 : 1;
+    return i < len ? i : len;
+}
+
 /* Index just past the comment or literal opening at text[i]. */
 static size_t ar_lex_skip(const char *t, size_t len, size_t i)
 {
-    if (t[i] == '/' && t[i + 1] == '*') {
-        for (i += 2; i + 1 < len && !(t[i] == '*' && t[i + 1] == '/'); i++) {}
-        return i + 2 < len ? i + 2 : len;
-    }
-    if (t[i] == '/') {
-        while (i < len && t[i] != '\n')
-            i += t[i] == '\\' ? 2 : 1;
-        return i < len ? i : len;
-    }
+    if (t[i] == '/')
+        return t[i + 1] == '*' ? ar_skip_block_comment(t, len, i)
+                               : ar_skip_line_comment(t, len, i);
     char quote = t[i];
     for (i++; i < len && t[i] != quote && t[i] != '\n'; i++)
         if (t[i] == '\\')
@@ -1053,6 +1280,27 @@ static bool ar_cond_operand_only(const char *t, size_t i)
     return false;
 }
 
+/* A literal header name ("x" or <x>) opening at t[j]: its bounds and closing
+ * character. False when there is none or it does not close on the line;
+ * *end is then where scanning resumes. */
+struct ar_hname {
+    size_t start, end;
+    char close;
+};
+
+static bool ar_header_name(const char *t, size_t len, size_t j,
+                           struct ar_hname *h)
+{
+    h->close = j < len && t[j] == '"' ? '"' : j < len && t[j] == '<' ? '>'
+                                                                    : 0;
+    h->start = j + 1;
+    h->end = h->close ? h->start : j;
+    while (h->close && h->end < len && t[h->end] != h->close &&
+           t[h->end] != '\n')
+        h->end++;
+    return h->close && h->end < len && t[h->end] == h->close;
+}
+
 /* One conditional test at text[i] (word length w). As an operand of
  * defined / #ifdef / #define it asks nothing; called with a literal "name"
  * or <name> it is recorded; anything else (a macro argument, the word
@@ -1064,33 +1312,100 @@ static size_t ar_cond_test(struct ar_state *s, const char *text, size_t len,
     if (ar_cond_operand_only(text, i))
         return i + w;
     size_t j = ar_skip_space(text, len, i + w);
-    char close = 0;
-    if (j < len && text[j] == '(') {
-        j = ar_skip_space(text, len, j + 1);
-        close = j < len && text[j] == '"' ? '"'
-              : j < len && text[j] == '<' ? '>' : 0;
-    }
-    size_t start = j + 1, end = start;
-    while (close && end < len && text[end] != close && text[end] != '\n')
-        end++;
-    if (!close || end >= len || text[end] != close ||
-        !ar_cond_name_add(s, text + start, end - start)) {
+    struct ar_hname h = {0};
+    bool named = j < len && text[j] == '(' &&
+                 ar_header_name(text, len, ar_skip_space(text, len, j + 1),
+                                &h) &&
+                 ar_cond_name_add(s, text + h.start, h.end - h.start);
+    if (!named) {
         ar_fail(&s->c, "conditional_lookup_unbound",
                 "conditional include test has no literal header name", token);
         return 0;
     }
-    return end + 1;
+    return h.end + 1;
 }
 
-/* Walk code outside comments and literals for conditional tests. */
-static bool ar_cond_scan_text(struct ar_state *s, const char *text,
-                              size_t len, const char *token)
+/* A header name with a ".." component. */
+static bool ar_name_climbs(const char *name, size_t n)
 {
+    for (size_t i = 0; i + 1 < n; i++)
+        if (name[i] == '.' && name[i + 1] == '.' &&
+            (i == 0 || name[i - 1] == '/' || name[i - 1] == '\\') &&
+            (i + 2 == n || name[i + 2] == '/' || name[i + 2] == '\\'))
+            return true;
+    return false;
+}
+
+/* The climbing quote name, resolved beside the includer, is a regular file:
+ * the compiler takes that route first, so nothing earlier can shadow it. */
+static bool ar_beside_includer(const struct ar_dep *d, const char *name,
+                               size_t n)
+{
+    const char *slash = strrchr(d->fs, '/');
+    char path[PATH_MAX];
+    struct stat st;
+    return slash &&
+           snprintf(path, sizeof(path), "%.*s/%.*s", (int)(slash - d->fs),
+                    d->fs, (int)n, name) < (int)sizeof(path) &&
+           stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static size_t ar_directive_word(const char *t, size_t len, size_t j,
+                                bool *next)
+{
+    static const char *const words[] = {
+        "include_next", "include", "import", "embed",
+    };
+    for (size_t k = 0; k < sizeof(words) / sizeof(words[0]); k++) {
+        size_t n = strlen(words[k]);
+        if (j + n <= len && memcmp(t + j, words[k], n) == 0 &&
+            (j + n == len || !ar_ident_char(t[j + n]))) {
+            *next = k == 0;
+            return n;
+        }
+    }
+    return 0;
+}
+
+/* One '#' at t[i]. A negative lookup records the name the depfile path
+ * implies below each dir; a name that climbs ("../x.h") reaches the same
+ * file from dirs that name never covers. Only a quote name found beside its
+ * includer is bound (no earlier location exists); any other route misses
+ * (include_climb_unbound). Returns the index to resume at, 0 on a miss. */
+static size_t ar_include_climb(struct ar_state *s, const char *t, size_t len,
+                               size_t i, const struct ar_dep *d)
+{
+    bool next = false;
+    size_t j = ar_skip_space(t, len, i + 1);
+    size_t w = ar_directive_word(t, len, j, &next);
+    if (!w)
+        return i + 1;
+    struct ar_hname h = {0};
+    if (!ar_header_name(t, len, ar_skip_space(t, len, j + w), &h))
+        return h.end;
+    const char *name = t + h.start;
+    size_t n = h.end - h.start;
+    if (name[0] == '/' || !ar_name_climbs(name, n) ||
+        (h.close == '"' && !next && ar_beside_includer(d, name, n)))
+        return h.end + 1;
+    ar_fail(&s->c, "include_climb_unbound",
+            "an include name climbing with \"..\" is not bound beside its "
+            "includer", d->token);
+    return 0;
+}
+
+/* Walk code outside comments and literals for conditional tests and
+ * climbing include names. */
+static bool ar_cond_scan_text(struct ar_state *s, const char *text,
+                              size_t len, const struct ar_dep *d)
+{
+    const char *token = d->token;
     size_t i = 0;
     while (i < len) {
         size_t w = ar_cond_word(text, len, i);
-        if (w) {
-            i = ar_cond_test(s, text, len, i, w, token);
+        if (w || text[i] == '#') {
+            i = w ? ar_cond_test(s, text, len, i, w, token)
+                  : ar_include_climb(s, text, len, i, d);
             if (i == 0)
                 return false;
         } else {
@@ -1120,7 +1435,7 @@ static bool ar_cond_scan_dep(struct ar_state *s, const struct ar_dep *d)
         free(text);
         return false;
     }
-    ok = ar_cond_scan_text(s, text, len, d->token);
+    ok = ar_cond_scan_text(s, text, len, d);
     free(text);
     return ok;
 }
@@ -1266,6 +1581,18 @@ static long ar_env_slot(const char *entry, size_t name_len)
     return -1;
 }
 
+/* Variables that add include or library search dirs, or move the programs
+ * the driver runs. Their value alone cannot bind what those dirs hold, so
+ * a derivation under any of them (even set empty) misses. */
+static bool ar_env_search(const char *entry, size_t name_len)
+{
+    static const char *const names[] = {
+        "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+        "LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX",
+    };
+    return ar_in(names, sizeof(names) / sizeof(names[0]), entry, name_len);
+}
+
 /* The whole allowlist, each name set or explicitly unset. An environment
  * that names one allowlisted variable twice is ambiguous (which one the
  * child sees depends on the libc) and is refused, not normalized. */
@@ -1274,6 +1601,12 @@ static bool ar_env_build(struct ar_state *s)
     const char *const *env = s->c.req->environ;
     for (size_t i = 0; env && env[i]; i++) {
         const char *eq = strchr(env[i], '=');
+        if (eq && ar_env_search(env[i], (size_t)(eq - env[i]))) {
+            ar_fail(&s->c, "env_search_unbound",
+                    "environment adds search dirs the root cannot probe",
+                    env[i]);
+            return false;
+        }
         long slot = eq ? ar_env_slot(env[i], (size_t)(eq - env[i])) : -1;
         if (slot < 0)
             continue;
@@ -1341,7 +1674,7 @@ static bool ar_linker_build(struct ar_state *s)
         ar_fail(&s->c, "linker_missing", "linking stage names no linker", NULL);
         return false;
     }
-    return !ar_argv_refused(s, l->argv, l->argc) &&
+    return ar_argv_admitted(s, l->argv, l->argc, true) &&
            ar_linker_file(s, l->ld, s->ld, s->ld_sha3) &&
            (!l->collect2 ||
             ar_linker_file(s, l->collect2, s->collect2, s->collect2_sha3)) &&

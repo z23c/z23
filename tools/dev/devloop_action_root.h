@@ -23,6 +23,17 @@
  * spells one is re-read; each literal name it asks about is one conditional
  * lookup probed at every includer and search dir. A test whose argument is
  * not a literal name misses (conditional_lookup_unbound).
+ *
+ * Climbing names. A lookup name is the depfile path below a dir, so an
+ * #include whose name climbs ("../x.h") is only bound when it is a quote
+ * name found beside its includer; any other climbing route misses
+ * (include_climb_unbound).
+ *
+ * Argv is an allowlist: every word must be a flag, a valued option whose
+ * value names no unbound file, a compile input in the closure or a
+ * declared output. Anything else misses (argv_unrecognised). Environment
+ * variables that add search dirs (CPATH, LIBRARY_PATH, ...) miss
+ * (env_search_unbound) whenever present.
  */
 
 #ifndef ZCL_DEVLOOP_ACTION_ROOT_H
@@ -116,6 +127,7 @@ struct zcl_action_root_request {
  * dependency_duplicate, producer_unknown, include_dir_outside_repo,
  * search_class_conflict, search_too_large, search_flag_unsupported,
  * includer_unavailable, lookup_unavailable, conditional_lookup_unbound,
+ * include_climb_unbound, argv_unrecognised, env_search_unbound,
  * probe_unreadable,
  * probe_overflow, argv_noncanonical, env_duplicate, env_noncanonical,
  * builtin_dir_noncanonical, sysroot_noncanonical, linker_unavailable,
