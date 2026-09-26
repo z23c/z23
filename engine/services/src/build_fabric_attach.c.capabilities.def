@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the executor-key attach path. */
+ZCL_MODULE_CAPABILITY("engine/services/src/build_fabric_attach.c", CAP_FS_WRITE, "")

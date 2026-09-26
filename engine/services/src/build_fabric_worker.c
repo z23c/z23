@@ -18,6 +18,7 @@
 #include "crypto/sha3.h"
 #include "platform/os_proc.h"
 #include "platform/time_compat.h"
+#include "services/build_fabric_attach.h"
 #include "services/build_fabric_package_executor.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker_evidence.h"
@@ -649,6 +650,12 @@ struct zcl_result build_fabric_worker_execute(
             workspace, &observation, evidence_root);
         if (!observed.ok)
             return bfw_fail(ndb, action_id, lease_id, observed.message);
+        /* Publish the executor-key record so a later eligible duplicate
+         * request can attach to this physical result instead of recompiling.
+         * Best-effort: the observation, output, and receipt above stand on
+         * their own; a publish failure logs and degrades to a future MISS. */
+        build_fabric_executor_key_publish_logged(
+            workspace, &job, &action, observed_input_bytes_root);
     }
     int64_t output_cas_us =
         platform_time_monotonic_us() - output_cas_started_us;
