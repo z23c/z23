@@ -3644,13 +3644,16 @@ endif
 # feeds. Linked with $(HOTSWAP_MODULE_LDFLAGS) like every capsule.
 REFLEX_RUNNER_FIXTURE_SRC = tests/harness/fixtures/reflex_runner_fixture.c
 REFLEX_RUNNER_FIXTURE_KINDS = canary green regress loop segv socket wx \
-	pidfd killparent forkctor forkstory execctor execstory
+	pidfd killparent forkctor forkstory execctor execstory \
+	dupframe reapclose
 REFLEX_RUNNER_FIXTURE_SOS = $(foreach k,$(REFLEX_RUNNER_FIXTURE_KINDS),\
 	$(BUILD_DIR)/fixtures/reflex_runner/zcl_reflex_fixture_$(k).so)
 
 $(BUILD_DIR)/fixtures/reflex_runner/zcl_reflex_fixture_%.so: \
 		$(REFLEX_RUNNER_FIXTURE_SRC) \
 		tests/harness/fixtures/reflex_runner_fixture.h \
+		tools/dev/devloop_reflex_runner_wire.h \
+		tools/dev/devloop_reflex_runner.h \
 		engine/modules/hotswap/include/hotswap/hotfork_capsule.h
 	@mkdir -p $(dir $@)
 	@set -eu; \

@@ -280,6 +280,10 @@ static bool request_build(const struct zcl_reflex_runner_spec *spec,
     memset(r, 0, sizeof(*r));
     r->mode = (uint32_t)spec->mode;
     r->timeout_ms = spec->timeout_ms;
+#if defined(ZCL_TESTING)
+    if (spec->testing_disable_close_range)
+        r->testing_flags |= ZCL_REFLEX_TESTING_DISABLE_CLOSE_RANGE;
+#endif
     return (spec->mode == ZCL_REFLEX_MODE_HOT_FORK ||
             spec->mode == ZCL_REFLEX_MODE_HOT_SHADOW) &&
         spec->timeout_ms > 0 && spec->timeout_ms <= 60000u &&

@@ -56,6 +56,11 @@ struct zcl_reflex_runner_spec {
     const char *story_root;
     const char *story_fixture_root;
     uint32_t timeout_ms;
+    /* Test-only; a production caller must leave this false. Reaches the
+     * already-exec'd runner as a wire request flag (see
+     * ZCL_REFLEX_TESTING_DISABLE_CLOSE_RANGE), never an environment
+     * variable, because the runner execs with an empty environment. */
+    bool testing_disable_close_range;
 };
 
 /* The resident's validated view of one leaf. Environment facts (hash,

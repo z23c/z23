@@ -464,18 +464,42 @@ static bool close_by_enumeration(const int *keep, size_t keep_count)
     return clean;
 }
 
-bool zcl_reflex_close_all_except(const int *keep, size_t keep_count)
+/* Sorts `keep` into `sorted` (ascending) for close_spans_by_range and rejects
+ * an unusable list. Shared by every close_all_except variant. */
+static bool close_keep_sorted(const int *keep, size_t keep_count,
+                              int sorted[8])
 {
-    int sorted[8];
     if (!keep || keep_count == 0 || keep_count > 8) return false;
     memcpy(sorted, keep, keep_count * sizeof(int));
     for (size_t i = 1; i < keep_count; i++)
         for (size_t j = i; j > 0 && sorted[j - 1] > sorted[j]; j--) {
             int t = sorted[j]; sorted[j] = sorted[j - 1]; sorted[j - 1] = t;
         }
-    if (sorted[0] < 0) return false;
+    return sorted[0] >= 0;
+}
+
+bool zcl_reflex_close_all_except(const int *keep, size_t keep_count)
+{
+    int sorted[8];
+    if (!close_keep_sorted(keep, keep_count, sorted)) return false;
     return close_spans_by_range(sorted, keep_count) ||
         close_by_enumeration(sorted, keep_count);
+}
+
+bool zcl_reflex_close_all_except_via(int dir_fd, const int *keep,
+                                     size_t keep_count)
+{
+    int sorted[8];
+    if (!close_keep_sorted(keep, keep_count, sorted)) return false;
+    if (close_spans_by_range(sorted, keep_count)) return true;
+    if (dir_fd < 0) return false;
+    bool clean = false;
+    for (int pass = 0; pass < 4 && !clean; pass++) {
+        long closed = fd_dir_pass(dir_fd, sorted, keep_count, true);
+        if (closed < 0) break;
+        clean = closed == 0;
+    }
+    return clean;
 }
 
 static bool write_all(int fd, const void *data, size_t len)
@@ -587,14 +611,21 @@ static bool child_install_filters(void)
 /* Landlock deny-all, then close the ruleset descriptor os_sandbox retains
  * (this single-threaded child never joins threads, so the candidate must not
  * see it), then the syscall layers. `keep` holds the image, the report pipe
- * and the pre-opened census directory. */
+ * and the pre-opened census directory.
+ *
+ * The close walks keep[2] (the census directory), already open before
+ * Landlock: close_all_except's plain enumeration fallback opens its own
+ * directory, and a fresh open of /proc/self/fd here is exactly what Landlock
+ * deny-all just refused, so that path would fail every leaf closed (never
+ * reaching the story at all). Walking the descriptor the caller already
+ * holds needs no new open. */
 static bool child_enter_sandbox(struct zcl_reflex_preload_frame *pre,
                                 const int keep[static 3])
 {
     if (!os_sandbox_landlock_restrict(NULL, 0).ok)
         return child_note(pre->stage, pre->error, "landlock",
                           "Landlock deny-all unavailable"), false;
-    if (!zcl_reflex_close_all_except(keep, 3))
+    if (!zcl_reflex_close_all_except_via(keep[2], keep, 3))
         return child_note(pre->stage, pre->error, "fds",
                           "ruleset close failed"), false;
     if (!child_install_filters())
@@ -950,7 +981,12 @@ static bool request_valid(const struct zcl_reflex_request *r)
         r->head.size == sizeof(*r) &&
         reflex_mode_known(r->mode) &&
         r->timeout_ms > 0 && r->timeout_ms <= 60000u &&
-        request_strings_terminated(r) && strlen(r->expected_sha256) == 64;
+        request_strings_terminated(r) && strlen(r->expected_sha256) == 64
+#if defined(ZCL_TESTING)
+        && (r->testing_flags & ~(uint32_t)ZCL_REFLEX_TESTING_DISABLE_CLOSE_RANGE)
+            == 0
+#endif
+        ;
 }
 
 static void reply_error(struct zcl_reflex_reply *reply, const char *error)
@@ -1108,8 +1144,16 @@ static bool runner_serve_one(void)
     bool keep_running = true;
     if (got < 0 || image_fd < 0 || !request_valid(&request))
         reply_error(&reply, "malformed reflex request");
-    else if (runner_verify_image(image_fd, &request, &reply))
+    else if (runner_verify_image(image_fd, &request, &reply)) {
+#if defined(ZCL_TESTING)
+        /* Reset every request: a warm runner serves many candidates, and a
+         * flag not carried by THIS request must not linger from the last
+         * one. */
+        zcl_reflex_testing_use_close_range(
+            !(request.testing_flags & ZCL_REFLEX_TESTING_DISABLE_CLOSE_RANGE));
+#endif
         keep_running = runner_execute(&request, image_fd, &reply);
+    }
     if (image_fd >= 0) (void)close(image_fd);
     return runner_send(&reply, sizeof(reply)) && keep_running;
 }
@@ -1119,9 +1163,14 @@ static bool runner_enter(void)
     const int keep[] = {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO,
                         ZCL_REFLEX_RUNNER_CONTROL_FD};
     struct sigaction ignore = {.sa_handler = SIG_IGN};
+    /* An inherited SIG_IGN on SIGCHLD auto-reaps children (POSIX), which
+     * would silently swallow every leaf exit this runner needs to wait for
+     * and read the status of. Reset to SIG_DFL before anything forks. */
+    struct sigaction dfl = {.sa_handler = SIG_DFL};
     return prctl(PR_SET_PDEATHSIG, SIGKILL) == 0 && runner_peer_is_parent() &&
         os_sandbox_no_new_privs() && zcl_reflex_close_all_except(keep, 4) &&
         chdir("/") == 0 && sigaction(SIGPIPE, &ignore, NULL) == 0 &&
+        sigaction(SIGCHLD, &dfl, NULL) == 0 &&
         os_sandbox_seccomp_deny(g_runner_denied, sizeof(g_runner_denied) /
                                 sizeof(g_runner_denied[0]), false).ok;
 }

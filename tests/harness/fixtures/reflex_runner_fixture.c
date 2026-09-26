@@ -21,6 +21,13 @@
  *   killparent — kill(getppid(), SIGKILL); killed, and the runner survives
  *   forkctor / forkstory — fork() from the constructor / the story; killed
  *   execctor / execstory — execve() from the constructor / the story; killed
+ *   dupframe   — after a normal green story, writes a second well-formed
+ *                pre-load-kind frame to the one FIFO among its descriptors (it
+ *                is never told the report pipe's number); the runner must name
+ *                this a duplicated frame and never say green
+ *   reapclose  — closes every descriptor above 2 (including the report
+ *                pipe, whichever one it is) then never returns; the runner
+ *                must see EOF, kill it at the deadline and survive
  *
  * Every escape kind reports "escaped:<what>" and returns GREEN if the call
  * works, and "refused:<errno>" (red) if it merely fails, so a permitted
@@ -30,6 +37,7 @@
 #define _GNU_SOURCE /* MAP_ANONYMOUS */
 #endif
 
+#include "devloop_reflex_runner_wire.h"
 #include "hotswap/hotfork_capsule.h"
 #include "reflex_runner_fixture.h"
 
@@ -42,6 +50,7 @@
 #include <sys/mman.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #if __has_include(<sys/pidfd.h>)
 #include <sys/pidfd.h> /* glibc >= 2.36 wraps pidfd_open */
@@ -241,6 +250,33 @@ static bool fixture_story(struct zcl_hotfork_observation_v1 *out)
                                  sizeof(detail));
 #endif
     return fixture_finish(out, 1, escaped ? 1u : 0u, detail);
+#elif defined(ZCL_REFLEX_FIXTURE_KIND_dupframe)
+    /* A normal green story, then a second well-formed pre-load-kind frame
+     * aimed at the report pipe. Confinement leaves exactly the image and the
+     * report pipe open, at fd numbers the story is never told, so it finds
+     * the pipe the way a hostile candidate would: the one FIFO among its
+     * descriptors. (Writing the sealed image instead would only raise
+     * SIGXFSZ under the zero RLIMIT_FSIZE and never reach the pipe.) */
+    bool ok = fixture_finish(out, 3, 3, "green checks=3/3");
+    struct zcl_reflex_preload_frame dup = {
+        .head = {.magic = ZCL_REFLEX_REPORT_MAGIC, .abi = ZCL_REFLEX_WIRE_ABI,
+                 .kind = ZCL_REFLEX_REPORT_PRELOAD, .size = sizeof(dup)},
+        .sandboxed = 1,
+    };
+    for (int fd = 3; fd < 256; fd++) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode))
+            (void)write(fd, &dup, sizeof(dup));
+    }
+    return ok;
+#elif defined(ZCL_REFLEX_FIXTURE_KIND_reapclose)
+    /* Close every descriptor above 2 -- the report pipe among them, whatever
+     * its number -- then never return. The runner must see EOF on its read
+     * end, still bound the leaf to the deadline, and survive. */
+    for (int fd = 3; fd < 256; fd++)
+        (void)close(fd);
+    for (volatile uint64_t spin = 0;; spin++) {}
+    return fixture_finish(out, 1, 1, "unreachable");
 #else
 #error "unknown reflex runner fixture kind"
 #endif

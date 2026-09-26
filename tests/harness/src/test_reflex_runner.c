@@ -99,9 +99,11 @@ static bool rr_prepare(struct rr_case *c, const char *kind,
     return true;
 }
 
-static bool rr_run(struct rr_case *c, const char *kind, uint32_t timeout_ms)
+static bool rr_run_with(struct rr_case *c, const char *kind,
+                        uint32_t timeout_ms, bool disable_close_range)
 {
     if (!rr_prepare(c, kind, timeout_ms)) return false;
+    c->spec.testing_disable_close_range = disable_close_range;
     int64_t started = platform_time_monotonic_us();
     bool available = zcl_reflex_runner_run(&c->spec, &c->out);
     c->wall_us = platform_time_monotonic_us() - started;
@@ -116,6 +118,11 @@ static bool rr_run(struct rr_case *c, const char *kind, uint32_t timeout_ms)
            (long long)c->out.dlopen_us, (long long)c->out.story_us,
            c->out.reason, c->out.report.observation.detail);
     return available;
+}
+
+static bool rr_run(struct rr_case *c, const char *kind, uint32_t timeout_ms)
+{
+    return rr_run_with(c, kind, timeout_ms, false);
 }
 
 static bool rr_confined(const struct zcl_reflex_runner_outcome *o)
@@ -336,7 +343,7 @@ static int t_unverifiable_artifact_fails_closed(void)
         ASSERT(!zcl_reflex_runner_run(&c.spec, &c.out));
         ASSERT(!c.out.available);
         ASSERT(!c.out.green);
-        ASSERT(c.out.reason[0] != '\0');
+        ASSERT(strstr(c.out.reason, "digest mismatch") != NULL);
 
         c.spec.artifact_sha256 = c.sha;
         c.spec.artifact_path = RR_DIR "absent.so";
@@ -776,6 +783,117 @@ static int t_reap_is_bounded_after_eof(void)
     return failures;
 }
 
+/* F1 regression: the runner's post-Landlock descriptor close must not
+ * reopen /proc/self/fd (Landlock now refuses it) when close_range is
+ * unavailable. The only way to drive a REAL leaf down that fallback is the
+ * ZCL_TESTING-only wire flag (never an env var: the runner execs with an
+ * empty environment and cannot see one). A green candidate must stay green
+ * and leave no descriptor behind even on the enumeration path. */
+static int t_green_survives_leaf_close_without_close_range(void)
+{
+    int failures = 0;
+    TEST("reflex runner: green candidate confines via the Landlock-safe "
+         "enumeration fallback when close_range is disabled") {
+        struct rr_case c;
+        ASSERT(rr_run_with(&c, "green", 1000, true));
+        ASSERT(c.out.green);
+        ASSERT(rr_confined(&c.out));
+        ASSERT(c.out.report.wx_installed);
+
+        struct rr_case after;
+        ASSERT(rr_run(&after, "green", 1000));
+        ASSERT(after.out.green);
+        ASSERT_EQ(after.out.runner_pid, c.out.runner_pid);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* F4(a): a story that writes a second well-formed pre-load-kind frame
+ * after it runs, aimed at every descriptor above 2 since it cannot know the
+ * report pipe's number. The runner must name this a duplicated frame and
+ * never say green. */
+static int t_hostile_story_duplicate_frame_is_red(void)
+{
+    int failures = 0;
+    TEST("reflex runner: a story-injected duplicate pre-load frame is red "
+         "by the duplicated-frame name, never green") {
+        struct rr_case c;
+        ASSERT(rr_run(&c, "dupframe", 1000));
+        ASSERT(c.out.available);
+        ASSERT(!c.out.green);
+        ASSERT(!c.out.report_complete);
+        ASSERT_STR_EQ(c.out.reason, "leaf report: duplicated frame");
+
+        struct rr_case after;
+        ASSERT(rr_run(&after, "green", 1000));
+        ASSERT(after.out.green);
+        ASSERT_EQ(after.out.runner_pid, c.out.runner_pid);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* F4(b): a story that closes every descriptor above 2 (the report pipe
+ * among them, whatever its number) then never returns. The runner must see
+ * EOF, still kill the leaf at the deadline, name it the bounded-reap
+ * reason, and survive. */
+static int t_leaf_closes_pipe_then_outlives_deadline(void)
+{
+    int failures = 0;
+    TEST("reflex runner: a leaf that closes its own report pipe then spins "
+         "past the deadline is killed and named by the bounded-reap "
+         "reason; the runner survives") {
+        struct rr_case c;
+        ASSERT(rr_run(&c, "reapclose", 300));
+        ASSERT(c.out.available);
+        ASSERT(!c.out.green);
+        ASSERT_EQ(c.out.child_signal, SIGKILL);
+        ASSERT(c.out.timed_out);
+        ASSERT(c.wall_us >= 250000 && c.wall_us < 3000000);
+        ASSERT_STR_EQ(c.out.reason, "leaf outlived its deadline after "
+                      "closing its report pipe");
+        int runner_pid = c.out.runner_pid;
+
+        struct rr_case after;
+        ASSERT(rr_run(&after, "green", 1000));
+        ASSERT(after.out.green);
+        ASSERT_EQ(after.out.runner_pid, runner_pid);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* F2: SIG_IGN on SIGCHLD survives exec, and under it the kernel auto-reaps
+ * every exiting child, so a runner that kept it could never waitid() its
+ * leaf (nor its startup deny probes). The resident spawns a fresh runner
+ * while SIGCHLD is ignored; the runner must reset the disposition itself and
+ * still reap, observe the W^X layer and say green. The resident's own
+ * disposition is restored before any assert can leave the case. */
+static int t_runner_resets_inherited_sigchld_ignore(void)
+{
+    int failures = 0;
+    TEST("reflex runner: a runner exec'd under an inherited SIGCHLD SIG_IGN "
+         "still reaps its leaf and says green") {
+        struct sigaction ignore = {.sa_handler = SIG_IGN};
+        struct sigaction saved;
+        zcl_reflex_runner_shutdown();
+        ASSERT(sigaction(SIGCHLD, &ignore, &saved) == 0);
+        struct rr_case c;
+        bool ran = rr_run(&c, "green", 1000);
+        bool restored = sigaction(SIGCHLD, &saved, NULL) == 0;
+        ASSERT(restored);
+        ASSERT(ran);
+        ASSERT(!c.out.runner_warm);
+        ASSERT(c.out.green);
+        ASSERT(rr_confined(&c.out));
+        ASSERT(c.out.report.wx_installed);
+        ASSERT_EQ(c.out.child_exit_code, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_reflex_runner(void);
 int test_reflex_runner(void)
 {
@@ -792,6 +910,10 @@ int test_reflex_runner(void)
     failures += t_report_strings_validated_before_use();
     failures += t_report_frames_parse_by_name();
     failures += t_reap_is_bounded_after_eof();
+    failures += t_green_survives_leaf_close_without_close_range();
+    failures += t_hostile_story_duplicate_frame_is_red();
+    failures += t_leaf_closes_pipe_then_outlives_deadline();
+    failures += t_runner_resets_inherited_sigchld_ignore();
     zcl_reflex_runner_shutdown();
     printf("=== reflex_runner: %d failures ===\n", failures);
     return failures;

@@ -61,7 +61,23 @@ struct zcl_reflex_request {
     char story_id[128];
     char story_root[65];
     char story_fixture_root[65];
+#if defined(ZCL_TESTING)
+    /* Test-only seam: the runner is exec'd with an empty environment (a real
+     * candidate must never see one), so a proof that needs to reach the
+     * warm, already-exec'd runner has no env var to carry it. This field
+     * travels over the same wire the runner already trusts for everything
+     * else and is read only under ZCL_TESTING; it does not exist in a
+     * production build's wire struct. */
+    uint32_t testing_flags;
+#endif
 };
+
+#if defined(ZCL_TESTING)
+/* zcl_reflex_request.testing_flags: force the post-Landlock descriptor close
+ * onto its enumeration fallback (close_range disabled) so a proof can drive
+ * the leaf down the path that must not reopen /proc/self/fd. */
+#define ZCL_REFLEX_TESTING_DISABLE_CLOSE_RANGE 1u
+#endif
 
 /* ── leaf report frames (report pipe, leaf -> runner) ─────────────────────
  *
@@ -210,6 +226,15 @@ void zcl_reflex_testing_set_fd_dir(const char *path);
  * where the kernel has it, otherwise a full allocation-free /proc/self/fd
  * enumeration. False (a refusal) when neither is possible. Async-signal-safe. */
 bool zcl_reflex_close_all_except(const int *keep, size_t keep_count);
+
+/* Same contract, but the enumeration fallback walks `dir_fd` (a directory the
+ * caller already has open, and keeps open: this never closes it) instead of
+ * opening one itself. Use this once any filesystem access the enumeration
+ * fallback would otherwise need (a fresh open of /proc/self/fd) may already
+ * be refused, such as after Landlock deny-all -- close_range still needs no
+ * directory and is tried first either way. */
+bool zcl_reflex_close_all_except_via(int dir_fd, const int *keep,
+                                     size_t keep_count);
 
 /* Count every open descriptor not in `keep` by full /proc/self/fd
  * enumeration; UINT32_MAX when the enumeration is impossible. */
