@@ -15,6 +15,9 @@
  *     pass, whole-key ("file" never reads the file_mapped/file_dirty/
  *     file_writeback rows listed before it), and reports -1 — never 0 — for
  *     a row, a file or a cgroup that is not there
+ *   - the Seccomp_filters status-text parser requires the trailing '\n'
+ *     after the digits, so a status read truncated mid-number fails closed
+ *     instead of returning a short-read digit prefix
  */
 
 #include "test/test_core.h"
@@ -203,6 +206,34 @@ static int os_proc_preserved_report_fd_checks(void)
 #endif
 }
 
+/* Seccomp_filters status-text parser: a truncated read must fail closed,
+ * never return the digit prefix it happened to have in the buffer. */
+static int os_proc_seccomp_filters_parse_checks(void)
+{
+    int failures = 0;
+#if defined(ZCL_TESTING) && defined(__linux__)
+    uint32_t out = 12345;
+    /* A 4095-byte status read that cut "Seccomp_filters: 12" down to "1" —
+     * no trailing '\n' because the buffer ran out mid-number. */
+    OSPROC_CHECK("a digit run truncated before '\\n' fails closed",
+                 !os_proc_parse_seccomp_filters_for_test(
+                     "Name:\tz23\n"
+                     "\nSeccomp_filters:\t1", &out));
+    OSPROC_CHECK("a failed parse leaves no stale value behind",
+                 out == 12345);
+
+    out = 0;
+    OSPROC_CHECK("a correctly terminated field parses",
+                 os_proc_parse_seccomp_filters_for_test(
+                     "Name:\tz23\n"
+                     "\nSeccomp_filters:\t2\n"
+                     "Cpus_allowed:\tff\n", &out));
+    OSPROC_CHECK("the correctly terminated field's value is observed",
+                 out == 2);
+#endif
+    return failures;
+}
+
 int test_os_proc(void);
 int test_os_proc(void)
 {
@@ -211,6 +242,7 @@ int test_os_proc(void)
 
     failures += os_proc_cgroup_stat_fixture_checks();
     failures += os_proc_preserved_report_fd_checks();
+    failures += os_proc_seccomp_filters_parse_checks();
 
     OSPROC_CHECK("native Linux release classification",
                  os_proc_environment_classify_kernel_release(

@@ -779,9 +779,18 @@ static bool os_proc_parse_seccomp_filters(const char *status, uint32_t *out)
         value = value * 10u + (uint64_t)(*p - '0');
     if (p == digits || value > UINT32_MAX)
         return false; // raw-return-ok:platform-cannot-answer
+    if (*p != '\n')
+        return false; // raw-return-ok:truncated-read-fails-closed
     *out = (uint32_t)value;
     return true;
 }
+
+#ifdef ZCL_TESTING
+bool os_proc_parse_seccomp_filters_for_test(const char *status, uint32_t *out)
+{
+    return os_proc_parse_seccomp_filters(status, out);
+}
+#endif
 #endif
 
 bool os_proc_seccomp_filters(uint64_t pid, uint32_t *out)

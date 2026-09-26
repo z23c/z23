@@ -277,6 +277,12 @@ int os_proc_fd_dir_open(void);
  * cannot be read (non-Linux, or a kernel before 5.9). */
 bool os_proc_seccomp_filters(uint64_t pid, uint32_t *out);
 
+#if defined(ZCL_TESTING) && defined(__linux__)
+/* Test-only seam onto the Seccomp_filters status-text parser, so a test can
+ * feed it a crafted or truncated buffer without a real /proc/<pid>/status. */
+bool os_proc_parse_seccomp_filters_for_test(const char *status, uint32_t *out);
+#endif
+
 /* ── Per-THREAD kernel work counters ─────────────────────────────────────
  *
  * The counters a liveness check needs in order to tell a thread that is
