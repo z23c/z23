@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
 #define _POSIX_C_SOURCE 200809L
 #include "ledger_hid.h"
+#include "zcl_address.h"
 
 #include <fcntl.h>
 #include <glob.h>
@@ -202,7 +203,34 @@ static int quit_app(const char *path) {
     return 0;
 }
 
+static int hex_digit(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+static int address_from_pubkey(const char *hex) {
+    if (strlen(hex) != ZCL_COMPRESSED_PUBKEY_SIZE * 2)
+        return error_result(false, "invalid_pubkey", "Expected a 33-byte compressed public key in hex.");
+    uint8_t pubkey[ZCL_COMPRESSED_PUBKEY_SIZE];
+    for (size_t i = 0; i < sizeof pubkey; ++i) {
+        int high = hex_digit(hex[2 * i]);
+        int low = hex_digit(hex[2 * i + 1]);
+        if (high < 0 || low < 0)
+            return error_result(false, "invalid_pubkey", "Public key contains non-hex characters.");
+        pubkey[i] = (uint8_t)((high << 4) | low);
+    }
+    char address[ZCL_ADDRESS_SIZE];
+    if (zcl_address_from_pubkey(pubkey, address) < 0)
+        return error_result(false, "invalid_pubkey", "Public key is not on secp256k1.");
+    puts(address);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[1], "address-from-pubkey") == 0)
+        return address_from_pubkey(argv[2]);
     if ((argc == 2 || argc == 3) && strcmp(argv[1], "devices") == 0 &&
         (argc == 2 || strcmp(argv[2], "--json") == 0))
         return list_devices(argc == 3);
@@ -214,10 +242,11 @@ int main(int argc, char **argv) {
         return probe_info(argv[argc - 1], argc == 4);
     if (argc == 3 && strcmp(argv[1], "quit") == 0)
         return quit_app(argv[2]);
-    fprintf(stderr, "Usage: %s devices [--json]\n"
+    fprintf(stderr, "Usage: %s address-from-pubkey COMPRESSED_PUBKEY_HEX\n"
+                    "       %s devices [--json]\n"
                     "       %s app-info [--json] /dev/hidrawN\n"
                     "       %s probe [--json] /dev/hidrawN\n"
                     "       %s quit /dev/hidrawN\n",
-            argv[0], argv[0], argv[0], argv[0]);
+            argv[0], argv[0], argv[0], argv[0], argv[0]);
     return 2;
 }

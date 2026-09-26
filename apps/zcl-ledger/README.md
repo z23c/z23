@@ -6,8 +6,9 @@ This standalone C23 host communicates with Ledger Blue over Linux `hidraw`.
 It reads app information, probes the ZCL device app, exits a running app, and
 installs or deletes the reviewed no-key ZCL Probe image through the Blue's
 secure channel. It does not need Ledger Live, Python, Rust, or a network
-connection at runtime. It does not derive addresses, sign transactions, or
-access recovery words.
+connection at runtime. The host can encode a transparent address from a
+public key supplied separately. It does not derive device keys or addresses,
+sign transactions, or access recovery words.
 
 ## Build and test
 
@@ -59,6 +60,20 @@ success and nonzero for failure. App-info checks Ledger's USB vendor ID before
 sending its read-only APDU. It rejects malformed responses and does not report
 success merely because the USB exchange succeeded. Neither command requests
 keys, addresses, or signatures.
+
+To independently encode a ZCL mainnet transparent address from a 33-byte
+compressed secp256k1 public key, run:
+
+```sh
+build/zcl-ledger/zcl-ledger address-from-pubkey \
+  0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+```
+
+This example prints `t1UYsZVJkLPeMjxEtACvSxfWuNmddpWfxzs`. The command
+checks the public key is on secp256k1, then computes SHA-256, RIPEMD-160, the
+ZCL mainnet P2PKH prefix, and Base58Check. It uses no device or private key.
+It is a validation component for later device-derived public keys, not a
+Ledger address derivation command.
 
 `app-info --json` error codes are `open_failed`, `not_ledger`,
 `no_app_info_response`, `device_status`, and `invalid_app_info`. Device
