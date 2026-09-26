@@ -3401,7 +3401,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
     static const char fake_compiler[] =
         "#!/usr/bin/env bash\n"
         "set -eu\n"
-        "case \" $* \" in *\" -E \"*|*\" -print-\"*) exec cc \"$@\" ;; esac\n"
+        "case \" $* \" in *\" -E \"*|*\" -print-\"*|*\" -### \"*) exec cc \"$@\" ;; esac\n"
         "out= dep= source= compile=0\n"
         "while [ \"$#\" -gt 0 ]; do\n"
         "  case \"$1\" in\n"
