@@ -16,6 +16,13 @@ the existing acceptance targets. Open (◐) MVP criteria are P1 work under
 P3 development machinery in this queue. Each ◐ cell names its own remaining
 condition or owner decision; recheck it against its ledger before starting.
 
+Acceptance for the current mission lives in
+[`DEVELOPMENT_MVP.md`](./DEVELOPMENT_MVP.md): eight milestones (D1–D8) for
+fast, coordinated, low-cost agent development of C23, each with one
+measurement and one threshold. It adds to C1–C8 and replaces none of them.
+
+<!-- claim: file-present docs/work/DEVELOPMENT_MVP.md -->
+
 ## Current mission: fast C23 development with fleet Insight + Control
 
 Make Z23 the durable P2P platform through which interchangeable agents
