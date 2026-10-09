@@ -98,3 +98,40 @@ int ci_store_refs_by_enclosing_file(struct ci_store *s,
 {
     return refs_by_name_file(s, false, enclosing, ref_file, out, cap);
 }
+
+/* Every symbol row named `name`, any kind, in a stable order. -1 on a prepare
+ * error, a step error mid-read, or any row failing its checksum: fewer rows
+ * than exist are never returned silently. A result of `cap` rows may be
+ * clipped; the caller treats it as truncated. */
+int ci_store_defs_by_name(struct ci_store *s, const char *name,
+                          struct ci_symbol *out, int cap)
+{
+    if (!s || !name || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to defs_by_name");
+    ci_store_lock(s);
+    sqlite3 *db = ci_store_db(s);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db,
+        "SELECT " CI_SYM_COLS " FROM symbols WHERE name=?"
+        " ORDER BY def_path ASC, def_line ASC",
+        -1, &stmt, NULL) != SQLITE_OK) {
+        ci_store_unlock(s);
+        LOG_ERR("codeindex", "prepare defs_by_name");
+    }
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+    int n = 0;
+    bool ok = true;
+    while (ok && n < cap) {
+        int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
+        if (rc == SQLITE_DONE)
+            break;
+        ok = rc == SQLITE_ROW && ci_store_fill_symbol(stmt, &out[n]);
+        if (ok)
+            n++;
+    }
+    sqlite3_finalize(stmt);
+    ci_store_unlock(s);
+    if (!ok)
+        LOG_ERR("codeindex", "read defs_by_name failed for %s", name);
+    return n;
+}

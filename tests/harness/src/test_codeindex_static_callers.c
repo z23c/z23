@@ -33,10 +33,10 @@
 #define SC_INC "core/modules/net/include/net/"
 #define SC_OUT_CAP 64
 
-static bool sc_write(const char *rel, const char *content)
+static bool sc_write_in(const char *root, const char *rel, const char *content)
 {
     char full[512];
-    int n = snprintf(full, sizeof(full), "%s/%s", SC_FIX, rel);
+    int n = snprintf(full, sizeof(full), "%s/%s", root, rel);
     if (n <= 0 || (size_t)n >= sizeof(full))
         return false;
     for (char *p = full + 1; *p; p++) {
@@ -52,6 +52,11 @@ static bool sc_write(const char *rel, const char *content)
     size_t len = strlen(content);
     bool ok = fwrite(content, 1, len, f) == len;
     return fclose(f) == 0 && ok;
+}
+
+static bool sc_write(const char *rel, const char *content)
+{
+    return sc_write_in(SC_FIX, rel, content);
 }
 
 static bool sc_write_fixture_two_tus(void)
@@ -367,6 +372,72 @@ static int test_sc_cause_value(void)
     return failures;
 }
 
+
+/* ── forward closure binds a called name to EVERY definition ──────────────
+ * `seed_fn` calls bv(). bv is defined external in a_low.c and in b_high.c
+ * (each calling its own dep), and as a static, on a LOWER line than both, in
+ * c_stat.c. Binding the call to the single lowest-line row would keep only
+ * c_stat.c and drop the real callees' files: a stale PASS. */
+#define SC_FWD_FIX "test-tmp/codeindex_forward_all_defs"
+#define SC_FWD_WANT_N 6
+
+static bool sc_fwd_write(const char *rel, const char *content)
+{
+    return sc_write_in(SC_FWD_FIX, rel, content);
+}
+
+static bool sc_fwd_fixture(void)
+{
+    bool ok = true;
+    ok = ok && sc_fwd_write(SC_SRC "seed.c", "int seed_fn(void)\n{\n    return bv();\n}\n");
+    ok = ok && sc_fwd_write(SC_SRC "c_stat.c", "static int bv(void) { return 1; }\n");
+    ok = ok && sc_fwd_write(SC_SRC "a_low.c",
+        "/* pad */\n/* pad */\n\nint bv(void)\n{\n    return a_dep();\n}\n");
+    ok = ok && sc_fwd_write(SC_SRC "b_high.c",
+        "/* pad */\n/* pad */\n/* pad */\n/* pad */\n\nint bv(void)\n{\n"
+        "    return b_dep();\n}\n");
+    ok = ok && sc_fwd_write(SC_SRC "a_dep.c", "int a_dep(void)\n{\n    return 2;\n}\n");
+    ok = ok && sc_fwd_write(SC_SRC "b_dep.c", "int b_dep(void)\n{\n    return 3;\n}\n");
+    return ok;
+}
+
+static bool sc_fwd_has(char (*out)[256], int n, const char *path)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(out[i], path) == 0)
+            return true;
+    return false;
+}
+
+static int test_sc_forward_closure_all_definitions(void)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: forward closure keeps every definition of a called name") {
+        TEST_DISCARD(system("rm -rf " SC_FWD_FIX));
+        ASSERT(sc_fwd_fixture());
+        struct codeindex *ci = codeindex_open(SC_FWD_FIX);
+        ASSERT(ci != NULL);
+        char out[SC_OUT_CAP][256];
+        bool truncated = true, root_found = false;
+        int n = codeindex_forward_closure(ci, "seed_fn", out, SC_OUT_CAP,
+                                          &truncated, &root_found);
+        const char *want[SC_FWD_WANT_N] = { SC_SRC "seed.c", SC_SRC "c_stat.c", SC_SRC "a_low.c",
+                                            SC_SRC "b_high.c", SC_SRC "a_dep.c", SC_SRC "b_dep.c" };
+        bool all = n >= 0 && root_found && !truncated;
+        for (int i = 0; i < SC_FWD_WANT_N; i++) {
+            bool has = all && sc_fwd_has(out, n, want[i]);
+            if (!has)
+                printf("\n    forward closure missing %s (n=%d)\n    ", want[i], n);
+            all = all && has;
+        }
+        codeindex_close(ci);
+        ASSERT(all);
+        PASS();
+    } _test_next:;
+    TEST_DISCARD(system("rm -rf " SC_FWD_FIX));
+    return failures;
+}
+
 int test_codeindex_static_callers(void)
 {
     int failures = test_sc_cause_labels() + test_sc_cause_value();
@@ -387,5 +458,6 @@ int test_codeindex_static_callers(void)
         codeindex_close(ci);
     }
      TEST_DISCARD(system("rm -rf " SC_FIX));
+    failures += test_sc_forward_closure_all_definitions();
     return failures;
 }

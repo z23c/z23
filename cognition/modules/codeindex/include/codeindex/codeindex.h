@@ -554,6 +554,9 @@ int codeindex_impact_closure_bounded(
  * MUST therefore treat a *truncated result as UNCACHEABLE and MUST back the
  * cache with a cold-audit path that never trusts it — see tests/harness/src/test_cache.c.
  *
+ * A called name binds to EVERY definition row of that name (any kind, any
+ * file), not one: a same-named static elsewhere never hides the real callee.
+ *
  * Output is DETERMINISTIC (unique, sorted by path) and filled up to `cap` rows.
  * *truncated is set true iff the closure hit an internal size cap, a per-symbol
  * callee fan-out cap, overflowed `cap`, OR the depth ceiling was reached with

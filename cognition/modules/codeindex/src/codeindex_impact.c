@@ -904,32 +904,54 @@ int codeindex_reverse_includes(struct codeindex *ci, const char *path,
  * which we report as truncated so the caller treats the group as uncacheable. */
 #define CI_FWD_DEPTH_CEIL 256
 
-/* Record `sym`'s definition file and that file's in-tree include closure.
- * A symbol that resolves to no in-tree definition (a libc/external call) has
- * no file to hash and is silently skipped — it cannot change under the tree.
- * *hit_cap is raised through ci_closure_add_file / an include fan-out overflow. */
-static bool ci_fwd_record_symbol_file(struct ci_closure_ctx *c,
-                                      struct codeindex *ci, const char *sym,
-                                      bool *hit_cap)
+/* Record one definition file and that file's in-tree include closure. */
+static bool ci_fwd_record_file(struct ci_closure_ctx *c, struct codeindex *ci,
+                               const char *path, bool *hit_cap)
 {
-    struct ci_symbol s;
-    bool found = false;
-    if (!codeindex_symbol(ci, sym, &s, &found))
-        return false;
-    if (!found || !s.def_path[0])
-        return true;  /* external/undefined: nothing in-tree to hash */
-
-    if (!ci_closure_add_file(c, s.def_path, hit_cap))
+    if (!ci_closure_add_file(c, path, hit_cap))
         return false;
 
-    int ni = codeindex_includes_of_file(ci, s.def_path, c->incbuf,
+    int ni = codeindex_includes_of_file(ci, path, c->incbuf,
                                         CI_CLOSURE_QUERY_BATCH);
     if (ni < 0)
-        LOG_FAIL("codeindex", "includes_of_file failed for %s", s.def_path);
+        LOG_FAIL("codeindex", "includes_of_file failed for %s", path);
     if (ni == CI_CLOSURE_QUERY_BATCH)
         *hit_cap = true;  /* more includes than one batch — closure incomplete */
     for (int i = 0; i < ni; i++) {
         if (!ci_closure_add_file(c, c->incbuf[i], hit_cap))
+            return false;
+    }
+    return true;
+}
+
+/* Record EVERY definition row of `sym`, any kind, so a name defined in several
+ * files (a static or macro in one, the real function in another) never loses
+ * the file the call actually binds to: keeping an extra file only costs a
+ * re-run, dropping a true dependency serves a stale PASS. A symbol with no
+ * in-tree definition (a libc/external call) has no file to hash and is
+ * silently skipped. *hit_cap is raised through ci_closure_add_file, an include
+ * fan-out overflow, or a definition list that fills one batch. */
+static bool ci_fwd_record_symbol_file(struct ci_closure_ctx *c,
+                                      struct codeindex *ci, const char *sym,
+                                      bool *hit_cap)
+{
+    if (!c->symbuf) {
+        c->symbuf = zcl_malloc(sizeof(*c->symbuf) * CI_CLOSURE_QUERY_BATCH,
+                               "ci_fwd_symbuf");
+        if (!c->symbuf)
+            LOG_FAIL("codeindex", "forward closure symbuf alloc failed");
+    }
+    int nd = ci_store_defs_by_name(ci->store, sym, c->symbuf,
+                                   CI_CLOSURE_QUERY_BATCH);
+    if (nd < 0)
+        LOG_FAIL("codeindex", "definition rows failed for %s", sym);
+    if (nd == CI_CLOSURE_QUERY_BATCH)
+        *hit_cap = true;  /* more definitions than one batch */
+    for (int i = 0; i < nd; i++) {
+        const char *path = c->symbuf[i].def_path;
+        if (!path[0] || (i > 0 && !strcmp(path, c->symbuf[i - 1].def_path)))
+            continue;  /* undeclared-here, or this file was just recorded */
+        if (!ci_fwd_record_file(c, ci, path, hit_cap))
             return false;
     }
     return true;
