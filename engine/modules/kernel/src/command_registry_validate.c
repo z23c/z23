@@ -135,7 +135,8 @@ static bool cr_validate_effect_traits(const struct zcl_command_spec *spec,
     const uint32_t known_traits =
         ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_REVERSIBLE |
         ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DRY_RUN |
-        ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_DISPLAY_ONLY;
+        ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_DISPLAY_ONLY |
+        ZCL_COMMAND_TRAIT_SECRET_OUTPUT;
     if ((spec->traits & ~(known_traits | ZCL_COMMAND_TRAIT_PROSE)) != 0) {
         if (why)
             snprintf(why, why_size, "unknown command trait for %s", spec->path);

@@ -3903,14 +3903,14 @@ test_unknown_trait_bit_registry(struct zcl_command_spec out_specs[2])
         .allowed_lanes = ZCL_COMMAND_LANE_LOCAL,
         .transports = ZCL_COMMAND_TRANSPORT_NATIVE,
         .handler = contract_noop_handler,
-        .traits = 1U << 7,
+        .traits = 1U << 8,
     };
     out_specs[0] = branch;
     out_specs[1] = leaf;
     return (struct zcl_command_registry){ .commands = out_specs, .count = 2 };
 }
 
-/* A trait bit above ZCL_COMMAND_TRAIT_PROSE is not one the registry knows
+/* A trait bit above ZCL_COMMAND_TRAIT_SECRET_OUTPUT is not one the registry knows
  * about; validate() must refuse it rather than let an unrecognized bit ride
  * through into a real catalog undetected. */
 static int test_unknown_trait_bit_rejected(void)
@@ -3919,7 +3919,7 @@ static int test_unknown_trait_bit_rejected(void)
     struct zcl_command_spec specs[2];
     struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
     char why[128] = { 0 };
-    TEST("validate rejects a trait bit above ZCL_COMMAND_TRAIT_PROSE") {
+    TEST("validate rejects a trait bit above SECRET_OUTPUT") {
         ASSERT(!zcl_command_registry_validate(&reg, why, sizeof(why)));
         PASS();
     } _test_next:;
@@ -3936,6 +3936,55 @@ static int test_unknown_trait_bit_names_defect(void)
     struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
     char why[128] = { 0 };
     TEST("the rejection names unknown command trait") {
+        ASSERT(!zcl_command_registry_validate(&reg, why, sizeof(why)));
+        ASSERT(strstr(why, "unknown command trait") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The secret-output trait is a known bit: a spec carrying it validates, its
+ * describe policy names it, and the next bit up is still refused. One test
+ * per function (one _test_next label each). */
+static int test_secret_output_trait_validates(void)
+{
+    int failures = 0;
+    struct zcl_command_spec specs[2];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    char why[128] = { 0 };
+    specs[1].traits = ZCL_COMMAND_TRAIT_SECRET_OUTPUT;
+    TEST("validate accepts ZCL_COMMAND_TRAIT_SECRET_OUTPUT") {
+        ASSERT(zcl_command_registry_validate(&reg, why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_secret_output_trait_described(void)
+{
+    int failures = 0;
+    struct zcl_command_spec specs[2];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    char out[4096];
+    specs[1].traits = ZCL_COMMAND_TRAIT_SECRET_OUTPUT;
+    TEST("describe names secret_output for a secret-output spec") {
+        size_t n = zcl_command_registry_describe_json(&reg, "x.y", out,
+                                                      sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "\"secret_output\":true") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_secret_output_next_bit_refused(void)
+{
+    int failures = 0;
+    struct zcl_command_spec specs[2];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    char why[128] = { 0 };
+    specs[1].traits = 1U << 8;
+    TEST("validate still refuses the bit above SECRET_OUTPUT") {
         ASSERT(!zcl_command_registry_validate(&reg, why, sizeof(why)));
         ASSERT(strstr(why, "unknown command trait") != NULL);
         PASS();
@@ -4949,6 +4998,9 @@ int test_command_registry_catalog(void)
     failures += test_semantics_contract_negative();
     failures += test_unknown_trait_bit_rejected();
     failures += test_unknown_trait_bit_names_defect();
+    failures += test_secret_output_trait_validates();
+    failures += test_secret_output_trait_described();
+    failures += test_secret_output_next_bit_refused();
     failures += test_leaf_semantics_and_budget();
     failures += test_describe_emits_semantics();
     failures += test_every_describe_document_fits();

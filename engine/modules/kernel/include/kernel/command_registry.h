@@ -224,6 +224,9 @@ enum zcl_command_trait {
      * the two can never disagree. See tools/command/native_command.c's
      * prose-leaf render path. */
     ZCL_COMMAND_TRAIT_PROSE = 1U << 6,
+    /* A successful reply intentionally contains secret material. Every
+     * native transport owner must retire its private copies after last use. */
+    ZCL_COMMAND_TRAIT_SECRET_OUTPUT = 1U << 7,
 };
 
 enum zcl_command_transport {
@@ -448,14 +451,18 @@ size_t zcl_command_registry_menu_json(const struct zcl_command_registry *registr
 static inline bool zcl_command_registry_describe_traits(
     struct json_value *policy, uint32_t traits)
 {
-    return json_push_kv_bool(policy, "deterministic",
-                             (traits & ZCL_COMMAND_TRAIT_DETERMINISTIC) != 0) &&
+    bool ok = json_push_kv_bool(
+                  policy, "deterministic",
+                  (traits & ZCL_COMMAND_TRAIT_DETERMINISTIC) != 0) &&
            json_push_kv_bool(policy, "idempotent",
                              (traits & ZCL_COMMAND_TRAIT_IDEMPOTENT) != 0) &&
            json_push_kv_bool(policy, "display_only",
                              (traits & ZCL_COMMAND_TRAIT_DISPLAY_ONLY) != 0) &&
            json_push_kv_bool(policy, "prose",
                              (traits & ZCL_COMMAND_TRAIT_PROSE) != 0);
+    if ((traits & ZCL_COMMAND_TRAIT_SECRET_OUTPUT) != 0)
+        ok = ok && json_push_kv_bool(policy, "secret_output", true);
+    return ok;
 }
 size_t zcl_command_registry_describe_json(
     const struct zcl_command_registry *registry, const char *path,
