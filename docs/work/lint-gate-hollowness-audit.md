@@ -23,7 +23,7 @@ Gates wired to this pattern: `check_one_write_path.sh`,
 `check_projections_pure.sh`, `check_supervisor_domain.sh`,
 `check_supervisor_registration.sh`, `check_stage_advances_or_blocks.sh`,
 `check_consensus_parity.sh` (E13), `check_honest_witness.sh` (Law 7),
-`check_no_silent_ready.sh` (E8), `check_coins_lookup_nullcheck.sh`.
+`z23-lint check-no-silent-ready` (E8), `check_coins_lookup_nullcheck.sh`.
 
 ## Two fix classes for a hollow gate
 

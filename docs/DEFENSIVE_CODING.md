@@ -396,7 +396,7 @@ assert green).
   `engine/models/include/models/activerecord.h`) OR a top-of-file
   `ar-validate-skip:<tag>` marker explaining why AR validation does not apply
   (e.g. `connection-handle-not-a-row`). Impl:
-  `tools/scripts/check_model_validation.sh`.
+  `./build/bin/z23-lint check-model-validation`.
 
 - **Gate #11b: `check-model-ar-lifecycle`** (HARD) — `engine/models/src/*.c` may
   not call `ar_run_before_save()` or `ar_run_after_save()` directly. Save paths
@@ -563,7 +563,7 @@ assert green).
   `"validation/sigops.h"`, and `chainparams.h` gets `MESSAGE_START_SIZE` from
   `chain/chainparamsbase.h` instead of `"net/protocol.h"`. Any forbidden
   include fails HARD. Override `// core-boundary-ok:<tag>`. Impl:
-  `tools/scripts/check_core_include_boundary.sh`.
+  `./build/bin/z23-lint check-core-include-boundary`.
 
 - **Gate #47: `check-core-seal`** (HARD — frozen at split wave W5) — pins
   the byte-integrity of `core/` to the SHA3-256 manifest `core/MANIFEST.sha3`
@@ -798,7 +798,7 @@ assert green).
   `tests/harness/src/test_simd_os_support.c` hand the policy the exact CPUID/XCR0
   contents of an AVX-512 host whose OS disabled ZMM state — a machine we do not
   own — and pin that the answer is "no". Impl:
-  `tools/lint/check_simd_os_support.sh`.
+  `./build/bin/z23-lint check-simd-os-support`.
 
 - **Gate #16: `check-supervisor-registration`** (RATCHET) — flags any
   `engine/services/src/*_service.c` that spawns work (`pthread_create`,
@@ -1597,7 +1597,7 @@ A node states which source it is running in its version handshake. That
 statement is only worth anything if a second person holding the same source can
 rebuild the same bytes and compare. Two things keep that true.
 
-`check-tu-random-seed` (`tools/lint/check_tu_random_seed.sh`) is the cheap
+`check-tu-random-seed` (`./build/bin/z23-lint check-tu-random-seed`) is the cheap
 guard, and it runs in `make lint`. GCC derives its default random seed from the
 name of the object file it is writing. Every object in this tree is compiled
 into a fresh temporary staging directory and published atomically, so that name

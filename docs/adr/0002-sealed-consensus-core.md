@@ -75,7 +75,7 @@ described in `docs/ZVCS.md`, invoked only from the Makefile, never from
 inside `tools/core_seal.c` itself.
 
 A second gate, `check-core-include-boundary`
-(`tools/scripts/check_core_include_boundary.sh`), enforces that `core/` may
+(`./build/bin/z23-lint check-core-include-boundary`), enforces that `core/` may
 not depend upward or sideways — in particular, not on `core/modules/validation/` —
 the same discipline `check_domain_purity.sh` already applies to `domain/`.
 

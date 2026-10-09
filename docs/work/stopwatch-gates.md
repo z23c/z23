@@ -175,7 +175,7 @@ ledger-only consumer could tell a week-dead fixture from a typo.
 ### Regression guard
 
 `make lint` runs `check-stopwatch-skip-detector`
-(`tools/lint/check_stopwatch_skip_detector.sh`), which runs both shell
+(`./build/bin/z23-lint check-stopwatch-skip-detector`), which runs both shell
 selftests with a false-green guard and cross-checks that the shell parser
 sees exactly the class rows in the `.def`. The C half is the
 `stopwatch_skip_watch` test group.

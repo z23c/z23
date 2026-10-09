@@ -37,7 +37,7 @@ depending on the operator's git install:
    unseal token is present.
 
 The **hard gate** that keeps this true is
-`tools/scripts/check_vcs_no_git.sh` (wired into `make lint` as
+`./build/bin/z23-lint check-vcs-no-git` (wired into `make lint` as
 `check-vcs-no-git`): it fails the build if any file under `contexts/commons/modules/vcs/`
 references the word `git`, or calls `exec*`, `execve`, `system(`, `popen(`,
 or `fork(`. `contexts/commons/modules/vcs/` is sovereign by construction, not by convention — a

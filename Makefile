@@ -4381,7 +4381,7 @@ docs-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 	@tools/scripts/zcode_registry_rederive.sh
 
 check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(BIN_DIR)/z23-lint
-	@tools/lint/check_zcode_package_registry.sh
+	@./build/bin/z23-lint check-zcode-package-registry
 .PHONY: check-zcode-package-standalone
 check-zcode-package-standalone: $(BIN_DIR)/z23-lint
 	@tools/lint/check_zcode_package_standalone.sh
@@ -7832,16 +7832,16 @@ $(CLANG_FACTS_OUT_DIR)/%.zsm: %.c $(CLANG_FACTS_HDRS) $(BIN_DIR)/z23-clang-manif
 # compile there (the old behavior) left the stub unobservable exactly where
 # most window development happens. The lint gate owns that compile now;
 # this target is its manual alias and runs the same script unconditionally.
-arena-view-syntax:
-	@./tools/lint/check_arena_view_stub.sh
+arena-view-syntax: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-arena-view-stub
 
 # Lint-lane wiring for the stub compile above (also in LINT_FAST_GATES and
 # the gate_command() table in tools/lint/run_lint.sh — a gate is a two-file
 # operation; check-lint-gate-wiring asserts both halves stay in step).
 check-arena-view-stub: $(LINTC_TOOL)
 	@echo "══ LINT: arena_view compiles against the raylib stub ══"
-	@./tools/lint/check_arena_view_stub.sh --selftest
-	@./tools/lint/check_arena_view_stub.sh
+	@./build/bin/z23-lint check-arena-view-stub --selftest
+	@./build/bin/z23-lint check-arena-view-stub
 
 # Every HOT_FORK capsule unity (owner TU set + its story adapter in
 # tools/dev/hotfork_stories/) compiles with the frozen resident action plan.
@@ -7852,8 +7852,8 @@ build/lintc-obj/gate_hotfork_stories.o: engine/composition/hotfork_capsules.def 
 	tools/dev/hotfork_unity.h
 check-hotfork-stories: $(LINTC_TOOL) $(HOTSWAP_ACTION_PLAN)
 	@echo "══ LINT: every HOT_FORK capsule unity compiles ══"
-	@./tools/lint/check_hotfork_stories.sh --selftest
-	@./tools/lint/check_hotfork_stories.sh
+	@./build/bin/z23-lint check-hotfork-stories --selftest
+	@./build/bin/z23-lint check-hotfork-stories
 $(BIN_DIR)/arena_frame: tools/arena_frame.c tools/arena_hud.c \
 		contexts/commons/packages/zdogview/src/zdogview.c \
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
@@ -8542,11 +8542,11 @@ simnet-fuzz-sweep: wire_sweep
 	@echo "==> simnet-fuzz-sweep PASSED ($(WIRE_SWEEP_NIGHTLY_SEEDS) seeds)"
 
 # Gate: the simnet_wire harness must be pure in-memory — no real sockets.
-# See tools/scripts/check_wire_harness_security_gate.sh.
+# See ./build/bin/z23-lint check-wire-harness-security-gate.
 .PHONY: check-wire-harness-security-gate
 check-wire-harness-security-gate: $(LINTC_TOOL)
 	@echo "══ LINT: simnet_wire harness has zero real-network calls ══"
-	@bash tools/scripts/check_wire_harness_security_gate.sh
+	@./build/bin/z23-lint check-wire-harness-security-gate
 
 # Offline P2 self-heal invariant checker: coins_applied_height == utxo_apply
 # cursor, read read-only from a progress.kv (works while the node is down —
@@ -8914,7 +8914,7 @@ check-fleet-source-status:
 
 .PHONY: check-tor-dial-prewarm
 check-tor-dial-prewarm: $(LINTC_TOOL)
-	@tools/scripts/check_tor_dial_prewarm.sh
+	@./build/bin/z23-lint check-tor-dial-prewarm
 
 # Physical native-agent UI acceptance driver. It links only the workstation's
 # X11 client ABI and sends one bounded event to an exact titled window; it owns
@@ -12394,7 +12394,7 @@ check-agent-cli: zclassic23
 
 check-malloc: $(LINTC_TOOL)
 	@echo "══ LINT: bare malloc/calloc/realloc in app/tools code ══"
-	@./tools/lint/check_malloc.sh
+	@./build/bin/z23-lint check-malloc
 
 check-raw-sqlite:
 	@echo "══ LINT: raw sqlite3_step in app code ══"
@@ -12402,7 +12402,7 @@ check-raw-sqlite:
 
 check-vcs-no-git: $(LINTC_TOOL)
 	@echo "══ LINT: contexts/commons/modules/vcs is git-free + spawns no processes ══"
-	@tools/scripts/check_vcs_no_git.sh
+	@./build/bin/z23-lint check-vcs-no-git
 
 check-vcs-no-sha1: $(LINTC_TOOL)
 	@echo "══ LINT: ZVCS/producer-source authority does not inherit Git SHA-1 ══"
@@ -12548,8 +12548,8 @@ check-raw-malloc: $(LINTC_TOOL)
 
 check-json-value-init: $(LINTC_TOOL)
 	@echo "══ LINT: struct json_value initialised before first use ══"
-	@./tools/scripts/check_json_value_init.sh --selftest
-	@./tools/scripts/check_json_value_init.sh
+	@./build/bin/z23-lint check-json-value-init --selftest
+	@./build/bin/z23-lint check-json-value-init
 
 check-blob-read-bounds: $(LINTC_TOOL)
 	@echo "══ LINT: bounded sqlite blob reads in app models ══"
@@ -12890,8 +12890,8 @@ check-core-seal: tools/core_seal
 # scope is reported separately by check-core-seal.
 check-core-include-boundary: $(LINTC_TOOL)
 	@echo "══ LINT: pure consensus-context include boundary ══"
-	@./tools/scripts/check_core_include_boundary.sh --selftest
-	@./tools/scripts/check_core_include_boundary.sh
+	@./build/bin/z23-lint check-core-include-boundary --selftest
+	@./build/bin/z23-lint check-core-include-boundary
 
 # The hot-swap consensus pin: engine/modules/hotswap/include/hotswap/core_seal_root.h must
 # mirror core/MANIFEST.sha3's ROOT, the module emitter must stamp it into every
@@ -12924,8 +12924,8 @@ check-no-adx-overclaim: $(LINTC_TOOL)
 	@echo "══ LINT: no ADCX/ADOX carry-chain overclaim ══"
 	@./tools/lint/check_no_adx_overclaim.sh --selftest
 	@./tools/lint/check_no_adx_overclaim.sh
-	@./tools/lint/check_asan_adx_exception.sh --selftest
-	@./tools/lint/check_asan_adx_exception.sh
+	@./build/bin/z23-lint check-asan-adx-exception --selftest
+	@./build/bin/z23-lint check-asan-adx-exception
 
 # SIMD OS-support: CPUID reports what the silicon decodes, not whether the OS
 # agreed to save the register state. A dispatch predicate that reads only the
@@ -12937,7 +12937,7 @@ check-no-adx-overclaim: $(LINTC_TOOL)
 # to a named predicate that does.
 check-simd-os-support: $(LINTC_TOOL)
 	@echo "══ LINT: SIMD dispatch checks OS state, not just CPUID ══"
-	@./tools/lint/check_simd_os_support.sh
+	@./build/bin/z23-lint check-simd-os-support
 
 check-silent-errors-services: $(LINTC_TOOL)
 	@echo "══ LINT: silent error returns in services ══"
@@ -12980,7 +12980,7 @@ check-wallet-raw-prepare-log: $(LINTC_TOOL)
 
 check-before-save-hooks: $(LINTC_TOOL)
 	@echo "══ LINT: critical models wire before_save hooks ══"
-	@./tools/lint/check_before_save_hooks.sh
+	@./build/bin/z23-lint check-before-save-hooks
 
 # Move 4: every long-running thread goes through thread_registry_spawn{,_ex}.
 # Short-burst workers joined within the same function, and pthread_attr-using
@@ -12989,7 +12989,7 @@ check-before-save-hooks: $(LINTC_TOOL)
 # implementation in platform/modules/util/src/thread_registry.c is implicitly skipped.
 check-pthread-create: $(LINTC_TOOL)
 	@echo "══ LINT: raw pthread_create outside thread_registry ══"
-	@./tools/lint/check_pthread_create.sh
+	@./build/bin/z23-lint check-pthread-create
 
 # Move 11: every engine/models/src/*.c either invokes validates_* macros
 # from engine/models/include/models/activerecord.h, or carries an
@@ -12997,7 +12997,7 @@ check-pthread-create: $(LINTC_TOOL)
 # lifecycle does not apply (infrastructure wrapper, registry, etc.).
 check-model-validation: $(LINTC_TOOL)
 	@echo "══ LINT: model validation coverage ══"
-	@./tools/scripts/check_model_validation.sh
+	@./build/bin/z23-lint check-model-validation
 
 check-model-ar-lifecycle: $(LINTC_TOOL)
 	@echo "══ LINT: model ActiveRecord lifecycle saves ══"
@@ -13095,16 +13095,16 @@ check-long-functions: $(LINTC_TOOL)
 # build/bin/z23-lint check-cyclomatic-complexity --write-baseline.
 check-cyclomatic-complexity: $(LINTC_TOOL)
 	@echo "══ LINT: cyclomatic complexity cap 15 per function ══"
-	@./tools/lint/check_cyclomatic_complexity.sh --selftest && ./tools/lint/check_cyclomatic_complexity.sh
+	@./build/bin/z23-lint check-cyclomatic-complexity --selftest && ./build/bin/z23-lint check-cyclomatic-complexity
 
 # Wave 9a: every register_*_rpc_commands callsite uses rpc_table_must_append.
 # rpc_table_append returns false silently on registration failure (duplicate
 # name / MAX_RPC_COMMANDS cap / table running) — that silent failure mode
 # left the control-group RPCs unreachable for a release cycle. The
 # must_append variant aborts at boot with a precise reason.
-check-rpc-registrar:
+check-rpc-registrar: $(LINTC_TOOL)
 	@echo "══ LINT: rpc_table_must_append in registrars ══"
-	@./tools/scripts/check_rpc_registrar.sh
+	@./build/bin/z23-lint check-rpc-registrar
 
 # Lag-SLO observability: the legacy_mirror_sync_service must emit
 # EV_LAG_SLO_BREACH and EV_MIRROR_CONCURRENT_CATCHUP, and the
@@ -13339,7 +13339,7 @@ check-no-api-keys: $(LINTC_TOOL)
 
 check-posix-ere-only: $(LINTC_TOOL)
 	@echo "══ LINT: POSIX ERE only in lint-runtime regex patterns ══"
-	@./tools/lint/check_posix_ere_only.sh
+	@./build/bin/z23-lint check-posix-ere-only
 
 # Gate — the closed flags.def catalog is the ONE list of every ZCL_ runtime/
 # build/test flag and Makefile variable this tree reads out of its process
@@ -13348,8 +13348,8 @@ check-posix-ere-only: $(LINTC_TOOL)
 # before HEAD's commit date fails. See docs/FLAGS.md.
 check-flag-registry: $(LINTC_TOOL)
 	@echo "══ LINT: every ZCL_ flag is in the closed flags.def catalog ══"
-	@./tools/lint/check_flag_registry.sh --selftest
-	@./tools/lint/check_flag_registry.sh
+	@./build/bin/z23-lint check-flag-registry --selftest
+	@./build/bin/z23-lint check-flag-registry
 
 # The cheap half of the fuzz-artifact replay contract (21 ms, text + git only):
 # every saved finding under tests/harness/fuzz_seeds/ has a live fuzz binary behind
@@ -13424,8 +13424,8 @@ check-no-trust-state-ordering:
 # FFI route may re-enter the executable tree.
 check-c23-only: $(LINTC_TOOL)
 	@echo "══ LINT: C23-only build and runtime ══"
-	@./tools/lint/check_c23_only.sh --selftest
-	@./tools/lint/check_c23_only.sh
+	@./build/bin/z23-lint check-c23-only --selftest
+	@./build/bin/z23-lint check-c23-only
 
 # The public node compiles every translation unit with -std=c23. gcc 13 does
 # not know that flag. Diagnose it by compiling an empty TU before the lint
@@ -13477,7 +13477,7 @@ check-no-python: $(LINTC_TOOL)
 # `__VA_OPT__(,) __VA_ARGS__` with an identical token stream.
 check-no-gnu-va-args: $(LINTC_TOOL)
 	@echo "══ LINT: C23 __VA_OPT__, never the GNU comma-swallowing extension ══"
-	@./tools/lint/check_no_gnu_va_args.sh
+	@./build/bin/z23-lint check-no-gnu-va-args
 
 # struct platform_positioned_file_snapshot (platform/modules/platform/include/platform/
 # positioned_file.h) is 64 bytes wide but holds only 56 bytes of fields --
@@ -13790,7 +13790,7 @@ check-no-new-coordination-shell: $(LINTC_TOOL)
 # (test_core.h), which root every fixture under the repo's own test-tmp/.
 check-no-bare-tmp-fixture: $(LINTC_TOOL)
 	@echo "══ LINT: no new bare /tmp fixture literal ══"
-	@./tools/lint/check_no_bare_tmp_fixture.sh --selftest && ./tools/lint/check_no_bare_tmp_fixture.sh
+	@./build/bin/z23-lint check-no-bare-tmp-fixture --selftest && ./build/bin/z23-lint check-no-bare-tmp-fixture
 
 
 # Gate — network tool hardening. The Internet-facing standalone tools must
@@ -13799,7 +13799,7 @@ check-no-bare-tmp-fixture: $(LINTC_TOOL)
 # off Linux, UNPROVEN without readelf.
 check-network-tool-hardening: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS)
 	@echo "══ LINT: network tools carry declared ELF mitigations ══"
-	@./tools/lint/check_network_tool_hardening.sh --selftest && ./tools/lint/check_network_tool_hardening.sh
+	@./build/bin/z23-lint check-network-tool-hardening --selftest && ./build/bin/z23-lint check-network-tool-hardening
 
 # Gate — sqlite cursor lifetime. A stepped sqlite3_stmt must be
 # sqlite3_finalize/sqlite3_reset'd BEFORE any returning error macro
@@ -13810,7 +13810,7 @@ check-network-tool-hardening: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS)
 # 2026-09-29 node.db write-plane wedge class; fixes 278f328c56, ad6920b8d4).
 check-sqlite-cursor-lifetime: $(LINTC_TOOL)
 	@echo "══ LINT: sqlite cursor lifetime (finalize before returning macro) ══"
-	@./tools/scripts/check_sqlite_cursor_lifetime.sh --selftest && ./tools/scripts/check_sqlite_cursor_lifetime.sh
+	@./build/bin/z23-lint check-sqlite-cursor-lifetime --selftest && ./build/bin/z23-lint check-sqlite-cursor-lifetime
 
 # Sovereign-cure ratchet — no NEW caller of coins_kv_seed_from_node_db (the
 # BORROWED zclassicd-chainstate seed the self-verified-tip cure is deleting,
@@ -13973,7 +13973,7 @@ check-orient-facts:
 # nobody runs is the exact defect it exists to fix.
 check-stopwatch-skip-detector: $(LINTC_TOOL)
 	@echo "══ LINT: stopwatch skip-streak detector selftests ══"
-	@./tools/lint/check_stopwatch_skip_detector.sh
+	@./build/bin/z23-lint check-stopwatch-skip-detector
 
 # Gate — the proof-server promotion binding stays self-recording. tools/ship.sh's
 # guard used to tell the operator to "re-tag the candidate" and nothing ever did
@@ -13982,7 +13982,7 @@ check-stopwatch-skip-detector: $(LINTC_TOOL)
 # prose-with-no-code defect cannot silently return.
 check-proof-server-pin: $(LINTC_TOOL)
 	@echo "══ LINT: proof-server promotion pin ══"
-	@./tools/lint/check_proof_server_pin.sh
+	@./build/bin/z23-lint check-proof-server-pin
 
 # Gate — promotion evidence survives this machine and cannot be rewritten. The
 # pin above is a LOCAL, MUTABLE, UNSIGNED tag; platform/deploy/promotion-receipts.jsonl
@@ -14215,10 +14215,10 @@ check-plan-claims:
 # at WALLET_PERSISTENCE_RECOVERY.md, which had never existed — a dead pointer
 # at the one moment the reader most needs the instructions.
 # check-markdown-links covers .md-to-.md; this covers .md inside C literals.
-# See tools/lint/check_error_doc_refs.sh (original script had no --selftest; the C23 port adds one).
+# See ./build/bin/z23-lint check-error-doc-refs (original script had no --selftest; the C23 port adds one).
 check-error-doc-refs: $(LINTC_TOOL)
 	@echo "══ LINT: operator-named docs exist (C string literals) ══"
-	@./tools/lint/check_error_doc_refs.sh
+	@./build/bin/z23-lint check-error-doc-refs
 
 # docs/API_REFERENCE.md is GENERATED from engine/composition/commands/*.def by
 # tools/gen_api_reference.c (editorial prose lives in docs/API_REFERENCE.md.in).
@@ -14385,8 +14385,8 @@ equihash-facts-check: check-equihash-params
 # what the chain IS, which is what was wrong across nine files.
 check-equihash-params: $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL)
 	@echo "══ LINT: Equihash parameters are height-selected, and said so ══"
-	@./tools/lint/check_equihash_params.sh --selftest
-	@./tools/lint/check_equihash_params.sh
+	@./build/bin/z23-lint check-equihash-params --selftest
+	@./build/bin/z23-lint check-equihash-params
 
 # Dev-UX: the DERIVED binary size (counterpart to the forbid gate above). Quote
 # this instead of hand-pinning a size in prose; a reviewer re-runs it to confirm.
@@ -14520,7 +14520,7 @@ check-no-utxos-mirror-read: $(LINTC_TOOL)
 
 check-no-silent-ready: $(LINTC_TOOL)
 	@echo "══ LINT: no-silent-ready (E8) ══"
-	@./tools/scripts/check_no_silent_ready.sh
+	@./build/bin/z23-lint check-no-silent-ready
 
 check-honest-witness: $(LINTC_TOOL)
 	@echo "══ LINT: honest witness (E12) ══"
@@ -14578,7 +14578,7 @@ check-no-stray-root-files: $(LINTC_TOOL)
 	@./tools/lint/check_no_stray_root_files.sh
 
 check-no-retired-agent-protocol: $(LINTC_TOOL)
-	@./tools/lint/check_no_retired_agent_protocol.sh
+	@./build/bin/z23-lint check-no-retired-agent-protocol
 
 # Nothing under test, and no command an agent is told to copy, may be aimed at
 # the OPERATOR'S LIVE NODE. Three prongs, all measured on this tree:
@@ -14656,7 +14656,7 @@ check-zcc-epoch-batch:
 
 check-dev-proof-native-fast-path: $(LINTC_TOOL)
 	@echo "══ LINT: native push admission has no shell or build authority ══"
-	@./tools/lint/check_dev_proof_native_fast_path.sh
+	@./build/bin/z23-lint check-dev-proof-native-fast-path
 
 # A build whose objects do not repeat cannot be shown to anyone. GCC seeds
 # itself from the object's output name, and every object here is written into
@@ -14666,7 +14666,7 @@ check-dev-proof-native-fast-path: $(LINTC_TOOL)
 # the one documented exemption). `make repro-build` is the end-to-end proof.
 check-tu-random-seed: $(LINTC_TOOL)
 	@echo "══ LINT: per-TU object recipes pin GCC's random seed ══"
-	@./tools/lint/check_tu_random_seed.sh
+	@./build/bin/z23-lint check-tu-random-seed
 
 # A function that hands back a struct the caller frees must initialize it above
 # the first thing that can fail, and a pointer published into a module global
@@ -14682,8 +14682,8 @@ check-outparam-init-before-return:
 
 check-codeindex-coverage: $(ZCLASSIC23_DEV_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: every tracked maintained source node is indexed ══"
-	@./tools/lint/check_codeindex_coverage.sh --selftest
-	@./tools/lint/check_codeindex_coverage.sh
+	@./build/bin/z23-lint check-codeindex-coverage --selftest
+	@./build/bin/z23-lint check-codeindex-coverage
 
 # One process rebuilds a checkout's index: the node's resident mind. Every
 # other caller of codeindex_rebuild is a second writer that races the
@@ -14694,8 +14694,8 @@ check-codeindex-coverage: $(ZCLASSIC23_DEV_BIN) $(LINTC_TOOL)
 .PHONY: check-mind-owns-rebuild
 check-mind-owns-rebuild: $(LINTC_TOOL)
 	@echo "══ LINT: only the mind rebuilds a code index ══"
-	@./tools/lint/check_mind_owns_rebuild.sh --selftest
-	@./tools/lint/check_mind_owns_rebuild.sh
+	@./build/bin/z23-lint check-mind-owns-rebuild --selftest
+	@./build/bin/z23-lint check-mind-owns-rebuild
 
 .PHONY: check-tor-full-default
 check-tor-full-default: $(LINTC_TOOL)

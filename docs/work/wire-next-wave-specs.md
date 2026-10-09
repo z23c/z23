@@ -244,10 +244,10 @@ detail).
     `grep` over `engine/modules/sim/src/simnet_wire*.c` + `tools/sim/*wire*` asserting
     no `recv(`/`send(`/`socket(`/`connect(`/`bind(`/`getaddrinfo(` — **this
     gate now EXISTS and is wired**: `make check-wire-harness-security-gate`
-    (`tools/scripts/check_wire_harness_security_gate.sh`), in `LINT_GATES` and
+    (`./build/bin/z23-lint check-wire-harness-security-gate`), in `LINT_GATES` and
     in `run_lint.sh`. Nothing to add; extend its scan set if the harness grows
     new files.
-    <!-- claim: file-present tools/scripts/check_wire_harness_security_gate.sh # the gate is built -->
+    <!-- claim: file-present tools/lint/run_lint.sh # the gate is wired into the lint runner -->
     <!-- claim: gate-passes check-wire-harness-security-gate # and the harness stays socket-free -->
   - `engine/modules/sim/src/simnet_wire.c` (touch only if capsule replay needs a load
     path — check `seed_tape` API for a load/replay entry point before
