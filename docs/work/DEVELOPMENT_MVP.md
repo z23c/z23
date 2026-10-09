@@ -62,6 +62,20 @@ random, so differences between hosts may reflect the tasks.
 | D7 | 2 of the last 6 groups failed with no cause named; group spacing about 29 minutes |
 | D8 | Host roles and paths are configured; staging, package tests and dispatch still run as shell scripts |
 
+## Measurements of 2026-10-09
+
+Observational values from one day of records. Each row names its sample. No
+milestone threshold is met as written, so no status symbol changed.
+
+| Milestone | Measured value | Sample | Evidence |
+|---|---|---|---|
+| D1 | Claude usage now totals per model with no overflow (usage reader fix 8f7e06b7dc). Still missing: the per-run tool build id, and the host with no record is not named in the tree | 3,739 Claude requests across 1,224 session files; 1 malformed line, 0 unreadable | maintainer scratch area mvp-20261009 (d4_first_try.md, d6_failures.md, d7_landing.md, outcomes_519.json) |
+| D2 | About 234 Claude requests per Claude-co-authored landed change, all session work charged; no closed-contract cohort yet | 3,739 requests for 16 landed changes | maintainer scratch area mvp-20261009 (d4_first_try.md, d6_failures.md, d7_landing.md, outcomes_519.json) |
+| D4 (lander stand-in, not the D4 measure) | 82 of 111 changes landed on the first lander attempt (73.9%; 84.5% excluding operator cancels). Review rounds are not recorded, so D4 itself is unmeasured | 111 changes over 7 days | maintainer scratch area mvp-20261009 (d4_first_try.md, d6_failures.md, d7_landing.md, outcomes_519.json) |
+| D5 | About 126,000 uncached input plus output tokens per Claude-co-authored landed change; Opus made 52% of requests. Cache writes (24 million tokens) are outside the D5 unit and reported separately | 16 landed changes (day sample) | maintainer scratch area mvp-20261009 (d4_first_try.md, d6_failures.md, d7_landing.md, outcomes_519.json) |
+| D6 | Focused test runs: waiting median 1 s, 95th percentile 745 s; running median 154 s, 95th percentile 2,640 s. 57 failed runs, none classifiable because run output is not recorded | 119 runs in 24 hours | maintainer scratch area mvp-20261009 (d4_first_try.md, d6_failures.md, d7_landing.md, outcomes_519.json) |
+| D7 | 0 failures without a named cause in the 10 most recent landing outcomes. 40 publications in 24 hours; median spacing 26.8 minutes (target 20) | 10 landing outcomes; 40 publications in 24 hours | maintainer scratch area mvp-20261009 (d4_first_try.md, d6_failures.md, d7_landing.md, outcomes_519.json) |
+
 ## Remaining condition per milestone
 
 - **D1:** record the remaining host and the per-run template and tool versions.
