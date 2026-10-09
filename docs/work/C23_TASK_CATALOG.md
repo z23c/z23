@@ -22,6 +22,9 @@ The source defines these C23 prompt kinds: `c23-byte-validator`,
 `c23-resource-owner`. Existing kinds `fix-gate`,
 `add-test`, `port-arm`, `doc-claim`, and `review` remain. Rows marked
 `PROPOSED:<family>` still need a procedure; they are not dispatchable kinds.
+The `review` kind returns findings only, each marked as about the change or
+about a claim made for it, and never a verdict; rules a gate measures arrive
+as supplied facts.
 Each kind declares a tier in the same file (`ENGINE_PROMPT_KIND_TIER`). Light
 kinds (`c23-context-pack`, `c23-gate-tail`, `c23-proof-triage`) are read-only
 or mechanical and a small model can run them; standard kinds write code. The

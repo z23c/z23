@@ -3751,6 +3751,30 @@ static int case_pin_atomic(void)
 }
 #endif
 
+/* The review kind hands the reviewer facts, not verdicts: gate-measured rules
+ * arrive as facts, the reply is findings, and every finding names its subject. */
+static int case_review_findings_not_verdict(void)
+{
+    int failures = 0;
+    const char *rules = engine_prompt_template_body("review", "rules");
+    const char *task = engine_prompt_template_body("review", "task");
+    const char *judging = engine_prompt_template_body("review", "judging");
+    EN_CHECK("review bodies are all supplied", rules && task && judging);
+    if (!rules || !task || !judging)
+        return failures;
+    EN_CHECK("review still does not edit", strstr(rules, "does not edit"));
+    EN_CHECK("review takes gate-measured rules as supplied facts",
+             strstr(rules, "decided by the gate")
+             && strstr(rules, "\"not supplied\""));
+    EN_CHECK("review returns findings and no verdict",
+             strstr(judging, "Return findings only")
+             && strstr(judging, "derives the verdict"));
+    EN_CHECK("review marks each finding as about the change or a claim",
+             strstr(task, "the CHANGE") && strstr(task, "a CLAIM")
+             && strstr(task, "names the sentence"));
+    return failures;
+}
+
 int test_engine(void)
 {
     int failures = 0;
@@ -3783,6 +3807,7 @@ int test_engine(void)
 #if !defined(_WIN32)
     failures += case_engine_unit_grok_projection_e2e();
 #endif
+    failures += case_review_findings_not_verdict();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }
