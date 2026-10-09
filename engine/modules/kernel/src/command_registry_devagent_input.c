@@ -191,6 +191,10 @@ static bool devagent_scoped_bool(const char *path, const char *key,
         { "ops.host.gc", "apply" },
         { "app.invoke.package", "accept_execution" },
         { "zcode.package.add.plan", "local_only" },
+        /* dev.fleet.ship (alias dev.ship): reuse a banked gate stamp, and
+         * accept a persistent-schema change. */
+        { "dev.fleet.ship", "skip_gate" },
+        { "dev.fleet.ship", "accept_one_way" },
     };
     if (!path)
         return false;

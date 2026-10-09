@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 904 |
+| Registry entries (branches + leaves) | 905 |
 | Top-level roots | 14 |
 | Branches | 199 |
-| Leaves (dispatchable command paths) | 705 |
+| Leaves (dispatchable command paths) | 706 |
 | … `ready` (live handler in this build) | 619 |
-| … `compat` (metadata only, names a fallback) | 56 |
+| … `compat` (metadata only, names a fallback) | 57 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 55 |
-| Leaves with `effect=mutate` | 258 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 56 |
+| Leaves with `effect=mutate` | 259 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 131 |
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
 | `engine/composition/commands/ops.def` | 59 | 11 | 48 |
-| `engine/composition/commands/dev.def` | 120 | 22 | 98 |
+| `engine/composition/commands/dev.def` | 121 | 22 | 99 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -804,6 +804,7 @@ represented by its children's sections.
 | `dev fleet truth` | ready | read / read / operator · fast/low | none | `zcl.dev_fleet.v1` | `z23 dev fleet truth` | Show the Git and lint-receipt truth for every origin lane |
 | `dev fleet start` | ready | read / read / operator · foreground/low | `since`, `budget_bytes`, `board_dir`, `include_units`, `cwd` | `zcl.fleet_start.v1` | `z23 dev fleet start` | One opening answer for an orchestrator: the whole fleet in one bounded packet |
 | `dev fleet know` (aliases: `dev.know`) | ready | read / read / operator · instant/tiny | **`subject`**, `relation`, `context`, `budget_bytes` | `zcl.dev_know.v1` | `z23 dev know --subject=sonnet` | Ask what the fleet knows about a subject before acting on it |
+| `dev fleet ship` (aliases: `dev.ship`) | compat 🔧 → `z23-dev dev ship` | mutate / dev-mutation / operator · persistent/moderate | `targets`, `dry_run`, `skip_gate`, `accept_one_way`, `root` | `zcl.dev_ship.v1` | `z23-dev dev ship --dry_run --targets=remote` | Preflight and plan a fleet deploy without touching any host — *fleet deploy planning reads the development checkout* |
 | `dev fleet agents` (aliases: `fleet.agents`) | ready | mutate / dev-mutation / operator, prose · foreground/low | `since`, `by`, `root`, `ledger`, `include_units`, `publish`, `fleet` | `zcl.fleet_agents.v1` | `z23-dev fleet agents --since=168 --by=executor` | Every AI agent working on this box, and each executor's grade over time |
 
 #### `dev.fleet.tunnel` — Loopback TCP tunnels between paired machines
@@ -1919,6 +1920,7 @@ Every alias resolves through the same grammar as its canonical path
 | `dev.agent.shippable` | `dev.agent.ready` |
 | `dev.agent.group` | `dev.agent.test` |
 | `dev.agent.mutation` | `dev.agent.mutate` |
+| `dev.ship` | `dev.fleet.ship` |
 | `dev.factory` | `dev.agent.factory` |
 | `general` | `code.general` |
 | `zcode.create` | `zcode.package.dev.create` |

@@ -2535,6 +2535,11 @@ void zcl_native_handle_dev_lane_new(
 void zcl_native_handle_dev_ci(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* dev.ship — native preflight and plan of a fleet deploy, phase 1 of
+ * retiring tools/ship.sh (tools/command/native_dev_ship.c). */
+void zcl_native_handle_dev_ship(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* dev.fleet.know, aliased `dev know` — the fleet fact table, asked by
  * subject. It reads engine/composition/fleet_facts.def as an X-macro paste

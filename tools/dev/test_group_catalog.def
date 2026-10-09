@@ -1016,6 +1016,7 @@ ZCL_TEST_GROUP(dev_land_window)
  * receipt reports no receipt instead of a verdict, and that the cancel and
  * retry views NAME the sibling command without running it. */
 ZCL_TEST_GROUP(dev_ci)
+ZCL_TEST_GROUP(dev_ship)
 /* Agent worktree construction: detached git worktree plus the proof's
  * vendored dependencies cloned onto independent inodes (never hardlinked). */
 ZCL_TEST_GROUP(dev_lane)

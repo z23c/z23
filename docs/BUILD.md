@@ -817,6 +817,20 @@ line and refuses loudly on failure:
 `--dry-run` prints this plan (and the hardlink count) without building or
 repairing anything.
 
+`z23-dev dev ship --dry_run` is the native C23 port of that preflight and
+plan, the first phase of retiring `tools/ship.sh`. It applies ship.sh's
+target, host, proof-server, clean-tree and origin/main checks in ship.sh's
+order, captures the source id with the same tool, reports whether the gate
+stamp is banked (`--skip_gate`), and reports the persistent-schema one-way
+verdict against origin/main (`--accept_one_way` is the flag form of
+`ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1`). It returns one typed plan whose
+`verdict` is `ready` or `refuse` with a refusal class. Hosts appear only by
+their SSH alias; an address-shaped `ZCL_SHIP_HOSTS` entry appears as
+`target-<n>`. Two behaviours differ from ship.sh: HEAD ahead of origin/main
+is refused instead of pushed, and without `--dry_run` a ready plan is
+BLOCKED because this phase builds, stages and restarts nothing. Its parity
+with `tools/ship.sh --dry-run` is the `dev_ship` test group.
+
 All remotes are ordinary serving peers unless one exact destination is named
 with `ZCL_SHIP_PROOF_SERVER`. That host is skipped by default; an intentional
 promotion additionally requires `ZCL_SHIP_ALLOW_PROOF_SERVER=1`. Preflight

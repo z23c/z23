@@ -2010,6 +2010,38 @@ ZCL_COMMAND_DEV_READ(
     "the landing and unit queues are development-lane state",
     "z23-dev dev ci")
 
+/* ── dev.fleet.ship (alias dev.ship) ───────────────────────────────────────
+ * Native preflight and plan of a fleet deploy (tools/command/native_dev_ship.c),
+ * the first phase of retiring tools/ship.sh. It builds, stages and restarts
+ * nothing yet. */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.fleet.ship", "dev.fleet", "dev.ship",
+    "Preflight and plan a fleet deploy without touching any host",
+    "Runs tools/ship.sh's preflight in its order and returns the plan: "
+    "targets and configured SSH alias names (an address-shaped destination "
+    "reads target-<n>), clean tree, HEAD against freshly fetched "
+    "origin/main (behind refuses; ahead refuses because this leaf never "
+    "pushes), source id from tools/dev/source-identity.sh, the gate stamp "
+    "under ~/.cache/zcl-ship (banked only with skip_gate), and the "
+    "persistent-schema one-way verdict against origin/main with ship.sh's "
+    "0/1/2 contract. dry_run returns verdict ready or refuse with its class; "
+    "otherwise a refusal fails and a ready plan is BLOCKED, because phase 1 "
+    "deploys nothing. Its only write is the origin fetch.", 16384,
+    "ship,deploy,fleet,preflight,plan,gate,schema,dry_run",
+    "zcl.dev_ship_input.v1", "zcl.dev_ship.v1",
+    "targets,dry_run,skip_gate,accept_one_way,root", "",
+    "z23-dev dev ship --dry_run --targets=remote",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_ship,
+    "fleet deploy planning reads the development checkout",
+    "z23-dev dev ship")
+
 /* ── dev.land ──────────────────────────────────────────────────────────────
  * The landing service: an agent submits a tip and returns in milliseconds,
  * a driver steps the queue, and the agent learns the outcome by
