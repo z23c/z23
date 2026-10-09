@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 902 |
+| Registry entries (branches + leaves) | 903 |
 | Top-level roots | 14 |
 | Branches | 199 |
-| Leaves (dispatchable command paths) | 703 |
+| Leaves (dispatchable command paths) | 704 |
 | … `ready` (live handler in this build) | 618 |
-| … `compat` (metadata only, names a fallback) | 55 |
+| … `compat` (metadata only, names a fallback) | 56 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 54 |
-| Leaves with `effect=mutate` | 257 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 55 |
+| Leaves with `effect=mutate` | 258 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 131 |
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
 | `engine/composition/commands/ops.def` | 59 | 11 | 48 |
-| `engine/composition/commands/dev.def` | 118 | 22 | 96 |
+| `engine/composition/commands/dev.def` | 119 | 22 | 97 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -742,6 +742,7 @@ represented by its children's sections.
 | `dev proof coverage` | compat 🔧 → `z23-dev dev proof status` | read / read / operator · instant/tiny | `root`, `local_commit`, `remote_base` | `zcl.dev_proof_coverage.v1` | `z23-dev dev proof coverage` | Query one pair's canonical coverage manifest — *coverage queries require the dev binary* |
 | `dev proof observations` | compat 🔧 → `z23-dev dev proof status` | read / read / operator · instant/tiny | `group` | `zcl.dev_observations.v1` | `z23-dev dev proof observations` | Query this box's receiver observation index — *observation queries require the dev binary* |
 | `dev proof observations fold` | compat 🔧 → `z23-dev dev proof observations` | mutate / dev-mutation / operator · instant/low | `local_commit`, `remote_base` | `zcl.dev_observations_fold.v1` | `z23-dev dev proof observations fold` | Fold one pair's durable observations into the box index — *observation folds require the dev binary* |
+| `dev land window` | compat 🔧 → `z23-dev dev land window` | mutate / dev-mutation / operator · fast/low | **`action`**, `host`, `seq`, `candidate`, `base`, `expected_done`, `now` | `zcl.land_window.v1` | `z23-dev dev land window --action=open --host=hosta` | Read or announce the two-lander LAND-WINDOW proving windows — *landing windows are a development-lane coordination surface* |
 
 #### `dev.test` — Focused proof selection
 

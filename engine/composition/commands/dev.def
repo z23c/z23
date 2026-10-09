@@ -2011,6 +2011,37 @@ ZCL_COMMAND_DEV_COMMAND(
     "the landing queue is a development-lane coordination surface",
     "z23-dev dev land")
 
+/* ── dev.land.window ───────────────────────────────────────────────────────
+ * The two-lander LAND-WINDOW mail protocol
+ * (tools/command/native_dev_land_window.c). */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.window", "dev.proof", "",
+    "Read or announce the two-lander LAND-WINDOW proving windows",
+    "open reads the agent mail dir and lists windows another host announced "
+    "as 'LAND-WINDOW <host>, candidate <sha10> on base <sha10>, proving now, "
+    "expected done HH:MMZ.' that no later row from the same sender closed "
+    "with LANDED or RELEASED naming the candidate and whose expected-done "
+    "time is still ahead (next UTC day when earlier than the row), with "
+    "seconds_left and max_seconds_left (0 when none); unparsable rows are "
+    "skipped and counted. announce posts that row once as a note to * with "
+    "ref astra-board-runs through the dev.agent.mail post path; a second "
+    "announce of the same host, candidate and base finds its own prior "
+    "outbox row and reports already_announced. now overrides the clock for "
+    "tests. No shell, no network.", 16384,
+    "land,window,mail,lander,proof,coordination",
+    "zcl.land_window_input.v1", "zcl.land_window.v1",
+    "action,host,seq,candidate,base,expected_done,now", "action",
+    "z23-dev dev land window --action=open --host=hosta",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_dev_land_window,
+    "landing windows are a development-lane coordination surface",
+    "z23-dev dev land window")
+
 /* ── dev.lane ──────────────────────────────────────────────────────────────
  * An agent worktree with the proof's vendored dependencies primed onto
  * independent inodes. Hardlinks are forbidden: they bump the shared inode's
