@@ -12007,6 +12007,29 @@ check-git-hooks-installed: $(GIT_HOOK_BIN) $(LINTC_TOOL)
 hooks-status:
 	@tools/scripts/hooks_status.sh
 
+# One step before `make lint` in a lane: hooks, generated files, untracked
+# check. The regeneration list mirrors the lander's (DLRG_ARTIFACTS in
+# tools/command/native_dev_land_regen.c plus the API reference in
+# native_dev_land.c); it refuses to run unless each target is an initializer
+# row of those tables (a mention in a comment does not count). It never commits.
+LINT_READY_REGEN := docs-capability-inventory docs-api-reference fix-doc-counts docs-executor-routing
+.PHONY: lint-ready
+lint-ready: $(GIT_HOOK_BIN) $(LINTC_TOOL)
+	@for t in $(LINT_READY_REGEN); do \
+	  grep -Eq "^[[:space:]]*\{ (\"[^\"]*\", )?\"$$t\"," tools/command/native_dev_land_regen.c tools/command/native_dev_land.c || \
+	    { echo "lint-ready: FAIL: $$t is not in the lander's regeneration tables"; exit 1; }; done
+	@./tools/scripts/check_git_hooks_installed.sh >/dev/null 2>&1 || \
+	  { echo "lint-ready: hooks differ from the tracked hook; running make install-hooks"; \
+	    $(MAKE) --no-print-directory install-hooks; }
+	@echo "lint-ready: regenerating: $(LINT_READY_REGEN)"
+	@$(MAKE) --no-print-directory -s $(LINT_READY_REGEN)
+	@echo "lint-ready: git status --short"; git status --short
+	@u=$$(git ls-files --others --exclude-standard); \
+	if [ -n "$$u" ]; then \
+	  echo "lint-ready: FAIL: untracked files; git add them before lint, lint only sees tracked files:" >&2; \
+	  printf '  %s\n' $$u >&2; exit 1; fi; \
+	echo "lint-ready: ok"
+
 # One-shot bootstrap for a freshly created `.claude/worktrees/*` lane: copies
 # vendor/lib/*.a in from the canonical checkout (idempotent), re-asserts the
 # shared core.hooksPath, and sanity-checks the link prerequisites so a

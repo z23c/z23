@@ -1025,6 +1025,14 @@ compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
 tampered dimension cannot be admitted. `make pre-push-ci` remains an explicit
 legacy parity oracle; it is not called by the installed push hook.
 
+`make lint-ready` prepares a lane worktree for lint in one step. It runs
+`make install-hooks` only when `check-git-hooks-installed` would fail, runs
+the lander's regeneration targets (`docs-capability-inventory`,
+`docs-api-reference`, `fix-doc-counts`, `docs-executor-routing`), and prints
+`git status --short`. It exits non-zero while untracked non-ignored files
+exist, because lint scans tracked files only: `git add -A`, run
+`make lint-ready`, amend what it changed, then run `make lint`. It never commits.
+
 Every publishable proof runs the whole lint gate set, `make lint` plus
 `check-windows-acceptance`, including inventory-only changes. A scratch
 directory's location or `queue.lock` cannot narrow publication evidence.
