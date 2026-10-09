@@ -461,7 +461,7 @@ struct dl_string_result {
     return result;
 }
 
-/* Successful native serialization emits 33 unique scalar members. Reject
+/* Successful native serialization emits 34 unique scalar members. Reject
  * foreign ambiguity and displacement; cap extensions before O(n^2) work. */
 static bool dl_row_members_ok(const struct json_value *doc)
 {
@@ -739,6 +739,10 @@ struct dl_row {
      * means "no answers yet". */
     char uncertain_main[80];
     long long uncertain_tries;
+    /* Set once the producer-stale recovery has been spent for this row until
+     * main moves. Written before the recovery runs; independent of dimension.
+     * Optional on disk: an older row loads as "not tried". */
+    long long producer_recovered;
 };
 
 static bool dl_hold_field(const struct json_value *doc, bool *hold)
@@ -991,6 +995,8 @@ static bool dl_parse_dispatch_fields(const char *line, struct dl_row *r)
     (void)dl_line_int(line, "push_diagnostic_pending", &pending);
     r->push_diagnostic_pending = pending != 0;
     (void)dl_line_int(line, "fence_peer", &r->fence_peer);
+    (void)dl_line_int(line, "producer_recovered", &r->producer_recovered);
+    r->producer_recovered = r->producer_recovered != 0; /* garbage reads as spent */
     return dl_chain_fields_parse(line, r) && r->fence_peer >= 0 &&
         (strcmp(r->state, "fenced") != 0 || r->fence_peer > 0);
 }
@@ -1129,7 +1135,8 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  "\"dimension\":\"%s\",\"log_path\":\"%s\","
                  "\"prechecked_main\":\"%s\","
                  "\"precheck_uncertain_main\":\"%s\","
-                 "\"precheck_uncertain\":%lld,\"detail\":\"%s\","
+                 "\"precheck_uncertain\":%lld,\"producer_recovered\":%lld,"
+                 "\"detail\":\"%s\","
                  "\"push_diagnostic_pending\":%d,\"fence_peer\":%lld,"
                  "\"publication_hold\":%s%s}\n",
                  r->seq, r->priority_seq, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
@@ -1140,7 +1147,8 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  /* Unescaped on purpose: dl_prechecked_parse() and the
                   * precheck admit only a 40-hex commit id or "". */
                  e_dim, e_log, r->prechecked, r->uncertain_main,
-                 r->uncertain_tries, e_detail, r->push_diagnostic_pending ? 1 : 0,
+                 r->uncertain_tries, r->producer_recovered, e_detail,
+                 r->push_diagnostic_pending ? 1 : 0,
                  r->fence_peer, dl_hold_literal(r->publication_hold), dependency);
     if (w <= 0 || (size_t)w >= cap)
         return false;
@@ -2425,11 +2433,100 @@ static enum dl_proof dl_proof_stub_status(const char *wt, const char *local,
 #endif
 }
 
+#if defined(ZCL_TESTING)
+/* Test seam for the producer recovery: the stand-in "rebuild" appends one
+ * byte to a counter under the isolated state root, and the stubs below read
+ * it. Production never compiles this. */
+static bool dl_producer_stub_path(char *path, size_t cap)
+{
+    const char *state = getenv("XDG_STATE_HOME");
+    return state && state[0] &&
+           snprintf(path, cap, "%s/producer-recovery-count", state) <
+               (int)cap;
+}
+
+static long dl_producer_stub_runs(void)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    if (!dl_producer_stub_path(path, sizeof(path)) || stat(path, &st) != 0)
+        return 0;
+    return (long)st.st_size;
+}
+
+static bool dl_producer_stub_record(void)
+{
+    char path[PATH_MAX];
+    FILE *f = dl_producer_stub_path(path, sizeof(path))
+                  ? fopen(path, "ab") : NULL;
+    if (!f)
+        return false;
+    bool ok = fputc('x', f) != EOF;
+    return fclose(f) == 0 && ok;
+}
+
+/* Only the testing-only producer stubs skip the rebuild. */
+static bool dl_producer_stub_active(void)
+{
+    const char *stub = dl_stub();
+    return stub && strncmp(stub, "producer_stale", 14) == 0;
+}
+
+/* "producer_stale" always refuses with the producer-source detail;
+ * "producer_stale_once" refuses until one recovery has run, then passes.
+ * The "_nv" forms present the same refusal as a NO_VERDICT (pending) status,
+ * the way the proof status reader classifies an exact-match record.
+ * "producer_stale_text" is a RUNNING (pending) status whose detail merely
+ * contains the producer-stale text. "no_verdict_other" is a NO_VERDICT whose
+ * detail is not producer-stale. "producer_host_load" is a host-load failure. */
+static bool dl_proof_stub_producer(const char *stub, enum dl_proof *out,
+                                   char *dimension, size_t dim_cap,
+                                   char *detail, size_t cap)
+{
+    bool nv = strncmp(stub, "producer_stale_nv", 17) == 0;
+    bool once = strstr(stub, "_once") != NULL;
+    bool other = strcmp(stub, "no_verdict_other") == 0;
+    if (strcmp(stub, "producer_host_load") == 0) {
+        (void)snprintf(dimension, dim_cap, "test");
+        (void)snprintf(detail, cap, "proof stub: timed out");
+        *out = DL_PROOF_FAILED;
+        return true;
+    }
+    if (strcmp(stub, "producer_stale_text") == 0) {
+        (void)snprintf(detail, cap, "%s",
+                       "background_verification_running: "
+                       "proof_producer_source_mismatch");
+        *out = DL_PROOF_PENDING;
+        return true;
+    }
+    if (!nv && !other && strncmp(stub, "producer_stale", 14) != 0)
+        return false;
+    if (once && dl_producer_stub_runs() > 0) {
+        (void)snprintf(detail, cap, "proof stub: pass");
+        *out = DL_PROOF_PASSED;
+        return true;
+    }
+    (void)snprintf(detail, cap, "%s", other
+                   ? "proof_producer_source_id_unavailable"
+                   : "proof_producer_source_mismatch");
+    (void)snprintf(dimension, dim_cap, "%s",
+                   nv || other ? "proof_no_verdict" : detail);
+    *out = nv || other ? DL_PROOF_PENDING : DL_PROOF_FAILED;
+    return true;
+}
+#endif
+
 static enum dl_proof dl_proof_stub_read(const char *stub, const char *wt,
                                         const char *local, const char *base,
                                         char *dimension, size_t dim_cap,
                                         char *detail, size_t cap)
 {
+#if defined(ZCL_TESTING)
+    enum dl_proof produced;
+    if (dl_proof_stub_producer(stub, &produced, dimension, dim_cap, detail,
+                               cap))
+        return produced;
+#endif
     if (strcmp(stub, "status") == 0)
         return dl_proof_stub_status(wt, local, base, dimension, dim_cap,
                                     detail, cap);
@@ -3996,6 +4093,7 @@ static bool dl_requeue_successor(const struct dl_dirs *d, struct dl_row *row,
     successor.proof_intent[0] = '\0';
     dl_publication_clear(&successor);
     successor.dimension[0] = '\0';
+    successor.producer_recovered = 0;
     for (size_t i = at + 1; i < nrows; i++) rows[i - 1] = rows[i];
     rows[nrows - 1] = successor;
     ok = dl_rewrite_rows(d->land, qpath, rows, nrows);
@@ -7493,6 +7591,7 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
     (void)snprintf(row->state, sizeof(row->state), "queued");
     (void)snprintf(row->phase, sizeof(row->phase), "rebase");
     row->dimension[0] = '\0';
+    row->producer_recovered = 0;
     row->proof_intent[0] = '\0';
     dl_publication_clear(row);
     (void)snprintf(row->detail, sizeof(row->detail),
@@ -7836,6 +7935,61 @@ static bool dl_resume_proof_read(const struct dl_dirs *d, struct dl_row *row,
 }
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+enum dl_recover {
+    DL_RECOVER_OK = 0,
+    DL_RECOVER_RETRY_REFUSED = -1,
+    DL_RECOVER_UNAVAILABLE = -2,
+};
+static bool dl_producer_stale(const char *detail);
+static int dl_producer_recover(const char *root, const char *local,
+                               const char *base, char *why, size_t why_cap);
+
+/* A producer-stale refusal is a verdict on the proof binary, not on the
+ * candidate: do what `dev land drive` does — rebuild the producer in the
+ * landing worktree and prove again — once per row until main moves. Returns true when
+ * the step is answered; false leaves the failure to settle as before, with
+ * the recovery noted in the row detail when one was tried. */
+static bool dl_resume_producer_stale(const struct dl_dirs *d,
+                                     struct dl_row *row,
+                                     const char detail[512],
+                                     struct zcl_command_reply *reply)
+{
+    char why[256];
+    int rc;
+    if (!dl_producer_stale(detail))
+        return false;
+    if (row->producer_recovered) {
+        (void)snprintf(row->detail, sizeof(row->detail),
+                       "%.500s; producer recovery tried once", detail);
+        return false;
+    }
+    row->producer_recovered = 1;
+    (void)snprintf(row->detail, sizeof(row->detail),
+                   "producer recovery started: %.400s", detail);
+    if (!dl_commit_row(d, row, false)) {
+        dl_fail(reply, "QUEUE_WRITE_FAILED", "prove",
+                "cannot persist the producer recovery mark", d->land);
+        return true;
+    }
+    dl_log(row, "producer source mismatch; rebuilding the producer from the "
+                "candidate and proving again\n");
+    rc = dl_producer_recover(d->wt, row->local, row->base, why, sizeof(why));
+    if (rc != DL_RECOVER_OK) {
+        (void)snprintf(row->detail, sizeof(row->detail),
+                       "%.400s; producer recovery tried once and failed: %.64s",
+                       detail, why);
+        dl_log(row, row->detail);
+        dl_log(row, "\n");
+        return false;
+    }
+    (void)snprintf(row->detail, sizeof(row->detail),
+                   "producer rebuilt from the candidate; proof re-run: %.400s",
+                   detail);
+    if (dl_commit_or_report(d, row, false, reply, "proving"))
+        dl_step_reply(reply, row, "proving");
+    return true;
+}
+
 /* An interrupted run (a requester signal, an outer timeout, the base probe)
  * is not a verdict on the candidate: re-run the same exact pair rather than
  * settle the request as failed, bounded by DL_ATTEMPT_MAX so a candidate
@@ -7874,6 +8028,23 @@ static bool dl_resume_interrupted_proof(const struct dl_dirs *d,
 }
 #endif
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* The proof status reader classifies a producer-source refusal as NO_VERDICT,
+ * which dl_proof_status_map reads as pending. Left pending, a step that
+ * cannot rebuild the producer would hold the row in flight forever, so the
+ * step treats it as the failure it is: one bounded recovery, then settled. */
+static void dl_resume_stale_no_verdict(enum dl_proof *p, char dimension[48],
+                                       const char detail[512])
+{
+    if (*p != DL_PROOF_PENDING ||
+        strcmp(dimension, "proof_no_verdict") != 0 ||
+        !dl_producer_stale(detail))
+        return;
+    *p = DL_PROOF_FAILED;
+    (void)snprintf(dimension, 48, "%s", "proof_producer_source_mismatch");
+}
+#endif
+
 static void dl_resume_failed_proof(const struct dl_dirs *d,
                                     struct dl_row *row,
                                     const char dimension[48],
@@ -7891,6 +8062,8 @@ static void dl_resume_failed_proof(const struct dl_dirs *d,
         return;
     }
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    if (dl_resume_producer_stale(d, row, detail, reply))
+        return;
     if (zcl_dev_proof_failure_interrupted(detail) &&
         dl_resume_interrupted_proof(d, row, detail, reply))
         return;
@@ -7992,6 +8165,9 @@ static void dl_resume_pending_watcher_kick(const struct dl_dirs *d,
     }
     if (!dl_resume_proof_read(d, row, observed_main, dimension, detail, &p, reply))
         return;
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    dl_resume_stale_no_verdict(&p, dimension, detail);
+#endif
     if (p == DL_PROOF_PENDING) {
 #ifdef ZCL_DEV_BUILD
         dl_resume_pending_watcher_kick(d, row);
@@ -9691,6 +9867,44 @@ int zcl_native_dev_land_test_watch_worker(const char *wt, const char *base,
     }
     return 1;
 }
+
+/* The one recovery both `dev land drive` and `dev land step` run for a
+ * producer-stale refusal: clear the sticky verdict so the pair queues again,
+ * then build the producer in `root` and prove with it (dl_producer_reproof,
+ * unchanged). Returns DL_RECOVER_OK once the child proof has exited,
+ * DL_RECOVER_RETRY_REFUSED when the pair could not be queued again, and
+ * DL_RECOVER_UNAVAILABLE when no candidate-built producer could be run; `why`
+ * carries the reason for either failure. Only the testing-only producer stubs
+ * skip the rebuild: a test build then only counts the call. */
+static int dl_producer_recover(const char *root, const char *local,
+                               const char *base, char *why, size_t why_cap)
+{
+    why[0] = '\0';
+#if defined(ZCL_TESTING)
+    if (dl_producer_stub_active()) {
+        if (dl_producer_stub_record())
+            return DL_RECOVER_OK;
+        (void)snprintf(why, why_cap, "%s", "producer_stub_unrecorded");
+        return DL_RECOVER_UNAVAILABLE;
+    }
+#endif
+#ifdef ZCL_DEV_BUILD
+    struct zcl_dev_proof_status again = {0};
+    if (!zcl_dev_proof_retry(root, local, base, &again)) {
+        (void)snprintf(why, why_cap, "%s", again.detail);
+        return DL_RECOVER_RETRY_REFUSED;
+    }
+    if (dl_producer_reproof(root, local, base, "make", why, why_cap) < 0)
+        return DL_RECOVER_UNAVAILABLE;
+    return DL_RECOVER_OK;
+#else
+    (void)root;
+    (void)local;
+    (void)base;
+    (void)snprintf(why, why_cap, "%s", "producer recovery needs the dev binary");
+    return DL_RECOVER_UNAVAILABLE;
+#endif
+}
 #endif
 
 #if defined(ZCL_TESTING)
@@ -9745,16 +9959,16 @@ static int dl_drive_proof(struct zcl_command_reply *reply)
     if (result == 1 && dl_producer_stale(proof.detail)) {
         /* Settled as a refusal of this binary, not of the candidate. Queue
          * the pair again and prove it with a producer built from it. */
-        struct zcl_dev_proof_status again = {0};
         char why[256] = "";
-        if (!zcl_dev_proof_retry(root, local, base, &again)) {
+        int recovered = dl_producer_recover(root, local, base, why,
+                                            sizeof(why));
+        if (recovered == DL_RECOVER_RETRY_REFUSED) {
             dl_fail(reply, "PROOF_PRODUCER_RETRY_REFUSED", "drive",
                     "cannot queue the pair again for a candidate-built producer",
-                    again.detail);
+                    why);
             return -1;
         }
-        if (dl_producer_reproof(root, local, base, "make", why,
-                                sizeof(why)) < 0) {
+        if (recovered != DL_RECOVER_OK) {
             dl_fail(reply, "PROOF_PRODUCER_UNAVAILABLE", "drive",
                     "cannot build and run a producer from the candidate",
                     why);

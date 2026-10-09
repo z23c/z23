@@ -7812,6 +7812,146 @@ _test_next:;
 }
 #endif
 
+/* The producer-recovery counter the proof stub's stand-in rebuild keeps. */
+static long dlx_producer_runs(void)
+{
+    char path[1200];
+    struct stat st;
+    (void)snprintf(path, sizeof(path), "%s/producer-recovery-count",
+                   g_dlx_state);
+    return stat(path, &st) == 0 ? (long)st.st_size : 0;
+}
+
+/* One step under `stub`; true when it answered `state` with `dimension`. */
+static bool dlx_step_dim(const char *stub, const char *state,
+                         const char *dimension, const char *detail_part)
+{
+    struct dlx_call c;
+    setenv("ZCL_LAND_PROOF_STUB", stub, 1);
+    dlx_begin(&c, "step");
+    bool ok = dlx_run(&c) && dlx_ok(&c) &&
+              strcmp(dlx_str(&c, "state"), state) == 0 &&
+              (!dimension || strcmp(dlx_str(&c, "dimension"),
+                                    dimension) == 0) &&
+              (!detail_part || strstr(dlx_str(&c, "detail"), detail_part));
+    dlx_end(&c);
+    return ok;
+}
+
+static int test_dev_land_step_producer_recovery(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    static const char *const stale = "proof_producer_source_mismatch";
+    TEST("land step: a producer-stale refusal is recovered once and the re-proved pair lands") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_producer_once", "step_producer_once_rig"));
+        ASSERT(dlx_step_dim("producer_stale_once", "proving", "",
+                            "producer rebuilt from the candidate"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_stale_once", "landed", "", NULL));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: a producer refusal that survives the one recovery settles failed and is not recovered again") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_producer_twice", "step_producer_twice_rig"));
+        ASSERT(dlx_step_dim("producer_stale", "proving", "", NULL));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_stale", "failed", stale,
+                            "producer recovery tried once"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_stale", "empty", NULL, NULL));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: any other proof failure settles as before and never recovers the producer") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_producer_other", "step_producer_other_rig"));
+        ASSERT(dlx_step_dim("fail", "failed", "lint", "proof stub: fail"));
+        ASSERT_EQ(dlx_producer_runs(), 0);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: a no-verdict producer refusal is recovered once and the re-proved pair lands") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_nv_once", "step_nv_once_rig"));
+        ASSERT(dlx_step_dim("producer_stale_nv_once", "proving", "",
+                            "producer rebuilt from the candidate"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_stale_nv_once", "landed", "", NULL));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: a no-verdict producer refusal that survives the one recovery settles failed, never pending") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_nv_twice", "step_nv_twice_rig"));
+        ASSERT(dlx_step_dim("producer_stale_nv", "proving", "", NULL));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_stale_nv", "failed", stale,
+                            "producer recovery tried once"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_stale_nv", "empty", NULL, NULL));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: a no-verdict status with another detail stays pending and never recovers the producer") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_nv_other", "step_nv_other_rig"));
+        ASSERT(dlx_step_dim("no_verdict_other", "proving", NULL,
+                            "proof_producer_source_id_unavailable"));
+        ASSERT(dlx_step_dim("no_verdict_other", "proving", NULL, NULL));
+        ASSERT_EQ(dlx_producer_runs(), 0);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: a host-load retry mark is kept through a producer recovery") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_producer_hl", "step_producer_hl_rig"));
+        ASSERT(dlx_step_dim("producer_host_load", "rebased", "host_load",
+                            NULL));
+        ASSERT(dlx_step_dim("running", "started", "host_load", NULL));
+        ASSERT(dlx_step_dim("producer_stale_once", "proving", "host_load",
+                            "producer rebuilt from the candidate"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_stale_once", "landed", "host_load",
+                            NULL));
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: a host-load retry after the recovery does not earn a second recovery") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_producer_hl2", "step_producer_hl2_rig"));
+        ASSERT(dlx_step_dim("producer_stale", "proving", "", NULL));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_host_load", "rebased", "host_load",
+                            NULL));
+        ASSERT(dlx_step_dim("running", "started", "host_load", NULL));
+        ASSERT(dlx_step_dim("producer_stale", "failed", stale,
+                            "producer recovery tried once"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: a running status whose text mentions the stale producer is not a no-verdict and is left alone") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_producer_text", "step_producer_text_rig"));
+        ASSERT(dlx_step_dim("producer_stale_text", "proving", "",
+                            "background_verification_running"));
+        ASSERT(dlx_step_dim("producer_stale_text", "proving", "", NULL));
+        ASSERT_EQ(dlx_producer_runs(), 0);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+#endif
+    return failures;
+}
+
 static int test_dev_land_interrupted_proof(void)
 {
     int failures = 0;
@@ -9809,14 +9949,14 @@ static bool dlx_extended_native_row(char *body, size_t cap, unsigned members)
         return false;
     struct json_value doc; json_init(&doc);
     bool ok = json_read(&doc, native, strlen(native)) && doc.type == JSON_OBJ &&
-              doc.num_children == 33;
+              doc.num_children == 34;
     json_free(&doc);
     char *end = strrchr(native, '}');
-    if (!ok || !end || members < 33) return false;
+    if (!ok || !end || members < 34) return false;
     size_t used = (size_t)(end - native);
     if (used >= cap) return false;
     memcpy(body, native, used);
-    for (unsigned i = 33; i < members; i++) {
+    for (unsigned i = 34; i < members; i++) {
         int n = snprintf(body + used, cap - used, ",\"extension_%u\":0", i);
         if (n <= 0 || (size_t)n >= cap - used) return false;
         used += (size_t)n;
@@ -12277,6 +12417,7 @@ int test_dev_land(void)
     failures += test_dev_land_signed_recovery();
     failures += test_dev_land_new_source_precheck();
     failures += test_dev_land_drive_producer_reproof();
+    failures += test_dev_land_step_producer_recovery();
     failures += test_dev_land_signed_lost_ack();
     failures += test_dev_land_signed_lost_race();
     failures += test_dev_land_signed_lost_ack_resend();

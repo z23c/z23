@@ -1376,7 +1376,12 @@ The proof producer must be built from the exact sealed candidate source before
 selection, reuse, or dimensions run. `proof_producer_source_mismatch` refuses
 before those stages. `dev land drive` recovers from it without help: it queues
 the pair again, builds `dev-bin` in the landing worktree, and proves the pair
-with that binary as a child. Outside a drive, use the candidate-owned producer
+with that binary as a child. `dev land step` runs the same recovery, whether
+the refusal reads as a failed or a no-verdict proof, once per row until main
+moves (the mark is its own row field, independent of the `host_load` retry):
+a second refusal, or a failed rebuild, settles the row failed with
+`proof_producer_source_mismatch` instead of leaving it pending. Outside a
+landing, use the candidate-owned producer
 and its structured foreground recovery action. A proof step started outside a
 user-manager scope that delegates the memory controller refuses at once with
 `proof_host_memory_scope_unqualified`; run it through the build scheduler.
