@@ -104,8 +104,8 @@ struct chain_state_repository {
 
 /* ── Read-only view ─────────────────────────────────────────────
  * Captured by csr_snapshot. Repository-owned memory is copied under csr->lock;
- * external progress.kv/node.db counts are sampled only after that lock is
- * released. The counts may therefore be one commit newer than the frontier,
+ * tip_height and the external progress.kv/node.db counts are sampled only
+ * after that lock is released. The counts may therefore be one commit newer than the frontier,
  * which is preferable to creating a csr->progress lock-order edge. */
 struct chain_state_view {
     int             tip_height;        /* active_chain tip height (-1 if none) */

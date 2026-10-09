@@ -25,6 +25,7 @@ void csr_snapshot(struct chain_state_repository *csr,
                   struct chain_state_view *out)
 {
     struct node_db *ndb = NULL;
+    struct active_chain *chain = NULL;
 
     if (!out)
         return;
@@ -40,11 +41,13 @@ void csr_snapshot(struct chain_state_repository *csr,
      * publish through the CSR.  Copy only repository-owned memory while this
      * mutex is held.  The external progress.kv/node.db observations below run
      * after unlock, otherwise health/agent snapshotting creates the inverse
-     * csr->progress edge and deadlocks the reducer. */
+     * csr->progress edge and deadlocks the reducer. active_chain_height is
+     * one of those observations: it reads tip_finalize_log under
+     * progress_store_tx_lock. */
     pthread_mutex_lock(&csr->lock);
-    if (csr->chain_active) {
-        out->tip_height = active_chain_height(csr->chain_active);
-        struct block_index *tip = active_chain_cached_tip(csr->chain_active);
+    chain = csr->chain_active;
+    if (chain) {
+        struct block_index *tip = active_chain_cached_tip(chain);
         if (tip && tip->phashBlock)
             out->tip_hash = *tip->phashBlock;
     }
@@ -62,7 +65,10 @@ void csr_snapshot(struct chain_state_repository *csr,
     pthread_mutex_unlock(&csr->lock);
 
     /* These projection counts are independent point-in-time observations;
-     * they are intentionally not atomic with the in-memory frontier copy. */
+     * they are intentionally not atomic with the in-memory frontier copy.
+     * The active chain object has process lifetime. */
+    if (chain)
+        out->tip_height = active_chain_height(chain);
     /* Introspection must not compete for progress_store_tx_lock with a reducer
      * batch. The canonical coins_kv count is used by commit validation, while
      * this field's public contract is the rebuildable node.db projection. */

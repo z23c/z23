@@ -16,6 +16,8 @@
 #include "validation/process_block.h"
 #include "coins/coins_view.h"
 #include "models/database.h"
+#include "platform/time_compat.h"
+#include "storage/progress_store.h"
 #include "event/event.h"
 
 #include <pthread.h>
@@ -1495,6 +1497,105 @@ static int t_p71_update_tip_propagates_csr_rejection(void)
     return failures;
 }
 
+/* ── Lock order: csr_snapshot vs a reducer stage ────────────
+ * A reducer stage holds progress_store_tx_lock (stage_run_once) and then
+ * publishes through csr->lock (csr_promote_header_tip). A snapshot reader
+ * that reads the progress-backed active-chain height while still holding
+ * csr->lock closes the inverse edge and the two threads deadlock. The
+ * authority hook only observes that the snapshot reached the height read; it
+ * returns false so the read takes the real progress_store_tx_lock path. */
+
+static _Atomic int g_lo_height_reads;
+
+static int64_t lo_auth_height(void) { return -1; }
+
+static bool lo_auth_not_authoritative(void)
+{
+    atomic_fetch_add(&g_lo_height_reads, 1);
+    return false;
+}
+
+struct lo_snapshot_args {
+    struct chain_state_repository *csr;
+    struct chain_state_view view;
+    _Atomic bool done;
+};
+
+static void *lo_snapshot_thread(void *p)
+{
+    struct lo_snapshot_args *a = p;
+    csr_snapshot(a->csr, &a->view);
+    atomic_store(&a->done, true);
+    return NULL;
+}
+
+static bool lo_wait_height_read(const struct lo_snapshot_args *a, int ms)
+{
+    for (int waited = 0; waited < ms; waited++) {
+        if (atomic_load(&g_lo_height_reads) > 0 || atomic_load(&a->done))
+            return atomic_load(&g_lo_height_reads) > 0;
+        platform_sleep_ms(1);
+    }
+    return false;
+}
+
+static bool lo_lock_csr_bounded(struct chain_state_repository *csr, int ms)
+{
+    for (int waited = 0; waited < ms; waited++) {
+        if (pthread_mutex_trylock(&csr->lock) == 0)
+            return true;
+        platform_sleep_ms(1);
+    }
+    return false;
+}
+
+static int t_snapshot_releases_csr_lock_before_progress_read(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "csr_lock_order", "snapshot");
+    bool own_store = progress_store_db() == NULL;
+    bool store_ok = !own_store || progress_store_open(dir);
+    CSR_RUN("csr/lock-order: progress store open", store_ok &&
+            progress_store_db() != NULL);
+
+    struct csr_fixture f; csr_fix_init(&f);
+    struct chain_state_repository csr;
+    csr_init(&csr, &f.bm, &f.chain, &f.header_tip, &f.coins_tip, NULL, NULL);
+    atomic_store(&g_lo_height_reads, 0);
+    active_chain_register_authority(&(struct active_chain_authority){
+        .get_height = lo_auth_height,
+        .is_authoritative = lo_auth_not_authoritative,
+    });
+
+    struct lo_snapshot_args args = { .csr = &csr };
+    progress_store_tx_lock();
+    pthread_t th;
+    bool started = pthread_create(&th, NULL, lo_snapshot_thread, &args) == 0;
+    bool reached = started && lo_wait_height_read(&args, 5000);
+    bool csr_free_while_reading = reached && lo_lock_csr_bounded(&csr, 2000);
+    if (csr_free_while_reading)
+        pthread_mutex_unlock(&csr.lock);
+    progress_store_tx_unlock();
+    if (started)
+        pthread_join(th, NULL);
+
+    CSR_RUN("csr/lock-order: snapshot reaches the progress-backed height read",
+            reached);
+    CSR_RUN("csr/lock-order: snapshot releases csr->lock before taking "
+            "progress_store_tx_lock", csr_free_while_reading);
+    CSR_RUN("csr/lock-order: snapshot completes once the stage releases",
+            atomic_load(&args.done) && args.view.tip_height == -1);
+
+    active_chain_register_authority(&(struct active_chain_authority){0});
+    csr_free(&csr);
+    csr_fix_free(&f);
+    if (own_store && store_ok)
+        progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* ── Test runner ─────────────────────────────────────────── */
 
 int test_chain_state_repo(void)
@@ -1545,6 +1646,7 @@ int test_chain_state_repo(void)
     failures += t_singleton_uninitialized_rejects();
     failures += t_singleton_init_wires_fixture();
     failures += t_p71_update_tip_propagates_csr_rejection();
+    failures += t_snapshot_releases_csr_lock_before_progress_read();
 
     /* Negative height rejection */
     {
