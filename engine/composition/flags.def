@@ -1382,6 +1382,15 @@ Z23_FLAG("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND", "env_test", "-", "-",
           "test-only terminal append refusal; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TIMING", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:auto")
+Z23_FLAG("ZCL_LAND_WINDOW", "env_runtime", "1", "-",
+          "0 turns off the lander's LAND-WINDOW coordination (deferring a "
+          "proof start behind another host's open window on the same base, "
+          "announcing, re-announcing and closing its own); test builds "
+          "are off unless 1; first use tools/command/native_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_WINDOW_HOST", "env_runtime", "-", "-",
+          "the host name the lander announces LAND-WINDOW rows under and "
+          "excludes from foreign windows; default the node name; first use "
+          "tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_WORKTREE", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LANE_AGENT_TIMEOUT", "env_build", "10", "-",

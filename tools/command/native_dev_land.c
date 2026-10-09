@@ -134,8 +134,10 @@
 #include "command/native_command.h"
 #include "command/native_dev_land_regen.h"
 #include "command/native_dev_land_attestation.h"
+#include "command/native_dev_land_window.h"
 #include "util/clientversion.h"
 #include "command/native_devagent.h"
+#include "command/native_dev_agents.h"
 #include "dependency_links.h"
 
 #include "base/safe_alloc.h"
@@ -6395,6 +6397,164 @@ static bool dl_reconcile_landing(const struct dl_dirs *d, struct dl_row *row,
 /* Seal the prepared tree and exact proof pair in the row before asking a
  * worker to prove it. A replacement driver can recover the same request
  * after the initiating process dies. */
+/* ── LAND-WINDOW: the two-lander proving window ────────────────────────────
+ * Before a fresh row is prepared, a foreign host's open window on the base
+ * this row would prove on defers the step (STEP_DEFERRED, retryable). A
+ * started proof announces this host's window with an estimate measured from
+ * the landing worktree's proof attempts; a proof still pending past it is
+ * re-announced; every other settled step closes it, LANDED when the row
+ * landed and RELEASED otherwise. ZCL_LAND_WINDOW=0 turns all of it off
+ * (test builds: off unless ZCL_LAND_WINDOW=1); ZCL_LAND_WINDOW_HOST names
+ * this host, else the host name. Mail trouble is logged, never fatal. */
+
+struct dl_window {
+    char host[ZCL_LAND_WINDOW_HOST_MAX + 1];
+    char sidecar[4096 + 32];
+    struct zcl_land_window_self self;
+};
+
+static bool dl_window_host(char host[ZCL_LAND_WINDOW_HOST_MAX + 1])
+{
+    const char *named = getenv("ZCL_LAND_WINDOW_HOST");
+    if (named && named[0])
+        (void)snprintf(host, ZCL_LAND_WINDOW_HOST_MAX + 1, "%s", named);
+    else
+        zcl_agents_host_name(host, ZCL_LAND_WINDOW_HOST_MAX + 1);
+    return zcl_land_window_host_ok(host);
+}
+
+static bool dl_window_on(const struct dl_dirs *d, struct dl_window *w)
+{
+    const char *on = getenv("ZCL_LAND_WINDOW");
+#if defined(ZCL_TESTING)
+    if (!on || strcmp(on, "1") != 0)
+        return false;
+#else
+    if (on && strcmp(on, "0") == 0)
+        return false;
+#endif
+    if (!d || !dl_window_host(w->host) ||
+        snprintf(w->sidecar, sizeof(w->sidecar), "%s/window.state",
+                 d->land) >= (int)sizeof(w->sidecar))
+        return false;
+    w->self = (struct zcl_land_window_self){ w->sidecar, w->host, DL_LEAF };
+    return true;
+}
+
+static void dl_window_log(const struct dl_row *row, const char *note)
+{
+    if (!row || !note || !note[0])
+        return;
+    dl_log(row, "land window: ");
+    dl_log(row, note);
+    dl_log(row, "\n");
+}
+
+static void dl_step_deferred(struct zcl_command_reply *reply,
+                             const struct zcl_land_window_hit *hit)
+{
+    char evidence[256];
+    (void)snprintf(evidence, sizeof(evidence),
+                   "host=%s candidate=%s base=%s seconds_left=%lld",
+                   hit->host, hit->candidate, hit->base,
+                   (long long)hit->seconds_left);
+    (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
+    (void)json_push_kv_str(&reply->data, "window_host", hit->host);
+    (void)json_push_kv_str(&reply->data, "window_candidate", hit->candidate);
+    (void)json_push_kv_str(&reply->data, "window_base", hit->base);
+    (void)json_push_kv_int(&reply->data, "window_seconds_left",
+                           hit->seconds_left);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED, "STEP_DEFERRED", "window",
+                           true, false,
+                           "another host is proving on this base; step again "
+                           "after its window closes",
+                           evidence);
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "%s", "z23-dev dev land step");
+}
+
+/* True when the step deferred (reply written). Fail-open: no window, a
+ * failed scan, a worktree or fetch problem all proceed to the normal step,
+ * which reports its own failures. */
+static bool dl_window_defer(const struct dl_dirs *d, const struct dl_row *row,
+                            struct zcl_command_reply *reply)
+{
+    struct dl_window w;
+    struct zcl_land_window_hit hit;
+    char main_now[80], why[1024] = "", note[160];
+    int64_t now = platform_time_wall_unix();
+    if (!dl_window_on(d, &w) ||
+        !zcl_land_window_foreign(w.host, NULL, now, ZCL_LAND_WINDOW_GRACE_S,
+                                 &hit))
+        return false;
+    if (hit.stale > 0) {
+        (void)snprintf(note, sizeof(note),
+                       "ignored %lld stale foreign window(s) past "
+                       "expected-done + %d min",
+                       (long long)hit.stale, ZCL_LAND_WINDOW_GRACE_S / 60);
+        dl_window_log(row, note);
+    }
+    if (!hit.open || !dl_wt_ensure(d, row, why, sizeof(why)) ||
+        !dl_fetch_remote_main(d->wt, main_now) ||
+        !zcl_land_window_foreign(w.host, main_now, now,
+                                 ZCL_LAND_WINDOW_GRACE_S, &hit) ||
+        !hit.open)
+        return false;
+    dl_step_deferred(reply, &hit);
+    return true;
+}
+
+static void dl_window_begin(const struct dl_dirs *d, const struct dl_row *row)
+{
+    struct dl_window w;
+    struct zcl_land_window_estimate e;
+    char note[256];
+    if (!dl_window_on(d, &w))
+        return;
+    zcl_land_window_estimate(d->wt, NULL, &e);
+    (void)zcl_land_window_begin(&w.self, row->local, row->base,
+                                platform_time_wall_unix(), &e, note,
+                                sizeof(note));
+    dl_window_log(row, note);
+}
+
+static void dl_window_tick(const struct dl_dirs *d, const struct dl_row *row)
+{
+    struct dl_window w;
+    char note[256];
+    if (!dl_window_on(d, &w))
+        return;
+    (void)zcl_land_window_tick(&w.self, d->wt, platform_time_wall_unix(),
+                               note, sizeof(note));
+    dl_window_log(row, note);
+}
+
+/* After a step: keep the window of a proof that is still running, close
+ * any other (LANDED for the row that just landed). */
+[[maybe_unused]] static void dl_window_settle(const struct dl_dirs *d,
+                                              const struct dl_row *row,
+                                              const struct zcl_command_reply *reply)
+{
+    struct dl_window w;
+    const char *state;
+    char note[256];
+    bool proving, landed;
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED || !dl_window_on(d, &w))
+        return;
+    state = json_get_str(json_get(&reply->data, "state"));
+    if (!state)
+        return;
+    proving = row && (strcmp(state, "started") == 0 ||
+                      strcmp(state, "proving") == 0);
+    landed = row && strcmp(state, "landed") == 0;
+    (void)zcl_land_window_close(&w.self, proving ? row->local : NULL,
+                                proving ? row->base : NULL,
+                                landed ? row->local : NULL, note,
+                                sizeof(note));
+    dl_window_log(row, note);
+}
+
 static bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row)
 {
     char rev[96];
@@ -6517,8 +6677,10 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
-    if (dl_commit_or_report(d, row, false, reply, "started"))
+    if (dl_commit_or_report(d, row, false, reply, "started")) {
         dl_step_reply(reply, row, "started");
+        dl_window_begin(d, row);
+    }
 }
 
 static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
@@ -6624,6 +6786,8 @@ static void dl_prepare(const struct dl_dirs *d, struct dl_row *row,
                          struct zcl_command_reply *reply, char observed_main[80])
 {
     int64_t started = platform_time_monotonic_us();
+    if (dl_window_defer(d, row, reply))
+        return;
     dl_step_start(d, row, reply, observed_main);
     dl_beat(row, "prepare", started);
 }
@@ -7832,6 +7996,7 @@ static void dl_resume_pending_watcher_kick(const struct dl_dirs *d,
 #ifdef ZCL_DEV_BUILD
         dl_resume_pending_watcher_kick(d, row);
 #endif
+        dl_window_tick(d, row);
         if (dl_commit_or_report(d, row, false, reply, "proving"))
             dl_step_reply(reply, row, "proving");
         return;
@@ -9298,8 +9463,9 @@ static void dl_step(const struct zcl_command_request *req,
     have_row = dl_step_pick_row(rows, nrows, &pick, &have_inflight);
     free(rows);
     if (!have_row) {
-        dl_unlock(slot);
         dl_step_reply(reply, NULL, "empty");
+        dl_window_settle(&d, NULL, reply);
+        dl_unlock(slot);
         return;
     }
     if (dl_step_terminal_replay(&d, &pick, reply) != 0) {
@@ -9338,6 +9504,7 @@ static void dl_step(const struct zcl_command_request *req,
         dl_step_resume(&d, &pick, reply, observed_main);
     else
         dl_prepare(&d, &pick, reply, observed_main);
+    dl_window_settle(&d, &pick, reply);
     /* Still under step.lock, after the driven row's own work: rows queued
      * behind a row in flight learn now whether this main left them
      * mergeable, not when they reach the head of the queue. */
@@ -9397,6 +9564,10 @@ static enum zcl_dev_proof_base_observation dl_base_observe(void *opaque)
     const char *args[] = { "ls-remote", "--quiet", "origin",
                            "refs/heads/main", NULL };
     char out[512], tip[80];
+    struct dl_dirs dirs;
+    /* The proof's only periodic beat: re-announce an overrun window. */
+    if (dl_dirs_resolve(&dirs, false))
+        dl_window_tick(&dirs, NULL);
     if (!ctx || !ctx->wt || !ctx->base ||
         dl_git(ctx->wt, args, out, sizeof(out), DL_BASE_PROBE_TIMEOUT_MS) != 0)
         return ZCL_DEV_PROOF_BASE_UNKNOWN;

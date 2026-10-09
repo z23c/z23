@@ -2030,7 +2030,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "tests. No shell, no network.", 16384,
     "land,window,mail,lander,proof,coordination",
     "zcl.land_window_input.v1", "zcl.land_window.v1",
-    "action,host,seq,candidate,base,expected_done,now", "action",
+    "action,host,seq,candidate,base,expected_done,now,grace_s", "action",
     "z23-dev dev land window --action=open --host=hosta",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,

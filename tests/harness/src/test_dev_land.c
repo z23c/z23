@@ -144,6 +144,8 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
     unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
+    unsetenv("ZCL_LAND_WINDOW");
+    unsetenv("ZCL_LAND_WINDOW_HOST");
     /* The vendor/tor submodule fixtures below add a real gitlink pointing
      * at a same-host bare repo; modern git's default transport allowlist
      * otherwise refuses a local `file://`-style remote reached through
@@ -175,6 +177,8 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
     unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
+    unsetenv("ZCL_LAND_WINDOW");
+    unsetenv("ZCL_LAND_WINDOW_HOST");
     unsetenv("GIT_ALLOW_PROTOCOL");
 }
 
@@ -12061,6 +12065,188 @@ _test_next:;
     return failures;
 }
 
+/* ── LAND-WINDOW: deferral, announce, close ─────────────────────────────
+ * The lander's window posts are off in test builds unless armed; the
+ * fixture mail dir lives under the isolated state root. */
+
+static void dlx_window_arm(const char *on)
+{
+    (void)setenv("ZCL_LAND_WINDOW", on, 1);
+    (void)setenv("ZCL_LAND_WINDOW_HOST", "hosta", 1);
+}
+
+static bool dlx_window_maildir(char *out, size_t cap)
+{
+    char landdir[1200];
+    dlx_landdir(landdir, sizeof(landdir));
+    if (snprintf(out, cap, "%s/../mail", landdir) >= (int)cap)
+        return false;
+    return dlx_mkdir_p(out);
+}
+
+static void dlx_window_clock(int64_t t, char iso[32], char hhmm[8])
+{
+    time_t tt = (time_t)t;
+    struct tm tm;
+    (void)gmtime_r(&tt, &tm);
+    (void)strftime(iso, 32, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    (void)strftime(hhmm, 8, "%H:%MZ", &tm);
+}
+
+/* The peer inbox: hostb proving candidate aaaaaaaaaa on `base10`, announced
+ * at `ts` and expected done at `done`, optionally released a minute later. */
+static bool dlx_window_peer(const char *base10, int64_t ts, int64_t done,
+                            bool released)
+{
+    char mail[1400], path[1500], iso[32], hhmm[8], dhhmm[8], riso[32];
+    char rows[2048];
+    if (!dlx_window_maildir(mail, sizeof(mail)))
+        return false;
+    dlx_window_clock(ts, iso, hhmm);
+    dlx_window_clock(done, riso, dhhmm);
+    dlx_window_clock(ts + 60, riso, hhmm);
+    int n = snprintf(rows, sizeof(rows),
+        "{\"seq\":1,\"ts\":\"%s\",\"from\":\"agent-b\",\"to\":\"*\","
+        "\"kind\":\"note\",\"body\":\"LAND-WINDOW hostb, candidate "
+        "aaaaaaaaaa on base %.10s, proving now, expected done %s.\","
+        "\"ref\":\"astra-board-runs\"}\n",
+        iso, base10, dhhmm);
+    if (n <= 0 || (size_t)n >= sizeof(rows))
+        return false;
+    if (released &&
+        snprintf(rows + n, sizeof(rows) - (size_t)n,
+                 "{\"seq\":2,\"ts\":\"%s\",\"from\":\"agent-b\",\"to\":\"*\","
+                 "\"kind\":\"note\",\"body\":\"RELEASED hostb, candidate "
+                 "aaaaaaaaaa on base %.10s.\",\"ref\":\"astra-board-runs\"}\n",
+                 riso, base10) >= (int)(sizeof(rows) - (size_t)n))
+        return false;
+    return snprintf(path, sizeof(path), "%s/inbox.peer.jsonl", mail) <
+               (int)sizeof(path) &&
+           dlx_write(path, rows);
+}
+
+static bool dlx_window_outbox_has(const char *needle)
+{
+    char mail[1400], path[1500];
+    static char text[1u << 20];
+    size_t len = 0;
+    if (!dlx_window_maildir(mail, sizeof(mail)) ||
+        snprintf(path, sizeof(path), "%s/outbox.jsonl", mail) >=
+            (int)sizeof(path) ||
+        !dlx_slurp(path, text, sizeof(text) - 1, &len))
+        return false;
+    text[len] = '\0'; /* dlx_slurp does not terminate */
+    return strstr(text, needle) != NULL;
+}
+
+/* Isolated rig, armed lander window, a queued submission of the rig tip. */
+static bool dlx_window_rig(struct dlx_rig *rig, const char *tag,
+                           const char *on, char base[64])
+{
+    struct dlx_call c;
+    char mail[1400];
+    bool ok;
+    dlx_isolate(tag);
+    dlx_window_arm(on);
+    if (!dlx_rig_make(rig, tag) || !dlx_origin_main(rig, base) ||
+        !dlx_window_maildir(mail, sizeof(mail)))
+        return false;
+    (void)setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    (void)setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    dlx_submit(&c, rig, rig->tip);
+    ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    return ok;
+}
+
+/* Step once; "" state on a refusal, with the refusal code in `code`. */
+static void dlx_window_step(char state[32], char code[64], char evidence[512])
+{
+    struct dlx_call c;
+    dlx_begin(&c, "step");
+    state[0] = code[0] = evidence[0] = '\0';
+    if (dlx_run(&c)) {
+        if (dlx_ok(&c) && dlx_str(&c, "state"))
+            (void)snprintf(state, 32, "%s", dlx_str(&c, "state"));
+        else if (!dlx_ok(&c)) {
+            (void)snprintf(code, 64, "%s", dlx_err_code(&c));
+            (void)snprintf(evidence, 512, "%s", dlx_err_evidence(&c));
+        }
+    }
+    dlx_end(&c);
+}
+
+static int test_dev_land_window_defer(void)
+{
+    int failures = 0;
+    struct dlx_rig rig;
+    char base[64], state[32], code[64], evidence[512], want[160];
+    int64_t now = platform_time_wall_unix();
+
+    TEST("land window: a foreign window on the same base defers the proof") {
+        ASSERT(dlx_window_rig(&rig, "window_defer", "1", base));
+        ASSERT(dlx_window_peer(base, now - 300, now + 1500, false));
+        dlx_window_step(state, code, evidence);
+        ASSERT_STR_EQ(code, "STEP_DEFERRED");
+        ASSERT(strstr(evidence, "host=hostb") != NULL);
+        ASSERT(strstr(evidence, "candidate=aaaaaaaaaa") != NULL);
+        ASSERT(strstr(evidence, "seconds_left=") != NULL);
+        ASSERT(!dlx_window_outbox_has("LAND-WINDOW hosta"));
+        /* hostb released: the proof starts and hosta announces it */
+        ASSERT(dlx_window_peer(base, now - 300, now + 1500, true));
+        dlx_window_step(state, code, evidence);
+        ASSERT_STR_EQ(state, "started");
+        (void)snprintf(want, sizeof(want), "on base %.10s, proving now, "
+                       "expected done ", base);
+        ASSERT(dlx_window_outbox_has("\"body\":\"LAND-WINDOW hosta, candidate "));
+        ASSERT(dlx_window_outbox_has(want));
+        /* the publish closes the window with LANDED */
+        (void)setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_window_step(state, code, evidence);
+        ASSERT_STR_EQ(state, "landed");
+        ASSERT(dlx_window_outbox_has("\"body\":\"LANDED hosta, candidate "));
+        ASSERT(!dlx_window_outbox_has("\"body\":\"RELEASED hosta"));
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land window: a window on another base does not defer; a failure releases") {
+        ASSERT(dlx_window_rig(&rig, "window_other_base", "1", base));
+        ASSERT(dlx_window_peer("cccccccccc", now - 300, now + 1500, false));
+        dlx_window_step(state, code, evidence);
+        ASSERT_STR_EQ(state, "started");
+        ASSERT(dlx_window_outbox_has("\"body\":\"LAND-WINDOW hosta, candidate "));
+        (void)setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        dlx_window_step(state, code, evidence);
+        ASSERT(state[0] != '\0' && strcmp(state, "landed") != 0);
+        ASSERT(dlx_window_outbox_has("\"body\":\"RELEASED hosta, candidate "));
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land window: a window past expected-done + 10 min does not defer") {
+        ASSERT(dlx_window_rig(&rig, "window_expired", "1", base));
+        ASSERT(dlx_window_peer(base, now - 3000, now - 900, false));
+        dlx_window_step(state, code, evidence);
+        ASSERT_STR_EQ(state, "started");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land window: ZCL_LAND_WINDOW=0 neither defers nor posts") {
+        ASSERT(dlx_window_rig(&rig, "window_off", "0", base));
+        ASSERT(dlx_window_peer(base, now - 300, now + 1500, false));
+        dlx_window_step(state, code, evidence);
+        ASSERT_STR_EQ(state, "started");
+        ASSERT(!dlx_window_outbox_has("LAND-WINDOW hosta"));
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 #endif /* !defined(_WIN32) */
 
 int test_dev_land(void)
@@ -12258,6 +12444,7 @@ int test_dev_land(void)
     failures += dlx_outcome_escape_cases();
     failures += dlx_optional_string_refusal_cases();
     failures += dlx_string_compatibility_cases();
+    failures += test_dev_land_window_defer();
 
 #endif /* !defined(_WIN32) */
 
