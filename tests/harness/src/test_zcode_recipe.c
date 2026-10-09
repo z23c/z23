@@ -30,15 +30,16 @@
  *      and BAD_ROOT rejections.
  *
  * Handlers run in-process on ./test-tmp datadirs; CHAIN_MAIN is pinned.
- * Nothing here or in the code under test compiles or executes anything —
+ * Nothing in the recipe code under test compiles or executes anything —
  * the recipe is declarative; compilation belongs to the external verifier
- * (slice 6). */
+ * (slice 6). Section 5 alone runs the host cc and the seed wordcount CLI. */
 
 #include "test/test_core.h"
 
 #include "command/native_command.h"
 
 #include "chain/chainparams.h"
+#include "devloop.h"
 #include "core/uint256.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -1140,6 +1141,144 @@ static int t_bounded(void)
     return failures;
 }
 
+/* ── 5. the seed wordcount CLI crosses the real program ────────────────
+ * The journey's seed app/main.c is compiled with the host cc against libc
+ * and the textstat fixture only. wordcount_longest_line is deliberately
+ * absent from the seed (the journey creates it), so a TEST-LOCAL copy of it
+ * is compiled in here, in the temp dir; the seed is never edited. The limit
+ * is inclusive: exactly the cap is valid, cap+1 is too large, and a read
+ * error is its own failure, never "larger than". */
+
+#define ZR_WC_FIX "tools/dev/fixtures/commons_journey"
+#define ZR_WC_CAP (1u << 20)
+
+static bool zr_wc_write(const char *path, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < n; i++)
+        ok = fputc('a', f) != EOF;
+    return fclose(f) == 0 && ok;
+}
+
+static bool zr_wc_run(const char *bin, const char *input, int *code,
+                      char *out, size_t cap)
+{
+    const char *const argv[] = { bin, input, NULL };
+    struct zcl_devloop_process_result run = {0};
+    if (!zcl_devloop_process_run(".", argv, 30000, &run))
+        return false;
+    snprintf(out, cap, "%s", run.output);
+    *code = run.exit_code;
+    return true;
+}
+
+static bool zr_wc_build(const char *dir, const char *bin)
+{
+    char longest[256];
+    snprintf(longest, sizeof(longest), "%s/longest.c", dir);
+    FILE *lf = fopen(longest, "wb");
+    if (!lf)
+        return false;
+    fputs("#include <stddef.h>\n"
+          "size_t wordcount_longest_line(const char *t, size_t n)\n"
+          "{ size_t b = 0, c = 0;\n"
+          "  for (size_t i = 0; i < n; i++) {\n"
+          "    if (t[i] == '\\n') { if (c > b) b = c; c = 0; } else c++; }\n"
+          "  return c > b ? c : b; }\n", lf);
+    if (fclose(lf) != 0)
+        return false;
+    const char *const cc[] = {
+        "cc", "-std=c2x", "-O1", "-I" ZR_WC_FIX "/wordcount/include",
+        "-I" ZR_WC_FIX "/textstat/include", ZR_WC_FIX "/wordcount/app/main.c",
+        ZR_WC_FIX "/wordcount/src/wordcount.c",
+        ZR_WC_FIX "/textstat/src/textstat.c", longest, "-o", bin, NULL };
+    struct zcl_devloop_process_result built = {0};
+    bool ok = zcl_devloop_process_run(".", cc, 120000, &built) &&
+              built.exit_code == 0;
+    if (!ok)
+        printf("%s\n", built.output);
+    return ok;
+}
+
+/* One input of n 'a' bytes: valid at or under the cap, too large above it. */
+static int zr_wc_size_case(const char *bin, const char *dir, const char *name,
+                           size_t n)
+{
+    int failures = 0, code = -1;
+    char in[256], out[512], want[128], label[96];
+    snprintf(in, sizeof(in), "%s/in-%s", dir, name);
+    snprintf(want, sizeof(want),
+             "lines %d words %d bytes %zu longest_line %zu\n",
+             n ? 1 : 0, n ? 1 : 0, n, n);
+    snprintf(label, sizeof(label), "wordcount cli: %s file", name);
+    bool ran = zr_wc_write(in, n) && zr_wc_run(bin, in, &code, out, sizeof(out));
+    bool big = n > ZR_WC_CAP;
+    bool good = ran && (big ? code == 2 &&
+                              strstr(out, "larger than 1048576") &&
+                              !strstr(out, "lines ")
+                            : code == 0 && strcmp(out, want) == 0);
+    ZR_CHECK(label, good);
+    if (!good && ran)
+        printf("    exit=%d out=[%s]\n", code, out);
+    return failures;
+}
+
+static int zr_wc_odd_cases(const char *bin, const char *dir)
+{
+    int failures = 0, code = -1;
+    char in[256], out[512];
+    snprintf(in, sizeof(in), "%s/as-dir", dir);
+    mkdir(in, 0700);
+    bool ran = zr_wc_run(bin, in, &code, out, sizeof(out));
+    bool good = ran && code == 2 && strstr(out, "cannot read") &&
+                !strstr(out, "larger than");
+    ZR_CHECK("wordcount cli: a read error is its own failure", good);
+    if (!good && ran)
+        printf("    exit=%d out=[%s]\n", code, out);
+
+    /* Unterminated final line and an embedded NUL are carried by length. */
+    snprintf(in, sizeof(in), "%s/nul", dir);
+    FILE *nf = fopen(in, "wb");
+    if (nf) {
+        fwrite("ab\0cd\nef", 1, 8, nf);
+        fclose(nf);
+    }
+    ran = nf && zr_wc_run(bin, in, &code, out, sizeof(out));
+    ZR_CHECK("wordcount cli: NUL byte and unterminated last line",
+             ran && code == 0 &&
+             strcmp(out, "lines 2 words 2 bytes 8 longest_line 5\n") == 0);
+    return failures;
+}
+
+static int t_wordcount_cli(void)
+{
+    int failures = 0;
+    const char *dir = "test-tmp/zr_wordcount_cli";
+    char bin[256];
+    /* The devloop runner refuses to exec in tests unless the fixture opts in. */
+    setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
+    test_rm_rf_recursive(dir);
+    mkdir("test-tmp", 0700);
+    mkdir(dir, 0700);
+    snprintf(bin, sizeof(bin), "%s/wordcount", dir);
+    bool built = zr_wc_build(dir, bin);
+    ZR_CHECK("wordcount cli: seed app compiles against libc and textstat",
+             built);
+    if (built) {
+        failures += zr_wc_size_case(bin, dir, "cap-1", ZR_WC_CAP - 1);
+        failures += zr_wc_size_case(bin, dir, "cap", ZR_WC_CAP);
+        failures += zr_wc_size_case(bin, dir, "empty", 0);
+        failures += zr_wc_size_case(bin, dir, "cap+1", ZR_WC_CAP + 1);
+        failures += zr_wc_odd_cases(bin, dir);
+    }
+    unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_zcode_recipe(void)
 {
     printf("\n=== zcode_recipe: declarative C23 build recipe ===\n");
@@ -1150,6 +1289,7 @@ int test_zcode_recipe(void)
     failures += t_publish();
     failures += t_command();
     failures += t_bounded();
+    failures += t_wordcount_cli();
     printf("=== zcode_recipe complete: %d failure(s) ===\n", failures);
     return failures;
 }

@@ -616,6 +616,9 @@ static bool group_reads_external_inputs(const char *name)
          * outside the group's forward C closure. */
         "zcode_package_dev",
         "zcode_package_dev_shard_01",
+        /* Compiles and runs the commons journey seed sources with the host
+         * compiler at run time; those fixture files are outside the closure. */
+        "zcode_recipe",
         /* zv_run_verifier spawns build/bin/zclassic23-package-verify-dev.
          * That verifier's link is outside this group's forward C closure. */
         "zcode_verify",

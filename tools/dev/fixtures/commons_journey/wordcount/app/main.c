@@ -26,16 +26,24 @@ int main(int argc, char **argv)
     /* A stranger's ordinary C23 program: it must compile against nothing but
      * libc. The whole point of the journey is that Z23 builds code it did not
      * write and does not link itself into. */
-    char *text = malloc(WORDCOUNT_MAX_BYTES); // raw-alloc-ok:plain-libc-fixture
+    char *text = malloc(WORDCOUNT_MAX_BYTES + 1u); // raw-alloc-ok:plain-libc-fixture
     if (!text) {
         fclose(f);
         fprintf(stderr, "wordcount: out of memory\n");
         return 2;
     }
-    size_t len = fread(text, 1, WORDCOUNT_MAX_BYTES, f);
-    int truncated = !feof(f);
+    /* The limit is inclusive: read one byte past it, so a file of exactly
+     * WORDCOUNT_MAX_BYTES is valid and only a longer one is too large. A
+     * failed read is its own error, not a size problem. */
+    size_t len = fread(text, 1, WORDCOUNT_MAX_BYTES + 1u, f);
+    int failed = ferror(f);
     fclose(f);
-    if (truncated) {
+    if (failed) {
+        free(text);
+        fprintf(stderr, "wordcount: cannot read %s\n", argv[1]);
+        return 2;
+    }
+    if (len > WORDCOUNT_MAX_BYTES) {
         free(text);
         fprintf(stderr, "wordcount: %s is larger than %u bytes\n", argv[1],
                 WORDCOUNT_MAX_BYTES);
