@@ -160,12 +160,155 @@ bool engine_prompt_template_serialize(const char *kind, uint8_t **wire,
 
 /* The kind a task file declares for itself.
  *
- * A `kind:` line in the first few lines of `task`, before any blank line —
+ * A `kind:` line in the first few lines of `task` (8; the typed-contract
+ * header bound when the header carries a `contract:` line), before any blank line —
  * a header, not a word found anywhere in the prose. Returns a pointer into
  * a static buffer, or NULL when the file declares none.
  *
  * --kind still wins at the caller: an operator re-running a task as a
  * review must be able to say so without editing the task. */
 const char *engine_prompt_kind_from_header(const char *task);
+
+/* ── the typed task contract ────────────────────────────────────────────
+ *
+ * A task file's header (the lines before the first empty line, like `kind:`)
+ * may carry a typed contract. The contract is ASSERTIONS about the task, not
+ * grants: nothing here authorises anything, it only lets the dispatcher
+ * refuse a task whose own explicit terms contradict each other BEFORE a
+ * worker is paid to find that out. The contract lives in the task bytes, so
+ * the task digest covers it byte for byte; it is never hashed as a struct.
+ *
+ *   contract: 1                       version line (the only version)
+ *   phase: author                     the current phase           (required)
+ *   actor: author                     actor responsible in it     (required)
+ *   execution: source-only            or may-execute              (required)
+ *   evidence: executed-pass phase=verify actor=verifier [from=predecessor]
+ *   evidence: notrun-report phase=author actor=author   (1 to 4, required)
+ *   output: min-bytes=N max-bytes=M   optional, one line
+ *   write-scope: PATH                 optional, repeatable, at most 8
+ *   must-change: PATH                 optional, repeatable, at most 8
+ *   base: HEX                         optional, one: 40 or 64 lowercase hex
+ *   depends: HEX                      optional, repeatable, at most 4
+ *   attempt: N                        optional, 1..9, default 1
+ *   predecessor: HEX                  optional, one: 40 or 64 lowercase hex
+ *   kind: NAME                        accepted and ignored here (see above)
+ *
+ * Names (phase, actor) are [a-z0-9-], 1 to 31 bytes. Tokens are separated by
+ * spaces; values are trimmed of blanks and a trailing CR. A key starts at
+ * column 0.
+ *
+ * evidence says WHAT is required (`executed-pass`: a test or gate that was
+ * actually run and passed; `notrun-report`: an honest NOTRUN statement), from
+ * which PHASE and which ACTOR; the optional fourth token `from=predecessor`
+ * says it is carried from the previous attempt rather than produced now.
+ *
+ * output: both numbers are decimal, no sign, no leading zeros, at most
+ * ENGINE_CONTRACT_MAX_OUTPUT_BYTES. max-bytes must be above zero and not
+ * below min-bytes.
+ *
+ * write-scope / must-change: repo-relative paths over [A-Za-z0-9._/-], at
+ * most 191 bytes, no leading `/`, no empty, `.` or `..` segment. A trailing
+ * `/` on a write-scope entry makes it a directory prefix (segment-wise:
+ * `src/` covers `src/a.c`; `src/a` is the single path `src/a` and covers
+ * nothing else, so `src/ab.c` is not under it). Every must-change path must
+ * be covered by some write-scope entry. execution: source-only with no
+ * write-scope is a read-only unit and is fine.
+ *
+ * A task with no `contract:` line in its header is LEGACY: untyped, not
+ * checked, and never reported as qualified. Once a `contract:` line is
+ * present the task is TYPED and strict: an unsupported version, a malformed
+ * header line, a key this version does not know, a duplicate of any
+ * non-repeatable key, a missing required key, or exceeding a bound is
+ * REFUSED. A parse failure never falls back to legacy. In a typed header
+ * the only lines allowed are the keys above. A header that outgrows the
+ * bounds is scanned on, only for a `contract:` line; finding one makes the
+ * task typed and REFUSED as over-bound, so a contract cannot hide beyond a
+ * window. Line ends must be bare LF for the blank line: a CR before LF is
+ * trimmed from values, but a line holding only CR is not a blank line.
+ *
+ * Rules (each refusal names the fields and the smallest correction):
+ *   SOURCE_ONLY_EXECUTED_PASS  source-only and an executed-pass evidence
+ *                              owned by the current phase and actor;
+ *   duplicate evidence         same what, phase and actor listed twice;
+ *   one phase, one actor       evidence in the task's phase naming another
+ *                              actor than the task's;
+ *   output bounds, must-change coverage, depends needs base, depends is not
+ *   base and not repeated, attempt above 1 needs a predecessor and a
+ *   predecessor needs attempt above 1, from=predecessor needs attempt above
+ *   1, and a predecessor's executed-pass is never accepted on a repair
+ *   attempt (it covers different bytes).
+ *
+ * DELIBERATELY NOT DECIDED: that any evidence is true or any test ran; that
+ * a phase or actor exists or is the one dispatched; that a path exists, is
+ * writable, or is inside the real territory; that a hex identity names a real
+ * object or that predecessor is the attempt actually carried; that
+ * write-scope entries do not overlap; that output limits fit the engine's own
+ * response cap; anything about kind, tier or territory. */
+#define ENGINE_CONTRACT_VERSION 1
+#define ENGINE_CONTRACT_MAX_HEADER_BYTES 6144u
+#define ENGINE_CONTRACT_MAX_HEADER_LINES 40u /* lines scanned in a header */
+#define ENGINE_CONTRACT_MAX_FIELDS 36u       /* lines in a typed header */
+#define ENGINE_CONTRACT_MAX_EVIDENCE 4u
+#define ENGINE_CONTRACT_MAX_PATHS 8u         /* write-scope and must-change */
+#define ENGINE_CONTRACT_MAX_DEPENDS 4u
+#define ENGINE_CONTRACT_MAX_OUTPUT_BYTES 1048576u
+#define ENGINE_CONTRACT_MAX_ATTEMPT 9u
+#define ENGINE_CONTRACT_NAME_MAX 32u         /* buffer: names are <= 31 */
+#define ENGINE_CONTRACT_PATH_MAX 192u        /* buffer: paths are <= 191 */
+#define ENGINE_CONTRACT_HEX_MAX 65u          /* buffer: 40 or 64 hex */
+#define ENGINE_CONTRACT_REASON_BYTES 448u
+
+enum engine_contract_result {
+    ENGINE_CONTRACT_LEGACY = 0, /* no `contract:` line: untyped, unchecked */
+    ENGINE_CONTRACT_OK,         /* typed and self-consistent (not "proven") */
+    ENGINE_CONTRACT_REFUSED,    /* typed and contradictory or malformed */
+};
+
+enum engine_contract_execution {
+    ENGINE_CONTRACT_EXEC_UNSET = 0,
+    ENGINE_CONTRACT_EXEC_SOURCE_ONLY,
+    ENGINE_CONTRACT_EXEC_MAY_EXECUTE,
+};
+
+enum engine_contract_what {
+    ENGINE_CONTRACT_EVIDENCE_EXECUTED_PASS = 0,
+    ENGINE_CONTRACT_EVIDENCE_NOTRUN_REPORT,
+};
+
+struct engine_contract_evidence {
+    enum engine_contract_what what;
+    char phase[ENGINE_CONTRACT_NAME_MAX];
+    char actor[ENGINE_CONTRACT_NAME_MAX];
+    bool from_predecessor;
+};
+
+/* The parsed view. Meaningful only for ENGINE_CONTRACT_OK (it is filled as
+ * far as parsing got otherwise, for diagnostics). */
+struct engine_contract {
+    unsigned version;
+    char phase[ENGINE_CONTRACT_NAME_MAX];
+    char actor[ENGINE_CONTRACT_NAME_MAX];
+    enum engine_contract_execution execution;
+    size_t evidence_count;
+    struct engine_contract_evidence evidence[ENGINE_CONTRACT_MAX_EVIDENCE];
+    bool has_output;
+    unsigned min_bytes, max_bytes;
+    size_t scope_count, must_count, depends_count;
+    char write_scope[ENGINE_CONTRACT_MAX_PATHS][ENGINE_CONTRACT_PATH_MAX];
+    char must_change[ENGINE_CONTRACT_MAX_PATHS][ENGINE_CONTRACT_PATH_MAX];
+    char base[ENGINE_CONTRACT_HEX_MAX];
+    char depends[ENGINE_CONTRACT_MAX_DEPENDS][ENGINE_CONTRACT_HEX_MAX];
+    unsigned attempt;
+    char predecessor[ENGINE_CONTRACT_HEX_MAX];
+};
+
+/* Pure, allocation-free, one bounded pass over the header of task[0..len)
+ * (plus, past a bound, a scan for a `contract:` line only). `view` may be
+ * NULL. A NUL byte anywhere in task[0..len) is REFUSED, typed or not, because
+ * a task is text. `reason` (cap bytes, NUL-terminated) is filled on REFUSED
+ * and is empty otherwise. */
+enum engine_contract_result engine_contract_check(
+    const char *task, size_t len, struct engine_contract *view,
+    char *reason, size_t reason_cap);
 
 #endif /* ZCL_ENGINE_PROMPT_H */

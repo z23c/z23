@@ -11,6 +11,8 @@
 #include "base/serialize_le.h"
 #include "sha3/sha3.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 const char *engine_system_rules(void)
@@ -507,6 +509,28 @@ bool engine_prompt_template_serialize(const char *kind, uint8_t **wire,
     return true;
 }
 
+/* How many header lines `kind:` may sit in. 8 for every task as before; a
+ * task whose header carries a `contract:` line ANYWHERE in it (the whole
+ * header, to its blank line or the end of the task: the same rule the
+ * contract check uses, so the two cannot disagree) gets the contract header
+ * bound, because its own contract lines must not push `kind:` out of reach. */
+static unsigned kind_scan_limit(const char *task)
+{
+    const char *p = task;
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        const size_t n = eol ? (size_t)(eol - p) : strlen(p);
+        if (n == 0)
+            break;
+        if (strncmp(p, "contract:", 9) == 0)
+            return ENGINE_CONTRACT_MAX_HEADER_LINES;
+        if (!eol)
+            break;
+        p = eol + 1;
+    }
+    return 8;
+}
+
 const char *engine_prompt_kind_from_header(const char *task)
 {
     static char kind[64];
@@ -514,7 +538,8 @@ const char *engine_prompt_kind_from_header(const char *task)
     if (!task)
         return NULL;
     const char *p = task;
-    for (int line = 0; line < 8 && *p; line++) {
+    const unsigned limit = kind_scan_limit(task);
+    for (unsigned line = 0; line < limit && *p; line++) {
         const char *eol = strchr(p, '\n');
         const size_t n = eol ? (size_t)(eol - p) : strlen(p);
         if (n == 0)
@@ -536,4 +561,777 @@ const char *engine_prompt_kind_from_header(const char *task)
         p = eol + 1;
     }
     return NULL;
+}
+
+/* ── the typed task contract ────────────────────────────────────────────
+ *
+ * See engine_prompt.h for the syntax. Everything below is pure: it splits
+ * the header into at most ENGINE_CONTRACT_MAX_HEADER_LINES line spans, then
+ * validates those spans. It allocates nothing. */
+
+struct contract_line {
+    const char *p;
+    size_t n;
+};
+
+/* Bits in `seen`, one per single-valued key. */
+enum {
+    SEEN_CONTRACT = 1u << 0,
+    SEEN_PHASE = 1u << 1,
+    SEEN_ACTOR = 1u << 2,
+    SEEN_EXECUTION = 1u << 3,
+    SEEN_KIND = 1u << 4,
+    SEEN_OUTPUT = 1u << 5,
+    SEEN_BASE = 1u << 6,
+    SEEN_ATTEMPT = 1u << 7,
+    SEEN_PREDECESSOR = 1u << 8,
+    SEEN_REPEATABLE = 1u << 9, /* evidence, write-scope, must-change,
+                                * depends: bounded by their own caps */
+};
+
+static void contract_refuse(char *reason, size_t cap, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
+static void contract_refuse(char *reason, size_t cap, const char *fmt, ...)
+{
+    if (!reason || cap == 0)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(reason, cap, fmt, ap);
+    va_end(ap);
+}
+
+/* From `pos` to the blank line or the end of `len`: is there a line that
+ * starts `contract:`? Used only once a bound has been hit. */
+static bool contract_tail_has(const char *task, size_t len, size_t pos)
+{
+    while (pos < len) {
+        const char *nl = memchr(task + pos, '\n', len - pos);
+        const size_t n = nl ? (size_t)(nl - (task + pos)) : len - pos;
+        if (n == 0)
+            break;
+        if (n >= 9 && memcmp(task + pos, "contract:", 9) == 0)
+            return true;
+        if (!nl)
+            break;
+        pos += n + 1;
+    }
+    return false;
+}
+
+/* Split the header (up to the first empty line) into spans. Sets *typed when
+ * a `contract:` line is in the header (past a bound too: the rest of the
+ * header is then scanned for that line alone) and *over when a bound was hit
+ * before the header ended. Returns the span count. */
+static size_t contract_split(const char *task, size_t len,
+                             struct contract_line *ln, bool *typed, bool *over)
+{
+    size_t pos = 0, count = 0, bytes = 0;
+    *typed = false;
+    *over = false;
+    while (pos < len) {
+        const char *nl = memchr(task + pos, '\n', len - pos);
+        const size_t n = nl ? (size_t)(nl - (task + pos)) : len - pos;
+        if (n == 0)
+            break;                         /* the header ends at the blank */
+        bytes += n + 1;
+        if (count == ENGINE_CONTRACT_MAX_HEADER_LINES
+            || bytes > ENGINE_CONTRACT_MAX_HEADER_BYTES) {
+            *over = true;
+            *typed = *typed || contract_tail_has(task, len, pos);
+            break;
+        }
+        ln[count].p = task + pos;
+        ln[count].n = n;
+        if (n >= 9 && memcmp(task + pos, "contract:", 9) == 0)
+            *typed = true;
+        count++;
+        if (!nl)
+            break;
+        pos += n + 1;
+    }
+    return count;
+}
+
+static bool contract_name_ok(const char *s, size_t n)
+{
+    if (n == 0 || n >= ENGINE_CONTRACT_NAME_MAX)
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        const char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'))
+            return false;
+    }
+    return true;
+}
+
+static bool contract_copy_name(char *dst, const char *s, size_t n)
+{
+    if (!contract_name_ok(s, n))
+        return false;
+    memcpy(dst, s, n);
+    dst[n] = '\0';
+    return true;
+}
+
+/* Next space-separated token of [*p, end); advances *p. */
+static size_t contract_token(const char **p, const char *end, const char **tok)
+{
+    while (*p < end && **p == ' ')
+        (*p)++;
+    *tok = *p;
+    while (*p < end && **p != ' ')
+        (*p)++;
+    return (size_t)(*p - *tok);
+}
+
+/* `key=NAME` where the token must start with `key` and `=`. */
+static bool contract_keyed_name(const char *tok, size_t n, const char *key,
+                                char *dst)
+{
+    const size_t kl = strlen(key);
+    return n > kl + 1 && memcmp(tok, key, kl) == 0 && tok[kl] == '='
+           && contract_copy_name(dst, tok + kl + 1, n - kl - 1);
+}
+
+/* Decimal, no sign, no leading zeros, at most the output cap. */
+static bool contract_uint(const char *s, size_t n, unsigned *out)
+{
+    if (n == 0 || n > 7 || (n > 1 && s[0] == '0'))
+        return false;
+    unsigned v = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        v = v * 10u + (unsigned)(s[i] - '0');
+    }
+    if (v > ENGINE_CONTRACT_MAX_OUTPUT_BYTES)
+        return false;
+    *out = v;
+    return true;
+}
+
+static bool contract_keyed_uint(const char *tok, size_t n, const char *key,
+                                unsigned *out)
+{
+    const size_t kl = strlen(key);
+    return n > kl + 1 && memcmp(tok, key, kl) == 0 && tok[kl] == '='
+           && contract_uint(tok + kl + 1, n - kl - 1, out);
+}
+
+static bool contract_hex_ok(const char *s, size_t n)
+{
+    if (n != 40 && n != 64)
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+static bool contract_path_char_ok(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+           || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+
+/* One segment: not empty, not "." and not "..". */
+static bool contract_seg_ok(const char *seg, size_t n)
+{
+    if (n == 0)
+        return false;
+    if (n == 1 && seg[0] == '.')
+        return false;
+    return !(n == 2 && seg[0] == '.' && seg[1] == '.');
+}
+
+/* A repo-relative path: [A-Za-z0-9._/-], at most 191 bytes, no leading '/',
+ * no empty, "." or ".." segment. `dir_ok` lets one trailing '/' through. */
+static bool contract_path_ok(const char *s, size_t n, bool dir_ok)
+{
+    if (n == 0 || n >= ENGINE_CONTRACT_PATH_MAX || s[0] == '/')
+        return false;
+    if (dir_ok && s[n - 1] == '/')
+        n--;
+    size_t start = 0;
+    for (size_t i = 0; i <= n; i++) {
+        if (i < n && s[i] != '/') {
+            if (!contract_path_char_ok(s[i]))
+                return false;
+            continue;
+        }
+        if (!contract_seg_ok(s + start, i - start))
+            return false;
+        start = i + 1;
+    }
+    return true;
+}
+
+/* `executed-pass` or `notrun-report` (the whole token). */
+static bool contract_parse_what(const char *tok, size_t tn,
+                                enum engine_contract_what *out)
+{
+    if (tn == 13 && memcmp(tok, "executed-pass", 13) == 0)
+        *out = ENGINE_CONTRACT_EVIDENCE_EXECUTED_PASS;
+    else if (tn == 13 && memcmp(tok, "notrun-report", 13) == 0)
+        *out = ENGINE_CONTRACT_EVIDENCE_NOTRUN_REPORT;
+    else
+        return false;
+    return true;
+}
+
+/* `WHAT phase=P actor=A [from=predecessor]`. */
+static bool contract_parse_evidence(const char *v, size_t n,
+                                    struct engine_contract_evidence *ev)
+{
+    const char *p = v, *end = v + n, *tok;
+    size_t tn = contract_token(&p, end, &tok);
+    memset(ev, 0, sizeof(*ev));
+    if (!contract_parse_what(tok, tn, &ev->what))
+        return false;
+    tn = contract_token(&p, end, &tok);
+    if (!contract_keyed_name(tok, tn, "phase", ev->phase))
+        return false;
+    tn = contract_token(&p, end, &tok);
+    if (!contract_keyed_name(tok, tn, "actor", ev->actor))
+        return false;
+    tn = contract_token(&p, end, &tok);
+    if (tn == 16 && memcmp(tok, "from=predecessor", 16) == 0) {
+        ev->from_predecessor = true;
+        tn = contract_token(&p, end, &tok);
+    }
+    return tn == 0;
+}
+
+static bool contract_parse_execution(const char *v, size_t n,
+                                     enum engine_contract_execution *out)
+{
+    if (n == 11 && memcmp(v, "source-only", 11) == 0)
+        *out = ENGINE_CONTRACT_EXEC_SOURCE_ONLY;
+    else if (n == 11 && memcmp(v, "may-execute", 11) == 0)
+        *out = ENGINE_CONTRACT_EXEC_MAY_EXECUTE;
+    else
+        return false;
+    return true;
+}
+
+/* ── one handler per key: fill the view or put a complaint in msg ─────── */
+
+typedef bool (*contract_handler)(struct engine_contract *c, const char *v,
+                                 size_t vn, char *msg, size_t cap);
+
+static bool h_contract(struct engine_contract *c, const char *v, size_t vn,
+                       char *msg, size_t cap)
+{
+    if (vn != 1 || v[0] != '0' + ENGINE_CONTRACT_VERSION) {
+        contract_refuse(msg, cap, "unsupported contract version (this build "
+                                  "supports 1)");
+        return false;
+    }
+    c->version = ENGINE_CONTRACT_VERSION;
+    return true;
+}
+
+static bool h_phase(struct engine_contract *c, const char *v, size_t vn,
+                    char *msg, size_t cap)
+{
+    if (contract_copy_name(c->phase, v, vn))
+        return true;
+    contract_refuse(msg, cap, "bad phase name (a-z 0-9 -, 1 to 31 bytes)");
+    return false;
+}
+
+static bool h_actor(struct engine_contract *c, const char *v, size_t vn,
+                    char *msg, size_t cap)
+{
+    if (contract_copy_name(c->actor, v, vn))
+        return true;
+    contract_refuse(msg, cap, "bad actor name (a-z 0-9 -, 1 to 31 bytes)");
+    return false;
+}
+
+static bool h_execution(struct engine_contract *c, const char *v, size_t vn,
+                        char *msg, size_t cap)
+{
+    if (contract_parse_execution(v, vn, &c->execution))
+        return true;
+    contract_refuse(msg, cap, "execution must be source-only or may-execute");
+    return false;
+}
+
+static bool h_kind(struct engine_contract *c, const char *v, size_t vn,
+                   char *msg, size_t cap)
+{
+    (void)c; (void)v; (void)vn; (void)msg; (void)cap;
+    return true;   /* kind: detection is engine_prompt_kind_from_header */
+}
+
+static bool contract_evidence_listed(const struct engine_contract *c,
+                                     const struct engine_contract_evidence *e)
+{
+    for (size_t i = 0; i < c->evidence_count; i++) {
+        const struct engine_contract_evidence *o = &c->evidence[i];
+        if (o->what == e->what && strcmp(o->phase, e->phase) == 0
+            && strcmp(o->actor, e->actor) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool h_evidence(struct engine_contract *c, const char *v, size_t vn,
+                       char *msg, size_t cap)
+{
+    struct engine_contract_evidence *e = &c->evidence[c->evidence_count];
+    if (c->evidence_count >= ENGINE_CONTRACT_MAX_EVIDENCE) {
+        contract_refuse(msg, cap, "too many evidence items (at most %u)",
+                        ENGINE_CONTRACT_MAX_EVIDENCE);
+        return false;
+    }
+    if (!contract_parse_evidence(v, vn, e)) {
+        contract_refuse(msg, cap, "evidence must be `executed-pass|"
+                        "notrun-report phase=NAME actor=NAME "
+                        "[from=predecessor]`");
+        return false;
+    }
+    if (contract_evidence_listed(c, e)) {
+        contract_refuse(msg, cap, "duplicate evidence (this item, phase and "
+                        "actor is already listed; drop one)");
+        return false;
+    }
+    c->evidence_count++;
+    return true;
+}
+
+static bool h_output(struct engine_contract *c, const char *v, size_t vn,
+                     char *msg, size_t cap)
+{
+    const char *p = v, *end = v + vn, *tok;
+    size_t tn = contract_token(&p, end, &tok);
+    unsigned lo = 0, hi = 0;
+    bool ok = contract_keyed_uint(tok, tn, "min-bytes", &lo);
+    tn = contract_token(&p, end, &tok);
+    ok = ok && contract_keyed_uint(tok, tn, "max-bytes", &hi);
+    ok = ok && contract_token(&p, end, &tok) == 0;
+    if (!ok) {
+        contract_refuse(msg, cap, "output must be `min-bytes=N max-bytes=M` "
+                        "(decimal, no sign, no leading zeros, each at most "
+                        "%u)", ENGINE_CONTRACT_MAX_OUTPUT_BYTES);
+        return false;
+    }
+    if (hi == 0 || lo > hi) {
+        contract_refuse(msg, cap, "output min-bytes=%u max-bytes=%u cannot be "
+                        "met (max-bytes must be above zero and not below "
+                        "min-bytes); lower min-bytes or raise max-bytes",
+                        lo, hi);
+        return false;
+    }
+    c->has_output = true;
+    c->min_bytes = lo;
+    c->max_bytes = hi;
+    return true;
+}
+
+static bool contract_add_path(char (*arr)[ENGINE_CONTRACT_PATH_MAX],
+                              size_t *count, const char *key, bool dir_ok,
+                              const char *v, size_t vn, char *msg, size_t cap)
+{
+    if (*count >= ENGINE_CONTRACT_MAX_PATHS) {
+        contract_refuse(msg, cap, "too many %s entries (at most %u)", key,
+                        ENGINE_CONTRACT_MAX_PATHS);
+        return false;
+    }
+    if (!contract_path_ok(v, vn, dir_ok)) {
+        contract_refuse(msg, cap, "bad %s path (repo-relative, [A-Za-z0-9._/-]"
+                        ", at most 191 bytes, no leading /, no empty or . or "
+                        ".. segment%s)", key,
+                        dir_ok ? "; one trailing / marks a directory" : "");
+        return false;
+    }
+    memcpy(arr[*count], v, vn);
+    arr[*count][vn] = '\0';
+    (*count)++;
+    return true;
+}
+
+static bool h_scope(struct engine_contract *c, const char *v, size_t vn,
+                    char *msg, size_t cap)
+{
+    return contract_add_path(c->write_scope, &c->scope_count, "write-scope",
+                             true, v, vn, msg, cap);
+}
+
+static bool h_must(struct engine_contract *c, const char *v, size_t vn,
+                   char *msg, size_t cap)
+{
+    return contract_add_path(c->must_change, &c->must_count, "must-change",
+                             false, v, vn, msg, cap);
+}
+
+static bool contract_copy_hex(char *dst, const char *v, size_t vn, char *msg,
+                              size_t cap, const char *key)
+{
+    if (!contract_hex_ok(v, vn)) {
+        contract_refuse(msg, cap, "%s must be 40 or 64 lowercase hex digits",
+                        key);
+        return false;
+    }
+    memcpy(dst, v, vn);
+    dst[vn] = '\0';
+    return true;
+}
+
+static bool h_base(struct engine_contract *c, const char *v, size_t vn,
+                   char *msg, size_t cap)
+{
+    return contract_copy_hex(c->base, v, vn, msg, cap, "base");
+}
+
+static bool h_predecessor(struct engine_contract *c, const char *v, size_t vn,
+                          char *msg, size_t cap)
+{
+    return contract_copy_hex(c->predecessor, v, vn, msg, cap, "predecessor");
+}
+
+static bool h_depends(struct engine_contract *c, const char *v, size_t vn,
+                      char *msg, size_t cap)
+{
+    if (c->depends_count >= ENGINE_CONTRACT_MAX_DEPENDS) {
+        contract_refuse(msg, cap, "too many depends entries (at most %u)",
+                        ENGINE_CONTRACT_MAX_DEPENDS);
+        return false;
+    }
+    if (!contract_copy_hex(c->depends[c->depends_count], v, vn, msg, cap,
+                           "depends"))
+        return false;
+    c->depends_count++;
+    return true;
+}
+
+static bool h_attempt(struct engine_contract *c, const char *v, size_t vn,
+                      char *msg, size_t cap)
+{
+    if (vn != 1 || v[0] < '1' || v[0] > (char)('0' + (int)ENGINE_CONTRACT_MAX_ATTEMPT)) {
+        contract_refuse(msg, cap, "attempt must be one digit, 1 to %u",
+                        ENGINE_CONTRACT_MAX_ATTEMPT);
+        return false;
+    }
+    c->attempt = (unsigned)(v[0] - '0');
+    return true;
+}
+
+/* Named once so an unknown key's refusal lists the table's real contents. */
+#define CONTRACT_ALLOWED_KEYS "contract, kind, phase, actor, execution, " \
+    "evidence, output, write-scope, must-change, base, depends, attempt, " \
+    "predecessor"
+
+static const struct contract_key {
+    const char *name;
+    unsigned bit;
+    contract_handler fn;
+} contract_keys[] = {
+    {"contract", SEEN_CONTRACT, h_contract},
+    {"phase", SEEN_PHASE, h_phase},
+    {"actor", SEEN_ACTOR, h_actor},
+    {"execution", SEEN_EXECUTION, h_execution},
+    {"kind", SEEN_KIND, h_kind},
+    {"evidence", SEEN_REPEATABLE, h_evidence},
+    {"output", SEEN_OUTPUT, h_output},
+    {"write-scope", SEEN_REPEATABLE, h_scope},
+    {"must-change", SEEN_REPEATABLE, h_must},
+    {"base", SEEN_BASE, h_base},
+    {"depends", SEEN_REPEATABLE, h_depends},
+    {"attempt", SEEN_ATTEMPT, h_attempt},
+    {"predecessor", SEEN_PREDECESSOR, h_predecessor},
+};
+
+/* One `key: value` line. true when fine, else msg holds the complaint. */
+static bool contract_apply(struct engine_contract *c, unsigned *seen,
+                           const char *key, size_t kn, const char *v,
+                           size_t vn, char *msg, size_t cap)
+{
+    for (size_t i = 0; i < sizeof(contract_keys) / sizeof(contract_keys[0]);
+         i++) {
+        const struct contract_key *k = &contract_keys[i];
+        if (strlen(k->name) != kn || memcmp(k->name, key, kn) != 0)
+            continue;
+        if (k->bit != SEEN_REPEATABLE && (*seen & k->bit)) {
+            contract_refuse(msg, cap, "duplicate key (this key may appear "
+                            "once; drop the repeat)");
+            return false;
+        }
+        *seen |= k->bit;
+        return k->fn(c, v, vn, msg, cap);
+    }
+    contract_refuse(msg, cap, "unknown contract key; allowed keys are "
+                    CONTRACT_ALLOWED_KEYS);
+    return false;
+}
+
+/* True when `key` (kn bytes) is one of the contract_keys names. */
+static bool contract_key_known(const char *key, size_t kn)
+{
+    for (size_t i = 0; i < sizeof(contract_keys) / sizeof(contract_keys[0]);
+         i++) {
+        if (strlen(contract_keys[i].name) == kn
+            && memcmp(contract_keys[i].name, key, kn) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Length of the `key` in `key:...` (lowercase letters and '-'), or 0 when the
+ * line is not of that shape. A key over 16 bytes is not a key: the line is
+ * then refused as not `key: value`, which echoes nothing from the task. */
+static size_t contract_key_len(const struct contract_line *l)
+{
+    size_t kn = 0;
+    while (kn < l->n && ((l->p[kn] >= 'a' && l->p[kn] <= 'z')
+                         || l->p[kn] == '-'))
+        kn++;
+    return (kn == 0 || kn > 16 || kn >= l->n || l->p[kn] != ':') ? 0 : kn;
+}
+
+/* The value after `key:`, trimmed of blanks and a trailing CR. */
+static size_t contract_value(const struct contract_line *l, size_t kn,
+                             const char **v)
+{
+    const char *s = l->p + kn + 1, *end = l->p + l->n;
+    while (s < end && (*s == ' ' || *s == '\t'))
+        s++;
+    while (end > s && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
+        end--;
+    *v = s;
+    return (size_t)(end - s);
+}
+
+/* Split `key: value` and apply it. */
+static bool contract_line_apply(struct engine_contract *c, unsigned *seen,
+                                const struct contract_line *l, size_t no,
+                                char *reason, size_t cap)
+{
+    const size_t kn = contract_key_len(l);
+    if (kn == 0) {
+        contract_refuse(reason, cap,
+                        "contract refused: header line %zu is not `key: "
+                        "value` (a typed task header holds only contract "
+                        "keys and kind)", no);
+        return false;
+    }
+    if (!contract_key_known(l->p, kn)) {
+        contract_refuse(reason, cap, "contract refused: header line %zu: "
+                        "unknown contract key; allowed keys are "
+                        CONTRACT_ALLOWED_KEYS, no);
+        return false;
+    }
+    const char *v;
+    char msg[256];
+    const size_t vn = contract_value(l, kn, &v);
+    msg[0] = '\0';
+    bool ok = false;
+    if (vn == 0)
+        contract_refuse(msg, sizeof(msg), "empty value");
+    else
+        ok = contract_apply(c, seen, l->p, kn, v, vn, msg, sizeof(msg));
+    if (!ok)
+        contract_refuse(reason, cap, "contract refused: header line %zu "
+                        "(`%.*s:`): %s", no, (int)kn, l->p, msg);
+    return ok;
+}
+
+/* ── cross-field rules, after every line parsed ─────────────────────── */
+
+static bool contract_rule_source_only_executed_pass(
+    const struct engine_contract *c, char *reason, size_t cap)
+{
+    if (c->execution != ENGINE_CONTRACT_EXEC_SOURCE_ONLY)
+        return true;
+    for (size_t i = 0; i < c->evidence_count; i++) {
+        const struct engine_contract_evidence *e = &c->evidence[i];
+        if (e->what == ENGINE_CONTRACT_EVIDENCE_EXECUTED_PASS
+            && strcmp(e->phase, c->phase) == 0
+            && strcmp(e->actor, c->actor) == 0) {
+            contract_refuse(reason, cap,
+                "contract refused: execution=source-only but this same "
+                "actor=%s in phase=%s owes an executed-pass; "
+                "either set execution: may-execute, or move the "
+                "executed-pass to a separate phase and require "
+                "notrun-report here", c->actor, c->phase);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool contract_required_present(unsigned seen,
+                                      const struct engine_contract *c,
+                                      char *reason, size_t cap)
+{
+    const char *missing = !(seen & SEEN_PHASE) ? "phase"
+                          : !(seen & SEEN_ACTOR) ? "actor"
+                          : !(seen & SEEN_EXECUTION) ? "execution"
+                          : c->evidence_count == 0 ? "evidence" : NULL;
+    if (missing)
+        contract_refuse(reason, cap,
+                        "contract refused: required key `%s` is missing "
+                        "from the typed header", missing);
+    return missing == NULL;
+}
+
+/* Per evidence item: carried-from-predecessor rules and one-phase-one-actor. */
+static bool contract_rule_evidence_items(const struct engine_contract *c,
+                                         char *reason, size_t cap)
+{
+    for (size_t i = 0; i < c->evidence_count; i++) {
+        const struct engine_contract_evidence *e = &c->evidence[i];
+        if (e->from_predecessor && c->attempt == 1) {
+            contract_refuse(reason, cap, "contract refused: evidence from="
+                            "predecessor (phase=%s actor=%s) but attempt is "
+                            "1; drop from=predecessor, or set attempt: 2 or "
+                            "more with a predecessor:", e->phase, e->actor);
+            return false;
+        }
+        if (e->from_predecessor
+            && e->what == ENGINE_CONTRACT_EVIDENCE_EXECUTED_PASS) {
+            contract_refuse(reason, cap, "contract refused: a predecessor's "
+                            "executed-pass covers different bytes; require a "
+                            "fresh executed-pass in a verification phase "
+                            "(phase=%s actor=%s)", e->phase, e->actor);
+            return false;
+        }
+        if (strcmp(e->phase, c->phase) == 0
+            && strcmp(e->actor, c->actor) != 0) {
+            contract_refuse(reason, cap, "contract refused: phase=%s is this "
+                            "task's phase and its actor is %s, but evidence "
+                            "names actor=%s; one phase has one actor here",
+                            c->phase, c->actor, e->actor);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* A must-change path is covered by an exact write-scope entry, or by a
+ * directory entry (trailing '/') it sits under. Segment-wise: the entry's
+ * '/' is part of the prefix, so `src/a` never covers `src/ab.c`. */
+static bool contract_path_covered(const char *scope, const char *path)
+{
+    const size_t sl = strlen(scope);
+    if (sl > 0 && scope[sl - 1] == '/')
+        return strncmp(path, scope, sl) == 0;
+    return strcmp(path, scope) == 0;
+}
+
+static bool contract_rule_scope(const struct engine_contract *c, char *reason,
+                                size_t cap)
+{
+    for (size_t i = 0; i < c->must_count; i++) {
+        bool covered = false;
+        for (size_t j = 0; j < c->scope_count && !covered; j++)
+            covered = contract_path_covered(c->write_scope[j],
+                                            c->must_change[i]);
+        if (!covered) {
+            contract_refuse(reason, cap, "contract refused: must-change path "
+                            "%s is covered by no write-scope entry; add it "
+                            "to write-scope or drop the must-change",
+                            c->must_change[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool contract_rule_refs(const struct engine_contract *c, char *reason,
+                               size_t cap)
+{
+    if (c->depends_count > 0 && c->base[0] == '\0') {
+        contract_refuse(reason, cap, "contract refused: a dependency ref "
+                        "needs the base it is relative to: add base:");
+        return false;
+    }
+    for (size_t i = 0; i < c->depends_count; i++) {
+        bool dup = strcmp(c->depends[i], c->base) == 0;
+        for (size_t j = 0; j < i && !dup; j++)
+            dup = strcmp(c->depends[i], c->depends[j]) == 0;
+        if (dup) {
+            contract_refuse(reason, cap, "contract refused: depends %s is the "
+                            "base itself or is listed twice; drop the "
+                            "repeat", c->depends[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool contract_rule_attempt(const struct engine_contract *c,
+                                  char *reason, size_t cap)
+{
+    if (c->attempt > 1 && c->predecessor[0] == '\0') {
+        contract_refuse(reason, cap, "contract refused: attempt=%u is a "
+                        "repair attempt but no predecessor is named; add "
+                        "predecessor: HEX, or set attempt: 1", c->attempt);
+        return false;
+    }
+    if (c->attempt == 1 && c->predecessor[0] != '\0') {
+        contract_refuse(reason, cap, "contract refused: predecessor is set "
+                        "but attempt is 1; set attempt: 2 or more, or drop "
+                        "predecessor:");
+        return false;
+    }
+    return true;
+}
+
+static bool contract_cross_checks(unsigned seen, const struct engine_contract *c,
+                                  char *reason, size_t cap)
+{
+    return contract_required_present(seen, c, reason, cap)
+           && contract_rule_evidence_items(c, reason, cap)
+           && contract_rule_source_only_executed_pass(c, reason, cap)
+           && contract_rule_scope(c, reason, cap)
+           && contract_rule_refs(c, reason, cap)
+           && contract_rule_attempt(c, reason, cap);
+}
+
+enum engine_contract_result engine_contract_check(
+    const char *task, size_t len, struct engine_contract *view,
+    char *reason, size_t reason_cap)
+{
+    struct engine_contract local;
+    struct engine_contract *c = view ? view : &local;
+    struct contract_line ln[ENGINE_CONTRACT_MAX_HEADER_LINES];
+    memset(c, 0, sizeof(*c));
+    c->attempt = 1;
+    if (reason && reason_cap)
+        reason[0] = '\0';
+    if (!task)
+        return ENGINE_CONTRACT_LEGACY;
+    if (memchr(task, '\0', len) != NULL) {
+        contract_refuse(reason, reason_cap,
+                        "contract refused: the task file contains a NUL byte; "
+                        "remove it (a task is text)");
+        return ENGINE_CONTRACT_REFUSED;
+    }
+
+    bool typed, over;
+    const size_t count = contract_split(task, len, ln, &typed, &over);
+    if (!typed)
+        return ENGINE_CONTRACT_LEGACY;
+    if (over || count > ENGINE_CONTRACT_MAX_FIELDS) {
+        contract_refuse(reason, reason_cap,
+                        "contract refused: typed header exceeds its bounds "
+                        "(at most %u bytes, %u lines, %u fields)",
+                        ENGINE_CONTRACT_MAX_HEADER_BYTES,
+                        ENGINE_CONTRACT_MAX_HEADER_LINES,
+                        ENGINE_CONTRACT_MAX_FIELDS);
+        return ENGINE_CONTRACT_REFUSED;
+    }
+    unsigned seen = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!contract_line_apply(c, &seen, &ln[i], i + 1, reason, reason_cap))
+            return ENGINE_CONTRACT_REFUSED;
+    }
+    if (!contract_cross_checks(seen, c, reason, reason_cap))
+        return ENGINE_CONTRACT_REFUSED;
+    return ENGINE_CONTRACT_OK;
 }

@@ -3775,6 +3775,1013 @@ static int case_review_findings_not_verdict(void)
     return failures;
 }
 
+/* typed task contract: validator table and the real binary ──────────────
+ *
+ * The pure table first, then the decisive subprocess cases (NEG, POS,
+ * LEGACY, carried state, one refusal per newer rule, and preview/real
+ * agreement) against the real engine-unit binary. */
+
+#define CONTRACT_HDR "contract: 1\nphase: author\nactor: author\n"
+#define CONTRACT_SRC CONTRACT_HDR "execution: source-only\n"
+#define CONTRACT_NEG_EVIDENCE \
+    "evidence: executed-pass phase=author actor=author\n"
+#define CONTRACT_POS_EVIDENCE \
+    "evidence: notrun-report phase=author actor=author\n" \
+    "evidence: executed-pass phase=verify actor=verifier\n"
+#define CONTRACT_OKH CONTRACT_SRC CONTRACT_POS_EVIDENCE
+#define CT_A10 "aaaaaaaaaa"
+#define CT_A50 CT_A10 CT_A10 CT_A10 CT_A10 CT_A10
+#define CT_P191 CT_A50 CT_A50 CT_A50 CT_A10 CT_A10 CT_A10 CT_A10 "a"
+#define CT_P192 CT_P191 "a"
+#define CT_N31 CT_A10 CT_A10 CT_A10 "a"
+#define CT_N32 CT_N31 "a"
+#define CT_HEX40 CT_A10 CT_A10 CT_A10 CT_A10
+#define CT_HEX40B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+#define CT_HEX64 CT_HEX40 CT_A10 CT_A10 "aaaa"
+#define CT_HEX40C "cccccccccc" "cccccccccc" "cccccccccc" "cccccccccc"
+#define CT_HEX40D "dddddddddd" "dddddddddd" "dddddddddd" "dddddddddd"
+#define CT_HEX40E "eeeeeeeeee" "eeeeeeeeee" "eeeeeeeeee" "eeeeeeeeee"
+#define CT_HEX40F "ffffffffff" "ffffffffff" "ffffffffff" "ffffffffff"
+#define CT_LEN(s) (sizeof(s) - 1)
+#define CT_PRED_EXEC_FROM \
+    "evidence: executed-pass phase=verify actor=verifier from=predecessor\n"
+
+struct contract_row {
+    const char *name;
+    const char *task;
+    enum engine_contract_result want;
+    const char *has1, *has2, *has3; /* substrings the reason must hold */
+};
+
+#define CT_OK(n, t) {n, t, ENGINE_CONTRACT_OK, NULL, NULL, NULL}
+#define CT_NO(n, t, a, b, c) {n, t, ENGINE_CONTRACT_REFUSED, a, b, c}
+
+static const struct contract_row contract_rows[] = {
+    {"legacy task is LEGACY even with contract-looking prose keys",
+     "kind: fix-gate\n\nphase: 3\nactor: me\n", ENGINE_CONTRACT_LEGACY,
+     NULL, NULL, NULL},
+    {"a contract line after the blank line is prose, so LEGACY",
+     "title\n\ncontract: 1\n", ENGINE_CONTRACT_LEGACY, NULL, NULL, NULL},
+    CT_OK("typed OK with the executed-pass split to another phase and actor",
+          CONTRACT_OKH "\nbody\n"),
+    CT_OK("may-execute may own its executed-pass",
+          CONTRACT_HDR "execution: may-execute\n" CONTRACT_NEG_EVIDENCE),
+    CT_OK("same phase and actor with notrun-report is fine",
+          CONTRACT_SRC "evidence: notrun-report phase=author actor=author\n"),
+    CT_NO("NEGATIVE: source-only owning its own executed-pass names both "
+          "fields and the correction",
+          CONTRACT_SRC CONTRACT_NEG_EVIDENCE,
+          "execution=source-only but this same actor=author in phase=author "
+          "owes an executed-pass",
+          "execution: may-execute", "require notrun-report"),
+    CT_NO("unsupported version",
+          "contract: 2\nphase: a\nactor: a\nexecution: source-only\n"
+          CONTRACT_POS_EVIDENCE, "unsupported contract version", NULL, NULL),
+    CT_NO("duplicate phase is refused, never first-wins",
+          CONTRACT_HDR "phase: verify\nexecution: source-only\n"
+          CONTRACT_POS_EVIDENCE, "duplicate key", "`phase:`", NULL),
+    CT_NO("duplicate actor",
+          CONTRACT_HDR "actor: verifier\nexecution: source-only\n"
+          CONTRACT_POS_EVIDENCE, "duplicate key", "`actor:`", NULL),
+    CT_NO("duplicate execution",
+          CONTRACT_SRC "execution: may-execute\n" CONTRACT_POS_EVIDENCE,
+          "duplicate key", "`execution:`", NULL),
+    CT_NO("duplicate contract line", "contract: 1\ncontract: 1\n",
+          "duplicate key", NULL, NULL),
+    CT_NO("duplicate identical evidence",
+          CONTRACT_SRC CONTRACT_POS_EVIDENCE
+          "evidence: notrun-report phase=author actor=author\n",
+          "duplicate evidence", NULL, NULL),
+    CT_NO("unknown key", CONTRACT_SRC "grant: all\n" CONTRACT_POS_EVIDENCE,
+          "unknown contract key", "allowed keys are contract, kind", NULL),
+    CT_NO("a header line that is not key: value refuses, never falls to "
+          "legacy", "contract: 1\nsome prose\n", "not `key: value`", NULL,
+          NULL),
+    CT_NO("a leading space before a key is not a key",
+          "contract: 1\n phase: author\n", "not `key: value`", NULL, NULL),
+    CT_NO("malformed evidence: missing actor",
+          CONTRACT_SRC "evidence: executed-pass phase=verify\n",
+          "evidence must be", NULL, NULL),
+    CT_NO("malformed evidence: unknown what",
+          CONTRACT_SRC "evidence: passed phase=v actor=v\n",
+          "evidence must be", NULL, NULL),
+    CT_NO("malformed evidence: trailing token",
+          CONTRACT_SRC "evidence: notrun-report phase=v actor=v x\n",
+          "evidence must be", NULL, NULL),
+    CT_NO("malformed evidence: unknown fourth token",
+          CONTRACT_SRC "evidence: notrun-report phase=v actor=v from=me\n",
+          "evidence must be", NULL, NULL),
+    CT_NO("malformed evidence: uppercase name",
+          CONTRACT_SRC "evidence: notrun-report phase=V actor=v\n",
+          "evidence must be", NULL, NULL),
+    CT_NO("execution word outside the two",
+          CONTRACT_HDR "execution: sometimes\n" CONTRACT_POS_EVIDENCE,
+          "execution must be", NULL, NULL),
+    CT_NO("missing execution", CONTRACT_HDR CONTRACT_POS_EVIDENCE,
+          "`execution` is missing", NULL, NULL),
+    CT_NO("missing evidence", CONTRACT_SRC, "`evidence` is missing", NULL,
+          NULL),
+    CT_NO("missing phase",
+          "contract: 1\nactor: a\nexecution: source-only\n"
+          CONTRACT_POS_EVIDENCE, "`phase` is missing", NULL, NULL),
+    CT_OK("CRLF line ends: the CR is trimmed from values",
+          "contract: 1\r\nphase: author\r\nactor: author\r\n"
+          "execution: source-only\r\n"
+          "evidence: notrun-report phase=author actor=author\r\n\nbody\n"),
+    CT_NO("CRLF blank line is not a blank line: the header runs on and "
+          "refuses loudly",
+          "contract: 1\r\nphase: author\r\nactor: author\r\n"
+          "execution: source-only\r\n"
+          "evidence: notrun-report phase=author actor=author\r\n\r\nbody\r\n",
+          "not `key: value`", NULL, NULL),
+    CT_OK("a 31-byte name is accepted",
+          "contract: 1\nphase: " CT_N31 "\nactor: author\n"
+          "execution: source-only\n"
+          "evidence: notrun-report phase=" CT_N31 " actor=author\n"),
+    CT_NO("a 32-byte name is refused",
+          "contract: 1\nphase: " CT_N32 "\nactor: author\n"
+          "execution: source-only\n"
+          "evidence: notrun-report phase=a actor=author\n",
+          "bad phase name", NULL, NULL),
+
+    /* depends, base and must-change bounds: */
+    CT_OK("depends of 4 entries is accepted",
+          CONTRACT_OKH "base: " CT_HEX40 "\ndepends: " CT_HEX40B "\n"
+          "depends: " CT_HEX40C "\ndepends: " CT_HEX40D "\n"
+          "depends: " CT_HEX40E "\n"),
+    CT_NO("depends of 5 entries is refused",
+          CONTRACT_OKH "base: " CT_HEX40 "\ndepends: " CT_HEX40B "\n"
+          "depends: " CT_HEX40C "\ndepends: " CT_HEX40D "\n"
+          "depends: " CT_HEX40E "\ndepends: " CT_HEX40F "\n",
+          "too many depends entries", NULL, NULL),
+    CT_NO("base of 41 hex digits is refused",
+          CONTRACT_OKH "base: " CT_HEX40 "a\n",
+          "must be 40 or 64 lowercase hex digits", NULL, NULL),
+    CT_NO("base of 63 hex digits is refused",
+          CONTRACT_OKH "base: " CT_HEX40 CT_A10 CT_A10 "aaa\n",
+          "must be 40 or 64 lowercase hex digits", NULL, NULL),
+    CT_NO("base of 65 hex digits is refused",
+          CONTRACT_OKH "base: " CT_HEX64 "a\n",
+          "must be 40 or 64 lowercase hex digits", NULL, NULL),
+    CT_OK("a must-change path of 191 bytes is accepted",
+          CONTRACT_OKH "write-scope: " CT_P191 "\nmust-change: " CT_P191 "\n"),
+    CT_NO("a must-change path of 192 bytes is refused",
+          CONTRACT_OKH "write-scope: " CT_P191 "\nmust-change: " CT_P192 "\n",
+          "bad must-change path", NULL, NULL),
+
+    /* output: */
+    CT_OK("output min == max is accepted",
+          CONTRACT_OKH "output: min-bytes=5 max-bytes=5\n"),
+    CT_OK("output at the cap and min zero are accepted",
+          CONTRACT_OKH "output: min-bytes=0 max-bytes=1048576\n"),
+    CT_NO("output min above max names both numbers and the correction",
+          CONTRACT_OKH "output: min-bytes=6 max-bytes=5\n",
+          "min-bytes=6", "max-bytes=5", "lower min-bytes or raise max-bytes"),
+    CT_NO("output zero max",
+          CONTRACT_OKH "output: min-bytes=0 max-bytes=0\n",
+          "max-bytes=0", "min-bytes=0", "lower min-bytes or raise max-bytes"),
+    CT_NO("output leading zero",
+          CONTRACT_OKH "output: min-bytes=01 max-bytes=5\n",
+          "output must be", NULL, NULL),
+    CT_NO("output signed", CONTRACT_OKH "output: min-bytes=+1 max-bytes=5\n",
+          "output must be", NULL, NULL),
+    CT_NO("output over the cap",
+          CONTRACT_OKH "output: min-bytes=1 max-bytes=1048577\n",
+          "output must be", NULL, NULL),
+    CT_NO("output absurdly long number (overflow)",
+          CONTRACT_OKH "output: min-bytes=99999999999999999999 max-bytes=5\n",
+          "output must be", NULL, NULL),
+    CT_NO("output tokens in the wrong order",
+          CONTRACT_OKH "output: max-bytes=5 min-bytes=1\n", "output must be",
+          NULL, NULL),
+    CT_NO("output with a missing token",
+          CONTRACT_OKH "output: min-bytes=1\n", "output must be", NULL,
+          NULL),
+    CT_NO("duplicate output", CONTRACT_OKH "output: min-bytes=1 max-bytes=2\n"
+          "output: min-bytes=1 max-bytes=2\n", "duplicate key", "`output:`",
+          NULL),
+
+    /* write-scope / must-change */
+    CT_OK("source-only with no write-scope is a read-only unit", CONTRACT_OKH),
+    CT_OK("must-change covered by an exact write-scope entry",
+          CONTRACT_OKH "write-scope: src/a.c\nmust-change: src/a.c\n"),
+    CT_OK("must-change under a directory entry",
+          CONTRACT_OKH "write-scope: src/\nmust-change: src/deep/a.c\n"),
+    CT_NO("segment-wise: src/ab.c is NOT under the entry src/a",
+          CONTRACT_OKH "write-scope: src/a\nmust-change: src/ab.c\n",
+          "must-change path src/ab.c",
+          "add it to write-scope or drop the must-change", NULL),
+    CT_NO("segment-wise: src/ab.c is not under the directory src/a/",
+          CONTRACT_OKH "write-scope: src/a/\nmust-change: src/ab.c\n",
+          "src/ab.c", "add it to write-scope or drop the must-change", NULL),
+    CT_NO("must-change with no write-scope at all",
+          CONTRACT_OKH "must-change: src/a.c\n", "src/a.c",
+          "add it to write-scope or drop the must-change", NULL),
+    CT_OK("a path of exactly 191 bytes is accepted",
+          CONTRACT_OKH "write-scope: " CT_P191 "\nmust-change: " CT_P191 "\n"),
+    CT_NO("a path of 192 bytes is refused",
+          CONTRACT_OKH "write-scope: " CT_P192 "\n", "bad write-scope path",
+          NULL, NULL),
+    CT_NO("a leading slash is refused",
+          CONTRACT_OKH "write-scope: /etc/x\n", "bad write-scope path", NULL,
+          NULL),
+    CT_NO("a .. segment is refused",
+          CONTRACT_OKH "write-scope: src/../x\n", "bad write-scope path",
+          NULL, NULL),
+    CT_NO("a . segment is refused",
+          CONTRACT_OKH "write-scope: src/./x\n", "bad write-scope path", NULL,
+          NULL),
+    CT_NO("an empty segment is refused",
+          CONTRACT_OKH "write-scope: src//x\n", "bad write-scope path", NULL,
+          NULL),
+    CT_NO("a character outside the set is refused",
+          CONTRACT_OKH "write-scope: src/a b.c\n", "bad write-scope path",
+          NULL, NULL),
+    CT_NO("a trailing slash on must-change is refused",
+          CONTRACT_OKH "write-scope: src/\nmust-change: src/\n",
+          "bad must-change path", NULL, NULL),
+    CT_OK(".hidden and ..x are ordinary segments",
+          CONTRACT_OKH "write-scope: .hidden/..x/\n"),
+
+    /* base / depends */
+    CT_OK("base of 40 and depends of 64 hex",
+          CONTRACT_OKH "base: " CT_HEX40 "\ndepends: " CT_HEX64 "\n"),
+    CT_NO("base of 39 digits", CONTRACT_OKH "base: " CT_A10 CT_A10 CT_A10
+          "aaaaaaaaa\n", "base must be 40 or 64 lowercase hex", NULL, NULL),
+    CT_NO("base in uppercase",
+          CONTRACT_OKH "base: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+          "base must be 40 or 64 lowercase hex", NULL, NULL),
+    CT_NO("depends without a base",
+          CONTRACT_OKH "depends: " CT_HEX40 "\n",
+          "a dependency ref needs the base it is relative to: add base:",
+          NULL, NULL),
+    CT_NO("depends equal to base",
+          CONTRACT_OKH "base: " CT_HEX40 "\ndepends: " CT_HEX40 "\n",
+          "is the base itself or is listed twice", NULL, NULL),
+    CT_NO("depends listed twice",
+          CONTRACT_OKH "base: " CT_HEX40B "\ndepends: " CT_HEX40 "\ndepends: "
+          CT_HEX40 "\n", "is the base itself or is listed twice", NULL, NULL),
+    CT_NO("duplicate base",
+          CONTRACT_OKH "base: " CT_HEX40 "\nbase: " CT_HEX40B "\n",
+          "duplicate key", "`base:`", NULL),
+
+    /* attempt / predecessor */
+    CT_OK("repair attempt with a predecessor and a carried notrun-report",
+          CONTRACT_OKH "attempt: 2\npredecessor: " CT_HEX40 "\n"
+          "evidence: notrun-report phase=verify actor=verifier "
+          "from=predecessor\n"),
+    CT_OK("attempt 9 with a 64-hex predecessor",
+          CONTRACT_OKH "attempt: 9\npredecessor: " CT_HEX64 "\n"),
+    CT_NO("attempt above 1 without a predecessor",
+          CONTRACT_OKH "attempt: 2\n", "attempt=2", "add predecessor: HEX",
+          NULL),
+    CT_NO("predecessor with the default attempt",
+          CONTRACT_OKH "predecessor: " CT_HEX40 "\n",
+          "predecessor is set but attempt is 1", NULL, NULL),
+    CT_NO("predecessor with attempt 1 stated",
+          CONTRACT_OKH "attempt: 1\npredecessor: " CT_HEX40 "\n",
+          "predecessor is set but attempt is 1", NULL, NULL),
+    CT_NO("attempt 0", CONTRACT_OKH "attempt: 0\n", "attempt must be one digit",
+          NULL, NULL),
+    CT_NO("attempt 10", CONTRACT_OKH "attempt: 10\n",
+          "attempt must be one digit", NULL, NULL),
+    CT_NO("from=predecessor on attempt 1",
+          CONTRACT_OKH "evidence: notrun-report phase=verify actor=verifier "
+          "from=predecessor\n", "from=predecessor", "attempt is 1", NULL),
+    CT_NO("a predecessor's executed-pass is never accepted on a repair",
+          CONTRACT_SRC "attempt: 2\npredecessor: " CT_HEX40 "\n"
+          CT_PRED_EXEC_FROM,
+          "a predecessor's executed-pass covers different bytes; require a "
+          "fresh executed-pass in a verification phase", NULL, NULL),
+
+    /* one phase, one actor */
+    CT_NO("evidence in the task's phase naming another actor",
+          CONTRACT_SRC "evidence: notrun-report phase=author actor=ci\n",
+          "phase=author is this task's phase and its actor is author, but "
+          "evidence names actor=ci; one phase has one actor here", NULL,
+          NULL),
+    CT_OK("evidence naming another phase and actor is fine",
+          CONTRACT_SRC "evidence: executed-pass phase=verify actor=ci\n"),
+};
+
+static int case_contract_rows(void)
+{
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(contract_rows) / sizeof(contract_rows[0]);
+         i++) {
+        const struct contract_row *r = &contract_rows[i];
+        char why[ENGINE_CONTRACT_REASON_BYTES];
+        const enum engine_contract_result got = engine_contract_check(
+            r->task, strlen(r->task), NULL, why, sizeof(why));
+        const bool text = (!r->has1 || strstr(why, r->has1))
+                          && (!r->has2 || strstr(why, r->has2))
+                          && (!r->has3 || strstr(why, r->has3));
+        EN_CHECK(r->name, got == r->want && text
+                 && (got == ENGINE_CONTRACT_REFUSED) == (why[0] != '\0'));
+    }
+    return failures;
+}
+
+/* Rows whose task can hold a NUL byte, so each carries its own length, and
+ * whose reason must not echo a key the task named (`absent`). */
+struct contract_nul_row {
+    const char *name;
+    const char *task;
+    size_t len;
+    enum engine_contract_result want;
+    const char *has;    /* the reason must hold this */
+    const char *absent; /* the reason must not hold this, or NULL */
+};
+
+#define CT_NUL_FIRST "\0contract: 1\n" CONTRACT_SRC CONTRACT_POS_EVIDENCE
+#define CT_NUL_BODY "kind: fix-gate\n\nbody\0more\n"
+#define CT_KEY17 CONTRACT_OKH "abcdefghijklmnopq: x\n"
+#define CT_KEY_UNKNOWN CONTRACT_OKH "grant: all\n"
+
+static const struct contract_nul_row contract_nul_rows[] = {
+    {"a NUL as the first byte of a contract: line is REFUSED", CT_NUL_FIRST,
+     CT_LEN(CT_NUL_FIRST), ENGINE_CONTRACT_REFUSED, "contains a NUL byte",
+     NULL},
+    {"a NUL in the body after the blank line of a legacy task is REFUSED",
+     CT_NUL_BODY, CT_LEN(CT_NUL_BODY), ENGINE_CONTRACT_REFUSED,
+     "contains a NUL byte", NULL},
+    {"a 17-byte key is REFUSED and its text is not echoed", CT_KEY17,
+     CT_LEN(CT_KEY17), ENGINE_CONTRACT_REFUSED, "not `key: value`",
+     "abcdefghijklmnopq"},
+    {"an unknown short key is REFUSED and its text is not echoed",
+     CT_KEY_UNKNOWN, CT_LEN(CT_KEY_UNKNOWN), ENGINE_CONTRACT_REFUSED,
+     "allowed keys", "grant"},
+};
+
+static int case_contract_nul_rows(void)
+{
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(contract_nul_rows) / sizeof(contract_nul_rows[0]);
+         i++) {
+        const struct contract_nul_row *r = &contract_nul_rows[i];
+        char why[ENGINE_CONTRACT_REASON_BYTES];
+        const enum engine_contract_result got = engine_contract_check(
+            r->task, r->len, NULL, why, sizeof(why));
+        const bool text = strstr(why, r->has) != NULL
+                          && (!r->absent || !strstr(why, r->absent));
+        EN_CHECK(r->name, got == r->want && text
+                 && (got == ENGINE_CONTRACT_REFUSED) == (why[0] != '\0'));
+    }
+    return failures;
+}
+
+static bool contract_view_core_ok(const struct engine_contract *v)
+{
+    return v->version == 1 && v->evidence_count == 3
+           && v->execution == ENGINE_CONTRACT_EXEC_SOURCE_ONLY
+           && strcmp(v->phase, "author") == 0
+           && v->evidence[1].what == ENGINE_CONTRACT_EVIDENCE_EXECUTED_PASS
+           && strcmp(v->evidence[1].phase, "verify") == 0
+           && strcmp(v->evidence[1].actor, "verifier") == 0
+           && v->evidence[2].from_predecessor
+           && !v->evidence[0].from_predecessor;
+}
+
+static bool contract_view_keys_ok(const struct engine_contract *v)
+{
+    return v->has_output && v->min_bytes == 1 && v->max_bytes == 9
+           && v->scope_count == 1 && strcmp(v->write_scope[0], "src/") == 0
+           && v->must_count == 1 && v->depends_count == 1
+           && strcmp(v->base, CT_HEX40) == 0 && v->attempt == 2
+           && strcmp(v->predecessor, CT_HEX64) == 0;
+}
+
+static int case_contract_view(void)
+{
+    int failures = 0;
+    struct engine_contract v;
+    char why[ENGINE_CONTRACT_REASON_BYTES];
+    const char *t = CONTRACT_OKH "output: min-bytes=1 max-bytes=9\n"
+                    "write-scope: src/\nmust-change: src/a.c\n"
+                    "base: " CT_HEX40 "\ndepends: " CT_HEX40B "\n"
+                    "attempt: 2\npredecessor: " CT_HEX64 "\n"
+                    "evidence: notrun-report phase=verify actor=verifier "
+                    "from=predecessor\n\nbody\n";
+    const enum engine_contract_result r =
+        engine_contract_check(t, strlen(t), &v, why, sizeof(why));
+    EN_CHECK("typed OK fills the parsed view",
+             r == ENGINE_CONTRACT_OK && contract_view_core_ok(&v));
+    EN_CHECK("the newer keys land in the view", contract_view_keys_ok(&v));
+    EN_CHECK("a task of length 0 is LEGACY and a NULL task is LEGACY",
+             engine_contract_check("contract: 1\n", 0, &v, why, sizeof(why))
+                 == ENGINE_CONTRACT_LEGACY
+             && engine_contract_check(NULL, 0, NULL, NULL, 0)
+                 == ENGINE_CONTRACT_LEGACY);
+    return failures;
+}
+
+
+static int case_contract_nul(void)
+{
+    int failures = 0;
+    char why[ENGINE_CONTRACT_REASON_BYTES];
+    static const char in_value[] =
+        "contract: 1\nphase: aut\0hor\nactor: author\nexecution: source-only\n"
+        CONTRACT_POS_EVIDENCE;
+    static const char in_key[] =
+        "contract: 1\npha\0se: author\nactor: author\nexecution: source-only\n"
+        CONTRACT_POS_EVIDENCE;
+    static const char in_version[] = "contract: 1\0\nphase: author\n";
+    EN_CHECK("an embedded NUL in a value is refused, not truncated",
+             engine_contract_check(in_value, sizeof(in_value) - 1, NULL, why,
+                                   sizeof(why)) == ENGINE_CONTRACT_REFUSED
+             && strstr(why, "contains a NUL byte"));
+    EN_CHECK("an embedded NUL in a key is refused",
+             engine_contract_check(in_key, sizeof(in_key) - 1, NULL, why,
+                                   sizeof(why)) == ENGINE_CONTRACT_REFUSED
+             && strstr(why, "contains a NUL byte"));
+    EN_CHECK("an embedded NUL in the version value is refused",
+             engine_contract_check(in_version, sizeof(in_version) - 1, NULL,
+                                   why, sizeof(why)) == ENGINE_CONTRACT_REFUSED
+             && strstr(why, "contains a NUL byte"));
+    return failures;
+}
+
+static size_t contract_fill_lines(char *buf, size_t cap, size_t lines,
+                                  const char *line)
+{
+    size_t n = 0;
+    buf[0] = '\0';
+    for (size_t i = 0; i < lines; i++)
+        n += (size_t)snprintf(buf + n, cap - n, "%s", line);
+    return n;
+}
+
+static int case_contract_bounds(void)
+{
+    int failures = 0;
+    static char big[16384];
+    char why[ENGINE_CONTRACT_REASON_BYTES];
+    size_t n = (size_t)snprintf(big, sizeof(big), "%s", CONTRACT_SRC);
+    for (unsigned i = 0; i < ENGINE_CONTRACT_MAX_EVIDENCE + 1u; i++)
+        n += (size_t)snprintf(big + n, sizeof(big) - n,
+                              "evidence: notrun-report phase=p%u actor=a\n",
+                              i);
+    EN_CHECK("evidence over the item cap refused",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_REFUSED && strstr(why, "too many evidence"));
+    n = (size_t)snprintf(big, sizeof(big), "contract: 1\n");
+    n += contract_fill_lines(big + n, sizeof(big) - n,
+                             ENGINE_CONTRACT_MAX_FIELDS, "kind: x\n");
+    EN_CHECK("header over the field cap refused",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_REFUSED && strstr(why, "exceeds its bounds"));
+    n = (size_t)snprintf(big, sizeof(big), "contract: 1\nphase: ");
+    memset(big + n, 'a', ENGINE_CONTRACT_MAX_HEADER_BYTES + 8u);
+    n += ENGINE_CONTRACT_MAX_HEADER_BYTES + 8u;
+    EN_CHECK("header over the byte cap refused",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_REFUSED && strstr(why, "exceeds its bounds"));
+    EN_CHECK("a tiny reason buffer is bounded, not overrun",
+             engine_contract_check(CONTRACT_SRC CONTRACT_NEG_EVIDENCE,
+                                   strlen(CONTRACT_SRC CONTRACT_NEG_EVIDENCE),
+                                   NULL, why, 16) == ENGINE_CONTRACT_REFUSED
+             && strlen(why) == 15);
+    return failures;
+}
+
+/* A `contract:` line beyond the line or byte window must not hide. */
+static int case_contract_window(void)
+{
+    int failures = 0;
+    static char big[16384];
+    char why[ENGINE_CONTRACT_REASON_BYTES];
+    size_t n = contract_fill_lines(big, sizeof(big),
+                                   ENGINE_CONTRACT_MAX_HEADER_LINES, "a: 1\n");
+    n += (size_t)snprintf(big + n, sizeof(big) - n, "%s", CONTRACT_OKH);
+    EN_CHECK("contract on the line after the line window is REFUSED, not "
+             "legacy",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_REFUSED && strstr(why, "exceeds its bounds"));
+    n = (size_t)snprintf(big, sizeof(big), "x: ");
+    memset(big + n, 'a', 3000u + ENGINE_CONTRACT_MAX_HEADER_BYTES);
+    n += 3000u + ENGINE_CONTRACT_MAX_HEADER_BYTES;
+    n += (size_t)snprintf(big + n, sizeof(big) - n, "\n%s", CONTRACT_OKH);
+    EN_CHECK("contract after one over-long first line is REFUSED, not legacy",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_REFUSED && strstr(why, "exceeds its bounds"));
+    n = contract_fill_lines(big, sizeof(big),
+                            ENGINE_CONTRACT_MAX_HEADER_LINES + 20u, "a: 1\n");
+    EN_CHECK("a long legacy header with no contract line stays LEGACY",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_LEGACY);
+    n = (size_t)snprintf(big, sizeof(big), "x: ");
+    memset(big + n, 'a', 3000u + ENGINE_CONTRACT_MAX_HEADER_BYTES);
+    n += 3000u + ENGINE_CONTRACT_MAX_HEADER_BYTES;
+    EN_CHECK("one over-long legacy line stays LEGACY",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_LEGACY);
+    n = contract_fill_lines(big, sizeof(big),
+                            ENGINE_CONTRACT_MAX_HEADER_LINES + 5u, "a: 1\n");
+    n += (size_t)snprintf(big + n, sizeof(big) - n, "\ncontract: 1\n");
+    EN_CHECK("contract after the blank line beyond the window is prose",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_LEGACY);
+
+    /* full-size legal header: every key at its cap fits the bounds */
+    n = (size_t)snprintf(big, sizeof(big), "%s", CONTRACT_SRC);
+    for (unsigned i = 0; i < ENGINE_CONTRACT_MAX_PATHS; i++)
+        n += (size_t)snprintf(big + n, sizeof(big) - n,
+                              "write-scope: " CT_P191 "\n");
+    for (unsigned i = 0; i < 4; i++)
+        n += (size_t)snprintf(big + n, sizeof(big) - n,
+                              "evidence: notrun-report phase=p%u actor=a\n", i);
+    EN_CHECK("8 maximum-length write-scope paths and 4 evidence fit",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_OK);
+    n = (size_t)snprintf(big, sizeof(big), "%s", CONTRACT_OKH);
+    for (unsigned i = 0; i < ENGINE_CONTRACT_MAX_PATHS + 1u; i++)
+        n += (size_t)snprintf(big + n, sizeof(big) - n,
+                              "write-scope: d%u/\n", i);
+    EN_CHECK("9 write-scope entries refused",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_REFUSED
+             && strstr(why, "too many write-scope"));
+    n = (size_t)snprintf(big, sizeof(big), "%swrite-scope: src/\n",
+                         CONTRACT_OKH);
+    for (unsigned i = 0; i < ENGINE_CONTRACT_MAX_PATHS + 1u; i++)
+        n += (size_t)snprintf(big + n, sizeof(big) - n,
+                              "must-change: src/f%u.c\n", i);
+    EN_CHECK("9 must-change entries refused",
+             engine_contract_check(big, n, NULL, why, sizeof(why))
+                 == ENGINE_CONTRACT_REFUSED
+             && strstr(why, "too many must-change"));
+    return failures;
+}
+
+static int case_contract_kind(void)
+{
+    int failures = 0;
+    const char *k = engine_prompt_kind_from_header(
+        "kind: fix-gate\n" CONTRACT_SRC CONTRACT_POS_EVIDENCE "\nbody\n");
+    EN_CHECK("kind before the contract lines is found",
+             k && strcmp(k, "fix-gate") == 0);
+    k = engine_prompt_kind_from_header(
+        CONTRACT_SRC CONTRACT_POS_EVIDENCE
+        "evidence: notrun-report phase=q actor=q\nkind: add-test\n\nbody\n");
+    EN_CHECK("kind after the contract lines is found beyond line 8",
+             k && strcmp(k, "add-test") == 0);
+    k = engine_prompt_kind_from_header(
+        "a: 1\nb: 2\nc: 3\nd: 4\ne: 5\nf: 6\ng: 7\nh: 8\nkind: add-test\n\n"
+        "body\n");
+    EN_CHECK("legacy 8-line bound unchanged: kind on line 9 is not found",
+             k == NULL);
+    k = engine_prompt_kind_from_header(
+        "a: 1\nb: 2\nc: 3\nd: 4\ne: 5\nf: 6\ng: 7\nh: 8\ni: 9\nkind: x\n"
+        "contract: 1\n\nbody\n");
+    EN_CHECK("contract on line 11 widens the scan, so kind on line 10 is "
+             "found",
+             k && strcmp(k, "x") == 0);
+    return failures;
+}
+
+#if !defined(_WIN32)
+struct contract_fx {
+    char dir[600];
+    char neg[700], pos[700], legacy[700], reply[700];
+    char wt[700], st[700];
+};
+
+/* Run `args` through the real binary into <dir>/<name>.log; return the exit
+ * status (-1 when it did not exit) and the captured text in out. */
+static int contract_unit(const struct contract_fx *x, const char *name,
+                         const char *args, char *out, size_t cap)
+{
+    char cmd[4096], log[700];
+    (void)snprintf(log, sizeof(log), "%s/%s.log", x->dir, name);
+    (void)snprintf(cmd, sizeof(cmd), "%s --engine fixture %s >%s 2>&1",
+                   ENGINE_UNIT_BIN, args, log);
+    const int rc = system(cmd);
+    out[0] = '\0';
+    (void)read_whole_file(log, out, cap);
+    return rc != -1 && WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+}
+
+static bool contract_dir_empty(const char *dir)
+{
+    char cmd[1024];
+    (void)snprintf(cmd, sizeof(cmd), "test -z \"$(ls -A %s)\"", dir);
+    return system(cmd) == 0;
+}
+
+static bool contract_fx_init(struct contract_fx *x)
+{
+    char rel[512];
+    test_make_tmpdir(rel, sizeof(rel), "engine_contract", "run");
+    if (!test_abs_path(rel, x->dir, sizeof(x->dir)))
+        return false;
+    (void)snprintf(x->neg, sizeof(x->neg), "%s/neg.txt", x->dir);
+    (void)snprintf(x->pos, sizeof(x->pos), "%s/pos.txt", x->dir);
+    (void)snprintf(x->legacy, sizeof(x->legacy), "%s/legacy.txt", x->dir);
+    (void)snprintf(x->reply, sizeof(x->reply), "%s/reply.json", x->dir);
+    (void)snprintf(x->wt, sizeof(x->wt), "%s/wt", x->dir);
+    (void)snprintf(x->st, sizeof(x->st), "%s/st", x->dir);
+    (void)mkdir(x->wt, 0700);
+    (void)mkdir(x->st, 0700);
+    return write_whole_file(x->neg, "kind: fix-gate\n" CONTRACT_SRC
+                                    CONTRACT_NEG_EVIDENCE "\nA smoke task.\n")
+           && write_whole_file(x->pos, "kind: fix-gate\n" CONTRACT_SRC
+                                       CONTRACT_POS_EVIDENCE
+                                       "\nA smoke task.\n")
+           && write_whole_file(x->legacy,
+                               "kind: fix-gate\n\nA task with no contract.\n")
+           && write_whole_file(x->reply,
+               "{\"choices\":[{\"message\":{\"content\":\"No file changes.\""
+               "}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,"
+               "\"total_tokens\":14}}");
+}
+
+static int case_contract_neg(const struct contract_fx *x)
+{
+    int failures = 0;
+    char args[2048], out[16384], nokey[700], rest[700];
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --dry-run "
+                   "--fixture-reply %s", x->neg, x->reply);
+    const int rc_dry = contract_unit(x, "neg_dry", args, out, sizeof(out));
+    EN_CHECK("NEG refused preview exits 0", rc_dry == 0);
+    EN_CHECK("NEG dry-run names both fields and the correction",
+             strstr(out, "execution=source-only")
+             && strstr(out, "actor=author in phase=author")
+             && strstr(out, "execution: may-execute"));
+    EN_CHECK("NEG dry-run says WOULD BE REFUSED, never would dispatch",
+             strstr(out, "WOULD BE REFUSED") && !strstr(out, "would dispatch"));
+
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --yes-dispatch "
+                   "--fixture-reply %s", x->neg, x->reply);
+    const int rc = contract_unit(x, "neg_real", args, out, sizeof(out));
+    EN_CHECK("NEG real path fails non-zero with the same reason",
+             rc == 2 && strstr(out, "execution=source-only")
+             && strstr(out, "actor=author in phase=author"));
+
+    /* Missing key file, fresh empty worktree and state dir: if any effect
+     * path ran first, the failure would be about the key or the workspace,
+     * or one of the two directories would no longer be empty. */
+    (void)snprintf(nokey, sizeof(nokey), "%s/no-such-key", x->dir);
+    (void)snprintf(rest, sizeof(rest), "%s/receipt.json", x->st);
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --yes-dispatch "
+                   "--fixture-reply %s --key-file %s --worktree %s "
+                   "--state-dir %s", x->neg, x->reply, nokey, x->wt, x->st);
+    const int rc3 = contract_unit(x, "neg_effects", args, out, sizeof(out));
+    EN_CHECK("NEG fails with the CONTRACT reason, not a credential or "
+             "workspace error",
+             rc3 == 2 && strstr(out, "execution=source-only")
+             && !strstr(out, "API key") && !strstr(out, "credential")
+             && !strstr(out, "worktree"));
+    EN_CHECK("NEG left the worktree and state dirs empty and wrote no receipt",
+             contract_dir_empty(x->wt) && contract_dir_empty(x->st)
+             && access(rest, F_OK) != 0 && access(nokey, F_OK) != 0);
+    return failures;
+}
+
+static int case_contract_pos(const struct contract_fx *x)
+{
+    int failures = 0;
+    char args[2048], out[16384];
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --dry-run "
+                   "--fixture-reply %s", x->pos, x->reply);
+    int rc = contract_unit(x, "pos_dry", args, out, sizeof(out));
+    EN_CHECK("POS dry-run says would dispatch and prints its contract line",
+             rc == 0 && strstr(out, "would dispatch")
+             && !strstr(out, "WOULD BE REFUSED")
+             && strstr(out, "contract:   v1 phase=author actor=author "
+                            "execution=source-only evidence=2"));
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --yes-dispatch "
+                   "--worktree %s --state-dir %s --fixture-reply %s", x->pos,
+                   x->wt, x->st, x->reply);
+    rc = contract_unit(x, "pos_real", args, out, sizeof(out));
+    EN_CHECK("POS real fixture dispatch is not refused by the contract",
+             rc != 2 && !strstr(out, "contract refused")
+             && strstr(out, "turn 1/"));
+
+    static char chain[32768];
+    char want[128], hex[65], body[512] = {0}, rp[700];
+    uint8_t d[32];
+    (void)snprintf(rp, sizeof(rp), "%s/%s", x->st, ENGINE_RECEIPT_FILENAME);
+    (void)read_whole_file(x->pos, body, sizeof(body));
+    zcl_sha3_256((const unsigned char *)body, strlen(body), d);
+    zcl_hex_encode(d, 32, hex);
+    (void)snprintf(want, sizeof(want), "\"task_sha3\":\"%s\"", hex);
+    chain[0] = '\0';
+    EN_CHECK("POS receipt binds the sha3 of the task file bytes",
+             read_whole_file(rp, chain, sizeof(chain)) && strstr(chain, want));
+    return failures;
+}
+
+static int case_contract_legacy_and_carry(const struct contract_fx *x)
+{
+    int failures = 0;
+    char args[2048], out[16384], a1[700], a2[700], a1state[700], att[700];
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --dry-run "
+                   "--fixture-reply %s", x->legacy, x->reply);
+    int rc = contract_unit(x, "legacy_dry", args, out, sizeof(out));
+    EN_CHECK("LEGACY dry-run is as before plus the untyped line",
+             rc == 0 && strstr(out, "would dispatch")
+             && strstr(out, "contract:   none (legacy task; obligations "
+                            "not checked)"));
+
+    /* Predecessor state sits in a1/state.txt; the run is attempt a2. */
+    (void)snprintf(att, sizeof(att), "%s/attempts", x->dir);
+    (void)snprintf(a1, sizeof(a1), "%s/a1", att);
+    (void)snprintf(a2, sizeof(a2), "%s/a2", att);
+    (void)snprintf(a1state, sizeof(a1state), "%s/state.txt", a1);
+    (void)mkdir(att, 0700);
+    (void)mkdir(a1, 0700);
+    (void)mkdir(a2, 0700);
+    EN_CHECK("carried-state fixture written",
+             write_whole_file(a1state, CONTRACT_SRC CONTRACT_NEG_EVIDENCE
+                              "tried: x\n"));
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --dry-run "
+                   "--fixture-reply %s --state-dir %s", x->legacy, x->reply,
+                   a2);
+    rc = contract_unit(x, "carry_legacy", args, out, sizeof(out));
+    EN_CHECK("a contract-looking predecessor state does not type a legacy task",
+             rc == 0 && strstr(out, "carrying") && strstr(out, "would dispatch")
+             && strstr(out, "contract:   none (legacy task")
+             && !strstr(out, "contract refused"));
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --dry-run "
+                   "--fixture-reply %s --state-dir %s", x->pos, x->reply, a2);
+    rc = contract_unit(x, "carry_pos", args, out, sizeof(out));
+    EN_CHECK("a contradictory predecessor state does not refuse a good task",
+             rc == 0 && strstr(out, "carrying") && strstr(out, "would dispatch")
+             && strstr(out, "evidence=2") && !strstr(out, "contract refused"));
+    return failures;
+}
+
+/* A must-change path of exactly 191 valid bytes (the validator's limit), no
+ * write-scope covering it: 191 = 3 * 50 + 41. No segment is empty, `.` or
+ * `..`. */
+#define CT_SEG10 "abcd/abcd/abcd/abcd/abcd/abcd/abcd/abcd/abcd/abcd/"
+#define CT_PATH191 CT_SEG10 CT_SEG10 CT_SEG10 \
+    "abcd/abcd/abcd/abcd/abcd/abcd/abcd/abcd/e"
+#define CT_LONG_NAME "uncovered must-change path at the 191-byte limit"
+#define CT_LONG_TAIL "add it to write-scope or drop the must-change"
+
+/* Every header that crosses the real binary below: refused ones carry the
+ * reason fragment, accepted ones carry NULL. */
+struct contract_bin_row {
+    const char *name;
+    const char *header;
+    const char *reason; /* NULL: must be accepted */
+};
+
+static const struct contract_bin_row contract_bin_rows[] = {
+    {"source-only owns its executed-pass",
+     CONTRACT_SRC CONTRACT_NEG_EVIDENCE,
+     "execution=source-only but this same actor=author in phase=author "
+     "owes an executed-pass"},
+    {"output bounds",
+     CONTRACT_OKH "output: min-bytes=9 max-bytes=3\n",
+     "lower min-bytes or raise max-bytes"},
+    {"write scope",
+     CONTRACT_OKH "write-scope: src/a\nmust-change: src/ab.c\n",
+     "add it to write-scope or drop the must-change"},
+    {"missing base", CONTRACT_OKH "depends: " CT_HEX40 "\n",
+     "a dependency ref needs the base it is relative to: add base:"},
+    {"predecessor evidence",
+     CONTRACT_SRC "attempt: 2\npredecessor: " CT_HEX40 "\n" CT_PRED_EXEC_FROM,
+     "a predecessor's executed-pass covers different bytes"},
+    {"actor/phase conflict",
+     CONTRACT_SRC "evidence: notrun-report phase=author actor=ci\n",
+     "one phase has one actor here"},
+    {"split executed-pass is accepted", CONTRACT_OKH, NULL},
+    {"every key present is accepted",
+     CONTRACT_OKH "output: min-bytes=1 max-bytes=9\nwrite-scope: src/\n"
+     "must-change: src/a.c\nbase: " CT_HEX40 "\ndepends: " CT_HEX40B "\n"
+     "attempt: 2\npredecessor: " CT_HEX64 "\n"
+     "evidence: notrun-report phase=verify actor=verifier "
+     "from=predecessor\n",
+     NULL},
+    {"duplicate evidence",
+     CONTRACT_SRC CONTRACT_POS_EVIDENCE
+     "evidence: notrun-report phase=author actor=author\n",
+     "duplicate evidence"},
+    {"depends equal to base",
+     CONTRACT_OKH "base: " CT_HEX40 "\ndepends: " CT_HEX40 "\n",
+     "is the base itself"},
+    {"attempt 2 without a predecessor", CONTRACT_OKH "attempt: 2\n",
+     "no predecessor is named"},
+    {"predecessor with attempt 1",
+     CONTRACT_OKH "predecessor: " CT_HEX64 "\n",
+     "predecessor is set but attempt is 1"},
+    {"from=predecessor on attempt 1",
+     CONTRACT_OKH "evidence: notrun-report phase=verify actor=verifier "
+     "from=predecessor\n",
+     "evidence from=predecessor"},
+    {CT_LONG_NAME,
+     CONTRACT_OKH "write-scope: src/a\nmust-change: " CT_PATH191 "\n",
+     CT_LONG_TAIL},
+};
+
+/* The reason line starts at "contract refused:" and must end in a newline
+ * inside cap, so the copy into dst (cap bytes) is whole. A line that does
+ * not fit returns false: a truncated reason must not compare equal. */
+static bool contract_reason_line(const char *out, char *dst, size_t cap)
+{
+    const char *p = strstr(out, "contract refused:");
+    if (!p)
+        return false;
+    size_t n = 0;
+    while (n < cap && p[n] && p[n] != '\n')
+        n++;
+    if (n == cap || p[n] != '\n')
+        return false;
+    memcpy(dst, p, n);
+    dst[n] = '\0';
+    return true;
+}
+
+/* An accepted header's real run got past the contract gate: exit 1 (the
+ * fixture's own no-change verdict), the status line, no refusal, and a
+ * verdict line from the engine. */
+static bool contract_reaches_dispatch(int rc, const char *real)
+{
+    return rc == 1 && strstr(real, "contract:   v1")
+           && !strstr(real, "contract refused")
+           && strstr(real, "engine_unit: ");
+}
+
+/* The long must-change row keeps its corrective tail in both captures, so
+ * the full reason line was captured and nothing was cut. */
+static int contract_agree_tail(const struct contract_bin_row *r,
+                               const char *dr, const char *rr)
+{
+    int failures = 0;
+    char name[200];
+    if (strcmp(r->name, CT_LONG_NAME) != 0)
+        return 0;
+    (void)snprintf(name, sizeof(name), "AGREE %s: reason keeps its "
+                   "corrective tail", r->name);
+    EN_CHECK(name, strstr(dr, CT_LONG_TAIL) && strstr(rr, CT_LONG_TAIL));
+    return failures;
+}
+
+/* One header through dry-run and real, each in its own fresh empty dirs. */
+static int case_contract_agree_row(const struct contract_fx *x, size_t i,
+                                   const struct contract_bin_row *r)
+{
+    int failures = 0;
+    char task[700], wt[700], st[700], args[2600], name[200];
+    static char dry[16384], real[16384], body[8192];
+    char dr[ENGINE_CONTRACT_REASON_BYTES] = {0};
+    char rr[ENGINE_CONTRACT_REASON_BYTES] = {0};
+    (void)snprintf(task, sizeof(task), "%s/agree%zu.txt", x->dir, i);
+    (void)snprintf(wt, sizeof(wt), "%s/agree_wt%zu", x->dir, i);
+    (void)snprintf(st, sizeof(st), "%s/agree_st%zu", x->dir, i);
+    (void)mkdir(wt, 0700);
+    (void)mkdir(st, 0700);
+    (void)snprintf(body, sizeof(body), "kind: fix-gate\n%s\nA smoke task.\n",
+                   r->header);
+    if (!write_whole_file(task, body)) {
+        printf("engine: FAIL (cannot write %s)\n", task);
+        return 1;
+    }
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --dry-run "
+                   "--fixture-reply %s", task, x->reply);
+    const int rc_dry = contract_unit(x, "agree_dry", args, dry, sizeof(dry));
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --yes-dispatch "
+                   "--fixture-reply %s --worktree %s --state-dir %s", task,
+                   x->reply, wt, st);
+    const int rc = contract_unit(x, "agree_real", args, real, sizeof(real));
+    const bool dry_ref = contract_reason_line(dry, dr, sizeof(dr));
+    const bool real_ref = rc == 2 && contract_reason_line(real, rr, sizeof(rr));
+    const bool want_ref = r->reason != NULL;
+
+    (void)snprintf(name, sizeof(name), "AGREE %s: preview and real both %s",
+                   r->name, want_ref ? "refuse" : "accept");
+    EN_CHECK(name, dry_ref == want_ref && real_ref == want_ref);
+    if (want_ref) {
+        (void)snprintf(name, sizeof(name), "AGREE %s: refused preview exits 0",
+                       r->name);
+        EN_CHECK(name, rc_dry == 0);
+    }
+    (void)snprintf(name, sizeof(name), "AGREE %s: reason line byte-identical",
+                   r->name);
+    EN_CHECK(name, !want_ref
+             || (strcmp(dr, rr) == 0 && strstr(dr, r->reason)));
+    (void)snprintf(name, sizeof(name), "AGREE %s: accepted real run passes "
+                   "the gate and reaches dispatch", r->name);
+    EN_CHECK(name, want_ref || contract_reaches_dispatch(rc, real));
+    (void)snprintf(name, sizeof(name), "AGREE %s: preview verdict wording",
+                   r->name);
+    EN_CHECK(name, want_ref ? (strstr(dry, "WOULD BE REFUSED")
+                               && !strstr(dry, "would dispatch"))
+                            : (strstr(dry, "would dispatch")
+                               && !strstr(dry, "WOULD BE REFUSED")));
+    (void)snprintf(name, sizeof(name), "AGREE %s: refusal left dirs empty "
+                   "and no receipt", r->name);
+    EN_CHECK(name, !want_ref
+             || (contract_dir_empty(wt) && contract_dir_empty(st)));
+    failures += contract_agree_tail(r, dr, rr);
+    return failures;
+}
+
+/* A NUL byte before the contract line. Written with an explicit length:
+ * write_whole_file would stop at the NUL and test a different file. */
+#define CT_BIN_NUL "kind: fix-gate\n\0" CONTRACT_SRC CONTRACT_POS_EVIDENCE \
+    "\nA smoke task.\n"
+
+static bool contract_write_bytes(const char *path, const char *s, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    const bool ok = fwrite(s, 1, n, f) == n;
+    return fclose(f) == 0 && ok;
+}
+
+/* Preview and real both refuse the NUL task with one identical reason line,
+ * and the refusal leaves both directories empty. */
+static int case_contract_agree_nul(const struct contract_fx *x)
+{
+    int failures = 0;
+    char task[700], wt[700], st[700], args[2600];
+    static char dry[16384], real[16384];
+    char dr[ENGINE_CONTRACT_REASON_BYTES] = {0};
+    char rr[ENGINE_CONTRACT_REASON_BYTES] = {0};
+    (void)snprintf(task, sizeof(task), "%s/agree_nul.txt", x->dir);
+    (void)snprintf(wt, sizeof(wt), "%s/agree_nul_wt", x->dir);
+    (void)snprintf(st, sizeof(st), "%s/agree_nul_st", x->dir);
+    (void)mkdir(wt, 0700);
+    (void)mkdir(st, 0700);
+    if (!contract_write_bytes(task, CT_BIN_NUL, CT_LEN(CT_BIN_NUL))) {
+        printf("engine: FAIL (cannot write %s)\n", task);
+        return 1;
+    }
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --dry-run "
+                   "--fixture-reply %s", task, x->reply);
+    const int rc_dry =
+        contract_unit(x, "agree_nul_dry", args, dry, sizeof(dry));
+    (void)snprintf(args, sizeof(args), "--task %s --no-group --yes-dispatch "
+                   "--fixture-reply %s --worktree %s --state-dir %s", task,
+                   x->reply, wt, st);
+    const int rc = contract_unit(x, "agree_nul_real", args, real, sizeof(real));
+    const bool dry_ref = contract_reason_line(dry, dr, sizeof(dr));
+    const bool real_ref = rc == 2 && contract_reason_line(real, rr, sizeof(rr));
+    EN_CHECK("AGREE NUL before the contract line: preview and real both refuse",
+             dry_ref && real_ref);
+    EN_CHECK("AGREE NUL before the contract line: refused preview exits 0",
+             rc_dry == 0);
+    EN_CHECK("AGREE NUL before the contract line: reason line byte-identical "
+             "and names the NUL",
+             strcmp(dr, rr) == 0 && strstr(dr, "contains a NUL byte"));
+    EN_CHECK("AGREE NUL before the contract line: refusal left dirs empty "
+             "and no receipt",
+             contract_dir_empty(wt) && contract_dir_empty(st));
+    return failures;
+}
+
+static int case_contract_agree(const struct contract_fx *x)
+{
+    int failures = 0;
+    for (size_t i = 0;
+         i < sizeof(contract_bin_rows) / sizeof(contract_bin_rows[0]); i++)
+        failures += case_contract_agree_row(x, i, &contract_bin_rows[i]);
+    return failures;
+}
+
+static int case_contract_binary(void)
+{
+    int failures = 0;
+    struct contract_fx x;
+    if (!engine_unit_binary_present()) {
+        printf("engine: FAIL (%s is a required prerequisite)\n",
+               ENGINE_UNIT_BIN);
+        return 1;
+    }
+    const bool ready = contract_fx_init(&x);
+    EN_CHECK("contract fixtures are written", ready);
+    if (!ready)
+        return failures;
+    failures += case_contract_neg(&x);
+    failures += case_contract_pos(&x);
+    failures += case_contract_legacy_and_carry(&x);
+    failures += case_contract_agree(&x);
+    failures += case_contract_agree_nul(&x);
+    return failures;
+}
+#endif
+
+static int case_contract(void)
+{
+    int failures = 0;
+    failures += case_contract_rows();
+    failures += case_contract_nul_rows();
+    failures += case_contract_view();
+    failures += case_contract_nul();
+    failures += case_contract_bounds();
+    failures += case_contract_window();
+    failures += case_contract_kind();
+#if !defined(_WIN32)
+    failures += case_contract_binary();
+#endif
+    return failures;
+}
+
 int test_engine(void)
 {
     int failures = 0;
@@ -3808,6 +4815,7 @@ int test_engine(void)
     failures += case_engine_unit_grok_projection_e2e();
 #endif
     failures += case_review_findings_not_verdict();
+    failures += case_contract();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }

@@ -2421,6 +2421,40 @@ static bool dispatch_workspace_prepare(const struct unit_opts *o, char *out,
     return true;
 }
 
+/* The typed-contract preflight on the TASK BYTES. Legacy and OK print one
+ * status line and return. REFUSED does not return: the dry-run preview prints
+ * the reason and ends with the WOULD BE REFUSED verdict (exit 0, as every
+ * other preview verdict), the real path fails through fail_setup (exit 2).
+ * It exits from here, not from main(), because main() is at its complexity
+ * pin and a refusal that is a branch in main() is a pin that rose. Nothing
+ * it touches is an effect: no credential, workspace, state or provider. */
+static void contract_gate_or_exit(char *task, size_t task_len, bool dry_run)
+{
+    struct engine_contract c;
+    char why[ENGINE_CONTRACT_REASON_BYTES];
+    const enum engine_contract_result r =
+        engine_contract_check(task, task_len, &c, why, sizeof(why));
+    if (r == ENGINE_CONTRACT_LEGACY)
+        engine_emit(stdout, "  contract:   none (legacy task; obligations "
+                            "not checked)\n");
+    else if (r == ENGINE_CONTRACT_OK)
+        engine_emit(stdout, "  contract:   v%u phase=%s actor=%s "
+                            "execution=%s evidence=%zu (assertions "
+                            "consistent; not proven)\n",
+                    c.version, c.phase, c.actor,
+                    c.execution == ENGINE_CONTRACT_EXEC_SOURCE_ONLY
+                        ? "source-only" : "may-execute",
+                    c.evidence_count);
+    if (r != ENGINE_CONTRACT_REFUSED)
+        return;
+    free(task);
+    if (dry_run) {
+        engine_emit(stdout, "  %s\n\n[task contract: WOULD BE REFUSED]\n", why);
+        exit(0);
+    }
+    exit(fail_setup(why));
+}
+
 int main(int argc, char **argv)
 {
     struct unit_opts o;
@@ -2527,6 +2561,15 @@ int main(int argc, char **argv)
                     "  kind:       none declared (no template bodies; pass "
                     "--kind or add a `kind:` header to the task file)\n");
     }
+
+    /* Task contract preflight: the ONE call, after the kind check and before
+     * anything is composed or any effect. Obligations come ONLY from the
+     * task bytes. `brief` (territory) and `carried_preamble` (state carried
+     * from a predecessor attempt) do not exist yet here and are never
+     * parsed for contract lines: a predecessor must not be able to add or
+     * remove an obligation by writing `contract:`/`evidence:` into its
+     * state. A refusal exits inside the call. */
+    contract_gate_or_exit(task, task_len, o.dry_run);
 
     /* Fail-closed: a named territory must resolve, or the unit does not go
      * out. Dispatching with an unresolvable label is what this replaces. */
