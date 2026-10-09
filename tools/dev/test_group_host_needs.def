@@ -147,12 +147,18 @@ ZCL_TEST_GROUP_BUILD_NEED("test_semantic_facts_live",
                           "build/bin/z23-clang-manifest", "clang-manifest")
 ZCL_TEST_GROUP_BUILD_NEED("test_semantic_consumer_live",
                           "build/bin/z23-clang-manifest", "clang-manifest")
-/* The fuzz generator emits C23 constexpr, and GCC preprocessing uses
- * -std=c23. The proof currently binds only the root-owned system libclang
- * 18 route. On a host where its matching Clang or default GCC cannot parse
- * that source, a universal run names this unavailable capability instead of
- * counting the group's self-skip as evidence. Exact selection still runs and
- * refuses. Private LLVM runpaths do not qualify this proof generation. */
+/* The fuzz generator emits C23 constexpr, typeof, static_assert, the digit
+ * separator, #embed and __has_embed (GCC preprocessing only the common
+ * core), all under -std=c23. The need is met when the clang the group will
+ * run compiles that source: the bin/clang of the first existing
+ * /usr/lib/llvm-{20,21,19,18}/include/clang-c/Index.h (the Makefile's
+ * CLANG_MANIFEST_LLVM_DIR order), or the system libclang 18 route when none
+ * exists, and the default /usr/bin/gcc accepts it too. An existing sensor
+ * must be bound to that same clang; a stale one is not ready until the build
+ * relinks it. The value string below is kept for the selection logs. On a
+ * host that fails this, a universal run names the unavailable capability
+ * instead of counting the group's self-skip as evidence. Exact selection
+ * still runs and refuses. */
 ZCL_TEST_GROUP_NEED("test_semantic_facts_fuzz", ZCL_HOST_NEED_C23_TOOLCHAIN,
                     "bound-libclang18-full-c23")
 ZCL_TEST_GROUP_BUILD_NEED("test_semantic_facts_fuzz",

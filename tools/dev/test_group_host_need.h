@@ -61,6 +61,40 @@ bool zcl_test_group_build_needs_add(const char *group,
                                     struct zcl_test_group_host_need *needs,
                                     size_t cap, size_t *n);
 
+/* Facts behind the C23 fuzz toolchain need (test_semantic_facts_fuzz). The
+ * header flags follow the Makefile's CLANG_MANIFEST_LLVM_DIR order: llvm-20,
+ * llvm-21, llvm-19, llvm-18 clang-c/Index.h. The first present one is the
+ * LLVM the build binds, and only that LLVM's clang is judged; with none
+ * present the system libclang-18 fallback facts decide. */
+#define ZCL_C23_FUZZ_LLVM_N 4
+struct zcl_c23_fuzz_facts {
+    bool header[ZCL_C23_FUZZ_LLVM_N]; /* llvm-20, -21, -19, -18 Index.h */
+    bool selected_clang_file;  /* selected <llvm>/bin/clang: root-owned file */
+    bool selected_clang_c23;   /* selected clang accepts the C23 probe */
+    bool fallback_lib;         /* system libclang-18 is root-owned, regular */
+    bool fallback_clang_c23;   /* /usr/lib/llvm-18/bin/clang accepts */
+    bool gcc_c23;              /* /usr/bin/gcc accepts */
+    bool sensor_present;       /* build/bin/z23-clang-manifest exists */
+    bool sensor_bound_matches_selection; /* the clang it is bound to is the
+                                            selected one (stale sensor: no) */
+};
+
+/* Index of the LLVM the build binds (first present header), or -1. */
+int zcl_c23_fuzz_select_llvm(const bool header[ZCL_C23_FUZZ_LLVM_N]);
+
+/* Pure decision: is the toolchain the group would really run able to run
+ * it? Exposed so tests can drive it without the host. */
+bool zcl_c23_fuzz_toolchain_decide(const struct zcl_c23_fuzz_facts *f);
+
+/* Test-visible: the clang the sensor ELF at sensor_path is bound to (its
+ * RUNPATH's <dir>/bin/clang, or the system llvm-18 clang for a sensor with no
+ * RUNPATH that needs libclang-18.so.18) written to out. *present is false
+ * only when the file is absent (ENOENT/ENOTDIR); any other failure is
+ * present, unbound. False on every malformation. */
+bool zcl_c23_fuzz_sensor_bound_clang_for_test(const char *sensor_path,
+                                              char *out, size_t cap,
+                                              bool *present);
+
 /* Is the need satisfied by the tree at `root` and this process's environment?
  * FILE and BUILD resolve `<root>/<value>`, so they answer for the tree a
  * runner will exec in and never for the caller's own checkout. NONE is always

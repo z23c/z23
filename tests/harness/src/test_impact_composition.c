@@ -11877,6 +11877,273 @@ static int test_ic_rule_group_length(void)
     return failures;
 }
 
+/* The fuzz toolchain decision is a pure function of host facts: the build
+ * binds the first present of llvm-20, -21, -19, -18 headers (the Makefile's
+ * CLANG_MANIFEST_LLVM_DIR) and only that LLVM's clang is judged; with none
+ * present the system libclang-18 fallback decides. gcc must always accept. */
+static int test_ic_fuzz_toolchain_decision_table(void)
+{
+    int failures = 0;
+    struct row {
+        const char *name;
+        struct zcl_c23_fuzz_facts f;
+        bool want;
+    };
+    /* header order: 20, 21, 19, 18; then sel file, sel c23, lib, fb c23, gcc */
+    static const struct row rows[] = {
+#define H19 {false, false, true, true}
+#define H2018 {true, false, false, true}
+#define HNONE {false, false, false, false}
+/* header, sel file, sel c23, fallback lib, fallback c23, gcc, sensor present,
+ * sensor bound matches */
+#define F(h, sf, sc, fl, fc, g, sp, sm) \
+    {h, sf, sc, fl, fc, g, sp, sm}
+        {"llvm19 bound, its clang good, no good fallback",
+         F(H19, true, true, false, false, true, false, false), true},
+        {"llvm19 bound, clang missing, fallback all good",
+         F(H19, false, false, true, true, true, false, false), false},
+        {"llvm19 bound, clang rejects C23, fallback all good",
+         F(H19, true, false, true, true, true, false, false), false},
+        {"llvm20 and llvm18 present: judged on 20's clang, good",
+         F(H2018, true, true, false, false, true, false, false), true},
+        {"llvm20 and llvm18 present: 20's clang bad, 18 fallback good",
+         F(H2018, true, false, true, true, true, false, false), false},
+        {"no headers, fallback all good",
+         F(HNONE, false, false, true, true, true, false, false), true},
+        {"no headers, fallback library bad",
+         F(HNONE, false, false, false, true, true, false, false), false},
+        {"no headers, fallback clang rejects",
+         F(HNONE, false, false, true, false, true, false, false), false},
+        {"no headers, selected-clang facts are ignored",
+         F(HNONE, true, true, false, false, true, false, false), false},
+        {"gcc rejects, llvm19 bound and good",
+         F(H19, true, true, true, true, false, false, false), false},
+        {"gcc rejects, no headers, fallback good",
+         F(HNONE, false, false, true, true, false, false, false), false},
+        {"sensor present and bound to the selected clang",
+         F(H19, true, true, false, false, true, true, true), true},
+        {"sensor present but bound elsewhere (stale), all else good",
+         F(H19, true, true, true, true, true, true, false), false},
+        {"no headers, stale sensor present, fallback good",
+         F(HNONE, false, false, true, true, true, true, false), false},
+        {"no headers, sensor present and bound to the fallback clang",
+         F(HNONE, false, false, true, true, true, true, true), true},
+    };
+#undef F
+#undef HNONE
+#undef H2018
+#undef H19
+    TEST_CASE("fuzz host gate: toolchain decision follows the bound LLVM") {
+        ASSERT(!zcl_c23_fuzz_toolchain_decide(NULL));
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            bool got = zcl_c23_fuzz_toolchain_decide(&rows[i].f);
+            if (got != rows[i].want)
+                fprintf(stderr, "row failed: %s\n", rows[i].name);
+            ASSERT(got == rows[i].want);
+        }
+    } TEST_END
+    return failures;
+}
+
+/* A minimal ELF64 little-endian x86-64 image for the sensor reader: header,
+ * a string table at 64, a dynamic section at 320, section headers at 448
+ * (null, strtab, dynamic). No compiler is involved. */
+struct ic_sensor_img {
+    const char *name;
+    uint8_t cls;            /* ELFCLASS byte; 0: 64-bit */
+    uint16_t machine;       /* 0: x86-64 */
+    bool no_dynamic;        /* omit the dynamic section */
+    const char *str;        /* string table bytes */
+    size_t strn;
+    uint64_t ent[4][2];     /* dynamic entries {tag, value} */
+    unsigned nent;
+    uint64_t dsz;           /* dynamic size override, 0: nent * 16 */
+    uint32_t link;          /* linked section override, 0: 1 */
+    uint32_t strtype;       /* string table type override, 0: 3 */
+    size_t cut;             /* file length override, 0: whole image */
+    bool want_bound;
+    const char *want_path;  /* the expected bound clang, or NULL */
+    bool fifo;              /* mkfifo at the path instead of an image */
+};
+
+static size_t ic_sensor_build(const struct ic_sensor_img *s, uint8_t *w)
+{
+    memset(w, 0, 704);
+    memcpy(w, "\177ELF", 4);
+    w[4] = s->cls ? s->cls : 2;
+    w[5] = 1;
+    w[18] = (uint8_t)(s->machine ? s->machine : 62);
+    ic_elf_u64(w + 40, 448);
+    w[58] = 64;
+    w[60] = s->no_dynamic ? 2 : 3;
+    memcpy(w + 64, s->str, s->strn);
+    for (unsigned i = 0; i < s->nent; i++) {
+        ic_elf_u64(w + 320 + i * 16, s->ent[i][0]);
+        ic_elf_u64(w + 320 + i * 16 + 8, s->ent[i][1]);
+    }
+    w[448 + 64 + 4] = (uint8_t)(s->strtype ? s->strtype : 3);
+    ic_elf_u64(w + 448 + 64 + 24, 64);
+    ic_elf_u64(w + 448 + 64 + 32, s->strn);
+    w[448 + 128 + 4] = 6;
+    ic_elf_u64(w + 448 + 128 + 24, 320);
+    ic_elf_u64(w + 448 + 128 + 32, s->dsz ? s->dsz : s->nent * 16u);
+    w[448 + 128 + 40] = (uint8_t)(s->link ? s->link : 1);
+    return s->cut ? s->cut : 448 + (s->no_dynamic ? 128 : 192);
+}
+
+/* The sensor reader fails closed on every malformed image, and follows the
+ * test group's own reader: a later RUNPATH wins and an empty one is refused. */
+static int test_ic_sensor_bound_clang_reader(void)
+{
+    int failures = 0;
+#define IC_RP IC_FIX_ROOT "/rp"
+    static const struct ic_sensor_img rows[] = {
+        {.name = "zero-length file", .str = "\0", .strn = 1, .cut = 0,
+         .want_bound = false},
+        {.name = "truncated header", .str = "\0", .strn = 1, .cut = 30,
+         .want_bound = false},
+        {.name = "32-bit class", .cls = 1, .str = "\0" IC_RP "/lib",
+         .strn = sizeof("\0" IC_RP "/lib"), .ent = {{29, 1}}, .nent = 1,
+         .want_bound = false},
+        {.name = "wrong machine", .machine = 40, .str = "\0" IC_RP "/lib",
+         .strn = sizeof("\0" IC_RP "/lib"), .ent = {{29, 1}}, .nent = 1,
+         .want_bound = false},
+        {.name = "no dynamic section", .no_dynamic = true, .str = "\0",
+         .strn = 1, .want_bound = false},
+        {.name = "runpath whose clang does not exist", .str = "\0/x/lib",
+         .strn = sizeof("\0/x/lib"), .ent = {{29, 1}}, .nent = 1,
+         .want_bound = false},
+        {.name = "runpath whose clang exists", .str = "\0" IC_RP "/lib",
+         .strn = sizeof("\0" IC_RP "/lib"), .ent = {{29, 1}}, .nent = 1,
+         .want_bound = true, .want_path = IC_RP "/bin/clang"},
+        {.name = "runpath offset past the table", .str = "\0" IC_RP "/lib",
+         .strn = sizeof("\0" IC_RP "/lib"), .ent = {{29, 500}}, .nent = 1,
+         .want_bound = false},
+        {.name = "unterminated last string", .str = "\0" IC_RP "/lib",
+         .strn = sizeof("\0" IC_RP "/lib") - 1, .ent = {{29, 1}}, .nent = 1,
+         .want_bound = false},
+        {.name = "dynamic size not a multiple of 16",
+         .str = "\0" IC_RP "/lib", .strn = sizeof("\0" IC_RP "/lib"),
+         .ent = {{29, 1}, {0, 0}}, .nent = 2, .dsz = 24,
+         .want_bound = false},
+        {.name = "link index out of range", .str = "\0" IC_RP "/lib",
+         .strn = sizeof("\0" IC_RP "/lib"), .ent = {{29, 1}}, .nent = 1,
+         .link = 9, .want_bound = false},
+        {.name = "linked section is not a string table",
+         .str = "\0" IC_RP "/lib", .strn = sizeof("\0" IC_RP "/lib"),
+         .ent = {{29, 1}}, .nent = 1, .strtype = 1, .want_bound = false},
+        {.name = "empty runpath", .str = "\0", .strn = 1,
+         .ent = {{29, 0}}, .nent = 1, .want_bound = false},
+        {.name = "empty runpath beside a libclang-18 need",
+         .str = "\0libclang-18.so.18", .strn = sizeof("\0libclang-18.so.18"),
+         .ent = {{29, 0}, {1, 1}}, .nent = 2, .want_bound = false},
+        {.name = "two runpaths: the last wins (good last)",
+         .str = "\0/nope/lib\0" IC_RP "/lib",
+         .strn = sizeof("\0/nope/lib\0" IC_RP "/lib"),
+         .ent = {{29, 1}, {29, 11}}, .nent = 2, .want_bound = true,
+         .want_path = IC_RP "/bin/clang"},
+        {.name = "two runpaths: the last wins (bad last)",
+         .str = "\0" IC_RP "/lib\0/nope/lib",
+         .strn = sizeof("\0" IC_RP "/lib\0/nope/lib"),
+         .ent = {{29, 1}, {29, sizeof("\0" IC_RP "/lib") }}, .nent = 2,
+         .want_bound = false},
+        {.name = "no runpath, needs libclang-18: the system clang",
+         .str = "\0libclang-18.so.18", .strn = sizeof("\0libclang-18.so.18"),
+         .ent = {{1, 1}}, .nent = 1, .want_bound = true,
+         .want_path = "/usr/lib/llvm-18/bin/clang"},
+        {.name = "no runpath, needs another libclang",
+         .str = "\0libclang-19.so.19", .strn = sizeof("\0libclang-19.so.19"),
+         .ent = {{1, 1}}, .nent = 1, .want_bound = false},
+        {.name = "DT_RPATH only, its clang exists",
+         .str = "\0" IC_RP "/lib", .strn = sizeof("\0" IC_RP "/lib"),
+         .ent = {{15, 1}}, .nent = 1, .want_bound = true,
+         .want_path = IC_RP "/bin/clang"},
+        {.name = "DT_RPATH good then DT_RUNPATH bad: the runpath wins",
+         .str = "\0" IC_RP "/lib\0/nope/lib",
+         .strn = sizeof("\0" IC_RP "/lib\0/nope/lib"),
+         .ent = {{15, 1}, {29, sizeof("\0" IC_RP "/lib")}}, .nent = 2,
+         .want_bound = false},
+        {.name = "no runpath, needs a prefix of libclang-18.so.18",
+         .str = "\0libclang-18.so.1", .strn = sizeof("\0libclang-18.so.1"),
+         .ent = {{1, 1}}, .nent = 1, .want_bound = false},
+        {.name = "FIFO at the sensor path: present, unbound, returns",
+         .str = "\0", .strn = 1, .fifo = true, .want_bound = false},
+    };
+    TEST_CASE("sensor reader: crafted ELF images bind or refuse") {
+        static const char path[] = IC_FIX_ROOT "/sensor-img.elf";
+        uint8_t w[704];
+        bool present = false;
+        char out[PATH_MAX];
+        /* Start clean: a failed earlier run leaves the rp tree and sensor. */
+        (void)test_rm_rf_recursive(IC_RP);
+        (void)unlink(path);
+        (void)mkdir("test-tmp", 0755);
+        ASSERT(mkdir(IC_FIX_ROOT, 0755) == 0 || errno == EEXIST);
+        ASSERT(mkdir(IC_RP, 0755) == 0 || errno == EEXIST);
+        ASSERT(mkdir(IC_RP "/bin", 0755) == 0 || errno == EEXIST);
+        ASSERT(ic_elf_write(IC_RP "/bin/clang", (const uint8_t *)"x", 1));
+        ASSERT(chmod(IC_RP "/bin/clang", 0755) == 0);
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            size_t n = ic_sensor_build(&rows[i], w);
+            if (strcmp(rows[i].name, "zero-length file") == 0)
+                n = 0;
+            (void)unlink(path);
+            if (rows[i].fifo) {
+#if defined(_WIN32)
+                continue; /* no mkfifo here: the FIFO row is POSIX-only */
+#else
+                ASSERT(mkfifo(path, 0600) == 0);
+#endif
+            } else {
+                ASSERT(ic_elf_write(path, w, n));
+            }
+            out[0] = '\0';
+            bool got = zcl_c23_fuzz_sensor_bound_clang_for_test(
+                path, out, sizeof(out), &present);
+            bool ok = present && got == rows[i].want_bound &&
+                      (!rows[i].want_path ||
+                       strcmp(out, rows[i].want_path) == 0);
+            if (!ok)
+                fprintf(stderr, "sensor row failed: %s (got %d '%s')\n",
+                        rows[i].name, (int)got, out);
+            ASSERT(ok);
+        }
+        present = true;
+        ASSERT(!zcl_c23_fuzz_sensor_bound_clang_for_test(
+            IC_FIX_ROOT "/no-such-sensor", out, sizeof(out), &present));
+        ASSERT(!present);
+        unlink(path);
+        (void)test_rm_rf_recursive(IC_RP);
+    } TEST_END
+#undef IC_RP
+    return failures;
+}
+
+static int test_ic_fuzz_llvm_selection_table(void)
+{
+    int failures = 0;
+    TEST_CASE("fuzz host gate: the bound LLVM is the first present header") {
+        static const struct {
+            bool h[ZCL_C23_FUZZ_LLVM_N];
+            int want;
+        } sel[] = {
+            {{false, false, false, true}, 3},  /* only 18 */
+            {{false, false, true, true}, 2},   /* 19 + 18 -> 19 */
+            {{true, false, false, true}, 0},   /* 20 + 18 -> 20 */
+            {{false, true, true, false}, 1},   /* 21 + 19 -> 21 */
+            {{true, true, false, false}, 0},   /* 20 + 21 -> 20 */
+            {{false, false, false, false}, -1},
+        };
+        for (size_t i = 0; i < sizeof(sel) / sizeof(sel[0]); i++) {
+            int got = zcl_c23_fuzz_select_llvm(sel[i].h);
+            if (got != sel[i].want)
+                fprintf(stderr, "selection row %zu: got %d\n", i, got);
+            ASSERT(got == sel[i].want);
+        }
+    } TEST_END
+    return failures;
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -12053,6 +12320,9 @@ int test_impact_composition(void)
     failures += test_ic_harness_name_reference_secondary_candidate();
     failures += test_ic_name_reference_single_word_stem_is_bounded();
     failures += test_ic_harness_no_owner_stays_unmatched();
+    failures += test_ic_fuzz_toolchain_decision_table();
+    failures += test_ic_fuzz_llvm_selection_table();
+    failures += test_ic_sensor_bound_clang_reader();
 #if !defined(_WIN32)
     failures += test_pw_next_proof_seeds_from_the_finished_generation();
     failures += test_pw_identity_mismatch_stays_cold_with_its_reason();
