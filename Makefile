@@ -14618,7 +14618,7 @@ check-installed-acceptance-tools: $(LINTC_TOOL)
 # (3) a REAL violation with a non-fixture name still fails every mode, and
 # (4) an untracked stray file is named distinctly, not as a code violation.
 # See tools/lint/selftest_scanner_immunity.sh.
-check-scanner-immunity:
+check-scanner-immunity: $(LINTC_TOOL)
 	@echo "══ LINT: scanner fixture-race immunity regression proof (DX1) ══"
 	@./tools/lint/selftest_scanner_immunity.sh
 
@@ -15086,7 +15086,7 @@ else
 # Dispatching them again through the script creates independent writers
 # (notably two Windows linkers in `make lint check-windows-acceptance`).
 LINT_PARALLEL_GATES = $(filter-out $(MAKECMDGOALS),$(LINT_GATES))
-lint: $(LINTC_TOOL) $(filter $(LINT_GATES),$(MAKECMDGOALS))
+lint: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS) $(filter $(LINT_GATES),$(MAKECMDGOALS))
 	@$(if $(LINT_PARALLEL_GATES),tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PARALLEL_GATES),:)
 	@echo "══ LINT: all checks passed ══"
 endif
