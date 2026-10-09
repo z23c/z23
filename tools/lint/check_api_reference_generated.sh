@@ -68,7 +68,9 @@ run_selftest() {
     mkdir -p "$sandbox"
     # Hardlink-free copy of just what the gate reads.
     mkdir -p "$sandbox/tools/lint" "$sandbox/docs" "$sandbox/$DEF_DIR" \
-             "$sandbox/engine/modules/kernel/include/kernel" "$sandbox/platform/modules/json/include/json"
+             "$sandbox/engine/modules/kernel/include/kernel" \
+             "$sandbox/platform/modules/base/include/base" \
+             "$sandbox/platform/modules/json/include/json"
     cp "$GEN_SRC" "$sandbox/tools/"
     cp "$SCRIPT_DIR/check_api_reference_generated.sh" "$sandbox/tools/lint/"
     cp "$SCRIPT_DIR/gate_lib.sh" "$sandbox/tools/lint/"
@@ -83,6 +85,8 @@ run_selftest() {
     cp engine/modules/kernel/include/kernel/command_registry.h \
        "$sandbox/engine/modules/kernel/include/kernel/"
     cp platform/modules/json/include/json/json.h "$sandbox/platform/modules/json/include/json/"
+    cp platform/modules/base/include/base/cleanse.h \
+       "$sandbox/platform/modules/base/include/base/"
 
     out="$tmp/clean.log"
     if ! (cd "$sandbox" && bash tools/lint/check_api_reference_generated.sh) \
@@ -191,6 +195,7 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 CC_BIN="${CC:-cc}"
 if ! "$CC_BIN" -std=c23 -O0 -Wall -Wextra -Werror \
         -Iengine/modules/kernel/include -Iplatform/modules/json/include \
+        -Iplatform/modules/base/include \
         -o "$TMP/gen_api_reference" "$GEN_SRC" 2> "$TMP/cc.log"; then
     echo "check_api_reference_generated: FATAL — $GEN_SRC does not compile:" >&2
     sed 's/^/    /' "$TMP/cc.log" >&2

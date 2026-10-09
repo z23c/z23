@@ -132,6 +132,7 @@ static const char k_db_reg_dir[] = "engine/modules/kernel/src";
 static const char k_db_reg_prefix[] = "command_registry";
 static const char *const k_db_extra_srcs[] = {
     "platform/modules/json/src/json.c",
+    "platform/modules/base/src/cleanse.c",
     "core/modules/crypto/src/sha256.c",
     "platform/modules/base/src/safe_alloc.c",
     "platform/modules/base/src/log_level.c",

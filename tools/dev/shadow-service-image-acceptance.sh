@@ -67,6 +67,7 @@ printf '%s\n' 'PASS: service initializer was refused before execution'
     -I"$root/cognition/services/include" \
     -I"$root/engine/modules/hotswap/include" \
     -I"$root/platform/modules/json/include" \
+    -I"$root/platform/modules/base/include" \
     -o "$tmp/service.so" \
     "$root/cognition/services/src/dev_reflex_policy_service.c"
 expected="$(sha256sum "$tmp/service.so")"

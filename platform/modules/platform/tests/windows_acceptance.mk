@@ -108,12 +108,14 @@ ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_SOURCES := \
 	tests/harness/src/bundle_exporter_windows_refusal_acceptance.c \
 	engine/composition/src/bundle_exporter.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_FLAGS := -DZCL_TESTING
 ZCL_WINDOWS_ACCEPTANCE_cli_render_env_SOURCES := \
 	platform/modules/platform/tests/cli_render_env_windows_acceptance.c \
 	tools/command/cli_render.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_cli_render_env_FLAGS := -Itools
 ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_SOURCES := \
@@ -163,6 +165,7 @@ ZCL_WINDOWS_ACCEPTANCE_consensus_state_publication_cas_refusal_SOURCES := \
 	platform/modules/sha3/src/sha3.c \
 	engine/modules/storage/src/consensus_state_bundle_codec.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/base/src/safe_alloc.c \
 	platform/modules/base/src/result.c
 ZCL_WINDOWS_ACCEPTANCE_datadir_privacy_SOURCES := \
@@ -231,6 +234,7 @@ ZCL_WINDOWS_ACCEPTANCE_mind_state_SOURCES := \
 	tools/mind/mind_state.c \
 	cognition/modules/codeindex/src/codeindex_owner.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/platform/src/path_replace.c \
 	platform/modules/platform/src/private_directory.c \
 	platform/modules/platform/src/private_acl_internal.c \
@@ -251,6 +255,7 @@ ZCL_WINDOWS_ACCEPTANCE_dev_agent_mail_SOURCES := \
 	tools/command/native_devagent_mail.c \
 	contexts/commons/packages/zutf8/src/zutf8.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/platform/src/directory_transaction.c \
 	platform/modules/platform/src/private_file.c \
 	platform/modules/platform/src/private_directory.c \
@@ -278,6 +283,7 @@ ZCL_WINDOWS_ACCEPTANCE_devagent_worker_confine_SOURCES := \
 	platform/modules/platform/src/os_proc.c \
 	platform/modules/platform/src/clock.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/base/src/safe_alloc.c \
 	platform/modules/base/src/log_level.c
 ZCL_WINDOWS_ACCEPTANCE_devagent_worker_confine_FLAGS := \
@@ -291,6 +297,7 @@ ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_SOURCES := \
 	tools/command/native_dev_train_shared.c \
 	platform/modules/util/src/spawn.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/platform/src/directory_compat.c \
 	platform/modules/platform/src/path_replace.c \
 	platform/modules/platform/src/process_lock.c \
@@ -460,6 +467,7 @@ ZCL_WINDOWS_ACCEPTANCE_package_prepare_SOURCES := \
 	contexts/commons/modules/vcs/src/package_manifest.c \
 	contexts/commons/modules/vcs/src/package_recipe.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/codec/src/cursor.c \
 	platform/modules/sha3/src/sha3.c \
 	platform/modules/base/src/safe_alloc.c \
@@ -551,6 +559,7 @@ ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_SOURCES := \
 	platform/modules/platform/tests/rpc_client_transport_windows_acceptance.c \
 	engine/controllers/src/rpc_client.c \
 	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
 	platform/modules/base/src/safe_alloc.c \
 	platform/modules/platform/src/clock.c
 ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_LIBS := \

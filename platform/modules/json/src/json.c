@@ -7,6 +7,7 @@
 #include <math.h>
 #include <inttypes.h>
 #include <errno.h>
+#include "base/cleanse.h"
 #include "base/safe_alloc.h"
 #include "base/hex.h"
 
@@ -461,6 +462,26 @@ static const char *skip_ws(const char *p, const char *end)
 static bool parse_value_r(struct json_value *v, const char **pp,
                           const char *end, int depth);
 
+static void json_discard_span(char *s, size_t len)
+{
+    if (s) {
+        memory_cleanse(s, len);
+        json_heap_release(s);
+    }
+}
+
+static void json_discard_string(char *s)
+{
+    if (s)
+        json_discard_span(s, strlen(s) + 1);
+}
+
+static void json_discard_value(struct json_value *v)
+{
+    json_cleanse_strings(v);
+    json_free(v);
+}
+
 /* Append one decoded byte. A NULL string is the validate-only scan: the
  * grammar is walked exactly as for a kept string and nothing is stored. */
 static bool str_put(char **s, size_t *cap, size_t *len, char c)
@@ -563,12 +584,12 @@ static bool parse_string(char **out, const char **pp, const char *end)
     }
     while (p < end && *p != '"') {
         unsigned char c = (unsigned char)*p++;
-        if (c < 0x20) { json_heap_release(s); return false; }
+        if (c < 0x20) { json_discard_span(s, len); return false; }
         bool ok = c == '\\' ? str_escape(&s, &cap, &len, &p, end)
                              : str_put(&s, &cap, &len, (char)c);
-        if (!ok) { json_heap_release(s); return false; }
+        if (!ok) { json_discard_span(s, len); return false; }
     }
-    if (p >= end) { json_heap_release(s); return false; }
+    if (p >= end) { json_discard_span(s, len); return false; }
     p++;
     if (out) {
         s[len] = '\0';
@@ -646,7 +667,11 @@ static bool parse_number(struct json_value *v, const char **pp, const char *end)
 static bool json_append(struct json_value *v, char *key,
                         struct json_value *child)
 {
-    if (!json_grow(v)) { json_heap_release(key); json_free(child); return false; }
+    if (!json_grow(v)) {
+        json_discard_string(key);
+        json_discard_value(child);
+        return false;
+    }
     v->keys[v->num_children] = key;
     v->children[v->num_children] = *child;
     v->num_children++;
@@ -661,7 +686,7 @@ static bool parse_member_key(char **key, const char **pp, const char *end)
     if (!parse_string(key, &p, end)) return false;
     p = skip_ws(p, end);
     if (p >= end || *p != ':') {
-        if (key) { json_heap_release(*key); *key = NULL; }
+        if (key) { json_discard_string(*key); *key = NULL; }
         return false;
     }
     *pp = p + 1;
@@ -678,9 +703,12 @@ static bool parse_object_r(struct json_value *v, const char **pp,
     while (p < end) {
         char *key = NULL;
         if (!parse_member_key(v ? &key : NULL, &p, end)) return false;
-        struct json_value child = {0};
+        struct json_value child;
+        json_init(&child);
         if (!parse_value_r(v ? &child : NULL, &p, end, depth + 1)) {
-            json_heap_release(key); json_free(&child); return false;
+            json_discard_string(key);
+            if (v) json_discard_value(&child);
+            return false;
         }
         if (v && !json_append(v, key, &child)) return false;
         p = skip_ws(p, end);
@@ -698,9 +726,11 @@ static bool parse_array_r(struct json_value *v, const char **pp,
     const char *p = skip_ws(*pp, end);
     if (p < end && *p == ']') { *pp = p + 1; return true; }
     while (p < end) {
-        struct json_value child = {0};
+        struct json_value child;
+        json_init(&child);
         if (!parse_value_r(v ? &child : NULL, &p, end, depth + 1)) {
-            json_free(&child); return false;
+            if (v) json_discard_value(&child);
+            return false;
         }
         if (v && !json_append(v, NULL, &child)) return false;
         p = skip_ws(p, end);
@@ -770,7 +800,7 @@ bool json_read(struct json_value *v, const char *raw, size_t len)
     const char *p = raw;
     const char *end = raw + len;
     if (!parse_value_r(v, &p, end, 0) || skip_ws(p, end) != end) {
-        json_free(v);
+        json_discard_value(v);
         json_init(v);
         return false;
     }
