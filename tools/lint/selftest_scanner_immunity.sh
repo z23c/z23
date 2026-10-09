@@ -56,12 +56,26 @@ SCAN_ROOT="$(mktemp -d .cache/scanner-immunity-selftest.XXXXXX)" || {
     echo "selftest_scanner_immunity: could not create isolated scan root" >&2
     exit 1
 }
+OUTPUT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/scanner-immunity-output.XXXXXX")" || {
+    rmdir "$SCAN_ROOT" 2>/dev/null || true
+    echo "selftest_scanner_immunity: could not create isolated output root" >&2
+    exit 1
+}
 RACE_FIXTURE="$SCAN_ROOT/_x_fixture_tmp_.c"
 REAL_VIOLATION="$SCAN_ROOT/_test_regression_real_violation_scanner_immunity.c"
 STRAY_FILE="$SCAN_ROOT/_test_regression_stray_untracked_scanner_immunity.c"
+PROD_OUT="$OUTPUT_ROOT/production.out"
+SELFTEST_OUT="$OUTPUT_ROOT/selftest.out"
+REAL_PROD_OUT="$OUTPUT_ROOT/real-production.out"
+REAL_SELFTEST_OUT="$OUTPUT_ROOT/real-selftest.out"
+RECOVER_OUT="$OUTPUT_ROOT/recover.out"
+STRAY_CLEAN_OUT="$OUTPUT_ROOT/stray-clean.out"
 
 cleanup() {
     rm -f "$RACE_FIXTURE" "$REAL_VIOLATION" "$STRAY_FILE"
+    rm -f "$PROD_OUT" "$SELFTEST_OUT" "$REAL_PROD_OUT" \
+          "$REAL_SELFTEST_OUT" "$RECOVER_OUT" "$STRAY_CLEAN_OUT"
+    rmdir "$OUTPUT_ROOT" 2>/dev/null || true
     rmdir "$SCAN_ROOT" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -121,12 +135,12 @@ EOF
 
 # Assertion 1: production scan (what make lint runs) is CLEAN despite the
 # fixture sitting in a real scanned directory right now.
-run_production_style "$GATE" >/tmp/scanner_immunity_prod.out 2>&1
+run_production_style "$GATE" >"$PROD_OUT" 2>&1
 prod_rc=$?
 assert_pass "PRODUCTION scan (ZCL_LINT_PRODUCTION_SCAN=1) ignores the mid-scan fixture" "$prod_rc"
 if [ "$prod_rc" -ne 0 ]; then
     note "  --- production scan output ---"
-    sed 's/^/  /' /tmp/scanner_immunity_prod.out
+    sed 's/^/  /' "$PROD_OUT"
 fi
 
 # Assertion 2: selftest-style direct invocation (no env var — exactly what
@@ -135,12 +149,12 @@ fi
 # this script may itself be running under `make check-scanner-immunity`,
 # which — being a check-% target — already has ZCL_LINT_PRODUCTION_SCAN=1 in
 # ITS OWN environment.
-run_selftest_style "$GATE" >/tmp/scanner_immunity_selftest.out 2>&1
+run_selftest_style "$GATE" >"$SELFTEST_OUT" 2>&1
 selftest_rc=$?
 assert_fail "SELFTEST-style invocation still detects the fixture (unweakened)" "$selftest_rc"
 if [ "$selftest_rc" -eq 0 ]; then
     note "  --- selftest-style output (unexpected clean) ---"
-    sed 's/^/  /' /tmp/scanner_immunity_selftest.out
+    sed 's/^/  /' "$SELFTEST_OUT"
 fi
 
 rm -f "$RACE_FIXTURE"
@@ -159,18 +173,18 @@ bool _test_regression_real_violation_scanner_immunity_case(void)
 }
 EOF
 
-run_production_style "$GATE" >/tmp/scanner_immunity_real_prod.out 2>&1
+run_production_style "$GATE" >"$REAL_PROD_OUT" 2>&1
 real_prod_rc=$?
 assert_fail "PRODUCTION scan still catches a REAL (non-fixture-named) violation" "$real_prod_rc"
 
-run_selftest_style "$GATE" >/tmp/scanner_immunity_real_selftest.out 2>&1
+run_selftest_style "$GATE" >"$REAL_SELFTEST_OUT" 2>&1
 real_selftest_rc=$?
 assert_fail "SELFTEST-style scan still catches a REAL (non-fixture-named) violation" "$real_selftest_rc"
 
 rm -f "$REAL_VIOLATION"
 
 echo "== 3/5: gate recovers to clean once the real violation is removed =="
-run_production_style "$GATE" >/tmp/scanner_immunity_recover.out 2>&1
+run_production_style "$GATE" >"$RECOVER_OUT" 2>&1
 recover_rc=$?
 assert_pass "PRODUCTION scan is clean again after cleanup" "$recover_rc"
 
@@ -224,7 +238,7 @@ rm -f "$STRAY_FILE"
 stray_clean_rc=0
 ZCL_STRAY_SCAN_DIRS_FOR_TEST="$SCAN_ROOT" \
     bash tools/lint/check_no_stray_untracked_source.sh \
-    >/tmp/scanner_immunity_stray_clean.out 2>&1 || stray_clean_rc=$?
+    >"$STRAY_CLEAN_OUT" 2>&1 || stray_clean_rc=$?
 assert_pass "check_no_stray_untracked_source.sh is clean again after cleanup" "$stray_clean_rc"
 
 echo ""
