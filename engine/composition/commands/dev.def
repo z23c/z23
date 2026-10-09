@@ -463,10 +463,15 @@ ZCL_COMMAND_READY_READ(
     "dev.change.plan", "dev.change", "", "Classify files and select the smallest proof",
     "A deterministic classification of the given file list into the "
     "smallest sufficient proof lane, unioning static path rules with the "
-    "bounded source-index closure when available.",
+    "bounded source-index closure when available. "
+    "Optional \"selects\" names one test group id and adds selects_answer: "
+    "\"selected\" when the complete plan runs that group, \"not_selected\" "
+    "when the complete valid plan does not contain it, \"unknown_group\" "
+    "when the id is not in the test catalog, and \"plan_invalid\" when the "
+    "plan's execution set is not valid so no group can be ruled out.",
     ZCL_COMMAND_EXTENDED_LIST_BUDGET,
     "change,impact,classify,proof,hotswap,reload", "zcl.dev_change_input.v1",
-    "zcl.dev_plan.v1", "files,facts,facts_offset", "", "z23 dev change plan --input='{\"files\":[\"contexts/commons/apps/social/app.def\"]}'",
+    "zcl.dev_plan.v1", "files,facts,facts_offset,selects", "", "z23 dev change plan --input='{\"files\":[\"contexts/commons/apps/social/app.def\"]}'",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
     ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
@@ -893,9 +898,14 @@ ZCL_COMMAND_READY_READ(
     "groups, computed from static path-classification rules; no live "
     "checkout scan is performed. Each selected group carries the dimension "
     "and the file that pulled it in, and the reply states per dimension "
-    "whether that dimension's answer was complete.", ZCL_COMMAND_LIST_BUDGET,
+    "whether that dimension's answer was complete. "
+    "Optional \"selects\" names one test group id and adds selects_answer: "
+    "\"selected\" when the complete plan runs that group, \"not_selected\" "
+    "when the complete valid plan does not contain it, \"unknown_group\" "
+    "when the id is not in the test catalog, and \"plan_invalid\" when the "
+    "plan's execution set is not valid so no group can be ruled out.", ZCL_COMMAND_LIST_BUDGET,
     "test,plan,impact,groups", "zcl.dev_change_input.v1",
-    "zcl.dev_test_plan.v1", "files", "", "z23 dev test plan --input='{\"files\":[]}'",
+    "zcl.dev_test_plan.v1", "files,selects", "", "z23 dev test plan --input='{\"files\":[]}'",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
     ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,

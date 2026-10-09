@@ -1583,9 +1583,42 @@ static bool plan_json_tail(const struct zcl_devloop_plan *plan,
         appendf(out, out_sz, pos, "}");
 }
 
+/* The answer to "will this plan's proof select group `id`?", computed over the
+ * COMPLETE plan by the same predicate and the same validity gate the
+ * execution-set walk (append_execution_set) uses, so the abridged closure
+ * lists can never change it. A group the catalog does not know is
+ * "unknown_group", never "not_selected". Integration-only groups are not
+ * filtered here, exactly as the execution-set walk does not filter them. */
+const char *zcl_devloop_plan_selects_answer(const struct zcl_devloop_plan *plan,
+                                            const char *id)
+{
+    char full[ZCL_TEST_GROUP_FULL_MAX];
+    if (!plan || !id || !zcl_test_group_resolve_exact(id, full) ||
+        !zcl_test_group_catalog_contains(full))
+        return "unknown_group";
+    if (!plan_group_ids_valid(plan))
+        return "plan_invalid";
+    return plan_selects_full_group(plan, full) ? "selected" : "not_selected";
+}
+
+/* Reopen the closed document and add the two "selects" members. */
+static bool plan_json_add_selects(const struct zcl_devloop_plan *plan,
+                                  const char *selects, char *out,
+                                  size_t out_sz, size_t *pos)
+{
+    if (*pos == 0 || out[*pos - 1] != '}')
+        return false;
+    (*pos)--;
+    return appendf(out, out_sz, pos, ",\"selects\":") &&
+           append_json_string(out, out_sz, pos, selects) &&
+           appendf(out, out_sz, pos, ",\"selects_answer\":\"%s\"}",
+                   zcl_devloop_plan_selects_answer(plan, selects));
+}
+
 static size_t plan_json_body(const struct zcl_devloop_plan *plan,
                              const char *const *files, size_t file_count,
-                             bool include_closure, char *out, size_t out_sz)
+                             bool include_closure, const char *selects,
+                             char *out, size_t out_sz)
 {
     size_t pos = 0;
     bool proof_admissible = true;
@@ -1614,6 +1647,8 @@ static size_t plan_json_body(const struct zcl_devloop_plan *plan,
         !plan_json_tail(plan, files, file_count, include_closure,
                         proof_admissible, proof_why, out, out_sz, &pos))
         return 0;
+    if (selects && !plan_json_add_selects(plan, selects, out, out_sz, &pos))
+        return 0;
     return pos;
 }
 
@@ -1624,13 +1659,14 @@ size_t zcl_devloop_plan_json(const char *const *files, size_t file_count,
     if (!out || out_sz == 0 ||
         !zcl_devloop_plan_files(files, file_count, &plan))
         return 0;
-    return plan_json_body(&plan, files, file_count, false, out, out_sz);
+    return plan_json_body(&plan, files, file_count, false, NULL, out, out_sz);
 }
 
-size_t zcl_devloop_plan_json_closure(const char *repo_root,
-                                     const char *const *files,
-                                     size_t file_count, char *out,
-                                     size_t out_sz)
+size_t zcl_devloop_plan_json_closure_selects(const char *repo_root,
+                                             const char *const *files,
+                                             size_t file_count,
+                                             const char *selects, char *out,
+                                             size_t out_sz)
 {
     struct zcl_devloop_plan plan;
     if (!out || out_sz == 0 ||
@@ -1639,7 +1675,17 @@ size_t zcl_devloop_plan_json_closure(const char *repo_root,
     /* Closure is best-effort: a failure/unavailable index leaves the path
      * floor intact, so we still emit a valid plan (closure_groups empty). */
     (void)zcl_devloop_plan_add_closure(repo_root, files, file_count, &plan);
-    return plan_json_body(&plan, files, file_count, true, out, out_sz);
+    return plan_json_body(&plan, files, file_count, true, selects, out,
+                          out_sz);
+}
+
+size_t zcl_devloop_plan_json_closure(const char *repo_root,
+                                     const char *const *files,
+                                     size_t file_count, char *out,
+                                     size_t out_sz)
+{
+    return zcl_devloop_plan_json_closure_selects(repo_root, files, file_count,
+                                                 NULL, out, out_sz);
 }
 
 size_t zcl_devloop_plan_json_render(const struct zcl_devloop_plan *plan,
@@ -1649,7 +1695,7 @@ size_t zcl_devloop_plan_json_render(const struct zcl_devloop_plan *plan,
 {
     if (!plan || !out || out_sz == 0)
         return 0;
-    return plan_json_body(plan, files, file_count, true, out, out_sz);
+    return plan_json_body(plan, files, file_count, true, NULL, out, out_sz);
 }
 
 bool zcl_devloop_unseal_token_present(const char *repo_root)

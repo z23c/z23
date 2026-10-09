@@ -653,6 +653,69 @@ static int test_ic_large_plan_preserves_groups(void)
         ASSERT(rendered_len == body_len);
         ASSERT(memcmp(rendered, body, body_len) == 0);
 
+        /* "selects": the answer is over the COMPLETE plan, so a group that
+         * only the unlisted tail of the abridged closure names is still
+         * "selected". (d) No question asked, no member in the reply. */
+        ASSERT(strstr(body, "\"closure_groups_abridged\":true") != NULL);
+        ASSERT(strstr(body, "\"selects") == NULL);
+        ASSERT(plan.closure_groups_len > 48);
+        const char *tail = plan.closure_groups[plan.closure_groups_len - 1];
+        char want[ZCL_DEVLOOP_PLAN_WIRE_MAX + 1];
+        char needle[ZCL_DEVLOOP_GROUP_MAX + 64];
+        /* (a) selected, and not among the 48 the reply lists. */
+        for (size_t i = 0; i < 48; i++)
+            ASSERT(strcmp(plan.closure_groups[i], tail) != 0);
+        size_t want_len = zcl_devloop_plan_json_closure_selects(
+            IC_FIX_GROUP, files, 1, tail, want, sizeof(want));
+        ASSERT(want_len > 0 && want_len <= ZCL_DEVLOOP_PLAN_WIRE_MAX);
+        (void)snprintf(needle, sizeof(needle),
+                       "\"selects\":\"%s\",\"selects_answer\":\"selected\"}",
+                       tail);
+        ASSERT(strcmp(want + want_len - strlen(needle), needle) == 0);
+        ASSERT(strcmp(zcl_devloop_plan_selects_answer(&plan, tail),
+                      "selected") == 0);
+        /* (b) a catalog group outside the plan, (c) a made-up id. */
+        const char *outside = NULL;
+        for (size_t i = 0; i < zcl_test_group_catalog_count() && !outside;
+             i++) {
+            const char *full = zcl_test_group_catalog_at(i);
+            bool in = false;
+            for (size_t g = 0; g < plan.path_groups_len && !in; g++)
+                in = zcl_test_group_plan_selects(plan.path_groups[g], full);
+            for (size_t g = 0; g < plan.closure_groups_len && !in; g++)
+                in = zcl_test_group_plan_selects(plan.closure_groups[g], full);
+            if (!in)
+                outside = full;
+        }
+        ASSERT(outside != NULL);
+        ASSERT(strcmp(zcl_devloop_plan_selects_answer(&plan, outside),
+                      "not_selected") == 0);
+        ASSERT(strcmp(zcl_devloop_plan_selects_answer(&plan,
+                                                      "no_such_group_xyz"),
+                      "unknown_group") == 0);
+        want_len = zcl_devloop_plan_json_closure_selects(
+            IC_FIX_GROUP, files, 1, "no_such_group_xyz", want, sizeof(want));
+        ASSERT(want_len > 0);
+        ASSERT(strstr(want, "\"selects\":\"no_such_group_xyz\","
+                            "\"selects_answer\":\"unknown_group\"}") != NULL);
+
+        /* An invalid execution set (a plan token no catalog group expands)
+         * is "plan_invalid" for a real catalog group, never "not_selected";
+         * an unknown id stays "unknown_group". Built directly on the plan
+         * struct: no fixture produces execution_set_valid:false. */
+        char saved[ZCL_DEVLOOP_GROUP_MAX];
+        memcpy(saved, plan.closure_groups[0], sizeof(saved));
+        (void)snprintf(plan.closure_groups[0], ZCL_DEVLOOP_GROUP_MAX, "%s",
+                       "no_such_plan_token_xyz");
+        ASSERT(strcmp(zcl_devloop_plan_selects_answer(&plan, outside),
+                      "plan_invalid") == 0);
+        ASSERT(strcmp(zcl_devloop_plan_selects_answer(&plan, tail),
+                      "plan_invalid") == 0);
+        ASSERT(strcmp(zcl_devloop_plan_selects_answer(&plan,
+                                                      "no_such_group_xyz"),
+                      "unknown_group") == 0);
+        memcpy(plan.closure_groups[0], saved, sizeof(saved));
+
  TEST_DISCARD(system("rm -rf " IC_FIX_GROUP));
         PASS();
     } _test_next:;

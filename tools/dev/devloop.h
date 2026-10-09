@@ -733,6 +733,26 @@ size_t zcl_devloop_plan_json_closure(const char *repo_root,
                                      size_t file_count, char *out,
                                      size_t out_sz);
 
+/* zcl_devloop_plan_json_closure() plus, when `selects` is non-NULL, the two
+ * members "selects" (the id as given) and "selects_answer". */
+size_t zcl_devloop_plan_json_closure_selects(const char *repo_root,
+                                             const char *const *files,
+                                             size_t file_count,
+                                             const char *selects, char *out,
+                                             size_t out_sz);
+
+/* The answer to "does this plan's proof run test group `id`?", computed over
+ * the COMPLETE plan, never the abridged JSON lists. Exactly one of:
+ *   "selected"      the complete plan runs that group.
+ *   "not_selected"  the complete, valid plan does not contain that group.
+ *   "unknown_group" the id is not in the test catalog (a typo is never
+ *                   "not_selected").
+ *   "plan_invalid"  the plan's execution set is not valid
+ *                   (execution_set_valid:false), so no group can be ruled
+ *                   out. */
+const char *zcl_devloop_plan_selects_answer(const struct zcl_devloop_plan *plan,
+                                            const char *id);
+
 /* The same document, rendered from a plan the caller ALREADY ran the closure
  * on. zcl_devloop_plan_json_closure() has to open the code index and walk the
  * whole reverse-caller graph again to rebuild a plan its caller is usually

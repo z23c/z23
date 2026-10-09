@@ -716,7 +716,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `dev change plan` | ready | read / read / operator · instant/tiny | `files`, `facts`, `facts_offset` | `zcl.dev_plan.v1` | `z23 dev change plan --input='{"files":["contexts/commons/apps/social/app.def"]}'` | Classify files and select the smallest proof |
+| `dev change plan` | ready | read / read / operator · instant/tiny | `files`, `facts`, `facts_offset`, `selects` | `zcl.dev_plan.v1` | `z23 dev change plan --input='{"files":["contexts/commons/apps/social/app.def"]}'` | Classify files and select the smallest proof |
 | `dev change apply` (aliases: `dev.change.cycle`) | compat 🔧 → `z23-dev dev change cycle` | mutate / dev-mutation / **owner**, job · foreground/high | `files` | `zcl.dev_cycle.v1` | `z23 dev change apply --input='{"files":["contexts/commons/apps/social/app.def"]}'` | Contained publication entrypoint: returns RUNTIME_PUBLICATION_CONTAINED — *change application requires the dev-only process/activation executor* |
 
 #### `dev.loop` — Persistent save-to-verdict loop
@@ -748,7 +748,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `dev test plan` | ready | read / read / operator · instant/tiny | `files` | `zcl.dev_test_plan.v1` | `z23 dev test plan --input='{"files":[]}'` | Map changed files to mandatory proof groups |
+| `dev test plan` | ready | read / read / operator · instant/tiny | `files`, `selects` | `zcl.dev_test_plan.v1` | `z23 dev test plan --input='{"files":[]}'` | Map changed files to mandatory proof groups |
 | `dev test run` (aliases: `dev.test.focused`) | compat 🔧 → `z23-dev dev test focused` | read / read / **owner** · background/high | **`group`** | `zcl.dev_focused_test.v1` | `z23 dev test run hotswap_simnet` | Run one exact prebuilt focused test group — *focused tests require the dev-only process executor* |
 | `dev test story` | compat 🔧 → `z23-dev dev test story` | read / read / **owner** · instant/tiny | **`owner`** | `zcl.vault_intent_decision_story.v1` | `z23-dev dev test story --input='{"owner":"transaction_intent"}'` | Run one exact owner-bound fail-fast behavior story — *behavior stories require the dev-only frozen fixture registry* |
 | `dev test sim` | compat 🔧 → `z23-dev dev test sim` | read / read / **owner** · fast/moderate | `app_id` | `zcl.dev_sim.v1` | `z23 dev test sim` | Run the generic hot-swap network proof — *the simulation runner requires the dev-only process executor* |

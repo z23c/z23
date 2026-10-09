@@ -1687,6 +1687,61 @@ void zcl_native_handle_dev_app_simulate(
 
 /* ── dev.change.plan ───────────────────────────────────────────────────── */
 
+/* Optional "selects": one test group id. Absent is no question; present it
+ * must be a non-empty string under the catalog id bound with no control
+ * character, else the request is refused. */
+static bool dev_plan_selects_valid(const struct json_value *input,
+                                   const char **selects)
+{
+    const struct json_value *v = json_get(input, "selects");
+    *selects = NULL;
+    if (!v)
+        return true;
+    if (v->type != JSON_STR)
+        return false;
+    const char *s = json_get_str(v);
+    size_t len = s ? strlen(s) : 0;
+    if (len == 0 || len >= 96)
+        return false;
+    for (size_t i = 0; i < len; i++)
+        if ((unsigned char)s[i] < 0x20 || (unsigned char)s[i] == 0x7f)
+            return false;
+    *selects = s;
+    return true;
+}
+
+/* Read "selects" and, on a malformed value or beside facts, fill the refusal
+ * reply and return false. */
+static bool dev_plan_read_selects(const struct zcl_command_request *request,
+                                  bool has_facts, const char **selects,
+                                  struct zcl_command_reply *reply)
+{
+    if (dev_plan_selects_valid(request->input, selects) &&
+        !(*selects && has_facts))
+        return true;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INVALID, "INVALID_SELECTS",
+                           "normalize", false, false,
+                           "selects must be one test group id string "
+                           "(under 96 bytes, no control characters) "
+                           "and cannot be combined with facts",
+                           "selects");
+    return false;
+}
+
+/* Render the plan document: the facts-narrowed one, or the closure one that
+ * can also answer "selects". */
+static size_t dev_plan_render(const char *const *files, size_t count,
+                              const char *facts, size_t facts_offset,
+                              const char *selects, char *body, size_t body_sz)
+{
+    if (facts)
+        return zcl_devloop_plan_json_facts(".", files, count, facts,
+                                           facts_offset, body, body_sz);
+    return zcl_devloop_plan_json_closure_selects(".", files, count, selects,
+                                                 body, body_sz);
+}
+
 void zcl_native_handle_dev_change_plan(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -1744,14 +1799,19 @@ void zcl_native_handle_dev_change_plan(
         return;
     }
     size_t facts_offset = off_v ? (size_t)json_get_int(off_v) : 0;
+    /* "selects" is answered against the plan this handler builds; the facts
+     * renderer builds its own, so the pair is refused rather than half
+     * answered. */
+    const char *selects = NULL;
+    if (!dev_plan_read_selects(request, facts != NULL, &selects, reply)) {
+        free(file_ptrs);
+        return;
+    }
     /* Path-glob floor + symbol-closure additions (F3). The closure is
      * best-effort: an unavailable/failed index degrades to the path floor, so
      * the reply is always a valid plan. repo_root is the process cwd. */
-    size_t n = facts ? zcl_devloop_plan_json_facts(".", file_ptrs, count,
-                                                   facts, facts_offset, body,
-                                                   sizeof(body))
-                     : zcl_devloop_plan_json_closure(".", file_ptrs, count,
-                                                     body, sizeof(body));
+    size_t n = dev_plan_render(file_ptrs, count, facts, facts_offset, selects,
+                               body, sizeof(body));
     free(file_ptrs);
     if (n == 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
