@@ -202,7 +202,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .max_retries   = 1,
     },
     {
-        /* Anthropic's agent CLI, subscription-authenticated. Two rows, one
+        /* Anthropic's agent CLI, subscription-authenticated. Three rows, one
          * per model tier, because a caller picks an ENGINE and the model is
          * what differs. Prompt is an argument (96 KiB cap applies). The
          * usage object is decoded from its single JSON result. */
@@ -218,6 +218,8 @@ static const struct engine_vendor k_engine_vendors[] = {
         .wire          = ENGINE_WIRE_LOCAL_CLI,
         .delivery      = ENGINE_DELIVERS_EDITS,
         .costs_money   = true,
+        .lead          = "claude",
+        .tier          = ENGINE_TIER_LIGHT,
         .max_retries   = 1,
     },
     {
@@ -233,6 +235,25 @@ static const struct engine_vendor k_engine_vendors[] = {
         .wire          = ENGINE_WIRE_LOCAL_CLI,
         .delivery      = ENGINE_DELIVERS_EDITS,
         .costs_money   = true,
+        .lead          = "claude",
+        .tier          = ENGINE_TIER_STANDARD,
+        .max_retries   = 1,
+    },
+    {
+        .id            = "claude-opus",
+        .display       = "Anthropic Claude Opus (installed agent CLI, subscription auth)",
+        .url           = NULL,
+        .default_model = "claude-opus-5-5",
+        .program       = "claude",
+        .start_argv    = k_claude_cli_start_argv,
+        .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
+        .cli_cwd_is_workdir = true,
+        .report_format = ENGINE_CLI_OUTPUT_CLAUDE_JSON,
+        .wire          = ENGINE_WIRE_LOCAL_CLI,
+        .delivery      = ENGINE_DELIVERS_EDITS,
+        .costs_money   = true,
+        .lead          = "claude",
+        .tier          = ENGINE_TIER_HEAVY,
         .max_retries   = 1,
     },
     {
@@ -323,4 +344,44 @@ const struct engine_vendor *engine_default(void)
      * is. Returning NULL rather than picking row 0 keeps a malformed table
      * from silently electing whoever happens to be first. */
     return NULL;
+}
+
+const struct engine_vendor *engine_for_lead_tier(const char *lead,
+                                                 enum engine_tier tier)
+{
+    if (lead == NULL || lead[0] == '\0' || tier == ENGINE_TIER_NONE)
+        return NULL;
+    for (size_t i = 0; i < k_engine_count; i++)
+        if (k_engine_vendors[i].lead != NULL
+            && strcmp(k_engine_vendors[i].lead, lead) == 0
+            && k_engine_vendors[i].tier == tier)
+            return &k_engine_vendors[i];
+    return NULL;
+}
+
+static const char *const k_tier_names[] = {
+    [ENGINE_TIER_NONE]       = "none",
+    [ENGINE_TIER_LIGHT]    = "light",
+    [ENGINE_TIER_STANDARD] = "standard",
+    [ENGINE_TIER_HEAVY]    = "heavy",
+};
+
+bool engine_tier_from_name(const char *name, enum engine_tier *out)
+{
+    if (name == NULL || out == NULL)
+        return false;
+    for (int t = ENGINE_TIER_LIGHT; t <= ENGINE_TIER_HEAVY; t++) {
+        if (strcmp(name, k_tier_names[t]) == 0) {
+            *out = (enum engine_tier)t;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *engine_tier_name(enum engine_tier tier)
+{
+    if (tier < ENGINE_TIER_NONE || tier > ENGINE_TIER_HEAVY)
+        return "none";
+    return k_tier_names[tier];
 }

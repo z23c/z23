@@ -94,6 +94,14 @@ enum engine_wire {
     ENGINE_WIRE_LOCAL_FIXTURE     /* no network; a canned reply from a file */
 };
 
+/* Task-kind tier an engine row is auto-selected for. */
+enum engine_tier {
+    ENGINE_TIER_NONE = 0,
+    ENGINE_TIER_LIGHT,
+    ENGINE_TIER_STANDARD,
+    ENGINE_TIER_HEAVY,
+};
+
 /* How a dispatch of this shape gets work into the tree. The distinction the
  * verdict does NOT care about — a diff is a diff — but the applier does. */
 enum engine_delivery {
@@ -212,6 +220,13 @@ struct engine_vendor {
      * a row that does not exist, a flag cannot, and a test asserts that
      * exactly one row sets it. */
     bool             is_default;
+    /* Lead agent family ("claude" or "gpt") whose dispatcher auto-selects
+     * this row; NULL = never auto-selected. At most one row per (lead, tier);
+     * a row with a lead has tier != NONE. */
+    const char      *lead;
+    /* Task-kind tier for automatic selection when the caller names no engine.
+     * NONE means the row is never auto-selected by tier. */
+    enum engine_tier tier;
     /* Retry budget. Per vendor, not global: a CLI engine already retries
      * internally, and retrying on top of something that retries multiplies
      * the wall clock invisibly. VibePoint sets 3 for raw APIs and 1 for CLI
@@ -259,6 +274,14 @@ bool engine_needs_key(const struct engine_vendor *v);
  * Defaulting WHICH engine is not defaulting WHETHER to dispatch. Every path
  * that spends money or writes code still requires its own per-run opt-in. */
 const struct engine_vendor *engine_default(void);
+/* The row `lead` auto-selects for `tier`, or NULL; always NULL for a NULL or
+ * empty lead and for ENGINE_TIER_NONE. */
+const struct engine_vendor *engine_for_lead_tier(const char *lead,
+                                                 enum engine_tier tier);
+/* Parses "light", "standard" or "heavy" exactly; false for anything else. */
+bool engine_tier_from_name(const char *name, enum engine_tier *out);
+/* Inverse of engine_tier_from_name; "none" for ENGINE_TIER_NONE. */
+const char *engine_tier_name(enum engine_tier tier);
 /* Borrowed extension template, or NULL for an unknown/unsupported engine. */
 const char *const *engine_registry_resume_argv(const char *name);
 

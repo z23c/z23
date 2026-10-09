@@ -3235,6 +3235,88 @@ static int case_receipt_attempt_pair(const char *path)
     return failures;
 }
 
+/* ── task-kind tiers ────────────────────────────────────────────────────── */
+static int case_engine_tiers(void)
+{
+    int failures = 0;
+
+    for (size_t i = 0; i < engine_count(); i++) {
+        const struct engine_vendor *a = engine_at(i);
+        EN_CHECK("a row with a lead has a tier",
+                 a->lead == NULL || a->tier != ENGINE_TIER_NONE);
+        for (size_t j = i + 1; j < engine_count(); j++) {
+            const struct engine_vendor *b = engine_at(j);
+            EN_CHECK("at most one row per (lead, tier)",
+                     a->lead == NULL || b->lead == NULL
+                     || a->tier != b->tier
+                     || strcmp(a->lead, b->lead) != 0);
+        }
+    }
+
+    EN_CHECK("claude light resolves to claude-haiku",
+             engine_for_lead_tier("claude", ENGINE_TIER_LIGHT)
+             == engine_by_id("claude-haiku"));
+    EN_CHECK("claude standard resolves to claude-sonnet",
+             engine_for_lead_tier("claude", ENGINE_TIER_STANDARD)
+             == engine_by_id("claude-sonnet"));
+    EN_CHECK("claude heavy resolves to claude-opus",
+             engine_for_lead_tier("claude", ENGINE_TIER_HEAVY)
+             == engine_by_id("claude-opus"));
+    EN_CHECK("the three claude rows exist",
+             engine_by_id("claude-haiku") != NULL
+             && engine_by_id("claude-sonnet") != NULL
+             && engine_by_id("claude-opus") != NULL);
+    EN_CHECK("a NULL lead selects nothing",
+             engine_for_lead_tier(NULL, ENGINE_TIER_LIGHT) == NULL);
+    EN_CHECK("an empty lead selects nothing",
+             engine_for_lead_tier("", ENGINE_TIER_LIGHT) == NULL);
+    EN_CHECK("an unknown lead selects nothing",
+             engine_for_lead_tier("nope", ENGINE_TIER_STANDARD) == NULL);
+    EN_CHECK("the NONE tier never selects a row",
+             engine_for_lead_tier("claude", ENGINE_TIER_NONE) == NULL);
+
+    static const char *const names[] = { "light", "standard", "heavy" };
+    for (int t = ENGINE_TIER_LIGHT; t <= ENGINE_TIER_HEAVY; t++) {
+        enum engine_tier out = ENGINE_TIER_NONE;
+        EN_CHECK("tier names round-trip",
+                 engine_tier_from_name(names[t - 1], &out) && out == t
+                 && strcmp(engine_tier_name((enum engine_tier)t),
+                           names[t - 1]) == 0);
+    }
+    /* Every tier named in prompt_templates.def must parse as an engine tier. */
+    static const char *const kind_tiers[] = {
+#define ENGINE_PROMPT_TEMPLATE(kind_, section_, body_)
+#define ENGINE_PROMPT_KIND_TIER(kind_, tier_) #tier_,
+#include "../../../engine/composition/prompt_templates.def"
+#undef ENGINE_PROMPT_KIND_TIER
+#undef ENGINE_PROMPT_TEMPLATE
+    };
+    for (size_t k = 0; k < sizeof kind_tiers / sizeof kind_tiers[0]; k++) {
+        enum engine_tier kt = ENGINE_TIER_NONE;
+        EN_CHECK("every prompt template kind tier parses as an engine tier",
+                 engine_tier_from_name(kind_tiers[k], &kt)
+                 && kt != ENGINE_TIER_NONE);
+    }
+
+    EN_CHECK("NONE names itself none",
+             strcmp(engine_tier_name(ENGINE_TIER_NONE), "none") == 0);
+
+    enum engine_tier out = ENGINE_TIER_STANDARD;
+    EN_CHECK("empty tier name is refused",
+             !engine_tier_from_name("", &out));
+    EN_CHECK("NULL tier name is refused",
+             !engine_tier_from_name(NULL, &out));
+    EN_CHECK("tier names are case-sensitive",
+             !engine_tier_from_name("Light", &out));
+    EN_CHECK("none is not a parseable tier",
+             !engine_tier_from_name("none", &out));
+
+    const struct engine_vendor *fx = engine_by_id("fixture");
+    EN_CHECK("the fixture row is never auto-selected",
+             fx && fx->tier == ENGINE_TIER_NONE);
+    return failures;
+}
+
 static int case_receipt_attempt_binding(void)
 {
     int failures = 0;
@@ -4802,6 +4884,7 @@ int test_engine(void)
     failures += case_cli_argv();
     failures += case_cli_observation();
     failures += case_default_engine();
+    failures += case_engine_tiers();
     failures += case_receipt_attempt_binding();
     failures += case_receipt_chain();
     failures += case_receipt_text();
