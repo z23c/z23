@@ -165,6 +165,7 @@
  */
 
 #include "command/native_command.h"
+#include "command/native_devagent.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -190,6 +191,25 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef ZCL_TESTING
+static zcl_devagent_mail_test_hook_fn dvm_test_after_brief_probe;
+static size_t dvm_test_max_seq_scans;
+
+void zcl_devagent_mail_test_set_after_brief_probe(
+    zcl_devagent_mail_test_hook_fn hook)
+{
+    dvm_test_after_brief_probe = hook;
+}
+
+size_t zcl_devagent_mail_test_max_seq_scans(bool reset)
+{
+    size_t scans = dvm_test_max_seq_scans;
+    if (reset)
+        dvm_test_max_seq_scans = 0;
+    return scans;
+}
+#endif
 
 /* MinGW declares neither macro: O_APPEND/O_CREAT etc. are ANSI, but
  * close-on-exec and fchmod are POSIX-only. The outbox/cursor files are
@@ -1542,6 +1562,9 @@ static void dvm_stream_next(struct dvm_stream *s,
 static void dvm_stream_max_seq(const struct dvm_stream *s,
                                struct dvm_pull_state *ps)
 {
+#ifdef ZCL_TESTING
+    dvm_test_max_seq_scans++;
+#endif
     FILE *f = fopen(s->path, "rb");
     struct dvm_row r;
     if (!f)
@@ -1722,7 +1745,8 @@ static void dvm_pull_build_reply(struct zcl_command_reply *reply,
  * False with a fail reply already written. */
 static bool dvm_streams_start(struct zcl_command_reply *reply,
                               const struct dvm_pull_filter *filter,
-                              struct dvm_pull_state *ps)
+                              struct dvm_pull_state *ps,
+                              bool defer_cursor)
 {
     const char *why = filter->token ? dvm_token_apply(filter->token, ps)
                                     : NULL;
@@ -1732,7 +1756,8 @@ static bool dvm_streams_start(struct zcl_command_reply *reply,
     }
     for (size_t i = 0; i < ps->nstreams; i++) {
         struct dvm_stream *s = &ps->streams[i];
-        dvm_stream_max_seq(s, ps);
+        if (!defer_cursor)
+            dvm_stream_max_seq(s, ps);
         if (!dvm_stream_open(s)) {
             dvm_fail(reply, "MAIL_CURSOR_STALE",
                      "the resume token does not name a line boundary of "
@@ -1833,7 +1858,8 @@ static bool dvm_pull_resume_agent(const struct zcl_command_request *req,
 }
 
 static void dvm_pull(const struct zcl_command_request *req,
-                     struct zcl_command_reply *reply, const char *maildir)
+                     struct zcl_command_reply *reply, const char *maildir,
+                     bool brief_drain)
 {
     struct dvm_pull_filter filter;
     struct dvm_pull_state *ps;
@@ -1858,8 +1884,22 @@ static void dvm_pull(const struct zcl_command_request *req,
     }
     ps->cursor = filter.since;
     if (dvm_streams_list(maildir, reply, &filter, ps) &&
-        dvm_streams_start(reply, &filter, ps)) {
+        dvm_streams_start(reply, &filter, ps, brief_drain)) {
         dvm_pull_page(ps, &filter, &pg);
+        if (brief_drain && !pg.truncated) {
+#ifdef ZCL_TESTING
+            if (dvm_test_after_brief_probe)
+                dvm_test_after_brief_probe();
+#endif
+            /* A final-page probe can race an append. Re-run that bounded
+             * page through the public path so its max scan still precedes
+             * the rows and token this internal drain returns. */
+            dvm_streams_close(ps);
+            free(ps);
+            free(pg.rows);
+            dvm_pull(req, reply, maildir, false);
+            return;
+        }
         if (pg.n > 1)
             qsort(pg.rows, pg.n, sizeof(*pg.rows), dvm_row_cmp);
         if (dvm_token_build(ps, filter.since, token, sizeof(token)))
@@ -2017,8 +2057,8 @@ static void dvm_ack(const struct zcl_command_request *req,
     reply->exit_code = 0;
 }
 
-void zcl_native_handle_dev_agent_mail(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static void dvm_handle(const struct zcl_command_request *request,
+                       struct zcl_command_reply *reply, bool brief_drain)
 {
     const char *action;
     char maildir[4096];
@@ -2049,7 +2089,7 @@ void zcl_native_handle_dev_agent_mail(
         return;
     }
     if (strcmp(action, "pull") == 0) {
-        dvm_pull(request, reply, maildir);
+        dvm_pull(request, reply, maildir, brief_drain);
         return;
     }
     if (strcmp(action, "ack") == 0) {
@@ -2058,4 +2098,18 @@ void zcl_native_handle_dev_agent_mail(
     }
     dvm_fail(reply, "BAD_INPUT", "action is one of post|pull|ack",
              "input.action unknown");
+}
+
+void zcl_native_handle_dev_agent_mail(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    dvm_handle(request, reply, false);
+}
+
+/* Internal fleet-brief path. It keeps normal validation and skips max scans
+ * while pages remain; a final-page probe falls back to the public pull path. */
+void zcl_native_handle_dev_agent_mail_brief_drain(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    dvm_handle(request, reply, true);
 }

@@ -2975,7 +2975,8 @@ static const char *fmc_mail_page_why(const struct fmc_sub *sub,
 static const char *fmc_mail_page(const struct zcl_command_request *req,
                                  struct json_value *rows, long long *cursor,
                                  char *since, bool *more,
-                                 char *why_buf, size_t why_cap)
+                                 char *why_buf, size_t why_cap,
+                                 bool brief_drain)
 {
     struct fmc_sub sub;
     const struct json_value *arr, *tok, *tr;
@@ -2991,7 +2992,11 @@ static const char *fmc_mail_page(const struct zcl_command_request *req,
         (void)json_push_kv_str(&sub.input, "since", since);
     else
         (void)json_push_kv_int(&sub.input, "since", 0);
-    zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
+    if (brief_drain)
+        zcl_native_handle_dev_agent_mail_brief_drain(&sub.request,
+                                                      &sub.reply);
+    else
+        zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
     sub.ran = true;
     tok = json_get(&sub.reply.data, "next_since");
     next = (tok && tok->type == JSON_STR) ? json_get_str(tok) : NULL;
@@ -3021,7 +3026,8 @@ static const char *fmc_mail_drain_from(const struct zcl_command_request *req,
                                        long long *cursor,
                                        const char *since_init,
                                        char *end_token, size_t end_cap,
-                                       char *why_buf, size_t why_cap)
+                                       char *why_buf, size_t why_cap,
+                                       bool brief_drain)
 {
     char since[FMC_MAIL_SINCE_CAP] = "";
     bool more = true;
@@ -3030,7 +3036,7 @@ static const char *fmc_mail_drain_from(const struct zcl_command_request *req,
     for (int page = 0; page < FMC_MAIL_PAGES_MAX && more; page++) {
         const char *why =
             fmc_mail_page(req, rows, cursor, since, &more, why_buf,
-                          why_cap);
+                          why_cap, brief_drain);
         if (why)
             return why;
     }
@@ -3042,7 +3048,8 @@ static const char *fmc_mail_drain_from(const struct zcl_command_request *req,
 static const char *fmc_mail_drain(const struct zcl_command_request *req,
                                   struct json_value *rows, long long *cursor)
 {
-    return fmc_mail_drain_from(req, rows, cursor, "", NULL, 0, NULL, 0);
+    return fmc_mail_drain_from(req, rows, cursor, "", NULL, 0, NULL, 0,
+                               false);
 }
 
 /* Everything the mail walk writes into, so each row is one call. */
@@ -3226,7 +3233,7 @@ static bool fmc_brief_resume_changes(const struct zcl_command_request *req,
     fail = fmc_mail_drain_from(req, &fresh, &fresh_cursor, resume,
                                view->cursor_token,
                                sizeof(view->cursor_token), why,
-                               sizeof(why));
+                               sizeof(why), true);
     t1 = clock_now_wall_ms();
     if (fail) {
         fmc_note_missing(missing, "dev.agent.mail", fail, t1 - t0);
@@ -3272,7 +3279,7 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
     fail = fmc_mail_drain_from(req, &rows, &view->cursor, "",
                                view->cursor_token,
                                sizeof(view->cursor_token), why,
-                               sizeof(why));
+                               sizeof(why), true);
     t1 = clock_now_wall_ms();
     if (fail) {
         fmc_note_missing(missing, "dev.agent.mail", fail, t1 - t0);

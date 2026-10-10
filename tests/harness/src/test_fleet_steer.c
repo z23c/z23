@@ -472,6 +472,54 @@ static long long fmx_mail_count(void)
     return n;
 }
 
+static bool fmx_public_mail_page(size_t *scan_count)
+{
+    struct fmx_call p;
+    const struct json_value *truncated;
+    long long count = -1;
+    (void)zcl_devagent_mail_test_max_seq_scans(true);
+    json_init(&p.input);
+    json_set_object(&p.input);
+    memset(&p.request, 0, sizeof(p.request));
+    p.request.input = &p.input;
+    p.request.spec = zcl_command_registry_find(zcl_command_catalog(),
+                                               "dev.agent.mail", NULL);
+    zcl_command_reply_init(&p.reply, "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&p.input, "action", "pull");
+    (void)json_push_kv_int(&p.input, "since", 0);
+    zcl_native_handle_dev_agent_mail(&p.request, &p.reply);
+    const struct json_value *count_value = json_get(&p.reply.data, "count");
+    truncated = json_get(&p.reply.data, "truncated");
+    if (p.reply.status == ZCL_COMMAND_STATUS_PASSED && count_value &&
+        count_value->type == JSON_INT)
+        count = json_get_int(count_value);
+    *scan_count = zcl_devagent_mail_test_max_seq_scans(false);
+    bool page_ok = count > 0 && count < 142 && truncated &&
+                   truncated->type == JSON_BOOL &&
+                   json_get_bool(truncated);
+    zcl_command_reply_free(&p.reply);
+    json_free(&p.input);
+    return page_ok;
+}
+
+static bool fmx_evidence_mail_uses_public_drain(size_t *scan_count)
+{
+    struct fmx_call e;
+    const struct json_value *object, *ref;
+    bool accepted;
+    (void)zcl_devagent_mail_test_max_seq_scans(true);
+    fmx_evidence(&e, NULL, "mail", "brief-page-069");
+    accepted = fmx_run(&e, zcl_native_handle_fleet_steer_evidence) &&
+               fmx_ok(&e);
+    object = accepted ? fmx_get(&e, "object") : NULL;
+    ref = object ? json_get(object, "ref") : NULL;
+    accepted = accepted && ref && ref->type == JSON_STR &&
+               strcmp(json_get_str(ref), "brief-page-069") == 0;
+    *scan_count = zcl_devagent_mail_test_max_seq_scans(false);
+    fmx_end(&e);
+    return accepted;
+}
+
 /* Mail ack through the real mail leaf. */
 static bool fmx_ack(const char *agent, long long cursor)
 {
@@ -550,6 +598,108 @@ static void fmx_seed_inbox(const char *peer, const char *ts, long long seq,
         fmx_fixture_fail("cannot write an inbox row");
     if (fclose(f) != 0)
         fmx_fixture_fail("cannot finish an inbox row");
+}
+
+static bool fmx_seed_mail_history(size_t rows_per_stream)
+{
+    char body[1600], ref[48];
+    /* Two 70-row streams exceed the mail leaf's 16 KiB page byte bound. */
+    for (size_t i = 0; i < rows_per_stream; i++) {
+        int n = snprintf(body, sizeof(body), "row-%03zu ", i);
+        if (n <= 0 || (size_t)n + 1500u >= sizeof(body))
+            return false;
+        memset(body + n, 'x', 1500);
+        body[(size_t)n + 1500u] = '\0';
+        (void)snprintf(ref, sizeof(ref), "brief-page-%03zu", i);
+        fmx_seed_inbox("page-a", "2026-09-20T00:00:00Z", (long long)i + 1,
+                       "page-a", "*", "note", body, ref);
+        fmx_seed_inbox("page-b", "2026-09-20T00:00:01Z", (long long)i + 1,
+                       "page-b", "*", "note", body, ref);
+    }
+    fmx_seed_inbox("third", "2026-09-20T00:00:02Z", 700, "third", "*",
+                   "note", "third stream", "third-ref");
+    return true;
+}
+
+static bool fmx_brief_has_mail_ref(const struct fmx_call *b,
+                                   const char *ref)
+{
+    const struct json_value *rows = fmx_arr(b, "changes");
+    for (size_t i = 0; rows && i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const struct json_value *v = row ? json_get(row, "ref") : NULL;
+        if (v && v->type == JSON_STR && strcmp(json_get_str(v), ref) == 0)
+            return true;
+    }
+    return false;
+}
+
+static long long fmx_evidence_int(const struct fmx_call *b,
+                                  const char *key)
+{
+    const struct json_value *evidence = fmx_get(b, "evidence");
+    const struct json_value *v = evidence ? json_get(evidence, key) : NULL;
+    return v && v->type == JSON_INT ? json_get_int(v) : -1;
+}
+
+static bool fmx_brief_mail_counts_ok(const struct fmx_call *b,
+                                     long long cursor, long long rows)
+{
+    return fmx_int(b, "cursor") == cursor &&
+           fmx_evidence_int(b, "mail_cursor") == cursor &&
+           fmx_evidence_int(b, "mail_count") == rows;
+}
+
+static bool fmx_brief_token_complete(const struct fmx_call *b)
+{
+    const char *token = fmx_str(b, "cursor_token");
+    return token[0] != '\0' &&
+           strstr(token, "inbox.empty.jsonl:") != NULL &&
+           strstr(token, "inbox.page-a.jsonl:") != NULL &&
+           strstr(token, "inbox.page-b.jsonl:") != NULL &&
+           strstr(token, "inbox.third.jsonl:") != NULL;
+}
+
+static bool fmx_brief_full_rows_ok(const struct fmx_call *b,
+                                   size_t expected_rows)
+{
+    return fmx_brief_mail_counts_ok(b, 700,
+                                    (long long)(expected_rows * 2 + 1)) &&
+           fmx_brief_token_complete(b) &&
+           fmx_brief_has_mail_ref(b, "brief-page-069");
+}
+
+static bool fmx_brief_full_projection(struct fmx_call *b,
+                                      size_t expected_rows,
+                                      size_t *scan_count)
+{
+    (void)zcl_devagent_mail_test_max_seq_scans(true);
+    fmx_brief(b, NULL, 0);
+    if (!fmx_run(b, zcl_native_handle_fleet_steer_brief) || !fmx_ok(b) ||
+        fmx_missing_has(b, "dev.agent.mail"))
+        return false;
+    if (!fmx_brief_full_rows_ok(b, expected_rows))
+        return false;
+    *scan_count = zcl_devagent_mail_test_max_seq_scans(false);
+    return true;
+}
+
+static bool fmx_brief_resume_projection(struct fmx_call *b, const char *token,
+                                        size_t expected_rows,
+                                        size_t *scan_count)
+{
+    (void)zcl_devagent_mail_test_max_seq_scans(true);
+    fmx_brief_since(b, NULL, token);
+    if (!fmx_run(b, zcl_native_handle_fleet_steer_brief) || !fmx_ok(b) ||
+        fmx_missing_has(b, "dev.agent.mail"))
+        return false;
+    if (!fmx_brief_mail_counts_ok(b, 701,
+                                  (long long)(expected_rows * 2 + 2)) ||
+        fmx_changes_n(b) != 1 ||
+        !fmx_brief_has_mail_ref(b, "brief-resume"))
+        return false;
+    *scan_count = zcl_devagent_mail_test_max_seq_scans(false);
+    return true;
 }
 
 /* The state the brief reports for the change row `from` wrote under `ref`, or
@@ -3839,6 +3989,58 @@ _test_next:;
     return failures;
 }
 
+static bool fmx_test_brief_deferred_cursor(size_t *initial_scans,
+                                           size_t *resume_scans,
+                                           size_t *public_scans,
+                                           size_t *evidence_scans)
+{
+    struct fmx_call b;
+    char token[4096];
+    const size_t rows_per_stream = 70;
+    fmx_state_file("mail", "inbox.empty.jsonl", "", false);
+    if (!fmx_seed_mail_history(rows_per_stream))
+        return false;
+    if (!fmx_brief_full_projection(&b, rows_per_stream, initial_scans)) {
+        fmx_end(&b);
+        return false;
+    }
+    (void)snprintf(token, sizeof(token), "%s", fmx_str(&b, "cursor_token"));
+    fmx_end(&b);
+    if (!token[0])
+        return false;
+    fmx_seed_inbox("third", "2019-01-01T00:00:00Z", 701, "third", "*",
+                   "note", "resumed row", "brief-resume");
+    if (!fmx_brief_resume_projection(&b, token, rows_per_stream,
+                                     resume_scans)) {
+        fmx_end(&b);
+        return false;
+    }
+    fmx_end(&b);
+    return fmx_public_mail_page(public_scans) &&
+           fmx_evidence_mail_uses_public_drain(evidence_scans);
+}
+
+static int fmx_t_brief_deferred_cursor(void)
+{
+    int failures = 0;
+    TEST("steer: brief defers global cursor scans across mail pages and resume") {
+        size_t initial_scans, resume_scans, public_scans, evidence_scans;
+        fmx_isolate("brief_deferred_cursor");
+        ASSERT(fmx_test_brief_deferred_cursor(&initial_scans, &resume_scans,
+                                             &public_scans,
+                                             &evidence_scans));
+        ASSERT_EQ(initial_scans, 4);
+        ASSERT_EQ(resume_scans, 8);
+        ASSERT_EQ(public_scans, 4);
+        ASSERT(evidence_scans > 4 && evidence_scans % 4 == 0);
+        fmx_restore();
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 /* Request/result correlation: a directive is answered by a later result
  * on its ref from the other side, acked only by the receiver's own ack
  * cursor, and queued with neither. A reply is never read as an ack. */
@@ -5055,6 +5257,7 @@ int test_fleet_steer(void)
     failures += fmx_t_brief_changes();
     failures += fmx_t_brief_newer_low_seq();
     failures += fmx_t_brief_watermark();
+    failures += fmx_t_brief_deferred_cursor();
     failures += fmx_t_evidence();
     failures += fmx_t_duplicate();
     failures += fmx_t_lifecycle();

@@ -46,6 +46,7 @@
 static char g_dvx_state[1024];
 static bool g_dvx_had_root;
 static bool g_dvx_isolated;
+static unsigned g_dvx_after_probe_calls;
 #if defined(_WIN32)
 static wchar_t g_dvx_saved_root[32768];
 #else
@@ -152,7 +153,7 @@ static void dvx_begin(struct dvx_call *c)
 
 /* Validate through the REAL registry first, so a key the .def never declared
  * is caught here rather than passing in-process and failing from a shell. */
-static bool dvx_run(struct dvx_call *c)
+static bool dvx_run_mode(struct dvx_call *c, bool brief_drain)
 {
     char why[256];
     if (c->request.spec &&
@@ -161,8 +162,16 @@ static bool dvx_run(struct dvx_call *c)
         printf("[input rejected: %s] ", why);
         return false;
     }
-    zcl_native_handle_dev_agent_mail(&c->request, &c->reply);
+    if (brief_drain)
+        zcl_native_handle_dev_agent_mail_brief_drain(&c->request, &c->reply);
+    else
+        zcl_native_handle_dev_agent_mail(&c->request, &c->reply);
     return true;
+}
+
+static bool dvx_run(struct dvx_call *c)
+{
+    return dvx_run_mode(c, false);
 }
 
 static void dvx_end(struct dvx_call *c)
@@ -429,7 +438,8 @@ static bool dvx_pull_fits_budget(const struct dvx_call *call)
 /* Mark each row's "row-NNN" body index; false on a duplicate or a body
  * this rig never wrote. */
 static bool dvx_mark_rows(const struct json_value *rows, unsigned char *seen,
-                          size_t *total)
+                          size_t *total, unsigned *order,
+                          size_t order_cap, size_t *order_n)
 {
     for (size_t i = 0; rows && i < rows->num_children; i++) {
         const char *body = json_get_str(json_get(&rows->children[i], "body"));
@@ -439,8 +449,12 @@ static bool dvx_mark_rows(const struct json_value *rows, unsigned char *seen,
         idx = strtol(body + 4, NULL, 10);
         if (idx < 0 || (size_t)idx >= DVX_PAGE_ROWS + 1u || seen[idx])
             return false;
+        if (order && (!order_n || *order_n >= order_cap))
+            return false;
         seen[idx] = 1;
         (*total)++;
+        if (order)
+            order[(*order_n)++] = (unsigned)idx;
     }
     return true;
 }
@@ -466,8 +480,11 @@ static bool dvx_post_history(size_t n)
 
 /* Follow next_since from `token` until a page is the last one. Returns the
  * number of pages, or 0 when a page failed or repeated a row. */
-static size_t dvx_drain(char *token, size_t cap, unsigned char *seen,
-                        size_t *total)
+static size_t dvx_drain_mode(char *token, size_t cap, unsigned char *seen,
+                             size_t *total, bool brief_drain,
+                             long long *cursor, long long *skipped,
+                             unsigned *order, size_t order_cap,
+                             size_t *order_n)
 {
     size_t pages = 0;
     bool more = true;
@@ -475,18 +492,30 @@ static size_t dvx_drain(char *token, size_t cap, unsigned char *seen,
         struct dvx_call p;
         const struct json_value *tr;
         dvx_pull_token(&p, token, "directive");
-        if (!dvx_run(&p) || !dvx_ok(&p) ||
-            !dvx_mark_rows(dvx_arr(&p, "rows"), seen, total)) {
+        if (!dvx_run_mode(&p, brief_drain) || !dvx_ok(&p) ||
+            !dvx_mark_rows(dvx_arr(&p, "rows"), seen, total, order,
+                           order_cap, order_n)) {
             dvx_end(&p);
             return 0;
         }
         tr = json_get(&p.reply.data, "truncated");
         more = tr && tr->type == JSON_BOOL && json_get_bool(tr);
+        if (cursor)
+            *cursor = dvx_int(&p, "cursor");
+        if (skipped)
+            *skipped += dvx_int(&p, "skipped");
         (void)snprintf(token, cap, "%s", dvx_str(&p, "next_since"));
         dvx_end(&p);
         pages++;
     }
     return more ? 0 : pages;
+}
+
+static size_t dvx_drain(char *token, size_t cap, unsigned char *seen,
+                        size_t *total)
+{
+    return dvx_drain_mode(token, cap, seen, total, false, NULL, NULL, NULL,
+                          0, NULL);
 }
 
 static void dvx_import_append(const char *name, const char *row)
@@ -497,6 +526,65 @@ static void dvx_import_append(const char *name, const char *row)
     FILE *f = fopen(path, "a");
     if (!f || fputs(row, f) < 0 || fclose(f) != 0)
         dvx_fixture_fail("cannot append to imported stream");
+}
+
+static void dvx_append_after_brief_probe(void)
+{
+    g_dvx_after_probe_calls++;
+    dvx_import_append("outbox",
+        "{\"seq\":1001,\"ts\":\"2019-01-01T00:00:00Z\","
+        "\"from\":\"alice\",\"to\":\"*\",\"kind\":\"directive\","
+        "\"body\":\"late row\",\"ref\":\"\"}\n");
+}
+
+static bool dvx_public_replay_matches(const char *brief_wire)
+{
+    struct dvx_call p;
+    char public_wire[8192];
+    dvx_pull_token(&p, "0|", "directive");
+    bool matches = dvx_run(&p) && dvx_ok(&p) &&
+        json_write(&p.reply.data, public_wire, sizeof(public_wire)) > 0 &&
+        strcmp(public_wire, brief_wire) == 0;
+    dvx_end(&p);
+    return matches;
+}
+
+static bool dvx_brief_stage_append_safe(void)
+{
+    struct dvx_call p, b, scalar;
+    char brief_wire[8192];
+    bool matches;
+    dvx_isolate("brief_stage_append");
+    dvx_post(&p, "alice", "*", "directive", "initial row");
+    if (!dvx_run(&p) || !dvx_ok(&p)) {
+        dvx_end(&p);
+        dvx_restore();
+        return false;
+    }
+    dvx_end(&p);
+    g_dvx_after_probe_calls = 0;
+    (void)zcl_devagent_mail_test_max_seq_scans(true);
+    zcl_devagent_mail_test_set_after_brief_probe(
+        dvx_append_after_brief_probe);
+    dvx_pull_token(&b, "0|", "directive");
+    bool ran = dvx_run_mode(&b, true);
+    zcl_devagent_mail_test_set_after_brief_probe(NULL);
+    if (!ran || !dvx_ok(&b) || g_dvx_after_probe_calls != 1 ||
+        zcl_devagent_mail_test_max_seq_scans(false) != 1 ||
+        dvx_int(&b, "cursor") != 1001 || dvx_int(&b, "count") != 2 ||
+        json_write(&b.reply.data, brief_wire, sizeof(brief_wire)) == 0) {
+        dvx_end(&b);
+        dvx_restore();
+        return false;
+    }
+    dvx_end(&b);
+    matches = dvx_public_replay_matches(brief_wire);
+    dvx_pull(&scalar, 1001, NULL, "directive");
+    matches = matches && dvx_run(&scalar) && dvx_ok(&scalar) &&
+              dvx_int(&scalar, "count") == 0;
+    dvx_end(&scalar);
+    dvx_restore();
+    return matches;
 }
 
 static int test_mail_paging(void)
@@ -547,6 +635,138 @@ static int test_mail_paging(void)
         ASSERT_STR_EQ(p.reply.error.code, "MAIL_CURSOR_STALE");
         dvx_end(&p);
         dvx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static bool dvx_brief_drain_equivalent(char *public_token,
+                                      char *brief_token)
+{
+    unsigned char public_seen[DVX_PAGE_ROWS + 1u] = {0};
+    unsigned char brief_seen[DVX_PAGE_ROWS + 1u] = {0};
+    unsigned public_order[DVX_PAGE_ROWS + 1u] = {0};
+    unsigned brief_order[DVX_PAGE_ROWS + 1u] = {0};
+    size_t public_order_n = 0, brief_order_n = 0;
+    size_t public_total = 0, brief_total = 0;
+    size_t public_pages, brief_pages;
+    size_t public_scans, brief_scans;
+    long long public_cursor = -1, brief_cursor = -1;
+    long long public_skipped = 0, brief_skipped = 0;
+    (void)snprintf(public_token, 4096, "%s", "0|");
+    (void)snprintf(brief_token, 4096, "%s", "0|");
+    (void)zcl_devagent_mail_test_max_seq_scans(true);
+    public_pages = dvx_drain_mode(public_token, 4096, public_seen,
+                                  &public_total, false, &public_cursor,
+                                  &public_skipped, public_order,
+                                  sizeof(public_order) / sizeof(public_order[0]),
+                                  &public_order_n);
+    public_scans = zcl_devagent_mail_test_max_seq_scans(true);
+    brief_pages = dvx_drain_mode(brief_token, 4096, brief_seen, &brief_total,
+                                 true, &brief_cursor, &brief_skipped,
+                                 brief_order,
+                                 sizeof(brief_order) / sizeof(brief_order[0]),
+                                 &brief_order_n);
+    brief_scans = zcl_devagent_mail_test_max_seq_scans(false);
+    return public_pages > 1 && brief_pages == public_pages &&
+           public_scans == public_pages * 2 && brief_scans == 2 &&
+           brief_total == public_total &&
+           memcmp(brief_seen, public_seen, sizeof(brief_seen)) == 0 &&
+           brief_order_n == public_order_n &&
+           memcmp(brief_order, public_order,
+                  brief_order_n * sizeof(brief_order[0])) == 0 &&
+           brief_cursor == public_cursor && brief_cursor == 1000 &&
+           brief_skipped == public_skipped && brief_skipped == 1 &&
+           strcmp(brief_token, public_token) == 0;
+}
+
+static bool dvx_brief_append_equivalent(char *public_token,
+                                        char *brief_token)
+{
+    struct dvx_call p, b;
+    char public_wire[8192], brief_wire[8192];
+    bool same;
+    dvx_import_append("inbox.peer",
+        "{\"seq\":1001,\"ts\":\"2019-01-01T00:00:00Z\","
+        "\"from\":\"bob\",\"to\":\"*\",\"kind\":\"directive\","
+        "\"body\":\"row-202\",\"ref\":\"\"}\n");
+    dvx_pull_token(&p, public_token, "directive");
+    if (!dvx_run(&p) || !dvx_ok(&p) || dvx_int(&p, "cursor") != 1001 ||
+        dvx_int(&p, "count") != 1 ||
+        json_write(&p.reply.data, public_wire, sizeof(public_wire)) == 0) {
+        dvx_end(&p);
+        return false;
+    }
+    (void)snprintf(public_token, 4096, "%s", dvx_str(&p, "next_since"));
+    dvx_end(&p);
+    dvx_pull_token(&b, brief_token, "directive");
+    if (!dvx_run_mode(&b, true) || !dvx_ok(&b) ||
+        dvx_int(&b, "cursor") != 1001 || dvx_int(&b, "count") != 1 ||
+        json_write(&b.reply.data, brief_wire, sizeof(brief_wire)) == 0) {
+        dvx_end(&b);
+        return false;
+    }
+    (void)snprintf(brief_token, 4096, "%s", dvx_str(&b, "next_since"));
+    same = strcmp(brief_wire, public_wire) == 0 &&
+           strcmp(brief_token, public_token) == 0;
+    dvx_end(&b);
+    return same;
+}
+
+static bool dvx_brief_stale_refusal_matches(const char *public_token,
+                                           const char *brief_token)
+{
+    struct dvx_call p, b;
+    bool public_stale, brief_stale;
+    dvx_import_stream("inbox.peer", "\n");
+    dvx_pull_token(&p, public_token, "directive");
+    public_stale = dvx_run(&p) && !dvx_ok(&p) &&
+                   strcmp(p.reply.error.code, "MAIL_CURSOR_STALE") == 0 &&
+                   !p.reply.error.mutated;
+    dvx_end(&p);
+    dvx_pull_token(&b, brief_token, "directive");
+    brief_stale = dvx_run_mode(&b, true) && !dvx_ok(&b) &&
+                  strcmp(b.reply.error.code, "MAIL_CURSOR_STALE") == 0 &&
+                  !b.reply.error.mutated;
+    dvx_end(&b);
+    return public_stale && brief_stale;
+}
+
+static bool dvx_brief_drain_fixture(void)
+{
+    char public_token[4096], brief_token[4096];
+    bool ok = false;
+    dvx_isolate("brief_drain");
+    if (!dvx_post_history(200))
+        goto done;
+    dvx_import_stream("inbox.peer",
+        "malformed row\n"
+        "{\"seq\":999,\"ts\":\"2020-01-01T00:00:00Z\","
+        "\"from\":\"bob\",\"to\":\"*\",\"kind\":\"directive\","
+        "\"body\":\"row-200\",\"ref\":\"\"}\n"
+        "{\"seq\":1000,\"ts\":\"2020-01-01T00:00:01Z\","
+        "\"from\":\"bob\",\"to\":\"*\",\"kind\":\"directive\","
+        "\"body\":\"row-201\",\"ref\":\"\"}\n");
+    if (!dvx_brief_drain_equivalent(public_token, brief_token) ||
+        !dvx_brief_append_equivalent(public_token, brief_token) ||
+        !dvx_brief_stale_refusal_matches(public_token, brief_token))
+        goto done;
+    ok = true;
+done:
+    dvx_restore();
+    return ok;
+}
+
+static int test_mail_brief_drain(void)
+{
+    int failures = 0;
+    TEST("mail: brief drain defers only the intermediate global cursor") {
+        ASSERT(dvx_brief_drain_fixture());
+        PASS();
+    }
+    TEST("mail: append after final-page probe remains in the cursor result") {
+        ASSERT(dvx_brief_stage_append_safe());
         PASS();
     }
 _test_next:;
@@ -1082,6 +1302,7 @@ int test_devagent_mail(void)
 
     failures += test_mail_independent_cursor();
     failures += test_mail_paging();
+    failures += test_mail_brief_drain();
     failures += test_mail_ref_filter_and_agent_resume();
     failures += test_mail_stored_cursor();
     failures += test_mail_board_fields();

@@ -14,6 +14,20 @@
 struct zcl_command_request;
 struct zcl_command_reply;
 
+/* Internal fleet-brief mail pull. It skips global-max scans while pages
+ * remain and replays the final page through the normal path; direct mail
+ * commands retain per-page cursor behavior. Call only from fleet brief. */
+void zcl_native_handle_dev_agent_mail_brief_drain(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+#ifdef ZCL_TESTING
+typedef void (*zcl_devagent_mail_test_hook_fn)(void);
+void zcl_devagent_mail_test_set_after_brief_probe(
+    zcl_devagent_mail_test_hook_fn hook);
+size_t zcl_devagent_mail_test_max_seq_scans(bool reset);
+#endif
+
 /* ── SUITE VERDICT ────────────────────────────────────────────────────────
  * test_parallel prints exactly one machine-greppable verdict line:
  *
