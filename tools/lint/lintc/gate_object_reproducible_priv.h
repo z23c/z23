@@ -38,6 +38,9 @@ struct or_cfg {
     const char *link;
     const char *libs;
     const char *cross;
+    const char *xcc;     /* --xcc-flags: freestanding flags of the riscv64-link compile */
+    const char *xld;     /* --xld: the cross linker program */
+    const char *xld_flags; /* --xld-flags: its argv before -o */
     const char *targets;
     const char *strip;
     const char *seed;
@@ -54,6 +57,7 @@ struct or_case {
     bool cross;          /* freestanding units, --cross-flags, a --targets entry */
     bool shipped;        /* use the node object flags verbatim, one unit */
     bool link;           /* link a small program, hash it */
+    bool xlink;          /* link = true, with the cross compiler and --xld */
 };
 
 struct or_sha {
@@ -68,6 +72,29 @@ struct or_cmd {
     const char *argv[OR_MAXTOK + 1];
     int n;
 };
+
+struct or_roots {
+    char base[OR_PATH];
+    char a[OR_PATH];
+    char b[OR_PATH];
+};
+
+struct or_ctx {
+    const struct or_cfg *cfg;
+    const struct or_case *cs;
+    const char *cc;     /* the --host-cc / case name until resolved */
+    char ccbuf[OR_PATH];
+    char target[OR_PATH]; /* the case's --target flag from --targets, or "" */
+    char ccsha[65];
+    char xldbuf[OR_PATH]; /* the resolved --xld (riscv64-link only) */
+    char xldsha[65];
+    const struct or_roots *roots;
+};
+
+/* The riscv64-link fixture (tracked) and the steps of its build: compile,
+ * then link. Both are built in the root as working directory. */
+#define OR_XLINK_SRC "tools/lint/fixtures/riscv64_freebsd_hello.c.fixture"
+enum { OR_XLINK_STEPS = 2 };
 
 /* support.c: hashing, bounded files, ELF */
 void or_sha_init(struct or_sha *s);
@@ -99,6 +126,19 @@ bool or_cfg_names_ok(const struct or_cfg *cfg);
 int or_excuse(const struct or_cfg *cfg, const struct or_case *cs, int rc);
 bool or_target_of(const char *list, const char *name, char *out, size_t cap);
 bool or_contains(const unsigned char *h, size_t hl, const char *needle);
+bool or_add_words(struct or_cmd *c, const struct or_cfg *cfg, const char *words,
+                  const char *root, bool prefix_map);
+bool or_run_compiler(const struct or_cmd *c, char *diag, int *timeout_ms);
+int or_case_missing(const struct or_ctx *x, const char *want, const char *kind);
+
+/* xlink.c: the riscv64-link case (freestanding compile, cross link) */
+bool or_xlink_cmd(const struct or_ctx *x, const char *root, int step,
+                  bool prefix_map, struct or_cmd *c);
+unsigned char *or_xlink_build(const struct or_ctx *x, const char *root,
+                              bool prefix_map, struct or_cmd *c, char *diag,
+                              size_t *len);
+bool or_xlink_elf_ok(const unsigned char *b, size_t len);
+int or_xlink_tool(struct or_ctx *x);
 unsigned char *or_compile_run(const struct or_cmd *c, char *diag, size_t *len,
                               const char **why, int *timeout_ms);
 

@@ -36,11 +36,19 @@
  * programs. The linked output must also contain neither root path string. It
  * gates the verdict.
  *
+ * The riscv64-link case compiles the tracked fixture OR_XLINK_SRC (a
+ * freestanding riscv64 FreeBSD program with its own _start) with the cross
+ * compiler, --xcc-flags and the prefix map, links it with the cross linker
+ * --xld and --xld-flags (mold: the build host has no lld), and compares the
+ * SHA-256 of the two executables. They must be an ELF64 RISC-V ET_EXEC and
+ * hold neither root path. Its code is in gate_object_reproducible_xlink.c.
+ * Cross linker missing: SKIPPED by name when the case is in --allow-missing.
+ *
  * Controls (what each case proves it can observe):
  *   host-cc, clang-host, clang-riscv64, clang-aarch64: unit-level GREEN (the
  *     first unit under two roots WITH the prefix map must match) and RED (the
  *     same unit WITHOUT the prefix-map flag must differ), before the units.
- *   shipped-link: link-level GREEN (the real link must match) and RED (the
+ *   shipped-link, riscv64-link: link-level GREEN (the real link must match) and RED (the
  *     same compile and link WITHOUT the prefix-map flag must differ across
  *     roots or contain a root path), after the real link.
  *   shipped-recipe: NO control. It is the LTO node recipe, run report-only.
@@ -120,14 +128,15 @@ struct or_unit {
 };
 
 static const struct or_case k_or_cases[] = {
-    { "host-cc", NULL, false, false, false },
-    { "clang-host", "clang", false, false, false },
-    { "clang-riscv64", "clang", true, false, false },
-    { "clang-aarch64", "clang", true, false, false },
+    { "host-cc", NULL, false, false, false, false },
+    { "clang-host", "clang", false, false, false, false },
+    { "clang-riscv64", "clang", true, false, false, false },
+    { "clang-aarch64", "clang", true, false, false, false },
+    { "riscv64-link", "clang", true, false, true, true },
     /* NO must-differ control: it must gain one before its --report-only
      * argument is removed. */
-    { "shipped-recipe", NULL, false, true, false },
-    { "shipped-link", NULL, false, true, true },
+    { "shipped-recipe", NULL, false, true, false, false },
+    { "shipped-link", NULL, false, true, true, false },
 };
 enum { OR_NCASES = (int)(sizeof k_or_cases / sizeof k_or_cases[0]) };
 
@@ -150,6 +159,7 @@ static const char *const k_or_payload[] = {
     "platform/modules/astro/src/astro_priv.h",
     "platform/modules/astro/src/astro_exact.c",
     "platform/modules/astro/src/astro_mag.c",
+    OR_XLINK_SRC,
 };
 enum { OR_NPAYLOAD = (int)(sizeof k_or_payload / sizeof k_or_payload[0]) };
 
@@ -201,21 +211,6 @@ static int or_budget_ms(void)
 
 /* ---- command construction ------------------------------------------- */
 
-struct or_roots {
-    char base[OR_PATH];
-    char a[OR_PATH];
-    char b[OR_PATH];
-};
-
-struct or_ctx {
-    const struct or_cfg *cfg;
-    const struct or_case *cs;
-    const char *cc;     /* the --host-cc / case name until resolved */
-    char ccbuf[OR_PATH];
-    char target[OR_PATH]; /* the case's --target flag from --targets, or "" */
-    char ccsha[65];
-    const struct or_roots *roots;
-};
 
 
 /* The last token refused for length: or_compile_in names it as FLAG_TOO_LONG
@@ -258,8 +253,8 @@ static bool or_add_subst(struct or_cmd *c, const char *s, const char *from,
 /* Split a Makefile flag string on spaces, rewriting the tree root to `root`;
  * drop every token starting with --red-strip when `prefix_map` is false (the
  * RED control). */
-static bool or_add_words(struct or_cmd *c, const struct or_cfg *cfg,
-                         const char *words, const char *root, bool prefix_map)
+bool or_add_words(struct or_cmd *c, const struct or_cfg *cfg,
+                  const char *words, const char *root, bool prefix_map)
 {
     const char *p = words;
     size_t sl = cfg->strip ? strlen(cfg->strip) : 0;
@@ -391,6 +386,8 @@ static bool or_link_cmd(const struct or_ctx *x, const char *cc,
 /* Steps of one root's work: one compile, or OR_NLINKSRC compiles and a link. */
 static int or_nsteps(const struct or_ctx *x)
 {
+    if (x->cs->xlink)
+        return OR_XLINK_STEPS;
     return x->cs->link ? OR_NLINKSRC + 1 : 1;
 }
 
@@ -398,6 +395,8 @@ static bool or_step(const struct or_ctx *x, const char *cc, const char *root,
                     const char *unit, int step, bool prefix_map,
                     struct or_cmd *c)
 {
+    if (x->cs->xlink)
+        return or_xlink_cmd(x, root, step, prefix_map, c);
     if (!x->cs->link)
         return or_build_cmd(x, cc, root, unit, prefix_map, c);
     if (step < OR_NLINKSRC)
@@ -463,6 +462,7 @@ static void or_ctx_init(struct or_ctx *x, const struct or_cfg *cfg,
     x->cs = cs;
     x->cc = cs->cc ? cs->cc : cfg->host_cc;
     (void)snprintf(x->ccsha, sizeof x->ccsha, "-");
+    (void)snprintf(x->xldsha, sizeof x->xldsha, "-");
     (void)or_target_of(cfg->targets, cs->name, x->target, sizeof x->target);
 }
 
@@ -504,7 +504,9 @@ static void or_print_srcs(const struct or_ctx *x, const char *unit)
 {
     char h[65];
     printf(" src=");
-    if (!x->cs->link) {
+    if (x->cs->xlink)
+        unit = OR_XLINK_SRC;
+    if (!x->cs->link || x->cs->xlink) {
         or_src_hash(x->cfg, unit, h);
         printf("%s", h);
         return;
@@ -548,6 +550,8 @@ static void or_print_evidence(const struct or_ctx *x, const char *unit)
     (void)or_flags_hash(x, unit, fh);
     or_print_srcs(x, unit);
     printf(" flags=%s", fh);
+    if (x->cs->xlink)
+        printf(" ld=%s", x->xldsha);
     or_print_argvs(x, unit, true, "");
 }
 
@@ -720,7 +724,7 @@ static bool or_roots_drop(const struct or_ctx *x, struct or_roots *r)
 
 /* Run the compiler: true only for an observed exit status of zero, inside the
  * time budget (per-compile bound, process deadline, no stop signal). */
-static bool or_run_compiler(const struct or_cmd *c, char *diag, int *timeout_ms)
+bool or_run_compiler(const struct or_cmd *c, char *diag, int *timeout_ms)
 {
     struct zcl_spawn_binary_observation ob = { 0 };
     int budget = or_budget_ms();
@@ -884,6 +888,8 @@ static unsigned char *or_link_build(const struct or_ctx *x, const char *root,
                                     char *diag, size_t *len)
 {
     bool ok = true;
+    if (x->cs->xlink)
+        return or_xlink_build(x, root, prefix_map, c, diag, len);
     for (int st = 0; ok && st <= OR_NLINKSRC; st++)
         ok = or_link_step_run(x, root, st, prefix_map, c, diag);
     return ok ? or_read_file("out.bin", len) : NULL;
@@ -904,7 +910,9 @@ static unsigned char *or_link_in(const struct or_ctx *x, const char *root,
         bin = or_link_build(x, root, prefix_map, c, diag, len);
         ok = chdir(saved) == 0;
     }
-    if (!bin || !ok || !or_elf_linked(bin, *len)) {
+    if (!bin || !ok
+        || !(x->cs->xlink ? or_xlink_elf_ok(bin, *len)
+                          : or_elf_linked(bin, *len))) {
         free(bin);
         bin = NULL;
         or_refuse_compile(x, NULL, "the compile or link (host driver; it may "
@@ -966,12 +974,15 @@ static int or_link_verdict(const struct or_ctx *x, const struct or_obj *o)
     bool leak = or_link_leak(x, o);
     if (!same)
         or_elf_first_diff(o->a, o->la, o->b, o->lb, sec, sizeof sec);
-    printf("OBJREPRO case=%s units=%s+%s+%s+%s+%s verdict=%s cc=%s bin_a=%s "
-           "bin_b=%s section=%s root_path_in_output=%s", x->cs->name,
-           k_or_link_src[0], k_or_link_src[1], k_or_link_src[2],
-           k_or_link_src[3], k_or_link_src[4], same ? "MATCH" : "DIFFER",
-           x->ccsha, o->ha, o->hb, sec[0] ? sec : "-",
-           leak ? "FOUND" : "none");
+    printf("OBJREPRO case=%s units=", x->cs->name);
+    if (x->cs->xlink)
+        printf("%s", OR_XLINK_SRC);
+    else
+        printf("%s+%s+%s+%s+%s", k_or_link_src[0], k_or_link_src[1],
+               k_or_link_src[2], k_or_link_src[3], k_or_link_src[4]);
+    printf(" verdict=%s cc=%s bin_a=%s bin_b=%s section=%s "
+           "root_path_in_output=%s", same ? "MATCH" : "DIFFER", x->ccsha,
+           o->ha, o->hb, sec[0] ? sec : "-", leak ? "FOUND" : "none");
     or_print_evidence(x, NULL);
     printf("\n");
     if (!same) {
@@ -1134,25 +1145,27 @@ static int or_case_body(const struct or_ctx *x)
 }
 
 /* The compiler binary is not on PATH: skipped only when allowed. */
-static int or_case_missing(const struct or_ctx *x, const char *want)
+int or_case_missing(const struct or_ctx *x, const char *want, const char *kind)
 {
     bool ok = or_listed(x->cfg->allow, x->cs->name);
-    printf("OBJREPRO case=%s unit=- verdict=SKIPPED compiler=%s%s",
-           x->cs->name, want, ok ? " allowed-missing" : "");
+    printf("OBJREPRO case=%s unit=- verdict=SKIPPED %s=%s%s",
+           x->cs->name, kind, want, ok ? " allowed-missing" : "");
     or_print_case_evidence(x);
     printf("\n");
     if (ok)
         return OR_OK;
-    if (strcmp(want, "clang") == 0)
+    if (strcmp(kind, "compiler") == 0 && strcmp(want, "clang") == 0)
         printf("check-object-reproducible: REFUSED MISSING_COMPILER: case %s: "
                "clang is required for the clang and cross cases "
-               "(clang-host, clang-riscv64, clang-aarch64) but is not on "
-               "PATH; install clang, or name %s in --allow-missing (the "
+               "(clang-host, clang-riscv64, clang-aarch64, riscv64-link) "
+               "but is not on PATH; install clang, or name %s in "
+               "--allow-missing (the "
                "Makefile list is: %s)", x->cs->name, x->cs->name,
                x->cfg->allow[0] ? x->cfg->allow : "empty");
     else
-        printf("check-object-reproducible: REFUSED MISSING_COMPILER: case %s "
-               "needs %s, which is not on PATH", x->cs->name, want);
+        printf("check-object-reproducible: REFUSED MISSING_TOOL: case %s "
+               "needs the %s %s, which is not on PATH", x->cs->name, kind,
+               want);
     or_print_case_evidence(x);
     printf("\n");
     return OR_REFUSED;
@@ -1162,8 +1175,11 @@ static int or_case_inner(struct or_ctx *x)
 {
     const char *want = x->cc;
     if (!or_find_exe(want, x->ccbuf, sizeof x->ccbuf))
-        return or_case_missing(x, want);
+        return or_case_missing(x, want, "compiler");
     x->cc = x->ccbuf;
+    int tool = x->cs->xlink ? or_xlink_tool(x) : -1;
+    if (tool >= 0)
+        return tool;
     if (!or_hash_file(x->ccbuf, x->ccsha)) {
         printf("OBJREPRO case=%s unit=- verdict=COMPILER_UNREADABLE "
                "compiler=%s", x->cs->name, want);
@@ -1230,6 +1246,8 @@ bool or_parse(int argc, char **argv, struct or_cfg *cfg)
         { "--base-cflags", &cfg->base }, { "--shipped-cflags", &cfg->shipped },
         { "--link-flags", &cfg->link }, { "--link-libs", &cfg->libs },
         { "--cross-flags", &cfg->cross }, { "--targets", &cfg->targets },
+        { "--xcc-flags", &cfg->xcc }, { "--xld", &cfg->xld },
+        { "--xld-flags", &cfg->xld_flags },
         { "--red-strip", &cfg->strip },
         { "--seed-flag", &cfg->seed }, { "--allow-missing", &cfg->allow },
         { "--report-only", &cfg->report }, { "--host-cc", &cfg->host_cc },
@@ -1276,6 +1294,9 @@ const char *or_cfg_flaw(const struct or_cfg *cfg)
         { cfg->link, "--link-flags is required and must not be empty" },
         { cfg->libs, "--link-libs is required and must not be empty" },
         { cfg->cross, "--cross-flags is required and must not be empty" },
+        { cfg->xcc, "--xcc-flags is required and must not be empty" },
+        { cfg->xld, "--xld is required and must not be empty" },
+        { cfg->xld_flags, "--xld-flags is required and must not be empty" },
         { cfg->targets, "--targets is required and must not be empty" },
         { cfg->strip, "--red-strip is required and must not be empty" },
         { cfg->seed, "--seed-flag is empty (pass none on a host with no "
@@ -1404,7 +1425,8 @@ int check_object_reproducible_run(int argc, char **argv)
         fprintf(stderr, "check-object-reproducible: REFUSED BAD_ARGS: %s; "
                 "need --tree-root DIR --repro-cflags STR --base-cflags STR "
                 "--shipped-cflags STR --link-flags STR --link-libs STR "
-                "--cross-flags STR --targets NAME=FLAG,.. --red-strip STR "
+                "--cross-flags STR --xcc-flags STR --xld PROG --xld-flags STR "
+                "--targets NAME=FLAG,.. --red-strip STR "
                 "--seed-flag STR|none [--allow-missing a,b] "
                 "[--report-only a,b] [--host-cc CC] [--unsupported-host OS]; "
                 "the Makefile recipe passes them\n",

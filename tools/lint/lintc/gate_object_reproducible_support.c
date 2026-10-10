@@ -442,6 +442,31 @@ static int or_selftest_elf(void)
     return 0;
 }
 
+/* The riscv64-link output check takes ET_EXEC + EM_RISCV and refuses an
+ * object, a position-independent executable and another machine. */
+static int or_selftest_xlink_elf(void)
+{
+    enum { N = 64 + 16 + 64 * 2 };
+    unsigned char a[N];
+    or_fixture_elf(a, sizeof a);
+    a[16] = 2;                 /* ET_EXEC */
+    a[18] = 243;               /* EM_RISCV */
+    if (!or_xlink_elf_ok(a, sizeof a))
+        return or_fail("a RISC-V ET_EXEC was refused");
+    a[18] = 62;                /* EM_X86_64 */
+    if (or_xlink_elf_ok(a, sizeof a))
+        return or_fail("an x86-64 executable was accepted as riscv64");
+    a[18] = 243;
+    a[16] = 3;                 /* ET_DYN */
+    if (or_xlink_elf_ok(a, sizeof a))
+        return or_fail("a RISC-V ET_DYN was accepted as ET_EXEC");
+    a[16] = 2;
+    a[4] = 1;                  /* ELFCLASS32 */
+    if (or_xlink_elf_ok(a, sizeof a))
+        return or_fail("a 32-bit ELF was accepted as ELF64");
+    return 0;
+}
+
 /* Negative bounds: each corruption of the fixture must be refused. */
 static int or_selftest_elf_bounds(void)
 {
@@ -485,7 +510,9 @@ static int or_selftest_contains(void)
     "--tree-root", "/t", "--repro-cflags", "-fx", "--base-cflags", "-O2", \
     "--shipped-cflags", "-O3", "--link-flags", "-pthread", \
     "--link-libs", "-lm", "--cross-flags", "-nostdlibinc", \
-    "--targets", "clang-riscv64=--target=a,clang-aarch64=--target=b", \
+    "--xcc-flags", "-ffreestanding", "--xld", "mold", "--xld-flags", "-static", \
+    "--targets", "clang-riscv64=--target=a,clang-aarch64=--target=b," \
+    "riscv64-link=--target=a", \
     "--red-strip", "-ffile-prefix-map=", "--seed-flag", SEED
 
 /* --report-only takes only shipped-recipe and --allow-missing only cross
@@ -494,10 +521,12 @@ static int or_selftest_contains(void)
 static int or_selftest_names(void)
 {
     char *real[] = { OR_GOOD_ARGS("none"), "--allow-missing",
-                     "clang-riscv64,clang-aarch64", "--report-only",
+                     "clang-riscv64,clang-aarch64,riscv64-link", "--report-only",
                      "shipped-recipe" };
     char *unknown[] = { OR_GOOD_ARGS("none"), "--allow-missing", "bogus" };
     char *hostcc[] = { OR_GOOD_ARGS("none"), "--allow-missing", "host-cc" };
+    char *xlinkrep[] = { OR_GOOD_ARGS("none"), "--report-only",
+                         "riscv64-link" };
     char *shiplink[] = { OR_GOOD_ARGS("none"), "--report-only",
                          "shipped-link" };
     struct or_cfg cfg;
@@ -514,7 +543,33 @@ static int or_selftest_names(void)
     if (!or_parse((int)(sizeof shiplink / sizeof shiplink[0]), shiplink, &cfg)
         || or_cfg_names_ok(&cfg))
         return or_fail("--report-only shipped-link was accepted");
+    if (!or_parse((int)(sizeof xlinkrep / sizeof xlinkrep[0]), xlinkrep, &cfg)
+        || or_cfg_names_ok(&cfg))
+        return or_fail("--report-only riscv64-link was accepted");
     return 0;
+}
+
+/* --targets must name every cross case (riscv64-link included), --xld must
+ * not be empty, and --unsupported-host is parsed. */
+static int or_selftest_targets(void)
+{
+    char *notgt[] = { OR_GOOD_ARGS("none"), "--targets", "clang-riscv64=--t=a" };
+    char *nolink[] = { OR_GOOD_ARGS("none"), "--targets",
+                       "clang-riscv64=--t=a,clang-aarch64=--t=b" };
+    char *noxld[] = { OR_GOOD_ARGS("none"), "--xld", "" };
+    char *host[] = { OR_GOOD_ARGS("none"), "--unsupported-host", "Darwin" };
+    const int n = (int)(sizeof notgt / sizeof notgt[0]);
+    struct or_cfg cfg;
+    if (!or_parse(n, notgt, &cfg) || or_cfg_flaw(&cfg) == NULL)
+        return or_fail("a --targets list missing a cross case was accepted");
+    if (!or_parse(n, nolink, &cfg) || or_cfg_flaw(&cfg) == NULL)
+        return or_fail("a --targets list missing riscv64-link was accepted");
+    if (!or_parse(n, noxld, &cfg) || or_cfg_flaw(&cfg) == NULL)
+        return or_fail("an empty --xld was accepted");
+    if (!or_parse(n, host, &cfg) || or_cfg_flaw(&cfg) != NULL
+        || strcmp(cfg.unsupported, "Darwin") != 0)
+        return or_fail("--unsupported-host was not parsed");
+    return or_selftest_names();
 }
 
 static int or_selftest_args(void)
@@ -522,8 +577,6 @@ static int or_selftest_args(void)
     char *good[] = { OR_GOOD_ARGS("-frandom-seed=@UNIT@") };
     char *empty[] = { OR_GOOD_ARGS("") };
     char *unsub[] = { OR_GOOD_ARGS("-frandom-seed=tools/lint/z23-lint") };
-    char *notgt[] = { OR_GOOD_ARGS("none"), "--targets", "clang-riscv64=--t=a" };
-    char *host[] = { OR_GOOD_ARGS("none"), "--unsupported-host", "Darwin" };
     const int n = (int)(sizeof good / sizeof good[0]);
     struct or_cfg cfg;
     if (!or_parse(n, good, &cfg) || or_cfg_flaw(&cfg) != NULL)
@@ -537,12 +590,7 @@ static int or_selftest_args(void)
         return or_fail("an explicit seed none was refused");
     if (or_parse(n - 1, good, &cfg))
         return or_fail("an unpaired option was accepted");
-    if (!or_parse(n + 2, notgt, &cfg) || or_cfg_flaw(&cfg) == NULL)
-        return or_fail("a --targets list missing a cross case was accepted");
-    if (!or_parse(n + 2, host, &cfg) || or_cfg_flaw(&cfg) != NULL
-        || strcmp(cfg.unsupported, "Darwin") != 0)
-        return or_fail("--unsupported-host was not parsed");
-    return or_selftest_names();
+    return or_selftest_targets();
 }
 
 /* Report-only excuses a hash MISMATCH of the named case and nothing else. */
@@ -551,8 +599,8 @@ static int or_selftest_excuse(void)
     struct or_cfg cfg;
     memset(&cfg, 0, sizeof cfg);
     cfg.report = "shipped-recipe";
-    const struct or_case rep = { "shipped-recipe", NULL, false, true, false };
-    const struct or_case other = { "host-cc", NULL, false, false, false };
+    const struct or_case rep = { "shipped-recipe", NULL, false, true, false, false };
+    const struct or_case other = { "host-cc", NULL, false, false, false, false };
     if (or_excuse(&cfg, &rep, OR_MISMATCH) != OR_OK)
         return or_fail("a report-only MISMATCH was not excused");
     if (or_excuse(&cfg, &rep, OR_REFUSED) != OR_REFUSED)
@@ -697,6 +745,7 @@ int check_object_reproducible_selftest(void)
                     "19db06c1") != 0)
         return or_fail("SHA-256 known answer for the two-block message");
     if (or_selftest_elf() != 0 || or_selftest_elf_bounds() != 0
+        || or_selftest_xlink_elf() != 0
         || or_selftest_args() != 0 || or_selftest_contains() != 0
         || or_selftest_excuse() != 0 || or_selftest_runner() != 0)
         return 1;
@@ -707,7 +756,8 @@ int check_object_reproducible_selftest(void)
            "compiler that writes nothing, a non-ELF writer, a stop signal "
            "and an expired deadline, and accepts a valid object). The real "
            "run adds RED/GREEN controls for host-cc, clang-host, "
-           "clang-riscv64 and clang-aarch64 (unit level) and shipped-link "
+           "clang-riscv64 and clang-aarch64 (unit level) and shipped-link and "
+           "riscv64-link "
            "(link level); shipped-recipe has none\n");
     return 0;
 }

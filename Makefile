@@ -1149,8 +1149,14 @@ REPRO_GATE_BASE_CFLAGS = -std=$(ZCL_C_STD) $(firstword $(filter -O%,$(CFLAGS))) 
 # The gate types no flag of its own (other than -c, -o and its -I list): the
 # per-target flags, the cross-case flag, the link libraries and the name of the
 # prefix-map flag that its RED control removes all come from here.
-REPRO_GATE_TARGETS = clang-riscv64=--target=riscv64-unknown-freebsd,clang-aarch64=--target=aarch64-unknown-linux-gnu
+REPRO_GATE_TARGETS = clang-riscv64=--target=riscv64-unknown-freebsd,clang-aarch64=--target=aarch64-unknown-linux-gnu,riscv64-link=--target=riscv64-unknown-freebsd
 REPRO_GATE_CROSS_FLAGS = -nostdlibinc
+# riscv64-link case: the freestanding compile flags of the tracked fixture and
+# the cross linker (mold: the build host has no lld) with its argv. A linker
+# that is not installed skips the case by name (it is in --allow-missing).
+REPRO_GATE_XCC_FLAGS = -ffreestanding -fno-stack-protector
+REPRO_GATE_XLD ?= mold
+REPRO_GATE_XLD_FLAGS = -m elf64lriscv -static --build-id=none -e _start
 REPRO_GATE_LINK_LIBS = -lm
 REPRO_GATE_STRIP_FLAG = -ffile-prefix-map=
 # The gate reads ELF sections and links with GNU-ld flags, so a build host that
@@ -6126,6 +6132,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_network_tool_hardening.c \
     tools/lint/lintc/gate_object_reproducible.c \
     tools/lint/lintc/gate_object_reproducible_support.c \
+    tools/lint/lintc/gate_object_reproducible_xlink.c \
     tools/lint/lintc/gate_tor_full_default.c \
     tools/lint/lintc/gate_installed_acceptance_tools.c \
     tools/lint/lintc/gate_hotswap_denied_leaves.c \
@@ -13858,9 +13865,11 @@ check-object-reproducible: $(LINTC_TOOL)
 		--shipped-cflags '$(NODE_C23_OBJECT_CFLAGS)' \
 		--link-flags '$(LDFLAGS) -Wl,--build-id=none' --link-libs '$(REPRO_GATE_LINK_LIBS)' \
 		--cross-flags '$(REPRO_GATE_CROSS_FLAGS)' --targets '$(REPRO_GATE_TARGETS)' \
+		--xcc-flags '$(REPRO_GATE_XCC_FLAGS)' --xld '$(REPRO_GATE_XLD)' \
+		--xld-flags '$(REPRO_GATE_XLD_FLAGS)' \
 		--red-strip '$(REPRO_GATE_STRIP_FLAG)' \
 		--seed-flag '$(or $(subst $<,@UNIT@,$(ZCL_TU_RANDOM_SEED)),none)' \
-		--host-cc '$(ZCL_OBJECT_CC)' --allow-missing clang-riscv64,clang-aarch64 \
+		--host-cc '$(ZCL_OBJECT_CC)' --allow-missing clang-riscv64,clang-aarch64,riscv64-link \
 		--report-only shipped-recipe $(REPRO_GATE_HOST_SKIP)
 
 # Gate — sqlite cursor lifetime. A stepped sqlite3_stmt must be
