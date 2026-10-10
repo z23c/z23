@@ -12406,7 +12406,7 @@ check-vcs-no-git: $(LINTC_TOOL)
 
 check-vcs-no-sha1: $(LINTC_TOOL)
 	@echo "══ LINT: ZVCS/producer-source authority does not inherit Git SHA-1 ══"
-	@bash tools/scripts/check_vcs_no_sha1.sh
+	@./build/bin/z23-lint check-vcs-no-sha1
 	@tools/dev/source-identity-selftest.sh
 	@tools/dev/sovereign-source-identity-selftest.sh
 
@@ -12417,7 +12417,7 @@ check-vcs-no-sha1: $(LINTC_TOOL)
 # so a release build links zero dynamic-loading code.
 check-hotswap-dev-only: $(LINTC_TOOL)
 	@echo "══ LINT: hot-swap dlopen confined to engine/modules/hotswap under ZCL_DEV_BUILD ══"
-	@./tools/lint/check_hotswap_dev_only.sh
+	@./build/bin/z23-lint check-hotswap-dev-only
 
 # Tier-1 hot-swap eligibility manifest (engine/composition/hotswap_eligible.def) is kept
 # honest by two REAL gates (self-tested in test_make_lint_gates.c): eligible
@@ -12491,8 +12491,8 @@ check-hotswap-swappable-shape: $(LINTC_TOOL)
 # violations of both classes.
 check-hotswap-candidates-ledger: $(LINTC_TOOL)
 	@echo "══ LINT: hot-swap candidate ledger agrees with the gates; make hotswap still refuses ══"
-	@bash tools/lint/check_hotswap_candidates_ledger.sh --selftest
-	@bash tools/lint/check_hotswap_candidates_ledger.sh
+	@./build/bin/z23-lint check-hotswap-candidates-ledger --selftest
+	@./build/bin/z23-lint check-hotswap-candidates-ledger
 
 # A packaged module carries a `<artifact>.manifest` receipt (schema
 # zcl.hotswap_package.v1) recording its SHA3-256, source TU, leaves, abi_version
@@ -12553,7 +12553,7 @@ check-json-value-init: $(LINTC_TOOL)
 
 check-blob-read-bounds: $(LINTC_TOOL)
 	@echo "══ LINT: bounded sqlite blob reads in app models ══"
-	@bash tools/lint/check_blob_read_bounds.sh
+	@./build/bin/z23-lint check-blob-read-bounds
 
 # Gate — ONE fixed-width byte-order codec. Packing or unpacking a
 # 16/32/64-bit integer at a byte address lives only in
@@ -13037,7 +13037,7 @@ check-cookbook: $(ZCLASSIC23_DEV_BIN)
 
 check-persona-resolves: $(LINTC_TOOL)
 	@echo "══ LINT: every authored persona still resolves ══"
-	@./tools/lint/check_persona_resolves.sh
+	@./build/bin/z23-lint check-persona-resolves
 
 check-specialists: $(LINTC_TOOL)
 	@echo "══ LINT: every specialist territory, gate and test group resolves ══"
@@ -13066,7 +13066,7 @@ check-fleet-vitals:
 
 check-prompt-templates: $(LINTC_TOOL)
 	@echo "══ LINT: every prompt template names a declared section ══"
-	@./tools/lint/check_prompt_templates.sh
+	@./build/bin/z23-lint check-prompt-templates
 
 # engine/composition/rule_vocab.def is the CLOSED vocabulary of rules an
 # executor may be shown, and the only place a rule id exists. The harness keys
@@ -13112,7 +13112,7 @@ check-rpc-registrar: $(LINTC_TOOL)
 # Prevents the "silent lag" regression we shipped this gate to lock down.
 check-lag-slo-observable: $(LINTC_TOOL)
 	@echo "══ LINT: lag SLO observability ══"
-	@./tools/scripts/check_lag_slo_observable.sh
+	@./build/bin/z23-lint check-lag-slo-observable
 
 # lib/ layer purity: no lib/ file should #include from app/ unless the
 # include is in the grandfathered baseline or has a documented per-line
@@ -13173,8 +13173,8 @@ check-shape-include-direction: $(LINTC_TOOL)
 # tests and private-to-private composition are allowed.
 check-controller-private-headers: $(LINTC_TOOL)
 	@echo "══ LINT: controller private-header ownership ══"
-	@./tools/lint/check_controller_private_headers.sh --selftest
-	@./tools/lint/check_controller_private_headers.sh
+	@./build/bin/z23-lint check-controller-private-headers --selftest
+	@./build/bin/z23-lint check-controller-private-headers
 
 # domain/ source purity: the innermost layer may only #include its own
 # domain headers, C/system headers, bare domain-local siblings, and the 12
@@ -13228,7 +13228,7 @@ check-no-runtime-abort: $(LINTC_TOOL)
 # enumerates the grandfathered sites; must shrink over Rounds 7-9.
 check-typed-blocker: $(LINTC_TOOL)
 	@echo "══ LINT: typed blocker adoption ══"
-	@./tools/scripts/check_typed_blocker.sh
+	@./build/bin/z23-lint check-typed-blocker
 
 # Gate #49 — blocker escape-action totality (HARD, no baseline). Every
 # non-empty escape_action string literal assigned at a blocker_init/
@@ -13467,8 +13467,8 @@ check-dev-linker-threads:
 # Historical vector comments may name a Python origin; they must not call it.
 check-no-python: $(LINTC_TOOL)
 	@echo "══ LINT: no Python runtime ══"
-	@./tools/lint/check_no_python.sh --selftest
-	@./tools/lint/check_no_python.sh
+	@./build/bin/z23-lint check-no-python --selftest
+	@./build/bin/z23-lint check-no-python
 
 # The GNU comma-swallowing extension `, ##__VA_ARGS__` is not standard C, and
 # it is the single idiom that made this tree unbuildable by a second compiler:
@@ -13498,8 +13498,8 @@ check-no-gnu-va-args: $(LINTC_TOOL)
 .PHONY: check-no-snapshot-struct-memcmp
 check-no-snapshot-struct-memcmp: $(LINTC_TOOL)
 	@echo "══ LINT: no raw memcmp/bcmp over struct platform_positioned_file_snapshot ══"
-	@./tools/lint/check_no_snapshot_struct_memcmp.sh --self-test
-	@./tools/lint/check_no_snapshot_struct_memcmp.sh
+	@./build/bin/z23-lint check-no-snapshot-struct-memcmp --self-test
+	@./build/bin/z23-lint check-no-snapshot-struct-memcmp
 
 # Second-compiler portability. The node ships as one whole-program GCC build,
 # so nothing ever asked a different compiler whether the tree is well-formed
@@ -13654,8 +13654,8 @@ check-no-raw-sqlite-in-controllers: $(LINTC_TOOL)
 # tools/lint/model_column_drift_baseline.txt (may only shrink).
 check-model-column-drift: $(LINTC_TOOL)
 	@echo "→ model_column_drift"
-	@./tools/lint/check_model_column_drift.sh --selftest
-	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_model_column_drift.sh
+	@./build/bin/z23-lint check-model-column-drift --selftest
+	@ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-model-column-drift
 
 check-supervisor-domain: $(LINTC_TOOL)
 	@echo "→ Gate #21: supervisor_domain"
@@ -13728,7 +13728,7 @@ check-command-contract: $(LINTC_TOOL)
 # grammar and aborts LOUD on arity drift rather than reading the wrong slot.
 check-command-availability-truthful: $(LINTC_TOOL)
 	@echo "══ LINT: command-availability truthfulness ══"
-	@./tools/lint/check_command_availability_truthful.sh
+	@./build/bin/z23-lint check-command-availability-truthful
 
 # Gate — declared input_keys vs. the keys the handler actually READS. The
 # kernel rejects any input key a leaf does not declare, so a key the C
@@ -13846,7 +13846,7 @@ check-doc-no-false-deleted:
 
 check-zclassicd-reach-allowlist: $(LINTC_TOOL)
 	@echo "══ LINT: zclassicd reach allowlist (node stands alone) ══"
-	@./tools/lint/gate_zclassicd_reach_allowlist.sh .
+	@./build/bin/z23-lint check-zclassicd-reach-allowlist .
 
 check-stage-log-reorg-unsafe:
 	@echo "══ LINT: stage-log reorg-unsafe ratchet ══"
@@ -13858,7 +13858,7 @@ check-no-csr-lock-on-finalize-drive:
 
 check-mint-skip-crypto-offline-only: $(LINTC_TOOL)
 	@echo "══ LINT: fast-mint crypto pass-through is offline-only ══"
-	@./tools/lint/check_mint_skip_crypto_offline_only.sh .
+	@./build/bin/z23-lint check-mint-skip-crypto-offline-only .
 
 # Gate E1 — the file-size policy for production C (tools/file_size_policy.c).
 # Three bands: 800 is the advisory TARGET, 801..1500 is an ALLOWED buffer that
@@ -14111,13 +14111,13 @@ check-pipefail-status-pipe:
 # unchanged spelling baseline.
 check-shell-host-assumptions: $(LINTC_TOOL) $(JSONQ_BIN) $(DEV_PACKAGE_VERIFY_BIN)
 	@echo "══ LINT: Linux/GNU shell assumptions only shrink ══"
-	@./tools/lint/check_shell_host_assumptions.sh --selftest
+	@./build/bin/z23-lint check-shell-host-assumptions --selftest
 	@./tools/scripts/port_probe.sh --selftest
 	@./tools/scripts/commons_fix_admit.sh --selftest
 	@./tools/scripts/isolated_node_env_selftest.sh
 	@./tools/scripts/service_args_selftest.sh
 	@bash tools/scripts/two_node_peer_tip_selftest.sh
-	@./tools/lint/check_shell_host_assumptions.sh
+	@./build/bin/z23-lint check-shell-host-assumptions
 
 # Sibling of the gate above, for two more shapes where the shell throws a
 # decision away. (A) A bare `! cmd` statement under `set -e`: bash does not
@@ -14324,8 +14324,8 @@ docs-proof-tools: $(LINTC_TOOL) $(BIN_DIR)/z23-fleet-observe $(CAPABILITY_INVENT
 
 check-generated-artifact-contradictions: $(LINTC_TOOL)
 	@echo "══ LINT: generated artifacts cannot contradict each other ══"
-	@./tools/lint/check_generated_artifact_contradictions.sh --selftest
-	@./tools/lint/check_generated_artifact_contradictions.sh
+	@./build/bin/z23-lint check-generated-artifact-contradictions --selftest
+	@./build/bin/z23-lint check-generated-artifact-contradictions
 
 
 # docs/EQUIHASH_PARAMS.md is GENERATED by tools/equihash_params_fact.c, which
@@ -14508,15 +14508,15 @@ check-dumper-never-blocks: $(LINTC_TOOL)
 # shrinks toward a zero-debt invariant as Program H demotes the copy.
 check-no-block-index-flat: $(LINTC_TOOL)
 	@echo "══ LINT: no new flat/LevelDB/SQLite header-cache consumer (Program H) ══"
-	@./tools/scripts/check_no_block_index_flat.sh
+	@./build/bin/z23-lint check-no-block-index-flat
 
 check-no-utxo-projection: $(LINTC_TOOL)
 	@echo "══ LINT: no new event-sourced UTXO-projection consumer (Program H) ══"
-	@./tools/scripts/check_no_utxo_projection.sh
+	@./build/bin/z23-lint check-no-utxo-projection
 
 check-no-utxos-mirror-read: $(LINTC_TOOL)
 	@echo "══ LINT: no new node.db utxos-mirror reader (Program H) ══"
-	@./tools/scripts/check_no_utxos_mirror_read.sh --selftest && ./tools/scripts/check_no_utxos_mirror_read.sh
+	@./build/bin/z23-lint check-no-utxos-mirror-read --selftest && ./build/bin/z23-lint check-no-utxos-mirror-read
 
 check-no-silent-ready: $(LINTC_TOOL)
 	@echo "══ LINT: no-silent-ready (E8) ══"
@@ -14564,10 +14564,10 @@ check-commons-journey-ordering: $(PROCESS_GROUP_EXEC_BIN) $(BIN_DIR)/arena_produ
 # wf/dx-scanner-immunity — runs FIRST: names any untracked stray .c/.h file
 # under a scanned source dir as "untracked stray file (not a code
 # violation)" before any OTHER gate has a chance to report its content as
-# if it were a real defect. See tools/lint/check_no_stray_untracked_source.sh.
+# if it were a real defect. See ./build/bin/z23-lint check-no-stray-untracked-source.
 check-no-stray-untracked-source: $(LINTC_TOOL)
 	@echo "══ LINT: no stray untracked source (DX1) ══"
-	@./tools/lint/check_no_stray_untracked_source.sh
+	@./build/bin/z23-lint check-no-stray-untracked-source
 
 # The repository root is a curated list — source areas, top-level docs, and a
 # short allowlist of generated/local entries. Anything else (a stray database,
@@ -14625,7 +14625,7 @@ check-no-unattended-publish: $(LINTC_TOOL)
 # prefix outside every conditional, so no undocumented flag is load-bearing.
 check-installed-acceptance-tools: $(LINTC_TOOL)
 	@echo "══ LINT: installed Commons needs no optional flag ══"
-	@./tools/lint/check_installed_acceptance_tools.sh
+	@./build/bin/z23-lint check-installed-acceptance-tools
 
 # wf/dx-scanner-immunity regression proof — plants a transient lint-gate
 # fixture mid-scan and proves: (1) a production scan ignores it, (2) a
@@ -14700,8 +14700,8 @@ check-mind-owns-rebuild: $(LINTC_TOOL)
 .PHONY: check-tor-full-default
 check-tor-full-default: $(LINTC_TOOL)
 	@echo "══ LINT: real Tor is the default link, a stub cannot be packaged ══"
-	@./tools/lint/check_tor_full_default.sh --selftest
-	@./tools/lint/check_tor_full_default.sh
+	@./build/bin/z23-lint check-tor-full-default --selftest
+	@./build/bin/z23-lint check-tor-full-default
 
 # The Tor archive provenance verifier itself — links only zsha256
 # (self-contained SHA-256, no dependencies beyond libc) plus the header-only
@@ -15561,10 +15561,10 @@ first-build-timing-selftest:
 # bans an UNEXPLAINED one: any instance needs a `suppression-ok: <reason>`
 # marker on its line or the line above. Carries hermetic detector fixtures and
 # runs them before it certifies the tree, so it cannot report clean while
-# blind. Self-test: tools/lint/check_no_warning_suppression.sh --self-test
+# blind. Self-test: ./build/bin/z23-lint check-no-warning-suppression --self-test
 check-no-warning-suppression: $(LINTC_TOOL)
 	@echo "══ LINT: unexplained warning suppressions ══"
-	@./tools/lint/check_no_warning_suppression.sh .
+	@./build/bin/z23-lint check-no-warning-suppression .
 
 # ── Entry point: build-bench ─────────────────────────────────────────────
 # What the build and test loop costs on THIS host, measured with a wall clock

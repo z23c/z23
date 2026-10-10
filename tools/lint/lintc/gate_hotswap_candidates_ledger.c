@@ -135,7 +135,7 @@ static int hl_collect(const char *buf, size_t n, const char *tok,
 }
 
 /* check-hotswap-candidates-ledger — port of
- * tools/lint/check_hotswap_candidates_ledger.sh (now a shim). The agent-facing
+ * ./build/bin/z23-lint check-hotswap-candidates-ledger (now a shim). The agent-facing
  * advisory tool tools/dev/hotswap-candidates.sh re-parses the same .def
  * manifests the gates parse with its OWN awk walkers; a drifted walk does not
  * crash, it under-reports, and an agent believes it and pays the ~4m45s

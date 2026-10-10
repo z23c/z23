@@ -145,7 +145,7 @@ the surface the prior deletion missed.
 | Blocker remedies | `engine/conditions/include/conditions/blocker_remedy_bindings.def` | `:88,89,113,115,116,134,137,138,169` — re-point each remedy to its B7 replacement first |
 | Diagnostics dumpers | `engine/controllers/include/controllers/diagnostics_dumpers.def` | `:124` (legacy_mirror), `:568` (utxo_mirror_sync); update the diagnostics-registry test if it asserts the catalog |
 | Lint baselines | `tools/lint/file_purpose_baseline.txt` (`13,22,35,46,53,157,164-168`), `tools/lint/borrowed_seed_caller_baseline.txt:11`, `tools/scripts/repair_rung_baseline.txt:5,6,26`, `tools/lint/silent_bool_errors_baseline.txt:14-24,47,48,53,54,55` | remove the row(s) for each deleted file/symbol |
-| Lint scripts | `check_blocker_escape_registered.sh`, `check_condition_cooldown.sh`, `check_no_new_repair_rung.sh`, `check_lag_slo_observable.sh`, `check_honest_witness.sh`, `fresh-boot-proof.sh`, `sticky_fault_inject.sh` | confirm each still passes with the symbol gone (some grep for it) |
+| Lint scripts | `check_blocker_escape_registered.sh`, `check_condition_cooldown.sh`, `check_no_new_repair_rung.sh`, `z23-lint check-lag-slo-observable`, `check_honest_witness.sh`, `fresh-boot-proof.sh`, `sticky_fault_inject.sh` | confirm each still passes with the symbol gone (some grep for it) |
 | Build / Makefile | `Makefile:4934` (lag-SLO observability on `legacy_mirror_sync_service`) | re-source before deleting the service |
 | Consumer headers | §3/§4/§5 header lists | trim decls; delete dangling `stage_repair_reducer_frontier*` externs if the condition goes |
 | Agent-impact map | `cognition/controllers/include/controllers/agent_impact_rules.def:120,121` | remove the reducer_frontier / stale_validate rows |

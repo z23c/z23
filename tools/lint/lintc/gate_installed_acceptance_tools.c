@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-installed-acceptance-tools, the C23 lint
- * runtime port of tools/lint/check_installed_acceptance_tools.sh. Every
+ * runtime port of ./build/bin/z23-lint check-installed-acceptance-tools. Every
  * binary tools/dev/zcode_dht_acceptance.sh (the HARNESS) tests with
  * `[ -x ]` before it starts a node must be placed in the install prefix by
  * tools/dev/c23_commons_beta_acceptance.sh (the INSTALLER) OUTSIDE every

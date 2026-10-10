@@ -16,7 +16,7 @@
  */
 
 /* ── check-controller-private-headers ──────────────────────────────────────
- * Byte-parity C23 port of tools/lint/check_controller_private_headers.sh
+ * Byte-parity C23 port of ./build/bin/z23-lint check-controller-private-headers
  * (a header named controllers/<owner>_internal.h or <owner>_private.h
  * belongs to the dynamically-derived <owner> source family; every include
  * from outside that family, outside another *_internal.h/_private.h

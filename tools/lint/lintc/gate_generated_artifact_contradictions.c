@@ -19,7 +19,7 @@
 
 /* ── check-generated-artifact-contradictions ─────────────────────────────
  * Byte-parity C23 port of
- * tools/lint/check_generated_artifact_contradictions.sh (fail closed when
+ * ./build/bin/z23-lint check-generated-artifact-contradictions (fail closed when
  * the generated evidence artifacts disagree: the capability inventory
  * declares its consumed arm baseline in its own first record, and every
  * multi-arm claim must survive both directions of the cross-check).

@@ -201,7 +201,7 @@ static void race_fixture_probe(void) {}
 EOF
 stray_with_fixture_out=$(
     ZCL_STRAY_SCAN_DIRS_FOR_TEST="$SCAN_ROOT" \
-        bash tools/lint/check_no_stray_untracked_source.sh 2>&1
+        ./build/bin/z23-lint check-no-stray-untracked-source 2>&1
 )
 stray_with_fixture_rc=$?
 assert_pass "check_no_stray_untracked_source.sh ignores an untracked fixture-named file" "$stray_with_fixture_rc"
@@ -222,7 +222,7 @@ EOF
 
 stray_out=$(
     ZCL_STRAY_SCAN_DIRS_FOR_TEST="$SCAN_ROOT" \
-        bash tools/lint/check_no_stray_untracked_source.sh 2>&1
+        ./build/bin/z23-lint check-no-stray-untracked-source 2>&1
 )
 stray_rc=$?
 assert_fail "check_no_stray_untracked_source.sh fails on the untracked file" "$stray_rc"
@@ -237,7 +237,7 @@ fi
 rm -f "$STRAY_FILE"
 stray_clean_rc=0
 ZCL_STRAY_SCAN_DIRS_FOR_TEST="$SCAN_ROOT" \
-    bash tools/lint/check_no_stray_untracked_source.sh \
+    ./build/bin/z23-lint check-no-stray-untracked-source \
     >"$STRAY_CLEAN_OUT" 2>&1 || stray_clean_rc=$?
 assert_pass "check_no_stray_untracked_source.sh is clean again after cleanup" "$stray_clean_rc"
 

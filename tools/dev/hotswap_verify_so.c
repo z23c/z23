@@ -16,7 +16,7 @@
  * that has never been loaded is a claim, not an admission.
  *
  * All dlopen/dlsym/dlclose lives in engine/modules/hotswap behind #ifdef ZCL_DEV_BUILD —
- * the invariant tools/lint/check_hotswap_dev_only.sh enforces, so a release
+ * the invariant ./build/bin/z23-lint check-hotswap-dev-only enforces, so a release
  * build links zero dynamic-loading code. This file deliberately contains none.
  *
  * WHAT IT PROVES / DOES NOT PROVE: see hotswap_verify_module_so() in

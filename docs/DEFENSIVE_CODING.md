@@ -474,7 +474,7 @@ assert green).
   not a debt to ratchet down, it is a false statement, and the fix is to
   correct or delete it in the same change. A persona grants no authority: it
   is pasted into a dispatched unit's prompt and read by nothing else. Impl:
-  `tools/lint/check_persona_resolves.sh`, with a mandatory `--selftest` that
+  `./build/bin/z23-lint check-persona-resolves`, with a mandatory `--selftest` that
   plants an unknown territory, a directory holding no C, deleted evidence, a
   duplicate row and an unusably short stance, and requires a rejection on
   every one, plus an empty `.def` that must exit 2 rather than read as clean.
@@ -539,7 +539,7 @@ assert green).
   suffix. Owner-family sources, tests, and private-to-private headers pass;
   every other production edge must remain in the exact shrink-only baseline.
   New edges, stale rows, and missing or empty scan roots fail closed. Impl:
-  `tools/lint/check_controller_private_headers.sh`.
+  `./build/bin/z23-lint check-controller-private-headers`.
 
 - **Gate #45: `check-domain-purity`** (HARD) — `domain/` is the innermost
   layer. A `domain/**/*.c|.h` file (outside `*/test/*`) may only `#include` its
@@ -903,7 +903,7 @@ assert green).
   Override `// raw-controller-sql-ok`.
 
 - **`check-model-column-drift`** (RATCHET) —
-  `tools/lint/check_model_column_drift.sh`. A model in `engine/models/src/` must
+  `./build/bin/z23-lint check-model-column-drift`. A model in `engine/models/src/` must
   not hand-maintain the column indices of a multi-column row read: two or more
   distinct literal indices in `AR_READ_*` / `AR_COL_*` is the shape where
   inserting a column in the middle of the SQL column list silently shifts

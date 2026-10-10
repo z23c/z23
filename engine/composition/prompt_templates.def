@@ -24,7 +24,7 @@
  *   kind     the task kind, selected by `--kind` or by a `kind:` line in the
  *            task file's header. A short hyphenated noun phrase.
  *   section  an id declared in prompt_sections.def. Nothing else is
- *            admissible, and tools/lint/check_prompt_templates.sh fails on a
+ *            admissible, and ./build/bin/z23-lint check-prompt-templates fails on a
  *            section this file names that that file does not declare.
  *   body     the prose inserted under that section's marker. It is text a
  *            model reads, never a command the harness runs.

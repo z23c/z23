@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-tor-full-default, the C23 lint runtime port
- * of tools/lint/check_tor_full_default.sh. Real Tor is the default link
+ * of ./build/bin/z23-lint check-tor-full-default. Real Tor is the default link
  * and a stub cannot be packaged: (i) a build that links a node establishes
  * the Tor archives first, (ii) the stub is reachable only by naming
  * ZCL_TOR=stub, and (iii) every packaging step refuses a tor=stub binary
@@ -455,7 +455,7 @@ int check_tor_full_default_run(int argc, char **argv)
     tfd_clear_ov();
     if (argc > 0) {
         fprintf(tfd_err ? tfd_err : stderr,
-                "usage: check_tor_full_default.sh [--selftest]\n");
+                "usage: z23-lint check-tor-full-default [--selftest]\n");
         return 2;
     }
     return tfd_eval();

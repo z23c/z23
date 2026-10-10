@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Gate: check-no-snapshot-struct-memcmp
- * Port of tools/lint/check_no_snapshot_struct_memcmp.sh (now a shim).
+ * Port of ./build/bin/z23-lint check-no-snapshot-struct-memcmp (now a shim).
  * struct platform_positioned_file_snapshot (platform/modules/platform/
  * include/platform/positioned_file.h) is 64 bytes wide but holds only 56
  * bytes of fields: two uint32_t nanosecond members sit in front of wider

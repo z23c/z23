@@ -1,5 +1,5 @@
 # Program H0 baseline — CURRENT consumers of the demoted flat/LevelDB/SQLite
-# header-index caches (see tools/scripts/check_no_block_index_flat.sh).
+# header-index caches (see ./build/bin/z23-lint check-no-block-index-flat).
 # One repo-relative path per line. Program H deletion waves shrink this file
 # to comments-only; a stale row (consumer gone) FAILS the gate. Never add a
 # new row — a new consumer is architecture regression.

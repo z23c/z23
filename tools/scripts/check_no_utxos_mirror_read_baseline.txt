@@ -1,5 +1,5 @@
 # Program H4 baseline — CURRENT readers of the node.db `utxos` mirror in the
-# demotion-relevant trees (see tools/scripts/check_no_utxos_mirror_read.sh).
+# demotion-relevant trees (see ./build/bin/z23-lint check-no-utxos-mirror-read).
 # One repo-relative path per line. Program H4 shrinks this file to comments-only
 # as it re-points readers at the kernel coins store; a stale row (reader gone)
 # FAILS the gate. Never add a new row.

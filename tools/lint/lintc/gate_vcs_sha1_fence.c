@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-vcs-no-sha1 (port of
- * tools/scripts/check_vcs_no_sha1.sh, now a shim). HARD gate: ZVCS and
+ * ./build/bin/z23-lint check-vcs-no-sha1, now a shim). HARD gate: ZVCS and
  * producer-source authority may not inherit Git/SHA-1. ZVCS and content.v2
  * use SHA3-256; the dev supersession identity uses a SHA-256 digest of
  * current source bytes. Git object ids may remain external GitHub

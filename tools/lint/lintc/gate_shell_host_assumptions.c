@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-shell-host-assumptions lint gate of the
- * C23 lint runtime. Replaces tools/lint/check_shell_host_assumptions.sh:
+ * C23 lint runtime. Replaces ./build/bin/z23-lint check-shell-host-assumptions:
  * a shrink-only rail for shell commands whose spellings silently assume
  * Linux/GNU (bare `ss`, `nproc`, `stat -c`, `sed -i`). Every tracked *.sh
  * file's raw lexical text (comments, quotes and heredoc bodies included,
@@ -499,7 +499,7 @@ static int shl_report_violations(struct shl_violset *vs)
     for (int i = 0; i < vs->n; i++)
         fprintf(stderr, "  %s\n", vs->v[i]);
     fprintf(stderr, "Fix the command with a portable helper/fallback, then shrink with:\n");
-    fprintf(stderr, "  ZCL_LINT_MODE=UPDATE tools/lint/check_shell_host_assumptions.sh\n");
+    fprintf(stderr, "  ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-shell-host-assumptions\n");
     return 1;
 }
 

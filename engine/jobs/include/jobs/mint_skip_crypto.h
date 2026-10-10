@@ -34,7 +34,7 @@
  * engine/composition/src/boot_refold_staged.c::boot_mint_anchor_reset), gated under
  * ctx->mint_anchor, and the -mint-anchor process is a one-shot that never
  * starts P2P/RPC and _exit()s after the mint. Enforced by the lint gate
- * tools/lint/check_mint_skip_crypto_offline_only.sh + test_mint_skip_crypto.
+ * ./build/bin/z23-lint check-mint-skip-crypto-offline-only + test_mint_skip_crypto.
  *
  * This module changes NO validation rule for a running node — it only controls
  * whether the offline mint re-derives the (already-once-validated) crypto

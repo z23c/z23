@@ -39,7 +39,7 @@
  * a referee is the thing this project refuses.
  *
  * Consumers: tools/engine_unit.c (pastes the stance into a dispatched unit's
- * prompt, beside the generated brief) and tools/lint/check_persona_resolves.sh.
+ * prompt, beside the generated brief) and ./build/bin/z23-lint check-persona-resolves.
  */
 
 /* clang-format off */

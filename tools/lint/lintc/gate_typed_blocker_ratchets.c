@@ -27,7 +27,7 @@
 #include "lintc.h"
 
 /* ── check-typed-blocker (Gate #16) ──────────────────────────────────────
- * Port of tools/scripts/check_typed_blocker.sh. On 2026-05-21 the live
+ * Port of ./build/bin/z23-lint check-typed-blocker. On 2026-05-21 the live
  * node ran 4.3 days with a raw string blocker re-firing ~5/sec because
  * there was no de-duplication at the recorder. blocker_set() is the typed
  * primitive (rate-limiting, escape dispatch, retry budget, class-aware

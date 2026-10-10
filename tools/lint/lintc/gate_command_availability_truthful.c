@@ -37,7 +37,7 @@
  * this gate aborts LOUD (exit 2) rather than silently reading the wrong
  * slot and reporting a clean scan.
  *
- * Ported from tools/lint/check_command_availability_truthful.sh, which is
+ * Ported from ./build/bin/z23-lint check-command-availability-truthful, which is
  * now a 3-line exec shim onto this binary.
  */
 #ifndef _POSIX_C_SOURCE

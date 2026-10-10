@@ -44,7 +44,7 @@ or `fork(`. `contexts/commons/modules/vcs/` is sovereign by construction, not by
 regression that adds a `system("git ...")` call anywhere in that directory
 turns the build red.
 
-`tools/scripts/check_vcs_no_sha1.sh` is the separate source-authority gate. It
+`./build/bin/z23-lint check-vcs-no-sha1` is the separate source-authority gate. It
 keeps SHA-1 primitives out of `contexts/commons/modules/vcs/`, prevents the dev source identity from
 hashing Git HEAD/object data, and requires producer-receipt writers to use the
 baked SHA-256 source id. Its scope is deliberately **not** all cryptographic

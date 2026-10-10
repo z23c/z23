@@ -10,7 +10,7 @@
  */
 
 /* ── check-model-column-drift ──────────────────────────────────────────────
- * Byte-parity C23 port of tools/lint/check_model_column_drift.sh (a model
+ * Byte-parity C23 port of ./build/bin/z23-lint check-model-column-drift (a model
  * must not hand-maintain the column indices of a multi-column row read: any
  * model source reading TWO OR MORE DISTINCT literal column indices through
  * AR_READ_BLOB / AR_READ_STR / AR_COL_INT / AR_COL_BYTES / AR_COL_TEXT /

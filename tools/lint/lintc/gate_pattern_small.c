@@ -944,7 +944,7 @@ int check_no_gnu_va_args_selftest(void)
 }
 
 /* check-blob-read-bounds — port of the awk state machine from the original
- * tools/lint/check_blob_read_bounds.sh (now a shim). Fixed-size SQLite blob
+ * ./build/bin/z23-lint check-blob-read-bounds (now a shim). Fixed-size SQLite blob
  * reads in app models must use AR_READ_BLOB or prove the SQLite blob length
  * before memcpy: a short BLOB at rest must never be copied as 16/32/43/etc.
  * bytes from sqlite3_column_blob(). Per file: a variable assigned from

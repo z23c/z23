@@ -141,7 +141,7 @@ them — acceptance scripts, lint gates, operator probes — is where the silent
 Linux assumptions still live, and it is exactly the layer an agent runs
 first, so a wrong answer here costs a cycle before any C compiles.
 
-Measured by `tools/lint/check_shell_host_assumptions.sh` over 449 intended
+Measured by `./build/bin/z23-lint check-shell-host-assumptions` over 449 intended
 tracked `*.sh` files (the gate excludes its own implementation). The gate owns
 these counts; a hand grep is not equivalent to its conservative raw lexical
 scan, which includes comments, quoted programs, and heredoc bodies rather than

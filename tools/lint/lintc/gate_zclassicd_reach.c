@@ -23,7 +23,7 @@
 
 /* ── check-zclassicd-reach-allowlist ─────────────────────────────────────
  * Byte-parity C23 port of the shell RATCHET gate
- * tools/lint/gate_zclassicd_reach_allowlist.sh (at c2f48bda2): the set of
+ * ./build/bin/z23-lint check-zclassicd-reach-allowlist (at c2f48bda2): the set of
  * non-test source files that reach an external zclassicd is FROZEN in the
  * inline allowlist below — a reaching file not on the list fails the gate,
  * while a listed file that stopped reaching is tolerated and named as a
@@ -343,7 +343,7 @@ static int zra_fail_new(const char *root, const struct zra_list *cur,
               "dependence may not grow.\n"
               "If this reach is genuinely required, add the file to "
               "ALLOWLIST in\n"
-              "tools/lint/gate_zclassicd_reach_allowlist.sh AND justify it "
+              "tools/lint/lintc/gate_zclassicd_reach.c AND justify it "
               "in the commit.\n", err) < 0)
         return die("z23-lint: write failed\n", "");
     return 1;
