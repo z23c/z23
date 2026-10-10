@@ -72,6 +72,12 @@ bool db_file_service_save(struct node_db *ndb,
     AR_BEGIN_SAVE(cbs, "file_service", fs, db_file_service_validate);
 
     sqlite3_stmt *s = ndb->stmt_file_service_save;
+    /* Network-thread caller: serialize on the shared-connection statement
+     * mutex like db_peer_save. A cached statement is never left stepped
+     * after this returns (AR_STEP_DONE resets it on a failed step). */
+    bool locked_stmt = ndb->state_mutex_init;
+    if (locked_stmt)
+        zcl_mutex_lock(&ndb->state_mutex);
     AR_RESET(s);
     AR_BIND_BLOB(s, 1, fs->ip, 16);
     AR_BIND_INT(s, 2, fs->port);
@@ -80,6 +86,8 @@ bool db_file_service_save(struct node_db *ndb,
     AR_BIND_INT(s, 5, fs->is_zcl23 ? 1 : 0);
 
     bool ok = AR_STEP_DONE(s);
+    if (locked_stmt)
+        zcl_mutex_unlock(&ndb->state_mutex);
     AR_FINISH_SAVE(cbs, fs, ok);
 }
 

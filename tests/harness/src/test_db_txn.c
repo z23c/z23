@@ -14,6 +14,8 @@
 #include "models/database.h"
 #include "models/activerecord.h"
 #include "models/ar_after_commit.h"
+#include "models/file_service.h"
+#include "models/utxo.h"
 #include "event/event.h"
 
 #include <pthread.h>
@@ -693,6 +695,70 @@ static int t_busy_snapshot_rollback_rebegin(void)
     return failures;
 }
 
+/* ── 20b. A failed cached-statement step must not pin the snapshot ─ */
+
+/* The file-service insert is stepped from the network thread. When the write
+ * lock is held elsewhere the step ends BUSY; the cached statement must be
+ * reset on that path, or it keeps a read transaction open on the shared
+ * connection and every later write there fails BUSY_SNAPSHOT. */
+static int t_failed_cached_step_does_not_pin(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "db_txn", "failed_cached_step");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    
+
+    struct node_db a;
+    memset(&a, 0, sizeof(a));
+    bool opened = node_db_open(&a, path);
+    sqlite3 *b = NULL;
+    bool b_open = opened &&
+        sqlite3_open_v2(path, &b, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK;
+    if (b_open)
+        sqlite3_busy_timeout(a.db, 0);
+    bool b_locked = b_open &&
+        sqlite3_exec(b,
+            "BEGIN IMMEDIATE;"
+            "INSERT OR REPLACE INTO node_state(key,value) "
+            "VALUES('fs.b', X'01')", NULL, NULL, NULL) == SQLITE_OK;
+
+    struct db_file_service fs;
+    memset(&fs, 0, sizeof(fs));
+    fs.ip[15] = 1;
+    fs.port = 8033;
+    bool saved = b_locked && db_file_service_save(&a, &fs);
+    DT_RUN("dt: file-service save fails while the write lock is held",
+           b_locked && !saved);
+    DT_RUN("dt: failed save leaves the cached statement reset",
+           b_locked && sqlite3_stmt_busy(a.stmt_file_service_save) == 0);
+    DT_RUN("dt: failed save leaves no open transaction on the connection",
+           b_locked && sqlite3_txn_state(a.db, "main") == SQLITE_TXN_NONE);
+
+    struct db_utxo u;
+    memset(&u, 0, sizeof(u));
+    u.vout = 1;
+    u.value = 1;
+    u.height = 1;
+    bool u_saved = b_locked && db_utxo_insert_raw(&a, &u);
+    DT_RUN("dt: failed utxo insert fails and leaves its statement reset",
+           b_locked && !u_saved &&
+           sqlite3_stmt_busy(a.stmt_utxo_insert) == 0);
+
+    bool released = b_locked &&
+        sqlite3_exec(b, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    DT_RUN("dt: shared-connection write succeeds after the lock is released",
+           released && node_db_state_set(&a, "fs.a", "v", 1));
+
+    if (b)
+        sqlite3_close(b);
+    if (opened)
+        node_db_close(&a);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* ── 19. Poisoned COMMIT: abandoned write VM recovery ───────────── */
 
 /* A write VM abandoned in RUN state on
@@ -1057,6 +1123,7 @@ int test_db_txn(void)
     failures += t_rollback_preserves_pre_existing_rows();
     failures += t_failed_commit_rolls_back();
     failures += t_busy_snapshot_rollback_rebegin();
+    failures += t_failed_cached_step_does_not_pin();
     failures += t_poisoned_commit_recovery();
     failures += t_after_commit_not_fired_on_rollback();
     failures += t_after_commit_fires_on_commit();

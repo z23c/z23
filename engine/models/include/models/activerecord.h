@@ -50,6 +50,7 @@
 
 #include "event/event.h"
 #include "models/ar_after_commit.h"
+#include <sqlite3.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -348,7 +349,18 @@ static inline void ar_errors_full_messages(const struct ar_errors *e,
 
 /* Step and check result */
 #define AR_STEP_ROW(stmt)  (sqlite3_step(stmt) == SQLITE_ROW)
-#define AR_STEP_DONE(stmt) (sqlite3_step(stmt) == SQLITE_DONE)
+/* Invariant: a cached statement is never left stepped after its call returns.
+ * A step that ends BUSY/LOCKED leaves the VM active, holding a read snapshot
+ * that makes every later write on the connection fail BUSY_SNAPSHOT, so a
+ * failed step resets it here (errcode/errmsg survive the reset). */
+static inline bool ar_step_done(sqlite3_stmt *stmt)
+{
+    int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE)
+        sqlite3_reset(stmt);
+    return rc == SQLITE_DONE;
+}
+#define AR_STEP_DONE(stmt) ar_step_done(stmt)
 
 /* Column readers */
 #define AR_COL_INT(stmt, col)    sqlite3_column_int64(stmt, col)
