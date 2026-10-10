@@ -4938,6 +4938,117 @@ static int case_light_review_pass_kind(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+
+/* ── the fleet ledger row a finished Claude CLI unit files ───────────────
+ * Runs the real binary against a fake `claude` that prints a canned result
+ * and a fake ledger program that records its argv, one arg per line. */
+
+#define CLAUDE_LEDGER_BODY(COST) \
+    "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false," \
+    "\"num_turns\":3,\"result\":\"done\"," \
+    "\"session_id\":\"63c495cb-5b9f-4e4a-8979-29ed2a67f8b1\"," COST \
+    "\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":13822," \
+    "\"cache_read_input_tokens\":100,\"output_tokens\":41}," \
+    "\"modelUsage\":{\"claude-haiku-5-5\":{\"inputTokens\":7," \
+    "\"outputTokens\":41,\"cacheReadInputTokens\":100," \
+    "\"cacheCreationInputTokens\":13822}}}"
+
+static bool claude_ledger_run(const char *tag, const char *body,
+                              char *argv_txt, size_t cap)
+{
+    char rel[512], dir[600];
+    test_make_tmpdir(rel, sizeof(rel), "engine_claude_ledger", tag);
+    if (!test_abs_path(rel, dir, sizeof(dir))) {
+        test_rm_rf(rel);
+        return false;
+    }
+    char bin_dir[700], state[700], worktree[700], task[700], body_path[700];
+    char claude[700], ledger[700], log[700], run_log[700], text[1600];
+    (void)snprintf(bin_dir, sizeof(bin_dir), "%s/bin", dir);
+    (void)snprintf(state, sizeof(state), "%s/state", dir);
+    (void)snprintf(worktree, sizeof(worktree), "%s/wt", dir);
+    (void)snprintf(task, sizeof(task), "%s/task.txt", dir);
+    (void)snprintf(body_path, sizeof(body_path), "%s/body.json", dir);
+    (void)snprintf(claude, sizeof(claude), "%s/claude", bin_dir);
+    (void)snprintf(ledger, sizeof(ledger), "%s/ledger.sh", dir);
+    (void)snprintf(log, sizeof(log), "%s/ledger.argv", dir);
+    (void)snprintf(run_log, sizeof(run_log), "%s/run.log", dir);
+    if (mkdir(bin_dir, 0700) != 0 || mkdir(state, 0700) != 0 ||
+        mkdir(worktree, 0700) != 0) {
+        test_rm_rf(dir);
+        return false;
+    }
+    (void)snprintf(text, sizeof(text), "#!/bin/sh\ncat '%s'\n", body_path);
+    bool ok = write_whole_file(claude, text) && chmod(claude, 0700) == 0;
+    (void)snprintf(text, sizeof(text),
+                   "#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\"; "
+                   "done > '%s'\n", log);
+    ok = ok && write_whole_file(ledger, text) && chmod(ledger, 0700) == 0 &&
+         write_whole_file(body_path, body) &&
+         write_whole_file(task, "kind: fix-gate\n\nMeasure the row.\n");
+    if (!ok) {
+        test_rm_rf(dir);
+        return false;
+    }
+    char cmd[4096];
+    (void)snprintf(cmd, sizeof(cmd),
+        "PATH=%s:$PATH %s --engine claude-haiku --task %s --no-group "
+        "--yes-dispatch --worktree %s --state-dir %s --fleet-ledger %s "
+        ">%s 2>&1", bin_dir, ENGINE_UNIT_BIN, task, worktree, state, ledger,
+        run_log);
+    TEST_DISCARD(system(cmd)); /* the row is read from what the ledger saw */
+    argv_txt[0] = '\0';
+    const bool got = read_whole_file(log, argv_txt, cap);
+    test_rm_rf(dir); /* read the argv log first: it lives under dir */
+    return got;
+}
+
+static int case_claude_ledger_row_e2e(void)
+{
+    int failures = 0;
+    if (!engine_unit_binary_present()) {
+        printf("engine: FAIL (%s is required for the ledger row e2e)\n",
+               ENGINE_UNIT_BIN);
+        return 1;
+    }
+    char row[2048];
+    const bool priced = claude_ledger_run("priced",
+        CLAUDE_LEDGER_BODY("\"total_cost_usd\":0.0027666,"), row, sizeof(row));
+    EN_CHECK("a priced Claude unit files a usage row", priced &&
+             strstr(row, "--subject=claude-haiku\n") != NULL);
+    EN_CHECK("known token facts are sent (input includes cached input)",
+             priced && strstr(row, "--tokens_in=13929\n") &&
+             strstr(row, "--tokens_out=41\n") &&
+             strstr(row, "--tokens_cached=100\n") &&
+             strstr(row, "--turns=3\n"));
+    EN_CHECK("the vendor cost is sent in micro-dollars, rounded",
+             priced && strstr(row, "--cost_micro_usd=2767\n"));
+    EN_CHECK("an unreported reasoning count is omitted, not sent as 0",
+             priced && !strstr(row, "tokens_reasoning"));
+
+    const bool unpriced = claude_ledger_run("unpriced",
+        CLAUDE_LEDGER_BODY(""), row, sizeof(row));
+    EN_CHECK("an unpriced run still files its tokens", unpriced &&
+             strstr(row, "--tokens_in=13929\n"));
+    EN_CHECK("an unknown cost is omitted, not sent as 0",
+             unpriced && !strstr(row, "cost_micro_usd"));
+
+    const bool negative = claude_ledger_run("negative",
+        CLAUDE_LEDGER_BODY("\"total_cost_usd\":-1.5,"), row, sizeof(row));
+    EN_CHECK("a negative cost is omitted",
+             negative && strstr(row, "--tokens_in=13929\n") &&
+             !strstr(row, "cost_micro_usd"));
+
+    const bool huge = claude_ledger_run("huge",
+        CLAUDE_LEDGER_BODY("\"total_cost_usd\":1e20,"), row, sizeof(row));
+    EN_CHECK("a cost that would overflow int64 micro-dollars is not sent",
+             huge && strstr(row, "--tokens_in=13929\n") &&
+             !strstr(row, "cost_micro_usd"));
+    return failures;
+}
+#endif
+
 int test_engine(void)
 {
     int failures = 0;
@@ -4970,6 +5081,7 @@ int test_engine(void)
     failures += case_engine_unit_state_e2e();
 #if !defined(_WIN32)
     failures += case_engine_unit_grok_projection_e2e();
+    failures += case_claude_ledger_row_e2e();
 #endif
     failures += case_review_findings_not_verdict();
     failures += case_contract();

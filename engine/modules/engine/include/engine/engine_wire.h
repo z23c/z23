@@ -105,6 +105,11 @@ struct engine_cli_observation {
     int64_t output_tokens;
     int64_t reasoning_tokens;
     int64_t total_tokens;
+    /* Vendor-reported spend for the whole invocation, when the vendor says
+     * (Claude's total_cost_usd). cost_known=false is truthful UNKNOWN, never
+     * free: absent, non-number, negative and non-finite all land there. */
+    double  cost_usd;
+    bool    cost_known;
 };
 
 void engine_reply_free(struct engine_reply *r);

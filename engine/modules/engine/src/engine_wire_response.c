@@ -22,6 +22,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -261,6 +262,25 @@ static bool claude_read_counters(const struct json_value *root,
     return true;
 }
 
+/* total_cost_usd is optional. Only a finite, nonnegative JSON number is a
+ * cost; anything else leaves the cost unknown rather than zero. */
+static void claude_read_cost(const struct json_value *root,
+                             struct engine_cli_observation *t)
+{
+    const struct json_value *c = json_get(root, "total_cost_usd");
+    double v = 0.0;
+    if (c && c->type == JSON_REAL)
+        v = json_get_real(c);
+    else if (c && c->type == JSON_INT)
+        v = (double)json_get_int(c);
+    else
+        return;
+    if (!isfinite(v) || v < 0.0)
+        return;
+    t->cost_usd = v;
+    t->cost_known = true;
+}
+
 /* A result that is not a clean success: typed refusal, not usage to count. */
 static bool claude_result_is_success(const struct json_value *root)
 {
@@ -311,6 +331,7 @@ static bool cli_observation_from_claude(const char *body, size_t len,
                      sizeof(tmp.resolved_model), "resolved model") &&
                  claude_read_counters(&root, usage, &tmp)) {
             tmp.reasoning_tokens = -1;
+            claude_read_cost(&root, &tmp);
             snprintf(tmp.stop_reason, sizeof(tmp.stop_reason), "%s", "success");
             tmp.known = true;
             ok = true;

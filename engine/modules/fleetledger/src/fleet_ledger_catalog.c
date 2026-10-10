@@ -233,7 +233,11 @@ bool zcl_fleet_subject_from_name(uint8_t kind, const char *name,
 
 /* Indexed by the enum value, so slot 0 is deliberately absent: key 0 is not
  * a key, and a caller that forgot to set one gets a refusal rather than the
- * first entry in a table. */
+ * first entry in a table.
+ *
+ * Meanings worth stating: tokens_in is the whole input side and INCLUDES
+ * cached input; tokens_cached is the cache-read part of it; cost_micro_usd
+ * is the vendor-reported spend in millionths of a dollar. */
 static const char *const k_pair_names[ZCL_FLEET_PAIR_KEY_MAX + 1] = {
     NULL,
     "tokens_in", "tokens_out", "tokens_cached", "tokens_reasoning",

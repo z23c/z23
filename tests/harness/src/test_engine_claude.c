@@ -123,6 +123,36 @@ static int case_decoder(void)
     EC_CHECK("known, model and session",
              o.known && strcmp(o.resolved_model, "claude-haiku-5-5") == 0 &&
              strcmp(o.session_id, "63c495cb-5b9f-4e4a-8979-29ed2a67f8b1") == 0);
+    EC_CHECK("total_cost_usd decodes to a known cost",
+             o.cost_known && o.cost_usd > 0.00276659 && o.cost_usd < 0.00276661);
+
+    /* The cost is optional and only a finite nonnegative number counts. */
+    {
+        const char *fields[] = { "\"total_cost_usd\":0.0027666,", "",
+                                 "\"total_cost_usd\":-0.5,",
+                                 "\"total_cost_usd\":\"0.5\",",
+                                 "\"total_cost_usd\":null,",
+                                 "\"total_cost_usd\":0," };
+        const bool known[] = { true, false, false, false, false, true };
+        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+            char body[1024];
+            struct engine_cli_observation c;
+            snprintf(body, sizeof(body),
+                "{\"type\":\"result\",\"subtype\":\"success\","
+                "\"is_error\":false,\"num_turns\":3,\"result\":\"done\","
+                "\"session_id\":\"63c495cb-5b9f-4e4a-8979-29ed2a67f8b1\",%s"
+                "\"usage\":{\"input_tokens\":7,"
+                "\"cache_creation_input_tokens\":1,"
+                "\"cache_read_input_tokens\":1,\"output_tokens\":4},"
+                "\"modelUsage\":{\"claude-haiku-5-5\":{\"outputTokens\":4}}}",
+                fields[i]);
+            const bool parsed = engine_cli_observation_parse(
+                v, body, strlen(body), &c);
+            EC_CHECK("cost variant: run still decodes, cost known only when valid",
+                     parsed && c.known && c.cost_known == known[i] &&
+                     (known[i] || c.cost_usd == 0.0));
+        }
+    }
 
     EC_CHECK("is_error true is a failed invocation",
         refused(v, "{\"type\":\"result\",\"subtype\":\"success\","

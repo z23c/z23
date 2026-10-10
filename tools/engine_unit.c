@@ -96,6 +96,7 @@
 #include "vcs/vcs_object.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2140,9 +2141,36 @@ static const char *unit_ledger_provider(const char *engine_id)
         return "grok";
     if (strcmp(engine_id, "glm") == 0 || strcmp(engine_id, "glm-cli") == 0)
         return "glm";
+    /* The Claude rows name their own ledger subject: a priced CLI run is
+     * the cost-per-task evidence, so it must not vanish for want of a map. */
+    if (strcmp(engine_id, "claude-haiku") == 0 ||
+        strcmp(engine_id, "claude-sonnet") == 0)
+        return engine_id;
     if (strcmp(engine_id, "openai") == 0)
         return "codex";
     return NULL; /* `fixture` spends nothing; an unknown id names nothing */
+}
+
+/* The CLI observation carries the vendor's own total_cost_usd; the HTTP path
+ * already fills the usage cost from the response. Without this the receipt
+ * and the ledger row call a priced CLI run "cost unknown". */
+static void unit_adopt_cli_cost(struct dispatch_result *dr)
+{
+    if (!dr->cli_observation.known || !dr->cli_observation.cost_known ||
+        dr->reply.usage.cost_known)
+        return;
+    dr->reply.usage.cost_usd = dr->cli_observation.cost_usd;
+    dr->reply.usage.cost_known = true;
+}
+
+/* USD to whole micro-dollars, rounded to nearest. Unknown, negative,
+ * non-finite or a value that would not fit an int64 is "not said". */
+static int64_t unit_cost_micro_usd(const struct engine_usage *usage)
+{
+    if (!usage || !usage->cost_known || !isfinite(usage->cost_usd) ||
+        usage->cost_usd < 0.0 || usage->cost_usd > 9.0e12)
+        return ENGINE_RECEIPT_UNREPORTED;
+    return (int64_t)(usage->cost_usd * 1e6 + 0.5);
 }
 
 /* One `--key=value` argument, or nothing at all when the value is absent.
@@ -2186,7 +2214,8 @@ static void unit_ledger_row(const struct unit_opts *o,
         return;
 
     const char *argv[16];
-    char slots[8][48];
+    /* Indexed by argv position (not pair count), so sized to argv. */
+    char slots[16][48];
     size_t n = 0;
     argv[n++] = o->fleet_ledger_bin;
     argv[n++] = "fleet";
@@ -2197,6 +2226,8 @@ static void unit_ledger_row(const struct unit_opts *o,
     argv[n++] = note;
     const size_t fixed = n;
     const bool tok = usage && usage->tokens_known;
+    /* tokens_in is the whole input side: on the CLI path prompt_tokens is
+     * total minus output, so it INCLUDES cached input (read and write). */
     unit_ledger_pair("tokens_in", tok ? usage->prompt_tokens
                                       : ENGINE_RECEIPT_UNREPORTED,
                      slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
@@ -2211,6 +2242,8 @@ static void unit_ledger_row(const struct unit_opts *o,
     unit_ledger_pair("tokens_reasoning",
                      seen ? obs->reasoning_tokens : ENGINE_RECEIPT_UNREPORTED,
                      slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
+    unit_ledger_pair("cost_micro_usd", unit_cost_micro_usd(usage), slots, argv,
+                     &n, sizeof(argv) / sizeof(argv[0]));
     unit_ledger_pair("wall_ms", wall_ms, slots, argv, &n,
                      sizeof(argv) / sizeof(argv[0]));
     unit_ledger_pair("turns", seen ? obs->turns : ENGINE_RECEIPT_UNREPORTED,
@@ -2970,6 +3003,7 @@ int main(int argc, char **argv)
             verdict = ENGINE_VERDICT_REFUSED;
             break;
         }
+        unit_adopt_cli_cost(&dr);
 
         /* Archive the raw completion before any envelope parsing touches
          * it. A FAIL(NO-CHANGE) verdict alone cannot say whether the model
@@ -2998,11 +3032,17 @@ int main(int argc, char **argv)
         else
             engine_emit(stdout, "  spend:      not reported by %s\n", v->id);
 
+        /* For an engine that edits in place the cap is checked after those
+         * edits exist. REFUSED here skips the apply and the gate, and nothing
+         * reverts the worktree: it keeps the edits for the caller to inspect
+         * or discard. */
         if (o.max_cost_usd > 0.0 && dr.reply.usage.cost_known
             && dr.reply.usage.cost_usd > o.max_cost_usd) {
             engine_emit(stderr,
                         "engine_unit: the reported spend exceeded "
-                        "--max-cost-usd\n");
+                        "--max-cost-usd; a CLI engine may have edited the "
+                        "worktree in place, and those edits were not "
+                        "reverted\n");
             dispatch_failed = true;
             verdict = ENGINE_VERDICT_REFUSED;
             break;
