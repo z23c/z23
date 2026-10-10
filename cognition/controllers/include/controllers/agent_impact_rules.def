@@ -3190,7 +3190,7 @@ AGENT_IMPACT_RULE("cognition/modules/territory/include/territory/territory.h|cog
  * self-test lives inside the engine group, and cold_join_sovereign rides along
  * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
  * which is the exact reason this module has no transport in it. */
-AGENT_IMPACT_RULE("engine/modules/engine/src/*.c|engine/modules/engine/include/engine/*.h|tests/harness/src/test_engine.c|tests/harness/src/test_engine_claude.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine engine_claude engine_rules cold_join_sovereign make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/engine/src/*.c|engine/modules/engine/include/engine/*.h|tests/harness/src/test_engine.c|tests/harness/src/test_engine_claude.c|tests/harness/src/test_engine_escalate.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine engine_claude engine_escalate engine_rules cold_join_sovereign make_lint_gates")
 /* The heuristic half: the rule vocabulary, the scorer that retires a rule off
  * gate outcomes, the miner that proposes one, and the read leaf that shows the
  * table. A change to the vocabulary is a change to what every executor is

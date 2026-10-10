@@ -1118,6 +1118,7 @@ int main(int argc, char **argv)
     failures += test_sqlite();
     failures += test_activerecord();
     { extern int test_engine_rules(void); failures += test_engine_rules(); }
+    { extern int test_engine_escalate(void); failures += test_engine_escalate(); }
     { extern int test_engine_claude(void); failures += test_engine_claude(); }
     failures += test_validation();
     { extern int test_consensus_parity(void); failures += test_consensus_parity(); }
