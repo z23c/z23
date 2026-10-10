@@ -1693,3 +1693,81 @@ Every refusal names the file, the line number and the reason
 (`mvl_bad_json`, `mvl_line_too_long`, `mvl_plan_field`, `mvl_tsv_header`,
 `mvl_overflow`, …). Line length is capped and every table is a fixed size, so
 no input can grow the reader without bound.
+
+## Retired procedures
+
+These procedures were last scripted in shell with no tracked caller and were
+removed in 46a8af087. Nothing automated runs them today, and no entry below is
+a current pass. Each entry records the method so it can be rebuilt as a native
+tool or a registered test; `git show 46a8af087^:<path>` prints the exact text.
+
+### tools/scripts/debug_bundle_triage.sh <!-- doc-path-ok: removed in 46a8af087 -->
+Purpose: read-only, one-screen triage of a `zcl.debug_bundle.v1` JSON, to see
+why the node is wedged. Inputs: a bundle file, or a directory (newest
+`debug-bundle-*.json` by mtime); helper `build/bin/jsonq`, overridable by `JSONQ`.
+Method: 1. refuse unless `format` is `zcl.debug_bundle.v1` and `subsystems` exists.
+2. print `trigger`, `captured_at_utc`, `build.version`, 12-char `build_commit`.
+3. `reducer_frontier`: H*, served floor and gap, H*+1 blocker, coins verdict.
+4. `blocker`: `active_count`, class counts, first 5 blockers (`fire_count`,
+`reason` cut at 72 chars). 5. `supervisor_stalls`: per child `stall_reason`,
+`stall_fires`, `last_tick_age_us`. 6. `sovereignty`: `trust_mode`, if present.
+Checks: no pass or fail; coins cover H* when `coins_best_height` >= H*-1.
+Exit 1 on a bad format, 2 on usage. Writes: stdout only.
+
+### tools/scripts/ux_join_drill.sh <!-- doc-path-ok: removed in 46a8af087 -->
+Purpose: one stranger-join run in an isolated /tmp datadir (`iso_init`), joining
+one operator-named peer over Tor. Inputs: built `z23`, `jsonq`, `zclassic23`,
+`zcl-rpc`; the peer via `UX_JOIN_PEER_ONION` and `UX_JOIN_PEER_PORT`, or
+`UX_JOIN_PEER_FILE`; no peer named exits 2.
+Method: 1. start `zclassic23 -tor -onion-persist`. 2. poll `core network onion
+status` for `bootstrap_state` `ready`. 3. `core network peers add --address=` must
+return `dial_requested`; then RPC `addnode`. 4. Three clocks from t0: PEERED, a
+`getpeerinfo` entry for the onion with a version; FIRST_MSG, `app messaging send`
+(`plan`, then `confirm:true` gives `sent`) and the log text `delivery ack from
+peer`; SYNCED, `getblockcount` >= the peer's `startingheight`, captured at verack
+and not a live tip. 5. 60 s defect rule: a step over `UX_JOIN_STEP_BUDGET` (60)
+prints `DEFECT=<token> seconds=<n>` and is never a pass.
+Writes: one JSON line per run to `UX_JOIN_CLOCK`; pass needs all 3 clocks, 0 defects.
+
+### tools/dev/core-section-dependency-graph.sh <!-- doc-path-ok: removed in 46a8af087 -->
+Purpose: measure the directed dependency graph among the sealed core's
+subsystems, to decide whether a section can be the swap unit. Subsystems are
+SECTION directories with a `include` or `src` SECTION child. It reads
+`core/MANIFEST.sha3` and changes nothing; it writes only its work directory.
+Inputs: `make` (`CACHED_CFLAGS`, or `--cflags=STR`), `cc`, `nm`; `--work=DIR`.
+Method: three axes, none inferred from names. INCLUDE-CLOSURE: `cc -MM` per
+sealed file, filtered to sealed files. INCLUDE-DIRECT: each file's own
+`#include`, resolved on the `-I` path and cross-checked against the closure.
+SYMBOL: each sealed `.c` built with LTO off and read with `nm -P`; an undefined
+symbol defined by another subsystem is an edge. Output: a union matrix (D, S,
+i, (c) for closure-only), edge counts, leaves, 2- and 3-cycles, and interface
+width. Writes: a work directory under TMPDIR or `build/tmp`, removed on exit
+unless `--work`; the report goes to stdout.
+
+### tools/dev/zcc-reuse-bench.sh <!-- doc-path-ok: removed in 46a8af087 -->
+Purpose: Linux compile-reuse A/B of two ZCC binaries with isolated caches.
+Inputs: two executables, BEFORE and AFTER (usage exit 2); `cc`, `realpath`,
+`sha256sum`; unsets `ZCC_DISABLE` and `ZCC_AUDIT`.
+Method: 1. generate `fixture.c` (1000 `fixture_N` functions). 2. five rounds; odd
+rounds run BEFORE then AFTER, even rounds reversed. 3. per version, a cold batch
+then a warm batch, each four concurrent `ZCC cc -std=c23 -O2 -Wall -Wextra -Werror
+-pedantic` jobs with `ZCC_STRICT=1`. 4. assert the four outputs are `cmp`-equal to
+each other and to the saved first output, and `hits + misses` is 4. 5. measure
+batch `wall_ms`, `user_s`, `system_s`, and HIT, MISS, WAIT log counts.
+Writes: a kept directory under TMPDIR with `results.csv` (columns `round,version,
+state,wall_ms,user_s,system_s,hits,misses,waits`), `environment.txt`, `oracle.o`.
+No speed threshold; the CSV is measurement only.
+
+### tools/scripts/metaverse_site_smoke.sh <!-- doc-path-ok: removed in 46a8af087 -->
+Purpose: smoke the `/metaverse` pages on an isolated node over its HTTPS listener.
+Inputs: `iso_init`, `iso_spawn_node`, `iso_wait_rpc_ready 90`; `openssl`; `curl`.
+Method: 1. mint a one-day self-signed `ssl/fullchain.pem` and `ssl/privkey.pem`
+(the listener starts only when both exist). 2. spawn the node; sleep 2. 3. `curl -kfsS`
+`/metaverse`, `/metaverse/property`, `/metaverse/space`, `/metaverse/commons` on
+`ISO_HTTPSPORT`, expecting 200 (`SMOKE 200 <route> (<bytes> bytes)`). 4. markers,
+verbatim: `nobody owns the world they build in` and `SIMULATION` on `/metaverse`,
+`zcode_package` on `/metaverse/property`, `ZC23 Living Commons` on `/metaverse/commons`.
+Writes: stdout; exit 1 when a route or marker check fails.
+
+The two-node terminal acceptance procedure is the sixth retired one; it is
+recorded in `docs/work/SOVEREIGN_MACHINE_MESH_PLAN.md`.

@@ -424,6 +424,148 @@ tears down access and emits a bounded signed receipt. Relay and rendezvous
 peers forward opaque ciphertext only and never acquire endpoint credentials or
 access authority.
 
+### Two-node terminal acceptance procedure
+
+**Purpose.** On two isolated regtest nodes, prove that two independent ZID
+masters anchor, provision chain-bound delegations, authenticate each other
+over the DHT, and pair bilaterally with the commit-time terminal-exec
+capability. Then drive a confined `fbsh` shell on the responder through the
+ZMTERM lane: open, poll, write, read, resize, close. Finally, prove that a
+mid-session revoke on the responder ends the live terminal with its named
+evidence, and that a wrong fingerprint never writes a pairing.
+
+**Topology.** Two nodes on loopback.
+
+- Node A is the initiator. P2P `20032`, RPC `29311`, FS `29312`,
+  HTTPS `29313`.
+- Node B is the terminal responder. P2P `18043`, RPC `29321`, FS `29322`,
+  HTTPS `29323`. Only B is started with `-terminalshell=<build/bin/fbsh>`.
+
+The granted shell is `fbsh`, not `/bin/sh`. The cage's grant is the
+filesystem (the per-terminal workdir plus the one granted binary). A
+dynamically linked shell fails `execve` closed inside that cage, because the
+kernel's ELF-interpreter open and every shared-library open fall outside the
+grant. `fbsh` is the project's statically linked confined shell, the same
+binary the worker group's live cases drive.
+
+**Steps, in order.** Each step's assertion is the exact field or text checked.
+
+1. **Preflight.** Assert the eight ports are free. Require the node, RPC and
+   native C23 acceptance binaries, `build/bin/fbsh`, and `xxd`. Create the
+   work directory with `dht_make_work zcl23-termacc`. Build the master-pubkey
+   helper by sourcing only `dht_build_helper` from
+   `zcode_dht_acceptance.sh`. Write one fixed test master seed per node to a
+   mode-600 file, and derive each node's public key with the helper.
+2. **Boot.** Start A, then start B with the initial link
+   `-connect=127.0.0.1:<A P2P>`. Wait on RPC warm-up for both.
+3. **Fund.** On A, call `getnewaddress`, then `dht_mine_to_address 101`.
+   Wait for B to reach height `101` and for A's reducer fold to reach `101`.
+4. **Custody phase.** Restart B onto the dead sink, then restart A. On A,
+   call `addnode` with `127.0.0.1:<B P2P>` and `"onetry"`. Wait for
+   connection, live sync, and the chain index at `101`. Unlock the wallet,
+   top up the keypool with `getnewaddress`, take the encrypted backup, and
+   wait for a positive spendable balance.
+5. **Anchor both masters.** On A, call `dht_anchor` for A's public key with
+   label `term-anchor-a`, then `dht_mine_empty 1`. Call `dht_anchor` for B's
+   public key with label `term-anchor-b`, then `dht_mine_empty 1`. Then
+   `dht_mine_empty 21`, and wait for B to reach height `124`.
+6. **Provision delegations.** Run
+   `zcode network delegate --input={"seed_file":...}` through `dht_native`
+   on A and then on B. Assert `ok` is `True` for each. Assert these files are
+   non-empty on each node: `v2_identity.key`,
+   `zcode/dht/online_ed25519.key`, and `zcode/dht/delegation.v1`. Refusals:
+   `A delegation failed: <output>`, `B delegation failed: <output>`, and
+   `provisioned identity file missing: <path>`.
+7. **Restart and authenticate.** Restart B, then A, with the same flags.
+   On A, call `addnode` with `"onetry"` for B. Wait for mutual DHT
+   authentication with `dht_wait_auth` on each side. Refusals:
+   `A never authenticated B over DHT` and `B never authenticated A over DHT`.
+8. **Pair A to B, with a wrong fingerprint first.** On A, call
+   `mesh_pairing_plan`. Read `peer_noise_fingerprint_sha3` and `pairing_id`.
+   Refuse with `A plan did not name B` if either is empty. Flip the last hex
+   digit of the fingerprint, staying inside the hex alphabet. Call
+   `mesh_pairing_commit` with that fingerprint, `"terminal":true`,
+   `"days":1`. It must return `ok` `False`, or the script refuses with
+   `a wrong fingerprint was accepted`. The PASS line is
+   `PASS wrong-fingerprint commit refused (<code>)`.
+9. **Commit A's pairing.** Call `mesh_pairing_commit` on A with B's real
+   fingerprint, `"terminal":true`, `"days":1`. Assert `ok` is `True` and
+   `pairing.capability` is `status_read+terminal_exec`. Refusals:
+   `A commit failed` and `A commit did not record the terminal capability`.
+10. **Pair B to A.** Call `mesh_pairing_plan` on B and read A's
+    `peer_noise_fingerprint_sha3`. Refuse with `B plan did not name A` if it
+    is empty. Call `mesh_pairing_commit` on B with that fingerprint,
+    `"terminal":true`, `"days":1`. Assert `ok` is `True`. Read the pairing id
+    from `pairing.pairing_id`, or from `pairing_id` if that is empty. Refusals:
+    `B commit failed` and `B commit did not return its pairing id`.
+11. **Open.** On A, call `mesh_terminal_open` with `pairing_id` set to A's
+    pairing id, `"cols":80`, `"rows":24`. Assert `ok` is `True` and read
+    `terminal_id`. Refusals: `terminal open failed` and
+    `open returned no terminal id`.
+12. **Live.** Poll `mesh_terminal_poll` with `terminal_id` until `state` is
+    `live`. Assert `cols` is `80`. Refusals: `terminal never went live`
+    (after `terminal <id> never reached state=live` is noted), and
+    `live view lost the requested geometry`. The PASS line is
+    `PASS terminal is live on B's confined cage`.
+13. **Write and read.** Call `mesh_terminal_write` with `terminal_id` and
+    `input_hex`, the hex of `echo <marker>` plus a newline. The marker is
+    `z23-term-<epoch seconds>`. Then poll `mesh_terminal_read` with
+    `"max_bytes":4096`, decode `output_hex`, and stop when the marker
+    appears. Refusals: `terminal write failed` and
+    `marker never appeared in terminal output`. Also
+    `the confined shell never echoed the marker`. The PASS line is
+    `PASS the confined shell echoed through the mesh`.
+14. **Resize.** Call `mesh_terminal_resize` with `"cols":100`, `"rows":30`.
+    Assert `ok` is `True`. Refusal: `resize failed`.
+15. **Close.** Call `mesh_terminal_close` with `terminal_id`. Assert `ok` is
+    `True`. Refusal: `close failed`. Poll until `state` is `ended`. Assert
+    `close_reason` is `requested`. Refusals:
+    `terminal <id> never ended` and
+    `operator close did not end the session by name`. The PASS line is
+    `PASS operator close ended the session by name`.
+16. **Second open.** Open again with the same arguments, assert `ok` is
+    `True`, and wait for `live`. This shows the responder spawns again after a
+    clean end. Refusals: `second open failed` and
+    `second terminal never went live`.
+17. **Mid-session revoke.** On B, call `mesh_pairing_revoke_plan` with
+    `pairing_id` set to B's pairing id, and read `confirmation`. Refuse with
+    `revoke plan returned no confirmation` if it is empty. Call
+    `mesh_pairing_revoke_commit` on B with the same `pairing_id` and
+    `"confirm"` set to that token, and assert `ok` is `True`. Refuse with
+    `revoke commit failed`. Poll the second terminal until `state` is `ended`.
+    Pass if `close_reason` is `revoked` or `verdict` is `closed`. Refusals:
+    `the revoked pairing did not end the live terminal` and
+    `the terminal ended without revoked/closed evidence`. The PASS line is
+    `PASS revoke ended the live terminal (reason=<r> verdict=<v>)`.
+18. **Refused reopen.** On A, call `mesh_terminal_open` with A's pairing id.
+    The admit succeeds locally, so assert `ok` is `True`. The verdict arrives
+    as B's signed refusal receipt through the poll. Poll the third terminal
+    until `state` is `refused`, and assert `verdict` is `revoked`. Refusals:
+    `the post-revoke open never even went out`,
+    `post-revoke open returned no terminal id`,
+    `the revoked pairing did not refuse the next open`, and
+    `the post-revoke refusal is not named revoked`. The PASS line is
+    `PASS post-revoke open refused by name (verdict=revoked)`.
+19. **Cleanup.** Run `dht_cleanup`, then `dht_assert_no_owned_processes` and
+    `dht_assert_ports_rebindable`. Refusal: `cleanup failed`. The final line
+    is `ALL MESH TERMINAL ACCEPTANCE PROOFS PASSED`.
+
+**Reused from `tools/dev/node_lifecycle.sh`.** The script sources this file
+and adds no lifecycle rules of its own. It takes the work directory
+(`dht_make_work`), the port claims (`dht_assert_port`), process-group
+ownership (`dht_register_owned_group`, `dht_kill_group`), the RPC readiness
+waits (`dht_wait_rpc`), and the cleanup and EXIT trap (`dht_cleanup`). It
+also uses the node helpers `dht_anchor`, `dht_mine_empty`, `dht_native`,
+`dht_unlock_wallet`, and `dht_backup_wallet`, which are defined there.
+
+**Diagnostics.** Progress and PASS notes print as
+`mesh-terminal-acceptance: <message>` on stderr. Polls run until the DHT wait
+budget expires and check every half second.
+
+This procedure was last scripted as `tools/dev/mesh_terminal_acceptance.sh`, <!-- doc-path-ok: removed in 46a8af087 -->
+removed in 46a8af087; that revision holds the exact text. No automated lane
+runs it today.
+
 ### Streams
 
 The terminal does not own a wire of its own. It is one **service** on a
