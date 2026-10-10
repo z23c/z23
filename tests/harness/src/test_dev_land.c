@@ -9354,6 +9354,7 @@ static int dlx_attest_only_cases(void)
         ASSERT(snprintf(path, sizeof(path), "%s/queue.jsonl", land) < (int)sizeof(path));
         ASSERT(dlx_write(path, row));
         ASSERT(dlx_slurp(path, before, sizeof(before), &before_len));
+        before[before_len] = 0;
         for (int i = 0; i < 4; ++i) {
             ASSERT(setenv("ZCL_LAND_ALLOW_UNSIGNED", (i & 1) ? "1" : "not-one", 1) == 0);
             ASSERT(setenv("ZCL_LAND_PROOF_STUB", (i & 2) ? "PRIVATE-FIXTURE-VALUE-NOT-OUTPUT" : "", 1) == 0);
@@ -9818,13 +9819,120 @@ static bool dlx_hold_field_replace(const char *replacement)
     size_t len = 0;
     if (!dlx_queue_bytes(body, sizeof(body), &len)) return false;
     char *field = strstr(body, ",\"publication_hold\":");
-    char *end = field ? strchr(field, '}') : NULL;
+    char *end = field ? strchr(field, '}') : strchr(body, '}');
+    if (!field) field = end;
     if (!end) return false;
     int n = snprintf(changed, sizeof(changed), "%.*s%s%s",
                      (int)(field - body), body, replacement, end);
     dlx_landdir(land, sizeof(land));
     (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
     return n > 0 && (size_t)n < sizeof(changed) && dlx_write(path, changed);
+}
+
+static bool dlx_priority_replace(const char *value)
+{
+    char body[16384], changed[16384], land[1200], path[1400];
+    size_t len = 0;
+    if (!dlx_queue_bytes(body, sizeof(body), &len)) return false;
+    char *field = strstr(body, "\"priority_seq\":");
+    if (!field) return false;
+    field += strlen("\"priority_seq\":");
+    char *end = strchr(field, ',');
+    if (!end) return false;
+    int n = snprintf(changed, sizeof(changed), "%.*s%s%s",
+                     (int)(field - body), body, value, end);
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+    return n > 0 && (size_t)n < sizeof(changed) && dlx_write(path, changed);
+}
+
+static bool dlx_priority_is(const char *value)
+{
+    char body[16384];
+    size_t len = 0;
+    return dlx_queue_bytes(body, sizeof(body), &len) && strstr(body, value) != NULL;
+}
+
+static int dlx_guarded_priority_case(void)
+{
+    int failures = 0;
+    TEST("land: held priority rejects malformed markers without queue rewrite") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char before[16384], after[16384], canonical[16384], land[1200], path[1400];
+        size_t first = 0, second = 0;
+        dlx_isolate("held_priority");
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        ASSERT(dlx_rig_make(&rig, "held_priority_rig"));
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        ASSERT(dlx_hold_field_replace(",\"publication_hold\":true"));
+        ASSERT(dlx_queue_bytes(canonical, sizeof(canonical), &first));
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+        const char *bad[] = {"\"held:0\"", "\"held:-1\"", "\"held:+1\"",
+            "\"held:01\"", "\"held: 1\"", "\"held:1 \"", "\"held:1x\"",
+            "\"held:\"", "\"held:2\"", "\"held:9223372036854775808\"",
+            "\"held:1\\u0000junk\"", "true", "0", "-1", "2",
+            "\"held:1\",\"priority_seq\":1"};
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            ASSERT(dlx_write(path, canonical));
+            ASSERT(dlx_priority_replace(bad[i]));
+            ASSERT(dlx_queue_bytes(before, sizeof(before), &first));
+            dlx_begin(&c, "status");
+            ASSERT(dlx_run(&c) && !dlx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "QUEUE_READ_FAILED"); dlx_end(&c);
+            ASSERT(dlx_queue_bytes(after, sizeof(after), &second));
+            ASSERT(first == second && memcmp(before, after, first) == 0);
+        }
+        PASS();
+    }
+_test_next:
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_guarded_hold_mismatch_case(void)
+{
+    int failures = 0;
+    TEST("land: guarded priority requires true hold and survives other-row rewrites") {
+        struct dlx_rig rig, other;
+        struct dlx_call c;
+        dlx_isolate("guarded_mismatch");
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        ASSERT(dlx_rig_make(&rig, "guarded_mismatch_rig"));
+        ASSERT(dlx_rig_make(&other, "guarded_other_rig"));
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        ASSERT(dlx_priority_replace("\"held:1\""));
+        const char *hold[] = {"", ",\"publication_hold\":false",
+            ",\"publication_hold\":true,\"publication_hold\":true"};
+        for (size_t i = 0; i < sizeof(hold) / sizeof(hold[0]); i++) {
+            ASSERT(dlx_hold_field_replace(hold[i]));
+            dlx_begin(&c, "status");
+            ASSERT(dlx_run(&c) && !dlx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "QUEUE_READ_FAILED"); dlx_end(&c);
+            ASSERT(dlx_hold_field_replace(",\"publication_hold\":true"));
+        }
+        dlx_submit(&c, &other, other.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        dlx_begin(&c, "hold");
+        (void)json_push_kv_int(&c.input, "seq", 2);
+        ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        ASSERT(dlx_priority_is("\"priority_seq\":\"held:1\""));
+        ASSERT(dlx_priority_is("\"priority_seq\":\"held:2\""));
+        dlx_begin(&c, "release");
+        (void)json_push_kv_int(&c.input, "seq", 2);
+        ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        ASSERT(dlx_priority_is("\"priority_seq\":\"held:1\""));
+        ASSERT(dlx_priority_is("\"priority_seq\":2,"));
+        PASS();
+    }
+_test_next:
+    dlx_restore();
+    return failures;
 }
 
 static int dlx_hold_legacy_case(void)
@@ -10026,6 +10134,23 @@ _test_next:
     return failures;
 }
 
+static bool dlx_hold_upgrade_duplicate(struct dlx_rig *rig)
+{
+    struct dlx_call c;
+    if (!dlx_priority_is("\"priority_seq\":\"held:1\"")) return false;
+    /* Legacy integer holds remain readable; idempotent hold upgrades them. */
+    if (!dlx_priority_replace("1")) return false;
+    dlx_begin(&c, "hold");
+    (void)json_push_kv_int(&c.input, "seq", 1);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    if (!ok || !dlx_priority_is("\"priority_seq\":\"held:1\"")) return false;
+    dlx_submit(&c, rig, rig->tip);
+    ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    return ok && dlx_priority_is("\"priority_seq\":\"held:1\"");
+}
+
 static int dlx_publication_hold_cases(void)
 {
     int failures = 0;
@@ -10046,6 +10171,7 @@ static int dlx_publication_hold_cases(void)
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT(json_get_bool(json_get(&c.reply.data, "publication_hold")));
         dlx_end(&c);
+        ASSERT(dlx_hold_upgrade_duplicate(&rig));
         dlx_begin(&c, "status");
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *queued = dlx_arr(&c, "queued");
@@ -10072,6 +10198,7 @@ static int dlx_publication_hold_cases(void)
         const struct json_value *flight = json_get(&c.reply.data, "in_flight");
         ASSERT(flight != NULL);
         ASSERT(json_get_bool(json_get(flight, "publication_hold")));
+        ASSERT(dlx_priority_is("\"priority_seq\":\"held:1\""));
         ASSERT(strstr(dlx_str(&c, "screen"), "publication HELD") != NULL);
         ASSERT_EQ((long long)dlx_arr(&c, "outcomes")->num_children, 0);
         dlx_end(&c);
@@ -10090,6 +10217,7 @@ static int dlx_publication_hold_cases(void)
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT(!json_get_bool(json_get(&c.reply.data, "publication_hold")));
         dlx_end(&c);
+        ASSERT(dlx_priority_is("\"priority_seq\":1,"));
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
@@ -12881,6 +13009,8 @@ int test_dev_land(void)
     int failures = 0;
     failures += dlx_publication_hold_cases();
     failures += dlx_hold_legacy_case();
+    failures += dlx_guarded_priority_case();
+    failures += dlx_guarded_hold_mismatch_case();
     failures += dlx_hold_pushed_case();
     failures += dlx_hold_malformed_case();
     failures += dlx_hold_sealed_case();

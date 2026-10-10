@@ -192,11 +192,155 @@ static int case_decoder(void)
     return failures;
 }
 
+static const char grok_body[] =
+    "{\"text\":\"done\",\"stopReason\":\"end_turn\","
+    "\"sessionId\":\"23c9be10-5084-43a4-8e1a-2735a4650981\","
+    "\"requestId\":\"ddc16017-2c5f-4c34-9fa9-ce50a4ec48a0\","
+    "\"usage\":{\"input_tokens\":100,"
+    "\"cache_read_input_tokens\":60,"
+    "\"cache_creation_input_tokens\":10,\"output_tokens\":25,"
+    "\"reasoning_tokens\":7,\"total_tokens\":125},"
+    "\"num_turns\":4,\"total_cost_usd\":0.125,"
+    "\"modelUsage\":{\"grok-4.6-build\":{\"inputTokens\":100,"
+    "\"outputTokens\":25,\"cacheReadInputTokens\":60,"
+    "\"cacheCreationInputTokens\":10,\"modelCalls\":4}}}";
+
+static int case_reply_text_success(void)
+{
+    int failures = 0;
+    const struct engine_vendor *claude = engine_by_id("claude-haiku");
+    const struct engine_vendor *grok = engine_by_id("grok-cli");
+    struct engine_reply reply = {0};
+    bool ok = engine_cli_reply_text(claude, OK_BODY, strlen(OK_BODY), &reply);
+    EC_CHECK("Claude final result text extracts after metadata validation",
+             ok && reply.text != NULL && reply.text_len == 4u && strcmp(reply.text, "done") == 0);
+    engine_reply_free(&reply);
+
+    ok = engine_cli_reply_text(grok, grok_body, sizeof(grok_body) - 1u, &reply);
+    EC_CHECK("Grok top-level text extracts after metadata validation",
+             ok && reply.text != NULL && reply.text_len == 4u && strcmp(reply.text, "done") == 0);
+    engine_reply_free(&reply);
+
+    return failures;
+}
+
+static int case_reply_text_refusal(void)
+{
+    int failures = 0;
+    const struct engine_vendor *grok = engine_by_id("grok-cli");
+    const struct engine_vendor *claude = engine_by_id("claude-haiku");
+    struct engine_reply reply = {0};
+    bool ok;
+    char nonstring[sizeof(grok_body)];
+    memcpy(nonstring, grok_body, sizeof(grok_body));
+    char *text_value = strstr(nonstring, "\"text\":\"done\"");
+    if (text_value)
+        memcpy(text_value, "\"text\":7     ", 13u);
+    reply = (struct engine_reply){0};
+    reply.text_len = 77u;
+    memcpy(reply.finish_reason, "sentinel", sizeof("sentinel"));
+    ok = engine_cli_reply_text(grok, nonstring, sizeof(grok_body) - 1u, &reply);
+    EC_CHECK("non-string Grok text is refused without output mutation",
+             text_value && !ok && reply.text == NULL && reply.text_len == 77u &&
+             strcmp(reply.finish_reason, "sentinel") == 0);
+
+    static const char failed_claude[] =
+        "{\"type\":\"result\",\"subtype\":\"success\","
+        "\"is_error\":true,\"num_turns\":1,\"result\":\"x\","
+        "\"session_id\":\"s\",\"usage\":{\"input_tokens\":1,"
+        "\"output_tokens\":1,\"cache_read_input_tokens\":0,"
+        "\"cache_creation_input_tokens\":0},"
+        "\"modelUsage\":{\"m\":{\"outputTokens\":1}}}";
+    ok = engine_cli_reply_text(claude, failed_claude,
+                               sizeof(failed_claude) - 1u, &reply);
+    EC_CHECK("failed Claude metadata is refused without output mutation",
+             !ok && reply.text == NULL && reply.text_len == 77u &&
+             strcmp(reply.finish_reason, "sentinel") == 0);
+
+    return failures;
+}
+
+static int case_reply_text_empty(void)
+{
+    int failures = 0;
+    const struct engine_vendor *claude = engine_by_id("claude-haiku");
+    struct engine_reply reply = {0};
+    bool ok;
+    static const char empty_claude[] =
+        "{\"type\":\"result\",\"subtype\":\"success\","
+        "\"is_error\":false,\"num_turns\":1,\"result\":\"\","
+        "\"session_id\":\"s\",\"usage\":{\"input_tokens\":1,"
+        "\"output_tokens\":0,\"cache_read_input_tokens\":0,"
+        "\"cache_creation_input_tokens\":0},"
+        "\"modelUsage\":{\"m\":{\"outputTokens\":0}}}";
+    reply = (struct engine_reply){0};
+    ok = engine_cli_reply_text(claude, empty_claude,
+                               sizeof(empty_claude) - 1u, &reply);
+    EC_CHECK("empty validated result text remains available to trigger retry",
+             ok && reply.text != NULL && reply.text_len == 0u &&
+             reply.text[0] == '\0');
+    engine_reply_free(&reply);
+
+    return failures;
+}
+
+static int case_reply_text_cap(void)
+{
+    int failures = 0;
+    const struct engine_vendor *claude = engine_by_id("claude-haiku");
+    struct engine_reply reply = {0};
+    bool ok;
+    const char prefix[] =
+        "{\"type\":\"result\",\"subtype\":\"success\","
+        "\"is_error\":false,\"num_turns\":1,\"result\":\"";
+    const char suffix[] =
+        "\",\"session_id\":\"s\",\"usage\":{\"input_tokens\":1,"
+        "\"output_tokens\":0,\"cache_read_input_tokens\":0,"
+        "\"cache_creation_input_tokens\":0},"
+        "\"modelUsage\":{\"m\":{\"outputTokens\":0}}}";
+    const size_t prefix_len = sizeof(prefix) - 1u;
+    const size_t suffix_len = sizeof(suffix) - 1u;
+    const size_t cap = ENGINE_MAX_TEXT_BYTES;
+    const size_t body_len = prefix_len + cap + suffix_len;
+    char *body = malloc(body_len + 2u);
+    if (!body) {
+        EC_CHECK("reply text cap fixture allocation", false);
+        return failures;
+    }
+    memcpy(body, prefix, prefix_len);
+    memset(body + prefix_len, 'x', cap);
+    memcpy(body + prefix_len + cap, suffix, suffix_len);
+    body[body_len] = '\0';
+    ok = engine_cli_reply_text(claude, body, body_len, &reply);
+    EC_CHECK("text exactly at ENGINE_MAX_TEXT_BYTES is accepted",
+             ok && reply.text != NULL && reply.text_len == cap && reply.text[0] == 'x' &&
+             reply.text[cap - 1u] == 'x');
+    engine_reply_free(&reply);
+
+    reply = (struct engine_reply){0};
+    reply.text_len = 77u;
+    memcpy(reply.finish_reason, "sentinel", sizeof("sentinel"));
+    memmove(body + prefix_len + cap + 1u, body + prefix_len + cap,
+            suffix_len + 1u);
+    body[prefix_len + cap] = 'x';
+    ok = engine_cli_reply_text(claude, body, body_len + 1u, &reply);
+    EC_CHECK("text over ENGINE_MAX_TEXT_BYTES is refused atomically",
+             !ok && reply.text == NULL && reply.text_len == 77u &&
+             strcmp(reply.finish_reason, "sentinel") == 0);
+    free(body);
+    return failures;
+}
+
+
 int test_engine_claude(void)
 {
     int failures = 0;
     failures += case_registry();
     failures += case_decoder();
+    failures += case_reply_text_success();
+    failures += case_reply_text_refusal();
+    failures += case_reply_text_empty();
+    failures += case_reply_text_cap();
     printf("engine_claude: %d failure(s)\n", failures);
     return failures;
 }

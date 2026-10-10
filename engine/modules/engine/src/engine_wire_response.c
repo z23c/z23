@@ -683,3 +683,50 @@ bool engine_response_error_text(const char *body, size_t len,
     json_free(&root);
     return found;
 }
+
+bool engine_cli_reply_text(const struct engine_vendor *vendor,
+                           const char *body, size_t len,
+                           struct engine_reply *out)
+{
+    if (!out || !vendor || out->text ||
+        (vendor->report_format != ENGINE_CLI_OUTPUT_CLAUDE_JSON &&
+         vendor->report_format != ENGINE_CLI_OUTPUT_GROK_JSON))
+        return false;
+
+    struct engine_cli_observation observation;
+    if (!engine_cli_observation_parse(vendor, body, len, &observation))
+        return false;
+
+    struct json_value root;
+    json_init(&root);
+    if (!json_read(&root, body, len)) {
+        json_free(&root);
+        LOG_FAIL("engine", "refusing malformed CLI reply text");
+    }
+    const char *key = vendor->report_format == ENGINE_CLI_OUTPUT_CLAUDE_JSON
+                          ? "result" : "text";
+    const struct json_value *value = json_get(&root, key);
+    const char *text = value && value->type == JSON_STR
+                           ? json_get_str(value) : NULL;
+    if (!text) {
+        json_free(&root);
+        LOG_FAIL("engine", "refusing CLI reply without string %s", key);
+    }
+    const size_t text_len = strlen(text);
+    if (text_len > ENGINE_MAX_TEXT_BYTES) {
+        json_free(&root);
+        LOG_FAIL("engine", "refusing %zu bytes of CLI reply text: over the cap",
+                 text_len);
+    }
+    char *copy = zcl_malloc(text_len + 1u, "engine_cli_reply_text");
+    if (!copy) {
+        json_free(&root);
+        LOG_FAIL("engine", "cannot allocate %zu bytes of CLI reply text",
+                 text_len + 1u);
+    }
+    memcpy(copy, text, text_len + 1u);
+    json_free(&root);
+    out->text = copy;
+    out->text_len = text_len;
+    return true;
+}

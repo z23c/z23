@@ -5,11 +5,9 @@
  *
  *   THE MODEL PROPOSES. THE GATE DECIDES.
  *
- * The whole argument for this program is in engine/engine.h and
- * engine/engine_verdict.h. In one sentence: model output is not
- * reproducible, so it can never be evidence, and the verdict therefore comes
- * from running the unit's test group and reading how many groups actually
- * executed — never from an exit code, never from a report.
+ * Model output is not reproducible, so edits are judged by the unit test
+ * group and observed worktree changes. A report is different: without edits
+ * it is terminal REPORTED, not a gate pass; edits make it fail.
  *
  * This is the sole C23 engine-unit path. It preserves the predecessor shell
  * lane's measured lessons without retaining a second dispatcher.
@@ -256,9 +254,9 @@ static void usage(void)
 "                    status, the latency and what came back. Needs\n"
 "                    --yes-dispatch: it consumes the configured provider access\n"
 "\n"
-"Exit: 0 the unit landed and its group passed. 1 any other verdict —\n"
-"      including TIMEOUT and including an engine that reported success and\n"
-"      changed nothing. 2 usage or setup error. Never green by default.\n",
+"Exit: 0 a PASS whose group ran, or a terminal REPORTED report with no edits.\n"
+"      REPORTED is not a gate pass; 1 any other verdict, including TIMEOUT\n"
+"      and report edits. 2 usage or setup error. Never green by default.\n",
         UNIT_DEFAULT_TURNS, UNIT_DEFAULT_TIMEOUT, UNIT_MAX_TIMEOUT);
 }
 
@@ -530,27 +528,39 @@ static bool worktree_prepare(const struct unit_opts *o, char *out, size_t out_le
     return true;
 }
 
-/* How many tracked files the unit actually changed. This is measured from the
- * worktree, not claimed by the engine, and it is the input that makes
- * "reported success, changed nothing" reachable as a FAILURE. */
-static size_t worktree_changed_files(const char *dir)
+/* How many changed paths the unit actually changed. This is measured from the
+ * worktree, not claimed by the engine; status failure is unknown, not zero. */
+static bool worktree_changed_files(const char *dir, size_t *count_out)
 {
     const char *const argv[] = { "git", "-C", dir, "status", "--porcelain",
                                  NULL };
     char *buf = zcl_malloc(UNIT_GATE_LOG_BYTES, "engine_unit_status");
     if (!buf) {
         LOG_WARN("engine_unit", "cannot allocate the status buffer");
-        return 0;
+        return false;
     }
+    struct zcl_spawn_binary_observation observation = {0};
+    const struct zcl_result result = zcl_spawn_capture_binary(
+        argv, buf, UNIT_GATE_LOG_BYTES, 60000, &observation);
     size_t count = 0;
-    if (run(argv, buf, UNIT_GATE_LOG_BYTES, 60000) >= 0) {
-        for (const char *p = buf; *p; p++) {
-            if (*p == '\n')
+    const bool complete = result.ok && observation.eof &&
+        observation.exit_observed && observation.exit_code == 0 &&
+        !observation.timed_out && !observation.overflow;
+    if (complete) {
+        for (size_t i = 0; i < observation.output_len; i++) {
+            if (buf[i] == '\n')
                 count++;
         }
+    } else {
+        LOG_WARN("engine_unit",
+                 "git status did not produce a complete successful result; "
+                 "changed-file count is unknown");
     }
     free(buf);
-    return count;
+    if (!complete)
+        return false;
+    *count_out = count;
+    return true;
 }
 
 /* ── prompt composition ──────────────────────────────────────────────── */
@@ -1249,6 +1259,19 @@ static bool dispatch_fixture(const struct engine_vendor *v, const char *path,
     return ok;
 }
 
+static enum engine_err unit_cli_reply_error(const struct engine_vendor *vendor,
+                                            enum engine_prompt_effect effect,
+                                            const char *body, size_t len, int rc,
+                                            struct engine_reply *reply)
+{
+    if (effect != ENGINE_PROMPT_EFFECT_REPORT)
+        return ENGINE_OK;
+    const bool decoded = engine_cli_reply_text(vendor, body, len, reply);
+    if (rc != 0)
+        return ENGINE_ERR_REFUSED;
+    return decoded ? ENGINE_OK : ENGINE_ERR_PARSE;
+}
+
 /* A subscription-backed agent CLI. It edits the worktree itself, so there is
  * no reply text to decode — its "answer" is the diff, which is measured the
  * same way every other engine's is.
@@ -1334,7 +1357,6 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         dr->err = ENGINE_ERR_PARSE;
         return false;
     }
-    free(log);
     if (dr->cli_observation.known) {
         /* The parser validated nonnegative, consistent totals for either
          * cache accounting shape. Normalize the projected input count while
@@ -1363,12 +1385,13 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         (void)snprintf(dr->reply.model, sizeof(dr->reply.model), "%s",
                        dr->cli_observation.resolved_model);
     }
-    /* rc is deliberately NOT consulted beyond "did it launch". A CLI engine
-     * exiting 0 having written nothing is one of the three measured failures
-     * this harness exists to catch; the diff and the gate decide. */
+    /* Edit delivery retains its diff-and-gate exit policy. A report needs
+     * a successful child exit; parsed usage remains available on failure. */
     dr->http_status = 0;
-    dr->err = ENGINE_OK;
-    return true;
+    dr->err = unit_cli_reply_error(v, engine_prompt_kind_effect(o->kind),
+                                   log, strlen(log), rc, &dr->reply);
+    free(log);
+    return dr->err == ENGINE_OK;
 }
 
 /* ── applying a reply ────────────────────────────────────────────────── */
@@ -1817,13 +1840,104 @@ static bool receipt_push_counter(struct json_value *doc, const char *key,
                  : receipt_push_null(doc, key);
 }
 
+static bool receipt_push_changed(struct json_value *doc, size_t changed,
+                                  bool known)
+{
+    if (!known)
+        return receipt_push_null(doc, "files_changed");
+    return json_push_kv_int(doc, "files_changed", (int64_t)changed);
+}
+
+static const char *receipt_resolved_model(
+    const struct engine_cli_observation *observation, const char *model)
+{
+    if (observation && observation->known)
+        return observation->resolved_model;
+    if (model && model[0])
+        return model;
+    return NULL;
+}
+
+static bool unit_report_has_text(const struct engine_reply *reply)
+{
+    if (!reply->text)
+        return false;
+    for (size_t i = 0; i < reply->text_len; i++) {
+        if (!strchr(" \t\r\n\v\f", reply->text[i]))
+            return true;
+    }
+    return false;
+}
+
+static bool unit_should_gate(enum engine_prompt_effect effect, bool refused,
+                             bool no_group, size_t changed)
+{
+    return !refused && effect != ENGINE_PROMPT_EFFECT_REPORT &&
+           !no_group && changed > 0;
+}
+
+static bool unit_no_edit_feedback(enum engine_prompt_effect effect,
+                                  bool refused, size_t changed)
+{
+    return !refused && effect != ENGINE_PROMPT_EFFECT_REPORT && changed == 0;
+}
+
+static const char *unit_kind_failure(const struct engine_vendor *vendor,
+                                     const char *kind)
+{
+    if (!engine_prompt_kind_is_complete(kind))
+        return "that --kind has no usable prompt template; "
+               "run --list for the kinds this build declares";
+    if (engine_prompt_kind_effect(kind) == ENGINE_PROMPT_EFFECT_REPORT &&
+        vendor->wire == ENGINE_WIRE_LOCAL_CLI &&
+        vendor->report_format != ENGINE_CLI_OUTPUT_GROK_JSON &&
+        vendor->report_format != ENGINE_CLI_OUTPUT_CLAUDE_JSON)
+        return "selected CLI engine has no supported report decoder";
+    return NULL;
+}
+
+static bool unit_turn_finished(enum engine_verdict verdict, int turn, int limit)
+{
+    return engine_verdict_is_terminal(verdict) ||
+           verdict == ENGINE_VERDICT_REPORT_EDITED || turn == limit;
+}
+
+static enum engine_verdict unit_turn_verdict(
+    enum engine_prompt_effect effect, bool refused, const struct engine_reply *reply,
+    const struct engine_gate_reading *gate, size_t changed, bool timed_out,
+    bool group_required, char *feedback, size_t cap, bool *have_feedback)
+{
+    if (refused)
+        return ENGINE_VERDICT_REFUSED;
+    if (effect == ENGINE_PROMPT_EFFECT_REPORT && changed == 0 &&
+        !unit_report_has_text(reply)) {
+        (void)snprintf(feedback, cap,
+                      "Your last report was empty. Return a nonblank actual "
+                      "report without editing the worktree; an empty reply "
+                      "cannot be recorded as REPORTED.");
+        *have_feedback = true;
+        return ENGINE_VERDICT_NO_CHANGE;
+    }
+    if (unit_no_edit_feedback(effect, refused, changed)) {
+        (void)snprintf(feedback, cap,
+                      "Your last reply reported success but the diff was "
+                      "empty: nothing changed in the worktree, so the "
+                      "gate was not run. That is recorded as a FAILURE "
+                      "regardless of what the gate would have said.");
+        *have_feedback = true;
+    }
+    return engine_verdict_of_effect(effect, gate, changed, timed_out,
+                                    group_required);
+}
+
 static void write_receipt(const struct unit_opts *o,
                           const struct engine_vendor *v,
                           const struct engine_usage *usage,
                           const struct engine_cli_observation *observation,
                           const char *reply_resolved_model,
                           const struct engine_gate_reading *g,
-                          size_t files_changed, int attempts,
+                          size_t files_changed, bool files_changed_known,
+                          int attempts,
                           int64_t dispatch_latency_ms,
                           int64_t proof_latency_ms,
                           enum engine_verdict verdict,
@@ -1866,7 +1980,7 @@ static void write_receipt(const struct unit_opts *o,
                          ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT) &&
         json_push_kv_str(&doc, "territory", o->territory ? o->territory : "") &&
         json_push_kv_str(&doc, "group", o->group ? o->group : "") &&
-        json_push_kv_int(&doc, "files_changed", (int64_t)files_changed) &&
+        receipt_push_changed(&doc, files_changed, files_changed_known) &&
         json_push_kv_int(&doc, "groups_ran", g->groups_ran) &&
         json_push_kv_int(&doc, "groups_failed", g->groups_failed) &&
         json_push_kv_bool(&doc, "cached", g->cached_mode) &&
@@ -1959,7 +2073,8 @@ static bool append_unit_receipt(const struct unit_opts *o,
                                 const struct engine_cli_observation *observation,
                                 const char *resolved_model,
                                 const struct engine_gate_reading *g,
-                                size_t files_changed, int attempts,
+                                size_t files_changed, bool files_changed_known,
+                                int attempts,
                                 int64_t dispatch_latency_ms,
                                 int64_t proof_latency_ms,
                                 int64_t cumulative_proof_ms,
@@ -1989,10 +2104,7 @@ static bool append_unit_receipt(const struct unit_opts *o,
         .attempt_id = o->attempt_id,
         .requested_model = o->model ? o->model
                                     : (v->default_model ? v->default_model : ""),
-        .resolved_model = observation && observation->known
-                              ? observation->resolved_model
-                              : (resolved_model && resolved_model[0]
-                                     ? resolved_model : NULL),
+        .resolved_model = receipt_resolved_model(observation, resolved_model),
         .reasoning_effort = o->reasoning_effort ? o->reasoning_effort
                               : ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT,
         .kind = o->kind,
@@ -2028,12 +2140,14 @@ static bool append_unit_receipt(const struct unit_opts *o,
         .http_status = http_status,
         .worktree_head = NULL,
         .outcome = {
-            .applied = files_changed > 0,
+            .applied = files_changed_known && files_changed > 0,
             .groups_ran = g->groups_ran,
             .groups_failed = g->groups_failed,
             .gate_pass = engine_verdict_is_pass(verdict),
             .retries = attempts > 0 ? attempts - 1 : 0,
-            .lines_changed = (int64_t)files_changed,
+            .lines_changed = files_changed_known
+                                 ? (int64_t)files_changed
+                                 : ENGINE_RECEIPT_UNREPORTED,
             .lint_rc = ENGINE_RECEIPT_UNREPORTED,
         },
     };
@@ -2583,10 +2697,10 @@ int main(int argc, char **argv)
     if (!o.kind || !o.kind[0])
         o.kind = engine_prompt_kind_from_header(task);
     if (o.kind && o.kind[0]) {
-        if (!engine_prompt_kind_is_complete(o.kind)) {
+        const char *kind_failure = unit_kind_failure(v, o.kind);
+        if (kind_failure) {
             free(task);
-            return fail_setup("that --kind has no usable prompt template; "
-                              "run --list for the kinds this build declares");
+            return fail_setup(kind_failure);
         }
         engine_emit(stdout, "  kind:       %s\n", o.kind);
     } else {
@@ -2752,9 +2866,8 @@ int main(int argc, char **argv)
      * turns blind is fixed here: every turn after the first carries forward
      * the model's own <state> block (engine/engine_state.h) plus the
      * previous gate's feedback, instead of nothing at all. The loop stops
-     * the moment a turn's verdict is a pass, or after the last turn either
-     * way — a unit that never passes still gets judged and receipted on
-     * its final turn.
+     * on a terminal verdict (PASS or REPORTED), or after the last turn; a
+     * unit that never reaches one still gets judged and receipted there.
      */
     char turn_state[ENGINE_STATE_MAX_BYTES] = {0};
     bool have_turn_state = false;
@@ -2778,9 +2891,12 @@ int main(int argc, char **argv)
     char *delivered = NULL;
     char prompt_path[1024] = {0};
     bool dispatch_failed = false;
+    bool changed_known = false;
+    const enum engine_prompt_effect effect = engine_prompt_kind_effect(o.kind);
     const int64_t unit_started_ns = clock_now_monotonic_ns();
 
     for (int turn = 1; turn <= o.turns; turn++) {
+        changed_known = false;
         if (turn > 1) {
             engine_reply_free(&dr.reply);
             memset(&dr, 0, sizeof(dr));
@@ -2998,12 +3114,12 @@ int main(int argc, char **argv)
         free(body);
         free(delivered);
         delivered = NULL;
+        unit_adopt_cli_cost(&dr);
         if (!got) {
             dispatch_failed = true;
             verdict = ENGINE_VERDICT_REFUSED;
             break;
         }
-        unit_adopt_cli_cost(&dr);
 
         /* Archive the raw completion before any envelope parsing touches
          * it. A FAIL(NO-CHANGE) verdict alone cannot say whether the model
@@ -3147,13 +3263,24 @@ int main(int argc, char **argv)
             break;
         }
 
-        changed = worktree_changed_files(workdir);
+        if (!worktree_changed_files(workdir, &changed)) {
+            engine_emit(stderr,
+                        "engine_unit: refusing verdict because git status "
+                        "could not establish a complete changed-file count\n");
+            dispatch_failed = true;
+            verdict = ENGINE_VERDICT_REFUSED;
+            break;
+        }
+        changed_known = true;
         engine_emit(stdout,
                     "  diff:       %zu changed path(s) in the worktree\n",
                     changed);
 
         proof_latency_ms = 0;
-        if (!refused && !o.no_group && changed > 0) {
+        /* REPORT success is determined by effect, not by an unrelated gate.
+         * In particular, do not spend a group run after observing a report
+         * edit that is already a failure. */
+        if (unit_should_gate(effect, refused, o.no_group, changed)) {
             char gate_log[1024] = {0};
             if (o.state_dir && o.state_dir[0])
                 (void)snprintf(gate_log, sizeof(gate_log), "%s/gate.log",
@@ -3193,16 +3320,11 @@ int main(int argc, char **argv)
                         gate.saw_verdict_line ? "yes" : "NO",
                         gate.cached_mode ? "cached" : "cold", gate.groups_ran,
                         gate.groups_failed);
-        } else if (!refused && changed == 0) {
-            (void)snprintf(gate_tail, sizeof(gate_tail),
-                          "Your last reply reported success but the diff was "
-                          "empty: nothing changed in the worktree, so the "
-                          "gate was not run. That is recorded as a FAILURE "
-                          "regardless of what the gate would have said.");
-            have_gate_tail = true;
         }
 
-        verdict = engine_verdict_of(&gate, changed, timed_out, !o.no_group);
+        verdict = unit_turn_verdict(effect, refused, &dr.reply, &gate, changed,
+                                    timed_out, !o.no_group, gate_tail,
+                                    sizeof(gate_tail), &have_gate_tail);
 
         /* Extract this turn's state independent of the envelope, per
          * engine/engine_state.h. A CLI wire never decodes reply text, so
@@ -3239,7 +3361,7 @@ int main(int argc, char **argv)
         engine_emit(stdout, "  turn %d/%d:   %s\n", turn, o.turns,
                    engine_verdict_name(verdict));
 
-        if (engine_verdict_is_pass(verdict) || turn == o.turns)
+        if (unit_turn_finished(verdict, turn, o.turns))
             break;
     }
 
@@ -3254,14 +3376,15 @@ int main(int argc, char **argv)
                     "block names its next step as an operator action; see "
                     "state.txt\n");
     write_receipt(&o, v, &dr.reply.usage, &dr.cli_observation, dr.reply.model,
-                  &gate, changed,
+                  &gate, changed, changed_known,
                   dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
                   verdict, have_turn_state ? strlen(turn_state) : 0,
                   state_updated_last, compactions, needs_operator,
                   invocations.totals_ambiguous);
     const bool durable_receipt = append_unit_receipt(
         &o, v, &dr.reply.usage, &dr.cli_observation, dr.reply.model, &gate,
-        changed, dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
+        changed, changed_known, dr.attempts, dr.dispatch_latency_ms,
+        proof_latency_ms,
         cumulative_proof_ms, unit_elapsed_ms, dr.http_status, verdict,
         task_sha3_hex, &invocations);
     if (!durable_receipt)
@@ -3284,5 +3407,5 @@ int main(int argc, char **argv)
     free(task);
     free(brief);
     return durable_receipt && !dispatch_failed &&
-                   engine_verdict_is_pass(verdict) ? 0 : 1;
+                   engine_verdict_is_terminal(verdict) ? 0 : 1;
 }

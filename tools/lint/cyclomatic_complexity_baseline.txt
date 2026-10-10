@@ -3797,12 +3797,12 @@ tools/dev/z23_git_hook.c:child_capture:53
 tools/dev/z23_git_hook.c:child_capture#2:23
 tools/dev/z23_git_hook.c:hook_append_arg:20
 tools/dev/z23_git_hook.c:selftest:46
-tools/engine_unit.c:append_unit_receipt:27
+tools/engine_unit.c:append_unit_receipt:25
 tools/engine_unit.c:compose_prompt:23
 tools/engine_unit.c:dispatch_cli:21
 tools/engine_unit.c:gate_feedback_from_log:30
 tools/engine_unit.c:load_attempt_state:18
-tools/engine_unit.c:main:152
+tools/engine_unit.c:main:148
 tools/engine_unit.c:parse_args:30
 tools/engine_unit.c:probe_cli:30
 tools/engine_unit.c:unit_ledger_row:17

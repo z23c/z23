@@ -301,6 +301,73 @@ _test_next:;
     return failures;
 }
 
+static bool dvt_call_implicit(zcl_command_handler_fn handler,
+                              const char *cwd, struct json_value *input,
+                              struct zcl_command_reply *reply)
+{
+    char saved_cwd[4096], saved_env[4096];
+    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
+    bool had_env = env != NULL;
+    zcl_command_reply_init(reply, "zcl.test.train.v1");
+    if (!getcwd(saved_cwd, sizeof(saved_cwd)) ||
+        (env && strlen(env) >= sizeof(saved_env)))
+        return false;
+    if (env) memcpy(saved_env, env, strlen(env) + 1);
+    if (chdir(cwd) != 0) return false;
+    bool ready = unsetenv("ZCL_DEV_SOURCE_ROOT") == 0;
+    if (ready) dvt_call(handler, NULL, input, reply);
+    bool cwd_restored = chdir(saved_cwd) == 0;
+    bool env_restored = (had_env ? setenv("ZCL_DEV_SOURCE_ROOT", saved_env, 1)
+                                : unsetenv("ZCL_DEV_SOURCE_ROOT")) == 0;
+    return ready && cwd_restored && env_restored;
+}
+
+static int dvt_implicit_root_case(const char *parent, const char *root,
+                                  const char *cwd, const char *source,
+                                  const char *name)
+{
+    int failures = 0;
+    char expected[4096], nested[4096];
+    struct json_value input = dvt_input_build(name, source);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.train.v1");
+    ASSERT(snprintf(expected, sizeof(expected), "%s/z23-stack%s", parent,
+                    name) < (int)sizeof(expected));
+    ASSERT(snprintf(nested, sizeof(nested), "%s/z23-stack%s", cwd,
+                    name) < (int)sizeof(nested));
+    ASSERT(dvt_call_implicit(zcl_native_handle_dev_train_build, cwd, &input, &reply));
+    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_STR_EQ(dvt_str(&reply, "path"), expected);
+    ASSERT(platform_directory_probe_real(expected) == PLATFORM_DIRECTORY_PROBE_OK);
+    ASSERT(platform_directory_probe_real(nested) == PLATFORM_DIRECTORY_PROBE_MISSING);
+    zcl_command_reply_free(&reply);
+    ASSERT(dvt_call_implicit(zcl_native_handle_dev_train_build, cwd, &input, &reply));
+    ASSERT_STR_EQ(reply.error.code, "STACK_EXISTS");
+    ASSERT_STR_EQ(dvt_str(&reply, "path"), expected);
+    ASSERT(platform_directory_probe_real(nested) == PLATFORM_DIRECTORY_PROBE_MISSING);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    json_init(&input); json_set_object(&input);
+    (void)json_push_kv_str(&input, "name", name);
+    ASSERT(dvt_call_implicit(zcl_native_handle_dev_train_status, cwd, &input, &reply));
+    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+    const struct json_value *stacks = json_get(&reply.data, "stacks");
+    ASSERT(stacks && stacks->type == JSON_ARR && stacks->num_children == 1);
+    zcl_command_reply_free(&reply);
+    (void)json_push_kv_bool(&input, "force", true);
+    ASSERT(dvt_call_implicit(zcl_native_handle_dev_train_drop, cwd, &input, &reply));
+    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT(platform_directory_probe_real(expected) == PLATFORM_DIRECTORY_PROBE_MISSING);
+    const char *list[] = {"worktree", "list", "--porcelain", NULL};
+    char worktrees[8192];
+    ASSERT(dvt_git_capture(root, list, worktrees, sizeof(worktrees)));
+    ASSERT(strstr(worktrees, expected) == NULL);
+_test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
 int test_dev_train(void);
 int test_dev_train(void)
 {
@@ -511,6 +578,20 @@ int test_dev_train(void)
         ASSERT(strstr(worktrees, stack_dir) == NULL);
         zcl_command_reply_free(&reply);
         json_free(&input);
+        PASS();
+    }
+
+    TEST("train: omitted source root selects checkout siblings from root and subdirectory") {
+        char abs_parent[4096], abs_root[4096], abs_source[4096], subdir[4096];
+        ASSERT(platform_directory_canonical_real(parent, abs_parent, sizeof(abs_parent)));
+        ASSERT(platform_directory_canonical_real(root, abs_root, sizeof(abs_root)));
+        ASSERT(platform_directory_canonical_real(src_a, abs_source, sizeof(abs_source)));
+        ASSERT(snprintf(subdir, sizeof(subdir), "%s/subdir", abs_root) < (int)sizeof(subdir));
+        ASSERT(platform_directory_ensure(subdir, 0700));
+        ASSERT(dvt_implicit_root_case(abs_parent, abs_root, abs_root, abs_source,
+                                      "implicit_root") == 0);
+        ASSERT(dvt_implicit_root_case(abs_parent, abs_root, subdir, abs_source,
+                                      "implicit_subdir") == 0);
         PASS();
     }
 

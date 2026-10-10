@@ -30,6 +30,7 @@
 #include "sha3/sha3.h"
 #include "vcs/vcs_object.h"
 #include "platform/private_file.h"
+#include "util/spawn.h"
 #if defined(_WIN32)
 #include "platform/windows_path.h"
 #endif
@@ -2596,6 +2597,36 @@ static bool read_whole_file(const char *path, char *out, size_t out_cap)
     return true;
 }
 
+static bool engine_test_spawn_ok(const char *const argv[])
+{
+    char output[256];
+    struct zcl_spawn_binary_observation observation = {0};
+    const struct zcl_result result = zcl_spawn_capture_binary(
+        argv, output, sizeof(output), 10000, &observation);
+    return result.ok && observation.eof && observation.exit_observed &&
+           observation.exit_code == 0 && !observation.timed_out &&
+           !observation.overflow;
+}
+
+static bool engine_test_git_init(const char *dir)
+{
+    const char *const init[] = { "git", "-C", dir, "init", "--quiet", NULL };
+    const char *const add[] = { "git", "-C", dir, "add", "--", ".gitignore",
+                                NULL };
+    const char *const commit[] = {
+        "git", "-C", dir, "-c", "user.name=Z23 fixture",
+        "-c", "user.email=z23-fixture@example.invalid", "commit", "--quiet",
+        "-m", "fixture", NULL
+    };
+    char ignore_path[1024];
+    if ((size_t)snprintf(ignore_path, sizeof(ignore_path), "%s/.gitignore",
+                         dir) >= sizeof(ignore_path) ||
+        !write_whole_file(ignore_path, ".zvcs/\n"))
+        return false;
+    return engine_test_spawn_ok(init) && engine_test_spawn_ok(add) &&
+           engine_test_spawn_ok(commit);
+}
+
 static bool template_cas_matches(const char *workspace, const char *kind)
 {
     uint8_t *expected = NULL, *actual = NULL;
@@ -2725,6 +2756,10 @@ static int case_engine_unit_state_e2e(void)
      * existing directory; the fixture only needs that arm. */
     mkdir(worktree, 0700);
 #endif
+    const bool worktree_ready = engine_test_git_init(worktree);
+    EN_CHECK("the unit fixture worktree is a Git repository", worktree_ready);
+    if (!worktree_ready)
+        return failures + 1;
 
     const bool wrote_task = write_whole_file(task_path,
         "kind: fix-gate\n\nA smoke task; the fixture engine never reads "
@@ -2743,8 +2778,9 @@ static int case_engine_unit_state_e2e(void)
         "\"completion_tokens\":4,\"total_tokens\":14,"
         "\"prompt_tokens_details\":{\"cached_tokens\":6},"
         "\"completion_tokens_details\":{\"reasoning_tokens\":2}}}");
-    EN_CHECK("fixtures for the e2e case are written", wrote_task && wrote_reply);
-    if (!wrote_task || !wrote_reply)
+    const bool fixtures_written = wrote_task && wrote_reply;
+    EN_CHECK("fixtures for the e2e case are written", fixtures_written);
+    if (!fixtures_written)
         return failures + 1;
 
     char cmd[2048];
@@ -2862,6 +2898,638 @@ static bool engine_test_shell_quote(const char *in, char *out, size_t cap)
     return true;
 }
 
+static size_t engine_count_occurrences(const char *text, const char *needle)
+{
+    if (!text || !needle || !needle[0])
+        return 0;
+    size_t count = 0;
+    const size_t needle_len = strlen(needle);
+    for (const char *p = text; (p = strstr(p, needle)) != NULL;
+         p += needle_len)
+        count++;
+    return count;
+}
+
+static bool engine_test_capture_complete(
+    const struct zcl_result *result,
+    const struct zcl_spawn_binary_observation *observed)
+{
+    return observed->eof && observed->exit_observed &&
+           !observed->timed_out && !observed->overflow &&
+           result->ok == (observed->exit_code == 0);
+}
+
+static int engine_test_run_unit_capture(const char *path_prefix,
+                                const char *const argv[],
+                                char *output, size_t output_cap,
+                                struct zcl_spawn_binary_observation *observed, bool merged)
+{
+    char path[4096], saved_path[4096];
+    const char *old_path = getenv("PATH");
+    const size_t old_path_len = old_path ? strlen(old_path) : 0;
+    if (old_path_len >= sizeof(saved_path) || output_cap < 2)
+        return -1;
+    if (old_path)
+        memcpy(saved_path, old_path, old_path_len + 1u);
+    const int path_len = snprintf(path, sizeof(path), "%s%s/usr/bin:/bin",
+                                  path_prefix ? path_prefix : "",
+                                  path_prefix ? ":" : "");
+    if (path_len < 0 || (size_t)path_len >= sizeof(path) ||
+        setenv("PATH", path, 1) != 0)
+        return -1;
+
+    struct zcl_spawn_binary_observation local_observed = {0};
+    struct zcl_spawn_binary_observation *result_observed =
+        observed ? observed : &local_observed;
+    const struct zcl_result result = merged
+        ? zcl_spawn_capture_binary_merged(argv, output, output_cap - 1u,
+                                          120000, result_observed)
+        : zcl_spawn_capture_binary(argv, output, output_cap - 1u,
+                                   120000, result_observed);
+    if (result_observed->output_len < output_cap)
+        output[result_observed->output_len] = '\0';
+    else
+        output[output_cap - 1u] = '\0';
+    const bool complete = engine_test_capture_complete(&result, result_observed);
+    if (old_path)
+        (void)setenv("PATH", saved_path, 1);
+    else
+        (void)unsetenv("PATH");
+    return complete ? result_observed->exit_code : -1;
+}
+
+static int engine_test_run_unit(const char *path_prefix,
+                                const char *const argv[],
+                                char *output, size_t output_cap,
+                                struct zcl_spawn_binary_observation *observed)
+{
+    return engine_test_run_unit_capture(path_prefix, argv, output, output_cap,
+                                        observed, false);
+}
+
+struct engine_report_fixture {
+    char dir[700];
+};
+
+static bool engine_report_path(const struct engine_report_fixture *fixture,
+                               char *out, size_t cap, const char *relative)
+{
+    const int n = snprintf(out, cap, "%s/%s", fixture->dir, relative);
+    return n >= 0 && (size_t)n < cap;
+}
+
+
+struct engine_report_path_binding {
+    char *out;
+    size_t cap;
+    const char *relative;
+};
+
+static bool engine_report_paths(const struct engine_report_fixture *fx,
+                                const struct engine_report_path_binding *paths,
+                                size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (!engine_report_path(fx, paths[i].out, paths[i].cap,
+                                 paths[i].relative))
+            return false;
+    }
+    return true;
+}
+
+static bool engine_report_make_fixture(const struct engine_report_fixture *fx)
+{
+    char bin[800], calls[800], executable[900], quoted_calls[1100];
+    char script[2048];
+    if (!engine_report_path(fx, bin, sizeof(bin), "make-bin") ||
+        !engine_report_path(fx, calls, sizeof(calls), "make.calls") ||
+        !engine_report_path(fx, executable, sizeof(executable), "make-bin/make") ||
+        !engine_test_shell_quote(calls, quoted_calls, sizeof(quoted_calls)))
+        return false;
+    (void)snprintf(script, sizeof(script),
+        "#!/bin/sh\nprintf 'called\\n' >> %s\nprintf '%%s\\n' "
+        "'SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+        "groups_cached=0 groups_failed=0 self_skips=0 env_unobserved=0 "
+        "toolkey=fixture' 'ALL TESTS PASSED — 0/1 groups failed'\n",
+        quoted_calls);
+    return write_whole_file(executable, script) &&
+           chmod(executable, 0700) == 0;
+}
+
+static bool engine_report_git_failure_fixture(
+    const struct engine_report_fixture *fx)
+{
+    char bin[800], calls[800], executable[900], quoted_calls[1100];
+    char script[2048];
+    if (!engine_report_path(fx, bin, sizeof(bin), "git-bin") ||
+        !engine_report_path(fx, calls, sizeof(calls), "git.calls") ||
+        !engine_report_path(fx, executable, sizeof(executable), "git-bin/git") ||
+        !engine_test_shell_quote(calls, quoted_calls, sizeof(quoted_calls)))
+        return false;
+    (void)snprintf(script, sizeof(script),
+        "#!/bin/sh\nif [ \"$1\" = \"-C\" ] && "
+        "[ \"$3\" = \"status\" ]; then\n"
+        "  printf 'called\\n' >> %s\n  exit 23\nfi\n"
+        "exec /usr/bin/git \"$@\"\n", quoted_calls);
+    return write_whole_file(executable, script) &&
+           chmod(executable, 0700) == 0;
+}
+
+static bool engine_report_fixture_dirs(struct engine_report_fixture *fx)
+{
+    char bin_make[800], bin_git[800], worktree[800], state[800];
+    const bool dirs = engine_report_path(fx, bin_make, sizeof(bin_make),
+                                         "make-bin") &&
+        engine_report_path(fx, bin_git, sizeof(bin_git), "git-bin") &&
+        mkdir(bin_make, 0700) == 0 && mkdir(bin_git, 0700) == 0;
+    const char *const worktrees[] = { "wt-clean", "wt-edit", "wt-status",
+                                       "wt-malformed", "wt-empty", "wt-cli", "wt-format", "wt-claude", "wt-grok" };
+    const char *const states[] = { "state-clean", "state-edit", "state-status",
+                                   "state-malformed", "state-empty", "state-cli", "state-format", "state-claude", "state-grok" };
+    bool children = dirs;
+    for (size_t i = 0; children && i < 9; i++) {
+        children = engine_report_path(fx, worktree, sizeof(worktree),
+                                      worktrees[i]) &&
+            engine_report_path(fx, state, sizeof(state), states[i]) &&
+            mkdir(worktree, 0700) == 0 && mkdir(state, 0700) == 0 &&
+            engine_test_git_init(worktree);
+    }
+    return children;
+}
+
+static bool engine_report_fixture_setup(struct engine_report_fixture *fx)
+{
+    char rel[512], task[800], clean_reply[800], edit_reply[800];
+    char malformed_reply[800], empty_reply[800];
+    test_make_tmpdir(rel, sizeof(rel), "engine_report_effect", "run");
+    if (!test_abs_path(rel, fx->dir, sizeof(fx->dir)))
+        return false;
+
+    if (!engine_report_fixture_dirs(fx))
+        return false;
+    const bool files = engine_report_path(fx, empty_reply, sizeof(empty_reply),
+                                           "empty.json") &&
+        write_whole_file(empty_reply,
+            "{\"choices\":[{\"message\":{\"content\":\" \\t\\n\"}}]}") &&
+        engine_report_path(fx, task, sizeof(task), "task.txt") &&
+        engine_report_path(fx, clean_reply, sizeof(clean_reply), "clean.json") &&
+        engine_report_path(fx, edit_reply, sizeof(edit_reply), "edit.json") &&
+        engine_report_path(fx, malformed_reply, sizeof(malformed_reply),
+                           "malformed.json") &&
+        write_whole_file(task,
+            "kind: c23-review-pass\n\nInspect this local fixture.\n") &&
+        write_whole_file(clean_reply,
+            "{\"choices\":[{\"message\":{\"content\":"
+            "\"Review completed with no changes.\"}}],"
+            "\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,"
+            "\"total_tokens\":5}}") &&
+        write_whole_file(edit_reply,
+            "{\"choices\":[{\"message\":{\"content\":"
+            "\"Review found a note.\\nZ23-BEGIN-FILE note.txt\\n"
+            "review note\\nZ23-END-FILE\\n\"}}],"
+            "\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,"
+            "\"total_tokens\":5}}") &&
+        write_whole_file(malformed_reply,
+            "{\"choices\":[{\"message\":{\"content\":"
+            "\"Z23-BEGIN-FILE a.c\\nZ23-BEGIN-FILE b.c\\n"
+            "x\\nZ23-END-FILE\\nZ23-END-FILE\\n\"}}],"
+            "\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,"
+            "\"total_tokens\":5}}");
+    return files && engine_report_make_fixture(fx) &&
+           engine_report_git_failure_fixture(fx);
+}
+
+static int engine_report_empty_check(const struct engine_report_fixture *fx,
+                                         int rc, const char *output, bool files,
+                                         const char *receipt, const char *events)
+{
+    char path[900], feedback[16384] = {0};
+    int failures = 0;
+    EN_CHECK("blank reports fail after the bounded retry budget",
+             rc == 1 && strstr(output, "FAIL(NO-CHANGE)") && files &&
+             strstr(receipt, "\"verdict\":\"FAIL(NO-CHANGE)\"") &&
+             engine_count_occurrences(events, "\"phase\":\"turn\"") == 4);
+    EN_CHECK("blank report feedback asks for actual text",
+             engine_report_path(fx, path, sizeof(path),
+                        "state-empty/prompt.txt") &&
+             read_whole_file(path, feedback, sizeof(feedback)) &&
+             strstr(feedback, "Your last report was empty"));
+    return failures;
+}
+
+static int engine_report_clean_check(int rc, const char *output, bool files,
+                                     const char *receipt, const char *events)
+{
+    int failures = 0;
+    EN_CHECK("a no-edit report exits 0 as REPORTED, never PASS",
+             rc == 0 && strstr(output, "engine_unit: REPORTED") &&
+             strstr(receipt, "\"verdict\":\"REPORTED\"") &&
+             !strstr(receipt, "\"verdict\":\"PASS\""));
+    EN_CHECK("REPORTED ends after one of four allowed turns",
+             files && engine_count_occurrences(events, "\"phase\":\"turn\"") == 1 &&
+             strstr(events, "\"ordinal\":1,\"phase\":\"turn\"") &&
+             !strstr(events, "\"ordinal\":2,\"phase\":\"turn\""));
+    EN_CHECK("REPORTED is not a gate pass and records a measured clean tree",
+             files && strstr(receipt, "\"files_changed\":0") &&
+             strstr(receipt, "\"groups_ran\":0") &&
+             strstr(events, "\"gate_pass\":false") &&
+             strstr(events, "\"lines_changed\":0"));
+    return failures;
+}
+
+static int engine_report_clean_case(const struct engine_report_fixture *fx,
+                                    bool empty)
+{
+    char task[800], reply[800], worktree[800], state[800], receipt_path[900];
+    char chain_path[900], log_path[900];
+    const struct engine_report_path_binding paths[] = {
+        { task, sizeof(task), "task.txt" },
+        { reply, sizeof(reply), empty ? "empty.json" : "clean.json" },
+        { worktree, sizeof(worktree), empty ? "wt-empty" : "wt-clean" },
+        { state, sizeof(state), empty ? "state-empty" : "state-clean" },
+        { log_path, sizeof(log_path), "clean.log" },
+        { receipt_path, sizeof(receipt_path),
+          empty ? "state-empty/receipt.json" : "state-clean/receipt.json" },
+        { chain_path, sizeof(chain_path), empty
+          ? "state-empty/" ENGINE_RECEIPT_FILENAME
+          : "state-clean/" ENGINE_RECEIPT_FILENAME }
+    };
+    if (!engine_report_paths(fx, paths, sizeof(paths) / sizeof(paths[0])))
+        return 1;
+
+    const char *const argv[] = {
+        ENGINE_UNIT_BIN, "--engine", "fixture", "--task", task,
+        "--no-group", "--yes-dispatch", "--worktree", worktree,
+        "--state-dir", state, "--fixture-reply", reply, "--rounds", "4", NULL
+    };
+    char output[16384] = {0}, receipt[8192] = {0}, events[32768] = {0};
+    const int rc = engine_test_run_unit(NULL, argv, output, sizeof(output),
+                                         NULL);
+    (void)write_whole_file(log_path, output);
+    const bool files = read_whole_file(receipt_path, receipt, sizeof(receipt)) &&
+        read_whole_file(chain_path, events, sizeof(events));
+    if (empty)
+        return engine_report_empty_check(fx, rc, output, files, receipt, events);
+    return engine_report_clean_check(rc, output, files, receipt, events);
+}
+
+static int engine_report_edited_case(const struct engine_report_fixture *fx)
+{
+    char task[800], reply[800], worktree[800], state[800], bin[800];
+    char make_path[900], receipt_path[900], chain_path[900];
+    char gate_path[900], calls_path[900], note_path[900];
+    const struct engine_report_path_binding paths[] = {
+        { task, sizeof(task), "task.txt" },
+        { reply, sizeof(reply), "edit.json" },
+        { worktree, sizeof(worktree), "wt-edit" },
+        { state, sizeof(state), "state-edit" },
+        { bin, sizeof(bin), "make-bin" },
+        { make_path, sizeof(make_path), "make-bin/make" },
+        { calls_path, sizeof(calls_path), "make.calls" },
+        { note_path, sizeof(note_path), "wt-edit/note.txt" },
+        { receipt_path, sizeof(receipt_path), "state-edit/" "receipt.json" },
+        { chain_path, sizeof(chain_path), "state-edit/" ENGINE_RECEIPT_FILENAME },
+        { gate_path, sizeof(gate_path), "state-edit/" "gate.log" }
+    };
+    if (!engine_report_paths(fx, paths, sizeof(paths) / sizeof(paths[0])))
+        return 1;
+
+    const char *const argv[] = {
+        ENGINE_UNIT_BIN, "--engine", "fixture", "--task", task,
+        "--group", "engine", "--yes-dispatch", "--worktree", worktree,
+        "--state-dir", state, "--fixture-reply", reply, "--rounds", "4", NULL
+    };
+    char output[16384] = {0}, receipt[8192] = {0}, events[32768] = {0};
+    const int rc = engine_test_run_unit(bin, argv, output, sizeof(output),
+                                         NULL);
+    const bool files = read_whole_file(receipt_path, receipt, sizeof(receipt)) &&
+        read_whole_file(chain_path, events, sizeof(events));
+    int failures = 0;
+    EN_CHECK("a report edit fails without spending a passing gate",
+             rc == 1 && strstr(output, "FAIL(REPORT-EDITED)") && files &&
+             access(make_path, F_OK) == 0 && access(gate_path, F_OK) != 0 &&
+             access(calls_path, F_OK) != 0 &&
+             strstr(receipt, "\"files_changed\":1") &&
+             strstr(events, "\"gate_pass\":false") &&
+             strstr(events, "\"groups_ran\":0") &&
+             access(note_path, F_OK) == 0 &&
+             engine_count_occurrences(events, "\"phase\":\"turn\"") == 1);
+    return failures;
+}
+
+static int engine_report_malformed_case(const struct engine_report_fixture *fx)
+{
+    char task[800], reply[800], worktree[800], state[800];
+    char receipt_path[900], chain_path[900], applied_path[900];
+    const struct engine_report_path_binding paths[] = {
+        { task, sizeof(task), "task.txt" },
+        { reply, sizeof(reply), "malformed.json" },
+        { worktree, sizeof(worktree), "wt-malformed" },
+        { state, sizeof(state), "state-malformed" },
+        { receipt_path, sizeof(receipt_path), "state-malformed/" "receipt.json" },
+        { chain_path, sizeof(chain_path), "state-malformed/" ENGINE_RECEIPT_FILENAME },
+        { applied_path, sizeof(applied_path), "state-malformed/" "applied.txt" }
+    };
+    if (!engine_report_paths(fx, paths, sizeof(paths) / sizeof(paths[0])))
+        return 1;
+
+    const char *const argv[] = {
+        ENGINE_UNIT_BIN, "--engine", "fixture", "--task", task,
+        "--no-group", "--yes-dispatch", "--worktree", worktree,
+        "--state-dir", state, "--fixture-reply", reply, "--rounds", "1", NULL
+    };
+    char output[16384] = {0}, receipt[8192] = {0}, events[32768] = {0};
+    char applied[2048] = {0};
+    const int rc = engine_test_run_unit(NULL, argv, output, sizeof(output),
+                                         NULL);
+    const bool files = read_whole_file(receipt_path, receipt, sizeof(receipt)) &&
+        read_whole_file(chain_path, events, sizeof(events)) &&
+        read_whole_file(applied_path, applied, sizeof(applied));
+    int failures = 0;
+    EN_CHECK("malformed report envelope refuses and remains unapplied",
+             rc == 1 && strstr(output, "REFUSED") &&
+             !strstr(output, "REPORTED") && files &&
+             strstr(receipt, "\"verdict\":\"REFUSED\"") &&
+             strstr(receipt, "\"files_changed\":0") &&
+             strstr(events, "\"lines_changed\":0") &&
+             strstr(applied, "PARSE_REFUSED"));
+    return failures;
+}
+
+static int engine_report_status_refusal_case(
+    const struct engine_report_fixture *fx)
+{
+    char task[800], reply[800], worktree[800], state[800], bin[800];
+    char receipt_path[900], chain_path[900], calls_path[900];
+    const struct engine_report_path_binding paths[] = {
+        { task, sizeof(task), "task.txt" },
+        { reply, sizeof(reply), "clean.json" },
+        { worktree, sizeof(worktree), "wt-status" },
+        { state, sizeof(state), "state-status" },
+        { bin, sizeof(bin), "git-bin" },
+        { calls_path, sizeof(calls_path), "git.calls" },
+        { receipt_path, sizeof(receipt_path), "state-status/" "receipt.json" },
+        { chain_path, sizeof(chain_path), "state-status/" ENGINE_RECEIPT_FILENAME }
+    };
+    if (!engine_report_paths(fx, paths, sizeof(paths) / sizeof(paths[0])))
+        return 1;
+
+    const char *const argv[] = {
+        ENGINE_UNIT_BIN, "--engine", "fixture", "--task", task,
+        "--no-group", "--yes-dispatch", "--worktree", worktree,
+        "--state-dir", state, "--fixture-reply", reply, "--rounds", "4", NULL
+    };
+    char output[16384] = {0}, receipt[8192] = {0};
+    char events[32768] = {0}, calls[128] = {0};
+    const int rc = engine_test_run_unit(bin, argv, output, sizeof(output),
+                                         NULL);
+    const bool files = read_whole_file(receipt_path, receipt, sizeof(receipt)) &&
+        read_whole_file(chain_path, events, sizeof(events)) &&
+        read_whole_file(calls_path, calls, sizeof(calls));
+    int failures = 0;
+    EN_CHECK("empty stdout with failed git status refuses, not REPORTED",
+             rc == 1 && strstr(output, "REFUSED") &&
+             !strstr(output, "REPORTED") && files &&
+             engine_count_occurrences(calls, "called\n") == 1);
+    EN_CHECK("status refusal keeps changed count unknown in both receipts",
+             files && strstr(receipt, "\"files_changed\":null") &&
+             strstr(events, "\"lines_changed\":-1") &&
+             strstr(events, "\"gate_pass\":false"));
+    return failures;
+}
+
+static bool engine_report_cli_fixture(const struct engine_report_fixture *fx)
+{
+    char bin[800], executable[900], calls[800], quoted_calls[1100];
+    char script[2048];
+    if (!engine_report_path(fx, bin, sizeof(bin), "cli-bin") ||
+        !engine_report_path(fx, calls, sizeof(calls), "cli.calls") ||
+        !engine_test_shell_quote(calls, quoted_calls, sizeof(quoted_calls)) ||
+        mkdir(bin, 0700) != 0)
+        return false;
+    (void)snprintf(script, sizeof(script),
+        "#!/bin/sh\nprintf 'called\\n' >> %s\nprintf '%%s\\n' "
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
+        "\"num_turns\":1,\"result\":\"Review completed.\","
+        "\"session_id\":\"63c495cb-5b9f-4e4a-8979-29ed2a67f8b1\","
+        "\"total_cost_usd\":0.125,\"usage\":{\"input_tokens\":7,"
+        "\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,"
+        "\"output_tokens\":3},\"modelUsage\":{\"claude-haiku-5-5\":{"
+        "\"inputTokens\":7,\"outputTokens\":3,\"cacheReadInputTokens\":0,"
+        "\"cacheCreationInputTokens\":0}}}'\nexit 23\n", quoted_calls);
+    const char *const programs[] = { "cli-bin/claude", "cli-bin/zai" };
+    for (size_t i = 0; i < sizeof(programs) / sizeof(programs[0]); i++) {
+        if (!engine_report_path(fx, executable, sizeof(executable), programs[i]) ||
+            !write_whole_file(executable, script) || chmod(executable, 0700) != 0)
+            return false;
+    }
+    return true;
+}
+
+static int engine_report_cli_unsupported_check(int rc, const char *output,
+                                              const char *calls_path,
+                                              const char *receipt_path,
+                                              const char *chain_path)
+{
+    int failures = 0;
+    EN_CHECK("unsupported report CLI refuses before invoking its executable",
+             rc == 2 && strstr(output, "no supported report decoder") &&
+             access(calls_path, F_OK) != 0 &&
+             access(receipt_path, F_OK) != 0 && access(chain_path, F_OK) != 0);
+    if (failures)
+        printf("engine: unsupported report diagnostic rc=%d calls=%d receipt=%d chain=%d output=%.300s\n",
+               rc, access(calls_path, F_OK), access(receipt_path, F_OK),
+               access(chain_path, F_OK), output);
+    return failures;
+}
+
+static int engine_report_cli_failed_check(int rc, const char *output, bool files,
+                                         const char *receipt, const char *events,
+                                         const char *calls)
+{
+    int failures = 0;
+    EN_CHECK("nonzero report child refuses once despite valid nonblank output",
+             rc == 1 && strstr(output, "child_exit=23") && files &&
+             strstr(receipt, "\"verdict\":\"REFUSED\"") &&
+             !strstr(receipt, "\"verdict\":\"REPORTED\"") &&
+             engine_count_occurrences(calls, "called\n") == 1 &&
+             engine_count_occurrences(events, "\"phase\":\"turn\"") == 1);
+    if (failures)
+        printf("engine: failed report diagnostic rc=%d files=%d calls=%zu turns=%zu child_exit_seen=%d refused=%d\n",
+               rc, files, engine_count_occurrences(calls, "called\n"),
+               engine_count_occurrences(events, "\"phase\":\"turn\""),
+               strstr(output, "child_exit=23") != NULL,
+               strstr(receipt, "\"verdict\":\"REFUSED\"") != NULL);
+    return failures;
+}
+
+static int engine_report_cli_usage_check(bool files, const char *receipt,
+                                         const char *events)
+{
+    int failures = 0;
+    EN_CHECK("failed report child retains observed tokens and cost",
+             files && strstr(receipt, "\"total_tokens\":10") &&
+             strstr(receipt, "\"cost_usd_known\":true") &&
+             strstr(receipt, "\"cost_usd\":0.125") &&
+             strstr(events, "\"total_tokens\":10") &&
+             strstr(events, "\"gate_pass\":false"));
+    return failures;
+}
+
+static int engine_report_run_merged(const char *bin, const char *const argv[],
+                                    char *output, size_t cap)
+{
+    return engine_test_run_unit_capture(bin, argv, output, cap, NULL, true);
+}
+
+static int engine_report_cli_refusal_case(const struct engine_report_fixture *fx,
+                                          bool unsupported)
+{
+    char task[800], worktree[800], state[800], bin[800], calls_path[900];
+    char receipt_path[900], chain_path[900];
+    const struct engine_report_path_binding paths[] = {
+        { task, sizeof(task), "task.txt" },
+        { bin, sizeof(bin), "cli-bin" },
+        { calls_path, sizeof(calls_path), "cli.calls" },
+        { worktree, sizeof(worktree), unsupported ? "wt-format" : "wt-cli" },
+        { state, sizeof(state), unsupported ? "state-format" : "state-cli" },
+        { receipt_path, sizeof(receipt_path), unsupported
+          ? "state-format/receipt.json" : "state-cli/receipt.json" },
+        { chain_path, sizeof(chain_path), unsupported
+          ? "state-format/" ENGINE_RECEIPT_FILENAME
+          : "state-cli/" ENGINE_RECEIPT_FILENAME }
+    };
+    if (!engine_report_paths(fx, paths, sizeof(paths) / sizeof(paths[0])))
+        return 1;
+    if (unlink(calls_path) != 0 && errno != ENOENT) {
+        printf("engine: FAIL (cannot clear report CLI invocation log)\n");
+        return 1;
+    }
+    const char *const argv[] = {
+        ENGINE_UNIT_BIN, "--engine", unsupported ? "glm-cli" : "claude-haiku",
+        "--task", task, "--no-group", "--yes-dispatch", "--worktree", worktree,
+        "--state-dir", state, "--rounds", "4", NULL
+    };
+    char output[16384] = {0}, receipt[8192] = {0}, events[32768] = {0};
+    char calls[128] = {0};
+    const int rc = engine_report_run_merged(bin, argv, output, sizeof(output));
+    if (unsupported)
+        return engine_report_cli_unsupported_check(rc, output, calls_path,
+                                                   receipt_path, chain_path);
+    const bool files = read_whole_file(receipt_path, receipt, sizeof(receipt)) &&
+        read_whole_file(chain_path, events, sizeof(events)) &&
+        read_whole_file(calls_path, calls, sizeof(calls));
+    return engine_report_cli_failed_check(rc, output, files, receipt, events,
+                                          calls) +
+           engine_report_cli_usage_check(files, receipt, events);
+}
+
+static bool engine_report_cli_success_script(const struct engine_report_fixture *fx,
+                                             bool grok)
+{
+    char executable[900], calls[800], quoted_calls[1100], script[2048];
+    if (!engine_report_path(fx, executable, sizeof(executable),
+                             grok ? "cli-bin/grok" : "cli-bin/claude"))
+        return false;
+    if (!grok) {
+        if (!read_whole_file(executable, script, sizeof(script)))
+            return false;
+        char *exit_line = strstr(script, "exit 23");
+        if (!exit_line)
+            return false;
+        memcpy(exit_line, "exit 0 ", 7u);
+    } else {
+        if (!engine_report_path(fx, calls, sizeof(calls), "cli.calls") ||
+            !engine_test_shell_quote(calls, quoted_calls, sizeof(quoted_calls)))
+            return false;
+        (void)snprintf(script, sizeof(script),
+            "#!/bin/sh\nprintf 'called\\n' >> %s\nprintf '%%s\\n' "
+            "'{\"text\":\"Review completed.\",\"stopReason\":\"end_turn\","
+            "\"sessionId\":\"23c9be10-5084-43a4-8e1a-2735a4650981\","
+            "\"requestId\":\"ddc16017-2c5f-4c34-9fa9-ce50a4ec48a0\","
+            "\"usage\":{\"input_tokens\":7,\"output_tokens\":3,"
+            "\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,"
+            "\"reasoning_tokens\":0,\"total_tokens\":10},\"num_turns\":1,"
+            "\"modelUsage\":{\"grok-4.6\":{\"inputTokens\":7,"
+            "\"outputTokens\":3,\"cacheReadInputTokens\":0,"
+            "\"cacheCreationInputTokens\":0,\"modelCalls\":1}}}'\nexit 0\n",
+            quoted_calls);
+    }
+    return write_whole_file(executable, script) && chmod(executable, 0700) == 0;
+}
+
+static int engine_report_cli_success_case(const struct engine_report_fixture *fx,
+                                          bool grok)
+{
+    char task[800], worktree[800], state[800], bin[800], calls_path[900];
+    char receipt_path[900], chain_path[900], reply_path[900];
+    const struct engine_report_path_binding paths[] = {
+        { task, sizeof(task), "task.txt" }, { bin, sizeof(bin), "cli-bin" },
+        { calls_path, sizeof(calls_path), "cli.calls" },
+        { worktree, sizeof(worktree), grok ? "wt-grok" : "wt-claude" },
+        { state, sizeof(state), grok ? "state-grok" : "state-claude" },
+        { receipt_path, sizeof(receipt_path), grok
+          ? "state-grok/receipt.json" : "state-claude/receipt.json" },
+        { chain_path, sizeof(chain_path), grok
+          ? "state-grok/" ENGINE_RECEIPT_FILENAME
+          : "state-claude/" ENGINE_RECEIPT_FILENAME },
+        { reply_path, sizeof(reply_path), grok
+          ? "state-grok/reply.txt" : "state-claude/reply.txt" }
+    };
+    if (!engine_report_paths(fx, paths, sizeof(paths) / sizeof(paths[0])) ||
+        !engine_report_cli_success_script(fx, grok))
+        return 1;
+    if (unlink(calls_path) != 0 && errno != ENOENT)
+        return 1;
+    const char *const argv[] = {
+        ENGINE_UNIT_BIN, "--engine", grok ? "grok-cli" : "claude-haiku",
+        "--task", task, "--no-group", "--yes-dispatch", "--worktree", worktree,
+        "--state-dir", state, "--rounds", "4", NULL
+    };
+    char output[16384] = {0}, receipt[8192] = {0}, events[32768] = {0};
+    char calls[128] = {0}, reply[128] = {0};
+    const int rc = engine_test_run_unit(bin, argv, output, sizeof(output), NULL);
+    const bool files = read_whole_file(receipt_path, receipt, sizeof(receipt)) &&
+        read_whole_file(chain_path, events, sizeof(events));
+    int failures = engine_report_clean_check(rc, output, files, receipt, events);
+    EN_CHECK("successful structured report exposes actual text and invokes once",
+             read_whole_file(reply_path, reply, sizeof(reply)) &&
+             strcmp(reply, "Review completed.") == 0 &&
+             read_whole_file(calls_path, calls, sizeof(calls)) &&
+             engine_count_occurrences(calls, "called\n") == 1);
+    return failures;
+}
+
+static int case_engine_unit_report_effect_e2e(void)
+{
+    if (!engine_unit_binary_present()) {
+        printf("engine: FAIL (%s is required for report-effect e2e)\n",
+               ENGINE_UNIT_BIN);
+        return 1;
+    }
+    struct engine_report_fixture fx = {0};
+    if (!engine_report_fixture_setup(&fx)) {
+        printf("engine: FAIL (report-effect fixture setup failed)\n");
+        test_cleanup_tmpdir(fx.dir);
+        return 1;
+    }
+    if (!engine_report_cli_fixture(&fx)) {
+        printf("engine: FAIL (report CLI fixture setup failed)\n");
+        test_cleanup_tmpdir(fx.dir);
+        return 1;
+    }
+    int failures = engine_report_clean_case(&fx, false);
+    failures += engine_report_clean_case(&fx, true);
+    failures += engine_report_edited_case(&fx);
+    failures += engine_report_malformed_case(&fx);
+    failures += engine_report_status_refusal_case(&fx);
+    failures += engine_report_cli_refusal_case(&fx, false);
+    failures += engine_report_cli_refusal_case(&fx, true);
+    failures += engine_report_cli_success_case(&fx, false);
+    failures += engine_report_cli_success_case(&fx, true);
+    test_cleanup_tmpdir(fx.dir);
+    return failures;
+}
 struct attempt_cli_fixture {
     const char *counter, *log_path;
     const char *bin, *count, *first, *second, *task, *worktree, *state, *log;
@@ -4689,6 +5357,10 @@ static int case_contract_neg(const struct contract_fx *x)
 static int case_contract_pos(const struct contract_fx *x)
 {
     int failures = 0;
+    const bool worktree_ready = engine_test_git_init(x->wt);
+    EN_CHECK("POS fixture worktree is a Git repository", worktree_ready);
+    if (!worktree_ready)
+        return failures;
     char args[2048], out[16384];
     (void)snprintf(args, sizeof(args), "--task %s --no-group --dry-run "
                    "--fixture-reply %s", x->pos, x->reply);
@@ -5207,7 +5879,8 @@ static bool claude_ledger_run(const char *tag, const char *body,
         return false;
     }
     (void)snprintf(text, sizeof(text), "#!/bin/sh\ncat '%s'\n", body_path);
-    bool ok = write_whole_file(claude, text) && chmod(claude, 0700) == 0;
+    bool ok = write_whole_file(claude, text) && chmod(claude, 0700) == 0 &&
+         engine_test_git_init(worktree);
     (void)snprintf(text, sizeof(text),
                    "#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\"; "
                    "done > '%s'\n", log);
@@ -5346,6 +6019,7 @@ int test_engine(void)
     failures += case_state();
     failures += case_engine_unit_state_e2e();
 #if !defined(_WIN32)
+    failures += case_engine_unit_report_effect_e2e();
     failures += case_engine_unit_grok_projection_e2e();
     failures += case_claude_ledger_row_e2e();
 #endif

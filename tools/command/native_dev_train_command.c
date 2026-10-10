@@ -145,6 +145,60 @@ static void dvt_fail(struct zcl_command_reply *reply, enum zcl_command_status st
                            false, message, evidence);
 }
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static bool dvt_checkout_root(const struct zcl_command_request *request,
+                              struct zcl_command_reply *reply,
+                              char *root, size_t cap)
+{
+    const char *hint = zcl_dev_train_source_root(request);
+    const char *args[] = {"rev-parse", "--show-toplevel", NULL};
+    char top[PATH_MAX];
+    int result = zcl_dev_train_git(hint, args, top, sizeof(top),
+                                    DVT_GIT_TIMEOUT_MS);
+    zcl_dev_train_strip(top);
+    if (result == 0 && top[0] && platform_directory_canonical_real(top, root, cap))
+        return true;
+    dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+             "SOURCE_ROOT_INVALID", "prepare",
+             "source root must resolve to an existing Git checkout", hint);
+    return false;
+}
+
+static bool dvt_prepare_stack(const struct zcl_command_request *request,
+                              struct zcl_command_reply *reply, const char *name,
+                              char *root, char *stack_dir, bool create)
+{
+    if (!dvt_checkout_root(request, reply, root, PATH_MAX)) return false;
+    dvt_stack_path(root, name, stack_dir, PATH_MAX);
+    (void)json_push_kv_str(&reply->data, "path", stack_dir);
+    if (zcl_dev_train_is_dir(stack_dir) != create) return true;
+    if (create) {
+        char next[PATH_MAX + 64];
+        (void)snprintf(next, sizeof(next), "dev train drop --name %s", name);
+        (void)json_push_kv_str(&reply->data, "next", next);
+        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "STACK_EXISTS", "prepare", "stack worktree already exists",
+                 stack_dir);
+    } else {
+        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "STACK_NOT_FOUND", "prepare", "no such stack worktree",
+                 stack_dir);
+    }
+    return false;
+}
+
+static bool dvt_stack_children(const struct zcl_command_request *request,
+                               struct zcl_command_reply *reply, char *parent,
+                               struct platform_directory_list *children)
+{
+    char root[PATH_MAX];
+    if (!dvt_checkout_root(request, reply, root, sizeof(root))) return false;
+    dvt_dirname(root, parent, PATH_MAX);
+    (void)platform_directory_list_real_sorted(parent, children);
+    return true;
+}
+#endif
+
 void zcl_native_handle_dev_train_build(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -179,20 +233,8 @@ void zcl_native_handle_dev_train_build(
     }
     (void)json_push_kv_str(&reply->data, "name", name);
 
-    const char *root = zcl_dev_train_source_root(request);
-    char stack_dir[PATH_MAX];
-    dvt_stack_path(root, name, stack_dir, sizeof(stack_dir));
-    (void)json_push_kv_str(&reply->data, "path", stack_dir);
-
-    if (zcl_dev_train_is_dir(stack_dir)) {
-        char next[PATH_MAX + 64];
-        (void)snprintf(next, sizeof(next), "dev train drop --name %s", name);
-        (void)json_push_kv_str(&reply->data, "next", next);
-        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "STACK_EXISTS", "prepare", "stack worktree already exists",
-                stack_dir);
-        return;
-    }
+    char root[PATH_MAX], stack_dir[PATH_MAX];
+    if (!dvt_prepare_stack(request, reply, name, root, stack_dir, true)) return;
 
     static const char *const fetch_args[] = {"fetch", "-q", "origin", NULL};
     if (zcl_dev_train_git(root, fetch_args, NULL, 0, DVT_FETCH_TIMEOUT_MS) != 0) {
@@ -494,15 +536,8 @@ void zcl_native_handle_dev_train_check(
                 "INVALID_NAME", "validate", "name is required", "");
         return;
     }
-    const char *root = zcl_dev_train_source_root(request);
-    char stack_dir[PATH_MAX];
-    dvt_stack_path(root, name, stack_dir, sizeof(stack_dir));
-    if (!zcl_dev_train_is_dir(stack_dir)) {
-        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "STACK_NOT_FOUND", "prepare", "no such stack worktree",
-                stack_dir);
-        return;
-    }
+    char root[PATH_MAX], stack_dir[PATH_MAX];
+    if (!dvt_prepare_stack(request, reply, name, root, stack_dir, false)) return;
 
     const char *lock_argv[] = {"tools/dev/checkout-lock.sh", "foreground",
                                "build/.checkout.lock", "--", "make",
@@ -594,9 +629,7 @@ void zcl_native_handle_dev_train_status(
 #else
     const char *name =
         request && request->input ? json_get_str(json_get(request->input, "name")) : NULL;
-    const char *root = zcl_dev_train_source_root(request);
     char parent[PATH_MAX];
-    dvt_dirname(root, parent, sizeof(parent));
     (void)json_push_kv_str(&reply->data, "leaf", DVT_LEAF_STATUS);
 
     struct json_value stacks;
@@ -605,7 +638,11 @@ void zcl_native_handle_dev_train_status(
 
     struct platform_directory_list children;
     memset(&children, 0, sizeof(children));
-    if (platform_directory_list_real_sorted(parent, &children)) {
+    if (!dvt_stack_children(request, reply, parent, &children)) {
+        json_free(&stacks);
+        return;
+    }
+    {
         for (size_t i = 0; i < children.count; i++) {
             const char *child_name = children.entries[i].name;
             if (strncmp(child_name, "z23-stack", 9) != 0)
@@ -705,17 +742,9 @@ void zcl_native_handle_dev_train_drop(
                 "INVALID_NAME", "validate", "name is required", "");
         return;
     }
-    const char *root = zcl_dev_train_source_root(request);
-    char stack_dir[PATH_MAX];
-    dvt_stack_path(root, name, stack_dir, sizeof(stack_dir));
+    char root[PATH_MAX], stack_dir[PATH_MAX];
     (void)json_push_kv_str(&reply->data, "name", name);
-    (void)json_push_kv_str(&reply->data, "path", stack_dir);
-    if (!zcl_dev_train_is_dir(stack_dir)) {
-        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "STACK_NOT_FOUND", "prepare", "no such stack worktree",
-                stack_dir);
-        return;
-    }
+    if (!dvt_prepare_stack(request, reply, name, root, stack_dir, false)) return;
 
     static const char *const count_args[] = {"rev-list", "--count",
                                              "origin/main..HEAD", NULL};

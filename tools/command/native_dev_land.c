@@ -772,6 +772,27 @@ static bool dl_hold_field(const struct json_value *doc, bool *hold)
     return true;
 }
 
+static bool dl_held_priority(const struct json_value *field, bool hold, long long *out)
+{
+    if (field->type == JSON_INT) {
+        *out = json_get_int(field);
+        return true;
+    }
+    if (!hold || field->type != JSON_STR || !field->val.s ||
+        strncmp(field->val.s, "held:", 5) != 0) return false;
+    const char *digits = field->val.s + 5;
+    if (*digits < '1' || *digits > '9') return false;
+    long long value = 0;
+    for (; *digits; digits++) {
+        if (*digits < '0' || *digits > '9') return false;
+        int digit = *digits - '0';
+        if (value > (LLONG_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return true;
+}
+
 static bool dl_row_json_ok(const char *line, long long *priority,
                            bool *has_priority, bool *hold)
 {
@@ -780,19 +801,15 @@ static bool dl_row_json_ok(const char *line, long long *priority,
     json_init(&doc);
     bool ok = json_read(&doc, line, strlen(line)) && doc.type == JSON_OBJ &&
               dl_row_members_ok(&doc);
+    if (ok) ok = dl_hold_field(&doc, hold);
     field = ok ? json_get(&doc, "priority_seq") : NULL;
     *has_priority = field != NULL;
-    if (field) {
-        ok = field->type == JSON_INT;
-        if (ok)
-            *priority = json_get_int(field);
-    }
+    if (field) ok = dl_held_priority(field, *hold, priority);
     field = ok ? json_get(&doc, "push_diagnostic_pending") : NULL;
     if (field)
         ok = field->type == JSON_INT && json_get_int(field) >= 0 && json_get_int(field) <= 1;
     field = ok ? json_get(&doc, "fence_peer") : NULL;
     if (field) ok = field->type == JSON_INT && json_get_int(field) >= 0;
-    if (ok) ok = dl_hold_field(&doc, hold);
     json_free(&doc);
     return ok;
 }
@@ -1109,6 +1126,17 @@ static const char *dl_hold_literal(bool hold)
     return hold ? "true" : "false";
 }
 
+static bool dl_row_encoding_start(const struct dl_row *r, char *row, size_t cap,
+                                   char out[40])
+{
+    if (!r || !row || cap == 0) return false;
+    int n = r->publication_hold
+        ? snprintf(out, 40, "\"held:%lld\"", r->priority_seq)
+        : snprintf(out, 40, "%lld", r->priority_seq);
+    return n >= 0 && n < 40;
+}
+
+
 static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                           size_t *len_out)
 {
@@ -1127,8 +1155,8 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
      * valid UTF-8 detail cannot overflow its escaped buffer. */
     char e_dim[128], e_log[8192], e_detail[1024 * 6 + 16];
     int w;
-    if (!r || !out || cap == 0)
-        return false;
+    char priority[40];
+    if (!dl_row_encoding_start(r, out, cap, priority)) return false;
     if (!dl_escape_start_fields(r, e_ts, e_tip, e_wt, e_note, e_state,
                                 e_phase) ||
         !dl_escape_proof_fields(r, e_base, e_local, e_tree, e_intent, dependency) ||
@@ -1139,7 +1167,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
         !dl_escape(r->detail, e_detail, sizeof(e_detail)))
         return false;
     w = snprintf(out, cap,
-                 "{\"seq\":%lld,\"priority_seq\":%lld,\"ts\":\"%s\",\"tip\":\"%s\","
+                 "{\"seq\":%lld,\"priority_seq\":%s,\"ts\":\"%s\",\"tip\":\"%s\","
                  "\"worktree\":\"%s\",\"note\":\"%s\",\"state\":\"%s\","
                  "\"phase\":\"%s\",\"attempt\":%lld,\"started\":%lld,"
                  "\"base\":\"%s\",\"local\":\"%s\",\"tree\":\"%s\","
@@ -1156,7 +1184,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  "\"phase_mail\":%lld,\"detail\":\"%s\","
                  "\"push_diagnostic_pending\":%d,\"fence_peer\":%lld,"
                  "\"publication_hold\":%s%s}\n",
-                 r->seq, r->priority_seq, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
+                 r->seq, priority, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
                  r->attempt, r->started, e_base, e_local, e_tree, e_intent,
                  e_pushed, p.target, p.proof, p.bundle, p.signer, p.signature,
                  p.remote_tip, p.remote_source, p.remote_signer,

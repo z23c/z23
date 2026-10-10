@@ -126,6 +126,12 @@ bool engine_cli_observation_parse(const struct engine_vendor *vendor,
                                   const char *body, size_t len,
                                   struct engine_cli_observation *out);
 
+/* Extract final text from validated Claude or Grok CLI JSON. out->text must be
+ * NULL. On success only text/text_len are set; failure leaves out unchanged. */
+bool engine_cli_reply_text(const struct engine_vendor *vendor,
+                           const char *body, size_t len,
+                           struct engine_reply *out);
+
 /* How much of a refused body is quoted back to the operator. Enough to see
  * the shape of the document — the top-level keys, an unexpected wrapper, a
  * proxy's HTML error page — and far too little to be a transcript. */
