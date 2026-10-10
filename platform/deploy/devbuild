@@ -341,7 +341,7 @@ rc=0
 systemd-run --user --scope --quiet --unit="$unit" --slice=development.slice \
     --property="CPUQuota=$quota" --property="MemoryMax=$memory" \
     --property=MemorySwapMax=0 --property=CPUWeight="$cpu_weight" --property=IOWeight=20 -- \
-    /usr/bin/env "DEVBUILD_ACTIVE=$project" "ZCC_MAX_MB=${ZCC_MAX_MB:-8192}" \
+    /usr/bin/env "DEVBUILD_ACTIVE=$project" "ZCC_MAX_MB=${ZCC_MAX_MB:-24576}" \
     /usr/bin/nice -n 10 /usr/bin/ionice -c 2 -n 7 \
     /usr/bin/taskset --cpu-list "$cpu_list" \
     /bin/bash -c 'umask "$1"; shift; exec "$@"' devbuild-command \
