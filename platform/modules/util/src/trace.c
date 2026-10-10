@@ -164,10 +164,8 @@ void trace_set_status(struct trace_span *s, enum trace_status status)
     s->status = status;
 }
 
-/* OTLP/JSON encodes enum fields as INTEGERS, not names (OpenTelemetry
- * Protocol specification, "JSON Protobuf Encoding" section: enum values are
- * sent as integers; receivers accept names too, senders must not emit
- * them).  Status.StatusCode: UNSET 0, OK 1, ERROR 2. */
+/* The OTLP status field is emitted as its integer code, not its enum name.
+ * Status.StatusCode: UNSET 0, OK 1, ERROR 2. */
 static int trace_otlp_status(enum trace_status status)
 {
     if (status == TRACE_STATUS_ERROR) return 2;
