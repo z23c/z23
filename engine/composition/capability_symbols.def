@@ -431,6 +431,8 @@ ZCL_CAPABILITY_SYMBOL("fflush", CAP_FS_READ,
     "Commits buffered bytes only if a CAP_FS_WRITE call put them there, "
     "so the handle itself is all the reach this symbol adds.")
 ZCL_CAPABILITY_SYMBOL("fgetc", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("ungetc", CAP_FS_READ,
+    "Pushes a byte back into an existing input stream; does not write external storage.")
 ZCL_CAPABILITY_SYMBOL("fgets", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("fopen", CAP_FS_READ,
     "The mode string is invisible to nm, so this one symbol spans "

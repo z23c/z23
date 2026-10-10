@@ -81,3 +81,14 @@ verification log SHA256 is
 The qualified source postimages are carrier `a33be53f`, test `a5540ff9` and
 verifier `845e4b30`; the combined patch above binds their complete bytes.
 This focused acceptance is separate from exact-pair publication proof.
+
+The exact-pair publication attempt
+`e8938c3c67ea405ec709e0ad82467cb1cb6f2b4a` against
+`7bcd688b84d181a7dff72fa048d60a34d30fe005` failed capability closure:
+its new attribute parser reached the unclassified libc `ungetc` symbol.
+The complete lint log SHA256 is
+`27c5f11fbbff582fbaf6eaa31680af2bd4797d7caea21e456f865824c10649f1`.
+The classification repair assigns `ungetc` to `CAP_FS_READ`: it pushes one
+byte back into an existing input stream without writing external storage.
+The verifier already declares this capability; no module authority or gate
+threshold changes. The failed publication attempt remains failure evidence.
