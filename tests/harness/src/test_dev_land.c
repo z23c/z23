@@ -7812,6 +7812,7 @@ _test_next:;
 }
 #endif
 
+#if !defined(_WIN32)
 /* The producer-recovery counter the proof stub's stand-in rebuild keeps. */
 static long dlx_producer_runs(void)
 {
@@ -7838,11 +7839,368 @@ static bool dlx_step_dim(const char *stub, const char *state,
     return ok;
 }
 
+/* Stand in for a step that died between phases: rewrite the one row's phase
+ * in the rig's queue file. Fails unless `"phase":"<from>"` occurs exactly once. */
+static bool dlx_queue_phase(const char *from, const char *to)
+{
+    char landdir[1100], path[1200], key[64], buf[16384], out[16384];
+    size_t len = 0;
+    int n = snprintf(key, sizeof(key), "\"phase\":\"%s\"", from);
+    dlx_landdir(landdir, sizeof(landdir));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", landdir);
+    if (n < 0 || (size_t)n >= sizeof(key) ||
+        !dlx_slurp(path, buf, sizeof(buf) - 1, &len))
+        return false;
+    buf[len] = '\0';
+    char *hit = strstr(buf, key);
+    if (!hit || strstr(hit + n, key))
+        return false;
+    int w = snprintf(out, sizeof(out), "%.*s\"phase\":\"%s\"%s",
+                     (int)(hit - buf), buf, to, hit + n);
+    return w > 0 && (size_t)w < sizeof(out) && dlx_write(path, out);
+}
+
+/* Stand in for a queued row whose producer recovery was spent: rewrite
+ * `from` to `to` inside the one queue.jsonl line that holds `anchor`.
+ * Fails unless `anchor` occurs exactly once in the file and `from` occurs
+ * exactly once in that line. (Choice: the anchor is the row's tip, since
+ * a second row carries the same field.) */
+static bool dlx_queue_field_once(const char *anchor, const char *from,
+                                 const char *to)
+{
+    char landdir[1100], path[1200], buf[16384], line[16384], out[16384];
+    size_t len = 0;
+    dlx_landdir(landdir, sizeof(landdir));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", landdir);
+    if (!dlx_slurp(path, buf, sizeof(buf) - 1, &len))
+        return false;
+    buf[len] = '\0';
+    char *hit = strstr(buf, anchor);
+    if (!hit || strstr(hit + 1, anchor))
+        return false;
+    char *start = hit;
+    while (start > buf && start[-1] != '\n')
+        start--;
+    char *end = strchr(hit, '\n');
+    if (!end)
+        end = buf + len;
+    if ((size_t)(end - start) >= sizeof(line))
+        return false;
+    (void)snprintf(line, sizeof(line), "%.*s", (int)(end - start), start);
+    char *f = strstr(line, from);
+    if (!f || strstr(f + strlen(from), from))
+        return false;
+    int w = snprintf(out, sizeof(out), "%.*s%.*s%s%s%s",
+                     (int)(start - buf), buf, (int)(f - line), line, to,
+                     f + strlen(from), end);
+    return w > 0 && (size_t)w < sizeof(out) && dlx_write(path, out);
+}
+
+/* Move origin/main with a commit from a side clone, as a stranger landing. */
+static bool dlx_stranger_lands(const struct dlx_rig *rig)
+{
+    char stranger[64];
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    const char *fetch[] = { "fetch", "--quiet", "origin", NULL };
+    const char *branch[] = { "checkout", "--quiet", "-B", "side",
+                             "origin/main", NULL };
+    const char *back[] = { "checkout", "--quiet", "-B", "main", NULL };
+    return dlx_git(rig->clone, branch) == 0 &&
+           dlx_commit(rig->clone, "stranger.txt", "elsewhere\n", stranger) &&
+           dlx_git(rig->clone, push) == 0 &&
+           dlx_git(rig->clone, back) == 0 &&
+           dlx_git(rig->clone, fetch) == 0;
+}
+
+/* The shared setup of the dead-step cases: recover once, then kill the step. */
+static bool dlx_recovered_dead(struct dlx_rig *rig, const char *tag,
+                               const char *rig_tag)
+{
+    return dlx_started(rig, tag, rig_tag) &&
+           dlx_step_dim("producer_stale", "proving", "", NULL) &&
+           dlx_producer_runs() == 1 &&
+           dlx_queue_phase("prove", "prebuild");
+}
+#endif
+
+#if !defined(_WIN32)
+/* Phase mail quieting. The lander posts one phase row per landing step; a
+ * row identical to the last one posted for the same landing is not posted
+ * again. These cases read the mail leaf's outbox raw and count rows. */
+static bool dlx_pm_outbox_path(char *out, size_t cap)
+{
+    char landdir[1200], mail[1300];
+    dlx_landdir(landdir, sizeof(landdir));
+    return snprintf(mail, sizeof(mail), "%s/../mail", landdir) <
+               (int)sizeof(mail) &&
+           dlx_mkdir_p(mail) &&
+           snprintf(out, cap, "%s/outbox.jsonl", mail) < (int)cap;
+}
+
+static int dlx_pm_count(const char *needle)
+{
+    char path[1400];
+    static char text[1u << 20];
+    size_t len = 0;
+    int n = 0;
+    if (!dlx_pm_outbox_path(path, sizeof(path)) ||
+        !dlx_slurp(path, text, sizeof(text) - 1, &len))
+        return 0;
+    text[len] = '\0';
+    for (const char *p = text; (p = strstr(p, needle)) != NULL; p += strlen(needle))
+        n++;
+    return n;
+}
+
+/* Occurrences of `needle` in the land log of the one submission, the same
+ * logs/land-1-a1.log that dlx_beat_log_record reads. */
+static int dlx_pm_log_count(const char *needle)
+{
+    char landdir[1200], path[1400];
+    static char text[1u << 20];
+    size_t len = 0;
+    int n = 0;
+    dlx_landdir(landdir, sizeof(landdir));
+    int w = snprintf(path, sizeof(path), "%s/logs/land-1-a1.log", landdir);
+    if (w <= 0 || (size_t)w >= sizeof(path) ||
+        !dlx_slurp(path, text, sizeof(text) - 1, &len))
+        return 0;
+    text[len] = '\0';
+    for (const char *p = text; (p = strstr(p, needle)) != NULL; p += strlen(needle))
+        n++;
+    return n;
+}
+
+/* True while queue.jsonl still carries a "phase_mail" member, or cannot be
+ * read (the caller then fails rather than passing on an unknown file). */
+static bool dlx_pm_queue_has_phase_mail(void)
+{
+    char landdir[1100], path[1200], buf[16384];
+    size_t len = 0;
+    dlx_landdir(landdir, sizeof(landdir));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", landdir);
+    if (!dlx_slurp(path, buf, sizeof(buf) - 1, &len))
+        return true;
+    buf[len] = '\0';
+    return strstr(buf, "\"phase_mail\":") != NULL;
+}
+
+/* Isolated rig, mailbox present, one submission stepped once. */
+static bool dlx_pm_start(struct dlx_rig *rig, const char *tag)
+{
+    struct dlx_call c;
+    char path[1400];
+    dlx_isolate(tag);
+    if (!dlx_rig_make(rig, tag) || !dlx_pm_outbox_path(path, sizeof(path)))
+        return false;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    dlx_submit(&c, rig, rig->tip);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    return ok && dlx_step_dim("running", "started", NULL, NULL);
+}
+
+/* One step under the "running" stub that must succeed, whatever the state. */
+static bool dlx_pm_step(void)
+{
+    struct dlx_call c;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    dlx_begin(&c, "step");
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    return ok;
+}
+
+/* Delete the `"phase_mail":N,` member from the queue file: an older row. */
+static bool dlx_pm_strip_field(void)
+{
+    char landdir[1100], path[1200], buf[16384];
+    size_t len = 0;
+    dlx_landdir(landdir, sizeof(landdir));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", landdir);
+    if (!dlx_slurp(path, buf, sizeof(buf) - 1, &len))
+        return false;
+    buf[len] = '\0';
+    char *key = strstr(buf, "\"phase_mail\":");
+    char *comma = key ? strchr(key, ',') : NULL;
+    if (!comma)
+        return false;
+    memmove(key, comma + 1, strlen(comma + 1) + 1);
+    return dlx_write(path, buf);
+}
+
+static int test_dev_land_phase_mail_quiet(void)
+{
+    int failures = 0;
+    TEST("land: steps that change nothing post one phase row; a changed row posts a new one") {
+        struct dlx_rig rig;
+        int first, beats;
+        ASSERT(dlx_pm_start(&rig, "pm_quiet"));
+        first = dlx_pm_count("land=phase");
+        ASSERT(first >= 1);
+        beats = dlx_pm_log_count("beat=proof_status");
+        ASSERT(dlx_pm_step());
+        ASSERT(dlx_pm_step());
+        /* Both steps ran the proof read and their commits succeeded (dlx_pm_step
+         * requires an ok reply), so each wrote its proof_status beat. The
+         * unchanged post count below is then suppression, not idle steps. */
+        ASSERT(dlx_pm_log_count("beat=proof_status") >= beats + 2);
+        ASSERT_EQ(dlx_pm_count("land=phase"), first);
+        ASSERT(dlx_step_dim("producer_stale", "proving", "", NULL));
+        ASSERT(dlx_pm_count("land=phase") > first);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land: a terminal row is posted after quiet phase rows") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        ASSERT(dlx_pm_start(&rig, "pm_terminal"));
+        ASSERT(dlx_pm_step());
+        ASSERT_EQ(dlx_pm_count("land=outcome"), 0);
+        dlx_begin(&c, "cancel");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        ASSERT_EQ(dlx_pm_count("land=outcome\\nstate=cancelled"), 1);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land: a queue row without the phase_mail field loads, steps and posts") {
+        struct dlx_rig rig;
+        int first;
+        ASSERT(dlx_pm_start(&rig, "pm_oldrow"));
+        first = dlx_pm_count("land=phase");
+        ASSERT(dlx_pm_strip_field());
+        ASSERT(!dlx_pm_queue_has_phase_mail());
+        ASSERT(dlx_pm_step());
+        ASSERT_EQ(dlx_pm_count("land=phase"), first + 1);
+        ASSERT(dlx_pm_step());
+        ASSERT_EQ(dlx_pm_count("land=phase"), first + 1);
+        dlx_restore();
+        PASS();
+    }
+    /* A plain behaviour test: the requeued successor's first phase row posts.
+     * It does NOT discriminate the successor.phase_mail reset in
+     * dl_requeue_successor; removing that reset leaves this test green. */
+    TEST("land: a successor row's first phase row posts") {
+        struct dlx_rig rig;
+        char base[64], stranger[64];
+        int first;
+        ASSERT(dlx_started(&rig, "pm_successor", "pm_successor_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        const char *branch[] = { "checkout", "--quiet", "-B", "side", base,
+                                 NULL };
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
+                               NULL };
+        ASSERT(dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_commit(rig.clone, "stranger.txt", "elsewhere\n", stranger));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_step_to("cancelled", "rebased", 2, "successor queued"));
+        first = dlx_pm_count("land=phase");
+        ASSERT(dlx_pm_step());
+        ASSERT(dlx_pm_count("land=phase") > first);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+#endif
+
+/* Pure digest judgments through zcl_dev_land_phase_digest, declared in
+ * native_dev_land_attestation.h. Each test moves one input and says what
+ * that must do to the digest. */
+static long long dlx_pd(const char *detail, const char *tip)
+{
+    return zcl_dev_land_phase_digest("inflight", "prove", 1, "", "n", detail,
+                                     "land-1-a1.log", tip);
+}
+
+static int test_dev_land_phase_digest(void)
+{
+    int failures = 0;
+    static const char idle_901[] =
+        "resident_proof_request_queued; proof_request_idle_age_s=901 "
+        "(no worker has claimed the queued request)";
+    static const char idle_12345[] =
+        "resident_proof_request_queued; proof_request_idle_age_s=12345 "
+        "(no worker has claimed the queued request)";
+    TEST("land phase digest: a tip change moves the digest") {
+        ASSERT(dlx_pd(idle_901, "aaaa") != dlx_pd(idle_901, "bbbb"));
+        PASS();
+    }
+    TEST("land phase digest: only the idle-age digits leave it unchanged; other detail moves it") {
+        static const char renamed[] =
+            "resident_proof_request_queued_x; proof_request_idle_age_s=901 "
+            "(no worker has claimed the queued request)";
+        static const char reworded[] =
+            "resident_proof_request_queued; proof_request_idle_age_s=901 "
+            "(no worker has claimed the queued request!)";
+        ASSERT(dlx_pd(idle_901, "aaaa") == dlx_pd(idle_12345, "aaaa"));
+        ASSERT(dlx_pd(idle_901, "aaaa") != dlx_pd(renamed, "aaaa"));
+        ASSERT(dlx_pd(idle_901, "aaaa") != dlx_pd(reworded, "aaaa"));
+        PASS();
+    }
+    TEST("land phase digest: an all-empty row is never 0, NULL reads as empty") {
+        long long nulls = zcl_dev_land_phase_digest(NULL, NULL, 0, NULL, NULL,
+                                                    NULL, NULL, NULL);
+        long long empty = zcl_dev_land_phase_digest("", "", 0, "", "", "", "",
+                                                    "");
+        ASSERT(nulls != 0);
+        ASSERT(empty != 0);
+        ASSERT(nulls == empty);
+        PASS();
+    }
+    TEST("land phase digest: adjacent fields keep their borders") {
+        ASSERT(zcl_dev_land_phase_digest("ab", "c", 0, NULL, NULL, NULL, NULL,
+                                         NULL) !=
+               zcl_dev_land_phase_digest("a", "bc", 0, NULL, NULL, NULL, NULL,
+                                         NULL));
+        PASS();
+    }
+    TEST("land phase digest: the idle key with no digits, or twice, is stable") {
+        static const char bare[] = "x; proof_request_idle_age_s= (none)";
+        static const char twice_a[] =
+            "proof_request_idle_age_s=1; proof_request_idle_age_s=22";
+        static const char twice_b[] =
+            "proof_request_idle_age_s=9; proof_request_idle_age_s=3";
+        ASSERT(dlx_pd(bare, "t") != 0);
+        ASSERT(dlx_pd(bare, "t") == dlx_pd(bare, "t"));
+        ASSERT(dlx_pd(twice_a, "t") == dlx_pd(twice_b, "t"));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int test_dev_land_step_producer_recovery(void)
 {
     int failures = 0;
 #if !defined(_WIN32)
     static const char *const stale = "proof_producer_source_mismatch";
+    TEST("land step: a spent producer recovery is earned again when a dead step's rebase finds main moved") {
+        struct dlx_rig rig;
+        ASSERT(dlx_recovered_dead(&rig, "step_producer_moved", "step_producer_moved_rig"));
+        ASSERT(dlx_stranger_lands(&rig));
+        ASSERT(dlx_step_dim("running", "started", NULL, NULL));
+        ASSERT(dlx_step_dim("producer_stale", "proving", "",
+                            "producer rebuilt from the candidate"));
+        ASSERT_EQ(dlx_producer_runs(), 2);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land step: a dead step's rebase on an unmoved main does not hand out a second producer recovery") {
+        struct dlx_rig rig;
+        ASSERT(dlx_recovered_dead(&rig, "step_producer_still", "step_producer_still_rig"));
+        ASSERT(dlx_step_dim("running", "started", NULL, NULL));
+        ASSERT(dlx_step_dim("producer_stale", "failed", stale,
+                            "producer recovery tried once"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        dlx_restore();
+        PASS();
+    }
     TEST("land step: a producer-stale refusal is recovered once and the re-proved pair lands") {
         struct dlx_rig rig;
         ASSERT(dlx_started(&rig, "step_producer_once", "step_producer_once_rig"));
@@ -9949,14 +10307,14 @@ static bool dlx_extended_native_row(char *body, size_t cap, unsigned members)
         return false;
     struct json_value doc; json_init(&doc);
     bool ok = json_read(&doc, native, strlen(native)) && doc.type == JSON_OBJ &&
-              doc.num_children == 34;
+              doc.num_children == 35;
     json_free(&doc);
     char *end = strrchr(native, '}');
-    if (!ok || !end || members < 34) return false;
+    if (!ok || !end || members < 35) return false;
     size_t used = (size_t)(end - native);
     if (used >= cap) return false;
     memcpy(body, native, used);
-    for (unsigned i = 34; i < members; i++) {
+    for (unsigned i = 35; i < members; i++) {
         int n = snprintf(body + used, cap - used, ",\"extension_%u\":0", i);
         if (n <= 0 || (size_t)n >= cap - used) return false;
         used += (size_t)n;
@@ -10243,6 +10601,17 @@ static int dlx_case_step_lock(void)
         ASSERT(c.reply.error.retryable);
         ASSERT(!c.reply.error.mutated);
         ASSERT(strstr(dlx_err_evidence(&c), "queue=") != NULL);
+        {
+#if defined(__linux__)
+            char want[48];
+            (void)snprintf(want, sizeof(want), "holder_pid=%d ",
+                           (int)getpid());
+            ASSERT(strstr(dlx_err_evidence(&c), want) != NULL);
+#else
+            /* The holder is read from /proc/locks, which only Linux has. */
+            ASSERT(strstr(dlx_err_evidence(&c), "holder_pid=unknown") != NULL);
+#endif
+        }
         ASSERT(strstr(dlx_err_evidence(&c), landdir) != NULL);
         dlx_end(&c);
 
@@ -12418,6 +12787,10 @@ int test_dev_land(void)
     failures += test_dev_land_new_source_precheck();
     failures += test_dev_land_drive_producer_reproof();
     failures += test_dev_land_step_producer_recovery();
+#if !defined(_WIN32)
+    failures += test_dev_land_phase_mail_quiet();
+#endif
+    failures += test_dev_land_phase_digest();
     failures += test_dev_land_signed_lost_ack();
     failures += test_dev_land_signed_lost_race();
     failures += test_dev_land_signed_lost_ack_resend();
@@ -13202,6 +13575,33 @@ static bool dlx_qp_file_has(const char *path, const char *needle)
     return strstr(text, needle) != NULL;
 }
 
+/* The last line of `path` that holds `anchor`, copied into `line`. Choice:
+ * outcomes.jsonl is read raw, since the status reply carries no base or mark. */
+static bool dlx_qp_last_line(const char *path, const char *anchor,
+                             char *line, size_t cap)
+{
+    static char text[262144];
+    const char *hit = NULL, *p, *start, *end;
+    size_t len = 0;
+    if (!dlx_slurp(path, text, sizeof(text) - 1, &len))
+        return false;
+    text[len] = '\0';
+    for (p = text; (p = strstr(p, anchor)) != NULL; p++)
+        hit = p;
+    if (!hit)
+        return false;
+    start = hit;
+    while (start > text && start[-1] != '\n')
+        start--;
+    end = strchr(hit, '\n');
+    if (!end)
+        end = text + len;
+    if ((size_t)(end - start) >= cap)
+        return false;
+    (void)snprintf(line, cap, "%.*s", (int)(end - start), start);
+    return true;
+}
+
 static int test_dev_land_queued_conflict_detected(void)
 {
     int failures = 0;
@@ -13241,6 +13641,55 @@ static int test_dev_land_queued_conflict_detected(void)
                (int)sizeof(outbox));
         ASSERT(dlx_qp_file_has(outbox, "state=conflict"));
         ASSERT(dlx_qp_file_has(outbox, "detected while queued"));
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* A terminal conflict row records its base and its cleared mark together;
+ * the cleared mark has no later effect because the row is terminal. */
+static int test_dev_land_queued_conflict_mark_cleared(void)
+{
+    int failures = 0;
+    TEST("land: a queued row that spent its producer recovery and is "
+         "conflicted by a moved main is recorded on that main with the "
+         "mark cleared") {
+        struct dlx_rig rig;
+        char b[64], m1[64], detail[512], landdir[1200], outcomes[1300];
+        char anchor[128], base[128], line[4096];
+        dlx_isolate("qp_mark");
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(dlx_rig_make(&rig, "qp_mark_rig"));
+        ASSERT(dlx_qp_branch(&rig, "qp-b", "seed.txt", "mine\n", NULL, NULL,
+                             b));
+        ASSERT(dlx_qp_start(&rig, b));
+        ASSERT(dlx_qp_beat("started", 1, 0));
+        ASSERT(dlx_qp_queued_has(b, 1));
+        ASSERT(dlx_qp_push_main(&rig, "seed.txt", "theirs\n", m1));
+        /* Seed: B's producer recovery is spent before the precheck runs. */
+        ASSERT(snprintf(anchor, sizeof(anchor), "\"tip\":\"%s\"", b) <
+               (int)sizeof(anchor));
+        ASSERT(dlx_queue_field_once(anchor, "\"producer_recovered\":0",
+                                    "\"producer_recovered\":1"));
+        ASSERT(dlx_qp_beat("rebased", -1, -1));
+        ASSERT(dlx_qp_beat("started", 1, 1));
+        /* The model's own verdict checks. */
+        ASSERT(dlx_qp_outcome(b, "conflict", detail, sizeof(detail)));
+        ASSERT(strstr(detail, "detected while queued") != NULL);
+        ASSERT(strstr(detail, m1) != NULL);
+        ASSERT(!dlx_qp_queued_has(b, 1));
+        /* The terminal row B lands in outcomes.jsonl: moved base, mark 0. */
+        ASSERT(snprintf(outcomes, sizeof(outcomes), "%s/outcomes.jsonl",
+                        landdir) < (int)sizeof(outcomes));
+        ASSERT(dlx_qp_last_line(outcomes, anchor, line, sizeof(line)));
+        ASSERT(strstr(line, "\"producer_recovered\":0") != NULL);
+        ASSERT(snprintf(base, sizeof(base), "\"base\":\"%s\"", m1) <
+               (int)sizeof(base));
+        ASSERT(strstr(line, base) != NULL);
+        ASSERT(strstr(line, "detected while queued") != NULL);
         dlx_restore();
         PASS();
     }
@@ -13723,6 +14172,7 @@ static int test_dev_land_queued_precheck_cases(void)
 {
     int failures = 0;
     failures += test_dev_land_queued_conflict_detected();
+    failures += test_dev_land_queued_conflict_mark_cleared();
     failures += test_dev_land_queued_mergeable_lands();
     failures += test_dev_land_queued_regen_only_kept();
     failures += test_dev_land_queued_tool_failure_kept();

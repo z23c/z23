@@ -225,15 +225,23 @@ static void dl_fail(struct zcl_command_reply *reply, const char *code,
 /* Another driver already holds step.lock. Nothing has been read or touched
  * yet — the lock is the first thing step takes — so this always fires
  * before any queue or worktree access. Retryable: the caller is expected to
- * step again shortly rather than treat this as a real failure. dl_lock_path
- * does not hand back the holder's pid (it is a plain open+flock, not a
- * pid-file), so the evidence names what is knowable: the queue directory
- * the lock lives in. */
+ * step again shortly rather than treat this as a real failure. The lock is
+ * a plain open+flock, not a pid-file, so the holder is read from the
+ * kernel's /proc/locks (never from the file); the evidence says "unknown"
+ * where the kernel does not say, and always names the queue directory. */
+static bool dl_lock_holder_pid(const char *path, int *pid_out);
+
 static void dl_step_busy(struct zcl_command_reply *reply, const char *landdir)
 {
-    char evidence[4096 + 64];
-    (void)snprintf(evidence, sizeof(evidence), "holder_pid=unknown queue=%s",
-                   landdir ? landdir : "");
+    char evidence[4096 + 96], path[4096 + 32], holder[24] = "unknown";
+    int pid = 0;
+    int n = landdir ? snprintf(path, sizeof(path), "%s/step.lock", landdir)
+                    : -1;
+    if (n > 0 && (size_t)n < sizeof(path) &&
+        dl_lock_holder_pid(path, &pid))
+        (void)snprintf(holder, sizeof(holder), "%d", pid);
+    (void)snprintf(evidence, sizeof(evidence), "holder_pid=%s queue=%s",
+                   holder, landdir ? landdir : "");
     (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                            ZCL_COMMAND_EXIT_BLOCKED, "STEP_BUSY", "step",
@@ -461,7 +469,7 @@ struct dl_string_result {
     return result;
 }
 
-/* Successful native serialization emits 34 unique scalar members. Reject
+/* Successful native serialization emits 35 unique scalar members. Reject
  * foreign ambiguity and displacement; cap extensions before O(n^2) work. */
 static bool dl_row_members_ok(const struct json_value *doc)
 {
@@ -743,6 +751,11 @@ struct dl_row {
      * main moves. Written before the recovery runs; independent of dimension.
      * Optional on disk: an older row loads as "not tried". */
     long long producer_recovered;
+    /* Digest of the last phase mail posted for this row (state, phase,
+     * attempt, tip, dimension, note, detail, log); 0 means nothing posted.
+     * Optional on disk: an older row loads as 0, an older binary ignores
+     * the key. A cache that only decides whether a repeat row is mailed. */
+    long long phase_mail;
 };
 
 static bool dl_hold_field(const struct json_value *doc, bool *hold)
@@ -996,7 +1009,11 @@ static bool dl_parse_dispatch_fields(const char *line, struct dl_row *r)
     r->push_diagnostic_pending = pending != 0;
     (void)dl_line_int(line, "fence_peer", &r->fence_peer);
     (void)dl_line_int(line, "producer_recovered", &r->producer_recovered);
-    r->producer_recovered = r->producer_recovered != 0; /* garbage reads as spent */
+    /* Absent, non-integer or out-of-range (ERANGE) text stays 0; any other non-zero integer (or "1x") is spent. */
+    r->producer_recovered = r->producer_recovered != 0;
+    (void)dl_line_int(line, "phase_mail", &r->phase_mail);
+    if (r->phase_mail < 0)
+        r->phase_mail = 0;
     return dl_chain_fields_parse(line, r) && r->fence_peer >= 0 &&
         (strcmp(r->state, "fenced") != 0 || r->fence_peer > 0);
 }
@@ -1136,7 +1153,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  "\"prechecked_main\":\"%s\","
                  "\"precheck_uncertain_main\":\"%s\","
                  "\"precheck_uncertain\":%lld,\"producer_recovered\":%lld,"
-                 "\"detail\":\"%s\","
+                 "\"phase_mail\":%lld,\"detail\":\"%s\","
                  "\"push_diagnostic_pending\":%d,\"fence_peer\":%lld,"
                  "\"publication_hold\":%s%s}\n",
                  r->seq, r->priority_seq, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
@@ -1147,7 +1164,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  /* Unescaped on purpose: dl_prechecked_parse() and the
                   * precheck admit only a 40-hex commit id or "". */
                  e_dim, e_log, r->prechecked, r->uncertain_main,
-                 r->uncertain_tries, r->producer_recovered, e_detail,
+                 r->uncertain_tries, r->producer_recovered, r->phase_mail, e_detail,
                  r->push_diagnostic_pending ? 1 : 0,
                  r->fence_peer, dl_hold_literal(r->publication_hold), dependency);
     if (w <= 0 || (size_t)w >= cap)
@@ -3984,6 +4001,84 @@ static bool dl_terminal_checkpoint(const struct dl_dirs *d,
     return true;
 }
 
+/* FNV-1a over one string and its terminator, so field borders count. */
+static uint64_t dl_fnv_str(uint64_t h, const char *s)
+{
+    do {
+        h ^= (unsigned char)*s;
+        h *= 1099511628211ULL;
+    } while (*s++);
+    return h;
+}
+
+/* As dl_fnv_str, but the digits right after the idle note's age key are not
+ * hashed: the age grows every step, and that growth alone must not post the
+ * same idleness again. The key text and the terminator are hashed. */
+static uint64_t dl_fnv_detail(uint64_t h, const char *s)
+{
+    static const char key[] = "proof_request_idle_age_s=";
+    const size_t klen = sizeof(key) - 1;
+    for (;;) {
+        if (strncmp(s, key, klen) == 0) {
+            for (size_t i = 0; i < klen; i++) {
+                h ^= (unsigned char)s[i];
+                h *= 1099511628211ULL;
+            }
+            s += klen;
+            while (*s >= '0' && *s <= '9')
+                s++;
+            continue;
+        }
+        h ^= (unsigned char)*s;
+        h *= 1099511628211ULL;
+        if (*s == '\0')
+            return h;
+        s++;
+    }
+}
+
+static const char *dl_or_empty(const char *s)
+{
+    return s ? s : "";
+}
+
+/* Digest of what a phase row says: pure, NULL fields read as empty, never 0. */
+long long zcl_dev_land_phase_digest(const char *state, const char *phase,
+                                    long long attempt, const char *dimension,
+                                    const char *note, const char *detail,
+                                    const char *log_base, const char *tip)
+{
+    char attempt_text[32];
+    uint64_t h = 14695981039346656037ULL;
+    (void)snprintf(attempt_text, sizeof(attempt_text), "%lld", attempt);
+    h = dl_fnv_str(h, dl_or_empty(state));
+    h = dl_fnv_str(h, dl_or_empty(phase));
+    h = dl_fnv_str(h, attempt_text);
+    h = dl_fnv_str(h, dl_or_empty(tip));
+    h = dl_fnv_str(h, dl_or_empty(dimension));
+    h = dl_fnv_str(h, dl_or_empty(note));
+    h = dl_fnv_detail(h, dl_or_empty(detail));
+    h = dl_fnv_str(h, dl_or_empty(log_base));
+    return (long long)((h & 0x3fffffffffffffffULL) | 1);
+}
+
+/* Digest of what a phase row says. Never 0 (0 means "nothing posted"). */
+static long long dl_phase_digest(const struct dl_row *r)
+{
+    return zcl_dev_land_phase_digest(r->state, r->phase, r->attempt,
+                                     r->dimension, r->note, r->detail,
+                                     dl_log_base(r->log_path), r->tip);
+}
+
+/* Record on `row` what this phase row says and report whether it differs
+ * from `posted`, the digest the stored row carries. Only the mail depends
+ * on the answer; the row is written either way. */
+static bool dl_phase_stamp(struct dl_row *row, long long posted)
+{
+    row->phase_mail = dl_phase_digest(row);
+    return row->phase_mail != posted;
+}
+
 /* Persist one row back into the queue file, or drop it and record it as an
  * outcome when its state is terminal. */
 static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
@@ -3992,7 +4087,7 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
     struct dl_row *rows = NULL;
     size_t nrows = 0, kept = 0;
     char qpath[4096 + 32];
-    bool ok, found = false;
+    bool ok, found = false, post = false;
     int lock;
     if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d->land) >=
         (int)sizeof(qpath))
@@ -4009,6 +4104,7 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
             found = true;
             if (terminal)
                 continue;
+            post = dl_phase_stamp(row, rows[i].phase_mail);
             rows[kept++] = *row;
             continue;
         }
@@ -4034,7 +4130,11 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
         ok = dl_rewrite_rows(d->land, qpath, rows, kept);
     free(rows);
     dl_unlock(lock);
-    if (ok && !terminal)
+    /* The digest was stamped into the row before this post and is written
+     * with it. A phase row whose post fails is therefore not resent until
+     * the row changes. Accepted: the post was already best-effort and the
+     * board is advisory. Terminal outcome rows do not use this path. */
+    if (ok && post)
         (void)dl_outbox(d, row, "phase");
     return ok;
 }
@@ -4094,6 +4194,9 @@ static bool dl_requeue_successor(const struct dl_dirs *d, struct dl_row *row,
     dl_publication_clear(&successor);
     successor.dimension[0] = '\0';
     successor.producer_recovered = 0;
+    /* Belt-and-braces: the digest already differs for a successor because
+     * `attempt` is hashed; no test discriminates this reset. */
+    successor.phase_mail = 0;
     for (size_t i = at + 1; i < nrows; i++) rows[i - 1] = rows[i];
     rows[nrows - 1] = successor;
     ok = dl_rewrite_rows(d->land, qpath, rows, nrows);
@@ -5051,6 +5154,15 @@ static bool dl_tip_checkout(const struct dl_dirs *d, struct dl_row *row,
     return dl_linearize_for_rebase(d, row, observed_main, why, why_cap);
 }
 
+/* Move the row's base to a newly observed main. The producer-recovery mark
+ * is spent only until main moves, so it clears only when the base changes. */
+static void dl_row_move_base(struct dl_row *row, const char *observed_main)
+{
+    if (strcmp(row->base, observed_main) != 0)
+        row->producer_recovered = 0;
+    (void)snprintf(row->base, sizeof(row->base), "%s", observed_main);
+}
+
 /* Rebase the row's tip onto origin/main inside the private landing
  * worktree. Returns 1 prepared, 0 conflict, -1 setup failure.
  *
@@ -5073,7 +5185,7 @@ static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
         regen_note[0] = '\0';
     if (!dl_tip_checkout(d, row, observed_main, &integrated, why, why_cap))
         return -1;
-    (void)snprintf(row->base, sizeof(row->base), "%s", observed_main);
+    dl_row_move_base(row, observed_main);
     /* Replaying an already-integrated merge discards its resolution and
      * can reintroduce conflicts from previously published work. Skip only
      * that replay; preparation and exact proof below remain mandatory. */
@@ -7592,6 +7704,9 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
     (void)snprintf(row->phase, sizeof(row->phase), "rebase");
     row->dimension[0] = '\0';
     row->producer_recovered = 0;
+    /* Belt-and-braces: the digest already differs for a successor because
+     * `attempt` is hashed; no test discriminates this reset. */
+    row->phase_mail = 0;
     row->proof_intent[0] = '\0';
     dl_publication_clear(row);
     (void)snprintf(row->detail, sizeof(row->detail),
@@ -8628,7 +8743,7 @@ static bool dl_precheck_end(const struct dl_dirs *d, struct dl_row *row,
 {
     (void)snprintf(row->state, sizeof(row->state), "conflict");
     (void)snprintf(row->dimension, sizeof(row->dimension), "rebase");
-    (void)snprintf(row->base, sizeof(row->base), "%s", observed_main);
+    dl_row_move_base(row, observed_main);
     (void)snprintf(row->detail, sizeof(row->detail),
                    "detected while queued on main %s: %s", observed_main,
                    paths);

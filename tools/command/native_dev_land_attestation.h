@@ -15,6 +15,10 @@ struct zcl_land_beat {
     int64_t started_us, finished_us;
 };
 bool zcl_dev_land_beat_format(const struct zcl_land_beat *b, char *out, size_t cap);
+/* Pure phase-row digest, never 0; NULL fields read as empty; only the digits after "proof_request_idle_age_s=" in detail are ignored. */
+long long zcl_dev_land_phase_digest(const char *state, const char *phase,
+    long long attempt, const char *dimension, const char *note,
+    const char *detail, const char *log_base, const char *tip);
 /* Self-observation only. UNKNOWN service origin never grants timer authority.
  * Decoder requires independently expected image/source and a bounded age. */
 bool zcl_dev_land_attestation_decode(const char *wire, size_t length,
