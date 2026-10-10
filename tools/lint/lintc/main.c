@@ -217,6 +217,7 @@ static const struct lint_gate k_gates[] = {
       check_network_tool_hardening_selftest },
     { "check-object-reproducible", check_object_reproducible_run,
       check_object_reproducible_selftest },
+    { "riscv64-universal", riscv64_universal_run, riscv64_universal_selftest },
     { "check-tor-full-default", check_tor_full_default_run,
       check_tor_full_default_selftest },
     { "check-installed-acceptance-tools", check_installed_acceptance_tools_run,

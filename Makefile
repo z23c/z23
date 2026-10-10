@@ -1159,6 +1159,22 @@ REPRO_GATE_XLD ?= mold
 REPRO_GATE_XLD_FLAGS = -m elf64lriscv -static --build-id=none -e _start
 REPRO_GATE_LINK_LIBS = -lm
 REPRO_GATE_STRIP_FLAG = -ffile-prefix-map=
+# The riscv64 universal copy (see docs/DEFENSIVE_CODING.md, "riscv64 universal
+# copy"): every compile and link flag is one of the REPRO_GATE_* variables
+# above plus REPRO_CFLAGS. The cross compiler driver is REPRO_GATE_XCC and the
+# linker REPRO_GATE_XLD; the unit list is read from the check-object-reproducible
+# gate's own table by the z23-lint sub-command, so there is one list.
+REPRO_GATE_XCC ?= clang
+# The rv64im variant of the universal fixture program: the base integer and
+# multiply instructions only. Passed to the sub-command as --xcc-rv64im-flags.
+REPRO_GATE_XCC_RV64IM_FLAGS := -march=rv64im -mabi=lp64
+UNIVERSAL_RV64_OUT ?= build/universal/riscv64-unknown-freebsd
+UNIVERSAL_RV64_ARGS = --tree-root '$(CURDIR)' --repro-cflags '$(REPRO_CFLAGS)' \
+	--base-cflags '$(REPRO_GATE_BASE_CFLAGS)' --cross-flags '$(REPRO_GATE_CROSS_FLAGS)' \
+	--xcc-flags '$(REPRO_GATE_XCC_FLAGS)' --xcc-rv64im-flags '$(REPRO_GATE_XCC_RV64IM_FLAGS)' \
+	--xcc '$(REPRO_GATE_XCC)' \
+	--xld '$(REPRO_GATE_XLD)' --xld-flags '$(REPRO_GATE_XLD_FLAGS)' \
+	--targets '$(REPRO_GATE_TARGETS)'
 # The gate reads ELF sections and links with GNU-ld flags, so a build host that
 # is not Linux is skipped, by name; a Linux build host never gets this argument,
 # so a Linux host with no clang fails loudly. The OS is `uname -s` of the BUILD
@@ -3050,6 +3066,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-no-bare-tmp-fixture \
         check-network-tool-hardening \
         check-object-reproducible \
+        riscv64-universal check-riscv64-universal \
         check-sqlite-cursor-lifetime \
         fuzz-ci-leaks \
         soak-smoke soak-7day soak-ci test-crash-bootstrap \
@@ -6133,6 +6150,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_object_reproducible.c \
     tools/lint/lintc/gate_object_reproducible_support.c \
     tools/lint/lintc/gate_object_reproducible_xlink.c \
+    tools/lint/lintc/gate_riscv64_universal.c \
     tools/lint/lintc/gate_tor_full_default.c \
     tools/lint/lintc/gate_installed_acceptance_tools.c \
     tools/lint/lintc/gate_hotswap_denied_leaves.c \
@@ -13872,6 +13890,25 @@ check-object-reproducible: $(LINTC_TOOL)
 		--host-cc '$(ZCL_OBJECT_CC)' --allow-missing clang-riscv64,clang-aarch64,riscv64-link \
 		--report-only shipped-recipe $(REPRO_GATE_HOST_SKIP)
 
+# riscv64 universal copy: the libc-free fixture program (two ISA variants) and
+# the freestanding tree units as riscv64 FreeBSD artifacts, plus a MANIFEST of
+# their hashes. Linked, never executed. A missing cross compiler or linker is a
+# one-line failure naming the variable to set (REPRO_GATE_XCC, REPRO_GATE_XLD).
+riscv64-universal: $(LINTC_TOOL)
+	@echo "→ riscv64 universal copy → $(UNIVERSAL_RV64_OUT)"
+	@$(LINTC_TOOL) riscv64-universal $(UNIVERSAL_RV64_ARGS) --out '$(UNIVERSAL_RV64_OUT)'
+
+# Build the universal copy twice into two differently named temp roots and fail
+# unless the two MANIFEST files are byte-identical. Registered in LINT_GATES at
+# the level of check-app-bundle-reproducible, the other build-twice gate. A
+# missing cross compiler or linker is one SKIPPED line (--allow-missing, the
+# cross-case rule); a host that is not Linux is one SKIPPED_HOST line
+# (REPRO_GATE_HOST_SKIP, the same argument check-object-reproducible takes).
+check-riscv64-universal: $(LINTC_TOOL)
+	@echo "══ LINT: riscv64 universal copy is reproducible ══"
+	@$(LINTC_TOOL) riscv64-universal --selftest && \
+	$(LINTC_TOOL) riscv64-universal $(UNIVERSAL_RV64_ARGS) --allow-missing --twice $(REPRO_GATE_HOST_SKIP)
+
 # Gate — sqlite cursor lifetime. A stepped sqlite3_stmt must be
 # sqlite3_finalize/sqlite3_reset'd BEFORE any returning error macro
 # (LOG_FAIL/LOG_ERR/LOG_NULL/LOG_RETURN/GUARD*) fires in the same function:
@@ -15119,6 +15156,7 @@ LINT_GATES := \
     check-arena-view-stub \
     check-hotfork-stories \
     check-app-bundle-reproducible \
+    check-riscv64-universal \
     check-no-operator-paths \
     check-no-unattended-publish \
     check-tor-dial-prewarm \

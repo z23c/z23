@@ -148,6 +148,18 @@ static const struct or_unit k_or_units[] = {
 };
 enum { OR_NUNITS = (int)(sizeof k_or_units / sizeof k_or_units[0]) };
 
+/* The i-th freestanding unit (not hosted_only) the cross cases compile, or
+ * NULL past the last. The riscv64-universal build reads the list from here, so
+ * the gate and the universal copy can never name different units. */
+const char *or_cross_unit(int i)
+{
+    for (int k = 0; k < OR_NUNITS; k++) {
+        if (!k_or_units[k].hosted_only && i-- == 0)
+            return k_or_units[k].path;
+    }
+    return NULL;
+}
+
 /* Tree-relative payload copied into each root besides the units. The -I list
  * is derived from it (every "/include" entry) and from the unit directories. */
 static const char *const k_or_payload[] = {
@@ -301,7 +313,7 @@ static bool or_add_inc(struct or_cmd *c, const char *dir, size_t n)
 
 /* The -I list, derived from the tables: every payload "/include" directory
  * and the directory of every unit. */
-static bool or_add_incs(struct or_cmd *c)
+bool or_add_incs(struct or_cmd *c)
 {
     bool ok = true;
     for (int i = 0; ok && i < OR_NPAYLOAD; i++) {
@@ -722,8 +734,13 @@ static bool or_roots_drop(const struct or_ctx *x, struct or_roots *r)
     return ok;
 }
 
+/* The child's text kept in a failure diagnostic; the cause line after it is
+ * never cut, and the whole diagnostic stays under the caller's 2000-byte print. */
+enum { OR_CHILD_TEXT = 1500 };
+
 /* Run the compiler: true only for an observed exit status of zero, inside the
- * time budget (per-compile bound, process deadline, no stop signal). */
+ * time budget (per-compile bound, process deadline, no stop signal). On
+ * failure, diag ends with one bracketed line naming how the child ended. */
 bool or_run_compiler(const struct or_cmd *c, char *diag, int *timeout_ms)
 {
     struct zcl_spawn_binary_observation ob = { 0 };
@@ -732,17 +749,24 @@ bool or_run_compiler(const struct or_cmd *c, char *diag, int *timeout_ms)
     *timeout_ms = 0;
     if (budget <= 0) {
         const char *why = or_stop_reason();
-        (void)snprintf(diag, OR_DIAG, "not run: %s", why ? why : "no time left");
+        (void)snprintf(diag, OR_DIAG, "[child not run: %s]",
+                       why ? why : "no time left");
         return false;
     }
     g_or_runs++;
     struct zcl_result r = zcl_spawn_capture_binary_merged(
         c->argv, diag, OR_DIAG - 1, budget, &ob);
-    diag[ob.output_len < OR_DIAG - 1 ? ob.output_len : OR_DIAG - 1] = '\0';
+    size_t n = ob.output_len < OR_DIAG - 1 ? ob.output_len : OR_DIAG - 1;
+    if (n > OR_CHILD_TEXT)
+        n = OR_CHILD_TEXT;
+    diag[n] = '\0';
     if (ob.timed_out)
         *timeout_ms = budget;
-    return r.ok && ob.exit_observed && ob.exit_code == 0 && ob.eof
-           && !ob.timed_out && !ob.overflow;
+    bool ok = r.ok && ob.exit_observed && ob.exit_code == 0 && ob.eof
+              && !ob.timed_out && !ob.overflow;
+    if (!ok)
+        or_append_cause(diag, n, &ob, budget);
+    return ok;
 }
 
 /* out.o in the working directory: a regular, non-empty, well-formed ELF. */
@@ -787,12 +811,7 @@ static void or_refuse_compile(const struct or_ctx *x, const char *unit,
            "%s: %s", x->cs->name, unit ? unit : "-", why);
     or_print_evidence(x, unit);
     printf("\n");
-    const char *p = diag;
-    for (int line = 0; *p && line < OR_DIAG_LINES; line++) {
-        size_t n = strcspn(p, "\n");
-        printf("    compiler: %.*s\n", (int)(n > 200 ? 200 : n), p);
-        p += n + (p[n] == '\n' ? 1 : 0);
-    }
+    or_print_diag(diag);
 }
 
 /* The refusal of a failed compile or set-up: FLAG_TOO_LONG when a flag token

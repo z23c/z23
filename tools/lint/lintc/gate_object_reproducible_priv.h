@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <signal.h>
 #include <stdint.h>
+#include "util/spawn.h"
 
 enum {
     OR_PATH = 1024,
@@ -126,9 +127,14 @@ bool or_cfg_names_ok(const struct or_cfg *cfg);
 int or_excuse(const struct or_cfg *cfg, const struct or_case *cs, int rc);
 bool or_target_of(const char *list, const char *name, char *out, size_t cap);
 bool or_contains(const unsigned char *h, size_t hl, const char *needle);
+const char *or_cross_unit(int i);
+bool or_add_incs(struct or_cmd *c);
 bool or_add_words(struct or_cmd *c, const struct or_cfg *cfg, const char *words,
                   const char *root, bool prefix_map);
 bool or_run_compiler(const struct or_cmd *c, char *diag, int *timeout_ms);
+void or_append_cause(char *diag, size_t n,
+                     const struct zcl_spawn_binary_observation *ob, int budget);
+void or_print_diag(const char *diag);
 int or_case_missing(const struct or_ctx *x, const char *want, const char *kind);
 
 /* xlink.c: the riscv64-link case (freestanding compile, cross link) */

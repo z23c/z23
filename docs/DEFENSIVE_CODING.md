@@ -1437,6 +1437,7 @@ add/remove a gate.
 - `check-equihash-params`
 - `check-determinism-ratchet`
 - `check-sqlite-cursor-lifetime`
+- `check-riscv64-universal`
 <!-- LINT-GATES-END -->
 
 (`check-consensus-parity` [E13, the parity mechanism — see
@@ -1444,6 +1445,42 @@ add/remove a gate.
 `check-no-new-coordination-shell`, and
 `check-stage-advances-or-blocks` appear in the canonical block and run in `make
 lint`; they are documented in their own docs rather than expanded here.)
+
+**riscv64 universal copy.** `make riscv64-universal` builds, into
+`build/universal/riscv64-unknown-freebsd/`, the riscv64 FreeBSD copy of what
+the tree can already cross-build: the libc-free fixture program
+`tools/lint/fixtures/riscv64_freebsd_hello.c.fixture` as a static ET_EXEC in two
+variants (`hello-default`, and `hello-rv64im`, built with
+`REPRO_GATE_XCC_RV64IM_FLAGS`, `-march=rv64im -mabi=lp64`; the rv64im variant
+uses only the base integer and multiply instructions), and a relocatable object
+for each freestanding unit that `check-object-reproducible`'s cross case
+compiles (the unit list is read from that gate by `z23-lint riscv64-universal`,
+so there is one list). Every compile and link flag is a `REPRO_GATE_*` variable
+or `REPRO_CFLAGS`; the only tokens typed in the C source are `-c`, `-o`, `-x c`
+and the include directories, so the outputs do not depend on the checkout path.
+Each program is checked as ELF64 RISC-V `ET_EXEC` and each object as ELF64
+RISC-V `ET_REL` before it is listed. The target writes `MANIFEST` last and
+atomically: an old `MANIFEST` is removed first, the new one goes to
+`MANIFEST.tmp` and is renamed into place only after every artifact succeeded.
+`MANIFEST` has two toolchain header lines, `toolchain-compiler` and
+`toolchain-linker` (the sha256 of each binary), then one tab-separated line per
+artifact, sorted by name: name, sha256, size, `source=sha256`, sha256 of the
+exact flag text (tree root shown as `<ROOT>`, output paths left out) and the
+target triple. No time, absolute path or host name reaches the file. Artifact
+lines are expected to match across hosts only when the toolchain lines match.
+`check-riscv64-universal` (in `make lint`, the level of the other build-twice
+gate `check-app-bundle-reproducible`) builds twice into two temp roots and fails
+unless the two `MANIFEST` files are byte-identical. That proves independence
+from the OUTPUT root only; checkout-path independence of the same compile is
+proven by `check-object-reproducible` case `riscv64-link`. A missing cross
+compiler or linker makes `check-riscv64-universal` print one `SKIPPED` line
+naming the tool and exit 0 (the cross-case rule of `--allow-missing`), and a
+host that is not Linux prints one `SKIPPED_HOST` line and exits 0; the plain
+`make riscv64-universal` still fails with one named line naming the tool and
+the variable to set (`REPRO_GATE_XCC`, `REPRO_GATE_XLD`). Limits: freestanding
+only (this host has no FreeBSD riscv64 sysroot, so no C library), the programs
+are linked and never executed by the build, and headers are not part of a
+source's hash.
 
 `check-lint-gate-wiring` (`tools/lint/lintc/gate_lint_gate_wiring.c`, exec'd via
 the 3-line `check_lint_gate_wiring.sh` shim) keeps the three files of a lint

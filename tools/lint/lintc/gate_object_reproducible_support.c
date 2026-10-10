@@ -391,6 +391,62 @@ void or_elf_first_diff(const unsigned char *a, size_t la,
     (void)snprintf(out, cap, ea.shnum != eb.shnum
                    ? "<section-count>" : "<elf-header-or-section-table>");
 }
+/* Append exactly one bracketed line naming how the child ended. The first
+ * matching cause wins: timeout, no exit status (spawn failed or the exit was
+ * not observed), output overflow, a clean exit whose output never closed,
+ * then the exit code itself. */
+static void or_cause_text(const struct zcl_spawn_binary_observation *ob,
+                          int budget, char *line, size_t cap)
+{
+    if (ob->timed_out)
+        (void)snprintf(line, cap, "[child timed out after %d ms]", budget);
+    else if (!ob->exit_observed)
+        (void)snprintf(line, cap, "[child did not report an exit status]");
+    else if (ob->overflow)
+        (void)snprintf(line, cap, "[child output exceeded the capture buffer]");
+    else if (ob->exit_code == 0 && !ob->eof)
+        (void)snprintf(line, cap,
+                       "[child exit 0 but its output stream did not close]");
+    else if (ob->exit_code > 128)
+        (void)snprintf(line, cap, "[child exit %d (128+signal %d)]",
+                       ob->exit_code, ob->exit_code - 128);
+    else
+        (void)snprintf(line, cap, "[child exit %d]", ob->exit_code);
+}
+
+void or_append_cause(char *diag, size_t n,
+                     const struct zcl_spawn_binary_observation *ob, int budget)
+{
+    char line[160];
+    or_cause_text(ob, budget, line, sizeof line);
+    if (n > 0 && diag[n - 1] != '\n')
+        diag[n++] = '\n';
+    (void)snprintf(diag + n, OR_DIAG - n, "%s", line);
+}
+
+/* Print the first OR_DIAG_LINES lines of a diagnostic, then its last line
+ * (the bracketed cause) even when the text runs longer than that. */
+void or_print_diag(const char *diag)
+{
+    const char *p = diag;
+    size_t len = strlen(diag);
+    const char *last = diag;
+    for (int line = 0; *p && line < OR_DIAG_LINES; line++) {
+        size_t n = strcspn(p, "\n");
+        printf("    compiler: %.*s\n", (int)(n > 200 ? 200 : n), p);
+        p += n + (p[n] == '\n' ? 1 : 0);
+    }
+    while (len > 0 && diag[len - 1] == '\n')
+        len--;
+    for (size_t i = 0; i < len; i++)
+        if (diag[i] == '\n')
+            last = diag + i + 1;
+    if (*p && last >= p) {
+        size_t n = strcspn(last, "\n");
+        printf("    compiler: %.*s\n", (int)(n > 200 ? 200 : n), last);
+    }
+}
+
 /* ---- pure-logic selftest ---------------------------------------------- */
 
 static void or_fixture_elf(unsigned char *a, size_t cap)
@@ -648,9 +704,58 @@ static int or_rt_expect(const char *what, const char *const *w, int nw,
     return or_rt_run(w, nw, stale) == want ? 0 : or_fail(what);
 }
 
+/* A compiler that fails silently: its failure diagnostic names the exit. */
+static int or_selftest_cause(const char *false_path)
+{
+    struct or_cmd *c = zcl_malloc(sizeof *c, "or_cause cmd");
+    char *diag = zcl_malloc(OR_DIAG, "or_cause diag");
+    bool ok = c && diag;
+    int tmo = 0;
+    int bad = 0;
+    if (ok)
+        c->n = 0;
+    ok = ok && or_add(c, false_path) && or_seal(c, true);
+    if (!ok)
+        bad = or_fail("cannot build the failing compiler command");
+    else if (or_run_compiler(c, diag, &tmo)
+             || !strstr(diag, "[child exit 1]"))
+        bad = or_fail("a failing compiler's diagnostic lacks [child exit 1]");
+    free(c);
+    free(diag);
+    return bad;
+}
+
+/* The cause line for an output overflow and for a clean exit whose output
+ * never closed: the observation is built directly, no child runs. */
+static int or_selftest_cause_rows(void)
+{
+    char *diag = zcl_malloc(OR_DIAG, "or_cause rows diag");
+    int bad = 0;
+    if (!diag)
+        return or_fail("cannot allocate the cause row diagnostic");
+    struct zcl_spawn_binary_observation over = { 0 };
+    over.overflow = true;
+    over.exit_observed = true;
+    struct zcl_spawn_binary_observation noeof = { 0 };
+    noeof.exit_observed = true;
+    diag[0] = '\0';
+    or_append_cause(diag, 0, &over, 1000);
+    if (strcmp(diag, "[child output exceeded the capture buffer]") != 0)
+        bad = or_fail("an output overflow's cause line is wrong");
+    diag[0] = '\0';
+    or_append_cause(diag, 0, &noeof, 1000);
+    if (!bad && strcmp(diag, "[child exit 0 but its output stream did not "
+                             "close]") != 0)
+        bad = or_fail("an exit 0 without end-of-stream's cause line is wrong");
+    free(diag);
+    return bad;
+}
+
 /* t: the paths of false, true, cp and find. */
 static int or_selftest_runner_checks(const char *const *t)
 {
+    if (or_selftest_cause(t[0]) || or_selftest_cause_rows())
+        return 1;
     const char *const w_false[] = { t[0] };
     const char *const w_true[] = { t[1] };
     const char *const w_cp[] = { t[2], "fixture.o", "out.o" };
