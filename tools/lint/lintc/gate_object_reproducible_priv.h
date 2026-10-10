@@ -48,6 +48,7 @@ struct or_cfg {
     const char *allow;
     const char *report;
     const char *host_cc;
+    const char *clang;   /* --clang: the driver name of every clang case */
     const char *unsupported;
     bool seed_none;
 };
@@ -84,6 +85,7 @@ struct or_ctx {
     const struct or_cfg *cfg;
     const struct or_case *cs;
     const char *cc;     /* the --host-cc / case name until resolved */
+    const char *ccname; /* the requested compiler name, kept for receipts */
     char ccbuf[OR_PATH];
     char target[OR_PATH]; /* the case's --target flag from --targets, or "" */
     char ccsha[65];
@@ -108,6 +110,7 @@ bool or_mkparent(const char *path);
 bool or_join(char *out, size_t cap, const char *a, const char *b);
 bool or_copy_tree(const char *src, const char *dst, int depth);
 bool or_rm_rf(const char *path, int depth);
+const char *or_clang_flaw(const char *name);
 bool or_find_exe(const char *name, char *out, size_t cap);
 bool or_elf_valid(const unsigned char *b, size_t len);
 bool or_elf_linked(const unsigned char *b, size_t len);

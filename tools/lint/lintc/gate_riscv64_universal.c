@@ -516,7 +516,7 @@ static bool ru_load_manifest(const char *dir, unsigned char **buf, size_t *len)
     return *buf != NULL;
 }
 
-static int ru_compare(const char *ra, const char *rb)
+static int ru_compare(const char *ra, const char *rb, const char *cc)
 {
     size_t la = 0, lb = 0;
     unsigned char *a = NULL, *b = NULL;
@@ -529,7 +529,7 @@ static int ru_compare(const char *ra, const char *rb)
             ru_report_diff(a, la, b, lb);
         else
             printf(RU ": PASS two builds, two output roots, byte-identical "
-                   "MANIFEST (%zu bytes)\n", la);
+                   "MANIFEST (%zu bytes) cross_cc=%s\n", la, cc);
     }
     free(a);
     free(b);
@@ -553,7 +553,7 @@ static int ru_twice_in(const struct ru_cfg *cfg, const char *base)
     st = ru_build(cfg, rb);
     if (st != RU_OK)
         return st;
-    return ru_compare(ra, rb);
+    return ru_compare(ra, rb, cfg->xcc);
 }
 
 /* Two roots with different names and lengths under the tool temp area. Every

@@ -257,6 +257,24 @@ bool or_rm_rf(const char *path, int depth)
     return rmdir(path) == 0 && ok;
 }
 
+/* NULL when `name` is a usable clang driver name: a bare name or an absolute
+ * path, 1..127 bytes of [A-Za-z0-9._+-] (and / for a path), else the reason. */
+const char *or_clang_flaw(const char *name)
+{
+    if (!name || !name[0])
+        return "--clang is empty: name the clang driver (REPRO_GATE_CLANG)";
+    if (strlen(name) > 127)
+        return "--clang is longer than 127 bytes";
+    if (strchr(name, '/') && name[0] != '/')
+        return "--clang has a slash but is not an absolute path";
+    if (strspn(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                     "0123456789._+-/") != strlen(name))
+        return "--clang has a character outside [A-Za-z0-9._+-/]";
+    if (strstr(name, "..") || name[0] == '-')
+        return "--clang starts with - or contains ..";
+    return NULL;
+}
+
 /* Resolve a compiler name to an executable path; false when absent. */
 bool or_find_exe(const char *name, char *out, size_t cap)
 {
@@ -628,6 +646,40 @@ static int or_selftest_targets(void)
     return or_selftest_names();
 }
 
+/* --clang is parsed; absent it stays "clang"; a bad value is refused by name. */
+static int or_selftest_clang(void)
+{
+    char *none[] = { OR_GOOD_ARGS("none") };
+    char *v19[] = { OR_GOOD_ARGS("none"), "--clang", "clang-19" };
+    char *abs[] = { OR_GOOD_ARGS("none"), "--clang", "/opt/llvm/bin/clang" };
+    char *rel[] = { OR_GOOD_ARGS("none"), "--clang", "bin/clang" };
+    char *junk[] = { OR_GOOD_ARGS("none"), "--clang", "cl ang;x" };
+    char *empty[] = { OR_GOOD_ARGS("none"), "--clang", "" };
+    char *dash[] = { OR_GOOD_ARGS("none"), "--clang", "-clang" };
+    char *longn[] = { OR_GOOD_ARGS("none"), "--clang", NULL };
+    char big[200];
+    struct or_cfg cfg;
+    memset(big, 'c', sizeof big - 1);
+    big[sizeof big - 1] = '\0';
+    longn[sizeof longn / sizeof longn[0] - 1] = big;
+    if (!or_parse((int)(sizeof none / sizeof none[0]), none, &cfg)
+        || strcmp(cfg.clang, "clang") != 0 || or_cfg_flaw(&cfg) != NULL)
+        return or_fail("the default --clang is not clang");
+    if (!or_parse((int)(sizeof v19 / sizeof v19[0]), v19, &cfg)
+        || strcmp(cfg.clang, "clang-19") != 0 || or_cfg_flaw(&cfg) != NULL)
+        return or_fail("--clang clang-19 was not parsed");
+    if (!or_parse((int)(sizeof abs / sizeof abs[0]), abs, &cfg)
+        || or_cfg_flaw(&cfg) != NULL)
+        return or_fail("an absolute --clang path was refused");
+    char **bad[] = { rel, junk, empty, dash, longn };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        if (!or_parse((int)(sizeof v19 / sizeof v19[0]), bad[i], &cfg)
+            || or_cfg_flaw(&cfg) == NULL)
+            return or_fail("a bad --clang value was accepted");
+    }
+    return 0;
+}
+
 static int or_selftest_args(void)
 {
     char *good[] = { OR_GOOD_ARGS("-frandom-seed=@UNIT@") };
@@ -646,7 +698,8 @@ static int or_selftest_args(void)
         return or_fail("an explicit seed none was refused");
     if (or_parse(n - 1, good, &cfg))
         return or_fail("an unpaired option was accepted");
-    return or_selftest_targets();
+    int tr = or_selftest_targets();
+    return tr ? tr : or_selftest_clang();
 }
 
 /* Report-only excuses a hash MISMATCH of the named case and nothing else. */

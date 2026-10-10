@@ -1164,7 +1164,11 @@ REPRO_GATE_STRIP_FLAG = -ffile-prefix-map=
 # above plus REPRO_CFLAGS. The cross compiler driver is REPRO_GATE_XCC and the
 # linker REPRO_GATE_XLD; the unit list is read from the check-object-reproducible
 # gate's own table by the z23-lint sub-command, so there is one list.
-REPRO_GATE_XCC ?= clang
+# REPRO_GATE_CLANG is the first clang on PATH among the names below (a host that
+# has only a versioned clang); the literal clang when none is found, so the
+# missing-tool refusal is unchanged. An explicit REPRO_GATE_XCC still wins.
+REPRO_GATE_CLANG ?= $(shell for c in clang clang-21 clang-20 clang-19 clang-18 clang-17 clang-16; do command -v $$c >/dev/null 2>&1 && { echo $$c; exit 0; }; done; echo clang)
+REPRO_GATE_XCC ?= $(REPRO_GATE_CLANG)
 # The rv64im variant of the universal fixture program: the base integer and
 # multiply instructions only. Passed to the sub-command as --xcc-rv64im-flags.
 REPRO_GATE_XCC_RV64IM_FLAGS := -march=rv64im -mabi=lp64
@@ -13887,7 +13891,8 @@ check-object-reproducible: $(LINTC_TOOL)
 		--xld-flags '$(REPRO_GATE_XLD_FLAGS)' \
 		--red-strip '$(REPRO_GATE_STRIP_FLAG)' \
 		--seed-flag '$(or $(subst $<,@UNIT@,$(ZCL_TU_RANDOM_SEED)),none)' \
-		--host-cc '$(ZCL_OBJECT_CC)' --allow-missing clang-riscv64,clang-aarch64,riscv64-link \
+		--host-cc '$(ZCL_OBJECT_CC)' --clang '$(REPRO_GATE_CLANG)' \
+		--allow-missing clang-riscv64,clang-aarch64,riscv64-link \
 		--report-only shipped-recipe $(REPRO_GATE_HOST_SKIP)
 
 # riscv64 universal copy: the libc-free fixture program (two ISA variants) and
@@ -14460,6 +14465,14 @@ build/lintc-obj/gate_file_purpose.o build/lintc-obj/gate_framework_shape.o: \
     LINTC_CFLAGS += -Ivendor/include
 build/lintc-obj/gate_file_purpose.o build/lintc-obj/gate_framework_shape.o: \
     tests/harness/include/test/test_core.h vendor/include/sqlite3.h
+
+# These four share a private header; without this line a header-only change
+# leaves stale objects that disagree about struct layout.
+build/lintc-obj/gate_object_reproducible.o \
+build/lintc-obj/gate_object_reproducible_support.o \
+build/lintc-obj/gate_object_reproducible_xlink.o \
+build/lintc-obj/gate_riscv64_universal.o: \
+    tools/lint/lintc/gate_object_reproducible_priv.h
 
 build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h
 	@mkdir -p $(dir $@)

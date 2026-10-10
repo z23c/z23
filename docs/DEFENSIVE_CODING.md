@@ -1458,6 +1458,12 @@ compiles (the unit list is read from that gate by `z23-lint riscv64-universal`,
 so there is one list). Every compile and link flag is a `REPRO_GATE_*` variable
 or `REPRO_CFLAGS`; the only tokens typed in the C source are `-c`, `-o`, `-x c`
 and the include directories, so the outputs do not depend on the checkout path.
+`REPRO_GATE_CLANG` is the first clang found on `PATH` among `clang` and
+`clang-21` through `clang-16` (the literal `clang` when none is found). Both this
+target (through the default `REPRO_GATE_XCC`) and `check-object-reproducible`
+(through `--clang`) use it, and each prints the resolved name (`cross_cc=`,
+`clang=`, `ccname=`) beside the compiler hash, which stays the identity of the
+compiler that ran.
 Each program is checked as ELF64 RISC-V `ET_EXEC` and each object as ELF64
 RISC-V `ET_REL` before it is listed. The target writes `MANIFEST` last and
 atomically: an old `MANIFEST` is removed first, the new one goes to

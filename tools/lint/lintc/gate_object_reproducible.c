@@ -472,7 +472,9 @@ static void or_ctx_init(struct or_ctx *x, const struct or_cfg *cfg,
     memset(x, 0, sizeof *x);
     x->cfg = cfg;
     x->cs = cs;
-    x->cc = cs->cc ? cs->cc : cfg->host_cc;
+    x->cc = !cs->cc ? cfg->host_cc
+            : strcmp(cs->cc, "clang") == 0 ? cfg->clang : cs->cc;
+    x->ccname = x->cc;
     (void)snprintf(x->ccsha, sizeof x->ccsha, "-");
     (void)snprintf(x->xldsha, sizeof x->xldsha, "-");
     (void)or_target_of(cfg->targets, cs->name, x->target, sizeof x->target);
@@ -999,8 +1001,9 @@ static int or_link_verdict(const struct or_ctx *x, const struct or_obj *o)
     else
         printf("%s+%s+%s+%s+%s", k_or_link_src[0], k_or_link_src[1],
                k_or_link_src[2], k_or_link_src[3], k_or_link_src[4]);
-    printf(" verdict=%s cc=%s bin_a=%s bin_b=%s section=%s "
+    printf(" verdict=%s cc=%s ccname=%s bin_a=%s bin_b=%s section=%s "
            "root_path_in_output=%s", same ? "MATCH" : "DIFFER", x->ccsha,
+           x->ccname,
            o->ha, o->hb, sec[0] ? sec : "-", leak ? "FOUND" : "none");
     or_print_evidence(x, NULL);
     printf("\n");
@@ -1066,9 +1069,10 @@ static void or_print_line(const struct or_ctx *x, const char *unit,
                           const char *verdict, const char *ha, const char *hb,
                           const char *section)
 {
-    printf("OBJREPRO case=%s unit=%s verdict=%s target=%s cc=%s obj_a=%s "
+    printf("OBJREPRO case=%s unit=%s verdict=%s target=%s cc=%s ccname=%s "
+           "obj_a=%s "
            "obj_b=%s section=%s", x->cs->name, unit, verdict,
-           x->target[0] ? x->target : "host", x->ccsha, ha, hb,
+           x->target[0] ? x->target : "host", x->ccsha, x->ccname, ha, hb,
            section[0] ? section : "-");
     or_print_evidence(x, unit);
     printf("\n");
@@ -1173,13 +1177,13 @@ int or_case_missing(const struct or_ctx *x, const char *want, const char *kind)
     printf("\n");
     if (ok)
         return OR_OK;
-    if (strcmp(kind, "compiler") == 0 && strcmp(want, "clang") == 0)
+    if (strcmp(kind, "compiler") == 0 && x->cs->cc)
         printf("check-object-reproducible: REFUSED MISSING_COMPILER: case %s: "
                "clang is required for the clang and cross cases "
                "(clang-host, clang-riscv64, clang-aarch64, riscv64-link) "
-               "but is not on PATH; install clang, or name %s in "
-               "--allow-missing (the "
-               "Makefile list is: %s)", x->cs->name, x->cs->name,
+               "but %s is not on PATH; install it, set REPRO_GATE_CLANG to "
+               "the clang on this host, or name %s in --allow-missing (the "
+               "Makefile list is: %s)", x->cs->name, want, x->cs->name,
                x->cfg->allow[0] ? x->cfg->allow : "empty");
     else
         printf("check-object-reproducible: REFUSED MISSING_TOOL: case %s "
@@ -1259,6 +1263,7 @@ bool or_parse(int argc, char **argv, struct or_cfg *cfg)
     cfg->allow = "";
     cfg->report = "";
     cfg->host_cc = "gcc";
+    cfg->clang = "clang";
     cfg->unsupported = "";
     const struct or_opt tab[] = {
         { "--tree-root", &cfg->tree }, { "--repro-cflags", &cfg->repro },
@@ -1270,6 +1275,7 @@ bool or_parse(int argc, char **argv, struct or_cfg *cfg)
         { "--red-strip", &cfg->strip },
         { "--seed-flag", &cfg->seed }, { "--allow-missing", &cfg->allow },
         { "--report-only", &cfg->report }, { "--host-cc", &cfg->host_cc },
+        { "--clang", &cfg->clang },
         { "--unsupported-host", &cfg->unsupported },
     };
     if (argc % 2 != 0)
@@ -1328,7 +1334,8 @@ const char *or_cfg_flaw(const struct or_cfg *cfg)
     if (!cfg->seed_none && !strstr(cfg->seed, "@UNIT@"))
         return "--seed-flag has no @UNIT@ placeholder: the unit name was "
                "not substituted";
-    return or_cfg_targets_flaw(cfg);
+    const char *cf = or_clang_flaw(cfg->clang);
+    return cf ? cf : or_cfg_targets_flaw(cfg);
 }
 
 /* The case a list element names (by pointer and length), NULL if none does. */
@@ -1426,7 +1433,8 @@ static int or_run_all(const struct or_cfg *cfg)
         worst = OR_REFUSED;
     }
     printf("check-object-reproducible: %s compiler_invocations=%d "
-           "wall_s=%.1f\n", worst == 0 ? "PASS" : "FAIL", g_or_runs,
+           "clang=%s wall_s=%.1f\n", worst == 0 ? "PASS" : "FAIL", g_or_runs,
+           cfg->clang,
            (double)(or_now_ms() - t0) / 1000.0);
     (void)fflush(stdout);
     if (sig) {
@@ -1447,7 +1455,8 @@ int check_object_reproducible_run(int argc, char **argv)
                 "--cross-flags STR --xcc-flags STR --xld PROG --xld-flags STR "
                 "--targets NAME=FLAG,.. --red-strip STR "
                 "--seed-flag STR|none [--allow-missing a,b] "
-                "[--report-only a,b] [--host-cc CC] [--unsupported-host OS]; "
+                "[--report-only a,b] [--host-cc CC] [--clang NAME] "
+                "[--unsupported-host OS]; "
                 "the Makefile recipe passes them\n",
                 flaw ? flaw : "unknown or unpaired option");
         return OR_REFUSED;
