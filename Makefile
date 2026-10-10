@@ -3967,7 +3967,7 @@ test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-ve
 test-parallel:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  $(MAKE) --no-print-directory test-parallel-locked \
+	  $(MAKE) --no-print-directory $(ZCL_DEFAULT_JOBS) test-parallel-locked \
 	    TEST_PARALLEL_ARGS='$(TEST_PARALLEL_ARGS)'
 
 .PHONY: test-parallel-locked
@@ -4675,7 +4675,7 @@ t-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
 t-fast:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  $(MAKE) --no-print-directory t-fast-locked ONLY='$(ONLY)' \
+	  $(MAKE) --no-print-directory $(ZCL_DEFAULT_JOBS) t-fast-locked ONLY='$(ONLY)' \
 	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
 	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
 
@@ -4690,7 +4690,7 @@ t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
 t-fast-exact:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  $(MAKE) --no-print-directory t-fast-exact-locked \
+	  $(MAKE) --no-print-directory $(ZCL_DEFAULT_JOBS) t-fast-exact-locked \
 	    EXACT_ONLY_MATCHED='$(EXACT_ONLY_MATCHED)' \
 	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
 	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
@@ -14808,6 +14808,10 @@ ZCL_HOST_JOBS := $(shell nproc 2>/dev/null || echo 8)
 # Exported so a gate script sizes itself from the same answer instead of
 # re-deriving one (tools/lint/check_standalone_tools_link.sh reads it).
 export ZCL_HOST_JOBS
+# Test targets recurse with this. An explicit caller -jN already reaches the
+# recursive make through MAKEFLAGS, so a default is added only when make was
+# given no -j; passing both would hand the recursion two job counts.
+ZCL_DEFAULT_JOBS = $(if $(filter -j%,$(MAKEFLAGS)),,-j$(ZCL_HOST_JOBS))
 
 # Workers for the parallel lint driver. Measured on a 32-core host: the
 # umbrella burns ~4.5 min of CPU inside ~39 s of wall at 8 workers, so the

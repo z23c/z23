@@ -1578,6 +1578,41 @@ static bool tgs_write_file(const char *path, const char *text)
     return fclose(fp) == 0 && ok;
 }
 
+/* Test targets default to parallel prerequisite builds. A caller's -j reaches
+ * the recursive make through MAKEFLAGS, so the recursive line must carry a
+ * default -j only when make got none, and never a second one. */
+static int test_exact_default_parallel_jobs(void)
+{
+    int failures = 0;
+    TEST("t-fast-exact recursion defaults to -j only when make got no -j") {
+        char command[1024], line[512];
+        int n = snprintf(command, sizeof(command),
+            "env -u MAKEFLAGS -u MFLAGS make -n t-fast-exact ONLY=api "
+            "TEST_PARALLEL_ARGS= TEST_PARALLEL_FAST_CANDIDATE=/bin/true "
+            "TEST_PARALLEL_FAST_ACTIVE=/bin/true "
+            "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1 | "
+            "grep 'make --no-print-directory.*t-fast-exact-locked'",
+            zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, line, sizeof(line)) == 0);
+        ASSERT(strstr(line, "--no-print-directory -j") != NULL);
+
+        n = snprintf(command, sizeof(command),
+            "env -u MAKEFLAGS -u MFLAGS make -n -j3 t-fast-exact ONLY=api "
+            "TEST_PARALLEL_ARGS= TEST_PARALLEL_FAST_CANDIDATE=/bin/true "
+            "TEST_PARALLEL_FAST_ACTIVE=/bin/true "
+            "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1 | "
+            "grep 'make --no-print-directory.*t-fast-exact-locked'",
+            zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, line, sizeof(line)) == 0);
+        ASSERT(strstr(line, "t-fast-exact-locked") != NULL);
+        ASSERT(strstr(line, "-j") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_exact_verifier_prerequisites(void)
 {
     int failures = 0;
@@ -1986,6 +2021,7 @@ static int test_verdict_json_quoted_name(void)
 int test_test_group_selector(void)
 {
     int failures = 0;
+    failures += test_exact_default_parallel_jobs();
     failures += test_exact_verifier_prerequisites();
     failures += test_compile_scope_proof();
     failures += test_runner_build_needs_selection();
