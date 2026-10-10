@@ -26,6 +26,8 @@ const char *engine_verdict_name(enum engine_verdict v)
     case ENGINE_VERDICT_TIMEOUT:    return "TIMEOUT";
     case ENGINE_VERDICT_REFUSED:    return "REFUSED";
     case ENGINE_VERDICT_UNVERIFIED: return "UNVERIFIED";
+    case ENGINE_VERDICT_REPORTED:   return "REPORTED";
+    case ENGINE_VERDICT_REPORT_EDITED: return "FAIL(REPORT-EDITED)";
     }
     return "UNKNOWN";
 }
@@ -33,6 +35,11 @@ const char *engine_verdict_name(enum engine_verdict v)
 bool engine_verdict_is_pass(enum engine_verdict v)
 {
     return v == ENGINE_VERDICT_PASS;
+}
+
+bool engine_verdict_is_terminal(enum engine_verdict v)
+{
+    return v == ENGINE_VERDICT_PASS || v == ENGINE_VERDICT_REPORTED;
 }
 
 /* Read `key=<number>` out of one line. Absent leaves *out untouched. */
@@ -164,4 +171,19 @@ enum engine_verdict engine_verdict_of(const struct engine_gate_reading *gate,
     if (!gate->saw_pass_token)
         return ENGINE_VERDICT_REFUSED;
     return ENGINE_VERDICT_PASS;
+}
+
+enum engine_verdict engine_verdict_of_effect(enum engine_prompt_effect effect,
+                                             const struct engine_gate_reading *gate,
+                                             size_t files_changed,
+                                             bool timed_out,
+                                             bool have_group)
+{
+    if (effect != ENGINE_PROMPT_EFFECT_REPORT)
+        return engine_verdict_of(gate, files_changed, timed_out, have_group);
+    if (timed_out)
+        return ENGINE_VERDICT_TIMEOUT;
+    if (files_changed > 0)
+        return ENGINE_VERDICT_REPORT_EDITED;
+    return ENGINE_VERDICT_REPORTED;
 }

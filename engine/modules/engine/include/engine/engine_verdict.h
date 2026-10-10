@@ -45,6 +45,8 @@
 #ifndef ZCL_ENGINE_VERDICT_H
 #define ZCL_ENGINE_VERDICT_H
 
+#include "engine/engine_prompt.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -55,7 +57,9 @@ enum engine_verdict {
     ENGINE_VERDICT_NO_CHANGE,  /* the engine changed nothing */
     ENGINE_VERDICT_TIMEOUT,    /* the wall clock ended the unit */
     ENGINE_VERDICT_REFUSED,    /* the gate produced no readable verdict */
-    ENGINE_VERDICT_UNVERIFIED  /* dispatched with no group; nothing was proved */
+    ENGINE_VERDICT_UNVERIFIED, /* dispatched with no group; nothing was proved */
+    ENGINE_VERDICT_REPORTED,   /* a report unit changed nothing: not judged, NOT a pass */
+    ENGINE_VERDICT_REPORT_EDITED /* a report unit changed files: a failure */
 };
 
 const char *engine_verdict_name(enum engine_verdict v);
@@ -64,6 +68,12 @@ const char *engine_verdict_name(enum engine_verdict v);
  * rather than testing the enum, so a verdict added later cannot accidentally
  * become passing at a call site nobody revisited. */
 bool engine_verdict_is_pass(enum engine_verdict v);
+
+/* "Another round cannot improve this": a pass, or a report that was
+ * delivered. The dispatcher's round loop should stop on this, not on
+ * engine_verdict_is_pass, once it judges by effect. REPORTED is terminal but
+ * is still not a pass: nobody has judged the report. */
+bool engine_verdict_is_terminal(enum engine_verdict v);
 
 /* What the runner said about itself, read from its machine-greppable line.
  * tests/harness/src/test_parallel.c emits:
@@ -103,5 +113,16 @@ enum engine_verdict engine_verdict_of(const struct engine_gate_reading *gate,
                                       size_t files_changed,
                                       bool timed_out,
                                       bool have_group);
+
+/* The judgement for a unit whose kind declares what it should produce.
+ * EDIT (and UNKNOWN, fail-closed to the stricter rule) is exactly
+ * engine_verdict_of. REPORT: a timeout is TIMEOUT; any changed file is
+ * REPORT_EDITED (a failure); no change is REPORTED. A report never consults
+ * the gate: it ran none worth reading. */
+enum engine_verdict engine_verdict_of_effect(enum engine_prompt_effect effect,
+                                             const struct engine_gate_reading *gate,
+                                             size_t files_changed,
+                                             bool timed_out,
+                                             bool have_group);
 
 #endif /* ZCL_ENGINE_VERDICT_H */

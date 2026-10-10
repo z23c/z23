@@ -1061,6 +1061,172 @@ static int case_verdict(void)
     return failures;
 }
 
+/* ── 6b. verdict by declared effect ──────────────────────────────────── */
+
+static int case_effect_per_kind(void)
+{
+    int failures = 0;
+    /* Every registered kind must be classified here, so a new kind cannot
+     * ship without someone deciding whether its unit may change files. */
+    static const struct {
+        const char *kind;
+        enum engine_prompt_effect effect;
+    } want[] = {
+        { "fix-gate", ENGINE_PROMPT_EFFECT_EDIT },
+        { "add-test", ENGINE_PROMPT_EFFECT_EDIT },
+        { "port-arm", ENGINE_PROMPT_EFFECT_EDIT },
+        { "doc-claim", ENGINE_PROMPT_EFFECT_EDIT },
+        { "review", ENGINE_PROMPT_EFFECT_REPORT },
+        { "c23-byte-validator", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-command-handler", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-model-save", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-regression-fixture", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-wire-codec", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-cas-operation", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-service-operation", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-resource-owner", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-telemetry-field", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-controller-route", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-source-generator", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-registry-entry", ENGINE_PROMPT_EFFECT_EDIT },
+        /* writes its one pack file, so it changes the worktree */
+        { "c23-context-pack", ENGINE_PROMPT_EFFECT_EDIT },
+        /* regenerates the capability inventory and repairs pins */
+        { "c23-gate-tail", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-proof-triage", ENGINE_PROMPT_EFFECT_REPORT },
+        { "c23-patch", ENGINE_PROMPT_EFFECT_EDIT },
+        { "c23-review-pass", ENGINE_PROMPT_EFFECT_REPORT },
+        { "c23-card-check", ENGINE_PROMPT_EFFECT_REPORT },
+    };
+    const size_t n = sizeof want / sizeof want[0];
+    EN_CHECK("the effect table classifies every registered kind",
+             engine_prompt_kind_count() == n);
+    for (size_t i = 0; i < engine_prompt_kind_count(); i++) {
+        const char *kind = engine_prompt_kind_at(i);
+        bool found = false;
+        for (size_t j = 0; j < n && kind; j++) {
+            if (strcmp(want[j].kind, kind) != 0)
+                continue;
+            found = true;
+            EN_CHECK("a kind's effect is the one the table decided",
+                     engine_prompt_kind_effect(kind) == want[j].effect);
+        }
+        EN_CHECK("every registered kind appears in the effect table", found);
+    }
+    EN_CHECK("a NULL kind has an UNKNOWN effect",
+             engine_prompt_kind_effect(NULL) == ENGINE_PROMPT_EFFECT_UNKNOWN);
+    EN_CHECK("an empty kind has an UNKNOWN effect",
+             engine_prompt_kind_effect("") == ENGINE_PROMPT_EFFECT_UNKNOWN);
+    EN_CHECK("an unregistered kind has an UNKNOWN effect",
+             engine_prompt_kind_effect("half-done")
+                 == ENGINE_PROMPT_EFFECT_UNKNOWN);
+    return failures;
+}
+
+static int case_verdict_report(void)
+{
+    int failures = 0;
+    const struct engine_gate_reading g = perfect();
+    const enum engine_prompt_effect rep = ENGINE_PROMPT_EFFECT_REPORT;
+
+    const enum engine_verdict done =
+        engine_verdict_of_effect(rep, NULL, 0, false, false);
+    EN_CHECK("a report that changed nothing is REPORTED",
+             done == ENGINE_VERDICT_REPORTED);
+    EN_CHECK("REPORTED is not a pass", !engine_verdict_is_pass(done));
+    EN_CHECK("REPORTED is terminal", engine_verdict_is_terminal(done));
+    EN_CHECK("REPORTED needs neither a gate nor a group",
+             engine_verdict_of_effect(rep, &g, 0, false, true) == done);
+
+    const enum engine_verdict edited =
+        engine_verdict_of_effect(rep, &g, 1, false, true);
+    EN_CHECK("a report that changed a file is REPORT_EDITED, even on a "
+             "perfect gate", edited == ENGINE_VERDICT_REPORT_EDITED);
+    EN_CHECK("REPORT_EDITED is neither a pass nor terminal",
+             !engine_verdict_is_pass(edited)
+             && !engine_verdict_is_terminal(edited));
+    EN_CHECK("a report that timed out is TIMEOUT, edited or not",
+             engine_verdict_of_effect(rep, &g, 0, true, true)
+                 == ENGINE_VERDICT_TIMEOUT
+             && engine_verdict_of_effect(rep, &g, 4, true, true)
+                 == ENGINE_VERDICT_TIMEOUT);
+    EN_CHECK("TIMEOUT is not terminal",
+             !engine_verdict_is_terminal(ENGINE_VERDICT_TIMEOUT));
+    return failures;
+}
+
+static int case_verdict_edit_delegates(void)
+{
+    int failures = 0;
+    struct engine_gate_reading ok = perfect();
+    struct engine_gate_reading failed = perfect();
+    failed.groups_failed = 1;
+    struct engine_gate_reading hollow = perfect();
+    hollow.groups_ran = 0;
+    struct engine_gate_reading silent = {0};
+    const struct {
+        const struct engine_gate_reading *g;
+        size_t changed;
+        bool timed_out;
+        bool group;
+    } in[] = {
+        { &ok, 3, false, true },      /* PASS */
+        { &ok, 0, false, true },      /* NO_CHANGE */
+        { &ok, 2, true, true },       /* TIMEOUT */
+        { &ok, 2, false, false },     /* UNVERIFIED */
+        { &failed, 2, false, true },  /* FAIL */
+        { &hollow, 2, false, true },  /* HOLLOW */
+        { &silent, 2, false, true },  /* REFUSED */
+        { NULL, 2, false, true },     /* REFUSED */
+    };
+    const enum engine_prompt_effect effects[] = {
+        ENGINE_PROMPT_EFFECT_EDIT, ENGINE_PROMPT_EFFECT_UNKNOWN };
+    for (size_t e = 0; e < 2; e++) {
+        for (size_t i = 0; i < sizeof in / sizeof in[0]; i++) {
+            EN_CHECK("EDIT and UNKNOWN delegate to engine_verdict_of",
+                     engine_verdict_of_effect(effects[e], in[i].g,
+                                              in[i].changed, in[i].timed_out,
+                                              in[i].group)
+                     == engine_verdict_of(in[i].g, in[i].changed,
+                                          in[i].timed_out, in[i].group));
+        }
+    }
+    EN_CHECK("an EDIT unit that changed nothing is still NO_CHANGE",
+             engine_verdict_of_effect(ENGINE_PROMPT_EFFECT_EDIT, &ok, 0,
+                                      false, true) == ENGINE_VERDICT_NO_CHANGE);
+    EN_CHECK("PASS is terminal and passing",
+             engine_verdict_is_terminal(ENGINE_VERDICT_PASS)
+             && engine_verdict_is_pass(ENGINE_VERDICT_PASS));
+    EN_CHECK("no failure verdict is terminal",
+             !engine_verdict_is_terminal(ENGINE_VERDICT_FAIL)
+             && !engine_verdict_is_terminal(ENGINE_VERDICT_NO_CHANGE)
+             && !engine_verdict_is_terminal(ENGINE_VERDICT_HOLLOW)
+             && !engine_verdict_is_terminal(ENGINE_VERDICT_REFUSED)
+             && !engine_verdict_is_terminal(ENGINE_VERDICT_UNVERIFIED));
+    return failures;
+}
+
+static int case_verdict_names(void)
+{
+    int failures = 0;
+    EN_CHECK("REPORTED names itself",
+             strcmp(engine_verdict_name(ENGINE_VERDICT_REPORTED),
+                    "REPORTED") == 0);
+    EN_CHECK("REPORT_EDITED names itself",
+             strcmp(engine_verdict_name(ENGINE_VERDICT_REPORT_EDITED),
+                    "FAIL(REPORT-EDITED)") == 0);
+    for (int v = ENGINE_VERDICT_PASS; v <= ENGINE_VERDICT_REPORT_EDITED; v++) {
+        const char *name = engine_verdict_name((enum engine_verdict)v);
+        EN_CHECK("every verdict has a distinct non-UNKNOWN name",
+                 name && strcmp(name, "UNKNOWN") != 0);
+        for (int w = ENGINE_VERDICT_PASS; w < v; w++)
+            EN_CHECK("verdict names are pairwise distinct",
+                     strcmp(name,
+                            engine_verdict_name((enum engine_verdict)w)) != 0);
+    }
+    return failures;
+}
+
 /* ── 7. reading the gate's own output ────────────────────────────────── */
 
 static int case_gate_read(void)
@@ -4896,6 +5062,14 @@ static int case_light_patch_kind(void)
                        "Never weaken, delete or skip an assertion"));
     const char *patch_judging =
         engine_prompt_template_body("c23-patch", "judging");
+    EN_CHECK("c23-patch rejects weakening or deleting an assertion",
+             patch_judging
+             && strstr(patch_judging,
+                       "weakening or deleting an assertion"));
+    EN_CHECK("c23-patch allows a test update the brief names",
+             patch_judging
+             && strstr(patch_judging,
+                       "A test update the brief names is allowed"));
     EN_CHECK("c23-patch escalates after one failed round",
              patch_judging
              && strstr(patch_judging, "One failed round sends the unit"));
@@ -4910,6 +5084,14 @@ static int case_light_review_pass_kind(void)
              == ENGINE_PROMPT_TIER_LIGHT);
     EN_CHECK("c23-review-pass supplies every required section",
              engine_prompt_kind_is_complete("c23-review-pass"));
+    const char *review_rules =
+        engine_prompt_template_body("c23-review-pass", "rules");
+    EN_CHECK("c23-review-pass says not to supply a fact from memory",
+             review_rules && strstr(review_rules, "do not supply it from memory"));
+    EN_CHECK("c23-review-pass says quote lines exactly",
+             review_rules && strstr(review_rules, "do not paraphrase a quote"));
+    EN_CHECK("c23-review-pass names a missing cleanup only from the diff",
+             review_rules && strstr(review_rules, "NOT IN DIFF"));
     const char *review_protocol =
         engine_prompt_template_body("c23-review-pass", "protocol");
     EN_CHECK("c23-review-pass leads with findings",
@@ -4918,8 +5100,17 @@ static int case_light_review_pass_kind(void)
              review_protocol
              && strstr(review_protocol,
                        "about the CHANGE or about a CLAIM"));
+    EN_CHECK("c23-review-pass says uncaught code has unknown coverage",
+             review_protocol
+             && strstr(review_protocol, "its coverage is unknown"));
+    EN_CHECK("c23-review-pass never replaces the independent review",
+             review_protocol
+             && strstr(review_protocol,
+                       "never replaces the required independent review"));
     EN_CHECK("c23-review-pass lists what it did not read",
              review_protocol && strstr(review_protocol, "NOT REVIEWED"));
+    EN_CHECK("c23-review-pass says a NOT REVIEWED line is not clean",
+             review_protocol && strstr(review_protocol, "is not a clean result"));
     EN_CHECK("c23-review-pass states what it sampled and how",
              review_protocol
              && strstr(review_protocol, "State what you sampled and how"));
@@ -4931,6 +5122,9 @@ static int case_light_review_pass_kind(void)
              review_judging
              && strstr(review_judging,
                        "A finding with no file and line is discarded"));
+    EN_CHECK("c23-review-pass sends flagged work to a whole-change review",
+             review_judging
+             && strstr(review_judging, "review of the whole change"));
     EN_CHECK("review and fix-gate are still standard",
              engine_prompt_kind_tier("review") == ENGINE_PROMPT_TIER_STANDARD
              && engine_prompt_kind_tier("fix-gate")
@@ -5049,6 +5243,41 @@ static int case_claude_ledger_row_e2e(void)
 }
 #endif
 
+/* The card-check kind is read-only: it checks a card against the tree and
+ * reports facts and open choices, never a design judgement or a verdict. */
+static int case_light_card_check_kind(void)
+{
+    int failures = 0;
+    EN_CHECK("c23-card-check is light",
+             engine_prompt_kind_tier("c23-card-check")
+             == ENGINE_PROMPT_TIER_LIGHT);
+    EN_CHECK("c23-card-check supplies every required section",
+             engine_prompt_kind_is_complete("c23-card-check"));
+    const char *rules = engine_prompt_template_body("c23-card-check", "rules");
+    EN_CHECK("c23-card-check checks every statement of fact",
+             rules && strstr(rules, "Check every statement of fact"));
+    EN_CHECK("c23-card-check forbids edits, builds and test runs",
+             rules && strstr(rules, "Do not edit, build or run tests"));
+    EN_CHECK("c23-card-check does not judge the design",
+             rules && strstr(rules, "Do not judge the design"));
+    const char *task = engine_prompt_template_body("c23-card-check", "task");
+    EN_CHECK("c23-card-check marks each claim TRUE, FALSE or NOT FOUND",
+             task && strstr(task, "TRUE, FALSE or NOT FOUND"));
+    EN_CHECK("c23-card-check gives the true fact for a FALSE claim",
+             task && strstr(task, "give the true fact"));
+    EN_CHECK("c23-card-check opens the precedent model",
+             task && strstr(task, "open that model"));
+    EN_CHECK("c23-card-check lists every open choice with a precedent",
+             task && strstr(task, "List every choice")
+             && strstr(task, "nearest precedent"));
+    const char *protocol =
+        engine_prompt_template_body("c23-card-check", "protocol");
+    EN_CHECK("c23-card-check ends with READY or NOT READY",
+             protocol && strstr(protocol, "READY")
+             && strstr(protocol, "NOT READY"));
+    return failures;
+}
+
 int test_engine(void)
 {
     int failures = 0;
@@ -5058,6 +5287,10 @@ int test_engine(void)
     failures += case_patch();
     failures += case_secret();
     failures += case_verdict();
+    failures += case_effect_per_kind();
+    failures += case_verdict_report();
+    failures += case_verdict_edit_delegates();
+    failures += case_verdict_names();
     failures += case_gate_read();
     failures += case_err();
     failures += case_key_gate();
@@ -5087,6 +5320,7 @@ int test_engine(void)
     failures += case_contract();
     failures += case_light_patch_kind();
     failures += case_light_review_pass_kind();
+    failures += case_light_card_check_kind();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }

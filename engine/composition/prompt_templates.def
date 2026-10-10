@@ -36,6 +36,15 @@
  *            mechanical; standard kinds write code. It is a floor a
  *            dispatcher may exceed, not a schedule. Exactly one row per kind.
  *
+ *   ENGINE_PROMPT_KIND_EFFECT(kind, report)
+ *
+ *   report   this kind's product is its reply and it must change NOTHING in
+ *            the worktree. Declared only for kinds whose own text says they
+ *            do not edit. A kind with no row is `edit` (changes files), so
+ *            forgetting a row fails toward the stricter judgement. A kind
+ *            that writes even one file (c23-context-pack writes its pack)
+ *            is `edit`, not `report`.
+ *
  * ── CLOSED IN BOTH DIRECTIONS ────────────────────────────────────────────
  * A denylist over a growing vocabulary is a default-permit, so this is a
  * membership rule instead. The gate requires:
@@ -58,6 +67,11 @@
 #ifndef ENGINE_PROMPT_KIND_TIER
 #define ENGINE_PROMPT_KIND_TIER(kind_, tier_)
 #define ENGINE_PROMPT_TIER_LOCAL_
+#endif
+
+#ifndef ENGINE_PROMPT_KIND_EFFECT
+#define ENGINE_PROMPT_KIND_EFFECT(kind_, effect_)
+#define ENGINE_PROMPT_EFFECT_LOCAL_
 #endif
 
 /* clang-format off */
@@ -139,6 +153,7 @@ ENGINE_PROMPT_TEMPLATE(doc-claim, judging,
 /* ── review ──────────────────────────────────────────────────────────────
  * Read a diff and report. This kind writes nothing. */
 ENGINE_PROMPT_KIND_TIER(review, standard)
+ENGINE_PROMPT_KIND_EFFECT(review, report)
 ENGINE_PROMPT_TEMPLATE(review, rules,
     "This unit reviews and does not edit. Report what you found; propose no "
     "patch. A reviewer who starts writing stops reading. Rules a gate "
@@ -500,6 +515,8 @@ ENGINE_PROMPT_TEMPLATE(c23-context-pack, judging,
  * Mechanical gate tail after a writer's focused test passes. It runs
  * gates and applies only the repairs a gate's own failure text dictates. */
 ENGINE_PROMPT_KIND_TIER(c23-gate-tail, light)
+/* No effect row: EDIT. Known false negative: on an already-clean tree this
+ * kind legitimately changes nothing and is then judged NO_CHANGE. */
 ENGINE_PROMPT_TEMPLATE(c23-gate-tail, rules,
     "Run the gate tail for a finished change. Never edit hand-written "
     "source or tests. Never commit, rebase or reset. Run every heavy "
@@ -529,6 +546,7 @@ ENGINE_PROMPT_TEMPLATE(c23-gate-tail, judging,
  * from the proof's own evidence and names the next command; it repairs
  * nothing. */
 ENGINE_PROMPT_KIND_TIER(c23-proof-triage, light)
+ENGINE_PROMPT_KIND_EFFECT(c23-proof-triage, report)
 ENGINE_PROMPT_TEMPLATE(c23-proof-triage, rules,
     "Triage one failed proof. Read only: never edit, build, retry, "
     "resubmit or post. Quote evidence verbatim with its file and line. If "
@@ -584,19 +602,25 @@ ENGINE_PROMPT_TEMPLATE(c23-patch, protocol,
     "fail-then-pass lines when the brief asks for them; OPEN items.")
 ENGINE_PROMPT_TEMPLATE(c23-patch, judging,
     "The control side reruns the named acceptance. A patch that passes by "
-    "changing a file outside the brief, or by editing an assertion, is "
-    "rejected. One failed round sends the unit to a standard-tier worker with "
+    "changing a file outside the brief, or by weakening or deleting an "
+    "assertion, is rejected. A test update the brief names is allowed. "
+    "One failed round sends the unit to a standard-tier worker with "
     "your report attached; say plainly what you could not do.")
 
 /* ── c23-review-pass ────────────────────────────────────────────────────
  * A first-pass review against a written card. It reviews and returns
- * findings; a standard-tier review reads only the hunks it flags. */
+ * findings; a standard-tier review covers the whole change, starting from the
+ * hunks it flags. */
 ENGINE_PROMPT_KIND_TIER(c23-review-pass, light)
+ENGINE_PROMPT_KIND_EFFECT(c23-review-pass, report)
 ENGINE_PROMPT_TEMPLATE(c23-review-pass, rules,
     "This unit is a first-pass review against a written card. It reviews and "
     "does not edit. It builds and runs nothing unless the brief names a "
     "command. Check the diff against the card point by point; do not judge "
-    "taste.")
+    "taste. If a fact is not in the card or the diff, write CANNOT TELL; do "
+    "not supply it from memory. Quote lines exactly; do not paraphrase a "
+    "quote. Name a missing cleanup only when the diff shows the free, close, "
+    "unlock or error return; otherwise write NOT IN DIFF.")
 ENGINE_PROMPT_TEMPLATE(c23-review-pass, task,
     "For every numbered point of the card answer MET, NOT MET or CANNOT TELL, "
     "with a file and line and the quoted code. Trace each new error path to "
@@ -607,14 +631,52 @@ ENGINE_PROMPT_TEMPLATE(c23-review-pass, protocol,
     "quoted line and why it matters. Then one line per card point. Then NOT "
     "REVIEWED. Mark each finding as about the CHANGE or about a CLAIM. State "
     "what you sampled and how: the files and hunks you read whole, and the "
-    "ones you only searched, so a clean result shows what it covers.")
+    "ones you only searched, so a clean result shows what it covers. "
+    "Code you did not flag is not reviewed; its coverage is unknown. "
+    "A first pass never replaces the required independent review and does not "
+    "measure what it missed. A NOT REVIEWED line is not a clean result.")
 ENGINE_PROMPT_TEMPLATE(c23-review-pass, judging,
     "Return findings only; write no accept or reject. The control side derives "
     "the verdict. A finding with no file and line is discarded. A first pass "
     "that reports attention needed, or that could not tell on any point, is "
-    "followed by a standard-tier review of the flagged hunks only.")
+    "followed by a standard-tier review of the whole change, starting from the "
+    "flagged hunks.")
+
+/* ── c23-card-check ──────────────────────────────────────────────────────
+ * Read-only check of a task card against the tree, run before a writer is
+ * dispatched. It reports facts and open choices; it never judges the design. */
+ENGINE_PROMPT_KIND_TIER(c23-card-check, light)
+ENGINE_PROMPT_KIND_EFFECT(c23-card-check, report)
+ENGINE_PROMPT_TEMPLATE(c23-card-check, rules,
+    "This unit checks a task card against the tree before a writer is "
+    "dispatched. Check every statement of fact in the card against the tree: "
+    "a function exists, sits at a line, is called from a place, a file holds a "
+    "key or string, a row ends up in a named file, a count. Do not edit, build "
+    "or run tests. Do not judge the design; report facts and open choices only.")
+ENGINE_PROMPT_TEMPLATE(c23-card-check, task,
+    "Mark each claim TRUE, FALSE or NOT FOUND with file:line and the quoted "
+    "line; for a FALSE claim give the true fact. Where the card says to do "
+    "something the way an existing test or function does, open that model and "
+    "confirm it does what the card says. List every choice the card leaves "
+    "open (a name, where a helper lives, which file an assertion reads), each "
+    "with the nearest precedent in the tree.")
+ENGINE_PROMPT_TEMPLATE(c23-card-check, protocol,
+    "Reply with the claims, each TRUE, FALSE or NOT FOUND with file:line and "
+    "the quoted line; then the open choices, each with its nearest precedent; "
+    "then one line: READY when no claim is FALSE and no choice is open, "
+    "otherwise NOT READY and the count of each.")
+ENGINE_PROMPT_TEMPLATE(c23-card-check, judging,
+    "Accepted when every claim carries file:line and a quoted line, and every "
+    "open choice names a precedent or says none exists. Rejected when a claim "
+    "has no quoted line, when a design is judged, or when a file is edited or a "
+    "test run.")
 
 /* clang-format on */
+
+#ifdef ENGINE_PROMPT_EFFECT_LOCAL_
+#undef ENGINE_PROMPT_KIND_EFFECT
+#undef ENGINE_PROMPT_EFFECT_LOCAL_
+#endif
 
 #ifdef ENGINE_PROMPT_TIER_LOCAL_
 #undef ENGINE_PROMPT_KIND_TIER

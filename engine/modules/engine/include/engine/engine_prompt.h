@@ -118,6 +118,21 @@ enum engine_prompt_tier {
  * with no tier row. The tier is a floor for the worker, never a schedule. */
 enum engine_prompt_tier engine_prompt_kind_tier(const char *kind);
 
+/* What a unit of a kind is expected to PRODUCE. EDIT: it changes files in the
+ * worktree (the default for a kind with no declaration). REPORT: it must
+ * change nothing; its product is its reply. UNKNOWN is only for a kind that
+ * does not exist. */
+enum engine_prompt_effect {
+    ENGINE_PROMPT_EFFECT_UNKNOWN = 0,
+    ENGINE_PROMPT_EFFECT_EDIT,
+    ENGINE_PROMPT_EFFECT_REPORT,
+};
+
+/* The effect `kind` declares; UNKNOWN for NULL, an empty or unknown kind
+ * (the same answer engine_prompt_kind_tier gives), EDIT for a known kind with
+ * no effect row. A kind that writes any file is EDIT. */
+enum engine_prompt_effect engine_prompt_kind_effect(const char *kind);
+
 /* True when the tier rows and the template kinds agree both ways: every tier
  * row names a kind that has template rows, no kind has two tier rows, and
  * every template kind has one. On false, *why_kind (when non-NULL) names the

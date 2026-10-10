@@ -319,6 +319,8 @@ static bool verdict_known(enum engine_verdict v)
     case ENGINE_VERDICT_TIMEOUT:
     case ENGINE_VERDICT_REFUSED:
     case ENGINE_VERDICT_UNVERIFIED:
+    case ENGINE_VERDICT_REPORTED:
+    case ENGINE_VERDICT_REPORT_EDITED:
         return true;
     }
     return false;

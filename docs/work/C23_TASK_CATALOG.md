@@ -18,7 +18,7 @@ The source defines these C23 prompt kinds: `c23-byte-validator`,
 `c23-wire-codec`, `c23-cas-operation`, `c23-service-operation`,
 `c23-telemetry-field`, `c23-controller-route`, `c23-source-generator`,
 `c23-registry-entry`, `c23-context-pack`, `c23-gate-tail`,
-`c23-proof-triage`, `c23-patch`, `c23-review-pass`, and
+`c23-proof-triage`, `c23-patch`, `c23-review-pass`, `c23-card-check`, and
 `c23-resource-owner`. Existing kinds `fix-gate`,
 `add-test`, `port-arm`, `doc-claim`, and `review` remain. Rows marked
 `PROPOSED:<family>` still need a procedure; they are not dispatchable kinds.
@@ -27,8 +27,8 @@ about a claim made for it, and never a verdict; rules a gate measures arrive
 as supplied facts.
 Each kind declares a tier in the same file (`ENGINE_PROMPT_KIND_TIER`). Light
 kinds (`c23-context-pack`, `c23-gate-tail`, `c23-proof-triage`, `c23-patch`,
-`c23-review-pass`) are read-only, mechanical, or a fully specified edit
-(`c23-patch`), and a small model can run them; standard kinds write code. `c23-patch` is a fully specified change: light tier
+`c23-review-pass`, `c23-card-check`) are read-only, mechanical, or a fully
+specified edit (`c23-patch`), and a small model can run them; standard kinds write code. `c23-patch` is a fully specified change: light tier
 first, standard tier after one failed round. `c23-review-pass` is a first-pass
 review against a card: light tier; a standard-tier review reads only what it
 flags. The

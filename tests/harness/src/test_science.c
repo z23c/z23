@@ -1887,6 +1887,10 @@ static int case_surface(void)
         rc = receipt("alice", SCIENCE_ARM_CONTROL, (enum engine_verdict)42);
         SC_CHECK("a verdict outside the engine's enum is refused",
                  science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_VERDICT);
+        rc = receipt("alice", SCIENCE_ARM_CONTROL,
+                     (enum engine_verdict)(ENGINE_VERDICT_REPORT_EDITED + 1));
+        SC_CHECK("the first value past the enum is refused",
+                 science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_VERDICT);
         struct science_reading r;
         SC_CHECK("none of the refused receipts entered the register",
                  science_claim_read(reg, id, &r) == SCIENCE_OK &&

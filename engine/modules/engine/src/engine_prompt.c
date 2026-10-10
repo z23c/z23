@@ -294,6 +294,37 @@ enum engine_prompt_tier engine_prompt_kind_tier(const char *kind)
     return ENGINE_PROMPT_TIER_UNKNOWN;
 }
 
+struct engine_prompt_effect_row {
+    const char *kind;
+    enum engine_prompt_effect effect;
+};
+
+static const struct engine_prompt_effect_row k_effects[] = {
+#define ENGINE_PROMPT_EFFECT_report ENGINE_PROMPT_EFFECT_REPORT
+#define ENGINE_PROMPT_EFFECT_edit ENGINE_PROMPT_EFFECT_EDIT
+#define ENGINE_PROMPT_TEMPLATE(kind_, section_, body_)
+#define ENGINE_PROMPT_KIND_TIER(kind_, tier_)
+#define ENGINE_PROMPT_KIND_EFFECT(kind_, effect_) \
+    { #kind_, ENGINE_PROMPT_EFFECT_##effect_ },
+#include "../../../composition/prompt_templates.def"
+#undef ENGINE_PROMPT_KIND_EFFECT
+#undef ENGINE_PROMPT_KIND_TIER
+#undef ENGINE_PROMPT_EFFECT_report
+#undef ENGINE_PROMPT_EFFECT_edit
+#undef ENGINE_PROMPT_TEMPLATE
+};
+
+enum engine_prompt_effect engine_prompt_kind_effect(const char *kind)
+{
+    if (!kind || !kind[0] || !kind_has_templates(kind))
+        return ENGINE_PROMPT_EFFECT_UNKNOWN;
+    for (size_t i = 0; i < sizeof(k_effects) / sizeof(k_effects[0]); i++) {
+        if (strcmp(k_effects[i].kind, kind) == 0)
+            return k_effects[i].effect;
+    }
+    return ENGINE_PROMPT_EFFECT_EDIT;
+}
+
 static bool tier_row_is_sound(size_t i)
 {
     if (!kind_has_templates(k_tiers[i].kind))
