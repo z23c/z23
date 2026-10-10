@@ -80,6 +80,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "vcs/package_content.h"
 #include "test/test_zcode_store_priv.h"
 
 void zs_hex32(const uint8_t in[32], char out[65])
@@ -1056,10 +1057,62 @@ static int t_store_noop_missing_authority(void)
     return failures;
 }
 
+static int t_store_permuted_manifest_read(struct vcs_package_store *store,
+                                         struct zs_pkg *pkg)
+{
+    int failures = 0;
+    uint8_t *out = NULL, permuted_root[32];
+    size_t len = 0;
+    ZS_CHECK("manifest index: canonical array returns exact first file",
+        vcs_package_content_get_file_at(store, pkg->root, &pkg->manifest,
+            0u, &out, &len) == VCS_PACKAGE_STORE_OK && out && len == 32u &&
+        memcmp(out, pkg->contents[0], len) == 0);
+    free(out);
+    out = NULL;
+    len = SIZE_MAX;
+    struct vcs_package_file swap = pkg->manifest.files[0];
+    pkg->manifest.files[0] = pkg->manifest.files[1];
+    pkg->manifest.files[1] = swap;
+    ZS_CHECK("manifest index: permutation preserves committed root",
+        vcs_package_manifest_root(&pkg->manifest, permuted_root) &&
+        memcmp(permuted_root, pkg->root, 32) == 0);
+    enum vcs_package_store_result result = vcs_package_content_get_file_at(
+        store, pkg->root, &pkg->manifest, 0u, &out, &len);
+    ZS_CHECK("manifest index: permuted same-root distinct file refuses atomically",
+        result != VCS_PACKAGE_STORE_OK && out == NULL && len == 0);
+    free(out);
+    return failures;
+}
+
+static int t_store_manifest_index_binding(void)
+{
+    int failures = 0;
+    char dd[1024];
+    struct vcs_package_store *store = zs_open(dd, sizeof(dd), "manifest_index",
+        VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    ZS_CHECK("manifest index: isolated store opens", store != NULL);
+    if (!store) return failures + 1;
+    struct zs_pkg pkg = {0};
+    const char *paths[] = {"a.bin", "b.bin"};
+    const size_t lens[] = {32u, 32u};
+    bool ready = zs_make_package(&pkg, 2u, paths, lens, 0x31) &&
+        memcmp(pkg.contents[0], pkg.contents[1], 32) != 0 &&
+        vcs_package_store_put_manifest(store, pkg.wire, pkg.wire_len, NULL) ==
+            VCS_PACKAGE_STORE_OK && zs_put_all(store, &pkg) == VCS_PACKAGE_STORE_OK;
+    ZS_CHECK("manifest index: equal-size distinct chunks prepare", ready);
+    if (ready) failures += t_store_permuted_manifest_read(store, &pkg);
+    zs_free_package(&pkg);
+    vcs_package_store_close(store);
+    ZS_CHECK("manifest index: isolated fixture removes",
+              test_rm_rf_recursive(dd) == 0);
+    return failures;
+}
+
 int test_zcode_store(void)
 {
     printf("\n=== zcode_store: local content-addressed package store ===\n");
     int failures = 0;
+    failures += t_store_manifest_index_binding();
     failures += t_store_layout_and_flags();
     failures += t_store_manifest_admission();
     failures += t_store_chunk_flow();

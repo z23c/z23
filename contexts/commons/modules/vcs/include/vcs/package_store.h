@@ -301,6 +301,25 @@ enum vcs_package_store_result vcs_package_store_get_chunk_at(
     struct vcs_package_store *store, const uint8_t package_root[32],
     uint32_t file_index, uint32_t chunk_index, uint8_t **out,
     size_t *out_len);
+/* Read and verify directly into caller-owned unpublished memory. Capacity
+ * is checked before writing. On refusal *out_len is zero; destination may
+ * contain untrusted partial bytes and must not be published. Successful
+ * reads retain the allocating API's hash, quarantine and logical access
+ * contract, without allocating or copying a temporary chunk. */
+enum vcs_package_store_result vcs_package_store_get_chunk_at_into(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    uint32_t file_index, uint32_t chunk_index, uint8_t *destination,
+    size_t capacity, size_t *out_len);
+#ifdef ZCL_TESTING
+struct vcs_package_store_read_stats {
+    uint64_t verified_bytes;
+    uint64_t into_reads;
+    uint64_t allocated_reads;
+};
+/* Calling thread only; observes successful verified reads, not elapsed time. */
+struct vcs_package_store_read_stats vcs_package_store_read_stats_for_test(
+    bool reset);
+#endif
 enum vcs_package_store_result vcs_package_store_get_manifest_wire(
     struct vcs_package_store *store, const uint8_t package_root[32],
     uint8_t **out, size_t *out_len);

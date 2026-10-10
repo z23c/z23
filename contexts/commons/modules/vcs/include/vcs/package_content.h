@@ -22,9 +22,9 @@ enum vcs_package_store_result vcs_package_content_put_file(
     const char *path, const uint8_t *bytes, size_t bytes_len);
 
 /* Reconstruct one manifest-indexed file from verified CAS objects. The
- * supplied manifest is re-rooted against package_root before any bytes are
- * returned. Allocates *out (including a one-byte allocation for an empty
- * file); callers own it. */
+ * supplied manifest must be in canonical path order and is re-rooted against
+ * package_root before returning bytes. Allocates *out (including a one-byte
+ * allocation for an empty file); callers own it. */
 enum vcs_package_store_result vcs_package_content_get_file_at(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const struct vcs_package_manifest *manifest, uint32_t file_index,

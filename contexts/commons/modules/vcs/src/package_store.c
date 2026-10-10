@@ -1057,6 +1057,119 @@ enum vcs_package_store_result vcs_package_store_put_recipe(
 
 /* ── reads ────────────────────────────────────────────────────────── */
 
+struct store_chunk_reader {
+    struct platform_positioned_file handle;
+    char path[STORE_PATH_MAX];
+    uint64_t size;
+};
+
+#ifdef ZCL_TESTING
+static _Thread_local struct vcs_package_store_read_stats store_read_stats;
+
+struct vcs_package_store_read_stats vcs_package_store_read_stats_for_test(
+    bool reset)
+{
+    struct vcs_package_store_read_stats result = store_read_stats;
+    if (reset) memset(&store_read_stats, 0, sizeof(store_read_stats));
+    return result;
+}
+#endif
+
+/* Caller holds the store lock and owns the manifest for the entire read. */
+static enum vcs_package_store_result store_chunk_reader_open(
+    struct vcs_package_store *store, const struct vcs_package_file *file,
+    uint32_t index, const uint8_t hash[32], struct store_chunk_reader *reader)
+{
+    platform_positioned_file_init(&reader->handle);
+    store_cas_path(store, hash, reader->path, sizeof(reader->path));
+    if (!platform_positioned_file_open(&reader->handle, reader->path)) {
+        int saved_errno = errno;
+        if (saved_errno == ENOENT)
+            return store_cas_quarantine_if_bad(store, hash, file, index,
+                                              VCS_PACKAGE_STORE_ERR_CHUNK_MISSING);
+        LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
+                   "CAS object %s open: %s", reader->path, strerror(saved_errno));
+    }
+    if (!platform_positioned_file_size(&reader->handle, &reader->size)) {
+        platform_positioned_file_close(&reader->handle);
+        LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
+                   "CAS object %s size", reader->path);
+    }
+    uint64_t offset = (uint64_t)index * VCS_PACKAGE_CHUNK_BYTES;
+    uint64_t remaining = file->size - offset;
+    uint64_t expected = remaining > VCS_PACKAGE_CHUNK_BYTES ?
+                            VCS_PACKAGE_CHUNK_BYTES : remaining;
+    if (reader->size == 0 || reader->size != expected) {
+        platform_positioned_file_close(&reader->handle);
+        return store_cas_quarantine_if_bad(store, hash, file, index,
+                                           VCS_PACKAGE_STORE_ERR_CHUNK_HASH);
+    }
+    return VCS_PACKAGE_STORE_OK;
+}
+
+static enum vcs_package_store_result store_chunk_reader_verify(
+    struct vcs_package_store *store, const struct vcs_package_file *file,
+    uint32_t index, const uint8_t hash[32], struct store_chunk_reader *reader,
+    uint8_t *bytes)
+{
+    int64_t got = platform_positioned_file_read(&reader->handle, bytes,
+                                                (size_t)reader->size, 0);
+    platform_positioned_file_close(&reader->handle);
+    if (got < 0 || (uint64_t)got != reader->size)
+        LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
+                   "read CAS object %s", reader->path);
+    if (!vcs_package_verify_chunk(file, index, bytes, (size_t)reader->size))
+        return store_cas_quarantine_if_bad(store, hash, file, index,
+                                           VCS_PACKAGE_STORE_ERR_CHUNK_HASH);
+#ifdef ZCL_TESTING
+    store_read_stats.verified_bytes += reader->size;
+#endif
+    return VCS_PACKAGE_STORE_OK;
+}
+
+static enum vcs_package_store_result store_chunk_read_locked(
+    struct vcs_package_store *store, struct store_package *pkg,
+    const struct vcs_package_file *file, uint32_t index,
+    uint8_t *destination, size_t capacity, uint8_t **allocated, size_t *out_len)
+{
+    if (!file || index >= file->chunk_count)
+        return VCS_PACKAGE_STORE_ERR_CHUNK_COORD;
+    const uint8_t *hash = file->chunk_hashes + (size_t)index * 32u;
+    if (!store_cas_contains(store, hash))
+        return VCS_PACKAGE_STORE_ERR_CHUNK_MISSING;
+    struct store_chunk_reader reader;
+    enum vcs_package_store_result result =
+        store_chunk_reader_open(store, file, index, hash, &reader);
+    if (result != VCS_PACKAGE_STORE_OK) return result;
+    if (destination && reader.size > capacity) {
+        platform_positioned_file_close(&reader.handle);
+        LOG_RETURN(VCS_PACKAGE_STORE_ERR_LIMIT, STORE_LOG,
+                   "chunk destination holds %zu of %llu bytes", capacity,
+                   (unsigned long long)reader.size);
+    }
+    uint8_t *bytes = destination;
+    if (!bytes) bytes = zcl_malloc((size_t)reader.size, "vcs_store_get_chunk");
+    if (!bytes) {
+        platform_positioned_file_close(&reader.handle);
+        LOG_RETURN(VCS_PACKAGE_STORE_ERR_ALLOC, STORE_LOG,
+                   "alloc %llu chunk bytes", (unsigned long long)reader.size);
+    }
+    result = store_chunk_reader_verify(store, file, index, hash, &reader, bytes);
+    if (result != VCS_PACKAGE_STORE_OK) {
+        if (!destination) free(bytes);
+        return result;
+    }
+    pkg->access_count++;
+    pkg->last_access = ++store->logical_clock;
+    *out_len = (size_t)reader.size;
+    if (allocated) *allocated = bytes;
+#ifdef ZCL_TESTING
+    if (destination) store_read_stats.into_reads++;
+    else store_read_stats.allocated_reads++;
+#endif
+    return VCS_PACKAGE_STORE_OK;
+}
+
 enum vcs_package_store_result vcs_package_store_get_chunk(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const char *path, uint32_t chunk_index, uint8_t **out, size_t *out_len)
@@ -1067,85 +1180,36 @@ enum vcs_package_store_result vcs_package_store_get_chunk(
     *out = NULL;
     *out_len = 0;
     pthread_mutex_lock(&store->lock);
-
     struct store_package *pkg = store_find(store, package_root, NULL);
-    if (!pkg) {
-        pthread_mutex_unlock(&store->lock);
-        return VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE;
-    }
-    const struct vcs_package_file *file = store_resolve_file(pkg, path);
-    if (!file || chunk_index >= file->chunk_count) {
-        pthread_mutex_unlock(&store->lock);
-        return VCS_PACKAGE_STORE_ERR_CHUNK_COORD;
-    }
-    uint8_t hash[32];
-    memcpy(hash, file->chunk_hashes + (size_t)chunk_index * 32u, 32);
-    if (!store_cas_contains(store, hash)) {
-        pthread_mutex_unlock(&store->lock);
-        return VCS_PACKAGE_STORE_ERR_CHUNK_MISSING;
-    }
-    char cas_path[STORE_PATH_MAX];
-    store_cas_path(store, hash, cas_path, sizeof(cas_path));
-    struct platform_positioned_file cas_file;
-    uint64_t file_size = 0;
-    platform_positioned_file_init(&cas_file);
-    if (!platform_positioned_file_open(&cas_file, cas_path)) {
-        int saved_errno = errno;
-        if (saved_errno == ENOENT) {
-            enum vcs_package_store_result result =
-                store_cas_quarantine_if_bad(
-                    store, hash, file, chunk_index,
-                    VCS_PACKAGE_STORE_ERR_CHUNK_MISSING);
-            pthread_mutex_unlock(&store->lock);
-            return result;
-        }
-        pthread_mutex_unlock(&store->lock);
-        LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
-                   "CAS object %s open: %s", cas_path,
-                   strerror(saved_errno));
-    }
-    if (!platform_positioned_file_size(&cas_file, &file_size)) {
-        platform_positioned_file_close(&cas_file);
-        pthread_mutex_unlock(&store->lock);
-        LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
-                   "CAS object %s size", cas_path);
-    }
-    if (file_size == 0 || file_size > VCS_PACKAGE_CHUNK_BYTES) {
-        platform_positioned_file_close(&cas_file);
-        enum vcs_package_store_result result = store_cas_quarantine_if_bad(
-            store, hash, file, chunk_index, VCS_PACKAGE_STORE_ERR_CHUNK_HASH);
-        pthread_mutex_unlock(&store->lock);
-        return result;
-    }
-    size_t len = (size_t)file_size;
-    uint8_t *buf = zcl_malloc(len, "vcs_store_get_chunk");
-    if (!buf) {
-        platform_positioned_file_close(&cas_file);
-        pthread_mutex_unlock(&store->lock);
-        LOG_RETURN(VCS_PACKAGE_STORE_ERR_ALLOC, STORE_LOG,
-                   "alloc %zu chunk bytes", len);
-    }
-    int64_t got = platform_positioned_file_read(&cas_file, buf, len, 0);
-    platform_positioned_file_close(&cas_file);
-    if (got < 0 || (uint64_t)got != file_size) {
-        free(buf);
-        pthread_mutex_unlock(&store->lock);
-        LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
-                   "read CAS object %s", cas_path);
-    }
-    if (!vcs_package_verify_chunk(file, chunk_index, buf, len)) {
-        free(buf);
-        enum vcs_package_store_result result = store_cas_quarantine_if_bad(
-            store, hash, file, chunk_index, VCS_PACKAGE_STORE_ERR_CHUNK_HASH);
-        pthread_mutex_unlock(&store->lock);
-        return result;
-    }
-    pkg->access_count++;
-    pkg->last_access = ++store->logical_clock;
-    *out = buf;
-    *out_len = len;
+    enum vcs_package_store_result result = VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE;
+    if (pkg)
+        result = store_chunk_read_locked(store, pkg, store_resolve_file(pkg, path),
+                                         chunk_index, NULL, 0, out, out_len);
     pthread_mutex_unlock(&store->lock);
-    return VCS_PACKAGE_STORE_OK;
+    return result;
+}
+
+enum vcs_package_store_result vcs_package_store_get_chunk_at_into(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    uint32_t file_index, uint32_t chunk_index, uint8_t *destination,
+    size_t capacity, size_t *out_len)
+{
+    if (out_len) *out_len = 0;
+    if (!store || !package_root || !destination || !out_len)
+        LOG_RETURN(VCS_PACKAGE_STORE_ERR_NULL, STORE_LOG,
+                   "null store/root/destination/length");
+    pthread_mutex_lock(&store->lock);
+    struct store_package *pkg = store_find(store, package_root, NULL);
+    enum vcs_package_store_result result = VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE;
+    if (pkg) {
+        result = VCS_PACKAGE_STORE_ERR_CHUNK_COORD;
+        if (file_index < pkg->manifest.count)
+            result = store_chunk_read_locked(store, pkg,
+                &pkg->manifest.files[file_index], chunk_index,
+                destination, capacity, NULL, out_len);
+    }
+    pthread_mutex_unlock(&store->lock);
+    return result;
 }
 
 /* ── reads: slice-12 swarm coordinates ────────────────────────────── */

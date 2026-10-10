@@ -322,7 +322,6 @@ contexts/commons/modules/vcs/src/package_build.c:vcs_package_build_validate:32
 contexts/commons/modules/vcs/src/package_capsule.c:vcs_package_capsule_parse:17
 contexts/commons/modules/vcs/src/package_checkout.c:checkout_materialize:19
 contexts/commons/modules/vcs/src/package_checkout.c:vcs_package_checkout#2:29
-contexts/commons/modules/vcs/src/package_content.c:vcs_package_content_get_file_at:20
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_deps_error_string:25
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_deps_parse_meta:39
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_lock_parse:24
@@ -381,7 +380,6 @@ contexts/commons/modules/vcs/src/package_service.c:svc_credit:16
 contexts/commons/modules/vcs/src/package_service.c:svc_wire_decode:31
 contexts/commons/modules/vcs/src/package_service.c:vcs_service_book_load:41
 contexts/commons/modules/vcs/src/package_store.c:store_pick_victim:17
-contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_get_chunk:19
 contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_open:21
 contexts/commons/modules/vcs/src/package_store_io.c:store_atomic_write:25
 contexts/commons/modules/vcs/src/package_store_io.c:store_gc_cas:28

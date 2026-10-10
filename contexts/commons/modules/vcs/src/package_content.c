@@ -62,6 +62,23 @@ enum vcs_package_store_result vcs_package_content_put_file(
     return VCS_PACKAGE_STORE_OK;
 }
 
+/* Root calculation sorts a copy; store indices require caller order too. */
+static bool content_manifest_matches(const struct vcs_package_manifest *manifest,
+    const uint8_t package_root[32], uint32_t file_index)
+{
+    uint8_t derived[32];
+    if (file_index >= manifest->count ||
+        !vcs_package_manifest_root(manifest, derived) ||
+        memcmp(derived, package_root, 32) != 0 ||
+        manifest->files[file_index].size > SIZE_MAX)
+        LOG_FAIL(CONTENT_LOG, "content file manifest/root mismatch");
+    for (size_t i = 1; i < manifest->count; i++) {
+        if (strcmp(manifest->files[i - 1].path, manifest->files[i].path) >= 0)
+            LOG_FAIL(CONTENT_LOG, "content manifest is not in canonical path order");
+    }
+    return true;
+}
+
 enum vcs_package_store_result vcs_package_content_get_file_at(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const struct vcs_package_manifest *manifest, uint32_t file_index,
@@ -72,13 +89,9 @@ enum vcs_package_store_result vcs_package_content_get_file_at(
     if (!store || !package_root || !manifest || !out || !out_len)
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_NULL, CONTENT_LOG,
                    "null content file read input");
-    uint8_t derived[32];
-    if (file_index >= manifest->count ||
-        !vcs_package_manifest_root(manifest, derived) ||
-        memcmp(derived, package_root, 32) != 0 ||
-        manifest->files[file_index].size > SIZE_MAX)
+    if (!content_manifest_matches(manifest, package_root, file_index))
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_MANIFEST, CONTENT_LOG,
-                   "content file manifest/root mismatch");
+                   "content file manifest/root/order mismatch");
     const struct vcs_package_file *file = &manifest->files[file_index];
     size_t len = (size_t)file->size;
     uint8_t *bytes = zcl_malloc(len == 0 ? 1u : len,
@@ -87,22 +100,16 @@ enum vcs_package_store_result vcs_package_content_get_file_at(
         return VCS_PACKAGE_STORE_ERR_ALLOC;
     size_t offset = 0;
     for (uint32_t i = 0; i < file->chunk_count; i++) {
-        uint8_t *chunk = NULL;
         size_t chunk_len = 0;
-        enum vcs_package_store_result got = vcs_package_store_get_chunk_at(
-            store, package_root, file_index, i, &chunk, &chunk_len);
-        if (got != VCS_PACKAGE_STORE_OK ||
-            !vcs_package_verify_chunk(file, i, chunk, chunk_len) ||
-            chunk_len > len - offset) {
-            free(chunk);
+        enum vcs_package_store_result got = vcs_package_store_get_chunk_at_into(
+            store, package_root, file_index, i, bytes + offset,
+            len - offset, &chunk_len);
+        if (got != VCS_PACKAGE_STORE_OK) {
             free(bytes);
-            LOG_RETURN(got == VCS_PACKAGE_STORE_OK
-                           ? VCS_PACKAGE_STORE_ERR_CHUNK_HASH : got,
+            LOG_RETURN(got,
                        CONTENT_LOG, "content file chunk %u refused", i);
         }
-        memcpy(bytes + offset, chunk, chunk_len);
         offset += chunk_len;
-        free(chunk);
     }
     if (offset != len) {
         free(bytes);

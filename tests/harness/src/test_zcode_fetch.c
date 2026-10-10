@@ -1220,6 +1220,21 @@ static bool zf_fastobj_read_pair(const char *cache_dir,
 
 /* ── the fastobj cases ──────────────────────────────────────────────── */
 
+static bool zf_admit_verified_counts(struct zf_cmd *c)
+{
+    (void)vcs_package_store_read_stats_for_test(true);
+    zcl_native_handle_zcode_package_fastobj_admit(&c->request, &c->reply);
+    struct vcs_package_store_read_stats reads =
+        vcs_package_store_read_stats_for_test(false);
+    printf("  fastobj native admit reads: into=%llu allocated=%llu verified_bytes=%llu\n",
+           (unsigned long long)reads.into_reads,
+           (unsigned long long)reads.allocated_reads,
+           (unsigned long long)reads.verified_bytes);
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+           reads.into_reads == 2 && reads.allocated_reads == 0 &&
+           reads.verified_bytes > 0;
+}
+
 static int zf_t_fastobj_export_admit(void)
 {
     int failures = 0;
@@ -1288,7 +1303,7 @@ static int zf_t_fastobj_export_admit(void)
         zf_cmd_init(&c, dd);
         (void)json_push_kv_str(&c.input, "package_root", root_copy);
         (void)json_push_kv_str(&c.input, "cache_dir", cache2);
-        zcl_native_handle_zcode_package_fastobj_admit(&c.request, &c.reply);
+        ASSERT(zf_admit_verified_counts(&c));
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT_EQ(json_get_int(json_get(&c.reply.data, "entries")), 1);
         ASSERT_EQ(json_get_int(json_get(&c.reply.data, "object_bytes")),

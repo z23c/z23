@@ -20,6 +20,7 @@
 #include "vcs/build_action.h"
 #include "vcs/build_execution_observation.h"
 #include "vcs/package_store.h"
+#include "platform/clock.h"
 
 #include "vcs/blob_store.h"
 #include "vcs/package_deps.h"
@@ -326,6 +327,120 @@ int t_store_blob(void)
 }
 
 /* ── action-bound work output carrier ─────────────────────────────── */
+static bool store_multichunk_verified_read(struct vcs_package_store *store,
+    const uint8_t root[32], const uint8_t action[32], const uint8_t *expected,
+    size_t len)
+{
+    uint8_t *out = NULL;
+    size_t out_len = 0;
+    (void)vcs_package_store_read_stats_for_test(true);
+    int64_t start = clock_now_monotonic_raw_us();
+    enum vcs_zcode_work_output_result result =
+        vcs_zcode_work_output_get(store, root, action, &out, &out_len);
+    int64_t elapsed = clock_now_monotonic_raw_us() - start;
+    struct vcs_package_store_read_stats reads =
+        vcs_package_store_read_stats_for_test(false);
+    printf("  verified multichunk read: bytes=%zu elapsed_us=%lld into=%llu allocated=%llu verified_bytes=%llu\n",
+           len, (long long)elapsed, (unsigned long long)reads.into_reads,
+           (unsigned long long)reads.allocated_reads,
+           (unsigned long long)reads.verified_bytes);
+    bool ok = result == VCS_ZCODE_WORK_OUTPUT_OK && out_len == len &&
+              memcmp(out, expected, len) == 0 && reads.into_reads == 3 &&
+              reads.allocated_reads == 0 && reads.verified_bytes == len + 32u;
+    free(out);
+    return ok;
+}
+
+static int store_into_read_controls(struct vcs_package_store *store,
+                                     const uint8_t root[32],
+                                     const uint8_t action[32])
+{
+    int failures = 0;
+    uint8_t out[32];
+    memset(out, 0xa5, sizeof(out));
+    size_t len = SIZE_MAX;
+    ZS_CHECK("verified into: short capacity refuses before writing",
+        vcs_package_store_get_chunk_at_into(store, root, 0, 0, out, 31,
+                                              &len) == VCS_PACKAGE_STORE_ERR_LIMIT &&
+        len == 0 && out[0] == 0xa5 && out[31] == 0xa5);
+    ZS_CHECK("verified into: exact capacity returns action bytes",
+        vcs_package_store_get_chunk_at_into(store, root, 0, 0, out, sizeof(out),
+                                              &len) == VCS_PACKAGE_STORE_OK &&
+        len == sizeof(out) && memcmp(out, action, sizeof(out)) == 0);
+    ZS_CHECK("verified into: invalid coordinate clears length",
+        vcs_package_store_get_chunk_at_into(store, root, 2, 0, out, sizeof(out),
+                                              &len) == VCS_PACKAGE_STORE_ERR_CHUNK_COORD &&
+        len == 0);
+    ZS_CHECK("verified into: null destination clears length",
+        vcs_package_store_get_chunk_at_into(store, root, 0, 0, NULL, 0,
+                                              &len) == VCS_PACKAGE_STORE_ERR_NULL &&
+        len == 0);
+    return failures;
+}
+
+static int store_into_corrupt_control(struct vcs_package_store *store,
+    const char *dd, const uint8_t root[32], const uint8_t action[32])
+{
+    int failures = 0;
+    uint8_t hash[32], tampered[32], out[32];
+    if (!vcs_package_chunk_hash(action, 32, hash)) {
+        ZS_CHECK("verified into: corruption fixture hash", false);
+        return failures;
+    }
+    char hex[65], suffix[160], path[1400];
+    zs_hex32(hash, hex);
+    snprintf(suffix, sizeof(suffix), "cas/sha3/%.2s/%s", hex, hex);
+    zs_store_path(path, sizeof(path), dd, suffix);
+    memcpy(tampered, action, sizeof(tampered));
+    tampered[7] ^= 0xff;
+    FILE *file = fopen(path, "wb");
+    bool wrote = file && fwrite(tampered, 1, sizeof(tampered), file) ==
+                            sizeof(tampered);
+    if (file) wrote = fclose(file) == 0 && wrote;
+    ZS_CHECK("verified into: corrupted CAS fixture writes", wrote);
+    if (!wrote) return failures;
+    size_t len = SIZE_MAX;
+    ZS_CHECK("verified into: hash refusal publishes no length",
+        vcs_package_store_get_chunk_at_into(store, root, 0, 0, out, sizeof(out),
+            &len) == VCS_PACKAGE_STORE_ERR_CHUNK_HASH && len == 0);
+    ZS_CHECK("verified into: quarantined chunk remains missing",
+        vcs_package_store_get_chunk_at_into(store, root, 0, 0, out, sizeof(out),
+            &len) == VCS_PACKAGE_STORE_ERR_CHUNK_MISSING && len == 0);
+    return failures;
+}
+
+static int store_into_oversized_final_control(struct vcs_package_store *store,
+    const char *dd, const uint8_t root[32], const uint8_t action[32],
+    const uint8_t *bytes)
+{
+    int failures = 0;
+    uint8_t hash[32], out_chunk[32];
+    if (!vcs_package_chunk_hash(bytes + VCS_PACKAGE_CHUNK_BYTES, 17, hash)) {
+        ZS_CHECK("verified content: final chunk fixture hash", false);
+        return failures;
+    }
+    char hex[65], suffix[160], path[1400];
+    zs_hex32(hash, hex);
+    snprintf(suffix, sizeof(suffix), "cas/sha3/%.2s/%s", hex, hex);
+    zs_store_path(path, sizeof(path), dd, suffix);
+    FILE *file = fopen(path, "wb");
+    bool wrote = file && fwrite(action, 1, 32, file) == 32;
+    if (file) wrote = fclose(file) == 0 && wrote;
+    ZS_CHECK("verified content: oversized final chunk writes", wrote);
+    if (!wrote) return failures;
+    uint8_t *out = NULL;
+    size_t len = SIZE_MAX;
+    ZS_CHECK("verified content: oversized final chunk refuses atomically",
+        vcs_zcode_work_output_get(store, root, action, &out, &len) ==
+            VCS_ZCODE_WORK_OUTPUT_CORRUPT && out == NULL && len == 0);
+    free(out);
+    ZS_CHECK("verified content: oversized final chunk is quarantined",
+        vcs_package_store_get_chunk_at_into(store, root, 1, 1, out_chunk,
+            sizeof(out_chunk), &len) == VCS_PACKAGE_STORE_ERR_CHUNK_MISSING &&
+        len == 0);
+    return failures;
+}
+
 int t_store_work_output(void)
 {
     int failures = 0;
@@ -357,6 +472,9 @@ int t_store_work_output(void)
                  s, root_a, action_a, &out, &out_len) ==
                  VCS_ZCODE_WORK_OUTPUT_OK && out_len == bytes_len &&
              memcmp(out, bytes, bytes_len) == 0);
+    ZS_CHECK("work output: multichunk reconstruction uses verified destination reads",
+             store_multichunk_verified_read(s, root_a, action_a, bytes, bytes_len));
+    failures += store_into_read_controls(s, root_a, action_a);
     free(out); out = NULL; out_len = 0;
     ZS_CHECK("work output: wrong action fails closed",
              vcs_zcode_work_output_get(
@@ -375,6 +493,8 @@ int t_store_work_output(void)
              vcs_zcode_work_output_put(
                  s, action_a, bytes, 0, root_b) ==
                  VCS_ZCODE_WORK_OUTPUT_EMPTY);
+    failures += store_into_oversized_final_control(s, dd, root_a, action_a, bytes);
+    failures += store_into_corrupt_control(s, dd, root_a, action_a);
     free(bytes);
     vcs_package_store_close(s);
     test_rm_rf_recursive(dd);
