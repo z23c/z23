@@ -702,6 +702,7 @@ int test_service_state(void);
 int test_service_state_driver(void);
 int test_clock(void);
 int test_time_authority(void);
+int test_time_select(void);
 int test_rng(void);
 int test_seed_tape(void);
 int test_postmortem(void);

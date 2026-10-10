@@ -114,6 +114,7 @@ AGENT_IMPACT_RULE("engine/modules/health/src/heartbeat.c|engine/modules/health/i
  * heartbeat sweeper tick (covered by the rule above) and consumed as an
  * additional signal by clock_skew_reconcile. */
 AGENT_IMPACT_RULE("platform/modules/util/src/time_authority.c|platform/modules/util/include/util/time_authority.h|tests/harness/src/test_time_authority.c|platform/modules/platform/src/clock.c|platform/modules/platform/include/platform/clock.h|engine/conditions/src/clock_skew_reconcile.c|engine/conditions/include/conditions/clock_skew_reconcile.h|tests/harness/src/test_sticky_conditions.c", "time_authority sticky_conditions condition_engine supervisor make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/util/src/time_select.c|platform/modules/util/include/util/time_select.h|tests/harness/src/test_time_select.c", "time_select make_lint_gates")
 /* Phase E4: per-reducer-stage Prometheus telemetry. stage_metrics.c/h has
  * no app/jobs visibility (lib/ layering); its data arrives via the
  * external-gauges seam filled in engine/composition/src/boot_node_utilities.c (already
