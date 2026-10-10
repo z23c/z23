@@ -1586,6 +1586,16 @@ production action, irreconcilable authority ambiguity, a missing human product
 decision, an assertion that would need weakening, or genuine completion of the
 mission. Otherwise continue through the ordered queue.
 
+### Briefing a Haiku implementer
+
+The shared agent `z23-unit-haiku` in [`../.claude/agents/`](../.claude/agents/z23-unit-haiku.md)
+takes well-specified work: a C23 patch with a named focused test, a small port
+from shell to C23, a test written from a spec, a doc or measurement update, a
+mechanical rename, or a gate fix. Give it no open design questions; use a
+stronger implementer for those. Keep each brief short. Start every brief with
+the same standing-rules text, so the prompt cache can reuse that shared start.
+Put the worktree, the contract and the gates after it.
+
 ## Measuring the MVP experiment
 
 MVP means minimum viable product. The 144-loop plan of record is also an
