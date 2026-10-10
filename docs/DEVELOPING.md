@@ -717,6 +717,16 @@ or unknown selector. `lint-fast` is the inner lint's fast gate subset.
 Never run `test_zcl` directly. Do not run full `make lint` on an ordinary
 slice.
 
+`make -j28 agent-verify ONLY=<group,group>` is the one verification trip for an
+edit. It runs `check-cyclomatic-complexity`, `t-fast-exact` on the named groups,
+`docs-capability-inventory` and `lint-fast`, each in its own sub-make with a log
+under `build/scratch/`. It does not stop at the first failure: it prints one
+`agent-verify: <step> rc=<n>` line per step, then `agent-verify: OK` or
+`agent-verify: FAILED (...)`, and writes the same lines to
+`build/scratch/agent-verify.rc`. Run it through devbuild as one job, with
+`devbuild --wait --class normal make -j28 agent-verify ONLY=<group,group>`. Full
+`make lint` and the wide group list remain the landing step's job.
+
 A change under `tools/command/*.c`, `engine/composition/**/*.def`,
 `contexts/**/*.def`, or a new `.c` file routinely passes `lint-fast` and then
 fails only in the full `make lint`, because the gates that catch that class of

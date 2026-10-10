@@ -15495,6 +15495,41 @@ pr-check:
 	@tools/scripts/first_build_timing.sh --self-test
 	@echo "══ pr-check: passed ══"
 
+# agent-verify: the one verification trip for an edit. It runs the four checks
+# every edit must pass, each as its own sub-make with its own log, and keeps
+# going after a failure so one trip shows every red step. Full lint and the
+# wide group list stay with the landing step.
+#   make -j28 agent-verify ONLY=<group,group>
+# Logs: build/scratch/agent-verify.<step>.log; verdict lines: agent-verify.rc.
+.PHONY: agent-verify
+agent-verify:
+	@if [ -z '$(strip $(ONLY))' ]; then \
+	    echo "agent-verify: ONLY is empty; usage: make -j28 agent-verify ONLY=<group,group>"; \
+	    exit 2; \
+	 fi; \
+	 mkdir -p build/scratch && : > build/scratch/agent-verify.rc || exit 1; \
+	 failed=""; \
+	 av_step() { \
+	    step="$$1"; shift; \
+	    log="build/scratch/agent-verify.$$step.log"; \
+	    $(MAKE) --no-print-directory "$$step" "$$@" >"$$log" 2>&1; rc=$$?; \
+	    { echo "agent-verify: $$step rc=$$rc"; \
+	      if [ "$$step" = t-fast-exact ]; then grep 'SUITE VERDICT' "$$log" | tail -1; fi; \
+	      if [ $$rc -ne 0 ]; then grep -E '^FAIL|FAIL at|error:|not a valid|unknown exact group|\*\*\*' "$$log" | head -5 | cut -c1-200; fi; \
+	    } | tee -a build/scratch/agent-verify.rc; \
+	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
+	 }; \
+	 av_step check-cyclomatic-complexity; \
+	 av_step t-fast-exact 'ONLY=$(ONLY)'; \
+	 av_step docs-capability-inventory; \
+	 av_step lint-fast; \
+	 if [ -z "$$failed" ]; then \
+	    echo "agent-verify: OK" | tee -a build/scratch/agent-verify.rc; \
+	 else \
+	    echo "agent-verify: FAILED ($$(echo $$failed))" | tee -a build/scratch/agent-verify.rc; \
+	    exit 1; \
+	 fi
+
 help-selftest:
 	@tools/scripts/make_help.sh --self-test
 

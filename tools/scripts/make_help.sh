@@ -38,6 +38,7 @@ loop	syntax-check	whole-tree no-link syntax pass in one compiler invocation
 loop	dev-bin	non-LTO local node binary at build/bin/zclassic23-dev
 loop	t-fast	one test group: make t-fast ONLY=<group>
 loop	lint-fast	the highest-signal subset of the lint gates
+loop	agent-verify	one trip for an edit: make -j28 agent-verify ONLY=<group,group>
 gate	lint-ready	hooks, generated docs, untracked-file check before lint; never commits
 gate	lint	the full lint umbrella — every gate, run in parallel
 gate	test-parallel	every test group, each in its own process
