@@ -6,12 +6,15 @@
  * linkage, TLS stack, enable/disable, and edge cases. */
 
 #include "test/test_core.h"
-#include "encoding/utilstrencodings.h"
 #include "util/trace.h"
+#include "util/spawn.h"
 
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 /* ── 1. Basic span creation ─────────────────────────────────── */
 
@@ -262,13 +265,18 @@ static int test_reset_thread(void)
 
 /* ── Entry point ────────────────────────────────────────────── */
 
-static bool otlp_id_is(const char *body, const char *hex, size_t raw_len)
+/* The id appears under `key` exactly as the typed literal `id` (the test
+ * pins the span's ids to literals; it never compares the writer to the
+ * struct value it was fed).  OTLP/JSON carries hex, not base64. */
+#define OTLP_T_ID "0123456789abcdef0123456789abcdef"
+#define OTLP_P_ID "fedcba9876543210"
+#define OTLP_C_ID "0011223344556677"
+
+static bool otlp_field_is(const char *body, const char *key, const char *id)
 {
-    unsigned char raw[16];
-    char expect[40];
-    if (ParseHex(hex, raw, raw_len) != raw_len) return false;
-    if (EncodeBase64(raw, raw_len, expect, sizeof(expect)) == 0) return false;
-    return strstr(body, expect) != NULL;
+    char want[96];
+    snprintf(want, sizeof(want), "\"%s\":\"%s\"", key, id);
+    return strstr(body, want) != NULL;
 }
 
 static int test_otlp_json(void)
@@ -286,17 +294,26 @@ static int test_otlp_json(void)
         struct trace_span *child = trace_start("say\"hi");
         ASSERT(parent != NULL);
         ASSERT(child != NULL);
+        /* Pin the ids to typed literals so the expectations below are
+         * independent of the generator. */
+        snprintf(parent->trace_id, sizeof(parent->trace_id), "%s", OTLP_T_ID);
+        snprintf(parent->span_id, sizeof(parent->span_id), "%s", OTLP_P_ID);
+        snprintf(child->trace_id, sizeof(child->trace_id), "%s", OTLP_T_ID);
+        snprintf(child->span_id, sizeof(child->span_id), "%s", OTLP_C_ID);
+        snprintf(child->parent_span_id, sizeof(child->parent_span_id), "%s",
+                 OTLP_P_ID);
         trace_attr_str(child, "command", "z23 status");
         trace_attr_int(child, "height", 123456);
         trace_set_status(child, TRACE_STATUS_ERROR);
         end_us = child->start_wall_us + 2500;
         ASSERT(trace_format_otlp(child, end_us, body, sizeof(body)));
         ASSERT(strstr(body, "\"resourceSpans\"") != NULL);
-        ASSERT(otlp_id_is(body, child->trace_id, 16));
-        ASSERT(otlp_id_is(body, child->span_id, 8));
-        ASSERT(otlp_id_is(body, parent->span_id, 8));
+        ASSERT(otlp_field_is(body, "traceId", OTLP_T_ID));
+        ASSERT(otlp_field_is(body, "spanId", OTLP_C_ID));
+        ASSERT(otlp_field_is(body, "parentSpanId", OTLP_P_ID));
         ASSERT(strstr(body, "\"name\":\"say\\\"hi\"") != NULL);
-        ASSERT(strstr(body, "\"code\":\"STATUS_CODE_ERROR\"") != NULL);
+        /* OTLP JSON enums are integers (spec, "JSON Protobuf Encoding"): ERROR is 2. */
+        ASSERT(strstr(body, "\"status\":{\"code\":2}") != NULL);
         ASSERT(strstr(body, "\"stringValue\":\"z23 status\"") != NULL);
         ASSERT(strstr(body, "\"intValue\":\"123456\"") != NULL);
         snprintf(start_nano, sizeof(start_nano),
@@ -339,8 +356,8 @@ static int test_otlp_log(void)
             "\"body\":{\"stringValue\":\"bad block\"},\"attributes\":["
             "{\"key\":\"height\",\"value\":{\"stringValue\":\"42\"}},"
             "{\"key\":\"peer\",\"value\":{\"stringValue\":\"\"}}],"
-            "\"traceId\":\"AAECAwQFBgcICQoLDA0ODw==\","
-            "\"spanId\":\"EBESExQVFhc=\"" LOG_TAIL;
+            "\"traceId\":\"000102030405060708090a0b0c0d0e0f\","
+            "\"spanId\":\"1011121314151617\"" LOG_TAIL;
         static const char exp3[] =
             LOG_HEAD "s\\\"v" LOG_MID "5000\",\"severityNumber\":21,"
             "\"severityText\":\"FATAL\",\"body\":{\"stringValue\":"
@@ -350,7 +367,7 @@ static int test_otlp_log(void)
         static const char exp4[] =
             LOG_HEAD "z23" LOG_MID "7000\",\"severityNumber\":1,"
             "\"severityText\":\"TRACE\",\"body\":{\"stringValue\":\"\"},"
-            "\"attributes\":[],\"spanId\":\"EBESExQVFhc=\"" LOG_TAIL;
+            "\"attributes\":[],\"spanId\":\"1011121314151617\"" LOG_TAIL;
         char out[2048];
         struct trace_log_record r = {
             .wall_us = 1, .severity = TRACE_LOG_INFO, .body = "hi",
@@ -586,8 +603,8 @@ static int test_otlp_log_held(void)
                  LOG_HEAD "z23" LOG_MID "1000\",\"severityNumber\":9,"
                  "\"severityText\":\"INFO\",\"body\":{\"stringValue\":"
                  "\"b\"},\"attributes\":[],"
-                 "\"traceId\":\"AAECAwQFBgcICQoLDA0ODw==\","
-                 "\"spanId\":\"q83vASNFZ4k=\"" LOG_TAIL);
+                 "\"traceId\":\"000102030405060708090a0b0c0d0e0f\","
+                 "\"spanId\":\"abcdef0123456789\"" LOG_TAIL);
         ASSERT(trace_format_otlp_log(&t, out, sizeof(out)));
         ASSERT(strcmp(out, exp) == 0);
         t.trace_id = "000102030405060708090a0B0c0D0e0F";
@@ -598,7 +615,7 @@ static int test_otlp_log_held(void)
         t = base; t.trace_id = "000102030405060708090a0b0c0d0e0f";
         ASSERT(trace_format_otlp_log(&t, out, sizeof(out)));
         ASSERT(strstr(out, "\"attributes\":[],\"traceId\":"
-                           "\"AAECAwQFBgcICQoLDA0ODw==\"" LOG_TAIL) != NULL);
+                           "\"000102030405060708090a0b0c0d0e0f\"" LOG_TAIL) != NULL);
         ASSERT(strstr(out, "spanId") == NULL);
         /* Prefix and extra-length ids refuse. */
         t = base; t.span_id = "0x10111213141516";
@@ -694,6 +711,275 @@ static int test_otlp_log_held(void)
     return failures;
 }
 
+/* ── OTLP/JSON identifiers are hex, not base64 ──────────────────
+ * Expected strings below are typed from the OpenTelemetry Protocol
+ * specification, section "JSON Protobuf Encoding": traceId and spanId are
+ * case-insensitive hex strings (16 bytes = 32 hex digits, 8 bytes = 16),
+ * with the specification's own example
+ *   {"traceId": "5B8EFFF798038103D269B633813FC60C",
+ *    "spanId": "EEE19B7EC3C1B174"}
+ * Our writers accept either case and emit lowercase. */
+
+#define SPEC_TRACE_ID "5B8EFFF798038103D269B633813FC60C"
+#define SPEC_SPAN_ID  "EEE19B7EC3C1B174"
+
+static const char *const g_bad_trace_ids[] = {
+    "5b8efff798038103d269b633813fc60",     /* 31 digits */
+    "5b8efff798038103d269b633813fc60c0",   /* 33 digits */
+    "5b8efff798038103d269b633813fc6zz",    /* 32 chars, non-hex */
+    "AAECAwQFBgcICQoLDA0ODw==",            /* old base64 form, 24 chars */
+    "AAECAwQFBgcICQoLDA0ODwAAAAAAAAAA",    /* base64-looking, 32 chars */
+    "00000000000000000000000000000000",    /* all-zero trace id */
+};
+
+static const char *const g_bad_span_ids[] = {
+    "eee19b7ec3c1b17",                     /* 15 digits */
+    "eee19b7ec3c1b1740",                   /* 17 digits */
+    "eee19b7ec3c1b17g",                    /* 16 chars, non-hex */
+    "EBESExQVFhc=",                        /* old base64 form, 12 chars */
+    "EBESExQVFhcAAAA=",                    /* base64-looking, 16 chars */
+    "0000000000000000",                    /* all-zero span id */
+};
+
+#define N_BAD(a) (sizeof(a) / sizeof((a)[0]))
+
+static int test_otlp_log_hex_spec(void)
+{
+    int failures = 0;
+    TEST("trace: OTLP log ids are lowercase hex (spec example vector)") {
+        static const char expect[] =
+            LOG_HEAD "z23" LOG_MID "1000\",\"severityNumber\":9,"
+            "\"severityText\":\"INFO\",\"body\":{\"stringValue\":\"hi\"},"
+            "\"attributes\":[],"
+            "\"traceId\":\"5b8efff798038103d269b633813fc60c\","
+            "\"spanId\":\"eee19b7ec3c1b174\"" LOG_TAIL;
+        struct trace_log_record r = {
+            .wall_us = 1, .severity = TRACE_LOG_INFO, .body = "hi",
+            .service = "z23",
+            .trace_id = SPEC_TRACE_ID, .span_id = SPEC_SPAN_ID,
+        };
+        char out[2048];
+        ASSERT(trace_format_otlp_log(&r, out, sizeof(out)));
+        ASSERT(strcmp(out, expect) == 0);
+        r.trace_id = "5b8efff798038103d269b633813fc60c";
+        r.span_id = "eee19b7ec3c1b174";
+        ASSERT(trace_format_otlp_log(&r, out, sizeof(out)));
+        ASSERT(strcmp(out, expect) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_otlp_log_hex_refusals(void)
+{
+    int failures = 0;
+    TEST("trace: OTLP log refuses wrong-length, non-hex and base64 ids") {
+        char out[2048];
+        struct trace_log_record r = {
+            .wall_us = 1, .severity = TRACE_LOG_INFO, .body = "hi",
+            .service = "z23",
+        };
+        for (size_t i = 0; i < N_BAD(g_bad_trace_ids); i++) {
+            r.trace_id = g_bad_trace_ids[i];
+            r.span_id = NULL;
+            memset(out, 0x5a, sizeof(out));
+            ASSERT(!trace_format_otlp_log(&r, out, sizeof(out)));
+            ASSERT(out[0] == '\0');
+        }
+        for (size_t i = 0; i < N_BAD(g_bad_span_ids); i++) {
+            r.trace_id = NULL;
+            r.span_id = g_bad_span_ids[i];
+            memset(out, 0x5a, sizeof(out));
+            ASSERT(!trace_format_otlp_log(&r, out, sizeof(out)));
+            ASSERT(out[0] == '\0');
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void span_with_ids(struct trace_span *s, const char *trace,
+                          const char *span, const char *parent)
+{
+    memset(s, 0, sizeof(*s));
+    snprintf(s->trace_id, sizeof(s->trace_id), "%s", trace);
+    snprintf(s->span_id, sizeof(s->span_id), "%s", span);
+    snprintf(s->parent_span_id, sizeof(s->parent_span_id), "%s", parent);
+    snprintf(s->operation, sizeof(s->operation), "op");
+    s->start_wall_us = 1;
+}
+
+static int test_otlp_span_hex_spec(void)
+{
+    int failures = 0;
+    TEST("trace: OTLP span ids are lowercase hex (spec example vector)") {
+        static const char root[] =
+            "{\"resourceSpans\":[{\"scopeSpans\":[{\"scope\":{\"name\":"
+            "\"z23\"},\"spans\":[{\"traceId\":"
+            "\"5b8efff798038103d269b633813fc60c\",\"spanId\":"
+            "\"eee19b7ec3c1b174\",\"name\":\"op\",\"startTimeUnixNano\":"
+            "\"1000\",\"endTimeUnixNano\":\"3000\",\"attributes\":[],"
+            "\"status\":{\"code\":0}}]}]}]}";
+        static const char child[] =
+            "{\"resourceSpans\":[{\"scopeSpans\":[{\"scope\":{\"name\":"
+            "\"z23\"},\"spans\":[{\"traceId\":"
+            "\"5b8efff798038103d269b633813fc60c\",\"spanId\":"
+            "\"1011121314151617\",\"parentSpanId\":\"eee19b7ec3c1b174\","
+            "\"name\":\"op\",\"startTimeUnixNano\":\"1000\","
+            "\"endTimeUnixNano\":\"3000\",\"attributes\":[],"
+            "\"status\":{\"code\":0}}]}]}]}";
+        struct trace_span s;
+        char out[2048];
+        span_with_ids(&s, SPEC_TRACE_ID, SPEC_SPAN_ID, "");
+        ASSERT(trace_format_otlp(&s, 3, out, sizeof(out)));
+        ASSERT(strcmp(out, root) == 0);
+        span_with_ids(&s, SPEC_TRACE_ID, "1011121314151617", SPEC_SPAN_ID);
+        ASSERT(trace_format_otlp(&s, 3, out, sizeof(out)));
+        ASSERT(strcmp(out, child) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The span writer takes ids by fixed-size array: struct trace_span holds at
+ * most 32 / 16 id characters, so an over-long id is truncated into the array
+ * before the writer sees it and cannot be presented to it.  Those
+ * unrepresentable rows are exercised on the log writer (which takes the ids
+ * by pointer) above, not here.  Every row below reaches the span writer. */
+static bool span_refused(const char *trace, const char *span,
+                         const char *parent)
+{
+    struct trace_span s;
+    char out[2048];
+    span_with_ids(&s, trace, span, parent);
+    return !trace_format_otlp(&s, 3, out, sizeof(out));
+}
+
+static const char *const g_span_bad_traces[] = {
+    "",                                    /* empty */
+    "5b8efff798038103d269b633813fc60",     /* 31 digits */
+    "5b8efff798038103d269b633813fc6zz",    /* 32 chars, non-hex */
+    "AAECAwQFBgcICQoLDA0ODw==",            /* old base64 form, 24 chars */
+    "AAECAwQFBgcICQoLDA0ODwAAAAAAAAAA",    /* base64-looking, 32 chars */
+    "00000000000000000000000000000000",    /* all-zero trace id */
+};
+
+static const char *const g_span_bad_ids[] = {
+    "",                                    /* empty */
+    "eee19b7ec3c1b17",                     /* 15 digits */
+    "eee19b7ec3c1b17g",                    /* 16 chars, one non-hex */
+    "EBESExQVFhc=",                        /* old base64 form, 12 chars */
+    "EBESExQVFhcAAAA=",                    /* base64-looking, 16 chars */
+    "0000000000000000",                    /* all-zero span id, and (below) all-zero parent id */
+};
+
+static int test_otlp_span_hex_refusals(void)
+{
+    int failures = 0;
+    TEST("trace: OTLP span refuses empty, short, non-hex and base64 ids") {
+        char out[2048];
+        struct trace_span s;
+        for (size_t i = 0; i < N_BAD(g_span_bad_traces); i++)
+            ASSERT(span_refused(g_span_bad_traces[i], "eee19b7ec3c1b174", ""));
+        for (size_t i = 0; i < N_BAD(g_span_bad_ids); i++) {
+            ASSERT(span_refused(SPEC_TRACE_ID, g_span_bad_ids[i], ""));
+            /* A parent id that is present must be valid; the empty row
+             * is the root-span case, accepted below, so start at 1. */
+            if (g_span_bad_ids[i][0] != '\0')
+                ASSERT(span_refused(SPEC_TRACE_ID, "eee19b7ec3c1b174",
+                                    g_span_bad_ids[i]));
+        }
+        ASSERT(!span_refused(SPEC_TRACE_ID, SPEC_SPAN_ID, ""));
+        /* Empty parent id: accepted, and parentSpanId is omitted. */
+        span_with_ids(&s, SPEC_TRACE_ID, SPEC_SPAN_ID, "");
+        ASSERT(trace_format_otlp(&s, 3, out, sizeof(out)));
+        ASSERT(strstr(out, "parentSpanId") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#ifndef _WIN32
+/* ── ZCL_OTLP_LOGS at process start ─────────────────────────── */
+
+/* This test exists to exercise the process-start constructor in trace.c:
+ * the mirror is installed before main() only when ZCL_OTLP_LOGS is "1".  A
+ * unit test in this process cannot see that (the switch is resolved once
+ * and the hook is reset by the test helper), so it execs a probe that links
+ * the real trace.c and log_json.c, emits one log_jsonf event
+ * (otlp_startup_probe) and exits 0.  log_jsonf writes its line through
+ * LogPrintStr, which writes to stderr, so stderr is the stream captured.
+ * The environment is built by env(1) (no shell, this process's environment
+ * is never modified): "-u" removes the variable, "NAME=value" sets it. */
+#define OTLP_PROBE_BIN "build/fixtures/otlp_startup_probe"
+#define OTLP_PROBE_DEADLINE_MS 10000
+
+/* Count lines of `text` containing `needle`. */
+static int otlp_count_lines(const char *text, const char *needle)
+{
+    int count = 0;
+    const char *line = text;
+    while (*line != '\0') {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+        char copy[4096];
+        if (len >= sizeof(copy)) len = sizeof(copy) - 1;
+        memcpy(copy, line, len);
+        copy[len] = '\0';
+        if (strstr(copy, needle) != NULL) count++;
+        if (!nl) break;
+        line = nl + 1;
+    }
+    return count;
+}
+
+/* Run the probe with the switch unset (setting NULL) or set to `setting`;
+ * false when the probe is missing, cannot be run, times out or does not
+ * exit 0.  `out` receives the merged stdout and stderr. */
+static bool otlp_run_probe(const char *setting, char *out, size_t cap)
+{
+    bool timed_out = false;
+    const char *unset_argv[] = { "/usr/bin/env", "-u", "ZCL_OTLP_LOGS",
+                                 OTLP_PROBE_BIN, NULL };
+    char assign[32];
+    const char *set_argv[] = { "/usr/bin/env", assign, OTLP_PROBE_BIN, NULL };
+    int rc;
+    if (access(OTLP_PROBE_BIN, X_OK) != 0) return false;
+    if (setting) snprintf(assign, sizeof(assign), "ZCL_OTLP_LOGS=%s", setting);
+    rc = zcl_spawn_capture_merged_observed(setting ? set_argv : unset_argv,
+                                           out, cap, OTLP_PROBE_DEADLINE_MS,
+                                           &timed_out);
+    return rc == 0 && !timed_out;
+}
+
+static int test_otlp_logs_startup(void)
+{
+    int failures = 0;
+    TEST("trace: ZCL_OTLP_LOGS gates the mirror at process start") {
+        static const char *const settings[] = { NULL, "0", "1" };
+        for (size_t i = 0; i < 3; i++) {
+            char out[8192];
+            int want_logs = settings[i] && strcmp(settings[i], "1") == 0;
+            ASSERT(otlp_run_probe(settings[i], out, sizeof(out)));
+            ASSERT(otlp_count_lines(out, "\"event\":\"otlp_startup_probe\"")
+                   == 1);
+            ASSERT(otlp_count_lines(out, "\"event\":\"otlp_logs\"")
+                   == want_logs);
+            /* The hook is in place before main() only when the switch is
+             * on; the log call itself is not what installed it. */
+            ASSERT(otlp_count_lines(out, want_logs ? "mirror_installed=1"
+                                                   : "mirror_installed=0")
+                   == 1);
+            if (want_logs)
+                ASSERT(otlp_count_lines(out,
+                    "\"body\":{\"stringValue\":\"otlp_startup_probe\"}") == 1);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_trace(void);
 
 int test_trace(void)
@@ -702,6 +988,13 @@ int test_trace(void)
     failures += test_otlp_log();
     failures += test_otlp_log_held();
     failures += test_otlp_json();
+    failures += test_otlp_log_hex_spec();
+    failures += test_otlp_log_hex_refusals();
+    failures += test_otlp_span_hex_spec();
+    failures += test_otlp_span_hex_refusals();
+#ifndef _WIN32
+    failures += test_otlp_logs_startup();
+#endif
     failures += test_span_creation();
     failures += test_attributes();
     failures += test_attr_overflow();

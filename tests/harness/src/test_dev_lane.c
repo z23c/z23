@@ -120,6 +120,7 @@ static const char *const dln_check_rels[] = {
     "build/hotswap/zcl_rollback_fixture_b.so",
     "build/fixtures/rlc_child_v1",
     "build/fixtures/rlc_child_broken",
+    "build/fixtures/otlp_startup_probe",
     NULL,
 };
 
@@ -241,7 +242,7 @@ int test_dev_lane(void)
         ASSERT(dln_bool(&reply, "ok"));
         ASSERT_STR_EQ(dln_str(&reply, "path"), lane);
         ASSERT(strlen(dln_str(&reply, "head")) == 40);
-        ASSERT(dln_int(&reply, "dependencies") == 17);
+        ASSERT(dln_int(&reply, "dependencies") == 18);
         ASSERT(dln_int(&reply, "libtor_links") == 1);
         ASSERT(dln_bool(&reply, "hooks_installed"));
 
@@ -281,7 +282,7 @@ int test_dev_lane(void)
         char parent[512], root[600], lane[600], check[800];
         struct json_value input;
         struct zcl_command_reply reply;
-        struct stat before[17], after;
+        struct stat before[18], after;
         size_t i;
 
         test_make_tmpdir(parent, sizeof(parent), "dev_lane", "again");
@@ -296,7 +297,7 @@ int test_dev_lane(void)
         (void)json_push_kv_str(&input, "base", "HEAD");
         dln_call(root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
-        ASSERT(dln_int(&reply, "dependencies") == 17);
+        ASSERT(dln_int(&reply, "dependencies") == 18);
         zcl_command_reply_free(&reply);
 
         for (i = 0; dln_check_rels[i]; i++) {

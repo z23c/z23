@@ -83,6 +83,10 @@ typedef void (*log_json_mirror_fn)(enum log_json_level level,
                                    const char *event, const char *fields);
 void log_json_set_mirror(log_json_mirror_fn fn);
 
+/* Diagnostic, read-only: true when a mirror hook is currently installed.
+ * Lets a test process observe the start-up install decision directly. */
+bool log_json_mirror_installed(void);
+
 /* JSON-escape `in` into `out`.  Writes at most cap-1 bytes plus a NUL.
  * Returns the number of bytes written (excluding the NUL). */
 size_t log_json_escape(char *out, size_t cap, const char *in);

@@ -6506,7 +6506,9 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
         "build/hotswap/zcl_rollback_fixture_%.so:\n"
         "\t@mkdir -p build/hotswap; printf '%s\\n' '$*' > $@\n"
         "build/fixtures/rlc_child_%:\n"
-        "\t@mkdir -p build/fixtures; printf '%s\\n' '$*' > $@\n";
+        "\t@mkdir -p build/fixtures; printf '%s\\n' '$*' > $@\n"
+        "build/fixtures/otlp_startup_probe:\n"
+        "\t@mkdir -p build/fixtures; printf '%s\\n' probe > $@\n";
     if (!ic_write(root, ".gitignore", "build/\n.cache/\n") ||
         !ic_write(root, "sample.c", "int value = 1;\n") ||
         !ic_write(root, "Makefile", makefile) ||
@@ -6545,6 +6547,7 @@ static bool ic_original_plan_recovers_fixtures(
         "build/hotswap/zcl_rollback_fixture_b.so",
         "build/fixtures/rlc_child_v1",
         "build/fixtures/rlc_child_broken",
+        "build/fixtures/otlp_startup_probe",
     };
     const size_t fixture_count = sizeof(fixtures) / sizeof(fixtures[0]);
     char path[4096], generation[4096], why[512];
@@ -8701,6 +8704,7 @@ static const char *const ic_gen_dep_files[] = {
 #if !defined(_WIN32)
     "build/fixtures/rlc_child_v1",
     "build/fixtures/rlc_child_broken",
+    "build/fixtures/otlp_startup_probe",
 #endif
     "build/bin/z23-lint",
     "build/bin/z23-fleet-observe",

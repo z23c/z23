@@ -164,20 +164,35 @@ void trace_set_status(struct trace_span *s, enum trace_status status)
     s->status = status;
 }
 
-static const char *trace_otlp_status(enum trace_status status)
+/* OTLP/JSON encodes enum fields as INTEGERS, not names (OpenTelemetry
+ * Protocol specification, "JSON Protobuf Encoding" section: enum values are
+ * sent as integers; receivers accept names too, senders must not emit
+ * them).  Status.StatusCode: UNSET 0, OK 1, ERROR 2. */
+static int trace_otlp_status(enum trace_status status)
 {
-    if (status == TRACE_STATUS_ERROR) return "STATUS_CODE_ERROR";
-    if (status == TRACE_STATUS_OK) return "STATUS_CODE_OK";
-    return "STATUS_CODE_UNSET";
+    if (status == TRACE_STATUS_ERROR) return 2;
+    if (status == TRACE_STATUS_OK) return 1;
+    return 0;
 }
 
-static bool trace_otlp_b64(const char *hex, size_t raw_len,
-                           char *out, size_t cap)
+/* OTLP/JSON carries trace and span ids as hex strings (OpenTelemetry
+ * Protocol specification, "JSON Protobuf Encoding"), not base64.  `id` must
+ * be exactly `want` hex digits of either case; out receives them lowercased
+ * plus a NUL, so cap must be at least want + 1.  Anything else is refused,
+ * including the all-zero id, which the OTLP trace model defines as invalid. */
+static bool trace_otlp_hex(const char *id, size_t want, char *out, size_t cap)
 {
-    unsigned char raw[16];
-    if (raw_len > sizeof(raw) || !hex) return false;
-    if (ParseHex(hex, raw, raw_len) != raw_len) return false;
-    return EncodeBase64(raw, raw_len, out, cap) > 0;
+    bool nonzero = false;
+    if (!id || !out || cap < want + 1 || strlen(id) != want) return false;
+    for (size_t i = 0; i < want; i++) {
+        char c = id[i];
+        if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        if (c != '0') nonzero = true;
+        out[i] = c;
+    }
+    out[want] = '\0';
+    return nonzero;
 }
 
 static bool trace_otlp_attr(const struct trace_attr *a, char *out, size_t cap)
@@ -218,20 +233,20 @@ static bool trace_otlp_attrs(const struct trace_span *s, char *out, size_t cap)
 bool trace_format_otlp(const struct trace_span *s, uint64_t end_wall_us,
                        char *out, size_t cap)
 {
-    char trace_b64[32], span_b64[24], parent_b64[24];
+    char trace_hex[33], span_hex[17], parent_hex[17];
     char name[TRACE_MAX_OP_LEN * 2];
     char attrs[4096];
     bool has_parent;
     uint64_t start_us, end_us;
     int n;
     if (!s || !out || cap < 64) return false;
-    if (!trace_otlp_b64(s->trace_id, 16, trace_b64, sizeof(trace_b64)))
+    if (!trace_otlp_hex(s->trace_id, 32, trace_hex, sizeof(trace_hex)))
         return false;
-    if (!trace_otlp_b64(s->span_id, 8, span_b64, sizeof(span_b64)))
+    if (!trace_otlp_hex(s->span_id, 16, span_hex, sizeof(span_hex)))
         return false;
     has_parent = s->parent_span_id[0] != '\0';
     if (has_parent &&
-        !trace_otlp_b64(s->parent_span_id, 8, parent_b64, sizeof(parent_b64)))
+        !trace_otlp_hex(s->parent_span_id, 16, parent_hex, sizeof(parent_hex)))
         return false;
     log_json_escape(name, sizeof(name), s->operation);
     if (!trace_otlp_attrs(s, attrs, sizeof(attrs))) return false;
@@ -244,8 +259,8 @@ bool trace_format_otlp(const struct trace_span *s, uint64_t end_wall_us,
                      "\"spanId\":\"%s\",\"parentSpanId\":\"%s\","
                      "\"name\":\"%s\",\"startTimeUnixNano\":\"%llu\","
                      "\"endTimeUnixNano\":\"%llu\",\"attributes\":[%s],"
-                     "\"status\":{\"code\":\"%s\"}}]}]}]}",
-                     trace_b64, span_b64, parent_b64, name,
+                     "\"status\":{\"code\":%d}}]}]}]}",
+                     trace_hex, span_hex, parent_hex, name,
                      (unsigned long long)(start_us * 1000ull),
                      (unsigned long long)(end_us * 1000ull),
                      attrs, trace_otlp_status(s->status));
@@ -256,8 +271,8 @@ bool trace_format_otlp(const struct trace_span *s, uint64_t end_wall_us,
                      "\"spanId\":\"%s\",\"name\":\"%s\","
                      "\"startTimeUnixNano\":\"%llu\","
                      "\"endTimeUnixNano\":\"%llu\",\"attributes\":[%s],"
-                     "\"status\":{\"code\":\"%s\"}}]}]}]}",
-                     trace_b64, span_b64, name,
+                     "\"status\":{\"code\":%d}}]}]}]}",
+                     trace_hex, span_hex, name,
                      (unsigned long long)(start_us * 1000ull),
                      (unsigned long long)(end_us * 1000ull),
                      attrs, trace_otlp_status(s->status));
@@ -331,18 +346,6 @@ static void trace_log_put_esc(struct trace_log_out *o, const char *s)
     }
 }
 
-static bool trace_log_hex_id(const char *id, size_t want)
-{
-    if (strlen(id) != want) return false;
-    for (size_t i = 0; i < want; i++) {
-        char c = id[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-              (c >= 'A' && c <= 'F')))
-            return false;
-    }
-    return true;
-}
-
 static const char *trace_log_severity_text(enum trace_log_severity sev)
 {
     if (sev == TRACE_LOG_TRACE) return "TRACE";
@@ -372,19 +375,17 @@ static bool trace_log_check_attrs(const struct trace_log_record *r)
     return true;
 }
 
-/* Fills trace_b64 / span_b64 when the matching id is present. */
+/* Fills trace_hex / span_hex when the matching id is present. */
 static bool trace_log_check_ids(const struct trace_log_record *r,
                                 bool has_trace, bool has_span,
-                                char *trace_b64, size_t trace_cap,
-                                char *span_b64, size_t span_cap)
+                                char *trace_hex, size_t trace_cap,
+                                char *span_hex, size_t span_cap)
 {
     if (has_trace &&
-        (!trace_log_hex_id(r->trace_id, 32) ||
-         !trace_otlp_b64(r->trace_id, 16, trace_b64, trace_cap)))
+        !trace_otlp_hex(r->trace_id, 32, trace_hex, trace_cap))
         return false;
     if (has_span &&
-        (!trace_log_hex_id(r->span_id, 16) ||
-         !trace_otlp_b64(r->span_id, 8, span_b64, span_cap)))
+        !trace_otlp_hex(r->span_id, 16, span_hex, span_cap))
         return false;
     return true;
 }
@@ -429,16 +430,16 @@ static void trace_log_write_attrs(struct trace_log_out *o,
 
 static void trace_log_write_tail(struct trace_log_out *o,
                                  bool has_trace, bool has_span,
-                                 const char *trace_b64, const char *span_b64)
+                                 const char *trace_hex, const char *span_hex)
 {
     if (has_trace) {
         trace_log_puts(o, ",\"traceId\":\"");
-        trace_log_puts(o, trace_b64);
+        trace_log_puts(o, trace_hex);
         trace_log_puts(o, "\"");
     }
     if (has_span) {
         trace_log_puts(o, ",\"spanId\":\"");
-        trace_log_puts(o, span_b64);
+        trace_log_puts(o, span_hex);
         trace_log_puts(o, "\"");
     }
     trace_log_puts(o, "}]}]}]}");
@@ -449,18 +450,18 @@ static void trace_log_write_tail(struct trace_log_out *o,
 static bool trace_log_build(const struct trace_log_record *r,
                             struct trace_log_out *o)
 {
-    char trace_b64[32] = "", span_b64[24] = "";
+    char trace_hex[33] = "", span_hex[17] = "";
     bool has_trace = r->trace_id && r->trace_id[0] != '\0';
     bool has_span = r->span_id && r->span_id[0] != '\0';
     if (!trace_log_check_fields(r)) return false;
     if (!trace_log_check_attrs(r)) return false;
     if (!trace_log_check_ids(r, has_trace, has_span,
-                             trace_b64, sizeof(trace_b64),
-                             span_b64, sizeof(span_b64)))
+                             trace_hex, sizeof(trace_hex),
+                             span_hex, sizeof(span_hex)))
         return false;
     trace_log_write_head(o, r);
     trace_log_write_attrs(o, r);
-    trace_log_write_tail(o, has_trace, has_span, trace_b64, span_b64);
+    trace_log_write_tail(o, has_trace, has_span, trace_hex, span_hex);
     return true;
 }
 
@@ -553,9 +554,10 @@ static void trace_log_mirror(enum log_json_level level, const char *event,
     (void)trace_log_emit(&r);
 }
 
-/* Installs the hook only when the switch is on, so with it off log_jsonf()
- * pays one pointer load and nothing else.  The flag is set after the hook
- * is in place. */
+/* Installs the hook only when the switch is on, so with it off no hook is
+ * installed: a log_jsonf() call loads one pointer and takes no call.  The
+ * flag is set after the hook is in place.  log_json_mirror_installed() lets
+ * a process observe whether the hook is in place. */
 static void trace_install_log_mirror(void)
 {
     if (g_mirror_installed) return;

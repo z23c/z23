@@ -5521,7 +5521,8 @@ static bool dp_generation_dependency(const char *root, const char *generation,
                                     : strncmp(dependency, "build/fixtures/",
                                               15) == 0
                                         ? "make build/fixtures/rlc_child_v1 "
-                                          "build/fixtures/rlc_child_broken"
+                                          "build/fixtures/rlc_child_broken "
+                                          "build/fixtures/otlp_startup_probe"
                                         : strncmp(dependency, "build/bin/",
                                                   10) == 0 &&
                                               make_target_ok
@@ -5655,6 +5656,9 @@ static bool dp_generation_dependencies(const char *root,
          * make that could build them inside the generation. */
         "build/fixtures/rlc_child_v1",
         "build/fixtures/rlc_child_broken",
+        /* test_trace execs this start-up probe by name (Makefile guards it
+         * on ZCL_HOST_WINDOWS only, like the pair above). */
+        "build/fixtures/otlp_startup_probe",
 #endif
     };
     if (!dp_generation_build_dirs(generation, why, why_len))
@@ -10387,6 +10391,7 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
          * the group's first check fails on absence, not on behaviour. */
         "build/fixtures/rlc_child_v1",
         "build/fixtures/rlc_child_broken",
+        "build/fixtures/otlp_startup_probe",
 #endif
         NULL,
     };

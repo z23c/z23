@@ -3868,6 +3868,50 @@ $(TEST_PARALLEL_REL_CANDIDATE): | $(RESIDENT_CONTRACT_FIXTURE_BINS)
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(RESIDENT_CONTRACT_FIXTURE_BINS)
 endif
 
+# test_trace's start-up gate (ZCL_OTLP_LOGS) execs this probe: one log_jsonf
+# event from a process whose only mirror installer is trace.c's constructor.
+# A missing probe is a broken build, never a skip.
+OTLP_STARTUP_PROBE_SRCS = \
+	tests/harness/fixtures/otlp_startup_probe.c \
+	platform/modules/util/src/trace.c \
+	platform/modules/util/src/log_json.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/encoding/src/utilstrencodings.c \
+	platform/modules/base/src/safe_alloc.c
+# Headers the sources above include (gcc -MM closure), so a header edit
+# rebuilds the probe; the resident-launch fixtures list only their .c.
+OTLP_STARTUP_PROBE_HDRS = \
+	platform/modules/base/include/base/format_attribute.h \
+	platform/modules/base/include/base/log_level.h \
+	platform/modules/base/include/base/log_macros.h \
+	platform/modules/base/include/base/safe_alloc.h \
+	platform/modules/base/include/base/utc_tm.h \
+	platform/modules/encoding/include/encoding/utilstrencodings.h \
+	platform/modules/platform/include/platform/clock.h \
+	platform/modules/platform/include/platform/time_compat.h \
+	platform/modules/util/include/util/log_json.h \
+	platform/modules/util/include/util/log_macros.h \
+	platform/modules/util/include/util/safe_alloc.h \
+	platform/modules/util/include/util/trace.h \
+	platform/modules/util/include/util/util.h
+ifeq ($(ZCL_HOST_WINDOWS),)
+OTLP_STARTUP_PROBE_BIN = $(BUILD_DIR)/fixtures/otlp_startup_probe$(ZCL_HOST_EXEEXT)
+else
+OTLP_STARTUP_PROBE_BIN =
+endif
+
+$(BUILD_DIR)/fixtures/otlp_startup_probe$(ZCL_HOST_EXEEXT): $(OTLP_STARTUP_PROBE_SRCS) $(OTLP_STARTUP_PROBE_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(TEST_FAST_CFLAGS) -o $@ $(OTLP_STARTUP_PROBE_SRCS) -pthread
+
+ifeq ($(ZCL_HOST_WINDOWS),)
+$(BIN_DIR)/test_zcl: | $(OTLP_STARTUP_PROBE_BIN)
+$(TEST_PARALLEL_BIN): | $(OTLP_STARTUP_PROBE_BIN)
+$(TEST_PARALLEL_FAST_BIN): | $(OTLP_STARTUP_PROBE_BIN)
+$(TEST_PARALLEL_REL_CANDIDATE): | $(OTLP_STARTUP_PROBE_BIN)
+$(TEST_PARALLEL_FAST_CANDIDATE): | $(OTLP_STARTUP_PROBE_BIN)
+endif
+
 # test_engine's end-to-end case runs $(ENGINE_UNIT_BIN) as a subprocess (same
 # reason test_acme_worker runs zclassic23-acme instead of linking it: the
 # binary carries a TLS client, and test_cold_join_sovereign P2 asserts no

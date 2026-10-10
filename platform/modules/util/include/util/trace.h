@@ -108,8 +108,16 @@ void trace_end(struct trace_span *s);
 /* Write one OTLP/HTTP JSON ExportTraceServiceRequest for `s`.
  * `end_wall_us` is the wall-clock end in microseconds, the same clock as
  * `start_wall_us`. The bytes are the published proto3 JSON mapping
- * (base64 trace and span ids, decimal-string timestamps, enum status
- * names). Returns false when `out` cannot hold the document. */
+ * (lowercase hex trace, span and parent span ids per the OTLP JSON
+ * Protobuf encoding: 32 and 16 hex digits, NOT base64; decimal-string
+ * timestamps, integer status code 0 unset, 1 ok, 2 error per the
+ * rule that OTLP JSON enums are integers). Input ids must be exactly 32
+ * (trace) and 16 (span, parent) hex digits of either case; any other length
+ * or alphabet makes the call return false, and so does an all-zero id (the
+ * trace model defines an all-zero trace id and span id as invalid); this
+ * applies to trace, span and a present parent span id, and to
+ * trace_format_otlp_log's ids. A root span (empty parent id) omits
+ * parentSpanId. Returns false also when `out` cannot hold the document. */
 bool trace_format_otlp(const struct trace_span *s, uint64_t end_wall_us,
                        char *out, size_t cap);
 
@@ -168,10 +176,10 @@ struct trace_log_record {
  *    each exactly {"key":"<k>","value":{"stringValue":"<v>"}}; "attributes"
  *    is always present, as [] when attr_count is 0.
  *  - <ids>: after "attributes", in this order and each only when
- *    present: ,"traceId":"<b64>"  then  ,"spanId":"<b64>". An id is
- *    base64 (standard alphabet, '=' padding) of its raw bytes, produced
- *    exactly like trace_otlp_b64 in trace.c (ParseHex + EncodeBase64),
- *    16 bytes for traceId and 8 for spanId. Either may be present
+ *    present: ,"traceId":"<hex>"  then  ,"spanId":"<hex>". An id is
+ *    its hex digits lowercased (OTLP JSON Protobuf encoding: hex, not
+ *    base64), 32 digits for traceId and 16 for spanId. Upper-case input
+ *    is accepted and emitted lowercase. Either may be present
  *    without the other.
  *  - Escaping of service, body, keys and values (as log_json_escape):
  *    '"' -> \" ; '\\' -> \\ ; \b \f \n \r \t -> those two-char

@@ -142,6 +142,11 @@ void log_json_set_mirror(log_json_mirror_fn fn)
     g_mirror = fn;
 }
 
+bool log_json_mirror_installed(void)
+{
+    return g_mirror != NULL;
+}
+
 static void log_json_mirror(log_json_mirror_fn fn, enum log_json_level level,
                             const char *event, const char *fields)
 {
