@@ -1125,11 +1125,14 @@ static int ef_layout(void)
     int failures = 0;
     struct efd_finding f[4];
     struct efd_result r;
-    TEST("F4: a FINDING not at column 0 or not followed by a space is ignored") {
+    TEST("F4: an indented or bare FINDING is ill-formed, mid-sentence after byte 16 is ignored") {
         r = ef_run("  FINDING CHANGE high a.c:1 x\n"
-                   "see FINDING CHANGE high a.c:1 x\n"
                    "\tFINDING CLAIM low a.c:2 y\n"
-                   "FINDING\nFINDINGS CHANGE high a.c:1 x\n", f, 4);
+                   "FINDING\n", f, 4);
+        ASSERT_EQ(r.findings, 0);
+        ASSERT_EQ(r.illformed, 3);
+        r = ef_run("See the note about each FINDING CHANGE line format later.\n"
+                   "FINDINGS CHANGE high a.c:1 x\n", f, 4);
         ASSERT_EQ(r.findings, 0);
         ASSERT_EQ(r.illformed, 0);
         PASS();
@@ -1198,6 +1201,112 @@ _test_next:;
     return failures;
 }
 
+/* N1, N2, N7: the near-miss rule, one line alone each. */
+static int ef_nearmiss(void)
+{
+    int failures = 0;
+    static const char *const near[] = {
+        "- FINDING CHANGE high a.c:12 x", "* FINDING CHANGE high a.c:12 x",
+        "**FINDING** CHANGE high a.c:12 x", "`FINDING CHANGE high a.c:12 x`",
+        "  FINDING CHANGE high a.c:12 x", "1. FINDING CHANGE high a.c:12 x",
+        "finding CHANGE high a.c:12 x", "FINDING: CHANGE high a.c:12 x",
+        "FINDING", "Finding: the bound is wrong", "- NO FINDINGS",
+        "NO FINDINGS.", "no findings",
+    };
+    static const char *const quiet[] = {
+        "Findings first, most severe first.",
+        "The findings below are about the change.",
+        "See the note about each FINDING CHANGE line format later.",
+        "\n", "NOT REVIEWED: tests",
+    };
+    struct efd_finding f[2];
+    TEST("N1: a near-miss line alone is ill-formed, never a finding") {
+        for (size_t i = 0; i < sizeof(near) / sizeof(near[0]); i++) {
+            struct efd_result r = ef_run(near[i], f, 2);
+            if (r.findings != 0 || r.illformed != 1 || r.no_findings)
+                printf("[row %zu: %s] ", i, near[i]);
+            ASSERT_EQ(r.findings, 0);
+            ASSERT_EQ(r.illformed, 1);
+            ASSERT(!r.no_findings);
+        }
+        PASS();
+    }
+    TEST("N2: prose that only touches the word, and an empty line, is ignored") {
+        for (size_t i = 0; i < sizeof(quiet) / sizeof(quiet[0]); i++) {
+            struct efd_result r = ef_run(quiet[i], f, 2);
+            if (r.findings != 0 || r.illformed != 0)
+                printf("[row %zu: %s] ", i, quiet[i]);
+            ASSERT_EQ(r.findings, 0);
+            ASSERT_EQ(r.illformed, 0);
+        }
+        PASS();
+    }
+    TEST("N7: a near-miss read never passes len, even at a line's end") {
+        struct efd_result r;
+        static const char cut[] = "findinFINDING CHANGE high a.c:1 x\n";
+        static const char edge[] = "          findin" "g CHANGE high a.c:1 x\n"
+                                   "FINDING CHANGE high a.c:2 y\n";
+        efd_parse(cut, 6, f, 2, &r);
+        ASSERT_EQ(r.findings, 0);
+        ASSERT_EQ(r.illformed, 0);
+        efd_parse(edge, 16, f, 2, &r);
+        ASSERT_EQ(r.findings, 0);
+        ASSERT_EQ(r.illformed, 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* N3, N4: the line number and the path rules. */
+static int ef_where_rules(void)
+{
+    int failures = 0;
+    static const char *const zeros[] = {
+        "FINDING CHANGE high a.c:007 x", "FINDING CHANGE high a.c:0 x",
+    };
+    static const char *const bad_paths[] = {
+        "FINDING CHANGE high /abs/a.c:3 x", "FINDING CHANGE high ./a.c:3 x",
+        "FINDING CHANGE high a/src/a.c:3 x", "FINDING CHANGE high b/src/a.c:3 x",
+    };
+    static const char *const good_paths[] = {
+        "FINDING CHANGE high ab/src/a.c:3 x", "FINDING CLAIM low src/a/b.c:3 x",
+    };
+    struct efd_finding f[2];
+    TEST("N3: a line number with a leading zero is ill-formed") {
+        for (size_t i = 0; i < sizeof(zeros) / sizeof(zeros[0]); i++) {
+            struct efd_result r = ef_run(zeros[i], f, 2);
+            if (r.findings != 0 || r.illformed != 1)
+                printf("[row %zu: %s] ", i, zeros[i]);
+            ASSERT_EQ(r.findings, 0);
+            ASSERT_EQ(r.illformed, 1);
+        }
+        PASS();
+    }
+    TEST("N4: a path starting with /, ./, a/ or b/ is ill-formed") {
+        for (size_t i = 0; i < sizeof(bad_paths) / sizeof(bad_paths[0]); i++) {
+            struct efd_result r = ef_run(bad_paths[i], f, 2);
+            if (r.findings != 0 || r.illformed != 1)
+                printf("[row %zu: %s] ", i, bad_paths[i]);
+            ASSERT_EQ(r.findings, 0);
+            ASSERT_EQ(r.illformed, 1);
+        }
+        PASS();
+    }
+    TEST("N4: ab/ and a path with an inner a/ are well-formed") {
+        for (size_t i = 0; i < sizeof(good_paths) / sizeof(good_paths[0]); i++) {
+            struct efd_result r = ef_run(good_paths[i], f, 2);
+            if (r.findings != 1 || r.illformed != 0)
+                printf("[row %zu: %s] ", i, good_paths[i]);
+            ASSERT_EQ(r.findings, 1);
+            ASSERT_EQ(r.illformed, 0);
+        }
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 /* ── the scorer's second input form: a raw reply ────────────────────── */
 
 #define RS_REPLY(id, text) \
@@ -1240,6 +1349,17 @@ static int rs_reply_defect(const char *root)
         ASSERT_EQ(rs_int(&c, "reviews_unparsed"), 0);
         PASS();
     }
+    TEST("N5: a clean hit beside a bulleted near-miss is unparsed, not caught") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, RS_DEFECT("d1", "code", "k"),
+                        RS_REPLY("d1", "FINDING CHANGE high a.c:12 off by one\\n- FINDING CHANGE high a.c:12 x")));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "reviews_unparsed"), 1);
+        ASSERT_EQ(rs_int(&c, "findings_illformed"), 1);
+        ASSERT_EQ(rs_int(&c, "defect_reviews"), 0);
+        ASSERT_EQ(rs_int(&c, "defect_accepted"), 0);
+        PASS();
+    }
 _test_next:;
     rs_end(&c);
     return failures;
@@ -1277,6 +1397,16 @@ static int rs_reply_sound(const char *root)
         ASSERT(rs_ok(&c));
         ASSERT_EQ(rs_int(&c, "reviews_malformed_lines"), 1);
         ASSERT_EQ(rs_int(&c, "sound_reviews"), 0);
+        PASS();
+    }
+    TEST("N6: NO FINDINGS beside a bulleted finding is unparsed, not sound") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, RS_SOUND("s1"),
+                        RS_REPLY("s1", "NO FINDINGS\\n- FINDING CHANGE high a.c:12 x")));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "reviews_unparsed"), 1);
+        ASSERT_EQ(rs_int(&c, "sound_reviews"), 0);
+        ASSERT_EQ(rs_int(&c, "sound_rejected"), 0);
         PASS();
     }
 _test_next:;
@@ -1349,6 +1479,8 @@ int test_devagent_reviewscore(void)
     failures += ef_illformed();
     failures += ef_layout();
     failures += ef_bounds();
+    failures += ef_nearmiss();
+    failures += ef_where_rules();
     failures += rs_reply_defect(root);
     failures += rs_reply_sound(root);
     (void)test_rm_rf_recursive(root);

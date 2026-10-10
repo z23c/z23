@@ -13,9 +13,12 @@
  *   and is shorter than ERS_FILE_MAX. <line> is a positive decimal integer of
  *   at most EFD_LINE_MAX. <text> is the rest of the line and may be empty.
  *   A reply with no findings carries the line `NO FINDINGS`, alone on its
- *   line. Every other line is ignored, and so is a FINDING that is not at
- *   column 0. A line that starts with `FINDING ` but does not parse is
- *   counted as ill-formed, never as a finding. Lines end at \n or \r\n; the
+ *   line. A line that starts with `FINDING ` but does not parse is counted as
+ *   ill-formed, never as a finding. A line that is not a finding but has
+ *   `finding` (any case, not followed by a letter) or `NO FINDINGS` (any case)
+ *   within its first 16 bytes is ill-formed. A line number with a leading zero
+ *   is ill-formed. A path that starts with `/`, `./`, `a/` or `b/` is
+ *   ill-formed. Every other line is ignored. Lines end at \n or \r\n; the
  *   last line needs no terminator. The text is not assumed to be NUL
  *   terminated: nothing at or past `len` is read.
  */

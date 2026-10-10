@@ -10,6 +10,10 @@
 
 #define EFD_PREFIX "FINDING "
 #define EFD_NONE "NO FINDINGS"
+/* Near-miss words, lower case: matched in any ASCII case. */
+#define EFD_WORD "finding"
+#define EFD_NONE_WORDS "no findings"
+#define EFD_NEAR_SPAN 16
 
 struct efd_cur {
     const char *p;
@@ -60,6 +64,15 @@ static bool efd_severity(const char *f, size_t fl, enum efd_severity *s)
     return true;
 }
 
+/* A path that starts `/`, `./`, `a/` or `b/` cannot match the set. */
+static bool efd_bad_prefix(const char *p, size_t plen)
+{
+    if (p[0] == '/')
+        return true;
+    return plen >= 2 && p[1] == '/' &&
+           (p[0] == '.' || p[0] == 'a' || p[0] == 'b');
+}
+
 /* `path:line`: the first colon splits; everything after it is digits. */
 static bool efd_where(const char *f, size_t fl, struct efd_finding *out)
 {
@@ -68,7 +81,8 @@ static bool efd_where(const char *f, size_t fl, struct efd_finding *out)
         return false;
     size_t plen = (size_t)(colon - f);
     size_t dlen = fl - plen - 1u;
-    if (plen == 0 || plen >= ERS_FILE_MAX || dlen == 0)
+    if (plen == 0 || plen >= ERS_FILE_MAX || dlen == 0 ||
+        efd_bad_prefix(f, plen) || colon[1] == '0')
         return false;
     int64_t v = 0;
     for (size_t i = 0; i < dlen; i++) {
@@ -105,6 +119,46 @@ static bool efd_fields(struct efd_cur c, struct efd_finding *out)
     return true;
 }
 
+/* True when the bytes at l[i..i+wl) are `w` in any ASCII case, all below
+ * `span`. `w` is lower case. */
+static bool efd_ci_at(const char *l, size_t i, size_t span, const char *w,
+                      size_t wl)
+{
+    if (i + wl > span)
+        return false;
+    for (size_t k = 0; k < wl; k++) {
+        char c = l[i + k];
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c - 'A' + 'a');
+        if (c != w[k])
+            return false;
+    }
+    return true;
+}
+
+static bool efd_letter(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+/* A line that is not a finding but reads as one: `finding` in its first
+ * EFD_NEAR_SPAN bytes with no letter right after it, or `no findings` there
+ * in any case. */
+static bool efd_near_miss(const char *l, size_t n)
+{
+    size_t span = n < EFD_NEAR_SPAN ? n : EFD_NEAR_SPAN;
+    size_t wl = strlen(EFD_WORD);
+    size_t nl = strlen(EFD_NONE_WORDS);
+    for (size_t i = 0; i < span; i++) {
+        if (efd_ci_at(l, i, span, EFD_NONE_WORDS, nl))
+            return true;
+        if (efd_ci_at(l, i, span, EFD_WORD, wl) &&
+            !(i + wl < n && efd_letter(l[i + wl])))
+            return true;
+    }
+    return false;
+}
+
 static void efd_line(const char *l, size_t n, struct efd_finding *out,
                      size_t cap, struct efd_result *res)
 {
@@ -113,8 +167,11 @@ static void efd_line(const char *l, size_t n, struct efd_finding *out,
         return;
     }
     size_t pre = strlen(EFD_PREFIX);
-    if (n < pre || memcmp(l, EFD_PREFIX, pre) != 0)
+    if (n < pre || memcmp(l, EFD_PREFIX, pre) != 0) {
+        if (efd_near_miss(l, n))
+            res->illformed++;
         return;
+    }
     struct efd_finding f;
     memset(&f, 0, sizeof(f));
     struct efd_cur c = {l + pre, n - pre};

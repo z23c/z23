@@ -174,9 +174,12 @@ ENGINE_PROMPT_TEMPLATE(review, task,
 ENGINE_PROMPT_TEMPLATE(review, protocol,
     "Write each finding on its own line, starting at the first column, "
     "exactly as: FINDING <CHANGE|CLAIM> <high|medium|low> <path>:<line> "
-    "<what is wrong>. If there are none, write the line NO FINDINGS. Lines "
-    "not in that form are not counted. Write no files. Your reply is the "
-    "product.")
+    "<what is wrong>. <path> is the file path as the diff shows it, without "
+    "a leading a/ or b/; <line> is one line number in the new file, not a "
+    "range. No bullet, numbering, bold or backticks on that line. If there "
+    "are none, write the line NO FINDINGS. A line that looks like a finding "
+    "but is not in that form makes the whole review unreadable. Write no "
+    "files. Your reply is the product.")
 ENGINE_PROMPT_TEMPLATE(review, judging,
     "Return findings only. Do not write accept, approve or reject; the "
     "control side derives the verdict from your findings, separately for "
@@ -635,9 +638,12 @@ ENGINE_PROMPT_TEMPLATE(c23-review-pass, task,
 ENGINE_PROMPT_TEMPLATE(c23-review-pass, protocol,
     "Write each finding on its own line, starting at the first column, "
     "exactly as: FINDING <CHANGE|CLAIM> <high|medium|low> <path>:<line> "
-    "<what is wrong>. If there are none, write the line NO FINDINGS. Lines "
-    "not in that form are not counted. "
-    "Findings first, most severe first, each with severity, file and line, the "
+    "<what is wrong>. <path> is the file path as the diff shows it, without "
+    "a leading a/ or b/; <line> is one line number in the new file, not a "
+    "range. No bullet, numbering, bold or backticks on that line. If there "
+    "are none, write the line NO FINDINGS. A line that looks like a finding "
+    "but is not in that form makes the whole review unreadable. "
+    "Findings first, most severe first. Under a finding line you may add the "
     "quoted line and why it matters. Then one line per card point. Then NOT "
     "REVIEWED. Mark each finding as about the CHANGE or about a CLAIM. State "
     "what you sampled and how: the files and hunks you read whole, and the "

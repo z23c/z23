@@ -5151,8 +5151,11 @@ static int case_review_finding_line(const char *kind)
              protocol && strstr(protocol, "FINDING <CHANGE|CLAIM>")
              && strstr(protocol, "<high|medium|low> <path>:<line>"));
     EN_CHECK("review protocol names the NO FINDINGS line",
-             protocol && strstr(protocol, "NO FINDINGS")
-             && strstr(protocol, "Lines not in that form are not counted"));
+             protocol && strstr(protocol, "NO FINDINGS"));
+    EN_CHECK("review protocol bars a leading a/ or b/ in the path",
+             protocol && strstr(protocol, "without a leading a/ or b/"));
+    EN_CHECK("review protocol says a bad finding line makes the review unreadable",
+             protocol && strstr(protocol, "makes the whole review unreadable"));
     return failures;
 }
 
