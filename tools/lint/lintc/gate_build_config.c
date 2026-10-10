@@ -33,12 +33,30 @@
 #include "gate_build_config_priv.h"
 
 
-static int trs_on_recipe(FILE *out, int cov, int start, const char *argv,
+/* Non-coverage per-TU recipes must publish through the backend selector
+ * (native zcc --epoch-object when CC is zcc); naming the shell publisher
+ * directly costs ~10 helper processes per object. Coverage keeps the shell
+ * tool. */
+static int trs_is_legacy(const char *first)
+{
+    static const char legacy[] = "$(" "BUILD_EPOCH_OBJECT_TOOL" ") dep";
+    return strstr(first, legacy) != NULL;
+}
+
+static int trs_on_recipe(FILE *out, int cov, int legacy, int start, const char *argv,
                          int *dep_total, int *dep_seeded, int *cov_total,
                          int *fail)
 {
     static const char needle[] = "$(" "ZCL_TU_RANDOM_SEED" ")";
     int has = strstr(argv, needle) != NULL;
+    if (legacy && !cov) {
+        if (fprintf(out,
+                    "FAIL: Makefile:%d — per-TU object recipe names the shell "
+                    "publisher directly; use $(BUILD_FAST_EPOCH_OBJECT_COMMAND)\n",
+                    start) < 0)
+            return die("z23-lint: write failed\n", "");
+        *fail = 1;
+    }
     if (!cov) {
         (*dep_total)++;
         if (has) {
@@ -197,6 +215,7 @@ int trs_check(FILE *out)
         found = 1;
         int cov = regexec(&covre, line, 0, NULL, 0) == 0;
         int start = lineno;
+        int legacy = trs_is_legacy(line);
         while (regexec(&cont, line, 0, NULL, 0) == 0) {
             n = getline(&line, &cap, f);
             if (n < 0)
@@ -213,7 +232,7 @@ int trs_check(FILE *out)
         const char *argv = line;
         while (*argv == '\t')
             argv++;
-        rc = trs_on_recipe(out, cov, start, argv, &dep_total, &dep_seeded,
+        rc = trs_on_recipe(out, cov, legacy, start, argv, &dep_total, &dep_seeded,
                            &cov_total, &fail);
         if (rc)
             break;

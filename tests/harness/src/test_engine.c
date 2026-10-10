@@ -3445,7 +3445,7 @@ static int case_engine_tiers(void)
     for (int t = ENGINE_TIER_LIGHT; t <= ENGINE_TIER_HEAVY; t++) {
         enum engine_tier out = ENGINE_TIER_NONE;
         EN_CHECK("tier names round-trip",
-                 engine_tier_from_name(names[t - 1], &out) && out == t
+                 engine_tier_from_name(names[t - 1], &out) && (int)out == t
                  && strcmp(engine_tier_name((enum engine_tier)t),
                            names[t - 1]) == 0);
     }

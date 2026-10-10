@@ -24,7 +24,7 @@
 static const char k_trs_ok[] =
     "ZCL_TU_RANDOM_SEED = -frandom-seed=$<\n"
     "all:\n"
-    "\t@$(BUILD_EPOCH_OBJECT_TOOL) dep \"$@\" \"$<\" \\\n"
+    "\t@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep \"$@\" \"$<\" \\\n"
     "\t  -- \\\n"
     "\t  $(CC) $(CFLAGS) $(ZCL_TU_RANDOM_SEED)\n"
     "\t@$(BUILD_EPOCH_OBJECT_TOOL) coverage \"$@\" \"$<\" \\\n"
@@ -33,7 +33,7 @@ static const char k_trs_ok[] =
 
 static const char k_trs_missing[] =
     "all:\n"
-    "\t@$(BUILD_EPOCH_OBJECT_TOOL) dep \"$@\" \"$<\" \\\n"
+    "\t@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep \"$@\" \"$<\" \\\n"
     "\t  -- \\\n"
     "\t  $(CC) $(CFLAGS) $(ZCL_TU_RANDOM_SEED)\n"
     "\t@$(BUILD_EPOCH_OBJECT_TOOL) coverage \"$@\" \"$<\" \\\n"
@@ -43,12 +43,19 @@ static const char k_trs_missing[] =
 static const char k_trs_unseeded[] =
     "ZCL_TU_RANDOM_SEED = -frandom-seed=$<\n"
     "all:\n"
-    "\t@$(BUILD_EPOCH_OBJECT_TOOL) dep \"$@\" \"$<\" \\\n"
+    "\t@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep \"$@\" \"$<\" \\\n"
     "\t  -- \\\n"
     "\t  $(CC) $(CFLAGS)\n"
     "\t@$(BUILD_EPOCH_OBJECT_TOOL) coverage \"$@\" \"$<\" \\\n"
     "\t  -- \\\n"
     "\t  $(CC) $(COV)\n";
+
+static const char k_trs_legacy[] =
+    "ZCL_TU_RANDOM_SEED = -frandom-seed=$<\n"
+    "all:\n"
+    "\t@$(BUILD_EPOCH_OBJECT_TOOL) dep \"$@\" \"$<\" \\\n"
+    "\t  -- \\\n"
+    "\t  $(CC) $(CFLAGS) $(ZCL_TU_RANDOM_SEED)\n";
 
 static int trs_case(FILE *out, const char *content, int want_rc,
     const char *want_substr)
@@ -96,6 +103,8 @@ int check_tu_random_seed_selftest(void)
     bad |= trs_case(out, k_trs_unseeded, 1,
         "FAIL: Makefile:3 — per-TU object recipe does not carry $("
         "ZCL_TU_RANDOM_SEED)");
+    bad |= trs_case(out, k_trs_legacy, 1,
+        "FAIL: Makefile:3 — per-TU object recipe names the shell publisher");
 
     fclose(out);
     unlink("./Makefile");
