@@ -2541,6 +2541,13 @@ void zcl_native_handle_dev_ship(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* dev.test.fast_plan — the native changed-set plan of tools/agent_fast_ci.sh
+ * plan-json (tools/command/native_dev_fast_plan.c). Read-only; its only
+ * child process is git. */
+void zcl_native_handle_dev_fast_plan(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* dev.fleet.know, aliased `dev know` — the fleet fact table, asked by
  * subject. It reads engine/composition/fleet_facts.def as an X-macro paste
  * through cognition/modules/fleetfacts and touches nothing else: no file,

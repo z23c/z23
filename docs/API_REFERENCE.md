@@ -74,14 +74,14 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 905 |
+| Registry entries (branches + leaves) | 906 |
 | Top-level roots | 14 |
 | Branches | 199 |
-| Leaves (dispatchable command paths) | 706 |
+| Leaves (dispatchable command paths) | 707 |
 | … `ready` (live handler in this build) | 619 |
-| … `compat` (metadata only, names a fallback) | 57 |
+| … `compat` (metadata only, names a fallback) | 58 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 56 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 57 |
 | Leaves with `effect=mutate` | 259 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 131 |
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
 | `engine/composition/commands/ops.def` | 59 | 11 | 48 |
-| `engine/composition/commands/dev.def` | 121 | 22 | 99 |
+| `engine/composition/commands/dev.def` | 122 | 22 | 100 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -753,6 +753,7 @@ represented by its children's sections.
 | `dev test story` | compat 🔧 → `z23-dev dev test story` | read / read / **owner** · instant/tiny | **`owner`** | `zcl.vault_intent_decision_story.v1` | `z23-dev dev test story --input='{"owner":"transaction_intent"}'` | Run one exact owner-bound fail-fast behavior story — *behavior stories require the dev-only frozen fixture registry* |
 | `dev test sim` | compat 🔧 → `z23-dev dev test sim` | read / read / **owner** · fast/moderate | `app_id` | `zcl.dev_sim.v1` | `z23 dev test sim` | Run the generic hot-swap network proof — *the simulation runner requires the dev-only process executor* |
 | `dev test replay` | planned | read / read / **owner** · foreground/moderate | **`seed`**, `scenario` | `zcl.dev_test_replay.v1` | `z23 dev test replay 1234` | Replay one deterministic failure seed — *generic seed replay registry is not implemented* |
+| `dev test fast_plan` | compat 🔧 → `z23-dev dev test fast_plan` | read / read / operator · fast/low | none | `zcl.agent_fast_plan.v1` | `z23 dev test fast_plan` | Plan the fast gate: changed files, test groups and next command — *the fast-gate plan is a development-lane surface* |
 
 #### `dev.generation` — Generation provenance
 

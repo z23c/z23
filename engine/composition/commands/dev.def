@@ -2373,6 +2373,33 @@ ZCL_COMMAND_DEV_READ(
     "agent mail waiting is a development-lane coordination surface",
     "z23-dev dev agent mail wait")
 
+/* ── dev.test.fast_plan ────────────────────────────────────────────────────
+ * Native plan-json of tools/agent_fast_ci.sh (tools/command/native_dev_fast_plan.c).
+ * Maps the changed-file set to focused test groups and the next command,
+ * under schema zcl.agent_fast_plan.v1. Read-only; spawns git only. Refuses
+ * the cache-enabled and affected-unit verdicts it does not yet derive. */
+ZCL_COMMAND_DEV_READ(
+    "dev.test.fast_plan", "dev.test", "",
+    "Plan the fast gate: changed files, test groups and next command",
+    "Reads the changed set the way agent_fast_ci.sh does (ZCL_FAST_CHANGED_FILES, "
+    "ZCL_FAST_CHANGED_FILES_FILE, and unless ZCL_FAST_CHANGED_FILES_ONLY is set "
+    "the ZCL_FAST_BASE range plus git diff, index and untracked lists), maps "
+    "each path through the compiled AGENT_IMPACT_RULE table and reports the "
+    "selected groups, unmapped code changes, the compile plan and the "
+    "recommended command. Requires ZCL_FAST_CACHE=0: the green-input cache "
+    "verdict needs source identity and is refused rather than guessed. "
+    "Creates no file and runs nothing but git.", 32768,
+    "fast,plan,gate,impact,test-groups,changed-files", "zcl.dev_fast_plan_input.v1",
+    "zcl.agent_fast_plan.v1", "", "",
+    "z23 dev test fast_plan",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_fast_plan,
+    "the fast-gate plan is a development-lane surface",
+    "z23-dev dev test fast_plan")
+
 /* ── dev.factory ───────────────────────────────────────────────────────────
  * Read-only factory waste report (tools/command/native_dev_factory.c). */
 ZCL_COMMAND_DEV_READ(
