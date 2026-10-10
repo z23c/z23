@@ -302,6 +302,7 @@ gate_command() {
         check-no-bare-tmp-fixture)         echo './build/bin/z23-lint check-no-bare-tmp-fixture --selftest && ./build/bin/z23-lint check-no-bare-tmp-fixture' ;;
         check-network-tool-hardening)         echo './build/bin/z23-lint check-network-tool-hardening --selftest && ./build/bin/z23-lint check-network-tool-hardening' ;;
         check-sqlite-cursor-lifetime)      echo './build/bin/z23-lint check-sqlite-cursor-lifetime --selftest && ./build/bin/z23-lint check-sqlite-cursor-lifetime' ;;
+        check-object-reproducible)            echo './tools/lint/check_object_reproducible.sh' ;; # the Makefile recipe runs the pure selftest once
         check-no-new-borrowed-seed)        echo './tools/lint/check_no_new_borrowed_seed.sh .' ;;
         check-no-new-coin-backfill-caller) echo './tools/lint/check_no_new_coin_backfill_caller.sh .' ;;
         check-route-command-parity)        echo './tools/lint/check_route_command_parity.sh .' ;;

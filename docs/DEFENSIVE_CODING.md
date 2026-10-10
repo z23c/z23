@@ -1298,6 +1298,7 @@ add/remove a gate.
 - `check-no-authoritative-ram-state`
 - `check-no-bare-tmp-fixture`
 - `check-network-tool-hardening`
+- `check-object-reproducible`
 - `check-no-dev-history-in-contracts`
 - `check-no-live-lab-history`
 - `check-no-new-borrowed-seed`

@@ -1136,6 +1136,27 @@ REPRO_CFLAGS = -ffile-prefix-map=$(CURDIR)=$(ZCL_REPRO_ROOT)
 else
 REPRO_CFLAGS = -ffile-prefix-map=$(CURDIR)=$(ZCL_REPRO_ROOT) -gno-record-gcc-switches
 endif
+# Base language/optimisation flags of the check-object-reproducible gate's
+# small-unit cases (host-cc, clang-host, clang-riscv64, clang-aarch64). Derived
+# from the real variables: the C standard spelling the selected compiler takes
+# (ZCL_C_STD) and the optimisation level and -g that CFLAGS carries. It is NOT
+# the full CFLAGS on purpose: CFLAGS adds -Werror, the LTO flag, the arch flags,
+# the whole-tree include set, vendor and GUI includes and -D defines, none of
+# which the freestanding cross units can take (no target libc, no GTK) and none
+# of which changes whether the checkout path reaches the object. The shipped
+# node objects use NODE_C23_OBJECT_CFLAGS instead (shipped-recipe/-link cases).
+REPRO_GATE_BASE_CFLAGS = -std=$(ZCL_C_STD) $(firstword $(filter -O%,$(CFLAGS))) $(filter -g,$(CFLAGS))
+# The gate types no flag of its own (other than -c, -o and its -I list): the
+# per-target flags, the cross-case flag, the link libraries and the name of the
+# prefix-map flag that its RED control removes all come from here.
+REPRO_GATE_TARGETS = clang-riscv64=--target=riscv64-unknown-freebsd,clang-aarch64=--target=aarch64-unknown-linux-gnu
+REPRO_GATE_CROSS_FLAGS = -nostdlibinc
+REPRO_GATE_LINK_LIBS = -lm
+REPRO_GATE_STRIP_FLAG = -ffile-prefix-map=
+# The gate reads ELF sections and links with GNU-ld flags. Only a host that is
+# not an ELF host (Darwin, Windows) is skipped, by name; no other host gets
+# this argument, so a gcc-only Linux host with no clang fails loudly.
+REPRO_GATE_HOST_SKIP = $(if $(or $(filter Darwin,$(ZCL_HOST_OS)),$(ZCL_HOST_WINDOWS)),--unsupported-host $(ZCL_HOST_OS),)
 
 # ── Per-TU random seed (object-level determinism) ─────────────────────────
 # GCC derives its default random seed from the OUTPUT file name. Every object
@@ -3018,6 +3039,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-no-new-coordination-shell \
         check-no-bare-tmp-fixture \
         check-network-tool-hardening \
+        check-object-reproducible \
         check-sqlite-cursor-lifetime \
         fuzz-ci-leaks \
         soak-smoke soak-7day soak-ci test-crash-bootstrap \
@@ -6026,6 +6048,7 @@ LINTC_PREMISE_SRCS = $(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/selection.c
 # confinement builders (Landlock + seccomp on Linux; the refusing stub
 # elsewhere) that unit-exec enters.
 LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c $(ZCL_TOOL_SANDBOX_SRC) \
+    platform/modules/util/src/spawn.c platform/modules/platform/src/clock.c \
     platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
     platform/modules/base/src/safe_alloc.c
 LINTC_NODE_OBJS = $(LINTC_NODE_SRCS:%.c=build/lintc-obj/node/%.o)
@@ -6097,6 +6120,8 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_no_new_coordination_shell.c \
     tools/lint/lintc/gate_no_bare_tmp_fixture.c \
     tools/lint/lintc/gate_network_tool_hardening.c \
+    tools/lint/lintc/gate_object_reproducible.c \
+    tools/lint/lintc/gate_object_reproducible_support.c \
     tools/lint/lintc/gate_tor_full_default.c \
     tools/lint/lintc/gate_installed_acceptance_tools.c \
     tools/lint/lintc/gate_hotswap_denied_leaves.c \
@@ -13802,6 +13827,36 @@ check-network-tool-hardening: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS)
 	@echo "══ LINT: network tools carry declared ELF mitigations ══"
 	@./build/bin/z23-lint check-network-tool-hardening --selftest && ./build/bin/z23-lint check-network-tool-hardening
 
+# Gate — object reproducibility. The same unit compiled under two checkout
+# roots of different path length, with the tree's own REPRO_CFLAGS and
+# per-file random seed passed in from here (one source of truth), must hash
+# identically per compiler and target. @UNIT@ stands for the relative source
+# path the seed is built from. Only the cross cases may be absent. The base
+# flags, the node object flags and the seed all come from this recipe.
+# --report-only shipped-recipe: that case compiles one real unit with the
+# flags the shipped node objects use (NODE_C23_OBJECT_CFLAGS, -O3 -flto=auto)
+# and is printed but NOT part of the verdict. Measured cause of its DIFFER:
+# the compiler's working directory is streamed into the gcc LTO sections
+# (.gnu.lto_.decls and the per-function .gnu.lto_* sections); -ffile-prefix-map
+# does not rewrite it. The final link is unaffected: the shipped-link case
+# compiles real astro/support units plus a tiny gate-written main with those flags,
+# links them with the same CFLAGS plus $(LDFLAGS) -Wl,--build-id=none (as tools/scripts/
+# repro_build_vars.sh does for the node) under both roots, and GATES on the
+# linked output hashing identically and holding neither root path. REMOVE the
+# --report-only argument if the LTO objects themselves become path-free.
+check-object-reproducible: $(LINTC_TOOL)
+	@echo "══ LINT: objects do not depend on the checkout path ══"
+	@./tools/lint/check_object_reproducible.sh --selftest && \
+	./tools/lint/check_object_reproducible.sh --tree-root '$(CURDIR)' \
+		--repro-cflags '$(REPRO_CFLAGS)' --base-cflags '$(REPRO_GATE_BASE_CFLAGS)' \
+		--shipped-cflags '$(NODE_C23_OBJECT_CFLAGS)' \
+		--link-flags '$(LDFLAGS) -Wl,--build-id=none' --link-libs '$(REPRO_GATE_LINK_LIBS)' \
+		--cross-flags '$(REPRO_GATE_CROSS_FLAGS)' --targets '$(REPRO_GATE_TARGETS)' \
+		--red-strip '$(REPRO_GATE_STRIP_FLAG)' \
+		--seed-flag '$(or $(subst $<,@UNIT@,$(ZCL_TU_RANDOM_SEED)),none)' \
+		--host-cc '$(ZCL_OBJECT_CC)' --allow-missing clang-riscv64,clang-aarch64 \
+		--report-only shipped-recipe $(REPRO_GATE_HOST_SKIP)
+
 # Gate — sqlite cursor lifetime. A stepped sqlite3_stmt must be
 # sqlite3_finalize/sqlite3_reset'd BEFORE any returning error macro
 # (LOG_FAIL/LOG_ERR/LOG_NULL/LOG_RETURN/GUARD*) fires in the same function:
@@ -15008,6 +15063,7 @@ LINT_GATES := \
     check-no-new-coordination-shell \
     check-no-bare-tmp-fixture \
     check-network-tool-hardening \
+    check-object-reproducible \
     check-no-new-borrowed-seed \
     check-no-new-coin-backfill-caller \
     check-route-command-parity \
