@@ -12762,7 +12762,9 @@ _test_next:;
  * "fail" -> a non-landed terminal). Returns the next step's state. */
 static bool dlx_window_crash(const char *tag, const char *on,
                              const char *proof, char state[32],
-                             char code[64], bool *sidecar)
+                             char code[64], bool *sidecar,
+                             bool *pre_side, bool *pre_landed,
+                             bool *pre_released)
 {
     struct dlx_rig rig;
     struct dlx_call c;
@@ -12791,9 +12793,12 @@ static bool dlx_window_crash(const char *tag, const char *on,
     if (snprintf(side, sizeof(side), "%s/window.state", landdir) >=
         (int)sizeof(side))
         return false;
-    *sidecar = dlx_file_exists(side);
+    /* Observed after the crash and before the replay step. */
+    *pre_side = dlx_file_exists(side);
+    *pre_landed = dlx_window_outbox_has("\"body\":\"LANDED hosta");
+    *pre_released = dlx_window_outbox_has("\"body\":\"RELEASED hosta");
     dlx_window_step(state, code, evidence);
-    *sidecar = *sidecar && dlx_file_exists(side);
+    *sidecar = *pre_side && dlx_file_exists(side);
     return true;
 }
 
@@ -12801,16 +12806,21 @@ static int test_dev_land_window_replay(void)
 {
     int failures = 0;
     char state[32], code[64], ref[32];
-    bool sidecar;
+    bool sidecar, pre_side, pre_landed, pre_released;
 
     TEST("land window: a terminal replay closes the open window with LANDED") {
         /* reference: the same crash with the window off */
         ASSERT(dlx_window_crash("window_replay_off", "0", "pass", ref, code,
-                                &sidecar));
+                                &sidecar, &pre_side, &pre_landed,
+                                &pre_released));
         ASSERT_STR_EQ(ref, "landed");
         dlx_restore();
         ASSERT(dlx_window_crash("window_replay_landed", "1", "pass", state,
-                                code, &sidecar));
+                                code, &sidecar, &pre_side, &pre_landed,
+                                &pre_released));
+        ASSERT(pre_side);
+        ASSERT(!pre_landed);
+        ASSERT(!pre_released);
         ASSERT_STR_EQ(state, ref);
         ASSERT_STR_EQ(code, "");
         ASSERT(dlx_window_outbox_has("\"body\":\"LANDED hosta, candidate "));
@@ -12822,11 +12832,16 @@ static int test_dev_land_window_replay(void)
 
     TEST("land window: a terminal replay of a failed row closes with RELEASED") {
         ASSERT(dlx_window_crash("window_replay_off2", "0", "fail", ref, code,
-                                &sidecar));
+                                &sidecar, &pre_side, &pre_landed,
+                                &pre_released));
         ASSERT(ref[0] != '\0' && strcmp(ref, "landed") != 0);
         dlx_restore();
         ASSERT(dlx_window_crash("window_replay_failed", "1", "fail", state,
-                                code, &sidecar));
+                                code, &sidecar, &pre_side, &pre_landed,
+                                &pre_released));
+        ASSERT(pre_side);
+        ASSERT(!pre_landed);
+        ASSERT(!pre_released);
         ASSERT_STR_EQ(state, ref);
         ASSERT_STR_EQ(code, "");
         ASSERT(dlx_window_outbox_has("\"body\":\"RELEASED hosta, candidate "));
