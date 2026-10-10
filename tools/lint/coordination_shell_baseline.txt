@@ -75,7 +75,6 @@ tools/dev/factory-same-store-lineage.sh
 tools/dev/factory-throughput-qualification.sh
 tools/dev/fleet-identity.sh
 tools/dev/generate-compdb.sh
-tools/dev/git_land_owner_fixture_series.sh
 tools/dev/git_land_signed_intent_acceptance.sh
 tools/dev/hotswap-candidates.sh
 tools/dev/hotswap-core-section-reach.sh
