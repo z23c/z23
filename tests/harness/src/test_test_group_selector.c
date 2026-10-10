@@ -2,6 +2,7 @@
 
 #include "test/test_core.h"
 #include "test/test_group_selector.h"
+#include "test/test_verdict_json.h"
 #include "platform/os_proc.h"
 #include "test_group_catalog.h"
 #include "test_group_weights.h"
@@ -1873,6 +1874,115 @@ static int test_compile_scope_proof(void)
     return failures;
 }
 
+/* build/test-verdict.json renderer (test_verdict_json.h): exact bytes for the
+ * zero, two, over-cap and quote-bearing cases the verdict file must hold. */
+static struct test_verdict_doc verdict_doc_base(void)
+{
+    struct test_verdict_doc doc = {
+        .mode = "cold", .groups_total = 3, .groups_ran = 3,
+        .groups_cached = 0, .groups_failed = 0,
+        .failed_names = NULL, .failed_names_count = 0,
+        .toolkey = "abc123", .devbuild_lane = NULL, .ended_unix = 1234,
+    };
+    return doc;
+}
+
+/* One TEST per function: ASSERT jumps to a fixed _test_next label. */
+static int test_verdict_json_zero_failures(void)
+{
+    int failures = 0;
+    struct test_verdict_doc doc = verdict_doc_base();
+    TEST("test verdict json: zero failures, null lane, empty list") {
+        char out[1024];
+        ASSERT(test_verdict_json_format(out, sizeof(out), &doc) > 0);
+        ASSERT_STR_EQ(out,
+            "{\"schema\":\"zcl.test_verdict.v1\",\"mode\":\"cold\","
+            "\"groups_total\":3,\"groups_ran\":3,\"groups_cached\":0,"
+            "\"groups_failed\":0,\"failed_groups\":[],"
+            "\"failed_groups_truncated\":false,\"toolkey\":\"abc123\","
+            "\"devbuild_lane\":null,\"ended_unix\":1234}\n");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_verdict_json_two_failures(void)
+{
+    int failures = 0;
+    struct test_verdict_doc doc = verdict_doc_base();
+    TEST("test verdict json: two failures and a lane name") {
+        const char *names[] = { "alpha", "beta" };
+        struct test_verdict_doc two = doc;
+        two.groups_failed = 2;
+        two.failed_names = names;
+        two.failed_names_count = 2;
+        two.devbuild_lane = "z23-lane-a";
+        char out[1024];
+        ASSERT(test_verdict_json_format(out, sizeof(out), &two) > 0);
+        ASSERT_STR_EQ(out,
+            "{\"schema\":\"zcl.test_verdict.v1\",\"mode\":\"cold\","
+            "\"groups_total\":3,\"groups_ran\":3,\"groups_cached\":0,"
+            "\"groups_failed\":2,\"failed_groups\":[\"alpha\",\"beta\"],"
+            "\"failed_groups_truncated\":false,\"toolkey\":\"abc123\","
+            "\"devbuild_lane\":\"z23-lane-a\",\"ended_unix\":1234}\n");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_verdict_json_over_cap(void)
+{
+    int failures = 0;
+    struct test_verdict_doc doc = verdict_doc_base();
+    TEST("test verdict json: 70 failures keep 64 names and set truncated") {
+        char names_buf[70][8];
+        const char *names[70];
+        for (size_t i = 0; i < 70; i++) {
+            (void)snprintf(names_buf[i], sizeof(names_buf[i]), "g%02zu", i);
+            names[i] = names_buf[i];
+        }
+        struct test_verdict_doc many = doc;
+        many.groups_failed = 70;
+        many.failed_names = names;
+        many.failed_names_count = 70;
+        static char out[8192];
+        ASSERT(test_verdict_json_format(out, sizeof(out), &many) > 0);
+        ASSERT(strstr(out, "\"groups_failed\":70,") != NULL);
+        ASSERT(strstr(out, "\"g00\",\"g01\"") != NULL);
+        ASSERT(strstr(out, "\"g63\"],\"failed_groups_truncated\":true") != NULL);
+        ASSERT(strstr(out, "\"g64\"") == NULL);
+        ASSERT(strstr(out, "\"failed_groups_truncated\":false") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_verdict_json_quoted_name(void)
+{
+    int failures = 0;
+    struct test_verdict_doc doc = verdict_doc_base();
+    TEST("test verdict json: quote and backslash in a name are escaped") {
+        const char *names[] = { "a\"b\\c" };
+        struct test_verdict_doc quoted = doc;
+        quoted.groups_ran = 2;
+        quoted.groups_failed = 1;
+        quoted.failed_names = names;
+        quoted.failed_names_count = 1;
+        char out[1024];
+        ASSERT(test_verdict_json_format(out, sizeof(out), &quoted) > 0);
+        ASSERT_STR_EQ(out,
+            "{\"schema\":\"zcl.test_verdict.v1\",\"mode\":\"cold\","
+            "\"groups_total\":3,\"groups_ran\":2,\"groups_cached\":0,"
+            "\"groups_failed\":1,\"failed_groups\":[\"a\\\"b\\\\c\"],"
+            "\"failed_groups_truncated\":false,\"toolkey\":\"abc123\","
+            "\"devbuild_lane\":null,\"ended_unix\":1234}\n");
+        char tiny[16];
+        ASSERT(test_verdict_json_format(tiny, sizeof(tiny), &doc) == -1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_test_group_selector(void)
 {
     int failures = 0;
@@ -1900,5 +2010,9 @@ int test_test_group_selector(void)
     failures += test_runner_dispatches_longest_first();
     failures += test_assert_macros_report_where_and_what();
     failures += test_assert_messages_name_file_line_and_values();
+    failures += test_verdict_json_zero_failures();
+    failures += test_verdict_json_two_failures();
+    failures += test_verdict_json_over_cap();
+    failures += test_verdict_json_quoted_name();
     return failures;
 }

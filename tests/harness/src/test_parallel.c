@@ -59,6 +59,7 @@
 #include "util/signal_handler.h"
 #include "util/clientversion.h"
 #include "util/log_json.h"
+#include "test/test_verdict_json.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -1829,6 +1830,81 @@ static void write_test_timing_json(const struct group_result *results,
     }
 }
 
+/* Machine-readable verdict of THIS run: build/test-verdict.json (schema
+ * zcl.test_verdict.v1), written on every run, pass or fail, beside the
+ * SUITE VERDICT line. The host job ledger keeps command, rc and timings but no
+ * output, so this file is what explains a failure after the fact. Best-effort:
+ * a failed write prints one warning line and never changes the exit code. */
+static void write_test_verdict_file(const struct group_result *results,
+                                    const struct suite_verdict *v)
+{
+    const char *names[TEST_VERDICT_MAX_FAILED_NAMES];
+    size_t n_names = 0;
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped)
+            continue;
+        bool pass = !results[i].signaled && results[i].exit_code == 0;
+        if (!pass && n_names < TEST_VERDICT_MAX_FAILED_NAMES)
+            names[n_names++] = g_groups[i].name;
+    }
+    struct test_verdict_doc doc = {
+        .mode = v->mode,
+        .groups_total = v->groups_total,
+        .groups_ran = v->groups_ran,
+        .groups_cached = v->groups_cached,
+        .groups_failed = (size_t)v->groups_failed,
+        .failed_names = names,
+        .failed_names_count = n_names,
+        .toolkey = v->toolkey,
+        .devbuild_lane = getenv("DEVBUILD_LANE"),
+        .ended_unix = (long long)time(NULL),
+    };
+    static char body[40960];
+    int len = test_verdict_json_format(body, sizeof(body), &doc);
+    if (len < 0) {
+        fprintf(stderr, "test_parallel: test verdict render failed; "
+                        "build/test-verdict.json not written\n");
+        return;
+    }
+    if (platform_directory_create("build", 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "test_parallel: mkdir build failed; "
+                        "build/test-verdict.json not written\n");
+        return;
+    }
+
+    /* Write-then-rename: a reader never sees a torn file. The pid in the tmp
+     * name keeps two concurrent runners from sharing one tmp file. */
+    char tmp_path[64];
+    const char *final_path = "build/test-verdict.json";
+    snprintf(tmp_path, sizeof(tmp_path), "build/test-verdict.json.tmp.%ld",
+             (long)getpid());
+    FILE *fp = fopen(tmp_path, "w");
+    if (!fp) {
+        fprintf(stderr, "test_parallel: cannot open %s: %s\n", tmp_path,
+                strerror(errno));
+        return;
+    }
+    bool wrote = fwrite(body, 1, (size_t)len, fp) == (size_t)len;
+    if (fclose(fp) != 0)
+        wrote = false;
+    if (!wrote) {
+        fprintf(stderr, "test_parallel: test verdict write failed: %s\n",
+                tmp_path);
+        (void)remove(tmp_path);
+        return;
+    }
+#if defined(_WIN32)
+    /* Windows rename() refuses an existing target; this file is replaced
+     * wholesale on every run, so removing last run's copy is correct. */
+    (void)remove(final_path);
+#endif
+    if (rename(tmp_path, final_path) != 0) {
+        fprintf(stderr, "test_parallel: rename to %s failed: %s\n",
+                final_path, strerror(errno));
+        (void)remove(tmp_path);
+    }
+}
+
 /* ── Module mode: run the real groups against a hot-swapped .so ────────────
  *
  * ZCL_HOTSWAP_TEST_MODULE=<abs path to module .so> makes this harness load the
@@ -2830,6 +2906,7 @@ int main(int argc, char **argv)
                            startup_wall, wall, jobs, g_num_groups,
                            failed_groups,
                            pre_skipped, &verdict);
+    write_test_verdict_file(results, &verdict);
 
     /* A compact receipt near the end of stdout lets the resident dev service
      * bind its identity/graph phases to the test runner's own startup/body
