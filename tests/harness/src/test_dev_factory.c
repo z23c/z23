@@ -114,6 +114,12 @@ static bool dfx_is_null(const struct dfx_call *c, const char *path)
     return v && v->type == JSON_NULL;
 }
 
+static bool dfx_bool_is(const struct dfx_call *c, const char *path, bool want)
+{
+    const struct json_value *v = dfx_at(c, path);
+    return v && v->type == JSON_BOOL && json_get_bool(v) == want;
+}
+
 static void dfx_write(const char *path, const char *text)
 {
     FILE *fp = fopen(path, "w");
@@ -268,6 +274,31 @@ static void dfx_attempts_fixture(const char *dir)
                 "queue_lock_wait_ms=2000\n", NULL, 30);
     dfx_attempt(dir, DFX_NAME_40C "-" DFX_NAME_40A ".s1", real, NULL,
                 49 * DFX_HOUR);
+}
+
+/* Two cwds, a first and a second job each. cwd_a has a failed second run
+ * whose verdict (written by the test) ends with it; cwd_b's failed second
+ * run has no verdict. */
+static void dfx_cold_fixture(const char *path, const char *cwd_a,
+                             const char *cwd_b, long now)
+{
+    char all[4096], row[1024];
+    size_t n = 0;
+#define DFX_COLD(...)                                                      \
+    do {                                                                   \
+        dfx_job_line(row, sizeof(row), __VA_ARGS__);                       \
+        n += (size_t)snprintf(all + n, sizeof(all) - n, "%s", row);        \
+    } while (0)
+    DFX_COLD("z23", now - 1000, now - 950, now - 50, 50, 900, 0, 0, "tA1",
+             "make -j28 z23", cwd_a);
+    DFX_COLD("z23", now - 500, now - 300, now, 200, 300, 0, 1, "tA2",
+             "make -j28 z23", cwd_a);
+    DFX_COLD("z23", now - 900, now - 800, now - 300, 100, 500, 0, 0, "tB1",
+             "make t-fast-exact ONLY=x", cwd_b);
+    DFX_COLD("z23", now - 400, now - 390, now - 190, 10, 200, 0, 1, "tB2",
+             "make t-fast-exact ONLY=x", cwd_b);
+#undef DFX_COLD
+    dfx_write(path, all);
 }
 
 static void dfx_proc_fixture(const char *dir)
@@ -479,6 +510,122 @@ int test_dev_factory(void)
         ASSERT(dfx_ok(&c));
         ASSERT_EQ((int)dfx_num(&c, "jobs.oversized_lines"), 1);
         ASSERT_EQ((int)dfx_num(&c, "jobs.total"), 0);
+        dfx_end(&c);
+        dfx_env(jobs, land, att, proc);
+        PASS();
+    }
+
+    TEST("factory: cold-start proxy and failed runs named by a verdict") {
+        char cwd_a[700], cwd_b[700], vdir[800], vpath[900], jobs_c[700];
+        char vtext[256];
+        (void)snprintf(cwd_a, sizeof(cwd_a), "%s/wt_a", base);
+        (void)snprintf(cwd_b, sizeof(cwd_b), "%s/wt_b", base);
+        (void)snprintf(jobs_c, sizeof(jobs_c), "%s/jobs_cold.jsonl", base);
+        (void)snprintf(vdir, sizeof(vdir), "%s/build", cwd_a);
+        (void)snprintf(vpath, sizeof(vpath), "%s/test-verdict.json", vdir);
+        dfx_mkdirs(vdir);
+        (void)snprintf(vtext, sizeof(vtext),
+                       "{\"ended_unix\":%ld,\"failed_groups\":"
+                       "[\"zcl_group_b\",\"zcl_group_a\"]}\n",
+                       now);
+        dfx_write(vpath, vtext);
+        dfx_cold_fixture(jobs_c, cwd_a, cwd_b, now);
+        (void)setenv("ZCL_DEV_FACTORY_JOBS", jobs_c, 1);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.total"), 4);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.first.n"), 2);
+        ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.first.run_p50_s", 500));
+        ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.first.run_p95_s", 900));
+        ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.first.run_sum_s", 1400));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.non_first.n"), 2);
+        ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.non_first.run_p50_s", 200));
+        ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.non_first.run_p95_s", 300));
+        ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.non_first.run_sum_s", 500));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.tracked_cwds"), 2);
+        ASSERT(dfx_bool_is(&c, "jobs.first_job_per_cwd.cwd_cap_hit", false));
+        /* build: 900 - 300 = 600; t_fast: 500 - 200 = 300 */
+        ASSERT(dfx_near(&c, "jobs.cold_build_seconds_estimate", 900));
+        ASSERT(dfx_str_is(&c, "jobs.cold_build_basis", "proxy"));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.cold_build_unbaselined_first_jobs"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 1);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 1);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_groups_overflow"), 0);
+        {
+            const struct json_value *g = dfx_at(&c, "jobs.failed_groups");
+            ASSERT(g && g->type == JSON_ARR);
+            ASSERT_EQ((int)json_size(g), 2);
+            ASSERT_STR_EQ(json_get_str(json_get(json_at(g, 0), "group")),
+                          "zcl_group_a");
+            ASSERT_EQ((int)json_get_int(json_get(json_at(g, 0), "n")), 1);
+            ASSERT_STR_EQ(json_get_str(json_get(json_at(g, 1), "group")),
+                          "zcl_group_b");
+        }
+        dfx_end(&c);
+        dfx_env(jobs, land, att, proc);
+        PASS();
+    }
+
+    TEST("factory: first-seen cwd table caps at 4096 and says so") {
+        char capf[700], row[1024];
+        FILE *fp;
+        (void)snprintf(capf, sizeof(capf), "%s/jobs_cap.jsonl", base);
+        fp = fopen(capf, "w");
+        ASSERT(fp != NULL);
+        for (int i = 0; i < 4097; i++) {
+            char cwd[64];
+            (void)snprintf(cwd, sizeof(cwd), "/cap/wt%d", i);
+            dfx_job_line(row, sizeof(row), "z23", now - 100, now - 90, now - 80,
+                         10, 10, 0, 0, "tC", "make", cwd);
+            (void)fputs(row, fp);
+        }
+        (void)fclose(fp);
+        (void)setenv("ZCL_DEV_FACTORY_JOBS", capf, 1);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.tracked_cwds"), 4096);
+        ASSERT(dfx_bool_is(&c, "jobs.first_job_per_cwd.cwd_cap_hit", true));
+        dfx_end(&c);
+        dfx_env(jobs, land, att, proc);
+        PASS();
+    }
+
+    TEST("factory: cold t-fast runs by cpu threshold, serial ones counted") {
+        char cwd[700], jobs_k[700], all[4096], row[1024];
+        size_t n = 0;
+        FILE *fp;
+        (void)snprintf(cwd, sizeof(cwd), "%s/wt_k", base);
+        (void)snprintf(jobs_k, sizeof(jobs_k), "%s/jobs_k.jsonl", base);
+        /* cold + -j (800 s), cold + serial (500 s), warm at the threshold
+         * (100 s), warm serial (40 s), and a non-t-fast build (ignored). */
+#define DFX_K(...)                                                         \
+    do {                                                                   \
+        dfx_job_line(row, sizeof(row), __VA_ARGS__);                       \
+        n += (size_t)snprintf(all + n, sizeof(all) - n, "%s", row);        \
+    } while (0)
+        DFX_K("z23", now - 900, now - 890, now - 90, 10, 800, 700, 0, "tK1",
+              "make -j28 t-fast-exact ONLY=a", cwd);
+        DFX_K("z23", now - 800, now - 790, now - 300, 10, 500, 650, 1, "tK2",
+              "make t-fast-exact ONLY=b", cwd);
+        DFX_K("z23", now - 700, now - 695, now - 595, 5, 100, 600, 0, "tK3",
+              "make -j28 t-fast ONLY=c", cwd);
+        DFX_K("z23", now - 600, now - 599, now - 559, 1, 40, 30, 0, "tK4",
+              "make t-fast-exact ONLY=d", cwd);
+        DFX_K("z23", now - 500, now - 490, now - 10, 10, 900, 900, 0, "tK5",
+              "make -j28 z23", cwd);
+#undef DFX_K
+        fp = fopen(jobs_k, "w");
+        ASSERT(fp != NULL);
+        (void)fputs(all, fp);
+        (void)fclose(fp);
+        (void)setenv("ZCL_DEV_FACTORY_JOBS", jobs_k, 1);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.cold_t_fast_n"), 2);
+        ASSERT(dfx_near(&c, "jobs.cold_t_fast_run_s", 1300));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.cold_t_fast_without_j"), 1);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.warm_t_fast_n"), 2);
+        ASSERT(dfx_near(&c, "jobs.cold_t_fast_cpu_threshold_s", 600));
         dfx_end(&c);
         dfx_env(jobs, land, att, proc);
         PASS();

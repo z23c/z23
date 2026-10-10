@@ -15,7 +15,16 @@
  * FAC_MAX_LINE bytes is counted in oversized_lines and never parsed; more
  * rows than the per-source cap makes that source report "refused_rows" with
  * no statistics, never a silently truncated sample. Percentiles are
- * nearest-rank. Nothing is written. */
+ * nearest-rank. Nothing is written.
+ *
+ * Jobs also report first_job_per_cwd (the earliest ledger row of each cwd,
+ * a cold-start proxy, against the rest), cold_build_seconds_estimate (a
+ * proxy: first-job run time above the non-first median of its class) and
+ * failed_runs_named / failed_runs_unnamed, where a failed run is named when
+ * <cwd>/build/test-verdict.json ended within 120 s of it and lists groups.
+ * cold_t_fast_* counts t-fast runs with cpu_s above 600 (cold builds), their
+ * run_s total and how many ran without a -j token; warm_t_fast_n counts the
+ * rest. */
 
 #include "command/native_command.h"
 
@@ -46,6 +55,13 @@
 #define FAC_LANES 3
 #define FAC_PATH 4096u
 #define FAC_PAIR 82u
+#define FAC_MAX_CWDS 4096u
+#define FAC_CWD_SLOTS 8192u
+#define FAC_VERDICT_MAX (1u << 16)
+#define FAC_VERDICT_SKEW_S 120.0
+#define FAC_NAME 64u
+#define FAC_MAX_NAMES 64u
+#define FAC_COLD_CPU_S 600.0 /* a t-fast run above this cpu_s is a cold build */
 
 enum fac_class {
     FAC_LAND, FAC_T_FAST, FAC_LINT, FAC_PREPARE, FAC_BUILD, FAC_OTHER,
@@ -236,17 +252,38 @@ struct fac_job {
     bool lander;
     bool lane_side;
     bool has_tree;
+    bool first;    /* earliest ledger row of its cwd */
+    bool parallel; /* cmd carries a -j token */
     int rc;
-    int64_t seq;
+    int64_t seq, ledger_idx, slot; /* slot: first-seen table, -1 untracked */
+    size_t cwd_off;                /* cwd starts at key + cwd_off */
     double queued, started, ended, wait_s, run_s, cpu_s;
     char *key; /* tree 0x1f cmd 0x1f cwd */
+};
+
+/* Earliest (queued, idx) ledger row seen for one cwd, over the whole ledger. */
+struct fac_cwd {
+    char *cwd;
+    double queued;
+    int64_t idx;
 };
 
 struct fac_jobs {
     struct fac_job *v;
     size_t n, cap;
     double window_start;
+    struct fac_cwd *cwds; /* open addressing, FAC_CWD_SLOTS entries */
+    size_t ncwds;
+    int64_t rows;    /* valid ledger rows, every project */
+    bool cwd_cap_hit; /* a cwd could not be tracked (table or path cap) */
 };
+
+/* Saturating increment: a count never wraps. */
+static void fac_inc(int64_t *v)
+{
+    if (*v < INT64_MAX)
+        (*v)++;
+}
 
 static int fac_classify(const char *cmd)
 {
@@ -287,6 +324,71 @@ static bool fac_job_grow(struct fac_jobs *j)
     return true;
 }
 
+static uint64_t fac_hash(const char *s)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (; *s; s++)
+        h = (h ^ (unsigned char)*s) * 1099511628211ull;
+    return h;
+}
+
+/* Slot of `cwd` in the first-seen table, keeping the earliest (queued, idx)
+ * row of each cwd. -1 when it cannot be tracked (empty, too long, table or
+ * allocation full); those cases set cwd_cap_hit. */
+static int64_t fac_cwd_slot(struct fac_jobs *j, const char *cwd, double queued,
+                            int64_t idx)
+{
+    size_t len = strlen(cwd), mask = FAC_CWD_SLOTS - 1, s;
+    struct fac_cwd *e;
+    if (len == 0)
+        return -1;
+    if (len >= FAC_PATH) {
+        j->cwd_cap_hit = true;
+        return -1;
+    }
+    s = (size_t)fac_hash(cwd) & mask;
+    while (j->cwds[s].cwd && strcmp(j->cwds[s].cwd, cwd) != 0)
+        s = (s + 1) & mask;
+    e = &j->cwds[s];
+    if (e->cwd) {
+        if (queued < e->queued || (queued == e->queued && idx < e->idx)) {
+            e->queued = queued;
+            e->idx = idx;
+        }
+        return (int64_t)s;
+    }
+    if (j->ncwds < FAC_MAX_CWDS)
+        e->cwd = zcl_malloc(len + 1, "dev_factory_cwd");
+    if (!e->cwd) {
+        j->cwd_cap_hit = true;
+        return -1;
+    }
+    memcpy(e->cwd, cwd, len + 1);
+    e->queued = queued;
+    e->idx = idx;
+    j->ncwds++;
+    return (int64_t)s;
+}
+
+/* True when a whitespace-separated token of cmd is -j or -j<digits>. */
+static bool fac_has_j(const char *cmd)
+{
+    const char *p = cmd;
+    while (*p) {
+        const char *t;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        t = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        if (p - t >= 2 && t[0] == '-' && t[1] == 'j') {
+            if (p - t == 2 || (t[2] >= '0' && t[2] <= '9'))
+                return true;
+        }
+    }
+    return false;
+}
+
 static void fac_job_fill(struct fac_job *jb, const struct json_value *row,
                          int64_t seq)
 {
@@ -294,6 +396,9 @@ static void fac_job_fill(struct fac_job *jb, const struct json_value *row,
     const char *cwd = fac_text(row, "cwd");
     const char *tree = fac_text(row, "tree");
     memset(jb, 0, sizeof(*jb));
+    jb->slot = -1;
+    jb->parallel = fac_has_j(cmd);
+    jb->cwd_off = strlen(tree) + strlen(cmd) + 2;
     jb->cls = fac_classify(cmd);
     jb->lander = strstr(cmd, "land drive") || strstr(cmd, "land step");
     jb->lane_side = jb->cls == FAC_LINT && !strstr(cwd, "/dev/land/wt");
@@ -315,6 +420,7 @@ static bool fac_job_line(const char *line, size_t len, void *ctx,
     struct fac_jobs *j = ctx;
     struct json_value row;
     double queued;
+    int64_t idx, slot;
     json_init(&row);
     if (!json_read(&row, line, len) || row.type != JSON_OBJ ||
         !fac_num(json_get(&row, "queued"), &queued)) {
@@ -322,6 +428,9 @@ static bool fac_job_line(const char *line, size_t len, void *ctx,
         json_free(&row);
         return true;
     }
+    idx = j->rows;
+    fac_inc(&j->rows);
+    slot = fac_cwd_slot(j, fac_text(&row, "cwd"), queued, idx);
     if (strcmp(fac_text(&row, "project"), "z23") == 0 &&
         queued >= j->window_start) {
         if (j->n >= FAC_MAX_JOBS) {
@@ -335,6 +444,8 @@ static bool fac_job_line(const char *line, size_t len, void *ctx,
             return false;
         }
         fac_job_fill(&j->v[j->n], &row, (int64_t)j->n);
+        j->v[j->n].ledger_idx = idx;
+        j->v[j->n].slot = slot;
         j->n++;
     }
     json_free(&row);
@@ -346,6 +457,23 @@ static void fac_jobs_free(struct fac_jobs *j)
     for (size_t i = 0; i < j->n; i++)
         free(j->v[i].key);
     free(j->v);
+    if (j->cwds)
+        for (size_t s = 0; s < FAC_CWD_SLOTS; s++)
+            free(j->cwds[s].cwd);
+    free(j->cwds);
+}
+
+/* Mark each window job that is the earliest ledger row of its cwd. */
+static void fac_mark_first(struct fac_jobs *j)
+{
+    for (size_t i = 0; i < j->n; i++) {
+        struct fac_job *jb = &j->v[i];
+        const struct fac_cwd *e;
+        if (jb->slot < 0)
+            continue;
+        e = &j->cwds[jb->slot];
+        jb->first = e->queued == jb->queued && e->idx == jb->ledger_idx;
+    }
 }
 
 static void fac_class_stats(const struct fac_jobs *j, int cls, double *w,
@@ -398,14 +526,6 @@ static int fac_cmp_job_queued(const void *a, const void *b)
     if (x->queued != y->queued)
         return x->queued < y->queued ? -1 : 1;
     return (x->seq > y->seq) - (x->seq < y->seq);
-}
-
-static uint64_t fac_hash(const char *s)
-{
-    uint64_t h = 1469598103934665603ull;
-    for (; *s; s++)
-        h = (h ^ (unsigned char)*s) * 1099511628211ull;
-    return h;
 }
 
 /* Index of the slot holding `key`, or the empty slot where it belongs. */
@@ -511,6 +631,268 @@ static void fac_lane_lint(const struct fac_jobs *j, struct json_value *out)
     fac_attach(out, "lane_lint", &ll);
 }
 
+/* Run times of the window jobs with first == want_first, in class cls (any
+ * class when cls < 0), sorted into r. Returns the count and sets *sum. */
+static size_t fac_collect_run(const struct fac_jobs *j, bool want_first,
+                              int cls, double *r, double *sum)
+{
+    size_t n = 0;
+    *sum = 0;
+    for (size_t i = 0; i < j->n; i++) {
+        const struct fac_job *jb = &j->v[i];
+        if (jb->first != want_first || (cls >= 0 && jb->cls != cls))
+            continue;
+        r[n++] = jb->run_s;
+        *sum += jb->run_s;
+    }
+    qsort(r, n, sizeof(*r), fac_cmp_double);
+    return n;
+}
+
+static void fac_run_emit(struct json_value *out, const char *key,
+                         const double *r, size_t n, double sum)
+{
+    struct json_value one;
+    fac_new_obj(&one);
+    (void)json_push_kv_int(&one, "n", (int64_t)n);
+    (void)json_push_kv_real(&one, "run_p50_s", fac_pct(r, n, 0.50));
+    (void)json_push_kv_real(&one, "run_p95_s", fac_pct(r, n, 0.95));
+    (void)json_push_kv_real(&one, "run_sum_s", sum);
+    fac_attach(out, key, &one);
+}
+
+/* The first job per cwd against the rest, by run time. */
+static void fac_first_report(const struct fac_jobs *j, double *r,
+                             struct json_value *out)
+{
+    struct json_value fp;
+    double sum = 0;
+    size_t n;
+    fac_new_obj(&fp);
+    n = fac_collect_run(j, true, -1, r, &sum);
+    fac_run_emit(&fp, "first", r, n, sum);
+    n = fac_collect_run(j, false, -1, r, &sum);
+    fac_run_emit(&fp, "non_first", r, n, sum);
+    (void)json_push_kv_int(&fp, "tracked_cwds", (int64_t)j->ncwds);
+    (void)json_push_kv_bool(&fp, "cwd_cap_hit", j->cwd_cap_hit);
+    fac_attach(out, "first_job_per_cwd", &fp);
+}
+
+/* Proxy for cold-build seconds: each first job's run time above the median
+ * run time of the non-first jobs of its class. A first job whose class has
+ * no non-first job has no baseline and adds nothing (counted in
+ * *unbaselined). */
+static double fac_cold_estimate(const struct fac_jobs *j, double *r,
+                                int64_t *unbaselined)
+{
+    double total = 0;
+    for (int c = 0; c < FAC_NCLASS; c++) {
+        double sum = 0;
+        size_t n = fac_collect_run(j, false, c, r, &sum);
+        double base = fac_pct(r, n, 0.50);
+        for (size_t i = 0; i < j->n; i++) {
+            const struct fac_job *jb = &j->v[i];
+            if (!jb->first || jb->cls != c)
+                continue;
+            if (n == 0)
+                fac_inc(unbaselined);
+            else if (jb->run_s > base)
+                total += jb->run_s - base;
+        }
+    }
+    return total;
+}
+
+static void fac_first_section(const struct fac_jobs *j, struct json_value *out)
+{
+    double *r = zcl_malloc((j->n + 1) * sizeof(*r), "dev_factory_first");
+    double est;
+    int64_t unbaselined = 0;
+    if (!r)
+        return;
+    fac_first_report(j, r, out);
+    est = fac_cold_estimate(j, r, &unbaselined);
+    (void)json_push_kv_real(out, "cold_build_seconds_estimate", est);
+    (void)json_push_kv_str(out, "cold_build_basis", "proxy");
+    (void)json_push_kv_int(out, "cold_build_unbaselined_first_jobs",
+                           unbaselined);
+    free(r);
+}
+
+/* Cold t-fast builds: a t-fast or t-fast-exact run whose cpu_s exceeds
+ * FAC_COLD_CPU_S. Reports the count, their total run time, how many ran
+ * without -j, and the warm t-fast runs at or below the threshold. */
+static void fac_cold_section(const struct fac_jobs *j, struct json_value *out)
+{
+    int64_t cold = 0, serial = 0, warm = 0;
+    double run_sum = 0;
+    for (size_t i = 0; i < j->n; i++) {
+        const struct fac_job *jb = &j->v[i];
+        if (jb->cls != FAC_T_FAST)
+            continue;
+        if (jb->cpu_s > FAC_COLD_CPU_S) {
+            fac_inc(&cold);
+            run_sum += jb->run_s;
+            if (!jb->parallel)
+                fac_inc(&serial);
+        } else {
+            fac_inc(&warm);
+        }
+    }
+    (void)json_push_kv_real(out, "cold_t_fast_cpu_threshold_s",
+                            FAC_COLD_CPU_S);
+    (void)json_push_kv_int(out, "cold_t_fast_n", cold);
+    (void)json_push_kv_real(out, "cold_t_fast_run_s", run_sum);
+    (void)json_push_kv_int(out, "cold_t_fast_without_j", serial);
+    (void)json_push_kv_int(out, "warm_t_fast_n", warm);
+}
+
+/* ── failed runs named by a test verdict ─────────────────────────────────── */
+
+struct fac_name {
+    char key[FAC_NAME];
+    int64_t n;
+};
+
+struct fac_verdict {
+    int64_t named, unnamed, overflow;
+    size_t nn;
+    struct fac_name names[FAC_MAX_NAMES];
+};
+
+static void fac_verdict_note(struct fac_verdict *v, const char *name)
+{
+    for (size_t i = 0; i < v->nn; i++) {
+        if (strcmp(v->names[i].key, name) == 0) {
+            fac_inc(&v->names[i].n);
+            return;
+        }
+    }
+    if (v->nn >= FAC_MAX_NAMES) {
+        fac_inc(&v->overflow);
+        return;
+    }
+    (void)snprintf(v->names[v->nn].key, sizeof(v->names[v->nn].key), "%s",
+                   name);
+    v->names[v->nn].n = 1;
+    v->nn++;
+}
+
+/* Read `<cwd>/build/test-verdict.json`, a JSON object. False when absent,
+ * oversized or not an object; doc is then not to be freed. */
+static bool fac_verdict_read(const char *cwd, struct json_value *doc)
+{
+    char path[FAC_PATH + 32];
+    char *buf;
+    FILE *fp;
+    size_t len = 0;
+    bool ok = false;
+    if (snprintf(path, sizeof(path), "%s/build/test-verdict.json", cwd) >=
+        (int)sizeof(path))
+        return false;
+    fp = fopen(path, "r");
+    if (!fp)
+        return false;
+    buf = zcl_malloc(FAC_VERDICT_MAX + 1u, "dev_factory_verdict");
+    if (buf) {
+        len = fread(buf, 1, FAC_VERDICT_MAX + 1u, fp);
+        if (len <= FAC_VERDICT_MAX) {
+            json_init(doc);
+            ok = json_read(doc, buf, len) && doc->type == JSON_OBJ;
+            if (!ok)
+                json_free(doc);
+        }
+        free(buf);
+    }
+    (void)fclose(fp);
+    return ok;
+}
+
+/* ended_unix within the skew of the run's own end time. */
+static bool fac_verdict_match(const struct json_value *doc, double ended)
+{
+    double vu = 0, d;
+    if (!fac_num(json_get(doc, "ended_unix"), &vu))
+        return false;
+    d = vu - ended;
+    return d <= FAC_VERDICT_SKEW_S && d >= -FAC_VERDICT_SKEW_S;
+}
+
+/* Note each non-empty string of failed_groups; true when there was one. */
+static bool fac_verdict_names(const struct json_value *doc,
+                              struct fac_verdict *v)
+{
+    const struct json_value *arr = json_get(doc, "failed_groups");
+    bool any = false;
+    if (!arr || arr->type != JSON_ARR)
+        return false;
+    for (size_t i = 0; i < json_size(arr); i++) {
+        const struct json_value *s = json_at(arr, i);
+        const char *name = s && s->type == JSON_STR ? json_get_str(s) : NULL;
+        if (name && name[0]) {
+            fac_verdict_note(v, name);
+            any = true;
+        }
+    }
+    return any;
+}
+
+/* A failed run is named when its cwd's verdict ended with it and names at
+ * least one failed group; any other failed run is unnamed. */
+static void fac_verdict_job(const struct fac_job *jb, struct fac_verdict *v)
+{
+    struct json_value doc;
+    const char *cwd;
+    bool named = false;
+    if (jb->rc == 0)
+        return;
+    cwd = jb->key ? jb->key + jb->cwd_off : "";
+    if (cwd[0] && fac_verdict_read(cwd, &doc)) {
+        named = fac_verdict_match(&doc, jb->ended) && fac_verdict_names(&doc, v);
+        json_free(&doc);
+    }
+    if (named)
+        fac_inc(&v->named);
+    else
+        fac_inc(&v->unnamed);
+}
+
+static int fac_cmp_name(const void *a, const void *b)
+{
+    const struct fac_name *x = a, *y = b;
+    if (x->n != y->n)
+        return x->n > y->n ? -1 : 1;
+    return strcmp(x->key, y->key);
+}
+
+static void fac_failed_section(const struct fac_jobs *j, struct json_value *out)
+{
+    struct fac_verdict *v = zcl_calloc(1, sizeof(*v), "dev_factory_verdicts");
+    struct json_value names;
+    size_t shown;
+    if (!v)
+        return;
+    for (size_t i = 0; i < j->n; i++)
+        fac_verdict_job(&j->v[i], v);
+    (void)json_push_kv_int(out, "failed_runs_named", v->named);
+    (void)json_push_kv_int(out, "failed_runs_unnamed", v->unnamed);
+    qsort(v->names, v->nn, sizeof(*v->names), fac_cmp_name);
+    json_init(&names);
+    json_set_array(&names);
+    shown = v->nn < FAC_TOP ? v->nn : FAC_TOP;
+    for (size_t i = 0; i < shown; i++) {
+        struct json_value row;
+        fac_new_obj(&row);
+        (void)json_push_kv_str(&row, "group", v->names[i].key);
+        (void)json_push_kv_int(&row, "n", v->names[i].n);
+        (void)json_push_back(&names, &row);
+        json_free(&row);
+    }
+    fac_attach(out, "failed_groups", &names);
+    (void)json_push_kv_int(out, "failed_groups_overflow", v->overflow);
+    free(v);
+}
+
 static void fac_jobs_report(struct fac_jobs *j, double now, double window_s,
                             struct json_value *out)
 {
@@ -528,6 +910,9 @@ static void fac_jobs_report(struct fac_jobs *j, double now, double window_s,
                                 lanes * 100.0 / (FAC_LANES * window_s));
     }
     fac_lane_lint(j, out);
+    fac_first_section(j, out);
+    fac_cold_section(j, out);
+    fac_failed_section(j, out);
 }
 
 static void fac_jobs_section(double now, double window_s,
@@ -537,15 +922,19 @@ static void fac_jobs_section(double now, double window_s,
     struct fac_src src = {0};
     char path[FAC_PATH];
     j.window_start = now - window_s;
-    if (!fac_path(getenv("ZCL_DEV_FACTORY_JOBS"),
+    j.cwds = zcl_calloc(FAC_CWD_SLOTS, sizeof(*j.cwds), "dev_factory_cwds");
+    if (!j.cwds ||
+        !fac_path(getenv("ZCL_DEV_FACTORY_JOBS"),
                   ".local/state/development/devbuild.jobs.jsonl", path,
                   sizeof(path)))
         src.absent = true;
     else
         (void)fac_each_line(path, fac_job_line, &j, &src);
     fac_push_src(out, &src);
-    if (!src.absent && !src.refused_rows)
+    if (!src.absent && !src.refused_rows) {
+        fac_mark_first(&j);
         fac_jobs_report(&j, now, window_s, out);
+    }
     fac_jobs_free(&j);
 }
 
