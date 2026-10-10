@@ -67,6 +67,139 @@ static bool bdl_write_file(const char *path, const char *text)
     return fclose(f) == 0;
 }
 
+#define BDL_BEACON_CAP (64 * 1024)
+
+/* Reads a whole regular file into out. st receives the stat taken before the
+ * read; out_len is the byte count. Fails when the file is missing, empty,
+ * 64 KiB or larger, or short-read. */
+static bool bdl_read_beacon(const char *path, char *out, size_t *out_len,
+                            struct stat *st)
+{
+    if (stat(path, st) != 0 || !S_ISREG(st->st_mode))
+        return false;
+    if (st->st_size <= 0 || st->st_size >= BDL_BEACON_CAP)
+        return false;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    size_t want = (size_t)st->st_size;
+    size_t n = fread(out, 1, want, f);
+    fclose(f);
+    *out_len = n;
+    return n == want;
+}
+
+/* Owner child: take the lock, report it, hold until released, then exit. */
+static void bdl_owner_hold(const char *dir, int ready_w, int release_r)
+{
+    bool locked = boot_datadir_lock_acquire(dir);
+    char ready = locked ? '1' : '0';
+    (void)!write(ready_w, &ready, 1);
+    close(ready_w);
+    if (locked) {
+        char release = 0;
+        (void)!read(release_r, &release, 1);
+        boot_datadir_lock_release();
+    }
+    close(release_r);
+    _exit(locked ? 0 : 1);
+}
+
+static void bdl_close_fds(int ready[2], int release[2])
+{
+    for (int i = 0; i < 2; i++) {
+        if (ready[i] >= 0) close(ready[i]);
+        if (release[i] >= 0) close(release[i]);
+    }
+}
+
+struct bdl_beacon_probe {
+    bool beacon_read;
+    bool parent_refused;
+    bool beacon_stable;
+};
+
+/* Parent side: snapshot the owner's beacon, make the refused acquire, then
+ * prove the beacon is byte-, inode- and mtime-identical afterwards. */
+static void bdl_probe_refusal(const char *dir, const char *beacon_path,
+                              struct bdl_beacon_probe *out)
+{
+    static char before[BDL_BEACON_CAP];
+    static char after[BDL_BEACON_CAP];
+    struct stat probe;
+    if (stat(beacon_path, &probe) != 0)
+        (void)bdl_write_file(beacon_path,
+            "{\"schema\":\"zcl.boot_status.v1\",\"stage_ordinal\":9,"
+            "\"serving\":true}\n");
+    struct stat before_st;
+    size_t before_len = 0;
+    out->beacon_read = bdl_read_beacon(beacon_path, before, &before_len,
+                                       &before_st);
+    out->parent_refused = !boot_datadir_lock_acquire(dir);
+    struct stat after_st;
+    size_t after_len = 0;
+    bool after_read = bdl_read_beacon(beacon_path, after, &after_len,
+                                      &after_st);
+    out->beacon_stable = out->beacon_read && after_read &&
+                         after_len == before_len &&
+                         memcmp(before, after, before_len) == 0 &&
+                         after_st.st_ino == before_st.st_ino &&
+                         after_st.st_mtime == before_st.st_mtime;
+}
+
+/* A live owner holds the datadir and has published its beacon. A second
+ * process is refused, and the refused attempt must not replace or rewrite the
+ * owner's boot_status.json: same bytes, same inode, same mtime. */
+static int test_boot_datadir_lock_owner_beacon_stable(void)
+{
+    int failures = 0;
+
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "owner_beacon");
+    char beacon_path[512];
+    snprintf(beacon_path, sizeof(beacon_path), "%s/boot_status.json", dir);
+    int ready_pipe[2] = {-1, -1};
+    int release_pipe[2] = {-1, -1};
+    bool pipes_ok = pipe(ready_pipe) == 0 && pipe(release_pipe) == 0;
+    pid_t child = pipes_ok ? fork() : -1;
+    if (child == 0) {
+        close(ready_pipe[0]);
+        close(release_pipe[1]);
+        bdl_owner_hold(dir, ready_pipe[1], release_pipe[0]);
+    }
+
+    bool owner_ready = false;
+    bool child_clean = false;
+    struct bdl_beacon_probe probe = {false, false, false};
+    if (child > 0) {
+        close(ready_pipe[1]);
+        close(release_pipe[0]);
+        char ready = 0;
+        owner_ready = read(ready_pipe[0], &ready, 1) == 1 && ready == '1';
+        close(ready_pipe[0]);
+        if (owner_ready)
+            bdl_probe_refusal(dir, beacon_path, &probe);
+        char release = '1';
+        if (owner_ready)
+            (void)!write(release_pipe[1], &release, 1);
+        close(release_pipe[1]);
+        int status = 0;
+        child_clean = waitpid(child, &status, 0) == child &&
+                      WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    } else {
+        bdl_close_fds(ready_pipe, release_pipe);
+    }
+    BDL_CHECK("owner beacon is readable, non-empty and under 64 KiB",
+              pipes_ok && owner_ready && probe.beacon_read);
+    BDL_CHECK("second acquire is refused while the owner holds the datadir",
+              probe.parent_refused);
+    BDL_CHECK("refused acquire leaves owner beacon byte, inode and mtime intact",
+              probe.beacon_stable);
+    BDL_CHECK("owner releases cleanly after the refusal", child_clean);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int test_boot_datadir_lock_platform_arm(void)
 {
     int failures = 0;
@@ -422,6 +555,8 @@ static int test_boot_datadir_lock_platform_arm(void)
                   pipes_ok && holder_named);
         test_rm_rf_recursive(dir);
     }
+
+    failures += test_boot_datadir_lock_owner_beacon_stable();
 
     boot_error_reset_for_testing();
     return failures;
