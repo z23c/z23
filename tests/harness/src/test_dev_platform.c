@@ -3863,7 +3863,19 @@ static bool dp_probe_select_fixture(void)
            dp_probe_select_one("{\"so_path\":\"/opt/x.so\"}", true, NULL,
                                false, "/opt/x.so", NULL) &&
            dp_probe_select_one("{\"source_tu\":\"a.c\"}", true, NULL, false,
-                               NULL, "a.c");
+                               NULL, "a.c") &&
+           dp_probe_select_one("{\"source_tu\":7}", false,
+                               "source_tu must be a non-empty string", false,
+                               NULL, NULL) &&
+           dp_probe_select_one("{\"source_tu\":\"\"}", false,
+                               "source_tu must be a non-empty string", false,
+                               NULL, NULL) &&
+           dp_probe_select_one("{\"source_tu\":null}", false,
+                               "source_tu must be a non-empty string", false,
+                               NULL, NULL) &&
+           dp_probe_select_one("{\"so_path\":7}", false,
+                               "so_path must be a non-empty string", false,
+                               NULL, NULL);
 }
 
 #define DP_PROBE_SERVICE \
@@ -3920,7 +3932,11 @@ static bool dp_probe_diagnostic_json(const struct zcl_command_reply *reply)
               strcmp(json_get_str(json_get(&again, "built_from")),
                      DP_PROBE_SERVICE) == 0 &&
               strstr(json_get_str(json_get(&again, "build_output")),
-                     "error") != NULL;
+                     "error") != NULL &&
+              /* Observed: the compiler prefixes each diagnostic with the
+               * source path, so the broken fixture's basename is present. */
+              strstr(json_get_str(json_get(&again, "build_output")),
+                     strrchr(DP_PROBE_SERVICE, '/') + 1) != NULL;
     json_free(&again);
     return ok;
 }
@@ -4020,12 +4036,22 @@ static bool dp_probe_build_cases(const char *root, const char *cache)
 {
     char canonical[PATH_MAX];
     struct dp_env_scope cache_env = {0}, proc_env = {0};
-    bool ok = dp_env_scope_set(&cache_env, "ZCL_DEV_ARTIFACT_CACHE", cache) &&
-              dp_env_scope_set(&proc_env, "ZCL_DEVLOOP_TEST_PROCESS", "1") &&
-              dp_probe_fixture_init(root, canonical) &&
-              dp_probe_case_builds(canonical) &&
-              dp_probe_case_diagnostic(canonical) &&
-              dp_probe_case_allowlist(canonical);
+    const char *failed = NULL;
+    if (!dp_env_scope_set(&cache_env, "ZCL_DEV_ARTIFACT_CACHE", cache) ||
+        !dp_env_scope_set(&proc_env, "ZCL_DEVLOOP_TEST_PROCESS", "1"))
+        failed = "environment";
+    else if (!dp_probe_fixture_init(root, canonical))
+        failed = "fixture_init";
+    else if (!dp_probe_case_builds(canonical))
+        failed = "case_builds";
+    else if (!dp_probe_case_diagnostic(canonical))
+        failed = "case_diagnostic";
+    else if (!dp_probe_case_allowlist(canonical))
+        failed = "case_allowlist";
+    if (failed)
+        fprintf(stderr, "dev_platform: hotswap probe build step '%s' failed\n",
+                failed);
+    bool ok = failed == NULL;
     /* Both scopes restore exactly, whatever the cases did. */
     bool restored = dp_env_scope_restore(&proc_env);
     bool cache_back = dp_env_scope_restore(&cache_env);
@@ -4110,8 +4136,7 @@ static bool dp_probe_e2e_root(const char *root, const char *cwd, bool tamper)
                     "-ffile-prefix-map=%s/%s=/zclassic23 "
                     "-I%s/contexts/commons/services/include "
                     "-I%s/engine/modules/hotswap/include\n"
-                    "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles "
-                    "-Wl,-Bsymbolic\n",
+                    "HOTSWAP_MODULE_LDFLAGS=" DP_HOTSWAP_TEST_LINK_FLAGS "\n",
                     0, cwd, root, cwd, cwd) < (int)sizeof(flags) &&
            dp_mk_write(root, "build/hotswap-fast/flags.env", flags) &&
            dp_probe_e2e_source(root, tamper);
@@ -4161,10 +4186,12 @@ static bool dp_probe_e2e_read(struct json_value *reply, const char *text,
  * never depends on the caller's environment. */
 static bool dp_probe_e2e_run(const char *cwd, const char *root,
                              const char *cache, const char *datadir,
-                             int *exit_code, struct json_value *reply)
+                             int *exit_code, struct json_value *reply,
+                             char *text, size_t text_cap)
 {
     char src_abs[PATH_MAX], cache_abs[PATH_MAX], dd_arg[PATH_MAX + 16];
-    char input[256], text[16384] = {0};
+    char input[256];
+    text[0] = '\0';
     struct dp_env_scope src_env = {0}, cache_env = {0}, proc_env = {0};
     bool timed_out = false;
     if (snprintf(src_abs, sizeof(src_abs), "%s/%s", cwd, root) >=
@@ -4184,7 +4211,7 @@ static bool dp_probe_e2e_run(const char *cwd, const char *root,
                  dp_env_scope_set(&cache_env, "ZCL_DEV_ARTIFACT_CACHE",
                                   cache_abs) &&
                  dp_env_scope_unset(&proc_env, "ZCL_DEVLOOP_TEST_PROCESS");
-    int rc = armed ? zcl_spawn_capture_observed(argv, text, sizeof(text),
+    int rc = armed ? zcl_spawn_capture_observed(argv, text, text_cap,
                                                 DP_PROBE_E2E_DEADLINE_MS,
                                                 &timed_out)
                    : -1;
@@ -4196,7 +4223,7 @@ static bool dp_probe_e2e_run(const char *cwd, const char *root,
         dp_probe_e2e_explain(armed, restored, timed_out, rc);
         return false;
     }
-    return dp_probe_e2e_read(reply, text, sizeof(text));
+    return dp_probe_e2e_read(reply, text, text_cap);
 }
 
 static bool dp_probe_e2e_is_hex64(const char *s)
@@ -4204,32 +4231,61 @@ static bool dp_probe_e2e_is_hex64(const char *s)
     return s && strlen(s) == 64 && strspn(s, "0123456789abcdef") == 64;
 }
 
-/* T1: a correct island is built and probed to stage verified. */
-static bool dp_probe_e2e_verified(const struct json_value *reply)
+/* T1: a correct island is built and probed to stage verified.  Each helper
+ * returns the name of the first check that failed, or NULL. */
+static const char *dp_probe_e2e_identity_check(const struct json_value *data)
+{
+    if (strcmp(json_get_str(json_get(data, "stage")), "verified") != 0)
+        return "stage";
+    if (strcmp(json_get_str(json_get(data, "service_id")),
+               "zcode.passport.view.v1") != 0 ||
+        strcmp(json_get_str(json_get(data, "built_from")),
+               DP_PROBE_E2E_TU) != 0)
+        return "identity";
+    if (!dp_probe_e2e_is_hex64(json_get_str(json_get(data, "artifact_sha256"))))
+        return "hash";
+    return NULL;
+}
+
+static const char *dp_probe_e2e_verified_check(const struct json_value *reply)
 {
     const struct json_value *data = json_get(reply, "data");
-    return json_get_bool(json_get(reply, "ok")) && data &&
-           !strcmp(json_get_str(json_get(data, "stage")), "verified") &&
-           !strcmp(json_get_str(json_get(data, "service_id")),
-                   "zcode.passport.view.v1") &&
-           !strcmp(json_get_str(json_get(data, "built_from")),
-                   DP_PROBE_E2E_TU) &&
-           dp_probe_e2e_is_hex64(
-               json_get_str(json_get(data, "artifact_sha256"))) &&
-           json_get(data, "compile_us") && json_get(data, "link_us") &&
-           json_get_int(json_get(data, "compile_us")) > 0 &&
-           json_get_int(json_get(data, "link_us")) > 0 &&
-           json_get(data, "artifact_cache_hit") != NULL &&
-           !json_get_bool(json_get(data, "artifact_cache_hit"));
+    if (!json_get_bool(json_get(reply, "ok")) || !data)
+        return "ok flag";
+    const char *bad = dp_probe_e2e_identity_check(data);
+    if (bad)
+        return bad;
+    if (!json_get(data, "compile_us") || !json_get(data, "link_us") ||
+        json_get_int(json_get(data, "compile_us")) <= 0 ||
+        json_get_int(json_get(data, "link_us")) <= 0)
+        return "costs";
+    if (json_get(data, "artifact_cache_hit") == NULL ||
+        json_get_bool(json_get(data, "artifact_cache_hit")))
+        return "cache flag";
+    return NULL;
 }
 
 /* T2: one changed answer byte is refused with the frozen test's own text. */
-static bool dp_probe_e2e_refused(const struct json_value *reply)
+static const char *dp_probe_e2e_refused_check(const struct json_value *reply)
 {
     const struct json_value *error = json_get(reply, "error");
-    return !json_get_bool(json_get(reply, "ok")) && error &&
-           strstr(json_get_str(json_get(error, "message")),
-                  "frozen Passport presentation vector 0 failed") != NULL;
+    if (json_get_bool(json_get(reply, "ok")) || !error)
+        return "ok flag";
+    if (!strstr(json_get_str(json_get(error, "message")),
+                "frozen Passport presentation vector 0 failed"))
+        return "error text";
+    return NULL;
+}
+
+/* The first failing check for the case, exit status first; NULL when the
+ * reply is what the case requires. */
+static const char *dp_probe_e2e_first_failure(bool tamper, int rc,
+                                              const struct json_value *reply)
+{
+    if (tamper ? rc == 0 : rc != 0)
+        return "exit status";
+    return tamper ? dp_probe_e2e_refused_check(reply)
+                  : dp_probe_e2e_verified_check(reply);
 }
 
 static bool dp_probe_e2e_case(const char *cwd, const char *tag, bool tamper)
@@ -4249,13 +4305,21 @@ static bool dp_probe_e2e_case(const char *cwd, const char *tag, bool tamper)
         return false;
     }
     struct json_value reply;
+    static char text[16384];
     int rc = -1;
     json_init(&reply);
+    text[0] = '\0';
     bool ran = platform_directory_create(datadir, 0700) == 0 &&
                dp_probe_e2e_root(root, cwd, tamper) &&
-               dp_probe_e2e_run(cwd, root, cache, datadir, &rc, &reply);
-    bool ok = ran && (tamper ? rc != 0 && dp_probe_e2e_refused(&reply)
-                             : rc == 0 && dp_probe_e2e_verified(&reply));
+               dp_probe_e2e_run(cwd, root, cache, datadir, &rc, &reply, text,
+                                sizeof(text));
+    const char *failed =
+        ran ? dp_probe_e2e_first_failure(tamper, rc, &reply) : "run";
+    if (failed)
+        fprintf(stderr,
+                "dev_platform: e2e %s case check '%s' failed: exit %d, "
+                "reply %.300s\n", tag, failed, rc, text);
+    bool ok = !failed;
     json_free(&reply);
     bool root_gone = dp_rm_gone(root);
     bool cache_gone = dp_rm_gone(cache);

@@ -412,6 +412,19 @@ void zcl_native_hotswap_publish_hooks(struct hotswap_publish_hooks *out,
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING — end of the shared publish hooks */
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* A present key must hold a non-empty string; json_get_str() would read a
+ * number, null or "" as an empty path.  Returns the offending key or NULL. */
+static const char *hotswap_probe_bad_key(const struct json_value *input)
+{
+    static const char *const keys[] = {"so_path", "source_tu"};
+    for (size_t i = 0; i < 2; i++) {
+        const struct json_value *v = json_get(input, keys[i]);
+        if (v && (v->type != JSON_STR || json_get_str(v)[0] == '\0'))
+            return keys[i];
+    }
+    return NULL;
+}
+
 /* `dev hotswap probe` takes exactly one of two inputs: an absolute module
  * path (the form that always existed) or a repo-relative source the resident
  * builder compiles first.  The selection and the build half carry no dlopen,
@@ -422,6 +435,16 @@ bool zcl_native_hotswap_probe_select(const struct json_value *input,
                                      struct zcl_command_reply *reply)
 {
     /* json_get_str() reads a missing key as "", so presence is the key. */
+    const char *bad_key = hotswap_probe_bad_key(input);
+    if (bad_key) {
+        char why[96];
+        (void)snprintf(why, sizeof(why),
+                       "%s must be a non-empty string when given", bad_key);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INVALID, "HOTSWAP_BAD_INPUT", "validate", false,
+            false, why, "dev.hotswap.probe");
+        return false;
+    }
     bool have_so = json_get(input, "so_path") != NULL;
     bool have_tu = json_get(input, "source_tu") != NULL;
     *so_path = have_so ? json_get_str(json_get(input, "so_path")) : NULL;
