@@ -1872,7 +1872,9 @@ ZCL_COMMAND_READY_READ(
     "with code, CLAIM with claim). A duplicate case id or a malformed set "
     "line refuses the set. It also reports whether the defect cases are "
     "independent: at most 3 per base change and 8 per class. It reads only "
-    "the named paths and writes nothing.", 32768,
+    "the named paths and writes nothing. A review may carry a raw reply "
+    "instead of findings; its FINDING lines are parsed, and a reply that "
+    "cannot be read is counted and not scored.", 32768,
     "agent,review,score,reviewscore,known-answer,defect,sound",
     "zcl.agent_reviewscore_input.v1", "zcl.agent_reviewscore.v1",
     "set,reviews", "set",

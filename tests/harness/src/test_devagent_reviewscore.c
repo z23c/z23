@@ -12,6 +12,7 @@
 
 #include "command/native_command.h"
 #include "config/command_catalog.h"
+#include "engine/engine_findings.h"
 #include "engine/engine_review_score.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -1016,6 +1017,273 @@ _test_next:;
     return failures;
 }
 
+/* ── the FINDING-line parser, called directly ───────────────────────── */
+
+static struct efd_result ef_run(const char *text, struct efd_finding *out,
+                                size_t cap)
+{
+    struct efd_result r;
+    efd_parse(text, text ? strlen(text) : 0, out, cap, &r);
+    return r;
+}
+
+static bool ef_text_is(const struct efd_finding *f, const char *want)
+{
+    return f->text_len == strlen(want) && memcmp(f->text, want, f->text_len) == 0;
+}
+
+/* F1, F2 */
+static int ef_basic(void)
+{
+    int failures = 0;
+    struct efd_finding f[4];
+    struct efd_result r;
+    TEST("F1: a CHANGE and a CLAIM line among prose are read with exact fields") {
+        r = ef_run("Summary of the review.\n"
+                   "FINDING CHANGE high a.c:12 off by one\n"
+                   "1. MET - the card point\n"
+                   "FINDING CLAIM low docs/x.md:7\n"
+                   "NOT REVIEWED: nothing\n", f, 4);
+        ASSERT_EQ(r.findings, 2);
+        ASSERT_EQ(r.illformed, 0);
+        ASSERT(!r.no_findings && !r.truncated);
+        ASSERT(f[0].kind == ERS_KIND_CHANGE && f[0].severity == EFD_SEV_HIGH);
+        ASSERT_STR_EQ(f[0].path, "a.c");
+        ASSERT_EQ(f[0].line, 12);
+        ASSERT(ef_text_is(&f[0], "off by one"));
+        ASSERT(f[1].kind == ERS_KIND_CLAIM && f[1].severity == EFD_SEV_LOW);
+        ASSERT_STR_EQ(f[1].path, "docs/x.md");
+        ASSERT_EQ(f[1].line, 7);
+        ASSERT_EQ(f[1].text_len, 0);
+        PASS();
+    }
+    TEST("F2: NO FINDINGS alone sets the flag and yields no finding") {
+        r = ef_run("Looks fine.\nNO FINDINGS\n", f, 4);
+        ASSERT(r.no_findings);
+        ASSERT_EQ(r.findings, 0);
+        ASSERT_EQ(r.illformed, 0);
+        r = ef_run("a NO FINDINGS here\nNO FINDINGS.\n no findings\n", f, 4);
+        ASSERT(!r.no_findings);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* F3: each ill-formed variant is counted, never a finding. */
+static int ef_illformed(void)
+{
+    int failures = 0;
+    static const char *const bad[] = {
+        "FINDING CHANGES high a.c:1 x", "FINDING change high a.c:1 x",
+        "FINDING CHANGE urgent a.c:1 x", "FINDING CHANGE High a.c:1 x",
+        "FINDING CHANGE high a.c 1 x", "FINDING CHANGE high a.c:0 x",
+        "FINDING CHANGE high a.c:-3 x", "FINDING CHANGE high a.c:1x x",
+        "FINDING CHANGE high a.c:+1 x", "FINDING CHANGE high a.c: x",
+        "FINDING CHANGE high a.c:99999999999999999999 x",
+        "FINDING CHANGE high a.c:1000000001 x", "FINDING CHANGE high :5 x",
+        "FINDING CHANGE high a:b.c:5 x", "FINDING  CHANGE high a.c:1 x",
+        "FINDING CHANGE  high a.c:1 x", "FINDING CHANGE high", "FINDING CHANGE",
+        "FINDING CHANGE high ", "FINDING ", "FINDING CHANGE high a.c:1\t",
+    };
+    struct efd_finding f[2];
+    char longp[ERS_FILE_MAX + 32];
+    TEST("F3: every ill-formed variant is counted and is not a finding") {
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            struct efd_result r = ef_run(bad[i], f, 2);
+            if (r.findings != 0 || r.illformed != 1)
+                printf("[row %zu: %s] ", i, bad[i]);
+            ASSERT_EQ(r.findings, 0);
+            ASSERT_EQ(r.illformed, 1);
+        }
+        PASS();
+    }
+    TEST("F3: a path of ERS_FILE_MAX bytes is ill-formed, one byte less is not") {
+        char p[ERS_FILE_MAX + 1];
+        memset(p, 'p', ERS_FILE_MAX);
+        p[ERS_FILE_MAX] = '\0';
+        (void)snprintf(longp, sizeof(longp), "FINDING CLAIM low %s:3 t", p);
+        struct efd_result r = ef_run(longp, f, 2);
+        ASSERT_EQ(r.findings, 0);
+        ASSERT_EQ(r.illformed, 1);
+        (void)snprintf(longp, sizeof(longp), "FINDING CLAIM low %s:3 t", p + 1);
+        r = ef_run(longp, f, 2);
+        ASSERT_EQ(r.findings, 1);
+        ASSERT_EQ(strlen(f[0].path), ERS_FILE_MAX - 1);
+        r = ef_run("FINDING CHANGE low a.c:1000000000 t", f, 2);
+        ASSERT_EQ(r.findings, 1);
+        ASSERT_EQ(f[0].line, 1000000000);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* F4, F5 */
+static int ef_layout(void)
+{
+    int failures = 0;
+    struct efd_finding f[4];
+    struct efd_result r;
+    TEST("F4: a FINDING not at column 0 or not followed by a space is ignored") {
+        r = ef_run("  FINDING CHANGE high a.c:1 x\n"
+                   "see FINDING CHANGE high a.c:1 x\n"
+                   "\tFINDING CLAIM low a.c:2 y\n"
+                   "FINDING\nFINDINGS CHANGE high a.c:1 x\n", f, 4);
+        ASSERT_EQ(r.findings, 0);
+        ASSERT_EQ(r.illformed, 0);
+        PASS();
+    }
+    TEST("F5: CRLF line ends and a last line without a newline") {
+        r = ef_run("FINDING CHANGE high a.c:1 x\r\n"
+                   "FINDING CLAIM low b.c:2 y\r\nNO FINDINGS\r\n"
+                   "FINDING CHANGE low c.c:3 tail", f, 4);
+        ASSERT_EQ(r.findings, 3);
+        ASSERT_EQ(r.illformed, 0);
+        ASSERT(r.no_findings);
+        ASSERT(ef_text_is(&f[0], "x"));
+        ASSERT(ef_text_is(&f[2], "tail"));
+        ASSERT_STR_EQ(f[2].path, "c.c");
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* F6, F7, F8 */
+static int ef_bounds(void)
+{
+    int failures = 0;
+    struct efd_finding f[4];
+    struct efd_result r;
+    static const char two[] = "FINDING CHANGE high a.c:12\nFINDING CLAIM low b.c:2 z\n";
+    static const char one[] = "FINDING CHANGE high a.c:1\nFINDING CLAIM low b.c:2 z\n";
+    TEST("F6: nothing at or past len is read") {
+        efd_parse(two, 25, f, 4, &r); /* cut inside the digits: line 1, not 12 */
+        ASSERT_EQ(r.findings, 1);
+        ASSERT_EQ(f[0].line, 1);
+        ASSERT_EQ(f[0].text_len, 0);
+        efd_parse(one, 25, f, 4, &r); /* cut at the newline: the next line is unseen */
+        ASSERT_EQ(r.findings, 1);
+        ASSERT_EQ(r.illformed, 0);
+        efd_parse(one, 1, f, 4, &r);
+        ASSERT_EQ(r.findings, 0);
+        ASSERT_EQ(r.illformed, 0);
+        PASS();
+    }
+    TEST("F7: more findings than capacity set truncated, the count stays exact") {
+        const char *t = "FINDING CHANGE high a.c:1 a\nFINDING CHANGE high a.c:2 b\n"
+                        "FINDING CLAIM low a.c:3 c\n";
+        r = ef_run(t, f, 2);
+        ASSERT_EQ(r.findings, 3);
+        ASSERT(r.truncated);
+        ASSERT_EQ(f[1].line, 2);
+        r = ef_run(t, f, 3);
+        ASSERT(!r.truncated);
+        r = ef_run(t, NULL, 0);
+        ASSERT_EQ(r.findings, 3);
+        ASSERT(r.truncated);
+        PASS();
+    }
+    TEST("F8: empty and NULL text") {
+        memset(&r, 0xff, sizeof(r));
+        efd_parse(NULL, 0, NULL, 0, &r);
+        ASSERT(r.findings == 0 && r.illformed == 0);
+        ASSERT(!r.no_findings && !r.truncated);
+        r = ef_run("", f, 4);
+        ASSERT(r.findings == 0 && r.illformed == 0 && !r.no_findings);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* ── the scorer's second input form: a raw reply ────────────────────── */
+
+#define RS_REPLY(id, text) \
+    "{\"case\":\"" id "\",\"reviewer\":\"r1\",\"reply\":\"" text "\"}\n"
+
+static int rs_reply_defect(const char *root)
+{
+    int failures = 0;
+    struct rs_call c;
+    rs_begin(&c);
+    TEST("S1: a defect reviewed by a reply whose FINDING line hits is caught") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, RS_DEFECT("d1", "code", "k"),
+                        RS_REPLY("d1", "Review.\\nFINDING CHANGE high a.c:12 off by one\\n1. MET")));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "defect_reviews"), 1);
+        ASSERT_EQ(rs_int(&c, "defect_accepted"), 0);
+        ASSERT_EQ(rs_int(&c, "findings_total"), 1);
+        ASSERT_EQ(rs_int(&c, "reviews_unparsed"), 0);
+        PASS();
+    }
+    TEST("S4: an ill-formed FINDING line is unparsed, not scored as a miss") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, RS_DEFECT("d1", "code", "k"),
+                        RS_REPLY("d1", "FINDING CHANGE urgent a.c:12 off by one")));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "reviews_unparsed"), 1);
+        ASSERT_EQ(rs_int(&c, "findings_illformed"), 1);
+        ASSERT_EQ(rs_int(&c, "defect_reviews"), 0);
+        ASSERT_EQ(rs_int(&c, "defect_accepted"), 0);
+        PASS();
+    }
+    TEST("S6: a JSON-escaped multi-line CRLF reply parses its lines") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, RS_DEFECT("d1", "code", "k"),
+                        RS_REPLY("d1", "intro\\r\\nFINDING CLAIM low a.c:300 no\\r\\nFINDING CHANGE medium a.c:11 hit\\r\\n")));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "findings_total"), 2);
+        ASSERT_EQ(rs_int(&c, "defect_accepted"), 0);
+        ASSERT_EQ(rs_int(&c, "reviews_unparsed"), 0);
+        PASS();
+    }
+_test_next:;
+    rs_end(&c);
+    return failures;
+}
+
+static int rs_reply_sound(const char *root)
+{
+    int failures = 0;
+    struct rs_call c;
+    rs_begin(&c);
+    TEST("S2: a sound case with reply NO FINDINGS is reviewed and not rejected") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, RS_SOUND("s1"), RS_REPLY("s1", "All good.\\nNO FINDINGS")));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "sound_reviews"), 1);
+        ASSERT_EQ(rs_int(&c, "sound_rejected"), 0);
+        ASSERT_EQ(rs_int(&c, "reviews_unparsed"), 0);
+        PASS();
+    }
+    TEST("S3: a prose-only reply is unparsed and the sound tally is unchanged") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, RS_SOUND("s1") RS_SOUND("s2"),
+                        RS_REPLY("s1", "NO FINDINGS")
+                        RS_REPLY("s2", "Looks fine to me, nothing to add.")));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "sound_reviews"), 1);
+        ASSERT_EQ(rs_int(&c, "reviews_unparsed"), 1);
+        ASSERT_EQ(rs_int(&c, "findings_illformed"), 0);
+        PASS();
+    }
+    TEST("S5: a review line with both findings and reply is malformed") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, RS_SOUND("s1"),
+                        "{\"case\":\"s1\",\"findings\":[],\"reply\":\"NO FINDINGS\"}\n"));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "reviews_malformed_lines"), 1);
+        ASSERT_EQ(rs_int(&c, "sound_reviews"), 0);
+        PASS();
+    }
+_test_next:;
+    rs_end(&c);
+    return failures;
+}
+
 /* ── T15: the pure rule, no command ─────────────────────────────────── */
 
 static int rs_pure(void)
@@ -1077,6 +1345,12 @@ int test_devagent_reviewscore(void)
     failures += rs_ready(root);
     failures += rs_independence_bounds(root);
     failures += rs_pure();
+    failures += ef_basic();
+    failures += ef_illformed();
+    failures += ef_layout();
+    failures += ef_bounds();
+    failures += rs_reply_defect(root);
+    failures += rs_reply_sound(root);
     (void)test_rm_rf_recursive(root);
     if (failures == 0) printf("test_devagent_reviewscore: all passed\n");
     else printf("test_devagent_reviewscore: %d FAILED\n", failures);

@@ -172,7 +172,11 @@ ENGINE_PROMPT_TEMPLATE(review, task,
     "contradicts it. A change with no change findings but a false claim is "
     "reported as exactly that.")
 ENGINE_PROMPT_TEMPLATE(review, protocol,
-    "Write no files. Your reply is the product.")
+    "Write each finding on its own line, starting at the first column, "
+    "exactly as: FINDING <CHANGE|CLAIM> <high|medium|low> <path>:<line> "
+    "<what is wrong>. If there are none, write the line NO FINDINGS. Lines "
+    "not in that form are not counted. Write no files. Your reply is the "
+    "product.")
 ENGINE_PROMPT_TEMPLATE(review, judging,
     "Return findings only. Do not write accept, approve or reject; the "
     "control side derives the verdict from your findings, separately for "
@@ -629,6 +633,10 @@ ENGINE_PROMPT_TEMPLATE(c23-review-pass, task,
     "its cleanup. For each new test say what production line would have to be "
     "deleted for it to fail. List what you did not read.")
 ENGINE_PROMPT_TEMPLATE(c23-review-pass, protocol,
+    "Write each finding on its own line, starting at the first column, "
+    "exactly as: FINDING <CHANGE|CLAIM> <high|medium|low> <path>:<line> "
+    "<what is wrong>. If there are none, write the line NO FINDINGS. Lines "
+    "not in that form are not counted. "
     "Findings first, most severe first, each with severity, file and line, the "
     "quoted line and why it matters. Then one line per card point. Then NOT "
     "REVIEWED. Mark each finding as about the CHANGE or about a CLAIM. State "

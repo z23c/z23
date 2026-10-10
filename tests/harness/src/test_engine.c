@@ -5142,6 +5142,26 @@ static int case_light_review_pass_kind(void)
     return failures;
 }
 
+/* Both review kinds tell the reviewer the one FINDING line the scorer reads. */
+static int case_review_finding_line(const char *kind)
+{
+    int failures = 0;
+    const char *protocol = engine_prompt_template_body(kind, "protocol");
+    EN_CHECK("review protocol names the FINDING line format",
+             protocol && strstr(protocol, "FINDING <CHANGE|CLAIM>")
+             && strstr(protocol, "<high|medium|low> <path>:<line>"));
+    EN_CHECK("review protocol names the NO FINDINGS line",
+             protocol && strstr(protocol, "NO FINDINGS")
+             && strstr(protocol, "Lines not in that form are not counted"));
+    return failures;
+}
+
+static int case_review_finding_line_kinds(void)
+{
+    return case_review_finding_line("c23-review-pass")
+           + case_review_finding_line("review");
+}
+
 #if !defined(_WIN32)
 
 /* ── the fleet ledger row a finished Claude CLI unit files ───────────────
@@ -5332,6 +5352,7 @@ int test_engine(void)
     failures += case_light_review_pass_kind();
     failures += case_review_pass_no_new_file();
     failures += case_light_card_check_kind();
+    failures += case_review_finding_line_kinds();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }

@@ -19,6 +19,15 @@
  *            {"case","reviewer","findings":[{"kind":"CHANGE"|"CLAIM",
  *             "file","line"}]}
  *            An empty findings array means reviewed, nothing found.
+ *            Instead of "findings" a line may carry "reply":"<raw reply>"
+ *            (never both: that line is malformed). The FINDING lines of the
+ *            reply are read by engine/engine_findings.h. A reply with a
+ *            `NO FINDINGS` line and no finding is reviewed, nothing found. A
+ *            reply with no finding and no such line, with any ill-formed
+ *            FINDING line, or with more findings than DRS_REPLY_MAX is
+ *            counted in reviews_unparsed and NOT scored: it is neither a
+ *            rejection nor an acceptance. Ill-formed lines are counted in
+ *            findings_illformed. Severity is validated, not scored.
  *
  * The rule is engine/engine_review_score.h (pure, reusable). This file only
  * reads the two files, accumulates, and writes the reply. Output members are
@@ -36,6 +45,7 @@
 #include "command/native_command.h"
 
 #include "base/safe_alloc.h"
+#include "engine/engine_findings.h"
 #include "engine/engine_review_score.h"
 #include "json/json.h"
 
@@ -54,6 +64,9 @@
 #define DRS_OVER_MAX 32u
 #define DRS_LINE_NUM_MAX 1000000000
 #define DRS_FOLD_NAME "(other)"
+/* A reply line is under DRS_LINE_MAX bytes and a finding needs 22, so 384
+ * cannot truncate; a truncated parse would still be refused, not scored. */
+#define DRS_REPLY_MAX 384u
 
 enum drs_row { DRS_ROW_OK, DRS_ROW_BAD, DRS_ROW_STOP };
 enum drs_parse { DRS_PARSE_OK, DRS_PARSE_BAD, DRS_PARSE_ALLOC };
@@ -98,6 +111,7 @@ struct drs_tally {
     int64_t defect_reviews, defect_accepted, acc_code, acc_claim;
     int64_t findings_total, findings_discarded;
     int64_t unknown, malformed;
+    int64_t unparsed, illformed;
     struct drs_class classes[DRS_CLASSES_MAX];
     size_t nclasses;
     struct drs_class other;
@@ -596,18 +610,72 @@ static enum drs_row drs_score_known(struct drs_run *run, struct drs_case *cs,
     return DRS_ROW_OK;
 }
 
+/* Score the findings read from a raw reply. A reply that cannot be read as
+ * findings, or as an explicit NO FINDINGS, is counted and not scored. */
+static enum drs_row drs_score_reply(struct drs_run *run, struct drs_case *cs,
+                                    const char *reply)
+{
+    struct efd_finding *p = zcl_malloc(DRS_REPLY_MAX * sizeof(*p),
+                                       "reviewscore_reply");
+    struct ers_finding *f = zcl_malloc(DRS_REPLY_MAX * sizeof(*f),
+                                       "reviewscore_reply_f");
+    if (!p || !f) {
+        free(p);
+        free(f);
+        run->alloc_failed = true;
+        return DRS_ROW_STOP;
+    }
+    struct efd_result res;
+    efd_parse(reply, strlen(reply), p, DRS_REPLY_MAX, &res);
+    run->tally.illformed += (int64_t)res.illformed;
+    if (res.illformed > 0 || res.truncated ||
+        (res.findings == 0 && !res.no_findings)) {
+        run->tally.unparsed++;
+    } else {
+        for (size_t i = 0; i < res.findings; i++)
+            f[i] = (struct ers_finding){p[i].kind, p[i].path, p[i].line};
+        struct ers_result r;
+        ers_score_review(&cs->c, f, res.findings, &r);
+        drs_tally_review(&run->tally, cs, &r);
+        cs->reviews++;
+    }
+    free(p);
+    free(f);
+    return DRS_ROW_OK;
+}
+
+/* Exactly one of "findings" (array) or "reply" (string) per review line. */
+static bool drs_review_form(const struct json_value *row,
+                            const struct json_value **findings,
+                            const char **reply)
+{
+    const struct json_value *rv = json_get(row, "reply");
+    *findings = json_get(row, "findings");
+    *reply = NULL;
+    if (rv && *findings)
+        return false;
+    if (rv) {
+        *reply = drs_str(row, "reply");
+        return *reply != NULL;
+    }
+    return *findings && (*findings)->type == JSON_ARR;
+}
+
 static enum drs_row drs_review_row(void *ctx, const struct json_value *row)
 {
     struct drs_run *run = ctx;
     const char *id = drs_str(row, "case");
-    const struct json_value *findings = json_get(row, "findings");
-    if (!id || !id[0] || !findings || findings->type != JSON_ARR)
+    const struct json_value *findings;
+    const char *reply;
+    if (!id || !id[0] || !drs_review_form(row, &findings, &reply))
         return DRS_ROW_BAD;
     struct drs_case *cs = drs_find(run->set, id);
     if (!cs) {
         run->tally.unknown++;
         return DRS_ROW_OK;
     }
+    if (reply)
+        return drs_score_reply(run, cs, reply);
     return drs_score_known(run, cs, findings);
 }
 
@@ -849,6 +917,8 @@ static bool drs_push_review_counts(struct json_value *data,
            json_push_kv_int(data, "findings_total", t->findings_total) &&
            json_push_kv_int(data, "findings_discarded", t->findings_discarded) &&
            json_push_kv_int(data, "reviews_malformed_lines", t->malformed) &&
+           json_push_kv_int(data, "reviews_unparsed", t->unparsed) &&
+           json_push_kv_int(data, "findings_illformed", t->illformed) &&
            json_push_kv_int(data, "unknown_case_reviews", t->unknown);
 }
 
