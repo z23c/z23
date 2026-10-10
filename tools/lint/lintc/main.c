@@ -244,6 +244,8 @@ static const struct lint_gate k_gates[] = {
     { "check-specialists", check_specialists_run, check_specialists_selftest },
     { "check-shell-host-assumptions", check_shell_host_assumptions_run,
       check_shell_host_assumptions_selftest },
+    { "check-doc-inline-paths", check_doc_inline_paths_run,
+      check_doc_inline_paths_selftest },
     { "check-fleet-airship-rules", check_fleet_airship_rules_run,
       check_fleet_airship_rules_selftest },
     { "check-source-identity-authority", check_source_identity_authority_run,

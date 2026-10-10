@@ -1207,6 +1207,207 @@ int t_no_stray_root_files(void)
  * (3) a tree with no run_lint.sh FAILS rather than reporting clean;
  * (4) the gate is itself in LINT_GATES, run_lint.sh's case table, and
  *     DEFENSIVE_CODING.md's canonical block. */
+/* ── check-doc-inline-paths, C port: the native gate on two generated
+ * fixtures. A clean tree must PASS (exit 0); one seeded dead path must
+ * FAIL (exit 1) and name the doc line it sits on. A fixture has no .git,
+ * so the gate walks it. ─────────────────────────────────────────────── */
+
+enum { DIP_LIB_DIRS = 24, DIP_FILES = 120, DIP_REFS = 210 };
+/* "# Index" is line 1, the DIP_REFS references follow, the seed comes next. */
+#define DIP_SEED_LINE (1 + DIP_REFS + 1)
+
+static int dip_fixture_files(const char *root)
+{
+    char p[PATH_MAX];
+    if (snprintf(p, sizeof p, "%s/lib", root) >= (int)sizeof p || mkdir(p, 0755) != 0)
+        return 1;
+    for (int k = 0; k < DIP_LIB_DIRS; k++) {
+        if (snprintf(p, sizeof p, "%s/lib/m%d", root, k) >= (int)sizeof p
+            || mkdir(p, 0755) != 0)
+            return 1;
+    }
+    for (int j = 0; j < DIP_FILES; j++) {
+        FILE *f = NULL;
+        if (snprintf(p, sizeof p, "%s/lib/m%d/f%d.c", root, j % DIP_LIB_DIRS, j) >= (int)sizeof p)
+            return 1;
+        f = fopen(p, "w");
+        if (!f || fputs("int x;\n", f) < 0 || fclose(f) != 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int dip_fixture_doc(const char *root, int seeded)
+{
+    char p[PATH_MAX];
+    if (snprintf(p, sizeof p, "%s/docs", root) >= (int)sizeof p || mkdir(p, 0755) != 0)
+        return 1;
+    if (snprintf(p, sizeof p, "%s/docs/index.md", root) >= (int)sizeof p)
+        return 1;
+    FILE *f = fopen(p, "w");
+    if (!f || fprintf(f, "# Index\n") < 0)
+        return 1;
+    for (int i = 0; i < DIP_REFS; i++) {
+        int j = i % DIP_FILES;
+        if (fprintf(f, "`lib/m%d/f%d.c`\n", j % DIP_LIB_DIRS, j) < 0) {
+            fclose(f);
+            return 1;
+        }
+    }
+    if (seeded && fprintf(f, "Old flow: `lib/gone/missing.c`\n") < 0) {
+        fclose(f);
+        return 1;
+    }
+    return fclose(f) == 0 ? 0 : 1;
+}
+
+static int dip_run(const char *exe, const char *root, const char *out, int *rc_out)
+{
+    pid_t pid = fork_with_retry();
+    if (pid < 0)
+        return 1;
+    if (pid == 0) {
+        int fd = open(out, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        if (fd < 0 || chdir(root) != 0)
+            _exit(127);
+        (void)dup2(fd, STDOUT_FILENO);
+        (void)dup2(fd, STDERR_FILENO);
+        close(fd);
+        execl(exe, "z23-lint", "check-doc-inline-paths", (char *)NULL);
+        _exit(127);
+    }
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0) {
+        if (errno != EINTR)
+            return 1;
+    }
+    if (!WIFEXITED(st))
+        return 1;
+    *rc_out = WEXITSTATUS(st);
+    return 0;
+}
+
+static int dip_slurp(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 1;
+    size_t n = fread(buf, 1, cap - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return 0;
+}
+
+static void dip_cleanup(const char *root)
+{
+    char p[PATH_MAX];
+    for (int j = 0; j < DIP_FILES; j++) {
+        if (snprintf(p, sizeof p, "%s/lib/m%d/f%d.c", root, j % DIP_LIB_DIRS, j) < (int)sizeof p)
+            unlink(p);
+    }
+    for (int k = 0; k < DIP_LIB_DIRS; k++) {
+        if (snprintf(p, sizeof p, "%s/lib/m%d", root, k) < (int)sizeof p)
+            rmdir(p);
+    }
+    if (snprintf(p, sizeof p, "%s/lib", root) < (int)sizeof p)
+        rmdir(p);
+    if (snprintf(p, sizeof p, "%s/docs/index.md", root) < (int)sizeof p)
+        unlink(p);
+    if (snprintf(p, sizeof p, "%s/docs", root) < (int)sizeof p)
+        rmdir(p);
+    rmdir(root);
+}
+
+struct dip_roots {
+    char tmpl[PATH_MAX], clean[PATH_MAX], seeded[PATH_MAX];
+    char clean_out[PATH_MAX], seeded_out[PATH_MAX];
+};
+
+static int dip_join(char *out, size_t cap, const char *dir, const char *leaf)
+{
+    return snprintf(out, cap, "%s/%s", dir, leaf) >= (int)cap;
+}
+
+static int dip_roots_make(struct dip_roots *R, const char *base)
+{
+    if (snprintf(R->tmpl, sizeof R->tmpl, "%s/doc-inline-paths-XXXXXX", base) >= (int)sizeof R->tmpl
+        || mkdtemp(R->tmpl) == NULL)
+        return 1;
+    if (dip_join(R->clean, sizeof R->clean, R->tmpl, "clean")
+        || dip_join(R->seeded, sizeof R->seeded, R->tmpl, "seeded")
+        || dip_join(R->clean_out, sizeof R->clean_out, R->tmpl, "clean.out")
+        || dip_join(R->seeded_out, sizeof R->seeded_out, R->tmpl, "seeded.out")
+        || mkdir(R->clean, 0755) != 0 || mkdir(R->seeded, 0755) != 0)
+        return 1;
+    return 0;
+}
+
+static int dip_build(const struct dip_roots *R)
+{
+    return dip_fixture_files(R->clean) || dip_fixture_doc(R->clean, 0)
+        || dip_fixture_files(R->seeded) || dip_fixture_doc(R->seeded, 1);
+}
+
+static int dip_expect_clean(const char *exe, const char *root, const char *out,
+                            char *text, size_t cap)
+{
+    int rc = -1;
+    if (dip_run(exe, root, out, &rc) || rc != 0 || dip_slurp(out, text, cap)
+        || !strstr(text, "check_doc_inline_paths: PASS (1 docs scanned, 0 baselined, 0 new)")) {
+        fprintf(stderr, "[lint-gate] check-doc-inline-paths: clean fixture must PASS, got rc=%d\n%s",
+                rc, text);
+        return 1;
+    }
+    return 0;
+}
+
+static int dip_expect_seeded(const char *exe, const char *root, const char *out,
+                             char *text, size_t cap)
+{
+    char want[PATH_MAX];
+    int rc = -1;
+    if (snprintf(want, sizeof want, "docs/index.md:%d -> lib/gone/missing.c", DIP_SEED_LINE)
+        >= (int)sizeof want)
+        return 1;
+    if (dip_run(exe, root, out, &rc) || rc != 1 || dip_slurp(out, text, cap)
+        || !strstr(text, "FAIL") || !strstr(text, want)) {
+        fprintf(stderr, "[lint-gate] check-doc-inline-paths: seeded fixture must FAIL naming line %d, got rc=%d\n%s",
+                DIP_SEED_LINE, rc, text);
+        return 1;
+    }
+    return 0;
+}
+
+static void dip_remove_all(const struct dip_roots *R)
+{
+    dip_cleanup(R->clean);
+    dip_cleanup(R->seeded);
+    unlink(R->clean_out);
+    unlink(R->seeded_out);
+    rmdir(R->tmpl);
+}
+
+static int t_doc_inline_paths_c_gate(void)
+{
+    static char text[16384];
+    char exe[PATH_MAX], base[PATH_MAX];
+    struct dip_roots R;
+    if (repo_path(exe, sizeof exe, "build/bin/z23-lint") != 0
+        || repo_path(base, sizeof base, "test-tmp") != 0)
+        return 1;
+    (void)mkdir(base, 0755);
+    if (dip_roots_make(&R, base))
+        return 1;
+    int fails = dip_build(&R);
+    if (!fails) {
+        text[0] = '\0';
+        fails += dip_expect_clean(exe, R.clean, R.clean_out, text, sizeof text);
+        text[0] = '\0';
+        fails += dip_expect_seeded(exe, R.seeded, R.seeded_out, text, sizeof text);
+    }
+    dip_remove_all(&R);
+    return fails;
+}
 int t_lint_gate_wiring_gate(void)
 {
     int failures = 0;
@@ -1272,6 +1473,7 @@ int t_lint_gate_wiring_gate(void)
         ASSERT(doc_wired);
         PASS();
     } _test_next:;
+    failures += t_doc_inline_paths_c_gate();
     free(makefile_buf);
     free(driver_buf);
     free(doc_buf);

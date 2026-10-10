@@ -6117,6 +6117,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_hex_codec_single_selftest.c \
     tools/lint/lintc/gate_specialists.c \
     tools/lint/lintc/gate_shell_host_assumptions.c \
+    tools/lint/lintc/gate_doc_inline_paths.c \
     tools/lint/lintc/gate_shell_host_assumptions_selftest.c \
     tools/lint/lintc/gate_fleet_airship_rules.c \
     tools/lint/lintc/gate_fleet_airship_rules_parse.c \
@@ -13932,7 +13933,7 @@ check-markdown-links:
 # source path in tracked Markdown, plus every backticked module directory
 # (`lib/consensus`, `app/events`) — a moved module is invisible to a
 # file-extension scan. Shrink-only baseline.
-check-doc-inline-paths:
+check-doc-inline-paths: $(LINTC_TOOL)
 	@echo "══ LINT: inline code paths in Markdown ══"
 	@./tools/lint/check_doc_inline_paths.sh
 

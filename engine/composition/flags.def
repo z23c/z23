@@ -813,9 +813,9 @@ Z23_FLAG("ZCL_DISCARD_GATE_SCAN_GLOB", "env_build", "-", "-",
 Z23_FLAG("ZCL_DOC_CLAIMS_GATE_TIMEOUT", "env_build", "180", "-",
           "undocumented; first use tools/lint/check_doc_claims.sh:auto")
 Z23_FLAG("ZCL_DOC_INLINE_PATHS_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_doc_inline_paths.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_doc_inline_paths.c:717")
 Z23_FLAG("ZCL_DOC_INLINE_PATHS_GLOB", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_doc_inline_paths.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_doc_inline_paths.c:718")
 Z23_FLAG("ZCL_DOCTOR_TSV", "env_build", "-", "-",
           "undocumented; first use tools/scripts/doctor.sh:auto")
 Z23_FLAG("ZCL_DOMAIN_CONTEXTS", "env_build", "-", "-",
