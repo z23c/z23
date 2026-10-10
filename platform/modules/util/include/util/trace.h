@@ -113,6 +113,102 @@ void trace_end(struct trace_span *s);
 bool trace_format_otlp(const struct trace_span *s, uint64_t end_wall_us,
                        char *out, size_t cap);
 
+/* ── OTLP log records ──────────────────────────────────────── */
+
+/* Maximum string attributes on one log record. */
+#define TRACE_LOG_MAX_ATTRS 4
+
+/* OTLP SeverityNumber values; the text is the severityText below. */
+enum trace_log_severity {
+    TRACE_LOG_TRACE = 1,   /* "TRACE" */
+    TRACE_LOG_DEBUG = 5,   /* "DEBUG" */
+    TRACE_LOG_INFO  = 9,   /* "INFO"  */
+    TRACE_LOG_WARN  = 13,  /* "WARN"  */
+    TRACE_LOG_ERROR = 17,  /* "ERROR" */
+    TRACE_LOG_FATAL = 21,  /* "FATAL" */
+};
+
+struct trace_log_attr {
+    const char *key;       /* non-NULL, non-empty */
+    const char *val;       /* non-NULL, may be empty */
+};
+
+/* One log record; every pointer is caller-owned and only read. */
+struct trace_log_record {
+    uint64_t wall_us;               /* wall clock, microseconds since epoch */
+    enum trace_log_severity severity;
+    const char *body;               /* non-NULL, may be empty */
+    const char *trace_id;           /* NULL or "" = absent, else 32 hex chars */
+    const char *span_id;            /* NULL or "" = absent, else 16 hex chars */
+    const char *service;            /* non-NULL, non-empty: service.name */
+    struct trace_log_attr attrs[TRACE_LOG_MAX_ATTRS];
+    int attr_count;                 /* 0..TRACE_LOG_MAX_ATTRS */
+};
+
+/* Write one OTLP/HTTP JSON ExportLogsServiceRequest for `r` into `out`
+ * (NUL-terminated, no whitespace anywhere, returns true).
+ *
+ * Exact shape, fields in exactly this order (<..> are substitutions):
+ *
+ * {"resourceLogs":[{"resource":{"attributes":[{"key":"service.name",
+ * "value":{"stringValue":"<service>"}}]},"scopeLogs":[{"scope":
+ * {"name":"z23"},"logRecords":[{"timeUnixNano":"<ns>",
+ * "severityNumber":<num>,"severityText":"<TEXT>",
+ * "body":{"stringValue":"<body>"},"attributes":[<attrs>]<ids>}]}]}]}
+ *
+ * (shown wrapped; the real output has no newlines or spaces other than
+ * those inside the substituted strings.)
+ *
+ *  - <ns>: wall_us * 1000 as an unsigned decimal string in quotes (the
+ *    proto3 JSON mapping of fixed64), same as trace_format_otlp. If
+ *    wall_us > UINT64_MAX / 1000 return false.
+ *  - <num>: the enum value as a bare JSON integer; <TEXT> is the name
+ *    in the enum comments. Any other severity value returns false.
+ *  - <attrs>: the record attributes in array order, comma separated,
+ *    each exactly {"key":"<k>","value":{"stringValue":"<v>"}}; "attributes"
+ *    is always present, as [] when attr_count is 0.
+ *  - <ids>: after "attributes", in this order and each only when
+ *    present: ,"traceId":"<b64>"  then  ,"spanId":"<b64>". An id is
+ *    base64 (standard alphabet, '=' padding) of its raw bytes, produced
+ *    exactly like trace_otlp_b64 in trace.c (ParseHex + EncodeBase64),
+ *    16 bytes for traceId and 8 for spanId. Either may be present
+ *    without the other.
+ *  - Escaping of service, body, keys and values (as log_json_escape):
+ *    '"' -> \" ; '\\' -> \\ ; \b \f \n \r \t -> those two-char
+ *    escapes ; every other byte < 0x20 -> \u00xx with lowercase hex
+ *    (e.g. 0x01 -> \u0001, 0x1f -> \u001f) ; all other bytes (including
+ *    0x7f and bytes >= 0x80) are copied unchanged.
+ *
+ * Returns false (and never writes past out[cap-1]) when:
+ *  - r or out is NULL, or r->body, r->service or an attribute key or
+ *    value pointer is NULL, or service or a key is empty;
+ *  - attr_count < 0 or > TRACE_LOG_MAX_ATTRS;
+ *  - a non-empty id is not exactly 32 (trace) or 16 (span) characters
+ *    of [0-9a-fA-F] (no spaces, no prefix, no other length);
+ *  - severity or wall_us is out of range as above;
+ *  - the document plus its NUL does not fit in cap, i.e. cap must be at
+ *    least strlen(document) + 1; nothing is truncated silently, so
+ *    over-long text is a refusal too, whatever buffers are used inside.
+ * On every false return with cap > 0, out[0] is set to '\0' (a valid
+ * empty string); with cap == 0 nothing is written. */
+bool trace_format_otlp_log(const struct trace_log_record *r,
+                           char *out, size_t cap);
+
+/* OTLP log mirror: with ZCL_OTLP_LOGS=1, every log_jsonf() line (except
+ * otlp_traces / otlp_logs) is also emitted as one OTLP log record on an
+ * "otlp_logs" line; body = event name.  With the switch on, the rendered
+ * fields ride as ONE escaped string attribute z23.fields (omitted when
+ * empty), not as separate structured attributes.  Fields that do not fit
+ * the 1024-byte OTLP record buffer are replaced by z23.fields_dropped=true
+ * instead.  The hook is installed into log_json at process start by a
+ * constructor, and only when the switch is on; trace_start() also calls
+ * the same install helper.
+ *
+ * Test-only: forget the cached ZCL_OTLP_LOGS value, uninstall the hook,
+ * then re-read the environment and reinstall the hook if the switch is now
+ * on (so a later setenv() takes effect). */
+void trace_otlp_logs_reset_for_testing(void);
+
 /* ── Query ─────────────────────────────────────────────────── */
 
 /* Get the current active span on this thread (top of stack).

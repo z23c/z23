@@ -1714,6 +1714,8 @@ Z23_FLAG("ZCL_ORIENT_FACTS_DIR", "env_build", "engine/composition/facts", "-",
           "tree instead of the real one; first use tools/lint/check_orient_facts.sh:auto")
 Z23_FLAG("ZCL_ORPHAN_PLACEMENT_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_ratchet_ports.c:auto")
+Z23_FLAG("ZCL_OTLP_LOGS", "env_runtime", "-", "-",
+          "undocumented; first use platform/modules/util/src/trace.c:auto")
 Z23_FLAG("ZCL_OWP_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_state_hygiene_fences.c:auto")
 Z23_FLAG("ZCL_PACKAGE_SIGN_BIN", "env_build", "-", "-",

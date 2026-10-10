@@ -81,8 +81,11 @@ static _Thread_local struct trace_tls tls_trace = { .depth = 0 };
 
 /* ── Lifecycle ─────────────────────────────────────────────── */
 
+static void trace_install_log_mirror(void);
+
 struct trace_span *trace_start(const char *operation)
 {
+    trace_install_log_mirror();
     if (!g_trace_enabled) return NULL;
 
     struct trace_span *s = zcl_malloc(sizeof(*s), "trace_span");
@@ -260,6 +263,321 @@ bool trace_format_otlp(const struct trace_span *s, uint64_t end_wall_us,
                      attrs, trace_otlp_status(s->status));
     }
     return n > 0 && (size_t)n < cap;
+}
+
+/* Bounded writer for trace_format_otlp_log: every byte goes through
+ * trace_log_put, which refuses instead of writing past out[cap-1].  The
+ * first refusal sets failed; later writes then do nothing. */
+struct trace_log_out {
+    char *out;
+    size_t cap;
+    size_t n;
+    bool failed;
+};
+
+static void trace_log_put(struct trace_log_out *o, const char *s, size_t len)
+{
+    if (o->failed) return;
+    if (len >= o->cap - o->n) {
+        o->failed = true;
+        return;
+    }
+    memcpy(o->out + o->n, s, len);
+    o->n += len;
+    o->out[o->n] = '\0';
+}
+
+static void trace_log_puts(struct trace_log_out *o, const char *s)
+{
+    trace_log_put(o, s, strlen(s));
+}
+
+/* Two-character escapes named in the header of trace_format_otlp_log. */
+static const struct {
+    char c;
+    char esc;
+} trace_log_esc_table[] = {
+    { '"', '"' }, { '\\', '\\' }, { '\b', 'b' }, { '\f', 'f' },
+    { '\n', 'n' }, { '\r', 'r' }, { '\t', 't' },
+};
+
+/* Escape letter for c, or '\0' when c has no two-character form. */
+static char trace_log_esc_pair(unsigned char c)
+{
+    for (size_t i = 0; i < sizeof(trace_log_esc_table) / sizeof(trace_log_esc_table[0]); i++) {
+        if ((unsigned char)trace_log_esc_table[i].c == c) return trace_log_esc_table[i].esc;
+    }
+    return '\0';
+}
+
+/* Escape s exactly as the header of trace_format_otlp_log specifies. */
+static void trace_log_put_esc(struct trace_log_out *o, const char *s)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    for (; *p; p++) {
+        char tmp[8];
+        size_t len = 1;
+        char esc = trace_log_esc_pair(*p);
+        if (esc) {
+            tmp[0] = '\\';
+            tmp[1] = esc;
+            len = 2;
+        } else if (*p < 0x20) {
+            len = (size_t)snprintf(tmp, sizeof(tmp), "\\u%04x", (unsigned)*p);
+        } else {
+            tmp[0] = (char)*p;
+        }
+        trace_log_put(o, tmp, len);
+    }
+}
+
+static bool trace_log_hex_id(const char *id, size_t want)
+{
+    if (strlen(id) != want) return false;
+    for (size_t i = 0; i < want; i++) {
+        char c = id[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F')))
+            return false;
+    }
+    return true;
+}
+
+static const char *trace_log_severity_text(enum trace_log_severity sev)
+{
+    if (sev == TRACE_LOG_TRACE) return "TRACE";
+    if (sev == TRACE_LOG_DEBUG) return "DEBUG";
+    if (sev == TRACE_LOG_INFO) return "INFO";
+    if (sev == TRACE_LOG_WARN) return "WARN";
+    if (sev == TRACE_LOG_ERROR) return "ERROR";
+    if (sev == TRACE_LOG_FATAL) return "FATAL";
+    return NULL;
+}
+
+static bool trace_log_check_fields(const struct trace_log_record *r)
+{
+    if (!r->body || !r->service || r->service[0] == '\0') return false;
+    if (!trace_log_severity_text(r->severity)) return false;
+    if (r->wall_us > UINT64_MAX / 1000ull) return false;
+    return true;
+}
+
+static bool trace_log_check_attrs(const struct trace_log_record *r)
+{
+    if (r->attr_count < 0 || r->attr_count > TRACE_LOG_MAX_ATTRS) return false;
+    for (int i = 0; i < r->attr_count; i++) {
+        if (!r->attrs[i].key || !r->attrs[i].val || r->attrs[i].key[0] == '\0')
+            return false;
+    }
+    return true;
+}
+
+/* Fills trace_b64 / span_b64 when the matching id is present. */
+static bool trace_log_check_ids(const struct trace_log_record *r,
+                                bool has_trace, bool has_span,
+                                char *trace_b64, size_t trace_cap,
+                                char *span_b64, size_t span_cap)
+{
+    if (has_trace &&
+        (!trace_log_hex_id(r->trace_id, 32) ||
+         !trace_otlp_b64(r->trace_id, 16, trace_b64, trace_cap)))
+        return false;
+    if (has_span &&
+        (!trace_log_hex_id(r->span_id, 16) ||
+         !trace_otlp_b64(r->span_id, 8, span_b64, span_cap)))
+        return false;
+    return true;
+}
+
+static void trace_log_write_head(struct trace_log_out *o,
+                                 const struct trace_log_record *r)
+{
+    char num[32], sev_num[16];
+    snprintf(num, sizeof(num), "%llu",
+             (unsigned long long)(r->wall_us * 1000ull));
+    snprintf(sev_num, sizeof(sev_num), "%d", (int)r->severity);
+    trace_log_puts(o, "{\"resourceLogs\":[{\"resource\":{\"attributes\":"
+                      "[{\"key\":\"service.name\",\"value\":"
+                      "{\"stringValue\":\"");
+    trace_log_put_esc(o, r->service);
+    trace_log_puts(o, "\"}}]},\"scopeLogs\":[{\"scope\":"
+                      "{\"name\":\"z23\"},\"logRecords\":"
+                      "[{\"timeUnixNano\":\"");
+    trace_log_puts(o, num);
+    trace_log_puts(o, "\",\"severityNumber\":");
+    trace_log_puts(o, sev_num);
+    trace_log_puts(o, ",\"severityText\":\"");
+    trace_log_puts(o, trace_log_severity_text(r->severity));
+    trace_log_puts(o, "\",\"body\":{\"stringValue\":\"");
+    trace_log_put_esc(o, r->body);
+    trace_log_puts(o, "\"},\"attributes\":[");
+}
+
+static void trace_log_write_attrs(struct trace_log_out *o,
+                                  const struct trace_log_record *r)
+{
+    for (int i = 0; i < r->attr_count; i++) {
+        if (i) trace_log_puts(o, ",");
+        trace_log_puts(o, "{\"key\":\"");
+        trace_log_put_esc(o, r->attrs[i].key);
+        trace_log_puts(o, "\",\"value\":{\"stringValue\":\"");
+        trace_log_put_esc(o, r->attrs[i].val);
+        trace_log_puts(o, "\"}}");
+    }
+    trace_log_puts(o, "]");
+}
+
+static void trace_log_write_tail(struct trace_log_out *o,
+                                 bool has_trace, bool has_span,
+                                 const char *trace_b64, const char *span_b64)
+{
+    if (has_trace) {
+        trace_log_puts(o, ",\"traceId\":\"");
+        trace_log_puts(o, trace_b64);
+        trace_log_puts(o, "\"");
+    }
+    if (has_span) {
+        trace_log_puts(o, ",\"spanId\":\"");
+        trace_log_puts(o, span_b64);
+        trace_log_puts(o, "\"");
+    }
+    trace_log_puts(o, "}]}]}]}");
+}
+
+/* Returns false when validation refuses the record; write refusals
+ * (buffer full) are reported through o->failed by the caller. */
+static bool trace_log_build(const struct trace_log_record *r,
+                            struct trace_log_out *o)
+{
+    char trace_b64[32] = "", span_b64[24] = "";
+    bool has_trace = r->trace_id && r->trace_id[0] != '\0';
+    bool has_span = r->span_id && r->span_id[0] != '\0';
+    if (!trace_log_check_fields(r)) return false;
+    if (!trace_log_check_attrs(r)) return false;
+    if (!trace_log_check_ids(r, has_trace, has_span,
+                             trace_b64, sizeof(trace_b64),
+                             span_b64, sizeof(span_b64)))
+        return false;
+    trace_log_write_head(o, r);
+    trace_log_write_attrs(o, r);
+    trace_log_write_tail(o, has_trace, has_span, trace_b64, span_b64);
+    return true;
+}
+
+bool trace_format_otlp_log(const struct trace_log_record *r,
+                           char *out, size_t cap)
+{
+    struct trace_log_out o;
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!r) return false;
+    o.out = out;
+    o.cap = cap;
+    o.n = 0;
+    o.failed = false;
+    if (trace_log_build(r, &o) && !o.failed) return true;
+    out[0] = '\0';
+    return false;
+}
+
+/* ── OTLP log mirror (ZCL_OTLP_LOGS=1, off by default) ─────────
+ * Installed into log_json at process start by a constructor, and only
+ * when the switch is on; trace_start() and the test reset call the same
+ * install helper.  Env-flag idiom of trace_verbose(): the switch is
+ * resolved once. */
+static _Atomic int g_otlp_logs = -1;
+static _Atomic bool g_mirror_installed = false;
+
+static bool trace_otlp_logs_enabled(void)
+{
+    int v = g_otlp_logs;
+    if (v < 0) {
+        const char *env = getenv("ZCL_OTLP_LOGS");
+        v = (env && strcmp(env, "1") == 0) ? 1 : 0;
+        g_otlp_logs = v;
+    }
+    return v == 1;
+}
+
+/* Indexed by enum log_json_level. */
+static const enum trace_log_severity trace_log_sev_map[] = {
+    [LOG_JSON_INFO]  = TRACE_LOG_INFO,
+    [LOG_JSON_WARN]  = TRACE_LOG_WARN,
+    [LOG_JSON_ERROR] = TRACE_LOG_ERROR,
+};
+
+static enum trace_log_severity trace_log_sev_of(enum log_json_level level)
+{
+    if ((unsigned)level >= sizeof(trace_log_sev_map) / sizeof(trace_log_sev_map[0]))
+        return TRACE_LOG_INFO;
+    return trace_log_sev_map[level];
+}
+
+/* Format r and emit it as an otlp_logs line; false when it did not fit. */
+static bool trace_log_emit(const struct trace_log_record *r)
+{
+    char doc[1024];
+    if (!trace_format_otlp_log(r, doc, sizeof(doc))) return false;
+    log_jsonf(LOG_JSON_INFO, "otlp_logs", "\"otlp\":%s", doc);
+    return true;
+}
+
+/* log_json mirror hook: body is the event name, the rendered fields text
+ * rides as one z23.fields attribute.  If that does not fit the record
+ * goes out with z23.fields_dropped=true instead; if even that does not
+ * fit nothing is emitted.  OTLP export lines are never mirrored. */
+static void trace_log_mirror(enum log_json_level level, const char *event,
+                             const char *fields)
+{
+    if (!trace_otlp_logs_enabled()) return;
+    if (strcmp(event, "otlp_traces") == 0 || strcmp(event, "otlp_logs") == 0)
+        return;
+    const struct trace_span *sp = trace_current();
+    int64_t now = platform_time_realtime_us();
+    struct trace_log_record r = {
+        .wall_us = now > 0 ? (uint64_t)now : 0,
+        .severity = trace_log_sev_of(level),
+        .body = event,
+        .trace_id = sp ? sp->trace_id : NULL,
+        .span_id = sp ? sp->span_id : NULL,
+        .service = "z23",
+    };
+    if (fields[0] == '\0') {
+        (void)trace_log_emit(&r);
+        return;
+    }
+    r.attrs[0] = (struct trace_log_attr){ "z23.fields", fields };
+    r.attr_count = 1;
+    if (trace_log_emit(&r)) return;
+    r.attrs[0] = (struct trace_log_attr){ "z23.fields_dropped", "true" };
+    (void)trace_log_emit(&r);
+}
+
+/* Installs the hook only when the switch is on, so with it off log_jsonf()
+ * pays one pointer load and nothing else.  The flag is set after the hook
+ * is in place. */
+static void trace_install_log_mirror(void)
+{
+    if (g_mirror_installed) return;
+    if (!trace_otlp_logs_enabled()) return;
+    log_json_set_mirror(trace_log_mirror);
+    g_mirror_installed = true;
+}
+
+/* Process start: reads the switch once and installs the hook only if it
+ * is on.  Same form as the constructor in engine/composition/src/runtime.c. */
+__attribute__((constructor))
+static void trace_otlp_logs_ctor(void)
+{
+    trace_install_log_mirror();
+}
+
+void trace_otlp_logs_reset_for_testing(void)
+{
+    g_otlp_logs = -1;
+    g_mirror_installed = false;
+    log_json_set_mirror(NULL);
+    trace_install_log_mirror();
 }
 
 void trace_end(struct trace_span *s)

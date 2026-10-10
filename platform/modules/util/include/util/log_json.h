@@ -71,6 +71,18 @@ ZCL_PRINTF_LIKE(3, 4)
 void log_jsonf(enum log_json_level level, const char *event,
                 const char *fields_fmt, ...);
 
+/* Mirror hook: called by log_jsonf() after it emitted its own line.
+ * `event` is a copy truncated to 63 bytes (never NULL); `fields` is the
+ * rendered fields text (possibly empty, never NULL), both valid only
+ * during the call.  A log_jsonf() made from inside the hook is not
+ * mirrored again.  NULL (the default) disables mirroring; the setter is
+ * atomic and costs log_jsonf() one pointer load when unset.  The OTLP
+ * mirror (trace.h) passes its fields text on as one z23.fields string.
+ * A mirrored log call uses roughly 9 KB of stack on the logging thread. */
+typedef void (*log_json_mirror_fn)(enum log_json_level level,
+                                   const char *event, const char *fields);
+void log_json_set_mirror(log_json_mirror_fn fn);
+
 /* JSON-escape `in` into `out`.  Writes at most cap-1 bytes plus a NUL.
  * Returns the number of bytes written (excluding the NUL). */
 size_t log_json_escape(char *out, size_t cap, const char *in);

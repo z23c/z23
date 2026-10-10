@@ -7,6 +7,9 @@
 #include "util/log_json.h"
 #include "util/util.h"
 
+#include <stdatomic.h>
+#include <stdbool.h>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -78,7 +81,7 @@ done:
  * unit tests (via log_json_format()). */
 static size_t format_v(char *buf, size_t cap, enum log_json_level level,
                         const char *event, const char *fields_fmt,
-                        va_list ap)
+                        va_list ap, char *fields, size_t fields_cap)
 {
     if (!buf || cap == 0) return 0;
 
@@ -101,10 +104,9 @@ static size_t format_v(char *buf, size_t cap, enum log_json_level level,
      * we know whether to emit a leading comma between "event" and the
      * fields.  An empty fields_fmt or fmt that produces nothing skips
      * the comma entirely. */
-    char fields[1536];
     fields[0] = '\0';
     if (fields_fmt && *fields_fmt) {
-        int fn = vsnprintf(fields, sizeof(fields), fields_fmt, ap);
+        int fn = vsnprintf(fields, fields_cap, fields_fmt, ap);
         if (fn < 0) fields[0] = '\0';
     }
 
@@ -126,23 +128,56 @@ static size_t format_v(char *buf, size_t cap, enum log_json_level level,
     return (size_t)n;
 }
 
+/* ── Mirror hook ───────────────────────────────────────────────
+ * One optional observer of every emitted line (NULL by default; the
+ * trace module installs the OTLP log mirror).  Hook-off cost on the log
+ * path is one atomic pointer load. */
+static _Atomic(log_json_mirror_fn) g_mirror = NULL;
+
+/* Set while the hook runs, so a line it emits is not mirrored again. */
+static _Thread_local bool tls_mirroring = false;
+
+void log_json_set_mirror(log_json_mirror_fn fn)
+{
+    g_mirror = fn;
+}
+
+static void log_json_mirror(log_json_mirror_fn fn, enum log_json_level level,
+                            const char *event, const char *fields)
+{
+    char ev[64];
+    if (tls_mirroring) return;
+    snprintf(ev, sizeof(ev), "%s", event ? event : "");
+    tls_mirroring = true;
+    fn(level, ev, fields);
+    tls_mirroring = false;
+}
+
 void log_jsonf(enum log_json_level level, const char *event,
                 const char *fields_fmt, ...)
 {
     char line[2048];
+    char fields[1536];
     va_list ap;
     va_start(ap, fields_fmt);
-    size_t n = format_v(line, sizeof(line), level, event, fields_fmt, ap);
+    size_t n = format_v(line, sizeof(line), level, event, fields_fmt, ap,
+                        fields, sizeof(fields));
     va_end(ap);
-    if (n > 0) (void)LogPrintStr(line);
+    if (n > 0) {
+        (void)LogPrintStr(line);
+        log_json_mirror_fn fn = g_mirror;
+        if (fn) log_json_mirror(fn, level, event, fields);
+    }
 }
 
 size_t log_json_format(char *buf, size_t cap, enum log_json_level level,
                         const char *event, const char *fields_fmt, ...)
 {
     va_list ap;
+    char fields[1536];
     va_start(ap, fields_fmt);
-    size_t n = format_v(buf, cap, level, event, fields_fmt, ap);
+    size_t n = format_v(buf, cap, level, event, fields_fmt, ap,
+                        fields, sizeof(fields));
     va_end(ap);
     return n;
 }
