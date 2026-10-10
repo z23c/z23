@@ -44,6 +44,8 @@
  *     same compile and link WITHOUT the prefix-map flag must differ across
  *     roots or contain a root path), after the real link.
  *   shipped-recipe: NO control. It is the LTO node recipe, run report-only.
+ *     It must gain a must-differ control before its --report-only argument
+ *     is removed.
  * If a RED control does not differ the check observes nothing and the gate
  * fails with SELFTEST_UNOBSERVED.
  *
@@ -58,11 +60,11 @@
  * fails the gate.
  *
  * Host support: the gate compares ELF objects and links with GNU-ld style
- * flags. A host that is not that kind (Darwin, Windows) is skipped through
- * the explicit --unsupported-host NAME, which the Makefile passes ONLY on such
- * a host; the skip prints one named line per case and exits 0. On an ELF host
- * the argument is never passed, so a missing clang or a driver that rejects
- * the flags fails the gate with a clear message.
+ * flags. A build host that is not Linux is skipped through the explicit
+ * --unsupported-host NAME, which the Makefile passes ONLY when `uname -s` is
+ * not Linux; the skip prints one SKIPPED_HOST line and exits 0. On a Linux
+ * host the argument is never passed, so a missing clang or a driver that
+ * rejects the flags fails the gate with a clear message.
  *
  * Stopping: one process-wide deadline (OR_DEADLINE_S) bounds the whole run,
  * and each compile is also bounded by OR_TIMEOUT_MS and by the time left.
@@ -122,6 +124,8 @@ static const struct or_case k_or_cases[] = {
     { "clang-host", "clang", false, false, false },
     { "clang-riscv64", "clang", true, false, false },
     { "clang-aarch64", "clang", true, false, false },
+    /* NO must-differ control: it must gain one before its --report-only
+     * argument is removed. */
     { "shipped-recipe", NULL, false, true, false },
     { "shipped-link", NULL, false, true, true },
 };
@@ -214,9 +218,24 @@ struct or_ctx {
 };
 
 
+/* The last token refused for length: or_compile_in names it as FLAG_TOO_LONG
+ * rather than a generic set-up failure. Reset before each command is built. */
+static struct { size_t len, limit; bool set; } g_or_toolong;
+
+/* A token of `len` bytes fits a buffer of `cap` bytes (NUL included). */
+static bool or_flag_fits(size_t len, size_t cap)
+{
+    if (len < cap)
+        return true;
+    g_or_toolong.len = len;
+    g_or_toolong.limit = cap - 1;
+    g_or_toolong.set = true;
+    return false;
+}
+
 bool or_add(struct or_cmd *c, const char *s)
 {
-    if (c->n >= OR_MAXTOK || strlen(s) >= OR_PATH)
+    if (c->n >= OR_MAXTOK || !or_flag_fits(strlen(s), OR_PATH))
         return false;
     (void)snprintf(c->tok[c->n], OR_PATH, "%s", s);
     c->n++;
@@ -233,7 +252,7 @@ static bool or_add_subst(struct or_cmd *c, const char *s, const char *from,
         return or_add(c, s);
     int n = snprintf(buf, sizeof buf, "%.*s%s%s", (int)(hit - s), s, to,
                      hit + strlen(from));
-    return n > 0 && n < (int)sizeof buf && or_add(c, buf);
+    return n > 0 && or_flag_fits((size_t)n, sizeof buf) && or_add(c, buf);
 }
 
 /* Split a Makefile flag string on spaces, rewriting the tree root to `root`;
@@ -249,7 +268,7 @@ static bool or_add_words(struct or_cmd *c, const struct or_cfg *cfg,
             p++;
         size_t n = strcspn(p, " ");
         char tok[OR_PATH];
-        if (n >= sizeof tok)
+        if (!or_flag_fits(n, sizeof tok))
             return false;
         memcpy(tok, p, n);
         tok[n] = '\0';
@@ -282,7 +301,7 @@ static bool or_add_inc(struct or_cmd *c, const char *dir, size_t n)
 {
     char t[OR_PATH];
     int w = snprintf(t, sizeof t, "-I%.*s", (int)n, dir);
-    return w > 0 && w < (int)sizeof t && or_add(c, t);
+    return w > 0 && or_flag_fits((size_t)w, sizeof t) && or_add(c, t);
 }
 
 /* The -I list, derived from the tables: every payload "/include" directory
@@ -636,15 +655,46 @@ static bool or_remove_checked(const struct or_ctx *x, const char *path)
     return false;
 }
 
+/* A path that does not fit its buffer: PATH_TOO_LONG with its length and the
+ * largest length the buffer takes (NUL excluded). */
+static void or_refuse_path_long(const struct or_ctx *x, const char *which,
+                                size_t len, size_t limit)
+{
+    char what[192];
+    (void)snprintf(what, sizeof what, "the %s path is %zu bytes, the limit "
+                   "is %zu", which, len, limit);
+    or_refuse_case(x, "PATH_TOO_LONG", what, "");
+}
+
+/* out = base/leaf; false (PATH_TOO_LONG) when it does not fit `cap` bytes. */
+static bool or_root_fits(const struct or_ctx *x, const char *which,
+                         const char *base, const char *leaf, char *out,
+                         size_t cap)
+{
+    int n = snprintf(out, cap, "%s/%s", base, leaf);
+    if (n >= 0 && (size_t)n < cap)
+        return true;
+    or_refuse_path_long(x, which, n > 0 ? (size_t)n : 0, cap - 1);
+    return false;
+}
+
 /* base is set the moment the directory exists, so every later failure path
  * can still remove it through or_roots_drop. */
 static bool or_roots_make(const struct or_ctx *x, struct or_roots *r)
 {
     const char *tmp = env_or("TMPDIR", "test-tmp");
+    static const char k_tmpl_leaf[] = "z23-lint-objrepro.XXXXXX";
     char tmpl[OR_PATH];
-    if (csr_mkdirs(tmp) != 0
-        || !or_join(tmpl, sizeof tmpl, tmp, "z23-lint-objrepro.XXXXXX")
-        || !mkdtemp(tmpl)) {
+    if (csr_mkdirs(tmp) != 0) {
+        or_refuse_case(x, "IO_ERROR", "cannot create the temp area", "");
+        return false;
+    }
+    if (!or_join(tmpl, sizeof tmpl, tmp, k_tmpl_leaf)) {
+        or_refuse_path_long(x, "temp area template", strlen(tmp) + 1
+                            + strlen(k_tmpl_leaf), sizeof tmpl - 1);
+        return false;
+    }
+    if (!mkdtemp(tmpl)) {
         or_refuse_case(x, "IO_ERROR", "cannot create the temp area", "");
         return false;
     }
@@ -654,12 +704,10 @@ static bool or_roots_make(const struct or_ctx *x, struct or_roots *r)
         or_refuse_case(x, "IO_ERROR", "cannot resolve the temp area", "");
         return false;
     }
-    if (snprintf(r->a, sizeof r->a, "%s/" OR_ROOT_A, r->base) >= (int)sizeof r->a
-        || snprintf(r->b, sizeof r->b, "%s/" OR_ROOT_B, r->base)
-               >= (int)sizeof r->b) {
-        or_refuse_case(x, "IO_ERROR", "temp root path too long", "");
+    if (!or_root_fits(x, "temp root A", r->base, OR_ROOT_A, r->a, sizeof r->a)
+        || !or_root_fits(x, "temp root B", r->base, OR_ROOT_B, r->b,
+                         sizeof r->b))
         return false;
-    }
     return or_copy_payload(x, r->a) && or_copy_payload(x, r->b);
 }
 
@@ -672,11 +720,12 @@ static bool or_roots_drop(const struct or_ctx *x, struct or_roots *r)
 
 /* Run the compiler: true only for an observed exit status of zero, inside the
  * time budget (per-compile bound, process deadline, no stop signal). */
-static bool or_run_compiler(const struct or_cmd *c, char *diag)
+static bool or_run_compiler(const struct or_cmd *c, char *diag, int *timeout_ms)
 {
     struct zcl_spawn_binary_observation ob = { 0 };
     int budget = or_budget_ms();
     diag[0] = '\0';
+    *timeout_ms = 0;
     if (budget <= 0) {
         const char *why = or_stop_reason();
         (void)snprintf(diag, OR_DIAG, "not run: %s", why ? why : "no time left");
@@ -686,6 +735,8 @@ static bool or_run_compiler(const struct or_cmd *c, char *diag)
     struct zcl_result r = zcl_spawn_capture_binary_merged(
         c->argv, diag, OR_DIAG - 1, budget, &ob);
     diag[ob.output_len < OR_DIAG - 1 ? ob.output_len : OR_DIAG - 1] = '\0';
+    if (ob.timed_out)
+        *timeout_ms = budget;
     return r.ok && ob.exit_observed && ob.exit_code == 0 && ob.eof
            && !ob.timed_out && !ob.overflow;
 }
@@ -707,15 +758,16 @@ static unsigned char *or_take_object(size_t *len)
 /* The previous object is deleted first, so a compiler that fails leaves
  * nothing to read. */
 unsigned char *or_compile_run(const struct or_cmd *c, char *diag,
-                                     size_t *len, const char **why)
+                              size_t *len, const char **why, int *timeout_ms)
 {
     if (unlink("out.o") != 0 && errno != ENOENT) {
         *why = "cannot delete the previous object";
         return NULL;
     }
-    if (!or_run_compiler(c, diag)) {
+    if (!or_run_compiler(c, diag, timeout_ms)) {
         *why = or_stop_reason() ? "gate stopped (signal or deadline)"
-                                : "compiler did not exit with status 0";
+               : *timeout_ms > 0 ? "COMPILE_TIMEOUT"
+                                 : "compiler did not exit with status 0";
         return NULL;
     }
     unsigned char *o = or_take_object(len);
@@ -739,6 +791,27 @@ static void or_refuse_compile(const struct or_ctx *x, const char *unit,
     }
 }
 
+/* The refusal of a failed compile or set-up: FLAG_TOO_LONG when a flag token
+ * was refused for length, COMPILE_TIMEOUT when the compiler ran out of its
+ * budget (and the gate did not stop), else COMPILE_FAILED with the reason. */
+static void or_refuse_failed(const struct or_ctx *x, const char *unit,
+                             const char *why, const char *diag, int tmo_ms)
+{
+    char what[192];
+    if (g_or_toolong.set) {
+        (void)snprintf(what, sizeof what, "a flag token of %zu bytes exceeds "
+                       "the limit of %zu bytes", g_or_toolong.len,
+                       g_or_toolong.limit);
+        or_refuse_case(x, "FLAG_TOO_LONG", what, "");
+    } else if (tmo_ms > 0 && !or_stop_reason()) {
+        (void)snprintf(what, sizeof what, "the compiler exceeded its %.1f s "
+                       "budget", (double)tmo_ms / 1000.0);
+        or_refuse_case(x, "COMPILE_TIMEOUT", what, "");
+    } else {
+        or_refuse_compile(x, unit, why, diag);
+    }
+}
+
 /* Compile `unit` in `root` (as the working directory) and read out.o. */
 static unsigned char *or_compile_in(const struct or_ctx *x, const char *root,
                                     const char *unit, bool prefix_map,
@@ -749,11 +822,13 @@ static unsigned char *or_compile_in(const struct or_ctx *x, const char *root,
     char saved[OR_PATH];
     unsigned char *obj = NULL;
     const char *why = "could not set up the compile";
+    int tmo_ms = 0;
+    g_or_toolong.set = false;
     if (diag)
         diag[0] = '\0';
     if (c && diag && or_build_cmd(x, x->cc, root, unit, prefix_map, c)
         && getcwd(saved, sizeof saved) && chdir(root) == 0) {
-        obj = or_compile_run(c, diag, len, &why);
+        obj = or_compile_run(c, diag, len, &why, &tmo_ms);
         if (chdir(saved) != 0) {
             free(obj);
             obj = NULL;
@@ -761,7 +836,7 @@ static unsigned char *or_compile_in(const struct or_ctx *x, const char *root,
         }
     }
     if (!obj)
-        or_refuse_compile(x, unit, why, diag ? diag : "");
+        or_refuse_failed(x, unit, why, diag ? diag : "", tmo_ms);
     free(c);
     free(diag);
     return obj;
@@ -792,14 +867,15 @@ static bool or_link_step_run(const struct or_ctx *x, const char *root, int st,
                              bool prefix_map, struct or_cmd *c, char *diag)
 {
     char obj[32];
+    int tmo_ms = 0;
     if (!or_step(x, x->cc, root, NULL, st, prefix_map, c))
         return false;
     if (st == OR_NLINKSRC)
         return (unlink("out.bin") == 0 || errno == ENOENT)
-               && or_run_compiler(c, diag);
+               && or_run_compiler(c, diag, &tmo_ms);
     (void)snprintf(obj, sizeof obj, "obj%d.o", st);
     return (unlink("out.o") == 0 || errno == ENOENT)
-           && or_run_compiler(c, diag) && rename("out.o", obj) == 0;
+           && or_run_compiler(c, diag, &tmo_ms) && rename("out.o", obj) == 0;
 }
 
 /* In the root as working directory: objects, link, read out.bin. */
@@ -1215,23 +1291,66 @@ const char *or_cfg_flaw(const struct or_cfg *cfg)
     return or_cfg_targets_flaw(cfg);
 }
 
-/* An explicit, named skip for a host that is not an ELF and GNU-ld host. One
- * line per case carries the evidence; nothing is compiled. */
-static int or_skip_host(const struct or_cfg *cfg)
+/* The case a list element names (by pointer and length), NULL if none does. */
+static const struct or_case *or_case_named(const char *p, size_t n)
 {
     for (int i = 0; i < OR_NCASES; i++) {
-        struct or_ctx x;
-        or_ctx_init(&x, cfg, &k_or_cases[i]);
-        printf("OBJREPRO case=%s unit=- verdict=SKIPPED_HOST host=%s",
-               x.cs->name, cfg->unsupported);
-        or_print_case_evidence(&x);
-        printf("\n");
+        if (strlen(k_or_cases[i].name) == n
+            && strncmp(k_or_cases[i].name, p, n) == 0)
+            return &k_or_cases[i];
     }
-    printf("check-object-reproducible: SKIPPED_HOST: host OS %s is not an ELF "
-           "and GNU-ld style host, and this gate compares ELF sections and "
-           "links with --build-id=none; no case was run (the Makefile passes "
-           "--unsupported-host only on Darwin and Windows hosts). This is a "
-           "skip, not a PASS\n", cfg->unsupported);
+    return NULL;
+}
+
+static bool or_may_cross(const struct or_case *cs)
+{
+    return cs->cross;
+}
+
+static bool or_may_shipped_recipe(const struct or_case *cs)
+{
+    return strcmp(cs->name, "shipped-recipe") == 0;
+}
+
+/* Refuses the first element of the comma list that is not a case, or is a
+ * case `may` does not allow for `flag` (an empty element is not a case). */
+static bool or_names_refused(const char *flag, const char *list,
+                             bool (*may)(const struct or_case *))
+{
+    const char *p = list;
+    while (*p) {
+        size_t n = strcspn(p, ",");
+        const struct or_case *cs = or_case_named(p, n);
+        if (!cs || !may(cs)) {
+            fprintf(stderr, "check-object-reproducible: REFUSED BAD_ARGUMENT: "
+                    "%s names '%.*s', which is %s\n", flag, (int)n, p,
+                    cs ? "not allowed for this flag" : "an unknown case");
+            return true;
+        }
+        p += n + (p[n] == ',' ? 1 : 0);
+    }
+    return false;
+}
+
+/* --report-only takes only shipped-recipe; --allow-missing takes only cases
+ * whose table entry is a cross target. Each refusal prints a BAD_ARGUMENT
+ * line that names the case. */
+bool or_cfg_names_ok(const struct or_cfg *cfg)
+{
+    if (or_names_refused("--report-only", cfg->report, or_may_shipped_recipe))
+        return false;
+    return !or_names_refused("--allow-missing", cfg->allow, or_may_cross);
+}
+
+/* The one line of a host that is not Linux: nothing is compiled, and the
+ * skip is named, so it is never mistaken for a PASS. */
+static int or_skip_host(const struct or_cfg *cfg)
+{
+    printf("check-object-reproducible: SKIPPED_HOST host=%s reason=the build "
+           "host is not Linux, and this gate compares ELF sections and links "
+           "with GNU-ld flags; no case was run, so this is a skip, "
+           "not a PASS\n",
+           cfg->unsupported);
     return OR_OK;
 }
 
@@ -1247,6 +1366,14 @@ static int or_run_all(const struct or_cfg *cfg)
         return OR_REFUSED;
     }
     for (int i = 0; i < OR_NCASES && !g_or_sig; i++) {
+        if (or_now_ms() >= g_or_deadline_ms) {
+            printf("check-object-reproducible: REFUSED DEADLINE_EXCEEDED: "
+                   "OR_DEADLINE_S=%d elapsed_s=%.1f; case %s and the cases "
+                   "after it were not started\n", OR_DEADLINE_S,
+                   (double)(or_now_ms() - t0) / 1000.0, k_or_cases[i].name);
+            worst = OR_REFUSED;
+            break;
+        }
         int rc = or_run_case(cfg, &k_or_cases[i]);
         if (rc > worst)
             worst = rc;
@@ -1284,6 +1411,8 @@ int check_object_reproducible_run(int argc, char **argv)
                 flaw ? flaw : "unknown or unpaired option");
         return OR_REFUSED;
     }
+    if (!or_cfg_names_ok(&cfg))
+        return OR_REFUSED;
     if (cfg.unsupported[0])
         return or_skip_host(&cfg);
     return or_run_all(&cfg);

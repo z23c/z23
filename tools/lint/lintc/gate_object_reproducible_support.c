@@ -173,7 +173,7 @@ bool or_hash_file(const char *path, char out[65])
     return ok;
 }
 
-bool or_copy_file(const char *src, const char *dst)
+static bool or_copy_file(const char *src, const char *dst)
 {
     size_t n = 0;
     unsigned char *buf = or_read_file(src, &n);
@@ -488,6 +488,35 @@ static int or_selftest_contains(void)
     "--targets", "clang-riscv64=--target=a,clang-aarch64=--target=b", \
     "--red-strip", "-ffile-prefix-map=", "--seed-flag", SEED
 
+/* --report-only takes only shipped-recipe and --allow-missing only cross
+ * cases. The Makefile's real values pass; an unknown name, host-cc in
+ * --allow-missing and shipped-link in --report-only are each refused. */
+static int or_selftest_names(void)
+{
+    char *real[] = { OR_GOOD_ARGS("none"), "--allow-missing",
+                     "clang-riscv64,clang-aarch64", "--report-only",
+                     "shipped-recipe" };
+    char *unknown[] = { OR_GOOD_ARGS("none"), "--allow-missing", "bogus" };
+    char *hostcc[] = { OR_GOOD_ARGS("none"), "--allow-missing", "host-cc" };
+    char *shiplink[] = { OR_GOOD_ARGS("none"), "--report-only",
+                         "shipped-link" };
+    struct or_cfg cfg;
+    if (!or_parse((int)(sizeof real / sizeof real[0]), real, &cfg)
+        || !or_cfg_names_ok(&cfg))
+        return or_fail("the Makefile's --allow-missing and --report-only "
+                       "names were refused");
+    if (!or_parse((int)(sizeof unknown / sizeof unknown[0]), unknown, &cfg)
+        || or_cfg_names_ok(&cfg))
+        return or_fail("an unknown --allow-missing case was accepted");
+    if (!or_parse((int)(sizeof hostcc / sizeof hostcc[0]), hostcc, &cfg)
+        || or_cfg_names_ok(&cfg))
+        return or_fail("--allow-missing host-cc was accepted");
+    if (!or_parse((int)(sizeof shiplink / sizeof shiplink[0]), shiplink, &cfg)
+        || or_cfg_names_ok(&cfg))
+        return or_fail("--report-only shipped-link was accepted");
+    return 0;
+}
+
 static int or_selftest_args(void)
 {
     char *good[] = { OR_GOOD_ARGS("-frandom-seed=@UNIT@") };
@@ -513,7 +542,7 @@ static int or_selftest_args(void)
     if (!or_parse(n + 2, host, &cfg) || or_cfg_flaw(&cfg) != NULL
         || strcmp(cfg.unsupported, "Darwin") != 0)
         return or_fail("--unsupported-host was not parsed");
-    return 0;
+    return or_selftest_names();
 }
 
 /* Report-only excuses a hash MISMATCH of the named case and nothing else. */
@@ -554,7 +583,8 @@ static int or_rt_run(const char *const *words, int nw, bool stale)
     if (ok) {
         size_t len = 0;
         const char *why = "";
-        unsigned char *o = or_compile_run(c, diag, &len, &why);
+        int tmo = 0;
+        unsigned char *o = or_compile_run(c, diag, &len, &why, &tmo);
         res = o ? 1 : 0;
         free(o);
     }

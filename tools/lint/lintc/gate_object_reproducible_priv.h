@@ -76,7 +76,6 @@ void or_sha_hex(struct or_sha *s, char out[65]);
 void or_sha_buf(const void *data, size_t len, char out[65]);
 unsigned char *or_read_file(const char *path, size_t *len);
 bool or_hash_file(const char *path, char out[65]);
-bool or_copy_file(const char *src, const char *dst);
 bool or_mkparent(const char *path);
 bool or_join(char *out, size_t cap, const char *a, const char *b);
 bool or_copy_tree(const char *src, const char *dst, int depth);
@@ -96,10 +95,11 @@ bool or_add(struct or_cmd *c, const char *s);
 bool or_seal(struct or_cmd *c, bool ok);
 bool or_parse(int argc, char **argv, struct or_cfg *cfg);
 const char *or_cfg_flaw(const struct or_cfg *cfg);
+bool or_cfg_names_ok(const struct or_cfg *cfg);
 int or_excuse(const struct or_cfg *cfg, const struct or_case *cs, int rc);
 bool or_target_of(const char *list, const char *name, char *out, size_t cap);
 bool or_contains(const unsigned char *h, size_t hl, const char *needle);
 unsigned char *or_compile_run(const struct or_cmd *c, char *diag, size_t *len,
-                              const char **why);
+                              const char **why, int *timeout_ms);
 
 #endif

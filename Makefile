@@ -1153,10 +1153,14 @@ REPRO_GATE_TARGETS = clang-riscv64=--target=riscv64-unknown-freebsd,clang-aarch6
 REPRO_GATE_CROSS_FLAGS = -nostdlibinc
 REPRO_GATE_LINK_LIBS = -lm
 REPRO_GATE_STRIP_FLAG = -ffile-prefix-map=
-# The gate reads ELF sections and links with GNU-ld flags. Only a host that is
-# not an ELF host (Darwin, Windows) is skipped, by name; no other host gets
-# this argument, so a gcc-only Linux host with no clang fails loudly.
-REPRO_GATE_HOST_SKIP = $(if $(or $(filter Darwin,$(ZCL_HOST_OS)),$(ZCL_HOST_WINDOWS)),--unsupported-host $(ZCL_HOST_OS),)
+# The gate reads ELF sections and links with GNU-ld flags, so a build host that
+# is not Linux is skipped, by name; a Linux build host never gets this argument,
+# so a Linux host with no clang fails loudly. The OS is `uname -s` of the BUILD
+# host, captured once here, and NOT ZCL_HOST_OS: a cross build
+# (ZCL_TARGET=windows-x86_64) overrides ZCL_HOST_OS to MINGW64_NT-10.0 while the
+# compilers and ELF tools that run this gate are still the Linux build host's.
+REPRO_GATE_BUILD_OS := $(shell uname -s 2>/dev/null)
+REPRO_GATE_HOST_SKIP = $(if $(filter-out Linux,$(REPRO_GATE_BUILD_OS)),--unsupported-host $(REPRO_GATE_BUILD_OS),)
 
 # ── Per-TU random seed (object-level determinism) ─────────────────────────
 # GCC derives its default random seed from the OUTPUT file name. Every object
@@ -13844,6 +13848,8 @@ check-network-tool-hardening: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS)
 # repro_build_vars.sh does for the node) under both roots, and GATES on the
 # linked output hashing identically and holding neither root path. REMOVE the
 # --report-only argument if the LTO objects themselves become path-free.
+# The shipped-recipe case has NO must-differ control, so it must gain one
+# before its --report-only argument is removed.
 check-object-reproducible: $(LINTC_TOOL)
 	@echo "══ LINT: objects do not depend on the checkout path ══"
 	@./tools/lint/check_object_reproducible.sh --selftest && \
