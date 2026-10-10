@@ -383,7 +383,15 @@ static bool orchestration_env(const char *entry)
     static const char *const names[] = {
         "BUILD_SOURCE_RECORD=", "BUILD_COMPILER_ID=", "BUILD_SYSTEM_ID=",
         "BUILD_EPOCH_KEEP=", "MAKEFLAGS=", "MFLAGS=", "MAKELEVEL=",
-        "ZCL_CHECKOUT_LOCK_HELD=", "ZCL_HOST_JOBS="
+        "ZCL_CHECKOUT_LOCK_HELD=", "ZCL_HOST_JOBS=",
+        /* Per-session and per-job bookkeeping. Each of these differs between
+         * two otherwise identical compiles (measured: 17,780 compiles in an
+         * hour, 21 hits, because every agent session carried its own ids), and
+         * no compiler driver reads any of them. */
+        "ONLY=", "MAKEOVERRIDES=", "DEVBUILD_ACTIVE=", "INVOCATION_ID=",
+        "JOURNAL_STREAM=", "SHLVL=", "OLDPWD=", "_=",
+        "SSH_CONNECTION=", "SSH_CLIENT=", "SSH_TTY=", "XDG_SESSION_ID=",
+        "CLAUDE_", "CLAUDECODE=", "AI_AGENT="
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strncmp(entry, names[i], strlen(names[i])) == 0)

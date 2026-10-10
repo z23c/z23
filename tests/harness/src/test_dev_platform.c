@@ -5065,6 +5065,234 @@ static bool run_hotswap_action_root_zcc_fixture(void)
     return ok;
 }
 
+/* ---- zcc hits across sessions and descriptor-path outputs --------------- */
+
+/* The Makefile-driven epoch publisher writes through /proc/self/fd/N/<obj>.o,
+ * and every agent session reaches zcc with its own session, job and shell
+ * bookkeeping variables. None of those can change an object, so none may be
+ * in the key: a repeat compile must be a HIT. A compiler-visible variable
+ * (CPATH) must still miss. */
+static bool dp_zcc_env_compile(const char *zcc, const char *cache,
+                               const char *log, const char *src,
+                               const char *out, int salt, const char *cpath)
+{
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        char value[64];
+        snprintf(value, sizeof(value), "session-%d", salt);
+        (void)setenv("ZCC_DIR", cache, 1);
+        (void)setenv("ZCC_LOG", log, 1);
+        (void)unsetenv("ZCC_VERIFIED");
+        (void)unsetenv("ZCC_STRICT");
+        (void)unsetenv("ZCC_DISABLE");
+        (void)unsetenv("ZCC_AUDIT");
+        (void)setenv("ONLY", value, 1);
+        (void)setenv("MAKEOVERRIDES", value, 1);
+        (void)setenv("CLAUDE_CODE_SESSION_ID", value, 1);
+        (void)setenv("CLAUDE_PID", value, 1);
+        (void)setenv("INVOCATION_ID", value, 1);
+        (void)setenv("DEVBUILD_ACTIVE", value, 1);
+        (void)setenv("SSH_CONNECTION", value, 1);
+        (void)setenv("XDG_SESSION_ID", value, 1);
+        (void)setenv("SHLVL", value, 1);
+        (void)setenv("OLDPWD", value, 1);
+        (void)setenv("_", value, 1);
+        if (cpath)
+            (void)setenv("CPATH", cpath, 1);
+        else
+            (void)unsetenv("CPATH");
+        execl(zcc, zcc, "cc", "-std=c23", "-O1", "-c", "-o", out, src,
+              (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0)
+        if (errno != EINTR)
+            return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int dp_zcc_log_hits(const char *log)
+{
+    FILE *f = fopen(log, "r");
+    char line[512];
+    int hits = 0;
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f))
+        if (strncmp(line, "HIT", 3) == 0)
+            hits++;
+    (void)fclose(f);
+    return hits;
+}
+
+/* Two compiles of one TU; the second changes the session variables (and
+ * CPATH when cpath2 is set). Returns the HIT count, or -1 on a setup error. */
+static int dp_zcc_env_scenario(const char *zcc, const char *root,
+                               const char *tag, bool via_fd,
+                               const char *cpath2)
+{
+    char cache[PATH_MAX], log[PATH_MAX], src[PATH_MAX], outdir[PATH_MAX];
+    char out[PATH_MAX];
+    int dirfd = -1, hits = -1;
+    if (snprintf(cache, sizeof(cache), "%s/%s-cache", root, tag) >=
+            (int)sizeof(cache) ||
+        snprintf(log, sizeof(log), "%s/%s.log", root, tag) >=
+            (int)sizeof(log) ||
+        snprintf(src, sizeof(src), "%s/t.c", root) >= (int)sizeof(src) ||
+        snprintf(outdir, sizeof(outdir), "%s/%s-out", root, tag) >=
+            (int)sizeof(outdir) ||
+        platform_directory_create(outdir, 0700) != 0)
+        return -1;
+    if (via_fd) {
+        dirfd = open(outdir, O_RDONLY | O_DIRECTORY);
+        if (dirfd < 0 ||
+            snprintf(out, sizeof(out), "/proc/self/fd/%d/t.o", dirfd) >=
+                (int)sizeof(out)) {
+            if (dirfd >= 0)
+                (void)close(dirfd);
+            return -1;
+        }
+    } else if (snprintf(out, sizeof(out), "%s/t.o", outdir) >=
+               (int)sizeof(out)) {
+        return -1;
+    }
+    if (dp_zcc_env_compile(zcc, cache, log, src, out, 1, NULL) &&
+        dp_zcc_env_compile(zcc, cache, log, src, out, 2, cpath2))
+        hits = dp_zcc_log_hits(log);
+    if (dirfd >= 0)
+        (void)close(dirfd);
+    return hits;
+}
+
+/* PWD stays in the key. Compile once with PWD naming the cwd and once with
+ * PWD unset: the second must be a miss, or serve bytes identical to a fresh
+ * uncached compile under that same environment. */
+static bool dp_zcc_pwd_compile(const char *zcc, const char *cache,
+                               const char *log, const char *src,
+                               const char *out, bool set_pwd, bool disable)
+{
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        char cwd[PATH_MAX];
+        (void)setenv("ZCC_DIR", cache, 1);
+        (void)setenv("ZCC_LOG", log, 1);
+        (void)unsetenv("ZCC_VERIFIED");
+        if (disable)
+            (void)setenv("ZCC_DISABLE", "1", 1);
+        else
+            (void)unsetenv("ZCC_DISABLE");
+        if (set_pwd && getcwd(cwd, sizeof(cwd)))
+            (void)setenv("PWD", cwd, 1);
+        else
+            (void)unsetenv("PWD");
+        execl(zcc, zcc, "cc", "-std=c23", "-O1", "-c", "-o", out, src,
+              (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0)
+        if (errno != EINTR)
+            return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static bool dp_zcc_same_bytes(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
+    bool same = fa && fb;
+    while (same) {
+        int ca = fgetc(fa), cb = fgetc(fb);
+        same = ca == cb;
+        if (ca == EOF || cb == EOF)
+            break;
+    }
+    if (fa)
+        (void)fclose(fa);
+    if (fb)
+        (void)fclose(fb);
+    return same;
+}
+
+static bool dp_zcc_pwd_scenario(const char *zcc, const char *root,
+                                const char *src)
+{
+    char cache[PATH_MAX], log[PATH_MAX], warm[PATH_MAX], fresh[PATH_MAX];
+    char fcache[PATH_MAX];
+    bool paths =
+        snprintf(cache, sizeof(cache), "%s/pwd-cache", root) < PATH_MAX &&
+        snprintf(fcache, sizeof(fcache), "%s/pwd-fresh-cache", root) <
+            PATH_MAX &&
+        snprintf(log, sizeof(log), "%s/pwd.log", root) < PATH_MAX &&
+        snprintf(warm, sizeof(warm), "%s/pwd-warm.o", root) < PATH_MAX &&
+        snprintf(fresh, sizeof(fresh), "%s/pwd-fresh.o", root) < PATH_MAX;
+    bool ok = paths &&
+        dp_zcc_pwd_compile(zcc, cache, log, src, warm, true, false) &&
+        dp_zcc_pwd_compile(zcc, cache, log, src, warm, false, false) &&
+        dp_zcc_pwd_compile(zcc, fcache, log, src, fresh, false, true);
+    bool same = ok && dp_zcc_same_bytes(warm, fresh);
+    int hits = ok ? dp_zcc_log_hits(log) : -1;
+    printf("    zcc env: PWD set then unset hits=%d object_matches_fresh=%d "
+           "-> %s\n", hits, same ? 1 : 0, same ? "PASS" : "FAIL");
+    return same;
+}
+
+static bool dp_zcc_env_paths(char zcc[PATH_MAX], char root[PATH_MAX],
+                             char src[PATH_MAX])
+{
+    char cwd[PATH_MAX];
+    return getcwd(cwd, sizeof(cwd)) &&
+           snprintf(zcc, PATH_MAX, "%s/build/bin/zcc", cwd) < PATH_MAX &&
+           snprintf(root, PATH_MAX, "%s/test-tmp/zcc_env_hit_%ld", cwd,
+                    (long)getpid()) < PATH_MAX &&
+           snprintf(src, PATH_MAX, "%s/t.c", root) < PATH_MAX;
+}
+
+static bool dp_zcc_env_source(const char *root, const char *src)
+{
+    (void)platform_directory_create("test-tmp", 0700);
+    if (platform_directory_create(root, 0700) != 0)
+        return false;
+    FILE *f = fopen(src, "w");
+    if (!f)
+        return false;
+    bool wrote = fputs("int zcc_env_hit(void) { return 7; }\n", f) >= 0;
+    return fclose(f) == 0 && wrote;
+}
+
+static bool run_zcc_session_env_hit_fixture(void)
+{
+#if defined(__linux__)
+    char zcc[PATH_MAX], root[PATH_MAX], src[PATH_MAX];
+    if (!dp_zcc_env_paths(zcc, root, src))
+        return false;
+    if (access(zcc, X_OK) != 0) {
+        printf("    zcc env: no %s -> FAIL\n", zcc);
+        return false;
+    }
+    test_rm_rf_recursive(root);
+    if (!dp_zcc_env_source(root, src))
+        return false;
+    int plain = dp_zcc_env_scenario(zcc, root, "plain", false, NULL);
+    int desc = dp_zcc_env_scenario(zcc, root, "fd", true, NULL);
+    int cpath = dp_zcc_env_scenario(zcc, root, "cpath", false,
+                                    "/nonexistent-zcc-include");
+    bool ok = plain == 1 && desc == 1 && cpath == 0 &&
+              dp_zcc_pwd_scenario(zcc, root, src);
+    printf("    zcc env: repeat compile hits plain=%d descriptor=%d "
+           "compiler-visible-change=%d (want 1 1 0) -> %s\n",
+           plain, desc, cpath, ok ? "PASS" : "FAIL");
+    test_rm_rf_recursive(root);
+    return ok;
+#else
+    return true;
+#endif
+}
+
 static FILE *dp_unity_fixture(void)
 {
     char path[PATH_MAX];
@@ -5172,6 +5400,8 @@ static int test_hotswap_artifact_cache(void)
         /* A real zcc in the driver command never serves a keyed compile:
          * a new assembler moves the root and rebuilds the object. */
         ASSERT(run_hotswap_action_root_zcc_fixture());
+        /* A repeat compile is a HIT despite per-session environment. */
+        ASSERT(run_zcc_session_env_hit_fixture());
         PASS();
     } _test_next:;
     return failures;
