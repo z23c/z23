@@ -726,6 +726,9 @@ under `build/scratch/`. It does not stop at the first failure: it prints one
 `build/scratch/agent-verify.rc`. Run it through devbuild as one job, with
 `devbuild --wait --class normal make -j28 agent-verify ONLY=<group,group>`. Full
 `make lint` and the wide group list remain the landing step's job.
+The last line of `build/scratch/agent-verify.rc` is `agent-verify: OK` or
+`agent-verify: FAILED (<steps>)`. A file without that last line is an
+interrupted run and is not a pass, whatever its `rc=` lines say.
 
 A change under `tools/command/*.c`, `engine/composition/**/*.def`,
 `contexts/**/*.def`, or a new `.c` file routinely passes `lint-fast` and then

@@ -15501,13 +15501,15 @@ pr-check:
 # wide group list stay with the landing step.
 #   make -j28 agent-verify ONLY=<group,group>
 # Logs: build/scratch/agent-verify.<step>.log; verdict lines: agent-verify.rc.
+# Pass = last rc line is `agent-verify: OK`; no such last line = interrupted.
 .PHONY: agent-verify
 agent-verify:
 	@if [ -z '$(strip $(ONLY))' ]; then \
-	    echo "agent-verify: ONLY is empty; usage: make -j28 agent-verify ONLY=<group,group>"; \
+	    echo "agent-verify: ONLY is empty; usage: make -j28 agent-verify ONLY=<group,group>" >&2; \
 	    exit 2; \
 	 fi; \
 	 mkdir -p build/scratch && : > build/scratch/agent-verify.rc || exit 1; \
+	 rm -f build/scratch/agent-verify.*.log || exit 1; \
 	 failed=""; \
 	 av_step() { \
 	    step="$$1"; shift; \
