@@ -1870,8 +1870,9 @@ ZCL_COMMAND_READY_READ(
     "counted. A finding hits a defect when file matches exactly, line is "
     "within the range plus tolerance, and kind matches the locus (CHANGE "
     "with code, CLAIM with claim). A duplicate case id or a malformed set "
-    "line refuses the set. It reads only the named paths and writes "
-    "nothing.", 32768,
+    "line refuses the set. It also reports whether the defect cases are "
+    "independent: at most 3 per base change and 8 per class. It reads only "
+    "the named paths and writes nothing.", 32768,
     "agent,review,score,reviewscore,known-answer,defect,sound",
     "zcl.agent_reviewscore_input.v1", "zcl.agent_reviewscore.v1",
     "set,reviews", "set",

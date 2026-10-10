@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define RS_PATH "dev.agent.reviewscore"
 
@@ -736,6 +737,285 @@ _test_next:;
     return failures;
 }
 
+/* ── I1..I9: duplicate defects and independence ────────────────────── */
+
+/* A defect line with an optional base_id (NULL omits the key). */
+#define RS_DEFECT_BASE(id, cls, base)                                       \
+    "{\"id\":\"" id "\",\"label\":\"defect\",\"locus\":\"code\","           \
+    "\"class\":\"" cls "\",\"base_id\":\"" base "\",\"defect\":["           \
+    RS_RANGE("a.c", 10, 20) "]}\n"
+
+/* A generated set: n defect cases with distinct ranges (so none repeats), case
+ * i on base b(i % nbases) (no base_id when nbases is 0) and class
+ * k(i % nclasses); the first `fat` cases share the base "fat"; then `sound`
+ * sound cases. */
+struct rs_gen {
+    int n, nbases, nclasses, fat, sound;
+};
+
+static char *rs_gen_set(const struct rs_gen *g)
+{
+    size_t cap = (size_t)(g->n + g->sound) * 300u + 1u;
+    char *set = zcl_malloc(cap, "rs_gen_set");
+    size_t off = 0;
+    if (!set)
+        return NULL;
+    set[0] = '\0';
+    for (int i = 0; i < g->n; i++) {
+        char base[64] = "";
+        if (g->nbases > 0)
+            (void)snprintf(base, sizeof(base), "\"base_id\":\"%s%d\",",
+                           i < g->fat ? "fat" : "b",
+                           i < g->fat ? 0 : i % g->nbases);
+        off += (size_t)snprintf(set + off, cap - off,
+                                "{\"id\":\"g%d\",\"label\":\"defect\",\"locus\":"
+                                "\"code\",\"class\":\"k%d\",%s\"defect\":["
+                                "{\"file\":\"a.c\",\"line_lo\":%d,\"line_hi\":%d}]}\n",
+                                i, i % g->nclasses, base, i + 1, i + 1);
+    }
+    for (int i = 0; i < g->sound; i++)
+        off += (size_t)snprintf(set + off, cap - off,
+                                "{\"id\":\"s%d\",\"label\":\"sound\"%s}\n", i,
+                                g->nbases < 0 ? ",\"base_id\":\"sb\"" : "");
+    return set;
+}
+
+/* Score a generated set with no reviews. False on a setup failure. */
+static bool rs_run_gen(struct rs_call *c, const char *root,
+                       const struct rs_gen *g)
+{
+    char *set = rs_gen_set(g);
+    if (!set)
+        return false;
+    rs_end(c);
+    bool ran = rs_score(c, root, set, "");
+    free(set);
+    return ran;
+}
+
+/* The independence object's member, or NULL. */
+static const struct json_value *rs_ind(const struct rs_call *c, const char *key)
+{
+    return json_get(json_get(&c->reply.data, "independence"), key);
+}
+
+static int64_t rs_ind_int(const struct rs_call *c, const char *key)
+{
+    const struct json_value *v = rs_ind(c, key);
+    return v && v->type == JSON_INT ? json_get_int(v) : -12345;
+}
+
+static bool rs_ind_ok(const struct rs_call *c)
+{
+    const struct json_value *v = rs_ind(c, "ok");
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
+/* True when the independence array `key` has exactly the one element `name`. */
+static bool rs_ind_only(const struct rs_call *c, const char *key,
+                        const char *name)
+{
+    const struct json_value *a = rs_ind(c, key);
+    const char *s = a && json_size(a) == 1 ? json_get_str(json_at(a, 0)) : NULL;
+    return s && strcmp(s, name) == 0;
+}
+
+static int rs_dup_defect(const char *root)
+{
+    int failures = 0;
+    struct rs_call c;
+    rs_begin(&c);
+    TEST("I1: the same class, locus, ranges and base twice refuses the set") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root,
+                        RS_DEFECT_BASE("dA", "logic", "b1")
+                        RS_DEFECT_BASE("dB", "logic", "b1"), ""));
+        ASSERT(!rs_ok(&c));
+        ASSERT_STR_EQ(rs_code(&c), "SET_DUPLICATE_DEFECT");
+        ASSERT(strstr(rs_err(&c), "dA") && strstr(rs_err(&c), "dB"));
+        PASS();
+    }
+    TEST("I2: the same class and ranges on different bases is accepted") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root,
+                        RS_DEFECT_BASE("dA", "logic", "b1")
+                        RS_DEFECT_BASE("dB", "logic", "b2"), ""));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_int(&c, "defect_cases"), 2);
+        PASS();
+    }
+    TEST("I3: the same base and class on a different range is accepted") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root,
+                        RS_DEFECT_BASE("dA", "logic", "b1")
+                        "{\"id\":\"dB\",\"label\":\"defect\",\"locus\":\"code\","
+                        "\"class\":\"logic\",\"base_id\":\"b1\",\"defect\":["
+                        "{\"file\":\"a.c\",\"line_lo\":10,\"line_hi\":21}]}\n",
+                        ""));
+        ASSERT(rs_ok(&c));
+        PASS();
+    }
+_test_next:;
+    rs_end(&c);
+    return failures;
+}
+
+static int rs_base_rules(const char *root)
+{
+    int failures = 0;
+    struct rs_call c;
+    char big[512];
+    rs_begin(&c);
+    TEST("I7: a case with no base_id is its own base") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root,
+                        RS_DEFECT("d1", "code", "x") RS_DEFECT("d2", "code", "x"),
+                        ""));
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "bases"), 2);
+        ASSERT_EQ(rs_ind_int(&c, "max_per_base"), 1);
+        PASS();
+    }
+    TEST("I8: a base_id of 96 bytes is a malformed set line, 95 is accepted") {
+        char id[ERS_ID_MAX + 1];
+        memset(id, 'b', 96);
+        id[96] = '\0';
+        (void)snprintf(big, sizeof(big), "{\"id\":\"s1\",\"label\":\"sound\","
+                       "\"base_id\":\"%s\"}\n", id);
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, big, ""));
+        ASSERT(!rs_ok(&c));
+        ASSERT_STR_EQ(rs_code(&c), "SET_MALFORMED");
+        id[95] = '\0';
+        (void)snprintf(big, sizeof(big), "{\"id\":\"s1\",\"label\":\"sound\","
+                       "\"base_id\":\"%s\"}\n", id);
+        rs_end(&c);
+        ASSERT(rs_score(&c, root, big, ""));
+        ASSERT(rs_ok(&c));
+        PASS();
+    }
+    TEST("I8: a non-string base_id is a malformed set line") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root,
+                        "{\"id\":\"s1\",\"label\":\"sound\",\"base_id\":7}\n", ""));
+        ASSERT_STR_EQ(rs_code(&c), "SET_MALFORMED");
+        PASS();
+    }
+_test_next:;
+    rs_end(&c);
+    return failures;
+}
+
+static int rs_independence(const char *root)
+{
+    int failures = 0;
+    struct rs_call c;
+    rs_begin(&c);
+    TEST("I4: four defect cases on one base are over the base limit") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){4, 1, 4, 0, 0}));
+        ASSERT(!rs_ind_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "max_per_base"), 4);
+        ASSERT_EQ(rs_ind_int(&c, "over_base_total"), 1);
+        ASSERT(rs_ind_only(&c, "over_base", "b0"));
+        PASS();
+    }
+    TEST("boundary: exactly 3 per base and exactly 8 per class is ok") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){3, 1, 3, 0, 0}));
+        ASSERT(rs_ind_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "per_base_limit"), 3);
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){8, 8, 1, 0, 0}));
+        ASSERT(rs_ind_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "per_class_limit"), 8);
+        ASSERT_EQ(rs_ind_int(&c, "max_per_class"), 8);
+        PASS();
+    }
+    TEST("I5: nine defect cases of one class on nine bases are over the class limit") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){9, 9, 1, 0, 0}));
+        ASSERT(!rs_ind_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "over_base_total"), 0);
+        ASSERT(rs_ind_only(&c, "over_class", "k0"));
+        PASS();
+    }
+    TEST("I9: sound cases never count toward a base or a class") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){3, 3, 3, 0, 12}));
+        ASSERT(rs_ind_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "bases"), 3);
+        ASSERT_EQ(rs_ind_int(&c, "max_per_class"), 1);
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){3, -1, 3, 0, 12}));
+        ASSERT(rs_ind_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "max_per_base"), 1);
+        PASS();
+    }
+_test_next:;
+    rs_end(&c);
+    return failures;
+}
+
+static int rs_ready(const char *root)
+{
+    int failures = 0;
+    struct rs_call c;
+    rs_begin(&c);
+    TEST("I6: 59 defects within the limits plus a sound case is set_ready") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){59, 20, 8, 0, 1}));
+        ASSERT(rs_bool(&c, "set_ready"));
+        ASSERT(rs_ind_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "bases"), 20);
+        PASS();
+    }
+    TEST("I6: the same set without a sound case is not set_ready") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){59, 20, 8, 0, 0}));
+        ASSERT(!rs_bool(&c, "set_ready"));
+        ASSERT(rs_bool(&c, "defect_cases_enough"));
+        PASS();
+    }
+    TEST("I6: one base holding 4 is not set_ready though the count is enough") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){59, 20, 8, 4, 1}));
+        ASSERT(!rs_bool(&c, "set_ready"));
+        ASSERT(rs_bool(&c, "defect_cases_enough"));
+        ASSERT(!rs_ind_ok(&c));
+        PASS();
+    }
+    TEST("I6: 58 defects within the limits plus a sound case is not set_ready") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){58, 20, 8, 0, 1}));
+        ASSERT(!rs_bool(&c, "set_ready"));
+        PASS();
+    }
+_test_next:;
+    rs_end(&c);
+    return failures;
+}
+
+/* The over lists cap at 32 with the exact total; 4096 cases stay fast. */
+static int rs_independence_bounds(const char *root)
+{
+    int failures = 0;
+    struct rs_call c;
+    struct timespec t0, t1;
+    rs_begin(&c);
+    TEST("over_base lists 32 of 40 bases and over_base_total is 40") {
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){160, 40, 4, 0, 0}));
+        ASSERT_EQ(rs_ind_int(&c, "over_base_total"), 40);
+        ASSERT_EQ(json_size(rs_ind(&c, "over_base")), 32);
+        PASS();
+    }
+    TEST("4096 defect cases on 4096 bases and one class tally (time reported, not graded)") {
+        (void)clock_gettime(CLOCK_MONOTONIC, &t0);
+        ASSERT(rs_run_gen(&c, root, &(struct rs_gen){4096, 4096, 1, 0, 0}));
+        (void)clock_gettime(CLOCK_MONOTONIC, &t1);
+        double secs = (double)(t1.tv_sec - t0.tv_sec) +
+                      (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+        printf("[4096-case independence run: %.3f s] ", secs);
+        ASSERT(rs_ok(&c));
+        ASSERT_EQ(rs_ind_int(&c, "bases"), 4096);
+        ASSERT_EQ(rs_ind_int(&c, "over_class_total"), 1);
+        PASS();
+    }
+_test_next:;
+    rs_end(&c);
+    return failures;
+}
+
 /* ── T15: the pure rule, no command ─────────────────────────────────── */
 
 static int rs_pure(void)
@@ -791,6 +1071,11 @@ int test_devagent_reviewscore(void)
     failures += rs_findings(root);
     failures += rs_set_refusals(root);
     failures += rs_set_limit(root);
+    failures += rs_dup_defect(root);
+    failures += rs_base_rules(root);
+    failures += rs_independence(root);
+    failures += rs_ready(root);
+    failures += rs_independence_bounds(root);
     failures += rs_pure();
     (void)test_rm_rf_recursive(root);
     if (failures == 0) printf("test_devagent_reviewscore: all passed\n");

@@ -6,10 +6,15 @@
  * INPUT (zcl.agent_reviewscore_input.v1), both required
  *   set      JSONL, one case per line:
  *            {"id","label":"sound"|"defect","locus":"code"|"claim","class",
- *             "defect":[{"file","line_lo","line_hi"}],"tolerance"}
+ *             "defect":[{"file","line_lo","line_hi"}],"tolerance","base_id"}
  *            locus, class and defect are required for a defect case and
  *            ignored for a sound one; tolerance defaults to 2 (0..50).
  *            class may not be "(other)": that name is the fold row.
+ *            base_id (optional string, bound as id) names the sound change
+ *            a case was cut from; without it a case is its own base. Two
+ *            defect cases equal in class, locus, ranges and base REFUSE the
+ *            set (SET_DUPLICATE_DEFECT). The reply's `independence` object
+ *            reports, without refusing, bases over 3 cases or classes over 8.
  *   reviews  JSONL, one review per line:
  *            {"case","reviewer","findings":[{"kind":"CHANGE"|"CLAIM",
  *             "file","line"}]}
@@ -44,6 +49,9 @@
 #define DRS_UNREVIEWED_MAX 64u
 #define DRS_CLASSES_MAX 32u
 #define DRS_DEFECT_MIN 59
+#define DRS_PER_BASE_LIMIT 3
+#define DRS_PER_CLASS_LIMIT 8
+#define DRS_OVER_MAX 32u
 #define DRS_LINE_NUM_MAX 1000000000
 #define DRS_FOLD_NAME "(other)"
 
@@ -53,6 +61,7 @@ typedef enum drs_row (*drs_row_fn)(void *ctx, const struct json_value *row);
 
 struct drs_case {
     struct ers_case c;
+    char base[ERS_ID_MAX]; /* the change this case came from; its id if none */
     struct ers_range *own;
     int64_t reviews;
 };
@@ -70,6 +79,9 @@ struct drs_set {
     int64_t sound;
     int64_t defect;
     char dup_id[ERS_ID_MAX];
+    char same_a[ERS_ID_MAX]; /* the two ids of a duplicate defect */
+    char same_b[ERS_ID_MAX];
+    bool same_defect;
     bool dup;
     bool too_big;
     bool alloc_failed;
@@ -207,10 +219,21 @@ static bool drs_parse_tolerance(const struct json_value *row, int *out)
     return true;
 }
 
+/* base_id is optional; without one a case is its own base. */
+static bool drs_parse_base(const struct json_value *row, struct drs_case *cs)
+{
+    if (!json_get(row, "base_id")) {
+        memcpy(cs->base, cs->c.id, strlen(cs->c.id) + 1u);
+        return true;
+    }
+    return drs_copy_str(row, "base_id", cs->base, sizeof(cs->base));
+}
+
 static enum drs_parse drs_parse_case(const struct json_value *row,
                                      struct drs_case *cs)
 {
     if (!drs_copy_str(row, "id", cs->c.id, sizeof(cs->c.id)) ||
+        !drs_parse_base(row, cs) ||
         !drs_parse_tolerance(row, &cs->c.tolerance))
         return DRS_PARSE_BAD;
     const char *label = drs_str(row, "label");
@@ -261,11 +284,43 @@ static bool drs_set_grow(struct drs_set *s)
     return true;
 }
 
+/* Same defect: class, locus, every range in order, and base all equal. */
+static bool drs_same_defect(const struct drs_case *a, const struct drs_case *b)
+{
+    if (a->c.locus != b->c.locus || a->c.nranges != b->c.nranges ||
+        strcmp(a->c.cls, b->c.cls) != 0 || strcmp(a->base, b->base) != 0)
+        return false;
+    for (size_t i = 0; i < a->c.nranges; i++) {
+        const struct ers_range *x = &a->c.ranges[i], *y = &b->c.ranges[i];
+        if (x->line_lo != y->line_lo || x->line_hi != y->line_hi ||
+            strcmp(x->file, y->file) != 0)
+            return false;
+    }
+    return true;
+}
+
+/* True, with both ids recorded, when `cs` repeats an earlier defect case. */
+static bool drs_note_same_defect(struct drs_set *s, const struct drs_case *cs)
+{
+    for (size_t i = 0; i < s->n; i++) {
+        const struct drs_case *o = &s->items[i];
+        if (o->c.label != ERS_LABEL_DEFECT || !drs_same_defect(o, cs))
+            continue;
+        s->same_defect = true;
+        memcpy(s->same_a, o->c.id, sizeof(s->same_a));
+        memcpy(s->same_b, cs->c.id, sizeof(s->same_b));
+        return true;
+    }
+    return false;
+}
+
 static enum drs_row drs_set_add(struct drs_set *s, struct drs_case *cs)
 {
     if (drs_find(s, cs->c.id)) {
         s->dup = true;
         memcpy(s->dup_id, cs->c.id, sizeof(s->dup_id));
+    } else if (cs->c.label == ERS_LABEL_DEFECT && drs_note_same_defect(s, cs)) {
+        /* refused: the same defect twice is not two independent defects */
     } else if (s->n >= DRS_CASES_MAX) {
         s->too_big = true;
     } else if (!drs_set_grow(s)) {
@@ -407,6 +462,16 @@ static bool drs_refuse_set_state(struct zcl_command_reply *reply,
                        "one id are not scoreable", s->dup_id);
         drs_refuse(reply, ZCL_COMMAND_EXIT_INVALID, "SET_DUPLICATE_ID",
                    "validate", msg, "known-answer set", "give every case a unique id");
+        return false;
+    }
+    if (s->same_defect) {
+        (void)snprintf(msg, sizeof(msg),
+                       "cases '%s' and '%s' are the same defect (same class, "
+                       "locus, ranges and base); one defect counted twice is "
+                       "not two independent defects", s->same_a, s->same_b);
+        drs_refuse(reply, ZCL_COMMAND_EXIT_INVALID, "SET_DUPLICATE_DEFECT",
+                   "validate", msg, "known-answer set",
+                   "drop one, or give the cases different bases");
         return false;
     }
     if (s->too_big) {
@@ -642,13 +707,131 @@ static bool drs_push_unreviewed(struct json_value *data, const struct drs_set *s
     return ok;
 }
 
-static bool drs_push_set_counts(struct json_value *data, const struct drs_set *s)
+/* ── independence of the defect cases ───────────────────────────────── */
+
+struct drs_cnt {
+    const char *name;
+    int64_t n;
+};
+
+struct drs_indep {
+    struct drs_cnt *rows; /* bases first, then classes; one block */
+    struct drs_cnt *bases;
+    struct drs_cnt *classes;
+    size_t nb, nc;
+    int64_t max_base, max_class, over_base, over_class;
+    bool ok;
+};
+
+/* Count `name` in out[0..*k); a linear scan, so the tally is O(defects x
+ * distinct names): 4096 x 4096 string compares at the cap. */
+static void drs_count_name(struct drs_cnt *out, size_t *k, const char *name)
 {
+    for (size_t i = 0; i < *k; i++) {
+        if (strcmp(out[i].name, name) == 0) {
+            out[i].n++;
+            return;
+        }
+    }
+    out[*k].name = name;
+    out[*k].n = 1;
+    (*k)++;
+}
+
+static void drs_measure(const struct drs_cnt *c, size_t k, int64_t limit,
+                        int64_t *max, int64_t *over)
+{
+    *max = 0;
+    *over = 0;
+    for (size_t i = 0; i < k; i++) {
+        if (c[i].n > *max)
+            *max = c[i].n;
+        if (c[i].n > limit)
+            (*over)++;
+    }
+}
+
+/* Only defect cases are tallied; a sound case belongs to no base or class. */
+static bool drs_indep_build(struct drs_indep *in, const struct drs_set *s)
+{
+    memset(in, 0, sizeof(*in));
+    in->rows = zcl_malloc((2u * (size_t)s->defect + 1u) * sizeof(*in->rows),
+                          "reviewscore_indep");
+    if (!in->rows)
+        return false;
+    in->bases = in->rows;
+    in->classes = in->rows + s->defect;
+    for (size_t i = 0; i < s->n; i++) {
+        if (s->items[i].c.label != ERS_LABEL_DEFECT)
+            continue;
+        drs_count_name(in->bases, &in->nb, s->items[i].base);
+        drs_count_name(in->classes, &in->nc, s->items[i].c.cls);
+    }
+    drs_measure(in->bases, in->nb, DRS_PER_BASE_LIMIT, &in->max_base,
+                &in->over_base);
+    drs_measure(in->classes, in->nc, DRS_PER_CLASS_LIMIT, &in->max_class,
+                &in->over_class);
+    in->ok = in->over_base == 0 && in->over_class == 0;
+    return true;
+}
+
+static bool drs_push_over(struct json_value *obj, const char *key,
+                          const char *total_key, const struct drs_cnt *c,
+                          size_t k, int64_t limit, int64_t total)
+{
+    struct json_value arr;
+    json_init(&arr);
+    json_set_array(&arr);
+    size_t pushed = 0;
+    bool ok = true;
+    for (size_t i = 0; ok && i < k && pushed < DRS_OVER_MAX; i++) {
+        if (c[i].n <= limit)
+            continue;
+        struct json_value el;
+        json_init(&el);
+        json_set_str(&el, c[i].name);
+        ok = json_push_back(&arr, &el);
+        json_free(&el);
+        pushed++;
+    }
+    ok = ok && json_push_kv(obj, key, &arr) &&
+         json_push_kv_int(obj, total_key, total);
+    json_free(&arr);
+    return ok;
+}
+
+static bool drs_push_independence(struct json_value *data,
+                                  const struct drs_indep *in)
+{
+    struct json_value obj;
+    json_init(&obj);
+    json_set_object(&obj);
+    bool ok = json_push_kv_int(&obj, "bases", (int64_t)in->nb) &&
+              json_push_kv_int(&obj, "per_base_limit", DRS_PER_BASE_LIMIT) &&
+              json_push_kv_int(&obj, "per_class_limit", DRS_PER_CLASS_LIMIT) &&
+              json_push_kv_int(&obj, "max_per_base", in->max_base) &&
+              json_push_kv_int(&obj, "max_per_class", in->max_class) &&
+              drs_push_over(&obj, "over_base", "over_base_total", in->bases,
+                            in->nb, DRS_PER_BASE_LIMIT, in->over_base) &&
+              drs_push_over(&obj, "over_class", "over_class_total",
+                            in->classes, in->nc, DRS_PER_CLASS_LIMIT,
+                            in->over_class) &&
+              json_push_kv_bool(&obj, "ok", in->ok) &&
+              json_push_kv(data, "independence", &obj);
+    json_free(&obj);
+    return ok;
+}
+
+static bool drs_push_set_counts(struct json_value *data, const struct drs_set *s,
+                                const struct drs_indep *in)
+{
+    bool enough = s->defect >= DRS_DEFECT_MIN;
     return json_push_kv_int(data, "sound_cases", s->sound) &&
            json_push_kv_int(data, "defect_cases", s->defect) &&
            json_push_kv_int(data, "defect_cases_min", DRS_DEFECT_MIN) &&
-           json_push_kv_bool(data, "defect_cases_enough",
-                             s->defect >= DRS_DEFECT_MIN) &&
+           json_push_kv_bool(data, "defect_cases_enough", enough) &&
+           json_push_kv_bool(data, "set_ready",
+                             enough && in->ok && s->sound > 0) &&
            json_push_kv_int(data, "set_malformed_lines", (int64_t)s->bad.count);
 }
 
@@ -672,14 +855,21 @@ static bool drs_push_review_counts(struct json_value *data,
 static bool drs_push_all(struct json_value *data, const struct drs_set *s,
                          const struct drs_tally *t)
 {
-    return drs_push_set_counts(data, s) && drs_push_review_counts(data, t) &&
-           drs_push_pair(data, "sound_reject_rate", t->sound_rejected,
-                         t->sound_reviews) &&
-           drs_push_pair(data, "defect_accept_rate", t->defect_accepted,
-                         t->defect_reviews) &&
-           json_push_kv_bool(data, "measurable",
-                             t->sound_reviews > 0 && t->defect_reviews > 0) &&
-           drs_push_unreviewed(data, s) && drs_push_classes(data, t);
+    struct drs_indep in;
+    if (!drs_indep_build(&in, s))
+        return false;
+    bool ok = drs_push_set_counts(data, s, &in) &&
+              drs_push_review_counts(data, t) &&
+              drs_push_pair(data, "sound_reject_rate", t->sound_rejected,
+                            t->sound_reviews) &&
+              drs_push_pair(data, "defect_accept_rate", t->defect_accepted,
+                            t->defect_reviews) &&
+              json_push_kv_bool(data, "measurable",
+                                t->sound_reviews > 0 && t->defect_reviews > 0) &&
+              drs_push_unreviewed(data, s) && drs_push_classes(data, t) &&
+              drs_push_independence(data, &in);
+    free(in.rows);
+    return ok;
 }
 
 static const char *drs_path(struct zcl_command_reply *reply,
