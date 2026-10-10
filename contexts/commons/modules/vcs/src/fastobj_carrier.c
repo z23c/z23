@@ -1,6 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: the zcl.fastobj.v1 object-set carrier (vcs/fastobj_carrier.h). */
 
+#if defined(__linux__)
+#define _GNU_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "vcs/fastobj_carrier.h"
@@ -9,6 +12,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "platform/positioned_file.h"
+#include "platform/fd_path.h"
 #include "sha3/sha3.h"
 #include "vcs/fastobj.h"
 #include "vcs/package_content.h"
@@ -69,8 +73,40 @@ static bool fc_read_file(const char *cache_dir, const char *relative,
     return true;
 }
 
+/* Unsupported filesystems retain named staging. Other creation failures refuse
+ * before writing; publication failures never switch staging mechanisms. */
+static int fc_stage_open(int dirfd, const char *tmp, mode_t mode,
+                          bool *anonymous)
+{
+    *anonymous = false;
+#if defined(__linux__)
+    int fd = openat(dirfd, ".", O_TMPFILE | O_WRONLY | O_CLOEXEC, mode);
+    if (fd >= 0) {
+        *anonymous = true;
+        return fd;
+    }
+    if (errno != EOPNOTSUPP && errno != EINVAL && errno != EISDIR &&
+        errno != ENOSYS)
+        return -1;
+#endif
+    return openat(dirfd, tmp, O_WRONLY | O_CREAT | O_EXCL |
+                               O_CLOEXEC | O_NOFOLLOW, mode);
+}
+
+static bool fc_stage_write(int fd, const uint8_t *bytes, size_t len)
+{
+    size_t put = 0;
+    while (put < len) {
+        ssize_t n = write(fd, bytes + put, len - put);
+        if (n <= 0)
+            return false;
+        put += (size_t)n;
+    }
+    return fsync(fd) == 0;
+}
+
 /* Write through the verified shard descriptor, without following or replacing
- * a cache member. */
+ * a cache member. Anonymous staging releases its unpublished inode on death. */
 static bool fc_atomic_write_at(int dirfd, const char *name,
                                const uint8_t *bytes, size_t len,
                                mode_t mode)
@@ -80,27 +116,23 @@ static bool fc_atomic_write_at(int dirfd, const char *name,
                       (long)getpid());
     if (tn <= 0 || (size_t)tn >= sizeof(tmp))
         return false;
-    int fd = openat(dirfd, tmp, O_WRONLY | O_CREAT | O_EXCL |
-                               O_CLOEXEC | O_NOFOLLOW, mode);
+    bool anonymous = false;
+    int fd = fc_stage_open(dirfd, tmp, mode, &anonymous);
     if (fd < 0)
         return false;
-    size_t put = 0;
-    bool ok = true;
-    while (put < len) {
-        ssize_t n = write(fd, bytes + put, len - put);
-        if (n <= 0) {
-            ok = false;
-            break;
-        }
-        put += (size_t)n;
+    bool ok = fc_stage_write(fd, bytes, len);
+#if defined(__linux__)
+    if (ok && anonymous) {
+        char source[128];
+        ok = platform_fd_path(source, sizeof(source), fd, NULL) &&
+             linkat(AT_FDCWD, source, dirfd, name, AT_SYMLINK_FOLLOW) == 0;
     }
-    if (ok && fsync(fd) != 0)
-        ok = false;
+#endif
     if (close(fd) != 0)
         ok = false;
-    if (ok && linkat(dirfd, tmp, dirfd, name, 0) != 0)
+    if (ok && !anonymous && linkat(dirfd, tmp, dirfd, name, 0) != 0)
         ok = false;
-    if (unlinkat(dirfd, tmp, 0) != 0)
+    if (!anonymous && unlinkat(dirfd, tmp, 0) != 0)
         ok = false;
     return ok;
 }
@@ -802,6 +834,27 @@ static bool fc_carrier_member(const char *path, const char *ext,
     return fc_is_lower_hex(key_out, 64u);
 }
 
+static bool fc_existing_entry_at(int shard, const char *obj_name,
+                                 const char *side_name, bool have_obj,
+                                 bool have_side, const uint8_t *obj,
+                                 size_t obj_len, const uint8_t *side,
+                                 size_t side_len)
+{
+    uint8_t *eobj = NULL, *eside = NULL;
+    size_t eobj_len = 0, eside_len = 0;
+    bool ok = have_obj &&
+        fc_read_file_at(shard, obj_name, FASTOBJ_CARRIER_MAX_OBJECT_BYTES,
+                        &eobj, &eobj_len) &&
+        eobj_len == obj_len && memcmp(eobj, obj, obj_len) == 0;
+    if (ok && have_side)
+        ok = fc_read_file_at(shard, side_name, VCS_FASTOBJ_SIDECAR_MAX_BYTES,
+                             &eside, &eside_len) &&
+             eside_len == side_len && memcmp(eside, side, side_len) == 0;
+    free(eobj);
+    free(eside);
+    return ok;
+}
+
 static bool fc_admit_entry(const char *cache_dir, const char *key,
                            const uint8_t *obj, size_t obj_len,
                            const uint8_t *side, size_t side_len,
@@ -822,21 +875,18 @@ static bool fc_admit_entry(const char *cache_dir, const char *key,
     bool have_side = fstatat(shard, side_name, &st, AT_SYMLINK_NOFOLLOW) == 0;
     bool ok;
     if (have_obj || have_side) {
-        uint8_t *eobj = NULL, *eside = NULL;
-        size_t eobj_len = 0, eside_len = 0;
-        ok = have_obj && have_side &&
-             fc_read_file_at(shard, obj_name, FASTOBJ_CARRIER_MAX_OBJECT_BYTES,
-                             &eobj, &eobj_len) &&
-             fc_read_file_at(shard, side_name, VCS_FASTOBJ_SIDECAR_MAX_BYTES,
-                             &eside, &eside_len) &&
-             eobj_len == obj_len && eside_len == side_len &&
-             memcmp(eobj, obj, obj_len) == 0 &&
-             memcmp(eside, side, side_len) == 0;
-        free(eobj);
-        free(eside);
+        ok = fc_existing_entry_at(shard, obj_name, side_name, have_obj,
+                                  have_side, obj, obj_len, side, side_len);
+        bool completing = ok && !have_side;
+        if (completing)
+            /* A death between the two publications may leave the exact
+             * object. Complete only its absent sidecar, without overwrite. */
+            ok = fc_atomic_write_at(shard, side_name, side, side_len, 0600);
         if (!ok)
             (void)snprintf(err, err_cap,
-                           "cache CORRUPTION: existing entry %.16s... differs from the carrier",
+                           completing
+                               ? "cannot store sidecar for existing entry %.16s..."
+                               : "cache CORRUPTION: existing entry %.16s... differs from the carrier",
                            key);
     } else {
         ok = fc_atomic_write_at(shard, obj_name, obj, obj_len, 0444) &&

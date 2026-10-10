@@ -5092,7 +5092,7 @@ static bool pv_fast_unsafe_token(char token[16], size_t len)
 static bool pv_fast_ascii_identifier(int c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_';
+           (c >= '0' && c <= '9') || c == '_' || c == '$';
 }
 
 static bool pv_fast_identifier_asm(FILE *f, int c)
@@ -5150,6 +5150,85 @@ static bool pv_fast_diagnostic_attribute(FILE *f)
            pv_fast_nonspace(f) == ')';
 }
 
+static bool pv_fast_attribute_word(FILE *f, const char *expected)
+{
+    size_t i = 0;
+    int c = pv_fast_nonspace(f);
+    while (c != EOF && (isalpha((unsigned char)c) || c == '_')) {
+        if (!expected[i] || c != (unsigned char)expected[i]) return false;
+        i++;
+        c = fgetc(f);
+    }
+    return expected[i] == '\0' && c != EOF && ungetc(c, f) != EOF;
+}
+
+static bool pv_fast_attribute_char(FILE *f, int expected)
+{
+    return pv_fast_nonspace(f) == expected;
+}
+
+static bool pv_fast_attribute_message(FILE *f)
+{
+    if (!pv_fast_attribute_char(f, '"')) return false;
+    int c;
+    while ((c = fgetc(f)) != '"')
+        if (c < 0x20 || c > 0x7e || c == '\\') return false;
+    return true;
+}
+
+static bool pv_fast_apple_attribute_close(FILE *f)
+{
+    if (!pv_fast_attribute_char(f, ')')) return false;
+    if (!pv_fast_attribute_char(f, ')')) return false;
+    return pv_fast_attribute_char(f, ')');
+}
+
+static bool pv_fast_apple_swift_attribute(FILE *f)
+{
+    static const char value[] = "nonisolated(unsafe)";
+    if (!pv_fast_attribute_char(f, '"')) return false;
+    for (size_t i = 0; i < sizeof(value) - 1; i++)
+        if (fgetc(f) != (unsigned char)value[i]) return false;
+    return fgetc(f) == '"' && pv_fast_apple_attribute_close(f);
+}
+
+static bool pv_fast_apple_availability_attribute(FILE *f)
+{
+    if (!pv_fast_attribute_word(f, "swift")) return false;
+    if (!pv_fast_attribute_char(f, ',')) return false;
+    if (!pv_fast_attribute_word(f, "unavailable")) return false;
+    if (!pv_fast_attribute_char(f, ',')) return false;
+    if (!pv_fast_attribute_word(f, "message")) return false;
+    if (!pv_fast_attribute_char(f, '=')) return false;
+    if (!pv_fast_attribute_message(f)) return false;
+    return pv_fast_apple_attribute_close(f);
+}
+
+/* These exact Apple SDK attributes carry importer/availability metadata only.
+ * Keep quoted text confined to their syntax and refuse mixed attribute lists. */
+static bool pv_fast_apple_attribute(FILE *f)
+{
+    if (!pv_fast_attribute_char(f, '(')) return false;
+    int c = pv_fast_nonspace(f);
+    char name[24];
+    size_t n = 0;
+    while (c != EOF && (isalpha((unsigned char)c) || c == '_')) {
+        if (n + 1 >= sizeof(name)) return false;
+        name[n++] = (char)c;
+        c = fgetc(f);
+    }
+    name[n] = '\0';
+    if (c == EOF || ungetc(c, f) == EOF ||
+        !pv_fast_attribute_char(f, '(')) return false;
+
+    if (strcmp(name, "__swift_attr__") == 0)
+        return pv_fast_apple_swift_attribute(f);
+    if (strcmp(name, "availability") == 0 ||
+        strcmp(name, "__availability__") == 0)
+        return pv_fast_apple_availability_attribute(f);
+    return false;
+}
+
 /* Preserve unquoted GNU attributes and standalone warning/error messages.
  * Other quoted arguments and directive/attribute syntax stay ineligible. */
 static bool pv_fast_unquoted_attribute(FILE *f)
@@ -5172,6 +5251,8 @@ static bool pv_fast_attribute_cacheable(FILE *f, int c)
     long start = ftell(f);
     if (start < 0) return false;
     if (pv_fast_diagnostic_attribute(f)) return true;
+    if (fseek(f, start, SEEK_SET) != 0) return false;
+    if (pv_fast_apple_attribute(f)) return true;
     return fseek(f, start, SEEK_SET) == 0 && pv_fast_unquoted_attribute(f);
 }
 

@@ -36,6 +36,9 @@
  * The candidate lane forks the package verifier beside this binary; it must
  * exist (make dev-bin), and a missing binary is a loud failure. */
 
+#if defined(__linux__)
+#define _GNU_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "test/test_core.h"
@@ -43,6 +46,7 @@
 #include "base/hex.h"
 #include "core/uint256.h"
 #include "platform/os_proc.h"
+#include "platform/fd_path.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "sha3/sha3.h"
@@ -66,9 +70,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/ptrace.h>
+#include <linux/ptrace.h>
+#include <sys/syscall.h>
+#endif
 
 #define FC_CHECK(name, expr) do {                                       \
     if (expr) { printf("  fastobj_carrier: %s... OK\n", (name)); }      \
@@ -524,8 +534,8 @@ static const char *fcw_find(const uint8_t *hay, size_t len,
     return NULL;
 }
 
-#if defined(__linux__)
-/* GNU assembler witness: bytes read by .incbin are absent from -E output. */
+#if defined(__linux__) || defined(__APPLE__)
+/* Assembler witness: bytes read by .incbin are absent from -E output. */
 struct fcw_asm_fixture {
     char pkg[4096], data[4096], source[4096], recipe[4096];
     char cache[4096], fresh[4096], emit[3][4096];
@@ -555,11 +565,16 @@ static bool fcw_asm_fixture_init(struct fcw_asm_fixture *f, const char *base,
     }
     FILE *source = fopen(f->source, "ab");
     if (!source) return false;
+#if defined(__APPLE__)
+    const char *format = "\n#define FCW_ASM __asm__\n"
+          "FCW_ASM(\".data\\n.incbin \\\"%s\\\"\\n.text\\n\");\n";
+#else
     const char *format = attribute
         ? "\nconst unsigned char fcw_section_data __attribute__((section("
           "\".rodata\\n.incbin \\\"%s\\\"\\n#\"))) = 7;\n"
         : "\n#define FCW_ASM __asm__\n"
           "FCW_ASM(\".pushsection .rodata\\n.incbin \\\"%s\\\"\\n.popsection\\n\");\n";
+#endif
     int written = fprintf(source, format, f->data);
     bool ok = written > 0;
     if (fclose(source) != 0) ok = false;
@@ -680,6 +695,35 @@ static bool fcw_attribute_spelling(const char *base, const char *worker,
     return ok && result.cache_complete && result.hits == 0 &&
            result.misses == (reusable ? 2u : 1u);
 }
+#endif
+
+#if defined(__APPLE__)
+static int fcw_apple_attribute_spellings(const char *base, const char *worker,
+                                        const struct pubkey *pk)
+{
+    static const char *const cases[] = {
+        "\nextern int fcw_alias(void) __asm__(\"_\" \"fcw_symbol\" \"$DARWIN_EXTSN\");\n"
+        "const int fcw_swift __attribute__((__swift_attr__(\"nonisolated(unsafe)\"))) = 1;\n"
+        "extern int fcw_availability(void) __attribute__((availability(swift, unavailable, message=\"SDK metadata\")));\n",
+        "\nconst int fcw_swift __attribute__((__swift_attr__(\"nonisolated(unsafe)\"), section(\"__DATA,fcw_guard\"))) = 1;\n",
+        "\nconst int fcw_availability __attribute__((availability(swift, unavailable, message=\"SDK metadata\"), section(\"__DATA,fcw_guard\"))) = 1;\n",
+        "\nconst int fcw_swift __attribute__((__swift_attr__(\"nonisolated(safe)\"))) = 1;\n",
+        "\nextern int fcw_availability(void) __attribute__((availability(swift, unavailable, message=\"escaped\\n\")));\n",
+        "\nextern int fcw_alias(void) __asm__(\"fcw_symbol/unsafe\");\n",
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char path[4096], name[48];
+        (void)snprintf(name, sizeof(name), "apple-attribute-spelling-%zu", i);
+        bool ok = fcw_asm_path(path, base, name) &&
+            fcw_attribute_spelling(path, worker, pk, cases[i], i == 0);
+        FC_CHECK(name, ok);
+    }
+    return failures;
+}
+#endif
+
+#if defined(__linux__)
 
 static int fcw_attribute_spellings(const char *base, const char *worker,
                                   const struct pubkey *pk)
@@ -1166,6 +1210,391 @@ static int fcw_empty_export_regression(void)
     return failures;
 }
 
+#if defined(__linux__)
+struct fcw_disk {
+    uint64_t file_bytes;
+    uint64_t directory_bytes;
+    uint32_t files;
+    size_t unique;
+    dev_t devices[4];
+    ino_t inodes[4];
+};
+
+static bool fcw_disk_file(struct fcw_disk *disk, const struct stat *st)
+{
+    disk->files++;
+    for (size_t i = 0; i < disk->unique; i++)
+        if (disk->devices[i] == st->st_dev && disk->inodes[i] == st->st_ino)
+            return true;
+    if (disk->unique == 4u)
+        return false;
+    disk->devices[disk->unique] = st->st_dev;
+    disk->inodes[disk->unique++] = st->st_ino;
+    disk->file_bytes += (uint64_t)st->st_blocks * 512u;
+    return true;
+}
+
+/* Only the newly created crash fixture is traversed, at three levels. */
+static bool fcw_crash_disk(const char *path, unsigned depth,
+                            struct fcw_disk *disk)
+{
+    struct stat st;
+    if (depth > 3u || lstat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+        return false;
+    disk->directory_bytes += (uint64_t)st.st_blocks * 512u;
+    DIR *dir = opendir(path);
+    if (!dir)
+        return false;
+    bool ok = true;
+    struct dirent *entry;
+    while (ok && (entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+            continue;
+        char child[4096];
+        ok = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) <
+                 (int)sizeof(child) && lstat(child, &st) == 0;
+        if (ok && S_ISDIR(st.st_mode))
+            ok = fcw_crash_disk(child, depth + 1u, disk);
+        else if (ok && S_ISREG(st.st_mode))
+            ok = fcw_disk_file(disk, &st);
+        else {
+            ok = false;
+        }
+    }
+    return closedir(dir) == 0 && ok;
+}
+
+static bool fcw_same_inode(int fd, int dir, const char *name)
+{
+    struct stat opened, linked;
+    return fstat(fd, &opened) == 0 &&
+        fstatat(dir, name, &linked, AT_SYMLINK_NOFOLLOW) == 0 &&
+        opened.st_ino == linked.st_ino && opened.st_dev == linked.st_dev;
+}
+
+static bool fcw_anonymous_support(const char *cache)
+{
+    int dir = open(cache, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dir < 0)
+        return false;
+    int fd = openat(dir, ".", O_TMPFILE | O_WRONLY | O_CLOEXEC, 0600);
+    char source[128];
+    bool ok = fd >= 0 && write(fd, "exact", 5u) == 5 && fsync(fd) == 0 &&
+        platform_fd_path(source, sizeof(source), fd, NULL) &&
+        linkat(AT_FDCWD, source, dir, "support", AT_SYMLINK_FOLLOW) == 0 &&
+        fcw_same_inode(fd, dir, "support");
+    if (ok) {
+        errno = 0;
+        ok = linkat(AT_FDCWD, source, dir, "support", AT_SYMLINK_FOLLOW) == -1 &&
+             errno == EEXIST;
+    }
+    if (unlinkat(dir, "support", 0) != 0)
+        ok = false;
+    if (fd >= 0 && close(fd) != 0)
+        ok = false;
+    return close(dir) == 0 && ok;
+}
+
+/* RLIMIT_FSIZE kills the actual admit after one byte reaches its staging
+ * inode, before either object or sidecar can be published. */
+static bool fcw_crash_admit(const char *cache, struct vcs_package_store *store,
+                             const uint8_t root[32])
+{
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        (void)alarm(10u);
+        struct rlimit file_limit = {1u, 1u}, core_limit = {0u, 0u};
+        if (signal(SIGXFSZ, SIG_DFL) == SIG_ERR ||
+            setrlimit(RLIMIT_CORE, &core_limit) != 0 ||
+            setrlimit(RLIMIT_FSIZE, &file_limit) != 0)
+            _exit(2);
+        struct vcs_fastobj_carrier_stats stats;
+        char err[256];
+        bool admitted = vcs_fastobj_carrier_admit(cache, store, root, &stats,
+                                                  err, sizeof(err));
+        _exit(admitted ? 3 : 4);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFSIGNALED(status) &&
+           WTERMSIG(status) == SIGXFSZ;
+}
+
+static bool fcw_wait_child(pid_t child, int *status)
+{
+    pid_t result;
+    do {
+        result = waitpid(child, status, 0);
+    } while (result < 0 && errno == EINTR);
+    return result == child;
+}
+
+enum fcw_trace_event { FCW_TRACE_ERROR, FCW_TRACE_EXIT,
+                       FCW_TRACE_WAIT, FCW_TRACE_PUBLISHED };
+
+static enum fcw_trace_event fcw_publication_step(pid_t child, bool *publishing)
+{
+    int status = 0;
+    if (ptrace(PTRACE_SYSCALL, child, NULL, NULL) != 0)
+        return FCW_TRACE_ERROR;
+    if (!fcw_wait_child(child, &status) || !WIFSTOPPED(status))
+        return FCW_TRACE_EXIT;
+    struct ptrace_syscall_info info = {0};
+    if (WSTOPSIG(status) != (SIGTRAP | 0x80) ||
+        ptrace(PTRACE_GET_SYSCALL_INFO, child, sizeof(info), &info) < 0)
+        return FCW_TRACE_ERROR;
+    if (info.op == PTRACE_SYSCALL_INFO_ENTRY)
+        *publishing = info.entry.nr == SYS_linkat;
+    if (info.op == PTRACE_SYSCALL_INFO_EXIT && *publishing &&
+        info.exit.rval == 0)
+        return FCW_TRACE_PUBLISHED;
+    return FCW_TRACE_WAIT;
+}
+
+static bool fcw_kill_child(pid_t child)
+{
+    int status = 0;
+    bool killed = kill(child, SIGKILL) == 0;
+    bool reaped = fcw_wait_child(child, &status);
+    return killed && reaped && WIFSIGNALED(status) &&
+           WTERMSIG(status) == SIGKILL;
+}
+
+static bool fcw_stop_after_publication(pid_t child)
+{
+    int status = 0;
+    bool stopped = fcw_wait_child(child, &status) && WIFSTOPPED(status);
+    bool alive = stopped, publishing = false, published = false;
+    if (stopped)
+        stopped = ptrace(PTRACE_SETOPTIONS, child, NULL,
+                          (void *)(uintptr_t)PTRACE_O_TRACESYSGOOD) == 0;
+    for (unsigned step = 0; stopped && step < 10000u; step++) {
+        enum fcw_trace_event event = fcw_publication_step(child, &publishing);
+        if (event == FCW_TRACE_EXIT) {
+            alive = false;
+            break;
+        }
+        if (event == FCW_TRACE_ERROR || event == FCW_TRACE_PUBLISHED) {
+            published = event == FCW_TRACE_PUBLISHED;
+            break;
+        }
+    }
+    if (alive)
+        return fcw_kill_child(child) && published;
+    return false;
+}
+
+static bool fcw_crash_after_object(const char *cache,
+                                   struct vcs_package_store *store,
+                                   const uint8_t root[32])
+{
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        (void)alarm(10u);
+        struct rlimit core_limit = {0u, 0u};
+        if (setrlimit(RLIMIT_CORE, &core_limit) != 0 ||
+            ptrace(PTRACE_TRACEME, 0, NULL, NULL) != 0 || raise(SIGSTOP) != 0)
+            _exit(2);
+        struct vcs_fastobj_carrier_stats stats;
+        char err[256];
+        bool admitted = vcs_fastobj_carrier_admit(cache, store, root, &stats,
+                                                  err, sizeof(err));
+        _exit(admitted ? 3 : 4);
+    }
+    return fcw_stop_after_publication(child);
+}
+
+#endif
+
+static bool fcw_exact_retry(const char *cache, struct vcs_package_store *store,
+                            const uint8_t root[32])
+{
+    struct vcs_fastobj_carrier_stats stats;
+    char err[256];
+    uint8_t round_trip[32];
+    return vcs_fastobj_carrier_admit(cache, store, root, &stats, err,
+                                    sizeof(err)) &&
+           vcs_fastobj_carrier_admit(cache, store, root, &stats, err,
+                                    sizeof(err)) &&
+           vcs_fastobj_carrier_export(cache, store, round_trip, &stats, err,
+                                     sizeof(err)) &&
+           memcmp(root, round_trip, sizeof(round_trip)) == 0;
+}
+
+struct fcw_partial_paths {
+    char object[4096], sidecar[4096], outside[4096];
+};
+
+static bool fcw_partial_paths_init(const char *cache,
+                                   struct fcw_partial_paths *paths)
+{
+    char key[65];
+    return fcw_first_entry(cache, key) &&
+        vcs_fastobj_cache_paths(cache, key, paths->object, sizeof(paths->object),
+                                paths->sidecar, sizeof(paths->sidecar)) &&
+        snprintf(paths->outside, sizeof(paths->outside), "%s/outside", cache) <
+            (int)sizeof(paths->outside);
+}
+
+static bool fcw_bytes_equal(const char *path, const char *expected, size_t size)
+{
+    size_t len = 0;
+    uint8_t *bytes = fcw_read_file(path, size, &len);
+    bool equal = bytes && len == size && memcmp(bytes, expected, size) == 0;
+    free(bytes);
+    return equal;
+}
+
+static int fcw_divergent_object_refusal(const struct fcw_partial_paths *paths,
+                                        struct vcs_package_store *store,
+                                        const uint8_t root[32],
+                                        const char *cache)
+{
+    int failures = 0;
+    char err[256];
+    struct vcs_fastobj_carrier_stats stats;
+    bool ready = unlink(paths->sidecar) == 0 &&
+        chmod(paths->object, 0600) == 0 &&
+        fcw_write_file(paths->object, "divergent", 9u);
+    FC_CHECK("divergent lone object refuses without sidecar publication",
+             ready && !vcs_fastobj_carrier_admit(cache, store, root, &stats,
+                                                err, sizeof(err)) &&
+             !fcw_exists(paths->sidecar) &&
+             fcw_bytes_equal(paths->object, "divergent", 9u));
+    return failures;
+}
+
+static int fcw_linked_partial_refusal(const struct fcw_partial_paths *paths,
+                                       struct vcs_package_store *store,
+                                       const uint8_t root[32], const char *cache)
+{
+    int failures = 0;
+    char err[256];
+    struct vcs_fastobj_carrier_stats stats;
+    bool ready = unlink(paths->object) == 0 &&
+        fcw_write_file(paths->outside, "outside", 7u) &&
+        symlink(paths->outside, paths->object) == 0;
+    FC_CHECK("linked lone object refuses without sidecar publication",
+             ready && !vcs_fastobj_carrier_admit(cache, store, root, &stats,
+                                                err, sizeof(err)) &&
+             !fcw_exists(paths->sidecar));
+    FC_CHECK("linked object refusal preserves outside bytes",
+             ready && fcw_bytes_equal(paths->outside, "outside", 7u));
+    return failures;
+}
+
+static int fcw_sidecar_only_refusal(const struct fcw_partial_paths *paths,
+                                    struct vcs_package_store *store,
+                                    const uint8_t root[32], const char *cache)
+{
+    int failures = 0;
+    char err[256];
+    struct vcs_fastobj_carrier_stats stats;
+    bool ready = unlink(paths->object) == 0 &&
+                 fcw_write_file(paths->sidecar, "sidecar-only", 12u);
+    FC_CHECK("sidecar-only entry refuses without object publication",
+             ready && !vcs_fastobj_carrier_admit(cache, store, root, &stats,
+                                                err, sizeof(err)) &&
+             !fcw_exists(paths->object));
+    return failures;
+}
+
+static int fcw_partial_pair_refusals(const char *cache,
+                                      struct vcs_package_store *store,
+                                      const uint8_t root[32])
+{
+    struct fcw_partial_paths paths;
+    if (!fcw_partial_paths_init(cache, &paths))
+        return 1;
+    int failures = fcw_divergent_object_refusal(&paths, store, root, cache);
+    failures += fcw_linked_partial_refusal(&paths, store, root, cache);
+    failures += fcw_sidecar_only_refusal(&paths, store, root, cache);
+    return failures;
+}
+
+/* This process-independent recovery path is exercised on every POSIX host;
+ * removing an admitted sidecar supplies the exact incomplete-pair precondition. */
+static int fcw_portable_partial_retry(const char *base,
+                                      struct vcs_package_store *store,
+                                      const uint8_t root[32])
+{
+    int failures = 0;
+    char cache[4096], key[65], object[4096], sidecar[4096];
+    bool ready = snprintf(cache, sizeof(cache), "%s/partial-retry", base) <
+                    (int)sizeof(cache) && fcw_exact_retry(cache, store, root) &&
+        fcw_first_entry(cache, key) &&
+        vcs_fastobj_cache_paths(cache, key, object, sizeof(object),
+                                sidecar, sizeof(sidecar)) &&
+        unlink(sidecar) == 0;
+    FC_CHECK("portable exact-object/missing-sidecar fixture", ready);
+    bool recovered = ready && fcw_exact_retry(cache, store, root);
+    FC_CHECK("portable missing-sidecar retry completes exact/idempotent pair",
+             recovered);
+    if (recovered)
+        failures += fcw_partial_pair_refusals(cache, store, root);
+    return failures;
+}
+
+#if defined(__linux__)
+static int fcw_publication_crash_case(const char *base,
+                                      struct vcs_package_store *store,
+                                      const uint8_t root[32])
+{
+    int failures = 0;
+    char cache[4096];
+    bool ready = snprintf(cache, sizeof(cache), "%s/object-only-admit", base) <
+                    (int)sizeof(cache) && fcw_mkdir_p(cache);
+    FC_CHECK("actual admit killed after first object publication",
+             ready && fcw_crash_after_object(cache, store, root));
+    struct fcw_disk after = {0};
+    bool counted = ready && fcw_crash_disk(cache, 0, &after);
+    printf("  fastobj_carrier: first-publication allocated file bytes=%llu "
+           "directory bytes=%llu files=%u\n",
+           (unsigned long long)after.file_bytes,
+           (unsigned long long)after.directory_bytes, after.files);
+    FC_CHECK("first publication retains exactly one allocated object",
+             counted && after.files == 1u && after.file_bytes > 0);
+    FC_CHECK("object-only retry completes exact pair without overwrite",
+             ready && fcw_exact_retry(cache, store, root));
+    return failures;
+}
+
+static int fcw_anonymous_crash_refusal(const char *base,
+                                       struct vcs_package_store *store,
+                                       const uint8_t root[32])
+{
+    int failures = 0;
+    char cache[4096];
+    bool ready = snprintf(cache, sizeof(cache), "%s/crash-admit", base) <
+                     (int)sizeof(cache) && fcw_mkdir_p(cache);
+    FC_CHECK("unprivileged exact-inode anonymous publication/no-overwrite",
+             ready && fcw_anonymous_support(cache));
+    if (!ready)
+        return failures + 1;
+    struct fcw_disk before = {0}, after = {0};
+    bool counted = fcw_crash_disk(cache, 0, &before);
+    FC_CHECK("actual admit killed during staging write",
+             fcw_crash_admit(cache, store, root));
+    counted = fcw_crash_disk(cache, 0, &after) && counted;
+    printf("  fastobj_carrier: crash allocated file bytes=%llu->%llu "
+           "directory bytes=%llu->%llu\n",
+           (unsigned long long)before.file_bytes,
+           (unsigned long long)after.file_bytes,
+           (unsigned long long)before.directory_bytes,
+           (unsigned long long)after.directory_bytes);
+    FC_CHECK("death retains zero staging files/allocated file bytes",
+             counted && before.files == 0 && after.files == 0 &&
+             before.file_bytes == 0 && after.file_bytes == 0);
+    FC_CHECK("staging death retry is exact and idempotent",
+             fcw_exact_retry(cache, store, root));
+    failures += fcw_publication_crash_case(base, store, root);
+    return failures;
+}
+#endif
+
 static int test_fastobj_carrier_platform_arm(void)
 {
     int failures = 0;
@@ -1423,6 +1852,9 @@ static int test_fastobj_carrier_platform_arm(void)
     failures += fcw_attribute_bypass(base, worker, &pk);
     failures += fcw_test_cache_failure(base, worker, &pk);
     failures += fcw_program_cache_probe(base, worker, &pk);
+#elif defined(__APPLE__)
+    failures += fcw_asm_bypass(base, worker, &pk, false);
+    failures += fcw_apple_attribute_spellings(base, worker, &pk);
 #endif
 
     /* 11. testless standard-profile refusal: a copy without tests/ is
@@ -1733,6 +2165,10 @@ static int test_fastobj_carrier_platform_arm(void)
                                               sizeof(err));
         failures += fcw_linked_admit_shard_refusal(base, key, nodeA, rootA,
                                                     err, sizeof(err));
+        failures += fcw_portable_partial_retry(base, nodeA, rootA);
+#if defined(__linux__)
+        failures += fcw_anonymous_crash_refusal(base, nodeA, rootA);
+#endif
 
         /* R4: a hand-built carrier whose sidecar is filed under a key it
          * does not hash to — ADMIT must refuse at the destination. */
