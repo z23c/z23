@@ -47,6 +47,8 @@
 #include "services/shop_want_view_service.h"
 #include "services/vault_intent_decision_service.h"
 #include "controllers/rpc_client.h"
+#include "devloop.h"
+#include "zutf8/zutf8.h"
 #include "rpc/protocol.h"
 #include "rpc/server.h"
 #include "util/safe_alloc.h"
@@ -409,6 +411,100 @@ void zcl_native_hotswap_publish_hooks(struct hotswap_publish_hooks *out,
 
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING — end of the shared publish hooks */
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* `dev hotswap probe` takes exactly one of two inputs: an absolute module
+ * path (the form that always existed) or a repo-relative source the resident
+ * builder compiles first.  The selection and the build half carry no dlopen,
+ * so the test binary exercises them; only the probe itself is dev-only. */
+bool zcl_native_hotswap_probe_select(const struct json_value *input,
+                                     const char **so_path,
+                                     const char **source_tu,
+                                     struct zcl_command_reply *reply)
+{
+    /* json_get_str() reads a missing key as "", so presence is the key. */
+    bool have_so = json_get(input, "so_path") != NULL;
+    bool have_tu = json_get(input, "source_tu") != NULL;
+    *so_path = have_so ? json_get_str(json_get(input, "so_path")) : NULL;
+    *source_tu = have_tu ? json_get_str(json_get(input, "source_tu")) : NULL;
+    const char *refusal = NULL;
+    if (have_so && have_tu)
+        refusal = "give exactly one of so_path and source_tu, not both";
+    else if (!have_so && !have_tu)
+        refusal = "exactly one of so_path (absolute) and source_tu "
+                  "(repo-relative) is required";
+    else if (have_so && (*so_path)[0] != '/')
+        refusal = "so_path (absolute) is required";
+    if (!refusal)
+        return true;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+        ZCL_COMMAND_EXIT_INVALID, "HOTSWAP_BAD_INPUT", "validate", false,
+        false, refusal, "dev.hotswap.probe");
+    return false;
+}
+
+#define HOTSWAP_BUILD_OUTPUT_KEEP 4096u
+
+/* The compiler's own words, bounded and valid UTF-8 so the reply stays valid
+ * JSON: clip at the cap, back off a split trailing character, and fall back
+ * to the loader's fixed marker (hotswap_loader.c diagnostic_text) when the
+ * text is still not UTF-8. */
+static void build_output_text(const struct zcl_devloop_process_result *process,
+                              char *out, size_t cap)
+{
+    size_t n = process->output_len;
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, process->output, n);
+    for (size_t back = 0; back < 3 && n > 0 && !zutf8_validate_n(out, n);
+         back++)
+        n--;
+    out[n] = '\0';
+    if (!zutf8_validate_n(out, n))
+        (void)snprintf(out, cap, "[invalid UTF-8]");
+}
+
+static void build_refusal_reply(struct zcl_command_reply *reply,
+                                const char *source_tu, const char *why,
+                                const struct zcl_devloop_process_result *process)
+{
+    char output[HOTSWAP_BUILD_OUTPUT_KEEP + 1];
+    build_output_text(process, output, sizeof(output));
+    json_free(&reply->data);
+    json_init(&reply->data);
+    json_set_object(&reply->data);
+    json_push_kv_bool(&reply->data, "ok", false);
+    json_push_kv_str(&reply->data, "stage", "build");
+    json_push_kv_str(&reply->data, "built_from", source_tu);
+    json_push_kv_int(&reply->data, "build_exit_code",
+                     (int64_t)process->exit_code);
+    json_push_kv_bool(&reply->data, "build_output_truncated",
+                      process->output_truncated ||
+                      process->output_len > HOTSWAP_BUILD_OUTPUT_KEEP);
+    json_push_kv_str(&reply->data, "build_output", output);
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+        "HOTSWAP_REFUSED", "build", false, false,
+        why[0] ? why : "hot-swap build failed", source_tu);
+}
+
+/* Build one source under `root` into a module and fill `receipt`.  On failure
+ * the reply is a typed refusal at stage `build` carrying the builder's reason
+ * and the child's captured output; nothing is published. */
+bool zcl_native_hotswap_build_source(
+    const char *root, const char *source_tu,
+    struct zcl_devloop_hotswap_build_receipt *receipt,
+    struct zcl_command_reply *reply)
+{
+    struct zcl_devloop_process_result process = {0};
+    char why[256];
+    if (zcl_devloop_hotswap_build(root, source_tu, receipt, &process, why,
+                                  sizeof(why)))
+        return true;
+    build_refusal_reply(reply, source_tu, why, &process);
+    return false;
+}
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING */
+
 #ifdef ZCL_DEV_BUILD
 
 /* Render a hotswap_activate_report into an already-init'd reply. */
@@ -744,21 +840,11 @@ void zcl_native_handle_dev_hotswap_apply(
     free(resp);
 }
 
-/* CLI `dev hotswap probe`: VERIFY-ONLY in this throwaway CLI process. dlopen +
- * ABI + self_test, never commits — the safest way to prove a swap would work. */
-void zcl_native_handle_dev_hotswap_probe(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+/* Verify one module .so in this throwaway process: service islands first,
+ * then command modules.  Verify-only: request_activate stays false. */
+static void probe_module_path(const char *so_path,
+                              struct zcl_command_reply *reply)
 {
-    /* Non-bridge handler: initialize the one-shot RPC client so
-     * node_rpc_client_datadir() below returns the CLI-resolved dev datadir. */
-    zcl_native_bridge_ensure_rpc();
-    const char *so_path = json_get_str(json_get(request->input, "so_path"));
-    if (!so_path || so_path[0] != '/') {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-            ZCL_COMMAND_EXIT_INVALID, "HOTSWAP_BAD_INPUT", "validate", false,
-            false, "so_path (absolute) is required", "dev.hotswap.probe");
-        return;
-    }
     struct zcl_hotswap_service_report service_report;
     (void)probe_service_any(
         so_path, node_rpc_client_datadir(), false, &service_report);
@@ -774,6 +860,62 @@ void zcl_native_handle_dev_hotswap_probe(
                      /*request_activate=*/false, &hooks, &report);
     report_to_reply(reply, &report);
     probe_rendered_clear();
+}
+
+/* The checkout the source form builds from: an explicit context root wins,
+ * then ZCL_DEV_SOURCE_ROOT, then the working directory (the same order as
+ * native_dev_verify_change_command.c verify_source_root). */
+static const char *hotswap_source_root(const struct zcl_command_request *request)
+{
+    if (request && request->context && request->context->source_root &&
+        request->context->source_root[0])
+        return request->context->source_root;
+    const char *root = getenv("ZCL_DEV_SOURCE_ROOT");
+    return root && root[0] ? root : ".";
+}
+
+/* Build one source under `root`, then probe the module it produced through
+ * exactly the path the so_path form runs.  Nothing is published or activated;
+ * the build's cost and identity ride along in the reply. */
+void zcl_native_hotswap_probe_source_at(const char *root, const char *source_tu,
+                                        struct zcl_command_reply *reply)
+{
+    struct zcl_devloop_hotswap_build_receipt receipt;
+    if (!zcl_native_hotswap_build_source(root, source_tu, &receipt, reply))
+        return;
+    probe_module_path(receipt.artifact_path, reply);
+    if (reply->data.type != JSON_OBJ)
+        return;
+    json_push_kv_str(&reply->data, "built_from", source_tu);
+    if (!json_get(&reply->data, "artifact_sha256"))
+        json_push_kv_str(&reply->data, "artifact_sha256",
+                         receipt.artifact_sha256);
+    json_push_kv_int(&reply->data, "compile_us", receipt.compile_us);
+    json_push_kv_int(&reply->data, "link_us", receipt.link_us);
+    json_push_kv_int(&reply->data, "build_us", receipt.total_us);
+    json_push_kv_bool(&reply->data, "plan_cache_hit", receipt.plan_cache_hit);
+    json_push_kv_bool(&reply->data, "artifact_cache_hit",
+                      receipt.artifact_cache_hit);
+}
+
+/* CLI `dev hotswap probe`: VERIFY-ONLY in this throwaway CLI process. dlopen +
+ * ABI + self_test, never commits — the safest way to prove a swap would work.
+ * Takes a module .so, or a source the resident builder compiles first. */
+void zcl_native_handle_dev_hotswap_probe(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    /* Non-bridge handler: initialize the one-shot RPC client so
+     * node_rpc_client_datadir() below returns the CLI-resolved dev datadir. */
+    zcl_native_bridge_ensure_rpc();
+    const char *so_path, *source_tu;
+    if (!zcl_native_hotswap_probe_select(request->input, &so_path, &source_tu,
+                                         reply))
+        return;
+    if (source_tu)
+        zcl_native_hotswap_probe_source_at(hotswap_source_root(request),
+                                           source_tu, reply);
+    else
+        probe_module_path(so_path, reply);
 }
 
 bool register_dev_native_hotswap_rpc(struct rpc_table *table,

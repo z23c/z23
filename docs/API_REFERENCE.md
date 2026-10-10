@@ -789,7 +789,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `dev hotswap apply` | compat 🔧 → `z23-dev dev hotswap apply --input='{"so_path":"...","probe_leaf":"..."}'` | mutate / dev-mutation / **owner** · fast/moderate | **`so_path`**, `probe_leaf` | `zcl.dev_hotswap.v1` | `z23-dev dev hotswap apply --input='{"so_path":"/tmp/gen.so","probe_leaf":"core.status"}'` | Live module hot-swap: forwards to the resident dev node; verify-only unless -hotswap-activate + ZCL_HOTSWAP_ACTIVATE=1 on the dev datadir (canonical refused) — *in-process hot-swap requires a dev build* |
-| `dev hotswap probe` | compat 🔧 → `z23-dev dev hotswap probe --input='{"so_path":"...","probe_leaf":"..."}'` | read / read / **owner** · fast/low | **`so_path`**, `probe_leaf` | `zcl.dev_hotswap.v1` | `z23-dev dev hotswap probe --input='{"so_path":"/tmp/gen.so","probe_leaf":"core.status"}'` | Verify-only in-process: dlopen + ABI-validate + self_test of a module .so; never commits — *resident hot-swap probing requires a dev build* |
+| `dev hotswap probe` | compat 🔧 → `z23-dev dev hotswap probe --input='{"so_path":"...","probe_leaf":"..."}'` | read / read / **owner** · fast/low | `so_path`, `probe_leaf`, `source_tu` | `zcl.dev_hotswap.v1` | `z23-dev dev hotswap probe --input='{"source_tu":"contexts/commons/services/src/zcode_passport_view_service.c"}'` | Verify-only in-process: dlopen + ABI-validate + self_test of a module .so, or of one source built first; never commits — *resident hot-swap probing requires a dev build* |
 
 #### `dev.test.background` — Background proof freshness
 

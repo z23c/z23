@@ -22,6 +22,9 @@ extern "C" {
 struct rpc_table;
 struct hotswap_publish_hooks;
 struct zcl_hotswap_service_report;
+struct json_value;
+struct zcl_command_reply;
+struct zcl_devloop_hotswap_build_receipt;
 
 /* Register the resident-node RPC method `dev_hotswap_native` on `table`.
  * DEV-ONLY, and a successful no-op on a release build or a non-dev-lane
@@ -51,7 +54,33 @@ void zcl_native_hotswap_publish_hooks(struct hotswap_publish_hooks *out,
  * caller that does not render one (the test harness) calls this instead. */
 void zcl_native_hotswap_probe_rendered_clear(void);
 
+/* `dev hotswap probe` input rule: exactly one of `so_path` (absolute) and
+ * `source_tu` (repo-relative). Returns true with both out-pointers set (one
+ * of them NULL); otherwise fills `reply` with HOTSWAP_BAD_INPUT and returns
+ * false. */
+bool zcl_native_hotswap_probe_select(const struct json_value *input,
+                                     const char **so_path,
+                                     const char **source_tu,
+                                     struct zcl_command_reply *reply);
+
+/* Build `source_tu` under checkout `root` into a module. On failure `reply`
+ * is a typed refusal at stage `build` whose data carries the builder's reason
+ * and the compiler's captured output; nothing is published. */
+bool zcl_native_hotswap_build_source(
+    const char *root, const char *source_tu,
+    struct zcl_devloop_hotswap_build_receipt *receipt,
+    struct zcl_command_reply *reply);
+
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
+
+#ifdef ZCL_DEV_BUILD
+/* Build `source_tu` under checkout `root`, then verify-only probe the module
+ * it produced through the same path as the `so_path` form. The seam the
+ * handler uses; `root` is a parameter so a fixture checkout can stand in. */
+void zcl_native_hotswap_probe_source_at(const char *root,
+                                        const char *source_tu,
+                                        struct zcl_command_reply *reply);
+#endif /* ZCL_DEV_BUILD */
 
 /* Verify one pure service module from an already-open image descriptor inside
  * an already-confined disposable process (the clean-zygote reflex runner's

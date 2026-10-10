@@ -10,6 +10,7 @@
 
 #include "codeindex/codeindex.h"
 #include "command/native_command.h"
+#include "command/native_dev_hotswap.h"
 #include "command/native_dev_loop_command.h"
 #include "dev_activation.h"
 #include "dev_failure_store.h"
@@ -3806,6 +3807,346 @@ out:
     return ok;
 }
 
+/* ---- `dev hotswap probe` source form: selection and build half ----------
+ *
+ * The probe half needs dlopen, which this binary does not carry (the service
+ * probe is a release stub here), so the fixture proves what runs before it:
+ * the exactly-one-of input rule and the build refusal that must hand the
+ * compiler's own words back to the caller. */
+static bool dp_probe_reply_is(const struct zcl_command_reply *reply,
+                              const char *code, const char *phase,
+                              const char *message_part)
+{
+    return strcmp(reply->error.code, code) == 0 &&
+           strcmp(reply->error.phase, phase) == 0 &&
+           strstr(reply->error.message, message_part) != NULL;
+}
+
+static bool dp_probe_select_one(const char *json, bool want_ok,
+                                const char *message_part, bool names_both,
+                                const char *want_so, const char *want_tu)
+{
+    struct zcl_command_reply reply;
+    struct json_value input;
+    const char *so_path = NULL, *source_tu = NULL;
+    json_init(&input);
+    zcl_command_reply_init(&reply, "zcl.test.probe_select.v1");
+    bool parsed = json_read(&input, json, strlen(json));
+    bool got = parsed && zcl_native_hotswap_probe_select(
+                             &input, &so_path, &source_tu, &reply);
+    bool ok = parsed && got == want_ok;
+    if (ok && want_ok)
+        ok = (want_so ? so_path && !strcmp(so_path, want_so) : !so_path) &&
+             (want_tu ? source_tu && !strcmp(source_tu, want_tu) : !source_tu);
+    else if (ok)
+        ok = dp_probe_reply_is(&reply, "HOTSWAP_BAD_INPUT", "validate",
+                               message_part) &&
+             (!names_both || (strstr(reply.error.message, "so_path") &&
+                              strstr(reply.error.message, "source_tu")));
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+/* Both keys and neither key are refused naming both keys; a relative
+ * so_path keeps its old message; each single key passes through. */
+static bool dp_probe_select_fixture(void)
+{
+    return dp_probe_select_one(
+               "{\"so_path\":\"/opt/x.so\",\"source_tu\":\"a.c\"}", false,
+               "not both", true, NULL, NULL) &&
+           dp_probe_select_one("{}", false, "is required", true, NULL, NULL) &&
+           dp_probe_select_one("{\"so_path\":\"rel.so\"}", false,
+                               "so_path (absolute) is required", false, NULL,
+                               NULL) &&
+           dp_probe_select_one("{\"so_path\":\"/opt/x.so\"}", true, NULL,
+                               false, "/opt/x.so", NULL) &&
+           dp_probe_select_one("{\"source_tu\":\"a.c\"}", true, NULL, false,
+                               NULL, "a.c");
+}
+
+#define DP_PROBE_SERVICE \
+    "contexts/commons/services/src/zcode_c23_corpus_service.c"
+
+/* A throwaway checkout whose compiler is a passthrough to the real cc. */
+static bool dp_probe_fixture_init(const char *root, char canonical[PATH_MAX])
+{
+    char compiler[PATH_MAX], flags[PATH_MAX * 2];
+    size_t files = sizeof(g_dp_hotswap_cache_files) /
+                   sizeof(g_dp_hotswap_cache_files[0]);
+    for (size_t i = 0; i < files; i++)
+        if (!dp_mk_write(root, g_dp_hotswap_cache_files[i][0],
+                         g_dp_hotswap_cache_files[i][1]))
+            return false;
+    return dp_mk_write(root, "tools/fake_cc.sh",
+                       "#!/bin/sh\nexec cc \"$@\"\n") &&
+           platform_directory_canonical_real(root, canonical, PATH_MAX) &&
+           snprintf(compiler, sizeof(compiler), "%s/tools/fake_cc.sh",
+                    canonical) < (int)sizeof(compiler) &&
+           chmod(compiler, 0700) == 0 &&
+           snprintf(flags, sizeof(flags),
+                    "CC=%s\nCXX=g++\nCOMPILER_ID=%064d\n"
+                    "DEV_CFLAGS=-DZCL_DEV_BUILD -ffile-prefix-map=%s=/zclassic23\n"
+                    "HOTSWAP_MODULE_LDFLAGS=" DP_HOTSWAP_TEST_LINK_FLAGS "\n",
+                    compiler, 0, canonical) < (int)sizeof(flags) &&
+           dp_mk_write(root, "build/hotswap-fast/flags.env", flags);
+}
+
+/* A body that compiles: the receipt carries the digest and the costs. */
+static bool dp_probe_case_builds(const char *canonical)
+{
+    struct zcl_devloop_hotswap_build_receipt receipt = {0};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.probe_build.v1");
+    bool built = zcl_native_hotswap_build_source(canonical, DP_PROBE_SERVICE,
+                                                 &receipt, &reply);
+    zcl_command_reply_free(&reply);
+    return built && strlen(receipt.artifact_sha256) == 64 &&
+           receipt.compile_us > 0 && receipt.link_us > 0 &&
+           strcmp(receipt.source_tu, DP_PROBE_SERVICE) == 0;
+}
+
+/* The reply data, serialized and read back, still names the stage and the
+ * source and carries a compiler diagnostic line. */
+static bool dp_probe_diagnostic_json(const struct zcl_command_reply *reply)
+{
+    char output[8192];
+    size_t n = json_write(&reply->data, output, sizeof(output));
+    struct json_value again;
+    json_init(&again);
+    bool ok = n > 0 && n < sizeof(output) && json_read(&again, output, n) &&
+              strcmp(json_get_str(json_get(&again, "stage")), "build") == 0 &&
+              strcmp(json_get_str(json_get(&again, "built_from")),
+                     DP_PROBE_SERVICE) == 0 &&
+              strstr(json_get_str(json_get(&again, "build_output")),
+                     "error") != NULL;
+    json_free(&again);
+    return ok;
+}
+
+/* A body that does not compile: refused at stage build, and the compiler's
+ * own diagnostic is in the reply data as valid JSON. */
+static bool dp_probe_case_diagnostic(const char *canonical)
+{
+    struct zcl_devloop_hotswap_build_receipt receipt = {0};
+    struct zcl_command_reply reply;
+    if (!dp_mk_write(canonical, DP_PROBE_SERVICE,
+                     "int zcl_hotswap_fixture_service(void) { return }\n"))
+        return false;
+    zcl_command_reply_init(&reply, "zcl.test.probe_build.v1");
+    bool refused =
+        !zcl_native_hotswap_build_source(canonical, DP_PROBE_SERVICE, &receipt,
+                                         &reply) &&
+        dp_probe_reply_is(&reply, "HOTSWAP_REFUSED", "build", "") &&
+        reply.error.message[0] && dp_probe_diagnostic_json(&reply);
+    zcl_command_reply_free(&reply);
+    return refused;
+}
+
+/* A source outside the allowlist gets the builder's own refusal. */
+static bool dp_probe_case_allowlist(const char *canonical)
+{
+    struct zcl_devloop_hotswap_build_receipt receipt = {0};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.probe_build.v1");
+    bool refused =
+        !zcl_native_hotswap_build_source(canonical, "tools/engine_unit.c",
+                                         &receipt, &reply) &&
+        dp_probe_reply_is(&reply, "HOTSWAP_REFUSED", "build",
+                          "outside the compiled swappable allowlist");
+    zcl_command_reply_free(&reply);
+    return refused;
+}
+
+static bool dp_probe_build_fixture(void)
+{
+    char root[PATH_MAX], cache_rel[PATH_MAX], cwd[PATH_MAX];
+    char canonical[PATH_MAX], cache[PATH_MAX], saved[PATH_MAX] = {0};
+    const char *prior = getenv("ZCL_DEV_ARTIFACT_CACHE");
+    bool had_prior = prior && prior[0];
+    if (!getcwd(cwd, sizeof(cwd)) ||
+        snprintf(root, sizeof(root), "test-tmp/dev_probe_source_%ld",
+                 (long)getpid()) >= (int)sizeof(root) ||
+        snprintf(cache_rel, sizeof(cache_rel),
+                 "test-tmp/dev_probe_source_cache_%ld",
+                 (long)getpid()) >= (int)sizeof(cache_rel) ||
+        snprintf(cache, sizeof(cache), "%s/%s", cwd, cache_rel) >=
+            (int)sizeof(cache))
+        return false;
+    if (had_prior)
+        (void)snprintf(saved, sizeof(saved), "%s", prior);
+    test_rm_rf_recursive(root);
+    test_rm_rf_recursive(cache_rel);
+    bool ok = dp_probe_fixture_init(root, canonical) &&
+              platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) == 0 &&
+              platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+              dp_probe_case_builds(canonical) &&
+              dp_probe_case_diagnostic(canonical) &&
+              dp_probe_case_allowlist(canonical);
+    (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
+    if (had_prior)
+        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved, 1);
+    else
+        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
+    test_rm_rf_recursive(root);
+    test_rm_rf_recursive(cache_rel);
+    return ok;
+}
+
+
+/* ---- `dev hotswap probe` source form, end to end through the built dev
+ * binary -------------------------------------------------------------------
+ *
+ * The probe half needs dlopen, which this test binary does not carry (the
+ * service probe is a release stub here), so the whole command runs as a child
+ * process, the way test_engine runs the engine-unit binary.  The fixture
+ * checkout holds a copy of one real service island; its compile plan points
+ * at the real headers.  Nothing here touches a datadir or the real cache. */
+#define DP_PROBE_E2E_BIN "build/bin/z23-dev"
+#define DP_PROBE_E2E_TU \
+    "contexts/commons/services/src/zcode_passport_view_service.c"
+#define DP_PROBE_E2E_ANSWER "zcode passport plan\""
+
+/* Copy the real island into the fixture; when `tamper`, change one byte of an
+ * answer its frozen known-answer vector checks. */
+static bool dp_probe_e2e_source(const char *root, bool tamper)
+{
+    static char src[32768];
+    FILE *f = fopen(DP_PROBE_E2E_TU, "rb");
+    if (!f)
+        return false;
+    size_t n = fread(src, 1, sizeof(src) - 1, f);
+    bool whole = feof(f) && !ferror(f);
+    (void)fclose(f);
+    src[n] = '\0';
+    char *answer = strstr(src, DP_PROBE_E2E_ANSWER);
+    if (!whole || n == 0 || !answer)
+        return false;
+    if (tamper)
+        answer[strlen(DP_PROBE_E2E_ANSWER) - 2] = 'o'; /* plan -> plao */
+    return dp_mk_write(root, DP_PROBE_E2E_TU, src);
+}
+
+static bool dp_probe_e2e_root(const char *root, const char *cwd, bool tamper)
+{
+    char flags[PATH_MAX * 3];
+    size_t files = sizeof(g_dp_hotswap_cache_files) /
+                   sizeof(g_dp_hotswap_cache_files[0]);
+    for (size_t i = 0; i < files; i++)
+        if (!dp_mk_write(root, g_dp_hotswap_cache_files[i][0],
+                         g_dp_hotswap_cache_files[i][1]))
+            return false;
+    return snprintf(flags, sizeof(flags),
+                    "CC=cc\nCXX=g++\nCOMPILER_ID=%064d\n"
+                    "DEV_CFLAGS=-std=c23 -DZCL_DEV_BUILD -fPIC "
+                    "-ffile-prefix-map=%s/%s=/zclassic23 "
+                    "-I%s/contexts/commons/services/include "
+                    "-I%s/engine/modules/hotswap/include\n"
+                    "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles "
+                    "-Wl,-Bsymbolic\n",
+                    0, cwd, root, cwd, cwd) < (int)sizeof(flags) &&
+           dp_mk_write(root, "build/hotswap-fast/flags.env", flags) &&
+           dp_probe_e2e_source(root, tamper);
+}
+
+/* Run the dev binary on the fixture; its one JSON reply lands in `reply`. */
+static bool dp_probe_e2e_run(const char *cwd, const char *root,
+                             const char *cache, const char *datadir,
+                             struct json_value *reply)
+{
+    char cmd[PATH_MAX * 4], out[PATH_MAX], text[16384];
+    (void)snprintf(out, sizeof(out), "%s/reply.json", datadir);
+    if (snprintf(cmd, sizeof(cmd),
+                 "ZCL_DEV_SOURCE_ROOT='%s/%s' ZCL_DEV_ARTIFACT_CACHE='%s/%s' "
+                 "%s -datadir=%s/%s dev hotswap probe "
+                 "--input='{\"source_tu\":\"" DP_PROBE_E2E_TU "\"}' "
+                 ">%s 2>/dev/null",
+                 cwd, root, cwd, cache, DP_PROBE_E2E_BIN, cwd, datadir,
+                 out) >= (int)sizeof(cmd))
+        return false;
+    TEST_DISCARD(system(cmd)); /* the verdict is the reply, not the exit code */
+    FILE *f = fopen(out, "rb");
+    if (!f)
+        return false;
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    (void)fclose(f);
+    json_init(reply);
+    return n > 0 && json_read(reply, text, n);
+}
+
+static bool dp_probe_e2e_is_hex64(const char *s)
+{
+    return s && strlen(s) == 64 && strspn(s, "0123456789abcdef") == 64;
+}
+
+/* T1: a correct island is built and probed to stage verified. */
+static bool dp_probe_e2e_verified(const struct json_value *reply)
+{
+    const struct json_value *data = json_get(reply, "data");
+    return json_get_bool(json_get(reply, "ok")) && data &&
+           !strcmp(json_get_str(json_get(data, "stage")), "verified") &&
+           !strcmp(json_get_str(json_get(data, "service_id")),
+                   "zcode.passport.view.v1") &&
+           !strcmp(json_get_str(json_get(data, "built_from")),
+                   DP_PROBE_E2E_TU) &&
+           dp_probe_e2e_is_hex64(
+               json_get_str(json_get(data, "artifact_sha256"))) &&
+           json_get(data, "compile_us") && json_get(data, "link_us") &&
+           json_get_int(json_get(data, "compile_us")) > 0 &&
+           json_get_int(json_get(data, "link_us")) > 0 &&
+           json_get(data, "artifact_cache_hit") != NULL &&
+           !json_get_bool(json_get(data, "artifact_cache_hit"));
+}
+
+/* T2: one changed answer byte is refused with the frozen test's own text. */
+static bool dp_probe_e2e_refused(const struct json_value *reply)
+{
+    const struct json_value *error = json_get(reply, "error");
+    return !json_get_bool(json_get(reply, "ok")) && error &&
+           strstr(json_get_str(json_get(error, "message")),
+                  "frozen Passport presentation vector 0 failed") != NULL;
+}
+
+static bool dp_probe_e2e_case(const char *cwd, const char *tag, bool tamper)
+{
+    char root[PATH_MAX], cache[PATH_MAX], datadir[PATH_MAX];
+    (void)snprintf(root, sizeof(root), "test-tmp/dev_probe_e2e_%s_%ld", tag,
+                   (long)getpid());
+    (void)snprintf(cache, sizeof(cache), "%s_cache", root);
+    (void)snprintf(datadir, sizeof(datadir), "%s_dd", root);
+    test_rm_rf_recursive(root);
+    test_rm_rf_recursive(cache);
+    test_rm_rf_recursive(datadir);
+    struct json_value reply;
+    json_init(&reply);
+    bool ran = platform_directory_create(datadir, 0700) == 0 &&
+               dp_probe_e2e_root(root, cwd, tamper) &&
+               dp_probe_e2e_run(cwd, root, cache, datadir, &reply);
+    bool ok = ran && (tamper ? dp_probe_e2e_refused(&reply)
+                             : dp_probe_e2e_verified(&reply));
+    json_free(&reply);
+    test_rm_rf_recursive(root);
+    test_rm_rf_recursive(cache);
+    test_rm_rf_recursive(datadir);
+    return ok;
+}
+
+/* Visible skip when the dev binary is absent: the group's BUILD_NEED row
+ * builds it, so this only prints in a tree that bypassed that. */
+static bool dp_probe_e2e_fixture(void)
+{
+    char cwd[PATH_MAX];
+    if (access(DP_PROBE_E2E_BIN, X_OK) != 0 ||
+        access(DP_PROBE_E2E_TU, R_OK) != 0) {
+        printf("dev_platform: SKIP (" DP_PROBE_E2E_BIN
+               " or the island source is absent): probe source_tu "
+               "end to end not observed\n");
+        return true;
+    }
+    return getcwd(cwd, sizeof(cwd)) &&
+           dp_probe_e2e_case(cwd, "good", false) &&
+           dp_probe_e2e_case(cwd, "bad", true);
+}
 /* ---- the cache key binds the action root (F1-F3 falsification) ---------
  *
  * A real compiler (behind a wrapper script so its bytes can change at the
@@ -4632,6 +4973,18 @@ static int test_hotswap_artifact_cache(void)
         /* A real zcc in the driver command never serves a keyed compile:
          * a new assembler moves the root and rebuilds the object. */
         ASSERT(run_hotswap_action_root_zcc_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_hotswap_probe_source(void)
+{
+    int failures = 0;
+    TEST("dev platform: hotswap probe takes one of so_path or source_tu and refuses a failed build with the compiler output") {
+        ASSERT(dp_probe_select_fixture());
+        ASSERT(dp_probe_build_fixture());
+        ASSERT(dp_probe_e2e_fixture());
         PASS();
     } _test_next:;
     return failures;
@@ -10501,6 +10854,7 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_mirror_write_joins_ring, 5),
     DP_CASE(test_distill_first_error, 7),
     DP_CASE(test_hotswap_artifact_cache, 5),
+    DP_CASE(test_hotswap_probe_source, 5),
     DP_CASE(test_hotswap_unity_extent, 4),
     DP_CASE(test_hotfork_story_file_green_and_red, 5),
     DP_CASE(test_hotfork_shape_refusals, 5),
@@ -10678,7 +11032,7 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 70u + (unsigned)(
+    if (DP_CASE_COUNT != 71u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else

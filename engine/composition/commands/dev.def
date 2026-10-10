@@ -578,14 +578,18 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_READ(
     "dev.hotswap.probe", "dev.hotswap", "", "Verify-only in-process: dlopen + "
-    "ABI-validate + self_test of a module .so; never commits",
-    "A dlopen/ABI-validate/self-test result for one module .so, executed "
-    "in this CLI's own throwaway process; proves a swap WOULD work but "
-    "commits nothing to the resident node.", 0,
-    "hotswap,probe,precommit,leaves,generation", "zcl.dev_hotswap_input.v1",
-    "zcl.dev_hotswap.v1", "so_path,probe_leaf", "so_path",
-    "z23-dev dev hotswap probe --input='{\"so_path\":\"/tmp/gen.so\","
-    "\"probe_leaf\":\"core.status\"}'",
+    "ABI-validate + self_test of a module .so, or of one source built first; "
+    "never commits",
+    "A dlopen/ABI-validate/self-test result for one module .so (so_path), or "
+    "for one swappable source (source_tu) this command first builds, then "
+    "probes; give exactly one. Runs in this CLI's own throwaway process; "
+    "proves a swap WOULD work but commits nothing to the resident node. A "
+    "failed build is refused at stage build with the compiler output.", 0,
+    "hotswap,probe,precommit,leaves,generation,build,source",
+    "zcl.dev_hotswap_input.v1",
+    "zcl.dev_hotswap.v1", "so_path,probe_leaf,source_tu", "",
+    "z23-dev dev hotswap probe --input='{\"source_tu\":"
+    "\"contexts/commons/services/src/zcode_passport_view_service.c\"}'",
     ZCL_COMMAND_SCOPE_DEV_LANE, ZCL_COMMAND_AUTH_OWNER,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_DEV,
     ZCL_COMMAND_CAP_HOTSWAP,

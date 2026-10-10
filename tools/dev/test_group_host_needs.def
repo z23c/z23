@@ -252,3 +252,11 @@ ZCL_TEST_GROUP_BUILD_NEED("test_process_group_exec",
 ZCL_TEST_GROUP_BUILD_NEED("test_consensus_rule_sweep",
                           "build/bin/consensus_rule_sweep",
                           "tools/consensus_rule_sweep")
+
+/* tests/harness/src/test_dev_platform.c runs the built dev binary on a
+ * fixture checkout to observe `dev hotswap probe` with a source_tu end to end
+ * (the dlopen half is a release stub in the test binary). The shard that
+ * carries that case builds the binary itself. */
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_platform_shard_06", "build/bin/z23-dev",
+                          "dev-bin")
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_platform", "build/bin/z23-dev", "dev-bin")
