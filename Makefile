@@ -3014,6 +3014,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-operator-needed-sink check-systemd-memory-budget check-doc-accuracy check-doc-counts check-doc-claims check-no-stale-pinned-facts check-markdown-links check-doc-inline-paths \
         check-api-reference-generated check-describe-budget \
         check-no-new-repair-rung \
+        check-no-new-coordination-shell \
         check-no-bare-tmp-fixture \
         check-network-tool-hardening \
         check-sqlite-cursor-lifetime \
@@ -6090,6 +6091,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_model_ar_lifecycle.c \
     tools/lint/lintc/gate_raw_malloc.c \
     tools/lint/lintc/gate_no_new_repair_rung.c \
+    tools/lint/lintc/gate_no_new_coordination_shell.c \
     tools/lint/lintc/gate_no_bare_tmp_fixture.c \
     tools/lint/lintc/gate_network_tool_hardening.c \
     tools/lint/lintc/gate_tor_full_default.c \
@@ -13767,6 +13769,16 @@ check-no-new-repair-rung: $(LINTC_TOOL)
 	@echo "══ LINT: no new repair rung (TENACITY I3) ══"
 	@./tools/scripts/check_no_new_repair_rung.sh --selftest && ./tools/scripts/check_no_new_repair_rung.sh
 
+# Gate — no NEW coordination shell (the project goal: no shell on the
+# coordination path). Every tracked top-level tools/dev/*.sh and
+# tools/scripts/*.sh, plus tools/agent_test_runner.sh, tools/agent_fast_ci.sh
+# and tools/deploy_guard.sh, must be listed in
+# tools/lint/coordination_shell_baseline.txt. The list is hand-edited and can
+# only lose lines; a new script is written in C23 as a native command instead.
+check-no-new-coordination-shell: $(LINTC_TOOL)
+	@echo "══ LINT: no new coordination shell ══"
+	@./tools/lint/check_no_new_coordination_shell.sh --selftest && ./tools/lint/check_no_new_coordination_shell.sh
+
 # Gate — no NEW bare "/tmp fixture literal in tests/harness/, tools/lint/lintc/,
 # engine/, or tools/command/ (shrink-only ratchet: tools/lint/
 # no_bare_tmp_fixture_baseline.txt). A hardcoded "/tmp/..." mkdtemp/mkstemp
@@ -14985,6 +14997,7 @@ LINT_GATES := \
     check-commons-journey-ordering \
     check-consensus-parity \
     check-no-new-repair-rung \
+    check-no-new-coordination-shell \
     check-no-bare-tmp-fixture \
     check-network-tool-hardening \
     check-no-new-borrowed-seed \

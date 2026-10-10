@@ -1302,6 +1302,7 @@ add/remove a gate.
 - `check-no-live-lab-history`
 - `check-no-new-borrowed-seed`
 - `check-no-new-coin-backfill-caller`
+- `check-no-new-coordination-shell`
 - `check-no-new-repair-rung`
 - `check-no-retired-agent-protocol`
 - `check-no-runtime-abort`
@@ -1438,7 +1439,8 @@ add/remove a gate.
 <!-- LINT-GATES-END -->
 
 (`check-consensus-parity` [E13, the parity mechanism — see
-`docs/CONSENSUS_PARITY_DOCTRINE.md`], `check-no-new-repair-rung`, and
+`docs/CONSENSUS_PARITY_DOCTRINE.md`], `check-no-new-repair-rung`,
+`check-no-new-coordination-shell`, and
 `check-stage-advances-or-blocks` appear in the canonical block and run in `make
 lint`; they are documented in their own docs rather than expanded here.)
 

@@ -542,6 +542,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_long_functions_enforced_ratchet),
     S_(t_long_functions_lib_warn_tier),
     S_(t_no_new_repair_rung),
+    S_(t_no_new_coordination_shell),
     S_(t_no_new_borrowed_seed_caller),
     S_(t_no_new_coin_backfill_caller),
     S_(t_no_writer_below_sealed_frontier),

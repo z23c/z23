@@ -394,6 +394,8 @@ int check_raw_malloc_run(int argc, char **argv);
 int check_raw_malloc_selftest(void);
 int check_no_new_repair_rung_run(int argc, char **argv);
 int check_no_new_repair_rung_selftest(void);
+int check_no_new_coordination_shell_run(int argc, char **argv);
+int check_no_new_coordination_shell_selftest(void);
 int check_no_bare_tmp_fixture_run(int argc, char **argv);
 int check_no_bare_tmp_fixture_selftest(void);
 int check_network_tool_hardening_run(int argc, char **argv);

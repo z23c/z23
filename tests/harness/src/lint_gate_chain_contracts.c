@@ -89,6 +89,27 @@ int t_no_new_repair_rung(void)
     return failures;
 }
 
+#define COORD_SHELL_SCRIPT_REL "tools/lint/check_no_new_coordination_shell.sh"
+/* Ratchet: the coordination-shell gate is green on the real tree, and its own
+ * --selftest sandbox runs the trip and recover matrix (a new top-level script
+ * trips, a stale list entry trips, an unsorted list trips, a subdirectory
+ * script does not, and a clean list recovers). This gate has NO marker
+ * exemption, so no marker case exists. The matrix runs through
+ * run_gate_script_selftest because the gate reads tracked files from the git
+ * index: a plant in the real tree that is not staged is never seen. */
+int t_no_new_coordination_shell(void)
+{
+    int failures = 0;
+    int clean_rc = run_gate_script(COORD_SHELL_SCRIPT_REL, NULL);
+    int matrix_rc = run_gate_script_selftest(COORD_SHELL_SCRIPT_REL);
+    TEST("[lint-gate] coordination-shell: real tree clean, sandbox trip/recover matrix, no marker exemption") {
+        ASSERT(clean_rc == 0);
+        ASSERT(matrix_rc == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Sovereign-cure ratchet — coins_kv_seed_from_node_db is the borrowed UTXO
  * seed path. New production callers must fail the gate, and removing the caller
  * must restore green so the baseline remains shrink-only. */

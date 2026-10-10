@@ -208,6 +208,8 @@ static const struct lint_gate k_gates[] = {
     { "check-raw-malloc", check_raw_malloc_run, check_raw_malloc_selftest },
     { "check-no-new-repair-rung", check_no_new_repair_rung_run,
       check_no_new_repair_rung_selftest },
+    { "check-no-new-coordination-shell", check_no_new_coordination_shell_run,
+      check_no_new_coordination_shell_selftest },
     { "check-no-bare-tmp-fixture", check_no_bare_tmp_fixture_run,
       check_no_bare_tmp_fixture_selftest },
     { "check-network-tool-hardening", check_network_tool_hardening_run,

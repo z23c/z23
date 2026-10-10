@@ -122,7 +122,7 @@ check-no-utxo-projection check-no-utxos-mirror-read
 check-no-authoritative-ram-state check-no-dev-history-in-contracts
 check-no-live-lab-history
 check-stage-advances-or-blocks check-no-silent-ready check-honest-witness
-check-consensus-parity check-no-new-repair-rung check-no-new-borrowed-seed
+check-consensus-parity check-no-new-repair-rung check-no-new-coordination-shell check-no-new-borrowed-seed
 check-no-new-coin-backfill-caller check-route-command-parity
 check-zclassicd-reach-allowlist check-stage-log-reorg-unsafe
 check-no-csr-lock-on-finalize-drive check-mint-skip-crypto-offline-only

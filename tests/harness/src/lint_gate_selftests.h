@@ -409,6 +409,7 @@ int t_long_functions_lib_warn_tier(void);
 int t_e1_file_size_bands(void);
 int t_e1_file_size_baseline_and_hollow_scan(void);
 int t_no_new_repair_rung(void);
+int t_no_new_coordination_shell(void);
 int t_no_new_borrowed_seed_caller(void);
 int t_no_new_coin_backfill_caller(void);
 int t_no_writer_below_sealed_frontier(void);
