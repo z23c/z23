@@ -343,23 +343,58 @@ static int ncs_load_list(struct ncs_set *b, const char *path, FILE *err)
 
 /* ── comparison and report ────────────────────────────────────────────── */
 
-static int ncs_report_new(FILE *err, const struct ncs_set *listed,
+/* A found path is "deleted in the working tree" only when stat fails with
+ * ENOENT or ENOTDIR. Any other stat failure (permission, I/O) and an overflow
+ * keep the file in the NEW report, because telling someone to `git rm` a file
+ * that exists would be the wrong next action. */
+static int ncs_gone(const char *base, const char *rel)
+{
+    char path[4096];
+    struct stat st;
+    if (ovf(snprintf(path, sizeof path, "%s%s", base, rel), sizeof path))
+        return 0;
+    if (stat(path, &st) == 0)
+        return 0;
+    return errno == ENOENT || errno == ENOTDIR;
+}
+
+/* Prints one group: the unlisted found paths whose ncs_gone() equals `deleted`.
+ * Returns how many it printed; the header is printed before the first one. */
+static int ncs_report_group(FILE *err, const char *base,
+                            const struct ncs_set *listed,
+                            const struct ncs_set *found, int deleted)
+{
+    int n = 0;
+    for (int i = 0; i < found->n; i++) {
+        if (ncs_has(listed, found->p[i]) || ncs_gone(base, found->p[i]) != deleted)
+            continue;
+        if (!n)
+            fputs(deleted
+                  ? "check-no-new-coordination-shell: script(s) in the git "
+                    "index but deleted in the working tree:\n"
+                  : "check-no-new-coordination-shell: NEW coordination-path "
+                    "script(s) not on the list:\n", err);
+        fprintf(err, "  %s\n", found->p[i]);
+        n++;
+    }
+    return n;
+}
+
+/* Returns 1 when any unlisted path is reported, in either group. */
+static int ncs_report_new(FILE *err, const char *base,
+                          const struct ncs_set *listed,
                           const struct ncs_set *found)
 {
-    int bad = 0;
-    for (int i = 0; i < found->n; i++) {
-        if (ncs_has(listed, found->p[i]))
-            continue;
-        if (!bad)
-            fputs("check-no-new-coordination-shell: NEW coordination-path "
-                  "script(s) not on the list:\n", err);
-        fprintf(err, "  %s\n", found->p[i]);
-        bad = 1;
-    }
-    if (bad)
+    int n_new = ncs_report_group(err, base, listed, found, 0);
+    int n_gone = ncs_report_group(err, base, listed, found, 1);
+    if (n_new)
         fputs("\nwrite it in C23 as a native command instead (the project "
               "goal: no shell on the coordination path)\n", err);
-    return bad;
+    if (n_new && n_gone)
+        fputc('\n', err);
+    if (n_gone)
+        fputs("commit or stage the deletion (git rm <path>), then rerun\n", err);
+    return n_new + n_gone > 0;
 }
 
 static int ncs_report_stale(FILE *err, const struct ncs_set *listed,
@@ -378,6 +413,16 @@ static int ncs_report_stale(FILE *err, const struct ncs_set *listed,
     return bad;
 }
 
+/* The comparison itself, with no collection or list loading: NEW and
+ * deleted-in-tree groups, then STALE. Returns 1 when anything is reported. */
+static int ncs_compare(const struct ncs_set *found, const struct ncs_set *listed,
+                       const char *base, FILE *err)
+{
+    int bad_new = ncs_report_new(err, base, listed, found);
+    int bad_stale = ncs_report_stale(err, listed, found);
+    return bad_new || bad_stale;
+}
+
 static int ncs_run_cfg(const char *base, const char *list_path, int use_git,
                        FILE *out, FILE *err)
 {
@@ -388,9 +433,7 @@ static int ncs_run_cfg(const char *base, const char *list_path, int use_git,
     rc = ncs_collect(&found, base, use_git);
     if (rc)
         return rc;
-    int bad_new = ncs_report_new(err, &listed, &found);
-    int bad_stale = ncs_report_stale(err, &listed, &found);
-    if (bad_new || bad_stale)
+    if (ncs_compare(&found, &listed, base, err))
         return 1;
     fprintf(out, "check-no-new-coordination-shell: clean — %d "
                  "coordination-path script(s), all listed in %s\n",
@@ -502,6 +545,131 @@ static int ncs_st_list_gone(const char *root, const char *name, int as_dir,
     return ncs_st_run(name, base, list, want_rc, needle);
 }
 
+/* Run ncs_compare() on a found set built from `found`, with an empty list. The
+ * `planted` paths are created under the sandbox, so they exist on disk; a found
+ * path that is not planted does not exist. Captures stderr into ebuf. */
+static int ncs_st_cmp(const char *root, const char *name,
+                      const char *const *planted, int nplanted,
+                      const char *const *found, int nfound, int want_rc,
+                      char *ebuf, size_t ecap)
+{
+    static struct ncs_set fnd, lst;
+    char base[4096], list[4096];
+    if (ncs_st_setup(root, name, planted, nplanted, "", base, sizeof base,
+                     list, sizeof list))
+        return 1;
+    fnd.n = 0;
+    lst.n = 0;
+    for (int i = 0; i < nfound; i++)
+        if (ncs_add(&fnd, found[i]))
+            return 1;
+    FILE *err = tmpfile();
+    if (!err)
+        return 1;
+    int rc = ncs_compare(&fnd, &lst, base, err);
+    int bad = csr_slurp(err, ebuf, ecap);
+    fclose(err);
+    if (rc != want_rc) {
+        fprintf(stderr, "check_no_new_coordination_shell selftest: %s: want "
+                        "rc %d; got rc %d, stderr:\n%s\n", name, want_rc, rc,
+                ebuf);
+        return 1;
+    }
+    return bad;
+}
+
+/* Every `want` substring is in buf, and no `avoid` substring is. Both arrays
+ * end with NULL. */
+static int ncs_st_text(const char *name, const char *buf,
+                       const char *const *want, const char *const *avoid)
+{
+    for (const char *const *w = want; *w; w++)
+        if (!strstr(buf, *w)) {
+            fprintf(stderr, "check_no_new_coordination_shell selftest: %s: "
+                            "missing '%s' in stderr:\n%s\n", name, *w, buf);
+            return 1;
+        }
+    for (const char *const *a = avoid; *a; a++)
+        if (strstr(buf, *a)) {
+            fprintf(stderr, "check_no_new_coordination_shell selftest: %s: "
+                            "unexpected '%s' in stderr:\n%s\n", name, *a, buf);
+            return 1;
+        }
+    return 0;
+}
+
+/* The needles occur in buf in the given order (NULL-terminated). */
+static int ncs_st_in_order(const char *buf, const char *const *seq)
+{
+    const char *at = buf;
+    for (const char *const *s = seq; *s; s++) {
+        at = strstr(at, *s);
+        if (!at)
+            return 0;
+    }
+    return 1;
+}
+
+/* S1: an unlisted path that is not on disk is reported as deleted in the
+ * working tree, with the git rm advice, and never as NEW. */
+static int ncs_st_gone(const char *root)
+{
+    static const char *const found[] = { "tools/dev/gone.sh" };
+    static const char *const want[] = { "deleted in the working tree",
+                                        "tools/dev/gone.sh", "git rm", NULL };
+    static const char *const avoid[] = { "NEW coordination-path",
+                                         "write it in C23", NULL };
+    char ebuf[4096];
+    if (ncs_st_cmp(root, "gone", NULL, 0, found, 1, 1, ebuf, sizeof ebuf))
+        return 1;
+    return ncs_st_text("gone", ebuf, want, avoid);
+}
+
+/* S2: one unlisted existing path and one unlisted missing path land in their
+ * own groups, the NEW group first, then the deleted group. */
+static int ncs_st_mixed(const char *root)
+{
+    static const char *const planted[] = { "tools/scripts/new.sh" };
+    static const char *const found[] = { "tools/scripts/new.sh",
+                                         "tools/dev/gone.sh" };
+    static const char *const want[] = { "NEW coordination-path",
+                                        "  tools/scripts/new.sh",
+                                        "deleted in the working tree",
+                                        "  tools/dev/gone.sh", "git rm", NULL };
+    static const char *const order[] = { "NEW coordination-path",
+                                         "  tools/scripts/new.sh",
+                                         "deleted in the working tree",
+                                         "  tools/dev/gone.sh", NULL };
+    static const char *const none[] = { NULL };
+    char ebuf[4096];
+    if (ncs_st_cmp(root, "mixed", planted, 1, found, 2, 1, ebuf, sizeof ebuf))
+        return 1;
+    if (ncs_st_text("mixed", ebuf, want, none))
+        return 1;
+    if (!ncs_st_in_order(ebuf, order)) {
+        fprintf(stderr, "check_no_new_coordination_shell selftest: mixed: "
+                        "groups out of order or misplaced; stderr:\n%s\n", ebuf);
+        return 1;
+    }
+    return 0;
+}
+
+/* S3 (regression): an unlisted existing path gets today's NEW message and never
+ * the deleted-in-working-tree group. */
+static int ncs_st_regress(const char *root)
+{
+    static const char *const planted[] = { "tools/scripts/new.sh" };
+    static const char *const found[] = { "tools/scripts/new.sh" };
+    static const char *const want[] = { "NEW coordination-path",
+                                        "  tools/scripts/new.sh",
+                                        "write it in C23", NULL };
+    static const char *const avoid[] = { "deleted in the working tree", NULL };
+    char ebuf[4096];
+    if (ncs_st_cmp(root, "regress", planted, 1, found, 1, 1, ebuf, sizeof ebuf))
+        return 1;
+    return ncs_st_text("regress", ebuf, want, avoid);
+}
+
 static const char *const k_ncs_one[] = { "tools/dev/a.sh" };
 static const char *const k_ncs_new[] = { "tools/dev/a.sh", "tools/scripts/new.sh" };
 static const char *const k_ncs_two[] = { "tools/dev/a.sh", "tools/dev/b.sh" };
@@ -553,6 +721,9 @@ static int ncs_st_cases(const char *root)
                        "leading, trailing or CR whitespace");
     bad |= ncs_st_list_gone(root, "missing", 0, 1, "is missing");
     bad |= ncs_st_list_gone(root, "readerr", 1, 2, "cannot read");
+    bad |= ncs_st_gone(root);
+    bad |= ncs_st_mixed(root);
+    bad |= ncs_st_regress(root);
     return bad;
 }
 
