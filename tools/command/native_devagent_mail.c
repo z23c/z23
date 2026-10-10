@@ -146,7 +146,11 @@
  * no ".." segment and stays allowed.
  *
  * OUTPUT (zcl.agent_mail.v1). Every reply names its own `leaf`. Post returns
- * the row fields plus `cursor` (the row's seq) and `outbox`. Pull returns
+ * the row fields plus `cursor` (the row's seq), `outbox`, and `delivery`:
+ * where the board exporter will carry the row: "exported" (to another
+ * enrolled box, or back to the box a directive came from under `ref`) or
+ * "local" (this box only). `hint` is added for local mail to a name no
+ * roster box holds. Pull returns
  * `rows` (array), `cursor`, `count`, `truncated`, `next_since`, `skipped`,
  * `resumed_from` (since|agent|start) and `sources`: per stream,
  * {stream, consumed, size, complete}. `cursor` is only the largest seq seen
@@ -1064,6 +1068,17 @@ static const struct dvm_fail_info *dvm_post_compose(
     return NULL;
 }
 
+/* The reply's `delivery` (and `hint`, when local mail names no roster box). */
+static void dvm_post_delivery(struct zcl_command_reply *reply, const char *to,
+                              const char *ref)
+{
+    struct zcl_boardmail_delivery where;
+    zcl_devagent_boardmail_delivery(to, ref, &where);
+    (void)json_push_kv_str(&reply->data, "delivery", where.label);
+    if (where.hint[0])
+        (void)json_push_kv_str(&reply->data, "hint", where.hint);
+}
+
 static void dvm_post(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply, const char *maildir)
 {
@@ -1160,6 +1175,7 @@ static void dvm_post(const struct zcl_command_request *req,
     (void)json_push_kv_str(&reply->data, "ref", ref);
     (void)json_push_kv_int(&reply->data, "cursor", seq);
     (void)json_push_kv_str(&reply->data, "outbox", outbox);
+    dvm_post_delivery(reply, to, ref);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }

@@ -98,6 +98,7 @@
 #include "controllers/rpc_client.h"
 #include "fleet_enrol.h"
 #include "json/json.h"
+#include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 
@@ -322,15 +323,26 @@ static const struct bm_peer *bm_by_signer_hex(const struct bm_roster *r,
     return NULL;
 }
 
+/* This box's own box key. False on a box with no enrolled key. */
+static bool bm_own_box(uint8_t own[FLEET_ENROL_PUBKEY_BYTES])
+{
+    uint8_t seed[FLEET_ENROL_SEED_BYTES];
+    const char *why = NULL;
+    bool present = false;
+    if (!fleet_enrol_key_load(seed, own, false, &present, &why))
+        present = false;
+    memset(seed, 0, sizeof(seed));
+    return present;
+}
+
 /* Is `to` another enrolled box, not this one? This box is the roster entry
  * whose box key is this box's own fleet key. */
 bool zcl_devagent_boardmail_remote(const char *to)
 {
     struct bm_roster *r;
     const struct bm_peer *p;
-    uint8_t seed[FLEET_ENROL_SEED_BYTES], own[FLEET_ENROL_PUBKEY_BYTES];
-    const char *why = NULL;
-    bool present = false, remote;
+    uint8_t own[FLEET_ENROL_PUBKEY_BYTES];
+    bool present, remote;
     if (!to || !to[0] || strcmp(to, "*") == 0)
         return false;
     r = zcl_calloc(1, sizeof(*r), "boardmail.roster");
@@ -340,9 +352,7 @@ bool zcl_devagent_boardmail_remote(const char *to)
     }
     bm_roster_load(r);
     p = bm_by_name(r, to);
-    if (!fleet_enrol_key_load(seed, own, false, &present, &why))
-        present = false;
-    memset(seed, 0, sizeof(seed));
+    present = bm_own_box(own);
     remote = p && !(present && memcmp(p->box, own, sizeof(own)) == 0);
     free(r);
     return remote;
@@ -595,6 +605,17 @@ static enum bm_post bm_post_row(const char *line, const struct bm_row *r,
     return verdict;
 }
 
+/* The box an imported directive under `ref` came from, or NULL. */
+static const char *bm_ref_peer(const struct bm_refs *refs, const char *ref)
+{
+    size_t i;
+    for (i = 0; ref[0] && i < refs->n; i++) {
+        if (refs->r[i].dir == 'i' && strcmp(refs->r[i].ref, ref) == 0)
+            return refs->r[i].peer;
+    }
+    return NULL;
+}
+
 /* Which box a row is carried for: `to` when it is another enrolled box,
  * the box a directive came from when the row answers it under that ref,
  * else NULL (local mail, never carried). *out_dir says whether to record
@@ -605,7 +626,6 @@ static const char *bm_export_peer(const struct zcl_boardmail_ctx *c,
                                   const struct bm_row *r, bool *record)
 {
     const struct bm_peer *p;
-    size_t i;
     *record = false;
     if (strcmp(r->to, c->receiver) == 0)
         return NULL;
@@ -614,11 +634,100 @@ static const char *bm_export_peer(const struct zcl_boardmail_ctx *c,
         *record = true;
         return p->name;
     }
-    for (i = 0; r->ref[0] && i < refs->n; i++) {
-        if (refs->r[i].dir == 'i' && strcmp(refs->r[i].ref, r->ref) == 0)
-            return refs->r[i].peer;
+    return bm_ref_peer(refs, r->ref);
+}
+
+/* ── where a posted row will go, read back for the poster ───────────────── */
+
+#define BM_KNOWN_SHOWN 8u
+#define BM_KNOWN_CAP 512u
+
+struct bm_route {
+    struct bm_roster ro;
+    struct bm_refs refs;
+    char self[FLEET_ENROL_NAME_MAX + 1];
+};
+
+/* Load the roster, this box's own roster name and the refs ledger under
+ * <state>/receive, the same paths the receive beat exports from. */
+static void bm_route_load(struct bm_route *v)
+{
+    uint8_t own[FLEET_ENROL_PUBKEY_BYTES];
+    char root[4096], dir[4200];
+    size_t i;
+    bm_roster_load(&v->ro);
+    if (bm_own_box(own)) {
+        for (i = 0; i < v->ro.n; i++) {
+            if (memcmp(v->ro.p[i].box, own, sizeof(own)) == 0) {
+                (void)snprintf(v->self, sizeof(v->self), "%s",
+                               v->ro.p[i].name);
+                break;
+            }
+        }
     }
-    return NULL;
+    if (platform_state_root(root, sizeof(root)) &&
+        snprintf(dir, sizeof(dir), "%s/receive", root) > 0)
+        bm_refs_load(&v->refs, dir);
+}
+
+/* Comma list of the other roster box names, capped at BM_KNOWN_SHOWN. */
+static void bm_known_names(const struct bm_roster *r, const char *self,
+                           char *out, size_t cap)
+{
+    size_t i, shown = 0, len = 0;
+    int n;
+    out[0] = '\0';
+    for (i = 0; i < r->n; i++) {
+        if (strcmp(r->p[i].name, self) == 0)
+            continue;
+        if (shown == BM_KNOWN_SHOWN) {
+            (void)snprintf(out + len, cap - len, ", ...");
+            return;
+        }
+        n = snprintf(out + len, cap - len, "%s%s", shown ? ", " : "",
+                     r->p[i].name);
+        if (n < 0 || (size_t)n >= cap - len)
+            return;
+        len += (size_t)n;
+        shown++;
+    }
+    if (shown == 0)
+        (void)snprintf(out, cap, "none");
+}
+
+/* Where a row posted to `to` under `ref` will go. The same predicates as
+ * bm_export_peer, in the same order, so the answer cannot drift from the
+ * exporter. `out.label` is "exported" when the exporter carries the row to
+ * a box, else "local". `out.hint` is set only for local mail to a name no
+ * roster box holds (not "*", not this box). */
+void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
+                                     struct zcl_boardmail_delivery *out)
+{
+    struct bm_route *v;
+    const struct bm_peer *p;
+    char known[BM_KNOWN_CAP];
+    memset(out, 0, sizeof(*out));
+    (void)snprintf(out->label, sizeof(out->label), "local");
+    if (!to || !to[0])
+        return;
+    v = zcl_calloc(1, sizeof(*v), "boardmail.route");
+    if (!v)
+        return;
+    bm_route_load(v);
+    p = bm_by_name(&v->ro, to);
+    if (strcmp(to, v->self) == 0 || strcmp(to, "*") == 0) {
+        /* This box, or broadcast to this box only: never carried. */
+    } else if ((p && strcmp(p->name, v->self) != 0) ||
+               bm_ref_peer(&v->refs, ref ? ref : "")) {
+        (void)snprintf(out->label, sizeof(out->label), "exported");
+    } else if (!p) {
+        bm_known_names(&v->ro, v->self, known, sizeof(known));
+        (void)snprintf(out->hint, sizeof(out->hint),
+                       "no roster box named %s; cross-host mail is addressed "
+                       "by roster box name (known: %s)",
+                       to, known);
+    }
+    free(v);
 }
 
 /* One complete outbox line. False when the cursor must stay before it. */

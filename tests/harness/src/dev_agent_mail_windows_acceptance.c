@@ -24,6 +24,17 @@ bool zcl_devagent_checkout_root(const char *start, char *out, size_t cap)
     return false;
 }
 
+/* The acceptance program links mail without the roster closure, so it supplies
+ * the delivery answer for a box with no roster. */
+void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
+                                     struct zcl_boardmail_delivery *out)
+{
+    (void)to;
+    (void)ref;
+    memset(out, 0, sizeof(*out));
+    (void)snprintf(out->label, sizeof(out->label), "local");
+}
+
 /* Record the handler's refusal envelope without linking the unrelated
  * command dispatcher and its agent-spending policy. Filesystem operations
  * and JSON parsing/serialization below use their production implementations. */

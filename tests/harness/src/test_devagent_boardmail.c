@@ -1074,6 +1074,87 @@ _test_next:;
     return failures;
 }
 
+/* One dev.agent.mail post from this box; copies its delivery label and hint
+ * out. False when the post itself is refused. */
+static bool bmx_post_where(const char *to, const char *ref, char *label,
+                           size_t lcap, char *hint, size_t hcap)
+{
+    struct json_value in;
+    struct zcl_command_request req;
+    struct zcl_command_reply reply;
+    const struct json_value *v;
+    bool ok;
+    json_init(&in);
+    json_set_object(&in);
+    memset(&req, 0, sizeof(req));
+    req.input = &in;
+    zcl_command_reply_init(&reply, "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&in, "action", "post");
+    (void)json_push_kv_str(&in, "from", "node-a");
+    (void)json_push_kv_str(&in, "to", to);
+    (void)json_push_kv_str(&in, "kind", "note");
+    (void)json_push_kv_str(&in, "body", "where does this go");
+    if (ref)
+        (void)json_push_kv_str(&in, "ref", ref);
+    zcl_native_handle_dev_agent_mail(&req, &reply);
+    ok = reply.status == ZCL_COMMAND_STATUS_PASSED;
+    label[0] = '\0';
+    hint[0] = '\0';
+    v = json_get(&reply.data, "delivery");
+    if (v && v->type == JSON_STR && json_get_str(v))
+        (void)snprintf(label, lcap, "%s", json_get_str(v));
+    v = json_get(&reply.data, "hint");
+    if (v && v->type == JSON_STR && json_get_str(v))
+        (void)snprintf(hint, hcap, "%s", json_get_str(v));
+    zcl_command_reply_free(&reply);
+    json_free(&in);
+    return ok;
+}
+
+static int bmx_t_delivery(void)
+{
+    int failures = 0;
+    TEST("boardmail: a posted row says where the exporter will carry it") {
+        char label[160], hint[1024], path[1600];
+        ASSERT(bmx_setup("delivery"));
+        bmx_use(BMX_A);
+        /* Broadcast: this box only, nothing carried. */
+        ASSERT(bmx_post_where("*", NULL, label, sizeof(label), hint,
+                              sizeof(hint)));
+        ASSERT_STR_EQ(label, "local");
+        ASSERT_STR_EQ(hint, "");
+        /* Another enrolled box, named by its roster name. */
+        ASSERT(bmx_post_where("node-b", NULL, label, sizeof(label), hint,
+                              sizeof(hint)));
+        ASSERT_STR_EQ(label, "exported");
+        ASSERT_STR_EQ(hint, "");
+        /* An agent id no roster box holds: local, with a hint that
+         * names the roster boxes cross-host mail can be addressed to. */
+        ASSERT(bmx_post_where("someagent", NULL, label, sizeof(label), hint,
+                              sizeof(hint)));
+        ASSERT_STR_EQ(label, "local");
+        ASSERT(strstr(hint, "no roster box named someagent") != NULL);
+        ASSERT(strstr(hint, "node-b") != NULL);
+        /* A reply under a ref this box imported from node-b goes back to
+         * node-b, whatever `to` names. Lay down the refs ledger the receive
+         * beat keeps under <state>/receive. */
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/receive",
+                       g_bmx_state[BMX_A]);
+        (void)mkdir(path, 0700);
+        ASSERT(bmx_write(BMX_A, "receive/boardmail.refs", "in job-9 node-b\n",
+                         "wb"));
+        ASSERT(bmx_post_where("someagent", "job-9", label, sizeof(label),
+                              hint, sizeof(hint)));
+        ASSERT_STR_EQ(label, "exported");
+        ASSERT_STR_EQ(hint, "");
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
 static int bmx_t_oversize(void)
 {
     int failures = 0;
@@ -1124,6 +1205,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_expired();
     failures += bmx_t_deferred();
     failures += bmx_t_oversize();
+    failures += bmx_t_delivery();
 #endif
     if (failures == 0)
         printf("test_devagent_boardmail: all passed\n");

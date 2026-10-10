@@ -501,6 +501,18 @@ void zcl_devagent_boardmail_export(const struct zcl_boardmail_ctx *c,
 /* True when `to` is a verified roster box other than this one. */
 bool zcl_devagent_boardmail_remote(const char *to);
 
+/* Where a row posted to `to` under `ref` will be carried, by the exporter's
+ * own rules. `label` is "exported" when the exporter carries the row to a
+ * box, else "local". `hint` is set only for local mail to a name no roster
+ * box holds (not "*", not this box). Only this box's own state is read;
+ * nothing is written. */
+struct zcl_boardmail_delivery {
+    char label[160];
+    char hint[1024];
+};
+void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
+                                     struct zcl_boardmail_delivery *out);
+
 /* The longest mail row line (without its newline) the board carries: the
  * signed text ceiling of one fleet note (FLEET_BOARD_TEXT_MAX). A row bound
  * for another box that would not fit is refused where it is sent. */

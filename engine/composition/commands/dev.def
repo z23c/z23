@@ -2313,7 +2313,9 @@ ZCL_COMMAND_DEV_COMMAND(
     "Post, pull, and ack async agent mail",
     "One append-only, cursor-based mail primitive over the owner-private "
     "state root: post appends a row {seq, ts, from, to, kind, body, ref} to "
-    "mail/outbox.jsonl with a single O_APPEND write, plus the optional "
+    "mail/outbox.jsonl with a single O_APPEND write, and returns delivery "
+    "(exported when the board carries the row to another box, else local, "
+    "with a hint when a name matches no roster box), plus the optional "
     "sender_binding stamping which credential sent it, since from is a "
     "claim and a reader that dispatches work needs more than a name; pull "
     "returns board_post and board_signer (64 hex each, \"\" when absent) "
