@@ -170,6 +170,7 @@ struct dvu_fields {
     const char *id;
     const char *model;
     char hour[DVU_HOUR_LEN + 1];
+    long long ts; /* UTC epoch seconds; -1 when absent or malformed */
     int64_t v[DVU_NF];
     int64_t ordinal;
     const char *session; /* NULL: not in any run row */
@@ -186,6 +187,7 @@ struct dvu_event {
     char *agent_type;
     bool sidechain;
     char hour[DVU_HOUR_LEN + 1];
+    long long ts; /* UTC epoch seconds; -1 when absent or malformed */
     enum dvu_format format;
     size_t seq; /* input order: the latest line for an id wins */
     int64_t v[DVU_NF];
@@ -216,6 +218,8 @@ struct dvu_sum {
     int64_t events;
     int64_t v[DVU_NF];
     int64_t unreported[DVU_NF];
+    long long ts_min; /* -1: no event with a valid time yet */
+    long long ts_max;
 };
 
 static void dvu_fail(struct zcl_command_reply *reply, enum zcl_command_exit exit_code,
@@ -272,6 +276,49 @@ static void dvu_hour_from_iso(const char *ts, char out[DVU_HOUR_LEN + 1])
         (void)snprintf(out, DVU_HOUR_LEN + 1, "%.13s", ts);
     else
         (void)snprintf(out, DVU_HOUR_LEN + 1, "unknown");
+}
+
+/* True when ts starts with YYYY-MM-DDTHH:MM:SS (digits and separators at
+ * fixed positions); anything after the seconds is not inspected. */
+static bool dvu_iso_shape_ok(const char *ts)
+{
+    static const char pat[] = "dddd-dd-ddTdd:dd:dd";
+    for (size_t i = 0; i < 19; i++) {
+        bool ok = pat[i] == 'd' ? (ts[i] >= '0' && ts[i] <= '9') : ts[i] == pat[i];
+        if (!ok)
+            return false;
+    }
+    return true;
+}
+
+/* Howard Hinnant's days_from_civil, as in native_dev_index_ingest.c. */
+static long long dvu_days_from_civil(long long y, int m, int d)
+{
+    y -= (m <= 2);
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    long long yoe = y - era * 400;
+    long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/* UTC epoch seconds for YYYY-MM-DDTHH:MM:SS; -1 when malformed, out of
+ * range, or before 1970. */
+static long long dvu_secs_from_iso(const char *ts)
+{
+    if (!ts || strlen(ts) < 19 || !dvu_iso_shape_ok(ts))
+        return -1;
+    long long y = (ts[0] - '0') * 1000 + (ts[1] - '0') * 100 +
+                  (ts[2] - '0') * 10 + (ts[3] - '0');
+    int mo = (ts[5] - '0') * 10 + (ts[6] - '0');
+    int d = (ts[8] - '0') * 10 + (ts[9] - '0');
+    int h = (ts[11] - '0') * 10 + (ts[12] - '0');
+    int mi = (ts[14] - '0') * 10 + (ts[15] - '0');
+    int s = (ts[17] - '0') * 10 + (ts[18] - '0');
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 60)
+        return -1;
+    long long secs = dvu_days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s;
+    return secs < 0 ? -1 : secs;
 }
 
 static bool dvu_parse_muse(const struct json_value *row, struct dvu_fields *f)
@@ -337,6 +384,7 @@ static bool dvu_parse_claude(const struct json_value *row, struct dvu_fields *f)
     f->id = dvu_str(msg, "id");
     f->model = dvu_str(msg, "model");
     dvu_hour_from_iso(dvu_str(row, "timestamp"), f->hour);
+    f->ts = dvu_secs_from_iso(dvu_str(row, "timestamp"));
     f->v[DVU_IN] = dvu_counter(u, "input_tokens");
     f->v[DVU_OUT] = dvu_counter(u, "output_tokens");
     f->v[DVU_CREAD] = dvu_counter(u, "cache_read_input_tokens");
@@ -465,6 +513,7 @@ static void dvu_keep(struct dvu_scan *s, const struct dvu_fields *f)
         return;
     }
     memcpy(e->hour, f->hour, sizeof(e->hour));
+    e->ts = f->ts;
     memcpy(e->v, f->v, sizeof(e->v));
     e->format = f->format;
     e->seq = s->seq++;
@@ -528,6 +577,7 @@ static void dvu_line(struct dvu_scan *s, char codex_id[300], const char *line,
     }
     struct dvu_fields f;
     memset(&f, 0, sizeof(f));
+    f.ts = -1;
     dvu_codex_meta(s, codex_id, &row);
     if (dvu_parse_muse(&row, &f) || dvu_parse_claude(&row, &f) ||
         dvu_parse_codex(&row, codex_id, &f)) {
@@ -734,6 +784,12 @@ static int dvu_cmp_hour(const void *a, const void *b)
 static bool dvu_sum_add(struct dvu_sum *t, const struct dvu_event *e)
 {
     t->events++;
+    if (e->ts >= 0) {
+        if (t->ts_min < 0 || e->ts < t->ts_min)
+            t->ts_min = e->ts;
+        if (t->ts_max < 0 || e->ts > t->ts_max)
+            t->ts_max = e->ts;
+    }
     for (int f = 0; f < DVU_NF; f++) {
         if (e->v[f] < 0)
             t->unreported[f]++;
@@ -865,6 +921,7 @@ static bool dvu_push_by_model(struct json_value *usage, struct dvu_scan *s)
     for (size_t i = 0; ok && i < s->n;) {
         struct dvu_sum t;
         memset(&t, 0, sizeof(t));
+        t.ts_min = t.ts_max = -1;
         size_t j = i;
         while (ok && j < s->n && dvu_cmp_model(&s->ev[i], &s->ev[j]) == 0)
             ok = dvu_sum_add(&t, &s->ev[j++]);
@@ -918,6 +975,7 @@ static bool dvu_push_by_hour(struct json_value *usage, struct dvu_scan *s)
     for (size_t i = 0; ok && i < s->n;) {
         struct dvu_sum t;
         memset(&t, 0, sizeof(t));
+        t.ts_min = t.ts_max = -1;
         size_t j = i;
         while (ok && j < s->n && dvu_cmp_hour(&s->ev[i], &s->ev[j]) == 0)
             ok = dvu_sum_add(&t, &s->ev[j++]);
@@ -968,6 +1026,19 @@ static int dvu_cmp_run(const void *a, const void *b)
     return dvu_cmp_run_key(a, b);
 }
 
+/* Run-row members appended after the sum: requests always; the time
+ * members only when at least one event had a valid time. */
+static bool dvu_push_run_times(struct json_value *row, const struct dvu_sum *t)
+{
+    if (!json_push_kv_int(row, "requests", t->events))
+        return false;
+    if (t->ts_min < 0 || t->ts_max < 0)
+        return true;
+    return json_push_kv_int(row, "first_ts", t->ts_min) &&
+           json_push_kv_int(row, "last_ts", t->ts_max) &&
+           json_push_kv_int(row, "wall_s", t->ts_max - t->ts_min);
+}
+
 /* Appends the row when it fits the budget; *fit says whether it did. */
 static bool dvu_push_run_row(struct json_value *arr, const struct dvu_event *e,
                              const struct dvu_sum *t, size_t *used, bool *fit)
@@ -981,7 +1052,8 @@ static bool dvu_push_run_row(struct json_value *arr, const struct dvu_event *e,
               dvu_json_str(&row, "agent_type", e->agent_type) &&
               json_push_kv_bool(&row, "sidechain", e->sidechain) &&
               dvu_json_str(&row, "model", e->model) &&
-              dvu_push_sum(&row, t, true);
+              dvu_push_sum(&row, t, true) &&
+              dvu_push_run_times(&row, t);
     *fit = ok && dvu_fits(&row, used, DVU_RUN_BYTES);
     ok = ok && (!*fit || dvu_json_back(arr, &row));
     json_free(&row);
@@ -1012,6 +1084,7 @@ static bool dvu_push_by_run(struct json_value *usage, struct dvu_scan *s)
         size_t j = i;
         struct dvu_sum t;
         memset(&t, 0, sizeof(t));
+        t.ts_min = t.ts_max = -1;
         while (ok && j < s->n && dvu_cmp_run_key(&s->ev[i], &s->ev[j]) == 0)
             ok = dvu_sum_add(&t, &s->ev[j++]);
         if (!ok) {

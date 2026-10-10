@@ -1050,9 +1050,11 @@ static int dvx_codex_unknowns(const char *root, const char *ledger)
 
 /* Append one Claude assistant line; a NULL session omits sessionId, a NULL
  * agent omits agentId (the lead thread), a NULL type omits attributionAgent. */
-static void dvx_run_line(char *buf, size_t cap, const char *session,
-                         const char *agent, const char *type, bool side,
-                         const char *id, const char *model, int out, int cread)
+/* Same as dvx_run_line with the line's timestamp given as ts. */
+static void dvx_run_line_ts(char *buf, size_t cap, const char *ts,
+                            const char *session, const char *agent,
+                            const char *type, bool side, const char *id,
+                            const char *model, int out, int cread)
 {
     char ses[256] = "", ag[256] = "", ty[256] = "";
     size_t at = strlen(buf);
@@ -1063,11 +1065,19 @@ static void dvx_run_line(char *buf, size_t cap, const char *session,
     if (type)
         (void)snprintf(ty, sizeof(ty), "\"attributionAgent\":\"%s\",", type);
     (void)snprintf(buf + at, cap - at,
-        "{\"type\":\"assistant\",\"timestamp\":\"2026-09-19T01:02:03Z\",%s%s%s"
+        "{\"type\":\"assistant\",\"timestamp\":\"%s\",%s%s%s"
         "\"isSidechain\":%s,\"message\":{\"id\":\"%s\",\"model\":\"%s\","
         "\"usage\":{\"input_tokens\":1,\"output_tokens\":%d,"
         "\"cache_read_input_tokens\":%d}}}\n",
-        ses, ag, ty, side ? "true" : "false", id, model, out, cread);
+        ts, ses, ag, ty, side ? "true" : "false", id, model, out, cread);
+}
+
+static void dvx_run_line(char *buf, size_t cap, const char *session,
+                         const char *agent, const char *type, bool side,
+                         const char *id, const char *model, int out, int cread)
+{
+    dvx_run_line_ts(buf, cap, "2026-09-19T01:02:03Z", session, agent, type,
+                    side, id, model, out, cread);
 }
 
 static bool dvx_bool_is(const struct json_value *o, const char *key, bool want)
@@ -1474,6 +1484,145 @@ static bool dvx_group_in(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
     return false;
 }
 
+/* 2026-09-19T00:00:00Z: 2026-01-01 is 1767225600 (2025-01-01 1735689600 plus
+ * 365 * 86400 = 31536000); 261 days from 2026-01-01 to 2026-09-19 (243 days
+ * through August plus 18) add 261 * 86400 = 22550400, giving 1789776000.
+ * 01:02:03 adds 3723 -> 1789779723; 01:03:33 adds 3813 -> 1789779813. */
+#define DVX_WALL_FIRST 1789779723
+#define DVX_WALL_LAST 1789779813
+
+static int dvx_runs_wall_order(const char *root, const char *ledger)
+{
+    int failures = 0;
+    char text[4096] = "";
+    char path[1024];
+    (void)snprintf(path, sizeof(path), "%s/runs-wall.jsonl", root);
+    struct dvx_call c;
+    dvx_usage_call(&c, ledger, path, NULL);
+    TEST("usage: by_run reports requests, first_ts, last_ts and wall_s from the run's events") {
+        dvx_run_line_ts(text, sizeof(text), "2026-09-19T01:03:33Z", "s1", NULL,
+                        NULL, false, "w2", "mA", 1, 1);
+        dvx_run_line_ts(text, sizeof(text), "2026-09-19T01:02:03Z", "s1", NULL,
+                        NULL, false, "w1", "mA", 1, 1);
+        ASSERT(dvx_write(root, "runs-wall.jsonl", text));
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        const struct json_value *rows = dvx_run_rows(&c);
+        ASSERT(rows != NULL && rows->num_children == 1);
+        const struct json_value *r = &rows->children[0];
+        ASSERT_EQ(dvx_entry_int(r, "requests"), 2);
+        ASSERT_EQ(dvx_entry_int(r, "first_ts"), DVX_WALL_FIRST);
+        ASSERT_EQ(dvx_entry_int(r, "last_ts"), DVX_WALL_LAST);
+        ASSERT_EQ(dvx_entry_int(r, "wall_s"), 90);
+        PASS();
+    } _test_next:;
+    dvx_end(&c);
+    return failures;
+}
+
+static int dvx_runs_wall_unknown(const char *root, const char *ledger)
+{
+    int failures = 0;
+    char text[4096] = "";
+    char path[1024];
+    (void)snprintf(path, sizeof(path), "%s/runs-wall-bad.jsonl", root);
+    struct dvx_call c;
+    dvx_usage_call(&c, ledger, path, NULL);
+    TEST("usage: by_run omits wall_s, first_ts and last_ts when no event has a valid time") {
+        dvx_run_line_ts(text, sizeof(text), "not-a-time", "s1", NULL, NULL,
+                        false, "x1", "mA", 1, 1);
+        ASSERT(dvx_write(root, "runs-wall-bad.jsonl", text));
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        const struct json_value *rows = dvx_run_rows(&c);
+        ASSERT(rows != NULL && rows->num_children == 1);
+        const struct json_value *r = &rows->children[0];
+        ASSERT_EQ(dvx_entry_int(r, "requests"), 1);
+        ASSERT(json_get(r, "wall_s") == NULL);
+        ASSERT(json_get(r, "first_ts") == NULL);
+        ASSERT(json_get(r, "last_ts") == NULL);
+        PASS();
+    } _test_next:;
+    dvx_end(&c);
+    return failures;
+}
+
+static int dvx_runs_wall_dedup(const char *root, const char *ledger)
+{
+    int failures = 0;
+    char text[4096] = "";
+    char path[1024];
+    (void)snprintf(path, sizeof(path), "%s/runs-wall-dup.jsonl", root);
+    struct dvx_call c;
+    dvx_usage_call(&c, ledger, path, NULL);
+    TEST("usage: by_run counts a repeated message id once in requests") {
+        dvx_run_line_ts(text, sizeof(text), "2026-09-19T01:02:03Z", "s1", NULL,
+                        NULL, false, "r1", "mA", 1, 1);
+        dvx_run_line_ts(text, sizeof(text), "2026-09-19T01:03:33Z", "s1", NULL,
+                        NULL, false, "r1", "mA", 1, 1);
+        ASSERT(dvx_write(root, "runs-wall-dup.jsonl", text));
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        const struct json_value *rows = dvx_run_rows(&c);
+        ASSERT(rows != NULL && rows->num_children == 1);
+        ASSERT_EQ(dvx_entry_int(&rows->children[0], "requests"), 1);
+        PASS();
+    } _test_next:;
+    dvx_end(&c);
+    return failures;
+}
+
+static int dvx_runs_wall_partial(const char *root, const char *ledger)
+{
+    int failures = 0;
+    char text[4096] = "";
+    char path[1024];
+    (void)snprintf(path, sizeof(path), "%s/runs-wall-mixed.jsonl", root);
+    struct dvx_call c;
+    dvx_usage_call(&c, ledger, path, NULL);
+    TEST("usage: by_run takes its wall time from the valid timestamps only") {
+        dvx_run_line_ts(text, sizeof(text), "2026-09-19T01:02:03Z", "s1", NULL,
+                        NULL, false, "p1", "mA", 1, 1);
+        dvx_run_line_ts(text, sizeof(text), "not-a-time", "s1", NULL, NULL,
+                        false, "p2", "mA", 1, 1);
+        ASSERT(dvx_write(root, "runs-wall-mixed.jsonl", text));
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        const struct json_value *rows = dvx_run_rows(&c);
+        ASSERT(rows != NULL && rows->num_children == 1);
+        const struct json_value *r = &rows->children[0];
+        ASSERT_EQ(dvx_entry_int(r, "requests"), 2);
+        ASSERT_EQ(dvx_entry_int(r, "wall_s"), 0);
+        ASSERT_EQ(dvx_entry_int(r, "first_ts"), DVX_WALL_FIRST);
+        ASSERT_EQ(dvx_entry_int(r, "last_ts"), DVX_WALL_FIRST);
+        PASS();
+    } _test_next:;
+    dvx_end(&c);
+    return failures;
+}
+
+static int dvx_runs_wall_by_model(const char *root, const char *ledger)
+{
+    int failures = 0;
+    char text[4096] = "";
+    char path[1024];
+    (void)snprintf(path, sizeof(path), "%s/runs-wall-model.jsonl", root);
+    struct dvx_call c;
+    dvx_usage_call(&c, ledger, path, NULL);
+    TEST("usage: by_model rows carry no by_run wall time") {
+        dvx_run_line_ts(text, sizeof(text), "2026-09-19T01:02:03Z", "s1", NULL,
+                        NULL, false, "b1", "mA", 1, 1);
+        dvx_run_line_ts(text, sizeof(text), "2026-09-19T01:03:33Z", "s1", NULL,
+                        NULL, false, "b2", "mA", 1, 1);
+        ASSERT(dvx_write(root, "runs-wall-model.jsonl", text));
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        const struct json_value *m = dvx_usage_model(&c, "claude", "mA");
+        ASSERT(m != NULL);
+        ASSERT(json_get(m, "wall_s") == NULL);
+        ASSERT(json_get(m, "first_ts") == NULL);
+        ASSERT(json_get(m, "last_ts") == NULL);
+        PASS();
+    } _test_next:;
+    dvx_end(&c);
+    return failures;
+}
+
 static int dvx_usage_path_floor(void)
 {
     int failures = 0;
@@ -1699,6 +1848,11 @@ int test_devagent_outcomes(void)
     failures += dvx_oversized_line(root, ledger);
     failures += dvx_runs_unreported(root, ledger);
     failures += dvx_runs_agent_type_split(root, ledger);
+    failures += dvx_runs_wall_order(root, ledger);
+    failures += dvx_runs_wall_unknown(root, ledger);
+    failures += dvx_runs_wall_dedup(root, ledger);
+    failures += dvx_runs_wall_partial(root, ledger);
+    failures += dvx_runs_wall_by_model(root, ledger);
     failures += dvx_usage_path_floor();
     failures += dvx_sort_boundaries(root, ledger);
     failures += dvx_byte_boundaries(root, ledger);
