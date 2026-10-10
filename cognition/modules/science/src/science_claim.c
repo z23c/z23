@@ -309,6 +309,10 @@ static bool same_claim_different_falsifier(const struct science_claim_row *row,
            row->sample_floor != spec->sample_floor;
 }
 
+/* REPORTED and REPORT_EDITED are accepted before anything emits them, on
+ * purpose: a register is replayed by every reader, and an unknown verdict
+ * refuses the register, so readers must learn a value before any writer uses
+ * it. */
 static bool verdict_known(enum engine_verdict v)
 {
     switch (v) {

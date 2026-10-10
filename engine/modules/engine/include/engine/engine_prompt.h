@@ -135,8 +135,9 @@ enum engine_prompt_effect engine_prompt_kind_effect(const char *kind);
 
 /* True when the tier rows and the template kinds agree both ways: every tier
  * row names a kind that has template rows, no kind has two tier rows, and
- * every template kind has one. On false, *why_kind (when non-NULL) names the
- * first offending kind; it is NULL on true. */
+ * every template kind has one. Every effect row names a kind that has
+ * template rows, and no kind has two effect rows. On false, *why_kind (when
+ * non-NULL) names the first offending kind; it is NULL on true. */
 bool engine_prompt_tiers_closed(const char **why_kind);
 
 /* "unknown", "light" or "standard". */

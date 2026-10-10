@@ -118,7 +118,13 @@ enum engine_verdict engine_verdict_of(const struct engine_gate_reading *gate,
  * EDIT (and UNKNOWN, fail-closed to the stricter rule) is exactly
  * engine_verdict_of. REPORT: a timeout is TIMEOUT; any changed file is
  * REPORT_EDITED (a failure); no change is REPORTED. A report never consults
- * the gate: it ran none worth reading. */
+ * the gate: it ran none worth reading.
+ *
+ * Caller contract: files_changed must be a real count of the files the unit
+ * changed. A caller whose change count can fail (returning 0 on error) must
+ * not call this for a report unit with that 0, because 0 means REPORTED,
+ * which is terminal. For a report unit a timeout outranks an edit, as in
+ * engine_verdict_of. */
 enum engine_verdict engine_verdict_of_effect(enum engine_prompt_effect effect,
                                              const struct engine_gate_reading *gate,
                                              size_t files_changed,

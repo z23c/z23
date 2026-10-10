@@ -1895,6 +1895,17 @@ static int case_surface(void)
         SC_CHECK("none of the refused receipts entered the register",
                  science_claim_read(reg, id, &r) == SCIENCE_OK &&
                      r.trials == 0 && r.status == SCIENCE_UNTESTED);
+        /* The two report verdicts are accepted. A report that changed nothing
+         * is REPORTED, so its files_changed is 0; one that changed files is
+         * REPORT_EDITED. */
+        rc = receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_REPORTED);
+        rc.files_changed = 0;
+        SC_CHECK("a REPORTED receipt is accepted",
+                 science_trial_record(reg, id, &rc) == SCIENCE_OK);
+        rc = receipt("alice", SCIENCE_ARM_CONTROL,
+                     ENGINE_VERDICT_REPORT_EDITED);
+        SC_CHECK("a REPORT_EDITED receipt is accepted",
+                 science_trial_record(reg, id, &rc) == SCIENCE_OK);
         science_close(reg);
     } else {
         SC_CHECK("the register opens", false);

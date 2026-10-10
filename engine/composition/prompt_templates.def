@@ -616,11 +616,13 @@ ENGINE_PROMPT_KIND_EFFECT(c23-review-pass, report)
 ENGINE_PROMPT_TEMPLATE(c23-review-pass, rules,
     "This unit is a first-pass review against a written card. It reviews and "
     "does not edit. It builds and runs nothing unless the brief names a "
-    "command. Check the diff against the card point by point; do not judge "
-    "taste. If a fact is not in the card or the diff, write CANNOT TELL; do "
-    "not supply it from memory. Quote lines exactly; do not paraphrase a "
-    "quote. Name a missing cleanup only when the diff shows the free, close, "
-    "unlock or error return; otherwise write NOT IN DIFF.")
+    "command. A command the brief names must leave no new file in the "
+    "worktree, or this unit is judged as having edited. Check the diff against "
+    "the card point by point; do not judge taste. If a fact is not in the card "
+    "or the diff, write CANNOT TELL; do not supply it from memory. Quote lines "
+    "exactly; do not paraphrase a quote. Name a missing cleanup only when the "
+    "diff shows the free, close, unlock or error return; otherwise write "
+    "NOT IN DIFF.")
 ENGINE_PROMPT_TEMPLATE(c23-review-pass, task,
     "For every numbered point of the card answer MET, NOT MET or CANNOT TELL, "
     "with a file and line and the quoted code. Trace each new error path to "

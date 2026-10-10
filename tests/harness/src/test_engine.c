@@ -5076,6 +5076,16 @@ static int case_light_patch_kind(void)
     return failures;
 }
 
+static int case_review_pass_no_new_file(void)
+{
+    int failures = 0;
+    const char *review_rules =
+        engine_prompt_template_body("c23-review-pass", "rules");
+    EN_CHECK("c23-review-pass says a command must leave no new file",
+             review_rules && strstr(review_rules, "leave no new file"));
+    return failures;
+}
+
 static int case_light_review_pass_kind(void)
 {
     int failures = 0;
@@ -5320,6 +5330,7 @@ int test_engine(void)
     failures += case_contract();
     failures += case_light_patch_kind();
     failures += case_light_review_pass_kind();
+    failures += case_review_pass_no_new_file();
     failures += case_light_card_check_kind();
     printf("engine: %d failure(s)\n", failures);
     return failures;

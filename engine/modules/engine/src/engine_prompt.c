@@ -325,6 +325,17 @@ enum engine_prompt_effect engine_prompt_kind_effect(const char *kind)
     return ENGINE_PROMPT_EFFECT_EDIT;
 }
 
+static bool effect_row_is_sound(size_t i)
+{
+    if (!kind_has_templates(k_effects[i].kind))
+        return false;
+    for (size_t j = 0; j < i; j++) {
+        if (strcmp(k_effects[i].kind, k_effects[j].kind) == 0)
+            return false;
+    }
+    return true;
+}
+
 static bool tier_row_is_sound(size_t i)
 {
     if (!kind_has_templates(k_tiers[i].kind))
@@ -360,6 +371,13 @@ bool engine_prompt_tiers_closed(const char **why_kind)
         if (!kind_has_tier_row(k_templates[i].kind)) {
             if (why_kind)
                 *why_kind = k_templates[i].kind;
+            return false;
+        }
+    }
+    for (size_t i = 0; i < sizeof(k_effects) / sizeof(k_effects[0]); i++) {
+        if (!effect_row_is_sound(i)) {
+            if (why_kind)
+                *why_kind = k_effects[i].kind;
             return false;
         }
     }
