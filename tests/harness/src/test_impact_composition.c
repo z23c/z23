@@ -2802,6 +2802,81 @@ static int test_ic_proof_retry(void)
     } _test_next:;
     return failures;
 }
+/* Plants the admitted receipt for the pair at its receipt path, as the retry
+ * test does: the serialized fixture receipt, private mode. */
+static bool ic_plant_passing_receipt(const char *state, const char *key)
+{
+    char relative[256], path[4096];
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    struct zcl_dev_acceptance_receipt_v1 receipt = ic_valid_dev_proof_receipt();
+    if (snprintf(relative, sizeof(relative), "receipts/%s.receipt", key) <= 0 ||
+        snprintf(path, sizeof(path), "%s/%s", state, relative) <= 0)
+        return false;
+    if (!zcl_dev_proof_receipt_serialize(&receipt, wire)) return false;
+    if (!ic_proof_private_write(state, relative, "")) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool written = fwrite(wire, 1, sizeof(wire), file) == sizeof(wire);
+    return fclose(file) == 0 && written && chmod(path, 0600) == 0;
+}
+
+static int test_ic_proof_ensure_passed_writes_no_request(void)
+{
+    int failures = 0;
+    TEST("ensure writes no request for a pair with a passing receipt") {
+        static const char local[] = "1111111111111111111111111111111111111111";
+        static const char base[] = "2222222222222222222222222222222222222222";
+        char root[4096], state[4096], key[160], request[4096];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "ensure-passed");
+        ASSERT(ic_proof_private_write(root, ".cache/fixture", "passing receipt\n"));
+        ASSERT((size_t)snprintf(state, sizeof(state), "%s/.cache/zcl-dev-proof",
+                                root) < sizeof(state));
+        ASSERT((size_t)snprintf(key, sizeof(key), "%s-%s", local, base) < sizeof(key));
+        ASSERT((size_t)snprintf(request, sizeof(request), "%s/requests/%s.request", state, key) < sizeof(request));
+        ASSERT(ic_plant_passing_receipt(state, key));
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_PASSED);
+        ASSERT(access(request, F_OK) != 0);
+        ASSERT(zcl_dev_proof_ensure(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_PASSED);
+        ASSERT(access(request, F_OK) != 0);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_leftover_request_never_hides_passed(void)
+{
+    int failures = 0;
+    TEST("a leftover request never hides a passing receipt") {
+        static const char local[] = "1111111111111111111111111111111111111111";
+        static const char base[] = "2222222222222222222222222222222222222222";
+        char root[4096], state[4096], key[160], request[4096], relative[256];
+        char body[320];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "leftover-request");
+        ASSERT(ic_proof_private_write(root, ".cache/fixture", "passing receipt\n"));
+        ASSERT((size_t)snprintf(state, sizeof(state), "%s/.cache/zcl-dev-proof",
+                                root) < sizeof(state));
+        ASSERT((size_t)snprintf(key, sizeof(key), "%s-%s", local, base) < sizeof(key));
+        ASSERT((size_t)snprintf(request, sizeof(request), "%s/requests/%s.request", state, key) < sizeof(request));
+        ASSERT(ic_plant_passing_receipt(state, key));
+        ASSERT((size_t)snprintf(relative, sizeof(relative), "requests/%s.request", key) < sizeof(relative));
+        ASSERT((size_t)snprintf(body, sizeof(body), "zcl.dev_proof_request.v1\n%s\n%s\n1\n1\n", local, base) < sizeof(body));
+        ASSERT(ic_proof_private_write(state, relative, body));
+        ASSERT(access(request, F_OK) == 0);
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_PASSED);
+        ASSERT(strcmp(status.detail, "resident_proof_request_queued") != 0);
+        ASSERT(zcl_dev_proof_ensure(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_PASSED);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 static int test_ic_resident_proof_queue(void)
@@ -12205,6 +12280,8 @@ int test_impact_composition(void)
     failures += test_ic_landing_proof_holds_lock_through_worker();
     failures += test_ic_proof_environment_no_verdict();
     failures += test_ic_proof_retry();
+    failures += test_ic_proof_ensure_passed_writes_no_request();
+    failures += test_ic_proof_leftover_request_never_hides_passed();
     failures += test_ic_proof_next_preserves_root();
 #endif
     failures += test_ic_cycle_reuse_requires_exact_proof_inputs();
