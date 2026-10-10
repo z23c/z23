@@ -22,8 +22,11 @@
 #include "kpi/kpi.h"
 #include "territory/territory.h"
 #include "test_group_catalog.h"
+#include "util/safe_alloc.h"
 
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* code.group with no arg: the top buckets (direct children of "root", plus
@@ -462,6 +465,287 @@ void zcl_native_handle_code_sym(const struct zcl_command_request *request,
                    s.def_path[0] ? s.def_line : s.decl_line);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 
+    codeindex_close(ci);
+}
+
+/* ── code.body ──────────────────────────────────────────────────────────── */
+/* One function's source: from its definition line through the closing brace
+ * of its body, read from the checkout. Text is capped at CODE_BODY_TEXT_MAX
+ * bytes and CODE_BODY_LINES_MAX lines and cut at a line boundary when either
+ * cap fires (truncated=true). The brace scan skips comments, string and char
+ * literals, and C23 digit separators, so braces inside them never count. */
+#define CODE_BODY_TEXT_MAX  16384
+#define CODE_BODY_LINES_MAX 400
+#define CODE_BODY_FILE_MAX  (8u * 1024u * 1024u)
+
+enum code_body_mode {
+    CB_CODE,
+    CB_LINE_COMMENT,
+    CB_BLOCK_COMMENT,
+    CB_STRING,
+    CB_CHAR,
+};
+
+enum code_body_verdict { CB_OPEN, CB_DONE, CB_DECL };
+
+struct code_body_scan {
+    enum code_body_mode mode;
+    int depth;
+    bool opened;
+    bool escaped;
+    char prev; /* last code byte: `1'000` is a digit separator, not a char */
+};
+
+struct code_body_span {
+    char text[CODE_BODY_TEXT_MAX + 1];
+    size_t bytes;
+    int lines;
+    bool truncated;
+};
+
+static size_t code_body_in_comment(struct code_body_scan *st, const char *p,
+                                   size_t left)
+{
+    if (st->mode == CB_LINE_COMMENT) {
+        if (p[0] == '\n') st->mode = CB_CODE;
+        return 1;
+    }
+    if (left >= 2 && p[0] == '*' && p[1] == '/') {
+        st->mode = CB_CODE;
+        return 2;
+    }
+    return 1;
+}
+
+static void code_body_in_literal(struct code_body_scan *st, const char *p)
+{
+    char quote = st->mode == CB_STRING ? '"' : '\'';
+    if (st->escaped)
+        st->escaped = false;
+    else if (p[0] == '\\')
+        st->escaped = true;
+    else if (p[0] == quote || p[0] == '\n')
+        st->mode = CB_CODE;
+}
+
+static size_t code_body_open_token(struct code_body_scan *st, const char *p,
+                                   size_t left)
+{
+    if (p[0] == '/' && left >= 2 && p[1] == '/') {
+        st->mode = CB_LINE_COMMENT;
+        return 2;
+    }
+    if (p[0] == '/' && left >= 2 && p[1] == '*') {
+        st->mode = CB_BLOCK_COMMENT;
+        return 2;
+    }
+    if (p[0] == '"')
+        st->mode = CB_STRING;
+    else if (p[0] == '\'' && !isalnum((unsigned char)st->prev))
+        st->mode = CB_CHAR;
+    return 1;
+}
+
+static enum code_body_verdict code_body_brace(struct code_body_scan *st,
+                                              char c)
+{
+    if (c == '{') {
+        st->depth++;
+        st->opened = true;
+        return CB_OPEN;
+    }
+    if (c == '}' && st->opened)
+        return --st->depth == 0 ? CB_DONE : CB_OPEN;
+    if (c == ';' && !st->opened)
+        return CB_DECL;
+    return CB_OPEN;
+}
+
+/* Consume one token at `p` (at most `left` bytes); sets *v when the token is
+ * the body's closing brace or a `;` before any `{` (a declaration). */
+static size_t code_body_step(struct code_body_scan *st, const char *p,
+                             size_t left, enum code_body_verdict *v)
+{
+    *v = CB_OPEN;
+    if (st->mode == CB_LINE_COMMENT || st->mode == CB_BLOCK_COMMENT)
+        return code_body_in_comment(st, p, left);
+    if (st->mode == CB_STRING || st->mode == CB_CHAR) {
+        code_body_in_literal(st, p);
+        return 1;
+    }
+    size_t n = code_body_open_token(st, p, left);
+    if (st->mode == CB_CODE && n == 1)
+        *v = code_body_brace(st, p[0]);
+    st->prev = p[n - 1];
+    return n;
+}
+
+/* The offset of the `}` closing the definition whose text starts at `start`.
+ * False when the text is a declaration or never closes. */
+static bool code_body_find_end(const char *text, size_t len, size_t start,
+                               size_t *end)
+{
+    struct code_body_scan st;
+    memset(&st, 0, sizeof(st));
+    size_t i = start;
+    while (i < len) {
+        enum code_body_verdict v;
+        size_t n = code_body_step(&st, text + i, len - i, &v);
+        if (v == CB_DONE) {
+            *end = i;
+            return true;
+        }
+        if (v == CB_DECL)
+            return false;
+        i += n;
+    }
+    return false;
+}
+
+/* Byte offset of the first byte of 1-based `line`; false past the last line. */
+static bool code_body_line_start(const char *text, size_t len, int line,
+                                 size_t *off)
+{
+    if (line < 1) return false;
+    size_t i = 0;
+    for (int cur = 1; cur < line; cur++) {
+        while (i < len && text[i] != '\n') i++;
+        if (i >= len) return false;
+        i++;
+    }
+    *off = i;
+    return true;
+}
+
+/* Copy whole lines from `start` through the line holding `end` into `out`,
+ * stopping before either cap; out->truncated records a stop before `end`. */
+static void code_body_span_fill(const char *text, size_t len, size_t start,
+                                size_t end, struct code_body_span *out)
+{
+    out->bytes = 0;
+    out->lines = 0;
+    out->truncated = false;
+    size_t i = start;
+    while (i <= end && i < len) {
+        size_t e = i;
+        while (e < len && text[e] != '\n') e++;
+        size_t take = e - i;
+        size_t sep = out->lines > 0 ? 1 : 0;
+        if (out->lines >= CODE_BODY_LINES_MAX ||
+            out->bytes + sep + take > CODE_BODY_TEXT_MAX) {
+            out->truncated = true;
+            break;
+        }
+        if (sep) out->text[out->bytes++] = '\n';
+        memcpy(out->text + out->bytes, text + i, take);
+        out->bytes += take;
+        out->lines++;
+        i = e + 1;
+    }
+    out->text[out->bytes] = '\0';
+}
+
+/* Resolve NAME to its indexed definition, or fail the reply with a typed
+ * error: unknown name, declaration-only symbol, or a non-function kind. */
+static bool code_body_resolve(struct codeindex *ci, const char *name,
+                              struct ci_symbol *s,
+                              struct zcl_command_reply *reply)
+{
+    bool found = false;
+    (void)codeindex_symbol(ci, name, s, &found);
+    if (!found) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "SYMBOL_NOT_FOUND",
+                               "resolve", false, false,
+                               "no indexed symbol with this name", name);
+        return false;
+    }
+    if (s->kind != 'T' && s->kind != 't') {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "NOT_A_FUNCTION",
+                               "resolve", false, false,
+                               "the name is not an indexed function", name);
+        return false;
+    }
+    if (s->def_path[0] == '\0' || s->def_line < 1) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "NO_DEFINITION",
+                               "resolve", false, false,
+                               "the function has only a declaration", name);
+        return false;
+    }
+    return true;
+}
+
+static void code_body_fail(struct zcl_command_reply *reply, const char *code,
+                           const char *message, const char *evidence)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, code, "read", true, false,
+                           message, evidence);
+}
+
+/* Read the definition's file from the checkout and fill the reply with its
+ * bounded span. */
+static void code_body_reply(const char *root, const struct ci_symbol *s,
+                            struct zcl_command_reply *reply)
+{
+    char path[4096];
+    int pn = snprintf(path, sizeof(path), "%s/%s", root, s->def_path);
+    size_t len = 0;
+    char *src = NULL;
+    if (pn <= 0 || (size_t)pn >= sizeof(path) ||
+        !(src = code_read_source_file(path, CODE_BODY_FILE_MAX, &len))) {
+        code_body_fail(reply, "SOURCE_UNREADABLE",
+                       "the definition's file could not be read from the "
+                       "checkout", s->def_path);
+        return;
+    }
+    size_t start = 0, end = 0;
+    if (!code_body_line_start(src, len, s->def_line, &start) ||
+        !code_body_find_end(src, len, start, &end)) {
+        free(src);
+        code_body_fail(reply, "NO_BODY",
+                       "no closing brace follows the indexed definition; the "
+                       "index may be stale", s->def_path);
+        return;
+    }
+    struct code_body_span span;
+    code_body_span_fill(src, len, start, end, &span);
+    free(src);
+
+    int end_line = s->def_line + span.lines - 1;
+    (void)json_push_kv_str(&reply->data, "name", s->name);
+    (void)json_push_kv_str(&reply->data, "file", s->def_path);
+    (void)json_push_kv_int(&reply->data, "start_line", s->def_line);
+    (void)json_push_kv_int(&reply->data, "end_line", end_line);
+    (void)json_push_kv_int(&reply->data, "bytes", (int64_t)span.bytes);
+    (void)json_push_kv_bool(&reply->data, "truncated", span.truncated);
+    (void)json_push_kv_str(&reply->data, "text", span.text);
+    char summary[224];
+    (void)snprintf(summary, sizeof(summary), "%s %s:%d-%d (%d line(s))%s",
+                   s->name, s->def_path, s->def_line, end_line, span.lines,
+                   span.truncated ? " truncated" : "");
+    (void)json_push_kv_str(&reply->data, "summary", summary);
+}
+
+void zcl_native_handle_code_body(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply)
+{
+    const char *name = code_str(request, "name");
+    if (!name) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_NAME",
+                               "normalize", false, false,
+                               "code body requires a symbol name", "");
+        return;
+    }
+    struct codeindex *ci = code_open(request, reply);
+    if (!ci) return;
+
+    struct ci_symbol s;
+    if (code_body_resolve(ci, name, &s, reply))
+        code_body_reply(code_source_root(request), &s, reply);
     codeindex_close(ci);
 }
 

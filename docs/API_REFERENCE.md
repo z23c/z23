@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 906 |
+| Registry entries (branches + leaves) | 907 |
 | Top-level roots | 14 |
 | Branches | 199 |
-| Leaves (dispatchable command paths) | 707 |
-| … `ready` (live handler in this build) | 619 |
+| Leaves (dispatchable command paths) | 708 |
+| … `ready` (live handler in this build) | 620 |
 | … `compat` (metadata only, names a fallback) | 58 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 57 |
@@ -97,7 +97,7 @@ Per source file:
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
 | `engine/composition/commands/ops.def` | 59 | 11 | 48 |
 | `engine/composition/commands/dev.def` | 122 | 22 | 100 |
-| `engine/composition/commands/code.def` | 33 | 4 | 29 |
+| `engine/composition/commands/code.def` | 34 | 4 | 30 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
 | `engine/composition/commands/zcode.def` | 253 | 59 | 194 |
@@ -1093,6 +1093,7 @@ represented by its children's sections.
 | `code context-map` | ready | read / read / public · foreground/low | none | `zcl.code_context_map.v1` | `z23 code context-map` | Map contexts, shapes, and coupling |
 | `code file` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_file.v1` | `z23 code file contexts/commons/modules/vcs/src/vcs_index.c` | Show a file's symbols and includes |
 | `code sym` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_symbol.v1` | `z23 code sym codeindex_open` | Show one symbol's definition and contract |
+| `code body` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_body.v1` | `z23 code body code_limit` | Print one function's source |
 | `code capsule` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_capsule.v1` | `z23 code capsule sovereignty_guard_allow` | Join one symbol's code and proof surface |
 | `code change-plan` | ready | read / read / public · fast/tiny | **`name`**, `symbol`, `intent`, `patch` | `zcl.code_change_plan.v1` | `z23 code change-plan codeindex_open` | Plan evidence-backed edits and tests |
 | `code refs` | ready | read / read / public · fast/tiny | **`name`**, `limit` | `zcl.code_refs.v1` | `z23 code refs zcl_malloc` | List references to one symbol |

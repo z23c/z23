@@ -356,6 +356,11 @@ void zcl_native_handle_code_file(
 void zcl_native_handle_code_sym(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.body — one function's source text from its definition line through its
+ * closing brace, read from the checkout and bounded by line and byte caps. */
+void zcl_native_handle_code_body(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.capsule — one bounded document composing a symbol's identity, direct
  * callers/callees, in-tree includes of its def file, and the command paths
  * whose registered handler is defined there (config/command_handler_index.h

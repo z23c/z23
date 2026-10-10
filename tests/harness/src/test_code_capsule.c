@@ -24,6 +24,7 @@
 
 #include "test/test_core.h"
 #include "codeindex/codeindex.h"
+#include "config/command_catalog.h"
 #include "config/command_handler_index.h"
 #include "command/native_command.h"
 #include "kernel/command_registry.h"
@@ -586,9 +587,100 @@ static int test_code_relations_static_not_command_handler(void)
     return failures;
 }
 
+/* ── code.body: one function's source, bounded ─────────────────────────── */
+static const struct zcl_command_spec *code_body_spec(void)
+{
+    return zcl_command_registry_find(zcl_command_catalog(), "code.body", NULL);
+}
+
+static void code_body_run(const char *name, struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    (void)json_push_kv_str(&input, "name", name);
+    struct zcl_command_request request = {
+        .input = &input, .view = "normal", .invoked_name = "code.body",
+    };
+    zcl_command_reply_init(reply, "zcl.code_body.v1");
+    const struct zcl_command_spec *spec = code_body_spec();
+    if (spec && spec->handler)
+        spec->handler(&request, reply);
+    json_free(&input);
+}
+
+static int test_code_body_small_function(void)
+{
+    int failures = 0;
+    TEST("code_body: a small function's text starts at its signature and "
+         "ends at its closing brace") {
+        struct zcl_command_reply reply;
+        code_body_run("code_limit", &reply);
+
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "name")), "code_limit");
+        const char *text = json_get_str(json_get(&reply.data, "text"));
+        ASSERT(text && strncmp(text, "static int code_limit(", 22) == 0);
+        size_t tl = text ? strlen(text) : 0;
+        ASSERT(tl > 0 && text[tl - 1] == '}');
+        ASSERT(!json_get_bool(json_get(&reply.data, "truncated")));
+        ASSERT(json_get_int(json_get(&reply.data, "end_line")) >=
+               json_get_int(json_get(&reply.data, "start_line")));
+        ASSERT((size_t)json_get_int(json_get(&reply.data, "bytes")) == tl);
+
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_body_unknown_name(void)
+{
+    int failures = 0;
+    TEST("code_body: an unknown symbol refuses with the typed SYMBOL_NOT_FOUND "
+         "error") {
+        struct zcl_command_reply reply;
+        code_body_run("zz_code_body_no_such_symbol", &reply);
+
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "SYMBOL_NOT_FOUND");
+        ASSERT(json_get(&reply.data, "text") == NULL);
+
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_body_long_function_truncates(void)
+{
+    int failures = 0;
+    TEST("code_body: a function past the 400-line cap returns a line-bounded "
+         "prefix with truncated=true") {
+        struct zcl_command_reply reply;
+        code_body_run("node_db_migrate_features", &reply);
+
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(&reply.data, "truncated")));
+        int64_t lines = json_get_int(json_get(&reply.data, "end_line")) -
+                        json_get_int(json_get(&reply.data, "start_line")) + 1;
+        ASSERT(lines > 0 && lines <= 400);
+        const char *text = json_get_str(json_get(&reply.data, "text"));
+        ASSERT(text && strlen(text) <= 16384);
+        ASSERT((size_t)json_get_int(json_get(&reply.data, "bytes")) ==
+               strlen(text));
+
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_capsule(void)
 {
     int failures = 0;
+    failures += test_code_body_small_function();
+    failures += test_code_body_unknown_name();
+    failures += test_code_body_long_function_truncates();
     failures += test_code_capsule_golden_symbol();
     failures += test_code_capsule_commands_join();
     failures += test_code_capsule_static_id_is_exact();

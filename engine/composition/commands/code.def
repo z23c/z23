@@ -307,6 +307,23 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_sym)
 
 ZCL_COMMAND_READY_READ(
+    "code.body", "code", "",
+    "Print one function's source",
+    "One function's source text from its definition line through its closing "
+    "brace, read from the checkout; capped at 16384 bytes and 400 lines, cut at "
+    "a line boundary with truncated=true when either cap fires.", 65536,
+    "code,body,source,function,text,print", "zcl.code_name_input.v1",
+    "zcl.code_body.v1", "name", "name",
+    "z23 code body code_limit",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_body)
+
+ZCL_COMMAND_READY_READ(
     "code.capsule", "code", "",
     "Join one symbol's code and proof surface",
     "One symbol's identity (id/def/decl/signature/group), direct callers and "

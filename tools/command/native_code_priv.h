@@ -95,6 +95,11 @@ struct codeindex *code_open_source_view(
 const char *code_str(const struct zcl_command_request *request,
                      const char *key);
 
+/* Read a checkout file whole (at most `max` bytes) into a zcl_malloc'd,
+ * NUL-terminated buffer; NULL when absent, oversized, or unreadable. Caller
+ * frees. Defined in native_code_cost_command.c (owns the FS_READ reach). */
+char *code_read_source_file(const char *path, size_t max, size_t *len);
+
 /* Push one string onto a JSON array. */
 void code_push_line(struct json_value *arr, const char *s);
 

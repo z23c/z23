@@ -29,6 +29,35 @@ static const char *cost_source_root(
     return root && root[0] ? root : ".";
 }
 
+/* Read a checkout file whole into a zcl_malloc'd, NUL-terminated buffer of at
+ * most `max` bytes; *len receives its size. NULL when the file is absent,
+ * oversized, or unreadable. The caller frees the buffer. The FS_READ reach
+ * lives in this unit (module_capabilities.def) so code.body in
+ * native_code_structure.c reads source without a capability row of its own. */
+char *code_read_source_file(const char *path, size_t max, size_t *len)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    char *buf = NULL;
+    if (fseek(fp, 0, SEEK_END) == 0) {
+        long size = ftell(fp);
+        if (size >= 0 && (unsigned long)size <= max &&
+            fseek(fp, 0, SEEK_SET) == 0) {
+            buf = zcl_malloc((size_t)size + 1, "code_source_file");
+            if (buf && fread(buf, 1, (size_t)size, fp) != (size_t)size) {
+                free(buf);
+                buf = NULL;
+            }
+            if (buf) {
+                buf[size] = '\0';
+                *len = (size_t)size;
+            }
+        }
+    }
+    fclose(fp);
+    return buf;
+}
+
 /* The last suite run's per-group timing artifact (schema zcl.test_timing.v1),
  * written by tests/harness/src/test_parallel.c. Absent, oversized, or
  * unparseable all mean one honest thing: this checkout has no usable
