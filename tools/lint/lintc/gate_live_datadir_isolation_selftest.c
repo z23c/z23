@@ -2,6 +2,8 @@
  * purpose: isolated production-entrypoint fixtures for live-datadir lint. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -29,7 +31,7 @@ static const struct ldi_case k_cases[] = {
     { "A", "\"%s/.zclassic-c23\"\n", k_doc, "", "", "", "PRONG A", 1 },
     { "A HOME", "\"$HOME/.zclassic\"\n", k_doc, "", "", "", "PRONG A", 1 },
     { "A tilde", "\"~/.zclassic-c23\"\n", k_doc, "", "", "", "PRONG A", 1 },
-    { "constant root", "\"/tmp/home/.zclassic\"\n", k_doc, "", "", "", "PASS", 0 },
+    { "constant root", "\"/fixture/home/.zclassic\"\n", k_doc, "", "", "", "PASS", 0 },
     { "A single-file real-path baseline", "\"%s/.zclassic\" \"~/.zclassic\"\n", k_doc, "@TEST@ 1 # hand analysis\n", "", "ZCL_LDI_CEILING_A=1", "prong A 1 site", 0 },
     { "A grew", "\"%s/.zclassic\"\n\"%s/.zclassic\"\n", k_doc, "@TEST@ 1\n", "", "ZCL_LDI_CEILING_A=1", "baseline allows 1", 1 },
     { "A stale", k_clean, k_doc, "@TEST@ 1\n", "", "ZCL_LDI_CEILING_A=1", "stale", 1 },
@@ -116,10 +118,23 @@ static int ldi_port_adapter(void)
     return 0;
 }
 
+static int ldi_scratch_dir(char *dir, size_t cap)
+{
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !tmp[0]) {
+        if (mkdir("./test-tmp", 0755) && errno != EEXIST)
+            return die("z23-lint: cannot create ./test-tmp\n", "");
+        tmp = "./test-tmp";
+    }
+    if (ovf(snprintf(dir, cap, "%s/z23-ldi-selftest.XXXXXX", tmp), cap)) return 2;
+    if (!mkdtemp(dir)) return die("z23-lint: mkdtemp failed\n", "");
+    return 0;
+}
+
 int check_live_datadir_isolation_selftest(void)
 {
-    char dir[] = "/tmp/z23-ldi-selftest.XXXXXX", path[2048], exe[4096], quoted[16384];
-    if (!mkdtemp(dir)) return die("z23-lint: mkdtemp failed\n", "");
+    char dir[4096], path[2048], exe[4096], quoted[16384];
+    if (ldi_scratch_dir(dir, sizeof dir)) return 2;
     int rc = ovf(snprintf(path, sizeof path, "%s/defs/sand.def", dir), sizeof path);
     if (!rc) rc = csr_write(path, k_def);
     if (!rc) rc = lint_self_exe(exe, sizeof exe) || sh_single_quote(exe, quoted, sizeof quoted);

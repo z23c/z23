@@ -53,10 +53,9 @@ static int ldi_number(const char *s, int *n)
     return 0;
 }
 
-static int ldi_env_number(const char *name, const char *fallback, int *n)
+static int ldi_env_number(const char *name, const char *value, int *n)
 {
-    const char *v = env_or(name, fallback);
-    if (ldi_number(v, n))
+    if (ldi_number(value, n))
         return die("z23-lint: invalid nonnegative integer for %s\n", name);
     return 0;
 }
@@ -441,9 +440,11 @@ static int ldi_options_load(struct ldi_options *o)
     o->docs = env_or("ZCL_LDI_DOC_GLOBS", "");
     o->defs = env_or("ZCL_LDI_DEF_DIR", "engine/composition/commands");
     o->mode = env_or("ZCL_LINT_MODE", "FAIL");
-    if (ldi_env_number("ZCL_LDI_TEST_FLOOR", "300", &o->af) || ldi_env_number("ZCL_LDI_DOC_FLOOR", "200", &o->cf)
-        || ldi_env_number("ZCL_LDI_LEAF_FLOOR", "20", &o->lf) || ldi_env_number("ZCL_LDI_CEILING_A", "8", &o->ac)
-        || ldi_env_number("ZCL_LDI_CEILING_C", "13", &o->cc)) return 2;
+    if (ldi_env_number("ZCL_LDI_TEST_FLOOR", env_or("ZCL_LDI_TEST_FLOOR", "300"), &o->af)
+        || ldi_env_number("ZCL_LDI_DOC_FLOOR", env_or("ZCL_LDI_DOC_FLOOR", "200"), &o->cf)
+        || ldi_env_number("ZCL_LDI_LEAF_FLOOR", env_or("ZCL_LDI_LEAF_FLOOR", "20"), &o->lf)
+        || ldi_env_number("ZCL_LDI_CEILING_A", env_or("ZCL_LDI_CEILING_A", "8"), &o->ac)
+        || ldi_env_number("ZCL_LDI_CEILING_C", env_or("ZCL_LDI_CEILING_C", "13"), &o->cc)) return 2;
     return 0;
 }
 

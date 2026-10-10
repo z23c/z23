@@ -1420,25 +1420,25 @@ Z23_FLAG("ZCL_LAUNCHD_PLIST", "env_build", "-", "-",
 Z23_FLAG("ZCL_LAUNCH_TEST_ECHO", "env_runtime", "-", "-",
           "undocumented; first use tools/zcl-nodectl.c:auto")
 Z23_FLAG("ZCL_LDI_BASELINE_A", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_BASELINE_C", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_CEILING_A", "env_build", "8", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_CEILING_C", "env_build", "13", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_DEF_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_DOC_FLOOR", "env_build", "200", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_DOC_GLOBS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_LEAF_FLOOR", "env_build", "20", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_TEST_FLOOR", "env_build", "300", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LDI_TEST_GLOBS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_live_datadir_isolation.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_live_datadir_isolation.c:auto")
 Z23_FLAG("ZCL_LEGACY_CHAINSTATE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_chainstate_legacy_reader.c:auto")
 Z23_FLAG("ZCL_LEGACY_DATADIR", "env_test", "-", "-",

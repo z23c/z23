@@ -70,3 +70,24 @@ cost was not separately timed and is excluded from scan measurements.
 Review, repair, builds and LLM input cost are not included in these scan
 ratios. This experiment establishes no fourfold accepted-task or LLM-input
 productivity gain and no cross-platform performance result.
+
+## Integration repair
+
+The first native integration attempt against `39c3fdd9` failed before
+publication: two selftest string literals violated the bare-temp fixture
+gate, and the flag registry could not observe five indirect environment
+reads or resolve ten first-use pointers left at the retired shell reads.
+The repair uses a constant fixture path outside the system temporary root,
+creates actual scratch beneath `TMPDIR` or checkout-owned `test-tmp`, and
+passes five literal environment reads into the existing numeric validation.
+All ten registry pointers now identify their actual native reads. No scan
+floor, ceiling, baseline, assertion or flag default changed.
+
+The initial repair exceeded the complexity cap at M17; extracting scratch
+setup into a separate helper closed that refusal. The corrected repair
+passed complexity, bare-temp fixtures, flag registry, the native gate and
+its selftest, and the registered `make_lint_gates` group. One group ran,
+with zero failures, self-skips or unobserved requirements; suite wall time
+was 1.9 seconds. The complete qualification log SHA256 is
+`2a963d15c1e52e2e3761279a707c3bc84adc652797f1f0743a02f50df774d476`.
+This repair acceptance is separate from current-base publication proof.
