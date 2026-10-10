@@ -2901,6 +2901,112 @@ static bool fbw_holds_all(struct node_db *db,
     return true;
 }
 
+/* Deliver independently composed frames through the real encrypted P2P queue. */
+static bool fbw_deliver(struct fbw *w, const uint8_t *frame, size_t len)
+{
+    if (!len || !p2p_node_begin_message(w->asker, "zpkgswm",
+                                       w->mp.params->pchMessageStart))
+        return false;
+    p2p_node_write_message_data(w->asker, frame, len);
+    return p2p_node_end_message(w->asker) &&
+           mesh_loop_pump(w->asker, w->ask_q, w->f.res_term, &w->mp,
+                           w->answerer) == 1;
+}
+
+static bool fbw_exact_answer(const uint8_t *frame, size_t len,
+                              const struct fleet_board_post *post)
+{
+    uint8_t wire[MESH_LOOP_WIRE_MAX];
+    size_t wire_len = 0;
+    const size_t offset = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u + 2u +
+                          FLEET_BOARD_FLEET_ANSWER_HEAD +
+                          FLEET_BOARD_FLEET_RECORD_HEAD;
+    return fleet_board_post_encode(post, wire, sizeof(wire), &wire_len) ==
+               FLEET_BOARD_OK && len == offset + wire_len &&
+           memcmp(frame + offset, wire, wire_len) == 0;
+}
+
+/* Each authority change gets a fresh independently paired Noise fixture. */
+static int test_fleet_board_delayed_authority(unsigned change)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post post;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-delayed-authority" };
+    const char *names[] = {
+        "fleet board delayed page: authorized WINDOW sends exact signed post",
+        "fleet board delayed page: pairing revoke prevents cached DATA",
+        "fleet board delayed page: read role withdrawal prevents cached DATA",
+        "fleet board delayed page: delegation expiry prevents cached DATA" };
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w);
+    TEST(names[change]) {
+        ASSERT(opened);
+        ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "private delayed page",
+                        2000, 3600, 2100, &post));
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind(&w.a);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        uint8_t pull[FLEET_BOARD_FLEET_PULL_BYTES] = {0};
+        pull[0] = FLEET_BOARD_FLEET_MSG_PULL;
+        pull[1] = FLEET_BOARD_FLEET_VERSION;
+        uint8_t frame[MESH_LOOP_WIRE_MAX], answer[MESH_LOOP_WIRE_MAX];
+        size_t len = mesh_stream_test_open_frame(
+            1, 1, FLEET_BOARD_FLEET_SERVICE_NAME, pull, sizeof(pull),
+            frame, sizeof(frame));
+        ASSERT(fbw_deliver(&w, frame, len));
+        ASSERT_EQ(mesh_stream_test_live_count(FLEET_BOARD_FLEET_SERVICE_NAME),
+                  (size_t)1);
+        boot_fleet_board_fleet_test_serve();
+        bool more = false;
+        ASSERT_EQ(mesh_loop_take(w.answerer, w.answer_q, w.f.term_peer.ini,
+                                 answer, sizeof(answer), &more), (size_t)0);
+        ASSERT(!more); /* The actual credit window held the cached page. */
+        if (change == 1)
+            ASSERT(db_mesh_pairing_revoke(&w.f.ndb,
+                                          w.f.term_peer.pairing.pairing_id,
+                                          FBW_NOW));
+        else if (change == 2)
+            g_fbw_deny_read = true;
+        else if (change == 3)
+            boot_fleet_board_fleet_test_bind_authority(
+                &w.f.term_peer.delegation, w.f.genesis, 4001);
+        len = mesh_stream_test_window_frame(1, 4096, frame, sizeof(frame));
+        ASSERT(fbw_deliver(&w, frame, len));
+        boot_fleet_board_fleet_test_serve();
+        len = mesh_loop_take(w.answerer, w.answer_q, w.f.term_peer.ini,
+                              answer, sizeof(answer), &more);
+        uint8_t kind = 0;
+        ASSERT(more && mesh_stream_test_read_header(answer, len, &kind, NULL));
+        ASSERT_EQ(kind, change ? MESH_STREAM_KIND_CLOSE : MESH_STREAM_KIND_DATA);
+        if (change) {
+            ASSERT(len > MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u);
+            ASSERT_EQ(answer[MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u],
+                      MESH_STREAM_REFUSED_PEER_UNPAIRED);
+        } else
+            ASSERT(fbw_exact_answer(answer, len, &post));
+        boot_fleet_board_fleet_test_serve();
+        if (change) {
+            ASSERT_EQ(mesh_loop_take(w.answerer, w.answer_q,
+                                     w.f.term_peer.ini, answer, sizeof(answer),
+                                     &more), (size_t)0);
+            ASSERT(!more);
+        } else
+            mesh_loop_discard(w.answerer, w.answer_q, w.f.term_peer.ini);
+        PASS();
+    }
+    _test_next:
+    fbw_close(&w);
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 static int test_fleet_board_fleet_carriage(void)
 {
     int failures = 0;
@@ -3317,6 +3423,8 @@ int test_fleet_board(void)
     failures += test_fleet_board_scope_store();
     failures += test_fleet_board_reclaim_expired();
     failures += test_fleet_board_fleet_carriage();
+    for (unsigned change = 0; change < 4; change++)
+        failures += test_fleet_board_delayed_authority(change);
     failures += test_fleet_board_fleet_cursor_resumes();
     failures += test_fleet_board_fleet_carriage_gap_free();
     failures += test_fleet_board_fleet_quota();

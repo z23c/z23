@@ -390,7 +390,7 @@ static bool board_answer_visit(const struct db_fleet_board_post *row,
 /* An inbound OPEN. The primitive has proven the Noise session and a
  * pairing row granting the capability; this lane proves the delegation is
  * current and the peer holds the read role, and only then reads the page
- * once, here, so the tick never touches the store for the answering half. */
+ * once, here. The tick rechecks authority before emitting the cached page. */
 static enum mesh_stream_refusal board_service_open(struct mesh_stream *st,
                                                    const uint8_t *payload,
                                                    size_t len, uint8_t *reply,
@@ -469,6 +469,10 @@ static void board_service_tick(struct mesh_stream *st, int64_t now, void *ctx)
     }
     if (st->send_credit < remaining)
         return; /* wait for the window; never split an answer */
+    if (!board_accept_authorized(st->peer_static)) {
+        mesh_stream_close(st, MESH_STREAM_REFUSED_PEER_UNPAIRED, NULL, 0);
+        return;
+    }
     if (mesh_stream_send(st, s->rows + s->sent, remaining))
         s->sent += remaining;
 }
