@@ -12756,6 +12756,108 @@ _test_next:;
     return failures;
 }
 
+/* The step that would have settled died right after its outcome append:
+ * this host's window is still open in the sidecar while the row is
+ * terminal. `proof` is the stub the dying step runs ("pass" -> landed,
+ * "fail" -> a non-landed terminal). Returns the next step's state. */
+static bool dlx_window_crash(const char *tag, const char *on,
+                             const char *proof, char state[32],
+                             char code[64], bool *sidecar)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char base[64], evidence[512], landdir[1200], side[1300];
+    int child_status = 0;
+    if (!dlx_window_rig(&rig, tag, on, base))
+        return false;
+    dlx_window_step(state, code, evidence);
+    if (strcmp(state, "started") != 0)
+        return false;
+    (void)setenv("ZCL_LAND_PROOF_STUB", proof, 1);
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        (void)setenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME", "1", 1);
+        (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
+        dlx_begin(&c, "step");
+        (void)dlx_run(&c);
+        _exit(90);
+    }
+    if (dlx_wait_child(child, &child_status) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 81)
+        return false;
+    dlx_landdir(landdir, sizeof(landdir));
+    if (snprintf(side, sizeof(side), "%s/window.state", landdir) >=
+        (int)sizeof(side))
+        return false;
+    *sidecar = dlx_file_exists(side);
+    dlx_window_step(state, code, evidence);
+    *sidecar = *sidecar && dlx_file_exists(side);
+    return true;
+}
+
+static int test_dev_land_window_replay(void)
+{
+    int failures = 0;
+    char state[32], code[64], ref[32];
+    bool sidecar;
+
+    TEST("land window: a terminal replay closes the open window with LANDED") {
+        /* reference: the same crash with the window off */
+        ASSERT(dlx_window_crash("window_replay_off", "0", "pass", ref, code,
+                                &sidecar));
+        ASSERT_STR_EQ(ref, "landed");
+        dlx_restore();
+        ASSERT(dlx_window_crash("window_replay_landed", "1", "pass", state,
+                                code, &sidecar));
+        ASSERT_STR_EQ(state, ref);
+        ASSERT_STR_EQ(code, "");
+        ASSERT(dlx_window_outbox_has("\"body\":\"LANDED hosta, candidate "));
+        ASSERT(!dlx_window_outbox_has("\"body\":\"RELEASED hosta"));
+        ASSERT(!sidecar);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land window: a terminal replay of a failed row closes with RELEASED") {
+        ASSERT(dlx_window_crash("window_replay_off2", "0", "fail", ref, code,
+                                &sidecar));
+        ASSERT(ref[0] != '\0' && strcmp(ref, "landed") != 0);
+        dlx_restore();
+        ASSERT(dlx_window_crash("window_replay_failed", "1", "fail", state,
+                                code, &sidecar));
+        ASSERT_STR_EQ(state, ref);
+        ASSERT_STR_EQ(code, "");
+        ASSERT(dlx_window_outbox_has("\"body\":\"RELEASED hosta, candidate "));
+        ASSERT(!dlx_window_outbox_has("\"body\":\"LANDED hosta"));
+        ASSERT(!sidecar);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land window: a row still proving keeps its window across a step") {
+        struct dlx_rig rig;
+        char base[64], evidence[512], landdir[1200], side[1300];
+        ASSERT(dlx_window_rig(&rig, "window_replay_proving", "1", base));
+        dlx_window_step(state, code, evidence);
+        ASSERT_STR_EQ(state, "started");
+        dlx_window_step(state, code, evidence); /* stub still running */
+        ASSERT(strcmp(state, "started") == 0 || strcmp(state, "proving") == 0);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(side, sizeof(side), "%s/window.state", landdir) <
+               (int)sizeof(side));
+        ASSERT(dlx_file_exists(side));
+        ASSERT(!dlx_window_outbox_has("\"body\":\"LANDED hosta"));
+        ASSERT(!dlx_window_outbox_has("\"body\":\"RELEASED hosta"));
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 #endif /* !defined(_WIN32) */
 
 int test_dev_land(void)
@@ -12959,6 +13061,7 @@ int test_dev_land(void)
     failures += dlx_optional_string_refusal_cases();
     failures += dlx_string_compatibility_cases();
     failures += test_dev_land_window_defer();
+    failures += test_dev_land_window_replay();
 
 #endif /* !defined(_WIN32) */
 

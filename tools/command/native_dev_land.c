@@ -9038,6 +9038,10 @@ static bool dl_precheck_load(const struct dl_dirs *d, const char *observed_main,
     if (!terminal_seen) return 0;
     if (dl_commit_or_report(d, &prior, true, reply, prior.state))
         dl_step_reply(reply, &prior, prior.state);
+    /* The step that wrote this outcome may have died, or failed to post
+     * its close, before it could settle: close this host's window for the
+     * row whose terminal state was just replayed (the caller unlocks). */
+    dl_window_settle(d, &prior, reply);
     return 1;
 }
 
