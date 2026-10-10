@@ -26,8 +26,8 @@
  *      very process's own executable) the source identity BAKED INTO it,
  *      which is directory-independent by construction
  *      (platform/modules/util/include/util/clientversion.h);
- *   2. the artifact your machine builds — tools/scripts/node_reproduce.sh
- *      builds z23 in an isolated build dir and emits a receipt;
+ *   2. the artifact your machine builds — tools/command/native_zcode_node_reproduce.c
+ *      builds z23 in an isolated build dir in process and emits a receipt;
  *   3. the toolchain BOTH artifacts record, read the SAME way from each
  *      image: ELF `.comment` on ELF and `LC_BUILD_VERSION` on Mach-O.
  *      Measuring the two sides differently would make every honest build
@@ -68,6 +68,7 @@
 #include "util/clientversion.h"
 #include "util/spawn.h"
 #include "vcs/node_reproduce.h"
+#include "command/native_zcode_node_reproduce.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -350,24 +351,22 @@ void zcl_native_node_verify_test_set_driver(zcl_node_verify_driver_fn fn)
     g_nv_driver = fn;
 }
 
-static int nv_run_driver(const char *script, const char *source_dir,
-                         const char *scratch_dir, const char *out_path,
-                         const char *profile, int jobs, int timeout_s,
-                         char *log, size_t log_cap)
+static int nv_run_driver(const char *source_dir, const char *scratch_dir,
+                         const char *out_path, const char *profile, int jobs,
+                         int timeout_s, char *log, size_t log_cap)
 {
     if (g_nv_driver)
         return g_nv_driver(source_dir, scratch_dir, out_path, profile, jobs);
 
-    char a_src[PATH_MAX + 16], a_scratch[PATH_MAX + 16];
-    char a_out[PATH_MAX + 16], a_profile[64], a_jobs[32];
-    (void)snprintf(a_src, sizeof(a_src), "--source=%s", source_dir);
-    (void)snprintf(a_scratch, sizeof(a_scratch), "--scratch=%s", scratch_dir);
-    (void)snprintf(a_out, sizeof(a_out), "--out=%s", out_path);
-    (void)snprintf(a_profile, sizeof(a_profile), "--profile=%s", profile);
-    (void)snprintf(a_jobs, sizeof(a_jobs), "--jobs=%d", jobs);
-    const char *argv[] = { script, a_src, a_scratch, a_out,
-                           a_profile, a_jobs, NULL };
-    return zcl_spawn_capture(argv, log, log_cap, timeout_s * 1000);
+    struct zcl_node_reproduce_request req = {
+        .source_dir = source_dir,
+        .scratch_dir = scratch_dir,
+        .out_path = out_path,
+        .profile = profile,
+        .jobs = jobs,
+        .timeout_s = timeout_s,
+    };
+    return zcl_native_node_reproduce(&req, log, log_cap);
 }
 
 /* ── reply rendering ────────────────────────────────────────────────────── */
@@ -505,7 +504,6 @@ struct nv_ctx {
     char scratch[PATH_MAX];
     char receipt_path[PATH_MAX];
     char rebuilt_path[PATH_MAX];
-    char script[PATH_MAX];
     const char *profile;
     int jobs;
     int timeout_s;
@@ -516,6 +514,7 @@ struct nv_ctx {
 static bool nv_resolve(const struct zcl_command_request *request,
                        struct zcl_command_reply *reply, struct nv_ctx *c)
 {
+    char makefile[PATH_MAX];
     memset(c, 0, sizeof(*c));
     const struct json_value *in = request->input;
 
@@ -563,18 +562,17 @@ static bool nv_resolve(const struct zcl_command_request *request,
                 src ? src : "");
         return false;
     }
-    int n = snprintf(c->script, sizeof(c->script),
-                     "%s/tools/scripts/node_reproduce.sh", c->source_dir);
+    /* The rebuild is in process (native_zcode_node_reproduce.c); what it
+     * needs from the tree is a Makefile to build. */
+    int n = snprintf(makefile, sizeof(makefile), "%s/Makefile", c->source_dir);
     bool driver_available = g_nv_driver != NULL;
 #if !defined(_WIN32)
-    driver_available = driver_available || access(c->script, X_OK) == 0;
+    driver_available = driver_available || access(makefile, R_OK) == 0;
 #endif
-    if (n <= 0 || (size_t)n >= sizeof(c->script) || !driver_available) {
+    if (n <= 0 || (size_t)n >= sizeof(makefile) || !driver_available) {
         nv_fail(reply, "NO_SOURCE_TREE",
-                "that directory has no executable "
-                "tools/scripts/node_reproduce.sh (or no native reproduce "
-                "driver), so it is not a checkout this command can rebuild "
-                "from",
+                "that directory has no Makefile to rebuild from, so it is "
+                "not a checkout this command can rebuild",
                 c->source_dir);
         return false;
     }
@@ -701,7 +699,7 @@ void zcl_native_handle_zcode_node_verify(
     static char log[8192];
     log[0] = '\0';
     (void)remove(c.receipt_path);
-    int rc = nv_run_driver(c.script, c.source_dir, c.scratch, c.receipt_path,
+    int rc = nv_run_driver(c.source_dir, c.scratch, c.receipt_path,
                            c.profile, c.jobs, c.timeout_s, log, sizeof(log));
     if (rc != 0) {
         char msg[512];

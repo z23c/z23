@@ -20,7 +20,6 @@ nproc	tools/scripts/fleet_sync.sh	1
 nproc	tools/scripts/fresh-boot-weld-prove-selftest.sh	1
 nproc	tools/scripts/fresh-boot-weld-prove.sh	1
 nproc	tools/scripts/gate-and-report.sh	1
-nproc	tools/scripts/node_reproduce.sh	2
 nproc	tools/scripts/repro-verify.sh	2
 nproc	tools/scripts/repro_build.sh	2
 nproc	tools/scripts/timings.sh	1
@@ -86,7 +85,6 @@ stat	tools/scripts/check_reproducible_build.sh	3
 stat	tools/scripts/ci_install_gate.sh	1
 stat	tools/scripts/cold_start_test.sh	4
 stat	tools/scripts/cold_start_to_tip_probe.sh	5
-stat	tools/scripts/node_reproduce.sh	1
 stat	tools/scripts/node_slo_probe.sh	1
 stat	tools/scripts/produce_anchor_snapshot.sh	1
 stat	tools/scripts/promote_fuzz_artifacts.sh	1

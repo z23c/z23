@@ -51,8 +51,8 @@
  * Pure evaluation: nothing in this file opens a file, spawns a process,
  * hashes anything, or reaches the network. The receipt DECODER is a plain
  * bounded text parser over a caller-supplied buffer. Producing a rebuild
- * receipt is the caller's job (tools/scripts/node_reproduce.sh), exactly
- * as contexts/commons/modules/vcs never compiles a package. */
+ * receipt is the caller's job (tools/command/native_zcode_node_reproduce.c),
+ * exactly as contexts/commons/modules/vcs never compiles a package. */
 
 #ifndef ZCL_VCS_NODE_REPRODUCE_H
 #define ZCL_VCS_NODE_REPRODUCE_H

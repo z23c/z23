@@ -282,7 +282,6 @@ tools/scripts/netdisrupt_two_node_drill.sh
 tools/scripts/netdisrupt_two_node_run_and_record.sh
 tools/scripts/network_disruption_recovery_stopwatch.sh
 tools/scripts/new_app.sh
-tools/scripts/node_reproduce.sh
 tools/scripts/node_slo_probe.sh
 tools/scripts/onion_pair_watch.sh
 tools/scripts/onion_pair_watch_loop.sh

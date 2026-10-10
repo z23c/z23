@@ -22,9 +22,13 @@
 
 #include "base/hex.h"
 #include "vcs/node_reproduce.h"
+#include "command/native_zcode_node_reproduce.h"
+#include "sha3/sha3.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #define NR_CHECK(name, expr) do {                                          \
     if (expr) { printf("  node_reproduce: %s... OK\n", (name)); }          \
@@ -385,7 +389,7 @@ static int t_codec_rejections(void)
     /* Comments, blank lines and CRLF are ordinary text, not errors. */
     const char *tolerant =
         VCS_NODE_REPRO_SCHEMA "\r\n"
-        "# written by tools/scripts/node_reproduce.sh\r\n"
+        "# written by tools/command/native_zcode_node_reproduce.c\r\n"
         "\r\n"
         "producer local-rebuild\r\n"
         "artifact "
@@ -433,6 +437,241 @@ static int t_names_are_total(void)
     return failures;
 }
 
+/* ── 8. the in-process reproducer: receipt, refusals, failures ─────── */
+
+static bool nrp_write(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = fputs(text, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static size_t nrp_read(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    size_t n = fread(buf, 1, cap - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return n;
+}
+
+static bool nrp_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    fclose(f);
+    return true;
+}
+
+/* A checkout with the given Makefile and two vendored archives, one of
+ * which carries a provenance manifest. */
+static bool nrp_checkout(const char *root, const char *makefile)
+{
+    char p[512];
+    if (mkdir(root, 0777) != 0 && errno != EEXIST)
+        return false;
+    (void)snprintf(p, sizeof(p), "%s/vendor", root);
+    (void)mkdir(p, 0777);
+    (void)snprintf(p, sizeof(p), "%s/vendor/lib", root);
+    (void)mkdir(p, 0777);
+    (void)snprintf(p, sizeof(p), "%s/vendor/provenance", root);
+    (void)mkdir(p, 0777);
+    (void)snprintf(p, sizeof(p), "%s/Makefile", root);
+    if (!nrp_write(p, makefile))
+        return false;
+    (void)snprintf(p, sizeof(p), "%s/vendor/lib/libfoo.a", root);
+    (void)nrp_write(p, "archive");
+    (void)snprintf(p, sizeof(p), "%s/vendor/lib/libbar.a", root);
+    (void)nrp_write(p, "archive");
+    (void)snprintf(p, sizeof(p), "%s/vendor/provenance/libfoo.manifest", root);
+    return nrp_write(p, "manifest\n");
+}
+
+static struct zcl_node_reproduce_request nrp_req(const char *src,
+                                                 const char *scratch,
+                                                 const char *out)
+{
+    struct zcl_node_reproduce_request r = {
+        src, scratch, out, "default", 2, 600,
+    };
+    return r;
+}
+
+static const char NRP_OK_MAKEFILE[] =
+    "z23:\n"
+    "\tmkdir -p $(BUILD_DIR)/bin\n"
+    "\tprintf 'fixture-bytes' > $(BUILD_DIR)/bin/z23\n";
+
+static int nrp_check_receipt_text(const char *text, size_t n)
+{
+    int failures = 0;
+    unsigned char digest[32];
+    char hex[65], want[160], why[200] = "";
+    zcl_sha3_256((const unsigned char *)"fixture-bytes", 13, digest);
+    zcl_hex_encode(digest, sizeof(digest), hex);
+    (void)snprintf(want, sizeof(want), "artifact %s 13 bin/z23\n", hex);
+    NR_CHECK("the artifact row names the SHA3-256 and size of the bytes built",
+             strstr(text, want) != NULL);
+    NR_CHECK("the receipt opens with the schema and producer lines",
+             strncmp(text, "zcl.node_repro_receipt.v1\n"
+                           "producer local-rebuild\n", 48) == 0);
+    NR_CHECK("the default profile is named in the toolchain description",
+             strstr(text, "toolchain_desc make default profile") != NULL);
+    NR_CHECK("an archive with no manifest is named 'already present'",
+             strstr(text, "unverified vendor/lib/libbar.a archive "
+                          "already present on this host") != NULL);
+    NR_CHECK("an archive with a manifest is named 'prebuilt'",
+             strstr(text, "unverified vendor/lib/libfoo.a prebuilt "
+                          "archive") != NULL);
+    NR_CHECK("the two fixed gaps are always named",
+             strstr(text, "unverified lto-intermediate-objects") != NULL &&
+                 strstr(text, "unverified host-toolchain") != NULL);
+    NR_CHECK("no source_id line without a source identity tool",
+             strstr(text, "source_id ") == NULL);
+    struct vcs_node_receipt rec;
+    NR_CHECK("the receipt decodes with the comparator's own codec",
+             vcs_node_receipt_decode(text, n, &rec, why, sizeof(why)) &&
+                 rec.artifact_count == 1 && rec.unverified_count == 4);
+    return failures;
+}
+
+static int t_reproduce_receipt_format(void)
+{
+    int failures = 0;
+    char dir[256], src[320], scratch[320], out[320], log[512] = "";
+    test_make_tmpdir(dir, sizeof(dir), "nodereproduce", "receipt");
+    (void)snprintf(src, sizeof(src), "%s/src", dir);
+    (void)snprintf(scratch, sizeof(scratch), "%s/scratch", dir);
+    (void)snprintf(out, sizeof(out), "%s/receipt", dir);
+    NR_CHECK("a fixture checkout is written",
+             nrp_checkout(src, NRP_OK_MAKEFILE));
+
+    struct zcl_node_reproduce_request req = nrp_req(src, scratch, out);
+    NR_CHECK("a successful local build exits 0",
+             zcl_native_node_reproduce(&req, log, sizeof(log)) == 0);
+
+    static char text[16384];
+    size_t n = nrp_read(out, text, sizeof(text));
+    NR_CHECK("the receipt is written where it was asked", n > 0);
+    failures += nrp_check_receipt_text(text, n);
+    char build_log[320];
+    (void)snprintf(build_log, sizeof(build_log), "%s/build.log", scratch);
+    NR_CHECK("the build log is kept beside the build",
+             nrp_exists(build_log));
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* Every refusal is exit 2 and writes nothing: the reproducer never builds
+ * a tree it was told not to, and never leaves a receipt behind. */
+static int t_reproduce_refusals(void)
+{
+    int failures = 0;
+    char dir[256], src[320], scratch[320], out[320], bare[320];
+    test_make_tmpdir(dir, sizeof(dir), "nodereproduce", "refusals");
+    (void)snprintf(src, sizeof(src), "%s/src", dir);
+    (void)snprintf(scratch, sizeof(scratch), "%s/scratch", dir);
+    (void)snprintf(out, sizeof(out), "%s/receipt", dir);
+    (void)snprintf(bare, sizeof(bare), "%s/bare", dir);
+    NR_CHECK("a fixture checkout is written",
+             nrp_checkout(src, NRP_OK_MAKEFILE));
+    (void)mkdir(bare, 0777);
+
+    struct zcl_node_reproduce_request r = nrp_req(src, scratch, out);
+    r.out_path = NULL;
+    NR_CHECK("no receipt path is refused with exit 2",
+             zcl_native_node_reproduce(&r, NULL, 0) == 2);
+    (void)snprintf(src, sizeof(src), "%s/no-such-tree", dir);
+    r = nrp_req(src, scratch, out);
+    NR_CHECK("a source that is not a directory is refused with exit 2",
+             zcl_native_node_reproduce(&r, NULL, 0) == 2);
+    r = nrp_req(bare, scratch, out);
+    NR_CHECK("a source with no Makefile is refused with exit 2",
+             zcl_native_node_reproduce(&r, NULL, 0) == 2);
+    r = nrp_req(bare, scratch, out);
+    r.profile = "trust-me";
+    NR_CHECK("an unknown profile is refused with exit 2",
+             zcl_native_node_reproduce(&r, NULL, 0) == 2);
+    r.profile = "default";
+    r.jobs = 0;
+    NR_CHECK("zero jobs is refused with exit 2",
+             zcl_native_node_reproduce(&r, NULL, 0) == 2);
+    NR_CHECK("a refusal writes no receipt", !nrp_exists(out));
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* A build that fails, or that finishes without producing the artifact, is
+ * exit 1 and writes no receipt. */
+static int t_reproduce_build_failures(void)
+{
+    int failures = 0;
+    char dir[256], src[320], scratch[320], out[320], log[512] = "";
+    test_make_tmpdir(dir, sizeof(dir), "nodereproduce", "buildfail");
+    (void)snprintf(src, sizeof(src), "%s/src", dir);
+    (void)snprintf(scratch, sizeof(scratch), "%s/scratch", dir);
+    (void)snprintf(out, sizeof(out), "%s/receipt", dir);
+    NR_CHECK("a failing checkout is written",
+             nrp_checkout(src, "z23:\n\tfalse\n"));
+    struct zcl_node_reproduce_request r = nrp_req(src, scratch, out);
+    NR_CHECK("a make that fails is exit 1",
+             zcl_native_node_reproduce(&r, log, sizeof(log)) == 1);
+    NR_CHECK("a failed build writes no receipt", !nrp_exists(out));
+    NR_CHECK("the failure's own output is kept for the caller", log[0] != '\0');
+
+    NR_CHECK("a checkout that builds nothing is written",
+             nrp_checkout(src, "z23:\n\ttrue\n"));
+    NR_CHECK("a build that produces no artifact is exit 1",
+             zcl_native_node_reproduce(&r, log, sizeof(log)) == 1);
+    NR_CHECK("a build with no artifact writes no receipt", !nrp_exists(out));
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* The release profile resolves CFLAGS through make, rewrites -march=native to
+ * the portable baseline, and names the epoch it pinned. The fixture writes the
+ * flags it was built with, so the artifact size proves the rewrite happened. */
+static int t_reproduce_release_profile(void)
+{
+    int failures = 0;
+    char dir[256], src[320], scratch[320], out[320], want[160];
+    test_make_tmpdir(dir, sizeof(dir), "nodereproduce", "release");
+    (void)snprintf(src, sizeof(src), "%s/src", dir);
+    (void)snprintf(scratch, sizeof(scratch), "%s/scratch", dir);
+    (void)snprintf(out, sizeof(out), "%s/receipt", dir);
+    NR_CHECK("a release checkout is written",
+             nrp_checkout(src,
+                          "CFLAGS = -O2 -march=native\n"
+                          "z23:\n"
+                          "\tmkdir -p $(BUILD_DIR)/bin\n"
+                          "\tprintf '%s' '$(CFLAGS)' > $(BUILD_DIR)/bin/z23\n"));
+    struct zcl_node_reproduce_request r = nrp_req(src, scratch, out);
+    r.profile = "release";
+    NR_CHECK("the release profile builds and exits 0",
+             zcl_native_node_reproduce(&r, NULL, 0) == 0);
+    static char text[16384];
+    size_t n = nrp_read(out, text, sizeof(text));
+    unsigned char digest[32];
+    char hex[65];
+    const char *flags = "-O2 -march=x86-64-v3";
+    zcl_sha3_256((const unsigned char *)flags, strlen(flags), digest);
+    zcl_hex_encode(digest, sizeof(digest), hex);
+    (void)snprintf(want, sizeof(want), "artifact %s %zu bin/z23\n", hex,
+                   strlen(flags));
+    NR_CHECK("the artifact was built with the rewritten portable flags",
+             n > 0 && strstr(text, want) != NULL);
+    NR_CHECK("the release description names the pinned epoch",
+             strstr(text, "tools/release.sh release profile, "
+                          "SOURCE_DATE_EPOCH=") != NULL);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_node_reproduce(void)
 {
     int failures = 0;
@@ -444,6 +683,10 @@ int test_node_reproduce(void)
     failures += t_codec_roundtrip();
     failures += t_codec_rejections();
     failures += t_names_are_total();
+    failures += t_reproduce_receipt_format();
+    failures += t_reproduce_refusals();
+    failures += t_reproduce_build_failures();
+    failures += t_reproduce_release_profile();
     printf("=== node_reproduce: %d failures ===\n", failures);
     return failures;
 }

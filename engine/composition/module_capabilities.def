@@ -1252,6 +1252,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_zcode_leaderboard_command.c", CAP_FS
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_network_command.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_node_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_node_verify_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_zcode_node_reproduce.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_package_dev_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_package_transport_command.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_project_command.c", CAP_FS_WRITE|CAP_FS_READ, "")

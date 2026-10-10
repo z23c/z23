@@ -591,6 +591,40 @@ static int t_envelope_renders(void)
     return failures;
 }
 
+/* With no test driver the rebuild is the in-process reproducer. A checkout
+ * with a Makefile and no shell script is a real rebuild: a failing make
+ * is REBUILD_FAILED, never the NO_SOURCE_TREE refusal the script path gave. */
+static int t_rebuild_runs_in_process(void)
+{
+    int failures = 0;
+    char dir[256], src[320], mk[340];
+    struct nv_run r;
+    test_make_tmpdir(dir, sizeof(dir), "nodeverify", "inprocess");
+    (void)snprintf(src, sizeof(src), "%s/src", dir);
+    (void)mkdir(src, 0777);
+    (void)snprintf(mk, sizeof(mk), "%s/Makefile", src);
+    FILE *f = fopen(mk, "wb");
+    if (f) {
+        (void)fputs("z23:\n\tfalse\n", f);
+        (void)fclose(f);
+    }
+    zcl_native_node_verify_test_set_driver(NULL);
+    nv_run_init(&r, dir);
+    json_free(&r.input);
+    json_init(&r.input);
+    json_set_object(&r.input);
+    (void)json_push_kv_str(&r.input, "source_dir", src);
+    (void)json_push_kv_str(&r.input, "scratch_dir", dir);
+    NV_CHECK("a checkout with a Makefile and no script executes",
+             nv_exec(&r));
+    NV_CHECK("a failing in-process rebuild is REBUILD_FAILED",
+             strcmp(r.reply.error.code, "REBUILD_FAILED") == 0);
+    nv_run_free(&r);
+    zcl_native_node_verify_test_set_driver(nv_driver);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_zcode_node_verify(void)
 {
     int failures = 0;
@@ -602,6 +636,7 @@ int test_zcode_node_verify(void)
     failures += t_partial_is_not_success();
     failures += t_benign_causes_are_named_separately();
     failures += t_refusals_are_named();
+    failures += t_rebuild_runs_in_process();
     failures += t_envelope_renders();
     zcl_native_node_verify_test_set_driver(NULL);
     printf("=== zcode_node_verify: %d failures ===\n", failures);

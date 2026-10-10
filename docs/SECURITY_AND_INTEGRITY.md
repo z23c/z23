@@ -292,7 +292,7 @@ artifact you received with a local rebuild:
 3. Read `verdict` and the named `unverified` components in the reply.
 
 The command hashes the artifact (by default its own executable), rebuilds from
-`source_dir` in an isolated tree via `tools/scripts/node_reproduce.sh`, and
+`source_dir` in an isolated tree in process (`tools/command/native_zcode_node_reproduce.c`), and
 byte-compares. It contacts nothing.
 
 It structurally cannot perform the worthless check. Comparing a published hash
