@@ -1859,6 +1859,30 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_outcomes)
 
+ZCL_COMMAND_READY_READ(
+    "dev.agent.reviewscore", "dev.agent", "",
+    "Score reviews against known answers",
+    "Reads a JSONL set of cases labelled sound or defect (defects carry "
+    "file and line ranges) and a JSONL file of reviews, and returns integer "
+    "counts and num/den pairs: sound cases rejected, seeded defects "
+    "accepted, by defect class, plus unreviewed cases. A finding without a "
+    "file, a positive line or a kind of CHANGE or CLAIM is discarded and "
+    "counted. A finding hits a defect when file matches exactly, line is "
+    "within the range plus tolerance, and kind matches the locus (CHANGE "
+    "with code, CLAIM with claim). A duplicate case id or a malformed set "
+    "line refuses the set. It reads only the named paths and writes "
+    "nothing.", 32768,
+    "agent,review,score,reviewscore,known-answer,defect,sound",
+    "zcl.agent_reviewscore_input.v1", "zcl.agent_reviewscore.v1",
+    "set,reviews", "set",
+    "z23 dev agent reviewscore --set=cases.jsonl --reviews=reviews.jsonl",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_reviewscore)
+
 /* claim WRITES a ledger line into the Git common directory, so it takes the
  * same command shape dev.begin takes rather than the read shape above. */
 ZCL_COMMAND_DEV_COMMAND(
@@ -2093,7 +2117,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * caller's business (a timer calling next+reap). */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.agent.queue", "dev.agent", "",
-    "Post, dispatch, reap, and inspect async flash-unit runs without blocking",
+    "Post, dispatch, reap, inspect async flash-unit runs",
     "One durable unit queue over the owner-private state root: post appends "
     "a row {seq, kind, name, group, path, brief, model, attempt} to "
     "queue/queue.jsonl with a single O_APPEND write (refused QUEUE_FULL at "
@@ -2134,7 +2158,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * to run a job. No consensus, wallet, deploy, or push authority. */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.agent.worker", "dev.agent", "",
-    "Consume the unit queue continuously with a bounded resident worker",
+    "Consume the unit queue with a bounded worker",
     "One active job per worker over the owner-private state root: claim "
     "takes the oldest unfinished row and persists the claim identity "
     "before any model submission; the executor runs forked under "
@@ -2196,7 +2220,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * operator-determined, never preflight-verified. */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.agent.receive", "dev.agent", "",
-    "Turn directives arriving in this box's agent mail into queued work",
+    "Turn agent-mail directives into queued work",
     "Each beat, directive "
     "pages are pulled in-process from a durable cursor (receive/intake."
     "state), four a beat, advanced after each handled page; status shows "
@@ -2251,7 +2275,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * inbox file per peer); this leaf only writes and reads local files. */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.agent.mail", "dev.agent", "",
-    "Post, pull, and ack async agent mail without blocking",
+    "Post, pull, and ack async agent mail",
     "One append-only, cursor-based mail primitive over the owner-private "
     "state root: post appends a row {seq, ts, from, to, kind, body, ref} to "
     "mail/outbox.jsonl with a single O_APPEND write, plus the optional "
@@ -2289,7 +2313,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * (tools/command/native_devagent_mail_wait.c). */
 ZCL_COMMAND_DEV_READ(
     "dev.agent.mail.wait", "dev.agent", "",
-    "Wait for the next matching agent mail row after a cursor",
+    "Wait for the next mail row after a cursor",
     "Blocks up to timeout_ms for a mail row newer than since that matches "
     "the to, ref, from and kind filters of dev.agent.mail pull, then "
     "returns the same page and next_since token pull would; following "

@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 903 |
+| Registry entries (branches + leaves) | 904 |
 | Top-level roots | 14 |
 | Branches | 199 |
-| Leaves (dispatchable command paths) | 704 |
-| … `ready` (live handler in this build) | 618 |
+| Leaves (dispatchable command paths) | 705 |
+| … `ready` (live handler in this build) | 619 |
 | … `compat` (metadata only, names a fallback) | 56 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 55 |
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
 | `engine/composition/commands/ops.def` | 59 | 11 | 48 |
-| `engine/composition/commands/dev.def` | 119 | 22 | 97 |
+| `engine/composition/commands/dev.def` | 120 | 22 | 98 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -850,14 +850,15 @@ represented by its children's sections.
 | `dev agent ceiling` | ready | read / read / operator · fast/low | `cwd`, **`base`**, `requested`, `ceiling_lines` | `zcl.agent_ceiling.v1` | `z23 dev agent ceiling --base=origin/main` | Refuse a diff that outgrew what was requested |
 | `dev agent pace` | ready | read / read / operator · fast/low | `cwd`, **`log`** | `zcl.agent_pace.v1` | `z23 dev agent pace --log=build/scratch/run.out` | Read an executor run log and grade its pace |
 | `dev agent outcomes` | ready | read / read / operator · fast/low | **`ledger`**, `model`, `since`, `usage_log` | `zcl.agent_outcomes.v1` | `z23 dev agent outcomes --ledger=build/scratch/outcomes.jsonl` | Route units to models from the unit-outcome ledger |
+| `dev agent reviewscore` | ready | read / read / operator · fast/low | **`set`**, `reviews` | `zcl.agent_reviewscore.v1` | `z23 dev agent reviewscore --set=cases.jsonl --reviews=reviews.jsonl` | Score reviews against known answers |
 | `dev agent claim` | compat 🔧 → `z23-dev dev agent claim` | mutate / dev-mutation / operator · fast/low | `cwd`, **`story`**, `files`, `release`, `retire_worktree` | `zcl.agent_claim.v1` | `z23-dev dev agent claim hex-codec` | Claim files for one story so lanes do not collide — *the file-claim ledger is a development-lane coordination surface* |
 | `dev agent hot` | ready | read / read / operator · background/high | **`path`**, `group`, `cwd` | `zcl.agent_hot.v1` | `z23 dev agent hot --path=tools/command/native_devagent_hot.c` | Run one saved file's owning test group, hot or rebuilt |
 | `dev agent ticketkey` | ready | read / read / operator · fast/low | `group`, `cwd`, `tip` | `zcl.agent_ticketkey.v1` | `z23 dev agent ticketkey --group=devagent_situation` | Commuting-ticket key of one test group at one tip |
-| `dev agent queue` | compat 🔧 → `z23-dev dev agent queue` | mutate / dev-mutation / operator · fast/low | **`action`**, `kind`, `name`, `group`, `path`, `brief`, `model`, `attempt`, `priority`, `depends_on`, `json`, `cwd`, `worker`, `session`, `terminate` | `zcl.agent_queue.v1` | `z23 dev agent queue post --kind=leaf --name=situation` | Post, dispatch, reap, and inspect async flash-unit runs without blocking — *the unit queue is a development-lane coordination surface* |
-| `dev agent worker` | compat 🔧 → `z23-dev dev agent worker` | mutate / dev-mutation / operator · foreground/moderate | **`action`**, `worker`, `session`, `model`, `deadline_s`, `idle_start_s`, `idle_limit_s`, `max_jobs`, `time_cap_s`, `cpu_s`, `mem_mb`, `token_cap` | `zcl.agent_worker.v1` | `z23 dev agent worker status --worker=resident-a` | Consume the unit queue continuously with a bounded resident worker — *the resident worker is a development-lane coordination surface* |
-| `dev agent receive` | compat 🔧 → `z23-dev dev agent receive` | mutate / dev-mutation / operator · foreground/low | **`action`**, `receiver`, `workspace`, `deadline_s`, `wait_ms`, `max_beats`, `ref`, `from`, `sender_binding`, `body`, `to` | `zcl.agent_receive.v1` | `z23 dev agent receive status --receiver=box-a` | Turn directives arriving in this box's agent mail into queued work — *the resident receiver is a development-lane coordination surface* |
-| `dev agent mail` | compat 🔧 → `z23-dev dev agent mail` | mutate / dev-mutation / operator · fast/low | **`action`**, `to`, `kind`, `body`, `since`, `from`, **`cursor`**, `agent`, `ref`, `sender_binding`, `cwd` | `zcl.agent_mail.v1` | `z23 dev agent mail post --to=* --kind=note --body=hello` | Post, pull, and ack async agent mail without blocking — *agent mail is a development-lane coordination surface* |
-| `dev agent mail wait` | compat 🔧 → `z23-dev dev agent mail wait` | read / read / operator · persistent/low | **`since`**, `to`, `ref`, `from`, `kind`, `timeout_ms` | `zcl.agent_mail.v1` | `z23 dev agent mail wait --since=0 --to=me --timeout_ms=30000` | Wait for the next matching agent mail row after a cursor — *agent mail waiting is a development-lane coordination surface* |
+| `dev agent queue` | compat 🔧 → `z23-dev dev agent queue` | mutate / dev-mutation / operator · fast/low | **`action`**, `kind`, `name`, `group`, `path`, `brief`, `model`, `attempt`, `priority`, `depends_on`, `json`, `cwd`, `worker`, `session`, `terminate` | `zcl.agent_queue.v1` | `z23 dev agent queue post --kind=leaf --name=situation` | Post, dispatch, reap, inspect async flash-unit runs — *the unit queue is a development-lane coordination surface* |
+| `dev agent worker` | compat 🔧 → `z23-dev dev agent worker` | mutate / dev-mutation / operator · foreground/moderate | **`action`**, `worker`, `session`, `model`, `deadline_s`, `idle_start_s`, `idle_limit_s`, `max_jobs`, `time_cap_s`, `cpu_s`, `mem_mb`, `token_cap` | `zcl.agent_worker.v1` | `z23 dev agent worker status --worker=resident-a` | Consume the unit queue with a bounded worker — *the resident worker is a development-lane coordination surface* |
+| `dev agent receive` | compat 🔧 → `z23-dev dev agent receive` | mutate / dev-mutation / operator · foreground/low | **`action`**, `receiver`, `workspace`, `deadline_s`, `wait_ms`, `max_beats`, `ref`, `from`, `sender_binding`, `body`, `to` | `zcl.agent_receive.v1` | `z23 dev agent receive status --receiver=box-a` | Turn agent-mail directives into queued work — *the resident receiver is a development-lane coordination surface* |
+| `dev agent mail` | compat 🔧 → `z23-dev dev agent mail` | mutate / dev-mutation / operator · fast/low | **`action`**, `to`, `kind`, `body`, `since`, `from`, **`cursor`**, `agent`, `ref`, `sender_binding`, `cwd` | `zcl.agent_mail.v1` | `z23 dev agent mail post --to=* --kind=note --body=hello` | Post, pull, and ack async agent mail — *agent mail is a development-lane coordination surface* |
+| `dev agent mail wait` | compat 🔧 → `z23-dev dev agent mail wait` | read / read / operator · persistent/low | **`since`**, `to`, `ref`, `from`, `kind`, `timeout_ms` | `zcl.agent_mail.v1` | `z23 dev agent mail wait --since=0 --to=me --timeout_ms=30000` | Wait for the next mail row after a cursor — *agent mail waiting is a development-lane coordination surface* |
 | `dev agent factory` (aliases: `dev.factory`) | compat 🔧 → `z23-dev dev factory` | read / read / operator · foreground/low | `hours` | `zcl.dev_factory.v1` | `z23-dev dev factory --hours=48` | Report factory waste over a window — *factory measurement reads dev-lane state and needs the dev binary* |
 
 #### `dev.lane` — Agent worktree with independent inodes

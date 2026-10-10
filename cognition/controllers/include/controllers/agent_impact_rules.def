@@ -3039,6 +3039,7 @@ AGENT_IMPACT_RULE("tools/command/native_devagent.c|tools/command/native_devagent
  * only reason the whole family is named on those two rows. */
 AGENT_IMPACT_RULE("tools/command/native_devagent_situation.c|tests/harness/src/test_devagent_situation.c", "devagent_situation command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_usage.c|tools/command/native_devagent_usage_internal.h|tools/command/native_devagent_outcomes.c|tests/harness/src/test_devagent_outcomes.c", "devagent_outcomes make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_devagent_reviewscore.c|engine/modules/engine/src/engine_review_score.c|engine/modules/engine/include/engine/engine_review_score.h|tests/harness/src/test_devagent_reviewscore.c", "devagent_reviewscore make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_devagent_rules.c|tests/harness/src/test_devagent_rules.c", "devagent_rules command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_start.c|tests/harness/src/test_devagent_start.c", "devagent_start command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_claim.c|tests/harness/src/test_devagent_claim.c", "devagent_claim command_registry_catalog native_api_contract command_input_bounds")
