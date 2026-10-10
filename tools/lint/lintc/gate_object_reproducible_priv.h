@@ -112,6 +112,13 @@ bool or_copy_tree(const char *src, const char *dst, int depth);
 bool or_rm_rf(const char *path, int depth);
 const char *or_clang_flaw(const char *name);
 bool or_find_exe(const char *name, char *out, size_t cap);
+/* support.c: the skipped-case record and the final summary line */
+void or_skips_reset(void);
+void or_skip_note(const char *name);
+void or_summary_text(char *out, size_t cap, int worst, int runs,
+                     const char *clang, double wall_s,
+                     const char *const *skips, int nskips);
+void or_print_summary(int worst, int runs, const char *clang, double wall_s);
 bool or_elf_valid(const unsigned char *b, size_t len);
 bool or_elf_linked(const unsigned char *b, size_t len);
 void or_elf_first_diff(const unsigned char *a, size_t la,

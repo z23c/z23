@@ -1483,7 +1483,7 @@ compiler or linker makes `check-riscv64-universal` print one `SKIPPED` line
 naming the tool and exit 0 (the cross-case rule of `--allow-missing`), and a
 host that is not Linux prints one `SKIPPED_HOST` line and exits 0; the plain
 `make riscv64-universal` still fails with one named line naming the tool and
-the variable to set (`REPRO_GATE_XCC`, `REPRO_GATE_XLD`). Limits: freestanding
+the variable to set (`REPRO_GATE_XCC`, `REPRO_GATE_XLD`). A missing cross tool in `check-object-reproducible` is a named skip (case `riscv64-link` or a cross clang case), and its summary line then reads `PASS_WITH_SKIPS` and names the skipped case. Limits: freestanding
 only (this host has no FreeBSD riscv64 sysroot, so no C library), the programs
 are linked and never executed by the build, and headers are not part of a
 source's hash.

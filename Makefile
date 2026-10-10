@@ -1155,8 +1155,13 @@ REPRO_GATE_CROSS_FLAGS = -nostdlibinc
 # the cross linker (mold: the build host has no lld) with its argv. A linker
 # that is not installed skips the case by name (it is in --allow-missing).
 REPRO_GATE_XCC_FLAGS = -ffreestanding -fno-stack-protector
-REPRO_GATE_XLD ?= mold
-REPRO_GATE_XLD_FLAGS = -m elf64lriscv -static --build-id=none -e _start
+# The default linker is mold on PATH, else $(HOME)/.local/bin/mold when that
+# file is executable (a system-only PATH), else the literal mold (missing-tool
+# skip, unchanged). An explicit REPRO_GATE_XLD still wins.
+REPRO_GATE_XLD ?= $(shell command -v mold >/dev/null 2>&1 && echo mold || { test -x "$(HOME)/.local/bin/mold" && echo "$(HOME)/.local/bin/mold"; } || echo mold)
+# --no-fork: mold otherwise finishes in a background child that keeps the
+# output pipe open after the parent exits 0, so the capture never sees EOF.
+REPRO_GATE_XLD_FLAGS = -m elf64lriscv -static --build-id=none --no-fork -e _start
 REPRO_GATE_LINK_LIBS = -lm
 REPRO_GATE_STRIP_FLAG = -ffile-prefix-map=
 # The riscv64 universal copy (see docs/DEFENSIVE_CODING.md, "riscv64 universal

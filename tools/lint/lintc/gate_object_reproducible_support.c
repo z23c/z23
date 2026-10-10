@@ -465,6 +465,59 @@ void or_print_diag(const char *diag)
     }
 }
 
+/* ---- skipped cases and the summary line ------------------------------- */
+
+enum { OR_SKIP_MAX = 32, OR_LIST = 512 };
+static const char *g_or_skips[OR_SKIP_MAX];
+static int g_or_nskips;
+
+void or_skips_reset(void)
+{
+    g_or_nskips = 0;
+}
+
+/* Records a case skipped because its tool is missing and it is allowed. The
+ * case table has far fewer than OR_SKIP_MAX entries. */
+void or_skip_note(const char *name)
+{
+    if (g_or_nskips < OR_SKIP_MAX)
+        g_or_skips[g_or_nskips++] = name;
+}
+
+/* The summary line from its inputs alone. One skip makes the word
+ * PASS_WITH_SKIPS; the line always ends with skipped=<names> or skipped=none.
+ * The names are fixed case-table names, far below OR_LIST. */
+void or_summary_text(char *out, size_t cap, int worst, int runs,
+                     const char *clang, double wall_s,
+                     const char *const *skips, int nskips)
+{
+    char list[OR_LIST] = "none";
+    if (nskips > 0) {
+        size_t off = 0;
+        list[0] = '\0';
+        for (int i = 0; i < nskips; i++) {
+            int k = snprintf(list + off, sizeof list - off, "%s%s",
+                             i ? "," : "", skips[i]);
+            if (k < 0 || (size_t)k >= sizeof list - off)
+                break;
+            off += (size_t)k;
+        }
+    }
+    const char *word = worst != 0 ? "FAIL"
+                       : nskips > 0 ? "PASS_WITH_SKIPS" : "PASS";
+    (void)snprintf(out, cap, "check-object-reproducible: %s "
+                   "compiler_invocations=%d clang=%s wall_s=%.1f skipped=%s",
+                   word, runs, clang, wall_s, list);
+}
+
+void or_print_summary(int worst, int runs, const char *clang, double wall_s)
+{
+    char line[OR_LIST + 160];
+    or_summary_text(line, sizeof line, worst, runs, clang, wall_s,
+                    g_or_skips, g_or_nskips);
+    printf("%s\n", line);
+}
+
 /* ---- pure-logic selftest ---------------------------------------------- */
 
 static void or_fixture_elf(unsigned char *a, size_t cap)
@@ -890,6 +943,24 @@ static int or_selftest_runner(void)
     return rc;
 }
 
+/* The summary line: one skip makes the word PASS_WITH_SKIPS and names it; none
+ * says skipped=none. */
+static int or_selftest_summary(void)
+{
+    char line[OR_LIST + 160];
+    const char *one[] = { "riscv64-link" };
+    or_summary_text(line, sizeof line, 0, 70, "clang", 4.6, one, 1);
+    if (strcmp(line, "check-object-reproducible: PASS_WITH_SKIPS "
+               "compiler_invocations=70 clang=clang wall_s=4.6 "
+               "skipped=riscv64-link") != 0)
+        return or_fail("a summary with one skipped case is wrong");
+    or_summary_text(line, sizeof line, 0, 70, "clang", 4.6, NULL, 0);
+    if (strcmp(line, "check-object-reproducible: PASS compiler_invocations=70 "
+               "clang=clang wall_s=4.6 skipped=none") != 0)
+        return or_fail("a summary with no skipped case is wrong");
+    return 0;
+}
+
 int check_object_reproducible_selftest(void)
 {
     char hex[65];
@@ -905,7 +976,8 @@ int check_object_reproducible_selftest(void)
     if (or_selftest_elf() != 0 || or_selftest_elf_bounds() != 0
         || or_selftest_xlink_elf() != 0
         || or_selftest_args() != 0 || or_selftest_contains() != 0
-        || or_selftest_excuse() != 0 || or_selftest_runner() != 0)
+        || or_selftest_excuse() != 0 || or_selftest_runner() != 0
+        || or_selftest_summary() != 0)
         return 1;
     printf("check_object_reproducible selftest: ok (sha256 KATs, ELF section "
            "differ and bounds, argument refusals, report-only excuses only a "

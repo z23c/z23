@@ -1175,8 +1175,10 @@ int or_case_missing(const struct or_ctx *x, const char *want, const char *kind)
            x->cs->name, kind, want, ok ? " allowed-missing" : "");
     or_print_case_evidence(x);
     printf("\n");
-    if (ok)
+    if (ok) {
+        or_skip_note(x->cs->name);
         return OR_OK;
+    }
     if (strcmp(kind, "compiler") == 0 && x->cs->cc)
         printf("check-object-reproducible: REFUSED MISSING_COMPILER: case %s: "
                "clang is required for the clang and cross cases "
@@ -1407,6 +1409,7 @@ static int or_run_all(const struct or_cfg *cfg)
     int worst = OR_OK;
     g_or_deadline_ms = t0 + (int64_t)OR_DEADLINE_S * 1000;
     g_or_runs = 0;
+    or_skips_reset();
     if (!or_signals_install()) {
         fprintf(stderr, "check-object-reproducible: REFUSED SIGNALS: cannot "
                 "install the SIGINT and SIGTERM handlers\n");
@@ -1432,10 +1435,8 @@ static int or_run_all(const struct or_cfg *cfg)
                sig);
         worst = OR_REFUSED;
     }
-    printf("check-object-reproducible: %s compiler_invocations=%d "
-           "clang=%s wall_s=%.1f\n", worst == 0 ? "PASS" : "FAIL", g_or_runs,
-           cfg->clang,
-           (double)(or_now_ms() - t0) / 1000.0);
+    or_print_summary(worst, g_or_runs, cfg->clang,
+                     (double)(or_now_ms() - t0) / 1000.0);
     (void)fflush(stdout);
     if (sig) {
         (void)signal(sig, SIG_DFL);
