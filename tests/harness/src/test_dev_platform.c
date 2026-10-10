@@ -34,6 +34,7 @@
 #include "services/dev_reflex_policy_service.h"
 #include "sim/social_app_sim.h"
 #include "util/safe_alloc.h"
+#include "util/spawn.h"
 #include "vcs/build_action.h"
 #include "wallet/wallet.h"
 
@@ -3958,12 +3959,85 @@ static bool dp_probe_case_allowlist(const char *canonical)
     return refused;
 }
 
+/* Set a child-inherited variable for one scope and put the exact prior value
+ * back (or unset it); a value that does not fit the save slot is refused. */
+struct dp_env_scope {
+    const char *name;
+    char saved[PATH_MAX];
+    bool had;
+    bool set;
+};
+
+static bool dp_env_scope_set(struct dp_env_scope *s, const char *name,
+                             const char *value)
+{
+    const char *prior = getenv(name);
+    s->name = name;
+    s->had = prior != NULL;
+    s->set = false;
+    if (s->had && snprintf(s->saved, sizeof(s->saved), "%s", prior) >=
+                      (int)sizeof(s->saved))
+        return false;
+    s->set = platform_environment_set(name, value, 1) == 0;
+    return s->set;
+}
+
+/* Unset a child-inherited variable for one scope; the prior value, or its
+ * absence, is saved the same way and put back by dp_env_scope_restore. */
+static bool dp_env_scope_unset(struct dp_env_scope *s, const char *name)
+{
+    const char *prior = getenv(name);
+    s->name = name;
+    s->had = prior != NULL;
+    s->set = false;
+    if (s->had && snprintf(s->saved, sizeof(s->saved), "%s", prior) >=
+                      (int)sizeof(s->saved))
+        return false;
+    s->set = dp_environment_unset(name) == 0;
+    return s->set;
+}
+
+static bool dp_env_scope_restore(const struct dp_env_scope *s)
+{
+    if (!s->set)
+        return true;
+    if ((s->had ? platform_environment_set(s->name, s->saved, 1)
+                : dp_environment_unset(s->name)) != 0)
+        return false;
+    const char *now = getenv(s->name);
+    return s->had ? (now && !strcmp(now, s->saved)) : now == NULL;
+}
+
+/* Remove a fixture tree and report whether it is really gone; the remover's
+ * own status is not trusted (it fails on a path that never existed). */
+static bool dp_rm_gone(const char *path)
+{
+    (void)test_rm_rf_recursive(path);
+    return access(path, F_OK) != 0 && errno == ENOENT;
+}
+
+static bool dp_probe_build_cases(const char *root, const char *cache)
+{
+    char canonical[PATH_MAX];
+    struct dp_env_scope cache_env = {0}, proc_env = {0};
+    bool ok = dp_env_scope_set(&cache_env, "ZCL_DEV_ARTIFACT_CACHE", cache) &&
+              dp_env_scope_set(&proc_env, "ZCL_DEVLOOP_TEST_PROCESS", "1") &&
+              dp_probe_fixture_init(root, canonical) &&
+              dp_probe_case_builds(canonical) &&
+              dp_probe_case_diagnostic(canonical) &&
+              dp_probe_case_allowlist(canonical);
+    /* Both scopes restore exactly, whatever the cases did. */
+    bool restored = dp_env_scope_restore(&proc_env);
+    bool cache_back = dp_env_scope_restore(&cache_env);
+    if (!restored || !cache_back)
+        fprintf(stderr,
+                "dev_platform: hotswap probe build environment not restored\n");
+    return cache_back && restored && ok;
+}
+
 static bool dp_probe_build_fixture(void)
 {
-    char root[PATH_MAX], cache_rel[PATH_MAX], cwd[PATH_MAX];
-    char canonical[PATH_MAX], cache[PATH_MAX], saved[PATH_MAX] = {0};
-    const char *prior = getenv("ZCL_DEV_ARTIFACT_CACHE");
-    bool had_prior = prior && prior[0];
+    char root[PATH_MAX], cache_rel[PATH_MAX], cwd[PATH_MAX], cache[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd)) ||
         snprintf(root, sizeof(root), "test-tmp/dev_probe_source_%ld",
                  (long)getpid()) >= (int)sizeof(root) ||
@@ -3973,24 +4047,16 @@ static bool dp_probe_build_fixture(void)
         snprintf(cache, sizeof(cache), "%s/%s", cwd, cache_rel) >=
             (int)sizeof(cache))
         return false;
-    if (had_prior)
-        (void)snprintf(saved, sizeof(saved), "%s", prior);
-    test_rm_rf_recursive(root);
-    test_rm_rf_recursive(cache_rel);
-    bool ok = dp_probe_fixture_init(root, canonical) &&
-              platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) == 0 &&
-              platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
-              dp_probe_case_builds(canonical) &&
-              dp_probe_case_diagnostic(canonical) &&
-              dp_probe_case_allowlist(canonical);
-    (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
-    if (had_prior)
-        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
-    test_rm_rf_recursive(root);
-    test_rm_rf_recursive(cache_rel);
-    return ok;
+    if (!dp_rm_gone(root) || !dp_rm_gone(cache_rel)) {
+        fprintf(stderr, "dev_platform: stale hotswap probe tree not removed\n");
+        return false;
+    }
+    bool ok = dp_probe_build_cases(root, cache);
+    bool root_gone = dp_rm_gone(root);
+    bool cache_gone = dp_rm_gone(cache_rel);
+    if (!root_gone || !cache_gone)
+        fprintf(stderr, "dev_platform: hotswap probe fixture tree not removed\n");
+    return ok && root_gone && cache_gone;
 }
 
 
@@ -4006,6 +4072,8 @@ static bool dp_probe_build_fixture(void)
 #define DP_PROBE_E2E_TU \
     "contexts/commons/services/src/zcode_passport_view_service.c"
 #define DP_PROBE_E2E_ANSWER "zcode passport plan\""
+/* Deadline for one end-to-end probe child, in ms (ten minutes). */
+#define DP_PROBE_E2E_DEADLINE_MS 600000
 
 /* Copy the real island into the fixture; when `tamper`, change one byte of an
  * answer its frozen known-answer vector checks. */
@@ -4049,29 +4117,86 @@ static bool dp_probe_e2e_root(const char *root, const char *cwd, bool tamper)
            dp_probe_e2e_source(root, tamper);
 }
 
-/* Run the dev binary on the fixture; its one JSON reply lands in `reply`. */
+/* Put each scope back on its own, so one failed restore never skips another. */
+static bool dp_probe_e2e_restore(struct dp_env_scope *src,
+                                 struct dp_env_scope *cache,
+                                 struct dp_env_scope *proc)
+{
+    bool src_back = dp_env_scope_restore(src);
+    bool cache_back = dp_env_scope_restore(cache);
+    bool proc_back = dp_env_scope_restore(proc);
+    return src_back && cache_back && proc_back;
+}
+
+/* Name the one reason the child produced no run to read. */
+static void dp_probe_e2e_explain(bool armed, bool restored, bool timed_out,
+                                 int rc)
+{
+    if (!armed)
+        fprintf(stderr, "dev_platform: e2e environment not armed\n");
+    else if (!restored)
+        fprintf(stderr, "dev_platform: e2e environment not restored\n");
+    else if (timed_out)
+        fprintf(stderr, "dev_platform: e2e child exceeded %d ms\n",
+                DP_PROBE_E2E_DEADLINE_MS);
+    else if (rc < 0)
+        fprintf(stderr, "dev_platform: e2e child did not start\n");
+}
+
+/* The one reply must be complete: non-empty, inside the buffer, and parsed. */
+static bool dp_probe_e2e_read(struct json_value *reply, const char *text,
+                              size_t cap)
+{
+    size_t n = strlen(text);
+    bool ok = n > 0 && n < cap - 1 && json_read(reply, text, n);
+    if (!ok)
+        fprintf(stderr,
+                "dev_platform: e2e reply incomplete or unparsable (%zu bytes)\n",
+                n);
+    return ok;
+}
+
+/* Run the dev binary on the fixture with no shell: argv, a deadline, the real
+ * exit status.  The child runs without ZCL_DEVLOOP_TEST_PROCESS, so its result
+ * never depends on the caller's environment. */
 static bool dp_probe_e2e_run(const char *cwd, const char *root,
                              const char *cache, const char *datadir,
-                             struct json_value *reply)
+                             int *exit_code, struct json_value *reply)
 {
-    char cmd[PATH_MAX * 4], out[PATH_MAX], text[16384];
-    (void)snprintf(out, sizeof(out), "%s/reply.json", datadir);
-    if (snprintf(cmd, sizeof(cmd),
-                 "ZCL_DEV_SOURCE_ROOT='%s/%s' ZCL_DEV_ARTIFACT_CACHE='%s/%s' "
-                 "%s -datadir=%s/%s dev hotswap probe "
-                 "--input='{\"source_tu\":\"" DP_PROBE_E2E_TU "\"}' "
-                 ">%s 2>/dev/null",
-                 cwd, root, cwd, cache, DP_PROBE_E2E_BIN, cwd, datadir,
-                 out) >= (int)sizeof(cmd))
+    char src_abs[PATH_MAX], cache_abs[PATH_MAX], dd_arg[PATH_MAX + 16];
+    char input[256], text[16384] = {0};
+    struct dp_env_scope src_env = {0}, cache_env = {0}, proc_env = {0};
+    bool timed_out = false;
+    if (snprintf(src_abs, sizeof(src_abs), "%s/%s", cwd, root) >=
+            (int)sizeof(src_abs) ||
+        snprintf(cache_abs, sizeof(cache_abs), "%s/%s", cwd, cache) >=
+            (int)sizeof(cache_abs) ||
+        snprintf(dd_arg, sizeof(dd_arg), "-datadir=%s/%s", cwd, datadir) >=
+            (int)sizeof(dd_arg) ||
+        snprintf(input, sizeof(input), "--input={\"source_tu\":\"%s\"}",
+                 DP_PROBE_E2E_TU) >= (int)sizeof(input)) {
+        fprintf(stderr, "dev_platform: e2e argument exceeds its buffer\n");
         return false;
-    TEST_DISCARD(system(cmd)); /* the verdict is the reply, not the exit code */
-    FILE *f = fopen(out, "rb");
-    if (!f)
-        return false;
-    size_t n = fread(text, 1, sizeof(text) - 1, f);
-    (void)fclose(f);
+    }
+    const char *const argv[] = {DP_PROBE_E2E_BIN, dd_arg, "dev", "hotswap",
+                                "probe", input, NULL};
+    bool armed = dp_env_scope_set(&src_env, "ZCL_DEV_SOURCE_ROOT", src_abs) &&
+                 dp_env_scope_set(&cache_env, "ZCL_DEV_ARTIFACT_CACHE",
+                                  cache_abs) &&
+                 dp_env_scope_unset(&proc_env, "ZCL_DEVLOOP_TEST_PROCESS");
+    int rc = armed ? zcl_spawn_capture_observed(argv, text, sizeof(text),
+                                                DP_PROBE_E2E_DEADLINE_MS,
+                                                &timed_out)
+                   : -1;
+    bool restored = dp_probe_e2e_restore(&src_env, &cache_env, &proc_env);
+    *exit_code = rc;
     json_init(reply);
-    return n > 0 && json_read(reply, text, n);
+    bool ran = armed && restored && !timed_out && rc >= 0;
+    if (!ran) {
+        dp_probe_e2e_explain(armed, restored, timed_out, rc);
+        return false;
+    }
+    return dp_probe_e2e_read(reply, text, sizeof(text));
 }
 
 static bool dp_probe_e2e_is_hex64(const char *s)
@@ -4114,34 +4239,44 @@ static bool dp_probe_e2e_case(const char *cwd, const char *tag, bool tamper)
                    (long)getpid());
     (void)snprintf(cache, sizeof(cache), "%s_cache", root);
     (void)snprintf(datadir, sizeof(datadir), "%s_dd", root);
-    test_rm_rf_recursive(root);
-    test_rm_rf_recursive(cache);
-    test_rm_rf_recursive(datadir);
+    if (!platform_directory_ensure("test-tmp", 0755)) {
+        fprintf(stderr, "dev_platform: e2e probe parent test-tmp not created\n");
+        return false;
+    }
+    if (!dp_rm_gone(root) || !dp_rm_gone(cache) || !dp_rm_gone(datadir)) {
+        fprintf(stderr, "dev_platform: stale e2e probe tree not removed (%s)\n",
+                root);
+        return false;
+    }
     struct json_value reply;
+    int rc = -1;
     json_init(&reply);
     bool ran = platform_directory_create(datadir, 0700) == 0 &&
                dp_probe_e2e_root(root, cwd, tamper) &&
-               dp_probe_e2e_run(cwd, root, cache, datadir, &reply);
-    bool ok = ran && (tamper ? dp_probe_e2e_refused(&reply)
-                             : dp_probe_e2e_verified(&reply));
+               dp_probe_e2e_run(cwd, root, cache, datadir, &rc, &reply);
+    bool ok = ran && (tamper ? rc != 0 && dp_probe_e2e_refused(&reply)
+                             : rc == 0 && dp_probe_e2e_verified(&reply));
     json_free(&reply);
-    test_rm_rf_recursive(root);
-    test_rm_rf_recursive(cache);
-    test_rm_rf_recursive(datadir);
-    return ok;
+    bool root_gone = dp_rm_gone(root);
+    bool cache_gone = dp_rm_gone(cache);
+    bool cleaned = dp_rm_gone(datadir) && root_gone && cache_gone;
+    if (!cleaned)
+        fprintf(stderr, "dev_platform: e2e probe fixture tree not removed (%s)\n",
+                root);
+    return ok && cleaned;
 }
 
-/* Visible skip when the dev binary is absent: the group's BUILD_NEED row
- * builds it, so this only prints in a tree that bypassed that. */
+/* Fail closed: a tree without the built dev binary or the island source has
+ * observed nothing, so the acceptance must not pass there. */
 static bool dp_probe_e2e_fixture(void)
 {
     char cwd[PATH_MAX];
     if (access(DP_PROBE_E2E_BIN, X_OK) != 0 ||
         access(DP_PROBE_E2E_TU, R_OK) != 0) {
-        printf("dev_platform: SKIP (" DP_PROBE_E2E_BIN
+        printf("dev_platform: FAIL (" DP_PROBE_E2E_BIN
                " or the island source is absent): probe source_tu "
                "end to end not observed\n");
-        return true;
+        return false;
     }
     return getcwd(cwd, sizeof(cwd)) &&
            dp_probe_e2e_case(cwd, "good", false) &&
