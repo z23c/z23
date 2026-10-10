@@ -6028,7 +6028,9 @@ LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c $(ZCL_TOOL_SANDBOX_SRC) \
     platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
     platform/modules/base/src/safe_alloc.c
 LINTC_NODE_OBJS = $(LINTC_NODE_SRCS:%.c=build/lintc-obj/node/%.o)
-LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_hotswap_candidates_ledger.c tools/lint/lintc/gate_source_patterns.c \
+LINTC_LIVE_DATADIR_SRCS = tools/lint/lintc/gate_live_datadir_isolation.c \
+    tools/lint/lintc/gate_live_datadir_isolation_selftest.c
+LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_hotswap_candidates_ledger.c tools/lint/lintc/gate_source_patterns.c \
     tools/lint/lintc/gate_pattern_small.c tools/lint/lintc/gate_wire_dial.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_tree_walk_selftests.c tools/lint/lintc/gate_git_scan_a.c \
     tools/lint/lintc/gate_git_scan_a_selftests.c \
@@ -14592,7 +14594,7 @@ check-no-retired-agent-protocol: $(LINTC_TOOL)
 #      example that ran the boot ceremony on the operator's node.db.
 # The datadir-taking leaf set is derived from argument 10 of the leaf macros in
 # engine/composition/commands/*.def, never hand-listed.
-check-live-datadir-isolation:
+check-live-datadir-isolation: $(LINTC_TOOL)
 	@echo "══ LINT: nothing under test aims at the live datadir ══"
 	@./tools/lint/check_live_datadir_isolation.sh --selftest
 	@./tools/lint/check_live_datadir_isolation.sh

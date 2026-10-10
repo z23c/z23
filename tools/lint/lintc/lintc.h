@@ -176,6 +176,13 @@ int lint_base_pin(struct lint_base *b, const char *key, int m);
 int lint_base_write(struct lint_base *b, const char *path, const char *hdr);
 
 
+/* Extract the 1-based top-level comma argument span; quote/escape and
+ * parenthesis aware. Returns total argument count; outputs change only
+ * when the requested argument exists. Input length must fit INT_MAX. */
+int lint_macro_arg(const char *s, int want, int *off, int *len);
+int check_live_datadir_isolation_run(int argc, char **argv);
+int check_live_datadir_isolation_selftest(void);
+
 int check_no_python_run(int argc, char **argv);
 int check_no_python_selftest(void);
 int check_malloc_run(int argc, char **argv);

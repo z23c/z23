@@ -538,40 +538,7 @@ static char *brf_span_dup(const struct brf_lines *l, int ln0, int off0,
  * span of s. Returns the total argument count (0 if fewer than want). */
 static int brf_top_arg(const char *s, int want, int *aoff, int *alen)
 {
-    int depth = 0, instr = 0, esc = 0, argno = 1, start = 0;
-    size_t n = strlen(s);
-    for (size_t i = 0; i <= n; i++) {
-        char c = i < n ? s[i] : ',';
-        int flush = i == n;
-        if (!flush) {
-            if (instr) {
-                if (esc)
-                    esc = 0;
-                else if (c == '\\')
-                    esc = 1;
-                else if (c == '"')
-                    instr = 0;
-                continue;
-            }
-            if (c == '"') {
-                instr = 1;
-                continue;
-            }
-            if (c == '(')
-                depth++;
-            else if (c == ')')
-                depth--;
-            if (depth != 0 || c != ',')
-                continue;
-        }
-        if (argno == want) {
-            *aoff = start;
-            *alen = (int)i - start;
-        }
-        argno++;
-        start = (int)i + 1;
-    }
-    return argno - 1;
+    return lint_macro_arg(s, want, aoff, alen);
 }
 
 /* v with the leading quote already stripped: the length awk's

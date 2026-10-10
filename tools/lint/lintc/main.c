@@ -13,6 +13,7 @@
 #include "premise.h"
 
 static const struct lint_gate k_gates[] = {
+    { "check-live-datadir-isolation", check_live_datadir_isolation_run, check_live_datadir_isolation_selftest },
     { "check-no-python", check_no_python_run, check_no_python_selftest },
     { "check-malloc", check_malloc_run, check_malloc_selftest },
     { "check-dev-proof-native-fast-path", check_dev_proof_native_fast_path_run,
