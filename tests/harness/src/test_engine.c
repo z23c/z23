@@ -4864,6 +4864,80 @@ static int case_contract(void)
     return failures;
 }
 
+/* The patch kind takes a fully specified change on a light worker and must
+ * report a design question rather than choose; the review-pass kind returns
+ * findings and no verdict. Both are light, and the standard edit kinds stay
+ * standard. */
+static int case_light_patch_kind(void)
+{
+    int failures = 0;
+    EN_CHECK("c23-patch is light",
+             engine_prompt_kind_tier("c23-patch") == ENGINE_PROMPT_TIER_LIGHT);
+    const char *why = "unset";
+    EN_CHECK("tier rows stay closed with the two new kinds",
+             engine_prompt_tiers_closed(&why) && why == NULL);
+    EN_CHECK("c23-patch supplies every required section",
+             engine_prompt_kind_is_complete("c23-patch"));
+    const char *patch_rules = engine_prompt_template_body("c23-patch", "rules");
+    EN_CHECK("c23-patch reports a design question instead of choosing",
+             patch_rules && strstr(patch_rules, "Do not choose"));
+    EN_CHECK("c23-patch edits only the files the brief owns",
+             patch_rules
+             && strstr(patch_rules, "Edit only the files the brief owns"));
+    EN_CHECK("c23-patch stops when the brief contradicts the tree",
+             patch_rules && strstr(patch_rules, "brief contradicts the tree"));
+    const char *patch_task = engine_prompt_template_body("c23-patch", "task");
+    EN_CHECK("c23-patch quotes each line before replacing it",
+             patch_task
+             && strstr(patch_task, "quote the lines you will replace"));
+    EN_CHECK("c23-patch never weakens an assertion",
+             patch_task
+             && strstr(patch_task,
+                       "Never weaken, delete or skip an assertion"));
+    const char *patch_judging =
+        engine_prompt_template_body("c23-patch", "judging");
+    EN_CHECK("c23-patch escalates after one failed round",
+             patch_judging
+             && strstr(patch_judging, "One failed round sends the unit"));
+    return failures;
+}
+
+static int case_light_review_pass_kind(void)
+{
+    int failures = 0;
+    EN_CHECK("c23-review-pass is light",
+             engine_prompt_kind_tier("c23-review-pass")
+             == ENGINE_PROMPT_TIER_LIGHT);
+    EN_CHECK("c23-review-pass supplies every required section",
+             engine_prompt_kind_is_complete("c23-review-pass"));
+    const char *review_protocol =
+        engine_prompt_template_body("c23-review-pass", "protocol");
+    EN_CHECK("c23-review-pass leads with findings",
+             review_protocol && strstr(review_protocol, "Findings first"));
+    EN_CHECK("c23-review-pass marks each finding CHANGE or CLAIM",
+             review_protocol
+             && strstr(review_protocol,
+                       "about the CHANGE or about a CLAIM"));
+    EN_CHECK("c23-review-pass lists what it did not read",
+             review_protocol && strstr(review_protocol, "NOT REVIEWED"));
+    EN_CHECK("c23-review-pass states what it sampled and how",
+             review_protocol
+             && strstr(review_protocol, "State what you sampled and how"));
+    const char *review_judging =
+        engine_prompt_template_body("c23-review-pass", "judging");
+    EN_CHECK("c23-review-pass returns findings and no verdict",
+             review_judging && strstr(review_judging, "Return findings only"));
+    EN_CHECK("c23-review-pass discards a finding with no file and line",
+             review_judging
+             && strstr(review_judging,
+                       "A finding with no file and line is discarded"));
+    EN_CHECK("review and fix-gate are still standard",
+             engine_prompt_kind_tier("review") == ENGINE_PROMPT_TIER_STANDARD
+             && engine_prompt_kind_tier("fix-gate")
+                 == ENGINE_PROMPT_TIER_STANDARD);
+    return failures;
+}
+
 int test_engine(void)
 {
     int failures = 0;
@@ -4899,6 +4973,8 @@ int test_engine(void)
 #endif
     failures += case_review_findings_not_verdict();
     failures += case_contract();
+    failures += case_light_patch_kind();
+    failures += case_light_review_pass_kind();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }

@@ -557,6 +557,63 @@ ENGINE_PROMPT_TEMPLATE(c23-proof-triage, judging,
     "any mutation, or advice to loosen a selection, a host need or a "
     "deadline to obtain a pass.")
 
+/* ── c23-patch ───────────────────────────────────────────────────────────
+ * A fully specified change: the brief names every file, the change and the
+ * acceptance. A light worker makes it; a design question is reported, not
+ * decided. */
+ENGINE_PROMPT_KIND_TIER(c23-patch, light)
+ENGINE_PROMPT_TEMPLATE(c23-patch, rules,
+    "This unit is a prescriptive patch: the brief names every file, the exact "
+    "change and the exact acceptance. The brief is the whole design. If the "
+    "change needs a decision the brief does not make (a name, where a value is "
+    "stored, what an error means, which of two behaviours), stop and report "
+    "BLOCKED with the question. Do not choose. If the brief contradicts the "
+    "tree (a name, a line, a file or an expected failure it states does not "
+    "match what you find), stop and report BLOCKED quoting both; do not adapt "
+    "the change to fit. Edit only the files the brief "
+    "owns.")
+ENGINE_PROMPT_TEMPLATE(c23-patch, task,
+    "Open each owned file at the lines the brief names and quote the lines you "
+    "will replace. Make one change, build the one target the brief names, read "
+    "the first error, fix it, repeat. Never batch untested edits. Never weaken, "
+    "delete or skip an assertion or a gate to get a pass; a failing check you "
+    "cannot explain in one sentence is reported verbatim.")
+ENGINE_PROMPT_TEMPLATE(c23-patch, protocol,
+    "Reply with RESULT (PASS, FAIL or BLOCKED); CHANGED as file and line "
+    "ranges; each command run with its exit code and literal verdict line; the "
+    "fail-then-pass lines when the brief asks for them; OPEN items.")
+ENGINE_PROMPT_TEMPLATE(c23-patch, judging,
+    "The control side reruns the named acceptance. A patch that passes by "
+    "changing a file outside the brief, or by editing an assertion, is "
+    "rejected. One failed round sends the unit to a standard-tier worker with "
+    "your report attached; say plainly what you could not do.")
+
+/* ── c23-review-pass ────────────────────────────────────────────────────
+ * A first-pass review against a written card. It reviews and returns
+ * findings; a standard-tier review reads only the hunks it flags. */
+ENGINE_PROMPT_KIND_TIER(c23-review-pass, light)
+ENGINE_PROMPT_TEMPLATE(c23-review-pass, rules,
+    "This unit is a first-pass review against a written card. It reviews and "
+    "does not edit. It builds and runs nothing unless the brief names a "
+    "command. Check the diff against the card point by point; do not judge "
+    "taste.")
+ENGINE_PROMPT_TEMPLATE(c23-review-pass, task,
+    "For every numbered point of the card answer MET, NOT MET or CANNOT TELL, "
+    "with a file and line and the quoted code. Trace each new error path to "
+    "its cleanup. For each new test say what production line would have to be "
+    "deleted for it to fail. List what you did not read.")
+ENGINE_PROMPT_TEMPLATE(c23-review-pass, protocol,
+    "Findings first, most severe first, each with severity, file and line, the "
+    "quoted line and why it matters. Then one line per card point. Then NOT "
+    "REVIEWED. Mark each finding as about the CHANGE or about a CLAIM. State "
+    "what you sampled and how: the files and hunks you read whole, and the "
+    "ones you only searched, so a clean result shows what it covers.")
+ENGINE_PROMPT_TEMPLATE(c23-review-pass, judging,
+    "Return findings only; write no accept or reject. The control side derives "
+    "the verdict. A finding with no file and line is discarded. A first pass "
+    "that reports attention needed, or that could not tell on any point, is "
+    "followed by a standard-tier review of the flagged hunks only.")
+
 /* clang-format on */
 
 #ifdef ENGINE_PROMPT_TIER_LOCAL_
