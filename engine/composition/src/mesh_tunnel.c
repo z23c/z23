@@ -908,6 +908,36 @@ size_t mesh_tunnel_list(struct mesh_tunnel_row *out, size_t cap,
     return written;
 }
 
+static bool tunnel_allow_store_locked(struct mesh_tunnel_allow_row *slot,
+                                      const char *peer_pairing_id,
+                                      uint16_t port, const char *why)
+{
+    size_t previous_count = g_allow_count;
+    size_t slot_index = slot ? (size_t)(slot - g_allow) : previous_count;
+    struct mesh_tunnel_allow_row previous_row;
+    bool had_row = slot != NULL;
+    if (had_row)
+        previous_row = *slot;
+    else
+        slot = &g_allow[g_allow_count++];
+    memset(slot, 0, sizeof(*slot));
+    snprintf(slot->peer, sizeof(slot->peer), "%s", peer_pairing_id);
+    slot->port = port;
+    snprintf(slot->why, sizeof(slot->why), "%s", why ? why : "");
+    for (char *c = slot->why; *c; c++)
+        if (*c == '\n' || *c == '\r')
+            *c = ' ';
+    bool ok = tunnel_allow_persist_locked();
+    if (!ok) {
+        g_allow_count = previous_count;
+        if (had_row)
+            g_allow[slot_index] = previous_row;
+        else
+            memset(&g_allow[slot_index], 0, sizeof(g_allow[slot_index]));
+    }
+    return ok;
+}
+
 enum mesh_tunnel_refusal mesh_tunnel_allow(const char *peer_pairing_id,
                                            uint16_t port, const char *why)
 {
@@ -927,16 +957,7 @@ enum mesh_tunnel_refusal mesh_tunnel_allow(const char *peer_pairing_id,
         tunnel_unlock();
         return MESH_TUNNEL_REFUSED_CAP;
     }
-    if (!slot)
-        slot = &g_allow[g_allow_count++];
-    memset(slot, 0, sizeof(*slot));
-    snprintf(slot->peer, sizeof(slot->peer), "%s", peer_pairing_id);
-    slot->port = port;
-    snprintf(slot->why, sizeof(slot->why), "%s", why ? why : "");
-    for (char *c = slot->why; *c; c++)
-        if (*c == '\n' || *c == '\r')
-            *c = ' ';
-    bool ok = tunnel_allow_persist_locked();
+    bool ok = tunnel_allow_store_locked(slot, peer_pairing_id, port, why);
     tunnel_unlock();
     return ok ? MESH_TUNNEL_OK : MESH_TUNNEL_REFUSED_UNAVAILABLE;
 }

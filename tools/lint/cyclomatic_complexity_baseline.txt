@@ -1567,7 +1567,6 @@ engine/composition/src/mesh_stream.c:mesh_stream_refusal_string:17
 engine/composition/src/mesh_stream.c:mesh_stream_service_register:17
 engine/composition/src/mesh_stream.c:stream_pump_tick:17
 engine/composition/src/mesh_stream.c:stream_receive_open:31
-engine/composition/src/mesh_tunnel.c:mesh_tunnel_allow:17
 engine/composition/src/mint_anchor_progress.c:mint_anchor_normal_boot_allowed:19
 engine/composition/src/mint_anchor_progress.c:mint_anchor_progress_can_resume:25
 engine/conditions/src/block_failed_mask_at_tip.c:detail_block_failed_mask_at_tip:22

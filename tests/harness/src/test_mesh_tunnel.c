@@ -26,6 +26,7 @@
 #include "net/net.h"
 #include "net/noise_transport.h"
 #include "net/protocol.h"
+#include "platform/private_directory.h"
 #include "platform/socket_compat.h"
 
 #include <stdlib.h>
@@ -276,6 +277,146 @@ static size_t tunnel_open_payload(uint16_t port, uint8_t out[8])
     return 8u;
 }
 
+static bool tunnel_file_equals(const char *path, const char *expected,
+                               size_t expected_len)
+{
+    FILE *file = fopen(path, "rb");
+    if (!file)
+        return false;
+    char actual[1024];
+    size_t got = fread(actual, 1, sizeof(actual), file);
+    bool read_ok = !ferror(file);
+    bool close_ok = fclose(file) == 0;
+    bool ok = read_ok && close_ok && got == expected_len &&
+              memcmp(actual, expected, expected_len) == 0;
+    return ok;
+}
+
+static bool tunnel_failed_open_refused(struct tunnel_test_wire *wire,
+                                       uint16_t port, uint64_t stream_id,
+                                       platform_socket_t target)
+{
+    uint8_t payload[8], frame[TUNNEL_TEST_WIRE_MAX];
+    size_t payload_len = tunnel_open_payload(port, payload);
+    size_t frame_len = mesh_stream_test_open_frame(
+        stream_id, MESH_TUNNEL_CHUNK, MESH_TUNNEL_SERVICE_NAME, payload,
+        payload_len, frame, sizeof(frame));
+    if (!frame_len || !mesh_stream_frame(wire->mp, wire->b, frame, frame_len,
+                                         NULL))
+        return false;
+    uint8_t answer[TUNNEL_TEST_WIRE_MAX];
+    bool more = false;
+    size_t answer_len = tunnel_take(wire->b, wire->b_queue,
+                                    wire->f->term_peer.ini, answer,
+                                    sizeof(answer), &more);
+    uint8_t kind = 0;
+    const char *token = "tunnel_target_not_allowed";
+    if (!more || answer_len < TUNNEL_TEST_CLOSE_PAYLOAD + strlen(token) ||
+        !mesh_stream_test_read_header(answer, answer_len, &kind, NULL))
+        return false;
+    return kind == MESH_STREAM_KIND_CLOSE &&
+           answer[MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u] ==
+               MESH_STREAM_CLOSED_BY_SERVICE &&
+           memcmp(answer + TUNNEL_TEST_CLOSE_PAYLOAD, token,
+                  strlen(token)) == 0 &&
+           mesh_stream_test_live_count(MESH_TUNNEL_SERVICE_NAME) == 0 &&
+           platform_socket_wait_readable(target, 0) <= 0;
+}
+
+struct tunnel_allow_case {
+    char path[512];
+    char staging[544];
+    char bytes[256];
+    size_t bytes_len;
+    uint16_t committed_port;
+};
+
+static bool tunnel_allow_case_start(struct tunnel_allow_case *c,
+                                    const char *dir, const char *peer,
+                                    uint16_t target_port)
+{
+    int path_len = snprintf(c->path, sizeof(c->path), "%s/%s", dir,
+                            MESH_TUNNEL_ALLOW_FILE);
+    int staging_len = snprintf(c->staging, sizeof(c->staging), "%s.tmp",
+                               c->path);
+    if (path_len <= 0 || path_len >= (int)sizeof(c->path) ||
+        staging_len <= 0 || staging_len >= (int)sizeof(c->staging))
+        return false;
+    c->committed_port = target_port == UINT16_MAX ? target_port - 1u
+                                                 : target_port + 1u;
+    if (mesh_tunnel_allow(peer, c->committed_port, "committed reason") !=
+        MESH_TUNNEL_OK)
+        return false;
+    int bytes_len = snprintf(
+        c->bytes, sizeof(c->bytes),
+        "# <pairing id> <port> <why> — nothing is allowed without a row here\n"
+        "%s %u committed reason\n", peer, (unsigned)c->committed_port);
+    if (bytes_len <= 0 || bytes_len >= (int)sizeof(c->bytes))
+        return false;
+    c->bytes_len = (size_t)bytes_len;
+    return tunnel_file_equals(c->path, c->bytes, c->bytes_len) &&
+           platform_private_directory_create(c->staging);
+}
+
+static bool tunnel_allow_snapshot_matches(const struct tunnel_allow_case *c,
+                                          const char *peer)
+{
+    struct mesh_tunnel_allow_row rows[MESH_TUNNEL_ALLOW_MAX];
+    size_t total = SIZE_MAX;
+    return mesh_tunnel_allow_list(rows, MESH_TUNNEL_ALLOW_MAX, &total) == 1 &&
+           total == 1 && rows[0].port == c->committed_port &&
+           strcmp(rows[0].peer, peer) == 0 &&
+           strcmp(rows[0].why, "committed reason") == 0 &&
+           tunnel_file_equals(c->path, c->bytes, c->bytes_len);
+}
+
+static bool tunnel_allow_recovery_matches(const struct tunnel_allow_case *c,
+                                          const char *peer, uint16_t port)
+{
+    if (mesh_tunnel_allow(peer, port, "ordinary addition") != MESH_TUNNEL_OK ||
+        mesh_tunnel_allow(peer, c->committed_port, "ordinary update") !=
+            MESH_TUNNEL_OK)
+        return false;
+    struct mesh_tunnel_allow_row rows[MESH_TUNNEL_ALLOW_MAX];
+    size_t total = SIZE_MAX;
+    return mesh_tunnel_allow_list(rows, MESH_TUNNEL_ALLOW_MAX, &total) == 2 &&
+           total == 2 && strcmp(rows[0].why, "ordinary update") == 0;
+}
+
+static int tunnel_allow_transaction_case(struct tunnel_test_wire *wire,
+                                         uint16_t port,
+                                         platform_socket_t target,
+                                         const char *dir)
+{
+    int failures = 0;
+    struct tunnel_allow_case c = {0};
+    bool collision = false;
+    const char *peer = wire->f->term_peer.pairing.pairing_id;
+    TEST("mesh tunnel: failed persistence never admits an owned target") {
+        ASSERT(tunnel_allow_case_start(&c, dir, peer, port));
+        collision = true;
+        ASSERT_EQ(mesh_tunnel_allow(peer, port, "must not persist"),
+                  MESH_TUNNEL_REFUSED_UNAVAILABLE);
+        /* Production OPEN precedes every rollback list assertion. */
+        ASSERT(tunnel_failed_open_refused(wire, port, 4, target));
+        ASSERT(tunnel_allow_snapshot_matches(&c, peer));
+        ASSERT_EQ(mesh_tunnel_allow(peer, c.committed_port, "changed reason"),
+                  MESH_TUNNEL_REFUSED_UNAVAILABLE);
+        ASSERT(tunnel_allow_snapshot_matches(&c, peer));
+        ASSERT(platform_private_directory_remove_empty(c.staging));
+        collision = false;
+        ASSERT(tunnel_allow_recovery_matches(&c, peer, port));
+        PASS();
+    }
+_test_next:
+    if (collision && !platform_private_directory_remove_empty(c.staging)) {
+        fprintf(stderr, "mesh tunnel: staging collision cleanup failed: %s\n",
+                c.staging);
+        failures++;
+    }
+    return failures;
+}
+
 #define TUNNEL_TEXT_PEER \
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define TUNNEL_TEXT_BEFORE TUNNEL_TEXT_PEER " 80 before\n"
@@ -473,8 +614,7 @@ int test_mesh_tunnel(void)
         ASSERT_EQ(mesh_stream_test_live_count(MESH_TUNNEL_SERVICE_NAME),
                   (size_t)0);
 
-        /* b) The peer is paired, and still nothing is allowed: the tunnel
-         * service refuses the exact port by name, and never dials. */
+        /* b) Paired but unauthorized OPEN is refused by name and never dials. */
         ASSERT(mesh_term_pair_row(&f, &f.term_peer,
                                   MESH_PAIRING_CAP_STATUS_READ,
                                   TUNNEL_TEST_PAIRED_AT,
@@ -499,6 +639,11 @@ int test_mesh_tunnel(void)
                   (size_t)0);
         /* Nothing was dialled: the stand-in server saw no connection. */
         ASSERT(platform_socket_wait_readable(target, 0) <= 0);
+
+        failures += tunnel_allow_transaction_case(&wire, target_port, target,
+                                                  dir);
+        if (failures)
+            goto _test_next;
         PASS();
     }
 
