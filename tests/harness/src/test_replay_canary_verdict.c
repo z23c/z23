@@ -858,12 +858,14 @@ static int test_pass_replaces_stale_sentinel(void)
 }
 
 /* Open the FIFO's write end once the child reads it. Retries while the
- * child lives (cap near 30 s; a loaded host may need far more than 5 s);
- * a child that exited is reaped here and its status kept. */
+ * child lives (cap near 180 s, 10 ms per tick; a loaded proof host can
+ * delay the forked bash script well past 30 s); a child that exits early
+ * is reaped here and its status kept, so a healthy child costs no wait. */
+#define CANARY_FIFO_WAIT_TICKS 18000
 static int canary_open_fifo_writer(pid_t pid, const char *fifo,
                                    int *wstatus, bool *reaped)
 {
-    for (int i = 0; i < 3000; i++) {
+    for (int i = 0; i < CANARY_FIFO_WAIT_TICKS; i++) {
         int writer = open(fifo, O_WRONLY | O_NONBLOCK);
         if (writer >= 0) return writer;
         if (errno != ENXIO && errno != ENOENT) return -1;
