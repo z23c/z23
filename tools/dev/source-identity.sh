@@ -316,8 +316,16 @@ collect_gitlink()
         append_prefixed_nul "$WORK/gitlink-untracked-$seq" "$prefix" \
             "$WORK/paths"
     fi
-    append_prefixed_nul "$WORK/gitlink-untracked-$seq" "$prefix" \
-        "$WORK/tracked-source"
+    # Tor's generated receipt describes the selected archives and their
+    # producer; it is not source consumed by the compiler. Archive bytes
+    # remain explicit inputs below, and readiness still verifies the receipt.
+    # Only the untracked receipt is excluded: a tracked file remains an input.
+    while IFS= read -r -d '' relative; do
+        if [ "$prefix/$relative" = vendor/tor/.provenance ]; then
+            continue
+        fi
+        printf '%s/%s\0' "$prefix" "$relative" >> "$WORK/tracked-source"
+    done < "$WORK/gitlink-untracked-$seq"
 
     git -C "$prefix" ls-files --stage -z -- \
         > "$WORK/gitlink-index-$seq" ||

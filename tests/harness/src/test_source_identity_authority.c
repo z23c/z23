@@ -880,6 +880,75 @@ static int sia_digest_cache_framing(void)
 }
 #endif
 
+static int sia_tor_receipt_is_not_source(void)
+{
+    int failures = 0;
+    char work[512] = {0}, origin[PATH_MAX], cmd[8192];
+    TEST("Tor receipt differs across roots without hiding source inputs") {
+        ASSERT(getcwd(origin, sizeof(origin)) != NULL);
+        test_make_tmpdir(work, sizeof(work), "sia", "tor-receipt");
+        int n = snprintf(cmd, sizeof(cmd),
+            "bash -c 'set -euo pipefail; cd \"%s\"; "
+            "mkdir -p a/vendor/tor; git init -q a; "
+            "git init -q a/vendor/tor; "
+            "printf source > a/vendor/tor/input.c; "
+            "printf header > a/vendor/tor/input.h; "
+            "printf \"*.a\\n\" > a/vendor/tor/.gitignore; "
+            "git -C a/vendor/tor add .; "
+            "git -C a/vendor/tor -c user.name=Fixture "
+            "-c user.email=fixture@example.invalid commit -qm source; "
+            "git -C a add vendor/tor; "
+            "git -C a -c user.name=Fixture -c user.email=fixture@example.invalid "
+            "commit -qm source; cp -a a b; "
+            "printf archive > a/vendor/tor/libtor.a; "
+            "printf archive > b/vendor/tor/libtor.a; "
+            "printf receipt-a > a/vendor/tor/.provenance; "
+            "printf receipt-b > b/vendor/tor/.provenance; "
+            "script=\"%s/tools/dev/source-identity.sh\"; "
+            "helper=$(\"${script%%/*}/source-identity-batch-bootstrap.sh\"); "
+            "[ -n \"$helper\" ] && [ -x \"$helper\" ]; "
+            "\"$helper\" check-tags < /dev/null; "
+            "printf helper=; sha256sum \"$helper\"; "
+            "id() { value=$( (cd \"$1\"; "
+            "ZCL_SOURCE_IDENTITY_BATCH_DISABLE=\"$2\" \"$script\" capture-record) "
+            "| cut -d\" \" -f1) || return 1; "
+            "[[ $value =~ ^[0-9a-f]{64}$ ]] || return 1; "
+            "printf \"%%s\\n\" \"$value\"; }; "
+            "same() { got=$(id b \"$1\") || exit 1; "
+            "if [ \"$base\" != \"$got\" ]; then "
+            "printf \"receipt-only identity mismatch: expected=%%s actual=%%s\\n\" "
+            "\"$base\" \"$got\" >&2; exit 1; fi; }; "
+            "different() { got=$(id b \"$1\") || exit 1; "
+            "[ \"$base\" != \"$got\" ]; }; "
+            "for fallback in 0 1; do "
+            "base=$(id a $fallback); "
+            "[[ $base =~ ^[0-9a-f]{64}$ ]]; "
+            "same $fallback; "
+            "for file in input.c input.h libtor.a extra.c; do "
+            "[ ! -e b/vendor/tor/$file ] || cp b/vendor/tor/$file saved; "
+            "printf changed > b/vendor/tor/$file; "
+            "different $fallback; "
+            "if [ -e saved ]; then mv saved b/vendor/tor/$file; "
+            "else rm b/vendor/tor/$file; fi; done; "
+            "same $fallback; "
+            "printf other > b/.provenance; "
+            "different $fallback; rm b/.provenance; "
+            "done; native=$(id a 0); fallback=$(id a 1); "
+            "[ \"$native\" = \"$fallback\" ]; "
+            "(cd a; \"$script\" paths) | grep -Fx vendor/tor/.provenance; "
+            "git -C a/vendor/tor add .provenance; "
+            "tracked=$(id a 1); printf receipt-changed > a/vendor/tor/.provenance; "
+            "changed=$(id a 1); [ \"$tracked\" != \"$changed\" ]; "
+            "native=$(id a 0); [ \"$native\" = \"$changed\" ]; "
+            "printf helper-after=; sha256sum \"$helper\"'", work, origin);
+        ASSERT(n > 0 && (size_t)n < sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+        PASS();
+    } _test_next:;
+    if (work[0]) test_rm_rf_recursive(work);
+    return failures;
+}
+
 int test_source_identity_authority(void)
 {
     int failures = 0;
@@ -890,6 +959,7 @@ int test_source_identity_authority(void)
     failures += sia_negative_control_positional_reader();
     failures += sia_healthcheck_reader_refuses_ambiguity();
     failures += sia_precommit_source_action();
+    failures += sia_tor_receipt_is_not_source();
 #if !defined(_WIN32)
     failures += sia_digest_cache_concurrent();
     failures += sia_digest_cache_absent_directory();
