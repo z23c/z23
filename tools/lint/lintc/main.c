@@ -246,6 +246,7 @@ static const struct lint_gate k_gates[] = {
     { "check-git-hooks-installed", check_git_hooks_installed_run,
       check_git_hooks_installed_selftest },
     { "check-fleet-facts", check_fleet_facts_run, check_fleet_facts_selftest },
+    { "check-fleet-vitals", check_fleet_vitals_run, check_fleet_vitals_selftest },
     { "check-fleet-observations", check_fleet_observations_run,
       check_fleet_observations_selftest },
     { "check-log-macro-return-type", check_log_macro_return_type_run,

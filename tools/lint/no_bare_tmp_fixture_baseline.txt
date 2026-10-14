@@ -162,6 +162,7 @@ tools/lint/lintc/gate_doc_index.c 1
 tools/lint/lintc/gate_dumper_never_blocks.c 1
 tools/lint/lintc/gate_flag_registry.c 2
 tools/lint/lintc/gate_fleet_facts_selftest.c 1
+tools/lint/lintc/gate_fleet_vitals.c 2
 tools/lint/lintc/gate_function_complexity.c 1
 tools/lint/lintc/gate_generated_artifact_contradictions_workers.c 1
 tools/lint/lintc/gate_git_hooks_installed.c 1

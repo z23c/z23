@@ -10,7 +10,7 @@
  *
  *   engine/modules/fleetledger/src/fleet_ledger_catalog.c   the subject enum
  *   docs/FLEET_LEDGER.md                                    the rendered table
- *   tools/lint/check_fleet_vitals.sh                        the gate
+ *   tools/lint/lintc/gate_fleet_vitals.c                the gate
  *
  * Row shape:
  *

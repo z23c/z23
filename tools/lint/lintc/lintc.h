@@ -445,6 +445,8 @@ int check_git_hooks_installed_run(int argc, char **argv);
 int check_git_hooks_installed_selftest(void);
 int check_fleet_facts_run(int argc, char **argv);
 int check_fleet_facts_selftest(void);
+int check_fleet_vitals_run(int argc, char **argv);
+int check_fleet_vitals_selftest(void);
 int check_fleet_observations_run(int argc, char **argv);
 int check_fleet_observations_selftest(void);
 int check_log_macro_return_type_run(int argc, char **argv);

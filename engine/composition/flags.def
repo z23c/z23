@@ -975,13 +975,13 @@ Z23_FLAG("ZCL_FLEET_OBS_ROOT", "env_build", "-", "-",
 Z23_FLAG("ZCL_FLEET_STATE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/fleet_source_status.sh:auto")
 Z23_FLAG("ZCL_FLEET_VITALS_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_fleet_vitals.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fleet_vitals.c:auto")
 Z23_FLAG("ZCL_FLEET_VITALS_DOC", "env_build", "docs/FLEET_LEDGER.md", "-",
-          "undocumented; first use tools/lint/check_fleet_vitals.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fleet_vitals.c:auto")
 Z23_FLAG("ZCL_FLEET_VITALS_FLOOR", "env_build", "30", "-",
-          "undocumented; first use tools/lint/check_fleet_vitals.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fleet_vitals.c:auto")
 Z23_FLAG("ZCL_FLEET_VITALS_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_fleet_vitals.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fleet_vitals.c:auto")
 Z23_FLAG("ZCL_FOLD_INRAM", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_mint_anchor_preflight.c:auto")
 Z23_FLAG("ZCL_FOLD_INRAM_FLUSH_EVERY", "env_runtime", "-", "-",

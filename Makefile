@@ -6530,6 +6530,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_blocker_escape.c \
     tools/lint/lintc/gate_git_hooks_installed.c \
     tools/lint/lintc/gate_fleet_facts.c \
+    tools/lint/lintc/gate_fleet_vitals.c \
     tools/lint/lintc/gate_fleet_facts_selftest.c \
     tools/lint/lintc/gate_fleet_observations.c \
     tools/lint/lintc/gate_fleet_observations_proc.c \
@@ -13625,10 +13626,10 @@ check-fleet-observations: $(LINTC_TOOL) $(BIN_DIR)/z23-fleet-observe
 	@./tools/lint/check_fleet_observations.sh --selftest
 	@./tools/lint/check_fleet_observations.sh
 
-check-fleet-vitals:
+check-fleet-vitals: $(LINTC_TOOL)
 	@echo "══ LINT: the fleet vitals catalog is closed and its table matches ══"
-	@./tools/lint/check_fleet_vitals.sh --selftest
-	@./tools/lint/check_fleet_vitals.sh
+	@./build/bin/z23-lint check-fleet-vitals --selftest
+	@./build/bin/z23-lint check-fleet-vitals
 
 check-prompt-templates: $(LINTC_TOOL)
 	@echo "══ LINT: every prompt template names a declared section ══"

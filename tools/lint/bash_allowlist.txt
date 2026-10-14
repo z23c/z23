@@ -175,7 +175,6 @@ tools/lint/check_clang_portability.sh
 tools/lint/check_determinism_ratchet.sh
 tools/lint/check_discarded_status.sh
 tools/lint/check_doc_claims.sh
-tools/lint/check_fleet_vitals.sh
 tools/lint/check_fortify_masked_decls.sh
 tools/lint/check_fuzz_artifact_replay.sh
 tools/lint/check_hotswap_module_imports.sh
