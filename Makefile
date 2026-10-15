@@ -6613,6 +6613,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_orient_facts.c \
     tools/lint/lintc/gate_orient_facts_selftest.c \
     tools/lint/lintc/gate_tor_provenance.c \
+    tools/lint/lintc/gate_markdown_links.c \
     tools/lint/lintc/gate_tor_provenance_selftest.c \
     $(LINTC_PREMISE_SRCS) \
     tools/lint/lintc/main.c
@@ -14549,9 +14550,9 @@ check-doc-accuracy:
 # Markdown as it exists in the worktree; fail on missing/escaping relative
 # files and directories while leaving network URIs, anchors, images, and
 # generated placeholders outside this filesystem-only contract.
-check-markdown-links:
+check-markdown-links: $(LINTC_TOOL)
 	@echo "══ LINT: local Markdown targets ══"
-	@./tools/lint/check_markdown_links.sh .
+	@./build/bin/z23-lint check-markdown-links .
 
 # check-markdown-links covers Markdown LINK targets and explicitly excludes
 # inline code. Every dead path an agent actually trusts is inline code — a doc

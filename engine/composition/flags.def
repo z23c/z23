@@ -1520,7 +1520,7 @@ Z23_FLAG("ZCL_LONGFN_LIB_ROOTS", "env_build", "-", "-",
 Z23_FLAG("ZCL_MACOS_CAPABILITY_MATRIX", "env_build", "-", "-",
           "undocumented; first use tools/scripts/macos_acceptance.sh:auto")
 Z23_FLAG("ZCL_MARKDOWN_LINKS_SELFTEST", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_markdown_links.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_markdown_links.c:auto")
 Z23_FLAG("ZCL_MARKET_HELPER", "env_build", "-", "-",
           "undocumented; first use tools/dev/market_acceptance.sh:auto")
 Z23_FLAG("ZCL_MAX_BLOCK_ROLLBACK", "env_runtime", "-", "-",

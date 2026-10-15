@@ -217,6 +217,8 @@ static const struct lint_gate k_gates[] = {
     { "check-app-bundle-reproducible", check_app_bundle_reproducible_run,
       check_app_bundle_reproducible_selftest },
     { "check-no-new-bash", check_no_new_bash_run, check_no_new_bash_selftest },
+    { "check-markdown-links", check_markdown_links_run,
+      check_markdown_links_selftest },
     { "check-no-bare-tmp-fixture", check_no_bare_tmp_fixture_run,
       check_no_bare_tmp_fixture_selftest },
     { "check-network-tool-hardening", check_network_tool_hardening_run,

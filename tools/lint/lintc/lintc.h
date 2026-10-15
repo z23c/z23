@@ -414,6 +414,8 @@ int check_app_bundle_reproducible_run(int argc, char **argv);
 int check_app_bundle_reproducible_selftest(void);
 int check_no_new_bash_run(int argc, char **argv);
 int check_no_new_bash_selftest(void);
+int check_markdown_links_run(int argc, char **argv);
+int check_markdown_links_selftest(void);
 int check_no_bare_tmp_fixture_run(int argc, char **argv);
 int check_no_bare_tmp_fixture_selftest(void);
 int check_network_tool_hardening_run(int argc, char **argv);
