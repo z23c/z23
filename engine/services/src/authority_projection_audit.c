@@ -232,9 +232,7 @@ static void ap_collect_diff(sqlite3 *pdb, sqlite3 *pj)
     if (sqlite3_prepare_v2(pdb,
             "SELECT txid, vout, value, height FROM coins ORDER BY txid, vout",
             -1, &a, NULL) == SQLITE_OK &&
-        sqlite3_prepare_v2(pj,
-            "SELECT txid, vout, value, height FROM utxos ORDER BY txid, vout",
-            -1, &b, NULL) == SQLITE_OK) {
+        utxo_mirror_prepare_key_scan(pj, &b) == SQLITE_OK) {
         int ra = sqlite3_step(a);  // raw-sql-ok:progress-kv-kernel-store
         int rb = sqlite3_step(b);  // raw-sql-ok:progress-kv-kernel-store
         while (n < AP_DIFF_MAX && (ra == SQLITE_ROW || rb == SQLITE_ROW)) {

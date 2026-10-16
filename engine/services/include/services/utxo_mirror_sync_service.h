@@ -48,6 +48,7 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <sqlite3.h>
 
 struct node_db;
 
@@ -168,6 +169,11 @@ int64_t utxo_mirror_rebuild_now(struct utxo_mirror_sync_service *svc);
  * frontier and before the rebuild opens its snapshot, so a test can advance
  * coins_kv in that window. NULL clears. Never set in production. */
 void utxo_mirror_sync_test_set_pre_snapshot_hook(void (*fn)(void *), void *ctx);
+
+/* Prepare the key-ordered (txid, vout, value, height) scan of the mirror for the
+ * authority-vs-projection audit. The mirror reader lives in this unit so the
+ * utxos-mirror reader freeze (check-no-utxos-mirror-read) stays closed. */
+int utxo_mirror_prepare_key_scan(sqlite3 *db, sqlite3_stmt **out);
 
 struct json_value;
 bool utxo_mirror_sync_dump_state_json(struct json_value *out,

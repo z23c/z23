@@ -969,3 +969,10 @@ void utxo_mirror_sync_stop(struct utxo_mirror_sync_service *svc)
     pthread_cond_destroy(&svc->ready_cond);
     printf("[utxo_mirror] stopped\n");
 }
+
+int utxo_mirror_prepare_key_scan(sqlite3 *db, sqlite3_stmt **out)
+{
+    return sqlite3_prepare_v2(
+        db, "SELECT txid, vout, value, height FROM utxos ORDER BY txid, vout",
+        -1, out, NULL);
+}
