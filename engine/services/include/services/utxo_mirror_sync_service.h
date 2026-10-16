@@ -152,16 +152,19 @@ bool utxo_mirror_sync_audit_snapshot(uint64_t *generation_out);
 
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe. */
 /* Typed failures of a wholesale rebuild (negative return of
- * utxo_mirror_rebuild_now). Any failure rolls node.db back: the previous
- * mirror stays byte-identical. */
+ * utxo_mirror_rebuild_now). Ordinary failures establish no successful repair;
+ * an opened write transaction is rolled back. UNSETTLED means restoration
+ * is unproven after failed rollback; quarantine remains. */
 #define UTXO_MIRROR_REBUILD_ERROR            (-1)
 #define UTXO_MIRROR_REBUILD_STOPPED          (-2)
 #define UTXO_MIRROR_REBUILD_VERIFY_MISMATCH  (-3)
+#define UTXO_MIRROR_REBUILD_UNSETTLED        (-4)
 
 /* Operator repair: rebuild the whole mirror from ONE coins_kv snapshot, verify
  * the staged rows against that snapshot's SHA3 commitment, and only then
  * commit (the commit is the atomic swap). Clears quarantine on success and
- * leaves it set on failure. Returns the rows written, or a negative
+ * leaves it set on failure. UNSETTLED requires operator inspection; do not
+ * assume the previous mirror was restored. Returns rows written, or a negative
  * UTXO_MIRROR_REBUILD_* code. Never writes coins_kv. */
 int64_t utxo_mirror_rebuild_now(struct utxo_mirror_sync_service *svc);
 

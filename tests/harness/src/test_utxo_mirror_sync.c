@@ -392,6 +392,160 @@ static int ums_test_audit_diff(struct utxo_mirror_sync_service *svc,
     return failures;
 }
 
+/* Real SQLite failures in the staged SELECT, without replacing production
+ * hashing or injecting fabricated roots. Callbacks affect this fixture DB only. */
+struct ums_scan_fault {
+    sqlite3 *db;
+    bool prepare_denied;
+    bool deny_rollback;
+    bool rollback_denied;
+    bool trace_started;
+    bool interrupted;
+};
+
+static int ums_deny_staged_read(void *opaque, int action, const char *table,
+    const char *column, const char *db_name, const char *trigger)
+{
+    struct ums_scan_fault *f = opaque;
+    (void)db_name; (void)trigger;
+    if (f->deny_rollback && action == SQLITE_TRANSACTION && table && !strcmp(table, "ROLLBACK")) {
+        f->rollback_denied = true;
+        return SQLITE_DENY;
+    }
+    if (!f->prepare_denied && action == SQLITE_READ && table && column &&
+        !strcmp(table, "utxos") && !strcmp(column, "script")) {
+        f->prepare_denied = true;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int ums_interrupt_staged_step(void *opaque)
+{
+    struct ums_scan_fault *f = opaque;
+    if (f->interrupted) return 0;
+    f->interrupted = true;
+    return 1;
+}
+
+static int ums_trace_staged_step(unsigned type, void *opaque, void *statement,
+    void *detail)
+{
+    struct ums_scan_fault *f = opaque;
+    (void)detail;
+    const char *sql = sqlite3_sql(statement);
+    if (type == SQLITE_TRACE_STMT && !f->trace_started && sql &&
+        !strcmp(sql, "SELECT txid, vout, value, height, is_coinbase, script FROM utxos ORDER BY txid, vout")) {
+        f->trace_started = true;
+        sqlite3_progress_handler(f->db, 1, ums_interrupt_staged_step, f);
+    }
+    return 0;
+}
+
+static bool ums_old_mirror_intact(struct utxo_mirror_sync_service *svc,
+    struct node_db *ndb, int64_t cursor, const uint8_t expected[32])
+{
+    int64_t actual = -1;
+    uint8_t root[32];
+    uint64_t count = 0;
+    utxo_commitment_sha3_compute(ndb->db, root, &count);
+    return count == 2 && !memcmp(root, expected, 32) && node_db_state_get_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &actual) &&
+        actual == cursor && db_utxo_count(ndb) == 2 &&
+        atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED;
+}
+
+/* The source frontier alone cannot authorize replacing a valid mirror. */
+static int ums_test_operator_admission(struct utxo_mirror_sync_service *svc,
+    struct node_db *ndb, sqlite3 *pdb)
+{
+    int failures = 0;
+    uint8_t before[32];
+    uint64_t before_count = 0;
+    utxo_commitment_sha3_compute(ndb->db, before, &before_count);
+    UMS_CHECK("operator: baseline mirror has two rows", before_count == 2);
+    UMS_CHECK("operator: remove migration marker",
+        progress_meta_delete(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
+    UMS_CHECK("operator: absent migration evidence refuses",
+        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_ERROR);
+    UMS_CHECK("operator: absent evidence preserves old mirror and quarantine",
+        ums_old_mirror_intact(svc, ndb, 102, before));
+    const uint8_t malformed[2] = {1, 1};
+    UMS_CHECK("operator: malformed marker installed",
+        progress_meta_set(pdb, COINS_KV_MIGRATION_COMPLETE_KEY, malformed, sizeof(malformed)));
+    UMS_CHECK("operator: malformed migration evidence refuses",
+        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_ERROR);
+    UMS_CHECK("operator: malformed evidence preserves old mirror and quarantine",
+        ums_old_mirror_intact(svc, ndb, 102, before));
+    UMS_CHECK("operator: genuine migration evidence restored",
+        coins_kv_mark_migration_complete(pdb));
+    uint8_t a[32], b[32]; ums_txid(a, 0x51); ums_txid(b, 0x52);
+    UMS_CHECK("operator: empty the SQL source",
+        coins_kv_spend(pdb, a, 0) && coins_kv_spend(pdb, b, 0) &&
+        coins_kv_count_sqlite(pdb) == 0);
+    UMS_CHECK("operator: empty source refuses despite present frontier and marker",
+        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_ERROR);
+    UMS_CHECK("operator: empty source preserves old mirror and quarantine",
+        ums_old_mirror_intact(svc, ndb, 102, before));
+    UMS_CHECK("operator: source restored",
+        ums_add_coin(pdb, 0x51, 1000, 100) && ums_add_coin(pdb, 0x52, 2000, 101));
+    return failures;
+}
+
+static int ums_test_staged_read_errors(struct utxo_mirror_sync_service *svc,
+    struct node_db *ndb)
+{
+    int failures = 0;
+    uint8_t before[32];
+    uint64_t before_count = 0;
+    utxo_commitment_sha3_compute(ndb->db, before, &before_count);
+    UMS_CHECK("operator: baseline mirror has two rows", before_count == 2);
+    struct ums_scan_fault f = {.db = ndb->db};
+    UMS_CHECK("operator: install staged prepare denial",
+        sqlite3_set_authorizer(ndb->db, ums_deny_staged_read, &f) == SQLITE_OK);
+    int64_t result = utxo_mirror_rebuild_now(svc);
+    sqlite3_set_authorizer(ndb->db, NULL, NULL);
+    UMS_CHECK("operator: real staged prepare error is not a root mismatch",
+        f.prepare_denied && result == UTXO_MIRROR_REBUILD_ERROR);
+    UMS_CHECK("operator: prepare error rollback preserves old mirror and quarantine",
+        ums_old_mirror_intact(svc, ndb, 102, before));
+    f = (struct ums_scan_fault){.db = ndb->db};
+    UMS_CHECK("operator: install staged step interruption",
+        sqlite3_trace_v2(ndb->db, SQLITE_TRACE_STMT, ums_trace_staged_step, &f) == SQLITE_OK);
+    result = utxo_mirror_rebuild_now(svc);
+    sqlite3_trace_v2(ndb->db, 0, NULL, NULL);
+    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    UMS_CHECK("operator: real staged step error is not a root mismatch",
+        f.trace_started && f.interrupted && result == UTXO_MIRROR_REBUILD_ERROR);
+    UMS_CHECK("operator: step error rollback preserves old mirror and quarantine",
+        ums_old_mirror_intact(svc, ndb, 102, before));
+    return failures;
+}
+
+/* A real SQLite authorizer refusal of rollback must not report restoration.
+ * Remove the fixture refusal and settle the transaction before later cases. */
+static int ums_test_rollback_unsettled(struct utxo_mirror_sync_service *svc,
+    struct node_db *ndb)
+{
+    int failures = 0;
+    uint8_t before[32];
+    uint64_t count = 0;
+    utxo_commitment_sha3_compute(ndb->db, before, &count);
+    struct ums_scan_fault f = {.db = ndb->db, .deny_rollback = true};
+    UMS_CHECK("operator: install rollback refusal",
+        sqlite3_set_authorizer(ndb->db, ums_deny_staged_read, &f) == SQLITE_OK);
+    int64_t result = utxo_mirror_rebuild_now(svc);
+    sqlite3_set_authorizer(ndb->db, NULL, NULL);
+    UMS_CHECK("operator: failed rollback is explicitly unsettled",
+        f.prepare_denied && f.rollback_denied && result == UTXO_MIRROR_REBUILD_UNSETTLED);
+    UMS_CHECK("operator: unsettled rebuild never clears quarantine",
+        atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED);
+    if (!sqlite3_get_autocommit(ndb->db))
+        UMS_CHECK("operator: fixture settles its retained transaction", node_db_rollback(ndb));
+    UMS_CHECK("operator: explicit fixture rollback restores old mirror",
+        count == 2 && ums_old_mirror_intact(svc, ndb, 102, before));
+    return failures;
+}
+
 static int ums_test_rebuild_now(void)
 {
     int failures = 0;
@@ -421,6 +575,10 @@ static int ums_test_rebuild_now(void)
     utxo_mirror_sync_init(&svc, &ndb);
     UMS_CHECK("rebuild_now: initial pass builds 2 rows",
               utxo_mirror_sync_run_once(&svc) == 2);
+
+    failures += ums_test_operator_admission(&svc, &ndb, pdb);
+    failures += ums_test_staged_read_errors(&svc, &ndb);
+    failures += ums_test_rollback_unsettled(&svc, &ndb);
 
     /* A source row the mirror cannot represent (oversize script) makes the
      * staged set differ from the snapshot commitment: the rebuild must roll

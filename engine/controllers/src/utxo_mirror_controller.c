@@ -26,6 +26,14 @@ void zcl_native_handle_utxo_mirror_rebuild(
         return;
     }
     int64_t rows = utxo_mirror_rebuild_now(svc);
+    if (rows == UTXO_MIRROR_REBUILD_UNSETTLED) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_FAILED, "ROLLBACK_UNSETTLED", "handle",
+            false, true, "rebuild rollback failed; mirror restoration is "
+            "unproven and remains quarantined; operator inspection required",
+            "ops.recovery.utxo_mirror");
+        return;
+    }
     if (rows < 0) {
         const char *code = rows == UTXO_MIRROR_REBUILD_VERIFY_MISMATCH
                                ? "VERIFY_MISMATCH"
@@ -34,8 +42,8 @@ void zcl_native_handle_utxo_mirror_rebuild(
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, code, "handle",
                                false, false,
-                               "the rebuild rolled back; the previous mirror "
-                               "is unchanged", code);
+                               "the rebuild did not complete; no successful "
+                               "repair is established", code);
         return;
     }
     json_set_object(&reply->data);
