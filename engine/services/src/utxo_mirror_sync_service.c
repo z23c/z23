@@ -15,6 +15,7 @@
 #include "services/utxo_mirror_delta.h"
 
 #include "coins/utxo_commitment.h"
+#include "crypto/sha3.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
 #include "models/database.h"
@@ -294,6 +295,35 @@ mirror_rebuild_fold_row(struct node_db *ndb, sqlite3_stmt *sel,
     return MIRROR_ROW_FOLDED;
 }
 
+#define MIRROR_REBUILD_STOPPED          (-2)
+#define MIRROR_REBUILD_VERIFY_MISMATCH  (-3)
+
+static void (*mirror_pre_snapshot_hook)(void *);
+static void *mirror_pre_snapshot_ctx;
+
+void utxo_mirror_sync_test_set_pre_snapshot_hook(void (*fn)(void *), void *ctx)
+{
+    mirror_pre_snapshot_hook = fn;
+    mirror_pre_snapshot_ctx = ctx;
+}
+
+/* Feed one source row into the canonical SHA3 stream exactly as
+ * coins_kv_commitment() does (rows with a short txid are skipped there too). */
+static void mirror_rebuild_source_fold(struct sha3_256_ctx *ctx,
+                                       sqlite3_stmt *sel)
+{
+    const uint8_t *txid = sqlite3_column_blob(sel, 0);
+    if (!txid || sqlite3_column_bytes(sel, 0) < 32)
+        return;
+    const uint8_t *script = sqlite3_column_blob(sel, 5);
+    int slen = sqlite3_column_bytes(sel, 5);
+    utxo_commitment_sha3_write_record(
+        ctx, txid, (uint32_t)sqlite3_column_int(sel, 1),
+        sqlite3_column_int64(sel, 2), slen > 0 ? script : NULL,
+        (uint32_t)(slen > 0 ? slen : 0), (uint32_t)sqlite3_column_int(sel, 3),
+        (uint8_t)(sqlite3_column_int(sel, 4) ? 1 : 0));
+}
+
 /* Stop responsiveness for the wholesale rebuild: the walk below runs the
  * entire coins table (millions of rows) on the service thread, and a walk
  * that never polls the stop flag keeps the thread alive past the
@@ -316,9 +346,13 @@ static bool mirror_rebuild_stop_polled(const _Atomic bool *stop,
  * recomputes from scratch, so utxo_mirror_delta_apply can incrementally
  * maintain it from here on instead of the boot-time O(n) refresh doing it. */
 static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
-                                            int32_t frontier,
+                                            int32_t *frontier_out,
                                             const _Atomic bool *stop)
 {
+    int32_t frontier = -1;
+    if (mirror_pre_snapshot_hook)
+        mirror_pre_snapshot_hook(mirror_pre_snapshot_ctx);
+
     if (!ndb || !ndb->open)
         LOG_RETURN(-1, "utxo_mirror", "rebuild: node.db unavailable");
 
@@ -340,6 +374,19 @@ static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
                    pkv_path);
     }
     sqlite3_busy_timeout(rdb, 5000);
+
+    /* ONE read snapshot for the frontier AND the scan. The frontier read is
+     * the first statement of the read transaction, so WAL pins the snapshot
+     * there; the coins scan below runs in the same transaction and therefore
+     * reflects exactly coins_applied_height == frontier. Reading the frontier
+     * earlier (under the lock) and scanning later let the reducer commit in
+     * between: rows from height N+k were stamped as height N. */
+    bool fr_found = false;
+    if (sqlite3_exec(rdb, "BEGIN", NULL, NULL, NULL) != SQLITE_OK ||
+        !coins_kv_get_applied_height(rdb, &frontier, &fr_found) || !fr_found) {
+        sqlite3_close(rdb);
+        LOG_RETURN(-1, "utxo_mirror", "rebuild: snapshot frontier unavailable");
+    }
 
     sqlite3_stmt *sel = NULL;
     if (sqlite3_prepare_v2(rdb,
@@ -370,6 +417,11 @@ static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
     int64_t written = 0;
     struct utxo_commitment uc;
     utxo_commitment_init(&uc);
+    /* Source-side canonical SHA3 over EVERY well-formed snapshot row, the
+     * exact record stream coins_kv_commitment() emits. Compared below with
+     * the SHA3 of the staged utxos before anything commits. */
+    struct sha3_256_ctx src_sha;
+    sha3_256_init(&src_sha);
 
     while (ok) {
         int rc = sqlite3_step(sel);  // raw-sql-ok:progress-kv-kernel-store
@@ -391,6 +443,7 @@ static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
             break;
         }
 
+        mirror_rebuild_source_fold(&src_sha, sel);
         enum mirror_row_fold rf = mirror_rebuild_fold_row(ndb, sel, &uc);
         if (rf == MIRROR_ROW_FAILED) {
             ok = false;
@@ -407,9 +460,29 @@ static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
         if (!node_db_rollback(ndb))
             LOG_WARN("utxo_mirror", "rebuild: node.db ROLLBACK failed after error");
         if (stopped)
-            return -2; // raw-return-ok:stop-abort logged above; not an error
+            return MIRROR_REBUILD_STOPPED; // raw-return-ok:stop-abort logged above; not an error
         LOG_RETURN(-1, "utxo_mirror", "rebuild: aborted after %lld rows",
                    (long long)written);
+    }
+
+    /* Verify BEFORE commit: the staged rows must hash to the snapshot's own
+     * commitment. A mismatch (skipped/corrupt row, writer bug) rolls the whole
+     * transaction back; the previous mirror stays byte-identical. */
+    {
+        uint8_t src_root[32], stg_root[32];
+        uint64_t stg_count = 0;
+        sha3_256_finalize(&src_sha, src_root);
+        utxo_commitment_sha3_compute(ndb->db, stg_root, &stg_count);
+        if (memcmp(src_root, stg_root, 32) != 0) {
+            if (!node_db_rollback(ndb))
+                LOG_WARN("utxo_mirror",
+                         "rebuild: node.db ROLLBACK failed after verify");
+            LOG_WARN("utxo_mirror",
+                     "rebuild: staged commitment != coins_kv snapshot "
+                     "commitment at height=%d (%lld rows) — rolled back",
+                     frontier, (long long)written);
+            return MIRROR_REBUILD_VERIFY_MISMATCH;
+        }
     }
 
     /* Height-stamp the freshly rebuilt checkpoint in the SAME transaction —
@@ -450,6 +523,7 @@ static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
         LOG_RETURN(-1, "utxo_mirror", "rebuild: node.db COMMIT failed");
     }
 
+    *frontier_out = frontier;
     return written;
 }
 
@@ -506,9 +580,10 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
     }
 
     atomic_store(&r->svc->mirror_health, UTXO_MIRROR_AUDITING);
-    r->written = mirror_rebuild_from_coins_kv(ndb, r->frontier,
+    int32_t snap_h = r->frontier;
+    r->written = mirror_rebuild_from_coins_kv(ndb, &snap_h,
                                               &r->svc->stop_requested);
-    if (r->written == -2) {
+    if (r->written == MIRROR_REBUILD_STOPPED) {
         /* Stopped mid-rebuild (shutdown) and rolled back: the mirror is
          * unchanged, so restore HEALTHY — a stop is not corruption and must
          * never quarantine. The service thread exits on the same flag; the
@@ -523,7 +598,7 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
                      platform_time_wall_unix());
         return false;
     }
-    r->applied_through = r->frontier;
+    r->applied_through = snap_h;  /* the SCANNED height, not the earlier read */
     r->cursor_persisted = true;
     atomic_store(&r->svc->mirror_health, UTXO_MIRROR_HEALTHY);
     return true;

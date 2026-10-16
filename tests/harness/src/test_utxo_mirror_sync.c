@@ -265,6 +265,82 @@ static int ums_test_stop_abort_rebuild(void)
     return failures;
 }
 
+/* ── Single-snapshot rebuild ────────────────────────────────────────
+ * The reducer commits between the service's frontier read and the rebuild's
+ * scan. The cursor/commitment stamp must equal the height the scan actually
+ * observed, not the earlier read. */
+struct ums_race_ctx { sqlite3 *pdb; bool ok; };
+
+static void ums_race_hook(void *p)
+{
+    struct ums_race_ctx *c = p;
+    c->ok = ums_add_coin(c->pdb, 0x53, 3000, 102) &&
+            ums_set_frontier(c->pdb, 103);
+}
+
+static bool ums_roots_equal(struct node_db *ndb, sqlite3 *pdb)
+{
+    uint8_t a[32], b[32];
+    uint64_t cnt = 0;
+    if (coins_kv_commitment(pdb, a) != 0)
+        return false;
+    utxo_commitment_sha3_compute(ndb->db, b, &cnt);
+    return memcmp(a, b, 32) == 0;
+}
+
+static int ums_test_snapshot_race(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "utxo_mirror_sync", "race");
+    char ndb_path[600];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
+
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ndb_path);
+    ok = ok && progress_store_open(dir);
+    sqlite3 *pdb = progress_store_db();
+    ok = ok && pdb && coins_kv_ensure_schema(pdb);
+    ok = ok && ums_add_coin(pdb, 0x51, 1000, 100);
+    ok = ok && ums_add_coin(pdb, 0x52, 2000, 101);
+    ok = ok && ums_set_frontier(pdb, 102);
+
+    struct db_service dbsvc;
+    struct app_runtime_context runtime;
+    struct utxo_mirror_sync_service svc;
+    memset(&runtime, 0, sizeof(runtime));
+    db_service_init(&dbsvc);
+    ok = ok && db_service_attach(&dbsvc, &ndb);
+    ok = ok && db_service_start(&dbsvc);
+    runtime.db_service = &dbsvc;
+    app_runtime_set_current(&runtime);
+    utxo_mirror_sync_init(&svc, &ndb);
+
+    struct ums_race_ctx rc = { pdb, false };
+    utxo_mirror_sync_test_set_pre_snapshot_hook(ums_race_hook, &rc);
+    int64_t w = utxo_mirror_sync_run_once(&svc);
+    utxo_mirror_sync_test_set_pre_snapshot_hook(NULL, NULL);
+
+    int64_t cur = -1;
+    (void)node_db_state_get_int(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &cur);
+    UMS_CHECK("race: hook advanced the frontier", rc.ok);
+    UMS_CHECK("race: rebuild scanned the advanced set (3 rows)", w == 3);
+    UMS_CHECK("race: cursor equals the scanned height, not the earlier read",
+              cur == 103);
+    UMS_CHECK("race: mirror root equals coins_kv root",
+              ums_roots_equal(&ndb, pdb));
+    UMS_CHECK("race: next pass is a steady-state no-op",
+              utxo_mirror_sync_run_once(&svc) == 0);
+
+    app_runtime_set_current(NULL);
+    db_service_stop(&dbsvc);
+    progress_store_close();
+    node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    if (!ok) failures++;
+    return failures;
+}
+
 int test_utxo_mirror_sync(void);
 int test_utxo_mirror_sync(void)
 {
@@ -767,6 +843,7 @@ int test_utxo_mirror_sync(void)
     db_service_stop(&dbsvc);
     progress_store_close();
     failures += ums_test_stop_abort_rebuild();
+    failures += ums_test_snapshot_race();
     node_db_close(&ndb);
     test_cleanup_tmpdir(dir);
     return failures;

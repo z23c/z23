@@ -150,6 +150,11 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc);
 bool utxo_mirror_sync_audit_snapshot(uint64_t *generation_out);
 
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe. */
+/* Test seam: called inside a wholesale rebuild after the caller read the
+ * frontier and before the rebuild opens its snapshot, so a test can advance
+ * coins_kv in that window. NULL clears. Never set in production. */
+void utxo_mirror_sync_test_set_pre_snapshot_hook(void (*fn)(void *), void *ctx);
+
 struct json_value;
 bool utxo_mirror_sync_dump_state_json(struct json_value *out,
                                       const char *key);
