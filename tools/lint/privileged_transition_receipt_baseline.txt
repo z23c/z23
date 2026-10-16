@@ -83,6 +83,7 @@ app.shop.want.cancel       exempt: flips one node-local shop_wants.cancelled_uni
 app.shop.want.review       exempt: flips one node-local shop_wants.review_state column; local curation metadata only, never gossiped, no privileged artifact install
 app.swap.initiate          exempt: mints a local HTLC contract row, broadcasts nothing
 app.swap.participate       exempt: mints a local HTLC contract row, broadcasts nothing
+ops.recovery.utxo_mirror    exempt: rebuilds the node.db utxos read-model from a verified coins_kv snapshot in one transaction; never writes coins_kv, no artifact install
 ops.debug.rom_seed.enable  exempt: in-process policy flag flip + JSON persist, no artifact install
 ops.debug.rom_seed.disable exempt: in-process policy flag flip + JSON persist, no artifact install
 ops.debug.rom_fetch.bundle exempt: downloads+content-verifies a file into the datadir only; activation is the separate receipt-gated -install-consensus-bundle path

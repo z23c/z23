@@ -60,9 +60,22 @@ static _Atomic int32_t  g_ap_last_height         = -1;
 static _Atomic uint64_t g_ap_last_auth_count     = 0;
 static _Atomic uint64_t g_ap_last_proj_count     = 0;
 
+static _Atomic int64_t  g_ap_last_auth_h        = -1;
+static _Atomic int64_t  g_ap_last_proj_h        = -1;
+static _Atomic int      g_ap_diff_count         = 0;
+
+/* Unsynced markers are retried at the mirror tick period before the pass is
+ * counted as skipped_unsynced: the projection normally trails the authority by
+ * at most one tick, so one hourly sample landing in that window is not a
+ * verdict. */
+#define AP_UNSYNCED_RETRIES          3
+#define AP_DIFF_MAX                  8
+#define AP_DIFF_ENTRY_MAX            96
+
 static pthread_mutex_t g_ap_detail_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_ap_last_auth_hex[65];
 static char g_ap_last_proj_hex[65];
+static char g_ap_diff_keys[AP_DIFF_MAX * AP_DIFF_ENTRY_MAX];
 
 #ifdef ZCL_TESTING
 struct node_db *g_ap_test_ndb;
@@ -175,6 +188,85 @@ bool ap_audit_apply_verdict(const struct ap_audit_verdict *v,
     return true;
 }
 
+/* ── Differing-key diagnostics ───────────────────────────────────────── */
+
+static int ap_key_cmp(sqlite3_stmt *a, sqlite3_stmt *b)
+{
+    const void *ta = sqlite3_column_blob(a, 0);
+    const void *tb = sqlite3_column_blob(b, 0);
+    int la = sqlite3_column_bytes(a, 0), lb = sqlite3_column_bytes(b, 0);
+    if (la != 32 || lb != 32 || !ta || !tb)
+        return la != lb ? (la < lb ? -1 : 1) : 0;
+    int c = memcmp(ta, tb, 32);
+    if (c != 0)
+        return c < 0 ? -1 : 1;
+    int64_t va = sqlite3_column_int64(a, 1), vb = sqlite3_column_int64(b, 1);
+    return va == vb ? 0 : (va < vb ? -1 : 1);
+}
+
+static void ap_diff_emit(char *buf, size_t cap, size_t *off, char tag,
+                         sqlite3_stmt *st)
+{
+    char hex[65] = {0};
+    const void *t = sqlite3_column_blob(st, 0);
+    if (t && sqlite3_column_bytes(st, 0) == 32)
+        HexStr(t, 32, false, hex, sizeof(hex));
+    int w = snprintf(buf + *off, cap - *off, "%s%c:%s:%lld",
+                     *off ? ";" : "", tag, hex,
+                     (long long)sqlite3_column_int64(st, 1));
+    if (w > 0 && (size_t)w < cap - *off)
+        *off += (size_t)w;
+}
+
+/* Sorted merge of the two PK-ordered scans (coins on the authority side,
+ * utxos on the projection side): O(n) with an early exit after AP_DIFF_MAX
+ * differences. 'a' = only in the authority, 'p' = only in the projection,
+ * 'v' = same outpoint, different value or height. */
+static void ap_collect_diff(sqlite3 *pdb, sqlite3 *pj)
+{
+    char buf[sizeof(g_ap_diff_keys)];
+    size_t off = 0;
+    int n = 0;
+    buf[0] = '\0';
+    sqlite3_stmt *a = NULL, *b = NULL;
+    if (sqlite3_prepare_v2(pdb,
+            "SELECT txid, vout, value, height FROM coins ORDER BY txid, vout",
+            -1, &a, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(pj,
+            "SELECT txid, vout, value, height FROM utxos ORDER BY txid, vout",
+            -1, &b, NULL) == SQLITE_OK) {
+        int ra = sqlite3_step(a);  // raw-sql-ok:progress-kv-kernel-store
+        int rb = sqlite3_step(b);  // raw-sql-ok:progress-kv-kernel-store
+        while (n < AP_DIFF_MAX && (ra == SQLITE_ROW || rb == SQLITE_ROW)) {
+            int c = ra != SQLITE_ROW ? 1 : rb != SQLITE_ROW ? -1
+                                     : ap_key_cmp(a, b);
+            if (c < 0) {
+                ap_diff_emit(buf, sizeof(buf), &off, 'a', a);
+                n++;
+                ra = sqlite3_step(a);  // raw-sql-ok:progress-kv-kernel-store
+            } else if (c > 0) {
+                ap_diff_emit(buf, sizeof(buf), &off, 'p', b);
+                n++;
+                rb = sqlite3_step(b);  // raw-sql-ok:progress-kv-kernel-store
+            } else {
+                if (sqlite3_column_int64(a, 2) != sqlite3_column_int64(b, 2) ||
+                    sqlite3_column_int(a, 3) != sqlite3_column_int(b, 3)) {
+                    ap_diff_emit(buf, sizeof(buf), &off, 'v', a);
+                    n++;
+                }
+                ra = sqlite3_step(a);  // raw-sql-ok:progress-kv-kernel-store
+                rb = sqlite3_step(b);  // raw-sql-ok:progress-kv-kernel-store
+            }
+        }
+    }
+    sqlite3_finalize(a);
+    sqlite3_finalize(b);
+    pthread_mutex_lock(&g_ap_detail_lock);
+    snprintf(g_ap_diff_keys, sizeof(g_ap_diff_keys), "%s", buf);
+    pthread_mutex_unlock(&g_ap_detail_lock);
+    atomic_store(&g_ap_diff_count, n);
+}
+
 /* ── Background pass ─────────────────────────────────────────────────── */
 
 /* Read the two applied-height markers: coins_kv authority frontier
@@ -218,7 +310,19 @@ bool ap_audit_run_once(void)
     int32_t auth_h0 = -1;
     int64_t proj_h0 = -1;
     bool ok0 = false;
-    ap_read_markers(ndb, pdb, &auth_h0, &proj_h0, &ok0);
+    for (int attempt = 0; attempt < AP_UNSYNCED_RETRIES; attempt++) {
+        ap_read_markers(ndb, pdb, &auth_h0, &proj_h0, &ok0);
+        atomic_store(&g_ap_last_auth_h, auth_h0);
+        atomic_store(&g_ap_last_proj_h, proj_h0);
+        if (ok0 && (int64_t)auth_h0 == proj_h0)
+            break;
+#ifdef ZCL_TESTING
+        if (g_ap_test_ndb)
+            continue;
+#endif
+        if (attempt + 1 < AP_UNSYNCED_RETRIES)
+            platform_sleep_ms(UTXO_MIRROR_SYNC_DEFAULT_TICK_SECONDS * 1000);
+    }
     if (!ok0 || (int64_t)auth_h0 != proj_h0) {
         /* Projection legitimately lags/leads the authority during catch-up —
          * NOT a divergence. Only an equal-height pair is byte-comparable. */
@@ -270,6 +374,10 @@ bool ap_audit_run_once(void)
     ap_audit_evaluate(&in, &v);
     (void)ap_audit_apply_verdict(&v, in.height, in.auth_count, in.proj_count,
                                  in.auth_root, in.proj_root);
+    if (v.violated)
+        ap_collect_diff(pdb, ndb->db);
+    else
+        atomic_store(&g_ap_diff_count, 0);
     return true;
 }
 
@@ -325,6 +433,10 @@ void ap_audit_reset_for_test(void)
     pthread_mutex_lock(&g_ap_detail_lock);
     g_ap_last_auth_hex[0] = '\0';
     g_ap_last_proj_hex[0] = '\0';
+    g_ap_diff_keys[0] = '\0';
+    atomic_store(&g_ap_diff_count, 0);
+    atomic_store(&g_ap_last_auth_h, -1);
+    atomic_store(&g_ap_last_proj_h, -1);
     pthread_mutex_unlock(&g_ap_detail_lock);
 }
 
@@ -361,8 +473,22 @@ bool ap_audit_dump_state_json(struct json_value *out, const char *key)
                      (int64_t)atomic_load(&g_ap_last_auth_count));
     json_push_kv_int(out, "last_proj_count",
                      (int64_t)atomic_load(&g_ap_last_proj_count));
-    pthread_mutex_lock(&g_ap_detail_lock);
+    json_push_kv_int(out, "auth_h", atomic_load(&g_ap_last_auth_h));
+    json_push_kv_int(out, "proj_h", atomic_load(&g_ap_last_proj_h));
+    {
+        struct utxo_mirror_sync_service *ms = g_utxo_mirror_sync;
+        int mh = ms ? atomic_load(&ms->mirror_health) : -1;
+        json_push_kv_str(out, "mirror_health",
+                         !ms ? "absent"
+                         : mh == UTXO_MIRROR_QUARANTINED ? "quarantined"
+                         : mh == UTXO_MIRROR_AUDITING ? "auditing" : "healthy");
+        json_push_kv_bool(out, "quarantine",
+                          ms && mh == UTXO_MIRROR_QUARANTINED);
+    }
+    json_push_kv_int(out, "diff_count", atomic_load(&g_ap_diff_count));
+        pthread_mutex_lock(&g_ap_detail_lock);
     json_push_kv_str(out, "last_auth_root", g_ap_last_auth_hex);
+    json_push_kv_str(out, "diff_keys", g_ap_diff_keys);
     json_push_kv_str(out, "last_proj_root", g_ap_last_proj_hex);
     pthread_mutex_unlock(&g_ap_detail_lock);
     return true;

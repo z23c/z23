@@ -924,6 +924,25 @@ ZCL_COMMAND_PLANNED_COMMAND(
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_NONE,
     "recovery rebuild plan/commit handshake is a Wave 2.2 deliverable")
 
+ZCL_COMMAND_READY_COMMAND(
+    "ops.recovery.utxo_mirror", "ops.recovery", "",
+    "Rebuild the utxo projection from the authority",
+    "Rebuilds the node.db utxos projection wholesale from one coins_kv "
+    "snapshot, verifies the staged rows against that snapshot's SHA3 "
+    "commitment, and commits only on a match; a mismatch rolls back and "
+    "leaves the old mirror intact. Clears a sticky quarantine on success. "
+    "Never writes coins_kv.", 0,
+    "recovery,utxo,mirror,projection,quarantine,rebuild",
+    "zcl.command.empty_input.v1", "zcl.utxo_mirror_rebuild.v1", "", "",
+    "z23 ops recovery utxo_mirror",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_utxo_mirror_rebuild)
+
 /* ── ops.host ──────────────────────────────────────────────────────────────
  * Machine-local hygiene for the box this node runs on. Not chain state and
  * not a dev-only convenience: the hourly janitor unit calls this on fleet

@@ -295,9 +295,6 @@ mirror_rebuild_fold_row(struct node_db *ndb, sqlite3_stmt *sel,
     return MIRROR_ROW_FOLDED;
 }
 
-#define MIRROR_REBUILD_STOPPED          (-2)
-#define MIRROR_REBUILD_VERIFY_MISMATCH  (-3)
-
 static void (*mirror_pre_snapshot_hook)(void *);
 static void *mirror_pre_snapshot_ctx;
 
@@ -460,7 +457,7 @@ static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
         if (!node_db_rollback(ndb))
             LOG_WARN("utxo_mirror", "rebuild: node.db ROLLBACK failed after error");
         if (stopped)
-            return MIRROR_REBUILD_STOPPED; // raw-return-ok:stop-abort logged above; not an error
+            return UTXO_MIRROR_REBUILD_STOPPED; // raw-return-ok:stop-abort logged above; not an error
         LOG_RETURN(-1, "utxo_mirror", "rebuild: aborted after %lld rows",
                    (long long)written);
     }
@@ -481,7 +478,7 @@ static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
                      "rebuild: staged commitment != coins_kv snapshot "
                      "commitment at height=%d (%lld rows) — rolled back",
                      frontier, (long long)written);
-            return MIRROR_REBUILD_VERIFY_MISMATCH;
+            return UTXO_MIRROR_REBUILD_VERIFY_MISMATCH;
         }
     }
 
@@ -583,7 +580,7 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
     int32_t snap_h = r->frontier;
     r->written = mirror_rebuild_from_coins_kv(ndb, &snap_h,
                                               &r->svc->stop_requested);
-    if (r->written == MIRROR_REBUILD_STOPPED) {
+    if (r->written == UTXO_MIRROR_REBUILD_STOPPED) {
         /* Stopped mid-rebuild (shutdown) and rolled back: the mirror is
          * unchanged, so restore HEALTHY — a stop is not corruption and must
          * never quarantine. The service thread exits on the same flag; the
@@ -758,6 +755,54 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
     LOG_INFO("utxo_mirror",
              "[utxo_mirror] %s mirror: %lld rows, synced to height %d",
              rebuild.used_delta ? "delta-applied" : "rebuilt",
+             (long long)rebuild.written, rebuild.applied_through);
+    return rebuild.written;
+}
+
+/* ── Operator-driven rebuild ───────────────────────────────── */
+
+int64_t utxo_mirror_rebuild_now(struct utxo_mirror_sync_service *svc)
+{
+    if (!svc || !svc->ndb || !svc->ndb->open)
+        LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
+                   "rebuild_now: node.db unavailable");
+    if (refold_in_progress())
+        LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
+                   "rebuild_now: refused while a refold is in progress");
+
+    int32_t frontier = -1;
+    int64_t coins_count = -1;
+    if (!read_coins_kv_state(&frontier, &coins_count))
+        LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
+                   "rebuild_now: no authoritative frontier");
+
+    /* cursor 0 forces the wholesale branch; the scan stamps its own snapshot
+     * height. Quarantine is cleared only by a verified commit. */
+    struct mirror_rebuild_ctx rebuild = {
+        .svc = svc, .cursor = 0, .frontier = frontier,
+        .mirror_has_rows = false, .applied_through = 0, .written = -1,
+        .cursor_persisted = false, .used_delta = false,
+    };
+    int prior = atomic_load(&svc->mirror_health);
+    atomic_fetch_add(&svc->updates_active, 1u);
+    atomic_fetch_add(&svc->update_generation, 1u);
+    bool lane_ok = mirror_run_db_lane(svc->ndb, mirror_rebuild_and_advance_lane,
+                                      &rebuild);
+    atomic_fetch_add(&svc->update_generation, 1u);
+    atomic_fetch_sub(&svc->updates_active, 1u);
+    if (!lane_ok || rebuild.written < 0) {
+        atomic_store(&svc->last_error_unix, platform_time_wall_unix());
+        if (rebuild.written == UTXO_MIRROR_REBUILD_STOPPED)
+            atomic_store(&svc->mirror_health, prior);
+        return rebuild.written < 0 ? rebuild.written
+                                   : UTXO_MIRROR_REBUILD_ERROR;
+    }
+    atomic_fetch_add(&svc->rebuilds_run, 1);
+    atomic_fetch_add(&svc->rows_written, rebuild.written);
+    atomic_store(&svc->last_mirror_height, (int64_t)rebuild.applied_through);
+    atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
+    LOG_INFO("utxo_mirror",
+             "[utxo_mirror] operator rebuild: %lld rows, synced to height %d",
              (long long)rebuild.written, rebuild.applied_through);
     return rebuild.written;
 }

@@ -150,6 +150,20 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc);
 bool utxo_mirror_sync_audit_snapshot(uint64_t *generation_out);
 
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe. */
+/* Typed failures of a wholesale rebuild (negative return of
+ * utxo_mirror_rebuild_now). Any failure rolls node.db back: the previous
+ * mirror stays byte-identical. */
+#define UTXO_MIRROR_REBUILD_ERROR            (-1)
+#define UTXO_MIRROR_REBUILD_STOPPED          (-2)
+#define UTXO_MIRROR_REBUILD_VERIFY_MISMATCH  (-3)
+
+/* Operator repair: rebuild the whole mirror from ONE coins_kv snapshot, verify
+ * the staged rows against that snapshot's SHA3 commitment, and only then
+ * commit (the commit is the atomic swap). Clears quarantine on success and
+ * leaves it set on failure. Returns the rows written, or a negative
+ * UTXO_MIRROR_REBUILD_* code. Never writes coins_kv. */
+int64_t utxo_mirror_rebuild_now(struct utxo_mirror_sync_service *svc);
+
 /* Test seam: called inside a wholesale rebuild after the caller read the
  * frontier and before the rebuild opens its snapshot, so a test can advance
  * coins_kv in that window. NULL clears. Never set in production. */

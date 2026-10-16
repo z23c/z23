@@ -2732,6 +2732,12 @@ void zcl_native_handle_rom_seed_enable(
 void zcl_native_handle_rom_seed_disable(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+
+/* utxo mirror operator rebuild (engine/controllers/src/utxo_mirror_controller.c)
+ * - see engine/composition/commands/ops.def `ops.recovery.utxo_mirror`. */
+void zcl_native_handle_utxo_mirror_rebuild(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_rom_seed_artifacts(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

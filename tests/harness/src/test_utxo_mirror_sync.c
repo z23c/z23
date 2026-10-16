@@ -26,6 +26,7 @@
 #include "models/utxo.h"
 #include "script/standard.h"
 #include "services/chain_state_service.h"
+#include "services/authority_projection_audit.h"
 #include "services/utxo_mirror_delta.h"
 #include "services/utxo_mirror_sync_service.h"
 #include "storage/coins_kv.h"
@@ -331,6 +332,123 @@ static int ums_test_snapshot_race(void)
               ums_roots_equal(&ndb, pdb));
     UMS_CHECK("race: next pass is a steady-state no-op",
               utxo_mirror_sync_run_once(&svc) == 0);
+
+    app_runtime_set_current(NULL);
+    db_service_stop(&dbsvc);
+    progress_store_close();
+    node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    if (!ok) failures++;
+    return failures;
+}
+
+/* ── Operator rebuild: verify-before-commit, quarantine exit, audit keys ── */
+extern struct node_db *g_ap_test_ndb;
+
+static void ums_hex_key(char out[96], uint8_t tag)
+{
+    uint8_t t[32]; ums_txid(t, tag);
+    for (int i = 0; i < 32; i++) snprintf(out + 2 * i, 3, "%02x", t[i]);
+}
+
+static int ums_test_rebuild_now(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "utxo_mirror_sync", "rebuild_now");
+    char ndb_path[600];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
+
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ndb_path);
+    ok = ok && progress_store_open(dir);
+    sqlite3 *pdb = progress_store_db();
+    ok = ok && pdb && coins_kv_ensure_schema(pdb);
+    ok = ok && ums_add_coin(pdb, 0x51, 1000, 100);
+    ok = ok && ums_add_coin(pdb, 0x52, 2000, 101);
+    ok = ok && ums_set_frontier(pdb, 102);
+
+    struct db_service dbsvc;
+    struct app_runtime_context runtime;
+    struct utxo_mirror_sync_service svc;
+    memset(&runtime, 0, sizeof(runtime));
+    db_service_init(&dbsvc);
+    ok = ok && db_service_attach(&dbsvc, &ndb);
+    ok = ok && db_service_start(&dbsvc);
+    runtime.db_service = &dbsvc;
+    app_runtime_set_current(&runtime);
+    utxo_mirror_sync_init(&svc, &ndb);
+    UMS_CHECK("rebuild_now: initial pass builds 2 rows",
+              utxo_mirror_sync_run_once(&svc) == 2);
+
+    /* A source row the mirror cannot represent (oversize script) makes the
+     * staged set differ from the snapshot commitment: the rebuild must roll
+     * back and leave the old mirror and cursor untouched. */
+    static uint8_t big[10001];
+    uint8_t btx[32]; ums_txid(btx, 0x60);
+    bool added = coins_kv_add(pdb, btx, 0, 5, 102, false, big, sizeof(big)) &&
+                 ums_set_frontier(pdb, 103);
+    UMS_CHECK("rebuild_now: unrepresentable source row added", added);
+    int64_t r = utxo_mirror_rebuild_now(&svc);
+    int64_t cur = -1;
+    (void)node_db_state_get_int(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &cur);
+    UMS_CHECK("rebuild_now: verify mismatch returns the typed error",
+              r == UTXO_MIRROR_REBUILD_VERIFY_MISMATCH);
+    UMS_CHECK("rebuild_now: mismatch left the old mirror intact",
+              db_utxo_count(&ndb) == 2 && cur == 102);
+    UMS_CHECK("rebuild_now: failed rebuild stays quarantined",
+              atomic_load(&svc.mirror_health) == UTXO_MIRROR_QUARANTINED);
+    UMS_CHECK("rebuild_now: quarantined run_once is a no-op",
+              utxo_mirror_sync_run_once(&svc) == 0);
+
+    /* Repair the source, add a good coin: rebuild_now converges from
+     * quarantine and the roots match. */
+    UMS_CHECK("rebuild_now: bad row spent", coins_kv_spend(pdb, btx, 0));
+    UMS_CHECK("rebuild_now: good coin added",
+              ums_add_coin(pdb, 0x53, 3000, 103) && ums_set_frontier(pdb, 104));
+    r = utxo_mirror_rebuild_now(&svc);
+    cur = -1;
+    (void)node_db_state_get_int(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &cur);
+    UMS_CHECK("rebuild_now: converges from quarantine (3 rows)", r == 3);
+    UMS_CHECK("rebuild_now: cursor at the scanned height", cur == 104);
+    UMS_CHECK("rebuild_now: quarantine cleared",
+              atomic_load(&svc.mirror_health) == UTXO_MIRROR_HEALTHY);
+    UMS_CHECK("rebuild_now: roots match", ums_roots_equal(&ndb, pdb));
+
+    /* Audit: inject one projection-only row and one authority-only row at
+     * equal heights; the audit records both keys. */
+    UMS_CHECK("audit: projection-only row", ums_seed_mirror_row(&ndb, 0x77, 50));
+    UMS_CHECK("audit: authority-only row", ums_add_coin(pdb, 0x54, 4000, 104));
+    g_ap_test_ndb = &ndb;
+    g_utxo_mirror_sync = &svc;
+    ap_audit_reset_for_test();
+    UMS_CHECK("audit: pass ran", ap_audit_run_once());
+    struct json_value v = {0};
+    json_set_object(&v);
+    (void)ap_audit_dump_state_json(&v, NULL);
+    const char *keys = json_get_str(json_get(&v, "diff_keys"));
+    char k77[96], k52[96], want_p[128], want_a[128];
+    ums_hex_key(k77, 0x77);
+    ums_hex_key(k52, 0x54);
+    snprintf(want_p, sizeof(want_p), "p:%s:0", k77);
+    snprintf(want_a, sizeof(want_a), "a:%s:0", k52);
+    UMS_CHECK("audit: records the projection-only key",
+              keys && strstr(keys, want_p));
+    UMS_CHECK("audit: records the authority-only key",
+              keys && strstr(keys, want_a));
+    UMS_CHECK("audit: diff_count == 2",
+              json_get_int(json_get(&v, "diff_count")) == 2);
+    UMS_CHECK("audit: reports both heights",
+              json_get_int(json_get(&v, "auth_h")) == 104 &&
+              json_get_int(json_get(&v, "proj_h")) == 104);
+    const char *mh = json_get_str(json_get(&v, "mirror_health"));
+    UMS_CHECK("audit: reports mirror health and quarantine",
+              mh && strcmp(mh, "healthy") == 0 &&
+              !json_get_bool(json_get(&v, "quarantine")));
+    json_free(&v);
+    ap_audit_reset_for_test();
+    g_ap_test_ndb = NULL;
+    g_utxo_mirror_sync = NULL;
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);
@@ -844,6 +962,7 @@ int test_utxo_mirror_sync(void)
     progress_store_close();
     failures += ums_test_stop_abort_rebuild();
     failures += ums_test_snapshot_race();
+    failures += ums_test_rebuild_now();
     node_db_close(&ndb);
     test_cleanup_tmpdir(dir);
     return failures;
