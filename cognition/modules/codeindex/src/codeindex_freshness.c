@@ -137,6 +137,12 @@ bool codeindex_is_stale(struct codeindex *ci, bool *stale)
     if (stale) *stale = true;
     if (!ci || !ci->store) LOG_FAIL("codeindex", "null arg to is_stale");
     if (ci_fresh_memo_hit(ci)) {
+        /* Same bookkeeping the uncached fresh path does. */
+        ci_merkle_free(ci->pending_merkle);
+        ci->pending_merkle = NULL;
+        ci->pending_merkle_snapshot_used = false;
+        ci->pending_merkle_full_rescan = false;
+        ci->pending_merkle_inventory_changed = false;
         if (stale) *stale = false;
         return true;
     }

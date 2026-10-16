@@ -13,6 +13,7 @@
 
 #define _GNU_SOURCE
 #include "codeindex_priv.h"
+#include "codeindex_merkle_internal.h"
 
 #include "platform/file_watch_compat.h"
 #include "util/log_macros.h"
@@ -45,6 +46,7 @@ void ci_test_note_freshness_walk(void)
 #if !defined(_WIN32)
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -76,6 +78,8 @@ struct fw_slot {
     int skips;
     uint8_t merkle[32];
     uint8_t dep[32];
+    pid_t pid;                    /* arming process: a forked child misses */
+    struct merkle_snapshot files; /* the leaves (path, stat key) the walk saw */
     struct ci_fresh_watch *watch;
     char key[PATH_MAX];
 };
@@ -244,6 +248,7 @@ static struct fw_slot *fw_find(const char *key)
 static void fw_clear(struct fw_slot *s)
 {
     fw_free(s->watch);
+    merkle_snapshot_free(&s->files);
     memset(s, 0, sizeof(*s));
 }
 
@@ -280,6 +285,77 @@ static bool fw_stored_digests(struct codeindex *ci, uint8_t merkle[32],
            memcmp(schema, CI_SCHEMA_VERSION, sl) == 0;
 }
 
+/* ── per-file re-stat: what a directory watch cannot see ───────────────── */
+
+/* A write through a hard link outside the watched tree, or through an
+ * existing writable shared mapping, raises no directory event but always
+ * moves the inode's size/mtime/ctime. The memo therefore also re-stats the
+ * recorded leaves (no opendir/readdir) and trusts them only while each
+ * (size, ino, dev, mtime ns, ctime ns) is the one the verifying walk saw. */
+static bool fw_key_matches(const struct ci_merkle_stat_key *k,
+                           const struct stat *st)
+{
+    return k->dev == (uint64_t)st->st_dev && k->ino == (uint64_t)st->st_ino &&
+           k->size == (uint64_t)st->st_size &&
+           k->mtime_sec == (uint64_t)st->st_mtim.tv_sec &&
+           k->mtime_nsec == (uint64_t)st->st_mtim.tv_nsec &&
+           k->ctime_sec == (uint64_t)st->st_ctim.tv_sec &&
+           k->ctime_nsec == (uint64_t)st->st_ctim.tv_nsec;
+}
+
+/* A leaf stored with mtime_nsec == UINT64_MAX was written in the walk's own
+ * second (racy-clean): its key proves nothing, so the walk re-reads its bytes
+ * and so does the memo. */
+static bool fw_racy_leaf_current(const char *root,
+                                 const struct merkle_leaf_rec *leaf)
+{
+    struct ci_merkle_leaf now;
+    bool found = false;
+    return ci_merkle_hash_changed_leaf(root, leaf->path, &now, &found) &&
+           found && memcmp(now.digest.bytes, leaf->digest.bytes, 32) == 0;
+}
+
+static bool fw_leaf_current(int dfd, const char *root,
+                            const struct merkle_leaf_rec *leaf)
+{
+    struct stat st;
+    if (fstatat(dfd, leaf->path, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISREG(st.st_mode))
+        return false;
+    if (leaf->key.mtime_nsec == UINT64_MAX)
+        return fw_racy_leaf_current(root, leaf);
+    return fw_key_matches(&leaf->key, &st);
+}
+
+static bool fw_files_current(const char *root, const struct merkle_snapshot *f)
+{
+    int dfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd < 0) return false;
+    bool ok = f->nleaves > 0;
+    for (uint32_t i = 0; ok && i < f->nleaves; i++)
+        ok = fw_leaf_current(dfd, root, &f->leaves[i]);
+    close(dfd);
+    return ok;
+}
+
+/* Take the sealed snapshot's leaves, but only when its root is the digest
+ * the walk just proved fresh; anything else is not recorded (stays a walk). */
+static bool fw_capture_files(const char *key, const struct codeindex *ci,
+                             struct merkle_snapshot *out)
+{
+    bool found = false;
+    memset(out, 0, sizeof(*out));
+    if (!merkle_snapshot_load(key, out, &found)) return false;
+    const struct merkle_node_rec *root =
+        found ? merkle_find_node(out->nodes, out->nnodes, "") : NULL;
+    bool ok = root && memcmp(root->digest.bytes, ci->fresh_merkle, 32) == 0;
+    free(out->nodes);
+    out->nodes = NULL;
+    out->nnodes = 0;
+    if (!ok) merkle_snapshot_free(out);
+    return ok;
+}
+
 bool ci_fresh_memo_hit(struct codeindex *ci)
 {
     char key[PATH_MAX];
@@ -290,7 +366,8 @@ bool ci_fresh_memo_hit(struct codeindex *ci)
     struct fw_slot *s = fw_find(key);
     bool hit = false;
     if (s && !s->disabled) {
-        if (!fw_quiet(s->watch))
+        if (s->pid != getpid() || !fw_quiet(s->watch) ||
+            !fw_files_current(key, &s->files))
             fw_clear(s);
         else
             hit = memcmp(s->merkle, merkle, 32) == 0 &&
@@ -341,10 +418,13 @@ void ci_fresh_finish(struct ci_fresh_watch *w, struct codeindex *ci, bool fresh)
 {
     if (!w) return;
     pthread_mutex_lock(&g_fw_lock);
-    if (fresh && fw_quiet(w)) {
+    struct merkle_snapshot files;
+    if (fresh && fw_quiet(w) && fw_capture_files(w->key, ci, &files)) {
         struct fw_slot *s = fw_take(w->key);
         fw_clear(s);
         s->used = true;
+        s->pid = getpid();
+        s->files = files;
         memcpy(s->merkle, ci->fresh_merkle, 32);
         memcpy(s->dep, ci->fresh_dep, 32);
         snprintf(s->key, sizeof(s->key), "%s", w->key);

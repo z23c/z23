@@ -12,6 +12,11 @@
 #include "codeindex/codeindex_build.h"
 
 #include <errno.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -288,6 +293,101 @@ static int test_cis_memo_watch_failure_walks_every_time(void)
     return failures;
 }
 
+#if defined(__linux__)
+/* Keep the alias outside every directory watched for this index. Each test
+ * owns its unique parent; even an assertion failure reaches the cleanup. */
+static int test_cis_memo_external_hardlink(void)
+{
+    int failures = 0;
+    char parent[] = "test-tmp/cistale-alias-XXXXXX";
+    char root[512], path[512], alias[512];
+    bool owned = false;
+    int fd = -1;
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: writes through an outside hardlink invalidate live answers") {
+        ASSERT(mkdtemp(parent) != NULL);
+        owned = true;
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
+        ASSERT(cis_seed(root));
+        ASSERT(cis_write(root, "tools/deep/er/x.c", "int x(void) { return 0; }\n"));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/tools/deep/er/x.c", root) < sizeof(path));
+        ASSERT((size_t)snprintf(alias, sizeof(alias), "%s/alias.c", parent) < sizeof(alias));
+        ASSERT(link(path, alias) == 0);
+        /* The alias exists before the index and its watch are established. */
+        ci = codeindex_open(root);
+        ASSERT(ci != NULL);
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(cis_verdict(ci, false));
+        fd = open(alias, O_WRONLY | O_CLOEXEC);
+        ASSERT(fd >= 0);
+        ASSERT(pwrite(fd, "xyz", 3, 0) == 3);
+        int close_rc = close(fd);
+        fd = -1;
+        ASSERT(close_rc == 0);
+        ASSERT(cis_verdict(ci, true));
+        PASS();
+    } _test_next:;
+    if (fd >= 0) close(fd);
+    codeindex_close(ci);
+    if (owned) test_rm_rf_recursive(parent);
+    return failures;
+}
+
+static int test_cis_memo_existing_shared_mapping(void)
+{
+    int failures = 0;
+    char parent[] = "test-tmp/cistale-map-XXXXXX";
+    char root[512], path[512];
+    bool owned = false;
+    int fd = -1;
+    const size_t len = sizeof("int x(void) { return 0; }\n") - 1;
+    char *mapping = MAP_FAILED;
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: established shared mapping remains live across rebuilds") {
+        ASSERT(mkdtemp(parent) != NULL);
+        owned = true;
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
+        ASSERT(cis_ready(root, &ci));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/tools/deep/er/x.c", root) < sizeof(path));
+        fd = open(path, O_RDWR | O_CLOEXEC);
+        ASSERT(fd >= 0);
+        mapping = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        ASSERT(mapping != MAP_FAILED);
+        int close_rc = close(fd);
+        fd = -1;
+        ASSERT(close_rc == 0);
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        ASSERT(fd >= 0);
+        /* Establish the writable mapping before priming. The retained
+         * read-only descriptor witnesses page-cache bytes without flushing. */
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(cis_verdict(ci, false));
+        char *digit = memchr(mapping, '0', len);
+        ASSERT(digit != NULL);
+        *digit = '1';
+        char observed;
+        ASSERT(pread(fd, &observed, 1, (off_t)(digit - mapping)) == 1);
+        ASSERT(observed == *digit);
+        ASSERT(cis_verdict(ci, true));
+        ASSERT(codeindex_rebuild(ci));
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(cis_verdict(ci, false));
+        /* The same writable mapping survives: a one-time mapping/mtime
+         * observation is insufficient for this second mutation. */
+        *digit = '2';
+        ASSERT(pread(fd, &observed, 1, (off_t)(digit - mapping)) == 1);
+        ASSERT(observed == *digit);
+        ASSERT(cis_verdict(ci, true));
+        PASS();
+    } _test_next:;
+    if (mapping != MAP_FAILED) munmap(mapping, len);
+    if (fd >= 0) close(fd);
+    codeindex_close(ci);
+    if (owned) test_rm_rf_recursive(parent);
+    return failures;
+}
+#endif
+
 int test_codeindex_stale(void)
 {
     int failures = 0;
@@ -301,6 +401,10 @@ int test_codeindex_stale(void)
     failures += test_cis_memo_new_nested_dir_walks();
     failures += test_cis_memo_rename_and_delete_walk();
     failures += test_cis_memo_watch_failure_walks_every_time();
+#if defined(__linux__)
+    failures += test_cis_memo_external_hardlink();
+    failures += test_cis_memo_existing_shared_mapping();
+#endif
     printf("=== codeindex_stale: %d failures ===\n", failures);
     return failures;
 }
