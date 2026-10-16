@@ -960,6 +960,26 @@ static int psk_io_buffered_revoke(void)
     } TEST_END
     psk_io_fixture_close(&f); return failures;
 }
+static ssize_t psk_io_wait_byte(struct psk_io_fixture *f, int fd, uint8_t *byte);
+
+/* Drive only the still-authorized client. A complete new encrypted record
+ * must leave its carrier before the revoked server is stepped even once. */
+static bool psk_io_client_record_attempt(struct psk_io_fixture *f, size_t size,
+    uint64_t read_before, uint64_t written_before)
+{
+    int64_t deadline = f->previous->now_monotonic_ns(f->previous->self) + INT64_C(5000000000);
+    while (f->previous->now_monotonic_ns(f->previous->self) < deadline) {
+        enum device_host_bridge_result result = typed_test_device_host_psk_bridge_step(&f->client);
+        if (!psk_io_live_result(result)) return false;
+        if (f->client.observation.plaintext_read_bytes == read_before + size &&
+            f->client.observation.carrier_written_bytes > written_before &&
+            !f->client.session.pending_used && !f->client.local_used) return true;
+        if (f->client.observation.plaintext_read_bytes > read_before + size) return false;
+        if (poll(NULL, 0, 1) < 0 && errno != EINTR) return false;
+    }
+    return false;
+}
+
 static int psk_io_idle_revoke_then_record(void)
 {
     int failures = 0; struct psk_io_fixture f; psk_io_fixture_init(&f);
@@ -971,15 +991,20 @@ static int psk_io_idle_revoke_then_record(void)
         ASSERT(db_device_pairing_revoke_expected(f.server_spec.session.store, f.server_spec.session.peer, 150,
             f.server_spec.session.approved_root, &publication)); ASSERT_EQ(publication, DEVICE_PAIRING_DURABLE);
         const uint8_t record[] = {0x52, 0x65, 0x76};
+        ASSERT_EQ(f.client.session.pending_used, 0); ASSERT_EQ(f.client.local_used, 0);
+        uint64_t read_before = f.client.observation.plaintext_read_bytes;
+        uint64_t written_before = f.client.observation.carrier_written_bytes;
+        uint64_t server_read_before = f.server.observation.carrier_read_bytes;
         ASSERT_EQ(send(f.plain[0], record, sizeof(record), MSG_NOSIGNAL), sizeof(record));
-        enum device_host_bridge_result result = DEVICE_HOST_BRIDGE_PROGRESS;
-        for (unsigned i = 0; i < 64 && psk_io_live_result(result); ++i) {
-            result = typed_test_device_host_psk_bridge_step(&f.server);
-            if (f.client.active) (void)typed_test_device_host_psk_bridge_step(&f.client);
-        }
+        ASSERT(psk_io_client_record_attempt(&f, sizeof(record), read_before, written_before));
+        ASSERT_EQ(f.client.observation.plaintext_read_bytes, read_before + sizeof(record));
+        ASSERT(f.client.observation.carrier_written_bytes > written_before);
+        ASSERT_EQ(f.server.observation.carrier_read_bytes, server_read_before);
+        ASSERT(f.server.active);
+        enum device_host_bridge_result result = typed_test_device_host_psk_bridge_step(&f.server);
         ASSERT_EQ(result, DEVICE_HOST_BRIDGE_REFUSED); ASSERT(!f.server.active);
         ASSERT_EQ(f.server.observation.plaintext_written_bytes, 0);
-        uint8_t seen = 0; ASSERT(recv(f.target, &seen, 1, MSG_DONTWAIT) <= 0);
+        uint8_t seen = 0; ASSERT_EQ(psk_io_wait_byte(&f, f.target, &seen), 0);
     } TEST_END
     psk_io_fixture_close(&f); return failures;
 }
