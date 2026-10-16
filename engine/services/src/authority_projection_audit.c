@@ -291,6 +291,29 @@ static void ap_read_markers(struct node_db *ndb, sqlite3 *pdb,
     *ok = afound && pfound && *auth_h >= 0 && *proj_h >= 0;
 }
 
+/* Read the markers up to AP_UNSYNCED_RETRIES times, pausing between tries so a
+ * pass that races the reducer/mirror tick does not skip on a transient gap.
+ * True only for a comparable (equal-height) pair. */
+static bool ap_wait_synced(struct node_db *ndb, sqlite3 *pdb,
+                           int32_t *auth_h, int64_t *proj_h)
+{
+    bool ok = false;
+    for (int attempt = 0; attempt < AP_UNSYNCED_RETRIES; attempt++) {
+        ap_read_markers(ndb, pdb, auth_h, proj_h, &ok);
+        atomic_store(&g_ap_last_auth_h, *auth_h);
+        atomic_store(&g_ap_last_proj_h, *proj_h);
+        if (ok && (int64_t)*auth_h == *proj_h)
+            return true;
+#ifdef ZCL_TESTING
+        if (g_ap_test_ndb)
+            continue;
+#endif
+        if (attempt + 1 < AP_UNSYNCED_RETRIES)
+            platform_sleep_ms(UTXO_MIRROR_SYNC_DEFAULT_TICK_SECONDS * 1000);
+    }
+    return false;
+}
+
 bool ap_audit_run_once(void)
 {
     struct node_db *ndb = ap_audit_ndb();
@@ -309,21 +332,7 @@ bool ap_audit_run_once(void)
 
     int32_t auth_h0 = -1;
     int64_t proj_h0 = -1;
-    bool ok0 = false;
-    for (int attempt = 0; attempt < AP_UNSYNCED_RETRIES; attempt++) {
-        ap_read_markers(ndb, pdb, &auth_h0, &proj_h0, &ok0);
-        atomic_store(&g_ap_last_auth_h, auth_h0);
-        atomic_store(&g_ap_last_proj_h, proj_h0);
-        if (ok0 && (int64_t)auth_h0 == proj_h0)
-            break;
-#ifdef ZCL_TESTING
-        if (g_ap_test_ndb)
-            continue;
-#endif
-        if (attempt + 1 < AP_UNSYNCED_RETRIES)
-            platform_sleep_ms(UTXO_MIRROR_SYNC_DEFAULT_TICK_SECONDS * 1000);
-    }
-    if (!ok0 || (int64_t)auth_h0 != proj_h0) {
+    if (!ap_wait_synced(ndb, pdb, &auth_h0, &proj_h0)) {
         /* Projection legitimately lags/leads the authority during catch-up —
          * NOT a divergence. Only an equal-height pair is byte-comparable. */
         atomic_fetch_add(&g_ap_skipped_unsynced, 1);

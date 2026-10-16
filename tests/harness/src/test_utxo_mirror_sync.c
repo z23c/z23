@@ -351,6 +351,47 @@ static void ums_hex_key(char out[96], uint8_t tag)
     for (int i = 0; i < 32; i++) snprintf(out + 2 * i, 3, "%02x", t[i]);
 }
 
+/* Audit half of the rebuild test: one projection-only and one authority-only
+ * row at equal heights; the audit must record both keys, tagged p/a. */
+static int ums_test_audit_diff(struct utxo_mirror_sync_service *svc,
+                               struct node_db *ndbp, sqlite3 *pdb)
+{
+    int failures = 0;
+    UMS_CHECK("audit: projection-only row", ums_seed_mirror_row(ndbp, 0x77, 50));
+    UMS_CHECK("audit: authority-only row", ums_add_coin(pdb, 0x54, 4000, 104));
+    g_ap_test_ndb = ndbp;
+    g_utxo_mirror_sync = svc;
+    ap_audit_reset_for_test();
+    UMS_CHECK("audit: pass ran", ap_audit_run_once());
+    struct json_value v = {0};
+    json_set_object(&v);
+    (void)ap_audit_dump_state_json(&v, NULL);
+    const char *keys = json_get_str(json_get(&v, "diff_keys"));
+    char k77[96], k52[96], want_p[128], want_a[128];
+    ums_hex_key(k77, 0x77);
+    ums_hex_key(k52, 0x54);
+    snprintf(want_p, sizeof(want_p), "p:%s:0", k77);
+    snprintf(want_a, sizeof(want_a), "a:%s:0", k52);
+    UMS_CHECK("audit: records the projection-only key",
+              keys && strstr(keys, want_p));
+    UMS_CHECK("audit: records the authority-only key",
+              keys && strstr(keys, want_a));
+    UMS_CHECK("audit: diff_count == 2",
+              json_get_int(json_get(&v, "diff_count")) == 2);
+    UMS_CHECK("audit: reports both heights",
+              json_get_int(json_get(&v, "auth_h")) == 104 &&
+              json_get_int(json_get(&v, "proj_h")) == 104);
+    const char *mh = json_get_str(json_get(&v, "mirror_health"));
+    UMS_CHECK("audit: reports mirror health and quarantine",
+              mh && strcmp(mh, "healthy") == 0 &&
+              !json_get_bool(json_get(&v, "quarantine")));
+    json_free(&v);
+    ap_audit_reset_for_test();
+    g_ap_test_ndb = NULL;
+    g_utxo_mirror_sync = NULL;
+    return failures;
+}
+
 static int ums_test_rebuild_now(void)
 {
     int failures = 0;
@@ -415,40 +456,7 @@ static int ums_test_rebuild_now(void)
               atomic_load(&svc.mirror_health) == UTXO_MIRROR_HEALTHY);
     UMS_CHECK("rebuild_now: roots match", ums_roots_equal(&ndb, pdb));
 
-    /* Audit: inject one projection-only row and one authority-only row at
-     * equal heights; the audit records both keys. */
-    UMS_CHECK("audit: projection-only row", ums_seed_mirror_row(&ndb, 0x77, 50));
-    UMS_CHECK("audit: authority-only row", ums_add_coin(pdb, 0x54, 4000, 104));
-    g_ap_test_ndb = &ndb;
-    g_utxo_mirror_sync = &svc;
-    ap_audit_reset_for_test();
-    UMS_CHECK("audit: pass ran", ap_audit_run_once());
-    struct json_value v = {0};
-    json_set_object(&v);
-    (void)ap_audit_dump_state_json(&v, NULL);
-    const char *keys = json_get_str(json_get(&v, "diff_keys"));
-    char k77[96], k52[96], want_p[128], want_a[128];
-    ums_hex_key(k77, 0x77);
-    ums_hex_key(k52, 0x54);
-    snprintf(want_p, sizeof(want_p), "p:%s:0", k77);
-    snprintf(want_a, sizeof(want_a), "a:%s:0", k52);
-    UMS_CHECK("audit: records the projection-only key",
-              keys && strstr(keys, want_p));
-    UMS_CHECK("audit: records the authority-only key",
-              keys && strstr(keys, want_a));
-    UMS_CHECK("audit: diff_count == 2",
-              json_get_int(json_get(&v, "diff_count")) == 2);
-    UMS_CHECK("audit: reports both heights",
-              json_get_int(json_get(&v, "auth_h")) == 104 &&
-              json_get_int(json_get(&v, "proj_h")) == 104);
-    const char *mh = json_get_str(json_get(&v, "mirror_health"));
-    UMS_CHECK("audit: reports mirror health and quarantine",
-              mh && strcmp(mh, "healthy") == 0 &&
-              !json_get_bool(json_get(&v, "quarantine")));
-    json_free(&v);
-    ap_audit_reset_for_test();
-    g_ap_test_ndb = NULL;
-    g_utxo_mirror_sync = NULL;
+    failures += ums_test_audit_diff(&svc, &ndb, pdb);
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);
