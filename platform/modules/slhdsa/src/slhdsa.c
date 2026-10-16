@@ -56,7 +56,7 @@ enum zcl_slhdsa_status zcl_slhdsa_keygen_internal(
     return ZCL_SLHDSA_OK;
 }
 
-enum zcl_slhdsa_status zcl_slhdsa_keygen(
+[[nodiscard]] enum zcl_slhdsa_status zcl_slhdsa_keygen(
     enum zcl_slhdsa_param param, zcl_slhdsa_random_fn random, void *random_ctx,
     uint8_t *pk, size_t pk_len, uint8_t *sk, size_t sk_len)
 {
@@ -148,7 +148,7 @@ static enum zcl_slhdsa_status sign_external(
     return sign_checked(param, sk, sk_len, &m, opt_rand, sig, sig_len);
 }
 
-enum zcl_slhdsa_status zcl_slhdsa_sign_deterministic(
+[[nodiscard]] enum zcl_slhdsa_status zcl_slhdsa_sign_deterministic(
     enum zcl_slhdsa_param param, const uint8_t *sk, size_t sk_len,
     const uint8_t *msg, size_t msg_len, const uint8_t *ctx, size_t ctx_len,
     uint8_t *sig, size_t sig_len)
@@ -161,7 +161,7 @@ enum zcl_slhdsa_status zcl_slhdsa_sign_deterministic(
     return st;
 }
 
-enum zcl_slhdsa_status zcl_slhdsa_sign(
+[[nodiscard]] enum zcl_slhdsa_status zcl_slhdsa_sign(
     enum zcl_slhdsa_param param, const uint8_t *sk, size_t sk_len,
     const uint8_t *msg, size_t msg_len, const uint8_t *ctx, size_t ctx_len,
     zcl_slhdsa_random_fn random, void *random_ctx, uint8_t *sig, size_t sig_len)
@@ -219,7 +219,7 @@ enum zcl_slhdsa_status zcl_slhdsa_verify_internal(
     return verify_checked(param, pk, pk_len, &m, sig, sig_len);
 }
 
-enum zcl_slhdsa_status zcl_slhdsa_verify(
+[[nodiscard]] enum zcl_slhdsa_status zcl_slhdsa_verify(
     enum zcl_slhdsa_param param, const uint8_t *pk, size_t pk_len,
     const uint8_t *msg, size_t msg_len, const uint8_t *ctx, size_t ctx_len,
     const uint8_t *sig, size_t sig_len)

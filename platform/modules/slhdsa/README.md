@@ -25,11 +25,13 @@ callback; `zcl_slhdsa_sign_deterministic` uses `opt_rand = PK.seed`. The module
 never reads an operating-system generator. All functions return
 `enum zcl_slhdsa_status` and are `[[nodiscard]]`. Wrong-length keys, seeds and
 signatures give `ZCL_SLHDSA_ERR_LENGTH` before any hashing; a well-formed
-signature that does not verify gives `ZCL_SLHDSA_ERR_VERIFY`. Arguments are
-validated first and output buffers are unspecified on failure; the header lists
-the only cases that zero them. Nothing allocates on the heap;
-the message is streamed through an incremental SHAKE256 sponge, so verification
-stack use does not depend on message or signature length.
+signature that does not verify gives `ZCL_SLHDSA_ERR_VERIFY`. Parameters are
+validated before any hashing, but `zcl_slhdsa_sign` draws `opt_rand` from the
+callback before it checks the key, context and signature lengths. Output
+buffers are unspecified on failure; the header lists the only cases that zero
+them. Nothing allocates on the heap; the message is streamed through an
+incremental SHAKE256 sponge, so verification stack use does not depend on
+message or signature length.
 
 `include/slhdsa/slhdsa_kat.h` declares the internal algorithms (FIPS 205
 Algorithms 18-20) for known-answer testing only.
@@ -42,8 +44,11 @@ external and internal interfaces, and signature verification including the
 expected-failure cases), round trips, single-bit-flip rejection over the
 signature, message, context and public key, and input validation. It prints
 sign and verify milliseconds and asserts nothing about time. The vector header
-records the ACVP commit and the SHA-256 of each source JSON file;
-`tests/gen_vectors.sh` regenerates it (as `slhdsa_vectors.h` and `slhdsa_verify_vectors.h`, split to stay under the lint file-size limit) with `jq` and `awk`.
+records the ACVP commit and the SHA-256 of each source JSON file and states the
+selection rule; no generator script is kept (new shell scripts are not allowed),
+so a refresh is redone from those named files under the same rule. The vectors
+are split into `slhdsa_vectors.h` and `slhdsa_verify_vectors.h` to stay under the
+lint file-size limit.
 
 Run with `make zcode-package-slhdsa-test`; the sanitizer build is part of
 `make zcode-package-asan`.

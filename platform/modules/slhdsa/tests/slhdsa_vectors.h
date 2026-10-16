@@ -5,7 +5,7 @@
  * source JSON file and the record layout. Each string holds at most 4000
  * characters so the table stays within the minimum string-literal length every
  * C compiler must accept; a line is the concatenation of consecutive strings up
- * to one ending in a newline. Regenerate with tests/gen_vectors.sh. */
+ * to one ending in a newline. The selection rule above reproduces it from the named ACVP files. */
 static const char *const slhdsa_vector_pieces[] = {
     "# SLH-DSA known-answer vectors, NIST ACVP FIPS 205 internalProjection data.\n",
     "# Source repository: https://github.com/usnistgov/ACVP-Server\n",
