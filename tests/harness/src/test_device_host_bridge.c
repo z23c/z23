@@ -960,6 +960,29 @@ static int psk_io_buffered_revoke(void)
     } TEST_END
     psk_io_fixture_close(&f); return failures;
 }
+static int psk_io_idle_revoke_then_record(void)
+{
+    int failures = 0; struct psk_io_fixture f; psk_io_fixture_init(&f);
+    TEST_CASE("host PSK IO: pairing revoked while bridge is idle; next record is refused and never reaches target") {
+        ASSERT(psk_io_fixture_open(&f, 0, false)); ASSERT(psk_io_fixture_admit(&f)); ASSERT(psk_io_fixture_ready(&f));
+        for (unsigned i = 0; i < 4; ++i) ASSERT(psk_io_pair_step(&f.client, &f.server));
+        ASSERT_EQ(f.server.observation.plaintext_written_bytes, 0);
+        enum device_pairing_publication publication;
+        ASSERT(db_device_pairing_revoke_expected(f.server_spec.session.store, f.server_spec.session.peer, 150,
+            f.server_spec.session.approved_root, &publication)); ASSERT_EQ(publication, DEVICE_PAIRING_DURABLE);
+        const uint8_t record[] = {0x52, 0x65, 0x76};
+        ASSERT_EQ(send(f.plain[0], record, sizeof(record), MSG_NOSIGNAL), sizeof(record));
+        enum device_host_bridge_result result = DEVICE_HOST_BRIDGE_PROGRESS;
+        for (unsigned i = 0; i < 64 && psk_io_live_result(result); ++i) {
+            result = typed_test_device_host_psk_bridge_step(&f.server);
+            if (f.client.active) (void)typed_test_device_host_psk_bridge_step(&f.client);
+        }
+        ASSERT_EQ(result, DEVICE_HOST_BRIDGE_REFUSED); ASSERT(!f.server.active);
+        ASSERT_EQ(f.server.observation.plaintext_written_bytes, 0);
+        uint8_t seen = 0; ASSERT(recv(f.target, &seen, 1, MSG_DONTWAIT) <= 0);
+    } TEST_END
+    psk_io_fixture_close(&f); return failures;
+}
 static ssize_t psk_io_wait_byte(struct psk_io_fixture *f, int fd, uint8_t *byte)
 {
     int64_t deadline = psk_io_fixture_mono(f) + INT64_C(5000000000);
@@ -1664,7 +1687,7 @@ int test_device_host_bridge(void)
         bridge_invalid_transport() + bridge_halfclose() + bridge_partial_release() +
         bridge_broken_pipe() + bridge_closed_transport() + bridge_idle_revoke() + bridge_fullbytes() +
         bridge_write_boundary(true) + bridge_write_boundary(false) + psk_io_admission_and_bytes() +
-        psk_io_wrong_key_and_truncation() + psk_io_buffered_revoke() + psk_io_actual_guard_boundary() +
+        psk_io_wrong_key_and_truncation() + psk_io_buffered_revoke() + psk_io_idle_revoke_then_record() + psk_io_actual_guard_boundary() +
         psk_io_fin_and_extra() + psk_io_refused_target() + psk_io_closed_stderr() +
         psk_io_preflight_refusals() + psk_io_explicit_backup() + psk_io_partial_ciphertext() +
         psk_io_deadline_expiry() + psk_io_deadline_handshake() + psk_io_deadline_phase_ceiling() + psk_io_deadline_borrowed() +
