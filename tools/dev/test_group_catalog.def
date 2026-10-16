@@ -1107,6 +1107,9 @@ ZCL_TEST_GROUP(host_build)
  * installs as a slot only when its release doc is signed by a PINNED owner
  * key, commits to the package root, and the bytes match the manifest. */
 ZCL_TEST_GROUP(ops_slot_install)
+/* ops.slot.activate / ops.slot.status: rolling slot moves through a fake
+ * systemd with MainPID exe and health checks, rollback restoring drop-ins. */
+ZCL_TEST_GROUP(ops_slot_activate)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 /* The push proof's test dimension must set ZCL_STRESS_TESTS=1 in its own

@@ -2089,6 +2089,19 @@ void zcl_native_handle_ops_slot_install(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.slot.activate - move service instances onto an installed slot one at a
+ * time through systemd --user drop-ins, with a MainPID exe check, a health
+ * check and automatic rollback (tools/command/native_ops_slot_activate.c). */
+void zcl_native_handle_ops_slot_activate(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* ops.slot.status - read-only: the slot each instance runs, its last-good
+ * and the installed slots with sha256 (tools/command/native_ops_slot_status.c). */
+void zcl_native_handle_ops_slot_status(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.debug.meaning — node-free field ontology + question index. Answers
  * "what does this telemetry field mean, is this value bad, and which report
  * answers my question" straight out of the binary's static tables, with no

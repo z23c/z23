@@ -1349,3 +1349,53 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_ops_slot_install)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.slot.activate", "ops.slot", "",
+    "Move service instances onto an installed slot, one at a time, with rollback",
+    "For each instance in order: records its last-good slot, writes a systemd "
+    "--user drop-in <unit>.d/z23-slot.conf (temp + rename) pointing "
+    "ExecStart's binary at <slots>/<slot>/z23, runs daemon-reload, restarts "
+    "that one instance, requires MainPID's /proc exe to be the slot, then "
+    "runs `health`: {kind:listen, port, timeout_ms} (a loopback port per "
+    "instance, or instance {name, port}) or {kind:probe, argv:[absolute "
+    "program, args...], timeout_ms} (no shell; {instance} and {unit} are "
+    "substituted). `exec_args` is the argument string after the binary "
+    "(default: carried over from the instance's current drop-in). The first "
+    "failure restores every instance moved so far plus the failing one with "
+    "the same checks and returns SLOT_ACTIVATE_ROLLED_BACK naming the "
+    "instance and phase (a failed rollback is SLOT_ROLLBACK_FAILED). "
+    "service_class is an allow-list: tunnel-receiver or gateway "
+    "(BAD_SERVICE_CLASS otherwise); the canonical node unit and "
+    "~/.local/bin are never touched. `dry_run` checks and writes nothing. "
+    "systemctl is ZCL_SLOT_SYSTEMCTL_BIN.",
+    65536, "slot,activate,rollout,rolling,rollback,systemd,fleet",
+    "zcl.ops_slot_activate.input.v1", "zcl.ops_slot_activate.v1",
+    "service_class,slot,instances,health,exec_args,dry_run",
+    "service_class,slot,instances,health",
+    "z23 ops slot activate --service_class=tunnel-receiver --slot=<name> --instances='[\"r1\",\"r3\"]' --health='{\"kind\":\"listen\",\"port\":28022}'",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_slot_activate)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.slot.status", "ops.slot", "",
+    "Report the slot each instance runs, its last-good and installed slots",
+    "Read-only. For each instance of an allow-listed service_class "
+    "(tunnel-receiver, gateway) reports the slot its z23-slot.conf drop-in "
+    "points at (empty when it runs the unit's own binary) and the last-good "
+    "slot recorded by ops.slot.activate, plus every installed slot with its "
+    "sha256 and size. Starts no process and writes nothing.",
+    65536, "slot,status,fleet,systemd,sha256",
+    "zcl.ops_slot_status.input.v1", "zcl.ops_slot_status.v1",
+    "service_class,instances", "service_class,instances",
+    "z23 ops slot status --service_class=tunnel-receiver --instances='[\"r1\"]'",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_ops_slot_status)

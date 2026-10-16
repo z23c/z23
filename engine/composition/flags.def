@@ -2246,6 +2246,14 @@ Z23_FLAG("ZCL_SIMNET_NIGHTLY_FUZZ_SWEEP", "env_build", "0", "-",
           "first use tools/scripts/simnet_nightly.sh:auto; documented at docs/RUNBOOK.md:43: :20:00 test-suite timer. Set Environment=ZCL_SIMNET_NIGHTLY_FUZZ_SWEEP=1")
 Z23_FLAG("ZCL_SIMNET_PERF", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_simnet_fuzz.c:auto")
+Z23_FLAG("ZCL_SLOT_PROC_ROOT", "env_build", "/proc", "-",
+          "fixture seam for the /proc root ops.slot.activate reads MainPID's exe link from; first use tools/command/native_ops_slot_activate.c")
+Z23_FLAG("ZCL_SLOT_STATE_DIR", "env_build", "$HOME/.local/state/zclassic23/slots", "-",
+          "directory holding the per-instance last-good records ops.slot.activate writes and ops.slot.status reads; first use tools/command/native_slot_common.c")
+Z23_FLAG("ZCL_SLOT_SYSTEMCTL_BIN", "env_build", "systemctl", "-",
+          "fixture seam for the systemctl binary ops.slot.activate drives (daemon-reload, restart, show MainPID); first use tools/command/native_ops_slot_activate.c")
+Z23_FLAG("ZCL_SLOT_UNIT_DIR", "env_build", "$HOME/.config/systemd/user", "-",
+          "systemd --user unit directory whose <unit>.d/z23-slot.conf drop-ins ops.slot.activate writes; first use tools/command/native_slot_common.c")
 Z23_FLAG("ZCL_SLO_BLIND_STREAK", "env_runtime", "10", "-",
           "consecutive misses at which the prober reports an instance BLIND rather than merely unreachable; first use tools/command/slo_monitor_io.c:auto")
 Z23_FLAG("ZCL_SLO_BUCKET_SEC", "env_runtime", "900", "-",

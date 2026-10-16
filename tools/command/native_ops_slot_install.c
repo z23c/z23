@@ -21,6 +21,7 @@
  */
 
 #include "command/native_command.h"
+#include "command/native_slot_common.h"
 #include "command/release_pin.h"
 
 #include "base/hex.h"
@@ -60,8 +61,6 @@ static void osi_execute(const struct zcl_command_request *request,
 
 #define OSI_CMD "ops.slot.install"
 #define OSI_SLOT_FILE "z23"
-#define OSI_NAME_MAX 64u
-#define OSI_PATH_MAX 1536u
 
 enum osi_pass { OSI_PASS_OK, OSI_PASS_IO, OSI_PASS_SIZE, OSI_PASS_CHUNK,
                 OSI_PASS_CHANGED };
@@ -76,10 +75,10 @@ struct osi {
     struct zid_release rel;
     struct vcs_package_manifest manifest;
     const struct vcs_package_file *file;
-    char slots[OSI_PATH_MAX];
-    char name_dir[OSI_PATH_MAX];
-    char final_path[OSI_PATH_MAX];
-    char tmp_path[OSI_PATH_MAX];
+    char slots[SLOT_PATH_MAX];
+    char name_dir[SLOT_PATH_MAX];
+    char final_path[SLOT_PATH_MAX];
+    char tmp_path[SLOT_PATH_MAX];
     uint8_t sha[SHA256_OUTPUT_SIZE];
     uint64_t size;
 };
@@ -108,24 +107,6 @@ static const char *osi_str(const struct json_value *in, const char *key)
     return (s && s[0]) ? s : NULL;
 }
 
-/* A slot name is one path component of [a-z0-9._-], 1..64 bytes, not
- * starting with '-' or '.', so it can never traverse, hide or look like a
- * flag, and is never the ".tmp." staging name of another install. */
-static bool osi_name_ok(const char *name)
-{
-    size_t n = name ? strlen(name) : 0;
-    if (n == 0 || n > OSI_NAME_MAX || name[0] == '-' || name[0] == '.')
-        return false;
-    for (size_t i = 0; i < n; i++) {
-        char c = name[i];
-        bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-                  c == '.' || c == '_' || c == '-';
-        if (!ok)
-            return false;
-    }
-    return strstr(name, ".tmp.") == NULL;
-}
-
 static bool osi_parse_inputs(const struct zcl_command_request *request,
                              struct osi *st, struct zcl_command_reply *reply)
 {
@@ -148,7 +129,7 @@ static bool osi_parse_inputs(const struct zcl_command_request *request,
                     OSI_CMD);
         return false;
     }
-    if (!osi_name_ok(st->name)) {
+    if (!slot_name_ok(st->name)) {
         osi_invalid(reply, "BAD_SLOT_NAME",
                     "a slot name is 1-64 characters of a-z 0-9 . _ -, "
                     "not starting with - or .", st->name);
@@ -163,41 +144,26 @@ static bool osi_parse_inputs(const struct zcl_command_request *request,
     return true;
 }
 
-/* <slots> root: the launcher's own directory, never a literal home path. */
-static bool osi_slots_root(char *out, size_t cap)
-{
-    const char *env = getenv("ZCL_BINARY_SLOTS_DIR");
-    const char *home = getenv("HOME");
-    int n = -1;
-    if (env && env[0])
-        n = snprintf(out, cap, "%s", env);
-    else if (home && home[0])
-        n = snprintf(out, cap, "%s/.local/lib/zclassic23-slots", home);
-    return n > 0 && (size_t)n < cap && out[0] == '/';
-}
-
 static bool osi_resolve_paths(struct osi *st, struct zcl_command_reply *reply)
 {
-    int a, b;
-    if (!osi_slots_root(st->slots, sizeof(st->slots))) {
-        osi_invalid(reply, "NO_SLOTS_DIR",
-                    "cannot locate the slots directory: set "
-                    "ZCL_BINARY_SLOTS_DIR to an absolute path or ensure HOME "
-                    "is set", OSI_CMD);
+    struct slot_paths sp;
+    enum slot_path_status ps = slot_paths_resolve(&sp, st->name);
+    if (ps != SLOT_PATH_OK) {
+        osi_invalid(reply,
+                    ps == SLOT_PATH_NO_ROOT ? "NO_SLOTS_DIR"
+                                            : "SLOT_PATH_TOO_LONG",
+                    ps == SLOT_PATH_NO_ROOT
+                        ? "cannot locate the slots directory: set "
+                          "ZCL_BINARY_SLOTS_DIR to an absolute path or "
+                          "ensure HOME is set"
+                        : "the slots directory path is too long",
+                    OSI_CMD);
         return false;
     }
-    a = snprintf(st->name_dir, sizeof(st->name_dir), "%s/%s", st->slots,
-                 st->name);
-    b = snprintf(st->final_path, sizeof(st->final_path), "%s/%s/%s",
-                 st->slots, st->name, OSI_SLOT_FILE);
-    if (a < 0 || b < 0 || (size_t)b >= sizeof(st->final_path) ||
-        snprintf(st->tmp_path, sizeof(st->tmp_path), "%s/%s.tmp.%ld",
-                 st->slots, st->name, (long)getpid()) >=
-            (int)sizeof(st->tmp_path)) {
-        osi_invalid(reply, "SLOT_PATH_TOO_LONG",
-                    "the slots directory path is too long", OSI_CMD);
-        return false;
-    }
+    memcpy(st->slots, sp.slots, sizeof(st->slots));
+    memcpy(st->name_dir, sp.name_dir, sizeof(st->name_dir));
+    memcpy(st->final_path, sp.final_path, sizeof(st->final_path));
+    memcpy(st->tmp_path, sp.tmp_path, sizeof(st->tmp_path));
     return true;
 }
 
