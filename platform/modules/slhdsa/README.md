@@ -35,14 +35,14 @@ Algorithms 18-20) for known-answer testing only.
 
 ## Tests
 
-`tests/test_slhdsa.c` runs the NIST ACVP vectors in `tests/slhdsa_vectors.h`
+`tests/test_slhdsa.c` runs the NIST ACVP vectors in `tests/slhdsa_vectors.h` and `tests/slhdsa_verify_vectors.h`
 (key generation, deterministic and hedged signature generation through both the
 external and internal interfaces, and signature verification including the
 expected-failure cases), round trips, single-bit-flip rejection over the
 signature, message, context and public key, and input validation. It prints
 sign and verify milliseconds and asserts nothing about time. The vector header
 records the ACVP commit and the SHA-256 of each source JSON file;
-`tests/gen_vectors.sh` regenerates it with `jq` and `awk`.
+`tests/gen_vectors.sh` regenerates it (as `slhdsa_vectors.h` and `slhdsa_verify_vectors.h`, split to stay under the lint file-size limit) with `jq` and `awk`.
 
 Run with `make zcode-package-slhdsa-test`; the sanitizer build is part of
 `make zcode-package-asan`.

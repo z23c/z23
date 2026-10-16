@@ -4662,7 +4662,7 @@ zcode-package-slhdsa-test: $(ZCODE_PACKAGE_SLHDSA_TEST_BIN)
 	@$(ZCODE_PACKAGE_SLHDSA_TEST_BIN)
 $(ZCODE_PACKAGE_SLHDSA_TEST_BIN): platform/modules/slhdsa/tests/test_slhdsa.c \
 		$(wildcard platform/modules/slhdsa/src/*.c) platform/modules/slhdsa/src/slhdsa_internal.h \
-		platform/modules/slhdsa/tests/slhdsa_vectors.h platform/modules/sha3/src/sha3.c \
+		platform/modules/slhdsa/tests/slhdsa_vectors.h platform/modules/slhdsa/tests/slhdsa_verify_vectors.h platform/modules/sha3/src/sha3.c \
 		platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
@@ -4728,7 +4728,7 @@ $(ZCODE_PACKAGE_MLKEM_ASAN_BIN): platform/modules/mlkem/tests/test_mlkem.c \
 
 $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN): platform/modules/slhdsa/tests/test_slhdsa.c \
 		$(wildcard platform/modules/slhdsa/src/*.c) platform/modules/slhdsa/src/slhdsa_internal.h \
-		platform/modules/slhdsa/tests/slhdsa_vectors.h platform/modules/sha3/src/sha3.c \
+		platform/modules/slhdsa/tests/slhdsa_vectors.h platform/modules/slhdsa/tests/slhdsa_verify_vectors.h platform/modules/sha3/src/sha3.c \
 		platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 $(ZCODE_PACKAGE_ASAN_FLAGS) -Wall -Wextra -Werror -pedantic \

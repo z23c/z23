@@ -1,11 +1,13 @@
 #!/bin/sh
 # Copyright 2026 Rhett Creighton - Apache License 2.0
-# Regenerates slhdsa_vectors.h from the NIST ACVP-Server JSON. Usage:
-#   gen_vectors.sh DIR > slhdsa_vectors.h
+# Regenerates slhdsa_vectors.h and slhdsa_verify_vectors.h (split so each file
+# stays under the 2 MiB size the equihash-parameter lint gate reads) from the NIST ACVP-Server JSON. Usage:
+#   gen_vectors.sh DIR OUTDIR
 # where DIR holds keyGen.json, sigGen.json and sigVer.json (the three
 # internalProjection.json files named in the header). Needs only jq, awk, sed.
 set -eu
 dir=$1
+out=$2
 commit=975de31eb83d87039ec88934fdc47d8c312b892d
 sum() { sha256sum "$dir/$1.json" | cut -d' ' -f1; }
 
@@ -47,6 +49,7 @@ wrap() {
            printf "    \"%s\\n\",\n", s }'
 }
 
+{
 cat <<HDR
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
@@ -77,5 +80,17 @@ static const char *const slhdsa_vector_pieces[] = {
     "#   sign   P tcId pure|internal det|hedged sk rand ctx msg sig\n",
     "#   verify P tcId pure|internal expected(1|0) pk ctx msg sig\n",
 HDR
-{ keygen; siggen 4 2; sigver; } | wrap
+{ keygen; siggen 4 2; } | wrap
 echo "};"
+} > "$out/slhdsa_vectors.h"
+{
+cat <<VHDR
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+
+/* SLH-DSA signature-verification vectors; the source, selection and record
+ * layout are described at the top of slhdsa_vectors.h. */
+static const char *const slhdsa_verify_pieces[] = {
+VHDR
+sigver | wrap
+echo "};"
+} > "$out/slhdsa_verify_vectors.h"

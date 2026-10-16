@@ -29,6 +29,7 @@ enum {
 };
 
 #include "slhdsa_vectors.h"
+#include "slhdsa_verify_vectors.h"
 
 /* Per record kind and parameter set: how many vectors passed. */
 static unsigned passes[3][2];
@@ -37,19 +38,28 @@ static const char *const param_name[2] = {"128s", "192s"};
 
 static char vector_text[3000000];
 
+static size_t vector_used;
+
+/* Appends the pieces to vector_text; false if it would not fit. */
+static bool append_pieces(const char *const *pieces, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        const size_t n = strlen(pieces[i]);
+        if (vector_used + n >= sizeof(vector_text))
+            return false;
+        memcpy(vector_text + vector_used, pieces[i], n);
+        vector_used += n;
+    }
+    vector_text[vector_used] = '\0';
+    return true;
+}
+
 static int load_vectors(void)
 {
-    size_t total = 1;
-    size_t used = 0;
-    for (size_t i = 0; i < sizeof(slhdsa_vector_pieces) / sizeof(slhdsa_vector_pieces[0]); i++)
-        total += strlen(slhdsa_vector_pieces[i]);
-    CHECK(total <= sizeof(vector_text));
-    for (size_t i = 0; i < sizeof(slhdsa_vector_pieces) / sizeof(slhdsa_vector_pieces[0]); i++) {
-        const size_t n = strlen(slhdsa_vector_pieces[i]);
-        memcpy(vector_text + used, slhdsa_vector_pieces[i], n);
-        used += n;
-    }
-    vector_text[used] = '\0';
+    CHECK(append_pieces(slhdsa_vector_pieces,
+                        sizeof(slhdsa_vector_pieces) / sizeof(slhdsa_vector_pieces[0])));
+    CHECK(append_pieces(slhdsa_verify_pieces,
+                        sizeof(slhdsa_verify_pieces) / sizeof(slhdsa_verify_pieces[0])));
     return 0;
 }
 
