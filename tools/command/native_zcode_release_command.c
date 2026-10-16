@@ -37,6 +37,7 @@
  * buffer is memory_cleanse'd after use and is NEVER logged or echoed. */
 
 #include "command/native_command.h"
+#include "command/release_pin.h"
 
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
@@ -802,6 +803,49 @@ static bool zr_flag_set(const struct json_value *input, const char *key)
     return false;
 }
 
+/* Read a saved .zid (hex text) into file_hex, trimmed and NUL-terminated.
+ * Fails the reply with DOC_UNREADABLE and returns false otherwise. */
+static bool zr_read_doc_hex(const char *file, char *file_hex, size_t cap,
+                            struct zcl_command_reply *reply)
+{
+#if defined(_WIN32)
+    size_t file_size = 0;
+    if (!zr_read_stable(file, file_hex, cap - 1u,
+                        &file_size, false) || file_size == 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "DOC_UNREADABLE",
+                               "normalize", false, false,
+                               "doc file empty, unsafe, unstable or unreadable",
+                               file);
+        return false;
+    }
+    ssize_t n = (ssize_t)file_size;
+#else
+    int fd = open(file, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "DOC_UNREADABLE",
+                               "normalize", false, false,
+                               "cannot open doc file", strerror(errno));
+        return false;
+    }
+    ssize_t n = read(fd, file_hex, cap - 1);
+    close(fd);
+    if (n <= 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "DOC_UNREADABLE",
+                               "normalize", false, false,
+                               "doc file empty or unreadable", file);
+        return false;
+    }
+#endif
+    while (n > 0 && (file_hex[n - 1] == '\n' || file_hex[n - 1] == '\r' ||
+                     file_hex[n - 1] == ' '))
+        n--;
+    file_hex[n] = '\0';
+    return true;
+}
+
 /* ── zcode.release.verify ──────────────────────────────────────────── */
 
 void zcl_native_handle_zcode_release_verify(
@@ -844,41 +888,8 @@ void zcl_native_handle_zcode_release_verify(
 
     char file_hex[ZID_DOC_MAX * 2 + 2];
     if (!doc_hex || !doc_hex[0]) {
-#if defined(_WIN32)
-        size_t file_size = 0;
-        if (!zr_read_stable(file, file_hex, sizeof(file_hex) - 1u,
-                            &file_size, false) || file_size == 0) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "DOC_UNREADABLE",
-                                   "normalize", false, false,
-                                   "doc file empty, unsafe, unstable or unreadable",
-                                   file);
+        if (!zr_read_doc_hex(file, file_hex, sizeof(file_hex), reply))
             return;
-        }
-        ssize_t n = (ssize_t)file_size;
-#else
-        int fd = open(file, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "DOC_UNREADABLE",
-                                   "normalize", false, false,
-                                   "cannot open doc file", strerror(errno));
-            return;
-        }
-        ssize_t n = read(fd, file_hex, sizeof(file_hex) - 1);
-        close(fd);
-        if (n <= 0) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "DOC_UNREADABLE",
-                                   "normalize", false, false,
-                                   "doc file empty or unreadable", file);
-            return;
-        }
-#endif
-        while (n > 0 && (file_hex[n - 1] == '\n' || file_hex[n - 1] == '\r' ||
-                         file_hex[n - 1] == ' '))
-            n--;
-        file_hex[n] = '\0';
         doc_hex = file_hex;
     }
 
@@ -967,6 +978,13 @@ void zcl_native_handle_zcode_release_verify(
                                    "zcode.release.verify");
         return;
     }
+
+    /* Receiver pins (optional `pin` / `pin_file` / `package_root`). Only
+     * runs after the signature verdict above; without any of the three
+     * keys the gate is a no-op, so unpinned callers see no change. */
+    if (!release_pin_gate(in, false, doc.master_pubkey, rel.manifest_root,
+                          reply, "zcode.release.verify"))
+        return;
 
     /* Chain-rooted key trust (optional `--anchored`). The signature above
      * proves the doc was signed by the key it names — it says NOTHING

@@ -1311,3 +1311,41 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE,
     ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_mesh_device_host_runtime)
+
+/* ops.slot: install a fetched release as a binary slot, only when the owner
+ * who signed it is one the receiver pinned. This is the receiver half of the
+ * fleet binary swarm; it needs no chain, no wallet and zero ZCL. */
+ZCL_COMMAND_BRANCH("ops.slot", "ops", "Binary slots",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.slot.install", "ops.slot", "",
+    "Install a signed, pinned release binary as a z23 slot",
+    "Installs the checked-out binary `from` as <slots>/<name>/z23 only when "
+    "every link of the chain holds: the `release` .zid verifies against the "
+    "current time; its signer is one of the owner keys you pinned (`pin` "
+    "inline or `pin_file`, one 64-hex key per line; REQUIRED, there is no "
+    "unpinned install: RELEASE_UNPINNED / PIN_REQUIRED); the doc commits to "
+    "`package_root` (RELEASE_ROOT_MISMATCH); that package's manifest in the "
+    "local store under `datadir` lists `member` (default z23) and every "
+    "SHA3 chunk of `from` plus its exact size match it "
+    "(BINARY_DIGEST_MISMATCH, nothing written). The copy is hashed again "
+    "while it is written to <name>.tmp.<pid>, fsynced, set to 0755, linked "
+    "into place without replacing and the directory fsynced, so a reader "
+    "sees the whole new binary or none. An existing slot with identical "
+    "bytes is an idempotent ok; different bytes are SLOT_EXISTS_DIFFERENT "
+    "and are never overwritten. <slots> is ZCL_BINARY_SLOTS_DIR, else the "
+    "per-user zclassic23-slots directory the launcher reads. `dry_run` "
+    "performs every check and writes nothing. Reply: slot path relative to "
+    "the slots root, sha256, size, signer fingerprint, elapsed_ms.",
+    65536, "slot,install,release,pin,signed,binary,swarm,fleet",
+    "zcl.ops_slot_install.input.v1", "zcl.ops_slot_install.v1",
+    "release,from,name,package_root,member,pin,pin_file,datadir,dry_run",
+    "release,from,name,package_root",
+    "z23 ops slot install --release=<doc.zid> --from=<checked-out z23> --name=<slot> --package_root=<64hex> --pin_file=<owner-pins>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_ops_slot_install)

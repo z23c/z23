@@ -3644,7 +3644,7 @@ tools/command/native_zcode_project_command.c:zproject_render_profile:20
 tools/command/native_zcode_release_command.c:zcl_native_handle_zcode_release_anchor:27
 tools/command/native_zcode_release_command.c:zcl_native_handle_zcode_release_prove:22
 tools/command/native_zcode_release_command.c:zcl_native_handle_zcode_release_sign:23
-tools/command/native_zcode_release_command.c:zcl_native_handle_zcode_release_verify:47
+tools/command/native_zcode_release_command.c:zcl_native_handle_zcode_release_verify:41
 tools/command/native_zcode_release_command.c:zr_batch_load:56
 tools/command/native_zcode_release_command.c:zr_write_doc_file:33
 tools/command/native_zcode_reproduction_command.c:zrr_parse:19

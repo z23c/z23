@@ -3930,11 +3930,18 @@ ZCL_COMMAND_READY_READ(
     "SEPARATE fact from signature validity: a valid signature by an "
     "unanchored key is a hard KEY_NOT_ANCHORED, a valid signature by a "
     "revoked key a hard KEY_REVOKED, and a rotated key still verifies "
-    "while reporting its successor.", 0,
+    "while reporting its successor. With --pin=<64-hex owner key> and/or "
+    "--pin_file=<local file, one 64-hex key per line, # comments> the "
+    "receiver states which owner keys it trusts: a validly signed doc "
+    "whose master_pubkey is not among them is a hard RELEASE_UNPINNED "
+    "naming the signer fingerprint, and --package_root=<64-hex> asserts "
+    "the manifest root the doc must commit to (RELEASE_ROOT_MISMATCH "
+    "otherwise). Without pin, pin_file or package_root the output is "
+    "unchanged.", 0,
     "zcode,release,verify,zid,registry,signature,expiry,proof,batch,"
     "anchored,identity",
     "zcl.zcode_release_verify.input.v1", "zcl.zcode_release_verify.v1",
-    "doc,file,proof,root,anchored,datadir", "",
+    "doc,file,proof,root,anchored,datadir,pin,pin_file,package_root", "",
     "z23 zcode release verify --input='{\"doc\":\"<hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_PUBLIC,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,

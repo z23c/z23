@@ -48,6 +48,7 @@ AGENT_IMPACT_RULE("Makefile|README.md|.github/CONTRIBUTING.md|engine/entry/main.
 AGENT_IMPACT_RULE("tools/command/host_gc_*.c|tools/command/host_gc_*.h|tools/command/native_ops_host_gc.c|tools/scripts/host_gc*.sh|tests/harness/src/test_host_gc.c", "host_gc make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/build_admit.*|tools/command/build_run.c|tools/command/build_status.c|tools/command/build_windows_stub.c|tools/command/native_ops_host_build.c|tests/harness/src/test_host_build.c", "host_build make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/legacy_seed*|tools/command/legacy_status.*|tools/command/native_ops_host_legacy.c|tests/harness/src/test_legacy_seed.c", "legacy_seed command_registry_catalog make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_ops_slot_install.c|tools/command/release_pin.c|tools/command/release_pin.h|tests/harness/src/test_ops_slot_install.c", "ops_slot_install zcode_release")
 AGENT_IMPACT_RULE("platform/packaging/release/build_release.sh|platform/packaging/release/AGENT_CARD.md|docs/work/BOOTSTRAP_PLAN.md", "make_lint_gates")
 AGENT_IMPACT_RULE(".grok/rules/*", "make_lint_gates")
 AGENT_IMPACT_RULE("cognition/controllers/include/controllers/agent_direct_development_contracts.def|cognition/controllers/include/controllers/agent_impact_rules.def", "code_impact impact_composition syncdiag_rpc test_group_selector make_lint_gates")

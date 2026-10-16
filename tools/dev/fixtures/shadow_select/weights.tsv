@@ -828,6 +828,7 @@ test_group	test_op_return_index	1641	39
 test_group	test_op_return_index_legacy_state	333	9
 test_group	test_operator_needed_policy	0	17
 test_group	test_operator_ux	4178	157
+test_group	test_ops_slot_install	300	7
 test_group	test_oracle_policy	51	39
 test_group	test_orphan_utxo_above_tip	2353	17
 test_group	test_os_proc	71	56

@@ -1103,6 +1103,10 @@ ZCL_TEST_GROUP(host_gc)
  * properties through a stub launcher, keep their exit status, release scratch
  * only on success, and are refused below the free-space reserve. */
 ZCL_TEST_GROUP(host_build)
+/* ops.slot.install: the receiver half of the fleet binary swarm. A binary
+ * installs as a slot only when its release doc is signed by a PINNED owner
+ * key, commits to the package root, and the bytes match the manifest. */
+ZCL_TEST_GROUP(ops_slot_install)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 /* The push proof's test dimension must set ZCL_STRESS_TESTS=1 in its own

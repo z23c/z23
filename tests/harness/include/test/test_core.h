@@ -312,6 +312,7 @@ int test_net(void);
 int test_host_gc(void);
 int test_host_build(void);
 int test_legacy_seed(void);
+int test_ops_slot_install(void);
 int test_netbase_split_host_port(void);
 int test_nat_route_dump(void);
 int test_peer_strategy_worker(void);

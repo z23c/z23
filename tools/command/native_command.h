@@ -2082,6 +2082,13 @@ void zcl_native_handle_ops_host_legacy_seed(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.slot.install - install a checked-out release binary as a slot only
+ * when its signed release doc names a pinned owner key and the bytes match
+ * the package manifest exactly (tools/command/native_ops_slot_install.c). */
+void zcl_native_handle_ops_slot_install(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.debug.meaning — node-free field ontology + question index. Answers
  * "what does this telemetry field mean, is this value bad, and which report
  * answers my question" straight out of the binary's static tables, with no
