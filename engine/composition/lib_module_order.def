@@ -63,6 +63,8 @@ LIB_MODULE("rvvirtio")
 LIB_MODULE("sha3")
 /* ML-KEM-768 (FIPS 203) key encapsulation. Depends on base and sha3. */
 LIB_MODULE("mlkem")
+/* SLH-DSA (FIPS 205) stateless hash-based signatures. Depends on base and sha3. */
+LIB_MODULE("slhdsa")
 /* BM25 ranked retrieval and its immutable experiment roots. Depends on base,
  * sha3, and the C math library, so directly above sha3 is its lowest legal
  * rank. Nothing below it (base, install, sha3) references retrieval. */

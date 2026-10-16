@@ -1069,6 +1069,7 @@ int main(int argc, char **argv)
     { extern int test_rvuser(void); failures += test_rvuser(); }
     { extern int test_test_fdt(void); failures += test_test_fdt(); }
     { extern int test_mlkem(void); failures += test_mlkem(); }
+    { extern int test_slhdsa(void); failures += test_slhdsa(); }
     { extern int test_onion_vanity(void); failures += test_onion_vanity(); }
     failures += test_rvvirtio();
     { extern int test_zcode_creation_attribution(void);

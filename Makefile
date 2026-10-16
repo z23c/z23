@@ -4619,14 +4619,16 @@ dev-fleet-selftest: dev-bin agent-sha3
 ZCODE_PACKAGE_BASE_TEST_BIN := $(BIN_DIR)/zcode-package-base-test
 ZCODE_PACKAGE_SHA3_TEST_BIN := $(BIN_DIR)/zcode-package-sha3-test
 ZCODE_PACKAGE_MLKEM_TEST_BIN := $(BIN_DIR)/zcode-package-mlkem-test
+ZCODE_PACKAGE_SLHDSA_TEST_BIN := $(BIN_DIR)/zcode-package-slhdsa-test
 ZCODE_PACKAGE_CODEC_TEST_BIN := $(BIN_DIR)/zcode-package-codec-test
 ZCODE_PACKAGE_FDT_TEST_BIN := $(BIN_DIR)/zcode-package-fdt-test
 ZCODE_PACKAGE_BASE_ASAN_BIN := $(BIN_DIR)/zcode-package-base-test-asan
 ZCODE_PACKAGE_SHA3_ASAN_BIN := $(BIN_DIR)/zcode-package-sha3-test-asan
 ZCODE_PACKAGE_MLKEM_ASAN_BIN := $(BIN_DIR)/zcode-package-mlkem-test-asan
+ZCODE_PACKAGE_SLHDSA_ASAN_BIN := $(BIN_DIR)/zcode-package-slhdsa-test-asan
 ZCODE_PACKAGE_CODEC_ASAN_BIN := $(BIN_DIR)/zcode-package-codec-test-asan
 ZCODE_PACKAGE_REGISTRY_CHECK_BIN := $(BIN_DIR)/zcode-package-registry-check
-.PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-mlkem-test zcode-package-codec-test zcode-package-fdt-test zcode-package-foundation-test zcode-package-registry-check zcode-package-asan z23-package-sign
+.PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-mlkem-test zcode-package-slhdsa-test zcode-package-codec-test zcode-package-fdt-test zcode-package-foundation-test zcode-package-registry-check zcode-package-asan z23-package-sign
 zcode-package-base-test: $(ZCODE_PACKAGE_BASE_TEST_BIN)
 	@$(ZCODE_PACKAGE_BASE_TEST_BIN)
 $(ZCODE_PACKAGE_BASE_TEST_BIN): platform/modules/base/tests/test_base.c \
@@ -4656,6 +4658,17 @@ $(ZCODE_PACKAGE_MLKEM_TEST_BIN): platform/modules/mlkem/tests/test_mlkem.c \
 	    -Iplatform/modules/mlkem/include -Iplatform/modules/sha3/include \
 	    -Iplatform/modules/base/include -o $@ $(filter %.c,$^)
 
+zcode-package-slhdsa-test: $(ZCODE_PACKAGE_SLHDSA_TEST_BIN)
+	@$(ZCODE_PACKAGE_SLHDSA_TEST_BIN)
+$(ZCODE_PACKAGE_SLHDSA_TEST_BIN): platform/modules/slhdsa/tests/test_slhdsa.c \
+		$(wildcard platform/modules/slhdsa/src/*.c) platform/modules/slhdsa/src/slhdsa_internal.h \
+		platform/modules/slhdsa/tests/slhdsa_vectors.h platform/modules/sha3/src/sha3.c \
+		platform/modules/base/src/cleanse.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -Iplatform/modules/slhdsa/include -Iplatform/modules/sha3/include \
+	    -Iplatform/modules/base/include -o $@ $(filter %.c,$^)
+
 zcode-package-codec-test: $(ZCODE_PACKAGE_CODEC_TEST_BIN)
 	@$(ZCODE_PACKAGE_CODEC_TEST_BIN)
 $(ZCODE_PACKAGE_CODEC_TEST_BIN): platform/modules/codec/tests/test_codec.c \
@@ -4672,7 +4685,7 @@ $(ZCODE_PACKAGE_FDT_TEST_BIN): platform/modules/fdt/tests/test_fdt.c \
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Iplatform/modules/fdt/include -Iplatform/modules/base/include -o $@ $^
 
-zcode-package-foundation-test: zcode-package-base-test zcode-package-sha3-test zcode-package-mlkem-test zcode-package-codec-test
+zcode-package-foundation-test: zcode-package-base-test zcode-package-sha3-test zcode-package-mlkem-test zcode-package-slhdsa-test zcode-package-codec-test
 
 zcode-package-registry-check: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 	@$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
@@ -4713,6 +4726,15 @@ $(ZCODE_PACKAGE_MLKEM_ASAN_BIN): platform/modules/mlkem/tests/test_mlkem.c \
 	    -Iplatform/modules/mlkem/include -Iplatform/modules/sha3/include \
 	    -Iplatform/modules/base/include -o $@ $(filter %.c,$^)
 
+$(ZCODE_PACKAGE_SLHDSA_ASAN_BIN): platform/modules/slhdsa/tests/test_slhdsa.c \
+		$(wildcard platform/modules/slhdsa/src/*.c) platform/modules/slhdsa/src/slhdsa_internal.h \
+		platform/modules/slhdsa/tests/slhdsa_vectors.h platform/modules/sha3/src/sha3.c \
+		platform/modules/base/src/cleanse.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 $(ZCODE_PACKAGE_ASAN_FLAGS) -Wall -Wextra -Werror -pedantic \
+	    -Iplatform/modules/slhdsa/include -Iplatform/modules/sha3/include \
+	    -Iplatform/modules/base/include -o $@ $(filter %.c,$^)
+
 $(ZCODE_PACKAGE_CODEC_ASAN_BIN): platform/modules/codec/tests/test_codec.c \
 		platform/modules/codec/src/cursor.c
 	@mkdir -p $(dir $@)
@@ -4720,17 +4742,17 @@ $(ZCODE_PACKAGE_CODEC_ASAN_BIN): platform/modules/codec/tests/test_codec.c \
 	    -Iplatform/modules/codec/include -Iplatform/modules/base/include -o $@ $^
 
 zcode-package-asan: $(ZCODE_PACKAGE_BASE_ASAN_BIN) \
-		$(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_MLKEM_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN) \
+		$(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_MLKEM_ASAN_BIN) $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN) \
 		$(BIN_DIR)/z23-package-verify
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  sh -c 'set -e; ulimit -s 1048576; \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
-	  for t in $(ZCODE_PACKAGE_BASE_ASAN_BIN) $(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_MLKEM_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN); do \
+	  for t in $(ZCODE_PACKAGE_BASE_ASAN_BIN) $(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_MLKEM_ASAN_BIN) $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN) $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN); do \
 	    echo "zcode-package-asan: --- $$t ---"; "$$t"; \
 	  done'
 	@$(MAKE) --no-print-directory asan-ci \
 	  ASAN_CI_GROUPS='$(ZCODE_PACKAGE_ASAN_GROUPS)'
-	@echo "zcode-package-asan: OK (isolated base/sha3/mlkem/codec + signed package lifecycle)"
+	@echo "zcode-package-asan: OK (isolated base/sha3/mlkem/slhdsa/codec + signed package lifecycle)"
 
 .PHONY: docs-zcode-package-registry check-zcode-package-registry print-zcode-monolith-lib-sources
 docs-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
