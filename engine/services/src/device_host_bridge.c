@@ -684,9 +684,20 @@ static enum device_host_bridge_result psk_io_consume_unread(struct device_host_p
     }
     return DEVICE_HOST_BRIDGE_READY;
 }
+/* A read that would only report EAGAIN needs no authority acquisition: probe readiness first
+ * (one zero-timeout poll) and acquire the guard only when a read can actually deliver or
+ * report an end/error. Bytes are still read only while the guard is held. */
+static bool psk_io_read_ready(int fd)
+{
+    if (fd < 0) return true; /* let the read report the bad descriptor */
+    struct pollfd event = {.fd = fd, .events = POLLIN};
+    int ready = poll(&event, 1, 0);
+    return ready != 0;
+}
 static enum device_host_bridge_result psk_io_read_carrier(struct device_host_psk_bridge *bridge, bool *progress)
 {
     if (bridge->carrier_eof || bridge->unread_used || !psk_io_receive_enabled(bridge)) return DEVICE_HOST_BRIDGE_READY;
+    if (!psk_io_read_ready(bridge->spec.carrier_input_fd)) return DEVICE_HOST_BRIDGE_READY;
     struct device_pairing_guard guard = {0}; enum device_host_bridge_result result = psk_io_authorize(bridge, &guard);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
     ssize_t count = read(bridge->spec.carrier_input_fd, bridge->unread, sizeof(bridge->unread)); int error = errno;
@@ -717,6 +728,7 @@ static enum device_host_bridge_result psk_io_read_local(struct device_host_psk_b
 {
     if (bridge->session.phase != DEVICE_HOST_PSK_ESTABLISHED || bridge->local_eof || bridge->local_used ||
         bridge->session.pending_used || bridge->session.send_fin) return DEVICE_HOST_BRIDGE_READY;
+    if (!psk_io_read_ready(psk_io_input(bridge))) return psk_io_queue_local(bridge, progress);
     struct device_pairing_guard guard = {0}; enum device_host_bridge_result result = psk_io_authorize(bridge, &guard);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
     ssize_t count = read(psk_io_input(bridge), bridge->local, sizeof(bridge->local)); int error = errno;
