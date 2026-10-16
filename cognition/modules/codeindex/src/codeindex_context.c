@@ -43,7 +43,7 @@ static const struct ci_module_context k_modules[] = {
     {"presentation", "explorer"}, {"primitives", "core"},
     {"plugin", "commons"}, {"receipt", "engine"}, {"retrieval", "cognition"},
     {"rpc", "engine"}, {"rvemu", "platform"}, {"rvmachine", "platform"}, {"rvplat", "platform"}, {"rvuser", "platform"}, {"rvvirtio", "platform"}, {"sapling", "core"}, {"science", "cognition"},
-    {"script", "core"}, {"session", "cognition"}, {"sha3", "platform"},
+    {"script", "core"}, {"session", "cognition"}, {"sha3", "platform"}, {"slhdsa", "platform"},
     {"sim", "engine"}, {"storage", "engine"}, {"support", "platform"},
     {"sync", "core"}, {"territory", "cognition"}, {"util", "platform"},
     {"validation", "core"}, {"vcs", "commons"}, {"wallet", "wallet"},

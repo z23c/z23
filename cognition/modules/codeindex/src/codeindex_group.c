@@ -307,6 +307,7 @@ static const char *ci_purpose_modules_f(const char *group)
 {
     if (module_group_is(group, "fdt")) return "flattened device tree (DTB) writer and reader over caller-owned buffers for the RISC-V machine";
     if (module_group_is(group, "mlkem")) return "ML-KEM-768 key encapsulation (FIPS 203) over caller-supplied randomness";
+    if (module_group_is(group, "slhdsa")) return "SLH-DSA (FIPS 205) stateless hash-based signatures over SHAKE256 and caller-supplied randomness";
     if (module_group_is(group, "rvplat")) return "deterministic RISC-V platform device models: PLIC, tick-driven timer, native SBI call handler and ns16550 UART, with no CPU core, clock or I/O";
     if (module_group_is(group, "rvvirtio")) return "VIRTIO 1.2 MMIO transport, split virtqueues, virtio-blk and virtio-net device models behind caller memory callbacks";
     if (module_group_is(group, "rvmachine")) return "built-in RISC-V machine: one hart, RAM, PLIC, timer, firmware calls, ns16550 console and a copy-on-write virtio disk, with a kernel loader, a device tree and a deterministic run loop";

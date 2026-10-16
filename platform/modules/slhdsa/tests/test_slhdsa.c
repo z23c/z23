@@ -35,7 +35,7 @@ static unsigned passes[3][2];
 static const char *const kind_name[3] = {"keygen", "sign", "verify"};
 static const char *const param_name[2] = {"128s", "192s"};
 
-static char *vector_text;
+static char vector_text[3000000];
 
 static int load_vectors(void)
 {
@@ -43,8 +43,7 @@ static int load_vectors(void)
     size_t used = 0;
     for (size_t i = 0; i < sizeof(slhdsa_vector_pieces) / sizeof(slhdsa_vector_pieces[0]); i++)
         total += strlen(slhdsa_vector_pieces[i]);
-    vector_text = malloc(total);
-    CHECK(vector_text != nullptr);
+    CHECK(total <= sizeof(vector_text));
     for (size_t i = 0; i < sizeof(slhdsa_vector_pieces) / sizeof(slhdsa_vector_pieces[0]); i++) {
         const size_t n = strlen(slhdsa_vector_pieces[i]);
         memcpy(vector_text + used, slhdsa_vector_pieces[i], n);
@@ -103,7 +102,7 @@ static bool prng_fn(void *context, uint8_t *out, size_t len)
         uint64_t z = (prng_state += UINT64_C(0x9e3779b97f4a7c15));
         z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
         z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
-        out[i] = (uint8_t)((z ^ (z >> 31)) >> 24);
+        out[i] = (uint8_t)(z ^ (z >> 31));
     }
     return true;
 }
@@ -255,7 +254,6 @@ static int check_vectors(void)
         }
     CHECK(records == passes[0][0] + passes[0][1] + passes[1][0] + passes[1][1] +
                          passes[2][0] + passes[2][1]);
-    free(vector_text);
     return 0;
 }
 
@@ -266,7 +264,7 @@ static uint8_t g_pk[48], g_sk[96], g_sig[SLHT_MAX_SIG], g_bad[SLHT_MAX_SIG];
 static double now_ms(void)
 {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_MONOTONIC, &ts); // platform-ok: standalone module test prints elapsed time, never asserts it
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
 

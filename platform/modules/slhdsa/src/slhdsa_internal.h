@@ -4,6 +4,7 @@
 #define ZCL_SLHDSA_INTERNAL_H
 
 #include "slhdsa/slhdsa_kat.h"
+#include "base/serialize_le.h"
 
 #include <string.h>
 
@@ -48,16 +49,12 @@ enum {
 
 static inline void slh_adrs_put32(struct slh_adrs *a, unsigned off, uint32_t v)
 {
-    a->b[off] = (uint8_t)(v >> 24);
-    a->b[off + 1] = (uint8_t)(v >> 16);
-    a->b[off + 2] = (uint8_t)(v >> 8);
-    a->b[off + 3] = (uint8_t)v;
+    zcl_write_u32_be(a->b + off, v);
 }
 
 static inline uint32_t slh_adrs_get32(const struct slh_adrs *a, unsigned off)
 {
-    return ((uint32_t)a->b[off] << 24) | ((uint32_t)a->b[off + 1] << 16) |
-           ((uint32_t)a->b[off + 2] << 8) | (uint32_t)a->b[off + 3];
+    return zcl_read_u32_be(a->b + off);
 }
 
 static inline void slh_adrs_set_layer(struct slh_adrs *a, uint32_t v)
