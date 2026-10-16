@@ -25,8 +25,9 @@ callback; `zcl_slhdsa_sign_deterministic` uses `opt_rand = PK.seed`. The module
 never reads an operating-system generator. All functions return
 `enum zcl_slhdsa_status` and are `[[nodiscard]]`. Wrong-length keys, seeds and
 signatures give `ZCL_SLHDSA_ERR_LENGTH` before any hashing; a well-formed
-signature that does not verify gives `ZCL_SLHDSA_ERR_VERIFY`. Signing and key
-generation failures zero their output buffers. Nothing allocates on the heap;
+signature that does not verify gives `ZCL_SLHDSA_ERR_VERIFY`. Arguments are
+validated first and output buffers are unspecified on failure; the header lists
+the only cases that zero them. Nothing allocates on the heap;
 the message is streamed through an incremental SHAKE256 sponge, so verification
 stack use does not depend on message or signature length.
 

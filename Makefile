@@ -4747,7 +4747,7 @@ zcode-package-asan: $(ZCODE_PACKAGE_BASE_ASAN_BIN) \
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  sh -c 'set -e; ulimit -s 1048576; \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
-	  for t in $(ZCODE_PACKAGE_BASE_ASAN_BIN) $(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_MLKEM_ASAN_BIN) $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN) $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN); do \
+	  for t in $(ZCODE_PACKAGE_BASE_ASAN_BIN) $(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_MLKEM_ASAN_BIN) $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN); do \
 	    echo "zcode-package-asan: --- $$t ---"; "$$t"; \
 	  done'
 	@$(MAKE) --no-print-directory asan-ci \

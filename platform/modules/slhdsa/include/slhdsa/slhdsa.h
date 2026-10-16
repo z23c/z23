@@ -15,10 +15,14 @@
  * cryptographically secure random bytes through it. The deterministic signer
  * uses opt_rand = PK.seed as FIPS 205 permits.
  *
- * Every length is checked before any work is done; verification allocates
- * nothing and its stack use does not depend on attacker-chosen lengths. On any
- * failure every non-NULL output buffer is zeroed. Output buffers must not
- * overlap each other or any input. The caller owns the secret key and must
+ * Parameters, pointers and lengths are validated before any work is done;
+ * verification allocates nothing and its stack use does not depend on
+ * attacker-chosen lengths. The contents of output buffers are unspecified on
+ * failure. Only these cases zero them: zcl_slhdsa_sign_deterministic zeroes a
+ * non-NULL signature buffer of sig_len bytes on any failure; zcl_slhdsa_sign
+ * does so once param, random and sig are valid; zcl_slhdsa_keygen zeroes the
+ * public and secret key buffers when the random callback fails. Output
+ * buffers must not overlap each other or any input. The caller owns the secret key and must
  * wipe it (base/cleanse.h) when it is no longer needed. The internal
  * algorithms are declared in slhdsa/slhdsa_kat.h for known-answer testing. */
 

@@ -283,7 +283,7 @@ static int flip_signature(enum zcl_slhdsa_param param, const uint8_t *msg,
 {
     const size_t sl = zcl_slhdsa_signature_size(param);
     const size_t pl = zcl_slhdsa_public_key_size(param);
-    /* Every bit of R, a stride across FORS and hypertree, and the last bytes. */
+    /* One bit of each byte of R, a stride across FORS and hypertree, and the last bytes. */
     for (size_t pos = 0; pos < sl; pos += (pos < 32 ? 1 : 97)) {
         memcpy(g_bad, g_sig, sl);
         g_bad[pos] ^= (uint8_t)(1u << (pos % 8));
