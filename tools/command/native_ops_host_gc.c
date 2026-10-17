@@ -40,18 +40,37 @@ static void ohg_fail(struct zcl_command_reply *reply, const char *code,
                            false, message, evidence);
 }
 
+static bool ohg_object_root(const struct json_value *el,
+                             const char **path, const char **name)
+{
+    *path = NULL;
+    *name = NULL;
+    const struct json_value *value = json_get(el, "path");
+    const struct json_value *label = json_get(el, "class");
+    if (!value || value->type != JSON_STR ||
+        (label && label->type != JSON_STR))
+        return false;
+    *path = json_get_str(value);
+    if (label) *name = json_get_str(label);
+    return true;
+}
+
 /* One `roots` element. An object names its own class label; a bare string
  * takes the pool directory's own basename, so the common case stays one
  * short array of paths. */
 static bool ohg_take_root(const struct json_value *el,
                           struct host_gc_pool *pool)
 {
-    const char *path = json_get_str(el);
+    const char *path;
     const char *name = NULL;
     const char *slash;
-    if (!path) {
-        path = json_get_str(json_get(el, "path"));
-        name = json_get_str(json_get(el, "class"));
+    if (el && el->type == JSON_STR) {
+        path = json_get_str(el);
+    } else if (el && el->type == JSON_OBJ) {
+        if (!ohg_object_root(el, &path, &name))
+            return false;
+    } else {
+        return false;
     }
     if (!path || path[0] != '/')
         return false;
@@ -67,6 +86,8 @@ static bool ohg_take_root(const struct json_value *el,
 static bool ohg_take_roots(const struct json_value *roots,
                            struct host_gc_request *req)
 {
+    if (!roots || roots->type != JSON_ARR)
+        return false;
     size_t n = json_size(roots);
     if (n == 0 || n > HOST_GC_MAX_POOLS)
         return false;

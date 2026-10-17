@@ -26,6 +26,7 @@
 #include "test/test_core.h"
 
 #include "command/host_gc_sweep.h"
+#include "command/native_command.h"
 #include "util/spawn.h"
 
 #include <fcntl.h>
@@ -197,6 +198,129 @@ static void hgt_seed_request(struct host_gc_request *req, const char *pool)
     req->npools = 1;
 }
 
+/* Exercise the advertised command boundary; every request is an explicit dry run. */
+static bool hgt_handle_roots(const struct json_value *roots,
+                             struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    zcl_command_reply_init(reply, "zcl.host_gc.v1");
+    bool ok = json_push_kv_bool(&input, "apply", false) &&
+              json_push_kv(&input, "roots", roots);
+    if (ok) {
+        struct zcl_command_request request = { .input = &input };
+        zcl_native_handle_ops_host_gc(&request, reply);
+    }
+    json_free(&input);
+    return ok;
+}
+
+static bool hgt_root_report_matches(const struct zcl_command_reply *reply,
+                                    const char *pool, const char *expected)
+{
+    const struct json_value *classes = json_get(&reply->data, "classes");
+    const struct json_value *row = json_at(classes, 0);
+    const struct json_value *apply = json_get(&reply->data, "apply");
+    const struct json_value *reclaimed =
+        json_get(json_get(&reply->data, "totals"), "bytes_reclaimed");
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        reply->exit_code == ZCL_COMMAND_EXIT_OK &&
+        classes && classes->type == JSON_ARR && json_size(classes) == 1 &&
+        !strcmp(json_get_str(json_get(row, "path")), pool) &&
+        !strcmp(json_get_str(json_get(row, "class")), expected) &&
+        apply && apply->type == JSON_BOOL && !json_get_bool(apply) &&
+        reclaimed && reclaimed->type == JSON_INT && json_get_int(reclaimed) == 0;
+}
+
+static bool hgt_valid_root(const char *pool, unsigned form)
+{
+    struct json_value roots, element;
+    json_init(&roots); json_set_array(&roots);
+    json_init(&element);
+    bool built = true;
+    if (form == 0) {
+        json_set_str(&element, pool);
+    } else {
+        json_set_object(&element);
+        built = json_push_kv_str(&element, "path", pool);
+        if (form == 1 || form == 3)
+            built = built && json_push_kv_str(&element, "class",
+                                             form == 1 ? "selected-pool" : "");
+    }
+    built = built && json_push_back(&roots, &element);
+    struct zcl_command_reply reply;
+    bool called = hgt_handle_roots(&roots, &reply);
+    const char *expected = form == 1 ? "selected-pool" : "pool";
+    bool ok = built && called && hgt_root_report_matches(&reply, pool, expected);
+    zcl_command_reply_free(&reply);
+    json_free(&roots); json_free(&element);
+    return ok;
+}
+
+static bool hgt_invalid_roots(const char *text)
+{
+    struct json_value roots;
+    json_init(&roots);
+    if (!json_read(&roots, text, strlen(text))) {
+        json_free(&roots);
+        return false;
+    }
+    struct zcl_command_reply reply;
+    bool called = hgt_handle_roots(&roots, &reply);
+    bool ok = called && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        reply.exit_code == ZCL_COMMAND_EXIT_INVALID &&
+        !strcmp(reply.error.code, "host_gc.roots_invalid") &&
+        !reply.error.mutated;
+    zcl_command_reply_free(&reply);
+    json_free(&roots);
+    return ok;
+}
+
+static int hgt_handler_tests(const char *pool, const char *inuse,
+                              const char *locked, const char *orphan)
+{
+    int failures = 0;
+
+    TEST("host gc: command accepts typed roots and preserves dry-run class/path") {
+        for (unsigned form = 0; form < 4; form++)
+            ASSERT(hgt_valid_root(pool, form));
+        ASSERT(hgt_exists(inuse) && hgt_exists(locked) && hgt_exists(orphan));
+        PASS();
+    }
+
+    TEST("host gc: command refuses malformed roots, fields and pool counts") {
+        static const char *const invalid[] = {
+            "[]", "null", "false", "1", "\"/unused\"",
+            "{\"path\":\"/unused\"}",
+            "[null]", "[false]", "[1]", "[[]]",
+            "[\"\"]", "[\"relative\"]", "[{}]",
+            "[{\"path\":null}]", "[{\"path\":false}]",
+            "[{\"path\":1}]", "[{\"path\":[]}]",
+            "[{\"path\":{}}]", "[{\"path\":\"\"}]",
+            "[{\"path\":\"relative\"}]",
+            "[{\"path\":\"/unused\",\"class\":null}]",
+            "[{\"path\":\"/unused\",\"class\":false}]",
+            "[{\"path\":\"/unused\",\"class\":1}]",
+            "[{\"path\":\"/unused\",\"class\":[]}]",
+            "[{\"path\":\"/unused\",\"class\":{}}]",
+            "[\"/unused\",\"/unused\",\"/unused\",\"/unused\","
+            "\"/unused\",\"/unused\",\"/unused\",\"/unused\",\"/unused\"]",
+        };
+        for (size_t i = 0; i < sizeof(invalid)/sizeof(invalid[0]); i++) {
+            bool refused = hgt_invalid_roots(invalid[i]);
+            if (!refused)
+                fprintf(stderr, "host gc malformed roots case %zu: %s\n", i, invalid[i]);
+            ASSERT(refused);
+        }
+        ASSERT(hgt_exists(inuse) && hgt_exists(locked) && hgt_exists(orphan));
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
 int test_host_gc(void)
 {
     int failures = 0;
@@ -231,6 +355,8 @@ int test_host_gc(void)
         ASSERT(occupant > 0);
         PASS();
     }
+
+    failures += hgt_handler_tests(pool, inuse, locked, orphan);
 
     TEST("host gc: dry run labels in_use, locked and reapable, and moves nothing") {
         struct host_gc_request req;
