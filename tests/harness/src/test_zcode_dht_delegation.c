@@ -276,6 +276,37 @@ static int test_roster_cache_bound_to_body(void)
     return failures;
 }
 
+static int test_chain_cache_bound_to_body(void)
+{
+    int failures = 0;
+    TEST("zcode dht delegation: chain cached fields must equal the signed body") {
+        struct vcs_zcode_dht_delegation base, d;
+        ASSERT(make_delegation(&base, 1, 1000, 1000 + 86400, 0x22));
+        ASSERT_EQ(vcs_zcode_dht_delegation_verify(&base, NULL, NULL, 0, NULL, 1000),
+                  VCS_ZCODE_DHT_DELEGATION_OK);
+        d = base; d.network_genesis[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_dht_delegation_verify(&d, NULL, NULL, 0, NULL, 1000),
+                  VCS_ZCODE_DHT_DELEGATION_PROJECTION);
+        d = base; d.online_pubkey[5] ^= 1;
+        ASSERT_EQ(vcs_zcode_dht_delegation_verify(&d, NULL, NULL, 0, NULL, 1000),
+                  VCS_ZCODE_DHT_DELEGATION_PROJECTION);
+        d = base; d.noise_static_pubkey[31] ^= 1;
+        ASSERT_EQ(vcs_zcode_dht_delegation_verify(&d, NULL, NULL, 0, NULL, 1000),
+                  VCS_ZCODE_DHT_DELEGATION_PROJECTION);
+        d = base; d.beacon_height += 1;
+        ASSERT_EQ(vcs_zcode_dht_delegation_verify(&d, NULL, NULL, 0, NULL, 1000),
+                  VCS_ZCODE_DHT_DELEGATION_PROJECTION);
+        d = base; d.beacon_hash[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_dht_delegation_verify(&d, NULL, NULL, 0, NULL, 1000),
+                  VCS_ZCODE_DHT_DELEGATION_PROJECTION);
+        d = base; d.not_before += 1;
+        ASSERT_EQ(vcs_zcode_dht_delegation_verify(&d, NULL, NULL, 0, NULL, 1000),
+                  VCS_ZCODE_DHT_DELEGATION_PROJECTION);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_roster_validity_window(void)
 {
     int failures = 0;
@@ -489,6 +520,7 @@ int test_zcode_dht_delegation(void)
     failures += test_roster_validity_window();
     failures += test_unknown_mode_refused();
     failures += test_roster_cache_bound_to_body();
+    failures += test_chain_cache_bound_to_body();
     failures += test_roster_refused_by_verify_paths();
     failures += test_delegation_windows_and_binding();
     failures += test_delegation_stable_node_id();
