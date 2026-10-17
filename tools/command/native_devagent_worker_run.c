@@ -39,6 +39,7 @@
 #include "platform/time_compat.h"
 #include "platform/windows_path.h"
 #include "zutf8/zutf8.h"
+#include "util/log_macros.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -943,7 +944,10 @@ static struct wkr_spawn_out wkr_spawn_windows(const struct wkr_drive_opts *opts,
     }
     platform_process_init(&proc);
     t0_s = platform_time_wall_unix();
-    if (platform_confined_start(&proc, &run->spec) != PLATFORM_CONFINE_ARMED) {
+    enum platform_confine_missing missing = platform_confined_start(&proc, &run->spec);
+    if (missing != PLATFORM_CONFINE_ARMED) {
+        LOG_ERROR("devagent_worker", "confined start refused: capability=%s",
+                  platform_confine_missing_name(missing));
         free(run);
         return out;
     }

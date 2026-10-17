@@ -8,6 +8,7 @@
 #include "platform/confined_process.h"
 #include "process_lifecycle_internal.h"
 #include "base/safe_alloc.h"
+#include "util/log_macros.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -277,12 +278,18 @@ static bool cf_label(const char *root, const wchar_t *sddl, DWORD action)
               ConvertStringSecurityDescriptorToSecurityDescriptorW(
                   sddl, SDDL_REVISION_1, &sd, NULL) &&
               GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted) &&
-              present && sacl &&
-              TreeSetNamedSecurityInfoW(path, SE_FILE_OBJECT,
-                                        LABEL_SECURITY_INFORMATION, NULL,
-                                        NULL, NULL, sacl, action, NULL,
-                                        ProgressInvokeNever,
-                                        NULL) == ERROR_SUCCESS;
+              present && sacl;
+    if (ok) {
+        DWORD error = TreeSetNamedSecurityInfoW(
+            path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL,
+            NULL, NULL, sacl, action, NULL, ProgressInvokeNever, NULL);
+        ok = error == ERROR_SUCCESS;
+        if (!ok)
+            LOG_ERROR("confined_process",
+                      "write-root label refused: api=TreeSetNamedSecurityInfoW "
+                      "action=%lu win32=%lu", (unsigned long)action,
+                      (unsigned long)error);
+    }
     if (sd)
         LocalFree(sd);
     free(path);
@@ -388,8 +395,26 @@ static bool cf_create(HANDLE token, HANDLE job, struct cf_launch_text *t,
     started = CreateProcessAsUserW(token, t->image, t->line, NULL, NULL, TRUE,
                                    flags, t->env, t->cwd, &startup.StartupInfo,
                                    pi) != 0;
+    if (!started) {
+        DWORD error = GetLastError();
+        LOG_ERROR("confined_process",
+                  "launch refused: api=CreateProcessAsUserW win32=%lu",
+                  (unsigned long)error);
+    }
     assigned = started && AssignProcessToJobObject(job, pi->hProcess) != 0;
+    if (started && !assigned) {
+        DWORD error = GetLastError();
+        LOG_ERROR("confined_process",
+                  "launch refused: api=AssignProcessToJobObject win32=%lu",
+                  (unsigned long)error);
+    }
     resumed = assigned && ResumeThread(pi->hThread) != (DWORD)-1;
+    if (assigned && !resumed) {
+        DWORD error = GetLastError();
+        LOG_ERROR("confined_process",
+                  "launch refused: api=ResumeThread win32=%lu",
+                  (unsigned long)error);
+    }
     (void)SetErrorMode(previous);
     if (started && !resumed) {
         (void)TerminateProcess(pi->hProcess, 125u);
