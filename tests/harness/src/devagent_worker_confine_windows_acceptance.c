@@ -115,7 +115,13 @@ static bool acc_mode_memory(const struct wkr_job *job, struct wkr_result *res)
         FILE *f;
         if (!chunk)
             break;
-        memset(chunk, 0xA5, ACC_CHUNK); /* commit every page */
+        /* Ordinary dead stores let an optimizing compiler remove malloc and
+         * its failure branch too. Volatile page writes force real committed
+         * allocations to remain live until the Job memory cap refuses one. */
+        volatile unsigned char *committed = chunk;
+        for (size_t offset = 0; offset < ACC_CHUNK; offset += 4096)
+            committed[offset] = 0xA5;
+        committed[ACC_CHUNK - 1] = 0xA5;
         total += ACC_CHUNK;
         f = fopen(progress, "wb");
         if (f) {
@@ -357,9 +363,13 @@ static bool acc_case_memory(void)
                    job->rundir);
     total = acc_read_ull(progress);
     ok = !oc.gate && oc.rc == 130 && strcmp(oc.note, "executor-signaled") == 0;
-    if (!ok)
+    if (!ok) {
+        printf("devagent_worker_confine: memory outcome gate=%d rc=%lld note=%s "
+               "status=%d signaled=%d wall_ms=%lld allocated=%llu cap=%llu\n",
+               oc.gate, oc.rc, oc.note, out.status, out.signaled, out.wall_ms,
+               total, cap);
         acc_fail("memory", "the memory cap did not end in the crashed verdict");
-    else if (total >= cap || total < cap / 4u)
+    } else if (total >= cap || total < cap / 4u)
         ok = acc_fail("memory", "the allocation stopped away from the cap");
     free(job);
     return ok;
