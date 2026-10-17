@@ -1320,8 +1320,8 @@ static bool mesh_terminal_worker_budget_exceeded_platform_arm(struct mesh_termin
         return true;
     DWORD code = 0;
     if (w->win_process &&
-        GetExitCodeProcess((HANDLE)w->win_process, &code) &&
-        code != STILL_ACTIVE) {
+        WaitForSingleObject((HANDLE)w->win_process, 0) == WAIT_OBJECT_0 &&
+        GetExitCodeProcess((HANDLE)w->win_process, &code)) {
         w->exit_code = (int)code;
         w->running = false;
         if (w->close_reason == MESH_TERMINAL_CLOSE_REQUESTED)
@@ -1350,8 +1350,9 @@ static bool mesh_terminal_worker_alive_platform_arm(struct mesh_terminal_worker 
     if (!w || !w->running)
         return false;
     DWORD code = 0;
-    if (w->win_process && GetExitCodeProcess((HANDLE)w->win_process, &code) &&
-        code != STILL_ACTIVE) {
+    if (w->win_process &&
+        WaitForSingleObject((HANDLE)w->win_process, 0) == WAIT_OBJECT_0 &&
+        GetExitCodeProcess((HANDLE)w->win_process, &code)) {
         w->exit_code = (int)code;
         w->running = false;
         if (w->close_reason == MESH_TERMINAL_CLOSE_REQUESTED)

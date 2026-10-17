@@ -570,6 +570,38 @@ static void test_exact_argv(const char *shell, const char *workdir)
     test_argv_refusals(cfg, self);
 }
 
+static void test_exit_259(const char *shell, const char *workdir, bool budget_first)
+{
+    struct mesh_terminal_worker w;
+    struct mesh_terminal_worker_config cfg = base_config(shell, workdir);
+    const char *argv[] = {shell, "/d", "/c", "exit /b 259", NULL};
+    cfg.argv = argv;
+    int64_t now = (int64_t)time(NULL);
+    struct zcl_result r = mesh_terminal_worker_spawn(&cfg, now, &w);
+    expect(r.ok, "exit259: spawn");
+    if (!r.ok)
+        return;
+    DWORD code = 0;
+    DWORD waited = WaitForSingleObject((HANDLE)w.win_process, 5000);
+    bool queried = GetExitCodeProcess((HANDLE)w.win_process, &code) != 0;
+    printf("exit259: observed wait=%lu code=%lu budget_first=%d\n",
+           (unsigned long)waited, (unsigned long)code, budget_first);
+    expect(waited == WAIT_OBJECT_0 && queried && code == 259,
+           "exit259: native process really exited with 259");
+    if (budget_first)
+        expect(mesh_terminal_worker_budget_exceeded(&w, now + 121),
+               "exit259: budget poll observes exited process");
+    else
+        expect(!mesh_terminal_worker_alive(&w),
+               "exit259: alive poll observes exited process");
+    expect(!w.running && w.exit_code == 259 &&
+               w.close_reason == MESH_TERMINAL_CLOSE_WORKER_EXITED,
+           "exit259: natural exit takes precedence over expired lifetime");
+    mesh_terminal_worker_kill(&w);
+    expect(!w.win_process && !w.win_job && !w.win_pc &&
+               !w.win_input_write && !w.win_output_read,
+           "exit259: cleanup closes every worker handle");
+}
 int main(void)
 {
     int child = argv_child();
@@ -581,6 +613,8 @@ int main(void)
         fputs("mesh_terminal_worker_windows: environment unavailable\n", stderr);
         return 1;
     }
+    test_exit_259(cmd, workdir, false);
+    test_exit_259(cmd, workdir, true);
     int rc = roundtrip(cmd, workdir, "set /a 123456*7\r\n", "cmd.exe command");
     if (rc != 0)
         return rc;
