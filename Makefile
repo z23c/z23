@@ -192,7 +192,8 @@ endif
 ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 ZCL_WINDOWS_ACCEPTANCE_SQLITE := $(ZCL_WINDOWS_ACCEPTANCE_DIR)/lib/libsqlite3.a
 include platform/modules/platform/tests/windows_acceptance.mk
-ZCL_WINDOWS_STANDALONE_GOALS := print-node-c23-srcs windows-acceptance-fixtures $(addprefix \
+ZCL_WINDOWS_STANDALONE_GOALS := print-node-c23-srcs windows-acceptance-fixtures \
+	windows-acceptance-compile $(addprefix \
 	$(ZCL_WINDOWS_ACCEPTANCE_DIR)/,$(addsuffix .exe,$(ZCL_WINDOWS_ACCEPTANCE_TESTS)))
 
 ZCL_WINDOWS_STANDALONE_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_STANDALONE_GOALS),$(MAKECMDGOALS))),,1),)

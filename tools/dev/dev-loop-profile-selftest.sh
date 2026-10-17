@@ -29,13 +29,15 @@ exit 1
 SELECTOR_REFUSE
 chmod +x "$selector_fixture/refuse"
 for selector_helper in check-toolchain source-identity build-epoch-key \
-    build-epoch-session zcc_bootstrap; do
+    build-epoch-session zcc_bootstrap build_vendor tor_archives_ready; do
     cp "$selector_fixture/refuse" "$selector_fixture/$selector_helper"
 done
 sed -e "s|tools/dev/check-toolchain.sh|$selector_fixture/check-toolchain|g" \
     -e "s|tools/dev/source-identity.sh|$selector_fixture/source-identity|g" \
     -e "s|tools/dev/build-epoch-key.sh|$selector_fixture/build-epoch-key|g" \
     -e "s|tools/dev/build-epoch-session.sh|$selector_fixture/build-epoch-session|g" \
+    -e "s|tools/scripts/build_vendor.sh|$selector_fixture/build_vendor|g" \
+    -e "s|tools/scripts/tor_archives_ready.sh|$selector_fixture/tor_archives_ready|g" \
     -e "s|\$(CURDIR)/tools/dev/zcc_bootstrap.sh|$selector_fixture/zcc_bootstrap|g" \
     "$ROOT/Makefile" > "$selector_fixture/Makefile"
 selector_epoch="$selector_fixture/build/node-obj/epochs/$(printf '%064d' 0)"
@@ -51,6 +53,7 @@ selector_plan()
         > "$selector_fixture/plan" 2>&1
 }
 for selector_goal in print-node-c23-srcs windows-acceptance-fixtures \
+    windows-acceptance-compile \
     build/tests/windows/mesh_terminal_worker.exe \
     build/tests/windows/database_lifetime.exe known-mixed; do
     : > "$selector_fixture/calls"
@@ -66,12 +69,13 @@ for selector_goal in print-node-c23-srcs windows-acceptance-fixtures \
     [ "$(cat "$selector_epoch/.unverified")" = \
         "$selector_marker" ] || fail 'standalone parse mutated interrupted node state'
 done
-for selector_case in node mixed fixtures-mixed unknown default; do
+for selector_case in node mixed fixtures-mixed compile-mixed unknown default; do
     : > "$selector_fixture/calls"
     case "$selector_case" in
         node) set -- z23 ;;
         mixed) set -- print-node-c23-srcs z23 ;;
         fixtures-mixed) set -- windows-acceptance-fixtures z23 ;;
+        compile-mixed) set -- windows-acceptance-compile z23 ;;
         unknown) set -- build/tests/windows/not_a_catalog_row.exe ;;
         default) set -- ;;
     esac
