@@ -360,6 +360,36 @@ static int aops_fs_cases(void)
     return bad | aops_header_cases();
 }
 
+/* w40: the include/export readers and the impl glob must refuse an
+ * unreadable or non-regular operand instead of treating it as an empty
+ * result set (a dropped seed file can hide a whole accelerator). */
+static int aops_reader_cases(void)
+{
+    static const char k_dir_impl[] = "core/modules/crypto/src/fast_dir.c";
+    int bad = 0;
+    if (aops_put_base(AOPS_SHA) != 0)
+        return aops_fail("unreadable seed source", "cannot build the fixture");
+    if (geteuid() != 0) {
+        if (chmod(AOPS_SHA, 0) != 0)
+            return aops_fail("unreadable seed source", "cannot chmod the fixture");
+        bad |= aops_expect("an unreadable seed source (chmod 000)", 2,
+                           "cannot read " AOPS_SHA);
+        if (chmod(AOPS_SHA, 0644) != 0)
+            return aops_fail("unreadable seed source", "cannot restore the fixture");
+    } else {
+        fprintf(stderr, "check_accel_oracle_pinned: seed EACCES case "
+                "cannot run as root\n");
+        bad = aops_fail("unreadable seed source", "EACCES witness unqualified");
+    }
+    if (mkdir(k_dir_impl, 0755) != 0)
+        return aops_fail("directory impl", "cannot build the fixture");
+    bad |= aops_expect("an implementation source that is a directory", 2,
+                       "exists but is not a regular file");
+    if (rmdir(k_dir_impl) != 0)
+        return aops_fail("directory impl", "cannot remove the fixture");
+    return bad;
+}
+
 static int aops_cases(void)
 {
     for (size_t i = 0; i < sizeof k_aops_cases / sizeof k_aops_cases[0]; i++) {
@@ -370,7 +400,10 @@ static int aops_cases(void)
     int rc = aops_fs_cases();
     if (rc || lsc_pending())
         return rc;
-    return aops_glob_case();
+    rc = aops_glob_case();
+    if (rc || lsc_pending())
+        return rc;
+    return aops_reader_cases();
 }
 
 static int aops_in_fixture(const char *dir)

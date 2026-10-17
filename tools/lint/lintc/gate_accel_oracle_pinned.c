@@ -193,8 +193,10 @@ static int aop_file_includes(const char *path, const regex_t *re,
     char *line = NULL;
     size_t cap = 0;
     int rc = 0;
-    if (!f)
-        return 0;
+    if (!f) {
+        fprintf(stderr, "z23-lint: cannot read %s: %s\n", path, strerror(errno));
+        return 2; /* an unreadable tracked source is a FATAL, never an empty seed set */
+    }
     while (rc == 0 && getline(&line, &cap, f) >= 0)
         rc = aop_line_includes(re, line, out);
     free(line);
@@ -306,9 +308,15 @@ static int aop_add_impls(struct aop_ent *e, const char *libdir, const char *stem
                 gr == GLOB_NOSPACE ? "out of memory" : "read error");
         return 2;
     }
-    for (size_t i = 0; rc == 0 && i < g.gl_pathc; i++)
-        if (aop_is_file(g.gl_pathv[i]))
-            rc = aop_vec_push(&e->impls, g.gl_pathv[i]);
+    for (size_t i = 0; rc == 0 && i < g.gl_pathc; i++) {
+        if (!aop_is_file(g.gl_pathv[i])) {
+            fprintf(stderr, "z23-lint: glob match %s exists but is not a regular file\n",
+                    g.gl_pathv[i]);
+            rc = 2;
+            break;
+        }
+        rc = aop_vec_push(&e->impls, g.gl_pathv[i]);
+    }
     globfree(&g);
     return rc;
 }
@@ -757,14 +765,18 @@ static int aop_exports(const char *path, struct aop_vec *syms)
     char *line = NULL, sym[RS_NAME];
     size_t cap = 0;
     int rc = 0;
-    if (!f)
-        return 0;
+    if (!f) {
+        fprintf(stderr, "z23-lint: cannot read %s: %s\n", path, strerror(errno));
+        return 2; /* an unreadable impl yields no exports: refuse, never skip the leg */
+    }
     while (rc == 0 && getline(&line, &cap, f) >= 0) {
         if (strncmp(line, "static", 6) == 0 || strncmp(line, "typedef", 7) == 0)
             continue;
         if (aop_export_name(line, sym, sizeof sym))
             rc = aop_vec_push(syms, sym);
     }
+    if (rc == 0 && ferror(f))
+        rc = die("z23-lint: read failed: %s\n", path);
     free(line);
     fclose(f);
     aop_vec_sort_uniq(syms);
