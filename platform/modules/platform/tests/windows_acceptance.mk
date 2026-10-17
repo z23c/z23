@@ -597,9 +597,13 @@ ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_SOURCES := \
 	platform/modules/base/src/log_level.c
 ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_FLAGS := \
 	-DZCL_PROGRESS_STORE_LEGACY_REFUSAL_ACCEPTANCE \
-	-ffunction-sections -fdata-sections -flto -fwhole-program
+	-ffunction-sections -fdata-sections \
+	-fno-unwind-tables -fno-asynchronous-unwind-tables
+# COFF unwind records retain unused progress-store entry points and their node
+# dependencies. This C-only refusal fixture needs no unwinding: section GC can
+# then retain the real pre-mutation path without GCC-only whole-program LTO.
 ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_LIBS := \
-	-flto -Wl,--gc-sections -ladvapi32 \
+	-Wl,--gc-sections -ladvapi32 \
 	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_read_mapping_SOURCES := \
 	platform/modules/platform/tests/read_mapping_windows_acceptance.c \

@@ -186,13 +186,24 @@ ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
 ZCL_TEST_STACK_SETUP = ulimit -s unlimited
 endif
+# Read the canonical standalone catalog before selecting node build authority.
+# Its := library rows need these values before the include. Exact generated
+# paths qualify; an unknown path, mixed node goal, or default build does not.
+ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
+ZCL_WINDOWS_ACCEPTANCE_SQLITE := $(ZCL_WINDOWS_ACCEPTANCE_DIR)/lib/libsqlite3.a
+include platform/modules/platform/tests/windows_acceptance.mk
+ZCL_WINDOWS_STANDALONE_GOALS := print-node-c23-srcs $(addprefix \
+	$(ZCL_WINDOWS_ACCEPTANCE_DIR)/,$(addsuffix .exe,$(ZCL_WINDOWS_ACCEPTANCE_TESTS)))
+
+ZCL_WINDOWS_STANDALONE_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_STANDALONE_GOALS),$(MAKECMDGOALS))),,1),)
+
 ZCL_USE_CCACHE ?= 1
 # The compile cache ships in-tree (tools/zcc.c). Prefer it over any installed
 # sccache/ccache so every developer gets the same fast rebuilds with nothing
 # to install, and fall back to a host cache only if the in-tree one cannot be
 # built here. This is a parse-time $(shell) because $(CC) is fixed before the
 # first recipe runs; see tools/dev/zcc_bootstrap.sh for why and what it costs.
-ZCL_CCACHE_BIN := $(shell if [ "$(ZCL_USE_CCACHE)" != "0" ]; then \
+ZCL_CCACHE_BIN := $(shell if [ "$(ZCL_USE_CCACHE)" != "0" ] && [ "$(ZCL_WINDOWS_STANDALONE_ONLY)" != "1" ]; then \
                               $(CURDIR)/tools/dev/zcc_bootstrap.sh 2>/dev/null \
                               || command -v sccache 2>/dev/null \
                               || command -v ccache 2>/dev/null; fi)
@@ -252,6 +263,7 @@ ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
 ZCL_TOR_PROVENANCE_GOALS := build/bin/z23-tor-provenance \
 	tools/tor-provenance z23-tor-provenance
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
+	$(ZCL_WINDOWS_STANDALONE_GOALS) \
 	$(ZCL_TOR_PROVENANCE_GOALS) \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
@@ -367,7 +379,7 @@ ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest
 ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
 ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1564,7 +1576,7 @@ ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-p
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) setup \
 	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe \
-	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS)
+	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
 
@@ -2430,14 +2442,12 @@ presentation-portability: presentation-demo
 		printf '%s\n' 'presentation-portability: MinGW unavailable (Windows cross-link skipped)'; \
 	fi
 
-# Defined BEFORE the catalog include: the catalog assigns its per-program
-# variables with :=, so anything it references must already hold a value.
+# Standalone acceptance uses its own compiler and private archive tool.
 ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
 ZCL_WINDOWS_CROSS_AR := $(shell \
 	command -v x86_64-w64-mingw32-ar 2>/dev/null)
 ZCL_WINDOWS_ACCEPTANCE_AR ?= $(if \
 	$(ZCL_WINDOWS_CROSS_AR),x86_64-w64-mingw32-ar,ar)
-ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 
 # An acceptance program that reaches real sqlite3 needs a mingw archive, and
 # vendor/lib cannot supply one: that tree holds exactly one slot per archive
@@ -2447,16 +2457,12 @@ ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 # nothing being installed on the host. Warnings are off for this translation
 # unit only -- it is vendored third-party source, and the strict flags below
 # still apply to every file we wrote.
-ZCL_WINDOWS_ACCEPTANCE_SQLITE := $(ZCL_WINDOWS_ACCEPTANCE_DIR)/lib/libsqlite3.a
 $(ZCL_WINDOWS_ACCEPTANCE_SQLITE): vendor/sqlite3.c
 	@mkdir -p $(@D)
 	$(ZCL_WINDOWS_ACCEPTANCE_CC) -std=c2x -O2 -w $(ZCL_WINDOWS_API_FLOOR) \
 		-DWIN32_LEAN_AND_MEAN -DSQLITE_OMIT_LOAD_EXTENSION \
 		-DSQLITE_THREADSAFE=1 -c vendor/sqlite3.c -o $(@D)/sqlite3.o
 	$(ZCL_WINDOWS_ACCEPTANCE_AR) rcs $@ $(@D)/sqlite3.o
-
-include platform/modules/platform/tests/windows_acceptance.mk
-
 ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c2x -O2 -Wall -Wextra -Werror \
 	-pedantic -static -D_POSIX_C_SOURCE=200809L $(ZCL_WINDOWS_API_FLOOR) \
 	-DWIN32_LEAN_AND_MEAN -D__USE_MINGW_ANSI_STDIO=1 \

@@ -4,8 +4,9 @@
  * round-trips (cmd.exe always, powershell.exe when present), resize is
  * applied and bounds-checked, the input and output byte budgets and the
  * lifetime budget end the session by name, every ending removes the shell's
- * whole process tree, and input writes stay bounded against a shell that has
- * stopped running. Exit 0 = pass, 77 = ConPTY unavailable on this host
+ * whole process tree. A separate undrained named-pipe fixture proves input
+ * cancellation and subsequent lifetime cleanup; it does not claim ConPTY
+ * itself stopped draining input. Exit 0 = pass, 77 = ConPTY unavailable on this host
  * (honest refusal), 1 = failure. The worker is the mechanism under test; the
  * terminal lane's own refusal of an unconfined shell is not exercised here. */
 
@@ -336,6 +337,109 @@ static void test_input_bounded(const char *shell, const char *workdir)
     free(s);
 }
 
+/* The public worker handle is the seam: keep the real ConPTY alive, but send
+ * input to a connected pipe whose fixture-owned reader never drains bytes. */
+static bool blocked_input_pipe(HANDLE *writer, HANDLE *reader)
+{
+    wchar_t name[128];
+    int n = swprintf(name, sizeof(name) / sizeof(name[0]),
+        L"\\\\.\\pipe\\z23-terminal-blocked-%lu-%llu", GetCurrentProcessId(),
+        (unsigned long long)GetTickCount64());
+    if (n < 0 || (size_t)n >= sizeof(name) / sizeof(name[0]))
+        return false;
+    *writer = CreateNamedPipeW(name, PIPE_ACCESS_OUTBOUND |
+        FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 4096, 0, 0, NULL);
+    if (*writer == INVALID_HANDLE_VALUE) {
+        *writer = NULL;
+        return false;
+    }
+    *reader = CreateFileW(name, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                          FILE_ATTRIBUTE_NORMAL, NULL);
+    if (*reader == INVALID_HANDLE_VALUE) {
+        *reader = NULL;
+        CloseHandle(*writer);
+        *writer = NULL;
+        return false;
+    }
+    return true;
+}
+
+static void require_blocked_input(struct mesh_terminal_worker *w, HANDLE reader)
+{
+    uint8_t block[4096];
+    memset(block, 'b', sizeof(block));
+    bool stalled = false, accounted = true;
+    uint64_t initial = w->bytes_in;
+    ULONGLONG worst = 0;
+    for (int i = 0; i < 32 && !stalled; i++) {
+        uint64_t before = w->bytes_in;
+        ULONGLONG start = GetTickCount64();
+        struct zcl_result r = mesh_terminal_worker_input(w, block,
+                                                         sizeof(block), 1001);
+        ULONGLONG elapsed = GetTickCount64() - start;
+        if (elapsed > worst)
+            worst = elapsed;
+        accounted = accounted && w->bytes_in >= before &&
+            w->bytes_in - before <= sizeof(block);
+        if (r.ok)
+            accounted = accounted && w->bytes_in - before == sizeof(block);
+        else {
+            stalled = r.code == MESH_TERMINAL_WORKER_ERR_IO &&
+                strstr(r.message, "pty input stalled (wrote ") == r.message &&
+                elapsed >= 900;
+            break;
+        }
+    }
+    expect(stalled && worst < 4000,
+        "undrained fixture pipe reaches cancellation and settles within 4 seconds");
+    DWORD available = 0;
+    bool observed = PeekNamedPipe(reader, NULL, 0, NULL, &available, NULL) != 0;
+    printf("mesh_terminal_worker_windows: undrained fixture slowest=%llu ms, buffered=%lu, accounted=%llu\n",
+        (unsigned long long)worst, (unsigned long)available,
+        (unsigned long long)(w->bytes_in - initial));
+    expect(accounted && observed && available != 0 &&
+        w->bytes_in - initial == available && w->running,
+        "cancelled input accounting matches bytes retained by undrained fixture reader");
+}
+
+static void test_blocked_input_lifetime(const char *shell, const char *workdir)
+{
+    struct session *s = calloc(1, sizeof(*s));
+    expect(s != NULL, "blocked input fixture allocation");
+    if (!s)
+        return;
+    struct mesh_terminal_worker_config cfg = base_config(shell, workdir);
+    cfg.lifetime_seconds = 5;
+    struct zcl_result r = mesh_terminal_worker_spawn(&cfg, 1000, &s->worker);
+    expect(r.ok, "blocked input fixture real ConPTY spawn");
+    if (!r.ok) {
+        free(s);
+        return;
+    }
+    HANDLE writer = NULL, reader = NULL;
+    bool connected = blocked_input_pipe(&writer, &reader);
+    expect(connected, "blocked input fixture pipe connects without a draining reader");
+    if (connected) {
+        HANDLE original = s->worker.win_input_write;
+        s->worker.win_input_write = writer;
+        require_blocked_input(&s->worker, reader);
+        s->worker.win_input_write = original;
+        CloseHandle(writer);
+        CloseHandle(reader);
+        ULONGLONG start = GetTickCount64();
+        bool ended = mesh_terminal_worker_budget_exceeded(&s->worker, 1005);
+        expect(ended && GetTickCount64() - start < 4000 && !s->worker.running &&
+            s->worker.close_reason == MESH_TERMINAL_CLOSE_LIFETIME_LIMIT &&
+            !s->worker.win_process && !s->worker.win_job && !s->worker.win_pc &&
+            !s->worker.win_input_write && !s->worker.win_output_read,
+            "after cancelled fixture input real worker lifetime cleanup stays bounded and releases handles");
+    }
+    mesh_terminal_worker_kill(&s->worker);
+    free(s);
+}
+
 static bool exact_child_args(int argc, wchar_t **argv)
 {
     static const wchar_t *const expected[] = { L"--worker-argv-child",
@@ -484,6 +588,7 @@ int main(void)
     test_budgets(cmd, workdir);
     test_output_budget(cmd, workdir);
     test_input_bounded(cmd, workdir);
+    test_blocked_input_lifetime(cmd, workdir);
     test_exact_argv(cmd, workdir);
     if (system_path("\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", pwsh,
                     sizeof(pwsh)) &&

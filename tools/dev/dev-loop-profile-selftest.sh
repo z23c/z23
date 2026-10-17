@@ -15,7 +15,76 @@ fail()
 
 scratch="$(mktemp "${TMPDIR:-/tmp}/zcl-dev-profile.XXXXXX")" ||
     fail 'cannot allocate expanded-recipe scratch file'
-trap 'rm -f "$scratch"' EXIT HUP INT TERM
+selector_fixture="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-selector.XXXXXX")" ||
+    fail 'cannot allocate standalone selector fixture'
+trap 'rm -f "$scratch"; rm -rf "$selector_fixture"' EXIT HUP INT TERM
+
+# Exercise the real parse with inert, recording replacements for every source,
+# compiler and epoch helper. A node-bearing invocation must still reach its
+# authority checks; standalone catalog plans must never reach them at all.
+cat > "$selector_fixture/refuse" <<'SELECTOR_REFUSE'
+#!/bin/sh
+printf '%s %s\n' "${0##*/}" "$*" >> "$SELECTOR_CALLS"
+exit 1
+SELECTOR_REFUSE
+chmod +x "$selector_fixture/refuse"
+for selector_helper in check-toolchain source-identity build-epoch-key \
+    build-epoch-session zcc_bootstrap; do
+    cp "$selector_fixture/refuse" "$selector_fixture/$selector_helper"
+done
+sed -e "s|tools/dev/check-toolchain.sh|$selector_fixture/check-toolchain|g" \
+    -e "s|tools/dev/source-identity.sh|$selector_fixture/source-identity|g" \
+    -e "s|tools/dev/build-epoch-key.sh|$selector_fixture/build-epoch-key|g" \
+    -e "s|tools/dev/build-epoch-session.sh|$selector_fixture/build-epoch-session|g" \
+    -e "s|\$(CURDIR)/tools/dev/zcc_bootstrap.sh|$selector_fixture/zcc_bootstrap|g" \
+    "$ROOT/Makefile" > "$selector_fixture/Makefile"
+selector_epoch="$selector_fixture/build/node-obj/epochs/$(printf '%064d' 0)"
+mkdir -p "$selector_epoch"
+printf '%s\n' 'preserve interrupted node generation' > \
+    "$selector_epoch/.unverified"
+selector_marker="$(cat "$selector_epoch/.unverified")"
+selector_plan()
+{
+    SELECTOR_CALLS="$selector_fixture/calls" MAKEFLAGS= \
+    make -nB --no-print-directory -C "$ROOT" -f "$selector_fixture/Makefile" \
+        BUILD_DIR="$selector_fixture/build" ZCL_USE_CCACHE=1 "$@" \
+        > "$selector_fixture/plan" 2>&1
+}
+for selector_goal in print-node-c23-srcs \
+    build/tests/windows/mesh_terminal_worker.exe \
+    build/tests/windows/database_lifetime.exe known-mixed; do
+    : > "$selector_fixture/calls"
+    if [ "$selector_goal" = known-mixed ]; then
+        set -- print-node-c23-srcs build/tests/windows/mesh_terminal_worker.exe \
+            build/tests/windows/database_lifetime.exe
+    else
+        set -- "$selector_goal"
+    fi
+    selector_plan "$@" || fail "standalone plan refused: $selector_goal"
+    [ ! -s "$selector_fixture/calls" ] ||
+        fail "standalone plan invoked a node authority helper: $selector_goal"
+    [ "$(cat "$selector_epoch/.unverified")" = \
+        "$selector_marker" ] || fail 'standalone parse mutated interrupted node state'
+done
+for selector_case in node mixed unknown default; do
+    : > "$selector_fixture/calls"
+    case "$selector_case" in
+        node) set -- z23 ;;
+        mixed) set -- print-node-c23-srcs z23 ;;
+        unknown) set -- build/tests/windows/not_a_catalog_row.exe ;;
+        default) set -- ;;
+    esac
+    if selector_plan "$@"; then
+        fail "node authority refusal was bypassed: $selector_case"
+    fi
+    grep -q '^check-toolchain ' "$selector_fixture/calls" ||
+        fail "node authority checks disappeared: $selector_case"
+    grep -q '^zcc_bootstrap ' "$selector_fixture/calls" ||
+        fail "compiler bootstrap recording failed: $selector_case"
+    grep -q 'C23 toolchain check failed' "$selector_fixture/plan" ||
+        fail "unexpected authority refusal: $selector_case"
+done
+printf '%s\n' 'check-dev-loop-profiles: standalone catalog/query selector PASS'
 
 profile_line()
 {
@@ -68,14 +137,21 @@ git -C "$ROOT" grep -q "printf 'TEST_BASE_RELOC=" -- Makefile ||
 git -C "$ROOT" grep -q -- '-Wl,--allow-multiple-definition' -- \
     tools/dev/devloop_restart_build.c ||
     fail 'overlay objects are not ordered ahead of the frozen base'
-git -C "$ROOT" grep -q 'dev-bin z23-dev zclassic23-dev:.*\$(ZCLASSIC23_DEV_BIN)' -- Makefile ||
-    fail 'dev-bin target is missing'
+git -C "$ROOT" grep -q '^dev-bin z23-dev zclassic23-dev: \$(Z23_DEV_BIN) \$(Z23_DEV_BIN_ALIAS)' -- Makefile ||
+    fail 'dev-bin does not require both canonical and migration-alias outputs'
+git -C "$ROOT" grep -q '^$(Z23_DEV_BIN_ALIAS): $(Z23_DEV_BIN)$' -- Makefile ||
+    fail 'development migration alias does not depend on the canonical output'
 git -C "$ROOT" grep -q 'Z23_DEV_UNSHIPPABLE_BIN = \$(BIN_DIR)/z23.dev' -- Makefile ||
     fail 'unsippable compiler-speed binary name z23.dev is missing'
 git -C "$ROOT" grep -q '^dev: \$(Z23_DEV_UNSHIPPABLE_BIN)' -- Makefile ||
     fail 'make dev does not produce the unsippable z23.dev artifact'
-git -C "$ROOT" grep -qF 'ln -f "$<" "$@"' -- Makefile ||
-    fail 'z23-dev is not installed as a regular hard link of z23.dev'
+awk '
+    /^\$\(Z23_DEV_BIN\): \$\(Z23_DEV_UNSHIPPABLE_BIN\)$/ { target = 1; next }
+    target && /^[^\t]/ { target = 0 }
+    target && index($0, "$(if $(ZCL_HOST_WINDOWS),cp -f \"$<\" \"$@\",ln -f \"$<\" \"$@\")") { regular = 1 }
+    END { exit regular ? 0 : 1 }
+' "$ROOT/Makefile" ||
+    fail 'z23-dev does not copy on Windows and hard-link z23.dev on POSIX'
 if git -C "$ROOT" grep -qF 'ln -sfn z23.dev' -- Makefile; then
     fail 'z23-dev is a symlink: dev proof opens it with O_NOFOLLOW (ELOOP)'
 fi
