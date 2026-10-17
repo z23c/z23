@@ -1498,3 +1498,67 @@ int check_rpc_tls_without_env_and_port_oracle(void)
     return failures;
 }
 
+#if defined(ZCL_TESTING)
+extern const char *(*db_iter_value_raw_test_hook)(void *iter, size_t *vallen);
+
+static size_t db_test_reported_len;
+static const char db_test_payload[64] = {0};
+
+static const char *db_test_raw_fetch(void *iter, size_t *vallen)
+{
+    (void)iter;
+    *vallen = db_test_reported_len;
+    return db_test_payload;
+}
+
+/* db_iter_value growth guard: a reported value length so large that
+ * *vallen + 256 is unrepresentable must be refused with the reusable
+ * deobfuscation buffer untouched. The raw fetch runs through the
+ * ZCL_TESTING hook so the edge is exercised without a giant allocation.
+ * Pre-fix the capacity addition wrapped and the deobfuscation overflowed
+ * the tiny wrapped buffer. */
+int check_rpc_dbwrapper_deobf_growth_guard(void)
+{
+    int failures = 0;
+    char *keep = malloc(8);
+    if (!keep) {
+        printf("dbwrapper deobf growth guard... FAIL (fixture allocation)\n");
+        return 1;
+    }
+    memset(keep, 0, 8);
+    struct db_iterator it = {0};
+    it.iter = NULL; /* the hook intercepts before any deref */
+    it.obfuscate_key_len = 4;
+    memset(it.obfuscate_key, 0x5a, sizeof(it.obfuscate_key));
+    it.deobf_buf = keep;
+    it.deobf_cap = 8;
+    db_iter_value_raw_test_hook = db_test_raw_fetch;
+
+    printf("dbwrapper deobf unrepresentable growth refused... ");
+    db_test_reported_len = SIZE_MAX - 255; /* one past the edge */
+    size_t vallen = 0;
+    const char *got = db_iter_value(&it, &vallen);
+    if (got == NULL && vallen == SIZE_MAX - 255 && it.deobf_buf == keep &&
+        it.deobf_cap == 8)
+        printf("OK\n");
+    else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    printf("dbwrapper deobf representable growth still served... ");
+    db_test_reported_len = 32;
+    got = db_iter_value(&it, &vallen);
+    if (got != NULL && got != keep && vallen == 32)
+        printf("OK\n");
+    else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    if (it.deobf_buf != keep) free(it.deobf_buf);
+    it.deobf_buf = NULL;
+    db_iter_value_raw_test_hook = NULL;
+    return failures;
+}
+#endif

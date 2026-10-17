@@ -418,11 +418,33 @@ const char *db_iter_key(struct db_iterator *it, size_t *keylen)
     return leveldb_iter_key(it->iter, keylen);
 }
 
+#if defined(ZCL_TESTING)
+/* Test seam: non-NULL replaces the leveldb_iter_value fetch so a test can
+ * drive the growth-representability edge with a synthetic length, without
+ * a giant allocation. The hook receives the iterator's raw leveldb handle
+ * and must not dereference it. */
+const char *(*db_iter_value_raw_test_hook)(void *iter, size_t *vallen);
+#endif
+
+static const char *db_iter_value_raw(struct db_iterator *it, size_t *vallen)
+{
+#if defined(ZCL_TESTING)
+    if (db_iter_value_raw_test_hook)
+        return db_iter_value_raw_test_hook(it->iter, vallen);
+#endif
+    return leveldb_iter_value(it->iter, vallen);
+}
+
 const char *db_iter_value(struct db_iterator *it, size_t *vallen)
 {
-    const char *raw = leveldb_iter_value(it->iter, vallen);
+    const char *raw = db_iter_value_raw(it, vallen);
     if (!raw || it->obfuscate_key_len == 0)
         return raw;
+
+    /* Unrepresentable growth refused: *vallen + 256 must not wrap. No real
+     * database value can reach this, so this is defence in depth. */
+    if (*vallen > SIZE_MAX - 256)
+        return NULL;
 
     /* Deobfuscate into a reusable buffer */
     if (*vallen > it->deobf_cap) {

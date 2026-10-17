@@ -42,6 +42,7 @@ int check_rpc_getnodelog_regex(void);
 int check_rpc_value_from_amount(void);
 int check_rpc_dbwrapper_open_write_read(void);
 int check_rpc_dbwrapper_batch_and_iterator(void);
+int check_rpc_dbwrapper_deobf_growth_guard(void);
 int check_rpc_convert_values(void);
 int check_rpc_convert_values_msg_send_inbox(void);
 int check_rpc_convert_msg_send_non_numeric(void);

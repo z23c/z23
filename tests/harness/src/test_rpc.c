@@ -53,6 +53,9 @@ int test_rpc(void) {
     failures += check_rpc_value_from_amount();
     failures += check_rpc_dbwrapper_open_write_read();
     failures += check_rpc_dbwrapper_batch_and_iterator();
+#if defined(ZCL_TESTING)
+    failures += check_rpc_dbwrapper_deobf_growth_guard();
+#endif
     failures += check_rpc_convert_values();
     failures += check_rpc_convert_values_msg_send_inbox();
     failures += check_rpc_convert_msg_send_non_numeric();
