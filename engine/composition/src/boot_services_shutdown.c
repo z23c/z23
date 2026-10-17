@@ -113,6 +113,13 @@ static bool shutdown_flush_coins_to_sqlite(struct boot_svc_ctx *svc,
 static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
                                                      bool diagnostics_drained)
 {
+    /* Drain disk-completion callbacks admitted before the registration clear
+     * so no callback outlives the lifetime boundary of its consumer context.
+     * The wait releases the storage hook mutex and never invokes a callback
+     * while holding it. */
+    disk_block_io_quiesce_have_data_hook();
+    printf("[shutdown] disk-completion hook drained\n");
+
     /* Stop P2P entrypoints before flush; any in-flight reducer sees
      * g_shutdown_requested and returns before mutating coins further. */
     printf("[shutdown] stopping network services\n");

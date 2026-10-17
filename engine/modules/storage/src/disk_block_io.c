@@ -35,10 +35,16 @@ static struct log_throttle g_readfail_throttle  = LOG_THROTTLE_INIT;
 static struct log_throttle g_locate_fail_throttle = LOG_THROTTLE_INIT;
 
 /* Durable body-completion hook (see disk_block_io.h). Set once at boot,
- * cleared at shutdown; read on the persist thread under the same lock. */
+ * cleared at shutdown; read on the persist thread under the same lock.
+ * Admission is counted so shutdown can drain callbacks that copied the
+ * registration before the clear and are still running while their consumer
+ * context is being torn down. */
 static pthread_mutex_t g_have_data_hook_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_have_data_hook_drained = PTHREAD_COND_INITIALIZER;
 static disk_block_have_data_hook_fn g_have_data_hook;
 static void *g_have_data_hook_ctx;
+static unsigned g_have_data_hook_inflight;
+static bool g_have_data_hook_admission = true;
 
 void disk_block_io_set_have_data_hook(disk_block_have_data_hook_fn fn,
                                       void *ctx)
@@ -49,19 +55,46 @@ void disk_block_io_set_have_data_hook(disk_block_have_data_hook_fn fn,
     pthread_mutex_unlock(&g_have_data_hook_lock);
 }
 
+void disk_block_io_quiesce_have_data_hook(void)
+{
+    pthread_mutex_lock(&g_have_data_hook_lock);
+    g_have_data_hook = NULL;
+    g_have_data_hook_ctx = NULL;
+    g_have_data_hook_admission = false;
+    while (g_have_data_hook_inflight > 0)
+        pthread_cond_wait(&g_have_data_hook_drained, &g_have_data_hook_lock);
+    pthread_mutex_unlock(&g_have_data_hook_lock);
+}
+
 static void disk_block_io_fire_have_data_hook(void)
 {
     disk_block_have_data_hook_fn fn;
     void *ctx;
 
     pthread_mutex_lock(&g_have_data_hook_lock);
+    if (!g_have_data_hook_admission || !g_have_data_hook) {
+        pthread_mutex_unlock(&g_have_data_hook_lock);
+        return;
+    }
     fn = g_have_data_hook;
     ctx = g_have_data_hook_ctx;
+    g_have_data_hook_inflight++;
     pthread_mutex_unlock(&g_have_data_hook_lock);
 
-    if (fn)
-        fn(ctx);
+    fn(ctx);
+
+    pthread_mutex_lock(&g_have_data_hook_lock);
+    if (--g_have_data_hook_inflight == 0)
+        pthread_cond_broadcast(&g_have_data_hook_drained);
+    pthread_mutex_unlock(&g_have_data_hook_lock);
 }
+
+#if defined(ZCL_TESTING)
+void disk_block_io_test_fire_have_data_hook(void)
+{
+    disk_block_io_fire_have_data_hook();
+}
+#endif
 
 /* A missing directory is always invalid. Do not infer pointer lifetime from
  * path bytes: POSIX permits every non-NUL byte inside a path component except

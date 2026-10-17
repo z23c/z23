@@ -522,6 +522,132 @@ static int test_set_have_data_verified(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* Deterministic lifetime regression for the disk-completion hook. A callback
+ * admitted before the shutdown registration clear can still be in flight
+ * while consumer teardown runs; the quiesce boundary must drain it first.
+ * All interleavings are condition-variable driven — no sleeps. */
+struct hook_lifetime_fixture {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    bool entered;
+    bool release;
+    bool finished;
+    bool quiesce_started;
+    bool quiesce_done;
+};
+
+static void hook_lifetime_blocking_cb(void *v)
+{
+    struct hook_lifetime_fixture *f = v;
+    pthread_mutex_lock(&f->mu);
+    f->entered = true;
+    pthread_cond_broadcast(&f->cv);
+    while (!f->release)
+        pthread_cond_wait(&f->cv, &f->mu);
+    f->finished = true;
+    pthread_cond_broadcast(&f->cv);
+    pthread_mutex_unlock(&f->mu);
+}
+
+static void *hook_lifetime_fire_worker(void *v)
+{
+    (void)v;
+    disk_block_io_test_fire_have_data_hook();
+    return NULL;
+}
+
+static void *hook_lifetime_quiesce_worker(void *v)
+{
+    struct hook_lifetime_fixture *f = v;
+    pthread_mutex_lock(&f->mu);
+    f->quiesce_started = true;
+    pthread_cond_broadcast(&f->cv);
+    pthread_mutex_unlock(&f->mu);
+    disk_block_io_quiesce_have_data_hook();
+    pthread_mutex_lock(&f->mu);
+    f->quiesce_done = true;
+    pthread_cond_broadcast(&f->cv);
+    pthread_mutex_unlock(&f->mu);
+    return NULL;
+}
+
+static void hook_lifetime_cleanup(struct hook_lifetime_fixture *f,
+                                  pthread_t *fire_w, bool fire_started,
+                                  pthread_t *quiesce_w, bool quiesce_started)
+{
+    pthread_mutex_lock(&f->mu);
+    f->release = true;
+    pthread_cond_broadcast(&f->cv);
+    pthread_mutex_unlock(&f->mu);
+    if (fire_started)
+        pthread_join(*fire_w, NULL);
+    if (quiesce_started)
+        pthread_join(*quiesce_w, NULL);
+}
+
+static int test_have_data_hook_quiesce_drains_inflight(void)
+{
+    int failures = 0;
+    struct hook_lifetime_fixture f = {0};
+    pthread_mutex_init(&f.mu, NULL);
+    pthread_cond_init(&f.cv, NULL);
+    pthread_t fire_w, quiesce_w;
+    bool fire_started = false, quiesce_started = false;
+
+    TEST("have_data hook: quiesce drains an admitted callback before teardown") {
+        disk_block_io_set_have_data_hook(hook_lifetime_blocking_cb, &f);
+        if (pthread_create(&fire_w, NULL, hook_lifetime_fire_worker, NULL) != 0) {
+            printf("FAIL (fire worker)\n"); failures++; goto _test_next;
+        }
+        fire_started = true;
+
+        pthread_mutex_lock(&f.mu);
+        while (!f.entered)
+            pthread_cond_wait(&f.cv, &f.mu);
+        pthread_mutex_unlock(&f.mu);
+
+        /* The shutdown clear is cheap: it must not wait for in-flight calls. */
+        disk_block_io_set_have_data_hook(NULL, NULL);
+
+        if (pthread_create(&quiesce_w, NULL, hook_lifetime_quiesce_worker, &f) != 0) {
+            printf("FAIL (quiesce worker)\n"); failures++; goto _test_next;
+        }
+        quiesce_started = true;
+
+        pthread_mutex_lock(&f.mu);
+        while (!f.quiesce_started)
+            pthread_cond_wait(&f.cv, &f.mu);
+        if (f.quiesce_done || f.finished) {
+            pthread_mutex_unlock(&f.mu);
+            printf("FAIL (teardown-side drain lost the in-flight race)\n");
+            failures++; goto _test_next;
+        }
+        /* Simulated consumer destroy point: the callback is still blocked, so
+         * reaching it now would be the lifetime violation under test. */
+        f.release = true;
+        pthread_cond_broadcast(&f.cv);
+        while (!f.finished || !f.quiesce_done)
+            pthread_cond_wait(&f.cv, &f.mu);
+        pthread_mutex_unlock(&f.mu);
+
+        pthread_join(fire_w, NULL); fire_started = false;
+        pthread_join(quiesce_w, NULL); quiesce_started = false;
+        if (!f.quiesce_done) {
+            printf("FAIL (quiesce never completed)\n"); failures++; goto _test_next;
+        }
+        printf("OK\n");
+    }
+    _test_next:
+
+    if (fire_started || quiesce_started)
+        hook_lifetime_cleanup(&f, &fire_w, fire_started, &quiesce_w, quiesce_started);
+    pthread_mutex_destroy(&f.mu);
+    pthread_cond_destroy(&f.cv);
+    return failures;
+}
+#endif
+
 static int test_write_allocates_append_position(void)
 {
     int failures = 0;
@@ -1288,6 +1414,9 @@ int test_disk_block_io(void)
     failures += test_pread_accepts_frame_offset();
     failures += test_pread_refuses_unframed_position();
     failures += test_set_have_data_verified();
+#if !defined(_WIN32)
+    failures += test_have_data_hook_quiesce_drains_inflight();
+#endif
     failures += test_write_allocates_append_position();
     failures += test_append_quarantines_hardlinked_tail();
     failures += test_explicit_write_refuses_hardlinked_file();

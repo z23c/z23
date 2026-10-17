@@ -178,6 +178,20 @@ typedef void (*disk_block_have_data_hook_fn)(void *ctx);
 void disk_block_io_set_have_data_hook(disk_block_have_data_hook_fn fn,
                                       void *ctx);
 
+/* Shutdown lifecycle boundary: reject future hook admission and wait until
+ * every callback admitted before this call has returned. A callback admitted
+ * before the registration clear may still be in flight and may hold a
+ * consumer context whose lifetime ends at shutdown, so the wait must
+ * complete before that teardown. The wait releases the storage hook mutex
+ * while blocking and never invokes the callback while holding it. */
+void disk_block_io_quiesce_have_data_hook(void);
+
+#if defined(ZCL_TESTING)
+/* Invoke the real completion hook once, exactly as storage does. Tests only;
+ * production callers use the internal fire site. */
+void disk_block_io_test_fire_have_data_hook(void);
+#endif
+
 /* Hash-targeted self-heal for a stale/torn (nFile,nDataPos): scan the
  * entry's current blk file for a record whose block hash equals
  * *pindex->phashBlock and, on a hit, re-store the fresh position through
