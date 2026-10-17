@@ -25,6 +25,7 @@
 #include "platform/time_compat.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
+#include "util/parse_num.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -103,11 +104,10 @@ static int64_t stage_budget_env_override(int idx)
     const char *v = getenv(var);
     if (!v || !v[0])
         return -1; // raw-return-ok:sentinel-no-env-override, not an error
-    char *end = NULL;
-    long long n = strtoll(v, &end, 10);
-    if (!end || *end != '\0' || n <= 0)
+    int64_t budget = 0;
+    if (!zcl_parse_i64(v, &budget) || budget <= 0)
         return -1; // raw-return-ok:sentinel-malformed-env-falls-back, not an error
-    return (int64_t)n;
+    return budget;
 }
 
 static int64_t stage_budget_from_baseline(int64_t baseline_us)

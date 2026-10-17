@@ -46,6 +46,7 @@
 #include "services/reducer_ingest_service.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
+#include "util/parse_num.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -71,10 +72,9 @@ static int64_t batch_fsync_slow_budget_us(void)
 #endif
     const char *env = getenv("ZCL_BATCH_FSYNC_SLOW_EWMA_US");
     if (env && env[0]) {
-        char *end = NULL;
-        long long v = strtoll(env, &end, 10);
-        if (end != env && v > 0)
-            return (int64_t)v;
+        int64_t value = 0;
+        if (zcl_parse_i64(env, &value) && value > 0)
+            return value;
     }
     return BATCH_FSYNC_SLOW_EWMA_US_DEFAULT;
 }

@@ -25,6 +25,7 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SSBE_CHECK(name, expr) do { \
@@ -88,6 +89,44 @@ static void ssbe_cleanup(void)
     blocker_reset_for_testing();
     stage_step_budget_exceeded_test_reset();
     clock_reset_default();
+}
+
+/* An overflowing operator override must be rejected rather than becoming an
+ * effectively unreachable budget. The test deliberately uses the real
+ * env-or-baseline path: a steady EWMA locks the baseline, then a genuine
+ * slowdown must be named. Preserve any caller-provided override exactly. */
+static bool ssbe_overflowing_env_falls_back(struct ssbe_fake_clock *fc,
+                                             int64_t t0)
+{
+    const char *var = "ZCL_STAGE_BUDGET_US_PROOF_VALIDATE";
+    const char *old = getenv(var);
+    char *saved = old ? strdup(old) : NULL;
+    if (old && !saved)
+        return false;
+
+    bool ok = setenv(var, "9223372036854775808", 1) == 0;
+    if (ok) {
+        ssbe_reset();
+        ssbe_fake_clock_install(fc, t0);
+        stage_step_budget_exceeded_test_set_ewma_us(IDX_PROOF_VALIDATE, 1000);
+        for (int i = 0; i < 10; i++) {
+            ssbe_fake_clock_set(fc, t0 + 20 * (i + 1));
+            condition_engine_tick();
+            ok = ok && condition_engine_get_active_count() == 0;
+        }
+        stage_step_budget_exceeded_test_set_ewma_us(IDX_PROOF_VALIDATE, 50000);
+        ssbe_fake_clock_set(fc, t0 + 240);
+        condition_engine_tick();
+        ok = ok && condition_engine_get_active_count() == 1 &&
+             blocker_exists("stage_step_budget_exceeded");
+    }
+
+    if (saved)
+        ok = setenv(var, saved, 1) == 0 && ok;
+    else
+        ok = unsetenv(var) == 0 && ok;
+    free(saved);
+    return ok;
 }
 
 int test_stage_step_budget_exceeded(void);
@@ -239,6 +278,10 @@ int test_stage_step_budget_exceeded(void)
         SSBE_CHECK("a real multi-x regression on the learned baseline trips it",
                   ok2);
     }
+
+    /* ---- (e) malformed/overflowing override falls back to baseline ---- */
+    SSBE_CHECK("overflowing stage budget env falls back and names slowdown",
+               ssbe_overflowing_env_falls_back(&fc, t0 + 1000));
 
     ssbe_cleanup();
 

@@ -95,6 +95,35 @@ static void rdw_reset(void)
     register_reducer_drive_watchdog();
 }
 
+static bool rdw_batch_fsync_overflow_fails_closed(void)
+{
+    const char *old_budget = getenv("ZCL_BATCH_FSYNC_SLOW_EWMA_US");
+    char *old_budget_copy = old_budget != NULL ? strdup(old_budget) : NULL;
+    bool saved_budget = old_budget == NULL || old_budget_copy != NULL;
+    bool env_set = saved_budget &&
+                   setenv("ZCL_BATCH_FSYNC_SLOW_EWMA_US",
+                          "9223372036854775808", 1) == 0;
+    condition_engine_reset_for_testing();
+    blocker_reset_for_testing();
+    batch_fsync_slow_test_reset();
+    reducer_body_fsync_test_reset();
+    batch_fsync_slow_test_set_budget_us(-1);
+    reducer_body_fsync_test_set_inject_delay_us(5LL * 1000 * 1000);
+    register_batch_fsync_slow();
+    bool triggered = env_set && reducer_body_fsync_test_trigger_precommit();
+    condition_engine_tick();
+    bool detected = triggered && blocker_exists("batch_fsync_slow") &&
+                    batch_fsync_slow_test_remedy_calls() == 1;
+    reducer_body_fsync_test_set_inject_delay_us(0);
+    if (old_budget_copy != NULL) {
+        (void)setenv("ZCL_BATCH_FSYNC_SLOW_EWMA_US", old_budget_copy, 1);
+        free(old_budget_copy);
+    } else if (old_budget == NULL) {
+        (void)unsetenv("ZCL_BATCH_FSYNC_SLOW_EWMA_US");
+    }
+    return detected;
+}
+
 static void rdw_cleanup(void)
 {
     while (reducer_drive_active())
@@ -476,6 +505,14 @@ int test_reducer_drive_watchdog(void)
         RDW_CHECK("batch_fsync_slow: dumpstate reflects live EWMA activity",
                  okd2);
         json_free(&v2);
+
+        /* strtoll() reports ERANGE by returning LLONG_MAX for this runtime
+         * flag. Treat that malformed value as the documented default rather
+         * than accepting an effectively unreachable alert threshold. The
+         * production condition must still report a real 5s flush against its
+         * documented 4s default. */
+        RDW_CHECK("batch_fsync_slow: ERANGE budget fails closed to default",
+                  rdw_batch_fsync_overflow_fails_closed());
 
         batch_fsync_slow_test_reset();
         reducer_body_fsync_test_reset();
