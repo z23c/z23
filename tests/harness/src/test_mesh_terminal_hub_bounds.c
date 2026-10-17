@@ -808,6 +808,17 @@ static int fifo_waitstatus(pid_t pid)
     return status;
 }
 
+/* F_GETFL on Darwin also returns the kernel-internal FWASWRITTEN bit
+ * (0x10000, xnu bsd/sys/fcntl.h), which the first write on a descriptor
+ * sets. That is not a flag change, so only that one bit is ignored; every
+ * other status bit must come back exactly as it was. */
+#if defined(__APPLE__)
+#define HUB_KERNEL_ONLY_FLAGS 0x10000
+#else
+#define HUB_KERNEL_ONLY_FLAGS 0
+#endif
+#define HUB_USER_FLAGS (~HUB_KERNEL_ONLY_FLAGS)
+
 /* exit 0: gave up at the deadline, flags untouched. 1: the write claimed
  * success into a full pipe. 2: the descriptor's flags changed. 3: it gave up
  * late. SIGALRM: it blocked. */
@@ -822,7 +833,7 @@ static int fifo_race_child(int wfd)
     int64_t took = fifo_now_ms() - start;
     if (ok)
         return 1;
-    if (fcntl(wfd, F_GETFL) != before)
+    if ((fcntl(wfd, F_GETFL) & HUB_USER_FLAGS) != (before & HUB_USER_FLAGS))
         return 2;
     return took >= 250 && took <= 1500 ? 0 : 3;
 }
