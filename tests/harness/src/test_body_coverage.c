@@ -12,8 +12,10 @@
 #include "storage/progress_store.h"
 #include "net/download.h"
 #include "core/uint256.h"
+#include "util/safe_alloc.h"
 
 #include <sqlite3.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -188,6 +190,34 @@ static int test_bc_find_first_hole(void)
     return failures;
 }
 
+static int test_bc_maximum_height_range_boundaries(void)
+{
+    int failures = 0;
+    TEST("maximum-height ranges merge and count without overflow") {
+        struct body_coverage_map m;
+        struct bc_range hole;
+        body_coverage_init(&m);
+
+        ASSERT(body_coverage_insert(&m, 4, 7));
+        ASSERT(body_coverage_insert(&m, 8, 9));
+        ASSERT(body_coverage_range_count(&m) == 1);
+        ASSERT(m.ranges[0].lo == 4 && m.ranges[0].hi == 9);
+
+        body_coverage_reset(&m);
+        ASSERT(body_coverage_insert(&m, 0, INT64_MAX - 1));
+        ASSERT(body_coverage_insert(&m, INT64_MAX, INT64_MAX));
+        ASSERT(body_coverage_range_count(&m) == 1);
+        ASSERT(m.ranges[0].lo == 0 && m.ranges[0].hi == INT64_MAX);
+        ASSERT(body_coverage_total_covered(&m) == INT64_MAX);
+        ASSERT(!body_coverage_find_first_hole(&m, INT64_MAX - 1,
+                                              INT64_MAX, &hole));
+
+        body_coverage_free(&m);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static bool tbc_have_odd_tens(int64_t h, void *ctx)
 {
     (void)ctx;
@@ -253,6 +283,39 @@ static int test_bc_persistence_roundtrip(void)
 
         body_coverage_free(&m);
         body_coverage_free(&loaded);
+        progress_store_close();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bc_persistence_rejects_over_cap_range_count(void)
+{
+    int failures = 0;
+    TEST("load rejects an over-cap persisted range count") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "body_coverage", "over_cap");
+        ASSERT(progress_store_open(dir));
+        sqlite3 *db = progress_store_db();
+        ASSERT(db != NULL);
+        ASSERT(progress_meta_table_ensure(db));
+
+        const uint32_t count = BODY_COVERAGE_PERSIST_MAX_RANGES + 1u;
+        const size_t bytes = 3 * sizeof(uint32_t) +
+            (size_t)count * 2 * sizeof(int64_t);
+        uint8_t *blob = zcl_malloc(bytes, "test_body_coverage_over_cap");
+        ASSERT(blob != NULL);
+        memset(blob, 0, bytes);
+        uint32_t header[] = { 0x42434f56u, 1u, count };
+        memcpy(blob, header, sizeof(header));
+        ASSERT(progress_meta_set(db, "body_coverage.over_cap", blob, bytes));
+        free(blob);
+
+        struct body_coverage_map m;
+        body_coverage_init(&m);
+        ASSERT(!body_coverage_load_key(&m, db, "body_coverage.over_cap"));
+        ASSERT(body_coverage_range_count(&m) == 0);
+        body_coverage_free(&m);
         progress_store_close();
         PASS();
     } _test_next:;
@@ -414,8 +477,10 @@ int test_body_coverage(void)
     failures += test_bc_remove_split_and_edges();
     failures += test_bc_note_stored_pruned();
     failures += test_bc_find_first_hole();
+    failures += test_bc_maximum_height_range_boundaries();
     failures += test_bc_scan_window();
     failures += test_bc_persistence_roundtrip();
+    failures += test_bc_persistence_rejects_over_cap_range_count();
     failures += test_bc_scheduler_plan_and_blocker();
     failures += test_bc_scheduler_fill_rate();
     failures += test_bc_gap_enqueue_drain_fixture();

@@ -1955,7 +1955,6 @@ engine/modules/storage/src/block_prefetch.c:bp_frame_size:16
 engine/modules/storage/src/blocks_index_legacy_reader.c:bilr_load_height_map:22
 engine/modules/storage/src/blocks_index_legacy_reader.c:bilr_load_height_map_for_tip:31
 engine/modules/storage/src/blocks_mmap_reader.c:bmr_get_payload:22
-engine/modules/storage/src/body_coverage.c:body_coverage_load_key:16
 engine/modules/storage/src/body_history.c:body_history_census_fold:19
 engine/modules/storage/src/body_history.c:body_history_evaluate:33
 engine/modules/storage/src/boot_auto_refold.c:arf_read:17

@@ -61,6 +61,16 @@ static bool bc_ensure_cap(struct body_coverage_map *m, size_t need)
 
 /* ── Pure range algebra ─────────────────────────────────────────── */
 
+static bool bc_range_is_strictly_left(const struct bc_range *r, int64_t lo)
+{
+    return lo > 0 && r->hi < lo - 1;
+}
+
+static bool bc_range_touches_right(const struct bc_range *r, int64_t hi)
+{
+    return hi == INT64_MAX || r->lo <= hi + 1;
+}
+
 bool body_coverage_insert(struct body_coverage_map *m, int64_t lo, int64_t hi)
 {
     if (!m)
@@ -68,19 +78,22 @@ bool body_coverage_insert(struct body_coverage_map *m, int64_t lo, int64_t hi)
     if (lo < 0 || lo > hi)
         return true; /* no-op: benign empty/invalid insert */
 
-    /* First range not entirely to the left of [lo-1, ...]: i.e. the first
-     * range whose hi >= lo-1 (touching or overlapping on the left edge). */
+    /* First range that is not strictly separated on the left. `lo` is
+     * non-negative, so only zero needs special handling to avoid forming
+     * a synthetic -1 boundary. */
     size_t start = 0;
-    while (start < m->count && m->ranges[start].hi < lo - 1)
+    while (start < m->count &&
+           bc_range_is_strictly_left(&m->ranges[start], lo))
         start++;
 
-    /* Absorb every following range that starts within [.., hi+1] (touching
-     * or overlapping on the right edge). Because the map is sorted and
-     * disjoint, these are contiguous starting at `start`. */
+    /* Absorb every following range that overlaps or touches on the right.
+     * `INT64_MAX` has no representable successor, and thus joins every
+     * remaining valid range without evaluating `hi + 1`. */
     int64_t new_lo = lo;
     int64_t new_hi = hi;
     size_t end = start;
-    while (end < m->count && m->ranges[end].lo <= hi + 1) {
+    while (end < m->count &&
+           bc_range_touches_right(&m->ranges[end], hi)) {
         if (m->ranges[end].lo < new_lo)
             new_lo = m->ranges[end].lo;
         if (m->ranges[end].hi > new_hi)
@@ -204,9 +217,12 @@ bool body_coverage_find_first_hole(const struct body_coverage_map *m,
             out->hi = r->lo - 1 < to ? r->lo - 1 : to;
             return true;
         }
-        /* r covers cursor — advance past it. */
-        if (r->hi + 1 > cursor)
-            cursor = r->hi + 1;
+        /* r covers cursor. A range reaching `to` also covers every
+         * remaining in-window height, and avoids forming an unrepresentable
+         * successor for INT64_MAX. */
+        if (r->hi >= to)
+            return false;
+        cursor = r->hi + 1;
     }
     if (cursor <= to) {
         out->lo = cursor;
@@ -216,13 +232,25 @@ bool body_coverage_find_first_hole(const struct body_coverage_map *m,
     return false;
 }
 
+static int64_t bc_range_width_saturated(int64_t lo, int64_t hi)
+{
+    int64_t span = hi - lo;
+    return span == INT64_MAX ? INT64_MAX : span + 1;
+}
+
+static int64_t bc_add_saturated(int64_t total, int64_t add)
+{
+    return total > INT64_MAX - add ? INT64_MAX : total + add;
+}
+
 int64_t body_coverage_total_covered(const struct body_coverage_map *m)
 {
     if (!m)
         return 0;
     int64_t total = 0;
     for (size_t i = 0; i < m->count; i++)
-        total += m->ranges[i].hi - m->ranges[i].lo + 1;
+        total = bc_add_saturated(
+            total, bc_range_width_saturated(m->ranges[i].lo, m->ranges[i].hi));
     return total;
 }
 
@@ -243,7 +271,7 @@ int64_t body_coverage_covered_in_window(const struct body_coverage_map *m,
             rlo = lo;
         if (rhi > hi)
             rhi = hi;
-        total += rhi - rlo + 1;
+        total = bc_add_saturated(total, bc_range_width_saturated(rlo, rhi));
     }
     return total;
 }
@@ -348,6 +376,35 @@ bool body_coverage_save_key(const struct body_coverage_map *m,
     return true;
 }
 
+static bool bc_load_persisted_range_count(struct sqlite3 *db, const char *key,
+                                          size_t blob_len, uint32_t *out_count)
+{
+    size_t hdr = 3 * sizeof(uint32_t);
+    uint8_t header[3 * sizeof(uint32_t)];
+    size_t header_len = 0;
+    bool header_found = false;
+    if (!progress_meta_get(db, key, header, sizeof(header),
+                           &header_len, &header_found) || !header_found ||
+        header_len != blob_len)
+        LOG_FAIL("body_coverage", "load: header read short/failed");
+
+    uint32_t magic = 0, ver = 0, count = 0;
+    memcpy(&magic, header, sizeof(magic));
+    memcpy(&ver, header + sizeof(magic), sizeof(ver));
+    memcpy(&count, header + sizeof(magic) + sizeof(ver), sizeof(count));
+    if (magic != BC_BLOB_MAGIC || ver != BC_BLOB_VERSION)
+        LOG_FAIL("body_coverage", "load: bad magic/version %08x/%u",
+                 magic, ver);
+    if (count > BODY_COVERAGE_PERSIST_MAX_RANGES)
+        LOG_FAIL("body_coverage", "load: range count %u exceeds cap %u",
+                 count, (unsigned)BODY_COVERAGE_PERSIST_MAX_RANGES);
+    if (hdr + (size_t)count * 2 * sizeof(int64_t) != blob_len)
+        LOG_FAIL("body_coverage", "load: length mismatch cnt=%u len=%zu",
+                 count, blob_len);
+    *out_count = count;
+    return true;
+}
+
 bool body_coverage_load_key(struct body_coverage_map *m,
                             struct sqlite3 *db, const char *key)
 {
@@ -367,6 +424,13 @@ bool body_coverage_load_key(struct body_coverage_map *m,
     if (blob_len < hdr)
         LOG_FAIL("body_coverage", "load: blob too small (%zu)", blob_len);
 
+    /* Read only the fixed header before committing to the blob allocation.
+     * The writer caps persisted ranges; a corrupted local row must not turn
+     * that cap into an unbounded boot-time allocation. */
+    uint32_t cnt = 0;
+    if (!bc_load_persisted_range_count(db, key, blob_len, &cnt))
+        return false;
+
     uint8_t *buf = zcl_malloc(blob_len, "body_coverage_load");
     if (!buf)
         LOG_FAIL("body_coverage", "load: alloc %zu failed", blob_len);
@@ -378,21 +442,6 @@ bool body_coverage_load_key(struct body_coverage_map *m,
         LOG_FAIL("body_coverage", "load: progress_meta_get(read) short/failed");
     }
 
-    uint32_t magic = 0, ver = 0, cnt = 0;
-    memcpy(&magic, buf + 0, sizeof(magic));
-    memcpy(&ver, buf + 4, sizeof(ver));
-    memcpy(&cnt, buf + 8, sizeof(cnt));
-    if (magic != BC_BLOB_MAGIC || ver != BC_BLOB_VERSION) {
-        free(buf);
-        LOG_FAIL("body_coverage", "load: bad magic/version %08x/%u",
-                 magic, ver);
-    }
-    size_t need = hdr + (size_t)cnt * 2 * sizeof(int64_t);
-    if (need != blob_len) {
-        free(buf);
-        LOG_FAIL("body_coverage", "load: length mismatch cnt=%u len=%zu",
-                 cnt, blob_len);
-    }
 
     /* Re-insert every range: insert enforces the sorted/disjoint invariant,
      * so even a resaved-then-mutated blob loads to a normalized map. */
