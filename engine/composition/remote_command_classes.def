@@ -431,6 +431,9 @@ REMOTE_COMMAND_CLASS("app.presentation.publication-status", REMOTE_CLASS_NEVER, 
 REMOTE_COMMAND_CLASS("app.blog.anchor", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("app.names.resolve", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("app.names.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.oprindex.status", REMOTE_CLASS_READ_ONLY,
+    "Bounded OP_RETURN projection diagnostics; reads cursor and counts without resetting state.")
+REMOTE_COMMAND_CLASS("app.oprindex.rebuild", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("app.names.register", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("app.names.update", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("app.names.transfer", REMOTE_CLASS_NEVER, "")

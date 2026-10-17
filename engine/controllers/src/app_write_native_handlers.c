@@ -44,6 +44,7 @@ struct awn_leaf {
     const char *require_status;
     const char *degraded_code;
     const char *degraded_message;
+    const char *require_true;  /* explicit backing success witness */
     struct awn_arg args[AWN_MAX_ARGS]; /* .key == NULL terminates */
 };
 
@@ -218,6 +219,41 @@ static bool awn_body_is_error(const struct json_value *body,
     return false;
 }
 
+/* A transport success must also witness the leaf's promised effect. */
+static bool awn_completion_witness(const struct awn_leaf *leaf,
+                                    const struct json_value *body,
+                                    struct zcl_command_reply *reply)
+{
+    if (leaf->require_status) {
+        const char *status = json_get_str(json_get(body, "status"));
+        if (!status || strcmp(status, leaf->require_status) != 0) {
+            char msg[320];
+            (void)snprintf(msg, sizeof(msg), "%s (backing status: %s)",
+                           leaf->degraded_message
+                               ? leaf->degraded_message
+                               : "the backing command did not complete",
+                           status && status[0] ? status : "absent");
+            awn_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                     ZCL_COMMAND_EXIT_BLOCKED,
+                     leaf->degraded_code ? leaf->degraded_code
+                                         : "APP_WRITE_INCOMPLETE",
+                     "execute", msg, leaf->method);
+            return false;
+        }
+    }
+    if (leaf->require_true) {
+        const struct json_value *done = json_get(body, leaf->require_true);
+        if (!done || done->type != JSON_BOOL || !json_get_bool(done)) {
+            awn_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                     ZCL_COMMAND_EXIT_BLOCKED, "APP_WRITE_INCOMPLETE",
+                     "execute", "the backing command did not confirm the reset; inspect node.log and retry",
+                     leaf->method);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* ── the one runner every leaf in this file shares ──────────────────── */
 
 static void awn_run(const struct zcl_command_request *request,
@@ -378,32 +414,26 @@ static void awn_run(const struct zcl_command_request *request,
         return;
     }
 
-    /* A true RPC success that did not do the job the leaf promises. */
-    if (leaf->require_status) {
-        const char *status = json_get_str(json_get(&body, "status"));
-        if (!status || strcmp(status, leaf->require_status) != 0) {
-            char msg[320];
-            (void)snprintf(msg, sizeof(msg), "%s (backing status: %s)",
-                           leaf->degraded_message
-                               ? leaf->degraded_message
-                               : "the backing command did not complete",
-                           status && status[0] ? status : "absent");
-            json_free(&body);
-            awn_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                     ZCL_COMMAND_EXIT_BLOCKED,
-                     leaf->degraded_code ? leaf->degraded_code
-                                         : "APP_WRITE_INCOMPLETE",
-                     "execute", msg, leaf->method);
-            return;
-        }
+    if (!awn_completion_witness(leaf, &body, reply)) {
+        json_free(&body);
+        return;
     }
-
     awn_merge_object(&reply->data, &body);
     json_free(&body);
     (void)json_push_kv_str(&reply->data, "stage", "committed");
     (void)json_push_kv_bool(&reply->data, "committed", true);
     (void)json_push_kv_str(&reply->data, "plan_token", token);
     reply->error.mutated = true;
+}
+
+void zcl_native_handle_oprindex_rebuild(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    static const struct awn_leaf leaf = {
+        .action = "oprindex-rebuild", .method = "oprindex_rebuild",
+        .plan_commit = true, .require_true = "truncated",
+    };
+    awn_run(request, reply, &leaf);
 }
 
 /* ── ZCL Names (ZNAM) ───────────────────────────────────────────────── */

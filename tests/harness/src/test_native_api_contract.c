@@ -2190,6 +2190,51 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
     return strdup("null");
 }
 
+static const char *g_oprindex_rebuild_body;
+
+static char *oprindex_rebuild_body_rpc(const char *method, const char *params)
+{
+    (void)params;
+    return strdup(method && strcmp(method, "oprindex_rebuild") == 0
+                      ? g_oprindex_rebuild_body : "null");
+}
+
+static int test_oprindex_rebuild_requires_witness(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec =
+        find_spec(zcl_command_catalog(), "app.oprindex.rebuild");
+    TEST("OP_RETURN reset requires explicit true backing witness") {
+        ASSERT(spec);
+        const char *bodies[] = {"{}", "{\"truncated\":false}",
+                                "{\"truncated\":\"true\"}",
+                                "{\"truncated\":true}"};
+        struct json_value input = {0};
+        json_set_object(&input);
+        json_push_kv_bool(&input, "confirm", true);
+        struct zcl_command_request req = {.spec = spec, .input = &input};
+        bool ok = true;
+        node_rpc_client_set_test_hook(oprindex_rebuild_body_rpc);
+        for (size_t i = 0; i < sizeof(bodies)/sizeof(bodies[0]); i++) {
+            g_oprindex_rebuild_body = bodies[i];
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, spec->output_schema);
+            zcl_native_handle_oprindex_rebuild(&req, &reply);
+            bool success = i == 3;
+            ok = ok && (reply.exit_code == ZCL_COMMAND_EXIT_OK) == success &&
+                 reply.error.mutated == success;
+            if (!success) ok = ok && reply.error.message[0];
+            zcl_command_reply_free(&reply);
+        }
+        node_rpc_client_set_test_hook(NULL);
+        json_free(&input);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 static int test_app_write_native_e2e(void)
 {
     int failures = 0;
@@ -3411,6 +3456,7 @@ int test_native_api_contract(void)
     failures += test_wallet_security_refusal_flags();
     failures += test_raw_native_pipeline_mines_exact_signed_bytes();
     failures += test_app_write_native_e2e();
+    failures += test_oprindex_rebuild_requires_witness();
     failures += test_zslp_intent_refusal_surfaces_node_message();
     failures += test_zslp_plan_requires_named_inputs();
     failures += test_native_bridge_resident_binding();

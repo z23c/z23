@@ -209,19 +209,19 @@ static bool rpc_oprindex_rebuild(const struct json_value *params, bool help,
             "to empty. The supervised backfill service "
             "(dumpstate op_return_index) re-derives the whole catalog from\n"
             "block bodies on its next ticks. Non-consensus projection —\n"
-            "safe to run any time.\n");
+            "explicit operator recovery; busy fold/database work refuses it.\n");
         return true;
     }
     if (!g_oprindex_ndb || !g_oprindex_ndb->open) {
         json_set_str(result, "node.db not open");
         LOG_FAIL("op_return_index", "oprindex_rebuild: node.db not open");
     }
-    bool ok = op_return_index_truncate(g_oprindex_ndb);
+    bool ok = op_return_index_rebuild(g_oprindex_ndb);
     json_set_object(result);
     json_push_kv_bool(result, "truncated", ok);
     if (!ok)
         json_push_kv_str(result, "note",
-                         "op_return_index_truncate failed - see node.log");
+                         "rebuild refused or rolled back; retry after resolving fold/database contention - see node.log");
     return ok;
 }
 

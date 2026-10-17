@@ -193,6 +193,8 @@ static const struct {
  * dispatch pipeline validates an RPC success body against the binding this
  * file resolves. */
 static const struct bridge_rpc_binding g_bridge_rpc_direct[] = {
+    { "app.oprindex.status", "oprindex_status", JSON_OBJ,
+      {{"wired", JSON_BOOL}}, BRIDGE_RPC_ARRAY_NONE },
     { "core.chain.tip", "getchaintip", JSON_OBJ,
       {{"hash", JSON_STR}, {"height", JSON_INT}}, BRIDGE_RPC_ARRAY_NONE },
     { "core.chain.mempool.status", "getmempoolinfo", JSON_OBJ,

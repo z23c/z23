@@ -297,7 +297,7 @@ ZCL_MODULE_CAPABILITY("engine/models/src/mesh_pairing.c", CAP_FS_WRITE|CAP_FS_RE
 ZCL_MODULE_CAPABILITY("engine/models/src/mmb_leaf_store.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/onion_announcement.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/onion_directory.c", CAP_FS_WRITE|CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("engine/models/src/op_return_index.c", CAP_FS_WRITE|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("engine/models/src/op_return_index.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/parity_sample.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/peer.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/peer_chain_observation.c", CAP_FS_WRITE|CAP_FS_READ, "")

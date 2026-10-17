@@ -30,7 +30,8 @@
  * safe to call from ANY thread. The digest chain
  * (op_return_index_fold_block_digest) and the cursor
  * (op_return_index_get_cursor / op_return_index_set_cursor) are owned
- * EXCLUSIVELY by the backfill service (a single supervisor-driven thread)
+ * by the backfill service and explicit rebuild under the shared nonblocking
+ * fold/reset guard (a busy supervisor tick defers rather than waits)
  * so the chain stays deterministic — the tip-finalize hook in
  * explorer_index.c only ever inserts rows, it never folds the digest. */
 
@@ -221,6 +222,14 @@ bool op_return_index_prune_below(struct node_db *ndb, int32_t base_height);
  * The backfill service re-derives the catalog from block bodies on its
  * next ticks, re-seeding the base if the datadir is snapshot-seeded. */
 bool op_return_index_truncate(struct node_db *ndb);
+
+/* Production rebuild: owns a separate existing-runtime connection and one
+ * transaction. Refuses memory databases and concurrent fold/reset work.
+ * truncate above is a low-level primitive: caller must supply an isolated
+ * fixture or hold the fold/reset guard and its own transaction. */
+bool op_return_index_rebuild(struct node_db *ndb);
+bool op_return_index_fold_try_begin(void);
+void op_return_index_fold_end(void);
 
 int64_t op_return_index_count(struct node_db *ndb);
 int64_t op_return_index_count_by_tag_text(struct node_db *ndb,

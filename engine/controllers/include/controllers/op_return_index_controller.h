@@ -8,8 +8,8 @@
  *   oprindex_status   — cursor height/digest, provable tip, total rows,
  *                        rows-by-known-tag counts (ZNAM/ZSLP/ZANC/other)
  *   oprindex_list     — bounded list by tag and/or height range
- *   oprindex_rebuild  — drop-and-rederive entry point (op_return_index_
- *                        truncate); the backfill service re-derives from
+ *   oprindex_rebuild  — transactional, fold-excluded drop-and-rederive
+ *                        (op_return_index_rebuild); backfill re-derives from
  *                        block bodies on its next ticks */
 
 #ifndef ZCL_CONTROLLERS_OP_RETURN_INDEX_H

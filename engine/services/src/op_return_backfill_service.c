@@ -464,9 +464,14 @@ static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
 
 int op_return_backfill_run_once(void)
 {
+    if (!op_return_index_fold_try_begin()) {
+        atomic_store(&g_backfill_outcome, OP_RETURN_BACKFILL_BLOCKED);
+        return 0; /* fold/reset owns the cursor; supervisor never waits */
+    }
     int folded = 0;
     atomic_store(&g_backfill_outcome,
                  (int)backfill_run_once_typed(&folded));
+    op_return_index_fold_end();
     return folded;
 }
 

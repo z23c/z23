@@ -64,6 +64,7 @@ app.names.transfer         exempt: signs+broadcasts an OP_RETURN tx, no privileg
 app.names.renew            exempt: signs+broadcasts an OP_RETURN tx, no privileged datadir install
 app.names.set-record       exempt: signs+broadcasts an OP_RETURN tx, no privileged datadir install
 app.names.set-text         exempt: signs+broadcasts an OP_RETURN tx, no privileged datadir install
+app.oprindex.rebuild       exempt: resets the local OP_RETURN catalog projection and cursor in one node.db transaction; no artifact install, no chain transaction
 app.messaging.send         exempt: peer-socket write (p2p) or shielded send (onchain), no artifact install
 app.messaging.send-named   exempt: PLANNED fail-closed, no artifact install (no outbound delivery path exists)
 app.messaging.read         exempt: flips one message's read bit, rebuildable projection

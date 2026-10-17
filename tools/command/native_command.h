@@ -2492,6 +2492,9 @@ void zcl_native_handle_market_offer(
 void zcl_native_handle_swap_initiate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_oprindex_rebuild(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_swap_participate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

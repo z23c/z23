@@ -21,6 +21,10 @@
  *     adopts the seed floor as its base and fills forward. */
 
 #include "test/test_core.h"
+#include "config/command_catalog.h"
+#include "command/native_command.h"
+#include "controllers/op_return_index_controller.h"
+#include "controllers/rpc_client.h"
 #include "validation/main_state.h"
 #include "models/database.h"
 #include "models/explorer_index.h"
@@ -1119,6 +1123,254 @@ static int test_backfill_declared_partial_coverage(void)
     return failures;
 }
 
+/* Exercise the typed writer against the real controller/model on a file
+ * fixture, including SQLite refusals after earlier reset steps succeeded. */
+static struct rpc_table *g_rebuild_rpc_table;
+static int g_rebuild_rpc_calls;
+
+static char *rebuild_fixture_rpc(const char *method, const char *params_json)
+{
+    (void)params_json;
+    g_rebuild_rpc_calls++;
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    (void)rpc_table_execute(g_rebuild_rpc_table, method, &params, &result);
+    char buf[2048];
+    size_t len = json_write(&result, buf, sizeof(buf));
+    char *raw = len < sizeof(buf) ? strdup(buf) : NULL;
+    json_free(&params);
+    json_free(&result);
+    return raw;
+}
+
+static bool rebuild_seed_legacy(struct node_db *ndb)
+{
+    struct op_return_index_row row = {0};
+    uint8_t script[] = {0x6a, 4, 'T', 'E', 'S', 'T'};
+    uint8_t digest[32] = {1};
+    if (!op_return_index_extract(script, sizeof(script), &row))
+        return false;
+    row.txid[0] = 1;
+    row.height = 1;
+    return db_op_return_index_save(ndb, &row) &&
+        node_db_state_delete(ndb, "op_return_index_state.v2") &&
+        node_db_state_set_int(ndb, "op_return_index_cursor_height", 1) &&
+        node_db_state_set(ndb, "op_return_index_digest", digest, sizeof(digest));
+}
+
+static bool rebuild_typed_call(const struct zcl_command_spec *spec, bool confirm,
+                                bool expect_success)
+{
+    struct json_value input = {0};
+    json_set_object(&input);
+    json_push_kv_bool(&input, "confirm", confirm);
+    struct zcl_command_request req = {.spec = spec, .input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, spec->output_schema);
+    zcl_native_handle_oprindex_rebuild(&req, &reply);
+    bool ok = expect_success ? reply.exit_code == ZCL_COMMAND_EXIT_OK
+                             : reply.exit_code != ZCL_COMMAND_EXIT_OK;
+    ok = ok && reply.error.mutated == (confirm && expect_success);
+    if (!confirm) {
+        const char *stage = json_get_str(json_get(&reply.data, "stage"));
+        ok = ok && stage && !strcmp(stage, "plan");
+    }
+    if (!expect_success)
+        ok = ok && reply.error.message[0];
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static bool rebuild_backfill_busy(struct node_db *ndb)
+{
+    if (!op_return_index_fold_try_begin()) return false;
+    int folded = op_return_backfill_run_once();
+    struct op_return_index_cursor cur;
+    bool ok = folded == 0 && op_return_index_count(ndb) == 0 &&
+              op_return_index_get_cursor(ndb, &cur) && cur.height == -1;
+    op_return_index_fold_end();
+    return ok;
+}
+
+static bool rebuild_file_backfill(struct node_db *ndb)
+{
+    struct e2e_fixture f;
+    if (!e2e_fixture_init(&f)) return false;
+    g_op_return_backfill_test_ndb = ndb;
+    g_op_return_backfill_test_ms = &f.ms;
+    g_op_return_backfill_test_datadir = f.datadir;
+    op_return_backfill_reset_for_test();
+    reducer_frontier_provable_tip_set(OPRIDX_E2E_HEIGHTS - 1);
+    bool ok = op_return_index_rebuild(ndb) && rebuild_backfill_busy(ndb);
+    ok = op_return_backfill_run_once() == OPRIDX_E2E_HEIGHTS && ok;
+    struct op_return_index_cursor first, second;
+    int64_t rows = op_return_index_count(ndb);
+    ok = op_return_index_get_cursor(ndb, &first) && ok;
+    ok = op_return_index_rebuild(ndb) && ok;
+    ok = op_return_backfill_run_once() == OPRIDX_E2E_HEIGHTS && ok;
+    ok = op_return_index_get_cursor(ndb, &second) && ok &&
+         rows > 0 && rows == op_return_index_count(ndb) &&
+         first.height == second.height &&
+         memcmp(first.digest, second.digest, sizeof(first.digest)) == 0;
+    g_op_return_backfill_test_ndb = NULL;
+    g_op_return_backfill_test_ms = NULL;
+    g_op_return_backfill_test_datadir = NULL;
+    reducer_frontier_provable_tip_reset();
+    e2e_fixture_free(&f);
+    return ok;
+}
+
+static bool rebuild_plan_busy(struct node_db *ndb,
+                               const struct zcl_command_spec *spec)
+{
+    if (!rebuild_seed_legacy(ndb)) return false;
+    g_rebuild_rpc_calls = 0;
+    bool ok = rebuild_typed_call(spec, false, true) &&
+         g_rebuild_rpc_calls == 0 && op_return_index_count(ndb) == 1 &&
+         op_return_index_state_is_legacy_refused(ndb);
+    if (!op_return_index_fold_try_begin()) return false;
+    ok = rebuild_typed_call(spec, true, false) && ok &&
+         op_return_index_count(ndb) == 1 &&
+         op_return_index_state_is_legacy_refused(ndb);
+    op_return_index_fold_end();
+    return ok;
+}
+
+static int rebuild_check(const char *claim, bool ok)
+{
+    printf("OP_RETURN rebuild: %s... %s\n", claim, ok ? "OK" : "FAIL");
+    return !ok;
+}
+
+static bool rebuild_legacy_unchanged(struct node_db *ndb)
+{
+    int64_t height = -1;
+    uint8_t digest[32] = {0}, expected[32] = {1}, v2[82];
+    size_t len = 0;
+    bool legacy = node_db_state_get_int(ndb, "op_return_index_cursor_height", &height) &&
+        height == 1 &&
+        node_db_state_get(ndb, "op_return_index_digest", digest, sizeof(digest), &len) &&
+        len == sizeof(digest) && memcmp(digest, expected, sizeof(digest)) == 0;
+    return legacy &&
+        !node_db_state_get(ndb, "op_return_index_state.v2", v2, sizeof(v2), &len) &&
+        count_rows(ndb, "SELECT COUNT(*) FROM rebuild_child") == 0;
+}
+
+static bool rebuild_injected_failure(struct node_db *ndb,
+                                      const struct zcl_command_spec *spec,
+                                      const char *trigger)
+{
+    bool injected = sqlite3_exec(ndb->db, trigger, NULL, NULL, NULL) == SQLITE_OK;
+    bool ok = injected && rebuild_typed_call(spec, true, false) &&
+         op_return_index_count(ndb) == 1 &&
+         op_return_index_state_version(ndb) == OP_RETURN_INDEX_STATE_LEGACY_V1 &&
+         rebuild_legacy_unchanged(ndb);
+    int dropped = sqlite3_exec(ndb->db, "DROP TRIGGER IF EXISTS reject_reset", NULL, NULL, NULL);
+    return dropped == SQLITE_OK && ok;
+}
+
+static int rebuild_refusals(struct node_db *ndb,
+                             const struct zcl_command_spec *spec)
+{
+    int failures = 0;
+    /* A deferred FK violation fails COMMIT, after every reset step succeeds. */
+    if (sqlite3_exec(ndb->db,
+        "CREATE TABLE rebuild_parent(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE rebuild_child(id INTEGER REFERENCES rebuild_parent(id) DEFERRABLE INITIALLY DEFERRED)",
+        NULL, NULL, NULL) != SQLITE_OK) failures++;
+    const char *triggers[] = {
+        "CREATE TRIGGER reject_reset BEFORE DELETE ON op_return_index BEGIN SELECT RAISE(ABORT,'reset row refusal'); END",
+        "CREATE TRIGGER reject_reset BEFORE DELETE ON node_state WHEN OLD.key='op_return_index_digest' BEGIN SELECT RAISE(ABORT,'reset legacy refusal'); END",
+        "CREATE TRIGGER reject_reset BEFORE INSERT ON node_state WHEN NEW.key='op_return_index_state.v2' BEGIN SELECT RAISE(ABORT,'reset cursor refusal'); END",
+        "CREATE TRIGGER reject_reset AFTER INSERT ON node_state WHEN NEW.key='op_return_index_state.v2' BEGIN INSERT INTO rebuild_child VALUES(1); END",
+    };
+    for (size_t i = 0; i < sizeof(triggers)/sizeof(triggers[0]); i++)
+        failures += rebuild_check("injected failure rolls back rows and legacy cursor",
+                                  rebuild_injected_failure(ndb, spec, triggers[i]));
+    return failures;
+}
+
+static bool rebuild_retry_empty(struct node_db *ndb,
+                                 const struct zcl_command_spec *spec)
+{
+    struct op_return_index_cursor cur;
+    return rebuild_typed_call(spec, true, true) &&
+         op_return_index_count(ndb) == 0 &&
+         op_return_index_get_cursor(ndb, &cur) && cur.height == -1 &&
+         cur.base_height == 0 && !op_return_index_state_is_legacy_refused(ndb);
+}
+
+static bool rebuild_reopen_empty(struct node_db *ndb, const char *path)
+{
+    node_db_close(ndb);
+    if (!node_db_open(ndb, path)) return false;
+    uint8_t value[32]; size_t len = 0;
+    struct op_return_index_cursor cur;
+    return op_return_index_count(ndb) == 0 &&
+         op_return_index_get_cursor(ndb, &cur) && cur.height == -1 &&
+         !node_db_state_get(ndb, "op_return_index_cursor_height", value, sizeof(value), &len) &&
+         !node_db_state_get(ndb, "op_return_index_digest", value, sizeof(value), &len);
+}
+
+static bool rebuild_canonical_transaction(struct node_db *ndb)
+{
+    bool ok = rebuild_seed_legacy(ndb) && node_db_begin_immediate(ndb);
+    if (ok) {
+        ok = !op_return_index_rebuild(ndb) &&
+             !sqlite3_get_autocommit(ndb->db) &&
+             op_return_index_count(ndb) == 1;
+        if (!node_db_rollback(ndb)) ok = false;
+    }
+    return ok;
+}
+
+static const struct zcl_command_spec *rebuild_test_spec(void)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    for (size_t i = 0; i < reg->count; i++)
+        if (!strcmp(reg->commands[i].path, "app.oprindex.rebuild"))
+            return &reg->commands[i];
+    return NULL;
+}
+
+static int test_typed_rebuild(void)
+{
+    int failures = 0;
+    mkdir("./test-tmp", 0755);
+    char dir[] = "./test-tmp/opr-rebuild-XXXXXX";
+    if (!mkdtemp(dir)) return 1;
+    char path[256];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db ndb = {0};
+    if (!node_db_open(&ndb, path)) { rmdir(dir); return 1; }
+    struct rpc_table table;
+    rpc_table_init(&table);
+    rpc_op_return_index_set_state(&ndb);
+    register_op_return_index_rpc_commands(&table);
+    set_rpc_warmup_finished();
+    g_rebuild_rpc_table = &table;
+    node_rpc_client_set_test_hook(rebuild_fixture_rpc);
+    const struct zcl_command_spec *spec = rebuild_test_spec();
+    if (spec) {
+        failures += rebuild_check("plan and busy reset preserve legacy state", rebuild_plan_busy(&ndb, spec));
+        failures += rebuild_refusals(&ndb, spec);
+        failures += rebuild_check("retry commits empty v2 cursor", rebuild_retry_empty(&ndb, spec));
+        failures += rebuild_check("reopened file retains reset and retires both v1 keys", rebuild_reopen_empty(&ndb, path));
+        failures += rebuild_check("never borrows canonical transaction", rebuild_canonical_transaction(&ndb));
+        failures += rebuild_check("held guard prevents backfill; reset and backfill reproduce digest", rebuild_file_backfill(&ndb));
+    } else failures++;
+    node_rpc_client_set_test_hook(NULL);
+    g_rebuild_rpc_table = NULL;
+    rpc_op_return_index_set_state(NULL);
+    node_db_close(&ndb);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/node.db-wal", dir); unlink(path);
+    snprintf(path, sizeof(path), "%s/node.db-shm", dir); unlink(path);
+    rmdir(dir);
+    return failures;
+}
+
 /* ── Entry point ──────────────────────────────────────────────────── */
 
 int test_op_return_index(void)
@@ -1129,6 +1381,7 @@ int test_op_return_index(void)
     failures += test_explorer_wiring();
     failures += test_digest_pure();
     failures += test_cursor_state();
+    failures += test_typed_rebuild();
     failures += test_backfill_e2e();
     failures += test_backfill_genesis_fake_pos();
     failures += test_backfill_unreadable_body_backoff();

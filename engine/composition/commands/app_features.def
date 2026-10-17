@@ -34,6 +34,7 @@
  * protocols/invoke). Keeping these short keeps the `app` menu well under
  * budget (verified in test_native_api_contract's per-branch menu sweep). */
 ZCL_COMMAND_BRANCH("app.names", "app", "Names", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.oprindex", "app", "OP_RETURN catalog", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.tokens", "app", "Tokens", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.messaging", "app", "Messaging", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.market", "app", "Market", ZCL_COMMAND_LAYER_APP)
@@ -420,6 +421,37 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_ZNAM, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_blog_anchor)
+
+/* Explicit projection recovery; never an automatic legacy-state migration. */
+ZCL_COMMAND_READY_READ(
+    "app.oprindex.status", "app.oprindex", "", "Inspect OP_RETURN catalog",
+    "Live cursor record version, declared range, digest, row counts and "
+    "provable tip. Legacy or unknown records remain refused.", 0,
+    "oprindex,op_return,catalog,recovery,status", "zcl.command.empty_input.v1",
+    "zcl.app_oprindex_status.v1", "", "", "z23 app oprindex status",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.oprindex.rebuild", "app.oprindex", "", "Rebuild OP_RETURN catalog",
+    "Without confirm:true, returns a non-mutating plan. Confirmed execution "
+    "atomically deletes catalog rows and resets its cursor, including legacy "
+    "state. Backfill subsequently re-derives available block bodies; this "
+    "does not report backfill completion. A busy fold or database refuses "
+    "the reset; retry later.", 0,
+    "oprindex,op_return,catalog,recovery,rebuild",
+    "zcl.app_oprindex_rebuild.input.v1", "zcl.app_oprindex_rebuild.v1",
+    "confirm", "", "z23 app oprindex rebuild",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_oprindex_rebuild)
 
 /* ── Names (ZNAM) ──────────────────────────────────────────────────── */
 

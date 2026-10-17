@@ -53,6 +53,19 @@ static const char OP_RETURN_INDEX_BASE_TAG_V2[] = "ZCL.op_return_index.base.v2";
 
 DEFINE_MODEL_CALLBACKS(op_return_index)
 
+static atomic_flag g_fold_reset_guard = ATOMIC_FLAG_INIT;
+
+bool op_return_index_fold_try_begin(void)
+{
+    return !atomic_flag_test_and_set_explicit(&g_fold_reset_guard,
+                                               memory_order_acquire);
+}
+
+void op_return_index_fold_end(void)
+{
+    atomic_flag_clear_explicit(&g_fold_reset_guard, memory_order_release);
+}
+
 /* ── Pure extraction ───────────────────────────────────────────────── */
 
 /* Render `tag[0..tag_len)` into `out` (OP_RETURN_INDEX_TAG_TEXT_MAX bytes):
@@ -589,14 +602,52 @@ bool op_return_index_truncate(struct node_db *ndb)
         LOG_FAIL("op_return_index", "truncate: failed to reset cursor state");
     /* Retire any v1 record so the refusal above cannot survive a rebuild —
      * this is the operator's documented escape from a legacy record. */
-    (void)node_db_state_delete(ndb, OP_RETURN_INDEX_CURSOR_KEY_V1);
-    (void)node_db_state_delete(ndb, OP_RETURN_INDEX_DIGEST_KEY_V1);
+    if (!node_db_state_delete(ndb, OP_RETURN_INDEX_CURSOR_KEY_V1) ||
+        !node_db_state_delete(ndb, OP_RETURN_INDEX_DIGEST_KEY_V1))
+        LOG_FAIL("op_return_index", "truncate: failed to retire legacy state");
     /* This IS the rebuild the legacy-state backoff exists to wait for:
      * clear it now rather than let a caller sit inside up to 15 more
      * minutes of cached refusal after the fix already landed. The next
      * get_cursor() re-classifies immediately (finds the fresh EMPTY/V2
      * record set above) instead of skipping straight to the stale cache. */
     oprindex_legacy_backoff_clear(ndb);
+    return true;
+}
+
+static bool op_return_index_file_backed(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open || !ndb->path[0])
+        return false;
+    const char *filename = sqlite3_db_filename(ndb->db, "main");
+    return filename && filename[0];
+}
+
+bool op_return_index_rebuild(struct node_db *ndb)
+{
+    if (!op_return_index_file_backed(ndb))
+        LOG_FAIL("op_return_index", "rebuild: an open file-backed database is required");
+    if (!op_return_index_fold_try_begin())
+        LOG_FAIL("op_return_index", "rebuild: fold/reset is busy; retry later");
+
+    struct node_db writer;
+    bool ok = node_db_open_existing_runtime(&writer, ndb->path,
+                                             "op_return_index.rebuild");
+    if (ok) {
+        /* Recovery must not wait behind consensus or another SQLite writer. */
+        bool begun = sqlite3_busy_timeout(writer.db, 0) == SQLITE_OK &&
+                     node_db_begin_immediate(&writer);
+        ok = begun && op_return_index_truncate(&writer);
+        if (ok)
+            ok = node_db_commit(&writer);
+        if (begun && !ok && !node_db_rollback(&writer))
+            LOG_ERROR("op_return_index", "rebuild: rollback failed");
+        node_db_close(&writer);
+    }
+    if (ok)
+        oprindex_legacy_backoff_clear(ndb);
+    op_return_index_fold_end();
+    if (!ok)
+        LOG_FAIL("op_return_index", "rebuild: reset did not commit; retry after resolving the database failure");
     return true;
 }
 

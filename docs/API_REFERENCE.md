@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 964 |
+| Registry entries (branches + leaves) | 967 |
 | Top-level roots | 15 |
-| Branches | 209 |
-| Leaves (dispatchable command paths) | 755 |
-| … `ready` (live handler in this build) | 662 |
+| Branches | 210 |
+| Leaves (dispatchable command paths) | 757 |
+| … `ready` (live handler in this build) | 664 |
 | … `compat` (metadata only, names a fallback) | 63 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 62 |
-| Leaves with `effect=mutate` | 288 |
+| Leaves with `effect=mutate` | 289 |
 | Leaves with `effect=destructive` | 6 |
-| Leaves requiring **owner** authority | 152 |
+| Leaves requiring **owner** authority | 153 |
 
 Per source file:
 
@@ -93,7 +93,7 @@ Per source file:
 | `engine/composition/commands/root.def` | 10 | 5 | 5 |
 | `engine/composition/commands/core.def` | 124 | 29 | 95 |
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
-| `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
+| `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
 | `engine/composition/commands/ops.def` | 75 | 15 | 60 |
 | `engine/composition/commands/dev.def` | 128 | 23 | 105 |
@@ -493,6 +493,13 @@ represented by its children's sections.
 | `app names renew` | ready | mutate / app-write / **owner**, plan-commit · foreground/moderate | **`wallet_scope`**, `name`, `idempotency_key`, `plan_id`, `confirm` | `zcl.app_name_txresult.v1` | `z23 app names renew --input='{"wallet_scope":"dev","name":"alice","idempotency_key":"name-renew-1"}'` | Renew a ZCL Name registration term |
 | `app names set-record` | ready | mutate / app-write / **owner**, plan-commit · foreground/moderate | **`wallet_scope`**, `name`, `type`, `value`, `idempotency_key`, `plan_id`, `confirm` | `zcl.app_name_txresult.v1` | `z23 app names set-record --input='{"wallet_scope":"dev","name":"alice","type":"btc","value":"bc1..","idempotency_key":"name-record-1"}'` | Set a multi-coin address record |
 | `app names set-text` | ready | mutate / app-write / **owner**, plan-commit · foreground/moderate | **`wallet_scope`**, `name`, `key`, `value`, `idempotency_key`, `plan_id`, `confirm` | `zcl.app_name_txresult.v1` | `z23 app names set-text --input='{"wallet_scope":"dev","name":"alice","key":"url","value":"https://..","idempotency_key":"name-text-1"}'` | Set a text record on a ZCL Name |
+
+#### `app.oprindex` — OP_RETURN catalog
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `app oprindex status` | ready | read / read / operator · fast/low | none | `zcl.app_oprindex_status.v1` | `z23 app oprindex status` | Inspect OP_RETURN catalog |
+| `app oprindex rebuild` | ready | mutate / app-write / **owner**, plan-commit · foreground/moderate | `confirm` | `zcl.app_oprindex_rebuild.v1` | `z23 app oprindex rebuild` | Rebuild OP_RETURN catalog |
 
 #### `app.tokens` — Tokens
 

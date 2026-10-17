@@ -3975,6 +3975,33 @@ static int test_dev_vcs_seal_grant_release_stub(void)
 
 /* Every bridged READY leaf must resolve to exactly one dispatch: a
  * transport-neutral body function XOR a direct JSON-RPC method. */
+static int test_oprindex_recovery_catalog(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("OP_RETURN recovery exposes typed owner-confirmed reset and status") {
+        const struct zcl_command_spec *status = find_spec(reg, "app.oprindex.status");
+        const struct zcl_command_spec *reset = find_spec(reg, "app.oprindex.rebuild");
+        ASSERT(status && reset);
+        ASSERT_EQ(status->availability, ZCL_COMMAND_READY);
+        ASSERT_EQ(status->authority, ZCL_COMMAND_AUTH_OPERATOR);
+        ASSERT_STR_EQ(zcl_native_bridge_rpc_for_path(status->path), "oprindex_status");
+        ASSERT_EQ(reset->availability, ZCL_COMMAND_READY);
+        ASSERT_EQ(reset->authority, ZCL_COMMAND_AUTH_OWNER);
+        ASSERT_EQ(reset->confirmation, ZCL_COMMAND_CONFIRM_PLAN_COMMIT);
+        ASSERT(reset->handler == zcl_native_handle_oprindex_rebuild);
+        struct json_value input = {0};
+        json_set_object(&input);
+        json_push_kv_bool(&input, "confirm", true);
+        char why[160];
+        bool valid = zcl_command_registry_input_validate(reset, &input, why, sizeof(why));
+        json_free(&input);
+        ASSERT(valid);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bridge_bindings(void)
 {
     int failures = 0;
@@ -5865,6 +5892,7 @@ int test_command_registry_catalog(void)
     failures += test_status_brief_rejects_contract_contradictions();
     failures += test_status_brief_names_first_failing_field();
     failures += test_bridge_bindings();
+    failures += test_oprindex_recovery_catalog();
     failures += test_planned_fail_closed();
     failures += test_envelope_vectors();
     failures += test_dev_branch_leaves();
