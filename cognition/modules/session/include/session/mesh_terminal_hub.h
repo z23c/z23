@@ -220,6 +220,13 @@ void mesh_terminal_hub_testing_children_ignore_term(bool ignore);
 /* Test seam: called right before every hub write attempt (audit and client
  * output), so a test can make another writer win the race. NULL clears. */
 void mesh_terminal_hub_testing_before_write(void (*hook)(int fd));
+/* Test seam: the instant between "the descriptor looked ready" and the write
+ * syscall (the polled and non-blocking pipe paths), where a second writer
+ * takes the room. NULL clears. */
+void mesh_terminal_hub_testing_after_ready(void (*hook)(int fd));
+/* Test seam: make Linux treat a pipe as the non-Linux path does (no
+ * RWF_NOWAIT: bounded only on an already non-blocking descriptor). */
+void mesh_terminal_hub_testing_force_polled_fifo(bool on);
 /* Test seam: called in the supervisor right after the stop grace expired and
  * before the survivors are frozen; kids[0..n) are the session pids (0 = free
  * slot), so a test can end a session from outside at that exact point. */

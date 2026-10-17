@@ -1,10 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: see mesh_terminal_hub_io.h. */
 
-#if defined(__linux__)
-
+#if !defined(_WIN32)
 #define _GNU_SOURCE
 #include "mesh_terminal_hub_io.h"
+#include "session/mesh_terminal_hub_portable.h"
 
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -24,7 +24,7 @@ bool hub_io_send(int fd, const uint8_t *frame, size_t total)
 {
     size_t sent = 0;
     while (sent < total) {
-        ssize_t n = send(fd, frame + sent, total - sent, MSG_NOSIGNAL);
+        ssize_t n = send(fd, frame + sent, total - sent, HUB_SEND_NOSIGNAL);
         if (n > 0)
             sent += (size_t)n;
         else if (n < 0 && errno != EINTR)
@@ -57,18 +57,70 @@ void hub_io_before_write(int fd)
 }
 #endif
 
+/* Off Linux there is no RWF_NOWAIT, so a pipe is only bounded if the descriptor
+ * itself is non-blocking: then a write is all-or-EAGAIN (a record of at most
+ * PIPE_BUF bytes stays atomic) and hub_wfd_write polls the REMAINING deadline
+ * on EAGAIN. A pipe that is still blocking falls back to poll + PIPE_BUF,
+ * which a second writer can beat; hub_wfd_sink_bounded refuses to
+ * start a server on such a shared sink (the flags are never changed). ZCL_TESTING lets Linux take the same branch. */
+#if defined(ZCL_TESTING)
+static bool g_force_polled_fifo;
+
+void mesh_terminal_hub_testing_force_polled_fifo(bool on)
+{
+    g_force_polled_fifo = on;
+}
+#endif
+
+#if defined(__linux__)
+#if defined(ZCL_TESTING)
+#define HUB_POLLED_FIFO() g_force_polled_fifo
+#else
+#define HUB_POLLED_FIFO() false
+#endif
+#else
+#define HUB_POLLED_FIFO() true
+#endif
+
+static bool hub_fd_nonblocking(int fd)
+{
+    int fl = fcntl(fd, F_GETFL);
+    return fl >= 0 && (fl & O_NONBLOCK);
+}
+
+static void hub_wfd_open_fifo(struct hub_wfd *w)
+{
+    w->fifo = true;
+    if (HUB_POLLED_FIFO())
+        w->mode = hub_fd_nonblocking(w->fd) ? HUB_WFD_PLAIN : HUB_WFD_POLLED;
+}
+
+bool hub_wfd_sink_bounded(int fd)
+{
+    struct stat st;
+    if (!HUB_POLLED_FIFO() || fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode) || hub_fd_nonblocking(fd))
+        return true;
+    LOG_FAIL("hub_io", "fd %d is a blocking pipe shared with other holders: a bounded write needs O_NONBLOCK, which the hub will not set on a descriptor it does not own", fd);
+}
+
 void hub_wfd_open(struct hub_wfd *w, int fd)
 {
     struct stat st;
     *w = (struct hub_wfd){ .fd = fd, .mode = HUB_WFD_NOWAIT };
-    if (fstat(fd, &st) != 0)
+    if (fstat(fd, &st) != 0) {
+#if !defined(__linux__)
+        w->mode = HUB_WFD_POLLED;
+#endif
         return;
-    if (S_ISSOCK(st.st_mode))
+    }
+    if (S_ISSOCK(st.st_mode)) {
         w->mode = HUB_WFD_SOCKET;
+        hub_socket_nosigpipe(fd); /* once per socket; no-op on Linux (MSG_NOSIGNAL) */
+    }
     else if (S_ISREG(st.st_mode))
         w->mode = HUB_WFD_PLAIN;
     else if (S_ISFIFO(st.st_mode))
-        w->fifo = true;
+        hub_wfd_open_fifo(w);
     else
         w->mode = HUB_WFD_POLLED; /* tty/pty/char device: RWF_NOWAIT is not worth probing */
 }
@@ -78,6 +130,18 @@ void hub_wfd_open(struct hub_wfd *w, int fd)
  * a single free byte, and a bigger write would block past the caller's
  * deadline). A second writer can still win the readiness on a file that has
  * no RWF_NOWAIT; the audit sink and the screen pipes do have it. */
+#if defined(ZCL_TESTING)
+static void (*g_after_ready)(int fd);
+
+void mesh_terminal_hub_testing_after_ready(void (*hook)(int fd))
+{
+    g_after_ready = hook;
+}
+#define HUB_AFTER_READY(fd) do { if (g_after_ready) g_after_ready(fd); } while (0)
+#else
+#define HUB_AFTER_READY(fd) ((void)0)
+#endif
+
 static ssize_t hub_wfd_try_polled(const struct hub_wfd *w, const void *buf, size_t n)
 {
     struct pollfd pfd = { .fd = w->fd, .events = POLLOUT };
@@ -85,6 +149,7 @@ static ssize_t hub_wfd_try_polled(const struct hub_wfd *w, const void *buf, size
         errno = EAGAIN;
         return -1;
     }
+    HUB_AFTER_READY(w->fd); /* a second writer can still win the room here */
     size_t cap = w->fifo ? PIPE_BUF : 1;
     return write(w->fd, buf, n < cap ? n : cap);
 }
@@ -93,9 +158,12 @@ ssize_t hub_wfd_try(struct hub_wfd *w, const void *buf, size_t n)
 {
     hub_io_before_write(w->fd);
     if (w->mode == HUB_WFD_SOCKET)
-        return send(w->fd, buf, n, MSG_DONTWAIT | MSG_NOSIGNAL);
-    if (w->mode == HUB_WFD_PLAIN)
+        return send(w->fd, buf, n, MSG_DONTWAIT | HUB_SEND_NOSIGNAL);
+    if (w->mode == HUB_WFD_PLAIN) {
+        HUB_AFTER_READY(w->fd); /* test seam: the instant before the syscall */
         return write(w->fd, buf, n);
+    }
+#if defined(__linux__)
     if (w->mode == HUB_WFD_NOWAIT) {
         struct iovec iov = { .iov_base = (void *)buf, .iov_len = n };
         ssize_t k = pwritev2(w->fd, &iov, 1, -1, RWF_NOWAIT);
@@ -107,6 +175,7 @@ ssize_t hub_wfd_try(struct hub_wfd *w, const void *buf, size_t n)
                      w->fd, errno, w->fifo ? "PIPE_BUF" : "1-byte");
         w->mode = HUB_WFD_POLLED; /* this file takes no RWF_NOWAIT */
     }
+#endif
     return hub_wfd_try_polled(w, buf, n);
 }
 
@@ -198,4 +267,4 @@ enum hub_wait hub_rx_wait(struct hub_rx *rx, int fd, int timeout_ms,
  * is not empty (ISO C forbids an empty translation unit). */
 typedef int zcl_mesh_terminal_hub_io_unused;
 
-#endif /* __linux__ */
+#endif /* !_WIN32 */

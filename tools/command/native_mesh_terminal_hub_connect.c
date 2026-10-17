@@ -17,12 +17,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#if defined(__linux__)
+#if !defined(_WIN32)
 
 #include "json/json.h"
 #include "platform/os_proc.h"
 #include "platform/resident_launch.h"
 #include "session/mesh_terminal_hub.h"
+#include "session/mesh_terminal_hub_portable.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -33,7 +34,6 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <termios.h>
@@ -92,7 +92,7 @@ static bool connect_edge_open(struct connect_edge *e)
 {
     struct sigaction act = { .sa_handler = connect_on_winch };
     sigemptyset(&act.sa_mask);
-    if (pipe2(e->events, O_NONBLOCK | O_CLOEXEC) != 0)
+    if (hub_pipe_cloexec_nonblock(e->events) != 0)
         return false;
     g_event_write = e->events[1];
     sigaction(SIGWINCH, &act, &e->winch);
@@ -119,7 +119,7 @@ static void connect_edge_close(struct connect_edge *e)
 
 static int connect_direct(uint16_t port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0), one = 1;
+    int fd = hub_tcp_socket_cloexec(), one = 1;
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port),
                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
     if (fd >= 0 && connect(fd, (struct sockaddr *)&a, sizeof a) != 0) {
@@ -155,9 +155,9 @@ static bool tunnel_open(const char *route_input, struct tunnel *t)
     if (!have_self || !zcl_native_hub_route_arg(route_input, arg, sizeof arg) ||
         stat(route_input, &st) != 0 || !S_ISREG(st.st_mode))
         return false;
-    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0)
+    if (hub_socketpair_cloexec(sv) != 0)
         return false;
-    if (pipe2(errp, O_NONBLOCK | O_CLOEXEC) != 0) {
+    if (hub_pipe_cloexec_nonblock(errp) != 0) {
         close(sv[0]);
         close(sv[1]);
         return false;
@@ -209,7 +209,7 @@ static int tunnel_pidfd(pid_t pid)
     if (g_pidfd_unavailable)
         return -1;
 #endif
-    return (int)syscall(SYS_pidfd_open, pid, 0);
+    return hub_pidfd_open(pid);
 }
 
 /* Without pidfd_open the graceful wait polls waitpid(WNOHANG) in short steps;

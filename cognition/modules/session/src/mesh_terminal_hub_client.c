@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#if !defined(__linux__)
+#if defined(_WIN32)
 
 static void hub_client_run_arm(
     const struct mesh_terminal_hub_client_cfg *cfg,
@@ -31,6 +31,7 @@ static void hub_client_run_arm(
 #else
 
 #include "mesh_terminal_hub_io.h"
+#include "session/mesh_terminal_hub_portable.h"
 
 #include "platform/time_compat.h"
 
@@ -345,6 +346,7 @@ static void hub_client_run_arm(
 {
     struct hub_cl c = { .cfg = cfg, .res = result };
     memset(result, 0, sizeof(*result));
+    hub_socket_nosigpipe(cfg->net_fd); /* once per socket; no-op on Linux */
     hub_wfd_open(&c.wfd, cfg->out_fd);
     hub_cl_handshake(&c);
     if (!c.done)
@@ -356,7 +358,7 @@ static void hub_client_run_arm(
                                cfg->quiet ? 1u : 2u, false);
 }
 
-#endif /* __linux__ */
+#endif /* !_WIN32 */
 
 void mesh_terminal_hub_client_run(
     const struct mesh_terminal_hub_client_cfg *cfg,

@@ -26,6 +26,236 @@
 #include <stdio.h>
 #include <string.h>
 
+#if !defined(_WIN32) /* the POSIX portable-helper cases: no fcntl/sockets/pipes on Windows */
+#include "session/mesh_terminal_hub_portable.h"
+#include "../../../cognition/modules/session/src/mesh_terminal_hub_io.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+/* ── portable descriptor helpers and the confinement refusal ──────────────
+ * Run on every host: the helpers are what keeps accepted sockets, pipes and
+ * socket pairs close-on-exec (and the signal pipe non-blocking) where there
+ * is no accept4/pipe2/SOCK_CLOEXEC, and what makes a dead peer an EPIPE and
+ * not a SIGPIPE where there is no MSG_NOSIGNAL. */
+
+static int pcheck(int failures, bool ok, const char *label)
+{
+    printf("  %s... %s\n", label, ok ? "OK" : "FAIL");
+    return failures + (ok ? 0 : 1);
+}
+
+static bool p_cloexec(int fd)
+{
+    int f = fcntl(fd, F_GETFD);
+    return f >= 0 && (f & FD_CLOEXEC);
+}
+
+static bool p_nonblock(int fd)
+{
+    int f = fcntl(fd, F_GETFL);
+    return f >= 0 && (f & O_NONBLOCK);
+}
+
+static volatile sig_atomic_t g_sigpipes;
+
+static void p_on_sigpipe(int sig)
+{
+    (void)sig;
+    g_sigpipes++;
+}
+
+static int portable_flag_cases(void)
+{
+    int failures = 0, p[2] = { -1, -1 }, sv[2] = { -1, -1 };
+    failures = pcheck(failures, hub_pipe_cloexec_nonblock(p) == 0 && p_cloexec(p[0]) && p_cloexec(p[1]) &&
+                      p_nonblock(p[0]) && p_nonblock(p[1]),
+                      "portable: a hub pipe has both ends close-on-exec and non-blocking");
+    if (p[0] >= 0) { close(p[0]); close(p[1]); }
+    failures = pcheck(failures, hub_socketpair_cloexec(sv) == 0 && p_cloexec(sv[0]) && p_cloexec(sv[1]),
+                      "portable: a hub socket pair is close-on-exec on both ends");
+    if (sv[0] >= 0) { close(sv[0]); close(sv[1]); }
+    int tcp = hub_tcp_socket_cloexec();
+    failures = pcheck(failures, tcp >= 0 && p_cloexec(tcp), "portable: a hub TCP socket is close-on-exec");
+    if (tcp >= 0) close(tcp);
+#if defined(__linux__)
+    int pfd = hub_pidfd_open(getpid());
+    failures = pcheck(failures, pfd >= 0 || errno == ENOSYS || errno == EPERM,
+                      "portable: pidfd helper answers with a pidfd or a plain kernel refusal");
+    if (pfd >= 0)
+        close(pfd);
+#else
+    failures = pcheck(failures, hub_pidfd_open(getpid()) == -1,
+                      "portable: no pidfd off Linux; callers use their bounded-poll fallback");
+#endif
+    return failures;
+}
+
+/* A dead peer is EPIPE, never SIGPIPE: MSG_NOSIGNAL on Linux, the
+ * per-socket option elsewhere. */
+static bool dead_peer_is_epipe(int acc, int peer)
+{
+    struct sigaction act = { .sa_handler = p_on_sigpipe }, old;
+    uint8_t frame[8] = { 0 };
+    bool epipe = false;
+    sigemptyset(&act.sa_mask);
+    sigaction(SIGPIPE, &act, &old);
+    g_sigpipes = 0;
+    hub_socket_nosigpipe(acc); /* while connected: Darwin refuses the option on a dead socket */
+    close(peer);
+    for (int i = 0; i < 4 && !epipe; i++) /* a unix peer closed: EPIPE at once */
+        epipe = !hub_io_send(acc, frame, sizeof frame);
+    sigaction(SIGPIPE, &old, NULL);
+    return epipe && g_sigpipes == 0;
+}
+
+static int portable_accept_cases(void)
+{
+    int failures = 0;
+    uint16_t port = 0;
+    int ls = mesh_terminal_hub_listen(0, &port);
+    int cl = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port),
+                             .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    bool linked = ls >= 0 && cl >= 0 && connect(cl, (struct sockaddr *)&a, sizeof a) == 0;
+    int acc = linked ? hub_accept_cloexec(ls) : -1;
+    failures = pcheck(failures, acc >= 0 && p_cloexec(acc) && !p_nonblock(acc),
+                      "portable: an accepted hub socket is close-on-exec and keeps the listener's blocking mode");
+    failures = pcheck(failures, ls >= 0 && p_cloexec(ls), "portable: the hub listener is close-on-exec");
+    if (cl >= 0)
+        close(cl);
+    int sv[2] = { -1, -1 };
+    bool paired = hub_socketpair_cloexec(sv) == 0;
+    failures = pcheck(failures, paired && dead_peer_is_epipe(sv[0], sv[1]),
+                      "portable: sending to a dead peer fails without raising SIGPIPE");
+    if (paired)
+        close(sv[0]);
+    if (acc >= 0)
+        close(acc);
+    if (ls >= 0)
+        close(ls);
+    return failures;
+}
+
+#if !defined(__linux__)
+static bool p_frame(int fd, uint8_t *type, uint8_t *payload, size_t *len)
+{
+    uint8_t head[3];
+    size_t got = 0;
+    while (got < 3) {
+        ssize_t r = read(fd, head + got, 3 - got);
+        if (r <= 0)
+            return false;
+        got += (size_t)r;
+    }
+    if (!mesh_terminal_hub_frame_header(head, 3, type, len))
+        return false;
+    for (got = 0; got < *len;) {
+        ssize_t r = read(fd, payload + got, *len - got);
+        if (r <= 0)
+            return false;
+        got += (size_t)r;
+    }
+    return true;
+}
+
+static void p_serve_cfg(struct mesh_terminal_hub_serve_cfg *cfg)
+{
+    memset(cfg, 0, sizeof *cfg);
+    for (int i = 0; i < 32; i++)
+        cfg->key[i] = (uint8_t)(3 + i * 5);
+    cfg->shell_path = "/bin/sh";
+    static char workdir[256];
+    if (!workdir[0])
+        (void)test_mkdtemp(workdir, sizeof workdir, "hub_serve_cfg");
+    cfg->workdir = workdir;
+    cfg->max_bytes_in = cfg->max_bytes_out = 1u << 16;
+    cfg->lifetime_seconds = 10;
+    cfg->idle_seconds = 5;
+    cfg->stop_fd = -1;
+}
+
+/* CHALLENGE, a correct HELLO, then the terminating frame: true when it is a
+ * one-byte REFUSE whose code lands in *code. */
+static bool p_hello_refused(int fd, const uint8_t key[32], int *code)
+{
+    uint8_t type = 0, payload[MESH_TERMINAL_HUB_PAYLOAD_MAX], frame[MESH_TERMINAL_HUB_FRAME_MAX];
+    size_t len = 0;
+    struct mesh_terminal_hub_request rq = { .cols = 80, .rows = 24, .name = "refuse" };
+    if (!p_frame(fd, &type, payload, &len) || type != MESH_TERMINAL_HUB_CHALLENGE || len != 33)
+        return false;
+    size_t n = mesh_terminal_hub_hello_build(frame + 3, key, payload + 1, &rq);
+    size_t total = n ? mesh_terminal_hub_frame_seal(frame, MESH_TERMINAL_HUB_HELLO, n) : 0;
+    if (!total || write(fd, frame, total) != (ssize_t)total)
+        return false;
+    if (!p_frame(fd, &type, payload, &len) || type != MESH_TERMINAL_HUB_REFUSE || len != 1)
+        return false;
+    *code = payload[0];
+    return true;
+}
+
+/* No cage on this host: a correct hello is still answered with the typed
+ * confinement refusal, the session is not admitted, and no shell runs. */
+static int portable_refusal_case(void)
+{
+    int failures = 0, sv[2], rp[2], code = 0;
+    struct mesh_terminal_hub_serve_cfg cfg;
+    p_serve_cfg(&cfg);
+    if (hub_socketpair_cloexec(sv) != 0 || hub_pipe_cloexec_nonblock(rp) != 0)
+        return pcheck(failures, false, "portable: refusal fixture sockets");
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct mesh_terminal_hub_report r;
+        close(sv[0]);
+        mesh_terminal_hub_serve_fd(sv[1], &cfg, &r);
+        ssize_t w = write(rp[1], &r, sizeof r);
+        _exit(w == (ssize_t)sizeof r ? 0 : 1);
+    }
+    close(sv[1]);
+    close(rp[1]);
+    struct timeval tv = { .tv_sec = 5 };
+    setsockopt(sv[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    bool refused = p_hello_refused(sv[0], cfg.key, &code);
+    struct mesh_terminal_hub_report r;
+    memset(&r, 0, sizeof r);
+    int status = 0;
+    close(sv[0]);
+    /* the report pipe is non-blocking: wait for the child before reading it */
+    bool reaped = waitpid(pid, &status, 0) == pid && WIFEXITED(status);
+    bool rep = read(rp[0], &r, sizeof r) == (ssize_t)sizeof r;
+    close(rp[0]);
+    failures = pcheck(failures, refused && code == MESH_TERMINAL_HUB_REFUSE_CONFINEMENT,
+                      "portable: serve on a host without a cage sends the typed confinement refusal");
+    failures = pcheck(failures, rep && reaped && !r.admitted && r.refusal == MESH_TERMINAL_HUB_REFUSE_CONFINEMENT &&
+                      r.bytes_out == 0, "portable: the session is not admitted and the report names confinement");
+    return failures;
+}
+#endif
+
+int test_mesh_terminal_hub_fifo_bounds(void);
+
+static int portable_cases(void)
+{
+    int failures = portable_flag_cases() + portable_accept_cases() + test_mesh_terminal_hub_fifo_bounds();
+#if defined(__linux__)
+    failures = pcheck(failures, hub_confinement_supported(),
+                      "portable: Linux has the Landlock+seccomp cage, so serve is allowed to start a shell");
+#else
+    failures = pcheck(failures, !hub_confinement_supported(),
+                      "portable: this host has no cage, so serve must refuse every session");
+    failures += portable_refusal_case();
+#endif
+    return failures;
+}
+
+#endif /* !_WIN32 */
+
 #if defined(__linux__)
 
 #include <errno.h>
@@ -1472,6 +1702,7 @@ int test_mesh_terminal_hub(void)
         printf("  build/bin/fbsh is absent: the hub cannot run its shell\n");
         failures++;
     }
+    failures += portable_cases();
     failures += wire_cases();
     failures += key_cases();
     failures += exec_wire_cases();
@@ -1497,8 +1728,13 @@ int test_mesh_terminal_hub(void)
 
 int test_mesh_terminal_hub(void)
 {
-    printf("\n=== mesh terminal hub tests ===\n  Linux-only: the hub serves through the Linux confined worker\n");
-    return 0;
+    printf("\n=== mesh terminal hub tests ===\n  live shell cases are Linux-only: the confined worker needs the Linux cage\n");
+    int failures = 0;
+#if !defined(_WIN32)
+    failures += portable_cases();
+#endif
+    printf("mesh terminal hub: %d failures\n", failures);
+    return failures;
 }
 
 #endif

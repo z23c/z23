@@ -752,3 +752,160 @@ int test_mesh_terminal_hub_bounds(const char *fbsh, const char *dir)
 }
 
 #endif
+
+/* ── the non-Linux pipe write path, on every POSIX host ───────────────────
+ * Off Linux there is no RWF_NOWAIT, so a hub write to a pipe is bounded only
+ * if the descriptor is ALREADY O_NONBLOCK; the hub never sets or clears a flag
+ * on a descriptor it does not own (the open file description is shared with
+ * every other holder). A blocking shared pipe is refused up front. The
+ * ZCL_TESTING selector makes Linux take this same branch, so the cases run
+ * here as they run on Darwin. Writers run in a child under alarm(): a write
+ * that blocks past its deadline dies of SIGALRM instead of hanging the group. */
+#if !defined(_WIN32)
+
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static int fcheck(int failures, bool ok, const char *label)
+{
+    printf("  %s... %s\n", label, ok ? "OK" : "FAIL");
+    return failures + (ok ? 0 : 1);
+}
+
+static int64_t fifo_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* A second writer takes every free byte between "ready" and the write. The
+ * pipe is non-blocking here, so this never touches a flag. */
+static void fifo_steal(int fd)
+{
+    char chunk[4096];
+    memset(chunk, 's', sizeof chunk);
+    while (write(fd, chunk, sizeof chunk) > 0) {}
+}
+
+static int fifo_waitstatus(pid_t pid)
+{
+    int status = 0;
+    for (int i = 0; i < 400; i++) {
+        if (waitpid(pid, &status, WNOHANG) == pid)
+            return status;
+        poll(NULL, 0, 20); /* real-clock: waits on another process; there is no seam to inject */
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    return status;
+}
+
+/* exit 0: gave up at the deadline, flags untouched. 1: the write claimed
+ * success into a full pipe. 2: the descriptor's flags changed. 3: it gave up
+ * late. SIGALRM: it blocked. */
+static int fifo_race_child(int wfd)
+{
+    struct hub_wfd w;
+    int before = fcntl(wfd, F_GETFL);
+    alarm(5);
+    hub_wfd_open(&w, wfd);
+    int64_t start = fifo_now_ms();
+    bool ok = hub_wfd_write(&w, "audit line\n", 11, start + 300);
+    int64_t took = fifo_now_ms() - start;
+    if (ok)
+        return 1;
+    if (fcntl(wfd, F_GETFL) != before)
+        return 2;
+    return took >= 250 && took <= 1500 ? 0 : 3;
+}
+
+static int fifo_race_case(void)
+{
+    int p[2], failures = 0;
+    mesh_terminal_hub_testing_force_polled_fifo(true);
+    failures = fcheck(failures, pipe(p) == 0, "fifo race: pipe");
+    if (failures)
+        return failures;
+    fcntl(p[1], F_SETFL, fcntl(p[1], F_GETFL) | O_NONBLOCK); /* the inherited, already non-blocking sink */
+    struct hub_wfd probe;
+    hub_wfd_open(&probe, p[1]);
+    failures = fcheck(failures, probe.mode == HUB_WFD_PLAIN && probe.fifo,
+                      "fifo race: an already non-blocking pipe is written without waiting");
+    mesh_terminal_hub_testing_after_ready(fifo_steal);
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(fifo_race_child(p[1]));
+    int status = pid > 0 ? fifo_waitstatus(pid) : -1;
+    mesh_terminal_hub_testing_after_ready(NULL);
+    failures = fcheck(failures, WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                      "fifo race: a second writer takes the room, the write ends at its deadline, flags unchanged");
+    close(p[0]);
+    close(p[1]);
+    mesh_terminal_hub_testing_force_polled_fifo(false);
+    return failures;
+}
+
+/* A blocking pipe shared with other holders cannot be bounded without a flag
+ * change the hub will not make: it is refused and its flags are left alone. */
+static int fifo_refuse_case(void)
+{
+    int p[2], failures = 0;
+    mesh_terminal_hub_testing_force_polled_fifo(true);
+    failures = fcheck(failures, pipe(p) == 0, "fifo refuse: pipe");
+    if (failures)
+        return failures;
+    int before = fcntl(p[1], F_GETFL);
+    failures = fcheck(failures, !hub_wfd_sink_bounded(p[1]) && fcntl(p[1], F_GETFL) == before,
+                      "fifo refuse: a blocking shared pipe is refused and its flags are untouched");
+    fcntl(p[1], F_SETFL, before | O_NONBLOCK);
+    failures = fcheck(failures, hub_wfd_sink_bounded(p[1]),
+                      "fifo refuse: the same pipe made non-blocking by its owner is accepted");
+    mesh_terminal_hub_testing_force_polled_fifo(false);
+    failures = fcheck(failures, hub_wfd_sink_bounded(p[1]), "fifo refuse: Linux keeps RWF_NOWAIT and accepts any pipe");
+    close(p[0]);
+    close(p[1]);
+    return failures;
+}
+
+/* The server on a blocking audit pipe must refuse to start, not run and block. */
+static int fifo_serve_case(void)
+{
+    int p[2], failures = 0;
+    uint16_t port = 0;
+    mesh_terminal_hub_testing_force_polled_fifo(true);
+    failures = fcheck(failures, pipe(p) == 0, "fifo serve: pipe");
+    int listener = failures ? -1 : mesh_terminal_hub_listen(0, &port);
+    if (listener < 0)
+        return failures + fcheck(0, false, "fifo serve: listener");
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct mesh_terminal_hub_listen_cfg cfg;
+        memset(&cfg, 0, sizeof cfg);
+        cfg.audit_fd = p[1];
+        alarm(5);
+        _exit(mesh_terminal_hub_listen_run(listener, &cfg) == 1 ? 0 : 1);
+    }
+    int status = pid > 0 ? fifo_waitstatus(pid) : -1;
+    failures = fcheck(failures, WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                      "fifo serve: a blocking audit pipe makes the supervisor refuse to start");
+    close(listener);
+    close(p[0]);
+    close(p[1]);
+    mesh_terminal_hub_testing_force_polled_fifo(false);
+    return failures;
+}
+
+int test_mesh_terminal_hub_fifo_bounds(void)
+{
+    signal(SIGPIPE, SIG_IGN);
+    return fifo_race_case() + fifo_refuse_case() + fifo_serve_case();
+}
+
+#endif /* !_WIN32 */

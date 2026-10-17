@@ -7,7 +7,7 @@
  * with one send(); keystrokes are written to the pty from the receive buffer
  * with no intermediate copy. */
 
-#define _GNU_SOURCE /* accept4, pipe2, pidfd — must precede every include */
+#define _GNU_SOURCE /* accept4 and pidfd on Linux — must precede every include */
 
 #include "session/mesh_terminal_hub.h"
 
@@ -38,7 +38,7 @@ size_t mesh_terminal_hub_audit_line(
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1u);
 }
 
-#if !defined(__linux__)
+#if defined(_WIN32)
 
 static void hub_serve_fd_arm(int fd,
                                 const struct mesh_terminal_hub_serve_cfg *cfg,
@@ -66,6 +66,7 @@ static int hub_listen_run_arm(int listener,
 #else
 
 #include "mesh_terminal_hub_io.h"
+#include "session/mesh_terminal_hub_portable.h"
 
 #include "platform/resident_launch.h"
 #include "platform/rng.h"
@@ -82,7 +83,6 @@ static int hub_listen_run_arm(int listener,
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <termios.h>
-#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -122,6 +122,7 @@ static void hub_socket_prepare(int fd)
     int one = 1;
     struct timeval tv = { .tv_sec = HUB_SEND_TIMEOUT_S };
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    hub_socket_nosigpipe(fd);
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 }
 
@@ -186,6 +187,8 @@ static int hub_start_worker(struct hub_sess *s,
                             const struct mesh_terminal_hub_hello *hello)
 {
     bool exec = hello->argc != 0;
+    if (!hub_confinement_supported())
+        return MESH_TERMINAL_HUB_REFUSE_CONFINEMENT; /* no cage on this host: never an unconfined shell */
     struct mesh_terminal_worker_config wc = {
         .shell_path = exec ? hello->argv[0] : cfg->shell_path, .workdir = cfg->workdir,
         .cols = hello->cols, .rows = hello->rows,
@@ -201,7 +204,7 @@ static int hub_start_worker(struct hub_sess *s,
     if (!r.ok)
         return exec && (r.code == MESH_TERMINAL_WORKER_ERR_EXEC || r.code == MESH_TERMINAL_WORKER_ERR_CONFIG)
                    ? MESH_TERMINAL_HUB_REFUSE_EXEC : MESH_TERMINAL_HUB_REFUSE_CONFINEMENT;
-    s->pidfd = (int)syscall(SYS_pidfd_open, s->w.pid, 0);
+    s->pidfd = hub_pidfd_open(s->w.pid);
     if (hello->flags & MESH_TERMINAL_HUB_HELLO_QUIET)
         hub_echo_off(s);
     return 0;
@@ -398,7 +401,7 @@ static void hub_serve_fd_arm(int fd,
 
 static int hub_listen_arm(uint16_t port, uint16_t *bound_port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = hub_tcp_socket_cloexec();
     int one = 1;
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port),
                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
@@ -436,7 +439,7 @@ static bool hub_signals_install(bool watch_children)
 {
     struct sigaction act = { .sa_handler = hub_on_signal, .sa_flags = SA_NOCLDSTOP };
     sigemptyset(&act.sa_mask);
-    if (pipe2(g_hub_signal_pipe, O_NONBLOCK | O_CLOEXEC) != 0)
+    if (hub_pipe_cloexec_nonblock(g_hub_signal_pipe) != 0)
         return false;
     if (watch_children)
         sigaction(SIGCHLD, &act, NULL);
@@ -524,6 +527,7 @@ static void hub_child(int fd, int listener, volatile pid_t *worker_pgid,
 static void hub_busy(int fd)
 {
     uint8_t c = MESH_TERMINAL_HUB_REFUSE_BUSY;
+    hub_socket_nosigpipe(fd); /* never reaches hub_socket_prepare */
     (void)hub_io_send_frame(fd, MESH_TERMINAL_HUB_REFUSE, &c, 1);
 }
 
@@ -566,7 +570,7 @@ static void hub_sup_reap(struct hub_sup *sup)
 static void hub_sup_accept(struct hub_sup *sup, int listener,
                            const struct mesh_terminal_hub_listen_cfg *cfg)
 {
-    int fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+    int fd = hub_accept_cloexec(listener);
     unsigned limit = cfg->max_active < MESH_TERMINAL_HUB_ACTIVE_MAX
                          ? cfg->max_active : MESH_TERMINAL_HUB_ACTIVE_MAX;
     if (fd < 0)
@@ -719,7 +723,7 @@ static bool hub_sup_step(struct hub_sup *sup, int listener,
 static void hub_sup_report_dropped(const struct hub_sup *sup)
 {
     char line[96];
-    if (!sup->audit_dropped)
+    if (!sup->audit_dropped || !hub_wfd_sink_bounded(STDERR_FILENO))
         return;
     int n = snprintf(line, sizeof line, "event=TERMINAL_HUB_AUDIT_DROPPED count=%u\n",
                      sup->audit_dropped);
@@ -734,7 +738,7 @@ static int hub_listen_run_arm(int listener,
     size_t map_len = sizeof(pid_t) * MESH_TERMINAL_HUB_ACTIVE_MAX;
     void *map = listener < 0 || !cfg ? MAP_FAILED
                     : mmap(NULL, map_len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (map == MAP_FAILED || !hub_signals_install(true)) {
+    if (map == MAP_FAILED || !hub_wfd_sink_bounded(cfg->audit_fd) || !hub_signals_install(true)) {
         if (map != MAP_FAILED)
             munmap(map, map_len);
         if (listener >= 0)
@@ -755,7 +759,7 @@ static int hub_listen_run_arm(int listener,
     return 0;
 }
 
-#endif /* __linux__ */
+#endif /* !_WIN32 */
 
 void mesh_terminal_hub_serve_fd(int fd,
                                 const struct mesh_terminal_hub_serve_cfg *cfg,

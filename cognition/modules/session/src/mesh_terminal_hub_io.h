@@ -47,6 +47,15 @@ struct hub_wfd {
 };
 void hub_wfd_open(struct hub_wfd *w, int fd);
 
+/* Off Linux (and under the ZCL_TESTING polled-FIFO selector) a pipe write is
+ * bounded only on a descriptor that is ALREADY O_NONBLOCK (read with F_GETFL;
+ * its flags are never set or restored: the open file description is shared
+ * with every other holder). A blocking shared pipe is refused: false, logged.
+ * Always true for a non-pipe and on Linux. A record of at most PIPE_BUF
+ * (512 on Darwin) is then one all-or-EAGAIN write; a longer audit line can be
+ * written in pieces and interleave with a sibling's, as on any host. */
+bool hub_wfd_sink_bounded(int fd);
+
 /* One non-blocking attempt: bytes written, or -1 with errno (EAGAIN: no room
  * right now). */
 ssize_t hub_wfd_try(struct hub_wfd *w, const void *buf, size_t n);
