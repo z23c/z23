@@ -595,6 +595,11 @@ bool body_history_load(struct sqlite3 *db)
     bh_global_init_once();
 
     zcl_mutex_lock(&g_bh_lock);
+    /* A load can also happen during an in-process gap-fill restart. Start
+     * from the same pristine census state as a process restart before
+     * accepting the one durable field below: otherwise a missing or malformed
+     * row would leave the previous run's cursor live. */
+    body_history_census_init(&g_bh_census);
     /* Probe evidence does not survive a restart. Clearing it here (rather
      * than trusting the caller to have reset first) is what makes "a
      * restarted node has established nothing until it runs a pass" a

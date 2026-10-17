@@ -755,6 +755,35 @@ static int test_bh_persistence_never_restores_a_verdict(void)
         body_history_global_unlock();
         ASSERT(measured == 0);
 
+        /* gap_fill_start() can reload this singleton after an in-process
+         * stop/start. A missing or malformed durable cursor must not retain
+         * the prior run's in-memory work pointer. (Qualification of the
+         * Hetzner handoff candidate, gist 52a8508e.) */
+        ASSERT(progress_meta_delete(db, BODY_HISTORY_CURSOR_META_KEY));
+        body_history_global_lock();
+        body_history_global_census()->cursor = 777;
+        body_history_global_census()->cursor_valid = true;
+        body_history_global_unlock();
+        ASSERT(body_history_load(db));
+        body_history_global_lock();
+        ASSERT(!body_history_global_census()->cursor_valid);
+        ASSERT(body_history_global_census()->cursor == -1);
+        body_history_global_unlock();
+
+        const uint8_t malformed_cursor = 0;
+        ASSERT(progress_meta_set(db, BODY_HISTORY_CURSOR_META_KEY,
+                                 &malformed_cursor,
+                                 sizeof(malformed_cursor)));
+        body_history_global_lock();
+        body_history_global_census()->cursor = 888;
+        body_history_global_census()->cursor_valid = true;
+        body_history_global_unlock();
+        ASSERT(body_history_load(db));
+        body_history_global_lock();
+        ASSERT(!body_history_global_census()->cursor_valid);
+        ASSERT(body_history_global_census()->cursor == -1);
+        body_history_global_unlock();
+
         body_history_reset();
         progress_store_close();
         PASS();
