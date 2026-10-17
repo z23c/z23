@@ -25,6 +25,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <regex.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1277,6 +1278,8 @@ static void fr_st_cleanup(void)
     unlink("./fix_filler.c");
     unlink("./fix_ok.c");
     unlink("./fix_gone.c");
+    unlink("./w.c");
+    unlink("./x.c");
 }
 
 int check_flag_registry_selftest(void)
@@ -1314,7 +1317,13 @@ int check_flag_registry_selftest(void)
     fr_st_cleanup();
     if (chdir(cwd) != 0)
         return die("z23-lint: cannot scan %s\n", cwd);
-    rmdir(root);
+    /* The scratch dir must actually go away: a leftover means cleanup
+     * missed a fixture and /tmp accumulates z23-lint-flagreg-* dirs. */
+    if (rmdir(root) != 0) {
+        fprintf(stderr, "z23-lint: flagreg selftest left %s behind: %s\n",
+                root, strerror(errno));
+        bad = 1;
+    }
     if (bad)
         fputs("FAIL: check_flag_registry selftest\n", stderr);
     return st_ok(bad, "check_flag_registry selftest: OK\n");
