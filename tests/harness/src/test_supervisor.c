@@ -11,10 +11,10 @@
  *   - lifecycle: start/stop idempotency, second start returns true
  *   - introspection: snapshot_all + dump_state_json shape
  *
- * The supervisor's loop is time-driven; tests use
- * supervisor_set_tick_ms_for_testing(5) to keep each sub-test under
- * ~150 ms. supervisor_reset_for_testing() runs between sub-tests to
- * keep the registry clean. */
+ * The supervisor's loop is time-driven. Periodic-dispatch fixtures observe
+ * callback entry and hold explicit barriers; background timer deferral does
+ * not establish callback progress or duration. supervisor_reset_for_testing()
+ * runs between sub-tests to keep the registry clean. */
 
 #include "test/test_core.h"
 #include "supervisors/legacy_mirror_supervisor.h"
@@ -94,17 +94,6 @@ static void inc_stall(struct liveness_contract *self)
     if (cc) atomic_fetch_add(&cc->stall_calls, 1);
 }
 
-/* Deliberately slow on_tick: blocks 150 ms (simulating a child whose tick
- * commits a SQLite transaction under IO pressure). It runs on the tick-runner
- * thread, so it must NOT freeze the sweep heartbeat. */
-static void slow_tick(struct liveness_contract *self)
-{
-    struct cb_counts *cc = (struct cb_counts *)self->ctx;
-    struct timespec ts = { 0, 150 * 1000000L };
-    nanosleep(&ts, NULL);
-    if (cc) atomic_fetch_add(&cc->tick_calls, 1);
-}
-
 struct blocking_stall {
     pthread_mutex_t lock;
     pthread_cond_t changed;
@@ -113,9 +102,8 @@ struct blocking_stall {
     _Atomic bool returned;
 };
 
-static void wait_stall(struct liveness_contract *self)
+static void wait_stall_probe(struct blocking_stall *stall)
 {
-    struct blocking_stall *stall = self ? self->ctx : NULL;
     if (!stall)
         return;
     pthread_mutex_lock(&stall->lock);
@@ -125,6 +113,31 @@ static void wait_stall(struct liveness_contract *self)
         pthread_cond_wait(&stall->changed, &stall->lock);
     pthread_mutex_unlock(&stall->lock);
     atomic_store(&stall->returned, true);
+}
+
+static void wait_stall(struct liveness_contract *self)
+{
+    wait_stall_probe(self ? self->ctx : NULL);
+}
+
+struct blocking_tick {
+    struct blocking_stall gate;
+    struct cb_counts counts;
+};
+
+static void barrier_tick(struct liveness_contract *self)
+{
+    struct blocking_tick *probe = self->ctx;
+    wait_stall_probe(&probe->gate);
+    atomic_fetch_add(&probe->counts.tick_calls, 1);
+}
+
+static void release_stall_probe(struct blocking_stall *stall)
+{
+    pthread_mutex_lock(&stall->lock);
+    atomic_store(&stall->release, true);
+    pthread_cond_broadcast(&stall->changed);
+    pthread_mutex_unlock(&stall->lock);
 }
 
 static bool wait_stall_entered(struct blocking_stall *stall)
@@ -153,6 +166,27 @@ static bool wait_for_flag(_Atomic bool *flag, int timeout_ms)
         sleep_ms(1);
     }
     return atomic_load(flag);
+}
+
+/* Match wait_stall_entered's two-second condition-wait bound. The callback
+ * remains barrier-held throughout; elapsed sleep is never proof of blocking.
+ * The condition wait need not be signalled by a sweep: recheck on its bounded
+ * timeout, then release the callback regardless of the verdict. */
+static bool wait_sweeps_while_blocked(struct blocking_stall *stall, uint64_t hb0)
+{
+    struct timespec limit;
+    if (timespec_get(&limit, TIME_UTC) != TIME_UTC) return false;
+    limit.tv_sec += 2;
+    pthread_mutex_lock(&stall->lock);
+    while (supervisor_sweep_heartbeat() - hb0 < 3 &&
+           !atomic_load(&stall->returned)) {
+        if (pthread_cond_timedwait(&stall->changed, &stall->lock, &limit) != 0)
+            break;
+    }
+    bool advanced = supervisor_sweep_heartbeat() - hb0 >= 3 &&
+                    !atomic_load(&stall->returned);
+    pthread_mutex_unlock(&stall->lock);
+    return advanced;
 }
 
 /* Process-wide stall-observer probe (the supervisor_set_stall_observer
@@ -344,6 +378,76 @@ static bool wait_rearm_cancel_result(struct rearm_cancel_probe *probe)
     return done;
 }
 #endif
+
+static int check_periodic_tick_dispatch(void)
+{
+    int failures = 0;
+    supervisor_reset_for_testing();
+    supervisor_set_tick_ms_for_testing(5);
+    static struct liveness_contract c;
+    /* stop may retain a worker after a bounded join refusal. Keep its
+     * callback context and synchronization objects valid until process exit. */
+    static struct blocking_tick probe = {
+        .gate = {.lock = PTHREAD_MUTEX_INITIALIZER,
+                 .changed = PTHREAD_COND_INITIALIZER},
+    };
+    liveness_contract_init(&c, "loop.tick");
+    c.ctx = &probe;
+    c.on_tick = barrier_tick;
+    (void)supervisor_register(&c);
+    /* Be due before either worker starts; observe periodic dispatch rather
+     * than assuming a requested sleep schedules a fixed number of sweeps. */
+    atomic_fetch_sub(&c.last_tick_us, 2000000);
+    atomic_store(&c.period_secs, 1);
+    bool started = supervisor_start();
+    SUP_CHECK("supervisor_start succeeds", started);
+    bool entered = started && wait_stall_entered(&probe.gate);
+    release_stall_probe(&probe.gate);
+    supervisor_stop(); /* joins the callback and its ticks_run stamp */
+    SUP_CHECK("on_tick fired at least once",
+              entered && atomic_load(&probe.counts.tick_calls) >= 1);
+    SUP_CHECK("ticks_run advanced", atomic_load(&c.ticks_run) >= 1u);
+    return failures;
+}
+
+static int check_blocked_tick_sweep_progress(void)
+{
+    int failures = 0;
+    supervisor_reset_for_testing();
+    supervisor_set_tick_ms_for_testing(5);
+    static struct liveness_contract c;
+    /* Same process lifetime as the contract, including failed teardown. */
+    static struct blocking_tick probe = {
+        .gate = {.lock = PTHREAD_MUTEX_INITIALIZER,
+                 .changed = PTHREAD_COND_INITIALIZER},
+    };
+    liveness_contract_init(&c, "loop.slow_tick");
+    c.ctx = &probe;
+    c.on_tick = barrier_tick;
+    (void)supervisor_register(&c);
+    /* Hold the callback until the sweep proves progress. Timer deferral
+     * cannot release this barrier. No event wake replaces periodic coverage. */
+    atomic_fetch_sub(&c.last_tick_us, 2000000);
+    atomic_store(&c.period_secs, 1);
+    bool started = supervisor_start();
+    SUP_CHECK("supervisor_start succeeds (slow tick)", started);
+    bool entered = started && wait_stall_entered(&probe.gate);
+    SUP_CHECK("active callback names the blocking child",
+              entered && strcmp(supervisor_active_callback_name(), "loop.slow_tick") == 0);
+    uint64_t hb0 = supervisor_sweep_heartbeat();
+    bool advanced = entered && wait_sweeps_while_blocked(&probe.gate, hb0);
+    SUP_CHECK("sweep heartbeat keeps advancing while a child tick blocks",
+              advanced && !atomic_load(&probe.gate.returned));
+    release_stall_probe(&probe.gate);
+    SUP_CHECK("runner thread is alive", supervisor_tick_runner_running());
+    supervisor_stop();
+    SUP_CHECK("slow on_tick actually executed on the runner",
+              atomic_load(&probe.counts.tick_calls) >= 1 &&
+              atomic_load(&probe.gate.returned));
+    SUP_CHECK("active callback clears after the child returns",
+              strcmp(supervisor_active_callback_name(), "none") == 0);
+    return failures;
+}
 
 int test_supervisor(void)
 {
@@ -792,44 +896,7 @@ int test_supervisor(void)
     }
 #endif
 
-    /* ── supervisor loop drives on_tick when period_secs>0 ──────── */
-    supervisor_reset_for_testing();
-    supervisor_set_tick_ms_for_testing(5);
-    {
-        static struct liveness_contract c;
-        static struct cb_counts cc;
-        memset(&cc, 0, sizeof(cc));
-        liveness_contract_init(&c, "loop.tick");
-        c.ctx = &cc;
-        c.on_tick = inc_tick;
-        atomic_store(&c.period_secs, 0);  /* 0 = use micro period below */
-        supervisor_child_id id = supervisor_register(&c);
-        (void)id;
-
-        /* Configure a 0-sec period so every loop iteration triggers
-         * on_tick (period_secs > 0 check uses *=1e6 microseconds, but
-         * the loop also checks (now - last_tick) >= period * 1e6, so 0
-         * is treated as "disabled". Use 1 second period and run the
-         * loop for 1.2 s? Slow. Instead test via direct sweep:
-         * supervisor_set_period to 1, then bypass time by manipulating
-         * last_tick. Simpler: assert the supervisor thread starts and
-         * dispatches at least once when period is reachable. */
-        SUP_CHECK("supervisor_start succeeds", supervisor_start());
-
-        /* Backdate last_tick by 2 seconds so a period_secs=1 will fire
-         * on next sweep (~5 ms away). */
-        atomic_store(&c.last_tick_us,
-            atomic_load(&c.last_tick_us) - 2000000);
-        atomic_store(&c.period_secs, 1);
-
-        sleep_ms(80);  /* allow ≥10 sweeps */
-        SUP_CHECK("on_tick fired at least once",
-            atomic_load(&cc.tick_calls) >= 1);
-        SUP_CHECK("ticks_run advanced",
-            atomic_load(&c.ticks_run) >= 1u);
-
-        supervisor_stop();
-    }
+    failures += check_periodic_tick_dispatch();
 
     /* Explicit event wake bypasses the periodic cadence. */
     supervisor_reset_for_testing();
@@ -1135,46 +1202,8 @@ int test_supervisor(void)
             atomic_load(&p.respawn_calls) == 3);
     }
 
-    /* ── slow on_tick runs on the RUNNER, not the sweep ─────────────────
-     * The regression this whole lane exists for: a child whose on_tick blocks
-     * (SQLite commit → fsync → jbd2_log_wait_commit under IO pressure) must NOT
-     * freeze the sweep heartbeat and get a healthy node killed by the backstop.
-     * With the tick-runner thread the sweep keeps heartbeating while the slow
-     * tick runs elsewhere. */
-    supervisor_reset_for_testing();
-    supervisor_set_tick_ms_for_testing(5);
-    {
-        static struct liveness_contract c;
-        static struct cb_counts cc;
-        memset(&cc, 0, sizeof(cc));
-        liveness_contract_init(&c, "loop.slow_tick");
-        c.ctx = &cc;
-        c.on_tick = slow_tick;             /* blocks 150 ms */
-        supervisor_child_id id = supervisor_register(&c);
-        (void)id;
-
-        SUP_CHECK("supervisor_start succeeds (slow tick)", supervisor_start());
-        /* Make the child due so the runner picks it up promptly. */
-        atomic_store(&c.last_tick_us, atomic_load(&c.last_tick_us) - 2000000);
-        atomic_store(&c.period_secs, 1);
-
-        sleep_ms(30);                       /* let the runner ENTER slow_tick */
-        SUP_CHECK("active callback names the blocking child",
-            strcmp(supervisor_active_callback_name(), "loop.slow_tick") == 0);
-        uint64_t hb0 = supervisor_sweep_heartbeat();
-        sleep_ms(120);                      /* runner still inside the 150ms tick */
-        uint64_t hb1 = supervisor_sweep_heartbeat();
-        SUP_CHECK("sweep heartbeat keeps advancing while a child tick blocks",
-            hb1 - hb0 >= 3);
-
-        sleep_ms(150);                      /* let the slow tick finish */
-        SUP_CHECK("slow on_tick actually executed on the runner",
-            atomic_load(&cc.tick_calls) >= 1);
-        SUP_CHECK("active callback clears after the child returns",
-            strcmp(supervisor_active_callback_name(), "none") == 0);
-        SUP_CHECK("runner thread is alive", supervisor_tick_runner_running());
-        supervisor_stop();
-    }
+    /* A blocked callback must not freeze the independent sweep heartbeat. */
+    failures += check_blocked_tick_sweep_progress();
 
     /* A recovery callback may block on disk or another worker. Detection of
      * that stall must not stall the root sweep which systemd independently
