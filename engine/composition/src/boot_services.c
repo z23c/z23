@@ -796,20 +796,8 @@ bool app_init_services(struct app_context *ctx,
         }
     }
 
-    if (ctx->listen) {
-        struct net_service bind4;
-        net_service_init(&bind4);
-        unsigned char any4[4] = {0, 0, 0, 0};
-        net_addr_set_ipv4(&bind4.addr, any4);
-        bind4.port = (uint16_t)ctx->p2p_port;
-        if (bind_listen_port(&svc->connman->manager, &bind4, false))
-            printf("P2P listening on 0.0.0.0:%d\n", ctx->p2p_port);
-        struct net_service bind6;
-        net_service_init(&bind6);
-        bind6.port = (uint16_t)ctx->p2p_port;
-        if (bind_listen_port(&svc->connman->manager, &bind6, false))
-            printf("P2P listening on [::]:%d\n", ctx->p2p_port);
-    }
+    if (!boot_p2p_listen(&svc->connman->manager, ctx))
+        return boot_step_fail("p2p_explicit_bind");
 
     /* Wait for ZK params before P2P (needed for block verification) */
     if (ctx->params_dir) {

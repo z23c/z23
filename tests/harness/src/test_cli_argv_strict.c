@@ -39,6 +39,7 @@
 #include "kernel/command_registry.h"
 #include "platform/socket_compat.h"
 #include "config/cli_lane_defaults.h"
+#include "util/spawn.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -80,6 +81,10 @@ static const char *const cas_stale_witnesses[] = {
     "engine/composition/include/config/cli_lane_defaults.h",
     "engine/composition/src/args.c",
     "engine/composition/include/config/args.h",
+    "engine/composition/include/config/boot.h",
+    "engine/composition/src/boot_p2p_listen.c",
+    "engine/composition/src/boot_services.c",
+    "platform/modules/platform/include/platform/socket_compat.h",
     "engine/composition/commands/apps.def",
     "tools/command/native_command.c",
     "engine/controllers/src/transaction_type_catalog.c",
@@ -712,6 +717,121 @@ static int cas_test_daemon_mode_tolerant_and_warns(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* Keep this exact loopback port occupied throughout the child invocation.
+ * CLOEXEC prevents the node from inheriting the fixture's listener. */
+static platform_socket_t cas_hold_bind_collision_once(uint16_t *port)
+{
+    *port = 0;
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (sock == PLATFORM_SOCKET_INVALID) return sock;
+    struct sockaddr_in address = { .sin_family = AF_INET };
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    size_t size = sizeof(address);
+    bool ok = platform_socket_bind(sock, (struct sockaddr *)&address, size) == 0 &&
+        platform_socket_listen(sock, 1) == 0 &&
+        platform_socket_local_address(sock, (struct sockaddr *)&address, &size) == 0;
+    if (ok) *port = ntohs(address.sin_port);
+    if (!*port) {
+        (void)platform_socket_close(sock);
+        *port = 0;
+        return PLATFORM_SOCKET_INVALID;
+    }
+    return sock;
+}
+
+static platform_socket_t cas_hold_bind_collision(uint16_t *port)
+{
+    for (int attempt = 0; attempt < 16; attempt++) {
+        platform_socket_t sock = cas_hold_bind_collision_once(port);
+        if (sock == PLATFORM_SOCKET_INVALID) return sock; /* Real setup error. */
+        if (*port < 39070 || *port > 39073) return sock;
+        /* Retry only an excluded lane port, after releasing our exact socket. */
+        if (platform_socket_close(sock) != 0) break;
+    }
+    *port = 0;
+    return PLATFORM_SOCKET_INVALID;
+}
+
+static bool cas_capture_bind_refusal(const char *root, uint16_t port,
+                                     char *out, size_t cap,
+                                     struct zcl_spawn_binary_observation *observed)
+{
+    /* root is a checked PATH_MAX-sized test_mkdtemp result; each buffer
+     * reserves the full fixed suffix as well as its terminating byte. */
+    char home[PATH_MAX+8], datadir[PATH_MAX+8], home_env[PATH_MAX+16];
+    char datadir_flag[PATH_MAX+24], port_flag[32], connect_flag[64];
+    snprintf(home, sizeof(home), "%s/home", root);
+    snprintf(datadir, sizeof(datadir), "%s/dd", root);
+    if (mkdir(home, 0700) != 0 || mkdir(datadir, 0700) != 0) return false;
+    snprintf(home_env, sizeof(home_env), "HOME=%s", home);
+    snprintf(datadir_flag, sizeof(datadir_flag), "-datadir=%s", datadir);
+    snprintf(port_flag, sizeof(port_flag), "-port=%u", port);
+    snprintf(connect_flag, sizeof(connect_flag), "-connect=127.0.0.1:%u", port);
+    const char *argv[] = {
+        "/usr/bin/env", "-i", home_env, "PATH=/usr/bin:/bin:/usr/local/bin",
+        "ZCL_CLI_TEST_NO_SERVICE_LOOKUP=1", CAS_BIN, datadir_flag, port_flag,
+        "-bind=127.0.0.1", connect_flag, "-regtest", "-profile=zclassic-only",
+        "-operator-lane=test", "-rpcport=0", "-httpsport=-1", "-fsport=0",
+        "-nolegacyimport", "-nobgvalidation", "-nofilesync", "-showmetrics=0", NULL,
+    };
+    /* The native capture owns its child group and bounded reap. Nonzero is
+     * expected, but timeout, truncation or unobserved status never qualify. */
+    struct zcl_result capture =
+        zcl_spawn_capture_binary_merged(argv, out, cap-1, 20000, observed);
+    bool complete_refusal = observed->exit_observed && observed->exit_code == 1 &&
+        observed->eof && !observed->timed_out && !observed->overflow;
+    /* Expected exit 1 makes capture.ok false; the observation is authority. */
+    if (!capture.ok && !complete_refusal)
+        fprintf(stderr, "bind refusal capture: %s\n", capture.message);
+    size_t used = observed->output_len < cap ? observed->output_len : cap-1;
+    out[used] = '\0';
+    return true;
+}
+
+static bool cas_bind_refusal_observed(const char *out,
+                                     const struct zcl_spawn_binary_observation *observed)
+{
+    return observed->exit_observed && observed->exit_code == 1 && observed->eof &&
+        !observed->timed_out && !observed->overflow &&
+        cas_contains(out, "P2P explicit bind failed:") &&
+        cas_contains(out, "(no fallback)") && cas_contains(out, "BOOT_INIT_FAILED") &&
+        cas_contains(out, "stage_reached=network_ready") &&
+        !cas_contains(out, "stage_reached=ready");
+}
+#endif
+
+static int cas_test_explicit_bind_failure_exits(void)
+{
+#if defined(_WIN32)
+    printf("UNOBSERVED (explicit P2P boot refusal: bounded merged capture is POSIX-only)\n");
+    return 0;
+#else
+    int failures = 0;
+    TEST("explicit occupied P2P bind exits nonzero before ready, without fallback") {
+        char root[PATH_MAX] = {0};
+        bool made = test_mkdtemp(root, sizeof(root), "zcl_cas_bind_exit") != NULL;
+        uint16_t port = 0;
+        platform_socket_t held = made ? cas_hold_bind_collision(&port) : PLATFORM_SOCKET_INVALID;
+        char out[65537] = {0};
+        struct zcl_spawn_binary_observation observed = {0};
+        bool dispatched = held != PLATFORM_SOCKET_INVALID &&
+            cas_capture_bind_refusal(root, port, out, sizeof(out), &observed);
+        bool qualified = dispatched && cas_bind_refusal_observed(out, &observed);
+        if (!qualified) fprintf(stderr, "explicit P2P bind fixture output:\n%s\n", out);
+        bool closed = held == PLATFORM_SOCKET_INVALID || platform_socket_close(held) == 0;
+        bool cleaned = !made || test_rm_rf_recursive(root) == 0;
+        ASSERT(made && dispatched);
+        ASSERT(qualified);
+        ASSERT(closed && cleaned);
+        printf("observed exit=1 stage=network_ready bytes=%zu; owned fixture cleaned\n",
+               observed.output_len);
+        PASS();
+    } _test_next:;
+    return failures;
+#endif
+}
+
 static int cas_test_noisetransport_is_recognized(void)
 {
     int failures = 0;
@@ -980,6 +1100,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_extended_transaction_catalog_fits();
     failures += cas_test_extended_transaction_guide_fits();
     failures += cas_test_daemon_mode_tolerant_and_warns();
+    failures += cas_test_explicit_bind_failure_exits();
     failures += cas_test_noisetransport_is_recognized();
     failures += cas_test_overlong_datadir_refuses();
     failures += cas_test_overlong_home_default_refuses();

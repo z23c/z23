@@ -605,6 +605,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_network_monitor.c", CAP_FS_WR
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_node_db_gate.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_node_utilities.c", CAP_FS_READ|CAP_FS_WRITE|CAP_NETWORK, "node operator utility entry points that dial the local RPC/health surface to answer operator queries")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_params_gate.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_p2p_listen.c", CAP_NETWORK|CAP_FS_WRITE, "selects explicit or legacy wildcard P2P listeners, verifies explicit IPv6-only policy and emits contextual startup refusals")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_postmortem.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_projections.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_promote_shielded_history.c", CAP_FS_WRITE, "")

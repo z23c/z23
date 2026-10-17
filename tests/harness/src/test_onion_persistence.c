@@ -10,6 +10,8 @@
 
 #include "test/test_core.h"
 #include "net/tor_integration.h"
+#include "net/net.h"
+#include "platform/socket_compat.h"
 #include "config/boot.h"
 #include "config/args.h"
 #include "util/util.h"
@@ -551,6 +553,151 @@ static int test_auto_local_peer_refuses_self_endpoint(void)
     return failures;
 }
 
+static int test_p2p_bind_args_parse(void)
+{
+    int failures = 0;
+    const char *values[] = { "127.0.0.1", "::1", "localhost", "",
+                            "127.0.0.1:8033", "[::1]", "::1%lo",
+                            " 127.0.0.1", "127.0.0.1 ", "::ffff:127.0.0.1" };
+    for (size_t i = 0; i < sizeof(values)/sizeof(values[0]); i++) {
+        struct app_context ctx = {0};
+        ctx.runtime_profile = ZCL_RUNTIME_ZCLASSIC_ONLY;
+        ctx.p2p_port = 8033;
+        bool show_metrics = false;
+        char option[96];
+        snprintf(option, sizeof(option), "-bind=%s", values[i]);
+        char *argv[] = { "zclassic23", option };
+        int rc = args_parse_node_options(2, argv, &ctx, &show_metrics);
+        bool valid = i < 2;
+        if (rc != (valid ? -1 : 1) || ctx.listen != valid || ctx.p2p_port != 8033) {
+            printf("FAIL explicit P2P bind %s: rc=%d listen=%d port=%d\n",
+                   option, rc, ctx.listen, ctx.p2p_port);
+            failures++;
+        }
+    }
+    return failures;
+}
+
+static bool p2p_bind_observed(const struct net_manager *manager, bool ipv6)
+{
+    if (manager->num_listen_sockets != 1 || !manager->listen_sockets[0].local_port)
+        return false;
+    struct sockaddr_storage actual = {0};
+    size_t size = sizeof(actual);
+    platform_socket_t sock = manager->listen_sockets[0].socket;
+    if (platform_socket_local_address(sock, (struct sockaddr *)&actual, &size) != 0)
+        return false;
+    if (ipv6) {
+        const unsigned char loopback[16] = { [15] = 1 };
+        const struct sockaddr_in6 *addr = (const struct sockaddr_in6 *)&actual;
+        int only = 0;
+        return actual.ss_family == AF_INET6 && size == sizeof(*addr) &&
+            ntohs(addr->sin6_port) == manager->listen_sockets[0].local_port &&
+            memcmp(&addr->sin6_addr, loopback, sizeof(loopback)) == 0 &&
+            platform_socket_get_ipv6_only(sock, &only) && only == 1;
+    }
+    const unsigned char loopback[4] = {127, 0, 0, 1};
+    const struct sockaddr_in *addr = (const struct sockaddr_in *)&actual;
+    return actual.ss_family == AF_INET && size == sizeof(*addr) &&
+        ntohs(addr->sin_port) == manager->listen_sockets[0].local_port &&
+        memcmp(&addr->sin_addr, loopback, sizeof(loopback)) == 0;
+}
+
+static int test_p2p_explicit_listener_addresses(void)
+{
+    int failures = 0;
+    const char *addresses[] = { "127.0.0.1", "::1" };
+    for (size_t i = 0; i < sizeof(addresses)/sizeof(addresses[0]); i++) {
+        struct net_manager manager;
+        net_manager_init(&manager);
+        struct app_context ctx = { .listen = true, .p2p_bind_address = addresses[i] };
+        bool ok = boot_p2p_listen(&manager, &ctx) && p2p_bind_observed(&manager, i == 1);
+        net_manager_free(&manager);
+        if (!ok) { printf("FAIL explicit P2P listener address %s\n", addresses[i]); failures++; }
+    }
+    return failures;
+}
+
+static int test_p2p_explicit_listener_refusal(void)
+{
+    struct net_manager occupied, empty;
+    net_manager_init(&occupied);
+    net_manager_init(&empty);
+    struct app_context ctx = { .listen = true, .p2p_bind_address = "127.0.0.1" };
+    bool ok = boot_p2p_listen(&occupied, &ctx) && p2p_bind_observed(&occupied, false);
+    if (ok) {
+        ctx.p2p_port = occupied.listen_sockets[0].local_port;
+        platform_socket_t original = occupied.listen_sockets[0].socket;
+        ok = !boot_p2p_listen(&empty, &ctx) && empty.num_listen_sockets == 0;
+        ok = !boot_p2p_listen(&occupied, &ctx) && ok;
+        ok = occupied.listen_sockets[0].socket == original && ok;
+        ok = p2p_bind_observed(&occupied, false) && ok;
+    }
+    ctx.p2p_bind_address = "localhost";
+    ok = !boot_p2p_listen(&empty, &ctx) && empty.num_listen_sockets == 0 && ok;
+    ctx.listen = false;
+    ok = boot_p2p_listen(&empty, &ctx) && empty.num_listen_sockets == 0 && ok;
+    net_manager_free(&empty);
+    net_manager_free(&occupied);
+    if (!ok) printf("FAIL explicit P2P bind refusal or existing-listener preservation\n");
+    return ok ? 0 : 1;
+}
+
+static int test_p2p_bind_malformed_spelling(void)
+{
+    int failures = 0;
+    const char *options[] = { "-bind", "--bind", "--bind=127.0.0.1" };
+    for (size_t i = 0; i < sizeof(options)/sizeof(options[0]); i++) {
+        struct app_context ctx = {0};
+        bool metrics = false;
+        char *argv[] = { "zclassic23", (char *)options[i] };
+        if (args_parse_node_options(2, argv, &ctx, &metrics) != 1 || ctx.listen)
+            failures++;
+    }
+    struct app_context ctx = {0};
+    bool metrics = false;
+    char *twice[] = { "zclassic23", "-bind=127.0.0.1", "-bind=::1" };
+    if (args_parse_node_options(3, twice, &ctx, &metrics) != 1) failures++;
+    int only = 9;
+    if (platform_socket_get_ipv6_only(PLATFORM_SOCKET_INVALID, &only) || only != 0)
+        failures++;
+    if (platform_socket_get_ipv6_only(PLATFORM_SOCKET_INVALID, NULL)) failures++;
+    if (failures) printf("FAIL malformed/repeated bind or IPv6-only readback refusal\n");
+    return failures;
+}
+
+static int test_p2p_ipv6_refusal_retains_custody(void)
+{
+    struct net_manager manager;
+    net_manager_init(&manager);
+    struct app_context ctx = { .listen = true, .p2p_bind_address = "127.0.0.1" };
+    platform_socket_t owned[2] = { PLATFORM_SOCKET_INVALID, PLATFORM_SOCKET_INVALID };
+    bool ok = boot_p2p_listen(&manager, &ctx) && p2p_bind_observed(&manager, false);
+    if (ok) {
+        platform_socket_t original = manager.listen_sockets[0].socket;
+        ctx.p2p_bind_address = "::1";
+        boot_p2p_refuse_ipv6_for_test(true);
+        bool refused = !boot_p2p_listen(&manager, &ctx);
+        boot_p2p_refuse_ipv6_for_test(false);
+        ok = refused && manager.num_listen_sockets == 2 &&
+            manager.listen_sockets[0].socket == original;
+        if (ok) {
+            owned[0] = manager.listen_sockets[0].socket;
+            owned[1] = manager.listen_sockets[1].socket;
+        }
+    }
+    net_manager_free(&manager);
+    /* No new descriptors are created between teardown and these read-only
+     * observations. Never close/retry a saved descriptor after teardown. */
+    for (size_t i = 0; ok && i < 2; i++) {
+        struct sockaddr_storage address = {0};
+        size_t size = sizeof(address);
+        ok = platform_socket_local_address(owned[i], (struct sockaddr *)&address, &size) != 0;
+    }
+    if (!ok) printf("FAIL forced IPv6 verification refusal lost socket custody\n");
+    return ok ? 0 : 1;
+}
+
 static int test_port_args_parse(void)
 {
     int failures = 0;
@@ -694,6 +841,11 @@ int test_onion_persistence(void)
     failures += test_full_fold_target_args_parse();
     failures += test_auto_local_peer_refuses_self_endpoint();
     failures += test_port_args_parse();
+    failures += test_p2p_bind_args_parse();
+    failures += test_p2p_explicit_listener_addresses();
+    failures += test_p2p_explicit_listener_refusal();
+    failures += test_p2p_bind_malformed_spelling();
+    failures += test_p2p_ipv6_refusal_retains_custody();
 #if !defined(_WIN32)
     failures += test_remove_tree_does_not_follow_symlink();
     failures += test_remove_tree_trailing_separator_keeps_target();

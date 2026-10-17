@@ -58,6 +58,7 @@ AGENT_IMPACT_RULE("core/modules/net/src/https_frontdoor.c|core/modules/net/inclu
  * https_server_acme_challenge_filepath_for_testing(), both defined here. */
 AGENT_IMPACT_RULE("core/modules/net/src/https_server_redirect.c|core/modules/net/src/https_server_internal.h", "path_check make_lint_gates")
 AGENT_IMPACT_RULE("engine/composition/src/args.c|tests/harness/src/test_onion_persistence.c", "https_sni_select onion_persistence cli_argv_strict make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/src/boot_p2p_listen.c", "onion_persistence net make_lint_gates")
 AGENT_IMPACT_RULE("engine/modules/storage/src/chain_segment.c|engine/modules/storage/src/chain_segment_store.c|engine/modules/storage/include/storage/chain_segment.h|engine/controllers/src/chain_segment_controller.c|engine/controllers/include/controllers/chain_segment_controller.h|tests/harness/src/test_chain_segment.c|tools/lint/check_no_writer_below_sealed_frontier.sh", "chain_segment block_parse_cache segment_sealer segment_corruption syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/segment_sealer_service.c|engine/services/include/services/segment_sealer_service.h|tests/harness/src/test_segment_sealer.c", "segment_sealer chain_segment supervisor syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("engine/conditions/src/segment_corruption.c|engine/conditions/include/conditions/segment_corruption.h|tests/harness/src/test_segment_corruption.c", "segment_corruption chain_segment condition_engine syncdiag_rpc make_lint_gates")

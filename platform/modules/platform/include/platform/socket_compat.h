@@ -215,6 +215,27 @@ static inline int platform_socket_bind(platform_socket_t sock,
 static inline int platform_socket_listen(platform_socket_t sock, int backlog)
 { return listen(sock, backlog); }
 
+/* Read back the socket's actual IPv6-only policy; a requested setsockopt is
+ * not evidence that the kernel accepted it. Failure leaves *enabled zero. */
+static inline bool platform_socket_get_ipv6_only(platform_socket_t sock,
+                                                int *enabled)
+{
+    if (!enabled) return false;
+    *enabled = 0;
+    int value = 0;
+#if defined(_WIN32)
+    int size = (int)sizeof(value);
+    int result = getsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&value, &size);
+#else
+    socklen_t size = (socklen_t)sizeof(value);
+    int result = getsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &value, &size);
+#endif
+    if (result != 0 || (size_t)size != sizeof(value) || (value != 0 && value != 1))
+        return false;
+    *enabled = value;
+    return true;
+}
+
 static inline int platform_socket_local_address(platform_socket_t sock,
                                                  struct sockaddr *address,
                                                  size_t *address_size)

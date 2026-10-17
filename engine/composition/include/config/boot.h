@@ -54,6 +54,7 @@ struct app_context {
     const char *miner_address;
     int rpc_port;
     int p2p_port;
+    const char *p2p_bind_address; /* NULL preserves the default wildcard listeners. */
     int https_port;
     int fs_port;
     const char *rpc_user;
@@ -1267,6 +1268,8 @@ void app_stop_metrics(void);
 bool boot_test_params_thread_failure_is_fatal(bool has_params_dir,
                                               bool is_mainnet,
                                               bool mint_anchor_fast);
+/* Force verification refusal after a real IPv6 bind; not an OS error fixture. */
+void boot_p2p_refuse_ipv6_for_test(bool refuse);
 #endif
 
 /* Background UTXO replay status (after fast file sync).
@@ -1274,5 +1277,16 @@ bool boot_test_params_thread_failure_is_fatal(bool has_params_dir,
 #include <stdatomic.h>
 extern _Atomic bool g_utxo_replay_active;
 extern _Atomic int  g_utxo_replay_height;
+
+struct net_service;
+struct net_manager;
+/* One literal address only; rejects hostnames, ports, zones and mapped IPv6.
+ * The caller owns out; failure clears it. No DNS. */
+bool boot_p2p_parse_bind_address(const char *text, struct net_service *out);
+/* Boot-only listener owner: an explicit address binds exactly one socket.
+ * Failure refuses startup; created sockets remain manager-owned for teardown.
+ * Node boot exits before starting accepts; library callers must free manager.
+ * With no explicit address, preserve the existing best-effort wildcard policy. */
+bool boot_p2p_listen(struct net_manager *manager, const struct app_context *ctx);
 
 #endif

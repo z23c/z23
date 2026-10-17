@@ -19,6 +19,7 @@
 #include "controllers/agent_controller.h"  /* agent_print_native_usage (print_usage) */
 #include "hotswap/hotswap_module.h"
 #include "kernel/command_registry.h"
+#include "net/netaddr.h"
 #include "platform/environment_compat.h"
 #include "util/hw_profile.h"
 #include "util/log_level.h"
@@ -46,6 +47,8 @@ void print_usage(const char *prog)
     printf("  -datadir=<dir>      Data directory\n");
     printf("  -paramsdir=<dir>    Params directory\n");
     printf("  -port=<port>        P2P port (default: 8033)\n");
+    printf("  -bind=<address>     Listen only on one literal IPv4/IPv6 address\n");
+    printf("                      No hostname, port, zone or mapped IPv6; bind failure aborts\n");
     printf("  -rpcport=<port>     RPC port (default: 18232; 8232 is legacy zclassicd)\n");
     printf("  -addnode=<ip>       Add peer\n");
     printf("  -externalip=<ip[:port]>  Advertise this public P2P endpoint\n");
@@ -556,6 +559,24 @@ static bool args_parse_port(const char *text, bool bounded, int *out)
     if (bounded && (value < 0 || value > 65535)) return false;
     *out = (int)value;
     return true;
+}
+
+static int args_arm_bind(const char *arg, struct args_arm_state *st)
+{
+    if (strcmp(arg, "-bind") == 0 || strcmp(arg, "--bind") == 0 ||
+        strncmp(arg, "--bind=", 7) == 0) {
+        fprintf(stderr, "Invalid bind option: use -bind=<literal-address>\n");
+        return 1;
+    }
+    if (strncmp(arg, "-bind=", 6) != 0) return ARGS_ARM_NOMATCH;
+    struct net_service address;
+    if (st->ctx->p2p_bind_address || !boot_p2p_parse_bind_address(arg+6, &address)) {
+        fprintf(stderr, "Invalid or repeated bind option: %s\n", arg);
+        return 1;
+    }
+    st->ctx->p2p_bind_address = arg+6;
+    st->ctx->listen = true;
+    return ARGS_ARM_TAKEN;
 }
 
 static int args_arm_ports(const char *arg,
@@ -1123,6 +1144,7 @@ typedef int (*args_arm_fn)(const char *arg, struct args_arm_state *st);
 /* Arm order is the original else-if order, top to bottom. */
 static const args_arm_fn k_args_arms[] = {
     args_arm_core_identity,
+    args_arm_bind,
     args_arm_ports,
     args_arm_peer_wiring,
     args_arm_mining_build,
