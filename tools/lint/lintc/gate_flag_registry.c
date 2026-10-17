@@ -25,6 +25,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <regex.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -975,13 +976,27 @@ static int fr_st_first_use_cases(FILE *out, char *ob, size_t obcap)
                 "int f(void){ return getenv(\"ZCL_FU_UNREADABLE\") != 0; }\n"))
         return 1;
     bad |= chmod("./fu_secret.c", 0) != 0;
-    bad |= fr_st_case(
-            "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
-            "Z23_FLAG(\"ZCL_FU_UNREADABLE\", \"env_runtime\", \"-\", \"-\",\n"
-            " \"first use ./fu_secret.c:1\")\n",
-            NULL, NULL, "2026-01-01", "printf '%s\\0' fu_filler.c", out, ob,
-            obcap, &rc);
-    bad |= rc != 2;
+    /* A privileged reader (root, CAP_DAC_OVERRIDE, a permissive ACL) can
+     * still open a mode-0 file, so the gate sees content, not an unreadable
+     * file. Probe with a real open — not geteuid — and skip this case when
+     * the platform cannot deny the read; the skip names the reason and
+     * asserts nothing about the gate's rc. */
+    {
+        int probe = open("./fu_secret.c", O_RDONLY);
+        if (probe >= 0) {
+            close(probe);
+            printf("  SKIP flag-registry: unreadable-file case: privileged "
+                   "reader (chmod 0000 file still readable)\n");
+        } else {
+            bad |= fr_st_case(
+                    "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
+                    "Z23_FLAG(\"ZCL_FU_UNREADABLE\", \"env_runtime\", \"-\", \"-\",\n"
+                    " \"first use ./fu_secret.c:1\")\n",
+                    NULL, NULL, "2026-01-01", "printf '%s\\0' fu_filler.c",
+                    out, ob, obcap, &rc);
+            bad |= rc != 2;
+        }
+    }
     chmod("./fu_secret.c", 0644);
     return bad;
 }
