@@ -210,7 +210,11 @@ struct mesh_terminal_hub_listen_cfg {
 
 /* Accepts on `listener` (closed on return), one forked child per session so
  * a crash or a wedge in one session cannot touch another. Returns 0 on a
- * clean stop (max_sessions reached or SIGTERM/SIGINT), non-zero on error. */
+ * clean stop (max_sessions reached or SIGTERM/SIGINT), non-zero on error.
+ * MESH_TERMINAL_HUB_LISTEN_SINK_UNBOUNDED: off Linux, audit_fd is a blocking
+ * pipe the hub would have to set O_NONBLOCK on to bound its writes, which it
+ * never does to a shared descriptor; nothing is written to it. */
+#define MESH_TERMINAL_HUB_LISTEN_SINK_UNBOUNDED 2
 int mesh_terminal_hub_listen_run(int listener,
                                  const struct mesh_terminal_hub_listen_cfg *cfg);
 

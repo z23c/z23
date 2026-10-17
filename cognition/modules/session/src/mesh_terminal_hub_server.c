@@ -736,9 +736,14 @@ static int hub_listen_run_arm(int listener,
 {
     struct hub_sup sup = { 0 };
     size_t map_len = sizeof(pid_t) * MESH_TERMINAL_HUB_ACTIVE_MAX;
+    if (cfg && !hub_wfd_sink_bounded(cfg->audit_fd)) {
+        if (listener >= 0)
+            close(listener);
+        return MESH_TERMINAL_HUB_LISTEN_SINK_UNBOUNDED;
+    }
     void *map = listener < 0 || !cfg ? MAP_FAILED
                     : mmap(NULL, map_len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (map == MAP_FAILED || !hub_wfd_sink_bounded(cfg->audit_fd) || !hub_signals_install(true)) {
+    if (map == MAP_FAILED || !hub_signals_install(true)) {
         if (map != MAP_FAILED)
             munmap(map, map_len);
         if (listener >= 0)

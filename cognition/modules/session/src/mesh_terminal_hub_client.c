@@ -347,6 +347,15 @@ static void hub_client_run_arm(
     struct hub_cl c = { .cfg = cfg, .res = result };
     memset(result, 0, sizeof(*result));
     hub_socket_nosigpipe(cfg->net_fd); /* once per socket; no-op on Linux */
+    if (!hub_wfd_sink_bounded(cfg->out_fd)) {
+        /* Off Linux a blocking pipe cannot be bounded without setting
+         * O_NONBLOCK on a description the hub did not open. A tty, a regular
+         * file and a socket classify exactly as on Linux. Nothing is written
+         * to out_fd, and the session never starts. */
+        hub_cl_fail(&c, 2, "OUTPUT_UNBOUNDED",
+                    "stdout is a blocking pipe; on this host the hub client needs a terminal, a regular file, or a non-blocking pipe");
+        return;
+    }
     hub_wfd_open(&c.wfd, cfg->out_fd);
     hub_cl_handshake(&c);
     if (!c.done)

@@ -768,6 +768,7 @@ int test_mesh_terminal_hub_bounds(const char *fbsh, const char *dir)
 #include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -874,30 +875,99 @@ static int fifo_refuse_case(void)
     return failures;
 }
 
-/* The server on a blocking audit pipe must refuse to start, not run and block. */
-static int fifo_serve_case(void)
+/* Fills a pipe to the brim without changing the flags it is left with. */
+static void fifo_fill_full(int wfd)
 {
-    int p[2], failures = 0;
+    int fl = fcntl(wfd, F_GETFL);
+    fcntl(wfd, F_SETFL, fl | O_NONBLOCK);
+    fifo_steal(wfd);
+    fcntl(wfd, F_SETFL, fl);
+}
+
+/* The server on a blocking audit pipe must refuse to start with the typed
+ * outcome, not run and block. With audit_to_stderr the rejected sink IS
+ * stderr, and stderr is a FULL blocking pipe nobody reads: the refusal must
+ * not write (log) through it, or it would hang refusing itself. */
+static int fifo_serve_one(bool audit_to_stderr, const char *label)
+{
+    int p[2], q[2], failures = 0;
     uint16_t port = 0;
     mesh_terminal_hub_testing_force_polled_fifo(true);
-    failures = fcheck(failures, pipe(p) == 0, "fifo serve: pipe");
+    failures = fcheck(failures, pipe(p) == 0 && pipe(q) == 0, "fifo serve: pipes");
     int listener = failures ? -1 : mesh_terminal_hub_listen(0, &port);
     if (listener < 0)
         return failures + fcheck(0, false, "fifo serve: listener");
+    fifo_fill_full(audit_to_stderr ? q[1] : p[1]);
     pid_t pid = fork();
     if (pid == 0) {
         struct mesh_terminal_hub_listen_cfg cfg;
         memset(&cfg, 0, sizeof cfg);
-        cfg.audit_fd = p[1];
+        if (audit_to_stderr)
+            dup2(q[1], STDERR_FILENO);
+        cfg.audit_fd = audit_to_stderr ? STDERR_FILENO : p[1];
         alarm(5);
-        _exit(mesh_terminal_hub_listen_run(listener, &cfg) == 1 ? 0 : 1);
+        _exit(mesh_terminal_hub_listen_run(listener, &cfg) == MESH_TERMINAL_HUB_LISTEN_SINK_UNBOUNDED ? 0 : 1);
+    }
+    int status = pid > 0 ? fifo_waitstatus(pid) : -1;
+    failures = fcheck(failures, WIFEXITED(status) && WEXITSTATUS(status) == 0, label);
+    close(listener);
+    close(p[0]); close(p[1]); close(q[0]); close(q[1]);
+    mesh_terminal_hub_testing_force_polled_fifo(false);
+    return failures;
+}
+
+/* The client never writes to, or flips, a blocking pipe it did not open: it
+ * refuses before the session starts (typed OUTPUT_UNBOUNDED, exit 2). A pipe
+ * that is already non-blocking is accepted (the run then fails later, at the
+ * unanswered handshake, with a different code). */
+static int fifo_client_case(void)
+{
+    int p[2], sv[2], failures = 0;
+    mesh_terminal_hub_testing_force_polled_fifo(true);
+    failures = fcheck(failures, pipe(p) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "fifo client: pipe");
+    if (failures)
+        return failures;
+    int before = fcntl(p[1], F_GETFL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct mesh_terminal_hub_client_cfg cfg;
+        struct mesh_terminal_hub_client_result res;
+        memset(&cfg, 0, sizeof cfg);
+        cfg.net_fd = sv[0];
+        cfg.in_fd = -1;
+        cfg.out_fd = p[1];
+        cfg.event_fd = -1;
+        cfg.handshake_ms = 200;
+        alarm(5);
+        mesh_terminal_hub_client_run(&cfg, &res);
+        char c;
+        bool blocked_ok = !strcmp(res.code, "OUTPUT_UNBOUNDED") && res.exit_code == 2 &&
+                          fcntl(p[1], F_GETFL) == before;
+        fcntl(p[0], F_SETFL, O_NONBLOCK);
+        _exit(blocked_ok && read(p[0], &c, 1) < 0 ? 0 : 1);
     }
     int status = pid > 0 ? fifo_waitstatus(pid) : -1;
     failures = fcheck(failures, WIFEXITED(status) && WEXITSTATUS(status) == 0,
-                      "fifo serve: a blocking audit pipe makes the supervisor refuse to start");
-    close(listener);
-    close(p[0]);
-    close(p[1]);
+                      "fifo client: a blocking stdout pipe is refused (OUTPUT_UNBOUNDED, exit 2), untouched and unwritten");
+    fcntl(p[1], F_SETFL, before | O_NONBLOCK);
+    pid = fork();
+    if (pid == 0) {
+        struct mesh_terminal_hub_client_cfg cfg;
+        struct mesh_terminal_hub_client_result res;
+        memset(&cfg, 0, sizeof cfg);
+        cfg.net_fd = sv[0];
+        cfg.in_fd = -1;
+        cfg.out_fd = p[1];
+        cfg.event_fd = -1;
+        cfg.handshake_ms = 200;
+        alarm(5);
+        mesh_terminal_hub_client_run(&cfg, &res);
+        _exit(strcmp(res.code, "OUTPUT_UNBOUNDED") != 0 ? 0 : 1);
+    }
+    status = pid > 0 ? fifo_waitstatus(pid) : -1;
+    failures = fcheck(failures, WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                      "fifo client: an already non-blocking stdout pipe is accepted");
+    close(p[0]); close(p[1]); close(sv[0]); close(sv[1]);
     mesh_terminal_hub_testing_force_polled_fifo(false);
     return failures;
 }
@@ -905,7 +975,9 @@ static int fifo_serve_case(void)
 int test_mesh_terminal_hub_fifo_bounds(void)
 {
     signal(SIGPIPE, SIG_IGN);
-    return fifo_race_case() + fifo_refuse_case() + fifo_serve_case();
+    return fifo_race_case() + fifo_refuse_case() + fifo_client_case() +
+           fifo_serve_one(false, "fifo serve: a blocking audit pipe makes the supervisor refuse to start (typed exit 2)") +
+           fifo_serve_one(true, "fifo serve: stderr as a FULL blocking audit sink is refused without writing to it");
 }
 
 #endif /* !_WIN32 */

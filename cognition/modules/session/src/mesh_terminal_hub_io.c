@@ -100,7 +100,7 @@ bool hub_wfd_sink_bounded(int fd)
     struct stat st;
     if (!HUB_POLLED_FIFO() || fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode) || hub_fd_nonblocking(fd))
         return true;
-    LOG_FAIL("hub_io", "fd %d is a blocking pipe shared with other holders: a bounded write needs O_NONBLOCK, which the hub will not set on a descriptor it does not own", fd);
+    return false; /* pure: a refusal must never log through the descriptor it rejects */
 }
 
 void hub_wfd_open(struct hub_wfd *w, int fd)
