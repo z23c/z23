@@ -42,6 +42,28 @@ const char *mesh_terminal_close_reason_string(
 }
 
 static int g_failures;
+#if defined(ZCL_TESTING) && defined(MESH_TERMINAL_WORKER_CLOSE_FAILURE_FIXTURE)
+static bool fail_close_thread;
+static bool fail_read_cancel;
+static bool fail_job_quit;
+static unsigned fixture_process_limit = 32;
+bool mesh_terminal_worker_testing_close_thread_failure(void)
+{
+    return fail_close_thread;
+}
+unsigned mesh_terminal_worker_testing_process_limit(void)
+{
+    return fixture_process_limit;
+}
+bool mesh_terminal_worker_testing_read_cancel_failure(void)
+{
+    return fail_read_cancel;
+}
+bool mesh_terminal_worker_testing_job_quit_failure(void)
+{
+    return fail_job_quit;
+}
+#endif
 
 static void expect(bool ok, const char *label)
 {
@@ -124,8 +146,13 @@ static bool pump(struct session *s, unsigned ms, const char *needle)
                 (int64_t)time(NULL));
         if (needle && strstr(s->out, needle))
             return true;
-        if (got == 0)
-            Sleep(50);
+        if (got == 0) {
+            ULONGLONG now = GetTickCount64();
+            DWORD left = now < deadline ? (DWORD)(deadline - now) : 0;
+            HANDLE ready = (HANDLE)mesh_terminal_worker_output_wait_handle(&s->worker);
+            if (!ready || WaitForSingleObject(ready, left) == WAIT_FAILED)
+                return false;
+        }
     } while (GetTickCount64() < deadline);
     return needle == NULL;
 }
@@ -453,13 +480,99 @@ static bool exact_child_args(int argc, wchar_t **argv)
     return true;
 }
 
+static int output_blocks(unsigned blocks)
+{
+    char block[1024];
+    memset(block, 'x', sizeof(block));
+    for (unsigned i = 0; i < blocks; i++)
+        if (fwrite(block, 1, sizeof(block), stdout) != sizeof(block)) return 95;
+    puts("OUTPUT_DRAIN_COMPLETE");
+    fflush(stdout);
+    return 42;
+}
+
+static bool spawn_output_holder(bool new_console)
+{
+    wchar_t image[MAX_PATH], line[MAX_PATH + 64];
+    DWORD n = GetModuleFileNameW(NULL, image, MAX_PATH);
+    if (!n || n >= MAX_PATH) return false;
+    int count = swprintf(line, sizeof(line) / sizeof(line[0]),
+                        L"\"%ls\" --worker-sleep-child", image);
+    if (count < 0 || (size_t)count >= sizeof(line) / sizeof(line[0])) return false;
+    STARTUPINFOW startup = {.cb = sizeof(startup)};
+    PROCESS_INFORMATION child = {0};
+    if (!CreateProcessW(image, line, NULL, NULL, FALSE,
+        new_console ? CREATE_NEW_CONSOLE : 0, NULL, NULL, &startup, &child)) return false;
+    CloseHandle(child.hThread); CloseHandle(child.hProcess);
+    return true;
+}
+
+#if defined(ZCL_TESTING) && defined(MESH_TERMINAL_WORKER_CLOSE_FAILURE_FIXTURE)
+static unsigned retained_failure_count(bool watch)
+{
+    return watch ? mesh_terminal_worker_testing_retained_watches() :
+                   mesh_terminal_worker_testing_retained_reads();
+}
+
+static bool teardown_fields_closed(const struct mesh_terminal_worker *w)
+{
+    return !w->win_output_read && !w->win_output_state && !w->win_process && !w->win_job &&
+        !w->win_membership_state && !w->win_pc && !w->win_close_state;
+}
+
+static int teardown_failure_child(bool watch)
+{
+    char shell[MAX_PATH], cwd[MAX_PATH];
+    if (!system_path("\\System32\\cmd.exe", shell, sizeof(shell)) ||
+        !GetCurrentDirectoryA(sizeof(cwd), cwd)) return 97;
+    struct mesh_terminal_worker_config cfg = base_config(shell, cwd);
+    struct mesh_terminal_worker w = {0}, refused = {0};
+    struct zcl_result r = mesh_terminal_worker_spawn(&cfg, time(NULL), &w);
+    if (!r.ok) return 98;
+    unsigned before = retained_failure_count(watch);
+    fail_read_cancel = !watch;
+    fail_job_quit = watch;
+    ULONGLONG began = GetTickCount64();
+    mesh_terminal_worker_kill(&w);
+    ULONGLONG took = GetTickCount64() - began;
+    fail_read_cancel = false;
+    fail_job_quit = false;
+    r = mesh_terminal_worker_spawn(&cfg, time(NULL), &refused);
+    bool safe = !r.ok && r.code == MESH_TERMINAL_WORKER_ERR_PTY &&
+        retained_failure_count(watch) == before + 1 && took < 4500 && teardown_fields_closed(&w);
+    puts(safe ? "TEARDOWN_RETAIN_OK" : "TEARDOWN_RETAIN_BAD");
+    fflush(stdout);
+    return safe ? (watch ? 40 : 39) : 99;
+}
+#endif
+
+static int output_child_mode(int argc, wchar_t **argv)
+{
+    if (argc != 2) return -1;
+#if defined(ZCL_TESTING) && defined(MESH_TERMINAL_WORKER_CLOSE_FAILURE_FIXTURE)
+    if (!wcscmp(argv[1], L"--worker-read-cancel-child")) return teardown_failure_child(false);
+    if (!wcscmp(argv[1], L"--worker-job-quit-child")) return teardown_failure_child(true);
+#endif
+    if (!wcscmp(argv[1], L"--worker-sleep-child")) { Sleep(30000); return 0; }
+    if (!wcscmp(argv[1], L"--worker-held-output-child"))
+        return spawn_output_holder(false) ? output_blocks(128) : 96;
+    if (!wcscmp(argv[1], L"--worker-family-child")) {
+        if (!spawn_output_holder(true)) return 96;
+        puts("CENSUS_FAMILY_READY"); fflush(stdout); Sleep(30000); return 0;
+    }
+    if (!wcscmp(argv[1], L"--worker-output-child")) return output_blocks(128);
+    if (!wcscmp(argv[1], L"--worker-flood-child")) return output_blocks(32768);
+    return -1;
+}
+
 /* Parse wide command-line data directly: the CRT's narrow argv may use ACP. */
 static int argv_child(void)
 {
     int argc = 0;
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv)
-        return 91;
+    if (!argv) return 91;
+    int mode = output_child_mode(argc, argv);
+    if (mode >= 0) { LocalFree(argv); return mode; }
     if (argc > 1 && !wcscmp(argv[1], L"--worker-count-child")) {
         bool ok = argc == MESH_TERMINAL_WORKER_ARGV_MAX;
         for (int i = 2; i < argc; i++)
@@ -602,6 +715,235 @@ static void test_exit_259(const char *shell, const char *workdir, bool budget_fi
                !w.win_input_write && !w.win_output_read,
            "exit259: cleanup closes every worker handle");
 }
+static void test_output_readiness(const char *shell, const char *workdir)
+{
+    struct session s = {0};
+    struct mesh_terminal_worker_config cfg = base_config(shell, workdir);
+    struct zcl_result r = mesh_terminal_worker_spawn(&cfg, time(NULL), &s.worker);
+    expect(r.ok, "output readiness worker launches");
+    if (!r.ok) return;
+    expect(mesh_terminal_worker_output_wait_handle(&s.worker) != 0,
+           "worker exposes a borrowed output event");
+    expect(send_line(&s, "echo EVENT_OUTPUT_READY\r\n") &&
+           pump(&s, 5000, "EVENT_OUTPUT_READY"),
+           "output event wakes and drains a real ConPTY");
+    ULONGLONG begin = GetTickCount64();
+    mesh_terminal_worker_kill(&s.worker);
+    expect(GetTickCount64() - begin < 4000 &&
+           mesh_terminal_worker_output_wait_handle(&s.worker) == 0 &&
+           s.worker.win_output_state == NULL && s.worker.win_output_read == NULL,
+           "pending output cancellation settles before state release");
+}
+
+static bool fixture_self_image(char *self, size_t cap)
+{
+    wchar_t wide[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, wide, MAX_PATH);
+    return len && len < MAX_PATH && WideCharToMultiByte(CP_UTF8,
+        WC_ERR_INVALID_CHARS, wide, -1, self, (int)cap, NULL, NULL) > 0;
+}
+
+static void require_close_thread_retry(struct mesh_terminal_worker *w, bool held)
+{
+#if defined(ZCL_TESTING) && defined(MESH_TERMINAL_WORKER_CLOSE_FAILURE_FIXTURE)
+    if (!held) {
+        fail_close_thread = true;
+        struct zcl_result refused = mesh_terminal_worker_begin_output_close(w);
+        expect(!refused.ok && !w->win_pc && w->win_close_state && w->win_output_read &&
+            !mesh_terminal_worker_close_wait_handle(w),
+            "failed close-thread creation retains private console and readable output ownership");
+        fail_close_thread = false;
+    }
+#else
+    (void)w; (void)held;
+#endif
+}
+
+static bool drain_worker_to_eof(struct mesh_terminal_worker *w, ULONGLONG deadline)
+{
+    while (GetTickCount64() < deadline) {
+        uint8_t bytes[257];
+        size_t got = 0;
+        struct zcl_result r = mesh_terminal_worker_output(w, bytes, sizeof(bytes), &got, time(NULL));
+        HANDLE ready = (HANDLE)mesh_terminal_worker_output_wait_handle(w);
+        if (!r.ok) return false;
+        if (!ready) return true;
+        if (!got) {
+            ULONGLONG now = GetTickCount64();
+            DWORD left = now < deadline ? (DWORD)(deadline - now) : 0;
+            if (WaitForSingleObject(ready, left) == WAIT_FAILED) break;
+        }
+    }
+    return false;
+}
+
+static void require_output_eof(struct mesh_terminal_worker *w, bool held)
+{
+    expect(WaitForSingleObject((HANDLE)w->win_process, 5000) == WAIT_OBJECT_0,
+           "large final burst child exits naturally");
+    DWORD pids[PIDS_MAX];
+    size_t count = job_pids(w, pids);
+    if (held) expect(count > 0, "real descendant retains the console after its parent exits");
+    require_close_thread_retry(w, held);
+    struct zcl_result closing = mesh_terminal_worker_begin_output_close(w);
+    HANDLE closer = (HANDLE)mesh_terminal_worker_close_wait_handle(w);
+    expect(closing.ok && closer, "worker starts its owned console close while output remains readable");
+    if (!closing.ok || !closer) return;
+    struct zcl_result repeated = mesh_terminal_worker_begin_output_close(w);
+    expect(repeated.ok && mesh_terminal_worker_close_wait_handle(w) == (uintptr_t)closer,
+           "repeated begin-close preserves one closer and its original budget");
+    bool eof = drain_worker_to_eof(w, GetTickCount64() + 3000);
+    if (!eof) mesh_terminal_worker_kill(w); /* Closing read breaks a stuck conhost write. */
+    bool settled = eof && WaitForSingleObject(closer, 1000) == WAIT_OBJECT_0;
+    expect(eof && settled, "real ConPTY close drains and exposes settled EOF without a dangling read");
+    for (size_t i = 0; i < count; i++)
+        expect(process_gone(pids[i]), "output close removes a descendant retaining the console");
+}
+
+static void require_output_burst(struct mesh_terminal_worker *w)
+{
+    ULONGLONG deadline = GetTickCount64() + 10000;
+    uint64_t total = 0;
+    char tail[512] = {0};
+    bool marker = false, ok = true;
+    while (!marker && GetTickCount64() < deadline) {
+        uint8_t bytes[257];
+        size_t got = 0;
+        struct zcl_result r = mesh_terminal_worker_output(w, bytes, sizeof(bytes), &got, time(NULL));
+        if (!r.ok) { ok = false; break; }
+        total += got;
+        memmove(tail, tail + got, sizeof(tail) - got - 1);
+        memcpy(tail + sizeof(tail) - got - 1, bytes, got);
+        tail[sizeof(tail) - 1] = 0;
+        if (strstr(tail, DSR_QUERY)) {
+            (void)mesh_terminal_worker_input(w, (const uint8_t *)DSR_REPLY,
+                                            sizeof(DSR_REPLY) - 1, time(NULL));
+            memset(tail, ' ', sizeof(tail) - 1);
+        }
+        marker = strstr(tail, "OUTPUT_DRAIN_COMPLETE") != NULL;
+        if (!got) {
+            ULONGLONG now = GetTickCount64();
+            DWORD left = now < deadline ? (DWORD)(deadline - now) : 0;
+            HANDLE event = (HANDLE)mesh_terminal_worker_output_wait_handle(w);
+            if (WaitForSingleObject(event, left) == WAIT_FAILED) { ok = false; break; }
+        }
+    }
+    expect(ok && marker && total >= 131072 && total == w->bytes_out,
+           "event-driven small reads drain more than pipe capacity with exact accounting");
+}
+
+static void test_output_burst(const char *shell, const char *workdir, bool held)
+{
+    char self[MAX_PATH * 4];
+    if (!fixture_self_image(self, sizeof(self))) {
+        expect(false, "burst fixture resolves its own image"); return;
+    }
+    const char *args[] = { self, held ? "--worker-held-output-child" : "--worker-output-child", NULL };
+    struct mesh_terminal_worker_config cfg = base_config(shell, workdir);
+    cfg.argv = args;
+    struct mesh_terminal_worker w = {0};
+    struct zcl_result r = mesh_terminal_worker_spawn(&cfg, time(NULL), &w);
+    expect(r.ok, "burst output worker launches");
+    if (!r.ok) return;
+    require_output_burst(&w);
+    require_output_eof(&w, held);
+    mesh_terminal_worker_kill(&w);
+    mesh_terminal_worker_kill(&w);
+    expect(!w.win_close_state && !w.win_output_state && !w.win_pc,
+           "repeated kill releases settled close and read state exactly once");
+}
+
+static void test_output_cancel(const char *shell, const char *workdir, bool lifetime)
+{
+    char self[MAX_PATH * 4];
+    if (!fixture_self_image(self, sizeof(self))) { expect(false, "flood image resolves"); return; }
+    const char *args[] = {self, "--worker-flood-child", NULL};
+    struct mesh_terminal_worker_config cfg = base_config(shell, workdir);
+    cfg.argv = args; cfg.lifetime_seconds = 1;
+    struct mesh_terminal_worker w = {0};
+    struct zcl_result r = mesh_terminal_worker_spawn(&cfg, time(NULL), &w);
+    expect(r.ok, "undrained output producer launches");
+    if (!r.ok) return;
+    HANDLE ready = (HANDLE)mesh_terminal_worker_output_wait_handle(&w);
+    expect(ready && WaitForSingleObject(ready, 2000) == WAIT_OBJECT_0 &&
+        WaitForSingleObject((HANDLE)w.win_process, 250) == WAIT_TIMEOUT,
+        "real output producer remains live while output is not consumed");
+    ULONGLONG began = GetTickCount64();
+    if (lifetime) {
+        expect(mesh_terminal_worker_budget_exceeded(&w, w.started_unix + 2) &&
+            w.close_reason == MESH_TERMINAL_CLOSE_LIFETIME_LIMIT,
+            "lifetime budget ends an undrained output producer by name");
+    } else {
+        r = mesh_terminal_worker_begin_output_close(&w);
+        expect(r.ok, "caller starts close with undrained output");
+    }
+    mesh_terminal_worker_kill(&w);
+    mesh_terminal_worker_kill(&w);
+    expect(GetTickCount64() - began < 4500 && !w.win_output_read && !w.win_output_state &&
+        !w.win_close_state && !w.win_pc && !w.win_job && !w.win_process,
+        "stop or deadline cancels undrained output and settles all owned resources within one close budget");
+}
+
+#if defined(ZCL_TESTING) && defined(MESH_TERMINAL_WORKER_CLOSE_FAILURE_FIXTURE)
+static bool job_observed_empty(HANDLE job)
+{
+    union {
+        JOBOBJECT_BASIC_PROCESS_ID_LIST list;
+        uint8_t bytes[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) + PIDS_MAX * sizeof(ULONG_PTR)];
+    } members = {0};
+    return QueryInformationJobObject(job, JobObjectBasicProcessIdList, &members,
+        sizeof(members), NULL) && members.list.NumberOfAssignedProcesses == 0;
+}
+
+static void test_all_member_census(const char *shell, const char *workdir)
+{
+    char self[MAX_PATH * 4];
+    if (!fixture_self_image(self, sizeof(self))) { expect(false, "census image resolves"); return; }
+    const char *args[] = {self, "--worker-family-child", NULL};
+    struct session s = {0};
+    struct mesh_terminal_worker_config cfg = base_config(shell, workdir);
+    cfg.argv = args;
+    struct zcl_result r = mesh_terminal_worker_spawn(&cfg, time(NULL), &s.worker);
+    expect(r.ok, "native console family launches under worker Job");
+    if (!r.ok) return;
+    expect(pump(&s, 5000, "CENSUS_FAMILY_READY"), "console family reaches child-created marker");
+    HANDLE changed = (HANDLE)mesh_terminal_worker_budget_wait_handle(&s.worker);
+    expect(changed && WaitForSingleObject(changed, 1000) == WAIT_OBJECT_0,
+           "real Job membership changes wake the worker without an idle tick");
+    DWORD pids[PIDS_MAX];
+    size_t count = job_pids(&s.worker, pids);
+    printf("mesh_terminal_worker_windows: ordinary Job assigned members=%zu; protected OS-host coverage is separate\n", count);
+    expect(count >= 2 && count <= 32, "all-member Job census sees the real native console family");
+    HANDLE observed = NULL;
+    bool retained = DuplicateHandle(GetCurrentProcess(), (HANDLE)s.worker.win_job,
+        GetCurrentProcess(), &observed, JOB_OBJECT_QUERY, FALSE, 0) != 0;
+    expect(retained, "fixture retains a read-only observation lifetime for the Job");
+    fixture_process_limit = count > 1 ? (unsigned)count - 1 : 1;
+    bool ended = mesh_terminal_worker_budget_exceeded(&s.worker, time(NULL));
+    fixture_process_limit = 32;
+    expect(ended && s.worker.close_reason == MESH_TERMINAL_CLOSE_SESSION_LOST,
+           "all-member census over fixture-only limit ends session by name");
+    mesh_terminal_worker_kill(&s.worker);
+    for (size_t i = 0; i < count; i++) expect(process_gone(pids[i]), "census cleanup removes each observed Job member");
+    expect(retained && job_observed_empty(observed), "over-budget native Job is empty after cleanup");
+    expect(!mesh_terminal_worker_budget_wait_handle(&s.worker) && !s.worker.win_membership_state,
+           "census cleanup settles and releases the Job wake owner");
+    if (observed) CloseHandle(observed);
+}
+
+static void test_teardown_retention(const char *shell, const char *workdir, bool watch)
+{
+    char self[MAX_PATH * 4];
+    if (!fixture_self_image(self, sizeof(self))) { expect(false, "cancel-failure image resolves"); return; }
+    const char *args[] = {self, watch ? "--worker-job-quit-child" : "--worker-read-cancel-child", NULL};
+    struct mesh_terminal_worker_config cfg = base_config(shell, workdir);
+    cfg.argv = args;
+    test_argv_launch(&cfg, "TEARDOWN_RETAIN_OK", watch ? 40 : 39,
+        watch ? "isolated Job quit failure retains live handle/state and refuses new workers" :
+                "isolated cancellation failure retains pending heap and refuses new workers within close budget");
+}
+#endif
+
 int main(void)
 {
     int child = argv_child();
@@ -624,6 +966,16 @@ int main(void)
     test_input_bounded(cmd, workdir);
     test_blocked_input_lifetime(cmd, workdir);
     test_exact_argv(cmd, workdir);
+    test_output_readiness(cmd, workdir);
+    test_output_burst(cmd, workdir, false);
+    test_output_burst(cmd, workdir, true);
+    test_output_cancel(cmd, workdir, false);
+    test_output_cancel(cmd, workdir, true);
+#if defined(ZCL_TESTING) && defined(MESH_TERMINAL_WORKER_CLOSE_FAILURE_FIXTURE)
+    test_all_member_census(cmd, workdir);
+    test_teardown_retention(cmd, workdir, false);
+    test_teardown_retention(cmd, workdir, true);
+#endif
     if (system_path("\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", pwsh,
                     sizeof(pwsh)) &&
         GetFileAttributesA(pwsh) != INVALID_FILE_ATTRIBUTES) {

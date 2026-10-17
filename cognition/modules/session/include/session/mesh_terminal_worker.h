@@ -198,6 +198,9 @@ struct mesh_terminal_worker {
     void *win_process;     /* HANDLE: the spawned shell process */
     void *win_input_write; /* HANDLE: our end of the ConPTY's input pipe */
     void *win_output_read; /* HANDLE: our end of the ConPTY's output pipe */
+    void *win_output_state; /* owned bounded OVERLAPPED read state; never shared */
+    void *win_close_state;  /* preallocated console closer; never points at caller memory */
+    void *win_membership_state; /* owned Job completion wake state */
 #endif
 };
 
@@ -233,6 +236,36 @@ struct zcl_result mesh_terminal_worker_output(struct mesh_terminal_worker *w,
                                               uint8_t *buf, size_t cap,
                                               size_t *out_len,
                                               int64_t now_unix);
+
+/* Windows: borrowed manual-reset event for the worker-owned pending output
+ * read. Wait together with win_process and the caller's stop/network events;
+ * output() alone consumes/charges/rearms it. Settled EOF returns zero; process
+ * exit and budgets still end the session. Never close this handle. Zero on
+ * unavailable/closed/non-Windows workers. No polling thread is created. */
+uintptr_t mesh_terminal_worker_output_wait_handle(struct mesh_terminal_worker *w);
+
+/* Windows: stop the shell subtree and start closing ConPTY while output remains
+ * readable. The worker owns the closer and all handles. Repeated calls are safe.
+ * The returned event is borrowed; zero means unavailable. kill() cancels output
+ * and settles close within a fixed bound. An unsettled OS close retains only
+ * its private heap/handles until process exit and refuses future Windows spawns;
+ * already-live workers may each retain one such state. Never TerminateThread. */
+struct zcl_result mesh_terminal_worker_begin_output_close(struct mesh_terminal_worker *w);
+uintptr_t mesh_terminal_worker_close_wait_handle(struct mesh_terminal_worker *w);
+
+/* Windows: borrowed membership-change wake hint, reset by budget_exceeded()
+ * before its authoritative all-member census. Notifications are supplemental;
+ * callers still check budgets on other events and real deadlines. */
+uintptr_t mesh_terminal_worker_budget_wait_handle(struct mesh_terminal_worker *w);
+
+#if defined(_WIN32) && defined(ZCL_TESTING) && defined(MESH_TERMINAL_WORKER_CLOSE_FAILURE_FIXTURE)
+bool mesh_terminal_worker_testing_close_thread_failure(void);
+unsigned mesh_terminal_worker_testing_process_limit(void);
+bool mesh_terminal_worker_testing_read_cancel_failure(void);
+unsigned mesh_terminal_worker_testing_retained_reads(void);
+bool mesh_terminal_worker_testing_job_quit_failure(void);
+unsigned mesh_terminal_worker_testing_retained_watches(void);
+#endif
 
 /* Resize the PTY window (TIOCSWINSZ; the kernel raises SIGWINCH on the
  * shell's foreground group). Geometry bounds are the proto's. */

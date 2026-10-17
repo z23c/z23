@@ -217,7 +217,6 @@ cognition/modules/session/src/mesh_private_object_proto.c:offer_shape:27
 cognition/modules/session/src/mesh_status_proto.c:receipt_shape:18
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_proto_error_string:16
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_receipt_v1_matches_open:16
-cognition/modules/session/src/mesh_terminal_worker.c:mesh_terminal_worker_output_platform_arm#3:16
 cognition/modules/session/src/mesh_terminal_worker.c:mesh_terminal_worker_spawn_platform_arm#2:26
 cognition/modules/session/src/zses.c:zses_invite_decode_json:23
 cognition/modules/session/src/zses.c:zses_pick_endpoint:25
