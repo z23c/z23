@@ -73,6 +73,8 @@ TX_NONCHAIN_COMMAND("app.presentation.publication-confirm", "local_presentation"
     "Returns one bounded human display decision without committing or publishing the package and creates no chain transaction.")
 TX_NONCHAIN_COMMAND("app.presentation.publication-status", "local_presentation",
     "Shows exact package publication facts without committing, publishing, fetching, or creating a chain transaction.")
+TX_NONCHAIN_COMMAND("app.oprindex.rebuild", "local_projection_recovery",
+    "Resets the local OP_RETURN catalog projection and cursor for backfill from existing block bodies; it creates, signs, submits, and confirms no chain transaction.")
 TX_NONCHAIN_COMMAND("app.market.offer", "p2p_market_offer",
     "Builds, signs, persists, and gossips one self-authenticating paid file offer; settlement is the buyer's separate payment transaction, so this command creates no chain transaction.")
 TX_NONCHAIN_COMMAND("zcode.node.join", "local_node_config",

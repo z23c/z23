@@ -363,6 +363,14 @@ static bool tx_type_nonchain_path_unique(
     return ok;
 }
 
+static bool tx_type_oprindex_nonchain_ok(void)
+{
+    const struct zcl_transaction_nonchain_command *entry =
+        zcl_transaction_nonchain_command_find("app.oprindex.rebuild");
+    return entry && entry->category &&
+        strcmp(entry->category, "local_projection_recovery") == 0;
+}
+
 static int check_api_tx_type_reverse_aliases_real_types(void)
 {
     int failures = 0;
@@ -385,11 +393,12 @@ static int check_api_tx_type_reverse_aliases_real_types(void)
         size_t nonchain_count = 0;
         const struct zcl_transaction_nonchain_command *nonchain =
             zcl_transaction_nonchain_command_catalog(&nonchain_count);
-        ok = ok && nonchain && nonchain_count == 35;
+        ok = ok && nonchain && nonchain_count == 36;
         for (size_t i = 0; ok && i < nonchain_count; i++)
             ok = tx_type_nonchain_row_ok(registry, types, type_count,
                                          nonchain, i) &&
                  tx_type_nonchain_path_unique(nonchain, i);
+        ok = tx_type_oprindex_nonchain_ok() && ok;
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -667,7 +676,7 @@ static bool tx_type_index_policy_ok(const struct json_value *root)
            json_get_int(json_get(root,
                "alternate_command_route_count")) == 13 &&
            json_get_int(json_get(root,
-               "explicit_non_chain_command_count")) == 35 &&
+               "explicit_non_chain_command_count")) == 36 &&
            strcmp(json_get_str(json_get(root,
                        "checked_in_proof_source")),
                   "docs/work/transaction-lab-events.jsonl") == 0 &&
