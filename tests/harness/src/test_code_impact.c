@@ -814,6 +814,17 @@ static int test_code_impact_rule_predicate(void)
             for (size_t g = 0; g < acc.groups_len; g++)
                 ASSERT_STR_EQ(acc.groups[g], cases[i].groups[g]);
         }
+        /* A cursor-model change must re-prove the condition that refuses
+         * legacy state and names the explicit operator recovery. */
+        struct agent_impact_acc oprindex = {0};
+        ASSERT(agent_impact_apply_shared_rules(
+            "engine/models/src/op_return_index.c", &oprindex));
+        ASSERT(!oprindex.groups_lost);
+        bool legacy_state_selected = false;
+        for (size_t g = 0; g < oprindex.groups_len; g++)
+            legacy_state_selected = legacy_state_selected ||
+                strcmp(oprindex.groups[g], "op_return_index_legacy_state") == 0;
+        ASSERT(legacy_state_selected);
         PASS();
     } _test_next:;
     return failures;
