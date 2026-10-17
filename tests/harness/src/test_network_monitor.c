@@ -307,6 +307,50 @@ static int test_partition_condition(void)
     return failures;
 }
 
+/* A malformed interval must not silently turn the six-hundred-second
+ * partition signal into a ten-second one merely because it has a numeric
+ * prefix. Preserve any caller override exactly. */
+static int test_partition_rejects_malformed_window(void)
+{
+    int failures = 0;
+    const char *var = "ZCL_NET_PARTITION_SECS";
+    const char *old = getenv(var);
+    char *saved = old ? strdup(old) : NULL;
+    if (old && !saved)
+        return 1;
+
+    bool set = setenv(var, "10junk", 1) == 0;
+    net_partition_suspected_test_reset();
+    net_partition_suspected_test_set_now(10000);
+    inject_view(1, 100, 100, 100, false, -1);
+    bool first = !net_partition_suspected_test_detect();
+    net_partition_suspected_test_set_now(10011);
+    inject_view(1, 100, 100, 100, false, -1);
+    bool held_default = !net_partition_suspected_test_detect();
+    net_partition_suspected_test_set_now(10600);
+    inject_view(1, 100, 100, 100, false, -1);
+    bool default_detected = net_partition_suspected_test_detect();
+    NM_CHECK(set && first && held_default && default_detected);
+    net_partition_suspected_test_reset();
+
+    bool valid_set = setenv(var, "10", 1) == 0;
+    net_partition_suspected_test_set_now(11000);
+    inject_view(1, 100, 100, 100, false, -1);
+    bool valid_first = !net_partition_suspected_test_detect();
+    net_partition_suspected_test_set_now(11010);
+    inject_view(1, 100, 100, 100, false, -1);
+    bool valid_detected = net_partition_suspected_test_detect();
+    NM_CHECK(valid_set && valid_first && valid_detected);
+    net_partition_suspected_test_reset();
+
+    if (saved)
+        (void)setenv(var, saved, 1);
+    else
+        (void)unsetenv(var);
+    free(saved);
+    return failures;
+}
+
 int test_network_monitor(void)
 {
     printf("\n=== network_monitor tests ===\n");
@@ -316,6 +360,7 @@ int test_network_monitor(void)
     failures += test_tip_regression_condition();
     failures += test_fork_condition();
     failures += test_partition_condition();
+    failures += test_partition_rejects_malformed_window();
     if (failures == 0)
         printf("=== network_monitor: all passed ===\n");
     else
