@@ -50,7 +50,7 @@ selector_plan()
         BUILD_DIR="$selector_fixture/build" ZCL_USE_CCACHE=1 "$@" \
         > "$selector_fixture/plan" 2>&1
 }
-for selector_goal in print-node-c23-srcs \
+for selector_goal in print-node-c23-srcs windows-acceptance-fixtures \
     build/tests/windows/mesh_terminal_worker.exe \
     build/tests/windows/database_lifetime.exe known-mixed; do
     : > "$selector_fixture/calls"
@@ -66,11 +66,12 @@ for selector_goal in print-node-c23-srcs \
     [ "$(cat "$selector_epoch/.unverified")" = \
         "$selector_marker" ] || fail 'standalone parse mutated interrupted node state'
 done
-for selector_case in node mixed unknown default; do
+for selector_case in node mixed fixtures-mixed unknown default; do
     : > "$selector_fixture/calls"
     case "$selector_case" in
         node) set -- z23 ;;
         mixed) set -- print-node-c23-srcs z23 ;;
+        fixtures-mixed) set -- windows-acceptance-fixtures z23 ;;
         unknown) set -- build/tests/windows/not_a_catalog_row.exe ;;
         default) set -- ;;
     esac
@@ -85,6 +86,20 @@ for selector_case in node mixed unknown default; do
         fail "unexpected authority refusal: $selector_case"
 done
 printf '%s\n' 'check-dev-loop-profiles: standalone catalog/query selector PASS'
+
+# The standalone fixture room cannot substitute for the full node contract.
+# Check its owning recipe, rather than accepting these commands elsewhere.
+awk '
+    /^windows-acceptance: windows-acceptance-fixtures$/ { fixtures = 1 }
+    /^windows-acceptance:$/ { body = 1; next }
+    body && /^[^\t]/ { body = 0 }
+    body && /\$\(MAKE\).* z23/ { node = 1 }
+    body && /code have/ { queries++ }
+    body && /"ok":true/ { ok = 1 }
+    body && /data_schema/ { schema = 1 }
+    body && /budget_exceeded/ { budget = 1 }
+    END { exit fixtures && node && queries == 2 && ok && schema && budget ? 0 : 1 }
+' "$ROOT/Makefile" || fail 'full Windows acceptance lost its node/codeindex contract'
 
 profile_line()
 {

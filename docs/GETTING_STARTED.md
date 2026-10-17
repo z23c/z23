@@ -203,6 +203,13 @@ Windows setup and the boundary between native MSYS2 and WSL2 are documented in
 [`WINDOWS.md`](WINDOWS.md). Never share `build/` or `vendor/lib/` between
 native Windows and WSL.
 
+For standalone Windows platform fixtures, run
+`.\tools\dev\windows-make.ps1 windows-acceptance-fixtures`.
+This compiles the canonical fixture catalog and runs it with the hidden native
+runner, reporting unavailable runtime cases explicitly. It does not build the
+node or qualify native codeindex behavior; `windows-acceptance` includes those
+additional checks.
+
 #### macOS
 
 The arm64 macOS build includes the node, wallet, P2P and RPC services,

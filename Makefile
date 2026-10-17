@@ -192,7 +192,7 @@ endif
 ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 ZCL_WINDOWS_ACCEPTANCE_SQLITE := $(ZCL_WINDOWS_ACCEPTANCE_DIR)/lib/libsqlite3.a
 include platform/modules/platform/tests/windows_acceptance.mk
-ZCL_WINDOWS_STANDALONE_GOALS := print-node-c23-srcs $(addprefix \
+ZCL_WINDOWS_STANDALONE_GOALS := print-node-c23-srcs windows-acceptance-fixtures $(addprefix \
 	$(ZCL_WINDOWS_ACCEPTANCE_DIR)/,$(addsuffix .exe,$(ZCL_WINDOWS_ACCEPTANCE_TESTS)))
 
 ZCL_WINDOWS_STANDALONE_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_STANDALONE_GOALS),$(MAKECMDGOALS))),,1),)
@@ -2485,7 +2485,7 @@ endef
 $(foreach test,$(ZCL_WINDOWS_ACCEPTANCE_TESTS), \
 	$(eval $(call ZCL_WINDOWS_ACCEPTANCE_RULE,$(test))))
 
-.PHONY: windows-acceptance-compile windows-acceptance windows-acceptance-wine
+.PHONY: windows-acceptance-compile windows-acceptance-fixtures windows-acceptance windows-acceptance-wine
 windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
 	@if test '$(ZCL_WINDOWS_ACCEPTANCE_COUNT)' -lt 1; then \
 		printf '%s\n' 'windows-acceptance: FAIL: catalog selected zero programs' >&2; \
@@ -2504,12 +2504,12 @@ windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
 	done
 	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS ($(ZCL_WINDOWS_ACCEPTANCE_COUNT) programs)'
 
-windows-acceptance: windows-acceptance-compile
+windows-acceptance: windows-acceptance-fixtures
+windows-acceptance-fixtures: windows-acceptance-compile
 
 ifeq ($(ZCL_HOST_WINDOWS),1)
-windows-acceptance: windows-headless-run-selftest process-group-exec
+windows-acceptance-fixtures: windows-headless-run-selftest process-group-exec
 
-	@$(MAKE) --no-print-directory z23
 	@root="$$(cygpath -aw .)"; \
 	runner="$$(cygpath -aw $(WINDOWS_HEADLESS_RUN_BIN))"; \
 	log_dir="build/tests/windows/logs"; mkdir -p "$$log_dir"; \
@@ -2523,9 +2523,16 @@ windows-acceptance: windows-headless-run-selftest process-group-exec
 			"$$executable_win"; rc=$$?; \
 		test ! -f "$$log" || cat "$$log"; \
 		if test $$rc -eq 77; then \
-			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
+			printf '%s\n' "windows-acceptance-fixtures: honest runtime refusal: $$executable"; \
 		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
+	printf '%s\n' 'windows-acceptance-fixtures: standalone native fixture execution PASS (explicit runtime refusals reported above; node/codeindex acceptance not included)'
+
+windows-acceptance:
+	@$(MAKE) --no-print-directory z23
+	@root="$$(cygpath -aw .)"; \
+	runner="$$(cygpath -aw $(WINDOWS_HEADLESS_RUN_BIN))"; \
+	log_dir="build/tests/windows/logs"; mkdir -p "$$log_dir"; \
 	codeindex_prepare_log="$$log_dir/codeindex_prepare.log"; \
 	codeindex_prepare_log_win="$$(cygpath -aw "$$codeindex_prepare_log")"; \
 	codeindex_log="$$log_dir/codeindex_native.log"; \
@@ -2560,6 +2567,10 @@ windows-acceptance: windows-headless-run-selftest process-group-exec
 	printf '%s\n' 'windows-acceptance: native codeindex rebuild/open/query PASS'; \
 	printf '%s\n' 'windows-acceptance: native execution PASS (explicit runtime refusals reported above)'
 else
+windows-acceptance-fixtures:
+	@printf '%s\n' \
+	  'windows-acceptance-fixtures: native runtime UNOBSERVED (host=$(ZCL_HOST_OS)); MinGW cross-link PASS; run this target on native Windows'
+windows-acceptance:
 	@printf '%s\n' \
 	  'windows-acceptance: native runtime UNOBSERVED (host=$(ZCL_HOST_OS)); MinGW cross-link PASS; run make windows-acceptance on native Windows to close it'
 endif

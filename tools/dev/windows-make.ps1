@@ -108,9 +108,16 @@ $env:ZCL_DEV_GIT_EXE = $SelectedGit
 
 # Keep make's arguments as argv entries. Joining them into shell source loses
 # spaces and lets shell metacharacters in a variable assignment or path run as
-# commands. The fixed Bash program consumes only the two wrapper-owned values.
-$bashCommand = 'repo_root=$1; msys_root=$2; shift 2; cd -- "$repo_root" && export PATH="$msys_root/ucrt64/bin:$msys_root/usr/bin:$PATH" && exec make "$@"'
-$bashArgs = @('-lc', $bashCommand, 'z23-windows-make', $repoRoot, $msysRoot) + $MakeArgs.ToArray()
+# commands. Login profiles rewrite TEMP/TMP to MSYS /tmp, whose filesystem
+# policy may refuse native confinement labels. Restore the caller's process
+# values after login, including absence. Prefixes keep empty values as real
+# argv entries even through the bootstrap's direct native invocation.
+$NativeTempState = if (Test-Path Env:TEMP) { '1:' + [Environment]::GetEnvironmentVariable('TEMP', 'Process') } else { '0:' }
+$NativeTmpState = if (Test-Path Env:TMP) { '1:' + [Environment]::GetEnvironmentVariable('TMP', 'Process') } else { '0:' }
+$bashCommand = 'repo_root=$1; msys_root=$2; if [ "${3%%:*}" = 1 ]; then export TEMP="${3#*:}"; else unset TEMP; fi; if [ "${4%%:*}" = 1 ]; then export TMP="${4#*:}"; else unset TMP; fi; shift 4; cd -- "$repo_root" && export PATH="$msys_root/ucrt64/bin:$msys_root/usr/bin:$PATH" && exec make "$@"'
+$bashPrefixArgs = @('-lc', $bashCommand, 'z23-windows-make', $repoRoot, $msysRoot,
+                    $NativeTempState, $NativeTmpState)
+$bashArgs = $bashPrefixArgs + $MakeArgs.ToArray()
 
 if ($DryRun) {
     Write-Output "Z23_CHECKOUT_ROOT_MSYS=$repoRoot"
@@ -152,8 +159,7 @@ if ($NeedsBootstrap) {
     # and critical-error UI before spawning Bash: a broken cc1 must return an
     # exit status, never block an unattended setup behind a desktop popup.
     Enable-Z23NativeErrorMode
-    $BootstrapArgs = @('-lc', $bashCommand, 'z23-windows-make', $repoRoot,
-                       $msysRoot, 'build/bin/z23-headless-run.exe')
+    $BootstrapArgs = $bashPrefixArgs + @('build/bin/z23-headless-run.exe')
     & $Bash @BootstrapArgs
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $Runner)) {
         Write-Error -Message 'z23-make: REFUSE: failed to build the native process-tree launcher' -ErrorAction Continue
