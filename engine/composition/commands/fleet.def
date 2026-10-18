@@ -581,7 +581,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "fleet.steer.wiki-find", "fleet.steer", "",
-    "Discover bounded untrusted wiki knowledge",
+    "Find wiki pages on another node through a steer grant",
     "Requires the evidence grant scope when a grant is supplied. Required q "
     "is a nonempty string of at most 128 bytes. Reuses local wiki "
     "discovery with optional exact topic and applies_to filters (AND) and "
@@ -605,7 +605,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "fleet.steer.wiki-read", "fleet.steer", "",
-    "Read an exact retained wiki revision in signed body chunks",
+    "Read a wiki revision on another node through a steer grant",
     "Requires the evidence grant scope when a grant is supplied. Required id "
     "is a 64-character lowercase signed wiki revision id. Offset is 0..16384 "
     "bytes and bytes is 1..1024, defaulting to 0 and 1024. Reuses the native "
@@ -627,7 +627,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_COMMAND(
     "fleet.steer.wiki-write", "fleet.steer", "",
-    "Create or revise receiver-held wiki knowledge atomically",
+    "Write a wiki page on another node through an attributable steer grant",
     "Publishes PUBLIC knowledge signed by this node and replicated to peers. "
     "Requires an explicit attributable wiki-write grant. Required request_key "
     "is a stable token of at most 128 bytes; expected is absent for creation "

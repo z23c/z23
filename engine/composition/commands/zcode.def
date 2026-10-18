@@ -4156,7 +4156,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_network_delegate)
 
 ZCL_COMMAND_READY_READ(
-    "zcode.network.status", "zcode.network", "", "Inspect DHT status",
+    "zcode.network.status", "zcode.network", "", "Inspect ZCODE DHT state; TCP peers are core network status",
     "Reads the live daemon's Noise-bound ZCODE DHT state: enablement or named "
     "disablement, stable local node ID, fixed resource bounds, authenticated "
     "and cold contact counts, query/probe/frame counters, persistence state, "
@@ -4172,7 +4172,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_network_status)
 
 ZCL_COMMAND_READY_READ(
-    "zcode.network.peers", "zcode.network", "", "List DHT contacts",
+    "zcode.network.peers", "zcode.network", "", "List ZCODE DHT contacts; TCP peers are core network peers list",
     "Reads one bounded page of directly authenticated or cold-persisted DHT "
     "contacts from the live daemon. Rows contain node ID, bucket, local "
     "connected/cold/probing state, last-seen age, saturating failure count, "
