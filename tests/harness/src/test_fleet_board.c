@@ -5222,6 +5222,70 @@ static int test_fleet_wiki_find_page_cap(void)
     return failures;
 }
 
+static void fb_matched_join(const struct json_value *r, char *out, size_t cap)
+{
+    const struct json_value *m = json_get(json_at(json_get(r, "entries"), 0), "matched");
+    out[0] = 0;
+    for (size_t i = 0; m && i < json_size(m); i++)
+        (void)snprintf(out + strlen(out), cap - strlen(out), "%s%s",
+                       i ? "," : "", json_get_str(json_at(m, i)));
+}
+
+static bool fb_find_matched(struct fb_rpc_env *e, const char *q, size_t *returned,
+                            char *joined, size_t cap)
+{
+    struct json_value r;
+    if (!fb_rpc_op(e, "wiki_find", "q", q, NULL, NULL, &r)) return false;
+    *returned = (size_t)json_get_int(json_get(&r, "returned"));
+    fb_matched_join(&r, joined, cap);
+    json_free(&r);
+    return true;
+}
+
+static int test_fleet_wiki_find_matched_fields(void)
+{
+    int failures = 0;
+    TEST("fleet wiki: find searches lesson rule and why, not evidence, and "
+         "names matched fields in fixed order") {
+        static struct fb_rpc_env e;
+        char joined[96];
+        size_t returned = 99;
+        ASSERT(fb_rpc_env_open(&e));
+        const int64_t now = INT64_C(5000000);
+        char text[512];
+        fb_entry_json(text, sizeof(text), "s", "{\"rule\":\"Quokka first.\","
+            "\"why\":\"w\",\"evidence\":\"e\"}", "");
+        ASSERT(fb_test_ingest_page(&e.db, "p-rule", text, 0, now));
+        fb_entry_json(text, sizeof(text), "s", "{\"rule\":\"r\","
+            "\"why\":\"Because wombat.\",\"evidence\":\"e\"}", "");
+        ASSERT(fb_test_ingest_page(&e.db, "p-why", text, 1, now));
+        fb_entry_json(text, sizeof(text), "s", "{\"rule\":\"r\",\"why\":\"w\","
+            "\"evidence\":\"see numbat.md\"}", "");
+        ASSERT(fb_test_ingest_page(&e.db, "p-evidence", text, 2, now));
+        fb_entry_json(text, sizeof(text), "emu summary", "{\"rule\":\"emu rule\","
+            "\"why\":\"emu why\",\"evidence\":\"e\"}", "\"emu\"");
+        ASSERT(fb_test_ingest_page(&e.db, "emu-page", text, 3, now));
+
+        ASSERT(fb_find_matched(&e, "QUOKKA", &returned, joined, sizeof(joined)));
+        ASSERT_EQ((int64_t)returned, 1);
+        ASSERT_STR_EQ(joined, "rule");
+        ASSERT(fb_find_matched(&e, "wombat", &returned, joined, sizeof(joined)));
+        ASSERT_EQ((int64_t)returned, 1);
+        ASSERT_STR_EQ(joined, "why");
+        ASSERT(fb_find_matched(&e, "numbat", &returned, joined, sizeof(joined)));
+        ASSERT_EQ((int64_t)returned, 0);
+        ASSERT(fb_find_matched(&e, "emu", &returned, joined, sizeof(joined)));
+        ASSERT_EQ((int64_t)returned, 1);
+        ASSERT_STR_EQ(joined, "slug,summary,applies_to,rule,why");
+        ASSERT(fb_find_matched(&e, "", &returned, joined, sizeof(joined)));
+        ASSERT_EQ((int64_t)returned, 4);
+        ASSERT_STR_EQ(joined, "");
+        fb_rpc_env_close(&e);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 struct fb_query_vm { uint64_t steps, statements; };
 static int fb_query_vm_trace(unsigned type, void *context, void *statement, void *unused)
 {
@@ -6687,6 +6751,7 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_evidence_completion();
     failures += test_fleet_wiki_find_edges();
     failures += test_fleet_wiki_find_page_cap();
+    failures += test_fleet_wiki_find_matched_fields();
     failures += test_fleet_wiki_query_cost();
     failures += test_fleet_wiki_query_envelopes();
     failures += test_fleet_board_quota_does_not_score_relay();

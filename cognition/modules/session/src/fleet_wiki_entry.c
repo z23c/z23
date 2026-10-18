@@ -195,19 +195,56 @@ static bool contains_folded(const char *hay, const char *needle)
     return false;
 }
 
-bool fleet_wiki_entry_matches(const struct json_value *entry,
-                              const char *needle)
+static bool applies_to_matches(const struct json_value *entry, const char *needle)
 {
-    if (!entry || !needle)
-        return false;
-    if (contains_folded(json_get_str(json_get(entry, "topic")), needle) ||
-        contains_folded(json_get_str(json_get(entry, "summary")), needle))
-        return true;
     const struct json_value *applies = json_get(entry, "applies_to");
     for (size_t i = 0; applies && i < json_size(applies); i++)
         if (contains_folded(json_get_str(json_at(applies, i)), needle))
             return true;
     return false;
+}
+
+static bool lesson_field_matches(const struct json_value *entry,
+                                 const char *key, const char *needle)
+{
+    const struct json_value *lessons = json_get(entry, "lessons");
+    for (size_t i = 0; lessons && i < json_size(lessons); i++)
+        if (contains_folded(json_get_str(json_get(json_at(lessons, i), key)),
+                            needle))
+            return true;
+    return false;
+}
+
+size_t fleet_wiki_entry_matched_fields(const struct json_value *entry,
+    const char *slug, const char *needle, const char *out[FLEET_WIKI_MATCH_FIELDS])
+{
+    size_t n = 0;
+    if (!entry || !needle || !needle[0])
+        return 0;
+    if (slug && contains_folded(slug, needle))
+        out[n++] = "slug";
+    if (contains_folded(json_get_str(json_get(entry, "topic")), needle))
+        out[n++] = "topic";
+    if (contains_folded(json_get_str(json_get(entry, "summary")), needle))
+        out[n++] = "summary";
+    if (applies_to_matches(entry, needle))
+        out[n++] = "applies_to";
+    if (lesson_field_matches(entry, "rule", needle))
+        out[n++] = "rule";
+    if (lesson_field_matches(entry, "why", needle))
+        out[n++] = "why";
+    return n;
+}
+
+bool fleet_wiki_entry_matches(const struct json_value *entry,
+                              const char *needle)
+{
+    if (!entry || !needle)
+        return false;
+    if (!needle[0])
+        return true;
+    const char *fields[FLEET_WIKI_MATCH_FIELDS];
+    return fleet_wiki_entry_matched_fields(entry, NULL, needle, fields) > 0;
 }
 
 static bool wiki_query_applies(const struct json_value *entry, const char *exact)

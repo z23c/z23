@@ -1134,13 +1134,35 @@ static bool fb_find_item_project(const struct db_fleet_board_post *row,
         json_push_kv_bool(item, "summary_omitted", mode == 2);
 }
 
+static bool fb_find_item_matched(const struct fb_find_context *c,
+    const struct db_fleet_board_post *row, const struct json_value *entry,
+    struct json_value *item)
+{
+    const char *fields[FLEET_WIKI_MATCH_FIELDS];
+    size_t n = fleet_wiki_entry_matched_fields(entry, row->post.slug,
+        c->query.filters.q, fields);
+    struct json_value matched;
+    json_init(&matched); json_set_array(&matched);
+    bool ok = true;
+    for (size_t i = 0; ok && i < n; i++) {
+        struct json_value name;
+        json_init(&name); json_set_str(&name, fields[i]);
+        ok = json_push_back(&matched, &name);
+        json_free(&name);
+    }
+    if (ok) ok = json_push_kv(item, "matched", &matched);
+    json_free(&matched);
+    return ok;
+}
+
 static enum fleet_wiki_visit_result fb_find_emit(struct fb_find_context *c,
     const struct db_fleet_board_post *row, const struct json_value *entry)
 {
     for (unsigned mode = 0; mode < 3; mode++) {
         struct json_value item;
         json_init(&item);
-        if (!fb_find_item_project(row, entry, mode, &item)) {
+        if (!fb_find_item_project(row, entry, mode, &item) ||
+            !fb_find_item_matched(c, row, entry, &item)) {
             json_free(&item);
             return FLEET_WIKI_VISIT_FAILED;
         }

@@ -179,8 +179,10 @@ ZCL_COMMAND_READY_READ(
     "fleet.wiki.find", "fleet.wiki", "",
     "Find structured knowledge entries",
     "Read-only and local: never contacts a peer and never waits. Returns at "
-    "most 8 entries whose topic, applies_to, summary or slug contains `q` "
-    "(ASCII case-insensitive, at most 128 bytes; an empty `q` matches all), "
+    "most 8 entries whose topic, applies_to, summary, slug or lesson rule or why "
+    "contains `q` (ASCII case-insensitive, at most 128 bytes; an empty `q` "
+    "matches all), each with a `matched` array naming the matching fields "
+    "(slug, topic, summary, applies_to, rule, why; empty for an empty `q`), "
     "with optional exact topic and applies_to filters (1..64 bytes, AND). "
     "Newest verifying revisions win; plain-text winners suppress older entries. "
     "At most 256 revisions are verified per call. A blocked_slug with reason "

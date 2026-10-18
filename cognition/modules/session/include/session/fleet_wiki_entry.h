@@ -48,11 +48,19 @@ enum fleet_wiki_parse_status fleet_wiki_entry_parse_checked(
 bool fleet_wiki_entry_parse(const char *text, size_t len,
                             struct json_value *out, const char **why_out);
 
-/* True when `needle` is a substring of the entry's topic, summary or any
- * applies_to string. Case is folded for ASCII letters only. An empty needle
- * matches every entry. */
+/* True when `needle` is a substring of the entry's topic, summary, any
+ * applies_to string, or any lesson rule or why. Case is folded for ASCII
+ * letters only. An empty needle matches every entry. */
 bool fleet_wiki_entry_matches(const struct json_value *entry,
                               const char *needle);
+
+#define FLEET_WIKI_MATCH_FIELDS 6
+/* Names the fields of `entry` (and `slug`, when non-NULL) that contain
+ * `needle`, in the fixed order slug, topic, summary, applies_to, rule, why.
+ * Writes static strings to `out` and returns their count; an empty needle
+ * yields 0. */
+size_t fleet_wiki_entry_matched_fields(const struct json_value *entry,
+    const char *slug, const char *needle, const char *out[FLEET_WIKI_MATCH_FIELDS]);
 
 struct fleet_wiki_entry_query {
     const char *q;
