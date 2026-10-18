@@ -64,7 +64,7 @@ The example's steps map onto real node code as:
 
 - **Mint a coinbase** → the miner's block-template assembly (`engine/jobs/`) followed by the same `connect_block()` in `core/modules/validation`, driven live by the `utxo_apply` reducer stage (`engine/jobs/src/utxo_apply_stage.c`).
 - **Coinbase maturity** → `core/params/include/consensus/consensus.h` (`COINBASE_MATURITY`), enforced inside `connect_block()` for every real block, not just the sim.
-- **Spend the coin** → `wallet_create_transaction()` / `wallet_create_transaction_multi()` (`contexts/wallet/modules/wallet/include/wallet/wallet.h`) followed by `wallet_commit_transaction()`, surfaced through `z23 rpc sendtoaddress` on a live node.
+- **Spend the coin** → `wallet_create_transaction()` / `wallet_create_transaction_multi()` (`contexts/wallet/modules/wallet/include/wallet/wallet.h`) followed by `wallet_commit_transaction()`, surfaced through `z23 sendtoaddress` on a live node.
 - **UTXO existence/value query** → `coins_view_cache_have_coins()` and friends in `core/modules/coins/include/coins/coins_view.h` over the real on-disk `coins_kv` table, or `z23 core wallet utxo list` / `z23 core chain transaction get` at the command layer.
 
 ## See also

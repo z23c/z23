@@ -83,7 +83,7 @@ submitted through the normal transparent send path in
 `contexts/wallet/controllers/src/wallet_controller.c`. The RPC-facing entry point is
 `name_register` and its sibling handlers in
 `engine/controllers/src/name_controller.c` (also reachable via the
-`z23 rpc name_register`). The read side in this example —
+`z23 name_register`). The read side in this example —
 `explorer_index_block` → `apply_znam` — is the literal production path: a
 live node's forward-sync indexer calls it for every block, and the
 resulting `znam_names`/`znam_text_records`/`znam_addr_records` rows are

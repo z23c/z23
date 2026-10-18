@@ -82,13 +82,14 @@ nothing in this example is simulator-only.
 
 The RPC/controller glue is `rpc_swap_initiate` / `rpc_swap_participate` in
 `engine/controllers/src/swap_controller.c` (also exposed as the
-`z23 rpc swap_initiate` / `z23 rpc swap_participate`), which build the
+`z23 swap_initiate` / `z23 swap_participate`), which build the
 HTLC params, P2SH script, and local swap-state record from an
 initiate/participate RPC call.
 
 **Gap versus this example:** as of this writing there is no node-broadcast
 redeem/refund/settlement RPC path — an operator funds/redeems/refunds the
-resulting P2SH address by hand (e.g. raw-transaction RPCs via `z23 rpc`),
-the same way this example builds the redeem/refund transactions directly.
+resulting P2SH address by hand (e.g. raw-transaction RPC methods called
+directly, `z23 <method> '[params]'`), the same way this example builds the
+redeem/refund transactions directly.
 See `docs/SIMULATOR.md`'s HTLC/swap rows (Class B/C) for the current
 coverage boundary.

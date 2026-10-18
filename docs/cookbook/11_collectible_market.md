@@ -135,7 +135,7 @@ Ground-truth references this file was built from: `docs/examples/04_zslp_token.c
   hand; `z23 app tokens list` reads it
   back.
 - **Claim the storefront** — `name_register`
-  (`engine/controllers/src/name_controller.c`, `z23 rpc name_register`)
+  (`engine/controllers/src/name_controller.c`, `z23 name_register`)
   wires REGISTER end to end today. UPDATE/SET_TEXT are assembled the same
   way (`znam_build_update`/`znam_build_set_text` plus a normal transparent
   send) but have **no dedicated RPC yet** — see
@@ -148,12 +148,12 @@ Ground-truth references this file was built from: `docs/examples/04_zslp_token.c
   like this example's plain payment transaction.
 - **Escrow sale** — `swap_initiate` / `swap_participate`
   (`engine/controllers/src/swap_controller.c`, `z23 app swap initiate` /
-  `z23 rpc swap_participate`) build the same `htlc_build_script`
+  `z23 swap_participate`) build the same `htlc_build_script`
   contract this example built by hand. **Gap, same as example 06:** there
   is still no node-broadcast redeem/refund/settlement path today — an
   operator currently settles the P2SH address by hand (e.g. raw-transaction
-  RPCs via `z23 rpc`), the way this example settles it directly against
-  `simnet`.
+  RPC methods called directly (`z23 <method> '[params]'`), the way
+  this example settles it directly against `simnet`.
 - **File delivery** — once a buyer resolves the storefront `.onion`
   address above, the actual asset bytes ship over the P2P file market's
   chunk service (`fs_send_chunk_fast`), unlocked only after a

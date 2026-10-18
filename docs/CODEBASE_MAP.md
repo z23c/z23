@@ -754,7 +754,7 @@ sapling`); the `--input='{"query":"…"}'` form its schema advertises returns
   budget, 100-row cap, rate-gated 1 RPS.
 
 ### Escape hatch
-- `z23 rpc <method> '[params]'` — any node RPC method when no typed
+- a node RPC method called directly (`z23 <method> '[params]'`) when no typed
   command fits.
 
 ### REST API versioning

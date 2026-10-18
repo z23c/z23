@@ -136,7 +136,8 @@ Invariants:
   diagnostics must remain safe to call during incident response.
 - Command calls must record path, result code, and latency so `z23 ops
   timeline` and `z23 ops metrics` can explain agent activity.
-- The `z23 rpc` escape hatch is not the contract for new features. New
+- The direct node-RPC escape hatch (`z23 <method> '[params]'`) is not the
+  contract for new features. New
   stable functionality should get a typed command.
 
 Concrete files: `engine/modules/kernel/include/kernel/command_registry.h`,
