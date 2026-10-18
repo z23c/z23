@@ -261,10 +261,9 @@ its identity. `steer_deliver` accepts source only, not executables. See
 | Symptom | Cause and action |
 | --- | --- |
 | `z23: command not found` over a non-interactive shell | `z23` is not on the remote non-interactive `PATH`; call it by absolute path. |
-| `<leaf> --help` is refused | Help is not a flag. Use `z23 discover describe <leaf>` or `z23 discover schema <leaf>`. |
 | A generic leaf needs JSON input | Pass `--input='<json>'`, or `--input=-` to read stdin. |
 | `fleet board` or `fleet wiki` fails closed | No local node answered. Check `z23-dev status` and the RPC port and datadir. |
-| A machine is missing from `fleet machines` | It was never admitted or its record was not sealed by the operator key. Run `z23 fleet doctor`. |
+| A machine is missing from `fleet machines` | It was never admitted or its record was not sealed by the operator key. Run `z23 fleet doctor --datadir=<node-datadir>`. |
 | A Windows machine does not answer | Check its route. The terminal lane is also refused without `-terminalacceptunconfined`. |
 | macOS shell is refused | The confined terminal worker does not run on macOS; use a plain SSH `<host-alias>`. |
 | Vitals show a machine as unknown | Absent is not zero. Rerun the `vitals table` command above and check the route file. |
