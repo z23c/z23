@@ -116,6 +116,9 @@ from a hash, signature, test, or reproduction receipt.
   rebuilt inside a query.
 - [`WIKI.md`](WIKI.md) — the fleet wiki: `z23 wiki <q>`, entry schema,
   search behavior, agent-harness access and how to write a good page.
+- [`WORK_CARDS.md`](WORK_CARDS.md) — owner-signed public work cards on the
+  board: the card format, how state derives from claims and results, and
+  `z23 work list` / `z23 work show`.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
 - [`CHAOS_HARNESS.md`](CHAOS_HARNESS.md) — the two chaos/kill harnesses (the

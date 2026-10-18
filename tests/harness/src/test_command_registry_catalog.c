@@ -266,18 +266,18 @@ static int test_domain_leaf_counts(void)
     return failures;
 }
 
-static int test_fifteen_roots(void)
+static int test_sixteen_roots(void)
 {
     int failures = 0;
     const struct zcl_command_registry *reg = zcl_command_catalog();
-    TEST("root exposes exactly fifteen choices") {
+    TEST("root exposes exactly sixteen choices") {
         size_t roots = 0;
         for (size_t i = 0; i < reg->count; i++) {
             const char *p = reg->commands[i].parent;
             if (!p || !p[0])
                 roots++;
         }
-        ASSERT_EQ(roots, (size_t)15);
+        ASSERT_EQ(roots, (size_t)16);
         ASSERT(find_spec(reg, "status") != NULL);
         ASSERT(find_spec(reg, "core") != NULL);
         ASSERT(find_spec(reg, "app") != NULL);
@@ -291,6 +291,7 @@ static int test_fifteen_roots(void)
         ASSERT(find_spec(reg, "yardsale") != NULL);
         ASSERT(find_spec(reg, "zses") != NULL);
         ASSERT(find_spec(reg, "story") != NULL);
+        ASSERT(find_spec(reg, "work") != NULL);
         ASSERT(find_spec(reg, "fleet") != NULL);
         PASS();
     } _test_next:;
@@ -5873,7 +5874,7 @@ int test_command_registry_catalog(void)
     failures += test_describe_emits_observed_p99();
     failures += test_next_actions_fail_closed();
     failures += test_domain_leaf_counts();
-    failures += test_fifteen_roots();
+    failures += test_sixteen_roots();
     failures += test_yardsale_guide();
     failures += test_code_guide_leaf();
     failures += test_root_menu_budget();

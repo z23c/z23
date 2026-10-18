@@ -958,6 +958,14 @@ void zcl_native_handle_story_why(
 void zcl_native_handle_story_diff(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* Owner-signed public work cards (tools/command/native_work_command.c),
+ * bound by engine/composition/commands/work.def. */
+void zcl_native_handle_work_list(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_work_show(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_package_dev_score_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -3147,6 +3155,10 @@ enum {
     /* One rendered board line. A post's text is capped at 2 KiB. */
     FLEET_BOARD_LINE_MAX = 2560,
 };
+/* One raw board RPC round trip for leaves that read the board themselves
+ * (tools/command/native_work_command.c). Fills `reply` on failure. */
+bool zcl_native_fleet_board_call(struct json_value *in, struct json_value *body,
+                                 struct zcl_command_reply *reply);
 void zcl_native_handle_fleet_board_post(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

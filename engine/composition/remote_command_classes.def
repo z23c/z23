@@ -1142,6 +1142,15 @@ REMOTE_COMMAND_CLASS("story.show", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("story.why", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("story.diff", REMOTE_CLASS_NEVER, "")
 
+/* WORK — 2 never_remote leaves.
+ *
+ * Both read this node's own board through its local RPC, so the answer depends
+ * on the node asked. The trusted owner is the input `owner`, else the pinned
+ * WORK_OWNER_BOARD_KEY, else OWNER_REQUIRED. A remote caller reads the public
+ * room /board/room/work. */
+REMOTE_COMMAND_CLASS("work.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("work.show", REMOTE_CLASS_NEVER, "")
+
 /* AGENT-CONTRACT METHODS — 8 never_remote.
  *
  * The remaining flat methods from

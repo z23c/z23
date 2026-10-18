@@ -87,7 +87,7 @@ bool zcl_native_command_is_root(const char *word)
         return false;
     static const char *const roots[] = {
         "status", "core", "app", "dev", "ops", "discover", "code", "vault",
-        "zcode", "metaverse", "yardsale", "zses", "story", "plugin", "help",
+        "zcode", "metaverse", "yardsale", "zses", "story", "work", "plugin", "help",
         /* The fleet AI message board and wiki. A root rather than an
          * `ops.*` child for the same reason `general` is: it is what an
          * agent reads BEFORE it starts work and writes when it finishes,

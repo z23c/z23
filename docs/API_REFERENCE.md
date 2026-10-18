@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 967 |
-| Top-level roots | 15 |
-| Branches | 210 |
-| Leaves (dispatchable command paths) | 757 |
-| … `ready` (live handler in this build) | 664 |
+| Registry entries (branches + leaves) | 970 |
+| Top-level roots | 16 |
+| Branches | 211 |
+| Leaves (dispatchable command paths) | 759 |
+| … `ready` (live handler in this build) | 666 |
 | … `compat` (metadata only, names a fallback) | 63 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 62 |
@@ -107,6 +107,7 @@ Per source file:
 | `engine/composition/commands/zses.def` | 4 | 2 | 2 |
 | `engine/composition/commands/plugin.def` | 9 | 1 | 8 |
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
+| `engine/composition/commands/work.def` | 3 | 1 | 2 |
 | `engine/composition/commands/fleet_board.def` | 12 | 3 | 9 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
 | `engine/composition/commands/fleet.def` | 42 | 9 | 33 |
@@ -180,6 +181,7 @@ The root order below is a wire contract, not a presentation choice.
 | `zses` | `zses` | branch | ready | Session invites |
 | `plugin` | `plugin` | branch | ready | Signed plugin store |
 | `story` | `story` | branch | ready | Rooted causal views of development work |
+| `work` | `work` | branch | ready | Owner-signed public work cards on the node's board |
 | `fleet` | `fleet` | branch | ready | The fleet message board and wiki, and the owner's private fleet ledger |
 
 
@@ -1875,6 +1877,13 @@ represented by its children's sections.
 | `story show` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir` | `zcl.story_show.v1` | `z23 story show work-<task-prefix>` | Show one development work item as an exact-root causal story |
 | `story why` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir`, **`event`** | `zcl.story_why.v1` | `z23 story why work-<task-prefix> user_accepts` | Explain the exact causal chain for one development event |
 | `story diff` | ready | read / read / public · foreground/low | `workspace`, **`before`**, **`after`**, `datadir` | `zcl.story_diff.v1` | `z23 story diff work-<before-prefix> work-<after-prefix>` | Diff two exact-root development stories |
+
+### `work` — Owner-signed public work cards on the node's board
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `work list` | ready | read / read / operator · fast/low | `level`, `limit`, `owner` | `zcl.work_list.v1` | `z23 work list --level=haiku` | List the owner's public work cards with their derived state |
+| `work show` | ready | read / read / operator · fast/low | **`id`**, `owner` | `zcl.work_show.v1` | `z23 work show 4f2c0a9e...` | Show one work card whole with its claim and result posts |
 
 ### `fleet` — The fleet message board and wiki, and the owner's private fleet ledger
 

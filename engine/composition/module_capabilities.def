@@ -1421,3 +1421,5 @@ ZCL_MODULE_CAPABILITY("tools/command/native_device_host_shell.c", CAP_FS_READ|CA
 /* Inert release artifact byte handling. */
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/release_artifact.c", CAP_FS_WRITE, "checked-allocation failure diagnostics reach fprintf; package writes use the existing store APIs")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_release_artifact_command.c", CAP_FS_WRITE, "checked-allocation failure diagnostics reach fprintf; snapshot reads and CAS operations use existing typed APIs")
+ZCL_MODULE_CAPABILITY("tools/command/work_card.c", CAP_NONE, "pure validation of caller-supplied card bytes")
+ZCL_MODULE_CAPABILITY("tools/command/native_work_command.c", CAP_NONE, "reads board posts through the existing fleet_board RPC call; owns no storage, file or socket")

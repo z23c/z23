@@ -996,3 +996,13 @@ void zcl_native_handle_fleet_wiki_find(
             "read exact revision body chunks and verify the reconstructed post");
     }
 }
+
+/* One raw `fleet_board` RPC round trip for another native leaf that reads the
+ * board (work.list, work.show). `in` is the RPC's input object. On success
+ * `body` holds the node's reply; on failure `reply` already carries the same
+ * fail-closed refusal the board leaves give. */
+bool zcl_native_fleet_board_call(struct json_value *in, struct json_value *body,
+                                 struct zcl_command_reply *reply)
+{
+    return fb_call(reply, in, body, 0);
+}

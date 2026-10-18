@@ -219,7 +219,7 @@ static int t_menu_budgets(void)
 
     /* An alias is not a child of "", so it must not appear at the root and
      * must not move the pinned root count (test_command_registry_catalog's
-     * ASSERT_EQ(roots, 15) depends on exactly this). */
+     * the exact root count depends on exactly this). */
     ZNJ_CHECK("`join` and `update` do NOT render as root children",
               root_n > 0 && strstr(out, "\"join\"") == NULL &&
               strstr(out, "\"update\"") == NULL);
@@ -229,7 +229,7 @@ static int t_menu_budgets(void)
         if (!p || !p[0])
             roots++;
     }
-    ZNJ_CHECK("the registry still has exactly 15 roots", roots == 15);
+    ZNJ_CHECK("the registry still has exactly 16 roots", roots == 16);
 
     static const char *const branches[] = { "zcode", "zcode.node",
                                             "zcode.node.update" };

@@ -17,6 +17,7 @@
 #include "zses.def"
 #include "plugin.def"
 #include "story.def"
+#include "work.def"
 #include "fleet_board.def"
 #include "mind.def"
 #include "fleet_agents.def"
