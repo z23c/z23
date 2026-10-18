@@ -84,7 +84,9 @@ static const struct {
     [PLUGIN_ERR_KEY_MALFORMED] = { "PLUGIN_KEY_MALFORMED",
         "use a key file of exactly 32 bytes, as written by: z23 plugin keygen <key file>" },
     [PLUGIN_ERR_KEY_EXISTS] = { "PLUGIN_KEY_EXISTS",
-        "keygen never overwrites; choose a new key file path" }
+        "keygen never overwrites; choose a new key file path" },
+    [PLUGIN_ERR_INTERFACE] = { "PLUGIN_INTERFACE",
+        "use plugin run for interface 1 and plugin call for interface 2" }
 };
 
 const char *plugin_status_code(enum plugin_status status)
@@ -211,7 +213,8 @@ static bool pm_fields_read(const struct json_value *root,
     if (!schema || strcmp(schema, PM_SCHEMA) != 0 || !plugin_name_valid(name) ||
         !plugin_version_valid(version) ||
         !plugin_hex_valid(sha, PLUGIN_HEX_SHA3_512) ||
-        !iv || iv->type != JSON_INT || json_get_int(iv) < 1)
+        !iv || iv->type != JSON_INT || json_get_int(iv) < 1 ||
+        json_get_int(iv) > 2)
         return false;
     if (!pm_capabilities_read(json_get(root, "capabilities"), &out->capabilities))
         return false;

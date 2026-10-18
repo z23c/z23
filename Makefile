@@ -3260,6 +3260,7 @@ endif
 # plugin_run group asserts the platform refusal and never reads the fixture.
 ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
 RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_run_child$(ZCL_HOST_EXEEXT)
+RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_call_upper$(ZCL_HOST_EXEEXT)
 endif
 
 $(BUILD_DIR)/fixtures/rlc_child_v1$(ZCL_HOST_EXEEXT): $(RESIDENT_CONTRACT_FIXTURE_SRC)
@@ -3295,6 +3296,15 @@ $(BUILD_DIR)/fixtures/plugin_run_child$(ZCL_HOST_EXEEXT): $(PLUGIN_RUN_FIXTURE_S
 	@mkdir -p $(dir $@)
 	$(CC) -std=gnu2x -O2 -Wall -Wextra $(RESIDENT_CONFINED_STATIC) $(LIB_INCLUDES) \
 	  -o $@ $(PLUGIN_RUN_FIXTURE_SRC)
+
+# One-shot fixture plugin (interface 2) for the plugin_call group: a static
+# image that upper-cases standard input. Built on Linux only, like the
+# plugin_run fixture.
+PLUGIN_CALL_FIXTURE_SRC = tests/harness/fixtures/plugin_call_upper.c
+$(BUILD_DIR)/fixtures/plugin_call_upper$(ZCL_HOST_EXEEXT): $(PLUGIN_CALL_FIXTURE_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) -std=gnu2x -O2 -Wall -Wextra $(RESIDENT_CONFINED_STATIC) \
+	  -o $@ $(PLUGIN_CALL_FIXTURE_SRC)
 
 TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard tests/harness/src/*.c))

@@ -178,6 +178,8 @@ enum plugin_run_status prs_resolve(struct plugin_run *run)
         run->store = PLUGIN_ERR_NO_GENERATION;
     if (run->store == PLUGIN_OK)
         run->store = prs_verify(run, generation, &m);
+    if (run->store == PLUGIN_OK && m.interface_version != 1)
+        run->store = PLUGIN_ERR_INTERFACE;
     if (run->store != PLUGIN_OK) {
         prs_detail(run, "plugin store refused", plugin_status_code(run->store));
         return PLUGIN_RUN_ERR_STORE;

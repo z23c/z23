@@ -1,11 +1,13 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: plugin.pack, plugin.keygen, plugin.install, plugin.list, plugin.status, plugin.switch, plugin.rollback and
- *          plugin.run — the signed plugin store under ~/.z23/plugins and the
- *          confined supervisor for one installed plugin. Every refusal
+ * purpose: plugin.pack, plugin.keygen, plugin.install, plugin.list, plugin.status, plugin.switch, plugin.rollback,
+ *          plugin.run and plugin.call — the signed plugin store under ~/.z23/plugins and the
+ *          confined supervisor (run) and one-shot runner (call) for one installed plugin. Every refusal
  *          carries a stable PLUGIN_* code and the command that resolves it.
  *          The daemon is not contacted. */
 
 #include "base/safe_alloc.h"
+#include "command/lab.h"
+#include "command/lab_priv.h"
 #include "command/native_command.h"
 
 #include "json/json.h"
@@ -133,6 +135,22 @@ static void plg_next_install(struct zcl_command_reply *reply, const char *manife
     json_free(&follow_up);
 }
 
+/* The interface version from a JSON integer or its decimal string; absent
+ * means 1. false = not 1 or 2. */
+static bool plg_interface(const struct zcl_command_request *request, int *out)
+{
+    const struct json_value *v = request->input ? json_get(request->input, "interface") : NULL;
+    int64_t n = 1;
+    if (v && v->type == JSON_INT)
+        n = json_get_int(v);
+    else if (v && v->type == JSON_STR)
+        n = strcmp(json_get_str(v), "1") == 0 ? 1 : strcmp(json_get_str(v), "2") == 0 ? 2 : 0;
+    else if (v && !json_is_null(v))
+        n = 0;
+    *out = (int)n;
+    return n == 1 || n == 2;
+}
+
 void zcl_native_handle_plugin_pack(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -145,6 +163,10 @@ void zcl_native_handle_plugin_pack(const struct zcl_command_request *request,
     pack.version = plg_str(request, "version");
     pack.key_path = plg_str(request, "key");
     pack.out_dir = plg_str(request, "dir");
+    if (!plg_interface(request, &pack.interface_version)) {
+        plg_refuse(reply, PLUGIN_ERR_ARGUMENT, "pack", "interface must be 1 or 2");
+        return;
+    }
     if (!plg_capabilities(request, &pack.capabilities)) {
         plg_refuse(reply, PLUGIN_ERR_ARGUMENT, "pack",
                    "cap must name distinct capabilities from the plugin vocabulary");
@@ -160,6 +182,7 @@ void zcl_native_handle_plugin_pack(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_pack.v1");
     (void)json_push_kv_str(&reply->data, "name", pack.name);
     (void)json_push_kv_str(&reply->data, "version", pack.version);
+    (void)json_push_kv_int(&reply->data, "interface_version", pack.interface_version);
     (void)json_push_kv_str(&reply->data, "generation", result.generation);
     (void)json_push_kv_str(&reply->data, "public_key", result.public_key);
     (void)json_push_kv_str(&reply->data, "manifest", result.manifest_path);
@@ -474,22 +497,28 @@ static bool plg_seconds(const struct zcl_command_request *request, uint32_t *out
     return true;
 }
 
-static void plg_run_refuse(struct zcl_command_reply *reply, enum plugin_run_status st,
-                           enum plugin_status store, const char *name)
+static void plg_run_refuse_as(struct zcl_command_reply *reply, enum plugin_run_status st,
+                           enum plugin_status store, const char *what, const char *name)
 {
     if (st == PLUGIN_RUN_ERR_STORE) {
-        plg_refuse(reply, store, "run", name);
+        plg_refuse(reply, store, what, name);
         return;
     }
     char message[192];
-    (void)snprintf(message, sizeof(message), "plugin run refused: %s",
+    (void)snprintf(message, sizeof(message), "plugin %s refused: %s", what,
                    plugin_run_status_code(st));
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                           plugin_run_status_code(st), "run", false, false, message,
+                           plugin_run_status_code(st), what, false, false, message,
                            name ? name : "");
     (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s",
                    plugin_run_status_next_action(st));
     reply->error.human_action_required = true;
+}
+
+static void plg_run_refuse(struct zcl_command_reply *reply, enum plugin_run_status st,
+                           enum plugin_status store, const char *name)
+{
+    plg_run_refuse_as(reply, st, store, "run", name);
 }
 
 static void plg_run_report(struct zcl_command_reply *reply, const char *name,
@@ -540,4 +569,116 @@ void zcl_native_handle_plugin_run(const struct zcl_command_request *request,
         return;
     }
     plg_run_report(reply, name, &info, true);
+}
+
+/* ── plugin.call: one-shot interface 2 ─────────────────────────────── */
+
+struct plg_call_in {
+    const char *name, *stdin_data;
+    const char *args[LAB_ARGS_MAX];
+    size_t n_args;
+    uint32_t timeout_ms;
+};
+
+static bool plg_call_input(const struct zcl_command_request *request, struct plg_call_in *in)
+{
+    const struct json_value *a = request->input ? json_get(request->input, "args") : NULL;
+    memset(in, 0, sizeof(*in));
+    in->name = plg_str(request, "name");
+    in->stdin_data = plg_str(request, "stdin");
+    if (a && (a->type != JSON_ARR || a->num_children > LAB_ARGS_MAX))
+        return false;
+    for (size_t i = 0; a && i < a->num_children; i++) {
+        if (a->children[i].type != JSON_STR)
+            return false;
+        in->args[in->n_args++] = json_get_str(&a->children[i]);
+    }
+    return in->name && lab_in_uint(request, "timeout_ms", LAB_TIMEOUT_DEFAULT_MS,
+                                   LAB_TIMEOUT_MAX_MS, &in->timeout_ms) &&
+           (!in->stdin_data || strlen(in->stdin_data) <= LAB_STDIN_MAX);
+}
+
+#if defined(__linux__)
+static void plg_call_report(struct zcl_command_reply *reply, const struct plugin_manifest *m,
+                            const struct lab_proc *proc)
+{
+    struct json_value run;
+    json_init(&run);
+    json_set_object(&reply->data);
+    if (!json_push_kv_str(&reply->data, "schema", "zcl.plugin_call.v1") ||
+        !json_push_kv_str(&reply->data, "name", m->name) ||
+        !json_push_kv_str(&reply->data, "version", m->version) ||
+        !json_push_kv_str(&reply->data, "sha3_512", m->exe_sha3) ||
+        !json_push_kv_str(&reply->data, "generation", m->generation) ||
+        !json_push_kv_int(&reply->data, "elapsed_ms", proc->wall_us / 1000) ||
+        !lab_json_run(&run, proc, true, NULL) || !json_push_kv(&reply->data, "run", &run))
+        plg_run_refuse_as(reply, PLUGIN_RUN_ERR_FAILED, PLUGIN_OK, "call", m->name);
+    json_free(&run);
+}
+
+/* Run the verified executable once through the lab's confined runner: private
+ * workdir, no network, no fork. Declared capabilities grant nothing more. */
+static void plg_call_run(struct zcl_command_reply *reply, const struct plg_call_in *in,
+                         const struct plugin_manifest *m, const char *exe)
+{
+    struct lab_dirs dirs;
+    struct lab_proc proc;
+    struct lab_inputs lab = {
+        .stdin_data = in->stdin_data ? in->stdin_data : "",
+        .stdin_len = in->stdin_data ? strlen(in->stdin_data) : 0,
+        .args = in->args, .n_args = in->n_args,
+        .timeout_ms = in->timeout_ms, .mem_mb = LAB_MEM_DEFAULT_MB,
+    };
+    if (lab_dirs_open(&dirs) != LAB_OK) {
+        plg_refuse(reply, PLUGIN_ERR_IO, "call", "the lab state directory could not be prepared");
+    } else if (!lab_confinement_available()) {
+        plg_run_refuse_as(reply, PLUGIN_RUN_ERR_SANDBOX, PLUGIN_OK, "call", m->name);
+    } else if (!lab_proc_init(&proc)) {
+        plg_run_refuse_as(reply, PLUGIN_RUN_ERR_FAILED, PLUGIN_OK, "call", "allocation failed");
+    } else {
+        lab_run_binary(&dirs, exe, false, &lab, &proc);
+        if (proc.launch == LAB_LAUNCHED)
+            plg_call_report(reply, m, &proc);
+        else
+            plg_run_refuse_as(reply, proc.launch == LAB_LAUNCH_UNCONFINED
+                                         ? PLUGIN_RUN_ERR_SANDBOX : PLUGIN_RUN_ERR_SPAWN,
+                              PLUGIN_OK, "call", proc.detail);
+        lab_proc_free(&proc);
+    }
+}
+
+static void plg_call_current(const char *root, const struct plg_call_in *in,
+                             struct zcl_command_reply *reply)
+{
+    char exe[PATH_MAX];
+    struct plugin_manifest m;
+    enum plugin_status st = plugin_store_current(root, in->name, &m, exe, sizeof(exe));
+    if (st == PLUGIN_OK && m.interface_version != 2)
+        st = PLUGIN_ERR_INTERFACE;
+    if (st != PLUGIN_OK)
+        plg_refuse(reply, st, "call", in->name);
+    else
+        plg_call_run(reply, in, &m, exe);
+}
+#endif
+
+
+void zcl_native_handle_plugin_call(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    char root[PATH_MAX];
+    struct plg_call_in in;
+    if (!plg_begin(request, reply, "call", root, sizeof(root)))
+        return;
+    if (!plg_call_input(request, &in))
+        plg_refuse(reply, PLUGIN_ERR_ARGUMENT, "call",
+                   "name is required; timeout_ms is 1..60000, args at most 32 strings, "
+                   "stdin at most 65536 bytes");
+#if !defined(__linux__)
+    else
+        plg_run_refuse_as(reply, PLUGIN_RUN_ERR_PLATFORM, PLUGIN_OK, "call", in.name);
+#else
+    else
+        plg_call_current(root, &in, reply);
+#endif
 }

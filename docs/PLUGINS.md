@@ -81,7 +81,8 @@ is refused.
 - `name`: 1 to 32 characters from `a-z`, `0-9`, `-`; it must match the file
   name `NAME.plugin.json`.
 - `version`: 1 to 64 characters from `A-Za-z0-9.+-`.
-- `interface_version`: integer, at least 1.
+- `interface_version`: 1 (resident daemon, run by `plugin run`) or 2 (one-shot
+  program, run by `plugin call`); any other value is refused.
 - `capabilities`: distinct entries from `fs.read`, `fs.write`, `net.client`,
   `net.server`, `process.spawn`, `clock`, `ui.panel`.
 
@@ -153,7 +154,8 @@ z23 plugin install ./dist/hello.plugin.json
 - **Arguments.** `--name` and `--version` follow the manifest rules above.
   `--cap` is a comma-separated list of distinct capabilities, or a JSON array
   through `--input`; it is optional. `--dir` is the output directory, created
-  when missing (default: the current directory). `interface_version` is 1.
+  when missing (default: the current directory). `--interface` is 1 or 2
+  (default 1).
 - **Reproducible output.** The manifest lists capabilities in vocabulary order
   and Ed25519 signing is deterministic, so equal inputs give byte-identical
   files. The executable is hashed while it is copied, so the signed digest is
@@ -187,6 +189,7 @@ z23 plugin status hello                    # inspect one plugin without verifica
 z23 plugin switch hello <128-hex generation>
 z23 plugin rollback hello
 z23 plugin run hello [seconds]             # supervise the current generation
+z23 plugin call upper --stdin=abc          # run an interface 2 plugin once
 z23 plugin keygen ./publisher.key          # publisher: create a signing key
 z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key
 ```
@@ -303,6 +306,38 @@ crashes, the supervisor keeps retrying at the capped delay and changes no link.
 `fell_back` and the last `detail`. `PLUGIN_RUN_*` refusals carry a next action;
 a store refusal (for example `PLUGIN_EXE_HASH`) is reported under its own code.
 
+## One-shot plugins (interface 2)
+
+A plugin whose manifest has `interface_version` 2 is a plain program, not a
+resident daemon: `z23 plugin call NAME` runs its `current` generation once with
+`stdin` in, and returns the exit code or signal, `stdout`, `stderr` (bounded
+like `lab.run`), `elapsed_ms`, and the plugin's `name`, `version`, `sha3_512` and
+`generation`. `pack` takes `--interface=1|2` (default 1); `install` and `switch`
+accept both versions and refuse any other.
+
+```sh
+cc -std=c23 -O1 -static -o upper upper.c
+z23 plugin keygen ./publisher.key          # add the printed key to ~/.z23/plugins/trusted_keys
+z23 plugin pack ./upper --name=upper --version=1.0.0 --key=./publisher.key --interface=2 --dir=./dist
+z23 plugin install ./dist/upper.plugin.json
+z23 plugin switch upper <128-hex generation>
+z23 plugin call upper --stdin=abc          # run.stdout is "ABC"
+```
+
+- The signature, trust and executable SHA3-512 are verified again immediately
+  before each start; a changed executable is refused with `PLUGIN_EXE_HASH` and
+  never runs.
+- The program runs through the lab's confined runner (see
+  [LAB.md](LAB.md#confinement)): Landlock, seccomp, no network, no `fork`, a
+  private working directory removed afterwards, resource limits. Declared
+  capabilities are recorded and verified but grant nothing beyond that.
+- `call` takes `stdin` (at most 65536 bytes), `args` (at most 32 strings) and
+  `timeout_ms` (1 to 60000, default 5000).
+- `plugin run` refuses an interface 2 plugin and `plugin call` refuses an
+  interface 1 plugin, both with `PLUGIN_INTERFACE`.
+- Linux only: other hosts refuse with `PLUGIN_RUN_PLATFORM`; a host without
+  Landlock and seccomp refuses with `PLUGIN_RUN_SANDBOX`.
+
 ## Showing installed plugins in mesh status
 
 Off by default. With `-meshstatusplugins`, the signed capsule that `z23 ops
@@ -343,6 +378,7 @@ Every refusal carries `error.code` and `error.next_action`.
 | `PLUGIN_KEY_MALFORMED` | The key file is not exactly 32 bytes. |
 | `PLUGIN_KEY_EXISTS` | `keygen` never overwrites an existing path. |
 | `PLUGIN_IO` | A file operation failed; check permissions and free space. |
+| `PLUGIN_INTERFACE` | `plugin run` was given an interface 2 plugin, or `plugin call` an interface 1 plugin. |
 | `PLUGIN_RUN_ARGUMENT` | `run` was given no valid plugin name. |
 | `PLUGIN_RUN_PLATFORM` | Confined plugin processes are available on Linux only. |
 | `PLUGIN_RUN_CAPABILITY` | The manifest grants a capability that has no descriptor yet. |
@@ -355,4 +391,5 @@ Every refusal carries `error.code` and `error.next_action`.
 ```sh
 make CC=gcc-14 t-fast-exact ONLY=plugin_store
 make CC=gcc-14 t-fast-exact ONLY=plugin_run
+make CC=gcc-14 t-fast-exact ONLY=plugin_call
 ```

@@ -35,9 +35,10 @@ static bool pp_manifest_build(const struct plugin_pack_request *r,
 {
     int n = snprintf(out, cap,
                      "{\"schema\":\"z23.plugin.v1\",\"name\":\"%s\","
-                     "\"version\":\"%s\",\"interface_version\":1,"
+                     "\"version\":\"%s\",\"interface_version\":%d,"
                      "\"sha3_512\":\"%s\",\"capabilities\":[",
-                     r->name, r->version, sha);
+                     r->name, r->version, r->interface_version ? r->interface_version : 1,
+                     sha);
     bool first = true;
     for (unsigned i = 0; n > 0 && (size_t)n < cap && plugin_capability_name(i); i++) {
         if (!(r->capabilities & (1u << i)))
@@ -99,7 +100,8 @@ static enum plugin_status pp_sign_doc(const uint8_t seed[PLUGIN_KEY_FILE_BYTES],
 static bool pp_args_valid(const struct plugin_pack_request *r)
 {
     return r && r->exe_path && r->key_path && plugin_name_valid(r->name) &&
-           plugin_version_valid(r->version);
+           plugin_version_valid(r->version) &&
+           r->interface_version >= 0 && r->interface_version <= 2;
 }
 
 static enum plugin_status pp_out_dir(const char *dir)

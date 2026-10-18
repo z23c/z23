@@ -44,7 +44,8 @@ enum plugin_status {
     PLUGIN_ERR_KEY_MISSING,
     PLUGIN_ERR_KEY_INSECURE,
     PLUGIN_ERR_KEY_MALFORMED,
-    PLUGIN_ERR_KEY_EXISTS
+    PLUGIN_ERR_KEY_EXISTS,
+    PLUGIN_ERR_INTERFACE /* the command does not run this interface version */
 };
 
 /* Stable refusal code, for example "PLUGIN_KEY_UNTRUSTED". */
@@ -99,6 +100,14 @@ enum plugin_status plugin_store_install(const char *root,
  * first. */
 enum plugin_status plugin_store_switch(const char *root, const char *name,
                                        const char *generation);
+
+/* Resolve the current generation of name for a one-shot call: verify its
+ * signature, trust and executable SHA3-512 in full, then return the signed
+ * manifest and the absolute path of the executable. Refuses PLUGIN_ERR_NO_GENERATION
+ * when nothing is current. */
+enum plugin_status plugin_store_current(const char *root, const char *name,
+                                        struct plugin_manifest *out,
+                                        char *exe, size_t exe_cap);
 
 /* Make the last-good generation current. restored receives its id. */
 enum plugin_status plugin_store_rollback(const char *root, const char *name,

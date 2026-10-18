@@ -31,7 +31,7 @@ ZCL_COMMAND_READY_COMMAND(
     "Write the signed manifest and signature for a plugin executable",
     "Copies the executable to dir (default the current directory) as NAME "
     "and writes NAME.plugin.json (strict schema z23.plugin.v1, interface "
-    "version 1, the executable SHA3-512 and the capabilities in "
+    "version 1 or 2 (interface, default 1), the executable SHA3-512 and the capabilities in "
     "vocabulary order) and NAME.plugin.sig (ed25519 over SHA3-512 of the "
     "domain tag, a NUL and the manifest bytes) signed with the key file. "
     "The key file must be a regular file you own with mode 0600 and exactly "
@@ -40,7 +40,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_RESULT_BUDGET,
     "plugin,pack,publish,sign,manifest,ed25519,sha3,capabilities",
     "zcl.plugin_pack.input.v1", "zcl.plugin_pack.v1",
-    "exe,name,version,key,cap,dir", "exe",
+    "exe,name,version,key,cap,dir,interface", "exe",
     "z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key --cap=fs.read,clock --dir=./dist",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
@@ -177,3 +177,28 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_plugin_run)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.call", "plugin", "",
+    "Run an installed one-shot plugin once and return its output",
+    "Runs the current generation of an interface 2 plugin as a plain program "
+    "once: stdin in, exit status, stdout and stderr out, bounded like lab.run. "
+    "The signature, trust and executable SHA3-512 are verified again "
+    "immediately before the start. The program runs through the lab's confined "
+    "runner (Landlock, seccomp, no network, no fork, private workdir, resource "
+    "limits); declared capabilities grant nothing beyond that. An interface 1 "
+    "plugin is refused with PLUGIN_INTERFACE, as plugin.run refuses an "
+    "interface 2 plugin. Linux only; other hosts refuse with "
+    "PLUGIN_RUN_PLATFORM.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,call,one-shot,interface,stdin,stdout,confined,landlock,seccomp",
+    "zcl.plugin_call.input.v1", "zcl.plugin_call.v1",
+    "name,stdin,args,timeout_ms", "name",
+    "z23 plugin call upper --stdin=abc",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_plugin_call)

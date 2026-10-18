@@ -161,6 +161,10 @@ replayed, not re-run. Pass `fresh:true` to compile and run again.
 
 Through MCP the same leaves are `lab.run`, `lab.test` and `lab.show`.
 
+A lab file that reads stdin and writes stdout can be packed unchanged as a
+one-shot plugin (`z23 plugin pack --interface=2`) and run with `z23 plugin call`;
+see [PLUGINS.md](PLUGINS.md#one-shot-plugins-interface-2).
+
 ## Measured latency
 
 2026-10-18 on r1 (AMD Ryzen 9 7950X3D, GCC 14.2.0, Linux 6.8.0-139, load

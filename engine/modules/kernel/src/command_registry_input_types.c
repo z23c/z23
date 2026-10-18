@@ -604,13 +604,18 @@ static const struct cr_int_bound *cr_history_bound(const char *path,
     return NULL;
 }
 
-/* lab.run and lab.test: wall-clock and memory caps of the confined run. */
+/* lab.run, lab.test and plugin.call: wall-clock and memory caps of the confined
+ * run; plugin.pack: the interface version. */
 static const struct cr_int_bound *cr_lab_bound(const char *path, const char *key)
 {
     static const struct cr_int_bound bounds[] = {
         { "timeout_ms", 1, 60000 }, { "mem_mb", 1, 2048 }
     };
-    if (strcmp(path, "lab.run") != 0 && strcmp(path, "lab.test") != 0)
+    static const struct cr_int_bound interface = { "interface", 1, 2 };
+    if (strcmp(path, "plugin.pack") == 0 && strcmp(key, interface.key) == 0)
+        return &interface;
+    if (strcmp(path, "lab.run") != 0 && strcmp(path, "lab.test") != 0 &&
+        strcmp(path, "plugin.call") != 0)
         return NULL;
     for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
         if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
@@ -656,11 +661,13 @@ static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
     const struct cr_int_bound *bound = cr_device_host_bound(path, key);
     return bound ? bound : cr_device_package_bound(path, key);
 }
-/* lab.run and lab.test: stdin may be empty; args and cases are arrays. */
+/* lab.run, lab.test and plugin.call: stdin may be empty; args and cases are
+ * arrays. */
 static bool cr_match_lab(const char *path, const char *key,
                          const struct json_value *value, bool *type_ok)
 {
-    if (strncmp(path, "lab.", 4) != 0) return false;
+    if (strncmp(path, "lab.", 4) != 0 && strcmp(path, "plugin.call") != 0)
+        return false;
     const char *text = json_get_str(value);
     if (strcmp(key, "stdin") == 0)
         *type_ok = value->type == JSON_STR && text &&

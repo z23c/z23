@@ -1713,6 +1713,7 @@ ZCL_TEST_GROUP(toolgen)
 ZCL_TEST_GROUP(zssh)
 ZCL_TEST_GROUP(plugin_store)
 ZCL_TEST_GROUP(plugin_run)
+ZCL_TEST_GROUP(plugin_call)
 
 ZCL_TEST_GROUP(plugin_package)
 ZCL_TEST_GROUP(mcp_serve)

@@ -27,6 +27,7 @@ struct plugin_pack_request {
     const char *key_path;
     const char *out_dir;      /* created when missing; NULL means "." */
     unsigned capabilities;    /* bit i is plugin_capability_name(i) */
+    int interface_version;    /* 1 resident daemon, 2 one-shot; 0 means 1 */
 };
 
 struct plugin_pack_result {

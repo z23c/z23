@@ -518,6 +518,23 @@ enum plugin_status plugin_store_switch(const char *root, const char *name,
     return st == PLUGIN_OK ? ps_point(plugdir, "current", generation) : st;
 }
 
+enum plugin_status plugin_store_current(const char *root, const char *name,
+                                        struct plugin_manifest *out,
+                                        char *exe, size_t exe_cap)
+{
+    char plugdir[PLUGIN_PATH_MAX], generation[PLUGIN_HEX_SHA3_512 + 1];
+    enum plugin_status st = ps_plugin_dir(root, name, plugdir, sizeof(plugdir));
+    if (st != PLUGIN_OK)
+        return st;
+    if (!plugin_link_generation(plugdir, "current", generation))
+        return PLUGIN_ERR_NO_GENERATION;
+    st = plugin_verify_generation_manifest(root, name, generation, out);
+    if (st == PLUGIN_OK &&
+        !plugin_join(exe, exe_cap, plugdir, "generations", generation, name))
+        st = PLUGIN_ERR_ARGUMENT;
+    return st;
+}
+
 enum plugin_status plugin_store_rollback(const char *root, const char *name,
                                          char restored[PLUGIN_HEX_SHA3_512 + 1])
 {
