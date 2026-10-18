@@ -224,6 +224,34 @@ from a mesh peer. Their authority is the publisher signature checked against
 the owner's trust file on every install, switch and rollback; the node daemon
 state is untouched.
 
+## Trust and first use
+
+The behavior below was measured on an installed release on 2026-10-18.
+
+- `z23 plugin keygen <path>` writes the key file and prints its public key as
+  64 lowercase hex characters.
+- Install trusts only the publishers listed in `~/.z23/plugins/trusted_keys`,
+  one lowercase hex public key per line. The permission rule for the trust file
+  and the store directories is in [Permissions](#permissions); a violation is
+  refused with `PLUGIN_TRUST_INSECURE`.
+- `z23 plugin install <manifest>` verifies and stores a generation but does not
+  change `current`. Until `z23 plugin switch <name> <generation>` selects one,
+  `z23 plugin call` answers `PLUGIN_NO_GENERATION`. `z23 plugin list` shows the
+  stored generations and `current_state`.
+
+```sh
+z23 plugin keygen ./publisher.key
+mkdir -p ~/.z23/plugins
+chmod 700 ~/.z23 ~/.z23/plugins              # satisfies the Permissions rule
+printf '%s\n' <64-hex-public-key> >> ~/.z23/plugins/trusted_keys
+chmod 600 ~/.z23/plugins/trusted_keys       # satisfies the Permissions rule
+z23 plugin pack ./up --name=upper --version=1.0.0 --key=./publisher.key --interface=2 --dir=dist
+z23 plugin install dist/upper.plugin.json
+z23 plugin list
+z23 plugin switch upper <128-hex generation>
+z23 plugin call upper --stdin=abc          # run.stdout is "ABC"
+```
+
 ## Running a plugin
 
 `z23 plugin run NAME` verifies the `current` generation again and starts its
