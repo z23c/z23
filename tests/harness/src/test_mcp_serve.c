@@ -27,12 +27,15 @@
 #if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -833,6 +836,118 @@ static int case_session(const char *home, const char *checkout)
     return failures;
 }
 
+/* A stand-in for the node RPC endpoint: answers every POST with one recorded
+ * fleet_board wiki_find body, so the MCP projection is tested without a node.
+ * The real op is covered by the fleet_board group. */
+static const char ms_find_result[] =
+    "{\"result\":{\"ok\":true,\"identity_schema\":\"zcl.fleet_wiki_revision.v1\","
+    "\"query_schema\":\"zcl.fleet_wiki_query.v1\",\"entries\":[{\"topic\":"
+    "\"push-gate\",\"slug\":\"push-gate\",\"id\":\"%064d\",\"host\":\"%064d\","
+    "\"created_at\":1,\"expires_at\":2,\"updated\":\"2026-10-12T09:00:00Z\","
+    "\"summary\":\"The push gate runs the full lint.\",\"rules\":[\"Run the "
+    "full lint before pushing.\"],\"rules_omitted\":false,\"summary_omitted\":"
+    "false,\"matched\":[\"rule\"]}],\"returned\":1,\"scanned\":1,\"verified\":1,"
+    "\"truncated\":false,\"incomplete\":false,\"after_slug\":\"\","
+    "\"blocked_slug\":\"\",\"reason\":\"exhausted\"},\"error\":null,\"id\":1}";
+
+static void ms_stub_serve(int listen_fd)
+{
+    char body[2048], hdr[256], req[8192];
+    int bl = snprintf(body, sizeof(body), ms_find_result, 1, 2);
+    int hl = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        "Content-Length: %d\r\nConnection: close\r\n\r\n", bl);
+    for (;;) {
+        int fd = accept(listen_fd, NULL, NULL);
+        if (fd < 0)
+            _exit(0);
+        (void)recv(fd, req, sizeof(req), 0);
+        (void)!write(fd, hdr, (size_t)hl);
+        (void)!write(fd, body, (size_t)bl);
+        close(fd);
+    }
+}
+
+static pid_t ms_stub_start(const char *dir, int *port)
+{
+    struct sockaddr_in a = {.sin_family = AF_INET,
+                            .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t al = sizeof(a);
+    char path[PATH_MAX + 16];
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0 || bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0 ||
+        getsockname(fd, (struct sockaddr *)&a, &al) != 0 || listen(fd, 4) != 0)
+        return -1;
+    *port = ntohs(a.sin_port);
+    snprintf(path, sizeof(path), "%s/.cookie", dir);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fputs("dummyuser:dummypass\n", f);
+    fclose(f);
+    pid_t pid = fork();
+    if (pid == 0)
+        ms_stub_serve(fd);
+    close(fd);
+    return pid;
+}
+
+static bool ms_start_node(struct ms *m, const char *home, const char *checkout,
+                          const char *dd, int port, const char *errfile)
+{
+    char a1[PATH_MAX + 16], a2[PATH_MAX + 16], a3[32];
+    const char *args[] = {MS_BIN, "mcp", "serve", a1, a2, a3, NULL};
+    snprintf(a1, sizeof(a1), "--checkout=%s", checkout);
+    snprintf(a2, sizeof(a2), "--datadir=%s", dd);
+    snprintf(a3, sizeof(a3), "--rpcport=%d", port);
+    return ms_start(m, args, home, errfile) && ms_init(m);
+}
+
+static int case_wiki_search(const char *home, const char *checkout)
+{
+    int failures = 0;
+    char dd[PATH_MAX + 16], err[PATH_MAX + 32];
+    snprintf(dd, sizeof(dd), "%s/wikidd", home);
+    snprintf(err, sizeof(err), "%s/err_wiki.txt", home);
+    (void)mkdir(dd, 0700);
+    TEST_CASE("z23_search scope=wiki returns lesson matches; bad scope and no node are typed") {
+        struct ms m;
+        int port = 0, dead = 0;
+        pid_t stub = ms_stub_start(dd, &port);
+        ASSERT(stub > 0);
+        ASSERT(ms_start_node(&m, home, checkout, dd, port, err));
+        ASSERT(ms_tool(&m, 2, "z23_search", "{\"query\":\"lint\",\"scope\":\"wiki\"}"));
+        ASSERT(has(&m, "\"isError\":false"));
+        ASSERT(has(&m, "zcl.wiki_search.v1"));
+        ASSERT(has(&m, "push-gate"));
+        ASSERT(has(&m, "matched"));
+        ASSERT(has(&m, "Run the full lint before pushing."));
+        ASSERT(ms_tool(&m, 3, "z23_search", "{\"query\":\"lint\",\"scope\":\"bogus\"}"));
+        ASSERT(has(&m, "BAD_SCOPE"));
+        ASSERT(has(&m, "\"isError\":true"));
+        char before[MS_LINE / 8];
+        ASSERT(ms_tool(&m, 4, "z23_search", "{\"query\":\"status brief\"}"));
+        snprintf(before, sizeof(before), "%.*s", (int)sizeof(before) - 1, strstr(m.line, "core.status.brief"));
+        ASSERT(ms_tool(&m, 5, "z23_search", "{\"query\":\"status brief\",\"scope\":\"commands\"}"));
+        ASSERT(strstr(m.line, before) != NULL);
+        ASSERT_EQ(ms_finish(&m), 0);
+        kill(stub, SIGKILL);
+        waitpid(stub, NULL, 0);
+
+        /* A port nothing listens on: the leaf's own typed refusal, not a crash. */
+        pid_t gone = ms_stub_start(dd, &dead);
+        ASSERT(gone > 0);
+        kill(gone, SIGKILL);
+        waitpid(gone, NULL, 0);
+        ASSERT(ms_start_node(&m, home, checkout, dd, dead, err));
+        ASSERT(ms_tool(&m, 2, "z23_search", "{\"query\":\"lint\",\"scope\":\"wiki\"}"));
+        ASSERT(has(&m, "\"isError\":true"));
+        ASSERT(has(&m, "NODE_UNAVAILABLE"));
+        ASSERT_EQ(ms_finish(&m), 0);
+    } TEST_END
+    return failures;
+}
+
 /* The pure policy gate and the transport-neutral core, no server needed. */
 static int case_units(void)
 {
@@ -929,6 +1044,7 @@ int test_mcp_serve(void)
     failures += case_initialize(home, checkout, head);
     failures += case_not_toplevel(home, checkout);
     failures += case_session(home, checkout);
+    failures += case_wiki_search(home, checkout);
     TEST_DISCARD(test_rm_rf_recursive(home));
 #endif
     printf("=== mcp_serve: %d failures ===\n", failures);

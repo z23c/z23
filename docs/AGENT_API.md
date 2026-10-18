@@ -1470,6 +1470,10 @@ for agent harnesses that launch their own tools (Claude Code, Codex). It
 speaks newline-delimited JSON-RPC on stdin/stdout, handles one request at a
 time and logs to stderr only. Four tools keep the MCP tool listing near 2 KB:
 `z23_search`, `z23_describe`, `z23_run` and `z23_code`.
+`z23_search` takes an optional `scope`: `commands` (default) or `wiki`, which runs
+`fleet.wiki.find` in process and returns each entry's slug, topic, summary,
+`matched` and `rules`; without a reachable node it returns the leaf's typed
+`NODE_UNAVAILABLE` refusal, and any other scope is `BAD_SCOPE`.
 
 - `--checkout` is required. Without it the server exits with `NO_CHECKOUT`;
   it never uses the working directory. A relative path is refused
