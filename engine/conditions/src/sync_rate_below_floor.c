@@ -143,7 +143,8 @@ static int64_t sr_floor_bps_scaled(void)
     if (v && v[0]) {
         char *end = NULL;
         long long n = strtoll(v, &end, 10);
-        if (end && *end == '\0' && n > 0)
+        if (end && *end == '\0' && n > 0 &&
+            n <= INT64_MAX / SYNC_RATE_SCALE)
             return (int64_t)n * SYNC_RATE_SCALE;
     }
     return (int64_t)SYNC_RATE_DEFAULT_FLOOR_BPS * SYNC_RATE_SCALE;

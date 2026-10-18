@@ -37,6 +37,7 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SRBF_CHECK(name, expr) do { \
@@ -118,6 +119,55 @@ static void srbf_tick(struct srbf_fake_clock *fc, int64_t wall_s,
     condition_engine_tick();
 }
 
+static bool srbf_overflow_floor_uses_default(struct srbf_fake_clock *fc,
+                                              int64_t wall_s,
+                                              int64_t window_us)
+{
+    const char *old = getenv("ZCL_SYNC_RATE_FLOOR_BPS");
+    const bool old_was_set = old != NULL;
+    char *old_copy = old_was_set ? strdup(old) : NULL;
+    if (old_was_set && !old_copy)
+        return false;
+    if (setenv("ZCL_SYNC_RATE_FLOOR_BPS", "9223372036854776", 1) != 0) {
+        free(old_copy);
+        return false;
+    }
+
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    srbf_reset(&cm, &dm, &ms);
+    srbf_fake_clock_install(fc, wall_s);
+    sync_rate_below_floor_test_set_log_head_override(0);
+
+    struct p2p_node peer = {0};
+    peer.id = 1;
+    peer.starting_height = 10000;
+    peer.state = PEER_ACTIVE;
+    peer.services = NODE_NETWORK;
+    struct p2p_node *peers[1] = { &peer };
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    int64_t mono_us = 1000000000;
+    int64_t cursor = 0;
+    srbf_tick(fc, wall_s, mono_us, cursor, 0);
+    for (int i = 0; i < 5; i++) {
+        mono_us += window_us;
+        cursor++;
+        srbf_tick(fc, wall_s + 30 * (i + 1), mono_us, cursor, 0);
+    }
+    const bool tripped = sync_rate_below_floor_test_remedy_calls() == 1 &&
+                         blocker_exists("sync_rate_below_floor");
+    srbf_cleanup();
+
+    const int restore_rc = old_was_set
+                               ? setenv("ZCL_SYNC_RATE_FLOOR_BPS", old_copy, 1)
+                               : unsetenv("ZCL_SYNC_RATE_FLOOR_BPS");
+    free(old_copy);
+    return tripped && restore_rc == 0;
+}
+
 int test_sync_rate_below_floor(void);
 int test_sync_rate_below_floor(void)
 {
@@ -126,6 +176,9 @@ int test_sync_rate_below_floor(void)
     struct srbf_fake_clock fc;
     int64_t t0 = 4000000000;
     const int64_t WINDOW_US = 10 * 1000 * 1000; /* 10s per simulated window */
+
+    SRBF_CHECK("overflowing floor configuration falls back to the default",
+               srbf_overflow_floor_uses_default(&fc, t0, WINDOW_US));
 
     /* ---- (a) sustained below-floor rate with peers+work trips it ---- */
     {
