@@ -5541,6 +5541,10 @@ static bool b2_latency_in_scope(const struct zcl_command_spec *s)
            strncmp(s->path, "code.", 5) == 0;
 }
 
+/* Largest per-leaf response budget (65536) plus envelope slack, so a leaf
+ * that declares a large budget is timed rather than truncated. */
+enum { B2_LATENCY_WIRE = 65536 + 8192 };
+
 int command_registry_ready_read_latency_contract(void)
 {
     int failures = 0;
@@ -5556,7 +5560,7 @@ int command_registry_ready_read_latency_contract(void)
             const struct zcl_command_spec *s = &reg->commands[i];
             if (!b2_latency_in_scope(s))
                 continue;
-            char warm[ZCL_COMMAND_RESULT_BUDGET + 1];
+            static char warm[B2_LATENCY_WIRE];
             enum zcl_command_exit wcode = ZCL_COMMAND_EXIT_INTERNAL;
             (void)exec_leaf(reg, s, warm, sizeof(warm), &wcode);
         }
@@ -5564,7 +5568,7 @@ int command_registry_ready_read_latency_contract(void)
             const struct zcl_command_spec *s = &reg->commands[i];
             if (!b2_latency_in_scope(s))
                 continue;
-            char out[ZCL_COMMAND_RESULT_BUDGET + 1];
+            static char out[B2_LATENCY_WIRE];
             enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
             /* Dispatch with an empty object; leaves needing a required
              * positional fail input validation FAST (before any I/O) — still a
