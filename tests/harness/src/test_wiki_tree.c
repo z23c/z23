@@ -3,7 +3,8 @@
  * discover.wiki and discover.read over the fixture tree in
  * tests/fixtures/wiki_docs: summary extraction, children and paging, the
  * Commands line, confinement refusals, UTF-8 cuts, plain-text summaries,
- * envelope paging, installed-binary docs resolution and the response budget. */
+ * envelope paging, installed-binary docs resolution, the response budget and
+ * worst-case pages against the leaf budget. */
 
 #include "test/test_core.h"
 
@@ -741,6 +742,180 @@ static int wt_exe_docs(void)
     return failures;
 }
 
+/* Worst-case topic: a three-level topic path and WT_WC_PAGES pages, all with
+ * maximal names, titles and summaries made of characters that JSON escapes.
+ * The tree is built per run because names with quotes do not belong in the
+ * repository. */
+enum {
+    WT_WC_PAGES = 28,
+    WT_WC_NAME = 127,    /* WK_NAME_MAX - 1 */
+    WT_WC_LEVEL = 100,
+    WT_WC_OUT = 65536,
+};
+
+struct wt_wc {
+    char base[PATH_MAX], docs[PATH_MAX + 8];
+    char level[3][WT_WC_LEVEL + 1];
+    char topic[3 * (WT_WC_LEVEL + 1)];
+};
+
+/* `prefix` followed by `"x` pairs up to `len` bytes, then `tail`. */
+static void wt_wc_name(char *out, size_t len, const char *prefix,
+                       const char *tail)
+{
+    size_t o = (size_t)snprintf(out, len + 1, "%s", prefix);
+    size_t room = len - strlen(tail);
+    for (; o + 1 < room; o += 2)
+        memcpy(out + o, "\"x", 2);
+    for (; o < room; o++)
+        out[o] = 'x';
+    snprintf(out + o, strlen(tail) + 1, "%s", tail);
+}
+
+static void wt_wc_page(int i, char *name)
+{
+    char prefix[8];
+    snprintf(prefix, sizeof(prefix), "%02d", i);
+    wt_wc_name(name, WT_WC_NAME, prefix, ".md");
+}
+
+static bool wt_wc_text(char *out, size_t cap, size_t chars)
+{
+    static const char unit[] = "a\"b\\c \xc3\xa9 ";
+    size_t o = 0;
+    while (o + sizeof(unit) < cap && o < chars) {
+        memcpy(out + o, unit, sizeof(unit) - 1);
+        o += sizeof(unit) - 1;
+    }
+    out[o] = '\0';
+    return o > 0;
+}
+
+static bool wt_wc_make(struct wt_wc *w)
+{
+    char dir[PATH_MAX + 512];
+    char name[WT_WC_NAME + 1];
+    char title[400], summary[600], text[1100];
+    if (!test_mkdtemp(w->base, sizeof(w->base), "wiki_worst"))
+        return false;
+    snprintf(w->docs, sizeof(w->docs), "%s/docs", w->base);
+    bool ok = mkdir(w->docs, 0700) == 0 &&
+              wt_write(w->docs, "README.md", "# Worst\n\nWorst case.\n");
+    snprintf(dir, sizeof(dir), "%s", w->docs);
+    w->topic[0] = '\0';
+    for (int l = 0; ok && l < 3; l++) {
+        char tag[4];
+        snprintf(tag, sizeof(tag), "L%d", l);
+        wt_wc_name(w->level[l], WT_WC_LEVEL, tag, "");
+        snprintf(dir + strlen(dir), sizeof(dir) - strlen(dir), "/%s",
+                 w->level[l]);
+        snprintf(w->topic + strlen(w->topic), sizeof(w->topic) -
+                 strlen(w->topic), "%s%s", l ? "/" : "", w->level[l]);
+        ok = mkdir(dir, 0700) == 0 &&
+             wt_write(dir, "README.md", "# Level\n\nLevel.\n");
+    }
+    ok = ok && wt_wc_text(title, sizeof(title), 300) &&
+         wt_wc_text(summary, sizeof(summary), 500);
+    snprintf(text, sizeof(text), "# %s\n\n%s\n", title, summary);
+    for (int i = 0; ok && i < WT_WC_PAGES; i++) {
+        wt_wc_page(i, name);
+        ok = wt_write(dir, name, text);
+    }
+    return ok;
+}
+
+/* Request for one page of the worst-case topic, topic quotes escaped. */
+static void wt_wc_input(const struct wt_wc *w, int64_t after, char *in,
+                        size_t cap)
+{
+    size_t o = (size_t)snprintf(in, cap, "{\"docsdir\":\"%s\",\"topic\":\"",
+                                w->docs);
+    for (const char *p = w->topic; *p && o + 8 < cap; p++) {
+        if (*p == '"')
+            in[o++] = '\\';
+        in[o++] = *p;
+    }
+    snprintf(in + o, cap - o, "\",\"after\":%lld}", (long long)after);
+}
+
+/* Records the pages of one reply; false when the reply breaks the contract. */
+static bool wt_wc_page_ok(const struct json_value *root, int *seen, bool *more,
+                          int64_t *next_after, size_t *count)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *kids = json_get(data, "children");
+    const struct json_value *next = json_get(root, "next");
+    bool wiki_next = false;
+    for (size_t i = 0; i < json_size(next); i++)
+        wiki_next = wiki_next ||
+            !strcmp(json_get_str(json_get(json_at(next, i), "command")),
+                    "discover.wiki");
+    for (size_t i = 0; i < json_size(kids); i++) {
+        const char *p = strrchr(json_get_str(json_get(json_at(kids, i),
+                                                      "path")), '/');
+        int idx = p ? atoi(p + 1) : -1;
+        if (idx < 0 || idx >= WT_WC_PAGES || seen[idx]++)
+            return false;
+    }
+    *count = json_size(kids);
+    *more = json_get(data, "next_after") != NULL;
+    *next_after = json_get_int(json_get(data, "next_after"));
+    return json_get_bool(json_get(root, "ok")) && *count > 0 &&
+           wiki_next == *more;
+}
+
+static int wt_worst_case(void)
+{
+    int failures = 0;
+    struct wt_wc w;
+    bool made = false;
+    TEST("wiki tree: worst-case pages fit the leaf budget and a walk lists each child once") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), "discover.wiki", NULL);
+        char *out = malloc(WT_WC_OUT);
+        int seen[WT_WC_PAGES] = { 0 };
+        int64_t after = 0;
+        size_t pages = 0;
+        bool more = true;
+        ASSERT(out != NULL && spec != NULL);
+        ASSERT_EQ(spec->budget_bytes, ZCL_COMMAND_EXTENDED_LIST_BUDGET);
+        made = true;
+        ASSERT(wt_wc_make(&w));
+        while (more) {
+            char in[2048];
+            struct json_value root, input;
+            size_t count = 0, len;
+            int64_t next_after = 0;
+            wt_wc_input(&w, after, in, sizeof(in));
+            json_init(&input);
+            ASSERT(json_read(&input, in, strlen(in)));
+            enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+            len = zcl_command_registry_execute_json(
+                zcl_command_catalog(), spec, NULL, &input, false, NULL, NULL,
+                0, 0, NULL, out, WT_WC_OUT, &code);
+            json_free(&input);
+            ASSERT(len > 0 && len <= (size_t)spec->budget_bytes);
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+            json_init(&root);
+            ASSERT(json_read(&root, out, len));
+            bool ok = wt_wc_page_ok(&root, seen, &more, &next_after, &count);
+            json_free(&root);
+            ASSERT(ok);
+            ASSERT(!more || next_after == after + (int64_t)count);
+            after = next_after;
+            pages++;
+        }
+        ASSERT(pages >= 3);
+        for (size_t i = 0; i < WT_WC_PAGES; i++)
+            ASSERT_EQ(seen[i], 1);
+        free(out);
+        PASS();
+    } _test_next:;
+    if (made)
+        TEST_DISCARD(test_rm_rf_recursive(w.base));
+    return failures;
+}
+
 int test_wiki_tree(void)
 {
     int failures = 0;
@@ -757,6 +932,7 @@ int test_wiki_tree(void)
     failures += wt_read_offsets();
     failures += wt_read_refusals();
     failures += wt_registry();
+    failures += wt_worst_case();
     failures += wt_exe_docs();
     return failures;
 }

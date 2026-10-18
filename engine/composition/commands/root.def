@@ -107,10 +107,12 @@ ZCL_COMMAND_READY_READ(
     "discover.wiki", "discover", "wiki",
     "Walk the docs knowledge tree one topic at a time",
     "One docs/ topic with no node running: its title and summary, immediate "
-    "sub-topics and pages (at most 64 per reply, resume with `after`), the "
+    "sub-topics and pages (a reply holds as many as fit its budget, at most 64; "
+    "resume with `after`), the "
     "commands its README names, and the next commands to run. An empty topic "
     "is the root; `docsdir` overrides the checkout's docs directory. Lesson "
-    "search over the signed fleet wiki is `fleet.wiki.find`.", 40960,
+    "search over the signed fleet wiki is `fleet.wiki.find`.",
+    ZCL_COMMAND_EXTENDED_LIST_BUDGET,
     "wiki,docs,topic,tree,knowledge,navigate", "zcl.discover.wiki_input.v1",
     "zcl.wiki_node.v1", "topic,after,docsdir", "topic",
     "z23 wiki agent",

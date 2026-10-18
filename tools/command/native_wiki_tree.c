@@ -11,10 +11,29 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Reply size proof. The leaf budget is ZCL_COMMAND_EXTENDED_LIST_BUDGET
+ * (16384 bytes) for the whole serialized reply. Worst case outside the
+ * children, with R the escaped topic path (at most 2 * WK_REL_MAX = 1024):
+ *   result wrapper and envelope next (input_json 512)        1200
+ *   data head: path R, title and summary 2 * 2 * WK_TEXT_MAX,
+ *     keys and counters 170                                    970 + R
+ *   commands: WK_CMD_CAP * (ZCL_COMMAND_MAX_PATH + 3)         2096
+ *   data.next: four hints, each carrying R, plus two child
+ *     names of at most 2 * WK_NAME_MAX and literals            640 + 4R
+ * so the fixed part is WK_FIXED_BASE = 5000 plus 6R. Children then get
+ * WK_DATA_BUDGET = 16384 - 5000 - 6R, never below 5240 (R = 1024), which
+ * holds the largest single child: 96 + R + 2 * WK_NAME_MAX + 2 * 2 *
+ * WK_TEXT_MAX = 2174. Each child is estimated at WK_CHILD_OVERHEAD (96, over
+ * the 51 literal bytes) plus its escaped path, title and summary, so the
+ * estimate bounds the serialized size. WK_CHILD_CAP only bounds work per
+ * reply; the byte budget alone keeps the reply inside the leaf budget. */
 enum {
     WK_CHILD_CAP = 64,        /* children per reply */
     WK_CMD_CAP = 16,          /* resolved commands per topic */
-    WK_DATA_BUDGET = 30000,   /* estimated child bytes per reply */
+    WK_REPLY_BUDGET = ZCL_COMMAND_EXTENDED_LIST_BUDGET,
+    WK_FIXED_BASE = 5000,     /* reply bytes outside children, excluding 6R */
+    WK_DATA_BUDGET = WK_REPLY_BUDGET - WK_FIXED_BASE, /* children, R = 0 */
+    WK_REL_COPIES = 6,        /* occurrences of the topic path outside children */
     WK_CHILD_OVERHEAD = 96,
 };
 
@@ -150,15 +169,17 @@ static bool wk_emit_children(const struct wk_node *node,
 {
     size_t i = node->after < 0 || (uint64_t)node->after > kids->n
                    ? kids->n : (size_t)node->after;
+    size_t rel_esc = wk_esc_len(node->rel);
+    size_t limit = WK_DATA_BUDGET - WK_REL_COPIES * rel_esc;
     size_t budget = 0;
     for (size_t used = 0; i < kids->n && used < WK_CHILD_CAP; i++, used++) {
         struct wk_meta m;
         if (!wk_child_meta(node, &kids->v[i], &m))
             return false;
-        budget += WK_CHILD_OVERHEAD + strlen(node->rel) +
-                  strlen(kids->v[i].name) + wk_esc_len(m.title) +
+        budget += WK_CHILD_OVERHEAD + rel_esc +
+                  wk_esc_len(kids->v[i].name) + wk_esc_len(m.title) +
                   wk_esc_len(m.summary);
-        if (budget > WK_DATA_BUDGET && used > 0)
+        if (budget > limit && used > 0)
             break;
         if (!wk_push_child(arr, node->rel, &kids->v[i], &m))
             return false;

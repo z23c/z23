@@ -106,10 +106,14 @@ Summaries come from the first paragraph of a README or page, rendered as
 plain text: `[text](target)` shows as `text` and `**`, `__` and backticks are
 dropped. `z23 discover read` returns the raw bytes.
 
-`z23 wiki` lists at most 64 children per reply. A truncated reply carries
-`next_after` and an envelope `next` entry that replays the request for the
-following children, for example `discover.wiki` with input
-`{"topic":"agent","after":64}`; the CLI form is `--after=<n>`. A topic README
+`z23 wiki` replies stay within 16384 bytes (the extended list budget): a
+reply lists as many children as fit, at most 64, so a page is up to 16 KiB
+and the full listing of a large topic takes several calls. A truncated reply
+carries `next_after` and an envelope `next` entry that replays the request
+for the following children, for example `discover.wiki` with input
+`{"topic":"agent","after":40}`; the CLI form is `--after=<n>`. Follow `next`
+until a reply has no `next_after`: every child appears exactly once across
+the pages. A topic README
 may carry one `Commands: ` line of backticked command paths;
 the reply lists those that resolve in the command registry. Lesson search
 over the signed wiki below is `z23 fleet wiki find`, not `z23 wiki`.
