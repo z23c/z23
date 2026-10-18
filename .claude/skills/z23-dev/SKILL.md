@@ -17,7 +17,7 @@ section for your step, with `grep -n '^## ' docs/DEVELOPING.md` to find it:
 | Edit | `3. Edit within ownership boundaries` |
 | Feedback and tests | `4. Receive fast local feedback`, `5. Build and focused proof` |
 | Integrate and push | `6. Integrate and push a coherent slice` |
-| Fleet policy | `Fleet entry and policy ownership`, `The normal loop` |
+| Fleet policy, hosts, priorities | `Maintainer hosts`, `Fleet entry and policy ownership`, `The normal loop` |
 
 This compatibility skill holds no project doctrine; edit the canonical
 documents instead.

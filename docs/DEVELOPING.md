@@ -54,6 +54,162 @@ unrelated history back into it. Recover a needed change as a bounded, reviewed
 patch against the current baseline.
 
 
+## Maintainer hosts
+
+This section holds the maintainer-host and fleet-coordination material that
+`AGENTS.md` routes here. Volunteers run `make` directly and can skip it.
+
+### First session on a maintainer host
+
+The `devon`, `devworker` and `devbuild` tools and `~/.config/dev-workers/*`
+exist only on maintainer hosts. Read the installed `OPERATIONS.md`,
+`STORAGE.md` and `WORKER.md`, then run `devworker where z23`. Their reserves
+supersede historical floors. Managed development runs remotely through `devon`
+routes; the laptop coordinates and reviews, without builds or worker copies.
+New to a fleet: [`agent/START_HERE.md`](agent/START_HERE.md).
+
+Reuse a sanctioned worktree and preserve owned dirty work. Route heavy builds,
+proofs, benchmarks and matrices through `devbuild --wait`, preserving job
+counts and native locks; the managed Mac takes one focused build, normally two
+jobs. Do not launch services, watchers or workers automatically. Apply the
+installed host job limit to the generic `-j"$(getconf _NPROCESSORS_ONLN)"`
+examples:
+
+```bash
+devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" z23
+devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" t-fast-exact ONLY=<exact-group>
+devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel TEST_PARALLEL_ARGS=--no-cache
+```
+
+Inspect before editing: `pwd`, `git status --short --branch`,
+`git fetch origin main`, `git rev-parse HEAD origin/main`. On a fresh clone,
+`make setup` (under `devbuild --wait`) arms dependencies and hooks. Descend the
+command catalog through `discover help <path>`, search with
+`discover search <query>`, inspect inputs with `discover schema <leaf>`. A
+command in a plan is a target until the selected binary lists it.
+
+[`HANDOFF.md`](HANDOFF.md) is read only for an explicit maintainer-host
+assignment; verify it against the running node with `build/bin/z23 status` and
+`build/bin/z23 dumpstate reducer_frontier`. Do not copy live height, soak or
+deployment status into durable entry documents.
+
+### Priority order and evidence
+
+Owner-adopted reset of 2026-10-16, recorded on board ref
+fleet-priorities-20261016. It supersedes earlier session rulings. The
+numbered owner rulings (R1, R2, ...) live on the fleet wiki page
+`fleet-rules`, read with `z23-dev fleet.wiki.read --slug=fleet-rules`; when
+an older doc or note conflicts with that ledger, the ledger wins. Cite
+rulings by number.
+
+1. **P0 (always first):** consensus, wallet/custody and public-node
+   correctness, and canonical node health. The blockchain wins resource
+   and authority contention. Builds, telemetry, package traffic and AI
+   workers may not delay chain advancement, block processing, transaction
+   relay, synchronization, peer health or wallet custody.
+2. **The fleet A+ scorecard** ([FLEET_SCORECARD.md](work/FLEET_SCORECARD.md))
+   orders all other work. Fleet tooling is first-class product.
+   - Tier 1, the unblockers: G9 landing throughput, G13 agent
+     productivity and review, G7 MCP harness, G4 wiki.
+   - Tier 2, the sovereign fleet core: G11 zero spend, G1 post-quantum
+     tunnel, G3 remote shell, G5 plugins and binary swarm, G6 seamless updates.
+   - Tier 3: G2 post-quantum release signing, G8 telemetry, G12 Mac parity.
+   Within a tier, the work closest to its A+ bar goes first; independent work
+   may proceed in parallel. Public-node V1 acceptance under
+   [MVP.md](MVP.md) C1-C8 and the product priorities in
+   [FORWARD_PLAN.md](work/FORWARD_PLAN.md) remain acceptance context.
+3. **Zero spend.** No fleet feature may require ZCL, an anchored ZID or a fee.
+   Work that needs a spend (such as the 1 ZCL payment rerun) waits for an
+   explicit owner authorization.
+
+Every unit, including core, crypto, consensus and custody, needs one reviewer
+who is not its author, of any model. Run full `make lint` once at the exact
+candidate tip before `dev land submit`; any lead may submit and drive its own
+reviewed work. Commits are signed and authored by the repository owner; a
+commit an AI model wrote ends with its `Co-Authored-By:` trailer naming that
+model (owner ruling R12).
+
+Every change should improve reuse, intent-to-working-software time, size,
+speed, safety, customization, exact reproduction or preservation.
+
+### Distributed production principles
+
+Treat participating machines as one distributed C23 production computer.
+Before computing, ask whether receiver-verified peer work can satisfy the
+exact request. Derive action roots early, attach duplicate requests to existing
+work, and distribute independent missing actions to qualified peers. Serialize
+dependencies, conflicting writes and protected resources, not unrelated work.
+Measure duplicate CPU, bytes, hashes, copies, queue waits and tool launches.
+Optimize complete accepted-task cost, including failed attempts, repair and
+review. Preserve unknown costs and conflicting evidence.
+
+Use existing CAS, action, receipt, queue and transport authorities. Keep
+verified components warm; transfer only missing content. Qualification precedes
+replacing old computation or artifacts. Downloaded C is inert: fetch/store,
+build/test, install/link and execute/deploy are separate authority
+transitions, and none grants canonical-datadir, wallet or consensus authority.
+A unit test cannot replace acceptance of a real consensus or custody
+invariant. Distinguish source review, fixtures, runtime observations, platform
+qualification and production acceptance.
+
+### Fleet coordination and access
+
+- Fleet agents coordinate through native tasks, candidates, actions and
+  receipts, never GitHub Issues or pull requests; committed `origin/main` is
+  the integration blackboard. Public volunteers submit work cards as `card:`
+  pull requests (see [CONTRIBUTING.md](../.github/CONTRIBUTING.md)), and issues
+  are for user-visible defects only.
+- Claim disjoint scopes through native tools. Keep one primary writer per
+  component and respect live leases; silence alone does not establish an
+  orphan. Obtain required independent review and persist handoffs so
+  coordination survives replacement of any worker.
+- Use typed native commands for a running node. Git, compilers, make and
+  bounded shell remain repository tools. New native commands need a recurring
+  operator or product need; reuse existing command families.
+
+Fleet access is a prerequisite for distributed work. Before dispatch verify
+authenticated access, a bounded command and exact-object transfer in both
+directions between each participating pair. Ping, stale status and board
+delivery do not qualify a route. Repair authorized routes directly rather than
+using the human as a message relay. Reuse existing SSH, tunnels and native
+transport; keep credentials and endpoints out of public messages.
+
+Each receiver controls workspace, commands, concurrency, access lifetime and
+revocation. Record readiness and missing access in native task, action and
+receipt evidence with aliases and object roots. Transport does not expand
+execution, production or custody authority. Recurring transport, access
+control and job execution belong in C23 node services; shell stays
+bootstrap/build/test glue. Protected native execution, hardware virtualization
+and emulated guests keep their qualification boundaries under
+[AGENT_FLEET.md](work/AGENT_FLEET.md). Lanes and trains:
+[agent/TRAIN_PROTOCOL.md](agent/TRAIN_PROTOCOL.md) and
+[agent/LANE_QUICKSTART.md](agent/LANE_QUICKSTART.md).
+
+### Platform baseline and completion
+
+Linux and arm64 macOS have native build paths; macOS needs no Linux VM. An
+arm64 Mac16,10 (macOS 26.0.1, Apple Clang 17) built the node and passed the
+dependency audit and isolated platform tests on 2026-08-26; that is not
+current-candidate chain-sync acceptance. Intel macOS is unverified. Details:
+[NATIVE_MACOS_RUNBOOK.md](work/NATIVE_MACOS_RUNBOOK.md#historical-platform-baseline).
+Linux tests do not qualify macOS.
+
+A coherent slice needs green focused acceptance, current generated files,
+required lint, independent review where required and no unrelated changes.
+Independently fetch and verify the exact remote SHA. Evidence applies only to
+its source, commit/base pair and policy; reconcile an unknown push before
+retrying. A status report does not suspend work. Remove obsolete code or
+instructions only after verifying ownership, callers and replacement
+acceptance; update the owning document in the same slice, regenerate derived
+references through canonical targets, and preserve historical evidence and
+active work.
+
+Source baseline: the one-time history baseline of 2026-10-12 grants no future
+rewrite authority (see [Managed source baseline](#managed-source-baseline)).
+Start from current main and recover old work as bounded reviewed patches.
+Recovery is copy-first under [TENACITY.md](TENACITY.md); deployment and custody
+remain owner-gated, and explicit scoped owner authorization persists.
+
 ## The normal loop
 
 1. Orient in the current checkout and mission.
@@ -361,7 +517,7 @@ dirty work, and use committed identities on `origin/main` as the shared
 integration blackboard.
 
 For fleet optimization, follow the
-[fleet speed north star](../AGENTS.md#fleet-speed-north-star).
+[fleet speed north star](work/AGENT_FLEET.md#consolidated-operating-model).
 Record the exact action inputs and receiving policy before spending CPU.
 Check qualified peer work and in-flight duplicates first; compare the measured
 cost of discovery, missing-byte transfer, verification, and binding with local

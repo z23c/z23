@@ -1,17 +1,8 @@
-# Claude compatibility entry point
+@AGENTS.md
 
-Claude is one replaceable coding-agent frontend for Z23. The project contract
-is model-neutral; this file only routes.
+Claude Code notes:
 
-- **Public volunteer** (you or a human you work for contributes from a fork):
-  read [`.github/CONTRIBUTING.md`](./.github/CONTRIBUTING.md) and nothing else
-  first. The plugin's `z23-work` skill runs its work-card loop.
-- **Maintainer or fleet member:** read [`AGENTS.md`](./AGENTS.md), then
-  [`docs/agent/START_HERE.md`](./docs/agent/START_HERE.md). Procedure is in
-  [`docs/DEVELOPING.md`](./docs/DEVELOPING.md), consulted by section; ordered
-  work is in [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md). On the
-  maintainer host only, [`docs/HANDOFF.md`](./docs/HANDOFF.md) holds live node
-  state, which must be rechecked through the node's typed status commands.
-
-Skills and UI integrations are adapters to those documents. They grant no extra
-consensus, custody, datadir, deployment or evidence authority.
+- Skills: `.claude/skills/` (`z23-dev`, `z23-lane`) route to the documents above. Plugins: `.claude/plugin` (volunteer `z23-work` loop, local) and `.claude/plugin-fleet` (opt-in fleet adapters).
+- Never read `docs/DEVELOPING.md` whole; list sections with `grep -n '^## ' docs/DEVELOPING.md` and open the linked one.
+- Nested `CLAUDE.md` files import the `AGENTS.md` beside them and load when you work in that directory.
+- Skills and plugins grant no extra consensus, custody, datadir, deployment or evidence authority.
