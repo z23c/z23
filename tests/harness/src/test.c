@@ -1468,6 +1468,7 @@ int main(int argc, char **argv)
     { extern int test_command_outcome(void); failures += test_command_outcome(); }
     failures += test_command_registry_latency();
     failures += test_native_api_contract();
+    failures += test_leaf_smoke();
     failures += test_metric_alerts();
     failures += test_db_validators();
     failures += test_peer_scoring();

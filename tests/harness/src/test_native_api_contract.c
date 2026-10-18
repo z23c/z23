@@ -1114,7 +1114,7 @@ static const char *const contract_leaves[] = {
     "ops.mesh.device.host.shell", "ops.mesh.terminal",
 };
 
-static bool contract_single_result(const char *wire)
+bool native_contract_single_result(const char *wire)
 {
     size_t n = strlen(wire);
     if (n < 2 || wire[0] != '{' || wire[n - 1] != '\n' ||
@@ -1147,9 +1147,9 @@ static int test_leaf_json_contract(void)
             ASSERT(strstr(u->wire, "zcl.command_schema.v1") != NULL);
             ASSERT(uniform_cli_in(path, datadir, NULL, 0, u->wire,
                                   sizeof(u->wire), &u->rc));
-            if (!contract_single_result(u->wire))
+            if (!native_contract_single_result(u->wire))
                 printf("  no-node run of %s is not one zcl.result.v1 document\n", path);
-            ASSERT(contract_single_result(u->wire));
+            ASSERT(native_contract_single_result(u->wire));
         }
     } TEST_END
     free(u);
