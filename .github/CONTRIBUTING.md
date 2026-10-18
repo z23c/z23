@@ -45,12 +45,20 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23    # first run fetches pinned sources
 build/bin/z23 discover help                  # smoke test: lists the commands
 ```
 
-After the first build, builds are offline. `make -j"$(getconf _NPROCESSORS_ONLN)" dev-bin`
-relinks a faster non-LTO `build/bin/z23-dev`. Run a registered test group with
-`make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group>`; `make t-list`
-names the groups. Never run the full test binary directly. Maintainers' hosts
-route heavy work through a build scheduler (`devbuild`); volunteers run `make`
-directly.
+After the first build, builds are offline. Common targets:
+
+```bash
+make vendor                  # rebuild missing vendor/lib archives from pinned sources
+make build-only              # compile check, no final link
+make dev-bin                 # faster non-LTO build/bin/z23-dev
+make t-fast ONLY=<group>     # one registered test group; make t-list names them
+make fast-ci                 # cache-aware lint, build and focused tests
+make lint                    # defensive-coding gates; must be clean
+```
+
+Add `-j"$(getconf _NPROCESSORS_ONLN)"` to run in parallel. Never run the full
+test binary directly. Maintainers' hosts route heavy work through a build
+scheduler (`devbuild`); volunteers run `make` directly.
 
 ## Find work
 
