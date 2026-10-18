@@ -458,10 +458,18 @@ static bool raw_input_read(int argc, char **argv, size_t consumed,
     char why[160];
     return valid && zcl_command_registry_input_validate(spec, input, why, sizeof(why));
 }
+/* `--help` is answered by the generic catalog path, not the raw transport. */
+static bool raw_help_requested(int argc, char **argv, size_t consumed)
+{
+    for (int i = (int)consumed + 1; i < argc; i++)
+        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) return true;
+    return false;
+}
 void zcl_native_device_host_runtime_exit_if_requested(int argc, char **argv)
 {
     size_t consumed = 0; enum host_command command = raw_selected_command(argc, argv, &consumed);
     if (command == HOST_NONE) return;
+    if (raw_help_requested(argc, argv, consumed)) return;
     const char *path = host_command_path[command];
     int result = ZCL_COMMAND_EXIT_INVALID;
     const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), path, NULL);

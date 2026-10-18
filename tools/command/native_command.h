@@ -2886,15 +2886,14 @@ void zcl_native_handle_dev_index_search(
     struct zcl_command_reply *reply);
 
 /* CLI-only: parses `z23 dev train <verb> --name=... --source=... [...]`
- * directly (repeated --source is not representable by the generic
- * --key=value flag parser), invokes the handler in-process, and prints one
- * JSON object plus (with --human) a human summary. Returns true iff it
- * handled the whole command line, setting *out_rc to the process exit code
- * that should be returned. Defined in native_dev_train_command.c, called
- * from zcl_native_command_main() before the generic flag parser runs. */
-bool zcl_native_dev_train_cli(const struct zcl_command_spec *spec,
-                              const char *const *words, size_t word_count,
-                              size_t consumed, int *out_rc);
+ * into the leaf input object (repeated --source is not representable by the
+ * generic --key=value flag parser). Returns false with a reason in `why`
+ * for an unknown flag or an overlong name. The caller validates the object
+ * and executes the leaf through the ordinary envelope path. */
+bool zcl_native_dev_train_cli_input(const char *const *words,
+                                    size_t word_count, size_t consumed,
+                                    struct json_value *input, char *why,
+                                    size_t why_cap);
 
 /* Dev-build-only executors.  The catalog binds these only when
  * ZCL_DEV_BUILD is set; release objects neither reference nor link them. */

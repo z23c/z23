@@ -299,12 +299,8 @@ bool zcl_native_mesh_terminal_try_attach(const char *const *words,
     if (zcl_native_mesh_terminal_hub_try(words, count, consumed, rc))
         return true;
     const char *pairing = terminal_pairing_arg(words, count, consumed);
-    if (!pairing || !pairing[0]) {
-        fprintf(stderr, "z23: refused: INVALID_ARGUMENTS: usage: "
-                        "z23 ops mesh terminal --pairing_id=<64hex>\n");
-        *rc = ZCL_COMMAND_EXIT_INVALID;
-        return true;
-    }
+    if (!pairing || !pairing[0])
+        return false;
     *rc = terminal_run(pairing);
     return true;
 }

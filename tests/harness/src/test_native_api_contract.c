@@ -1026,8 +1026,9 @@ cleanup:
     return ok;
 }
 /* Runs one CLI invocation with stdout redirected into a temp file. */
-static bool uniform_cli(const char *root, const char *const *args, int count,
-                        char *wire, size_t cap, int *rc)
+static bool uniform_cli_in(const char *root, const char *datadir,
+                           const char *const *args, int count, char *wire,
+                           size_t cap, int *rc)
 {
     FILE *output = tmpfile();
     int saved = dup(fileno(stdout));
@@ -1035,7 +1036,8 @@ static bool uniform_cli(const char *root, const char *const *args, int count,
     if (!output || saved < 0 || fflush(stdout) != 0 ||
         dup2(fileno(output), fileno(stdout)) < 0)
         goto cleanup;
-    *rc = zcl_native_command_main(root, args, count, "", 0, CHAIN_MAIN, false);
+    *rc = zcl_native_command_main(root, args, count, datadir, 0, CHAIN_MAIN,
+                                false);
     ok = fflush(stdout) == 0 && fseek(output, 0, SEEK_SET) == 0;
     if (ok) {
         size_t n = fread(wire, 1, cap - 1, output);
@@ -1047,6 +1049,12 @@ cleanup:
     if (output)
         fclose(output);
     return ok;
+}
+
+static bool uniform_cli(const char *root, const char *const *args, int count,
+                        char *wire, size_t cap, int *rc)
+{
+    return uniform_cli_in(root, "", args, count, wire, cap, rc);
 }
 
 static bool uniform_write(const char *path, const char *text)
@@ -1088,6 +1096,61 @@ static int test_uniform_help(void)
         ASSERT(uniform_cli("fleet", help, 3, u->wire, sizeof(u->wire), &u->rc));
         ASSERT_EQ(u->rc, ZCL_COMMAND_EXIT_OK);
         ASSERT(strstr(u->wire, "zcl.command_schema.v1") != NULL);
+    } TEST_END
+    free(u);
+    return failures;
+}
+
+/* Leaves whose raw argv readers once bypassed the generic --help handling or
+ * printed text instead of the result envelope. Each must answer --help with
+ * its JSON spec, and a run against an empty scratch datadir with no node must
+ * still yield one zcl.result.v1 document. */
+static const char *const contract_leaves[] = {
+    "ops.debug.explain", "ops.debug.producer", "ops.debug.profile",
+    "ops.debug.rom", "fleet.objectives", "fleet.triggers.list",
+    "dev.train.status", "dev.train.build", "dev.train.check",
+    "dev.train.drop", "dev.train.keep", "ops.mesh.device.host.client",
+    "ops.mesh.device.host.package.run", "ops.mesh.device.host.receiver",
+    "ops.mesh.device.host.shell", "ops.mesh.terminal",
+};
+
+static bool contract_single_result(const char *wire)
+{
+    size_t n = strlen(wire);
+    if (n < 2 || wire[0] != '{' || wire[n - 1] != '\n' ||
+        memchr(wire, '\n', n - 1) != NULL)
+        return false;
+    struct json_value doc;
+    bool ok = json_read(&doc, wire, n - 1) && doc.type == JSON_OBJ &&
+              strcmp(json_get_str_or(&doc, "schema", ""),
+                     "zcl.result.v1") == 0;
+    json_free(&doc);
+    return ok;
+}
+
+static int test_leaf_json_contract(void)
+{
+    int failures = 0;
+    struct uniform_dir *u = calloc(1, sizeof(*u));
+    TEST_CASE("every contract leaf answers --help and a no-node run in JSON") {
+        ASSERT(u);
+        char datadir[PATH_MAX];
+        test_make_tmpdir(datadir, sizeof(datadir), "native_api", "leaf_contract");
+        for (size_t i = 0; i < sizeof(contract_leaves) / sizeof(contract_leaves[0]); i++) {
+            const char *path = contract_leaves[i];
+            const char *help[] = {"--help"};
+            ASSERT(uniform_cli_in(path, datadir, help, 1, u->wire,
+                                  sizeof(u->wire), &u->rc));
+            ASSERT_EQ(u->rc, ZCL_COMMAND_EXIT_OK);
+            ASSERT(u->wire[0] == '{');
+            ASSERT(strstr(u->wire, path) != NULL);
+            ASSERT(strstr(u->wire, "zcl.command_schema.v1") != NULL);
+            ASSERT(uniform_cli_in(path, datadir, NULL, 0, u->wire,
+                                  sizeof(u->wire), &u->rc));
+            if (!contract_single_result(u->wire))
+                printf("  no-node run of %s is not one zcl.result.v1 document\n", path);
+            ASSERT(contract_single_result(u->wire));
+        }
     } TEST_END
     free(u);
     return failures;
@@ -3614,6 +3677,7 @@ int test_native_api_contract(void)
     failures += test_wallet_mutating_native_e2e();
     failures += test_wallet_security_refusal_flags();
     failures += test_uniform_help();
+    failures += test_leaf_json_contract();
     failures += test_uniform_input_file();
     failures += test_uniform_input_file_refusals();
     failures += test_format_flag_binds_leaf_input();

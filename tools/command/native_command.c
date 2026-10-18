@@ -3782,12 +3782,23 @@ static const struct zcl_command_spec *nc_main_resolve(
     return spec;
 }
 
+/* `--help` / `-h` after the resolved path: answered from the catalog, so no
+ * leaf-specific argv transport may consume it first. */
+static bool nc_main_words_request_help(const char *const *words, size_t count,
+                                       size_t consumed)
+{
+    for (size_t i = consumed; i < count; i++)
+        if (strcmp(words[i], "--help") == 0 || strcmp(words[i], "-h") == 0)
+            return true;
+    return false;
+}
+
 /* ops.rom watch mode and the dev-build-only CLI transports each intercept
  * dispatch for one exact leaf path before the ordinary flag parser runs
  * (ops.debug.rom takes empty input, so its --watch/--once/--interval flags
  * would otherwise be rejected as unknown keys). Order matches the leaf
  * checks this replaces exactly: ops.rom first, then (dev builds only)
- * events, retrieval, and train. */
+ * events and retrieval. */
 static bool nc_main_try_intercepts(const struct zcl_command_spec *spec,
                                    const char *const *words, size_t count,
                                    size_t consumed, const char *datadir,
@@ -3806,11 +3817,35 @@ static bool nc_main_try_intercepts(const struct zcl_command_spec *spec,
     if (strcmp(spec->path, "dev.retrieval.benchmark") == 0 &&
         nc_dev_retrieval_try_stream(spec, words, count, consumed, rc))
         return true;
-    if (strncmp(spec->path, "dev.train.", 10) == 0 &&
-        zcl_native_dev_train_cli(spec, words, count, consumed, rc))
-        return true;
 #endif
     return false;
+}
+
+/* Every flag-derived field back to "not seen", with an empty flag object. */
+static void nc_main_flags_reset(struct nc_main_state *st)
+{
+    json_init(&st->flags);
+    json_set_object(&st->flags);
+    st->npos = 0;
+    st->input_flag = NULL;
+    st->input_file_flag = NULL;
+    st->seen_input_file = false;
+    st->help = false;
+    st->view = NULL;
+    st->side = NULL;
+    st->cursor = NULL;
+    st->budget = 0;
+    st->max_items = 0;
+    st->seen_input = false;
+    st->seen_view = false;
+    st->seen_side = false;
+    st->seen_budget = false;
+    st->seen_max_items = false;
+    st->seen_cursor = false;
+    st->seen_format = false;
+    st->field_csv = NULL;
+    st->seen_field = false;
+    st->suggest_next = false;
 }
 
 enum nc_main_flag_result {
@@ -4064,28 +4099,7 @@ static enum nc_main_flag_result nc_main_apply_flag_group2(
  * no-arg entry point) but harmless for a caller to pass directly. */
 static bool nc_main_parse_flags(struct nc_main_state *st, int *rc)
 {
-    json_init(&st->flags);
-    json_set_object(&st->flags);
-    st->npos = 0;
-    st->input_flag = NULL;
-    st->input_file_flag = NULL;
-    st->seen_input_file = false;
-    st->help = false;
-    st->view = NULL;
-    st->side = NULL;
-    st->cursor = NULL;
-    st->budget = 0;
-    st->max_items = 0;
-    st->seen_input = false;
-    st->seen_view = false;
-    st->seen_side = false;
-    st->seen_budget = false;
-    st->seen_max_items = false;
-    st->seen_cursor = false;
-    st->seen_format = false;
-    st->field_csv = NULL;
-    st->seen_field = false;
-    st->suggest_next = false;
+    nc_main_flags_reset(st);
 
     bool flag_error = false;
     char flag_key[128];
@@ -4524,6 +4538,58 @@ static bool nc_main_prepare_input(struct nc_main_state *st, int *rc)
     return true;
 }
 
+#ifdef ZCL_DEV_BUILD
+/* dev.train.* verbs take repeated --source, which the generic flag parser
+ * cannot represent; their argv is parsed by the verb's own reader, and the
+ * resulting input object then follows the ordinary validate-and-execute
+ * path so the reply is the standard envelope. */
+static bool nc_main_is_train(const struct zcl_command_spec *spec)
+{
+    return strncmp(spec->path, "dev.train.", 10) == 0;
+}
+
+static void nc_main_train_flags(struct nc_main_state *st)
+{
+    nc_main_flags_reset(st);
+    st->help = nc_main_words_request_help(st->words, st->count, st->consumed);
+}
+
+static bool nc_main_train_input(struct nc_main_state *st, int *rc)
+{
+    char why[192];
+    json_init(&st->input);
+    if (!zcl_native_dev_train_cli_input(st->words, st->count, st->consumed,
+                                        &st->input, why, sizeof(why))) {
+        json_free(&st->input);
+        json_free(&st->flags);
+        nc_print_error(st->spec->path, "INVALID_ARGUMENTS", "parse", why,
+                       st->spec->path, "", "", "");
+        *rc = ZCL_COMMAND_EXIT_INVALID;
+        return false;
+    }
+    return nc_main_validate_input(st, rc) &&
+           nc_main_normalize_controls(st, rc);
+}
+#else
+static bool nc_main_is_train(const struct zcl_command_spec *spec)
+{
+    (void)spec;
+    return false;
+}
+
+static void nc_main_train_flags(struct nc_main_state *st)
+{
+    (void)st;
+}
+
+static bool nc_main_train_input(struct nc_main_state *st, int *rc)
+{
+    (void)st;
+    (void)rc;
+    return false;
+}
+#endif
+
 /* The caller provides this leaf's declared bounded envelope; the registry
  * still enforces the contract and any smaller caller-requested budget. */
 static bool nc_compare_leaf(const struct zcl_command_spec *spec)
@@ -4831,18 +4897,22 @@ int zcl_native_command_main_standalone(const char *root_word, const char *const 
     if (!st.spec)
         return rc;
 
-    if (nc_main_try_intercepts(st.spec, st.words, st.count, st.consumed,
+    if (!nc_main_words_request_help(st.words, st.count, st.consumed) &&
+        nc_main_try_intercepts(st.spec, st.words, st.count, st.consumed,
                                datadir, &rc))
         return rc;
 
-    if (!nc_main_parse_flags(&st, &rc))
+    bool train = nc_main_is_train(st.spec);
+    if (train)
+        nc_main_train_flags(&st);
+    else if (!nc_main_parse_flags(&st, &rc))
         return rc;
 
     int early = nc_main_run_without_handler(&st);
     if (early != NC_MAIN_CONTINUE)
         return early;
 
-    if (!nc_main_prepare_input(&st, &rc))
+    if (train ? !nc_main_train_input(&st, &rc) : !nc_main_prepare_input(&st, &rc))
         return rc;
 
     size_t out_cap = nc_main_response_capacity(st.spec);

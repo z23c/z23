@@ -809,45 +809,6 @@ static bool dvt_cli_flag(const char *word, const char *key, const char **value)
     return false;
 }
 
-static void dvt_print_json(const struct json_value *data)
-{
-    char buf[65536];
-    size_t needed = json_write(data, buf, sizeof(buf));
-    if (needed < sizeof(buf))
-        printf("%s\n", buf);
-    else
-        printf("{\"ok\":false,\"error\":\"result too large to render\"}\n");
-}
-
-/* A short human summary of one dev.train.* reply. Every field is optional
- * (each verb populates a different subset of them), so this prints only
- * what is present rather than assuming one leaf's shape. */
-static void dvt_human_summary(const struct json_value *data)
-{
-    const char *name = json_get_str(json_get(data, "name"));
-    const char *path = json_get_str(json_get(data, "path"));
-    const char *state = json_get_str(json_get(data, "state"));
-    const struct json_value *ok_v = json_get(data, "ok");
-    const struct json_value *commits_v = json_get(data, "commits");
-    const struct json_value *stacks_v = json_get(data, "stacks");
-    const char *next = json_get_str(json_get(data, "next"));
-
-    if (name && name[0])
-        printf("name:    %s\n", name);
-    if (path && path[0])
-        printf("path:    %s\n", path);
-    if (state && state[0])
-        printf("state:   %s\n", state);
-    if (ok_v && ok_v->type == JSON_BOOL)
-        printf("ok:      %s\n", json_get_bool(ok_v) ? "true" : "false");
-    if (commits_v && commits_v->type == JSON_INT)
-        printf("commits: %lld\n", (long long)json_get_int(commits_v));
-    if (stacks_v && stacks_v->type == JSON_ARR)
-        printf("stacks:  %zu\n", stacks_v->num_children);
-    if (next && next[0])
-        printf("next:    %s\n", next);
-}
-
 /* Every flag any dev.train verb accepts, in one place. The five verbs share
  * one CLI entry point because repeated --source is not representable by the
  * generic --key=value parser; splitting the parse into two small predicates
@@ -859,7 +820,6 @@ struct dvt_cli_opts {
     int64_t timeout_ms;
     char train[16];
     bool force;
-    bool human;
     bool once;
     bool dry_run;
     bool saw_timeout;
@@ -883,8 +843,6 @@ static bool dvt_cli_build_flag(const char *w, struct dvt_cli_opts *o)
         o->saw_timeout = true;
     } else if (dvt_cli_flag(w, "force", &value)) {
         o->force = true;
-    } else if (dvt_cli_flag(w, "human", &value)) {
-        o->human = true;
     } else {
         return false;
     }
@@ -929,14 +887,11 @@ static void dvt_cli_input(const struct dvt_cli_opts *o,
         (void)json_push_kv_bool(input, "dry_run", true);
 }
 
-bool zcl_native_dev_train_cli(const struct zcl_command_spec *spec,
-                              const char *const *words, size_t word_count,
-                              size_t consumed, int *out_rc)
+bool zcl_native_dev_train_cli_input(const char *const *words,
+                                    size_t word_count, size_t consumed,
+                                    struct json_value *input, char *why,
+                                    size_t why_cap)
 {
-    if (!spec || !out_rc)
-        return false;
-    *out_rc = ZCL_COMMAND_EXIT_OK;
-
     struct dvt_cli_opts opts;
     memset(&opts, 0, sizeof(opts));
 
@@ -945,56 +900,17 @@ bool zcl_native_dev_train_cli(const struct zcl_command_spec *spec,
         const char *value = NULL;
         if (dvt_cli_flag(w, "name", &value) && value &&
             strlen(value) >= sizeof(opts.name)) {
-            printf("{\"ok\":false,\"error\":\"--name exceeds 63 bytes; "
-                   "use --name=<name> with at most 63 bytes\"}\n");
-            *out_rc = ZCL_COMMAND_EXIT_INVALID;
-            return true;
+            (void)snprintf(why, why_cap,
+                           "--name exceeds 63 bytes; use --name=<name> with "
+                           "at most 63 bytes");
+            return false;
         }
         if (dvt_cli_build_flag(w, &opts) || dvt_cli_keep_flag(w, &opts))
             continue;
-        printf("{\"ok\":false,\"error\":\"unknown flag %s\"}\n", w);
-        *out_rc = ZCL_COMMAND_EXIT_INVALID;
-        return true;
+        (void)snprintf(why, why_cap, "unknown flag %s", w);
+        return false;
     }
-
-    struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    dvt_cli_input(&opts, &input);
-    bool human = opts.human;
-
-    char why[192];
-    if (!zcl_command_registry_input_validate(spec, &input, why, sizeof(why))) {
-        printf("{\"ok\":false,\"error\":\"%s\"}\n", why);
-        json_free(&input);
-        *out_rc = ZCL_COMMAND_EXIT_INVALID;
-        return true;
-    }
-
-    struct zcl_command_request request;
-    memset(&request, 0, sizeof(request));
-    request.spec = spec;
-    request.input = &input;
-
-    struct zcl_command_reply reply;
-    zcl_command_reply_init(&reply, "zcl.train.v1");
-    if (spec->handler)
-        spec->handler(&request, &reply);
-    else
-        dvt_fail(&reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                "DEV_BUILD_REQUIRED", "dispatch",
-                "dev train requires the dev binary", "z23-dev");
-
-    dvt_print_json(&reply.data);
-    if (human)
-        dvt_human_summary(&reply.data);
-    if (reply.status != ZCL_COMMAND_STATUS_PASSED &&
-        reply.status != ZCL_COMMAND_STATUS_ACCEPTED)
-        fprintf(stderr, "%s: %s (%s)\n", spec->path, reply.error.message,
-               reply.error.code);
-
-    *out_rc = (int)reply.exit_code;
-    zcl_command_reply_free(&reply);
-    json_free(&input);
+    json_set_object(input);
+    dvt_cli_input(&opts, input);
     return true;
 }

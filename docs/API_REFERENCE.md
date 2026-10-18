@@ -936,11 +936,11 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `ops debug explain` (aliases: `explain`, `ops.explain`) | ready | read / read / operator, prose · fast/low | **`topic`** | `zcl.ops_explain.v1` | `z23 explain sync` | Explain a subsystem in plain prose |
+| `ops debug explain` (aliases: `explain`, `ops.explain`) | ready | read / read / operator · fast/low | **`topic`** | `zcl.ops_explain.v1` | `z23 explain sync` | Explain a subsystem in plain prose |
 | `ops debug meaning` (aliases: `meaning`, `ops.meaning`) | ready | read / read / operator · fast/low | `subsystem`, `name`, `question` | `zcl.ops_meaning.v1` | `z23 meaning --name=pre_handshake_disconnects` | What a telemetry field means, and which report answers a question |
-| `ops debug profile` (aliases: `profile`, `ops.profile`) | ready | read / read / operator, prose · foreground/moderate | **`seconds`**, `top_n` | `zcl.ops_profile.v1` | `z23 profile 3` | Sample thread CPU + stage rates |
-| `ops debug producer` (aliases: `ops.producer.status`) | ready | read / read / operator, prose · fast/low | **`datadir`** | `zcl.ops_producer_status.v1` | `z23 ops producer status -datadir=/home/you/.zclassic-c23-mint` | Read a producer datadir's fold progress + receipt |
-| `ops debug rom` (aliases: `ops.rom`) | ready | read / read / operator, prose · fast/low | none | `zcl.rom_compile.v1` | `z23 ops rom` | ROM compilation fold progress |
+| `ops debug profile` (aliases: `profile`, `ops.profile`) | ready | read / read / operator · foreground/moderate | **`seconds`**, `top_n` | `zcl.ops_profile.v1` | `z23 profile 3` | Sample thread CPU + stage rates |
+| `ops debug producer` (aliases: `ops.producer.status`) | ready | read / read / operator · fast/low | **`datadir`** | `zcl.ops_producer_status.v1` | `z23 ops producer status -datadir=/home/you/.zclassic-c23-mint` | Read a producer datadir's fold progress + receipt |
+| `ops debug rom` (aliases: `ops.rom`) | ready | read / read / operator · fast/low | none | `zcl.rom_compile.v1` | `z23 ops rom` | ROM compilation fold progress |
 | `ops debug backtrace` | ready | read / read / operator · fast/low | none | `zcl.ops_debug_backtrace.v1` | `z23 ops debug backtrace` | Dump every thread's backtrace |
 | `ops debug bundle` | ready | read / read / operator · fast/low | none | `zcl.ops_debug_bundle.v1` | `z23 ops debug bundle` | Write one-shot debug bundle JSON |
 
@@ -1890,7 +1890,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `fleet usage` | ready | read / read / operator · instant/low | `days`, `provider`, `box` | `zcl.fleet_usage.v1` | `z23 fleet usage --days=7` | What every box spent, per provider, over the last days |
-| `fleet objectives` | ready | read / read / operator, prose · foreground/low | `outcomes`, `attempts_dir`, `repo`, `lintc_dir`, `baseline` | `zcl.fleet_objectives.v1` | `z23-dev fleet objectives` | Every objective z23 optimizes, its current value, target, and status |
+| `fleet objectives` | ready | read / read / operator · foreground/low | `outcomes`, `attempts_dir`, `repo`, `lintc_dir`, `baseline` | `zcl.fleet_objectives.v1` | `z23-dev fleet objectives` | Every objective z23 optimizes, its current value, target, and status |
 | `fleet invite` | ready | mutate / app-write / **owner** · fast/low | **`name`**, `ttl_hours`, `relay`, `datadir` | `zcl.fleet.invite.v1` | `z23 fleet invite --name=studio --ttl-hours=24` | Mint one signed invite line that adds a computer to this fleet |
 | `fleet join` | ready | mutate / app-write / **owner** · fast/low | **`token`**, `onion` | `zcl.fleet.join.v1` | `z23 fleet join <token> [--onion=<v3>.onion]` | Join this computer to a fleet from one pasted invite |
 | `fleet admit` | ready | mutate / app-write / **owner** · fast/low | **`receipt`**, `bridge`, `datadir`, `require_anchor` | `zcl.fleet.admit.v1` | `z23 fleet admit <receipt>` | Admit one joined computer to this fleet's machine roster |
@@ -1947,7 +1947,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `fleet triggers list` | ready | read / read / operator, prose · instant/low | none | `zcl.fleet_triggers_list.v1` | `z23-dev fleet triggers list` | Print the closed trigger registry |
+| `fleet triggers list` | ready | read / read / operator · instant/low | none | `zcl.fleet_triggers_list.v1` | `z23-dev fleet triggers list` | Print the closed trigger registry |
 | `fleet triggers check` | ready | mutate / dev-mutation / operator, prose · foreground/low | `since`, `dry-run` | `zcl.fleet_triggers_check.v1` | `z23-dev fleet triggers check --since=3600` | Run every trigger once against whatever is new in its source |
 | `fleet triggers ingest` | ready | mutate / dev-mutation / operator · fast/low | **`source`**, **`file`** | `zcl.fleet_triggers_ingest.v1` | `z23-dev fleet triggers ingest --source=github --file=/path/comments.jsonl` | Append already-fetched GitHub discussion comment rows to the github_comments trigger source |
 
