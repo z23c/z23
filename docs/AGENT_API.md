@@ -9,11 +9,11 @@ reference. Shell wrappers are compatibility shims only. New feature work follows
 database schema, ActiveRecord model, validations, relationships, service
 workflow, REST route contract, then the native surface.
 
-**The flat `agent*` / `statecatalog` / `dumpstate` / `proofbundle` / `timeline`
-commands below are compatibility shims.** They work, but they are not in
-`engine/composition/commands/*.def` and do not appear in `z23 discover help` — so
-"the typed registry is the sole agent interface" and "`statecatalog` works" are
-both true. Do not add new flat commands; add a registry leaf
+Commands are written as typed registry leaves (`z23 ops state`,
+`z23 core status brief`); `z23 discover help` lists them. A few first-call
+commands have no leaf yet and are served only by the flat names in
+`g_cli_static_agent_routes`; they are marked in the table below and work as
+shown. Do not add new flat commands; add a registry leaf
 (see [`docs/CODEBASE_MAP.md`](./CODEBASE_MAP.md) §2 "Add a native command").
 Everything below the "First calls" table is response-schema transcription that
 the running node returns anyway — prefer `z23 discover schema <leaf>` or
@@ -23,36 +23,64 @@ just calling the command.
 
 | need | native command |
 |---|---|
-| No-jq command center | `z23 agentops` |
-| Bounded diagnosis | `z23 agentdiagnose` |
 | Compact live status | `z23 status` |
-| Full compatibility status | `z23 agent` |
-| Code/docs/test map | `z23 agentmap` |
-| Lane topology | `z23 agentlanes` |
-| Unified liveness | `z23 agentliveness` |
-| Changed files to tests/risk | `z23 agentimpact <files...>` |
-| Versioned contracts | `z23 agentcontracts` |
-| Fast build contract | `z23 agentbuild` |
+| Chain-only status projection | `z23 core status brief` |
+| Bounded diagnosis | `z23 ops diagnose` |
+| Lane topology | `z23 ops lanes` |
+| Health rollup | `z23 ops health` |
+| Generic state dump | `z23 ops state --subsystem=<name>` |
+| In-process hot-swap status | `z23 ops state --subsystem=hotswap` |
+| State subsystem catalog | `z23 ops statecatalog` |
+| Recent event ring | `z23 ops timeline` |
+| Bounded log search | `z23 ops logs --pattern=<regex>` |
+| SELECT-only database query | `z23 core storage query --sql=<select>` |
+| Peer incident view | `z23 core network peers incidents` |
+| Mirror lag/blocker contract | `z23 ops debug dash mirror` |
+| Application protocol catalog | `z23 app protocols` |
+| Registry discovery | `z23 discover help` |
 | Unified save loop | `make dev-watch [MODE=verify\|check]` (`verify` default; publication modes refuse) |
 | Compilation database | `make agent-index` |
 | Developer-loop benchmark | `make dev-loop-bench` |
-| In-process hot-swap status | `z23 ops state --subsystem=hotswap` |
 | Read-only fast-lane plan | `make agent-plan` |
 | Combined dev doctor | `make agent-doctor` |
-| Generic state dump | `z23 ops state --subsystem=<name>` |
-| Registry discovery | `z23 discover help` |
-| Dev-lane status | `z23 agentdevstatus` (`make agent-dev-status`) |
-| Anchor producer status | `z23 anchorstatus` |
-| Operator proof bundle | `z23 proofbundle [anchor_datadir]` |
-| Application protocol catalog | `z23 appprotocols` |
-| Sovereign service catalog | `z23 servicecatalog [name]` |
-| Sovereign operation catalog | `z23 serviceoperations [operation_id|key=value...]` |
-| Preferred interface contract | `z23 agentinterface` |
-| State subsystem catalog | `z23 statecatalog` |
-| Semantic event timeline | `z23 timeline '{"category":"sync","count":50,"since_secs":3600}'` |
-| Peer incident view | `z23 peerincidents` |
-| Deploy/restart guard | `z23 agentdeployguard [action]` |
-| Mirror lag/blocker contract | `z23 getmirrorstatus` |
+| Dev-lane status (no leaf) | `z23 agentdevstatus` (`make agent-dev-status`) |
+| No-jq command center (no leaf) | `z23 agentops` |
+| Full compatibility status (no leaf) | `z23 agent` |
+| Code/docs/test map (no leaf) | `z23 agentmap` |
+| Unified liveness (no leaf) | `z23 agentliveness` |
+| Changed files to tests/risk (no leaf) | `z23 agentimpact <files...>` |
+| Versioned contracts (no leaf) | `z23 agentcontracts` |
+| Fast build contract (no leaf) | `z23 agentbuild` |
+| Anchor producer status (no leaf) | `z23 anchorstatus` |
+| Operator proof bundle (no leaf) | `z23 proofbundle [anchor_datadir]` |
+| Sovereign service catalog (no leaf) | `z23 servicecatalog [name]` |
+| Sovereign operation catalog (no leaf) | `z23 serviceoperations [operation_id|key=value...]` |
+| Preferred interface contract (no leaf) | `z23 agentinterface` |
+| Filtered event timeline (no leaf for filters) | `z23 timeline '{"category":"sync","count":50,"since_secs":3600}'` |
+| Raw event ring with sync state (no leaf) | `z23 eventlog` |
+| Deploy/restart guard (no leaf) | `z23 agentdeployguard [action]` |
+| Local stdio MCP server (no leaf) | `z23 mcp serve` |
+
+### Older names
+
+These flat names still answer on the installed binary. Each maps to a
+registry leaf that returns the same payload inside the `zcl.result.v1`
+envelope, except where noted.
+
+| older name | current command | note |
+|---|---|---|
+| `z23 agentdiagnose` | `z23 ops diagnose` | `full` and `brief` modes stay on `z23 agentdiagnose` |
+| `z23 agentlanes` | `z23 ops lanes` | |
+| `z23 healthcheck` | `z23 ops health` | `full` mode stays on `z23 healthcheck full` |
+| `z23 dumpstate <subsystem> [key]` | `z23 ops state --subsystem=<subsystem> [--key=<key>]` | |
+| `z23 statecatalog` | `z23 ops statecatalog` | |
+| `z23 timeline` | `z23 ops timeline` | the leaf takes no filters |
+| `z23 getnodelog` | `z23 ops logs` | |
+| `z23 dbquery` | `z23 core storage query` | |
+| `z23 peerincidents` | `z23 core network peers incidents` | |
+| `z23 getmirrorstatus` | `z23 ops debug dash mirror` | |
+| `z23 appprotocols` | `z23 app protocols` | |
+| `z23 agent` | `z23 core status brief` | the leaf carries the flattened `zcl.public_status.v3` readiness keys, not the full document |
 
 The native RPC contracts are implemented in `cognition/controllers/src/agent_controller.c`
 for the agent map/build surface, `cognition/controllers/src/agent_contracts_controller.c`
@@ -142,7 +170,7 @@ routes whose method also exists in `agent_contracts.def`. Do not add a second
 allowlist or a parallel `if/else` dispatch ladder for agent commands.
 REST application-layer protocol metadata lives in
 `engine/controllers/src/api_controller_app_protocols.c`; the same rows feed
-`z23 appprotocols`, `GET /api/v1/protocols`,
+`z23 app protocols`, `GET /api/v1/protocols`,
 `GET /api/v1/protocols/{name}`, `layer_model`, route-contract
 `application_protocol` fields, and generated OpenAPI
 `x-zcl-application-protocol` / protocol CRUD extensions for ZLSP, ZSLP, ZNAM,
@@ -293,17 +321,18 @@ back to onion reachability when NAT or firewall conditions require it.
 
 The best interface for an AI coding operator is the native command registry
 (`z23 <leaf> [--input=json]`): start with `z23 status` /
-`z23 agent` for the compact no-jq command center, use
+`z23 core status brief` for the compact first check, use
+`z23 agentops` for the no-jq command center and
 `z23 agentinterface` when checking the full transport contract, then use
-`z23 agentdiagnose`, `z23 agentliveness`, `z23 agentlanes`,
-`z23 getmirrorstatus`, `z23 agentimpact`, `z23 agentbuild`,
-`z23 dumpstate <subsystem>`, `z23 timeline`,
-`z23 appprotocols`, `z23 servicecatalog`, and `discover
+`z23 ops diagnose`, `z23 agentliveness`, `z23 ops lanes`,
+`z23 ops debug dash mirror`, `z23 agentimpact`, `z23 agentbuild`,
+`z23 ops state --subsystem=<subsystem>`, `z23 ops timeline`,
+`z23 app protocols`, `z23 servicecatalog`, and `discover
 help`/`discover search <q>` as needed. REST is the public read-only mirror.
 
 For terminal work, keep the operator path inside the same binary: use native
-commands such as `build/bin/z23 status`, `build/bin/z23 dumpstate
-supervisor`, or `build/bin/z23 discover help`. Against the dev lane,
+commands such as `build/bin/z23 status`, `build/bin/z23 ops state
+--subsystem=supervisor`, or `build/bin/z23 discover help`. Against the dev lane,
 `build/bin/z23-dev status` queries the installed dev binary at
 `~/.zclassic-c23-dev` on RPC port `18252`. The native command registry is the
 sole agent interface.
@@ -316,8 +345,8 @@ not the preferred agent interface. Do not use bare `build/bin/zclassic-cli` as
 a z23 status oracle: local defaults, cookies, datadirs, or environment
 can point it at another RPC target and create a false "z23 is behind"
 diagnosis. If a height/peer answer matters, the target lane must be explicit in
-the command or supplied by the C-owned agent surface (`z23 agent`,
-`z23 agentdiagnose`, or `z23 getmirrorstatus`).
+the command or supplied by the C-owned agent surface (`z23 core status brief`,
+`z23 ops diagnose`, or `z23 ops debug dash mirror`).
 
 The transport can vary, but the payload should not: AI-facing status surfaces
 return stable JSON objects with a `schema` or an explicit command contract, and
@@ -388,7 +417,7 @@ duplicates the decision fields agents need most (`verdict`, `safe_next_action`,
 marks skipped lower-priority sections as `partial_result=true` instead of
 hanging. Use it before raw logs when the node is behaving oddly but still
 answers RPC.
-`z23 agentdiagnose` and `z23 agentdiagnose brief` use the compact
+`z23 ops diagnose` and `z23 agentdiagnose brief` use the compact
 first-call shape: it
 preserves the top-level verdict,
 safe next action, peer/mirror counts, compact `peer_primary_host_issue`,
@@ -434,7 +463,7 @@ signals and `safe_next_action` will point at a host-specific
 `peer_primary_host_next_action` when the compact host scorer can name one;
 otherwise it falls back to the generic peer-lifecycle drill-down.
 For a peer-only packet without the rest of `agentdiagnose`, use
-`z23 peerincidents`; the generic fallback is
+`z23 core network peers incidents`; the generic fallback is
 `z23 ops state --subsystem=peer_lifecycle --key=incidents`. The first-class response schema is
 `zcl.peer_incidents.v2` and is bounded by design: it returns aggregate incident
 counts, `primary_host_issue`, top per-host incidents, duplicate host groups,
@@ -465,7 +494,7 @@ bootstrap blocker. `incident_severity` only scores incident pressure;
 Likewise, `mirror_severity=info` means the advisory zclassicd mirror is worth
 watching but is not a local-node stability blocker; only
 `mirror_operator_action_required=true` escalates the overall diagnosis. Use
-the typed native `z23 getmirrorstatus` command for the full mirror
+the typed native `z23 ops debug dash mirror` command for the full mirror
 contract.
 
 `anchorstatus` (`zcl.anchor_mint_status.v1`) is the offline/static status
@@ -589,8 +618,7 @@ and runtime build contracts, background quality summary fields, named
 drill-down commands, direct scalar pointers such as `peer_incidents_command`,
 API gaps, the registry-owned `workflow` for the expected agent loop, and the
 top next architecture work list. `api_ux` names the preferred drill-down
-commands (`z23 dumpstate`, `z23 getnodelog`, `z23
-dbquery`, and `z23 ops timeline`) so agents can keep one-off diagnostics
+commands (`z23 ops state`, `z23 ops logs`, `z23 core storage query`, and `z23 ops timeline`) so agents can keep one-off diagnostics
 simple before adding new
 typed routes. Do not pipe larger discovery payloads through `jq` to build this
 answer by hand; add a field to `agentops` when an agent repeatedly needs the
@@ -618,14 +646,14 @@ nullifier history must hold shielded spends fail-closed. The compact packet also
 `provable_tip_published` and `indexer.block_source_status_cached` so agents can
 tell when the first-call fast path intentionally avoided blocking projection
 reads during startup or catch-up; use `z23 core status`, `z23
-dumpstate <subsystem>`, or `z23 ops mirror` for heavier detail instead
+ops state --subsystem=<subsystem>`, or `z23 ops debug dash mirror` for heavier detail instead
 of making `agent` wait on SQLite.
 The same fast path uses cached mirror state and an internal optional-detail
 budget. If that budget is already spent, `agent.partial_result=true` and
 `first_call.partial_result=true`; the core status/readiness/height/peer/mirror
 fields remain present, while lower-priority detail such as `resources` and
 `restart_watchdog` can be deferred. Follow `first_call.full_mode_command`
-(`z23 healthcheck`) when the omitted detail matters.
+(`z23 healthcheck full`) when the omitted detail matters.
 The native `zcl.operator_snapshot.v3` payload binds both its root and embedded
 `zcl.operator_summary.v3`
 to the same exact lowercase 64-hex `source_id_sha256`. The projection fails
@@ -662,7 +690,7 @@ machine decision agents should use before interrupting work. Mirror-only stale
 hash-disagreement latches can be marked
 `suppressed_by_mirror_contract=true` when the mirror contract proves there is
 no active advisory blocker. `conditions` gives cheap active/unresolved counts
-and points to `z23 dumpstate condition_engine` for the full registered
+and points to `z23 ops state --subsystem=condition_engine` for the full registered
 condition list, attempts, thresholds, and detail. The operator summary's
 `mirror` object exposes `contract_trusted`,
 `blocker_active`, and `operator_action_required`; agents should key on those
@@ -671,7 +699,7 @@ booleans before any older `blocker` string. When `getmirrorstatus` includes
 top-level mirror blocker strings.
 
 `healthcheck` is also a first-call API, but its default shape is bounded:
-`z23 healthcheck` returns `zcl.healthcheck.v1` with
+`z23 ops health` returns `zcl.healthcheck.v1` with
 `result_completeness="bounded"`, `partial_result=true`, cached fast fields, and
 an embedded `agent` summary. Use `z23 healthcheck full` or
 `{"mode":"full"}` only when a diagnostic needs the heavier chain evidence,
@@ -771,27 +799,28 @@ sends outbound work before inbound processing, then yields from inbound
 processing after a bounded batch (`ZCL_MSG_PROCESS_MAX_PER_CYCLE`) so the
 outbound send/assignment phase keeps running even under a large receive backlog
 or slow local reducer work. Use `z23 core status`
-for the larger health packet, `z23 statecatalog` to discover every state
+for the larger health packet, `z23 ops statecatalog` to discover every state
 subsystem and its accepted keys, cost, freshness, owner file, safety level,
-tests, and drill-down commands, `z23 dumpstate <subsystem>` for
-subsystem internals, `z23 ops timeline` for category-filtered structured event history with bounded
+tests, and drill-down commands, `z23 ops state --subsystem=<subsystem>` for
+subsystem internals, `z23 ops timeline` for the recent event ring,
+`z23 timeline <json>` for category-filtered structured event history with bounded
 server-side filters, semantic summaries, log-reference hints, type/peer counts,
 recommended drill-downs, and seq cursors,
-`z23 getnodelog` for bounded log search, `z23 dbquery` for
+`z23 ops logs` for bounded log search, `z23 core storage query` for
 SELECT-only database inspection, and `z23 eventlog` for the raw recent
 event ring.
 
 Every new subsystem that has runtime state should expose it through the
-diagnostics registry and become reachable through `z23 dumpstate`. The
-same registry feeds `z23 statecatalog`
+diagnostics registry and become reachable through `z23 ops state`. The
+same registry feeds `z23 ops statecatalog`
 (`zcl.state_catalog.v2`), so agents can discover the subsystem name,
 description, owner shape/file, expected cost, freshness, accepted keys, safety
 level, focused tests, and drill-down commands without source search. Expensive
 development proof state belongs in a named background quality lane with a JSON
 verdict, not in an untracked terminal scrollback.
 
-For "what happened?" questions, start with `z23 ops timeline
---category=sync --count=50 --since-secs=3600` and switch category
+For "what happened?" questions, start with
+`z23 timeline '{"category":"sync","count":50,"since_secs":3600}'` and switch category
 as needed (`peer`, `message`, `chain`, `validation`, `condition`, `oracle`,
 `mirror`, `boot`, `db`, `wallet`, `disk`, `net`). Use object filters
 for `since_secs`, `since_us`, `peer`, `height`, `reducer_stage`, `condition`,
@@ -804,8 +833,8 @@ tie a timeline slice to later drill-downs. The same payload includes
 stays server-side.
 
 For peer churn, reconnect, or duplicate-entry reports, start with
-`z23 core network peers incidents`; use `z23 dumpstate
-peer_lifecycle incidents` only as the generic fallback. The first-class command
+`z23 core network peers incidents`; use `z23 ops state
+--subsystem=peer_lifecycle --key=incidents` only as the generic fallback. The first-class command
 returns bounded
 `zcl.peer_incidents.v2` JSON
 with `primary_host_issue`, `top_host_incidents`, flat `primary_issue_host` /
@@ -826,7 +855,7 @@ collapse the storm to one host-level `issue_class`, `incident_score`,
 `host_incident_count` is the total scored host count; `host_count_returned` is
 the bounded number included in `top_host_incidents`.
 Use the full
-`dumpstate peer_lifecycle` only after the compact incident view identifies the
+`z23 ops state --subsystem=peer_lifecycle` only after the compact incident view identifies the
 host or peer worth drilling into.
 
 ## Operator Lane
@@ -875,7 +904,7 @@ lane object. A canonical packet should therefore say
 `automation_deploy_ok=false`, and
 `safe_default_action="observe_only_or_use_dev_lane"`.
 
-`z23 agentlanes` returns the native
+`z23 ops lanes` returns the native
 `zcl.agent_lanes.v2` topology contract for all first-class operator lanes:
 canonical (`z23`, `~/.zclassic-c23`, RPC 18232 / P2P 8033), soak
 (`zclassic23-soak`, `~/.zclassic-c23-soak`, RPC 18242 / P2P 8043), and dev
@@ -925,7 +954,7 @@ The same contract also includes `restart_watchdog`
 watchdog's bounded restart memory: whether the watchdog is registered, whether
 an autonomous no-progress recycle happened in the current episode, the stuck
 height anchoring that episode, restart count, restart budget remaining, and the
-deep drill-down command (`z23 dumpstate chain_tip_watchdog`). A recent
+deep drill-down command (`z23 ops state --subsystem=chain_tip_watchdog`). A recent
 controlled liveness recycle appears as
 `last_restart_autonomous=true`,
 `last_restart_reason="no_progress_tip_stall"`, and
@@ -948,7 +977,7 @@ exactly equals the best header, the reducer closes the edge with the same
 authority anchor used on clean restart; otherwise
 `height_contract.status=normal_lookahead` remains an honest transient status,
 not a peer-connectivity failure. `lagging` means the served gap is material and
-should be diagnosed with `getsyncdiag` / `dumpstate reducer_frontier`.
+should be diagnosed with `getsyncdiag` / `z23 ops state --subsystem=reducer_frontier`.
 
 The same response includes `readiness` (`zcl.agent_readiness.v1`) so agents do
 not have to infer operational safety from the top-level status string alone.
@@ -1245,7 +1274,7 @@ This is a C23 project, so the edit loop should compile only what changed.
   consensus, and process/bootstrap ownership remain `reload_required`.
   Successful generations stay mapped so in-flight calls finish against their
   original code. Inspect provenance and rejection detail through
-  `z23 dumpstate hotswap`, schema `zcl.hotswap_generation.v2`.
+  `z23 ops state --subsystem=hotswap`, schema `zcl.hotswap_generation.v2`.
 - The single-handler module ABI IS live on the dev lane
   (`zcl23-dev.service` passes `-hotswap-activate` +
   `ZCL_HOTSWAP_ACTIVATE=1`; canonical refused). `make hotswap-module-so
@@ -1261,7 +1290,7 @@ This is a C23 project, so the edit loop should compile only what changed.
   simulated-network proof; `make sim-fast` remains the broader checked-in
   scenario and seeded replay suite.
 - For no-build terminal probes, prefer native commands like `z23 status`
-  / `z23 dumpstate <subsystem>` run directly against a binary that
+  / `z23 ops state --subsystem=<subsystem>` run directly against a binary that
   already exists: `build/bin/z23 <command>` for the source-tree node, or
   `build/bin/z23-dev <command>` for the installed `zcl23-dev` linger
   lane (pass `-datadir=... -rpcport=...` for a custom target).

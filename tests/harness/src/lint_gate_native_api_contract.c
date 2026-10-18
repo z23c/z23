@@ -1065,13 +1065,13 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(agent_doc_buf, "zcl.anchor_mint_status.v1") != NULL);
         ASSERT(strstr(agent_doc_buf, "z23 proofbundle") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.operator_proof_bundle.v2") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 appprotocols") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 app protocols") != NULL);
         ASSERT(strstr(agent_doc_buf,
                       "zcl.application_protocols.index.v2") != NULL);
         ASSERT(strstr(agent_doc_buf, "z23 servicecatalog") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.service_catalog.v2") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.service_contract.v2") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 agentlanes") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 ops lanes") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.agent_lanes.v2") != NULL);
         ASSERT(strstr(agent_doc_buf, "z23 agentliveness") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.agent_liveness.v2") != NULL);
@@ -1087,7 +1087,7 @@ int t_native_agent_api_contract(void)
                != NULL);
         ASSERT(strstr(agent_doc_buf,
                       "Do not add a second\nallowlist") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 getmirrorstatus") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 ops debug dash mirror") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.agent_runtime_services.v1")
                != NULL);
         ASSERT(strstr(agent_doc_buf, "configured boot intent") != NULL);
@@ -1111,7 +1111,7 @@ int t_native_agent_api_contract(void)
                       "operator-gated real-money first check") != NULL);
         ASSERT(strstr(agent_doc_buf, "z23 agentops") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.agent_ops.v2") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 agentdiagnose") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 ops diagnose") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.agent_diagnose.v2") != NULL);
         ASSERT(strstr(agent_doc_buf,
                       "zcl.agent_runtime_availability.v3") != NULL);
@@ -1130,9 +1130,9 @@ int t_native_agent_api_contract(void)
                       "diagnosis") != NULL);
         ASSERT(strstr(agent_doc_buf,
                       "unsupported_method_not_found") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 statecatalog") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 ops statecatalog") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.state_catalog.v2") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 timeline") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 ops timeline") != NULL);
         ASSERT(strstr(agent_doc_buf, "zcl.timeline.v2") != NULL);
         ASSERT(strstr(agent_doc_buf, "no_jq_required=true") != NULL);
         ASSERT(strstr(agent_doc_buf, "z23 agentdeployguard") != NULL);
@@ -1200,9 +1200,9 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(agent_doc_buf, "ZCL_DEPLOY_ALLOW_CANONICAL=1")
                != NULL);
         ASSERT(strstr(agent_doc_buf, "make deploy-dev") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 dumpstate") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 getnodelog") != NULL);
-        ASSERT(strstr(agent_doc_buf, "z23 dbquery") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 ops state") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 ops logs") != NULL);
+        ASSERT(strstr(agent_doc_buf, "z23 core storage query") != NULL);
         ASSERT(strstr(agent_doc_buf, "make pre-push-ci") != NULL);
         ASSERT(strstr(agent_doc_buf, "ZCL_FAST_LIVE=0") != NULL);
         ASSERT(strstr(agent_doc_buf, "make install-quality-linger") != NULL);
