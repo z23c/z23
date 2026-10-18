@@ -4,8 +4,7 @@
 > ordering lives only in [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
 
 Phase C2 of [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md). This document
-**decides**; [`ZC23_DISTRIBUTION_OPTIONS.md`](./ZC23_DISTRIBUTION_OPTIONS.md)
-was the menu. The owner picked, with one standing guidance: **incentivize
+**decides**; the earlier options menu is in Git history. The owner picked, with one standing guidance: **incentivize
 the P2P ecosystem**, and the picks are suggestions to be tuned, not sacred
 numbers. Everything here stays inside the frozen covenant
 ([`ZC23_LIVING_COMMONS.md`](./ZC23_LIVING_COMMONS.md)): ZC23 stays
@@ -23,7 +22,7 @@ the name is marketing, the covenant language stays the protocol truth.
 
 ## 2. Distribution — evidence-scheduled emission only
 
-Picked: **evidence-scheduled emission** (options-doc 2A). No genesis
+Picked: **evidence-scheduled emission**. No genesis
 pool, no bootstrap treasury. Every unit enters circulation the same way:
 a public, versioned schedule maps evidence classes to weights; a weekly
 epoch batch proposes mints from the verified evidence graph; the owner

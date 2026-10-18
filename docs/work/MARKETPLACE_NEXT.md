@@ -83,7 +83,7 @@ ZC23 is simulation-only by design. Before any real distribution or
 picks them. Nothing here touches consensus; mining/distribution stays
 simulation until the owner explicitly promotes it.
 
-- [x] C1. Options doc: [`ZC23_DISTRIBUTION_OPTIONS.md`](./ZC23_DISTRIBUTION_OPTIONS.md)
+- [x] C1. Options doc: Options doc (retired to Git history)
   — PoP naming (A/B/C), distribution model (evidence-scheduled vs genesis
   pool vs hybrid), earn-for-publishing mechanics, supply shape, and the
 - [x] C2. **Owner decided**: Proof of Participation name,

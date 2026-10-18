@@ -52,7 +52,6 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`sovereign-cutover-runbook.md`](./sovereign-cutover-runbook.md) | LIVE | owner-gated live cutover + revert procedure for the bundle install path |
 | [`ZCODE_DEVELOPMENT_NETWORK.md`](./ZCODE_DEVELOPMENT_NETWORK.md) | DESIGN | agentic C23 development-network contract: canonical task/evidence objects, real ZBuild worker, requester-led P2P work, typed create/use/improve, and durability lanes |
 | [`ZCODE_DEVELOPMENT_PRODUCT.md`](./ZCODE_DEVELOPMENT_PRODUCT.md) | DESIGN | v0.1 C23 product contract: measured expert-workflow baseline, project/work front door, bounded context/adapters/repair/review, self-hosting benchmark, and fresh-checkout acceptance |
-| [`ZCODE_ADAPTER_BENCHMARK.md`](./ZCODE_ADAPTER_BENCHMARK.md) | EVIDENCE | frozen native-CLI adapter control, packet/order A/B measurements, shell-only app-server pilot, blockers, and adoption decision |
 | [`ZCODE_DEVELOPMENT_WALKTHROUGH.md`](./ZCODE_DEVELOPMENT_WALKTHROUGH.md) | LIVE | five-minute small-C23-project path: inspect, start, bounded manual/Codex handoff, repair/evidence, explicit human acceptance, and the permanent hermetic acceptance target |
 | [`C23_DEV_LOOP_PERFORMANCE.md`](./C23_DEV_LOOP_PERFORMANCE.md) | LIVE | single authoritative coverage/latency ledger for resident live reload, non-LTO fast restart, affected proofs, cache reuse and batched release proof |
 | [`SEMANTIC_MANIFEST.md`](./SEMANTIC_MANIFEST.md) | DESIGN | canonical per-TU semantic manifest v1 (byte format, exact and hint roots, facts extension revision 2) and its one producer, the optional libclang sensor (a second parse at 1.2-1.6x `clang -fsyntax-only`); the planner consumer is not on main yet |
@@ -65,7 +64,6 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`MARKETPLACE_PLAN.md`](./MARKETPLACE_PLAN.md) | DESIGN | deferred application-protocol marketplace design; no consensus surface |
 | [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | RETAINED | marketplace dependency ordering; unchecked boxes are not current work |
 | [`MARKET_ONION_DELIVERY.md`](./MARKET_ONION_DELIVERY.md) | DESIGN | B5 onion-routed chunk delivery: offer v2 endpoint_type=onion wire, `/market/chunk` onion route, session-binding replacement, stub fail-closed policy, and the honest non-goals (timing, gossip metadata) |
-| [`ZC23_DISTRIBUTION_OPTIONS.md`](./ZC23_DISTRIBUTION_OPTIONS.md) | RETAINED | the Phase C1 menu; C2 chose from it and `ZC23_DISTRIBUTION_RULES.md` §2 cites option **2A** by number, so the numbering stays as-is |
 | [`shielded-history-importer.md`](./shielded-history-importer.md) | LIVE | reference for the shipped `-import-complete-shielded` operational cure; operational-vs-sovereign trust-mode split |
 | [`CONSENSUS-STATE-BUNDLE.md`](./CONSENSUS-STATE-BUNDLE.md) | LIVE | naming/ownership authority for `zcl.consensus_state_bundle.v1` |
 | [`fresh-start-seam.md`](./fresh-start-seam.md) | DESIGN | why a genuinely bare boot (empty datadir, isolated `$HOME`, no flags) reaches no state source and folds zero blocks: the two independent seams, every state source and the exact predicate that refuses it, and why the install gate is NOT circular at HEAD |
@@ -113,7 +111,6 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`parity-audit-round2-findings.md`](./parity-audit-round2-findings.md) | RETAINED | superseded audit, retained — findings L1/L2/L3 cited by the consensus-parity lock-in tests |
 | [`consensus-parity-supplemental-audit-2026-06-08.md`](./consensus-parity-supplemental-audit-2026-06-08.md) | RETAINED | superseded audit, retained — §2 item 5 cited by `docs/AGENT_TRAPS.md`; landed-fix summary condensed into `docs/CONSENSUS_PARITY_DOCTRINE.md` |
 | [`lint-gate-hollowness-audit.md`](./lint-gate-hollowness-audit.md) | RETAINED | the fail-loud-scan-floor lint-gate pattern, cited by `tools/lint/gate_lib.sh` and its self-test |
-| [`utxo-mirror-authority-rewind.md`](./utxo-mirror-authority-rewind.md) | EVIDENCE | mirror-cursor-above-authority diagnosis (next-height cursors on both sides), the quarantine verdict, and the recovery experiment record |
 
 This table covers **every** tracked file in this directory. Reconcile it after
 adding one — `git ls-files docs/work/` minus the paths linked above must be
@@ -184,11 +181,9 @@ completion remain defined by `AGENTS.md` and `docs/DEVELOPING.md`.
 | File | Authority | Purpose |
 |---|---|---|
 | [`ZC23_FAMILY_COMMONS.md`](./ZC23_FAMILY_COMMONS.md) | DESIGN | additive pre-genesis protocol foundation: family commons + evidence economics objects and commands |
-| [`C23_P2P_CORE_INVENTORY.md`](./C23_P2P_CORE_INVENTORY.md) | DESIGN | reviewed P2P core-consolidation code inventory; a map, not a plan |
 | [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | systemd drop-in reconciliation runbook: lexical apply order, detecting an `ExecStart=` collision, reading `/proc/<pid>/cmdline` for ground truth vs. `systemctl show`, and the hazard of another actor rewriting drop-ins mid-reconciliation |
 | [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](./LIVE_TRANSACTION_DEMONSTRATIONS.md) | LIVE | runbook: which cataloged transaction shapes are demonstrated live, and how |
 | [`REFLEX_REACTOR.md`](./REFLEX_REACTOR.md) | LIVE | local zero-wait reflex reactor: edit C23, receive first exact next-build result |
-| [`REFLEX_SUBSTRATE_AUDIT.md`](./REFLEX_SUBSTRATE_AUDIT.md) | EVIDENCE | measured coverage/latency audit of the merged reflex implementation |
 | [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | DESIGN | owner-approved `app shop` one-command sovereign storefront specification; not an execution queue |
 | [`TRANSACTION_LAB.md`](./TRANSACTION_LAB.md) | LIVE | transaction laboratory notebook; keeps its two questions separate |
 | [`TRANSACTION_MICRO_LAB.md`](./TRANSACTION_MICRO_LAB.md) | LIVE | owner-gated 100-transaction demonstration runbook; never ordinary development work |
@@ -200,17 +195,3 @@ completion remain defined by `AGENTS.md` and `docs/DEVELOPING.md`.
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-476e66661523.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-476e66661523.jsonl) | EVIDENCE | frozen 12-record publishable retrieval receipt for the distinct ten-task v2 cohort; exact evaluator-batch and per-task ranking-root replay, nine-task equal-weight macro denominator, 43 eligible relevance judgments, and explicit unavailable ceilings |
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-705d16ccab6b.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-705d16ccab6b.jsonl) | EVIDENCE | frozen 12-record publishable receipt for the same ten-task cohort with a current-driver directory-taxonomy scope proxy over exact-parent source: literal 7,209 bp and BM25 4,888 bp wrong-group selections at five; semantic scope, reuse success, and unique LOC avoided remain unobserved |
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-25fe3e353288.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-25fe3e353288.jsonl) | EVIDENCE | frozen 12-record publishable third-arm receipt with two sealed evaluator metric replays: the rare-identifier and observed-reverse-reference permutation records Recall@5 1,243 bp versus BM25 936 bp, equal Recall@20 at 3,502 bp, projected five-result context 733,211 versus 853,082 bytes, and directory-taxonomy proxy 4,666 versus 4,888 bp; vectors are not used, while scanner completeness, semantic scope, reuse success, and unique LOC avoided remain unobserved |
-| [`zcode-selfhost-validation-ledger.json`](./zcode-selfhost-validation-ledger.json) | EVIDENCE | zcl.zcode_selfhost_validation_ledger.v1 snapshot |
-| [`zcode-selfhost-evidence/`](./zcode-selfhost-evidence/) | EVIDENCE | frozen born-red replay artifacts: 15 paired json+log files (foundation-replay, codec-cursor, package-dev, package-registry, score-receipt, sha3-foundation) |
-| [`zcode-selfhost-evidence/born-red-base-foundation-replay.json`](./zcode-selfhost-evidence/born-red-base-foundation-replay.json) | EVIDENCE | born-red replay artifact (base-foundation-replay json half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-base-foundation-replay.log`](./zcode-selfhost-evidence/born-red-base-foundation-replay.log) | EVIDENCE | born-red replay artifact (base-foundation-replay log half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-codec-cursor.json`](./zcode-selfhost-evidence/born-red-codec-cursor.json) | EVIDENCE | born-red replay artifact (codec-cursor json half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-codec-cursor.log`](./zcode-selfhost-evidence/born-red-codec-cursor.log) | EVIDENCE | born-red replay artifact (codec-cursor log half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-package-dev.json`](./zcode-selfhost-evidence/born-red-package-dev.json) | EVIDENCE | born-red replay artifact (package-dev json half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-package-dev.log`](./zcode-selfhost-evidence/born-red-package-dev.log) | EVIDENCE | born-red replay artifact (package-dev log half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-package-registry.json`](./zcode-selfhost-evidence/born-red-package-registry.json) | EVIDENCE | born-red replay artifact (package-registry json half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-package-registry.log`](./zcode-selfhost-evidence/born-red-package-registry.log) | EVIDENCE | born-red replay artifact (package-registry log half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-score-receipt.json`](./zcode-selfhost-evidence/born-red-score-receipt.json) | EVIDENCE | born-red replay artifact (score-receipt json half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-score-receipt.log`](./zcode-selfhost-evidence/born-red-score-receipt.log) | EVIDENCE | born-red replay artifact (score-receipt log half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-sha3-foundation-replay.json`](./zcode-selfhost-evidence/born-red-sha3-foundation-replay.json) | EVIDENCE | born-red replay artifact (sha3-foundation-replay json half of paired proof) |
-| [`zcode-selfhost-evidence/born-red-sha3-foundation-replay.log`](./zcode-selfhost-evidence/born-red-sha3-foundation-replay.log) | EVIDENCE | born-red replay artifact (sha3-foundation-replay log half of paired proof) |

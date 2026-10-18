@@ -1,5 +1,0 @@
-test_codec_cursor.c:4:10: fatal error: codec/cursor.h: No such file or directory
-    4 | #include "codec/cursor.h"
-      |          ^~~~~~~~~~~~~~~~
-compilation terminated.
-exit_code=1
