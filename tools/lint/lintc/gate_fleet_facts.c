@@ -22,6 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lintc_text.h"
 
 enum {
     FF_ROWS = 4096, FF_FIELD = 320, FF_TOKMAX = 63, FF_WHYMAX = 223,
@@ -51,13 +52,6 @@ static int ff_is_start(const char *line, char *tag_out)
         }
     }
     return 0;
-}
-
-static int ff_ends_here(const char *line)
-{
-    size_t n = strlen(line);
-    while (n && isspace((unsigned char)line[n - 1])) n--;
-    return n > 0 && line[n - 1] == ')';
 }
 
 static int ff_extract_strings(const char *buf, char out[][FF_FIELD], int maxn, int *n)
@@ -133,7 +127,7 @@ static int ff_parse_def(const char *path, struct ff_row *rows, int cap, int *out
         }
         memcpy(buf + buflen, line, ll);
         buflen += ll; buf[buflen] = '\0';
-        if (ff_ends_here(line)) {
+        if (lct_ends_with_paren(line)) {
             collecting = 0;
             rc = ff_close_row(tag, buf, rows, cap, &rn);
         }

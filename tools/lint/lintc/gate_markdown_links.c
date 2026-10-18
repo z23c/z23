@@ -30,6 +30,7 @@
 #include "base/safe_alloc.h"
 #include "lintc.h"
 #include "lintc_sig.h"
+#include "lintc_text.h"
 
 /* Every static name carries the ml_ prefix: the code index links test
  * closures by symbol name. */
@@ -1052,21 +1053,6 @@ static void ml_hold(int wfd)
     _exit(3);
 }
 
-static int ml_read_path(int rfd, char *dir, size_t cap)
-{
-    size_t used = 0;
-    while (used + 1 < cap) {
-        ssize_t n = read(rfd, dir + used, 1);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0 || dir[used] == '\n')
-            break;
-        used++;
-    }
-    dir[used] = '\0';
-    return used ? 0 : -1;
-}
-
 static int ml_signal_case(int sig, int times)
 {
     int fds[2], st = 0;
@@ -1086,7 +1072,7 @@ static int ml_signal_case(int sig, int times)
         ml_hold(fds[1]);
     }
     close(fds[1]);
-    int ready = ml_read_path(fds[0], dir, sizeof dir);
+    int ready = lct_read_line_fd(fds[0], dir, sizeof dir);
     close(fds[0]);
     for (int i = 0; ready == 0 && i < times; i++)
         kill(pid, sig);

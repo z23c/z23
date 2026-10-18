@@ -23,6 +23,7 @@
 #include "base/safe_alloc.h"
 #include "gate_hosted_suite_verdict_priv.h"
 #include "lintc.h"
+#include "lintc_text.h"
 
 /* Every static name carries the hsv_ prefix: the code index links test
  * closures by symbol name. */
@@ -119,16 +120,6 @@ static long long hsv_parse_wrapped(const char *s)
     for (; *s; s++)
         v = v * 10u + (unsigned long long)(*s - '0');
     return (long long)v;
-}
-
-static bool hsv_is_digits(const char *s)
-{
-    if (!*s)
-        return false;
-    for (; *s; s++)
-        if (*s < '0' || *s > '9')
-            return false;
-    return true;
 }
 
 static bool hsv_is_lower_hex12(const char *s)
@@ -262,7 +253,7 @@ static void hsv_validate_fields(const struct hsv_values *vals, int *bad)
     }
     for (int i = HSV_TOTAL; i <= HSV_UNOBS; i++) {
         const char *s = hsv_show(vals, i);
-        if (!hsv_is_digits(s)) {
+        if (!lct_is_digits(s)) {
             hsv_fail("suite field %s is not a non-negative integer: %s",
                      k_hsv_fields[i], s);
             *bad = 1;

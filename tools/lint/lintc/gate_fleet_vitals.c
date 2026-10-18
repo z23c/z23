@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lintc_text.h"
 
 /* Every static name carries the fv_ prefix: the code index links test
  * closures by symbol name. */
@@ -136,13 +137,6 @@ static bool fv_row_starts(const char *line)
     return strncmp(line, "FLEET_VITAL(", 12) == 0;
 }
 
-static bool fv_row_ends(const char *line)
-{
-    size_t n = strlen(line);
-    while (n && isspace((unsigned char)line[n - 1])) n--;
-    return n > 0 && line[n - 1] == ')';
-}
-
 /* Join the four strings and the cadence TSV, then split the way the
  * script's `IFS=$'\t' read` did: tab is an IFS-whitespace character, so
  * leading and trailing tab runs are stripped and every RUN of tabs is ONE
@@ -232,7 +226,7 @@ static int fv_parse(const char *path, struct fv_row *rows, int cap, int *rn)
         memcpy(buf + buflen, line, ll);
         buflen += ll;
         buf[buflen] = '\0';
-        if (!fv_row_ends(line)) continue;
+        if (!lct_ends_with_paren(line)) continue;
         collecting = 0;
         if (*rn >= cap) {
             rc = die("z23-lint: fleet-vitals row overflow\n", "");
@@ -245,14 +239,6 @@ static int fv_parse(const char *path, struct fv_row *rows, int cap, int *rn)
     fclose(f);
     if (rc) return rc;
     return n ? die("z23-lint: read failed: %s\n", path) : 0;
-}
-
-static bool fv_is_digits(const char *s)
-{
-    if (!*s) return false;
-    for (; *s; s++)
-        if (*s < '0' || *s > '9') return false;
-    return true;
 }
 
 static int fv_append_fault(char *out, size_t cap, size_t *used,
@@ -287,7 +273,7 @@ static int fv_scan_row(const struct fv_row *rows, int i,
         && fv_append_fault(out, cap, used,
             "  %s: agg '%s' is neither gauge nor sum\n", r->id, r->agg))
         return 2;
-    if (!fv_is_digits(r->cadence) && fv_append_fault(out, cap, used,
+    if (!lct_is_digits(r->cadence) && fv_append_fault(out, cap, used,
             "  %s: cadence '%s' is not a non-negative integer\n",
             r->id, r->cadence))
         return 2;

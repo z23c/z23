@@ -6599,6 +6599,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_sqlite_cursor_lifetime.c \
     tools/lint/lintc/lintc_sig.c \
     tools/lint/lintc/lintc_proc.c \
+    tools/lint/lintc/lintc_text.c \
     tools/lint/lintc/gate_cookbook.c \
     tools/lint/lintc/gate_cookbook_parse.c \
     tools/lint/lintc/gate_cookbook_selftest.c \
