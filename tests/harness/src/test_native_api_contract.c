@@ -1025,6 +1025,128 @@ cleanup:
     if (output && fclose(output) != 0) ok = false;
     return ok;
 }
+/* Runs one CLI invocation with stdout redirected into a temp file. */
+static bool uniform_cli(const char *root, const char *const *args, int count,
+                        char *wire, size_t cap, int *rc)
+{
+    FILE *output = tmpfile();
+    int saved = dup(fileno(stdout));
+    bool ok = false;
+    if (!output || saved < 0 || fflush(stdout) != 0 ||
+        dup2(fileno(output), fileno(stdout)) < 0)
+        goto cleanup;
+    *rc = zcl_native_command_main(root, args, count, "", 0, CHAIN_MAIN, false);
+    ok = fflush(stdout) == 0 && fseek(output, 0, SEEK_SET) == 0;
+    if (ok) {
+        size_t n = fread(wire, 1, cap - 1, output);
+        wire[n] = '\0';
+        ok = !ferror(output) && n < cap - 1;
+    }
+cleanup:
+    ok &= security_restore_fd(saved, stdout);
+    if (output)
+        fclose(output);
+    return ok;
+}
+
+static bool uniform_write(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    bool ok = f && fputs(text, f) >= 0;
+    if (f && fclose(f) != 0)
+        ok = false;
+    return ok && chmod(path, 0600) == 0;
+}
+
+struct uniform_dir {
+    char dir[PATH_MAX], file[PATH_MAX], link[PATH_MAX], opt[PATH_MAX + 16];
+    char wire[ZCL_COMMAND_LIST_BUDGET + 8192];
+    int rc;
+};
+
+static void uniform_open(struct uniform_dir *u)
+{
+    test_make_tmpdir(u->dir, sizeof(u->dir), "native_api", "uniform_input");
+    snprintf(u->file, sizeof(u->file), "%s/in.json", u->dir);
+    snprintf(u->link, sizeof(u->link), "%s/link.json", u->dir);
+    snprintf(u->opt, sizeof(u->opt), "--input-file=%s", u->file);
+}
+
+static int test_uniform_help(void)
+{
+    int failures = 0;
+    struct uniform_dir *u = calloc(1, sizeof(*u));
+    TEST_CASE("every leaf prints its description and input schema on --help and -h") {
+        const char *help[] = {"vitals", "table", "--help"};
+        ASSERT(u);
+        ASSERT(uniform_cli("fleet", help, 3, u->wire, sizeof(u->wire), &u->rc));
+        ASSERT_EQ(u->rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(u->wire, "fleet.vitals.table") != NULL);
+        ASSERT(strstr(u->wire, "zcl.command_schema.v1") != NULL);
+        ASSERT(strstr(u->wire, "unknown input key") == NULL);
+        help[2] = "-h";
+        ASSERT(uniform_cli("fleet", help, 3, u->wire, sizeof(u->wire), &u->rc));
+        ASSERT_EQ(u->rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(u->wire, "zcl.command_schema.v1") != NULL);
+    } TEST_END
+    free(u);
+    return failures;
+}
+
+static int test_uniform_input_file(void)
+{
+    int failures = 0;
+    struct uniform_dir *u = calloc(1, sizeof(*u));
+    TEST_CASE("--input-file is read exactly like --input on any leaf") {
+        ASSERT(u);
+        uniform_open(u);
+        const char *bad[] = {"vitals", "table", u->opt};
+        const char *disc[] = {"schema", u->opt};
+        ASSERT(uniform_write(u->file, "{\"bogus\":1}\n"));
+        ASSERT(uniform_cli("fleet", bad, 3, u->wire, sizeof(u->wire), &u->rc));
+        ASSERT_EQ(u->rc, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(u->wire, "unknown input key 'bogus'") != NULL);
+        ASSERT(strstr(u->wire, "--help") != NULL);
+        ASSERT(uniform_write(u->file, "{\"path\":\"discover.search\"}\n"));
+        ASSERT(uniform_cli("discover", disc, 2, u->wire, sizeof(u->wire),
+                           &u->rc));
+        ASSERT_EQ(u->rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(u->wire, "discover.search") != NULL);
+        test_cleanup_tmpdir(u->dir);
+    } TEST_END
+    free(u);
+    return failures;
+}
+
+static int test_uniform_input_file_refusals(void)
+{
+    int failures = 0;
+    struct uniform_dir *u = calloc(1, sizeof(*u));
+    TEST_CASE("--input-file refuses symlinks, relative paths and --input together") {
+        ASSERT(u);
+        uniform_open(u);
+        ASSERT(uniform_write(u->file, "{}\n"));
+        ASSERT_EQ(symlink(u->file, u->link), 0);
+        char link_opt[PATH_MAX + 16];
+        snprintf(link_opt, sizeof(link_opt), "--input-file=%s", u->link);
+        const char *via_link[] = {"vitals", "table", link_opt};
+        const char *relative[] = {"vitals", "table", "--input-file=in.json"};
+        const char *both[] = {"vitals", "table", "--input={}", u->opt};
+        ASSERT(uniform_cli("fleet", via_link, 3, u->wire, sizeof(u->wire),
+                           &u->rc));
+        ASSERT_EQ(u->rc, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(u->wire, "BAD_INPUT") != NULL);
+        ASSERT(uniform_cli("fleet", relative, 3, u->wire, sizeof(u->wire),
+                           &u->rc));
+        ASSERT(strstr(u->wire, "BAD_INPUT") != NULL);
+        ASSERT(uniform_cli("fleet", both, 4, u->wire, sizeof(u->wire), &u->rc));
+        ASSERT(strstr(u->wire, "BAD_FLAG") != NULL);
+        test_cleanup_tmpdir(u->dir);
+    } TEST_END
+    free(u);
+    return failures;
+}
+
 static int test_wallet_security_refusal_flags(void)
 {
     int failures = 0;
@@ -3454,6 +3576,9 @@ int test_native_api_contract(void)
     failures += test_wallet_send_amount_admission();
     failures += test_wallet_mutating_native_e2e();
     failures += test_wallet_security_refusal_flags();
+    failures += test_uniform_help();
+    failures += test_uniform_input_file();
+    failures += test_uniform_input_file_refusals();
     failures += test_raw_native_pipeline_mines_exact_signed_bytes();
     failures += test_app_write_native_e2e();
     failures += test_oprindex_rebuild_requires_witness();

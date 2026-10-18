@@ -3653,13 +3653,15 @@ struct nc_main_state {
     const char *positional[NC_MAX_WORDS];
     size_t npos;
     const char *input_flag;
+    const char *input_file_flag;
+    bool help;
     const char *view;
     const char *side;
     const char *cursor;
     char input_cursor[64];
     size_t budget;
     size_t max_items;
-    bool seen_input, seen_view, seen_side, seen_budget, seen_max_items,
+    bool seen_input, seen_input_file, seen_view, seen_side, seen_budget, seen_max_items,
         seen_cursor, seen_format, seen_field;
     const char *field_csv;
     bool suggest_next;
@@ -3883,7 +3885,7 @@ static enum nc_main_flag_result nc_main_apply_flag_group1(
     char *why, size_t why_cap)
 {
     if (strcmp(flag_key, "input") == 0) {
-        if (nc_main_flag_input_bad(st->seen_input, value)) {
+        if (nc_main_flag_input_bad(st->seen_input || st->seen_input_file, value)) {
             (void)snprintf(why, why_cap,
                            "--input requires one non-empty value and may appear once");
             return NC_FLAG_BAD;
@@ -3932,6 +3934,34 @@ static enum nc_main_flag_result nc_main_apply_flag_group1(
             return NC_FLAG_BAD;
         }
         st->seen_max_items = true;
+        return NC_FLAG_OK;
+    }
+    return NC_FLAG_UNMATCHED;
+}
+
+/* --help / -h and --input-file=<absolute path>: uniform on every leaf, so
+ * neither ever reaches the leaf's own input keys. */
+static enum nc_main_flag_result nc_main_apply_flag_group3(
+    const char *flag_key, const char *value, struct nc_main_state *st,
+    char *why, size_t why_cap)
+{
+    if (strcmp(flag_key, "help") == 0 || strcmp(flag_key, "h") == 0) {
+        if (value) {
+            (void)snprintf(why, why_cap, "--%s takes no value", flag_key);
+            return NC_FLAG_BAD;
+        }
+        st->help = true;
+        return NC_FLAG_OK;
+    }
+    if (strcmp(flag_key, "input-file") == 0) {
+        if (st->seen_input_file || st->seen_input || !value || !value[0]) {
+            (void)snprintf(why, why_cap,
+                           "--input-file requires one non-empty path, may "
+                           "appear once, and excludes --input");
+            return NC_FLAG_BAD;
+        }
+        st->seen_input_file = true;
+        st->input_file_flag = value;
         return NC_FLAG_OK;
     }
     return NC_FLAG_UNMATCHED;
@@ -4016,6 +4046,9 @@ static bool nc_main_parse_flags(struct nc_main_state *st, int *rc)
     json_set_object(&st->flags);
     st->npos = 0;
     st->input_flag = NULL;
+    st->input_file_flag = NULL;
+    st->seen_input_file = false;
+    st->help = false;
     st->view = NULL;
     st->side = NULL;
     st->cursor = NULL;
@@ -4049,8 +4082,13 @@ static bool nc_main_parse_flags(struct nc_main_state *st, int *rc)
             flag_error = true;
             break;
         }
-        enum nc_main_flag_result r1 = nc_main_apply_flag_group1(
+        enum nc_main_flag_result r1 = nc_main_apply_flag_group3(
             flag_key, value, st, flag_why, sizeof(flag_why));
+        if (r1 == NC_FLAG_OK)
+            continue;
+        if (r1 == NC_FLAG_UNMATCHED)
+            r1 = nc_main_apply_flag_group1(flag_key, value, st, flag_why,
+                                           sizeof(flag_why));
         if (r1 == NC_FLAG_BAD) {
             flag_error = true;
             break;
@@ -4084,6 +4122,38 @@ static bool nc_main_parse_flags(struct nc_main_state *st, int *rc)
     return true;
 }
 
+/* --input-file=PATH: the JSON object from a non-symlink regular file under
+ * the same per-leaf budget as --input=-, parsed into *dst. The file rules
+ * (absolute path, caller-owned, not group/other writable) are those of the
+ * device-host input file reader. On refusal prints the error, frees *dst
+ * and the flag object, and returns false. */
+static bool nc_main_read_input_file(struct nc_main_state *st,
+                                    struct json_value *dst, size_t budget,
+                                    int *rc)
+{
+    char *text = zcl_malloc(budget + 1, "native_command_input_file");
+    size_t length = 0;
+    bool ok = text &&
+              zcl_native_device_host_input_file_read(st->input_file_flag, text,
+                                                     budget + 1, &length) &&
+              json_read(dst, text, length) && dst->type == JSON_OBJ;
+    free(text);
+    if (ok)
+        return true;
+    json_free(dst);
+    json_free(&st->flags);
+    char detail[192];
+    (void)snprintf(detail, sizeof(detail),
+                   "--input-file must name an absolute path to a regular, "
+                   "caller-owned, non-symlink file of 1..%zu bytes holding "
+                   "one JSON object", budget);
+    nc_print_error_next_string(
+        st->spec->path, "BAD_INPUT", "normalize", detail, st->spec->path,
+        "discover.schema", "path", st->spec->path, "inspect the input schema");
+    *rc = ZCL_COMMAND_EXIT_INVALID;
+    return false;
+}
+
 /* Discovery leaves render their native document directly.
  *
  * They read the POSITIONAL argument, but their declared contract also
@@ -4115,6 +4185,14 @@ static int nc_main_run_discover_leaf(struct nc_main_state *st)
     json_init(&disc_input);
     bool have_disc_input =
         nc_main_read_disc_input(arg, st->input_flag, &disc_input);
+    if (!arg && st->input_file_flag) {
+        int rc = ZCL_COMMAND_EXIT_INVALID;
+        if (!nc_main_read_input_file(
+                st, &disc_input,
+                zcl_command_registry_input_budget_bytes(st->spec), &rc))
+            return rc;
+        have_disc_input = true;
+    }
     if (have_disc_input) {
         /* The leaf's own first positional key names the argument. */
         const char *pk = st->spec->positional_keys ? st->spec->positional_keys
@@ -4138,6 +4216,27 @@ static int nc_main_run_discover_leaf(struct nc_main_state *st)
     json_free(&disc_input);
     json_free(&st->flags);
     return rc;
+}
+
+/* `<leaf> --help`: the leaf's discover.describe document followed by its
+ * discover.schema input document, rendered by the discovery producers. */
+static int nc_main_run_help(struct nc_main_state *st)
+{
+    json_free(&st->flags);
+    const struct zcl_command_spec *describe =
+        zcl_command_registry_find(catalog(), "discover.describe", NULL);
+    const struct zcl_command_spec *schema =
+        zcl_command_registry_find(catalog(), "discover.schema", NULL);
+    if (!describe || !schema) {
+        nc_print_error(st->spec->path, "HELP_UNAVAILABLE", "resolve",
+                       "discovery commands are not registered", st->spec->path,
+                       "", "", "");
+        return ZCL_COMMAND_EXIT_INTERNAL;
+    }
+    int rc = nc_run_discover(describe, st->spec->path, NULL);
+    if (rc != ZCL_COMMAND_EXIT_OK)
+        return rc;
+    return nc_run_discover(schema, st->spec->path, "input");
 }
 
 /* A branch: no deeper leaf resolved. */
@@ -4174,7 +4273,10 @@ static bool nc_main_build_input(struct nc_main_state *st, int *rc)
     const size_t input_budget =
         zcl_command_registry_input_budget_bytes(st->spec);
     g_native_input_from_stdin = false;
-    if (st->input_flag) {
+    if (st->input_file_flag) {
+        if (!nc_main_read_input_file(st, &st->input, input_budget, rc))
+            return false;
+    } else if (st->input_flag) {
         if (strcmp(st->input_flag, "-") == 0) {
             g_native_input_from_stdin = true;
             bool oversize = false;
@@ -4311,6 +4413,9 @@ static bool nc_main_validate_input(struct nc_main_state *st, int *rc)
         char detail[ZCL_COMMAND_MAX_PATH + 512];
         (void)zcl_command_registry_input_reject_detail(st->spec, why, detail,
                                                        sizeof(detail));
+        size_t used = strlen(detail);
+        (void)snprintf(detail + used, sizeof(detail) - used,
+                       "; `--help` prints this command's input schema");
         nc_print_error_next_string(
             st->spec->path, "INVALID_INPUT", "normalize", detail, st->spec->path,
             "discover.schema", "path", st->spec->path,
@@ -4668,6 +4773,21 @@ static int nc_main_standalone_preflight(const char *root_word,
     return NC_MAIN_CONTINUE;
 }
 
+/* Requests answered from the catalog alone: `--help` on a leaf, discovery
+ * leaves (rendered directly), and a branch (no deeper leaf resolved).
+ * NC_MAIN_CONTINUE when the leaf's handler must run. */
+static int nc_main_run_without_handler(struct nc_main_state *st)
+{
+    bool branch = st->spec->mode == ZCL_COMMAND_MODE_BRANCH;
+    if (st->help && !branch)
+        return nc_main_run_help(st);
+    if (branch)
+        return nc_main_run_branch(st);
+    if (st->spec->layer == ZCL_COMMAND_LAYER_DISCOVER)
+        return nc_main_run_discover_leaf(st);
+    return NC_MAIN_CONTINUE;
+}
+
 int zcl_native_command_main_standalone(const char *root_word, const char *const *args,
                             int nargs, const char *datadir, int rpc_port,
                             enum chain_network network,
@@ -4696,14 +4816,9 @@ int zcl_native_command_main_standalone(const char *root_word, const char *const 
     if (!nc_main_parse_flags(&st, &rc))
         return rc;
 
-    /* Discovery leaves render their native document directly. */
-    if (st.spec->layer == ZCL_COMMAND_LAYER_DISCOVER &&
-        st.spec->mode != ZCL_COMMAND_MODE_BRANCH)
-        return nc_main_run_discover_leaf(&st);
-
-    /* A branch: no deeper leaf resolved. */
-    if (st.spec->mode == ZCL_COMMAND_MODE_BRANCH)
-        return nc_main_run_branch(&st);
+    int early = nc_main_run_without_handler(&st);
+    if (early != NC_MAIN_CONTINUE)
+        return early;
 
     if (!nc_main_prepare_input(&st, &rc))
         return rc;

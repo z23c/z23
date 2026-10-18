@@ -105,6 +105,11 @@ Normative behavior:
   `--input='<object>'` or `--input=-` for stdin; convenient typed flags compile
   to the same object. Unknown keys and out-of-range values are rejected before
   side effects. A handler never parses shell syntax.
+- Every leaf also accepts `--help` (or `-h`), which prints the leaf's
+  `discover.describe` and input `discover.schema` documents and exits 0, and
+  `--input-file=<absolute path>`, which reads the same object as `--input`
+  from a caller-owned, non-symlink regular file under the same size budget as
+  `--input=-`. `--input` and `--input-file` are mutually exclusive.
 - Unknown branches fail with nearby valid paths and one executable next
   action; they never fall through to an unrelated RPC method.
 
