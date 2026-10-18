@@ -67,7 +67,6 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`never-stuck-plan.md`](./never-stuck-plan.md) | DESIGN | the wedge class this doc diagnosed is CURED; retained as the design record for the never-stuck hardening map + the per-height UTXO-ladder gap |
 | [`fail-safe-architecture.md`](./fail-safe-architecture.md) | DESIGN | the progress law + universal repair ladder; absorbs `sticky-node-plan.md`'s invariants and `never-stuck-plan.md` §1b |
 | [`sticky-node-plan.md`](./sticky-node-plan.md) | DESIGN/RETAINED | the stickiness invariants + gap analysis; §4 (the AAR/MTTUR metric) is cited by `tools/scripts/sticky_matrix.sh`/`sticky_fault_inject.sh` and the Makefile `sticky-matrix`/`sticky-matrix-v1` targets — keep §4 numbered as-is |
-| [`canonical-frontier-derived-state-plan.md`](./canonical-frontier-derived-state-plan.md) | DESIGN | frontier-derived-state gates + heal-ladder deletion design; historical input, current gates are in `SOVEREIGN-NETWORK-ROADMAP.md` |
 | [`ladder-carve-audit.md`](./ladder-carve-audit.md) | DESIGN | current per-file consumer graph for the borrowed-state ladder deletion; headline verdict: zero LOC deletable today |
 | [`reducer-shielded-consensus-plan.md`](./reducer-shielded-consensus-plan.md) | DESIGN | anchor-membership + turnstile enforcement design (not implementation-ready — see its own §8 gaps) |
 | [`concurrency-hazards-consensus-gated.md`](./concurrency-hazards-consensus-gated.md) | DESIGN | unfixed cross-thread hazards on the consensus/chain-advance path, boot-validation-blocked |
@@ -103,9 +102,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`sim-phase2-plan.md`](./sim-phase2-plan.md) | LIVE | the in-memory simulation network reference |
 | [`io-harness-design.md`](./io-harness-design.md) | LIVE | the `simnet_wire` adversarial network-IO harness design |
 | [`GROTH16-SPEND-PARITY.md`](./GROTH16-SPEND-PARITY.md) | LIVE | native Sapling spend-circuit differential parity scoreboard |
-| [`tenacity-roadmap.md`](./tenacity-roadmap.md) | RETAINED | superseded as a roadmap by `FORWARD_PLAN.md` + `self-verified-tip-plan.md` (`docs/TENACITY.md` remains the standing doctrine); items 3/5, the "Hold-class doctrine" and "Stability hardening backlog" sections, and §4's seal/window design are cited by name from reindex/replay-canary/`seal_kv` code and `tools/scripts/check_blocker_remedy.sh`/`reindex_smoke.sh`/the Makefile |
 | [`parity-audit-round2-findings.md`](./parity-audit-round2-findings.md) | RETAINED | superseded audit, retained — findings L1/L2/L3 cited by the consensus-parity lock-in tests |
-| [`consensus-parity-supplemental-audit-2026-06-08.md`](./consensus-parity-supplemental-audit-2026-06-08.md) | RETAINED | superseded audit, retained — §2 item 5 cited by `docs/AGENT_TRAPS.md`; landed-fix summary condensed into `docs/CONSENSUS_PARITY_DOCTRINE.md` |
 | [`lint-gate-hollowness-audit.md`](./lint-gate-hollowness-audit.md) | RETAINED | the fail-loud-scan-floor lint-gate pattern, cited by `tools/lint/gate_lib.sh` and its self-test |
 
 This table covers **every** tracked file in this directory. Reconcile it after

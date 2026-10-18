@@ -20,8 +20,7 @@ repeat them.
 
 ## Managed fleet operation
 
-Use the installed `~/.config/dev-workers/OPERATIONS.md`, `STORAGE.md` and
-`WORKER.md` before development. They own host routes, admission reserves,
+Use the installed host operations, storage and worker policy before development. They own host routes, admission reserves,
 retention and concurrency. On the managed Mac use one focused
 `devbuild --wait make -j2 …` command; generic all-core examples below do not
 override that host policy. See the

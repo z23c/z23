@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# reindex_smoke.sh — acceptance harness (a) + (c) for tenacity-roadmap item 3
+# reindex_smoke.sh — acceptance harness (a) + (c) for the reindex epilogue
 # (the reindex epilogue). Run via `make test-reindex-smoke` /
 # `make test-reindex-killmid`. NOT in hermetic `make ci`: it SPAWNS a real
 # isolated regtest node. All isolation (datadir under /tmp, 39xxx ports,

@@ -122,7 +122,7 @@ operator-specific peers. Copy and adapt before installing:
   removes the datadir on exit (including on SIGKILL of the group), and
   still refuses to `rm` anything that is not `$ZCL_ISO_SCRATCH_ROOT/zcl23-*`.
 - **Port reservation**: the nightly uses 39050 base, the weekly 39060. The
-  future nightly crash-soak (tenacity-roadmap item 7) should run at a
+  future nightly crash-soak should run at a
   DISJOINT calendar slot (~04:30) and on the RESERVED 39070 base. Distinct
   `ISO_KIND` mints distinct `/tmp/zcl23-replay-*` datadirs, so even an
   overlapping run is datadir-safe; the `ss(8)` LISTEN preflight in

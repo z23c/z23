@@ -2,7 +2,7 @@
  *
  * purpose: gate family — check-blocker-remedy (port of
  * tools/scripts/check_blocker_remedy.sh, now a shim). Blocker remedy
- * totality (docs/work/tenacity-roadmap.md "Hold-class doctrine"): every
+ * totality (docs/TENACITY.md "Hold-class doctrine"): every
  * named typed blocker a production call site can raise — a literal/macro id
  * argument to blocker_init / chain_linkage_hold_raise /
  * sentinel_raise_blocker / name_dependency_blocker, or a

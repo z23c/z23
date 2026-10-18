@@ -27,22 +27,14 @@ integrity checks, and reviewer checklist are documented in
 
 ## Automated review of pull requests
 
-Every pull request — including from forks — is automatically security-reviewed
-before it can be merged:
-
-- **`pr-security-review.yml`** runs `tools/scripts/pr_security_scan.sh` over the
-  PR diff: consensus divergence from `zclassicd`
+Every outside contribution is security-reviewed before it is merged. The
+reviewer runs `tools/scripts/pr_security_scan.sh` locally over the proposed
+diff, which checks for: consensus divergence from `zclassicd`
   ([`docs/CONSENSUS_PARITY_DOCTRINE.md`](../docs/CONSENSUS_PARITY_DOCTRINE.md)),
   supply-chain execution (fetch-and-run / decode-and-run / dynamic load / remote
   installs / new submodules + workflows), committed secrets, and dangerous C
-  calls. A **HIGH** finding fails the check and blocks the merge.
-
-This is intentionally **fork-safe**. The scan uses `pull_request_target` so the
-workflow and scanner come from the trusted base revision, checks out only the
-base SHA, and fetches the proposed head as inert Git data. Explicit permissions
-are read-only, no repository secrets are exposed, and no pull-request script or
-executable is run. The check result and bounded log are the complete verdict;
-no write-token comment workflow is involved.
+  calls. A **HIGH** finding blocks the merge. The scan reads the proposed head as
+inert Git data and executes nothing from it.
 
 ## Reporting a vulnerability
 

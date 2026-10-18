@@ -82,7 +82,7 @@ Z23_FLAG("ZCL_ACTION_ROOT_IMAGE_ROLE", "env_test", "-", "-",
 Z23_FLAG("ZCL_ACTION_ROOT_PARENT_HARNESS", "env_test", "-", "-",
           "Original builder-image input root for the changed-image re-exec control; first use tests/harness/src/test_action_root.c:auto")
 Z23_FLAG("ZCL_ADDNODE_FLAGS", "env_build", "-", "-",
-          "first use tools/repro_on_copy.sh:53; documented at docs/work/tenacity-roadmap.md:141: Goal:** restore full background re-verification on the live node. The flag is a TEMPORA...")
+          "first use tools/repro_on_copy.sh:53; Goal:** restore full background re-verification on the live node. The flag is a TEMPORA...")
 Z23_FLAG("ZCL_AGENT_CLEAR_STALE_REINDEX_AGENT_TIMEOUT", "env_build", "10", "-",
           "undocumented; first use tools/dev/agent-clear-stale-reindex.sh:auto")
 Z23_FLAG("ZCL_AGENT_CLEAR_STALE_REINDEX_DRY_RUN", "env_build", "0", "-",

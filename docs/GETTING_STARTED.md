@@ -745,7 +745,7 @@ Use bounded manual builds and focused tests for ordinary development. Read
 persistent watchers and services disabled unless explicitly requested.
 
 The commands below are ordinary local developer forms. On a shared development
-host, also read its policy, run `devworker where z23`, preserve ownership, and
+host, also read its policy, inspect the assigned lane, preserve ownership, and
 prefix heavy commands with `devbuild --wait` while retaining repository job
 presets. These host tools are not installed by repository setup; a fresh
 personal machine uses the standard build procedure above.

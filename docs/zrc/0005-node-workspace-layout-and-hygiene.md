@@ -15,7 +15,7 @@
 
 This accepted 2026-09-05 layout records a design convention, not current lane
 ownership or authority to relocate existing work. Follow AGENTS.md, host
-policy, `devworker where z23`, and the native lane receiver's approved paths.
+policy, and the native lane receiver's approved paths.
 Resume owned dirty work in place; do not move it into `~/.z23/` merely to match
 this proposal. Create or reclaim lanes only through qualified native tools,
 preserving Git registration, claims, leases, queued work, and exact commits.

@@ -2,19 +2,11 @@
 
 *This is the **doctrine** (timeless rules), distilled from an
 information-theory diagnosis of the project's failure modes. The dated status
-board this doctrine was distilled from — the divergence-surface audit, the
-failure-rate budget (F1–F11), the verification gates (G1–G5), and the merged
-rock-solid recovery-program L1/L2 items — is
-[`docs/work/tenacity-roadmap.md`](work/tenacity-roadmap.md), superseded as a
-roadmap by [`docs/work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) but retained on
-disk because reindex/replay-canary/seal_kv code still cites its numbered items
-by name.
-Near-term hardening sequencing (including the hold-class doctrine and the
-stability-hardening backlog) is in that same file's "Hold-class doctrine" and
-"Stability hardening backlog" sections.*
+board it was distilled from (divergence-surface audit, failure-rate budget
+F1-F11, verification gates G1-G5) was retired from the tree and remains in git
+history. Current sequencing is in [`docs/work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md).*
 
-Companion docs: `docs/work/canonical-frontier-derived-state-plan.md` (the what),
-`docs/CONSENSUS_PARITY_DOCTRINE.md` (the parity bar),
+Companion docs: `docs/CONSENSUS_PARITY_DOCTRINE.md` (the parity bar),
 `docs/work/fast-path.md` (diagnose on a COPY, never live).
 
 Live bootstrap/cure status: [`docs/HANDOFF.md`](HANDOFF.md); design:
@@ -126,7 +118,7 @@ unit (`StartLimitIntervalSec=0`, stepped backoff).
 floor, not a liveness proof: a fully green hermetic suite can coexist with the
 node down for hours in production, because no gate as configured samples that
 failure class. Gates must sample real crash/import/repair histories and real
-chain content — see the G1–G5 gate program in [`tenacity-roadmap.md`](work/tenacity-roadmap.md).
+chain content.
 
 ---
 
@@ -134,9 +126,7 @@ chain content — see the G1–G5 gate program in [`tenacity-roadmap.md`](work/t
 
 Separate WAL databases have no atomic cross-commit between
 stores. Per-encoding authority verdicts (which is CANONICAL, which is a demote /
-delete target) live in the audit table in
-`docs/work/canonical-frontier-derived-state-plan.md` Phase 1/2 and
-[`tenacity-roadmap.md`](work/tenacity-roadmap.md).
+delete target) are recorded in git history with the retired status board.
 
 The single canonical writer per fact:
 
@@ -174,8 +164,7 @@ tail (1,561 records) with plausible row counts and shipped green its whole life.
 Defense in depth: each failure mode is absorbed by the innermost layer that can;
 outer layers are backstops; the residue pages the operator via
 EV_OPERATOR_NEEDED / Conditions / supervisor — **never a silent halt, never a
-FATAL loop.** The live F1–F11 status board (absorbing layer + landed/open per
-mode) is in [`tenacity-roadmap.md`](work/tenacity-roadmap.md).
+FATAL loop.**
 
 **Page-the-operator residue** (everything the layers do NOT absorb): consensus
 divergence vs zclassicd at identical height (parity break — never auto-heal),
@@ -189,10 +178,7 @@ EV_OPERATOR_NEEDED + Condition, with the node held SERVING-degraded where safe.
 
 The gates ARE the product, and they are the only honest verification of the
 refactor — **they land FIRST.** Budget: ~1–1.5 h/night + ~30 min/week on the
-existing 32-core box. Each must emit a verdict sentinel (never exit-0 alone: a change can pass build+lint+tests with its new seed path never executing, and only repro-on-copy proves it fires). The five-gate program (G1 full-history replay
-canary, G2 chain-derived golden extremals, G3 crash-boot soak, G4 recipe smokes,
-G5 push-time execution) and its land status are in
-[`tenacity-roadmap.md`](work/tenacity-roadmap.md).
+existing 32-core box. Each must emit a verdict sentinel (never exit-0 alone: a change can pass build+lint+tests with its new seed path never executing, and only repro-on-copy proves it fires).
 
 **What exists today (honest):** the `make lint` gates (the lint umbrella —
 count derived from `LINT_GATES` in the Makefile, not restated here), the
@@ -200,3 +186,23 @@ registered test_parallel groups (count derived by `make test-parallel`,
 likewise not restated), `make ci`
 (policy-forbidden from starting a node), `make test-crash` (SKIPs when its
 selected datadir is absent). These checks remain a regression floor.
+
+---
+
+## Hold-class doctrine
+
+The stickiness invariant applied to reducer holds: **a stall must always be a
+NAMED typed blocker (`platform/modules/util/include/util/blocker.h`) with either an auto-remedy
+condition or an honest, documented owner-gate rationale** — never a bare
+fail-closed refusal invisible to `z23 core sync blockers` /
+`z23 dumpstate subsystem=blocker`. An audit of every fail-closed hold
+in `engine/jobs/src/` (`utxo_apply`, `script_validate`, `proof_validate`,
+`coin_backfill`) found 12 typed hold sites; the generic backstop
+(`engine/conditions/src/blocker_stall_meta_detector.c`) arms the sticky
+escalator + pages by blocker id for any hold whose H\*-freeze exceeds the
+window, covering every *typed* hold even with an empty `escape_action` — it
+is a backstop, not a substitute for an instance cure.
+
+Every blocker id a production call site can raise must declare its remedy in
+`engine/conditions/include/conditions/blocker_remedy_bindings.def`; the
+`check-blocker-remedy` lint gate enforces totality by exhaustive enumeration.

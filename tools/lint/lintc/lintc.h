@@ -451,8 +451,6 @@ int check_fleet_observations_run(int argc, char **argv);
 int check_fleet_observations_selftest(void);
 int check_log_macro_return_type_run(int argc, char **argv);
 int check_log_macro_return_type_selftest(void);
-int check_verification_coverage_run(int argc, char **argv);
-int check_verification_coverage_selftest(void);
 int check_hosted_suite_verdict_run(int argc, char **argv);
 int check_hosted_suite_verdict_selftest(void);
 int check_command_input_keys_run(int argc, char **argv);

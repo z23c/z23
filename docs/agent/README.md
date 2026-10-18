@@ -8,7 +8,7 @@ New to a z23 fleet? Read [START_HERE.md](START_HERE.md) first. Then [AGENTS.md](
 
 Before editing, inspect dirty work and `git worktree list --porcelain`, and
 fetch the exact `origin/main` identity. On a managed host, also read its host
-policy and run `devworker where z23`; those tools are not part of the repository.
+policy and inspect the assigned lane; host policy is not part of the repository.
 A standalone checkout is not exclusive
 ownership or permission to publish; directory layout grants no authority.
 

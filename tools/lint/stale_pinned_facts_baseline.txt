@@ -16,7 +16,6 @@ docs/MVP.md|| 6 | **7-day soak with zero operator intervention** | Live node + s
 docs/SYNC.md|canonical is now wedged at H*=3,176,325 on incomplete shielded history. The
 docs/TENACITY.md|H\*=3,176,325 because historical shielded anchors and nullifiers are incomplete.
 docs/USER_BENCHMARKS.md|H\*=3,176,325 on incomplete historical shielded anchors/nullifiers, so its
-docs/work/canonical-frontier-derived-state-plan.md|> **2026-07-12 correction:** `ab512d577` repaired the earlier transparent-loader failure and temporarily reached tip, but canonical is now wedged at H*=3,176,325 on incomplete shielded anchors/nullifiers. The borrowed artifact's digest and matching header verify bytes and chain location, not state derivation. This derive-state/delete-heal-ladder design remains historical input; current gates are in `SOVEREIGN-NETWORK-ROADMAP.md`.
 docs/work/concurrency-hazards-consensus-gated.md|> Canonical is now held at H*=3,176,325 by incomplete shielded anchor/nullifier
 docs/work/fail-safe-architecture.md|Live node stalled 2.3h at H\*=3166988 (header frontier 3167119). Full causal
 docs/work/fail-safe-architecture.md|on disk — the heal lands on the NEXT boot** (boot-1 stayed at H\*=3166988 for

@@ -300,7 +300,7 @@ bool boot_index_clear_coins_state(struct node_db *ndb)
         return false;
     /* Wiping a CACHE is always legal (the keys below are projections of
      * coins_kv). Known gap: the reindex epilogue deletes-not-recomputes
-     * these — tenacity-roadmap item 3 (F3), out of scope for wave 2. */
+     * these — out of scope for wave 2. */
     bool ok = node_db_exec(ndb, "DELETE FROM utxos");
     /* coins_best_block (the anchor the gate checks), utxo_commitment (the XOR
      * checkpoint) and utxo_sha3 (the self-heal commitment) are ALL stale once
@@ -514,7 +514,7 @@ bool reindex_chainstate(struct main_state *ms,
                 (int)(elapsed / 60), (int)(elapsed % 60), errors);
 
     /* Derive ALL durable post-reindex state from the just-replayed set in one
-     * ordered commit (tenacity-roadmap item 3): reseed coins_kv, recompute the
+     * ordered commit: reseed coins_kv, recompute the
      * SHA3 commitment that boot_index_clear_coins_state deleted, and clamp the
      * reducer cursors + coins_applied_height + tip_finalize anchor to the
      * replayed tip. Without this the recovery path itself manufactures the

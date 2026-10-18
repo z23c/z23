@@ -2,7 +2,7 @@
  *
  * test_blocker_meta_detector -- the generic backstop for the "typed blocker
  * with an EMPTY escape_action holding H*" defect CLASS
- * (docs/work/tenacity-roadmap.md "Hold-class doctrine"; e.g. a
+ * (docs/TENACITY.md "Hold-class doctrine"; e.g. a
  * sapling-anchor P0 with no escape action). Hermetic + deterministic: the uptime clock and
  * H* are injected, the blocker registry is the real one, and the escalator is
  * driven through its real note_stall/armed seam -- no live chain, no DB.

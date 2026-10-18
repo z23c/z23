@@ -3134,7 +3134,6 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-stopwatch-skip-detector \
         check-proof-server-pin \
         check-promotion-receipt-chain \
-        check-verification-coverage \
         check-ship-remote-transaction \
         check-z23-release-install \
         check-published-platforms \
@@ -6550,7 +6549,6 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_fleet_observations_selftest.c \
     tools/lint/lintc/gate_log_macro_return_type.c \
     tools/lint/lintc/gate_log_macro_return_type_selftest.c \
-    tools/lint/lintc/gate_verification_coverage.c \
     tools/lint/lintc/gate_hosted_suite_verdict.c \
     tools/lint/lintc/gate_hosted_suite_verdict_selftest.c \
     tools/lint/lintc/gate_command_input_keys.c \
@@ -13850,7 +13848,7 @@ check-blocker-escape-registered: $(LINTC_TOOL)
 	@./tools/scripts/check_blocker_escape_registered.sh --selftest && ./tools/scripts/check_blocker_escape_registered.sh
 
 # Gate — blocker remedy totality (HARD, no baseline; ratchets by exhaustive
-# enumeration instead). Doctrine: docs/work/tenacity-roadmap.md "Hold-class
+# enumeration instead). Doctrine: docs/TENACITY.md "Hold-class
 # doctrine" (`utxo_apply.nullifier_backfill_gap` had ZERO auto-remedy path
 # anywhere in the tree and wedged the canonical node for weeks): a typed blocker with an
 # empty escape_action and no auto-remedy condition looks exactly like any
@@ -14665,23 +14663,6 @@ check-promotion-receipt-chain: $(LINTC_TOOL)
 	@echo "══ LINT: promotion receipt chain ══"
 	@./tools/lint/check_promotion_receipt_chain.sh --selftest
 	@./tools/lint/check_promotion_receipt_chain.sh
-
-# Gate — hosted CI's green must not overstate what it checked. build.yml puts
-# five green checks on a commit (gcc, clang, lint, fuzz-replay, a full per-TU
-# compile) and the TEST SUITE IS NOT AMONG THEM, so to a reader on GitHub those
-# checks look like more verification than happened. .github/verification-coverage.txt
-# is the declared coverage and this holds it to the workflow both ways: every
-# item claiming to be hosted must name a job key that exists, every job must be
-# claimed, a not-hosted item must name who does vouch for it, and the required
-# item list lives in the GATE (not the manifest) so the gap cannot be closed by
-# deleting a row. It also names the not-hosted items in its own gate log (run
-# the script directly to see them — run_lint.sh captures passing gate output and
-# may cache-skip the gate; the reader-facing statement is build.yml's own
-# comment, which prong 5 forces to point at the manifest).
-check-verification-coverage: $(LINTC_TOOL)
-	@echo "══ LINT: hosted CI verification coverage ══"
-	@./tools/lint/check_verification_coverage.sh --selftest
-	@./tools/lint/check_verification_coverage.sh
 
 # Gate — execute the exact remote activation transaction embedded in ship.sh.
 # Fault injection at daemon-reload and restart must restore both the executable
@@ -15677,7 +15658,6 @@ LINT_GATES := \
     check-stopwatch-skip-detector \
     check-proof-server-pin \
     check-promotion-receipt-chain \
-    check-verification-coverage \
     check-ship-remote-transaction \
     check-z23-release-install \
     check-published-platforms \

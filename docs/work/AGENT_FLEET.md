@@ -18,7 +18,7 @@ those authorities, not another scheduler or ownership ledger.
 |---|---|
 | Product priorities and permitted scope | `AGENTS.md` and `FORWARD_PLAN.md` |
 | Development sequence and exact publication gates | `DEVELOPING.md` |
-| Host routes, working-set limits, admission reserves and output lifetime | Installed `~/.config/dev-workers/OPERATIONS.md`, `STORAGE.md` and `WORKER.md` |
+| Host routes, working-set limits, admission reserves and output lifetime | Installed host operations, storage and worker policy |
 | Ownership, current work and accepted evidence | Native task, action, lease, candidate and receipt objects |
 | Implemented commands and input contracts | The selected binary's `discover` catalog |
 | Human operating explanations | Repository runbooks and the native fleet wiki, with source/evidence references |
@@ -805,8 +805,7 @@ before this documentation slice. Native `dev.agent.start` reported a standalone
 checkout and `dev.agent.claim` accepted the bounded documentation/importer scope.
 Those observations establish neither a current-source build nor fleet authority.
 
-Local laptop preflight found neither `devworker` nor `devbuild` on PATH; the expected
-`~/.local/bin/` files were also absent. The repository's `platform/deploy/devbuild`
+Local laptop preflight found no `devbuild` on PATH. The repository's `platform/deploy/devbuild`
 is explicitly a reference mirror, not the installed host authority. Build,
 runtime, sanitizer, mutation, integration, model and fleet tests are **NOTRUN**.
 No executable implementation or cost saving is claimed by this documentation

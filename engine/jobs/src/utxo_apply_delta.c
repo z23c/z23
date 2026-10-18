@@ -634,7 +634,7 @@ void utxo_apply_compute_block_delta(const struct block *blk,
  *   added_blob: per erased coin    txid|vout            (everything SPEND needs)
  * NOTE: currently append-only — NOT yet pruned. A finality-floor prune is gated
  * on retiring the reducer-frontier repair ladder, whose inverse-delta walkers
- * have no finality clamp (see docs/work/canonical-frontier-derived-state-plan.md).
+ * have no finality clamp.
  * Until then this table grows O(chain); the only DELETE is the reorg range. */
 bool utxo_apply_ensure_delta_schema(sqlite3 *db)
 {

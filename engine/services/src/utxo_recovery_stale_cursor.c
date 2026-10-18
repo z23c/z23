@@ -20,7 +20,7 @@
  * in progress.kv) the coins-best fact is DERIVED via
  * reducer_frontier_derive_coins_best and this legacy node_state-anchor
  * repair never runs. It survives only for legacy datadirs until
- * canonical-plan step 5 (docs/work/canonical-frontier-derived-state-plan.md).
+ * canonical-plan step 5.
  */
 
 #include "services/utxo_recovery_service.h"

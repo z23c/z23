@@ -10,7 +10,7 @@ procedure remains in [DEVELOPING.md](../DEVELOPING.md).
 
 1. Inspect existing worktree and
    component ownership before assigning work (on a managed host, read its policy
-   and run `devworker where z23` first). Preserve dirty work and leases.
+   and inspect the assigned lane first). Preserve dirty work and leases.
 2. Record the full fetched `origin/main` commit. Give each worker a disjoint
    path contract and a concrete acceptance. Commands, Makefile, impact rules,
    and generated catalogs each need one primary writer.

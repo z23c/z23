@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * blocker_remedy_bindings — the ratchet baseline for "every named blocker
- * declares its remedy" (doctrine: docs/work/tenacity-roadmap.md "Hold-class
+ * declares its remedy" (doctrine: docs/TENACITY.md "Hold-class
  * doctrine").
  *
  * Why this exists

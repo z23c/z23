@@ -293,9 +293,9 @@ int t_git_hooks_gate_rejects_noop_pre_commit(void)
 /* Systemd memory budget: the live repo units must fit under the host budget;
  * the script parser self-test covers over-budget, infinity, invalid-size,
  * absent-cap, and drop-in override behavior. The baseline run pins
- * ZCL_SYSTEMD_MEMORY_BUDGET_MEMTOTAL_BYTES (as build.yml does) so the
+ * ZCL_SYSTEMD_MEMORY_BUDGET_MEMTOTAL_BYTES so the
  * verdict is independent of host RAM. */
-/* ~93 GiB; keep identical to build.yml's ZCL_SYSTEMD_MEMORY_BUDGET_MEMTOTAL_BYTES. */
+/* ~93 GiB. */
 #define ZCL_TEST_DEPLOY_TARGET_MEMTOTAL_BYTES "100300546048"
 int t_systemd_memory_budget(void)
 {

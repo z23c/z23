@@ -340,8 +340,7 @@ bool reducer_frontier_log_coverage_floor(
 );
 
 /* Derive the coins-best fact from progress.kv's own co-committed state.
- * THE derivation (docs/work/canonical-frontier-derived-state-plan.md
- * step 6): the answer is computed from coins_applied_height — co-committed in
+ * THE derivation (canonical-plan step 6): the answer is computed from coins_applied_height — co-committed in
  * the SAME BEGIN IMMEDIATE as every coin mutation + utxo_apply cursor move
  * (storage/coins_kv.h) — never from the separately-written node_state
  * 'coins_best_block' key, which is a CACHE that can drift and is never

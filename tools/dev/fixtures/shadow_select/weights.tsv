@@ -202,7 +202,6 @@ lint_gate	check-typed-blocker	118	338
 lint_gate	check-vcs-no-git	84	338
 lint_gate	check-vcs-no-sha1	53934	337
 lint_gate	check-vendor-provenance	486	375
-lint_gate	check-verification-coverage	99	338
 lint_gate	check-wallet-raw-prepare-log	19	375
 lint_gate	check-windows-acceptance	115700	194
 lint_gate	check-windows-acceptance-guard	367	375

@@ -4,7 +4,7 @@
  * just-replayed or verified-imported UTXO set in ONE ordered commit discipline
  * so the recovery path can never manufacture the coins_applied > hstar wedge.
  *
- * tenacity-roadmap item 3: -reindex-chainstate (the crash-only auto-recovery
+ * -reindex-chainstate (the crash-only auto-recovery
  * verb) ends torn without this epilogue — boot_index_clear_coins_state DELETES the SHA3
  * commitment + coins_best cache but nothing recomputes them, coins_kv is never
  * reseeded, and the 8 reducer stage cursors + coins_applied_height keep their

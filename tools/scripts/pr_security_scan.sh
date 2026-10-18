@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # pr_security_scan.sh — automated security review of a pull request / diff.
 #
-# Runs on every PR (via .github/workflows/pr-security-review.yml) and is
-# runnable by hand or by an agent reviewing an outside contribution. It is
+# Run by hand, or by an agent, over each outside contribution before it merges. It is
 # the "fast customer-service" gate: catch the dangerous classes immediately,
 # tell the contributor clearly, and keep our tree safe before anything merges.
 #

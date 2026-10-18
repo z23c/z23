@@ -23,8 +23,8 @@ development convenience.
 
 ## Fleet entry and policy ownership
 
-On a managed fleet, begin with `devworker where z23` and the installed
-`~/.config/dev-workers/OPERATIONS.md`, `STORAGE.md`, and `WORKER.md`.
+On a managed fleet, begin with the host's installed operations, storage and worker policy and
+inspect the assigned lane.
 Use the existing remote `devon` route from a coordination-only laptop.
 Do not build there or materialize another worker copy. Reuse a sanctioned
 worktree, preserve native claims, and run heavy commands through
@@ -61,9 +61,9 @@ This section holds the maintainer-host and fleet-coordination material that
 
 ### First session on a maintainer host
 
-The `devon`, `devworker` and `devbuild` tools and `~/.config/dev-workers/*`
-exist only on maintainer hosts. Read the installed `OPERATIONS.md`,
-`STORAGE.md` and `WORKER.md`, then run `devworker where z23`. Their reserves
+The `devon` and `devbuild` tools and the installed host policy documents
+exist only on maintainer hosts. Read the operations, storage and worker policy,
+then inspect the assigned lane. Their reserves
 supersede historical floors. Managed development runs remotely through `devon`
 routes; the laptop coordinates and reviews, without builds or worker copies.
 New to a fleet: [`agent/START_HERE.md`](agent/START_HERE.md).
@@ -319,11 +319,10 @@ use `devbuild --wait`, even when only one developer is active. The direct
 `make` examples elsewhere in this document describe unmanaged machines;
 installed host policy takes precedence on fleet development hosts.
 
-Read `~/.config/dev-workers/OPERATIONS.md`, `STORAGE.md` and `WORKER.md`
+Read the installed operations, storage and worker policy
 before work. Inspect the assigned lane and installed admission profile:
 
 ```bash
-devworker where z23
 devbuild --plan
 ```
 

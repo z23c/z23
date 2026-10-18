@@ -5,7 +5,7 @@
  * at a 1000-block grid point G: its SHA3 commitment, count, supply, and the
  * active-chain block hash it was computed against. Seals let a future
  * window_rebuild reset to a verified checkpoint and replay forward (the
- * tenacity-roadmap §4 "recompute, never repair" verb) instead of falling
+ * "recompute, never repair" verb) instead of falling
  * all the way back to the compiled checkpoint.
  *
  * STORAGE: a fixed 4-slot ring lives in progress_meta (NOT a new table) so a

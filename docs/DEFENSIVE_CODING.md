@@ -1143,7 +1143,7 @@ gate that does exist is the driver's own, so this gate never runs a second
 copy of it beside the driver's.
 
 **Out-of-repo documents are NOT covered by `make lint`.** The motivating
-failure happened in `~/.claude/plans/*.md`, which sits outside the git
+failure happened in a plan document that sat outside the git
 repository: invisible to `git grep` and unreachable by any repo gate. The
 in-repo half (tracked `*.md`) is automatic; the out-of-repo half is a
 deliberate, author-run command that scans an external tree while still
@@ -1367,7 +1367,6 @@ add/remove a gate.
 - `check-stopwatch-skip-detector`
 - `check-proof-server-pin`
 - `check-promotion-receipt-chain`
-- `check-verification-coverage`
 - `check-ship-remote-transaction`
 - `check-identity-parser-single`
 - `check-source-identity-authority`
