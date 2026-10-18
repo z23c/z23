@@ -96,7 +96,7 @@ bool zcl_native_command_is_root(const char *word)
          * board carries requests and pointers, and the gates decide. */
         "fleet",
         "search",
-        /* `z23 wiki <q>` is a bare alias of fleet.wiki.find. */
+        /* `z23 wiki [topic]` is a bare alias of discover.wiki. */
         "wiki",
         /* Operator-UX convenience roots: bare aliases of ops.explain /
          * ops.profile so `z23 explain sync` / `zclassic23 profile`
@@ -4929,6 +4929,15 @@ static int nc_main_standalone_preflight(const char *root_word,
     return NC_MAIN_CONTINUE;
 }
 
+/* help, search, describe and schema render their documents without a handler;
+ * wiki and read are ordinary handler-backed leaves of the same branch. */
+static bool nc_discover_renders_directly(const struct zcl_command_spec *spec)
+{
+    return spec->layer == ZCL_COMMAND_LAYER_DISCOVER &&
+           strcmp(spec->path, "discover.wiki") != 0 &&
+           strcmp(spec->path, "discover.read") != 0;
+}
+
 /* Requests answered from the catalog alone: `--help` on a leaf, discovery
  * leaves (rendered directly), and a branch (no deeper leaf resolved).
  * NC_MAIN_CONTINUE when the leaf's handler must run. */
@@ -4939,7 +4948,7 @@ static int nc_main_run_without_handler(struct nc_main_state *st)
         return nc_main_run_help(st);
     if (branch)
         return nc_main_run_branch(st);
-    if (st->spec->layer == ZCL_COMMAND_LAYER_DISCOVER)
+    if (nc_discover_renders_directly(st->spec))
         return nc_main_run_discover_leaf(st);
     return NC_MAIN_CONTINUE;
 }

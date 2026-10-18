@@ -102,3 +102,43 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE,
     zcl_native_handle_discover_schema)
+
+ZCL_COMMAND_READY_READ(
+    "discover.wiki", "discover", "wiki",
+    "Walk the docs knowledge tree one topic at a time",
+    "One docs/ topic with no node running: its title and summary, immediate "
+    "sub-topics and pages (at most 64 per reply, resume with `after`), the "
+    "commands its README names, and the next commands to run. An empty topic "
+    "is the root; `docsdir` overrides the checkout's docs directory. Lesson "
+    "search over the signed fleet wiki is `fleet.wiki.find`.", 40960,
+    "wiki,docs,topic,tree,knowledge,navigate", "zcl.discover.wiki_input.v1",
+    "zcl.wiki_node.v1", "topic,after,docsdir", "topic",
+    "z23 wiki agent",
+    ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_discover_wiki)
+
+ZCL_COMMAND_READY_READ(
+    "discover.read", "discover", "",
+    "Read one docs page in bounded UTF-8-safe chunks",
+    "One Markdown page under docs/ with no node running: `bytes` (default "
+    "4096, at most 16384) from `offset`, cut on a UTF-8 boundary, with the "
+    "page title, its size, and `next_offset` (null at the end). Paths are "
+    "confined to docs/; `docsdir` overrides the checkout's docs directory.",
+    40960,
+    "read,page,docs,markdown,chunk", "zcl.discover.read_input.v1",
+    "zcl.wiki_page.v1", "page,offset,bytes,docsdir", "page",
+    "z23 discover read README.md --bytes=300",
+    ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_discover_read)

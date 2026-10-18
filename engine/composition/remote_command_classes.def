@@ -274,6 +274,14 @@ REMOTE_COMMAND_CLASS("eventlog", REMOTE_CLASS_OWNER_CAPABILITY,
 
 /* ── never_remote ─────────────────────────────────────────────────── */
 
+/* DISCOVER DOCS TREE — 2 never_remote leaves.
+ *
+ * discover.wiki and discover.read read this node's checkout files, and their
+ * `docsdir` input names the directory to read. A peer must not choose a
+ * filesystem path on this node, so neither leaf is remotable. */
+REMOTE_COMMAND_CLASS("discover.wiki", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("discover.read", REMOTE_CLASS_NEVER, "")
+
 /* ROOT — 1 never_remote leaf.
  *
  * `z23 status` is the money front door. Its projection is custody-authoritative

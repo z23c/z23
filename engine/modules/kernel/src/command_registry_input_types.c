@@ -617,6 +617,30 @@ static const struct cr_int_bound *cr_lab_bound(const char *path, const char *key
     return NULL;
 }
 
+/* discover.read integers, and the docs path keys of discover.wiki and
+ * discover.read, which are strings here although `page` is an integer
+ * elsewhere. */
+static const struct cr_int_bound *cr_docs_read_bound(const char *path,
+                                                     const char *key)
+{
+    static const struct cr_int_bound bounds[] = {
+        { "offset", 0, INT64_MAX }, { "bytes", 1, 16384 }
+    };
+    if (strcmp(path, "discover.read") != 0) return NULL;
+    for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
+        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
+    return NULL;
+}
+
+static bool cr_docs_path_key(const char *path, const char *key)
+{
+    if (strcmp(key, "docsdir") == 0)
+        return strcmp(path, "discover.read") == 0 ||
+               strcmp(path, "discover.wiki") == 0;
+    return (strcmp(path, "discover.read") == 0 && strcmp(key, "page") == 0) ||
+           (strcmp(path, "discover.wiki") == 0 && strcmp(key, "topic") == 0);
+}
+
 static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
                                                    const char *key)
 {
@@ -625,6 +649,8 @@ static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
         strcmp(key, examples.key) == 0) return &examples;
     const struct cr_int_bound *lab = cr_lab_bound(path, key);
     if (lab) return lab;
+    const struct cr_int_bound *docs = cr_docs_read_bound(path, key);
+    if (docs) return docs;
     const struct cr_int_bound *history = cr_history_bound(path, key);
     if (history) return history;
     const struct cr_int_bound *bound = cr_device_host_bound(path, key);
@@ -833,7 +859,8 @@ bool zcl_command_registry_input_descriptor(
         out->type = JSON_INT;
         out->minimum = host_bound->lo;
         out->maximum = host_bound->hi;
-    } else if (cr_key_in(key, strings, sizeof(strings) / sizeof(strings[0]))) {
+    } else if (cr_key_in(key, strings, sizeof(strings) / sizeof(strings[0])) ||
+               cr_docs_path_key(spec->path, key)) {
         out->type = JSON_STR;
         out->max_bytes = zcl_command_registry_input_str_max(key);
     } else if (cr_key_in(key, integers, sizeof(integers) / sizeof(integers[0]))) {

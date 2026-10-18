@@ -16,6 +16,8 @@ This is a curated map, not an inventory. The documentation hierarchy is:
 7. [`../CLAUDE.md`](../CLAUDE.md) and vendor-specific skills — thin
    compatibility adapters, not independent project doctrine.
 
+Commands: `discover.help`, `discover.search`, `discover.wiki`, `discover.read`
+
 ## North Star
 
 Z23 exists to make useful software abundant without taking control away from
@@ -114,7 +116,7 @@ from a hash, signature, test, or reproduction receipt.
 - [`MIND.md`](MIND.md) — the per-node resident that owns rebuilding this box's
   code index, what it holds, and why a stale answer is refused rather than
   rebuilt inside a query.
-- [`WIKI.md`](WIKI.md) — the fleet wiki: `z23 wiki <q>`, entry schema,
+- [`WIKI.md`](WIKI.md) — the fleet wiki: `z23 fleet wiki find <q>`, entry schema,
   search behavior, agent-harness access and how to write a good page.
 - [`WORK_CARDS.md`](WORK_CARDS.md) — owner-signed public work cards on the
   board: the card format, how state derives from claims and results, and

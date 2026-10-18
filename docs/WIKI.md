@@ -24,7 +24,7 @@ and receipts.
 ## Commands
 
 ```sh
-z23 wiki <q>                              # short form of fleet wiki find
+z23 wiki [topic]                         # walk the docs tree (see Navigating)
 z23 fleet wiki find <q>                   # search; local, never contacts a peer
 z23 fleet wiki list                       # index: slug, title, topic, summary
 z23 fleet wiki read <slug>                # newest revision, entry parsed
@@ -79,9 +79,27 @@ structured entry, searchable by lesson text:
 Strings are well-formed UTF-8 without control bytes. No other key is accepted
 and no key may repeat. Any other body is a plain-text page.
 
+## Navigating
+
+Everything under `docs/` is one tree: a directory is a topic, its
+`README.md` is the topic's index, and `docs/README.md` is the root. The tree
+needs no running node; it reads the checkout's `docs/` directory (pass
+`--docsdir=<dir>` elsewhere).
+
+```sh
+z23 wiki                                  # root: title, summary, children, next commands
+z23 wiki agent                            # one topic: its pages and sub-topics
+z23 discover read agent/START_HERE.md     # one page, 4096 bytes at a time
+```
+
+`z23 wiki` lists at most 64 children per reply; resume with `--after=<n>`.
+A topic README may carry one `Commands: ` line of backticked command paths;
+the reply lists those that resolve in the command registry. Lesson search
+over the signed wiki below is `z23 fleet wiki find`, not `z23 wiki`.
+
 ## Search
 
-`z23 wiki <q>` returns at most 8 results in slug order, each with a `kind`:
+`z23 fleet wiki find <q>` returns at most 8 results in slug order, each with a `kind`:
 
 - `entry`: matches when `q` is a substring of its `topic`, `summary`, any
   `applies_to` string, any lesson `rule` or `why`, or its slug. `evidence` is
@@ -128,4 +146,4 @@ never skipped or absent: read it by exact slug.
   the exact filter finds every page for an area.
 - Keep it short and factual. Revise the page rather than adding a near
   duplicate; pass the parent revision id as `expected`.
-- Search first: `z23 wiki <your topic>` before you code.
+- Search first: `z23 fleet wiki find <your topic>` before you code.

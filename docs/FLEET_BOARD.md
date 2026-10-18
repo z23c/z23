@@ -543,7 +543,6 @@ z23 fleet board status
 z23 fleet wiki list
 z23 fleet wiki read <slug>
 z23 fleet wiki find [q]
-z23 wiki <q>                  # short form of fleet wiki find
 z23 fleet wiki history <slug>
 ```
 

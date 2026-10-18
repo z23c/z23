@@ -676,6 +676,8 @@ static bool group_reads_external_inputs(const char *name)
         "sprout_phgr13_kat",
         /* Act 3 (shielded) gates on ~/.zcash-params presence. */
         "wallet_destruction_drill",
+        /* reads the tests/fixtures/wiki_docs tree */
+        "wiki_tree",
         /* --- /proc + CPU-feature dispatch (the host, not the tree) --- */
         "boot_self_respawn",
         "canary_sentinel_watch",

@@ -187,6 +187,12 @@ void zcl_native_handle_discover_describe(
 void zcl_native_handle_discover_schema(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_discover_wiki(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_discover_read(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_dev_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

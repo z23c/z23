@@ -3598,7 +3598,7 @@ static int test_fleet_wiki_positionals_and_alias(void)
 {
     int failures = 0;
     const struct zcl_command_registry *reg = zcl_command_catalog();
-    TEST("fleet wiki find and history take their documented positional; wiki aliases find") {
+    TEST("fleet wiki find and history take their documented positional; wiki aliases discover.wiki") {
         const struct zcl_command_spec *find = find_spec(reg, "fleet.wiki.find");
         const struct zcl_command_spec *history = find_spec(reg, "fleet.wiki.history");
         ASSERT(find != NULL && history != NULL);
@@ -3612,7 +3612,8 @@ static int test_fleet_wiki_positionals_and_alias(void)
         const struct zcl_command_spec *s = zcl_command_registry_resolve_words(
             reg, words, 2, &consumed, &alias, invoked, sizeof(invoked));
         ASSERT(s != NULL);
-        ASSERT_STR_EQ(s->path, "fleet.wiki.find");
+        ASSERT_STR_EQ(s->path, "discover.wiki");
+        ASSERT_STR_EQ(find->aliases, "");
         ASSERT(alias);
         ASSERT_EQ(consumed, (size_t)1);
         PASS();
