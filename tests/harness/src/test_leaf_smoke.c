@@ -15,8 +15,10 @@
 
 #include "command/native_command.h"
 #include "config/command_catalog.h"
+#include "json/json.h"
 #include "kernel/command_registry.h"
 
+#include <dirent.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -182,6 +184,103 @@ static bool smoke_leaf_ok(const struct zcl_command_spec *s, const char *dir,
     return true;
 }
 
+/* Mutating leaves outside the read smoke above. Every row must resolve in the
+ * registry and render a zcl.command_schema.v1 document on --help. A row with
+ * refuse set is also called with empty input in the scratch datadir, which
+ * must answer one zcl.result.v1 refusal (ok=false, non-empty error.code) and
+ * leave the datadir empty. Rows without it have no required input, so an empty
+ * call would act (bind a socket, take the node singleton, sweep the real
+ * worktree pools, sample the host or write a seed or KPI record); those are
+ * checked for resolution and schema only. */
+struct contract_row {
+    const char *path;
+    bool refuse;
+};
+
+static const struct contract_row contract_rows[] = {
+    { "lab.promote", true }, { "lab.test", true },
+    { "plugin.call", true }, { "code.kpi", false },
+    { "dev.fleet.mind.serve", false },
+    { "dev.fleet.tunnel.allow", true }, { "dev.fleet.tunnel.close", true },
+    { "dev.fleet.tunnel.deny", true }, { "dev.fleet.tunnel.open", true },
+    { "ops.debug.rom_seed.disable", false },
+    { "ops.debug.rom_seed.enable", false },
+    { "ops.debug.rom_seed.publish", false },
+    { "ops.host.gc", false }, { "ops.mesh.device.init", true },
+    { "fleet.experiment.result", true }, { "fleet.join", true },
+    { "fleet.link.probe", false }, { "fleet.steer.deliver", true },
+    { "fleet.steer.drop", true }, { "fleet.vitals.sample", false },
+};
+
+static bool contract_refusal(const char *wire)
+{
+    size_t n = strlen(wire);
+    struct json_value doc;
+    if (!native_contract_single_result(wire) || !json_read(&doc, wire, n - 1))
+        return false;
+    bool ok = strcmp(json_get_str_or(&doc, "schema", ""), "zcl.result.v1") == 0 &&
+              !json_get_bool(json_get(&doc, "ok")) &&
+              json_get_str(json_get(json_get(&doc, "error"), "code"))[0] != 0;
+    json_free(&doc);
+    return ok;
+}
+
+/* True when `dir` holds nothing but the captured stdout file. */
+static bool contract_dir_untouched(const char *dir)
+{
+    DIR *d = opendir(dir);
+    size_t extra = 0;
+    if (!d)
+        return false;
+    for (const struct dirent *e = readdir(d); e; e = readdir(d))
+        extra += strcmp(e->d_name, ".") && strcmp(e->d_name, "..") &&
+                 strcmp(e->d_name, "out.json");
+    closedir(d);
+    return extra == 0;
+}
+
+static bool contract_row_ok(const struct contract_row *r, const char *dir,
+                            char *wire, size_t cap)
+{
+    const struct zcl_command_spec *s =
+        zcl_command_registry_find(zcl_command_catalog(), r->path, NULL);
+    if (!s || s->availability != ZCL_COMMAND_READY || !s->handler) {
+        printf("  %s: not a READY leaf in the registry\n", r->path);
+        return false;
+    }
+    if (!smoke_run(s, dir, true, wire, cap) || !smoke_help_ok(s, wire)) {
+        printf("  %s: --help is not a zcl.command_schema.v1 document\n", r->path);
+        return false;
+    }
+    if (!r->refuse)
+        return true;
+    if (!smoke_run(s, dir, false, wire, cap) || !contract_refusal(wire)) {
+        printf("  %s: empty input is not a typed refusal: %.80s\n", r->path, wire);
+        return false;
+    }
+    if (!contract_dir_untouched(dir)) {
+        printf("  %s: refusal wrote into the scratch datadir\n", r->path);
+        return false;
+    }
+    return true;
+}
+
+static int test_leaf_contract_rows(char *wire)
+{
+    int failures = 0;
+    TEST_CASE("mutating leaves resolve, render schema and refuse empty input without writing") {
+        char dir[PATH_MAX];
+        size_t bad = 0;
+        ASSERT(wire != NULL);
+        test_make_tmpdir(dir, sizeof(dir), "leaf_smoke", "contract");
+        for (size_t i = 0; i < sizeof(contract_rows) / sizeof(contract_rows[0]); i++)
+            bad += !contract_row_ok(&contract_rows[i], dir, wire, SMOKE_WIRE_CAP);
+        ASSERT_EQ(bad, (size_t)0);
+        (void)test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 int test_leaf_smoke(void)
 {
     int failures = 0;
@@ -207,6 +306,7 @@ int test_leaf_smoke(void)
         ASSERT_EQ(bad, (size_t)0);
         (void)test_rm_rf_recursive(dir);
     } TEST_END
+    failures += test_leaf_contract_rows(wire);
     free(wire);
     return failures;
 }
