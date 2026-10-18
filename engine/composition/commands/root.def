@@ -106,16 +106,19 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "discover.wiki", "discover", "wiki",
     "Walk the docs knowledge tree one topic at a time",
-    "One docs/ topic with no node running: its title and summary, immediate "
+    "One docs/ topic, or with the `code` prefix one source directory of the "
+    "repository, with no node running: its title and summary, immediate "
     "sub-topics and pages (a reply holds as many as fit its budget, at most 64; "
     "resume with `after`), the "
     "commands its README names, and the next commands to run. An empty topic "
-    "is the root; `docsdir` overrides the checkout's docs directory. Lesson "
+    "is the root; `code` lists the top-level source directories and `code/<dir>` "
+    "a directory with each file's purpose line. `docsdir` overrides the "
+    "checkout's docs directory and `codedir` its repository root. Lesson "
     "search over the signed fleet wiki is `fleet.wiki.find`.",
     ZCL_COMMAND_EXTENDED_LIST_BUDGET,
     "wiki,docs,topic,tree,knowledge,navigate,start,first,steps,getting started,new agent,begin,newcomer,onboarding", "zcl.discover.wiki_input.v1",
-    "zcl.wiki_node.v1", "topic,after,docsdir", "topic",
-    "z23 wiki agent",
+    "zcl.wiki_node.v1", "topic,after,docsdir,codedir", "topic",
+    "z23 wiki code/tools/command",
     ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_TINY,
@@ -128,13 +131,14 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "discover.read", "discover", "",
     "Read one docs page in bounded UTF-8-safe chunks",
-    "One Markdown page under docs/ with no node running: `bytes` (default "
-    "4096, at most 16384) from `offset`, cut on a UTF-8 boundary, with the "
-    "page title, its size, and `next_offset` (null at the end). Paths are "
-    "confined to docs/; `docsdir` overrides the checkout's docs directory.",
+    "One Markdown page under docs/, or a .c, .h, .def, .sh or .md source file "
+    "under code/, with no node running: `bytes` (default 4096, at most "
+    "16384) from `offset`, cut on a UTF-8 boundary, with the page title, its "
+    "size, and `next_offset` (null at the end). Paths are confined to docs/ "
+    "and the repository; `docsdir` and `codedir` override the checkout.",
     40960,
     "read,page,docs,markdown,chunk", "zcl.discover.read_input.v1",
-    "zcl.wiki_page.v1", "page,offset,bytes,docsdir", "page",
+    "zcl.wiki_page.v1", "page,offset,bytes,docsdir,codedir", "page",
     "z23 discover read README.md --bytes=300",
     ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,

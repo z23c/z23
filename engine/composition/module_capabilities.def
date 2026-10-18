@@ -1201,6 +1201,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_code_context_command.c", CAP_FS_WRIT
 ZCL_MODULE_CAPABILITY("tools/command/native_code_coverage_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_cost_command.c", CAP_FS_READ|CAP_FS_WRITE, "reads the last suite run's per-group timing artifact; the checked-allocation failure print is this unit's write reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_wiki_docs.c", CAP_FS_READ|CAP_FS_WRITE, "reads docs/ pages and directory listings under the confined docs root; the checked-allocation failure print is this unit's write reach")
+ZCL_MODULE_CAPABILITY("tools/command/native_wiki_code.c", CAP_FS_READ, "lists and reads source directories and files under the confined repository root served at code/")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_owner_command.c", CAP_NONE, "the on-disk existence check now goes through platform_file_shape_read(), an internal helper whose own translation unit owns the FS_READ reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_brief.c", CAP_FS_READ|CAP_FS_WRITE, "reads the first 4 KiB of the nearest AGENTS.md of each requested path; the wiki search it dispatches owns its own node reach; the checked-allocation failure print is this unit's write reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_recent_command.c", CAP_FS_WRITE, "spawns git log through the bounded capture seam, whose own module owns the process reach; the checked-allocation failure print is this unit's direct reach")

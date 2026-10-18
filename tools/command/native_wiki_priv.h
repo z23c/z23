@@ -25,10 +25,15 @@ enum {
     WK_CHUNK_MAX = 16384,
 };
 
-enum wk_status { WK_OK, WK_BAD, WK_ESCAPES, WK_MISSING, WK_NOMEM, WK_FULL };
+enum wk_status {
+    WK_OK, WK_BAD, WK_ESCAPES, WK_MISSING, WK_NOMEM, WK_FULL, WK_EXCLUDED
+};
 
+/* A topic root: the docs directory, or with `code` set the repository root
+ * served under the code/ prefix by the source-tree rules in native_wiki_code.c. */
 struct wk_docs {
-    char root[WK_PATH_MAX]; /* resolved docs directory */
+    char root[WK_PATH_MAX]; /* resolved root directory */
+    bool code;
 };
 
 struct wk_meta {
@@ -52,6 +57,11 @@ struct wk_children {
  * README.md. On failure the reply carries DOCS_UNAVAILABLE. */
 bool wk_docs_open(const struct zcl_command_request *request,
                   struct wk_docs *docs, struct zcl_command_reply *reply);
+
+/* Reply for a resolve status that refuses a path (ESCAPES, EXCLUDED); false
+ * for any other status. `code` selects the code/ error codes. */
+bool wk_fail_path(struct zcl_command_reply *reply, enum wk_status st,
+                  bool code, const char *field);
 
 /* Syntactic check of a docs-relative path; writes it without a trailing
  * slash. False for absolute, `.`/`..`, empty-segment, backslash or oversized
@@ -96,6 +106,42 @@ size_t wk_clean(char *dst, size_t max, const char *src, size_t len,
 enum wk_status wk_children_list(const struct wk_docs *docs, const char *real,
                                 struct wk_children *out);
 void wk_children_free(struct wk_children *c);
+
+/* Source-tree branch (native_wiki_code.c). `rel` is code or code/...; true
+ * with the offset of the path below the repository root. */
+bool wk_code_sub(const char *rel, size_t *off);
+
+/* The repository root: the codedir input alone when given; else the parent of
+ * the docs root when it is named docs and holds AGENTS.md. */
+bool wk_code_open(const struct zcl_command_request *request,
+                  const struct wk_docs *docs, struct wk_docs *code);
+
+/* Path below the repository root of a resolved path ("" for the root). */
+const char *wk_code_rel(const struct wk_docs *code, const char *real);
+
+/* True for a path the source tree never serves: dot segments, top-level
+ * build, test-tmp, dist and docs, and anything deeper than vendor/<entry>. */
+bool wk_code_denied(const char *rel);
+
+bool wk_code_is_topic(const struct wk_docs *code, const char *real);
+bool wk_code_ext_ok(const char *name);
+
+/* 0 skipped, 1 directory, 2 source file; `real` is the resolved entry. */
+int wk_code_classify(const struct wk_docs *code, const char *real,
+                     const char *name);
+
+/* Title and summary of a listed entry of the directory `dir`. */
+void wk_code_child_meta(const char *dir, const struct wk_child *c,
+                        struct wk_meta *meta);
+
+/* Head of AGENTS.md, else README.md, in `dir`; returns the file name used or
+ * NULL. */
+const char *wk_code_index(const char *dir, char *buf, size_t cap, size_t *len);
+
+/* Summary of a source file head: the codeindex file purpose for C-family
+ * files, the first comment line for shell scripts. */
+void wk_code_purpose(const char *name, const char *head, size_t len,
+                     char *out, size_t cap);
 
 /* Read `want` bytes at `offset` of `real` plus 3 lookahead bytes. */
 bool wk_read_at(const char *real, int64_t offset, size_t want, char *buf,

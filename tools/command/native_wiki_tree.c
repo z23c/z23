@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: discover.wiki - walk the docs/ knowledge tree one topic at a time:
- * title, summary, children, and the commands a topic names. */
+ * purpose: discover.wiki - walk the docs/ knowledge tree and, under the code/
+ * prefix, the repository's source tree, one topic at a time: title, summary,
+ * children, and the commands a topic names. */
 
 #include "command/native_wiki_priv.h"
 
@@ -20,25 +21,31 @@
  *   commands: WK_CMD_CAP * (ZCL_COMMAND_MAX_PATH + 3)         2096
  *   data.next: four hints, each carrying R, plus two child
  *     names of at most 2 * WK_NAME_MAX and literals            640 + 4R
- * so the fixed part is WK_FIXED_BASE = 5000 plus 6R. Children then get
- * WK_DATA_BUDGET = 16384 - 5000 - 6R, never below 5240 (R = 1024), which
+ *   the root hint `z23 wiki code` (R = 0 there)                  40
+ * so the fixed part is WK_FIXED_BASE = 5040 plus 6R. Children then get
+ * WK_DATA_BUDGET = 16384 - 5040 - 6R, never below 5200 (R = 1024), which
  * holds the largest single child: 96 + R + 2 * WK_NAME_MAX + 2 * 2 *
  * WK_TEXT_MAX = 2174. Each child is estimated at WK_CHILD_OVERHEAD (96, over
  * the 51 literal bytes) plus its escaped path, title and summary, so the
- * estimate bounds the serialized size. WK_CHILD_CAP only bounds work per
+ * estimate bounds the serialized size. The code/ branch keeps every cap: a
+ * child title is a file name or an AGENTS.md title and its summary a purpose
+ * line, within WK_NAME_MAX and WK_TEXT_MAX. WK_CHILD_CAP only bounds work per
  * reply; the byte budget alone keeps the reply inside the leaf budget. */
 enum {
     WK_CHILD_CAP = 64,        /* children per reply */
     WK_CMD_CAP = 16,          /* resolved commands per topic */
     WK_REPLY_BUDGET = ZCL_COMMAND_EXTENDED_LIST_BUDGET,
-    WK_FIXED_BASE = 5000,     /* reply bytes outside children, excluding 6R */
+    WK_FIXED_BASE = 5040,     /* reply bytes outside children, excluding 6R */
     WK_DATA_BUDGET = WK_REPLY_BUDGET - WK_FIXED_BASE, /* children, R = 0 */
     WK_REL_COPIES = 6,        /* occurrences of the topic path outside children */
     WK_CHILD_OVERHEAD = 96,
 };
 
 struct wk_node {
-    const struct wk_docs *docs;
+    const struct wk_docs *root; /* docs, or code when rel is under code/ */
+    struct wk_docs code;
+    bool code_ok;               /* a source tree is available beside docs/ */
+    size_t off;                 /* start of the root-relative path in rel */
     char rel[WK_REL_MAX + 1];
     char real[WK_PATH_MAX];
     int64_t after;
@@ -52,19 +59,60 @@ void wk_fail(struct zcl_command_reply *reply, const char *code,
                            false, message, evidence);
 }
 
-static void wk_unknown_topic(const struct wk_docs *docs, const char *rel,
+bool wk_fail_path(struct zcl_command_reply *reply, enum wk_status st,
+                  bool code, const char *field)
+{
+    if (st == WK_ESCAPES)
+        wk_fail(reply, code ? "OUTSIDE_CODE" : "OUTSIDE_DOCS",
+                code ? "path resolves outside the repository"
+                     : "path resolves outside docs/", field);
+    else if (st == WK_EXCLUDED)
+        wk_fail(reply, "EXCLUDED_PATH", "the source tree does not serve "
+                "dot directories, build, test-tmp, dist, docs or vendor "
+                "internals", field);
+    return st == WK_ESCAPES || st == WK_EXCLUDED;
+}
+
+static void wk_unknown_topic(const struct wk_node *node,
                              struct zcl_command_reply *reply)
 {
-    char parent[WK_REL_MAX + 1];
+    char below[WK_REL_MAX + 1], parent[WK_REL_MAX + 8];
     char in[WK_REL_MAX + 32];
-    wk_nearest_topic(docs, rel, parent, sizeof(parent));
+    bool code = node->root->code;
+    int n;
+    wk_nearest_topic(node->root, node->rel + node->off, below,
+                     sizeof(below));
+    if (code)
+        snprintf(parent, sizeof(parent), "code%s%s", below[0] ? "/" : "",
+                 below);
+    else
+        snprintf(parent, sizeof(parent), "%s", below);
     wk_fail(reply, "UNKNOWN_TOPIC", "no such topic; nearest existing topic is "
             "in the evidence", parent[0] ? parent : "(root)");
-    int n = snprintf(in, sizeof(in), "{\"page\":\"%s%sREADME.md\"}", parent,
-                     parent[0] ? "/" : "");
+    n = code ? snprintf(in, sizeof(in), "{\"topic\":\"%s\"}", parent)
+             : snprintf(in, sizeof(in), "{\"page\":\"%s%sREADME.md\"}", parent,
+                        parent[0] ? "/" : "");
     if (n > 0 && (size_t)n < sizeof(in))
-        (void)zcl_command_reply_add_next(reply, "discover.read", in,
+        (void)zcl_command_reply_add_next(reply, code ? "discover.wiki"
+                                                     : "discover.read", in,
                                          "read the nearest existing topic");
+}
+
+static bool wk_pick_root(const struct zcl_command_request *request,
+                         const struct wk_docs *docs, struct wk_node *node,
+                         struct zcl_command_reply *reply)
+{
+    bool code = wk_code_sub(node->rel, &node->off);
+    node->code_ok = wk_code_open(request, docs, &node->code);
+    if (code && !node->code_ok) {
+        wk_fail(reply, "CODE_UNAVAILABLE", "no source tree found beside "
+                "docs/; the codedir input names it", "codedir");
+        return false;
+    }
+    if (!code)
+        node->off = 0;
+    node->root = code ? &node->code : docs;
+    return true;
 }
 
 static bool wk_target(const struct zcl_command_request *request,
@@ -74,20 +122,19 @@ static bool wk_target(const struct zcl_command_request *request,
     const char *topic = json_get_str(json_get(request->input, "topic"));
     if (!wk_rel_normalize(topic ? topic : "", node->rel, sizeof(node->rel))) {
         wk_fail(reply, "BAD_TOPIC", "topic must be a relative path inside "
-                "docs/ without . or .. segments", "topic");
+                "docs/ or code/ without . or .. segments", "topic");
         return false;
     }
-    enum wk_status st = wk_resolve(docs, node->rel, node->real,
-                                   sizeof(node->real));
-    if (st == WK_ESCAPES) {
-        wk_fail(reply, "OUTSIDE_DOCS", "topic resolves outside docs/", "topic");
+    if (!wk_pick_root(request, docs, node, reply))
+        return false;
+    enum wk_status st = wk_resolve(node->root, node->rel + node->off,
+                                   node->real, sizeof(node->real));
+    if (wk_fail_path(reply, st, node->root->code, "topic"))
+        return false;
+    if (st != WK_OK || !wk_is_topic(node->root, node->real)) {
+        wk_unknown_topic(node, reply);
         return false;
     }
-    if (st != WK_OK || !wk_is_topic(docs, node->real)) {
-        wk_unknown_topic(docs, node->rel, reply);
-        return false;
-    }
-    node->docs = docs;
     node->after = json_get_int(json_get(request->input, "after"));
     return true;
 }
@@ -121,13 +168,17 @@ static bool wk_child_meta(const struct wk_node *node, const struct wk_child *c,
                           struct wk_meta *meta)
 {
     char path[WK_PATH_MAX];
-    int n = c->topic ? snprintf(path, sizeof(path), "%s/%s/README.md",
-                                node->real, c->name)
-                     : snprintf(path, sizeof(path), "%s/%s", node->real,
-                                c->name);
-    if (n <= 0 || (size_t)n >= sizeof(path))
-        return false;
-    wk_scan_file(path, meta);
+    if (node->root->code) {
+        wk_code_child_meta(node->real, c, meta);
+    } else {
+        int n = c->topic ? snprintf(path, sizeof(path), "%s/%s/README.md",
+                                    node->real, c->name)
+                         : snprintf(path, sizeof(path), "%s/%s", node->real,
+                                    c->name);
+        if (n <= 0 || (size_t)n >= sizeof(path))
+            return false;
+        wk_scan_file(path, meta);
+    }
     if (!meta->title[0])
         snprintf(meta->title, sizeof(meta->title), "%s", c->name);
     return true;
@@ -258,11 +309,12 @@ static bool wk_next(struct json_value *next, const struct wk_node *node,
     return true;
 }
 
-static bool wk_push_readme_hint(struct json_value *next, const char *rel)
+static bool wk_push_readme_hint(struct json_value *next, const char *rel,
+                                const char *file)
 {
     char path[WK_REL_MAX + 16];
     char s[WK_REL_MAX + 64];
-    if (!wk_join(path, sizeof(path), rel, "README.md"))
+    if (!wk_join(path, sizeof(path), rel, file))
         return false;
     snprintf(s, sizeof(s), "z23 discover read %s", path);
     return wk_push_str(next, s);
@@ -324,27 +376,64 @@ static void wk_add_page_next(struct zcl_command_reply *reply,
                                          "list the next children");
 }
 
+/* Title and summary of the topic itself and the index file they came from
+ * (NULL when there is none). The source-tree root has fixed text. */
+static const char *wk_self_meta(const struct wk_node *node,
+                                struct wk_meta *self, char *head,
+                                size_t cap, size_t *hn)
+{
+    char readme[WK_PATH_MAX];
+    const char *name = NULL;
+    *hn = 0;
+    head[0] = '\0';
+    if (node->root->code && !node->rel[node->off]) {
+        snprintf(self->title, sizeof(self->title), "Source code");
+        snprintf(self->summary, sizeof(self->summary), "Top-level source "
+                 "directories of the repository; each lists its "
+                 "subdirectories and source files.");
+        return NULL;
+    }
+    if (node->root->code) {
+        name = wk_code_index(node->real, head, cap, hn);
+    } else {
+        snprintf(readme, sizeof(readme), "%s/README.md", node->real);
+        name = wk_head(readme, head, cap, hn) ? "README.md" : NULL;
+    }
+    wk_meta_scan(head, name ? *hn : 0, self);
+    return name;
+}
+
+/* Hints a reader acts on next: children, the index file, and at the docs root
+ * the source tree. */
+static bool wk_hints(struct json_value *next, const struct wk_node *node,
+                     const struct wk_children *kids, size_t end,
+                     const char *index)
+{
+    size_t first = node->after < 0 || (uint64_t)node->after > kids->n
+                       ? kids->n : (size_t)node->after;
+    return wk_next(next, node, kids, first, end) &&
+           (!index || wk_push_readme_hint(next, node->rel, index)) &&
+           (node->root->code || node->rel[0] || !node->code_ok ||
+            wk_push_str(next, "z23 wiki code"));
+}
+
 static bool wk_build(struct zcl_command_reply *reply, const struct wk_node *node,
                      const struct wk_children *kids)
 {
     struct json_value ch, cmds, next;
     struct wk_meta self;
-    char readme[WK_PATH_MAX], head[WK_HEAD_MAX + 1];
+    char head[WK_HEAD_MAX + 1];
     size_t hn = 0, end = 0;
     int bad = 0;
+    const char *index;
     json_init(&ch); json_set_array(&ch);
     json_init(&cmds); json_set_array(&cmds);
     json_init(&next); json_set_array(&next);
-    snprintf(readme, sizeof(readme), "%s/README.md", node->real);
-    bool has = wk_head(readme, head, sizeof(head), &hn);
-    wk_meta_scan(head, has ? hn : 0, &self);
+    index = wk_self_meta(node, &self, head, sizeof(head), &hn);
     wk_self_title(node, &self);
-    size_t first = node->after < 0 || (uint64_t)node->after > kids->n
-                       ? kids->n : (size_t)node->after;
     bool ok = wk_emit_children(node, kids, &ch, &end) &&
-              (!has || wk_commands(head, &cmds, &bad)) &&
-              wk_next(&next, node, kids, first, end) &&
-              (!has || wk_push_readme_hint(&next, node->rel)) &&
+              (!index || node->root->code || wk_commands(head, &cmds, &bad)) &&
+              wk_hints(&next, node, kids, end, index) &&
               wk_push_head(reply, node, &self, kids->n, end, bad);
     ok = ok && wk_push_arr(reply, "children", &ch);
     ok = ok && wk_push_arr(reply, "commands", &cmds);
@@ -364,7 +453,7 @@ void zcl_native_handle_discover_wiki(const struct zcl_command_request *request,
     if (!wk_docs_open(request, &docs, reply) ||
         !wk_target(request, &docs, &node, reply))
         return;
-    enum wk_status st = wk_children_list(&docs, node.real, &kids);
+    enum wk_status st = wk_children_list(node.root, node.real, &kids);
     if (st == WK_NOMEM || st == WK_FULL)
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL,

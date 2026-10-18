@@ -639,7 +639,7 @@ static const struct cr_int_bound *cr_docs_read_bound(const char *path,
 
 static bool cr_docs_path_key(const char *path, const char *key)
 {
-    if (strcmp(key, "docsdir") == 0)
+    if (strcmp(key, "docsdir") == 0 || strcmp(key, "codedir") == 0)
         return strcmp(path, "discover.read") == 0 ||
                strcmp(path, "discover.wiki") == 0;
     return (strcmp(path, "discover.read") == 0 && strcmp(key, "page") == 0) ||

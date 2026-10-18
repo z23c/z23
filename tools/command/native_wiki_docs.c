@@ -29,6 +29,7 @@ bool wk_is_file(const char *real)
 static bool wk_docs_try(const char *cand, struct wk_docs *docs)
 {
     char readme[WK_PATH_MAX];
+    docs->code = false;
     if (!realpath(cand, docs->root) || !zcl_path_is_dir(docs->root))
         return false;
     return zcl_path_join(readme, sizeof(readme), docs->root, "README.md") &&
@@ -147,6 +148,8 @@ enum wk_status wk_resolve(const struct wk_docs *docs, const char *rel,
         return WK_MISSING;
     if (!wk_within(docs->root, res))
         return WK_ESCAPES;
+    if (docs->code && wk_code_denied(wk_code_rel(docs, res)))
+        return WK_EXCLUDED;
     if (strlen(res) >= cap)
         return WK_BAD;
     memcpy(real, res, strlen(res) + 1);
@@ -156,6 +159,8 @@ enum wk_status wk_resolve(const struct wk_docs *docs, const char *rel,
 bool wk_is_topic(const struct wk_docs *docs, const char *real)
 {
     char readme[WK_PATH_MAX];
+    if (docs->code)
+        return wk_code_is_topic(docs, real);
     if (!zcl_path_is_dir(real))
         return false;
     if (strcmp(real, docs->root) == 0)
@@ -506,8 +511,9 @@ static bool wk_ends_md(const char *name)
     return n > 3 && strcmp(name + n - 3, ".md") == 0;
 }
 
-/* A directory entry is listed when it resolves inside the docs root and is a
- * topic directory or a Markdown page other than README.md. */
+/* A directory entry is listed when it resolves inside the root. In docs it is
+ * a topic directory or a Markdown page other than README.md; in the source
+ * tree, wk_code_classify decides. */
 static int wk_classify(const struct wk_docs *docs, const char *dir,
                        const char *name)
 {
@@ -517,6 +523,8 @@ static int wk_classify(const struct wk_docs *docs, const char *dir,
     if (n <= 0 || (size_t)n >= sizeof(full) || !realpath(full, real) ||
         !wk_within(docs->root, real))
         return 0;
+    if (docs->code)
+        return wk_code_classify(docs, real, name);
     if (wk_is_topic(docs, real))
         return 1;
     return wk_is_file(real) && wk_ends_md(name) && strcmp(name, "README.md")

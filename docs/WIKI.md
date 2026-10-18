@@ -106,6 +106,35 @@ Summaries come from the first paragraph of a README or page, rendered as
 plain text: `[text](target)` shows as `text` and `**`, `__` and backticks are
 dropped. `z23 discover read` returns the raw bytes.
 
+### Source tree
+
+The prefix `code` walks the repository's source the same way, with the same
+reply shape, paging and byte budget:
+
+```sh
+z23 wiki code                                          # top-level source directories
+z23 wiki code/tools/command                            # one directory: sub-directories, files, a purpose line each
+z23 discover read code/tools/command/native_wiki_tree.c --bytes=2000
+```
+
+A directory takes its title and summary from its `AGENTS.md`, else its
+`README.md`; with neither, the summary is the file count (`12 files`). The
+root lists directories only. A directory lists its sub-directories and its
+`.c`, `.h`, `.def`, `.sh` and `.md` files. A file's summary is its purpose:
+an explicit `purpose:` line in the leading comment, else the first
+substantive line of that comment (the rule behind `z23 code`'s file index);
+shell scripts use their first comment line; a file with no leading comment
+has an empty summary. `z23 discover read` serves the same files in chunks of
+at most 16384 bytes.
+
+The code tree never serves dot directories, top-level `build`, `test-tmp`,
+`dist` and `docs` (read the last through the docs tree), anything below
+`vendor/<entry>`, or a symlink that leaves the repository. Those paths reply
+`EXCLUDED_PATH` or `OUTSIDE_CODE`. The repository root is the `--codedir=<dir>`
+input, used alone when given; else the parent of the docs directory when that
+directory is named `docs` and the parent holds `AGENTS.md`. Without one the
+reply is `CODE_UNAVAILABLE`; an installed binary without a checkout has none.
+
 `z23 wiki` replies stay within 16384 bytes (the extended list budget): a
 reply lists as many children as fit, at most 64, so a page is up to 16 KiB
 and the full listing of a large topic takes several calls. A truncated reply

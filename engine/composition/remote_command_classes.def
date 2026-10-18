@@ -277,8 +277,8 @@ REMOTE_COMMAND_CLASS("eventlog", REMOTE_CLASS_OWNER_CAPABILITY,
 /* DISCOVER DOCS TREE — 2 never_remote leaves.
  *
  * discover.wiki and discover.read read this node's checkout files, and their
- * `docsdir` input names the directory to read. A peer must not choose a
- * filesystem path on this node, so neither leaf is remotable. */
+ * `docsdir` and `codedir` inputs name the directories to read. A peer must
+ * not choose a filesystem path on this node, so neither leaf is remotable. */
 REMOTE_COMMAND_CLASS("discover.wiki", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("discover.read", REMOTE_CLASS_NEVER, "")
 

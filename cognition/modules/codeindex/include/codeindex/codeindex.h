@@ -648,4 +648,12 @@ bool codeindex_include_query_unsafe_cause(struct codeindex *ci,
                                           const char *path, char *out,
                                           size_t cap);
 
+/* One-line purpose of a source file from its leading comment, derived by the
+ * scanner rule behind the code index (explicit `purpose:` line, else the first
+ * substantive comment line without a license header or stem prefix). `relpath`
+ * supplies the file stem. Writes "" when no comment precedes the first code
+ * token. No index is opened and no symbol pass runs. */
+void codeindex_text_purpose(const char *src, size_t len, const char *relpath,
+                            char out[CI_FILE_PURPOSE_MAX]);
+
 #endif /* ZCL_CODEINDEX_H */

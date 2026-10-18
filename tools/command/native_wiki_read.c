@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: discover.read - one bounded, UTF-8-safe chunk of a docs/ page. */
+ * purpose: discover.read - one bounded, UTF-8-safe chunk of a docs/ page or of a
+ * source file under code/. */
 
 #include "command/native_wiki_priv.h"
 
@@ -14,26 +15,52 @@ static bool wk_ends_md(const char *s)
     return n > 3 && strcmp(s + n - 3, ".md") == 0;
 }
 
+/* The root that serves `rel`, and the path below it. */
+static const struct wk_docs *wk_page_root(
+    const struct zcl_command_request *request, const struct wk_docs *docs,
+    const char *rel, struct wk_docs *code, size_t *off)
+{
+    *off = 0;
+    if (!wk_code_sub(rel, off))
+        return docs;
+    return wk_code_open(request, docs, code) ? code : NULL;
+}
+
+static bool wk_page_name_ok(const char *rel, bool code)
+{
+    return rel[0] && (code ? wk_code_ext_ok(rel) : wk_ends_md(rel));
+}
+
 static bool wk_page_target(const struct zcl_command_request *request,
                            const struct wk_docs *docs, char *rel, char *real,
                            struct zcl_command_reply *reply)
 {
+    struct wk_docs code;
+    size_t off = 0;
     const char *page = json_get_str(json_get(request->input, "page"));
-    if (!page || !wk_rel_normalize(page, rel, WK_REL_MAX + 1) || !rel[0] ||
-        !wk_ends_md(rel)) {
-        wk_fail(reply, "BAD_PAGE", "page must be a relative .md path "
-                     "inside docs/ without . or .. segments", "page");
+    if (!page || !wk_rel_normalize(page, rel, WK_REL_MAX + 1)) {
+        wk_fail(reply, "BAD_PAGE", "page must be a relative .md path inside "
+                "docs/, or a source file under code/, without . or .. "
+                "segments", "page");
         return false;
     }
-    enum wk_status st = wk_resolve(docs, rel, real, WK_PATH_MAX);
-    if (st == WK_ESCAPES) {
-        wk_fail(reply, "OUTSIDE_DOCS", "page resolves outside docs/",
-                     "page");
+    const struct wk_docs *root = wk_page_root(request, docs, rel, &code, &off);
+    if (!root) {
+        wk_fail(reply, "CODE_UNAVAILABLE", "no source tree found beside "
+                "docs/; the codedir input names it", "codedir");
         return false;
     }
+    if (!wk_page_name_ok(rel, root->code)) {
+        wk_fail(reply, "BAD_PAGE", "page must be a .md file under docs/ or a "
+                ".c, .h, .def, .sh or .md file under code/", "page");
+        return false;
+    }
+    enum wk_status st = wk_resolve(root, rel + off, real, WK_PATH_MAX);
+    if (wk_fail_path(reply, st, root->code, "page"))
+        return false;
     if (st != WK_OK || !wk_is_file(real)) {
         wk_fail(reply, "UNKNOWN_PAGE", "no such page; list a topic with "
-                     "discover.wiki", rel);
+                "discover.wiki", rel);
         return false;
     }
     return true;
@@ -48,6 +75,15 @@ static bool wk_bounds(const struct zcl_command_request *request,
     *offset = o ? json_get_int(o) : 0;
     *bytes = (size_t)want;
     return *offset >= 0 && want >= 1 && want <= WK_CHUNK_MAX;
+}
+
+/* A source file's title is its name; Markdown keeps its heading. */
+static void wk_source_title(const char *rel, struct wk_meta *meta)
+{
+    size_t off = 0;
+    const char *slash = strrchr(rel, '/');
+    if (slash && wk_code_sub(rel, &off) && !wk_ends_md(rel))
+        snprintf(meta->title, sizeof(meta->title), "%s", slash + 1);
 }
 
 static bool wk_render(struct zcl_command_reply *reply, const char *rel,
@@ -73,6 +109,7 @@ static bool wk_render(struct zcl_command_reply *reply, const char *rel,
     if (!wk_head(real, head, sizeof(head), &hn))
         return false;
     wk_meta_scan(head, hn, &meta);
+    wk_source_title(rel, &meta);
     struct json_value nul;
     json_init(&nul);
     json_set_null(&nul);

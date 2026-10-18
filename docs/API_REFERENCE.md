@@ -1142,8 +1142,8 @@ represented by its children's sections.
 | `discover search` (aliases: `search`, `dev.search`, `dev.diagnose.search`) | ready | read / read / public · instant/tiny | **`query`** | `zcl.command_search.v1` | `z23 discover search 'ABI mismatch'` | Rank at most five commands by local deterministic intent search |
 | `discover describe` | ready | read / read / public · instant/tiny | **`path`** | `zcl.command_spec.v1` | `z23 discover describe dev.app.simulate` | Describe one leaf's schemas, safety, authority, and availability |
 | `discover schema` | ready | read / read / public · instant/tiny | **`path`**, `side` | `zcl.command_schema.v1` | `z23 discover schema dev.app.simulate --side=input` | Return the compact input or output schema contract for one leaf |
-| `discover wiki` (aliases: `wiki`) | ready | read / read / public · fast/tiny | **`topic`**, `after`, `docsdir` | `zcl.wiki_node.v1` | `z23 wiki agent` | Walk the docs knowledge tree one topic at a time |
-| `discover read` | ready | read / read / public · fast/tiny | **`page`**, `offset`, `bytes`, `docsdir` | `zcl.wiki_page.v1` | `z23 discover read README.md --bytes=300` | Read one docs page in bounded UTF-8-safe chunks |
+| `discover wiki` (aliases: `wiki`) | ready | read / read / public · fast/tiny | **`topic`**, `after`, `docsdir`, `codedir` | `zcl.wiki_node.v1` | `z23 wiki code/tools/command` | Walk the docs knowledge tree one topic at a time |
+| `discover read` | ready | read / read / public · fast/tiny | **`page`**, `offset`, `bytes`, `docsdir`, `codedir` | `zcl.wiki_page.v1` | `z23 discover read README.md --bytes=300` | Read one docs page in bounded UTF-8-safe chunks |
 
 ### `code` — Source-code navigator
 

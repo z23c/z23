@@ -896,3 +896,19 @@ void ci_scan_text(const char *src, size_t len, const char *relpath,
     free(c.comments);
     free(c.funcs);
 }
+
+void codeindex_text_purpose(const char *src, size_t len, const char *relpath,
+                            char out[CI_FILE_PURPOSE_MAX])
+{
+    out[0] = '\0';
+    if (!src || len == 0 || !relpath) return;
+    char *clean = zcl_malloc(len, "ci_clean");
+    if (!clean) return;
+    struct scan_ctx c;
+    memset(&c, 0, sizeof(c));
+    c.src = src; c.clean = clean; c.len = len; c.relpath = relpath;
+    blank_comments(&c, clean);
+    ci_file_purpose(&c, out);
+    free(clean);
+    free(c.comments);
+}
