@@ -849,7 +849,8 @@ plan, the first phase of retiring `tools/ship.sh`. It applies ship.sh's
 target, host, proof-server, clean-tree and origin/main checks in ship.sh's
 order, captures the source id with the same tool, reports whether the gate
 stamp is banked (`--skip_gate`), and reports the persistent-schema one-way
-verdict against origin/main (`--accept_one_way` is the flag form of
+verdict against origin/main, decided by content as below
+(`--accept_one_way` is the flag form of
 `ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1`). It returns one typed plan whose
 `verdict` is `ready` or `refuse` with a refusal class. Hosts appear only by
 their SSH alias; an address-shaped `ZCL_SHIP_HOSTS` entry appears as

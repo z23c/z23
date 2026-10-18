@@ -17,9 +17,12 @@
  *   5. source id    tools/dev/source-identity.sh capture, the same tool.
  *   6. gate stamp   $HOME/.cache/zcl-ship/<source_id>.passed; banked only
  *                   under --skip_gate with a valid id and the stamp present.
- *   7. schema       git diff --name-only over ship.sh's four persistent-
- *                   schema pathspecs, against origin/main (the dry-run
- *                   baseline ship.sh uses), and ship.sh's exit-code contract:
+ *   7. schema       ship.sh's content rule over its four persistent-schema
+ *                   pathspecs, against origin/main (the dry-run baseline
+ *                   ship.sh uses): database.h when NODE_DB_SCHEMA_LATEST
+ *                   differs or is unreadable, and any file adding a DDL or
+ *                   user_version line; a git failure lists database.h. Exit
+ *                   codes follow ship.sh:
  *                   0 no change, 1 changed and not accepted, 2 changed and
  *                   accepted with --accept_one_way (rollback disarmed).
  *
@@ -58,6 +61,10 @@
 #define SHIP_FETCH_TIMEOUT_MS 120000
 #define SHIP_SOURCE_ID_TIMEOUT_MS 300000
 #define SHIP_SCHEMA_BYTES 8192
+#define SHIP_DIFF_BYTES (256 * 1024)
+
+static const char ship_schema_header[] =
+    "engine/models/include/models/database.h";
 
 static const char *const ship_schema_pathspecs[] = {
     "engine/models/src/database*.c",
@@ -461,24 +468,151 @@ static enum ship_one_way ship_one_way_decision(size_t changed, bool accept)
     return accept ? SHIP_ONE_WAY_ACCEPT : SHIP_ONE_WAY_REFUSE;
 }
 
-static void ship_schema(struct ship_plan *p)
+/* ship.sh's ship_schema_version_of: the value of the leading
+ * `#define NODE_DB_SCHEMA_LATEST <digits>` in the header at `commit`.
+ * False when git fails, the output is truncated, or no such line exists. */
+static bool ship_schema_version(const struct ship_plan *p, const char *commit,
+                                char *buf, size_t cap, char out[24])
 {
-    const char *args[] = { "diff", "--name-only", p->origin, p->head, "--",
-                           ship_schema_pathspecs[0], ship_schema_pathspecs[1],
-                           ship_schema_pathspecs[2], ship_schema_pathspecs[3],
-                           NULL };
-    if (!p->origin_present)
+    char spec[SHIP_NAME_MAX + 96];
+    const char *args[] = { "show", spec, NULL };
+    static const char key[] = "NODE_DB_SCHEMA_LATEST";
+    char *save = NULL;
+    (void)snprintf(spec, sizeof(spec), "%s:%s", commit, ship_schema_header);
+    if (ship_git(p->root, args, buf, cap, SHIP_GIT_TIMEOUT_MS) != 0 ||
+        strlen(buf) + 1 >= cap)
+        return false;
+    for (char *line = strtok_r(buf, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        const char *s = line + strspn(line, " \t");
+        if (*s++ != '#')
+            continue;
+        s += strspn(s, " \t");
+        if (strncmp(s, "define", 6) != 0)
+            continue;
+        s += 6;
+        size_t gap = strspn(s, " \t");
+        if (gap == 0 || strncmp(s + gap, key, sizeof(key) - 1) != 0)
+            continue;
+        s += gap + sizeof(key) - 1;
+        gap = strspn(s, " \t");
+        size_t digits = strspn(s + gap, "0123456789");
+        if (gap == 0 || digits == 0 || digits >= 24)
+            continue;
+        memcpy(out, s + gap, digits);
+        out[digits] = '\0';
+        return true;
+    }
+    return false;
+}
+
+/* True when the schema header's version differs, or is unreadable, between
+ * the baseline and the head (fail closed, as ship.sh does). */
+static bool ship_schema_version_moved(const struct ship_plan *p, char *buf,
+                                      size_t cap)
+{
+    char before[24], after[24];
+    return !ship_schema_version(p, p->origin, buf, cap, before) ||
+           !ship_schema_version(p, p->head, buf, cap, after) ||
+           strcmp(before, after) != 0;
+}
+
+/* Adds `name` to the newline list in sorted position unless present. */
+static void ship_list_add(char *list, size_t cap, const char *name)
+{
+    size_t nlen = strlen(name), used = strlen(list);
+    char *at = list;
+    while (*at) {
+        size_t len = strcspn(at, "\n");
+        int cmp = strncmp(at, name, len < nlen ? len : nlen);
+        if (cmp == 0)
+            cmp = len == nlen ? 0 : (len < nlen ? -1 : 1);
+        if (cmp == 0)
+            return;
+        if (cmp > 0)
+            break;
+        at += len + (at[len] == '\n');
+    }
+    if (used + nlen + 2 > cap)
         return;
-    int rc = ship_git(p->root, args, p->schema_files,
-                      sizeof(p->schema_files), SHIP_GIT_TIMEOUT_MS);
-    if (rc != 0 || strlen(p->schema_files) + 1 >= sizeof(p->schema_files)) {
-        p->schema_files[0] = '\0';
+    memmove(at + nlen + 1, at, strlen(at) + 1);
+    memcpy(at, name, nlen);
+    at[nlen] = '\n';
+}
+
+/* ship.sh's awk filter: an added line that creates, alters or drops a table
+ * or index, or names user_version, case-insensitively. */
+static bool ship_added_line_is_ddl(const char *line)
+{
+    static const char *const needles[] = {
+        "create table", "create unique table", "create index",
+        "create unique index", "alter table", "drop table", "drop index",
+        "user_version",
+    };
+    char low[512];
+    size_t i = 0;
+    for (; line[i] && i + 1 < sizeof(low); i++)
+        low[i] = (char)tolower((unsigned char)line[i]);
+    low[i] = '\0';
+    for (size_t n = 0; n < sizeof(needles) / sizeof(needles[0]); n++)
+        if (strstr(low, needles[n]))
+            return true;
+    return false;
+}
+
+/* Files in a `git diff -U0` text that gain a DDL or user_version line. */
+static void ship_scan_added_ddl(char *diff, char *files, size_t cap)
+{
+    char file[SHIP_PATH] = "";
+    char *save = NULL;
+    for (char *line = strtok_r(diff, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (strncmp(line, "+++ ", 4) == 0) {
+            const char *name = line + 4;
+            size_t len = strcspn(name, " \t");
+            (void)snprintf(file, sizeof(file), "%.*s",
+                           (int)(len > 2 ? len - 2 : 0), name + 2);
+        } else if (line[0] == '+' && file[0] && ship_added_line_is_ddl(line)) {
+            ship_list_add(files, cap, file);
+        }
+    }
+}
+
+/* ship.sh's ship_schema_files_changed: files that changed by content, as a
+ * sorted unique newline list. Any git failure lists the schema header. */
+static void ship_schema_changed_files(const struct ship_plan *p, char *files,
+                                      size_t cap)
+{
+    const char *diff_args[] = { "diff", "-U0", "--no-color", "--no-ext-diff",
+                                p->origin, p->head, "--",
+                                ship_schema_pathspecs[0],
+                                ship_schema_pathspecs[1],
+                                ship_schema_pathspecs[2],
+                                ship_schema_pathspecs[3], NULL };
+    char *buf = zcl_calloc(1, SHIP_DIFF_BYTES, "dev_ship_schema");
+    files[0] = '\0';
+    if (!buf ||
+        ship_git(p->root, diff_args, buf, SHIP_DIFF_BYTES,
+                 SHIP_GIT_TIMEOUT_MS) != 0 ||
+        strlen(buf) + 1 >= SHIP_DIFF_BYTES) {
+        ship_list_add(files, cap, ship_schema_header);
+        free(buf);
         return;
     }
+    ship_scan_added_ddl(buf, files, cap);
+    if (ship_schema_version_moved(p, buf, SHIP_DIFF_BYTES))
+        ship_list_add(files, cap, ship_schema_header);
+    free(buf);
+}
+
+static void ship_schema(struct ship_plan *p)
+{
+    if (!p->origin_present)
+        return;
+    ship_schema_changed_files(p, p->schema_files, sizeof(p->schema_files));
     p->schema_known = true;
     for (const char *c = p->schema_files; *c; c++)
         p->schema_count += *c == '\n';
-    p->schema_count += p->schema_files[0] != '\0';
     p->one_way = ship_one_way_decision(p->schema_count, p->accept_one_way);
 }
 

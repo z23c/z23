@@ -436,6 +436,16 @@ static void dsx_schema_files(const struct dsx_call *c, char *out, size_t cap)
     dsx_join(dsx_at(c, "schema_one_way.files"), NULL, out, cap);
 }
 
+/* The schema files the C planner lists for the fixture's HEAD against
+ * origin/main, joined as dsx_join does. */
+static void dsx_planner_files(const struct dsx *fx, char *out, size_t cap)
+{
+    struct dsx_call c;
+    dsx_ship(&c, fx, "local", "d");
+    dsx_schema_files(&c, out, cap);
+    dsx_end(&c);
+}
+
 static bool dsx_reply_mentions(const struct dsx_call *c, const char *needle)
 {
     char *buf = malloc(65536);
@@ -884,6 +894,8 @@ static int dsx_case_ahead(const struct dsx *fx, struct dsx_sh *sh)
         dsx_commit(fx, "unpushed benign schema-file edit");
         dsx_sh_schema_decision(fx, true, decision, sizeof(decision));
         ASSERT_STR_EQ(decision, "rc=0 files=");
+        dsx_planner_files(fx, files, sizeof(files));
+        ASSERT_STR_EQ(files, "");
         PASS();
     }
     TEST("ship: a schema change is would_refuse, rc 1, as ship.sh decides") {
@@ -927,6 +939,8 @@ static int dsx_case_ahead(const struct dsx *fx, struct dsx_sh *sh)
         dsx_commit(fx, "unpushed version bump");
         dsx_sh_schema_decision(fx, false, decision, sizeof(decision));
         ASSERT_STR_EQ(decision, "rc=1 files=" DSX_SCHEMA_HEADER);
+        dsx_planner_files(fx, files, sizeof(files));
+        ASSERT_STR_EQ(files, DSX_SCHEMA_HEADER);
         PASS();
     }
     TEST("ship: removing a DDL line alone is not a schema change") {
@@ -937,6 +951,8 @@ static int dsx_case_ahead(const struct dsx *fx, struct dsx_sh *sh)
         dsx_commit(fx, "unpushed DDL removal");
         dsx_sh_schema_decision(fx, true, decision, sizeof(decision));
         ASSERT_STR_EQ(decision, "rc=0 files=");
+        dsx_planner_files(fx, files, sizeof(files));
+        ASSERT_STR_EQ(files, "");
         PASS();
     }
 _test_next:
