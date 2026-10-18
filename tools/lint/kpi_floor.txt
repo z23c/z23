@@ -11,10 +11,11 @@
 #
 # TIGHTEN-ONLY. Raise the floor in the same commit that improves the metric.
 # Never lower a row to make a regression pass; fix the regression. Rows for
-# neutral metrics (capabilities, files_owned, territories) are refused.
+# neutral metrics (capabilities, files_owned, territories, cmd.leaves,
+# lint_gates, test_groups) are refused.
 #
-# Counts of commands, lint gates and test groups are tracked but not floored:
-# consolidation that merges or retires them is an improvement.
+# Counts of commands, lint gates and test groups are neutral, tracked but never
+# floored: consolidation that merges or retires them is an improvement.
 #
 # Show the rows behind a number: `build/bin/z23 code kpi --group=<cmd|code|docs>`.
 cmd.help_pct 10000

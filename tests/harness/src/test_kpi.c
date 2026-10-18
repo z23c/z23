@@ -780,7 +780,7 @@ static int case_floor_loads(const char *path)
     unsigned bad = 0;
     struct kpi_floor fl;
     KPI_CHECK("comments, blanks and trailing comments load",
-              spill(path, "# header\n\ncmd.leaves 7\ncode.size_debt 2 # why\n") &&
+              spill(path, "# header\n\ncmd.tested 7\ncode.size_debt 2 # why\n") &&
                   kpi_floor_load(path, &fl, &bad) && fl.count == 2 &&
                   fl.value[0] == 7 && fl.value[1] == 2);
     KPI_CHECK("a missing floor file is refused",
@@ -803,14 +803,18 @@ static int case_floor_refusals(const char *path)
               floor_refused(path, "# h\nno.such 1\n", 2));
     KPI_CHECK("a neutral metric cannot be floored",
               floor_refused(path, "capabilities 1\n", 1));
+    KPI_CHECK("command, lint-gate and test-group counts are neutral and cannot be floored",
+              floor_refused(path, "cmd.leaves 1\n", 1) &&
+                  floor_refused(path, "lint_gates 1\n", 1) &&
+                  floor_refused(path, "test_groups 1\n", 1));
     KPI_CHECK("a duplicate row is refused",
-              floor_refused(path, "cmd.leaves 1\ncmd.leaves 2\n", 2));
+              floor_refused(path, "cmd.tested 1\ncmd.tested 2\n", 2));
     KPI_CHECK("a non-numeric value is refused",
-              floor_refused(path, "cmd.leaves x\n", 1));
+              floor_refused(path, "cmd.tested x\n", 1));
     KPI_CHECK("a negative value is refused",
-              floor_refused(path, "cmd.leaves -1\n", 1));
+              floor_refused(path, "cmd.tested -1\n", 1));
     KPI_CHECK("a row without a value is refused",
-              floor_refused(path, "cmd.leaves\n", 1));
+              floor_refused(path, "cmd.tested\n", 1));
     return failures;
 }
 
@@ -823,11 +827,11 @@ static int case_floor_steps(const char *path)
     struct kpi_frame f;
     memset(&f, 0, sizeof f);
     f.count = 2;
-    f.metric[0] = entry_of("cmd.leaves", KPI_STATE_PRESENT, 7);       /* up */
+    f.metric[0] = entry_of("cmd.tested", KPI_STATE_PRESENT, 7);       /* up */
     f.metric[1] = entry_of("code.size_debt", KPI_STATE_PRESENT, 2);   /* down */
     struct kpi_miss miss[4];
     KPI_CHECK("metrics exactly at their floor pass",
-              spill(path, "cmd.leaves 7\ncode.size_debt 2\n") &&
+              spill(path, "cmd.tested 7\ncode.size_debt 2\n") &&
                   kpi_floor_load(path, &fl, &bad) &&
                   kpi_floor_check(&fl, &f, miss, 4) == 0);
     f.metric[0].value = 8;
@@ -837,7 +841,7 @@ static int case_floor_steps(const char *path)
     f.metric[0].value = 6;
     size_t n = kpi_floor_check(&fl, &f, miss, 4);
     KPI_CHECK("a higher-is-better metric one step down fails, naming it",
-              n == 1 && strcmp(miss[0].def->id, "cmd.leaves") == 0 &&
+              n == 1 && strcmp(miss[0].def->id, "cmd.tested") == 0 &&
                   miss[0].kind == KPI_MISS_WORSE && miss[0].floor == 7 &&
                   miss[0].current == 6);
     f.metric[0].value = 7;
@@ -857,11 +861,11 @@ static int case_floor_unmeasured(const char *path)
     struct kpi_frame f;
     memset(&f, 0, sizeof f);
     f.count = 2;
-    f.metric[0] = entry_of("cmd.leaves", KPI_STATE_PRESENT, 7);
+    f.metric[0] = entry_of("cmd.tested", KPI_STATE_PRESENT, 7);
     f.metric[1] = entry_of("code.size_debt", KPI_STATE_UNAVAILABLE, 0);
     struct kpi_miss miss[4];
     KPI_CHECK("a floored metric that cannot be measured fails, not passes",
-              spill(path, "cmd.leaves 7\ncode.size_debt 2\n") &&
+              spill(path, "cmd.tested 7\ncode.size_debt 2\n") &&
                   kpi_floor_load(path, &fl, &bad) &&
                   kpi_floor_check(&fl, &f, miss, 4) == 1 &&
                   miss[0].kind == KPI_MISS_UNAVAILABLE);

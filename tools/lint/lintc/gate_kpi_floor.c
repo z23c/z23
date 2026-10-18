@@ -116,10 +116,10 @@ int check_kpi_floor_selftest(void)
     rc |= kfg_case("code.size_debt", 5, KPI_STATE_PRESENT, 5, 0);
     rc |= kfg_case("code.size_debt", 5, KPI_STATE_PRESENT, 4, 0);
     rc |= kfg_case("code.size_debt", 5, KPI_STATE_PRESENT, 6, 1);
-    rc |= kfg_case("cmd.leaves", 700, KPI_STATE_PRESENT, 700, 0);
-    rc |= kfg_case("cmd.leaves", 700, KPI_STATE_PRESENT, 701, 0);
-    rc |= kfg_case("cmd.leaves", 700, KPI_STATE_PRESENT, 699, 1);
-    rc |= kfg_case("cmd.leaves", 700, KPI_STATE_UNAVAILABLE, 0, 1);
+    rc |= kfg_case("cmd.tested", 700, KPI_STATE_PRESENT, 700, 0);
+    rc |= kfg_case("cmd.tested", 700, KPI_STATE_PRESENT, 701, 0);
+    rc |= kfg_case("cmd.tested", 700, KPI_STATE_PRESENT, 699, 1);
+    rc |= kfg_case("cmd.tested", 700, KPI_STATE_UNAVAILABLE, 0, 1);
     rc |= kfg_case("code.size_debt", 0, KPI_STATE_UNAVAILABLE, 0, 1);
     if (rc == 0)
         fputs("check-kpi-floor selftest: PASS — a metric at its floor passes in "

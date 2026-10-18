@@ -1954,7 +1954,7 @@ nothing. `--record=true` appends one frame holding every metric. A metric that
 cannot be measured is `unavailable`, never 0.
 
 `tools/lint/kpi_floor.txt` pins a floor for every quality metric that needs no node;
-command, lint-gate and test-group counts are tracked but not floored, so
+command, lint-gate and test-group counts are neutral, tracked but never floored, so
 consolidation can shrink them.
 The `check-kpi-floor` lint gate fails when a metric is worse than its floor and
 prints the metric, floor, current value and the command that shows the rows.
