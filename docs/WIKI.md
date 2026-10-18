@@ -104,6 +104,7 @@ never skipped or absent: read it by exact slug.
 
 ## From an agent harness
 
+- Before editing: `z23_code` with `sub` set to `guide` and `input` `{"paths":["tools/command/native_command.c"]}` (CLI: `z23 code guide <paths>`) returns one bounded brief of owner rules, test groups, matching lessons from this wiki and the first commands to run. Lessons are marked `lessons_unavailable` when no node answers.
 - Local MCP server: `z23_search` with `scope` set to `wiki` runs the same
   search in process and returns each result's `kind`, `slug`, `title`,
   `topic`, `summary`, `matched` and `rules`. It needs a running node and

@@ -3442,7 +3442,6 @@ tools/command/native_code_context_command.c:zcl_native_handle_code_context_map:6
 tools/command/native_code_coverage_command.c:zcl_native_handle_code_coverage:16
 tools/command/native_code_facts_command.c:zcl_native_handle_code_facts:21
 tools/command/native_code_focus_command.c:zcl_native_handle_code_focus:28
-tools/command/native_code_guide_command.c:zcl_native_handle_code_guide:17
 tools/command/native_code_owner_command.c:zcl_native_handle_code_owner:16
 tools/command/native_code_relations_command.c:zcl_native_handle_code_relations:34
 tools/command/native_dev_activation_command.c:dac_authority_available:17

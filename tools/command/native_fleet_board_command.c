@@ -953,9 +953,8 @@ static bool fb_wiki_find_request(const struct zcl_command_request *request,
     return true;
 }
 
-void zcl_native_handle_fleet_wiki_find(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+static void fb_wiki_find(const struct zcl_command_request *request,
+                         struct zcl_command_reply *reply, int64_t deadline_ms)
 {
     struct json_value out;
     json_init(&out);
@@ -968,7 +967,7 @@ void zcl_native_handle_fleet_wiki_find(
 
     struct json_value body;
     json_init(&body);
-    bool ok = fb_call(reply, &out, &body, 0);
+    bool ok = fb_call(reply, &out, &body, deadline_ms);
     json_free(&out);
     if (!ok)
         return;
@@ -995,6 +994,21 @@ void zcl_native_handle_fleet_wiki_find(
         (void)zcl_command_reply_add_next(reply, "fleet.wiki.read", input,
             "read exact revision body chunks and verify the reconstructed post");
     }
+}
+
+void zcl_native_handle_fleet_wiki_find(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    fb_wiki_find(request, reply, 0);
+}
+
+void zcl_native_fleet_wiki_find_until(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, int64_t deadline_ms)
+{
+    /* Like the board list: an unset deadline must never select defaults. */
+    fb_wiki_find(request, reply, deadline_ms > 0 ? deadline_ms : -1);
 }
 
 /* One raw `fleet_board` RPC round trip for another native leaf that reads the

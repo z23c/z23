@@ -37,7 +37,8 @@ make lint-fast                                # fast lint subset
 Never run `test_zcl` directly. Run full `make lint` once, at the candidate tip before landing.
 On a maintainer host, prefix heavy commands with `devbuild --wait` ([Maintainer hosts](docs/DEVELOPING.md#maintainer-hosts)).
 
-Navigate with the binary before searching: `build/bin/z23 code guide`, `code map`, `code owner <path>`, `code impact <path>`, `discover help <path>`.
+Before editing, `build/bin/z23 code guide <paths>` (MCP: `z23_code sub=guide`) returns one brief: nearest `AGENTS.md` rules, test groups, wiki lessons, first commands.
+Navigate with the binary before searching: `code map`, `code owner <path>`, `code impact <path>`, `discover help <path>`.
 Search with `git grep`. Generated references (`docs/CAPABILITY_INVENTORY.jsonl`, `docs/API_REFERENCE.md`, corpus evidence) are excluded from search by `.ignore`; open them by path.
 
 <!-- claim: symbol-present t-fast Makefile # focused registered-test target -->

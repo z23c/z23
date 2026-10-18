@@ -83,6 +83,7 @@ static size_t input_member_budget(const char *key, size_t key_len)
 {
     size_t value_max;
     if ((key_len == 5 && memcmp(key, "files", 5) == 0) ||
+        (key_len == 5 && memcmp(key, "paths", 5) == 0) ||
         (key_len == 9 && memcmp(key, "requested", 9) == 0))
         value_max = 2u + ZCL_COMMAND_INPUT_FILES_MAX_ITEMS *
                              (ZCL_COMMAND_INPUT_FILES_PATH_MAX + 3u);

@@ -55,7 +55,12 @@ static bool cr_str_array(const struct json_value *value, size_t max_items,
 static bool cr_match_files(const char *key, const struct json_value *value,
                            bool *type_ok)
 {
-    if (strcmp(key, "files") != 0 && strcmp(key, "symbols") != 0)
+    if (strcmp(key, "paths") == 0 && value->type == JSON_STR) {
+        *type_ok = cr_nonempty_str(value, ZCL_COMMAND_INPUT_FILES_PATH_MAX * 4u);
+        return true;
+    }
+    if (strcmp(key, "files") != 0 && strcmp(key, "symbols") != 0 &&
+        strcmp(key, "paths") != 0)
         return false;
     *type_ok = cr_str_array(value, ZCL_COMMAND_INPUT_FILES_MAX_ITEMS,
                             ZCL_COMMAND_INPUT_FILES_PATH_MAX);
@@ -220,6 +225,7 @@ static const struct cr_int_bound *cr_find_int_bound(const char *key)
         { "watcher_born", 1, INT64_MAX },
         { "seconds", 1, 60 },
         { "top_n", 1, 32 },
+        { "budget", 256, 8192 },
         { "depth", 1, 1000000 },
         /* fleet.steer.grant bearer lifetime: 0 means no expiry. */
         { "ttl_seconds", 0, 2592000 },

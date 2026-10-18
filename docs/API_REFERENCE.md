@@ -1145,7 +1145,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `code guide` | ready | read / read / public · instant/tiny | none | `zcl.code_guide.v1` | `z23 code guide` | Edit and prove a checkout change |
+| `code guide` | ready | read / read / public · foreground/tiny | **`paths`**, `topic`, `budget` | `zcl.code_guide.v1` | `z23 code guide tools/command/native_command.c` | Edit and prove a checkout change |
 | `code group` | ready | read / read / public · foreground/tiny | **`group`** | `zcl.code_group.v1` | `z23 code group app/services` | Browse source groups and files |
 | `code map` | ready | read / read / public · foreground/tiny | none | `zcl.code_map.v1` | `z23 code map` | Count root groups and app shapes |
 | `code coverage` | ready | read / read / public · foreground/low | none | `zcl.code_coverage.v1` | `z23 code coverage` | Reconcile source with the code index |

@@ -3200,6 +3200,11 @@ void zcl_native_handle_fleet_wiki_history(
 void zcl_native_handle_fleet_wiki_find(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* Same search under one absolute monotonic deadline in ms (capped to FAST per
+ * request); an expired deadline refuses without a request. */
+void zcl_native_fleet_wiki_find_until(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, int64_t deadline_ms);
 
 /* ── the per-node mind (tools/command/native_mind_command.c). `ask` reads the
  * published index generation and NEVER rebuilds: a stale generation is

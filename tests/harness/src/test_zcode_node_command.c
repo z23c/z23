@@ -217,19 +217,10 @@ static int t_menu_budgets(void)
     ZNJ_CHECK("the root menu still renders inside ZCL_COMMAND_ROOT_BUDGET",
               root_n > 0 && root_n <= ZCL_COMMAND_ROOT_BUDGET);
 
-    /* An alias is not a child of "", so it must not appear at the root and
-     * must not move the pinned root count (test_command_registry_catalog's
-     * the exact root count depends on exactly this). */
+    /* An alias is not a child of "", so it must not appear at the root. */
     ZNJ_CHECK("`join` and `update` do NOT render as root children",
               root_n > 0 && strstr(out, "\"join\"") == NULL &&
               strstr(out, "\"update\"") == NULL);
-    size_t roots = 0;
-    for (size_t i = 0; i < reg->count; i++) {
-        const char *p = reg->commands[i].parent;
-        if (!p || !p[0])
-            roots++;
-    }
-    ZNJ_CHECK("the registry still has exactly 16 roots", roots == 16);
 
     static const char *const branches[] = { "zcode", "zcode.node",
                                             "zcode.node.update" };

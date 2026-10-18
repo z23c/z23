@@ -12,14 +12,20 @@ ZCL_COMMAND_READY_READ(
     "Edit and prove a checkout change",
     "The inner coding-agent loop: check the generated capability inventory, "
     "inspect with code impact/tests, then prove with t-fast ONLY and lint-fast; "
-    "push admission checks the exact sealed receipt. It reads no checkout "
-    "state and never runs a compiler, test, or live-node command.",
-    ZCL_COMMAND_LIST_BUDGET,
+    "push admission checks the exact sealed receipt. With no input it reads no "
+    "checkout state and never runs a compiler, test, or live-node command. "
+    "With paths (at most 16), topic or budget (256..8192 bytes, default 2048; it "
+    "bounds the data object, not the envelope) "
+    "it returns one bounded task brief: the nearest AGENTS.md rules per path, "
+    "the routed test groups, matching fleet-wiki lessons (marked unavailable "
+    "when no node answers or one second passes; lessons_capped marks results "
+    "beyond five or trimmed text) and the first commands to run.", 12288,
     "code,guide,develop,proof,lint,t-fast,impact,agent",
-    "zcl.code_guide.input.v1", "zcl.code_guide.v1", "", "",
-    "z23 code guide",
+    "zcl.code_guide.input.v1", "zcl.code_guide.v1", "paths,topic,budget",
+    "paths",
+    "z23 code guide tools/command/native_command.c",
     ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
-    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FOREGROUND,
     ZCL_COMMAND_COST_TINY,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE,

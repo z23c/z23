@@ -13,6 +13,7 @@
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 #include "json/json.h"
+#include "controllers/agent_impact_rules.h"
 #include "controllers/diagnostics_internal.h"
 #include "controllers/app_native_handlers.h"
 #include "controllers/chain_native_handlers.h"
@@ -35,6 +36,8 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #endif
+
+void zcl_native_fleet_board_test_set_bootstrap(void (*fn)(void));
 
 static const char governed_source_roots[] =
 #define SOURCE_ROOT(name_) " " name_
@@ -507,6 +510,207 @@ static int test_code_guide_leaf(void)
                       "docs/DEVELOPING.md") == 0);
         zcl_command_reply_free(&reply);
         json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* code.guide task brief: input in, bounded zcl.code_guide_brief.v1 out. */
+
+static bool brief_write(const char *root, const char *rel, const char *text)
+{
+    char path[PATH_MAX];
+    FILE *f;
+    if ((size_t)snprintf(path, sizeof(path), "%s/%s", root, rel) >= sizeof(path))
+        return false;
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = fputs(text, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static void brief_no_bootstrap(void)
+{
+}
+
+/* Validate then run code.guide on `input_text` against the fixture root. The
+ * RPC client points at the fixture, which holds no node cookie, and the real
+ * endpoint bootstrap is replaced, so no run can reach a live node. */
+static bool brief_run(const char *root, const char *input_text,
+                      struct zcl_command_reply *reply, char *why, size_t why_size)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = find_spec(reg, "code.guide");
+    struct json_value input;
+    struct zcl_command_context ctx = { .registry = reg, .source_root = root,
+                                       .authority_ceiling = ZCL_COMMAND_AUTH_OWNER };
+    struct zcl_command_request request = {
+        .spec = spec, .context = &ctx, .input = &input,
+    };
+    char *saved_dir = strdup(node_rpc_client_datadir());
+    int saved_port = node_rpc_test_client_port();
+    bool ok;
+    json_init(&input);
+    ok = spec && json_read(&input, input_text, strlen(input_text)) &&
+         zcl_command_registry_input_validate(spec, &input, why, why_size);
+    zcl_command_reply_init(reply, "zcl.test.code_guide_brief.v1");
+    node_rpc_client_init(root, 1);
+    zcl_native_fleet_board_test_set_bootstrap(brief_no_bootstrap);
+    if (ok)
+        spec->handler(&request, reply);
+    zcl_native_fleet_board_test_set_bootstrap(NULL);
+    node_rpc_client_init(saved_dir ? saved_dir : "", saved_port);
+    free(saved_dir);
+    json_free(&input);
+    return ok;
+}
+
+static bool brief_array_has(const struct json_value *arr, const char *want)
+{
+    for (size_t i = 0; arr && i < json_size(arr); i++)
+        if (strcmp(json_get_str(json_at(arr, i)), want) == 0)
+            return true;
+    return false;
+}
+
+static bool brief_fixture(char *root, size_t root_size)
+{
+    char long_rule[320] = "- ";
+    char path[PATH_MAX];
+    for (int i = 0; i < 120; i++)
+        strcat(long_rule, "\xC3\xA9");
+    strcat(long_rule, "\n");
+    if (!test_mkdtemp(root, root_size, "code_guide_brief"))
+        return false;
+    snprintf(path, sizeof(path), "%s/tools", root);
+    if (mkdir(path, 0700) != 0)
+        return false;
+    char tools_guide[1024];
+    snprintf(tools_guide, sizeof(tools_guide),
+             "# tools/\n\nRules:\n- Fixture rule one.\n%s%s- Fixture rule three.\n"
+             "- Fixture rule four.\n\nTests: none.\n",
+             long_rule, long_rule);
+    return brief_write(root, "AGENTS.md", "# Root\n\nRoot fixture line.\n") &&
+           brief_write(root, "tools/AGENTS.md", tools_guide);
+}
+
+static int test_code_guide_brief(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], why[192];
+    struct zcl_command_reply reply;
+    TEST("code.guide brief names the AGENTS.md owner, routed tests and next commands") {
+        ASSERT(brief_fixture(root, sizeof(root)));
+        ASSERT(brief_run(root, "{\"paths\":[\"tools/command/native_command.c\"]}",
+                         &reply, why, sizeof(why)));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "schema")),
+                      "zcl.code_guide_brief.v1");
+        const struct json_value *owner = json_at(json_get(&reply.data, "owners"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(owner, "file")), "tools/AGENTS.md");
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(owner, "rules"), 0)),
+                      "Fixture rule one.");
+        struct agent_impact_acc acc;
+        bool crisk = false;
+        const char *route = zcl_native_code_route_for_path(
+            "tools/command/native_command.c", &acc, &crisk);
+        ASSERT(acc.groups_len > 0);
+        ASSERT(brief_array_has(json_get(&reply.data, "tests"), route));
+        ASSERT(json_get(&reply.data, "tests_unmapped") == NULL);
+        const char *proof = json_get_str(json_at(json_get(&reply.data, "next"), 0));
+        ASSERT(strncmp(proof, "make t-fast ONLY=", 17) == 0);
+        const char *focus = NULL;
+        for (size_t g = 0; g < acc.groups_len && !focus; g++)
+            if (strcmp(acc.groups[g], "make_lint_gates") != 0)
+                focus = acc.groups[g];
+        ASSERT(focus != NULL && strstr(proof, focus) != NULL);
+        ASSERT(strstr(proof, "make_lint_gates") == NULL);
+        ASSERT(json_write(&reply.data, NULL, 0) <= 2048);
+        zcl_command_reply_free(&reply);
+        test_rm_rf_recursive(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_guide_brief_budget(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], why[192];
+    struct zcl_command_reply reply;
+    TEST("code.guide brief stays within its budget, reports every cut and keeps UTF-8 whole") {
+        ASSERT(brief_fixture(root, sizeof(root)));
+        ASSERT(brief_run(root,
+                         "{\"paths\":[\"tools/command/native_command.c\"],\"budget\":512}",
+                         &reply, why, sizeof(why)));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_write(&reply.data, NULL, 0) <= 512);
+        ASSERT(json_get_bool(json_get(&reply.data, "truncated")));
+        ASSERT(json_size(json_get(&reply.data, "cut")) > 0);
+        zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root,
+                         "{\"paths\":[\"tools/command/native_command.c\"],\"budget\":8192}",
+                         &reply, why, sizeof(why)));
+        const struct json_value *rules =
+            json_get(json_at(json_get(&reply.data, "owners"), 0), "rules");
+        const char *wide = json_get_str(json_at(rules, 1));
+        size_t n = strlen(wide);
+        ASSERT(n > 0 && n % 2 == 0 && n < 200);
+        for (size_t i = 0; i < n; i += 2)
+            ASSERT((unsigned char)wide[i] == 0xC3 && (unsigned char)wide[i + 1] == 0xA9);
+        ASSERT(json_get_bool(json_get(&reply.data, "truncated")));
+        ASSERT(brief_array_has(json_get(&reply.data, "cut"), "owner_rules"));
+        zcl_command_reply_free(&reply);
+        test_rm_rf_recursive(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_guide_brief_edges(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], why[192];
+    struct zcl_command_reply reply;
+    TEST("code.guide brief marks unmapped paths and refuses bad input") {
+        ASSERT(brief_fixture(root, sizeof(root)));
+        ASSERT(brief_run(root, "{\"paths\":\"does/not/exist.xyz\"}", &reply, why,
+                         sizeof(why)));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_bool(json_get(&reply.data, "tests_unmapped")));
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(&reply.data, "next"), 0)),
+                      "build/bin/z23 code cost does/not/exist.xyz");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(json_get(&reply.data, "owners"), 0), "file")),
+                      "AGENTS.md");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "lessons_unavailable")),
+                      "NODE_UNAVAILABLE");
+        zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root, "{\"paths\":[\"../etc/passwd\"]}", &reply, why, sizeof(why)));
+        ASSERT_STR_EQ(reply.error.code, "BAD_CODE_GUIDE_INPUT");
+        zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root, "{\"paths\":\"/etc/passwd\"}", &reply, why, sizeof(why)));
+        ASSERT_STR_EQ(reply.error.code, "BAD_CODE_GUIDE_INPUT");
+        zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root, "{\"paths\":[\"a\\u0001b.c\"]}", &reply, why, sizeof(why)));
+        ASSERT_STR_EQ(reply.error.code, "BAD_CODE_GUIDE_INPUT");
+        zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root, "{\"paths\":\"tools/x.c,does/not/exist.xyz\"}", &reply, why,
+                         sizeof(why)));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_size(json_get(&reply.data, "owners")), 2u);
+        ASSERT(json_get_bool(json_get(&reply.data, "tests_unmapped")));
+        zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root, "{\"budget\":512}", &reply, why, sizeof(why)));
+        ASSERT_STR_EQ(reply.error.code, "BAD_CODE_GUIDE_INPUT");
+        zcl_command_reply_free(&reply);
+        ASSERT(!brief_run(root, "{\"paths\":[\"a.c\"],\"bogus\":\"x\"}", &reply, why,
+                          sizeof(why)));
+        zcl_command_reply_free(&reply);
+        ASSERT(!brief_run(root, "{\"paths\":[\"a.c\"],\"budget\":99}", &reply, why,
+                          sizeof(why)));
+        zcl_command_reply_free(&reply);
+        test_rm_rf_recursive(root);
         PASS();
     } _test_next:;
     return failures;
@@ -5877,6 +6081,9 @@ int test_command_registry_catalog(void)
     failures += test_sixteen_roots();
     failures += test_yardsale_guide();
     failures += test_code_guide_leaf();
+    failures += test_code_guide_brief();
+    failures += test_code_guide_brief_budget();
+    failures += test_code_guide_brief_edges();
     failures += test_root_menu_budget();
     failures += test_branch_menus_shallow();
     failures += test_search_bounded();
