@@ -886,6 +886,73 @@ static void fb_op_wiki_read(struct node_db *ndb, const struct json_value *in,
     fb_wiki_read_body(&row, &limits, result);
 }
 
+#define FB_INDEX_SUMMARY_MAX 120
+
+/* First line of a plain page, at most FB_INDEX_SUMMARY_MAX bytes, cut so a
+ * UTF-8 sequence is never split. */
+static void fb_plain_summary(const char *text, size_t len,
+                             char out[FB_INDEX_SUMMARY_MAX + 1])
+{
+    size_t n = 0;
+    while (n < len && text[n] != '\r' && text[n] != '\n')
+        n++;
+    if (n > FB_INDEX_SUMMARY_MAX) {
+        n = FB_INDEX_SUMMARY_MAX;
+        while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80)
+            n--;
+    }
+    memcpy(out, text, n);
+    out[n] = 0;
+}
+
+static bool fb_index_item(struct json_value *item,
+                          const struct db_fleet_board_post *row)
+{
+    struct json_value entry;
+    char plain[FB_INDEX_SUMMARY_MAX + 1];
+    enum fleet_wiki_parse_status parsed = fleet_wiki_entry_parse_checked(
+        row->post.text, row->post.text_len, &entry, NULL);
+    if (parsed == FLEET_WIKI_PARSE_ALLOC_FAILED) return false;
+    bool is_entry = parsed == FLEET_WIKI_PARSE_ENTRY;
+    if (!is_entry) fb_plain_summary(row->post.text, row->post.text_len, plain);
+    char id[65], host[65];
+    fleet_board_id_to_hex(row->post.id, id);
+    fleet_board_id_to_hex(row->post.host_pubkey, host);
+    json_set_object(item);
+    bool ok = json_push_kv_str(item, "kind", "wiki") &&
+        json_push_kv_str(item, "slug", row->post.slug) &&
+        json_push_kv_str(item, "title", row->post.title) &&
+        (!is_entry || json_push_kv(item, "topic", json_get(&entry, "topic"))) &&
+        json_push_kv_str(item, "summary",
+            is_entry ? json_get_str(json_get(&entry, "summary")) : plain) &&
+        json_push_kv_str(item, "host", host) &&
+        json_push_kv_str(item, "agent", row->post.agent) &&
+        json_push_kv_int(item, "created_at", (int64_t)row->post.created_at) &&
+        json_push_kv_str(item, "id", id);
+    if (is_entry) json_free(&entry);
+    return ok;
+}
+
+static bool fb_render_wiki_index(struct json_value *result,
+                                 const struct db_fleet_board_post *rows, int n)
+{
+    json_set_object(result);
+    struct json_value arr;
+    json_init(&arr);
+    json_set_array(&arr);
+    bool ok = json_push_kv_bool(result, "ok", true);
+    for (int i = 0; ok && i < n; i++) {
+        struct json_value item;
+        json_init(&item);
+        ok = fb_index_item(&item, &rows[i]) && json_push_back(&arr, &item);
+        json_free(&item);
+    }
+    ok = ok && json_push_kv(result, "posts", &arr) &&
+        json_push_kv_int(result, "returned", n);
+    json_free(&arr);
+    return ok;
+}
+
 static void fb_op_wiki_list(struct node_db *ndb, struct json_value *result)
 {
     struct db_fleet_board_post *rows = zcl_calloc(
@@ -896,7 +963,12 @@ static void fb_op_wiki_list(struct node_db *ndb, struct json_value *result)
         return;
     }
     int n = db_fleet_board_wiki_list(ndb, rows, FLEET_BOARD_LIST_MAX);
-    fb_render_list(result, rows, n);
+    if (!fb_render_wiki_index(result, rows, n)) {
+        json_free(result);
+        json_init(result);
+        fb_error(result, "READ_PROJECTION_FAILED",
+                 "cannot faithfully construct the wiki index");
+    }
     free(rows);
 }
 

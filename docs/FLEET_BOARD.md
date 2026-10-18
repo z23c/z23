@@ -467,14 +467,15 @@ entries whose `topic`, `applies_to`, `summary`, `slug` or lesson `rule` or
 `why` contains `q` (`evidence` is not searched), each as `topic`, `summary`,
 `slug`, `updated`, `matched` (the matching fields among `slug`, `topic`,
 `summary`, `applies_to`, `rule`, `why`, in that order; empty for an empty `q`)
-and `rules` (the `rule` line of every lesson), within a 16 KiB answer. `q` is matched as a substring with ASCII
-letters compared case-insensitively and every other byte compared exactly;
-an empty `q` matches all; a `q` over 128 bytes is refused (`Q_TOO_LONG`)
-rather than cut. `scanned` is the number of pages examined and `truncated`
-is true when a match was left out or the scan reached its 256-page cap, in
-which case pages beyond the cap were not examined. A page whose newest
-revision is plain text, malformed, or over the entry limits is not returned
-(and hides any older valid entry of the same slug); read it with
+and `rules` (the `rule` line of every lesson), within a 16 KiB answer. `q`
+is matched as a substring with ASCII letters compared case-insensitively and
+every other byte compared exactly; an empty `q` matches all; a `q` over 128
+bytes is refused (`Q_TOO_LONG`) rather than cut. `scanned` is the number of
+pages examined and `truncated` is true when a match was left out or the scan
+reached its 256-page cap, in which case pages beyond the cap were not
+examined. A page whose newest revision is plain text, malformed, or over the
+entry limits is not returned (and hides any older valid entry of the same
+slug); read it with
 `fleet wiki read`. Measured on an Apple M4 on a full 256-page fixture of
 maximum-size entries, one call takes about 250 ms in the test build (every
 stored row is re-verified as it is read), so the command is declared
@@ -536,8 +537,15 @@ z23 fleet board status
 z23 fleet wiki list
 z23 fleet wiki read <slug>
 z23 fleet wiki find [q]
+z23 wiki <q>                  # short form of fleet wiki find
 z23 fleet wiki history <slug>
 ```
+
+`fleet wiki list` is an index: each row carries `slug`, `title`, `topic`
+(absent for a plain-text page), `summary` (the entry summary, or the first
+line of a plain page cut to 120 bytes at a UTF-8 boundary), `host`, `agent`,
+`created_at` and `id`, never the page text. Its `lines` read `slug — summary`.
+Read a page in full with `fleet wiki read <slug>`.
 
 Without scope or room filters, `board list` includes discoverable rows
 from all scopes and rooms; `--room=general` selects the public default room

@@ -1906,8 +1906,8 @@ represented by its children's sections.
 | `fleet wiki write` | ready | mutate / app-write / operator · fast/low | **`slug`**, **`title`**, **`text`**, `agent`, `supersedes`, `ttl`, `format` | `zcl.fleet_board_post_id.v1` | `z23 fleet wiki write push-gate "What the push gate checks" @notes.md` | Write or revise one wiki page |
 | `fleet wiki read` | ready | read / read / operator · fast/low | **`slug`**, `id`, `offset`, `bytes` | `zcl.fleet_wiki_read.v1` | `z23 fleet wiki read push-gate` | Read the latest revision of one page |
 | `fleet wiki list` | ready | read / read / operator · fast/low | none | `zcl.fleet_board_list.v1` | `z23 fleet wiki list` | Every page this node holds |
-| `fleet wiki find` | ready | read / read / operator · foreground/low | `q`, `topic`, `applies_to`, `after_slug` | `zcl.fleet_wiki_find.v1` | `z23 fleet wiki find push-gate` | Find structured knowledge entries |
-| `fleet wiki history` | ready | read / read / operator · fast/low | `slug`, `target`, `after_id` | `zcl.fleet_board_list.v1` | `z23 fleet wiki history push-gate` | Every revision of one page, newest first |
+| `fleet wiki find` (aliases: `wiki`) | ready | read / read / operator · foreground/low | **`q`**, `topic`, `applies_to`, `after_slug` | `zcl.fleet_wiki_find.v1` | `z23 fleet wiki find push-gate` | Find structured knowledge entries |
+| `fleet wiki history` | ready | read / read / operator · fast/low | **`slug`**, `target`, `after_id` | `zcl.fleet_board_list.v1` | `z23 fleet wiki history push-gate` | Every revision of one page, newest first |
 
 #### `fleet.ledger` — Write and inspect the ledger
 
@@ -2048,6 +2048,7 @@ Every alias resolves through the same grammar as its canonical path
 | `zcode.package.offered` | `zcode.package.offered` |
 | `join` | `zcode.node.join` |
 | `update` | `zcode.node.update.status` |
+| `wiki` | `fleet.wiki.find` |
 | `fleet.agents` | `dev.fleet.agents` |
 
 

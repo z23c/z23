@@ -96,6 +96,8 @@ bool zcl_native_command_is_root(const char *word)
          * board carries requests and pointers, and the gates decide. */
         "fleet",
         "search",
+        /* `z23 wiki <q>` is a bare alias of fleet.wiki.find. */
+        "wiki",
         /* Operator-UX convenience roots: bare aliases of ops.explain /
          * ops.profile so `z23 explain sync` / `zclassic23 profile`
          * work without the `ops` prefix (each leaf carries the matching

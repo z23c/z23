@@ -5286,6 +5286,55 @@ static int test_fleet_wiki_find_matched_fields(void)
     return failures;
 }
 
+static const struct json_value *fb_index_row(const struct json_value *r, const char *slug)
+{
+    const struct json_value *posts = json_get(r, "posts");
+    for (size_t i = 0; posts && i < json_size(posts); i++)
+        if (!strcmp(json_get_str(json_get(json_at(posts, i), "slug")), slug))
+            return json_at(posts, i);
+    return NULL;
+}
+
+static int test_fleet_wiki_list_is_an_index(void)
+{
+    int failures = 0;
+    TEST("fleet wiki: list is an index of slug, title, topic and summary without page text") {
+        static struct fb_rpc_env e;
+        struct json_value r;
+        ASSERT(fb_rpc_env_open(&e));
+        const int64_t now = INT64_C(5000000);
+        char text[512], plain[400] = "a";
+        fb_entry_json(text, sizeof(text), "entry summary", FB_ONE_LESSON, "");
+        ASSERT(fb_test_ingest_page(&e.db, "entry-page", text, 0, now));
+        for (int i = 0; i < 60; i++) strcat(plain, "\xC3\xA9");
+        strcat(plain, "\nsecond line");
+        ASSERT(fb_test_ingest_page(&e.db, "plain-page", plain, 1, now));
+        char longline[161];
+        memset(longline, 'x', 160);
+        longline[160] = 0;
+        ASSERT(fb_test_ingest_page(&e.db, "plain-long", longline, 2, now));
+        ASSERT(fb_rpc_op(&e, "wiki_list", NULL, NULL, NULL, NULL, &r));
+        ASSERT_EQ(json_get_int(json_get(&r, "returned")), 3);
+        const struct json_value *entry = fb_index_row(&r, "entry-page");
+        const struct json_value *flat = fb_index_row(&r, "plain-page");
+        ASSERT(entry != NULL && flat != NULL);
+        ASSERT(json_get(entry, "text") == NULL && json_get(flat, "text") == NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(entry, "topic")), "t");
+        ASSERT_STR_EQ(json_get_str(json_get(entry, "summary")), "entry summary");
+        ASSERT(json_get(flat, "topic") == NULL);
+        ASSERT_EQ((int64_t)strlen(json_get_str(json_get(flat, "summary"))), 119);
+        const struct json_value *lng = fb_index_row(&r, "plain-long");
+        ASSERT(lng != NULL);
+        ASSERT_EQ((int64_t)strlen(json_get_str(json_get(lng, "summary"))), 120);
+        ASSERT(json_get(entry, "id") && json_get(entry, "host") && json_get(entry, "agent") &&
+               json_get(entry, "created_at") && json_get(entry, "title"));
+        json_free(&r);
+        fb_rpc_env_close(&e);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 struct fb_query_vm { uint64_t steps, statements; };
 static int fb_query_vm_trace(unsigned type, void *context, void *statement, void *unused)
 {
@@ -6752,6 +6801,7 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_wiki_find_edges();
     failures += test_fleet_wiki_find_page_cap();
     failures += test_fleet_wiki_find_matched_fields();
+    failures += test_fleet_wiki_list_is_an_index();
     failures += test_fleet_wiki_query_cost();
     failures += test_fleet_wiki_query_envelopes();
     failures += test_fleet_board_quota_does_not_score_relay();

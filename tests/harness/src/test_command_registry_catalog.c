@@ -3139,6 +3139,32 @@ static int test_typo_stays_branch(void)
     return failures;
 }
 
+static int test_fleet_wiki_positionals_and_alias(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("fleet wiki find and history take their documented positional; wiki aliases find") {
+        const struct zcl_command_spec *find = find_spec(reg, "fleet.wiki.find");
+        const struct zcl_command_spec *history = find_spec(reg, "fleet.wiki.history");
+        ASSERT(find != NULL && history != NULL);
+        ASSERT_STR_EQ(find->positional_keys, "q");
+        ASSERT_STR_EQ(history->positional_keys, "slug");
+        ASSERT(zcl_native_command_is_root("wiki"));
+        const char *words[] = { "wiki", "push-gate" };
+        size_t consumed = 0;
+        bool alias = false;
+        char invoked[ZCL_COMMAND_MAX_PATH];
+        const struct zcl_command_spec *s = zcl_command_registry_resolve_words(
+            reg, words, 2, &consumed, &alias, invoked, sizeof(invoked));
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(s->path, "fleet.wiki.find");
+        ASSERT(alias);
+        ASSERT_EQ(consumed, (size_t)1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_dev_branch_leaves(void)
 {
     int failures = 0;
@@ -5903,6 +5929,7 @@ int test_command_registry_catalog(void)
     failures += test_work_envelope_ceiling();
     failures += test_success_data_budget();
     failures += test_typo_stays_branch();
+    failures += test_fleet_wiki_positionals_and_alias();
     failures += test_ops_selftest_registry();
     failures += test_ops_dash_dashboards_ported();
     failures += test_ops_state_requires_subsystem();

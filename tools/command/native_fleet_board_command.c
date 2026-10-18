@@ -362,6 +362,14 @@ static void fb_forward_int(struct json_value *out,
     }
 }
 
+/* A wiki index row has no body; its line reads "slug — summary". */
+static const char *fb_index_text(const struct json_value *post, char *buf, size_t cap)
+{
+    (void)snprintf(buf, cap, "%s \xE2\x80\x94 %s", json_get_str(json_get(post, "slug")),
+                   json_get_str(json_get(post, "summary")));
+    return buf;
+}
+
 /* The line an agent's script greps, one per post:
  *   <ts> <host12> [<kind>] <agent>: <text>  (id <id>) re:<ref>
  * The renderer prints a scalar array one entry per line, so pushing this as
@@ -373,6 +381,8 @@ static void fb_post_line(const struct json_value *post, char *out, size_t cap)
     const char *kind = json_get_str(json_get(post, "kind"));
     const char *agent = json_get_str(json_get(post, "agent"));
     const char *text = json_get_str(json_get(post, "text"));
+    char index_text[FLEET_BOARD_LINE_MAX];
+    if (json_get(post, "summary")) text = fb_index_text(post, index_text, sizeof(index_text));
     const char *id = json_get_str(json_get(post, "id"));
     const struct json_value *ts = json_get(post, "created_at");
     const char *ref = json_get_str(json_get(post, "ref"));

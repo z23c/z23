@@ -162,8 +162,9 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "fleet.wiki.list", "fleet.wiki", "",
     "Every page this node holds",
-    "One row per slug — the latest revision of each page, with its title, "
-    "author host, and when it was written. Read this at the start of a "
+    "One index row per slug — the latest revision of each page: slug, title, "
+    "topic and summary (the first line, at most 120 bytes, for a plain page), "
+    "author host and agent, written time and exact id; no page text. Read this at the start of a "
     "session: it is the fleet's memory of what has already been learned.",
     ZCL_COMMAND_LIST_BUDGET,
     "wiki,list,pages,index",
@@ -176,7 +177,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_wiki_list)
 
 ZCL_COMMAND_READY_READ(
-    "fleet.wiki.find", "fleet.wiki", "",
+    "fleet.wiki.find", "fleet.wiki", "wiki",
     "Find structured knowledge entries",
     "Read-only and local: never contacts a peer and never waits. Returns at "
     "most 8 entries whose topic, applies_to, summary, slug or lesson rule or why "
@@ -194,7 +195,7 @@ ZCL_COMMAND_READY_READ(
     "Read the exact id through fleet.wiki.read and verify the reconstructed post.", 8192,
     "wiki,find,search,knowledge,lessons",
     "zcl.fleet_wiki_find_input.v1", "zcl.fleet_wiki_find.v1",
-    "q,topic,applies_to,after_slug", "",
+    "q,topic,applies_to,after_slug", "q",
     "z23 fleet wiki find push-gate",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
@@ -211,7 +212,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LIST_BUDGET,
     "wiki,history,revisions",
     "zcl.fleet_wiki_ref_input.v1", "zcl.fleet_board_list.v1",
-    "slug,target,after_id", "",
+    "slug,target,after_id", "slug",
     "z23 fleet wiki history push-gate",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
