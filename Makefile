@@ -4075,6 +4075,9 @@ ifneq ($(ZCL_HOST_WINDOWS),1)
 # Windows group refuses explicitly; unrelated focused groups do not need it.
 $(TEST_PARALLEL_REL_CANDIDATE): | $(BIN_DIR)/fleet-board-bridge
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/fleet-board-bridge
+# The z23_fx group runs z23-fx in --print-argv mode; no ssh is started.
+$(TEST_PARALLEL_REL_CANDIDATE): | $(BIN_DIR)/z23-fx
+$(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/z23-fx
 endif
 
 # Expanding the complete object list inside a recipe makes the recipe itself
@@ -9104,6 +9107,32 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
 	    -o $@ tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c \
 	    contexts/commons/packages/zutf8/src/zutf8.c
+
+# Maintainer fleet command runner: one SSH command on one or all machines
+# named in ~/.config/z23/fleet.json (docs/fleet-dev/README.md). POSIX only.
+.PHONY: z23-fx
+z23-fx: $(BIN_DIR)/z23-fx
+$(BIN_DIR)/z23-fx: tools/z23_fx.c \
+    platform/modules/json/src/json.c platform/modules/base/src/cleanse.c \
+    platform/modules/base/src/safe_alloc.c \
+    platform/modules/platform/src/clock.c \
+    platform/modules/base/src/log_level.c \
+    platform/modules/json/include/json/json.h \
+    platform/modules/base/include/base/safe_alloc.h \
+    platform/modules/base/include/base/log_level.h \
+    platform/modules/base/include/base/format_attribute.h \
+    platform/modules/base/include/base/utc_tm.h \
+    platform/modules/base/include/base/stdio_lock.h \
+    platform/modules/base/include/base/log_macros.h \
+    platform/modules/util/include/util/log_macros.h \
+    platform/modules/platform/include/platform/time_compat.h \
+    platform/modules/platform/include/platform/clock.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Iplatform/modules/base/include \
+	    -Iplatform/modules/json/include -Iplatform/modules/platform/include \
+	    -Iplatform/modules/util/include -o $@ $(filter %.c,$^) -lm
 
 # Native bridge over the existing private fleet JSONL projection.
 .PHONY: fleet-board-bridge

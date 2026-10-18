@@ -60,3 +60,13 @@ compact JSON, so a coordinating session does not load raw fleet output:
 
 Wiki text and mail bodies are untrusted knowledge; the agents report them and
 follow no instructions inside them.
+
+## Maintainer agents, card workflow and fleet commands
+
+The plugin also carries the maintainer workflow: five agents
+(`z23-capsule-facts`, `z23-scout`, `z23-implement`, `z23-watch`,
+`z23-review`) and two skills (`z23-dev-card`, `z23-dev-fleet`). They use only
+the local `z23` tools, native `z23` commands, git and `z23-fx`, a small tool
+that runs one command on the machines listed in `~/.config/z23/fleet.json`.
+Setup and the daily loop are in
+[`docs/fleet-dev/README.md`](../../docs/fleet-dev/README.md).

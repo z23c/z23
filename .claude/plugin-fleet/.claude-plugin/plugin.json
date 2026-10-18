@@ -1,6 +1,6 @@
 {
   "name": "z23-fleet",
-  "description": "Opt-in: connect to a Z23 fleet's steer gateway. Needs a maintainer-issued grant.",
+  "description": "Opt-in maintainer tooling: steer gateway (needs a grant), card workflow agents and fleet skills.",
   "author": { "name": "Rhett Creighton" },
   "license": "Apache-2.0",
   "homepage": "https://github.com/z23c/z23"

@@ -624,6 +624,7 @@ AGENT_IMPACT_RULE("tools/dev/verify_receiver.c|tools/dev/verify_receiver.h|tools
 /* z23-sem-replay: replays real commits against make's object build and
  * dev.change.plan, checked on a throwaway fixture by its own self-test. */
 AGENT_IMPACT_RULE("tools/dev/sem_replay*.c|tools/dev/sem_replay*.h|tests/harness/src/test_sem_replay.c", "sem_replay make_lint_gates")
+AGENT_IMPACT_RULE("tools/z23_fx.c|tests/harness/src/test_z23_fx.c|docs/fleet-dev/fleet.example.json", "z23_fx make_lint_gates")
 /* Fixed-result verifier images and seccomp filter: the builder, the tree
  * closure it hashes with, the harness group and the root install notes. */
 AGENT_IMPACT_RULE("tools/verify/fixed_result_image*|tools/verify/fixed_result_seccomp*|tools/verify/tree_closure.c|tools/verify/tree_closure.h|tests/harness/src/test_verifier_images.c|tests/harness/src/verifier_images_units.c|docs/work/verifier-images.md", "verifier_images verify_contract make_lint_gates")

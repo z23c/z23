@@ -170,6 +170,8 @@ from a hash, signature, test, or reproduction receipt.
 - [`RUNBOOK.md`](RUNBOOK.md) — symptom-driven diagnostics and operations.
 - [`FLEET.md`](FLEET.md) — fleet operator guide: machines, joining, tunnel,
   shells, vitals, board, wiki, agents, roles and troubleshooting.
+- [`fleet-dev/README.md`](fleet-dev/README.md) — maintainer setup for the
+  opt-in `z23-fleet` plugin, `z23-fx` and the daily loop.
 - [`FLEET_TRIGGERS.md`](FLEET_TRIGGERS.md) — the closed registry of
   reactions to local events (`z23-dev fleet triggers`).
 - [`TENACITY.md`](TENACITY.md) — copy-first recovery invariants.
