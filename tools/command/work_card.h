@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define WORK_CARD_SCHEMA_ID "zcl.work_card.v1"
 
@@ -24,6 +25,8 @@ enum {
     WORK_CARD_NAME_MAX = 48,
     WORK_CARD_ACCEPTANCE_MAX = 256,
     WORK_CARD_BASE_HEX = 40,
+    WORK_CARD_PATH_MAX = 256,
+    WORK_CARD_TOKEN_BUDGET_MAX = 1000000,
 };
 
 enum work_card_level {
@@ -42,9 +45,14 @@ enum work_card_reason {
     WORK_CARD_ACCEPTANCE_SHELL,
     WORK_CARD_OWNED_EMPTY,
     WORK_CARD_NAME,
+    WORK_CARD_LAB_FILE,
+    WORK_CARD_LAB_CASES,
+    WORK_CARD_LAB_ACCEPTANCE,
+    WORK_CARD_TOKEN_BUDGET,
 };
 
-/* The validated scalar fields. The arrays (owned, forbidden, contract,
+/* The validated scalar fields (lab_file, cases and token_budget are empty or 0
+ * when absent). The arrays (owned, forbidden, contract,
  * stop_if) are validated for shape and read again from the card bytes. */
 struct work_card {
     char name[WORK_CARD_NAME_MAX + 1];
@@ -53,13 +61,19 @@ struct work_card {
     char outcome[WORK_CARD_BYTES_MAX + 1];
     char acceptance[WORK_CARD_ACCEPTANCE_MAX + 1];
     size_t owned_count;
+    char lab_file[WORK_CARD_PATH_MAX + 1];
+    char cases[WORK_CARD_PATH_MAX + 1];
+    int64_t token_budget;
 };
 
 /* Judge `len` bytes. Returns WORK_CARD_OK and fills `out`, or the first
  * failing check and zeroes `out`. Checks run in this order: size; JSON shape,
  * schema and duplicate keys (CARD_SCHEMA); level; base; acceptance (empty or
  * over-long is CARD_SCHEMA, a disallowed character or launcher is
- * CARD_ACCEPTANCE_SHELL); owned; name. */
+ * CARD_ACCEPTANCE_SHELL); owned; name; then the optional lab fields:
+ * lab_file (CARD_LAB_FILE), cases (CARD_LAB_CASES), the `z23 lab test `
+ * acceptance prefix when cases is present (CARD_LAB_ACCEPTANCE), token_budget
+ * (CARD_TOKEN_BUDGET). */
 enum work_card_reason work_card_validate(const char *bytes, size_t len,
                                          struct work_card *out);
 

@@ -187,11 +187,127 @@ static int test_work_card_validator_7(void)
         ASSERT_STR_EQ(work_card_reason_code(WORK_CARD_OWNED_EMPTY),
                       "CARD_OWNED_EMPTY");
         ASSERT_STR_EQ(work_card_reason_code(WORK_CARD_NAME), "CARD_NAME");
+        ASSERT_STR_EQ(work_card_reason_code(WORK_CARD_LAB_FILE), "CARD_LAB_FILE");
+        ASSERT_STR_EQ(work_card_reason_code(WORK_CARD_LAB_CASES), "CARD_LAB_CASES");
+        ASSERT_STR_EQ(work_card_reason_code(WORK_CARD_LAB_ACCEPTANCE),
+                      "CARD_LAB_ACCEPTANCE");
+        ASSERT_STR_EQ(work_card_reason_code(WORK_CARD_TOKEN_BUDGET),
+                      "CARD_TOKEN_BUDGET");
         PASS();
     } _test_next:;
     return failures;
 }
 
+
+#define WC_LAB_ACCEPT "z23 lab test lab/a.c --cases=lab/a.json"
+
+/* A lab card: `fields` is spliced in as raw JSON members, `pad` extends the
+ * outcome so a card can be sized to the byte. */
+static void wc_lab_card(char *out, size_t cap, const char *accept,
+                        const char *fields, size_t pad)
+{
+    char outcome[WORK_CARD_BYTES_MAX + 1] = "Make the thing true.";
+    size_t n = strlen(outcome);
+    memset(outcome + n, 'x', pad);
+    outcome[n + pad] = '\0';
+    (void)snprintf(out, cap,
+        "{\"schema\":\"zcl.work_card.v1\",\"name\":\"lab-card\","
+        "\"level\":\"haiku\",\"outcome\":\"%s\",\"base\":\"%s\","
+        "\"owned\":[\"tools/x.c\",\"lab/a.c\"],\"acceptance\":\"%s\"%s}",
+        outcome, WC_BASE, accept, fields);
+}
+
+static enum work_card_reason wc_lab_judge(const char *fields)
+{
+    char text[WORK_CARD_BYTES_MAX + 1];
+    wc_lab_card(text, sizeof(text), WC_LAB_ACCEPT, fields, 0);
+    return wc_judge(text);
+}
+
+static int test_work_card_lab_valid(void)
+{
+    int failures = 0;
+    TEST("work card: a lab card round-trips and a v1 card without lab fields still validates") {
+        char text[WORK_CARD_BYTES_MAX + 1];
+        struct work_card card;
+        wc_lab_card(text, sizeof(text), WC_LAB_ACCEPT,
+                    ",\"lab_file\":\"lab/a.c\",\"cases\":\"lab/a.json\","
+                    "\"token_budget\":20000", 0);
+        ASSERT_EQ(work_card_validate(text, strlen(text), &card), WORK_CARD_OK);
+        ASSERT_STR_EQ(card.lab_file, "lab/a.c");
+        ASSERT_STR_EQ(card.cases, "lab/a.json");
+        ASSERT_EQ(card.token_budget, 20000);
+        wc_lab_card(text, sizeof(text), WC_LAB_ACCEPT, ",\"lab_file\":\"lab/a.c\"", 0);
+        ASSERT_EQ(work_card_validate(text, strlen(text), &card), WORK_CARD_OK);
+        ASSERT_EQ(card.cases[0], '\0');
+        ASSERT_EQ(card.token_budget, 0);
+        wc_card(text, sizeof(text), "n", "haiku", "make x");
+        ASSERT_EQ(work_card_validate(text, strlen(text), &card), WORK_CARD_OK);
+        ASSERT_EQ(card.lab_file[0], '\0');
+        ASSERT_EQ(card.token_budget, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_work_card_lab_refusals(void)
+{
+    int failures = 0;
+    TEST("work card: each lab field violation refuses with its own code") {
+        static const struct { const char *fields; enum work_card_reason want; } k[] = {
+            {",\"lab_file\":\"/lab/a.c\"", WORK_CARD_LAB_FILE},
+            {",\"lab_file\":\"lab/../a.c\"", WORK_CARD_LAB_FILE},
+            {",\"lab_file\":\"../a.c\"", WORK_CARD_LAB_FILE},
+            {",\"lab_file\":\"lab\\\\a.c\"", WORK_CARD_LAB_FILE},
+            {",\"lab_file\":\"lab/a.h\"", WORK_CARD_LAB_FILE},
+            {",\"lab_file\":\"lab/b.c\"", WORK_CARD_LAB_FILE},
+            {",\"lab_file\":7", WORK_CARD_LAB_FILE},
+            {",\"cases\":\"lab/a.json\"", WORK_CARD_LAB_CASES},
+            {",\"lab_file\":\"lab/a.c\",\"cases\":\"lab/a.txt\"", WORK_CARD_LAB_CASES},
+            {",\"lab_file\":\"lab/a.c\",\"cases\":\"/lab/a.json\"", WORK_CARD_LAB_CASES},
+            {",\"lab_file\":\"lab/a.c\",\"cases\":\"lab/../a.json\"", WORK_CARD_LAB_CASES},
+            {",\"token_budget\":0", WORK_CARD_TOKEN_BUDGET},
+            {",\"token_budget\":1000001", WORK_CARD_TOKEN_BUDGET},
+            {",\"token_budget\":-5", WORK_CARD_TOKEN_BUDGET},
+            {",\"token_budget\":1.5", WORK_CARD_TOKEN_BUDGET},
+            {",\"token_budget\":\"5\"", WORK_CARD_TOKEN_BUDGET},
+        };
+        for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++)
+            ASSERT_EQ(wc_lab_judge(k[i].fields), k[i].want);
+        ASSERT_EQ(wc_lab_judge(",\"token_budget\":1"), WORK_CARD_OK);
+        ASSERT_EQ(wc_lab_judge(",\"token_budget\":1000000"), WORK_CARD_OK);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_work_card_lab_acceptance_and_size(void)
+{
+    int failures = 0;
+    TEST("work card: a lab card runs z23 lab test and the 2048-byte cap still holds") {
+        char text[WORK_CARD_BYTES_MAX + 64];
+        const char *both = ",\"lab_file\":\"lab/a.c\",\"cases\":\"lab/a.json\"";
+        size_t base;
+        wc_lab_card(text, sizeof(text), "make x", both, 0);
+        ASSERT_EQ(wc_judge(text), WORK_CARD_LAB_ACCEPTANCE);
+        wc_lab_card(text, sizeof(text), "z23 lab run lab/a.c", both, 0);
+        ASSERT_EQ(wc_judge(text), WORK_CARD_LAB_ACCEPTANCE);
+        wc_lab_card(text, sizeof(text), "make x", ",\"lab_file\":\"lab/a.c\"", 0);
+        ASSERT_EQ(wc_judge(text), WORK_CARD_OK);
+        wc_lab_card(text, sizeof(text), WC_LAB_ACCEPT, both, 0);
+        base = strlen(text);
+        wc_lab_card(text, sizeof(text), WC_LAB_ACCEPT, both,
+                    WORK_CARD_BYTES_MAX - base);
+        ASSERT_EQ(strlen(text), WORK_CARD_BYTES_MAX);
+        ASSERT_EQ(wc_judge(text), WORK_CARD_OK);
+        wc_lab_card(text, sizeof(text), WC_LAB_ACCEPT, both,
+                    WORK_CARD_BYTES_MAX - base + 1);
+        ASSERT_EQ(strlen(text), WORK_CARD_BYTES_MAX + 1);
+        ASSERT_EQ(wc_judge(text), WORK_CARD_TOO_LARGE);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 
 static int test_work_card_owner_key(void)
 {
@@ -675,6 +791,9 @@ int test_work_card(void)
     failures += test_work_card_validator_5();
     failures += test_work_card_validator_6();
     failures += test_work_card_validator_7();
+    failures += test_work_card_lab_valid();
+    failures += test_work_card_lab_refusals();
+    failures += test_work_card_lab_acceptance_and_size();
     failures += test_work_card_owner_key();
     failures += test_work_card_seed_file();
     failures += test_work_card_list();

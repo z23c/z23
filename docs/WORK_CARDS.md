@@ -27,9 +27,30 @@ bytes with schema `zcl.work_card.v1`:
 | `stop_if` | optional: conditions under which to stop and report instead of continuing |
 | `credit` | optional: how to credit the contributor |
 | `task_root` | optional: even-length hex root of an existing task object |
+| `lab_file` | optional: repo-relative `.c` path (1 to 256 bytes) that is also in `owned` |
+| `cases` | optional: repo-relative `.json` lab cases path; requires `lab_file`, and `acceptance` must then start with `z23 lab test ` |
+| `token_budget` | optional: integer from 1 to 1000000 |
 
 Duplicate keys are refused. `docs/work/cards.jsonl` holds the current seed cards, one per line. Every line
 must validate; the `work_card` test group enforces it.
+
+## Lab cards
+
+A lab card adds up to three optional fields so that the test is the reviewer
+and a small model can finish it: `lab_file` is the one C23 file to work on, a
+repo-relative path ending `.c` that must also appear in `owned`; `cases` is the
+repo-relative path of a `z23 lab test` cases JSON file ending `.json` and needs
+`lab_file`; `token_budget` is an integer from 1 to 1000000 that bounds the
+work. Paths are 1 to 256 bytes with no leading `/`, no `..` segment and no
+backslash. When `cases` is present, `acceptance` must start with `z23 lab test `
+and is normally `z23 lab test <lab_file> --cases=<cases>`. Adding optional
+fields keeps the schema at `zcl.work_card.v1`: a validator that predates them
+ignores unknown keys, so old nodes still list and show the card. `work show`
+returns the card with these fields; `work list` rows are unchanged.
+
+```json
+{"schema":"zcl.work_card.v1","name":"rev-cases-edges","level":"haiku","outcome":"rev_cases.json also covers empty input and a line with no trailing newline; rev.c still passes every case.","base":"0123456789abcdef0123456789abcdef01234567","owned":["tests/fixtures/lab/rev.c","tests/fixtures/lab/rev_cases.json"],"lab_file":"tests/fixtures/lab/rev.c","cases":"tests/fixtures/lab/rev_cases.json","token_budget":20000,"acceptance":"z23 lab test tests/fixtures/lab/rev.c --cases=tests/fixtures/lab/rev_cases.json"}
+```
 
 ## How state is derived
 
@@ -59,7 +80,8 @@ validation is reported under `rejected` with a reason code, never listed as a
 card.
 
 Reason codes: `CARD_TOO_LARGE`, `CARD_SCHEMA`, `CARD_LEVEL`, `CARD_BASE`,
-`CARD_ACCEPTANCE_SHELL`, `CARD_OWNED_EMPTY`, `CARD_NAME`.
+`CARD_ACCEPTANCE_SHELL`, `CARD_OWNED_EMPTY`, `CARD_NAME`, `CARD_LAB_FILE`, `CARD_LAB_CASES`,
+`CARD_LAB_ACCEPTANCE`, `CARD_TOKEN_BUDGET`.
 
 ## Listing and showing cards
 

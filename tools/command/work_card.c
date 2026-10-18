@@ -16,6 +16,10 @@ static const char *const k_reason_codes[] = {
     [WORK_CARD_ACCEPTANCE_SHELL] = "CARD_ACCEPTANCE_SHELL",
     [WORK_CARD_OWNED_EMPTY] = "CARD_OWNED_EMPTY",
     [WORK_CARD_NAME] = "CARD_NAME",
+    [WORK_CARD_LAB_FILE] = "CARD_LAB_FILE",
+    [WORK_CARD_LAB_CASES] = "CARD_LAB_CASES",
+    [WORK_CARD_LAB_ACCEPTANCE] = "CARD_LAB_ACCEPTANCE",
+    [WORK_CARD_TOKEN_BUDGET] = "CARD_TOKEN_BUDGET",
 };
 
 const char *work_card_reason_code(enum work_card_reason reason)
@@ -140,7 +144,7 @@ static bool wc_has_duplicate_keys(const struct json_value *obj)
     return false;
 }
 
-/* Optional task_root: even-length lowercase hex, at most 64 bytes. */
+/* Optional task_root: even-length lowercase hex, at most 128 characters. */
 static bool wc_task_root_ok(const struct json_value *v)
 {
     const char *s = v->type == JSON_STR ? json_get_str(v) : NULL;
@@ -203,6 +207,84 @@ static enum work_card_reason wc_fields(const struct json_value *root,
     return WORK_CARD_OK;
 }
 
+/* Repo-relative path of 1..WORK_CARD_PATH_MAX bytes ending in `suffix`: no
+ * leading slash, backslash or `..` segment. */
+static bool wc_repo_path_ok(const char *s, const char *suffix)
+{
+    size_t n = s ? strlen(s) : 0;
+    size_t tail = strlen(suffix);
+    if (n <= tail || n > WORK_CARD_PATH_MAX || s[0] == '/' ||
+        strchr(s, '\\') != NULL || strcmp(s + n - tail, suffix) != 0)
+        return false;
+    for (const char *seg = s; seg;) {
+        if (strncmp(seg, "..", 2) == 0 && (seg[2] == '/' || seg[2] == '\0'))
+            return false;
+        const char *slash = strchr(seg, '/');
+        seg = slash ? slash + 1 : NULL;
+    }
+    return true;
+}
+
+static bool wc_owned_has(const struct json_value *owned, const char *path)
+{
+    for (size_t i = 0; i < json_size(owned); i++)
+        if (strcmp(json_get_str(json_at(owned, i)), path) == 0)
+            return true;
+    return false;
+}
+
+/* An absent optional string is NULL with *bad false; a present non-string
+ * sets *bad. */
+static const char *wc_opt_str(const struct json_value *root, const char *key,
+                              bool *bad)
+{
+    const struct json_value *v = json_get(root, key);
+    *bad = v && v->type != JSON_STR;
+    return v && !*bad ? json_get_str(v) : NULL;
+}
+
+static bool wc_budget_ok(const struct json_value *budget)
+{
+    return !budget || (budget->type == JSON_INT && json_get_int(budget) >= 1 &&
+                       json_get_int(budget) <= WORK_CARD_TOKEN_BUDGET_MAX);
+}
+
+/* Checks lab_file and cases; `bad_*` marks a present non-string. */
+static enum work_card_reason wc_lab_paths(const struct json_value *root,
+                                          const char *file, bool bad_file,
+                                          const char *cases, bool bad_cases)
+{
+    if (bad_file || (file && (!wc_repo_path_ok(file, ".c") ||
+                              !wc_owned_has(json_get(root, "owned"), file))))
+        return WORK_CARD_LAB_FILE;
+    if (bad_cases || (cases && (!file || !wc_repo_path_ok(cases, ".json"))))
+        return WORK_CARD_LAB_CASES;
+    return WORK_CARD_OK;
+}
+
+static enum work_card_reason wc_lab(const struct json_value *root,
+                                    struct work_card *out)
+{
+    bool bad_file, bad_cases;
+    const char *file = wc_opt_str(root, "lab_file", &bad_file);
+    const char *cases = wc_opt_str(root, "cases", &bad_cases);
+    const struct json_value *budget = json_get(root, "token_budget");
+    enum work_card_reason reason =
+        wc_lab_paths(root, file, bad_file, cases, bad_cases);
+    if (reason != WORK_CARD_OK)
+        return reason;
+    if (cases && strncmp(out->acceptance, "z23 lab test ", 13) != 0)
+        return WORK_CARD_LAB_ACCEPTANCE;
+    if (!wc_budget_ok(budget))
+        return WORK_CARD_TOKEN_BUDGET;
+    if (file)
+        memcpy(out->lab_file, file, strlen(file));
+    if (cases)
+        memcpy(out->cases, cases, strlen(cases));
+    out->token_budget = budget ? json_get_int(budget) : 0;
+    return WORK_CARD_OK;
+}
+
 enum work_card_reason work_card_validate(const char *bytes, size_t len,
                                          struct work_card *out)
 {
@@ -217,6 +299,8 @@ enum work_card_reason work_card_validate(const char *bytes, size_t len,
     if (json_read(&root, bytes, len) && root.type == JSON_OBJ &&
         wc_shape_ok(&root))
         reason = wc_fields(&root, out);
+    if (reason == WORK_CARD_OK)
+        reason = wc_lab(&root, out);
     json_free(&root);
     if (reason != WORK_CARD_OK)
         memset(out, 0, sizeof(*out));
