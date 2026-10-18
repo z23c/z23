@@ -1,9 +1,15 @@
 <!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
 
-# Start here: joining and working in a z23 fleet
+# Start here: working in a z23 fleet
 
-Read this page first when you arrive at a z23 fleet. It is a map. Each
-section ends with the document that owns the detail. Commands are real: use
+**Router.** Public volunteer or a coding agent you drive yourself: go to
+[CONTRIBUTING.md](../../.github/CONTRIBUTING.md) and stop reading here.
+Maintainer or fleet member: continue with this page, then
+[AGENTS.md](../../AGENTS.md). Fleet machines and operations:
+[FLEET.md](../FLEET.md).
+
+This page is the fleet member's map. Each section ends with the document that
+owns the detail. Commands are real: use
 `build/bin/z23 discover help <path>` and `build/bin/z23 discover schema <leaf>`
 to confirm exact input keys before you rely on one. Development leaves
 (`dev.*`) run through `build/bin/z23-dev`.
@@ -48,7 +54,7 @@ is sent over a network; the owner carries each line by hand.
 
 Step 1 prints step 2's command. Step 2 prints step 3's command. The name is
 2 to 24 characters of `a-z`, `0-9` and interior dashes, and cannot be renamed.
-On a fresh checkout, build first with `make -j8 build/bin/z23-dev` and run
+On a fresh checkout, build first with `make dev-bin` and run
 `build/bin/z23-dev fleet join <token>`. List the result with
 `z23 fleet machines`. Everything a machine says about itself is self-reported,
 not verified. Details, refusals and the optional ssh bridge:
@@ -186,8 +192,7 @@ anything to another fleet you would not publish.
 - Find your lane with your host's worktree registry. Use a sanctioned worktree. Never
   touch another worker's checkout.
 - Run heavy builds and tests through your host's build scheduler when it has
-  one (on the maintainer host that is `devbuild --wait`), for example
-  `env -u GIT_EDITOR -u GIT_OPTIONAL_LOCKS devbuild --wait make -j28 <target>`.
+  one (maintainers' hosts use `devbuild --wait`; volunteers run `make` directly).
 - Run a focused registered group: `make t-fast-exact ONLY=<group>`. Find the
   group for a file with `z23 code tests <path>`.
 - Red, then green: show the new test failing for the intended reason before

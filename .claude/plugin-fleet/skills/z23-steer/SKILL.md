@@ -7,8 +7,10 @@ description: Use when joining or coordinating with a Z23 fleet through its steer
 
 # Z23 fleet steering
 
-The `z23` MCP server is the fleet's steer gateway. Its tools act with the
-authority of one owner-minted grant; the node checks scope, expiry and
+This skill belongs to the opt-in `z23-fleet` plugin and needs a maintainer-issued
+grant; public volunteers use the `z23-work` skill instead. The `z23` MCP server
+is the fleet's steer gateway. Its tools act with the authority of one
+maintainer-minted grant; the node checks scope, expiry and
 revocation on every call.
 
 | Tool | Scope | Use |
@@ -16,6 +18,8 @@ revocation on every call.
 | `steer_brief` | brief | Fleet snapshot: agents, work, blockers, capacity, evidence refs, your authenticated `caller` |
 | `wiki_find` | evidence | Find fleet wiki entries; fetch an exact revision with `steer_evidence` type `board` |
 | `steer_evidence` | evidence | One evidence object by exact reference |
+| `wiki_read` | evidence | One hex chunk of an exact signed wiki revision, by revision id |
+| `wiki_write` | wiki-write | Publish a public wiki revision; never implied by another scope |
 | `steer_send` | send | Bounded directives or results to named agents |
 | `steer_deliver` | deliver | Stage one `.c`/`.h` file in the inert quarantine inbox |
 
@@ -52,26 +56,24 @@ grant confers no shell, deployment, wallet or consensus authority.
 ## Connecting
 
 The plugin's header helper sends a saved grant when one exists; otherwise the
-client signs in through the gateway's OAuth approval page, where the owner
+client signs in through the gateway's OAuth approval page, where a maintainer
 approves the request.
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | No `steer_*` tools | Server added or plugin installed after the session started | Restart Claude Code (`claude --continue`) |
 | "needs you to sign in again" | No saved grant and no completed OAuth sign-in | Save a grant (below), or run `/mcp`, select `z23`, Authenticate |
-| `STEER_GRANT_UNKNOWN` | Grant minted on a node that does not serve this gateway | Mint again on the gateway host with the node binary the gateway runs (`FLEET_GW_NODE`) |
-| `STEER_GRANT_EXPIRED` / `STEER_GRANT_REVOKED` | Grant ended | Ask the owner for a new grant |
-| Insufficient scope | Grant lacks the tool's scope | Ask the owner to mint with that scope |
+| `STEER_GRANT_UNKNOWN` | Grant minted on a node that does not serve this gateway | Ask the maintainer to mint again with the node binary the gateway runs |
+| `STEER_GRANT_EXPIRED` / `STEER_GRANT_REVOKED` | Grant ended | Ask a maintainer for a new grant |
+| Insufficient scope | Grant lacks the tool's scope | Ask a maintainer to mint with that scope |
 
-Save a grant without a browser. The owner mints it on the host that serves
-the gateway, with the node binary the gateway runs (`FLEET_GW_NODE`; a grant
-minted by any other node is `STEER_GRANT_UNKNOWN`), and pipes the reply into
+Save a grant without a browser. A maintainer mints it on the host that serves
+the gateway with the node binary the gateway runs (a grant minted by any other
+node is `STEER_GRANT_UNKNOWN`) and sends you the reply privately. Pipe it into
 the plugin's helper on the client machine:
 
 ```sh
-ssh <owner>@<gateway-host> 'z23 fleet steer grant --action=mint \
-  --scopes=brief,send,evidence --label=<session-label> --ttl_seconds=2592000' \
-  | <plugin>/bin/z23-steer-headers --save
+<minted-reply> | <plugin>/bin/z23-steer-headers --save
 ```
 
 `--save` stores the id in `~/.config/z23/steer-grant` (mode 600, atomic

@@ -2,7 +2,7 @@
 
 # Fleet operator guide
 
-This is the single operator page for the Z23 fleet: which machines belong to
+This is the single operator page for a Z23 fleet: which machines belong to
 it, how to add one, how to reach one, and how to read its health. Agent and
 coordinator policy (storage admission, task ownership, cost accounting) is in
 [`work/AGENT_FLEET.md`](work/AGENT_FLEET.md). Priorities are in
@@ -14,22 +14,20 @@ selected binary: `z23 discover describe <leaf>` and `z23 discover schema <leaf>`
 
 ## Machines
 
-This table is the only place in the documentation that lists fleet hosts.
+A fleet's machines are exactly what `z23 fleet machines` reports: admitted
+inventory records, not a list kept in documentation. This page names no
+particular hosts. To work with the roster:
 
-| Name | Host | Role | SSH alias | Status |
-| --- | --- | --- | --- | --- |
-| r1 | rhett.dev | Linux x86_64 development and tunnel client | `z23-r1` | in service |
-| r2 | rhett2.dev | Linux x86_64 landing host and tunnel hub | `z23-r2` | in service |
-| mac | rentamac | macOS arm64 | `z23-mac` | in service; native HOST tunnel unqualified |
-| laptop | the owner's laptop | development seat | none | in service |
-| windows | the owner's Windows machine | MSYS2 UCRT64 build target | none | route down |
+| Task | Command |
+| --- | --- |
+| List machines | `z23 fleet machines` |
+| See the next missing step for this node | `z23 fleet doctor --datadir=<node-datadir>` |
+| Enrol and admit a machine | the three-step sequence under *Joining a machine* |
+| Read paired-machine status | `z23 ops mesh machines`, `z23 ops mesh status` |
 
-`rhett3.dev` and `rhett4.dev` (r3, r4) were retired on 2026-10-18. Two
-additional servers are expected on 2026-10-20; add them here when admitted.
-
-On r1 and r2 the `z23` binary is not on the non-interactive `PATH`; call
-`~/.local/bin/z23`. Host build admission (`devbuild --wait`) and storage
-reserves are local policy; see `AGENT_FLEET.md`.
+If `z23` is not on a remote host's non-interactive `PATH`, call it by its
+absolute path. Host build admission and storage reserves are local policy; see
+`work/AGENT_FLEET.md`.
 
 ## Joining a machine
 
@@ -57,8 +55,8 @@ anchoring and the roster gate (`-fleetrostergate`) are in
 
 Current status:
 
-- r2 runs one supervised user unit per client, `z23-tunnel-receiver@<client>.service`.
-  The units for r3 and r4 are retired with those hosts.
+- The hub host runs one supervised user unit per client,
+  `z23-tunnel-receiver@<client>.service`.
 - The outer transport is backend 2 (SHAKE256-Wrap) with a static pairwise
   PSK. It has no forward secrecy.
 - Inner OpenSSH negotiates `sntrup761x25519-sha512@openssh.com` and verifies
@@ -121,12 +119,12 @@ key exchange):
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
   -o ControlMaster=no -o ControlPath=none \
   -o KexAlgorithms=sntrup761x25519-sha512@openssh.com \
-  z23-r2 'hostname; id -un'
+  <host-alias> 'hostname; id -un'
 ```
 
 Through a command-scoped forwarding carrier to the peer's loopback sshd, add
-`-o "ProxyCommand=ssh <same options> -W 127.0.0.1:22 z23-r2"`. All directed
-pairs among r1 to r4 and the Mac passed on 2026-10-15; that record is historical:
+`-o "ProxyCommand=ssh <same options> -W 127.0.0.1:22 <host-alias>"`. A directed-pair
+check of one fleet passed on 2026-10-15; that record is historical:
 [`experiments/FLEET_SHELL_ROUTES_2026-10-15.md`](experiments/FLEET_SHELL_ROUTES_2026-10-15.md).
 
 Native confined terminal over a paired node:
@@ -155,11 +153,10 @@ catalog, ledger kinds and refusals are in [`FLEET_LEDGER.md`](FLEET_LEDGER.md);
 the telemetry shape and unknown-value rules are in
 [`TELEMETRY_CONTRACT.md`](TELEMETRY_CONTRACT.md).
 
-Read another machine's load, memory and disk over the host tunnel (measured
-2026-10-18 from r1 to r2: 200 to 220 ms in three runs):
+Read another machine's load, memory and disk over the host tunnel (200 to 220 ms in three runs on 2026-10-18):
 
 ```sh
-~/.local/bin/z23 fleet vitals table --machines='[{"label":"r2","route_file":"$HOME/.local/state/z23-tunnel/r2-e1/client.json","slot":"/home/rhett/.local/bin/z23","host_alias":"rhett2.dev"}]'
+z23 fleet vitals table --machines='[{"label":"<name>","route_file":"<route-file>","slot":"<remote-z23-path>","host_alias":"<host-alias>"}]'
 ```
 
 Other telemetry: `z23 ops telemetry watch --since=<sequence>` (resumable
@@ -263,11 +260,11 @@ its identity. `steer_deliver` accepts source only, not executables. See
 
 | Symptom | Cause and action |
 | --- | --- |
-| `z23: command not found` over a non-interactive shell on r1 or r2 | `z23` is not on the non-interactive `PATH`; use `~/.local/bin/z23`. |
+| `z23: command not found` over a non-interactive shell | `z23` is not on the remote non-interactive `PATH`; call it by absolute path. |
 | `<leaf> --help` is refused | Help is not a flag. Use `z23 discover describe <leaf>` or `z23 discover schema <leaf>`. |
 | A generic leaf needs JSON input | Pass `--input='<json>'`, or `--input=-` to read stdin. |
 | `fleet board` or `fleet wiki` fails closed | No local node answered. Check `z23-dev status` and the RPC port and datadir. |
 | A machine is missing from `fleet machines` | It was never admitted or its record was not sealed by the operator key. Run `z23 fleet doctor`. |
-| Windows does not answer | Its route is down. The terminal lane is also refused without `-terminalacceptunconfined`. |
-| macOS shell is refused | The confined terminal worker does not run on macOS; use the `z23-mac` SSH alias. |
+| A Windows machine does not answer | Check its route. The terminal lane is also refused without `-terminalacceptunconfined`. |
+| macOS shell is refused | The confined terminal worker does not run on macOS; use a plain SSH `<host-alias>`. |
 | Vitals show a machine as unknown | Absent is not zero. Rerun the `vitals table` command above and check the route file. |

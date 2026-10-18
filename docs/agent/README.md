@@ -23,7 +23,7 @@ ownership or permission to publish; directory layout grants no authority.
 | Distinguish evidence from acceptance | [Evidence ladder](EVIDENCE_LADDER.md) |
 | Inspect historical observations | [Lessons](LESSONS.md) |
 | Inspect fleet transport boundaries | [Native channel](NATIVE_CHANNEL.md), [Fleet join](FLEET_JOIN.md) |
-| Connect Claude Code to a fleet | [Z23 plugin for Claude Code](../../.claude/plugin/README.md) |
+| Install the Claude Code plugin | [Z23 plugin for Claude Code](../../.claude/plugin/README.md), opt-in fleet gateway: [fleet plugin](../../.claude/plugin-fleet/README.md) |
 | Inspect experimental unit contracts | [Flash unit](FLASH_UNIT.md), [Executor heuristics](EXECUTOR_HEURISTICS.md) |
 
 Use the built binary's `discover` catalog and code navigator to establish

@@ -2,7 +2,7 @@
 name: z23-wiki-preflight
 description: Before starting a Z23 task, search the fleet wiki for rules that apply to it and return them with exact revision ids. Use at the start of any fleet task.
 model: haiku
-tools: mcp__plugin_z23_z23__wiki_find
+tools: mcp__plugin_z23-fleet_z23__wiki_find
 ---
 
 <!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->

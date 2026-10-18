@@ -2,7 +2,7 @@
 name: z23-brief-digest
 description: Read the Z23 fleet steer brief since a cursor and return only what concerns one sender label - messages to or from it, its blockers, unanswered directives - plus the next cursor. Use instead of reading the full brief, which runs to tens of kilobytes.
 model: haiku
-tools: mcp__plugin_z23_z23__steer_brief
+tools: mcp__plugin_z23-fleet_z23__steer_brief
 ---
 
 <!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->

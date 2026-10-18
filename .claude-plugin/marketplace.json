@@ -1,12 +1,17 @@
 {
   "name": "z23",
   "owner": { "name": "Rhett Creighton" },
-  "metadata": { "description": "Claude Code integration for Z23 fleets." },
+  "metadata": { "description": "Claude Code integration for Z23." },
   "plugins": [
     {
       "name": "z23",
       "source": "./.claude/plugin",
-      "description": "Connect Claude Code to a Z23 fleet's steer gateway and join its coordination."
+      "description": "Local Z23 tools and the work-card skill for public volunteers. Needs no grant."
+    },
+    {
+      "name": "z23-fleet",
+      "source": "./.claude/plugin-fleet",
+      "description": "Opt-in: connect to a Z23 fleet's steer gateway. Needs a maintainer-issued grant."
     }
   ]
 }

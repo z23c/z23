@@ -7,7 +7,7 @@ Copyright 2026 Rhett Creighton. Licensed under the Apache License, Version 2.0.
 This is a curated map, not an inventory. The documentation hierarchy is:
 
 1. [`../README.md`](../README.md) — public product explanation.
-2. [`../AGENTS.md`](../AGENTS.md) — model-neutral coding-agent entry point.
+2. [`../AGENTS.md`](../AGENTS.md) — model-neutral entry point for maintainers and fleet agents. Public volunteers start at [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).
 3. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) — current ordered work.
 4. [`DEVELOPING.md`](DEVELOPING.md) — detailed developer procedure.
 5. [`HANDOFF.md`](HANDOFF.md) — current state of the maintainer's hosted node
@@ -219,8 +219,7 @@ path:
 
 ## Contributing and attribution
 
-- [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md) — contribution
-  contract.
+- [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md) — the public volunteer front door: build, work cards, submission and credit.
 - [`ATTRIBUTIONS.md`](ATTRIBUTIONS.md) — concept and code attribution.
 - [`../NOTICE`](../NOTICE) — upstream notices.
 

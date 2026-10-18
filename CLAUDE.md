@@ -1,20 +1,17 @@
 # Claude compatibility entry point
 
-Claude is one replaceable coding-agent frontend for Z23. The project
-contract is model-neutral; this file intentionally does not duplicate it.
+Claude is one replaceable coding-agent frontend for Z23. The project contract
+is model-neutral; this file only routes.
 
-Read, in order:
+- **Public volunteer** (you or a human you work for contributes from a fork):
+  read [`.github/CONTRIBUTING.md`](./.github/CONTRIBUTING.md) and nothing else
+  first. The plugin's `z23-work` skill runs its work-card loop.
+- **Maintainer or fleet member:** read [`AGENTS.md`](./AGENTS.md), then
+  [`docs/agent/START_HERE.md`](./docs/agent/START_HERE.md). Procedure is in
+  [`docs/DEVELOPING.md`](./docs/DEVELOPING.md), consulted by section; ordered
+  work is in [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md). On the
+  maintainer host only, [`docs/HANDOFF.md`](./docs/HANDOFF.md) holds live node
+  state, which must be rechecked through the node's typed status commands.
 
-1. [`AGENTS.md`](./AGENTS.md) — durable product direction, priorities,
-   authority boundaries, first commands, and continuation rules.
-2. [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md) — scoped acceptance
-   and implementation context; work order is in `AGENTS.md`.
-3. [`docs/DEVELOPING.md`](./docs/DEVELOPING.md) — detailed repository workflow,
-   navigation, feedback, tests, integration, and push procedure.
-4. On the maintainer host only,
-   [`docs/HANDOFF.md`](./docs/HANDOFF.md) — current hosted-node state, which
-   must be rechecked through the node's typed status commands.
-
-Use Claude-specific skills or UI integrations only as adapters to those
-documents. They do not grant extra consensus, custody, datadir, deployment, or
-evidence authority.
+Skills and UI integrations are adapters to those documents. They grant no extra
+consensus, custody, datadir, deployment or evidence authority.

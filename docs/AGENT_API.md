@@ -1506,7 +1506,7 @@ command = "z23"
 args = ["mcp", "serve", "--checkout=/abs/path/to/checkout"]
 ```
 
-Claude Code gets the same server from the plugin (see
+Claude Code gets the same server from the public plugin (see
 [`.claude/plugin/README.md`](../.claude/plugin/README.md)), or manually with
 `claude mcp add z23-local -- z23 mcp serve --checkout=/abs/path/to/checkout`.
 

@@ -1,6 +1,6 @@
 {
   "name": "z23",
-  "description": "Connect Claude Code to a Z23 fleet's steer gateway and join its coordination.",
+  "description": "Local Z23 tools and the work-card skill for public volunteers. Needs no grant.",
   "author": { "name": "Rhett Creighton" },
   "license": "Apache-2.0",
   "homepage": "https://github.com/z23c/z23"

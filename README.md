@@ -44,8 +44,8 @@ target, see [the whole picture](docs/WHOLE_PICTURE.md).
 | Reach the chain tip sooner | [What reaching the tip actually costs](#what-reaching-the-tip-actually-costs) | [Sync](docs/SYNC.md) |
 | Share and reuse C23 source | [The C23 Commons](#the-c23-commons) | [Commons Quickstart](docs/C23_COMMONS_QUICKSTART.md) |
 | Change Z23 itself | [Working on Z23 itself](#working-on-z23-itself) | [Developing](docs/DEVELOPING.md) |
-| Attach a coding agent | [Connect coding agents](#connect-coding-agents) | [AGENTS.md](AGENTS.md) |
-| Operate development across machines | [Fleet operating contract](docs/work/AGENT_FLEET.md#consolidated-operating-model) | [Developing](docs/DEVELOPING.md) |
+| Contribute, or attach a coding agent | [Contribute](#contribute-with-or-without-a-coding-agent) | [CONTRIBUTING.md](.github/CONTRIBUTING.md) |
+| Operate a fleet of machines | [Fleet guide](docs/FLEET.md) | [AGENTS.md](AGENTS.md) |
 
 ## Public start here
 
@@ -215,39 +215,12 @@ make zhello-selftest
 make zdemo ZDEMO_ARGS=--frames=2
 ```
 
-## Connect coding agents
+## Contribute, with or without a coding agent
 
-A coding agent joins the fleet through the same typed queue a developer
-uses — no shell scraping, no special build. Post a unit, run the
-bounded worker command, reap the outcome:
-
-```bash
-build/bin/z23-dev dev agent queue --input='{"action":"post","kind":"file","name":"fix-foo","group":"test_foo","path":"src/foo.c","brief":"docs/foo-brief.md"}'
-build/bin/z23-dev dev agent worker --input='{"action":"run","worker":"resident-a","max_jobs":1}'
-build/bin/z23-dev dev agent queue --input='{"action":"reap"}'
-```
-
-On a shared development host, replace the worker line above with:
-
-```bash
-devbuild --wait build/bin/z23-dev dev agent worker --input='{"action":"run","worker":"resident-a","max_jobs":1}'
-```
-
-The worker claims ONE job (the claim identity persists before any model
-submission), runs the wired executor bounded, judges the result through
-the required gate — a file unit passes only when its test group passes
-right now — records the receipt, and posts a result row under the SAME
-ref. Only `pass`/`PASS` with rc 0 completes; `completed`, `failed`,
-`cancelled`, and crashes stay incomplete. `dev agent queue cancel`
-stops queued work; a running row belongs to its worker. Mail carries the
-same lifecycle for remote drivers: `fleet steer send` posts a directive,
-`fleet steer evidence` returns the latest terminal row per ref.
-
-This bounded command is not permission to enable a resident service, timer,
-watcher, or development node. Source workers follow [AGENTS.md](AGENTS.md) and
-[DEVELOPING.md](docs/DEVELOPING.md), including native ownership,
-`devbuild --wait` for heavy work, non-author review, and receipt-gated landing.
-A worker result is not a publication receipt.
+Volunteers, including people who drive their own AI coding agents, start at
+[CONTRIBUTING.md](.github/CONTRIBUTING.md): one build sequence, public work
+cards sized for lower-capability agents, and how to submit.
+Maintainers and fleet members continue with [AGENTS.md](AGENTS.md).
 
 ## Go deeper
 

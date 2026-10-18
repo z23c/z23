@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "z23": {
+      "type": "http",
+      "url": "${Z23_STEER_URL:-https://z23.sh/steer}",
+      "headersHelper": "${CLAUDE_PLUGIN_ROOT}/bin/z23-steer-headers"
+    }
+  }
+}

@@ -2,7 +2,7 @@
 name: z23-mail-triage
 description: Fetch Z23 fleet mail by exact refs and classify each message - request, acknowledgement, result, correction - with the concrete asks, refs, files and decisions it contains. Use before answering fleet messages.
 model: haiku
-tools: mcp__plugin_z23_z23__steer_evidence
+tools: mcp__plugin_z23-fleet_z23__steer_evidence
 ---
 
 <!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->

@@ -2,12 +2,16 @@
 
 # Z23 agent entry point
 
-Read this model-neutral contract before changing the repository. It owns
-durable principles, authority and the current work order (see *Priority and
-evidence*); [DEVELOPING.md](docs/DEVELOPING.md) owns procedure;
-[AGENT_FLEET.md](docs/work/AGENT_FLEET.md) owns the fleet operating model;
-[FLEET.md](docs/FLEET.md) is the operator guide to the fleet's machines.
-[HANDOFF.md](docs/HANDOFF.md) is maintainer-host live-state routing only.
+Public volunteers and their coding agents: start at
+[CONTRIBUTING.md](.github/CONTRIBUTING.md). This file is for maintainers and
+fleet agents.
+
+This model-neutral contract owns durable principles, authority and the current
+work order (see *Priority and evidence*); [DEVELOPING.md](docs/DEVELOPING.md)
+owns procedure; [AGENT_FLEET.md](docs/work/AGENT_FLEET.md) owns the fleet
+operating model; [FLEET.md](docs/FLEET.md) is the operator guide to a fleet's
+machines. [HANDOFF.md](docs/HANDOFF.md) is maintainer-host live-state routing
+only.
 [CODE_FEARLESSLY.md](docs/CODE_FEARLESSLY.md) explains the operating
 disposition: act when the rails hold and build a missing rail.
 
@@ -100,8 +104,7 @@ rulings by number.
 Review and landing: every unit, including core, crypto, consensus and
 custody, needs one reviewer who is not its author, of any model. Run full
 `make lint` once at the exact candidate tip before `dev land submit`; any
-lead may submit and drive its own reviewed work. Native C23 commands are
-the target; small POSIX sh operator scripts are acceptable as interim tooling.
+lead may submit and drive its own reviewed work.
 Commits are signed and authored by the repository owner; a commit an AI
 model wrote ends with its `Co-Authored-By:` trailer naming that model
 (owner ruling R12).
@@ -125,17 +128,18 @@ deletion, reuse and composition over new abstractions.
 
 New to a fleet? Read [START_HERE.md](docs/agent/START_HERE.md) first.
 
-Read the installed
-`~/.config/dev-workers/OPERATIONS.md`, `STORAGE.md` and `WORKER.md`, then
-run `devworker where z23`. Their current reserves supersede historical
-floors. Managed Z23, QEDC and gate_computer development runs remotely through
-existing `devon` routes; the laptop coordinates and reviews, without builds
-or worker copies.
+**Maintainer hosts only** (the `devon`, `devworker` and `devbuild` tools and
+`~/.config/dev-workers/*` exist only there; volunteers run `make` directly):
+read the installed `OPERATIONS.md`, `STORAGE.md` and `WORKER.md` there, then
+run `devworker where z23`. Their reserves supersede historical floors. Managed
+development runs remotely through `devon` routes; the laptop coordinates and
+reviews, without builds or worker copies.
 
-Reuse a sanctioned worktree and preserve owned dirty work. Route heavy builds,
-proofs, benchmarks and matrices through `devbuild --wait`, preserving job
-counts and native locks. On the managed Mac use one focused build, normally
-two jobs. Do not launch services, watchers or workers automatically.
+Reuse a sanctioned worktree and preserve owned dirty work. On maintainer
+hosts route heavy builds, proofs, benchmarks and matrices through
+`devbuild --wait`, preserving job counts and native locks; the managed Mac
+takes one focused build, normally two jobs. Do not launch services, watchers
+or workers automatically.
 
 Inspect before editing:
 
@@ -146,7 +150,7 @@ git fetch origin main
 git rev-parse HEAD origin/main
 ```
 
-On a fresh clone, `devbuild --wait make setup` arms dependencies and hooks;
+On a fresh clone, `make setup` (under `devbuild --wait` on maintainer hosts) arms dependencies and hooks;
 its suggested `make doctor` is an optional environment check. Build the public
 binary on an admitted host:
 
@@ -182,15 +186,12 @@ than copying counts into entry documents.
 
 ## Verified platform baseline
 
-Linux and arm64 macOS have native build paths; macOS does not require a Linux
-VM. On 2026-08-26, an arm64 Mac16,10 with macOS 26.0.1 and Apple Clang 17
-built the node, passed the dependency audit and recorded isolated startup and
-platform tests. That evidence is not current-candidate chain-sync acceptance.
-Intel macOS remains unverified. The detailed historical observations and
-platform refusal boundaries belong in
+Linux and arm64 macOS have native build paths; macOS needs no Linux VM. An
+arm64 Mac16,10 (macOS 26.0.1, Apple Clang 17) built the node and passed the
+dependency audit and isolated platform tests on 2026-08-26; that is not
+current-candidate chain-sync acceptance. Intel macOS is unverified. Details:
 [NATIVE_MACOS_RUNBOOK.md](docs/work/NATIVE_MACOS_RUNBOOK.md#historical-platform-baseline).
-Use its native acceptance target for new qualification; Linux tests do not
-qualify macOS.
+Linux tests do not qualify macOS.
 
 ## Orient before editing
 
@@ -242,9 +243,11 @@ assertion that would need weakening, or genuine mission completion.
 - Preserve unrelated dirty work; never reset, overwrite or include it in
   your commit. Keep one primary writer per component and respect live leases.
   Silence alone does not establish an orphan.
-- GitHub Issues and pull requests are not coordination authorities and must
-  not be created. Use native tasks, candidates, actions and receipts;
-  committed `origin/main` is the integration blackboard.
+- Fleet agents coordinate through native tasks, candidates, actions and
+  receipts, never GitHub Issues or pull requests; committed `origin/main` is
+  the integration blackboard. Public volunteers submit work cards as `card:`
+  pull requests (see CONTRIBUTING.md), and issues are for user-visible
+  defects only.
 - Claim disjoint scopes through native tools. Obtain required independent
   review and persist handoffs so coordination survives replacement of any
   worker without a permanent privileged lead.
@@ -263,20 +266,18 @@ assertion that would need weakening, or genuine mission completion.
 
 Fleet access is a prerequisite for distributed work. Before dispatch verify
 authenticated access, a bounded command and exact-object transfer in both
-directions between each participating pair, directly or through tunnels.
-Ping, stale status and board delivery do not qualify a route. Repair authorized
-routes directly rather than using the human as a message relay. Reuse existing
-SSH, tunnels and native transport; keep private credentials local and endpoints
-out of public coordination messages.
+directions between each participating pair. Ping, stale status and board
+delivery do not qualify a route. Repair authorized routes directly rather than
+using the human as a message relay. Reuse existing SSH, tunnels and native
+transport; keep credentials and endpoints out of public messages.
 
 Each receiver controls workspace, commands, concurrency, access lifetime and
 revocation. Record readiness and missing access in native task/action/receipt
 evidence with aliases and object roots. Transport does not expand execution,
-production or custody authority. Recurring transport, access control, tunnels
-and job execution belong in C23 node services; shell remains bootstrap/build/
-test glue, not a new orchestration layer. Protected native execution,
-hardware virtualization and emulated guests retain their separate qualification
-boundaries under [AGENT_FLEET.md](docs/work/AGENT_FLEET.md).
+production or custody authority. Recurring transport, access control and job
+execution belong in C23 node services; shell stays bootstrap/build/test glue.
+Protected native execution, hardware virtualization and emulated guests keep
+their qualification boundaries under [AGENT_FLEET.md](docs/work/AGENT_FLEET.md).
 
 ## Completion and continuation
 
