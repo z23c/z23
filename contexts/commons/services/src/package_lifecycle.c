@@ -768,23 +768,68 @@ struct zcl_result package_lifecycle_commit(
 
 /* Consider one "<publisher>/<package>" generation log as a candidate for
  * "the package whose active version changed most recently". */
-static void pkgl_last_consider(const struct pkgl_ctx *ctx, const char *name,
-                               char *best_name, size_t cap,
-                               int64_t *best_unix, bool *found)
+static struct zcl_result pkgl_last_consider(
+    const struct pkgl_ctx *ctx, const char *name, char *best_name, size_t cap,
+    int64_t *best_unix, bool *found)
 {
     struct vcs_package_generations gens;
     struct zcl_result r = pkgl_generations_load(ctx, name, &gens);
-    if (!r.ok || gens.count == 0)
-        return;
+    if (!r.ok)
+        return ZCL_ERR(-1, "read generation log for %s: %s", name,
+                       r.message);
+    if (gens.count == 0)
+        return ZCL_OK;
     int64_t when = gens.items[gens.count - 1u].activated_unix;
     /* Ties resolve to the lexicographically smaller name so two packages
      * activated in the same second still give one deterministic answer. */
     if (*found && (when < *best_unix ||
                    (when == *best_unix && strcmp(name, best_name) >= 0)))
-        return;
+        return ZCL_OK;
     (void)snprintf(best_name, cap, "%s", name);
     *best_unix = when;
     *found = true;
+    return ZCL_OK;
+}
+
+static struct zcl_result pkgl_last_scan_publisher(
+    const struct pkgl_ctx *ctx, const char *root, const char *publisher,
+    char *best_name, size_t cap, int64_t *best_unix, bool *found)
+{
+    char pubdir[PKGL_PATH_MAX];
+    int n = snprintf(pubdir, sizeof(pubdir), "%s/%s", root, publisher);
+    if (n <= 0 || (size_t)n >= sizeof(pubdir))
+        return ZCL_ERR(-1, "generation publisher path too long under %s",
+                       root);
+    DIR *pkgs = opendir(pubdir);
+    if (!pkgs)
+        return ZCL_ERR(-1, "opendir %s: %s", pubdir, strerror(errno));
+    struct zcl_result res = ZCL_OK;
+    for (;;) {
+        errno = 0;
+        struct dirent *pkg = readdir(pkgs);
+        if (!pkg) {
+            if (errno != 0)
+                res = ZCL_ERR(-1, "readdir %s: %s", pubdir,
+                              strerror(errno));
+            break;
+        }
+        if (pkg->d_name[0] == '.' ||
+            strlen(pkg->d_name) > VCS_PACKAGE_RELEASE_NAME_HALF_MAX)
+            continue;
+        char name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
+        n = snprintf(name, sizeof(name), "%s/%s", publisher, pkg->d_name);
+        if (n <= 0 || (size_t)n >= sizeof(name)) {
+            res = ZCL_ERR(-1, "generation package name too long under %s",
+                          pubdir);
+            break;
+        }
+        res = pkgl_last_consider(ctx, name, best_name, cap, best_unix, found);
+        if (!res.ok)
+            break;
+    }
+    if (closedir(pkgs) != 0 && res.ok)
+        res = ZCL_ERR(-1, "closedir %s: %s", pubdir, strerror(errno));
+    return res;
 }
 
 /* Name the package whose newest generation was activated last — the "what I
@@ -807,37 +852,28 @@ static struct zcl_result pkgl_last_activated(const struct pkgl_ctx *ctx,
                                : ZCL_ERR(-1, "opendir %s: %s", root,
                                          strerror(errno));
     int64_t best_unix = 0;
-    struct dirent *pub;
-    while ((pub = readdir(pubs)) != NULL) {
+    struct zcl_result res = ZCL_OK;
+    for (;;) {
+        errno = 0;
+        struct dirent *pub = readdir(pubs);
+        if (!pub) {
+            if (errno != 0)
+                res = ZCL_ERR(-1, "readdir %s: %s", root, strerror(errno));
+            break;
+        }
         /* Only entries that could be a legal publisher half are considered;
          * a directory that cannot be part of a package name is not one. */
         if (pub->d_name[0] == '.' ||
             strlen(pub->d_name) > VCS_PACKAGE_RELEASE_NAME_HALF_MAX)
             continue;
-        char pubdir[PKGL_PATH_MAX];
-        int n = snprintf(pubdir, sizeof(pubdir), "%s/%s", root, pub->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(pubdir))
-            continue;
-        DIR *pkgs = opendir(pubdir);
-        if (!pkgs)
-            continue;
-        struct dirent *pkg;
-        while ((pkg = readdir(pkgs)) != NULL) {
-            if (pkg->d_name[0] == '.' ||
-                strlen(pkg->d_name) > VCS_PACKAGE_RELEASE_NAME_HALF_MAX)
-                continue;
-            char name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
-            n = snprintf(name, sizeof(name), "%s/%s", pub->d_name,
-                         pkg->d_name);
-            if (n <= 0 || (size_t)n >= sizeof(name))
-                continue;
-            pkgl_last_consider(ctx, name, name_out, cap, &best_unix,
-                               present_out);
-        }
-        closedir(pkgs);
+        res = pkgl_last_scan_publisher(ctx, root, pub->d_name, name_out, cap,
+                                       &best_unix, present_out);
+        if (!res.ok)
+            break;
     }
-    closedir(pubs);
-    return ZCL_OK;
+    if (closedir(pubs) != 0 && res.ok)
+        res = ZCL_ERR(-1, "closedir %s: %s", root, strerror(errno));
+    return res;
 }
 
 struct zcl_result package_lifecycle_last_activated(

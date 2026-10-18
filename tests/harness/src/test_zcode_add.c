@@ -129,6 +129,7 @@ static const uint8_t *za_midcopy_content;
 static size_t za_midcopy_size;
 static int64_t za_midcopy_stamp;
 static bool za_midcopy_changed;
+static const char *za_pkgl_refused_directory;
 
 static int64_t za_midcopy_read(const struct platform_positioned_file *file,
                                void *data, size_t size, uint64_t offset)
@@ -150,6 +151,16 @@ static int64_t za_midcopy_read(const struct platform_positioned_file *file,
             utimensat(AT_FDCWD, za_midcopy_path, stamps, 0) == 0;
     }
     return got;
+}
+
+static DIR *za_pkgl_opendir(const char *path)
+{
+    if (za_pkgl_refused_directory &&
+        strcmp(path, za_pkgl_refused_directory) == 0) {
+        errno = EIO;
+        return NULL;
+    }
+    return opendir(path);
 }
 
 #define pkgl_worker_path_for_executable za_retained_twin_pkgl_worker_path_for_executable
@@ -265,7 +276,9 @@ struct zcl_result package_lifecycle_active(
 #define pkgl_parent_shape za_retained_install_parent_shape
 #include "../../../contexts/commons/services/src/package_lifecycle_install.c"
 #undef pkgl_parent_shape
+#define opendir za_pkgl_opendir
 #include "../../../contexts/commons/services/src/package_lifecycle.c"
+#undef opendir
 #undef platform_positioned_file_read
 #undef pkgl_worker_path_for_executable
 #undef pkgl_worker_path
@@ -3683,6 +3696,30 @@ static int za_nofollow_trailing_sep(void)
           za_nofollow_run(true));
     return failures;
 }
+
+static int za_default_rollback_incomplete_census(void)
+{
+    int failures = 0;
+    char base[256], publisher[384];
+    (void)snprintf(base, sizeof(base), "test-tmp/za_census_%ld",
+                   (long)getpid());
+    (void)snprintf(publisher, sizeof(publisher),
+                   "%s/zcode/generations/alice", base);
+    za_rm_rf(base);
+    bool prepared = za_mkdir_p(publisher);
+    struct package_lifecycle_rollback_report report;
+    za_pkgl_refused_directory = publisher;
+    struct zcl_result r = za_retained_twin_package_lifecycle_rollback(
+        base, NULL, 1700000000, &report);
+    za_pkgl_refused_directory = NULL;
+    ZA_CHECK("default rollback refuses an incomplete generation-log census",
+             prepared && !r.ok && !report.selected_by_default &&
+                 strcmp(report.rule, "generations-unreadable") == 0 &&
+                 strstr(r.message, "opendir") != NULL &&
+                 strstr(r.message, "Input/output error") != NULL);
+    ZA_CHECK("incomplete-census fixture is removed", za_rm_rf(base));
+    return failures;
+}
 #endif /* !_WIN32 */
 
 int test_zcode_add(void)
@@ -3707,6 +3744,7 @@ int test_zcode_add(void)
 #if !defined(_WIN32)
     failures += za_nofollow_plain_link();
     failures += za_nofollow_trailing_sep();
+    failures += za_default_rollback_incomplete_census();
 #endif
     failures += t_e2e();
     failures += t_programs();
