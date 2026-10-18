@@ -470,7 +470,7 @@ ZCL_COMMAND_READY_COMMAND(
     "restricts swarm requests to freshly authenticated provider peers. It "
     "schedules (or resumes) the transport-root swarm download and "
     "— once bytes are local — admits them: re-derives the science root "
-    "from bytes (never trusted from a record), stores the wire in the CAS, "
+    "from bytes (never taken unverified from a record), stores the wire in the CAS, "
     "and refreshes the projection via the CAS-authoritative rebuild. "
     "blob_root remains an explicit transport-address compatibility input. "
     "Idempotent: re-admitting reports new=false. With no live engine the "

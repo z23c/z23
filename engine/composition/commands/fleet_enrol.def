@@ -160,7 +160,7 @@ ZCL_COMMAND_READY_COMMAND(
     "Copy one manager-sealed roster line onto this box's machine roster",
     "How a box that is not the manager learns which machines its fleet "
     "holds: paste one whole line from the manager's roster. The line is "
-    "checked against the operator key this box already trusts — the one "
+    "checked against the operator key this box already holds — the one "
     "`fleet join` recorded, or this box's own key on the manager — BEFORE "
     "anything is written, so a line sealed by any other key, or a sealed "
     "line with one byte changed, is refused and the roster is untouched. "
@@ -179,7 +179,7 @@ ZCL_COMMAND_READY_COMMAND(
     "the same sequence and bytes is a no-op, the same sequence with "
     "different bytes is refused (fleet_head_conflict), and a higher "
     "sequence replaces it. A machine row for a revoked box is refused "
-    "(fleet_box_revoked), and a stored head this box cannot trust refuses "
+    "(fleet_box_revoked), and a stored head this box cannot verify refuses "
     "every row (fleet_head_unreadable) and admits no peer: it fails closed. "
     "The first successful import pins the operator key it came from; a "
     "later import under a different operator key is refused "

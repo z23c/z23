@@ -505,7 +505,7 @@ ZCL_COMMAND_READY_READ(
     "Compare admitted standalone artifact and node.db mirror copies",
     "Scans exact readonly input copies and externally accepted raw capture manifest; "
     "completed totals require both scans and checked outer cleanup. External capture "
-    "acceptance is not a mechanical coherence proof; paths require trusted copy provenance. "
+    "acceptance is not a mechanical coherence proof; paths require copy provenance established outside this command. "
     "No canonical datadir, node RPC, repair, capture or activation access.", 32768,
     "utxo,compare,offline,copy,diagnostic",
     "zcl.utxo_compare_offline.input.v1", "zcl.utxo_compare_offline.v1",

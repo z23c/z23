@@ -418,7 +418,7 @@ ZCL_COMMAND_READY_READ(
     "transitively downstream via the call graph (codeindex_impact_closure) — "
     "plus the downstream focused test groups from the same shared-rule "
     "resolver code.tests uses; capped and truncation-flagged, so an "
-    "incomplete closure is never silently trusted.", ZCL_COMMAND_LIST_BUDGET,
+    "incomplete closure is never silently presented as complete.", ZCL_COMMAND_LIST_BUDGET,
     "code,impact,blast,radius,dependency,closure", "zcl.code_path_input.v1",
     "zcl.code_impact.v1", "path", "path",
     "z23 code impact platform/modules/util/include/util/safe_alloc.h",
@@ -643,7 +643,7 @@ ZCL_COMMAND_READY_READ(
     "call and stored nowhere: what it OWNS (files, bytes, public functions, "
     "types, macros), what PROVES it (the groups its files route to, and — a "
     "different fact, never summed with routing — how many public functions a "
-    "registered test entry point actually reaches), what it TRUSTS (whether a "
+    "registered test entry point actually reaches), what it REPRODUCES (whether a "
     "result from those groups is reproducible: currently UNKNOWN for every "
     "group, reported rather than omitted because the determinism ledger has "
     "not landed and an omitted field reads as 'fine'), where it is WEAK "

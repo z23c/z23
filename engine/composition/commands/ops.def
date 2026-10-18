@@ -544,7 +544,7 @@ ZCL_COMMAND_READY_COMMAND(
     "seeding peer's file service and verifies it BY CONTENT against the "
     "digests supplied here — the operator commits to (root, whole_sha3, "
     "size) before a byte is requested; any whole-file mismatch discards "
-    "the download (no partial trust). 'peer' may be a comma-separated "
+    "the download (nothing is accepted partially). 'peer' may be a comma-separated "
     "host list for the parallel multi-seeder scheduler. The verified "
     "file lands at <out_dir>/<filename> (default: the node datadir); it "
     "is NOT activated — install funnels only through "
@@ -940,7 +940,7 @@ ZCL_COMMAND_BRANCH("ops.mesh.device", "ops.mesh", "Offline owner device identity
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.device.init", "ops.mesh.device", "",
     "Initialize an offline private device identity",
-    "Creates an absent trusted owner-private profile exclusively. Public identity and actual publication durability are reported; unknown initialization requires reconciliation, never automatic retry. Starts no service or network connection.",
+    "Creates an absent owner-private profile exclusively; the profile location is relied on unverified. Public identity and actual publication durability are reported; unknown initialization requires reconciliation, never automatic retry. Starts no service or network connection.",
     ZCL_COMMAND_RESULT_BUDGET, "mesh,device,owner,identity,offline",
     "zcl.device.init.input.v1", "zcl.device.profile.v1", "directory", "directory",
     "z23 ops mesh device init --directory=<absent-private-profile>",
@@ -952,7 +952,7 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_READ(
     "ops.mesh.device.identity", "ops.mesh.device", "",
     "Observe an existing offline device identity",
-    "Validates an existing trusted private profile and exact key binding; returns public key and fingerprint only. Reads never repair, create, infer owner consent or prove historical durability.",
+    "Validates an existing private profile (location relied on unverified) and exact key binding; returns public key and fingerprint only. Reads never repair, create, infer owner consent or prove historical durability.",
     ZCL_COMMAND_RESULT_BUDGET, "mesh,device,owner,identity,offline",
     "zcl.device.identity.input.v1", "zcl.device.profile.v1", "directory", "directory",
     "z23 ops mesh device identity --directory=<private-profile>",
@@ -1002,7 +1002,7 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.device.prepare-secret", "ops.mesh.device", "",
     "Prepare one private pair-purpose import source",
-    "Requires existing trusted profile, peer_key, capability=host-forward, backend=2, absent destination in an existing owner-private parent and confirm=true. Generates independent OS random secret32 and opaque credential ID; returns public ID and publication only, never secret/path/hash. Creates inert import input, no grant or service. Interrupted artifacts are preserved; no automatic retry/reconciliation. Trusted ancestors and no hostile same-UID swaps required; Windows durable preparation unsupported.",
+    "Requires existing profile (location relied on unverified), peer_key, capability=host-forward, backend=2, absent destination in an existing owner-private parent and confirm=true. Generates independent OS random secret32 and opaque credential ID; returns public ID and publication only, never secret/path/hash. Creates inert import input, no grant or service. Interrupted artifacts are preserved; no automatic retry/reconciliation. Ancestors relied on unverified and no hostile same-UID swaps required; Windows durable preparation unsupported.",
     ZCL_COMMAND_RESULT_BUDGET, "mesh,device,owner,pairing,secret,offline",
     "zcl.device.prepare-secret.input.v1", "zcl.device.secret-source.v1",
     "directory,peer_key,capability,backend,destination,confirm", "directory,peer_key",
@@ -1031,7 +1031,7 @@ ZCL_COMMAND_BRANCH("ops.mesh.device.host", "ops.mesh.device", "Foreground owner-
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.device.host.client", "ops.mesh.device.host", "",
     "Run one raw foreground selected-route HOST client",
-    "Linux and macOS foreground raw CLI only, before node/config startup. Exactly one --input JSON or --input-file=<absolute owner file>; stdout contains only authenticated application bytes, stderr public tokens. Explicit trusted profile, peer/root/directional target_port, route_id/literal IPv4/route_port, confirm=true and finite connect/handshake/session/idle milliseconds required (hard maxima session 28800000 = 8 h, idle 1800000 = 30 min; grant expiry and revocation still end a session sooner). No DNS, shell, automatic backup, RPC/JSON stream fallback or guest authority. Stdin/stdout exclusive pipe/connected-stream descriptions independent of stderr; original status flags restored. Fresh session after restart/restore; restore entropy qualification is separate.",
+    "Linux and macOS foreground raw CLI only, before node/config startup. Exactly one --input JSON or --input-file=<absolute owner file>; stdout contains only authenticated application bytes, stderr public tokens. Explicit profile (location relied on unverified), peer/root/directional target_port, route_id/literal IPv4/route_port, confirm=true and finite connect/handshake/session/idle milliseconds required (hard maxima session 28800000 = 8 h, idle 1800000 = 30 min; grant expiry and revocation still end a session sooner). No DNS, shell, automatic backup, RPC/JSON stream fallback or guest authority. Stdin/stdout exclusive pipe/connected-stream descriptions independent of stderr; original status flags restored. Fresh session after restart/restore; restore entropy qualification is separate.",
     ZCL_COMMAND_RESULT_BUDGET, "mesh,device,host,psk,raw,foreground",
     "zcl.device.host.client.input.v1", "zcl.device.host.raw.v1",
     "directory,peer_key,expected_root,target_port,route_id,route_address,route_port,connect_ms,handshake_ms,session_ms,idle_ms,confirm", "directory,peer_key",
@@ -1045,7 +1045,7 @@ ZCL_COMMAND_BRANCH("ops.mesh.device.host.package", "ops.mesh.device.host", "Exac
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.device.host.package.run", "ops.mesh.device.host.package", "",
     "Run exact owner-accepted installed bin/tunnel in foreground",
-    "Linux raw CLI only, before node/config startup. Exact datadir/package_root/receipt_id/artifact_sha3, accept_execution=true and runtime_policy=host_os required. role is client or receiver; runtime_input is the existing bounded nonsecret HOST JSON with absolute profile directory. Fixed argv/env/CWD and bin/tunnel only; no shell or arbitrary executable. launch_ms/execution_ms/cleanup_ms bound process observation, excluding filesystem acquisition. Sealed top image is pinned; mutable system loader/libc are trusted, not pinned or confined. HUP forwards bounded engine drain; hard cancel/deadline wins. CLEAN requires engine exit and descendant/supervisor reap; incomplete cleanup exits nonzero with explicit owner-EOF custody handoff, not success. JSON/RPC stream execution refuses.",
+    "Linux raw CLI only, before node/config startup. Exact datadir/package_root/receipt_id/artifact_sha3, accept_execution=true and runtime_policy=host_os required. role is client or receiver; runtime_input is the existing bounded nonsecret HOST JSON with absolute profile directory. Fixed argv/env/CWD and bin/tunnel only; no shell or arbitrary executable. launch_ms/execution_ms/cleanup_ms bound process observation, excluding filesystem acquisition. Sealed top image is pinned; mutable system loader/libc are used as-is, not verified, pinned or confined. HUP forwards bounded engine drain; hard cancel/deadline wins. CLEAN requires engine exit and descendant/supervisor reap; incomplete cleanup exits nonzero with explicit owner-EOF custody handoff, not success. JSON/RPC stream execution refuses.",
     ZCL_COMMAND_RESULT_BUDGET, "mesh,device,host,package,installed,raw",
     "zcl.device.host.package.input.v1", "zcl.device.host.raw.v1",
     "datadir,package_root,receipt_id,artifact_sha3,accept_execution,runtime_policy,role,runtime_input,launch_ms,execution_ms,cleanup_ms", "datadir,package_root,receipt_id,artifact_sha3",
@@ -1058,7 +1058,7 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.device.host.receiver", "ops.mesh.device.host", "",
     "Run a finite foreground receiver for one exact HOST pair/root",
-    "Linux raw CLI only, no node/config startup or stdout JSON. One --input JSON or --input-file=<absolute owner file>. Explicit trusted profile, selected peer/root/target_port and literal listen_address/listen_port (zero explicitly ephemeral); confirm=true and allow_external required for nonloopback. Finite lifetime/session/handshake/idle limits (hard maxima lifetime 86400000 = 24 h, session 28800000 = 8 h, idle 1800000 = 30 min; grant expiry and revocation still end a session sooner), max_active1..4 and max_sessions1..64; sessions count only after PSK authentication and 256 pre-auth failures close the listener. Stderr listener token proves bind/listen only. Target is literal loopback, connected only after mutual confirmation by guarded PSK IO. Revoke/root change or signal closes owned listener/contexts. No built-in supervision/autostart; platform/deploy/examples/z23-tunnel-receiver.service is an optional example user unit, not an installed or qualified deployment. No private delivery or guest-restore qualification.",
+    "Linux raw CLI only, no node/config startup or stdout JSON. One --input JSON or --input-file=<absolute owner file>. Explicit profile (location relied on unverified), selected peer/root/target_port and literal listen_address/listen_port (zero explicitly ephemeral); confirm=true and allow_external required for nonloopback. Finite lifetime/session/handshake/idle limits (hard maxima lifetime 86400000 = 24 h, session 28800000 = 8 h, idle 1800000 = 30 min; grant expiry and revocation still end a session sooner), max_active1..4 and max_sessions1..64; sessions count only after PSK authentication and 256 pre-auth failures close the listener. Stderr listener token proves bind/listen only. Target is literal loopback, connected only after mutual confirmation by guarded PSK IO. Revoke/root change or signal closes owned listener/contexts. No built-in supervision/autostart; platform/deploy/examples/z23-tunnel-receiver.service is an optional example user unit, not an installed or qualified deployment. No private delivery or guest-restore qualification.",
     ZCL_COMMAND_RESULT_BUDGET, "mesh,device,host,psk,receiver,foreground",
     "zcl.device.host.receiver.input.v1", "zcl.device.host.raw.v1",
     "directory,peer_key,expected_root,target_port,route_id,listen_address,listen_port,allow_external,lifetime_ms,handshake_ms,session_ms,idle_ms,max_active,max_sessions,confirm", "directory,peer_key",

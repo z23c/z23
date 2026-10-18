@@ -917,7 +917,7 @@ ZCL_COMMAND_READY_READ(
     "refused WORK_RECEIPT_CONTRADICTED. A missing receipt is "
     "WORK_RECEIPT_NOT_FOUND and any other failure WORK_RECEIPT_REFUSED. "
     "Verification proves which key vouched for the roots, not that the "
-    "key is trusted, and grants no acceptance or publication authority.",
+    "key is approved, and grants no acceptance or publication authority.",
     ZCL_COMMAND_LIST_BUDGET,
     "zcode,work,receipt,pull,verify,observer,remote,evidence",
     "zcl.zcode_work_receipt.input.v1", "zcl.zcode_work_receipt.v1",
@@ -1070,7 +1070,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.work.review", "zcode.work", "", "Review one exact candidate",
-    "Reloads the exact candidate and its trusted non-review proof set, stores "
+    "Reloads the exact candidate and its non-review proof set, stores "
     "bounded findings in the existing CAS, emits review.v1 plus a signed "
     "REVIEW work receipt from a reviewer identity distinct from the candidate "
     "author, and re-evaluates the existing proof policy. Review cannot edit, "
@@ -2193,7 +2193,7 @@ ZCL_COMMAND_READY_COMMAND(
     "zcode.package.dev.prepare.export", "zcode.package.dev", "",
     "Export bounded inert canonical package wires",
     "Derives the existing unsigned package inputs once and exclusively creates "
-    "artifact_dir beneath trusted ancestors. Writes fixed raw manifest, recipe, "
+    "artifact_dir beneath ancestors relied on unverified. Writes fixed raw manifest, recipe, "
     "lock, capsule and release-body files; returns exact lengths and SHA3 digests "
     "within a bounded reply. Existing destinations refuse. Interrupted/uncertain "
     "publication preserves artifacts without automatic retry. This is neither "
@@ -2373,9 +2373,9 @@ ZCL_COMMAND_READY_COMMAND(
     "output has local reproduction or the user's approved distinct-signer "
     "quorum. Compile, test, fuzz, and approving review receipts are counted "
     "separately against their exact fixed action kinds; review.v1 must bind "
-    "an existing trusted proof set. A release-byte-identity policy remains "
+    "an existing proof set. A release-byte-identity policy remains "
     "false until final release artifacts exist. Remote observations remain "
-    "untrusted until reproduction or the applicable quorum passes. Emits "
+    "unverified until reproduction or the applicable quorum passes. Emits "
     "and stores the canonical proof-set root used by review.v1.",
     0, "zcode,evidence,receipt,quorum,reproduce,proof",
     "zcl.zcode_evidence.input.v1", "zcl.zcode_evidence.v1",
@@ -3925,7 +3925,7 @@ ZCL_COMMAND_READY_READ(
     "anchored). With --anchored (plus --datadir), additionally resolves "
     "the doc's master_pubkey against this node's on-chain identity "
     "projection and reports anchored, anchor_height, anchor_txid, "
-    "anchor_name, anchor_status and anchor_source — so key trust comes "
+    "anchor_name, anchor_status and anchor_source — so key verification comes "
     "from the chain instead of a key pinned in a README. That is a "
     "SEPARATE fact from signature validity: a valid signature by an "
     "unanchored key is a hard KEY_NOT_ANCHORED, a valid signature by a "
@@ -4222,7 +4222,7 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "zcode.network.find.cancel", "zcode.network", "", "Cancel a DHT lookup",
     "Releases the lookup named by the opaque lookup_id only when its separate "
-    "owner_token matches. It never changes routing contacts or network trust "
+    "owner_token matches. It never changes routing contacts or network peer "
     "state; late authenticated replies retain normal replay classification.",
     4096, "zcode,network,dht,find,lookup,cancel,async",
     "zcl.zcode_network_find_cancel.input.v1",
@@ -5026,7 +5026,7 @@ ZCL_COMMAND_READY_COMMAND(
     "REBUILD_RECEIPT_INVALID. Costs a full node build; it starts, stops "
     "and signals nothing.",
     16384,
-    "verify,reproduce,bytes,rebuild,supply-chain,trust,artifact,toolchain",
+    "verify,reproduce,bytes,rebuild,supply-chain,artifact,toolchain",
     "zcl.zcode_node_verify.input.v1", "zcl.zcode_node_verify.v1",
     "artifact,source_dir,scratch_dir,profile,jobs,timeout_seconds", "",
     "z23 zcode node verify --input='{\"source_dir\":\"/path/to/zclassic23\"}'",

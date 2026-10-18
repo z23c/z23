@@ -532,10 +532,10 @@ ZCL_COMMAND_BRANCH("metaverse.build.worker", "metaverse.build",
 
 ZCL_COMMAND_READY_READ(
     "metaverse.build.worker.list", "metaverse.build.worker", "",
-    "List build workers and current trust state",
+    "List build workers and current approval state",
     "Returns a bounded read-only view of worker ids, signer keys, declared "
     "capabilities, approval/revocation, expiry, and last-seen time.",
-    ZCL_COMMAND_LIST_BUDGET, "metaverse,build,worker,list,trust",
+    ZCL_COMMAND_LIST_BUDGET, "metaverse,build,worker,list,verify",
     "zcl.build_worker_list.input.v1", "zcl.build_worker_list.v1",
     "datadir", "", "z23 metaverse build worker list",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
@@ -547,10 +547,10 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_COMMAND(
     "metaverse.build.worker.approve", "metaverse.build.worker", "",
     "Approve one Ed25519 build-receipt signer",
-    "Creates or updates the operator-owned trust row for a worker id and "
+    "Creates or updates the operator-owned approval row for a worker id and "
     "Ed25519 public key. Approval never executes worker-supplied commands; V1 "
     "workers remain confined to the fixed preprocessed-TU compile action.",
-    0, "metaverse,build,worker,approve,ed25519,trust",
+    0, "metaverse,build,worker,approve,ed25519,verify",
     "zcl.build_worker_approve.input.v1", "zcl.build_worker.v1",
     "worker_id,signer_pubkey,capabilities,expires_at,datadir",
     "worker_id,signer_pubkey",
@@ -567,9 +567,9 @@ ZCL_COMMAND_READY_COMMAND(
     "metaverse.build.worker.revoke", "metaverse.build.worker", "",
     "Revoke one build-receipt signer without deleting evidence",
     "Durably revokes the worker. Existing receipts remain queryable, while "
-    "all later receipt acceptance fails before signature trust. Repeated "
+    "all later receipt acceptance fails before signature verification. Repeated "
     "revocation is idempotent.",
-    0, "metaverse,build,worker,revoke,trust,receipt",
+    0, "metaverse,build,worker,revoke,verify,receipt",
     "zcl.build_worker_revoke.input.v1", "zcl.build_worker.v1",
     "worker_id,datadir", "worker_id",
     "z23 metaverse build worker revoke <worker_id>",

@@ -807,10 +807,10 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_READ(
     "dev.proof.signer", "dev.proof", "",
-    "Show this box's receipt signing key and who it trusts",
+    "Show this box's receipt signing key and the signers it verifies against",
     "Prints the Ed25519 public key this box signs push-proof receipts with, "
-    "the owner-private paths that hold it and the signers.allow trust list, "
-    "and how many trusted and malformed lines that list has. Creates "
+    "the owner-private paths that hold it and the signers.allow list, "
+    "and how many valid and malformed lines that list has. Creates "
     "nothing: the first proof creates the key. Copy the printed key into "
     "another box's signers.allow to let it admit receipts proved here.", 0,
     "dev,proof,signer,key,allowlist,receipt,push",

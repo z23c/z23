@@ -18,7 +18,7 @@ ZCL_COMMAND_READY_READ(
     "references it; done when a result signed by the owner key references it. "
     "Posts signed by any other key are ignored in the list of cards. Cards that fail validation are "
     "listed in `rejected` with a reason code. The owner key defaults to the "
-    "project owner key pinned in the source; pass `owner` to trust another key. "
+    "project owner key pinned in the source; pass `owner` to accept another key. "
     "`level` keeps one card level. What is returned is what this node holds; a post it has not fetched yet is absent, not denied.",
     ZCL_COMMAND_LIST_BUDGET,
     "work,card,task,board,volunteer,need,open,claim,start,first,steps,begin,newcomer,onboarding",
