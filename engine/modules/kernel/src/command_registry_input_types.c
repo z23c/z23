@@ -604,17 +604,61 @@ static const struct cr_int_bound *cr_history_bound(const char *path,
     return NULL;
 }
 
+/* lab.run and lab.test: wall-clock and memory caps of the confined run. */
+static const struct cr_int_bound *cr_lab_bound(const char *path, const char *key)
+{
+    static const struct cr_int_bound bounds[] = {
+        { "timeout_ms", 1, 60000 }, { "mem_mb", 1, 2048 }
+    };
+    if (strcmp(path, "lab.run") != 0 && strcmp(path, "lab.test") != 0)
+        return NULL;
+    for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
+        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
+    return NULL;
+}
+
 static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
                                                    const char *key)
 {
     static const struct cr_int_bound examples = { "example_limit", 0, 32 };
     if (strcmp(path, "core.consensus.utxo.compare.offline") == 0 &&
         strcmp(key, examples.key) == 0) return &examples;
+    const struct cr_int_bound *lab = cr_lab_bound(path, key);
+    if (lab) return lab;
     const struct cr_int_bound *history = cr_history_bound(path, key);
     if (history) return history;
     const struct cr_int_bound *bound = cr_device_host_bound(path, key);
     return bound ? bound : cr_device_package_bound(path, key);
 }
+/* lab.run and lab.test: stdin may be empty; args and cases are arrays. */
+static bool cr_match_lab(const char *path, const char *key,
+                         const struct json_value *value, bool *type_ok)
+{
+    if (strncmp(path, "lab.", 4) != 0) return false;
+    const char *text = json_get_str(value);
+    if (strcmp(key, "stdin") == 0)
+        *type_ok = value->type == JSON_STR && text &&
+                   strlen(text) <= zcl_command_registry_input_str_max(key);
+    else if (strcmp(key, "args") == 0)
+        *type_ok = value->type == JSON_ARR && value->num_children <= 32u;
+    else if (strcmp(key, "cases") == 0)
+        *type_ok = (value->type == JSON_ARR && value->num_children <= 256u) ||
+                   cr_nonempty_str(value, zcl_command_registry_input_str_max(key));
+    else if (strcmp(key, "sanitize") == 0 || strcmp(key, "fresh") == 0 ||
+             strcmp(key, "compile_only") == 0)
+        *type_ok = value->type == JSON_BOOL;
+    else
+        return false;
+    return true;
+}
+
+static bool cr_match_lab_or_ints(const char *path, const char *key,
+                                 const struct json_value *value, bool *type_ok)
+{
+    return cr_match_lab(path, key, value, type_ok) ||
+           cr_match_leaf_ints(path, key, value, type_ok);
+}
+
 static bool cr_match_path_special(const struct zcl_command_spec *spec,
                                   const char *key,
                                   const struct json_value *value,
@@ -643,7 +687,7 @@ static bool cr_match_path_special(const struct zcl_command_spec *spec,
         *type_ok = cr_int_range(value, 1, INT64_MAX);
         return true;
     }
-    if (cr_match_leaf_ints(path, key, value, type_ok))
+    if (cr_match_lab_or_ints(path, key, value, type_ok))
         return true;
     return false;
 }

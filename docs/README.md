@@ -119,6 +119,10 @@ from a hash, signature, test, or reproduction receipt.
 - [`WORK_CARDS.md`](WORK_CARDS.md) — owner-signed public work cards on the
   board: the card format, how state derives from claims and results, and
   `z23 work list` / `z23 work show`.
+- [`LAB.md`](LAB.md) — the one-file lab: `z23 lab run`, `lab test` and
+  `lab show` compile one C23 file, run it confined and return a
+  content-addressed JSON receipt; limits, confinement, cache and measured
+  latency.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
 - [`CHAOS_HARNESS.md`](CHAOS_HARNESS.md) — the two chaos/kill harnesses (the

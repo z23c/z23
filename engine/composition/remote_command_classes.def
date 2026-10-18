@@ -1151,6 +1151,14 @@ REMOTE_COMMAND_CLASS("story.diff", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("work.list", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("work.show", REMOTE_CLASS_NEVER, "")
 
+/* LAB — 3 never_remote leaves.
+ *
+ * They compile and run a file on the node that is asked, in that node's lab
+ * state directory; a remote caller has no file on this node to name. */
+REMOTE_COMMAND_CLASS("lab.run", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("lab.test", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("lab.show", REMOTE_CLASS_NEVER, "")
+
 /* AGENT-CONTRACT METHODS — 8 never_remote.
  *
  * The remaining flat methods from

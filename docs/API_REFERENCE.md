@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 970 |
-| Top-level roots | 16 |
-| Branches | 211 |
-| Leaves (dispatchable command paths) | 759 |
-| … `ready` (live handler in this build) | 666 |
+| Registry entries (branches + leaves) | 974 |
+| Top-level roots | 17 |
+| Branches | 212 |
+| Leaves (dispatchable command paths) | 762 |
+| … `ready` (live handler in this build) | 669 |
 | … `compat` (metadata only, names a fallback) | 63 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 62 |
-| Leaves with `effect=mutate` | 289 |
+| Leaves with `effect=mutate` | 291 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 153 |
 
@@ -108,6 +108,7 @@ Per source file:
 | `engine/composition/commands/plugin.def` | 9 | 1 | 8 |
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/work.def` | 3 | 1 | 2 |
+| `engine/composition/commands/lab.def` | 4 | 1 | 3 |
 | `engine/composition/commands/fleet_board.def` | 12 | 3 | 9 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
 | `engine/composition/commands/fleet.def` | 42 | 9 | 33 |
@@ -182,6 +183,7 @@ The root order below is a wire contract, not a presentation choice.
 | `plugin` | `plugin` | branch | ready | Signed plugin store |
 | `story` | `story` | branch | ready | Rooted causal views of development work |
 | `work` | `work` | branch | ready | Owner-signed public work cards on the node's board |
+| `lab` | `lab` | branch | ready | Compile and run one C23 file confined, with ground truth |
 | `fleet` | `fleet` | branch | ready | The fleet message board and wiki, and the owner's private fleet ledger |
 
 
@@ -1884,6 +1886,14 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `work list` | ready | read / read / operator · fast/low | `level`, `limit`, `owner` | `zcl.work_list.v1` | `z23 work list --level=haiku` | List the owner's public work cards with their derived state |
 | `work show` | ready | read / read / operator · fast/low | **`id`**, `owner` | `zcl.work_show.v1` | `z23 work show 4f2c0a9e...` | Show one work card whole with its claim and result posts |
+
+### `lab` — Compile and run one C23 file confined, with ground truth
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `lab run` | ready | mutate / app-write / operator · maintenance/moderate | **`file`**, `stdin`, `args`, `sanitize`, `timeout_ms`, `mem_mb`, `fresh`, `compile_only` | `zcl.lab_run.v1` | `z23 lab run hello.c --stdin=hi` | Compile one C file and run it confined, returning exit, output and sanitizer findings |
+| `lab test` | ready | mutate / app-write / operator · maintenance/moderate | **`file`**, `cases`, `sanitize`, `timeout_ms`, `mem_mb`, `fresh` | `zcl.lab_test.v1` | `z23 lab test solve.c --cases=cases.json` | Compile one C file once and run a list of stdin/args cases confined, with pass or fail and a diff |
+| `lab show` | ready | read / read / operator · fast/low | **`root`** | `zcl.lab_show.v1` | `z23 lab show 4f2c0a9e...` | Show the stored lab receipt for one root |
 
 ### `fleet` — The fleet message board and wiki, and the owner's private fleet ledger
 

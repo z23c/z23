@@ -22,8 +22,8 @@ extern "C" {
 /* Root menu byte budget: every root is listed as the same fixed 5-field
  * child summary the branch menus use (~130 bytes per root), with about one
  * root of headroom so adding a root is deliberate; raised from 2048 for the
- * plugin root, the fifteenth. */
-#define ZCL_COMMAND_ROOT_BUDGET 2304U
+ * plugin root, the fifteenth, and to 2560 for the lab root, the seventeenth. */
+#define ZCL_COMMAND_ROOT_BUDGET 2560U
 /* Branch menu byte budget: each branch lists its immediate children as a
  * fixed 5-field summary (path, summary, risk, latency, availability), so
  * size grows one summary per leaf. The ceiling keeps accidental

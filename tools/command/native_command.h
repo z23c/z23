@@ -968,6 +968,17 @@ void zcl_native_handle_work_list(
 void zcl_native_handle_work_show(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* The one-file lab (tools/command/native_lab_command.c and
+ * native_lab_test_command.c), bound by engine/composition/commands/lab.def. */
+void zcl_native_handle_lab_run(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_lab_test(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_lab_show(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_package_dev_score_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

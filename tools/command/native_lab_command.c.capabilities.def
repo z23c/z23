@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_lab_command.c", CAP_FS_WRITE, "Creates the lab state directory and publishes receipts through the lab store")

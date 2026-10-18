@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/lab_exec.c", CAP_PROCESS|CAP_FS_READ|CAP_FS_WRITE|CAP_PRIVILEGE, "Forks the confined compiler and program, measures the workdir, and drops privileges with Landlock, seccomp and rlimits before execv")

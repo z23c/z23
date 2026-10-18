@@ -1,0 +1,6 @@
+[
+  {"name": "adds", "stdin": "2 3\n", "expect_stdout": "5\n"},
+  {"name": "adds negative", "stdin": "-4 1\n", "expect_stdout": "-3\n"},
+  {"name": "wrong expectation", "stdin": "2 3\n", "expect_stdout": "6\n"},
+  {"name": "no input fails", "stdin": "", "expect_exit": 1}
+]

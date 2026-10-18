@@ -5,6 +5,7 @@
 #include "platform/os_sandbox.h"
 #include <sys/syscall.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -130,4 +131,118 @@ struct zcl_result os_sandbox_seccomp_guard_signals(void)
                        errno, strerror(errno));
     return ZCL_OK;
 #endif
+}
+
+/* Signal containment for a program that keeps one process. A positive-pid
+ * kill or tgkill is allowed only at the caller's own thread group (what raise,
+ * abort and pthread_kill need); tkill, queued signals, pidfd_open,
+ * pidfd_send_signal, ptrace and process_vm_{read,write}v answer EPERM. Signals
+ * also leave through descriptor ownership (a SIGIO or F_SETSIG signal sent to
+ * the owner when a descriptor becomes ready), so the commands that set an
+ * owner or a signal number fail EPERM too: fcntl F_SETOWN, F_SETOWN_EX and
+ * F_SETSIG, ioctl FIOSETOWN, SIOCSPGRP and TIOCSPGRP. Where a PID namespace
+ * cannot be entered, this is what keeps an unrelated same-uid process from
+ * being signalled. The caller's pid is captured at install time, so install
+ * it after the final fork. x86_64 has no fcntl64.
+ *
+ * Layout: 0-2 arch, 3 load nr, 4-5 kill and tgkill, 6-13 deny, 14-15 fcntl and
+ * ioctl dispatch, 16 ALLOW, 17-21 fcntl cmds, 22-26 ioctl cmds, 27-29 self
+ * pid test, 30 EPERM. */
+enum {
+    PKG_SELF_DENY_N = 8,
+    PKG_AT_FCNTL = 17,
+    PKG_AT_IOCTL = 22,
+    PKG_AT_SELF = 27,
+    PKG_AT_EPERM = 30,
+    PKG_SELF_LEN = 31
+};
+
+#ifdef PKG_HAVE_SECCOMP
+static struct sock_filter pkg_ld(unsigned offset)
+{
+    return (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offset);
+}
+
+static struct sock_filter pkg_ret(uint32_t what)
+{
+    return (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, what);
+}
+
+/* Jump to index `to` when the loaded word equals `v`; `at` is this index. */
+static struct sock_filter pkg_jeq(uint32_t v, size_t at, unsigned to)
+{
+    return (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, v,
+                                        (uint8_t)(to - at - 1u), 0);
+}
+
+static size_t pkg_cmd_rows(struct sock_filter *f, size_t k,
+                           const uint32_t *cmds, size_t n)
+{
+    f[k++] = pkg_ld(offsetof(struct seccomp_data, args[1]));
+    for (size_t i = 0; i < n; i++, k++)
+        f[k] = pkg_jeq(cmds[i], k, PKG_AT_EPERM);
+    f[k++] = pkg_ret(SECCOMP_RET_ALLOW);
+    return k;
+}
+
+static size_t pkg_self_program(struct sock_filter *f, uint32_t self,
+                               unsigned flags)
+{
+    const uint32_t deny[PKG_SELF_DENY_N] = {
+        (uint32_t)__NR_tkill, (uint32_t)__NR_rt_sigqueueinfo,
+        (uint32_t)__NR_rt_tgsigqueueinfo, (uint32_t)__NR_pidfd_send_signal,
+        (uint32_t)__NR_pidfd_open, (uint32_t)__NR_ptrace,
+        (uint32_t)__NR_process_vm_readv, (uint32_t)__NR_process_vm_writev };
+    const uint32_t fcntl_cmds[] = { F_SETOWN, F_SETSIG, F_SETOWN_EX };
+    const uint32_t ioctl_cmds[] = { 0x8901u /* FIOSETOWN */,
+                                    0x8902u /* SIOCSPGRP */,
+                                    0x5410u /* TIOCSPGRP */ };
+    const bool fd_rules = !(flags & OS_SANDBOX_SELF_SIGNALS_NO_FD_OWNER);
+    size_t k = 0;
+    f[k++] = pkg_ld(offsetof(struct seccomp_data, arch));
+    f[k] = pkg_jeq(AUDIT_ARCH_X86_64, k, 3u), k++;
+    f[k++] = pkg_ret(0x80000000U);
+    f[k++] = pkg_ld(offsetof(struct seccomp_data, nr));
+    f[k] = pkg_jeq((uint32_t)__NR_kill, k, PKG_AT_SELF), k++;
+    f[k] = pkg_jeq((uint32_t)__NR_tgkill, k, PKG_AT_SELF), k++;
+    for (size_t i = 0; i < PKG_SELF_DENY_N; i++, k++)
+        f[k] = pkg_jeq(deny[i], k, PKG_AT_EPERM);
+    f[k] = pkg_jeq(fd_rules ? (uint32_t)__NR_fcntl : 0xffffffffu, k, PKG_AT_FCNTL), k++;
+    f[k] = pkg_jeq(fd_rules ? (uint32_t)__NR_ioctl : 0xffffffffu, k, PKG_AT_IOCTL), k++;
+    f[k++] = pkg_ret(SECCOMP_RET_ALLOW);
+    k = pkg_cmd_rows(f, k, fcntl_cmds, 3);
+    k = pkg_cmd_rows(f, k, ioctl_cmds, 3);
+    f[k++] = pkg_ld(offsetof(struct seccomp_data, args[0]));
+    f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, self, 0, 1);
+    f[k++] = pkg_ret(SECCOMP_RET_ALLOW);
+    f[k++] = pkg_ret(SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+    return k;
+}
+#endif
+
+struct zcl_result os_sandbox_seccomp_self_signals_only_ext(unsigned flags)
+{
+#ifndef PKG_HAVE_SECCOMP
+    (void)flags;
+    return ZCL_ERR(OS_SANDBOX_ERR_SECCOMP_UNAVAILABLE,
+                   "seccomp headers absent at build time");
+#else
+    struct sock_filter f[PKG_SELF_LEN];
+    size_t k = pkg_self_program(f, (uint32_t)getpid(), flags);
+    struct sock_fprog prog = { .len = (unsigned short)k, .filter = f };
+    long r = syscall(__NR_seccomp, (long)SECCOMP_SET_MODE_FILTER,
+                     (long)SECCOMP_FILTER_FLAG_TSYNC, &prog);
+    if (r != 0 && errno == ENOSYS)
+        r = prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0);
+    if (r != 0)
+        return ZCL_ERR(OS_SANDBOX_ERR_SECCOMP,
+                       "self-signal filter install failed errno=%d (%s)",
+                       errno, strerror(errno));
+    return ZCL_OK;
+#endif
+}
+
+struct zcl_result os_sandbox_seccomp_self_signals_only(void)
+{
+    return os_sandbox_seccomp_self_signals_only_ext(0);
 }

@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/lab_receipt.c", CAP_FS_READ|CAP_FS_WRITE, "Stores and loads content-addressed receipts under the lab state directory")

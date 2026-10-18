@@ -18,6 +18,7 @@
 #include "plugin.def"
 #include "story.def"
 #include "work.def"
+#include "lab.def"
 #include "fleet_board.def"
 #include "mind.def"
 #include "fleet_agents.def"

@@ -416,6 +416,21 @@ struct zcl_result os_sandbox_seccomp_deny_ext(
  * after which no outside pid is addressable at all. */
 struct zcl_result os_sandbox_seccomp_guard_signals(void);
 
+/* Stacked filter for a program that keeps one process: kill and tgkill are
+ * allowed only at the caller's own pid, and tkill, queued signals, pidfd_open,
+ * pidfd_send_signal, ptrace and process_vm_readv/writev fail EPERM. Install it
+ * after the last fork (the pid is captured at install). Signals also leave
+ * through descriptor ownership (SIGIO, F_SETSIG), so the owner and signal
+ * commands of fcntl and ioctl fail EPERM as well. With it no other
+ * process of the user can be signalled even where os_sandbox_pidns_enter is
+ * refused. */
+/* Test-only: omit the descriptor-ownership rules (fcntl F_SETOWN, F_SETOWN_EX,
+ * F_SETSIG; ioctl FIOSETOWN, SIOCSPGRP, TIOCSPGRP), to prove a probe signals
+ * through them without the rules. */
+enum { OS_SANDBOX_SELF_SIGNALS_NO_FD_OWNER = 1u };
+struct zcl_result os_sandbox_seccomp_self_signals_only_ext(unsigned flags);
+struct zcl_result os_sandbox_seccomp_self_signals_only(void);
+
 /* The RESIDENT NODE's -confine ALLOW-list: the empirically-derived steady-state
  * syscall set a booted node needs for status RPC, SELECT-only storage queries,
  * SQLite (WAL) file I/O, malloc, timers, and RNG. Everything NOT in this set is

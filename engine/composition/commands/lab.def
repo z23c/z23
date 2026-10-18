@@ -1,0 +1,83 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* The one-file lab: compile one C23 source with the in-tree compile cache,
+ * run it confined, and return the compiler diagnostics, exit status, output
+ * and sanitizer findings as one content-addressed receipt.
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
+
+ZCL_COMMAND_BRANCH("lab", "",
+                   "Compile and run one C23 file confined, with ground truth",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "lab.run", "lab", "",
+    "Compile one C file and run it confined, returning exit, output and sanitizer findings",
+    "Compiles `file` (one .c translation unit, at most 256 KiB, a regular file "
+    "you own) with -std=c23 -O1 -g -Wall -Wextra -Werror -pedantic and libc and "
+    "libm only, with AddressSanitizer and UndefinedBehaviorSanitizer when the "
+    "toolchain has them, then runs it in a fresh private workdir under "
+    "Landlock, seccomp (no network, no fork), no_new_privs and rlimits, killing "
+    "it at timeout_ms. The receipt zcl.lab_run.v1 carries parsed compiler "
+    "diagnostics, exit code or signal, stdout and stderr, sanitizer finding "
+    "count, and the confinement applied. The root is the SHA3-512 of the source "
+    "and the canonical inputs; an identical request is answered from the stored "
+    "receipt (cache.hit true) without compiling or running, so a program that "
+    "reads the clock or a random source is replayed, not re-measured: pass "
+    "fresh to bypass. Where Landlock or seccomp cannot be applied it refuses "
+    "with LAB_UNCONFINED and never runs the program; compile_only still works.",
+    65536U,
+    "lab,c23,compile,run,sandbox,sanitizer,ubsan,asan,test,exit,stdout",
+    "zcl.lab_run_input.v1", "zcl.lab_run.v1",
+    "file,stdin,args,sanitize,timeout_ms,mem_mb,fresh,compile_only", "file",
+    "z23 lab run hello.c --stdin=hi",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_PROCESS_EXEC | ZCL_COMMAND_CAP_COMPILER,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_lab_run)
+
+ZCL_COMMAND_READY_COMMAND(
+    "lab.test", "lab", "",
+    "Compile one C file once and run a list of stdin/args cases confined, with pass or fail and a diff",
+    "Compiles `file` as lab.run does, then runs each case from `cases` (a path "
+    "to a JSON file or an inline JSON array of up to 256 objects with name and "
+    "optional stdin, args, expect_stdout, expect_exit) confined and reports "
+    "passed, failed and, per case, exit code, wall time and the first "
+    "differing line (expected against got, at most 512 bytes, 16 KiB over all "
+    "cases). A case passes when the program exits with expect_exit (default 0) "
+    "and, if given, stdout equals expect_stdout exactly. The receipt "
+    "zcl.lab_test.v1 is content addressed and cached like lab.run's; fresh "
+    "bypasses the cache. Refuses with LAB_UNCONFINED where Landlock or "
+    "seccomp cannot be applied.",
+    65536U,
+    "lab,c23,test,cases,expect,diff,sandbox,sanitizer",
+    "zcl.lab_test_input.v1", "zcl.lab_test.v1",
+    "file,cases,sanitize,timeout_ms,mem_mb,fresh", "file",
+    "z23 lab test solve.c --cases=cases.json",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_PROCESS_EXEC | ZCL_COMMAND_CAP_COMPILER,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_lab_test)
+
+ZCL_COMMAND_READY_READ(
+    "lab.show", "lab", "",
+    "Show the stored lab receipt for one root",
+    "Returns the receipt stored under a 128-hex root from an earlier lab.run "
+    "or lab.test, exactly as stored (compiler diagnostics, run result, "
+    "sanitizer and confinement sections). Reads only the lab state directory "
+    "($Z23_LAB_DIR, else ~/.z23/lab/receipts); a root never stored is "
+    "LAB_NOT_FOUND.",
+    ZCL_COMMAND_RESULT_BUDGET * 16,
+    "lab,receipt,show,root,cache",
+    "zcl.lab_show_input.v1", "zcl.lab_show.v1",
+    "root", "root",
+    "z23 lab show 4f2c0a9e...",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_lab_show)

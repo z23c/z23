@@ -409,6 +409,21 @@ struct zcl_result os_sandbox_seccomp_guard_signals(void)
 #endif
 }
 
+struct zcl_result os_sandbox_seccomp_self_signals_only(void)
+{
+#if defined(_WIN32)
+    return unavailable("seccomp");
+#else
+    return ZCL_OK;
+#endif
+}
+
+struct zcl_result os_sandbox_seccomp_self_signals_only_ext(unsigned flags)
+{
+    (void)flags;
+    return os_sandbox_seccomp_self_signals_only();
+}
+
 struct zcl_result os_sandbox_seccomp_deny(const int *calls, size_t count,
                                           bool deny_exec_mmap)
 {

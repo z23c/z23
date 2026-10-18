@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/lab_build.c", CAP_FS_READ|CAP_FS_WRITE, "Reads the submitted source and toolchain identity; writes the content-addressed build tree under the lab state directory")
