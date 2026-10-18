@@ -3332,7 +3332,7 @@ static bool fb_wiki_native_roundtrip(const struct rpc_table *table,
     int changes = sqlite3_total_changes(db->db);
     fb_native_test_table = table;
     node_rpc_client_set_test_hook(fb_native_rpc);
-    bool ok = json_push_kv_str(&input, "q", "GIT") && fb_wiki_native_find(&request, id);
+    bool ok = json_push_kv_str(&input, "q", "FULL LINT") && fb_wiki_native_find(&request, id);
     json_free(&input); json_init(&input); json_set_object(&input);
     ok = ok && json_push_kv_str(&input, "type", "board") &&
         json_push_kv_str(&input, "ref", id) && fb_wiki_native_exact(&request, id) &&
@@ -3346,7 +3346,7 @@ static int test_fleet_wiki_find_and_read(void)
 {
     int failures = 0;
     TEST("fleet wiki: read returns the parsed entry, find returns at most 8 "
-        "matching entries with rules, and plain pages are skipped") {
+        "matching results with rules, and malformed pages are skipped") {
         struct node_db db = {0};
         ASSERT(node_db_open(&db, ":memory:"));
         struct db_service service = {.node_db = &db, .started = true};
@@ -3403,9 +3403,10 @@ static int test_fleet_wiki_find_and_read(void)
         ASSERT(json_push_kv_str(&in, "op", "wiki_find") &&
                json_push_kv_str(&in, "q", "GIT"));
         ASSERT(fb_test_rpc(&table, &in, &result));
-        ASSERT_EQ(json_get_int(json_get(&result, "returned")), 1);
+        ASSERT_EQ(json_get_int(json_get(&result, "returned")), 2);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(json_get(&result, "entries"), 0), "kind")), "page");
         const struct json_value *hit =
-            json_at(json_get(&result, "entries"), 0);
+            json_at(json_get(&result, "entries"), 1);
         struct db_fleet_board_post exact;
         char exact_id[65], exact_host[65];
         ASSERT(db_fleet_board_wiki_read(&db, "push-gate", &exact));
@@ -5335,6 +5336,50 @@ static int test_fleet_wiki_list_is_an_index(void)
     return failures;
 }
 
+static int test_fleet_wiki_find_plain_pages(void)
+{
+    int failures = 0;
+    TEST("fleet wiki: find returns plain pages by slug, title or first line, never under a topic filter") {
+        static struct fb_rpc_env e;
+        struct json_value r;
+        ASSERT(fb_rpc_env_open(&e));
+        const int64_t now = INT64_C(5000000);
+        char text[512];
+        fb_entry_json(text, sizeof(text), "alpha summary", FB_ONE_LESSON, "");
+        ASSERT(fb_test_ingest_page(&e.db, "aaa-entry", text, 1, now));
+        ASSERT(fb_test_ingest_page(&e.db, "bbb-plain", "Some prose\nsecond line", 7, now));
+        ASSERT(fb_test_ingest_page(&e.db, "ccc-plain", "Alpha prose", 8, now));
+
+        ASSERT(fb_rpc_op(&e, "wiki_find", "q", "PAGE 7", NULL, NULL, &r));
+        ASSERT_EQ(json_get_int(json_get(&r, "returned")), 1);
+        const struct json_value *hit = json_at(json_get(&r, "entries"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(hit, "kind")), "page");
+        ASSERT_STR_EQ(json_get_str(json_get(hit, "slug")), "bbb-plain");
+        ASSERT_STR_EQ(json_get_str(json_get(hit, "title")), "Page 7");
+        ASSERT_STR_EQ(json_get_str(json_get(hit, "summary")), "Some prose");
+        ASSERT_EQ((int64_t)json_size(json_get(hit, "matched")), 1);
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(hit, "matched"), 0)), "title");
+        json_free(&r);
+
+        ASSERT(fb_rpc_op(&e, "wiki_find", "q", "page 7", "topic", "t", &r));
+        ASSERT_EQ(json_get_int(json_get(&r, "returned")), 0);
+        json_free(&r);
+
+        ASSERT(fb_rpc_op(&e, "wiki_find", "q", "alpha", NULL, NULL, &r));
+        ASSERT_EQ(json_get_int(json_get(&r, "returned")), 2);
+        const struct json_value *items = json_get(&r, "entries");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(items, 0), "slug")), "aaa-entry");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(items, 0), "kind")), "entry");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(items, 1), "slug")), "ccc-plain");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(items, 1), "kind")), "page");
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(json_at(items, 1), "matched"), 0)), "summary");
+        json_free(&r);
+        fb_rpc_env_close(&e);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 struct fb_query_vm { uint64_t steps, statements; };
 static int fb_query_vm_trace(unsigned type, void *context, void *statement, void *unused)
 {
@@ -6802,6 +6847,7 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_wiki_find_page_cap();
     failures += test_fleet_wiki_find_matched_fields();
     failures += test_fleet_wiki_list_is_an_index();
+    failures += test_fleet_wiki_find_plain_pages();
     failures += test_fleet_wiki_query_cost();
     failures += test_fleet_wiki_query_envelopes();
     failures += test_fleet_board_quota_does_not_score_relay();

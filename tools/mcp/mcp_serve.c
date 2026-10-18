@@ -367,13 +367,13 @@ static bool tool_authority(void *ctx, const struct mcp_tool *tool,
  * typed envelope, passed through unchanged. */
 static void wiki_entries_json(struct mcp_buf *out, const struct json_value *data)
 {
-    static const char *const keys[] = {"slug", "topic", "summary", "matched", "rules"};
+    static const char *const keys[] = {"kind", "slug", "title", "topic", "summary", "matched", "rules"};
     const struct json_value *entries = json_get(data, "entries");
     mcp_buf_str(out, "{\"schema\":\"zcl.wiki_search.v1\",\"scope\":\"wiki\",\"entries\":[");
     for (size_t i = 0; entries && i < json_size(entries); i++) {
         const struct json_value *e = json_at(entries, i);
         mcp_buf_str(out, i ? ",{" : "{");
-        for (size_t k = 0, put = 0; k < 5; k++) {
+        for (size_t k = 0, put = 0; k < 7; k++) {
             if (!json_get(e, keys[k]))
                 continue;
             mcp_buf_str(out, put++ ? ",\"" : "\"");

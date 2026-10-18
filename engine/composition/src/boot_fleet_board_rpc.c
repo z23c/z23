@@ -886,35 +886,16 @@ static void fb_op_wiki_read(struct node_db *ndb, const struct json_value *in,
     fb_wiki_read_body(&row, &limits, result);
 }
 
-#define FB_INDEX_SUMMARY_MAX 120
-
-/* First line of a plain page, at most FB_INDEX_SUMMARY_MAX bytes, cut so a
- * UTF-8 sequence is never split. */
-static void fb_plain_summary(const char *text, size_t len,
-                             char out[FB_INDEX_SUMMARY_MAX + 1])
-{
-    size_t n = 0;
-    while (n < len && text[n] != '\r' && text[n] != '\n')
-        n++;
-    if (n > FB_INDEX_SUMMARY_MAX) {
-        n = FB_INDEX_SUMMARY_MAX;
-        while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80)
-            n--;
-    }
-    memcpy(out, text, n);
-    out[n] = 0;
-}
-
 static bool fb_index_item(struct json_value *item,
                           const struct db_fleet_board_post *row)
 {
     struct json_value entry;
-    char plain[FB_INDEX_SUMMARY_MAX + 1];
+    char plain[FLEET_WIKI_SUMMARY_MAX + 1];
     enum fleet_wiki_parse_status parsed = fleet_wiki_entry_parse_checked(
         row->post.text, row->post.text_len, &entry, NULL);
     if (parsed == FLEET_WIKI_PARSE_ALLOC_FAILED) return false;
     bool is_entry = parsed == FLEET_WIKI_PARSE_ENTRY;
-    if (!is_entry) fb_plain_summary(row->post.text, row->post.text_len, plain);
+    if (!is_entry) fleet_wiki_plain_summary(row->post.text, row->post.text_len, plain);
     char id[65], host[65];
     fleet_board_id_to_hex(row->post.id, id);
     fleet_board_id_to_hex(row->post.host_pubkey, host);
@@ -1173,7 +1154,8 @@ static bool fb_find_item_identity(const struct db_fleet_board_post *row,
     char id[65], host[65];
     fleet_board_id_to_hex(row->post.id, id);
     fleet_board_id_to_hex(row->post.host_pubkey, host);
-    return json_push_kv(item, "topic", json_get(entry, "topic")) &&
+    return json_push_kv_str(item, "kind", "entry") &&
+        json_push_kv(item, "topic", json_get(entry, "topic")) &&
         json_push_kv_str(item, "slug", row->post.slug) &&
         json_push_kv_str(item, "id", id) &&
         json_push_kv_str(item, "host", host) &&
@@ -1206,13 +1188,9 @@ static bool fb_find_item_project(const struct db_fleet_board_post *row,
         json_push_kv_bool(item, "summary_omitted", mode == 2);
 }
 
-static bool fb_find_item_matched(const struct fb_find_context *c,
-    const struct db_fleet_board_post *row, const struct json_value *entry,
-    struct json_value *item)
+static bool fb_find_push_matched(struct json_value *item,
+    const char *const *fields, size_t n)
 {
-    const char *fields[FLEET_WIKI_MATCH_FIELDS];
-    size_t n = fleet_wiki_entry_matched_fields(entry, row->post.slug,
-        c->query.filters.q, fields);
     struct json_value matched;
     json_init(&matched); json_set_array(&matched);
     bool ok = true;
@@ -1227,29 +1205,92 @@ static bool fb_find_item_matched(const struct fb_find_context *c,
     return ok;
 }
 
+static bool fb_find_item_matched(const struct fb_find_context *c,
+    const struct db_fleet_board_post *row, const struct json_value *entry,
+    struct json_value *item)
+{
+    const char *fields[FLEET_WIKI_MATCH_FIELDS];
+    size_t n = fleet_wiki_entry_matched_fields(entry, row->post.slug,
+        c->query.filters.q, fields);
+    return fb_find_push_matched(item, fields, n);
+}
+
+
+static enum fleet_wiki_visit_result fb_find_append(struct fb_find_context *c,
+    struct json_value *item, bool *fits)
+{
+    size_t bytes = json_write(item, NULL, 0) + 1;
+    *fits = c->used + bytes <= c->query.budget - 768;
+    if (!*fits) return FLEET_WIKI_VISIT_CONTINUE;
+    if (!json_push_back(&c->entries, item)) return FLEET_WIKI_VISIT_FAILED;
+    c->used += bytes;
+    c->returned++;
+    return FLEET_WIKI_VISIT_CONTINUE;
+}
+
 static enum fleet_wiki_visit_result fb_find_emit(struct fb_find_context *c,
     const struct db_fleet_board_post *row, const struct json_value *entry)
 {
     for (unsigned mode = 0; mode < 3; mode++) {
         struct json_value item;
+        bool fits = false;
         json_init(&item);
         if (!fb_find_item_project(row, entry, mode, &item) ||
             !fb_find_item_matched(c, row, entry, &item)) {
             json_free(&item);
             return FLEET_WIKI_VISIT_FAILED;
         }
-        size_t bytes = json_write(&item, NULL, 0) + 1;
-        if (c->used + bytes <= c->query.budget - 768) {
-            bool ok = json_push_back(&c->entries, &item);
-            json_free(&item);
-            if (!ok) return FLEET_WIKI_VISIT_FAILED;
-            c->used += bytes;
-            c->returned++;
-            return FLEET_WIKI_VISIT_CONTINUE;
-        }
+        enum fleet_wiki_visit_result status = fb_find_append(c, &item, &fits);
         json_free(&item);
+        if (status == FLEET_WIKI_VISIT_FAILED || fits) return status;
     }
     return FLEET_WIKI_VISIT_PAGE;
+}
+
+static bool fb_find_page_item(const struct db_fleet_board_post *row,
+    const char *summary, const char *const *fields, size_t n,
+    struct json_value *item)
+{
+    char id[65], host[65];
+    fleet_board_id_to_hex(row->post.id, id);
+    fleet_board_id_to_hex(row->post.host_pubkey, host);
+    json_set_object(item);
+    return json_push_kv_str(item, "kind", "page") &&
+        json_push_kv_str(item, "slug", row->post.slug) &&
+        json_push_kv_str(item, "title", row->post.title) &&
+        json_push_kv_str(item, "id", id) &&
+        json_push_kv_str(item, "host", host) &&
+        json_push_kv_int(item, "created_at", (int64_t)row->post.created_at) &&
+        json_push_kv_int(item, "expires_at", row->expires_at) &&
+        json_push_kv_str(item, "summary", summary) &&
+        fb_find_push_matched(item, fields, n);
+}
+
+/* A plain-text newest revision is found by slug, title or first line. Bodies
+ * that open with a JSON object but fail the entry rules stay hidden, and an
+ * exact topic or applies_to filter excludes pages, which have neither. */
+static enum fleet_wiki_visit_result fb_find_visit_page(struct fb_find_context *c,
+    const struct db_fleet_board_post *row)
+{
+    const struct fleet_wiki_entry_query *f = &c->query.filters;
+    char summary[FLEET_WIKI_SUMMARY_MAX + 1];
+    const char *fields[3];
+    struct json_value item;
+    bool fits = false;
+    if (row->post.text_len == 0 || row->post.text[0] == '{' ||
+        f->topic[0] || f->applies_to[0]) return FLEET_WIKI_VISIT_CONTINUE;
+    fleet_wiki_plain_summary(row->post.text, row->post.text_len, summary);
+    size_t n = fleet_wiki_page_matched_fields(row->post.slug, row->post.title,
+                                              summary, f->q, fields);
+    if (f->q[0] && n == 0) return FLEET_WIKI_VISIT_CONTINUE;
+    json_init(&item);
+    if (!fb_find_page_item(row, summary, fields, n, &item)) {
+        json_free(&item);
+        return FLEET_WIKI_VISIT_FAILED;
+    }
+    enum fleet_wiki_visit_result status = fb_find_append(c, &item, &fits);
+    json_free(&item);
+    return status != FLEET_WIKI_VISIT_CONTINUE || fits ? status : FLEET_WIKI_VISIT_PAGE;
 }
 
 static enum fleet_wiki_visit_result fb_find_visit(void *context,
@@ -1261,7 +1302,7 @@ static enum fleet_wiki_visit_result fb_find_visit(void *context,
     enum fleet_wiki_parse_status parsed = fleet_wiki_entry_parse_checked(
         row->post.text, row->post.text_len, &entry, NULL);
     if (parsed == FLEET_WIKI_PARSE_ALLOC_FAILED) return FLEET_WIKI_VISIT_FAILED;
-    if (parsed != FLEET_WIKI_PARSE_ENTRY) return FLEET_WIKI_VISIT_CONTINUE;
+    if (parsed != FLEET_WIKI_PARSE_ENTRY) return fb_find_visit_page(c, row);
     enum fleet_wiki_visit_result status = FLEET_WIKI_VISIT_CONTINUE;
     struct fleet_wiki_entry_query filters = c->query.filters;
     filters.slug = row->post.slug;

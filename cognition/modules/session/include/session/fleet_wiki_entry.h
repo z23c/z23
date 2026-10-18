@@ -62,6 +62,18 @@ bool fleet_wiki_entry_matches(const struct json_value *entry,
 size_t fleet_wiki_entry_matched_fields(const struct json_value *entry,
     const char *slug, const char *needle, const char *out[FLEET_WIKI_MATCH_FIELDS]);
 
+#define FLEET_WIKI_SUMMARY_MAX 120
+/* First line of a plain-text page (ends at CR, LF or `len`), at most
+ * FLEET_WIKI_SUMMARY_MAX bytes, cut so a UTF-8 sequence is never split. */
+void fleet_wiki_plain_summary(const char *text, size_t len,
+                              char out[FLEET_WIKI_SUMMARY_MAX + 1]);
+
+/* Fields of a plain-text page that contain `needle`, in the fixed order
+ * slug, title, summary. Writes static strings to `out`; an empty needle
+ * yields 0. */
+size_t fleet_wiki_page_matched_fields(const char *slug, const char *title,
+    const char *summary, const char *needle, const char *out[3]);
+
 struct fleet_wiki_entry_query {
     const char *q;
     const char *topic;

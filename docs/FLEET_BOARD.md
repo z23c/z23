@@ -462,21 +462,25 @@ signed-history rules above.
 is read-only, local, never contacts a peer and never waits. It scans the
 newest revision of each page this node holds, **whoever signed it** (the same
 revision `fleet wiki read` returns; the board's existing trust model applies
-to what it finds), up to a cap of 256 pages. It returns at most 8 valid
-entries whose `topic`, `applies_to`, `summary`, `slug` or lesson `rule` or
-`why` contains `q` (`evidence` is not searched), each as `topic`, `summary`,
-`slug`, `updated`, `matched` (the matching fields among `slug`, `topic`,
-`summary`, `applies_to`, `rule`, `why`, in that order; empty for an empty `q`)
-and `rules` (the `rule` line of every lesson), within a 16 KiB answer. `q`
-is matched as a substring with ASCII letters compared case-insensitively and
-every other byte compared exactly; an empty `q` matches all; a `q` over 128
-bytes is refused (`Q_TOO_LONG`) rather than cut. `scanned` is the number of
-pages examined and `truncated` is true when a match was left out or the scan
-reached its 256-page cap, in which case pages beyond the cap were not
-examined. A page whose newest revision is plain text, malformed, or over the
-entry limits is not returned (and hides any older valid entry of the same
-slug); read it with
-`fleet wiki read`. Measured on an Apple M4 on a full 256-page fixture of
+to what it finds), up to a cap of 256 pages. It returns at most 8 results, each with a `kind`.
+A valid entry (`kind` `entry`) matches when its `topic`, `applies_to`,
+`summary`, `slug` or lesson `rule` or `why` contains `q` (`evidence` is not
+searched) and is returned as `topic`, `summary`, `slug`, `updated` and `rules`
+(the `rule` line of every lesson). A plain-text page (`kind` `page`) matches
+on its `slug`, `title` or first line and is returned as `slug`, `title` and
+`summary` (the first line, at most 120 bytes). Every result carries `matched`,
+the matching fields among `slug`, `topic`, `title`, `summary`, `applies_to`,
+`rule`, `why` (empty for an empty `q`), and the exact revision `id`, within a
+16 KiB answer. An exact `topic` or `applies_to` filter excludes pages, which
+have neither. `q` is matched as a substring with ASCII letters compared
+case-insensitively and every other byte compared exactly; an empty `q`
+matches all; a `q` over 128 bytes is refused (`Q_TOO_LONG`) rather than cut.
+`scanned` is the number of pages examined and `truncated` is true when a match
+was left out or the scan reached its 256-page cap, in which case pages beyond
+the cap were not examined. A newest revision that is malformed, over the entry
+limits or a JSON object that is not a valid entry is not returned (and hides
+any older valid entry of the same slug); read it with `fleet wiki read`.
+Measured on an Apple M4 on a full 256-page fixture of
 maximum-size entries, one call takes about 250 ms in the test build (every
 stored row is re-verified as it is read), so the command is declared
 foreground, not fast.

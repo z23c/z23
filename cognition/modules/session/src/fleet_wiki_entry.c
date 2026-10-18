@@ -236,6 +236,36 @@ size_t fleet_wiki_entry_matched_fields(const struct json_value *entry,
     return n;
 }
 
+void fleet_wiki_plain_summary(const char *text, size_t len,
+                              char out[FLEET_WIKI_SUMMARY_MAX + 1])
+{
+    size_t n = 0;
+    while (n < len && text[n] != '\r' && text[n] != '\n')
+        n++;
+    if (n > FLEET_WIKI_SUMMARY_MAX) {
+        n = FLEET_WIKI_SUMMARY_MAX;
+        while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80)
+            n--;
+    }
+    memcpy(out, text, n);
+    out[n] = 0;
+}
+
+size_t fleet_wiki_page_matched_fields(const char *slug, const char *title,
+    const char *summary, const char *needle, const char *out[3])
+{
+    size_t n = 0;
+    if (!needle || !needle[0])
+        return 0;
+    if (slug && contains_folded(slug, needle))
+        out[n++] = "slug";
+    if (title && contains_folded(title, needle))
+        out[n++] = "title";
+    if (summary && contains_folded(summary, needle))
+        out[n++] = "summary";
+    return n;
+}
+
 bool fleet_wiki_entry_matches(const struct json_value *entry,
                               const char *needle)
 {
