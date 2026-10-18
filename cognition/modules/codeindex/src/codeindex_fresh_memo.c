@@ -41,6 +41,16 @@ void codeindex_test_force_watch_failure(bool fail)
 }
 static void (*g_fw_bracket_hook)(const char *);
 static _Atomic size_t g_fw_dep_cap;
+static _Atomic size_t g_fw_dep_par_min;
+static _Atomic bool g_fw_dep_thread_fail;
+void codeindex_test_set_dep_par_min(size_t n)
+{
+    atomic_store_explicit(&g_fw_dep_par_min, n, memory_order_relaxed);
+}
+void codeindex_test_force_dep_thread_create_failure(bool fail)
+{
+    atomic_store_explicit(&g_fw_dep_thread_fail, fail, memory_order_relaxed);
+}
 void codeindex_test_set_bracket_hook(void (*hook)(const char *root))
 {
     g_fw_bracket_hook = hook;
@@ -436,12 +446,31 @@ static void *fw_dep_range(void *arg)
     return NULL;
 }
 
+static size_t fw_dep_par_min(void)
+{
+#ifdef ZCL_TESTING
+    size_t n = atomic_load_explicit(&g_fw_dep_par_min, memory_order_relaxed);
+    if (n) return n;
+#endif
+    return FW_DEP_PAR_MIN;
+}
+
+static bool fw_dep_thread_start(pthread_t *tid, struct fw_dep_job *job)
+{
+#ifdef ZCL_TESTING
+    if (atomic_load_explicit(&g_fw_dep_thread_fail, memory_order_relaxed))
+        return false;
+#endif
+    /* raw-pthread-ok: short-burst worker, joined by fw_deps_current */
+    return pthread_create(tid, NULL, fw_dep_range, job) == 0;
+}
+
 static bool fw_deps_current(const char *root, const struct ci_deps_keys *d)
 {
     int rootfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (rootfd < 0) return false;
     atomic_bool bad = false;
-    size_t slices = d->count >= FW_DEP_PAR_MIN ? FW_DEP_THREADS : 1;
+    size_t slices = d->count >= fw_dep_par_min() ? FW_DEP_THREADS : 1;
     struct fw_dep_job jobs[FW_DEP_THREADS];
     pthread_t tid[FW_DEP_THREADS];
     bool started[FW_DEP_THREADS] = {false};
@@ -449,8 +478,7 @@ static bool fw_deps_current(const char *root, const struct ci_deps_keys *d)
         jobs[t] = (struct fw_dep_job){rootfd, d, d->count * t / slices,
                                       d->count * (t + 1) / slices, &bad, false};
     for (size_t t = 1; t < slices; t++)
-        /* raw-pthread-ok: short-burst worker, joined below before return */
-        started[t] = pthread_create(&tid[t], NULL, fw_dep_range, &jobs[t]) == 0;
+        started[t] = fw_dep_thread_start(&tid[t], &jobs[t]);
     fw_dep_range(&jobs[0]);
     bool ok = jobs[0].ok;
     for (size_t t = 1; t < slices; t++) {

@@ -538,6 +538,81 @@ static int test_cis_memo_depfile_cap_overflow_walks(void)
     return failures;
 }
 
+static bool cis_append_newline(const char *path)
+{
+    int fd = open(path, O_WRONLY | O_APPEND | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool ok = write(fd, "\n", 1) == 1;
+    return close(fd) == 0 && ok;
+}
+
+/* Prime, then prove a second check is a memo hit (no walk). */
+static bool cis_prime_hit(struct codeindex *ci)
+{
+    if (!cis_verdict(ci, false)) return false;
+    uint64_t walks = codeindex_test_freshness_walks();
+    return cis_verdict(ci, false) && codeindex_test_freshness_walks() == walks;
+}
+
+/* One outside-alias write must be seen as stale by a walking verdict. */
+static bool cis_alias_seen(struct codeindex *ci, const char *alias)
+{
+    uint64_t walks = codeindex_test_freshness_walks();
+    return cis_append_newline(alias) && cis_verdict(ci, true) &&
+           codeindex_test_freshness_walks() == walks + 1;
+}
+
+/* Eight depfiles in two build subdirectories with par_min=4: four slices of
+ * two, so the parallel re-stat, the per-directory switch and the inline
+ * fallback are all reached. Looping over every depfile covers every slice
+ * whatever order the inventory is collected in. */
+static int test_cis_memo_parallel_depfile_slices(void)
+{
+    enum { N = 8 };
+    int failures = 0;
+    char parent[] = "test-tmp/cistale-par-XXXXXX";
+    char root[512], path[512], alias[N][512];
+    bool owned = false;
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: every parallel depfile slice sees an alias write") {
+        ASSERT(mkdtemp(parent) != NULL);
+        owned = true;
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
+        ASSERT(cis_seed(root));
+        for (int i = 0; i < N; i++) {
+            ASSERT(snprintf(path, sizeof(path), "build/%c/f%d.d", i < N / 2 ? 'a' : 'b', i) > 0);
+            ASSERT(cis_write(root, path, CIS_DEP_TEXT));
+            char full[512];
+            ASSERT((size_t)snprintf(full, sizeof(full), "%s/%s", root, path) < sizeof(full));
+            ASSERT((size_t)snprintf(alias[i], sizeof(alias[i]), "%s/alias%d.d", parent, i) < sizeof(alias[i]));
+            /* Link before open: link() itself moves the inode's ctime. */
+            ASSERT(link(full, alias[i]) == 0);
+        }
+        ci = codeindex_open(root);
+        ASSERT(ci != NULL);
+        codeindex_test_set_dep_par_min(4);
+        ASSERT(cis_prime_hit(ci));
+        for (int i = 0; i < N; i++) {
+            ASSERT(cis_alias_seen(ci, alias[i]));
+            ASSERT(codeindex_rebuild(ci));
+            ASSERT(cis_prime_hit(ci));
+        }
+        /* Every worker thread fails to start: the inline fallback must give
+         * the same answers. */
+        codeindex_test_force_dep_thread_create_failure(true);
+        ASSERT(cis_prime_hit(ci));
+        ASSERT(cis_alias_seen(ci, alias[5]));
+        ASSERT(codeindex_rebuild(ci));
+        ASSERT(cis_prime_hit(ci));
+        PASS();
+    } _test_next:;
+    codeindex_test_force_dep_thread_create_failure(false);
+    codeindex_test_set_dep_par_min(0);
+    codeindex_close(ci);
+    if (owned) test_rm_rf_recursive(parent);
+    return failures;
+}
+
 static int test_cis_memo_existing_shared_mapping(void)
 {
     int failures = 0;
@@ -548,7 +623,7 @@ static int test_cis_memo_existing_shared_mapping(void)
     const size_t len = sizeof("int x(void) { return 0; }\n") - 1;
     char *mapping = MAP_FAILED;
     struct codeindex *ci = NULL;
-    TEST("codeindex stale: established shared mapping remains live across rebuilds") {
+    TEST("codeindex stale: a synced shared-mapping write is seen, across a rebuild") {
         ASSERT(mkdtemp(parent) != NULL);
         owned = true;
         ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
@@ -570,6 +645,12 @@ static int test_cis_memo_existing_shared_mapping(void)
         char *digit = memchr(mapping, '0', len);
         ASSERT(digit != NULL);
         *digit = '1';
+        /* POSIX marks st_mtime/st_ctime for update between a MAP_SHARED write
+         * and the next msync; each asserted write is therefore synced before
+         * the verdict. An unsynced store to an already-dirty page that leaves
+         * the metadata unchanged is the documented LIMIT above fw_key_matches,
+         * and this fixture does not claim to detect it. */
+        ASSERT(msync(mapping, len, MS_SYNC) == 0);
         char observed;
         ASSERT(pread(fd, &observed, 1, (off_t)(digit - mapping)) == 1);
         ASSERT(observed == *digit);
@@ -577,9 +658,9 @@ static int test_cis_memo_existing_shared_mapping(void)
         ASSERT(codeindex_rebuild(ci));
         ASSERT(cis_verdict(ci, false));
         ASSERT(cis_verdict(ci, false));
-        /* The same writable mapping survives: a one-time mapping/mtime
-         * observation is insufficient for this second mutation. */
+        /* The established mapping survives the rebuild. */
         *digit = '2';
+        ASSERT(msync(mapping, len, MS_SYNC) == 0);
         ASSERT(pread(fd, &observed, 1, (off_t)(digit - mapping)) == 1);
         ASSERT(observed == *digit);
         ASSERT(cis_verdict(ci, true));
@@ -613,6 +694,7 @@ int test_codeindex_stale(void)
     failures += test_cis_memo_new_depfile_in_new_build_dir();
     failures += test_cis_memo_epoch_retarget_walks();
     failures += test_cis_memo_depfile_cap_overflow_walks();
+    failures += test_cis_memo_parallel_depfile_slices();
     failures += test_cis_memo_existing_shared_mapping();
 #endif
     printf("=== codeindex_stale: %d failures ===\n", failures);

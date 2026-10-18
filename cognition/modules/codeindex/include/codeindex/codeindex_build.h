@@ -72,6 +72,11 @@ void codeindex_test_force_watch_failure(bool fail);
  * sealed (mutate a depfile there), and a smaller depfile-key cap (0: default). */
 void codeindex_test_set_bracket_hook(void (*hook)(const char *root));
 void codeindex_test_set_dep_key_cap(size_t cap);
+/* Parallel depfile re-stat seams: the inventory size that starts slicing (0:
+ * default) and a switch that makes every worker thread creation fail, so the
+ * inline fallback runs. */
+void codeindex_test_set_dep_par_min(size_t n);
+void codeindex_test_force_dep_thread_create_failure(bool fail);
 #endif
 
 /* ── Canonical group taxonomy (mirrors the Makefile / shape layout) ──
