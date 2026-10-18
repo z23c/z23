@@ -16,6 +16,7 @@
 
 #include "event/event.h"
 #include "platform/time_compat.h"
+#include "util/parse_num.h"
 #include "util/time_authority.h"
 
 #include <stdatomic.h>
@@ -52,10 +53,9 @@ static _Atomic int g_test_remedy_calls;
 static int64_t skew_tolerance(void)
 {
     const char *v = getenv("ZCL_CLOCK_SKEW_TOLERANCE_SECS");
-    if (v && v[0]) {
-        long t = strtol(v, NULL, 10);
-        if (t > 0) return (int64_t)t;
-    }
+    int64_t t = 0;
+    if (zcl_parse_i64(v, &t) && t > 0)
+        return t;
     return CLOCK_SKEW_TOLERANCE_SECS;
 }
 

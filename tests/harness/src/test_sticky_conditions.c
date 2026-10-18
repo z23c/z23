@@ -23,9 +23,12 @@
 #include "services/index_fold_guard.h"
 #include "util/blocker.h"
 #include "util/mem_pressure.h"
+#include "util/time_authority.h"
 
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #define SC_CHECK(name, expr) do { \
@@ -54,6 +57,31 @@ static int64_t inj_mono(void *user)
 }
 static struct platform_clock_source g_inj_src = { .monotonic_us = inj_mono,
                                                   .wall_unix = inj_wall };
+
+struct sc_saved_env {
+    const char *name;
+    char *value;
+    bool was_set;
+};
+
+static bool sc_env_save(struct sc_saved_env *saved, const char *name)
+{
+    const char *value = getenv(name);
+    saved->name = name;
+    saved->value = value ? strdup(value) : NULL;
+    saved->was_set = value != NULL;
+    return !value || saved->value != NULL;
+}
+
+static bool sc_env_restore(struct sc_saved_env *saved)
+{
+    int rc = saved->was_set
+        ? setenv(saved->name, saved->value, 1)
+        : unsetenv(saved->name);
+    free(saved->value);
+    saved->value = NULL;
+    return rc == 0;
+}
 
 int test_sticky_conditions(void);
 int test_sticky_conditions(void)
@@ -95,6 +123,75 @@ int test_sticky_conditions(void)
         platform_clock_clear_source();
         condition_engine_reset_for_testing();
         clock_skew_reconcile_test_reset();
+    }
+
+    /* An overflowing operator value must not turn a wall-step detector off.
+     * Model the boot ordering where the condition observes first and the
+     * independent authority sampler takes its first sample only after the
+     * step; that first authority sample is baseline-only by contract. */
+    {
+        struct sc_saved_env saved_env;
+        condition_engine_reset_for_testing();
+        clock_skew_reconcile_test_reset();
+        time_auth_reset_for_testing();
+        atomic_store(&g_inj_wall_unix, 1700000000);
+        platform_clock_set_source(&g_inj_src);
+        bool saved = sc_env_save(&saved_env,
+                                 "ZCL_CLOCK_SKEW_TOLERANCE_SECS");
+        SC_CHECK("clock_skew: overflow tolerance save", saved);
+        bool overflow_env =
+            saved && setenv("ZCL_CLOCK_SKEW_TOLERANCE_SECS",
+                            "999999999999999999999999", 1) == 0;
+        SC_CHECK("clock_skew: overflow tolerance setup",
+                 overflow_env);
+        if (overflow_env) {
+            register_clock_skew_reconcile();
+            condition_engine_tick();
+            atomic_store(&g_inj_wall_unix, 1700003600);
+            time_auth_observe_for_testing(1000000, 1700003600000000LL);
+            condition_engine_tick();
+            SC_CHECK("clock_skew: overflow tolerance falls back and remedies",
+                     clock_skew_reconcile_test_remedy_calls() >= 1);
+        }
+        bool restored = !saved || sc_env_restore(&saved_env);
+        SC_CHECK("clock_skew: overflow tolerance restore", restored);
+        platform_clock_clear_source();
+        condition_engine_reset_for_testing();
+        clock_skew_reconcile_test_reset();
+        time_auth_reset_for_testing();
+    }
+
+    /* A fully valid large value remains an intentional operator setting; the
+     * malformed-input guard must not silently clamp it to the default. */
+    {
+        struct sc_saved_env saved_env;
+        condition_engine_reset_for_testing();
+        clock_skew_reconcile_test_reset();
+        time_auth_reset_for_testing();
+        atomic_store(&g_inj_wall_unix, 1700000000);
+        platform_clock_set_source(&g_inj_src);
+        bool saved = sc_env_save(&saved_env,
+                                 "ZCL_CLOCK_SKEW_TOLERANCE_SECS");
+        SC_CHECK("clock_skew: valid tolerance save", saved);
+        bool valid_large_env =
+            saved && setenv("ZCL_CLOCK_SKEW_TOLERANCE_SECS", "7200", 1) == 0;
+        SC_CHECK("clock_skew: valid large tolerance setup",
+                 valid_large_env);
+        if (valid_large_env) {
+            register_clock_skew_reconcile();
+            condition_engine_tick();
+            atomic_store(&g_inj_wall_unix, 1700003600);
+            time_auth_observe_for_testing(1000000, 1700003600000000LL);
+            condition_engine_tick();
+            SC_CHECK("clock_skew: valid large tolerance remains effective",
+                     clock_skew_reconcile_test_remedy_calls() == 0);
+        }
+        bool restored = !saved || sc_env_restore(&saved_env);
+        SC_CHECK("clock_skew: valid tolerance restore", restored);
+        platform_clock_clear_source();
+        condition_engine_reset_for_testing();
+        clock_skew_reconcile_test_reset();
+        time_auth_reset_for_testing();
     }
 
     /* ───────────────── disk_full_pause ───────────────── */
