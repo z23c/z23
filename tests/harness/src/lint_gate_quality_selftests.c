@@ -206,17 +206,17 @@ int t_fuzz_artifact_ledger_gate(void)
 }
 
 /* Local Markdown target gate: production scans the tracked repository and the
- * script's isolated Git fixtures prove valid targets pass, missing targets
+ * gate's isolated Git fixtures prove valid targets pass, missing targets
  * fail with source context, outbound symlinks fail containment, untracked
  * Markdown is ignored, and an empty scan exits fail-loud. No live services,
  * network, or repository files are used by the self-test. */
 int t_markdown_links_gate(void)
 {
     int failures = 0;
-    int baseline_rc = run_gate_script(MARKDOWN_LINK_SCRIPT_REL, NULL);
+    int baseline_rc = run_gate_script_arg(MARKDOWN_LINK_GATE_BIN, NULL, "check-markdown-links");
     int env_rc = setenv("ZCL_MARKDOWN_LINKS_SELFTEST", "1", 1);
     int selftest_rc =
-        env_rc == 0 ? run_gate_script(MARKDOWN_LINK_SCRIPT_REL, NULL) : -1;
+        env_rc == 0 ? run_gate_script_arg(MARKDOWN_LINK_GATE_BIN, NULL, "check-markdown-links") : -1;
     (void)unsetenv("ZCL_MARKDOWN_LINKS_SELFTEST");
     TEST("[lint-gate] local Markdown targets: baseline and selftest pass") {
         ASSERT(baseline_rc == 0);

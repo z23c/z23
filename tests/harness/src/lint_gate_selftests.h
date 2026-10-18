@@ -212,7 +212,7 @@
  * without cooldown_secs trips exit 2; cooldown-bearing, .progressing-exempt,
  * local-only, WARN-severity and hollow-scan cases stay clean. */
 #define CONDITION_COOLDOWN_SCRIPT_REL "tools/scripts/check_condition_cooldown.sh"
-#define MARKDOWN_LINK_SCRIPT_REL "tools/lint/check_markdown_links.sh"
+#define MARKDOWN_LINK_GATE_BIN "build/bin/z23-lint"
 #define FUZZ_ARTIFACT_REPLAY_SCRIPT_REL "tools/lint/check_fuzz_artifact_replay.sh"
 #define E10_SHAPE_SCRIPT_REL "tools/lint/framework_shape_check.sh"
 /* Same direct-selftest convention as NODE_DB_EXEC_FIXTURE_DST_REL. */
