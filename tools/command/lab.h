@@ -92,6 +92,7 @@ struct lab_compile {
     char tail[LAB_TAIL_MAX + 1];
     char binary[LAB_PATH];
     char detail[160];             /* non-empty when the compile did not start */
+    char command[320];            /* the compiler command line that ran */
     bool unconfined;              /* confinement refused the compile child */
 };
 
@@ -120,6 +121,12 @@ void lab_compile_source(const struct lab_dirs *dirs,
                         const struct lab_toolchain *tc,
                         const struct lab_source *src, const char *name,
                         bool sanitize, struct lab_compile *out);
+/* Release image of the same source: -std=c23 -O2 -Wall -Wextra -Werror
+ * -pedantic -static-pie, no sanitizers and no debug information. */
+void lab_compile_release(const struct lab_dirs *dirs,
+                         const struct lab_toolchain *tc,
+                         const struct lab_source *src, const char *name,
+                         struct lab_compile *out);
 void lab_compile_cleanup(const struct lab_dirs *dirs, const char *name);
 
 /* Run a compiled binary once in a fresh private workdir. */

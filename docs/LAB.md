@@ -23,6 +23,7 @@ Linux only. Where Landlock or seccomp cannot be applied, `lab run` and
 | `z23 lab run <file.c>` | compile and run once; receipt `zcl.lab_run.v1` |
 | `z23 lab test <file.c> --cases=<json>` | compile once, run each case; receipt `zcl.lab_test.v1` |
 | `z23 lab show <root>` | print the stored receipt for a root |
+| `z23 lab promote <file.c> --cases=<json> --name=<n> --version=<v> --key=<file>` | sign a file that passes its cases as a one-shot plugin; receipt `zcl.lab_promote.v1` |
 
 `lab run` inputs: `stdin` (string, at most 64 KiB), `args` (at most 32
 strings), `sanitize` (default true), `timeout_ms` (default 5000, at most
@@ -163,7 +164,62 @@ Through MCP the same leaves are `lab.run`, `lab.test` and `lab.show`.
 
 A lab file that reads stdin and writes stdout can be packed unchanged as a
 one-shot plugin (`z23 plugin pack --interface=2`) and run with `z23 plugin call`;
-see [PLUGINS.md](PLUGINS.md#one-shot-plugins-interface-2).
+see [PLUGINS.md](PLUGINS.md#one-shot-plugins-interface-2). `lab promote` does
+the whole path from a tested file.
+
+## Promote a lab file to a plugin
+
+`lab promote` turns one C23 file that passes its cases into a signed one-shot
+plugin, in this order, and writes nothing to `dir` unless every gate passes:
+
+1. Runs the cases exactly as `lab test` does (fresh, sanitized build). A failed
+   case or a compile error refuses with `LAB_PROMOTE_CASES_FAILED`; the message
+   names the failed count and `error.next_action` is `z23 lab show <root>`.
+2. Builds a release image of the same source with the lab's compiler:
+   `-std=c23 -O2 -Wall -Wextra -Werror -pedantic -static-pie`, no sanitizers and
+   no `-g`. A failed build refuses with `LAB_PROMOTE_BUILD_FAILED`.
+3. Runs every case again against that image through the confined runner that
+   `plugin call` uses. Any failure refuses with `LAB_PROMOTE_RELEASE_DISAGREES`.
+4. Packs the image as an interface 2 plugin through `plugin pack` with the key
+   file you name (`name`, `version` and `key` are required; `cap` and `dir` are
+   as for `plugin pack`). The key is only read; nothing is generated or moved.
+
+It signs, so it carries the authority of `plugin pack`, and it installs nothing:
+the receipt's `next` is the install command. Linux only; other hosts refuse with
+`LAB_UNSUPPORTED`. Inputs: `file`, `cases`, `name`, `version`, `key`, `cap`,
+`dir`, `sanitize`, `timeout_ms`, `mem_mb`. The receipt `zcl.lab_promote.v1`
+carries `root` (of the test run), `cases_passed`, `release_command`,
+`release_sha3_512`, `name`, `version`, `manifest`, `signature`, `generation`,
+`public_key` and `next`.
+
+Run on r1 (GCC 14.2.0) with a throwaway `HOME` whose `trusted_keys` holds the
+publisher key; `upper.c` upper-cases stdin and `cases.json` is
+
+```
+[{"name":"lower","stdin":"abc\n","expect_stdout":"ABC\n"},
+ {"name":"mixed","stdin":"Hello, z23\n","expect_stdout":"HELLO, Z23\n"}]
+```
+
+```
+$ z23 plugin keygen ./publisher.key           # add the printed key to ~/.z23/plugins/trusted_keys
+$ z23 lab promote upper.c --cases=cases.json --name=upper --version=1.0.0 \
+      --key=./publisher.key --dir=./dist
+"data":{"schema":"zcl.lab_promote.v1","root":"0bc5665f...c260","cases_passed":2,
+ "release_command":"zcc /usr/bin/x86_64-linux-gnu-gcc-14 -std=c23 -O2 -Wall -Wextra -Werror -pedantic -static-pie upper.c -o upper.c.1760126.bin -lm",
+ "release_sha3_512":"779654bf...2602","name":"upper","version":"1.0.0",
+ "manifest":"./dist/upper.plugin.json","signature":"./dist/upper.plugin.sig",
+ "generation":"e5ff7f8e...9242","public_key":"b65cf7c7...8d15",
+ "next":"z23 plugin install --manifest=./dist/upper.plugin.json"}
+$ z23 plugin install --manifest=./dist/upper.plugin.json     # ok, generation e5ff7f8e...9242
+$ z23 plugin switch upper e5ff7f8e...9242                    # ok, current e5ff7f8e...9242
+$ z23 plugin call upper --stdin='abc
+'
+"run":{"ran":true,"exit_code":0,"signal":0,...,"stdout":"ABC\n",...}
+```
+
+The plugin's stdout `ABC\n` is the first case's `expect_stdout`, and the
+`sha3_512` of the `plugin call` reply equals `release_sha3_512`. Without the
+`switch`, `plugin call` refuses with `PLUGIN_NO_GENERATION`. Through MCP the leaf is `lab.promote`.
 
 ## Measured latency
 

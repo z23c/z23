@@ -604,8 +604,8 @@ static const struct cr_int_bound *cr_history_bound(const char *path,
     return NULL;
 }
 
-/* lab.run, lab.test and plugin.call: wall-clock and memory caps of the confined
- * run; plugin.pack: the interface version. */
+/* lab.run, lab.test, lab.promote and plugin.call: wall-clock and memory caps of
+ * the confined run; plugin.pack: the interface version. */
 static const struct cr_int_bound *cr_lab_bound(const char *path, const char *key)
 {
     static const struct cr_int_bound bounds[] = {
@@ -615,7 +615,7 @@ static const struct cr_int_bound *cr_lab_bound(const char *path, const char *key
     if (strcmp(path, "plugin.pack") == 0 && strcmp(key, interface.key) == 0)
         return &interface;
     if (strcmp(path, "lab.run") != 0 && strcmp(path, "lab.test") != 0 &&
-        strcmp(path, "plugin.call") != 0)
+        strcmp(path, "lab.promote") != 0 && strcmp(path, "plugin.call") != 0)
         return NULL;
     for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
         if (strcmp(key, bounds[i].key) == 0) return &bounds[i];

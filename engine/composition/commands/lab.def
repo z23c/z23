@@ -63,6 +63,36 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_PROCESS_EXEC | ZCL_COMMAND_CAP_COMPILER,
     ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_lab_test)
 
+ZCL_COMMAND_READY_COMMAND(
+    "lab.promote", "lab", "",
+    "Turn one C23 file that passes its lab cases into a signed one-shot plugin",
+    "Runs `cases` against `file` exactly as lab.test does (fresh, sanitized "
+    "build) and refuses with LAB_PROMOTE_CASES_FAILED, writing nothing, unless "
+    "every case passes. Then builds a release image of the same source with "
+    "the lab compiler (-std=c23 -O2 -Wall -Wextra -Werror -pedantic "
+    "-static-pie, no sanitizers; failure is LAB_PROMOTE_BUILD_FAILED), runs "
+    "every case again against that image through the confined runner that "
+    "plugin.call uses (any failure is LAB_PROMOTE_RELEASE_DISAGREES), and only "
+    "then packs it as an interface 2 plugin through plugin.pack with the key "
+    "file you name: name, version and key are required, cap and dir are as "
+    "plugin.pack. It signs, so it needs the same authority as plugin.pack; it "
+    "installs nothing and never reads, creates or moves a key. The receipt "
+    "zcl.lab_promote.v1 carries the test root, cases passed, the release "
+    "command and SHA3-512, manifest and signature paths, the generation and "
+    "`next`, the plugin install command. Linux only.",
+    65536U,
+    "lab,promote,plugin,pack,sign,one-shot,static,release,cases",
+    "zcl.lab_promote_input.v1", "zcl.lab_promote.v1",
+    "file,cases,name,version,key,cap,dir,sanitize,timeout_ms,mem_mb", "file",
+    "z23 lab promote upper.c --cases=cases.json --name=upper --version=1.0.0 --key=./publisher.key --dir=./dist",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_PROCESS_EXEC | ZCL_COMMAND_CAP_COMPILER,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_lab_promote)
+
 ZCL_COMMAND_READY_READ(
     "lab.show", "lab", "",
     "Show the stored lab receipt for one root",

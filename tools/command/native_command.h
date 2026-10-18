@@ -992,6 +992,10 @@ void zcl_native_handle_lab_test(
 void zcl_native_handle_lab_show(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* lab.promote (tools/command/native_lab_promote_command.c). */
+void zcl_native_handle_lab_promote(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_package_dev_score_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

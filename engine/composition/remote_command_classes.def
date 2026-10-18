@@ -1166,6 +1166,7 @@ REMOTE_COMMAND_CLASS("work.show", REMOTE_CLASS_NEVER, "")
  * state directory; a remote caller has no file on this node to name. */
 REMOTE_COMMAND_CLASS("lab.run", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("lab.test", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("lab.promote", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("lab.show", REMOTE_CLASS_NEVER, "")
 
 /* AGENT-CONTRACT METHODS — 8 never_remote.

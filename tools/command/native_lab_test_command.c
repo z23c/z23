@@ -351,6 +351,33 @@ static bool lab_build_test(struct json_value *d, const struct lab_ctx *ctx,
            lab_tail(d, comp, requested, comp->ok, t->findings, t->first);
 }
 
+enum lab_check lab_cases_check(const struct zcl_command_request *rq,
+                               struct lab_ctx *ctx, const char *binary,
+                               uint32_t timeout_ms, uint32_t mem_mb,
+                               size_t *passed, size_t *failed)
+{
+    struct lab_cases cs;
+    struct lab_compile *comp = zcl_calloc(1, sizeof(*comp), "lab.compile");
+    struct lab_tally t = { .diff_left = LAB_DIFF_TOTAL };
+    struct json_value rows;
+    enum lab_check res = LAB_CHECK_NO_CASES;
+    json_init(&rows);
+    json_set_array(&rows);
+    if (comp && lab_cases_load(rq, &cs)) {
+        comp->ok = true;
+        snprintf(comp->binary, sizeof(comp->binary), "%s", binary);
+        res = lab_run_cases(ctx, &cs, comp, timeout_ms, mem_mb, &rows, &t)
+                  ? LAB_CHECK_RAN : LAB_CHECK_UNCONFINED;
+        *passed = t.passed;
+        *failed = t.failed;
+    }
+    if (comp)
+        lab_cases_free(&cs);
+    json_free(&rows);
+    free(comp);
+    return res;
+}
+
 struct lab_test_req {
     bool sanitize, fresh;
     uint32_t timeout_ms, mem_mb;

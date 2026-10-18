@@ -159,3 +159,4 @@ dev.agent.receive priority  # the receiver composes its own post object from the
 dev.agent.receive json      # the receiver sub-dispatches a fixed status+name object to dev.agent.queue; request->input never reaches the nested json key.
 dev.agent.receive terminate # the receiver sub-dispatches fixed post and status objects to dev.agent.queue; request->input never reaches the nested terminate key.
 dev.agent.receive engine    # the receiver sub-dispatches fixed post and status objects to dev.agent.queue; request->input never reaches the nested engine key.
+lab.promote interface   # the handler writes interface=2 into the plugin.pack input it composes; request->input never supplies it.

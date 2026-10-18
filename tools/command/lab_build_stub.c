@@ -55,6 +55,18 @@ void lab_compile_source(const struct lab_dirs *d, const struct lab_toolchain *tc
     out->unconfined = true;
 }
 
+void lab_compile_release(const struct lab_dirs *d, const struct lab_toolchain *tc,
+                         const struct lab_source *src, const char *name,
+                         struct lab_compile *out)
+{
+    (void)d;
+    (void)tc;
+    (void)src;
+    (void)name;
+    memset(out, 0, sizeof(*out));
+    out->unconfined = true;
+}
+
 void lab_compile_cleanup(const struct lab_dirs *d, const char *name)
 {
     (void)d;

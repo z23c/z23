@@ -301,7 +301,7 @@ struct lab_cc_args {
 
 static void lab_cc_argv(const struct lab_toolchain *tc,
                         const struct lab_source *src, bool sanitize,
-                        struct lab_cc_args *a)
+                        bool release, struct lab_cc_args *a)
 {
     size_t n = 0;
     if (tc->zcc[0]) {
@@ -310,11 +310,13 @@ static void lab_cc_argv(const struct lab_toolchain *tc,
     } else {
         a->argv[n++] = tc->cc;
     }
-    static const char *const flags[] = {
-        "-std=c23", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-pedantic",
+    static const char *const flags[2][7] = {
+        { "-std=c23", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+        { "-std=c23", "-O2", "-Wall", "-Wextra", "-Werror", "-pedantic",
+          "-static-pie" },
     };
-    for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++)
-        a->argv[n++] = flags[i];
+    for (size_t i = 0; i < sizeof(flags[0]) / sizeof(flags[0][0]); i++)
+        a->argv[n++] = flags[release][i];
     if (sanitize) {
         a->argv[n++] = "-fsanitize=address,undefined";
         a->argv[n++] = "-fno-omit-frame-pointer";
@@ -377,10 +379,20 @@ static void lab_compile_finish(struct lab_proc *p, struct lab_compile *c,
         c->ok = false;
 }
 
+static void lab_command_text(const struct lab_cc_args *a, char *out, size_t cap)
+{
+    size_t len = 0;
+    out[0] = '\0';
+    for (size_t i = 0; a->argv[i] && len < cap; i++) {
+        int n = snprintf(out + len, cap - len, "%s%s", i ? " " : "", a->argv[i]);
+        len += n > 0 ? (size_t)n : 0;
+    }
+}
+
 static void lab_compile_once(const struct lab_dirs *d,
                              const struct lab_toolchain *tc,
                              const struct lab_source *src, const char *dir,
-                             bool sanitize, struct lab_compile *c)
+                             bool sanitize, bool release, struct lab_compile *c)
 {
     struct os_sandbox_path_rule rules[10];
     struct lab_cc_args args;
@@ -390,7 +402,7 @@ static void lab_compile_once(const struct lab_dirs *d,
     snprintf(zdir, sizeof(zdir), "ZCC_DIR=%s", d->zcc);
     const char *env[] = { "PATH=/usr/bin:/bin", "LC_ALL=C", tmpdir, zdir,
                           "ZCC_MAX_MB=64", NULL };
-    lab_cc_argv(tc, src, sanitize, &args);
+    lab_cc_argv(tc, src, sanitize, release, &args);
     struct lab_spawn spawn = {
         .profile = LAB_PROFILE_COMPILE, .confine = lab_sandbox_available(),
         .argv = args.argv, .env = env,
@@ -401,6 +413,7 @@ static void lab_compile_once(const struct lab_dirs *d,
         .nofile = 256,
     };
     memset(c, 0, sizeof(*c));
+    lab_command_text(&args, c->command, sizeof(c->command));
     if (!lab_proc_init(&proc)) {
         snprintf(c->detail, sizeof(c->detail), "allocation failed");
         return;
@@ -420,22 +433,39 @@ static bool lab_sanitizer_missing(const struct lab_compile *c)
            strstr(c->tail, "libubsan");
 }
 
+static bool lab_compile_dir(const struct lab_dirs *d, const struct lab_source *src,
+                            const char *name, char dir[LAB_PATH],
+                            struct lab_compile *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (zcl_path_join(dir, LAB_PATH, d->cc, name) &&
+        zcl_result_is_ok(zcl_mkdir_p(dir, 0700)) && lab_write_source(dir, src))
+        return true;
+    snprintf(out->detail, sizeof(out->detail), "compile directory failed");
+    return false;
+}
+
 void lab_compile_source(const struct lab_dirs *d, const struct lab_toolchain *tc,
                         const struct lab_source *src, const char *name,
                         bool sanitize, struct lab_compile *out)
 {
     char dir[LAB_PATH];
-    memset(out, 0, sizeof(*out));
-    if (!zcl_path_join(dir, sizeof(dir), d->cc, name) ||
-        !zcl_result_is_ok(zcl_mkdir_p(dir, 0700)) || !lab_write_source(dir, src)) {
-        snprintf(out->detail, sizeof(out->detail), "compile directory failed");
+    if (!lab_compile_dir(d, src, name, dir, out))
         return;
-    }
-    lab_compile_once(d, tc, src, dir, sanitize, out);
+    lab_compile_once(d, tc, src, dir, sanitize, false, out);
     if (sanitize && !out->ok && !out->unconfined && lab_sanitizer_missing(out)) {
-        lab_compile_once(d, tc, src, dir, false, out);
+        lab_compile_once(d, tc, src, dir, false, false, out);
         out->sanitizers_unavailable = out->ok;
     }
+}
+
+void lab_compile_release(const struct lab_dirs *d, const struct lab_toolchain *tc,
+                         const struct lab_source *src, const char *name,
+                         struct lab_compile *out)
+{
+    char dir[LAB_PATH];
+    if (lab_compile_dir(d, src, name, dir, out))
+        lab_compile_once(d, tc, src, dir, false, true, out);
 }
 
 void lab_compile_cleanup(const struct lab_dirs *d, const char *name)
