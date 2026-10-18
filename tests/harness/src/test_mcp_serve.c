@@ -8,7 +8,7 @@
  * The server is started from the test's own working directory, which is NOT
  * the checkout: a pass proves the checkout comes only from --checkout.
  *
- * Skips (does not fail) when build/bin/z23-dev is missing; the host-need row
+& build/bin/z23-dev is missing; the host-need row
  * builds it for `make t-fast-exact ONLY=mcp_serve`.
  *
  * make t-fast-exact ONLY=mcp_serve */
@@ -57,27 +57,39 @@ static bool ms_file_exists(const char *path)
     return stat(path, &st) == 0;
 }
 
+/* Optional working directory and ZCL_DEV_SOURCE_ROOT for the next spawn. */
+static const char *ms_child_cwd;
+static const char *ms_child_src;
+
 static pid_t ms_spawn(const char *const args[], const char *home,
                       const char *errfile, int *to_child, int *from_child)
 {
     int in[2], out[2];
     char home_env[PATH_MAX + 8];
     snprintf(home_env, sizeof(home_env), "HOME=%s", home);
+    char src_env[PATH_MAX + 32], bin[PATH_MAX];
     char *envp[] = {home_env, (char *)"PATH=/usr/bin:/bin:/usr/local/bin",
-                    (char *)"ZCL_CLI_TEST_NO_SERVICE_LOOKUP=1", NULL};
-    if (pipe(in) != 0 || pipe(out) != 0)
+                    (char *)"ZCL_CLI_TEST_NO_SERVICE_LOOKUP=1", NULL, NULL};
+    if (ms_child_src) {
+        snprintf(src_env, sizeof(src_env), "ZCL_DEV_SOURCE_ROOT=%s",
+                 ms_child_src);
+        envp[3] = src_env;
+    }
+    if (!realpath(MS_BIN, bin) || pipe(in) != 0 || pipe(out) != 0)
         return -1;
     pid_t pid = fork();
     if (pid < 0)
         return -1;
     if (pid == 0) {
         int err = open(errfile, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (ms_child_cwd && chdir(ms_child_cwd) != 0)
+            _exit(126);
         dup2(in[0], STDIN_FILENO);
         dup2(out[1], STDOUT_FILENO);
         if (err >= 0)
             dup2(err, STDERR_FILENO);
         close(in[0]); close(in[1]); close(out[0]); close(out[1]);
-        execve(MS_BIN, (char *const *)args, envp);
+        execve(bin, (char *const *)args, envp);
         _exit(127);
     }
     close(in[0]);
@@ -215,15 +227,135 @@ static bool read_file(const char *path, char *out, size_t cap)
 static int case_no_checkout(const char *home)
 {
     int failures = 0;
-    char err[PATH_MAX + 32], text[1024];
+    char err[PATH_MAX + 32];
     snprintf(err, sizeof(err), "%s/err_start.txt", home);
-    TEST_CASE("mcp serve without --checkout refuses with NO_CHECKOUT") {
+    TEST_CASE("mcp serve without --checkout initializes and refuses z23_code") {
         struct ms m;
         const char *const args[] = {MS_BIN, "mcp", "serve", NULL};
         ASSERT(ms_start(&m, args, home, err));
-        ASSERT(ms_finish(&m) == 2);
-        ASSERT(read_file(err, text, sizeof(text)));
-        ASSERT(strstr(text, "NO_CHECKOUT") != NULL);
+        ASSERT(ms_tool(&m, 1, "z23_describe", "{\"path\":\"lab.run\"}"));
+        ASSERT(has(&m, "NOT_INITIALIZED"));
+        ASSERT(ms_init(&m));
+        ASSERT(has(&m, "\"name\":\"z23-local\""));
+        ASSERT(ms_call(&m, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":"
+                           "\"tools/list\"}"));
+        ASSERT(has(&m, "\"name\":\"z23_code\""));
+        ASSERT(ms_tool(&m, 3, "z23_describe", "{\"path\":\"lab.run\"}"));
+        ASSERT(has(&m, "\"isError\":false"));
+        ASSERT(has(&m, "idempotency_key"));
+        ASSERT(ms_tool(&m, 4, "z23_search", "{\"query\":\"lab run\"}"));
+        ASSERT(has(&m, "lab.run"));
+        ASSERT(ms_tool(&m, 5, "z23_code",
+                       "{\"sub\":\"guide\",\"input\":{\"paths\":[\"a.c\"]}}"));
+        ASSERT(has(&m, "NO_CHECKOUT"));
+        ASSERT(ms_finish(&m) == 0);
+    } TEST_END
+    return failures;
+}
+
+static int case_no_checkout_instructions(const char *home)
+{
+    int failures = 0;
+    char err[PATH_MAX + 32];
+    snprintf(err, sizeof(err), "%s/err_instr.txt", home);
+    TEST_CASE("initialize without --checkout says z23_code needs --checkout") {
+        struct ms m;
+        const char *const args[] = {MS_BIN, "mcp", "serve", NULL};
+        ASSERT(ms_start(&m, args, home, err));
+        ASSERT(ms_call(&m, ms_init_req));
+        ASSERT(has(&m, "z23_code needs --checkout=<git toplevel>"));
+        ASSERT(!has(&m, "Checkout identity"));
+        ASSERT(ms_finish(&m) == 0);
+    } TEST_END
+    return failures;
+}
+
+static bool ms_write_page(const char *dir, const char *name, const char *text)
+{
+    char path[PATH_MAX + 64];
+    FILE *f;
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    f = fopen(path, "w");
+    if (!f)
+        return false;
+    fputs(text, f);
+    return fclose(f) == 0;
+}
+
+static int case_no_checkout_source_root(const char *home)
+{
+    int failures = 0;
+    char err[PATH_MAX + 32], root[PATH_MAX + 16], docs[PATH_MAX + 32];
+    char req[PATH_MAX + 128];
+    snprintf(err, sizeof(err), "%s/err_root.txt", home);
+    snprintf(root, sizeof(root), "%s/probe_root", home);
+    snprintf(docs, sizeof(docs), "%s/docs", root);
+    TEST_CASE("without --checkout neither the cwd nor ZCL_DEV_SOURCE_ROOT is a source root") {
+        struct ms m;
+        const char *const args[] = {MS_BIN, "mcp", "serve", NULL};
+        ASSERT(mkdir(root, 0700) == 0 && mkdir(docs, 0700) == 0);
+        ASSERT(ms_write_page(docs, "README.md", "# Probe\n"));
+        ASSERT(ms_write_page(docs, "PROBE.md", "# Probe\n\nprobe-marker-7f3a\n"));
+        ms_child_cwd = root;
+        ms_child_src = root;
+        ASSERT(ms_start(&m, args, home, err));
+        ms_child_cwd = NULL;
+        ms_child_src = NULL;
+        ASSERT(ms_init(&m));
+        snprintf(req, sizeof(req), "{\"path\":\"discover.read\",\"input\":"
+                 "{\"page\":\"PROBE.md\",\"docsdir\":\"%s\"}}", docs);
+        ASSERT(ms_tool(&m, 2, "z23_run", req));
+        ASSERT(has(&m, "probe-marker-7f3a"));
+        ASSERT(ms_tool(&m, 3, "z23_run",
+                       "{\"path\":\"discover.read\",\"input\":"
+                       "{\"page\":\"PROBE.md\"}}"));
+        ASSERT(!has(&m, "probe-marker-7f3a"));
+        ASSERT(ms_tool(&m, 4, "z23_run",
+                       "{\"path\":\"code.tests\",\"input\":"
+                       "{\"path\":\"tools/mcp/mcp_rpc.c\"}}"));
+        ASSERT(has(&m, "NO_CHECKOUT"));
+        ASSERT(ms_tool(&m, 5, "z23_run", "{\"path\":\"dev.status\"}"));
+        ASSERT(has(&m, "NO_CHECKOUT"));
+        ASSERT(ms_finish(&m) == 0);
+    } TEST_END
+    return failures;
+}
+
+static int case_lab_run(const char *home)
+{
+    int failures = 0;
+    char err[PATH_MAX + 32], src[PATH_MAX + 32], req[PATH_MAX + 128];
+    snprintf(err, sizeof(err), "%s/err_lab.txt", home);
+    snprintf(src, sizeof(src), "%s/lab_probe.c", home);
+    TEST_CASE("z23_run lab.run needs an idempotency_key and returns the program output") {
+        struct ms m;
+        const char *const args[] = {MS_BIN, "mcp", "serve", NULL};
+        FILE *f = fopen(src, "w");
+        ASSERT(f != NULL);
+        fputs("#include <stdio.h>\nint main(void)\n{\n"
+              "    puts(\"lab-probe-ok\");\n    return 0;\n}\n", f);
+        fclose(f);
+        ASSERT(ms_start(&m, args, home, err));
+        ASSERT(ms_init(&m));
+        snprintf(req, sizeof(req), "{\"path\":\"lab.run\",\"input\":"
+                 "{\"file\":\"%s\"}}", src);
+        ASSERT(ms_tool(&m, 2, "z23_run", req));
+        ASSERT(has(&m, "IDEMPOTENCY_KEY_REQUIRED"));
+        snprintf(req, sizeof(req), "{\"path\":\"lab.run\",\"input\":"
+                 "{\"file\":\"%s\",\"idempotency_key\":\"probe-1\"}}", src);
+        ASSERT(ms_tool(&m, 3, "z23_run", req));
+        if (has(&m, "LAB_UNCONFINED") || has(&m, "LAB_UNSUPPORTED")) {
+            printf("mcp_serve: lab.run unavailable on this host - SKIP run half\n");
+        } else {
+            ASSERT(has(&m, "\"isError\":false"));
+            ASSERT(has(&m, "lab-probe-ok"));
+            snprintf(req, sizeof(req), "{\"path\":\"lab.run\",\"input\":"
+                     "{\"file\":\"%s\",\"idempotency_key\":\"probe-2\"}}", src);
+            ASSERT(ms_tool(&m, 4, "z23_run", req));
+            ASSERT(has(&m, "\\\"hit\\\":true"));
+        }
+        ASSERT(ms_finish(&m) == 0);
+        TEST_DISCARD(unlink(src));
     } TEST_END
     return failures;
 }
@@ -1163,6 +1295,9 @@ int test_mcp_serve(void)
         return failures + 1;
     }
     failures += case_no_checkout(home);
+    failures += case_no_checkout_instructions(home);
+    failures += case_no_checkout_source_root(home);
+    failures += case_lab_run(home);
     failures += case_unexpanded(home);
     failures += case_relative(home);
     failures += case_args_refused(home);

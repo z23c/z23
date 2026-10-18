@@ -27,13 +27,13 @@ ZCL_COMMAND_READY_COMMAND(
     65536U,
     "lab,c23,compile,run,sandbox,sanitizer,ubsan,asan,test,exit,stdout",
     "zcl.lab_run_input.v1", "zcl.lab_run.v1",
-    "file,stdin,args,sanitize,timeout_ms,mem_mb,fresh,compile_only", "file",
+    "file,stdin,args,sanitize,timeout_ms,mem_mb,fresh,compile_only,idempotency_key", "file",
     "z23 lab run hello.c --stdin=hi",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
-    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CONFIRM_IDEMPOTENCY, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC | ZCL_COMMAND_CAP_COMPILER,
     ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_lab_run)
 
@@ -53,13 +53,13 @@ ZCL_COMMAND_READY_COMMAND(
     65536U,
     "lab,c23,test,cases,expect,diff,sandbox,sanitizer",
     "zcl.lab_test_input.v1", "zcl.lab_test.v1",
-    "file,cases,sanitize,timeout_ms,mem_mb,fresh", "file",
+    "file,cases,sanitize,timeout_ms,mem_mb,fresh,idempotency_key", "file",
     "z23 lab test solve.c --cases=cases.json",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
-    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CONFIRM_IDEMPOTENCY, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC | ZCL_COMMAND_CAP_COMPILER,
     ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_lab_test)
 

@@ -160,7 +160,13 @@ replayed, not re-run. Pass `fresh:true` to compile and run again.
 4. Treat `sanitizer.findings > 0` as a bug even when the exit code is 0.
 5. `z23 lab show <root>` re-reads any receipt without re-running.
 
-Through MCP the same leaves are `lab.run`, `lab.test` and `lab.show`.
+Through MCP (`z23 mcp serve`, no `--checkout` needed) `lab.run` and `lab.test`
+run with `z23_run` and an `idempotency_key` in `input`, for example
+`{"path":"lab.run","input":{"file":"/abs/solve.c","idempotency_key":"try-1"}}`;
+without the key the call is refused with `IDEMPOTENCY_KEY_REQUIRED`. The key
+is not part of the root, so a repeat with a new key still answers from the
+stored receipt. `lab.show` is a read. `plugin.call` stays CLI-only: it needs
+owner authority, which the adapter refuses.
 
 A lab file that reads stdin and writes stdout can be packed unchanged as a
 one-shot plugin (`z23 plugin pack --interface=2`) and run with `z23 plugin call`;

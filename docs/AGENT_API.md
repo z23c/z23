@@ -1465,7 +1465,7 @@ archive bytes for the same node action.
 
 ## Local MCP adapter
 
-`z23 mcp serve --checkout=<absolute git toplevel>` is a local stdio MCP server
+`z23 mcp serve [--checkout=<absolute git toplevel>]` is a local stdio MCP server
 for agent harnesses that launch their own tools (Claude Code, Codex). It
 speaks newline-delimited JSON-RPC on stdin/stdout, handles one request at a
 time and logs to stderr only. Four tools keep the MCP tool listing near 2 KB:
@@ -1473,10 +1473,18 @@ time and logs to stderr only. Four tools keep the MCP tool listing near 2 KB:
 `z23_search` takes an optional `scope`, `commands` (default) or `wiki`; the wiki
 scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
 
-- `--checkout` is required. Without it the server exits with `NO_CHECKOUT`;
-  it never uses the working directory. A relative path is refused
-  (`CHECKOUT_NOT_ABSOLUTE`), as is an unexpanded `${...}`
-  (`CHECKOUT_UNEXPANDED`). At `initialize` it verifies the git toplevel, HEAD,
+- `--checkout` is optional. Without it the server starts with no source root:
+  it unsets `ZCL_DEV_SOURCE_ROOT`, moves to `/`, and never uses the caller's
+  working directory. `z23_search`, `z23_describe` and `z23_run` work against
+  the built-in registry, including `lab.run` and `lab.test` (see
+  [LAB.md](LAB.md)); `z23_code` and every `z23_run` leaf that reads a source
+  tree (`code.*`, `dev.*`, `app.presentation.*`, `fleet.objectives`, and any
+  leaf declaring checkout capabilities) are refused with `NO_CHECKOUT`, and
+  `instructions` say so. Tool calls before `initialize` are refused with
+  `NOT_INITIALIZED`.
+- With `--checkout`, an empty or over-long value is refused (`NO_CHECKOUT`), a
+  relative path is refused (`CHECKOUT_NOT_ABSOLUTE`), as is an unexpanded
+  `${...}` (`CHECKOUT_UNEXPANDED`). At `initialize` it verifies the git toplevel, HEAD,
   the dirty flag and the code index `source_root_sha3` (when an index exists)
   and reports them in `instructions`; tool calls are refused until that
   succeeds.
@@ -1490,6 +1498,8 @@ scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
   `plan_id`, `plan_token`, `confirm` or `mode` input, and an idempotency leaf
   that declares no `idempotency_key` are refused
   (`MUTATION_NO_CONFIRMATION_FLOW`); an undeclared key never waives a check.
+  An idempotency leaf that declares the key runs when the call supplies a
+  non-empty `idempotency_key` (`IDEMPOTENCY_KEY_REQUIRED` otherwise).
   The plan stage is a `<stem>.plan` leaf whose `<stem>.commit` partner is a
   mutation in the registry.
   Never-remote commands are allowed here: the adapter is a local operator

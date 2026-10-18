@@ -1894,8 +1894,8 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `lab run` | ready | mutate / app-write / operator · maintenance/moderate | **`file`**, `stdin`, `args`, `sanitize`, `timeout_ms`, `mem_mb`, `fresh`, `compile_only` | `zcl.lab_run.v1` | `z23 lab run hello.c --stdin=hi` | Compile one C file and run it confined, returning exit, output and sanitizer findings |
-| `lab test` | ready | mutate / app-write / operator · maintenance/moderate | **`file`**, `cases`, `sanitize`, `timeout_ms`, `mem_mb`, `fresh` | `zcl.lab_test.v1` | `z23 lab test solve.c --cases=cases.json` | Compile one C file once and run a list of stdin/args cases confined, with pass or fail and a diff |
+| `lab run` | ready | mutate / app-write / operator, idempotency · maintenance/moderate | **`file`**, `stdin`, `args`, `sanitize`, `timeout_ms`, `mem_mb`, `fresh`, `compile_only`, `idempotency_key` | `zcl.lab_run.v1` | `z23 lab run hello.c --stdin=hi` | Compile one C file and run it confined, returning exit, output and sanitizer findings |
+| `lab test` | ready | mutate / app-write / operator, idempotency · maintenance/moderate | **`file`**, `cases`, `sanitize`, `timeout_ms`, `mem_mb`, `fresh`, `idempotency_key` | `zcl.lab_test.v1` | `z23 lab test solve.c --cases=cases.json` | Compile one C file once and run a list of stdin/args cases confined, with pass or fail and a diff |
 | `lab promote` | ready | mutate / app-write / **owner** · maintenance/moderate | **`file`**, `cases`, `name`, `version`, `key`, `cap`, `dir`, `sanitize`, `timeout_ms`, `mem_mb` | `zcl.lab_promote.v1` | `z23 lab promote upper.c --cases=cases.json --name=upper --version=1.0.0 --key=./publisher.key --dir=./dist` | Turn one C23 file that passes its lab cases into a signed one-shot plugin |
 | `lab show` | ready | read / read / operator · fast/low | **`root`** | `zcl.lab_show.v1` | `z23 lab show 4f2c0a9e...` | Show the stored lab receipt for one root |
 
