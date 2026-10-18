@@ -86,8 +86,11 @@
 /* Every line the fixtures and real logs can produce comfortably fits; this
  * is a diagnostic-scale cap, not a protocol limit. */
 #define DVP_LINE_CAP 8192
-/* Distinct edited files this leaf can track in one run. */
-#define DVP_MAX_FILES 4096
+/* Distinct edited files this leaf can track in one run, and the bytes their
+ * paths may occupy together. Both live in the handler's stack frame, so the
+ * frame stays far below any thread stack; further paths are not listed. */
+#define DVP_MAX_FILES 1024
+#define DVP_PATH_ARENA 65536
 
 /* Strip ANSI escape sequences from `in` into `out` (size cap), returning the
  * stripped length. Recognizes ESC '[' <bytes 0x30-0x3f>* <bytes 0x20-0x2f>*
@@ -142,8 +145,20 @@ static void dvp_chomp(char *s)
         s[--n] = '\0';
 }
 
+/* Records the exit code of an `rc=<n> DONE` line; any other line is ignored. */
+static void dvp_parse_rc(const char *line, long long *rc)
+{
+    long long parsed_rc;
+    int consumed = 0;
+    if (sscanf(line, "rc=%lld DONE%n", &parsed_rc, &consumed) == 1 &&
+        consumed > 0 && line[consumed] == '\0')
+        *rc = parsed_rc;
+}
+
 struct dvp_files {
-    char paths[DVP_MAX_FILES][PATH_MAX];
+    const char *paths[DVP_MAX_FILES];
+    char arena[DVP_PATH_ARENA];
+    size_t used;
     size_t count;
 };
 
@@ -153,9 +168,11 @@ static void dvp_files_add(struct dvp_files *files, const char *path)
         if (strcmp(files->paths[i], path) == 0)
             return;
     }
-    if (files->count < DVP_MAX_FILES) {
-        (void)snprintf(files->paths[files->count], PATH_MAX, "%s", path);
-        files->count++;
+    size_t need = strlen(path) + 1;
+    if (files->count < DVP_MAX_FILES && need <= sizeof(files->arena) - files->used) {
+        memcpy(files->arena + files->used, path, need);
+        files->paths[files->count++] = files->arena + files->used;
+        files->used += need;
     }
 }
 
@@ -212,6 +229,7 @@ void zcl_native_handle_dev_agent_pace(
         return;
     }
 
+    files.used = 0;
     files.count = 0;
 
     while (fgets(raw, sizeof(raw), f)) {
@@ -248,13 +266,7 @@ void zcl_native_handle_dev_agent_pace(
             continue;
         }
 
-        {
-            long long parsed_rc;
-            int consumed = 0;
-            if (sscanf(line, "rc=%lld DONE%n", &parsed_rc, &consumed) == 1 &&
-                consumed > 0 && line[consumed] == '\0')
-                rc = parsed_rc;
-        }
+        dvp_parse_rc(line, &rc);
     }
     (void)fclose(f);
 

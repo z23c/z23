@@ -14,6 +14,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +125,29 @@ static bool dvx_arr_has(const struct json_value *arr, const char *needle)
 #define READ    E "\xe2\x86\x92 " E
 #define WRITE   E "\xe2\x86\x90 " E
 #define SEARCH  E "\xe2\x9c\xb1 " E
+
+/* The handler runs on a 512 KiB stack, far below the 8 MiB default, so a
+ * large automatic object in its frame faults on entry as it did from the CLI. */
+static void *dvx_small_stack_main(void *arg)
+{
+    struct dvx_call *c = arg;
+    zcl_native_handle_dev_agent_pace(&c->request, &c->reply);
+    return NULL;
+}
+
+static bool dvx_run_small_stack(struct dvx_call *c)
+{
+    pthread_attr_t attr;
+    pthread_t th;
+    bool ok = false;
+    if (pthread_attr_init(&attr) != 0)
+        return false;
+    if (pthread_attr_setstacksize(&attr, 512u * 1024u) == 0 &&
+        pthread_create(&th, &attr, dvx_small_stack_main, c) == 0)
+        ok = pthread_join(th, NULL) == 0;
+    (void)pthread_attr_destroy(&attr);
+    return ok;
+}
 
 static void dvx_call_on(struct dvx_call *c, const char *dir, const char *log)
 {
@@ -265,6 +289,37 @@ int test_devagent_pace(void)
         ASSERT(dvx_run(&c));
         ASSERT(!dvx_ok(&c));
         ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("pace: no input at all returns a typed refusal on a small stack") {
+        struct dvx_call c;
+        dvx_begin(&c);
+        c.request.input = NULL;
+        ASSERT(dvx_run_small_stack(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("pace: an empty input object returns a typed refusal on a small stack") {
+        struct dvx_call c;
+        dvx_begin(&c);
+        ASSERT(dvx_run_small_stack(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("pace: a valid log succeeds on a small stack") {
+        struct dvx_call c;
+        dvx_call_on(&c, root, "paced.out");
+        ASSERT(dvx_run_small_stack(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "verdict"), "PACED");
         dvx_end(&c);
         PASS();
     }
