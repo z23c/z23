@@ -3852,6 +3852,24 @@ static bool nc_main_flag_format_bad(bool seen, const char *value)
     return seen || !value || strcmp(value, "json") != 0;
 }
 
+/* `--format=X` is the leaf's own input when the leaf declares a `format` key
+ * and X is not the output selector `json`. */
+static bool nc_main_format_is_input(const struct nc_main_state *st,
+                                    const char *value)
+{
+    const char *keys = st->spec->input_keys ? st->spec->input_keys : "";
+    if (!value || strcmp(value, "json") == 0)
+        return false;
+    for (const char *at = keys; at && *at; ) {
+        const char *end = strchr(at, ',');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (n == 6 && memcmp(at, "format", 6) == 0)
+            return true;
+        at = end ? end + 1 : NULL;
+    }
+    return false;
+}
+
 static bool nc_main_flag_field_bad(bool seen, const char *value)
 {
     return seen || !value || !value[0];
@@ -4002,6 +4020,8 @@ static enum nc_main_flag_result nc_main_apply_flag_group2(
         return NC_FLAG_OK;
     }
     if (strcmp(flag_key, "format") == 0) {
+        if (nc_main_format_is_input(st, value))
+            return NC_FLAG_UNMATCHED;
         if (nc_main_flag_format_bad(st->seen_format, value)) {
             (void)snprintf(why, why_cap,
                            "only one --format=json is implemented for bounded native results");

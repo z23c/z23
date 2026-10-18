@@ -41,7 +41,7 @@ Reviews are ordinary revisions whose body is a
 ```sh
 z23 fleet wiki write review-push-gate "Review of exact bytes" \
   '{"schema":"zcl.fleet_wiki_review.v1","target":"<64 hex revision id>","verdict":"approve","rating":5,"rationale":"Checked these exact bytes."}'
-z23 fleet wiki history --target <revision-id>
+z23 fleet wiki history --target=<revision-id>
 ```
 
 The verdict is `approve`, `request-changes` or `comment`; `rating` is

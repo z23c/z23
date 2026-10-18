@@ -384,8 +384,8 @@ Replace the target placeholder with an exact revision this node retains:
 
     z23 fleet wiki write review-example "Review of exact bytes" \
       '{"schema":"zcl.fleet_wiki_review.v1","target":"<64 lowercase hex revision id>","verdict":"approve","rating":5,"rationale":"I checked these exact bytes."}'
-    z23 fleet wiki history --target <revision-id>
-    z23 fleet wiki history --target <revision-id> --after_id <returned-after_id>
+    z23 fleet wiki history --target=<revision-id>
+    z23 fleet wiki history --target=<revision-id> --after_id=<returned-after_id>
 
 The verdict is approve, request-changes or comment; rating is optional
 and must be an integer from 1 through 5. The rationale is 1..1000 printable
@@ -452,7 +452,7 @@ A wiki page body may be a JSON object of schema `zcl.fleet_wiki_entry.v1`:
 `topic` is a slug (`[a-z0-9-]`, at most 64 bytes); `lessons` holds 1..16
 objects (`rule` 1..200 bytes, `why` and `evidence` at most 400 bytes each);
 `applies_to` holds at most 16 strings of 1..64 bytes; `updated` is ISO-8601
-UTC. Strings must be well-formed UTF-8 without control bytes. No other key is accepted, and no key may appear twice. `fleet wiki write ... --format entry` refuses a
+UTC. Strings must be well-formed UTF-8 without control bytes. No other key is accepted, and no key may appear twice. `fleet wiki write ... --format=entry` refuses a
 body that does not validate (`BAD_ENTRY`, naming the first violated rule);
 `format` on any kind other than `wiki` is refused (`FORMAT_NOT_WIKI`);
 without a format option, entry validation is optional. A valid entry in the

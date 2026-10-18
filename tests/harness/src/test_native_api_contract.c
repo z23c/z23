@@ -1147,6 +1147,43 @@ static int test_uniform_input_file_refusals(void)
     return failures;
 }
 
+static char g_format_params[1024];
+static char *format_capture_rpc(const char *method, const char *params)
+{
+    (void)method;
+    snprintf(g_format_params, sizeof(g_format_params), "%s", params ? params : "");
+    return strdup("{\"ok\":false,\"code\":\"STUB\",\"message\":\"stub\"}");
+}
+
+static int test_format_flag_binds_leaf_input(void)
+{
+    int failures = 0;
+    TEST_CASE("--format=entry binds fleet.wiki.write input; json stays output; other leaves refuse it") {
+        char wire[16384];
+        int rc = 0;
+        const char *entry[] = {"wiki", "write", "s", "t", "body", "--format=entry"};
+        const char *json[] = {"wiki", "write", "s", "t", "body", "--format=json"};
+        const char *other[] = {"board", "list", "--format=entry"};
+        node_rpc_client_set_test_hook(format_capture_rpc);
+        g_format_params[0] = '\0';
+        ASSERT(uniform_cli("fleet", entry, 6, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "BAD_FLAG") == NULL);
+        ASSERT(strstr(g_format_params, "\"format\":\"entry\"") != NULL);
+        g_format_params[0] = '\0';
+        ASSERT(uniform_cli("fleet", json, 6, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "BAD_FLAG") == NULL);
+        ASSERT(strstr(g_format_params, "\"format\"") == NULL);
+        g_format_params[0] = '\0';
+        ASSERT(uniform_cli("fleet", other, 3, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "BAD_FLAG") != NULL);
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_EQ(g_format_params[0], '\0');
+        node_rpc_client_set_test_hook(NULL);
+    } TEST_END
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 static int test_wallet_security_refusal_flags(void)
 {
     int failures = 0;
@@ -3579,6 +3616,7 @@ int test_native_api_contract(void)
     failures += test_uniform_help();
     failures += test_uniform_input_file();
     failures += test_uniform_input_file_refusals();
+    failures += test_format_flag_binds_leaf_input();
     failures += test_raw_native_pipeline_mines_exact_signed_bytes();
     failures += test_app_write_native_e2e();
     failures += test_oprindex_rebuild_requires_witness();
