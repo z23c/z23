@@ -45,6 +45,8 @@ int test_dev_ship(void)
 #define DSX_HOSTS "shipfix-a shipfix-p shipfix-b"
 #define DSX_PROOF "shipfix-p"
 #define DSX_SCHEMA_FILE "engine/models/src/database_fixture.c"
+#define DSX_SCHEMA_HEADER "engine/models/include/models/database.h"
+#define DSX_DDL "CREATE TABLE fixture(a);\n"
 
 static const char *const dsx_copied[] = {
     "tools/ship.sh",
@@ -269,6 +271,10 @@ static void dsx_fixture(struct dsx *fx)
     dsx_write(path, "/build/\n/vendor/\n", 0644);
     (void)snprintf(path, sizeof(path), "%s/README", fx->repo);
     dsx_write(path, "ship fixture v1\n", 0644);
+    (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_HEADER, fx->repo);
+    dsx_write(path, "#define NODE_DB_SCHEMA_LATEST 87\n", 0644);
+    (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
+    dsx_write(path, DSX_DDL "int v;\n", 0644);
     dsx_commit(fx, "base");
     dsx_git(fx, (const char *const[]){ "remote", "add", "origin", fx->origin,
                                        NULL });
@@ -570,13 +576,14 @@ static void dsx_origin_tip(const struct dsx *fx, char out[42])
         dsx_die("cannot read origin main:", fx->origin);
 }
 
-/* ship.sh's own two schema functions, cut out of the fixture's copy and run
+/* ship.sh's schema functions, cut out of the fixture's copy and run
  * against origin/main..HEAD: "rc=<0|1|2> files=<a b>". */
 static void dsx_sh_schema_decision(const struct dsx *fx, bool accept,
                                    char *out, size_t cap)
 {
     const char *script =
-        "eval \"$(sed -n '/^ship_schema_files_changed() {/,/^}/p;"
+        "eval \"$(sed -n '/^ship_schema_version_of() {/,/^}/p;"
+        "/^ship_schema_files_changed() {/,/^}/p;"
         "/^ship_one_way_schema_decision() {/,/^}/p' tools/ship.sh)\"; "
         "changed=\"$(ship_schema_files_changed . origin/main HEAD)\"; rc=0; "
         "ship_one_way_schema_decision \"$changed\" \"$1\" || rc=$?; "
@@ -871,9 +878,17 @@ static int dsx_case_ahead(const struct dsx *fx, struct dsx_sh *sh)
         ASSERT(!sh->forward_only);
         PASS();
     }
+    TEST("ship: a schema-file edit with no DDL or version change is not a schema change") {
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
+        dsx_write(path, DSX_DDL "int benign;\n", 0644);
+        dsx_commit(fx, "unpushed benign schema-file edit");
+        dsx_sh_schema_decision(fx, true, decision, sizeof(decision));
+        ASSERT_STR_EQ(decision, "rc=0 files=");
+        PASS();
+    }
     TEST("ship: a schema change is would_refuse, rc 1, as ship.sh decides") {
         (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
-        dsx_write(path, "int fixture_schema;\n", 0644);
+        dsx_write(path, "int fixture_schema;\nALTER TABLE fixture ADD b;\n", 0644);
         dsx_commit(fx, "unpushed schema change");
         dsx_ship(&c, fx, "local", "d");
         ASSERT_STR_EQ(dsx_class(&c), "ahead_origin");
@@ -902,6 +917,26 @@ static int dsx_case_ahead(const struct dsx *fx, struct dsx_sh *sh)
         ASSERT_EQ(sh->rc, 1);
         ASSERT_STR_EQ(sh->cls, "ahead_origin");
         ASSERT(!sh->forward_only);
+        PASS();
+    }
+    TEST("ship: a NODE_DB_SCHEMA_LATEST bump alone lists database.h") {
+        dsx_git(fx, (const char *const[]){ "reset", "-q", "--hard",
+                                           "origin/main", NULL });
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_HEADER, fx->repo);
+        dsx_write(path, "#define NODE_DB_SCHEMA_LATEST 88\n", 0644);
+        dsx_commit(fx, "unpushed version bump");
+        dsx_sh_schema_decision(fx, false, decision, sizeof(decision));
+        ASSERT_STR_EQ(decision, "rc=1 files=" DSX_SCHEMA_HEADER);
+        PASS();
+    }
+    TEST("ship: removing a DDL line alone is not a schema change") {
+        dsx_git(fx, (const char *const[]){ "reset", "-q", "--hard",
+                                           "origin/main", NULL });
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
+        dsx_write(path, "int v;\n", 0644);
+        dsx_commit(fx, "unpushed DDL removal");
+        dsx_sh_schema_decision(fx, true, decision, sizeof(decision));
+        ASSERT_STR_EQ(decision, "rc=0 files=");
         PASS();
     }
 _test_next:

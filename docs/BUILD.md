@@ -879,7 +879,12 @@ A candidate that changes persistent-schema code (`engine/models/src/database*`,
 `engine/models/include/models/database*`, `schema_migration.*`) is refused by
 default on every target, remote or local, because reverting to the prior
 binary against an already-migrated datadir is itself unsafe — the old binary
-does not know how to refuse a database newer than it is. Setting
+does not know how to refuse a database newer than it is.
+A change is decided by content, not by path: `NODE_DB_SCHEMA_LATEST` in
+`engine/models/include/models/database.h` differs from the rollback commit, or
+the diff adds a line containing `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE`,
+`DROP TABLE`, `DROP INDEX` or `user_version` (case-insensitive) to those files.
+Other edits to them, and removed lines, ship with rollback armed. Setting
 `ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1` is a deliberate, explicit forward-only
 acceptance: it lets such a candidate ship, and in the same breath disarms
 automatic rollback for the affected host(s), remote or local. A remote target

@@ -42,7 +42,10 @@
 #   ZCL_SHIP_REMOTE   compatibility fallback for one remote host
 #   ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1
 #                     deploy even though the candidate changes persistent-schema
-#                     code. Default is to REFUSE, because the previous binary
+#                     code. A change is NODE_DB_SCHEMA_LATEST differing from the
+#                     rollback commit, or an added CREATE/ALTER/DROP TABLE|INDEX
+#                     or user_version line in those files; other edits do not
+#                     count. Default is to REFUSE, because the previous binary
 #                     cannot read the migrated database. Setting this also
 #                     DISARMS the automatic rollback for a remote host: with a
 #                     forward migration applied, restoring the old binary is
@@ -87,17 +90,36 @@ ship_scratch_root() {
 }
 
 # Prints (possibly empty) newline-separated persistent-schema files changed
-# between $2 (prior rollback commit) and $3 (candidate) in git repo $1. Same
-# pathspecs the remote leg's forward-only check uses. Kept as its own
+# between $2 (prior rollback commit) and $3 (candidate) in git repo $1. A file
+# counts only by content: database.h when NODE_DB_SCHEMA_LATEST differs (or
+# is unreadable on either side, which fails closed), and any file under the
+# four schema pathspecs the remote leg's forward-only check uses that gains a
+# CREATE/ALTER/DROP TABLE|INDEX or user_version line. Kept as its own
 # function, defined here (before --selftest) so the local decision below is
 # testable against a small fixture git history instead of the real checkout.
+ship_schema_version_of() {
+    git -C "$1" show "$2:engine/models/include/models/database.h" 2>/dev/null |
+        sed -n 's/^[[:space:]]*#[[:space:]]*define[[:space:]]\{1,\}NODE_DB_SCHEMA_LATEST[[:space:]]\{1,\}\([0-9][0-9]*\).*/\1/p' |
+        head -1 || true
+}
+
 ship_schema_files_changed() {
-    local repo="$1" prior="$2" head="$3"
-    git -C "$repo" diff --name-only "$prior" "$head" -- \
-        'engine/models/src/database*.c' \
-        'engine/models/include/models/database*.h' \
-        'engine/models/src/schema_migration.c' \
-        'engine/models/include/models/schema_migration.h'
+    local repo="$1" prior="$2" head="$3" before after
+    before="$(ship_schema_version_of "$repo" "$prior")"
+    after="$(ship_schema_version_of "$repo" "$head")"
+    {
+        if [ -z "$before" ] || [ "$before" != "$after" ]; then
+            printf '%s\n' engine/models/include/models/database.h
+        fi
+        git -C "$repo" diff -U0 --no-color --no-ext-diff "$prior" "$head" -- \
+            'engine/models/src/database*.c' \
+            'engine/models/include/models/database*.h' \
+            'engine/models/src/schema_migration.c' \
+            'engine/models/include/models/schema_migration.h' |
+            awk '/^\+\+\+ /{f=substr($2,3);next}
+                 /^\+/{l=tolower($0)
+                       if (l ~ /create (unique )?(table|index)|alter table|drop (table|index)|user_version/) print f}'
+    } | sort -u
 }
 
 # Pure decision: given $1 = the (possibly empty) output of
@@ -978,19 +1000,46 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     ( cd "$schema_repo" && git init -q &&
       git config user.email t@t.example && git config user.name selftest &&
       git config commit.gpgsign false )
-    printf 'v1\n' > "$schema_repo/engine/models/src/database_fixture.c"
+    schema_h="engine/models/include/models/database.h"
+    schema_c="engine/models/src/database_fixture.c"
+    mkdir -p "$schema_repo/engine/models/include/models"
+    printf '#define NODE_DB_SCHEMA_LATEST 87\n' > "$schema_repo/$schema_h"
+    printf 'v1\nCREATE TABLE t(a);\n' > "$schema_repo/$schema_c"
     printf 'unrelated v1\n' > "$schema_repo/README"
     ( cd "$schema_repo" && git add -A && git commit -q -m base )
     schema_base="$(git -C "$schema_repo" rev-parse HEAD)"
+    schema_commit() {
+        ( cd "$schema_repo" && git add -A && git commit -q -m "$1" &&
+          git rev-parse HEAD )
+    }
     printf 'unrelated v2\n' > "$schema_repo/README"
-    ( cd "$schema_repo" && git add -A && git commit -q -m no-schema-change )
-    schema_unchanged_head="$(git -C "$schema_repo" rev-parse HEAD)"
-    printf 'v2\n' > "$schema_repo/engine/models/src/database_fixture.c"
-    ( cd "$schema_repo" && git add -A && git commit -q -m schema-change )
-    schema_changed_head="$(git -C "$schema_repo" rev-parse HEAD)"
+    schema_unchanged_head="$(schema_commit no-schema-change)"
+    # A schema-file edit without DDL or a version change is not a schema change.
+    printf 'v2\nCREATE TABLE t(a);\n' > "$schema_repo/$schema_c"
+    schema_benign_head="$(schema_commit benign-edit)"
+    # Removing a DDL line adds none.
+    printf 'v2\n' > "$schema_repo/$schema_c"
+    schema_delete_head="$(schema_commit delete-ddl)"
+    printf 'v2\nalter table t add column b;\n' > "$schema_repo/$schema_c"
+    schema_changed_head="$(schema_commit schema-change)"
+    ( cd "$schema_repo" && git checkout -q "$schema_base" )
+    printf '#define NODE_DB_SCHEMA_LATEST 88\n' > "$schema_repo/$schema_h"
+    schema_bump_head="$(schema_commit version-bump)"
+    ( cd "$schema_repo" && git checkout -q -f "$schema_base" &&
+      git rm -q "$schema_h" )
+    schema_nover_head="$(schema_commit drop-version-header)"
     [ -z "$(ship_schema_files_changed "$schema_repo" "$schema_base" "$schema_unchanged_head")" ]
+    [ -z "$(ship_schema_files_changed "$schema_repo" "$schema_base" "$schema_benign_head")" ]
+    [ -z "$(ship_schema_files_changed "$schema_repo" "$schema_base" "$schema_delete_head")" ]
+    [ "$(ship_schema_files_changed "$schema_repo" "$schema_base" "$schema_bump_head")" = "$schema_h" ]
+    [ "$(ship_schema_files_changed "$schema_repo" "$schema_base" "$schema_nover_head")" = "$schema_h" ]
+    # prior without database.h fails closed
+    [ "$(ship_schema_files_changed "$schema_repo" "$schema_nover_head" "$schema_base")" = "$schema_h" ]
     schema_diff="$(ship_schema_files_changed "$schema_repo" "$schema_base" "$schema_changed_head")"
-    [ "$schema_diff" = "engine/models/src/database_fixture.c" ]
+    [ "$schema_diff" = "$schema_c" ]
+    # benign edit -> empty list -> rollback stays armed even when accepted
+    schema_rc=0; ship_one_way_schema_decision "" 1 || schema_rc=$?
+    [ "$schema_rc" -eq 0 ]
     # no schema change -> rollback stays armed, nothing to plan
     schema_rc=0; ship_one_way_schema_decision "" 0 || schema_rc=$?
     [ "$schema_rc" -eq 0 ] && [ -z "$SHIP_ONE_WAY_PLAN" ]
@@ -1809,11 +1858,7 @@ REMOTE_HASH
     git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
         die "$host rollback commit $prior_commit is unavailable locally"
     one_way_schema=0
-    if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
-        'engine/models/src/database*.c' \
-        'engine/models/include/models/database*.h' \
-        'engine/models/src/schema_migration.c' \
-        'engine/models/include/models/schema_migration.h'; then
+    if [ -n "$(ship_schema_files_changed "$REPO_ROOT" "$prior_commit" "$HEAD_SHA")" ]; then
         # A FORWARD-ONLY deploy is a deliberate act, in the same shape as
         # ZCL_SHIP_ALLOW_PROOF_SERVER above: refuse by default, proceed only
         # when the operator names the risk. It is not a way to make a red

@@ -148,8 +148,11 @@ The push-hook receipt does not count. The rollback commit
 comes from `ZCL_AGENT_EXPECT_BUILD_COMMIT` in the RUNNING
 daemon's `/proc` environ on the target.
 `ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1` is inert unless the
-schema code changed since that commit; when it did, it
-disarms rollback. Wrap the run in `ulimit -s unlimited` and
+schema changed since that commit (a different
+`NODE_DB_SCHEMA_LATEST`, or an added CREATE/ALTER/DROP
+TABLE|INDEX or `user_version` line in the database and
+migration files); when it did, it disarms rollback. Wrap the run in
+`ulimit -s unlimited` and
 a transient `systemd-run --user` unit so a shell timeout
 cannot kill it.
 
