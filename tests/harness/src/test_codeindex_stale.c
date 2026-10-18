@@ -333,6 +333,211 @@ static int test_cis_memo_external_hardlink(void)
     return failures;
 }
 
+/* Active depfiles are freshness inputs even though build/ is not a source
+ * Merkle root. Establish the outside alias before any directory watch. */
+static int test_cis_memo_external_depfile_hardlink(void)
+{
+    int failures = 0;
+    char parent[] = "test-tmp/cistale-depalias-XXXXXX";
+    char root[512], path[512], alias[512];
+    bool owned = false;
+    int fd = -1;
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: outside active-depfile writes invalidate a proven memo") {
+        ASSERT(mkdtemp(parent) != NULL);
+        owned = true;
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
+        ASSERT(cis_seed(root));
+        /* No epochs directory: this regular .d is in the active inventory. */
+        ASSERT(cis_write(root, "build/foo.d",
+            "build/foo.o: core/modules/net/src/foo.c core/modules/net/include/net/foo.h\n"));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/build/foo.d", root) < sizeof(path));
+        ASSERT((size_t)snprintf(alias, sizeof(alias), "%s/alias.d", parent) < sizeof(alias));
+        ASSERT(link(path, alias) == 0);
+        size_t depfiles = 0;
+        int64_t newest = 0;
+        ASSERT(codeindex_depfile_graph(root, &depfiles, &newest));
+        ASSERT(depfiles == 1);
+        ci = codeindex_open(root);
+        ASSERT(ci != NULL);
+        ASSERT(cis_verdict(ci, false));
+        uint64_t primed = codeindex_test_freshness_walks();
+        ASSERT(cis_verdict(ci, false));
+        /* A host without a working memo cannot qualify this regression. */
+        ASSERT(codeindex_test_freshness_walks() == primed);
+        struct stat before, after;
+        ASSERT(stat(path, &before) == 0);
+        fd = open(alias, O_WRONLY | O_APPEND | O_CLOEXEC);
+        ASSERT(fd >= 0);
+        ASSERT(write(fd, "\n", 1) == 1);
+        int close_rc = close(fd);
+        fd = -1;
+        ASSERT(close_rc == 0);
+        ASSERT(stat(path, &after) == 0 && after.st_size == before.st_size + 1);
+        bool memo_stale = false;
+        bool memo_ok = codeindex_is_stale(ci, &memo_stale);
+        /* Force an independent full-path observation before asserting the
+         * candidate verdict. The marker causes a build-directory event but
+         * is ignored by depfile collection and is outside source Merkle roots.
+         * The existing fault switch alone does not evict an armed memo. */
+        codeindex_test_force_watch_failure(true);
+        ASSERT(cis_write(root, "build/.control-marker", "ignored\n"));
+        uint64_t walked = codeindex_test_freshness_walks();
+        ASSERT(cis_verdict(ci, true));
+        ASSERT(codeindex_test_freshness_walks() == walked + 1);
+        ASSERT(memo_ok && memo_stale);
+        PASS();
+    } _test_next:;
+    codeindex_test_force_watch_failure(false);
+    if (fd >= 0) close(fd);
+    codeindex_close(ci);
+    if (owned) test_rm_rf_recursive(parent);
+    return failures;
+}
+
+#define CIS_DEP_TEXT \
+    "build/foo.o: core/modules/net/src/foo.c core/modules/net/include/net/foo.h\n"
+
+/* Seed a tree whose build/ already holds one active depfile, open it, and
+ * leave the store proven fresh once (the memo armed or about to arm). */
+static bool cis_open_with_depfile(const char *root, struct codeindex **ci)
+{
+    return cis_seed(root) && cis_write(root, "build/foo.d", CIS_DEP_TEXT) &&
+           (*ci = codeindex_open(root)) != NULL;
+}
+
+static char g_cis_hook_alias[512];
+static bool g_cis_hook_fired;
+
+/* Runs after the verifying walk, before the memo is sealed: an outside alias
+ * writes the active depfile exactly there, raising no watch event. */
+static void cis_bracket_hook(const char *root)
+{
+    (void)root;
+    int fd = open(g_cis_hook_alias, O_WRONLY | O_APPEND | O_CLOEXEC);
+    if (fd < 0) return;
+    if (write(fd, "\n", 1) == 1) g_cis_hook_fired = true;
+    close(fd);
+}
+
+/* The depfile keys must bracket the digest observation: a write between the
+ * walk's verification and the seal may not be sealed in as the baseline. */
+static int test_cis_memo_depfile_write_in_seal_bracket(void)
+{
+    int failures = 0;
+    char parent[] = "test-tmp/cistale-bracket-XXXXXX";
+    char root[512], path[512];
+    bool owned = false;
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: a depfile alias write between verify and seal is not sealed") {
+        ASSERT(mkdtemp(parent) != NULL);
+        owned = true;
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
+        ASSERT(cis_seed(root));
+        ASSERT(cis_write(root, "build/foo.d", CIS_DEP_TEXT));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/build/foo.d", root) < sizeof(path));
+        ASSERT((size_t)snprintf(g_cis_hook_alias, sizeof(g_cis_hook_alias),
+                                "%s/alias.d", parent) < sizeof(g_cis_hook_alias));
+        /* Link before open: link() itself moves the inode's ctime. */
+        ASSERT(link(path, g_cis_hook_alias) == 0);
+        ci = codeindex_open(root);
+        ASSERT(ci != NULL);
+        g_cis_hook_fired = false;
+        codeindex_test_set_bracket_hook(cis_bracket_hook);
+        ASSERT(cis_verdict(ci, false)); /* the walk itself saw a fresh tree */
+        codeindex_test_set_bracket_hook(NULL);
+        ASSERT(g_cis_hook_fired);
+        /* Sealed against the pre-write baseline it would be a memo hit
+         * (fresh); the bracket refuses to arm, so the next open walks. */
+        ASSERT(cis_verdict(ci, true));
+        PASS();
+    } _test_next:;
+    codeindex_test_set_bracket_hook(NULL);
+    codeindex_close(ci);
+    if (owned) test_rm_rf_recursive(parent);
+    return failures;
+}
+
+static int test_cis_memo_new_depfile_in_new_build_dir(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: a depfile in a new nested build dir walks and sees stale") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "newdep");
+        ASSERT(cis_open_with_depfile(dir, &ci));
+        ASSERT(cis_verdict(ci, false));
+        uint64_t primed = codeindex_test_freshness_walks();
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_walks() == primed);
+        ASSERT(cis_write(dir, "build/sub/deeper/new.d", CIS_DEP_TEXT));
+        ASSERT(cis_verdict(ci, true));
+        ASSERT(codeindex_test_freshness_walks() == primed + 1);
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+#define CIS_EPOCH_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define CIS_EPOCH_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+static int test_cis_memo_epoch_retarget_walks(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: retargeting the current epoch walks and sees stale") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "epoch");
+        ASSERT(cis_seed(dir));
+        ASSERT(cis_write(dir, "build/epochs/" CIS_EPOCH_A "/foo.d", CIS_DEP_TEXT));
+        ASSERT(cis_write(dir, "build/epochs/" CIS_EPOCH_B "/bar.d", CIS_DEP_TEXT));
+        ASSERT(cis_write(dir, "build/.current-epoch", CIS_EPOCH_A "\n"));
+        ci = codeindex_open(dir);
+        ASSERT(ci != NULL);
+        ASSERT(cis_verdict(ci, false));
+        uint64_t primed = codeindex_test_freshness_walks();
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_walks() == primed);
+        ASSERT(cis_write(dir, "build/.current-epoch", CIS_EPOCH_B "\n"));
+        ASSERT(cis_verdict(ci, true));
+        ASSERT(codeindex_test_freshness_walks() == primed + 1);
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_cis_memo_depfile_cap_overflow_walks(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: more depfiles than the cap never arm the memo") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "depcap");
+        ASSERT(cis_seed(dir));
+        ASSERT(cis_write(dir, "build/a.d", CIS_DEP_TEXT));
+        ASSERT(cis_write(dir, "build/b.d", CIS_DEP_TEXT));
+        codeindex_test_set_dep_key_cap(1);
+        ci = codeindex_open(dir);
+        ASSERT(ci != NULL);
+        ASSERT(cis_verdict(ci, false));
+        uint64_t before = codeindex_test_freshness_walks();
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_walks() == before + 2);
+        ASSERT(cis_write(dir, "build/b.d", CIS_DEP_TEXT "# edit\n"));
+        ASSERT(cis_verdict(ci, true));
+        PASS();
+    } _test_next:;
+    codeindex_test_set_dep_key_cap(0);
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int test_cis_memo_existing_shared_mapping(void)
 {
     int failures = 0;
@@ -403,6 +608,11 @@ int test_codeindex_stale(void)
     failures += test_cis_memo_watch_failure_walks_every_time();
 #if defined(__linux__)
     failures += test_cis_memo_external_hardlink();
+    failures += test_cis_memo_external_depfile_hardlink();
+    failures += test_cis_memo_depfile_write_in_seal_bracket();
+    failures += test_cis_memo_new_depfile_in_new_build_dir();
+    failures += test_cis_memo_epoch_retarget_walks();
+    failures += test_cis_memo_depfile_cap_overflow_walks();
     failures += test_cis_memo_existing_shared_mapping();
 #endif
     printf("=== codeindex_stale: %d failures ===\n", failures);

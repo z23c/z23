@@ -293,6 +293,7 @@ struct dep_paths {
     char **items;
     size_t count;
     size_t capacity;
+    size_t limit; /* 0: unbounded; else collection stops past it */
 };
 
 static void dep_paths_free(struct dep_paths *paths)
@@ -305,6 +306,7 @@ static void dep_paths_free(struct dep_paths *paths)
 
 static bool dep_paths_push(struct dep_paths *paths, const char *path)
 {
+    if (paths->limit && paths->count >= paths->limit) return false;
     if (paths->count == paths->capacity) {
         size_t next = paths->capacity ? paths->capacity * 2 : 128;
         char **items = zcl_realloc(paths->items, next * sizeof(*items),
@@ -1144,4 +1146,87 @@ bool ci_deps_stat_root_sha3(const char *root, uint8_t out_root[32])
                  strerror(errno ? errno : EIO));
     sha3_256_finalize(&sha, out_root);
     return true;
+}
+
+/* The active depfile inventory with one stat() key per file, for a caller that
+ * later re-stats exactly these paths. The inventory is collect_dep_paths'
+ * own, so the epoch-current redirect and the history / hotswap-fast /
+ * dot-name skips stay single-sourced. Collection stops the moment it passes
+ * `cap` files and the call fails with nothing held; a caller must not trust a partial inventory. */
+void ci_deps_keys_free(struct ci_deps_keys *keys)
+{
+    if (!keys) return;
+    free(keys->names);
+    free(keys->ent);
+    memset(keys, 0, sizeof(*keys));
+}
+
+/* The (dev, ino, size, mtime, ctime) key of one depfile. Windows stat has no
+ * nanosecond timestamps, so the key carries whole seconds there. */
+static struct ci_merkle_stat_key dep_stat_key(const struct stat *st)
+{
+    struct ci_merkle_stat_key k = {.dev = (uint64_t)st->st_dev,
+                                   .ino = (uint64_t)st->st_ino,
+                                   .size = (uint64_t)st->st_size};
+#if defined(_WIN32)
+    k.mtime_sec = (uint64_t)st->st_mtime;
+    k.ctime_sec = (uint64_t)st->st_ctime;
+#else
+    k.mtime_sec = (uint64_t)st->st_mtim.tv_sec;
+    k.mtime_nsec = (uint64_t)st->st_mtim.tv_nsec;
+    k.ctime_sec = (uint64_t)st->st_ctim.tv_sec;
+    k.ctime_nsec = (uint64_t)st->st_ctim.tv_nsec;
+#endif
+    return k;
+}
+
+static bool dep_keys_fill(const char *root, const struct dep_paths *paths,
+                          struct ci_deps_keys *out)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < paths->count; i++) total += strlen(paths->items[i]) + 1;
+    out->names = zcl_malloc(total ? total : 1, "codeindex dep key names");
+    out->ent = zcl_malloc((paths->count ? paths->count : 1) * sizeof(*out->ent),
+                          "codeindex dep key entries");
+    if (!out->names || !out->ent) return false;
+    for (size_t i = 0; i < paths->count; i++) {
+        char full[CI_PATH_MAX];
+        int fn = snprintf(full, sizeof(full), "%s/%s", root, paths->items[i]);
+        struct stat st;
+        if (fn <= 0 || (size_t)fn >= sizeof(full) || stat(full, &st) != 0)
+            LOG_FAIL("codeindex", "stat depfile failed path=%s: %s",
+                     paths->items[i], strerror(errno));
+        size_t len = strlen(paths->items[i]) + 1;
+        memcpy(out->names + out->names_len, paths->items[i], len);
+        out->ent[i].off = (uint32_t)out->names_len;
+        const char *slash = strrchr(paths->items[i], '/');
+        out->ent[i].dirlen = slash ? (uint32_t)(slash - paths->items[i]) : 0;
+        out->names_len += len;
+        out->ent[i].key = dep_stat_key(&st);
+        out->count++;
+    }
+    return true;
+}
+
+bool ci_deps_stat_keys(const char *root, struct ci_deps_keys *out, size_t cap)
+{
+    if (!root || !out)
+        LOG_FAIL("codeindex", "null arg to deps_stat_keys");
+    memset(out, 0, sizeof(*out));
+    char build[CI_PATH_MAX];
+    int bn = snprintf(build, sizeof(build), "%s/build", root);
+    if (bn <= 0 || (size_t)bn >= sizeof(build))
+        LOG_FAIL("codeindex", "build path too long");
+    enum platform_directory_probe_result probe =
+        platform_directory_probe_real(build);
+    if (probe == PLATFORM_DIRECTORY_PROBE_MISSING) return true;
+    if (probe != PLATFORM_DIRECTORY_PROBE_OK)
+        LOG_FAIL("codeindex", "inspect build directory failed: %s",
+                 strerror(errno));
+    struct dep_paths paths = {.limit = cap};
+    bool ok = collect_dep_paths(root, "build", &paths) &&
+              dep_keys_fill(root, &paths, out);
+    dep_paths_free(&paths);
+    if (!ok) ci_deps_keys_free(out);
+    return ok;
 }

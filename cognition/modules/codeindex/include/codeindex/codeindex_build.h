@@ -68,6 +68,10 @@ uint64_t codeindex_test_exact_bytes_read(void);
  * the change watch fail so the memo must fall back to walking every open. */
 uint64_t codeindex_test_freshness_walks(void);
 void codeindex_test_force_watch_failure(bool fail);
+/* Test seams: a callback run after the verifying walk and before the memo is
+ * sealed (mutate a depfile there), and a smaller depfile-key cap (0: default). */
+void codeindex_test_set_bracket_hook(void (*hook)(const char *root));
+void codeindex_test_set_dep_key_cap(size_t cap);
 #endif
 
 /* ── Canonical group taxonomy (mirrors the Makefile / shape layout) ──

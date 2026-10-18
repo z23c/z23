@@ -24,10 +24,14 @@ static void empty_dep_sort(void *base, size_t count, size_t width,
 #define ci_deps_scan_roots empty_dep_scan_roots
 #define codeindex_depfile_graph empty_dep_graph
 #define ci_deps_stat_root_sha3 empty_dep_stat_root
+#define ci_deps_stat_keys empty_dep_stat_keys
+#define ci_deps_keys_free empty_dep_keys_free
 #define qsort empty_dep_sort
 #include "../../../cognition/modules/codeindex/src/codeindex_deps.c"
 #undef qsort
 #undef ci_deps_stat_root_sha3
+#undef ci_deps_stat_keys
+#undef ci_deps_keys_free
 #undef codeindex_depfile_graph
 #undef ci_deps_scan_roots
 #undef ci_deps_scan

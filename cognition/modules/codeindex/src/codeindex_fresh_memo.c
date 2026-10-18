@@ -6,7 +6,9 @@
  * that was armed BEFORE that walk began over every directory the walk and the
  * depfile scan can read. A later open in the same process trusts the verdict
  * only while the watch has reported nothing, the watch is healthy, and the
- * store still carries the exact digests the walk verified. Any doubt (event,
+ * source leaves and active depfiles still carry the stat keys the walk saw
+ * (re-stat of those recorded paths only, no directory scan, no hashing), and
+ * the store carries the exact digests the walk verified. Any doubt (event,
  * overflow, ignored watch, add failure, cap, unsupported platform) falls
  * through to the existing full walk; this file never produces a fresh verdict
  * without either that walk or an unbroken watch. */
@@ -36,6 +38,16 @@ uint64_t codeindex_test_freshness_walks(void)
 void codeindex_test_force_watch_failure(bool fail)
 {
     atomic_store_explicit(&g_fw_force_fail, fail, memory_order_relaxed);
+}
+static void (*g_fw_bracket_hook)(const char *);
+static _Atomic size_t g_fw_dep_cap;
+void codeindex_test_set_bracket_hook(void (*hook)(const char *root))
+{
+    g_fw_bracket_hook = hook;
+}
+void codeindex_test_set_dep_key_cap(size_t cap)
+{
+    atomic_store_explicit(&g_fw_dep_cap, cap, memory_order_relaxed);
 }
 void ci_test_note_freshness_walk(void)
 {
@@ -69,6 +81,7 @@ struct ci_fresh_watch {
     int fd;
     int root_wd;
     int dirs;
+    struct ci_deps_keys deps; /* active depfile keys, taken BEFORE the walk */
     char key[PATH_MAX];
 };
 
@@ -97,10 +110,20 @@ static bool fw_forced_failure(void)
 #endif
 }
 
+static size_t fw_dep_cap(void)
+{
+#ifdef ZCL_TESTING
+    size_t cap = atomic_load_explicit(&g_fw_dep_cap, memory_order_relaxed);
+    if (cap) return cap;
+#endif
+    return CI_DEPS_KEY_MAX;
+}
+
 static void fw_free(struct ci_fresh_watch *w)
 {
     if (!w) return;
     if (w->fd >= 0) close(w->fd);
+    ci_deps_keys_free(&w->deps);
     free(w);
 }
 
@@ -287,11 +310,13 @@ static bool fw_stored_digests(struct codeindex *ci, uint8_t merkle[32],
 
 /* ── per-file re-stat: what a directory watch cannot see ───────────────── */
 
-/* A write through a hard link outside the watched tree, or through an
- * existing writable shared mapping, raises no directory event but always
- * moves the inode's size/mtime/ctime. The memo therefore also re-stats the
+/* A write through a hard link outside the watched tree raises no directory
+ * event but moves the inode's size/mtime/ctime, so the memo also re-stats the
  * recorded leaves (no opendir/readdir) and trusts them only while each
- * (size, ino, dev, mtime ns, ctime ns) is the one the verifying walk saw. */
+ * (size, ino, dev, mtime ns, ctime ns) is the one the verifying walk saw.
+ * LIMIT: a key cannot see a store through an already-open writable shared
+ * mapping that leaves the metadata unchanged (it moves no ctime/mtime until
+ * msync or writeback); such a write is outside what the memo can detect. */
 static bool fw_key_matches(const struct ci_merkle_stat_key *k,
                            const struct stat *st)
 {
@@ -356,6 +381,89 @@ static bool fw_capture_files(const char *key, const struct codeindex *ci,
     return ok;
 }
 
+/* Active build depfiles are not source leaves, and an alias write to one
+ * raises no directory event. A memo hit re-stats exactly the paths the
+ * arming pass recorded (no opendir/readdir, no hashing). A NEW depfile is a
+ * create in a build/ directory, which the whole-build watch armed in
+ * fw_arm_all reports, so it clears the memo through fw_quiet.
+ *
+ * Depfiles of one directory are consecutive, so a directory is opened once
+ * and its files are stat'ed relative to it. The ~10k stats are the hit's
+ * dominant cost, so a large inventory is split across a few threads; any
+ * mismatch, missing file or error in any slice fails the whole check. */
+enum { FW_DEP_THREADS = 4, FW_DEP_PAR_MIN = 2048 };
+
+struct fw_dep_job {
+    int rootfd;
+    const struct ci_deps_keys *d;
+    size_t lo, hi;
+    atomic_bool *bad;
+    bool ok;
+};
+
+static int fw_dep_dir(int rootfd, const char *name, uint32_t dirlen)
+{
+    char dir[PATH_MAX];
+    if (dirlen == 0 || dirlen >= sizeof(dir)) return -1;
+    memcpy(dir, name, dirlen);
+    dir[dirlen] = '\0';
+    return openat(rootfd, dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+}
+
+static void *fw_dep_range(void *arg)
+{
+    struct fw_dep_job *j = arg;
+    int dirfd = -1;
+    const char *dirname = NULL;
+    uint32_t dirlen = 0;
+    j->ok = true;
+    for (size_t i = j->lo; j->ok && i < j->hi; i++) {
+        const struct ci_deps_key_ent *e = &j->d->ent[i];
+        const char *name = j->d->names + e->off;
+        if (dirfd < 0 || e->dirlen != dirlen || memcmp(name, dirname, dirlen)) {
+            if (dirfd >= 0) close(dirfd);
+            dirfd = fw_dep_dir(j->rootfd, name, e->dirlen);
+            dirname = name;
+            dirlen = e->dirlen;
+        }
+        struct stat st;
+        j->ok = dirfd >= 0 && fstatat(dirfd, name + dirlen + 1, &st, 0) == 0 &&
+                fw_key_matches(&e->key, &st) &&
+                !atomic_load_explicit(j->bad, memory_order_relaxed);
+    }
+    if (dirfd >= 0) close(dirfd);
+    if (!j->ok) atomic_store_explicit(j->bad, true, memory_order_relaxed);
+    return NULL;
+}
+
+static bool fw_deps_current(const char *root, const struct ci_deps_keys *d)
+{
+    int rootfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (rootfd < 0) return false;
+    atomic_bool bad = false;
+    size_t slices = d->count >= FW_DEP_PAR_MIN ? FW_DEP_THREADS : 1;
+    struct fw_dep_job jobs[FW_DEP_THREADS];
+    pthread_t tid[FW_DEP_THREADS];
+    bool started[FW_DEP_THREADS] = {false};
+    for (size_t t = 0; t < slices; t++)
+        jobs[t] = (struct fw_dep_job){rootfd, d, d->count * t / slices,
+                                      d->count * (t + 1) / slices, &bad, false};
+    for (size_t t = 1; t < slices; t++)
+        /* raw-pthread-ok: short-burst worker, joined below before return */
+        started[t] = pthread_create(&tid[t], NULL, fw_dep_range, &jobs[t]) == 0;
+    fw_dep_range(&jobs[0]);
+    bool ok = jobs[0].ok;
+    for (size_t t = 1; t < slices; t++) {
+        if (started[t])
+            pthread_join(tid[t], NULL);
+        else
+            fw_dep_range(&jobs[t]); /* no thread available: run it here */
+        ok = ok && jobs[t].ok;
+    }
+    close(rootfd);
+    return ok;
+}
+
 bool ci_fresh_memo_hit(struct codeindex *ci)
 {
     char key[PATH_MAX];
@@ -367,7 +475,8 @@ bool ci_fresh_memo_hit(struct codeindex *ci)
     bool hit = false;
     if (s && !s->disabled) {
         if (s->pid != getpid() || !fw_quiet(s->watch) ||
-            !fw_files_current(key, &s->files))
+            !fw_files_current(key, &s->files) ||
+            !fw_deps_current(key, &s->watch->deps))
             fw_clear(s);
         else
             hit = memcmp(s->merkle, merkle, 32) == 0 &&
@@ -406,7 +515,9 @@ struct ci_fresh_watch *ci_fresh_arm(const char *root)
     snprintf(w->key, sizeof(w->key), "%s", key);
     w->fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     w->root_wd = -1;
-    if (w->fd >= 0 && fw_arm_all(w, root)) return w;
+    if (w->fd >= 0 && fw_arm_all(w, root) &&
+        ci_deps_stat_keys(root, &w->deps, fw_dep_cap()))
+        return w;
     LOG_WARN("codeindex", "freshness watch unavailable (%s): walking every open",
              strerror(errno));
     fw_free(w);
@@ -414,12 +525,28 @@ struct ci_fresh_watch *ci_fresh_arm(const char *root)
     return NULL;
 }
 
+/* The depfile keys were taken in ci_fresh_arm, BEFORE the verifying walk hashed
+ * the depfiles. Re-stat those exact paths now, after the walk: an unchanged key
+ * proves no write (alias writes included) landed between digest and seal. The
+ * watch must also still be quiet; any doubt discards the whole memo. */
+static bool fw_capture_all(struct ci_fresh_watch *w, const struct codeindex *ci,
+                           struct merkle_snapshot *files)
+{
+    if (!fw_capture_files(w->key, ci, files)) return false;
+#ifdef ZCL_TESTING
+    if (g_fw_bracket_hook) g_fw_bracket_hook(w->key);
+#endif
+    if (fw_deps_current(w->key, &w->deps) && fw_quiet(w)) return true;
+    merkle_snapshot_free(files);
+    return false;
+}
+
 void ci_fresh_finish(struct ci_fresh_watch *w, struct codeindex *ci, bool fresh)
 {
     if (!w) return;
     pthread_mutex_lock(&g_fw_lock);
     struct merkle_snapshot files;
-    if (fresh && fw_quiet(w) && fw_capture_files(w->key, ci, &files)) {
+    if (fresh && fw_capture_all(w, ci, &files)) {
         struct fw_slot *s = fw_take(w->key);
         fw_clear(s);
         s->used = true;

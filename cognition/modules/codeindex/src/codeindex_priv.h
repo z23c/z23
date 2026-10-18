@@ -426,6 +426,23 @@ bool ci_deps_scan_roots(const char *root, ci_dep_cb cb, void *user,
  * live compile epoch of each object root and nothing else; this path reads no
  * depfile content. */
 bool ci_deps_stat_root_sha3(const char *root, uint8_t out_root[32]);
+/* Per-depfile stat() keys of the active inventory (the same set the stat root
+ * hashes), names in one arena. Fails (nothing held), and stops collecting, past `cap`
+ * files (the memo uses CI_DEPS_KEY_MAX); a missing build/ is a valid empty set. */
+enum { CI_DEPS_KEY_MAX = 32768 };
+struct ci_deps_key_ent {
+    uint32_t off;    /* name offset into the arena */
+    uint32_t dirlen; /* bytes of the directory prefix (0: directly in root) */
+    struct ci_merkle_stat_key key;
+};
+struct ci_deps_keys {
+    char *names;
+    size_t names_len;
+    struct ci_deps_key_ent *ent;
+    size_t count;
+};
+bool ci_deps_stat_keys(const char *root, struct ci_deps_keys *out, size_t cap);
+void ci_deps_keys_free(struct ci_deps_keys *keys);
 
 /* ── change-watched freshness memo (codeindex_fresh_memo.c) ────────────
  * A fresh verdict proved by a full walk is held for the process together
