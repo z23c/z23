@@ -502,7 +502,7 @@ else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_EPOCH_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
-else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -513,7 +513,11 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # therefore owns only the dev epoch; the explicit proof bundle below keeps the
 # complete dev+test-fast graph on platforms that can consume it.
 ZCL_EPOCH_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
-else ifneq ($(filter dev-proof-bundle dev-proof-bundle-prefork ff action-root-reuse-study,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),dev-proof-bundle-prefork)
+# The standalone lint-tool closure includes the wiki qualifier, which shares
+# the public node object graph. Select its real epoch before acquiring leases.
+ZCL_EPOCH_PROFILES := dev test-fast node-c23
+else ifneq ($(filter dev-proof-bundle ff action-root-reuse-study,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -1921,6 +1925,9 @@ NODE_C23_LINK_RSP = $(NODE_C23_OBJ_DIR)/link-inputs.$(BUILD_INVOCATION_ID).rsp
 NODE_C23_PACKAGE_VERIFY_OBJ = $(NODE_C23_OBJ_DIR)/tools/package_verify.o
 NODE_C23_PACKAGE_VERIFY_NODE_OBJS = $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(ALL_SRCS))
 NODE_C23_PACKAGE_VERIFY_LINK_RSP = $(NODE_C23_OBJ_DIR)/package-verify-link-inputs.$(BUILD_INVOCATION_ID).rsp
+# The qualifier shares the public node graph; only its standalone main is distinct.
+NODE_C23_WIKI_RUNTIME_OBJ = $(NODE_C23_OBJ_DIR)/tools/dev/wiki_runtime_main.o
+NODE_C23_WIKI_RUNTIME_LINK_RSP = $(NODE_C23_OBJ_DIR)/wiki-runtime-link-inputs.$(BUILD_INVOCATION_ID).rsp
 NODE_C23_PROFILE = node-c23-v1
 NODE_C23_SESSION = $(NODE_C23_OBJ_DIR)/.build-session
 NODE_C23_LEASE = $(NODE_C23_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
@@ -2002,7 +2009,7 @@ else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := build-only
-else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only dev-package-verifier,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev
@@ -2013,7 +2020,11 @@ else ifneq ($(filter lint lint-cached lint-cold-audit lint-preflight,$(ZCL_DEPFI
 # compile and link the dev node and package verifier, so a header edit must
 # invalidate those objects.  An empty profile relinked stale objects.
 ZCL_DEPFILE_PROFILES := dev
-else ifneq ($(filter dev-proof-bundle dev-proof-bundle-prefork ff,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),dev-proof-bundle-prefork)
+# Match the epoch selection: header edits must invalidate the shared node
+# objects and the qualifier main before the prefork bundle is admitted.
+ZCL_DEPFILE_PROFILES := dev test-fast node-c23
+else ifneq ($(filter dev-proof-bundle ff,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
 else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),dev) test-fast)
@@ -2043,7 +2054,7 @@ ifneq ($(filter build-only,$(ZCL_DEPFILE_PROFILES)),)
 -include $(ALL_OBJS:.o=.d)
 endif
 ifneq ($(filter node-c23,$(ZCL_DEPFILE_PROFILES)),)
--include $(NODE_C23_OBJS:.o=.d) $(NODE_C23_PACKAGE_VERIFY_OBJ:.o=.d)
+-include $(NODE_C23_OBJS:.o=.d) $(NODE_C23_PACKAGE_VERIFY_OBJ:.o=.d) $(NODE_C23_WIKI_RUNTIME_OBJ:.o=.d)
 endif
 ifneq ($(filter dev,$(ZCL_DEPFILE_PROFILES)),)
 -include $(DEV_OBJS:.o=.d) $(DEV_PACKAGE_VERIFY_OBJ:.o=.d)
@@ -5049,7 +5060,7 @@ dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-bin $(DEV_RESTART_PLAN) zc
 
 # The proof worker needs both the runner bundle and every executable read by
 # full lint before its test/lint children fork. Name one Make goal so the shared
-# graph schedules independent tools together under the dev+test-fast profiles.
+# graph schedules independent tools under the dev+test-fast+node-c23 profiles.
 dev-proof-bundle-prefork: dev-proof-bundle proof-lint-prebuild \
 	zcl-nodectl z23-acme fbsh engine-unit tools/file_size_policy \
 	fleet-board-bridge git-hook install-hooks build/bin/z23-lint
@@ -16508,7 +16519,28 @@ export-native-tunnel: $(BIN_DIR)/native-tunnel-export
 	 --source-head "$(shell git rev-parse HEAD)"
 
 # Finite native wiki propagation qualifier; no operator command registry leaf.
-$(eval $(call BUILD_NODE_TOOL,z23-wiki-runtime,tools/dev/wiki_runtime_main.c))
+.PHONY: z23-wiki-runtime
+z23-wiki-runtime: $(BIN_DIR)/z23-wiki-runtime
+$(BIN_DIR)/z23-wiki-runtime: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
+		$(NODE_C23_WIKI_RUNTIME_OBJ) $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS) \
+		$(COMMAND_CATALOG_DEFS) $(C23_PORTABLE_RELINK) | $(NODE_VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$(NODE_C23_WIKI_RUNTIME_LINK_RSP),$(NODE_C23_WIKI_RUNTIME_OBJ) $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS))) set -eu; \
+	tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	test -s "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"; \
+	trap 'rm -f "$$tmp" "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"' EXIT HUP INT TERM; \
+	$(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) \
+		-o "$$tmp" "@$(NODE_C23_WIKI_RUNTIME_LINK_RSP)" $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS); \
+	$(BUILD_EPOCH_SESSION_TOOL) verify "$(NODE_C23_SESSION)" "$(NODE_C23_LEASE)" \
+	  "$(NODE_C23_OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
+	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
+	  "$(NODE_C23_COMPILE_EPOCH)" "$(NODE_C23_PROFILE)" \
+	  "$(NODE_C23_EPOCH_COMPILE_FLAGS)" "$(NODE_C23_EPOCH_LINK_FLAGS)" \
+	  "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
+	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
+	mv -f -- "$$tmp" "$@"; \
+	rm -f -- "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"; \
+	trap - EXIT HUP INT TERM
 
 # Cheap declaration/syntax screen only; registered tests and tool link remain mandatory.
 # Syntax-only does not exercise middle-end warnings (see the doctrine near line 1336).
