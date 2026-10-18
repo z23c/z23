@@ -26,6 +26,7 @@ ownership or permission to publish; directory layout grants no authority.
 | Inspect fleet transport boundaries | [Native channel](NATIVE_CHANNEL.md), [Fleet join](FLEET_JOIN.md) |
 | Install the Claude Code plugin | [Z23 plugin for Claude Code](../../.claude/plugin/README.md), opt-in fleet gateway: [fleet plugin](../../.claude/plugin-fleet/README.md) |
 | Inspect experimental unit contracts | [Flash unit](FLASH_UNIT.md), [Executor heuristics](EXECUTOR_HEURISTICS.md) |
+| See where the development system is going | [Development system vision](VISION.md) |
 
 Use the built binary's `discover` catalog and code navigator to establish
 available commands and exact input keys. Source declarations and plans are not

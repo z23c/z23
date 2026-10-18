@@ -33,7 +33,8 @@ reusable packages, dependency graphs, bounded builds, independent
 reproduction, local policy, distribution, release history, and preservation.
 Documentation here should keep complexity hidden but inspectable, and give the
 reader one obvious next action. The durable statement of this is
-[`../AGENTS.md`](../AGENTS.md#north-star).
+[`../AGENTS.md`](../AGENTS.md#north-star). How Z23 itself is developed toward
+it, by people and agents, is [`agent/VISION.md`](agent/VISION.md).
 
 ## Public product
 
