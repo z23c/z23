@@ -74,10 +74,10 @@ static bool lp_join(char *out, size_t cap, const char *a, const char *b)
     return n > 0 && (size_t)n < cap;
 }
 
-static bool lp_trust(const struct lp_env *e, const char *public_key)
+static bool lp_keys(const struct lp_env *e, const char *public_key)
 {
     char path[PATH_MAX];
-    FILE *f = lp_join(path, sizeof(path), e->root, "trusted_keys") ? fopen(path, "wb") : NULL;
+    FILE *f = lp_join(path, sizeof(path), e->root, "publisher_keys") ? fopen(path, "wb") : NULL;
     bool ok = f && fprintf(f, "%s\n", public_key) > 0;
     if (f)
         ok = fclose(f) == 0 && ok;
@@ -97,7 +97,7 @@ static bool lp_env_dirs(struct lp_env *e, char lab[PATH_MAX])
            lp_join(e->key, sizeof(e->key), e->base, "publisher.key");
 }
 
-/* Temporary HOME and lab state, a generated key, and the key trusted. */
+/* Temporary HOME and lab state, a generated key, and the key listed. */
 static bool lp_env_open(struct lp_env *e)
 {
     char lab[PATH_MAX], in[2 * PATH_MAX], pub[65];
@@ -114,7 +114,7 @@ static bool lp_env_open(struct lp_env *e)
     snprintf(pub, sizeof(pub), "%s", r.exit_code == ZCL_COMMAND_EXIT_OK
                                          ? json_get_str(json_get(&r.data, "public_key")) : "");
     zcl_command_reply_free(&r);
-    return pub[0] && lp_trust(e, pub);
+    return pub[0] && lp_keys(e, pub);
 }
 
 static void lp_env_close(struct lp_env *e)
@@ -177,7 +177,7 @@ static int lp_case_roundtrip(void)
     bool ready = lp_env_open(&e);
     TEST_CASE("lab.promote signs a file that passes its cases and plugin.call returns the cases' output") {
         struct zcl_command_reply p, c;
-        char manifest[PATH_MAX], sig[PATH_MAX], next[PATH_MAX + 64], sha[PLUGIN_HEX_SHA3_512 + 1];
+        char manifest[PATH_MAX], sig[PATH_MAX], sha[PLUGIN_HEX_SHA3_512 + 1];
         ASSERT(ready);
         lp_promote(&e, LP_UPPER, LP_CASES_OK, &p);
         ASSERT_EQ(p.exit_code, ZCL_COMMAND_EXIT_OK);
@@ -187,9 +187,11 @@ static int lp_case_roundtrip(void)
         ASSERT(strstr(lp_str(&p.data, "release_command"), "-fsanitize") == NULL);
         snprintf(manifest, sizeof(manifest), "%s", lp_str(&p.data, "manifest"));
         snprintf(sig, sizeof(sig), "%s", lp_str(&p.data, "signature"));
-        snprintf(next, sizeof(next), "z23 plugin install --manifest=%s", manifest);
         snprintf(sha, sizeof(sha), "%s", lp_str(&p.data, "release_sha3_512"));
-        ASSERT_STR_EQ(lp_str(&p.data, "next"), next);
+        ASSERT(json_get(&p.data, "next") == NULL);
+        ASSERT_EQ(p.next_count, 1);
+        ASSERT_STR_EQ(p.next[0].command, "plugin.install");
+        ASSERT(strstr(p.next[0].input_json, manifest) != NULL);
         ASSERT_EQ(access(manifest, R_OK), 0);
         ASSERT_EQ(access(sig, R_OK), 0);
         ASSERT_EQ(lp_entries(e.dist), 3);

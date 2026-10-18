@@ -79,7 +79,7 @@ enum plugin_status plugin_check_dir(const char *path)
         return PLUGIN_OK;
     }
     return platform_directory_probe_real(path) == PLATFORM_DIRECTORY_PROBE_MISSING
-        ? PLUGIN_ERR_NOT_INSTALLED : PLUGIN_ERR_TRUST_INSECURE;
+        ? PLUGIN_ERR_NOT_INSTALLED : PLUGIN_ERR_KEYS_INSECURE;
 #else
 
     struct stat st;
@@ -87,7 +87,7 @@ enum plugin_status plugin_check_dir(const char *path)
         return errno == ENOENT ? PLUGIN_ERR_NOT_INSTALLED : PLUGIN_ERR_IO;
     if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
         (st.st_mode & 022) != 0)
-        return PLUGIN_ERR_TRUST_INSECURE;
+        return PLUGIN_ERR_KEYS_INSECURE;
     return PLUGIN_OK;
 
 #endif
@@ -167,7 +167,7 @@ static enum plugin_status plugin_open_failure(void)
 {
     if (errno == ENOENT)
         return PLUGIN_ERR_EXE_MISSING;
-    return errno == EPERM || errno == ELOOP ? PLUGIN_ERR_TRUST_INSECURE
+    return errno == EPERM || errno == ELOOP ? PLUGIN_ERR_KEYS_INSECURE
                                             : PLUGIN_ERR_IO;
 }
 
@@ -473,24 +473,24 @@ bool plugin_link_generation(const char *dir, const char *link,
     return plugin_link_slot(dir, link, hex) == PLUGIN_SLOT_OK;
 }
 
-enum plugin_status plugin_trust_load(const char *path, char **bytes, size_t *len)
+enum plugin_status plugin_keys_load(const char *path, char **bytes, size_t *len)
 {
     if (path && plugin_read_file(path, PLUGIN_FILE_MAX,
                                  PLUGIN_OPEN_NOFOLLOW | PLUGIN_OPEN_OWNER_ONLY, bytes, len))
         return PLUGIN_OK;
     if (!path)
-        return PLUGIN_ERR_NO_TRUST;
+        return PLUGIN_ERR_NO_KEYS;
     switch (errno) {
     case EPERM:
     case ELOOP:
-        return PLUGIN_ERR_TRUST_INSECURE;
+        return PLUGIN_ERR_KEYS_INSECURE;
     case EFBIG:
-        return PLUGIN_ERR_TRUST_MALFORMED;
+        return PLUGIN_ERR_KEYS_MALFORMED;
     case EIO:
     case ENOMEM:
         return PLUGIN_ERR_IO;
     default:
-        return PLUGIN_ERR_NO_TRUST;
+        return PLUGIN_ERR_NO_KEYS;
     }
 }
 

@@ -48,10 +48,10 @@ struct plugin_run {
     uint32_t misses;
     uint32_t run_pings;     /* answered pings of the current child */
     /* Last generation that passed signature verification here, the digest of the
-     * trusted_keys bytes it passed under, and its signed manifest. One entry,
-     * memory only: a changed trust set or generation misses and re-verifies. */
+     * publisher_keys bytes it passed under, and its signed manifest. One entry,
+     * memory only: a changed key list or generation misses and re-verifies. */
     char verified_generation[PLUGIN_HEX_SHA3_512 + 1];
-    unsigned char verified_trust[32];
+    unsigned char verified_keys[32];
     struct plugin_manifest verified_manifest;
 };
 

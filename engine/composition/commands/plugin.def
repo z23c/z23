@@ -11,10 +11,10 @@ ZCL_COMMAND_READY_COMMAND(
     "Creates the key file exclusively (O_EXCL, mode 0600) from the host "
     "CSPRNG: exactly the 32-byte Ed25519 seed. An existing path is refused "
     "with PLUGIN_KEY_EXISTS. The reply carries only the public key, the "
-    "line to add to ~/.z23/plugins/trusted_keys; the secret is never "
+    "line to add to ~/.z23/plugins/publisher_keys; the secret is never "
     "printed.",
     ZCL_COMMAND_RESULT_BUDGET,
-    "plugin,keygen,key,ed25519,publisher,trusted,sign",
+    "plugin,keygen,key,ed25519,publisher,sign",
     "zcl.plugin_keygen.input.v1", "zcl.plugin_keygen.v1",
     "key", "key",
     "z23 plugin keygen ./publisher.key",
@@ -25,6 +25,32 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_plugin_keygen)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.publisher", "plugin", "",
+    "Add a publisher key z23 verifies plugin signatures against",
+    "Appends the 64-character lowercase hex Ed25519 public key (key) as one "
+    "line to ~/.z23/plugins/publisher_keys, the keys plugin.install, "
+    "plugin.switch, plugin.run and plugin.call verify signatures against. "
+    "Creates ~/.z23 and ~/.z23/plugins at mode 0700 when missing and writes "
+    "a new publisher_keys at mode 0600 through a sibling file and a rename. "
+    "A key already listed is reported as already_listed and changes "
+    "nothing. An existing directory or publisher_keys that is not owned by "
+    "you or is writable by group or others is refused with "
+    "PLUGIN_KEYS_INSECURE and nothing is written; a key that is not 64 "
+    "lowercase hex characters is refused with PLUGIN_ARGUMENT.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,publisher_key,verify,key,publisher,ed25519,keys",
+    "zcl.plugin_publisher.input.v1", "zcl.plugin_publisher.v1",
+    "key", "key",
+    "z23 plugin publisher 0000000000000000000000000000000000000000000000000000000000000000",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_plugin_publisher)
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.pack", "plugin", "",
@@ -56,13 +82,13 @@ ZCL_COMMAND_READY_COMMAND(
     "Verifies NAME.plugin.json (strict schema z23.plugin.v1, no unknown or "
     "duplicate keys), its detached NAME.plugin.sig (ed25519 over SHA3-512 of "
     "the domain tag, a NUL and the manifest bytes) against "
-    "~/.z23/plugins/trusted_keys, and the executable's SHA3-512. Stages the "
+    "~/.z23/plugins/publisher_keys, and the executable's SHA3-512. Stages the "
     "files, verifies the staged copy again, then renames it to "
     "~/.z23/plugins/NAME/generations/<signed-manifest SHA3-512> with the executable at mode "
-    "0555. It does not change the current link. Unsigned, untrusted or "
+    "0555. It does not change the current link. Unsigned, unknown-key or "
     "altered plugins are refused with a PLUGIN_* code and the next action.",
     ZCL_COMMAND_RESULT_BUDGET,
-    "plugin,install,signed,manifest,ed25519,sha3,generation,trust",
+    "plugin,install,signed,manifest,ed25519,sha3,generation,publisher_key,verify",
     "zcl.plugin_install.input.v1", "zcl.plugin_install.v1",
     "manifest", "manifest",
     "z23 plugin install ./hello.plugin.json",
@@ -116,7 +142,7 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "plugin.switch", "plugin", "",
     "Make an installed plugin generation current",
-    "Verifies the named generation again (signature, trust, executable "
+    "Verifies the named generation again (signature, publisher key, executable "
     "hash), records the previous current generation as last-good, then "
     "replaces the current link atomically by symlink and rename. Switching "
     "to the generation that is already current changes nothing.",
@@ -183,7 +209,7 @@ ZCL_COMMAND_READY_COMMAND(
     "Run an installed one-shot plugin once and return its output",
     "Runs the current generation of an interface 2 plugin as a plain program "
     "once: stdin in, exit status, stdout and stderr out, bounded like lab.run. "
-    "The signature, trust and executable SHA3-512 are verified again "
+    "The signature, publisher key and executable SHA3-512 are verified again "
     "immediately before the start. The program runs through the lab's confined "
     "runner (Landlock, seccomp, no network, no fork, private workdir, resource "
     "limits); declared capabilities grant nothing beyond that. An interface 1 "

@@ -146,7 +146,7 @@ static void promote_report(struct zcl_command_reply *reply,
 {
     char manifest[4096], name[128], version[128], generation[PLUGIN_HEX_SHA3_512 + 1];
     char key[PLUGIN_HEX_PUBLIC_KEY + 1], sha[PLUGIN_HEX_SHA3_512 + 1];
-    char sig[4096], next[4200];
+    char sig[4096];
     size_t n;
     snprintf(manifest, sizeof(manifest), "%s", promote_str(&reply->data, "manifest"));
     snprintf(name, sizeof(name), "%s", promote_str(&reply->data, "name"));
@@ -155,7 +155,6 @@ static void promote_report(struct zcl_command_reply *reply,
     snprintf(key, sizeof(key), "%s", promote_str(&reply->data, "public_key"));
     n = strlen(manifest);
     snprintf(sig, sizeof(sig), "%.*ssig", (int)(n >= 4 ? n - 4 : n), manifest);
-    snprintf(next, sizeof(next), "z23 plugin install --manifest=%s", manifest);
     json_free(&reply->data);
     json_init(&reply->data);
     json_set_object(&reply->data);
@@ -170,8 +169,7 @@ static void promote_report(struct zcl_command_reply *reply,
         !json_push_kv_str(&reply->data, "manifest", manifest) ||
         !json_push_kv_str(&reply->data, "signature", sig) ||
         !json_push_kv_str(&reply->data, "generation", generation) ||
-        !json_push_kv_str(&reply->data, "public_key", key) ||
-        !json_push_kv_str(&reply->data, "next", next))
+        !json_push_kv_str(&reply->data, "public_key", key))
         lab_fail(reply, "LAB_ALLOC", "serialize", "the receipt could not be built");
 }
 

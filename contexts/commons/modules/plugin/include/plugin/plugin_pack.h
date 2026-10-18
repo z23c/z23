@@ -49,7 +49,7 @@ enum plugin_status plugin_pack(const struct plugin_pack_request *request,
 
 /* Exclusively creates a host-CSPRNG key (mode 0600 on POSIX; protected
  * owner+SYSTEM-only ACL beneath a validated private parent on Windows) and
- * returns the public key as 64 hex characters, the line for trusted_keys. An
+ * returns the public key as 64 hex characters, the line for publisher_keys. An
  * existing path is refused with PLUGIN_ERR_KEY_EXISTS; the secret is never
  * returned. */
 enum plugin_status plugin_keygen(const char *key_path,

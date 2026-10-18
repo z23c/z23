@@ -13,13 +13,14 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define PS_TRUST_FILE "trusted_keys"
+#define PS_KEYS_FILE "publisher_keys"
 #define PS_MANIFEST_SUFFIX ".plugin.json"
 
 struct ps_paths {
@@ -103,14 +104,14 @@ static enum plugin_status ps_read_error(enum plugin_status missing,
         return missing;
     if (errno == EFBIG)
         return oversize;
-    return errno == EPERM || errno == ELOOP ? PLUGIN_ERR_TRUST_INSECURE
+    return errno == EPERM || errno == ELOOP ? PLUGIN_ERR_KEYS_INSECURE
                                             : PLUGIN_ERR_IO;
 }
 
 /* Verify one manifest, signature and executable set end to end. */
 static enum plugin_status ps_verify_set(const struct ps_paths *p,
-                                        const char *trust, const char *trust_bytes,
-                                        size_t trust_len, unsigned flags,
+                                        const char *keys_file, const char *keys_bytes,
+                                        size_t keys_len, unsigned flags,
                                         struct plugin_manifest *out)
 {
     char *mf = NULL, *sg = NULL;
@@ -123,10 +124,10 @@ static enum plugin_status ps_verify_set(const struct ps_paths *p,
     if (!plugin_read_file(p->sig, PLUGIN_FILE_MAX, flags, &sg, &sg_len))
         st = ps_read_error(PLUGIN_ERR_SIG_MISSING, PLUGIN_ERR_SIG_INVALID);
     if (st == PLUGIN_OK)
-        st = trust_bytes
-                 ? plugin_verify_manifest_trust(mf, mf_len, sg, sg_len, trust_bytes,
-                                                trust_len, out)
-                 : plugin_verify_manifest(mf, mf_len, sg, sg_len, trust, out);
+        st = keys_bytes
+                 ? plugin_verify_manifest_keys(mf, mf_len, sg, sg_len, keys_bytes,
+                                                keys_len, out)
+                 : plugin_verify_manifest(mf, mf_len, sg, sg_len, keys_file, out);
     if (st == PLUGIN_OK)
         st = plugin_hash_path(p->exe, flags, hex);
     if (st == PLUGIN_OK && strcmp(hex, out->exe_sha3) != 0)
@@ -136,9 +137,9 @@ static enum plugin_status ps_verify_set(const struct ps_paths *p,
     return st;
 }
 
-static bool ps_trust_path(const char *root, char *out, size_t cap)
+static bool ps_keys_path(const char *root, char *out, size_t cap)
 {
-    return plugin_join(out, cap, root, PS_TRUST_FILE, NULL, NULL);
+    return plugin_join(out, cap, root, PS_KEYS_FILE, NULL, NULL);
 }
 
 static bool ps_generation_paths(const char *root, const char *name,
@@ -190,10 +191,10 @@ enum plugin_status plugin_check_generation_dirs(const char *root, const char *na
     return st == PLUGIN_ERR_NOT_INSTALLED ? PLUGIN_ERR_NO_GENERATION : st;
 }
 
-/* Trust comes from the file at trust, or from trust_bytes when given. */
+/* Keys come from the file at keys_file, or from keys_bytes when given. */
 static enum plugin_status ps_verify_generation(const char *root, const char *name,
-                                               const char *generation, const char *trust,
-                                               const char *trust_bytes, size_t trust_len,
+                                               const char *generation, const char *keys_file,
+                                               const char *keys_bytes, size_t keys_len,
                                                struct plugin_manifest *out)
 {
     struct ps_paths p;
@@ -202,7 +203,7 @@ static enum plugin_status ps_verify_generation(const char *root, const char *nam
     enum plugin_status st = plugin_check_generation_dirs(root, name, generation);
     if (st != PLUGIN_OK)
         return st;
-    st = ps_verify_set(&p, trust, trust_bytes, trust_len, PLUGIN_OPEN_NOFOLLOW, out);
+    st = ps_verify_set(&p, keys_file, keys_bytes, keys_len, PLUGIN_OPEN_NOFOLLOW, out);
     if (st == PLUGIN_OK &&
         (strcmp(out->name, name) != 0 ||
          (strcmp(out->generation, generation) != 0 &&
@@ -217,20 +218,20 @@ enum plugin_status plugin_verify_generation_manifest(const char *root,
                                                      const char *generation,
                                                      struct plugin_manifest *out)
 {
-    char trust[PLUGIN_PATH_MAX];
-    if (!ps_trust_path(root, trust, sizeof(trust)))
+    char keys_file[PLUGIN_PATH_MAX];
+    if (!ps_keys_path(root, keys_file, sizeof(keys_file)))
         return PLUGIN_ERR_ARGUMENT;
-    return ps_verify_generation(root, name, generation, trust, NULL, 0, out);
+    return ps_verify_generation(root, name, generation, keys_file, NULL, 0, out);
 }
 
-enum plugin_status plugin_verify_generation_manifest_trust(const char *root,
+enum plugin_status plugin_verify_generation_manifest_keys(const char *root,
                                                            const char *name,
                                                            const char *generation,
-                                                           const char *trust,
-                                                           size_t trust_len,
+                                                           const char *keys,
+                                                           size_t keys_len,
                                                            struct plugin_manifest *out)
 {
-    return ps_verify_generation(root, name, generation, NULL, trust, trust_len, out);
+    return ps_verify_generation(root, name, generation, NULL, keys, keys_len, out);
 }
 
 enum plugin_status plugin_verify_generation(const char *root, const char *name,
@@ -272,7 +273,7 @@ static enum plugin_status ps_source_paths(const char *manifest_path,
 
 /* Copy the verified set into a staging directory and verify the copy. */
 static enum plugin_status ps_stage(const struct ps_paths *src, const char *name,
-                                   const char *staging, const char *trust,
+                                   const char *staging, const char *keys_file,
                                    struct plugin_manifest *m)
 {
     struct ps_paths dst;
@@ -289,7 +290,7 @@ static enum plugin_status ps_stage(const struct ps_paths *src, const char *name,
         st = plugin_copy_file(src->manifest, dst.manifest, 0444, hex);
     if (st == PLUGIN_OK)
         st = plugin_copy_file(src->sig, dst.sig, 0444, hex);
-    return st == PLUGIN_OK ? ps_verify_set(&dst, trust, NULL, 0, PLUGIN_OPEN_NOFOLLOW, m)
+    return st == PLUGIN_OK ? ps_verify_set(&dst, keys_file, NULL, 0, PLUGIN_OPEN_NOFOLLOW, m)
                            : st;
 }
 
@@ -407,7 +408,7 @@ static enum plugin_status ps_replace(const char *gens, const char *staging,
 
 static enum plugin_status ps_publish(const char *plugdir, const char *name,
                                      const struct ps_paths *src,
-                                     const char *trust,
+                                     const char *keys_file,
                                      struct plugin_manifest *m)
 {
     char gens[PLUGIN_PATH_MAX], staging[PLUGIN_PATH_MAX], final_dir[PLUGIN_PATH_MAX];
@@ -423,7 +424,7 @@ static enum plugin_status ps_publish(const char *plugdir, const char *name,
     if (st == PLUGIN_OK && (!plugin_remove_tree(staging) || !plugin_mkdir_new(staging)))
         st = PLUGIN_ERR_IO;
     if (st == PLUGIN_OK)
-        st = ps_stage(src, name, staging, trust, m);
+        st = ps_stage(src, name, staging, keys_file, m);
     if (st == PLUGIN_OK)
         st = ps_replace(gens, staging, final_dir);
 #if !defined(_WIN32)
@@ -439,7 +440,7 @@ enum plugin_status plugin_store_install(const char *root,
                                         int *already_present)
 {
     struct ps_paths src;
-    char stem[PLUGIN_NAME_MAX + 1], trust[PLUGIN_PATH_MAX], plugdir[PLUGIN_PATH_MAX];
+    char stem[PLUGIN_NAME_MAX + 1], keys_file[PLUGIN_PATH_MAX], plugdir[PLUGIN_PATH_MAX];
     if (already_present)
         *already_present = 0;
     if (!root || !out)
@@ -447,11 +448,11 @@ enum plugin_status plugin_store_install(const char *root,
     enum plugin_status st = ps_source_paths(manifest_path, stem, &src);
     if (st != PLUGIN_OK)
         return st;
-    if (!ps_trust_path(root, trust, sizeof(trust)))
+    if (!ps_keys_path(root, keys_file, sizeof(keys_file)))
         return PLUGIN_ERR_ARGUMENT;
-    if (plugin_check_dir(root) == PLUGIN_ERR_TRUST_INSECURE)
-        return PLUGIN_ERR_TRUST_INSECURE;
-    st = ps_verify_set(&src, trust, NULL, 0, 0, out);
+    if (plugin_check_dir(root) == PLUGIN_ERR_KEYS_INSECURE)
+        return PLUGIN_ERR_KEYS_INSECURE;
+    st = ps_verify_set(&src, keys_file, NULL, 0, 0, out);
     if (st == PLUGIN_OK && strcmp(out->name, stem) != 0)
         st = PLUGIN_ERR_MANIFEST_INVALID;
     if (st != PLUGIN_OK)
@@ -467,7 +468,7 @@ enum plugin_status plugin_store_install(const char *root,
             *already_present = 1;
         return PLUGIN_OK;
     }
-    return ps_publish(plugdir, stem, &src, trust, out);
+    return ps_publish(plugdir, stem, &src, keys_file, out);
 }
 
 static enum plugin_status ps_plugin_dir(const char *root, const char *name,
@@ -695,4 +696,113 @@ void plugin_store_list_free(struct plugin_info *infos, size_t count)
     for (size_t i = 0; infos && i < count; i++)
         free(infos[i].generations);
     free(infos);
+}
+
+static enum plugin_status ps_keys_dirs(const char *root)
+{
+    char parent[PLUGIN_PATH_MAX];
+    const char *slash = strrchr(root, '/');
+    if (!slash || slash == root || (size_t)(slash - root) >= sizeof(parent))
+        return PLUGIN_ERR_ARGUMENT;
+    memcpy(parent, root, (size_t)(slash - root));
+    parent[slash - root] = '\0';
+    const char *dirs[2] = { parent, root };
+    for (int i = 0; i < 2; i++) {
+        enum plugin_status st = plugin_check_dir(dirs[i]);
+        if (st != PLUGIN_OK && st != PLUGIN_ERR_NOT_INSTALLED)
+            return st;
+    }
+    return plugin_mkdirs(root) ? PLUGIN_OK : PLUGIN_ERR_IO;
+}
+
+static bool ps_keys_has(const char *bytes, size_t len, const char *key)
+{
+    size_t pos = 0;
+    while (pos < len) {
+        size_t end = pos;
+        while (end < len && bytes[end] != '\n')
+            end++;
+        size_t n = end - pos;
+        if (n > 0 && bytes[pos + n - 1] == '\r')
+            n--;
+        if (n == PLUGIN_HEX_PUBLIC_KEY && memcmp(bytes + pos, key, n) == 0)
+            return true;
+        pos = end + 1;
+    }
+    return false;
+}
+
+/* Replaces path through an exclusive sibling and a rename; owner-only file. */
+static bool ps_write_private(const char *path, const char *data, size_t len)
+{
+#if defined(_WIN32)
+    return platform_directory_transaction_write_atomic(path, data, len);
+#else
+
+    char tmp[PLUGIN_PATH_MAX];
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid());
+    if (n <= 0 || (size_t)n >= sizeof(tmp))
+        return false;
+    (void)unlink(tmp);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    bool ok = fchmod(fd, 0600) == 0 && write(fd, data, len) == (ssize_t)len &&
+              fsync(fd) == 0;
+    ok = close(fd) == 0 && ok;
+    ok = ok && rename(tmp, path) == 0;
+    if (!ok)
+        (void)unlink(tmp);
+    return ok;
+
+#endif
+}
+
+static enum plugin_status ps_keys_append(const char *root, const char *path,
+                                          const char *key,
+                                          char *bytes, size_t len)
+{
+    if (len > PLUGIN_FILE_MAX - PLUGIN_HEX_PUBLIC_KEY - 2)
+        return PLUGIN_ERR_KEYS_MALFORMED; /* plugin_keys_load would refuse the result */
+    char *out = zcl_malloc(len + PLUGIN_HEX_PUBLIC_KEY + 2, "plugin_store_add_key");
+    if (!out)
+        return PLUGIN_ERR_IO;
+    size_t n = len;
+    if (len > 0)
+        memcpy(out, bytes, len);
+    if (len > 0 && out[len - 1] != '\n')
+        out[n++] = '\n';
+    memcpy(out + n, key, PLUGIN_HEX_PUBLIC_KEY);
+    n += PLUGIN_HEX_PUBLIC_KEY;
+    out[n++] = '\n';
+    enum plugin_status st = ps_write_private(path, out, n) ? PLUGIN_OK : PLUGIN_ERR_IO;
+    if (st == PLUGIN_OK && !plugin_fsync_dir(root))
+        st = PLUGIN_ERR_IO;
+    free(out);
+    return st;
+}
+
+enum plugin_status plugin_store_add_key(const char *root, const char *key,
+                                      int *already_listed)
+{
+    char path[PLUGIN_PATH_MAX], *bytes = NULL;
+    size_t len = 0;
+    if (!root || !key || !already_listed || !plugin_hex_valid(key, PLUGIN_HEX_PUBLIC_KEY) ||
+        !ps_keys_path(root, path, sizeof(path)))
+        return PLUGIN_ERR_ARGUMENT;
+    enum plugin_status st = ps_keys_dirs(root);
+    if (st != PLUGIN_OK)
+        return st;
+    st = plugin_keys_load(path, &bytes, &len);
+    if (st == PLUGIN_ERR_NO_KEYS && access(path, F_OK) != 0)
+        st = PLUGIN_OK; /* no key file yet: bytes stays NULL, len 0 */
+    else if (st == PLUGIN_ERR_NO_KEYS)
+        st = PLUGIN_ERR_IO;
+    if (st != PLUGIN_OK)
+        return st;
+    *already_listed = bytes && ps_keys_has(bytes, len, key);
+    if (!*already_listed)
+        st = ps_keys_append(root, path, key, bytes, len);
+    free(bytes);
+    return st;
 }

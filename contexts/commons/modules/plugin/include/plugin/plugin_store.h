@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: signed plugin store under ~/.z23/plugins. A plugin executable is
  * installed only when its manifest is strictly formed, its detached Ed25519
- * signature verifies against a locally trusted key, and the executable
+ * signature verifies against a locally listed publisher key, and the executable
  * matches the manifest SHA3-512. Generations are content addressed;
  * "current" and "last-good" are replaced atomically: POSIX symbolic links,
  * or Windows validated private files containing exactly "generations/",
@@ -23,8 +23,8 @@ enum {
 enum plugin_status {
     PLUGIN_OK = 0,
     PLUGIN_ERR_ARGUMENT,
-    PLUGIN_ERR_NO_TRUST,
-    PLUGIN_ERR_TRUST_MALFORMED,
+    PLUGIN_ERR_NO_KEYS,
+    PLUGIN_ERR_KEYS_MALFORMED,
     PLUGIN_ERR_MANIFEST_MISSING,
     PLUGIN_ERR_MANIFEST_INVALID,
     PLUGIN_ERR_MANIFEST_DUPLICATE_KEY,
@@ -32,7 +32,7 @@ enum plugin_status {
     PLUGIN_ERR_SIG_MISSING,
     PLUGIN_ERR_SIG_INVALID,
     PLUGIN_ERR_SIG_ALG,
-    PLUGIN_ERR_KEY_UNTRUSTED,
+    PLUGIN_ERR_KEY_UNKNOWN,
     PLUGIN_ERR_SIG_BAD,
     PLUGIN_ERR_EXE_MISSING,
     PLUGIN_ERR_EXE_HASH,
@@ -40,7 +40,7 @@ enum plugin_status {
     PLUGIN_ERR_NO_GENERATION,
     PLUGIN_ERR_NO_LAST_GOOD,
     PLUGIN_ERR_IO,
-    PLUGIN_ERR_TRUST_INSECURE,
+    PLUGIN_ERR_KEYS_INSECURE,
     PLUGIN_ERR_KEY_MISSING,
     PLUGIN_ERR_KEY_INSECURE,
     PLUGIN_ERR_KEY_MALFORMED,
@@ -48,7 +48,7 @@ enum plugin_status {
     PLUGIN_ERR_INTERFACE /* the command does not run this interface version */
 };
 
-/* Stable refusal code, for example "PLUGIN_KEY_UNTRUSTED". */
+/* Stable refusal code, for example "PLUGIN_KEY_UNKNOWN". */
 const char *plugin_status_code(enum plugin_status status);
 
 /* The operator action that resolves the refusal. */
@@ -71,12 +71,12 @@ const char *plugin_capability_name(unsigned index);
 enum plugin_status plugin_manifest_parse(const char *bytes, size_t len,
                                          struct plugin_manifest *out);
 
-/* Verify manifest bytes against the detached signature bytes and the trust
- * file at trust_path. Succeeds only for a well-formed manifest signed by a
- * trusted key. On success fills out. */
+/* Verify manifest bytes against the detached signature bytes and the publisher key
+ * file at keys_path. Succeeds only for a well-formed manifest signed by a
+ * listed key. On success fills out. */
 enum plugin_status plugin_verify_manifest(const char *manifest, size_t manifest_len,
                                           const char *sig, size_t sig_len,
-                                          const char *trust_path,
+                                          const char *keys_path,
                                           struct plugin_manifest *out);
 
 /* SHA3-512 of a file as 128 lowercase hex characters plus terminator. */
@@ -95,6 +95,14 @@ enum plugin_status plugin_store_install(const char *root,
                                         struct plugin_manifest *out,
                                         int *already_present);
 
+/* Appends the 64 lowercase hex character public key to root/publisher_keys,
+ * creating the store root and its parent at mode 0700 and a new publisher key file at
+ * mode 0600. Existing directories or publisher key file that are not owner-only are
+ * refused with PLUGIN_ERR_KEYS_INSECURE before anything is written. A key
+ * already listed sets already_listed and writes nothing. */
+enum plugin_status plugin_store_add_key(const char *root, const char *key,
+                                      int *already_listed);
+
 /* Make generation (128 hex characters) the current one, recording the
  * previous current generation as last-good. The generation is verified again
  * first. */
@@ -102,7 +110,7 @@ enum plugin_status plugin_store_switch(const char *root, const char *name,
                                        const char *generation);
 
 /* Resolve the current generation of name for a one-shot call: verify its
- * signature, trust and executable SHA3-512 in full, then return the signed
+ * signature, publisher key and executable SHA3-512 in full, then return the signed
  * manifest and the absolute path of the executable. Refuses PLUGIN_ERR_NO_GENERATION
  * when nothing is current. */
 enum plugin_status plugin_store_current(const char *root, const char *name,

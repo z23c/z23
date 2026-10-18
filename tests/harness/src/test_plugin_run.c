@@ -102,7 +102,7 @@ static bool prt_env_open(struct prt_env *e)
               mkdir(e->home, 0700) == 0 && zcl_path_join(dot, sizeof(dot), e->home, ".z23") &&
               mkdir(dot, 0700) == 0 && zcl_path_join(e->root, sizeof(e->root), dot, "plugins") &&
               mkdir(e->root, 0700) == 0 && zcl_path_join(e->src, sizeof(e->src), e->base, "src") &&
-              mkdir(e->src, 0700) == 0 && zcl_path_join(keys, sizeof(keys), e->root, "trusted_keys");
+              mkdir(e->src, 0700) == 0 && zcl_path_join(keys, sizeof(keys), e->root, "publisher_keys");
     prt_hex(e->pk, 32, hex);
     snprintf(line, sizeof(line), "%s\n", hex);
     return ok && prt_write(keys, line, strlen(line)) && chmod(keys, 0600) == 0;
@@ -461,15 +461,15 @@ static bool prt_failed(const struct plugin_run_info *i, const void *ctx)
     return i->state == PLUGIN_RUN_STATE_FAILED;
 }
 
-/* Write trusted_keys as the signer's key plus an optional second key line, or
+/* Write publisher_keys as the signer's key plus an optional second key line, or
  * with the signer left out entirely. */
-static bool prt_set_trust(const struct prt_env *e, bool signer, const char *extra)
+static bool prt_set_keys(const struct prt_env *e, bool signer, const char *extra)
 {
     char path[PATH_MAX], hex[65], body[200];
     prt_hex(e->pk, 32, hex);
     snprintf(body, sizeof(body), "%s%s%s%s", signer ? hex : "", signer ? "\n" : "",
              extra ? extra : "", extra ? "\n" : "");
-    return zcl_path_join(path, sizeof(path), e->root, "trusted_keys") &&
+    return zcl_path_join(path, sizeof(path), e->root, "publisher_keys") &&
            prt_write(path, body, strlen(body));
 }
 
@@ -489,7 +489,7 @@ static int prt_case_verify_cache(void)
     struct prt_env e;
     struct plugin_run *run = NULL;
     bool ready = prt_env_open(&e);
-    TEST_CASE("restarts reuse a verified generation until trusted_keys changes") {
+    TEST_CASE("restarts reuse a verified generation until publisher_keys changes") {
         char gen[PRT_HEX];
         struct plugin_run_info info;
         unsigned base;
@@ -504,9 +504,9 @@ static int prt_case_verify_cache(void)
         ASSERT_EQ(plugin_run_test_verify_count(), base);
         ASSERT_EQ(plugin_run_reload(run), PLUGIN_RUN_OK);
         ASSERT_EQ(plugin_run_test_verify_count(), base);
-        /* an extra trusted key changes the digest: the signature is checked again */
+        /* an extra listed key changes the digest: the signature is checked again */
         ASSERT(prt_wait(&run, 1, 0, prt_healthy, NULL, 5000));
-        ASSERT(prt_set_trust(&e, true, PRT_OTHER_KEY));
+        ASSERT(prt_set_keys(&e, true, PRT_OTHER_KEY));
         ASSERT(prt_restart_once(&run));
         ASSERT_EQ(plugin_run_test_verify_count(), base + 1);
         ASSERT(prt_wait(&run, 1, 0, prt_healthy, NULL, 5000));
@@ -514,7 +514,7 @@ static int prt_case_verify_cache(void)
         ASSERT_EQ(plugin_run_test_verify_count(), base + 1);
         /* revoking the signer must refuse the next restart */
         ASSERT(prt_wait(&run, 1, 0, prt_healthy, NULL, 5000));
-        ASSERT(prt_set_trust(&e, false, PRT_OTHER_KEY));
+        ASSERT(prt_set_keys(&e, false, PRT_OTHER_KEY));
         plugin_run_info_get(run, &info);
         ASSERT_EQ(kill((pid_t)info.pid, SIGKILL), 0);
         ASSERT(prt_wait(&run, 1, 0, prt_failed, NULL, 5000));
@@ -563,39 +563,39 @@ static int prt_case_cached_exe_hash(void)
     return failures;
 }
 
-/* Race the verification: the trust set is A (signer absent) when it is read,
+/* Race the verification: the key list is A (signer absent) when it is read,
  * B (signer present) while the verifier could open it, and A again before the
  * result is remembered. */
 static void prt_aba_hook(int point, void *ctx)
 {
     const struct prt_env *e = ctx;
-    (void)prt_set_trust(e, point == PLUGIN_RUN_TEST_AFTER_TRUST, PRT_OTHER_KEY);
+    (void)prt_set_keys(e, point == PLUGIN_RUN_TEST_AFTER_KEYS, PRT_OTHER_KEY);
 }
 
-static int prt_case_trust_aba(void)
+static int prt_case_keys_aba(void)
 {
     int failures = 0;
     struct prt_env e;
     struct plugin_run *run = NULL, *again = NULL;
     bool ready = prt_env_open(&e);
-    TEST_CASE("a trust set swapped to B and back to A during verify authorizes nothing") {
+    TEST_CASE("a key list swapped to B and back to A during verify authorizes nothing") {
         char gen[PRT_HEX];
         struct plugin_run_options o;
         enum plugin_status store = PLUGIN_OK;
         ASSERT(ready);
         ASSERT(prt_install(&e, "ab", "normal", "a1", PRT_FS, gen));
-        ASSERT(prt_set_trust(&e, false, PRT_OTHER_KEY));
+        ASSERT(prt_set_keys(&e, false, PRT_OTHER_KEY));
         o = prt_options(&e, "ab");
         plugin_run_test_set_hook(prt_aba_hook, &e);
         ASSERT_EQ(plugin_run_open(&o, &run, &store), PLUGIN_RUN_ERR_STORE);
         plugin_run_test_set_hook(NULL, NULL);
-        ASSERT_EQ(store, PLUGIN_ERR_KEY_UNTRUSTED);
+        ASSERT_EQ(store, PLUGIN_ERR_KEY_UNKNOWN);
         ASSERT(run == NULL);
         /* nothing may have been remembered under A either */
         store = PLUGIN_OK;
-        ASSERT(prt_set_trust(&e, false, PRT_OTHER_KEY));
+        ASSERT(prt_set_keys(&e, false, PRT_OTHER_KEY));
         ASSERT_EQ(plugin_run_open(&o, &again, &store), PLUGIN_RUN_ERR_STORE);
-        ASSERT_EQ(store, PLUGIN_ERR_KEY_UNTRUSTED);
+        ASSERT_EQ(store, PLUGIN_ERR_KEY_UNKNOWN);
     } TEST_END
     plugin_run_test_set_hook(NULL, NULL);
     plugin_run_close(run);
@@ -631,7 +631,7 @@ static int prt_case_cached_unsafe_dir(const char *title, const char *name, bool 
         plugin_run_info_get(run, &info);
         ASSERT_EQ(info.pid, 0u);
         ASSERT(strstr(info.detail, "plugin store refused") != NULL);
-        ASSERT(strstr(info.detail, "PLUGIN_TRUST_INSECURE") != NULL);
+        ASSERT(strstr(info.detail, "PLUGIN_KEYS_INSECURE") != NULL);
     } TEST_END
     plugin_run_close(run);
     prt_env_close(&e);
@@ -1359,7 +1359,7 @@ int test_plugin_run(void)
     failures += prt_case_kill_backoff();
     failures += prt_case_verify_cache();
     failures += prt_case_cached_exe_hash();
-    failures += prt_case_trust_aba();
+    failures += prt_case_keys_aba();
     failures += prt_case_cached_unsafe_dir("a remembered generation is refused once its directory is group-writable", "udg", false);
     failures += prt_case_cached_unsafe_dir("a remembered generation is refused once the generations directory is group-writable", "udd", true);
     failures += prt_case_hung_ping();

@@ -3,7 +3,9 @@
  * accept interface 2, plugin.call runs the verified executable once through
  * the lab's confined runner and returns its stdout and exit status, a
  * tampered executable is refused before it runs, and plugin.run and
- * plugin.call each refuse the other's interface. Every plugin is signed with a
+ * plugin.call each refuse the other's interface; plugin.publisher creates the store,
+ * appends once, refuses malformed keys and insecure directories, and runs the
+ * keygen to call chain. Every plugin is signed with a
  * generated key under a temporary HOME; the real ~/.z23 is never read. */
 
 #include "test/test_core.h"
@@ -12,6 +14,7 @@
 #include "json/json.h"
 #include "plugin/plugin_store.h"
 
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,17 +71,17 @@ static bool pct_join(char *out, size_t cap, const char *a, const char *b)
     return n > 0 && (size_t)n < cap;
 }
 
-static bool pct_trust(const struct pct_env *e, const char *public_key)
+static bool pct_keys(const struct pct_env *e, const char *public_key)
 {
     char path[PATH_MAX];
-    FILE *f = pct_join(path, sizeof(path), e->root, "trusted_keys") ? fopen(path, "wb") : NULL;
+    FILE *f = pct_join(path, sizeof(path), e->root, "publisher_keys") ? fopen(path, "wb") : NULL;
     bool ok = f && fprintf(f, "%s\n", public_key) > 0;
     if (f)
         ok = fclose(f) == 0 && ok;
     return ok && chmod(path, 0600) == 0;
 }
 
-/* Temporary HOME with a store, a generated key, and the key trusted. */
+/* Temporary HOME with a store, a generated key, and the key listed. */
 static bool pct_env_open(struct pct_env *e)
 {
     char dot[PATH_MAX], key[PATH_MAX], in[2 * PATH_MAX], pub[65];
@@ -99,7 +102,7 @@ static bool pct_env_open(struct pct_env *e)
     snprintf(pub, sizeof(pub), "%s", r.exit_code == ZCL_COMMAND_EXIT_OK
                                          ? json_get_str(json_get(&r.data, "public_key")) : "");
     zcl_command_reply_free(&r);
-    return pub[0] && pct_trust(e, pub);
+    return pub[0] && pct_keys(e, pub);
 }
 
 static void pct_env_close(struct pct_env *e)
@@ -252,6 +255,200 @@ static int pct_case_versions(void)
     return failures;
 }
 
+/* Temporary HOME with no ~/.z23: plugin.publisher must create the store itself. */
+static bool pct_env_bare(struct pct_env *e)
+{
+    const char *home = getenv("HOME");
+    memset(e, 0, sizeof(*e));
+    snprintf(e->old_home, sizeof(e->old_home), "%s", home ? home : "");
+    return test_mkdtemp(e->base, sizeof(e->base), "plugin_keys") &&
+           pct_join(e->home, sizeof(e->home), e->base, "home") && mkdir(e->home, 0700) == 0 &&
+           pct_join(e->root, sizeof(e->root), e->home, ".z23/plugins") &&
+           pct_join(e->dist, sizeof(e->dist), e->base, "dist") &&
+           setenv("HOME", e->home, 1) == 0;
+}
+
+/* Generate the publisher key; the public key goes to pub, the reply's first
+ * next entry to next. */
+static bool pct_keygen(const struct pct_env *e, char pub[65], struct zcl_command_next *next)
+{
+    char in[2 * PATH_MAX], key[PATH_MAX];
+    struct zcl_command_reply r;
+    if (!pct_join(key, sizeof(key), e->base, "publisher.key"))
+        return false;
+    snprintf(in, sizeof(in), "{\"key\":\"%s\"}", key);
+    if (!pct_call(zcl_native_handle_plugin_keygen, in, &r))
+        return false;
+    bool ok = r.exit_code == ZCL_COMMAND_EXIT_OK && r.next_count == 1;
+    if (ok) {
+        snprintf(pub, 65, "%s", json_get_str(json_get(&r.data, "public_key")));
+        *next = r.next[0];
+    }
+    zcl_command_reply_free(&r);
+    return ok;
+}
+
+static bool pct_keys_call(const char *key, struct zcl_command_reply *r)
+{
+    char in[160];
+    snprintf(in, sizeof(in), "{\"key\":\"%s\"}", key);
+    return pct_call(zcl_native_handle_plugin_publisher, in, r);
+}
+
+static int pct_mode(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? (int)(st.st_mode & 0777) : -1;
+}
+
+static bool pct_slurp(const char *path, char *out, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    size_t n = f ? fread(out, 1, cap - 1, f) : 0;
+    bool ok = f && !ferror(f);
+    if (f)
+        fclose(f);
+    out[n] = '\0';
+    return ok;
+}
+
+static int pct_case_keys(void)
+{
+    int failures = 0;
+    struct pct_env e;
+    bool ready = pct_env_bare(&e);
+    TEST_CASE("plugin.publisher creates a private store, appends once and reports a repeat") {
+        char pub[65], dot[PATH_MAX], file[PATH_MAX], before[256], after[256], expect[80];
+        struct zcl_command_next next;
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT(pct_keygen(&e, pub, &next));
+        snprintf(expect, sizeof(expect), "{\"key\":\"%s\"}", pub);
+        ASSERT_STR_EQ(next.command, "plugin.publisher");
+        ASSERT_STR_EQ(next.input_json, expect);
+        ASSERT(pct_join(dot, sizeof(dot), e.home, ".z23"));
+        ASSERT(pct_join(file, sizeof(file), e.root, "publisher_keys"));
+        ASSERT(pct_keys_call(pub, &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(!json_get_bool(json_get(&r.data, "already_listed")));
+        ASSERT(r.error.mutated);
+        zcl_command_reply_free(&r);
+        ASSERT_EQ(pct_mode(dot), 0700);
+        ASSERT_EQ(pct_mode(e.root), 0700);
+        ASSERT_EQ(pct_mode(file), 0600);
+        ASSERT(pct_slurp(file, before, sizeof(before)));
+        snprintf(expect, sizeof(expect), "%s\n", pub);
+        ASSERT_STR_EQ(before, expect);
+        ASSERT(pct_keys_call(pub, &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_bool(json_get(&r.data, "already_listed")));
+        ASSERT(!r.error.mutated);
+        zcl_command_reply_free(&r);
+        ASSERT(pct_slurp(file, after, sizeof(after)));
+        ASSERT_STR_EQ(after, before);
+    } TEST_END
+    pct_env_close(&e);
+    return failures;
+}
+
+static int pct_case_keys_refusals(void)
+{
+    int failures = 0;
+    struct pct_env e;
+    bool ready = pct_env_bare(&e);
+    TEST_CASE("plugin.publisher refuses a malformed key and an insecure store and writes nothing") {
+        static const char *const bad[] = {
+            "", "abc", "0000000000000000000000000000000000000000000000000000000000000000f",
+            "ABCDEF0000000000000000000000000000000000000000000000000000000000",
+            "zz00000000000000000000000000000000000000000000000000000000000000" };
+        static const char good[] =
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        char dot[PATH_MAX], file[PATH_MAX];
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT(pct_join(dot, sizeof(dot), e.home, ".z23"));
+        ASSERT(pct_join(file, sizeof(file), e.root, "publisher_keys"));
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            ASSERT(pct_keys_call(bad[i], &r));
+            ASSERT_STR_EQ(r.error.code, "PLUGIN_ARGUMENT");
+            zcl_command_reply_free(&r);
+        }
+        ASSERT(access(dot, F_OK) != 0);
+        ASSERT_EQ(mkdir(dot, 0700), 0);
+        ASSERT_EQ(mkdir(e.root, 0700), 0);
+        ASSERT_EQ(chmod(e.root, 0777), 0);
+        ASSERT(pct_keys_call(good, &r));
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_KEYS_INSECURE");
+        zcl_command_reply_free(&r);
+        ASSERT(access(file, F_OK) != 0);
+        ASSERT_EQ(chmod(e.root, 0700), 0);
+        ASSERT_EQ(chmod(dot, 0770), 0);
+        ASSERT(pct_keys_call(good, &r));
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_KEYS_INSECURE");
+        zcl_command_reply_free(&r);
+        ASSERT(access(file, F_OK) != 0);
+        ASSERT_EQ(pct_mode(dot), 0770);
+    } TEST_END
+    pct_env_close(&e);
+    return failures;
+}
+
+static int pct_case_keys_empty(void)
+{
+    int failures = 0;
+    struct pct_env e;
+    bool ready = pct_env_bare(&e);
+    TEST_CASE("plugin.publisher treats an existing empty key file as zero keys and appends") {
+        static const char good[] =
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        char dot[PATH_MAX], file[PATH_MAX], after[256], expect[80];
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT(pct_join(dot, sizeof(dot), e.home, ".z23"));
+        ASSERT(pct_join(file, sizeof(file), e.root, "publisher_keys"));
+        ASSERT_EQ(mkdir(dot, 0700), 0);
+        ASSERT_EQ(mkdir(e.root, 0700), 0);
+        int fd = open(file, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        ASSERT(fd >= 0);
+        ASSERT_EQ(close(fd), 0);
+        ASSERT(pct_keys_call(good, &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(!json_get_bool(json_get(&r.data, "already_listed")));
+        ASSERT(r.error.mutated);
+        zcl_command_reply_free(&r);
+        ASSERT(pct_slurp(file, after, sizeof(after)));
+        snprintf(expect, sizeof(expect), "%s\n", good);
+        ASSERT_STR_EQ(after, expect);
+        ASSERT_EQ(pct_mode(file), 0600);
+    } TEST_END
+    pct_env_close(&e);
+    return failures;
+}
+
+static int pct_case_keys_chain(void)
+{
+    int failures = 0;
+    struct pct_env e;
+    bool ready = pct_env_bare(&e);
+    TEST_CASE("keygen, publisher, pack, install, switch and call run end to end with no hand edits") {
+        char pub[65];
+        struct zcl_command_next next;
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT(pct_keygen(&e, pub, &next));
+        ASSERT(pct_keys_call(pub, &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&r);
+        ASSERT(pct_publish(&e, "upper", 2));
+        ASSERT(pct_call(zcl_native_handle_plugin_call, "{\"name\":\"upper\",\"stdin\":\"abc\\n\"}", &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&r.data, "run"), "stdout")), "ABC\n");
+        zcl_command_reply_free(&r);
+    } TEST_END
+    pct_env_close(&e);
+    return failures;
+}
+
 int test_plugin_call(void)
 {
     int failures = 0;
@@ -260,6 +457,10 @@ int test_plugin_call(void)
     failures += pct_case_tamper();
     failures += pct_case_interface();
     failures += pct_case_versions();
+    failures += pct_case_keys();
+    failures += pct_case_keys_refusals();
+    failures += pct_case_keys_empty();
+    failures += pct_case_keys_chain();
     return failures;
 }
 #endif

@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: strict plugin manifest and signature parsing, trust lookup and
+ * Purpose: strict plugin manifest and signature parsing, key lookup and
  * signature verification. */
 
 #include "plugin_internal.h"
@@ -37,10 +37,10 @@ static const struct {
     [PLUGIN_OK] = { "PLUGIN_OK", "" },
     [PLUGIN_ERR_ARGUMENT] = { "PLUGIN_ARGUMENT",
         "pass the documented arguments: z23 discover describe plugin" },
-    [PLUGIN_ERR_NO_TRUST] = { "PLUGIN_NO_TRUST",
-        "write one trusted Ed25519 public key hex per line to ~/.z23/plugins/trusted_keys" },
-    [PLUGIN_ERR_TRUST_MALFORMED] = { "PLUGIN_TRUST_MALFORMED",
-        "fix ~/.z23/plugins/trusted_keys so every line is a 64 character public key hex" },
+    [PLUGIN_ERR_NO_KEYS] = { "PLUGIN_NO_KEYS",
+        "write one Ed25519 public key hex per line to ~/.z23/plugins/publisher_keys" },
+    [PLUGIN_ERR_KEYS_MALFORMED] = { "PLUGIN_KEYS_MALFORMED",
+        "fix ~/.z23/plugins/publisher_keys so every line is a 64 character public key hex" },
     [PLUGIN_ERR_MANIFEST_MISSING] = { "PLUGIN_MANIFEST_MISSING",
         "pass the path of an existing NAME.plugin.json" },
     [PLUGIN_ERR_MANIFEST_INVALID] = { "PLUGIN_MANIFEST_INVALID",
@@ -55,8 +55,8 @@ static const struct {
         "regenerate NAME.plugin.sig with sig_alg, public_key and signature only" },
     [PLUGIN_ERR_SIG_ALG] = { "PLUGIN_SIG_ALG",
         "sign the manifest with ed25519 and set sig_alg to ed25519" },
-    [PLUGIN_ERR_KEY_UNTRUSTED] = { "PLUGIN_KEY_UNTRUSTED",
-        "add the publisher key to ~/.z23/plugins/trusted_keys only if you trust it" },
+    [PLUGIN_ERR_KEY_UNKNOWN] = { "PLUGIN_KEY_UNKNOWN",
+        "add the publisher key to ~/.z23/plugins/publisher_keys only after you have verified who publishes it" },
     [PLUGIN_ERR_SIG_BAD] = { "PLUGIN_SIG_BAD",
         "obtain an unmodified manifest and signature from the publisher" },
     [PLUGIN_ERR_EXE_MISSING] = { "PLUGIN_EXE_MISSING",
@@ -71,8 +71,8 @@ static const struct {
         "switch to a generation first; rollback needs a recorded last-good" },
     [PLUGIN_ERR_IO] = { "PLUGIN_IO",
         "check permissions and free space under ~/.z23/plugins and retry" },
-    [PLUGIN_ERR_TRUST_INSECURE] = { "PLUGIN_TRUST_INSECURE",
-        "make trusted_keys and the plugin store regular files and real directories owned by you and not writable by group or others, with no symbolic links inside; then retry" },
+    [PLUGIN_ERR_KEYS_INSECURE] = { "PLUGIN_KEYS_INSECURE",
+        "make publisher_keys and the plugin store regular files and real directories owned by you and not writable by group or others, with no symbolic links inside; then retry" },
     [PLUGIN_ERR_KEY_MISSING] = { "PLUGIN_KEY_MISSING",
         "create the signing key first: z23 plugin keygen <key file>" },
     [PLUGIN_ERR_KEY_INSECURE] = { "PLUGIN_KEY_INSECURE",
@@ -266,9 +266,9 @@ static enum plugin_status pm_sig_parse(const char *bytes, size_t len,
     return st;
 }
 
-/* One trusted key per line. The scan reads the bytes it is given, so the
- * caller decides which snapshot of the trust set a verification runs under. */
-static enum plugin_status pm_trust_scan(const char *bytes, size_t len, const uint8_t pk[32])
+/* One publisher key per line. The scan reads the bytes it is given, so the
+ * caller decides which snapshot of the key list a verification runs under. */
+static enum plugin_status pm_keys_scan(const char *bytes, size_t len, const uint8_t pk[32])
 {
     char line[256];
     bool any = false, found = false;
@@ -281,7 +281,7 @@ static enum plugin_status pm_trust_scan(const char *bytes, size_t len, const uin
         while (n > 0 && bytes[pos + n - 1] == '\r')
             n--;
         if (n >= sizeof(line))
-            return PLUGIN_ERR_TRUST_MALFORMED;
+            return PLUGIN_ERR_KEYS_MALFORMED;
         memcpy(line, bytes + pos, n);
         line[n] = '\0';
         pos = end + 1;
@@ -289,13 +289,13 @@ static enum plugin_status pm_trust_scan(const char *bytes, size_t len, const uin
             continue;
         uint8_t key[32];
         if (!zcl_hex_decode(line, key, 32))
-            return PLUGIN_ERR_TRUST_MALFORMED;
+            return PLUGIN_ERR_KEYS_MALFORMED;
         any = true;
         found = found || memcmp(key, pk, 32) == 0;
     }
     if (!any)
-        return PLUGIN_ERR_NO_TRUST;
-    return found ? PLUGIN_OK : PLUGIN_ERR_KEY_UNTRUSTED;
+        return PLUGIN_ERR_NO_KEYS;
+    return found ? PLUGIN_OK : PLUGIN_ERR_KEY_UNKNOWN;
 }
 
 void plugin_manifest_digest(const char *manifest, size_t len,
@@ -309,9 +309,9 @@ void plugin_manifest_digest(const char *manifest, size_t len,
     sha3_512_finalize(&ctx, digest);
 }
 
-enum plugin_status plugin_verify_manifest_trust(const char *manifest, size_t manifest_len,
+enum plugin_status plugin_verify_manifest_keys(const char *manifest, size_t manifest_len,
                                                 const char *sig, size_t sig_len,
-                                                const char *trust, size_t trust_len,
+                                                const char *keys, size_t keys_len,
                                                 struct plugin_manifest *out)
 {
     uint8_t pk[32], sg[64], digest[PLUGIN_DIGEST_BYTES];
@@ -319,7 +319,7 @@ enum plugin_status plugin_verify_manifest_trust(const char *manifest, size_t man
     if (st == PLUGIN_OK)
         st = pm_sig_parse(sig, sig_len, pk, sg);
     if (st == PLUGIN_OK)
-        st = pm_trust_scan(trust, trust_len, pk);
+        st = pm_keys_scan(keys, keys_len, pk);
     if (st != PLUGIN_OK)
         return st;
     plugin_manifest_digest(manifest, manifest_len, digest);
@@ -333,16 +333,16 @@ enum plugin_status plugin_verify_manifest_trust(const char *manifest, size_t man
 
 enum plugin_status plugin_verify_manifest(const char *manifest, size_t manifest_len,
                                           const char *sig, size_t sig_len,
-                                          const char *trust_path,
+                                          const char *keys_path,
                                           struct plugin_manifest *out)
 {
-    char *trust = NULL;
-    size_t trust_len = 0;
-    enum plugin_status st = plugin_trust_load(trust_path, &trust, &trust_len);
+    char *keys = NULL;
+    size_t keys_len = 0;
+    enum plugin_status st = plugin_keys_load(keys_path, &keys, &keys_len);
     if (st != PLUGIN_OK)
         return st;
-    st = plugin_verify_manifest_trust(manifest, manifest_len, sig, sig_len, trust,
-                                      trust_len, out);
-    free(trust);
+    st = plugin_verify_manifest_keys(manifest, manifest_len, sig, sig_len, keys,
+                                      keys_len, out);
+    free(keys);
     return st;
 }

@@ -61,7 +61,7 @@ enum plugin_status plugin_copy_file(const char *src, const char *dst,
 /* Validate a real directory: POSIX requires current-user ownership and no
  * group/other writes; Windows requires the protected owner+SYSTEM-only ACL.
  * Missing is PLUGIN_ERR_NOT_INSTALLED,
- * anything else wrong is PLUGIN_ERR_TRUST_INSECURE. */
+ * anything else wrong is PLUGIN_ERR_KEYS_INSECURE. */
 enum plugin_status plugin_check_dir(const char *path);
 
 /* Apply the platform directory durability barrier to a validated directory. */
@@ -84,7 +84,7 @@ bool plugin_link_generation(const char *dir, const char *link,
 enum plugin_slot_state plugin_link_slot(const char *dir, const char *link,
                                         char hex[PLUGIN_HEX_SHA3_512 + 1]);
 
-/* Verify a stored generation directory against the trust file. */
+/* Verify a stored generation directory against the publisher key file. */
 enum plugin_status plugin_verify_generation(const char *root, const char *name,
                                             const char *generation);
 
@@ -95,30 +95,30 @@ enum plugin_status plugin_verify_generation_manifest(const char *root,
                                                      const char *generation,
                                                      struct plugin_manifest *out);
 
-/* Read the trust file once, no-follow and owner-only, into a heap buffer the
+/* Read the publisher key file once, no-follow and owner-only, into a heap buffer the
  * caller frees. Failures map as plugin_verify_manifest maps them. */
-enum plugin_status plugin_trust_load(const char *path, char **bytes, size_t *len);
+enum plugin_status plugin_keys_load(const char *path, char **bytes, size_t *len);
 
-/* As plugin_verify_manifest, against trust bytes the caller already holds, so
+/* As plugin_verify_manifest, against key bytes the caller already holds, so
  * the decision and anything the caller remembers about it share one read. */
-enum plugin_status plugin_verify_manifest_trust(const char *manifest, size_t manifest_len,
+enum plugin_status plugin_verify_manifest_keys(const char *manifest, size_t manifest_len,
                                                 const char *sig, size_t sig_len,
-                                                const char *trust, size_t trust_len,
+                                                const char *keys, size_t keys_len,
                                                 struct plugin_manifest *out);
 
 /* The store root, the plugin directory, its generations directory and the
  * generation directory must each be a real directory owned by the user and
- * closed to group and others. Needs no trust set and reads no file. */
+ * closed to group and others. Needs no key list and reads no file. */
 enum plugin_status plugin_check_generation_dirs(const char *root, const char *name,
                                                 const char *generation);
 
-/* As plugin_verify_generation_manifest, verifying under trust bytes the caller
- * already read with plugin_trust_load. */
-enum plugin_status plugin_verify_generation_manifest_trust(const char *root,
+/* As plugin_verify_generation_manifest, verifying under key bytes the caller
+ * already read with plugin_keys_load. */
+enum plugin_status plugin_verify_generation_manifest_keys(const char *root,
                                                            const char *name,
                                                            const char *generation,
-                                                           const char *trust,
-                                                           size_t trust_len,
+                                                           const char *keys,
+                                                           size_t keys_len,
                                                            struct plugin_manifest *out);
 
 #endif

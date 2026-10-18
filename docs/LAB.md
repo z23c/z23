@@ -191,15 +191,15 @@ plugin, in this order, and writes nothing to `dir` unless every gate passes:
    as for `plugin pack`). The key is only read; nothing is generated or moved.
 
 It signs, so it carries the authority of `plugin pack`, and it installs nothing:
-the receipt's `next` is the install command. Linux only; other hosts refuse with
+the reply's `next` is the install command. Linux only; other hosts refuse with
 `LAB_UNSUPPORTED`. Inputs: `file`, `cases`, `name`, `version`, `key`, `cap`,
 `dir`, `sanitize`, `timeout_ms`, `mem_mb`. The receipt `zcl.lab_promote.v1`
 carries `root` (of the test run), `cases_passed`, `release_command`,
 `release_sha3_512`, `name`, `version`, `manifest`, `signature`, `generation`,
-`public_key` and `next`.
+`public_key`; the reply's `next` array names `plugin.install`.
 
-Run on r1 (GCC 14.2.0) with a throwaway `HOME` whose `trusted_keys` holds the
-publisher key; `upper.c` upper-cases stdin and `cases.json` is
+Run on r1 (GCC 14.2.0) with a throwaway `HOME`; the publisher key is added with
+`plugin publisher`. `upper.c` upper-cases stdin and `cases.json` is
 
 ```
 [{"name":"lower","stdin":"abc\n","expect_stdout":"ABC\n"},
@@ -207,15 +207,15 @@ publisher key; `upper.c` upper-cases stdin and `cases.json` is
 ```
 
 ```
-$ z23 plugin keygen ./publisher.key           # add the printed key to ~/.z23/plugins/trusted_keys
+$ z23 plugin keygen ./publisher.key           # prints public_key
+$ z23 plugin publisher <64-hex-public-key>        # appends it to ~/.z23/plugins/publisher_keys
 $ z23 lab promote upper.c --cases=cases.json --name=upper --version=1.0.0 \
       --key=./publisher.key --dir=./dist
 "data":{"schema":"zcl.lab_promote.v1","root":"0bc5665f...c260","cases_passed":2,
  "release_command":"zcc /usr/bin/x86_64-linux-gnu-gcc-14 -std=c23 -O2 -Wall -Wextra -Werror -pedantic -static-pie upper.c -o upper.c.1760126.bin -lm",
  "release_sha3_512":"779654bf...2602","name":"upper","version":"1.0.0",
  "manifest":"./dist/upper.plugin.json","signature":"./dist/upper.plugin.sig",
- "generation":"e5ff7f8e...9242","public_key":"b65cf7c7...8d15",
- "next":"z23 plugin install --manifest=./dist/upper.plugin.json"}
+ "generation":"e5ff7f8e...9242","public_key":"b65cf7c7...8d15"}
 $ z23 plugin install --manifest=./dist/upper.plugin.json     # ok, generation e5ff7f8e...9242
 $ z23 plugin switch upper e5ff7f8e...9242                    # ok, current e5ff7f8e...9242
 $ z23 plugin call upper --stdin='abc

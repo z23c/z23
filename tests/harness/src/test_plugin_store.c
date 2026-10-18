@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: prove the signed plugin store refuses unsigned, untrusted and
+ * Purpose: prove the signed plugin store refuses unsigned, unknown-key and
  * altered plugins, keeps generations content addressed, and swaps the
  * current and last-good links without ever leaving them dangling. Fixtures
  * live under the repository test-tmp directory and sign with real Ed25519. */
@@ -63,7 +63,7 @@ static bool pst_write(const char *path, const char *data, size_t len)
     return ok;
 }
 
-/* Owner-only file, whatever the process umask: the trust file must be one. */
+/* Owner-only file, whatever the process umask: the keys_file file must be one. */
 static bool pst_write_private(const char *path, const char *data, size_t len)
 {
     return pst_write(path, data, len) && chmod(path, 0600) == 0;
@@ -86,7 +86,7 @@ static bool pst_path(char *out, size_t cap, const char *a, const char *b)
     return n > 0 && (size_t)n < cap;
 }
 
-static bool pst_fx_open(struct pst_fx *fx, bool with_trust)
+static bool pst_fx_open(struct pst_fx *fx, bool with_keys)
 {
     memset(fx, 0, sizeof(*fx));
     if (!test_mkdtemp(fx->base, sizeof(fx->base), "plugin_store"))
@@ -104,11 +104,11 @@ static bool pst_fx_open(struct pst_fx *fx, bool with_trust)
         memset(seed, 0x11 * (k + 1), sizeof(seed));
         zcl_ed25519_keypair(fx->pk[k], fx->sk[k], seed);
     }
-    if (ok && with_trust) {
+    if (ok && with_keys) {
         char hex[65], line[80], path[PATH_MAX];
         pst_hex(fx->pk[0], 32, hex);
         snprintf(line, sizeof(line), "%s\n", hex);
-        ok = pst_path(path, sizeof(path), fx->root, "trusted_keys") &&
+        ok = pst_path(path, sizeof(path), fx->root, "publisher_keys") &&
              pst_write_private(path, line, strlen(line));
     }
     return ok;
@@ -266,19 +266,19 @@ static int pst_case_integrity_refusals(void)
     return failures;
 }
 
-static int pst_case_trust_refusals(void)
+static int pst_case_keys_refusals(void)
 {
     int failures = 0;
-    TEST_CASE("untrusted signing key and missing trust file are refused") {
+    TEST_CASE("unknown signing key and missing keys_file file are refused") {
         struct pst_fx fx;
         struct pst_opts other = { .key = 1 };
         struct pst_opts good = {0};
-        char trust[PATH_MAX];
+        char keys_file[PATH_MAX];
         ASSERT(pst_fx_open(&fx, true));
-        ASSERT_EQ(pst_install(&fx, "hello", "payload", &other), PLUGIN_ERR_KEY_UNTRUSTED);
-        ASSERT(pst_path(trust, sizeof(trust), fx.root, "trusted_keys"));
-        ASSERT_EQ(unlink(trust), 0);
-        ASSERT_EQ(pst_install(&fx, "hello", "payload", &good), PLUGIN_ERR_NO_TRUST);
+        ASSERT_EQ(pst_install(&fx, "hello", "payload", &other), PLUGIN_ERR_KEY_UNKNOWN);
+        ASSERT(pst_path(keys_file, sizeof(keys_file), fx.root, "publisher_keys"));
+        ASSERT_EQ(unlink(keys_file), 0);
+        ASSERT_EQ(pst_install(&fx, "hello", "payload", &good), PLUGIN_ERR_NO_KEYS);
         ASSERT(!pst_exists(fx.root, "hello"));
         pst_fx_close(&fx);
     } TEST_END
@@ -467,33 +467,33 @@ static int pst_case_post_install_tamper(void)
 }
 
 
-static bool pst_trust_path_of(const struct pst_fx *fx, char *out, size_t cap)
+static bool pst_keys_path_of(const struct pst_fx *fx, char *out, size_t cap)
 {
-    return pst_path(out, cap, fx->root, "trusted_keys");
+    return pst_path(out, cap, fx->root, "publisher_keys");
 }
 
-static int pst_case_insecure_trust(void)
+static int pst_case_insecure_keys(void)
 {
     int failures = 0;
-    TEST_CASE("trust file that is group-writable, a link or a directory is refused") {
+    TEST_CASE("keys_file file that is group-writable, a link or a directory is refused") {
         struct pst_fx fx;
         struct pst_opts o = {0};
-        char trust[PATH_MAX], real[PATH_MAX];
+        char keys_file[PATH_MAX], real[PATH_MAX];
         ASSERT(pst_fx_open(&fx, true));
-        ASSERT(pst_trust_path_of(&fx, trust, sizeof(trust)));
-        ASSERT_EQ(chmod(trust, 0664), 0);
-        ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_ERR_TRUST_INSECURE);
-        ASSERT_EQ(chmod(trust, 0600), 0);
+        ASSERT(pst_keys_path_of(&fx, keys_file, sizeof(keys_file)));
+        ASSERT_EQ(chmod(keys_file, 0664), 0);
+        ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_ERR_KEYS_INSECURE);
+        ASSERT_EQ(chmod(keys_file, 0600), 0);
         ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_OK);
         ASSERT(pst_path(real, sizeof(real), fx.base, "keys_elsewhere"));
-        ASSERT_EQ(rename(trust, real), 0);
-        ASSERT_EQ(symlink(real, trust), 0);
+        ASSERT_EQ(rename(keys_file, real), 0);
+        ASSERT_EQ(symlink(real, keys_file), 0);
         ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation),
-                  PLUGIN_ERR_TRUST_INSECURE);
-        ASSERT_EQ(unlink(trust), 0);
-        ASSERT_EQ(mkdir(trust, 0700), 0);
+                  PLUGIN_ERR_KEYS_INSECURE);
+        ASSERT_EQ(unlink(keys_file), 0);
+        ASSERT_EQ(mkdir(keys_file, 0700), 0);
         ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation),
-                  PLUGIN_ERR_TRUST_INSECURE);
+                  PLUGIN_ERR_KEYS_INSECURE);
         pst_fx_close(&fx);
     } TEST_END
     return failures;
@@ -511,14 +511,14 @@ static int pst_case_insecure_dirs(void)
         ASSERT(pst_path(plug, sizeof(plug), fx.root, "hello"));
         ASSERT(pst_path(gens, sizeof(gens), plug, "generations"));
         ASSERT_EQ(chmod(fx.root, 0777), 0);
-        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_TRUST_INSECURE);
-        ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_ERR_TRUST_INSECURE);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_KEYS_INSECURE);
+        ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_ERR_KEYS_INSECURE);
         ASSERT_EQ(chmod(fx.root, 0700), 0);
         ASSERT_EQ(chmod(plug, 0770), 0);
-        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_TRUST_INSECURE);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_KEYS_INSECURE);
         ASSERT_EQ(chmod(plug, 0700), 0);
         ASSERT_EQ(chmod(gens, 0707), 0);
-        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_TRUST_INSECURE);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_KEYS_INSECURE);
         ASSERT_EQ(chmod(gens, 0700), 0);
         ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_OK);
         pst_fx_close(&fx);
@@ -539,14 +539,14 @@ static int pst_case_store_symlinks(void)
         ASSERT(pst_path(copy, sizeof(copy), fx.base, "verified_copy"));
         ASSERT_EQ(rename(gen, copy), 0);
         ASSERT_EQ(symlink(copy, gen), 0);
-        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_TRUST_INSECURE);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_KEYS_INSECURE);
         ASSERT_EQ(unlink(gen), 0);
         ASSERT_EQ(rename(copy, gen), 0);
         snprintf(exe, sizeof(exe), "%s/hello", gen);
         ASSERT(pst_path(stash, sizeof(stash), fx.base, "exe_elsewhere"));
         ASSERT_EQ(rename(exe, stash), 0);
         ASSERT_EQ(symlink(stash, exe), 0);
-        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_TRUST_INSECURE);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_ERR_KEYS_INSECURE);
         pst_fx_close(&fx);
     } TEST_END
     return failures;
@@ -580,24 +580,24 @@ static int pst_case_republish_broken(void)
     return failures;
 }
 
-static int pst_case_trust_file_forms(void)
+static int pst_case_keys_file_forms(void)
 {
     int failures = 0;
-    TEST_CASE("trust file: CRLF lines work, malformed lines and empty files refuse") {
+    TEST_CASE("keys_file file: CRLF lines work, malformed lines and empty files refuse") {
         struct pst_fx fx;
         struct pst_opts o = {0};
-        char trust[PATH_MAX], hex[65], line[160];
+        char keys_file[PATH_MAX], hex[65], line[160];
         ASSERT(pst_fx_open(&fx, true));
-        ASSERT(pst_trust_path_of(&fx, trust, sizeof(trust)));
+        ASSERT(pst_keys_path_of(&fx, keys_file, sizeof(keys_file)));
         pst_hex(fx.pk[0], 32, hex);
         snprintf(line, sizeof(line), "\r\n%s\r\n\r\n", hex);
-        ASSERT(pst_write_private(trust, line, strlen(line)));
+        ASSERT(pst_write_private(keys_file, line, strlen(line)));
         ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_OK);
         snprintf(line, sizeof(line), "%s\nnot-a-key\n", hex);
-        ASSERT(pst_write_private(trust, line, strlen(line)));
-        ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_ERR_TRUST_MALFORMED);
-        ASSERT(pst_write_private(trust, "\n\n", 2));
-        ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_ERR_NO_TRUST);
+        ASSERT(pst_write_private(keys_file, line, strlen(line)));
+        ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_ERR_KEYS_MALFORMED);
+        ASSERT(pst_write_private(keys_file, "\n\n", 2));
+        ASSERT_EQ(pst_install(&fx, "hello", "payload", &o), PLUGIN_ERR_NO_KEYS);
         pst_fx_close(&fx);
     } TEST_END
     return failures;
@@ -606,22 +606,22 @@ static int pst_case_trust_file_forms(void)
 static int pst_case_revoked_key(void)
 {
     int failures = 0;
-    TEST_CASE("removing a key from trust makes switch and rollback refuse") {
+    TEST_CASE("removing a key from keys_file makes switch and rollback refuse") {
         struct pst_fx fx;
         struct pst_opts o = {0};
-        char a[PST_HEX], back[PST_HEX], trust[PATH_MAX], hex[65], line[80];
+        char a[PST_HEX], back[PST_HEX], keys_file[PATH_MAX], hex[65], line[80];
         ASSERT(pst_fx_open(&fx, true));
         ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
         memcpy(a, fx.generation, PST_HEX);
         ASSERT_EQ(pst_install(&fx, "hello", "version two", &o), PLUGIN_OK);
         ASSERT_EQ(plugin_store_switch(fx.root, "hello", a), PLUGIN_OK);
         ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_OK);
-        ASSERT(pst_trust_path_of(&fx, trust, sizeof(trust)));
+        ASSERT(pst_keys_path_of(&fx, keys_file, sizeof(keys_file)));
         pst_hex(fx.pk[1], 32, hex);
         snprintf(line, sizeof(line), "%s\n", hex);
-        ASSERT(pst_write_private(trust, line, strlen(line)));
-        ASSERT_EQ(plugin_store_rollback(fx.root, "hello", back), PLUGIN_ERR_KEY_UNTRUSTED);
-        ASSERT_EQ(plugin_store_switch(fx.root, "hello", a), PLUGIN_ERR_KEY_UNTRUSTED);
+        ASSERT(pst_write_private(keys_file, line, strlen(line)));
+        ASSERT_EQ(plugin_store_rollback(fx.root, "hello", back), PLUGIN_ERR_KEY_UNKNOWN);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", a), PLUGIN_ERR_KEY_UNKNOWN);
         pst_fx_close(&fx);
     } TEST_END
     return failures;
@@ -725,7 +725,7 @@ static int pst_case_permission_update_revoked(void)
         ASSERT(pst_fx_open(&fx, true));
         ASSERT_EQ(pst_install_present(&fx, "hello", "shared exe", &wide, &m, &present), PLUGIN_OK);
         ASSERT_EQ(pst_install_present(&fx, "hello", "shared exe", &narrow_revoked, &m, &present),
-                  PLUGIN_ERR_KEY_UNTRUSTED);
+                  PLUGIN_ERR_KEY_UNKNOWN);
         ASSERT_EQ(plugin_store_list(fx.root, &infos, &count), PLUGIN_OK);
         ASSERT_EQ(infos[0].generation_count, 1u);
         plugin_store_list_free(infos, count);
@@ -863,7 +863,7 @@ static int pst_case_commands(void)
         ASSERT(pst_publish(&fx, "hello", "version one", &bad));
         snprintf(in, sizeof(in), "{\"manifest\":\"%s\"}", fx.manifest);
         ASSERT(pst_call(zcl_native_handle_plugin_install, in, &r));
-        ASSERT_STR_EQ(r.error.code, "PLUGIN_KEY_UNTRUSTED");
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_KEY_UNKNOWN");
         ASSERT(r.error.next_action[0] != '\0');
         zcl_command_reply_free(&r);
         ASSERT(pst_publish(&fx, "hello", "version one", &o));
@@ -1142,7 +1142,7 @@ static int pst_case_status_states(void)
 
 static const char pst_pk_body[] = "#!/bin/sh\necho packed\n";
 
-/* A publisher workspace: an executable, a key file holding the trusted seed
+/* A publisher workspace: an executable, a key file holding the publisher seed
  * with the given mode, and an output directory name. */
 static bool pst_pk_open(struct pst_pk *pk, mode_t key_mode)
 {
@@ -1273,7 +1273,7 @@ static int pst_case_keygen(void)
         struct pst_pk pk;
         struct stat st;
         char pub[PLUGIN_HEX_PUBLIC_KEY + 1], again[PLUGIN_HEX_PUBLIC_KEY + 1];
-        char before[64], after[64], trust[PATH_MAX], line[80];
+        char before[64], after[64], keys_file[PATH_MAX], line[80];
         ASSERT(pst_pk_open(&pk, 0600));
         ASSERT_EQ(unlink(pk.key), 0);
         ASSERT_EQ(plugin_keygen(pk.key, pub), PLUGIN_OK);
@@ -1286,8 +1286,8 @@ static int pst_case_keygen(void)
         ASSERT(pst_slurp(pk.key, after, sizeof(after)));
         ASSERT_EQ(memcmp(before, after, 32), 0);
         snprintf(line, sizeof(line), "%s\n", pub);
-        ASSERT(pst_path(trust, sizeof(trust), pk.fx.root, "trusted_keys"));
-        ASSERT(pst_write_private(trust, line, strlen(line)));
+        ASSERT(pst_path(keys_file, sizeof(keys_file), pk.fx.root, "publisher_keys"));
+        ASSERT(pst_write_private(keys_file, line, strlen(line)));
         ASSERT_EQ(plugin_pack(&pk.rq, &pk.res), PLUGIN_OK);
         ASSERT_STR_EQ(pk.res.public_key, pub);
         ASSERT_EQ(plugin_store_install(pk.fx.root, pk.res.manifest_path,
@@ -1299,7 +1299,7 @@ static int pst_case_keygen(void)
 }
 
 /* Removes the first occurrence of cut from the manifest, signs the result
- * with the trusted key and writes both files, so only strictness can refuse. */
+ * with the listed key and writes both files, so only strictness can refuse. */
 static bool pst_pk_resign_without(const struct pst_pk *pk, const char *cut)
 {
     char text[512], sig_hex[129], pub[65], doc[512], path[PATH_MAX];
@@ -1458,7 +1458,7 @@ int test_plugin_store(void)
     printf("\n=== Plugin store tests ===\n");
     failures += pst_case_install_valid();
     failures += pst_case_integrity_refusals();
-    failures += pst_case_trust_refusals();
+    failures += pst_case_keys_refusals();
     failures += pst_case_strict_format();
     failures += pst_case_manifest_vocabulary();
     failures += pst_case_switch_rollback();
@@ -1466,11 +1466,11 @@ int test_plugin_store(void)
     failures += pst_case_atomic_link_failure();
     failures += pst_case_rollback_refusals();
     failures += pst_case_post_install_tamper();
-    failures += pst_case_insecure_trust();
+    failures += pst_case_insecure_keys();
     failures += pst_case_insecure_dirs();
     failures += pst_case_store_symlinks();
     failures += pst_case_republish_broken();
-    failures += pst_case_trust_file_forms();
+    failures += pst_case_keys_file_forms();
     failures += pst_case_revoked_key();
     failures += pst_case_permission_update();
     failures += pst_case_permission_update_revoked();

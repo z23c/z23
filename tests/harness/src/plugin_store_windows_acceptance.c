@@ -238,8 +238,8 @@ int main(void)
     char root[PLUGIN_PATH_MAX], key[PLUGIN_PATH_MAX];
     struct fixture_key_paths key_paths;
     char store[PLUGIN_PATH_MAX], dist[PLUGIN_PATH_MAX], exe[PLUGIN_PATH_MAX],
-        trust[PLUGIN_PATH_MAX];
-    char pub[PLUGIN_HEX_PUBLIC_KEY + 1], trust_bytes[PLUGIN_HEX_PUBLIC_KEY + 2];
+        keys_file[PLUGIN_PATH_MAX];
+    char pub[PLUGIN_HEX_PUBLIC_KEY + 1], keys_bytes[PLUGIN_HEX_PUBLIC_KEY + 2];
     wchar_t temp_wide[32768];
     char temp[PLUGIN_PATH_MAX];
     DWORD temp_count = GetTempPathW(32768, temp_wide);
@@ -261,10 +261,10 @@ int main(void)
     REQUIRE(platform_private_directory_create(store));
     REQUIRE(
         platform_directory_transaction_write_atomic(exe, "first executable bytes", 22));
-    REQUIRE(plugin_join(trust, sizeof(trust), store, "trusted_keys", NULL, NULL));
-    n = snprintf(trust_bytes, sizeof(trust_bytes), "%s\n", pub);
+    REQUIRE(plugin_join(keys_file, sizeof(keys_file), store, "publisher_keys", NULL, NULL));
+    n = snprintf(keys_bytes, sizeof(keys_bytes), "%s\n", pub);
     REQUIRE(n == 65 &&
-            platform_directory_transaction_write_atomic(trust, trust_bytes, (size_t)n));
+            platform_directory_transaction_write_atomic(keys_file, keys_bytes, (size_t)n));
     struct plugin_pack_request request = {.exe_path = exe,
                                           .key_path = key,
                                           .name = "hello",

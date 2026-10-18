@@ -78,8 +78,8 @@ ZCL_COMMAND_READY_COMMAND(
     "plugin.pack. It signs, so it needs the same authority as plugin.pack; it "
     "installs nothing and never reads, creates or moves a key. The receipt "
     "zcl.lab_promote.v1 carries the test root, cases passed, the release "
-    "command and SHA3-512, manifest and signature paths, the generation and "
-    "`next`, the plugin install command. Linux only.",
+    "command and SHA3-512, manifest and signature paths, the generation and the "
+    "public key. The reply next array names the plugin install command. Linux only.",
     65536U,
     "lab,promote,plugin,pack,sign,one-shot,static,release,cases",
     "zcl.lab_promote_input.v1", "zcl.lab_promote.v1",

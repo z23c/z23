@@ -1132,6 +1132,7 @@ REMOTE_COMMAND_CLASS("zses.invite.accept", REMOTE_CLASS_NEVER, "")
  * must not be able to install, activate, roll back or start code here. */
 REMOTE_COMMAND_CLASS("plugin.pack", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.keygen", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("plugin.publisher", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.install", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.list", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.status", REMOTE_CLASS_NEVER, "")

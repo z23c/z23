@@ -4,7 +4,7 @@
 
 `z23 plugin` keeps plugin executables under `~/.z23/plugins`. A plugin is
 installed only when its manifest is strictly formed, its detached Ed25519
-signature verifies against a key listed in `trusted_keys`, and the executable
+signature verifies against a key listed in `publisher_keys`, and the executable
 matches the SHA3-512 in the signed manifest. The daemon is not involved: these
 commands read and write files only.
 
@@ -12,7 +12,7 @@ commands read and write files only.
 
 ```text
 ~/.z23/plugins/
-  trusted_keys                      one public key per line
+  publisher_keys                      one public key per line
   NAME/
     generations/<SHA3-512 hex>/
       NAME                          executable, mode 0555 on POSIX
@@ -42,21 +42,21 @@ for reconciliation; an error alone does not prove that the move did not occur.
 
 ## Permissions
 
-On POSIX, `trusted_keys` must be a regular file owned by you and not writable
+On POSIX, `publisher_keys` must be a regular file owned by you and not writable
 by group or others. `~/.z23/plugins`, each `NAME` directory and each
 `generations` directory must be real directories with the same ownership and
 mode rule. Nothing inside the store may be a symbolic link except `current`
 and `last-good`, whose targets must have the form `generations/<128 hex>`.
-A violation is refused with `PLUGIN_TRUST_INSECURE`.
+A violation is refused with `PLUGIN_KEYS_INSECURE`.
 
-On Windows, the store directories, `trusted_keys`, signing keys and generation
+On Windows, the store directories, `publisher_keys`, signing keys and generation
 pointer files use protected ACLs owned by the current account, granting full
 access only to that account and SYSTEM, with no inherited or additional ACEs.
-Signing keys and `trusted_keys` also require an existing owner-private parent
+Signing keys and `publisher_keys` also require an existing owner-private parent
 directory with this ACL. An existing pack output directory must be private;
 a new output directory is created private. Reparse points are refused.
 Insecure signing keys or key parents report `PLUGIN_KEY_INSECURE`; insecure
-trust files or store directories report `PLUGIN_TRUST_INSECURE`.
+publisher key files or store directories report `PLUGIN_KEYS_INSECURE`.
 
 Windows storage operations do not enable plugin execution or establish a
 confinement guarantee. `plugin run` remains Linux-only and refuses other hosts
@@ -113,7 +113,7 @@ z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key \
 ```
 
 `keygen` prints one result document; `data.public_key` is the line for
-`trusted_keys`, and the secret is never printed:
+`publisher_keys`, and the secret is never printed:
 
 ```json
 {"schema":"zcl.plugin_keygen.v1","public_key":"94da1a987b44af1793538d4c6ec4fa5f2146aa9380ad4a57f1eba3aba6d02423","key_file":"./publisher.key"}
@@ -134,10 +134,10 @@ and `hello.plugin.sig` is:
 {"sig_alg":"ed25519","public_key":"94da1a987b44af1793538d4c6ec4fa5f2146aa9380ad4a57f1eba3aba6d02423","signature":"ece1ba9c0b8f3e077c91f65a837515b3dbef3524ee350a11bd134b8fe85bfb54fe827aa63c4555ed96351af7fb407c5f1e2c4f4b3620e002a0d83975ef87840b"}
 ```
 
-To install it on a machine, trust the key and install the manifest:
+To install it on a machine, list the key as a publisher key and install the manifest:
 
 ```sh
-printf '%s\n' 94da1a987b44af1793538d4c6ec4fa5f2146aa9380ad4a57f1eba3aba6d02423 >> ~/.z23/plugins/trusted_keys
+printf '%s\n' 94da1a987b44af1793538d4c6ec4fa5f2146aa9380ad4a57f1eba3aba6d02423 >> ~/.z23/plugins/publisher_keys
 z23 plugin install ./dist/hello.plugin.json
 ```
 
@@ -169,15 +169,15 @@ z23 plugin install ./dist/hello.plugin.json
 - **Signature.** The signature covers the manifest bytes exactly as written,
   ending with one newline, as described under Signature.
 
-## Trust file
+## Publisher keys
 
-`~/.z23/plugins/trusted_keys` holds one full Ed25519 public key per line as 64
+`~/.z23/plugins/publisher_keys` holds one full Ed25519 public key per line as 64
 hex characters. Blank lines are ignored; any other line is refused. The file
-must exist and name at least one key.
+must exist and name at least one key to verify a plugin. Earlier builds read the
+key list from a different file name; move its lines to publisher_keys.
 
 ```sh
-mkdir -p ~/.z23/plugins
-printf '%s\n' <64-hex-public-key> >> ~/.z23/plugins/trusted_keys
+z23 plugin publisher <64-hex-public-key>
 ```
 
 ## Commands
@@ -221,19 +221,26 @@ z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key
 
 `install`, `switch` and `rollback` are owner commands and are never accepted
 from a mesh peer. Their authority is the publisher signature checked against
-the owner's trust file on every install, switch and rollback; the node daemon
+the owner's publisher key file on every install, switch and rollback; the node daemon
 state is untouched.
 
-## Trust and first use
+## Publisher keys and first use
 
 The behavior below was measured on an installed release on 2026-10-18.
 
 - `z23 plugin keygen <path>` writes the key file and prints its public key as
   64 lowercase hex characters.
-- Install trusts only the publishers listed in `~/.z23/plugins/trusted_keys`,
-  one lowercase hex public key per line. The permission rule for the trust file
+- Install accepts only plugins signed by the publishers listed in `~/.z23/plugins/publisher_keys`,
+  one lowercase hex public key per line. The permission rule for the publisher key file
   and the store directories is in [Permissions](#permissions); a violation is
-  refused with `PLUGIN_TRUST_INSECURE`.
+  refused with `PLUGIN_KEYS_INSECURE`.
+- `z23 plugin publisher <64-hex-public-key>` appends the key to `publisher_keys`,
+  creating `~/.z23` and `~/.z23/plugins` at mode 0700 and a new file at mode
+  0600. A key already listed is reported as `already_listed` and nothing is
+  written. Existing directories or a publisher key file that break the rule in
+  [Permissions](#permissions) are refused with `PLUGIN_KEYS_INSECURE`; a key
+  that is not 64 lowercase hex characters is refused with `PLUGIN_ARGUMENT`.
+  The `plugin keygen` reply names this command as its next step.
 - `z23 plugin install <manifest>` verifies and stores a generation but does not
   change `current`. Until `z23 plugin switch <name> <generation>` selects one,
   `z23 plugin call` answers `PLUGIN_NO_GENERATION`. `z23 plugin list` shows the
@@ -241,10 +248,7 @@ The behavior below was measured on an installed release on 2026-10-18.
 
 ```sh
 z23 plugin keygen ./publisher.key
-mkdir -p ~/.z23/plugins
-chmod 700 ~/.z23 ~/.z23/plugins              # satisfies the Permissions rule
-printf '%s\n' <64-hex-public-key> >> ~/.z23/plugins/trusted_keys
-chmod 600 ~/.z23/plugins/trusted_keys       # satisfies the Permissions rule
+z23 plugin publisher <64-hex-public-key>      # keygen replies with this as its next step
 z23 plugin pack ./up --name=upper --version=1.0.0 --key=./publisher.key --interface=2 --dir=dist
 z23 plugin install dist/upper.plugin.json
 z23 plugin list
@@ -345,14 +349,14 @@ accept both versions and refuse any other.
 
 ```sh
 cc -std=c23 -O1 -static -o upper upper.c
-z23 plugin keygen ./publisher.key          # add the printed key to ~/.z23/plugins/trusted_keys
+z23 plugin keygen ./publisher.key          # then: z23 plugin publisher <printed public_key>
 z23 plugin pack ./upper --name=upper --version=1.0.0 --key=./publisher.key --interface=2 --dir=./dist
 z23 plugin install ./dist/upper.plugin.json
 z23 plugin switch upper <128-hex generation>
 z23 plugin call upper --stdin=abc          # run.stdout is "ABC"
 ```
 
-- The signature, trust and executable SHA3-512 are verified again immediately
+- The signature, publisher key and executable SHA3-512 are verified again immediately
   before each start; a changed executable is refused with `PLUGIN_EXE_HASH` and
   never runs.
 - The program runs through the lab's confined runner (see
@@ -384,8 +388,8 @@ Every refusal carries `error.code` and `error.next_action`.
 | Code | Meaning |
 | --- | --- |
 | `PLUGIN_ARGUMENT` | Missing or malformed argument, or `HOME` is not absolute. |
-| `PLUGIN_NO_TRUST` | `trusted_keys` is absent or names no key. |
-| `PLUGIN_TRUST_MALFORMED` | A `trusted_keys` line is not 64 hex characters. |
+| `PLUGIN_NO_KEYS` | `publisher_keys` is absent or names no key. |
+| `PLUGIN_KEYS_MALFORMED` | A `publisher_keys` line is not 64 hex characters. |
 | `PLUGIN_MANIFEST_MISSING` | The manifest file does not exist. |
 | `PLUGIN_MANIFEST_INVALID` | Not JSON, wrong schema, or a field outside its rules. |
 | `PLUGIN_MANIFEST_DUPLICATE_KEY` | A manifest key appears twice. |
@@ -393,14 +397,14 @@ Every refusal carries `error.code` and `error.next_action`.
 | `PLUGIN_SIG_MISSING` | The signature file does not exist. |
 | `PLUGIN_SIG_INVALID` | Signature file is malformed or has unknown or repeated keys. |
 | `PLUGIN_SIG_ALG` | `sig_alg` is not `ed25519`. |
-| `PLUGIN_KEY_UNTRUSTED` | The signing key is not in `trusted_keys`. |
+| `PLUGIN_KEY_UNKNOWN` | The signing key is not in `publisher_keys`. |
 | `PLUGIN_SIG_BAD` | The signature does not verify for the manifest bytes. |
 | `PLUGIN_EXE_MISSING` | The executable does not exist. |
 | `PLUGIN_EXE_HASH` | The executable's SHA3-512 differs from the manifest. |
 | `PLUGIN_NOT_INSTALLED` | No plugin of that name is stored. |
 | `PLUGIN_NO_GENERATION` | The named generation is not stored. |
 | `PLUGIN_NO_LAST_GOOD` | No `switch` has recorded a last-good generation. |
-| `PLUGIN_TRUST_INSECURE` | `trusted_keys` or the store has a wrong owner, is group or world writable, or contains a symbolic link or non-regular file. |
+| `PLUGIN_KEYS_INSECURE` | `publisher_keys` or the store has a wrong owner, is group or world writable, or contains a symbolic link or non-regular file. |
 | `PLUGIN_KEY_MISSING` | `pack` was given a key file that does not exist. |
 | `PLUGIN_KEY_INSECURE` | The key file is not a regular private file owned by you, is a link/reparse point, or its required Windows parent/ACL is not private. |
 | `PLUGIN_KEY_MALFORMED` | The key file is not exactly 32 bytes. |

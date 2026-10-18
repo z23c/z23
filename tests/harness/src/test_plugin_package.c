@@ -23,7 +23,7 @@
 struct pp_fixture {
     struct sw_node publisher, receiver;
     char base[1024], source[1200], signing[1200], executable[1200];
-    char trust[1200], checkout[1200], manifest[1400], current[1400];
+    char plugins[1200], checkout[1200], manifest[1400], current[1400];
     struct plugin_pack_result packed;
     uint8_t root[32];
     unsigned capabilities;
@@ -44,11 +44,11 @@ static bool pp_write(const char *path, const char *bytes, size_t len)
     return fclose(f) == 0 && ok;
 }
 
-static bool pp_trust(const char *directory, const char *key)
+static bool pp_keys(const char *directory, const char *key)
 {
     char path[1400], line[66];
     int n = snprintf(line, sizeof(line), "%s\n", key);
-    return n == 65 && pp_path(path, sizeof(path), directory, "trusted_keys") &&
+    return n == 65 && pp_path(path, sizeof(path), directory, "publisher_keys") &&
            pp_write(path, line, (size_t)n) && chmod(path, 0600) == 0;
 }
 
@@ -59,9 +59,9 @@ static bool pp_open(struct pp_fixture *f)
         pp_path(f->source, sizeof(f->source), f->base, "packed") &&
         pp_path(f->signing, sizeof(f->signing), f->base, "publisher-signing") &&
         pp_path(f->executable, sizeof(f->executable), f->base, "inert-image") &&
-        pp_path(f->trust, sizeof(f->trust), f->base, "receiver-plugins") &&
-        mkdir(f->trust, 0700) == 0 &&
-        pp_path(f->current, sizeof(f->current), f->trust, "demo/current") &&
+        pp_path(f->plugins, sizeof(f->plugins), f->base, "receiver-plugins") &&
+        mkdir(f->plugins, 0700) == 0 &&
+        pp_path(f->current, sizeof(f->current), f->plugins, "demo/current") &&
         pp_write(f->executable, "inert plugin image\n", 19) &&
         plugin_keygen(f->signing, public_key) == PLUGIN_OK &&
         sw_node_open(&f->publisher, "plugin-package-publisher", sw_score_contributor) &&
@@ -226,7 +226,7 @@ static bool pp_selection(const struct pp_fixture *f, const char *generation)
 static int pp_round(struct pp_fixture *f, unsigned version, char first[129])
 {
     int failures = 0;
-    TEST("plugin package: real transfer, local trust, inert install") {
+    TEST("plugin package: real transfer, local publisher key, inert install") {
         ASSERT(pp_publish(f, version));
         struct vcs_package_public_verdict public_shape;
         vcs_package_public_shape_classify(f->publisher.store, f->root, &public_shape);
@@ -244,13 +244,13 @@ static int pp_round(struct pp_fixture *f, unsigned version, char first[129])
         struct plugin_manifest installed;
         int present = -1;
         if (version == 1) {
-            ASSERT(pp_trust(f->source, f->packed.public_key));
-            ASSERT_EQ(plugin_store_install(f->trust, f->manifest, &installed,
-                                           &present), PLUGIN_ERR_NO_TRUST);
+            ASSERT(pp_keys(f->source, f->packed.public_key));
+            ASSERT_EQ(plugin_store_install(f->plugins, f->manifest, &installed,
+                                           &present), PLUGIN_ERR_NO_KEYS);
             ASSERT(pp_selection(f, NULL));
-            ASSERT(pp_trust(f->trust, f->packed.public_key));
+            ASSERT(pp_keys(f->plugins, f->packed.public_key));
         }
-        ASSERT_EQ(plugin_store_install(f->trust, f->manifest, &installed,
+        ASSERT_EQ(plugin_store_install(f->plugins, f->manifest, &installed,
                                        &present), PLUGIN_OK);
         ASSERT_EQ(present, 0);
         ASSERT(strcmp(installed.generation, f->packed.generation) == 0);
@@ -259,17 +259,17 @@ static int pp_round(struct pp_fixture *f, unsigned version, char first[129])
         ASSERT_EQ(plugin_hash_file(exe, digest), PLUGIN_OK);
         ASSERT(strcmp(installed.exe_sha3, digest) == 0);
         ASSERT(pp_selection(f, version == 1 ? NULL : first));
-        ASSERT_EQ(plugin_store_install(f->trust, f->manifest, &installed,
+        ASSERT_EQ(plugin_store_install(f->plugins, f->manifest, &installed,
                                        &present), PLUGIN_OK);
         ASSERT_EQ(present, 1);
         ASSERT(pp_selection(f, version == 1 ? NULL : first));
         if (version == 1) {
             memcpy(first, installed.generation, 129);
-            ASSERT_EQ(plugin_store_switch(f->trust, "demo", first), PLUGIN_OK);
+            ASSERT_EQ(plugin_store_switch(f->plugins, "demo", first), PLUGIN_OK);
             ASSERT(pp_selection(f, first));
         }
         ASSERT(pp_write(exe, "changed", 7));
-        ASSERT_EQ(plugin_store_install(f->trust, f->manifest, &installed,
+        ASSERT_EQ(plugin_store_install(f->plugins, f->manifest, &installed,
                                        &present), PLUGIN_ERR_EXE_HASH);
         ASSERT(pp_selection(f, first));
         PASS();
@@ -334,11 +334,11 @@ static bool pp_runtime_receive(struct pp_fixture *f, unsigned version,
     if (vcs_package_checkout(f->receiver.store, f->root, f->checkout, &metrics) !=
             VCS_PACKAGE_CHECKOUT_OK || metrics.files != 4 ||
         !pp_path(f->manifest, sizeof(f->manifest), f->checkout, "demo.plugin.json") ||
-        !pp_trust(f->trust, f->packed.public_key))
+        !pp_keys(f->plugins, f->packed.public_key))
         return false;
     struct plugin_manifest installed;
     int present = -1;
-    if (plugin_store_install(f->trust, f->manifest, &installed, &present) != PLUGIN_OK ||
+    if (plugin_store_install(f->plugins, f->manifest, &installed, &present) != PLUGIN_OK ||
         present != 0 || strcmp(installed.generation, f->packed.generation) != 0)
         return false;
     if (!pp_runtime_verify_executable(f, &installed))
@@ -381,9 +381,9 @@ static int pp_runtime_journey(void)
         ASSERT(pp_runtime_image(&f, "normal"));
         ASSERT(pp_runtime_receive(&f, 1, good));
         ASSERT(pp_selection(&f, NULL));
-        ASSERT_EQ(plugin_store_switch(f.trust, "demo", good), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(f.plugins, "demo", good), PLUGIN_OK);
         struct plugin_run_options options = {
-            .root = f.trust, .name = "demo", .ping_interval_ms = 40,
+            .root = f.plugins, .name = "demo", .ping_interval_ms = 40,
             .ping_deadline_ms = 500, .ping_miss_limit = 2,
             .backoff_initial_ms = 20, .backoff_max_ms = 2000,
             .stable_ms = 60000, .crash_limit = 3
@@ -396,9 +396,9 @@ static int pp_runtime_journey(void)
         ASSERT(pp_runtime_receive(&f, 2, bad));
         ASSERT(strcmp(good, bad) != 0);
         ASSERT(pp_selection(&f, good));
-        ASSERT_EQ(plugin_store_switch(f.trust, "demo", bad), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(f.plugins, "demo", bad), PLUGIN_OK);
         ASSERT(pp_selection(&f, bad));
-        ASSERT(pp_path(last_good, sizeof(last_good), f.trust, "demo/last-good"));
+        ASSERT(pp_path(last_good, sizeof(last_good), f.plugins, "demo/last-good"));
         ssize_t n = readlink(last_good, target, sizeof(target));
         ASSERT_EQ(n, 12 + PLUGIN_HEX_SHA3_512);
         ASSERT(memcmp(target, "generations/", 12) == 0);

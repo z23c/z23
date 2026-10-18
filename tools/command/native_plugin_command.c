@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: plugin.pack, plugin.keygen, plugin.install, plugin.list, plugin.status, plugin.switch, plugin.rollback,
+ * purpose: plugin.pack, plugin.keygen, plugin.publisher, plugin.install, plugin.list, plugin.status, plugin.switch, plugin.rollback,
  *          plugin.run and plugin.call — the signed plugin store under ~/.z23/plugins and the
  *          confined supervisor (run) and one-shot runner (call) for one installed plugin. Every refusal
  *          carries a stable PLUGIN_* code and the command that resolves it.
@@ -129,7 +129,7 @@ static void plg_next_install(struct zcl_command_reply *reply, const char *manife
         char *text = zcl_malloc(need, "plugin.pack.next");
         if (text && json_write(&follow_up, text, need) < need)
             (void)zcl_command_reply_add_next(reply, "plugin.install", text,
-                                             "install the packed plugin after trusting its key");
+                                             "install the packed plugin after adding its key as a publisher key");
         free(text);
     }
     json_free(&follow_up);
@@ -208,6 +208,30 @@ void zcl_native_handle_plugin_keygen(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "public_key", public_key);
     (void)json_push_kv_str(&reply->data, "key_file", key);
     reply->error.mutated = true;
+    char input[128];
+    (void)snprintf(input, sizeof(input), "{\"key\":\"%s\"}", public_key);
+    (void)zcl_command_reply_add_next(reply, "plugin.publisher", input,
+                                     "add this publisher key so z23 verifies its plugins before installing them");
+}
+
+void zcl_native_handle_plugin_publisher(const struct zcl_command_request *request,
+                                    struct zcl_command_reply *reply)
+{
+    char root[PATH_MAX];
+    if (!plg_begin(request, reply, "publisher", root, sizeof(root)))
+        return;
+    const char *key = plg_str(request, "key");
+    int already = 0;
+    enum plugin_status st = plugin_store_add_key(root, key, &already);
+    if (st != PLUGIN_OK) {
+        plg_refuse(reply, st, "publisher", key ? key : "");
+        return;
+    }
+    json_set_object(&reply->data);
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_publisher.v1");
+    (void)json_push_kv_str(&reply->data, "public_key", key);
+    (void)json_push_kv_bool(&reply->data, "already_listed", already != 0);
+    reply->error.mutated = already == 0;
 }
 
 void zcl_native_handle_plugin_install(const struct zcl_command_request *request,

@@ -79,9 +79,9 @@ void plugin_run_test_corrupt_signed_hash(bool on);
 /* Test seam: how many full signature verifications this process has run. */
 unsigned plugin_run_test_verify_count(void);
 /* Test seam: call fn at the two points a verification can be raced, between
- * reading the trust set and verifying under it (1) and after verifying and
+ * reading the key list and verifying under it (1) and after verifying and
  * before the result is remembered (2). NULL clears it. */
-#define PLUGIN_RUN_TEST_AFTER_TRUST 1
+#define PLUGIN_RUN_TEST_AFTER_KEYS 1
 #define PLUGIN_RUN_TEST_AFTER_VERIFY 2
 void plugin_run_test_set_hook(void (*fn)(int point, void *ctx), void *ctx);
 #endif

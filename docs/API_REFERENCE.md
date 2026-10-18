@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 978 |
+| Registry entries (branches + leaves) | 979 |
 | Top-level roots | 17 |
 | Branches | 212 |
-| Leaves (dispatchable command paths) | 766 |
-| … `ready` (live handler in this build) | 673 |
+| Leaves (dispatchable command paths) | 767 |
+| … `ready` (live handler in this build) | 674 |
 | … `compat` (metadata only, names a fallback) | 63 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 62 |
-| Leaves with `effect=mutate` | 293 |
+| Leaves with `effect=mutate` | 294 |
 | Leaves with `effect=destructive` | 6 |
-| Leaves requiring **owner** authority | 155 |
+| Leaves requiring **owner** authority | 156 |
 
 Per source file:
 
@@ -105,7 +105,7 @@ Per source file:
 | `engine/composition/commands/metaverse.def` | 30 | 7 | 23 |
 | `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
 | `engine/composition/commands/zses.def` | 4 | 2 | 2 |
-| `engine/composition/commands/plugin.def` | 10 | 1 | 9 |
+| `engine/composition/commands/plugin.def` | 11 | 1 | 10 |
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/work.def` | 3 | 1 | 2 |
 | `engine/composition/commands/lab.def` | 5 | 1 | 4 |
@@ -1865,6 +1865,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `plugin keygen` | ready | mutate / app-write / **owner** · fast/low | **`key`** | `zcl.plugin_keygen.v1` | `z23 plugin keygen ./publisher.key` | Create a plugin signing key file and print its public key |
+| `plugin publisher` | ready | mutate / app-write / **owner** · fast/low | **`key`** | `zcl.plugin_publisher.v1` | `z23 plugin publisher 0000000000000000000000000000000000000000000000000000000000000000` | Add a publisher key z23 verifies plugin signatures against |
 | `plugin pack` | ready | mutate / app-write / **owner** · fast/low | **`exe`**, `name`, `version`, `key`, `cap`, `dir`, `interface` | `zcl.plugin_pack.v1` | `z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key --cap=fs.read,clock --dir=./dist` | Write the signed manifest and signature for a plugin executable |
 | `plugin install` | ready | mutate / app-write / **owner** · foreground/low | **`manifest`** | `zcl.plugin_install.v1` | `z23 plugin install ./hello.plugin.json` | Install a signed plugin executable as a new generation |
 | `plugin list` | ready | read / read / operator · fast/low | none | `zcl.plugin_list.v1` | `z23 plugin list` | List installed plugins with current, last-good and all generations |
