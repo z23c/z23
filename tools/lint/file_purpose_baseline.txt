@@ -1,7 +1,7 @@
 # file_purpose_baseline.txt
 #
 # Shrink-only baseline for tools/lint/check_file_purpose.sh (Gate P1,
-# docs/work/palace-design.md §3). Each line is a codeindex-root .c/.h whose
+# docs/dev/palace-design.md §3). Each line is a codeindex-root .c/.h whose
 # ci_file_purpose() is empty today (typically a lone one-line copyright header
 # and no description). The gate runs WARN now; when flipped to RATCHET a NEW
 # purpose-less file fails, but these are tolerated. As agents touch a file they

@@ -1491,7 +1491,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * and likewise never creates a missing index. Every leaf accepts
  * --index=<path> (moves the database) and --state-root=<dir> (moves where
  * every declared source is read from), independent overrides — neither an
- * environment variable. See docs/INDEX.md. */
+ * environment variable. See docs/dev/DATA_INDEX.md. */
 ZCL_COMMAND_BRANCH("dev.index", "dev",
                    "Ingest and search local data sources (board/experiments/"
                    "landing/logs)",

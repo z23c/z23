@@ -13,7 +13,7 @@ invoking a subprocess.
 
 This document is the canonical description of what ZVCS is, what it stores,
 and what actually calls it today. See also
-[`docs/work/HOTSWAP.md`](work/HOTSWAP.md) §"ZVCS auto-anchor" and §"Sealed-consensus
+[`docs/dev/HOTSWAP.md`](dev/HOTSWAP.md) §"ZVCS auto-anchor" and §"Sealed-consensus
 refusal" for how the dev loop integrates it, and
 [`docs/adr/0002-sealed-consensus-core.md`](adr/0002-sealed-consensus-core.md)
 for why the sealed `core/` tree and ZVCS's seal guard exist together.

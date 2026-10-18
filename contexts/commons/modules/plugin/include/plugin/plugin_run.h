@@ -7,7 +7,7 @@
  * Linux with Landlock ABI 3 (file truncation handled) and seccomp only;
  * elsewhere plugin_run_open refuses with PLUGIN_RUN_ERR_PLATFORM or
  * PLUGIN_RUN_ERR_SANDBOX.
- * docs/PLUGINS.md describes the descriptors and the ping protocol. */
+ * docs/dev/PLUGINS.md describes the descriptors and the ping protocol. */
 #ifndef ZCL_PLUGIN_RUN_H
 #define ZCL_PLUGIN_RUN_H
 

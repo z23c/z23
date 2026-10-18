@@ -337,7 +337,7 @@ int t_gate21_supervisor_worker_lockin(void)
 /* META-GATE: every hardened gate must FAIL LOUD (exit 2) on an empty scan set
  * instead of reporting "clean" exit 0 (a hollow pass). Each gate exposes a
  * ZCL_*_SCAN_* override of its scan root, pointed here at an existing but
- * empty dir. See docs/work/lint-gate-hollowness-audit.md. */
+ * empty dir. See docs/dev/lint-gate-hollowness-audit.md. */
 /* Run a hot-swap manifest gate against a specific manifest fixture by exporting
  * ZCL_HOTSWAP_MANIFEST (resolved to an absolute path). */
 int run_hotswap_gate_with_manifest(const char *script_rel,

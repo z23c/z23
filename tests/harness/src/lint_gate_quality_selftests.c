@@ -371,7 +371,7 @@ int t_gate22_framework_filename_suffix(void)
     return failures;
 }
 
-/* Gate P2 (docs/work/palace-design.md §3) — check-group-purpose (HARD): a
+/* Gate P2 (docs/dev/palace-design.md §3) — check-group-purpose (HARD): a
  * group node whose ci_group_purpose() case returns "" trips the gate; the
  * unmodified source is clean. Never touches the live codeindex_group.c —
  * copies it into test-tmp/, blanks one known case (core/modules/bloom) in the copy,
@@ -442,7 +442,7 @@ int t_gate_p2_group_purpose(void)
     return failures;
 }
 
-/* Gate P1 (docs/work/palace-design.md §3) — check-file-purpose: a file whose
+/* Gate P1 (docs/dev/palace-design.md §3) — check-file-purpose: a file whose
  * first code token precedes any comment (no derivable purpose) trips the gate
  * in FAIL mode; a file with a substantive leading block comment passes. The
  * gate is pointed at an isolated test-tmp/ fixture tree via
@@ -518,7 +518,7 @@ int t_gate_p1_file_purpose(void)
     return failures;
 }
 
-/* Gate P3 (docs/work/palace-design.md §3) — check-no-orphan-placement: a path
+/* Gate P3 (docs/dev/palace-design.md §3) — check-no-orphan-placement: a path
  * outside every known navigator top resolves to the catch-all "root" group and
  * trips the gate in FAIL/RATCHET mode; a lib/-placed path passes. The scan set
  * is overridden via ZCL_ORPHAN_PLACEMENT_FILES so git ls-files (which cannot

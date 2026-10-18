@@ -4,7 +4,7 @@
  * replacement for tools/lint/check_fleet_vitals.sh. Holds the fleet vitals
  * catalog (engine/composition/fleet_vitals.def, the ONE declaration of what
  * a fleet metric is) closed, complete and identical to the table
- * docs/FLEET_LEDGER.md renders: every FLEET_VITAL row carries four strings
+ * docs/agent/FLEET_LEDGER.md renders: every FLEET_VITAL row carries four strings
  * and an integer cadence, every id is unique and named, every unit and why
  * is non-empty, every agg is gauge or sum, and the doc table lists exactly
  * the catalog's ids in the catalog's own order. A hollow catalog (below the
@@ -38,7 +38,7 @@ enum {
 };
 
 static const char k_fv_def_default[] = "engine/composition/fleet_vitals.def";
-static const char k_fv_doc_default[] = "docs/FLEET_LEDGER.md";
+static const char k_fv_doc_default[] = "docs/agent/FLEET_LEDGER.md";
 static const char k_fv_gate[] = "check_fleet_vitals";
 
 /* One parsed row. The five scan fields were joined TSV and re-split in the
@@ -634,12 +634,28 @@ static int fv_stub(const char *def_rel, const char *doc_rel, int floor)
     return rc;
 }
 
+/* The script's mkdir -p: build each parent as well. */
+static int fv_mkdirs(void)
+{
+    static const char *const k_dirs[] = {
+        "engine", "engine/composition", "docs", "docs/agent",
+    };
+    char sub[4096];
+    for (size_t i = 0; i < sizeof k_dirs / sizeof k_dirs[0]; i++) {
+        if (snprintf(sub, sizeof sub, "%s/%s", g_fv_tmp, k_dirs[i])
+            >= (int)sizeof sub)
+            return -1;
+        if (mkdir(sub, 0755) != 0 && errno != EEXIST)
+            return -1;
+    }
+    return 0;
+}
+
 static int fv_selftest_setup(void)
 {
     struct sigaction sa;
     sigset_t block, old;
     char template[4096];
-    char sub[4096];
     const char *tmp;
     char *dir;
     memset(&sa, 0, sizeof sa);
@@ -668,18 +684,7 @@ static int fv_selftest_setup(void)
     }
     snprintf(g_fv_tmp, sizeof g_fv_tmp, "%s", dir);
     sigprocmask(SIG_SETMASK, &old, NULL);
-    /* The script's mkdir -p: build each parent as well. */
-    if (snprintf(sub, sizeof sub, "%s/engine", g_fv_tmp) >= (int)sizeof sub)
-        return -1;
-    if (mkdir(sub, 0755) != 0 && errno != EEXIST) return -1;
-    if (snprintf(sub, sizeof sub, "%s/engine/composition", g_fv_tmp)
-        >= (int)sizeof sub)
-        return -1;
-    if (mkdir(sub, 0755) != 0 && errno != EEXIST) return -1;
-    if (snprintf(sub, sizeof sub, "%s/docs", g_fv_tmp) >= (int)sizeof sub)
-        return -1;
-    if (mkdir(sub, 0755) != 0 && errno != EEXIST) return -1;
-    return 0;
+    return fv_mkdirs();
 }
 
 /* One expecting-failure case: writes def+doc, requires a nonzero rc. */
@@ -687,9 +692,9 @@ static int fv_case_reject(const char *def, const char *doc,
                           const char *ok, const char *fail)
 {
     if (fv_write("engine/composition/fleet_vitals.def", def) == 0
-        && fv_write("docs/FLEET_LEDGER.md", doc) == 0
+        && fv_write("docs/agent/FLEET_LEDGER.md", doc) == 0
         && fv_stub("engine/composition/fleet_vitals.def",
-                   "docs/FLEET_LEDGER.md", 1) != 0) {
+                   "docs/agent/FLEET_LEDGER.md", 1) != 0) {
         fv_out_line("  selftest ok: %s", ok);
         return 0;
     }
@@ -733,9 +738,9 @@ int check_fleet_vitals_selftest(void)
     if (g_fv_signal) { fv_cleanup_and_raise(); return 1; }
 
     if (fv_write("engine/composition/fleet_vitals.def", good_def) == 0
-        && fv_write("docs/FLEET_LEDGER.md", good_doc) == 0
+        && fv_write("docs/agent/FLEET_LEDGER.md", good_doc) == 0
         && fv_stub("engine/composition/fleet_vitals.def",
-                   "docs/FLEET_LEDGER.md", 1) == 0)
+                   "docs/agent/FLEET_LEDGER.md", 1) == 0)
         fv_out_line("  selftest ok: a complete row with a matching doc "
                     "table");
     else {
@@ -756,7 +761,7 @@ int check_fleet_vitals_selftest(void)
     fails += fv_case_reject(good_def, drift_doc,
                             "a doc table that names a different id",
                             "a drifted doc table passed");
-    rc = fv_stub("missing.def", "docs/FLEET_LEDGER.md", 1);
+    rc = fv_stub("missing.def", "docs/agent/FLEET_LEDGER.md", 1);
     if (rc == 2)
         fv_out_line("  selftest ok: a missing .def exits 2");
     else {

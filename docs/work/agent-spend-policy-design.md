@@ -230,4 +230,4 @@ Hook points:
 - Delegated/macaroon-style tokens, expiry refresh, per-command policies.
 - Fee bounding: the caps bound the recipient amount, so actual outflow exceeds
   `max_per_tx` by the fee.
-- REST write surface (stays operator-gated per AGENT_ARCHITECTURE.md:73).
+- REST write surface (stays operator-gated per agent/AGENT_ARCHITECTURE.md:73).

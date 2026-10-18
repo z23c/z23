@@ -811,7 +811,7 @@ static bool board_set_chain(struct node_db *ndb, const uint8_t id[32],
 }
 
 /* Relink the whole stored table after a reclaim. The chain is LOCAL evidence
- * of arrival order over the rows this node still holds (docs/FLEET_BOARD.md,
+ * of arrival order over the rows this node still holds (docs/agent/FLEET_BOARD.md,
  * Storage): it is never gossiped and orders the board for nobody else, so
  * rebuilding it over the survivors preserves exactly what it ever claimed —
  * and leaves the table in a state db_fleet_board_chain_verify accepts with
@@ -1030,7 +1030,7 @@ static bool board_reclaim_locked(struct node_db *ndb, int64_t now,
     return true;
 }
 
-/* The separately bounded maintenance path docs/FLEET_BOARD.md reserves:
+/* The separately bounded maintenance path docs/agent/FLEET_BOARD.md reserves:
  * expired discussion rows are physically removed and the survivors are
  * re-seq'd and re-chained, so the store the lifetime quota counts and the
  * bytes the node actually carries say the same thing.

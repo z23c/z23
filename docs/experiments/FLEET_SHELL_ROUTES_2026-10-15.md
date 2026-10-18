@@ -55,7 +55,7 @@ four agent sessions are currently active. No keys were forwarded, host pins
 changed, service restarted or firewall modified. No Z23 receiver was started.
 
 The command recipe remains in the single
-[fleet guide](../FLEET.md#shells-and-remote-commands).
+[fleet guide](../agent/FLEET.md#shells-and-remote-commands).
 Builds still require devbuild admission and source changes still require
 component ownership. Route availability grants neither consensus nor custody
 authority.

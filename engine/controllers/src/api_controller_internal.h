@@ -363,7 +363,7 @@ void api_route_registry_visit(api_route_contract_visit_fn visit, void *ctx);
  * (engine/controllers/src/api_controller_dispatch.c): it acquire-loads an
  * atomic provider and, if a dev generation .so has installed one, delegates
  * to it; otherwise it calls the resident built-in below. See
- * docs/work/HOTSWAP.md and ZCL_HOTSWAP_EXPORT_PROVIDER. */
+ * docs/dev/HOTSWAP.md and ZCL_HOTSWAP_EXPORT_PROVIDER. */
 size_t api_resource_route_dispatch_dynamic(const char *method,
                                            const char *path,
                                            uint8_t *response,

@@ -8,7 +8,7 @@
  *
  * Every leaf here answers from local files. Nothing contacts a peer, and
  * nothing prints a row's contents anywhere a row could leave this machine.
- * See docs/FLEET_LEDGER.md. */
+ * See docs/agent/FLEET_LEDGER.md. */
 
 ZCL_COMMAND_BRANCH("fleet.ledger", "fleet", "Write and inspect the ledger",
                    ZCL_COMMAND_LAYER_OPS)

@@ -60,7 +60,7 @@ Description=ZClassic23 Host Garbage Collector Timer
 
 [Timer]
 # Hourly at :47 (+300s jitter). See tools/scripts/host_gc.sh and
-# docs/HOST_GC.md for why this slot and why hourly.
+# docs/dev/HOST_GC.md for why this slot and why hourly.
 OnCalendar=*-*-* *:47:00
 RandomizedDelaySec=300
 Persistent=true

@@ -87,7 +87,7 @@ const char *doc_for(const struct scan_ctx *c, size_t seg_start,
     return best;
 }
 
-/* ── file self-description (§1.1 of docs/work/palace-design.md) ───────── */
+/* ── file self-description (§1.1 of docs/dev/palace-design.md) ───────── */
 
 /* License headers describe redistribution terms, not the file.  Keep this
  * deliberately prefix-based and narrow: a line that is not recognizable

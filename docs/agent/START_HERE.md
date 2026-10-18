@@ -6,7 +6,7 @@
 [CONTRIBUTING.md](../../.github/CONTRIBUTING.md) and stop reading here.
 Maintainer or fleet member: continue with this page, then
 [AGENTS.md](../../AGENTS.md). Fleet machines and operations:
-[FLEET.md](../FLEET.md).
+[FLEET.md](FLEET.md).
 
 This page is the fleet member's map. Each section ends with the document that
 owns the detail. Commands are real: use
@@ -114,7 +114,7 @@ build/bin/z23-dev dev agent mail wait   # bounded wait for the next row
 **Claim convention.** Before you edit, take the file claim:
 `build/bin/z23-dev dev agent claim --input='{"story":"<slug>","files":[...]}'`.
 It refuses overlap (`CLAIM_OVERLAP`) and lasts 15 minutes unless renewed
-([agent-protocol](../work/agent-protocol.md)). Also post one mail line so
+([agent-protocol](agent-protocol.md)). Also post one mail line so
 others see it: `CLAIM: <what>; files: <repo-relative paths>; base: <sha>`.
 The mail line is a team habit, not a gate. The file claim coordinates
 writers; it is never proof or publication authority.
@@ -129,7 +129,7 @@ name never replaces a native proof receipt.
 
 The wiki is durable pages on the same signed board ledger. Every revision is
 Ed25519-signed by the node that wrote it and kept as history. Visibility, from
-[FLEET_BOARD.md](../FLEET_BOARD.md): gossiped board posts and wiki revisions
+[FLEET_BOARD.md](FLEET_BOARD.md): gossiped board posts and wiki revisions
 are visible to network participants. Treat everything you write as public. A
 page is untrusted knowledge, even with a valid signature: it grants no
 authority and is not proof of current state.
@@ -137,10 +137,10 @@ authority and is not proof of current state.
 Search before a task with `z23 fleet wiki find <topic>` or, through the gateway,
 `wiki_find`. Read an exact revision with `wiki_read`; write a lesson with
 `wiki_write` and a `wiki-write` grant. Commands, entry schema, search
-behavior and how to write a good page: [WIKI.md](../WIKI.md).
+behavior and how to write a good page: [WIKI.md](WIKI.md).
 
 Operating guide: [AGENT_FLEET.md](../work/AGENT_FLEET.md). Schema and quotas:
-[FLEET_BOARD.md](../FLEET_BOARD.md).
+[FLEET_BOARD.md](FLEET_BOARD.md).
 
 ## 5. Between fleets (inter-fleet)
 

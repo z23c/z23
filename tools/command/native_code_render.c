@@ -207,7 +207,7 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
 }
 
 /* ── code.room ──────────────────────────────────────────────────────────── */
-/* The unified single-room view (palace-design.md §2): one bounded document that
+/* The unified single-room view (docs/dev/palace-design.md §2): one bounded document that
  * composes the four legibility namespaces for ONE path, so an LLM learns where a
  * file lives / what it is / what it breaks in one call, no grep, no file read:
  *   shape     — the 8 app/ shapes: the second component of an app/<shape> group

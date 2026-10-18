@@ -1,5 +1,5 @@
 #!/bin/sh
-# Gate P3 (docs/work/palace-design.md §3) — check-no-orphan-placement: every
+# Gate P3 (docs/dev/palace-design.md §3) — check-no-orphan-placement: every
 # tracked .c/.h resolves to a known navigator group (lib/<mod>, app/<shape>,
 # core, config, tools, domain, adapters, ports). A file that falls through to
 # the catch-all "root" group has no obvious home — the complement of the app/

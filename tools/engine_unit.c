@@ -2356,7 +2356,7 @@ static bool receipt_plan_fits(const struct unit_opts *o,
 /* ── the owner's fleet ledger ─────────────────────────────────────────────
  *
  * The same numbers as the receipt above, in the one place the owner can ask
- * the whole fleet at once (docs/FLEET_LEDGER.md).
+ * the whole fleet at once (docs/agent/FLEET_LEDGER.md).
  *
  * This program does NOT open the ledger. The ledger lives under a datadir,
  * every row is signed by the node's delegated online key, and the boundary

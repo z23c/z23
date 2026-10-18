@@ -589,7 +589,7 @@ cache_manifest() {
         platform/deploy/zclassic23-fuzz.service platform/deploy/zclassic23-fuzz.timer \
         platform/deploy/zclassic23-coverage.service platform/deploy/zclassic23-coverage.timer \
         platform/deploy/zclassic23-test-suite.service platform/deploy/zclassic23-test-suite.timer \
-        tests/harness/src/test_make_lint_gates.c docs/work/fast-path.md \
+        tests/harness/src/test_make_lint_gates.c docs/dev/fast-path.md \
         docs/AGENT_API.md cognition/controllers/src/agent_controller.c \
         cognition/controllers/src/agent_lane_runtime.c \
         cognition/controllers/src/agent_runtime_controller.c; do

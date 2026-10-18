@@ -1943,7 +1943,7 @@ static int test_ic_fleet_triggers_proof_mapping(void)
             "tools/command/native_fleet_triggers.h",
             "tests/harness/src/test_fleet_triggers.c",
             "engine/composition/triggers.def",
-            "docs/FLEET_TRIGGERS.md",
+            "docs/agent/FLEET_TRIGGERS.md",
         };
         for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
             struct agent_impact_acc impact = {0};

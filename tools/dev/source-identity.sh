@@ -261,7 +261,7 @@ collect_gitlink()
             second. Doing those two in the other order converts this hard
             failure into a silent stub-Tor build that only surfaces at ship
             time, roughly 25 minutes in.
-  Why:      docs/AGENT_TRAPS.md, build-trap table, rows 1 and 2"
+  Why:      docs/agent/AGENT_TRAPS.md, build-trap table, rows 1 and 2"
     fi
     top="$(git -C "$prefix" rev-parse --show-toplevel 2>/dev/null)" ||
         fail "could not resolve gitlink worktree: $prefix"

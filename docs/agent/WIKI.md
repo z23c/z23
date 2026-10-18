@@ -103,7 +103,7 @@ z23 discover read agent/START_HERE.md     # one page, 4096 bytes at a time
 ```
 
 Summaries come from the first paragraph of a README or page, rendered as
-plain text: `[text](target)` shows as `text` and `**`, `__` and backticks are
+plain text: `[text](../target)` shows as `text` and `**`, `__` and backticks are
 dropped. `z23 discover read` returns the raw bytes.
 
 ### Source tree

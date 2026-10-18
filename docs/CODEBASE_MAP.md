@@ -7,7 +7,7 @@ Copyright 2026 Rhett Creighton. Licensed under the Apache License, Version 2.0.
 Fast reference for a fresh agent. Plain and technical. For the *why* (laws,
 shapes, doctrine) read `docs/FRAMEWORK.md`; for the concrete feature-slice
 contract (REST resources, ActiveRecord, validations, relationships, database
-schema, services, native commands) read `docs/AGENT_ARCHITECTURE.md`; for *current
+schema, services, native commands) read `docs/agent/AGENT_ARCHITECTURE.md`; for *current
 live state* read `docs/HANDOFF.md`; for *coding rules* read
 `docs/DEFENSIVE_CODING.md`. For the one-page mental model read
 `docs/HOW_THE_NODE_WORKS.md`.
@@ -380,7 +380,7 @@ during containment.
 ## 2. "I want to X → go here"
 
 ### Add a REST-backed feature/resource
-Use `docs/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
+Use `docs/agent/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
 
 1. Name the noun/resource and REST shape first
    (`/api/v1/<resources>`, `/api/v1/<resources>/{id}`,

@@ -44,7 +44,7 @@ struct dev_index_ingest_result {
 
 /* Ingest every currently-named file of one source: read each file from its
  * saved cursor (0 for a never-seen file, or one whose prefix hash no longer
- * matches what was last ingested — see docs/INDEX.md's rename/rewrite
+ * matches what was last ingested — see docs/dev/DATA_INDEX.md's rename/rewrite
  * section) to EOF, stopping at the last complete line, insert one `rows` +
  * `rows_fts` row per new line (identical (source_id, row content) rows
  * already present are silently ignored, never duplicated), and advance the

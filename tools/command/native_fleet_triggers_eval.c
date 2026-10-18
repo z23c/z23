@@ -926,7 +926,7 @@ bool zcl_trigger_check_run(bool dry_run, int64_t since_s, uint64_t *out_checked,
 }
 
 /* ── github comment ingest ────────────────────────────────────────────
- * z23 has no outbound HTTP seam (see docs/FLEET_TRIGGERS.md), so this never
+ * z23 has no outbound HTTP seam (see docs/agent/FLEET_TRIGGERS.md), so this never
  * reaches GitHub itself: it accepts rows a tiny external adapter already
  * fetched and appends the ones that carry every field the github_comments
  * source needs. */

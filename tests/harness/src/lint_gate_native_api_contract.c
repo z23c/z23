@@ -1153,7 +1153,7 @@ int t_native_agent_api_contract(void)
                       "z23 agentdeployguard -operator-lane=dev deploy")
                != NULL);
         ASSERT(strstr(agent_doc_buf, "No Python is required") != NULL);
-        ASSERT(strstr(agent_doc_buf, "docs/AGENT_ARCHITECTURE.md") != NULL);
+        ASSERT(strstr(agent_doc_buf, "docs/agent/AGENT_ARCHITECTURE.md") != NULL);
         /* The doc leads with native no-build probes. */
         ASSERT(strstr(agent_doc_buf, "prefer native commands like "
                                      "`z23 status`") != NULL);

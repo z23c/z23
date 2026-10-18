@@ -5116,7 +5116,7 @@ ZCL_COMMAND_PLANNED_COMMAND(
  * The ONE swappable leaf whose body is a pure decision over its arguments and
  * compiled-in constants: no node, no datadir, no RPC, no wall-clock. That is
  * what lets the hot-swap loader dispatch it as its own probe-before-publish
- * case in-process. See engine/composition/hotswap_swappable.def and docs/work/HOTSWAP.md.
+ * case in-process. See engine/composition/hotswap_swappable.def and docs/dev/HOTSWAP.md.
  */
 ZCL_COMMAND_BRANCH("zcode.package.policy", "zcode.package",
                    "Local ratio and anti-spam policy",

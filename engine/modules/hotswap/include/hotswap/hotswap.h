@@ -14,7 +14,7 @@
  * that already entered old code stays valid because the old .so text is
  * never unmapped.
  *
- * See docs/work/HOTSWAP.md for the end-to-end recipe + the ephemerality
+ * See docs/dev/HOTSWAP.md for the end-to-end recipe + the ephemerality
  * warning (hot-swaps revert on restart; persist via a normal rebuild).
  */
 

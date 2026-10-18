@@ -737,7 +737,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(main_src, "node_rpc_client_init") == NULL);
 
         ASSERT(repo_path(path, sizeof(path),
-                         "docs/AGENT_ARCHITECTURE.md") == 0);
+                         "docs/agent/AGENT_ARCHITECTURE.md") == 0);
         ASSERT(read_entire_file(path, &arch_doc) == 0);
         ASSERT(strstr(arch_doc, "REST resource first") != NULL);
         ASSERT(strstr(arch_doc, "ActiveRecord lifecycle") != NULL);
@@ -993,7 +993,7 @@ int t_agent_fast_ci_contract(void)
         free(rules);
         rules = NULL;
 
-        ASSERT(repo_path(path, sizeof(path), "docs/work/fast-path.md") == 0);
+        ASSERT(repo_path(path, sizeof(path), "docs/dev/fast-path.md") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
         ASSERT(strstr(buf, "`make fast-ci`") != NULL);
         ASSERT(strstr(buf, "`make t-fast ONLY=<group>`") != NULL);

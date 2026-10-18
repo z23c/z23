@@ -7,7 +7,7 @@ F1-F11, verification gates G1-G5) was retired from the tree and remains in git
 history. Current sequencing is in [`docs/work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md).*
 
 Companion docs: `docs/CONSENSUS_PARITY_DOCTRINE.md` (the parity bar),
-`docs/work/fast-path.md` (diagnose on a COPY, never live).
+`docs/dev/fast-path.md` (diagnose on a COPY, never live).
 
 Live bootstrap/cure status: [`docs/HANDOFF.md`](HANDOFF.md); design:
 `docs/work/self-verified-tip-plan.md`. Verify live state from

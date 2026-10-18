@@ -708,7 +708,7 @@ int test_script_validate_stage(void)
     /* stall-taxonomy audit: stage_upstream_log_hole_note. A durable
      * hole (row deleted below the already-advanced upstream cursor — the
      * residue of a noncanonical-row purge in script_validate_log +
-     * proof_validate_log, see docs/AGENT_TRAPS.md / reducer_frontier_
+     * proof_validate_log, see docs/agent/AGENT_TRAPS.md / reducer_frontier_
      * reconcile_light.c) must name a typed DEPENDENCY blocker immediately,
      * not rely solely on the 60-minute stage-freeze backstop. */
     {

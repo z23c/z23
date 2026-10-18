@@ -24,7 +24,7 @@
  * offset when the two hashes match — an inode change alone (a `mv` onto the
  * same content) does not force a restart, and a same-size in-place rewrite
  * (content changed, inode and size unchanged) is not missed. See
- * docs/INDEX.md.
+ * docs/dev/DATA_INDEX.md.
  */
 
 #include "command/native_dev_index_ingest.h"

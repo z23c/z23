@@ -16,7 +16,7 @@ ownership or permission to publish; directory layout grants no authority.
 
 | Need | Document |
 |---|---|
-| Establish ownership and resume a lane | [Parallel worker protocol](../work/agent-protocol.md) |
+| Establish ownership and resume a lane | [Parallel worker protocol](agent-protocol.md) |
 | Assign disjoint work to another worker | [Lane launch](LANE_LAUNCH.md) |
 | Start a bounded source slice | [Lane quickstart](LANE_QUICKSTART.md) |
 | Report an exact checkpoint and evidence | [Lane report](LANE_REPORT.md) |
@@ -27,6 +27,16 @@ ownership or permission to publish; directory layout grants no authority.
 | Install the Claude Code plugin | [Z23 plugin for Claude Code](../../.claude/plugin/README.md), opt-in fleet gateway: [fleet plugin](../../.claude/plugin-fleet/README.md) |
 | Inspect experimental unit contracts | [Flash unit](FLASH_UNIT.md), [Executor heuristics](EXECUTOR_HEURISTICS.md) |
 | See where the development system is going | [Development system vision](VISION.md) |
+| Operate the fleet: machines, joining, tunnel, roles | [Fleet guide](FLEET.md) |
+| Post to or read the fleet board | [Fleet board](FLEET_BOARD.md) |
+| Read the fleet ledger and its refusals | [Fleet ledger](FLEET_LEDGER.md) |
+| Check the closed trigger registry | [Fleet triggers](FLEET_TRIGGERS.md) |
+| Search or write fleet wiki pages | [Wiki](WIKI.md) |
+| Read or claim owner-signed work cards | [Work cards](WORK_CARDS.md) |
+| Add a feature slice | [Agent architecture](AGENT_ARCHITECTURE.md) |
+| Check intentional behavior before repairing it | [Agent traps](AGENT_TRAPS.md) |
+| Separate claims from evidence | [AI safety gates](AI_SAFETY_GATES.md) |
+| Measure the development system | [Development MVP](DEVELOPMENT_MVP.md) |
 
 Use the built binary's `discover` catalog and code navigator to establish
 available commands and exact input keys. Source declarations and plans are not

@@ -388,7 +388,7 @@ write placeholders also refuse without mutation.
 
 ## Where code belongs
 
-Follow [`AGENT_ARCHITECTURE.md`](./AGENT_ARCHITECTURE.md) for the remaining
+Follow [`AGENT_ARCHITECTURE.md`](./agent/AGENT_ARCHITECTURE.md) for the remaining
 feature slice:
 
 | Responsibility | Authority |

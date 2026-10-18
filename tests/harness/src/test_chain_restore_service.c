@@ -1847,7 +1847,7 @@ static int test_rebuild_active_chain_is_o_chain_not_delta(void) {
         /* O(chain), not O(delta): a 3x-taller chain does 3x the disk reads. */
         if (tall_rows != 3 * short_rows)
             printf("  KNOWN DEFECT surfaced: unclean-restart disk rebuild is "
-                   "O(chain) (short=%llu tall=%llu) — docs/AGENT_TRAPS.md\n",
+                   "O(chain) (short=%llu tall=%llu) — docs/agent/AGENT_TRAPS.md\n",
                    (unsigned long long)short_rows,
                    (unsigned long long)tall_rows);
         ASSERT(tall_rows == 3 * short_rows);

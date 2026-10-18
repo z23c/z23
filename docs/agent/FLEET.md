@@ -5,8 +5,8 @@
 This is the single operator page for a Z23 fleet: which machines belong to
 it, how to add one, how to reach one, and how to read its health. Agent and
 coordinator policy (storage admission, task ownership, cost accounting) is in
-[`work/AGENT_FLEET.md`](work/AGENT_FLEET.md). Priorities are in
-[`work/FLEET_SCORECARD.md`](work/FLEET_SCORECARD.md).
+[`work/AGENT_FLEET.md`](../work/AGENT_FLEET.md). Priorities are in
+[`work/FLEET_SCORECARD.md`](../work/FLEET_SCORECARD.md).
 
 A route to a machine grants no shell, no consensus authority and no custody
 authority. Implemented commands and their input contracts are those of the
@@ -49,7 +49,7 @@ roster. Hardware facts in a record are self-reported, not verified.
 
 The full procedure, refusal names, the optional `ssh` bridge, on-chain root
 anchoring and the roster gate (`-fleetrostergate`) are in
-[`agent/FLEET_JOIN.md`](agent/FLEET_JOIN.md).
+[`agent/FLEET_JOIN.md`](FLEET_JOIN.md).
 
 ## Tunnel
 
@@ -65,7 +65,7 @@ Current status:
 - macOS is blocked pending native HOST qualification: Darwin strict
   descendant cleanup is not qualified.
 - Forward-secrecy design (proposal, not implemented):
-  [`TUNNEL_PQ_FORWARD_SECRECY.md`](TUNNEL_PQ_FORWARD_SECRECY.md).
+  [`TUNNEL_PQ_FORWARD_SECRECY.md`](../TUNNEL_PQ_FORWARD_SECRECY.md).
 
 Install and run each host from an owner-selected immutable release directory
 after an explicit owner GO naming the host, source, image hash, peer, target
@@ -125,7 +125,7 @@ ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
 Through a command-scoped forwarding carrier to the peer's loopback sshd, add
 `-o "ProxyCommand=ssh <same options> -W 127.0.0.1:22 <host-alias>"`. A directed-pair
 check of one fleet passed on 2026-10-15; that record is historical:
-[`experiments/FLEET_SHELL_ROUTES_2026-10-15.md`](experiments/FLEET_SHELL_ROUTES_2026-10-15.md).
+[`experiments/FLEET_SHELL_ROUTES_2026-10-15.md`](../experiments/FLEET_SHELL_ROUTES_2026-10-15.md).
 
 Native confined terminal over a paired node:
 
@@ -141,9 +141,9 @@ macOS worker is refused; Windows is refused unless the node runs with
 
 For a machine with only the device-host receiver, `z23 ops mesh terminal
 serve` and `connect` give a confined shell over the tunnel, authenticated by a
-separate 0600 terminal key. See [`agent/FLEET_JOIN.md`](agent/FLEET_JOIN.md)
+separate 0600 terminal key. See [`agent/FLEET_JOIN.md`](FLEET_JOIN.md)
 for flags, refusal codes and the audit line. The terminal contract inventory
-is [`experiments/FLEET_TERMINAL_CONTRACT.md`](experiments/FLEET_TERMINAL_CONTRACT.md).
+is [`experiments/FLEET_TERMINAL_CONTRACT.md`](../experiments/FLEET_TERMINAL_CONTRACT.md).
 
 ## Health and vitals
 
@@ -151,7 +151,7 @@ is [`experiments/FLEET_TERMINAL_CONTRACT.md`](experiments/FLEET_TERMINAL_CONTRAC
 fleet ledger; unmeasurable facts are stored absent, never as zero. The metric
 catalog, ledger kinds and refusals are in [`FLEET_LEDGER.md`](FLEET_LEDGER.md);
 the telemetry shape and unknown-value rules are in
-[`TELEMETRY_CONTRACT.md`](TELEMETRY_CONTRACT.md).
+[`TELEMETRY_CONTRACT.md`](../TELEMETRY_CONTRACT.md).
 
 Read another machine's load, memory and disk over the host tunnel (200 to 220 ms in three runs on 2026-10-18):
 
@@ -204,7 +204,7 @@ results print `n/a (n<3)`; executors with no predictions are capped at C.
 
 `z23-dev fleet objectives [--format=json]` prints each named objective with
 its current value, target and status (`met`, `unmet`, `unmeasured(<reason>)`).
-The closed catalog is [`engine/composition/objectives.def`](../engine/composition/objectives.def):
+The closed catalog is [`engine/composition/objectives.def`](../../engine/composition/objectives.def):
 `landing_latency_s`, `landing_attempts_per_train`, `proof_lint_wall_s`,
 `proof_test_wall_s`, `commits_landed_today`, `lint_families_over_ceiling`,
 `functions_over_complexity_cap`, `fresh_node_sync_eta_s` and
@@ -254,7 +254,7 @@ Install does not select or run the plugin; the receiver's owner approves each
 stage. A generation is the SHA3-512 digest of the exact signed manifest bytes
 (128 lowercase hex characters); a version label or abbreviated prefix is not
 its identity. `steer_deliver` accepts source only, not executables. See
-[`PLUGINS.md`](PLUGINS.md).
+[`PLUGINS.md`](../dev/PLUGINS.md).
 
 ## Troubleshooting
 

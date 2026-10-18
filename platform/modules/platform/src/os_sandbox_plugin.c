@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * os_sandbox — the confinement profile of one supervised plugin process. See
- * platform/os_sandbox.h for the ordering invariant and docs/PLUGINS.md for the
+ * platform/os_sandbox.h for the ordering invariant and docs/dev/PLUGINS.md for the
  * descriptors a plugin receives. The file compiles on every host; the
  * deny-list is populated only on Linux, where os_sandbox_enter() can use it. */
 

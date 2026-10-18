@@ -26,7 +26,7 @@
 #     when the caller passes none, so a bare invocation did all of that to the
 #     operator's live node.db. Six leaves had it. An auditor tripped it while
 #     being deliberately careful, because THE DOCUMENTED EXAMPLE OMITS THE
-#     DATADIR — docs/SERVICES.md still says `z23 app service access
+#     DATADIR — docs/dev/SERVICES.md still says `z23 app service access
 #     <name>`. The property is enforced at runtime by
 #     test_read_leaf_no_datadir_write; what nothing enforced is that the
 #     examples an agent copies name a throwaway datadir.

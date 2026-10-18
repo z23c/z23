@@ -25,7 +25,7 @@
  * deliberately NOT an O(delta) scanner (the disk-backed active-chain rebuild
  * walks tip->genesis on an UNCLEAN warm restart); it is characterized by
  * test_rebuild_active_chain_is_o_chain_not_delta in
- * test_chain_restore_service.c. See docs/AGENT_TRAPS.md. */
+ * test_chain_restore_service.c. See docs/agent/AGENT_TRAPS.md. */
 
 #include "test/test_core.h"
 

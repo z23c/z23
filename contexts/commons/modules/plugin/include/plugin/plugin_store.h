@@ -7,7 +7,7 @@
  * or Windows validated private files containing exactly "generations/",
  * 128 lowercase hex characters and LF (141 bytes, no NUL or trailing bytes).
  * This storage contract grants no execution or confinement authority.
- * docs/PLUGINS.md is the operator-facing description. */
+ * docs/dev/PLUGINS.md is the operator-facing description. */
 #ifndef ZCL_PLUGIN_STORE_H
 #define ZCL_PLUGIN_STORE_H
 

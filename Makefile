@@ -5921,7 +5921,7 @@ $(DEV_TSAN_LINK_RSP): $(DEV_TSAN_OBJS)
 # (dev_hotswap_native RPC) — the edited handler goes live with no restart.
 # Uses only the stock toolchain and the shared platform module link/sign rail.
 # The RELEASE binary never links any of this (every dlopen sits behind
-# ZCL_DEV_BUILD). See docs/work/HOTSWAP.md.
+# ZCL_DEV_BUILD). See docs/dev/HOTSWAP.md.
 HOTSWAP_OBJ_DIR = $(BUILD_DIR)/hotswap-obj
 HOTSWAP_SO_DIR  = $(BUILD_DIR)/hotswap
 
@@ -6035,7 +6035,7 @@ hotswap:
 # `-fPIC -shared` translation unit, seconds not a relink. Unresolved kernel
 # symbols (node_rpc_call, json_*, zcl_native_bridge_run, ...) bind against the
 # -rdynamic dev node at dlopen. Prints the .so path as the LAST line. The .so is
-# loaded ONLY by hotswap_activate (dev-only, gated). See docs/work/HOTSWAP.md
+# loaded ONLY by hotswap_activate (dev-only, gated). See docs/dev/HOTSWAP.md
 # "Real module ABI".
 #
 # -DZCL_HOTSWAP_MODULE_SOURCE_TU stamps the module with the repo-relative TU it
@@ -6238,7 +6238,7 @@ hotswap-verify:
 # hotswap_swappable.def READY read-only leaves can ever activate, the declared
 # probe leaf must pass probe-before-publish, and the canonical datadir is
 # hard-refused. Prints the zcl.hotswap_activate.v2 report. See
-# docs/work/HOTSWAP.md "Real module ABI".
+# docs/dev/HOTSWAP.md "Real module ABI".
 hotswap-apply:
 	@if [ -z "$(HANDLER)$(FILE)" ]; then \
 	  echo "usage: make hotswap-apply HANDLER=core.status | FILE=<tu.c>" >&2; exit 2; fi
@@ -12999,7 +12999,7 @@ check-hotswap-dev-only: $(LINTC_TOOL)
 # Tier-1 hot-swap eligibility manifest (engine/composition/hotswap_eligible.def) is kept
 # honest by two REAL gates (self-tested in test_make_lint_gates.c): eligible
 # TUs must be app-layer surfaces, and must hold no mutable file-scope statics
-# (a .so gets its own zero copy). See docs/work/HOTSWAP.md.
+# (a .so gets its own zero copy). See docs/dev/HOTSWAP.md.
 check-hotswap-eligible-scope: $(LINTC_TOOL)
 	@tools/lint/check_hotswap_eligible_scope.sh
 
@@ -13050,7 +13050,7 @@ check-hotswap-service-islands:
 # TU — AND every leaf in its leaf list must be declared ZCL_COMMAND_READY_READ
 # (READY + read-only) in the engine/composition/commands catalog and be claimed by exactly
 # one file. Self-tested with seeded-violation fixtures in
-# test_make_lint_gates.c. See docs/work/HOTSWAP.md "Real module ABI".
+# test_make_lint_gates.c. See docs/dev/HOTSWAP.md "Real module ABI".
 check-hotswap-swappable-shape: $(LINTC_TOOL)
 	@tools/lint/check_hotswap_swappable_shape.sh
 
@@ -13950,7 +13950,7 @@ check-posix-ere-only: $(LINTC_TOOL)
 # build/test flag and Makefile variable this tree reads out of its process
 # environment. A getenv()/${...} read whose name is not a row fails; a row
 # nothing reads any more fails (shrink-only); a row whose expires_ date is
-# before HEAD's commit date fails. See docs/FLAGS.md.
+# before HEAD's commit date fails. See docs/dev/FLAGS.md.
 check-flag-registry: $(LINTC_TOOL)
 	@echo "══ LINT: every ZCL_ flag is in the closed flags.def catalog ══"
 	@./build/bin/z23-lint check-flag-registry --selftest
@@ -14275,7 +14275,7 @@ check-thread-supervision: $(LINTC_TOOL)
 	@echo "→ Gate #23: thread_supervision"
 	@./tools/lint/check_thread_supervision.sh --selftest && ./tools/lint/check_thread_supervision.sh
 
-# Gate P1 (docs/work/palace-design.md §3) — every indexed .c/.h under the
+# Gate P1 (docs/dev/palace-design.md §3) — every indexed .c/.h under the
 # codeindex roots has a DERIVABLE one-line purpose (a substantive top-of-file
 # comment or an explicit `purpose:` override). RATCHET against the shrink-only
 # tools/lint/file_purpose_baseline.txt; graduates to FAIL when it empties.
@@ -14283,7 +14283,7 @@ check-file-purpose: $(LINTC_TOOL)
 	@echo "→ Gate P1: check_file_purpose"
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_file_purpose.sh
 
-# Gate P2 (docs/work/palace-design.md §3) — every navigator group node
+# Gate P2 (docs/dev/palace-design.md §3) — every navigator group node
 # emitted by ci_group_emit_all() has a non-empty ci_group_purpose() (HARD:
 # the group population is finite and filled in full, so no ratchet needed).
 check-group-purpose: $(LINTC_TOOL)
@@ -14296,7 +14296,7 @@ check-architecture-tree: $(LINTC_TOOL)
 	@echo "→ architecture_tree"
 	@./tools/lint/check_architecture_tree.sh
 
-# Gate P3 (docs/work/palace-design.md §3) — every tracked .c/.h resolves to a
+# Gate P3 (docs/dev/palace-design.md §3) — every tracked .c/.h resolves to a
 # known navigator group (lib/<mod>, app/<shape>, core, config, tools, domain,
 # adapters, ports); a file falling through to the catch-all "root" group is a
 # violation. RATCHET against the shrink-only

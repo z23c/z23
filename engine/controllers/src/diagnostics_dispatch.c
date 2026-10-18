@@ -17,7 +17,7 @@
  *      resident copy under RTLD_LOCAL) at its recompiled diag_rpc_dumpstate_builtin.
  *
  * The atomic slot uses release-store / acquire-load publication. See
- * docs/work/HOTSWAP.md. */
+ * docs/dev/HOTSWAP.md. */
 
 #include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_internal.h"

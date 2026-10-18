@@ -110,7 +110,7 @@ bool bundle_staleness_dump_state_json(struct json_value *out,
  * diagnostics_dispatch.c): it acquire-loads an atomic provider and delegates
  * to it when a dev generation .so has installed one, else calls the resident
  * built-in below (which owns g_dumpers[], in the swap-eligible
- * diagnostics_registry.c). See docs/work/HOTSWAP.md. */
+ * diagnostics_registry.c). See docs/dev/HOTSWAP.md. */
 bool diag_rpc_dumpstate(const struct json_value *params, bool help,
                         struct json_value *result);
 bool diag_rpc_dumpstate_builtin(const struct json_value *params, bool help,

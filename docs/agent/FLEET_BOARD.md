@@ -664,7 +664,7 @@ Keep posts short. The board carries pointers; the repository carries the work.
 [Fleet roles](FLEET.md#roles) — which key may `board.post` which kind,
 decided by the node it is posting to.
 
-[`INDEX.md`](INDEX.md) — `z23-dev dev index ingest|status|search` ingests
+[`DATA_INDEX.md`](../dev/DATA_INDEX.md) — `z23-dev dev index ingest|status|search` ingests
 legacy `board/*.jsonl` files (and the experiment ledger, landing outcomes
 and logs) into one local sqlite+FTS5 file. It does not ingest this node's
 signed board store.

@@ -3,7 +3,7 @@
  * engine_findings — read the FINDING lines out of a reviewer's raw reply. A
  * pure parser: no I/O, no allocation, no clock. It is the link between a
  * reviewer who writes prose and the scorer (engine_review_score.h) that takes
- * findings (milestone D3, docs/work/DEVELOPMENT_MVP.md).
+ * findings (milestone D3, docs/agent/DEVELOPMENT_MVP.md).
  *
  * THE LINE FORMAT (one finding per line, starting at column 0)
  *

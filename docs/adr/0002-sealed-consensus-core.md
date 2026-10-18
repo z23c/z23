@@ -24,7 +24,7 @@ cycle from editing a validity predicate and auto-publishing it the same way
 it would publish an explorer template fix.
 
 The project increasingly relies on autonomous and semi-autonomous agent
-cycles (the dev loop described in `docs/work/HOTSWAP.md`, ZVCS's auto-anchor
+cycles (the dev loop described in `docs/dev/HOTSWAP.md`, ZVCS's auto-anchor
 in `docs/ZVCS.md`) to move fast on everything *outside* consensus. "Code
 fearlessly, not recklessly" requires that fast path to be **structurally**
 incapable of touching consensus rules without an explicit, logged, owner-run
@@ -216,7 +216,7 @@ seal gave.
 it lived (`domain/consensus/`, `lib/consensus/`, `core/modules/chain/`, `core/modules/core/`) <!-- doc-path-ok: rejected-alternative narration of the pre-ADR layout -->
 and rely solely on a `check-consensus-parity`-style gate scanning a hardcoded
 path list. Rejected: a hardcoded path list is exactly the kind of thing the
-lint-gate-hollowness audit (`docs/work/lint-gate-hollowness-audit.md`)
+lint-gate-hollowness audit (`docs/dev/lint-gate-hollowness-audit.md`)
 found goes silently stale — a new consensus file added under an existing directory
 but outside the listed sub-paths escapes the gate with the build still
 green. A physical `core/` tree makes "is this consensus" a single glob

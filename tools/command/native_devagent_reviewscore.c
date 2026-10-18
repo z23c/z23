@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * dev.agent.reviewscore — score reviewer findings against a known-answer
- * review set (milestone D3, docs/work/DEVELOPMENT_MVP.md).
+ * review set (milestone D3, docs/agent/DEVELOPMENT_MVP.md).
  *
  * INPUT (zcl.agent_reviewscore_input.v1), both required
  *   set      JSONL, one case per line:

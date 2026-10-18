@@ -10,7 +10,7 @@
  * the DOC-COMMENT layer: capturing each block/line comment's first
  * substantive line, attributing a captured comment to the segment that
  * follows it, and deriving the file's one-line purpose (§1.1 of
- * docs/work/palace-design.md). The split happened when the combined file
+ * docs/dev/palace-design.md). The split happened when the combined file
  * passed the 800-line shape ceiling. The scan state and those three
  * declarations are all that crosses that seam, so they live here and nowhere
  * else — nothing outside those two translation units may include this header.

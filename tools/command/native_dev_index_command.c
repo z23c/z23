@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * dev.index.{ingest,status,search} — see docs/INDEX.md and
+ * dev.index.{ingest,status,search} — see docs/dev/DATA_INDEX.md and
  * engine/composition/sources.def. This file only wires the three CLI
  * verbs to the catalog/ingest/search modules; it owns no sqlite calls of
  * its own.

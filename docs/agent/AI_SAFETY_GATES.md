@@ -199,7 +199,7 @@ benchmark log row, an immutable positioning statement in an ADR.
 **A gap that was closed, and the rule it left behind.** The sibling gate
 `tools/scripts/check_doc_counts.sh`, which machine-checks code-derived counts
 (test groups, ports, adapters, condition registrations) against a canonical
-`DOC-COUNTS` block in [`CODEBASE_MAP.md`](./CODEBASE_MAP.md), once scanned
+`DOC-COUNTS` block in [`CODEBASE_MAP.md`](../CODEBASE_MAP.md), once scanned
 `CLAUDE.md` and `docs/**` but **not** `README.md`. The single most-read file in
 the repository was the one file exempt from that gate — which is why several
 counts in it rotted undetected. Its scan set is now every tracked `*.md` via
@@ -325,8 +325,8 @@ Two design habits are worth stealing if you are adding a gate of your own:
   expressible. The second is stronger, and where the shape of the problem
   allows it, it is the one to reach for.
 
-Related: [`DEFENSIVE_CODING.md`](./DEFENSIVE_CODING.md) (the full gate list and
-the coding rules they enforce), [`FRAMEWORK.md`](./FRAMEWORK.md) (Law 7 and the
-detect/remedy/witness contract), [`TENACITY.md`](./TENACITY.md) (the copy-prove
-recovery doctrine), and [`work/fast-path.md`](./work/fast-path.md) (the
+Related: [`DEFENSIVE_CODING.md`](../DEFENSIVE_CODING.md) (the full gate list and
+the coding rules they enforce), [`FRAMEWORK.md`](../FRAMEWORK.md) (Law 7 and the
+detect/remedy/witness contract), [`TENACITY.md`](../TENACITY.md) (the copy-prove
+recovery doctrine), and [`dev/fast-path.md`](../dev/fast-path.md) (the
 diagnosis algorithm the copy-prove harness sits inside).

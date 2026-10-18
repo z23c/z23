@@ -285,13 +285,13 @@
 #define SILENT_BOOL_SCRIPT_REL "tools/lint/check_silent_bool_errors.sh"
 #define SILENT_BOOL_FIXTURE_DST \
     "engine/services/src/_silent_bool_fixture_tmp.c"
-/* Gate P2 (docs/work/palace-design.md §3) — check-group-purpose. Runs against
+/* Gate P2 (docs/dev/palace-design.md §3) — check-group-purpose. Runs against
  * a test-tmp/ copy of codeindex_group.c (ZCL_GROUP_PURPOSE_SRC). */
 #define GRPPURPOSE_SCRIPT_REL      "tools/lint/check_group_purpose.sh"
 #define GRPPURPOSE_REAL_SRC_REL    "cognition/modules/codeindex/src/codeindex_group.c"
 #define GRPPURPOSE_OK_FIXTURE_REL  "test-tmp/_group_purpose_fixture_ok_tmp.c"
 #define GRPPURPOSE_BAD_FIXTURE_REL "test-tmp/_group_purpose_fixture_bad_tmp.c"
-/* Gate P1 (docs/work/palace-design.md §3) — check-file-purpose. Scans an
+/* Gate P1 (docs/dev/palace-design.md §3) — check-file-purpose. Scans an
  * isolated fixture tree under test-tmp/ (ZCL_FILE_PURPOSE_ROOT); the two
  * canned fixtures live in tests/harness/fixtures/. */
 #define FILEPURPOSE_SCRIPT_REL      "tools/lint/check_file_purpose.sh"
@@ -300,7 +300,7 @@
                                     "services/src/_file_purpose_lint_fixture_tmp.c"
 #define FILEPURPOSE_BAD_FIXTURE_REL "tests/harness/fixtures/file_purpose_missing_fixture.c"
 #define FILEPURPOSE_OK_FIXTURE_REL  "tests/harness/fixtures/file_purpose_present_fixture.c"
-/* Gate P3 (docs/work/palace-design.md §3) — check-no-orphan-placement. Judges
+/* Gate P3 (docs/dev/palace-design.md §3) — check-no-orphan-placement. Judges
  * an explicit path list (ZCL_ORPHAN_PLACEMENT_FILES) from the path alone, so
  * no file needs to exist on disk. */
 #define ORPHAN_SCRIPT_REL "tools/lint/check_no_orphan_placement.sh"

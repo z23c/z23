@@ -2,7 +2,7 @@
  *
  * Fixture plugin for test_plugin_run.c (built by the Makefile into
  * build/fixtures/, never linked into a product binary). It speaks the plugin
- * protocol of docs/PLUGINS.md: argv is `<image> --resident <launch nonce>`,
+ * protocol of docs/dev/PLUGINS.md: argv is `<image> --resident <launch nonce>`,
  * Z23_PLUGIN_FDS names the granted descriptors, the control socket carries
  * 81-byte supervisor frames (ping or stop) and the plugin answers each ping
  * with one z23-res-run-v1 frame whose payload is the ping token.

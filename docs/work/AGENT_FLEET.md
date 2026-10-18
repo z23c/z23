@@ -201,7 +201,7 @@ source inventory and unmeasured acceptance are recorded in
 
 The commands and the table of existing monitoring interfaces, with what each
 establishes and does not establish, are in the
-[fleet operator guide](../FLEET.md#health-and-vitals).
+[fleet operator guide](../agent/FLEET.md#health-and-vitals).
 
 An instant fleet answer is a bounded local projection. Each host row must
 identify observation time, age, source, filesystem scope, policy identity,

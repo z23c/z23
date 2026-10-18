@@ -2507,7 +2507,7 @@ static void boot_step_restore_chain_tip(struct app_context *ctx,
         .activation_ctl = &g_activation_ctl,
         .db_service = boot_runtime_db_service(),
     };
-    /* O(delta) unclean-restart recovery (docs/AGENT_TRAPS.md). This branch
+    /* O(delta) unclean-restart recovery (docs/agent/AGENT_TRAPS.md). This branch
      * runs on every UNCLEAN restart (crash / kill -9 / OOM). When the just-
      * run block-index repair proved the in-memory index consistent, engage
      * the trust fastpath so the restore's internal chain_restore_finalize

@@ -9,7 +9,7 @@ Development Readiness Score (DRS) is the count of milestones met; the
 development MVP is achieved at 8/8.
 
 This file defines acceptance for the current mission in
-[`FORWARD_PLAN.md`](./FORWARD_PLAN.md), *fast C23 development with fleet
+[`FORWARD_PLAN.md`](../work/FORWARD_PLAN.md), *fast C23 development with fleet
 Insight + Control*. Public-node acceptance (C1–C8) stays in
 [`../MVP.md`](../MVP.md) and remains mandatory; nothing here replaces or
 weakens it. Durable priorities and authority live in

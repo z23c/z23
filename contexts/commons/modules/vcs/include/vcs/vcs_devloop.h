@@ -165,7 +165,7 @@ struct vcs_devloop_accepted_candidate_result {
  * out->baseline_needed to see whether THIS call is the one that should
  * launch/run the baseline (see vcs_devloop_run_initial_baseline below) or
  * whether one is already in flight. contexts/commons/modules/vcs itself never spawns a process
- * to do this — see docs/work/HOTSWAP.md and the ZVCS-sovereignty lint gate
+ * to do this — see docs/dev/HOTSWAP.md and the ZVCS-sovereignty lint gate
  * (contexts/commons/modules/vcs is release-linkable and must stay process-spawn free). */
 void vcs_devloop_anchor_cycle(const char *repo_root,
                               const struct vcs_devloop_verdict *v,

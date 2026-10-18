@@ -162,7 +162,7 @@ names as "a second write path," "authoritative chain state in RAM," or a
   `check_one_write_path`, `check_stage_log_reorg_unsafe_ratchet`,
   `check_projections_pure` **before** the item-2 deletions, so a hollow gate
   can't let a forbidden pattern back in via a renamed symbol. Doc:
-  [`lint-gate-hollowness-audit.md`](./lint-gate-hollowness-audit.md).
+  [`lint-gate-hollowness-audit.md`](../dev/lint-gate-hollowness-audit.md).
 - **(c) Delete confirmed-dead scaffolding** —
   `core/modules/validation/src/verify_queue.c:130` is `additive_unwired` (no
   non-test callers) + the other confirmed-dead paths.

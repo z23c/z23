@@ -627,7 +627,7 @@ static int mor_emit(FILE *viol, int nviol, int scanned, int rc)
                       stderr) < 0
                 || fputs("  Read the published generation with codeindex_open_readonly() and\n",
                          stderr) < 0
-                || fputs("  refuse a stale one; the mind rebuilds. See docs/MIND.md.\n",
+                || fputs("  refuse a stale one; the mind rebuilds. See docs/dev/MIND.md.\n",
                          stderr) < 0))
             rc = die("z23-lint: write failed\n", "");
         if (rc == 0)

@@ -22,7 +22,7 @@
  *   5. The event log carries zero EV_UTXO_ADD / EV_UTXO_SPEND events (tags
  *      5/6 are reserved wire slots). A positive control plants one
  *      EV_UTXO_ADD and requires the same scanner to report exactly 1
- *      (docs/AGENT_TRAPS.md §4). */
+ *      (docs/agent/AGENT_TRAPS.md §4). */
 
 #include "test/test_core.h"
 

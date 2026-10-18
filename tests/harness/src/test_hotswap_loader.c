@@ -8,7 +8,7 @@
  * the release stub (refuses, no dlopen) — that release behavior is asserted
  * too. The pure predicates + registry + dumper compile in all builds and are
  * exercised directly. A real end-to-end dlopen is proven by `make
- * hotswap-so` / `make hotswap-sim` (see docs/work/HOTSWAP.md). */
+ * hotswap-so` / `make hotswap-sim` (see docs/dev/HOTSWAP.md). */
 
 #include "test/test_core.h"
 #include "hotswap/hotswap.h"

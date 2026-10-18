@@ -1101,7 +1101,7 @@ static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok:
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. A behavioral precommit probe is a
- * separate concern (see docs/work/HOTSWAP.md "Known v1 TODOs"). */
+ * separate concern (see docs/dev/HOTSWAP.md "Known v1 TODOs"). */
 static bool module_selftest_status(char *err, size_t cap)
 {
     (void)err;

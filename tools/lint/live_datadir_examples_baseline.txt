@@ -9,6 +9,6 @@
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_live_datadir_isolation.sh
 docs/cookbook/12_sovereign_release.md 8   # zcode release/identity/epoch examples; a cookbook is copy-paste by design.
 docs/RUNBOOK.md 2   # `core wallet restore` — operator doc, plausibly aimed at a real node ON PURPOSE. Decide before "fixing".
-docs/SERVICES.md 1   # `app service access <name>` — THE command that ran the boot ceremony on the live node.db. Highest priority row.
+docs/dev/SERVICES.md 1   # `app service access <name>` — THE command that ran the boot ceremony on the live node.db. Highest priority row.
 docs/spec/sovereign-identity-layer.md 1   # `zcode proof walk`, described as read-only in prose.
 docs/WALLET_PERSISTENCE_RECOVERY.md 1   # `core wallet restore` — same class as RUNBOOK.md.

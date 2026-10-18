@@ -1248,7 +1248,7 @@ REMOTE_COMMAND_CLASS("fleet.triggers.ingest", REMOTE_CLASS_NEVER, "")
  * Every row in this ledger is the owner's own record of the owner's own
  * machines, and the whole design keeps it off every wire but one: a pull
  * between two peers the owner has paired, over an established Noise session,
- * carrying that peer's own rows and nothing else (docs/FLEET_LEDGER.md).
+ * carrying that peer's own rows and nothing else (docs/agent/FLEET_LEDGER.md).
  *
  * A remote leaf would be a second way in, with a different shape and a
  * different authority — a peer asking this node to render its ledger rather
@@ -1288,7 +1288,7 @@ REMOTE_COMMAND_CLASS("fleet.objectives", REMOTE_CLASS_NEVER, "")
  * node's key, so a remote form would let a caller decide, in this node's
  * own name, who this node trusts. Roles are this node's own decision
  * about a key and never a statement accepted from a peer
- * (docs/FLEET.md); a remote leaf would be exactly that statement.
+ * (docs/agent/FLEET.md); a remote leaf would be exactly that statement.
  */
 REMOTE_COMMAND_CLASS("fleet.roles.list", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.roles.grant", REMOTE_CLASS_NEVER, "")

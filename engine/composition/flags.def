@@ -12,7 +12,7 @@
  *
  *   tools/lint/lintc/gate_flag_registry.c   parses this file as text and
  *                                           scans the tree for reads
- *   docs/FLAGS.md                          the plain-language explanation
+ *   docs/dev/FLAGS.md                          the plain-language explanation
  *
  * Row shape:
  *
@@ -683,7 +683,7 @@ Z23_FLAG("ZCL_DEV_LOOP_TEST_BIN", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_dev_platform.c:auto")
 Z23_FLAG("ZCL_DEVLOOP_TEST_PROCESS", "env_test", "-", "-",
-          "first use tests/harness/src/test_dev_platform.c:auto; documented at docs/work/HOTSWAP.md:311: ZCL_DEVLOOP_TEST_PROCESS=1 fixture opt-in; release builds retain the literal")
+          "first use tests/harness/src/test_dev_platform.c:auto; documented at docs/dev/HOTSWAP.md:311: ZCL_DEVLOOP_TEST_PROCESS=1 fixture opt-in; release builds retain the literal")
 Z23_FLAG("ZCL_DEVLOOP_TEST_WAIT_REPORT_FD", "env_test", "-", "-",
           "test-only descriptor receiving output-wait descriptor and budget observations; first use tools/dev/devloop_process.c:auto")
 Z23_FLAG("ZCL_DEVLOOP_TEST_WATCH_STALL", "env_runtime", "-", "-",
@@ -909,7 +909,7 @@ Z23_FLAG("ZCL_FAST_CACHE_RESET", "env_build", "0", "-",
 Z23_FLAG("ZCL_FAST_CC", "make_var", "-", "-",
           "first use Makefile:auto; documented at docs/AGENT_API.md:1275: Override with ZCL_FAST_CC='ccache cc'. Use ZCL_FAST_JOBS=N,")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES", "env_build", "-", "-",
-          "first use tools/agent_fast_ci.sh:auto; documented at docs/work/fast-path.md:123: ZCL_FAST_CHANGED_FILES_ONLY=1 when ZCL_FAST_CHANGED_FILES[_FILE] is already")
+          "first use tools/agent_fast_ci.sh:auto; documented at docs/dev/fast-path.md:123: ZCL_FAST_CHANGED_FILES_ONLY=1 when ZCL_FAST_CHANGED_FILES[_FILE] is already")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES_FILE", "env_build", "-", "-",
           "undocumented; first use tools/agent_fast_ci.sh:auto")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES_ONLY", "env_build", "0", "-",
@@ -927,7 +927,7 @@ Z23_FLAG("ZCL_FAST_JOBS", "env_build", "-", "-",
 Z23_FLAG("ZCL_FAST_LIVE", "env_build", "auto", "-",
           "first use tools/agent_fast_ci.sh:auto; documented at docs/AGENT_API.md:1281: ZCL_FAST_STRICT_TESTS=1, and ZCL_FAST_LIVE=0 as needed.")
 Z23_FLAG("ZCL_FAST_NODE_BIN", "env_build", "build/bin/z23", "-",
-          "first use tools/agent_fast_ci.sh:auto; documented at docs/work/fast-path.md:135: binary with ZCL_FAST_NODE_BIN=... or skip the live check with")
+          "first use tools/agent_fast_ci.sh:auto; documented at docs/dev/fast-path.md:135: binary with ZCL_FAST_NODE_BIN=... or skip the live check with")
 Z23_FLAG("ZCL_FAST_STRICT_TESTS", "env_build", "0", "-",
           "first use tools/agent_fast_ci.sh:auto; documented at docs/AGENT_API.md:1281: ZCL_FAST_STRICT_TESTS=1, and ZCL_FAST_LIVE=0 as needed.")
 Z23_FLAG("ZCL_FAST_TEST_JOBS", "env_build", "-", "-",
@@ -976,7 +976,7 @@ Z23_FLAG("ZCL_FLEET_STATE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/fleet_source_status.sh:auto")
 Z23_FLAG("ZCL_FLEET_VITALS_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_fleet_vitals.c:auto")
-Z23_FLAG("ZCL_FLEET_VITALS_DOC", "env_build", "docs/FLEET_LEDGER.md", "-",
+Z23_FLAG("ZCL_FLEET_VITALS_DOC", "env_build", "docs/agent/FLEET_LEDGER.md", "-",
           "undocumented; first use tools/lint/lintc/gate_fleet_vitals.c:auto")
 Z23_FLAG("ZCL_FLEET_VITALS_FLOOR", "env_build", "30", "-",
           "undocumented; first use tools/lint/lintc/gate_fleet_vitals.c:auto")
@@ -1482,7 +1482,7 @@ Z23_FLAG("ZCL_LINT_GATE_TIMING", "env_test", "-", "-",
 Z23_FLAG("ZCL_LINT_JOBS", "env_build", "8", "-",
           "undocumented; first use tools/lint/run_lint.sh:auto")
 Z23_FLAG("ZCL_LINT_MODE", "env_runtime", "FAIL", "-",
-          "first use tools/lint/lintc/gate_ratchet_ports.c:auto; documented at docs/AI_SAFETY_GATES.md:153: invokes it as ZCL_LINT_MODE=FAIL, which fails on any violation and ignores the")
+          "first use tools/lint/lintc/gate_ratchet_ports.c:auto; documented at docs/agent/AI_SAFETY_GATES.md:153: invokes it as ZCL_LINT_MODE=FAIL, which fails on any violation and ignores the")
 Z23_FLAG("ZCL_LINT_PATTERNINIT_BIN_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_fuzz_artifact_replay.sh:auto")
 Z23_FLAG("ZCL_LINT_PRODUCTION_SCAN", "env_runtime", "0", "-",
@@ -1546,7 +1546,7 @@ Z23_FLAG("ZCL_MIND_STATE_DIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_MINGW_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",
           "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
 Z23_FLAG("ZCL_MINT_ANCHOR_OUT", "env_runtime", "-", "-",
-          "first use engine/composition/src/boot_anchor_snapshot_reachability.c:auto; documented at docs/work/fast-path.md:53: $ZCL_MINT_ANCHOR_OUT or <src>/utxo-anchor.snapshot. A refold proof also")
+          "first use engine/composition/src/boot_anchor_snapshot_reachability.c:auto; documented at docs/dev/fast-path.md:53: $ZCL_MINT_ANCHOR_OUT or <src>/utxo-anchor.snapshot. A refold proof also")
 Z23_FLAG("ZCL_MINT_FORCE_REBUILD", "env_runtime", "-", "-",
           "undocumented; first use tools/mint_v2_snapshot.c:auto")
 Z23_FLAG("ZCL_MINT_KEEP_EVENTLOG", "env_runtime", "-", "-",
@@ -2417,7 +2417,7 @@ Z23_FLAG("ZCL_STORE_LISTING_READY", "env_test", "-", "-",
 Z23_FLAG("ZCL_STRAY_SCAN_DIRS_FOR_TEST", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:auto")
 Z23_FLAG("ZCL_STRESS_TESTS", "env_test", "-", "-",
-          "first use tests/harness/src/test_chain_advance_atomicity.c:auto; documented at docs/AGENT_TRAPS.md:246: Onion gates self-SKIPing is SKIP-not-FAIL honesty, not a broken suite.** test_onion_boo...")
+          "first use tests/harness/src/test_chain_advance_atomicity.c:auto; documented at docs/agent/AGENT_TRAPS.md:246: Onion gates self-SKIPing is SKIP-not-FAIL honesty, not a broken suite.** test_onion_boo...")
 Z23_FLAG("ZCL_SUPDOM_COVERAGE", "env_build", "1", "-",
           "undocumented; first use tools/lint/lintc/gate_supervisor_domain.c:auto")
 Z23_FLAG("ZCL_SUPDOM_COVERAGE_ALLOWANCE", "env_build", "0", "-",
@@ -2485,9 +2485,9 @@ Z23_FLAG("ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST", "env_build", "-", "-",
 Z23_FLAG("ZCL_TELEMETRY_SCAN_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
 Z23_FLAG("ZCL_TEST_CACHE", "env_test", "-", "-",
-          "first use tests/harness/src/test_parallel.c:auto; documented at docs/work/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
+          "first use tests/harness/src/test_parallel.c:auto; documented at docs/dev/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
 Z23_FLAG("ZCL_TEST_CACHE_DUMP", "env_test", "-", "-",
-          "first use tests/harness/src/test_parallel.c:auto; documented at docs/work/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
+          "first use tests/harness/src/test_parallel.c:auto; documented at docs/dev/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
 Z23_FLAG("ZCL_TESTCACHE_STORE_ROOT", "env_test", "-", "-",
           "first use tests/harness/src/testcache.c:auto; documented at docs/zrc/0007-asynchronous-p2p-landing.md:171: 3. **Unpin the verdict store.** dev_proof.c sets ZCL_TESTCACHE_STORE_ROOT")
 Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",

@@ -24,7 +24,7 @@ Use the installed host operations, storage and worker policy before development.
 retention and concurrency. On the managed Mac use one focused
 `devbuild --wait make -j2 …` command; generic all-core examples below do not
 override that host policy. See the
-[fleet operating contract](AGENT_FLEET.md#consolidated-operating-model) for
+[fleet operating contract](../work/AGENT_FLEET.md#consolidated-operating-model) for
 the shared execution, transport and observation boundaries.
 
 Native packaging is distinct from production activation. The existing

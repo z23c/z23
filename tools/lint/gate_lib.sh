@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # gate_lib.sh — shared helpers that make lint gates FAIL-LOUD instead of
-# fail-silent. See docs/work/lint-gate-hollowness-audit.md.
+# fail-silent. See docs/dev/lint-gate-hollowness-audit.md.
 #
 # A hollow gate reports "clean" exit 0 while a real violation is present:
 # its scan set silently emptied (a renamed/moved dir, a `for f in glob`

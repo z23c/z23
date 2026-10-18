@@ -24,7 +24,7 @@
  *                                comment rows fed in by
  *                                `fleet triggers ingest` (z23 has no
  *                                outbound HTTP seam; see
- *                                docs/FLEET_TRIGGERS.md).
+ *                                docs/agent/FLEET_TRIGGERS.md).
  *   field_   the row's field name the trigger reads. A field a row does
  *            not carry is ABSENT, not empty-string, and a trigger against
  *            an absent field never fires — for any op, including "ne".
@@ -42,7 +42,7 @@
  * ORDER IS NOT IDENTITY here — ids are looked up by name, not position —
  * but append new rows at the end anyway so a diff reads as a diff.
  *
- * This is the SECOND SLICE (see docs/FLEET_TRIGGERS.md): still no daemon
+ * This is the SECOND SLICE (see docs/agent/FLEET_TRIGGERS.md): still no daemon
  * and still no outbound network call from z23 itself, but the board-post
  * action and the GitHub source both exist now. `z23-dev fleet triggers
  * check` is run once, by a human or a script, and later by the resident

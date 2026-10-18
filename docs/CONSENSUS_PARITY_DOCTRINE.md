@@ -264,7 +264,7 @@ closed:
 | # | Divergence | Landed at |
 |---|---|---|
 | 1 | CHECKDATASIG/CHECKDATASIGVERIFY undercounted as 0 sigops in the context-free structural count | `core/consensus/src/check_block.c:57` `DOMAIN_CONSENSUS_SIGOP_COUNT_FLAGS = SCRIPT_VERIFY_CHECKDATASIG_SIGOPS`, unconditional |
-| 2 | Per-tx contextual rules (Overwinter expiry, NU version gating, per-tx finality, BIP34 `bad-cb-height`) unwired on connect | `contextual_check_block()` (`core/modules/validation/src/check_block.c:436`) called from `engine/jobs/src/script_validate_contextual.c:107`, IBD- and tip-window-gated (see `docs/AGENT_TRAPS.md` for the gating rationale) |
+| 2 | Per-tx contextual rules (Overwinter expiry, NU version gating, per-tx finality, BIP34 `bad-cb-height`) unwired on connect | `contextual_check_block()` (`core/modules/validation/src/check_block.c:436`) called from `engine/jobs/src/script_validate_contextual.c:107`, IBD- and tip-window-gated (see `docs/agent/AGENT_TRAPS.md` for the gating rationale) |
 | 3 | JoinSplit Ed25519 signature not verified on the block-connect path | `engine/jobs/src/proof_validate_stage.c` verifies it before the per-joinsplit zk-SNARK loop; failure tags `first_failure_proof_type="joinsplit_sig"` |
 | 4 | Height-gated Sapling/Overwinter structural tx rules (version-group-id, version floors) unwired on connect | same wiring as #2 |
 | 5 | Missing `bad-txns-coinbase-spend-has-transparent-outputs` rule | `engine/jobs/src/utxo_apply_delta.c:536` and `engine/jobs/src/utxo_apply_stage.c:498` |
@@ -293,7 +293,7 @@ decision-identical on the normal path).
 
 The per-tx contextual rules wired at `engine/jobs/src/script_validate_contextual.c`
 (`CTX_TIP_WINDOW=16`, IBD-gated per-tx call, finality + BIP34 unconditional —
-see `docs/AGENT_TRAPS.md` for why):
+see `docs/agent/AGENT_TRAPS.md` for why):
 
 | c23 rule | zclassicd reference | Reject reason | IBD-gated |
 |---|---|---|---|

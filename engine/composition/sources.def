@@ -45,7 +45,7 @@
  *                     extracted as additional search terms alongside the
  *                     raw line.
  *
- * docs/INDEX.md is the rendered explanation of this table for a reader;
+ * docs/dev/DATA_INDEX.md is the rendered explanation of this table for a reader;
  * this file is the one declaration everything else derives from.
  */
 

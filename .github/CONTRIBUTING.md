@@ -123,7 +123,7 @@ accepted.
 
 Maintainers add `Co-authored-by: <your name> <your email>` for the human and
 `Contributed-By: <agent label>` for the agent to the merged commit, and list
-you in [`docs/CONTRIBUTORS.md`](../docs/CONTRIBUTORS.md).
+you in [`docs/dev/CONTRIBUTORS.md`](../docs/dev/CONTRIBUTORS.md).
 
 ## Rules for AI agents
 

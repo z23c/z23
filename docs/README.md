@@ -100,6 +100,10 @@ from a hash, signature, test, or reproduction receipt.
 
 ## Change the code
 
+- [`agent/README.md`](agent/README.md) — agent and fleet documents: lanes,
+  fleet guide, board, ledger, triggers, wiki, work cards, safety gates.
+- [`dev/README.md`](dev/README.md) — developer references: build and test
+  loop, hot-swap, lab, plugins, services, flags, host maintenance.
 - [`work/AGENT_FLEET.md`](work/AGENT_FLEET.md) — consolidated fleet operating
   contract: storage admission, task ownership, native and guest execution,
   transport choices, timestamped JSON observations, and measured agent cost.
@@ -109,20 +113,20 @@ from a hash, signature, test, or reproduction receipt.
 - [`DEVELOPING.md`](DEVELOPING.md) — navigation, reflex feedback, focused tests,
   integration, push, and asynchronous deep proof.
 - [`CODEBASE_MAP.md`](CODEBASE_MAP.md) — source ownership and extension recipes.
-- [`INDEX.md`](INDEX.md) — local data-source ingest/search (`z23-dev dev
+- [`DATA_INDEX.md`](dev/DATA_INDEX.md) — local data-source ingest/search (`z23-dev dev
   index`): the board, experiment ledger, landing outcomes, and logs, into
   one sqlite+FTS5 file.
-- [`AGENT_TRAPS.md`](AGENT_TRAPS.md) — intentional behavior and already-solved
+- [`AGENT_TRAPS.md`](agent/AGENT_TRAPS.md) — intentional behavior and already-solved
   problems to check before editing.
-- [`MIND.md`](MIND.md) — the per-node resident that owns rebuilding this box's
+- [`MIND.md`](dev/MIND.md) — the per-node resident that owns rebuilding this box's
   code index, what it holds, and why a stale answer is refused rather than
   rebuilt inside a query.
-- [`WIKI.md`](WIKI.md) — the fleet wiki: `z23 fleet wiki find <q>`, entry schema,
+- [`WIKI.md`](agent/WIKI.md) — the fleet wiki: `z23 fleet wiki find <q>`, entry schema,
   search behavior, agent-harness access and how to write a good page.
-- [`WORK_CARDS.md`](WORK_CARDS.md) — owner-signed public work cards on the
+- [`WORK_CARDS.md`](agent/WORK_CARDS.md) — owner-signed public work cards on the
   board: the card format, how state derives from claims and results, and
   `z23 work list` / `z23 work show`.
-- [`LAB.md`](LAB.md) — the one-file lab: `z23 lab run`, `lab test` and
+- [`LAB.md`](dev/LAB.md) — the one-file lab: `z23 lab run`, `lab test` and
   `lab show` compile one C23 file, run it confined and return a
   content-addressed JSON receipt; limits, confinement, cache and measured
   latency.
@@ -140,7 +144,7 @@ from a hash, signature, test, or reproduction receipt.
   than silently assigned. Regenerate it with `make docs-capability-inventory`;
   never hand-edit it.
 - [`BUILD.md`](BUILD.md) — vendored dependencies, profiles, and reproducibility.
-- [`AI_SAFETY_GATES.md`](AI_SAFETY_GATES.md) — claim and evidence discipline.
+- [`AI_SAFETY_GATES.md`](agent/AI_SAFETY_GATES.md) — claim and evidence discipline.
 - [`SECURITY_AND_INTEGRITY.md`](SECURITY_AND_INTEGRITY.md) — project security
   boundary and review checklist.
 - [`CONSENSUS_PARITY_DOCTRINE.md`](CONSENSUS_PARITY_DOCTRINE.md) — inviolable
@@ -169,14 +173,14 @@ from a hash, signature, test, or reproduction receipt.
 ## Operate and recover a node
 
 - [`RUNBOOK.md`](RUNBOOK.md) — symptom-driven diagnostics and operations.
-- [`FLEET.md`](FLEET.md) — fleet operator guide: machines, joining, tunnel,
+- [`FLEET.md`](agent/FLEET.md) — fleet operator guide: machines, joining, tunnel,
   shells, vitals, board, wiki, agents, roles and troubleshooting.
 - [`fleet-dev/README.md`](fleet-dev/README.md) — maintainer setup for the
   opt-in `z23-fleet` plugin, `z23-fx` and the daily loop.
-- [`FLEET_TRIGGERS.md`](FLEET_TRIGGERS.md) — the closed registry of
+- [`FLEET_TRIGGERS.md`](agent/FLEET_TRIGGERS.md) — the closed registry of
   reactions to local events (`z23-dev fleet triggers`).
 - [`TENACITY.md`](TENACITY.md) — copy-first recovery invariants.
-- [`work/fast-path.md`](work/fast-path.md) — diagnose and reproduce on a datadir
+- [`dev/fast-path.md`](dev/fast-path.md) — diagnose and reproduce on a datadir
   copy.
 - [`BLOCK_EXPLORER_HOSTING.md`](BLOCK_EXPLORER_HOSTING.md) — public explorer
   operation.
@@ -196,7 +200,7 @@ current development mission; neither file redefines the durable product.
 
 - [`BENCHMARKS_LOG.md`](BENCHMARKS_LOG.md) — append-only measured benchmark
   ledger.
-- [`BUILD_BENCH.md`](BUILD_BENCH.md) — `make build-bench` scenario harness;
+- [`BUILD_BENCH.md`](dev/BUILD_BENCH.md) — `make build-bench` scenario harness;
   how build-speed claims get a measured artifact.
 - [`USER_BENCHMARKS.md`](USER_BENCHMARKS.md) — user-facing measurement
   questions.
@@ -221,13 +225,13 @@ path:
 - [`FILE_MARKET_PROTOCOL.md`](FILE_MARKET_PROTOCOL.md) — marketplace protocol;
   the operator acceptance journey it once planned now lives as
   `make commons-multihost-acceptance` (see the top-level README).
-- [`FRAMEWORK.md`](FRAMEWORK.md) and [`AGENT_ARCHITECTURE.md`](AGENT_ARCHITECTURE.md)
+- [`FRAMEWORK.md`](FRAMEWORK.md) and [`AGENT_ARCHITECTURE.md`](agent/AGENT_ARCHITECTURE.md)
   — architectural reference, off the public-node critical path unless the
   current plan explicitly pulls in a bounded item.
 - [`adr/`](adr/) — historical design decisions; useful context, not live state.
 - [`zrc/`](zrc/) — the ZRC (Z23 Request for Comments) process for proposing a
   new subsystem or standing rule before it is built; see `zrc/README.md`.
-- [`work/README.md`](work/README.md), [`work/agent-protocol.md`](work/agent-protocol.md),
+- [`work/README.md`](work/README.md), [`agent/agent-protocol.md`](agent/agent-protocol.md),
   and [`agent/`](agent/) — one maintainer's optional orchestration references,
   not the universal contributor workflow.
 

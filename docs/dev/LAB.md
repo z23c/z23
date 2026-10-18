@@ -6,7 +6,7 @@ signal, stdout, stderr, sanitizer findings, and the confinement that was
 applied. An agent writes a single `.c` file and gets ground truth in tens of
 milliseconds, with no repository, test group or build tree.
 
-Why: [`agent/FLASH_UNIT.md`](agent/FLASH_UNIT.md) records agents finishing 0 of
+Why: [`agent/FLASH_UNIT.md`](../agent/FLASH_UNIT.md) records agents finishing 0 of
 10 multi-file tasks and 2 of 2 single-file tasks with a pinned test. The lab
 makes the second shape available without a pinned test: the program is its own
 test, and `lab test` adds expected output.

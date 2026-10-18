@@ -331,7 +331,7 @@ manifest admission. `dev.hotswap.apply` forwards to the resident node's
 `-hotswap-activate` + `ZCL_HOTSWAP_ACTIVATE=1` + the exact dev datadir
 (canonical hard-refused), re-pointing only the six read-only leaves on
 `engine/composition/hotswap_swappable.def`. Full mechanism, ABI, and prerequisites
-for disposable probing/publication: `docs/work/HOTSWAP.md`.
+for disposable probing/publication: `docs/dev/HOTSWAP.md`.
 
 The ordinary agent runs `loop ensure` in verify mode once, edits files, then
 optionally calls `loop wait` for the next sealed cycle epoch. The persistent loop owns
@@ -849,7 +849,7 @@ directly): partially landed.**
   `-hotswap-activate` + `ZCL_HOTSWAP_ACTIVATE=1` + the exact dev datadir,
   canonical refused. `dev.generation.activate` is the separate full-image
   transaction: immutable staging, exact source/resident CAS, bounded expiry,
-  exact-process probe, and rollback. See `docs/work/HOTSWAP.md`.
+  exact-process probe, and rollback. See `docs/dev/HOTSWAP.md`.
 
 Exit: an LLM can find and run every read-only operation through native
 discovery. **Met for the registry surface** — every declared root

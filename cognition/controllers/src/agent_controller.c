@@ -155,7 +155,7 @@ static const struct agent_path_outcome agent_out_docs = {
     "documentation", "docs_only", NULL, false, false, false,
     AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_fast_ci = {
-    "fast_ci_and_gates", "normal", "docs/work/fast-path.md", true, false,
+    "fast_ci_and_gates", "normal", "docs/dev/fast-path.md", true, false,
     false, AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_native_agent = {
     "native_agent_api", "operator_api", "docs/AGENT_API.md", true, true,
@@ -183,7 +183,7 @@ static const struct agent_path_outcome agent_out_service = {
     "service_layer", "operator_liveness", "docs/CODEBASE_MAP.md", true,
     false, false, AGENT_PATH_GROUPS_LINT };
 static const struct agent_path_outcome agent_out_harness = {
-    "test_harness", "normal", "docs/work/fast-path.md", true, false, false,
+    "test_harness", "normal", "docs/dev/fast-path.md", true, false, false,
     AGENT_PATH_GROUPS_LINT };
 static const struct agent_path_outcome agent_out_code = {
     "code", "normal", "docs/CODEBASE_MAP.md", true, false, false,
@@ -358,12 +358,12 @@ bool rpc_agent_map(const struct json_value *params, bool help,
     agent_push_subsystem(&subsystems, "fast_ci",
                          "cache-aware edit loop and focused test routing",
                          "cognition/controllers/include/controllers/agent_impact_rules.def, tools/agent_fast_ci.sh, Makefile",
-                         "docs/work/fast-path.md",
+                         "docs/dev/fast-path.md",
                          "make_lint_gates");
     agent_push_subsystem(&subsystems, "background_quality_lanes",
                          "long fuzz and coverage proof work outside the push path",
                          "cognition/controllers/src/agent_background_quality.c, tools/scripts/background_quality_lane.sh, platform/deploy/zclassic23-fuzz.service, platform/deploy/zclassic23-coverage.service",
-                         "docs/work/fast-path.md",
+                         "docs/dev/fast-path.md",
                          "make_lint_gates");
     json_push_kv(result, "subsystems", &subsystems);
     json_free(&subsystems);

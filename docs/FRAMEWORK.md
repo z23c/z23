@@ -23,7 +23,7 @@ one place.
 For the concrete future-agent feature slice — REST resource first, database
 schema, ActiveRecord model, validations, relationships, service workflow,
 route contract, typed native surface, and tests — use
-[`docs/AGENT_ARCHITECTURE.md`](./AGENT_ARCHITECTURE.md). This file is the law;
+[`docs/agent/AGENT_ARCHITECTURE.md`](./agent/AGENT_ARCHITECTURE.md). This file is the law;
 that file is the build recipe.
 
 ---
@@ -493,7 +493,7 @@ The framework holds; the implementation moves.
   old cutover/shadow language, and keep reducer/log authority as the only
   architecture described in production docs.
 - **Worker assignment:**
-  [`docs/work/agent-protocol.md`](./work/agent-protocol.md),
+  [`docs/agent/agent-protocol.md`](./agent/agent-protocol.md),
   then your spec under `docs/work/`.
 - **Reviewing a PR:** every changed file matches its folder's shape; lint
   passes; §9 is updated if it changed the open-item list.

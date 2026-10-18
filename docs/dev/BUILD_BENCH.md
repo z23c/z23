@@ -65,7 +65,7 @@ the delta is visible instead of silently folded into the baseline.
 
 ## Honesty states
 
-Same contract as [`make timings`](../tools/scripts/timings.sh): a row that is
+Same contract as [`make timings`](../../tools/scripts/timings.sh): a row that is
 not `ok` publishes **no duration**, in the artifact or in the printed report.
 
 - `ok` — measured, and the scenario's own precondition held.

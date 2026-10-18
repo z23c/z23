@@ -6,7 +6,7 @@ preserved in git history (PRs merge with merge commits — see the
 for the live picture); this file recognizes contributors in one place.
 
 All contributions are licensed under Apache-2.0 (inbound = outbound) —
-see [CONTRIBUTING.md](../.github/CONTRIBUTING.md#licensing-of-contributions).
+see [CONTRIBUTING.md](../../.github/CONTRIBUTING.md#licensing-of-contributions).
 
 ## Maintainer
 

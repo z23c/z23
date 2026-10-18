@@ -2,7 +2,7 @@
 
 This is the one performance authority for the live C23 developer loop. It
 records measurements, not aspirations. The product contract remains
-[`ZCODE_DEVELOPMENT_PRODUCT.md`](./ZCODE_DEVELOPMENT_PRODUCT.md); the runtime
+[`ZCODE_DEVELOPMENT_PRODUCT.md`](../work/ZCODE_DEVELOPMENT_PRODUCT.md); the runtime
 and safety contract remains [`HOTSWAP.md`](./HOTSWAP.md).
 
 The mission is simple: edit C23, let the resident owner classify and prove the

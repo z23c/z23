@@ -19,12 +19,12 @@ context under `AGENTS.md`; work that needs a ZCL spend waits for an owner
 authorization. Each ◐ cell names its own remaining
 condition or owner decision; recheck it against its ledger before starting.
 
-[`DEVELOPMENT_MVP.md`](./DEVELOPMENT_MVP.md) retains eight scoped milestones
+[`DEVELOPMENT_MVP.md`](../agent/DEVELOPMENT_MVP.md) retains eight scoped milestones
 (D1–D8) for fast, coordinated, low-cost agent development of C23, each with one
 measurement and one threshold. D1–D8 and C1–C8 remain acceptance context; they
 do not replace the fleet A+ bars or reorder current work.
 
-<!-- claim: file-present docs/work/DEVELOPMENT_MVP.md -->
+<!-- claim: file-present docs/agent/DEVELOPMENT_MVP.md -->
 
 ## Current mission: fast C23 development with fleet Insight + Control
 

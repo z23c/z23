@@ -231,7 +231,7 @@ Use this loop while the later platform items remain incomplete.
 1. **Establish authority and scope** — `pwd`, `git status --short`,
    `git worktree list --porcelain`; read `HANDOFF.md` (live facts),
    `FORWARD_PLAN.md` (before treating this as the active queue),
-   `AGENT_TRAPS.md` (before fixing an apparent defect), and for
+   `agent/AGENT_TRAPS.md` (before fixing an apparent defect), and for
    consensus-adjacent work `CONSENSUS_PARITY_DOCTRINE.md` +
    `DEFENSIVE_CODING.md`; confirm the assignment owns an isolated file set.
 2. **Discover before reading files** — `discover search <topic>`,
@@ -263,16 +263,16 @@ Use this loop while the later platform items remain incomplete.
 | What is live and protected? | `z23 status` + `docs/HANDOFF.md` |
 | What should execute next? | `docs/work/FORWARD_PLAN.md` |
 | Why is the code shaped this way? | `docs/FRAMEWORK.md` |
-| How is a feature slice built? | `docs/AGENT_ARCHITECTURE.md` |
+| How is a feature slice built? | `docs/agent/AGENT_ARCHITECTURE.md` |
 | What commands exist now? | `discover search/describe` |
 | Where is a symbol and who uses it? | `code sym/refs/room` |
 | Which proof is required? | `dev test plan` + `code tests` |
 | What can an App request? | `engine/modules/framework/include/zclassic23/app.h` |
 | What does an App declare? | `dev app describe` + `apps/<id>/app.def` |
-| What apparent bug may be intentional? | `docs/AGENT_TRAPS.md` |
+| What apparent bug may be intentional? | `docs/agent/AGENT_TRAPS.md` |
 
 Detailed contracts: `../NATIVE_COMMAND_INTERFACE.md`,
-`../AGENT_ARCHITECTURE.md`, `../../engine/modules/framework/include/zclassic23/app.h`. Daily
+`../agent/AGENT_ARCHITECTURE.md`, `../../engine/modules/framework/include/zclassic23/app.h`. Daily
 operating loop: `.claude/skills/z23-dev/SKILL.md`.
 
 ## Target compact protocol — extend, do not fork

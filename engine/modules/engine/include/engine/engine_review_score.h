@@ -2,7 +2,7 @@
  *
  * engine_review_score — score ONE review's findings against ONE known-answer
  * case. A pure function: no I/O, no allocation, no clock. It is the measurement
- * behind milestone D3 (docs/work/DEVELOPMENT_MVP.md): do reviews agree with the
+ * behind milestone D3 (docs/agent/DEVELOPMENT_MVP.md): do reviews agree with the
  * truth, in both directions.
  *
  * THE RULE

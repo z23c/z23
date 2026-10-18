@@ -15,7 +15,7 @@
  *
  * The atomic slot uses release-store / acquire-load publication: a worker
  * thread observes either the old or new provider, never a torn pointer, with
- * no lock on the hot path. See docs/work/HOTSWAP.md. */
+ * no lock on the hot path. See docs/dev/HOTSWAP.md. */
 
 #include "api_controller_internal.h"
 

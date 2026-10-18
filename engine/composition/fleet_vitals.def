@@ -9,7 +9,7 @@
  * This file is the ONE declaration. Everything else derives from it:
  *
  *   engine/modules/fleetledger/src/fleet_ledger_catalog.c   the subject enum
- *   docs/FLEET_LEDGER.md                                    the rendered table
+ *   docs/agent/FLEET_LEDGER.md                                    the rendered table
  *   tools/lint/lintc/gate_fleet_vitals.c                the gate
  *
  * Row shape:

@@ -191,7 +191,7 @@ Linux and arm64 macOS have native build paths; macOS needs no Linux VM. An
 arm64 Mac16,10 (macOS 26.0.1, Apple Clang 17) built the node and passed the
 dependency audit and isolated platform tests on 2026-08-26; that is not
 current-candidate chain-sync acceptance. Intel macOS is unverified. Details:
-[NATIVE_MACOS_RUNBOOK.md](work/NATIVE_MACOS_RUNBOOK.md#historical-platform-baseline).
+[NATIVE_MACOS_RUNBOOK.md](dev/NATIVE_MACOS_RUNBOOK.md#historical-platform-baseline).
 Linux tests do not qualify macOS.
 
 A coherent slice needs green focused acceptance, current generated files,
@@ -503,7 +503,7 @@ Read [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md), then consult:
   model;
 - [`CODEBASE_MAP.md`](CODEBASE_MAP.md) for source ownership and extension
   recipes;
-- [`AGENT_TRAPS.md`](AGENT_TRAPS.md) before re-solving an intentional or
+- [`AGENT_TRAPS.md`](agent/AGENT_TRAPS.md) before re-solving an intentional or
   completed behavior;
 - [`SECURITY_AND_INTEGRITY.md`](SECURITY_AND_INTEGRITY.md) and
   [`CONSENSUS_PARITY_DOCTRINE.md`](CONSENSUS_PARITY_DOCTRINE.md) near security,
@@ -747,8 +747,8 @@ only an exact deterministic compiler diagnostic may be coalesced.
 Do not expand HOT_FORK, hot-swap, or reflex machinery merely to improve
 coverage or benchmark numbers. It changes only when a current public-node or
 C23 Commons acceptance requires it. Architecture and measured evidence live in
-[`work/REFLEX_REACTOR.md`](work/REFLEX_REACTOR.md) and
-[`work/C23_DEV_LOOP_PERFORMANCE.md`](work/C23_DEV_LOOP_PERFORMANCE.md).
+[`dev/REFLEX_REACTOR.md`](dev/REFLEX_REACTOR.md) and
+[`dev/C23_DEV_LOOP_PERFORMANCE.md`](dev/C23_DEV_LOOP_PERFORMANCE.md).
 
 ## 5. Build and focused proof
 
@@ -1268,7 +1268,7 @@ records are unsigned and writable by the uid the candidate runs as; reuse
 comes back only when a separate-uid verifier qualifies. `phases.txt` records
 `test_reuse_admit=test-reuse: unqualified(no_verifier_account)` and an
 `advisory` `test_preflight` probe count that admits nothing
-([`work/test-result-cache.md`](work/test-result-cache.md)).
+([`dev/test-result-cache.md`](dev/test-result-cache.md)).
 Automatic proof-worker per-group collection is deferred until every mandatory
 input closure qualifies. The default exact cold whole-cycle proof and its signed
 pair receipt remain the admission gate. Explicit runner diagnostics use

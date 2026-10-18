@@ -4,7 +4,7 @@
  * key may call which fleet leaf. Every leaf here answers from local files
  * under the datadir and contacts no peer, same discipline as every other
  * `fleet` leaf. See tools/dev/fleet_roles.h for the catalog and store this
- * wraps, and docs/FLEET.md for the feature.
+ * wraps, and docs/agent/FLEET.md for the feature.
  */
 
 #include "command/native_command.h"

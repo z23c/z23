@@ -5,7 +5,7 @@
 The agent interface is the **native command registry** (`z23 <command>`);
 [`docs/NATIVE_COMMAND_INTERFACE.md`](./NATIVE_COMMAND_INTERFACE.md) is the primary
 reference. Shell wrappers are compatibility shims only. New feature work follows
-[`docs/AGENT_ARCHITECTURE.md`](./AGENT_ARCHITECTURE.md): REST resource first,
+[`docs/agent/AGENT_ARCHITECTURE.md`](./agent/AGENT_ARCHITECTURE.md): REST resource first,
 database schema, ActiveRecord model, validations, relationships, service
 workflow, REST route contract, then the native surface.
 
@@ -1500,13 +1500,13 @@ speaks newline-delimited JSON-RPC on stdin/stdout, handles one request at a
 time and logs to stderr only. Four tools keep the MCP tool listing near 2 KB:
 `z23_search`, `z23_describe`, `z23_run` and `z23_code`.
 `z23_search` takes an optional `scope`, `commands` (default) or `wiki`; the wiki
-scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
+scope is described in [WIKI.md](agent/WIKI.md#from-an-agent-harness).
 
 - `--checkout` is optional. Without it the server starts with no source root:
   it unsets `ZCL_DEV_SOURCE_ROOT`, moves to `/`, and never uses the caller's
   working directory. `z23_search`, `z23_describe` and `z23_run` work against
   the built-in registry, including `lab.run` and `lab.test` (see
-  [LAB.md](LAB.md)); `z23_code` and every `z23_run` leaf that reads a source
+  [LAB.md](dev/LAB.md)); `z23_code` and every `z23_run` leaf that reads a source
   tree (`code.*`, `dev.*`, `app.presentation.*`, `fleet.objectives`, and any
   leaf declaring checkout capabilities) are refused with `NO_CHECKOUT`, and
   `instructions` say so. Tool calls before `initialize` are refused with

@@ -11,7 +11,7 @@
  * This file is the ONE declaration. Everything else derives from it:
  *
  *   tools/command/native_fleet_objectives.c   the producer table
- *   docs/FLEET.md                            the objectives summary
+ *   docs/agent/FLEET.md                            the objectives summary
  *
  * Row shape:
  *

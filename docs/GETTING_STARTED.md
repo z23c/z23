@@ -852,5 +852,5 @@ To report a bug or propose a feature, use the forms in
 `z23 status` output and the consensus question up front.
 
 Next: [`HOW_THE_NODE_WORKS.md`](HOW_THE_NODE_WORKS.md) for the mental model,
-and [`AGENT_TRAPS.md`](AGENT_TRAPS.md) for the list of things that look broken
+and [`AGENT_TRAPS.md`](agent/AGENT_TRAPS.md) for the list of things that look broken
 but are intentional or already done.

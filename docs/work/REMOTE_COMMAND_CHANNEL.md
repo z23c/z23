@@ -245,7 +245,7 @@ never "trust these bytes", and the target node converges to a named source root
 ([`engine/composition/commands/dev.def`](../../engine/composition/commands/dev.def), handler
 [`tools/command/native_dev_hotswap.c`](../../tools/command/native_dev_hotswap.c))
 compile, ABI-validate, self-test and activate one module in the resident dev
-process. [`docs/work/HOTSWAP.md`](./HOTSWAP.md) records the measured local cost:
+process. [`docs/dev/HOTSWAP.md`](../dev/HOTSWAP.md) records the measured local cost:
 a warm 20-edit resident bench saw 227.280 ms p50 and 232.141 ms
 p95 edit-to-visible against a 250 ms gate, against minutes for a full rebuild
 and restart.
@@ -261,7 +261,7 @@ cost above the local loop is one bundle fetch plus verification plus the same
 resident activation — which keeps the target machine's own dev loop in the same
 order of magnitude as the local one, instead of a full rebuild per box. The
 honest number for a fleet is not yet measured and this document does not claim
-one; the local half is measured in `docs/work/HOTSWAP.md`, and the remote half
+one; the local half is measured in `docs/dev/HOTSWAP.md`, and the remote half
 is what the next increment must measure on real hardware before anyone quotes
 it.
 
@@ -378,5 +378,5 @@ an allowlist grown one hurried leaf at a time next to the code that needed it.
 
 - [`AGENTS.md`](../../AGENTS.md) — authority boundaries this design sits under.
 - [`docs/SECURITY_AND_INTEGRITY.md`](../SECURITY_AND_INTEGRITY.md)
-- [`docs/work/HOTSWAP.md`](./HOTSWAP.md)
+- [`docs/dev/HOTSWAP.md`](../dev/HOTSWAP.md)
 - [`docs/work/DIRECT_TRANSPORT.md`](./DIRECT_TRANSPORT.md)

@@ -146,7 +146,7 @@ int chain_restore_rebuild_active_chain_from_disk(
      * restart with an intact index STILL walks the full chain here (~74s
      * measured, chain_restore_executor.c comment). A non-zero count on a warm
      * restart is therefore EXPECTED after any unclean stop, and it being
-     * O(chain) rather than O(delta) is a known slow-boot defect (docs/
+     * O(chain) rather than O(delta) is a known slow-boot defect (docs/agent/
      * AGENT_TRAPS.md; proven by test_rebuild_active_chain_is_o_chain_not_delta).
      * Registered once; bumped per height read. */
     atomic_uint_least64_t *scan_ctr =

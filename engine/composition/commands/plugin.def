@@ -1,6 +1,6 @@
 /* plugin: the signed plugin store under ~/.z23/plugins and its confined
  * supervisor (run). Consumer defines
- * ZCL_COMMAND_*. docs/PLUGINS.md describes the layout and refusal codes. */
+ * ZCL_COMMAND_*. docs/dev/PLUGINS.md describes the layout and refusal codes. */
 
 ZCL_COMMAND_BRANCH("plugin", "", "Signed plugin store",
                    ZCL_COMMAND_LAYER_APP)

@@ -1156,7 +1156,7 @@ sweep_landtmp() {
 # (git cherry: patch equivalence, so cherry-picked lanes count as landed),
 # and have been idle more than LANDED_IDLE_H. OPT-IN: without
 # --reap-landed-worktrees this only reports the candidates, because
-# docs/HOST_GC.md sanctions whole-worktree removal only for the units,
+# docs/dev/HOST_GC.md sanctions whole-worktree removal only for the units,
 # lanes and trains directories. Before each removal the worktree's path,
 # commit and branch are appended to $STATE/landed_worktrees.tsv, so any one
 # of them is `git worktree add <path> <commit>` away from coming back.

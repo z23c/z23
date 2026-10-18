@@ -12,7 +12,7 @@
  * WHAT IT OWNS. For every registered checkout the resident holds the
  * codeindex owner claim (codeindex_owner_claim), watches the source tree, and
  * is the only process that calls codeindex_rebuild for it. Everything else
- * asks, and a stale answer is refused rather than served — see docs/MIND.md.
+ * asks, and a stale answer is refused rather than served — see docs/dev/MIND.md.
  *
  * WHAT IT IS NOT. It is not an authority. It answers where a symbol is, who
  * owns a territory, and which tests route; it decides nothing. No gate reads

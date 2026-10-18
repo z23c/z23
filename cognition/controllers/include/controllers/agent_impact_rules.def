@@ -12,7 +12,7 @@ AGENT_IMPACT_RULE("platform/adapters/outbound/persistence/src/block_log_legacy.c
 AGENT_IMPACT_RULE("platform/modules/fdt/*|tests/harness/src/test_fdt.c", "test_fdt")
 AGENT_IMPACT_RULE("tests/harness/src/test_zcode_policy.c", "zcode_policy")
 AGENT_IMPACT_RULE("tools/soak/main.c|tests/harness/src/test_soak_runner.c", "soak_runner soak_harness")
-AGENT_IMPACT_RULE("tools/command/native_fleet_triggers*.c|tools/command/native_fleet_triggers.h|tests/harness/src/test_fleet_triggers.c|engine/composition/triggers.def|docs/FLEET_TRIGGERS.md", "fleet_triggers make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_fleet_triggers*.c|tools/command/native_fleet_triggers.h|tests/harness/src/test_fleet_triggers.c|engine/composition/triggers.def|docs/agent/FLEET_TRIGGERS.md", "fleet_triggers make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_download_speed_contract.c|docs/experiments/C3_DOWNLOAD_PERF_LAB.md|docs/experiments/C3_SPEED_BASELINE.md", "download_speed_contract")
 AGENT_IMPACT_RULE("tests/harness/fixtures/c3_mutex_probe.c|tools/dev/c3_mutex_probe.h", "download_speed_contract download_enqueue_profile")
 AGENT_IMPACT_RULE("tests/harness/fixtures/c3_tip_seam_probe.c", "tip_finalize_stage tip_finalize_post_step")
@@ -40,7 +40,7 @@ AGENT_IMPACT_RULE("engine/composition/capability_classes.def|engine/composition/
  * claim against them, not only the shell gate that derives it in-tree. */
 AGENT_IMPACT_RULE("contexts/commons/modules/vcs/include/vcs/package_verify_capabilities.h|contexts/commons/modules/vcs/src/package_verify_capabilities.c|tests/harness/src/test_package_capability_claim.c", "package_capability_claim vcs_core make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_dev_train_command.c|tests/harness/src/test_dev_train.c", "dev_train make_lint_gates")
-AGENT_IMPACT_RULE("Makefile|README.md|.github/CONTRIBUTING.md|engine/entry/main.c|tools/*|tools/scripts/*|tools/githooks/*|deploy/*.service|deploy/*.timer|deploy/examples/*.service|deploy/examples/*.timer|engine/composition/launchd/*|docs/AGENT_API.md|docs/BUILD.md|docs/CODEBASE_MAP.md|docs/HOW_THE_NODE_WORKS.md|docs/GETTING_STARTED.md|docs/work/fast-path.md|docs/RUNBOOK.md|tests/harness/src/test_make_lint_gates.c|tests/harness/src/lint_gate_*.c|tests/harness/src/lint_gate_selftests.h", "make_lint_gates")
+AGENT_IMPACT_RULE("Makefile|README.md|.github/CONTRIBUTING.md|engine/entry/main.c|tools/*|tools/scripts/*|tools/githooks/*|deploy/*.service|deploy/*.timer|deploy/examples/*.service|deploy/examples/*.timer|engine/composition/launchd/*|docs/AGENT_API.md|docs/BUILD.md|docs/CODEBASE_MAP.md|docs/HOW_THE_NODE_WORKS.md|docs/GETTING_STARTED.md|docs/dev/fast-path.md|docs/RUNBOOK.md|tests/harness/src/test_make_lint_gates.c|tests/harness/src/lint_gate_*.c|tests/harness/src/lint_gate_selftests.h", "make_lint_gates")
 /* The host janitor: the sweep engine, the leaf over it, the hourly script
  * and its fixture regression all answer to one acceptance bar, so a change
  * to any of them runs the group that proves the janitor never deletes work
@@ -928,7 +928,7 @@ AGENT_IMPACT_RULE("cognition/modules/codeindex/*|tests/harness/src/test_codeinde
  * that ask it. The codeindex glob is in the pattern because the refusal
  * itself lives in that module — a change there decides whether a query is
  * refused or served, which is exactly what the mind group proves. */
-AGENT_IMPACT_RULE("tools/mind/*|cognition/modules/codeindex/*|tools/command/native_mind_command.c|engine/composition/commands/mind.def|platform/deploy/zcl-mind.service|docs/MIND.md|tests/harness/src/test_mind.c|tests/harness/src/mind_state_windows_acceptance.c", "mind codeindex command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("tools/mind/*|cognition/modules/codeindex/*|tools/command/native_mind_command.c|engine/composition/commands/mind.def|platform/deploy/zcl-mind.service|docs/dev/MIND.md|tests/harness/src/test_mind.c|tests/harness/src/mind_state_windows_acceptance.c", "mind codeindex command_registry_catalog native_api_contract make_lint_gates")
 
 /* Code navigator command surface: the `code` branch backed by cognition/modules/codeindex. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/*|engine/composition/commands/code.def|tools/command/native_code_command.c|tools/command/native_code_capsule.c|tools/command/native_code_render.c|tools/command/native_code_structure.c|tools/command/native_code_context_command.c|tools/command/native_code_guide_command.c|tools/command/native_code_brief.c|tools/command/native_code_brief.h|tools/command/native_code_relations_command.c|tests/harness/src/test_code_impact.c", "codeindex code_capsule code_impact command_registry_catalog make_lint_gates")
@@ -3092,7 +3092,7 @@ AGENT_IMPACT_RULE("tools/command/native_dev_fleet.c|tools/command/native_dev_fle
  * workspace directories, /proc, and the delegation ledger — so its own group
  * owns the arithmetic and the fixtures, and the registry groups own the fact
  * that one more leaf and one more alias were declared. */
-AGENT_IMPACT_RULE("tools/command/native_dev_agents.h|tools/command/native_dev_agents_command.c|tools/command/native_dev_agents_ledger.c|tools/command/native_dev_agents_render.c|tools/command/native_dev_agents_scan.c|engine/composition/commands/fleet_agents.def|docs/FLEET.md|tests/harness/src/test_fleet_agents.c", "fleet_agents command_registry_catalog native_api_contract command_handler_snapshot command_input_bounds make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_dev_agents.h|tools/command/native_dev_agents_command.c|tools/command/native_dev_agents_ledger.c|tools/command/native_dev_agents_render.c|tools/command/native_dev_agents_scan.c|engine/composition/commands/fleet_agents.def|docs/agent/FLEET.md|tests/harness/src/test_fleet_agents.c", "fleet_agents command_registry_catalog native_api_contract command_handler_snapshot command_input_bounds make_lint_gates")
 /* The install front door. platform/modules/install is pure judgement with no in-tree
  * dependencies, so the only things that can observe a change to it are its
  * own group and check-z23-release-install, which drives the real
@@ -3425,8 +3425,8 @@ AGENT_IMPACT_RULE("tests/harness/src/test_plugin_package.c", "plugin_package plu
 AGENT_IMPACT_RULE("tools/dev/wiki_runtime.c|tools/dev/wiki_runtime.h|tools/dev/wiki_runtime_main.c|tests/harness/src/test_wiki_runtime.c", "wiki_runtime fleet_board make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_wiki_code.c|tools/command/native_wiki_docs.c|tools/command/native_wiki_priv.h|tools/command/native_wiki_read.c|tools/command/native_wiki_tree.c|tests/harness/src/test_wiki_tree.c|tests/harness/src/test_wiki_code.c|tests/fixtures/wiki_docs/*", "wiki_tree wiki_code command_registry_catalog native_api_contract")
 AGENT_IMPACT_RULE("tools/command/native_wiki_docs.c|tools/scripts/install_z23.sh|tests/harness/src/test_wiki_docs_install.c", "wiki_docs_install wiki_tree")
-AGENT_IMPACT_RULE("tools/command/work_card.c|tools/command/work_card.h|tools/command/native_work_command.c|engine/composition/commands/work.def|docs/work/cards.jsonl|docs/WORK_CARDS.md|tests/harness/src/test_work_card.c", "work_card fleet_board command_registry_catalog native_api_contract")
-AGENT_IMPACT_RULE("tools/command/lab.h|tools/command/lab_exec.h|tools/command/lab_exec.c|tools/command/lab_build.c|tools/command/lab_receipt.c|tools/command/lab_priv.h|tools/command/native_lab_command.c|tools/command/native_lab_test_command.c|tools/command/native_lab_promote_command.c|engine/composition/commands/lab.def|docs/LAB.md|tests/harness/src/test_lab.c|tests/harness/src/test_lab_promote.c|tests/fixtures/lab", "lab lab_promote command_registry_catalog native_api_contract")
+AGENT_IMPACT_RULE("tools/command/work_card.c|tools/command/work_card.h|tools/command/native_work_command.c|engine/composition/commands/work.def|docs/work/cards.jsonl|docs/agent/WORK_CARDS.md|tests/harness/src/test_work_card.c", "work_card fleet_board command_registry_catalog native_api_contract")
+AGENT_IMPACT_RULE("tools/command/lab.h|tools/command/lab_exec.h|tools/command/lab_exec.c|tools/command/lab_build.c|tools/command/lab_receipt.c|tools/command/lab_priv.h|tools/command/native_lab_command.c|tools/command/native_lab_test_command.c|tools/command/native_lab_promote_command.c|engine/composition/commands/lab.def|docs/dev/LAB.md|tests/harness/src/test_lab.c|tests/harness/src/test_lab_promote.c|tests/fixtures/lab", "lab lab_promote command_registry_catalog native_api_contract")
 /* Shared path helpers (zcl_path_join, zcl_path_is_dir, zcl_is_lower_hex): their
  * own contract group plus the lab and wiki leaves that resolve paths through
  * them. */

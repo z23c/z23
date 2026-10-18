@@ -7,7 +7,7 @@
  * `ops state --subsystem=<name>` has always answered from: the reducer
  * frontier and the six ladder rungs. Nothing about the new leaves is supposed
  * to change those replies — but "supposed to" is exactly the claim that rots.
- * Something else already reads each of these bodies (docs/work/fast-path.md,
+ * Something else already reads each of these bodies (docs/dev/fast-path.md,
  * the deploy verify, the debug bundle, and every operator who has one in a
  * shell history), so a key that quietly vanishes or is renamed breaks a tool
  * nobody in this lane can see.

@@ -1,7 +1,7 @@
 # orphan_placement_baseline.txt
 #
 # Shrink-only baseline for tools/lint/check_no_orphan_placement.sh (Gate P3,
-# docs/work/palace-design.md §3). Each line is a tracked .c/.h that today
+# docs/dev/palace-design.md §3). Each line is a tracked .c/.h that today
 # resolves to the catch-all "root" group in ci_group_for_path() — a top-level
 # file (src/) or a dir (examples/) outside the known navigator tops. The
 # gate runs RATCHET: any new violation NOT listed here fails the build. As

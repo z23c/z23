@@ -305,7 +305,7 @@ int plant_long_function_file(const char *rel, const char *func_name,
 }
 
 /* META-GATE: a gate whose scan set is empty must fail loud (exit 2), never
- * report a hollow clean pass (docs/work/lint-gate-hollowness-audit.md).
+ * report a hollow clean pass (docs/dev/lint-gate-hollowness-audit.md).
  * One gate's check: an empty scan dir via its ZCL_*_SCAN_* override must exit
  * 2; with no override, exit 0. One TEST block per call (the TEST macro's
  * `_test_next` label is function-scoped). Returns 0 on pass, nonzero on

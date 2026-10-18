@@ -42,7 +42,7 @@
  * that as the CURRENT contract. Tightening it is a consensus change and needs
  * a full-history replay first (CONSENSUS_PARITY_DOCTRINE.md). The same rule
  * that made the non-canonical BLS12-381 infinity encoding an ACCEPTED fact
- * (docs/AGENT_TRAPS.md) applies here: a documented permissive verdict is a
+ * (docs/agent/AGENT_TRAPS.md) applies here: a documented permissive verdict is a
  * pinned fact, not a bug to fix in place.
  *
  * RE-RECORDING THE GOLDEN: never to make a red run green. Only after an

@@ -259,7 +259,7 @@ detail).
   tier: ~8-12 seeds... Nightly: tools/sim/wire_sweep.c, thousands of seeds").
   Keep it out of `make ci`/`make test` entirely — this is explicitly a
   nightly/soak-class artifact per the same doctrine that excludes
-  soak/fuzz from CI (see `docs/work/lint-gate-hollowness-audit.md` framing
+  soak/fuzz from CI (see `docs/dev/lint-gate-hollowness-audit.md` framing
   and the existing `fuzz-ci` vs `fuzz` split as precedent).
 - **Acceptance gates**: `make wire-sweep SEEDS=200` (short local smoke run)
   completes with zero monitor failures on current step A/B (+ C once landed)
@@ -271,7 +271,7 @@ detail).
   closely modeled on `chaos.c`); have a second Sonnet pass specifically
   verify the grep security gate actually fires on a deliberately-reintroduced
   `socket(` call before trusting it (a hollow lint gate is a known project
-  failure mode per `docs/work/lint-gate-hollowness-audit.md`).
+  failure mode per `docs/dev/lint-gate-hollowness-audit.md`).
 
 ## 4. App-layer flows through the harness
 

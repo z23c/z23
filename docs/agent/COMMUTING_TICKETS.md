@@ -116,4 +116,4 @@ writers coordinate through native claims; no permanent lead is required.
 | This specification | node1 |
 | Ledger and admission side | node2, lane `proof-commuting-tickets` |
 
-The file-to-group map comes from `code tests`, at 10 ms per file. Lane references: docs/agent/LANE_LAUNCH.md, docs/agent/LANE_REPORT.md. Node identity and reporting protocol: docs/work/agent-protocol.md.
+The file-to-group map comes from `code tests`, at 10 ms per file. Lane references: docs/agent/LANE_LAUNCH.md, docs/agent/LANE_REPORT.md. Node identity and reporting protocol: docs/agent/agent-protocol.md.

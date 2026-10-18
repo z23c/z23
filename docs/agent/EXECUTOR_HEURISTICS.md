@@ -87,7 +87,7 @@ Notes:
 
 - Flash gets one-file units with a pinned test and nothing else.
 - A pinned test is a registered test group that actually runs; group catalogue: tools/dev/test_group_catalog.def.
-- Every brief carries NEVER git stash; briefs: docs/work/agent-protocol.md.
+- Every brief carries NEVER git stash; briefs: docs/agent/agent-protocol.md.
 
 ## Observed routing
 

@@ -5,7 +5,7 @@
  * plugin_store_install accepts; plugin_keygen creates the signing key file.
  * A key file is exactly the 32-byte Ed25519 seed (RFC 8032), the same form as
  * the onion vanity seed. POSIX creates it with mode 0600; Windows requires a protected
- * owner+SYSTEM-only ACL and an owner-private parent. docs/PLUGINS.md describes
+ * owner+SYSTEM-only ACL and an owner-private parent. docs/dev/PLUGINS.md describes
  * publishing. Storage support does not grant plugin execution or confinement. */
 #ifndef ZCL_PLUGIN_PACK_H
 #define ZCL_PLUGIN_PACK_H

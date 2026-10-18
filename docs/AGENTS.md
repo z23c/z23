@@ -2,7 +2,7 @@
 
 # docs/
 
-Manuals and plans. Index: `README.md`. Procedure: `DEVELOPING.md` (open one section, never the whole file). Ownership map: `CODEBASE_MAP.md`. Fleet: `FLEET.md`, `work/AGENT_FLEET.md`, `agent/`. Current work order: `work/FORWARD_PLAN.md`.
+Manuals and plans. Index: `README.md`. Procedure: `DEVELOPING.md` (open one section, never the whole file). Ownership map: `CODEBASE_MAP.md`. Fleet: `agent/FLEET.md`, `work/AGENT_FLEET.md`, `agent/`; developer references: `dev/`. Current work order: `work/FORWARD_PLAN.md`.
 
 Generated, never hand-edit (regenerate with the canonical target):
 - `API_REFERENCE.md` from `API_REFERENCE.md.in` and the command `.def` files: `make docs-api-reference`.

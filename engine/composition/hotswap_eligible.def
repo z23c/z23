@@ -12,7 +12,7 @@
  * A translation unit listed here may be recompiled into a generation .so
  * (`make hotswap-so FILES=...`) and dlopen'd into a RUNNING dev node to
  * re-point its atomic command-leaf slots with no restart. See
- * docs/work/HOTSWAP.md and ZCL_HOTSWAP_EXPORT_LEAVES in
+ * docs/dev/HOTSWAP.md and ZCL_HOTSWAP_EXPORT_LEAVES in
  * engine/modules/hotswap/include/hotswap/hotswap.h.
  *
  * Two lint gates keep this list honest (both wired into `make lint`, both

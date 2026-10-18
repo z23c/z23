@@ -45,7 +45,7 @@ target, see [the whole picture](docs/WHOLE_PICTURE.md).
 | Share and reuse C23 source | [The C23 Commons](#the-c23-commons) | [Commons Quickstart](docs/C23_COMMONS_QUICKSTART.md) |
 | Change Z23 itself | [Working on Z23 itself](#working-on-z23-itself) | [Developing](docs/DEVELOPING.md) |
 | Contribute, or attach a coding agent | [Contribute](#contribute-with-or-without-a-coding-agent) | [CONTRIBUTING.md](.github/CONTRIBUTING.md) |
-| Operate a fleet of machines | [Fleet guide](docs/FLEET.md) | [AGENTS.md](AGENTS.md) |
+| Operate a fleet of machines | [Fleet guide](docs/agent/FLEET.md) | [AGENTS.md](AGENTS.md) |
 
 ## Public start here
 

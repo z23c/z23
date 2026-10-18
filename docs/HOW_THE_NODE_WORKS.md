@@ -208,7 +208,7 @@ and `z23 dumpstate reducer_frontier`.
 1. Read **`docs/work/FORWARD_PLAN.md`** (the current plan), then
    **`docs/MVP.md`** (the v1 acceptance bar). `docs/FRAMEWORK.md` is the
    canonical architecture; this page is its plain-language summary.
-   **`docs/AGENT_TRAPS.md`** lists things that look broken but are not
+   **`docs/agent/AGENT_TRAPS.md`** lists things that look broken but are not
    (don't re-chase them);
    **`docs/CODEBASE_MAP.md`** is where-things-live + how-to-do-each-thing.
    `docs/HANDOFF.md` records one maintainer's hosted-node state — read it only

@@ -1235,7 +1235,7 @@ static void exp_i64(char *out, size_t cap, uint8_t have, int64_t v)
  * `line` (caller-owned, FLEET_EXPORT_ROW_BYTES) rather than returned, so
  * the caller controls its own growth strategy. `note` is always empty: the
  * leaf does not yet keep a free-text note distinct from task_id (see
- * docs/FLEET_LEDGER.md, "known gap"), and printing a wrong guess would be
+ * docs/agent/FLEET_LEDGER.md, "known gap"), and printing a wrong guess would be
  * worse than an honest blank. */
 static void exp_row_line(char *line, size_t cap,
                          const struct zcl_fleet_experiment_row *r)

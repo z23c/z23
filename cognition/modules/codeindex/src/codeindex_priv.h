@@ -384,7 +384,7 @@ void ci_spare_discard(int dirfd);
  * handling for prototypes. Never aborts on messy input — degrades to
  * partial=true. `content_sha3` of the scanned bytes is returned in out_sha3.
  * `purpose_out` (may be NULL) receives the file's one-line self-description
- * derived from its leading block comment (§1.1 of docs/work/palace-design.md);
+ * derived from its leading block comment (§1.1 of docs/dev/palace-design.md);
  * "" when no leading comment precedes the first code token. */
 typedef void (*ci_sym_cb)(const struct ci_symbol *sym, void *user);
 /* `enclosing` is the name of the function the call site sits inside — the

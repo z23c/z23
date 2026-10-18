@@ -1318,7 +1318,7 @@ int zcl_devloop_app_scaffold(const char *repo_root, const char *app_id,
  * dev_activation_activate_generation()) or keep shelling out to the proven
  * backend or a replacement. The three helpers below are pure (no process
  * exec, no disk I/O beyond getenv()) glue used to build/interpret its request and
- * result -- see docs/work/HOTSWAP.md "Transactional reload: native engine".
+ * result -- see docs/dev/HOTSWAP.md "Transactional reload: native engine".
  *
  * Guarded the same way dev_activation.h's own entry points are
  * (ZCL_DEV_BUILD || ZCL_TESTING): a release build sees no declaration at

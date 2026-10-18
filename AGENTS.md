@@ -55,7 +55,7 @@ Search with `git grep`. Generated references (`docs/CAPABILITY_INVENTORY.jsonl`,
 - Use existing CAS, task, candidate, action, receipt, queue and signature authorities; add no competing source of truth.
 - Tests use local fixtures, isolated datadirs and consenting peers. Never weaken an assertion or threshold to pass.
 - Preserve unrelated dirty work; never reset, overwrite or commit it. Fetch `origin/main` before work and before every push; never rewrite others' history.
-- Check [AGENT_TRAPS.md](docs/AGENT_TRAPS.md) before repairing behavior that may be intentional or complete.
+- Check [AGENT_TRAPS.md](docs/agent/AGENT_TRAPS.md) before repairing behavior that may be intentional or complete.
 
 ## Authority and safety
 
