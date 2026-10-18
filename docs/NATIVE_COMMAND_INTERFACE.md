@@ -25,7 +25,12 @@ The same tree serves a person, an AI agent, a local automation tool, and every
 UI adapter. The API does not grant different truth or ownership authority based
 on the caller. `discover help`, `discover search <query>`, and
 `discover schema <leaf>` make each available operation and its exact inputs
-self-describing. Canonical roots and signed evidence carry facts across
+self-describing. `discover search` scores plain-language words against each
+command's path, aliases, tags, summary and semantics (path and alias heaviest),
+drops stop words, stems plurals and -ing/-ed forms, expands a small vocabulary
+table, and ranks by summed weight, so any matching word counts and ties break
+by path.
+Canonical roots and signed evidence carry facts across
 adapters; websites and local projections do not become parallel authorities.
 
 For public ZCODE work, the intended path is discover, fetch and inspect, create

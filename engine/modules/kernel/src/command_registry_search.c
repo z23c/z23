@@ -1,7 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * discover.search scoring and document emit, split so each function stays
- * under cyclomatic 15. Match ranks and JSON fields are unchanged. */
+ * under cyclomatic 15. Phrase tiers rank first; word-level scoring with stop
+ * words, stemming and vocabulary groups lives in
+ * command_registry_search_terms.c. JSON fields are unchanged. */
 
 #include "kernel/command_registry.h"
 
@@ -95,49 +97,21 @@ static int match_folded(const struct zcl_command_spec *spec, const char *query,
     return 0;
 }
 
-static int match_terms(const struct zcl_command_spec *spec, const char *query,
-                       const char **reason)
-{
-    if (!strchr(query, ' '))
-        return 0;
-    size_t words = 0, matched = 0;
-    for (const char *p = query; *p;) {
-        while (*p == ' ')
-            p++;
-        if (!*p)
-            break;
-        const char *start = p;
-        while (*p && *p != ' ')
-            p++;
-        size_t wl = (size_t)(p - start);
-        char word[129];
-        if (wl == 0 || wl >= sizeof(word))
-            return 0;
-        memcpy(word, start, wl);
-        word[wl] = 0;
-        words++;
-        if (contains_folded(spec->path, word) ||
-            contains_folded(spec->tags, word) ||
-            contains_folded(spec->summary, word))
-            matched++;
-    }
-    if (words >= 2 && matched == words) {
-        *reason = "terms";
-        return 250;
-    }
-    return 0;
-}
-
 static int command_match_score(const struct zcl_command_spec *spec,
-                               const char *query, const char **reason)
+                               const char *query,
+                               const struct search_query *terms,
+                               const char **reason)
 {
     int score = match_exact(spec, query, reason);
     if (score)
         return score;
-    score = match_folded(spec, query, reason);
-    if (score)
-        return score;
-    return match_terms(spec, query, reason);
+    int phrase = match_folded(spec, query, reason);
+    int scored = command_registry_search_term_score(spec, terms);
+    if (scored > phrase) {
+        *reason = "terms";
+        return scored;
+    }
+    return phrase;
 }
 
 struct search_hit {
@@ -158,9 +132,11 @@ static void search_collect(const struct zcl_command_registry *registry,
 {
     *hit_count = 0;
     *total = 0;
+    struct search_query terms;
+    command_registry_search_query_parse(normalized, &terms);
     for (size_t i = 0; i < registry->count; i++) {
         const char *reason = NULL;
-        int score = command_match_score(&registry->commands[i], normalized,
+        int score = command_match_score(&registry->commands[i], normalized, &terms,
                                         &reason);
         if (score == 0)
             continue;

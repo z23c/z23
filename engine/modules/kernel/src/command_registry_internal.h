@@ -129,6 +129,28 @@ void command_registry_execute_run(
     size_t max_items, const char *cursor, struct zcl_command_reply *reply,
     struct agent_spend_policy_decision *policy);
 
+/* ── command_registry_search_terms.c ───────────────────────────────────
+ * Tokenized, stemmed, synonym-aware scoring behind discover.search. */
+#define SEARCH_WORD_MAX 24U
+#define SEARCH_TERMS_MAX 8U
+#define SEARCH_SLOTS_MAX 40U
+struct search_slot {
+    char stem[SEARCH_WORD_MAX];
+    size_t term;
+    bool syn;
+};
+struct search_query {
+    size_t terms;
+    size_t slots;
+    bool first[128]; /* initial letters of slot stems: cheap pre-filter */
+    struct search_slot slot[SEARCH_SLOTS_MAX];
+};
+void command_registry_search_stem(char *word);
+bool command_registry_search_query_parse(const char *normalized,
+                                         struct search_query *query);
+int command_registry_search_term_score(const struct zcl_command_spec *spec,
+                                       const struct search_query *query);
+
 #ifdef __cplusplus
 }
 #endif

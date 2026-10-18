@@ -1,0 +1,25 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * discover.search vocabulary groups. Each group lists words that name the
+ * same idea in the command registry; a query word also matches the other
+ * words of its group at half field weight. The groups are generic English
+ * and registry vocabulary, never a mapping from an intent to a command.
+ * Every group is grounded in registry leaves that use both words:
+ *   shell terminal   ops.mesh.terminal ("confined shell"), dev.app.machine.shell
+ *   disk vitals      fleet.vitals.table ("load, memory and disk")
+ *   health doctor    ops.health, fleet.doctor
+ *   help describe    discover.help (alias help), discover.describe
+ *   telemetry events ops.telemetry.* feeds
+ *   machine host node fleet.machines, ops.mesh.machines, fleet.nodes.table
+ *   workspace agent  dev.fleet.agents, zcode.workspace.*
+ *   transaction tx   core.wallet.transaction.*, raw transaction leaves
+ * Words are matched after stemming, so plural and -ing forms need no entry. */
+
+SEARCH_SYNONYM_GROUP("shell terminal")
+SEARCH_SYNONYM_GROUP("disk vitals")
+SEARCH_SYNONYM_GROUP("health doctor")
+SEARCH_SYNONYM_GROUP("help describe")
+SEARCH_SYNONYM_GROUP("telemetry events")
+SEARCH_SYNONYM_GROUP("machine host node")
+SEARCH_SYNONYM_GROUP("workspace agent")
+SEARCH_SYNONYM_GROUP("transaction tx")

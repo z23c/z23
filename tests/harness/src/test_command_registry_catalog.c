@@ -806,11 +806,11 @@ static int test_search_multiword(void)
     const struct zcl_command_registry *reg = zcl_command_catalog();
     char out[ZCL_COMMAND_LIST_BUDGET + 1];
     TEST("a space-separated query matches dotted command paths") {
-        /* Multi-word queries match when each word appears; a nonsense word
-         * blocks the match. */
+        /* Multi-word queries match on any word and rank full coverage first; a
+         * nonsense word alone matches nothing. */
         ASSERT(search_total_matches(reg, "dev loop", out, sizeof(out)) > 0);
         ASSERT(search_total_matches(reg, "loop dev", out, sizeof(out)) > 0);
-        ASSERT(search_total_matches(reg, "dev zzznope", out, sizeof(out)) == 0);
+        ASSERT(search_total_matches(reg, "zzznope", out, sizeof(out)) == 0);
         /* Single-word behavior is unchanged and still finds matches. */
         ASSERT(search_total_matches(reg, "loop", out, sizeof(out)) > 0);
         PASS();
@@ -869,6 +869,255 @@ static int test_common_intent_search(void)
             json_free(&doc);
             ASSERT(correct);
         }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Ranking benchmark for discover.search. Each row is a plain-language intent
+ * with the leaves that answer it (comma-separated). Measured against the
+ * catalog at base d0a7aa0af on 2026-10-18 with the lexical, stemmed,
+ * synonym-aware scorer: tuning set hit@1 = 21/25, hit@5 = 23/25; the same
+ * 25 intents scored hit@1 = 10/25, hit@5 = 13/25 with the previous
+ * all-terms-substring scorer. Held-out set (written before tuning, never used
+ * to tune): hit@1 = 8/10, hit@5 = 9/10. The asserted floors leave room for
+ * leaves added later. Known misses: "open a shell on another machine"
+ * (ops.mesh.terminal ranks below the ssh shell leaves) and "telemetry events"
+ * (ops.telemetry.watch ranks below its siblings and dev.loop.events). */
+struct search_rank_case {
+    const char *query;
+    const char *expected;
+};
+
+static const struct search_rank_case SEARCH_RANK_TUNING[] = {
+    {"search the wiki", "fleet.wiki.find"},
+    {"post to the board", "fleet.board.post"},
+    {"disk usage on a machine", "fleet.vitals.table,fleet.vitals.sample"},
+    {"open a shell on another machine", "ops.mesh.terminal"},
+    {"show help for a command", "discover.describe,discover.help"},
+    {"input schema of a command", "discover.schema"},
+    {"find source code for a feature", "code.guide,code.find"},
+    {"check fleet health", "fleet.doctor"},
+    {"telemetry events", "ops.telemetry.watch"},
+    {"list agent workspaces", "dev.fleet.agents"},
+    {"write a wiki page", "fleet.wiki.write"},
+    {"list wiki pages", "fleet.wiki.list"},
+    {"list fleet machines", "fleet.machines"},
+    {"install a plugin", "plugin.install"},
+    {"invite a machine", "fleet.invite"},
+    {"grant a role", "fleet.roles.grant"},
+    {"wallet balance", "core.wallet.balance"},
+    {"package a checkout",
+     "zcode.package.checkout,zcode.workspace.source.package.checkout"},
+    {"node sync status", "core.sync.status,core.status,status"},
+    {"retry a proof", "dev.proof.retry"},
+    {"list work cards", "work.list"},
+    {"show a work card", "work.show"},
+    {"land a change", "dev.land"},
+    {"landing queue status", "dev.land"},
+    {"read a wiki page", "fleet.wiki.read"},
+};
+
+static const struct search_rank_case SEARCH_RANK_HELD_OUT[] = {
+    {"who is on the roster", "fleet.roster.head,ops.mesh.roster"},
+    {"revoke a role", "fleet.roles.revoke"},
+    {"wait for a block height", "core.chain.wait.height"},
+    {"send a transaction", "core.wallet.transaction.send"},
+    {"list peers", "core.network.peers.list"},
+    {"rescan the wallet", "core.wallet.rescan"},
+    {"back up my wallet", "core.wallet.backup.now"},
+    {"show the latest failure diagnosis",
+     "dev.diagnose.latest,dev.diagnose.show"},
+    {"mempool contents", "core.chain.mempool.list"},
+    {"register a name", "app.names.register"},
+};
+
+/* 1-based rank of the first expected leaf among the returned matches, or 0. */
+static size_t search_rank_of(const struct zcl_command_registry *reg,
+                             const char *query, const char *expected)
+{
+    char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    size_t n = zcl_command_registry_search_json(reg, query, out, sizeof(out));
+    struct json_value doc;
+    if (n == 0 || !json_read(&doc, out, n))
+        return 0;
+    size_t rank = 0;
+    const struct json_value *matches = json_get(&doc, "matches");
+    for (size_t i = 0; matches && !rank && i < matches->num_children; i++) {
+        const char *path =
+            json_get_str(json_get(&matches->children[i], "path"));
+        char key[ZCL_COMMAND_MAX_PATH + 3];
+        snprintf(key, sizeof(key), ",%s,", path ? path : "");
+        char list[512];
+        snprintf(list, sizeof(list), ",%s,", expected);
+        if (path && strstr(list, key))
+            rank = i + 1;
+    }
+    json_free(&doc);
+    return rank;
+}
+
+static void search_rank_tally(const struct zcl_command_registry *reg,
+                              const struct search_rank_case *cases, size_t n,
+                              size_t *hit1, size_t *hit5)
+{
+    *hit1 = 0;
+    *hit5 = 0;
+    for (size_t i = 0; i < n; i++) {
+        size_t rank = search_rank_of(reg, cases[i].query, cases[i].expected);
+        *hit1 += rank == 1;
+        *hit5 += rank >= 1;
+    }
+}
+
+static int test_search_rank_benchmark(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("search ranks plain-language intents: hit@5 >= 22/25, hit@1 >= 15/25") {
+        size_t hit1, hit5;
+        search_rank_tally(reg, SEARCH_RANK_TUNING,
+                          sizeof(SEARCH_RANK_TUNING) /
+                              sizeof(SEARCH_RANK_TUNING[0]),
+                          &hit1, &hit5);
+        printf("[search-rank tuning] hit@1=%zu/25 hit@5=%zu/25\n", hit1, hit5);
+        ASSERT(hit5 >= 22);
+        ASSERT(hit1 >= 15);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_search_rank_held_out(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("search ranks held-out intents: hit@5 >= 8/10, hit@1 >= 6/10") {
+        size_t hit1, hit5;
+        search_rank_tally(reg, SEARCH_RANK_HELD_OUT,
+                          sizeof(SEARCH_RANK_HELD_OUT) /
+                              sizeof(SEARCH_RANK_HELD_OUT[0]),
+                          &hit1, &hit5);
+        printf("[search-rank held-out] hit@1=%zu/10 hit@5=%zu/10\n", hit1,
+               hit5);
+        ASSERT(hit5 >= 8);
+        ASSERT(hit1 >= 6);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static size_t search_top_paths(const struct zcl_command_registry *reg,
+                               const char *query,
+                               char paths[][ZCL_COMMAND_MAX_PATH])
+{
+    char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    size_t n = zcl_command_registry_search_json(reg, query, out, sizeof(out));
+    struct json_value doc;
+    if (n == 0 || !json_read(&doc, out, n))
+        return 0;
+    const struct json_value *matches = json_get(&doc, "matches");
+    size_t count = matches ? matches->num_children : 0;
+    for (size_t i = 0; i < count && i < ZCL_COMMAND_SEARCH_LIMIT; i++)
+        snprintf(paths[i], ZCL_COMMAND_MAX_PATH, "%s",
+                 json_get_str(json_get(&matches->children[i], "path")));
+    json_free(&doc);
+    return count;
+}
+
+static bool search_top_paths_equal(const struct zcl_command_registry *reg,
+                                   const char *a, const char *b)
+{
+    char pa[ZCL_COMMAND_SEARCH_LIMIT][ZCL_COMMAND_MAX_PATH];
+    char pb[ZCL_COMMAND_SEARCH_LIMIT][ZCL_COMMAND_MAX_PATH];
+    size_t na = search_top_paths(reg, a, pa);
+    size_t nb = search_top_paths(reg, b, pb);
+    if (na == 0 || na != nb)
+        return false;
+    for (size_t i = 0; i < na; i++)
+        if (strcmp(pa[i], pb[i]) != 0)
+            return false;
+    return true;
+}
+
+static int test_search_stop_words(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    TEST("stop words do not change ranking") {
+        ASSERT(search_rank_of(reg, "list wiki pages", "fleet.wiki.list") == 1);
+        ASSERT(search_rank_of(reg, "please list the wiki pages for me",
+                              "fleet.wiki.list") == 1);
+        ASSERT(search_top_paths_equal(reg, "list wiki pages",
+                                      "list of the wiki pages"));
+        ASSERT(search_total_matches(reg, "the of", out, sizeof(out)) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_search_stemming(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("suffix stemming matches -s, -ing and -ed forms") {
+        ASSERT(search_rank_of(reg, "reading wiki pages", "fleet.wiki.read") == 1);
+        ASSERT(search_rank_of(reg, "writing wiki page", "fleet.wiki.write") == 1);
+        ASSERT(search_rank_of(reg, "retrying proof", "dev.proof.retry") == 1);
+        ASSERT(search_rank_of(reg, "granted roles", "fleet.roles.grant") == 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_search_vocabulary(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("vocabulary groups bridge words the leaf does not use") {
+        /* health -> doctor; machine -> host/node; disk -> vitals */
+        ASSERT(search_rank_of(reg, "check fleet health", "fleet.doctor") == 1);
+        ASSERT(search_rank_of(reg, "disk usage on a machine",
+                              "fleet.vitals.table") >= 1);
+        ASSERT(search_rank_of(reg, "shell mesh", "ops.mesh.terminal") >= 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_search_any_word(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    TEST("any matching word counts: no all-words requirement") {
+        ASSERT(search_total_matches(reg, "wiki zzznope", out, sizeof(out)) > 0);
+        ASSERT(search_total_matches(reg, "zzznope", out, sizeof(out)) == 0);
+        ASSERT(search_rank_of(reg, "zzznope fleet wiki find",
+                              "fleet.wiki.find") >= 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_search_latency(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    TEST("search latency is reported against the 50 ms leaf budget") {
+        enum { RUNS = 200 };
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int i = 0; i < RUNS; i++)
+            ASSERT(zcl_command_registry_search_json(
+                       reg, "open a shell on another machine", out,
+                       sizeof(out)) > 0);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double us = ((double)(t1.tv_sec - t0.tv_sec) * 1e6 +
+                     (double)(t1.tv_nsec - t0.tv_nsec) / 1e3) / RUNS;
+        printf("[search-rank latency] mean=%.0f us over %d runs\n", us, RUNS);
         PASS();
     } _test_next:;
     return failures;
@@ -6088,6 +6337,13 @@ int test_command_registry_catalog(void)
     failures += test_branch_menus_shallow();
     failures += test_search_bounded();
     failures += test_search_multiword();
+    failures += test_search_rank_benchmark();
+    failures += test_search_rank_held_out();
+    failures += test_search_stop_words();
+    failures += test_search_stemming();
+    failures += test_search_vocabulary();
+    failures += test_search_any_word();
+    failures += test_search_latency();
     failures += test_receive_address_search();
     failures += test_common_intent_search();
     failures += test_ready_leaves_bound();
