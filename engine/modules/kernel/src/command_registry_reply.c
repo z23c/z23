@@ -154,7 +154,8 @@ static bool push_next_item_valid(const struct zcl_command_next *next,
     /* A leaf may name itself only to continue a page: the input must carry the
      * paging key that advances it, so the entry can never repeat the call. */
     if (current_spec && strcmp(next_spec->path, current_spec->path) == 0 &&
-        !json_get(input, "cursor") && !json_get(input, "item_offset"))
+        !json_get(input, "cursor") && !json_get(input, "item_offset") &&
+        !json_get(input, "after"))
         return false;
     return zcl_command_registry_input_validate(next_spec, input, why,
                                                sizeof(why));

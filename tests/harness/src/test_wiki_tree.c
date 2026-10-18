@@ -2,18 +2,23 @@
  *
  * discover.wiki and discover.read over the fixture tree in
  * tests/fixtures/wiki_docs: summary extraction, children and paging, the
- * Commands line, confinement refusals, UTF-8 cuts and the response budget. */
+ * Commands line, confinement refusals, UTF-8 cuts, plain-text summaries,
+ * envelope paging, installed-binary docs resolution and the response budget. */
 
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_wiki_priv.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "util/spawn.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -463,6 +468,8 @@ static int wt_registry(void)
         ASSERT(wt_execute("discover.wiki",
                           "{\"docsdir\":\"" WT_DOCS "\",\"topic\":\"many\"}", out, cap));
         ASSERT(strstr(out, "\"next_after\":64") != NULL);
+        ASSERT(strstr(out, "\"command\":\"discover.wiki\",\"input\":"
+                      "{\"topic\":\"many\",\"after\":64}") != NULL);
         ASSERT(wt_execute("discover.read",
                           "{\"docsdir\":\"" WT_DOCS "\",\"page\":\"quotes.md\","
                           "\"offset\":10,\"bytes\":16384}", out, cap));
@@ -479,6 +486,261 @@ static int wt_registry(void)
     return failures;
 }
 
+static const struct json_value *wt_next_input(const struct zcl_command_reply *r,
+                                              size_t i, struct json_value *in)
+{
+    json_init(in);
+    return i < r->next_count &&
+                   json_read(in, r->next[i].input_json,
+                             strlen(r->next[i].input_json))
+               ? in : NULL;
+}
+
+/* Replays a `next` entry unchanged except for the fixture docs directory. */
+static bool wt_follow(const struct zcl_command_reply *from,
+                      struct zcl_command_reply *to)
+{
+    char with_docs[640];
+    if (strcmp(from->next[0].command, "discover.wiki") != 0)
+        return false;
+    snprintf(with_docs, sizeof(with_docs), "{\"docsdir\":\"" WT_DOCS "\",%s",
+             from->next[0].input_json + 1);
+    return wt_run(zcl_native_handle_discover_wiki, with_docs,
+                  "zcl.wiki_node.v1", to);
+}
+
+static bool wt_has_wiki_next(const struct zcl_command_reply *r)
+{
+    for (size_t i = 0; i < r->next_count; i++)
+        if (!strcmp(r->next[i].command, "discover.wiki"))
+            return true;
+    return false;
+}
+
+static int wt_paging_next(void)
+{
+    int failures = 0;
+    TEST("wiki tree: truncated pages carry an envelope next that resumes without overlap or gap") {
+        struct zcl_command_reply r, r2;
+        struct json_value in;
+        ASSERT(wt_wiki("many", 0, &r));
+        ASSERT(r.next_count >= 1);
+        ASSERT_STR_EQ(r.next[0].command, "discover.wiki");
+        ASSERT(wt_next_input(&r, 0, &in) != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(&in, "topic")), "many");
+        ASSERT_EQ(json_get_int(json_get(&in, "after")),
+                  json_get_int(json_get(&r.data, "next_after")));
+        json_free(&in);
+        ASSERT_STR_EQ(r.next[0].reason, "list the next children");
+        ASSERT(wt_follow(&r, &r2));
+        const struct json_value *kids = json_get(&r2.data, "children");
+        ASSERT_EQ(json_size(kids), 2);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(kids, 0), "path")),
+                      "many/p64.md");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(kids, 1), "path")),
+                      "many/p65.md");
+        ASSERT(wt_child(&r.data, "many/p64.md") == NULL);
+        ASSERT(!wt_has_wiki_next(&r2));
+        zcl_command_reply_free(&r2);
+        zcl_command_reply_free(&r);
+        ASSERT(wt_wiki("alpha", 0, &r));
+        ASSERT(!wt_has_wiki_next(&r));
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+struct wt_plain_case {
+    const char *in;
+    size_t cap;
+    const char *out;
+};
+
+static int wt_plain(void)
+{
+    static const struct wt_plain_case cases[] = {
+        { "see [AGENTS.md](../../AGENTS.md) now", 64, "see AGENTS.md now" },
+        { "**bold** and __also__ `code` a_b", 64, "bold and also code a_b" },
+        { "[a [b] c](t) end", 64, "a [b] c end" },
+        { "[x](https://e/a_(b)) y", 64, "x y" },
+        { "see [open and more", 64, "see [open and more" },
+        { "[text] alone", 64, "[text] alone" },
+        { "[a](b", 64, "[a](b" },
+        { "a [](x) b", 64, "a  b" },
+        { "go [here](there)", 64, "go here" },
+        { "ab[cdefgh](x)", 6, "abcde" },
+        { "[ab](x)", 3, "ab" },
+        { "[ab](x)", 2, "a" },
+        { "\xc3\xa9[x](y)", 4, "\xc3\xa9x" },
+        { "a\xc3\xa9", 3, "a" },
+        { "", 8, "" },
+    };
+    int failures = 0;
+    TEST("wiki tree: wk_plain renders links, emphasis and code as plain text") {
+        char out[80];
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            size_t n = wk_plain(out, cases[i].cap, cases[i].in,
+                                strlen(cases[i].in));
+            ASSERT_STR_EQ(out, cases[i].out);
+            ASSERT_EQ(n, strlen(cases[i].out));
+        }
+        memset(out, 'x', sizeof(out));
+        ASSERT_EQ(wk_plain(out, 0, "abc", 3), 0);
+        ASSERT_EQ(out[0], 'x');
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int wt_summary_plain(void)
+{
+    int failures = 0;
+    TEST("wiki tree: summaries drop link syntax; discover.read stays raw") {
+        struct zcl_command_reply r;
+        ASSERT(wt_wiki("", 0, &r));
+        ASSERT_STR_EQ(json_get_str(json_get(wt_child(&r.data, "links.md"),
+                                            "summary")),
+                      "See AGENTS.md for rules and code.");
+        zcl_command_reply_free(&r);
+        ASSERT(wt_read("links.md", 0, 4096, &r));
+        ASSERT(strstr(json_get_str(json_get(&r.data, "text")),
+                      "[AGENTS.md](../../AGENTS.md)") != NULL);
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#define WT_EXE "build/bin/z23-dev"
+#define WT_EXE_DEADLINE_MS 60000
+
+static bool wt_mkpath(const char *base, const char *rel)
+{
+    char path[PATH_MAX + 128];
+    size_t n = (size_t)snprintf(path, sizeof(path), "%s/%s", base, rel);
+    for (size_t i = strlen(base) + 1; i <= n && n < sizeof(path); i++) {
+        if (path[i] != '/' && path[i] != '\0')
+            continue;
+        char saved = path[i];
+        path[i] = '\0';
+        if (mkdir(path, 0700) != 0 && errno != EEXIST)
+            return false;
+        path[i] = saved;
+    }
+    return true;
+}
+
+static bool wt_copy_exe(const char *dst)
+{
+    FILE *in = fopen(WT_EXE, "rb"), *out = fopen(dst, "wb");
+    char buf[65536];
+    size_t got;
+    bool ok = in && out;
+    while (ok && (got = fread(buf, 1, sizeof(buf), in)) > 0)
+        ok = fwrite(buf, 1, got, out) == got;
+    if (in)
+        fclose(in);
+    ok = (out ? fclose(out) == 0 : false) && ok;
+    return ok && chmod(dst, 0700) == 0;
+}
+
+/* Installs a copy of the CLI at <prefix>/bin and docs at <prefix>/<docs_rel>
+ * (when non-NULL), as an installed layout without a checkout. */
+static bool wt_install(const char *prefix, const char *docs_rel, char *exe,
+                       size_t cap)
+{
+    char dir[PATH_MAX + 128];
+    snprintf(dir, sizeof(dir), "%s/bin", prefix);
+    snprintf(exe, cap, "%s/z23-dev", dir);
+    if (!wt_mkpath(prefix, "bin") || !wt_copy_exe(exe))
+        return false;
+    if (!docs_rel)
+        return true;
+    snprintf(dir, sizeof(dir), "%s/%s", prefix, docs_rel);
+    return wt_mkpath(prefix, docs_rel) &&
+           wt_write(dir, "README.md", "# Installed docs\n\nFound by path.\n");
+}
+
+static void wt_install_drop(const char *prefix, const char *docs_rel)
+{
+    char path[PATH_MAX + 192];
+    snprintf(path, sizeof(path), "%s/bin/z23-dev", prefix);
+    TEST_DISCARD(unlink(path));
+    snprintf(path, sizeof(path), "%s/bin", prefix);
+    TEST_DISCARD(rmdir(path));
+    if (docs_rel) {
+        snprintf(path, sizeof(path), "%s/%s/README.md", prefix, docs_rel);
+        TEST_DISCARD(unlink(path));
+        for (char *p = path + strlen(path); p > path + strlen(prefix); p--) {
+            if (*p != '/')
+                continue;
+            *p = '\0';
+            TEST_DISCARD(rmdir(path));
+        }
+    }
+    TEST_DISCARD(rmdir(prefix));
+}
+
+/* Runs the CLI copy from a scratch cwd with no source root configured. */
+static bool wt_cli_title(const char *exe, const char *cwd, const char *docsdir,
+                         char *title, size_t cap)
+{
+    char flag[PATH_MAX + 32], out[16384];
+    const char *argv[] = { exe, "wiki", docsdir ? flag : NULL, NULL };
+    struct json_value reply;
+    bool timed_out = false;
+    if (docsdir)
+        snprintf(flag, sizeof(flag), "--docsdir=%s", docsdir);
+    TEST_DISCARD(unsetenv("ZCL_DEV_SOURCE_ROOT"));
+    int rc = zcl_spawn_capture_in_dir_observed(argv, cwd, out, sizeof(out),
+                                               WT_EXE_DEADLINE_MS, &timed_out);
+    json_init(&reply);
+    bool ok = rc == 0 && !timed_out && json_read(&reply, out, strlen(out));
+    const char *t = ok ? json_get_str(json_get(json_get(&reply, "data"),
+                                               "title")) : NULL;
+    snprintf(title, cap, "%s", t ? t : "");
+    json_free(&reply);
+    return t != NULL;
+}
+
+static int wt_exe_docs(void)
+{
+    int failures = 0;
+    char base[PATH_MAX], beside[PATH_MAX + 32], shared[PATH_MAX + 32];
+    char exe_a[PATH_MAX + 128], exe_b[PATH_MAX + 128], title[WK_TEXT_MAX + 1];
+    char fixture[PATH_MAX + 64], cwd[PATH_MAX];
+    bool made = false;
+    TEST("wiki tree: an installed binary finds docs beside it or under share/z23; docsdir wins") {
+        ASSERT(test_mkdtemp(base, sizeof(base), "wiki_exe") != NULL);
+        made = true;
+        snprintf(beside, sizeof(beside), "%s/a", base);
+        snprintf(shared, sizeof(shared), "%s/p/q/r", base);
+        ASSERT(wt_mkpath(base, "a") && wt_mkpath(base, "p/q/r"));
+        ASSERT(wt_install(beside, "docs", exe_a, sizeof(exe_a)));
+        ASSERT(wt_install(shared, "share/z23/docs", exe_b, sizeof(exe_b)));
+        ASSERT(wt_cli_title(exe_a, base, NULL, title, sizeof(title)));
+        ASSERT_STR_EQ(title, "Installed docs");
+        ASSERT(wt_cli_title(exe_b, base, NULL, title, sizeof(title)));
+        ASSERT_STR_EQ(title, "Installed docs");
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        snprintf(fixture, sizeof(fixture), "%s/" WT_DOCS, cwd);
+        ASSERT(wt_cli_title(exe_a, base, fixture, title, sizeof(title)));
+        ASSERT_STR_EQ(title, "Fixture root");
+        PASS();
+    } _test_next:;
+    if (made) {
+        wt_install_drop(beside, "docs");
+        wt_install_drop(shared, "share/z23/docs");
+        snprintf(beside, sizeof(beside), "%s/p/q", base);
+        TEST_DISCARD(rmdir(beside));
+        snprintf(beside, sizeof(beside), "%s/p", base);
+        TEST_DISCARD(rmdir(beside));
+        TEST_DISCARD(rmdir(base));
+    }
+    return failures;
+}
+
 int test_wiki_tree(void)
 {
     int failures = 0;
@@ -486,11 +748,15 @@ int test_wiki_tree(void)
     failures += wt_root_node();
     failures += wt_nested();
     failures += wt_paging();
+    failures += wt_paging_next();
+    failures += wt_plain();
+    failures += wt_summary_plain();
     failures += wt_summary_cut();
     failures += wt_tree_refusals();
     failures += wt_read_pages();
     failures += wt_read_offsets();
     failures += wt_read_refusals();
     failures += wt_registry();
+    failures += wt_exe_docs();
     return failures;
 }

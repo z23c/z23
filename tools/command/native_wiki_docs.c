@@ -8,6 +8,7 @@
 
 #include "command/native_wiki_priv.h"
 
+#include "platform/os_proc.h"
 #include "util/safe_alloc.h"
 #include "util/path_util.h"
 
@@ -24,23 +25,70 @@ bool wk_is_file(const char *real)
     return stat(real, &st) == 0 && S_ISREG(st.st_mode);
 }
 
+/* A docs root counts only when it is a directory holding README.md. */
+static bool wk_docs_try(const char *cand, struct wk_docs *docs)
+{
+    char readme[WK_PATH_MAX];
+    if (!realpath(cand, docs->root) || !zcl_path_is_dir(docs->root))
+        return false;
+    return zcl_path_join(readme, sizeof(readme), docs->root, "README.md") &&
+           wk_is_file(readme);
+}
+
+static bool wk_docs_try_in(struct wk_docs *docs, const char *base,
+                           const char *sub)
+{
+    char cand[WK_PATH_MAX];
+    return zcl_path_join(cand, sizeof(cand), base, sub) && wk_docs_try(cand, docs);
+}
+
+/* Drops the last path component; false at the root or without a separator. */
+static bool wk_dirname(char *path)
+{
+    size_t n = strlen(path);
+    while (n > 1 && path[n - 1] != '/')
+        n--;
+    if (n <= 1)
+        return false;
+    path[n - 1] = '\0';
+    return true;
+}
+
+/* An installed binary: docs/ beside the executable or up to three parents
+ * above it (a checkout's build/bin), else <prefix>/share/z23/docs. */
+static bool wk_docs_from_exe(struct wk_docs *docs)
+{
+    char dir[WK_PATH_MAX], up[WK_PATH_MAX];
+    if (!os_proc_exe_path(dir, sizeof(dir)) || !wk_dirname(dir))
+        return false;
+    memcpy(up, dir, strlen(dir) + 1);
+    for (int level = 0; level <= 3; level++) {
+        if (wk_docs_try_in(docs, up, "docs"))
+            return true;
+        if (!wk_dirname(up))
+            break;
+    }
+    return wk_dirname(dir) && wk_docs_try_in(docs, dir, "share/z23/docs");
+}
+
 bool wk_docs_open(const struct zcl_command_request *request,
                   struct wk_docs *docs, struct zcl_command_reply *reply)
 {
     const char *over = json_get_str(json_get(request->input, "docsdir"));
-    char cand[WK_PATH_MAX];
-    int n = over && over[0]
-                ? snprintf(cand, sizeof(cand), "%s", over)
-                : snprintf(cand, sizeof(cand), "%s/docs",
-                           zcl_native_source_root(request));
-    if (n > 0 && (size_t)n < sizeof(cand) && realpath(cand, docs->root) &&
-        zcl_path_is_dir(docs->root))
+    bool found = over && over[0]
+                     ? wk_docs_try(over, docs)
+                     : wk_docs_try_in(docs, zcl_native_source_root(request), "docs") ||
+                           wk_docs_from_exe(docs);
+    if (found)
         return true;
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                            ZCL_COMMAND_EXIT_BLOCKED, "DOCS_UNAVAILABLE",
                            "resolve", false, false,
-                           "no docs directory found for this checkout; pass "
-                           "the docsdir input", "docsdir");
+                           "no docs directory found; looked at the docsdir "
+                           "input, the checkout docs directory, the "
+                           "executable's directory and its parents, and the "
+                           "share/z23/docs directory of the install prefix",
+                           "docsdir");
     return false;
 }
 
@@ -231,8 +279,96 @@ size_t wk_clean(char *dst, size_t max, const char *src, size_t len,
     return o;
 }
 
+/* Plain-text rendering of Markdown inline syntax for summaries: links keep
+ * their text, emphasis and code marks disappear. Output is a fixed buffer. */
+
+enum { WK_PLAIN_DEPTH = 4 };
+
+struct wk_pw {
+    char *d;
+    size_t max, o;
+    bool full;
+};
+
+/* One byte past the delimiter closing the `open` at s[0], or 0. */
+static size_t wk_match(const char *s, size_t n, char open, char close)
+{
+    size_t depth = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == open)
+            depth++;
+        else if (s[i] == close && --depth == 0)
+            return i + 1;
+    }
+    return 0;
+}
+
+/* Bytes of a `[text](target)` link at s[0] (0 when none) and its text. */
+static size_t wk_link(const char *s, size_t n, const char **text, size_t *tlen)
+{
+    size_t t = wk_match(s, n, '[', ']');
+    if (t == 0 || t >= n || s[t] != '(')
+        return 0;
+    size_t u = wk_match(s + t, n - t, '(', ')');
+    if (u == 0)
+        return 0;
+    *text = s + 1;
+    *tlen = t - 2;
+    return t + u;
+}
+
+/* Bytes of an emphasis or code mark at s[0]: `**`, `__` or a backtick. */
+static size_t wk_mark(const char *s, size_t n)
+{
+    if (s[0] == '`')
+        return 1;
+    return n >= 2 && s[1] == s[0] && (s[0] == '*' || s[0] == '_') ? 2 : 0;
+}
+
+/* Emits one character, whole; marks the writer full when it does not fit. */
+static size_t wk_put(struct wk_pw *w, const char *s, size_t n)
+{
+    char unit[4];
+    size_t k = wk_unit(s, n, false, unit);
+    if (w->o + k > w->max) {
+        w->full = true;
+        return n;
+    }
+    memcpy(w->d + w->o, unit, k);
+    w->o += k;
+    return k;
+}
+
+static void wk_pw_run(struct wk_pw *w, const char *s, size_t n, int depth)
+{
+    size_t i = 0;
+    while (i < n && !w->full) {
+        const char *text = NULL;
+        size_t tlen = 0, used = wk_mark(s + i, n - i);
+        if (used == 0 && s[i] == '[' && depth < WK_PLAIN_DEPTH &&
+            (used = wk_link(s + i, n - i, &text, &tlen)) != 0)
+            wk_pw_run(w, text, tlen, depth + 1);
+        else if (used == 0)
+            used = wk_put(w, s + i, n - i);
+        i += used;
+    }
+}
+
+size_t wk_plain(char *dst, size_t cap, const char *src, size_t len)
+{
+    struct wk_pw w = { .d = dst, .max = cap ? cap - 1 : 0 };
+    if (cap == 0)
+        return 0;
+    wk_pw_run(&w, src, len, 0);
+    dst[w.o] = '\0';
+    return w.o;
+}
+
+enum { WK_RAW_MAX = 640 }; /* summary bytes gathered before rendering */
+
 struct wk_scan {
     struct wk_meta *m;
+    char raw[WK_RAW_MAX + 1];
     size_t slen;
     bool comment, fence, title, para_done;
 };
@@ -299,8 +435,8 @@ static void wk_heading(struct wk_scan *sc, const char *s, size_t n)
 
 static void wk_append(struct wk_scan *sc, const char *s, size_t n)
 {
-    char *d = sc->m->summary;
-    size_t room = WK_TEXT_MAX - sc->slen;
+    char *d = sc->raw;
+    size_t room = WK_RAW_MAX - sc->slen;
     if (sc->slen > 0 && room > 0) {
         d[sc->slen++] = ' ';
         room--;
@@ -340,9 +476,13 @@ void wk_meta_scan(const char *buf, size_t len, struct wk_meta *meta)
         wk_line(&sc, buf + pos, end - pos);
         pos = end + 1;
     }
-    while (sc.slen > 0 && meta->summary[sc.slen - 1] == ' ')
+    while (sc.slen > 0 && sc.raw[sc.slen - 1] == ' ')
         sc.slen--;
-    meta->summary[sc.slen] = '\0';
+    size_t out = wk_plain(meta->summary, sizeof(meta->summary), sc.raw,
+                          sc.slen);
+    while (out > 0 && meta->summary[out - 1] == ' ')
+        out--;
+    meta->summary[out] = '\0';
 }
 
 static bool wk_name_ok(const char *name)

@@ -46,8 +46,10 @@ struct wk_children {
     size_t n;
 };
 
-/* Resolve the docs root (docsdir input, else <checkout>/docs); on failure the
- * reply carries DOCS_UNAVAILABLE. */
+/* Resolve the docs root: the docsdir input alone when given; else
+ * <source root>/docs, the executable's directory or up to three parents
+ * holding docs/, then <prefix>/share/z23/docs. A root counts only with a
+ * README.md. On failure the reply carries DOCS_UNAVAILABLE. */
 bool wk_docs_open(const struct zcl_command_request *request,
                   struct wk_docs *docs, struct zcl_command_reply *reply);
 
@@ -73,6 +75,11 @@ void wk_nearest_topic(const struct wk_docs *docs, const char *rel, char *out,
 
 /* Read at most cap-1 bytes from the start of `real` (NUL-terminated). */
 bool wk_head(const char *real, char *buf, size_t cap, size_t *len);
+
+/* Render Markdown inline syntax as plain text: `[text](target)` becomes
+ * `text`; `**`, `__` and backticks are dropped. Writes at most cap-1 bytes
+ * of whole UTF-8 sequences and a NUL; returns the bytes written. */
+size_t wk_plain(char *dst, size_t cap, const char *src, size_t len);
 
 /* First `# ` heading and first prose paragraph of a Markdown head. */
 void wk_meta_scan(const char *buf, size_t len, struct wk_meta *meta);

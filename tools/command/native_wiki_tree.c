@@ -278,6 +278,31 @@ static bool wk_push_head(struct zcl_command_reply *reply,
     return ok;
 }
 
+/* The exact request for the next window of children: the envelope `next`
+ * entry a client can replay unchanged. Skipped when the topic path is too
+ * long for the envelope; the `data.next` hint still names the page. */
+static void wk_add_page_next(struct zcl_command_reply *reply,
+                             const struct wk_node *node, size_t end)
+{
+    char in[512];
+    size_t o = 0;
+    int n = 0;
+    if (node->rel[0]) {
+        o = (size_t)snprintf(in, sizeof(in), "{\"topic\":\"");
+        for (const char *p = node->rel; *p && o + 4 < sizeof(in); p++) {
+            if (*p == '"')
+                in[o++] = '\\';
+            in[o++] = *p;
+        }
+        n = snprintf(in + o, sizeof(in) - o, "\",\"after\":%zu}", end);
+    } else {
+        n = snprintf(in, sizeof(in), "{\"after\":%zu}", end);
+    }
+    if (n > 0 && o + (size_t)n < sizeof(in))
+        (void)zcl_command_reply_add_next(reply, "discover.wiki", in,
+                                         "list the next children");
+}
+
 static bool wk_build(struct zcl_command_reply *reply, const struct wk_node *node,
                      const struct wk_children *kids)
 {
@@ -303,6 +328,8 @@ static bool wk_build(struct zcl_command_reply *reply, const struct wk_node *node
     ok = ok && wk_push_arr(reply, "children", &ch);
     ok = ok && wk_push_arr(reply, "commands", &cmds);
     ok = ok && wk_push_arr(reply, "next", &next);
+    if (ok && end < kids->n)
+        wk_add_page_next(reply, node, end);
     json_free(&ch); json_free(&cmds); json_free(&next);
     return ok;
 }

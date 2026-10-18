@@ -83,8 +83,18 @@ and no key may repeat. Any other body is a plain-text page.
 
 Everything under `docs/` is one tree: a directory is a topic, its
 `README.md` is the topic's index, and `docs/README.md` is the root. The tree
-needs no running node; it reads the checkout's `docs/` directory (pass
-`--docsdir=<dir>` elsewhere).
+needs no running node. The docs directory is the first of these that holds a
+`README.md`:
+
+1. the `--docsdir=<dir>` input, used alone when given;
+2. `docs/` under the source root (`ZCL_DEV_SOURCE_ROOT`, else the current
+   directory);
+3. `docs/` in the directory of the running executable or up to three parents
+   above it, so a binary run from a checkout's `build/bin` finds the checkout;
+4. `share/z23/docs` under the executable's install prefix (the parent of its
+   `bin/` directory).
+
+If none qualifies the reply is `DOCS_UNAVAILABLE`.
 
 ```sh
 z23 wiki                                  # root: title, summary, children, next commands
@@ -92,8 +102,15 @@ z23 wiki agent                            # one topic: its pages and sub-topics
 z23 discover read agent/START_HERE.md     # one page, 4096 bytes at a time
 ```
 
-`z23 wiki` lists at most 64 children per reply; resume with `--after=<n>`.
-A topic README may carry one `Commands: ` line of backticked command paths;
+Summaries come from the first paragraph of a README or page, rendered as
+plain text: `[text](target)` shows as `text` and `**`, `__` and backticks are
+dropped. `z23 discover read` returns the raw bytes.
+
+`z23 wiki` lists at most 64 children per reply. A truncated reply carries
+`next_after` and an envelope `next` entry that replays the request for the
+following children, for example `discover.wiki` with input
+`{"topic":"agent","after":64}`; the CLI form is `--after=<n>`. A topic README
+may carry one `Commands: ` line of backticked command paths;
 the reply lists those that resolve in the command registry. Lesson search
 over the signed wiki below is `z23 fleet wiki find`, not `z23 wiki`.
 
