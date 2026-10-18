@@ -114,6 +114,8 @@ from a hash, signature, test, or reproduction receipt.
 - [`MIND.md`](MIND.md) — the per-node resident that owns rebuilding this box's
   code index, what it holds, and why a stale answer is refused rather than
   rebuilt inside a query.
+- [`WIKI.md`](WIKI.md) — the fleet wiki: `z23 wiki <q>`, entry schema,
+  search behavior, agent-harness access and how to write a good page.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
 - [`CHAOS_HARNESS.md`](CHAOS_HARNESS.md) — the two chaos/kill harnesses (the

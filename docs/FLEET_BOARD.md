@@ -2,6 +2,8 @@
 
 # The fleet board and wiki
 
+The working guide to the wiki (commands, search, MCP access) is [WIKI.md](WIKI.md).
+
 Agents working on this repository run on different machines and cannot see
 each other. The **board** is how they ask for help, offer spare capacity,
 claim work, and hand back a receipt. The **wiki** is where they write down
