@@ -8,6 +8,7 @@
 #include "base/safe_alloc.h"
 #include "platform/directory_compat.h"
 #include "sha3/sha3.h"
+#include "util/path_util.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -89,12 +90,6 @@ static bool fleet_hash_file(const char *path, char out[65])
     return true;
 }
 
-static bool fleet_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
-}
-
 static bool fleet_suffix(const char *text, const char *suffix)
 {
     size_t a = strlen(text), b = strlen(suffix);
@@ -155,7 +150,7 @@ static bool fleet_read_receipt(const char *dir, const char *name,
                                struct fleet_receipt *receipt)
 {
     char path[ZCL_FLEET_PATH_MAX];
-    if (!fleet_join(path, sizeof(path), dir, name)) return false;
+    if (!zcl_path_join(path, sizeof(path), dir, name)) return false;
     FILE *file = fopen(path, "rb");
     if (!file) return false;
     char *raw = zcl_malloc(FLEET_RECEIPT_MAX + 1u, "fleet_receipt");
@@ -403,7 +398,7 @@ static bool fleet_apply_lint_receipt(
     if (strcmp(receipt->worktree, worktree->path) != 0 ||
         strcmp(receipt->branch, worktree->branch) != 0)
         return false;
-    if (!fleet_join(log_path, sizeof(log_path), directory, receipt->output) ||
+    if (!zcl_path_join(log_path, sizeof(log_path), directory, receipt->output) ||
         !fleet_hash_file(log_path, log_sha) ||
         strcmp(log_sha, receipt->output_sha) != 0 ||
         !fleet_apply_log(log_path, receipt->head, *current, gates, gate_count,

@@ -1034,6 +1034,7 @@ ZCL_MODULE_CAPABILITY("platform/modules/util/src/file_io.c", CAP_FS_READ|CAP_FS_
 ZCL_MODULE_CAPABILITY("platform/modules/util/src/file_tree_ops.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/util/src/hw_bench.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/util/src/log_rotate.c", CAP_FS_WRITE, "copies and truncates an append-mode log in place to hold it under its bound; every file operation goes through the platform private-file seam")
+ZCL_MODULE_CAPABILITY("platform/modules/util/src/path_util.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/util/src/storage_pacing.c", CAP_CLOCK, "times its one-shot storage classification and its maintenance token off the monotonic clock")
 ZCL_MODULE_CAPABILITY("platform/modules/util/src/hw_profile.c", CAP_FS_READ|CAP_PRIVILEGE, "reads Darwin hardware and memory facts through the read-only sysctl form")
 ZCL_MODULE_CAPABILITY("platform/modules/util/src/mailbox.c", CAP_FS_WRITE, "")

@@ -60,6 +60,10 @@ bool wk_rel_normalize(const char *in, char *out, size_t cap);
 enum wk_status wk_resolve(const struct wk_docs *docs, const char *rel,
                           char *real, size_t cap);
 
+/* Fail the reply with a typed resolve error (status FAILED, exit INVALID). */
+void wk_fail(struct zcl_command_reply *reply, const char *code,
+             const char *message, const char *evidence);
+
 bool wk_is_file(const char *real);
 bool wk_is_topic(const struct wk_docs *docs, const char *real);
 

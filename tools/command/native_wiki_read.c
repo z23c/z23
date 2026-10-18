@@ -8,14 +8,6 @@
 #include <stdio.h>
 #include <string.h>
 
-static void wk_read_fail(struct zcl_command_reply *reply, const char *code,
-                         const char *message, const char *evidence)
-{
-    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                           ZCL_COMMAND_EXIT_INVALID, code, "resolve", false,
-                           false, message, evidence);
-}
-
 static bool wk_ends_md(const char *s)
 {
     size_t n = strlen(s);
@@ -29,18 +21,18 @@ static bool wk_page_target(const struct zcl_command_request *request,
     const char *page = json_get_str(json_get(request->input, "page"));
     if (!page || !wk_rel_normalize(page, rel, WK_REL_MAX + 1) || !rel[0] ||
         !wk_ends_md(rel)) {
-        wk_read_fail(reply, "BAD_PAGE", "page must be a relative .md path "
+        wk_fail(reply, "BAD_PAGE", "page must be a relative .md path "
                      "inside docs/ without . or .. segments", "page");
         return false;
     }
     enum wk_status st = wk_resolve(docs, rel, real, WK_PATH_MAX);
     if (st == WK_ESCAPES) {
-        wk_read_fail(reply, "OUTSIDE_DOCS", "page resolves outside docs/",
+        wk_fail(reply, "OUTSIDE_DOCS", "page resolves outside docs/",
                      "page");
         return false;
     }
     if (st != WK_OK || !wk_is_file(real)) {
-        wk_read_fail(reply, "UNKNOWN_PAGE", "no such page; list a topic with "
+        wk_fail(reply, "UNKNOWN_PAGE", "no such page; list a topic with "
                      "discover.wiki", rel);
         return false;
     }
@@ -69,7 +61,7 @@ static bool wk_render(struct zcl_command_reply *reply, const char *rel,
     if (!wk_read_at(real, offset, bytes, raw, &got, &size))
         return false;
     if (offset > size) {
-        wk_read_fail(reply, "BAD_RANGE", "offset is past the end of the page", rel);
+        wk_fail(reply, "BAD_RANGE", "offset is past the end of the page", rel);
         return true;
     }
     size_t skip = 0;
@@ -107,7 +99,7 @@ void zcl_native_handle_discover_read(const struct zcl_command_request *request,
         !wk_page_target(request, &docs, rel, real, reply))
         return;
     if (!wk_bounds(request, &offset, &bytes)) {
-        wk_read_fail(reply, "BAD_RANGE", "offset must be >= 0 and bytes "
+        wk_fail(reply, "BAD_RANGE", "offset must be >= 0 and bytes "
                      "1..16384", "offset,bytes");
         return;
     }

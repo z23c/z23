@@ -15,6 +15,7 @@
 #include "platform/private_file.h"
 
 #include "dev/test_group_catalog.h"
+#include "util/path_util.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -68,12 +69,6 @@ static int64_t dvm_int(const struct json_value *input, const char *key)
     return v && v->type == JSON_INT ? json_get_int(v) : -1;
 }
 
-static bool dvm_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
-}
-
 /* ── whole-file read/write ─────────────────────────────────────────────── */
 
 static char *dvm_read_file(const char *path, size_t *len_out)
@@ -124,7 +119,7 @@ static bool dvm_write_file(const char *path, const char *bytes, size_t len)
 static bool dvm_pending_present(const char *root, char *rel, size_t rel_cap)
 {
     char path[PATH_MAX];
-    if (!dvm_join(path, sizeof(path), root, DVM_PENDING_PATH))
+    if (!zcl_path_join(path, sizeof(path), root, DVM_PENDING_PATH))
         return false;
     size_t len = 0;
     char *bytes = dvm_read_file(path, &len);
@@ -173,10 +168,10 @@ static bool dvm_pending_arm(const char *root, const char *rel,
                             const char *bytes, size_t len)
 {
     char dir[PATH_MAX], path[PATH_MAX], blob[PATH_MAX], parent[PATH_MAX];
-    if (!dvm_join(dir, sizeof(dir), root, DVM_PENDING_DIR) ||
-        !dvm_join(parent, sizeof(parent), root, "build") ||
-        !dvm_join(path, sizeof(path), root, DVM_PENDING_PATH) ||
-        !dvm_join(blob, sizeof(blob), root, DVM_PENDING_BYTES))
+    if (!zcl_path_join(dir, sizeof(dir), root, DVM_PENDING_DIR) ||
+        !zcl_path_join(parent, sizeof(parent), root, "build") ||
+        !zcl_path_join(path, sizeof(path), root, DVM_PENDING_PATH) ||
+        !zcl_path_join(blob, sizeof(blob), root, DVM_PENDING_BYTES))
         return false;
     /* build/ already exists in any checkout that produced this binary; the
      * subdirectory is the only thing that may be missing. */
@@ -198,9 +193,9 @@ static bool dvm_pending_restore(const char *root, char *rel, size_t rel_cap,
     if (!dvm_pending_present(root, rel, rel_cap))
         return false;
     char blob[PATH_MAX], target[PATH_MAX], marker[PATH_MAX];
-    if (!dvm_join(blob, sizeof(blob), root, DVM_PENDING_BYTES) ||
-        !dvm_join(target, sizeof(target), root, rel) ||
-        !dvm_join(marker, sizeof(marker), root, DVM_PENDING_PATH))
+    if (!zcl_path_join(blob, sizeof(blob), root, DVM_PENDING_BYTES) ||
+        !zcl_path_join(target, sizeof(target), root, rel) ||
+        !zcl_path_join(marker, sizeof(marker), root, DVM_PENDING_PATH))
         return false;
     size_t len = 0;
     char *bytes = dvm_read_file(blob, &len);
@@ -432,7 +427,7 @@ void zcl_native_handle_dev_agent_mutate(
                    exact ? "exact" : "only", exact ? full : group);
 
     char abs[PATH_MAX];
-    if (!dvm_join(abs, sizeof(abs), root, rel)) {
+    if (!zcl_path_join(abs, sizeof(abs), root, rel)) {
         dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                    "INVALID_FILE", "validate", "path too long for this host",
                    rel, "shorten the path or run from the checkout root");
@@ -623,9 +618,9 @@ void zcl_native_handle_dev_agent_mutate(
     bool restored = dvm_write_file(abs, original, len);
     free(original);
     char marker[PATH_MAX], blob[PATH_MAX];
-    if (restored && dvm_join(marker, sizeof(marker), root, DVM_PENDING_PATH))
+    if (restored && zcl_path_join(marker, sizeof(marker), root, DVM_PENDING_PATH))
         (void)unlink(marker);
-    if (restored && dvm_join(blob, sizeof(blob), root, DVM_PENDING_BYTES))
+    if (restored && zcl_path_join(blob, sizeof(blob), root, DVM_PENDING_BYTES))
         (void)unlink(blob);
     int rebuild_rc = restored
         ? zcl_devagent_run_make(root, "test_parallel", DVM_BUILD_TIMEOUT_MS)

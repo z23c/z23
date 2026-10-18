@@ -931,7 +931,7 @@ static bool pk_open(const struct zcl_command_request *request,
                     struct zcl_command_reply *reply, struct pk_run *run)
 {
     bool stale = true;
-    run->ctx.root = code_source_root(request);
+    run->ctx.root = zcl_native_source_root(request);
     run->ctx.ci = codeindex_open_readonly(run->ctx.root, &stale);
     if (!run->ctx.ci) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,

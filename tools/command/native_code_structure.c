@@ -757,7 +757,7 @@ void zcl_native_handle_code_body(const struct zcl_command_request *request,
 
     struct ci_symbol s;
     if (code_body_resolve(ci, name, &s, reply))
-        code_body_reply(code_source_root(request), &s, reply);
+        code_body_reply(zcl_native_source_root(request), &s, reply);
     codeindex_close(ci);
 }
 
@@ -1178,7 +1178,7 @@ void zcl_native_handle_code_merkle(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
     const char *path = code_str(request, "path");
-    const char *root = code_source_root(request);
+    const char *root = zcl_native_source_root(request);
 
     struct ci_merkle_cost cost;
     memset(&cost, 0, sizeof(cost));
@@ -1551,7 +1551,7 @@ void zcl_native_handle_code_territory(const struct zcl_command_request *request,
         return;
     }
 
-    const char *root = code_source_root(request);
+    const char *root = zcl_native_source_root(request);
     struct territory_proof_source src = {
         .at = code_territory_entry_at,
         .count = zcl_test_group_catalog_count(),
@@ -1771,7 +1771,7 @@ void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
     bool record = false;
     if (!code_kpi_inputs(request, reply, &show, &record)) return;
 
-    const char *root = code_source_root(request);
+    const char *root = zcl_native_source_root(request);
     struct codeindex *ci = code_open(request, reply);
     if (!ci) return;
 

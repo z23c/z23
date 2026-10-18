@@ -261,6 +261,7 @@
 #include "services/muse_run_audit.h"
 #include "util/log_macros.h"
 #include "zutf8/zutf8.h"
+#include "util/path_util.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -782,12 +783,6 @@ static bool rcv_copy(char *out, size_t cap, const char *s)
     return n > 0 && (size_t)n < cap;
 }
 
-static bool rcv_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
-}
-
 /* The first line of a small text file, trailing blanks and CR/LF trimmed.
  * False when the file is absent, unreadable, or empty. */
 static bool rcv_first_line(const char *path, char *out, size_t cap)
@@ -841,7 +836,7 @@ static bool rcv_git_dir(const char *ws, char *out, size_t cap)
 {
     char dot[RCV_PATH_MAX + 8];
     char line[RCV_PATH_MAX + 16];
-    if (!rcv_join(dot, sizeof(dot), ws, ".git"))
+    if (!zcl_path_join(dot, sizeof(dot), ws, ".git"))
         return false;
     if (rcv_is_dir(dot))
         return rcv_copy(out, cap, dot);
@@ -850,7 +845,7 @@ static bool rcv_git_dir(const char *ws, char *out, size_t cap)
         return false;
     if (line[8] == '/')
         return rcv_copy(out, cap, line + 8);
-    return rcv_join(out, cap, ws, line + 8);
+    return zcl_path_join(out, cap, ws, line + 8);
 }
 
 /* A linked worktree keeps its own HEAD in its admin directory and shares the
@@ -860,12 +855,12 @@ static bool rcv_common_dir(const char *gitdir, char *out, size_t cap)
 {
     char path[RCV_PATH_MAX + 32];
     char line[RCV_PATH_MAX + 16];
-    if (!rcv_join(path, sizeof(path), gitdir, "commondir") ||
+    if (!zcl_path_join(path, sizeof(path), gitdir, "commondir") ||
         !rcv_first_line(path, line, sizeof(line)))
         return rcv_copy(out, cap, gitdir);
     if (line[0] == '/')
         return rcv_copy(out, cap, line);
-    return rcv_join(out, cap, gitdir, line);
+    return zcl_path_join(out, cap, gitdir, line);
 }
 
 /* "<40 hex> <refname>" rows. A peeled "^<hex>" row names a tag's target,
@@ -877,7 +872,7 @@ static bool rcv_packed_head(const char *common, const char *ref, char *out,
     char line[1024];
     FILE *f;
     bool found = false;
-    if (!rcv_join(path, sizeof(path), common, "packed-refs"))
+    if (!zcl_path_join(path, sizeof(path), common, "packed-refs"))
         return false;
     f = fopen(path, "rb");
     if (!f)
@@ -904,10 +899,10 @@ static bool rcv_ref_head(const char *gitdir, const char *common,
 {
     char path[RCV_PATH_MAX + 256];
     char line[256];
-    if (rcv_join(path, sizeof(path), gitdir, ref) &&
+    if (zcl_path_join(path, sizeof(path), gitdir, ref) &&
         rcv_first_line(path, line, sizeof(line)) && rcv_hex40(line))
         return rcv_copy(out, cap, line);
-    if (rcv_join(path, sizeof(path), common, ref) &&
+    if (zcl_path_join(path, sizeof(path), common, ref) &&
         rcv_first_line(path, line, sizeof(line)) && rcv_hex40(line))
         return rcv_copy(out, cap, line);
     return rcv_packed_head(common, ref, out, cap);
@@ -920,7 +915,7 @@ static bool rcv_head_of(const char *gitdir, char *out, size_t cap)
     char path[RCV_PATH_MAX + 32];
     char common[RCV_PATH_MAX + 32];
     char line[1024];
-    if (!rcv_join(path, sizeof(path), gitdir, "HEAD") ||
+    if (!zcl_path_join(path, sizeof(path), gitdir, "HEAD") ||
         !rcv_first_line(path, line, sizeof(line)))
         return false;
     if (rcv_hex40(line))
@@ -1008,7 +1003,7 @@ static bool rcv_entry_clean(const char *ws, const struct rcv_idx_row *row)
         return false; /* an unmerged path is never a clean pre-state */
     if (kind == 0160000u)
         return true; /* a gitlink has no worktree file of its own here */
-    if (!rcv_join(path, sizeof(path), ws, row->name))
+    if (!zcl_path_join(path, sizeof(path), ws, row->name))
         return false;
 #if defined(_WIN32)
     struct platform_file_metadata metadata;
@@ -1124,7 +1119,7 @@ static void rcv_idx_scan(const char *gitdir, const char *ws,
     unsigned char *buf;
     size_t n = 0;
     uint32_t ver;
-    if (!rcv_join(path, sizeof(path), gitdir, "index"))
+    if (!zcl_path_join(path, sizeof(path), gitdir, "index"))
         return;
     buf = rcv_idx_load(path, &n);
     if (!buf)

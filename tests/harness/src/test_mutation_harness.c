@@ -64,16 +64,16 @@ static int tmh_pending_case(unsigned fail)
     char root[512] = {0}, build[600], dir[700], blob[800], marker[800], source[800];
     const char *original = "int example(void){return 1;}\n";
     ASSERT(test_mkdtemp(root, sizeof(root), "pending-arm") != NULL);
-    ASSERT(dvm_join(build, sizeof(build), root, "build"));
+    ASSERT(zcl_path_join(build, sizeof(build), root, "build"));
     ASSERT(platform_directory_ensure(build, 0700));
-    ASSERT(dvm_join(dir, sizeof(dir), root, "tools"));
+    ASSERT(zcl_path_join(dir, sizeof(dir), root, "tools"));
     ASSERT(platform_directory_ensure(dir, 0700));
-    ASSERT(dvm_join(source, sizeof(source), root, "tools/example.c"));
+    ASSERT(zcl_path_join(source, sizeof(source), root, "tools/example.c"));
     ASSERT(dvm_write_file(source, original, strlen(original)));
-    ASSERT(dvm_join(dir, sizeof(dir), root, DVM_PENDING_DIR));
+    ASSERT(zcl_path_join(dir, sizeof(dir), root, DVM_PENDING_DIR));
     ASSERT(platform_directory_ensure(dir, 0700));
-    ASSERT(dvm_join(blob, sizeof(blob), root, DVM_PENDING_BYTES));
-    ASSERT(dvm_join(marker, sizeof(marker), root, DVM_PENDING_PATH));
+    ASSERT(zcl_path_join(blob, sizeof(blob), root, DVM_PENDING_BYTES));
+    ASSERT(zcl_path_join(marker, sizeof(marker), root, DVM_PENDING_PATH));
     ASSERT(dvm_write_file(blob, original, strlen(original)));
     tmh_sync_count = 0; tmh_sync_fail = fail;
     bool armed = dvm_pending_arm(root, "tools/example.c", original, strlen(original));
@@ -88,10 +88,10 @@ _test_next:;
     tmh_sync_fail = 0;
     /* The helper removes files, then each owned directory from the leaf up. */
     if (root[0]) {
-        (void)dvm_join(dir, sizeof(dir), root, "tools"); test_cleanup_tmpdir(dir);
-        (void)dvm_join(dir, sizeof(dir), root, DVM_PENDING_DIR);
+        (void)zcl_path_join(dir, sizeof(dir), root, "tools"); test_cleanup_tmpdir(dir);
+        (void)zcl_path_join(dir, sizeof(dir), root, DVM_PENDING_DIR);
         test_cleanup_tmpdir(dir);
-        (void)dvm_join(build, sizeof(build), root, "build");
+        (void)zcl_path_join(build, sizeof(build), root, "build");
         test_cleanup_tmpdir(build); test_cleanup_tmpdir(root);
     }
     return failures;

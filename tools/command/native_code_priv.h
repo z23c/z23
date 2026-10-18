@@ -79,7 +79,6 @@ void code_trunc(char *dst, size_t cap, const char *src, size_t max);
 
 /* The checkout root the index scans: an explicit context source_root wins, then
  * ZCL_DEV_SOURCE_ROOT, else the current directory. */
-const char *code_source_root(const struct zcl_command_request *request);
 
 /* Open the index or fail the reply with a bounded internal error. */
 struct codeindex *code_open(const struct zcl_command_request *request,

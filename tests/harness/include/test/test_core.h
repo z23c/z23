@@ -428,6 +428,7 @@ int test_metaverse_broker_idempotency(void);
 int test_status_readiness_truth(void);
 int test_native_api_contract(void);
 int test_leaf_smoke(void);
+int test_path_util(void);
 bool native_contract_single_result(const char *wire);
 int test_metric_alerts(void);
 int test_db_validators(void);

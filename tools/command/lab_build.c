@@ -10,6 +10,7 @@
 #include "base/safe_alloc.h"
 #include "platform/os_proc.h"
 #include "util/file_tree_ops.h"
+#include "util/path_util.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -38,12 +39,6 @@ size_t lab_run_count(void)
 
 /* ── state directory ────────────────────────────────────────────────── */
 
-static bool lab_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
-}
-
 static bool lab_base_path(char *out, size_t cap)
 {
     const char *over = getenv("Z23_LAB_DIR");
@@ -62,10 +57,10 @@ enum lab_err lab_dirs_open(struct lab_dirs *d)
 {
     memset(d, 0, sizeof(*d));
     if (!lab_base_path(d->base, sizeof(d->base)) ||
-        !lab_join(d->cc, sizeof(d->cc), d->base, "cc") ||
-        !lab_join(d->run, sizeof(d->run), d->base, "run") ||
-        !lab_join(d->receipts, sizeof(d->receipts), d->base, "receipts") ||
-        !lab_join(d->zcc, sizeof(d->zcc), d->base, "zcc"))
+        !zcl_path_join(d->cc, sizeof(d->cc), d->base, "cc") ||
+        !zcl_path_join(d->run, sizeof(d->run), d->base, "run") ||
+        !zcl_path_join(d->receipts, sizeof(d->receipts), d->base, "receipts") ||
+        !zcl_path_join(d->zcc, sizeof(d->zcc), d->base, "zcc"))
         return LAB_E_UNSUPPORTED;
     const char *all[] = { d->base, d->cc, d->run, d->receipts, d->zcc };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
@@ -90,7 +85,7 @@ static bool lab_find_cc(char out[LAB_PATH])
     snprintf(list, sizeof(list), "%s", path && path[0] ? path : "/usr/bin:/bin");
     for (char *save = NULL, *dir = strtok_r(list, ":", &save); dir;
          dir = strtok_r(NULL, ":", &save)) {
-        if (dir[0] != '/' || !lab_join(cand, sizeof(cand), dir, "cc"))
+        if (dir[0] != '/' || !zcl_path_join(cand, sizeof(cand), dir, "cc"))
             continue;
         if (lab_is_exec_file(cand) && realpath(cand, out))
             return true;
@@ -108,7 +103,7 @@ static void lab_find_zcc(char out[LAB_PATH])
     char *slash = strrchr(exe, '/');
     for (int up = 0; slash && up < 3; up++) {
         *slash = '\0';
-        if (lab_join(cand, sizeof(cand), exe, "zcc") && lab_is_exec_file(cand)) {
+        if (zcl_path_join(cand, sizeof(cand), exe, "zcc") && lab_is_exec_file(cand)) {
             snprintf(out, LAB_PATH, "%s", cand);
             return;
         }
@@ -282,7 +277,7 @@ static void lab_set_tail(const char *text, size_t len, struct lab_compile *c)
 static bool lab_write_source(const char *dir, const struct lab_source *src)
 {
     char path[LAB_PATH];
-    if (!lab_join(path, sizeof(path), dir, src->base))
+    if (!zcl_path_join(path, sizeof(path), dir, src->base))
         return false;
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0)
@@ -378,7 +373,7 @@ static void lab_compile_finish(struct lab_proc *p, struct lab_compile *c,
     if (p->timed_out)
         snprintf(c->detail, sizeof(c->detail), "compile exceeded %d ms",
                  LAB_COMPILE_TIMEOUT_MS);
-    if (c->ok && !lab_join(c->binary, sizeof(c->binary), dir, binary_rel))
+    if (c->ok && !zcl_path_join(c->binary, sizeof(c->binary), dir, binary_rel))
         c->ok = false;
 }
 
@@ -431,7 +426,7 @@ void lab_compile_source(const struct lab_dirs *d, const struct lab_toolchain *tc
 {
     char dir[LAB_PATH];
     memset(out, 0, sizeof(*out));
-    if (!lab_join(dir, sizeof(dir), d->cc, name) ||
+    if (!zcl_path_join(dir, sizeof(dir), d->cc, name) ||
         !zcl_result_is_ok(zcl_mkdir_p(dir, 0700)) || !lab_write_source(dir, src)) {
         snprintf(out->detail, sizeof(out->detail), "compile directory failed");
         return;
@@ -446,7 +441,7 @@ void lab_compile_source(const struct lab_dirs *d, const struct lab_toolchain *tc
 void lab_compile_cleanup(const struct lab_dirs *d, const char *name)
 {
     char dir[LAB_PATH];
-    if (lab_join(dir, sizeof(dir), d->cc, name))
+    if (zcl_path_join(dir, sizeof(dir), d->cc, name))
         (void)zcl_tree_remove(dir);
 }
 
@@ -496,7 +491,7 @@ void lab_run_binary(const struct lab_dirs *d, const char *binary,
     char workdir[LAB_PATH], asan[96];
     const char *argv[LAB_ARGS_MAX + 2];
     struct os_sandbox_path_rule rules[12];
-    if (!lab_join(workdir, sizeof(workdir), d->run, "XXXXXX") ||
+    if (!zcl_path_join(workdir, sizeof(workdir), d->run, "XXXXXX") ||
         !mkdtemp(workdir)) {
         out->launch = LAB_LAUNCH_FAILED;
         snprintf(out->detail, sizeof(out->detail), "workdir could not be made");

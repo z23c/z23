@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 974 |
+| Registry entries (branches + leaves) | 976 |
 | Top-level roots | 17 |
 | Branches | 212 |
-| Leaves (dispatchable command paths) | 762 |
-| … `ready` (live handler in this build) | 669 |
+| Leaves (dispatchable command paths) | 764 |
+| … `ready` (live handler in this build) | 671 |
 | … `compat` (metadata only, names a fallback) | 63 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 62 |
@@ -90,7 +90,7 @@ Per source file:
 
 | `.def` file | Entries | Branches | Leaves |
 |---|---|---|---|
-| `engine/composition/commands/root.def` | 10 | 5 | 5 |
+| `engine/composition/commands/root.def` | 12 | 5 | 7 |
 | `engine/composition/commands/core.def` | 124 | 29 | 95 |
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
@@ -1142,6 +1142,8 @@ represented by its children's sections.
 | `discover search` (aliases: `search`, `dev.search`, `dev.diagnose.search`) | ready | read / read / public · instant/tiny | **`query`** | `zcl.command_search.v1` | `z23 discover search 'ABI mismatch'` | Rank at most five commands by local deterministic intent search |
 | `discover describe` | ready | read / read / public · instant/tiny | **`path`** | `zcl.command_spec.v1` | `z23 discover describe dev.app.simulate` | Describe one leaf's schemas, safety, authority, and availability |
 | `discover schema` | ready | read / read / public · instant/tiny | **`path`**, `side` | `zcl.command_schema.v1` | `z23 discover schema dev.app.simulate --side=input` | Return the compact input or output schema contract for one leaf |
+| `discover wiki` (aliases: `wiki`) | ready | read / read / public · fast/tiny | **`topic`**, `after`, `docsdir` | `zcl.wiki_node.v1` | `z23 wiki agent` | Walk the docs knowledge tree one topic at a time |
+| `discover read` | ready | read / read / public · fast/tiny | **`page`**, `offset`, `bytes`, `docsdir` | `zcl.wiki_page.v1` | `z23 discover read README.md --bytes=300` | Read one docs page in bounded UTF-8-safe chunks |
 
 ### `code` — Source-code navigator
 
@@ -1925,7 +1927,7 @@ represented by its children's sections.
 | `fleet wiki write` | ready | mutate / app-write / operator · fast/low | **`slug`**, **`title`**, **`text`**, `agent`, `supersedes`, `ttl`, `format` | `zcl.fleet_board_post_id.v1` | `z23 fleet wiki write push-gate "What the push gate checks" @notes.md` | Write or revise one wiki page |
 | `fleet wiki read` | ready | read / read / operator · fast/low | **`slug`**, `id`, `offset`, `bytes` | `zcl.fleet_wiki_read.v1` | `z23 fleet wiki read push-gate` | Read the latest revision of one page |
 | `fleet wiki list` | ready | read / read / operator · fast/low | none | `zcl.fleet_board_list.v1` | `z23 fleet wiki list` | Every page this node holds |
-| `fleet wiki find` (aliases: `wiki`) | ready | read / read / operator · foreground/low | **`q`**, `topic`, `applies_to`, `after_slug` | `zcl.fleet_wiki_find.v1` | `z23 fleet wiki find push-gate` | Find structured knowledge entries |
+| `fleet wiki find` | ready | read / read / operator · foreground/low | **`q`**, `topic`, `applies_to`, `after_slug` | `zcl.fleet_wiki_find.v1` | `z23 fleet wiki find push-gate` | Find structured knowledge entries |
 | `fleet wiki history` | ready | read / read / operator · fast/low | **`slug`**, `target`, `after_id` | `zcl.fleet_board_list.v1` | `z23 fleet wiki history push-gate` | Every revision of one page, newest first |
 
 #### `fleet.ledger` — Write and inspect the ledger
@@ -2017,6 +2019,7 @@ Every alias resolves through the same grammar as its canonical path
 | `search` | `discover.search` |
 | `dev.search` | `discover.search` |
 | `dev.diagnose.search` | `discover.search` |
+| `wiki` | `discover.wiki` |
 | `appprotocols` | `app.protocols` |
 | `explain` | `ops.debug.explain` |
 | `ops.explain` | `ops.debug.explain` |
@@ -2067,7 +2070,6 @@ Every alias resolves through the same grammar as its canonical path
 | `zcode.package.offered` | `zcode.package.offered` |
 | `join` | `zcode.node.join` |
 | `update` | `zcode.node.update.status` |
-| `wiki` | `fleet.wiki.find` |
 | `fleet.agents` | `dev.fleet.agents` |
 
 

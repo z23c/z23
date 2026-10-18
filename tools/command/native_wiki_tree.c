@@ -25,8 +25,8 @@ struct wk_node {
     int64_t after;
 };
 
-static void wk_fail(struct zcl_command_reply *reply, const char *code,
-                    const char *message, const char *evidence)
+void wk_fail(struct zcl_command_reply *reply, const char *code,
+             const char *message, const char *evidence)
 {
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_INVALID, code, "resolve", false,

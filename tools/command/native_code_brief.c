@@ -761,7 +761,7 @@ void zcl_code_brief_render(const struct zcl_command_request *request,
         cb_free(b);
         return;
     }
-    cb_collect_owners(b, code_source_root(request));
+    cb_collect_owners(b, zcl_native_source_root(request));
     cb_collect_tests(b);
     cb_collect_lessons(request, b);
     cb_build_next(b);

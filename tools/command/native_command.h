@@ -17,6 +17,10 @@ extern "C" {
 
 bool zcl_native_command_is_root(const char *word);
 
+/* The checkout a request runs against: the request context's source root,
+ * then ZCL_DEV_SOURCE_ROOT, then the current directory. */
+const char *zcl_native_source_root(const struct zcl_command_request *request);
+
 #ifdef ZCL_TESTING
 /* Drive the production event-option parser without a separate dev binary.
  * Invalid options print the same error envelope as the streaming CLI and

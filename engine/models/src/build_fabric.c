@@ -8,6 +8,7 @@
 #include "platform/time_compat.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
+#include "util/path_util.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -44,20 +45,9 @@ static bool build_outcome_valid(const char *outcome)
            strcmp(outcome, "ACCEPTED") == 0;
 }
 
-static bool build_lower_hex(const char *value, size_t length)
-{
-    if (!value || strlen(value) != length)
-        return false;
-    for (size_t i = 0; i < length; i++)
-        if (!((value[i] >= '0' && value[i] <= '9') ||
-              (value[i] >= 'a' && value[i] <= 'f')))
-            return false;
-    return true;
-}
-
 static bool build_hex_id(const char *value)
 {
-    return build_lower_hex(value, BUILD_FABRIC_ID_HEX);
+    return zcl_is_lower_hex(value, BUILD_FABRIC_ID_HEX);
 }
 
 static bool build_job_before_validate(void *record, void *ctx)
@@ -271,7 +261,7 @@ bool db_build_receipt_validate(const struct db_build_receipt *row,
                          build_hex_id(row->work_receipt_sha3),
                      "work_receipt_sha3", "must be empty or a hex digest");
     validates_custom(errors,
-                     build_lower_hex(row->signature,
+                     zcl_is_lower_hex(row->signature,
                                      BUILD_FABRIC_SIGNATURE_HEX),
                      "signature", "must be a 64-byte signature in hex");
     validates_string_present(errors, row->confinement, "confinement");

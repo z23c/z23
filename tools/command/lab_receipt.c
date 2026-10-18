@@ -11,6 +11,8 @@
 #include "base/serialize_le.h"
 #include "base/safe_alloc.h"
 #include "sha3/sha3.h"
+#include "util/write_all.h"
+#include "util/path_util.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -71,13 +73,7 @@ void lab_hasher_finish(struct lab_hasher *h, char hex[LAB_ROOT_HEX + 1])
 
 bool lab_root_valid(const char *root)
 {
-    if (!root || strlen(root) != LAB_ROOT_HEX)
-        return false;
-    for (size_t i = 0; i < LAB_ROOT_HEX; i++)
-        if (!((root[i] >= '0' && root[i] <= '9') ||
-              (root[i] >= 'a' && root[i] <= 'f')))
-            return false;
-    return true;
+    return zcl_is_lower_hex(root, LAB_ROOT_HEX);
 }
 
 static bool lab_receipt_path(const struct lab_dirs *d, const char *root,
@@ -85,20 +81,6 @@ static bool lab_receipt_path(const struct lab_dirs *d, const char *root,
 {
     int n = snprintf(out, cap, "%s/%s%s", d->receipts, root, suffix);
     return lab_root_valid(root) && n > 0 && (size_t)n < cap;
-}
-
-static bool lab_write_all(int fd, const char *buf, size_t len)
-{
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = write(fd, buf + off, len - off);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            return false;
-        off += (size_t)n;
-    }
-    return true;
 }
 
 bool lab_receipt_store(const struct lab_dirs *d, const char *root,
@@ -115,7 +97,7 @@ bool lab_receipt_store(const struct lab_dirs *d, const char *root,
     (void)json_write(receipt, buf, need + 1);
     snprintf(tmp, sizeof(tmp), "%s.%ld.tmp", path, (long)getpid());
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    bool ok = fd >= 0 && lab_write_all(fd, buf, need);
+    bool ok = fd >= 0 && zcl_write_all(fd, buf, need);
     if (fd >= 0)
         ok = close(fd) == 0 && ok;
     ok = ok && rename(tmp, path) == 0;

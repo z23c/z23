@@ -55,7 +55,7 @@ void code_trunc(char *dst, size_t cap, const char *src, size_t max)
 
 /* The checkout root the index scans: an explicit context source_root wins, then
  * ZCL_DEV_SOURCE_ROOT, else the current directory. */
-const char *code_source_root(const struct zcl_command_request *request)
+const char *zcl_native_source_root(const struct zcl_command_request *request)
 {
     if (request && request->context && request->context->source_root &&
         request->context->source_root[0])
@@ -68,13 +68,13 @@ const char *code_source_root(const struct zcl_command_request *request)
 struct codeindex *code_open(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
-    struct codeindex *ci = codeindex_open(code_source_root(request));
+    struct codeindex *ci = codeindex_open(zcl_native_source_root(request));
     if (!ci) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",
                                "dispatch", true, false,
                                "could not open or rebuild the code index",
-                               code_source_root(request));
+                               zcl_native_source_root(request));
     }
     return ci;
 }
@@ -86,13 +86,13 @@ struct codeindex *code_open_source_view(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct codeindex *ci =
-        codeindex_open_source_view(code_source_root(request));
+        codeindex_open_source_view(zcl_native_source_root(request));
     if (!ci) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",
                                "dispatch", true, false,
                                "could not open or rebuild the source index",
-                               code_source_root(request));
+                               zcl_native_source_root(request));
     }
     return ci;
 }
@@ -113,7 +113,7 @@ void zcl_native_handle_code_index_metrics(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    const char *root = code_source_root(request);
+    const char *root = zcl_native_source_root(request);
     struct codeindex *ci = codeindex_open_existing(root);
     if (!ci) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,

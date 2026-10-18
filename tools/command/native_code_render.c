@@ -1106,7 +1106,7 @@ void zcl_native_handle_general(const struct zcl_command_request *request,
     struct codeindex *ci = code_open(request, reply);
     if (!ci) return;
 
-    const char *root = code_source_root(request);
+    const char *root = zcl_native_source_root(request);
     struct territory_proof_source src = {
         .at = code_territory_entry_at,
         .count = zcl_test_group_catalog_count(),

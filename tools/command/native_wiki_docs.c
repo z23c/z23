@@ -9,6 +9,7 @@
 #include "command/native_wiki_priv.h"
 
 #include "util/safe_alloc.h"
+#include "util/path_util.h"
 
 #include <dirent.h>
 #include <limits.h>
@@ -16,21 +17,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-
-static const char *wk_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
-static bool wk_is_dir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
 
 bool wk_is_file(const char *real)
 {
@@ -46,9 +32,9 @@ bool wk_docs_open(const struct zcl_command_request *request,
     int n = over && over[0]
                 ? snprintf(cand, sizeof(cand), "%s", over)
                 : snprintf(cand, sizeof(cand), "%s/docs",
-                           wk_source_root(request));
+                           zcl_native_source_root(request));
     if (n > 0 && (size_t)n < sizeof(cand) && realpath(cand, docs->root) &&
-        wk_is_dir(docs->root))
+        zcl_path_is_dir(docs->root))
         return true;
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                            ZCL_COMMAND_EXIT_BLOCKED, "DOCS_UNAVAILABLE",
@@ -117,7 +103,7 @@ enum wk_status wk_resolve(const struct wk_docs *docs, const char *rel,
 bool wk_is_topic(const struct wk_docs *docs, const char *real)
 {
     char readme[WK_PATH_MAX];
-    if (!wk_is_dir(real))
+    if (!zcl_path_is_dir(real))
         return false;
     if (strcmp(real, docs->root) == 0)
         return true;
