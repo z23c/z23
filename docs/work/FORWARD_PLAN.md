@@ -277,6 +277,14 @@ refusal on either platform.
 5. Bound retention by age and bytes with visible coverage loss. Preserve
    accepted lifecycle evidence and explicit pins until locally released;
    exhausted pin budgets refuse additional admission.
+6. Prove one real two-machine file-market trade over Tor: offer, purchase,
+   authorized retrieval. Acceptance: `make commons-multihost-acceptance` ends
+   with byte-identical content on two hosts and each friction point is fixed.
+7. Complete the marketplace lane without a consensus change: cross-chain ZSLP
+   HTLC (redeem is an SLP SEND), adversarial simulator cases (cancel by
+   double spend, expiry and refund races, secret front-running, reorg during
+   settlement, oversized ads), then a simulation-first ZC23 implementation plan.
+   Acceptance: the simnet cases pass in their test group.
 
 ### 4. Make live operations transactional on both platforms
 
@@ -316,6 +324,21 @@ refusal on either platform.
    chunks, and edits transfer only missing content.
 4. Qualify maximum admitted background load while blockchain advancement and
    peer-health acceptance remain green.
+5. Publish `darwin-arm64` and `windows-x86_64` bootstraps from native cuts, each
+   with its real digest row. Acceptance: `build_release.sh
+   --print-bootstrap-platforms` lists both and `tools/lint/check_published_platforms.sh`
+   passes.
+6. Earn a chain-sync receipt on macOS and Windows with `make mvp`, `make
+   test-two-node-peer-tip` and `make mvp-coldstart-to-tip-stopwatch`.
+   Acceptance: one recorded receipt per platform; BLOCKED stays named and Wine
+   never substitutes.
+7. Remove Linux-only harness assumptions. Acceptance:
+   `z23-lint check-shell-host-assumptions` and the pipefail ratchet counts only
+   shrink, with `ss`, `nproc`, `stat -c` and `sed -i` sites moved to portable helpers.
+8. Enforce the ZIP-209 turnstile on the reducer path, owner-gated and
+   copy-proved on a datadir copy. Acceptance: a block driving a shielded pool
+   negative is refused, and `reducer-shielded-consensus-plan.md` section 8
+   gaps are closed.
 
 ## Acceptance and performance
 

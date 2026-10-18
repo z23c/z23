@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * test_cli_render — the terminal-lane human presentation layer
- * (tools/command/cli_render.c, docs/work/UX_PLAN.md (terminal lane)).
+ * (tools/command/cli_render.c, terminal-lane rules in cli_render.h).
  *
  * The lane's prime directive is: machines get canonical JSON, humans get
  * beauty. These tests prove both halves:

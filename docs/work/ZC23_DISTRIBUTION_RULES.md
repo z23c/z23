@@ -3,7 +3,7 @@
 > Retained simulation-only policy record, not a current-work queue. Current
 > ordering lives only in [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
 
-Phase C2 of [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md). This document
+Phase C2 of the retired marketplace dependency map (recover with `git log --follow`). This document
 **decides**; the earlier options menu is in Git history. The owner picked, with one standing guidance: **incentivize
 the P2P ecosystem**, and the picks are suggestions to be tuned, not sacred
 numbers. Everything here stays inside the frozen covenant

@@ -10,7 +10,7 @@
 > sliced delivery witnessed in both tor.log files. The clearnet acceptance
 > `make test-market-acceptance` stays green as the regression floor.
 
-Phase B5 of [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md). Goal: buyer and
+Phase B5 of the retired marketplace dependency map (recover with `git log --follow`). Goal: buyer and
 seller complete the SAME authorized, payment-gated chunk exchange with
 neither side's IP exposed. This file started as a design record from a full
 read of the delivery, onion, and wire code; it is now implemented and

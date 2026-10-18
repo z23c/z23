@@ -1873,7 +1873,7 @@ Z23_FLAG("ZCL_PROOF_ISSUE_COST_10K", "env_test", "-", "-",
 Z23_FLAG("ZCL_PROOF_RAM_RESERVE_BYTES", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof.c:auto")
 Z23_FLAG("ZCL_PROOF_TIMEOUT_MS", "env_runtime", "-", "-",
-          "first use tools/dev/dev_proof_budget.c:auto; documented at docs/work/AGENT_SYNC_PLAN.md:80: 1. Land the eight leaves (this lane) and ZCL_PROOF_TIMEOUT_MS. Bar: every devagent_* gr...")
+          "undocumented; first use tools/dev/dev_proof_budget.c:auto")
 Z23_FLAG("ZCL_PRUNE_KEEP_BLOCKS", "env_runtime", "-", "-",
           "first use engine/services/src/block_pruning_service.c:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:1164: {'record':'capability','header':'engine/services/include/services/block_pruning_service...")
 Z23_FLAG("ZCL_PSC_WORKERS", "env_runtime", "-", "-",

@@ -2768,7 +2768,7 @@ static bool nc_next_input_valid(const char *current_command,
     return true;
 }
 
-/* ── terminal-lane human presentation (docs/work/UX_PLAN.md (terminal lane)) ────
+/* ── terminal-lane human presentation (tools/command/cli_render.h) ────
  * The canonical typed-JSON document is ALWAYS computed first, unchanged;
  * these helpers only decide whether the final print swaps in the human
  * rendering from tools/command/cli_render.c. Resolution is once per CLI

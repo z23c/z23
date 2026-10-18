@@ -45,7 +45,6 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 |---|---|---|
 | [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) | PLAN | scoped acceptance and implementation context under AGENTS.md and the fleet A+ scorecard |
 | [`FLEET_SCORECARD.md`](./FLEET_SCORECARD.md) | TARGET | thirteen owner-adopted A+ bars; work order lives in `AGENTS.md` |
-| [`TRI_PLATFORM_PLAN.md`](./TRI_PLATFORM_PLAN.md) | DESIGN | Linux, macOS, and Windows acceptance gaps and their platform-local closure order |
 | [`self-verified-tip-plan.md`](./self-verified-tip-plan.md) | DESIGN | the `G-SOV` sovereignty-gate design + open hardening items; `G-SOV` is the active gate in `sovereignty_controller.c` |
 | [`SOVEREIGN-NETWORK-ROADMAP.md`](./SOVEREIGN-NETWORK-ROADMAP.md) | FOUNDATION | durable Phase 0–6 hierarchy and promotion gates, subordinate to `FORWARD_PLAN.md` |
 | [`SOVEREIGN_MACHINE_MESH_PLAN.md`](./SOVEREIGN_MACHINE_MESH_PLAN.md) | DESIGN | owner-paired Linux/macOS/Windows machine discovery, private transfer, typed control, secure remote-service tunnels, and hot-swap acceptance |
@@ -61,8 +60,6 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`NATIVE_MACOS_RUNBOOK.md`](./NATIVE_MACOS_RUNBOOK.md) | LIVE | native arm64 macOS maintenance: expected-green set, per-host platform-seam selection, known host quirks, and the first fix move per gate that can go red there |
 | [`NEON_CRYPTO_MATRIX.md`](./NEON_CRYPTO_MATRIX.md) | LIVE | per-crypto-family x86-64/arm64 tier matrix: gating, the test group proving bit-identity, the bench that times each tier, and honest no-clean-NEON-equivalent markers |
 | [`ZCODE_PLAN.md`](./ZCODE_PLAN.md) | FOUNDATION | original 15-slice ZCODE package-hosting order; slices 1–13 remain live foundations, while payout slices 14–15 are deferred behind the development network; `contexts/commons/modules/vcs/include/vcs/package_reward.h` cites its "ZCL fuel economics" section by name |
-| [`MARKETPLACE_PLAN.md`](./MARKETPLACE_PLAN.md) | DESIGN | deferred application-protocol marketplace design; no consensus surface |
-| [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | RETAINED | marketplace dependency ordering; unchecked boxes are not current work |
 | [`MARKET_ONION_DELIVERY.md`](./MARKET_ONION_DELIVERY.md) | DESIGN | B5 onion-routed chunk delivery: offer v2 endpoint_type=onion wire, `/market/chunk` onion route, session-binding replacement, stub fail-closed policy, and the honest non-goals (timing, gossip metadata) |
 | [`shielded-history-importer.md`](./shielded-history-importer.md) | LIVE | reference for the shipped `-import-complete-shielded` operational cure; operational-vs-sovereign trust-mode split |
 | [`CONSENSUS-STATE-BUNDLE.md`](./CONSENSUS-STATE-BUNDLE.md) | LIVE | naming/ownership authority for `zcl.consensus_state_bundle.v1` |
@@ -95,7 +92,6 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`session-substrate-probes.md`](./session-substrate-probes.md) | DESIGN | measured rootless-sandboxing capability probes for the multi-user-server program |
 | [`LLM-C23-APP-PLATFORM-CHECKLIST.md`](./LLM-C23-APP-PLATFORM-CHECKLIST.md) | DESIGN | future LLM/App platform execution checklist (Phases 3–5); not the current execution queue, cannot displace the sovereign cure |
 | [`agent-spend-policy-design.md`](./agent-spend-policy-design.md) | LIVE/RETAINED | scoped agent authority over digital assets — shipped as `agent_sessions` (migration v36) + `cognition/services/include/services/agent_spend_policy.h`; 16 `.c`/`.h`/test files cite its "Minting + presentation" and "Enforcement" sections by name, so keep those headings as-is |
-| [`UX_PLAN.md`](./UX_PLAN.md) | LIVE | the two-lane UX program (shared server-rendered design system + terminal presentation); both lanes have landed, `tools/command/cli_render.h`, `tools/command/native_command.c`, `engine/entry/main_cli_modes.c` and `tests/harness/src/test_cli_render.c` cite its "terminal lane" by name |
 | [`HOTSWAP.md`](./HOTSWAP.md) | LIVE | the dev-only hot-swap mechanisms |
 | [`fast-path.md`](./fast-path.md) | LIVE | the information algorithm + fast inner-loop commands for any change |
 | [`agent-protocol.md`](./agent-protocol.md) | LIVE | compact parallel-worker adapter to AGENTS.md and DEVELOPING.md; no second workflow authority |
@@ -118,6 +114,15 @@ empty, and an index that does not list everything is an index that lies.
 
 Recover any prior version of a file in this directory with
 `git log --follow -- docs/work/<name>.md`.
+
+Retired on 2026-10-18, recoverable with `git log --follow`: AGENT_SYNC_PLAN
+(superseded by the canonical lifecycle), UX_PLAN (both lanes landed), and
+TRI_PLATFORM_PLAN, MARKETPLACE_PLAN and MARKETPLACE_NEXT (unfinished items now
+live in `FORWARD_PLAN.md` sections 3 and 5).
+
+Still to fold into `FORWARD_PLAN.md` when their items are sized: the
+LLM-first App platform checklist, the sovereign machine mesh plan and the
+consensus-gated concurrency hazards.
 
 Before deleting anything here, clear all three: it is classified superseded
 above (PLAN / LIVE / DESIGN / RETAINED are not deletion candidates — DESIGN

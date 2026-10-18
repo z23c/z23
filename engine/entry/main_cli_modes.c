@@ -2306,7 +2306,7 @@ static int cli_run_static_agent_method(const char *method,
         }
     }
     if (ok) {
-        /* Terminal lane (docs/work/UX_PLAN.md): on a human terminal the
+        /* Terminal lane (tools/command/cli_render.h): on a human terminal the
          * statecatalog renders as a bounded table; every other static
          * agent method — and every pipe — keeps the canonical JSON. */
         struct zcl_cli_render_env renv = zcl_cli_render_resolve(

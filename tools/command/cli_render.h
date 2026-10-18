@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * cli_render — the terminal-lane human presentation layer for the native
- * command registry (docs/work/UX_PLAN.md (terminal lane)).
+ * command registry.
  *
  * PRIME DIRECTIVE: machines get canonical JSON, humans get beauty. This
  * module NEVER changes what a pipe/agent sees — the canonical typed-JSON
