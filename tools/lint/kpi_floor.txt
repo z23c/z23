@@ -1,0 +1,28 @@
+# Copyright 2026 Rhett Creighton - Apache License 2.0
+#
+# KPI scoreboard floor — lint gate check-kpi-floor.
+#
+# One `metric value` row per ratcheted metric; `#` starts a comment. The gate
+# computes the same metrics as `build/bin/z23 code kpi` over the checkout (no
+# node, no code index, nothing written) and fails when a metric is worse than
+# its row in its declared direction: below the floor for higher-is-better
+# metrics, above it for lower-is-better ones. Equal passes. A metric that
+# cannot be measured also fails. `*_pct` values are hundredths of a percent.
+#
+# TIGHTEN-ONLY. Raise the floor in the same commit that improves the metric.
+# Never lower a row to make a regression pass; fix the regression. Rows for
+# neutral metrics (capabilities, files_owned, territories) are refused.
+#
+# Show the rows behind a number: `build/bin/z23 code kpi --group=<cmd|code|docs>`.
+cmd.help_pct 10000
+cmd.leaves 759
+cmd.ready_pct 9591
+cmd.tested 493
+code.bash_scripts 347
+code.size_debt 19
+determinism_debt 4
+docs.orphans 15
+duplicate_candidates 1911
+lint_gates 222
+test_groups 1344
+untested_invariants 894

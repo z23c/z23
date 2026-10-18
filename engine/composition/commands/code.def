@@ -537,44 +537,48 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_focus)
 
-/* `code.kpi` is the one code.* leaf that WRITES, and it is classed MUTATE for
- * that reason rather than dressed as a read. Every run appends one frame to
- * <root>/.codeindex/kpi.chainlog, which is exactly the point: a ledger that
- * only reported would have no history to report against. The risk class is
- * DEV_MUTATION and the scope LOCAL because the only thing it can touch is
- * developer-local derived state in a gitignored directory — it reaches no
- * node, no datadir, no wallet and no consensus surface. Calling it a READ
- * would put it in the READY-read latency contract, which dispatches every
- * code.* read leaf four times per run, and those dispatches would silently
- * become ledger entries. */
+/* `code.kpi` is the one code.* leaf that CAN write, and it is classed MUTATE
+ * for that reason rather than dressed as a read. With `record=true` it
+ * appends one frame to <root>/.codeindex/kpi.chainlog, which is exactly the
+ * point: a ledger that only reported would have no history to report against.
+ * The default is `record=false`, which opens the ledger read-only and appends
+ * nothing, so the READY-read latency contract's repeated dispatches of every
+ * code.* leaf can never become ledger entries. The class names the leaf's
+ * maximum effect, not its default; one leaf keeps one name for the scoreboard
+ * where a read-only sibling would split it. The risk class is DEV_MUTATION
+ * and the scope LOCAL because the only thing it can touch is developer-local
+ * derived state in a gitignored directory — it reaches no node, no datadir,
+ * no wallet and no consensus surface. */
 ZCL_COMMAND_READY_COMMAND(
     "code.kpi", "code", "",
     "Track measured build outcomes",
-    "One canonical frame per run, appended to a hash-chained ledger at "
-    ".codeindex/kpi.chainlog, holding numbers this build ALREADY produces: "
-    "capabilities, duplicate candidates and untested invariants from the "
-    "generated capability inventory; territories and files owned from the "
-    "code index; registered test groups from the parallel-test catalog; lint "
-    "gates from the Makefile's own list; and determinism debt from the "
-    "ratchet baseline. Each is reported with its previous value, its delta, "
-    "which direction is better, a verdict, and the EXACT command that shows "
-    "the rows behind the number. A metric whose artifact is missing, "
-    "unreadable, or whose parse recognised nothing is UNAVAILABLE and is "
-    "NEVER reported as 0 — those are different facts, and a ledger that "
-    "conflated them would make every delta across that boundary a fiction. "
-    "Such a run still writes its frame, because the unavailability is itself "
-    "the fact being recorded, and the summary says how many were unavailable. "
-    "`previous` is the most recent PRIOR frame, never the one just written; "
-    "with no prior frame the verdict is no_baseline, never unchanged. The "
-    "frame payload is canonical bytes with no timestamp, path or pid, so two "
-    "honest runs over one tree produce identical bytes and the ledger stays "
-    "comparable; ordering comes from the chainlog sequence number. It grants "
-    "nothing and gates nothing: a frame is a measurement, never an approval.",
+    "One scoreboard of numbers this build ALREADY produces, in groups: cmd "
+    "(leaves, ready-with-handler share, help share, ready leaves a test "
+    "names), code (bash scripts, file-size debt, determinism debt, "
+    "capabilities, duplicate candidates, untested invariants, territories, "
+    "files owned, test groups, lint gates) and docs (orphan files). Each is "
+    "reported with its previous value, its delta, which direction is "
+    "better, a verdict against the newest frame in the hash-chained ledger "
+    "at .codeindex/kpi.chainlog, and the EXACT command that shows the rows "
+    "behind the number. `group` (cmd, code, docs, all; default all) limits "
+    "the rows shown. `record` (default false) appends the frame; without it "
+    "the ledger is opened read-only and stays byte-identical. A recorded "
+    "frame always holds every metric whatever `group` shows. A metric whose "
+    "artifact is missing, unreadable, or whose parse recognised nothing is "
+    "UNAVAILABLE and is NEVER reported as 0 — those are different facts. "
+    "`*_pct` values are hundredths of a percent. `previous` is the most "
+    "recent PRIOR frame; with none the verdict is no_baseline, never "
+    "unchanged. The frame payload is canonical bytes with no timestamp, path "
+    "or pid, so two honest runs over one tree produce identical bytes. The "
+    "committed floor tools/lint/kpi_floor.txt is enforced by the "
+    "check-kpi-floor lint gate. It grants nothing and gates nothing itself: "
+    "a frame is a measurement, never an approval.",
     ZCL_COMMAND_LIST_BUDGET,
-    "code,kpi,metrics,ledger,progress,trend,delta,inventory,debt",
-    "zcl.command.empty_input.v1",
-    "zcl.code_kpi.v1", "", "",
-    "z23 code kpi",
+    "code,kpi,metrics,ledger,progress,trend,delta,inventory,debt,commands,"
+    "scoreboard",
+    "zcl.code_kpi_input.v1",
+    "zcl.code_kpi.v1", "group,record", "",
+    "z23 code kpi --group=cmd",
     ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_MODE_SYNC,

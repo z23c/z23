@@ -3142,7 +3142,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-source-identity-authority \
         check-status-reason-single \
         check-operator-needed-sink check-systemd-memory-budget check-doc-accuracy check-doc-counts check-doc-claims check-no-stale-pinned-facts check-markdown-links check-doc-inline-paths \
-        check-api-reference-generated check-describe-budget check-catalog-rooms \
+        check-api-reference-generated check-describe-budget check-catalog-rooms check-kpi-floor \
         check-no-new-repair-rung \
         check-no-new-coordination-shell \
         check-no-new-bash \
@@ -6421,6 +6421,7 @@ LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     -D_POSIX_C_SOURCE=200809L -Iplatform/modules/base/include \
     -Iplatform/modules/sha3/include -Iplatform/modules/platform/include \
     -Iplatform/modules/util/include -Icontexts/commons/packages/zsha256/include \
+    -Icognition/modules/kpi/include -Iengine/modules/chainlog/include \
     $(ZCL_PLATFORM_CPPFLAGS) $(REPRO_CFLAGS)
 # Base-relative premise selection (tools/lint/lintc/premise.h): the premise
 # core, its `select --dry` / `premise` subcommands, and `unit-exec`, the
@@ -6433,7 +6434,9 @@ LINTC_PREMISE_SRCS = $(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/selection.c
 LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c contexts/commons/packages/zsha256/src/zsha256.c $(ZCL_TOOL_SANDBOX_SRC) \
     platform/modules/util/src/spawn.c platform/modules/platform/src/clock.c \
     platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
-    platform/modules/base/src/safe_alloc.c
+    platform/modules/base/src/safe_alloc.c \
+    cognition/modules/kpi/src/kpi_metrics.c cognition/modules/kpi/src/kpi_cmd.c \
+    cognition/modules/kpi/src/kpi_floor.c
 LINTC_NODE_OBJS = $(LINTC_NODE_SRCS:%.c=build/lintc-obj/node/%.o)
 LINTC_LIVE_DATADIR_SRCS = tools/lint/lintc/gate_live_datadir_isolation.c \
     tools/lint/lintc/gate_live_datadir_isolation_selftest.c
@@ -6458,6 +6461,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_pattern_guard.c \
     tools/lint/lintc/gate_describe_budget.c \
     tools/lint/lintc/gate_catalog_rooms.c \
+    tools/lint/lintc/gate_kpi_floor.c \
     tools/lint/lintc/gate_api_reference_generated.c \
     tools/lint/lintc/gate_api_reference_generated_selftest.c \
     tools/lint/lintc/gate_state_hygiene_fences.c \
@@ -14883,6 +14887,15 @@ check-catalog-rooms: $(LINTC_TOOL)
 	@./build/bin/z23-lint check-catalog-rooms --selftest
 	@./build/bin/z23-lint check-catalog-rooms
 
+# Gate — the scoreboard behind `z23 code kpi` may only improve. Every metric
+# named in tools/lint/kpi_floor.txt must be at or better than its committed
+# floor in its declared direction; raise the floor in the same commit that
+# improves the metric. Read-only over the checkout. Has --selftest.
+check-kpi-floor: $(LINTC_TOOL)
+	@echo "══ LINT: KPI scoreboard is at or better than its committed floor ══"
+	@./build/bin/z23-lint check-kpi-floor --selftest
+	@./build/bin/z23-lint check-kpi-floor
+
 # Regenerate the native command reference from the declarative catalog.
 API_REFERENCE_TOOL = $(BIN_DIR)/gen_api_reference
 
@@ -15670,6 +15683,7 @@ LINT_GATES := \
     check-generated-artifact-contradictions \
     check-describe-budget \
     check-catalog-rooms \
+    check-kpi-floor \
     check-markdown-links \
     check-doc-inline-paths \
     check-hex-codec-single \

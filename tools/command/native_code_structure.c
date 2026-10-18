@@ -1603,15 +1603,17 @@ void zcl_native_handle_code_territory(const struct zcl_command_request *request,
  * of what it was LAST time, so "did that get better?" was answered from memory
  * or not at all.
  *
- * THE ONLY code.* LEAF THAT WRITES. It appends one canonical frame per run to
- * <root>/.codeindex/kpi.chainlog — the same directory the code index already
- * uses for local derived state, and one git does not track. That write is the
- * point of the command, so the registry row classes it MUTATE rather than
- * dressing a writer as a read.
+ * THE ONLY code.* LEAF THAT CAN WRITE, and only when asked: `record=true`
+ * appends one canonical frame (always the whole metric set, whatever `group`
+ * shows) to <root>/.codeindex/kpi.chainlog — the same directory the code index
+ * already uses for local derived state, and one git does not track. The
+ * default `record=false` opens the ledger read-only, so the same run compares
+ * against the newest frame and appends nothing; the registry row classes the
+ * leaf MUTATE because that is its maximum effect, not its default.
  *
  * 0 AND "I COULD NOT LOOK" ARE DIFFERENT FACTS. A metric whose artifact is
  * missing or unparsable renders state "unavailable", value null and verdict
- * "unavailable" — never 0. The run still writes its frame, because the
+ * "unavailable" — never 0. A recorded run still writes its frame, because the
  * unavailability is itself what is being recorded, and the summary names how
  * many were unavailable so a short answer is never read as a clean one.
  *
@@ -1623,20 +1625,31 @@ void zcl_native_handle_code_territory(const struct zcl_command_request *request,
  * gate, never permission to land anything.
  */
 
-/* code.kpi's `metrics[]` array: one row per known metric, comparing this
- * frame against the most recent prior frame (if any). Returns the improved/
- * regressed/unavailable tallies the summary line needs. */
-static void code_kpi_render_metrics(
-    struct json_value *arr, const struct kpi_metric_def *defs, size_t ndefs,
-    const struct kpi_frame *frame, const struct kpi_ledger_result *led,
-    int *improved, int *regressed, int *unavailable)
+/* The `*_pct` metrics are hundredths of a percent; say so on the row. */
+static bool code_kpi_is_pct(const char *id)
 {
+    size_t n = strlen(id);
+    return n > 4 && strcmp(id + n - 4, "_pct") == 0;
+}
+
+/* code.kpi's `metrics[]` array: one row per metric in the `show` groups,
+ * comparing this frame against the most recent prior frame (if any). Returns
+ * how many rows and the improved/regressed/unavailable tallies the summary
+ * line needs. */
+static size_t code_kpi_render_metrics(
+    struct json_value *arr, const struct kpi_metric_def *defs, size_t ndefs,
+    uint32_t show, const struct kpi_frame *frame,
+    const struct kpi_ledger_result *led, int *improved, int *regressed,
+    int *unavailable)
+{
+    size_t rows = 0;
     *improved = 0;
     *regressed = 0;
     *unavailable = 0;
     for (size_t i = 0; i < ndefs; i++) {
         const struct kpi_entry *cur = kpi_frame_find(frame, defs[i].id);
-        if (!cur) continue;
+        if (!cur || !(kpi_metric_group(defs[i].id) & show)) continue;
+        rows++;
         const struct kpi_entry *prev =
             led->have_previous ? kpi_frame_find(&led->previous, defs[i].id)
                                : NULL;
@@ -1661,44 +1674,74 @@ static void code_kpi_render_metrics(
         (void)json_push_kv_str(&o, "direction",
                                kpi_direction_label(defs[i].direction));
         (void)json_push_kv_str(&o, "verdict", kpi_verdict_label(v));
+        if (code_kpi_is_pct(defs[i].id))
+            (void)json_push_kv_str(&o, "unit", "hundredths_of_percent");
         (void)json_push_kv_str(&o, "drill", defs[i].drill);
         code_push_obj(arr, &o);
     }
+    return rows;
 }
 
-/* code.kpi's one-line summary: which frame this is, and against what prior
- * frame (if any) the improved/regressed/unavailable tallies were computed. */
+/* code.kpi's one-line summary: which frame this is (or that nothing was
+ * recorded), and against what prior frame (if any) the improved/regressed/
+ * unavailable tallies were computed. */
 static void code_kpi_compose_summary(char summary[320],
                                      const struct kpi_ledger_result *led,
-                                     size_t ndefs, int improved, int regressed,
-                                     int unavailable)
+                                     bool recorded, size_t shown, int improved,
+                                     int regressed, int unavailable)
 {
-    if (!led->have_previous)
+    const char *head = recorded ? "" : "not recorded: ";
+    if (!led->have_previous && recorded)
         (void)snprintf(summary, 320,
-                       "frame %llu is the first: %d improved, %d regressed, "
-                       "%d unavailable, %d with no baseline yet",
-                       (unsigned long long)led->seq, improved, regressed,
-                       unavailable, (int)ndefs - unavailable);
-    else
+                       "frame %llu is the first: %zu shown, %d unavailable",
+                       (unsigned long long)led->seq, shown, unavailable);
+    else if (!led->have_previous)
+        (void)snprintf(summary, 320,
+                       "%sno prior frame; %zu shown, %d unavailable", head,
+                       shown, unavailable);
+    else if (recorded)
         (void)snprintf(summary, 320,
                        "frame %llu vs %llu: %d improved, %d regressed, "
                        "%d unavailable",
                        (unsigned long long)led->seq,
                        (unsigned long long)led->prior_records, improved,
                        regressed, unavailable);
+    else
+        (void)snprintf(summary, 320,
+                       "%svs frame %llu: %d improved, %d regressed, "
+                       "%d unavailable",
+                       head, (unsigned long long)led->prior_records, improved,
+                       regressed, unavailable);
 }
 
-void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
-                                struct zcl_command_reply *reply)
+/* The `group` and `record` inputs. An absent or non-object input is the
+ * defaults (all groups, read-only); a bad group name is refused. */
+static bool code_kpi_inputs(const struct zcl_command_request *request,
+                            struct zcl_command_reply *reply, uint32_t *show,
+                            bool *record)
 {
-    const char *root = code_source_root(request);
-    struct codeindex *ci = code_open(request, reply);
-    if (!ci) return;
+    const struct json_value *in = request->input;
+    bool object = in && in->type == JSON_OBJ;
+    const char *group = object ? json_get_str(json_get(in, "group")) : NULL;
+    *record = object && json_get_bool_or(in, "record", false);
+    if (kpi_group_parse(group, show))
+        return true;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INVALID, "BAD_CODE_KPI_GROUP",
+                           "validate", false, false,
+                           "group must be one of cmd, code, docs, all",
+                           group ? group : "");
+    return false;
+}
 
-    struct kpi_frame frame;
-    kpi_collect(root, ci, &frame);
-    codeindex_close(ci);
-
+/* The ledger step: append when recording, otherwise observe read-only. A
+ * ledger that refuses is reported as a refusal by the chainlog's own status
+ * name; rendering the metrics anyway while quietly dropping the frame would
+ * leave a reader believing a history exists that does not. */
+static bool code_kpi_ledger(struct zcl_command_reply *reply, const char *root,
+                            bool record, const struct kpi_frame *frame,
+                            struct kpi_ledger_result *led)
+{
     char ledger[1024];
     int wrote_path = snprintf(ledger, sizeof ledger, "%s/.codeindex/kpi.chainlog",
                               root);
@@ -1708,21 +1751,38 @@ void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
                                "dispatch", true, false,
                                "the source root is too long to hold a ledger "
                                "path", root);
-        return;
+        return false;
     }
+    bool ok = record ? kpi_ledger_record(ledger, frame, led)
+                     : kpi_ledger_peek(ledger, led);
+    if (!ok)
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               record ? "KPI_LEDGER_APPEND" : "KPI_LEDGER_READ",
+                               "dispatch", true, false,
+                               zcl_chainlog_status_label(led->status), ledger);
+    return ok;
+}
+
+void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply)
+{
+    uint32_t show = KPI_GROUP_ALL;
+    bool record = false;
+    if (!code_kpi_inputs(request, reply, &show, &record)) return;
+
+    const char *root = code_source_root(request);
+    struct codeindex *ci = code_open(request, reply);
+    if (!ci) return;
+
+    /* A recorded frame always holds every metric: a partial frame would make
+     * the next run's deltas compare against a subset. */
+    struct kpi_frame frame;
+    kpi_collect_masked(root, ci, record ? KPI_GROUP_ALL : show, &frame);
+    codeindex_close(ci);
 
     struct kpi_ledger_result led;
-    bool appended = kpi_ledger_record(ledger, &frame, &led);
-    /* A ledger that refuses is reported as a refusal, by the chainlog's own
-     * status name. Rendering the metrics anyway while quietly dropping the
-     * frame would leave a reader believing a history exists that does not. */
-    if (!appended) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "KPI_LEDGER_APPEND",
-                               "dispatch", true, false,
-                               zcl_chainlog_status_label(led.status), ledger);
-        return;
-    }
+    if (!code_kpi_ledger(reply, root, record, &frame, &led)) return;
 
     size_t ndefs = 0;
     const struct kpi_metric_def *defs = kpi_metric_defs(&ndefs);
@@ -1730,16 +1790,19 @@ void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
     struct json_value arr;
     json_init(&arr); json_set_array(&arr);
     int improved, regressed, unavailable;
-    code_kpi_render_metrics(&arr, defs, ndefs, &frame, &led, &improved,
-                            &regressed, &unavailable);
+    size_t shown = code_kpi_render_metrics(&arr, defs, ndefs, show, &frame,
+                                           &led, &improved, &regressed,
+                                           &unavailable);
 
     char root_hex[65];
     zcl_hex_encode(frame.source_root_sha3, 32, root_hex);
 
     (void)json_push_kv_str(&reply->data, "scope", "kpi");
     (void)json_push_kv(&reply->data, "metrics", &arr);
-    (void)json_push_kv_int(&reply->data, "count", (int64_t)ndefs);
-    (void)json_push_kv_int(&reply->data, "seq", (int64_t)led.seq);
+    (void)json_push_kv_int(&reply->data, "count", (int64_t)shown);
+    (void)json_push_kv_bool(&reply->data, "recorded", record);
+    if (record)
+        (void)json_push_kv_int(&reply->data, "seq", (int64_t)led.seq);
     (void)json_push_kv_int(&reply->data, "prior_frames",
                            (int64_t)led.prior_records);
     (void)json_push_kv_str(&reply->data, "source_root_sha3", root_hex);
@@ -1747,8 +1810,7 @@ void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
     json_free(&arr);
 
     char summary[320];
-    code_kpi_compose_summary(summary, &led, ndefs, improved, regressed,
+    code_kpi_compose_summary(summary, &led, record, shown, improved, regressed,
                              unavailable);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 }
-

@@ -629,11 +629,13 @@ void zcl_native_handle_code_corpus(
 
 /* code.kpi — the build's own numbers, recorded rather than remembered. Reads
  * artifacts the build already writes plus the code index's territory rows,
- * appends one canonical frame to <root>/.codeindex/kpi.chainlog, and reports
- * each metric against the most recent PRIOR frame with its direction, verdict
- * and the exact drill-down command. The only code.* leaf that writes, which is
- * why it is classed MUTATE. A metric whose artifact could not be read is
- * UNAVAILABLE and is never rendered as 0. Backed by cognition/modules/kpi. */
+ * and reports each metric against the most recent PRIOR frame with its
+ * direction, verdict and the exact drill-down command. Inputs: `group`
+ * (cmd, code, docs, all) and `record`. Only `record=true` appends a frame to
+ * <root>/.codeindex/kpi.chainlog; the default opens the ledger read-only. The
+ * only code.* leaf that can write, which is why it is classed MUTATE. A metric
+ * whose artifact could not be read is UNAVAILABLE and is never rendered as 0.
+ * Backed by cognition/modules/kpi. */
 void zcl_native_handle_code_kpi(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

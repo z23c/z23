@@ -26,7 +26,9 @@
 #include "base/serialize_le.h"
 #include "sha3/sha3.h"
 
+#include <errno.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* ── canonical bytes ─────────────────────────────────────────────────── */
 
@@ -119,17 +121,6 @@ bool kpi_decode(const uint8_t *buf, size_t len, struct kpi_frame *out)
     return true;
 }
 
-const struct kpi_entry *kpi_frame_find(const struct kpi_frame *f,
-                                       const char *id)
-{
-    if (!f || !id)
-        return NULL;
-    for (uint32_t i = 0; i < f->count && i < KPI_METRIC_MAX; i++)
-        if (strcmp(f->metric[i].id, id) == 0)
-            return &f->metric[i];
-    return NULL;
-}
-
 enum kpi_verdict kpi_verdict_of(enum kpi_direction d,
                                 const struct kpi_entry *prev,
                                 const struct kpi_entry *cur)
@@ -166,6 +157,51 @@ void kpi_stream_id(uint8_t out[32])
     zcl_sha3_256((const unsigned char *)k_stream, sizeof k_stream - 1, out);
 }
 
+/* The newest frame already in `log`, into `out`. */
+static void kpi_ledger_read_prior(struct zcl_chainlog *log,
+                                  struct kpi_ledger_result *out)
+{
+    uint64_t prior = zcl_chainlog_count(log);
+    out->prior_records = prior;
+    if (prior == 0)
+        return;
+    uint8_t buf[KPI_PAYLOAD_MAX];
+    size_t got = 0;
+    uint32_t kind = 0;
+    enum zcl_chainlog_status rs =
+        zcl_chainlog_read(log, prior, &kind, buf, sizeof buf, &got);
+    if (rs == ZCL_CHAINLOG_OK && kind == KPI_FRAME_KIND &&
+        kpi_decode(buf, got, &out->previous))
+        out->have_previous = true;
+    /* A prior frame this build cannot decode is reported as no baseline
+     * rather than as a zero baseline. The frame stays in the log — it is
+     * evidence — and the run still writes its own. */
+}
+
+bool kpi_ledger_peek(const char *path, struct kpi_ledger_result *out)
+{
+    if (!path || !out)
+        return false;
+    memset(out, 0, sizeof *out);
+    out->status = ZCL_CHAINLOG_OK;
+    struct stat st;
+    if (stat(path, &st) != 0 && errno == ENOENT)
+        return true; /* no ledger yet: nothing to compare against */
+
+    uint8_t stream[32];
+    kpi_stream_id(stream);
+    struct zcl_chainlog_report report;
+    memset(&report, 0, sizeof report);
+    struct zcl_chainlog *log = zcl_chainlog_open_readonly(path, stream, &report);
+    out->status = report.status;
+    out->torn_bytes = report.torn_bytes;
+    if (!log)
+        return false;
+    kpi_ledger_read_prior(log, out);
+    zcl_chainlog_close(log);
+    return true;
+}
+
 bool kpi_ledger_record(const char *path, const struct kpi_frame *cur,
                        struct kpi_ledger_result *out)
 {
@@ -192,21 +228,7 @@ bool kpi_ledger_record(const char *path, const struct kpi_frame *cur,
 
     /* READ FIRST. The baseline is the most recent frame that already existed;
      * appending before reading would make every run its own baseline. */
-    uint64_t prior = zcl_chainlog_count(log);
-    out->prior_records = prior;
-    if (prior > 0) {
-        uint8_t buf[KPI_PAYLOAD_MAX];
-        size_t got = 0;
-        uint32_t kind = 0;
-        enum zcl_chainlog_status rs =
-            zcl_chainlog_read(log, prior, &kind, buf, sizeof buf, &got);
-        if (rs == ZCL_CHAINLOG_OK && kind == KPI_FRAME_KIND &&
-            kpi_decode(buf, got, &out->previous))
-            out->have_previous = true;
-        /* A prior frame this build cannot decode is reported as no baseline
-         * rather than as a zero baseline. The frame stays in the log — it is
-         * evidence — and the run still writes its own. */
-    }
+    kpi_ledger_read_prior(log, out);
 
     enum zcl_chainlog_status as =
         zcl_chainlog_append(log, KPI_FRAME_KIND, payload, len, &out->seq, NULL);

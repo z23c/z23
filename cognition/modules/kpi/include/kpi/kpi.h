@@ -42,6 +42,22 @@
  *                          is the one source where 0 is a real answer, which
  *                          is exactly why it is spelled out here.
  *   territories/files      a code index handle AND territory_list() > 0.
+ *   command catalog        engine/composition/commands/catalog.def readable
+ *                          AND at least one leaf row found across the .def
+ *                          files it includes. Leaves are READY, PLANNED and
+ *                          COMPAT rows; a dev row counts as READY when it
+ *                          binds a handler, in every build, so the numbers do
+ *                          not change with the build flavour.
+ *   cmd.tested             also needs tests/harness/src readable.
+ *   bash allowlist, file-size baseline, orphan baseline
+ *                          readable. Zero rows is an HONEST 0 (the goal).
+ *
+ * METRIC GROUPS AND UNITS
+ * -----------------------
+ * A metric's group is the part of its id before the first '.' when that is
+ * cmd, code or docs; every id without such a prefix belongs to code. The
+ * `*_pct` metrics are hundredths of a percent (10000 = 100.00%) so a ratchet
+ * can see a single leaf move.
  *
  * CANONICAL BYTES
  * ---------------
@@ -164,6 +180,36 @@ bool kpi_count_lint_gates(const char *makefile_path, uint64_t *out);
 /* Non-comment, non-blank rows of a lint baseline file. Zero is honest here. */
 bool kpi_count_baseline_rows(const char *path, uint64_t *out);
 
+/* ── command catalog ─────────────────────────────────────────────────── */
+
+struct kpi_cmd_stats {
+    uint64_t leaves;        /* READY + PLANNED + COMPAT leaf rows */
+    uint64_t ready;         /* READY rows binding a handler */
+    uint64_t help;          /* leaves with a non-empty summary AND example */
+    uint64_t tested;        /* READY leaves named in a tests/harness/src file */
+    bool     have_tested;   /* false when the test sources were unreadable */
+};
+
+/* Parse the .def files reachable from catalog.def under `root`. False when
+ * catalog.def is unreadable or yields no leaf. `tested` counts a READY leaf
+ * when its dotted path, or its spaced CLI form, appears inside a string
+ * literal of any file in tests/harness/src; the scan is one bounded pass. */
+bool kpi_cmd_scan(const char *root, struct kpi_cmd_stats *out);
+
+/* Whole-number share in hundredths of a percent; 0 when den is 0. */
+uint64_t kpi_pct_hundredths(uint64_t num, uint64_t den);
+
+/* ── groups ──────────────────────────────────────────────────────────── */
+
+#define KPI_GROUP_CMD  1u
+#define KPI_GROUP_CODE 2u
+#define KPI_GROUP_DOCS 4u
+#define KPI_GROUP_ALL  7u
+
+/* "cmd", "code", "docs", "all" (NULL and "" mean all). False otherwise. */
+bool kpi_group_parse(const char *name, uint32_t *mask);
+uint32_t kpi_metric_group(const char *id);
+
 /* ── collection ──────────────────────────────────────────────────────────
  * Fill every metric for the checkout at `root`. `ci` may be NULL, in which
  * case the index-derived metrics are UNAVAILABLE rather than guessed and the
@@ -173,6 +219,45 @@ bool kpi_count_baseline_rows(const char *path, uint64_t *out);
  * exist yet. */
 void kpi_collect(const char *root, struct codeindex *ci,
                  struct kpi_frame *out);
+
+/* The same, restricted to the groups in `mask`: a metric outside the mask is
+ * left UNAVAILABLE and unmeasured, so a frame built this way is for display
+ * only and is never written to the ledger. */
+void kpi_collect_masked(const char *root, struct codeindex *ci, uint32_t mask,
+                        struct kpi_frame *out);
+
+/* Everything that needs no code index: the metrics the floor can ratchet.
+ * kpi_collect_masked is this plus the index-derived metrics. */
+void kpi_collect_files(const char *root, uint32_t mask, struct kpi_frame *out);
+
+/* ── the floor ───────────────────────────────────────────────────────────
+ * tools/lint/kpi_floor.txt: one `metric value` per line, `#` comments. A
+ * metric is within its floor when it is not worse than the floor in its
+ * declared direction. An unavailable metric under a floor is a miss. */
+
+struct kpi_floor {
+    uint32_t count;
+    char     id[KPI_METRIC_MAX][KPI_ID_MAX];
+    uint64_t value[KPI_METRIC_MAX];
+};
+
+enum kpi_miss_kind { KPI_MISS_WORSE = 0, KPI_MISS_UNAVAILABLE };
+
+struct kpi_miss {
+    const struct kpi_metric_def *def;
+    enum kpi_miss_kind           kind;
+    uint64_t                     floor;
+    uint64_t                     current;
+};
+
+/* False on a missing file, a malformed row, an unknown or neutral metric, or
+ * a duplicate; `*bad_line` receives the 1-based line (0 for an open error). */
+bool kpi_floor_load(const char *path, struct kpi_floor *out,
+                    unsigned *bad_line);
+
+/* Misses written to `miss` (up to `cap`); returns how many there are. */
+size_t kpi_floor_check(const struct kpi_floor *fl, const struct kpi_frame *cur,
+                       struct kpi_miss *miss, size_t cap);
 
 /* ── canonical bytes ─────────────────────────────────────────────────── */
 
@@ -219,5 +304,11 @@ void kpi_stream_id(uint8_t out[32]);
  * measured against, never the row this run just wrote. */
 bool kpi_ledger_record(const char *path, const struct kpi_frame *cur,
                        struct kpi_ledger_result *out);
+
+/* Read the most recent frame without ever writing: the log is opened
+ * read-only, so the file stays byte-identical. A ledger that does not exist
+ * yet is true with no previous frame; a busy, damaged or foreign log is false
+ * with `status` naming why. `wrote` stays false and `seq` stays 0. */
+bool kpi_ledger_peek(const char *path, struct kpi_ledger_result *out);
 
 #endif /* ZCL_KPI_H */

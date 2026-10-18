@@ -320,6 +320,8 @@ int check_describe_budget_run(int argc, char **argv);
 int check_describe_budget_selftest(void);
 int check_catalog_rooms_run(int argc, char **argv);
 int check_catalog_rooms_selftest(void);
+int check_kpi_floor_run(int argc, char **argv);
+int check_kpi_floor_selftest(void);
 int check_api_reference_generated_run(int argc, char **argv);
 int check_api_reference_generated_selftest(void);
 int check_json_value_init_run(int argc, char **argv);

@@ -16,9 +16,6 @@
 
 #include "kpi/kpi.h"
 
-#include "codeindex/codeindex.h"
-#include "territory/territory.h"
-
 #include <stdio.h>
 #include <string.h>
 
@@ -68,9 +65,25 @@ const char *kpi_verdict_label(enum kpi_verdict v)
 static const struct kpi_metric_def k_metrics[] = {
     { "capabilities", KPI_DIRECTION_NEUTRAL,
       "docs/CAPABILITY_INVENTORY.jsonl", "z23 code have <name>" },
+    { "cmd.help_pct", KPI_DIRECTION_HIGHER_IS_BETTER,
+      "engine/composition/commands/catalog.def", "docs/API_REFERENCE.md" },
+    { "cmd.leaves", KPI_DIRECTION_HIGHER_IS_BETTER,
+      "engine/composition/commands/catalog.def", "docs/API_REFERENCE.md" },
+    { "cmd.ready_pct", KPI_DIRECTION_HIGHER_IS_BETTER,
+      "engine/composition/commands/catalog.def", "docs/API_REFERENCE.md" },
+    { "cmd.tested", KPI_DIRECTION_HIGHER_IS_BETTER,
+      "engine/composition/commands/catalog.def", "z23 code tests <path>" },
+    { "code.bash_scripts", KPI_DIRECTION_LOWER_IS_BETTER,
+      "tools/lint/bash_allowlist.txt", "cat tools/lint/bash_allowlist.txt" },
+    { "code.size_debt", KPI_DIRECTION_LOWER_IS_BETTER,
+      "tools/lint/file_size_policy_baseline.txt",
+      "cat tools/lint/file_size_policy_baseline.txt" },
     { "determinism_debt", KPI_DIRECTION_LOWER_IS_BETTER,
       "tools/lint/determinism_baseline.txt",
       "make check-determinism-ratchet" },
+    { "docs.orphans", KPI_DIRECTION_LOWER_IS_BETTER,
+      "tools/lint/orphan_placement_baseline.txt",
+      "cat tools/lint/orphan_placement_baseline.txt" },
     { "duplicate_candidates", KPI_DIRECTION_LOWER_IS_BETTER,
       "docs/CAPABILITY_INVENTORY.jsonl", "z23 code have <name>" },
     { "files_owned", KPI_DIRECTION_NEUTRAL, "", "z23 code territory" },
@@ -365,29 +378,139 @@ bool kpi_count_baseline_rows(const char *path, uint64_t *out)
     return true;
 }
 
-/* ── collection ──────────────────────────────────────────────────────── */
 
-enum { KPI_TERRITORY_CAP = 128 };
-
-static bool kpi_territory_counts(struct codeindex *ci, uint64_t *territories,
-                                 uint64_t *files_owned)
+uint64_t kpi_pct_hundredths(uint64_t num, uint64_t den)
 {
-    if (!ci)
+    return den == 0 ? 0 : (num * 10000u) / den;
+}
+
+/* ── groups ──────────────────────────────────────────────────────────── */
+
+uint32_t kpi_metric_group(const char *id)
+{
+    if (!id)
+        return KPI_GROUP_CODE;
+    if (strncmp(id, "cmd.", 4) == 0)
+        return KPI_GROUP_CMD;
+    if (strncmp(id, "docs.", 5) == 0)
+        return KPI_GROUP_DOCS;
+    return KPI_GROUP_CODE;
+}
+
+bool kpi_group_parse(const char *name, uint32_t *mask)
+{
+    if (!mask)
         return false;
-    char names[KPI_TERRITORY_CAP][TERRITORY_NAME_MAX];
-    int n = territory_list(ci, names, KPI_TERRITORY_CAP);
-    if (n <= 0)
+    if (!name || !name[0] || strcmp(name, "all") == 0)
+        *mask = KPI_GROUP_ALL;
+    else if (strcmp(name, "cmd") == 0)
+        *mask = KPI_GROUP_CMD;
+    else if (strcmp(name, "code") == 0)
+        *mask = KPI_GROUP_CODE;
+    else if (strcmp(name, "docs") == 0)
+        *mask = KPI_GROUP_DOCS;
+    else
         return false;
-    uint64_t total = 0;
-    for (int i = 0; i < n; i++) {
-        int fc = codeindex_count_files_in_group(ci, names[i], false);
-        if (fc > 0)
-            total += (uint64_t)fc;
-    }
-    *territories = (uint64_t)n;
-    *files_owned = total;
     return true;
 }
+
+/* ── collection ──────────────────────────────────────────────────────── */
+
+/* What one measurement needs: the artifact path for the metric, and the
+ * command catalog scan shared by the four cmd.* metrics (taken once). */
+struct kpi_ctx {
+    struct kpi_cmd_stats cmd;
+    bool                 have_cmd;
+};
+
+typedef bool (*kpi_measure_fn)(const struct kpi_ctx *c, const char *path,
+                               uint64_t *v);
+
+static bool kpi_m_capabilities(const struct kpi_ctx *c, const char *path,
+                               uint64_t *v)
+{
+    (void)c;
+    return kpi_count_jsonl_records(path, "capability", v, NULL);
+}
+
+static bool kpi_m_duplicates(const struct kpi_ctx *c, const char *path,
+                             uint64_t *v)
+{
+    (void)c;
+    return kpi_count_jsonl_records(path, "duplicate", v, NULL);
+}
+
+static bool kpi_m_untested(const struct kpi_ctx *c, const char *path,
+                           uint64_t *v)
+{
+    (void)c;
+    return kpi_count_jsonl_records(path, "untested_invariant", v, NULL);
+}
+
+static bool kpi_m_groups(const struct kpi_ctx *c, const char *path,
+                         uint64_t *v)
+{
+    (void)c;
+    return kpi_count_test_groups(path, v);
+}
+
+static bool kpi_m_gates(const struct kpi_ctx *c, const char *path,
+                        uint64_t *v)
+{
+    (void)c;
+    return kpi_count_lint_gates(path, v);
+}
+
+static bool kpi_m_rows(const struct kpi_ctx *c, const char *path, uint64_t *v)
+{
+    (void)c;
+    return kpi_count_baseline_rows(path, v);
+}
+
+static bool kpi_m_cmd_leaves(const struct kpi_ctx *c, const char *path,
+                             uint64_t *v)
+{
+    (void)path;
+    *v = c->cmd.leaves;
+    return c->have_cmd;
+}
+
+static bool kpi_m_cmd_ready(const struct kpi_ctx *c, const char *path,
+                            uint64_t *v)
+{
+    (void)path;
+    *v = kpi_pct_hundredths(c->cmd.ready, c->cmd.leaves);
+    return c->have_cmd;
+}
+
+static bool kpi_m_cmd_help(const struct kpi_ctx *c, const char *path,
+                           uint64_t *v)
+{
+    (void)path;
+    *v = kpi_pct_hundredths(c->cmd.help, c->cmd.leaves);
+    return c->have_cmd;
+}
+
+static bool kpi_m_cmd_tested(const struct kpi_ctx *c, const char *path,
+                             uint64_t *v)
+{
+    (void)path;
+    *v = c->cmd.tested;
+    return c->have_cmd && c->cmd.have_tested;
+}
+
+/* One entry per k_metrics row, same order. NULL means the metric comes from
+ * the code index, which this file-only collection does not have. */
+static const kpi_measure_fn k_measure[] = {
+    kpi_m_capabilities, kpi_m_cmd_help,  kpi_m_cmd_leaves, kpi_m_cmd_ready,
+    kpi_m_cmd_tested,   kpi_m_rows,      kpi_m_rows,       kpi_m_rows,
+    kpi_m_rows,         kpi_m_duplicates, NULL,            kpi_m_gates,
+    NULL,               kpi_m_groups,    kpi_m_untested,
+};
+
+_Static_assert(sizeof k_measure / sizeof k_measure[0] ==
+                   sizeof k_metrics / sizeof k_metrics[0],
+               "every metric row needs a measure entry");
 
 static void kpi_join(char *buf, size_t cap, const char *root, const char *rel)
 {
@@ -406,7 +529,7 @@ static void kpi_set(struct kpi_frame *f, size_t slot, const char *id, bool ok,
     f->metric[slot].value = ok ? value : 0;
 }
 
-void kpi_collect(const char *root, struct codeindex *ci, struct kpi_frame *out)
+void kpi_collect_files(const char *root, uint32_t mask, struct kpi_frame *out)
 {
     if (!out)
         return;
@@ -418,47 +541,30 @@ void kpi_collect(const char *root, struct codeindex *ci, struct kpi_frame *out)
         ndefs = KPI_METRIC_MAX;
     out->count = (uint32_t)ndefs;
 
-    /* The tree this frame measured. Left all-zero when there is no verified
-     * index handle: codeindex_source_root_sha3() never fabricates an all-zero
-     * generation, so all-zero unambiguously reads as "unknown tree" rather
-     * than as some tree that happened to hash to nothing. */
-    if (ci)
-        (void)codeindex_source_root_sha3(ci, out->source_root_sha3);
-
-    uint64_t territories = 0, files_owned = 0;
-    bool have_territory = kpi_territory_counts(ci, &territories, &files_owned);
+    struct kpi_ctx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    if (mask & KPI_GROUP_CMD)
+        ctx.have_cmd = kpi_cmd_scan(root, &ctx.cmd);
 
     char path[1024];
     for (size_t i = 0; i < ndefs; i++) {
-        const char *id = defs[i].id;
         uint64_t v = 0;
         bool ok = false;
-
-        if (strcmp(id, "territories") == 0) {
-            ok = have_territory;
-            v = territories;
-        } else if (strcmp(id, "files_owned") == 0) {
-            ok = have_territory;
-            v = files_owned;
-        } else {
-            kpi_join(path, sizeof path, root, defs[i].source);
-            if (path[0] == '\0') {
-                ok = false;
-            } else if (strcmp(id, "capabilities") == 0) {
-                ok = kpi_count_jsonl_records(path, "capability", &v, NULL);
-            } else if (strcmp(id, "duplicate_candidates") == 0) {
-                ok = kpi_count_jsonl_records(path, "duplicate", &v, NULL);
-            } else if (strcmp(id, "untested_invariants") == 0) {
-                ok = kpi_count_jsonl_records(path, "untested_invariant", &v,
-                                             NULL);
-            } else if (strcmp(id, "test_groups") == 0) {
-                ok = kpi_count_test_groups(path, &v);
-            } else if (strcmp(id, "lint_gates") == 0) {
-                ok = kpi_count_lint_gates(path, &v);
-            } else if (strcmp(id, "determinism_debt") == 0) {
-                ok = kpi_count_baseline_rows(path, &v);
-            }
-        }
-        kpi_set(out, i, id, ok, v);
+        kpi_join(path, sizeof path, root, defs[i].source);
+        if ((kpi_metric_group(defs[i].id) & mask) && k_measure[i] &&
+            path[0] != '\0')
+            ok = k_measure[i](&ctx, path, &v);
+        kpi_set(out, i, defs[i].id, ok, v);
     }
+}
+
+const struct kpi_entry *kpi_frame_find(const struct kpi_frame *f,
+                                       const char *id)
+{
+    if (!f || !id)
+        return NULL;
+    for (uint32_t i = 0; i < f->count && i < KPI_METRIC_MAX; i++)
+        if (strcmp(f->metric[i].id, id) == 0)
+            return &f->metric[i];
+    return NULL;
 }

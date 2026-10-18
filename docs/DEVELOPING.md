@@ -1933,6 +1933,31 @@ Every refusal names the file, the line number and the reason
 `mvl_overflow`, …). Line length is capped and every table is a fixed size, so
 no input can grow the reader without bound.
 
+## The KPI scoreboard
+
+`build/bin/z23 code kpi` is the one scoreboard. Each metric is reported with
+its previous value, delta, direction, verdict and the command that shows the
+rows behind it, in three groups:
+
+- `cmd` — `cmd.leaves`, `cmd.ready_pct` (ready leaves with a handler),
+  `cmd.help_pct` (leaves with a summary and an example) and `cmd.tested`
+  (ready leaves named inside a string literal under `tests/harness/src`).
+  `*_pct` values are hundredths of a percent.
+- `code` — `code.bash_scripts`, `code.size_debt`, `determinism_debt`,
+  `lint_gates`, `test_groups`, `capabilities`, `duplicate_candidates`,
+  `untested_invariants`, `territories`, `files_owned`.
+- `docs` — `docs.orphans`.
+
+`--group=cmd|code|docs|all` limits the rows shown. The default is read-only: it
+compares against the newest frame in `.codeindex/kpi.chainlog` and appends
+nothing. `--record=true` appends one frame holding every metric. A metric that
+cannot be measured is `unavailable`, never 0.
+
+`tools/lint/kpi_floor.txt` pins a floor for every metric that needs no node.
+The `check-kpi-floor` lint gate fails when a metric is worse than its floor and
+prints the metric, floor, current value and the command that shows the rows.
+The floor only tightens: raise it in the same commit that improves the metric.
+
 ## Retired procedures
 
 These procedures were last scripted in shell with no tracked caller and were

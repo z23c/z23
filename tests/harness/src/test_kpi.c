@@ -15,6 +15,7 @@
 #include "kpi/kpi.h"
 
 #include <stdio.h>
+#include <sys/stat.h>
 #include <string.h>
 
 #define KPI_CHECK(name, expr)                                      \
@@ -489,6 +490,402 @@ static int case_parsers(void)
     return failures;
 }
 
+/* ── 8. groups ─────────────────────────────────────────────────────── */
+
+static int case_group_names(void)
+{
+    int failures = 0;
+    uint32_t m = 0;
+    KPI_CHECK("no name and 'all' mean every group",
+              kpi_group_parse(NULL, &m) && m == KPI_GROUP_ALL &&
+                  kpi_group_parse("", &m) && m == KPI_GROUP_ALL &&
+                  kpi_group_parse("all", &m) && m == KPI_GROUP_ALL);
+    KPI_CHECK("each group name selects its own bit",
+              kpi_group_parse("cmd", &m) && m == KPI_GROUP_CMD &&
+                  kpi_group_parse("code", &m) && m == KPI_GROUP_CODE &&
+                  kpi_group_parse("docs", &m) && m == KPI_GROUP_DOCS);
+    KPI_CHECK("an unknown group is refused", !kpi_group_parse("nope", &m));
+    return failures;
+}
+
+static int case_group_of_ids(void)
+{
+    int failures = 0;
+    KPI_CHECK("dotted prefixes pick the group",
+              kpi_metric_group("cmd.leaves") == KPI_GROUP_CMD &&
+                  kpi_metric_group("docs.orphans") == KPI_GROUP_DOCS &&
+                  kpi_metric_group("code.size_debt") == KPI_GROUP_CODE);
+    KPI_CHECK("an id without a prefix belongs to code",
+              kpi_metric_group("lint_gates") == KPI_GROUP_CODE);
+    KPI_CHECK("percent math is whole hundredths and 0 over 0",
+              kpi_pct_hundredths(4, 7) == 5714 &&
+                  kpi_pct_hundredths(7, 7) == 10000 &&
+                  kpi_pct_hundredths(3, 0) == 0);
+    return failures;
+}
+
+/* The pre-existing ids are unchanged, so an older ledger still compares. */
+static int case_legacy_ids(void)
+{
+    static const char *const k_ids[] = {
+        "capabilities", "determinism_debt", "duplicate_candidates",
+        "files_owned", "lint_gates", "territories", "test_groups",
+        "untested_invariants" };
+    bool all = true;
+    for (size_t i = 0; i < sizeof k_ids / sizeof k_ids[0]; i++)
+        if (!kpi_metric_def_by_id(k_ids[i]))
+            all = false;
+    int failures = 0;
+    KPI_CHECK("the original metric ids are still defined", all);
+    return failures;
+}
+
+/* ── 9. the command scoreboard, on a fixture catalog ───────────────── */
+
+static bool fixture_put(const char *dir, const char *rel, const char *text)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s", dir, rel);
+    for (char *p = path + strlen(dir) + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        (void)mkdir(path, 0700);
+        *p = '/';
+    }
+    return spill(path, text);
+}
+
+/* The first 12 arguments every leaf macro shares, then filler up to `total`,
+ * with `handler` at index `h` (-1: none). */
+static void leaf_row(char *out, size_t cap, const char *macro, const char *path,
+                     const char *summary, const char *example, int total, int h,
+                     const char *handler)
+{
+    int n = snprintf(out, cap,
+                     "%s(\n    \"%s\", \"x\", \"\",\n    \"%s\",\n    \"sem\", 0,"
+                     " \"tag\", \"in\", \"out\", \"\", \"\",\n    \"%s\"",
+                     macro, path, summary, example);
+    for (int i = 12; i < total && (size_t)n < cap; i++)
+        n += snprintf(out + n, cap - (size_t)n, ",%s%s", i % 4 == 0 ? "\n    " : " ",
+                      i == h ? handler : "FILL");
+    snprintf(out + n, cap - (size_t)n, ")\n");
+}
+
+static void fixture_defs(const char *dir)
+{
+    char row[1024], all[8192] = "";
+    struct { const char *m, *p, *s, *e; int total, h; const char *hd; } r[] = {
+        { "ZCL_COMMAND_READY_READ", "x.one", "S", "z23 x one", 22, 21, "h_one" },
+        { "ZCL_COMMAND_READY_READ", "x.two", "", "z23 x two", 22, 21, "h_two" },
+        { "ZCL_COMMAND_READY_READ", "x.nul", "S", "e", 22, 21, "NULL" },
+        { "ZCL_COMMAND_PLANNED_READ", "x.plan", "S", "e", 20, -1, "" },
+        { "ZCL_COMMAND_COMPAT_READ", "x.compat", "S", "", 21, -1, "" },
+        { "ZCL_COMMAND_DEV_READ", "x.dev", "S", "e", 22, 19, "h_dev" },
+        { "ZCL_COMMAND_READY_READ", "x.paren", "a (b, c)", "e", 22, 21, "h_p" },
+    };
+    strcat(all, "ZCL_COMMAND_BRANCH(\"x\", \"\", \"Branch\", LAYER)\n");
+    strcat(all, "/* ZCL_COMMAND_READY_READ( inside a comment is skipped */\n");
+    for (size_t i = 0; i < sizeof r / sizeof r[0]; i++) {
+        leaf_row(row, sizeof row, r[i].m, r[i].p, r[i].s, r[i].e, r[i].total,
+                 r[i].h, r[i].hd);
+        strcat(all, row);
+    }
+    fixture_put(dir, "engine/composition/commands/catalog.def", "#include \"x.def\"\n");
+    fixture_put(dir, "engine/composition/commands/x.def", all);
+}
+
+static void fixture_tests(const char *dir)
+{
+    fixture_put(dir, "tests/harness/src/t1.c",
+        "// \"x.paren\" in a line comment is not a reference\n"
+        "/* \"x.dev\" in a block comment is not one either */\n"
+        "int x_dev = 1; /* x.dev as bare text */\n"
+        "const char *a = \"x.one\";\n"
+        "const char *b = \"z23 x two --flag\";\n"
+        "const char *c = \"x.paren.sub\";\n"
+        "const char *d = \"x.one.deeper\";\n");
+}
+
+static int case_cmd_scoreboard(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "kpi", "cmd");
+    fixture_defs(dir);
+
+    struct kpi_cmd_stats s;
+    KPI_CHECK("a catalog without test sources still scans",
+              kpi_cmd_scan(dir, &s) && !s.have_tested);
+    KPI_CHECK("leaves are READY, PLANNED and COMPAT rows; branches and comments "
+              "are not", s.leaves == 7);
+    KPI_CHECK("ready needs a handler: NULL and PLANNED/COMPAT rows are not "
+              "ready, a dev row with a handler is", s.ready == 4);
+    KPI_CHECK("help needs both a summary and an example", s.help == 5);
+
+    fixture_tests(dir);
+    KPI_CHECK("tested counts dotted and spaced mentions in string literals "
+              "only, never a longer path or a comment",
+              kpi_cmd_scan(dir, &s) && s.have_tested && s.tested == 2);
+
+    struct kpi_frame f;
+    kpi_collect_files(dir, KPI_GROUP_CMD, &f);
+    const struct kpi_entry *leaves = kpi_frame_find(&f, "cmd.leaves");
+    const struct kpi_entry *ready = kpi_frame_find(&f, "cmd.ready_pct");
+    const struct kpi_entry *help = kpi_frame_find(&f, "cmd.help_pct");
+    const struct kpi_entry *tested = kpi_frame_find(&f, "cmd.tested");
+    KPI_CHECK("the frame carries the four cmd metrics",
+              leaves && leaves->state == KPI_STATE_PRESENT &&
+                  leaves->value == 7 && ready && ready->value == 5714 &&
+                  help && help->value == 7142 && tested && tested->value == 2);
+
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* ── 10. the file-backed metrics, groups and UNAVAILABLE ───────────── */
+
+static int case_tree_metrics(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "kpi", "tree");
+    fixture_defs(dir);
+    fixture_put(dir, "tools/lint/bash_allowlist.txt", "# header\na.sh\nb.sh\nc.sh\n");
+    fixture_put(dir, "tools/lint/file_size_policy_baseline.txt",
+        "# header\nsrc/a.c 1600\nsrc/b.c 1700\n");
+    fixture_put(dir, "tools/lint/orphan_placement_baseline.txt", "# nothing owed\n");
+
+    struct kpi_frame f;
+    kpi_collect_files(dir, KPI_GROUP_ALL, &f);
+    const struct kpi_entry *bash = kpi_frame_find(&f, "code.bash_scripts");
+    const struct kpi_entry *size = kpi_frame_find(&f, "code.size_debt");
+    const struct kpi_entry *orph = kpi_frame_find(&f, "docs.orphans");
+    KPI_CHECK("bash scripts and size debt count their rows",
+              bash && bash->state == KPI_STATE_PRESENT && bash->value == 3 &&
+                  size && size->state == KPI_STATE_PRESENT && size->value == 2);
+    KPI_CHECK("an empty orphan baseline is an honest 0, not UNAVAILABLE",
+              orph && orph->state == KPI_STATE_PRESENT && orph->value == 0);
+    const struct kpi_entry *no_cmd_tests = kpi_frame_find(&f, "cmd.tested");
+    KPI_CHECK("without test sources cmd.tested is UNAVAILABLE while the other "
+              "cmd metrics are measured",
+              no_cmd_tests && no_cmd_tests->state == KPI_STATE_UNAVAILABLE &&
+                  kpi_frame_find(&f, "cmd.leaves")->state == KPI_STATE_PRESENT);
+    KPI_CHECK("a metric whose artifact is absent stays UNAVAILABLE, value 0",
+              kpi_frame_find(&f, "capabilities")->state ==
+                      KPI_STATE_UNAVAILABLE &&
+                  kpi_frame_find(&f, "capabilities")->value == 0);
+
+    kpi_collect_files(dir, KPI_GROUP_DOCS, &f);
+    KPI_CHECK("a group mask measures only that group",
+              kpi_frame_find(&f, "docs.orphans")->state == KPI_STATE_PRESENT &&
+                  kpi_frame_find(&f, "cmd.leaves")->state ==
+                      KPI_STATE_UNAVAILABLE &&
+                  kpi_frame_find(&f, "code.bash_scripts")->state ==
+                      KPI_STATE_UNAVAILABLE);
+
+    uint8_t buf[KPI_PAYLOAD_MAX];
+    KPI_CHECK("a full frame of the grown table encodes within one payload",
+              (kpi_collect_files(dir, KPI_GROUP_ALL, &f), true) &&
+                  kpi_encode(&f, buf, sizeof buf) > 0);
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* ── 11. read-only mode appends nothing ────────────────────────────── */
+
+static bool slurp_file(const char *path, char *buf, size_t cap, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    *len = fread(buf, 1, cap, f);
+    bool ok = ferror(f) == 0;
+    fclose(f);
+    return ok;
+}
+
+static int case_peek_missing(const char *dir)
+{
+    int failures = 0;
+    char path[640];
+    snprintf(path, sizeof path, "%s/absent.chainlog", dir);
+    struct kpi_ledger_result r;
+    struct stat st;
+    KPI_CHECK("peeking a ledger that does not exist succeeds with no baseline",
+              kpi_ledger_peek(path, &r) && !r.have_previous && !r.wrote &&
+                  r.prior_records == 0);
+    KPI_CHECK("and does not create it", stat(path, &st) != 0);
+    return failures;
+}
+
+static int case_peek_existing(const char *dir)
+{
+    int failures = 0;
+    char path[640];
+    snprintf(path, sizeof path, "%s/kpi.chainlog", dir);
+    struct kpi_frame a;
+    frame_seed(&a);
+    struct kpi_ledger_result r;
+    KPI_CHECK("one frame is recorded",
+              kpi_ledger_record(path, &a, &r) && r.seq == 1);
+
+    static char before[1 << 16], after[1 << 16];
+    size_t nb = 0, na = 0;
+    KPI_CHECK("the ledger reads back for comparison",
+              slurp_file(path, before, sizeof before, &nb) && nb > 0);
+    KPI_CHECK("a peek returns the newest frame as the baseline",
+              kpi_ledger_peek(path, &r) && r.have_previous && !r.wrote &&
+                  r.seq == 0 && r.prior_records == 1);
+    KPI_CHECK("the baseline carries the recorded values",
+              kpi_frame_find(&r.previous, "gamma") &&
+                  kpi_frame_find(&r.previous, "gamma")->value == 100);
+    KPI_CHECK("peeking twice still leaves the ledger byte-identical",
+              kpi_ledger_peek(path, &r) &&
+                  slurp_file(path, after, sizeof after, &na) && na == nb &&
+                  memcmp(before, after, nb) == 0);
+    return failures;
+}
+
+static int case_peek_foreign(const char *dir)
+{
+    int failures = 0;
+    char other[640];
+    snprintf(other, sizeof other, "%s/other.chainlog", dir);
+    struct kpi_ledger_result r;
+    KPI_CHECK("a file that is not a chainlog is refused, not read as empty",
+              spill(other, "not a chainlog at all, but long enough to read\n"
+                           "0123456789012345678901234567890123456789012345\n") &&
+                  !kpi_ledger_peek(other, &r));
+    return failures;
+}
+
+static int case_read_only_ledger(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "kpi", "peek");
+    failures += case_peek_missing(dir);
+    failures += case_peek_existing(dir);
+    failures += case_peek_foreign(dir);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* ── 12. the floor: loading, and one step worse ────────────────────── */
+
+static int case_floor_loads(const char *path)
+{
+    int failures = 0;
+    unsigned bad = 0;
+    struct kpi_floor fl;
+    KPI_CHECK("comments, blanks and trailing comments load",
+              spill(path, "# header\n\ncmd.leaves 7\ncode.size_debt 2 # why\n") &&
+                  kpi_floor_load(path, &fl, &bad) && fl.count == 2 &&
+                  fl.value[0] == 7 && fl.value[1] == 2);
+    KPI_CHECK("a missing floor file is refused",
+              !kpi_floor_load("/nonexistent/kpi_floor.txt", &fl, &bad) &&
+                  bad == 0);
+    return failures;
+}
+
+static bool floor_refused(const char *path, const char *text, unsigned line)
+{
+    struct kpi_floor fl;
+    unsigned bad = 0;
+    return spill(path, text) && !kpi_floor_load(path, &fl, &bad) && bad == line;
+}
+
+static int case_floor_refusals(const char *path)
+{
+    int failures = 0;
+    KPI_CHECK("an unknown metric is refused with its line",
+              floor_refused(path, "# h\nno.such 1\n", 2));
+    KPI_CHECK("a neutral metric cannot be floored",
+              floor_refused(path, "capabilities 1\n", 1));
+    KPI_CHECK("a duplicate row is refused",
+              floor_refused(path, "cmd.leaves 1\ncmd.leaves 2\n", 2));
+    KPI_CHECK("a non-numeric value is refused",
+              floor_refused(path, "cmd.leaves x\n", 1));
+    KPI_CHECK("a negative value is refused",
+              floor_refused(path, "cmd.leaves -1\n", 1));
+    KPI_CHECK("a row without a value is refused",
+              floor_refused(path, "cmd.leaves\n", 1));
+    return failures;
+}
+
+/* Equal passes; one step worse in the declared direction fails. */
+static int case_floor_steps(const char *path)
+{
+    int failures = 0;
+    struct kpi_floor fl;
+    unsigned bad = 0;
+    struct kpi_frame f;
+    memset(&f, 0, sizeof f);
+    f.count = 2;
+    f.metric[0] = entry_of("cmd.leaves", KPI_STATE_PRESENT, 7);       /* up */
+    f.metric[1] = entry_of("code.size_debt", KPI_STATE_PRESENT, 2);   /* down */
+    struct kpi_miss miss[4];
+    KPI_CHECK("metrics exactly at their floor pass",
+              spill(path, "cmd.leaves 7\ncode.size_debt 2\n") &&
+                  kpi_floor_load(path, &fl, &bad) &&
+                  kpi_floor_check(&fl, &f, miss, 4) == 0);
+    f.metric[0].value = 8;
+    f.metric[1].value = 1;
+    KPI_CHECK("better than the floor passes",
+              kpi_floor_check(&fl, &f, miss, 4) == 0);
+    f.metric[0].value = 6;
+    size_t n = kpi_floor_check(&fl, &f, miss, 4);
+    KPI_CHECK("a higher-is-better metric one step down fails, naming it",
+              n == 1 && strcmp(miss[0].def->id, "cmd.leaves") == 0 &&
+                  miss[0].kind == KPI_MISS_WORSE && miss[0].floor == 7 &&
+                  miss[0].current == 6);
+    f.metric[0].value = 7;
+    f.metric[1].value = 3;
+    n = kpi_floor_check(&fl, &f, miss, 4);
+    KPI_CHECK("a lower-is-better metric one step up fails, naming it",
+              n == 1 && strcmp(miss[0].def->id, "code.size_debt") == 0 &&
+                  miss[0].current == 3 && miss[0].floor == 2);
+    return failures;
+}
+
+static int case_floor_unmeasured(const char *path)
+{
+    int failures = 0;
+    struct kpi_floor fl;
+    unsigned bad = 0;
+    struct kpi_frame f;
+    memset(&f, 0, sizeof f);
+    f.count = 2;
+    f.metric[0] = entry_of("cmd.leaves", KPI_STATE_PRESENT, 7);
+    f.metric[1] = entry_of("code.size_debt", KPI_STATE_UNAVAILABLE, 0);
+    struct kpi_miss miss[4];
+    KPI_CHECK("a floored metric that cannot be measured fails, not passes",
+              spill(path, "cmd.leaves 7\ncode.size_debt 2\n") &&
+                  kpi_floor_load(path, &fl, &bad) &&
+                  kpi_floor_check(&fl, &f, miss, 4) == 1 &&
+                  miss[0].kind == KPI_MISS_UNAVAILABLE);
+    f.count = 1;
+    KPI_CHECK("a floored metric absent from the frame fails",
+              kpi_floor_check(&fl, &f, miss, 4) == 1);
+    return failures;
+}
+
+static int case_floor(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "kpi", "floor");
+    char path[640];
+    snprintf(path, sizeof path, "%s/kpi_floor.txt", dir);
+    failures += case_floor_loads(path);
+    failures += case_floor_refusals(path);
+    failures += case_floor_steps(path);
+    failures += case_floor_unmeasured(path);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_kpi(void);
 int test_kpi(void)
 {
@@ -500,6 +897,13 @@ int test_kpi(void)
     failures += case_ledger_previous();
     failures += case_missing_artifact();
     failures += case_parsers();
+    failures += case_group_names();
+    failures += case_group_of_ids();
+    failures += case_legacy_ids();
+    failures += case_cmd_scoreboard();
+    failures += case_tree_metrics();
+    failures += case_read_only_ledger();
+    failures += case_floor();
     printf("kpi: %d failure(s)\n", failures);
     return failures;
 }

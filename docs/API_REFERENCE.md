@@ -1164,7 +1164,7 @@ represented by its children's sections.
 | `code have` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_have.v1` | `z23 code have validation` | Find existing capabilities first |
 | `code territory` | ready | read / read / public · background/moderate | **`name`** | `zcl.code_territory.v1` | `z23 code territory core/modules/net` | Score one module's evidence surface |
 | `code focus` | ready | read / read / public · background/moderate | **`specialist`**, `list` | `zcl.code_focus.v1` | `z23 code focus net` | Rank a specialist's next work |
-| `code kpi` | ready | mutate / dev-mutation / public · background/moderate | none | `zcl.code_kpi.v1` | `z23 code kpi` | Track measured build outcomes |
+| `code kpi` | ready | mutate / dev-mutation / public · background/moderate | `group`, `record` | `zcl.code_kpi.v1` | `z23 code kpi --group=cmd` | Track measured build outcomes |
 | `code corpus` | ready | read / read / public · background/moderate | none | `zcl.code_corpus.v1` | `z23 code corpus` | Measure the reusable C23 corpus |
 | `code general` (aliases: `general`) | ready | read / read / public · background/moderate | **`name`** | `zcl.general_brief.v1` | `z23 general core/modules/net` | Brief one territory or rank evidence gaps |
 

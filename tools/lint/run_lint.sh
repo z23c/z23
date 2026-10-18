@@ -277,6 +277,7 @@ gate_command() {
         check-generated-artifact-contradictions) echo './build/bin/z23-lint check-generated-artifact-contradictions --selftest && ./build/bin/z23-lint check-generated-artifact-contradictions' ;;
         check-describe-budget)             echo './tools/lint/check_describe_budget.sh --selftest && ./tools/lint/check_describe_budget.sh' ;;
         check-catalog-rooms)               echo './build/bin/z23-lint check-catalog-rooms --selftest && ./build/bin/z23-lint check-catalog-rooms' ;;
+        check-kpi-floor)                   echo './build/bin/z23-lint check-kpi-floor --selftest && ./build/bin/z23-lint check-kpi-floor' ;;
         check-markdown-links)              echo './tools/lint/check_markdown_links.sh .' ;;
         check-doc-inline-paths)            echo './tools/lint/check_doc_inline_paths.sh' ;;
         check-hex-codec-single)            echo './tools/lint/check_hex_codec_single.sh --selftest && ./tools/lint/check_hex_codec_single.sh' ;;
