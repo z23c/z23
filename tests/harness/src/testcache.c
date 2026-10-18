@@ -678,6 +678,7 @@ static bool group_reads_external_inputs(const char *name)
         "wallet_destruction_drill",
         /* reads the tests/fixtures/wiki_docs tree */
         "wiki_tree",
+        "wiki_docs_install",
         /* --- /proc + CPU-feature dispatch (the host, not the tree) --- */
         "boot_self_respawn",
         "canary_sentinel_watch",

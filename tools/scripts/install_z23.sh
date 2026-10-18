@@ -673,6 +673,37 @@ atomic_relative_link() {
     mv -fh -- "$tmp" "$link"
 }
 
+# Installs the Markdown documentation tree (docs/**/*.md, relative paths kept,
+# nothing else) at <prefix>/share/z23/docs, where `z23 wiki` finds it for both
+# the <prefix>/bin/z23 and the <prefix>/lib/z23/generations/<sha>/z23 layouts.
+# The tree is staged in a sibling directory and `docs` is a relative link that
+# is replaced by rename; the previous copy is removed only after that rename.
+# The source is Z23_INSTALL_DOCS_DIR or the docs/ directory of the checkout
+# holding this script; a script fetched standalone has none and installs no
+# docs.
+install_docs() {
+    local prefix="$1" share="$1/share/z23" src old="" stage
+    src="${Z23_INSTALL_DOCS_DIR:-$SCRIPT_DIR/../../docs}"
+    if [ ! -f "$src/README.md" ]; then
+        say "no docs tree at $src; z23 wiki will report DOCS_UNAVAILABLE" >&2
+        return 0
+    fi
+    mkdir -p "$share"
+    [ ! -e "$share/docs" ] || [ -L "$share/docs" ] \
+        || die "$share/docs exists and is not an installer-managed link"
+    [ ! -L "$share/docs" ] || old="$(readlink "$share/docs")"
+    stage="$(mktemp -d "$share/docs.XXXXXX")" || die "could not stage the docs tree"
+    (cd "$src" && find . -type f -name "*.md" -exec sh -c \
+        "d=\$1; shift; for f; do mkdir -p \"\$d/\${f%/*}\" && cp -- \"\$f\" \"\$d/\$f\" || exit 1; done" \
+        sh "$stage" {} +) || die "could not copy the docs tree"
+    chmod 755 "$stage"
+    atomic_relative_link "${stage##*/}" "$share/docs" \
+        || die "could not link the installed docs tree"
+    case "$old" in
+        docs.??????) find "$share/$old" -xdev -depth -delete ;;
+    esac
+}
+
 macos_generation_matches() {
     local stage="$1" generation="$2" name
     # Every name the verified manifest lists (cmp reads through the helper
@@ -805,6 +836,7 @@ install_payload_macos_generation() {
     atomic_relative_link ../../lib/z23/current/AGENT_CARD.md \
         "$prefix/share/z23/AGENT_CARD.md" \
         || die "could not link the current verified agent card"
+    install_docs "$prefix"
 }
 
 install_payload() {
@@ -831,6 +863,7 @@ install_payload() {
     # The agent card is verified payload, so it is installed like payload:
     # an assistant reading it is reading bytes SHA256SUMS covered.
     install -m 644 "$stage/AGENT_CARD.md" "$carddir/AGENT_CARD.md"
+    install_docs "$prefix"
 }
 
 xml_escape() {
@@ -1186,6 +1219,14 @@ selftest_prepare() {
     printf 'confined-verifier\n' >"$tmp/good/zclassic23-package-verify"
     printf 'cert-worker\n' >"$tmp/good/zclassic23-acme"
     printf '# Z23 agent card\n\nRun `z23 status`.\n' >"$tmp/good/AGENT_CARD.md"
+
+    # Documentation fixture: Markdown installs, other files do not.
+    mkdir -p "$tmp/docsrc/sub"
+    printf "# Docs root\n\nRoot page.\n" >"$tmp/docsrc/README.md"
+    printf "# Page\n\nNested page.\n" >"$tmp/docsrc/sub/page.md"
+    printf "{}\n" >"$tmp/docsrc/sub/data.jsonl"
+    printf "notes\n" >"$tmp/docsrc/notes.txt"
+    export Z23_INSTALL_DOCS_DIR="$tmp/docsrc"
     (cd "$tmp/good" && sha256sum $RELEASE_MEMBERS_LEGACY >SHA256SUMS)
 
     # Shell-only curl fixture: map https://mirror.invalid/<path> into the
@@ -1734,6 +1775,23 @@ selftest_remote_manifest_and_signal() {
         || die "selftest: signalled install installed z23"
 }
 
+# The installed docs tree holds the Markdown files at their relative paths and
+# nothing else, and a replaced install leaves exactly one copy behind.
+selftest_docs_assert() {
+    local prefix="$1" label="$2" share="$1/share/z23" docs
+    docs="$share/docs"
+    [ -L "$docs" ] || die "selftest: $label docs must be an installer-managed link"
+    cmp -s "$Z23_INSTALL_DOCS_DIR/README.md" "$docs/README.md" \
+        || die "selftest: $label README.md did not install"
+    cmp -s "$Z23_INSTALL_DOCS_DIR/sub/page.md" "$docs/sub/page.md" \
+        || die "selftest: $label nested page.md did not install"
+    [ ! -e "$docs/sub/data.jsonl" ] && [ ! -e "$docs/notes.txt" ] \
+        || die "selftest: $label installed a non-Markdown file"
+    set -- "$share"/docs.*
+    [ "$#" -eq 1 ] && [ -d "$1" ] \
+        || die "selftest: $label must leave exactly one docs copy"
+}
+
 selftest_local_success() {
     local tmp="$SELFTEST_TMP" rc out install_card
 
@@ -1816,6 +1874,11 @@ selftest_local_success() {
     out="$(run_install "$tmp/prefix" "$tmp/units" "$tmp/good" 2>"$tmp/ok2.err")" \
         || die "selftest: second install failed"
     [ "$out" = "$NEXT_COMMAND" ] || die "selftest: re-run stdout drifted"
+    selftest_docs_assert "$tmp/prefix" Linux
+    printf 'Changed.\n' >>"$tmp/docsrc/README.md"
+    run_install "$tmp/prefix" "$tmp/units" "$tmp/good" >/dev/null 2>"$tmp/ok3.err" \
+        || die "selftest: docs refresh install failed"
+    selftest_docs_assert "$tmp/prefix" "Linux refresh"
 
     # The shipped unit must Restart=always so checkpoint install-on-next-boot
     # (a clean exit) is brought back. on-failure would strand a new node.
@@ -2236,6 +2299,7 @@ EOF
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
         || die "selftest: staging changed the selected generation"
     selftest_macos_helper_bytes "$prefix" "$mac/v1"
+    selftest_docs_assert "$prefix" macOS
 
     # Readiness can succeed while launchd is still running other bytes. The
     # exact txt-vnode digest must catch that and restore v1 automatically.

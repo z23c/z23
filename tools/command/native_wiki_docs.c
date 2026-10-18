@@ -55,7 +55,9 @@ static bool wk_dirname(char *path)
 }
 
 /* An installed binary: docs/ beside the executable or up to three parents
- * above it (a checkout's build/bin), else <prefix>/share/z23/docs. */
+ * above it (a checkout's build/bin), else share/z23/docs of the install
+ * prefix, found up to four parents above the executable directory:
+ * <prefix>/bin/z23 and <prefix>/lib/z23/generations/<sha>/z23. */
 static bool wk_docs_from_exe(struct wk_docs *docs)
 {
     char dir[WK_PATH_MAX], up[WK_PATH_MAX];
@@ -68,7 +70,10 @@ static bool wk_docs_from_exe(struct wk_docs *docs)
         if (!wk_dirname(up))
             break;
     }
-    return wk_dirname(dir) && wk_docs_try_in(docs, dir, "share/z23/docs");
+    for (int level = 1; level <= 4 && wk_dirname(dir); level++)
+        if (wk_docs_try_in(docs, dir, "share/z23/docs"))
+            return true;
+    return false;
 }
 
 bool wk_docs_open(const struct zcl_command_request *request,

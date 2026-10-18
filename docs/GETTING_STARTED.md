@@ -587,6 +587,12 @@ operator-approved release and datadir. The public download front door remains
 disabled until the signed platform index and fresh-host acceptance in
 [`docs/work/BOOTSTRAP_PLAN.md`](work/BOOTSTRAP_PLAN.md) are complete.
 
+`tools/scripts/install_z23.sh` also installs the Markdown documentation tree
+(`docs/**/*.md` only) at `<prefix>/share/z23/docs`, replacing the previous copy
+by rename, on Linux and macOS, so `z23 wiki` works outside a checkout. The tree
+comes from the `docs/` directory of the checkout holding the script, or from
+`Z23_INSTALL_DOCS_DIR`; a script fetched on its own installs none.
+
 `make service-install` fails closed if `$(PREFIX)/bin/z23` is missing, so
 run `make install` first or use `make dev-service-install` to run the node
 straight from `build/bin/z23`. The LaunchAgent starts at login, restarts on

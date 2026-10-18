@@ -2094,6 +2094,7 @@ int main(int argc, char **argv)
     { extern int test_work_card(void); failures += test_work_card(); }
     { extern int test_lab(void); failures += test_lab(); }
     { extern int test_wiki_tree(void); failures += test_wiki_tree(); }
+    { extern int test_wiki_docs_install(void); failures += test_wiki_docs_install(); }
     { extern int test_fleet_wiki_mutation(void); failures += test_fleet_wiki_mutation(); }
     { extern int test_fleet_board_bridge(void); failures += test_fleet_board_bridge(); }
     { extern int test_board_site(void); failures += test_board_site(); }
