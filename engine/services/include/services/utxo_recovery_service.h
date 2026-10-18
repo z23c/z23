@@ -89,6 +89,12 @@ struct utxo_import_result utxo_recovery_import_ldb(
  * read-only. */
 struct zcl_result utxo_recovery_copy_chainstate_stable(const char *cs_path,
                                                        const char *import_path);
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+/* Direct census seam: a test can pin refusal of an uninspectable member
+ * without sleeping through the production retry budget. */
+struct zcl_result utxo_recovery_chainstate_signature_for_test(
+    const char *path, uint64_t *out);
+#endif
 
 /* ── Chain tip restoration ───────────────────────────────── */
 

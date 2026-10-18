@@ -19,6 +19,7 @@
 #include "storage/coins_view_sqlite.h"
 #include "util/ar_step_readonly.h"
 #include "util/blocker.h"
+#include "util/file_tree_ops.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -103,6 +104,80 @@ static bool urs_exec_progress(sqlite3 *db, const char *sql)
     }
     return true;
 }
+
+#if !defined(_WIN32)
+static int urs_chainstate_copy_refusal_case(void)
+{
+    int failures = 0;
+    char dir[512] = {0};
+    char dangling[512] = {0}, import[512] = {0};
+    bool made_dir = test_mkdtemp(dir, sizeof(dir), "urs_copy_census") != NULL;
+    bool setup = made_dir;
+    if (setup) {
+        int dn = snprintf(dangling, sizeof(dangling),
+                          "%s/MANIFEST-000002", dir);
+        int in = snprintf(import, sizeof(import), "%s-copy", dir);
+        setup = dn > 0 && (size_t)dn < sizeof(dangling) &&
+                in > 0 && (size_t)in < sizeof(import);
+    }
+    bool linked = setup && symlink("missing-leveldb-table", dangling) == 0;
+    bool caller_refused = false;
+    if (linked) {
+        struct zcl_result copied =
+            utxo_recovery_copy_chainstate_stable(dir, import);
+        caller_refused = !copied.ok;
+    }
+    URS_CHECK("urs: stable copy refuses an incomplete source census",
+              caller_refused);
+    if (import[0])
+        (void)zcl_tree_remove(import);
+    if (linked)
+        unlink(dangling);
+    if (made_dir)
+        rmdir(dir);
+    return failures;
+}
+
+static int urs_chainstate_census_cases(void)
+{
+    int failures = 0;
+    char dir[512] = {0};
+    char regular[512] = {0}, dangling[512] = {0};
+    uint64_t signature = 0;
+    FILE *f = NULL;
+    bool made_dir = test_mkdtemp(dir, sizeof(dir), "urs_census") != NULL;
+    bool setup = made_dir;
+    if (setup) {
+        int rn = snprintf(regular, sizeof(regular), "%s/000001.ldb", dir);
+        int dn = snprintf(dangling, sizeof(dangling),
+                          "%s/MANIFEST-000002", dir);
+        setup = rn > 0 && (size_t)rn < sizeof(regular) &&
+                dn > 0 && (size_t)dn < sizeof(dangling);
+    }
+    if (setup) {
+        f = fopen(regular, "wb");
+        setup = f && fwrite("leveldb", 1, 7, f) == 7 && fclose(f) == 0;
+        f = NULL;
+    }
+    struct zcl_result census =
+        utxo_recovery_chainstate_signature_for_test(dir, &signature);
+    URS_CHECK("urs: complete chainstate census is signable",
+              setup && census.ok);
+    bool linked = setup && symlink("missing-leveldb-table", dangling) == 0;
+    census = utxo_recovery_chainstate_signature_for_test(dir, &signature);
+    URS_CHECK("urs: uninspectable chainstate member refuses partial census",
+              linked && !census.ok);
+    if (f)
+        fclose(f);
+    if (linked)
+        unlink(dangling);
+    if (regular[0])
+        unlink(regular);
+    if (made_dir)
+        rmdir(dir);
+    return failures;
+}
+#endif
 
 static bool urs_seed_finalized_floor(int height, const struct uint256 *hash,
                                      const char *status)
@@ -377,6 +452,10 @@ int test_utxo_recovery_service(void)
 {
     printf("\n=== utxo recovery service tests ===\n");
     int failures = 0;
+#if !defined(_WIN32)
+    failures += urs_chainstate_census_cases();
+    failures += urs_chainstate_copy_refusal_case();
+#endif
 
     /* ── 1. Policy-gated wipe: allowed (small UTXO set) ── */
 
