@@ -188,10 +188,12 @@ static bool smoke_leaf_ok(const struct zcl_command_spec *s, const char *dir,
  * registry and render a zcl.command_schema.v1 document on --help. A row with
  * refuse set is also called with empty input in the scratch datadir, which
  * must answer one zcl.result.v1 refusal (ok=false, non-empty error.code) and
- * leave the datadir empty. Rows without it have no required input, so an empty
- * call would act (bind a socket, take the node singleton, sweep the real
- * worktree pools, sample the host or write a seed or KPI record); those are
- * checked for resolution and schema only. */
+ * leave the datadir empty. Rows without it are the leaves where an empty call
+ * would act or be handed to a live node or wallet (bind a socket, take the
+ * node singleton, lock the wallet, sweep the real worktree pools, sample the
+ * host, write a seed or KPI record, or settle or arm a spend through a node
+ * RPC that does not refuse locally); those are checked for resolution and
+ * schema only. */
 struct contract_row {
     const char *path;
     bool refuse;
@@ -210,6 +212,14 @@ static const struct contract_row contract_rows[] = {
     { "fleet.experiment.result", true }, { "fleet.join", true },
     { "fleet.link.probe", false }, { "fleet.steer.deliver", true },
     { "fleet.steer.drop", true }, { "fleet.vitals.sample", false },
+    { "core.epoch.anchor", true }, { "core.wallet.address.label", true },
+    { "core.wallet.recovery.restore", true },
+    { "core.wallet.security.encrypt", true },
+    { "core.wallet.security.lock", false }, { "vault.intent.cancel", false },
+    { "vault.intent.commit", false }, { "vault.intent.issue", true },
+    { "vault.send-token", false }, { "vault.swap.redeem", true },
+    { "vault.swap.refund", true }, { "yardsale.buy", false },
+    { "yardsale.seller.arm", false }, { "yardsale.seller.disarm", false },
 };
 
 static bool contract_refusal(const char *wire)
