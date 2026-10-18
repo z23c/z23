@@ -2,17 +2,17 @@
 
 - **Status:** Superseded by `docs/FRAMEWORK.md`.
 - **Deciders:** Project maintainer.
-- **Supersedes:** the audit-first master plan (archived as `~/.claude/plans/archive/zclassic23-plan-audit-first-2026-05-22.md`) and the 3-epoch revamp framing (`~/.claude/plans/archive/revamp-zclassic23.md`).
+- **Supersedes:** the audit-first master plan and the 3-epoch revamp framing, both kept in the maintainer's private planning notes, which are not in the repository.
 
 ---
 
 ## Context
 
-The project oscillated between three incompatible framings — audit-first, ruthless purge, demolition-only (each rejected below in Alternatives) — each producing a plan that contradicted the previous one's recent commits. The maintainer resolved the oscillation by reframing the question from "what should we delete?" to "what are we building?", answered in `~/.claude/plans/zclassic23-ideal-architecture.md`.
+The project oscillated between three incompatible framings — audit-first, ruthless purge, demolition-only (each rejected below in Alternatives) — each producing a plan that contradicted the previous one's recent commits. The maintainer resolved the oscillation by reframing the question from "what should we delete?" to "what are we building?", answered in the maintainer's private architecture notes, which are not in the repository.
 
 ## Decision
 
-Adopt the **AI-Integrated Personal Sovereignty Stack** vision and the layer-cake architecture in `~/.claude/plans/zclassic23-ideal-architecture.md` as the canonical destination. Operating mode: **build forward, transform in place.**
+Adopt the **AI-Integrated Personal Sovereignty Stack** vision and the layer-cake architecture in the maintainer's private architecture notes as the canonical destination. Operating mode: **build forward, transform in place.**
 
 Concretely:
 
@@ -20,7 +20,7 @@ Concretely:
 2. **Positioning** = one ~30 MB dynamically-linked C23 binary on a $200 SBC providing bank + identity + inbox + market + swap + web host + games + AI co-pilot, all behind Tor. <!-- stale-ok: historical ADR positioning statement; current size via tools/scripts/binary_size.sh -->
 
 3. **Mode** = build forward. Recent work is bedrock for the destination, not cruft to be torn out. Pure deletions are bounded at ~2,500 LOC (Wave F-1, five dead helpers + dormant mirror-consensus machinery + three deprecated import-orchestrator files).
-4. **Roadmap** = six waves (F, S, M, Z, T, R) in `~/.claude/plans/zclassic23-plan.md`. The wedge dissolves naturally at the Wave S cutover; no targeted patch ships before then.
+4. **Roadmap** = six waves (F, S, M, Z, T, R) in the maintainer's private master plan. The wedge dissolves naturally at the Wave S cutover; no targeted patch ships before then.
 
 ## Consequences
 
@@ -45,9 +45,5 @@ Concretely:
 
 ## References
 
-- `~/.claude/plans/zclassic23-plan.md` — canonical master plan (replaces audit-first version).
-- `~/.claude/plans/zclassic23-ideal-architecture.md` — vision / destination doc.
-- `~/.claude/plans/archive/zclassic23-plan-audit-first-2026-05-22.md` — superseded plan, kept for archaeology.
-- `~/.claude/projects/<this-repo>/memory/feedback_dream_first_dont_flip_flop.md` — user feedback that triggered the pivot.
-- `~/.claude/projects/<this-repo>/memory/feedback_less_is_more_holistic.md` — companion feedback on the whack-a-mole pattern.
+- The maintainer's private master plan, architecture notes and the recorded feedback that prompted this decision are not part of the repository.
 - `docs/FRAMEWORK.md` — canonical architecture doc. (The L1–L7 layer-cake framing this ADR introduced was superseded 2026-05-23 by the eight-shape framework; see FRAMEWORK.md and its §9 debt-board decision log.)

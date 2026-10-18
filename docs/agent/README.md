@@ -6,9 +6,10 @@ New to a z23 fleet? Read [START_HERE.md](START_HERE.md) first. Then [AGENTS.md](
 [FORWARD_PLAN.md](../work/FORWARD_PLAN.md) for scoped context. The development procedure is
 [DEVELOPING.md](../DEVELOPING.md). These adapters do not reorder that work.
 
-Before editing, read `~/.config/dev-workers/OPERATIONS.md`, run
-`devworker where z23`, inspect dirty work and `git worktree list --porcelain`, and
-fetch the exact `origin/main` identity. A standalone checkout is not exclusive
+Before editing, inspect dirty work and `git worktree list --porcelain`, and
+fetch the exact `origin/main` identity. On a managed host, also read its host
+policy and run `devworker where z23`; those tools are not part of the repository.
+A standalone checkout is not exclusive
 ownership or permission to publish; directory layout grants no authority.
 
 ## Choose the adapter

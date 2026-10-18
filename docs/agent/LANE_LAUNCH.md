@@ -8,8 +8,9 @@ procedure remains in [DEVELOPING.md](../DEVELOPING.md).
 
 ## Dispatch
 
-1. Read host policy and run `devworker where z23`; inspect existing worktree and
-   component ownership before assigning work. Preserve dirty work and leases.
+1. Inspect existing worktree and
+   component ownership before assigning work (on a managed host, read its policy
+   and run `devworker where z23` first). Preserve dirty work and leases.
 2. Record the full fetched `origin/main` commit. Give each worker a disjoint
    path contract and a concrete acceptance. Commands, Makefile, impact rules,
    and generated catalogs each need one primary writer.

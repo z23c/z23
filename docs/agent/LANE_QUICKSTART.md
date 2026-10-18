@@ -7,8 +7,9 @@ review, and native publication procedure is [DEVELOPING.md](../DEVELOPING.md).
 Dispatch: [LANE_LAUNCH.md](LANE_LAUNCH.md). Report:
 [LANE_REPORT.md](LANE_REPORT.md).
 
-1. Read the host policy and run `devworker where z23`. Inspect the checkout, native
-   ownership, dirty files, leases, and exact `origin/main`. Resume owned work
+1. Inspect the checkout, native
+   ownership, dirty files, leases, and exact `origin/main` (on a managed host,
+   read its policy and run `devworker where z23` first). Resume owned work
    in place; never manufacture a replacement queue or overwrite another lane.
 2. If independent work needs another checkout, use the existing native
    `dev lane new` route from a qualified dev binary, under `devbuild --wait`.

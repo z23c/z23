@@ -10,7 +10,7 @@ lives in [`../../AGENTS.md`](../../AGENTS.md); the normal loop lives in
 
 ## Startup ritual
 
-Read the host policy and run `devworker where z23`. Inspect dirty work and
+On a managed host, read its policy and run `devworker where z23`. Inspect dirty work and
 `git worktree list --porcelain`, then fetch and record exact `origin/main`.
 Resume owned work in place. Worktree layout alone grants no ownership or
 publication authority. Use native lane preparation when isolation is required.
