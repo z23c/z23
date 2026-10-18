@@ -1100,7 +1100,7 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(agent_doc_buf,
                       "suppressed_by_mirror_contract") != NULL);
         ASSERT(strstr(agent_doc_buf,
-                      "z23 dumpstate condition_engine") != NULL);
+                      "z23 ops state --subsystem=condition_engine") != NULL);
         ASSERT(strstr(agent_doc_buf, "chain_serving_ready") != NULL);
         ASSERT(strstr(agent_doc_buf, "index_projection_ready") != NULL);
         ASSERT(strstr(agent_doc_buf, "readiness_status") != NULL);
