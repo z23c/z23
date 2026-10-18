@@ -27,7 +27,9 @@
  *                  A manifest recorded before this scheme existed has a
  *                  compiler_id with no "sha256:" prefix; `check` calls that
  *                  out by name (see below) and `rewrite-compiler-id` updates
- *                  it in place without a rebuild.>
+ *                  it in place without a rebuild. `check` compares ids with
+ *                  tor_compiler_ids_match (tools/tor_compiler_id.h): equal
+ *                  binary hash, else equal version text after the driver word.>
  *     configure_args_sha256=<sha256 of the NUL-joined configure_opts array>
  *     archive_sha256=<sha256 of libtor.a> <ed25519 donna> <ed25519 ref10> <keccak-tiny>
  *
@@ -88,6 +90,7 @@
 #include "platform/file_sync.h"
 #include "platform/path_replace.h"
 #include "zsha256/zsha256.h"
+#include "tor_compiler_id.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -475,7 +478,7 @@ static int check_compiler_id_field(const provenance_t *pv, const char *want_comp
         printf("tor-provenance: compiler_id MISMATCH manifest has no compiler_id line\n");
         return 0;
     }
-    if (strcmp(pv->compiler_id, want_compiler_id) == 0) {
+    if (tor_compiler_ids_match(pv->compiler_id, want_compiler_id)) {
         printf("tor-provenance: compiler_id ok\n");
         return 1;
     }
@@ -790,8 +793,8 @@ static int run_selftest(void)
     }
 
     const char *fake_commit_ok = "0123456789abcdef0123456789abcdef012345aa"; /* 40 hex chars */
-    const char *first_compiler_id = "selftest-compiler-id";
-    const char *fake_compiler_id = "selftest-replaced-compiler-id";
+    const char *first_compiler_id = "cc (selftest) 1.0";
+    const char *fake_compiler_id = "cc (selftest) 2.0";
     /* 64 hex chars: "0123456789abcdef" repeated 4 times. */
     const char *fake_configure_sha =
         "0123456789abcdef" "0123456789abcdef" "0123456789abcdef" "0123456789abcdef";
