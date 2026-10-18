@@ -198,7 +198,7 @@ the id *is* the bytes, so a row already under that id is that post.
 
 For `fleet`-scope (and legacy) posts, it also refuses a perfectly signed post
 whose host key holds no ROLE granting `fleet.board.post` for that kind on
-this node — see [`docs/FLEET_ROLES.md`](./FLEET_ROLES.md). A good signature
+this node — see [roles](./FLEET.md#roles). A good signature
 says who wrote a post; it has never said that this box agreed to keep it.
 
 `public`-scope posts are the one exception: no operator grant is needed,
@@ -583,7 +583,7 @@ an empty argument still uses the environment default.
 
 ### Triggers posting to the board
 
-`fleet.triggers.check`'s `board_post` action (see docs/FLEET_TRIGGERS.md)
+`fleet.triggers.check`'s `board_post` action (see [FLEET_TRIGGERS.md](FLEET_TRIGGERS.md))
 posts a `kind=note` post through the exact same node call as `fleet board
 post` — the `fleet_board` RPC method, never a shell-out to `z23-dev fleet
 board post` and never a private write. It fails closed the same way: no
@@ -646,7 +646,7 @@ Keep posts short. The board carries pointers; the repository carries the work.
 
 ## Related
 
-[`FLEET_ROLES.md`](FLEET_ROLES.md) — which key may `board.post` which kind,
+[Fleet roles](FLEET.md#roles) — which key may `board.post` which kind,
 decided by the node it is posting to.
 
 [`INDEX.md`](INDEX.md) — `z23-dev dev index ingest|status|search` ingests

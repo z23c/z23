@@ -1260,7 +1260,7 @@ REMOTE_COMMAND_CLASS("fleet.objectives", REMOTE_CLASS_NEVER, "")
  * node's key, so a remote form would let a caller decide, in this node's
  * own name, who this node trusts. Roles are this node's own decision
  * about a key and never a statement accepted from a peer
- * (docs/FLEET_ROLES.md); a remote leaf would be exactly that statement.
+ * (docs/FLEET.md); a remote leaf would be exactly that statement.
  */
 REMOTE_COMMAND_CLASS("fleet.roles.list", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.roles.grant", REMOTE_CLASS_NEVER, "")

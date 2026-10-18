@@ -114,15 +114,6 @@ from a hash, signature, test, or reproduction receipt.
 - [`MIND.md`](MIND.md) — the per-node resident that owns rebuilding this box's
   code index, what it holds, and why a stale answer is refused rather than
   rebuilt inside a query.
-- [`FLEET_AGENTS.md`](FLEET_AGENTS.md) — what every AI agent on this box is
-  doing right now, and each executor's grade over time: `z23-dev fleet agents`,
-  the ledger columns it reads, the grade formula, and what it does not collect.
-- [`FLEET_OBJECTIVES.md`](FLEET_OBJECTIVES.md) — the closed catalog of named
-  objectives z23 optimizes, and `z23-dev fleet objectives`, the one command
-  that prints each one's current value, target, and status.
-- [`FLEET_ROLES.md`](FLEET_ROLES.md) — which key may call which fleet leaf,
-  decided by this node alone: the closed role/grant catalog, the signed
-  local grant/revoke store, and `z23 fleet roles list|grant|revoke|check`.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
 - [`CHAOS_HARNESS.md`](CHAOS_HARNESS.md) — the two chaos/kill harnesses (the
@@ -166,6 +157,8 @@ from a hash, signature, test, or reproduction receipt.
 ## Operate and recover a node
 
 - [`RUNBOOK.md`](RUNBOOK.md) — symptom-driven diagnostics and operations.
+- [`FLEET.md`](FLEET.md) — fleet operator guide: machines, joining, tunnel,
+  shells, vitals, board, wiki, agents, roles and troubleshooting.
 - [`FLEET_TRIGGERS.md`](FLEET_TRIGGERS.md) — the closed registry of
   reactions to local events (`z23-dev fleet triggers`).
 - [`TENACITY.md`](TENACITY.md) — copy-first recovery invariants.

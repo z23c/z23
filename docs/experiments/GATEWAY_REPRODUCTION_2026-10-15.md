@@ -99,7 +99,7 @@ negatives were not run. Both pairings were revoked. These facts establish
 a measured earlier pair, not acceptance of the candidate above or a
 persistent usable fleet route.
 
-The [rollout runbook](../FLEET_TUNNEL_ROLLOUT.md) requires fresh per-host
+The [tunnel section of the fleet guide](../FLEET.md#tunnel) requires fresh per-host
 approval and acceptance before publication as a working fleet procedure.
 
 ## Integration and publication continuation

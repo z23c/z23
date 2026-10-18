@@ -2,6 +2,8 @@
 
 # Four-host shell and transfer observation — 2026-10-15
 
+rhett3.dev and rhett4.dev were retired on 2026-10-18; this record is historical evidence.
+
 All twelve directed pairs among z23-r1, z23-r2, z23-r3 and z23-r4
 completed both a direct SSH exchange and an SSH-forwarded exchange.
 Each source initiated its own three peer connections; the coordinator did not
@@ -53,7 +55,7 @@ four agent sessions are currently active. No keys were forwarded, host pins
 changed, service restarted or firewall modified. No Z23 receiver was started.
 
 The command recipe remains in the single
-[fleet rollout runbook](../FLEET_TUNNEL_ROLLOUT.md#observed-openssh-peer-access).
+[fleet guide](../FLEET.md#shells-and-remote-commands).
 Builds still require devbuild admission and source changes still require
 component ownership. Route availability grants neither consensus nor custody
 authority.

@@ -199,25 +199,9 @@ source inventory and unmeasured acceptance are recorded in
 
 ### Native JSON monitoring and wiki
 
-Inspect the selected binary before using an interface:
-
-```bash
-z23 discover schema ops.telemetry.storage.disk
-z23 discover schema fleet.steer.brief
-z23 discover schema fleet.vitals.sample
-z23 discover help fleet.wiki
-```
-
-| Existing interface | What it establishes | What it does not establish |
-|---|---|---|
-| `ops.telemetry.storage.disk` | Running-node datadir headroom and node thresholds | Every development volume or the installed development reserve |
-| `ops.mesh.machines` | Durable paired-machine rows and a bounded live status refresh | Instant live collection from every peer; it probes at most eight active records within a collective deadline |
-| `ops.mesh.status` | One paired receiver's verified signed status capsule | An unrestricted remote query or authority beyond status-read |
-| `fleet.vitals.sample` | Signed local host measurements, including datadir free space | A remote refresh or automatic collection on every peer |
-| `fleet.steer.brief` | Bounded task/worker view with resource fields, ages and missing reasons | A live probe of every admitted machine |
-| `fleet.ledger.status` | Held local/replica chains and newest-row ages | Fresh remote measurements or their complete contents |
-| `ops.host.gc` | Classification of its configured development proof pools; dry-run by default | Authority to remove unique source, evidence or production state |
-| `fleet.wiki.*` | Shared procedural explanations and their history | Current measurements, task ownership or an execution grant |
+The commands and the table of existing monitoring interfaces, with what each
+establishes and does not establish, are in the
+[fleet operator guide](../FLEET.md#health-and-vitals).
 
 An instant fleet answer is a bounded local projection. Each host row must
 identify observation time, age, source, filesystem scope, policy identity,

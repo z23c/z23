@@ -4,7 +4,7 @@
  *
  * WHAT IT READS. One tab-separated append-only ledger, 22 columns, written by
  * whoever dispatches a delegation. Column order is fixed and named in
- * docs/FLEET_AGENTS.md; the two that carry the measurement are `kind`
+ * the AG_COL_* indexes below; the two that carry the measurement are `kind`
  * (predict or result) and `task_id` (the string the two rows of ONE
  * delegation share).
  *

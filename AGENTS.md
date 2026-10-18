@@ -5,7 +5,8 @@
 Read this model-neutral contract before changing the repository. It owns
 durable principles, authority and the current work order (see *Priority and
 evidence*); [DEVELOPING.md](docs/DEVELOPING.md) owns procedure;
-[AGENT_FLEET.md](docs/work/AGENT_FLEET.md) owns the fleet operating model.
+[AGENT_FLEET.md](docs/work/AGENT_FLEET.md) owns the fleet operating model;
+[FLEET.md](docs/FLEET.md) is the operator guide to the fleet's machines.
 [HANDOFF.md](docs/HANDOFF.md) is maintainer-host live-state routing only.
 [CODE_FEARLESSLY.md](docs/CODE_FEARLESSLY.md) explains the operating
 disposition: act when the rails hold and build a missing rail.
