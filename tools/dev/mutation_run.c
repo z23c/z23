@@ -42,6 +42,7 @@
 #include "platform/clock.h"
 #include "platform/directory_compat.h"
 #include "platform/path_compat.h"
+#include "util/path_util.h"
 #include "sha3/sha3.h"
 
 #include <errno.h>
@@ -697,12 +698,6 @@ struct mut_ctx {
     char base_digest[65];
 };
 
-static bool mut_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
-}
-
 /* The scratch translation unit: a #line directive so every __FILE__ and
  * __LINE__ in the mutant matches the real file, then the (possibly mutated)
  * bytes. This is what makes compiling a copy indistinguishable from
@@ -857,7 +852,7 @@ static bool mut_cache_get(const struct mut_ctx *c, const char *key,
     *out = ZCL_MUT_OUTCOME_ERROR;
     *killed_by = "";
     char path[PATH_MAX];
-    if (!mut_join(path, sizeof path, c->cache_dir, key))
+    if (!zcl_path_join(path, sizeof path, c->cache_dir, key))
         return false;
     size_t len = 0;
     char *text = zcl_mut_read_file(path, &len);
@@ -888,7 +883,7 @@ static void mut_cache_put(const struct mut_ctx *c, const char *key,
                           enum zcl_mut_outcome o, const char *killed_by)
 {
     char path[PATH_MAX], line[128];
-    if (!mut_join(path, sizeof path, c->cache_dir, key))
+    if (!zcl_path_join(path, sizeof path, c->cache_dir, key))
         return;
     int n = snprintf(line, sizeof line, "%s %s\n", zcl_mut_outcome_name(o),
                      killed_by && killed_by[0] ? killed_by : "-");
@@ -899,12 +894,12 @@ static void mut_cache_put(const struct mut_ctx *c, const char *key,
 static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
 {
     const struct zcl_mut_config *cfg = c->cfg;
-    if (!mut_join(c->subject_c, sizeof c->subject_c, cfg->work_dir,
+    if (!zcl_path_join(c->subject_c, sizeof c->subject_c, cfg->work_dir,
                   "subject.c") ||
-        !mut_join(c->object, sizeof c->object, cfg->work_dir, "subject.o") ||
-        !mut_join(c->binary, sizeof c->binary, cfg->work_dir, "subject.bin") ||
-        !mut_join(c->rsp, sizeof c->rsp, cfg->work_dir, "link.rsp") ||
-        !mut_join(c->cache_dir, sizeof c->cache_dir, cfg->work_dir, "cache")) {
+        !zcl_path_join(c->object, sizeof c->object, cfg->work_dir, "subject.o") ||
+        !zcl_path_join(c->binary, sizeof c->binary, cfg->work_dir, "subject.bin") ||
+        !zcl_path_join(c->rsp, sizeof c->rsp, cfg->work_dir, "link.rsp") ||
+        !zcl_path_join(c->cache_dir, sizeof c->cache_dir, cfg->work_dir, "cache")) {
         (void)snprintf(rep->error, sizeof rep->error,
                        "scratch paths do not fit under %s", cfg->work_dir);
         return false;
@@ -933,7 +928,7 @@ static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
                 return false;
             }
             memcpy(rsp_path, p, path_len + 1u);
-        } else if (!mut_join(rsp_path, sizeof rsp_path, cfg->root, p)) {
+        } else if (!zcl_path_join(rsp_path, sizeof rsp_path, cfg->root, p)) {
             (void)snprintf(rep->error, sizeof rep->error, "rsp path too long");
             return false;
         }
@@ -1006,7 +1001,7 @@ bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
     long long started = mut_now_ms();
 
     char src_abs[PATH_MAX];
-    if (!mut_join(src_abs, sizeof src_abs, cfg->root, cfg->src_rel)) {
+    if (!zcl_path_join(src_abs, sizeof src_abs, cfg->root, cfg->src_rel)) {
         (void)snprintf(out->error, sizeof out->error, "source path too long");
         return false;
     }

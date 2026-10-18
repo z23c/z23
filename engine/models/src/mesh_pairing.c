@@ -8,6 +8,7 @@
 #include "crypto/sha3.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
+#include "util/path_util.h"
 
 #include <limits.h>
 #include <string.h>
@@ -51,17 +52,6 @@ static bool mesh_pairing_before_validate(void *record, void *ctx)
 DEFINE_MODEL_BEFORE_VALIDATE_READY(mesh_pairing,
                                    mesh_pairing_before_validate)
 
-static bool mesh_pairing_hex_id(const char *value)
-{
-    if (!value || strlen(value) != MESH_PAIRING_ID_HEX)
-        return false;
-    for (size_t i = 0; i < MESH_PAIRING_ID_HEX; i++)
-        if (!((value[i] >= '0' && value[i] <= '9') ||
-              (value[i] >= 'a' && value[i] <= 'f')))
-            return false;
-    return true;
-}
-
 bool db_mesh_pairing_validate(const struct db_mesh_pairing *row,
                               struct ar_errors *errors)
 {
@@ -77,7 +67,7 @@ bool db_mesh_pairing_validate(const struct db_mesh_pairing *row,
     bool id_ok = identities && mesh_pairing_id_derive(
         row->network_genesis, row->peer_master_pubkey,
         row->peer_noise_pubkey, derived);
-    validates_custom(errors, mesh_pairing_hex_id(row->pairing_id) && id_ok &&
+    validates_custom(errors, zcl_is_lower_hex(row->pairing_id, MESH_PAIRING_ID_HEX) && id_ok &&
                      strcmp(row->pairing_id, derived) == 0,
                      "pairing_id", "must match the bound public identities");
     validates_custom(errors, identities, "identities",
@@ -215,7 +205,7 @@ static bool mesh_pairing_read_checked(struct db_mesh_pairing *out,
         LOG_FAIL("mesh_pairing", "checked read: pairing ID is not text");
     const char *id = (const char *)sqlite3_column_text(st, 0);
     if (!id || sqlite3_column_bytes(st, 0) != MESH_PAIRING_ID_HEX ||
-        !mesh_pairing_hex_id(id))
+        !zcl_is_lower_hex(id, MESH_PAIRING_ID_HEX))
         LOG_FAIL("mesh_pairing", "checked read: malformed pairing ID");
 
     struct db_mesh_pairing row = {0};

@@ -17,11 +17,11 @@
 #include "platform/logical_cpu.h"
 #include "sha3/sha3.h"
 #include "util/spawn.h"
+#include "util/path_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -104,12 +104,6 @@ static bool mr_copy(char *out, size_t cap, const char *v, size_t vn)
     return true;
 }
 
-static bool mr_dir_ok(const char *path)
-{
-    struct stat st;
-    return path && path[0] && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 /* One identity character: ASCII alphanumeric plus `_`, `.` and `-`. */
 static bool mr_token_char(char c)
 {
@@ -157,7 +151,7 @@ static int mr_validate_ref(const struct muse_run_task *t,
 static int mr_validate_workspace(const struct muse_run_task *t,
     char err[MUSE_RUN_ERROR_MAX])
 {
-    if (!mr_dir_ok(t->workspace)) {
+    if (!zcl_path_is_dir(t->workspace)) {
         if (err)
             (void)snprintf(err, MUSE_RUN_ERROR_MAX,
                 "workspace is not a directory");
@@ -210,7 +204,7 @@ static int mr_validate(const struct muse_run_task *t,
     if (mr_validate_ref(t, err) != 0) return -1;
     if (mr_validate_workspace(t, err) != 0) return -1;
     if (mr_validate_work(t, err) != 0) return -1;
-    if (!mr_dir_ok(t->rundir)) {
+    if (!zcl_path_is_dir(t->rundir)) {
         if (err)
             (void)snprintf(err, MUSE_RUN_ERROR_MAX,
                 "rundir is not a directory");

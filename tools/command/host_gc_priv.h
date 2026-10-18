@@ -12,10 +12,9 @@
 
 #include "command/host_gc_sweep.h"
 
-/* Bounded copy/join. Both refuse rather than truncate: a truncated path is
+/* Bounded copy. It refuses rather than truncates: a truncated path is
  * a different path, and this engine hands paths to a removal command. */
 bool hg_copy(char *dst, size_t cap, const char *src);
-bool hg_join(char *out, size_t cap, const char *a, const char *b);
 
 /* Trim trailing whitespace and line endings in place. */
 void hg_strip(char *s);

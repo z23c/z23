@@ -55,15 +55,6 @@ static bool mind_flag(const struct zcl_command_request *request,
     return s && (strcmp(s, "true") == 0 || strcmp(s, "1") == 0);
 }
 
-static const char *mind_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
 /* One row of an answer: what was found, where, and what kind of thing it is.
  * Rows are uniform across question kinds on purpose — a caller renders the
  * table once. */
@@ -340,7 +331,7 @@ void zcl_native_handle_dev_mind_ask(const struct zcl_command_request *request,
         return;
     }
 
-    const char *root = mind_source_root(request);
+    const char *root = zcl_native_source_root(request);
     long long now = (long long)platform_time_wall_time_t();
     char summary[512];
     summary[0] = '\0';
@@ -613,7 +604,7 @@ void zcl_native_handle_dev_mind_status(
     (void)json_push_kv_str(&reply->data, "schema", "zcl.mind_status.v1");
     mind_status_local(reply, now, &running);
     if (!running)
-        mind_status_direct(reply, mind_source_root(request), now);
+        mind_status_direct(reply, zcl_native_source_root(request), now);
     if (mind_flag(request, "fleet") && !mind_status_fleet(reply))
         return;
     char summary[320];

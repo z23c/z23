@@ -22,15 +22,6 @@
 
 #define CF_TAG "native.code.focus"
 
-static const char *focus_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
 static void focus_push_obj(struct json_value *arr, struct json_value *obj)
 {
     (void)json_push_back(arr, obj);
@@ -155,7 +146,7 @@ void zcl_native_handle_code_focus(const struct zcl_command_request *request,
         return;
     }
 
-    const char *root = focus_source_root(request);
+    const char *root = zcl_native_source_root(request);
     struct codeindex *ci = codeindex_open_source_view(root);
     if (!ci) {
         LOG_ERROR(CF_TAG, "CODEINDEX_OPEN: %s", root);

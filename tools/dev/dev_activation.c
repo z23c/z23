@@ -28,6 +28,7 @@
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
 #include "storage/boot_auto_reindex.h"
+#include "util/path_util.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -53,14 +54,6 @@ static const char *dev_activation_executable_name(void)
 #else
     return "zclassic23-dev";
 #endif
-}
-
-bool dev_activation_join(char *out, size_t out_sz, const char *a, const char *b)
-{
-    int n = snprintf(out, out_sz, "%s/%s", a, b);
-    if (n <= 0 || (size_t)n >= out_sz)
-        LOG_FAIL("dev-activation", "path join overflow: %s/%s", a, b);
-    return true;
 }
 
 bool dev_activation_mkdir_p(const char *path)
@@ -370,7 +363,7 @@ bool dev_activation_link_generation(const struct dev_activation_txn *txn,
 #endif
         LOG_FAIL("dev-activation", "generation binary not executable: %s", bin);
     char link[PATH_MAX], tmp[PATH_MAX];
-    if (!dev_activation_join(link, sizeof(link), txn->gen_root, name))
+    if (!zcl_path_join(link, sizeof(link), txn->gen_root, name))
         return false;
     int n = snprintf(tmp, sizeof(tmp), "%s/.%s.%llu",
                      txn->gen_root, name,
@@ -638,15 +631,15 @@ static bool dev_validate_confinement(struct dev_activation_txn *txn)
 
     char dev_dd[PATH_MAX], canonical[PATH_MAX], soak[PATH_MAX], legacy[PATH_MAX];
 #if defined(_WIN32)
-    if (!dev_activation_join(dev_dd, sizeof(dev_dd), txn->home, "z23/dev") ||
-        !dev_activation_join(canonical, sizeof(canonical), txn->home, "z23/canonical") ||
-        !dev_activation_join(soak, sizeof(soak), txn->home, "z23/soak") ||
-        !dev_activation_join(legacy, sizeof(legacy), txn->home, "z23/legacy"))
+    if (!zcl_path_join(dev_dd, sizeof(dev_dd), txn->home, "z23/dev") ||
+        !zcl_path_join(canonical, sizeof(canonical), txn->home, "z23/canonical") ||
+        !zcl_path_join(soak, sizeof(soak), txn->home, "z23/soak") ||
+        !zcl_path_join(legacy, sizeof(legacy), txn->home, "z23/legacy"))
 #else
-    if (!dev_activation_join(dev_dd, sizeof(dev_dd), txn->home, ".zclassic-c23-dev") ||
-        !dev_activation_join(canonical, sizeof(canonical), txn->home, ".zclassic-c23") ||
-        !dev_activation_join(soak, sizeof(soak), txn->home, ".zclassic-c23-soak") ||
-        !dev_activation_join(legacy, sizeof(legacy), txn->home, ".zclassic"))
+    if (!zcl_path_join(dev_dd, sizeof(dev_dd), txn->home, ".zclassic-c23-dev") ||
+        !zcl_path_join(canonical, sizeof(canonical), txn->home, ".zclassic-c23") ||
+        !zcl_path_join(soak, sizeof(soak), txn->home, ".zclassic-c23-soak") ||
+        !zcl_path_join(legacy, sizeof(legacy), txn->home, ".zclassic"))
 #endif
         return false;
 
@@ -712,17 +705,17 @@ static bool dev_derive_paths(struct dev_activation_txn *txn)
     n = snprintf(txn->gen_root, sizeof(txn->gen_root), "%s", req->gen_root);
     if (n <= 0 || (size_t)n >= sizeof(txn->gen_root))
         LOG_FAIL("dev-activation", "gen_root too long");
-    if (!dev_activation_join(txn->current_link, sizeof(txn->current_link),
+    if (!zcl_path_join(txn->current_link, sizeof(txn->current_link),
                   txn->gen_root, "current") ||
-        !dev_activation_join(txn->last_good_link, sizeof(txn->last_good_link),
+        !zcl_path_join(txn->last_good_link, sizeof(txn->last_good_link),
                   txn->gen_root, "last-good") ||
-        !dev_activation_join(txn->staged_link, sizeof(txn->staged_link),
+        !zcl_path_join(txn->staged_link, sizeof(txn->staged_link),
                   txn->gen_root, "staged") ||
-        !dev_activation_join(txn->rejected_dir, sizeof(txn->rejected_dir),
+        !zcl_path_join(txn->rejected_dir, sizeof(txn->rejected_dir),
                   txn->gen_root, "rejected") ||
-        !dev_activation_join(txn->lock_path, sizeof(txn->lock_path),
+        !zcl_path_join(txn->lock_path, sizeof(txn->lock_path),
                   txn->gen_root, "activation.lock") ||
-        !dev_activation_join(txn->inprogress_path, sizeof(txn->inprogress_path),
+        !zcl_path_join(txn->inprogress_path, sizeof(txn->inprogress_path),
                   txn->gen_root, "activation.in_progress"))
         return false;
     n = snprintf(txn->compat_bin, sizeof(txn->compat_bin),
@@ -1333,7 +1326,7 @@ int dev_activation_activate_generation(const uint8_t gen_sha256[32],
              "gen-%s", txn.candidate_sha_hex);
     snprintf(result->candidate_generation, sizeof(result->candidate_generation),
              "%s", txn.candidate_generation);
-    dev_activation_join(txn.candidate_dir, sizeof(txn.candidate_dir), txn.gen_root,
+    zcl_path_join(txn.candidate_dir, sizeof(txn.candidate_dir), txn.gen_root,
              txn.candidate_generation);
     int candidate_n = snprintf(txn.candidate_bin, sizeof(txn.candidate_bin),
                                "%s/%s", txn.candidate_dir,

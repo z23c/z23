@@ -13,6 +13,7 @@
 #include "hotswap/hotswap.h"
 #include "hotswap_loader_internal.h"
 #include "util/clientversion.h"
+#include "util/path_util.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -42,18 +43,6 @@ static const char *eligible_probe(const char *source_identity)
 bool manifest_text_present(const char *value)
 {
     return value && value[0] && strnlen(value, 4096) < 4096;
-}
-
-static bool lowercase_sha256_hex(const char *value)
-{
-    if (!value || strlen(value) != 64)
-        return false;
-    for (size_t i = 0; i < 64; i++) {
-        if (!((value[i] >= '0' && value[i] <= '9') ||
-              (value[i] >= 'a' && value[i] <= 'f')))
-            return false;
-    }
-    return true;
 }
 
 bool hotswap_manifest_v2_validate(
@@ -93,8 +82,8 @@ bool hotswap_manifest_v2_validate(
                         (unsigned long long)
                             manifest->required_host_capabilities);
     const char *host_source_id = zcl_build_source_id_sha256();
-    if (!lowercase_sha256_hex(manifest->build_identity) ||
-        !lowercase_sha256_hex(host_source_id) ||
+    if (!zcl_is_lower_hex(manifest->build_identity, 64) ||
+        !zcl_is_lower_hex(host_source_id, 64) ||
         strcmp(manifest->build_identity, host_source_id) != 0)
         MANIFEST_REJECT(
             "build source identity mismatch: generation=%s host=%s",
@@ -105,7 +94,7 @@ bool hotswap_manifest_v2_validate(
     if (!required_probe)
         MANIFEST_REJECT("source is not runtime-eligible: %s",
                         manifest->source_identity ? manifest->source_identity : "");
-    if (!lowercase_sha256_hex(manifest->input_digest))
+    if (!zcl_is_lower_hex(manifest->input_digest, 64))
         MANIFEST_REJECT("input content SHA-256 must be 64 lowercase hex chars");
     if (!manifest->stateless || manifest->state_schema_version != 0)
         MANIFEST_REJECT("stateful provider is reload-required");

@@ -50,15 +50,6 @@ static void dac_fail(struct zcl_command_reply *reply,
                            message, evidence ? evidence : "");
 }
 
-static const char *dac_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *root = getenv("ZCL_DEV_SOURCE_ROOT");
-    return root && root[0] ? root : ".";
-}
-
 static bool dac_hex64(const char *s)
 {
     return s && strlen(s) == 64 &&
@@ -213,7 +204,7 @@ static bool dac_read_current(const char *gen_root, char out[80])
 static bool dac_resolve_root(const struct zcl_command_request *request,
                              char out[PATH_MAX])
 {
-    return platform_directory_canonical_real(dac_source_root(request), out,
+    return platform_directory_canonical_real(zcl_native_source_root(request), out,
                                              PATH_MAX);
 }
 

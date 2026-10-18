@@ -17,6 +17,7 @@
 #include "platform/directory_compat.h"
 #include "sha3/sha3.h"
 #include "util/spawn.h"
+#include "util/path_util.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -166,12 +167,6 @@ static bool nr_is_regular(const char *path)
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-static bool nr_is_dir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 /* mkdir -p: every prefix is created, EEXIST is fine, the leaf must be a
  * directory afterwards. */
 static bool nr_mkdirs(const char *dir)
@@ -189,7 +184,7 @@ static bool nr_mkdirs(const char *dir)
             return false;
         buf[i] = saved;
     }
-    return nr_is_dir(dir);
+    return zcl_path_is_dir(dir);
 }
 
 static bool nr_write_file(const char *path, const char *data, size_t len)

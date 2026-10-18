@@ -13,6 +13,7 @@
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_science.h"
+#include "util/path_util.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -46,16 +47,6 @@ struct vcs_zcode_science_index {
     struct vcs_zcode_science_index_review_entry *reviews;
     size_t review_count;
 };
-
-static bool index_hex_lower(const char *s, size_t want)
-{
-    for (size_t i = 0; i < want; i++) {
-        char c = s[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-            return false;
-    }
-    return s[want] == '\0';
-}
 
 static bool index_root_agrees(const uint8_t rederived[32],
                               const uint8_t address[32])
@@ -342,7 +333,7 @@ static void index_scan_shard(const char *repo_root, const char *shard_path,
     }
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
-        if (!index_hex_lower(de->d_name, 62))
+        if (!zcl_is_lower_hex(de->d_name, 62))
             continue;
         char hex64[65];
         int n = snprintf(hex64, sizeof(hex64), "%s%s", shard, de->d_name);
@@ -494,7 +485,7 @@ struct vcs_zcode_science_index *vcs_zcode_science_index_build(
     bool cap_logged = false;
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
-        if (!index_hex_lower(de->d_name, 2))
+        if (!zcl_is_lower_hex(de->d_name, 2))
             continue; /* skips "tmp" and any non-shard entry */
         char shard_path[4400];
         n = snprintf(shard_path, sizeof(shard_path), "%s/%s", objects,

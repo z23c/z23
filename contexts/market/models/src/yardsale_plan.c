@@ -5,22 +5,12 @@
 #include "models/yardsale_plan.h"
 
 #include "util/log_macros.h"
+#include "util/path_util.h"
 
 #include <stdio.h>
 #include <string.h>
 
 DEFINE_MODEL_CALLBACKS(yardsale_plan)
-
-static bool yardsale_hex64(const char *value)
-{
-    if (!value || strlen(value) != 64)
-        return false;
-    for (size_t i = 0; i < 64; i++)
-        if (!((value[i] >= '0' && value[i] <= '9') ||
-              (value[i] >= 'a' && value[i] <= 'f')))
-            return false;
-    return true;
-}
 
 static bool yardsale_payload_hex_valid(const char *payload_hex)
 {
@@ -100,13 +90,13 @@ bool db_yardsale_plan_validate(
         validates_custom(errors, false, "record", "is null");
         return false;
     }
-    validates_custom(errors, yardsale_hex64(row->plan_root), "plan_root",
+    validates_custom(errors, zcl_is_lower_hex(row->plan_root, 64), "plan_root",
                      "must be a SHA3 root");
     validates_custom(errors,
                      strcmp(row->kind, YARDSALE_PLAN_KIND_ARM) == 0 ||
                          strcmp(row->kind, YARDSALE_PLAN_KIND_BUY) == 0,
                      "kind", "must be arm or buy");
-    validates_custom(errors, yardsale_hex64(row->request_hash),
+    validates_custom(errors, zcl_is_lower_hex(row->request_hash, 64),
                      "request_hash", "must be a SHA3 request identity");
     validates_custom(errors, yardsale_payload_hex_valid(row->payload_hex),
                      "payload_hex", "must be even-length lowercase hex");

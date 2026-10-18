@@ -12,6 +12,7 @@
 #include "vcs/zcode_creation_attribution.h"
 #include "vcs/zcode_creation_claim.h"
 #include "vcs/zcode_epoch_creation.h"
+#include "util/path_util.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -50,16 +51,6 @@ struct commons_epoch_ref {
     uint8_t epoch_root[32];
     uint8_t attribution_root[32];
 };
-
-static bool commons_hex(const char *text, size_t length)
-{
-    for (size_t i = 0; i < length; i++) {
-        char c = text[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-            return false;
-    }
-    return text[length] == '\0';
-}
 
 static void commons_failure(struct vcs_zcode_commons_projection *projection,
                             const uint8_t root[32], const char *reason)
@@ -312,7 +303,7 @@ static void commons_scan_shard(
         return;
     struct dirent *entry;
     while ((entry = readdir(directory)) != NULL) {
-        if (!commons_hex(entry->d_name, 62))
+        if (!zcl_is_lower_hex(entry->d_name, 62))
             continue;
         char hex64[65];
         n = snprintf(hex64, sizeof(hex64), "%s%s", shard, entry->d_name);
@@ -359,7 +350,7 @@ struct vcs_zcode_commons_projection *vcs_zcode_commons_projection_build(
         return projection;
     struct dirent *entry;
     while ((entry = readdir(directory)) != NULL)
-        if (commons_hex(entry->d_name, 2))
+        if (zcl_is_lower_hex(entry->d_name, 2))
             commons_scan_shard(projection, workspace, objects, entry->d_name);
     closedir(directory);
     projection->scan_complete = true;

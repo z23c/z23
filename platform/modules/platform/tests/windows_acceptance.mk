@@ -396,7 +396,8 @@ ZCL_WINDOWS_ACCEPTANCE_file_ops_copy_SOURCES := \
 	platform/modules/platform/src/private_acl_internal.c \
 	platform/modules/platform/src/private_file.c \
 	platform/modules/platform/src/file_metadata.c \
-	platform/modules/base/src/safe_alloc.c
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/util/src/path_util.c
 ZCL_WINDOWS_ACCEPTANCE_file_ops_copy_LIBS := -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_file_service_transport_SOURCES := \
 	platform/modules/platform/tests/file_service_transport_windows_acceptance.c \

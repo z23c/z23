@@ -21,6 +21,7 @@
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
 #include "platform/file_sync.h"
+#include "util/path_util.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "json/json.h"
@@ -197,7 +198,7 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
         return DEV_ACTIVATION_E_STAGE;
     snprintf(r->candidate_generation, sizeof(r->candidate_generation), "%s",
              txn->candidate_generation);
-    if (!dev_activation_join(txn->candidate_dir, sizeof(txn->candidate_dir),
+    if (!zcl_path_join(txn->candidate_dir, sizeof(txn->candidate_dir),
                   txn->gen_root, txn->candidate_generation))
         return DEV_ACTIVATION_E_STAGE;
     n = snprintf(txn->candidate_bin, sizeof(txn->candidate_bin),
@@ -263,9 +264,9 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
     }
     const char *tmpdir = tmpl;
     char tmp_bin[PATH_MAX], tmp_manifest[PATH_MAX];
-    if (!dev_activation_join(tmp_bin, sizeof(tmp_bin), tmpdir,
+    if (!zcl_path_join(tmp_bin, sizeof(tmp_bin), tmpdir,
                              "zclassic23-dev") ||
-        !dev_activation_join(tmp_manifest, sizeof(tmp_manifest), tmpdir,
+        !zcl_path_join(tmp_manifest, sizeof(tmp_manifest), tmpdir,
                              "manifest.json")) {
         (void)platform_private_directory_remove_empty(tmpdir);
         return DEV_ACTIVATION_E_STAGE;
@@ -354,7 +355,7 @@ static bool dev_import_existing(struct dev_activation_txn *txn,
     if (n <= 0 || (size_t)n >= sizeof(generation))
         return false;
     char dir[PATH_MAX];
-    if (!dev_activation_join(dir, sizeof(dir), txn->gen_root, generation))
+    if (!zcl_path_join(dir, sizeof(dir), txn->gen_root, generation))
         return false;
     if (platform_directory_probe_real(dir) != PLATFORM_DIRECTORY_PROBE_OK) {
         fprintf(stderr,

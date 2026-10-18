@@ -545,12 +545,6 @@ static bool rcv_exists(const char *path)
     return path && path[0] && stat(path, &st) == 0;
 }
 
-static bool rcv_is_dir(const char *path)
-{
-    struct stat st;
-    return path && path[0] && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 /* Read a whole small file. False when absent, unreadable, or larger than
  * cap — a truncated brief must never compare equal to a body. */
 static bool rcv_read_file(const char *path, char *out, size_t cap)
@@ -838,7 +832,7 @@ static bool rcv_git_dir(const char *ws, char *out, size_t cap)
     char line[RCV_PATH_MAX + 16];
     if (!zcl_path_join(dot, sizeof(dot), ws, ".git"))
         return false;
-    if (rcv_is_dir(dot))
+    if (zcl_path_is_dir(dot))
         return rcv_copy(out, cap, dot);
     if (!rcv_first_line(dot, line, sizeof(line)) ||
         strncmp(line, "gitdir: ", 8) != 0 || !line[8])
@@ -1148,7 +1142,7 @@ bool zcl_devagent_workspace_observe(const char *dir, bool scan_tracked,
     out->resolved = platform_directory_canonical_real(dir, real, sizeof(real));
     out->directory = out->resolved;
 #else
-    out->directory = rcv_is_dir(dir);
+    out->directory = zcl_path_is_dir(dir);
     /* Canonicalize the ROOT ITSELF and then use the canonical path for
      * everything after this line. Demanding realpath(dir) == dir instead
      * refuses every legitimate workspace that merely sits below a symlinked
@@ -1282,7 +1276,7 @@ static bool rcv_dir_workspace_ok(struct rcv_direction *d)
         d->selector = true;
         return true;
     }
-    if (d->workspace[0] == '/' && rcv_is_dir(d->workspace))
+    if (d->workspace[0] == '/' && zcl_path_is_dir(d->workspace))
         return true;
     (void)snprintf(d->code, sizeof(d->code),
                    "RECEIVE_WORKSPACE_SELECTOR_UNKNOWN");
@@ -1539,7 +1533,7 @@ static void rcv_ref_known(struct rcv_ctx *c, const char *ref,
         return;
     if (snprintf(dir, sizeof(dir), "%s/%s", c->p.enginedir, ref) <
             (int)sizeof(dir) &&
-        rcv_is_dir(dir)) {
+        zcl_path_is_dir(dir)) {
         k->known = true;
         (void)snprintf(k->stage, sizeof(k->stage), "engine");
         return;
@@ -2386,7 +2380,7 @@ static void rcv_beat(struct rcv_ctx *c)
     struct zcl_boardmail_ctx board = rcv_board_ctx(c);
     c->st->beats++;
     c->deferred = false;
-    if (c->dry && !rcv_is_dir(c->p.maildir))
+    if (c->dry && !zcl_path_is_dir(c->p.maildir))
         return;
     zcl_devagent_boardmail_import(&board, c->st);
     (void)snprintf(since, sizeof(since), "%s", c->dry ? "" : c->intake.pos);
@@ -3113,7 +3107,7 @@ static void rcv_status(const char *receiver, const char *workspace,
                                                      : "unconfigured");
     (void)json_push_kv_str(&reply->data, "lock", rcv_lock_state(&p));
     (void)json_push_kv_str(&reply->data, "mail",
-                           rcv_is_dir(p.maildir) ? "present" : "absent");
+                           zcl_path_is_dir(p.maildir) ? "present" : "absent");
     (void)json_push_kv_str(&reply->data, "scope", RCV_SCOPE);
     rcv_push_stats(reply, &st);
     rcv_push_intake(reply, &p);

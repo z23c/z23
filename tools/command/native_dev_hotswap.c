@@ -885,18 +885,6 @@ static void probe_module_path(const char *so_path,
     probe_rendered_clear();
 }
 
-/* The checkout the source form builds from: an explicit context root wins,
- * then ZCL_DEV_SOURCE_ROOT, then the working directory (the same order as
- * native_dev_verify_change_command.c verify_source_root). */
-static const char *hotswap_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *root = getenv("ZCL_DEV_SOURCE_ROOT");
-    return root && root[0] ? root : ".";
-}
-
 /* Build one source under `root`, then probe the module it produced through
  * exactly the path the so_path form runs.  Nothing is published or activated;
  * the build's cost and identity ride along in the reply. */
@@ -935,7 +923,7 @@ void zcl_native_handle_dev_hotswap_probe(
                                          reply))
         return;
     if (source_tu)
-        zcl_native_hotswap_probe_source_at(hotswap_source_root(request),
+        zcl_native_hotswap_probe_source_at(zcl_native_source_root(request),
                                            source_tu, reply);
     else
         probe_module_path(so_path, reply);

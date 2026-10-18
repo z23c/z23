@@ -25,6 +25,7 @@
 #include "platform/time_compat.h"
 #include "util/log_level.h"
 #include "zutf8/zutf8.h"
+#include "util/path_util.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -314,12 +315,6 @@ static bool rtx_index(const char *ws, const char *name, uint32_t mode,
     return fclose(f) == 0;
 }
 
-static bool rtx_is_dir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 static bool rtx_mkdirs(const char *dir)
 {
     char path[1600];
@@ -332,7 +327,7 @@ static bool rtx_mkdirs(const char *dir)
     (void)mkdir(path, 0700);
     (void)snprintf(path, sizeof(path), "%s/src", dir);
     (void)mkdir(path, 0700);
-    return rtx_is_dir(path);
+    return zcl_path_is_dir(path);
 }
 
 /* A checkout on `head`: a .git directory, a symbolic HEAD, its loose ref,

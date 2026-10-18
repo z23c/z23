@@ -10,6 +10,7 @@
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_continuity_policy.h"
 #include "vcs/zcode_patronage_funding.h"
+#include "util/path_util.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -32,16 +33,6 @@ struct vcs_zcode_patronage_projection {
     uint8_t failure_root[32];
     char failure_reason[48];
 };
-
-static bool projection_hex(const char *text, size_t length)
-{
-    for (size_t i = 0; i < length; i++) {
-        char c = text[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-            return false;
-    }
-    return text[length] == '\0';
-}
 
 static void projection_failure(
     struct vcs_zcode_patronage_projection *projection,
@@ -203,7 +194,7 @@ static void projection_scan_shard(
     if (!directory) return;
     struct dirent *entry;
     while ((entry = readdir(directory)) != NULL) {
-        if (!projection_hex(entry->d_name, 62)) continue;
+        if (!zcl_is_lower_hex(entry->d_name, 62)) continue;
         char hex64[65];
         n = snprintf(hex64, sizeof(hex64), "%s%s", shard, entry->d_name);
         if (n == 64) projection_consider(projection, context, hex64);
@@ -239,7 +230,7 @@ vcs_zcode_patronage_projection_build(
     if (!directory) return projection;
     struct dirent *entry;
     while ((entry = readdir(directory)) != NULL)
-        if (projection_hex(entry->d_name, 2))
+        if (zcl_is_lower_hex(entry->d_name, 2))
             projection_scan_shard(
                 projection, context, objects, entry->d_name);
     closedir(directory);

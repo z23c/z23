@@ -9,6 +9,7 @@
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
 #include "vcs/build_action.h"
+#include "util/path_util.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -170,17 +171,6 @@ static bool bf_action_same_plan(const struct db_build_action *a,
            strcmp(a->resource_policy, b->resource_policy) == 0;
 }
 
-static bool bf_lower_hex_id(const char *value)
-{
-    if (!value || strlen(value) != BUILD_FABRIC_ID_HEX)
-        return false;
-    for (size_t i = 0; i < BUILD_FABRIC_ID_HEX; i++)
-        if (!((value[i] >= '0' && value[i] <= '9') ||
-              (value[i] >= 'a' && value[i] <= 'f')))
-            return false;
-    return true;
-}
-
 static bool bf_capability_has(const char *capabilities, const char *wanted)
 {
     if (!capabilities || !wanted || !wanted[0])
@@ -280,7 +270,7 @@ struct zcl_result build_fabric_plan_reproduction(
 {
     if (out_action_id) out_action_id[0] = '\0';
     if (out_job_id) out_job_id[0] = '\0';
-    if (!ndb || !ndb->open || !bf_lower_hex_id(primary_action_id) ||
+    if (!ndb || !ndb->open || !zcl_is_lower_hex(primary_action_id, BUILD_FABRIC_ID_HEX) ||
         !reproduction_profile || !reproduction_profile[0] ||
         strlen(reproduction_profile) > BUILD_FABRIC_PROFILE_MAX ||
         now <= 0 || !out_action_id || !out_job_id)
@@ -382,8 +372,8 @@ struct zcl_result build_fabric_claim(
     bool *claimed)
 {
     if (claimed) *claimed = false;
-    if (!ndb || !ndb->open || !bf_lower_hex_id(worker_id) ||
-        !bf_lower_hex_id(lease_id) || now < 0 ||
+    if (!ndb || !ndb->open || !zcl_is_lower_hex(worker_id, BUILD_FABRIC_ID_HEX) ||
+        !zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) || now < 0 ||
         lease_seconds < BUILD_FABRIC_LEASE_SECONDS_MIN ||
         lease_seconds > BUILD_FABRIC_LEASE_SECONDS_MAX || !out || !claimed)
         return ZCL_ERR(-1, "claim requires valid worker, lease, time, and bounds");
@@ -442,8 +432,8 @@ static struct zcl_result bf_leased_transition(
     struct node_db *ndb, const char *action_id, const char *lease_id,
     const char *expected_state, const char *next_state, int64_t now)
 {
-    if (!ndb || !ndb->open || !bf_lower_hex_id(action_id) ||
-        !bf_lower_hex_id(lease_id) || now < 0)
+    if (!ndb || !ndb->open || !zcl_is_lower_hex(action_id, BUILD_FABRIC_ID_HEX) ||
+        !zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) || now < 0)
         return ZCL_ERR(-1, "leased transition requires valid ids and time");
     struct db_build_action action;
     struct db_build_job job;
@@ -501,8 +491,8 @@ struct zcl_result build_fabric_heartbeat(
     struct node_db *ndb, const char *action_id, const char *lease_id,
     int64_t now, int64_t lease_seconds)
 {
-    if (!ndb || !ndb->open || !bf_lower_hex_id(action_id) ||
-        !bf_lower_hex_id(lease_id) || now < 0 ||
+    if (!ndb || !ndb->open || !zcl_is_lower_hex(action_id, BUILD_FABRIC_ID_HEX) ||
+        !zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) || now < 0 ||
         lease_seconds < BUILD_FABRIC_LEASE_SECONDS_MIN ||
         lease_seconds > BUILD_FABRIC_LEASE_SECONDS_MAX)
         return ZCL_ERR(-1, "heartbeat requires valid ids, time, and bounds");
@@ -577,8 +567,8 @@ struct zcl_result build_fabric_finish_leased(
     struct node_db *ndb, const char *action_id, const char *lease_id,
     const char *outcome, const char *detail, int64_t now)
 {
-    if (!ndb || !ndb->open || !bf_lower_hex_id(action_id) ||
-        !bf_lower_hex_id(lease_id) || !outcome || !detail || now < 0 ||
+    if (!ndb || !ndb->open || !zcl_is_lower_hex(action_id, BUILD_FABRIC_ID_HEX) ||
+        !zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) || !outcome || !detail || now < 0 ||
         (strcmp(outcome, "FAILED") != 0 &&
          strcmp(outcome, "LOCAL_FALLBACK") != 0 &&
          strcmp(outcome, "CANCELLED") != 0))

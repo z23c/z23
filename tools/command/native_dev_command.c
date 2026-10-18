@@ -128,15 +128,6 @@ static void dev_reply_from_json(struct zcl_command_reply *reply,
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
 
-static const char *dev_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
 /* ── dev.status ────────────────────────────────────────────────────────── */
 void zcl_native_handle_dev_status(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
@@ -144,7 +135,7 @@ void zcl_native_handle_dev_status(const struct zcl_command_request *request,
     char body[16384], why[160] = {0};
     size_t len = 0;
     enum zcl_devloop_state_lookup lookup = zcl_devloop_cycle_state_read(
-        dev_source_root(request), body, sizeof(body), &len, NULL,
+        zcl_native_source_root(request), body, sizeof(body), &len, NULL,
         why, sizeof(why));
     if (lookup == ZCL_DEVLOOP_STATE_FOUND) {
         struct json_value doc;
@@ -193,7 +184,7 @@ void zcl_native_handle_dev_ff(const struct zcl_command_request *request,
         "make dev-bin, or z23-dev dev ff");
 #else
     char root[PATH_MAX];
-    const char *src_root = dev_source_root(request);
+    const char *src_root = zcl_native_source_root(request);
     if (!dev_canonical_directory(src_root, root)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "ROOT_RESOLVE_FAILED",
@@ -725,7 +716,7 @@ void zcl_native_handle_dev_publication_status(
     if (!dev_pub_require_job_root(job_hex, job_root, reply)) return;
 
     struct vcs_devloop_publication_job job;
-    const char *root = dev_source_root(request);
+    const char *root = zcl_native_source_root(request);
     if (!vcs_devloop_publication_job_load(root, job_root, &job)) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -1215,7 +1206,7 @@ void zcl_native_handle_dev_publication_advance(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct zcl_dev_publication_input publication = {
-        .source_root = dev_source_root(request),
+        .source_root = zcl_native_source_root(request),
         .workspace = json_get_str(json_get(request->input, "workspace")),
         .datadir = json_get_str(json_get(request->input, "datadir")),
         .job_root = json_get_str(json_get(request->input, "job_root")),
@@ -1464,7 +1455,7 @@ void zcl_native_handle_dev_publication_collect(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct zcl_dev_publication_input publication = {
-        .source_root = dev_source_root(request),
+        .source_root = zcl_native_source_root(request),
         .job_root = json_get_str(json_get(request->input, "job_root")),
     };
     zcl_dev_publication_collect(&publication, reply);
@@ -1526,7 +1517,7 @@ void zcl_native_handle_dev_app_describe(
         return;
     }
     char body[8192];
-    size_t n = zcl_devloop_app_describe_json(dev_source_root(request), app_id,
+    size_t n = zcl_devloop_app_describe_json(zcl_native_source_root(request), app_id,
                                              body, sizeof(body));
     if (n == 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -1552,7 +1543,7 @@ void zcl_native_handle_dev_app_plan(const struct zcl_command_request *request,
         return;
     }
     char body[4096];
-    size_t n = zcl_devloop_app_plan_json(dev_source_root(request), app_id,
+    size_t n = zcl_devloop_app_plan_json(zcl_native_source_root(request), app_id,
                                          resource, body, sizeof(body));
     if (n == 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -1588,7 +1579,7 @@ void zcl_native_handle_dev_app_scaffold(
         return;
     }
     char body[8192];
-    size_t n = zcl_devloop_app_scaffold_json(dev_source_root(request), app_id,
+    size_t n = zcl_devloop_app_scaffold_json(zcl_native_source_root(request), app_id,
                                              resource, body, sizeof(body));
     if (n == 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -1868,7 +1859,7 @@ static bool dev_drive_wait_cycle(
         size_t body_len = 0;
         enum zcl_devloop_state_lookup lookup =
             zcl_devloop_cycle_state_wait_after(
-                dev_source_root(request), current_epoch, (int)remaining_ms,
+                zcl_native_source_root(request), current_epoch, (int)remaining_ms,
                 body, sizeof(body), &body_len, &current_epoch,
                 why, sizeof(why));
         if (lookup == ZCL_DEVLOOP_STATE_INVALID) {
@@ -2460,7 +2451,7 @@ void zcl_native_handle_dev_change_apply(
         return;
     }
     struct dev_cycle_call call = {
-        .root = dev_source_root(request), .files = files, .count = count,
+        .root = zcl_native_source_root(request), .files = files, .count = count,
     };
     char body[16384];
     int rc = ZCL_COMMAND_EXIT_INTERNAL;
@@ -3391,7 +3382,7 @@ static void dev_loop_ensure(
     }
     const struct json_value *root_v = json_get(request->input, "root");
     const char *requested = root_v && root_v->type == JSON_STR
-        ? json_get_str(root_v) : dev_source_root(request);
+        ? json_get_str(root_v) : zcl_native_source_root(request);
     char root[PATH_MAX], lock[PATH_MAX], log[PATH_MAX];
     if (!dev_checkout_root(requested, root) ||
         !dev_watch_paths(root, lock, log)) {
@@ -3581,7 +3572,7 @@ void zcl_native_handle_dev_loop_start_async(
 void zcl_native_handle_dev_loop_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    dev_emit_loop_status(dev_source_root(request), reply);
+    dev_emit_loop_status(zcl_native_source_root(request), reply);
 }
 
 static bool dev_input_int(const struct json_value *input, const char *key,
@@ -3612,7 +3603,7 @@ void zcl_native_handle_dev_loop_wait(
                                "after_epoch,timeout_ms");
         return;
     }
-    const char *repo_root = dev_source_root(request);
+    const char *repo_root = zcl_native_source_root(request);
     int64_t current_epoch = after;
     char body[16384], why[160] = {0};
     size_t body_len = 0;
@@ -3676,7 +3667,7 @@ void zcl_native_handle_dev_loop_events(
     int64_t cursor = after;
     enum zcl_devloop_state_lookup lookup =
         zcl_devloop_cycle_state_wait_after(
-            dev_source_root(request), after, (int)heartbeat_ms,
+            zcl_native_source_root(request), after, (int)heartbeat_ms,
             body, sizeof(body), &body_len, &cursor, why, sizeof(why));
     if (lookup != ZCL_DEVLOOP_STATE_FOUND)
         cursor = after;
@@ -3746,7 +3737,7 @@ static bool dev_loop_stop_root(const struct zcl_command_request *request,
                                "root must be a zclassic23 checkout", "root");
         return false;
     }
-    const char *source = dev_source_root(request);
+    const char *source = zcl_native_source_root(request);
     if (!dev_canonical_directory(source, root))
         (void)snprintf(root, PATH_MAX, "%s", source);
     return true;
@@ -4397,7 +4388,7 @@ void zcl_native_handle_dev_test_run(
     (void)graph_load_us;
 #endif
     char root[PATH_MAX], bin[PATH_MAX], selector[160];
-    if (!dev_canonical_directory(dev_source_root(request), root) ||
+    if (!dev_canonical_directory(zcl_native_source_root(request), root) ||
 #if defined(_WIN32)
         snprintf(bin, sizeof(bin), "%s/build/bin/test_parallel_fast.exe", root) <= 0 ||
 #else
@@ -4700,7 +4691,7 @@ void zcl_native_handle_dev_test_sim(
 {
     char body[8192];
     int rc = ZCL_COMMAND_EXIT_INTERNAL;
-    if (!dev_capture_stdout(dev_call_sim, (void *)dev_source_root(request),
+    if (!dev_capture_stdout(dev_call_sim, (void *)zcl_native_source_root(request),
                             body, sizeof(body), &rc)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "SIM_CAPTURE_FAILED",
@@ -4983,7 +4974,7 @@ void zcl_native_handle_dev_diagnose_latest(
     struct zcl_dev_failure_record record;
     char why[192] = {0};
     enum zcl_dev_failure_lookup lookup =
-        zcl_dev_failure_read_latest(dev_source_root(request), &record,
+        zcl_dev_failure_read_latest(zcl_native_source_root(request), &record,
                                     why, sizeof(why));
     if (lookup == ZCL_DEV_FAILURE_LOOKUP_ABSENT) {
         (void)json_push_kv_str(&reply->data, "schema",
@@ -5046,7 +5037,7 @@ void zcl_native_handle_dev_diagnose_show(
     struct zcl_dev_failure_record record;
     char why[192] = {0};
     enum zcl_dev_failure_lookup lookup =
-        zcl_dev_failure_read(dev_source_root(request), failure_id, &record,
+        zcl_dev_failure_read(zcl_native_source_root(request), failure_id, &record,
                              why, sizeof(why));
     if (lookup == ZCL_DEV_FAILURE_LOOKUP_ABSENT) {
         zcl_command_reply_fail(

@@ -33,15 +33,6 @@ static const char *plan_str(const struct zcl_command_request *request,
     return value && value[0] ? value : NULL;
 }
 
-static const char *plan_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *root = getenv("ZCL_DEV_SOURCE_ROOT");
-    return root && root[0] ? root : ".";
-}
-
 static void plan_push_string(struct json_value *array, const char *value)
 {
     struct json_value item;
@@ -194,13 +185,13 @@ void zcl_native_handle_code_change_plan(
         return;
     }
 
-    struct codeindex *index = codeindex_open(plan_source_root(request));
+    struct codeindex *index = codeindex_open(zcl_native_source_root(request));
     if (!index) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",
                                "dispatch", true, false,
                                "could not open or rebuild the code index",
-                               plan_source_root(request));
+                               zcl_native_source_root(request));
         return;
     }
 
@@ -260,7 +251,7 @@ void zcl_native_handle_code_change_plan(
     for (size_t i = 0; i < edit.len; i++)
         plan_add_tests_for_path(edit.path[i], tests, &test_count,
                                 &consensus_risk);
-    if (plan_is_package_workspace(plan_source_root(request))) {
+    if (plan_is_package_workspace(zcl_native_source_root(request))) {
         for (size_t i = 0; i < edit.len; i++) {
             if (!plan_is_package_source(edit.path[i])) continue;
             plan_add_test(tests, &test_count, "zcode_package_registry");

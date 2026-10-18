@@ -19,6 +19,7 @@
 #endif
 
 #include "command/host_gc_priv.h"
+#include "util/path_util.h"
 
 #include <dirent.h>
 #include <limits.h>
@@ -39,15 +40,6 @@ bool hg_copy(char *dst, size_t cap, const char *src)
         return false;
     memcpy(dst, src, n + 1);
     return true;
-}
-
-bool hg_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n;
-    if (!out || !a || !b)
-        return false;
-    n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
 }
 
 void hg_strip(char *s)
@@ -98,7 +90,7 @@ static uint64_t hg_walk(const char *path, int depth, long *budget)
         char child[HOST_GC_PATH_CAP * 2];
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
             continue;
-        if (hg_join(child, sizeof(child), path, e->d_name))
+        if (zcl_path_join(child, sizeof(child), path, e->d_name))
             total += hg_walk(child, depth + 1, budget);
     }
     (void)closedir(d);
@@ -141,7 +133,7 @@ static void hg_chmod_walk(const char *path, int depth, long *budget)
         char child[HOST_GC_PATH_CAP * 2];
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
             continue;
-        if (hg_join(child, sizeof(child), path, e->d_name))
+        if (zcl_path_join(child, sizeof(child), path, e->d_name))
             hg_chmod_walk(child, depth + 1, budget);
     }
     (void)closedir(d);
@@ -196,7 +188,7 @@ static bool hg_protected_named(const char *home, const char *p,
          i++) {
         char full[HOST_GC_PATH_CAP];
         bool hit;
-        if (!hg_join(full, sizeof(full), home, k_hg_protected[i].rel))
+        if (!zcl_path_join(full, sizeof(full), home, k_hg_protected[i].rel))
             continue;
         hit = k_hg_protected[i].star
                   ? strncmp(p, full, strlen(full)) == 0

@@ -40,6 +40,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/file_clone.h"
+#include "util/path_util.h"
 #include "util/spawn.h"
 
 #include <dirent.h>
@@ -104,15 +105,6 @@ static void dln_strip(char *s)
     while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' ||
                      s[n - 1] == ' ' || s[n - 1] == '\t'))
         s[--n] = '\0';
-}
-
-static bool dln_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n;
-    if (!out || !a || !b)
-        return false;
-    n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
 }
 
 static bool dln_is_abs(const char *path)
@@ -235,8 +227,8 @@ static bool dln_collect_missing(const char *root, const char *path,
          i++) {
         char source[DLN_PATH_CAP], target[DLN_PATH_CAP];
         struct stat st;
-        if (!dln_join(source, sizeof(source), root, DLN_REQUIRED[i]) ||
-            !dln_join(target, sizeof(target), path, DLN_REQUIRED[i])) {
+        if (!zcl_path_join(source, sizeof(source), root, DLN_REQUIRED[i]) ||
+            !zcl_path_join(target, sizeof(target), path, DLN_REQUIRED[i])) {
             (void)snprintf(m->first, sizeof(m->first), "%s",
                            DLN_REQUIRED[i]);
             m->count = -1;
@@ -496,9 +488,9 @@ static bool dln_materialize(const char *source, const char *target,
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0)
             continue;
-        if (!dln_join(child_source, sizeof(child_source), source,
+        if (!zcl_path_join(child_source, sizeof(child_source), source,
                       entry->d_name) ||
-            !dln_join(child_target, sizeof(child_target), target,
+            !zcl_path_join(child_target, sizeof(child_target), target,
                       entry->d_name) ||
             !dln_materialize(child_source, child_target, copied))
             ok = false;
@@ -520,7 +512,7 @@ static bool dln_git_common_abs(const char *dir, char *out, size_t cap)
     if (got[0] == '/') {
         src = got;
     } else {
-        if (!dln_join(joined, sizeof(joined), dir, got))
+        if (!zcl_path_join(joined, sizeof(joined), dir, got))
             return false;
         src = joined;
     }
@@ -547,7 +539,7 @@ static bool dln_has_git(const char *path)
 {
     char marker[DLN_PATH_CAP];
     struct stat st;
-    if (!dln_join(marker, sizeof(marker), path, ".git"))
+    if (!zcl_path_join(marker, sizeof(marker), path, ".git"))
         return false;
     return lstat(marker, &st) == 0;
 }
@@ -556,8 +548,8 @@ static bool dln_materialize_one(const char *root, const char *dest,
                                 const char *rel, int *copied)
 {
     char source[DLN_PATH_CAP], target[DLN_PATH_CAP];
-    if (!dln_join(source, sizeof(source), root, rel) ||
-        !dln_join(target, sizeof(target), dest, rel)) {
+    if (!zcl_path_join(source, sizeof(source), root, rel) ||
+        !zcl_path_join(target, sizeof(target), dest, rel)) {
         dln_log("path_too_long", rel);
         return false;
     }
@@ -574,7 +566,7 @@ static bool dln_materialize_ext_archives(const char *root, const char *dest,
     struct stat st;
     bool ok = true;
 
-    if (!dln_join(ext, sizeof(ext), root, "vendor/tor/src/ext"))
+    if (!zcl_path_join(ext, sizeof(ext), root, "vendor/tor/src/ext"))
         return false;
     if (lstat(ext, &st) != 0)
         return true;
@@ -600,7 +592,7 @@ static bool dln_materialize_ext_archives(const char *root, const char *dest,
         struct stat st1;
         if (strcmp(e1->d_name, ".") == 0 || strcmp(e1->d_name, "..") == 0)
             continue;
-        if (!dln_join(l1, sizeof(l1), ext, e1->d_name)) {
+        if (!zcl_path_join(l1, sizeof(l1), ext, e1->d_name)) {
             ok = false;
             break;
         }
@@ -618,7 +610,7 @@ static bool dln_materialize_ext_archives(const char *root, const char *dest,
             if (strcmp(e2->d_name, ".") == 0 ||
                 strcmp(e2->d_name, "..") == 0)
                 continue;
-            if (!dln_join(l2, sizeof(l2), l1, e2->d_name)) {
+            if (!zcl_path_join(l2, sizeof(l2), l1, e2->d_name)) {
                 ok = false;
                 break;
             }
@@ -657,7 +649,7 @@ static bool dln_materialize_ext_archives(const char *root, const char *dest,
                     if (strcmp(e3->d_name, ".") == 0 ||
                         strcmp(e3->d_name, "..") == 0)
                         continue;
-                    if (!dln_join(l3, sizeof(l3), l2, e3->d_name)) {
+                    if (!zcl_path_join(l3, sizeof(l3), l2, e3->d_name)) {
                         ok = false;
                         break;
                     }
@@ -816,8 +808,8 @@ void zcl_native_handle_dev_lane_new(
     for (size_t i = 0; i < sizeof(DLN_REQUIRED) / sizeof(DLN_REQUIRED[0]);
          i++) {
         char source[DLN_PATH_CAP], target[DLN_PATH_CAP];
-        if (!dln_join(source, sizeof(source), root, DLN_REQUIRED[i]) ||
-            !dln_join(target, sizeof(target), path, DLN_REQUIRED[i])) {
+        if (!zcl_path_join(source, sizeof(source), root, DLN_REQUIRED[i]) ||
+            !zcl_path_join(target, sizeof(target), path, DLN_REQUIRED[i])) {
             dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                      ZCL_COMMAND_EXIT_INTERNAL, "lane.materialize_failed",
                      "materialize", DLN_REQUIRED[i], DLN_REQUIRED[i]);
@@ -881,7 +873,7 @@ void zcl_native_handle_dev_lane_new(
         }
     }
 
-    if (!dln_join(libtor_path, sizeof(libtor_path), path,
+    if (!zcl_path_join(libtor_path, sizeof(libtor_path), path,
                   "vendor/tor/libtor.a") ||
         lstat(libtor_path, &libtor_st) != 0) {
         dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,

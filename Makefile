@@ -13256,7 +13256,7 @@ MUTATION_CAMPAIGN_SRCS = tools/dev/mutation_campaign.c $(MUTATION_LIB_SRCS) \
     tools/command/native_devagent.c platform/modules/sha3/src/sha3.c \
     core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c \
     platform/modules/platform/src/clock.c platform/modules/platform/src/directory_compat.c \
-    platform/modules/base/src/safe_alloc.c
+    platform/modules/base/src/safe_alloc.c platform/modules/util/src/path_util.c
 .PHONY: mutation-campaign
 mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
 $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)

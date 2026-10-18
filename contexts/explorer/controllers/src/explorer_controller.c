@@ -7,6 +7,7 @@
 #include "platform/time_compat.h"
 #include "platform/socket_compat.h"
 #include "platform/directory_compat.h"
+#include "util/path_util.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/api_controller.h"
 #include "chain/chain.h"
@@ -74,13 +75,6 @@ static struct explorer_rpc_backend g_explorer_rpc = {
 };
 static struct explorer_assets g_explorer_assets = {0};
 
-static bool explorer_join_path(char *out, size_t out_size,
-                               const char *directory, const char *leaf)
-{
-    int written = snprintf(out, out_size, "%s/%s", directory, leaf);
-    return written >= 0 && (size_t)written < out_size;
-}
-
 struct explorer_context *explorer_ctx(void)
 {
     return &g_explorer_ctx;
@@ -104,7 +98,7 @@ void ensure_explorer_dir(void)
     struct explorer_context *ctx = explorer_ctx();
     struct explorer_assets *assets = explorer_assets();
     if (!ctx->datadir) return;
-    if (!explorer_join_path(assets->explorer_dir,
+    if (!zcl_path_join(assets->explorer_dir,
                             sizeof(assets->explorer_dir), ctx->datadir,
                             "explorer")) {
         assets->explorer_dir[0] = '\0';
@@ -117,7 +111,7 @@ static void write_default_file(const char *filename, const char *content)
 {
     struct explorer_assets *assets = explorer_assets();
     char path[1200];
-    if (!explorer_join_path(path, sizeof(path), assets->explorer_dir,
+    if (!zcl_path_join(path, sizeof(path), assets->explorer_dir,
                             filename))
         return;
     /* Only write if file doesn't exist — don't overwrite customizations */
@@ -136,7 +130,7 @@ void load_css(void)
     struct explorer_assets *assets = explorer_assets();
     char path[1200];
     const char *override_path = getenv("ZCL_EXPLORER_CSS_FILE");
-    bool default_path_valid = explorer_join_path(
+    bool default_path_valid = zcl_path_join(
         path, sizeof(path), assets->explorer_dir, "style.css");
 
     if (override_path && override_path[0]) {

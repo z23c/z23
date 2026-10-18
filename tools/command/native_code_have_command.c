@@ -81,15 +81,6 @@ static void have_trunc(char *dst, size_t cap, const char *src, size_t max)
     dst[i] = '\0';
 }
 
-static const char *have_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
 void zcl_native_handle_code_have(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
@@ -104,13 +95,13 @@ void zcl_native_handle_code_have(const struct zcl_command_request *request,
     }
     int limit = have_limit(request);
 
-    struct codeindex *ci = codeindex_open_source_view(have_source_root(request));
+    struct codeindex *ci = codeindex_open_source_view(zcl_native_source_root(request));
     if (!ci) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",
                                "dispatch", true, false,
                                "could not open or rebuild the code index",
-                               have_source_root(request));
+                               zcl_native_source_root(request));
         return;
     }
 

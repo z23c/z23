@@ -43,15 +43,6 @@ static void npe_fail(struct zcl_command_reply *reply, const char *code,
         NPE_LEAF);
 }
 
-static const char *npe_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *environment = getenv("ZCL_DEV_SOURCE_ROOT");
-    return environment && environment[0] ? environment : ".";
-}
-
 static void npe_commas(char out[32], uint64_t value)
 {
     char plain[32];
@@ -777,7 +768,7 @@ void zcl_native_handle_presentation_ecosystem(
         .collect_growth = true,
         .inventory_path = NULL,
     };
-    const char *root = npe_source_root(request);
+    const char *root = zcl_native_source_root(request);
     if (!science_ecosystem_collect(root, &options, snap, error,
                                    sizeof(error))) {
         free(snap);

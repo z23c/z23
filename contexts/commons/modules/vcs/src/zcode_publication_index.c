@@ -7,6 +7,7 @@
 #include "base/safe_alloc.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_publication.h"
+#include "util/path_util.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -31,17 +32,6 @@ struct vcs_zcode_publication_index {
     size_t scanned;
     bool complete;
 };
-
-static bool index_hex_lower(const char *s, size_t want)
-{
-    if (strlen(s) != want) return false;
-    for (size_t i = 0; i < want; i++) {
-        char c = s[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-            return false;
-    }
-    return true;
-}
 
 static bool index_intent_signer(const char *repo_root,
                                 const uint8_t publication_root[32],
@@ -170,7 +160,7 @@ static void index_scan_shard(const char *repo_root, const char *path,
             if (errno != 0) index->complete = false;
             break;
         }
-        if (!index_hex_lower(de->d_name, 62)) continue;
+        if (!zcl_is_lower_hex(de->d_name, 62)) continue;
         if (++index->scanned > INDEX_MAX_SCANNED) {
             index->complete = false;
             break;
@@ -204,7 +194,7 @@ static void index_scan_root(const char *repo_root, const char *objects,
             if (errno != 0) index->complete = false;
             break;
         }
-        if (!index_hex_lower(de->d_name, 2)) continue;
+        if (!zcl_is_lower_hex(de->d_name, 2)) continue;
         char path[4400];
         int n = snprintf(path, sizeof(path), "%s/%s", objects, de->d_name);
         if (n <= 0 || (size_t)n >= sizeof(path)) {

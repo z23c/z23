@@ -18,6 +18,7 @@
 #include "json/json.h"
 #include "platform/state_root.h"
 #include "util/spawn.h"
+#include "util/path_util.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -428,12 +429,6 @@ static struct zcl_objective_value obj_landing_attempts_per_train(
 
 /* ── phases.txt ───────────────────────────────────────────────────────── */
 
-static bool obj_is_dir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 /* The most recently modified attempt directory under `dir`, or false when
  * none exists. */
 static bool obj_newest_attempt(const char *dir, char *out, size_t cap)
@@ -451,7 +446,7 @@ static bool obj_newest_attempt(const char *dir, char *out, size_t cap)
             continue;
         if (snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) <= 0)
             continue;
-        if (!obj_is_dir(path) || stat(path, &st) != 0)
+        if (!zcl_path_is_dir(path) || stat(path, &st) != 0)
             continue;
         if (!found || st.st_mtime > best) {
             best = st.st_mtime;

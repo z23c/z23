@@ -205,15 +205,6 @@ struct emit_ctx {
     char query_shown[132];
 };
 
-static const char *emit_source_root(const struct zcl_command_request *request)
-{
-    if (request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
 /* Join 1: the diagnostics registry (exact name, then the id's owner
  * component — `address_index.below_snapshot_seed` asks about
  * `address_index`). */
@@ -603,7 +594,7 @@ void zcl_native_handle_code_emitter(const struct zcl_command_request *request,
         return;
     }
 
-    struct emit_ctx ctx = {.text = text, .root = emit_source_root(request)};
+    struct emit_ctx ctx = {.text = text, .root = zcl_native_source_root(request)};
     ctx.ci = codeindex_open(ctx.root);
     if (!ctx.ci) {
         emit_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",

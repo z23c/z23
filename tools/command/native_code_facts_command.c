@@ -81,15 +81,6 @@ static void facts_report_unlock(void)
     (void)pthread_mutex_unlock(&g_facts_cache_mu);
 }
 
-static const char *facts_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
 static void facts_push_line(struct json_value *arr, const char *s)
 {
     struct json_value item;
@@ -121,7 +112,7 @@ static const char *facts_short_path(const char *p)
 void zcl_native_handle_code_facts(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
 {
-    const char *root = facts_source_root(request);
+    const char *root = zcl_native_source_root(request);
     /* This census consumes only indexed source rows. Exact source freshness is
      * required, but compiler depfile movement cannot change its answer and
      * must not tax the warm diagnostic latency budget. */

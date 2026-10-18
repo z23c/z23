@@ -26,6 +26,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/file_tree_ops.h"
+#include "util/path_util.h"
 #include "util/spawn.h"
 #include "vcs/build_action.h"
 #include "vcs/build_artifact_manifest.h"
@@ -187,11 +188,6 @@ struct zcl_result build_fabric_worker_verifier_path_for_test(
                                            out, cap);
 }
 #endif
-static bool bfw_path_join(char *out, size_t cap, const char *dir, const char *leaf)
-{
-    int n = snprintf(out, cap, "%s/%s", dir, leaf);
-    return n > 0 && (size_t)n < cap;
-}
 static struct zcl_result bfw_paths_init(const char *workspace, const char *lease_id,
                                         const char *kind,
                                         struct bfw_paths *p)
@@ -207,31 +203,31 @@ static struct zcl_result bfw_paths_init(const char *workspace, const char *lease
     n = snprintf(p->work, sizeof(p->work), "%s/%s", base, lease_id);
     if (n <= 0 || (size_t)n >= sizeof(p->work) || mkdir(p->work, 0700) != 0)
         return ZCL_ERR(-1, "lease work directory exists or cannot be created");
-    if (!bfw_path_join(p->src, sizeof(p->src), p->work, "src") ||
-        !bfw_path_join(p->build, sizeof(p->build), p->work, "build"))
+    if (!zcl_path_join(p->src, sizeof(p->src), p->work, "src") ||
+        !zcl_path_join(p->build, sizeof(p->build), p->work, "build"))
         return ZCL_ERR(-1, "isolated source/output path too long");
     if (mkdir(p->src, 0700) != 0 || mkdir(p->build, 0700) != 0)
         return ZCL_ERR(-1, "cannot create isolated source/output directories");
     if (strcmp(kind, VCS_BUILD_ACTION_KIND_V1) == 0) {
-        if (!bfw_path_join(p->input, sizeof(p->input), p->src, "unit.i") ||
-            !bfw_path_join(p->output, sizeof(p->output), p->build, VCS_BUILD_OUTPUT_V1))
+        if (!zcl_path_join(p->input, sizeof(p->input), p->src, "unit.i") ||
+            !zcl_path_join(p->output, sizeof(p->output), p->build, VCS_BUILD_OUTPUT_V1))
             return ZCL_ERR(-1, "compile action path too long");
     } else if (strcmp(kind, VCS_BUILD_ACTION_KIND_TEST_V1) == 0) {
-        if (!bfw_path_join(p->input, sizeof(p->input), p->build, "test.bin") ||
-            !bfw_path_join(p->output, sizeof(p->output), p->build, VCS_BUILD_TEST_OUTPUT_V1))
+        if (!zcl_path_join(p->input, sizeof(p->input), p->build, "test.bin") ||
+            !zcl_path_join(p->output, sizeof(p->output), p->build, VCS_BUILD_TEST_OUTPUT_V1))
             return ZCL_ERR(-1, "test action path too long");
     } else if (strcmp(kind, VCS_BUILD_ACTION_KIND_FUZZ_V1) == 0) {
-        if (!bfw_path_join(p->input, sizeof(p->input), p->build, "fuzz.bin") ||
-            !bfw_path_join(p->output, sizeof(p->output), p->build, VCS_BUILD_FUZZ_OUTPUT_V1))
+        if (!zcl_path_join(p->input, sizeof(p->input), p->build, "fuzz.bin") ||
+            !zcl_path_join(p->output, sizeof(p->output), p->build, VCS_BUILD_FUZZ_OUTPUT_V1))
             return ZCL_ERR(-1, "fuzz action path too long");
     } else if (strcmp(kind, VCS_BUILD_ACTION_KIND_PACKAGE_V1) == 0) {
-        if (!bfw_path_join(p->emit, sizeof(p->emit), p->work, "emit") ||
-            !bfw_path_join(p->recipe, sizeof(p->recipe), p->work, "recipe.v1"))
+        if (!zcl_path_join(p->emit, sizeof(p->emit), p->work, "emit") ||
+            !zcl_path_join(p->recipe, sizeof(p->recipe), p->work, "recipe.v1"))
             return ZCL_ERR(-1, "package action path too long");
         if (mkdir(p->emit, 0700) != 0)
             return ZCL_ERR(-1, "cannot create package emit directory");
         memcpy(p->input, p->recipe, strlen(p->recipe) + 1);
-        if (!bfw_path_join(p->output, sizeof(p->output), p->emit,
+        if (!zcl_path_join(p->output, sizeof(p->output), p->emit,
                            VCS_BUILD_PACKAGE_OUTPUT_V1))
             return ZCL_ERR(-1, "package output path too long");
     } else {

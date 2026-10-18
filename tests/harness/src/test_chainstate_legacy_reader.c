@@ -31,13 +31,13 @@
 #include "sapling/incremental_merkle_tree.h"
 #include "core/serialize.h"
 #include "core/uint256.h"
+#include "util/path_util.h"
 
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 /* ─────────────────────────────────────────────────────────────────────
  * Hermetic coverage of the 6 bulk shielded-history iterators
@@ -505,24 +505,17 @@ static bool walk_cb(const struct uint256 *txid,
     return true;
 }
 
-static bool dir_exists(const char *p)
-{
-    struct stat st;
-    if (stat(p, &st) != 0) return false;
-    return S_ISDIR(st.st_mode);
-}
-
 static const char *pick_snapshot_path(void)
 {
     const char *override = getenv("ZCL_LEGACY_CHAINSTATE");
-    if (override && *override && dir_exists(override))
+    if (override && *override && zcl_path_is_dir(override))
         return override;
     static const char *candidates[] = {
         "/tmp/zcl_chainstate_snapshot",
         NULL,
     };
     for (int i = 0; candidates[i]; i++)
-        if (dir_exists(candidates[i]))
+        if (zcl_path_is_dir(candidates[i]))
             return candidates[i];
     return NULL;
 }

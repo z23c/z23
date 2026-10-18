@@ -12,6 +12,7 @@
 #include "base/safe_alloc.h"
 #include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
+#include "util/path_util.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -346,19 +347,6 @@ static int publish_release_cmp(const void *a, const void *b)
     return memcmp(ida, idb, 32);
 }
 
-static bool publish_name_is_hex64(const char *name)
-{
-    if (!name || strlen(name) != 64)
-        return false;
-    for (size_t i = 0; i < 64; i++) {
-        char ch = name[i];
-        bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
-        if (!ok)
-            return false;
-    }
-    return true;
-}
-
 static DIR *publish_open_releases(const char *path, bool *missing_out)
 {
     *missing_out = false;
@@ -470,7 +458,7 @@ bool vcs_package_publish_load_releases(const char *zcode_dir,
     }
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
-        if (!publish_name_is_hex64(de->d_name))
+        if (!zcl_is_lower_hex(de->d_name, 64))
             continue;
         if (*count_out >= out_cap) {
             (*skipped_out)++;

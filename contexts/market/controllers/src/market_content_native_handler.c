@@ -11,6 +11,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "util/log_macros.h"
+#include "util/path_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,17 +27,6 @@ static void market_content_native_fail(
     LOG_ERROR(MCN_TAG, "%s: %s", code, message);
     zcl_command_reply_fail(reply, status, exit_code, code, phase, false, false,
                            message, "zmarket_content_register");
-}
-
-static bool market_content_native_hex64(const char *s)
-{
-    if (!s || strlen(s) != 64)
-        return false;
-    for (size_t i = 0; i < 64; i++)
-        if (!((s[i] >= '0' && s[i] <= '9') ||
-              (s[i] >= 'a' && s[i] <= 'f')))
-            return false;
-    return true;
 }
 
 void zcl_native_handle_market_content_register(
@@ -139,12 +129,12 @@ void zcl_native_handle_market_content_register(
         strcmp(schema, "zcl.market_content.v1") == 0 && body_mode &&
         strcmp(body_mode, mode) == 0 && committed_v &&
         committed_v->type == JSON_BOOL && committed == wants_commit &&
-        market_content_native_hex64(token) && state && state[0] && status &&
+        zcl_is_lower_hex(token, 64) && state && state[0] && status &&
         saved_offer && strcmp(saved_offer, offer_id) == 0;
     bool mode_valid = !wants_commit
         ? strcmp(status, "planned") == 0
         : strcmp(status, "registered") == 0 &&
-          market_content_native_hex64(root_hash) && size &&
+          zcl_is_lower_hex(root_hash, 64) && size &&
           size->type == JSON_INT && json_get_int(size) >= 0 && chunks &&
           chunks->type == JSON_INT && json_get_int(chunks) > 0 && registered &&
           registered->type == JSON_INT && json_get_int(registered) > 0;

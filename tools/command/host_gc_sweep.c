@@ -19,6 +19,7 @@
 #include "platform/time_compat.h"
 #include "platform/file_metadata.h"
 #include "util/file_tree_ops.h"
+#include "util/path_util.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
 
@@ -171,7 +172,7 @@ static bool hg_pool_repo(const char *pool, char *buf, size_t cap, char *repo,
         char child[HOST_GC_PATH_CAP];
         if (e->d_name[0] == '.')
             continue;
-        if (!hg_join(child, sizeof(child), pool, e->d_name))
+        if (!zcl_path_join(child, sizeof(child), pool, e->d_name))
             continue;
         if (stat(child, &st) != 0 || !S_ISDIR(st.st_mode))
             continue;
@@ -193,7 +194,7 @@ static bool hg_locked_on_disk(const char *wt)
     char marker[HOST_GC_PATH_CAP];
     struct stat st;
     FILE *f;
-    if (!hg_join(dotgit, sizeof(dotgit), wt, ".git"))
+    if (!zcl_path_join(dotgit, sizeof(dotgit), wt, ".git"))
         return false;
     f = fopen(dotgit, "r");
     if (!f)
@@ -204,7 +205,7 @@ static bool hg_locked_on_disk(const char *wt)
     hg_strip(line);
     if (strncmp(line, "gitdir: ", 8) != 0)
         return false;
-    if (!hg_join(marker, sizeof(marker), line + 8, "locked"))
+    if (!zcl_path_join(marker, sizeof(marker), line + 8, "locked"))
         return false;
     return stat(marker, &st) == 0;
 }
@@ -299,7 +300,7 @@ static void hg_mark_fds(struct hg_scan *scan, const char *procdir)
     char fddir[HOST_GC_PATH_CAP];
     DIR *d;
     struct dirent *e;
-    if (!hg_join(fddir, sizeof(fddir), procdir, "fd"))
+    if (!zcl_path_join(fddir, sizeof(fddir), procdir, "fd"))
         return;
     d = opendir(fddir);
     if (!d)
@@ -308,7 +309,7 @@ static void hg_mark_fds(struct hg_scan *scan, const char *procdir)
         char link[HOST_GC_PATH_CAP * 2];
         if (e->d_name[0] == '.')
             continue;
-        if (hg_join(link, sizeof(link), fddir, e->d_name))
+        if (zcl_path_join(link, sizeof(link), fddir, e->d_name))
             hg_mark_link(scan, link);
     }
     (void)closedir(d);
@@ -333,9 +334,9 @@ static void hg_mark_occupied(const struct host_gc_request *req,
         char cwdlink[HOST_GC_PATH_CAP * 2];
         if (e->d_name[0] < '0' || e->d_name[0] > '9')
             continue;
-        if (!hg_join(procdir, sizeof(procdir), root, e->d_name))
+        if (!zcl_path_join(procdir, sizeof(procdir), root, e->d_name))
             continue;
-        if (hg_join(cwdlink, sizeof(cwdlink), procdir, "cwd"))
+        if (zcl_path_join(cwdlink, sizeof(cwdlink), procdir, "cwd"))
             hg_mark_link(scan, cwdlink);
         hg_mark_fds(scan, procdir);
     }
@@ -421,7 +422,7 @@ static bool hg_marker_read(const char *wt, struct hg_marker *m)
     bool ok;
     FILE *f;
     m->completed = 0;
-    if (!hg_join(path, sizeof(path), wt, hg_marker_rel))
+    if (!zcl_path_join(path, sizeof(path), wt, hg_marker_rel))
         return false;
     f = fopen(path, "r");
     if (!f)
@@ -783,11 +784,11 @@ bool host_gc_defaults(struct host_gc_request *req)
         !hg_copy(req->home, sizeof(req->home), home))
         return false;
     if (!hg_copy(req->pools[0].name, sizeof(req->pools[0].name), "z23p") ||
-        !hg_join(req->pools[0].path, sizeof(req->pools[0].path), home,
+        !zcl_path_join(req->pools[0].path, sizeof(req->pools[0].path), home,
                  "github/.z23p"))
         return false;
     if (!hg_copy(req->pools[1].name, sizeof(req->pools[1].name), "z23p-ram") ||
-        !hg_join(req->pools[1].path, sizeof(req->pools[1].path),
+        !zcl_path_join(req->pools[1].path, sizeof(req->pools[1].path),
                  (ram && ram[0] == '/') ? ram : "/dev/shm", "z23p"))
         return false;
     req->npools = 2;

@@ -14,6 +14,7 @@
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
 #include "util/file_tree_ops.h"
+#include "util/path_util.h"
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -21,13 +22,6 @@
 #include <string.h>
 
 static _Atomic uint64_t g_file_copy_nonce;
-
-static bool file_ops_join(char *out, size_t cap, const char *dir,
-                          const char *name)
-{
-    int n = snprintf(out, cap, "%s/%s", dir, name);
-    return n > 0 && (size_t)n < cap;
-}
 
 bool file_copy(const char *src, const char *dst)
 {
@@ -122,8 +116,8 @@ bool dir_copy(const char *src_dir, const char *dst_dir)
         const char *name = entries.entries[i].name;
         if (name[0] == '.' || strcmp(name, "LOCK") == 0) continue;
         char s[1024], de[1024];
-        if (!file_ops_join(s, sizeof(s), src_dir, name) ||
-            !file_ops_join(de, sizeof(de), dst_dir, name)) {
+        if (!zcl_path_join(s, sizeof(s), src_dir, name) ||
+            !zcl_path_join(de, sizeof(de), dst_dir, name)) {
             failed++;
             continue;
         }
@@ -186,25 +180,25 @@ int block_files_copy(const char *src_dir, const char *dst_dir)
     for (int i = 0; i < 9999; i++) {
         char name[32];
         snprintf(name, sizeof(name), "blk%05d.dat", i);
-        if (!file_ops_join(src, sizeof(src), src_dir, name))
+        if (!zcl_path_join(src, sizeof(src), src_dir, name))
             return -1;
         enum block_files_probe blk = block_files_probe_coordinate(src);
         if (blk == BLOCK_FILES_PROBE_REFUSED)
             return -1;
         if (blk == BLOCK_FILES_PROBE_MISSING) break;
-        if (!file_ops_join(dst, sizeof(dst), dst_dir, name))
+        if (!zcl_path_join(dst, sizeof(dst), dst_dir, name))
             return -1;
         if (!file_copy(src, dst))
             return -1;
         count++;
         snprintf(name, sizeof(name), "rev%05d.dat", i);
-        if (!file_ops_join(src, sizeof(src), src_dir, name))
+        if (!zcl_path_join(src, sizeof(src), src_dir, name))
             return -1;
         enum block_files_probe rev = block_files_probe_coordinate(src);
         if (rev == BLOCK_FILES_PROBE_REFUSED)
             return -1;
         if (rev == BLOCK_FILES_PROBE_PRESENT) {
-            if (!file_ops_join(dst, sizeof(dst), dst_dir, name))
+            if (!zcl_path_join(dst, sizeof(dst), dst_dir, name))
                 return -1;
             if (!file_copy(src, dst))
                 return -1;
@@ -229,7 +223,7 @@ void block_files_clean(const char *dir)
             struct platform_private_file file;
             struct platform_private_file_identity identity;
             platform_private_file_init(&file);
-            if (file_ops_join(path, sizeof(path), dir, name) &&
+            if (zcl_path_join(path, sizeof(path), dir, name) &&
                 platform_private_file_open_locked(path, &file) &&
                 platform_private_file_identity(&file, &identity))
                 (void)platform_private_file_retire_if_identity(

@@ -93,9 +93,6 @@ struct dev_activation_txn {
 
 /* ── shared low-level helpers (dev_activation.c) ─────────────────────── */
 
-/* snprintf "%s/%s" of (a,b) into out; false on overflow. */
-bool dev_activation_join(char *out, size_t out_sz, const char *a,
-                         const char *b);
 /* mkdir -p `path` (0755). */
 bool dev_activation_mkdir_p(const char *path);
 /* ISO-8601 UTC "now" into out[32]. */

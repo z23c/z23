@@ -35,16 +35,6 @@ static const char corpus_source_roots[] =
 #undef SOURCE_ROOT
 ;
 
-/* Same resolution order as every other code.* leaf. */
-static const char *corpus_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
 /* Warm reads reuse the last walk until the inventory artifact changes.
  * The first dispatch still walks; the latency contract is the second. */
 static struct {
@@ -71,7 +61,7 @@ static void corpus_inventory_stamp(const char *inventory, uint64_t *size,
 void zcl_native_handle_code_corpus(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
-    const char *root = corpus_source_root(request);
+    const char *root = zcl_native_source_root(request);
     char inventory[1024];
     const int n = snprintf(inventory, sizeof inventory,
                            "%s/docs/CAPABILITY_INVENTORY.jsonl", root);

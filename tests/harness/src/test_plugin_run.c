@@ -16,6 +16,7 @@
 #include "platform/os_sandbox.h"
 #include "platform/positioned_file.h"
 #include "platform/resident_launch.h"
+#include "util/path_util.h"
 #include "plugin/plugin_run.h"
 #include "plugin/plugin_store.h"
 #include "sha3/sha3.h"
@@ -88,12 +89,6 @@ static bool prt_slurp(const char *path, char *out, size_t cap)
     return true;
 }
 
-static bool prt_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
-}
-
 static bool prt_env_open(struct prt_env *e)
 {
     char dot[PATH_MAX], keys[PATH_MAX], hex[65], line[80];
@@ -103,11 +98,11 @@ static bool prt_env_open(struct prt_env *e)
     zcl_ed25519_keypair(e->pk, e->sk, seed);
     if (!test_mkdtemp(e->base, sizeof(e->base), "plugin_run"))
         return false;
-    bool ok = prt_join(e->home, sizeof(e->home), e->base, "home") &&
-              mkdir(e->home, 0700) == 0 && prt_join(dot, sizeof(dot), e->home, ".z23") &&
-              mkdir(dot, 0700) == 0 && prt_join(e->root, sizeof(e->root), dot, "plugins") &&
-              mkdir(e->root, 0700) == 0 && prt_join(e->src, sizeof(e->src), e->base, "src") &&
-              mkdir(e->src, 0700) == 0 && prt_join(keys, sizeof(keys), e->root, "trusted_keys");
+    bool ok = zcl_path_join(e->home, sizeof(e->home), e->base, "home") &&
+              mkdir(e->home, 0700) == 0 && zcl_path_join(dot, sizeof(dot), e->home, ".z23") &&
+              mkdir(dot, 0700) == 0 && zcl_path_join(e->root, sizeof(e->root), dot, "plugins") &&
+              mkdir(e->root, 0700) == 0 && zcl_path_join(e->src, sizeof(e->src), e->base, "src") &&
+              mkdir(e->src, 0700) == 0 && zcl_path_join(keys, sizeof(keys), e->root, "trusted_keys");
     prt_hex(e->pk, 32, hex);
     snprintf(line, sizeof(line), "%s\n", hex);
     return ok && prt_write(keys, line, strlen(line)) && chmod(keys, 0600) == 0;
@@ -199,11 +194,11 @@ static bool prt_publish_bytes(struct prt_env *e, const char *name, const unsigne
              "{\"sig_alg\":\"ed25519\",\"public_key\":\"%s\",\"signature\":\"%s\"}", pub, sig_hex);
     snprintf(leaf, sizeof(leaf), "%s.plugin.json", name);
     char manifest_path[PATH_MAX];
-    bool ok = prt_join(manifest_path, sizeof(manifest_path), e->src, leaf) &&
+    bool ok = zcl_path_join(manifest_path, sizeof(manifest_path), e->src, leaf) &&
               prt_write(manifest_path, manifest, strlen(manifest));
     snprintf(leaf, sizeof(leaf), "%s.plugin.sig", name);
-    ok = ok && prt_join(path, sizeof(path), e->src, leaf) && prt_write(path, doc, strlen(doc)) &&
-         prt_join(path, sizeof(path), e->src, name) && prt_write(path, img, len);
+    ok = ok && zcl_path_join(path, sizeof(path), e->src, leaf) && prt_write(path, doc, strlen(doc)) &&
+         zcl_path_join(path, sizeof(path), e->src, name) && prt_write(path, img, len);
     struct plugin_manifest m;
     int present = 0;
     return ok && plugin_store_install(e->root, manifest_path, &m, &present) == PLUGIN_OK;
@@ -231,7 +226,7 @@ static void prt_link(const struct prt_env *e, const char *name, const char *link
 {
     char dir[PATH_MAX], path[PATH_MAX], target[PATH_MAX];
     out[0] = '\0';
-    if (!prt_join(dir, sizeof(dir), e->root, name) || !prt_join(path, sizeof(path), dir, link))
+    if (!zcl_path_join(dir, sizeof(dir), e->root, name) || !zcl_path_join(path, sizeof(path), dir, link))
         return;
     ssize_t n = readlink(path, target, sizeof(target) - 1);
     if (n > 12 && (size_t)n - 12 < PRT_HEX) {
@@ -347,8 +342,8 @@ static bool prt_crashed_often(const struct plugin_run_info *i, const void *ctx)
 static bool prt_report(const struct prt_env *e, const char *name, char *out, size_t cap)
 {
     char dir[PATH_MAX], data[PATH_MAX], path[PATH_MAX];
-    return prt_join(dir, sizeof(dir), e->root, name) && prt_join(data, sizeof(data), dir, "data") &&
-           prt_join(path, sizeof(path), data, "report.txt") && prt_slurp(path, out, cap);
+    return zcl_path_join(dir, sizeof(dir), e->root, name) && zcl_path_join(data, sizeof(data), dir, "data") &&
+           zcl_path_join(path, sizeof(path), data, "report.txt") && prt_slurp(path, out, cap);
 }
 
 static const char *PRT_FS = "\"fs.write\",\"clock\"";
@@ -474,7 +469,7 @@ static bool prt_set_trust(const struct prt_env *e, bool signer, const char *extr
     prt_hex(e->pk, 32, hex);
     snprintf(body, sizeof(body), "%s%s%s%s", signer ? hex : "", signer ? "\n" : "",
              extra ? extra : "", extra ? "\n" : "");
-    return prt_join(path, sizeof(path), e->root, "trusted_keys") &&
+    return zcl_path_join(path, sizeof(path), e->root, "trusted_keys") &&
            prt_write(path, body, strlen(body));
 }
 
@@ -832,8 +827,8 @@ static int prt_case_forbidden_calls(void)
             int sigsys = SIGSYS;
             snprintf(name, sizeof(name), "f-%s", PRT_FORBIDDEN[i]);
             ASSERT(prt_install(&e, name, PRT_FORBIDDEN[i], "f1", PRT_FS, gen));
-            ASSERT(prt_join(dir, sizeof(dir), e.root, name));
-            ASSERT(prt_join(victim, sizeof(victim), dir, "victim.txt"));
+            ASSERT(zcl_path_join(dir, sizeof(dir), e.root, name));
+            ASSERT(zcl_path_join(victim, sizeof(victim), dir, "victim.txt"));
             ASSERT(prt_write(victim, "keep", 4));
             run = prt_open_patient(&e, name);
             ASSERT(run != NULL);
@@ -868,8 +863,8 @@ static int prt_case_landlock_files(void)
         int eacces = 13;
         ASSERT(ready);
         ASSERT(prt_install(&e, "trunc", "truncate", "t1", PRT_FS, gen));
-        ASSERT(prt_join(dir, sizeof(dir), e.root, "trunc"));
-        ASSERT(prt_join(victim, sizeof(victim), dir, "victim.txt"));
+        ASSERT(zcl_path_join(dir, sizeof(dir), e.root, "trunc"));
+        ASSERT(zcl_path_join(victim, sizeof(victim), dir, "victim.txt"));
         ASSERT(prt_write(victim, "keep", 4));
         run = prt_open(&e, "trunc");
         ASSERT(run != NULL);
@@ -881,8 +876,8 @@ static int prt_case_landlock_files(void)
         ro = prt_open(&e, "ro");
         ASSERT(ro != NULL);
         ASSERT(prt_wait(&ro, 1, 0, prt_exit_code, &eacces, 5000));
-        ASSERT(prt_join(dir, sizeof(dir), e.root, "ro"));
-        ASSERT(prt_join(w, sizeof(w), dir, "data/w.txt"));
+        ASSERT(zcl_path_join(dir, sizeof(dir), e.root, "ro"));
+        ASSERT(zcl_path_join(w, sizeof(w), dir, "data/w.txt"));
         ASSERT(access(w, F_OK) != 0);
     } TEST_END
     plugin_run_close(run);
@@ -923,8 +918,8 @@ static int prt_case_permission_update(void)
         struct plugin_run_info info;
         ASSERT(ready);
         ASSERT(prt_install(&e, "perm", "readonly", "p1", PRT_FS, g1));
-        ASSERT(prt_join(dir, sizeof(dir), e.root, "perm"));
-        ASSERT(prt_join(w, sizeof(w), dir, "data/w.txt"));
+        ASSERT(zcl_path_join(dir, sizeof(dir), e.root, "perm"));
+        ASSERT(zcl_path_join(w, sizeof(w), dir, "data/w.txt"));
         wide = prt_open(&e, "perm");
         ASSERT(wide != NULL);
         /* last_exit_code starts at 0, so wait for the write itself */
@@ -1051,7 +1046,7 @@ static int prt_case_fd_slots(void)
         ASSERT(ready);
         img = prt_image("logonly", "l1", &len);
         ASSERT(img != NULL);
-        ASSERT(prt_join(image, sizeof(image), e.src, "slots-image"));
+        ASSERT(zcl_path_join(image, sizeof(image), e.src, "slots-image"));
         ASSERT(prt_write(image, img, len));
         free(img);
         ASSERT_EQ(chmod(image, 0755), 0);

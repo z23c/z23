@@ -70,6 +70,7 @@
 #include "util/safe_alloc.h"
 #include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
+#include "util/path_util.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -554,12 +555,6 @@ static bool dep_quoted_absolute(const char *quoted)
            (isalpha((unsigned char)quoted[0]) && quoted[1] == ':');
 }
 
-static bool dep_join(char *out, size_t cap, const char *dir, const char *rel)
-{
-    int n = snprintf(out, cap, "%s/%s", dir, rel);
-    return n > 0 && (size_t)n < cap;
-}
-
 /* Text-found include edges of one translation unit. `added` holds every file
  * already added as an edge; it is also the worklist of files still to scan,
  * so a cycle or a shared include is scanned once. */
@@ -614,7 +609,7 @@ static void text_include_near(struct text_includes *t, const char *file,
         return;
     memcpy(dir, file, dlen);
     dir[dlen] = '\0';
-    if (dep_join(rel, sizeof rel, dir, quoted))
+    if (zcl_path_join(rel, sizeof rel, dir, quoted))
         text_include_candidate(t, rel);
     char *src_at = strstr(dir, "/src");
     if (!src_at || (src_at[4] != '\0' && src_at[4] != '/'))
