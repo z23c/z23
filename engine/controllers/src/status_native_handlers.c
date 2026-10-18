@@ -632,29 +632,47 @@ static char *sbp_refuse(struct zcl_native_body_err *err,
     LOG_NULL("native.ops", "%s", err->message);
     return NULL;
 }
-static bool sbp_request_read(const struct json_value *args,
-                              struct sbp_request *request)
+enum { SBP_DEFAULT_LIMIT = BLOCKER_CAP };
+/* The rule broken by an unexpected key in paging input, or NULL. */
+static const char *sbp_key_rule(const struct json_value *args)
 {
-    if (!sbp_unique_keys(args)) {
-        LOG_WARN("native.ops", "blocker page request requires an object with unique keys");
-        return false;
-    }
     for (size_t i = 0; i < args->num_children; i++) {
         const char *key = args->keys[i];
+        if (!strcmp(key, "cursor"))
+            return "cursor pages the summary fields; it cannot be combined with "
+                   "item_offset, item_limit or expected_snapshot";
         if (strcmp(key, "item_offset") && strcmp(key, "item_limit") &&
-            strcmp(key, "expected_snapshot")) {
-            LOG_WARN("native.ops", "blocker page request has an unknown field");
-            return false;
-        }
+            strcmp(key, "expected_snapshot"))
+            return "unknown blocker paging field; accepted: item_offset (0..128, default 0), "
+                   "item_limit (1..128, default 128), expected_snapshot (required when item_offset > 0)";
     }
-    if (!sbp_integer(args, "item_offset", 0, BLOCKER_CAP)) return false;
+    return NULL;
+}
+/* Reads item paging input. Returns NULL when valid, else the exact rule that
+ * the input broke. `cursor` is a response control that pages the summary
+ * fields, so it never reaches this reader alone and never mixes with items. */
+static const char *sbp_request_read(const struct json_value *args,
+                                    struct sbp_request *request)
+{
+    if (!sbp_unique_keys(args)) return "blocker paging input must be an object with unique keys";
+    const char *rule = sbp_key_rule(args);
+    if (rule) return rule;
+    const struct json_value *offset = json_get(args, "item_offset");
     const struct json_value *limit = json_get(args, "item_limit");
-    if (limit && !sbp_integer(args, "item_limit", 1, BLOCKER_CAP)) return false;
-    request->offset = (size_t)json_get_int(json_get(args, "item_offset"));
-    request->limit = limit ? (size_t)limit->val.i : 1;
+    if (offset && !sbp_integer(args, "item_offset", 0, BLOCKER_CAP))
+        return "item_offset must be an integer from 0 to 128";
+    if (limit && !sbp_integer(args, "item_limit", 1, BLOCKER_CAP))
+        return "item_limit must be an integer from 1 to 128";
+    request->offset = offset ? (size_t)offset->val.i : 0;
+    request->limit = limit ? (size_t)limit->val.i : SBP_DEFAULT_LIMIT;
     request->expected = json_get(args, "expected_snapshot");
-    return (!request->expected || sbp_unique_keys(request->expected)) &&
-           (request->offset == 0 || request->expected);
+    if (request->expected && (request->expected->type != JSON_OBJ ||
+                              !sbp_unique_keys(request->expected)))
+        return "expected_snapshot must be the unmodified snapshot object of the previous page";
+    if (request->offset > 0 && !request->expected)
+        return "item_offset > 0 requires expected_snapshot, the snapshot object "
+               "returned with the previous page";
+    return NULL;
 }
 static bool sbp_hex(const char *value)
 {
@@ -770,8 +788,8 @@ static char *sbp_render(const struct sbp_request *request,
 static char *sbp_body(const struct json_value *args, struct zcl_native_body_err *err)
 {
     struct sbp_request request = {0};
-    if (!sbp_request_read(args, &request))
-        return sbp_refuse(err, ZCL_NATIVE_BODY_INVALID, "invalid blocker item paging input");
+    const char *rule = sbp_request_read(args, &request);
+    if (rule) return sbp_refuse(err, ZCL_NATIVE_BODY_INVALID, rule);
     char *raw = node_rpc_call("operatorsnapshot", NULL);
     struct json_value snapshot = {0}, token = {0};
     const struct json_value *rows = NULL;
@@ -796,7 +814,8 @@ static char *sbp_body(const struct json_value *args, struct zcl_native_body_err 
 char *zcl_native_blockers_body(const struct json_value *args,
                                struct zcl_native_body_err *err)
 {
-    if (args && args->type == JSON_OBJ && args->num_children)
+    if (args && args->type == JSON_OBJ && args->num_children &&
+        (args->num_children > 1 || !json_get(args, "cursor")))
         return sbp_body(args, err);
 
     char *raw = node_rpc_call("dumpstate", "[\"blocker\"]");

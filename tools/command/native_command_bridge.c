@@ -230,6 +230,67 @@ void nc_add_string_next(struct zcl_command_reply *reply,
         (void)zcl_command_reply_add_next(reply, command, encoded, reason);
 }
 
+/* True when the leaf declares `key` among its comma-separated input keys. */
+static bool nc_spec_accepts_key(const struct zcl_command_spec *spec,
+                                const char *key)
+{
+    size_t klen = strlen(key);
+    const char *p = spec && spec->input_keys ? spec->input_keys : "";
+    while (*p) {
+        size_t n = strcspn(p, ",");
+        if (n == klen && strncmp(p, key, klen) == 0)
+            return true;
+        p += n + (p[n] == ',' ? 1 : 0);
+    }
+    return false;
+}
+
+/* When the leaf accepts a `cursor` input, `next` is the exact request that
+ * fetches the following page; otherwise the caller falls back to describe. */
+static bool nc_add_cursor_next(const struct zcl_command_request *request,
+                               size_t next_cursor,
+                               struct zcl_command_reply *reply)
+{
+    if (!request->spec || !request->spec->path ||
+        !nc_spec_accepts_key(request->spec, "cursor"))
+        return false;
+    char input[64];
+    int n = snprintf(input, sizeof(input), "{\"cursor\":%zu}", next_cursor);
+    return n > 0 && (size_t)n < sizeof(input) &&
+           zcl_command_reply_add_next(reply, request->spec->path, input,
+                                      "continue from the next cursor");
+}
+
+/* core.sync.blockers item pages: `next` is the exact request that fetches the
+ * following page, carrying the snapshot token the continuation requires. */
+static void nc_add_blocker_page_next(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply)
+{
+    if (!request->spec || !request->spec->path ||
+        strcmp(request->spec->path, "core.sync.blockers") != 0)
+        return;
+    const struct json_value *page = json_get(&reply->data, "blocker_page");
+    if (!page || page->type != JSON_OBJ ||
+        json_get_bool(json_get(page, "page_complete")))
+        return;
+    const struct json_value *limit =
+        request->input ? json_get(request->input, "item_limit") : NULL;
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv(&input, "item_offset",
+                           json_get(page, "next_item_offset")) &&
+              (!limit || json_push_kv(&input, "item_limit", limit)) &&
+              json_push_kv(&input, "expected_snapshot",
+                           json_get(page, "snapshot"));
+    char encoded[sizeof(reply->next[0].input_json)];
+    size_t n = ok ? json_write(&input, encoded, sizeof(encoded)) : 0;
+    json_free(&input);
+    if (n > 0 && n < sizeof(encoded))
+        (void)zcl_command_reply_add_next(reply, request->spec->path, encoded,
+                                         "fetch the next blocker page");
+}
+
 static bool nc_is_scalar(const struct json_value *v)
 {
     return v && v->type <= JSON_STR; /* NULL/BOOL/INT/REAL/STR */
@@ -276,11 +337,17 @@ static size_t nc_project_cursor_start(const struct zcl_command_request *request,
                                       bool summary)
 {
     size_t start = 0;
-    if (!summary && request->cursor && request->cursor[0]) {
+    const struct json_value *typed =
+        request->input ? json_get(request->input, "cursor") : NULL;
+    if (summary)
+        return 0;
+    if (request->cursor && request->cursor[0]) {
         char *end = NULL;
         unsigned long long c = strtoull(request->cursor, &end, 10);
         if (end && !*end)
             start = (size_t)c;
+    } else if (typed && typed->type == JSON_INT && json_get_int(typed) > 0) {
+        start = (size_t)json_get_int(typed);
     }
     return start;
 }
@@ -446,6 +513,8 @@ static void nc_project_array(const struct zcl_command_request *request,
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 
+    if (truncated && !summary && nc_add_cursor_next(request, next_cursor, reply))
+        return;
     if (truncated)
         nc_add_describe_next(
             reply, request->spec->path,
@@ -594,6 +663,9 @@ void zcl_native_bridge_project(const struct zcl_command_request *request,
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 
+    nc_add_blocker_page_next(request, reply);
+    if (truncated && !summary && nc_add_cursor_next(request, next_cursor, reply))
+        return;
     if (truncated)
         nc_add_describe_next(
             reply, request->spec->path,

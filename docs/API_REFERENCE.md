@@ -252,7 +252,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `core sync status` | ready | read / read / public · fast/low | none | `zcl.sync_status.v1` | `z23 core sync status` | Sync phase and header/block gap |
 | `core sync validation` | ready | read / read / public · fast/low | none | `zcl.validation_status.v1` | `z23 core sync validation` | Background validation progress |
-| `core sync blockers` | ready | read / read / public · fast/low | `item_offset`, `item_limit`, `expected_snapshot` | `zcl.blockers.v1` | `z23 core sync blockers` | Active named sync blockers |
+| `core sync blockers` | ready | read / read / public · fast/low | `cursor`, `item_offset`, `item_limit`, `expected_snapshot` | `zcl.blockers.v1` | `z23 core sync blockers` | Active named sync blockers |
 | `core sync diagnose` | ready | read / read / operator · fast/moderate | none | `zcl.syncdiag.v1` | `z23 core sync diagnose` | Diagnose why sync is not advancing |
 | `core sync frontier offline` | ready | read / read / operator · fast/low | `datadir` | `zcl.core_sync_frontier_offline.v1` | `z23 core sync frontier offline --input='{"datadir":"$HOME/.zclassic-c23"}'` | H* (reducer frontier) of a STOPPED/COPIED datadir |
 

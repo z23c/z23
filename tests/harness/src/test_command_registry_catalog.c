@@ -3981,6 +3981,154 @@ static size_t blocker_page_execute(struct json_value *input, const char *view,
     return zcl_command_registry_execute_json(registry, spec, &context, input,
         false, spec->path, view, budget, 0, cursor, out, 8193, code);
 }
+/* The reply's first next entry, copied into `input` for the follow-up call.
+ * Returns false unless it names core.sync.blockers with an object input. */
+static bool blocker_next_input(const struct json_value *envelope,
+                               struct json_value *input)
+{
+    const struct json_value *next = json_get(envelope, "next");
+    if (!next || next->type != JSON_ARR || next->num_children == 0)
+        return false;
+    const struct json_value *first = &next->children[0];
+    const struct json_value *body = json_get(first, "input");
+    const char *command = json_get_str(json_get(first, "command"));
+    if (!command || strcmp(command, "core.sync.blockers") || !body ||
+        body->type != JSON_OBJ)
+        return false;
+    json_free(input);
+    json_init(input);
+    json_copy(input, body);
+    return true;
+}
+static int test_blocker_paging_controls(void)
+{
+    int failures = 0;
+    char out[8193];
+    struct json_value input = {0}, envelope = {0};
+    node_rpc_client_set_test_hook(blocker_page_rpc);
+    g_blocker_page_case = 0;
+    TEST("blocker item_limit alone pages every row and each next is the exact request") {
+        size_t seen = 0;
+        bool done = false;
+        json_set_object(&input);
+        ASSERT(json_push_kv_int(&input, "item_limit", 3));
+        for (int round = 0; round < 10 && !done; round++) {
+            enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+            ASSERT(blocker_page_execute(&input, "full", 8192, NULL, out, &code) > 0);
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+            json_free(&envelope);
+            ASSERT(json_read(&envelope, out, strlen(out)));
+            const struct json_value *page = json_get(json_get(&envelope, "data"), "blocker_page");
+            ASSERT(page && page->type == JSON_OBJ);
+            ASSERT_EQ(json_get_int(json_get(page, "item_offset")), (int64_t)seen);
+            seen += (size_t)json_get_int(json_get(page, "returned_count"));
+            done = json_get_bool(json_get(page, "page_complete"));
+            if (done) break;
+            ASSERT(blocker_next_input(&envelope, &input));
+            ASSERT_EQ(json_get_int(json_get(&input, "item_offset")), (int64_t)seen);
+            ASSERT_EQ(json_get_int(json_get(&input, "item_limit")), 3);
+            ASSERT(json_get(&input, "expected_snapshot") != NULL);
+        }
+        ASSERT(done);
+        ASSERT_EQ((long long)seen, 8);
+        json_free(&input); json_free(&envelope); PASS();
+    }
+    TEST("blocker item_offset 0 alone uses the default limit and fills the page budget") {
+        json_set_object(&input);
+        ASSERT(json_push_kv_int(&input, "item_offset", 0));
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(blocker_page_execute(&input, "full", 8192, NULL, out, &code) > 0);
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_read(&envelope, out, strlen(out)));
+        const struct json_value *page = json_get(json_get(&envelope, "data"), "blocker_page");
+        ASSERT(page && json_get_int(json_get(page, "returned_count")) > 1);
+        json_free(&input); json_free(&envelope); PASS();
+    }
+    TEST("blocker paging refusals name the exact rule") {
+        static const struct { const char *key; int64_t value; const char *extra; const char *rule; } cases[] = {
+            {"item_offset", 2, NULL, "item_offset > 0 requires expected_snapshot"},
+            {"item_limit", 0, NULL, "input key 'item_limit': expected an integer from 1 to 128, default 128"},
+            {"item_limit", 129, NULL, "input key 'item_limit': expected an integer from 1 to 128, default 128"},
+            {"item_offset", 129, NULL, "input key 'item_offset': expected an integer from 0 to 128, default 0"},
+            {"cursor", 1, "item_limit", "cursor pages the summary fields; it cannot be combined"},
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            json_set_object(&input);
+            ASSERT(json_push_kv_int(&input, cases[i].key, cases[i].value));
+            if (cases[i].extra) ASSERT(json_push_kv_int(&input, cases[i].extra, 2));
+            enum zcl_command_exit code = ZCL_COMMAND_EXIT_OK;
+            ASSERT(blocker_page_execute(&input, "full", 8192, NULL, out, &code) > 0);
+            ASSERT(code != ZCL_COMMAND_EXIT_OK);
+            if (!strstr(out, cases[i].rule)) printf("[case %zu: %s] ", i, out);
+            ASSERT(strstr(out, cases[i].rule) != NULL);
+            json_free(&input);
+        }
+        PASS();
+    }
+    TEST("blocker field pages continue with the advertised cursor input") {
+        int64_t last = -1;
+        int pages = 0;
+        bool truncated = true;
+        json_set_object(&input);
+        while (truncated && pages < 40) {
+            enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+            ASSERT(blocker_page_execute(&input, "normal", 1100, NULL, out, &code) > 0);
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+            json_free(&envelope);
+            ASSERT(json_read(&envelope, out, strlen(out)));
+            const struct json_value *meta = json_get(json_get(&envelope, "data"), "_page");
+            ASSERT(meta && meta->type == JSON_OBJ);
+            truncated = json_get_bool(json_get(meta, "truncated"));
+            pages++;
+            if (!truncated) break;
+            int64_t cursor = json_get_int(json_get(meta, "next_cursor"));
+            ASSERT(cursor > last);
+            last = cursor;
+            ASSERT(blocker_next_input(&envelope, &input));
+            ASSERT_EQ(json_get_int(json_get(&input, "cursor")), cursor);
+            ASSERT_EQ((long long)input.num_children, 1);
+        }
+        ASSERT(!truncated);
+        ASSERT(pages >= 2);
+        json_free(&input); json_free(&envelope); PASS();
+    }
+_test_next:;
+    json_free(&input); json_free(&envelope);
+    node_rpc_client_set_test_hook(NULL); g_blocker_page_case = 0;
+    return failures;
+}
+/* Every leaf's describe document is one valid JSON object naming its path. */
+static int test_every_describe_document_parses(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    static char out[ZCL_COMMAND_SPEC_BUDGET + 1];
+    static const char *const required[] = {
+        "core.identity.anchor", "core.identity.rotate", "core.identity.revoke",
+        "dev.agent.worker", "zcode.endpoint.publish"};
+    TEST("every leaf's describe document parses as a JSON object naming its path") {
+        bool covered[sizeof(required) / sizeof(required[0])] = {false};
+        for (size_t i = 0; i < reg->count; i++) {
+            const struct zcl_command_spec *spec = &reg->commands[i];
+            if (spec->mode == ZCL_COMMAND_MODE_BRANCH) continue;
+            size_t n = zcl_command_registry_describe_json(reg, spec->path, out, sizeof(out));
+            if (n == 0) { printf("[no document: %s] ", spec->path); ASSERT(n > 0); }
+            struct json_value doc = {0};
+            bool ok = json_read(&doc, out, n) && doc.type == JSON_OBJ &&
+                      !strcmp(json_get_str(json_get(&doc, "path")), spec->path);
+            json_free(&doc);
+            if (!ok) printf("[unparsable: %s] ", spec->path);
+            ASSERT(ok);
+            for (size_t r = 0; r < sizeof(required) / sizeof(required[0]); r++)
+                if (!strcmp(required[r], spec->path)) covered[r] = true;
+        }
+        for (size_t r = 0; r < sizeof(required) / sizeof(required[0]); r++)
+            ASSERT(covered[r]);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
 static int test_blocker_basic_pages(void)
 {
     int failures = 0;
@@ -5237,10 +5385,6 @@ static int test_every_describe_document_fits(void)
             if (zcl_command_registry_describe_json(reg, spec->path, out,
                                                    sizeof(out)) > 0)
                 continue;
-            /* zcode.endpoint.publish is baselined as pre-existing; see
-             * tools/lint/describe_budget_baseline.txt. */
-            if (strcmp(spec->path, "zcode.endpoint.publish") == 0)
-                continue;
             overflowed++;
             if (first_bad[0] == '\0')
                 snprintf(first_bad, sizeof(first_bad), "%s", spec->path);
@@ -6389,6 +6533,8 @@ int test_command_registry_catalog(void)
     failures += test_board_list_budget_pages();
     failures += test_response_budget_views();
     failures += test_blocker_basic_pages();
+    failures += test_blocker_paging_controls();
+    failures += test_every_describe_document_parses();
     failures += test_blocker_basic_refusals();
     failures += test_work_envelope_ceiling();
     failures += test_success_data_budget();

@@ -731,6 +731,16 @@ bool command_registry_input_key_declared(const struct zcl_command_spec *spec,
     return true;
 }
 
+/* The rule behind a rejected core.sync.blockers paging key, or NULL. */
+static const char *cr_blocker_key_rule(const char *key)
+{
+    if (!strcmp(key, "item_offset")) return "an integer from 0 to 128, default 0";
+    if (!strcmp(key, "item_limit")) return "an integer from 1 to 128, default 128";
+    if (!strcmp(key, "expected_snapshot"))
+        return "the unmodified snapshot object of the previous page";
+    return NULL;
+}
+
 bool command_registry_input_type_why(const char *key,
                                      const struct json_value *value, char *why,
                                      size_t why_size)
@@ -741,6 +751,10 @@ bool command_registry_input_type_why(const char *key,
         snprintf(why, why_size,
                  "input key '%s' is %zu characters, over its %zu limit",
                  key, strlen(text), str_max);
+    else if (why && cr_blocker_key_rule(key))
+        snprintf(why, why_size,
+                 "invalid type or range for input key '%s': expected %s", key,
+                 cr_blocker_key_rule(key));
     else if (why)
         snprintf(why, why_size, "invalid type or range for input key '%s'",
                  key);
