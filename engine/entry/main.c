@@ -36,6 +36,7 @@
 #include "config/args.h"                /* flag ladder, -loglevel, usage text */
 #include "main_cli_modes.h"             /* bench/cli/import/gen run-and-exit modes */
 #include "command/native_command.h"
+#include "command/cli_render.h"        /* bare-z23 first-steps line */
 #include "mcp/mcp_serve.h"              /* z23 mcp serve (local stdio MCP) */
 #include "net/file_service.h"           /* -filesync fast path (fs_client_sync) */
 #include "controllers/agent_controller.h" /* rpc_agent_set_boot_context */
@@ -336,6 +337,10 @@ static bool main_dispatch_priority_modes(int argc, char **argv, int *rc)
         synthetic[2] = (char *)"--next";
         synthetic[3] = NULL;
         *rc = cli_main(3, synthetic);
+        char start[96];
+        struct zcl_cli_render_env env = zcl_cli_render_resolve(fileno(stdout));
+        if (zcl_cli_render_start_hint(&env, start, sizeof(start)) > 0)
+            fputs(start, stdout);
         return true;
     }
     return false;

@@ -252,6 +252,25 @@ OpenSSL, libevent and zlib. `make tor-full` forces a rebuild. A development
 build can use `make ZCL_TOR=stub`; it publishes no onion service and cannot
 be shipped. Intel macOS remains unmeasured.
 
+### First steps
+
+Run the binary with no arguments. It prints the one-line node status, the
+suggested next command, and, on a terminal, a `start:` line naming the three
+verbs a new agent needs:
+
+```bash
+build/bin/z23
+# start: z23 wiki · z23 lab run hello.c · z23 card
+```
+
+| Verb | What it does |
+|---|---|
+| `z23 wiki [topic]` | Walks the docs tree one topic at a time. |
+| `z23 lab run <file.c>` | Compiles one C file and runs it confined; `tests/fixtures/lab/hello.c` is a checked-in example. `z23 lab test` runs a file against a list of cases. |
+| `z23 card [--level=haiku]` | Lists the owner's public work cards; `z23 card show <id>` shows one. |
+
+The same verbs are found by `z23 discover search "first steps"`.
+
 ### Your one obvious next action
 
 You have a working binary. There are two useful things to do with it: run the

@@ -28,7 +28,7 @@ An agent arriving at any node needs three verbs:
 |---|---|---|
 | `z23 wiki` | Where is it? One nested tree of docs topics, commands and lessons. | `discover.wiki`, `discover.read` |
 | `z23 lab` | Does it work? One C23 file, compiled and run confined, JSON result and receipt. | `lab.run`, `lab.test`, `lab.show` |
-| `z23 card` | What should I do next? A task sized to the model taking it. | Board cards; lab cards are not yet native |
+| `z23 card` | What should I do next? A task sized to the model taking it. | `work.list`, `work.show`: the board cards (`z23 card`, `z23 card show <id>`); lab cards are not yet native |
 
 The CLI and the MCP server are two views of one command registry with one
 JSON envelope. Claude Code, Codex or a person at a terminal receive identical

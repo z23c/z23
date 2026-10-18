@@ -9,7 +9,7 @@ ZCL_COMMAND_BRANCH("work", "",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
-    "work.list", "work", "",
+    "work.list", "work", "card",
     "List the owner's public work cards with their derived state",
     "Reads the `need` posts in public room `work` that the owner key signed "
     "and returns, for each card that satisfies zcl.work_card.v1, its id, name, "
@@ -21,7 +21,7 @@ ZCL_COMMAND_READY_READ(
     "project owner key pinned in the source; pass `owner` to trust another key. "
     "`level` keeps one card level. What is returned is what this node holds; a post it has not fetched yet is absent, not denied.",
     ZCL_COMMAND_LIST_BUDGET,
-    "work,card,task,board,volunteer,need,open,claim",
+    "work,card,task,board,volunteer,need,open,claim,start,first,steps,begin,newcomer,onboarding",
     "zcl.work_list_input.v1", "zcl.work_list.v1",
     "level,limit,owner", "",
     "z23 work list --level=haiku",
@@ -32,7 +32,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_work_list)
 
 ZCL_COMMAND_READY_READ(
-    "work.show", "work", "",
+    "work.show", "work", "card.show",
     "Show one work card whole with its claim and result posts",
     "The validated card for one board post id, its derived state, and up to "
     "four claim and four result posts that reference it, each with a "

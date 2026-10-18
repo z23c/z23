@@ -113,7 +113,7 @@ ZCL_COMMAND_READY_READ(
     "is the root; `docsdir` overrides the checkout's docs directory. Lesson "
     "search over the signed fleet wiki is `fleet.wiki.find`.",
     ZCL_COMMAND_EXTENDED_LIST_BUDGET,
-    "wiki,docs,topic,tree,knowledge,navigate", "zcl.discover.wiki_input.v1",
+    "wiki,docs,topic,tree,knowledge,navigate,start,first,steps,getting started,new agent,begin,newcomer,onboarding", "zcl.discover.wiki_input.v1",
     "zcl.wiki_node.v1", "topic,after,docsdir", "topic",
     "z23 wiki agent",
     ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,

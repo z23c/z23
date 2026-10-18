@@ -64,4 +64,10 @@ size_t zcl_cli_render_brief(const char *line,
                             const struct zcl_cli_render_env *env,
                             char *out, size_t cap);
 
+/* The first-steps line printed under the bare `z23` status: the three verbs
+ * a new agent needs. Writes it, newline-terminated, only when env->human;
+ * returns bytes written, 0 for machine output or a buffer too small. */
+size_t zcl_cli_render_start_hint(const struct zcl_cli_render_env *env,
+                                 char *out, size_t cap);
+
 #endif /* ZCL_CLI_RENDER_H */

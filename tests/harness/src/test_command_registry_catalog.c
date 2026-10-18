@@ -1041,6 +1041,41 @@ static bool search_top_paths_equal(const struct zcl_command_registry *reg,
     return true;
 }
 
+/* Front-door onboarding intents: a new agent's first query must reach the
+ * wiki, the lab or the work cards within three results. Written for the
+ * onboarding tags, separate from the tuning and held-out sets above. */
+static const struct search_rank_case SEARCH_RANK_FRONT_DOOR[] = {
+    {"first steps", "discover.wiki,lab.run,work.list"},
+    {"start", "discover.wiki,lab.run,work.list"},
+    {"getting started", "discover.wiki,lab.run,work.list"},
+    {"new agent", "discover.wiki,lab.run,work.list"},
+};
+
+static int test_search_rank_front_door(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("search puts the wiki, lab or work cards in the top three for newcomer queries") {
+        for (size_t i = 0; i < sizeof(SEARCH_RANK_FRONT_DOOR) /
+                                   sizeof(SEARCH_RANK_FRONT_DOOR[0]);
+             i++) {
+            size_t rank = search_rank_of(reg, SEARCH_RANK_FRONT_DOOR[i].query,
+                                         SEARCH_RANK_FRONT_DOOR[i].expected);
+            if (rank < 1 || rank > 3)
+                printf("[front-door] \"%s\" rank=%zu\n",
+                       SEARCH_RANK_FRONT_DOOR[i].query, rank);
+            ASSERT(rank >= 1 && rank <= 3);
+        }
+        char paths[ZCL_COMMAND_SEARCH_LIMIT][ZCL_COMMAND_MAX_PATH];
+        size_t n = search_top_paths(reg, "first steps", paths);
+        ASSERT(n > 0);
+        for (size_t i = 0; i < n; i++)
+            ASSERT(strcmp(paths[i], "core.wallet.recovery.restore") != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_search_stop_words(void)
 {
     int failures = 0;
@@ -3616,6 +3651,34 @@ static int test_fleet_wiki_positionals_and_alias(void)
         ASSERT_STR_EQ(find->aliases, "");
         ASSERT(alias);
         ASSERT_EQ(consumed, (size_t)1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_card_alias_resolves_to_work(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("card and card show resolve to work.list and work.show") {
+        ASSERT(zcl_native_command_is_root("card"));
+        const char *list_words[] = { "card", "--level=haiku" };
+        const char *show_words[] = { "card", "show", "abc" };
+        size_t consumed = 0;
+        bool alias = false;
+        char invoked[ZCL_COMMAND_MAX_PATH];
+        const struct zcl_command_spec *s = zcl_command_registry_resolve_words(
+            reg, list_words, 2, &consumed, &alias, invoked, sizeof(invoked));
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(s->path, "work.list");
+        ASSERT(alias);
+        ASSERT_EQ(consumed, (size_t)1);
+        s = zcl_command_registry_resolve_words(
+            reg, show_words, 3, &consumed, &alias, invoked, sizeof(invoked));
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(s->path, "work.show");
+        ASSERT(alias);
+        ASSERT_EQ(consumed, (size_t)2);
         PASS();
     } _test_next:;
     return failures;
@@ -6489,6 +6552,7 @@ int test_command_registry_catalog(void)
     failures += test_search_multiword();
     failures += test_search_rank_benchmark();
     failures += test_search_rank_held_out();
+    failures += test_search_rank_front_door();
     failures += test_search_stop_words();
     failures += test_search_stemming();
     failures += test_search_vocabulary();
@@ -6546,6 +6610,7 @@ int test_command_registry_catalog(void)
     failures += test_success_data_budget();
     failures += test_typo_stays_branch();
     failures += test_fleet_wiki_positionals_and_alias();
+    failures += test_card_alias_resolves_to_work();
     failures += test_ops_selftest_registry();
     failures += test_ops_dash_dashboards_ported();
     failures += test_ops_state_requires_subsystem();

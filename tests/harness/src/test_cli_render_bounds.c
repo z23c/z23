@@ -6,10 +6,12 @@
 #define zcl_cli_render_resolve cr_bounds_resolve
 #define zcl_cli_render_doc cr_bounds_doc
 #define zcl_cli_render_brief cr_bounds_brief
+#define zcl_cli_render_start_hint cr_bounds_start_hint
 #include "../../../tools/command/cli_render.c"
 #undef zcl_cli_render_resolve
 #undef zcl_cli_render_doc
 #undef zcl_cli_render_brief
+#undef zcl_cli_render_start_hint
 
 static int test_command_key_bound(void)
 {

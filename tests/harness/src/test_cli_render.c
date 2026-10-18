@@ -695,6 +695,32 @@ static int test_brief_render(void)
     return failures;
 }
 
+/* ── unit: bare-z23 first-steps line ───────────────────────────────── */
+
+static int test_start_hint(void)
+{
+    int failures = 0;
+    TEST("start hint: three verbs for a human, nothing for machine output") {
+        char out[128];
+        struct zcl_cli_render_env e = cr_env(80, false);
+        size_t n = zcl_cli_render_start_hint(&e, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT_EQ(n, strlen(out));
+        ASSERT(strcmp(out, "start: z23 wiki \xC2\xB7 z23 lab run hello.c "
+                           "\xC2\xB7 z23 card\n") == 0);
+        ASSERT(!cr_has_esc(out));
+
+        e.human = false;
+        ASSERT_EQ(zcl_cli_render_start_hint(&e, out, sizeof(out)), (size_t)0);
+        ASSERT_EQ(out[0], '\0');
+
+        e.human = true;
+        ASSERT_EQ(zcl_cli_render_start_hint(&e, out, 8), (size_t)0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── end-to-end against the real binary ────────────────────────────── */
 
 #define CR_BIN "build/bin/zclassic23"
@@ -704,6 +730,7 @@ static bool cr_bin_fresh(const char **stale_out)
     static const char *const witnesses[] = {
         "tools/command/cli_render.c",
         "tools/command/native_command.c",
+        "engine/entry/main.c",
         "engine/entry/main_cli_modes.c",
         NULL,
     };
@@ -879,6 +906,24 @@ static int test_e2e_forced_human(const char *home)
     return failures;
 }
 
+static int test_e2e_bare_start_line(const char *home)
+{
+    int failures = 0;
+    TEST("e2e: bare binary prints the start line for a human, not for a pipe") {
+        char *argv[] = { (char *)CR_BIN, NULL };
+        char out[8192];
+        (void)cr_run(argv, cr_build_envp(home, "ZCL_HUMAN=1", "NO_COLOR=1"),
+                     out, sizeof(out));
+        ASSERT(strstr(out, "\nstart: z23 wiki \xC2\xB7 z23 lab run hello.c "
+                           "\xC2\xB7 z23 card\n") != NULL);
+        (void)cr_run(argv, cr_build_envp(home, "ZCL_HUMAN=0", NULL), out,
+                     sizeof(out));
+        ASSERT(strstr(out, "start:") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_e2e_width_and_row_cap(const char *home)
 {
     int failures = 0;
@@ -950,6 +995,7 @@ int test_cli_render(void)
     failures += test_data_tree_render();
     failures += test_guide_tree_render();
     failures += test_brief_render();
+    failures += test_start_hint();
 
     const char *stale = NULL;
     if (!cr_bin_fresh(&stale)) {
@@ -961,6 +1007,7 @@ int test_cli_render(void)
         if (test_mkdtemp(home, sizeof(home), "cli_render_home")) {
             failures += test_e2e_pipe_byte_identity(home);
             failures += test_e2e_forced_human(home);
+            failures += test_e2e_bare_start_line(home);
             failures += test_e2e_width_and_row_cap(home);
             test_cleanup_tmpdir(home);
         } else {

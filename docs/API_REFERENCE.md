@@ -1887,8 +1887,8 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `work list` | ready | read / read / operator · fast/low | `level`, `limit`, `owner` | `zcl.work_list.v1` | `z23 work list --level=haiku` | List the owner's public work cards with their derived state |
-| `work show` | ready | read / read / operator · fast/low | **`id`**, `owner` | `zcl.work_show.v1` | `z23 work show 4f2c0a9e...` | Show one work card whole with its claim and result posts |
+| `work list` (aliases: `card`) | ready | read / read / operator · fast/low | `level`, `limit`, `owner` | `zcl.work_list.v1` | `z23 work list --level=haiku` | List the owner's public work cards with their derived state |
+| `work show` (aliases: `card.show`) | ready | read / read / operator · fast/low | **`id`**, `owner` | `zcl.work_show.v1` | `z23 work show 4f2c0a9e...` | Show one work card whole with its claim and result posts |
 
 ### `lab` — Compile and run one C23 file confined, with ground truth
 
@@ -2072,6 +2072,8 @@ Every alias resolves through the same grammar as its canonical path
 | `zcode.package.offered` | `zcode.package.offered` |
 | `join` | `zcode.node.join` |
 | `update` | `zcode.node.update.status` |
+| `card` | `work.list` |
+| `card.show` | `work.show` |
 | `fleet.agents` | `dev.fleet.agents` |
 
 

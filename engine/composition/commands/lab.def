@@ -25,7 +25,7 @@ ZCL_COMMAND_READY_COMMAND(
     "fresh to bypass. Where Landlock or seccomp cannot be applied it refuses "
     "with LAB_UNCONFINED and never runs the program; compile_only still works.",
     65536U,
-    "lab,c23,compile,run,sandbox,sanitizer,ubsan,asan,test,exit,stdout",
+    "lab,c23,compile,run,sandbox,sanitizer,ubsan,asan,test,exit,stdout,start,first,steps,begin,newcomer,onboarding",
     "zcl.lab_run_input.v1", "zcl.lab_run.v1",
     "file,stdin,args,sanitize,timeout_ms,mem_mb,fresh,compile_only,idempotency_key", "file",
     "z23 lab run hello.c --stdin=hi",
@@ -51,7 +51,7 @@ ZCL_COMMAND_READY_COMMAND(
     "bypasses the cache. Refuses with LAB_UNCONFINED where Landlock or "
     "seccomp cannot be applied.",
     65536U,
-    "lab,c23,test,cases,expect,diff,sandbox,sanitizer",
+    "lab,c23,test,cases,expect,diff,sandbox,sanitizer,start,first,steps,begin,newcomer,onboarding",
     "zcl.lab_test_input.v1", "zcl.lab_test.v1",
     "file,cases,sanitize,timeout_ms,mem_mb,fresh,idempotency_key", "file",
     "z23 lab test solve.c --cases=cases.json",

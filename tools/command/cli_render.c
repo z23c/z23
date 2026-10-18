@@ -1492,3 +1492,17 @@ size_t zcl_cli_render_brief(const char *line,
         return 0;
     return b.len;
 }
+
+size_t zcl_cli_render_start_hint(const struct zcl_cli_render_env *env,
+                                 char *out, size_t cap)
+{
+    static const char hint[] =
+        "start: z23 wiki \xC2\xB7 z23 lab run hello.c \xC2\xB7 z23 card\n";
+    if (!env || !out || cap == 0)
+        return 0;
+    out[0] = '\0';
+    if (!env->human || cap <= sizeof(hint) - 1)
+        return 0;
+    memcpy(out, hint, sizeof(hint));
+    return sizeof(hint) - 1;
+}
