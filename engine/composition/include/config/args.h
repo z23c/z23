@@ -14,8 +14,8 @@ struct app_context;
 
 /* ── Operator-target flag policy (shared: daemon WARN + CLI-client refusal) ──
  *
- * A double-dash typo of an operator-target flag (e.g. `--rpcport=39071` for
- * `-rpcport=`) with no `-datadir=` must never make
+ * A double-dash typo of an operator-target flag (e.g. `--port=39071` for
+ * `-port=`) with no `-datadir=` must never make
  * `is_cli_mode()` bail out and boot a full node against the DEFAULT
  * datadir — the live node's directory. The seven flags below are the ones
  * that select WHICH node an invocation targets (datadir/rpcport/port/
@@ -43,6 +43,14 @@ enum cli_flag_kind {
  * engine/entry/main_cli_modes.c (CLI-client hard refusal). */
 enum cli_flag_kind cli_flag_classify(const char *arg, char *suggest,
                                      size_t suggest_cap);
+
+/* The client spells two target flags with either dash count: `--datadir=DIR`
+ * and `--rpcport=N` mean exactly `-datadir=DIR` and `-rpcport=N`. Returns the
+ * single-dash form of such a well-formed token (a pointer into `arg`), and
+ * `arg` itself for every other token, including a value-less `--datadir`,
+ * which stays a typo. cli_flag_classify() is unchanged and still reports the
+ * double-dash form for the daemon WARN. */
+char *cli_flag_normalize_target(char *arg);
 
 /* Comma-joined "-name=PLACEHOLDER" listing of every operator-target flag
  * cli_flag_classify() recognizes, for refusal/diagnostic text. Returns a

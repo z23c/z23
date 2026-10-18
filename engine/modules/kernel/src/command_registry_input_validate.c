@@ -62,3 +62,20 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
     return command_registry_input_required_discovery(spec, input, why,
                                                      why_size);
 }
+
+bool zcl_command_registry_input_key_is_boolean(
+    const struct zcl_command_spec *spec, const char *key)
+{
+    if (!spec || !key)
+        return false;
+    struct json_value probe;
+    json_init(&probe);
+    json_set_object(&probe);
+    bool type_ok = false;
+    bool is_boolean = json_push_kv_bool(&probe, key, true) &&
+                      command_registry_input_value_type_ok(
+                          spec, key, &probe.children[0], &type_ok) &&
+                      type_ok;
+    json_free(&probe);
+    return is_boolean;
+}

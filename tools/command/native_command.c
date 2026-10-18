@@ -3887,22 +3887,29 @@ static bool nc_main_flag_format_bad(bool seen, const char *value)
     return seen || !value || strcmp(value, "json") != 0;
 }
 
+/* True when the leaf declares `key` among its input keys. */
+static bool nc_main_leaf_declares_key(const struct nc_main_state *st,
+                                      const char *key)
+{
+    const char *keys = st->spec->input_keys ? st->spec->input_keys : "";
+    size_t key_len = strlen(key);
+    for (const char *at = keys; at && *at; ) {
+        const char *end = strchr(at, ',');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (n == key_len && memcmp(at, key, n) == 0)
+            return true;
+        at = end ? end + 1 : NULL;
+    }
+    return false;
+}
+
 /* `--format=X` is the leaf's own input when the leaf declares a `format` key
  * and X is not the output selector `json`. */
 static bool nc_main_format_is_input(const struct nc_main_state *st,
                                     const char *value)
 {
-    const char *keys = st->spec->input_keys ? st->spec->input_keys : "";
-    if (!value || strcmp(value, "json") == 0)
-        return false;
-    for (const char *at = keys; at && *at; ) {
-        const char *end = strchr(at, ',');
-        size_t n = end ? (size_t)(end - at) : strlen(at);
-        if (n == 6 && memcmp(at, "format", 6) == 0)
-            return true;
-        at = end ? end + 1 : NULL;
-    }
-    return false;
+    return value && strcmp(value, "json") != 0 &&
+           nc_main_leaf_declares_key(st, "format");
 }
 
 static bool nc_main_flag_field_bad(bool seen, const char *value)
@@ -4090,6 +4097,92 @@ static enum nc_main_flag_result nc_main_apply_flag_group2(
     return NC_FLAG_UNMATCHED;
 }
 
+/* A bare `--name` that is followed by a word, where `name` is a declared
+ * value-carrying input key: the caller meant `--name <word>`, which is not a
+ * supported spelling. Switches (boolean keys) and `--name=value` never match. */
+static bool nc_main_flag_wants_joined_value(const struct nc_main_state *st,
+                                            const char *flag_key,
+                                            const char *value,
+                                            const char *next_word)
+{
+    if (value || !next_word || nc_is_flag(next_word) ||
+        !nc_main_leaf_declares_key(st, flag_key))
+        return false;
+    return !zcl_command_registry_input_key_is_boolean(st->spec, flag_key);
+}
+
+static bool nc_main_target_value_bad(const char *flag_key, const char *value)
+{
+    size_t port = 0;
+    if (!value || !value[0])
+        return true;
+    if (strcmp(flag_key, "datadir") == 0)
+        return strlen(value) >= sizeof(g_bridge_datadir);
+    return !nc_parse_size_control(value, 1, 65535, &port);
+}
+
+/* --datadir=DIR / --rpcport=N: the double-dash spelling of the client target
+ * flags -datadir=DIR / -rpcport=N, meaning the same on every leaf. The
+ * one-shot RPC client is rebound to the named target. A leaf that also
+ * declares an input of the same name additionally receives it as that input. */
+static enum nc_main_flag_result nc_main_apply_flag_group4(
+    const char *flag_key, const char *value, struct nc_main_state *st,
+    char *why, size_t why_cap)
+{
+    bool is_datadir = strcmp(flag_key, "datadir") == 0;
+    if (!is_datadir && strcmp(flag_key, "rpcport") != 0)
+        return NC_FLAG_UNMATCHED;
+    if (nc_main_target_value_bad(flag_key, value)) {
+        (void)snprintf(why, why_cap,
+                       "--%s needs one valid value; use --%s=value",
+                       flag_key, flag_key);
+        return NC_FLAG_BAD;
+    }
+    if (is_datadir) {
+        zcl_native_bridge_bind_rpc(value, g_bridge_rpc_port);
+        g_native_datadir_explicit = true;
+    } else {
+        g_bridge_rpc_port = atoi(value);
+        node_rpc_client_init(g_bridge_datadir, g_bridge_rpc_port);
+    }
+    return nc_main_leaf_declares_key(st, flag_key) ? NC_FLAG_UNMATCHED
+                                                   : NC_FLAG_OK;
+}
+
+typedef enum nc_main_flag_result (*nc_main_flag_group_fn)(
+    const char *, const char *, struct nc_main_state *, char *, size_t);
+
+/* One flag word: response controls and client targets first, then the
+ * leaf's own typed input. `next_word` is the word after it, if any. */
+static enum nc_main_flag_result nc_main_apply_flag(
+    struct nc_main_state *st, const char *flag_key, const char *value,
+    const char *next_word, char *why, size_t why_cap)
+{
+    static const nc_main_flag_group_fn groups[] = {
+        nc_main_apply_flag_group3, nc_main_apply_flag_group1,
+        nc_main_apply_flag_group4, nc_main_apply_flag_group2,
+    };
+    for (size_t g = 0; g < sizeof(groups) / sizeof(groups[0]); g++) {
+        enum nc_main_flag_result r = groups[g](flag_key, value, st, why,
+                                               why_cap);
+        if (r != NC_FLAG_UNMATCHED)
+            return r;
+    }
+    if (nc_main_flag_wants_joined_value(st, flag_key, value, next_word)) {
+        (void)snprintf(why, why_cap,
+                       "--%s takes its value joined with '='; use --%s=value",
+                       flag_key, flag_key);
+        return NC_FLAG_BAD;
+    }
+    if (!nc_set_typed_value(&st->flags, flag_key, value)) {
+        (void)snprintf(why, why_cap,
+                       "malformed, duplicate, or out-of-range --%s value",
+                       flag_key);
+        return NC_FLAG_BAD;
+    }
+    return NC_FLAG_OK;
+}
+
 /* Collect the tokens the path did not consume: positionals in order and
  * value flags into a scratch object (st->flags). CLI UX contract: field
  * selector + the bare no-arg entry point's next-command hint. `field=` is
@@ -4107,44 +4200,19 @@ static bool nc_main_parse_flags(struct nc_main_state *st, int *rc)
     for (size_t i = st->consumed; i < st->count; i++) {
         const char *w = st->words[i];
         if (!nc_is_flag(w)) {
-            if (!nc_main_parse_bare_word(w, st, flag_why, sizeof(flag_why))) {
-                flag_error = true;
-                break;
-            }
-            continue;
+            flag_error = !nc_main_parse_bare_word(w, st, flag_why,
+                                                  sizeof(flag_why));
+        } else {
+            const char *value = NULL;
+            const char *next = i + 1 < st->count ? st->words[i + 1] : NULL;
+            flag_error = !nc_split_flag(w, flag_key, sizeof(flag_key),
+                                        &value) ||
+                         nc_main_apply_flag(st, flag_key, value, next,
+                                            flag_why, sizeof(flag_why)) ==
+                             NC_FLAG_BAD;
         }
-        const char *value = NULL;
-        if (!nc_split_flag(w, flag_key, sizeof(flag_key), &value)) {
-            flag_error = true;
+        if (flag_error)
             break;
-        }
-        enum nc_main_flag_result r1 = nc_main_apply_flag_group3(
-            flag_key, value, st, flag_why, sizeof(flag_why));
-        if (r1 == NC_FLAG_OK)
-            continue;
-        if (r1 == NC_FLAG_UNMATCHED)
-            r1 = nc_main_apply_flag_group1(flag_key, value, st, flag_why,
-                                           sizeof(flag_why));
-        if (r1 == NC_FLAG_BAD) {
-            flag_error = true;
-            break;
-        }
-        if (r1 == NC_FLAG_UNMATCHED) {
-            enum nc_main_flag_result r2 = nc_main_apply_flag_group2(
-                flag_key, value, st, flag_why, sizeof(flag_why));
-            if (r2 == NC_FLAG_BAD) {
-                flag_error = true;
-                break;
-            }
-            if (r2 == NC_FLAG_UNMATCHED &&
-                !nc_set_typed_value(&st->flags, flag_key, value)) {
-                flag_error = true;
-                (void)snprintf(flag_why, sizeof(flag_why),
-                               "malformed, duplicate, or out-of-range --%s value",
-                               flag_key);
-                break;
-            }
-        }
     }
     if (flag_error) {
         json_free(&st->flags);

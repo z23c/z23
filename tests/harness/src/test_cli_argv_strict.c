@@ -445,7 +445,7 @@ static int cas_test_observed_incident_refuses(void)
 {
     int failures = 0;
     TEST("CLI-client argv: the exact observed incident "
-         "`--rpcport=39071 status` (double-dash typo, no -datadir=) is "
+         "`--port=39071 status` (double-dash typo, no -datadir=) is "
          "HARD REFUSED — never falls through to a node boot") {
         char home[PATH_MAX];
         test_fmt_tmpdir(home, sizeof(home), "zcl_cas_incident", "home");
@@ -453,7 +453,7 @@ static int cas_test_observed_incident_refuses(void)
         cas_mkdir_p(home);
 
         char *argv[] = {
-            (char *)CAS_BIN, (char *)"--rpcport=39071", (char *)"status",
+            (char *)CAS_BIN, (char *)"--port=39071", (char *)"status",
             NULL,
         };
         char out[8192] = {0};
@@ -461,8 +461,8 @@ static int cas_test_observed_incident_refuses(void)
 
         ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
         ASSERT(cas_contains(out, "error=UNRECOGNIZED_FLAG"));
-        ASSERT(cas_contains(out, "--rpcport=39071"));
-        ASSERT(cas_contains(out, "-rpcport=PORT"));
+        ASSERT(cas_contains(out, "--port=39071"));
+        ASSERT(cas_contains(out, "-port=PORT"));
         ASSERT(cas_contains(out, "-datadir=DIR"));
         /* The core safety property: no node boot ever started. */
         ASSERT(!cas_contains(out, "starting (datadir="));
@@ -475,17 +475,15 @@ static int cas_test_observed_incident_refuses(void)
 static int cas_test_double_dash_datadir_refuses(void)
 {
     int failures = 0;
-    TEST("CLI-client argv: `--datadir=... status` (double-dash typo) is "
-         "refused with the exact -datadir=DIR correction") {
+    TEST("CLI-client argv: a value-less `--datadir status` is refused with "
+         "the exact -datadir=DIR correction") {
         char home[PATH_MAX];
         test_fmt_tmpdir(home, sizeof(home), "zcl_cas_ddatadir", "home");
         (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = {
-            (char *)CAS_BIN,
-            (char *)"--datadir=/zcl_cas_never_touched",
-            (char *)"status", NULL,
+            (char *)CAS_BIN, (char *)"--datadir", (char *)"status", NULL,
         };
         char out[8192] = {0};
         int rc = cas_run(argv, home, out, sizeof(out));
@@ -494,9 +492,41 @@ static int cas_test_double_dash_datadir_refuses(void)
         ASSERT(cas_contains(out, "error=UNRECOGNIZED_FLAG"));
         ASSERT(cas_contains(out, "-datadir=DIR"));
         ASSERT(!cas_contains(out, "starting (datadir="));
-        /* Never actually touched the flag-supplied path. */
-        struct stat st;
-        ASSERT(stat("/zcl_cas_never_touched", &st) != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_double_dash_targets_accepted(void)
+{
+    int failures = 0;
+    TEST("CLI-client argv: `--datadir=DIR --rpcport=N` mean exactly "
+         "`-datadir=DIR -rpcport=N`") {
+        char home[PATH_MAX], datadir[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_ddok", "home");
+        test_fmt_tmpdir(datadir, sizeof(datadir), "zcl_cas_ddok", "dd");
+        (void)test_ensure_tmproot();
+        cas_mkdir_p(home);
+        cas_mkdir_p(datadir);
+
+        char double_dd[PATH_MAX + 16], single_dd[PATH_MAX + 16];
+        snprintf(double_dd, sizeof(double_dd), "--datadir=%s", datadir);
+        snprintf(single_dd, sizeof(single_dd), "-datadir=%s", datadir);
+        char *dbl[] = { (char *)CAS_BIN, double_dd, (char *)"--rpcport=39071",
+                        (char *)"app", (char *)"transaction-types",
+                        (char *)"list", NULL };
+        char *sgl[] = { (char *)CAS_BIN, single_dd, (char *)"-rpcport=39071",
+                        (char *)"app", (char *)"transaction-types",
+                        (char *)"list", NULL };
+        char out_dbl[ZCL_COMMAND_EXTENDED_LIST_BUDGET + 1] = {0};
+        char out_sgl[ZCL_COMMAND_EXTENDED_LIST_BUDGET + 1] = {0};
+        int rc_dbl = cas_run(dbl, home, out_dbl, sizeof(out_dbl));
+        int rc_sgl = cas_run(sgl, home, out_sgl, sizeof(out_sgl));
+
+        ASSERT_EQ(rc_dbl, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(rc_dbl, rc_sgl);
+        ASSERT(!cas_contains(out_dbl, "UNRECOGNIZED_FLAG"));
+        ASSERT(cas_contains(out_dbl, "zcl.transaction_types.index.v2"));
         PASS();
     } _test_next:;
     return failures;
@@ -529,7 +559,7 @@ static int cas_test_missing_value_refuses(void)
 static int cas_test_typo_after_command_word_refuses(void)
 {
     int failures = 0;
-    TEST("CLI-client argv: `status --rpcport=N` (typo AFTER the command "
+    TEST("CLI-client argv: `status --port=N` (typo AFTER the command "
          "word) is still refused — proves the classification/validation "
          "scan does not depend on flag position") {
         char home[PATH_MAX];
@@ -538,7 +568,7 @@ static int cas_test_typo_after_command_word_refuses(void)
         cas_mkdir_p(home);
 
         char *argv[] = {
-            (char *)CAS_BIN, (char *)"status", (char *)"--rpcport=39071",
+            (char *)CAS_BIN, (char *)"status", (char *)"--port=39071",
             NULL,
         };
         char out[8192] = {0};
@@ -1093,6 +1123,7 @@ int test_cli_argv_strict(void)
 
     failures += cas_test_observed_incident_refuses();
     failures += cas_test_double_dash_datadir_refuses();
+    failures += cas_test_double_dash_targets_accepted();
     failures += cas_test_missing_value_refuses();
     failures += cas_test_typo_after_command_word_refuses();
     failures += cas_test_bare_status_still_works();

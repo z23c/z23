@@ -1247,6 +1247,61 @@ static int test_format_flag_binds_leaf_input(void)
     return failures;
 }
 
+static int test_double_dash_target_flags_bind_client(void)
+{
+    int failures = 0;
+    TEST_CASE("--datadir= and --rpcport= bind the client on a leaf without those inputs, like the single-dash spelling") {
+        char wire[16384], dir_double[PATH_MAX], dir_single[PATH_MAX];
+        char flag_double[PATH_MAX + 16], flag_single[PATH_MAX + 16];
+        int rc = 0;
+        test_make_tmpdir(dir_double, sizeof(dir_double), "native_api", "dd_double");
+        test_make_tmpdir(dir_single, sizeof(dir_single), "native_api", "dd_single");
+        snprintf(flag_double, sizeof(flag_double), "--datadir=%s", dir_double);
+        snprintf(flag_single, sizeof(flag_single), "-datadir=%s", dir_single);
+        const char *dbl[] = {"board", "list", flag_double, "--rpcport=39071"};
+        const char *sgl[] = {"board", "list", flag_single, "-rpcport=39072"};
+        node_rpc_client_set_test_hook(format_capture_rpc);
+        g_format_params[0] = '\0';
+        ASSERT(uniform_cli("fleet", dbl, 4, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "BAD_FLAG") == NULL);
+        ASSERT_STR_EQ(zcl_native_command_datadir(), dir_double);
+        ASSERT_EQ(zcl_native_command_rpc_port(), 39071);
+        ASSERT(zcl_native_command_datadir_is_explicit());
+        ASSERT(strstr(g_format_params, "datadir") == NULL);
+        ASSERT(uniform_cli("fleet", sgl, 4, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "BAD_FLAG") == NULL);
+        ASSERT_STR_EQ(zcl_native_command_datadir(), dir_single);
+        ASSERT_EQ(zcl_native_command_rpc_port(), 39072);
+        node_rpc_client_set_test_hook(NULL);
+    } TEST_END
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
+static int test_space_separated_value_flag_is_refused_with_hint(void)
+{
+    int failures = 0;
+    TEST_CASE("--key value is refused with the --key=value hint; --key=value is unchanged") {
+        char wire[16384];
+        int rc = 0;
+        const char *spaced[] = {"board", "list", "--kind", "task"};
+        const char *joined[] = {"board", "list", "--kind=task"};
+        node_rpc_client_set_test_hook(format_capture_rpc);
+        g_format_params[0] = '\0';
+        ASSERT(uniform_cli("fleet", spaced, 4, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "\"code\":\"BAD_FLAG\"") != NULL);
+        ASSERT(strstr(wire, "use --kind=value") != NULL);
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_EQ(g_format_params[0], '\0');
+        ASSERT(uniform_cli("fleet", joined, 3, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "BAD_FLAG") == NULL);
+        ASSERT(strstr(g_format_params, "\"kind\":\"task\"") != NULL);
+        node_rpc_client_set_test_hook(NULL);
+    } TEST_END
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 static int test_wallet_security_refusal_flags(void)
 {
     int failures = 0;
@@ -3681,6 +3736,8 @@ int test_native_api_contract(void)
     failures += test_uniform_input_file();
     failures += test_uniform_input_file_refusals();
     failures += test_format_flag_binds_leaf_input();
+    failures += test_double_dash_target_flags_bind_client();
+    failures += test_space_separated_value_flag_is_refused_with_hint();
     failures += test_raw_native_pipeline_mines_exact_signed_bytes();
     failures += test_app_write_native_e2e();
     failures += test_oprindex_rebuild_requires_witness();

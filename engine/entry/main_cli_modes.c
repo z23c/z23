@@ -2819,19 +2819,20 @@ static int cli_refuse_malformed_target_flag(const char *arg,
  * invocation carries a typed command word, every one of the seven
  * operator-target flags (see config/args.h) must be either correctly
  * formed or absent — never silently mis-routed. Deliberately narrow: only
- * a double-dash typo or a bare "-flag" missing its "=value" is refused;
- * every other dash-prefixed token (arbitrary RPC method params, native
- * command conventions like `--input=`, `--next`, `--format=json`,
- * `field=...`) is untouched, since those are legitimate opaque data this
- * client forwards, not operator-target flags. Runs BEFORE any datadir/
- * rpcport resolution (the caller's very first statement) so a malformed
- * flag can never influence which node this call would have targeted —
- * closing the "explicit-looking flags were supplied and silently ignored,
- * so resolution fell back to the default datadir" hazard structurally,
- * not by special-casing the fallback path itself. */
+ * a double-dash typo (`--datadir=`/`--rpcport=` are normalized first) or a
+ * bare "-flag" missing its "=value" is refused; every other dash-prefixed
+ * token (arbitrary RPC method params, native command conventions like
+ * `--input=`, `--next`, `--format=json`, `field=...`) is untouched, since
+ * those are legitimate opaque data this client forwards, not operator-target
+ * flags. Runs BEFORE any datadir/rpcport resolution (the caller's very first
+ * statement) so a malformed flag can never influence which node this call
+ * would have targeted — closing the "explicit-looking flags were supplied and
+ * silently ignored, so resolution fell back to the default datadir" hazard
+ * structurally, not by special-casing the fallback path itself. */
 static int cli_validate_client_argv(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
+        argv[i] = cli_flag_normalize_target(argv[i]);
         char suggest[24] = {0};
         enum cli_flag_kind kind = cli_flag_classify(argv[i], suggest,
                                                      sizeof(suggest));

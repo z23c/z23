@@ -115,6 +115,13 @@ Normative behavior:
   `--input-file=<absolute path>`, which reads the same object as `--input`
   from a caller-owned, non-symlink regular file under the same size budget as
   `--input=-`. `--input` and `--input-file` are mutually exclusive.
+- A flag value is always joined with `=`: `--name=value`. A bare `--name`
+  followed by another word, where `name` is a declared value-carrying input
+  key, is refused with `BAD_FLAG` and the hint `use --name=value`; switches
+  such as `--help` are unaffected.
+- The client target flags `-datadir=DIR` and `-rpcport=N` are also accepted as
+  `--datadir=DIR` and `--rpcport=N` on every leaf, with the same meaning. A
+  leaf that declares an input of the same name also receives the value.
 - Unknown branches fail with nearby valid paths and one executable next
   action; they never fall through to an unrelated RPC method.
 

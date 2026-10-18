@@ -428,6 +428,10 @@ const struct zcl_command_spec *zcl_command_registry_resolve_words(
 bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                                          const struct json_value *input,
                                          char *why, size_t why_size);
+/* True when the declared input key `key` of `spec` accepts a JSON boolean, i.e.
+ * it is a switch rather than a value-carrying key. Undeclared keys are false. */
+bool zcl_command_registry_input_key_is_boolean(
+    const struct zcl_command_spec *spec, const char *key);
 /* Turn a rejection from the call above into a message that NAMES the keys the
  * leaf accepts: "<why>; accepted input keys: <a,b,c>", or "…; this command
  * accepts no input keys" for an empty-input leaf.

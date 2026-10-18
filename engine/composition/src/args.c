@@ -1236,3 +1236,12 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
 
     return -1; /* parsed OK — caller continues booting */
 }
+
+char *cli_flag_normalize_target(char *arg)
+{
+    if (strncmp(arg, "--datadir=", 10) == 0 && arg[10])
+        return arg + 1;
+    if (strncmp(arg, "--rpcport=", 10) == 0 && arg[10])
+        return arg + 1;
+    return arg;
+}
