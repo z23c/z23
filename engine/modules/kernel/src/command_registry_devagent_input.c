@@ -87,7 +87,7 @@ static bool devagent_bounded_positive_int(const char *key,
                                           bool *type_ok)
 {
     static const char *const keys[] = {
-        "attempt", "max_age_days", "ceiling_lines",
+        "attempt", "max_age_days", "ceiling_lines", "max_rows",
     };
     if (!devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
         return false;
@@ -377,7 +377,8 @@ bool command_registry_devagent_input_extra_bool_key(const char *key)
            strcmp(key, "include_units") == 0 ||
            strcmp(key, "list") == 0 || strcmp(key, "open") == 0 ||
            strcmp(key, "publish") == 0 || strcmp(key, "fleet") == 0 ||
-           strcmp(key, "terminate") == 0 || strcmp(key, "qualify") == 0;
+           strcmp(key, "terminate") == 0 || strcmp(key, "qualify") == 0 ||
+           strcmp(key, "prove") == 0;
 }
 
 /* dev.land cancel names one request by its sequence number, and `--seq=3`

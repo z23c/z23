@@ -6708,6 +6708,278 @@ _test_next:;
     return failures;
 }
 
+/* ── drive prove:true max_rows:N: the manual proof recipe, bounded ─────── */
+
+/* A stand-in `make`: argv is -jN -C <root> dev-bin. It builds a stand-in
+ * producer in <root>/build/bin/z23-dev that counts its runs in `count` and
+ * then either writes the pair's receipt (ok), exits 0 without one (quiet),
+ * or fails (broken). */
+enum dlx_producer { DLX_PRODUCER_OK, DLX_PRODUCER_QUIET, DLX_PRODUCER_BROKEN };
+
+static bool dlx_fake_make(const char *path, const char *count,
+                          enum dlx_producer kind)
+{
+    char script[4000];
+    const char *action =
+        kind == DLX_PRODUCER_OK
+            ? "mkdir -p \"$R/.cache/zcl-dev-proof/receipts\"\n"
+              "echo receipt > \"$R/.cache/zcl-dev-proof/receipts/$L-$B.receipt\"\n"
+            : kind == DLX_PRODUCER_QUIET ? "true\n"
+                                         : "echo 'lint: boom' >&2\nexit 3\n";
+    (void)snprintf(
+        script, sizeof(script),
+        "#!/bin/sh\n"
+        "[ \"$2\" = -C ] && [ \"$4\" = dev-bin ] || exit 64\n"
+        "mkdir -p \"$3/build/bin\" || exit 65\n"
+        "cat > \"$3/build/bin/z23-dev\" <<'PRODUCER'\n"
+        "#!/bin/sh\n"
+        "for a in \"$@\"; do case \"$a\" in\n"
+        "--root=*) R=${a#--root=};; --local_commit=*) L=${a#--local_commit=};;\n"
+        "--remote_base=*) B=${a#--remote_base=};; esac; done\n"
+        "echo run >> '%s'\n"
+        "%s"
+        "PRODUCER\n"
+        "chmod 700 \"$3/build/bin/z23-dev\"\n",
+        count, action);
+    return dlx_write(path, script) && chmod(path, 0700) == 0;
+}
+
+static bool dlx_prove_drive(struct dlx_call *c, int max_rows)
+{
+    dlx_begin(c, "drive");
+    (void)json_push_kv_bool(&c->input, "prove", true);
+    (void)json_push_kv_int(&c->input, "max_rows", max_rows);
+    return dlx_run(c);
+}
+
+static size_t dlx_runs(const char *count)
+{
+    char bytes[256];
+    size_t len = 0;
+    if (!dlx_slurp(count, bytes, sizeof(bytes) - 1, &len))
+        return 0;
+    return len / 4; /* "run\n" per producer run */
+}
+
+struct dlx_prove_rig {
+    struct dlx_rig rig;
+    char second[64];
+    char make[1400];
+    char count[1400];
+};
+
+/* Two submitted rows (tip, then a child of it), the stub proof pass, and a
+ * stand-in make of the requested kind. */
+static bool dlx_prove_rig(struct dlx_prove_rig *p, const char *tag,
+                          enum dlx_producer kind)
+{
+    struct dlx_call c;
+    char dir[1200];
+    if (!dlx_rig_make(&p->rig, tag))
+        return false;
+    dlx_landdir(dir, sizeof(dir));
+    (void)snprintf(p->make, sizeof(p->make), "%s/fake-make", p->rig.clone);
+    (void)snprintf(p->count, sizeof(p->count), "%s/producer-runs",
+                   p->rig.clone);
+    if (!dlx_fake_make(p->make, p->count, kind) ||
+        !dlx_commit(p->rig.clone, "second.txt", "two\n", p->second))
+        return false;
+    setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    setenv("ZCL_LAND_MAKE", p->make, 1);
+    dlx_submit(&c, &p->rig, p->rig.tip);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    dlx_submit(&c, &p->rig, p->second);
+    ok = ok && dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    return ok;
+}
+
+static int test_dev_land_prove_drive1(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: drive prove max_rows=2 proves and lands two rows, reporting each") {
+        struct dlx_prove_rig p;
+        struct dlx_call c;
+        char main_tip[64];
+        dlx_isolate("prove_drive_two");
+        ASSERT(dlx_prove_rig(&p, "prove_drive_two_rig", DLX_PRODUCER_OK));
+        ASSERT(dlx_prove_drive(&c, 2) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "outcome"), "landed");
+        ASSERT_EQ(dlx_int(&c, "rows_landed"), 2);
+        const struct json_value *rows = dlx_arr(&c, "rows");
+        ASSERT(rows != NULL && rows->num_children == 2);
+        for (size_t i = 0; i < 2; i++) {
+            const struct json_value *r = &rows->children[i];
+            ASSERT_EQ(json_get_int(json_get(r, "seq")), (int64_t)i + 1);
+            ASSERT_STR_EQ(json_get_str(json_get(r, "outcome")), "landed");
+            ASSERT_STR_EQ(json_get_str(json_get(r, "proof")), "ran");
+            ASSERT(json_get_int(json_get(r, "proof_ms")) >= 0);
+            ASSERT(strlen(json_get_str(json_get(r, "base"))) == 40);
+            ASSERT(strlen(json_get_str(json_get(r, "head"))) == 40);
+        }
+        dlx_end(&c);
+        ASSERT_EQ((int64_t)dlx_runs(p.count), 2);
+        ASSERT(dlx_origin_main(&p.rig, main_tip));
+        ASSERT_STR_EQ(main_tip, p.second);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
+static int test_dev_land_prove_drive2(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: drive prove stops at the first proof failure with the gate and log") {
+        struct dlx_prove_rig p;
+        struct dlx_call c;
+        char before[64], main_tip[64];
+        dlx_isolate("prove_drive_fail");
+        ASSERT(dlx_prove_rig(&p, "prove_drive_fail_rig", DLX_PRODUCER_BROKEN));
+        ASSERT(dlx_origin_main(&p.rig, before));
+        ASSERT(dlx_prove_drive(&c, 2) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_REFUSED");
+        ASSERT(strstr(dlx_str(&c, "reason"), "PROOF_RECEIPT_MISSING") != NULL);
+        ASSERT(strstr(dlx_str(&c, "reason"), "gate=proof_receipt") != NULL);
+        ASSERT(strstr(dlx_str(&c, "reason"), "prove-") != NULL);
+        const struct json_value *rows = dlx_arr(&c, "rows");
+        ASSERT(rows != NULL && rows->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "outcome")),
+                      "refused");
+        dlx_end(&c);
+        ASSERT_EQ((int64_t)dlx_runs(p.count), 1);
+        ASSERT(dlx_origin_main(&p.rig, main_tip));
+        ASSERT_STR_EQ(main_tip, before);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
+static int test_dev_land_prove_drive3(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: drive prove refuses while another drive holds the lander lock") {
+        struct dlx_prove_rig p;
+        struct dlx_call c;
+        char land[1200], lock[1400], before[64], main_tip[64];
+        dlx_isolate("prove_drive_busy");
+        ASSERT(dlx_prove_rig(&p, "prove_drive_busy_rig", DLX_PRODUCER_OK));
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(lock, sizeof(lock), "%s/drive.lock", land);
+        int fd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0);
+        ASSERT(dlx_origin_main(&p.rig, before));
+        ASSERT(dlx_prove_drive(&c, 1) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_BUSY");
+        ASSERT(c.reply.error.retryable);
+        dlx_end(&c);
+        ASSERT_EQ((int64_t)dlx_runs(p.count), 0);
+        ASSERT(dlx_origin_main(&p.rig, main_tip));
+        ASSERT_STR_EQ(main_tip, before);
+        ASSERT(flock(fd, LOCK_UN) == 0 && close(fd) == 0);
+        ASSERT(dlx_prove_drive(&c, 1) && dlx_ok(&c));
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
+static int test_dev_land_prove_drive4(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: an interrupted prove drive resumes from the receipt without rebuilding") {
+        struct dlx_prove_rig p;
+        struct dlx_call c;
+        char queue[16384], local[41], base[41], dir[1800], receipt[2000];
+        char main_tip[64], before[64];
+        size_t len = 0;
+        const char *at;
+        dlx_isolate("prove_drive_resume");
+        ASSERT(dlx_prove_rig(&p, "prove_drive_resume_rig", DLX_PRODUCER_QUIET));
+        ASSERT(dlx_origin_main(&p.rig, before));
+        /* The first drive dies (here: refuses) with row 1 in flight. */
+        ASSERT(dlx_prove_drive(&c, 1) && !dlx_ok(&c));
+        dlx_end(&c);
+        ASSERT_EQ((int64_t)dlx_runs(p.count), 1);
+        ASSERT(dlx_queue_bytes(queue, sizeof(queue), &len));
+        at = strstr(queue, "\"local\":\"");
+        ASSERT(at != NULL);
+        memcpy(local, at + 9, 40);
+        local[40] = '\0';
+        at = strstr(queue, "\"base\":\"");
+        ASSERT(at != NULL);
+        memcpy(base, at + 8, 40);
+        base[40] = '\0';
+        /* The killed drive's proof had finished: its receipt is on disk. */
+        dlx_landdir(dir, sizeof(dir));
+        (void)snprintf(dir + strlen(dir), sizeof(dir) - strlen(dir),
+                       "/wt/.cache/zcl-dev-proof/receipts");
+        ASSERT(dlx_mkdir_p(dir));
+        (void)snprintf(receipt, sizeof(receipt), "%s/%s-%s.receipt", dir,
+                       local, base);
+        ASSERT(dlx_write(receipt, "receipt\n"));
+        /* The make that would rebuild is gone: resuming must not need it. */
+        setenv("ZCL_LAND_MAKE", "/nonexistent/make", 1);
+        ASSERT(dlx_origin_main(&p.rig, main_tip));
+        ASSERT_STR_EQ(main_tip, before);
+        ASSERT(dlx_prove_drive(&c, 1) && dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "rows_landed"), 1);
+        const struct json_value *rows = dlx_arr(&c, "rows");
+        ASSERT(rows != NULL && rows->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "proof")),
+                      "receipt_present");
+        dlx_end(&c);
+        ASSERT_EQ((int64_t)dlx_runs(p.count), 1);
+        ASSERT(dlx_origin_main(&p.rig, main_tip));
+        ASSERT_STR_EQ(main_tip, p.rig.tip);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
+static int test_dev_land_prove_drive5(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: a prove drive never publishes a pair whose proof left no receipt") {
+        struct dlx_prove_rig p;
+        struct dlx_call c;
+        char before[64], main_tip[64];
+        dlx_isolate("prove_drive_noreceipt");
+        ASSERT(dlx_prove_rig(&p, "prove_drive_noreceipt_rig",
+                             DLX_PRODUCER_QUIET));
+        ASSERT(dlx_origin_main(&p.rig, before));
+        /* The producer exits 0 and writes nothing. */
+        ASSERT(dlx_prove_drive(&c, 2) && !dlx_ok(&c));
+        ASSERT(strstr(dlx_str(&c, "reason"), "PROOF_RECEIPT_MISSING") != NULL);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&p.rig, main_tip));
+        ASSERT_STR_EQ(main_tip, before);
+        PASS();
+    }
+#endif
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 /* ── submit --qualify: the pre-submit gates ────────────────────────────── */
 
 /* A stand-in worktree Makefile: every goal the gates run, steered by QFX
@@ -11877,6 +12149,8 @@ static int dlx_case_registration(void)
         ASSERT(strstr(dlx_leaf("submit")->input_keys, "worktree") != NULL);
         ASSERT(strstr(dlx_leaf("submit")->input_keys, "note") != NULL);
         ASSERT(strstr(dlx_leaf("drive")->input_keys, "seq") != NULL);
+        ASSERT(strstr(dlx_leaf("drive")->input_keys, "max_rows") != NULL);
+        ASSERT(strstr(dlx_leaf("drive")->input_keys, "prove") != NULL);
         ASSERT(strstr(dlx_leaf("cancel")->input_keys, "seq") != NULL);
         ASSERT(strstr(dlx_leaf("status")->input_keys, "json") != NULL);
         PASS();
@@ -14723,6 +14997,11 @@ int test_dev_land(void)
     failures += test_dev_land_drive_seq_refusals();
     failures += test_dev_land_drive_seq_proof_failed();
     failures += test_dev_land_drive_seq_stops();
+    failures += test_dev_land_prove_drive1();
+    failures += test_dev_land_prove_drive2();
+    failures += test_dev_land_prove_drive3();
+    failures += test_dev_land_prove_drive4();
+    failures += test_dev_land_prove_drive5();
     failures += test_dev_land_qualify_passes();
     failures += test_dev_land_qualify_verdict_rule();
     failures += test_dev_land_qualify_refusals();

@@ -1342,6 +1342,8 @@ Z23_FLAG("ZCL_LAND_HOOK_QUIET", "env_runtime", "-", "-",
           "sets it; first use tools/dev/z23_git_hook.c:auto")
 Z23_FLAG("ZCL_LAND_INTERVAL_S", "env_build", "30", "-",
           "undocumented; first use tools/dev/land_lander.sh:auto")
+Z23_FLAG("ZCL_LAND_MAKE", "env_test", "-", "-",
+          "test build only: the make program dev land drive prove runs to build the landing-worktree producer; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_MAX_ATTEMPTS", "env_build", "2", "-",
           "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LAND_PROOF_STUB", "env_runtime", "-", "-",

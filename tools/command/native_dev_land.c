@@ -10311,7 +10311,7 @@ static void dl_step(const struct zcl_command_request *req,
 
 /* Read the durable pair after a step has released step.lock. No process
  * owns this intent: another authorized integrator can read the same row. */
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static bool dl_drive_pair(char local[80], char base[80], char root[4096])
 {
     struct dl_dirs d;
@@ -10440,11 +10440,20 @@ int zcl_native_dev_land_test_watch_worker(const char *wt, const char *base,
  * Returns 1 once the child proof has exited (its verdict is the pair's
  * settled proof state, read by the step that follows), -1 with `why` when
  * no candidate-built producer could be run. */
-[[maybe_unused]] static int dl_producer_reproof(const char *root,
-                                                const char *local,
-                                                const char *base,
-                                                const char *make_program,
-                                                char *why, size_t why_cap)
+static void dl_producer_log_write(const char *log_path, const char *stage,
+                                  const char *text)
+{
+    FILE *f = log_path && log_path[0] ? fopen(log_path, "ab") : NULL;
+    if (!f)
+        return;
+    (void)fprintf(f, "== %s ==\n%s\n", stage, text ? text : "");
+    (void)fclose(f);
+}
+
+static int dl_producer_reproof_log(const char *root, const char *local,
+                                   const char *base, const char *make_program,
+                                   const char *log_path, char *why,
+                                   size_t why_cap)
 {
     char jobs[16], bin[4096], root_arg[4200], local_arg[128], base_arg[128];
     char *buf;
@@ -10472,6 +10481,7 @@ int zcl_native_dev_land_test_watch_worker(const char *wt, const char *base,
     const char *build[] = { make_program, jobs, "-C", root, "dev-bin", NULL };
     rc = zcl_spawn_capture(build, buf, DL_LOG_CAP,
                            DL_PRODUCER_BUILD_TIMEOUT_MS);
+    dl_producer_log_write(log_path, "producer build", buf);
     if (rc != 0 || access(bin, X_OK) != 0) {
         dl_first_actionable(buf, why, why_cap);
         if (!why[0])
@@ -10483,12 +10493,23 @@ int zcl_native_dev_land_test_watch_worker(const char *wt, const char *base,
                             base_arg, NULL };
     rc = zcl_spawn_capture(prove, buf, DL_LOG_CAP,
                            DL_PRODUCER_PROOF_TIMEOUT_MS);
+    dl_producer_log_write(log_path, "proof step", buf);
     free(buf);
     if (rc < 0) {
         (void)snprintf(why, why_cap, "%s", "producer_launch_failed");
         return -1;
     }
     return 1;
+}
+
+[[maybe_unused]] static int dl_producer_reproof(const char *root,
+                                                const char *local,
+                                                const char *base,
+                                                const char *make_program,
+                                                char *why, size_t why_cap)
+{
+    return dl_producer_reproof_log(root, local, base, make_program, NULL, why,
+                                   why_cap);
 }
 
 /* The one recovery both `dev land drive` and `dev land step` run for a
@@ -10546,10 +10567,125 @@ int zcl_native_dev_land_test_producer_reproof(const char *root,
 }
 #endif
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* ── drive prove:true: the manual proof recipe, bounded ───────────────────
+ * The queue only records the pair to prove (`in_flight.proof_step`); nothing
+ * claims it unless a resident watcher was armed. A proving drive runs the
+ * recipe itself: build the producer from the landing worktree's own source
+ * (the proof refuses any other producer), queue a failed pair again, run
+ * `dev proof step` with that binary, and require the signed receipt before
+ * the drive may continue to publication. The proof cannot run in this
+ * process: its producer would be this binary, not the candidate's. */
+struct dl_prove_run {
+    bool ran;       /* a producer was built and run for this pair */
+    long long ms;   /* build plus proof, milliseconds */
+    char local[80]; /* the pair this step saw, for the per-row report */
+    char base[80];
+};
+
+static struct dl_prove_run g_dl_prove;
+static bool g_dl_prove_mode;
+
+/* The pair's signed receipt exists and its proof reads PASS. Under the test
+ * build's proof stub the receipt file alone is the evidence: a stub has no
+ * signer to verify, but a drive must still not continue without the file. */
+static bool dl_prove_receipt_ok(const char *root, const char *local,
+                                const char *base)
+{
+    struct zcl_dev_proof_status st = {0};
+#if defined(ZCL_TESTING)
+    if (dl_stub()) {
+        char path[4096 + 256];
+        (void)snprintf(path, sizeof(path),
+                       "%s/.cache/zcl-dev-proof/receipts/%s-%s.receipt", root,
+                       local, base);
+        return access(path, R_OK) == 0;
+    }
+#endif
+    return zcl_dev_proof_status_read(root, local, base, &st) &&
+           st.state == ZCL_DEV_PROOF_STATE_PASSED && st.receipt_path[0] &&
+           access(st.receipt_path, R_OK) == 0;
+}
+
+static const char *dl_prove_make_program(void)
+{
+#if defined(ZCL_TESTING)
+    const char *forced = getenv("ZCL_LAND_MAKE");
+    if (forced && forced[0])
+        return forced;
+#endif
+    return "make";
+}
+
+/* Returns 1 with the pair's receipt in hand, -1 with a typed refusal that
+ * names the failing gate and the log. */
+static int dl_prove_pair(struct zcl_command_reply *reply)
+{
+    char local[80], base[80], root[4096], log[4096 + 128], why[256] = "";
+    char evidence[4096 + 512], failed[4096] = "";
+    struct dl_dirs d;
+    int64_t started;
+    int rc;
+    if (!dl_drive_pair(local, base, root) || !dl_dirs_make(&d)) {
+        dl_fail(reply, "PROOF_INTENT_UNAVAILABLE", "drive",
+                "the exact in-flight proof pair is unavailable",
+                "retry dev land drive after inspecting dev land status");
+        return -1;
+    }
+    (void)snprintf(g_dl_prove.local, sizeof(g_dl_prove.local), "%s", local);
+    (void)snprintf(g_dl_prove.base, sizeof(g_dl_prove.base), "%s", base);
+    if (dl_prove_receipt_ok(root, local, base))
+        return 1; /* resumed: the proof already finished */
+#ifdef ZCL_DEV_BUILD
+    struct zcl_dev_proof_status prior = {0};
+    if (zcl_dev_proof_status_read(root, local, base, &prior) &&
+        prior.state == ZCL_DEV_PROOF_STATE_FAILED &&
+        !zcl_dev_proof_retry(root, local, base, &prior)) {
+        dl_fail(reply, "PROOF_PRODUCER_RETRY_REFUSED", "drive",
+                "cannot queue the failed pair again", prior.detail);
+        return -1;
+    }
+#endif
+    (void)snprintf(log, sizeof(log), "%s/prove-%.12s-%.12s.log", d.logs, local,
+                   base);
+    (void)unlink(log);
+    started = platform_time_monotonic_us();
+    rc = dl_producer_reproof_log(root, local, base, dl_prove_make_program(),
+                                 log, why, sizeof(why));
+    g_dl_prove.ran = true;
+    g_dl_prove.ms += (platform_time_monotonic_us() - started) / 1000;
+    if (rc < 0) {
+        (void)snprintf(evidence, sizeof(evidence),
+                       "gate=producer_build: %s; log=%s", why, log);
+        dl_fail(reply, "PROOF_PRODUCER_UNAVAILABLE", "drive",
+                "cannot build and run a producer from the candidate",
+                evidence);
+        return -1;
+    }
+    if (!dl_prove_receipt_ok(root, local, base)) {
+        (void)zcl_dev_proof_failure_path(root, local, base, failed,
+                                         sizeof(failed));
+        (void)snprintf(evidence, sizeof(evidence),
+                       "gate=proof_receipt: no signed PASS receipt for %.12s on "
+                       "%.12s; log=%s%s%s",
+                       local, base, log, failed[0] ? " failed_record=" : "",
+                       failed);
+        dl_fail(reply, "PROOF_RECEIPT_MISSING", "drive",
+                "the exact proof left no receipt; nothing is published",
+                evidence);
+        return -1;
+    }
+    return 1;
+}
+
+#endif
+
 /* Return 1 after this pair settles, 0 when a worker owns it, -1 on refusal. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static int dl_drive_proof(struct zcl_command_reply *reply)
 {
+    if (g_dl_prove_mode)
+        return dl_prove_pair(reply);
 #ifdef ZCL_DEV_BUILD
     char local[80], base[80], root[4096];
     struct zcl_dev_proof_status proof = {0};
@@ -10855,36 +10991,211 @@ static void dl_drive_judged(void)
 #endif
 }
 
+static int dl_drive_run_row(const struct zcl_command_request *req,
+                            struct zcl_command_reply *reply, long long seq,
+                            struct dl_drive_verdict *v)
+{
+    int rounds = 0;
+    while (rounds < DL_DRIVE_ROUNDS && v->kind == DL_DRIVE_CONTINUE) {
+        rounds++;
+        dl_drive_reply_reset(reply);
+        dl_drive_round(req, reply, seq, v);
+    }
+    return rounds;
+}
+
 static void dl_drive_seq(const struct zcl_command_request *req,
                          struct zcl_command_reply *reply)
 {
     struct dl_drive_verdict v = { .kind = DL_DRIVE_CONTINUE };
     long long seq = 0;
-    int rounds = 0;
+    int rounds;
     if (!dl_seq_in(req, &seq)) {
         dl_fail(reply, "BAD_INPUT", "drive",
                 "drive --seq names one row by a positive sequence",
                 "input.seq");
         return;
     }
-    while (rounds < DL_DRIVE_ROUNDS && v.kind == DL_DRIVE_CONTINUE) {
-        rounds++;
-        dl_drive_reply_reset(reply);
-        dl_drive_round(req, reply, seq, &v);
-    }
+    rounds = dl_drive_run_row(req, reply, seq, &v);
     dl_drive_judged();
     dl_drive_outcome(reply, seq, rounds, &v);
 }
+
+/* ── drive prove:true max_rows:N ───────────────────────────────────────────
+ * Up to N rows, oldest first, each taken to a terminal outcome with its
+ * proof run by this drive. One drive at a time: a non-blocking lock in the
+ * land directory (the same flock helper the queue and step locks use; the
+ * step lock itself is released between steps, so it cannot span a drive).
+ * The first row that does not land stops the drive. A killed drive loses
+ * nothing: the lock dies with it, the row stays in flight, and the next
+ * drive resumes it, skipping a proof whose receipt already exists. */
+#define DL_DRIVE_MAX_ROWS 16
+
+static bool dl_drive_rows_in(const struct zcl_command_request *req,
+                             int *rows, bool *prove)
+{
+    const struct json_value *m = json_get(req->input, "max_rows");
+    const struct json_value *p = json_get(req->input, "prove");
+    *rows = 1;
+    *prove = false;
+    if (p && p->type != JSON_BOOL)
+        return false;
+    if (p)
+        *prove = json_get_bool(p);
+    if (!m)
+        return true;
+    if (m->type != JSON_INT || json_get_int(m) < 1 ||
+        json_get_int(m) > DL_DRIVE_MAX_ROWS)
+        return false;
+    *rows = (int)json_get_int(m);
+    return true;
+}
+
+static int dl_drive_lock(struct zcl_command_reply *reply)
+{
+    struct dl_dirs d;
+    char path[4096 + 32], evidence[128] = "another drive is running";
+    int fd, pid = 0;
+    if (!dl_dirs_make(&d) ||
+        snprintf(path, sizeof(path), "%s/drive.lock", d.land) >=
+            (int)sizeof(path)) {
+        dl_fail(reply, "DRIVE_LOCK_UNAVAILABLE", "drive",
+                "the drive lock path is unavailable", "land directory");
+        return -1;
+    }
+    fd = dl_lock_path(path, true);
+    if (fd >= 0)
+        return fd;
+    if (dl_lock_holder_pid(path, &pid))
+        (void)snprintf(evidence, sizeof(evidence),
+                       "another drive holds drive.lock (pid %d)", pid);
+    dl_fail(reply, "DRIVE_BUSY", "drive",
+            "another drive already holds the lander drive lock", evidence);
+    reply->error.retryable = true;
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "%s", "z23 dev land status");
+    return -1;
+}
+
+static void dl_drive_row_report(struct json_value *out, long long seq,
+                                int rounds, const struct dl_drive_verdict *v)
+{
+    static const char *const names[] = { "stopped", "stopped", "landed",
+                                         "proof_failed", "refused" };
+    struct json_value item;
+    const char *head = dl_sha_ok(g_dl_prove.local) ? g_dl_prove.local
+                                                   : v->row.local;
+    const char *base = dl_sha_ok(g_dl_prove.base) ? g_dl_prove.base
+                                                  : v->row.base;
+    json_init(&item);
+    json_set_object(&item);
+    (void)(json_push_kv_int(&item, "seq", seq) &&
+           json_push_kv_str(&item, "base", base) &&
+           json_push_kv_str(&item, "head", head) &&
+           json_push_kv_int(&item, "proof_ms", g_dl_prove.ms) &&
+           json_push_kv_str(&item, "proof", g_dl_prove.ran ? "ran"
+                                            : v->kind == DL_DRIVE_LANDED
+                                                ? "receipt_present" : "none") &&
+           json_push_kv_str(&item, "outcome", names[v->kind]) &&
+           json_push_kv_int(&item, "rounds", rounds) &&
+           json_push_back(out, &item));
+    json_free(&item);
+}
+
+static void dl_drive_rows(const struct zcl_command_request *req,
+                          struct zcl_command_reply *reply, int max_rows,
+                          bool prove)
+{
+    struct json_value report;
+    struct dl_drive_verdict v = { .kind = DL_DRIVE_LANDED };
+    int fd, done = 0;
+    long long last_seq = 0;
+    fd = dl_drive_lock(reply);
+    if (fd < 0)
+        return;
+    json_init(&report);
+    json_set_array(&report);
+    g_dl_prove_mode = prove;
+    while (done < max_rows) {
+        struct dl_drive_verdict row_v = { .kind = DL_DRIVE_CONTINUE };
+        struct dl_dirs d;
+        struct dl_row *rows = NULL;
+        size_t count = 0;
+        char path[4096 + 32];
+        long long seq = 0;
+        int rounds;
+        bool loaded = dl_dirs_make(&d) &&
+            snprintf(path, sizeof(path), "%s/queue.jsonl", d.land) <
+                (int)sizeof(path) &&
+            dl_load_rows(path, &rows, &count, NULL, 0);
+        const struct dl_row *pick = loaded ? dl_pick_steer(rows, count) : NULL;
+        if (pick)
+            seq = pick->seq;
+        free(rows);
+        if (!loaded) {
+            row_v.kind = DL_DRIVE_REFUSED;
+            (void)snprintf(row_v.detail, sizeof(row_v.detail), "%s",
+                           "queue_unreadable");
+            v = row_v;
+            break;
+        }
+        if (!pick)
+            break;
+        g_dl_prove = (struct dl_prove_run){0};
+        rounds = dl_drive_run_row(req, reply, seq, &row_v);
+        dl_drive_row_report(&report, seq, rounds, &row_v);
+        v = row_v;
+        last_seq = seq;
+        done++;
+        if (row_v.kind != DL_DRIVE_LANDED)
+            break;
+    }
+    g_dl_prove_mode = false;
+    dl_unlock(fd);
+    dl_drive_judged();
+    if (v.kind == DL_DRIVE_LANDED) {
+        dl_drive_reply_reset(reply);
+        (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
+        (void)json_push_kv_str(&reply->data, "outcome",
+                               done ? "landed" : "idle");
+        (void)json_push_kv_int(&reply->data, "rows_landed", done);
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        reply->exit_code = 0;
+    } else {
+        dl_drive_outcome(reply, last_seq, 0, &v);
+    }
+    (void)json_push_kv(&reply->data, "rows", &report);
+    json_free(&report);
+}
 #endif
 
-/* A drive that names a row (`--seq`) runs to that row's outcome; without one
- * it is a single bounded session over the queue head. */
+/* A drive that names a row (`--seq`) runs to that row's outcome; with
+ * `prove` or `max_rows` it drives that many rows in a row, proofs included;
+ * otherwise it is a single bounded session over the queue head. */
 static void dl_drive(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
     if (json_get(req->input, "seq")) {
+        if (json_get(req->input, "max_rows") || json_get(req->input, "prove")) {
+            dl_fail(reply, "BAD_INPUT", "drive",
+                    "seq names one row; max_rows and prove drive the queue",
+                    "input.seq with input.max_rows or input.prove");
+            return;
+        }
         dl_drive_seq(req, reply);
+        return;
+    }
+    if (json_get(req->input, "max_rows") || json_get(req->input, "prove")) {
+        int max_rows;
+        bool prove;
+        if (!dl_drive_rows_in(req, &max_rows, &prove)) {
+            dl_fail(reply, "BAD_INPUT", "drive",
+                    "max_rows is an integer from 1 to 16; prove is a boolean",
+                    "input.max_rows");
+            return;
+        }
+        dl_drive_rows(req, reply, max_rows, prove);
         return;
     }
 #endif

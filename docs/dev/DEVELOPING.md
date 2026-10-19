@@ -1617,7 +1617,9 @@ the foreground step through `devbuild --wait`; the next landing step consumes
 its signed receipt. Landing does not start a resident proof watcher by
 default. An operator who explicitly wants the prior watcher path can set
 `ZCL_LAND_START_PROOF_WATCHER=1` for that landing step.
-
+`ZCL_LAND_START_PROOF_WATCHER=1` for that landing step. To skip the hand
+copy entirely, run `dev land drive` with `prove` (see "Driving proofs without
+a human" below).
 `dev land` refuses a malformed or legacy queue record by record number on
 status, submit and step. It preserves the queue bytes until an operator
 repairs that record; a later valid row cannot make an earlier one disappear
@@ -1706,6 +1708,43 @@ locators that the exact proof reads (`ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL`,
 `ZCL_TEST_FREEBSD_PORT_FIXTURE_KERNEL`, `ZCL_TEST_GELI_FIXTURE_PACKET`) are
 whatever the operator exported. A drive without `--seq` stays a single
 bounded session over the queue head.
+
+**Driving proofs without a human.**
+
+Nothing claims a queued exact proof unless a resident watcher was armed, so a
+row sits in `phase=prove` showing `in_flight.proof_step` and the idle note
+"no worker has claimed the queued request". `dev land drive` cannot run that
+proof in its own process: the proof refuses any producer not built from the
+candidate's source, and the drive's binary is not the candidate's. The
+`prove` mode runs the manual recipe itself, bounded:
+
+```bash
+devbuild --wait z23 dev land drive --prove --max_rows=3
+```
+
+For each of up to `max_rows` rows (1 to 16, default 1), oldest first, it
+steps the row to its proof pair, builds `dev-bin` in the landing worktree with
+`make`, queues the pair again if its last attempt failed, runs
+`build/bin/z23-dev dev proof step` there, and requires the signed receipt
+before the drive may publish. Then it seals the intent and publishes as
+`drive --seq` does, and moves to the next row. Output: `outcome` (`landed`, or
+`idle` when the queue was empty), `rows_landed`, and `rows`, one entry per row
+tried with `seq`, `base`, `head`, `proof_ms` (producer build plus proof),
+`proof` (`ran`, or `receipt_present` when a receipt already existed) and
+`outcome`.
+
+- One drive at a time: a second one refuses `DRIVE_BUSY` (retryable) while
+  `drive.lock` in the land directory is held. The lock dies with its process.
+- The first row that does not land stops the drive. A proof that left no
+  receipt refuses `PROOF_RECEIPT_MISSING`; a producer that cannot be built
+  refuses `PROOF_PRODUCER_UNAVAILABLE`. Each names `gate=...` and `log=`
+  (`logs/prove-<local>-<base>.log` holds the build and proof output), and a
+  `.failed` record when one exists. The failing row's entry is in `rows`.
+- Resumable: a killed drive leaves the row in flight. The next drive resumes
+  it, and a pair whose receipt is already on disk is published without any
+  rebuild.
+- `seq` and `prove`/`max_rows` are exclusive (`BAD_INPUT`). Plain `drive` and
+  `drive --seq` are unchanged.
 
 Use ordinary scheduler admission unless the job actually needs more than
 24 GiB. Do not wrap a polling driver in an exclusive reservation or add a

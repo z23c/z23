@@ -2096,9 +2096,14 @@ ZCL_COMMAND_DEV_COMMAND(
     "outcome landed, proof_failed (failed_path), refused (reason) or "
     "stopped (rounds). A stale producer refuses with the rebuild command: "
     "make dev-bin, then drive again. The proof reads the public fixture "
-    "locators exported in the caller's environment.", 65536,
+    "locators exported in the caller's environment. With prove and "
+    "max_rows (1 to 16) it drives that many rows oldest first, building the "
+    "producer in the landing worktree and running the exact proof itself, "
+    "and publishes only behind the signed receipt; one drive at a time "
+    "(DRIVE_BUSY), a missing receipt refuses PROOF_RECEIPT_MISSING with the "
+    "gate and log, and rows reports seq, base, head, proof_ms and outcome.", 65536,
     "land,drive,proof,push,integrator",
-    "zcl.land_drive_input.v1", "zcl.land.v1", "seq", "",
+    "zcl.land_drive_input.v1", "zcl.land.v1", "seq,max_rows,prove", "",
     "z23 dev land drive --seq=3",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
