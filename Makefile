@@ -16171,7 +16171,7 @@ setup:
 	@$(MAKE) --no-print-directory compdb
 	@echo "  wrote  compile_commands.json  (clangd/LSP; regenerate with make compdb)"
 	@echo "  wrote  .cache/               (gitignored tool caches, created on demand)"
-	@echo "setup: done. Next: make doctor"
+	@echo "setup: done. Next: make -j4 z23"
 
 # What is missing on THIS host, and the one command that installs it.
 # Source of truth is tools/scripts/vendor_prereqs.tsv; the script fails if
