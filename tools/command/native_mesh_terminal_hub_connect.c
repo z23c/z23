@@ -163,6 +163,15 @@ static bool tunnel_open(const char *route_input, struct tunnel *t)
         return false;
     }
     t->pid = fork();
+    if (t->pid < 0) {
+        int saved = errno;
+        close(sv[0]);
+        close(sv[1]);
+        close(errp[0]);
+        close(errp[1]);
+        errno = saved;
+        return false;
+    }
     if (t->pid == 0) {
         char *const argv[] = { (char *)"z23", (char *)"ops", (char *)"mesh", (char *)"device",
                                (char *)"host", (char *)"client", arg, NULL };
