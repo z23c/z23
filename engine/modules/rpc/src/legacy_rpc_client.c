@@ -15,10 +15,13 @@
 #include "rpc/zclassicd_port.h"
 #include "util/safe_alloc.h"
 
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define LRC_TIMEOUT_SECS    5
 #define LRC_TIMEOUT_MAX_MS  60000u
@@ -30,17 +33,10 @@
 
 /* ── zclassic.conf parser ──────────────────────────────────────── */
 
-bool legacy_rpc_parse_conf(char *out_user, size_t user_sz,
-                           char *out_pass, size_t pass_sz,
-                           int *out_port)
+static bool legacy_rpc_parse_conf_stream(FILE *f, char *out_user, size_t user_sz,
+                                         char *out_pass, size_t pass_sz,
+                                         int *out_port)
 {
-    const char *home = getenv("HOME");
-    if (!home || !home[0]) return false;
-
-    char path[512];
-    snprintf(path, sizeof(path), "%s/.zclassic/zclassic.conf", home);
-    FILE *f = fopen(path, "r");
-    if (!f) return false;
 
     char line[512];
     bool got_user = false, got_pass = false;
@@ -75,6 +71,61 @@ bool legacy_rpc_parse_conf(char *out_user, size_t user_sz,
     }
     fclose(f);
     return got_user && got_pass;
+}
+
+bool legacy_rpc_parse_conf_file(const char *path, char *out_user, size_t user_sz,
+                                char *out_pass, size_t pass_sz, int *out_port)
+{
+    FILE *f = path ? fopen(path, "r") : NULL;
+    if (!f) return false;
+    return legacy_rpc_parse_conf_stream(f, out_user, user_sz, out_pass,
+                                        pass_sz, out_port);
+}
+
+/* The explicit ZCL_LEGACY_ORACLE_CONF path carries credentials, so it is
+ * opened O_NOFOLLOW, must be a regular file owned by this user and not
+ * writable by group or others, and is read from the checked descriptor. */
+static bool legacy_rpc_parse_trusted_conf(const char *path, char *out_user,
+                                          size_t user_sz, char *out_pass,
+                                          size_t pass_sz, int *out_port)
+{
+#ifdef _WIN32
+    /* No owner or mode bits to check here; read it as the default path is. */
+    return legacy_rpc_parse_conf_file(path, out_user, user_sz, out_pass,
+                                      pass_sz, out_port);
+#else
+    struct stat st;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    FILE *f;
+    if (fd < 0) return false;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & (S_IWGRP | S_IWOTH)) != 0 || !(f = fdopen(fd, "r"))) {
+        close(fd);
+        return false;
+    }
+    return legacy_rpc_parse_conf_stream(f, out_user, user_sz, out_pass,
+                                        pass_sz, out_port);
+#endif
+}
+
+bool legacy_rpc_parse_conf(char *out_user, size_t user_sz,
+                           char *out_pass, size_t pass_sz,
+                           int *out_port)
+{
+    char path[512];
+    const char *explicit_conf = getenv("ZCL_LEGACY_ORACLE_CONF");
+    const char *home = getenv("HOME");
+    if (explicit_conf && explicit_conf[0]) {
+        snprintf(path, sizeof(path), "%s", explicit_conf);
+    } else {
+        if (!home || !home[0]) return false;
+        snprintf(path, sizeof(path), "%s/.zclassic/zclassic.conf", home);
+    }
+    if (explicit_conf && explicit_conf[0])
+        return legacy_rpc_parse_trusted_conf(path, out_user, user_sz, out_pass,
+                                             pass_sz, out_port);
+    return legacy_rpc_parse_conf_file(path, out_user, user_sz, out_pass,
+                                      pass_sz, out_port);
 }
 
 bool legacy_rpc_fill_missing_creds(char *user, size_t user_sz,

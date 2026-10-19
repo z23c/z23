@@ -1453,6 +1453,8 @@ Z23_FLAG("ZCL_LEGACY_CHAINSTATE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_chainstate_legacy_reader.c:auto")
 Z23_FLAG("ZCL_LEGACY_DATADIR", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_block_log_legacy.c:auto")
+Z23_FLAG("ZCL_LEGACY_ORACLE_CONF", "env_runtime", "-", "-",
+          "optional absolute path of the legacy oracle zclassic.conf the node reads rpcuser and rpcpassword from; unset keeps $HOME/.zclassic/zclassic.conf; first use engine/modules/rpc/src/legacy_rpc_client.c")
 Z23_FLAG("ZCL_LEGACY_ORACLE_MODE", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_runtime_sync_services.c:auto")
 Z23_FLAG("ZCL_LEVELDB_NO_VERIFY_CHECKSUMS", "env_runtime", "-", "-",

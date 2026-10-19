@@ -25,6 +25,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Same parse over an explicit conf path (the oracle datadir's own conf). */
+bool legacy_rpc_parse_conf_file(const char *path, char *out_user, size_t user_sz,
+                                char *out_pass, size_t pass_sz, int *out_port);
+
+/* ZCL_LEGACY_ORACLE_CONF, when set, replaces the default path below: the
+ * oracle runs from its own datadir and the node must read ITS credentials. */
 /* Parse ~/.zclassic/zclassic.conf into the supplied buffers. Returns
  * true iff both rpcuser and rpcpassword were found. *out_port (if
  * non-NULL) is updated only when rpcport is present; otherwise it

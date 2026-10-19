@@ -1907,7 +1907,7 @@ engine/modules/rpc/src/legacy_chain_oracle.c:legacy_chain_rpc_get_mmb_leaf:22
 engine/modules/rpc/src/legacy_header_client.c:legacy_header_rpc_fetch_batch:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_call_with_timeout:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_fill_missing_creds:20
-engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_conf:29
+engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_conf_stream:26
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_result_string_array:20
 engine/modules/sim/src/postmortem.c:json_escape_string:16
 engine/modules/sim/src/postmortem.c:postmortem_capsule_compress:32
