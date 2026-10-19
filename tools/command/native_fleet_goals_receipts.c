@@ -29,7 +29,7 @@
 
 /* The explicit option, else the environment, else the state-dir default.
  * NULL when a fixture run (skip_probes) gave no explicit path. */
-static const char *rc_path(const char *given, const char *env_name,
+const char *zcl_goals_state_path(const char *given, const char *env_name,
                            const char *tail, bool skip, char *buf, size_t cap)
 {
     const char *env;
@@ -137,7 +137,7 @@ static struct zcl_goal_result rc_c3(const struct zcl_goals_options *o)
     char hist_buf[RC_PATH_MAX], slo[RC_PATH_MAX], err[RC_ERR_MAX];
     struct zcl_stopwatch_judge_opts opts;
     const char *hist =
-        rc_path(o ? o->c3_history : NULL, "ZCL_C3_STOPWATCH_HISTORY",
+        zcl_goals_state_path(o ? o->c3_history : NULL, "ZCL_C3_STOPWATCH_HISTORY",
                 ".local/state/zclassic23-c3-stopwatch/history.jsonl",
                 o && o->skip_probes, hist_buf, sizeof(hist_buf));
     int64_t ts;
@@ -200,7 +200,7 @@ static struct zcl_goal_result rc_c6(const struct zcl_goals_options *o)
     char dir_buf[RC_PATH_MAX], file[RC_PATH_MAX], dflt[RC_PATH_MAX], err[RC_ERR_MAX];
     struct zcl_soak_judge_opts opts;
     const char *dir =
-        rc_path(o ? o->soak_dir : NULL, "ZCL_SOAK_EVIDENCE_DIR",
+        zcl_goals_state_path(o ? o->soak_dir : NULL, "ZCL_SOAK_EVIDENCE_DIR",
                 ".local/state/zclassic23-soak-evidence", o && o->skip_probes,
                 dir_buf, sizeof(dir_buf));
 

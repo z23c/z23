@@ -478,6 +478,10 @@ bool zcl_native_device_host_shell_json(const struct zcl_native_host_shell_argv *
     const struct zcl_native_host_shell_argv *mlkem_plan, const char *executable, struct json_value *out);
 /* Resolve ssh once from a PATH string: the first regular executable file
  * named ssh. Any empty or relative component refuses the whole PATH. */
+/* Offline readiness of the route a shell would use: NULL when the file is a valid
+ * client input and its grant is host-forward, unrevoked and live at `now`;
+ * otherwise a named refusal. Reads only; nothing is dialed. */
+const char *zcl_native_device_host_shell_route_check(const char *route, uint64_t now);
 bool zcl_native_device_host_shell_resolve(const char *path_env, char *out, size_t capacity);
 /* Raw entry: validates, resolves ssh, probes `ssh -Q kex` (not on dry_run), then execs. Returns
  * a process exit code only when it does not exec. */

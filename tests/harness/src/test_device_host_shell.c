@@ -507,12 +507,31 @@ static int shell_package_hangup_race(void)
 #endif
 #endif
 
+#if defined(__linux__) || defined(__APPLE__)
+static int shell_route_check_refusals(void)
+{
+    int failures = 0;
+    char directory[1024] = {0}, route[1200];
+    TEST_CASE("device_host_shell: route_check refuses relative, missing and non-client routes offline") {
+        ASSERT(test_mkdtemp(directory, sizeof(directory), "device-host-shell-route"));
+        snprintf(route, sizeof(route), "%s/route.json", directory);
+        ASSERT(!strcmp(zcl_native_device_host_shell_route_check("route.json", 1), "route_input_refused"));
+        ASSERT(!strcmp(zcl_native_device_host_shell_route_check(route, 1), "route_input_refused"));
+        ASSERT(shell_write(route, "{}", 0600));
+        ASSERT(!strcmp(zcl_native_device_host_shell_route_check(route, 1), "route_input_not_a_client_input"));
+    } TEST_END
+    return failures;
+}
+
+#endif
+
 int test_device_host_shell(void);
 int test_device_host_shell(void)
 {
     int failures = shell_receiver_unit();
 #if defined(__linux__) || defined(__APPLE__)
     failures += shell_input_file() + shell_input_file_rewrite();
+    failures += shell_route_check_refusals();
     failures += shell_dry_run_argv() + shell_dry_run_executes_nothing() + shell_ssh_resolution() + shell_injection_refused();
 #if defined(__linux__)
     failures += shell_psk_fingerprint() + shell_psk_new() + shell_psk_cleanup_honesty() + shell_package_hangup_race();

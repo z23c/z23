@@ -10,6 +10,9 @@
 #include "platform/clock.h"
 #include "platform/pipe_compat.h"
 #include "json/json.h"
+#include "base/hex.h"
+#include "models/device_pairing.h"
+#include "services/device_identity.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -343,14 +346,50 @@ static bool shell_input(const struct json_value *input, struct shell_request *ou
 
 /* The named route must already be a valid client input, so a mistyped file
  * fails here with a named refusal instead of inside ssh's ProxyCommand. */
-static bool shell_route_valid(const char *route)
+static bool shell_route_parse(const char *route, struct json_value *parsed)
 {
     char text[4097]; size_t length = 0;
+    return zcl_native_device_host_input_file_read(route, text, sizeof(text), &length) &&
+        device_host_runtime_entry_parse(parsed, text, length, false).ok;
+}
+
+static bool shell_route_valid(const char *route)
+{
     struct json_value parsed = {0};
-    bool ok = zcl_native_device_host_input_file_read(route, text, sizeof(text), &length) &&
-        device_host_runtime_entry_parse(&parsed, text, length, false).ok;
+    bool ok = shell_route_parse(route, &parsed);
     json_free(&parsed);
     return ok;
+}
+
+/* The grant behind a route must name a host-forward authority that is not
+ * revoked and whose interval covers `now`. Read-only: shared-lock inspection. */
+static const char *shell_grant_state(const struct json_value *route, uint64_t now)
+{
+    uint8_t peer[32]; struct device_identity identity = {0}; struct device_pairing_store store;
+    struct db_device_pairing row; uint8_t root[32]; struct device_identity_publication_report report;
+    const char *directory = json_get_str(json_get(route, "directory"));
+    const char *peer_hex = json_get_str(json_get(route, "peer_key"));
+    if (!directory || !peer_hex || !zcl_hex_decode(peer_hex, peer, 32)) return "route_input_not_a_client_input";
+    if (!device_identity_open(&identity, directory, false, &report).ok) return "profile_unreadable";
+    const char *state = NULL;
+    if (!device_identity_pair_store(&identity, peer, &store).ok) state = "profile_unreadable";
+    else if (!db_device_pairing_inspect(&store, peer, &row, root)) state = "grant_missing";
+    else if (row.revoked_at) state = "grant_revoked";
+    else if (!(row.capabilities & DEVICE_PAIRING_CAP_HOST_FORWARD)) state = "grant_not_host_forward";
+    else if (now < row.paired_at) state = "grant_not_yet_valid";
+    else if (now >= row.expires_at) state = "grant_expired";
+    device_identity_close(&identity);
+    return state;
+}
+
+const char *zcl_native_device_host_shell_route_check(const char *route, uint64_t now)
+{
+    if (!shell_path_valid(route) || !shell_regular_file(route)) return "route_input_refused";
+    struct json_value parsed = {0};
+    if (!shell_route_parse(route, &parsed)) { json_free(&parsed); return "route_input_not_a_client_input"; }
+    const char *state = shell_grant_state(&parsed, now);
+    json_free(&parsed);
+    return state;
 }
 
 static int shell_dry_run(const struct zcl_native_host_shell_argv *sntrup, const struct zcl_native_host_shell_argv *both,

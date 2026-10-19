@@ -75,6 +75,8 @@ struct zcl_goals_options {
     size_t host_count;
     bool skip_probes;           /* tests: skip the in-process code and wiki probes */
     int64_t origin_tip_unix;    /* commit time of origin/main; 0 = ask git */
+    const char *tunnel_bench;   /* G1: tunnel bench receipt file */
+    const char *shell_routes;   /* G3: directory of <host>.json shell routes */
 };
 
 const char *zcl_goal_grade_name(enum zcl_goal_grade grade);
@@ -101,6 +103,12 @@ struct zcl_goal_result zcl_goal_make(enum zcl_goal_grade grade, const char *next
 
 /* Grades C3 and C6 from their newest durable receipt
  * (native_fleet_goals_receipts.c). False when the id has no receipt reader. */
+/* Explicit path, else the environment variable, else $HOME/<tail>. NULL when
+ * a fixture run gave no explicit path or HOME is unset. */
+const char *zcl_goals_state_path(const char *given, const char *env_name,
+                                 const char *tail, bool skip, char *buf,
+                                 size_t cap);
+
 bool zcl_goals_receipt_measure(const struct zcl_goals_options *options,
                                const char *id, struct zcl_goal_result *out);
 

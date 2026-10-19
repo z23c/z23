@@ -14,6 +14,9 @@
 #include "command/native_fleet_goals.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
+#include "base/hex.h"
+#include "models/device_pairing.h"
+#include "services/device_identity.h"
 #include "kernel/command_registry.h"
 
 #include <stdio.h>
@@ -514,7 +517,7 @@ static int fgl_case_hosts(void)
     (void)snprintf(hosts[1].os, sizeof(hosts[1].os), "Darwin");
     TEST("host-set goals: no roster is unmeasured with the reason; hosts come "
          "from the roster, never a fixed list") {
-        static const char *const ids[] = {"G1", "G3", "G5", "G6", "G8", "G12"};
+        static const char *const ids[] = {"G3", "G5", "G6", "G8", "G12"};
         for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
             struct zcl_goal_result r = zcl_goals_measure(&o, ids[i]);
             ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
@@ -522,7 +525,7 @@ static int fgl_case_hosts(void)
         }
         o.hosts = hosts;
         o.host_count = 2;
-        struct zcl_goal_result r = zcl_goals_measure(&o, "G1");
+        struct zcl_goal_result r = zcl_goals_measure(&o, "G5");
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
         ASSERT(fgl_has(r.evidence, "2 admitted host(s)"));
         r = zcl_goals_measure(&o, "G12");
@@ -797,6 +800,175 @@ static int fgl_case_wiki(void)
     return failures;
 }
 
+/* ── G1: tunnel bench receipt ─────────────────────────────────────────── */
+
+#define FGL_PQFS "Noise_XXhfs_25519+MLKEM768_ChaChaPoly_SHA256"
+
+static bool fgl_bench(const char *path, double fwd, double rev, int64_t ts,
+                      const char *handshake)
+{
+    char text[600];
+    (void)snprintf(text, sizeof(text),
+                   "{\"schema\":\"zcl.tunnel_bench.v1\",\"forward_mib_s\":%.1f,"
+                   "\"reverse_mib_s\":%.1f,\"timestamp_unix_ms\":%lld%s%s%s}",
+                   fwd, rev, (long long)ts * 1000, handshake ? ",\"outer_handshake\":\"" : "",
+                   handshake ? handshake : "", handshake ? "\"" : "");
+    return fgl_write(path, text);
+}
+
+static int fgl_case_g1(const char *root)
+{
+    int failures = 0;
+    char path[600];
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    (void)snprintf(path, sizeof(path), "%s/bench.json", root);
+    o.tunnel_bench = path;
+    TEST("G1: absent, malformed and future receipts are unmeasured") {
+        struct zcl_goal_result r;
+        (void)unlink(path);
+        r = zcl_goals_measure(&o, "G1");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, path));
+        ASSERT(fgl_write(path, "{\"schema\":\"other\"}"));
+        r = zcl_goals_measure(&o, "G1");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "not a zcl.tunnel_bench.v1 receipt"));
+        ASSERT(fgl_bench(path, 160, 185, FGL_NOW + 60, NULL));
+        r = zcl_goals_measure(&o, "G1");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "future"));
+        ASSERT(fgl_bench(path, 160, 185, FGL_NOW - 7 * 86400 - 1, NULL));
+        r = zcl_goals_measure(&o, "G1");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "stale"));
+        ASSERT(fgl_bench(path, 76, 98, FGL_NOW - 60, NULL));
+        r = zcl_goals_measure(&o, "G1");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "forward 76.0, reverse 98.0"));
+        ASSERT(fgl_bench(path, 400, 149.9, FGL_NOW - 60, FGL_PQFS));
+        ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_bench(path, 160, 185, FGL_NOW - 7 * 86400, NULL));
+        r = zcl_goals_measure(&o, "G1");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "outer tunnel static PSK, no forward "
+                                   "secrecy; PQ only inside ssh"));
+        ASSERT(fgl_has(r.evidence, "forward 160.0, reverse 185.0"));
+        ASSERT(fgl_bench(path, 160, 185, FGL_NOW - 3600, "static_psk"));
+        ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_bench(path, 160, 185, FGL_NOW - 3600, FGL_PQFS));
+        r = zcl_goals_measure(&o, "G1");
+        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_has(r.evidence, "1 h old"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── G3: shell routes and grants, offline ─────────────────────────────── */
+
+static bool fgl_grant(const char *home, char route[], size_t cap)
+{
+    struct device_identity id[2] = {0};
+    struct device_pairing_store store;
+    struct device_identity_publication_report rep;
+    struct db_device_pairing row = {0}, found;
+    uint8_t secret[32] = {17}, proposal[32], root[32];
+    struct device_pairing_psk_publication pub;
+    char dir[600], peer[65], expected[65];
+    bool ok;
+    (void)snprintf(dir, sizeof(dir), "%s/profile-a", home);
+    ok = device_identity_open(&id[0], dir, true, &rep).ok;
+    (void)snprintf(dir, sizeof(dir), "%s/profile-b", home);
+    ok = ok && device_identity_open(&id[1], dir, true, &rep).ok;
+    (void)snprintf(dir, sizeof(dir), "%s/profile-a", home);
+    ok = ok && device_identity_pair_store(&id[0], id[1].public_key, &store).ok;
+    if (ok) {
+        bool first = memcmp(id[0].public_key, id[1].public_key, 32) < 0;
+        row.capabilities = DEVICE_PAIRING_CAP_HOST_FORWARD;
+        row.paired_at = FGL_NOW - 100;
+        row.expires_at = FGL_NOW + 600;
+        memcpy(row.local_key, id[0].public_key, 32);
+        memcpy(row.peer_key, id[1].public_key, 32);
+        memcpy(row.profile, store.profile, 32);
+        row.host_scope.inbound_port = row.host_scope.outbound_port = 4000;
+        row.host_scope.binding.backend_profile = DEVICE_PAIRING_HOST_SHAKE256_WRAP_PSK;
+        row.host_scope.binding.psk.credential_id[0] = 91;
+        row.host_scope.binding.psk.key_epoch = 1;
+        memcpy(row.host_scope.binding.psk.endpoint_a, first ? row.local_key : row.peer_key, 32);
+        memcpy(row.host_scope.binding.psk.endpoint_b, first ? row.peer_key : row.local_key, 32);
+        ok = device_pairing_host_proposal_root(&row, proposal) &&
+             db_device_pairing_insert_host_psk(&store, &row, secret, proposal, &pub) &&
+             db_device_pairing_inspect(&store, row.peer_key, &found, root);
+    }
+    zcl_hex_encode(id[1].public_key, 32, peer);
+    zcl_hex_encode(root, 32, expected);
+    device_identity_close(&id[0]);
+    device_identity_close(&id[1]);
+    return ok && snprintf(route, cap,
+        "{\"directory\":\"%s\",\"peer_key\":\"%s\",\"expected_root\":\"%s\","
+        "\"target_port\":4000,\"route_id\":\"fleet-shell\",\"handshake_ms\":2000,"
+        "\"session_ms\":60000,\"idle_ms\":30000,\"confirm\":true,"
+        "\"route_address\":\"127.0.0.1\",\"route_port\":4001,\"connect_ms\":2000}",
+        dir, peer, expected) < (int)cap;
+}
+
+static int fgl_case_g3(const char *root)
+{
+    int failures = 0;
+    char routes[600], file[700], home[600], route[2400];
+    struct zcl_goals_options o;
+    struct zcl_goals_host hosts[2] = {{.name = "alpha"}, {.name = "beta"}};
+    fgl_options(&o);
+    o.hosts = hosts;
+    o.host_count = 2;
+    (void)snprintf(home, sizeof(home), "%s/g3", root);
+    (void)snprintf(routes, sizeof(routes), "%s/routes", home);
+    (void)mkdir(home, 0700);
+    (void)mkdir(routes, 0700);
+    o.shell_routes = routes;
+    TEST("G3: no route files fails and names the refusal; a malformed route "
+         "fails") {
+        struct zcl_goal_result r = zcl_goals_measure(&o, "G3");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "0 of 2"));
+        ASSERT(fgl_has(r.evidence, "alpha:route_input_refused"));
+        (void)snprintf(file, sizeof(file), "%s/alpha.json", routes);
+        ASSERT(fgl_write(file, "{}") && chmod(file, 0600) == 0);
+        r = zcl_goals_measure(&o, "G3");
+        ASSERT(fgl_has(r.evidence, "alpha:route_input_not_a_client_input"));
+        ASSERT(fgl_grant(home, route, sizeof(route)));
+        (void)snprintf(file, sizeof(file), "%s/alpha.json", routes);
+        ASSERT(fgl_write(file, route) && chmod(file, 0600) == 0);
+        r = zcl_goals_measure(&o, "G3");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "1 of 2"));
+        ASSERT(fgl_has(r.evidence, "beta:route_input_refused"));
+        (void)snprintf(file, sizeof(file), "%s/beta.json", routes);
+        ASSERT(fgl_write(file, route) && chmod(file, 0600) == 0);
+        r = zcl_goals_measure(&o, "G3");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "2 of 2"));
+        ASSERT(fgl_has(r.evidence, "no round trip"));
+        o.now_unix = FGL_NOW + 600;
+        r = zcl_goals_measure(&o, "G3");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "alpha:grant_expired"));
+        o.now_unix = FGL_NOW - 101;
+        r = zcl_goals_measure(&o, "G3");
+        ASSERT(fgl_has(r.evidence, "alpha:grant_not_yet_valid"));
+        struct zcl_goals_host evil[1] = {{.name = "../escape"}};
+        o.now_unix = FGL_NOW;
+        o.hosts = evil;
+        o.host_count = 1;
+        r = zcl_goals_measure(&o, "G3");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "route_name_refused"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_goals(void);
 int test_fleet_goals(void)
 {
@@ -816,6 +988,8 @@ int test_fleet_goals(void)
     failures += fgl_case_receipt_c6(root);
     failures += fgl_case_receipt_none();
     failures += fgl_case_hosts();
+    failures += fgl_case_g1(root);
+    failures += fgl_case_g3(root);
     failures += fgl_case_render();
     failures += fgl_case_bound();
     failures += fgl_case_wiki();

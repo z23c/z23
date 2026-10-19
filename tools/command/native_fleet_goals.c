@@ -12,6 +12,7 @@
 
 #include "native_fleet_objectives.h"
 
+#include "command/native_command.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
@@ -29,6 +30,11 @@
 #define GOALS_PAGES_MAX 200
 #define GOALS_TRAINS_MAX 256
 #define GOALS_CLAIM_LINE_MAX 16384
+#define GOALS_BENCH_MAX 8192
+#define GOALS_BENCH_STALE_S (7 * GOALS_DAY_S)
+#define GOALS_TUNNEL_MIB_S_MIN 150.0
+#define GOALS_BENCH_SCHEMA "zcl.tunnel_bench.v1"
+#define GOALS_PQFS_SUITE "Noise_XXhfs_25519+MLKEM768_ChaChaPoly_SHA256"
 
 static const struct zcl_goal_row k_goals[] = {
 #define Z23_GOAL(id_, title_, bar_) {id_, title_, bar_},
@@ -280,16 +286,9 @@ struct gr_static {
 };
 
 static const struct gr_static k_static[] = {
-    {"G1", true, "no per-pair throughput receipt reader exists; a directed "
-                 "pair probe (`fleet link probe`) dials peers and is not run "
-                 "by a read-only card",
-     "card: store link probe receipts per directed pair, then read them here"},
     {"G2", false, "no k-of-n hybrid signing probe exists in the tree",
      "card: a signing-quorum status leaf reporting hosts and last signed "
      "release"},
-    {"G3", true, "no offline remote-shell reachability receipt exists; "
-                 "reaching a host dials it",
-     "card: a shell reachability receipt per admitted host"},
     {"G5", true, "no peer-fetch and atomic-install receipt reader exists",
      "card: a plugin swarm status leaf listing per-host installs"},
     {"G10", false, "node liveness needs the canonical datadirs, which this "
@@ -373,6 +372,140 @@ static struct zcl_goal_result gr_g12(const struct zcl_goals_options *o)
                          "build, confinement or pairing parity receipt "
                          "exists",
                          mac, roster.count);
+}
+
+/* ── G1: tunnel throughput receipt ────────────────────────────────────── */
+
+static bool gr_bench_read(const char *path, struct json_value *out)
+{
+    static char text[GOALS_BENCH_MAX];
+    FILE *f = fopen(path, "rb");
+    size_t n;
+    if (!f)
+        return false;
+    n = fread(text, 1, sizeof(text), f);
+    (void)fclose(f);
+    if (n == 0 || n == sizeof(text))
+        return false;
+    json_init(out);
+    if (!json_read(out, text, n)) {
+        json_free(out);
+        return false;
+    }
+    return true;
+}
+
+/* Grade of a parsed receipt whose throughput and age are known. The outer
+ * tunnel is a static PSK with no forward secrecy (docs/spec/
+ * TUNNEL_PQ_FORWARD_SECRECY.md); only a receipt recording the hybrid Noise
+ * suite as the outer handshake passes, and no producer writes one yet. */
+static struct zcl_goal_result gr_g1_grade(const struct json_value *rc,
+                                          const char *path, int64_t age_s)
+{
+    static const char next[] =
+        "run `z23 ops mesh device host bench --receipt_out=<path>` on each "
+        "host; PASS needs an outer PQ+FS handshake that no producer records";
+    const struct json_value *hs = json_get(rc, "outer_handshake");
+    double fwd = json_get_real(json_get(rc, "forward_mib_s"));
+    double rev = json_get_real(json_get(rc, "reverse_mib_s"));
+    long long age_h = (long long)(age_s / 3600);
+    if (age_s > GOALS_BENCH_STALE_S)
+        return zcl_goal_make(ZCL_GOAL_FAIL, next,
+                             "stale: receipt %s is %lld h old, window %d d",
+                             path, age_h, GOALS_BENCH_STALE_S / GOALS_DAY_S);
+    if (fwd < GOALS_TUNNEL_MIB_S_MIN || rev < GOALS_TUNNEL_MIB_S_MIN)
+        return zcl_goal_make(ZCL_GOAL_FAIL, next,
+                             "under the %.0f MiB/s bar: forward %.1f, reverse "
+                             "%.1f MiB/s, receipt %s, %lld h old",
+                             GOALS_TUNNEL_MIB_S_MIN, fwd, rev, path, age_h);
+    if (hs && hs->type == JSON_STR &&
+        strcmp(json_get_str(hs), GOALS_PQFS_SUITE) == 0)
+        return zcl_goal_make(ZCL_GOAL_PASS, next,
+                             "forward %.1f, reverse %.1f MiB/s over %s, "
+                             "receipt %s, %lld h old",
+                             fwd, rev, GOALS_PQFS_SUITE, path, age_h);
+    return zcl_goal_make(ZCL_GOAL_PARTIAL, next,
+                         "forward %.1f, reverse %.1f MiB/s in-process on one "
+                         "host, receipt %s, %lld h old; outer tunnel static "
+                         "PSK, no forward secrecy; PQ only inside ssh",
+                         fwd, rev, path, age_h);
+}
+
+static struct zcl_goal_result gr_g1(const struct zcl_goals_options *o)
+{
+    static const char next[] =
+        "run `z23 ops mesh device host bench --receipt_out=<path>`, then "
+        "point ZCL_TUNNEL_BENCH_RECEIPT at it";
+    char buf[512];
+    struct json_value rc;
+    struct zcl_goal_result r;
+    const char *schema;
+    int64_t ts_ms, age_s;
+    const char *path = zcl_goals_state_path(
+        o ? o->tunnel_bench : NULL, "ZCL_TUNNEL_BENCH_RECEIPT",
+        ".local/state/z23/tunnel-bench/latest.json", o && o->skip_probes, buf,
+        sizeof(buf));
+    if (!path)
+        return gr_unmeasured(next, "tunnel bench receipt probe skipped");
+    if (!gr_bench_read(path, &rc))
+        return gr_unmeasured(next, "no readable bench receipt at %s", path);
+    schema = json_get_str(json_get(&rc, "schema"));
+    ts_ms = json_get_int(json_get(&rc, "timestamp_unix_ms"));
+    if (!schema || strcmp(schema, GOALS_BENCH_SCHEMA) != 0 || ts_ms <= 0 ||
+        !json_get(&rc, "forward_mib_s") || !json_get(&rc, "reverse_mib_s")) {
+        json_free(&rc);
+        return gr_unmeasured(next, "%s is not a %s receipt", path,
+                             GOALS_BENCH_SCHEMA);
+    }
+    age_s = gr_now(o) - ts_ms / 1000;
+    if (age_s < 0) {
+        json_free(&rc);
+        return gr_unmeasured(next, "receipt %s is dated in the future", path);
+    }
+    r = gr_g1_grade(&rc, path, age_s);
+    json_free(&rc);
+    return r;
+}
+
+/* ── G3: shell grants, offline ────────────────────────────────────────── */
+
+static struct zcl_goal_result gr_g3(const struct zcl_goals_options *o)
+{
+    static const char next[] =
+        "PASS needs a round-trip receipt; `ops mesh device host shell` execs "
+        "ssh interactively and has no non-interactive command mode";
+    char dir_buf[512], path[1100], bad[160] = "";
+    struct gr_roster roster;
+    size_t ok = 0, shown = 0;
+    const char *dir = zcl_goals_state_path(
+        o ? o->shell_routes : NULL, "ZCL_SHELL_ROUTE_DIR",
+        ".config/z23/shell-routes", o && o->skip_probes, dir_buf,
+        sizeof(dir_buf));
+    gr_roster_load(o, &roster);
+    if (!roster.ok)
+        return gr_no_roster(&roster);
+    if (!dir)
+        return gr_unmeasured(next, "shell route probe skipped");
+    for (size_t i = 0; i < roster.count; i++) {
+        const char *name = roster.hosts[i].name;
+        const char *why = "route_name_refused";
+        if (name[0] && name[0] != '.' && !strchr(name, '/') &&
+            snprintf(path, sizeof(path), "%s/%s.json", dir, name) <
+                (int)sizeof(path))
+            why = zcl_native_device_host_shell_route_check(
+                path, (uint64_t)gr_now(o));
+        if (!why)
+            ok++;
+        else if (shown++ < 3)
+            (void)snprintf(bad + strlen(bad), sizeof(bad) - strlen(bad),
+                           " %s:%s", name, why);
+    }
+    return zcl_goal_make(ok == roster.count ? ZCL_GOAL_PARTIAL : ZCL_GOAL_FAIL,
+                         next,
+                         "%zu of %zu admitted host(s) have a valid, unexpired "
+                         "shell route and grant in %s (offline check, no round "
+                         "trip)%s",
+                         ok, roster.count, dir, bad);
 }
 
 /* ── G6: release slot ─────────────────────────────────────────────────── */
@@ -1061,7 +1194,7 @@ static const struct {
     const char *id;
     gr_fn fn;
 } k_producers[] = {
-    {"G4", gr_g4},   {"G6", gr_g6},   {"G7", gr_g7},   {"G8", gr_g8},
+    {"G1", gr_g1},   {"G3", gr_g3},   {"G4", gr_g4},   {"G6", gr_g6},   {"G7", gr_g7},   {"G8", gr_g8},
     {"G9", gr_g9},   {"G12", gr_g12}, {"G13", gr_g13}, {"D7", gr_d7},
     {"D8", gr_d8},
 };
