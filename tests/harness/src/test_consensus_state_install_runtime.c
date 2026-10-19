@@ -36,6 +36,7 @@
 #include "jobs/reducer_frontier.h"
 #include "jobs/validate_headers_stage.h"
 #include "services/chain_state_service.h"
+#include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
 #include "validation/chainstate.h"
@@ -887,6 +888,15 @@ static int case_retry_condition(void)
     return failures;
 }
 
+static struct node_db *g_csir_ndb;
+
+static bool csir_gate(const char *dir, const char *auth, bool *canon)
+{
+    const char *why = NULL;
+    return boot_install_consensus_bundle_gate_for_test(dir, auth, g_csir_ndb,
+                                                       canon, &why);
+}
+
 /* Fresh-datadir cutover: the canonical-lane owner gate protects existing chain
  * state. A canonical datadir whose consensus store holds no coins and no
  * tip_finalize/utxo_apply rows above genesis has nothing to protect, so the
@@ -912,15 +922,20 @@ static int case_fresh_canonical_cutover(void)
     const char *old_home = getenv("HOME");
     char saved[PATH_MAX];
     snprintf(saved, sizeof(saved), "%s", old_home ? old_home : "");
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    char node_path[300];
+    snprintf(node_path, sizeof(node_path), "%s/node.db", root);
     bool setup = mkdir(home, 0700) == 0 && mkdir(canonical, 0700) == 0 &&
-                 setenv("HOME", home, 1) == 0;
+                 setenv("HOME", home, 1) == 0 && node_db_open(&ndb, node_path);
+    g_csir_ndb = &ndb;
     CSIR_CHECK("fresh canonical: fixture initializes", setup);
 
     bool is_canonical = false;
     CSIR_CHECK("fresh canonical: progress store opens",
                setup && progress_store_open(canonical));
     CSIR_CHECK("fresh canonical: empty store admits without owner gate",
-               boot_install_consensus_bundle_gate_allows_for_test(
+               csir_gate(
                    canonical, NULL, &is_canonical) && is_canonical);
     CSIR_CHECK("fresh canonical: schema without rows still admits",
                csir_sql("CREATE TABLE IF NOT EXISTS tip_finalize_log("
@@ -930,24 +945,24 @@ static int case_fresh_canonical_cutover(void)
                         "utxo_size_after INTEGER NOT NULL,"
                         "reorg_depth INTEGER NOT NULL,"
                         "finalized_at INTEGER NOT NULL)") &&
-               boot_install_consensus_bundle_gate_allows_for_test(
+               csir_gate(
                    canonical, NULL, &is_canonical));
     CSIR_CHECK("fresh canonical: genesis-only row still admits",
                csir_sql("INSERT INTO tip_finalize_log VALUES"
                         "(0,'ok',1,0,0,0,0,0)") &&
-               boot_install_consensus_bundle_gate_allows_for_test(
+               csir_gate(
                    canonical, NULL, &is_canonical));
     CSIR_CHECK("fresh canonical: a finalized height above genesis refuses",
                csir_sql("INSERT INTO tip_finalize_log VALUES"
                         "(7,'ok',1,0,0,0,0,0)") &&
-               !boot_install_consensus_bundle_gate_allows_for_test(
+               !csir_gate(
                    canonical, NULL, &is_canonical) && is_canonical);
     CSIR_CHECK("fresh canonical: owner gate still admits existing state",
-               boot_install_consensus_bundle_gate_allows_for_test(
+               csir_gate(
                    canonical, "1", &is_canonical));
     CSIR_CHECK("fresh canonical: removing the row reopens the fresh path",
                csir_sql("DELETE FROM tip_finalize_log WHERE height=7") &&
-               boot_install_consensus_bundle_gate_allows_for_test(
+               csir_gate(
                    canonical, NULL, &is_canonical));
     CSIR_CHECK("fresh canonical: any coin refuses",
                csir_sql("CREATE TABLE IF NOT EXISTS coins(txid BLOB NOT NULL,"
@@ -956,12 +971,14 @@ static int case_fresh_canonical_cutover(void)
                         "script BLOB NOT NULL, PRIMARY KEY(txid,vout))"
                         " WITHOUT ROWID") &&
                csir_sql("INSERT INTO coins VALUES(X'01',0,1,1,0,X'00')") &&
-               !boot_install_consensus_bundle_gate_allows_for_test(
+               !csir_gate(
                    canonical, NULL, &is_canonical));
     progress_store_close();
     CSIR_CHECK("fresh canonical: closed store fails closed",
-               !boot_install_consensus_bundle_gate_allows_for_test(
+               !csir_gate(
                    canonical, NULL, &is_canonical));
+    node_db_close(&ndb);
+    g_csir_ndb = NULL;
 
     if (old_home)
         (void)setenv("HOME", saved, 1);
@@ -978,6 +995,8 @@ static int case_fresh_canonical_cutover(void)
 static int case_owner_gate_refusal_writes_nothing(void)
 {
     int failures = 0;
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
     char root[256], home[300], canonical[340], bundles[380], bundle[420],
         failed[440];
     test_make_tmpdir(root, sizeof(root), "csir_gate_marker", "ok");
@@ -986,12 +1005,15 @@ static int case_owner_gate_refusal_writes_nothing(void)
     snprintf(bundles, sizeof(bundles), "%s/bundles", canonical);
     snprintf(bundle, sizeof(bundle), "%s/b.sqlite", bundles);
     snprintf(failed, sizeof(failed), "%s.failed", bundle);
+    char node_path[300];
+    snprintf(node_path, sizeof(node_path), "%s/node.db", root);
     const char *old_home = getenv("HOME");
     char saved[PATH_MAX];
     snprintf(saved, sizeof(saved), "%s", old_home ? old_home : "");
     bool setup = mkdir(home, 0700) == 0 && mkdir(canonical, 0700) == 0 &&
                  mkdir(bundles, 0700) == 0 && csir_touch(bundles, "b.sqlite") &&
-                 setenv("HOME", home, 1) == 0 && progress_store_open(canonical);
+                 setenv("HOME", home, 1) == 0 && progress_store_open(canonical) &&
+                 node_db_open(&ndb, node_path);
     CSIR_CHECK("gate marker: fixture initializes", setup);
     CSIR_CHECK("gate marker: seed one coin",
                setup &&
@@ -1003,11 +1025,11 @@ static int case_owner_gate_refusal_writes_nothing(void)
                csir_sql("INSERT INTO coins VALUES(X'01',0,1,1,0,X'00')"));
     struct consensus_state_install_runtime_result rr;
     struct zcl_result r =
-        consensus_state_install_from_bundle(NULL, NULL, bundle, canonical, &rr);
+        consensus_state_install_from_bundle(&ndb, NULL, bundle, canonical, &rr);
     CSIR_CHECK("gate marker: existing state refuses", !r.ok &&
                rr.owner_gate_refused && !rr.state_installed);
     CSIR_CHECK("gate marker: boot seam installs nothing",
-               !boot_maybe_auto_install_consensus_bundle(NULL, NULL, canonical,
+               !boot_maybe_auto_install_consensus_bundle(&ndb, NULL, canonical,
                                                         false));
     CSIR_CHECK("gate marker: refusal leaves no .failed marker",
                access(failed, F_OK) != 0);
@@ -1015,15 +1037,181 @@ static int case_owner_gate_refusal_writes_nothing(void)
                boot_autodetect_consensus_bundle(canonical) != NULL);
     CSIR_CHECK("gate marker: clearing the state lets admission judge the bundle",
                csir_sql("DELETE FROM coins") &&
-               !boot_maybe_auto_install_consensus_bundle(NULL, NULL, canonical,
+               !boot_maybe_auto_install_consensus_bundle(&ndb, NULL, canonical,
                                                         false) &&
                access(failed, F_OK) == 0);
     progress_store_close();
+    node_db_close(&ndb);
     if (old_home)
         (void)setenv("HOME", saved, 1);
     else
         (void)unsetenv("HOME");
     test_rm_rf_recursive(root);
+    return failures;
+}
+
+/* The owner gate fails closed: an unreadable or missing legacy mirror, a chain
+ * table the gate does not know, and a consensus store opened under a different
+ * datadir each keep a canonical datadir refused. */
+struct csir_gate_fx {
+    char root[256], home[300], canonical[340], other[300], saved[PATH_MAX];
+    bool had_home;
+    struct node_db ndb;
+    bool ready;
+};
+
+static void csir_gate_fx_open(struct csir_gate_fx *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    char node_path[300];
+    test_make_tmpdir(fx->root, sizeof(fx->root), "csir_gate_closed", "ok");
+    snprintf(fx->home, sizeof(fx->home), "%s/home", fx->root);
+    snprintf(fx->canonical, sizeof(fx->canonical), "%s/.zclassic-c23", fx->home);
+    snprintf(fx->other, sizeof(fx->other), "%s/other", fx->root);
+    snprintf(node_path, sizeof(node_path), "%s/node.db", fx->root);
+    const char *old_home = getenv("HOME");
+    fx->had_home = old_home != NULL;
+    snprintf(fx->saved, sizeof(fx->saved), "%s", old_home ? old_home : "");
+    fx->ready = mkdir(fx->home, 0700) == 0 && mkdir(fx->canonical, 0700) == 0 &&
+                mkdir(fx->other, 0700) == 0 && setenv("HOME", fx->home, 1) == 0 &&
+                node_db_open(&fx->ndb, node_path) &&
+                progress_store_open(fx->canonical);
+    g_csir_ndb = &fx->ndb;
+}
+
+static void csir_gate_fx_close(struct csir_gate_fx *fx)
+{
+    progress_store_close();
+    node_db_close(&fx->ndb);
+    g_csir_ndb = NULL;
+    if (fx->had_home)
+        (void)setenv("HOME", fx->saved, 1);
+    else
+        (void)unsetenv("HOME");
+    test_rm_rf_recursive(fx->root);
+}
+
+static bool csir_gate_reason(const struct csir_gate_fx *fx, const char *auth,
+                             struct node_db *ndb, const char *needle)
+{
+    bool canon = false;
+    const char *why = NULL;
+    bool admitted = boot_install_consensus_bundle_gate_for_test(
+        fx->canonical, auth, ndb, &canon, &why);
+    return !admitted && why && strstr(why, needle) != NULL;
+}
+
+static bool csir_gate_admits(const struct csir_gate_fx *fx, const char *auth,
+                             struct node_db *ndb)
+{
+    bool canon = false;
+    return boot_install_consensus_bundle_gate_for_test(fx->canonical, auth, ndb,
+                                                       &canon, NULL);
+}
+
+static int case_gate_mirror_handle(void)
+{
+    int failures = 0;
+    struct csir_gate_fx fx;
+    csir_gate_fx_open(&fx);
+    struct node_db closed;
+    memset(&closed, 0, sizeof(closed));
+    CSIR_CHECK("gate closed: fixture initializes", fx.ready);
+    CSIR_CHECK("gate closed: empty store and empty mirror admit",
+               csir_gate_admits(&fx, NULL, &fx.ndb));
+    CSIR_CHECK("gate closed: NULL mirror handle refuses with a reason",
+               csir_gate_reason(&fx, NULL, NULL, "legacy"));
+    CSIR_CHECK("gate closed: closed mirror handle refuses",
+               csir_gate_reason(&fx, NULL, &closed, "legacy"));
+    CSIR_CHECK("gate closed: owner authorization still admits a closed mirror",
+               csir_gate_admits(&fx, "1", &closed));
+    csir_gate_fx_close(&fx);
+    return failures;
+}
+
+static int case_gate_mirror_table(void)
+{
+    int failures = 0;
+    struct csir_gate_fx fx;
+    csir_gate_fx_open(&fx);
+    bool dropped = node_db_exec(&fx.ndb, "DROP TABLE utxos");
+    CSIR_CHECK("gate closed: dropped mirror table refuses (prepare error)",
+               dropped && csir_gate_reason(&fx, NULL, &fx.ndb, "legacy"));
+    bool restored = node_db_exec(&fx.ndb,
+        "CREATE TABLE utxos(txid BLOB, vout INTEGER, height INTEGER, "
+        "value INTEGER, script BLOB)");
+    CSIR_CHECK("gate closed: restored mirror table admits again",
+               restored && csir_gate_admits(&fx, NULL, &fx.ndb));
+    bool row = node_db_exec(&fx.ndb,
+                            "INSERT INTO utxos VALUES(X'01',0,1,1,X'00')");
+    CSIR_CHECK("gate closed: a mirror row refuses",
+               row && csir_gate_reason(&fx, NULL, &fx.ndb, "legacy"));
+    bool emptied = node_db_exec(&fx.ndb, "DELETE FROM utxos");
+    CSIR_CHECK("gate closed: emptied mirror admits",
+               emptied && csir_gate_admits(&fx, NULL, &fx.ndb));
+    csir_gate_fx_close(&fx);
+    return failures;
+}
+
+static bool csir_applied(int32_t height)
+{
+    return csir_sql("BEGIN IMMEDIATE") &&
+           coins_kv_set_applied_height_in_tx(progress_store_db(), height) &&
+           csir_sql("COMMIT");
+}
+
+static int case_gate_unknown_tables(void)
+{
+    int failures = 0;
+    struct csir_gate_fx fx;
+    csir_gate_fx_open(&fx);
+    bool seeded = csir_sql("CREATE TABLE legacy_chain(k INTEGER)") &&
+                  csir_sql("INSERT INTO legacy_chain VALUES(1)");
+    CSIR_CHECK("gate closed: unknown table with rows and no coins table refuses",
+               seeded && csir_gate_reason(&fx, NULL, &fx.ndb, "chain state"));
+    bool dropped = csir_sql("DROP TABLE legacy_chain");
+    CSIR_CHECK("gate closed: dropping it admits again",
+               dropped && csir_gate_admits(&fx, NULL, &fx.ndb));
+    bool nf = csir_sql("CREATE TABLE nullifiers(nf BLOB, pool INTEGER, "
+                       "height INTEGER)") &&
+              csir_sql("INSERT INTO nullifiers VALUES(X'01',0,1)");
+    CSIR_CHECK("gate closed: nullifier rows without a coins table refuse",
+               nf && csir_gate_reason(&fx, NULL, &fx.ndb, "chain state"));
+    bool cleaned = csir_sql("DELETE FROM nullifiers");
+    CSIR_CHECK("gate closed: cleaned nullifiers admit",
+               cleaned && csir_gate_admits(&fx, NULL, &fx.ndb));
+    csir_gate_fx_close(&fx);
+    return failures;
+}
+
+static int case_gate_applied_height(void)
+{
+    int failures = 0;
+    struct csir_gate_fx fx;
+    csir_gate_fx_open(&fx);
+    bool high = csir_applied(500);
+    CSIR_CHECK("gate closed: applied height above genesis refuses",
+               high && csir_gate_reason(&fx, NULL, &fx.ndb, "chain state"));
+    bool genesis = csir_applied(1);
+    CSIR_CHECK("gate closed: genesis applied height admits",
+               genesis && csir_gate_admits(&fx, NULL, &fx.ndb));
+    csir_gate_fx_close(&fx);
+    return failures;
+}
+
+static int case_gate_store_datadir(void)
+{
+    int failures = 0;
+    struct csir_gate_fx fx;
+    csir_gate_fx_open(&fx);
+    progress_store_close();
+    bool reopened = progress_store_open(fx.other);
+    CSIR_CHECK("gate closed: store opened under another datadir", reopened);
+    CSIR_CHECK("gate closed: mismatched store refuses with a named reason",
+               csir_gate_reason(&fx, NULL, &fx.ndb, "does not belong"));
+    CSIR_CHECK("gate closed: owner authorization admits a mismatched store",
+               csir_gate_admits(&fx, "1", &fx.ndb));
+    csir_gate_fx_close(&fx);
     return failures;
 }
 
@@ -1042,6 +1230,11 @@ int test_consensus_state_install_runtime(void)
     failures += case_retry_condition();
     failures += case_solution_repair_detect_window();
     failures += case_fresh_canonical_cutover();
+    failures += case_gate_mirror_handle();
+    failures += case_gate_mirror_table();
+    failures += case_gate_unknown_tables();
+    failures += case_gate_applied_height();
+    failures += case_gate_store_datadir();
     failures += case_owner_gate_refusal_writes_nothing();
     printf("=== consensus_state_install_runtime: %d failure(s) ===\n", failures);
     return failures;

@@ -893,6 +893,12 @@ size_t boot_snapshot_drop_bodiless_have_data_above_seed(
  * accepted only when it is exactly "1". */
 bool boot_install_consensus_bundle_gate_allows_for_test(
     const char *datadir, const char *authorization, bool *out_canonical);
+/* Unit surface for the full cutover decision: `ndb` is the legacy mirror handle
+ * the gate inspects; `out_refusal` receives a static reason (NULL when
+ * admitted). */
+bool boot_install_consensus_bundle_gate_for_test(
+    const char *datadir, const char *authorization, struct node_db *ndb,
+    bool *out_canonical, const char **out_refusal);
 /* Unit surface for the post-install derived-state invalidation: clears the
  * persisted Sapling tree pair on `ndb`, resets the in-process provable-tip
  * cache, and verifies MAX(coins.height) on `progress_db` == bundle_height. */

@@ -52,6 +52,7 @@ struct zcl_result consensus_state_install_from_bundle(
 #include "services/consensus_state_publication_cas.h"
 #include "services/utxo_mirror_sync_service.h"        /* UTXO_MIRROR_SYNC_CURSOR_KEY */
 #include "storage/anchor_kv.h"
+#include "storage/coins_kv.h"
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
@@ -153,59 +154,107 @@ static bool icb_canonical_authorized(const char *authorization)
 {
     return authorization && strcmp(authorization, "1") == 0;
 }
-/* True iff `table` exists in `db` and holds at least one row matching `where`
- * (NULL matches every row). A missing table is "no rows". Any SQLite error is
- * reported as "has rows" so the caller fails closed. `table` and `where` are
- * fixed literals from this file, never caller input. */
-static bool icb_table_has_rows(sqlite3 *db, const char *table,
-                               const char *where)
+/* Cutover safety. consensus_state_snapshot_install_activate replaces the coins,
+ * anchor and nullifier tables, the reducer logs and deltas, the producer
+ * session/receipt tables and the stage cursors of the consensus store, and the
+ * node.db utxo mirror and Sapling tree. It does not read or write wallet files. */
+
+/* Tables every consensus store carries from its first open; they hold no chain
+ * state of their own (the applied-height frontier is checked separately). */
+static const char *const k_icb_bookkeeping_tables[] = {
+    "progress_meta", "stage_cursor", "repair_marker"};
+
+static bool icb_is_bookkeeping_table(const char *name)
 {
-    char sql[160];
-    int n = snprintf(sql, sizeof(sql),
-                     "SELECT 1 FROM sqlite_master WHERE type='table' AND "
-                     "name='%s'", table);
-    if (n <= 0 || (size_t)n >= sizeof(sql))
+    for (size_t i = 0; i < sizeof(k_icb_bookkeeping_tables) /
+                               sizeof(k_icb_bookkeeping_tables[0]); i++)
+        if (strcmp(name, k_icb_bookkeeping_tables[i]) == 0)
+            return true;
+    return false;
+}
+/* True iff `table` holds chain rows. The two logs a pristine store seeds at
+ * genesis count only above height 0. Any SQLite error reads as "has rows" so
+ * the caller fails closed. `table` comes from sqlite_master. */
+static bool icb_table_has_chain_rows(sqlite3 *db, const char *table)
+{
+    if (strchr(table, '"'))
         return true;
+    bool genesis_log = strcmp(table, "tip_finalize_log") == 0 ||
+                       strcmp(table, "utxo_apply_log") == 0;
+    char sql[200];
+    int n = snprintf(sql, sizeof(sql), "SELECT 1 FROM \"%s\"%s LIMIT 1", table,
+                     genesis_log ? " WHERE height > 0" : "");
     sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
-        return true;
-    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
-    sqlite3_finalize(st);
-    if (rc == SQLITE_DONE)
-        return false;
-    if (rc != SQLITE_ROW)
-        return true;
-    n = snprintf(sql, sizeof(sql), "SELECT 1 FROM %s %s%s LIMIT 1", table,
-                 where ? "WHERE " : "", where ? where : "");
     if (n <= 0 || (size_t)n >= sizeof(sql) ||
         sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         return true;
-    rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
     sqlite3_finalize(st);
     return rc != SQLITE_DONE;
 }
-/* A datadir with no prior chain state: the consensus store carries no coin and
- * no tip_finalize / utxo_apply row above genesis, and the legacy utxo mirror is
- * empty. Nothing exists for a bundle cutover to overwrite. An unavailable
- * store is never "empty". */
-static bool icb_chain_state_empty(struct node_db *ndb, sqlite3 *progress_db)
+/* The consensus store is empty of chain state iff the applied-height frontier
+ * is at most the genesis seed and no table other than the bookkeeping tables
+ * holds rows. Deny by default: a table this code does not know, in any schema
+ * generation, with rows refuses. A missing table is not evidence of emptiness
+ * on its own; only the absence of rows in every table present is. */
+static bool icb_store_chain_state_empty(sqlite3 *db)
 {
-    if (!progress_db)
+    int32_t applied = 0;
+    bool found = false;
+    if (!coins_kv_get_applied_height(db, &applied, &found) ||
+        (found && applied > 1))
         return false;
-    if (icb_table_has_rows(progress_db, "coins", NULL) ||
-        icb_table_has_rows(progress_db, "tip_finalize_log", "height > 0") ||
-        icb_table_has_rows(progress_db, "utxo_apply_log", "height > 0"))
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT name FROM sqlite_master WHERE type='table' AND "
+            "name NOT LIKE 'sqlite_%'", -1, &st, NULL) != SQLITE_OK)
         return false;
-    return !ndb || node_db_utxo_count(ndb) == 0;
+    bool empty = true;
+    int rc;
+    while (empty && (rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
+        const char *name = (const char *)sqlite3_column_text(st, 0);
+        empty = name && (icb_is_bookkeeping_table(name) ||
+                         !icb_table_has_chain_rows(db, name));
+    }
+    if (empty && rc != SQLITE_DONE)
+        empty = false;
+    sqlite3_finalize(st);
+    return empty;
+}
+/* The legacy node.db utxo mirror is empty only when it was read and counted 0.
+ * node_db_utxo_count conflates an error with 0, so count here. */
+static bool icb_mirror_empty(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open || !ndb->db)
+        return false;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "SELECT count(*) FROM utxos", -1, &st,
+                           NULL) != SQLITE_OK)
+        return false;
+    bool empty = sqlite3_step(st) == SQLITE_ROW && // raw-sql-ok:read-only-introspection
+                 sqlite3_column_int64(st, 0) == 0;
+    sqlite3_finalize(st);
+    return empty;
 }
 /* The canonical-lane owner gate protects a daily-driver's existing chain state.
- * It admits the install when the owner authorized it, when the lane is a copy,
- * or when the canonical datadir has no prior chain state. */
-static bool icb_cutover_admitted(bool canonical, const char *authorization,
-                                 struct node_db *ndb, sqlite3 *progress_db)
+ * Returns NULL when the cutover is admitted: the owner authorized it, the lane
+ * is a copy, or the canonical datadir provably has no prior chain state in its
+ * own consensus store and legacy mirror. Otherwise a static refusal reason. */
+static const char *icb_cutover_refusal(bool canonical, const char *authorization,
+                                       struct node_db *ndb, sqlite3 *progress_db,
+                                       int dir_fd)
 {
-    return !canonical || icb_canonical_authorized(authorization) ||
-           icb_chain_state_empty(ndb, progress_db);
+    if (!canonical || icb_canonical_authorized(authorization))
+        return NULL;
+    if (!progress_db)
+        return "the consensus store is not open";
+    if (!progress_store_directory_matches_fd(progress_db, dir_fd))
+        return "the open consensus store does not belong to this datadir";
+    if (!icb_store_chain_state_empty(progress_db))
+        return "the datadir holds chain state";
+    if (!icb_mirror_empty(ndb))
+        return "the legacy utxo mirror is not provably empty";
+    return NULL;
 }
 /* Read the producer source receipt from the pinned, already-validated bundle
  * handle. The CAS re-checks the receipt's self-consistency and its binding to
@@ -333,14 +382,16 @@ struct zcl_result consensus_state_install_from_bundle(
                      classified.message);
         goto done;
     }
-    if (!icb_cutover_admitted(canonical_datadir,
-                              getenv("ZCL_DEPLOY_ALLOW_CANONICAL"), ndb,
-                              progress_store_db())) {
+    const char *refusal = icb_cutover_refusal(
+        canonical_datadir, getenv("ZCL_DEPLOY_ALLOW_CANONICAL"), ndb,
+        progress_store_db(), dir_fd);
+    if (refusal) {
         out->owner_gate_refused = true;
         rc = ZCL_ERR(-1,
-                     "datadir %s is the canonical lane and holds chain state; set "
+                     "datadir %s is the canonical lane and %s; set "
                      "ZCL_DEPLOY_ALLOW_CANONICAL=1 to cut over the daily-driver, "
-                     "or run the install on a dev/copy datadir first", datadir);
+                     "or run the install on a dev/copy datadir first", datadir,
+                     refusal);
         goto done;
     }
     enum consensus_state_target_lane lane =
@@ -746,20 +797,32 @@ done:
     return rc;
 }
 #ifdef ZCL_TESTING
-bool boot_install_consensus_bundle_gate_allows_for_test(
-    const char *datadir, const char *authorization, bool *out_canonical)
+bool boot_install_consensus_bundle_gate_for_test(
+    const char *datadir, const char *authorization, struct node_db *ndb,
+    bool *out_canonical, const char **out_refusal)
 {
+    if (out_refusal)
+        *out_refusal = NULL;
     int dir_fd = -1;
     bool canonical = false;
     struct zcl_result classified =
         icb_datadir_open_classify(datadir, &dir_fd, &canonical);
     if (!classified.ok)
         return false;
-    (void)close(dir_fd);
     if (out_canonical)
         *out_canonical = canonical;
-    return icb_cutover_admitted(canonical, authorization, NULL,
-                                progress_store_db());
+    const char *refusal = icb_cutover_refusal(canonical, authorization, ndb,
+                                              progress_store_db(), dir_fd);
+    (void)close(dir_fd);
+    if (out_refusal)
+        *out_refusal = refusal;
+    return refusal == NULL;
+}
+bool boot_install_consensus_bundle_gate_allows_for_test(
+    const char *datadir, const char *authorization, bool *out_canonical)
+{
+    return boot_install_consensus_bundle_gate_for_test(
+        datadir, authorization, NULL, out_canonical, NULL);
 }
 bool boot_install_consensus_bundle_invalidate_derived_for_test(
     struct node_db *ndb, sqlite3 *progress_db, int32_t bundle_height)

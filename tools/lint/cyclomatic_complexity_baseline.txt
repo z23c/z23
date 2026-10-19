@@ -1371,7 +1371,6 @@ engine/composition/src/boot.c:boot_step_init_crypto_and_state:17
 engine/composition/src/boot.c:sandbox_build_fs_rules:18
 engine/composition/src/boot_anchor_snapshot_reachability.c:anchor_snapshot_verified_reachable_ex:19
 engine/composition/src/boot_auto_install_bundle.c:boot_autodetect_consensus_bundle#2:22
-engine/composition/src/boot_auto_install_bundle.c:boot_maybe_auto_install_consensus_bundle#2:16
 engine/composition/src/boot_auto_install_bundle.c:boot_select_state_source#2:19
 engine/composition/src/boot_background_workers.c:hodl_history_worker_thread:17
 engine/composition/src/boot_background_workers.c:projection_backfill_service_thread:56
@@ -2039,7 +2038,7 @@ engine/reducer/conditions/src/reducer_frontier_reconcile_light.c:progressing_red
 engine/reducer/conditions/src/reducer_frontier_reconcile_light.c:remedy_reducer_frontier_reconcile_light:26
 engine/reducer/jobs/src/reducer_frontier.c:log_contiguous_prefix:25
 engine/reducer/jobs/src/reducer_frontier.c:log_ok_at:21
-engine/reducer/jobs/src/reducer_frontier.c:reducer_frontier_compute_hstar:22
+engine/reducer/jobs/src/reducer_frontier.c:reducer_frontier_compute_hstar:20
 engine/reducer/jobs/src/reducer_frontier.c:reducer_trusted_anchor:16
 engine/reducer/jobs/src/reducer_frontier_dump.c:first_hstar_blocker:17
 engine/reducer/jobs/src/reducer_frontier_dump.c:reducer_frontier_dump_state_json:67

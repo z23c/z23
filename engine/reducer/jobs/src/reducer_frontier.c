@@ -627,6 +627,16 @@ static void frontier_warn_cursor_below(int stage, const char *cursor_name,
 #endif
 }
 
+/* Diagnostic for a stage cursor behind the anchor; silent during a refold, where
+ * a below-anchor cursor is expected. */
+static void frontier_note_cursor(int stage, const char *cursor_name,
+                                 int64_t raw_cursor, int64_t scan_cursor,
+                                 int32_t anchor)
+{
+    if (scan_cursor < (int64_t)anchor + 1 && !refold_in_progress())
+        frontier_warn_cursor_below(stage, cursor_name, raw_cursor, anchor);
+}
+
 /* Fail-closed schema gate: a store without the reducer stage schema has no
  * frontier. Reports once per interval and returns false. */
 static bool frontier_schema_gate(sqlite3 *db)
@@ -711,9 +721,8 @@ bool reducer_frontier_compute_hstar(sqlite3 *progress_db,
          * compared so tip_finalize is not flagged for sitting one below the
          * upstream frame by convention. SUPPRESSED during a refold: a
          * below-anchor cursor is then EXPECTED (re-walking the prefix). */
-        if (scan_cursor < (int64_t)anchor + 1 && !refold_in_progress())
-            frontier_warn_cursor_below(i, k_logs[i].cursor_name, raw_cursor,
-                                       anchor);
+        frontier_note_cursor(i, k_logs[i].cursor_name, raw_cursor,
+                             scan_cursor, anchor);
 
         int32_t h_contig = anchor;
         if (!log_contiguous_prefix(progress_db, k_logs[i].log_table, anchor,

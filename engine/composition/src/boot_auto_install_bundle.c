@@ -527,6 +527,62 @@ size_t boot_post_install_drop_borrowed_have_data(
 
 /* ── The 1b + 1c orchestrator ──────────────────────────────────────────────── */
 
+/* (1b) Passive autodetect of a <datadir>/bundles/<name>.sqlite starter bundle.
+ * Returns true iff the bundle installed; *installed_height is set then. */
+static bool auto_install_detected(struct node_db *ndb, struct main_state *ms,
+                                  const char *datadir,
+                                  int32_t *installed_height)
+{
+    bool installed = false;
+    char *auto_bundle = boot_autodetect_consensus_bundle(datadir);
+    if (auto_bundle) {
+        struct consensus_state_install_runtime_result rr;
+        struct zcl_result r = consensus_state_install_from_bundle(
+            ndb, ms, auto_bundle, datadir, &rr);
+        if (r.ok) {
+            installed = true;
+            *installed_height = rr.height;
+            boot_auto_install_clear_failed_marker(auto_bundle);
+            LOG_INFO(ICB_SUBSYS, "autodetected consensus bundle installed %s "
+                                 "(H*=%d)", auto_bundle, rr.hstar);
+        } else if (rr.state_installed) {
+            LOG_ERROR(ICB_SUBSYS,
+                      "autodetected bundle %s landed durably but a "
+                      "post-install step failed (%s) — retrying on the next "
+                      "boot (not marked .failed: the state is on disk)",
+                      auto_bundle, rr.reason);
+        } else if (rr.owner_gate_refused) {
+            /* The canonical-lane owner gate protects existing chain state;
+             * it judges the datadir, not the bundle. Leave no .failed
+             * marker so a boot with ZCL_DEPLOY_ALLOW_CANONICAL=1 finds the
+             * bundle again. */
+            LOG_WARN(ICB_SUBSYS,
+                     "autodetected bundle %s not installed (NOT marked "
+                     ".failed): %s", auto_bundle, rr.reason);
+        } else if (rr.retriable_headers_not_ready) {
+            /* RETRIABLE WAIT (fresh boot / mid-header-sync): the validated
+             * header chain has not yet reached the checkpoint height. The
+             * bundle is GOOD — the node has not caught up — so do NOT mark
+             * .failed. It is re-detected on the next boot, and the
+             * checkpoint_bundle_install_ready condition arms the install the
+             * moment the header chain reaches the checkpoint this session. */
+            LOG_INFO(ICB_SUBSYS,
+                     "autodetected bundle %s deferred (NOT marked .failed): "
+                     "%s", auto_bundle, rr.reason);
+        } else {
+            /* Genuine pre-activate refusal (bad / incompatible / contained
+             * bundle): mark .failed so the next boot degrades to normal
+             * behavior (never-stuck). */
+            csir_write_failed_marker(auto_bundle);
+            LOG_ERROR(ICB_SUBSYS,
+                      "autodetected bundle %s did not install (marked .failed "
+                      "→ normal boot next time): %s", auto_bundle, rr.reason);
+        }
+        free(auto_bundle);
+    }
+    return installed;
+}
+
 bool boot_maybe_auto_install_consensus_bundle(struct node_db *ndb,
                                               struct main_state *ms,
                                               const char *datadir,
@@ -586,55 +642,8 @@ bool boot_maybe_auto_install_consensus_bundle(struct node_db *ndb,
         }
     }
 
-    /* (1b) Passive autodetect of a <datadir>/bundles/<name>.sqlite starter bundle. */
-    if (!installed) {
-        char *auto_bundle = boot_autodetect_consensus_bundle(datadir);
-        if (auto_bundle) {
-            struct consensus_state_install_runtime_result rr;
-            struct zcl_result r = consensus_state_install_from_bundle(
-                ndb, ms, auto_bundle, datadir, &rr);
-            if (r.ok) {
-                installed = true;
-                installed_height = rr.height;
-                boot_auto_install_clear_failed_marker(auto_bundle);
-                LOG_INFO(ICB_SUBSYS, "autodetected consensus bundle installed %s "
-                                     "(H*=%d)", auto_bundle, rr.hstar);
-            } else if (rr.state_installed) {
-                LOG_ERROR(ICB_SUBSYS,
-                          "autodetected bundle %s landed durably but a "
-                          "post-install step failed (%s) — retrying on the next "
-                          "boot (not marked .failed: the state is on disk)",
-                          auto_bundle, rr.reason);
-            } else if (rr.owner_gate_refused) {
-                /* The canonical-lane owner gate protects existing chain state;
-                 * it judges the datadir, not the bundle. Leave no .failed
-                 * marker so a boot with ZCL_DEPLOY_ALLOW_CANONICAL=1 finds the
-                 * bundle again. */
-                LOG_WARN(ICB_SUBSYS,
-                         "autodetected bundle %s not installed (NOT marked "
-                         ".failed): %s", auto_bundle, rr.reason);
-            } else if (rr.retriable_headers_not_ready) {
-                /* RETRIABLE WAIT (fresh boot / mid-header-sync): the validated
-                 * header chain has not yet reached the checkpoint height. The
-                 * bundle is GOOD — the node has not caught up — so do NOT mark
-                 * .failed. It is re-detected on the next boot, and the
-                 * checkpoint_bundle_install_ready condition arms the install the
-                 * moment the header chain reaches the checkpoint this session. */
-                LOG_INFO(ICB_SUBSYS,
-                         "autodetected bundle %s deferred (NOT marked .failed): "
-                         "%s", auto_bundle, rr.reason);
-            } else {
-                /* Genuine pre-activate refusal (bad / incompatible / contained
-                 * bundle): mark .failed so the next boot degrades to normal
-                 * behavior (never-stuck). */
-                csir_write_failed_marker(auto_bundle);
-                LOG_ERROR(ICB_SUBSYS,
-                          "autodetected bundle %s did not install (marked .failed "
-                          "→ normal boot next time): %s", auto_bundle, rr.reason);
-            }
-            free(auto_bundle);
-        }
-    }
+    if (!installed)
+        installed = auto_install_detected(ndb, ms, datadir, &installed_height);
 
     /* Post-install repair wiring — first drop any borrowed HAVE_DATA claims
      * the verbatim ladder load admitted (boot_post_install_drop_borrowed_
