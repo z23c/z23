@@ -22,6 +22,7 @@
 #include "codeindex_merkle_internal.h"
 
 #include "base/hex.h"
+#include "base/path_leaf.h"
 #include "base/serialize_le.h"
 
 #include "util/log_macros.h"
@@ -773,12 +774,6 @@ static bool merkle_finalize_frame(struct merkle_build *b,
     return true;
 }
 
-static const char *merkle_basename(const char *path)
-{
-    const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
-}
-
 /* Finalize the top frame and fold it into its parent as a directory child. */
 static bool merkle_pop_frame(struct merkle_build *b)
 {
@@ -793,7 +788,7 @@ static bool merkle_pop_frame(struct merkle_build *b)
     struct merkle_frame *parent = &b->frames[b->depth - 1];
     struct ci_merkle_proof_child c;
     memset(&c, 0, sizeof(c));
-    ci_cpy(c.name, sizeof(c.name), merkle_basename(nd.path));
+    ci_cpy(c.name, sizeof(c.name), zcl_path_leaf(nd.path));
     c.kind = 1;
     c.digest = nd.digest;
     if (!merkle_frame_push_child(parent, &c)) return false;
@@ -817,7 +812,7 @@ static bool merkle_push_frame(struct merkle_build *b, const char *path)
     if (b->depth >= MERKLE_MAX_DEPTH)
         LOG_FAIL("codeindex", "merkle directory nesting past %d: %s",
                  MERKLE_MAX_DEPTH, path);
-    if (strlen(merkle_basename(path)) >= MERKLE_NAME_MAX)
+    if (strlen(zcl_path_leaf(path)) >= MERKLE_NAME_MAX)
         LOG_FAIL("codeindex", "merkle directory name exceeds %d bytes: %s",
                  MERKLE_NAME_MAX - 1, path);
     struct merkle_frame *f = &b->frames[b->depth];
@@ -874,7 +869,7 @@ static bool merkle_file_key_cb(const char *relpath,
     }
     /* A truncated basename would let two distinct siblings hash identically,
      * so refuse rather than silently collide. */
-    if (strlen(merkle_basename(relpath)) >= MERKLE_NAME_MAX) {
+    if (strlen(zcl_path_leaf(relpath)) >= MERKLE_NAME_MAX) {
         b->err = true;
         LOG_FAIL("codeindex", "merkle file name exceeds %d bytes: %s",
                  MERKLE_NAME_MAX - 1, relpath);
@@ -927,7 +922,7 @@ static bool merkle_file_key_cb(const char *relpath,
     struct merkle_frame *f = &b->frames[b->depth - 1];
     struct ci_merkle_proof_child c;
     memset(&c, 0, sizeof(c));
-    ci_cpy(c.name, sizeof(c.name), merkle_basename(relpath));
+    ci_cpy(c.name, sizeof(c.name), zcl_path_leaf(relpath));
     c.kind = 0;
     c.digest = leaf.digest;
     if (!merkle_frame_push_child(f, &c)) { b->err = true; return false; }
@@ -1425,7 +1420,7 @@ bool ci_merkle_prove(const struct ci_merkle *m, const char *path,
             return false;
         lv->nchildren = n;
 
-        const char *want = merkle_basename(cur);
+        const char *want = zcl_path_leaf(cur);
         uint8_t want_kind =
             out->nlevels == 0 ? kind : (uint8_t)CI_MERKLE_KIND_DIR;
         bool hit = false;
@@ -1473,7 +1468,7 @@ static bool merkle_field_terminated(const char *f, size_t cap)
  * slash, no trailing slash, and no empty segment.
  *
  * This is not decoration, it closes a real hole. The verifier reconstructs the
- * proven path by walking merkle_dirname()/merkle_basename() upward, and those
+ * proven path by walking merkle_dirname()/zcl_path_leaf() upward, and those
  * two functions map BOTH "lib" and "/lib" to the same (parent "", basename
  * "lib") pair. Every deeper case is already closed by the digest chain — a
  * level's path is hashed verbatim, so "/core/modules/net" can never reproduce the digest
@@ -1572,7 +1567,7 @@ bool ci_merkle_proof_verify(const struct ci_merkle_proof *p,
 
         const struct ci_merkle_proof_child *slot = &kids[lv->index];
         if (slot->kind != kind) return true;
-        if (strcmp(slot->name, merkle_basename(cur)) != 0) return true;
+        if (strcmp(slot->name, zcl_path_leaf(cur)) != 0) return true;
         if (memcmp(slot->digest.bytes, acc.bytes, 32) != 0) return true;
 
         merkle_node_digest(lv->path, kids, lv->nchildren, &acc);

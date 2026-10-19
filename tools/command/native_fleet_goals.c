@@ -12,6 +12,7 @@
 
 #include "native_fleet_objectives.h"
 
+#include "base/compare.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
@@ -89,12 +90,8 @@ enum zcl_goal_grade zcl_goals_grade_scripts(int64_t scripts)
 
 /* ── result helpers ───────────────────────────────────────────────────── */
 
-static struct zcl_goal_result gr_make(enum zcl_goal_grade grade,
-                                      const char *next, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
-
-static struct zcl_goal_result gr_make(enum zcl_goal_grade grade,
-                                      const char *next, const char *fmt, ...)
+struct zcl_goal_result zcl_goal_make(enum zcl_goal_grade grade,
+                                     const char *next, const char *fmt, ...)
 {
     struct zcl_goal_result r = {0};
     va_list args;
@@ -107,11 +104,11 @@ static struct zcl_goal_result gr_make(enum zcl_goal_grade grade,
 }
 
 #define gr_unmeasured(next, ...) \
-    gr_make(ZCL_GOAL_UNMEASURED, (next), __VA_ARGS__)
-
-static int64_t gr_now(const struct zcl_goals_options *o)
-{
-    return o && o->now_unix > 0 ? o->now_unix : (int64_t)platform_time_wall_time_t();
+    zcl_goal_make(ZCL_GOAL_UNMEASURED, (next), __VA_ARGS__)
+      
+      static int64_t gr_now(const struct zcl_goals_options *o)
+      {
+          return o && o->now_unix > 0 ? o->now_unix : (int64_t)platform_time_wall_time_t();
 }
 
 /* Top-level of the git worktree that holds `dir`; false when git names none. */
@@ -423,10 +420,10 @@ static struct zcl_goal_result gr_g4(const struct zcl_goals_options *o)
                           why);
     } else {
         ms = platform_time_monotonic_ms() - t0;
-        r = gr_make(ZCL_GOAL_PARTIAL, next,
-                    "fleet.wiki.list answered in %lld ms on this node; "
-                    "cross-host read and pinned expiry are not probed",
-                    (long long)ms);
+        r = zcl_goal_make(ZCL_GOAL_PARTIAL, next,
+                          "fleet.wiki.list answered in %lld ms on this node; "
+                          "cross-host read and pinned expiry are not probed",
+                          (long long)ms);
     }
     zcl_command_reply_free(&reply);
     json_free(&input);
@@ -475,12 +472,12 @@ static struct zcl_goal_result gr_g7(const struct zcl_goals_options *o)
             ms[j - 1] = swap;
         }
     median = ms[GOALS_LOOKUP_SAMPLES / 2];
-    return gr_make(zcl_goals_grade_lookup(median), next,
-                   "code find median %lld ms over %d warm samples "
-                   "(first call %lld ms), bar %d ms; token reduction and MCP "
-                   "coverage are not measured",
-                   (long long)median, GOALS_LOOKUP_SAMPLES, (long long)cold,
-                   ZCL_GOALS_LOOKUP_MS_MAX);
+    return zcl_goal_make(zcl_goals_grade_lookup(median), next,
+                         "code find median %lld ms over %d warm samples "
+                         "(first call %lld ms), bar %d ms; token reduction and MCP "
+                         "coverage are not measured",
+                         (long long)median, GOALS_LOOKUP_SAMPLES, (long long)cold,
+                         ZCL_GOALS_LOOKUP_MS_MAX);
 }
 
 /* ── G8: vitals sample age per admitted host ──────────────────────────── */
@@ -576,12 +573,12 @@ static struct zcl_goal_result gr_g8(const struct zcl_goals_options *o)
     if (silent == roster.count)
         return gr_unmeasured(next, "%zu admitted host(s), no vitals history "
                              "readable on this node (%s)", roster.count, why);
-    return gr_make(zcl_goals_grade_fresh(fresh, roster.count), next,
-                   "%zu of %zu admitted host(s) have a vitals sample within "
-                   "3 cadences (%zu without a readable history, oldest "
-                   "sample %lld s); the one-second collection bound is not "
-                   "measured",
-                   fresh, roster.count, silent, (long long)oldest);
+    return zcl_goal_make(zcl_goals_grade_fresh(fresh, roster.count), next,
+                         "%zu of %zu admitted host(s) have a vitals sample within "
+                         "3 cadences (%zu without a readable history, oldest "
+                         "sample %lld s); the one-second collection bound is not "
+                         "measured",
+                         fresh, roster.count, silent, (long long)oldest);
 }
 
 /* ── landing ledger: G9 trains and D7 groups ──────────────────────────── */
@@ -734,11 +731,11 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
     else
         (void)snprintf(seen, sizeof(seen), "%lld commit(s) on origin/main",
                        (long long)commits);
-    return gr_make(
-        zcl_goals_grade_trains((int64_t)t.count, t.failed), next,
-        "%zu landed train(s) and %lld failed attempt(s) in the outcomes "
-        "ledger over 24 h, bar %d trains and 0 failures; %s in the same window",
-        t.count, (long long)t.failed, ZCL_GOALS_TRAIN_MIN, seen);
+    return zcl_goal_make(
+              zcl_goals_grade_trains((int64_t)t.count, t.failed), next,
+              "%zu landed train(s) and %lld failed attempt(s) in the outcomes "
+              "ledger over 24 h, bar %d trains and 0 failures; %s in the same window",
+              t.count, (long long)t.failed, ZCL_GOALS_TRAIN_MIN, seen);
 }
 
 /* ── D7: the most recent landing groups ───────────────────────────────── */
@@ -789,12 +786,6 @@ static void gr_group_row(const struct json_value *row, void *user)
     (void)snprintf(cur->key, sizeof(cur->key), "%s", key);
 }
 
-static int gr_cmp_i64(const void *a, const void *b)
-{
-    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
-    return (x > y) - (x < y);
-}
-
 /* Median gap between consecutive landed groups, oldest first; -1 when fewer
  * than two landed. Also counts the failures without a named cause. */
 static int64_t gr_group_spacing(const struct gr_groups *g, int64_t *unnamed)
@@ -816,7 +807,7 @@ static int64_t gr_group_spacing(const struct gr_groups *g, int64_t *unnamed)
     }
     if (n == 0)
         return -1;
-    qsort(gaps, n, sizeof(gaps[0]), gr_cmp_i64);
+    qsort(gaps, n, sizeof(gaps[0]), zcl_cmp_i64);
     return n % 2 ? gaps[n / 2] : (gaps[n / 2 - 1] + gaps[n / 2]) / 2;
 }
 
@@ -853,12 +844,12 @@ static struct zcl_goal_result gr_d7(const struct zcl_goals_options *o)
     if (median < 0)
         return gr_unmeasured(next, "fewer than two landed groups in the last "
                              "%d groups of %s", GOALS_GROUPS, use);
-    return gr_make(unnamed > 0 ? ZCL_GOAL_FAIL : ZCL_GOAL_PARTIAL, next,
-                   "%lld of the last %d groups failed without a named cause "
-                   "(bar 0); median spacing of landed groups %lld s (bar %d "
-                   "s under backlog); the backlog clause is not measured",
-                   (long long)unnamed, GOALS_GROUPS, (long long)median,
-                   GOALS_SPACING_MAX_S);
+    return zcl_goal_make(unnamed > 0 ? ZCL_GOAL_FAIL : ZCL_GOAL_PARTIAL, next,
+                         "%lld of the last %d groups failed without a named cause "
+                         "(bar 0); median spacing of landed groups %lld s (bar %d "
+                         "s under backlog); the backlog clause is not measured",
+                         (long long)unnamed, GOALS_GROUPS, (long long)median,
+                         GOALS_SPACING_MAX_S);
 }
 
 /* ── G13: active lane claims ──────────────────────────────────────────── */
@@ -932,10 +923,10 @@ static struct zcl_goal_result gr_g13(const struct zcl_goals_options *o)
     if (!gr_claims_scan(path, gr_now(o), &live, &unreadable))
         return gr_unmeasured(next, "claims ledger %s is missing or "
                              "unreadable", path);
-    return gr_make(zcl_goals_grade_claims(live), next,
-                   "%lld live lane claim(s) in the claims ledger (%lld "
-                   "unreadable line(s)); review latency is not measured",
-                   (long long)live, (long long)unreadable);
+    return zcl_goal_make(zcl_goals_grade_claims(live), next,
+                         "%lld live lane claim(s) in the claims ledger (%lld "
+                         "unreadable line(s)); review latency is not measured",
+                         (long long)live, (long long)unreadable);
 }
 
 /* ── D8: shell scripts left on the allowlist ──────────────────────────── */
@@ -971,10 +962,10 @@ static struct zcl_goal_result gr_d8(const struct zcl_goals_options *o)
     n = gr_count_entries(path);
     if (n < 0)
         return gr_unmeasured(next, "no shell script allowlist at %s", path);
-    return gr_make(zcl_goals_grade_scripts(n), next,
-                   "%lld shell script(s) on the check-no-new-bash allowlist; the "
-                   "host-configuration clause is not measured",
-                   (long long)n);
+    return zcl_goal_make(zcl_goals_grade_scripts(n), next,
+                         "%lld shell script(s) on the check-no-new-bash allowlist; the "
+                         "host-configuration clause is not measured",
+                         (long long)n);
 }
 
 /* ── dispatch ─────────────────────────────────────────────────────────── */

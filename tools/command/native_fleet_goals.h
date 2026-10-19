@@ -83,6 +83,11 @@ enum zcl_goal_grade zcl_goals_grade_fresh(size_t fresh, size_t hosts);
 enum zcl_goal_grade zcl_goals_grade_claims(int64_t live);
 enum zcl_goal_grade zcl_goals_grade_scripts(int64_t scripts);
 
+/* Build one graded row: `fmt` formats the evidence, `next` is copied whole. */
+struct zcl_goal_result zcl_goal_make(enum zcl_goal_grade grade, const char *next,
+                                     const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
 /* Grades C3 and C6 from their newest durable receipt
  * (native_fleet_goals_receipts.c). False when the id has no receipt reader. */
 bool zcl_goals_receipt_measure(const struct zcl_goals_options *options,

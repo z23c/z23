@@ -4,6 +4,7 @@
 
 #include "command_registry_internal.h"
 
+#include "base/compare.h"
 #include "crypto/sha256.h"
 #include "platform/time_compat.h"
 #include "services/agent_spend_policy.h"  // lib-layer-ok:agent-spend-policy-gate
@@ -88,12 +89,6 @@ static void latency_ring_record(const struct zcl_command_registry *registry,
         ;
 }
 
-static int latency_cmp_i64(const void *a, const void *b)
-{
-    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
-    return (x > y) - (x < y);
-}
-
 /* p99 + sample count for the ring at `spec`'s offset in `registry`. Returns
  * false with *count=0 when no samples exist yet (fresh process — see the
  * PROCESS-LIFETIME CAVEAT above); *p99_us is 0 in that case, never garbage. */
@@ -122,7 +117,7 @@ bool command_registry_latency_ring_p99(
     for (uint32_t i = 0; i < filled; i++)
         tmp[i] = atomic_load_explicit(&ring->samples_us[i],
                                       memory_order_relaxed);
-    qsort(tmp, filled, sizeof(int64_t), latency_cmp_i64);
+    qsort(tmp, filled, sizeof(int64_t), zcl_cmp_i64);
     *p99_us = tmp[(size_t)((filled - 1) * 99 / 100)];
     *count = filled;
     return true;

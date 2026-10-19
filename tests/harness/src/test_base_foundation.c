@@ -4,8 +4,11 @@
 #include "base/bytes.h"
 #include "base/checked.h"
 #include "base/cleanse.h"
+#include "base/compare.h"
+#include "base/path_leaf.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern void base_foundation_cleanse_probe(uint8_t *buf, size_t len);
@@ -27,6 +30,36 @@ static int test_checked_arithmetic(void)
         ASSERT(!zcl_u64_mul(UINT64_MAX, 2, &u) && u == 0);
         ASSERT(zcl_u64_add(1, 2, NULL));
         ASSERT(!zcl_u64_mul(UINT64_MAX, 2, NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_compare_i64(void)
+{
+    int failures = 0;
+    TEST("base compare: i64 ordering is sign-correct at the extremes") {
+        int64_t v[5] = { 7, INT64_MIN, 0, INT64_MAX, -7 };
+        ASSERT(zcl_cmp_i64(&v[1], &v[3]) < 0);
+        ASSERT(zcl_cmp_i64(&v[3], &v[1]) > 0);
+        ASSERT(zcl_cmp_i64(&v[0], &v[0]) == 0);
+        qsort(v, 5, sizeof(v[0]), zcl_cmp_i64);
+        ASSERT(v[0] == INT64_MIN && v[1] == -7 && v[2] == 0 && v[3] == 7 &&
+               v[4] == INT64_MAX);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_path_leaf(void)
+{
+    int failures = 0;
+    TEST("base path leaf: last component, bare name and trailing slash") {
+        ASSERT(strcmp(zcl_path_leaf("a/b/c.txt"), "c.txt") == 0);
+        ASSERT(strcmp(zcl_path_leaf("c.txt"), "c.txt") == 0);
+        ASSERT(strcmp(zcl_path_leaf("/c"), "c") == 0);
+        ASSERT(strcmp(zcl_path_leaf("a/b/"), "") == 0);
+        ASSERT(strcmp(zcl_path_leaf(""), "") == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -119,5 +152,6 @@ static int test_bytes_single_bit(void)
 int test_base_foundation(void)
 {
     return test_checked_arithmetic() + test_cleanse_cross_tu() +
-           test_bytes_polarity() + test_bytes_single_bit();
+           test_bytes_polarity() + test_bytes_single_bit() +
+           test_compare_i64() + test_path_leaf();
 }
