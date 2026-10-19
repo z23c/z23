@@ -365,15 +365,20 @@ static bool shell_route_valid(const char *route)
  * revoked and whose interval covers `now`. Read-only: shared-lock inspection. */
 static const char *shell_grant_state(const struct json_value *route, uint64_t now)
 {
-    uint8_t peer[32]; struct device_identity identity = {0}; struct device_pairing_store store;
+    uint8_t peer[32], approved[32]; struct device_identity identity = {0}; struct device_pairing_store store;
     struct db_device_pairing row; uint8_t root[32]; struct device_identity_publication_report report;
     const char *directory = json_get_str(json_get(route, "directory"));
     const char *peer_hex = json_get_str(json_get(route, "peer_key"));
-    if (!directory || !peer_hex || !zcl_hex_decode(peer_hex, peer, 32)) return "route_input_not_a_client_input";
+    const char *root_hex = json_get_str(json_get(route, "expected_root"));
+    if (!directory || !peer_hex || !root_hex || !zcl_hex_decode(peer_hex, peer, 32) ||
+        !zcl_hex_decode(root_hex, approved, 32)) return "route_input_not_a_client_input";
     if (!device_identity_open(&identity, directory, false, &report).ok) return "profile_unreadable";
     const char *state = NULL;
     if (!device_identity_pair_store(&identity, peer, &store).ok) state = "profile_unreadable";
     else if (!db_device_pairing_inspect(&store, peer, &row, root)) state = "grant_missing";
+    else if (memcmp(root, approved, 32)) state = "grant_root_mismatch";
+    else if (row.host_scope.binding.backend_profile != DEVICE_PAIRING_HOST_SHAKE256_WRAP_PSK)
+        state = "grant_backend_mismatch";
     else if (row.revoked_at) state = "grant_revoked";
     else if (!(row.capabilities & DEVICE_PAIRING_CAP_HOST_FORWARD)) state = "grant_not_host_forward";
     else if (now < row.paired_at) state = "grant_not_yet_valid";

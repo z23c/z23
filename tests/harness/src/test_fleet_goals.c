@@ -37,7 +37,7 @@ static bool fgl_write(const char *path, const char *text)
         return false;
     len = strlen(text);
     wrote = fwrite(text, 1, len, f) == len;
-    return fclose(f) == 0 && wrote;
+    return fclose(f) == 0 && wrote && chmod(path, 0600) == 0;
 }
 
 static void fgl_options(struct zcl_goals_options *o)
@@ -848,6 +848,29 @@ static int fgl_case_g1(const char *root)
         ASSERT(fgl_has(r.evidence, "forward 76.0, reverse 98.0"));
         ASSERT(fgl_bench(path, 400, 149.9, FGL_NOW - 60, FGL_PQFS));
         ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_bench(path, 160, 185, FGL_NOW - 60, FGL_PQFS "x"));
+        ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_write(path, "{\"schema\":\"zcl.tunnel_bench.v1\",\"forward_mib_s\":\"900\","
+                              "\"reverse_mib_s\":900,\"timestamp_unix_ms\":1799999000000}"));
+        ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_bench(path, 160, 185, FGL_NOW - 60, FGL_PQFS));
+        ASSERT(chmod(path, 0666) == 0);
+        ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(chmod(path, 0600) == 0);
+        ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_PASS);
+        {
+            char link[700];
+            (void)snprintf(link, sizeof(link), "%s.link", path);
+            (void)unlink(link);
+            ASSERT(symlink(path, link) == 0);
+            o.tunnel_bench = link;
+            ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_UNMEASURED);
+            (void)unlink(link);
+            ASSERT(mkfifo(link, 0600) == 0);
+            ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_UNMEASURED);
+            (void)unlink(link);
+            o.tunnel_bench = path;
+        }
         ASSERT(fgl_bench(path, 160, 185, FGL_NOW - 7 * 86400, NULL));
         r = zcl_goals_measure(&o, "G1");
         ASSERT(r.grade == ZCL_GOAL_PARTIAL);
@@ -954,6 +977,19 @@ static int fgl_case_g3(const char *root)
         r = zcl_goals_measure(&o, "G3");
         ASSERT(r.grade == ZCL_GOAL_FAIL);
         ASSERT(fgl_has(r.evidence, "alpha:grant_expired"));
+        {
+            char bad[2400];
+            char *at = strstr(route, "\"expected_root\":\"");
+            ASSERT(at);
+            (void)snprintf(bad, sizeof(bad), "%s", route);
+            memset(bad + (at - route) + 17, '0', 64);
+            (void)snprintf(file, sizeof(file), "%s/alpha.json", routes);
+            ASSERT(fgl_write(file, bad) && chmod(file, 0600) == 0);
+            r = zcl_goals_measure(&o, "G3");
+            ASSERT(r.grade == ZCL_GOAL_FAIL);
+            ASSERT(fgl_has(r.evidence, "alpha:grant_root_mismatch"));
+            ASSERT(fgl_write(file, route) && chmod(file, 0600) == 0);
+        }
         o.now_unix = FGL_NOW - 101;
         r = zcl_goals_measure(&o, "G3");
         ASSERT(fgl_has(r.evidence, "alpha:grant_not_yet_valid"));

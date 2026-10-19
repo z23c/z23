@@ -376,16 +376,17 @@ static struct zcl_goal_result gr_g12(const struct zcl_goals_options *o)
 
 /* ── G1: tunnel throughput receipt ────────────────────────────────────── */
 
+static bool gr_number(const struct json_value *v)
+{
+    return v && (v->type == JSON_INT || v->type == JSON_REAL);
+}
+
 static bool gr_bench_read(const char *path, struct json_value *out)
 {
-    static char text[GOALS_BENCH_MAX];
-    FILE *f = fopen(path, "rb");
-    size_t n;
-    if (!f)
-        return false;
-    n = fread(text, 1, sizeof(text), f);
-    (void)fclose(f);
-    if (n == 0 || n == sizeof(text))
+    char text[GOALS_BENCH_MAX];
+    size_t n = 0;
+    if (!path || path[0] != '/' ||
+        !zcl_native_device_host_input_file_read(path, text, sizeof(text), &n))
         return false;
     json_init(out);
     if (!json_read(out, text, n)) {
@@ -452,7 +453,9 @@ static struct zcl_goal_result gr_g1(const struct zcl_goals_options *o)
     schema = json_get_str(json_get(&rc, "schema"));
     ts_ms = json_get_int(json_get(&rc, "timestamp_unix_ms"));
     if (!schema || strcmp(schema, GOALS_BENCH_SCHEMA) != 0 || ts_ms <= 0 ||
-        !json_get(&rc, "forward_mib_s") || !json_get(&rc, "reverse_mib_s")) {
+        !gr_number(json_get(&rc, "forward_mib_s")) ||
+        !gr_number(json_get(&rc, "reverse_mib_s")) ||
+        json_get(&rc, "timestamp_unix_ms")->type != JSON_INT) {
         json_free(&rc);
         return gr_unmeasured(next, "%s is not a %s receipt", path,
                              GOALS_BENCH_SCHEMA);
@@ -1194,7 +1197,8 @@ static const struct {
     const char *id;
     gr_fn fn;
 } k_producers[] = {
-    {"G1", gr_g1},   {"G3", gr_g3},   {"G4", gr_g4},   {"G6", gr_g6},   {"G7", gr_g7},   {"G8", gr_g8},
+    {"G1", gr_g1},   {"G3", gr_g3},   {"G4", gr_g4},   {"G6", gr_g6},
+    {"G7", gr_g7},   {"G8", gr_g8},
     {"G9", gr_g9},   {"G12", gr_g12}, {"G13", gr_g13}, {"D7", gr_d7},
     {"D8", gr_d8},
 };

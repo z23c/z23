@@ -101,14 +101,14 @@ struct zcl_goal_result zcl_goal_make(enum zcl_goal_grade grade, const char *next
                                      const char *fmt, ...)
     ZCL_PRINTF_LIKE(3, 4);
 
-/* Grades C3 and C6 from their newest durable receipt
- * (native_fleet_goals_receipts.c). False when the id has no receipt reader. */
 /* Explicit path, else the environment variable, else $HOME/<tail>. NULL when
  * a fixture run gave no explicit path or HOME is unset. */
 const char *zcl_goals_state_path(const char *given, const char *env_name,
                                  const char *tail, bool skip, char *buf,
                                  size_t cap);
 
+/* Grades C3 and C6 from their newest durable receipt
+ * (native_fleet_goals_receipts.c). False when the id has no receipt reader. */
 bool zcl_goals_receipt_measure(const struct zcl_goals_options *options,
                                const char *id, struct zcl_goal_result *out);
 

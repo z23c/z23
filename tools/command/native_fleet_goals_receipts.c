@@ -30,7 +30,8 @@
 /* The explicit option, else the environment, else the state-dir default.
  * NULL when a fixture run (skip_probes) gave no explicit path. */
 const char *zcl_goals_state_path(const char *given, const char *env_name,
-                           const char *tail, bool skip, char *buf, size_t cap)
+                                 const char *tail, bool skip, char *buf,
+                                 size_t cap)
 {
     const char *env;
     const char *home;
