@@ -1050,7 +1050,7 @@ contexts/wallet/controllers/src/wallet_diagnostic_repair.c:rpc_reconcilewalletut
 contexts/wallet/controllers/src/wallet_helpers.c:wallet_transparent_spendable_balance_diagnose:25
 contexts/wallet/controllers/src/wallet_native_backup_handlers.c:zcl_native_handle_wallet_backup_now:16
 contexts/wallet/controllers/src/wallet_native_handlers.c:wnh_amount_exact:20
-contexts/wallet/controllers/src/wallet_native_handlers.c:zcl_native_handle_wallet_shielded_send:40
+contexts/wallet/controllers/src/wallet_native_handlers.c:zcl_native_handle_wallet_shielded_send:37
 contexts/wallet/controllers/src/wallet_native_handlers.c:zcl_native_handle_wallet_transaction_send:16
 contexts/wallet/controllers/src/wallet_native_read_bodies.c:zcl_native_address_public_key_body:20
 contexts/wallet/controllers/src/wallet_native_read_bodies.c:zcl_native_listaddresses_body:26
@@ -2847,7 +2847,7 @@ tests/harness/src/test_nat_route_dump.c:test_nat_route_dump:18
 tests/harness/src/test_native_api_contract.c:app_write_stub_rpc:28
 tests/harness/src/test_native_api_contract.c:raw_simnet_rpc:17
 tests/harness/src/test_native_api_contract.c:run_dev_failure_api_fixture:33
-tests/harness/src/test_native_api_contract.c:wallet_stub_rpc:23
+tests/harness/src/test_native_api_contract.c:wallet_stub_rpc:17
 tests/harness/src/test_net_bootstrap.c:test_net_bootstrap:42
 tests/harness/src/test_net_msg_dos.c:test_net_msg_dos:76
 tests/harness/src/test_netbase_split_host_port.c:test_netbase_split_host_port:21

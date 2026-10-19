@@ -537,6 +537,79 @@ void zcl_native_handle_wallet_transaction_send(
     json_free(&body);
 }
 
+/* Exact decimal text for a zatoshi amount (8 places, the RPC wire form). */
+static bool wnh_zat_text(CAmount zats, char out[32])
+{
+    if (zats < 0 || !MoneyRange(zats))
+        return false;
+    int n = snprintf(out, 32, "%lld.%08lld", (long long)(zats / COIN),
+                     (long long)(zats % COIN));
+    return n > 0 && n < 32;
+}
+
+/* The fee the z_sendmany commit pays is the node wallet default_fee, which
+ * getwalletinfo reports as paytxfee. This read builds no transaction and
+ * reserves no notes; an unreadable fee refuses before any broadcast. */
+static bool wnh_shielded_fee_zat(struct zcl_command_reply *reply,
+                                 CAmount *fee_out)
+{
+    struct json_value info;
+    if (!wnh_call_rpc(reply, "getwalletinfo", NULL, &info))
+        return false;
+    char fee_text[32];
+    bool ok = wnh_amount_exact(json_get(&info, "paytxfee"), fee_out, fee_text);
+    json_free(&info);
+    if (!ok)
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "WALLET_FEE_UNKNOWN",
+                 "getwalletinfo did not report a usable paytxfee",
+                 "getwalletinfo");
+    return ok;
+}
+
+/* Plan quote: the fee the commit will pay and the exact amount plus fee. */
+static bool wnh_shielded_quote(struct zcl_command_reply *reply,
+                               CAmount amount_zats, CAmount *fee_out,
+                               CAmount *total_out)
+{
+    if (!wnh_shielded_fee_zat(reply, fee_out))
+        return false;
+    *total_out = amount_zats + *fee_out;
+    if (!MoneyRange(*total_out)) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_AMOUNT",
+                 "amount plus the wallet fee exceeds the money range",
+                 "amount");
+        return false;
+    }
+    return true;
+}
+
+static void wnh_emit_shielded_quote(struct zcl_command_reply *reply,
+                                    CAmount amount_zats, CAmount fee_zats,
+                                    CAmount total_zats)
+{
+    char total_text[32];
+    (void)json_push_kv_int(&reply->data, "amount_zat", amount_zats);
+    (void)json_push_kv_int(&reply->data, "fee_zat", fee_zats);
+    (void)json_push_kv_int(&reply->data, "total_zat", total_zats);
+    if (wnh_zat_text(total_zats, total_text))
+        (void)json_push_kv_str(&reply->data, "total", total_text);
+}
+
+/* Echo the effective memo and idempotency key of a committed send. */
+static void wnh_emit_shielded_echo(struct zcl_command_reply *reply,
+                                   const char *memo, const char *memo_hex,
+                                   const char *idem)
+{
+    (void)json_push_kv_bool(&reply->data, "memo_attached",
+                            memo != NULL || memo_hex != NULL);
+    if (memo_hex)
+        (void)json_push_kv_str(&reply->data, "memo_hex", memo_hex);
+    else if (memo)
+        (void)json_push_kv_str(&reply->data, "memo", memo);
+    if (idem && idem[0])
+        (void)json_push_kv_str(&reply->data, "idempotency_key", idem);
+}
+
 void zcl_native_handle_wallet_shielded_send(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -625,14 +698,24 @@ void zcl_native_handle_wallet_shielded_send(
     bool confirm = json_get_bool_or(request->input, "confirm", false);
 
     if (!confirm) {
+        CAmount quote_fee = 0, quote_total = 0;
+        if (!wnh_shielded_quote(reply, amount_zats, &quote_fee, &quote_total))
+            return;
         (void)json_push_kv_str(&reply->data, "wallet_scope", wallet_scope);
         (void)json_push_kv_str(&reply->data, "from", from);
         (void)json_push_kv_str(&reply->data, "to", to);
         (void)json_push_kv_str(&reply->data, "amount", amount);
+        wnh_emit_shielded_quote(reply, amount_zats, quote_fee, quote_total);
         wnh_emit_plan(reply, request->spec->path, "shielded-send", token,
                       commit);
         return;
     }
+
+    /* The commit pays the wallet fee the plan quotes. Read it before
+     * z_sendmany so an unreadable fee refuses before any broadcast. */
+    CAmount fee_zats = 0;
+    if (!wnh_shielded_fee_zat(reply, &fee_zats))
+        return;
 
     /* Build [from,[{address,amount,memo?}]] through the encoder so input text
      * cannot rewrite the RPC params array. */
@@ -688,15 +771,8 @@ void zcl_native_handle_wallet_shielded_send(
     (void)json_push_kv_str(&reply->data, "from", from);
     (void)json_push_kv_str(&reply->data, "to", to);
     (void)json_push_kv_str(&reply->data, "amount", amount);
-    /* Echo the effective memo for higher-level binding. */
-    (void)json_push_kv_bool(&reply->data, "memo_attached",
-                            memo != NULL || memo_hex != NULL);
-    if (memo_hex)
-        (void)json_push_kv_str(&reply->data, "memo_hex", memo_hex);
-    else if (memo)
-        (void)json_push_kv_str(&reply->data, "memo", memo);
-    if (idem && idem[0])
-        (void)json_push_kv_str(&reply->data, "idempotency_key", idem);
+    (void)json_push_kv_int(&reply->data, "fee_zat", fee_zats);
+    wnh_emit_shielded_echo(reply, memo, memo_hex, idem);
     (void)json_push_kv_str(&reply->data, "plan_token", token);
     reply->error.mutated = true;
     json_free(&body);

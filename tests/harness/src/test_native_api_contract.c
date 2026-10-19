@@ -898,39 +898,10 @@ static bool g_wallet_raw_reject;
 static char g_wallet_z_sendmany_params[4096];
 static char g_wallet_sapling_address[128];
 
-static char *wallet_stub_rpc(const char *method, const char *params_json)
+/* Raw-transaction and multisig stub answers, split out of wallet_stub_rpc
+ * to keep that dispatcher under the cyclomatic cap. */
+static char *wallet_stub_raw_rpc(const char *method)
 {
-    if (method && strcmp(method, "rescanwitnesses") == 0)
-        return strdup("\"No readable header-bound endpoint\"");
-    if (method && strcmp(method, "getnewaddress") == 0)
-        return strdup("\"t1StubTransparentAddress00000000000\"");
-    if (method && strcmp(method, "z_getnewaddress") == 0) {
-        char wire[132];
-        (void)snprintf(wire, sizeof(wire), "\"%s\"",
-                       g_wallet_sapling_address);
-        return strdup(wire);
-    }
-    if (method && strcmp(method, "validateaddress") == 0)
-        return strdup(
-            "{\"isvalid\":true,\"ismine\":true,"
-            "\"pubkey\":\"02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
-            "\"iscompressed\":true}");
-    if (method && strcmp(method, "sendtoaddress") == 0) {
-        g_wallet_send_calls++;
-        return strdup(
-            "\"aa11bb22cc33dd44ee55ff66aa77bb88"
-            "cc99dd00ee11ff22aa33bb44cc55dd66\"");
-    }
-    if (method && strcmp(method, "z_sendmany") == 0) {
-        g_wallet_z_sendmany_calls++;
-        (void)snprintf(g_wallet_z_sendmany_params,
-                       sizeof(g_wallet_z_sendmany_params), "%s",
-                       params_json ? params_json : "");
-        return strdup(
-            "\"cc11bb22cc33dd44ee55ff66aa77bb88"
-            "cc99dd00ee11ff22aa33bb44cc55dd88\"");
-    }
     if (method && strcmp(method, "createrawtransaction") == 0)
         return strdup("\"0400008085202f89000000000000000000000000\"");
     if (method && strcmp(method, "signrawtransaction") == 0)
@@ -952,6 +923,47 @@ static char *wallet_stub_rpc(const char *method, const char *params_json)
             "\"redeemScript\":\"512102aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa51ae\"}");
     }
+    return NULL;
+}
+
+static char *wallet_stub_rpc(const char *method, const char *params_json)
+{
+    if (method && strcmp(method, "rescanwitnesses") == 0)
+        return strdup("\"No readable header-bound endpoint\"");
+    if (method && strcmp(method, "getnewaddress") == 0)
+        return strdup("\"t1StubTransparentAddress00000000000\"");
+    if (method && strcmp(method, "z_getnewaddress") == 0) {
+        char wire[132];
+        (void)snprintf(wire, sizeof(wire), "\"%s\"",
+                       g_wallet_sapling_address);
+        return strdup(wire);
+    }
+    if (method && strcmp(method, "getwalletinfo") == 0)
+        return strdup("{\"balance\":\"0.00000000\",\"paytxfee\":\"0.00000250\"}");
+    if (method && strcmp(method, "validateaddress") == 0)
+        return strdup(
+            "{\"isvalid\":true,\"ismine\":true,"
+            "\"pubkey\":\"02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+            "\"iscompressed\":true}");
+    if (method && strcmp(method, "sendtoaddress") == 0) {
+        g_wallet_send_calls++;
+        return strdup(
+            "\"aa11bb22cc33dd44ee55ff66aa77bb88"
+            "cc99dd00ee11ff22aa33bb44cc55dd66\"");
+    }
+    if (method && strcmp(method, "z_sendmany") == 0) {
+        g_wallet_z_sendmany_calls++;
+        (void)snprintf(g_wallet_z_sendmany_params,
+                       sizeof(g_wallet_z_sendmany_params), "%s",
+                       params_json ? params_json : "");
+        return strdup(
+            "\"cc11bb22cc33dd44ee55ff66aa77bb88"
+            "cc99dd00ee11ff22aa33bb44cc55dd88\"");
+    }
+    char *raw = wallet_stub_raw_rpc(method);
+    if (raw)
+        return raw;
     return strdup("null");
 }
 
@@ -1608,6 +1620,10 @@ static int test_wallet_mutating_native_e2e(void)
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "amount")),
                       "0.10000000");
         ASSERT_EQ(g_wallet_z_sendmany_calls, 0);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "fee_zat")), 250);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "amount_zat")), 10000000);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "total_zat")), 10000250);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "total")), "0.10000250");
         const char *shield_commit_text =
             json_get_str(json_get(&reply.data, "commit_input"));
         ASSERT(shield_commit_text && shield_commit_text[0]);
@@ -1635,6 +1651,7 @@ static int test_wallet_mutating_native_e2e(void)
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
                       "committed");
         ASSERT(json_get_bool(json_get(&reply.data, "committed")));
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "fee_zat")), 250);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "txid")),
                       "cc11bb22cc33dd44ee55ff66aa77bb88"
                       "cc99dd00ee11ff22aa33bb44cc55dd88");

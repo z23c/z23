@@ -109,6 +109,8 @@ static char *vd_rpc_hook(const char *method, const char *params_json)
         json_free(&envelope);
         return out;
     }
+    if (strcmp(method, "getwalletinfo") == 0)
+        return strdup("{\"paytxfee\":\"0.00000100\"}");
     if (strcmp(method, "agentsession") != 0 || !g_vd_rpc_ready)
         return strdup("null");
     struct json_value params;
@@ -580,6 +582,7 @@ int test_vault_dispatch(void)
     }
 
     /* 6a. shielded plan path: preflight names the shielded class. */
+    node_rpc_client_set_test_hook(vd_rpc_hook);
     {
         struct json_value input = vd_shielded_input();
         struct zcl_command_reply reply;
@@ -607,6 +610,7 @@ int test_vault_dispatch(void)
         zcl_command_reply_free(&reply);
         json_free(&input);
     }
+    node_rpc_client_set_test_hook(NULL);
 
     /* 6b. shielded route is session-gated identically. */
     {
