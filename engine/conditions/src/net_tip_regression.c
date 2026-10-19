@@ -5,6 +5,8 @@
  * keeps advancing while our served height is frozen and we are behind. Purely
  * observational; never changes chain selection. */
 
+#include <limits.h>
+
 #include "conditions/net_tip_regression.h"
 
 #include "framework/condition.h"
@@ -14,6 +16,7 @@
 #include "validation/main_state.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
+#include "util/parse_num.h"
 #include "platform/time_compat.h"
 
 #include <stdatomic.h>
@@ -47,9 +50,9 @@ static int ntr_regression_secs(void)
 {
     const char *e = getenv("ZCL_NET_TIP_REGRESSION_SECS");
     if (e && e[0]) {
-        int v = atoi(e);
-        if (v >= 1)
-            return v;
+        int64_t parsed = 0;
+        if (zcl_parse_i64(e, &parsed) && parsed >= 1 && parsed <= INT_MAX)
+            return (int)parsed;
     }
     return NET_TIP_REGRESSION_SECS;
 }

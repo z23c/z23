@@ -244,6 +244,47 @@ static int test_tip_regression_condition(void)
     return failures;
 }
 
+/* A malformed interval must not silently turn the nine-hundred-second
+ * tip-regression window into a ten-second one merely because it has a
+ * numeric prefix. Preserve any caller override exactly. */
+static int test_tip_regression_rejects_malformed_window(void)
+{
+    int failures = 0;
+    const char *var = "ZCL_NET_TIP_REGRESSION_SECS";
+    const char *old = getenv(var);
+    char *saved = old ? strdup(old) : NULL;
+    if (old && !saved)
+        return 1;
+
+    bool set = setenv(var, "10junk", 1) == 0;
+    net_tip_regression_test_reset();
+    net_tip_regression_test_set_now(10000);
+    inject_view(3, 100, 100, 100, false, -1);
+    NM_CHECK(set && !net_tip_regression_test_detect()); /* baseline */
+    net_tip_regression_test_set_now(10011);
+    inject_view(3, 100, 103, 110, false, -1);
+    bool held_default = !net_tip_regression_test_detect();
+    NM_CHECK(held_default);
+    net_tip_regression_test_reset();
+
+    bool valid_set = setenv(var, "10", 1) == 0;
+    net_tip_regression_test_set_now(11000);
+    inject_view(3, 100, 100, 100, false, -1);
+    bool valid_first = !net_tip_regression_test_detect();
+    net_tip_regression_test_set_now(11010);
+    inject_view(3, 100, 103, 110, false, -1);
+    bool valid_detected = net_tip_regression_test_detect();
+    NM_CHECK(valid_set && valid_first && valid_detected);
+    net_tip_regression_test_reset();
+
+    if (saved)
+        (void)setenv(var, saved, 1);
+    else
+        (void)unsetenv(var);
+    free(saved);
+    return failures;
+}
+
 /* ── 3b. net_fork_detected ───────────────────────────────────────────── */
 static int test_fork_condition(void)
 {
@@ -358,6 +399,7 @@ int test_network_monitor(void)
     failures += test_observation_model();
     failures += test_consensus_view();
     failures += test_tip_regression_condition();
+    failures += test_tip_regression_rejects_malformed_window();
     failures += test_fork_condition();
     failures += test_partition_condition();
     failures += test_partition_rejects_malformed_window();
