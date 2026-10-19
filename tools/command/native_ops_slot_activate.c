@@ -6,9 +6,12 @@
  *          drop-in (<unit>.d/z23-slot.conf, temp + rename) that points
  *          ExecStart's binary at <slots>/<slot>/z23, daemon-reload, restart
  *          that one instance, require MainPID's /proc exe to be the slot,
- *          then run the health check (a listen port, or a probe argv with
- *          no shell). The first failure restores every instance moved so
- *          far plus the failing one (same checks) and returns
+ *          then run the health check (a listen port, a "health needs kind=listen|probe|tip_parity and a "
+                    "timeout_ms of 0..300000"|probe|tip_parity and a "
+                    "timeout_ms of 0..300000" argv with
+ *          no shell, or tip_parity: the node and a reference zclassicd report
+ *          the same getbestblockhash). The first failure restores every
+ *          instance moved so far plus the failing one (same checks) and returns
  *          SLOT_ACTIVATE_ROLLED_BACK naming the instance and the phase.
  *          A running exe whose bytes differ from the install record is
  *          SLOT_RUNNING_DIGEST_MISMATCH (phase running_digest), rolled back.
@@ -73,7 +76,7 @@ static void osa_execute(const struct zcl_command_request *request,
 #define OSA_TIMEOUT_DEFAULT_MS 30000
 #define OSA_TIMEOUT_MAX_MS 300000
 
-enum osa_health_kind { OSA_HEALTH_LISTEN, OSA_HEALTH_PROBE };
+enum osa_health_kind { OSA_HEALTH_LISTEN, OSA_HEALTH_PROBE, OSA_HEALTH_TIP };
 
 struct osa_inst {
     char name[SLOT_NAME_MAX + 1];
@@ -108,6 +111,7 @@ struct osa {
     int64_t timeout_ms;
     char probe[OSA_MAX_PROBE_ARGS][OSA_ARG_MAX];
     size_t probe_n;
+    struct slot_tip_spec tip;
     struct osa_inst inst[OSA_MAX_INSTANCES];
     size_t n;
 };
@@ -207,6 +211,20 @@ static bool osa_parse_listen(const struct json_value *h, const char *kind,
     return true;
 }
 
+static bool osa_parse_tip(const struct json_value *h, struct osa *a,
+                          struct zcl_command_reply *reply)
+{
+    a->kind = OSA_HEALTH_TIP;
+    if (slot_tip_spec_parse(h, &a->tip))
+        return true;
+    slot_refuse(reply, "BAD_HEALTH",
+                "a tip_parity check needs node_conf, reference_host and "
+                "reference_conf (absolute readable rpc conf paths with "
+                "rpcuser, rpcpassword and a port; node_port and "
+                "reference_port override rpcport)", OSA_CMD);
+    return false;
+}
+
 static bool osa_parse_health(const struct json_value *in, struct osa *a,
                              struct zcl_command_reply *reply)
 {
@@ -218,14 +236,16 @@ static bool osa_parse_health(const struct json_value *in, struct osa *a,
         a->timeout_ms = json_get_int(t);
     if (!kind || a->timeout_ms < 0 || a->timeout_ms > OSA_TIMEOUT_MAX_MS) {
         slot_refuse(reply, "BAD_HEALTH",
-                    "health needs kind=listen|probe and a timeout_ms of "
-                    "0..300000", OSA_CMD);
+                    "health needs kind=listen|probe|tip_parity and a "
+                    "timeout_ms of 0..300000", OSA_CMD);
         return false;
     }
     if (strcmp(kind, "probe") == 0) {
         a->kind = OSA_HEALTH_PROBE;
         return osa_parse_probe(json_get(h, "argv"), a, reply);
     }
+    if (strcmp(kind, "tip_parity") == 0)
+        return osa_parse_tip(h, a, reply);
     return osa_parse_listen(h, kind, a, reply);
 }
 
@@ -634,12 +654,24 @@ static bool osa_probe_once(const struct osa *a, const struct osa_inst *in)
     return osa_run(argv, NULL, 0) == 0;
 }
 
+static bool osa_health_once(const struct osa *a, const struct osa_inst *in)
+{
+    switch (a->kind) {
+    case OSA_HEALTH_LISTEN:
+        return osa_port_open(in->port);
+    case OSA_HEALTH_PROBE:
+        return osa_probe_once(a, in);
+    case OSA_HEALTH_TIP:
+        return slot_tip_equal(&a->tip);
+    }
+    return false;
+}
+
 static bool osa_healthy(const struct osa *a, const struct osa_inst *in)
 {
     int64_t deadline = platform_time_monotonic_ms() + a->timeout_ms;
     do {
-        if (a->kind == OSA_HEALTH_LISTEN ? osa_port_open(in->port)
-                                         : osa_probe_once(a, in))
+        if (osa_health_once(a, in))
             return true;
         osa_sleep_ms(200);
     } while (platform_time_monotonic_ms() < deadline);
@@ -806,6 +838,7 @@ static void osa_execute(const struct zcl_command_request *request,
             }
         }
     }
+    slot_tip_spec_wipe(&a->tip);
     free(a);
 }
 

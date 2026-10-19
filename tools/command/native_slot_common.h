@@ -115,4 +115,33 @@ bool slot_record_write(const char *name_dir, const uint8_t sha[32]);
 /* Recompute the slot binary digest and compare it with the install record. */
 enum slot_verify slot_verify_installed(const char *name_dir);
 
+/* ---- tip_parity health (native_slot_tip.c) ------------------------------ */
+
+struct slot_tip_endpoint {
+    char host[128], user[64], pass[128];
+    int port;
+};
+
+struct slot_tip_spec {
+    struct slot_tip_endpoint node, ref;
+};
+
+/* health {kind:"tip_parity", node_conf, reference_host, reference_conf,
+ * [node_port, reference_port]}: conf paths are absolute rpc conf files
+ * (rpcuser, rpcpassword, rpcport). False when any field is missing or
+ * unreadable; the spec is wiped. */
+bool slot_tip_spec_parse(const struct json_value *health,
+                         struct slot_tip_spec *s);
+void slot_tip_spec_wipe(struct slot_tip_spec *s);
+
+/* True only when both endpoints answer getbestblockhash with a 64-hex hash
+ * and the two hashes are equal. */
+bool slot_tip_equal(const struct slot_tip_spec *s);
+
+/* Test seam: replaces the getbestblockhash transport. Returns the raw HTTP
+ * response (malloc'd) or NULL. */
+typedef char *(*slot_tip_rpc_fn)(const char *host, int port, const char *user,
+                                 const char *pass, uint32_t timeout_ms);
+void slot_tip_set_rpc(slot_tip_rpc_fn fn);
+
 #endif

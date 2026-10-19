@@ -18,6 +18,9 @@
  *      health and, as the restore cannot pass it either, is reported as
  *      SLOT_ROLLBACK_FAILED (manual attention)
  *
+ *   g. the tip_parity health check: equal tips pass; a lagging node, an
+ *      unreachable reference or a malformed hash fail health and roll back
+ *
  * Hermetic: a fake systemctl script, a fake /proc and per-pid ./test-tmp
  * directories. Outcomes only: no timing is asserted.
  */
@@ -578,6 +581,118 @@ static int test_osa_writable_dirs(void)
     return f;
 }
 
+#define OSA_TIP_A "00000000000000000000000000000000000000000000000000000000000000aa"
+#define OSA_TIP_B "00000000000000000000000000000000000000000000000000000000000000bb"
+
+enum osa_tip_mode {
+    TIP_EQUAL,
+    TIP_NODE_BEHIND_ON_NEW,
+    TIP_REF_DOWN,
+    TIP_NODE_MALFORMED
+};
+
+static enum osa_tip_mode osa_tip_mode;
+static char osa_tip_conf[PATH_MAX];
+
+static char *osa_tip_reply(const char *hash)
+{
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "HTTP/1.1 200 OK\r\n\r\n{\"result\":\"%s\",\"error\":null}", hash);
+    return strdup(buf);
+}
+
+/* The node answers with the reference tip unless its unit runs the new slot
+ * while the mode says the new slot lags. */
+static char *osa_tip_rpc(const char *host, int port, const char *user,
+                         const char *pass, uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    if (strcmp(user, "u") != 0 || strcmp(pass, "p") != 0 || port != 18232)
+        return NULL;
+    if (strcmp(host, "ref.example") == 0)
+        return osa_tip_mode == TIP_REF_DOWN ? NULL : osa_tip_reply(OSA_TIP_A);
+    if (osa_tip_mode == TIP_NODE_MALFORMED)
+        return osa_tip_reply("not-a-hash");
+    if (osa_tip_mode == TIP_NODE_BEHIND_ON_NEW &&
+        osa_has(osa_tip_conf, "/new/z23"))
+        return osa_tip_reply(OSA_TIP_B);
+    return osa_tip_reply(OSA_TIP_A);
+}
+
+static void osa_tip_json(const struct osa_fx *fx, char *out, size_t cap)
+{
+    char conf[PATH_MAX];
+    snprintf(conf, sizeof(conf), "%s/rpc.conf", fx->dir);
+    TEST_DISCARD(osa_put(conf, "rpcuser=u\nrpcpassword=p\nrpcport=18232\n",
+                         0600));
+    snprintf(out, cap,
+             "{\"kind\":\"tip_parity\",\"timeout_ms\":300,\"node_conf\":\"%s\","
+             "\"reference_host\":\"ref.example\",\"reference_conf\":\"%s\"}",
+             conf, conf);
+}
+
+/* Activates r1 under `mode`; the old drop-in is seeded so a restore has
+ * bytes to put back. want_code NULL: the activation must pass. */
+static int osa_tip_case(const char *name, enum osa_tip_mode mode,
+                        const char *want_code)
+{
+    struct osa_fx fx;
+    struct osa_cmd c;
+    char json[2048], health[1024], before[2048], after[2048];
+    int f = 0;
+    if (!osa_fx_init(&fx, name) || !osa_seed_old(&fx, "r1"))
+        return osa_check(false, "fixture");
+    osa_unit_path(&fx, "r1", osa_tip_conf, sizeof(osa_tip_conf));
+    TEST_DISCARD(osa_get(osa_tip_conf, before, sizeof(before)));
+    osa_tip_mode = mode;
+    slot_tip_set_rpc(osa_tip_rpc);
+    osa_tip_json(&fx, health, sizeof(health));
+    osa_json(&fx, "tunnel-receiver", "new", "[\"r1\"]", health, false, json,
+             sizeof(json));
+    oc_run(&c, json, false);
+    if (want_code) {
+        f += osa_check(!oc_ok(&c) && oc_code(&c, want_code) &&
+                           strcmp(c.reply.error.phase, "health") == 0,
+                       "a tip_parity failure fails the health phase and rolls back");
+        f += osa_check(osa_get(osa_tip_conf, after, sizeof(after)) > 0 &&
+                           strcmp(after, before) == 0,
+                       "the previous drop-in is restored byte for byte");
+    } else {
+        f += osa_check(oc_ok(&c) && osa_has(osa_tip_conf, "/new/z23"),
+                       "equal tips pass and the drop-in points at the new slot");
+    }
+    oc_free(&c);
+    slot_tip_set_rpc(NULL);
+    osa_rm_tree(fx.dir);
+    return f;
+}
+
+static int test_osa_tip_parity(void)
+{
+    struct osa_fx fx;
+    struct osa_cmd c;
+    char json[2048];
+    int f = 0;
+    f += osa_tip_case("tip_eq", TIP_EQUAL, NULL);
+    f += osa_tip_case("tip_lag", TIP_NODE_BEHIND_ON_NEW,
+                      "SLOT_ACTIVATE_ROLLED_BACK");
+    f += osa_tip_case("tip_ref", TIP_REF_DOWN, "SLOT_ROLLBACK_FAILED");
+    f += osa_tip_case("tip_bad", TIP_NODE_MALFORMED, "SLOT_ROLLBACK_FAILED");
+    if (!osa_fx_init(&fx, "tip_refuse"))
+        return f + osa_check(false, "fixture");
+    osa_json(&fx, "tunnel-receiver", "new", "[\"r1\"]",
+             "{\"kind\":\"tip_parity\",\"timeout_ms\":100,"
+             "\"node_conf\":\"/nonexistent\"}", false, json, sizeof(json));
+    oc_run(&c, json, false);
+    f += osa_check(!oc_ok(&c) && oc_code(&c, "BAD_HEALTH") &&
+                       !osa_exists(fx.calls),
+                   "an unreadable conf or missing reference is refused before any restart");
+    oc_free(&c);
+    osa_rm_tree(fx.dir);
+    return f;
+}
+
 int test_ops_slot_activate(void)
 {
     int failures = 0;
@@ -591,6 +706,7 @@ int test_ops_slot_activate(void)
     failures += test_osa_digest_reverify();
     failures += test_osa_running_digest();
     failures += test_osa_writable_dirs();
+    failures += test_osa_tip_parity();
     printf("=== OPS_SLOT_ACTIVATE: %d failure(s) ===\n", failures);
     return failures;
 }
