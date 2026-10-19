@@ -43,6 +43,7 @@ ZCL_COMMAND_READY_COMMAND(
     "first: 2 to 24 characters of a-z, 0-9 and interior dashes, unique "
     "across this fleet. A box's onion address, Noise fingerprint and ZID "
     "are observed facts that may rotate; none of them is ever its name. "
+    "--ttl_hours is a whole number of hours from 1 to 168, default 24. "
     "The token names the box, an expiry, a one-time nonce, an optional relay "
     "endpoint and this box's operator public key, all signed by this box's "
     "fleet key (created on first use). Nothing private is in it — a leaked "
@@ -59,7 +60,7 @@ ZCL_COMMAND_READY_COMMAND(
     "fleet,invite,enrol,join,token,machine,paste",
     "zcl.fleet_invite_input.v1", "zcl.fleet.invite.v1",
     "name,ttl_hours,relay,datadir", "name",
-    "z23 fleet invite --name=studio --ttl-hours=24",
+    "z23 fleet invite --name=studio --ttl_hours=24",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,

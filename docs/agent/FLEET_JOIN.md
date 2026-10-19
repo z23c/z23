@@ -481,7 +481,7 @@ Each of these is the exact evidence string a refusal carries.
 | Refusal | Meaning |
 |---|---|
 | `invite_name_invalid` | The name is not 2-24 characters of `a-z`, `0-9` and interior dashes |
-| `invite_ttl_invalid` | `--ttl-hours` is outside 1 to 168 |
+| `invite_ttl_invalid` | `--ttl_hours` is outside 1 to 168 hours |
 | `invite_relay_invalid` | `--relay` has a character a host or `host:port` cannot contain |
 | `invite_malformed` | The pasted token is not a token — usually a copy that lost its tail |
 | `invite_signature_invalid` | The token's bytes and its signature disagree |

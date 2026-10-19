@@ -652,6 +652,11 @@ static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
     static const struct cr_int_bound examples = { "example_limit", 0, 32 };
     if (strcmp(path, "core.consensus.utxo.compare.offline") == 0 &&
         strcmp(key, examples.key) == 0) return &examples;
+    /* fleet.invite ttl_hours: whole hours, 1 to 168 (FLEET_ENROL_TTL_HOURS_MIN/MAX). */
+    if (strcmp(path, "fleet.invite") == 0 && strcmp(key, "ttl_hours") == 0) {
+        static const struct cr_int_bound ttl = { "ttl_hours", 1, 168 };
+        return &ttl;
+    }
     const struct cr_int_bound *lab = cr_lab_bound(path, key);
     if (lab) return lab;
     const struct cr_int_bound *docs = cr_docs_read_bound(path, key);

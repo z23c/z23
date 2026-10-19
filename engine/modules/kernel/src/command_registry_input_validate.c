@@ -29,6 +29,11 @@ static bool cr_input_failure(const struct zcl_command_spec *spec,
             (unsigned)FLEET_BOARD_WIKI_TEXT_MAX);
         return false;
     }
+    if (!strcmp(spec->path, "fleet.invite") && !strcmp(key, "ttl_hours")) {
+        if (why && why_size) snprintf(why, why_size,
+            "invalid type or range for input key 'ttl_hours': expected a whole number of hours from 1 to 168");
+        return false;
+    }
     return command_registry_input_type_why(key, value, why, why_size);
 }
 

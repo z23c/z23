@@ -282,6 +282,34 @@ static int test_fe_invite_bounds(void)
     return failures;
 }
 
+static int test_fe_invite_ttl_flag(void)
+{
+    int failures = 0;
+    TEST("fleet invite: ttl_hours takes whole hours from 1 to 168, and a "
+         "refusal names that range") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), "fleet.invite", NULL);
+        const char *inside = "{\"name\":\"studio\",\"ttl_hours\":2}";
+        const char *outside = "{\"name\":\"studio\",\"ttl_hours\":169}";
+        struct json_value input;
+        char why[160] = {0};
+        ASSERT(spec != NULL);
+        json_init(&input);
+        ASSERT(json_read(&input, inside, strlen(inside)));
+        ASSERT(zcl_command_registry_input_validate(spec, &input, why,
+                                                   sizeof(why)));
+        json_free(&input);
+        json_init(&input);
+        ASSERT(json_read(&input, outside, strlen(outside)));
+        ASSERT(!zcl_command_registry_input_validate(spec, &input, why,
+                                                    sizeof(why)));
+        ASSERT(strstr(why, "1 to 168") != NULL);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── the receipt ────────────────────────────────────────────────────────── */
 
 static int test_fe_receipt(void)
@@ -3098,6 +3126,7 @@ int test_fleet_enrol(void)
     failures += test_fe_invite_round_trip();
     failures += test_fe_invite_tampered();
     failures += test_fe_invite_bounds();
+    failures += test_fe_invite_ttl_flag();
     failures += test_fe_receipt();
     failures += test_fe_roster_seal();
     failures += test_fe_roster_admission();

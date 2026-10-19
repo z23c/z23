@@ -244,7 +244,7 @@ static void fe_invite(const struct zcl_command_request *request,
     if (!fleet_invite_mint(name, ttl, relay ? relay : "", seed, pubkey,
                            fe_now(), token, sizeof(token), &invite, &why)) {
         fe_fail(reply, "FLEET_INVITE_REFUSED", "execute",
-                "this invite was not minted. --ttl-hours is 1 to 168 and "
+                "this invite was not minted. --ttl_hours is 1 to 168 and "
                 "--relay is a host or host:port.", why);
         return;
     }
