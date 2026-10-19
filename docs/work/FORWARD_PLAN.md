@@ -113,7 +113,7 @@ These five outcomes retain product acceptance context. Select work under
 `AGENTS.md` and the fleet A+ scorecard, respecting dependencies and authority.
 The items below describe work to prove, not capabilities declared complete.
 
-1. **Trust the public node and wallet first.** Close the literal
+1. **Make the public node and wallet verifiable first.** Close the literal
    [C1–C8 criteria](../quality/MVP.md) with evidence bound to the exact candidate.
    Literal payment qualification requires a previously uncredited recipient
    to receive **a minimal shielded payment within two blocks** (never a whole ZCL), with real proof verification and no
@@ -283,7 +283,7 @@ refusal on either platform.
 
 1. Extend the existing activation transaction through native systemd and launchd
    adapters. Repair service-unit placement and test the real preparation
-   adapter. Use a trusted C23 executor that verifies permitted artifacts and
+   adapter. Use a C23 executor that verifies permitted artifacts and
    running-image identity. Qualify Linux descriptor execution and macOS
    suspended-spawn image verification separately; one platform's evidence does
    not establish the other's guarantee.

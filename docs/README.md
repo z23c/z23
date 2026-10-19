@@ -50,7 +50,7 @@ The parts nest, each smaller and more sealed than the one around it:
 |---|---|
 | Core | ZClassic consensus, custody and network: money you verify yourself. Sealed, flat or shrinking. |
 | Commons | Software named by its exact source, rebuilt and reproduced on another node, accepted by version, usable after its publisher is gone. |
-| Runtime | Software that runs confined: one-file C23 programs and plugins, authority passed as descriptors, and a FreeBSD-derived guest as the same fallback everywhere. |
+| Runtime | Software that runs confined: one-file C23 programs and plugins, authority passed as descriptors, and, as a target, a FreeBSD-derived guest as the same fallback everywhere. |
 | Mesh | Your machines and your peers: peer to peer, onion routing, pinned keys, no fee, no signup, no central server. |
 | Agents | Replaceable workers outside the authority boundary. They propose; Z23 verifies; you accept. |
 
@@ -60,8 +60,9 @@ commons pipeline applied to Z23's own source. A step that needs a private
 script or a manual action is a gap in the product, and closing it is product
 work.
 
-Less is more. One program, one service per host, one ledger per fact, one
-command registry for the command line and MCP, one tree of documents. New
+Less is more. The target is one program, one service per host, one ledger
+per fact, one command registry for the command line and MCP, one tree of
+documents. New
 capability arrives as small, deletable plugins while the core stays small;
 removing code while every test still passes is progress.
 
