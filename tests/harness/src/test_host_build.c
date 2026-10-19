@@ -18,10 +18,15 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -342,10 +347,280 @@ _test_next:;
     return failures;
 }
 
+static bool hbt_wait_file(const char *path)
+{
+    for (int i = 0; i < 250; i++) {
+        if (access(path, F_OK) == 0)
+            return true;
+        hbt_nap(20);
+    }
+    return false;
+}
+
+/* The SigIgn mask of /proc/self/status as written by the job. */
+static bool hbt_ignored_mask(const char *path, unsigned long long *mask)
+{
+    char text[HBT_TEXT];
+    const char *p;
+    if (!hbt_slurp(path, text, sizeof(text)) ||
+        !(p = strstr(text, "SigIgn:")))
+        return false;
+    return sscanf(p, "SigIgn: %llx", mask) == 1;
+}
+
+static int hbt_signal_tests(const char *tmp)
+{
+    int failures = 0;
+    struct ba_config cfg;
+    char ready[HBT_PATH], got[HBT_PATH], script[2 * HBT_PATH];
+
+    TEST("host build: a SIGTERM sent to the wrapper reaches the job") {
+        const char *job[] = { "/bin/sh", "-c", script, NULL };
+        pid_t w;
+        ASSERT(hbt_config(&cfg, tmp, 1));
+        (void)snprintf(ready, sizeof(ready), "%s/term.ready", tmp);
+        (void)snprintf(got, sizeof(got), "%s/term.got", tmp);
+        (void)snprintf(script, sizeof(script),
+                       "trap 'echo got > %s; exit 0' TERM; echo up > %s; "
+                       "while :; do sleep 0.05; done", got, ready);
+        w = hbt_spawn(&cfg, job);
+        ASSERT(w > 0);
+        ASSERT(hbt_wait_file(ready));
+        ASSERT_EQ(kill(w, SIGTERM), 0);
+        ASSERT_EQ(hbt_reap(w), 0);
+        ASSERT(access(got, F_OK) == 0);
+        PASS();
+    }
+
+    TEST("host build: an inherited SIGCHLD ignore keeps the exit status and is not passed to the job") {
+        char mask_file[HBT_PATH];
+        unsigned long long mask = ~0ull;
+        const char *job[] = { "/bin/sh", "-c", script, NULL };
+        pid_t w;
+        int status = 0;
+        ASSERT(hbt_config(&cfg, tmp, 1));
+        (void)snprintf(mask_file, sizeof(mask_file), "%s/sigign", tmp);
+        (void)snprintf(script, sizeof(script),
+                       "grep SigIgn /proc/self/status > %s; exit 5", mask_file);
+        w = fork();
+        if (w == 0) {
+            struct sigaction sa;
+            int rc;
+            (void)signal(SIGCHLD, SIG_IGN);
+            rc = hbt_run(&cfg, job);
+            (void)sigaction(SIGCHLD, NULL, &sa);
+            _exit(rc == 5 && sa.sa_handler == SIG_IGN ? 0 : 1);
+        }
+        ASSERT(w > 0);
+        ASSERT_EQ(waitpid(w, &status, 0), w);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+        ASSERT(hbt_ignored_mask(mask_file, &mask));
+        ASSERT_EQ(mask & (1ull << (SIGCHLD - 1)), 0ull);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* Tickets of 300 waiters, past any fixed listing bound: `live` of them keep
+ * their flock (the last `live` names), the rest are dead files. */
+static size_t hbt_make_tickets(const char *fifo, size_t total, size_t live,
+                               int *fds)
+{
+    size_t held = 0;
+    (void)mkdir(fifo, 0700);
+    for (size_t i = 0; i < total; i++) {
+        char path[HBT_PATH + 64];
+        int fd;
+        (void)snprintf(path, sizeof(path), "%s/%019lld-1", fifo,
+                       1000000000000000000ll + (long long)i);
+        fd = open(path, O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        if (fd < 0)
+            return held;
+        if (i + live >= total && flock(fd, LOCK_SH) == 0)
+            fds[held++] = fd;
+        else
+            close(fd);
+    }
+    return held;
+}
+
+static int hbt_long_queue_tests(const char *tmp)
+{
+    enum { TICKETS = 300 };
+    int failures = 0;
+    int fds[TICKETS];
+    struct ba_config cfg;
+    struct json_value doc;
+    char dir[HBT_PATH], fifo[HBT_PATH + 16], marker[HBT_PATH + 16];
+    size_t held;
+
+    TEST("host build: the status lists every waiter of a queue longer than 256") {
+        (void)snprintf(dir, sizeof(dir), "%s/long", tmp);
+        ASSERT(mkdir(dir, 0700) == 0);
+        ASSERT(hbt_config(&cfg, dir, 1));
+        (void)snprintf(fifo, sizeof(fifo), "%s/state/z23.fifo", dir);
+        (void)mkdir(cfg.state_dir, 0700);
+        held = hbt_make_tickets(fifo, TICKETS, TICKETS, fds);
+        ASSERT_EQ(held, (size_t)TICKETS);
+        json_init(&doc);
+        json_set_object(&doc);
+        ASSERT(ba_status(cfg.state_dir, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "queued"), (size_t)TICKETS);
+        json_free(&doc);
+        for (size_t i = 0; i < held; i++)
+            close(fds[i]);
+        PASS();
+    }
+
+    TEST("host build: a live waiter beyond the 256th entry still holds the queue") {
+        const char *job[] = { "/usr/bin/touch", marker, NULL };
+        pid_t w;
+        (void)snprintf(marker, sizeof(marker), "%s/long/ran", tmp);
+        (void)snprintf(fifo, sizeof(fifo), "%s/long/state/z23.fifo", tmp);
+        held = hbt_make_tickets(fifo, TICKETS, 1, fds);
+        ASSERT_EQ(held, 1u);
+        w = fork();
+        if (w == 0) { /* the job must not keep the waiter's lock alive */
+            close(fds[0]);
+            _exit(hbt_run(&cfg, job));
+        }
+        ASSERT(w > 0);
+        hbt_nap(400);
+        ASSERT(access(marker, F_OK) != 0);
+        close(fds[0]);
+        ASSERT_EQ(hbt_reap(w), 0);
+        ASSERT(access(marker, F_OK) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+#ifdef __linux__
+/* A lock whose recorded pid has exited is attributed to the process that
+ * still holds its open file description. */
+static int hbt_owner_tests(const char *tmp)
+{
+    int failures = 0;
+    struct ba_config cfg;
+    struct json_value doc;
+    char dir[HBT_PATH], lock[HBT_PATH + 32];
+
+    TEST("host build: an orphaned lock is attributed to the live process that holds it") {
+        const struct json_value *row;
+        int fd, status = 0;
+        pid_t k;
+        (void)snprintf(dir, sizeof(dir), "%s/owner", tmp);
+        ASSERT(mkdir(dir, 0700) == 0);
+        ASSERT(hbt_config(&cfg, dir, 1));
+        ASSERT(mkdir(cfg.state_dir, 0700) == 0);
+        (void)snprintf(lock, sizeof(lock), "%s/z23.lock", cfg.state_dir);
+        fd = open(lock, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0);
+        k = fork();
+        if (k == 0)
+            _exit(flock(fd, LOCK_EX) == 0 ? 0 : 1);
+        ASSERT_EQ(waitpid(k, &status, 0), k);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        json_init(&doc);
+        json_set_object(&doc);
+        ASSERT(ba_status(cfg.state_dir, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), 1u);
+        row = json_at(json_get(&doc, "running"), 0);
+        ASSERT_EQ(json_get_int(json_get(row, "pid")), (int64_t)getpid());
+        json_free(&doc);
+        close(fd);
+        PASS();
+    }
+
+    TEST("host build: a holder outside the caller's processes is reported without a pid") {
+        const struct json_value *row;
+        int fd, status = 0, sync[2];
+        char byte = 0;
+        pid_t c;
+        if (geteuid() == 0) { /* root reads every process */
+            PASS();
+            goto _test_next;
+        }
+        (void)snprintf(dir, sizeof(dir), "%s/hidden", tmp);
+        ASSERT(mkdir(dir, 0700) == 0);
+        ASSERT(hbt_config(&cfg, dir, 1));
+        ASSERT(mkdir(cfg.state_dir, 0700) == 0);
+        (void)snprintf(lock, sizeof(lock), "%s/z23.lock", cfg.state_dir);
+        fd = open(lock, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0);
+        ASSERT(pipe(sync) == 0);
+        c = fork();
+        if (c == 0) {
+            /* A non-dumpable process is owned by root in /proc. Its child
+             * takes the lock and exits, leaving the description with c. */
+            pid_t g = fork();
+            if (g == 0)
+                _exit(flock(fd, LOCK_EX) == 0 ? 0 : 1);
+            (void)waitpid(g, &status, 0);
+            (void)prctl(PR_SET_DUMPABLE, 0);
+            (void)!write(sync[1], "x", 1);
+            for (;;)
+                pause();
+        }
+        ASSERT(c > 0);
+        close(sync[1]);
+        ASSERT_EQ(read(sync[0], &byte, 1), 1);
+        close(fd);
+        json_init(&doc);
+        json_set_object(&doc);
+        ASSERT(ba_status(cfg.state_dir, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), 1u);
+        row = json_at(json_get(&doc, "running"), 0);
+        ASSERT_EQ(json_get_int(json_get(row, "lane")), 1);
+        ASSERT(json_get(row, "pid") == NULL);
+        json_free(&doc);
+        (void)kill(c, SIGKILL);
+        (void)waitpid(c, &status, 0);
+        close(sync[0]);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+#endif
+
+static int hbt_reserve_env_tests(void)
+{
+    int failures = 0;
+    TEST("host build: the reserve defaults to 30 GiB and DEVBUILD_RESERVE_GIB overrides it") {
+        char *saved = getenv("DEVBUILD_RESERVE_GIB");
+        char keep[32] = "";
+        if (saved)
+            (void)snprintf(keep, sizeof(keep), "%s", saved);
+        (void)unsetenv("DEVBUILD_RESERVE_GIB");
+        ASSERT_EQ(ba_reserve_gib_from_env(), 30u);
+        (void)setenv("DEVBUILD_RESERVE_GIB", "7", 1);
+        ASSERT_EQ(ba_reserve_gib_from_env(), 7u);
+        (void)setenv("DEVBUILD_RESERVE_GIB", "0", 1);
+        ASSERT_EQ(ba_reserve_gib_from_env(), 0u);
+        (void)setenv("DEVBUILD_RESERVE_GIB", "-1", 1);
+        ASSERT_EQ(ba_reserve_gib_from_env(), 30u);
+        (void)setenv("DEVBUILD_RESERVE_GIB", "12x", 1);
+        ASSERT_EQ(ba_reserve_gib_from_env(), 30u);
+        (void)setenv("DEVBUILD_RESERVE_GIB", "", 1);
+        ASSERT_EQ(ba_reserve_gib_from_env(), 30u);
+        if (saved)
+            (void)setenv("DEVBUILD_RESERVE_GIB", keep, 1);
+        else
+            (void)unsetenv("DEVBUILD_RESERVE_GIB");
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_host_build(void)
 {
     int failures = 0;
-    char tmp[HBT_PATH] = "", scope_tmp[HBT_PATH] = "";
+    char tmp[HBT_PATH] = "";
     struct ba_config cfg;
 
     failures += hbt_cpu_plan_tests();
@@ -354,11 +629,16 @@ int test_host_build(void)
         printf("test_host_build: fixture failed\n");
         return failures + 1;
     }
-    (void)snprintf(scope_tmp, sizeof(scope_tmp), "%s", tmp);
     failures += hbt_scope_tests(&cfg, tmp);
     failures += hbt_reserve_tests(&cfg, tmp);
     failures += hbt_limit_tests(tmp);
     failures += hbt_order_tests(tmp);
+    failures += hbt_signal_tests(tmp);
+    failures += hbt_long_queue_tests(tmp);
+#ifdef __linux__
+    failures += hbt_owner_tests(tmp);
+#endif
+    failures += hbt_reserve_env_tests();
     (void)test_rm_rf_recursive(tmp);
     if (failures == 0)
         printf("test_host_build: all passed\n");

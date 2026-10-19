@@ -32,7 +32,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum { BA_PATH_MAX = 1024, BA_CPU_LIST_MAX = 256, BA_MAX_LANES = 4 };
+enum { BA_PATH_MAX = 1024, BA_CPU_LIST_MAX = 256, BA_MAX_LANES = 4,
+       BA_NAME_MAX = 64 };
+
+/* Free-space reserve in GiB when DEVBUILD_RESERVE_GIB is unset. It is the
+ * floor the installed devbuild wrapper admits with, so both admit alike. */
+enum { BA_DEFAULT_RESERVE_GIB = 30 };
 
 /* Exit status of a refused or deferred job (EX_TEMPFAIL), a missing command
  * (EX_USAGE) and a scratch directory that cannot be made (EX_CANTCREAT). */
@@ -61,6 +66,17 @@ struct ba_config {
  * fewer than four workers remain. */
 bool ba_cpu_plan_parse(const char *lscpu_text, char *list, size_t cap,
                        unsigned *workers);
+
+/* The reserve in GiB from DEVBUILD_RESERVE_GIB (0 disables), or
+ * BA_DEFAULT_RESERVE_GIB when it is unset, empty, malformed or above 2^20. */
+unsigned ba_reserve_gib_from_env(void);
+
+/* Names of the entries of `dir` (dot files and names of BA_NAME_MAX or more
+ * bytes skipped) in ascending order, in memory the caller frees. There is no
+ * fixed cap: a queue longer than any bound stays in order. True with *count
+ * 0 when the directory does not exist; false only on allocation failure. */
+bool ba_list_names(const char *dir, char (**names)[BA_NAME_MAX],
+                   size_t *count);
 
 /* A held lane: closing the descriptors releases every lock. */
 struct ba_slot {

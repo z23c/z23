@@ -9,6 +9,7 @@
 
 #ifndef _WIN32
 
+#include "base/safe_alloc.h"
 #include "util/file_tree_ops.h"
 
 #include <dirent.h>
@@ -22,8 +23,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-
-enum { BA_NAME_MAX = 64, BA_LIST_MAX = 256 };
 
 static volatile sig_atomic_t g_stop;
 
@@ -83,39 +82,70 @@ static int ba_name_cmp(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
-static size_t ba_list(const char *dir, char (*names)[BA_NAME_MAX], size_t max)
+static bool ba_names_push(char (**names)[BA_NAME_MAX], size_t *n, size_t *cap,
+                          const char *name)
+{
+    if (*n == *cap) {
+        size_t grown = *cap ? *cap * 2u : 64u;
+        char (*bigger)[BA_NAME_MAX] =
+            zcl_realloc(*names, grown * sizeof(**names), "build_queue_names");
+        if (!bigger)
+            return false;
+        *names = bigger;
+        *cap = grown;
+    }
+    memcpy((*names)[(*n)++], name, strlen(name) + 1u);
+    return true;
+}
+
+bool ba_list_names(const char *dir, char (**names)[BA_NAME_MAX], size_t *count)
 {
     DIR *d = opendir(dir);
-    size_t n = 0;
+    size_t cap = 0;
+    *names = NULL;
+    *count = 0;
     if (!d)
-        return 0;
-    for (struct dirent *e = readdir(d); e && n < max; e = readdir(d)) {
+        return true;
+    for (struct dirent *e = readdir(d); e; e = readdir(d)) {
         if (e->d_name[0] == '.' || strlen(e->d_name) >= BA_NAME_MAX)
             continue;
-        memcpy(names[n++], e->d_name, strlen(e->d_name) + 1u);
+        if (!ba_names_push(names, count, &cap, e->d_name)) {
+            closedir(d);
+            free(*names);
+            *names = NULL;
+            *count = 0;
+            return false;
+        }
     }
     closedir(d);
-    qsort(names, n, BA_NAME_MAX, ba_name_cmp);
-    return n;
+    qsort(*names, *count, BA_NAME_MAX, ba_name_cmp);
+    return true;
 }
 
 /* A waiter in `dir`, older than `self` when given, still holds its flock.
- * Dead entries met on the way are removed. */
+ * Dead entries met on the way are removed. A queue that cannot be read is
+ * treated as occupied so a job never overtakes waiters it cannot see. */
 static bool ba_other_live(const char *dir, const char *self)
 {
-    char names[BA_LIST_MAX][BA_NAME_MAX];
-    size_t n = ba_list(dir, names, BA_LIST_MAX);
-    for (size_t i = 0; i < n; i++) {
+    char (*names)[BA_NAME_MAX];
+    size_t n;
+    bool live = false;
+    if (!ba_list_names(dir, &names, &n)) {
+        (void)fprintf(stderr, "devbuild: out of memory reading %s\n", dir);
+        return true;
+    }
+    for (size_t i = 0; i < n && !live; i++) {
         char path[BA_PATH_MAX];
         if (self && strcmp(names[i], self) >= 0)
             continue;
         if (!ba_join(path, sizeof(path), dir, names[i]))
             continue;
-        if (ba_alive(path))
-            return true;
-        (void)unlink(path);
+        live = ba_alive(path);
+        if (!live)
+            (void)unlink(path);
     }
-    return false;
+    free(names);
+    return live;
 }
 
 struct ba_wait {

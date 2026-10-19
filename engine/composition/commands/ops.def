@@ -965,10 +965,11 @@ ZCL_COMMAND_READY_COMMAND(
     "Run a heavy command through the host build queue",
     "CLI-only: queues the command behind the host's build lanes (waiting is "
     "the default, --no-wait refuses with 75 when busy), refuses below the "
-    "free-space reserve (--reserve-gib or DEVBUILD_RESERVE_GIB, default 1024 "
-    "GiB), then runs it in a systemd user scope under development.slice "
-    "with a CPU quota, 24G of memory and no swap, on a disposable scratch "
-    "directory that is released after success and retained after failure. "
+    "free-space reserve (--reserve-gib or DEVBUILD_RESERVE_GIB, default 30 "
+    "GiB, the floor the installed devbuild wrapper admits with), then runs "
+    "it in a systemd user scope under development.slice with a CPU quota, "
+    "24G of memory and no swap, on a disposable scratch directory that is "
+    "released after success and retained after failure. "
     "Streams the command's stdio and exits with its status; --plan prints "
     "the limits. Shares its queue files with the installed devbuild wrapper. "
     "Dispatch through JSON returns a blocker.",

@@ -30,8 +30,8 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { OHB_MIN_CPUS = 8, OHB_LSCPU_MAX = 65536, OHB_DEFAULT_RESERVE_GIB = 1024,
-       OHB_MAX_ZCC_MB = 8192, OHB_MEM_KIB = 24u * 1024u * 1024u };
+enum { OHB_MIN_CPUS = 8, OHB_LSCPU_MAX = 65536, OHB_MAX_ZCC_MB = 8192,
+       OHB_MEM_KIB = 24u * 1024u * 1024u };
 
 static bool ohb_abs_env(const char *name)
 {
@@ -86,8 +86,7 @@ static void ohb_defaults(struct ba_config *cfg)
                    "systemd-run");
     cfg->lanes = ohb_env_uint("DEVBUILD_Z23_LANES", 1, BA_MAX_LANES,
                               BA_MAX_LANES);
-    cfg->reserve_gib = ohb_env_uint("DEVBUILD_RESERVE_GIB", 0, 1u << 20,
-                                    OHB_DEFAULT_RESERVE_GIB);
+    cfg->reserve_gib = ba_reserve_gib_from_env();
     cfg->need_mem_kib = OHB_MEM_KIB;
     cfg->poll_ms = 1000;
     cfg->zcc_max_mb = ohb_env_uint("ZCC_MAX_MB", 1, OHB_MAX_ZCC_MB,

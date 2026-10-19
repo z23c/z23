@@ -43,6 +43,16 @@ int ba_run(const struct ba_config *cfg, const char *const *argv, int argc)
     return BA_EXIT_DEFERRED;
 }
 
+unsigned ba_reserve_gib_from_env(void) { return BA_DEFAULT_RESERVE_GIB; }
+
+bool ba_list_names(const char *dir, char (**names)[BA_NAME_MAX], size_t *count)
+{
+    (void)dir;
+    *names = NULL;
+    *count = 0;
+    return true;
+}
+
 bool ba_status(const char *state_dir, struct json_value *out)
 {
     (void)state_dir;

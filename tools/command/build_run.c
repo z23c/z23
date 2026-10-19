@@ -29,7 +29,8 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { BA_CMD_LOG_MAX = 300, BA_CORES_MAX = 1024, BA_SCOPE_FIXED = 40 };
+enum { BA_CMD_LOG_MAX = 300, BA_CORES_MAX = 1024, BA_SCOPE_FIXED = 40,
+       BA_WAIT_POLL_MS = 20 };
 
 struct ba_cores {
     struct { unsigned core, socket; } seen[BA_CORES_MAX];
@@ -82,6 +83,17 @@ bool ba_cpu_plan_parse(const char *text, char *list, size_t cap,
     }
     *workers = count;
     return count >= 4;
+}
+
+unsigned ba_reserve_gib_from_env(void)
+{
+    const char *v = getenv("DEVBUILD_RESERVE_GIB");
+    char *end = NULL;
+    unsigned long n;
+    if (!v || !v[0])
+        return BA_DEFAULT_RESERVE_GIB;
+    n = strtoul(v, &end, 10);
+    return (*end || n > (1ul << 20)) ? BA_DEFAULT_RESERVE_GIB : (unsigned)n;
 }
 
 static int ba_disk_admit(const struct ba_config *cfg)
@@ -368,25 +380,70 @@ static bool ba_scope_build(const struct ba_config *cfg,
 
 /* ---- execution --------------------------------------------------------- */
 
+static void ba_run_nap(unsigned ms)
+{
+    struct timespec ts = { .tv_sec = ms / 1000u,
+                           .tv_nsec = (long)(ms % 1000u) * 1000000L };
+    (void)nanosleep(&ts, NULL);
+}
+
+static void ba_default_signals(void)
+{
+    static const int sigs[] = { SIGINT, SIGTERM, SIGHUP, SIGCHLD };
+    for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
+        (void)signal(sigs[i], SIG_DFL);
+}
+
+/* Wait for `pid`, forwarding a stop signal as soon as one is pending. The
+ * flag is polled between short naps, so a signal that arrived before the
+ * first wait is forwarded too. Returns the wait status, or -1 on failure. */
+static int ba_wait_forwarding(pid_t pid)
+{
+    int status = 0;
+    for (;;) {
+        pid_t done = waitpid(pid, &status, WNOHANG);
+        int sig = ba_stop_signal();
+        if (done == pid)
+            return status;
+        if (done < 0 && errno != EINTR)
+            return -1;
+        if (sig) {
+            (void)kill(pid, sig);
+            ba_request_stop(0);
+        }
+        if (done == 0)
+            ba_run_nap(BA_WAIT_POLL_MS);
+    }
+}
+
 /* fork and exec with the caller's stdio; an exec failure travels back over a
- * close-on-exec pipe so it is reported rather than mistaken for a job exit. */
+ * close-on-exec pipe so it is reported rather than mistaken for a job exit.
+ * SIGCHLD is default in the parent while it waits and in the child, so an
+ * inherited SIG_IGN neither discards the exit status nor reaches the job. */
 static int ba_exec_wait(char *const *argv, mode_t command_umask,
                         struct rusage *usage)
 {
-    int err = 0, status = 0, ep[2];
+    int err = 0, status, ep[2];
     pid_t pid;
     ssize_t got;
+    struct sigaction chld_saved, chld_dfl;
     if (pipe(ep) != 0)
         return 71;
     (void)fcntl(ep[0], F_SETFD, FD_CLOEXEC);
     (void)fcntl(ep[1], F_SETFD, FD_CLOEXEC);
+    memset(&chld_dfl, 0, sizeof(chld_dfl));
+    chld_dfl.sa_handler = SIG_DFL;
+    sigemptyset(&chld_dfl.sa_mask);
+    (void)sigaction(SIGCHLD, &chld_dfl, &chld_saved);
     pid = fork();
     if (pid < 0) {
         close(ep[0]);
         close(ep[1]);
+        (void)sigaction(SIGCHLD, &chld_saved, NULL);
         return 71;
     }
     if (pid == 0) {
+        ba_default_signals();
         (void)umask(command_umask);
         execvp(argv[0], argv);
         err = errno;
@@ -398,17 +455,10 @@ static int ba_exec_wait(char *const *argv, mode_t command_umask,
         got = read(ep[0], &err, sizeof(err));
     } while (got < 0 && errno == EINTR);
     close(ep[0]);
-    for (;;) {
-        pid_t done = waitpid(pid, &status, 0);
-        if (done == pid)
-            break;
-        if (done < 0 && errno == EINTR && ba_stop_signal()) {
-            (void)kill(pid, ba_stop_signal());
-            ba_request_stop(0);
-        } else if (done < 0 && errno != EINTR) {
-            return 71;
-        }
-    }
+    status = ba_wait_forwarding(pid);
+    (void)sigaction(SIGCHLD, &chld_saved, NULL);
+    if (status < 0)
+        return 71;
     (void)getrusage(RUSAGE_CHILDREN, usage);
     if (got == (ssize_t)sizeof(err))
         (void)fprintf(stderr, "devbuild: cannot execute %s: %s\n", argv[0],
