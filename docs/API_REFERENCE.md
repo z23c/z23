@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 985 |
+| Registry entries (branches + leaves) | 996 |
 | Top-level roots | 17 |
-| Branches | 213 |
-| Leaves (dispatchable command paths) | 772 |
+| Branches | 214 |
+| Leaves (dispatchable command paths) | 782 |
 | … `ready` (live handler in this build) | 679 |
-| … `compat` (metadata only, names a fallback) | 63 |
+| … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 62 |
-| Leaves with `effect=mutate` | 297 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
+| Leaves with `effect=mutate` | 305 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 156 |
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
 | `engine/composition/commands/ops.def` | 80 | 16 | 64 |
-| `engine/composition/commands/dev.def` | 128 | 23 | 105 |
+| `engine/composition/commands/dev.def` | 139 | 24 | 115 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -690,7 +690,6 @@ represented by its children's sections.
 | `dev ff` | ready | read / read / operator · instant/low | none | `zcl.dev_ff.v1` | `z23 dev ff` | Fail-fast: compile, test, lint |
 | `dev verify-change` | compat 🔧 → `make dev-bin, then z23-dev dev verify-change` | read / read / **owner** · background/high | none | `zcl.dev_verify_change.v1` | `z23-dev dev verify-change` | Compile changed code and run its focused proofs — *changed-scope verification requires the dev-only process executor* |
 | `dev ci` | compat 🔧 → `z23-dev dev ci` | read / read / operator · fast/low | **`topic`**, `sha`, `root`, `json` | `zcl.dev_ci.v1` | `z23-dev dev ci receipt --sha=9afd46726` | Answer every CI and landing question from one screen — *the landing and unit queues are development-lane state* |
-| `dev land` | compat 🔧 → `z23-dev dev land` | mutate / dev-mutation / operator · persistent/high | **`action`**, `tip`, `worktree`, `note`, `seq`, `base`, `head`, `wait_ms`, `json` | `zcl.land.v1` | `z23-dev dev land drive` | Queue a tip; attach signed Git intent, prove and push without waiting — *the landing queue is a development-lane coordination surface* |
 
 #### `dev.retrieval` — Retrieval quality for a source generation
 
@@ -763,7 +762,6 @@ represented by its children's sections.
 | `dev proof coverage` | compat 🔧 → `z23-dev dev proof status` | read / read / operator · instant/tiny | `root`, `local_commit`, `remote_base` | `zcl.dev_proof_coverage.v1` | `z23-dev dev proof coverage` | Query one pair's canonical coverage manifest — *coverage queries require the dev binary* |
 | `dev proof observations` | compat 🔧 → `z23-dev dev proof status` | read / read / operator · instant/tiny | `group` | `zcl.dev_observations.v1` | `z23-dev dev proof observations` | Query this box's receiver observation index — *observation queries require the dev binary* |
 | `dev proof observations fold` | compat 🔧 → `z23-dev dev proof observations` | mutate / dev-mutation / operator · instant/low | `local_commit`, `remote_base` | `zcl.dev_observations_fold.v1` | `z23-dev dev proof observations fold` | Fold one pair's durable observations into the box index — *observation folds require the dev binary* |
-| `dev land window` | compat 🔧 → `z23-dev dev land window` | mutate / dev-mutation / operator · fast/low | **`action`**, `host`, `seq`, `candidate`, `base`, `expected_done`, `now`, `grace_s` | `zcl.land_window.v1` | `z23-dev dev land window --action=open --host=hosta` | Read or announce the two-lander LAND-WINDOW proving windows — *landing windows are a development-lane coordination surface* |
 
 #### `dev.test` — Focused proof selection
 
@@ -883,6 +881,23 @@ represented by its children's sections.
 | `dev agent mail` | compat 🔧 → `z23-dev dev agent mail` | mutate / dev-mutation / operator · fast/low | **`action`**, `to`, `kind`, `body`, `since`, `from`, **`cursor`**, `agent`, `ref`, `sender_binding`, `cwd`, `stream`, `row_offset`, `seq`, `row_sha3` | `zcl.agent_mail.v1` | `z23 dev agent mail post --to=* --kind=note --body=hello` | Post, pull, exact-read and ack async agent mail — *agent mail is a development-lane coordination surface* |
 | `dev agent mail wait` | compat 🔧 → `z23-dev dev agent mail wait` | read / read / operator · persistent/low | **`since`**, `to`, `ref`, `from`, `kind`, `timeout_ms` | `zcl.agent_mail.v1` | `z23 dev agent mail wait --since=0 --to=me --timeout_ms=30000` | Wait for the next mail row after a cursor — *agent mail waiting is a development-lane coordination surface* |
 | `dev agent factory` (aliases: `dev.factory`) | compat 🔧 → `z23-dev dev factory` | read / read / operator · foreground/low | `hours` | `zcl.dev_factory.v1` | `z23-dev dev factory --hours=48` | Report factory waste over a window — *factory measurement reads dev-lane state and needs the dev binary* |
+
+#### `dev.land` — Queue a tip, prove it and publish it to origin/main
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev land submit` | compat 🔧 → `z23 dev land submit` | mutate / dev-mutation / operator · persistent/moderate | `tip`, `worktree`, `note`, `json`, `qualify` | `zcl.land.v1` | `z23 dev land submit --worktree=PATH --qualify` | Queue a signed tip for landing and return at once — *the landing queue is a development-lane coordination surface* |
+| `dev land drive` | compat 🔧 → `z23 dev land drive` | mutate / dev-mutation / operator · persistent/high | `seq` | `zcl.land.v1` | `z23 dev land drive --seq=3` | Drive a queued row through proof and publication — *the landing queue is a development-lane coordination surface* |
+| `dev land status` | compat 🔧 → `z23 dev land status` | read / read / operator · persistent/moderate | `json` | `zcl.land.v1` | `z23 dev land status` | Read the landing queue and the exact proof handoff — *the landing queue is a development-lane coordination surface* |
+| `dev land step` | compat 🔧 → `z23 dev land step` | mutate / dev-mutation / operator · persistent/high | none | `zcl.land.v1` | `z23 dev land step` | Advance the queue by one serialized beat — *the landing queue is a development-lane coordination surface* |
+| `dev land attach` | compat 🔧 → `z23 dev land attach` | mutate / dev-mutation / operator · persistent/moderate | `seq`, `base`, `head` | `zcl.land.v1` | `z23 dev land attach --seq=1` | Seal the signed Git intent for an exact proven pair — *the landing queue is a development-lane coordination surface* |
+| `dev land attach_publish` | compat 🔧 → `z23 dev land attach_publish` | mutate / dev-mutation / operator · persistent/high | `seq`, `base`, `head`, `wait_ms` | `zcl.land.v1` | `z23 dev land attach_publish --seq=1` | Seal the intent and run its publication beat under one lock — *the landing queue is a development-lane coordination surface* |
+| `dev land hold` | compat 🔧 → `z23 dev land hold` | mutate / dev-mutation / operator · persistent/low | `seq` | `zcl.land.v1` | `z23 dev land hold --seq=1` | Hold one row from sealing or pushing — *the landing queue is a development-lane coordination surface* |
+| `dev land release` | compat 🔧 → `z23 dev land release` | mutate / dev-mutation / operator · persistent/low | `seq` | `zcl.land.v1` | `z23 dev land release --seq=1` | Remove the publication hold from one row — *the landing queue is a development-lane coordination surface* |
+| `dev land cancel` | compat 🔧 → `z23 dev land cancel` | mutate / dev-mutation / operator · persistent/low | `seq`, `force`, `json` | `zcl.land.v1` | `z23 dev land cancel --seq=1` | Cancel one queued row by sequence number — *the landing queue is a development-lane coordination surface* |
+| `dev land fence_replace` | compat 🔧 → `z23 dev land fence_replace` | mutate / dev-mutation / operator · persistent/moderate | `seq`, `base`, `head`, `tip`, `worktree` | `zcl.land.v1` | `z23 dev land fence_replace --seq=1` | Bind an explicit paired successor to a fenced row — *the landing queue is a development-lane coordination surface* |
+| `dev land attest_only` | compat 🔧 → `z23 dev land attest_only` | read / read / operator · fast/low | none | `zcl.land.v1` | `z23 dev land attest_only` | Report the bounded self observation of this binary — *the landing queue is a development-lane coordination surface* |
+| `dev land window` | compat 🔧 → `z23 dev land window` | mutate / dev-mutation / operator · fast/low | **`action`**, `host`, `seq`, `candidate`, `base`, `expected_done`, `now`, `grace_s` | `zcl.land_window.v1` | `z23 dev land window --action=open --host=hosta` | Read or announce the two-lander LAND-WINDOW proving windows — *landing windows are a development-lane coordination surface* |
 
 #### `dev.lane` — Agent worktree with independent inodes
 
@@ -2124,6 +2139,7 @@ promise the same document shape.
 | `zcl.dev_hotswap.v1` | `dev.hotswap.apply`, `dev.hotswap.probe` |
 | `zcl.dev_loop_status.v1` | `dev.loop.ensure`, `dev.loop.status`, `dev.loop.stop` |
 | `zcl.dev_proof_status.v1` | `dev.proof.ensure`, `dev.proof.step`, `dev.proof.retry`, `dev.proof.status`, `dev.proof.wait` |
+| `zcl.land.v1` | `dev.land.submit`, `dev.land.drive`, `dev.land.status`, `dev.land.step`, `dev.land.attach`, `dev.land.attach_publish`, `dev.land.hold`, `dev.land.release`, `dev.land.cancel`, `dev.land.fence_replace`, `dev.land.attest_only` |
 | `zcl.agent_mail.v1` | `dev.agent.mail`, `dev.agent.mail.wait` |
 | `zcl.account.v1` | `app.account.show`, `app.account.whoami`, `app.account.add`, `app.account.role`, `app.account.suspend`, `app.account.unsuspend` |
 | `zcl.vault_swap_settle.v1` | `vault.swap.redeem`, `vault.swap.refund` |
