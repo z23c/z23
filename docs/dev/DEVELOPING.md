@@ -93,6 +93,24 @@ assignment; verify it against the running node with `build/bin/z23 status` and
 `build/bin/z23 dumpstate reducer_frontier`. Do not copy live height, soak or
 deployment status into durable entry documents.
 
+### Build queue in the product binary
+
+`z23 ops host build -- COMMAND [ARGS...]` is the native replacement for
+`devbuild --wait COMMAND`. It queues behind the host's build lanes (waiting
+is the default; `--no-wait` refuses with status 75 when busy), refuses below
+the free-space reserve, runs the command in a systemd user scope under
+`development.slice` with a CPU quota, 24G of memory and no swap, and gives it
+a disposable `TMPDIR` that is released after success and retained after a
+failure. The command's stdio and exit status pass through; `--plan` prints
+the limits. `z23 ops host jobs` lists the running and queued jobs as JSON.
+
+State follows `XDG_STATE_HOME` and `XDG_CACHE_HOME`, falling back to `$HOME`.
+The queue files use the `devbuild` wrapper's z23 format, so both can serve
+one host during the switch. Settings: `DEVBUILD_Z23_LANES` (1 to 4, default
+4), `DEVBUILD_RESERVE_GIB` or `--reserve-gib` (default 1024), `DEVBUILD_PRIORITY=land`,
+`DEVBUILD_KEEP_SCRATCH=1`. Not yet native: the checkout fingerprint and
+repeat-run note, and peak-memory accounting in `devbuild.jobs.jsonl`.
+
 ### Priority order and evidence
 
 Owner-adopted reset of 2026-10-16, recorded on board ref

@@ -2050,6 +2050,21 @@ void zcl_native_handle_ops_host_slo_judge(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.host.build — admit a command to the host build queue and run it in a
+ * limited scope (command/build_admit.h). CLI-only: the JSON handler is a
+ * blocker because the command's exit status and stdio cannot travel in the
+ * envelope; the CLI intercept runs the job and returns that status. */
+void zcl_native_handle_ops_host_build(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+bool zcl_native_ops_host_build_try_run(const char *const *words, size_t count,
+                                       size_t consumed, int *rc);
+
+/* ops.host.jobs — running and queued build jobs, read from /proc/locks. */
+void zcl_native_handle_ops_host_jobs(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.debug.meaning — node-free field ontology + question index. Answers
  * "what does this telemetry field mean, is this value bad, and which report
  * answers my question" straight out of the binary's static tables, with no

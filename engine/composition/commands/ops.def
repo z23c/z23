@@ -960,6 +960,42 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_DEV_STATE_WRITE | ZCL_COMMAND_CAP_PROCESS_EXEC,
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_ops_host_gc)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.host.build", "ops.host", "",
+    "Run a heavy command through the host build queue",
+    "CLI-only: queues the command behind the host's build lanes (waiting is "
+    "the default, --no-wait refuses with 75 when busy), refuses below the "
+    "free-space reserve (--reserve-gib or DEVBUILD_RESERVE_GIB, default 1024 "
+    "GiB), then runs it in a systemd user scope under development.slice "
+    "with a CPU quota, 24G of memory and no swap, on a disposable scratch "
+    "directory that is released after success and retained after failure. "
+    "Streams the command's stdio and exits with its status; --plan prints "
+    "the limits. Shares its queue files with the installed devbuild wrapper. "
+    "Dispatch through JSON returns a blocker.",
+    ZCL_COMMAND_RESULT_BUDGET, "host,build,queue,admission,scope,scratch",
+    "zcl.command.empty_input.v1", "zcl.ops_host_build.blocker.v1", "", "",
+    "z23 ops host build -- make lint-fast",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_STREAM,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE | ZCL_COMMAND_CAP_PROCESS_EXEC,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_host_build)
+ZCL_COMMAND_READY_READ(
+    "ops.host.jobs", "ops.host", "",
+    "List running and queued host build jobs",
+    "Build lanes held, queued tickets in FIFO order and landing markers, "
+    "read from /proc/locks at call time, with each holder's command line and "
+    "working directory when visible. Covers jobs started by this command and "
+    "by the installed devbuild wrapper. Takes no lock.", 0,
+    "host,build,queue,jobs,status",
+    "zcl.command.empty_input.v1", "zcl.host_jobs.v1", "", "",
+    "z23 ops host jobs",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_host_jobs)
 
 /* ── ops.host.slo ──────────────────────────────────────────────────────────
  * The standing node monitors. Each leaf is one timer's whole job and exits

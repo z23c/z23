@@ -3816,6 +3816,9 @@ static bool nc_main_try_intercepts(const struct zcl_command_spec *spec,
     if (strcmp(spec->path, "ops.mesh.terminal") == 0 &&
         zcl_native_mesh_terminal_try_attach(words, count, consumed, rc))
         return true;
+    if (strcmp(spec->path, "ops.host.build") == 0 &&
+        zcl_native_ops_host_build_try_run(words, count, consumed, rc))
+        return true;
 #ifdef ZCL_DEV_BUILD
     if (strcmp(spec->path, "dev.loop.events") == 0 &&
         nc_dev_events_try_stream(words, count, consumed, rc))

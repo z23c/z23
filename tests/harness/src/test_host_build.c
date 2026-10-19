@@ -1,0 +1,368 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Acceptance bar for the host build queue (tools/command/build_admit.h): a
+ * job is admitted in FIFO order, never above the lane limit, runs with the
+ * scope properties the devbuild wrapper uses, keeps its exit status, and
+ * leaves scratch behind only when it failed.
+ *
+ * The scope launcher is a stub script written into a throwaway directory:
+ * it records its arguments and runs the command after `--`, so no real
+ * systemd scope is created. Admission uses real flock files in that same
+ * directory.
+ */
+
+#include "test/test_core.h"
+
+#include "command/build_admit.h"
+#include "json/json.h"
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+enum { HBT_PATH = 512, HBT_TEXT = 8192 };
+
+static void hbt_nap(long ms)
+{
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    (void)nanosleep(&ts, NULL); /* real-clock: lets forked fixture jobs reach their lock; the code under test never reads this wait */
+}
+
+/* First CPU this process may run on, from the kernel's own allowed list. */
+static bool hbt_first_cpu(char *out, size_t cap)
+{
+    char line[512];
+    unsigned cpu;
+    bool found = false;
+    FILE *f = fopen("/proc/self/status", "r");
+    while (f && !found && fgets(line, sizeof(line), f))
+        found = sscanf(line, "Cpus_allowed_list: %u", &cpu) == 1;
+    if (f)
+        fclose(f);
+    if (found)
+        (void)snprintf(out, cap, "%u", cpu);
+    return found;
+}
+
+static bool hbt_slurp(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    size_t n;
+    if (!f)
+        return false;
+    n = fread(buf, 1, cap - 1u, f);
+    buf[n] = '\0';
+    fclose(f);
+    return true;
+}
+
+static bool hbt_write_stub(const char *dir, const char *stub, const char *log)
+{
+    FILE *f = fopen(stub, "w");
+    (void)dir;
+    if (!f)
+        return false;
+    fprintf(f, "#!/bin/sh\nprintf '%%s\\n' \"$@\" > '%s'\n"
+               "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+            log);
+    fclose(f);
+    return chmod(stub, 0700) == 0;
+}
+
+static bool hbt_config(struct ba_config *cfg, const char *tmp, unsigned lanes)
+{
+    char stub[HBT_PATH], log[HBT_PATH];
+    memset(cfg, 0, sizeof(*cfg));
+    (void)snprintf(cfg->state_dir, sizeof(cfg->state_dir), "%s/state", tmp);
+    (void)snprintf(cfg->scratch_root, sizeof(cfg->scratch_root), "%s/scratch",
+                   tmp);
+    (void)snprintf(cfg->disk_path, sizeof(cfg->disk_path), "%s", tmp);
+    (void)snprintf(stub, sizeof(stub), "%s/stub", tmp);
+    (void)snprintf(log, sizeof(log), "%s/stub.args", tmp);
+    (void)snprintf(cfg->scope_launcher, sizeof(cfg->scope_launcher), "%s", stub);
+    cfg->cpu_workers = 4;
+    cfg->lanes = lanes;
+    cfg->poll_ms = 20;
+    cfg->zcc_max_mb = 8192;
+    cfg->wait = true;
+    return hbt_first_cpu(cfg->cpu_list, sizeof(cfg->cpu_list)) &&
+           hbt_write_stub(tmp, stub, log);
+}
+
+static int hbt_run(const struct ba_config *cfg, const char *const *argv)
+{
+    int argc = 0;
+    while (argv[argc])
+        argc++;
+    return ba_run(cfg, argv, argc);
+}
+
+/* A forked job: runs the command through ba_run and exits with its status. */
+static pid_t hbt_spawn(const struct ba_config *cfg, const char *const *argv)
+{
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(hbt_run(cfg, argv));
+    return pid;
+}
+
+static int hbt_reap(pid_t pid)
+{
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid)
+        return -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -2;
+}
+
+static size_t hbt_array_size(const struct json_value *doc, const char *key)
+{
+    return json_size(json_get(doc, key));
+}
+
+/* Poll ba_status until `running` and `queued` hold the wanted counts. */
+static bool hbt_wait_counts(const char *state, size_t running, size_t queued,
+                            struct json_value *doc)
+{
+    for (int i = 0; i < 300; i++) {
+        json_init(doc);
+        json_set_object(doc);
+        if (ba_status(state, doc) &&
+            hbt_array_size(doc, "running") == running &&
+            hbt_array_size(doc, "queued") == queued)
+            return true;
+        json_free(doc);
+        hbt_nap(20);
+    }
+    return false;
+}
+
+static size_t hbt_count_jobs(const char *scratch_root)
+{
+    char pool[HBT_PATH];
+    size_t n = 0;
+    DIR *d;
+    (void)snprintf(pool, sizeof(pool), "%s/z23", scratch_root);
+    d = opendir(pool);
+    for (struct dirent *e = d ? readdir(d) : NULL; e; e = readdir(d))
+        if (strncmp(e->d_name, "job.", 4) == 0)
+            n++;
+    if (d)
+        closedir(d);
+    return n;
+}
+
+static bool hbt_first_job(const char *scratch_root, char *out, size_t cap)
+{
+    char pool[HBT_PATH];
+    DIR *d;
+    (void)snprintf(pool, sizeof(pool), "%s/z23", scratch_root);
+    d = opendir(pool);
+    for (struct dirent *e = d ? readdir(d) : NULL; e; e = readdir(d)) {
+        if (strncmp(e->d_name, "job.", 4) == 0) {
+            (void)snprintf(out, cap, "%s/%s", pool, e->d_name);
+            closedir(d);
+            return true;
+        }
+    }
+    if (d)
+        closedir(d);
+    return false;
+}
+
+static int hbt_cpu_plan_tests(void)
+{
+    int failures = 0;
+    TEST("host build: the CPU plan keeps two physical cores for the host") {
+        static const char eight[] =
+            "# CPU,Core,Socket\n0,0,0\n1,0,0\n2,1,0\n3,1,0\n"
+            "4,2,0\n5,2,0\n6,3,0\n7,3,0\n";
+        static const char six[] = "0,0,0\n1,0,0\n2,1,0\n3,1,0\n4,2,0\n5,2,0\n";
+        char list[64];
+        unsigned workers = 0;
+        ASSERT(ba_cpu_plan_parse(eight, list, sizeof(list), &workers));
+        ASSERT_STR_EQ(list, "4,5,6,7");
+        ASSERT_EQ(workers, 4u);
+        ASSERT(!ba_cpu_plan_parse(six, list, sizeof(list), &workers));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hbt_scope_tests(const struct ba_config *cfg, const char *tmp)
+{
+    int failures = 0;
+    char args[HBT_TEXT], jobs[HBT_TEXT], path[HBT_PATH];
+    char job[HBT_PATH];
+
+    TEST("host build: a passing job uses the wrapper's scope properties and releases its scratch") {
+        const char *const cmd[] = { "/bin/true", NULL };
+        ASSERT_EQ(hbt_run(cfg, cmd), 0);
+        (void)snprintf(path, sizeof(path), "%s/stub.args", tmp);
+        ASSERT(hbt_slurp(path, args, sizeof(args)));
+        ASSERT(strstr(args, "--user\n--scope\n--quiet\n") != NULL);
+        ASSERT(strstr(args, "--slice=development.slice\n") != NULL);
+        ASSERT(strstr(args, "--property=CPUQuota=400%\n") != NULL);
+        ASSERT(strstr(args, "--property=MemoryMax=24G\n") != NULL);
+        ASSERT(strstr(args, "--property=MemorySwapMax=0\n") != NULL);
+        ASSERT(strstr(args, "--property=CPUWeight=20\n") != NULL);
+        ASSERT(strstr(args, "--property=IOWeight=20\n") != NULL);
+        ASSERT(strstr(args, "DEVBUILD_ACTIVE=z23\n") != NULL);
+        ASSERT(strstr(args, "/usr/bin/taskset\n--cpu-list\n") != NULL);
+        ASSERT_EQ(hbt_count_jobs(cfg->scratch_root), 0u);
+        (void)snprintf(path, sizeof(path), "%s/state/devbuild.jobs.jsonl", tmp);
+        ASSERT(hbt_slurp(path, jobs, sizeof(jobs)));
+        ASSERT(strstr(jobs, "\"project\":\"z23\"") != NULL);
+        ASSERT(strstr(jobs, "\"rc\":0,") != NULL);
+        PASS();
+    }
+
+    TEST("host build: a failing job keeps its exit status and its scratch") {
+        const char *const cmd[] = { "/bin/sh", "-c",
+            "touch \"$TMPDIR/evidence\"; exit 3", NULL };
+        char evidence[HBT_PATH + 16];
+        ASSERT_EQ(hbt_run(cfg, cmd), 3);
+        ASSERT_EQ(hbt_count_jobs(cfg->scratch_root), 1u);
+        ASSERT(hbt_first_job(cfg->scratch_root, job, sizeof(job)));
+        (void)snprintf(evidence, sizeof(evidence), "%s/evidence", job);
+        ASSERT(access(evidence, F_OK) == 0);
+        PASS();
+    }
+
+    TEST("host build: a caller-owned TMPDIR gets no scratch") {
+        struct ba_config own = *cfg;
+        const char *const cmd[] = { "/bin/true", NULL };
+        own.tmpdir_set = true;
+        ASSERT_EQ(hbt_run(&own, cmd), 0);
+        ASSERT_EQ(hbt_count_jobs(cfg->scratch_root), 1u);
+        PASS();
+    }
+
+    TEST("host build: a descendant still holding the scratch retains it") {
+        const char *const cmd[] = { "/bin/sh", "-c",
+            "sleep 1 >/dev/null 2>&1 & exit 0", NULL };
+        ASSERT_EQ(hbt_run(cfg, cmd), 0);
+        ASSERT_EQ(hbt_count_jobs(cfg->scratch_root), 2u);
+        hbt_nap(1200);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hbt_reserve_tests(const struct ba_config *cfg, const char *tmp)
+{
+    int failures = 0;
+    TEST("host build: a free-space reserve refusal defers the job and runs nothing") {
+        struct ba_config low = *cfg;
+        char marker[HBT_PATH + 16];
+        const char *cmd[4] = { "/usr/bin/touch", marker, NULL, NULL };
+        (void)snprintf(marker, sizeof(marker), "%s/ran", tmp);
+        low.reserve_gib = 1u << 30;
+        ASSERT_EQ(hbt_run(&low, cmd), BA_EXIT_DEFERRED);
+        ASSERT(access(marker, F_OK) != 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hbt_limit_tests(const char *tmp)
+{
+    int failures = 0;
+    struct ba_config cfg;
+    struct json_value doc;
+    const char *const hold[] = { "/bin/sleep", "2", NULL };
+    const char *const quick[] = { "/bin/true", NULL };
+    pid_t a = -1, b = -1;
+
+    TEST("host build: the lane limit holds and a busy host refuses without --wait") {
+        ASSERT(hbt_config(&cfg, tmp, 2));
+        a = hbt_spawn(&cfg, hold);
+        b = hbt_spawn(&cfg, hold);
+        ASSERT(a > 0 && b > 0);
+        ASSERT(hbt_wait_counts(cfg.state_dir, 2, 0, &doc));
+        json_free(&doc);
+        cfg.wait = false;
+        ASSERT_EQ(hbt_run(&cfg, quick), BA_EXIT_DEFERRED);
+        ASSERT_EQ(hbt_reap(a), 0);
+        ASSERT_EQ(hbt_reap(b), 0);
+        cfg.wait = true;
+        ASSERT_EQ(hbt_run(&cfg, quick), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hbt_order_tests(const char *tmp)
+{
+    int failures = 0;
+    struct ba_config cfg;
+    struct json_value doc;
+    char order[HBT_PATH], text[256];
+    char cmd_b[HBT_PATH + 64], cmd_c[HBT_PATH + 64];
+    const char *const hold[] = { "/bin/sleep", "1", NULL };
+    pid_t a = -1, b = -1, c = -1;
+
+    TEST("host build: waiting jobs are admitted in arrival order") {
+        const char *job_b[] = { "/bin/sh", "-c", cmd_b, NULL };
+        const char *job_c[] = { "/bin/sh", "-c", cmd_c, NULL };
+        ASSERT(hbt_config(&cfg, tmp, 1));
+        (void)snprintf(order, sizeof(order), "%s/order", tmp);
+        (void)snprintf(cmd_b, sizeof(cmd_b), "echo B >> %s", order);
+        (void)snprintf(cmd_c, sizeof(cmd_c), "echo C >> %s", order);
+        a = hbt_spawn(&cfg, hold);
+        ASSERT(hbt_wait_counts(cfg.state_dir, 1, 0, &doc));
+        json_free(&doc);
+        b = hbt_spawn(&cfg, job_b);
+        ASSERT(hbt_wait_counts(cfg.state_dir, 1, 1, &doc));
+        json_free(&doc);
+        c = hbt_spawn(&cfg, job_c);
+        ASSERT(hbt_wait_counts(cfg.state_dir, 1, 2, &doc));
+        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&doc, "queued"), 0),
+                                        "pid")), (int64_t)b);
+        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&doc, "queued"), 1),
+                                        "pid")), (int64_t)c);
+        json_free(&doc);
+        ASSERT_EQ(hbt_reap(a), 0);
+        ASSERT_EQ(hbt_reap(b), 0);
+        ASSERT_EQ(hbt_reap(c), 0);
+        ASSERT(hbt_slurp(order, text, sizeof(text)));
+        ASSERT_STR_EQ(text, "B\nC\n");
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+int test_host_build(void)
+{
+    int failures = 0;
+    char tmp[HBT_PATH] = "", scope_tmp[HBT_PATH] = "";
+    struct ba_config cfg;
+
+    failures += hbt_cpu_plan_tests();
+    if (!test_mkdtemp(tmp, sizeof(tmp), "host_build") ||
+        !hbt_config(&cfg, tmp, 1)) {
+        printf("test_host_build: fixture failed\n");
+        return failures + 1;
+    }
+    (void)snprintf(scope_tmp, sizeof(scope_tmp), "%s", tmp);
+    failures += hbt_scope_tests(&cfg, tmp);
+    failures += hbt_reserve_tests(&cfg, tmp);
+    failures += hbt_limit_tests(tmp);
+    failures += hbt_order_tests(tmp);
+    (void)test_rm_rf_recursive(tmp);
+    if (failures == 0)
+        printf("test_host_build: all passed\n");
+    else
+        printf("test_host_build: %d FAILED\n", failures);
+    return failures;
+}
