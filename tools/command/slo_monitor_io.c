@@ -621,3 +621,16 @@ bool slo_io_pages_path(char *out, size_t cap)
     }
     return slo_monitor_file("pages.jsonl", out, cap);
 }
+
+/* Public one-shot legacy RPC (same credentials and bounds as the SLO probe)
+ * for the legacy status leaf. Returns the raw JSON body or failure text. */
+char *slo_io_legacy_call(const char *datadir, int rpcport, const char *method,
+                         long timeout_ms_value)
+{
+    struct slo_instance at;
+    memset(&at, 0, sizeof(at));
+    snprintf(at.datadir, sizeof(at.datadir), "%s", datadir);
+    at.rpcport = rpcport;
+    (void)timeout_ms_value;
+    return legacy_raw(&at, method);
+}

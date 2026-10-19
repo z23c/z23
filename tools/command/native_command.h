@@ -2065,6 +2065,19 @@ void zcl_native_handle_ops_host_jobs(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.host.legacy.status / .seed — legacy zclassicd oracle and bootstrap
+ * datadirs: identity, lock, RPC height, ports, and the two-phase seed. */
+void zcl_native_handle_ops_host_legacy_status(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+/* Test seam: replaces the loopback legacy RPC of ops.host.legacy.status. */
+void zcl_native_legacy_status_set_rpc(char *(*fn)(const char *datadir,
+                                                  int rpcport,
+                                                  const char *method));
+void zcl_native_handle_ops_host_legacy_seed(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.debug.meaning — node-free field ontology + question index. Answers
  * "what does this telemetry field mean, is this value bad, and which report
  * answers my question" straight out of the binary's static tables, with no

@@ -189,6 +189,10 @@ static bool devagent_scoped_bool(const char *path, const char *key,
         /* ops.host.gc's `--apply`: the one switch that turns the host
          * sweep from a classification report into a removal. */
         { "ops.host.gc", "apply" },
+        /* ops.host.legacy.status: the RPC-free identity gate the units run, and
+         * the switch that skips the loopback RPC calls. */
+        { "ops.host.legacy.status", "identity_only" },
+        { "ops.host.legacy.status", "rpc" },
         { "app.invoke.package", "accept_execution" },
         { "app.run.confined", "accept_execution" },
         { "ops.mesh.device.host.package.run", "accept_execution" },
@@ -236,6 +240,49 @@ static bool devagent_host_gc_input(const char *path, const char *key,
         return true;
     }
     if (strcmp(key, "roots") == 0) {
+        *type_ok = value->type == JSON_ARR && json_size(value) >= 1u &&
+                   json_size(value) <= 8u;
+        return true;
+    }
+    return false;
+}
+
+/* ops.host.legacy.status / .seed typed inputs. `--z23_rpcport=18232` and
+ * `--max_gap=2` type as integers and `instances` is an array of objects, so
+ * the default string branch would make both leaves uninvokable from a shell
+ * while raw JSON through a handler worked. The handlers re-validate; this
+ * only admits the shape inside the published bounds. */
+static bool devagent_host_legacy_input(const char *path, const char *key,
+                                       const struct json_value *value,
+                                       bool *type_ok)
+{
+    static const struct {
+        const char *path;
+        const char *key;
+        long long lo;
+        long long hi;
+    } ints[] = {
+        { "ops.host.legacy.status", "z23_rpcport", 1, 65535 },
+        { "ops.host.legacy.status", "z23_height", 0, 2000000000LL },
+        { "ops.host.legacy.status", "now_unix", 0, 4000000000LL },
+        { "ops.host.legacy.seed", "max_gap", 0, 1000000 },
+        { "ops.host.legacy.seed", "source_height", 0, 2000000000LL },
+        { "ops.host.legacy.seed", "z23_height", 0, 2000000000LL },
+        { "ops.host.legacy.seed", "workers", 1, 16 },
+        { "ops.host.legacy.seed", "margin_mib", 0, 1048576 },
+    };
+    if (!path)
+        return false;
+    for (size_t i = 0; i < sizeof ints / sizeof ints[0]; i++) {
+        if (strcmp(path, ints[i].path) != 0 || strcmp(key, ints[i].key) != 0)
+            continue;
+        *type_ok = value->type == JSON_INT &&
+                   json_get_int(value) >= ints[i].lo &&
+                   json_get_int(value) <= ints[i].hi;
+        return true;
+    }
+    if (strcmp(path, "ops.host.legacy.status") == 0 &&
+        strcmp(key, "instances") == 0) {
         *type_ok = value->type == JSON_ARR && json_size(value) >= 1u &&
                    json_size(value) <= 8u;
         return true;
@@ -351,6 +398,8 @@ bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
     if (devagent_scoped_bool(path, key, value, type_ok))
         return true;
     if (devagent_host_gc_input(path, key, value, type_ok))
+        return true;
+    if (devagent_host_legacy_input(path, key, value, type_ok))
         return true;
     if (devagent_resident_generation(path, key, value, type_ok))
         return true;

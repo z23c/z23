@@ -1733,3 +1733,10 @@ ZCL_TEST_GROUP(lab_promote)
 ZCL_TEST_GROUP(wiki_tree)
 ZCL_TEST_GROUP(wiki_code)
 ZCL_TEST_GROUP(wiki_docs_install)
+/* ops.host.legacy.seed / .status: fake legacy datadirs built in the test; the
+ * seed is byte-identical, never copies wallet or key files, refuses an
+ * existing target, a locked or running source, symlinks, a foreign owner,
+ * too little space and a stale source, leaves no target after a mid-copy
+ * failure and resumes the stage; status flags a wrong binary and shared
+ * ports. */
+ZCL_TEST_GROUP(legacy_seed)

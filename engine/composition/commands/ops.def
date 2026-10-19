@@ -1017,6 +1017,58 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_host_jobs)
 
+ZCL_COMMAND_BRANCH("ops.host.legacy", "ops.host", "Legacy zclassicd nodes",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.host.legacy.status", "ops.host.legacy", "ops.legacy.status",
+    "Legacy zclassicd oracle and bootstrap node status",
+    "Per configured instance: the binary's sha256 against its pin (match, "
+    "mismatch, missing, unpinned), running or not (pid file or a lock held on "
+    "<datadir>/.lock), the legacy RPC height, the z23 tip and the gap, and "
+    "the catch-up rate (blocks per minute) and ETA from the caller's previous "
+    "height sample. Reports port conflicts among the instances. With "
+    "identity_only:true it checks one binary against its pin with no RPC and "
+    "exits non-zero unless it matches: the ExecStartPre gate of the units.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "legacy,zclassicd,oracle,bootstrap,identity,sha256,ports,eta,status",
+    "zcl.legacy_status.input.v1", "zcl.legacy_status.v1",
+    "instances,z23_datadir,z23_rpcport,z23_height,rpc,now_unix,identity_only,"
+    "binary,sha256,node_conf",
+    "",
+    "z23 ops host legacy status --identity_only=true --binary=<zclassicd> --sha256=<pin>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_host_legacy_status)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.host.legacy.seed", "ops.host.legacy", "ops.legacy.seed",
+    "Seed a new legacy datadir from a synced one",
+    "Plan, stage, finish. step=plan (default) runs every refusal and returns "
+    "the plan_id. step=stage (confirm:true and plan_id) copies the immutable "
+    "blk/rev files into <target>.tmp while the source may still run; "
+    "resumable. step=finish needs the source stopped (pid file and lock "
+    "free), holds its lock, copies the tail pair, blocks/index and "
+    "chainstate, fsyncs, then hashes the manifest, writes seed-receipt.json "
+    "and renames <target>.tmp to <target> without replacing. Refuses an "
+    "existing target, a running or locked source, a source more than "
+    "max_gap blocks behind the z23 tip when both heights are given, "
+    "symlinks, foreign owners and too little free space. Never copies "
+    "wallet or key files. Reports downtime_ms, the finish copy window.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "legacy,zclassicd,seed,oracle,bootstrap,copy,datadir,plan,confirm",
+    "zcl.legacy_seed.input.v1", "zcl.legacy_seed.v1",
+    "source,target,step,plan_id,confirm,max_gap,source_height,z23_height,"
+    "margin_mib,workers",
+    "source,target",
+    "z23 ops host legacy seed --input='{\"source\":\"<datadir>\",\"target\":\"<newdatadir>\"}'",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_host_legacy_seed)
+
 /* ── ops.host.slo ──────────────────────────────────────────────────────────
  * The standing node monitors. Each leaf is one timer's whole job and exits
  * non-zero exactly when that timer's unit should show as failed. They nest

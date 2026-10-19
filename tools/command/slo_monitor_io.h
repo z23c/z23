@@ -10,6 +10,10 @@
 #include "services/slo_monitor.h"
 
 /* Instance table and thresholds, from the unit files and ZCL_SLO_* env. */
+/* One legacy-node RPC call on loopback; caller frees. Bounded by ZCL_SLO_RPC_TIMEOUT_SEC. */
+char *slo_io_legacy_call(const char *datadir, int rpcport, const char *method,
+                         long timeout_ms);
+
 bool slo_io_probe_config(struct slo_probe_config *cfg);
 
 /* Observers bound to the local host. `timeouts` come from ZCL_SLO_* env. */
