@@ -545,6 +545,23 @@ static int test_seed_phase_b(const char *root)
         ASSERT_EQ(access(victim, F_OK), 0);
         PASS();
     }
+    TEST("legacy seed: a top-level source file removed between the phases does not fail finish") {
+        struct lseed_request req;
+        struct lseed_result res;
+        char why[256], pb[LST_PATH], src[LST_PATH], path[LST_PATH];
+        lst_reset_hooks();
+        (void)snprintf(pb, sizeof(pb), "%s/pb", root);
+        (void)snprintf(src, sizeof(src), "%s/src", pb);
+        ASSERT(lst_put(src, "peers.dat", 64, 3));
+        lst_req(&req, pb, "top");
+        ASSERT_EQ(lseed_stage(&req, &res, why, sizeof(why)), LSEED_OK);
+        (void)snprintf(path, sizeof(path), "%s/peers.dat", src);
+        ASSERT_EQ(unlink(path), 0);
+        ASSERT_EQ(lseed_finish(&req, &res, why, sizeof(why)), LSEED_OK);
+        ASSERT(!lst_exists(pb, "top", "peers.dat"));
+        ASSERT(lst_trees_equal(pb, "top"));
+        PASS();
+    }
 _test_next:;
     return failures;
 }
@@ -672,6 +689,8 @@ static int test_seed_handler(const char *root)
         ASSERT(lst_call(zcl_native_handle_ops_host_legacy_seed, in, &r));
         ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
         ASSERT(json_get(&r.data, "downtime_ms") != NULL);
+        ASSERT(json_get(&r.data, "phase_b_files") != NULL);
+        ASSERT(json_get(&r.data, "phase_b_bytes") != NULL);
         zcl_command_reply_free(&r);
         ASSERT(lst_tree_identical(root, "leaf"));
         PASS();

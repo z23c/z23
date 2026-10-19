@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * The legacy seed copier: reflink first, then copy_file_range, then
- * read/write; a bounded worker pool; one fsync per file after the mtime is
- * set, so the data and the resume stamp reach disk together. */
+ * read/write; a bounded worker pool; data fsynced before the mtime is set so
+ * a crashed partial file can never satisfy the resume check. */
 
 #ifndef _WIN32
 
@@ -112,7 +112,7 @@ static bool lseed_finish_file(int out, const struct lseed_ent *e)
 {
     struct timespec ts[2] = { { e->mtime_s, e->mtime_ns },
                               { e->mtime_s, e->mtime_ns } };
-    return futimens(out, ts) == 0 && fsync(out) == 0;
+    return fsync(out) == 0 && futimens(out, ts) == 0 && fsync(out) == 0;
 }
 
 static int lseed_copy_one(struct pool *p, const struct lseed_ent *e)
@@ -290,7 +290,9 @@ static bool lseed_unlink_beneath(int dstroot, const char *rel, bool dir)
 {
     char parent[LSEED_PATH_MAX];
     const char *slash = strrchr(rel, '/');
-    if (!slash || (size_t)(slash - rel) >= sizeof(parent))
+    if (!slash) /* dstroot is already the confined root fd */
+        return unlinkat(dstroot, rel, dir ? AT_REMOVEDIR : 0) == 0;
+    if ((size_t)(slash - rel) >= sizeof(parent))
         return false;
     (void)snprintf(parent, sizeof(parent), "%.*s", (int)(slash - rel), rel);
     int pfd = lseed_open_beneath(dstroot, parent, O_RDONLY | O_DIRECTORY, 0);

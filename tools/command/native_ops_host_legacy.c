@@ -128,6 +128,8 @@ static void ohl_push_result(struct zcl_command_reply *reply,
                            (int64_t)r->excluded_files);
     (void)json_push_kv_int(&reply->data, "stage_ms", (int64_t)r->stage_ms);
     (void)json_push_kv_int(&reply->data, "downtime_ms", (int64_t)r->phase_b_ms);
+    (void)json_push_kv_int(&reply->data, "phase_b_files", (int64_t)r->phase_b_files);
+    (void)json_push_kv_int(&reply->data, "phase_b_bytes", (int64_t)r->phase_b_bytes);
     (void)json_push_kv_int(&reply->data, "hash_ms", (int64_t)r->hash_ms);
     if (r->manifest_sha3[0]) {
         (void)json_push_kv_str(&reply->data, "manifest_sha3", r->manifest_sha3);

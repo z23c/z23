@@ -179,7 +179,8 @@ never printed.
    longer has (compacted `.ldb` files) are deleted, confined to the target
    tree. It then fsyncs, hashes the manifest, writes `seed-receipt.json`
    (`phase_b_ms`, `phase_b_files`, `phase_b_bytes`) and renames atomically.
-   `downtime_ms` is the copy window with the oracle down:
+   `downtime_ms` is the copy window with the oracle down; `phase_b_files` and
+   `phase_b_bytes` count what that window copied:
 
    ```
    z23 ops host legacy seed --input='{"source":"<oracle datadir>","target":"<bootstrap datadir>","step":"finish","confirm":true,"plan_id":"<id>"}'
