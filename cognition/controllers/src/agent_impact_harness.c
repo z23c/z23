@@ -338,10 +338,23 @@ static bool aih_span_has_bounded_needle(const char *s, size_t slen,
     return false;
 }
 
+enum aih_match { AIH_MATCH_SUBSTRING, AIH_MATCH_BOUNDED, AIH_MATCH_EXACT };
+
+static bool aih_span_matches(enum aih_match mode, const char *s, size_t slen,
+                             const char *needle, size_t needle_len)
+{
+    if (mode == AIH_MATCH_EXACT)
+        return slen == needle_len && memcmp(s, needle, slen) == 0;
+    return mode == AIH_MATCH_BOUNDED
+        ? aih_span_has_bounded_needle(s, slen, needle, needle_len)
+        : aih_span_has_needle(s, slen, needle, needle_len);
+}
+
 /* Walks every string literal in `text` (honoring backslash escapes) and
- * reports whether any one of them contains `needle` — bounded to a whole
- * token when `bounded` is set, an unbounded substring scan otherwise. */
-static bool aih_scan_literal_spans(const char *text, const char *needle, bool bounded)
+ * reports whether any one of them matches `needle`: as a substring, as a
+ * whole token, or (EXACT) as the entire literal. */
+static bool aih_scan_literal_spans(const char *text, const char *needle,
+                                   enum aih_match mode)
 {
     if (!text || !needle || !needle[0])
         return false;
@@ -350,44 +363,36 @@ static bool aih_scan_literal_spans(const char *text, const char *needle, bool bo
     const char *lit_start = NULL;
     for (const char *p = text;; p++) {
         char c = *p;
-        if (c == '\0') {
-            if (in_str) {
-                size_t slen = (size_t)(p - lit_start);
-                return bounded
-                    ? aih_span_has_bounded_needle(lit_start, slen, needle, needle_len)
-                    : aih_span_has_needle(lit_start, slen, needle, needle_len);
-            }
-            return false;
-        }
+        if (c == '\0')
+            return in_str && aih_span_matches(mode, lit_start,
+                       (size_t)(p - lit_start), needle, needle_len);
         if (!in_str) {
             if (c == '"') { in_str = true; lit_start = p + 1; }
             continue;
         }
         if (c == '\\' && p[1]) { p++; continue; }
         if (c == '"') {
-            size_t slen = (size_t)(p - lit_start);
-            bool hit = bounded
-                ? aih_span_has_bounded_needle(lit_start, slen, needle, needle_len)
-                : aih_span_has_needle(lit_start, slen, needle, needle_len);
-            if (hit)
+            if (aih_span_matches(mode, lit_start, (size_t)(p - lit_start),
+                                 needle, needle_len))
                 return true;
             in_str = false;
         }
     }
 }
 
-static bool aih_scan_literals(const char *text, const char *needle, bool bounded)
+static bool aih_scan_literals(const char *text, const char *needle,
+                              enum aih_match mode)
 {
     /* Literal matching uses contiguous raw bytes; absence anywhere in the
      * input rules out a hit without repeatedly parsing quotes and escapes. */
     if (!text || !needle || !needle[0] || !strstr(text, needle))
         return false;
-    return aih_scan_literal_spans(text, needle, bounded);
+    return aih_scan_literal_spans(text, needle, mode);
 }
 
 bool agent_impact_string_literal_contains(const char *text, const char *needle)
 {
-    return aih_scan_literals(text, needle, false);
+    return aih_scan_literals(text, needle, AIH_MATCH_SUBSTRING);
 }
 
 /* Same as agent_impact_string_literal_contains(), but the match must land
@@ -397,7 +402,7 @@ bool agent_impact_string_literal_contains(const char *text, const char *needle)
  * identifiers). */
 bool agent_impact_string_literal_contains_whole_token(const char *text, const char *needle)
 {
-    return aih_scan_literals(text, needle, true);
+    return aih_scan_literals(text, needle, AIH_MATCH_BOUNDED);
 }
 
 /* `path`'s basename with the .c extension stripped; false when it does not
@@ -469,10 +474,54 @@ static void aih_merge_referrer_hit(const char *referrer_path,
     }
 }
 
+/* True for a path with an extension other than .c/.h: a fixture, table or
+ * document that a test reads by name rather than #includes. A root-level
+ * file (no directory) is too ambiguous a name to scan for. */
+static bool aih_path_is_data_file(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+        return false; // raw-return-ok:not-a-data-reference
+    const char *base = slash + 1;
+    const char *dot = strrchr(base, '.');
+    if (!dot || dot == base || !dot[1])
+        return false; // raw-return-ok:not-a-data-reference
+    return strcmp(dot, ".c") != 0 && strcmp(dot, ".h") != 0;
+}
+
+/* A test reads a data file through its full repo-relative path in one
+ * literal, or through a directory macro joined to the file name
+ * (DIR "/weights.tsv"). So: the full path as a whole token, or the basename
+ * as a whole token PLUS the parent directory in any literal of the same file
+ * (a distinctive basename with '_' and 12+ bytes may stand alone). A bare
+ * basename without its directory is no evidence, e.g. a temp "%s/weights.tsv". */
+static bool aih_data_referrer_hits(const char *text, const char *path)
+{
+    if (agent_impact_string_literal_contains_whole_token(text, path))
+        return true;
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+        return false; // raw-return-ok:not-a-data-reference
+    const char *base = slash + 1;
+    if (!agent_impact_string_literal_contains_whole_token(text, base))
+        return false; // raw-return-ok:not-a-data-reference
+    if (strchr(base, '_') && strlen(base) >= 12)
+        return true;
+    char dir[512];
+    size_t dlen = (size_t)(slash - path);
+    if (dlen >= sizeof(dir))
+        return false; // raw-return-ok:not-a-data-reference
+    memcpy(dir, path, dlen);
+    dir[dlen] = '\0';
+    return aih_scan_literals(text, dir, AIH_MATCH_EXACT);
+}
+
 static bool aih_referrer_hits(const char *text, const char *path,
                               const char *stem, const char *alt,
                               bool has_alt, bool compound)
 {
+    if (!stem)
+        return aih_data_referrer_hits(text, path);
     if (compound) {
         /* Distinctive compound token (has '-' or '_'): the plain unbounded
          * substring scan this file has always used — a hit anywhere inside
@@ -546,21 +595,30 @@ static bool aih_path_can_be_name_referenced(const char *path)
 bool agent_impact_name_routes_snapshot(const char *path,
     struct agent_impact_acc *acc, const struct agent_impact_snapshot *snapshot)
 {
-    if (!path || !acc || !aih_path_can_be_name_referenced(path))
+    if (!path || !acc)
         return false;
     char stem[ZCL_AGENT_IMPACT_GROUP_MAX];
-    if (!aih_basename_stem(path, stem))
-        return false; // raw-return-ok:not-eligible-for-name-reference
     char alt[ZCL_AGENT_IMPACT_GROUP_MAX];
-    bool has_alt = aih_underscore_variant(stem, alt);
-    bool compound = aih_stem_is_compound(stem);
+    /* A data file (stem == NULL below) is matched by its path, anywhere in
+     * the tree; a .c source keeps the tools/-only binary-name scan. */
+    bool data = aih_path_is_data_file(path);
+    const char *stem_arg = NULL;
+    bool has_alt = false, compound = false;
+    if (!data) {
+        if (!aih_path_can_be_name_referenced(path) ||
+            !aih_basename_stem(path, stem))
+            return false; // raw-return-ok:not-eligible-for-name-reference
+        has_alt = aih_underscore_variant(stem, alt);
+        compound = aih_stem_is_compound(stem);
+        stem_arg = stem;
+    }
 
     bool matched = false;
     if (snapshot) {
         for (size_t i = 0; i < snapshot->count; i++) {
             const struct aih_snapshot_row *row = &snapshot->rows[i];
             if (strcmp(row->path, path) == 0 ||
-                !aih_referrer_hits(row->text, path, stem, alt, has_alt, compound)) continue;
+                !aih_referrer_hits(row->text, path, stem_arg, alt, has_alt, compound)) continue;
             struct agent_impact_acc found = {0};
             if (!agent_impact_harness_routes_snapshot(row->path, &found, snapshot))
                 (void)agent_impact_apply_shared_rules(row->path, &found);
@@ -570,8 +628,8 @@ bool agent_impact_name_routes_snapshot(const char *path,
         return matched;
     }
     for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS) / sizeof(AIH_REFERRER_DIRS[0]); d++)
-        aih_scan_dir_for_reference(AIH_REFERRER_DIRS[d], path, stem, alt, has_alt,
-                                   compound, acc, &matched);
+        aih_scan_dir_for_reference(AIH_REFERRER_DIRS[d], path, stem_arg, alt,
+                                   has_alt, compound, acc, &matched);
     return matched;
 }
 

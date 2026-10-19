@@ -11636,6 +11636,67 @@ static int test_ic_name_reference_single_word_stem_is_bounded(void)
     return failures;
 }
 
+/* Runs `code tests <path>` and reports whether test_groups holds `group`;
+ * *count gets the number of listed groups. */
+static bool ic_code_tests_has_group(const char *path, const char *group,
+                                    size_t *count)
+{
+    struct zcl_command_reply reply;
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    (void)json_push_kv_str(&input, "path", path);
+    struct zcl_command_request request = {
+        .input = &input, .view = "normal", .invoked_name = "code.tests",
+    };
+    zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+    zcl_native_handle_code_tests(&request, &reply);
+    const struct json_value *groups = json_get(&reply.data, "test_groups");
+    bool seen = false;
+    if (count) *count = groups ? groups->num_children : 0;
+    for (size_t i = 0; groups && i < groups->num_children; i++) {
+        const char *g = json_get_str(&groups->children[i]);
+        if (g && group && strcmp(g, group) == 0)
+            seen = true;
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return seen;
+}
+
+static int test_ic_data_file_routes_to_reading_test_group(void)
+{
+    int failures = 0;
+    TEST("code tests: a fixture/data file routes to the test group whose "
+         "source names it, directory macro joined to the file name included") {
+        size_t n = 0;
+        /* dev_shadow_select joins a directory macro to "/weights.tsv" and
+         * asserts the row order. Paths are split so this file is no
+         * referrer of them. */
+        ASSERT(ic_code_tests_has_group(
+            "tools/dev/fixtures/shadow_select/" "weights.tsv",
+            "dev_shadow_select", &n));
+        ASSERT(ic_code_tests_has_group(
+            "tools/dev/fixtures/shadow_select/" "corpus.tsv",
+            "dev_shadow_select", &n));
+        /* a full-path literal reference in several groups. */
+        ASSERT(ic_code_tests_has_group(
+            "tools/dev/test_group_" "catalog.def", "dev_land", &n));
+        /* a data path no test names adds no group beyond the lint floor
+         * (pieces split so this file is no referrer of it). */
+        ASSERT(!ic_code_tests_has_group(
+            "tools/dev/fixtures/shadow_" "select/zz_unread_" "fixture.tsv",
+            "dev_shadow_select", &n));
+        ASSERT(n <= 1);
+        /* a bare "%s/weights.tsv" temp-dir join elsewhere is no evidence
+         * for an unrelated directory's weights.tsv. */
+        ASSERT(!ic_code_tests_has_group(
+            "docs/unrel" "ated_dir/" "weights.tsv", "test_group_selector", &n));
+        ASSERT(n <= 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_harness_no_owner_stays_unmatched(void)
 {
     int failures = 0;
@@ -13131,6 +13192,7 @@ int test_impact_composition(void)
     failures += test_ic_harness_windows_acceptance_table();
     failures += test_ic_harness_name_reference_secondary_candidate();
     failures += test_ic_name_reference_single_word_stem_is_bounded();
+    failures += test_ic_data_file_routes_to_reading_test_group();
     failures += test_ic_harness_no_owner_stays_unmatched();
     failures += test_ic_fuzz_toolchain_decision_table();
     failures += test_ic_fuzz_llvm_selection_table();

@@ -774,12 +774,12 @@ static int test_code_guide_brief_edges(void)
     struct zcl_command_reply reply;
     TEST("code.guide brief marks unmapped paths and refuses bad input") {
         ASSERT(brief_fixture(root, sizeof(root)));
-        ASSERT(brief_run(root, "{\"paths\":\"does/not/exist.xyz\"}", &reply, why,
+        ASSERT(brief_run(root, "{\"paths\":\"does/not/" "exist.xyz\"}", &reply, why,
                          sizeof(why)));
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT(json_get_bool(json_get(&reply.data, "tests_unmapped")));
         ASSERT_STR_EQ(json_get_str(json_at(json_get(&reply.data, "next"), 0)),
-                      "build/bin/z23 code cost does/not/exist.xyz");
+                      "build/bin/z23 code cost does/not/" "exist.xyz");
         ASSERT_STR_EQ(json_get_str(json_get(json_at(json_get(&reply.data, "owners"), 0), "file")),
                       "AGENTS.md");
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "lessons_unavailable")),
@@ -794,7 +794,7 @@ static int test_code_guide_brief_edges(void)
         ASSERT(brief_run(root, "{\"paths\":[\"a\\u0001b.c\"]}", &reply, why, sizeof(why)));
         ASSERT_STR_EQ(reply.error.code, "BAD_CODE_GUIDE_INPUT");
         zcl_command_reply_free(&reply);
-        ASSERT(brief_run(root, "{\"paths\":\"tools/x.c,does/not/exist.xyz\"}", &reply, why,
+        ASSERT(brief_run(root, "{\"paths\":\"tools/x.c,does/not/" "exist.xyz\"}", &reply, why,
                          sizeof(why)));
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ(json_size(json_get(&reply.data, "owners")), 2u);
