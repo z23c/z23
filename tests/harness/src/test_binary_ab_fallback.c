@@ -345,8 +345,8 @@ static int ab_unit_refusal_cases(const char *dir)
 static int ab_nodectl_unit_contract(void)
 {
     int failures = 0;
-    char tmpl[] = "/tmp/zcl_unit_XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_unit");
     if (!dir) {
         printf("ab: mkdtemp failed - cannot run unit contract\n");
         return 1;
