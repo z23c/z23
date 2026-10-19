@@ -288,7 +288,7 @@ The C3 recipe starts by minting a fresh near-tip bundle from a producer session
 whose source identity matches the candidate. Ask the canonical node directly:
 
 ```bash
-zclassic23 -rpcport=18232 -datadir=~/.zclassic-c23 dumpstate bundle_exporter
+z23 -rpcport=18232 -datadir=~/.zclassic-c23 dumpstate bundle_exporter
 ```
 
 `session_open:false` with a `degradation_reason` naming a session/binary/source

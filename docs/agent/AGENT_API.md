@@ -276,7 +276,7 @@ for agents. In addition to raw `text_records`, read `service_records[]` and
 `next_action`. The nested
 `contract_resolution` object is `zcl.names.service_contract_resolution.v1`;
 `status=resolved` means the chain-projected service hint maps to a canonical
-Zclassic23 service contract and, when present, operation contract. Unknown
+Z23 service contract and, when present, operation contract. Unknown
 service hints remain visible but are explicitly marked `service_unknown` so
 agents do not treat arbitrary text records as trusted node capabilities. The
 nested `runtime_probe` is the same `zcl.service_runtime_probe.v1` object

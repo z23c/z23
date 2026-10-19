@@ -150,7 +150,7 @@ is the cheap front door (present → nothing, else hardlink, else build).
 
 **The stub is a dev-only opt-in.** `make ZCL_TOR=stub ...` links
 `vendor/lib/libtor_stub.a`, whose every entry point fails. It prints one
-loud line while building, `zclassic23 -version` reports `tor: stub`, the
+loud line while building, `z23 -version` reports `tor: stub`, the
 binary refuses `-tor`, the onion flags and onion-node mode at runtime, and
 no ship or install step will package it.
 

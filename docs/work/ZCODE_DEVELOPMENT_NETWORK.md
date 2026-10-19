@@ -630,7 +630,7 @@ service:
 7. restart every participant and prove the task, leases, candidate, evidence,
    acceptance, and release remain reconstructible from durable objects.
 
-The self-hosting milestone repeats the path for a real Zclassic23 change.
+The self-hosting milestone repeats the path for a real Z23 change.
 
 ## Creation-backed issuance ordering
 

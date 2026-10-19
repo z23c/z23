@@ -14,16 +14,16 @@ The closed source registry (the complete list of accepted sources) is
 `engine/composition/sources.def`. Its X-macro rows are expanded by the
 source catalog; each row is
 `Z23_SOURCE(id_, kind_, root_, path_, format_, why_)`. It declares four
-sources. The zclassic23 state root is `~/.local/state/zclassic23`; the
+sources. The Z23 state root is `~/.local/state/zclassic23`; the
 native dev-state root is resolved by `platform_state_root()`. JSONL stores
 one JSON object per line; TSV stores tab-separated values.
 
 | id | kind | path | format |
 | --- | --- | --- | --- |
-| `board` | `board_rows` | `board/*.jsonl` under the zclassic23 state root | jsonl |
-| `experiments` | `experiment_rows` | `experiments/rows.tsv` under the zclassic23 state root | tsv | <!-- doc-path-ok: a runtime path under the state root, not a repo path -->
+| `board` | `board_rows` | `board/*.jsonl` under the Z23 state root | jsonl |
+| `experiments` | `experiment_rows` | `experiments/rows.tsv` under the Z23 state root | tsv | <!-- doc-path-ok: a runtime path under the state root, not a repo path -->
 | `landing` | `landing_outcomes` | `land/outcomes.jsonl` under the native dev-state root | jsonl |
-| `logs` | `log_lines` | every `*.log` under the zclassic23 state root | text_kv (free text + extracted `key=value` tokens) |
+| `logs` | `log_lines` | every `*.log` under the Z23 state root | text_kv (free text + extracted `key=value` tokens) |
 
 A source id not declared in `sources.def` cannot be ingested, filtered by
 `--source=`, or reported by `status`. Source paths are derived from

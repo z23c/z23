@@ -1,7 +1,7 @@
 # NAT traversal, onion hosting, and fast P2P transport — design notes
 
 > **Owner decision: onion P2P transport runs on the raw
-> dynhost stream API, NO SOCKS.** zclassic23 never proxies P2P through a
+> dynhost stream API, NO SOCKS.** Z23 never proxies P2P through a
 > SOCKS port. Outbound onion dials use the fork's raw bidirectional stream
 > API (`dynhost_stream_open/write/close`,
 > `vendor/tor/src/feature/dynhost/dynhost_stream.h`) via the socketpair <!-- doc-path-ok: vendor/tor is a submodule; the dynhost fork header lives inside it -->
