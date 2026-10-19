@@ -1418,6 +1418,7 @@ int main(int argc, char **argv)
     failures += test_model_fields();
     failures += test_sync_service();
     failures += test_node_db_catchup_service();
+    failures += test_wallet_witness_advance();
     failures += test_catchup_lifecycle_service();
     failures += test_sync_state_fsm();
     failures += test_heartbeat();

@@ -401,6 +401,7 @@ int test_db_txn(void);
 int test_model_fields(void);
 int test_sync_service(void);
 int test_node_db_catchup_service(void);
+int test_wallet_witness_advance(void);
 int test_catchup_lifecycle_service(void);
 int test_sync_state_fsm(void);
 int test_heartbeat(void);

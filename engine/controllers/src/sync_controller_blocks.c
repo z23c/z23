@@ -151,6 +151,33 @@ bool sync_wallet_note_nullifier_refresh_for_test(
 #endif
 
 
+/* Persist the witnesses advanced by one block. With shielded outputs each
+ * blob changed and is rewritten. Without, the blobs are unchanged but the
+ * stored height must follow the tip, or the send path rejects a current
+ * witness as stale. */
+static bool sync_save_advanced_witnesses(
+    struct node_db *ndb, struct wallet *wallet,
+    const struct db_sapling_note *wnotes,
+    const struct incremental_witness *witnesses, const int *witness_idx,
+    int num_with_witness, bool has_sapling_outputs, int height)
+{
+    if (!has_sapling_outputs)
+        return db_sapling_note_advance_witness_height(ndb, height - 1,
+                                                      height);
+    bool ok = true;
+    for (int wi = 0; wi < num_with_witness; wi++) {
+        struct byte_stream wout;
+        stream_init(&wout, 2048);
+        incremental_witness_serialize(&witnesses[wi], &wout);
+        if (!sync_wallet_note_save_witness(
+                ndb, wallet, &wnotes[witness_idx[wi]], &witnesses[wi],
+                wout.data, wout.size, height))
+            ok = false;
+        stream_free(&wout);
+    }
+    return ok;
+}
+
 /* Advance Sapling commitment tree and all wallet witnesses for one block.
  * Creates initial witnesses for wallet notes whose cm appears in this block.
  * Saves updated tree and witnesses to SQLite. */
@@ -264,20 +291,10 @@ bool advance_wallet_witnesses(struct node_db *ndb,
         }
     }
 
-    /* Save all advanced witnesses */
-    if (has_sapling_outputs) {
-        for (int wi = 0; wi < num_with_witness; wi++) {
-            struct byte_stream wout;
-            stream_init(&wout, 2048);
-            incremental_witness_serialize(&witnesses[wi], &wout);
-            int idx = witness_idx[wi];
-            if (!sync_wallet_note_save_witness(
-                    ndb, wallet, &wnotes[idx], &witnesses[wi],
-                    wout.data, wout.size, height))
-                ok = false;
-            stream_free(&wout);
-        }
-    }
+    if (!sync_save_advanced_witnesses(ndb, wallet, wnotes, witnesses,
+                                      witness_idx, num_with_witness,
+                                      has_sapling_outputs, height))
+        ok = false;
 
     /* Save tree to node_state — blob + height as one atomic pair inside the
      * serialized writer transaction both callers already own. Do not infer

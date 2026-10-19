@@ -593,6 +593,24 @@ bool db_sapling_note_save_witness(struct node_db *ndb,
     return ok;
 }
 
+bool db_sapling_note_advance_witness_height(struct node_db *ndb,
+                                            int from_height, int to_height)
+{
+    if (!ndb || !ndb->open) return false;
+    sqlite3_stmt *s = NULL;
+    sqlite3_prepare_v2(ndb->db,
+        "UPDATE wallet_sapling_notes SET witness_height=?"
+        " WHERE spent_txid IS NULL AND witness_data IS NOT NULL"
+        " AND witness_height=?",
+        -1, &s, NULL);
+    if (!s) LOG_FAIL("sapling_note", "prepare failed: %s", sqlite3_errmsg(ndb->db));
+    AR_BIND_INT(s, 1, to_height);
+    AR_BIND_INT(s, 2, from_height);
+    bool ok = AR_STEP_DONE(s);
+    AR_FINALIZE(s);
+    return ok;
+}
+
 bool db_sapling_note_save_witness_and_nullifier(
     struct node_db *ndb, const uint8_t txid[32], uint32_t output_index,
     const uint8_t *witness_blob, size_t blob_len, int height,

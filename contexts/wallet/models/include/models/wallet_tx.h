@@ -350,6 +350,12 @@ bool db_sapling_note_save_witness(struct node_db *ndb,
                                    const uint8_t txid[32], uint32_t output_index,
                                    const uint8_t *witness_blob, size_t blob_len,
                                    int height);
+/* A block without shielded outputs leaves every witness blob unchanged but
+ * moves the tip: raise the witness height of unspent notes from from_height
+ * to to_height so a witness current at the parent stays current at the child. */
+bool db_sapling_note_advance_witness_height(struct node_db *ndb,
+                                            int from_height, int to_height);
+
 /* Witness creation reveals the note's exact commitment-tree position.  Persist
  * the position-derived nullifier in the SAME row update so subsequent atomic
  * reservation matches the SpendDescription rather than the decrypt-time
