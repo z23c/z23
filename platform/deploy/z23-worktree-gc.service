@@ -1,0 +1,28 @@
+[Unit]
+Description=Z23 Worktree + Merged-Branch Garbage Collector
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github/z23
+# tools/scripts/worktree_gc.sh classifies every registered worktree and
+# local branch into SAFE / KEEP / CAUTION / LOCKED / PROTECTED / ORPHAN and
+# removes only the SAFE bucket (merged + clean, `git worktree remove`
+# without --force so a drifted lane still refuses on its own). --apply is
+# required; the script is dry-run/report-only otherwise.
+#
+# LOCKED worktrees (git worktree lock — a live lane) are skipped
+# UNCONDITIONALLY, even with --apply: see the "locked -> skip
+# unconditionally" bucket rule and HARD PROTECT LIST at the top of
+# tools/scripts/worktree_gc.sh. This unit never overrides that.
+ExecStart=%h/github/z23/tools/scripts/worktree_gc.sh --apply
+TimeoutStartSec=600
+
+# Environment hygiene work, not serving traffic — same polite scheduling as
+# the other background janitor/quality lanes.
+Nice=15
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal

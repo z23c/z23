@@ -73,7 +73,7 @@ Read-only inputs:
   ZCL_REMOTE_BRANCH=main          refuse any other checked-out branch
   ZCL_REMOTE_MAIN_REF=origin/main refuse any other remote ref
   ZCL_REMOTE_BUILD=fast-rebuild   requested future build shown in the plan
-  ZCL_REMOTE_UNIT=zclassic23-test.service
+  ZCL_REMOTE_UNIT=z23-test.service
   ZCL_REMOTE_JSON=0               line logs; set 1 or pass --json for JSON
 
 Contained requests (all refuse before SSH or local/remote file mutation):

@@ -1606,7 +1606,7 @@ static int cli_print_local_instances_status_fallback(const char *default_datadir
                            "matching -datadir) or -datadir=<DIR> to target "
                            "one of the instances above"
                          : "no local instance is reachable; start one "
-                           "(systemctl --user start zclassic23) or pass "
+                           "(systemctl --user start z23-node) or pass "
                            "-datadir=<DIR> for a lane this scan missed");
 
     char out[65536];
@@ -2583,7 +2583,7 @@ int cli_main(int argc, char **argv)
         fprintf(stderr,
                "error=CONNECT_REFUSED detail=no RPC cookie at %s/.cookie — "
                "node not running at this datadir try=start the node "
-               "(systemctl --user start zclassic23) or pass -datadir=DIR / "
+               "(systemctl --user start z23-node) or pass -datadir=DIR / "
                "-rpcport=PORT for the instance you meant\n", datadir);
         return ZCL_COMMAND_EXIT_BLOCKED;
     }

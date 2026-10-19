@@ -28,7 +28,7 @@ static const struct agent_operator_lane_topology g_operator_lane_topologies[] = 
     },
     {
         .lane = "soak",
-        .unit = "zclassic23-soak",
+        .unit = "z23-soak",
         .datadir = "~/.zclassic-c23-soak",
         .rpc_port = 18242,
         .p2p_port = 8043,

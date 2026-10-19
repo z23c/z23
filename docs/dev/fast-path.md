@@ -197,8 +197,8 @@ the hook and does not claim exact-receipt admission.
 `make pre-push-ci` remains available for deliberate legacy parity, and
 `ZCL_FAST_STRICT_TESTS=1` selects its strict focused mode. Full `make ci` still
 exists for release-grade manual runs, but the
-expensive proof lanes are kept fresh by `zclassic23-test-suite.timer`,
-`zclassic23-fuzz.timer`, and `zclassic23-coverage.timer`. Install them with
+expensive proof lanes are kept fresh by `z23-test-suite.timer`,
+`z23-fuzz.timer`, and `z23-coverage.timer`. Install them with
 `make install-quality-linger`; inspect their latest
 `zcl.background_quality_status.v1` verdict with `make quality-linger-status`.
 

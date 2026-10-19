@@ -4,7 +4,7 @@
 # ci_install_linger_gate.sh — the REAL MVP C1 operator proof (no docker, ever).
 #
 # MVP criterion #1 is "single-binary install on clean Ubuntu/Debian: a fresh
-# operator runs `make install && systemctl --user start zclassic23` and the node
+# operator runs `make install && systemctl --user start z23-node` and the node
 # comes up." The on-host ci-install gate proves the install MECHANISM but spawns
 # the node directly (no systemd). THIS gate proves the exact operator claim the
 # criterion names — a real `systemctl --user start` of a linger service brings
@@ -13,7 +13,7 @@
 #
 # It is fully ISOLATED from the live node:
 #   - a DISTINCT unit name `zclassic23-citest.service` (NEVER touches the live
-#     `zclassic23.service`),
+#     `z23-node.service`),
 #   - the binaries installed by the REAL `make install` to a throwaway /tmp
 #     prefix (DESTDIR set => the live --user unit install is skipped),
 #   - a /tmp regtest datadir + 3906x non-live ports + a dead `-connect` sink +

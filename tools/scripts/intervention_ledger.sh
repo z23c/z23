@@ -72,9 +72,9 @@
 #
 # Env (operator + test injection seams):
 #   ZCL_INTERVENE_DIR         ledger dir
-#                             (default ~/.local/state/zclassic23-intervention)
+#                             (default ~/.local/state/z23-intervention)
 #   ZCL_INTERVENE_UNITS       space/comma separated units to watch
-#                             (default: zclassic23.service)
+#                             (default: z23-node.service)
 #   ZCL_INTERVENE_WINDOW_SEC  attribution window (default 900)
 #   ZCL_INTERVENE_HEARTBEAT_SEC
 #                             max quiet period before a heartbeat line
@@ -102,7 +102,7 @@ fi
 # shellcheck source=lib/evidence_sources.sh
 . "$EVIDENCE_LIB"
 
-LEDGER_DIR="${ZCL_INTERVENE_DIR:-${HOME:-/root}/.local/state/zclassic23-intervention}"
+LEDGER_DIR="${ZCL_INTERVENE_DIR:-${HOME:-/root}/.local/state/z23-intervention}"
 LEDGER_FILE="$LEDGER_DIR/intervention-ledger.jsonl"
 STATE_DIR="$LEDGER_DIR/state"
 DECL_DIR="$LEDGER_DIR/declarations"
@@ -540,7 +540,7 @@ cmd_selftest() {
             "$1" "$2" "$3" "$4" "$5" "$BIN" "$BIN" > "$SHOWF"
     }
     write_show active running INV-AAA 0 success
-    printf '# /etc/systemd/user/zclassic23.service\n[Service]\nExecStart=%s\n' "$BIN" > "$CATF"
+    printf '# /etc/systemd/user/z23-node.service\n[Service]\nExecStart=%s\n' "$BIN" > "$CATF"
 
     local ENVV=(
         "ZCL_INTERVENE_DIR=$ST_TMP/led"
@@ -603,7 +603,7 @@ cmd_selftest() {
     # D) config drift with no restart: a drop-in edit changes the
     #    `systemctl cat` digest and nothing else. This is the ten-drop-in
     #    shape (WatchdogSec=0, OOMScoreAdjust=200) that was invisible.
-    printf '# /etc/systemd/user/zclassic23.service\n[Service]\nExecStart=%s\n# /etc/systemd/user/zclassic23.service.d/90-x.conf\n[Service]\nWatchdogSec=0\n' "$BIN" > "$CATF"
+    printf '# /etc/systemd/user/z23-node.service\n[Service]\nExecStart=%s\n# /etc/systemd/user/z23-node.service.d/90-x.conf\n[Service]\nWatchdogSec=0\n' "$BIN" > "$CATF"
     out="$(env "${ENVV[@]}" bash "$SELF" collect 2>&1)" || st_fail "case=config-drift collect must exit 0"
     grep -q '"change":"unit_config"' "$L" || { cat "$L" >&2; st_fail "case=config-drift not detected"; }
     grep -q '"attribution":"unattributed"' <<<"$(grep '"change":"unit_config"' "$L")" \

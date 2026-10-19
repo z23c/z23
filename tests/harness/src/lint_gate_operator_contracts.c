@@ -191,11 +191,11 @@ int t_remote_node_update_contract(void)
                != NULL);
         ASSERT(strstr(makefile, "install-remote-test-node-linger:") != NULL);
         ASSERT(strstr(makefile, "remote-test-node-status:") != NULL);
-        ASSERT(strstr(makefile, "zclassic23-remote-test-node.service") != NULL);
-        ASSERT(strstr(makefile, "zclassic23-remote-test.env.example") != NULL);
-        ASSERT(strstr(makefile, "zclassic23-remote-status.timer") != NULL);
+        ASSERT(strstr(makefile, "z23-remote-test-node.service") != NULL);
+        ASSERT(strstr(makefile, "z23-remote-test.env.example") != NULL);
+        ASSERT(strstr(makefile, "z23-remote-status.timer") != NULL);
         ASSERT(strstr(makefile,
-                      "systemctl --user enable --now zclassic23-remote-status.timer")
+                      "systemctl --user enable --now z23-remote-status.timer")
                != NULL);
         free(makefile);
         makefile = NULL;
@@ -234,16 +234,16 @@ int t_remote_node_update_contract(void)
                       "tools/scripts/check_stable_publish_containment.sh")
                != NULL);
         ASSERT(strstr(fast_ci,
-                      "platform/deploy/examples/zclassic23-remote-test-node.service")
+                      "platform/deploy/examples/z23-remote-test-node.service")
                != NULL);
         ASSERT(strstr(fast_ci,
-                      "platform/deploy/examples/zclassic23-remote-test.env.example")
+                      "platform/deploy/examples/z23-remote-test.env.example")
                != NULL);
         ASSERT(strstr(fast_ci,
-                      "platform/deploy/examples/zclassic23-self-update.service")
+                      "platform/deploy/examples/z23-self-update.service")
                != NULL);
         ASSERT(strstr(fast_ci,
-                      "platform/deploy/examples/zclassic23-self-update.timer")
+                      "platform/deploy/examples/z23-self-update.timer")
                != NULL);
         free(fast_ci);
         fast_ci = NULL;
@@ -284,13 +284,13 @@ int t_remote_node_update_contract(void)
                != NULL);
         ASSERT(strstr(doc, "systemd memory-budget lint") != NULL);
         ASSERT(strstr(doc,
-                      "platform/deploy/examples/zclassic23-self-update.timer")
+                      "platform/deploy/examples/z23-self-update.timer")
                != NULL);
         free(doc);
         doc = NULL;
 
         ASSERT(repo_path(path, sizeof(path),
-                         "platform/deploy/examples/zclassic23-remote-test-node.service")
+                         "platform/deploy/examples/z23-remote-test-node.service")
                == 0);
         ASSERT(read_entire_file(path, &service) == 0);
         ASSERT(strstr(service, "EnvironmentFile=-%h/.config/zclassic23/remote-test.env")
@@ -310,7 +310,7 @@ int t_remote_node_update_contract(void)
         service = NULL;
 
         ASSERT(repo_path(path, sizeof(path),
-                         "platform/deploy/examples/zclassic23-remote-test.env.example")
+                         "platform/deploy/examples/z23-remote-test.env.example")
                == 0);
         ASSERT(read_entire_file(path, &service) == 0);
         ASSERT(strstr(service, "ZCL_TEST_EXTERNALIP_FLAG=-externalip=")
@@ -324,11 +324,11 @@ int t_remote_node_update_contract(void)
         service = NULL;
 
         ASSERT(repo_path(path, sizeof(path),
-                         "platform/deploy/examples/zclassic23-self-update.service")
+                         "platform/deploy/examples/z23-self-update.service")
                == 0);
         ASSERT(read_entire_file(path, &service) == 0);
         ASSERT(strstr(service,
-                      "Documentation=file:%h/github/zclassic23/docs/agent/AGENT_API.md")
+                      "Documentation=file:%h/github/z23/docs/agent/AGENT_API.md")
                != NULL);
         ASSERT(strstr(service, "remote_node_update.sh self") != NULL);
         ASSERT(strstr(service, "ZCL_REMOTE_BUILD=none") != NULL);
@@ -340,7 +340,7 @@ int t_remote_node_update_contract(void)
         service = NULL;
 
         ASSERT(repo_path(path, sizeof(path),
-                         "platform/deploy/examples/zclassic23-self-update.timer")
+                         "platform/deploy/examples/z23-self-update.timer")
                == 0);
         ASSERT(read_entire_file(path, &timer) == 0);
         ASSERT(strstr(timer, "OnCalendar=daily") != NULL);
@@ -381,7 +381,7 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
         ASSERT(read_entire_file(evidence_path, &evidence) == 0);
         ASSERT(read_entire_file(service_args_path, &service_args) == 0);
 
-        ASSERT(strstr(scoreboard, "ZCL_NODE_UNIT=\"${ZCL_NODE_UNIT:-zclassic23}\"")
+        ASSERT(strstr(scoreboard, "ZCL_NODE_UNIT=\"${ZCL_NODE_UNIT:-z23-node}\"")
                != NULL);
         ASSERT(strstr(scoreboard, "lib/service_args.sh") != NULL);
         ASSERT(strstr(scoreboard, "ZCL_LAUNCHD_PLIST=") != NULL);

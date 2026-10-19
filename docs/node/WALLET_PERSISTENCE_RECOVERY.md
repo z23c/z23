@@ -109,7 +109,7 @@ held. An explicit `datadir` of 1024 bytes or more is refused with
 1024-byte path buffer.
 
 ```sh
-systemctl --user stop zclassic23
+systemctl --user stop z23-node
 
 # Rehearsal: runs the real merge in a transaction, rolls it back, and reports
 # per table what a commit would do.
@@ -120,7 +120,7 @@ z23 core wallet restore \
 # Commit (use the plan's commit_input, or add "confirm":true).
 z23 core wallet restore --input='{"from":"...","datadir":"...","confirm":true}'
 
-systemctl --user start zclassic23
+systemctl --user start z23-node
 z23 core wallet rescan             # transparent history
 z23 core wallet rescan-witnesses   # REQUIRED before spending a shielded note
 ```

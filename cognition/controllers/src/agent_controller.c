@@ -362,7 +362,7 @@ bool rpc_agent_map(const struct json_value *params, bool help,
                          "make_lint_gates");
     agent_push_subsystem(&subsystems, "background_quality_lanes",
                          "long fuzz and coverage proof work outside the push path",
-                         "cognition/controllers/src/agent_background_quality.c, tools/scripts/background_quality_lane.sh, platform/deploy/zclassic23-fuzz.service, platform/deploy/zclassic23-coverage.service",
+                         "cognition/controllers/src/agent_background_quality.c, tools/scripts/background_quality_lane.sh, platform/deploy/z23-fuzz.service, platform/deploy/z23-coverage.service",
                          "docs/dev/fast-path.md",
                          "make_lint_gates");
     json_push_kv(result, "subsystems", &subsystems);
@@ -808,13 +808,13 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     json_init(&lanes);
     json_set_array(&lanes);
     agent_push_build_command(&lanes, "fuzz",
-                             "zclassic23-fuzz.timer",
+                             "z23-fuzz.timer",
                              "hourly libFuzzer background lane with JSON verdict");
     agent_push_build_command(&lanes, "coverage",
-                             "zclassic23-coverage.timer",
+                             "z23-coverage.timer",
                              "weekly coverage lane with JSON verdict");
     agent_push_build_command(&lanes, "tests",
-                             "zclassic23-test-suite.timer",
+                             "z23-test-suite.timer",
                              "hourly full test suite lane with JSON verdict");
     json_push_kv(&background, "lanes", &lanes);
     json_free(&lanes);
@@ -837,7 +837,7 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     json_push_kv_str(&remote, "json_plan_command",
                      "tools/scripts/remote_node_update.sh --json rhett@host");
     json_push_kv_str(&remote, "status_timer_example",
-                     "platform/deploy/examples/zclassic23-self-update.timer");
+                     "platform/deploy/examples/z23-self-update.timer");
     json_push_kv_str(&remote, "default_behavior",
                      "read-only remote main and service observation");
     json_push_kv_bool(&remote, "main_only", true);

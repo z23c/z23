@@ -3,7 +3,7 @@ Description=Z23 Landing Stepper (dev land step, one beat)
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/github/zclassic23
+WorkingDirectory=%h/github/z23
 # One beat of the native landing service (tools/command/native_dev_land.c,
 # leaf at engine/composition/commands/dev.def:1836): rebase the queued tip
 # onto origin/main in a private worktree, run lint-fast, request the exact
@@ -20,12 +20,12 @@ WorkingDirectory=%h/github/zclassic23
 # `git push` of its own, ships no shell script in the path, and is not and
 # must never become an allowlist entry.
 #
-# NOT THE SAME SERVICE as platform/deploy/zclassic23-lander.service: that
+# NOT THE SAME SERVICE as platform/deploy/z23-lander.service: that
 # older unit runs tools/dev/land_lander.sh, stops at a local land/ready ref,
 # and never publishes. This unit drives the newer native `dev land step`
 # leaf all the way to a fast-forward of origin/main when a receipt is
 # admitted. Do not merge or confuse the two.
-ExecStart=%h/github/zclassic23/build/bin/z23-dev dev land step
+ExecStart=%h/github/z23/build/bin/z23-dev dev land step
 
 # A beat is a bounded poll-and-return by contract, not a background wait.
 # Measured on this host 2026-09-19: pid 1945635, a `dev land step` started
@@ -56,8 +56,8 @@ TimeoutStopSec=30
 LimitSTACK=infinity
 
 # Yield to the node and to interactive work, same posture as the other
-# background lanes in this directory (zclassic23-worktree-gc.service,
-# zclassic23-test-suite.service).
+# background lanes in this directory (z23-worktree-gc.service,
+# z23-test-suite.service).
 Nice=10
 CPUWeight=20
 IOWeight=20

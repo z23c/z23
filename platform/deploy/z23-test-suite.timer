@@ -1,0 +1,13 @@
+[Unit]
+Description=Z23 Background Full Test Suite Timer
+
+[Timer]
+# Full test_parallel evidence every hour, jittered away from interactive work.
+# systemd keeps the single oneshot service non-overlapping.
+OnCalendar=*-*-* *:20:00
+RandomizedDelaySec=300
+Persistent=true
+Unit=z23-test-suite.service
+
+[Install]
+WantedBy=timers.target

@@ -63,7 +63,7 @@ bool boot_node_db_open_failed_gate(const char *datadir)
                    dd, dd, dd);
     (void)snprintf(retry, sizeof(retry),
                    "mv %s/node.db %s/node.db.unopenable-$(date -u +%%Y%%m%%dT%%H%%M%%SZ) "
-                   "&& systemctl --user restart zclassic23", dd, dd);
+                   "&& systemctl --user restart z23-node", dd, dd);
     (void)snprintf(evidence, sizeof(evidence),
                    "datadir=%s store=node.db stage=db.open_migrate", dd);
 

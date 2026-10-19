@@ -139,7 +139,7 @@ probe() {
             "$BIN" agentdevstatus 2>/dev/null
             ;;
         canonical)
-            systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null
+            systemctl --user show z23-node -p ExecStart --value 2>/dev/null
             ;;
         dev_balance)
             "$BIN" -datadir="$DEV_DATADIR" -rpcport="$DEV_RPCPORT" \

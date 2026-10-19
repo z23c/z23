@@ -67,7 +67,7 @@ fi
 . "$EVIDENCE_LIB"
 
 base="${ZCL_PUBLIC_BASE:-https://zclnet.net}"
-LEDGER_DIR="${ZCL_PUBLIC_SMOKE_LEDGER_DIR:-${HOME:-/root}/.local/state/zclassic23-public-smoke}"
+LEDGER_DIR="${ZCL_PUBLIC_SMOKE_LEDGER_DIR:-${HOME:-/root}/.local/state/z23-public-smoke}"
 LEDGER_FILE="$LEDGER_DIR/availability-ledger.jsonl"
 STREAK_DIR="$LEDGER_DIR/streak"
 ROTATE_BYTES="${ZCL_PUBLIC_SMOKE_ROTATE_BYTES:-52428800}"

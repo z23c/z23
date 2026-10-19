@@ -55,7 +55,7 @@ MVP_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ZCL_RPC_BIN="${ZCL_RPC_BIN:-build/bin/zcl-rpc}"
 ZCL_NODE_BIN="${ZCL_NODE_BIN:-build/bin/zclassic23}"
-ZCL_SOAK_UNIT="${ZCL_SOAK_UNIT:-zclassic23}"
+ZCL_SOAK_UNIT="${ZCL_SOAK_UNIT:-z23-node}"
 ZCL_NODE_UNIT="${ZCL_NODE_UNIT:-$ZCL_SOAK_UNIT}"
 ZCL_LAUNCHD_PLIST="${ZCL_LAUNCHD_PLIST:-$HOME/Library/LaunchAgents/org.z23.zclassic.plist}"
 ZD_RPCPORT="${ZD_RPCPORT:-8232}"

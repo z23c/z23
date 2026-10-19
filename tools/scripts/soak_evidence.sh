@@ -7,13 +7,13 @@
 # MEASURABLE and JUDGEABLE instead of anecdotal. Two halves:
 #
 #   collect : append ONE JSON line per invocation (hourly via the
-#             platform/deploy/examples/zclassic23-soak-evidence.timer) to
+#             platform/deploy/examples/z23-soak-evidence.timer) to
 #             ~/.local/state/zclassic23-soak-evidence/evidence.jsonl:
 #               ts              epoch the sample was taken
 #               soak_height     soak node getblockcount (RPC 18242) or null
 #               zd_height       zclassicd getblockcount (RPC 8232) or null
 #               gap             zd_height - soak_height, or null
-#               nrestarts       systemd NRestarts of zclassic23-soak, or null
+#               nrestarts       systemd NRestarts of z23-soak, or null
 #               active_enter_ts epoch of ActiveEnterTimestamp, or null
 #               rss_kb          VmRSS of MainPID from /proc/<pid>/status
 #                               (NOT cgroup MemoryCurrent — that includes
@@ -100,8 +100,8 @@
 #   soak_evidence.sh --selftest        # hermetic; fixture JSONL, no nodes
 #
 # Env (test injection seams — the selftest needs no live nodes):
-#   ZCL_SOAK_EVIDENCE_DIR  evidence dir (default ~/.local/state/zclassic23-soak-evidence)
-#   ZCL_SOAK_UNIT          systemd unit name (default zclassic23-soak)
+#   ZCL_SOAK_EVIDENCE_DIR  evidence dir (default ~/.local/state/z23-soak-evidence)
+#   ZCL_SOAK_UNIT          systemd unit name (default z23-soak)
 #   ZCL_SOAK_RPC_CMD       command printing the soak node getblockcount JSON
 #   ZCL_ZD_RPC_CMD         command printing the zclassicd getblockcount JSON
 #   ZCL_SOAK_SHOW_CMD      command printing `systemctl show` key=value lines
@@ -127,7 +127,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 . "$SCRIPT_DIR/lib/evidence_sources.sh"
 SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
-EVIDENCE_DIR="${ZCL_SOAK_EVIDENCE_DIR:-${HOME:-/root}/.local/state/zclassic23-soak-evidence}"
+EVIDENCE_DIR="${ZCL_SOAK_EVIDENCE_DIR:-${HOME:-/root}/.local/state/z23-soak-evidence}"
 EVIDENCE_FILE="$EVIDENCE_DIR/evidence.jsonl"
 SOAK_UNIT="${ZCL_SOAK_UNIT:-zclassic23-soak}"
 

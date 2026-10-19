@@ -53,7 +53,7 @@ manifest_sha="$(sha256sum < "$manifest" | awk '{print $1}')"
 home="$tmp/home"
 release="$home/.local/lib/z23/releases/$manifest_sha"
 incoming="${release}.incoming.test-run"
-dropin="$home/.config/systemd/user/zclassic23.service.d/zzzzz-z23-ship-release.conf"
+dropin="$home/.config/systemd/user/z23-node.service.d/zzzzz-z23-ship-release.conf"
 mkdir -p "$tmp/mockbin" "$(dirname "$dropin")" "$(dirname "$release")"
 
 cat > "$tmp/mockbin/systemctl" <<'EOF'
@@ -75,7 +75,7 @@ show)
             exit 0 ;;
         ExecStart)
             selected_exec="$ZCL_SHIP_TEST_OLD"
-            for conf in "$HOME/.config/systemd/user/zclassic23.service.d/"*.conf; do
+            for conf in "$HOME/.config/systemd/user/z23-node.service.d/"*.conf; do
                 [ -f "$conf" ] || continue
                 pinned="$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$conf" | tail -1)"
                 [ -z "$pinned" ] || selected_exec="$pinned"
@@ -85,7 +85,7 @@ show)
             exit 0 ;;
         DropInPaths)
             paths=""
-            for conf in "$HOME/.config/systemd/user/zclassic23.service.d/"*.conf; do
+            for conf in "$HOME/.config/systemd/user/z23-node.service.d/"*.conf; do
                 [ -f "$conf" ] || continue
                 paths="${paths:+$paths }$conf"
             done
@@ -114,7 +114,7 @@ restart)
     target="$ZCL_SHIP_TEST_OLD"
     # Model systemd's lexical drop-in precedence. The legacy zzzz selector
     # loses to ship's zzzzz selector; the last effective ExecStart wins.
-    for conf in "$HOME/.config/systemd/user/zclassic23.service.d/"*.conf; do
+    for conf in "$HOME/.config/systemd/user/z23-node.service.d/"*.conf; do
         [ -f "$conf" ] || continue
         selected="$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$conf" | tail -1)"
         [ -z "$selected" ] || target="$selected"

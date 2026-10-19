@@ -161,7 +161,7 @@ static uint16_t cas_reserve_port(void)
 
 /* Minimal envp: HOME=<home>, a fixed PATH, ZCL_CLI_TEST_NO_SERVICE_LOOKUP=1
  * (see file header) so the CLI's systemctl-based default-service lookup
- * never resolves to this project's real zclassic23.service. Static scratch
+ * never resolves to this project's real z23-node.service. Static scratch
  * — not reentrant, fine for this single-threaded test group. */
 static char cas_env_home[PATH_MAX + 8];
 static char *cas_envp[5];

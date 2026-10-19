@@ -1,0 +1,29 @@
+[Unit]
+Description=Z23 read-only remote source/service status lane
+Documentation=file:%h/github/z23/docs/agent/AGENT_API.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github/z23
+Environment=ZCL_REMOTE_DRY_RUN=1
+Environment=ZCL_REMOTE_BUILD=none
+Environment=ZCL_REMOTE_RESTART=0
+Environment=ZCL_REMOTE_UNIT=z23-test.service
+ExecStart=%h/github/z23/tools/scripts/remote_node_update.sh self
+TimeoutStartSec=1800
+
+# Observe source/service status without competing with serving nodes.
+Nice=15
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
+MemoryHigh=8G
+TasksMax=1024
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

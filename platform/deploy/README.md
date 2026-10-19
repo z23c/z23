@@ -12,10 +12,10 @@ you are new; this page is about operating a host, not about building.
 
 ## What is here
 
-- **Node and lane units.** `zclassic23.service` (the node),
+- **Node and lane units.** `z23-node.service` (the node),
   `zcl23-dev.service` and `zcl23-devfleet@.service` (development lanes),
   `zcl-devd@.service`, `zcl-mind.service`, `zcl-serve.service`.
-- **Scheduled maintenance.** `zclassic23-logrotate`, `-worktree-gc`,
+- **Scheduled maintenance.** `z23-logrotate`, `-worktree-gc`,
   `-test-tmp-clean`, `-bundle-export`, `-build-drift`, `-coverage`, `-fuzz`,
   `-simnet-nightly`, `-replay-canary-*`, `-intervention`, `-tip-agreement`, `-public-smoke`, each
   with its `.service` and `.timer`.
@@ -28,7 +28,7 @@ you are new; this page is about operating a host, not about building.
   are tolerated); two probers on one ledger would double every row and halve
   the BLIND threshold.
 - **Landing.** `z23-land-step.service` / `.timer` drive one beat of the native
-  landing service. `zclassic23-lander.service` is the older shell lander and is
+  landing service. `z23-lander.service` is the older shell lander and is
   a different thing — its own header says so.
 - **Agents.** `zcl-agent-worker@.service` and `zcl-agent-receive@.service`, the
   instanced pair. The instance name is the box's own agent identity.
@@ -138,7 +138,7 @@ list, so the next person comparing `ls ~/.config/systemd/user/` against
 | `z23-xp-daily.service` / `.timer` | host-local | Personal absolute paths into `~/.local/state/zclassic23/scratch/xpdaily` and `experiments/mvp144`. |
 | `z23-proc-janitor.service` / `.timer` | host-local, **closest to shippable** | The only one of these whose script carries no private value. It is untracked, so rule 1 blocks it; bring `proc_janitor.sh` in-tree and this unit can follow unchanged. |
 | `zcl23-io-guard.service` / `.timer` | host-local, shippable once its script is | Generic and useful — it keeps compile and test disk traffic in the idle class, below the node — but runs untracked `~/.local/bin/zcl23-io-guard.sh`. |
-| `zclassic23-db-backup.service` / `.timer` | host-local, shippable once its script is | A clean, well-commented unit; its `~/.local/bin/zclassic23-db-backup` is untracked. |
+| `zclassic23-db-backup.service` / `.timer` | host-local, shippable once its script is | A clean, well-commented unit; its `~/.local/bin/z23-db-backup` is untracked. |
 | `zcl-bombard.service` / `.timer` | host-local | Untracked `zcl-adversarial-bombard.sh`, and a working directory pinned to the maintainer's checkout path. |
 | `zcl-stopwatch-ready.service` | host-local | Its peers `zcl-stopwatch-peer.service` and `zcl-stopwatch-onfailure.service` are already in `examples/`; this one runs an untracked fixture watcher. |
 | `zcl23-dev-loop.service` | host-local | A datadir and RPC port chosen by this host, on top of `zcl23-dev.service`, which is tracked. |

@@ -29,7 +29,7 @@ bool zcl_zcode_join_posture_fill(struct zcl_zcode_join_posture *out)
      * name the restart. Repeating the flag list after `z23 join` already
      * wrote them reads as "you have not joined". */
     out->offline_next_command = out->package_hosting
-        ? "systemctl --user restart zclassic23, then "
+        ? "systemctl --user restart z23-node, then "
           "z23 zcode package offered"
         : "z23 join";
     return true;

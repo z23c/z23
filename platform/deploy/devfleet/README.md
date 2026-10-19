@@ -165,10 +165,10 @@ the default two-minute watchdog. If it does, install the supplied ten-minute
 drop-in instead of allowing systemd to kill work that is still advancing:
 
 ```bash
-install -D -m644 platform/deploy/zclassic23-spinning-disk-watchdog.conf \
-  ~/.config/systemd/user/zclassic23.service.d/95-spinning-disk-watchdog.conf
+install -D -m644 platform/deploy/z23-spinning-disk-watchdog.conf \
+  ~/.config/systemd/user/z23-node.service.d/95-spinning-disk-watchdog.conf
 systemctl --user daemon-reload
-systemctl --user show zclassic23.service -p WatchdogUSec
+systemctl --user show z23-node.service -p WatchdogUSec
 ```
 
 This changes neither `TimeoutStartSec` nor restart policy. Do not use it to

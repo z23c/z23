@@ -35,7 +35,7 @@
  *      did not observe.
  *
  * NO supervised child is armed. The cadence belongs to the systemd timer that
- * writes the ledger (platform/deploy/zclassic23-tip-agreement.timer, every 10 min);
+ * writes the ledger (platform/deploy/z23-tip-agreement.timer, every 10 min);
  * there is no in-process work to tick, so there is no liveness contract and
  * therefore no progress policy to declare. (A supervised child with no
  * declared policy is a defect counted by check-supervisor-progress-declared —

@@ -843,9 +843,9 @@ done
 # are pure text in / text out precisely so this proves them with no systemd.
 printf '\nship-selftest: 6b. the effective-ExecStart guard\n'
 
-SHIP_DROPIN=/h/systemd/user/zclassic23.service.d/zzzzz-z23-ship-release.conf
-SHADOW_DROPIN=/h/systemd/user/zclassic23.service.d/zzzzzz-node-first.conf
-EARLIER_DROPIN=/h/systemd/user/zclassic23.service.d/90-build-identity.conf
+SHIP_DROPIN=/h/systemd/user/z23-node.service.d/zzzzz-z23-ship-release.conf
+SHADOW_DROPIN=/h/systemd/user/z23-node.service.d/zzzzzz-node-first.conf
+EARLIER_DROPIN=/h/systemd/user/z23-node.service.d/90-build-identity.conf
 
 check_exec_path() {
     local want="$1" text="$2" got

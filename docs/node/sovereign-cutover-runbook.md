@@ -249,19 +249,19 @@ of this sequence; the only unavailable window is between step 2 and step 5.
 1. **Stop the live service** (the install call needs exclusive write access
    to the live kernel store, `consensus.db`; a running node holds it open):
    ```bash
-   systemctl --user stop zclassic23
+   systemctl --user stop z23-node
    ```
 2. **Build + install the current-`main` candidate binary.** `make deploy`
    builds, installs the binary to the service's `ExecStart` path, and ends
-   with `systemctl --user restart zclassic23` — that restart is fine here
+   with `systemctl --user restart z23-node` — that restart is fine here
    (it comes back up on the still-wedged state, a normal boot), but it means
    you must stop the service again before the install call:
    ```bash
    make deploy
-   systemctl --user stop zclassic23
+   systemctl --user stop z23-node
    ```
    Confirm the binary that will run the install call is the one just built:
-   `SERVICE_BIN=$(systemctl --user show zclassic23 -p ExecStart --value | sed -n 's/.*path=\([^ ;]*\).*/\1/p')`
+   `SERVICE_BIN=$(systemctl --user show z23-node -p ExecStart --value | sed -n 's/.*path=\([^ ;]*\).*/\1/p')`
    then `"$SERVICE_BIN" -version` or equivalent build-identity check against
    `git rev-parse HEAD`.
 3. **Run the one-shot install directly** (not via systemd — this call is
@@ -281,7 +281,7 @@ of this sequence; the only unavailable window is between step 2 and step 5.
 4. **Boot normally** (no `-install-consensus-bundle` flag — a second pass of
    that flag is a no-op refusal path, not a resume mechanism):
    ```bash
-   systemctl --user start zclassic23
+   systemctl --user start z23-node
    ```
    `-nobgvalidation` is not required for the forward fold to proceed (it only
    gates the separate from-genesis background crypto-replay thread), but
@@ -324,7 +324,7 @@ consensus-parity divergence, not caught by copy-prove):
 
 1. **Stop the live service:**
    ```bash
-   systemctl --user stop zclassic23
+   systemctl --user stop z23-node
    ```
 2. **Preserve the failed post-install state for diagnosis** before
    overwriting anything:
@@ -345,7 +345,7 @@ consensus-parity divergence, not caught by copy-prove):
    `H*=3,176,325` on `utxo_apply.anchor_backfill_gap`, or wherever it was)
    before deciding on a next attempt:
    ```bash
-   systemctl --user start zclassic23
+   systemctl --user start z23-node
    ```
 5. `consensus.db` is the reducer kernel singleton — the coins/anchor/nullifier
    tables (`coins_kv.c`) share this same file, keyed off the same handle as

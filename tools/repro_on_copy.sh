@@ -409,7 +409,7 @@ process_like_live_arg() {
 }
 
 derive_like_live_systemd() {
-    _exec="$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null || true)"
+    _exec="$(systemctl --user show z23-node -p ExecStart --value 2>/dev/null || true)"
     [ -n "$_exec" ] || { echo "repro_on_copy: --like-live: cannot read ExecStart for zclassic23 (unit installed?)" >&2; exit 1; }
     _argv="$(printf '%s\n' "$_exec" | sed -n 's/.*argv\[\]=\(.*\) ; ignore_errors=.*/\1/p')"
     [ -n "$_argv" ] || { echo "repro_on_copy: --like-live: could not parse argv from ExecStart" >&2; exit 1; }
@@ -419,7 +419,7 @@ derive_like_live_systemd() {
         if [ "$_first" = 1 ]; then _first=0; continue; fi            # drop argv[0] (binary path)
         process_like_live_arg "$_tok"
     done
-    for _kv in $(systemctl --user show zclassic23 -p Environment --value 2>/dev/null); do
+    for _kv in $(systemctl --user show z23-node -p Environment --value 2>/dev/null); do
         process_env_kv "$_kv"
     done
     _envfile="$HOME/.config/zclassic23/env"

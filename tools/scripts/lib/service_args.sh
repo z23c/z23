@@ -39,7 +39,7 @@ zcl_service_launchd_print() {
 
 zcl_service_exec_arg() {
     local key="$1"
-    local unit="${2:-zclassic23}"
+    local unit="${2:-z23-node}"
     local plist="${3:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
     local value=""
     local argc=""
@@ -83,7 +83,7 @@ zcl_service_exec_arg() {
 }
 
 zcl_service_pid() {
-    local unit="${1:-zclassic23}"
+    local unit="${1:-z23-node}"
     local plist="${2:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
     local value=""
 
@@ -103,7 +103,7 @@ zcl_service_pid() {
 }
 
 zcl_service_active_state() {
-    local unit="${1:-zclassic23}"
+    local unit="${1:-z23-node}"
     local plist="${2:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
     local value=""
 
@@ -127,7 +127,7 @@ zcl_service_active_state() {
 }
 
 zcl_service_restart_policy() {
-    local unit="${1:-zclassic23}"
+    local unit="${1:-z23-node}"
     local plist="${2:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
     local value=""
 
@@ -155,7 +155,7 @@ zcl_service_restart_policy() {
 }
 
 zcl_service_started_epoch() {
-    local unit="${1:-zclassic23}"
+    local unit="${1:-z23-node}"
     local plist="${2:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
     local value="" pid=""
 
@@ -184,7 +184,7 @@ zcl_service_started_epoch() {
 }
 
 zcl_service_restart_count() {
-    local unit="${1:-zclassic23}"
+    local unit="${1:-z23-node}"
     local value=""
 
     if command -v systemctl >/dev/null 2>&1; then

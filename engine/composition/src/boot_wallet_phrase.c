@@ -297,7 +297,7 @@ bool boot_wallet_create_new(struct wallet *w, struct wallet_sqlite *ws,
      *   - -wallet-no-phrase-backup, in as many words.
      *
      * The canonical lane must be waived: the shipped unit
-     * (platform/deploy/zclassic23.service) passes -operator-lane=canonical
+     * (platform/deploy/z23-node.service) passes -operator-lane=canonical
      * with Restart=always, so refusing would loop a fresh install forever.
      * -allow-plaintext-wallet is deliberately NOT on that list: choosing to
      * keep keys in the clear is not choosing to have no written backup.

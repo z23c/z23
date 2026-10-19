@@ -999,9 +999,9 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(agent_bg_quality_buf,
                       "background_quality_stale") != NULL);
         ASSERT(strstr(agent_ctrl_buf, "make quality-linger-status") != NULL);
-        ASSERT(strstr(agent_ctrl_buf, "zclassic23-fuzz.timer") != NULL);
-        ASSERT(strstr(agent_ctrl_buf, "zclassic23-coverage.timer") != NULL);
-        ASSERT(strstr(agent_ctrl_buf, "zclassic23-test-suite.timer") != NULL);
+        ASSERT(strstr(agent_ctrl_buf, "z23-fuzz.timer") != NULL);
+        ASSERT(strstr(agent_ctrl_buf, "z23-coverage.timer") != NULL);
+        ASSERT(strstr(agent_ctrl_buf, "z23-test-suite.timer") != NULL);
         ASSERT(strstr(agent_ctrl_buf, "native pre-push checks ancestry")
                != NULL);
         ASSERT(strstr(agent_ctrl_buf, "cognition/controllers/src/agent_controller.c")

@@ -8,7 +8,7 @@ You need a built `build/bin/z23`, access to the node's RPC (remote procedure
 call) interface, and its datadir (data directory). Run commands from the
 checkout root. Examples using `~/.zclassic-c23` assume that datadir; substitute
 your configured path if it differs. Service commands assume the checked-in
-`zclassic23.service` user unit is installed. Recovery, deployment, and timer
+`z23-node.service` user unit is installed. Recovery, deployment, and timer
 changes require the operator's authority.
 
 ## Soak / chaos harnesses
@@ -47,14 +47,14 @@ also skips rather than guessing that the host is idle.
 The timer is an owner-gated installation, not a default checkout step:
 
 1. Have the operator install the unit files from
-   `platform/deploy/zclassic23-simnet-nightly.timer` and
-   `platform/deploy/zclassic23-simnet-nightly.service`, with the service's
+   `platform/deploy/z23-simnet-nightly.timer` and
+   `platform/deploy/z23-simnet-nightly.service`, with the service's
    checkout paths configured for this host.
 2. To include the longer sweep, set
    `Environment=ZCL_SIMNET_NIGHTLY_FUZZ_SWEEP=1` in a service drop-in.
 3. Enable the installed timer:
    ```bash
-   systemctl --user enable --now zclassic23-simnet-nightly.timer
+   systemctl --user enable --now z23-simnet-nightly.timer
    ```
 4. Read the latest status at
    `~/.local/state/zclassic23-quality/status/simnet_nightly.json`, or
@@ -148,7 +148,7 @@ build/bin/z23 getblockcount
 ```
 
 If genuinely stuck, `z23 dumpstate chain_evidence` names the precise reason
-(a blocker, never a silent halt). Recovery is `systemctl --user restart zclassic23`
+(a blocker, never a silent halt). Recovery is `systemctl --user restart z23-node`
 (or `make deploy` for a new binary).
 
 **Do not** manually delete UTXO ranges or bypass BIP30 — the fix is bounded to a
@@ -343,7 +343,7 @@ and you have a file under `~/wallet_backups/`.
 that refusal is protecting you.
 
 ```bash
-systemctl --user stop zclassic23
+systemctl --user stop z23-node
 
 # 1. Rehearse. This runs the whole merge in a transaction, rolls it back, and
 #    prints exactly what a commit would do — per table, rows in the backup,
@@ -356,7 +356,7 @@ build/bin/z23 core wallet restore \
 build/bin/z23 core wallet restore \
   --input='{"from":"...","datadir":"...","confirm":true}'
 
-systemctl --user start zclassic23
+systemctl --user start z23-node
 
 # 3. Rebuild what a row merge cannot: transparent history, then the Sapling
 #    witnesses. A restored shielded note CANNOT BE SPENT until step 3b runs.
@@ -415,10 +415,10 @@ build/bin/z23 core consensus integrity
    Replace `BLOCK_HASH` with the block's actual hash.
 4. Nuclear option (last resort): stop node, delete state, resync:
    ```bash
-   systemctl --user stop zclassic23
+   systemctl --user stop z23-node
    rm -f ~/.zclassic-c23/node.db ~/.zclassic-c23/node.db-{wal,shm}
    rm -f ~/.zclassic-c23/block_index.bin{,.sha3}
-   systemctl --user start zclassic23
+   systemctl --user start z23-node
    # Node will rebuild from block files or snapshot sync (cold bootstrap is now --importblockindex then a normal boot).
    ```
 
@@ -459,12 +459,12 @@ build/bin/z23 core network peers list
    ```
 3. **Sync state is FAILED:** restart — transient failures often clear:
    ```bash
-   systemctl --user restart zclassic23
+   systemctl --user restart z23-node
    ```
 4. **Stuck in SNAPSHOT_RECEIVE:** snapshot peer may have disconnected. Restart
    to retry from another peer:
    ```bash
-   systemctl --user restart zclassic23
+   systemctl --user restart z23-node
    ```
 
 **Prevention:** Monitor sync state. Alert on `FAILED` or height stalled >10 min.
@@ -708,12 +708,12 @@ echo "Per-IP: ${ZCL_RPC_PER_IP_RPS:-5} rps, burst ${ZCL_RPC_PER_IP_BURST:-10}"
    `~/.config/zclassic23/env` to raise the service's per-IP budget,
    then restart:
    ```bash
-   systemctl --user restart zclassic23
+   systemctl --user restart z23-node
    ```
 2. Set `ZCL_RPC_RPS=200` and `ZCL_RPC_BURST=400` in that environment file
    to raise the service's global budget, then restart:
    ```bash
-   systemctl --user restart zclassic23
+   systemctl --user restart z23-node
    ```
 3. If a specific IP is flooding, it auto-bans after `ZCL_RPC_AUTH_FAIL_THRESHOLD` (default 5) auth failures. For non-auth flooding, the per-IP rate limit handles it.
 4. Loopback (127.0.0.1) bypasses per-IP limits but still counts against global. If local tools fight for global budget, raise `ZCL_RPC_RPS`.
@@ -777,11 +777,11 @@ build/bin/z23 core storage stats # inspect cache sizes
 ## Boot Failure (Node Won't Start)
 
 **Symptoms:** Service fails to start.
-`journalctl --user -u zclassic23` shows errors.
+`journalctl --user -u z23-node` shows errors.
 
 **Diagnose:**
 ```bash
-journalctl --user -u zclassic23 --since "5 min ago" --no-pager
+journalctl --user -u z23-node --since "5 min ago" --no-pager
 # Look for EV_BOOT_VALIDATION_FAILED or specific error messages
 ```
 
@@ -790,7 +790,7 @@ journalctl --user -u zclassic23 --since "5 min ago" --no-pager
 | Error | Fix |
 |-------|-----|
 | `database is locked` | Another instance is running. `pgrep z23`. Kill stale process. |
-| `block index corrupt` | `EV_BLOCK_INDEX_CORRUPT`. Delete and rebuild: `rm ~/.zclassic-c23/block_index.bin{,.sha3}; systemctl --user restart zclassic23` |
+| `block index corrupt` | `EV_BLOCK_INDEX_CORRUPT`. Delete and rebuild: `rm ~/.zclassic-c23/block_index.bin{,.sha3}; systemctl --user restart z23-node` |
 | `node.db corrupt` | Delete `node.db*`, restart — will rebuild from block files or snapshot. |
 | `schema version mismatch` | Node was downgraded. Use the matching binary version or delete+resync. |
 | `permission denied` | `chmod 700 ~/.zclassic-c23; chown -R $USER ~/.zclassic-c23` |

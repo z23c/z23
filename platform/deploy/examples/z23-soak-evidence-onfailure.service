@@ -1,0 +1,12 @@
+[Unit]
+Description=Z23 Soak Evidence failure notifier
+# OnFailure= arm for the hourly evidence collector (same pattern as
+# z23-replay-canary-onfailure@.service). It fires ONLY when the
+# collector could not APPEND its sample — an unreachable node is NOT a
+# failure, it is recorded as an ok:false evidence line. The evidence
+# JSONL remains the authority; this unit just makes a broken collector
+# loud (`journalctl -t soak-evidence`).
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'logger -t soak-evidence "SOAK EVIDENCE COLLECTOR FAILED — see $HOME/.local/state/zclassic23-soak-evidence/"'

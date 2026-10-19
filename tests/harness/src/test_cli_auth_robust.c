@@ -15,7 +15,7 @@
  * rpc_table) gives a real cookie/port pair, never a live datadir.
  * `ZCL_CLI_TEST_NO_SERVICE_LOOKUP=1` is set on every child so the CLI's
  * systemctl default-service lookup (cli_service_exec_arg) never reads this
- * project's real `zclassic23.service`.
+ * project's real `z23-node.service`.
  *
  * Skips (does not fail) if build/bin/zclassic23 is missing or stale vs the
  * source files that define this behavior — matching the guard pattern in

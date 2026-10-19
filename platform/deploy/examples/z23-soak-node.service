@@ -1,0 +1,100 @@
+# NOTE on naming: on the operator box this unit is INSTALLED as
+# `z23-soak.service` — the long-uptime soak NODE. It is committed
+# here as `z23-soak-node.service` because the example files
+# `z23-soak.{service,timer}` in this directory are an OLDER,
+# unrelated oneshot probe (10-min three-guarantees assert against the
+# MAIN node). The hourly evidence collector for THIS node is
+# `z23-soak-evidence.{service,timer}` + tools/scripts/soak_evidence.sh.
+#
+# INSTALLING THIS UNIT IS TWO STEPS. The external uptime prober only samples
+# instances listed in the instance table of `z23 ops host slo probe`,
+# and the soak lane is NOT in it (an instance nobody runs would answer
+# reachable:false on every poll forever and drain the meaning out of the
+# ledger's any_unreachable flag). After installing this unit, add the row
+#     "soak|18242|${HOME:-/root}/.zclassic-c23-soak|ZCL_SLO_SOAK_CMD"
+# to that table. The native `z23 ops slo` reader discovers any bounded
+# instance name actually present in the ledger, so it needs no second table.
+# Tearing the lane back down means removing the prober row again.
+
+[Unit]
+Description=Z23 Soak Node (pinned binary, long-uptime MVP-C6 evidence)
+After=network-online.target
+Wants=network-online.target
+# Soak/deploy split (owner-approved 2026-06-12): the main zclassic23 unit
+# takes rapid deploys; THIS unit runs a PINNED binary copy that
+# `make deploy` never touches, so its uptime/soak-attestation evidence
+# survives every main-node deploy. Update the pinned binary only
+# deliberately (cp build/bin/zclassic23 ~/.local/bin/z23-soak
+# && systemctl --user restart z23-soak) — that restart is a
+# conscious re-baseline of the soak clock.
+StartLimitIntervalSec=0
+
+# Peer discovery carries no clearnet -addnode entries. Four used to sit in the
+# ExecStart below; all four were refused on :8033, 0/3 attempts each, when
+# probed 2026-08-26. A dead addnode costs a starting node the same dial budget
+# a live one would earn it, and an address pinned in a committed unit rots
+# silently. The compiled-in seeds are re-probed before each release and addrman
+# gossip finds the rest; an operator who wants specific peers names them in
+# their own env file, where a correction costs no commit. The loopback entries
+# that remain point at other daemons on the same machine.
+[Service]
+Type=simple
+
+# No -tor: the soak node's job is forward-progress + RSS-plateau evidence
+# with minimal moving parts; the onion surface is the main node's job.
+# Peers: the co-located zclassicd oracle (8034) + the live zclassic23 (8033) —
+# which also gives both zcl23 nodes a zcl23 peer — PLUS external mainnet
+# peers (same set as the main unit): localhost-only peering cannot satisfy
+# the anti-eclipse body-source floor (>=3 healthy distinct peers), so a
+# localhost-only soak pins at its seed whenever announce-stream holes need
+# body_fetch backfill (observed live 2026-06-12, soak stuck at 3145394).
+ExecStart=%h/.local/bin/z23-soak \
+    -datadir=%h/.zclassic-c23-soak \
+    -operator-lane=soak \
+    -port=8043 \
+    -rpcport=18242 \
+    -listen \
+    -txindex \
+    -addnode=127.0.0.1:8034 \
+    -addnode=127.0.0.1:8033 \
+    $ZCL_LANE_SNAPSHOT_LOADER_FLAG \
+    -showmetrics=0
+
+Restart=always
+RestartSec=5
+RestartSteps=8
+RestartMaxDelaySec=600
+
+ExecStop=/bin/sh -c 'for i in 1 2 3; do /bin/kill -TERM "$MAINPID" 2>/dev/null || exit 0; sleep 2; done'
+TimeoutStopSec=300
+KillMode=control-group
+
+# Soak must never degrade the dev box or the main node: low scheduling
+# weight, hard memory cap well under the box's 93G.
+MemoryHigh=24G
+# 31G leaves one additional GiB for the always-on dev node's measured
+# restart/sync headroom while preserving the soak lane's 24G soft target.
+MemoryMax=31G
+MemorySwapMax=512M
+CPUQuota=150%
+CPUWeight=30
+IOWeight=30
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TasksMax=1024
+OOMScoreAdjust=300
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.zclassic-c23-soak
+PrivateTmp=yes
+
+StandardOutput=append:%h/.zclassic-c23-soak/node.log
+StandardError=append:%h/.zclassic-c23-soak/node.log
+
+LimitCORE=infinity
+Environment="ZCL_CORE_DIR=%h/.zclassic-c23-soak/cores"
+
+[Install]
+WantedBy=default.target

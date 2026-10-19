@@ -582,13 +582,13 @@ cache_manifest() {
         tools/scripts/build_vendor.sh \
         tools/scripts/background_quality_lane.sh \
         tools/scripts/check_agentdeployguard_cli_exit.sh \
-        platform/deploy/examples/zclassic23-remote-test-node.service \
-        platform/deploy/examples/zclassic23-remote-test.env.example \
-        platform/deploy/examples/zclassic23-self-update.service \
-        platform/deploy/examples/zclassic23-self-update.timer \
-        platform/deploy/zclassic23-fuzz.service platform/deploy/zclassic23-fuzz.timer \
-        platform/deploy/zclassic23-coverage.service platform/deploy/zclassic23-coverage.timer \
-        platform/deploy/zclassic23-test-suite.service platform/deploy/zclassic23-test-suite.timer \
+        platform/deploy/examples/z23-remote-test-node.service \
+        platform/deploy/examples/z23-remote-test.env.example \
+        platform/deploy/examples/z23-self-update.service \
+        platform/deploy/examples/z23-self-update.timer \
+        platform/deploy/z23-fuzz.service platform/deploy/z23-fuzz.timer \
+        platform/deploy/z23-coverage.service platform/deploy/z23-coverage.timer \
+        platform/deploy/z23-test-suite.service platform/deploy/z23-test-suite.timer \
         tests/harness/src/test_make_lint_gates.c docs/dev/fast-path.md \
         docs/agent/AGENT_API.md cognition/controllers/src/agent_controller.c \
         cognition/controllers/src/agent_lane_runtime.c \
@@ -1474,7 +1474,7 @@ run_dev_rebuild() {
 
 live_service_detected() {
     if command -v systemctl >/dev/null 2>&1 &&
-       systemctl --user is-active --quiet zclassic23; then
+       systemctl --user is-active --quiet z23-node; then
         return 0
     fi
     [ -f "$HOME/.zclassic-c23/.cookie" ]

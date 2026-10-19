@@ -885,15 +885,15 @@ Z23_FLAG("ZCL_EXPLORER_DOMAIN", "env_build", "-", "-",
 Z23_FLAG("ZCL_EXPLORER_USER", "env_build", "-", "-",
           "first use tools/scripts/zcl-explorer-cert.sh:auto; documented at docs/BLOCK_EXPLORER_HOSTING.md:51: domain (override with ZCL_EXPLORER_USER / ZCL_EXPLORER_DATADIR /")
 Z23_FLAG("ZCL_EXPORT_BINARY", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-bundle-export.sh:auto")
+          "undocumented; first use platform/deploy/z23-bundle-export.sh:auto")
 Z23_FLAG("ZCL_EXPORT_CONSENSUS_SNAPSHOT_ON_BOOT", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_snapshot_offer.c:auto")
 Z23_FLAG("ZCL_EXPORT_EXTRA_ARGS", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-bundle-export.sh:auto")
+          "undocumented; first use platform/deploy/z23-bundle-export.sh:auto")
 Z23_FLAG("ZCL_EXPORT_KEEP", "env_build", "3", "-",
-          "undocumented; first use platform/deploy/zclassic23-bundle-export.sh:auto")
+          "undocumented; first use platform/deploy/z23-bundle-export.sh:auto")
 Z23_FLAG("ZCL_EXPORT_SECONDARY", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-bundle-export.sh:auto")
+          "undocumented; first use platform/deploy/z23-bundle-export.sh:auto")
 Z23_FLAG("ZCL_EXTERNALIP_FLAG", "env_build", "-", "-",
           "undocumented; first use tools/repro_on_copy.sh:53")
 Z23_FLAG("ZCL_FAST_BASE", "env_build", "-", "-",
@@ -1162,31 +1162,31 @@ Z23_FLAG("ZCL_HOST_GC_ZCC_DIR", "env_build", "$GC_HOME/.cache/zcc", "-",
 Z23_FLAG("ZCL_HOST_JOBS", "make_var", "nproc", "-",
           "the one processor count this build sizes every job count from -- coreutils nproc, which is the affinity mask this process may actually run on, not the box; the Makefile exports it so a gate script derives its own -j from the same answer instead of asking again; first use Makefile and tools/lint/check_standalone_tools_link.sh")
 Z23_FLAG("ZCL_HOST_WATCHDOG_DOWN_CYCLES", "env_build", "2", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_LOG", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_MANAGER_HOOK", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_PROBE_HOOK", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_PROBE_TIMEOUTS", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_PROGRESS_HOOK", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_RPC_HOST", "env_build", "127.0.0.1", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_RPC_PORT", "env_build", "18232", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_STATE", "env_build", "-", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
-Z23_FLAG("ZCL_HOST_WATCHDOG_UNIT", "env_build", "zclassic23", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
+Z23_FLAG("ZCL_HOST_WATCHDOG_UNIT", "env_build", "z23-node", "-",
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_USER", "env_build", "-", "-",
           "which account the host watchdog installs and runs under; the read "
           "site falls back to the deploy operator account, which this catalog "
           "deliberately does not name")
 Z23_FLAG("ZCL_HOST_WATCHDOG_WEDGE_CYCLES", "env_build", "5", "-",
-          "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:auto")
+          "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOTSWAP_ACTIVATE", "env_runtime", "-", "-",
           "first use engine/modules/hotswap/src/hotswap_activate.c:auto; documented at docs/agent/AGENT_API.md:1242: ZCL_HOTSWAP_ACTIVATE=1; canonical refused). make hotswap-module-so")
 Z23_FLAG("ZCL_HOTSWAP_BENCH_RUNS", "env_build", "20", "-",
@@ -1283,7 +1283,7 @@ Z23_FLAG("ZCL_INTERVENE_RUNNING_EXE_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/intervention_ledger.sh:auto")
 Z23_FLAG("ZCL_INTERVENE_SHOW_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/intervention_ledger.sh:auto")
-Z23_FLAG("ZCL_INTERVENE_UNITS", "env_build", "zclassic23.service", "-",
+Z23_FLAG("ZCL_INTERVENE_UNITS", "env_build", "z23-node.service", "-",
           "undocumented; first use tools/scripts/intervention_ledger.sh:auto")
 Z23_FLAG("ZCL_INTERVENE_WINDOW_SEC", "env_build", "900", "-",
           "undocumented; first use tools/scripts/intervention_ledger.sh:auto")
@@ -1683,7 +1683,7 @@ Z23_FLAG("ZCL_NO_BUNDLE_FETCH", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_bundle_fetch.c:auto")
 Z23_FLAG("ZCL_NODE_BIN", "env_build", "build/bin/zclassic23", "-",
           "undocumented; first use tools/dev/arena_acceptance.sh:auto")
-Z23_FLAG("ZCL_NODE_UNIT", "env_build", "zclassic23", "-",
+Z23_FLAG("ZCL_NODE_UNIT", "env_build", "z23-node", "-",
           "first use tools/mvp_gate.sh:auto; documented at docs/quality/mvp-live-gate.md:38: ZCL_NODE_UNIT — systemd --user unit whose ExecStart supplies the")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:auto")
@@ -2030,7 +2030,7 @@ Z23_FLAG("ZCL_REMOTE_SELFTEST_SANDBOX", "env_build", "-", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:auto")
 Z23_FLAG("ZCL_REMOTE_SSH", "env_build", "ssh", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:auto")
-Z23_FLAG("ZCL_REMOTE_UNIT", "env_build", "zclassic23-test.service", "-",
+Z23_FLAG("ZCL_REMOTE_UNIT", "env_build", "z23-test.service", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:auto")
 Z23_FLAG("ZCL_REORG_RATCHET_FILES", "env_build", "-", "-",
           "undocumented; first use tools/scripts/gate_stage_log_reorg_unsafe_ratchet.sh:auto")
@@ -2091,7 +2091,7 @@ Z23_FLAG("ZCL_ROUNDTRIP_RPCPORT", "env_build", "-", "-",
 Z23_FLAG("ZCL_ROUNDTRIP_TIMEOUT", "env_build", "300", "-",
           "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:auto")
 Z23_FLAG("ZCL_RPC_BIN", "env_build", "build/bin/zcl-rpc", "-",
-          "first use platform/deploy/zclassic23-cutover.sh:auto; documented at docs/quality/mvp-live-gate.md:37: ZCL_RPC_BIN — c23 client (default build/bin/zcl-rpc)")
+          "first use platform/deploy/z23-cutover.sh:auto; documented at docs/quality/mvp-live-gate.md:37: ZCL_RPC_BIN — c23 client (default build/bin/zcl-rpc)")
 Z23_FLAG("ZCL_RPCCONNECT", "env_build", "-", "-",
           "first use tools/mvp_gate.sh:auto; documented at docs/dev/BUILD.md:817: ZCL_RPCCONNECT: it derives the loopback RPC endpoint from the canonical")
 Z23_FLAG("ZCL_RPC_CONNECT_MS", "env_runtime", "2000", "-",

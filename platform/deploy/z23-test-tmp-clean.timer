@@ -1,0 +1,15 @@
+[Unit]
+Description=Z23 test-tmp Scratch Reclaimer Timer
+
+[Timer]
+# Daily 03:45 — right after z23-worktree-gc.timer (03:35), before
+# z23-bundle-export.timer (04:00) and
+# z23-replay-canary-nightly.timer (04:30); distinct from the
+# z23-test-suite.timer hourly *:20:00 slot.
+OnCalendar=*-*-* 03:45:00
+RandomizedDelaySec=300
+Persistent=true
+Unit=z23-test-tmp-clean.service
+
+[Install]
+WantedBy=timers.target

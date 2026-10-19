@@ -224,7 +224,7 @@
 #   ZCL_PARITY_NODE_BIN / ZCL_PARITY_RPC_BIN   binaries to use
 #   ZCL_PARITY_CANON_DATADIR / ZCL_PARITY_CANON_RPCPORT
 #                                explicit canonical binding; when absent,
-#                                resolve zclassic23.service ExecStart
+#                                resolve z23-node.service ExecStart
 #
 # This script exits non-zero ONLY if it could not append to its own ledger.
 # A node that would not answer is DATA, not a script failure — same doctrine
@@ -305,13 +305,13 @@ fi
 # name|rpcport|datadir. Membership rule is the SLO prober's: a row
 # exists only while the instance is DEPLOYED on this host, so a permanently
 # unreachable row can never train a reader to ignore could-not-ask. Only
-# zclassic23.service (canonical, 18232) runs here; adding a lane is one
+# z23-node.service (canonical, 18232) runs here; adding a lane is one
 # line.
 CANON_DATADIR="${ZCL_PARITY_CANON_DATADIR:-}"
 CANON_RPCPORT="${ZCL_PARITY_CANON_RPCPORT:-}"
 if [ "${1:-collect}" = "collect" ] &&
    { [ -z "$CANON_DATADIR" ] || [ -z "$CANON_RPCPORT" ]; }; then
-    canonical_exec="$(evidence_systemd_show zclassic23.service ExecStart)"
+    canonical_exec="$(evidence_systemd_show z23-node.service ExecStart)"
     [ -n "$CANON_DATADIR" ] ||
         CANON_DATADIR="$(evidence_unit_exec_arg "$canonical_exec" datadir)"
     [ -n "$CANON_RPCPORT" ] ||

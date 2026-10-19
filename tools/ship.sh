@@ -1072,7 +1072,7 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     # to the rollback commit in the same drop-in.
     grep -qF 'ZCL_DEPLOY_ONE_WAY=1' "$REPO_ROOT/Makefile"
     grep -qF 'one_way_armed=1' "$REPO_ROOT/Makefile"
-    grep -qF 'stop zclassic23' "$REPO_ROOT/Makefile"
+    grep -qF 'stop z23-node' "$REPO_ROOT/Makefile"
     grep -qF 'forward-only candidate failed qualification' "$REPO_ROOT/Makefile"
 
     # ── local deploy: immutable release directory is detected and refused
@@ -1568,7 +1568,7 @@ deploy_local() {
     fi
     local pid svc_dir worker_backup i rc=0 prior_commit schema_changed local_one_way=0
     local remapped_rc one_way_rc
-    pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
+    pid="$(systemctl --user show z23-node -p MainPID --value 2>/dev/null || true)"
     case "$pid" in
         ""|*[!0-9]*|0) die "local canonical service must be running before ship" ;;
     esac
@@ -1614,7 +1614,7 @@ deploy_local() {
     # cannot be proven without restarting the live canonical service.
     case "$(ship_local_release_layout "$svc_dir" "$HOME")" in
         release)
-            die "local worker/daemon install target $svc_dir is an immutable staged release directory — the same directory \`make deploy\`'s own daemon-install step already refuses to write into. Nothing was mutated (worker backup/restore is skipped: there is nothing here to back up). Point the local canonical zclassic23.service at a writable canonical binary — chmod u+w $svc_dir, or re-home the unit on \$(CURDIR)/build/bin/z23 — then ship locally again."
+            die "local worker/daemon install target $svc_dir is an immutable staged release directory — the same directory \`make deploy\`'s own daemon-install step already refuses to write into. Nothing was mutated (worker backup/restore is skipped: there is nothing here to back up). Point the local canonical z23-node.service at a writable canonical binary — chmod u+w $svc_dir, or re-home the unit on \$(CURDIR)/build/bin/z23 — then ship locally again."
             ;;
         *) say "layout     local writable canonical directory $svc_dir" ;;
     esac
@@ -1821,7 +1821,7 @@ deploy_remote() {
     step "Deploy → $host"
     svc_bin="$(ssh "${SSH_OPTS[@]}" "$host" \
         'set -eu
-         pid="$(systemctl --user show zclassic23 -p MainPID --value)"
+         pid="$(systemctl --user show z23-node -p MainPID --value)"
          case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
          if [ -e "/proc/$pid/exe" ]; then
              readlink -f "/proc/$pid/exe"
@@ -1848,7 +1848,7 @@ REMOTE_HASH
     # Prove that the persistent-schema implementation is byte-equivalent
     # between the running release and this candidate before any transfer.
     prior_commit="$(ssh "${SSH_OPTS[@]}" "$host" '
-        pid="$(systemctl --user show zclassic23 -p MainPID --value)" || exit 1
+        pid="$(systemctl --user show z23-node -p MainPID --value)" || exit 1
         if [ -r "/proc/$pid/environ" ]; then
             tr "\0" "\n" < "/proc/$pid/environ" |
                 sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p"
@@ -1990,7 +1990,7 @@ worker_v="$release_root/z23-package-verify"
 worker_v_legacy="$release_root/zclassic23-package-verify"
 worker_d="$release_root/z23-package-verify-dev"
 worker_d_legacy="$release_root/zclassic23-package-verify-dev"
-dropin_dir="$HOME/.config/systemd/user/zclassic23.service.d"
+dropin_dir="$HOME/.config/systemd/user/z23-node.service.d"
 dropin="$dropin_dir/zzzzz-z23-ship-release.conf"
 rollback_dropin="${dropin}.ship.rollback.${run_id}"
 dropin_absent="${dropin}.ship.absent.${run_id}"
@@ -2023,7 +2023,7 @@ restore_prior() {
     # Do not wait for Type=notify startup here: ship_await below is the
     # progress-aware authority. A synchronous restart can block for tens of
     # minutes on a spinning-disk datadir before that observer even starts.
-    systemctl --user restart --no-block zclassic23 || return 1
+    systemctl --user restart --no-block z23-node || return 1
 
     SHIP_AWAIT_WINDOW="$rollback_window"
     SHIP_AWAIT_SILENCE="$rollback_silence"
@@ -2098,7 +2098,7 @@ chmod 555 "$release_root"
     echo "remote: immutable release verification failed" >&2; exit 1;
 }
 
-pid="$(systemctl --user show zclassic23 -p MainPID --value)"
+pid="$(systemctl --user show z23-node -p MainPID --value)"
 case "$pid" in ""|*[!0-9]*|0) echo "remote: no running MainPID" >&2; exit 1 ;; esac
 prior_sha="$(ship_sha256_stream < "$(ship_exe_live_of "$pid")")"
 # Linux keeps exact argv boundaries (/proc cmdline is NUL-separated); hosts
@@ -2157,8 +2157,8 @@ systemctl --user daemon-reload
 # reporting sha != want for the whole window — which reads as a slow box, not
 # as a pinned one. Refuse here instead, naming the file that wins.
 guard_exec="$(ship_exec_path_from_show_text \
-    "$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null || true)")"
-guard_dropins="$(systemctl --user show zclassic23 -p DropInPaths --value 2>/dev/null || true)"
+    "$(systemctl --user show z23-node -p ExecStart --value 2>/dev/null || true)")"
+guard_dropins="$(systemctl --user show z23-node -p DropInPaths --value 2>/dev/null || true)"
 if ! guard_text="$(ship_exec_guard_check "$release_root/z23" "$guard_exec" \
         "$dropin" "$guard_dropins")"; then
     printf 'remote: %s\n' "$guard_text" >&2
@@ -2174,7 +2174,7 @@ fi
 # Queue the restart and immediately enter the progress-aware observer below.
 # Waiting synchronously defeats the slow-box verdict because Type=notify does
 # not return until the whole cold datadir startup has completed.
-systemctl --user restart --no-block zclassic23
+systemctl --user restart --no-block z23-node
 
 # The rollback stays armed until the candidate proves exact bytes, the expected
 # identity, and answering RPC. A successful `systemctl restart` only proves
@@ -2315,7 +2315,7 @@ crash_samples="$6"; unknown_samples="$7"; rpc_budgets="$8"
 # Wrapped to ship_await's one-argument observer seam. prior_sha is assigned
 # below, before the only call.
 observe_restore() { ship_observe zclassic23 "$prior_sha" "" "" "$1"; }
-dropin="$HOME/.config/systemd/user/zclassic23.service.d/zzzzz-z23-ship-release.conf"
+dropin="$HOME/.config/systemd/user/z23-node.service.d/zzzzz-z23-ship-release.conf"
 if [ -f "${dropin}.ship.rollback.${run_id}" ] || [ -f "${dropin}.ship.absent.${run_id}" ]; then
     if [ -f "${dropin}.ship.rollback.${run_id}" ]; then
         install -m 644 "${dropin}.ship.rollback.${run_id}" "$dropin"
@@ -2326,7 +2326,7 @@ if [ -f "${dropin}.ship.rollback.${run_id}" ] || [ -f "${dropin}.ship.absent.${r
         echo "remote: CRITICAL — rollback daemon-reload failed" >&2
         exit 1
     fi
-    if ! systemctl --user restart --no-block zclassic23; then
+    if ! systemctl --user restart --no-block z23-node; then
         echo "remote: CRITICAL — rollback restart request failed" >&2
         exit 1
     fi
@@ -2396,7 +2396,7 @@ ROLLBACK_SCRIPT
 set -eu
 run_id="$1"
 case "$run_id" in ''|*[!A-Za-z0-9.-]*) exit 2 ;; esac
-dropin="$HOME/.config/systemd/user/zclassic23.service.d/zzzzz-z23-ship-release.conf"
+dropin="$HOME/.config/systemd/user/z23-node.service.d/zzzzz-z23-ship-release.conf"
 rm -f \
     "${dropin}.ship.rollback.${run_id}" "${dropin}.ship.absent.${run_id}"
 REMOTE_CLEANUP
@@ -2453,7 +2453,7 @@ printf '%-22s %-18s %-12s %s\n' HOST SOURCE_ID HEIGHT STATE
 for target in $TARGETS; do
     case "$target" in
         local)
-            pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
+            pid="$(systemctl --user show z23-node -p MainPID --value 2>/dev/null || true)"
             s="$(timeout 20 "$(ship_exe_live_of "$pid")" status 2>/dev/null || true)"
             printf '%-22s %-18s %-12s %s\n' "local" "${CAND_SOURCE_ID:0:16}…" \
                 "$(printf '%s' "$s" | grep -oE 'hstar=[0-9]+' | cut -d= -f2)" \
@@ -2461,7 +2461,7 @@ for target in $TARGETS; do
         remote)
             for host in "${DEPLOY_HOSTS[@]}"; do
                 s="$(ssh "${SSH_OPTS[@]}" "$host" '
-                    pid="$(systemctl --user show zclassic23 -p MainPID --value)"
+                    pid="$(systemctl --user show z23-node -p MainPID --value)"
                     case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
                     if [ -e "/proc/$pid/exe" ]; then
                         exe="/proc/$pid/exe"

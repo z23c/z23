@@ -22,7 +22,7 @@ Wants=network-online.target
 # genuinely reachable at its .onion, not merely that a process exists.
 Type=notify
 NotifyAccess=main
-# Match production (platform/deploy/zclassic23.service): cold IBD boot can spend
+# Match production (platform/deploy/z23-node.service): cold IBD boot can spend
 # well over an hour in block-index load plus coins hydrate before the
 # onion descriptor is published and READY=1 fires. The previous 1h
 # budget SIGTERM'd that work and Restart=always livelocked the box.
@@ -42,7 +42,7 @@ EnvironmentFile=%h/.config/zclassic23-fleetsync/%i.env
 # the env because Exec* does expand them. A box using a different devfleet
 # datadir must override those three lines together.
 #
-# A box whose checkout is not at %h/github/zclassic23 overrides just this line:
+# A box whose checkout is not at %h/github/z23 overrides just this line:
 #   systemctl --user edit zcl23-devfleet@%i
 # ExecStart must be a literal absolute path; systemd will not expand a
 # variable in the first token.
@@ -54,7 +54,7 @@ EnvironmentFile=%h/.config/zclassic23-fleetsync/%i.env
 # node2 rotated through five addresses on 2026-08-23 that way. The flag sets
 # an idempotent boolean, so a box repeating it in DEVFLEET_FLAGS is harmless.
 # It is inert without -tor, which stays a per-box choice.
-ExecStart=%h/github/zclassic23/build/bin/zclassic23 \
+ExecStart=%h/github/z23/build/bin/zclassic23 \
     -datadir=%h/.zclassic-c23-devfleet \
     -port=${DEVFLEET_PORT} \
     -rpcport=${DEVFLEET_RPCPORT} \

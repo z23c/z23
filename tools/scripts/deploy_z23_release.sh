@@ -59,8 +59,8 @@ set -eu
 manifest="$1"
 case "$manifest" in *[!0-9a-f]*|'') exit 2 ;; esac
 [ "${#manifest}" -eq 64 ] || exit 2
-if systemctl --user is-active --quiet zclassic23.service 2>/dev/null; then
-    echo "active zclassic23.service owns the canonical node" >&2
+if systemctl --user is-active --quiet z23-node.service 2>/dev/null; then
+    echo "active z23-node.service owns the canonical node" >&2
     exit 3
 fi
 if systemctl --user cat z23.service >/dev/null 2>&1 ||
@@ -446,7 +446,7 @@ selftest_assert_failures() {
     mkdir -p "$tmp/hosts/active"
     : >"$tmp/hosts/active/canonical-active"
     ! selftest_run_deploy active >/dev/null 2>&1 \
-        || die "selftest: active zclassic23.service was not refused"
+        || die "selftest: active z23-node.service was not refused"
     mkdir -p "$tmp/hosts/existing/.config/systemd/user"
     : >"$tmp/hosts/existing/.config/systemd/user/z23.service"
     ! selftest_run_deploy existing >/dev/null 2>&1 \

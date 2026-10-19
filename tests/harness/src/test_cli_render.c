@@ -551,7 +551,7 @@ static int test_guide_tree_render(void)
             "\"swarm_member\":true,"
             "\"wrote_flags\":\"packagehost=1 buildworker=1\","
             "\"datadir\":\"./test-tmp/join-ux\","
-            "\"restart_command\":\"systemctl --user restart zclassic23\"}}";
+            "\"restart_command\":\"systemctl --user restart z23-node\"}}";
         struct zcl_cli_render_env e = cr_env(80, false);
         char out[8192];
         size_t n = zcl_cli_render_doc(doc, strlen(doc), "zcode.node.join",
@@ -563,7 +563,7 @@ static int test_guide_tree_render(void)
         ASSERT(strstr(out, "packagehost=1 buildworker=1") != NULL);
         ASSERT(strstr(out, "this process has not loaded those flags yet")
                != NULL);
-        ASSERT(strstr(out, "systemctl --user restart zclassic23") != NULL);
+        ASSERT(strstr(out, "systemctl --user restart z23-node") != NULL);
         ASSERT(strstr(out, "z23 zcode package offered") != NULL);
         ASSERT(strstr(out, "-datadir=./test-tmp/join-ux") != NULL);
         ASSERT(strstr(out, "\"joined\"") == NULL);
@@ -578,7 +578,7 @@ static int test_guide_tree_render(void)
     }
     TEST("offered renders two reconstructable commands at narrow width") {
         static const char restart[] =
-            "systemctl --user restart zclassic23";
+            "systemctl --user restart z23-node";
         static const char offered[] =
             "z23 zcode package offered "
             "-datadir=./test-tmp/offered-ux-copyable-"
@@ -588,7 +588,7 @@ static int test_guide_tree_render(void)
             "\"command\":\"zcode.package.offered\","
             "\"ok\":true,\"status\":\"passed\",\"data\":{"
             "\"live\":false,\"serving_ready\":false,\"peer_count\":0,"
-            "\"next_command\":\"systemctl --user restart zclassic23, then "
+            "\"next_command\":\"systemctl --user restart z23-node, then "
             "z23 zcode package offered "
             "-datadir=./test-tmp/offered-ux-copyable-"
             "0123456789abcdefghijklmnopqrstuvwxyz\"}}";

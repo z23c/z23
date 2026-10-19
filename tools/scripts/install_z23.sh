@@ -1112,7 +1112,7 @@ write_unit() {
     local prefix="$1" unit_dir="$2"
     local bin="$prefix/bin/zclassic23"
     mkdir -p "$unit_dir"
-    # z23.service — never overwrite the production zclassic23.service.
+    # z23.service — never overwrite the production z23-node.service.
     cat >"$unit_dir/z23.service" <<EOF
 [Unit]
 Description=Z23 node

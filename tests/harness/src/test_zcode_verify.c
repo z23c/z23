@@ -3534,7 +3534,7 @@ static int t_attest_publish_gate(void)
 
     failures += zg_no_store(package_root);
 
-    const char *argv[] = { "zclassic23-test", "-packagehost=1",
+    const char *argv[] = { "z23-test", "-packagehost=1",
                            "-packagequota=100000000" };
     ParseParameters(3, argv);
     char dd[1024];
@@ -3546,7 +3546,7 @@ static int t_attest_publish_gate(void)
              opened);
     if (!opened) {
         vcs_package_store_close_global();
-        const char *reset[] = { "zclassic23-test" };
+        const char *reset[] = { "z23-test" };
         ParseParameters(1, reset);
         SetDataDir("");
         test_rm_rf_recursive(dd);
@@ -3588,7 +3588,7 @@ static int t_attest_publish_gate(void)
     vcs_package_store_close_global();
     ZV_CHECK("gate: the node-global store is closed again",
              vcs_package_store_global() == NULL);
-    const char *reset[] = { "zclassic23-test" };
+    const char *reset[] = { "z23-test" };
     ParseParameters(1, reset);
     SetDataDir("");
     test_rm_rf_recursive(dd);
@@ -3642,7 +3642,7 @@ static int t_work_publish_gate(void)
         json_free(&result);
     }
 
-    const char *argv[] = { "zclassic23-test", "-packagehost=1",
+    const char *argv[] = { "z23-test", "-packagehost=1",
                            "-packagequota=100000000" };
     ParseParameters(3, argv);
     char dd[1024];
@@ -3655,7 +3655,7 @@ static int t_work_publish_gate(void)
              opened);
     if (!opened) {
         vcs_package_store_close_global();
-        const char *reset[] = { "zclassic23-test" };
+        const char *reset[] = { "z23-test" };
         ParseParameters(1, reset);
         SetDataDir("");
         test_rm_rf_recursive(dd);
@@ -3703,7 +3703,7 @@ static int t_work_publish_gate(void)
 
     /* Restore the process globals this case borrowed. */
     vcs_package_store_close_global();
-    const char *reset[] = { "zclassic23-test" };
+    const char *reset[] = { "z23-test" };
     ParseParameters(1, reset);
     SetDataDir("");
     test_rm_rf_recursive(dd);
@@ -3823,7 +3823,7 @@ static int t_task_publish_gate(void)
         json_free(&result);
     }
 
-    const char *argv[] = { "zclassic23-test", "-packagehost=1",
+    const char *argv[] = { "z23-test", "-packagehost=1",
                            "-packagequota=100000000" };
     ParseParameters(3, argv);
     char dd[1024];
@@ -3836,7 +3836,7 @@ static int t_task_publish_gate(void)
              opened);
     if (!opened) {
         vcs_package_store_close_global();
-        const char *reset[] = { "zclassic23-test" };
+        const char *reset[] = { "z23-test" };
         ParseParameters(1, reset);
         SetDataDir("");
         test_rm_rf_recursive(dd);
@@ -3947,7 +3947,7 @@ static int t_task_publish_gate(void)
 
     /* Restore the process globals this case borrowed. */
     vcs_package_store_close_global();
-    const char *reset[] = { "zclassic23-test" };
+    const char *reset[] = { "z23-test" };
     ParseParameters(1, reset);
     SetDataDir("");
     test_rm_rf_recursive(dd);

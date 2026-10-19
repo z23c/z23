@@ -16,7 +16,7 @@
 #
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_pipefail_status_pipe.sh
 platform/deploy/migrate-role-names-selftest.sh 3
-platform/deploy/zclassic23-bundle-export.sh 2
+platform/deploy/z23-bundle-export.sh 2
 tools/deploy_guard.sh 2
 tools/dev/agent-dev-status.sh 4
 tools/dev/agent-doctor.sh 1

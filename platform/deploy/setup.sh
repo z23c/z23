@@ -16,9 +16,9 @@ loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 
 # Install user service file
 mkdir -p "$SERVICE_DIR"
-install -m 644 "$REPO_DIR/platform/deploy/zclassic23.service" "$SERVICE_DIR/zclassic23.service"
-su - "$TARGET_USER" -c "systemctl --user daemon-reload && systemctl --user enable zclassic23" 2>/dev/null || \
-    echo "Note: run 'systemctl --user daemon-reload && systemctl --user enable zclassic23' as $TARGET_USER"
+install -m 644 "$REPO_DIR/platform/deploy/z23-node.service" "$SERVICE_DIR/z23-node.service"
+su - "$TARGET_USER" -c "systemctl --user daemon-reload && systemctl --user enable z23-node" 2>/dev/null || \
+    echo "Note: run 'systemctl --user daemon-reload && systemctl --user enable z23-node' as $TARGET_USER"
 
 # Clean up old setcap sudoers rule if present
 rm -f /etc/sudoers.d/zclassic23-setcap

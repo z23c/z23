@@ -89,7 +89,7 @@ The unit that [`platform/deploy/setup.sh`](../../platform/deploy/setup.sh) insta
 `zclassic23`, so the restart is:
 
 ```bash
-systemctl --user restart zclassic23
+systemctl --user restart z23-node
 ```
 
 The command's `restart_command` field prints this installed unit name. If you

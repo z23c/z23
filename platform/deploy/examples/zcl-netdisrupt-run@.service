@@ -16,9 +16,9 @@ OnFailure=zcl-stopwatch-onfailure.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/github/zclassic23
+WorkingDirectory=%h/github/z23
 EnvironmentFile=-%h/.config/zclassic23-stopwatch/%i.env
-ExecStart=%h/github/zclassic23/tools/scripts/netdisrupt_stopwatch_run_and_record.sh
+ExecStart=%h/github/z23/tools/scripts/netdisrupt_stopwatch_run_and_record.sh
 # Cut window (ZCL_ND_CUT_SECS default 600s) + recovery budget
 # (ZCL_ND_BUDGET_SECS default 600s) + boot/RPC overhead margin.
 TimeoutStartSec=1500

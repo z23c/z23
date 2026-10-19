@@ -349,10 +349,10 @@ before configuring a service for the clone above:
 
 ```bash
 cd "$HOME/src/z23"
-sed -n '1,220p' platform/deploy/zclassic23.service
+sed -n '1,220p' platform/deploy/z23-node.service
 ```
 
-Use `systemctl --user stop zclassic23.service` before changing its binary or
+Use `systemctl --user stop z23-node.service` before changing its binary or
 datadir. Operator flags belong in `~/.config/zclassic23/env`; private keys,
 cookies, datadirs, and credentials never belong in either checkout.
 
@@ -361,7 +361,7 @@ If boot-without-login is required, create one Windows Task Scheduler entry,
 as the owning Windows user, that runs:
 
 ```text
-wsl.exe -d Ubuntu -- systemctl --user start zclassic23.service
+wsl.exe -d Ubuntu -- systemctl --user start z23-node.service
 ```
 
 Use “At log on” unless unattended pre-login operation is an explicit

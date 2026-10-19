@@ -71,7 +71,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODE="${1:-collect}"
 SCHEMA="zcl.build_drift.v1"
 
-UNIT="${ZCL_DRIFT_UNIT:-zclassic23}"
+UNIT="${ZCL_DRIFT_UNIT:-z23-node}"
 LEDGER_DIR="${ZCL_DRIFT_LEDGER_DIR:-${HOME:-/root}/.local/state/zclassic23-drift}"
 LEDGER_FILE="$LEDGER_DIR/build-drift-ledger.jsonl"
 ROTATE_BYTES="${ZCL_DRIFT_ROTATE_BYTES:-52428800}"

@@ -599,7 +599,7 @@ static int t_declared_lane_creates_without_a_phrase(const char *dir)
 /* ── THE SHIPPED UNIT'S OWN FIRST BOOT ──────────────────────────────────
  *
  * Nothing covered this, and that is why the crash loop shipped twice. The
- * canonical unit (platform/deploy/zclassic23.service) passes -operator-lane=canonical
+ * canonical unit (platform/deploy/z23-node.service) passes -operator-lane=canonical
  * and carries Restart=always, and the secure way to run it is with
  * ZCL_WALLET_PASSPHRASE set. On a brand-new data directory that combination
  * ran the refusal, exit(1), restart, forever — no wallet, ever.
@@ -622,7 +622,7 @@ static int t_canonical_service_first_boot_creates_a_wallet(const char *dir)
 
     /* 1. The premise, read from the shipped unit. */
     char unit[65536];
-    long n_unit = wpl_slurp("platform/deploy/zclassic23.service", unit, sizeof(unit));
+    long n_unit = wpl_slurp("platform/deploy/z23-node.service", unit, sizeof(unit));
     WPL_CHECK("the shipped unit file was readable", n_unit > 0);
     WPL_CHECK("the shipped unit declares the CANONICAL operator lane",
               n_unit > 0 && strstr(unit, "-operator-lane=canonical") != NULL);

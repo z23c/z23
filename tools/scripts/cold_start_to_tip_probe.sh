@@ -20,7 +20,7 @@
 #
 # Fixture preference (product-aligned, never live datadir surgery):
 #   1. consensus-state-bundle-<H>.sqlite  (complete-state; zero-flag autodetect
-#      after platform/deploy/zclassic23-bundle-bootstrap.sh stages it into
+#      after platform/deploy/z23-bundle-bootstrap.sh stages it into
 #      <datadir>/bundles/). THIS-boot install also needs a header-chain seed
 #      (block_index.bin) at <datadir>/bundles/block_index.bin so
 #      boot_header_seed_import_maybe can seat the checkpoint header before
@@ -82,7 +82,7 @@ BUNDLE_SUCCESS_PATTERN='-load-snapshot-at-own-height: coin set RE-SEEDED'
 CONSENSUS_BUNDLE_SUCCESS_PATTERN='autodetected consensus bundle installed'
 CONSENSUS_BUNDLE_REQUEST_PATTERN='install-on-next-boot request installed'
 CONSENSUS_BUNDLE_MARKER='consensus-bundle-installed.marker'
-BUNDLE_BOOTSTRAP="$REPO_ROOT/platform/deploy/zclassic23-bundle-bootstrap.sh"
+BUNDLE_BOOTSTRAP="$REPO_ROOT/platform/deploy/z23-bundle-bootstrap.sh"
 MAX_BOOTS="${ZCL_C3_MAX_BOOTS:-12}"
 ARTIFACT_ROOT="${ZCL_C3_ARTIFACT_ROOT:-$REPO_ROOT/build/c3-probe}"
 RUN_ID="${ZCL_C3_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"

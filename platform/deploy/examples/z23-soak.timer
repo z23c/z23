@@ -1,0 +1,15 @@
+[Unit]
+Description=Z23 Soak Probe Timer
+# Run the three-guarantees assertion every 10 minutes, starting 5 min
+# after boot. Light enough to leave on continuously; surfaces silent
+# regressions (peer count crash, mirror lag growth, severity escalation,
+# magicbean reporting outage) as a journal record + non-zero exit.
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Persistent=true
+Unit=z23-soak.service
+
+[Install]
+WantedBy=timers.target

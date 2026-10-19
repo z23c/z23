@@ -85,7 +85,7 @@ returns bounded diagnostics. To survive logout and reboot, use the shipped
 
 ```bash
 sudo bash platform/deploy/setup.sh
-systemctl --user start zclassic23
+systemctl --user start z23-node
 ```
 
 **Tor is bundled, and it is on.** A plain `make` builds the pinned embedded Tor

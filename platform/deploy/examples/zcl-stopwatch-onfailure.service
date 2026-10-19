@@ -2,7 +2,7 @@
 Description=Z23 Stopwatch Gate failure notifier
 # OnFailure= arm for zcl-c3-stopwatch-run@.service and
 # zcl-netdisrupt-run@.service (same pattern as
-# zclassic23-soak-evidence-onfailure.service). Fires ONLY when a
+# z23-soak-evidence-onfailure.service). Fires ONLY when a
 # run-and-record wrapper itself fails HARD — could not lock or append its
 # ledger line (see tools/scripts/c3_stopwatch_run_and_record.sh /
 # netdisrupt_stopwatch_run_and_record.sh). A legitimate FAIL/SKIP/SEAM/

@@ -1,0 +1,23 @@
+[Unit]
+Description=Z23 Host Watchdog — probes user@<uid>.service liveness + canonical node RPC port from OUTSIDE the systemd --user failure domain
+After=network.target
+
+[Service]
+# SYSTEM unit, runs as root (default) — loginctl enable-linger and the
+# revive step need root; the script itself drops to the operator user
+# (runuser -u) for the localhost ssh login, per deploy/z23-host-watchdog.sh.
+Type=oneshot
+ExecStart=/usr/local/sbin/z23-host-watchdog.sh
+# Must exceed the SUM of the script's escalating probe budgets
+# (ZCL_HOST_WATCHDOG_PROBE_TIMEOUTS, default 5+15+45 = 65s) plus the ~3s
+# user-manager revive sleep, and must stay under the timer's OnUnitActiveSec
+# (2min) so cycles never overlap. This is a containment ceiling on a bounded,
+# enumerated probe schedule — it is NOT a health verdict, and nothing about
+# the node's speed is inferred from it. At 30s it silently truncated the
+# watchdog's own patience, which would have re-created the one-missed-probe
+# verdict the script exists to avoid.
+TimeoutStartSec=100
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

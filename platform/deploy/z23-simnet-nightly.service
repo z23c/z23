@@ -1,0 +1,32 @@
+[Unit]
+Description=Z23 Nightly Simulator Sweep Lane
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github/z23
+# Clean-skip while any *mint* user service is active; prune old lane logs
+# before/after the run without changing the latest verdict on a skip.
+ExecStart=%h/github/z23/tools/scripts/quality_job_guard.sh simnet-nightly
+TimeoutStartSec=3600
+
+# Composes `make simnet-nightly` (full .scenario corpus + bounded
+# wire_sweep + sim-fast) via tools/scripts/simnet_nightly.sh. Set to 1 to
+# also run the longer `make simnet-fuzz-sweep` seed tail every night.
+Environment=ZCL_SIMNET_NIGHTLY_FUZZ_SWEEP=0
+Environment=ZCL_QUALITY_LOG_KEEP=8
+
+# Evidence work, not serving traffic — same polite scheduling as the other
+# background quality lanes (z23-fuzz.service /
+# z23-test-suite.service). Builds up to three whole-program LTO
+# binaries (zclassic23-chaos, wire_sweep, test_parallel) on a cold run, so
+# give it the test-suite lane's memory/task headroom rather than the
+# leaner fuzz lane's.
+Nice=15
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
+MemoryHigh=12G
+TasksMax=2048
+
+StandardOutput=journal
+StandardError=journal

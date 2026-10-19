@@ -182,7 +182,7 @@ EOF
 
     local svc_bin
     svc_bin="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-        'systemctl --user show zclassic23 -p ExecStart --value | tr " " "\n" | sed -n "s/^path=//p" | head -1' 2>/dev/null || true)"
+        'systemctl --user show z23-node -p ExecStart --value | tr " " "\n" | sed -n "s/^path=//p" | head -1' 2>/dev/null || true)"
     case "$svc_bin" in
         /*) ;;
         *)

@@ -14,8 +14,13 @@ After=z23-slo-probe.service
 
 [Service]
 Type=oneshot
+<<<<<<<< HEAD:platform/deploy/z23-hold-judge.service
 ExecStart=%h/.local/bin/z23 ops host slo judge --instance=canonical --window_hours=72 --gap_budget=3 --record=true
 # One native pass over the retained ledger (~6-7k canonical lines/day) — seconds.
+========
+ExecStart=%h/github/z23/tools/scripts/slo_hold_judge.sh --instance canonical --window-hours 72 --gap-budget 3 --record
+# One awk pass over the retained ledger (~6-7k canonical lines/day) — seconds.
+>>>>>>>> 8b8fbac0b (Rename platform/deploy zclassic23 units and files to z23):platform/deploy/z23-hold-certifier.service
 TimeoutStartSec=120
 Nice=10
 IOSchedulingClass=idle

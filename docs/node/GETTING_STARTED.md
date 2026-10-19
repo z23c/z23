@@ -571,13 +571,13 @@ hand-writing a unit:
 
 ```bash
 sudo bash platform/deploy/setup.sh              # one-time: installs the unit, enables linger
-systemctl --user start zclassic23
-systemctl --user status zclassic23
+systemctl --user start z23-node
+systemctl --user status z23-node
 ```
 
 `platform/deploy/setup.sh` installs the
-[tracked unit](../../platform/deploy/zclassic23.service)
-to `~/.config/systemd/user/zclassic23.service` and enables
+[tracked unit](../../platform/deploy/z23-node.service)
+to `~/.config/systemd/user/z23-node.service` and enables
 [`loginctl` linger](https://www.freedesktop.org/software/systemd/man/loginctl.html)
 so the service survives logout/reboot. The unit already uses
 `%h`-relative paths and the default ports and datadir, so it works unmodified
@@ -587,7 +587,7 @@ including `ExecStartPre=`, `ExecStart=` and `ReadWritePaths=`, to match.
 The launcher also requires `build/bin/zcl-nodectl` (`make zcl-nodectl`).
 Operator-specific flags
 (a stable external IP, seed peers) go in `~/.config/zclassic23/env` — copy
-[`platform/deploy/zclassic23.env.example`](../../platform/deploy/zclassic23.env.example) and edit
+[`platform/deploy/z23-node.env.example`](../../platform/deploy/z23-node.env.example) and edit
 it; the unit sources this file optionally, so a fresh clone without it still
 starts cleanly and syncs over clearnet. The unit does not request Tor by
 default; it no longer needs to, because a full build starts Tor on its own.
@@ -732,7 +732,7 @@ build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -port=8035 -rpcport=18234 \
     -fsport=18035 -httpsport=8445
 ```
 
-(The repo's own [`platform/deploy/zclassic23-test.service`](../../platform/deploy/zclassic23-test.service)
+(The repo's own [`platform/deploy/z23-test.service`](../../platform/deploy/z23-test.service)
 is a worked example of the same pattern: its own datadir, `-port=8035`,
 `-rpcport=18234`, `-addnode=127.0.0.1:8034`, `-nobgvalidation` for a faster
 boot — a template to copy, not something to install as-is.)

@@ -304,7 +304,7 @@ healthcheck_full_mode_args_for_tool() {
 }
 
 service_pid_is_stable() {
-    stable_pid=$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)
+    stable_pid=$(systemctl --user show z23-node -p MainPID --value 2>/dev/null || true)
     [ "$stable_pid" = "$SERVICE_MAIN_PID" ] || return 1
     stable_ticks=$(proc_start_ticks "$SERVICE_MAIN_PID" || true)
     [ -n "$stable_ticks" ] && [ "$stable_ticks" = "$SERVICE_START_TICKS" ] || return 1
@@ -597,7 +597,7 @@ esac
 
 command -v systemctl >/dev/null 2>&1 ||
     fatal_binding "systemctl is required to bind proof to the canonical service"
-SERVICE_MAIN_PID=$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)
+SERVICE_MAIN_PID=$(systemctl --user show z23-node -p MainPID --value 2>/dev/null || true)
 case "$SERVICE_MAIN_PID" in
     ''|*[!0-9]*|0) fatal_binding "canonical zclassic23 service has no MainPID" ;;
 esac
@@ -612,7 +612,7 @@ SERVICE_START_TICKS=$(proc_start_ticks "$SERVICE_MAIN_PID" || true)
 SERVICE_EXE=$(readlink -f "/proc/$SERVICE_MAIN_PID/exe" 2>/dev/null || true)
 [ -n "$SERVICE_EXE" ] ||
     fatal_binding "canonical MainPID $SERVICE_MAIN_PID executable cannot be resolved"
-SERVICE_EXEC_TEXT=$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null || true)
+SERVICE_EXEC_TEXT=$(systemctl --user show z23-node -p ExecStart --value 2>/dev/null || true)
 [ -n "$SERVICE_EXEC_TEXT" ] || fatal_binding "canonical service ExecStart is unavailable"
 SERVICE_EXEC_PATH_VALUES=$(exec_path_values_from_text "$SERVICE_EXEC_TEXT")
 SERVICE_EXEC_PATH=$(single_value_or_empty "$SERVICE_EXEC_PATH_VALUES") ||

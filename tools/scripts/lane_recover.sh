@@ -357,7 +357,7 @@ selftest() {
     ZCL_LANE_SELFTEST_HOME="$sandbox/home"
     mkdir -p "$ZCL_LANE_SELFTEST_HOME"
     dev='{"lane":"dev","unit":"zcl23-dev","datadir":"/tmp/zcl-dev","role_ready":false,"status":"warn","reason":"lag_to_live_99","snapshot_path":"/tmp/zcl-dev/utxo-seed-10.snapshot","snapshot_loader_configured":false,"recovery_hint":"restart_with_load_snapshot_at_own_height"}'
-    soak='{"lane":"soak","unit":"zclassic23-soak","datadir":"/tmp/zcl-soak","role_ready":false,"status":"warn","reason":"lag_to_live_99","snapshot_path":"","snapshot_loader_configured":false,"recovery_hint":"install_tip_seed_snapshot"}'
+    soak='{"lane":"soak","unit":"z23-soak","datadir":"/tmp/zcl-soak","role_ready":false,"status":"warn","reason":"lag_to_live_99","snapshot_path":"","snapshot_loader_configured":false,"recovery_hint":"install_tip_seed_snapshot"}'
     live='{"lane":"live","unit":"zclassic23","datadir":"/tmp/zcl-live","role_ready":false,"status":"warn","reason":"lag_to_live_99","snapshot_path":"/tmp/zcl-live/utxo-seed-10.snapshot","snapshot_loader_configured":false,"recovery_hint":"restart_with_load_snapshot_at_own_height"}'
     stale_import='{"lane":"dev","unit":"zcl23-dev","datadir":"/tmp/zcl-dev","role_ready":false,"status":"warn","reason":"lag_to_live_99","height":50,"snapshot_seed_height":10,"snapshot_path":"/tmp/zcl-dev/utxo-seed-10.snapshot","snapshot_loader_configured":true,"recovery_hint":"loader_active"}'
     selftest_case "dev loader plan" dev 0 "$dev"

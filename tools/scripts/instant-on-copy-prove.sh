@@ -319,7 +319,7 @@ run_positive() {
     fi
     [ -d "$SRC" ] || { echo "  POSITIVE INVALID — --src not a directory: $SRC"; POS_VERDICT=INVALID; return; }
     if [ "$(resolve "$SRC")" = "$(resolve "$HOME/.zclassic-c23")" ] &&
-       [ "$(systemctl --user show zclassic23 -p ActiveState --value 2>/dev/null || true)" = active ]; then
+       [ "$(systemctl --user show z23-node -p ActiveState --value 2>/dev/null || true)" = active ]; then
         echo "  POSITIVE INVALID — canonical source wallet is active; stop it before copying so one wallet identity is never active at two endpoints."
         POS_VERDICT=INVALID; return
     fi

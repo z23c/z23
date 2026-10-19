@@ -579,7 +579,7 @@ void zcl_native_handle_zcode_node_join(
     ok = ok &&
          json_push_kv_bool(data, "restart_required", true) &&
          json_push_kv_str(data, "restart_command",
-                          "systemctl --user restart zclassic23") &&
+                          "systemctl --user restart z23-node") &&
          json_push_kv_str(data, "restart_note",
                           "the service manager owns the node process; this "
                           "command started, stopped and signalled nothing. "

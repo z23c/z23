@@ -13,14 +13,14 @@ After=zcl-stopwatch-peer.service
 # once the append succeeds, regardless of the run's own PASS/FAIL/SKIP/
 # SEAM/STALLED-NAMED verdict — that verdict is judged, not paged, via
 # `make c3-stopwatch-report`). Same collect/judge split as
-# zclassic23-soak-evidence.service.
+# z23-soak-evidence.service.
 OnFailure=zcl-stopwatch-onfailure.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/github/zclassic23
+WorkingDirectory=%h/github/z23
 EnvironmentFile=-%h/.config/zclassic23-stopwatch/%i.env
-ExecStart=%h/github/zclassic23/tools/scripts/c3_stopwatch_run_and_record.sh
+ExecStart=%h/github/z23/tools/scripts/c3_stopwatch_run_and_record.sh
 # 10-min stopwatch budget (ZCL_CS_BUDGET_SECS default 600) + boot/RPC
 # overhead margin.
 TimeoutStartSec=700

@@ -95,7 +95,7 @@ the forwarder is a dumb byte pipe.
 # 3. Restart the node so boot starts the HTTPS server with the new cert.
 #    (Do this AFTER the restart-durability fix is deployed — a cold-import node must
 #    not be restarted casually; see docs/TENACITY.md.)
-systemctl --user restart zclassic23
+systemctl --user restart z23-node
 
 # 4. Verify (substitute your domain).
 sleep 20
@@ -199,7 +199,7 @@ install -m 600 "$SRC/privkey.pem"   "$DD/ssl/privkey.pem"
 diff <(openssl x509 -in "$DD/ssl/fullchain.pem" -noout -pubkey) \
      <(openssl pkey -in "$DD/ssl/privkey.pem" -pubout) && echo "cert/key MATCH"
 
-systemctl --user restart zclassic23      # boot re-reads ssl/ and binds 8443
+systemctl --user restart z23-node      # boot re-reads ssl/ and binds 8443
 ```
 
 After restart the node re-reads `ssl/` at boot. If it was mid-IBD/refold it

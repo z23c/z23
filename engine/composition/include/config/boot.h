@@ -33,7 +33,7 @@ enum zcl_operator_lane {
     ZCL_OPERATOR_LANE_COPY,
     /* A warm-standby serving replica: follows tip continuously on its own
      * datadir/ports, ready to be promoted to the canonical serving identity
-     * by deploy/zclassic23-cutover.sh. Treated as an automated-noncanonical
+     * by deploy/z23-cutover.sh. Treated as an automated-noncanonical
      * lane (boots fresh datadirs unattended without the interactive wallet
      * REFUSE gate), NOT as canonical — it is a spare, not THE live node. */
     ZCL_OPERATOR_LANE_STANDBY

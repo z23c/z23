@@ -907,7 +907,7 @@ lane object. A canonical packet should therefore say
 `z23 ops lanes` returns the native
 `zcl.agent_lanes.v2` topology contract for all first-class operator lanes:
 canonical (`z23`, `~/.zclassic-c23`, RPC 18232 / P2P 8033), soak
-(`zclassic23-soak`, `~/.zclassic-c23-soak`, RPC 18242 / P2P 8043), and dev
+(`z23-soak`, `~/.zclassic-c23-soak`, RPC 18242 / P2P 8043), and dev
 (`zcl23-dev`, `~/.zclassic-c23-dev`, RPC 18252 / P2P 8053). It also embeds
 `current_runtime_lane`, the same `zcl.operator_lane.v1` object used by
 `z23 agent`, plus `current_runtime_services`
@@ -1410,15 +1410,15 @@ make remote-node-plan-json ZCL_REMOTE_HOST=<user>@<remote-host>
 
 For periodic read-only observation, run `make install-remote-status-linger`.
 It installs the compatibility-source timer from
-`platform/deploy/examples/zclassic23-self-update.timer` as
-`zclassic23-remote-status.timer`; the service pins `ZCL_REMOTE_DRY_RUN=1` and
+`platform/deploy/examples/z23-self-update.timer` as
+`z23-remote-status.timer`; the service pins `ZCL_REMOTE_DRY_RUN=1` and
 `ZCL_REMOTE_BUILD=none`. Check it with `make remote-status`.
 `make install-self-update-linger` is a containment probe and refuses.
 
 For a long-running remote z23 test node, run
 `make install-remote-test-node-linger`. It installs
-`platform/deploy/examples/zclassic23-remote-test-node.service` as
-`zclassic23-test.service`, creates `~/.zclassic23-test`, and creates
+`platform/deploy/examples/z23-remote-test-node.service` as
+`z23-test.service`, creates `~/.zclassic23-test`, and creates
 `~/.config/zclassic23/remote-test.env` only if it does not already exist.
 The service uses the remote test ports (`18033` P2P, `18233` RPC), appends
 logs to `~/.zclassic23-test/node.log`, and carries the soak resource budget
@@ -1437,12 +1437,12 @@ edit the env file before starting or restarting the service.
 The background lanes keep expensive proof work running without blocking every
 push or AI edit loop.
 
-- `zclassic23-fuzz.timer` runs the guarded
+- `z23-fuzz.timer` runs the guarded
   `tools/scripts/background_quality_lane.sh fuzz` lane hourly. Default
   duration is 900 seconds per fuzzer; override with `ZCL_FUZZ_DURATION`.
-- `zclassic23-coverage.timer` runs
+- `z23-coverage.timer` runs
   `tools/scripts/background_quality_lane.sh coverage` weekly.
-- `zclassic23-test-suite.timer` runs
+- `z23-test-suite.timer` runs
   `tools/scripts/background_quality_lane.sh tests` hourly.
 - `z23-land-step.timer` runs one beat of the native landing service
   (`build/bin/z23-dev dev land step`) every ~20s, plus once 2 minutes after
@@ -1454,7 +1454,7 @@ push or AI edit loop.
   that queues a tip, and the leaf it calls publishes only a tip whose exact
   sealed proof receipt was admitted (`tools/command/native_dev_land.c`,
   allowlisted in `tools/lint/lintc/gate_no_unattended_publish.c`). It is
-  not the same service as `zclassic23-lander.service`, which runs the
+  not the same service as `z23-lander.service`, which runs the
   older `tools/dev/land_lander.sh` and stops at a local `land/ready` ref
   without publishing.
 - All four heavyweight timer services (including simnet nightly) enter through

@@ -32,7 +32,7 @@ denies `execve` to *itself* would break the node on boot.
 | 9 | `cognition/controllers/src/agent_copy_prove_controller.c:402-436` | `system("nohup %s ... > log 2>&1 < /dev/null &")` — launches a detached copy-prove script. Args are allowlist-validated (alnum/`-_.:=,/` only) before being appended unquoted (:416-420), so this is not a shell-injection bug today, just a shell-out. | `zcl_spawn_detached()` |
 | 10 | `cognition/controllers/src/agent_test_controller.c:186,428` | `popen("%s --list 2>/dev/null", "r")` to enumerate tests; `system(cmd)` to launch `test_parallel` as a detached runner. | `zcl_spawn_capture()` (site 186), `zcl_spawn_detached()` (site 428) |
 | 11 | `cognition/controllers/src/agent_controller.c:61-94` | `popen(command, "r")` — runs `tools/dev/agent-dev-status.sh` and captures stdout. | `zcl_spawn_capture()` |
-| 12 | `engine/entry/main.c:770` | `popen("systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null", "r")` — reads the live systemd `ExecStart=` line. | `zcl_spawn_capture()` |
+| 12 | `engine/entry/main.c:770` | `popen("systemctl --user show z23-node -p ExecStart --value 2>/dev/null", "r")` — reads the live systemd `ExecStart=` line. | `zcl_spawn_capture()` |
 
 (`tools/*.c` — `zcl-nodectl.c`, `zcl-rpc.c`, `devloop_process.c`,
 `check_observability_pairing.c`, `soak/main.c`, `bench_fresh_sync.c` — also

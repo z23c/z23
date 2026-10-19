@@ -3,7 +3,7 @@ Description=Z23 Serve lane (secondary full node + block explorer)
 After=network-online.target
 Wants=network-online.target
 # The serve role is a secondary node instance: same binary/consensus code as
-# the canonical unit (platform/deploy/zclassic23.service) but its own datadir and its
+# the canonical unit (platform/deploy/z23-node.service) but its own datadir and its
 # own 39xxx port quad, so it can run alongside the canonical node without
 # colliding on ports, datadir, or lock files. Used for a second public
 # explorer/RPC surface, canary builds, or operator experimentation that
@@ -38,7 +38,7 @@ ExecStart=%h/zclassic23/build/bin/zclassic23 \
     -showmetrics=0
 
 # Role-appropriate restart posture: unlike the canonical lane (which defers
-# every restart decision to the operator, see platform/deploy/zclassic23.service),
+# every restart decision to the operator, see platform/deploy/z23-node.service),
 # the serve lane is a secondary/disposable instance — auto-restart with a
 # short stop timeout is fine here.
 Restart=always

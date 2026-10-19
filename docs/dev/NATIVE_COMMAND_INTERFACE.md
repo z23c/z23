@@ -1071,7 +1071,7 @@ brief is `z23 core status brief`; the large diagnostic document is explicit as
 `dumpstate` output.
 
 **No-arg entry point.** Bare `z23` (zero arguments — the real node
-service never invokes the binary this way; `platform/deploy/zclassic23.service`
+service never invokes the binary this way; `platform/deploy/z23-node.service`
 always passes `-datadir=`/`-rpcport=`/etc.) prints the brief line plus one
 suggested next command, never a wall of text:
 

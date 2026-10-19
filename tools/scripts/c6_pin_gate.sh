@@ -10,7 +10,7 @@
 # restarts, RSS and security posture, but a 168 h window is only worth
 # something if every sample came from the SAME deliberately-chosen
 # executable. The soak unit is pinned precisely so `make deploy` cannot
-# re-baseline the clock (platform/deploy/examples/zclassic23-soak-node.service),
+# re-baseline the clock (platform/deploy/examples/z23-soak-node.service),
 # and re-pinning it is a conscious restart. This gate is what makes that
 # intent checkable before and after the swap:
 #
@@ -37,7 +37,7 @@
 #   c6_pin_gate.sh --selftest    # hermetic; fixture unit, fake binary, no systemd
 #
 # Env (test injection seams — the selftest needs no unit and no node):
-#   ZCL_SOAK_UNIT        systemd unit name (default zclassic23-soak), the
+#   ZCL_SOAK_UNIT        systemd unit name (default z23-soak), the
 #                        same seam soak_evidence.sh reads
 #   ZCL_C6_SHOW_CMD      command printing `systemctl show` key=value lines
 #   ZCL_C6_EXE_SHA_CMD   command printing the running image's sha256
@@ -240,7 +240,7 @@ cmd_selftest()
     ST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/zcl-c6-pin-selftest.XXXXXX")"
     trap 'rm -rf "$ST_TMP"' EXIT
 
-    local bin="$ST_TMP/zclassic23-soak" dd="$ST_TMP/datadir"
+    local bin="$ST_TMP/z23-soak" dd="$ST_TMP/datadir"
     printf '#!/bin/sh\necho "z23 v0.1.0 (source deadbeefcafe)"\n' > "$bin"
     chmod 0755 "$bin"
     mkdir -p "$dd"

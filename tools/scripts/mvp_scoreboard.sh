@@ -47,7 +47,7 @@ cd "$REPO_ROOT"
 
 TEST_ZCL_BIN="${TEST_ZCL_BIN:-$REPO_ROOT/build/bin/test_zcl}"
 ZCL_RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
-ZCL_NODE_UNIT="${ZCL_NODE_UNIT:-zclassic23}"
+ZCL_NODE_UNIT="${ZCL_NODE_UNIT:-z23-node}"
 ZCL_LAUNCHD_PLIST="${ZCL_LAUNCHD_PLIST:-$HOME/Library/LaunchAgents/org.z23.zclassic.plist}"
 TIP_GAP_OK="${TIP_GAP_OK:-10}"
 

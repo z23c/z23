@@ -798,7 +798,7 @@ if live_height="$(rpc_call "$HOME/.zclassic-c23" 18232 getblockcount)"; then
 fi
 
 report_lane live zclassic23 "$HOME/.zclassic-c23" 18232 8033 "public daily-driver"
-report_lane soak zclassic23-soak "$HOME/.zclassic-c23-soak" 18242 8043 "long-uptime evidence"
+report_lane soak z23-soak "$HOME/.zclassic-c23-soak" 18242 8043 "long-uptime evidence"
 report_lane dev zcl23-dev "$HOME/.zclassic-c23-dev" 18252 8053 "fresh-build development"
 
 if [ "$JSON" != "1" ]; then

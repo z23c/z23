@@ -4686,7 +4686,7 @@ static int test_publish_reproduction_gate(void) {
     json_free(&input);
 
     /* Resident store, but no committed release names the package root. */
-    const char *argv[] = {"zclassic23-test", "-packagehost=1",
+    const char *argv[] = {"z23-test", "-packagehost=1",
                           "-packagequota=1000000"};
     ParseParameters(3, argv);
     char dd[256];
@@ -4852,7 +4852,7 @@ static int test_publish_reproduction_gate(void) {
     json_free(&input);
 
     vcs_package_store_close_global();
-    const char *reset_argv[] = {"zclassic23-test"};
+    const char *reset_argv[] = {"z23-test"};
     ParseParameters(1, reset_argv);
     SetDataDir("");
     test_rm_rf_recursive(dd);

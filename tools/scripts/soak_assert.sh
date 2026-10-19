@@ -27,7 +27,7 @@ DURATION_S="${1:-86400}"
 POLL_S="${2:-60}"
 MIN_PEERS="${MIN_PEERS:-3}"
 LAG_BREACH_BLOCKS="${LAG_BREACH_BLOCKS:-10}"
-UNIT="${SOAK_UNIT:-zclassic23}"
+UNIT="${SOAK_UNIT:-z23-node}"
 ZCL_CLI="${ZCL_CLI:-$REPO_ROOT/build/bin/zcl-rpc}"
 HEALTH_URL="${HEALTH_URL:-https://127.0.0.1:8443/api/health}"
 

@@ -352,7 +352,7 @@ static int t_join_writes_config(void)
               json_get_bool(json_get(&c.reply.data, "restart_required")) &&
               json_get_str(json_get(&c.reply.data, "restart_command")) &&
               strcmp(json_get_str(json_get(&c.reply.data, "restart_command")),
-                     "systemctl --user restart zclassic23") == 0);
+                     "systemctl --user restart z23-node") == 0);
 
     /* The composed verdict, as the join reply actually emits it. */
     const struct json_value *verdict = json_get(&c.reply.data, "verdict");

@@ -8,15 +8,15 @@ operator-specific peers. Copy and adapt before installing:
   `zclassicd` dev peer used as a drift/consensus oracle. The live/default
   unit name documented in CLAUDE.md and docs/node/SYNC.md is `zclassicd.service`;
   copy and rename this example if your host uses that name.
-- `zclassic23-soak.service` / `.timer` — the OLDER 10-minute three-guarantees
+- `z23-soak.service` / `.timer` — the OLDER 10-minute three-guarantees
   soak probe driving `tools/scripts/soak_assert.sh` against the MAIN node
   (hardcoded repo path). **Naming caution:** on the operator box the unit
-  named `zclassic23-soak.service` is NOT this probe — it is the long-uptime
-  soak NODE, committed here as `zclassic23-soak-node.service`.
-- `zclassic23-soak-node.service` — the deployed long-uptime soak NODE
-  (pinned binary at `~/.local/bin/zclassic23-soak`, datadir
+  named `z23-soak.service` is NOT this probe — it is the long-uptime
+  soak NODE, committed here as `z23-soak-node.service`.
+- `z23-soak-node.service` — the deployed long-uptime soak NODE
+  (pinned binary at `~/.local/bin/z23-soak`, datadir
   `~/.zclassic-c23-soak`, RPC 18242; installed on-box as
-  `zclassic23-soak.service`). `make deploy` never touches its binary;
+  `z23-soak.service`). `make deploy` never touches its binary;
   re-pinning it is a conscious soak-clock re-baseline (see unit comments).
   `tools/scripts/c6_pin_gate.sh` is what makes that re-baseline checkable
   instead of remembered: run it before and after the swap. With no
@@ -28,7 +28,7 @@ operator-specific peers. Copy and adapt before installing:
   running image, or a pin that lives inside a checkout where an ordinary
   build would replace it. It is offline: no RPC, no node start, no write.
   `tools/scripts/c6_pin_gate.sh --selftest` proves those rungs hermetically.
-- `zclassic23-soak-evidence.{service,timer}` — hourly MVP-C6 evidence
+- `z23-soak-evidence.{service,timer}` — hourly MVP-C6 evidence
   collector: `tools/scripts/soak_evidence.sh collect` appends one READ-ONLY
   JSON sample (soak/zclassicd heights, gap, NRestarts, ActiveEnterTimestamp,
   VmRSS, ok) to `~/.local/state/zclassic23-soak-evidence/evidence.jsonl`.
@@ -38,9 +38,9 @@ operator-specific peers. Copy and adapt before installing:
   dead collector can never leave an evergreen green verdict). Judge the
   window with `make soak-evidence-report`; the unit's OnFailure= pages
   only when the lock-acquire or APPEND itself fails.
-- `zclassic23-soak-evidence-onfailure.service` — `OnFailure=` arm for the
+- `z23-soak-evidence-onfailure.service` — `OnFailure=` arm for the
   collector; logs to the journal (`journalctl -t soak-evidence`).
-- `zclassic23-replay-canary-nightly.{service,timer}` — nightly from-anchor
+- `z23-replay-canary-nightly.{service,timer}` — nightly from-anchor
   replay canary driving `tools/scripts/replay_canary.sh --from=anchor`
   (~45 min). Replays bodies anchor(3,056,758)->tip through the HEAD reducer
   in an ISOLATED /tmp scratch datadir on 3905x ports and asserts zero
@@ -49,15 +49,15 @@ operator-specific peers. Copy and adapt before installing:
   (RPC 8232, READ-ONLY). Verdict is the sentinel FILE
   `~/.local/state/zclassic23-canary/replay_canary_anchor.json`, written
   atomically only after every assertion passes — never exit-0-as-proof.
-- `zclassic23-replay-canary-weekly.{service,timer}` — weekly from-genesis
+- `z23-replay-canary-weekly.{service,timer}` — weekly from-genesis
   replay (genesis->tip, ~6 h, bg-validation ON). Same asserts plus full
   script coverage. This run dials the co-located zclassicd P2P
   (127.0.0.1:8034) via `-addnode` for bodies — the one real peer, read-only.
-- `zclassic23-replay-canary-onfailure@.service` — templated `OnFailure=`
+- `z23-replay-canary-onfailure@.service` — templated `OnFailure=`
   arm; logs `CANARY FAILED` to the journal (`journalctl -t replay-canary`).
 - `zcl-stopwatch-peer.service` — dedicated minimal serving peer (ports
   39070-39073) that the two stopwatch gates below dial as a read-only P2P
-  client, kept separate from the canonical `zclassic23.service` (port 8033)
+  client, kept separate from the canonical `z23-node.service` (port 8033)
   so the 6-hourly stopwatch timers can never contend with or churn the
   live node.
 - `zcl-c3-stopwatch-run@.service` / `zcl-c3-stopwatch.timer` — the C3

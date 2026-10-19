@@ -318,7 +318,7 @@ static bool main_dispatch_priority_modes(int argc, char **argv, int *rc)
     }
 
     /* CLI UX contract: bare `zclassic23`, zero arguments. The real node
-     * service NEVER invokes the binary this way (platform/deploy/zclassic23.service's
+     * service NEVER invokes the binary this way (platform/deploy/z23-node.service's
      * ExecStart always passes -datadir=/-rpcport=/etc — see
      * docs/dev/NATIVE_COMMAND_INTERFACE.md "CLI UX contract"), so this is a
      * human at a shell prompt, not a boot attempt. Print the ONE-LINE status

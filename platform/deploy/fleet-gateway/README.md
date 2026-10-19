@@ -201,7 +201,7 @@ ENV
 chmod 600 ~/.config/z23-fleet-gateway/*.env
 
 # 3. Install and start (user units, no sudo). Both ExecStart lines name
-#    %h/github/zclassic23; a checkout elsewhere overrides them with
+#    %h/github/z23; a checkout elsewhere overrides them with
 #    `systemctl --user edit <unit>`.
 mkdir -p ~/.config/systemd/user
 install -m 644 platform/deploy/fleet-gateway/'z23-fleet-gateway@.service' ~/.config/systemd/user/

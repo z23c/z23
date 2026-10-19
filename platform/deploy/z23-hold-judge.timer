@@ -12,7 +12,11 @@ Description=Z23 72h Hold Judge Timer — every 15 min
 OnCalendar=*-*-* *:00/15:00
 RandomizedDelaySec=20
 Persistent=true
+<<<<<<<< HEAD:platform/deploy/z23-hold-judge.timer
 Unit=z23-hold-judge.service
+========
+Unit=z23-hold-certifier.service
+>>>>>>>> 8b8fbac0b (Rename platform/deploy zclassic23 units and files to z23):platform/deploy/z23-hold-certifier.timer
 
 [Install]
 WantedBy=timers.target

@@ -50,8 +50,8 @@ ss	tools/scripts/store_sell_operator_proof.sh	4
 ss	tools/scripts/zcl-portfwd-setup.sh	3
 stat	platform/deploy/migrate-role-names.sh	2
 stat	platform/deploy/provision-z23-build-host.sh	4
-stat	platform/deploy/zclassic23-bundle-export.sh	2
-stat	platform/deploy/zclassic23-cutover.sh	2
+stat	platform/deploy/z23-bundle-export.sh	2
+stat	platform/deploy/z23-cutover.sh	2
 stat	platform/packaging/release/build_release.sh	2
 stat	tools/agent_fast_ci.sh	2
 stat	tools/dev/agent-dev-status.sh	3

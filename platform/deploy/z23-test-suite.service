@@ -1,0 +1,23 @@
+[Unit]
+Description=Z23 Background Full Test Suite Lane
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github/z23
+# Clean-skip while any *mint* user service is active; prune old lane logs
+# before/after the run without changing the latest verdict on a skip.
+ExecStart=%h/github/z23/tools/scripts/quality_job_guard.sh tests
+TimeoutStartSec=3600
+
+# Full tests are proof work. Keep them out of the synchronous push path and run
+# them with low scheduling weight so the node and interactive development win.
+Environment=ZCL_QUALITY_LOG_KEEP=8
+Nice=15
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
+MemoryHigh=12G
+TasksMax=2048
+
+StandardOutput=journal
+StandardError=journal

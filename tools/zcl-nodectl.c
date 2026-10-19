@@ -421,7 +421,7 @@ static void systemctl_start(void)
     const char *reset_argv[] = {"systemctl", "--user", "reset-failed", "zclassic23", NULL};
     const char *start_argv[] = {"systemctl", "--user", "start", "zclassic23", NULL};
     (void)run_cmd(reset_argv);
-    if (run_cmd(start_argv) != 0) die("systemctl start zclassic23 failed");
+    if (run_cmd(start_argv) != 0) die("systemctl start z23-node failed");
 }
 
 static void systemctl_stop(void)

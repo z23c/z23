@@ -24,7 +24,7 @@ Description=Z23 per-node mind: the one process that rebuilds this box's code ind
 #
 #   mkdir -p ~/.local/state/z23/dev/mind
 #   { echo 'zcl.mind_registry.v1'; \
-#     echo 'zcl.mind_checkout.v1 '"$HOME"/github/zclassic23; } \
+#     echo 'zcl.mind_checkout.v1 '"$HOME"/github/z23; } \
 #     > ~/.local/state/z23/dev/mind/checkouts.v1
 #
 # Install:
@@ -81,7 +81,7 @@ MemorySwapMax=256M
 TasksMax=64
 OOMScoreAdjust=500
 
-ExecStart=%h/github/zclassic23/build/bin/z23-mind dev fleet mind serve
+ExecStart=%h/github/z23/build/bin/z23-mind dev fleet mind serve
 
 # The resident handles SIGTERM cooperatively: it finishes or abandons the
 # current rebuild, releases every checkout's owner claim so no query is left

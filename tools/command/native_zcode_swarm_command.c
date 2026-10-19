@@ -627,7 +627,7 @@ void zcl_native_handle_zcode_package_fetch(
                 note, sizeof(note),
                 "no live hosting engine: the resumable download record is "
                 "persisted under <datadir>/zcode/downloads; "
-                "systemctl --user restart zclassic23 so the live engine "
+                "systemctl --user restart z23-node so the live engine "
                 "resumes it (manifest-first, then chunks rarest-first from "
                 "the peers advertising the root)");
         else if (have_quoted_dd)
@@ -705,7 +705,7 @@ void zcl_native_handle_zcode_package_peers(
                 n = snprintf(
                     note, sizeof(note),
                     "no live hosting engine on this process; "
-                    "systemctl --user restart zclassic23 wires it. "
+                    "systemctl --user restart z23-node wires it. "
                     "peer facts are session-scoped and never persisted, so a "
                     "one-shot CLI has none to report. possession is "
                     "store-side and is still reported; missing store facts "
@@ -936,7 +936,7 @@ void zcl_native_handle_zcode_package_offered(
         int wn;
         if (join.package_hosting && have_quoted_dd)
             wn = snprintf(next, sizeof(next),
-                          "systemctl --user restart zclassic23, then "
+                          "systemctl --user restart z23-node, then "
                           "z23 zcode package offered -datadir=%s",
                           quoted_dd);
         else if (join.package_hosting)

@@ -303,22 +303,22 @@ void agent_build_background_quality_status(struct json_value *out)
     json_init(&lanes);
     json_set_array(&lanes);
     if (status_ok) {
-        agent_push_quality_lane(&lanes, "fuzz", "zclassic23-fuzz.service",
-                                "zclassic23-fuzz.timer", "hourly",
+        agent_push_quality_lane(&lanes, "fuzz", "z23-fuzz.service",
+                                "z23-fuzz.timer", "hourly",
                                 status_dir, &present_count, &valid_count,
                                 &failed_count, &running_count, &passed_count,
                                 &skipped_count, &current_count, &stale_count,
                                 &unknown_source_id_count);
         agent_push_quality_lane(&lanes, "coverage",
-                                "zclassic23-coverage.service",
-                                "zclassic23-coverage.timer", "weekly",
+                                "z23-coverage.service",
+                                "z23-coverage.timer", "weekly",
                                 status_dir, &present_count, &valid_count,
                                 &failed_count, &running_count, &passed_count,
                                 &skipped_count, &current_count, &stale_count,
                                 &unknown_source_id_count);
         agent_push_quality_lane(&lanes, "tests",
-                                "zclassic23-test-suite.service",
-                                "zclassic23-test-suite.timer", "hourly",
+                                "z23-test-suite.service",
+                                "z23-test-suite.timer", "hourly",
                                 status_dir, &present_count, &valid_count,
                                 &failed_count, &running_count, &passed_count,
                                 &skipped_count, &current_count, &stale_count,

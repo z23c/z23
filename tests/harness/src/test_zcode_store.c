@@ -381,7 +381,7 @@ static int t_store_dump_state(void)
     failures += store_case_dump_disabled();
 
     /* Enabled global store via the real flag + datadir path. */
-    const char *argv[] = { "zclassic23-test", "-packagehost=1",
+    const char *argv[] = { "z23-test", "-packagehost=1",
                            "-packagequota=1000000" };
     ParseParameters(3, argv);
     char dd[256];
@@ -399,7 +399,7 @@ static int t_store_dump_state(void)
     ZS_CHECK("dump: global closed", vcs_package_store_global() == NULL);
 
     /* Restore global flags/datadir for the rest of the process. */
-    const char *reset_argv[] = { "zclassic23-test" };
+    const char *reset_argv[] = { "z23-test" };
     ParseParameters(1, reset_argv);
     SetDataDir("");
     zs_free_package(&p);

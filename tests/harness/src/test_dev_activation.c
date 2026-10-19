@@ -762,7 +762,7 @@ static int test_confinement_refusals(void)
 
         /* wrong unit */
         base_request(&req, &sb, artifact);
-        req.unit = "zclassic23.service";
+        req.unit = "z23-node.service";
         ASSERT_EQ(run_confinement_case(&sb, &req), DEV_ACTIVATION_E_CONFINEMENT);
 
         /* wrong datadir */

@@ -1,0 +1,29 @@
+[Unit]
+Description=Z23 Off-Host Tip-Hash Agreement Timer — every 10 minutes
+
+[Timer]
+# 10 minutes, not 60 seconds. Each sample costs three bounded table scans on
+# the live node's consensus database; the peer-observation table only turns
+# over every 30s per peer, so a tighter cadence buys duplicate rows and pays
+# for them in I/O on the node it is measuring. Ten minutes gives ~144
+# samples a day, and the recorder's 15-minute observation window overlaps
+# consecutive runs, so one missed run leaves no hole in coverage.
+#
+# OnCalendar (wall-clock), NOT OnBootSec/OnUnitActiveSec — the same trap
+# that silently killed the SLO uptime ledger for 3.5 days on 2026-07-20:
+# Persistent=true is honored only for OnCalendar timers, and a monotonic
+# schedule loses its anchor across a user-manager restart and never fires
+# again. A wall-clock schedule has no anchor to lose, and Persistent=true
+# fires one catch-up run after downtime so an outage shows up as one bounded
+# gap in the ledger rather than a silent stretch of nothing.
+#
+# The gap is not silent either way: tools/scripts/tip_agreement_judge.sh
+# returns STALE (never a stale PASS) once the newest sample is older than 30
+# minutes, which is three missed runs.
+OnCalendar=*-*-* *:0/10:00
+RandomizedDelaySec=30
+Persistent=true
+Unit=z23-tip-agreement.service
+
+[Install]
+WantedBy=timers.target

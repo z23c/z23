@@ -260,7 +260,7 @@ proven yet, no digest an operator has committed to — has nothing in
 to find, and folds from genesis or waits on an operator to run the manual
 fetch command.
 
-**`platform/deploy/zclassic23-bundle-bootstrap.sh`** closes that gap the simplest way
+**`platform/deploy/z23-bundle-bootstrap.sh`** closes that gap the simplest way
 available without opening any new activation door: it is a plain courier that
 copies an operator/packaging-designated bundle straight into
 `<datadir>/bundles/` so the *existing*, already-wired autodetect finds it with
@@ -312,8 +312,8 @@ make bundle-bootstrap SOURCE=/path/to/consensus-state-bundle-3056758.sqlite \
 
 **Usage** — wired for every boot, zero manual steps thereafter: set
 `ZCL_CHECKPOINT_BUNDLE_SOURCE=/path/to/consensus-state-bundle-<height>.sqlite`
-in `~/.config/zclassic23/env` (see `platform/deploy/zclassic23.env.example`).
-`platform/deploy/zclassic23.service`'s `ExecStartPre` then runs the bootstrap script
+in `~/.config/zclassic23/env` (see `platform/deploy/z23-node.env.example`).
+`platform/deploy/z23-node.service`'s `ExecStartPre` then runs the bootstrap script
 before every node start; leaving the variable unset (the default) makes the
 step a no-op, so a fresh `~/.config/zclassic23/env` with nothing configured
 behaves exactly as it does today.

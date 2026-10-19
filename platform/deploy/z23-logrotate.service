@@ -1,0 +1,22 @@
+[Unit]
+Description=Z23 Log Rotation — size-threshold copytruncate (no external logrotate dependency)
+
+[Service]
+Type=oneshot
+# Rotates every ~/.zclassic-c23*/node.log (canonical/-dev/-soak/-test/...)
+# and any ~/.zclassic-c23*/mint-progress.log once it crosses 512 MiB
+# (ZCL_LOGROTATE_ROTATE_BYTES override available via this unit's
+# Environment= below), keeping 2 gzip-compressed generations. copytruncate
+# semantics: copies the file, THEN truncates it in place — the node's
+# already-open append fd (StandardOutput=append:...node.log) keeps writing
+# correctly at the new end-of-file, so this never requires restarting or
+# signaling the node. See tools/scripts/zcl-logrotate.sh header for the
+# full safety-invariant writeup (NEVER touches a non-*.log file, NEVER
+# follows a symlink, flock-serialized per file).
+ExecStart=%h/github/z23/tools/scripts/zcl-logrotate.sh
+# copytruncate of a large log on a spinning disk needs minutes, not seconds.
+TimeoutStartSec=900
+Nice=15
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

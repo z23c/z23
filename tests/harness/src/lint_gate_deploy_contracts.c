@@ -69,7 +69,7 @@ int t_canonical_deploy_proof_binding_contract(void)
                      "install -m 755 \"$$candidate\" \"$$SERVICE_BIN\"")
             : NULL;
         const char *restart = candidate_install
-            ? strstr(candidate_install, "systemctl --user restart zclassic23")
+            ? strstr(candidate_install, "systemctl --user restart z23-node")
             : NULL;
         const char *stage_bind = restart
             ? strstr(restart,
@@ -122,7 +122,7 @@ int t_canonical_deploy_proof_binding_contract(void)
                != NULL);
 
         char *unit_buf = NULL;
-        ASSERT(repo_path(path, sizeof(path), "platform/deploy/zclassic23.service") == 0);
+        ASSERT(repo_path(path, sizeof(path), "platform/deploy/z23-node.service") == 0);
         ASSERT(read_entire_file(path, &unit_buf) == 0);
         ASSERT(strstr(unit_buf,
                       "ExecStart=%h/zclassic23/build/bin/zcl-nodectl launch "
@@ -238,13 +238,13 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(repo_path(makefile_path, sizeof(makefile_path),
                          "Makefile") == 0);
         ASSERT(repo_path(live_unit_path, sizeof(live_unit_path),
-                         "platform/deploy/zclassic23.service") == 0);
+                         "platform/deploy/z23-node.service") == 0);
         ASSERT(repo_path(soak_unit_path, sizeof(soak_unit_path),
-                         "platform/deploy/examples/zclassic23-soak-node.service") == 0);
+                         "platform/deploy/examples/z23-soak-node.service") == 0);
         ASSERT(repo_path(dev_unit_path, sizeof(dev_unit_path),
                          "platform/deploy/zcl23-dev.service") == 0);
         ASSERT(repo_path(standby_unit_path, sizeof(standby_unit_path),
-                         "platform/deploy/zclassic23-standby.service") == 0);
+                         "platform/deploy/z23-node-standby.service") == 0);
         ASSERT(repo_path(boot_index_path, sizeof(boot_index_path),
                          "engine/composition/src/boot_index.c") == 0);
         ASSERT(repo_path(coldstart_path, sizeof(coldstart_path),
@@ -370,7 +370,7 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(strstr(makefile,
                       "./tools/deploy_guard.sh canonical-deploy") != NULL);
         ASSERT(strstr(makefile,
-                      "zclassic23.service.d/90-build-identity.conf") != NULL);
+                      "z23-node.service.d/90-build-identity.conf") != NULL);
         ASSERT(strstr(makefile,
                       "ZCL_AGENT_EXPECT_BUILD_SOURCE=make-deploy") != NULL);
         ASSERT(strstr(makefile,
@@ -397,7 +397,7 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(strstr(coldstart_tip, "-load-snapshot-at-own-height") != NULL);
         ASSERT(strstr(coldstart_tip, "BUNDLE_SUCCESS_PATTERN") != NULL);
         ASSERT(strstr(coldstart_tip, "consensus-state-bundle") != NULL);
-        ASSERT(strstr(coldstart_tip, "zclassic23-bundle-bootstrap.sh") != NULL);
+        ASSERT(strstr(coldstart_tip, "z23-bundle-bootstrap.sh") != NULL);
         ASSERT(strstr(coldstart_tip, "self_respawn_") != NULL);
         ASSERT(strstr(coldstart_tip, "--selftest") != NULL);
         ASSERT(strstr(coldstart_tip, "ZCL_C3_FILE_PEER") != NULL);
@@ -506,7 +506,7 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(strstr(handoff, "zcl.operator_lane.v1") != NULL);
         ASSERT(strstr(handoff, "Phase-0 contained") != NULL);
         ASSERT(strstr(lane_health, "report_lane live zclassic23") != NULL);
-        ASSERT(strstr(lane_health, "report_lane soak zclassic23-soak") != NULL);
+        ASSERT(strstr(lane_health, "report_lane soak z23-soak") != NULL);
         ASSERT(strstr(lane_health, "report_lane dev zcl23-dev") != NULL);
         ASSERT(strstr(lane_health, "forced_reindex_flag_present") != NULL);
         ASSERT(strstr(lane_health, "dev_booting_rpc_down") != NULL);
@@ -699,7 +699,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "quality-linger-status") != NULL);
         ASSERT(strstr(buf, "tools/scripts/background_quality_lane.sh") != NULL);
         ASSERT(strstr(buf, "background-tests") != NULL);
-        ASSERT(strstr(buf, "zclassic23-test-suite.timer") != NULL);
+        ASSERT(strstr(buf, "z23-test-suite.timer") != NULL);
         ASSERT(strstr(buf, "agent-dev-status") != NULL);
         ASSERT(strstr(buf, "agent-doctor") != NULL);
         ASSERT(strstr(buf, "tools/dev/agent-dev-status.sh") != NULL);
@@ -1040,9 +1040,9 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "fast result cache hit") != NULL);
         ASSERT(strstr(buf, "still refreshes the live service probe")
                != NULL);
-        ASSERT(strstr(buf, "zclassic23-fuzz.timer") != NULL);
-        ASSERT(strstr(buf, "zclassic23-coverage.timer") != NULL);
-        ASSERT(strstr(buf, "zclassic23-test-suite.timer") != NULL);
+        ASSERT(strstr(buf, "z23-fuzz.timer") != NULL);
+        ASSERT(strstr(buf, "z23-coverage.timer") != NULL);
+        ASSERT(strstr(buf, "z23-test-suite.timer") != NULL);
         ASSERT(strstr(buf, "zcl.background_quality_status.v1") != NULL);
         free(buf);
         buf = NULL;
@@ -1210,20 +1210,20 @@ int t_slow_disk_progress_verdicts_contract(void)
          * READY would otherwise hold the recipe forever. */
         ASSERT(strstr(makefile, "restart_timeout=180") != NULL);
         ASSERT(strstr(makefile,
-                      "timeout $$restart_timeout systemctl --user restart zclassic23")
+                      "timeout $$restart_timeout systemctl --user restart z23-node")
                != NULL);
         /* ...and the rollback's restart specifically captures rc, so a
          * timeout lands in the CRITICAL branch instead of hanging. */
         ASSERT(strstr(makefile,
-                      "restart zclassic23; rollback_restart_rc") != NULL);
+                      "restart z23-node; rollback_restart_rc") != NULL);
         /* No unbounded restart may remain anywhere in the recipe: a restart
          * at the start of a recipe line is the hang again. */
-        ASSERT(strstr(makefile, "\tsystemctl --user restart zclassic23")
+        ASSERT(strstr(makefile, "\tsystemctl --user restart z23-node")
                == NULL);
 
-        /* ── platform/deploy/zclassic23-cutover.sh ───────────────────────────────── */
+        /* ── platform/deploy/z23-cutover.sh ───────────────────────────────── */
         ASSERT(repo_path(path, sizeof(path),
-                         "platform/deploy/zclassic23-cutover.sh") == 0);
+                         "platform/deploy/z23-cutover.sh") == 0);
         ASSERT(read_entire_file(path, &cutover) == 0);
         ASSERT(strstr(cutover, "READY_STALL_TIMEOUT") != NULL);
         ASSERT(strstr(cutover, "delayacct_blkio_ticks") != NULL);
@@ -1233,12 +1233,12 @@ int t_slow_disk_progress_verdicts_contract(void)
         ASSERT(strstr(cutover, "last progress token=") != NULL);
         /* No elapsed-time rollback, in any spelling of the old line. */
         ASSERT(strstr(cutover, "did not reach H* >= $BAR within") == NULL);
-        ASSERT(run_gate_script("platform/deploy/zclassic23-cutover-selftest.sh", NULL)
+        ASSERT(run_gate_script("platform/deploy/z23-cutover-selftest.sh", NULL)
                == 0);
 
-        /* ── platform/deploy/zclassic23-host-watchdog.sh ─────────────────────────── */
+        /* ── platform/deploy/z23-host-watchdog.sh ─────────────────────────── */
         ASSERT(repo_path(path, sizeof(path),
-                         "platform/deploy/zclassic23-host-watchdog.sh") == 0);
+                         "platform/deploy/z23-host-watchdog.sh") == 0);
         ASSERT(read_entire_file(path, &watchdog) == 0);
         ASSERT(strstr(watchdog, "classify_node") != NULL);
         ASSERT(strstr(watchdog, "PROBE_TIMEOUTS") != NULL);
@@ -1252,7 +1252,7 @@ int t_slow_disk_progress_verdicts_contract(void)
         ASSERT(strstr(watchdog, "evidence=frozen_for_") != NULL);
         ASSERT(strstr(watchdog, "evidence=no-canonical-node-process") != NULL);
         int watchdog_rc = run_gate_script_arg(
-            "platform/deploy/zclassic23-host-watchdog.sh", NULL, "--selftest");
+            "platform/deploy/z23-host-watchdog.sh", NULL, "--selftest");
         if (watchdog_rc != 0) {
             char watchdog_out_path[PATH_MAX];
             char *watchdog_out = NULL;
@@ -1269,7 +1269,7 @@ int t_slow_disk_progress_verdicts_contract(void)
         /* The unit's own start timeout must not silently truncate the
          * watchdog's escalating probe schedule back to one impatient probe. */
         ASSERT(repo_path(path, sizeof(path),
-                         "platform/deploy/system/zclassic23-host-watchdog.service") == 0);
+                         "platform/deploy/system/z23-host-watchdog.service") == 0);
         ASSERT(read_entire_file(path, &watchdog_unit) == 0);
         ASSERT(strstr(watchdog_unit, "TimeoutStartSec=100") != NULL);
         ASSERT(strstr(watchdog_unit, "TimeoutStartSec=30\n") == NULL);
@@ -1280,7 +1280,7 @@ int t_slow_disk_progress_verdicts_contract(void)
          * it (the WATCHDOG=1 pet in engine/composition/src/boot_sd_watchdog.c,
          * gated on boot_progress freshness). */
         ASSERT(repo_path(path, sizeof(path),
-                         "platform/deploy/zclassic23-spinning-disk-watchdog.conf") == 0);
+                         "platform/deploy/z23-spinning-disk-watchdog.conf") == 0);
         ASSERT(read_entire_file(path, &disk_watchdog) == 0);
         ASSERT(strstr(disk_watchdog, "WatchdogSec=10min") != NULL);
         ASSERT(strstr(disk_watchdog, "CEILING") != NULL);

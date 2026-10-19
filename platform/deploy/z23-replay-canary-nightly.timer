@@ -1,0 +1,23 @@
+[Unit]
+Description=Z23 Replay Canary Timer — nightly from-anchor
+
+[Timer]
+# 04:30 nightly with up to 30 min jitter. Chosen OFF-PEAK and DISJOINT
+# from every other lane installed on this box (see `systemctl --user
+# list-timers`): z23-logrotate ~03:00, z23-fuzz hourly,
+# z23-soak-evidence hourly, z23-simnet-nightly ~03:1x,
+# z23-test-suite hourly, z23-coverage weekly Sun ~03:3x.
+# 04:30+jitter sits after the 03:xx cluster drains and well before normal
+# daytime load. Also on a DISJOINT 39xxx port base from the weekly canary
+# (39050 vs 39060) and from the future crash-soak reservation (39070).
+# ExecStart (in the .service) runs through replay_canary_guard.sh, which
+# SKIPS the run (logged, exit 0, no page) if a zclassic23-mint-* (or any
+# *mint*) transient unit is actively folding, so this evidence lane can
+# never steal CPU/IO from a live sovereign-state cure mint.
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=z23-replay-canary-nightly.service
+
+[Install]
+WantedBy=timers.target

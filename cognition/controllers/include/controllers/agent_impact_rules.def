@@ -1028,7 +1028,7 @@ AGENT_IMPACT_RULE("engine/controllers/src/api_controller_dispatch.c|engine/contr
  * (command_handler_snapshot) or the loader/simnet manifest contract
  * (hotswap_loader, hotswap_simnet). */
 AGENT_IMPACT_RULE("tools/command/native_dev_hotswap.c|tools/command/native_dev_hotswap.h|engine/composition/commands/dev.def|engine/modules/hotswap/*|engine/composition/hotswap_eligible.def|engine/composition/hotswap_swappable.def|tools/lint/check_hotswap_swappable_shape.sh|tests/harness/fixtures/hotswap_swappable_bad_shape.def|tests/harness/src/test_hotswap_module.c|engine/controllers/src/status_native_handlers.c", "hotswap_loader hotswap_simnet hotswap_module command_handler_snapshot make_lint_gates")
-AGENT_IMPACT_RULE("tools/scripts/remote_node_update.sh|tools/scripts/lane_recover.sh|platform/deploy/examples/zclassic23-self-update.service|platform/deploy/examples/zclassic23-self-update.timer", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/scripts/remote_node_update.sh|tools/scripts/lane_recover.sh|platform/deploy/examples/z23-self-update.service|platform/deploy/examples/z23-self-update.timer", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/deploy/devbuild|platform/deploy/devbuild-broker", "make_lint_gates")
 
 /* Instant dev loop Wave 1/2: Tier-2 fast restart (clean-shutdown marker + skip). */
@@ -1269,7 +1269,7 @@ AGENT_IMPACT_RULE("engine/services/src/index_fold_guard.c|engine/services/includ
  * svc call site that writes it, and the binary A/B streak it feeds all share
  * these two focused groups. */
 AGENT_IMPACT_RULE("engine/composition/src/boot_loop_guard.c|engine/composition/include/config/boot_loop_guard.h|engine/composition/src/boot_flight_recorder.c|engine/composition/include/config/boot_flight_recorder.h|platform/modules/util/src/shutdown_stagewatch.c|platform/modules/util/include/util/shutdown_stagewatch.h|tests/harness/src/test_boot_flight_recorder.c", "boot_flight_recorder shutdown_stagewatch make_lint_gates")
-AGENT_IMPACT_RULE("engine/services/src/binary_ab_fallback.c|engine/services/include/services/binary_ab_fallback.h|platform/modules/platform/src/os_binary_slots.c|platform/modules/platform/include/platform/os_binary_slots.h|tools/zcl-nodectl.c|platform/deploy/zclassic23.service|platform/deploy/zclassic23-test.service|tools/deploy_verify.sh|tests/harness/src/test_binary_ab_fallback.c", "binary_ab_fallback boot_flight_recorder make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/binary_ab_fallback.c|engine/services/include/services/binary_ab_fallback.h|platform/modules/platform/src/os_binary_slots.c|platform/modules/platform/include/platform/os_binary_slots.h|tools/zcl-nodectl.c|platform/deploy/z23-node.service|platform/deploy/z23-test.service|tools/deploy_verify.sh|tests/harness/src/test_binary_ab_fallback.c", "binary_ab_fallback boot_flight_recorder make_lint_gates")
 
 /* Off-systemd self-respawn: the ONE place that decides "re-exec /proc/self/exe"
  * (boot_self_respawn.c), the straggler-guard _exit path that must honor an
@@ -1993,7 +1993,7 @@ AGENT_IMPACT_RULE("tools/dev/hotswap_verify_so.c|tools/dev/hotswap-verify.sh|too
  * candidate, and the gate that pins all of it move together: an edit to any
  * one of them with no change to the gate is how a duration verdict comes back
  * in without anyone noticing. */
-AGENT_IMPACT_RULE("tools/deploy_verify.sh|platform/deploy/zclassic23-cutover.sh|platform/deploy/zclassic23-cutover-selftest.sh|platform/deploy/zclassic23-host-watchdog.sh|platform/deploy/install-host-watchdog.sh|platform/deploy/system/zclassic23-host-watchdog.service|platform/deploy/system/zclassic23-host-watchdog.timer|platform/deploy/zclassic23-spinning-disk-watchdog.conf|tests/harness/src/lint_gate_deploy_contracts.c", "make_lint_gates make_lint_gates_realroot")
+AGENT_IMPACT_RULE("tools/deploy_verify.sh|platform/deploy/z23-cutover.sh|platform/deploy/z23-cutover-selftest.sh|platform/deploy/z23-host-watchdog.sh|platform/deploy/install-host-watchdog.sh|platform/deploy/system/z23-host-watchdog.service|platform/deploy/system/z23-host-watchdog.timer|platform/deploy/z23-spinning-disk-watchdog.conf|tests/harness/src/lint_gate_deploy_contracts.c", "make_lint_gates make_lint_gates_realroot")
 /* LANE hotswap-leaf-denylist: the owner ruling that core.chain.block.get and
  * core.chain.transaction.get are NEVER hot-swappable, and the gate that
  * enforces it. The names and their per-leaf reasons are DATA in
@@ -3296,7 +3296,7 @@ AGENT_IMPACT_RULE("engine/modules/chainlog/src/*.c|engine/modules/chainlog/inclu
  * means. The shell entry points and the unit are listed with the C: a lander
  * whose service file drifts from the script it starts is a queue nobody
  * drains, and the impact rule is the only thing that would notice. */
-AGENT_IMPACT_RULE("tools/land/*.c|tools/land/*.h|tests/harness/src/test_land_queue.c|tools/dev/land.sh|tools/dev/land_lander.sh|tools/dev/land_bench.sh|platform/deploy/zclassic23-lander.service", "land_queue chainlog make_lint_gates")
+AGENT_IMPACT_RULE("tools/land/*.c|tools/land/*.h|tests/harness/src/test_land_queue.c|tools/dev/land.sh|tools/dev/land_lander.sh|tools/dev/land_bench.sh|platform/deploy/z23-lander.service", "land_queue chainlog make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along
  * because the ratchet it guards is the whole point — the recorded set of

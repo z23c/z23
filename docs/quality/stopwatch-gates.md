@@ -330,7 +330,7 @@ verdict on the underlying claim.
 
 `platform/deploy/examples/zcl-stopwatch-peer.service` is a dedicated minimal
 serving peer (ports 39070-39073) the C3 harness dials, kept separate from
-the canonical `zclassic23.service` (port 8033) so these gates can never
+the canonical `z23-node.service` (port 8033) so these gates can never
 contend with or churn the live node. `zcl-c3-stopwatch-run@.service` /
 `.timer` and `zcl-netdisrupt-run@.service` / `.timer` run the two
 collectors every 6h (offset 30 minutes apart); both `OnFailure=` into

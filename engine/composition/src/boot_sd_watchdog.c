@@ -647,7 +647,7 @@ static void boot_sd_watchdog_tick(void *ctx)
         return;
     struct node_health_snapshot snap = {0};
     node_health_collect(&snap, svc->node_db, svc->state);
-    /* Refresh status line — useful for `systemctl status zclassic23`.
+    /* Refresh status line — useful for `systemctl status z23-node`.
      * Include the recent-progress label so operators can see which
      * subsystem is keeping the watchdog alive during bulk ops, and a
      * supervisor=FROZEN marker when Pillar 7's gate is the reason the

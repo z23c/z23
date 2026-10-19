@@ -192,7 +192,7 @@ real chain history first — see
 
   ```bash
   zcl-intervene "why"                     # declare
-  zcl-intervene "why" -- systemctl --user restart zclassic23   # declare + do
+  zcl-intervene "why" -- systemctl --user restart z23-node   # declare + do
   ```
 
 - Transaction laboratory: re-derive isolated vs live bars from
