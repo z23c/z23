@@ -1,9 +1,13 @@
 /* purpose: Persist exact pairing authority and immutable private credentials with fail-closed publication. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE /* flock */
+#endif
 #include "models/device_pairing.h"
 #include "base/hex.h"
 #include "base/serialize_le.h"
 #include "base/cleanse.h"
+#include "base/safe_alloc.h"
 #include "net/v2_identity.h"
 #include "platform/clock.h"
 #include "platform/private_directory.h"
@@ -12,6 +16,12 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 enum { DEVICE_PAIRING_V1_WIRE = 168, DEVICE_PAIRING_V2_WIRE = 176,
        DEVICE_PAIRING_HOST_WIRE = 256,
@@ -214,10 +224,66 @@ static bool lock_store(struct device_pairing_store *store,
     return true;
 }
 
+/* A descriptor of authority.lock that a revalidation memo keeps open. It pins
+ * the lock inode, so an inode number compare against the path cannot be fooled
+ * by reuse, and it is NOT locked between acquisitions: a writer's nonblocking
+ * exclusive lock must keep succeeding. The cache and at most one outstanding
+ * guard each hold a reference; the last drop closes the descriptor. */
+#ifndef _WIN32
+struct device_pairing_lock_lease { int fd; unsigned refs; bool lent; uint64_t volume, file; };
+static struct device_pairing_lock_lease *lease_open(const char *lock,
+    const struct platform_private_path_state *held)
+{
+    int fd = open(lock, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return NULL; // raw-return-ok:memo not built; the caller falls back to the full path
+    struct stat st;
+    struct device_pairing_lock_lease *lease = NULL;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && (uint64_t)st.st_dev == held->volume &&
+        (uint64_t)st.st_ino == held->file) lease = zcl_calloc(1, sizeof(*lease), "device_pairing_lease");
+    if (!lease) { close(fd); return NULL; } // raw-return-ok:memo not built; the caller falls back to the full path
+    *lease = (struct device_pairing_lock_lease){.fd = fd, .refs = 1, .volume = held->volume, .file = held->file};
+    return lease;
+}
+static void lease_unref(struct device_pairing_lock_lease *lease)
+{
+    if (!lease || --lease->refs) return;
+    close(lease->fd); free(lease);
+}
+static bool lease_lent(const struct device_pairing_lock_lease *lease) { return lease && lease->lent; }
+static void lease_return(struct device_pairing_lock_lease *lease)
+{
+    (void)flock(lease->fd, LOCK_UN); lease->lent = false; lease_unref(lease);
+}
+/* Takes the shared lock on the held descriptor, then requires the lock path to
+ * still name that inode: lock first, compare second, so a replacement that
+ * completes before the compare is seen. */
+static bool lease_borrow(struct device_pairing_lock_lease *lease, const char *lock,
+    struct device_pairing_guard *guard)
+{
+    struct platform_private_path_state now;
+    if (lease->lent || flock(lease->fd, LOCK_SH | LOCK_NB) != 0) return false; // raw-return-ok:cache miss; the full acquisition logs
+    if (!platform_private_path_state(lock, &now) || now.volume != lease->volume || now.file != lease->file) {
+        (void)flock(lease->fd, LOCK_UN); return false; // raw-return-ok:cache miss; the full acquisition logs
+    }
+    lease->lent = true; lease->refs++; guard->lease = lease; guard->held = true;
+    return true;
+}
+#else
+struct device_pairing_lock_lease { int unused; };
+static struct device_pairing_lock_lease *lease_open(const char *lock, const struct platform_private_path_state *held)
+{ (void)lock; (void)held; return NULL; }
+static void lease_unref(struct device_pairing_lock_lease *lease) { (void)lease; }
+static bool lease_lent(const struct device_pairing_lock_lease *lease) { (void)lease; return false; }
+static void lease_return(struct device_pairing_lock_lease *lease) { (void)lease; }
+static bool lease_borrow(struct device_pairing_lock_lease *lease, const char *lock, struct device_pairing_guard *guard)
+{ (void)lease; (void)lock; (void)guard; return false; }
+#endif
+
 void device_pairing_guard_release(struct device_pairing_guard *guard)
 {
     if (!guard) return;
-    if (guard->held) platform_private_file_close(&guard->lock);
+    if (guard->held && guard->lease) lease_return(guard->lease);
+    else if (guard->held) platform_private_file_close(&guard->lock);
     memset(guard, 0, sizeof(*guard));
 }
 
@@ -1008,6 +1074,7 @@ void device_pairing_guard_cache_destroy(struct device_pairing_guard_cache *cache
 {
     if (!cache) return;
     if (cache->valid) platform_private_file_close(&cache->grant);
+    lease_unref(cache->lease);
     memory_cleanse(cache, sizeof(*cache));
 }
 static bool cache_arguments_match(const struct device_pairing_guard_cache *cache,
@@ -1030,9 +1097,49 @@ static bool state_equal(const char *path, const struct platform_private_path_sta
     struct platform_private_path_state actual;
     return platform_private_path_state(path, &actual) && !memcmp(&actual, expected, sizeof(actual));
 }
-/* Under the freshly taken shared authority lock no publisher can be between
- * intent and retirement, so an unchanged grant inode/metadata plus an absent
- * intent means the bytes the full acquisition validated are still current. */
+/* The profile directory is compared by identity and protection only. Its
+ * mtime/ctime move whenever any entry is created or renamed, and every entry
+ * this memo depends on (lock, pending, grant) is compared on its own below, so
+ * timestamps would add only spurious misses and would hide a missing check. */
+static bool directory_equal(const char *path, const struct platform_private_path_state *expected)
+{
+    struct platform_private_path_state actual;
+    return platform_private_path_state(path, &actual) && actual.volume == expected->volume &&
+        actual.file == expected->file && actual.mode == expected->mode && actual.owner == expected->owner;
+}
+/* Cached revalidation. Guarantee: the returned guard holds the shared
+ * authority.lock, and the row and root the last full acquisition read are
+ * still the current authority, i.e. any revoke, rotation, upgrade, root change
+ * or pending intent that completed before the check is observed by it, and a
+ * replaced profile directory, lock inode or grant inode is never accepted.
+ *
+ * Protocol, in this order (6 syscalls, was 7; one open+fstat+close pair of
+ * the lock file became a held descriptor):
+ *   1. lstat(profile dir): same dev/ino/mode/owner as at the full read, so the
+ *      path still names the directory every later path below resolves in.
+ *   2. flock(held lock fd, SH|NB): the shared lock is taken before anything
+ *      else is read. A writer holding or waiting for the exclusive lock makes
+ *      this fail, which is a miss, exactly as the old open-then-flock did.
+ *   3. lstat(authority.lock): must be the inode the descriptor pins. The
+ *      descriptor keeps that inode alive, so its number cannot be reused; if
+ *      the path names a different inode a publisher may hold the exclusive
+ *      lock on it unseen by our lock, so we miss and the full path re-reads.
+ *      Like the old code there is a window between lock and compare in which a
+ *      replacement may land; it is ordered after this check, so it is not
+ *      "completed before the check".
+ *   4. lstat(<grant>.pending): absent. Under the lock no publisher is between
+ *      intent and retirement, so an absent intent means no publication is in
+ *      flight.
+ *   5. lstat(grant): same inode, size, mode, owner, mtime and ctime as the
+ *      retained descriptor at the full read. Every mutation renames a fresh
+ *      inode over the path, so identical bytes in a new file still differ in
+ *      inode and ctime.
+ *   6. flock(LOCK_UN) at device_pairing_guard_release, replacing close().
+ * Removed against the old sequence: open(authority.lock), its fstat and the
+ * close. Each was only a way to obtain a fresh descriptor on the current lock
+ * inode; step 3 proves the held descriptor is on that inode, so they carry no
+ * information. The lock is never held between acquisitions, so writers are
+ * not blocked. Any doubt is a miss and the full acquisition decides. */
 static bool cache_revalidate(struct device_pairing_guard_cache *cache, struct device_pairing_store *store,
     const uint8_t peer[32], struct device_pairing_guard *guard)
 {
@@ -1040,10 +1147,9 @@ static bool cache_revalidate(struct device_pairing_guard_cache *cache, struct de
     int n = snprintf(lock, sizeof(lock), "%s/authority.lock", store->directory);
     if (n < 0 || (size_t)n >= sizeof(lock) || !record_path(store, peer, grant)) return false; // raw-return-ok:cache miss; the full acquisition logs
     n = snprintf(pending, sizeof(pending), "%s.pending", grant);
-    if (n < 0 || (size_t)n >= sizeof(pending) || !state_equal(store->directory, &cache->directory)) return false; // raw-return-ok:cache miss; the full acquisition logs
+    if (n < 0 || (size_t)n >= sizeof(pending) || !cache->lease || !directory_equal(store->directory, &cache->directory)) return false; // raw-return-ok:cache miss; the full acquisition logs
     platform_private_file_init(&guard->lock);
-    if (!platform_private_file_open_observation(lock, &guard->lock)) return false; // raw-return-ok:cache miss; the full acquisition logs
-    guard->held = true;
+    if (!lease_borrow(cache->lease, lock, guard)) return false; // raw-return-ok:cache miss; the full acquisition logs
     if (!platform_private_path_absent(pending) || !state_equal(grant, &cache->grant_state)) {
         device_pairing_guard_release(guard); return false; // raw-return-ok:cache miss; the full acquisition logs
     }
@@ -1054,15 +1160,21 @@ static bool cache_revalidate(struct device_pairing_guard_cache *cache, struct de
 static void cache_remember(struct device_pairing_guard_cache *cache, struct device_pairing_store *store,
     const uint8_t peer[32], const uint8_t expected_root[32], const struct device_pairing_psk_binding *binding,
     enum device_pairing_host_direction direction, uint16_t port,
-    const struct device_pairing_guard *guard, struct platform_private_file *retained)
+    struct device_pairing_guard *guard, struct platform_private_file *retained)
 {
     struct device_pairing_guard_cache next = {.grant = *retained, .row = guard->row, .binding = *binding,
         .store = store, .validated_ns = clock_now_monotonic_ns(), .direction = direction, .port = port};
     memcpy(next.root, guard->root, 32); memcpy(next.peer, peer, 32); memcpy(next.expected_root, expected_root, 32);
-    next.valid = next.validated_ns > 0 && platform_private_file_state(retained, &next.grant_state) &&
-        platform_private_path_state(store->directory, &next.directory);
+    struct platform_private_path_state held;
+    char lock[1200];
+    int n = snprintf(lock, sizeof(lock), "%s/authority.lock", store->directory);
+    next.valid = next.validated_ns > 0 && n > 0 && (size_t)n < sizeof(lock) &&
+        platform_private_file_state(retained, &next.grant_state) &&
+        platform_private_path_state(store->directory, &next.directory) &&
+        platform_private_file_state(&guard->lock, &held) &&
+        (next.lease = lease_open(lock, &held)) != NULL;
     if (next.valid) *cache = next;
-    else platform_private_file_close(retained);
+    else { platform_private_file_close(retained); lease_unref(next.lease); }
     memory_cleanse(&next, sizeof(next));
 }
 bool device_pairing_guard_acquire_host_psk_cached(struct device_pairing_store *store,
@@ -1071,7 +1183,8 @@ bool device_pairing_guard_acquire_host_psk_cached(struct device_pairing_store *s
     enum device_pairing_host_direction direction, uint16_t port,
     struct device_pairing_guard_cache *cache, struct device_pairing_guard *guard)
 {
-    if (!cache || !guard || !binding) return device_pairing_guard_acquire_host_psk(store, peer, expected_root, now, binding, direction, port, guard);
+    if (!cache || !guard || !binding || lease_lent(cache->lease))
+        return device_pairing_guard_acquire_host_psk(store, peer, expected_root, now, binding, direction, port, guard);
     memset(guard, 0, sizeof(*guard));
     if (cache_arguments_match(cache, store, peer, expected_root, binding, direction, port) &&
         cache_fresh(cache, now) && cache_revalidate(cache, store, peer, guard)) return true;

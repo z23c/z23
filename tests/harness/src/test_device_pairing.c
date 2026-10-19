@@ -1540,6 +1540,175 @@ static int pairing_psk_private_wire_refusals(void)
     if (directory[0]) test_rm_rf(directory);
     return failures;
 }
+/* Cached tunnel-authority revalidation: every case asserts through the process
+ * counters that the change forced a full acquisition (or a refusal) and never
+ * a cache hit, because a replaced-but-valid file still acquires successfully. */
+struct pairing_cache_fixture {
+    char directory[1024], lock[1200], grant[1200], pending[1240];
+    struct db_device_pairing row; struct device_pairing_store store; uint8_t root[32];
+    struct device_pairing_guard_cache cache;
+};
+static bool pairing_cache_acquire(struct pairing_cache_fixture *f, struct device_pairing_guard *guard)
+{
+    return device_pairing_guard_acquire_host_psk_cached(&f->store, f->row.peer_key, f->root, 150,
+        &f->row.host_scope.binding.psk, DEVICE_PAIRING_HOST_INBOUND, 2222, &f->cache, guard);
+}
+static bool pairing_cache_open(struct pairing_cache_fixture *f, const char *name)
+{
+    memset(f, 0, sizeof(*f));
+    struct device_pairing_psk_publication report; uint8_t secret[32] = {17}; struct db_device_pairing found;
+    char hex[65];
+    if (!test_mkdtemp(f->directory, sizeof(f->directory), name)) return false;
+    f->row = pairing_psk_row();
+    if (!device_pairing_store_open(&f->store, f->directory, f->row.profile, f->row.local_key) ||
+        !pairing_psk_import(&f->store, &f->row, secret, &report) ||
+        !db_device_pairing_inspect(&f->store, f->row.peer_key, &found, f->root)) return false;
+    zcl_hex_encode(f->row.peer_key, 32, hex);
+    return snprintf(f->lock, sizeof(f->lock), "%s/authority.lock", f->store.directory) > 0 &&
+        snprintf(f->grant, sizeof(f->grant), "%s/%s.grant", f->store.directory, hex) > 0 &&
+        snprintf(f->pending, sizeof(f->pending), "%s.pending", f->grant) > 0;
+}
+/* Acquire and release once so the memo is primed, then once more to prove a hit. */
+static bool pairing_cache_prime(struct pairing_cache_fixture *f)
+{
+    struct device_pairing_guard guard = {0}; uint64_t full0, hit0, full1, hit1;
+    device_pairing_test_guard_counts(&full0, &hit0);
+    bool ok = pairing_cache_acquire(f, &guard); device_pairing_guard_release(&guard);
+    ok = ok && pairing_cache_acquire(f, &guard); device_pairing_guard_release(&guard);
+    device_pairing_test_guard_counts(&full1, &hit1);
+    return ok && full1 == full0 + 1 && hit1 == hit0 + 1;
+}
+/* Copies path's bytes to a fresh file and renames it over path: new inode, same bytes. */
+static bool pairing_cache_replace(const char *path)
+{
+    char copy[1300]; uint8_t bytes[512]; if (snprintf(copy, sizeof(copy), "%s.copy", path) < 0) return false;
+    FILE *in = fopen(path, "rb"); if (!in) return false;
+    size_t length = fread(bytes, 1, sizeof(bytes), in); fclose(in);
+    struct platform_private_file file; platform_private_file_init(&file);
+    bool ok = platform_private_file_create(copy, &file) &&
+        (!length || platform_private_file_write_at(&file, bytes, length, 0));
+    platform_private_file_close(&file);
+    return ok && rename(copy, path) == 0;
+}
+/* After a full acquisition re-memoized, the very next check must be a hit again. */
+static bool pairing_cache_hits(struct pairing_cache_fixture *f)
+{
+    struct device_pairing_guard guard = {0}; uint64_t full0, hit0, full1, hit1;
+    device_pairing_test_guard_counts(&full0, &hit0);
+    bool ok = pairing_cache_acquire(f, &guard); device_pairing_guard_release(&guard);
+    device_pairing_test_guard_counts(&full1, &hit1);
+    return ok && full1 == full0 && hit1 == hit0 + 1;
+}
+static int pairing_cache_case1(void)
+{
+    int failures = 0; struct pairing_cache_fixture f = {0}; struct device_pairing_guard guard = {0}, second = {0};
+    uint64_t full0, hit0, full1, hit1; enum device_pairing_publication publication;
+    (void)second; (void)full0; (void)hit0; (void)full1; (void)hit1; (void)publication;
+    TEST_CASE("device_pairing cache: hit holds the shared lock until release, a second borrower takes the full path") {
+        ASSERT(pairing_cache_open(&f, "pair-cache-hit")); ASSERT(pairing_cache_prime(&f));
+        ASSERT(pairing_cache_acquire(&f, &guard));
+        ASSERT(!db_device_pairing_revoke(&f.store, f.row.peer_key, 160, &publication));
+        device_pairing_test_guard_counts(&full0, &hit0);
+        ASSERT(pairing_cache_acquire(&f, &second));
+        device_pairing_test_guard_counts(&full1, &hit1);
+        ASSERT_EQ(full1, full0 + 1); ASSERT_EQ(hit1, hit0);
+        device_pairing_guard_release(&second);
+        ASSERT(!db_device_pairing_revoke(&f.store, f.row.peer_key, 160, &publication));
+        device_pairing_guard_release(&guard);
+        device_pairing_guard_cache_destroy(&f.cache);
+        ASSERT(db_device_pairing_revoke(&f.store, f.row.peer_key, 160, &publication));
+    } TEST_END
+    if (f.directory[0]) test_rm_rf(f.directory);
+    return failures;
+}
+static int pairing_cache_case2(void)
+{
+    int failures = 0; struct pairing_cache_fixture f = {0}; struct device_pairing_guard guard = {0}, second = {0};
+    uint64_t full0, hit0, full1, hit1; enum device_pairing_publication publication;
+    (void)second; (void)full0; (void)hit0; (void)full1; (void)hit1; (void)publication;
+    TEST_CASE("device_pairing cache: destroying the memo under an outstanding guard keeps the lock until release") {
+        ASSERT(pairing_cache_open(&f, "pair-cache-destroy")); ASSERT(pairing_cache_prime(&f));
+        ASSERT(pairing_cache_acquire(&f, &guard)); device_pairing_guard_cache_destroy(&f.cache);
+        ASSERT(!db_device_pairing_revoke(&f.store, f.row.peer_key, 160, &publication));
+        device_pairing_guard_release(&guard);
+        ASSERT(db_device_pairing_revoke(&f.store, f.row.peer_key, 160, &publication));
+    } TEST_END
+    if (f.directory[0]) test_rm_rf(f.directory);
+    return failures;
+}
+static int pairing_cache_case3(void)
+{
+    int failures = 0; struct pairing_cache_fixture f = {0}; struct device_pairing_guard guard = {0}, second = {0};
+    uint64_t full0, hit0, full1, hit1; enum device_pairing_publication publication;
+    (void)second; (void)full0; (void)hit0; (void)full1; (void)hit1; (void)publication;
+    TEST_CASE("device_pairing cache: lock file replaced by a new inode is seen by the next check") {
+        ASSERT(pairing_cache_open(&f, "pair-cache-lock")); ASSERT(pairing_cache_prime(&f));
+        ASSERT(pairing_cache_replace(f.lock));
+        device_pairing_test_guard_counts(&full0, &hit0);
+        ASSERT(pairing_cache_acquire(&f, &guard)); device_pairing_guard_release(&guard);
+        device_pairing_test_guard_counts(&full1, &hit1);
+        ASSERT_EQ(full1, full0 + 1); ASSERT_EQ(hit1, hit0);
+        ASSERT(pairing_cache_hits(&f)); device_pairing_guard_cache_destroy(&f.cache);
+    } TEST_END
+    if (f.directory[0]) test_rm_rf(f.directory);
+    return failures;
+}
+static int pairing_cache_case4(void)
+{
+    int failures = 0; struct pairing_cache_fixture f = {0}; struct device_pairing_guard guard = {0}, second = {0};
+    uint64_t full0, hit0, full1, hit1; enum device_pairing_publication publication;
+    (void)second; (void)full0; (void)hit0; (void)full1; (void)hit1; (void)publication;
+    TEST_CASE("device_pairing cache: grant replaced with identical bytes revalidates through the full path") {
+        ASSERT(pairing_cache_open(&f, "pair-cache-grant")); ASSERT(pairing_cache_prime(&f));
+        ASSERT(pairing_cache_replace(f.grant));
+        device_pairing_test_guard_counts(&full0, &hit0);
+        ASSERT(pairing_cache_acquire(&f, &guard));
+        ASSERT(!memcmp(guard.root, f.root, 32)); device_pairing_guard_release(&guard);
+        device_pairing_test_guard_counts(&full1, &hit1);
+        ASSERT_EQ(full1, full0 + 1); ASSERT_EQ(hit1, hit0);
+        ASSERT(pairing_cache_hits(&f)); device_pairing_guard_cache_destroy(&f.cache);
+    } TEST_END
+    if (f.directory[0]) test_rm_rf(f.directory);
+    return failures;
+}
+static int pairing_cache_case5(void)
+{
+    int failures = 0; struct pairing_cache_fixture f = {0}; struct device_pairing_guard guard = {0}, second = {0};
+    uint64_t full0, hit0, full1, hit1; enum device_pairing_publication publication;
+    (void)second; (void)full0; (void)hit0; (void)full1; (void)hit1; (void)publication;
+    TEST_CASE("device_pairing cache: a pending intent created between checks refuses and never hits") {
+        ASSERT(pairing_cache_open(&f, "pair-cache-pending")); ASSERT(pairing_cache_prime(&f));
+        struct platform_private_file intent; platform_private_file_init(&intent);
+        ASSERT(platform_private_file_create(f.pending, &intent)); platform_private_file_close(&intent);
+        device_pairing_test_guard_counts(&full0, &hit0);
+        ASSERT(!pairing_cache_acquire(&f, &guard));
+        device_pairing_test_guard_counts(&full1, &hit1);
+        ASSERT_EQ(hit1, hit0); ASSERT(!guard.held);
+        ASSERT_EQ(remove(f.pending), 0);
+        ASSERT(pairing_cache_acquire(&f, &guard)); device_pairing_guard_release(&guard);
+        device_pairing_guard_cache_destroy(&f.cache);
+    } TEST_END
+    if (f.directory[0]) test_rm_rf(f.directory);
+    return failures;
+}
+static int pairing_cache_case6(void)
+{
+    int failures = 0; struct pairing_cache_fixture f = {0}; struct device_pairing_guard guard = {0}, second = {0};
+    uint64_t full0, hit0, full1, hit1; enum device_pairing_publication publication;
+    (void)second; (void)full0; (void)hit0; (void)full1; (void)hit1; (void)publication;
+    TEST_CASE("device_pairing cache: a revoke that completed before the check is observed") {
+        ASSERT(pairing_cache_open(&f, "pair-cache-revoke")); ASSERT(pairing_cache_prime(&f));
+        ASSERT(db_device_pairing_revoke(&f.store, f.row.peer_key, 160, &publication));
+        ASSERT(!pairing_cache_acquire(&f, &guard)); ASSERT(!guard.held);
+        device_pairing_guard_cache_destroy(&f.cache);
+    } TEST_END
+    if (f.directory[0]) test_rm_rf(f.directory);
+    return failures;
+}
+static int pairing_cache_revalidation(void)
+{
+    return pairing_cache_case1() + pairing_cache_case2() + pairing_cache_case3() + pairing_cache_case4() + pairing_cache_case5() + pairing_cache_case6();
+}
 #else
 static bool pairing_windows_no_psk_files(const char *directory, const uint8_t id[32])
 {
@@ -1645,6 +1814,6 @@ int test_device_pairing(void)
         pairing_psk_binding_refusals() + pairing_psk_secret_refusals() +
         pairing_psk_interruptions() + pairing_psk_rotation() + pairing_psk_wire() +
         pairing_psk_one_direction() + pairing_psk_orphan_and_missing() +
-        pairing_psk_private_wire_refusals();
+        pairing_psk_private_wire_refusals() + pairing_cache_revalidation();
 #endif
 }

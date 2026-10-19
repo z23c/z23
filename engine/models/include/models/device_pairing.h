@@ -56,11 +56,14 @@ struct device_pairing_store {
     char directory[1024];
     uint8_t profile[32], local_key[32];
 };
+/* Opaque shared-lock lease a revalidating guard borrows from its cache. */
+struct device_pairing_lock_lease;
 struct device_pairing_guard {
     struct platform_private_file lock;
     struct db_device_pairing row;
     uint8_t root[32];
     bool held;
+    struct device_pairing_lock_lease *lease;
 };
 enum device_pairing_publication {
     DEVICE_PAIRING_NOT_PUBLISHED,
@@ -205,12 +208,17 @@ bool device_pairing_guard_acquire_host_psk(struct device_pairing_store *store,
     struct device_pairing_guard *guard);
 void device_pairing_psk_snapshot_destroy(struct device_pairing_psk_snapshot *snapshot);
 /* Per-session revalidation memo for device_pairing_guard_acquire_host_psk.
- * A full acquisition retains the grant file it read (pinning its inode) and
- * records directory and grant metadata. A later acquisition with identical
- * arguments still opens authority.lock and takes the same shared lock, then
- * accepts the remembered row only if, under that lock, the directory and grant
- * path stats are unchanged, no <grant>.pending intent exists and the last full
- * read is under DEVICE_PAIRING_GUARD_CACHE_NS old. Every grant mutation
+ * A full acquisition retains the grant file it read (pinning its inode), keeps
+ * an open descriptor of authority.lock (pinning that inode, never locked between
+ * acquisitions) and records directory, lock and grant identity. A later
+ * acquisition with identical arguments takes the shared lock on that descriptor,
+ * then accepts the remembered row only if the directory identity and the lock
+ * path inode are unchanged, the grant path stat is unchanged, no
+ * <grant>.pending intent exists and the last full read is under
+ * DEVICE_PAIRING_GUARD_CACHE_NS old. The guard holds the shared lock until
+ * device_pairing_guard_release; while one is outstanding the memo is not lent
+ * again (a second acquisition takes the full path); destroying the memo while
+ * a guard is outstanding is safe, the lease outlives it. Every grant mutation
  * renames a freshly created inode over the path, so a committed revoke,
  * rotation or upgrade always misses and the full acquisition decides.
  * Zero-initialized storage is empty. One owner; never copy a live memo. */
@@ -218,6 +226,7 @@ enum { DEVICE_PAIRING_GUARD_CACHE_NS = 250000000 };
 struct device_pairing_guard_cache {
     struct platform_private_file grant;
     struct platform_private_path_state directory, grant_state;
+    struct device_pairing_lock_lease *lease;
     struct db_device_pairing row;
     struct device_pairing_psk_binding binding;
     const struct device_pairing_store *store;
