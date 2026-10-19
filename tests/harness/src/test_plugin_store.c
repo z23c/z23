@@ -21,9 +21,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <sys/file.h>
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #define PST_HEX (PLUGIN_HEX_SHA3_512 + 1)
@@ -1434,6 +1436,7 @@ struct pst_trio {
     char a[PST_HEX], b[PST_HEX], c[PST_HEX];
 };
 
+#if !defined(_WIN32)
 /* Run fn in a forked child; its plugin_status comes back as the exit code. */
 static pid_t pst_spawn(enum plugin_status (*fn)(struct pst_fx *, const struct pst_trio *),
                        struct pst_fx *fx, const struct pst_trio *t)
@@ -1586,6 +1589,7 @@ static int pst_case_lock_exclusion(void)
     } TEST_END
     return failures;
 }
+#endif
 
 static int pst_case_crashed_install(void)
 {
@@ -1692,8 +1696,10 @@ int test_plugin_store(void)
     failures += pst_case_pack_field_mutation();
     failures += pst_case_pack_commands();
     failures += pst_case_pack_next_escaping();
+#if !defined(_WIN32)
     failures += pst_case_concurrent_switch();
     failures += pst_case_lock_exclusion();
+#endif
     failures += pst_case_crashed_install();
     failures += pst_case_registered();
     return failures;
