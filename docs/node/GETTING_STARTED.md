@@ -709,11 +709,12 @@ Full reference: [`docs/dev/NATIVE_COMMAND_INTERFACE.md`](../dev/NATIVE_COMMAND_I
 
 ## Run in development
 
-Use a **separate datadir and non-default ports** so a dev instance never
-collides with anything running in production on the same machine:
+Use a **separate datadir and free ports for every listener**. Changing only
+P2P and RPC ports leaves the file-service and HTTPS ports at their defaults:
 
 ```bash
-build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -port=8035 -rpcport=18234
+build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -port=8035 -rpcport=18234 \
+    -fsport=18035 -httpsport=8445
 ```
 
 (The repo's own [`platform/deploy/zclassic23-test.service`](../../platform/deploy/zclassic23-test.service)
@@ -737,8 +738,14 @@ run a `-regtest` node pinned to a dead loopback connect sink, the same pattern
 ```bash
 build/bin/z23 -datadir="$HOME/.zclassic-c23-regtest" -regtest \
     -nolegacyimport -no-tor -port=39001 -rpcport=39002 \
+    -fsport=39003 -httpsport=39004 \
     -connect=127.0.0.1:39999
 ```
+
+Choose unused ports on your host; the numbers above are examples. The chosen
+HTTPS port also applies if you later configure a TLS certificate.
+
+<!-- claim: symbol-present args_arm_ports engine/composition/src/args.c # independent listener port options -->
 
 Regtest and testnet also disable automatic import from the mainnet
 `~/.zclassic` path during argument parsing. The explicit `-nolegacyimport`
