@@ -3891,12 +3891,19 @@ ZCL_COMMAND_READY_COMMAND(
     "from `zcode package publish plan`), signs it as a zid doc (seq "
     "monotonic per identity, default 1; expiry unix seconds, default "
     "now+365d), and returns doc_hex + master_pubkey plus a saved copy at "
-    "<datadir>/zcode/releases/<name>-<version>.zid. Anyone can check the "
+    "<datadir>/zcode/releases/<name>-<version>.zid. With the optional "
+    "pq_seed_file (a 0600/0400 file holding 96 hex chars = the 48-byte "
+    "SLH-DSA-SHAKE-128s seed, never printed) the leaf emits a v2 hybrid "
+    "doc (doc_version 2, pq true): the same prefix is signed by Ed25519 and "
+    "by SLH-DSA (deterministic, context z23.zrs1.release.v1), the SLH-DSA "
+    "key digest is inside the signed bytes, and the reply adds pq_pubkey; "
+    "a v2 doc is not saved to the v1 releases directory. Without it the "
+    "output is the v1 doc exactly as before. Anyone can check the "
     "doc with `zcode release verify --doc=<hex>` — no chain write, no "
     "fee.", 0,
     "zcode,release,sign,zid,registry,seed,identity",
     "zcl.zcode_release_sign.input.v1", "zcl.zcode_release_sign.v1",
-    "name,version,root,seed_file,seq,expiry,datadir", "",
+    "name,version,root,seed_file,pq_seed_file,seq,expiry,datadir", "",
     "z23 zcode release sign --input='{\"name\":\"demo\",\"version\":\"0.1\",\"root\":\"<64hex>\",\"seed_file\":\"/path/seed.hex\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
@@ -3916,7 +3923,7 @@ ZCL_COMMAND_READY_READ(
     "verification is a hard error naming the reason — DOC_EXPIRED (ask the "
     "publisher for a re-signed doc with a higher seq), BAD_SIGNATURE "
     "(tampered or corrupted), NOT_A_RELEASE_BODY (signed for something "
-    "else), DOC_DECODE_FAILED (malformed/truncated hex). With --proof=<hex> "
+    "else), DOC_DECODE_FAILED (malformed/truncated hex). v2 docs: both signatures; BAD_PQ_SIGNATURE, PQ_KEY_MISMATCH, PQ_CONTAINER_MALFORMED, PQ_PIN_UNSUPPORTED. With --proof=<hex> "
     "(from `zcode release prove`) and --root=<hex> (the anchored domain "
     "root) given together, additionally checks the doc's record digest is "
     "in the batch that produced root: batch_included is reported "

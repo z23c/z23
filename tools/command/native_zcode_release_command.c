@@ -55,6 +55,7 @@
 #include "support/cleanse.h"
 #include "zanc/zanc.h"
 #include "zid/zid.h"
+#include "zid/zid_hybrid.h"
 
 #include <sqlite3.h>
 #include <dirent.h>
@@ -182,19 +183,23 @@ static bool zr_open_ndb(const char *datadir, struct node_db *ndb,
 
 /* ── seed loading ──────────────────────────────────────────────────── */
 
-/* Read exactly 32 seed bytes from a 64-hex-char file. Accepts one
- * trailing newline (echo > file). Refuses any other size and any perm
- * bits beyond 0600/0400. The 64-byte hex buffer is cleansed before
- * return (caller cleanses `seed_out`). Never logs content. */
-static bool zr_read_seed(const char *path, uint8_t seed_out[32],
-                         char *err, size_t err_size)
+/* Read exactly `nbytes` secret bytes from a (2 * nbytes)-hex-char file
+ * (nbytes <= ZR_SECRET_MAX). Accepts one trailing newline (echo > file).
+ * Refuses any other size and any perm bits beyond 0600/0400. Every
+ * intermediate buffer is cleansed before return on every path (caller
+ * cleanses `out`). Never logs content. */
+#define ZR_SECRET_MAX 48
+static bool zr_read_hex_secret(const char *path, uint8_t *out, size_t nbytes,
+                               char *err, size_t err_size)
 {
+    const size_t hex_len = nbytes * 2u;
+    uint8_t raw[ZR_SECRET_MAX * 2u + 1u]; /* hex + optional newline */
 #if defined(_WIN32)
-    uint8_t raw[65];
     size_t raw_size = 0;
-    if (!zr_read_stable(path, raw, sizeof(raw), &raw_size, true)) {
+    if (!zr_read_stable(path, raw, hex_len + 1u, &raw_size, true)) {
         snprintf(err, err_size,
-                 "seed file must be a private, stable 64-hex file");
+                 "seed file must be a private, stable %zu-hex file", hex_len);
+        memory_cleanse(raw, sizeof(raw));
         return false;
     }
     ssize_t n = (ssize_t)raw_size;
@@ -218,30 +223,33 @@ static bool zr_read_seed(const char *path, uint8_t seed_out[32],
         close(fd);
         return false;
     }
-    uint8_t raw[65]; /* 64 hex + optional one trailing newline */
-    ssize_t n = read(fd, raw, sizeof(raw));
+    ssize_t n = read(fd, raw, hex_len + 1u);
     close(fd);
 #endif
-    if (n < 64) {
+    if (n < (ssize_t)hex_len ||
+        (n != (ssize_t)hex_len &&
+         !(n == (ssize_t)hex_len + 1 && raw[hex_len] == '\n'))) {
         snprintf(err, err_size,
-                 "seed file must be exactly 64 hex chars (read %zd bytes)", n);
-        return false;
-    }
-    if (n != 64 && !(n == 65 && raw[64] == '\n')) {
-        snprintf(err, err_size,
-                 "seed file must be exactly 64 hex chars (read %zd bytes)", n);
+                 "seed file must be exactly %zu hex chars (read %zd bytes)",
+                 hex_len, n);
         memory_cleanse(raw, sizeof(raw));
         return false;
     }
-    char hex[65];
-    memcpy(hex, raw, 64);
-    hex[64] = '\0';
+    char hex[ZR_SECRET_MAX * 2u + 1u];
+    memcpy(hex, raw, hex_len);
+    hex[hex_len] = '\0';
     memory_cleanse(raw, sizeof(raw));
-    bool ok = IsHex(hex) && ParseHex(hex, seed_out, 32) == 32;
+    bool ok = IsHex(hex) && ParseHex(hex, out, nbytes) == nbytes;
     memory_cleanse(hex, sizeof(hex));
     if (!ok)
-        snprintf(err, err_size, "seed file is not 64 hex chars");
+        snprintf(err, err_size, "seed file is not %zu hex chars", hex_len);
     return ok;
+}
+
+static bool zr_read_seed(const char *path, uint8_t seed_out[32],
+                         char *err, size_t err_size)
+{
+    return zr_read_hex_secret(path, seed_out, 32, err, err_size);
 }
 
 /* ── doc file I/O ──────────────────────────────────────────────────── */
@@ -620,6 +628,122 @@ static uint8_t (*zr_batch_digests(const struct zr_batch_entry *entries,
     return digests;
 }
 
+/* doc_version / pq (and, for v2, pq_pubkey / pq_param) on a sign or verify
+ * reply. pq_pk is read only when pq is true. */
+static void zr_push_pq_facts(struct zcl_command_reply *reply, bool pq,
+                             const uint8_t *pq_pk)
+{
+    json_push_kv_int(&reply->data, "doc_version",
+                     pq ? ZID_DOC_VERSION_V2 : ZID_DOC_VERSION);
+    json_push_kv_bool(&reply->data, "pq", pq);
+    if (!pq)
+        return;
+    char pq_hex[ZRS1_PQ_PK_SIZE * 2 + 1];
+    HexStr(pq_pk, ZRS1_PQ_PK_SIZE, false, pq_hex, sizeof(pq_hex));
+    json_push_kv_str(&reply->data, "pq_pubkey", pq_hex);
+    json_push_kv_str(&reply->data, "pq_param", "SLH-DSA-SHAKE-128s");
+}
+
+/* Persist a signed doc under <datadir>/zcode/releases/. A v2 hybrid doc is
+ * not stored there: batch anchor/prove decode v1 docs only, so a v2 file
+ * would poison the batch load. */
+static bool zr_persist_doc(const char *datadir, bool pq,
+                           const struct zid_release *rel, const char *doc_hex,
+                           char *saved_path, size_t saved_cap, char *err,
+                           size_t err_cap)
+{
+    if (pq) {
+        snprintf(err, err_cap, "%s",
+                 "a v2 hybrid doc is not stored in the v1 releases batch "
+                 "directory (batch anchor/prove decode v1 docs only); keep "
+                 "doc_hex");
+        return false;
+    }
+    return zr_write_doc_file(datadir, rel->name, rel->version, doc_hex,
+                             saved_path, saved_cap, err, err_cap);
+}
+
+/* Outcome of signing one release: the wire bytes plus the facts the reply
+ * reports. `pq` is true for a v2 (hybrid) doc. */
+struct zr_signed {
+    uint8_t wire[ZID_DOC_V2_MAX];
+    size_t wire_len;
+    uint8_t master_pubkey[32];
+    uint8_t pq_pk[ZRS1_PQ_PK_SIZE];
+    bool pq;
+};
+
+static void zr_sign_fail(struct zcl_command_reply *reply, int exit_code,
+                         const char *code, const char *phase,
+                         const char *message, const char *ctx)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, exit_code, code,
+                           phase, false, false, message, ctx);
+}
+
+/* Sign rel into `out`: v1 when pq_seed_file is empty (exactly as before),
+ * v2 hybrid when it names a PQ seed file. Both seed buffers are wiped on
+ * every path before this returns. Fails the reply and returns false. */
+static bool zr_sign_release(struct zcl_command_reply *reply,
+                            const struct zid_release *rel, uint64_t seq,
+                            uint64_t expiry, const char *seed_file,
+                            const char *pq_seed_file, struct zr_signed *out)
+{
+    uint8_t seed[32];
+    uint8_t pq_seed[ZRS1_PQ_SEED_SIZE];
+    char err[512];
+    const bool want_pq = pq_seed_file && pq_seed_file[0];
+    if (!zr_read_seed(seed_file, seed, err, sizeof(err))) {
+        zr_sign_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_SEED_FILE",
+                     "normalize", err, seed_file);
+        return false;
+    }
+    if (want_pq &&
+        !zr_read_hex_secret(pq_seed_file, pq_seed, sizeof(pq_seed), err,
+                            sizeof(err))) {
+        memory_cleanse(seed, sizeof(seed));
+        memory_cleanse(pq_seed, sizeof(pq_seed));
+        zr_sign_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_PQ_SEED_FILE",
+                     "normalize", err, pq_seed_file);
+        return false;
+    }
+
+    bool signed_ok;
+    out->pq = want_pq;
+    if (want_pq) {
+        struct zid_doc_v2 doc;
+        signed_ok = zid_hybrid_release_sign(&doc, rel, seq, expiry, seed,
+                                            pq_seed);
+        out->wire_len = signed_ok ? zid_hybrid_encode(out->wire,
+                                                      sizeof(out->wire), &doc)
+                                  : 0;
+        memcpy(out->master_pubkey, doc.master_pubkey, 32);
+        memcpy(out->pq_pk, doc.pq_pk, ZRS1_PQ_PK_SIZE);
+    } else {
+        struct zid_doc doc;
+        signed_ok = zid_release_sign(&doc, rel, seq, expiry, seed);
+        out->wire_len = signed_ok ? zid_doc_encode(out->wire,
+                                                   ZID_DOC_MAX, &doc)
+                                  : 0;
+        memcpy(out->master_pubkey, doc.master_pubkey, 32);
+    }
+    memory_cleanse(seed, sizeof(seed));
+    memory_cleanse(pq_seed, sizeof(pq_seed));
+    if (!signed_ok) {
+        zr_sign_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "SIGN_FAILED",
+                     "execute",
+                     "release sign failed (name/version not printable "
+                     "ASCII?)", rel->name);
+        return false;
+    }
+    if (out->wire_len == 0) {
+        zr_sign_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "ENCODE_FAILED",
+                     "serialize", "doc encode failed", rel->name);
+        return false;
+    }
+    return true;
+}
+
 /* ── zcode.release.sign ────────────────────────────────────────────── */
 
 void zcl_native_handle_zcode_release_sign(
@@ -707,42 +831,18 @@ void zcl_native_handle_zcode_release_sign(
         return;
     }
 
-    uint8_t seed[32];
-    char err[512];
-    if (!zr_read_seed(seed_file, seed, err, sizeof(err))) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "BAD_SEED_FILE",
-                               "normalize", false, false, err, seed_file);
+    const char *pq_seed_file = zr_input_str(in, "pq_seed_file");
+    struct zr_signed sg;
+    if (!zr_sign_release(reply, &rel, (uint64_t)seq, (uint64_t)expiry,
+                         seed_file, pq_seed_file, &sg))
         return;
-    }
-
-    struct zid_doc doc;
-    bool signed_ok = zid_release_sign(&doc, &rel, (uint64_t)seq,
-                                      (uint64_t)expiry, seed);
-    memory_cleanse(seed, sizeof(seed));
-    if (!signed_ok) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "SIGN_FAILED",
-                               "execute", false, false,
-                               "zid_release_sign failed (name/version not "
-                               "printable ASCII?)", name);
-        return;
-    }
-
-    uint8_t wire[ZID_DOC_MAX];
-    size_t wire_len = zid_doc_encode(wire, sizeof(wire), &doc);
-    if (wire_len == 0) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "ENCODE_FAILED",
-                               "serialize", false, false,
-                               "zid_doc_encode failed", name);
-        return;
-    }
-    char doc_hex[ZID_DOC_MAX * 2 + 1];
+    uint8_t *wire = sg.wire;
+    size_t wire_len = sg.wire_len;
+    char doc_hex[ZID_DOC_V2_MAX * 2 + 1];
     HexStr(wire, wire_len, false, doc_hex, sizeof(doc_hex));
 
     char pk_hex[65];
-    HexStr(doc.master_pubkey, 32, false, pk_hex, sizeof(pk_hex));
+    HexStr(sg.master_pubkey, 32, false, pk_hex, sizeof(pk_hex));
 
     /* Persist under <datadir>/zcode/releases/ (best-effort but reported:
      * a sign that cannot persist still returns the doc hex, with the
@@ -752,9 +852,8 @@ void zcl_native_handle_zcode_release_sign(
     char save_err[512] = {0};
     const char *datadir = zr_datadir(request);
     if (datadir)
-        saved = zr_write_doc_file(datadir, rel.name, rel.version, doc_hex,
-                                  saved_path, sizeof(saved_path),
-                                  save_err, sizeof(save_err));
+        saved = zr_persist_doc(datadir, sg.pq, &rel, doc_hex, saved_path,
+                               sizeof(saved_path), save_err, sizeof(save_err));
 
     json_push_kv_str(&reply->data, "doc_hex", doc_hex);
     json_push_kv_str(&reply->data, "master_pubkey", pk_hex);
@@ -766,6 +865,7 @@ void zcl_native_handle_zcode_release_sign(
     json_push_kv_int(&reply->data, "seq", seq);
     json_push_kv_int(&reply->data, "expiry", expiry);
     json_push_kv_int(&reply->data, "doc_bytes", (int64_t)wire_len);
+    zr_push_pq_facts(reply, sg.pq, sg.pq_pk);
     json_push_kv_bool(&reply->data, "saved", saved);
     if (saved)
         json_push_kv_str(&reply->data, "saved_path", saved_path);
@@ -846,6 +946,163 @@ static bool zr_read_doc_hex(const char *file, char *file_hex, size_t cap,
     return true;
 }
 
+/* Message for a v2 (hybrid) verification refusal. Each status keeps its
+ * own distinct code (zid_hybrid_status_code); this only words the hint. */
+static const char *zr_v2_message(enum zid_hybrid_status st)
+{
+    switch (st) {
+    case ZID_HYBRID_DOC_EXPIRED:
+        return "release doc is expired — ask the publisher for a re-signed "
+               "doc with a higher seq and later expiry";
+    case ZID_HYBRID_BAD_SIGNATURE:
+        return "ed25519 signature does not verify against the doc's "
+               "master_pubkey — the doc was tampered with or corrupted";
+    case ZID_HYBRID_BAD_PQ_SIGNATURE:
+        return "SLH-DSA signature does not verify (context z23.zrs1."
+               "release.v1) — the doc was tampered with or corrupted; the "
+               "ed25519 half alone is never accepted";
+    case ZID_HYBRID_PQ_KEY_MISMATCH:
+        return "the container SLH-DSA key does not match the key digest "
+               "the ed25519 signature covers — the pair is not authentic";
+    case ZID_HYBRID_NOT_A_RELEASE_BODY:
+        return "signature/body is not a ZIDR release record — this doc was "
+               "signed for something else";
+    case ZID_HYBRID_PQ_CONTAINER_MALFORMED:
+        return "the ZRS1 trailer is malformed (magic, param or length)";
+    default:
+        return "not a well-formed v2 hybrid zid doc";
+    }
+}
+
+/* Decode a wire as v1 or v2 into the v1-shaped `doc` (v2 fills it from the
+ * hybrid doc; its signature field stays zero). Fails the reply on a decode
+ * error, with the distinct container code for a v2 trailer fault. */
+static bool zr_decode_any(struct zcl_command_reply *reply,
+                          const uint8_t *wire, size_t wire_len,
+                          struct zid_doc *doc, struct zid_doc_v2 *v2,
+                          bool *is_v2)
+{
+    *is_v2 = wire[0] == ZID_DOC_VERSION_V2;
+    if (!*is_v2) {
+        if (zid_doc_decode(doc, wire, wire_len))
+            return true;
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "DOC_DECODE_FAILED",
+                               "execute", false, false,
+                               "not a well-formed zid doc (version/wire "
+                               "layout) — check the hex was not truncated",
+                               "zcode.release.verify");
+        return false;
+    }
+    enum zid_hybrid_status st = zid_hybrid_decode(v2, wire, wire_len);
+    if (st != ZID_HYBRID_OK) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               zid_hybrid_status_code(st), "execute", false,
+                               false, zr_v2_message(st),
+                               "zcode.release.verify");
+        return false;
+    }
+    memset(doc, 0, sizeof(*doc));
+    memcpy(doc->master_pubkey, v2->master_pubkey, 32);
+    doc->seq = v2->seq;
+    doc->expiry = v2->expiry;
+    doc->body_len = v2->body_len;
+    memcpy(doc->body, v2->body, v2->body_len);
+    return true;
+}
+
+/* The verification verdict for one decoded doc. `release_shape` is v1
+ * only: v2 reports a non-release body through its own status. */
+struct zr_verdict {
+    bool valid;
+    bool release_shape;
+    enum zid_hybrid_status v2st;
+};
+
+static void zr_run_verdict(struct zr_verdict *vd, bool is_v2,
+                           const struct zid_doc *doc,
+                           const struct zid_doc_v2 *v2,
+                           struct zid_release *rel, int64_t now)
+{
+    vd->release_shape = true;
+    vd->v2st = ZID_HYBRID_OK;
+    if (is_v2) {
+        vd->v2st = zid_hybrid_release_verify(v2, NULL, rel, (uint64_t)now);
+        vd->valid = vd->v2st == ZID_HYBRID_OK;
+        return;
+    }
+    vd->valid = zid_release_verify(doc, rel, (uint64_t)now);
+    if (!vd->valid)
+        /* Re-decode for display (verify left rel unfilled on failure). */
+        vd->release_shape = zid_release_decode_body(rel, doc->body,
+                                                    doc->body_len);
+}
+
+/* Always show the decoded fields so the caller can see WHAT failed; an
+ * invalid doc is a hard failure with the reason named, never a silent
+ * valid:false. */
+static void zr_push_doc_facts(struct zcl_command_reply *reply,
+                              const struct zid_doc *doc,
+                              const struct zid_release *rel, int64_t now,
+                              bool valid, bool is_v2,
+                              const struct zid_doc_v2 *v2)
+{
+    json_push_kv_str(&reply->data, "name", rel->name);
+    json_push_kv_str(&reply->data, "version", rel->version);
+    char hex[65];
+    HexStr(rel->manifest_root, 32, false, hex, sizeof(hex));
+    json_push_kv_str(&reply->data, "manifest_root", hex);
+    HexStr(doc->master_pubkey, 32, false, hex, sizeof(hex));
+    json_push_kv_str(&reply->data, "master_pubkey", hex);
+    json_push_kv_int(&reply->data, "seq", (int64_t)doc->seq);
+    json_push_kv_int(&reply->data, "expiry", (int64_t)doc->expiry);
+    json_push_kv_int(&reply->data, "verified_at", now);
+    json_push_kv_bool(&reply->data, "valid", valid);
+    zr_push_pq_facts(reply, is_v2, v2 ? v2->pq_pk : NULL);
+}
+
+/* Name why an invalid doc is invalid. Every v2 refusal keeps its own code;
+ * v1 keeps its three. */
+static void zr_fail_invalid(struct zcl_command_reply *reply, bool is_v2,
+                            const struct zr_verdict *vd,
+                            const struct zid_doc *doc, int64_t now)
+{
+    const char *code = "BAD_SIGNATURE";
+    const char *msg = "ed25519 signature does not verify against the doc's "
+                      "master_pubkey — the doc was tampered with or "
+                      "corrupted";
+    if (is_v2) {
+        code = zid_hybrid_status_code(vd->v2st);
+        msg = zr_v2_message(vd->v2st);
+    } else if (!vd->release_shape) {
+        code = "NOT_A_RELEASE_BODY";
+        msg = zr_v2_message(ZID_HYBRID_NOT_A_RELEASE_BODY);
+    } else if ((uint64_t)now >= doc->expiry) {
+        code = "DOC_EXPIRED";
+        msg = zr_v2_message(ZID_HYBRID_DOC_EXPIRED);
+    }
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, code, "execute", false,
+                           false, msg, "zcode.release.verify");
+}
+
+/* Key pins hold Ed25519-only owner keys and cannot match a pair (pair pins
+ * are a later packet): refuse them for a v2 doc instead of half-applying. */
+static bool zr_v2_pin_refused(const struct json_value *in,
+                              struct zcl_command_reply *reply)
+{
+    if (!json_get(in, "pin") && !json_get(in, "pin_file"))
+        return false;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INVALID, "PQ_PIN_UNSUPPORTED",
+                           "normalize", false, false,
+                           "pin/pin_file hold Ed25519-only owner keys and "
+                           "cannot pin a v2 hybrid doc; pair pins are not "
+                           "implemented yet", "zcode.release.verify");
+    return true;
+}
+
 /* ── zcode.release.verify ──────────────────────────────────────────── */
 
 void zcl_native_handle_zcode_release_verify(
@@ -886,7 +1143,7 @@ void zcl_native_handle_zcode_release_verify(
         return;
     }
 
-    char file_hex[ZID_DOC_MAX * 2 + 2];
+    char file_hex[ZID_DOC_V2_MAX * 2 + 2];
     if (!doc_hex || !doc_hex[0]) {
         if (!zr_read_doc_hex(file, file_hex, sizeof(file_hex), reply))
             return;
@@ -894,7 +1151,7 @@ void zcl_native_handle_zcode_release_verify(
     }
 
     size_t hex_len = strlen(doc_hex);
-    if (hex_len == 0 || (hex_len & 1u) != 0 || hex_len > ZID_DOC_MAX * 2 ||
+    if (hex_len == 0 || (hex_len & 1u) != 0 || hex_len > ZID_DOC_V2_MAX * 2 ||
         !IsHex(doc_hex)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "BAD_DOC_HEX",
@@ -905,7 +1162,7 @@ void zcl_native_handle_zcode_release_verify(
                                "zcode.release.verify");
         return;
     }
-    uint8_t wire[ZID_DOC_MAX];
+    uint8_t wire[ZID_DOC_V2_MAX];
     size_t wire_len = (size_t)ParseHex(doc_hex, wire, sizeof(wire));
     if (wire_len == 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -916,72 +1173,31 @@ void zcl_native_handle_zcode_release_verify(
     }
 
     struct zid_doc doc;
-    if (!zid_doc_decode(&doc, wire, wire_len)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "DOC_DECODE_FAILED",
-                               "execute", false, false,
-                               "not a well-formed zid doc (version/wire "
-                               "layout) — check the hex was not truncated",
-                               "zcode.release.verify");
+    struct zid_doc_v2 v2;
+    bool is_v2 = false;
+    if (!zr_decode_any(reply, wire, wire_len, &doc, &v2, &is_v2))
         return;
-    }
 
     int64_t now = platform_time_wall_unix();
     struct zid_release rel;
     memset(&rel, 0, sizeof(rel));
-    bool valid = zid_release_verify(&doc, &rel, (uint64_t)now);
-    bool release_shape = true;
-    if (!valid)
-        /* Re-decode for display (verify left rel unfilled on failure). */
-        release_shape = zid_release_decode_body(&rel, doc.body,
-                                                doc.body_len);
-
-    /* Always show the decoded fields so the caller can see WHAT failed;
-     * an invalid doc is a hard failure with the reason named, never a
-     * silent valid:false. */
-    json_push_kv_str(&reply->data, "name", rel.name);
-    json_push_kv_str(&reply->data, "version", rel.version);
+    struct zr_verdict vd;
+    zr_run_verdict(&vd, is_v2, &doc, &v2, &rel, now);
+    zr_push_doc_facts(reply, &doc, &rel, now, vd.valid, is_v2, &v2);
     char hex[65];
-    HexStr(rel.manifest_root, 32, false, hex, sizeof(hex));
-    json_push_kv_str(&reply->data, "manifest_root", hex);
-    HexStr(doc.master_pubkey, 32, false, hex, sizeof(hex));
-    json_push_kv_str(&reply->data, "master_pubkey", hex);
-    json_push_kv_int(&reply->data, "seq", (int64_t)doc.seq);
-    json_push_kv_int(&reply->data, "expiry", (int64_t)doc.expiry);
-    json_push_kv_int(&reply->data, "verified_at", now);
-    json_push_kv_bool(&reply->data, "valid", valid);
-
-    if (!valid) {
-        if (!release_shape)
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_FAILED,
-                                   "NOT_A_RELEASE_BODY", "execute", false,
-                                   false,
-                                   "signature/body is not a ZIDR release "
-                                   "record — this doc was signed for "
-                                   "something else", "zcode.release.verify");
-        else if ((uint64_t)now >= doc.expiry)
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_FAILED,
-                                   "DOC_EXPIRED", "execute", false, false,
-                                   "release doc is expired — ask the "
-                                   "publisher for a re-signed doc with a "
-                                   "higher seq and later expiry",
-                                   "zcode.release.verify");
-        else
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_FAILED,
-                                   "BAD_SIGNATURE", "execute", false, false,
-                                   "ed25519 signature does not verify "
-                                   "against the doc's master_pubkey — the "
-                                   "doc was tampered with or corrupted",
-                                   "zcode.release.verify");
+    if (!vd.valid) {
+        zr_fail_invalid(reply, is_v2, &vd, &doc, now);
         return;
     }
 
     /* Receiver pins (optional `pin` / `pin_file` / `package_root`). Only
      * runs after the signature verdict above; without any of the three
-     * keys the gate is a no-op, so unpinned callers see no change. */
+     * keys the gate is a no-op, so unpinned callers see no change.
+     * A v2 doc cannot be matched against today's Ed25519-only pins (pair
+     * pins are a later packet), so key pins are refused for it rather
+     * than half-applied; package_root alone still runs. */
+    if (is_v2 && zr_v2_pin_refused(in, reply))
+        return;
     if (!release_pin_gate(in, false, doc.master_pubkey, rel.manifest_root,
                           reply, "zcode.release.verify"))
         return;

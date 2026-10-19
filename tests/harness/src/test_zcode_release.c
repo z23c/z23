@@ -55,6 +55,8 @@
 #include "platform/directory_transaction.h"
 #include "test/transaction_lab_simnet.h"
 #include "zid/zid.h"
+#include "zid/zid_hybrid.h"
+#include "command/release_pin.h"
 #include "zanc/zanc.h"
 
 #include <errno.h>
@@ -1164,6 +1166,279 @@ static int test_zr_directory_listing(void)
 
 /* ── entry point ───────────────────────────────────────────────────── */
 
+/* ── 8. v2 hybrid release docs through the handlers ─────────────────── */
+
+#define ZR_PQ_HEX_LEN (ZRS1_PQ_SEED_SIZE * 2)
+
+static void zr_hy_check(const char *what, bool ok, int *failures)
+{
+    printf("zcode_release hybrid: %s... ", what);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); (*failures)++; }
+}
+
+/* Sign demo/1.0.0 with root fill 0x5A, seq 7, a fixed far expiry; pq_file
+ * NULL gives v1. */
+static void zr_hy_sign(const struct zr_fixture *f, const char *pq_file,
+                       struct zr_cmd *c)
+{
+    zr_cmd_init(c);
+    char root_hex[65];
+    uint8_t root[32];
+    memset(root, 0x5A, 32);
+    HexStr(root, 32, false, root_hex, sizeof(root_hex));
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_str(&c->input, "name", "demo");
+    (void)json_push_kv_str(&c->input, "version", "1.0.0");
+    (void)json_push_kv_str(&c->input, "root", root_hex);
+    (void)json_push_kv_str(&c->input, "seed_file", f->seedfile);
+    (void)json_push_kv_int(&c->input, "seq", 7);
+    (void)json_push_kv_int(&c->input, "expiry", 2000000000);
+    if (pq_file)
+        (void)json_push_kv_str(&c->input, "pq_seed_file", pq_file);
+    zcl_native_handle_zcode_release_sign(&c->request, &c->reply);
+}
+
+/* State shared by the parts below. */
+static struct {
+    struct zr_fixture f;
+    uint8_t pq_seed[ZRS1_PQ_SEED_SIZE];
+    char pq_hex[ZR_PQ_HEX_LEN + 1];
+    char pq_file[340];
+    char *v1_hex;
+    char *v2_hex;
+    char pq_pub[65];
+    int failures;
+} zy;
+
+/* Duplicate a reply string into malloc'd memory (NULL when absent). */
+static char *zr_hy_dup(const char *s)
+{
+    if (!s)
+        return NULL;
+    char *p = malloc(strlen(s) + 1); // raw-alloc-ok:test-fixture
+    if (p)
+        memcpy(p, s, strlen(s) + 1);
+    return p;
+}
+
+/* Permission contract for the PQ seed: nothing broader than 0600. */
+static void zr_hy_part_perms(void)
+{
+    static const mode_t bad_modes[] = {0644, 0640, 0660, 0604, 0700, 0666};
+    for (size_t i = 0; i < sizeof(bad_modes) / sizeof(bad_modes[0]); i++) {
+        (void)chmod(zy.pq_file, bad_modes[i]);
+        struct zr_cmd c;
+        zr_hy_sign(&zy.f, zy.pq_file, &c);
+        char what[64];
+        snprintf(what, sizeof(what), "pq seed mode %04o is refused",
+                 (unsigned)bad_modes[i]);
+        zr_hy_check(what,
+                    c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                        zr_code_is(&c.reply, "BAD_PQ_SEED_FILE") &&
+                        !zr_str(&c.reply, "doc_hex") &&
+                        !zr_json_contains(&c.reply.data, zy.pq_hex),
+                    &zy.failures);
+        zr_cmd_free(&c);
+    }
+    (void)chmod(zy.pq_file, 0600);
+
+    /* A 64-hex file (the Ed25519 seed size) is not a PQ seed. */
+    char short_file[340];
+    snprintf(short_file, sizeof(short_file), "%s/pq_short.hex", zy.f.datadir);
+    (void)zr_write_seed(short_file, zy.f.seed_hex, 0600);
+    struct zr_cmd c;
+    zr_hy_sign(&zy.f, short_file, &c);
+    zr_hy_check("a 64-hex pq seed file is refused",
+                zr_code_is(&c.reply, "BAD_PQ_SEED_FILE"), &zy.failures);
+    zr_cmd_free(&c);
+}
+
+/* Sign v1 and v2 through the handler. */
+static void zr_hy_part_sign(void)
+{
+    struct zr_cmd c;
+    zr_hy_sign(&zy.f, NULL, &c);
+    zy.v1_hex = zr_hy_dup(zr_str(&c.reply, "doc_hex"));
+    zr_hy_check("without pq_seed_file the leaf emits v1 (doc_version 1, pq "
+                "false)",
+                zr_ok(&c.reply) && zy.v1_hex &&
+                    zr_int(&c.reply, "doc_version", -1) == 1 &&
+                    zr_bool(&c.reply, "pq") == 0 &&
+                    zr_int(&c.reply, "doc_bytes", -1) == 51 + 47 + 64,
+                &zy.failures);
+    zr_cmd_free(&c);
+
+    zr_hy_sign(&zy.f, zy.pq_file, &c);
+    zy.v2_hex = zr_hy_dup(zr_str(&c.reply, "doc_hex"));
+    const char *pk = zr_str(&c.reply, "pq_pubkey");
+    zr_hy_check("with pq_seed_file the leaf emits v2 (doc_version 2, pq "
+                "true, 8090 bytes), seed never in the reply",
+                zr_ok(&c.reply) && zy.v2_hex && pk &&
+                    zr_int(&c.reply, "doc_version", -1) == 2 &&
+                    zr_bool(&c.reply, "pq") == 1 &&
+                    zr_int(&c.reply, "doc_bytes", -1) == 8090 &&
+                    zr_bool(&c.reply, "saved") == 0 &&
+                    !zr_json_contains(&c.reply.data, zy.pq_hex) &&
+                    !zr_json_contains(&c.reply.data, zy.f.seed_hex),
+                &zy.failures);
+    if (pk)
+        snprintf(zy.pq_pub, sizeof(zy.pq_pub), "%s", pk);
+    zr_cmd_free(&c);
+}
+
+/* The handler's doc is exactly the library's doc for the same seeds. */
+static void zr_hy_part_library(void)
+{
+    struct zid_release rel;
+    memset(&rel, 0, sizeof(rel));
+    snprintf(rel.name, sizeof(rel.name), "demo");
+    snprintf(rel.version, sizeof(rel.version), "1.0.0");
+    memset(rel.manifest_root, 0x5A, 32);
+    static struct zid_doc_v2 d;
+    static uint8_t w[ZID_DOC_V2_MAX];
+    static char wh[ZID_DOC_V2_MAX * 2 + 1];
+    bool ok = zid_hybrid_release_sign(&d, &rel, 7, 2000000000, zy.f.seed,
+                                      zy.pq_seed) &&
+              zid_hybrid_encode(w, sizeof(w), &d) == 8090;
+    if (ok)
+        HexStr(w, 8090, false, wh, sizeof(wh));
+    zr_hy_check("handler doc equals the library doc for the same seeds",
+                ok && strcmp(wh, zy.v2_hex) == 0, &zy.failures);
+}
+
+static void zr_hy_part_accept(void)
+{
+    struct zr_cmd c;
+    zr_verify(zy.v2_hex, NULL, NULL, &c);
+    zr_hy_check("verify accepts v2: valid, doc_version 2, pq true, "
+                "pq_pubkey reported",
+                zr_ok(&c.reply) && zr_bool(&c.reply, "valid") == 1 &&
+                    zr_int(&c.reply, "doc_version", -1) == 2 &&
+                    zr_bool(&c.reply, "pq") == 1 &&
+                    zr_str_is(&c.reply, "pq_pubkey", zy.pq_pub) &&
+                    zr_str_is(&c.reply, "name", "demo"),
+                &zy.failures);
+    zr_cmd_free(&c);
+    zr_verify(zy.v1_hex, NULL, NULL, &c);
+    zr_hy_check("verify still accepts v1: doc_version 1, pq false",
+                zr_ok(&c.reply) && zr_bool(&c.reply, "valid") == 1 &&
+                    zr_int(&c.reply, "doc_version", -1) == 1 &&
+                    zr_bool(&c.reply, "pq") == 0,
+                &zy.failures);
+    zr_cmd_free(&c);
+}
+
+/* Verify a copy of the v2 doc with one hex char changed (hex_off) or cut
+ * to hex_len chars; require EXACTLY the named code. */
+static void zr_hy_refusal(const char *what, size_t hex_off, size_t hex_len,
+                          const char *code)
+{
+    char *t = zr_hy_dup(zy.v2_hex);
+    if (!t) {
+        zy.failures++;
+        return;
+    }
+    if (hex_len != 0)
+        t[hex_len] = '\0';
+    else
+        t[hex_off] = t[hex_off] == '0' ? '1' : '0';
+    struct zr_cmd c;
+    zr_verify(t, NULL, NULL, &c);
+    char label[160];
+    snprintf(label, sizeof(label), "verify %s -> %s", what, code);
+    zr_hy_check(label,
+                c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                    zr_code_is(&c.reply, code),
+                &zy.failures);
+    zr_cmd_free(&c);
+    free(t);
+}
+
+/* Each refusal keeps its own code. Hex offsets: trailer starts at byte 133
+ * (prefix 131 + 2); ed sig at +5, pk at +69, pq sig at +101. */
+static void zr_hy_part_refusals(void)
+{
+    zr_hy_refusal("one flipped SLH-DSA signature byte", (133 + 101 + 50) * 2,
+                  0, "BAD_PQ_SIGNATURE");
+    zr_hy_refusal("one flipped Ed25519 signature byte", (133 + 5 + 3) * 2, 0,
+                  "BAD_SIGNATURE");
+    zr_hy_refusal("one flipped container pk byte (digest no longer matches)",
+                  (133 + 69 + 1) * 2, 0, "PQ_KEY_MISMATCH");
+    zr_hy_refusal("bad ZRS1 magic", (133 + 1) * 2, 0, "PQ_CONTAINER_MALFORMED");
+    zr_hy_refusal("a v2 doc with a flipped body byte", (51 + 5) * 2, 0,
+                  "BAD_SIGNATURE");
+    zr_hy_refusal("a truncated trailer", 0, strlen(zy.v2_hex) - 2,
+                  "PQ_CONTAINER_MALFORMED");
+}
+
+/* The pin gate is untouched: a key pin cannot match a pair, so a v2 doc is
+ * refused with a named code, never half-accepted. */
+static void zr_hy_part_pins(void)
+{
+    struct zr_cmd c;
+    zr_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "doc", zy.v2_hex);
+    (void)json_push_kv_str(&c.input, "pin", zy.f.seed_hex);
+    zcl_native_handle_zcode_release_verify(&c.request, &c.reply);
+    zr_hy_check("a key pin on a v2 doc is refused (PQ_PIN_UNSUPPORTED)",
+                c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                    zr_code_is(&c.reply, "PQ_PIN_UNSUPPORTED"),
+                &zy.failures);
+    zr_cmd_free(&c);
+
+    /* release_pin_read_doc (the pin gate's doc reader) must refuse a v2 doc
+     * file cleanly: false, a named code, no doc accepted. */
+    char path[340];
+    snprintf(path, sizeof(path), "%s/v2.zid", zy.f.datadir);
+    FILE *fp = fopen(path, "wb");
+    bool wrote = fp && fputs(zy.v2_hex, fp) >= 0;
+    if (fp)
+        fclose(fp);
+    struct zid_doc d;
+    memset(&d, 0, sizeof(d));
+    const char *code = NULL;
+    bool read_ok = release_pin_read_doc(path, &d, &code);
+    zr_hy_check("release_pin_read_doc refuses a v2 doc file",
+                wrote && !read_ok && code && code[0] != '\0' && d.seq == 0,
+                &zy.failures);
+    uint8_t w[ZID_DOC_V2_MAX];
+    size_t wl = (size_t)ParseHex(zy.v2_hex, w, sizeof(w));
+    zr_hy_check("the v1 decoder refuses the same v2 bytes",
+                wl == 8090 && !zid_doc_decode(&d, w, wl), &zy.failures);
+}
+
+static int test_zr_hybrid(void)
+{
+    memset(&zy, 0, sizeof(zy));
+    printf("zcode_release hybrid: fixture... ");
+    if (zr_fixture_init(&zy.f, "hyb", 0x2E)) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+
+    for (size_t i = 0; i < sizeof(zy.pq_seed); i++)
+        zy.pq_seed[i] = (uint8_t)(0xA0 + i);
+    HexStr(zy.pq_seed, sizeof(zy.pq_seed), false, zy.pq_hex,
+           sizeof(zy.pq_hex));
+    snprintf(zy.pq_file, sizeof(zy.pq_file), "%s/pq.hex", zy.f.datadir);
+    (void)zr_write_seed(zy.pq_file, zy.pq_hex, 0600);
+
+    zr_hy_part_perms();
+    zr_hy_part_sign();
+    if (zy.v1_hex && zy.v2_hex) {
+        zr_hy_part_library();
+        zr_hy_part_accept();
+        zr_hy_part_refusals();
+        zr_hy_part_pins();
+    } else {
+        printf("zcode_release hybrid: signing produced no doc... FAIL\n");
+        zy.failures++;
+    }
+    free(zy.v1_hex);
+    free(zy.v2_hex);
+    zr_fixture_free(&zy.f);
+    return zy.failures;
+}
+
 int test_zcode_release(void)
 {
     int failures = 0;
@@ -1179,6 +1454,7 @@ int test_zcode_release(void)
     failures += test_zr_verify_errors();
     failures += test_zr_prove_verify();
     failures += test_zr_mined_anchor();
+    failures += test_zr_hybrid();
 
     node_rpc_client_set_test_hook(NULL);
 

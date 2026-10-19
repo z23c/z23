@@ -1,15 +1,27 @@
-# ZRS1 hybrid release signature — design proposal
+# ZRS1 hybrid release signature
 
-Status: PROPOSED. Nothing here is implemented; the owner has not chosen any
-marked decision. This document specifies a hybrid container ("ZRS1") in which
-a release doc carries an Ed25519 signature and an SLH-DSA-SHAKE-128s signature
-over the same bytes, and verification requires both. It covers the doc wire
-(`contexts/wallet/modules/zid/include/zid/zid.h`), the verify path
-(`contexts/wallet/modules/zid/src/zid.c`) and the `zcode.release.sign` /
-`zcode.release.verify` handlers (`tools/command/native_zcode_release_command.c`).
-The SLH-DSA primitive is the module at platform/modules/slhdsa (header
-platform/modules/slhdsa/include/slhdsa/slhdsa.h), landed in the same series as
-this proposal; the ZRS1 container and its wiring remain unimplemented.
+Status: ACCEPTED (phase 1 and signer phase 2 implemented; pin pairs and k-of-n pending)
+
+This document specifies a hybrid container ("ZRS1") in which a release doc
+carries an Ed25519 signature and an SLH-DSA-SHAKE-128s signature over the same
+bytes, and verification requires both. It covers the doc wire
+(`contexts/wallet/modules/zid/include/zid/zid_hybrid.h`), the codec, sign and
+verify path (`contexts/wallet/modules/zid/src/zid_hybrid.c`) and the
+`zcode.release.sign` / `zcode.release.verify` handlers
+(`tools/command/native_zcode_release_command.c`). The SLH-DSA primitive is the
+module at platform/modules/slhdsa (header
+platform/modules/slhdsa/include/slhdsa/slhdsa.h).
+
+Implemented: migration phase 1 (the verifier accepts v1 and v2) and the signer
+half of phase 2 (`zcode.release.sign` emits v2 when given a PQ seed file; v1
+otherwise). Not implemented: the pair-pin file format and `release_pin` gate
+(section 6.1), the k-of-n owner gate (6.2), and any default switch to v2. A v2
+doc reaching `release_pin` today is refused cleanly: `release_pin_read_doc`
+returns false, and `zcode.release.verify` refuses `pin`/`pin_file` on a v2 doc
+with `PQ_PIN_UNSUPPORTED`.
+
+<!-- claim: symbol-present zid_hybrid_release_sign contexts/wallet/modules/zid -->
+<!-- claim: file-present contexts/wallet/modules/zid/include/zid/zid_hybrid.h -->
 
 ## 1. Overview & goals
 
@@ -35,49 +47,54 @@ Goals:
   context string only).
 - Auto-signing in a release pipeline.
 
+
 ## 3. Wire layout
 
-### 3.1 Facts about the current format (verified on main)
+### 3.1 Facts about the version-1 format (unchanged)
 
 - `ZID_DOC_VERSION` is 1, `ZID_BODY_MAX` is 1024, and
-  `ZID_DOC_MAX = 1 + 32 + 8 + 8 + 2 + ZID_BODY_MAX + 64` (zid.h lines 26-28).
+  `ZID_DOC_MAX = 1 + 32 + 8 + 8 + 2 + ZID_BODY_MAX + 64` = 1139. These
+  constants are unchanged and still bound v1 docs.
 - Version-1 wire: version:1 | master_pubkey:32 | seq:8 LE | expiry:8 LE |
   body_len:2 LE | body | signature:64. The signed prefix is everything before
-  the signature, 51 + body_len bytes (zid.h around line 47; `zid_encode_prefix`
-  at zid.c:104).
-- `struct zid_doc.signature` is a fixed `uint8_t[64]` (zid.h line 38 region).
-- `zid_doc_decode` rejects any length above `ZID_DOC_MAX` and any version byte
-  other than `ZID_DOC_VERSION` (zid.c:147-152).
+  the signature, 51 + body_len bytes.
+- `struct zid_doc.signature` is a fixed `uint8_t[64]`; `struct zid_doc` is
+  unchanged, so no existing caller changes shape. v2 uses a separate
+  `struct zid_doc_v2`.
+- `zid_doc_decode` rejects any version byte other than 1 (checked before the
+  length bound, so a v2 doc is refused as a version mismatch) and any length
+  above `ZID_DOC_MAX`.
 
-### 3.2 Why a new doc version is forced
+### 3.2 Doc version 2 carries the container as a trailer
 
-A ZRS1 container is 7957 bytes (below), but the v1 signature field is 64
-bytes and the v1 body is capped at 1024 bytes, and the signature is not part
-of the body. Neither field can hold it. Putting the SLH-DSA signature in the
-body would also put it inside the signed prefix (circular) and would exceed
-`ZID_BODY_MAX`. So the doc itself must change shape.
+RESOLVED (section 8, item 1): doc version byte 2, option (a). A ZRS1
+container is 7957 bytes, which neither the 64-byte v1 signature field nor the
+1024-byte body can hold, and putting it in the body would place it inside the
+signed prefix (circular). The rejected option (b), a sidecar file referenced by
+digest, splits one release across two artifacts that can be separated or
+substituted in transit; the doc would no longer be self-verifying.
 
-PROPOSED choice (a): doc version 2 carries the container as a trailer.
-The rejected option (b), a sidecar file referenced by digest, splits one
-release across two artifacts that can be separated or substituted in transit;
-the doc would no longer be self-verifying.
-
-Version-2 wire (PROPOSED):
+Version-2 wire:
 
     version:1 (=2) | master_pubkey:32 | seq:8 LE | expiry:8 LE |
-    body_len:2 LE | body | trailer_len:2 LE | trailer (a ZRS1 container)
+    body_len:2 LE | body | pq_param:1 | pq_pk_sha3_256:32 |
+    trailer_len:2 LE | trailer (a ZRS1 container)
 
-The signed prefix is still everything up to and including `body`
-(51 + body_len bytes), but its first byte is now 2, so the bytes signed by a
-v2 doc can never equal the bytes signed by a v1 doc. A v2 doc has no separate
-64-byte signature field; its Ed25519 signature lives in the container.
+The signed prefix is everything up to and including `pq_pk_sha3_256`
+(51 + body_len + 33 bytes). Its first byte is 2, so the bytes signed by a v2
+doc can never equal the bytes signed by a v1 doc. `pq_param` is the checked
+parameter byte (0 only) and `pq_pk_sha3_256` is SHA3-256 of the container's
+SLH-DSA public key, so the Ed25519 signature authenticates the SLH-DSA key
+even without a pin. There is one `seq` and one `expiry` for the whole doc. A
+v2 doc has no separate 64-byte signature field; its Ed25519 signature lives in
+the container.
 
 ### 3.3 ZRS1 container (SLH-DSA-SHAKE-128s, param byte 0)
 
 | Offset | Length | Field |
 |-------:|-------:|-------|
 | 0 | 4 | magic "ZRS1" |
-| 4 | 1 | param byte (0 = SHAKE-128s; 1 = SHAKE-192s reserved, rejected until enabled) |
+| 4 | 1 | param byte (0 = SHAKE-128s; 1 = SHAKE-192s is refused) |
 | 5 | 64 | Ed25519 signature over the signed prefix |
 | 69 | 32 | SLH-DSA public key (pk_len for the param) |
 | 101 | 7856 | SLH-DSA signature over the signed prefix |
@@ -86,34 +103,36 @@ v2 doc can never equal the bytes signed by a v1 doc. A v2 doc has no separate
 Arithmetic: 4 + 1 + 64 + 32 + 7856 = 7957 bytes. Offsets: 5 + 64 = 69;
 69 + 32 = 101; 101 + 7856 = 7957.
 
-The 192s variant (option, not recommended): pk 48, sig 16224, so
-4 + 1 + 64 + 48 + 16224 = 16341 bytes (pk at 69..116, sig at 117..16340).
+Only SHAKE-128s is accepted (RESOLVED, item 4). Param byte 1 (192s: pk 48,
+sig 16224, container 16341) is refused as `PQ_CONTAINER_MALFORMED`.
 
-Largest v2 doc with 128s: 51 + 1024 + 2 + 7957 = 9034 bytes (192s: 17418).
-`trailer_len` is u16, which holds both (limit 65535). This is more than
-seven times the v1 maximum of 1139 bytes.
+Largest v2 doc: 51 + 1024 + 33 + 2 + 7957 = 9067 bytes, seven times the v1
+maximum of 1139. `ZID_DOC_V2_MAX` is exactly this value, computed from the
+container size and tied to the slhdsa module's key and signature sizes by
+`static_assert`s in `zid_hybrid.c`; `ZID_DOC_MAX` is not changed (RESOLVED,
+item 2). `trailer_len` is u16, which holds the container (limit 65535).
 
 Length rules, all fail-closed:
-- Read the param byte first; unknown param is a refusal.
-- Derive pk_len and sig_len from the param (the slhdsa header provides
-  `zcl_slhdsa_public_key_size` and `zcl_slhdsa_signature_size`), compute the
-  expected total, and require `trailer_len` to equal it exactly before reading
-  any other field. The container's own fields carry no length to trust.
-- Require the doc length to equal the fixed fields plus `body_len` plus
+- Read the param byte first; an unknown or disabled param is a refusal.
+- Derive pk_len and sig_len from the param (`zcl_slhdsa_public_key_size`,
+  `zcl_slhdsa_signature_size`), compute the expected container size, and
+  require `trailer_len` to equal it exactly and the bytes present to equal it
+  exactly before reading any other field. The container's own fields carry no
+  length to trust.
+- The signed `pq_param` must equal the container's param byte.
+- The doc length must equal the fixed fields plus `body_len` plus
   `2 + trailer_len` exactly; no trailing bytes.
-- `ZID_DOC_MAX` must be re-derived for v2 (at least 9034 for 128s). The v1
-  limit must stay enforced for v1 docs. The final constant is open (section 8).
 
 ## 4. Domain separation
 
-Both signatures cover the same canonical bytes: the signed prefix of the
-release doc (version byte 2, pubkey, seq, expiry, body_len, body whose first
-four bytes are the "ZIDR" release tag).
+Both signatures cover the same canonical bytes: the v2 signed prefix
+(version byte 2 | master_pubkey | seq | expiry | body_len | body | pq_param |
+pq_pk_sha3_256, where the body's first four bytes are the "ZIDR" release tag).
 
 | Signature | Separation |
 |-----------|-----------|
-| Ed25519 | No context parameter exists. Separation comes from the prefix itself: version byte 2 (never a v1 doc) and the "ZIDR" body tag. |
-| SLH-DSA | Pure FIPS 205 context string, at most 255 bytes: "z23.zrs1.release.v1" (PROPOSED literal). |
+| Ed25519 | No context parameter exists. Ed25519 signs the prefix directly. Separation comes from the prefix itself: version byte 2 (never a v1 doc) and the "ZIDR" body tag. |
+| SLH-DSA | Pure FIPS 205 context string (at most 255 bytes) `z23.zrs1.release.v1`. The signed message is the same prefix. |
 
 Rules:
 - The SLH-DSA context must not reuse the body tags "ZIDR", "ZIDD", "ZIDE",
@@ -124,56 +143,68 @@ Rules:
 - The container magic is a parsing tag, not a signed domain; it does not
   replace the context string.
 - An SLH-DSA signature made under another context (or none) over the same
-  prefix must not verify. This is tested (section 9).
+  prefix does not verify. This is tested (section 9).
 
-Known gap (open question 3): the SLH-DSA public key is carried in the
-container and is not covered by the signed prefix. Without a pin, a verifier
-learns only that the signer holds some SLH-DSA key.
+Key binding (RESOLVED, item 3): the SLH-DSA public key is bound inside the
+Ed25519-signed bytes through `pq_pk_sha3_256`, and SLH-DSA signs the same
+prefix, so both signatures cover the digest. The verifier recomputes SHA3-256
+of the container pk and requires it to equal the prefix digest
+(`PQ_KEY_MISMATCH` otherwise). Unpinned verification therefore authenticates
+the pair as one signer: a forger must produce a valid Ed25519 signature over
+a prefix naming the forger's own SLH-DSA key, which needs the Ed25519 key. An
+unpinned v2 verify still proves only that SOME pair signed; WHICH pair is
+trusted is the pin's job (section 6).
 
 ## 5. Verify path
 
-Hook: `zid_release_verify` (zid.c:701-712) currently calls `zid_doc_verify`
-(expiry check, then Ed25519 over the prefix, zid.c:169-190) and then decodes
-the body. For v2 docs the hybrid check runs inside `zid_release_verify`,
-after the Ed25519 check and before body decode, keeping the change
-release-specific; other doc kinds are untouched.
+`zid_hybrid_release_verify` (zid_hybrid.c) is the v2 verify; the v1
+`zid_release_verify` is untouched and other doc kinds are untouched.
 
 Order for a v2 doc (all steps must pass):
 1. Decode: version 2, exact lengths (section 3.3), body_len <= `ZID_BODY_MAX`.
 2. Expiry: `now >= expiry` is DOC_EXPIRED (same as today).
 3. Ed25519 verify of container bytes 5..68 over the prefix with
-   master_pubkey.
-4. Param byte known, then SLH-DSA verify (`zcl_slhdsa_verify`, which returns
-   OK only for a valid signature) of the prefix, context
-   "z23.zrs1.release.v1", with the container's pk.
-5. Pin check: the container pk must equal the pinned SLH-DSA key for this
-   master_pubkey (section 6).
-6. Body decode ("ZIDR" release record).
+   master_pubkey (`BAD_SIGNATURE`).
+4. SHA3-256 of the container pk equals the prefix digest (`PQ_KEY_MISMATCH`).
+5. SLH-DSA verify (`zcl_slhdsa_verify`, which returns OK only for a valid
+   signature) of the prefix, context `z23.zrs1.release.v1`, with the
+   container's pk (`BAD_PQ_SIGNATURE`).
+6. Pin check, when a pinned SLH-DSA key is supplied: the container pk must
+   equal it (`PQ_KEY_MISMATCH`). The API takes the pinned key; the pin file
+   format that supplies it is the next packet.
+7. Body decode ("ZIDR" release record; `NOT_A_RELEASE_BODY` otherwise).
 
-Handlers: `zcode.release.sign` (handler at lines 624-720, calling
-`zid_release_sign` at 719, then `memory_cleanse` of the seed) gains a
-second key input and writes v2. `zcode.release.verify` (handler from line 807,
-`zid_doc_decode` at 908, `zid_release_verify` at 921) gains named failures.
-Existing codes are NOT_A_RELEASE_BODY, DOC_EXPIRED and BAD_SIGNATURE (message
-at about line 963). PROPOSED new codes, each distinct and never folded into
-`valid:false`: BAD_PQ_SIGNATURE (SLH-DSA fails), PQ_KEY_MISMATCH (container pk
-differs from the pin), PQ_CONTAINER_MALFORMED (length, magic or param error).
-BAD_SIGNATURE keeps meaning the Ed25519 half. Output adds the SLH-DSA pk and
-the param to the existing fields (name, version, manifest_root,
-master_pubkey, seq, expiry, verified_at, valid).
+Handlers: `zcode.release.sign` gains an optional `pq_seed_file`. With it the
+leaf emits v2; without it the output is v1 exactly as before. The seed file
+holds 96 hex chars (48 bytes, SK.seed | SK.prf | PK.seed), is opened with the
+same reader as the Ed25519 seed (refused unless mode 0600 or 0400, never
+printed), signing is deterministic (RESOLVED, item 5), and every secret buffer
+is wiped on every path, each right after its last use. A v2 doc is not written
+to the v1 `<datadir>/zcode/releases/` batch directory (batch anchor/prove
+decode v1 docs only); the reply says so in `save_error`. The reply adds
+`doc_version`, `pq` and, for v2, `pq_pubkey` and `pq_param`.
+
+`zcode.release.verify` accepts v1 and v2 and reports `doc_version` and
+`pq: true/false` (plus `pq_pubkey` for v2). Existing codes are
+NOT_A_RELEASE_BODY, DOC_EXPIRED, BAD_SIGNATURE and DOC_DECODE_FAILED. New
+codes, each distinct and never folded into `valid:false` or into one another:
+BAD_PQ_SIGNATURE (SLH-DSA fails), PQ_KEY_MISMATCH (container pk differs from
+the signed digest or the pin), PQ_CONTAINER_MALFORMED (length, magic or param
+error), and PQ_PIN_UNSUPPORTED (a key `pin`/`pin_file` given with a v2 doc:
+Ed25519-only pins cannot match a pair, so the doc is refused rather than
+half-accepted). BAD_SIGNATURE keeps meaning the Ed25519 half.
 
 Version-1 verifier behavior: a deployed verifier calls `zid_doc_decode`,
-which logs "unsupported version 2" and returns false for buf[0] != 1
-(zid.c:150-152). The handler already fails closed on a decode failure
-(handler line 908 region), so an old verifier refuses a v2 doc loudly; it
-can never accept the Ed25519 half alone. This is a deliberate wire break.
-`zid_doc_supersedes` compares seq only and does not verify signatures
-(zid.c:224), so replacement ordering needs no change; a v2 doc must still be
-verified before it is allowed to supersede anything.
+which logs "unsupported version 2" and returns false for buf[0] != 1. The
+handler already fails closed on a decode failure, so an old verifier refuses a
+v2 doc loudly; it can never accept the Ed25519 half alone. This is a
+deliberate wire break. `zid_doc_supersedes` compares seq only and does not
+verify signatures, so replacement ordering needs no change; a v2 doc must still
+be verified before it is allowed to supersede anything.
 
 ## 6. Pins and the k-of-n gate plan
 
-### 6.1 Pin model (PROPOSED)
+### 6.1 Pin model (PROPOSED, not implemented)
 
 A pin identifies a signer as a PAIR of keys: the Ed25519 master_pubkey and
 the SLH-DSA pk (with its param). A release is accepted for a pin only if the
@@ -187,8 +218,8 @@ ed25519 pk hex, param, SLH-DSA pk hex. Old pin lines keep their meaning;
 a pin that is Ed25519-only can accept v1 docs only (and a v2 doc is refused
 for it, since the pair cannot be matched). The release pin gate
 (`release_pin_gate`, signature taking one 32-byte signer and a manifest root,
-with a pin-set maximum of 256 per the packet) is not on main at this base;
-its existing semantics are out of scope here and are not re-verified.
+with a pin-set maximum of 256) lives in tools/command/release_pin.c and is
+unchanged by this packet; pair semantics there are the next packet.
 
 ### 6.2 k-of-n owner gate (later packet)
 
@@ -204,52 +235,76 @@ Shape only:
 - All docs in a set must agree on name, version and manifest_root; any
   disagreement refuses.
 
+
 ## 7. Migration from Ed25519-only
 
-All phases PROPOSED; the owner decides when each starts, in particular phase 3.
-1. Verifier accepts both v1 (Ed25519 only, unchanged behavior) and v2 ZRS1.
-   Ship the verifier everywhere first, because old verifiers refuse v2.
-2. Signer emits v2 by default (and still can emit v1 on request). Owner
-   generates the SLH-DSA key and publishes the pair pin.
-3. Pins require ZRS1 for new releases. A pin may still mark an old release
-   range as v1-acceptable.
+1. DONE: the verifier accepts both v1 (Ed25519 only, unchanged behavior) and
+   v2 ZRS1. Ship the verifier everywhere first, because old verifiers refuse
+   v2.
+2. PARTLY DONE: the signer emits v2 when given a PQ seed file and v1
+   otherwise. Not done: emitting v2 by default, and the owner generating the
+   SLH-DSA key and publishing the pair pin (needs the pair-pin format).
+3. NOT STARTED: pins require ZRS1 for new releases. A pin may still mark an
+   old release range as v1-acceptable. The owner decides when this starts.
 Existing v1 docs keep verifying; no re-sign is forced. Rollback before phase 3
-is switching the signer back to v1.
+is leaving out the PQ seed file.
 
-## 8. Open questions
+## 8. Decisions
 
-1. Version number: version byte 2 with a trailer (recommended here) versus
-   keeping version 1 and a tag inside the body. Tag-in-body is not
-   viable if the container must stay outside the signed prefix.
-2. Final `ZID_DOC_MAX` and trailer cap for v2 (at least 9034 for 128s).
-3. Binding the SLH-DSA pk: include its digest in the signed prefix (for
-   example in the body) so unpinned verification still authenticates the pair,
-   or accept that unpinned verification proves only the Ed25519 half. Should
-   an unpinned v2 verify report valid at all?
-4. Parameter set: 128s (7856-byte signature, recommended) versus 192s (16224).
-5. Deterministic versus hedged SLH-DSA signing for the release signer
-   (the slhdsa header offers both).
-6. Seed handling: derive the SLH-DSA key material from the existing 32-byte
-   master seed, or a separate seed file (the signer reads a 0600 seed file).
-7. Expiry and seq semantics for the two halves (single doc, so one value).
+The owner delegated the open decisions on 2026-10-19 ("you have authority,
+fix everything, do your best"). Resolutions:
 
-## 9. Test vector plan
+1. Version number: doc version byte 2 carrying a ZRS1 trailer (section 3.2,
+   option a).
+2. `ZID_DOC_MAX` stays 1139 for v1. `ZID_DOC_V2_MAX` is 9067, computed exactly
+   from the 128s container and tied to the container layout by `static_assert`.
+3. Key binding: the PQ key is bound inside the Ed25519-signed bytes. The v2
+   signed prefix is version(=2) | master_pubkey | seq | expiry | body_len |
+   body | pq_param:1 | pq_pk_sha3_256:32. Ed25519 signs it directly; SLH-DSA
+   signs it with the context string `z23.zrs1.release.v1`. Unpinned
+   verification authenticates the pair; whether to trust the pair is the pin's
+   job.
+4. Parameter set: SHAKE-128s only. Param byte 1 (192s) is refused.
+5. Deterministic SLH-DSA signing.
+6. The PQ secret comes from a separate seed file (not derived from the Ed25519
+   master seed), opened 0600/0400, refused if broader, never printed, wiped on
+   every path.
+7. One seq and one expiry for the whole doc.
+
+Still open: the pair-pin file format and `release_pin` gate change, the k-of-n
+gate API, and when migration phase 3 starts.
+
+## 9. Test vectors
+
+Implemented in `tests/harness/src/test_zid.c` (group `test_zid`, function
+`test_zid_hybrid`) and `tests/harness/src/test_zcode_release.c` (group
+`test_zcode_release`, function `test_zr_hybrid`):
 
 - SLH-DSA primitive: NIST ACVP keyGen, sigGen and sigVer vectors for
-  SHAKE-128s (and 192s if enabled), including non-empty contexts. These live
-  with the primitive in platform/modules/slhdsa/tests.
+  SHAKE-128s and 192s, with the primitive in platform/modules/slhdsa/tests.
 - ZRS1 positive: a fixed seed pair signs a fixed release body; a known-answer
-  v2 doc hex; encode/decode round-trip; exact 7957-byte trailer.
-- Negative, each must refuse with the named code:
+  v2 doc (prefix, Ed25519 signature, SLH-DSA key, SHA3-256 of the whole doc);
+  encode/decode round-trip; exact 7957-byte trailer; the handler's doc equals
+  the library's doc for the same seeds.
+- Negative, each asserting its named code:
   - valid Ed25519, corrupted SLH-DSA signature (BAD_PQ_SIGNATURE);
   - corrupted Ed25519, valid SLH-DSA signature (BAD_SIGNATURE);
-  - SLH-DSA signed under a different context, or with no context;
-  - Ed25519 or SLH-DSA signature over a different doc version byte;
+  - SLH-DSA signed under a different context, or with no context
+    (BAD_PQ_SIGNATURE);
+  - Ed25519 signature over a version-1 prefix (BAD_SIGNATURE) and SLH-DSA
+    signature over a version-1 prefix (BAD_PQ_SIGNATURE);
   - swapped fields (Ed25519 signature bytes in the SLH-DSA slot and back);
-  - container pk not equal to the pin (PQ_KEY_MISMATCH);
+  - container pk not equal to the pin, container pk swapped, and a signed pk
+    digest that does not match the container pk with a valid Ed25519
+    signature (PQ_KEY_MISMATCH);
   - truncated trailer, trailer one byte long, trailer_len mismatch, trailing
-    bytes after the container, unknown param byte, bad magic
+    bytes after the container, unknown param byte, 192s param byte, signed
+    param differing from the container param, bad magic
     (PQ_CONTAINER_MALFORMED);
-  - v2 doc given to the v1 decode path (refused, version mismatch);
-  - expired v2 doc (DOC_EXPIRED).
+  - v2 doc given to the v1 decode path (refused, version mismatch) and a v1
+    doc given to the v2 decoder (NOT_V2_DOC);
+  - expired v2 doc (DOC_EXPIRED);
+  - a PQ seed file with mode 0644 (and 0640, 0660, 0604, 0700, 0666) refused;
+  - a v2 doc refused by `release_pin_read_doc` and by `pin`/`pin_file` on
+    `zcode.release.verify` (PQ_PIN_UNSUPPORTED).
 - Regression: every existing v1 vector still verifies unchanged.

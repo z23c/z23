@@ -144,12 +144,14 @@ bool zid_doc_decode(struct zid_doc *doc, const uint8_t *buf, size_t len)
     if (len < ZID_PREFIX_LEN + 64)
         LOG_FAIL("zid", "decode: len %zu below minimum %d",
                  len, ZID_PREFIX_LEN + 64);
-    if (len > ZID_DOC_MAX)
-        LOG_FAIL("zid", "decode: len %zu exceeds ZID_DOC_MAX %d",
-                 len, ZID_DOC_MAX);
+    /* Version first: a v2 (hybrid) doc is refused here as a version
+     * mismatch, never as a mere oversize doc. Verdicts are unchanged. */
     if (buf[0] != ZID_DOC_VERSION)
         LOG_FAIL("zid", "decode: unsupported version %u (want %d)",
                  buf[0], ZID_DOC_VERSION);
+    if (len > ZID_DOC_MAX)
+        LOG_FAIL("zid", "decode: len %zu exceeds ZID_DOC_MAX %d",
+                 len, ZID_DOC_MAX);
 
     uint16_t body_len = (uint16_t)buf[49] | ((uint16_t)buf[50] << 8);
     if (len != ZID_PREFIX_LEN + (size_t)body_len + 64)

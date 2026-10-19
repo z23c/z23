@@ -8,6 +8,8 @@
 #include "test/test_core.h"
 #include "zid/zid.h"
 #include "zid/zid_anchor.h"
+#include "zid/zid_hybrid.h"
+#include "slhdsa/slhdsa.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "models/database.h"
@@ -898,6 +900,383 @@ static int test_ed25519_batch(void)
     }
 
     return failures;
+}
+
+/* ── ZRS1 hybrid release doc (doc version 2) ───────────────────────
+ *
+ * Fixture seeds only. SLH-DSA signing is deterministic, so the whole v2 doc
+ * is a known answer; every negative asserts its own named status, and the
+ * mutations are applied to ONE signed base doc (a re-sign is a slow
+ * SLH-DSA signature, so only the cases that need a different signed
+ * message re-sign). */
+_Static_assert(ZID_DOC_MAX == 1 + 32 + 8 + 8 + 2 + 1024 + 64,
+               "the v1 maximum must stay exactly as it was");
+_Static_assert(ZID_DOC_V2_MAX == 9067, "v2 maximum from the 128s container");
+
+#define ZH_BODY_LEN 47 /* "ZIDR" 4, name_len 1, "demo" 4, ver_len 1, "1.0.0" 5, root 32 */
+#define ZH_PREFIX_LEN (51 + ZH_BODY_LEN + 33)
+#define ZH_WIRE_LEN (ZH_PREFIX_LEN + 2 + 7957)
+#define ZH_NOW 1000000000ULL
+#define ZH_EXPIRY 2000000000ULL
+
+/* Frozen known answers for the fixture below. A change here is a wire
+ * change, not a test edit. */
+static const char zh_kat_prefix_hex[] = "027776e870b93354f2a0b24c23f2a36cc4e80e223218c1b97926fdd018396a2b9b070000000000000000943577000000002f005a4944520464656d6f05312e302e305a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a00f08d69e967f463484fd7af5951a45c75c92770a5b0a25ab0ff0d9b9181d14838";
+static const char zh_kat_ed_sig_hex[] = "fc3b7c81794c8df88f2d82344d18251d8c1fe6ea92440e4d72f2bc35e5605174f3df6b0a26a504e6769ab15717b00acb1af8c580698b34bdafd1384f1353d70d";
+static const char zh_kat_pq_pk_hex[] = "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf148be43638d4f4a3b9eaef0aa23ad516";
+static const char zh_kat_doc_sha3_hex[] = "ea78ec739106ac3a2d4ce8ea37a2129fb8dbbcdb4ad879d068ba9583b9e012d4";
+
+struct zh_seed_src { const uint8_t *seed; size_t used; };
+
+static bool zh_seed_draw(void *ctx, uint8_t *out, size_t len)
+{
+    struct zh_seed_src *s = ctx;
+    memcpy(out, s->seed + s->used, len);
+    s->used += len;
+    return true;
+}
+
+static void zh_fixture(struct zid_release *rel, uint8_t ed_seed[32],
+                       uint8_t pq_seed[ZRS1_PQ_SEED_SIZE])
+{
+    memset(rel, 0, sizeof(*rel));
+    snprintf(rel->name, sizeof(rel->name), "demo");
+    snprintf(rel->version, sizeof(rel->version), "1.0.0");
+    memset(rel->manifest_root, 0x5A, 32);
+    for (size_t i = 0; i < 32; i++) ed_seed[i] = (uint8_t)(0x10 + i);
+    for (size_t i = 0; i < ZRS1_PQ_SEED_SIZE; i++)
+        pq_seed[i] = (uint8_t)(0xA0 + i);
+}
+
+static void zh_hex(const uint8_t *b, size_t n, char *out)
+{
+    for (size_t i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", b[i]);
+}
+
+static bool zh_is(const char *what, enum zid_hybrid_status got,
+                  enum zid_hybrid_status want, int *failures)
+{
+    printf("zid_hybrid: %s -> %s... ", what, zid_hybrid_status_code(want));
+    if (got == want) { printf("OK\n"); return true; }
+    printf("FAIL (got %s)\n", zid_hybrid_status_code(got));
+    (*failures)++;
+    return false;
+}
+
+static void zh_check(const char *what, bool ok, int *failures)
+{
+    printf("zid_hybrid: %s... ", what);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); (*failures)++; }
+}
+
+/* Decode a (possibly mutated) wire, then verify it at ZH_NOW. A decode
+ * refusal is returned as-is. */
+static enum zid_hybrid_status zh_decode_verify(const uint8_t *wire, size_t len,
+                                               const uint8_t *pin)
+{
+    static struct zid_doc_v2 d;
+    enum zid_hybrid_status st = zid_hybrid_decode(&d, wire, len);
+    if (st != ZID_HYBRID_OK) return st;
+    return zid_hybrid_release_verify(&d, pin, NULL, ZH_NOW);
+}
+
+/* Re-sign the prefix of `wire` (len ZH_PREFIX_LEN) with Ed25519 and put the
+ * signature in the container, leaving everything else as is. */
+static void zh_resign_ed(uint8_t *wire, const uint8_t ed_seed[32])
+{
+    uint8_t pk[32], sk[32];
+    ed25519_keypair(pk, sk, ed_seed);
+    ed25519_sign(wire + ZH_PREFIX_LEN + 2 + 5, wire, ZH_PREFIX_LEN, sk, pk);
+    memset(sk, 0, sizeof(sk));
+}
+
+/* One signed base doc shared by the parts below. */
+static struct {
+    struct zid_release rel;
+    uint8_t ed_seed[32];
+    uint8_t pq_seed[ZRS1_PQ_SEED_SIZE];
+    struct zid_doc_v2 doc;
+    uint8_t wire[ZID_DOC_V2_MAX];
+    size_t wlen;
+    uint8_t bad[ZID_DOC_V2_MAX + 8];
+    int failures;
+} zh;
+
+#define ZH_TRAILER (ZH_PREFIX_LEN + 2) /* trailer start in the wire */
+
+static void zh_kat_field(const char *label, const uint8_t *b, size_t n,
+                         const char *want, bool *ok)
+{
+    char hx[ZH_WIRE_LEN * 2 + 1];
+    zh_hex(b, n, hx);
+    if (strcmp(hx, want) == 0)
+        return;
+    *ok = false;
+    printf("KAT %s actual: %s\n", label, hx);
+}
+
+static void zh_part_kat(void)
+{
+    int *f = &zh.failures;
+    bool ok = true;
+    uint8_t dg[32];
+    zh_kat_field("prefix", zh.wire, ZH_PREFIX_LEN, zh_kat_prefix_hex, &ok);
+    zh_kat_field("ed_sig", zh.doc.ed_signature, 64, zh_kat_ed_sig_hex, &ok);
+    zh_kat_field("pq_pk", zh.doc.pq_pk, 32, zh_kat_pq_pk_hex, &ok);
+    sha3_256(zh.wire, zh.wlen, dg);
+    zh_kat_field("doc_sha3", dg, 32, zh_kat_doc_sha3_hex, &ok);
+    zh_check("known answer: fixed seeds + body give the fixed v2 doc", ok, f);
+
+    zh_check("trailer is exactly 7957 bytes (trailer_len field and size)",
+             zh.wire[ZH_PREFIX_LEN] == (7957 & 0xff) &&
+             zh.wire[ZH_PREFIX_LEN + 1] == (7957 >> 8) &&
+             zh.wlen - ZH_TRAILER == 7957 &&
+             memcmp(zh.wire + ZH_TRAILER, "ZRS1", 4) == 0 &&
+             zh.wire[ZH_TRAILER + 4] == 0, f);
+
+    static struct zid_doc_v2 back;
+    static uint8_t again[ZID_DOC_V2_MAX];
+    ok = zid_hybrid_decode(&back, zh.wire, zh.wlen) == ZID_HYBRID_OK &&
+         zid_hybrid_encode(again, sizeof(again), &back) == zh.wlen &&
+         memcmp(again, zh.wire, zh.wlen) == 0;
+    zh_check("encode -> decode -> encode round trip is byte-identical", ok, f);
+
+    struct zid_release out;
+    int64_t t0 = clock_now_monotonic_ns();
+    ok = zid_hybrid_decode(&back, zh.wire, zh.wlen) == ZID_HYBRID_OK &&
+         zid_hybrid_release_verify(&back, zh.doc.pq_pk, &out, ZH_NOW) ==
+             ZID_HYBRID_OK &&
+         strcmp(out.name, "demo") == 0 && strcmp(out.version, "1.0.0") == 0 &&
+         back.seq == 7 && back.expiry == ZH_EXPIRY;
+    printf("zid_hybrid: timing (informational): verify %lld us\n",
+           (long long)((clock_now_monotonic_ns() - t0) / 1000));
+    zh_check("both signatures verify, release fields decode, pin matches", ok,
+             f);
+}
+
+/* Verify requires BOTH signatures. */
+static void zh_part_both_required(void)
+{
+    int *f = &zh.failures;
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    zh.bad[ZH_TRAILER + 101 + 100] ^= 1u; /* inside the SLH-DSA signature */
+    /* The Ed25519 half alone is still valid on this doc: an Ed25519-only
+     * verifier would have accepted it. */
+    zh_check("corrupted SLH-DSA half leaves a valid Ed25519 signature",
+             ed25519_verify(zh.bad + ZH_TRAILER + 5, zh.bad, ZH_PREFIX_LEN,
+                            zh.doc.master_pubkey), f);
+    zh_is("valid Ed25519, corrupted SLH-DSA signature",
+          zh_decode_verify(zh.bad, zh.wlen, NULL),
+          ZID_HYBRID_BAD_PQ_SIGNATURE, f);
+
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    zh.bad[ZH_TRAILER + 5 + 3] ^= 1u; /* inside the Ed25519 signature */
+    zh_is("corrupted Ed25519, valid SLH-DSA signature",
+          zh_decode_verify(zh.bad, zh.wlen, NULL), ZID_HYBRID_BAD_SIGNATURE,
+          f);
+
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    zh.bad[51 + 10] ^= 1u;
+    zh_is("tampered body", zh_decode_verify(zh.bad, zh.wlen, NULL),
+          ZID_HYBRID_BAD_SIGNATURE, f);
+
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    memcpy(zh.bad + ZH_TRAILER + 5, zh.wire + ZH_TRAILER + 101, 64);
+    memcpy(zh.bad + ZH_TRAILER + 101, zh.wire + ZH_TRAILER + 5, 64);
+    zh_is("Ed25519 and SLH-DSA signature bytes swapped",
+          zh_decode_verify(zh.bad, zh.wlen, NULL), ZID_HYBRID_BAD_SIGNATURE,
+          f);
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    memcpy(zh.bad + ZH_TRAILER + 101, zh.wire + ZH_TRAILER + 5, 64);
+    zh_is("Ed25519 bytes in the SLH-DSA slot, Ed25519 slot intact",
+          zh_decode_verify(zh.bad, zh.wlen, NULL),
+          ZID_HYBRID_BAD_PQ_SIGNATURE, f);
+}
+
+/* Pins and the signed key digest. */
+static void zh_part_pins(void)
+{
+    int *f = &zh.failures;
+    uint8_t other[32];
+    memcpy(other, zh.doc.pq_pk, 32);
+    other[0] ^= 0x80;
+    zh_is("container pk not equal to the pin",
+          zh_decode_verify(zh.wire, zh.wlen, other),
+          ZID_HYBRID_PQ_KEY_MISMATCH, f);
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    memcpy(zh.bad + ZH_TRAILER + 69, other, 32);
+    zh_is("container pk swapped for another key (digest in prefix differs)",
+          zh_decode_verify(zh.bad, zh.wlen, NULL),
+          ZID_HYBRID_PQ_KEY_MISMATCH, f);
+
+    /* Prefix digest that does not match the container pk, with a VALID
+     * Ed25519 signature over that prefix: only the digest rule catches it. */
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    zh.bad[51 + ZH_BODY_LEN + 1] ^= 1u;
+    zh_resign_ed(zh.bad, zh.ed_seed);
+    zh_is("signed pk digest does not match the container pk (ed25519 valid)",
+          zh_decode_verify(zh.bad, zh.wlen, NULL),
+          ZID_HYBRID_PQ_KEY_MISMATCH, f);
+}
+
+/* Install an SLH-DSA signature over `msg` (context ctx/ctx_len) in zh.bad. */
+static bool zh_pq_sign_into_bad(const uint8_t *sk, const uint8_t *msg,
+                                const uint8_t *ctx, size_t ctx_len)
+{
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    return zcl_slhdsa_sign_deterministic(
+               ZCL_SLHDSA_SHAKE_128S, sk,
+               ZCL_SLHDSA_SHAKE_128S_SECRET_KEY_SIZE, msg, ZH_PREFIX_LEN, ctx,
+               ctx_len, zh.bad + ZH_TRAILER + 101, 7856) == ZCL_SLHDSA_OK;
+}
+
+/* Domain separation: SLH-DSA under another context, no context, or over a
+ * different version byte; Ed25519 over a different version byte. */
+static void zh_part_domain(void)
+{
+    int *f = &zh.failures;
+    uint8_t sk[ZCL_SLHDSA_SHAKE_128S_SECRET_KEY_SIZE], pk[32];
+    struct zh_seed_src src = {zh.pq_seed, 0};
+    zh_check("fixture SLH-DSA key matches the doc key",
+             zcl_slhdsa_keygen(ZCL_SLHDSA_SHAKE_128S, zh_seed_draw, &src, pk,
+                               32, sk, sizeof(sk)) == ZCL_SLHDSA_OK &&
+                 memcmp(pk, zh.doc.pq_pk, 32) == 0, f);
+
+    static const uint8_t other_ctx[] = "z23.zrs1.release.v2";
+    zh_check("signed under another context (setup)",
+             zh_pq_sign_into_bad(sk, zh.wire, other_ctx,
+                                 sizeof(other_ctx) - 1), f);
+    zh_is("SLH-DSA signed under a different context",
+          zh_decode_verify(zh.bad, zh.wlen, NULL),
+          ZID_HYBRID_BAD_PQ_SIGNATURE, f);
+    zh_check("signed with no context (setup)",
+             zh_pq_sign_into_bad(sk, zh.wire, NULL, 0), f);
+    zh_is("SLH-DSA signed with no context",
+          zh_decode_verify(zh.bad, zh.wlen, NULL),
+          ZID_HYBRID_BAD_PQ_SIGNATURE, f);
+
+    /* Signatures over the prefix whose version byte is 1. */
+    static uint8_t v1p[ZH_PREFIX_LEN];
+    memcpy(v1p, zh.wire, ZH_PREFIX_LEN);
+    v1p[0] = ZID_DOC_VERSION;
+    uint8_t edpk[32], edsk[32];
+    ed25519_keypair(edpk, edsk, zh.ed_seed);
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    ed25519_sign(zh.bad + ZH_TRAILER + 5, v1p, ZH_PREFIX_LEN, edsk, edpk);
+    memset(edsk, 0, sizeof(edsk));
+    zh_is("Ed25519 signed over a version-1 prefix",
+          zh_decode_verify(zh.bad, zh.wlen, NULL), ZID_HYBRID_BAD_SIGNATURE,
+          f);
+    zh_check("signed over a version-1 prefix (setup)",
+             zh_pq_sign_into_bad(sk, v1p, (const uint8_t *)ZRS1_CONTEXT,
+                                 sizeof(ZRS1_CONTEXT) - 1), f);
+    zh_is("SLH-DSA signed over a version-1 prefix",
+          zh_decode_verify(zh.bad, zh.wlen, NULL),
+          ZID_HYBRID_BAD_PQ_SIGNATURE, f);
+    memset(sk, 0, sizeof(sk));
+}
+
+/* Container malformations, each its own refusal. */
+static void zh_container_case(const char *what, size_t off, uint8_t val,
+                              size_t len)
+{
+    memcpy(zh.bad, zh.wire, zh.wlen);
+    zh.bad[zh.wlen] = 0; /* the extra byte for the longer cases */
+    if (off != SIZE_MAX)
+        zh.bad[off] = val;
+    zh_is(what, zh_decode_verify(zh.bad, len, NULL),
+          ZID_HYBRID_PQ_CONTAINER_MALFORMED, &zh.failures);
+}
+
+static void zh_part_container(void)
+{
+    const size_t n = zh.wlen;
+    zh_container_case("truncated trailer (one byte short)", SIZE_MAX, 0,
+                      n - 1);
+    zh_container_case("truncated trailer (cut to 100 bytes)", SIZE_MAX, 0,
+                      ZH_TRAILER + 100);
+    zh_container_case("trailing byte after the container", SIZE_MAX, 0,
+                      n + 1);
+    memcpy(zh.bad, zh.wire, n);
+    zh.bad[n] = 0;
+    zh.bad[ZH_PREFIX_LEN] = (uint8_t)(7958 & 0xff);
+    zh.bad[ZH_PREFIX_LEN + 1] = (uint8_t)(7958 >> 8);
+    zh_is("trailer one byte long (trailer_len 7958, byte present)",
+          zh_decode_verify(zh.bad, n + 1, NULL),
+          ZID_HYBRID_PQ_CONTAINER_MALFORMED, &zh.failures);
+    zh_container_case("trailer_len mismatch against the bytes present",
+                      ZH_PREFIX_LEN, (uint8_t)(7956 & 0xff), n);
+    zh_container_case("unknown/disabled container param byte (192s refused)",
+                      ZH_TRAILER + 4, 1, n);
+    zh_container_case("unknown container param byte 0x7f", ZH_TRAILER + 4,
+                      0x7f, n);
+    zh_container_case("signed pq_param differs from the container param",
+                      51 + ZH_BODY_LEN, 1, n);
+    zh_container_case("bad ZRS1 magic", ZH_TRAILER, 'X', n);
+    zh_is("no trailer at all (doc cut inside the prefix block)",
+          zh_decode_verify(zh.wire, ZH_PREFIX_LEN, NULL),
+          ZID_HYBRID_DOC_MALFORMED, &zh.failures);
+}
+
+/* Version separation both ways, expiry, and the v2 maximum. */
+static void zh_part_versions(void)
+{
+    int *f = &zh.failures;
+    static struct zid_doc v1;
+    static struct zid_doc v1doc;
+    static uint8_t v1wire[ZID_DOC_MAX];
+    static struct zid_doc_v2 d;
+    zh_check("v1 decode path refuses a v2 doc (version mismatch)",
+             !zid_doc_decode(&v1, zh.wire, zh.wlen) &&
+             !zid_doc_decode(&v1, zh.wire, ZID_DOC_MAX), f);
+    size_t v1len = 0;
+    if (zid_release_sign(&v1doc, &zh.rel, 7, ZH_EXPIRY, zh.ed_seed))
+        v1len = zid_doc_encode(v1wire, sizeof(v1wire), &v1doc);
+    zh_check("v1 doc still signs", v1len > 0, f);
+    zh_is("hybrid decode refuses a v1 doc as NOT_V2",
+          zid_hybrid_decode(&d, v1wire, v1len), ZID_HYBRID_NOT_V2, f);
+
+    enum zid_hybrid_status st = zid_hybrid_decode(&d, zh.wire, zh.wlen);
+    if (st == ZID_HYBRID_OK)
+        st = zid_hybrid_release_verify(&d, NULL, NULL, ZH_EXPIRY);
+    zh_is("expired v2 doc", st, ZID_HYBRID_DOC_EXPIRED, f);
+
+    static struct zid_doc_v2 big;
+    static uint8_t bw[ZID_DOC_V2_MAX];
+    memcpy(&big, &zh.doc, sizeof(big));
+    big.body_len = ZID_BODY_MAX;
+    zh_check("v2 maximum: a full 1024-byte body encodes to 9067",
+             zid_hybrid_encode(bw, sizeof(bw), &big) == ZID_DOC_V2_MAX &&
+             zid_hybrid_decode(&big, bw, ZID_DOC_V2_MAX) == ZID_HYBRID_OK, f);
+}
+
+static int test_zid_hybrid(void)
+{
+    printf("\n=== ZID hybrid release (v2, ZRS1) ===\n");
+    memset(&zh, 0, sizeof(zh));
+    zh_fixture(&zh.rel, zh.ed_seed, zh.pq_seed);
+
+    int64_t t0 = clock_now_monotonic_ns();
+    bool signed_ok = zid_hybrid_release_sign(&zh.doc, &zh.rel, 7, ZH_EXPIRY,
+                                             zh.ed_seed, zh.pq_seed);
+    int64_t sign_us = (clock_now_monotonic_ns() - t0) / 1000;
+    zh.wlen = signed_ok ? zid_hybrid_encode(zh.wire, sizeof(zh.wire), &zh.doc)
+                        : 0;
+    printf("zid_hybrid: timing (informational): sign %lld us\n",
+           (long long)sign_us);
+    zh_check("sign + encode gives the exact length (prefix 131 + 2 + 7957)",
+             zh.wlen == ZH_WIRE_LEN, &zh.failures);
+    if (zh.wlen != ZH_WIRE_LEN)
+        return zh.failures;
+
+    zh_part_kat();
+    zh_part_both_required();
+    zh_part_pins();
+    zh_part_domain();
+    zh_part_container();
+    zh_part_versions();
+    return zh.failures;
 }
 
 int test_zid(void)
@@ -2091,6 +2470,8 @@ int test_zid(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    failures += test_zid_hybrid();
 
     printf("=== ZID: %d failure(s) ===\n", failures);
     return failures;

@@ -1688,7 +1688,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `zcode release sign` | ready | mutate / app-write / operator · fast/low | `name`, `version`, `root`, `seed_file`, `seq`, `expiry`, `datadir` | `zcl.zcode_release_sign.v1` | `z23 zcode release sign --input='{"name":"demo","version":"0.1","root":"<64hex>","seed_file":"/path/seed.hex"}'` | Sign a release record with a master seed |
+| `zcode release sign` | ready | mutate / app-write / operator · fast/low | `name`, `version`, `root`, `seed_file`, `pq_seed_file`, `seq`, `expiry`, `datadir` | `zcl.zcode_release_sign.v1` | `z23 zcode release sign --input='{"name":"demo","version":"0.1","root":"<64hex>","seed_file":"/path/seed.hex"}'` | Sign a release record with a master seed |
 | `zcode release verify` | ready | read / read / public · fast/low | `doc`, `file`, `proof`, `root`, `anchored`, `datadir`, `pin`, `pin_file`, `package_root` | `zcl.zcode_release_verify.v1` | `z23 zcode release verify --input='{"doc":"<hex>"}'` | Verify a signed release record (optionally its batch inclusion) |
 | `zcode release anchor` | ready | mutate / wallet / operator · foreground/moderate | `tip`, `domain`, `datadir` | `zcl.zcode_release_anchor.v1` | `z23 zcode release anchor --input='{}'` | Anchor the release batch's domain root on-chain |
 | `zcode release prove` | ready | read / read / operator · fast/low | **`name`**, **`version`**, `domain`, `datadir` | `zcl.zcode_release_prove.v1` | `z23 zcode release prove --input='{"name":"demo","version":"0.1"}'` | Emit the domain-batch inclusion proof for one release |
