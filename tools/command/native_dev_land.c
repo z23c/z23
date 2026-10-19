@@ -8267,6 +8267,188 @@ static void dl_push_refused_log(const struct dl_row *row, const char *next,
     dl_log(row, line);
 }
 
+/* Bounded substring search; the text need not be NUL-terminated. */
+static const char *dl_has(const char *text, size_t len, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (size_t i = 0; n <= len && i <= len - n; i++)
+        if (memcmp(text + i, needle, n) == 0) return text + i;
+    return NULL;
+}
+
+/* Skip the status marker; returns the text after it, or NULL when the line
+ * is neither accepted form. *lease is true for `! [rejected]`. */
+static const char *dl_push_status_marker(const char *p, const char *end,
+                                         bool *lease)
+{
+    static const char remote_rej[] = "! [remote rejected]";
+    static const char lease_rej[] = "! [rejected]";
+    while (p < end && *p == ' ') p++;
+    *lease = false;
+    if ((size_t)(end - p) > sizeof(remote_rej) - 1 &&
+        memcmp(p, remote_rej, sizeof(remote_rej) - 1) == 0)
+        p += sizeof(remote_rej) - 1;
+    else if ((size_t)(end - p) > sizeof(lease_rej) - 1 &&
+             memcmp(p, lease_rej, sizeof(lease_rej) - 1) == 0) {
+        p += sizeof(lease_rej) - 1;
+        *lease = true;
+    } else {
+        return NULL;
+    }
+    while (p < end && *p == ' ') p++;
+    return p;
+}
+
+/* After the marker: `<local> -> main (<reason>)`, exact commit and ref. */
+static bool dl_push_status_pair(const char *p, const char *end,
+                                const char *local, bool lease)
+{
+    size_t ll = strlen(local);
+    if ((size_t)(end - p) < ll + 4 || memcmp(p, local, ll) != 0 ||
+        memcmp(p + ll, " -> ", 4) != 0)
+        return false;
+    p += ll + 4;
+    if ((size_t)(end - p) >= 16 && memcmp(p, "refs/heads/main ", 16) == 0) p += 16;
+    else if ((size_t)(end - p) >= 5 && memcmp(p, "main ", 5) == 0) p += 5;
+    else return false;
+    if (p >= end || *p != '(' || end[-1] != ')')
+        return false;
+    if (!lease)
+        return end - p > 2;
+    return dl_has(p, (size_t)(end - p), "non-fast-forward") != NULL ||
+           dl_has(p, (size_t)(end - p), "stale info") != NULL;
+}
+
+/* Does one diagnostic status line decline exactly this ref update? Accepted
+ * forms only: `! [remote rejected] <local> -> main (<reason>)` and
+ * `! [rejected] <local> -> main (non-fast-forward | stale info)`. */
+static bool dl_push_status_declines(const char *line, size_t len,
+                                    const char *local)
+{
+    bool lease;
+    const char *end = line + len;
+    const char *p = dl_push_status_marker(line, end, &lease);
+    return p && dl_push_status_pair(p, end, local, lease);
+}
+
+/* git exited nonzero, did not time out, and the capture did not overflow:
+ * the header line of the diagnostic. Returns the text after that line. */
+static const char *dl_push_diagnostic_body(const char *text)
+{
+    static const char key[] = "exit_observed=1 exit_code=";
+    const char *hdr = strstr(text, key);
+    if (!hdr) return NULL;
+    char *after = NULL;
+    long code = strtol(hdr + sizeof(key) - 1, &after, 10);
+    const char *nl = strchr(after, '\n');
+    if (code == 0 || !nl ||
+        !dl_has(after, (size_t)(nl - after), " timed_out=0 ") ||
+        !dl_has(after, (size_t)(nl - after), " overflow=0 "))
+        return NULL;
+    return nl + 1;
+}
+
+/* The status line, trimmed of leading spaces and of any URL, as evidence. */
+static void dl_push_reason_copy(const char *line, size_t len, char *reason,
+                                size_t cap)
+{
+    const char *url = dl_has(line, len, "://");
+    size_t keep = url ? (size_t)(url - line) : len;
+    while (keep > 0 && *line == 32) { line++; keep--; }
+    (void)snprintf(reason, cap, "%.*s", (int)keep, line);
+}
+
+/* Parse the persisted publication diagnostic of this row's attempt. True
+ * only when git itself exited nonzero (no timeout, no overflow) and printed
+ * a status line declining exactly this ref update; `reason` carries that
+ * line with any URL cut off, `private_email` marks a GH007 refusal. A
+ * missing or partial file, a timeout, a dropped connection or a status line
+ * for anything else proves nothing and stays unknown. */
+static bool dl_push_declined_read(const struct dl_dirs *d,
+                                  const struct dl_row *row,
+                                  char *reason, size_t reason_cap,
+                                  bool *private_email)
+{
+    char path[4096 + 96], text[16384];
+    *private_email = false;
+    if (reason_cap) reason[0] = '\0';
+    if (snprintf(path, sizeof(path), "%s/push-%lld-a%lld.diagnostic",
+                 d->logs, row->seq, row->attempt) >= (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    (void)fclose(f);
+    text[n] = '\0';
+    const char *body = dl_push_diagnostic_body(text);
+    const char *trailer = body ? strstr(body, "\nEND publication diagnostic\n") : NULL;
+    if (!trailer) return false;
+    bool declined = false;
+    for (const char *line = body; line < trailer;) {
+        const char *eol = memchr(line, '\n', (size_t)(trailer - line));
+        size_t len = eol ? (size_t)(eol - line) : (size_t)(trailer - line);
+        if (dl_has(line, len, "GH007") || dl_has(line, len, "email privacy"))
+            *private_email = true;
+        if (!declined && dl_push_status_declines(line, len, row->local)) {
+            declined = true;
+            dl_push_reason_copy(line, len, reason, reason_cap);
+        }
+        line += len + (eol ? 1 : 0);
+    }
+    return declined;
+}
+
+/* The server declined this exact update (see dl_push_declined_read) AND an
+ * independent fetch shows main still at the row's base without the head, so
+ * the compare-and-swap can never apply as sent: a settled refusal. */
+static bool dl_push_declined_proof(const struct dl_dirs *d,
+                                   const struct dl_row *row,
+                                   const char *observed_main,
+                                   char *reason, size_t reason_cap,
+                                   bool *private_email)
+{
+    if (!observed_main || !dl_sha_ok(observed_main) || !dl_sha_ok(row->base) ||
+        !dl_sha_ok(row->local) || strcmp(observed_main, row->base) != 0 ||
+        strcmp(row->local, row->base) == 0)
+        return false;
+    return dl_push_declined_read(d, row, reason, reason_cap, private_email);
+}
+
+/* Settle a declined push: the row fails with a typed code and the author's
+ * next action, the queue moves on, and the drive reports row_failed. */
+static bool dl_push_declined_settle(const struct dl_dirs *d, struct dl_row *row,
+                                    const char *observed_main,
+                                    struct zcl_command_reply *reply)
+{
+    char reason[256];
+    bool priv = false;
+    if (!dl_push_declined_proof(d, row, observed_main, reason, sizeof(reason),
+                                &priv))
+        return false;
+    const char *code = priv ? "PUSH_DECLINED_PRIVATE_EMAIL"
+                            : "PUSH_DECLINED_BY_REMOTE";
+    const char *next = priv
+        ? "re-author the commits with the noreply identity (git config "
+          "user.email), then submit again"
+        : "read the remote reason, correct the candidate, then submit again";
+    char line[640];
+    (void)snprintf(line, sizeof(line),
+                   "signed push declined by the remote: %s seq=%lld base=%.64s "
+                   "local=%.64s\n", code, row->seq, row->base, row->local);
+    dl_log(row, line);
+    (void)snprintf(row->state, sizeof(row->state), "failed");
+    (void)snprintf(row->dimension, sizeof(row->dimension), "push");
+    (void)snprintf(row->detail, sizeof(row->detail), "%s: %s; %s", code,
+                   reason, next);
+    row->push_diagnostic_pending = false;
+    if (dl_commit_or_report(d, row, true, reply, "failed")) {
+        dl_step_reply(reply, row, "failed");
+        (void)json_push_kv_str(&reply->data, "code", code);
+        (void)json_push_kv_str(&reply->data, "next_action", next);
+    }
+    return true;
+}
+
 /* May a later step send the same signed compare-and-swap again? Only when a
  * fresh independent observation shows main still at the signed base: the
  * head is absent, so the earlier dispatch did not apply, and the push is
@@ -8297,6 +8479,8 @@ static void dl_push_checkpoint_settle(const struct dl_dirs *d,
                                       const char *observed_main,
                                       struct zcl_command_reply *reply)
 {
+    if (dl_push_declined_settle(d, row, observed_main, reply))
+        return;
     if (!dl_push_settled_refused(d, row, observed_main)) {
         dl_push_outcome_unknown(d, row, observed_main, reply);
         return;
@@ -8329,8 +8513,16 @@ static bool dl_cancel_push_settled(const struct dl_dirs *d, const char *qpath,
     free(rows);
     dl_unlock(lock);
     if (!found || !dl_wt_ready(d->wt) ||
-        !dl_fetch_remote_main(d->wt, observed) ||
-        !dl_push_settled_refused(d, settled, observed))
+        !dl_fetch_remote_main(d->wt, observed))
+        return false;
+    char reason[256];
+    bool priv = false;
+    if (dl_push_declined_proof(d, settled, observed, reason, sizeof(reason),
+                               &priv)) {
+        dl_log(settled, "signed push declined by the remote; cancel\n");
+        return true;
+    }
+    if (!dl_push_settled_refused(d, settled, observed))
         return false;
     dl_push_refused_log(settled, "cancel", observed);
     return true;
@@ -8382,6 +8574,60 @@ static bool dl_publication_held(const struct dl_row *row,
     return true;
 }
 
+/* Pre-dispatch identity qualification: every commit the push would publish
+ * must carry author and committer emails equal to the landing worktree's
+ * configured user.email, so a private address never costs a remote round
+ * trip (GH007). Nothing is hard-coded: the reference is the repo's own
+ * config, and an unconfigured worktree has nothing to compare against. */
+static bool dl_push_identity_ok(const struct dl_dirs *d, const struct dl_row *row)
+{
+    char email[256], total[64], match[64], fixed[320], range[200];
+    const char *get[] = { "config", "--get", "user.email", NULL };
+    if (dl_git(d->wt, get, email, sizeof(email), DL_GIT_TIMEOUT_MS) != 0)
+        return true;
+    dl_trim(email);
+    if (!email[0] || strchr(email, '\n') ||
+        snprintf(fixed, sizeof(fixed), "<%s>", email) >= (int)sizeof(fixed) ||
+        snprintf(range, sizeof(range), "%s..%s", row->base, row->local) >=
+            (int)sizeof(range))
+        return false;
+    char author[352], committer[352];
+    (void)snprintf(author, sizeof(author), "--author=%s", fixed);
+    (void)snprintf(committer, sizeof(committer), "--committer=%s", fixed);
+    const char *all[] = { "rev-list", "--count", range, NULL };
+    const char *own[] = { "rev-list", "--count", "--fixed-strings", author,
+                          committer, range, NULL };
+    if (dl_git(d->wt, all, total, sizeof(total), DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(d->wt, own, match, sizeof(match), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(total);
+    dl_trim(match);
+    return total[0] && strcmp(total, match) == 0;
+}
+
+static bool dl_push_identity_refuse(const struct dl_dirs *d, struct dl_row *row,
+                                    struct zcl_command_reply *reply)
+{
+    if (dl_push_identity_ok(d, row))
+        return false;
+    static const char next[] =
+        "re-author the commits with the configured noreply identity, then submit again";
+    dl_log(row, "push refused before dispatch: PUSH_IDENTITY_PRIVATE\n");
+    (void)snprintf(row->state, sizeof(row->state), "failed");
+    (void)snprintf(row->dimension, sizeof(row->dimension), "push");
+    (void)snprintf(row->detail, sizeof(row->detail),
+                   "PUSH_IDENTITY_PRIVATE: a commit in base..local carries an "
+                   "author or committer email other than the configured "
+                   "user.email; %s", next);
+    (void)dl_commit_row(d, row, true);
+    dl_fail(reply, "PUSH_IDENTITY_PRIVATE", "publication",
+            "a commit identity differs from the configured user.email; "
+            "no push was attempted", row->detail);
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "%s", next);
+    return true;
+}
+
 static bool dl_push_allowed(const struct dl_dirs *d, struct dl_row *row,
                               struct zcl_command_reply *reply)
 {
@@ -8391,7 +8637,8 @@ static bool dl_push_allowed(const struct dl_dirs *d, struct dl_row *row,
                 "locked queue");
         return false;
     }
-    return !dl_publication_held(row, reply) && dl_push_intent_ready(d, row, reply);
+    return !dl_publication_held(row, reply) && dl_push_intent_ready(d, row, reply) &&
+           !dl_push_identity_refuse(d, row, reply);
 }
 
 /* A hold that landed after the refresh makes the pre-push commit refuse a
@@ -8778,6 +9025,8 @@ static void dl_step_proof_unclaimed(const char *detail, struct zcl_command_reply
          * is never redispatched, and the requeued row re-proves and re-signs
          * a fresh pair on the new base.  Base unmoved sends the same signed
          * compare-and-swap again while the row has attempts left. */
+        if (dl_push_declined_settle(d, row, observed_main, reply))
+            return;
         if (dl_push_redispatch_allowed(row, observed_main)) {
             row->attempt++;
             dl_log(row, "signed push did not apply and main is unmoved; "

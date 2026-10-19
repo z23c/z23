@@ -155,6 +155,19 @@ static void dlx_isolate(const char *tag)
      * `git submodule update --init`. This is a process-local env var, not
      * a persistent git config write. */
     setenv("GIT_ALLOW_PROTOCOL", "file:http:https:git:ssh", 1);
+    /* The lander refuses a push whose commits carry an identity other than
+     * the configured user.email; the fixtures commit as land@z23.invalid, so
+     * the global scope names that identity and a repo config can override it. */
+    {
+        char cfg[600];
+        (void)snprintf(cfg, sizeof(cfg), "%s/gitconfig", base);
+        FILE *f = fopen(cfg, "w");
+        if (f) {
+            (void)fputs("[user]\n\tname = land\n\temail = land@z23.invalid\n", f);
+            (void)fclose(f);
+            setenv("GIT_CONFIG_GLOBAL", cfg, 1);
+        }
+    }
 #if !defined(_WIN32)
     if (dlx_hooks_dir(g_dlx_hooks_ok, sizeof(g_dlx_hooks_ok), tag, 0))
         setenv("ZCL_LAND_HOOKS_STUB_DIR", g_dlx_hooks_ok, 1);
@@ -182,6 +195,7 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
     unsetenv("ZCL_LAND_WINDOW");
     unsetenv("ZCL_LAND_WINDOW_HOST");
+    unsetenv("GIT_CONFIG_GLOBAL");
     unsetenv("GIT_ALLOW_PROTOCOL");
 }
 
@@ -8804,6 +8818,162 @@ _test_next:;
     return failures;
 }
 
+#if !defined(_WIN32)
+/* Attach a signed intent to a proven pair and make the bare remote's
+ * pre-receive hook decline every update with GitHub's GH007 text. */
+static bool dlx_declined_rig(struct dlx_rig *rig, const char *tag,
+                             char base[64], char wt[1400])
+{
+    struct dlx_call c;
+    char land[1200], hook[1400];
+    if (!dlx_attach_proven_pair(rig, tag, base))
+        return false;
+    dlx_begin(&c, "attach");
+    (void)json_push_kv_int(&c.input, "seq", 1);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(wt, 1400, "%s/wt", land);
+    (void)snprintf(hook, sizeof(hook), "%s/hooks/pre-receive", rig->bare);
+    const char *mail[] = { "config", "user.email", "land@z23.invalid", NULL };
+    return ok && dlx_git(wt, mail) == 0 &&
+           dlx_write(hook, "#!/bin/sh\necho 'error: GH007: Your push would "
+                           "publish a private email address.' >&2\nexit 1\n") &&
+           chmod(hook, 0700) == 0;
+}
+#endif
+
+static int test_dev_land_push_declined(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: a push the server declined settles as PUSH_DECLINED_PRIVATE_EMAIL, fails the row and frees the queue") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], remote[64], wt[1400];
+        dlx_isolate("push_declined");
+        ASSERT(dlx_declined_rig(&rig, "push_declined", base, wt));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
+        ASSERT_STR_EQ(dlx_str(&c, "code"), "PUSH_DECLINED_PRIVATE_EMAIL");
+        ASSERT(strstr(dlx_str(&c, "next_action"), "noreply") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "[remote rejected]") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "://") == NULL);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, base);
+        /* The drive reads the settled row as failed, not as a wedge. */
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(json_get(&c.reply.data, "in_flight") == NULL);
+        dlx_end(&c);
+        dlx_begin(&c, "cancel");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "SEQ_UNKNOWN");
+        dlx_end(&c);
+        /* The next row proceeds. */
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") != 0);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land: cancel drops a push checkpoint whose persisted diagnostic shows a declined update") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], wire[8192], wt[1400], land[1200], path[1400], text[1024];
+        size_t used = 0;
+        dlx_isolate("push_declined_cancel");
+        ASSERT(dlx_declined_rig(&rig, "push_declined_cancel", base, wt));
+        ASSERT(dlx_queue_bytes(wire, sizeof(wire), &used));
+        char *phase = strstr(wire, "\"phase\":\"prove\"");
+        ASSERT(phase != NULL);
+        memcpy(phase, "\"phase\":\"push\" ", 15);
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+        ASSERT(dlx_write(path, wire));
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            (void)snprintf(path, sizeof(path), "%s/logs/push-1-a%d.diagnostic",
+                           land, attempt);
+            (void)snprintf(text, sizeof(text),
+                "publication diagnostic v1\nseq=1 attempt=%d target=t\n"
+                "base=%s head=%s\nargv=git push\n"
+                "exit_observed=1 exit_code=1 timed_out=0 eof=1 overflow=0 bytes=99\n"
+                "remote: error: GH007: private\n"
+                " ! [remote rejected] %s -> main (pre-receive hook declined)\n"
+                "\nEND publication diagnostic\n", attempt, base, rig.tip, rig.tip);
+            ASSERT(dlx_write(path, text));
+        }
+        dlx_begin(&c, "cancel");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "cancelled");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land: a transport failure that prints GH007 text but no status line stays PUSH_OUTCOME_UNKNOWN") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], wt[1400], marker[1400];
+        dlx_isolate("push_transport");
+        ASSERT(dlx_signed_push_lossy(&rig, "push_transport", base, wt, marker,
+                                     NULL));
+        const char *noisy = "#!/bin/sh\necho 'remote: error: GH007: Your push "
+            "would publish a private email address.' >&2\nexit 91\n";
+        char land[1200], wrapper[1400];
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(wrapper, sizeof(wrapper), "%s/lose-ack", land);
+        ASSERT(dlx_write(wrapper, noisy));
+        ASSERT(chmod(wrapper, 0700) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_OUTCOME_UNKNOWN");
+        dlx_end(&c);
+        dlx_begin(&c, "cancel");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_OUTCOME_UNKNOWN");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land: a commit whose identity differs from user.email is refused before any push") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], wt[1400], marker[1400];
+        dlx_isolate("push_identity");
+        ASSERT(dlx_signed_push_lossy(&rig, "push_identity", base, wt, marker,
+                                     NULL));
+        const char *mail[] = { "config", "user.email", "noreply@z23.invalid",
+                               NULL };
+        ASSERT(dlx_git(wt, mail) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_IDENTITY_PRIVATE");
+        dlx_end(&c);
+        ASSERT(!dlx_file_exists(marker));
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(json_get(&c.reply.data, "in_flight") == NULL);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+#endif
+    return failures;
+}
+
 static int test_dev_land_signed_publisher_death(void)
 {
     int failures = 0;
@@ -15087,6 +15257,7 @@ int test_dev_land(void)
     failures += test_dev_land_signed_lost_ack_resend();
     failures += test_dev_land_signed_push_lost_race();
     failures += test_dev_land_cancel_push_refused();
+    failures += test_dev_land_push_declined();
     failures += test_dev_land_signed_publisher_death();
 #if !defined(_WIN32)
     failures += test_dev_land_signed_crash_before_push();
