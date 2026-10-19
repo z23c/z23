@@ -154,6 +154,237 @@ static int test_mvp_c8_live_evidence_gap(void)
     return ok ? 0 : 1;
 }
 
+/* ── mvp receipt readers: C2 onion bootstrap, C7 kill-9 recovery ─────
+ * Each case writes a hermetic receipts.jsonl under a private test-tmp dir,
+ * exported through ZCL_ONION_RECEIPT_DIR / ZCL_CRASH_RECEIPT_DIR, and reads
+ * the live dumper, so the env-var, path and tail-read wiring is what runs.
+ * The operator ledgers and $HOME are never touched. */
+
+#define RCPT_ONION(v, ms) \
+    "{\"schema\":\"zcl.onion_bootstrap_receipt.v1\"," \
+    "\"utc\":\"2026-10-18T10:00:00Z\",\"verdict\":\"" v "\"," \
+    "\"bootstrap_ms\":" ms "}\n"
+#define RCPT_CRASH(v, ms, why) \
+    "{\"schema\":\"zcl.crash_recovery_receipt.v1\"," \
+    "\"utc\":\"2026-10-18T10:00:00Z\",\"binary_sha256\":\"00\"," \
+    "\"recover_ms\":" ms ",\"verdict\":\"" v "\",\"reason\":\"" why "\"," \
+    "\"planned\":true,\"passed\":false}\n"
+
+struct mvp_rcpt_fixture {
+    char onion[512];
+    char crash[512];
+    char onion_file[600];
+    char crash_file[600];
+};
+
+struct mvp_rcpt_expect {
+    const char *id;
+    const char *state;
+    const char *blocker;
+    const char *reason;
+    const char *utc;
+};
+
+static bool mvp_rcpt_write(const char *file, const char *body)
+{
+    if (!body)
+        return true;
+    FILE *f = fopen(file, "wb");
+    if (!f)
+        return false;
+    bool ok = fputs(body, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static bool mvp_rcpt_setup(struct mvp_rcpt_fixture *fx,
+                           const char *onion_body, const char *crash_body)
+{
+    bool ok = test_mkdtemp(fx->onion, sizeof(fx->onion), "mvp_onion") != NULL &&
+              test_mkdtemp(fx->crash, sizeof(fx->crash), "mvp_crash") != NULL;
+    if (ok) {
+        snprintf(fx->onion_file, sizeof(fx->onion_file),
+                 "%s/receipts.jsonl", fx->onion);
+        snprintf(fx->crash_file, sizeof(fx->crash_file),
+                 "%s/receipts.jsonl", fx->crash);
+        ok = mvp_rcpt_write(fx->onion_file, onion_body) &&
+             mvp_rcpt_write(fx->crash_file, crash_body);
+    }
+    setenv("ZCL_ONION_RECEIPT_DIR", fx->onion, 1);
+    setenv("ZCL_CRASH_RECEIPT_DIR", fx->crash, 1);
+    return ok;
+}
+
+static void mvp_rcpt_teardown(struct mvp_rcpt_fixture *fx)
+{
+    unsetenv("ZCL_ONION_RECEIPT_DIR");
+    unsetenv("ZCL_CRASH_RECEIPT_DIR");
+    unlink(fx->onion_file);
+    unlink(fx->crash_file);
+    test_cleanup_tmpdir(fx->onion);
+    test_cleanup_tmpdir(fx->crash);
+}
+
+static const char *mvp_rcpt_ev(const struct json_value *c, const char *key)
+{
+    const char *s = json_get_str(json_get(json_get(c, "evidence"), key));
+    return s ? s : "";
+}
+
+static bool mvp_rcpt_met_ok(const struct json_value *c, const char *state)
+{
+    const struct json_value *m = json_get(c, "met");
+    if (strcmp(state, "unknown") == 0)
+        return json_is_null(m);
+    return !json_is_null(m) &&
+           json_get_bool(m) == (strcmp(state, "met") == 0);
+}
+
+static bool mvp_rcpt_src_ok(const struct json_value *c,
+                            const struct mvp_rcpt_expect *w,
+                            const struct mvp_rcpt_fixture *fx)
+{
+    if (!w->utc)
+        return true;
+    const char *want = strcmp(w->id, "C2") == 0 ? fx->onion_file : fx->crash_file;
+    return strcmp(mvp_rcpt_ev(c, "evidence_source"), want) == 0 &&
+           strcmp(mvp_rcpt_ev(c, "utc"), w->utc) == 0;
+}
+
+static bool mvp_rcpt_check(const struct json_value *arr,
+                           const struct mvp_rcpt_expect *w,
+                           const struct mvp_rcpt_fixture *fx)
+{
+    const struct json_value *c = mvp_find_criterion(arr, w->id);
+    if (!c)
+        return false;
+    const char *state = json_get_str(json_get(c, "met_state"));
+    const char *reason = json_get_str(json_get(c, "reason"));
+    const char *blocker = json_get_str(json_get(c, "blocker"));
+    bool ok = state && strcmp(state, w->state) == 0 &&
+              reason && strstr(reason, w->reason) != NULL &&
+              mvp_rcpt_met_ok(c, w->state) &&
+              mvp_rcpt_src_ok(c, w, fx);
+    if (w->blocker)
+        ok = ok && blocker && strcmp(blocker, w->blocker) == 0;
+    else
+        ok = ok && json_is_null(json_get(c, "blocker"));
+    return ok;
+}
+
+static bool mvp_rcpt_run(const char *onion_body, const char *crash_body,
+                         const struct mvp_rcpt_expect *want, size_t n)
+{
+    struct mvp_rcpt_fixture fx;
+    memset(&fx, 0, sizeof(fx));
+    bool ok = mvp_rcpt_setup(&fx, onion_body, crash_body);
+    struct json_value out = {0};
+    ok = ok && mvp_dump_state_json(&out, NULL);
+    const struct json_value *arr = json_get(&out, "criteria");
+    for (size_t i = 0; ok && i < n; i++)
+        ok = mvp_rcpt_check(arr, &want[i], &fx);
+    json_free(&out);
+    mvp_rcpt_teardown(&fx);
+    return ok;
+}
+
+static int test_mvp_receipts_absent_unknown(void)
+{
+    static const struct mvp_rcpt_expect want[] = {
+        {"C2", "unknown", NULL, "not durably recorded at runtime", NULL},
+        {"C7", "unknown", NULL, "recovery-drill timing not recorded", NULL},
+    };
+    bool ok = mvp_rcpt_run(NULL, NULL, want, 2);
+    printf("mvp receipts: no ledger leaves C2 and C7 unknown with reasons... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int test_mvp_receipts_pass_met(void)
+{
+    static const struct mvp_rcpt_expect want[] = {
+        {"C2", "met", NULL, "within the 60s budget", "2026-10-18T10:00:00Z"},
+        {"C7", "met", NULL, "within the 2min budget", "2026-10-18T10:00:00Z"},
+    };
+    bool ok = mvp_rcpt_run(RCPT_ONION("PASS", "42000"),
+                           RCPT_CRASH("PASS", "120000", ""), want, 2);
+    printf("mvp receipts: PASS rows within budget are MET with source and utc... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int test_mvp_receipts_fail_unmet(void)
+{
+    static const struct mvp_rcpt_expect onion_slow[] = {
+        {"C2", "unmet", "onion.too_slow", "verdict FAIL", NULL},
+    };
+    static const struct mvp_rcpt_expect onion_fail[] = {
+        {"C2", "unmet", "onion.failed", "verdict FAIL", NULL},
+    };
+    static const struct mvp_rcpt_expect onion_pass_edge[] = {
+        {"C2", "unmet", "onion.too_slow", "exceeded the 60s budget", NULL},
+    };
+    static const struct mvp_rcpt_expect crash_fail[] = {
+        {"C7", "unmet", "recovery.failed", "verdict FAIL", NULL},
+    };
+    static const struct mvp_rcpt_expect crash_slow[] = {
+        {"C7", "unmet", "recovery.too_slow", "exceeded the 2min budget", NULL},
+    };
+    bool ok = mvp_rcpt_run(RCPT_ONION("FAIL", "75000"), NULL, onion_slow, 1);
+    ok = mvp_rcpt_run(RCPT_ONION("FAIL", "null"), NULL, onion_fail, 1) && ok;
+    ok = mvp_rcpt_run(RCPT_ONION("PASS", "60000"), NULL, onion_pass_edge, 1) && ok;
+    ok = mvp_rcpt_run(NULL, RCPT_CRASH("FAIL", "30000", ""), crash_fail, 1) && ok;
+    ok = mvp_rcpt_run(NULL, RCPT_CRASH("PASS", "120001", ""), crash_slow, 1) && ok;
+    printf("mvp receipts: FAIL and over-budget rows are UNMET with named blockers... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int test_mvp_receipts_skip_unmeasured_unknown(void)
+{
+    static const struct mvp_rcpt_expect skip[] = {
+        {"C7", "unknown", NULL, "verdict SKIP: no root", NULL},
+    };
+    static const struct mvp_rcpt_expect no_ms_crash[] = {
+        {"C7", "unknown", NULL, "no recover_ms (not measured)", NULL},
+    };
+    static const struct mvp_rcpt_expect no_ms_onion[] = {
+        {"C2", "unknown", NULL, "no bootstrap_ms (not measured)", NULL},
+    };
+    static const struct mvp_rcpt_expect foreign[] = {
+        {"C2", "unknown", NULL, "not durably recorded at runtime", NULL},
+    };
+    bool ok = mvp_rcpt_run(NULL, RCPT_CRASH("SKIP", "null", "no root"),
+                           skip, 1);
+    ok = mvp_rcpt_run(NULL, RCPT_CRASH("PASS", "null", ""), no_ms_crash, 1) && ok;
+    ok = mvp_rcpt_run(RCPT_ONION("PASS", "null"), NULL, no_ms_onion, 1) && ok;
+    ok = mvp_rcpt_run("{\"schema\":\"zcl.other.v1\",\"verdict\":\"PASS\","
+                      "\"bootstrap_ms\":1}\n", NULL, foreign, 1) && ok;
+    printf("mvp receipts: SKIP and unmeasured rows stay UNKNOWN with the reason... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int test_mvp_receipts_torn_tail_uses_previous(void)
+{
+    static const struct mvp_rcpt_expect onion[] = {
+        {"C2", "met", NULL, "within the 60s budget", NULL},
+    };
+    static const struct mvp_rcpt_expect crash[] = {
+        {"C7", "met", NULL, "within the 2min budget", NULL},
+    };
+    bool ok = mvp_rcpt_run(
+        RCPT_ONION("PASS", "42000")
+        "{\"schema\":\"zcl.onion_bootstrap_receipt.v1\",\"verdict\":\"FAI",
+        NULL, onion, 1);
+    ok = mvp_rcpt_run(NULL,
+        RCPT_CRASH("PASS", "30000", "")
+        "{\"schema\":\"zcl.crash_recovery_receipt.v1\",\"verdict\":\"FAIL\"",
+        crash, 1) && ok;
+    printf("mvp receipts: a torn last line leaves the previous valid row in force... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int syncdiag_cases_operator(void)
 {
     int failures = 0;
@@ -1067,5 +1298,10 @@ int syncdiag_cases_operator(void)
     failures += test_mvp_c8_requires_exact_window();
     failures += test_mvp_c8_negative_precedence();
     failures += test_mvp_c8_live_evidence_gap();
+    failures += test_mvp_receipts_absent_unknown();
+    failures += test_mvp_receipts_pass_met();
+    failures += test_mvp_receipts_fail_unmet();
+    failures += test_mvp_receipts_skip_unmeasured_unknown();
+    failures += test_mvp_receipts_torn_tail_uses_previous();
     return failures;
 }

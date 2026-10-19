@@ -9,14 +9,15 @@
  * HONESTY CONTRACT — this is a REPORTER, never a gate. It derives
  * met=true|false|unknown STRICTLY from durable/runtime evidence the node
  * already produces (node_health tip-hold, the soak attestation service, the
- * standing utxo_parity oracle, the replay-canary watch). It can flip nothing
- * true on its own, performs no consensus/state writes, and a criterion whose
- * runtime evidence source is absent is reported "unknown" with a NAMED reason
- * — never silently "met". Criteria 1/2/4/5 are proven only by offline operator
- * make-targets (install / onion timing / shielded params / store buyer) with no
- * runtime signal, so at runtime they are honestly "unknown"; the value here is
- * the enumeration + the live signals that DO exist (sync_state/gap, soak
- * healthy/eligible, parity mismatches, canary latch) plus the met_count math.
+ * standing utxo_parity oracle, the replay-canary watch, and the C2 onion and
+ * C7 crash-recovery receipt ledgers). It can flip nothing true on its own,
+ * performs no consensus/state writes, and a criterion whose runtime evidence
+ * source is absent is reported "unknown" with a NAMED reason — never silently
+ * "met". Criteria 1/4/5 are proven only by offline operator make-targets
+ * (install / shielded params / store buyer) with no runtime signal, so at
+ * runtime they are honestly "unknown"; the value here is the enumeration + the
+ * live signals that DO exist (sync_state/gap, soak healthy/eligible, parity
+ * mismatches, canary latch, last receipt rows) plus the met_count math.
  *
  * The classifier mvp_build_status_json() is a PURE function over struct
  * mvp_evidence — the single place met/unmet/unknown is decided — so the unit
@@ -26,6 +27,7 @@
 #include "controllers/diagnostics_internal.h"
 
 #include "config/runtime.h"
+#include "services/evidence_ledger_row.h"
 #include "services/node_health_service.h"
 #include "services/soak_attestation_service.h"
 #include "services/utxo_parity_service.h"
@@ -42,6 +44,14 @@
  * UNKNOWN→null (an absent/insufficient evidence source), with a parallel
  * "met_state" string for human/typed consumers. */
 enum mvp_met { MVP_UNMET = 0, MVP_MET = 1, MVP_UNKNOWN = 2 };
+
+/* A criterion's resolved state, blocker and reason. The reason pointer names
+ * static text or a buffer inside the caller's struct mvp_evidence. */
+struct mvp_verdict {
+    enum mvp_met met;
+    const char *blocker;
+    const char *reason;
+};
 
 static const char *mvp_met_state_name(enum mvp_met m)
 {
@@ -132,6 +142,216 @@ static const char *mvp_c8_oracle_gap(const struct mvp_evidence *ev)
            "for the 0-mismatch-over-soak claim";
 }
 
+/* ── receipt ledgers: C2 onion bootstrap, C7 kill-9 recovery ─────────────
+ * Each producer appends one flat JSON object per run to a JSONL ledger. The
+ * LAST VALID row is the current evidence. Valid means: the expected schema, a
+ * PASS|FAIL|SKIP verdict, and a complete line — the shared reader drops torn
+ * tails. A missing or unreadable ledger is data, not an error, and leaves the
+ * criterion UNKNOWN with its default reason. */
+
+#define MVP_RECEIPT_TAIL_BYTES 65536
+#define MVP_RECEIPT_FILE "receipts.jsonl"
+#define MVP_ONION_SCHEMA "zcl.onion_bootstrap_receipt.v1"
+#define MVP_CRASH_SCHEMA "zcl.crash_recovery_receipt.v1"
+#define MVP_C2_OPERATOR_SOURCE "operator make-target (make mvp-onion-local)"
+#define MVP_C7_OPERATOR_SOURCE "recovery-drill timing (make test-crash-bootstrap)"
+#define MVP_C2_UNKNOWN_REASON \
+    "onion <60s bootstrap timing is not durably recorded at runtime"
+#define MVP_C7_UNKNOWN_REASON \
+    "recovery-drill timing not recorded at runtime; " \
+    "make test-crash-bootstrap is the operator proof"
+
+struct mvp_receipt_ledger {
+    const char *dir_env;
+    const char *home_rel;
+    const char *schema;
+    const char *ms_key;
+};
+
+static const struct mvp_receipt_ledger g_onion_ledger = {
+    "ZCL_ONION_RECEIPT_DIR", ".local/state/z23/onion-bootstrap",
+    MVP_ONION_SCHEMA, "bootstrap_ms",
+};
+
+static const struct mvp_receipt_ledger g_crash_ledger = {
+    "ZCL_CRASH_RECEIPT_DIR", ".local/state/z23/crash-recovery",
+    MVP_CRASH_SCHEMA, "recover_ms",
+};
+
+/* The last valid row a scan has seen for one ledger. */
+struct mvp_receipt_last {
+    const struct mvp_receipt_ledger *lg;
+    bool present;                           /* a valid row was found */
+    int verdict;                            /* enum mvp_receipt_verdict */
+    int64_t ms;                             /* bootstrap_ms or recover_ms; -1 when null */
+    char path[MVP_RECEIPT_PATH_MAX];
+    char utc[MVP_RECEIPT_UTC_MAX];
+    char reason[MVP_RECEIPT_REASON_MAX];    /* the row's own reason text */
+};
+
+static int mvp_receipt_verdict_parse(const char *text)
+{
+    if (strcmp(text, "PASS") == 0) return MVP_RECEIPT_PASS;
+    if (strcmp(text, "FAIL") == 0) return MVP_RECEIPT_FAIL;
+    if (strcmp(text, "SKIP") == 0) return MVP_RECEIPT_SKIP;
+    return MVP_RECEIPT_NONE;
+}
+
+static void mvp_receipt_scan_row(const char *row, size_t len, void *ctx)
+{
+    struct mvp_receipt_last *last = ctx;
+    char text[MVP_RECEIPT_REASON_MAX];
+    if (!evidence_row_flat_object_valid(row, len) ||
+        !evidence_row_str(row, len, "schema", text, sizeof(text)) ||
+        strcmp(text, last->lg->schema) != 0)
+        return;
+    if (!evidence_row_str(row, len, "verdict", text, sizeof(text)))
+        return;
+    int verdict = mvp_receipt_verdict_parse(text);
+    if (verdict == MVP_RECEIPT_NONE)
+        return;
+
+    int64_t ms = -1;
+    if (!evidence_row_int(row, len, last->lg->ms_key, &ms) || ms < 0)
+        ms = -1;   /* JSON null or absent: not measured, never zero */
+    last->present = true;
+    last->verdict = verdict;
+    last->ms = ms;
+    /* evidence_row_str clears its destination first, so a later row without
+     * these fields cannot inherit an earlier row's text. */
+    (void)evidence_row_str(row, len, "utc", last->utc, sizeof(last->utc));
+    (void)evidence_row_str(row, len, "reason", last->reason,
+                           sizeof(last->reason));
+}
+
+static bool mvp_receipt_read(const struct mvp_receipt_ledger *lg,
+                             struct mvp_receipt_last *last)
+{
+    memset(last, 0, sizeof(*last));
+    last->lg = lg;
+    last->ms = -1;
+    if (!evidence_ledger_resolve_path(lg->dir_env, lg->home_rel,
+                                      MVP_RECEIPT_FILE, last->path,
+                                      sizeof(last->path)))
+        return false;
+    return evidence_ledger_scan_tail(last->path, MVP_RECEIPT_TAIL_BYTES,
+                                     mvp_receipt_scan_row, last, NULL, NULL);
+}
+
+static void mvp_copy_text(char *dst, size_t cap, const char *src)
+{
+    evidence_copy_bounded(dst, cap, src, strlen(src));
+}
+
+static void mvp_c2_apply(struct mvp_evidence *ev,
+                         const struct mvp_receipt_last *r)
+{
+    if (!r->present)
+        return;
+    ev->c2_verdict = r->verdict;
+    ev->c2_bootstrap_ms = r->ms;
+    mvp_copy_text(ev->c2_source, sizeof(ev->c2_source), r->path);
+    mvp_copy_text(ev->c2_utc, sizeof(ev->c2_utc), r->utc);
+    if (r->verdict == MVP_RECEIPT_SKIP) {
+        snprintf(ev->c2_reason, sizeof(ev->c2_reason),
+                 "onion bootstrap receipt verdict SKIP: %s",
+                 r->reason[0] ? r->reason : "no reason recorded");
+    } else if (r->verdict == MVP_RECEIPT_PASS && r->ms < 0) {
+        mvp_copy_text(ev->c2_reason, sizeof(ev->c2_reason),
+                      "onion bootstrap receipt has no bootstrap_ms (not measured)");
+    }
+}
+
+static void mvp_c7_apply(struct mvp_evidence *ev,
+                         const struct mvp_receipt_last *r)
+{
+    if (!r->present)
+        return;
+    ev->c7_verdict = r->verdict;
+    mvp_copy_text(ev->c7_source, sizeof(ev->c7_source), r->path);
+    mvp_copy_text(ev->c7_utc, sizeof(ev->c7_utc), r->utc);
+    ev->c7_recovery_drill_present =
+        r->ms >= 0 && r->verdict != MVP_RECEIPT_SKIP;
+    if (r->ms >= 0) {
+        /* Round up to whole seconds so 120001 ms is over the 120 s budget. */
+        int64_t whole = r->ms / 1000;
+        if (r->ms % 1000 != 0)
+            whole++;
+        ev->c7_recovery_secs = whole;
+    }
+    if (r->verdict == MVP_RECEIPT_SKIP) {
+        snprintf(ev->c7_reason, sizeof(ev->c7_reason),
+                 "kill-9 recovery drill verdict SKIP: %s",
+                 r->reason[0] ? r->reason : "no reason recorded");
+    } else if (r->verdict == MVP_RECEIPT_PASS && r->ms < 0) {
+        mvp_copy_text(ev->c7_reason, sizeof(ev->c7_reason),
+                      "kill-9 recovery receipt has no recover_ms (not measured)");
+    }
+}
+
+/* Fill the C2 and C7 receipt fields of `ev` from the last valid row of each
+ * ledger. Both ledgers absent leaves ev unchanged. */
+static void mvp_receipt_evidence_read(struct mvp_evidence *ev)
+{
+    struct mvp_receipt_last onion;
+    struct mvp_receipt_last crash;
+    /* A missing or unreadable ledger is no evidence, not a failure. */
+    (void)mvp_receipt_read(&g_onion_ledger, &onion);
+    (void)mvp_receipt_read(&g_crash_ledger, &crash);
+    mvp_c2_apply(ev, &onion);
+    mvp_c7_apply(ev, &crash);
+}
+
+/* C2 verdict: FAIL is UNMET (onion.too_slow when the recorded time reached the
+ * budget, else onion.failed). PASS is MET only under the budget. A PASS with no
+ * measured time, or a SKIP, stays UNKNOWN with the recorded reason. */
+static struct mvp_verdict mvp_c2_verdict(const struct mvp_evidence *ev)
+{
+    struct mvp_verdict v = {MVP_UNKNOWN, NULL,
+        ev->c2_reason[0] ? ev->c2_reason : MVP_C2_UNKNOWN_REASON};
+    if (ev->c2_verdict == MVP_RECEIPT_FAIL) {
+        v.met = MVP_UNMET;
+        v.blocker = ev->c2_bootstrap_ms >= MVP_ONION_BOOTSTRAP_MS_MAX
+            ? "onion.too_slow" : "onion.failed";
+        v.reason = "onion bootstrap receipt verdict FAIL";
+    } else if (ev->c2_verdict == MVP_RECEIPT_PASS &&
+               ev->c2_bootstrap_ms >= 0) {
+        if (ev->c2_bootstrap_ms < MVP_ONION_BOOTSTRAP_MS_MAX) {
+            v.met = MVP_MET;
+            v.reason = "onion bootstrap receipt PASS within the 60s budget";
+        } else {
+            v.met = MVP_UNMET;
+            v.blocker = "onion.too_slow";
+            v.reason = "onion bootstrap receipt exceeded the 60s budget";
+        }
+    }
+    return v;
+}
+
+/* C7 verdict: FAIL is UNMET (recovery.failed). An unmeasured or SKIP receipt
+ * stays UNKNOWN with its reason. A measured PASS is MET within 120 s. */
+static struct mvp_verdict mvp_c7_verdict(const struct mvp_evidence *ev)
+{
+    struct mvp_verdict v = {MVP_UNKNOWN, NULL,
+        ev->c7_reason[0] ? ev->c7_reason : MVP_C7_UNKNOWN_REASON};
+    if (ev->c7_verdict == MVP_RECEIPT_FAIL) {
+        v.met = MVP_UNMET;
+        v.blocker = "recovery.failed";
+        v.reason = "kill-9 recovery drill verdict FAIL";
+    } else if (!ev->c7_recovery_drill_present) {
+        return v;
+    } else if (ev->c7_recovery_secs >= 0 &&
+               ev->c7_recovery_secs <= MVP_RECOVERY_SECS_MAX) {
+        v.met = MVP_MET;
+        v.reason = "kill-9 recovery drill within the 2min budget";
+    } else {
+        v.met = MVP_UNMET;
+        v.blocker = "recovery.too_slow";
+        v.reason = "kill-9 recovery drill exceeded the 2min budget";
+    }
+    return v;
+}
+
 bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out)
 {
     if (!out)
@@ -165,19 +385,21 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
     }
 
     /* ── C2: Tor onion bootstrap < 60s ───────────────────────────────
-     * Offline operator proof (make mvp-onion-local); the <60s timing is not
-     * durably recorded at runtime. */
+     * Evidence = the last valid zcl.onion_bootstrap_receipt.v1 row. With no
+     * ledger the criterion stays unknown and names the operator proof. */
     {
         struct json_value e = {0};
-        mvp_evidence_begin(&e, "operator make-target (make mvp-onion-local)",
-                           false);
-        enum mvp_met st = MVP_UNKNOWN;
-        mvp_push_criterion(&arr, "C2", "Tor onion bootstrap in <60s", st, 0,
-            NULL,
-            "onion <60s bootstrap timing is not durably recorded at runtime",
-            &e);
+        bool seen = ev->c2_verdict != MVP_RECEIPT_NONE;
+        mvp_evidence_begin(&e, seen ? ev->c2_source : MVP_C2_OPERATOR_SOURCE,
+                           seen);
+        json_push_kv_str(&e, "utc", ev->c2_utc);
+        json_push_kv_int(&e, "bootstrap_ms", ev->c2_bootstrap_ms);
+        json_push_kv_int(&e, "bootstrap_ms_max", MVP_ONION_BOOTSTRAP_MS_MAX);
+        struct mvp_verdict v = mvp_c2_verdict(ev);
+        mvp_push_criterion(&arr, "C2", "Tor onion bootstrap in <60s", v.met, 0,
+                           v.blocker, v.reason, &e);
         json_free(&e);
-        if (st == MVP_MET) met_count++;
+        if (v.met == MVP_MET) met_count++;
     }
 
     /* ── C3: cold-start sync to tip < 10min ──────────────────────────
@@ -324,37 +546,23 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
     }
 
     /* ── C7: recover from kill -9 in <2 min ──────────────────────────
-     * Evidence = a recovery-drill timing. Not recorded at runtime (make
-     * test-crash-bootstrap is the operator proof) → unknown unless supplied. */
+     * Evidence = the last valid zcl.crash_recovery_receipt.v1 row. With no
+     * ledger the criterion stays unknown and names the operator proof. */
     {
         struct json_value e = {0};
-        mvp_evidence_begin(&e,
-            "recovery-drill timing (make test-crash-bootstrap)", false);
+        bool seen = ev->c7_verdict != MVP_RECEIPT_NONE;
+        mvp_evidence_begin(&e, seen ? ev->c7_source : MVP_C7_OPERATOR_SOURCE,
+                           seen);
+        json_push_kv_str(&e, "utc", ev->c7_utc);
         json_push_kv_bool(&e, "recovery_drill_present",
                           ev->c7_recovery_drill_present);
         json_push_kv_int(&e, "recovery_secs", ev->c7_recovery_secs);
         json_push_kv_int(&e, "recovery_secs_max", MVP_RECOVERY_SECS_MAX);
-
-        enum mvp_met st;
-        const char *blocker = NULL;
-        const char *reason;
-        if (!ev->c7_recovery_drill_present) {
-            st = MVP_UNKNOWN;
-            reason = "recovery-drill timing not recorded at runtime; "
-                     "make test-crash-bootstrap is the operator proof";
-        } else if (ev->c7_recovery_secs >= 0 &&
-                   ev->c7_recovery_secs <= MVP_RECOVERY_SECS_MAX) {
-            st = MVP_MET;
-            reason = "kill-9 recovery drill within the 2min budget";
-        } else {
-            st = MVP_UNMET;
-            blocker = "recovery.too_slow";
-            reason = "kill-9 recovery drill exceeded the 2min budget";
-        }
-        mvp_push_criterion(&arr, "C7", "Recover from kill -9 in <2 min", st, 0,
-                           blocker, reason, &e);
+        struct mvp_verdict v = mvp_c7_verdict(ev);
+        mvp_push_criterion(&arr, "C7", "Recover from kill -9 in <2 min", v.met,
+                           0, v.blocker, v.reason, &e);
         json_free(&e);
-        if (st == MVP_MET) met_count++;
+        if (v.met == MVP_MET) met_count++;
     }
 
     /* C8 counter observations and a quiet canary latch are supporting facts.
@@ -429,6 +637,7 @@ bool mvp_dump_state_json(struct json_value *out, const char *key)
 
     struct mvp_evidence ev = {0};
     /* Sources with no runtime surface start explicitly absent/unknown. */
+    ev.c2_bootstrap_ms = -1;
     ev.c3_sync_benchmark_receipt_present = false;
     ev.c3_cold_sync_secs = -1;
     ev.c6_soak_window_hours = -1;
@@ -464,6 +673,9 @@ bool mvp_dump_state_json(struct json_value *out, const char *key)
         }
         json_free(&s);
     }
+
+    /* C2 onion and C7 crash-recovery receipt ledgers (last valid row each). */
+    mvp_receipt_evidence_read(&ev);
 
     /* C8 standing utxo_parity oracle. */
     {

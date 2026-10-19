@@ -1623,7 +1623,7 @@ engine/controllers/src/dbquery_controller.c:dbquery_execute:35
 engine/controllers/src/diagnostics_block_index.c:diag_header_band_dump_state_json:19
 engine/controllers/src/diagnostics_block_index.c:find_block_index_by_key:18
 engine/controllers/src/diagnostics_debug_bundle.c:debug_bundle_write_leased:23
-engine/controllers/src/diagnostics_mvp.c:mvp_build_status_json:32
+engine/controllers/src/diagnostics_mvp.c:mvp_build_status_json:31
 engine/controllers/src/diagnostics_registry_bundle.c:bundle_scan_seed_height:19
 engine/controllers/src/diagnostics_registry_bundle.c:bundle_staleness_dump_state_json:19
 engine/controllers/src/event_controller.c:rpc_service_operation_filter_arg:23

@@ -339,11 +339,36 @@ bool addrman_diag_dump_state_json(struct json_value *out, const char *key);
 #define MVP_SOAK_WINDOW_HOURS_REQUIRED 168 /* the 7-day (168h) clean window */
 #define MVP_RECOVERY_SECS_MAX 120          /* kill-9 recovery budget (2 min) */
 #define MVP_SLO_SUCCESS_MIN 0.999          /* SLO floor when a probe is present */
+#define MVP_ONION_BOOTSTRAP_MS_MAX 60000   /* onion bootstrap budget (60 s) */
+#define MVP_RECEIPT_PATH_MAX 512            /* receipt ledger path buffer */
+#define MVP_RECEIPT_UTC_MAX 40
+#define MVP_RECEIPT_REASON_MAX 192
+
+/* Verdict of the last valid receipt row (C2 and C7 ledgers). */
+enum mvp_receipt_verdict {
+    MVP_RECEIPT_NONE = 0,   /* no valid row: the criterion stays UNKNOWN */
+    MVP_RECEIPT_PASS,
+    MVP_RECEIPT_FAIL,
+    MVP_RECEIPT_SKIP,
+};
 
 /* Raw evidence inputs, one bundle for all eight criteria. The live dumper
  * fills this from existing sources; the unit test seeds it directly.
  * mvp_build_status_json() is the SINGLE place met/unmet/unknown is decided. */
 struct mvp_evidence {
+    /* C2 — onion bootstrap: last valid zcl.onion_bootstrap_receipt.v1 row. */
+    int       c2_verdict;                          /* enum mvp_receipt_verdict */
+    long long c2_bootstrap_ms;                     /* -1 when not measured */
+    char      c2_source[MVP_RECEIPT_PATH_MAX];     /* ledger path of that row */
+    char      c2_utc[MVP_RECEIPT_UTC_MAX];
+    char      c2_reason[MVP_RECEIPT_REASON_MAX];   /* SKIP or unmeasured PASS */
+
+    /* C7 — kill-9 recovery: last valid zcl.crash_recovery_receipt.v1 row. */
+    int       c7_verdict;                          /* enum mvp_receipt_verdict */
+    char      c7_source[MVP_RECEIPT_PATH_MAX];
+    char      c7_utc[MVP_RECEIPT_UTC_MAX];
+    char      c7_reason[MVP_RECEIPT_REASON_MAX];   /* SKIP or unmeasured PASS */
+
     /* C3 — cold-start sync to tip: live tip-hold + sync-benchmark receipt. */
     bool      c3_health_present;                  /* node_health snapshot taken */
     int       c3_sync_state;                      /* enum sync_state */
