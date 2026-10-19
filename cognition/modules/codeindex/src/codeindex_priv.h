@@ -297,6 +297,14 @@ bool ci_build_store_incremental(const char *root, struct ci_store *store,
                                 int changed_count,
                                 const uint8_t dep_stat[32],
                                 const uint8_t merkle_root[32]);
+/* Same, for a caller whose immediately preceding ci_deps_scan already set the
+ * include edge root and narrow-safety state this update stamps; it skips the
+ * second depfile scan. */
+bool ci_build_store_incremental_scanned(const char *root, struct ci_store *store,
+                                        const struct ci_merkle_leaf *changed,
+                                        int changed_count,
+                                        const uint8_t dep_stat[32],
+                                        const uint8_t merkle_root[32]);
 int ci_store_diff_merkle_leaves(struct ci_store *store,
                                 const struct ci_merkle_leaf *current,
                                 int current_count,

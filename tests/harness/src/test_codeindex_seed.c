@@ -18,6 +18,7 @@
 #include "test/test_core.h"
 
 #include "codeindex/codeindex.h"
+#include "codeindex/codeindex_build.h"
 
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
@@ -358,13 +359,13 @@ static int cis_different_depfiles(const struct cis_repo *repo)
         cis_drop_store(repo->target_root);
     cis_observe(repo->main_root, &donor);
     cis_observe(repo->target_root, &built);
-    CIS_CHECK("different depfiles refuse a sibling seed",
-              prepared && donor.opened && built.opened && !built.seeded);
+    CIS_CHECK("different depfile edges are reconciled onto a sibling seed",
+              prepared && donor.opened && built.opened && built.seeded);
     struct codeindex *index = codeindex_open(repo->target_root);
     char includes[4][256] = {{0}};
     int count = index ? codeindex_includes_of_file(
         index, "lib/net/src/alpha.c", includes, 4) : -1;
-    CIS_CHECK("cold graph uses the target depfile",
+    CIS_CHECK("seeded graph uses the target depfile",
               count == 1 &&
               strcmp(includes[0], "lib/net/src/gamma.c") == 0);
     if (index) codeindex_close(index);
@@ -394,8 +395,8 @@ static int cis_absolute_depfile_paths(const struct cis_repo *repo)
               strcmp(donor_includes[0], "lib/net/src/beta.c") == 0);
     if (donor_index) codeindex_close(donor_index);
     cis_observe(repo->target_root, &built);
-    CIS_CHECK("equal bytes with root-dependent paths refuse a seed",
-              prepared && donor.opened && built.opened && !built.seeded);
+    CIS_CHECK("root-dependent donor paths are reconciled onto a seed",
+              prepared && donor.opened && built.opened && built.seeded);
     struct codeindex *index = codeindex_open(repo->target_root);
     char includes[4][256] = {{0}};
     int count = index ? codeindex_includes_of_file(
@@ -429,9 +430,9 @@ static int cis_altered_donor_includes(const struct cis_repo *repo)
             SQLITE_OK; // raw-sql-ok:codeindex-derived
     if (db) sqlite3_close(db);
     cis_observe(repo->target_root, &built);
-    CIS_CHECK("altered donor include row refuses a seed",
+    CIS_CHECK("altered donor include row is reconciled onto a seed",
               prepared && donor.opened && altered && built.opened &&
-              !built.seeded);
+              built.seeded);
     struct codeindex *index = codeindex_open(repo->target_root);
     char includes[4][256] = {{0}};
     int count = index ? codeindex_includes_of_file(
@@ -483,6 +484,41 @@ static int cis_owner_refusal(const struct cis_repo *repo)
     return failures;
 }
 
+/* A donor built in another checkout holds depfile bytes that differ from this
+ * checkout's even when every include edge is the same. That must not stop
+ * the seed, and the generation must read each depfile once, not once per step. */
+static int cis_equal_edges_different_bytes(const struct cis_repo *repo)
+{
+    int failures = 0;
+    static const char donor_depfile[] =
+        "build/obj/alpha.o: lib/net/src/alpha.c lib/net/src/beta.c\n";
+    static const char target_depfile[] =
+        "build/other/alpha.o: lib/net/src/alpha.c \\\n"
+        " lib/net/src/beta.c\n";
+    bool prepared =
+        cis_write_file(repo->main_root, "build/obj/alpha.d", donor_depfile) &&
+        cis_write_file(repo->target_root, "build/obj/alpha.d", target_depfile) &&
+        cis_drop_store(repo->target_root);
+    struct cis_observation donor, seeded;
+    cis_observe(repo->main_root, &donor);
+    uint64_t before = codeindex_test_exact_bytes_read();
+    cis_observe(repo->target_root, &seeded);
+    const uint64_t scans_bytes = codeindex_test_exact_bytes_read() - before;
+    CIS_CHECK("equal edges in different depfile bytes still seed",
+              prepared && donor.opened && seeded.opened && seeded.fresh &&
+              seeded.seeded && seeded.files_refreshed == 2);
+    CIS_CHECK("seeding scans the depfiles once",
+              scans_bytes == sizeof(target_depfile) - 1);
+    struct codeindex *index = codeindex_open(repo->target_root);
+    char includes[4][256] = {{0}};
+    int count = index ? codeindex_includes_of_file(
+        index, "lib/net/src/alpha.c", includes, 4) : -1;
+    CIS_CHECK("the seeded graph equals the target depfile graph",
+              count == 1 && strcmp(includes[0], "lib/net/src/beta.c") == 0);
+    if (index) codeindex_close(index);
+    return failures;
+}
+
 int test_codeindex_seed(void)
 {
     int failures = 0;
@@ -505,6 +541,7 @@ int test_codeindex_seed(void)
     failures += cis_different_depfiles(&repo);
     failures += cis_absolute_depfile_paths(&repo);
     failures += cis_altered_donor_includes(&repo);
+    failures += cis_equal_edges_different_bytes(&repo);
     failures += cis_corrupt_donor(&repo);
     failures += cis_foreign_donor(&foreign);
     failures += cis_owner_refusal(&repo);

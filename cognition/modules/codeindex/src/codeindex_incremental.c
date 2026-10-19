@@ -166,7 +166,8 @@ bool ci_deps_include_edge_root(uint8_t out[32]);
  * update rebuilds. The stored edge root is left as is, so it keeps describing
  * the rows. */
 static bool incremental_refresh_include_narrow(const char *root,
-                                               struct ci_store *store)
+                                               struct ci_store *store,
+                                               bool rescan_deps)
 {
     uint8_t exact[32];
     uint8_t stat_root[32];
@@ -174,7 +175,8 @@ static bool incremental_refresh_include_narrow(const char *root,
     uint8_t stored[32];
     size_t stored_len = 0;
     bool found = false;
-    if (!ci_deps_scan_roots(root, NULL, NULL, exact, stat_root) ||
+    if ((rescan_deps &&
+         !ci_deps_scan_roots(root, NULL, NULL, exact, stat_root)) ||
         !ci_deps_include_edge_root(edges) ||
         !ci_store_meta_get(store, "include_edge_root_sha3", stored,
                            sizeof stored, &stored_len, &found))
@@ -193,21 +195,31 @@ static bool incremental_refresh_include_narrow(const char *root,
 }
 
 static bool incremental_stamp_projection_and_counts(const char *root,
-                                                    struct ci_store *store)
+                                                    struct ci_store *store,
+                                                    bool rescan_deps)
 {
     uint8_t projection_root[32];
-    return incremental_refresh_include_narrow(root, store) &&
+    return incremental_refresh_include_narrow(root, store, rescan_deps) &&
            ci_store_retrieval_projection_root(store, projection_root) &&
            ci_store_meta_set(store, CI_RETRIEVAL_PROJECTION_META,
                              projection_root, sizeof(projection_root)) &&
            ci_store_write_table_count_meta(store);
 }
 
-bool ci_build_store_incremental(const char *root, struct ci_store *store,
-                                const struct ci_merkle_leaf *changed,
-                                int changed_count,
-                                const uint8_t dep_stat[32],
-                                const uint8_t merkle_root[32])
+static bool incremental_seal_roots(struct ci_store *store, const uint8_t dep_stat[32],
+                                   const uint8_t merkle_root[32])
+{
+    uint8_t source_root[32];
+    return incremental_source_root(store, source_root) &&
+           ci_store_meta_set(store, "source_root_sha3", source_root, 32) &&
+           ci_store_meta_set(store, "dep_stat_root_sha3", dep_stat, 32) &&
+           ci_store_meta_set(store, "source_merkle_root_sha3", merkle_root, 32);
+}
+
+static bool incremental_build(const char *root, struct ci_store *store,
+                              const struct ci_merkle_leaf *changed,
+                              int changed_count, const uint8_t dep_stat[32],
+                              const uint8_t merkle_root[32], bool rescan_deps)
 {
     if (!root || !store || (changed_count > 0 && !changed) || changed_count < 0 ||
         !dep_stat || !merkle_root)
@@ -216,14 +228,9 @@ bool ci_build_store_incremental(const char *root, struct ci_store *store,
     bool ok = tx_open;
     for (int i = 0; ok && i < changed_count; i++)
         ok = incremental_replace_file(root, store, changed[i].path);
-    uint8_t source_root[32];
-    if (ok) ok = incremental_source_root(store, source_root);
+    if (ok) ok = incremental_seal_roots(store, dep_stat, merkle_root);
     if (ok)
-        ok = ci_store_meta_set(store, "source_root_sha3", source_root, 32) &&
-             ci_store_meta_set(store, "dep_stat_root_sha3", dep_stat, 32) &&
-             ci_store_meta_set(store, "source_merkle_root_sha3", merkle_root, 32);
-    if (ok)
-        ok = incremental_stamp_projection_and_counts(root, store);
+        ok = incremental_stamp_projection_and_counts(root, store, rescan_deps);
     if (!ok) {
         if (tx_open) (void)ci_store_rollback(store);
         LOG_FAIL("codeindex", "incremental changed-row replacement failed");
@@ -231,6 +238,26 @@ bool ci_build_store_incremental(const char *root, struct ci_store *store,
     if (!ci_store_commit(store))
         LOG_FAIL("codeindex", "incremental store commit failed");
     return true;
+}
+
+bool ci_build_store_incremental(const char *root, struct ci_store *store,
+                                const struct ci_merkle_leaf *changed,
+                                int changed_count,
+                                const uint8_t dep_stat[32],
+                                const uint8_t merkle_root[32])
+{
+    return incremental_build(root, store, changed, changed_count, dep_stat,
+                             merkle_root, true);
+}
+
+bool ci_build_store_incremental_scanned(const char *root, struct ci_store *store,
+                                        const struct ci_merkle_leaf *changed,
+                                        int changed_count,
+                                        const uint8_t dep_stat[32],
+                                        const uint8_t merkle_root[32])
+{
+    return incremental_build(root, store, changed, changed_count, dep_stat,
+                             merkle_root, false);
 }
 
 int ci_store_diff_merkle_leaves(struct ci_store *store,

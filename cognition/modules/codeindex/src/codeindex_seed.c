@@ -42,11 +42,14 @@
  * CAP_PROCESS. Nothing else is examined — the filesystem is never searched for
  * things that look like checkouts.
  *
- * ── What is NOT restamped ──
- * `dep_root_sha3` stays the donor's. Its exact depfile bytes must match this
- * checkout before adoption, because the `includes` rows ride along verbatim.
- * `dep_stat_root_sha3` describes local build artifacts and is restamped by
- * ci_build_store_incremental.
+ * ── Depfile bytes ──
+ * The donor's `dep_root_sha3` is the hash of the depfile bytes of ITS build,
+ * which carry its checkout root and compile epoch, so it differs between any
+ * two checkouts and is not a donor criterion. The `includes` rows are instead
+ * rewritten from a fresh parse of THIS checkout's depfiles and verified equal
+ * to it (seed_reconcile_includes); `dep_root_sha3` is then restamped with this
+ * checkout's own value. `dep_stat_root_sha3` describes local build artifacts
+ * and is restamped by ci_build_store_incremental.
  */
 
 #include "codeindex_priv.h"
@@ -302,12 +305,9 @@ static bool seed_generation_matches_binary(struct ci_store *store)
  * here, because replacing rows cannot add or remove them. */
 static int seed_distance(struct ci_store *store,
                          const struct ci_merkle_leaf *current,
-                         int current_count, struct ci_merkle_leaf *scratch,
-                         const uint8_t dep_root[32])
+                         int current_count, struct ci_merkle_leaf *scratch)
 {
-    if (!seed_generation_matches_binary(store) ||
-        !seed_meta_equals(store, "dep_root_sha3",
-                          (const char *)dep_root, 32)) return -1;
+    if (!seed_generation_matches_binary(store)) return -1;
     bool inventory_same = false;
     int changed = ci_store_diff_merkle_leaves(store, current, current_count,
                                               scratch, current_count,
@@ -327,12 +327,9 @@ static int seed_donor_distance(struct ci_store *donor,
                                const struct ci_merkle_leaf *current,
                                int current_count,
                                struct ci_merkle_leaf *scratch,
-                               const uint8_t merkle_root[32],
-                               const uint8_t dep_root[32])
+                               const uint8_t merkle_root[32])
 {
-    if (!seed_generation_matches_binary(donor) ||
-        !seed_meta_equals(donor, "dep_root_sha3",
-                          (const char *)dep_root, 32)) return -1;
+    if (!seed_generation_matches_binary(donor)) return -1;
     if (seed_meta_equals(donor, "source_merkle_root_sha3",
                          (const char *)merkle_root, 32))
         return 0;
@@ -351,8 +348,7 @@ static int seed_candidate_distance(const char *donor_root,
                                    const struct ci_merkle_leaf *current,
                                    int current_count,
                                    struct ci_merkle_leaf *scratch,
-                                   const uint8_t merkle_root[32],
-                                   const uint8_t dep_root[32])
+                                   const uint8_t merkle_root[32])
 {
     int fd = seed_open_image(donor_root);
     if (fd < 0) return CI_SEED_NO_GENERATION;
@@ -360,7 +356,7 @@ static int seed_candidate_distance(const char *donor_root,
     struct ci_store *donor = ci_store_open_readonly_fd(fd);
     if (!donor) return CI_SEED_NO_GENERATION;
     int distance = seed_donor_distance(donor, current, current_count, scratch,
-                                       merkle_root, dep_root);
+                                       merkle_root);
     ci_store_close(donor);
     return distance;
 }
@@ -382,8 +378,7 @@ static int seed_choose_donor(const struct ci_seed_candidates *cands,
                              const struct ci_merkle_leaf *current,
                              int current_count,
                              struct ci_merkle_leaf *scratch,
-                             const uint8_t merkle_root[32],
-                             const uint8_t dep_root[32])
+                             const uint8_t merkle_root[32])
 {
     const int limit = seed_changed_limit(current_count);
     int best = -1, examined = 0, best_distance = -1;
@@ -391,7 +386,7 @@ static int seed_choose_donor(const struct ci_seed_candidates *cands,
          i < cands->count && examined < CI_SEED_MAX_COMPARISONS; i++) {
         int distance = seed_candidate_distance(cands->items[i].root, current,
                                                current_count, scratch,
-                                               merkle_root, dep_root);
+                                               merkle_root);
         if (distance == CI_SEED_NO_GENERATION) continue;
         /* One generation was opened and compared: that is the cost this
          * budget exists to bound, so it counts even when it declines. */
@@ -439,17 +434,24 @@ static void seed_expected_edge(const char *source, const char *dependency,
                    sqlite3_step(expected->insert) == SQLITE_DONE; // raw-sql-ok:codeindex-derived
 }
 
-/* Compare the staged include rows with a fresh parse in THIS checkout. Raw
- * depfile identity alone cannot do this: absolute prerequisites resolve by
- * checkout root, and a donor image may have altered include rows. The join to
- * files mirrors the cold builder's rule that only indexed sources get edges. */
-static bool seed_includes_match(const char *root, struct ci_store *staged,
-                                const uint8_t dep_root[32])
+/* Replace the staged include rows with a fresh parse of THIS checkout, then
+ * prove the table equals that parse. The donor's rows describe the depfiles of
+ * its own build (checkout root, compiled units), which differ between
+ * checkouts even at an identical source tree, so they are never trusted. The
+ * join to files mirrors the cold builder's rule that only indexed sources get
+ * edges. */
+static bool seed_reconcile_includes(const char *root, struct ci_store *staged,
+                                    uint8_t parsed_root[32])
 {
     static const char create_sql[] =
         "CREATE TEMP TABLE seed_expected ("
         "source TEXT NOT NULL, dep_path TEXT NOT NULL,"
         "PRIMARY KEY(source,dep_path)) WITHOUT ROWID";
+    static const char rewrite_sql[] =
+        "DELETE FROM includes;"
+        " INSERT OR IGNORE INTO includes(file_id,dep_path)"
+        " SELECT f.id,e.dep_path FROM seed_expected e"
+        " JOIN files f ON f.path=e.source";
     static const char compare_sql[] =
         "WITH actual AS ("
         " SELECT f.path AS source,i.dep_path FROM includes i"
@@ -466,11 +468,12 @@ static bool seed_includes_match(const char *root, struct ci_store *staged,
                   "INSERT OR IGNORE INTO seed_expected(source,dep_path)"
                   " VALUES(?1,?2)", -1, &insert, NULL) == SQLITE_OK;
     struct seed_expected_edges expected = {.insert = insert, .ok = ok};
-    uint8_t parsed_root[32];
     if (ok)
         ok = ci_deps_scan(root, seed_expected_edge, &expected, parsed_root) &&
-             expected.ok && memcmp(parsed_root, dep_root, 32) == 0;
+             expected.ok;
     if (insert) sqlite3_finalize(insert);
+    if (ok)
+        ok = sqlite3_exec(db, rewrite_sql, NULL, NULL, NULL) == SQLITE_OK;
     if (ok)
         ok = sqlite3_prepare_v2(db, compare_sql, -1, &compare, NULL) ==
                  SQLITE_OK &&
@@ -502,7 +505,6 @@ static bool seed_refresh_staged(const char *root, int stagefd,
                                 int current_count,
                                 struct ci_merkle_leaf *scratch,
                                 const uint8_t dep_stat[32],
-                                const uint8_t dep_root[32],
                                 const uint8_t merkle_root[32],
                                 const char *kind, int *refreshed)
 {
@@ -511,12 +513,13 @@ static bool seed_refresh_staged(const char *root, int stagefd,
     /* Deliberately the row-by-row comparison and never the sealed-root
      * shortcut donor RANKING is allowed to take: what gets published is
      * verified against the rows it actually holds. */
-    int changed = seed_distance(staged, current, current_count, scratch,
-                                dep_root);
+    int changed = seed_distance(staged, current, current_count, scratch);
+    uint8_t dep_root[32];
     bool ok = changed >= 0 &&
-              seed_includes_match(root, staged, dep_root) &&
+              seed_reconcile_includes(root, staged, dep_root) &&
+              ci_store_meta_set(staged, "dep_root_sha3", dep_root, 32) &&
               seed_stamp_edge_root(staged) &&
-              ci_build_store_incremental(root, staged, scratch, changed,
+              ci_build_store_incremental_scanned(root, staged, scratch, changed,
                                          dep_stat, merkle_root) &&
               seed_write_receipt(staged, kind, changed);
     ci_store_close(staged);
@@ -539,8 +542,6 @@ static bool seed_stage_posix(const char *root, int stagefd,
                              const uint8_t merkle_root[32],
                              struct ci_seed_outcome *outcome)
 {
-    uint8_t dep_root[32];
-    if (!ci_deps_scan(root, NULL, NULL, dep_root)) return false;
     struct ci_seed_candidates *cands =
         zcl_calloc(1, sizeof(*cands), "ci_seed_donors");
     struct ci_merkle_leaf *scratch =
@@ -550,12 +551,12 @@ static bool seed_stage_posix(const char *root, int stagefd,
     if (ok) {
         seed_collect_donors(root, cands);
         best = seed_choose_donor(cands, current, current_count, scratch,
-                                 merkle_root, dep_root);
+                                 merkle_root);
         ok = best >= 0;
     }
     ok = ok && seed_copy_donor(cands->items[best].root, stagefd) &&
          seed_refresh_staged(root, stagefd, current, current_count, scratch,
-                             dep_stat, dep_root, merkle_root,
+                             dep_stat, merkle_root,
                              cands->items[best].kind,
                              &refreshed);
     if (ok) {
