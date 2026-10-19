@@ -1129,6 +1129,64 @@ int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
     return rebuild.written;
 }
 
+/* ── Operator rebuild job (runs on the mirror thread) ──────── */
+
+int utxo_mirror_rebuild_request(struct utxo_mirror_sync_service *svc,
+                                uint64_t *id_out)
+{
+    if (!svc || !atomic_load(&svc->thread_started) ||
+        atomic_load(&svc->stop_requested))
+        LOG_RETURN(-1, "utxo_mirror",
+                   "rebuild_request: no running mirror thread to serve it");
+    int rc = 0;
+    pthread_mutex_lock(&svc->job_mutex);
+    if (svc->job.state == UTXO_MIRROR_JOB_PENDING ||
+        svc->job.state == UTXO_MIRROR_JOB_RUNNING) {
+        rc = 1;
+    } else {
+        svc->job.id++;
+        svc->job.state = UTXO_MIRROR_JOB_PENDING;
+        svc->job.result = 0;
+        svc->job.reason[0] = '\0';
+    }
+    if (id_out)
+        *id_out = svc->job.id;
+    pthread_mutex_unlock(&svc->job_mutex);
+    return rc;
+}
+
+void utxo_mirror_rebuild_job_snapshot(struct utxo_mirror_sync_service *svc,
+                                      struct utxo_mirror_rebuild_job *out)
+{
+    pthread_mutex_lock(&svc->job_mutex);
+    *out = svc->job;
+    pthread_mutex_unlock(&svc->job_mutex);
+}
+
+int utxo_mirror_rebuild_job_service(struct utxo_mirror_sync_service *svc)
+{
+    pthread_mutex_lock(&svc->job_mutex);
+    bool pending = svc->job.state == UTXO_MIRROR_JOB_PENDING;
+    if (pending)
+        svc->job.state = UTXO_MIRROR_JOB_RUNNING;
+    pthread_mutex_unlock(&svc->job_mutex);
+    if (!pending)
+        return 0;
+
+    char reason[sizeof(svc->job.reason)] = "";
+    int64_t rows = utxo_mirror_rebuild_now_reason(svc, reason, sizeof(reason));
+
+    pthread_mutex_lock(&svc->job_mutex);
+    svc->job.result = rows;
+    memcpy(svc->job.reason, reason, sizeof(reason));
+    svc->job.quarantined =
+        atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED;
+    svc->job.mirror_height = atomic_load(&svc->last_mirror_height);
+    svc->job.state = UTXO_MIRROR_JOB_DONE;
+    pthread_mutex_unlock(&svc->job_mutex);
+    return 1;
+}
+
 /* ── Background thread ─────────────────────────────────────── */
 
 static void *utxo_mirror_sync_thread(void *arg)
@@ -1142,6 +1200,7 @@ static void *utxo_mirror_sync_thread(void *arg)
     pthread_mutex_unlock(&svc->ready_mutex);
 
     while (!atomic_load(&svc->stop_requested)) {
+        (void)utxo_mirror_rebuild_job_service(svc);
         (void)utxo_mirror_sync_run_once(svc);
         mirror_supervisor_heartbeat(svc);
 
@@ -1152,6 +1211,8 @@ static void *utxo_mirror_sync_thread(void *arg)
             if (atomic_load(&svc->stop_requested)) break;
             platform_sleep_ms(500);
             slept += 500;
+            if (utxo_mirror_rebuild_job_service(svc))
+                mirror_supervisor_heartbeat(svc);
         }
     }
 
@@ -1171,6 +1232,7 @@ void utxo_mirror_sync_init(struct utxo_mirror_sync_service *svc,
     pthread_mutex_init(&svc->ready_mutex, NULL);
     pthread_cond_init(&svc->ready_cond, NULL);
     atomic_store(&svc->stop_requested, false);
+    pthread_mutex_init(&svc->job_mutex, NULL);
     atomic_store(&svc->state, UTXO_MIRROR_SYNC_IDLE);
     atomic_store(&svc->mirror_health, UTXO_MIRROR_HEALTHY);
     atomic_store(&svc->rebuilds_run, 0);

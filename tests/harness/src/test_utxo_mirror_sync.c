@@ -34,6 +34,9 @@
 #include "storage/coins_ram.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
+#include "controllers/rpc_client.h"
+#include "controllers/utxo_mirror_controller.h"
+#include "rpc/server.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -1136,6 +1139,99 @@ static int ums_test_stale_residue_repair(void)
     return failures;
 }
 
+/* The REAL path. The CLI process has no mirror service (g_utxo_mirror_sync is
+ * NULL there); the node does. This hook is the node: it dispatches a CLI RPC
+ * call into a real rpc_table built by register_utxo_mirror_rpc_commands and
+ * exposes the service only around the actor call, exactly as the node process
+ * would. "Polling" lets the mirror thread's job pass run (job_service) the way
+ * the thread loop does between ticks. A direct call to utxo_mirror_rebuild_now
+ * cannot see the bug this guards: the handler reading the CLI's own NULL
+ * global and answering MIRROR_ABSENT against a running node. */
+enum ums_node_mode {
+    UMS_NODE_NORMAL,        /* serve start/status; the job finishes on poll 2 */
+    UMS_NODE_NO_ANSWER,     /* nothing answers: node_rpc_call yields NULL */
+    UMS_NODE_COOKIE_ERROR,  /* the client's own transport error body */
+    UMS_NODE_NEVER_DONE,    /* start accepted, the job never completes */
+    UMS_NODE_DIES_AFTER_START, /* start accepted, then every poll fails */
+};
+
+static bool g_ums_forwarded;
+static struct utxo_mirror_sync_service *g_ums_node_svc;
+static enum ums_node_mode g_ums_node_mode;
+static int g_ums_node_polls;
+static int g_ums_node_calls;
+static struct rpc_table g_ums_node_table;
+
+static char *ums_node_hook(const char *method, const char *params_json)
+{
+    g_ums_node_calls++;
+    if (g_ums_node_mode == UMS_NODE_NO_ANSWER)
+        return NULL;
+    if (g_ums_node_mode == UMS_NODE_COOKIE_ERROR)
+        return strdup("{\"error\":{\"code\":-32603,\"message\":"
+                      "\"cannot read RPC auth cookie\"}}");
+    struct json_value params = {0}, result = {0};
+    if (!json_read(&params, params_json, strlen(params_json)))
+        return strdup("{\"error\":{\"code\":-32700,\"message\":\"parse\"}}");
+    const char *act = json_get_str(json_at(&params, 0));
+    bool status = act && strcmp(act, "status") == 0;
+    if (status && g_ums_node_mode == UMS_NODE_DIES_AFTER_START) {
+        json_free(&params);
+        return strdup("{\"error\":{\"code\":-32603,"
+                      "\"message\":\"failed to send request to node\"}}");
+    }
+    if (act && strcmp(act, "start") == 0)
+        g_ums_node_polls = 0;
+    if (status && ++g_ums_node_polls >= 2 && g_ums_node_mode == UMS_NODE_NORMAL &&
+        g_ums_node_svc)
+        (void)utxo_mirror_rebuild_job_service(g_ums_node_svc);
+    g_utxo_mirror_sync = g_ums_node_svc;
+    (void)rpc_table_execute(&g_ums_node_table, method, &params, &result);
+    g_utxo_mirror_sync = NULL;
+    char *out = malloc(4096);
+    if (out && json_write(&result, out, 4096) == 0)
+        out[0] = '\0';
+    json_free(&params);
+    json_free(&result);
+    return out;
+}
+
+static void ums_fwd_begin(struct utxo_mirror_sync_service *svc)
+{
+    rpc_table_init(&g_ums_node_table);
+    register_utxo_mirror_rpc_commands(&g_ums_node_table);
+    g_ums_node_svc = svc;
+    g_ums_node_mode = UMS_NODE_NORMAL;
+    set_rpc_warmup_finished();
+    g_ums_node_calls = 0;
+    if (svc)
+        atomic_store(&svc->thread_started, true); /* the mirror thread is up */
+    zcl_utxo_mirror_controller_test_set_poll(0, 60000);
+    node_rpc_client_set_test_hook(ums_node_hook);
+}
+
+static void ums_fwd_end(struct utxo_mirror_sync_service *svc)
+{
+    node_rpc_client_set_test_hook(NULL);
+    zcl_utxo_mirror_controller_test_set_poll(-1, -1);
+    set_rpc_warmup_started(NULL);
+    if (svc)
+        atomic_store(&svc->thread_started, false);
+    g_ums_node_svc = NULL;
+    g_ums_forwarded = false;
+    g_utxo_mirror_sync = NULL;
+}
+
+/* Run the operator command as `svc`'s owner would (in-node: the service global
+ * is set) or as the CLI would (forwarded: the global is NULL, the hook is the
+ * node). */
+static void ums_call_handler(struct utxo_mirror_sync_service *svc,
+                             struct zcl_command_reply *reply)
+{
+    g_utxo_mirror_sync = g_ums_forwarded ? NULL : svc;
+    zcl_native_handle_utxo_mirror_rebuild(NULL, reply);
+}
+
 /* The controller reply reflects each typed outcome truthfully. */
 
 static int ums_check_wire(struct utxo_mirror_sync_service *svc, const char *name,
@@ -1144,8 +1240,7 @@ static int ums_check_wire(struct utxo_mirror_sync_service *svc, const char *name
     int failures = 0;
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.utxo_mirror_rebuild.v1");
-    g_utxo_mirror_sync = svc;
-    zcl_native_handle_utxo_mirror_rebuild(NULL, &reply);
+    ums_call_handler(svc, &reply);
     char label[128], evidence[160];
     snprintf(evidence, sizeof(evidence), "current_state=%s", want.state);
     if (want.reason)
@@ -1162,12 +1257,15 @@ static int ums_check_wire(struct utxo_mirror_sync_service *svc, const char *name
     return failures;
 }
 
-static int ums_test_controller_wire(void)
+static int ums_test_controller_wire(bool forwarded)
 {
     int failures = 0;
     struct ums_fx fx;
     setenv("ZCL_FOLD_INRAM", "1", 1);
-    ums_fx_open(&fx, "wire");
+    ums_fx_open(&fx, forwarded ? "wirefwd" : "wire");
+    g_ums_forwarded = forwarded;
+    if (forwarded)
+        ums_fwd_begin(&fx.svc);
     UMS_CHECK("wire: fixture prepared", ums_fx_prepare_dirty(&fx));
 
     utxo_mirror_sync_test_set_fault(UMS_FAULT_ROLLBACK_FAILS);
@@ -1180,8 +1278,7 @@ static int ums_test_controller_wire(void)
     utxo_mirror_sync_test_set_fault(UMS_FAULT_COMMIT_THEN_CLOSE_BUSY);
     struct zcl_command_reply post;
     zcl_command_reply_init(&post, "zcl.utxo_mirror_rebuild.v1");
-    g_utxo_mirror_sync = &fx.svc;
-    zcl_native_handle_utxo_mirror_rebuild(NULL, &post);
+    ums_call_handler(&fx.svc, &post);
     utxo_mirror_sync_test_set_fault(UMS_FAULT_NONE);
     UMS_CHECK("wire/post-commit-close: typed unsettled failure",
               post.status == ZCL_COMMAND_STATUS_FAILED &&
@@ -1230,7 +1327,7 @@ static int ums_test_controller_wire(void)
     UMS_CHECK("wire: incomplete audit scan ran", ap_audit_run_once());
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.utxo_mirror_rebuild.v1");
-    zcl_native_handle_utxo_mirror_rebuild(NULL, &reply);
+    ums_call_handler(&fx.svc, &reply);
     UMS_CHECK("wire/ok: success status", reply.status == ZCL_COMMAND_STATUS_PASSED);
     UMS_CHECK("wire/ok: rows_written 3", json_get_int(json_get(&reply.data, "rows_written")) == 3);
     UMS_CHECK("wire/ok: mutated true",
@@ -1248,7 +1345,7 @@ static int ums_test_controller_wire(void)
               ums_set_frontier(fx.pdb, 106));
     zcl_utxo_mirror_controller_test_fail_projection(true);
     zcl_command_reply_init(&reply, "zcl.utxo_mirror_rebuild.v1");
-    zcl_native_handle_utxo_mirror_rebuild(NULL, &reply);
+    ums_call_handler(&fx.svc, &reply);
     zcl_utxo_mirror_controller_test_fail_projection(false);
     UMS_CHECK("wire/commit-reply-failed: typed committed result",
               reply.status == ZCL_COMMAND_STATUS_FAILED &&
@@ -1261,6 +1358,133 @@ static int ums_test_controller_wire(void)
               ums_roots_equal(&fx.ndb, fx.pdb));
     zcl_command_reply_free(&reply);
     ap_audit_reset_for_test();
+    if (forwarded)
+        ums_fwd_end(&fx.svc);
+    ums_fx_close(&fx);
+    return failures;
+}
+
+/* One forwarded call against the stub node in `mode`; the typed refusal must
+ * match code, status and mutated flag exactly. */
+static int ums_fwd_run(struct ums_fx *fx, const char *name,
+                       enum ums_node_mode mode, const char *code,
+                       enum zcl_command_status status, bool mutated,
+                       const char *evidence_prefix)
+{
+    int failures = 0;
+    char label[128];
+    g_ums_node_mode = mode;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.utxo_mirror_rebuild.v1");
+    ums_call_handler(&fx->svc, &reply);
+    snprintf(label, sizeof(label), "fwd/%s: status and code %s", name, code);
+    UMS_CHECK(label, reply.status == status &&
+              strcmp(reply.error.code, code) == 0);
+    snprintf(label, sizeof(label), "fwd/%s: mutated=%d", name, (int)mutated);
+    UMS_CHECK(label, reply.error.mutated == mutated);
+    if (evidence_prefix) {
+        snprintf(label, sizeof(label), "fwd/%s: evidence names the job", name);
+        UMS_CHECK(label, strncmp(reply.error.evidence, evidence_prefix,
+                                 strlen(evidence_prefix)) == 0);
+    }
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
+static int ums_test_forward_edges(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    setenv("ZCL_FOLD_INRAM", "1", 1);
+    ums_fx_open(&fx, "fwdedge");
+    UMS_CHECK("fwd: fixture prepared", ums_fx_prepare_dirty(&fx));
+    g_ums_forwarded = true;
+    ums_fwd_begin(&fx.svc);
+    int64_t runs0 = atomic_load(&fx.svc.rebuilds_run);
+    char before[4096], after[4096];
+    UMS_CHECK("fwd: digest before", ums_digest(fx.ndb.db, before, sizeof(before)));
+
+    const struct rpc_command *cmd =
+        rpc_table_find(&g_ums_node_table, "utxomirrorrebuild");
+    UMS_CHECK("fwd: the method needs operator authority, not safe-mode",
+              cmd && !cmd->ok_safe_mode);
+
+    /* No node answers: typed NODE_UNAVAILABLE, never a local run. */
+    failures += ums_fwd_run(&fx, "no_answer", UMS_NODE_NO_ANSWER,
+                            "NODE_UNAVAILABLE", ZCL_COMMAND_STATUS_BLOCKED,
+                            false, NULL);
+    failures += ums_fwd_run(&fx, "cookie_error", UMS_NODE_COOKIE_ERROR,
+                            "NODE_UNAVAILABLE", ZCL_COMMAND_STATUS_BLOCKED,
+                            false, NULL);
+    struct utxo_mirror_rebuild_job job;
+    utxo_mirror_rebuild_job_snapshot(&fx.svc, &job);
+    UMS_CHECK("fwd: unavailable ran and queued nothing locally",
+              job.id == 0 && job.state == UTXO_MIRROR_JOB_IDLE &&
+              atomic_load(&fx.svc.rebuilds_run) == runs0 &&
+              atomic_load(&fx.svc.mirror_health) == UTXO_MIRROR_QUARANTINED &&
+              ums_digest(fx.ndb.db, after, sizeof(after)) &&
+              strcmp(before, after) == 0);
+
+    /* The real client, no hook, a datadir with no cookie: still typed. */
+    node_rpc_client_set_test_hook(NULL);
+    zcl_native_bridge_bind_rpc(fx.dir, 18999);
+    int calls = g_ums_node_calls;
+    failures += ums_fwd_run(&fx, "real_client_no_node", UMS_NODE_NORMAL,
+                            "NODE_UNAVAILABLE", ZCL_COMMAND_STATUS_BLOCKED,
+                            false, NULL);
+    UMS_CHECK("fwd: the real client never reached the stub node",
+              g_ums_node_calls == calls);
+    node_rpc_client_set_test_hook(ums_node_hook);
+
+    /* The node answers but cannot serve. */
+    atomic_store(&fx.svc.thread_started, false);
+    failures += ums_fwd_run(&fx, "thread_down", UMS_NODE_NORMAL,
+                            "MIRROR_NOT_RUNNING", ZCL_COMMAND_STATUS_FAILED,
+                            false, NULL);
+    atomic_store(&fx.svc.thread_started, true);
+    g_ums_node_svc = NULL;
+    failures += ums_fwd_run(&fx, "node_without_service", UMS_NODE_NORMAL,
+                            "MIRROR_ABSENT", ZCL_COMMAND_STATUS_FAILED, false,
+                            NULL);
+    g_ums_node_svc = &fx.svc;
+
+    /* Accepted, then the outcome is never read: mutated stays true. */
+    zcl_utxo_mirror_controller_test_set_poll(0, 0);
+    failures += ums_fwd_run(&fx, "wait_limit", UMS_NODE_NEVER_DONE,
+                            "REBUILD_OUTCOME_UNKNOWN",
+                            ZCL_COMMAND_STATUS_FAILED, true, "job_id=1;");
+    /* The job is still pending: a second request queues nothing. */
+    zcl_utxo_mirror_controller_test_set_poll(0, 60000);
+    failures += ums_fwd_run(&fx, "in_progress", UMS_NODE_NORMAL,
+                            "REBUILD_IN_PROGRESS", ZCL_COMMAND_STATUS_BLOCKED,
+                            false, "job_id=1");
+    UMS_CHECK("fwd: the pending job is the mirror thread's to run",
+              utxo_mirror_rebuild_job_service(&fx.svc));
+    utxo_mirror_rebuild_job_snapshot(&fx.svc, &job);
+    UMS_CHECK("fwd: that job completed with the typed result",
+              job.state == UTXO_MIRROR_JOB_DONE && job.result == 3 &&
+              !job.quarantined);
+
+    /* Accepted, then the node stops answering the polls. */
+    failures += ums_fwd_run(&fx, "node_dies", UMS_NODE_DIES_AFTER_START,
+                            "REBUILD_OUTCOME_UNKNOWN",
+                            ZCL_COMMAND_STATUS_FAILED, true, "job_id=2;");
+
+    /* The method itself always answers with a typed object. */
+    struct json_value params = {0}, result = {0};
+    UMS_CHECK("fwd: bad action parses",
+              json_read(&params, "[\"bogus\"]", strlen("[\"bogus\"]")));
+    g_utxo_mirror_sync = &fx.svc;
+    UMS_CHECK("fwd: bad action is a typed, successful reply",
+              rpc_table_execute(&g_ums_node_table, "utxomirrorrebuild",
+                                &params, &result) &&
+              strcmp(json_get_str(json_get(&result, "state")),
+                     "bad_request") == 0);
+    g_utxo_mirror_sync = NULL;
+    json_free(&params);
+    json_free(&result);
+
+    ums_fwd_end(&fx.svc);
     ums_fx_close(&fx);
     return failures;
 }
@@ -1274,7 +1498,9 @@ static int ums_test_containment_suite(void)
     failures += ums_test_audit_truncated();
     failures += ums_test_close_after_commit();
     failures += ums_test_stale_residue_repair();
-    failures += ums_test_controller_wire();
+    failures += ums_test_controller_wire(false);
+    failures += ums_test_controller_wire(true);
+    failures += ums_test_forward_edges();
     return failures;
 }
 

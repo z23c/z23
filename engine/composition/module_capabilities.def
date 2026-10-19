@@ -147,6 +147,7 @@ ZCL_MODULE_CAPABILITY("engine/controllers/src/sync_controller_sapling_tree_resum
 ZCL_MODULE_CAPABILITY("engine/controllers/src/sync_controller_writers.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/transaction_controller.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/transaction_controller_sign.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/controllers/src/utxo_mirror_controller.c", CAP_CLOCK, "polls the node for the rebuild job outcome with a bounded wait")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/vault_intent_async_controller.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/vault_intent_controller.c", CAP_FS_READ|CAP_FS_WRITE|CAP_RANDOM, "draws RAND_bytes to generate the vault intent's session nonce")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/vault_intent_fanout.c", CAP_FS_WRITE, "")

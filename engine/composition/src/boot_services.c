@@ -119,6 +119,7 @@
 #include "controllers/mesh_pairing_controller.h"
 #include "controllers/zdir_controller.h"
 #include "controllers/op_return_index_controller.h"
+#include "controllers/utxo_mirror_controller.h"
 #include "services/op_return_backfill_service.h"
 #include "services/zslp_ledger_backfill_service.h"
 #include "services/state_auditor.h"
@@ -1253,6 +1254,8 @@ bool app_init_services(struct app_context *ctx,
     /* OP_RETURN catalog — every OP_RETURN output ever seen, by lokad tag */
     rpc_op_return_index_set_state(boot_node_db(svc));
     register_op_return_index_rpc_commands(svc->rpc_table);
+    /* utxo mirror operator repair (CLI ops recovery utxo_mirror forwards here) */
+    register_utxo_mirror_rpc_commands(svc->rpc_table);
 
     /* ZCL Messaging — P2P messages (plaintext on the wire) */
     rpc_msg_set_state(boot_node_db(svc), svc->connman);

@@ -78,6 +78,26 @@ enum utxo_mirror_health_state {
     UTXO_MIRROR_QUARANTINED,
 };
 
+/* Operator rebuild as a job on the mirror thread. A wholesale rebuild outlasts
+ * the node RPC deadline (10 s client, 10 s server kill) and would pin one of
+ * the four RPC workers, so the RPC only REQUESTS it; the mirror thread runs it
+ * between passes and records the typed outcome here for the caller to poll. */
+enum utxo_mirror_job_state {
+    UTXO_MIRROR_JOB_IDLE = 0,    /* no job recorded since boot */
+    UTXO_MIRROR_JOB_PENDING,     /* requested, not yet picked up */
+    UTXO_MIRROR_JOB_RUNNING,
+    UTXO_MIRROR_JOB_DONE,        /* result/reason valid */
+};
+
+struct utxo_mirror_rebuild_job {
+    uint64_t id;                 /* 0 until the first request */
+    int      state;              /* enum utxo_mirror_job_state */
+    int64_t  result;             /* rows written, or a negative UTXO_MIRROR_REBUILD_* */
+    char     reason[96];         /* refusal token, empty if none */
+    bool     quarantined;        /* mirror_health at completion */
+    int64_t  mirror_height;      /* last_mirror_height at completion */
+};
+
 struct utxo_mirror_sync_service {
     /* References (not owned) */
     struct node_db *ndb;
@@ -121,6 +141,10 @@ struct utxo_mirror_sync_service {
      * complete write lane. */
     _Atomic uint64_t update_generation;
     _Atomic uint32_t updates_active;
+
+    /* Operator rebuild job record (see utxo_mirror_rebuild_request). */
+    pthread_mutex_t job_mutex;
+    struct utxo_mirror_rebuild_job job;
 };
 
 /* Global pointer for RPC/native/diagnostics access. Set by boot, NULL before. */
@@ -177,6 +201,20 @@ int64_t utxo_mirror_rebuild_now(struct utxo_mirror_sync_service *svc);
  * refusal token (empty unless REFUSED / OVERLAY_ACTIVE) into reason. */
 int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
                                        char *reason, size_t reason_cap);
+
+/* Request an operator rebuild on the mirror thread. Returns 0 and the new job
+ * id when queued; 1 and the active job's id when one is already pending or
+ * running (nothing queued); -1 when no mirror thread is running to serve it. */
+int utxo_mirror_rebuild_request(struct utxo_mirror_sync_service *svc,
+                                uint64_t *id_out);
+
+/* Copy the current job record (consistent snapshot). */
+void utxo_mirror_rebuild_job_snapshot(struct utxo_mirror_sync_service *svc,
+                                      struct utxo_mirror_rebuild_job *out);
+
+/* Run the pending job, if any, on the calling thread (the mirror thread's
+ * loop; tests drive it directly). 1 when a job ran, else 0. */
+int utxo_mirror_rebuild_job_service(struct utxo_mirror_sync_service *svc);
 
 #ifdef ZCL_TESTING
 /* Deterministic fault injection for the private rebuild writer: the scan
