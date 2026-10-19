@@ -644,6 +644,14 @@ static bool plan_parse_input(struct plan *pl, const char *a, int i)
     return true;
 }
 
+static void plan_named_library_bypass(struct plan *pl)
+{
+    /* hash_named_libs can resolve named libraries only under explicit -L
+     * directories. Parse all arguments first: a later -L still counts. */
+    if (pl->named_lib && pl->libdir_n == 0)
+        pl->bypass = "named library has no explicit search directory";
+}
+
 static void plan_build(struct plan *pl, int argc, char **argv)
 {
     pl->argv = argv;
@@ -717,13 +725,6 @@ static void plan_build(struct plan *pl, int argc, char **argv)
         pl->bypass = "no file inputs to key on";
         return;
     }
-    /* hash_named_libs can resolve named libraries only under explicit -L
-     * directories. Parse all arguments first: a later -L still counts. */
-    if (pl->named_lib && pl->libdir_n == 0) {
-        pl->bypass = "named library has no explicit search directory";
-        return;
-    }
-
     pl->want_dep = want_dep;
     if (dep_explicit) {
         pl->dep_path = dep_explicit;
@@ -740,6 +741,7 @@ static void plan_build(struct plan *pl, int argc, char **argv)
             pl->dep_path = pl->dep_buf;
         }
     }
+    plan_named_library_bypass(pl);
 }
 
 static void plan_free(struct plan *pl)
