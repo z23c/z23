@@ -1047,13 +1047,37 @@ static int psk_io_revoke_between_stream_records(void)
     } TEST_END
     psk_io_fixture_close(&f); return failures;
 }
+/* One receiving step reads, decrypts and releases a record under ONE authority acquisition. */
+static int psk_io_receive_single_authority(void)
+{
+    int failures = 0; struct psk_io_fixture f; psk_io_fixture_init(&f);
+    TEST_CASE("host PSK IO: one receive step reads, decrypts and releases a record under a single authority acquisition") {
+        ASSERT(psk_io_fixture_open(&f, 0, false)); ASSERT(psk_io_fixture_admit(&f)); ASSERT(psk_io_fixture_ready(&f));
+        uint64_t read_before = f.client.observation.plaintext_read_bytes;
+        uint64_t written_before = f.client.observation.carrier_written_bytes;
+        const uint8_t payload = 0x62; ASSERT_EQ(send(f.plain[0], &payload, 1, MSG_NOSIGNAL), 1);
+        ASSERT(psk_io_client_record_attempt(&f, sizeof(payload), read_before, written_before));
+        uint64_t full0 = 0, cached0 = 0, full1 = 0, cached1 = 0;
+        device_pairing_test_guard_counts(&full0, &cached0);
+        ASSERT(psk_io_live_result(typed_test_device_host_psk_bridge_step(&f.server)));
+        device_pairing_test_guard_counts(&full1, &cached1);
+        ASSERT_EQ(f.server.observation.plaintext_written_bytes, 1);
+        ASSERT_EQ((full1 - full0) + (cached1 - cached0), 1);
+        uint8_t observed = 0; ASSERT_EQ(psk_io_wait_byte(&f, f.target, &observed), 1); ASSERT_EQ(observed, payload);
+    } TEST_END
+    psk_io_fixture_close(&f); return failures;
+}
 static int psk_io_actual_guard_boundary(void)
 {
     int failures = 0; struct psk_io_fixture f; psk_io_fixture_init(&f);
     TEST_CASE("host PSK IO: current lock spans actual target write; completed in-action revoke may release no byte") {
         ASSERT(psk_io_fixture_open(&f, 0, false)); ASSERT(psk_io_fixture_admit(&f)); ASSERT(psk_io_fixture_ready(&f));
+        uint64_t read_before = f.client.observation.plaintext_read_bytes;
+        uint64_t written_before = f.client.observation.carrier_written_bytes;
         const uint8_t payload = 0x61; ASSERT_EQ(send(f.plain[0], &payload, 1, MSG_NOSIGNAL), 1);
-        ASSERT(psk_io_wait_plaintext(&f, false));
+        /* The record leaves the client carrier, then the server's single step reads, decrypts and writes
+         * it under one carried guard, so the revoke hook fires inside that step's actual target write. */
+        ASSERT(psk_io_client_record_attempt(&f, sizeof(payload), read_before, written_before));
         ASSERT_EQ(f.server.observation.plaintext_written_bytes, 0);
         f.revoke_at_plaintext = true;
         enum device_host_bridge_result result = typed_test_device_host_psk_bridge_step(&f.server);
@@ -1741,7 +1765,7 @@ int test_device_host_bridge(void)
         bridge_invalid_transport() + bridge_halfclose() + bridge_partial_release() +
         bridge_broken_pipe() + bridge_closed_transport() + bridge_idle_revoke() + bridge_fullbytes() +
         bridge_write_boundary(true) + bridge_write_boundary(false) + psk_io_admission_and_bytes() +
-        psk_io_wrong_key_and_truncation() + psk_io_buffered_revoke() + psk_io_idle_revoke_then_record() + psk_io_revoke_between_stream_records() + psk_io_actual_guard_boundary() +
+        psk_io_wrong_key_and_truncation() + psk_io_buffered_revoke() + psk_io_idle_revoke_then_record() + psk_io_revoke_between_stream_records() + psk_io_actual_guard_boundary() + psk_io_receive_single_authority() +
         psk_io_fin_and_extra() + psk_io_refused_target() + psk_io_closed_stderr() +
         psk_io_preflight_refusals() + psk_io_explicit_backup() + psk_io_partial_ciphertext() +
         psk_io_deadline_expiry() + psk_io_deadline_handshake() + psk_io_deadline_phase_ceiling() + psk_io_deadline_borrowed() +

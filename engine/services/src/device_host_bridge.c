@@ -757,11 +757,17 @@ static enum device_host_bridge_result psk_io_read_carrier(struct device_host_psk
     enum device_host_bridge_result result = psk_io_authorize(bridge, guard);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
     ssize_t count = read(bridge->spec.carrier_input_fd, bridge->unread, sizeof(bridge->unread)); int error = errno;
-    device_pairing_guard_release(guard);
     if (count > 0) {
         bridge->unread_used = (size_t)count; bridge->observation.carrier_read_bytes += (uint64_t)count; *progress = true;
-        return psk_io_consume_unread(bridge, progress);
+        /* Read, decrypt and first plaintext release run under the one guard taken above, exactly as
+         * the outbound path carries one guard through read, seal and send. */
+        result = psk_io_consume_unread(bridge, progress);
+        if (result == DEVICE_HOST_BRIDGE_READY && guard->held && bridge->session.plaintext_used)
+            result = psk_io_write_span(bridge, true, progress, guard);
+        device_pairing_guard_release(guard);
+        return result;
     }
+    device_pairing_guard_release(guard);
     if (!count) { bridge->carrier_eof = true; *progress = true; }
     else if (!transient_error(error)) { bridge->observation.error_number = error; return DEVICE_HOST_BRIDGE_IO_ERROR; }
     return DEVICE_HOST_BRIDGE_READY;
