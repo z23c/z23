@@ -1687,7 +1687,7 @@ engine/controllers/src/snapshot_controller_txindex.c:snapshot_tx_index_build_fro
 engine/controllers/src/sovereignty_controller.c:sovereignty_dump_state_json:28
 engine/controllers/src/status_native_handlers.c:zcl_native_status_body_full:45
 engine/controllers/src/status_native_helpers.c:status_blocker_counts_match:18
-engine/controllers/src/status_native_helpers.c:status_build_blocker_summary:36
+engine/controllers/src/status_native_helpers.c:status_build_blocker_summary:30
 engine/controllers/src/status_native_helpers.c:status_json_equal:23
 engine/controllers/src/status_native_helpers.c:status_peer_survey:23
 engine/controllers/src/store_controller.c:store_handle_request:23

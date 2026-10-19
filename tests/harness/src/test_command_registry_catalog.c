@@ -4058,7 +4058,7 @@ static char *blocker_page_rpc(const char *method, const char *params)
     json_push_kv_bool(&root, "healthy", false);
     json_push_kv_bool(&blockers, "known", true);
     json_push_kv_int(&blockers, "generation", 9);
-    int total = g_blocker_page_case == 4 ? 0 : 8;
+    int total = g_blocker_page_case == 4 ? 0 : g_blocker_page_case == 19 ? 7 : 8;
     json_push_kv_int(&blockers, "active_count", total);
     json_push_kv_int(&blockers, "permanent_count", g_blocker_page_case == 12 ? 0 : total);
     json_push_kv_int(&blockers, "transient_count", 0);
@@ -4199,6 +4199,61 @@ static int test_blocker_paging_controls(void)
         }
         ASSERT(!truncated);
         ASSERT(pages >= 2);
+        json_free(&input); json_free(&envelope); PASS();
+    }
+_test_next:;
+    json_free(&input); json_free(&envelope);
+    node_rpc_client_set_test_hook(NULL); g_blocker_page_case = 0;
+    return failures;
+}
+/* The default view carries the active blockers as compact rows; item paging
+ * keeps the full reasons. */
+static int test_blocker_default_view(void)
+{
+    int failures = 0;
+    char out[8193];
+    struct json_value input = {0}, envelope = {0};
+    node_rpc_client_set_test_hook(blocker_page_rpc);
+    TEST("blocker default view lists all 7 near-256-byte blockers within the budget") {
+        g_blocker_page_case = 19;
+        json_set_object(&input);
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(blocker_page_execute(&input, "normal", 4096, NULL, out, &code) > 0);
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strlen(out) <= 4096);
+        ASSERT(json_read(&envelope, out, strlen(out)));
+        const struct json_value *data = json_get(&envelope, "data");
+        const struct json_value *list = json_get(data, "blockers");
+        ASSERT(list && list->type == JSON_ARR);
+        ASSERT_EQ((long long)list->num_children, 7);
+        ASSERT(json_get(data, "blockers_omitted") == NULL);
+        for (size_t i = 0; i < list->num_children; i++) {
+            const struct json_value *row = &list->children[i];
+            ASSERT(json_get_str(json_get(row, "id")) != NULL);
+            ASSERT(json_get_str(json_get(row, "owner")) != NULL);
+            ASSERT(json_get_str(json_get(row, "class")) != NULL);
+            ASSERT(json_get(row, "age_us") != NULL);
+            const char *reason = json_get_str(json_get(row, "reason"));
+            ASSERT(reason != NULL);
+            ASSERT_EQ((long long)strlen(reason), 83);
+            ASSERT(strcmp(reason + 80, "...") == 0);
+        }
+        json_free(&input); json_free(&envelope); PASS();
+    }
+    TEST("blocker item paging still returns the full near-256-byte reasons") {
+        g_blocker_page_case = 19;
+        json_set_object(&input);
+        ASSERT(json_push_kv_int(&input, "item_limit", 1));
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(blocker_page_execute(&input, "full", 8192, NULL, out, &code) > 0);
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_read(&envelope, out, strlen(out)));
+        const struct json_value *page = json_get(json_get(&envelope, "data"), "blocker_page");
+        const struct json_value *rows = json_get(page, "rows");
+        ASSERT(rows && rows->num_children == 1);
+        ASSERT_EQ((long long)strlen(json_get_str(json_get(&rows->children[0], "reason"))), 255);
+        ASSERT_EQ(json_get_int(json_get(page, "total_items")), 7);
+        g_blocker_page_case = 0;
         json_free(&input); json_free(&envelope); PASS();
     }
 _test_next:;
@@ -6648,6 +6703,7 @@ int test_command_registry_catalog(void)
     failures += test_response_budget_views();
     failures += test_blocker_basic_pages();
     failures += test_blocker_paging_controls();
+    failures += test_blocker_default_view();
     failures += test_every_describe_document_parses();
     failures += test_blocker_basic_refusals();
     failures += test_work_envelope_ceiling();

@@ -275,7 +275,7 @@ ZCL_COMMAND_READY_READ(
     "item_offset above 0 requires expected_snapshot from the previous page, and "
     "changed views refuse. cursor continues a truncated summary and cannot be "
     "combined with the item keys; the reply's next entry carries the exact input. Ages are per-page observations, not one atomic traversal. "
-    "Paged rows exclude remediation detail. Missing projected page is UNKNOWN.", 0,
+    "Paged rows exclude remediation detail. The default view lists the active blockers first as compact rows (id, owner, class, age_us, reason cut to 80 bytes plus ...), dominant and permanent first; blockers_omitted counts rows that did not fit. Missing projected page is UNKNOWN.", 0,
     "blockers,stall,sync", "zcl.blocker_items_input.v1", "zcl.blockers.v1",
     "cursor,item_offset,item_limit,expected_snapshot", "", "z23 core sync blockers",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,

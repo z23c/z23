@@ -503,6 +503,110 @@ bool status_blocker_counts_match(const struct json_value *state,
     return true;
 }
 
+enum {
+    STATUS_BLOCKER_REASON_WIDTH = 80,
+    STATUS_BLOCKER_LIST_BYTES = 2304,
+};
+
+/* True when row `a` precedes row `b`: higher causal priority first, then the
+ * older blocker. */
+static bool status_blocker_row_before(const struct json_value *a,
+                                      const struct json_value *b)
+{
+    int pa = status_blocker_causal_priority(a);
+    int pb = status_blocker_causal_priority(b);
+    return pa != pb ? pa > pb
+                    : json_get_int(json_get(a, "age_us")) >
+                      json_get_int(json_get(b, "age_us"));
+}
+
+/* Build one compact row in `out`: id, owner, class, age_us and the reason cut
+ * to STATUS_BLOCKER_REASON_WIDTH bytes (on a character boundary) plus "...". */
+static bool status_compact_blocker_row(struct json_value *out,
+                                       const struct json_value *row)
+{
+    static const char *const names[] = {"id", "owner", "class"};
+    json_init(out);
+    json_set_object(out);
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(names) / sizeof(names[0]); i++) {
+        const char *s = json_get_str(json_get(row, names[i]));
+        ok = json_push_kv_str(out, names[i], s ? s : "");
+    }
+    ok = ok && json_push_kv_int(out, "age_us",
+                                json_get_int(json_get(row, "age_us")));
+    const char *reason = json_get_str(json_get(row, "reason"));
+    size_t len = reason ? strlen(reason) : 0;
+    size_t keep = len;
+    if (len > STATUS_BLOCKER_REASON_WIDTH) {
+        keep = STATUS_BLOCKER_REASON_WIDTH;
+        while (keep > 0 && ((unsigned char)reason[keep] & 0xC0u) == 0x80u)
+            keep--;
+    }
+    char text[STATUS_BLOCKER_REASON_WIDTH + 4];
+    if (keep > 0)
+        memcpy(text, reason, keep);
+    if (keep < len) {
+        memcpy(text + keep, "...", 3);
+        keep += 3;
+    }
+    text[keep] = '\0';
+    return ok && json_push_kv_str(out, "reason", text);
+}
+
+/* Push "blockers": the active blockers, dominant and permanent first, as
+ * compact rows bounded by STATUS_BLOCKER_LIST_BYTES; "blockers_omitted"
+ * counts rows that did not fit. Full rows stay behind item_offset/item_limit. */
+static bool status_push_compact_blockers(struct json_value *summary,
+                                         const struct json_value *entries)
+{
+    size_t n = json_size(entries);
+    size_t order[BLOCKER_CAP];
+    if (n > BLOCKER_CAP)
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        size_t j = i;
+        for (; j > 0 && status_blocker_row_before(
+                            json_at(entries, i), json_at(entries, order[j - 1]));
+             j--)
+            order[j] = order[j - 1];
+        order[j] = i;
+    }
+    struct json_value list;
+    json_init(&list);
+    json_set_array(&list);
+    size_t shown = 0, used = 2;
+    bool ok = true;
+    for (; ok && shown < n; shown++) {
+        struct json_value row;
+        ok = status_compact_blocker_row(&row, json_at(entries, order[shown]));
+        size_t bytes = json_write(&row, NULL, 0) + 1;
+        bool fits = ok && used + bytes <= STATUS_BLOCKER_LIST_BYTES;
+        ok = ok && (!fits || json_push_back(&list, &row));
+        json_free(&row);
+        if (!fits)
+            break;
+        used += bytes;
+    }
+    ok = ok && json_push_kv(summary, "blockers", &list) &&
+         (shown == n || json_push_kv_int(summary, "blockers_omitted",
+                                         (int64_t)(n - shown)));
+    json_free(&list);
+    return ok;
+}
+
+/* True for dumpstate keys the summary rebuilds or must not carry over. */
+static bool status_summary_skips_key(const char *key, bool include_entries)
+{
+    static const char *const rebuilt[] = {
+        "dominant", "execution_locus", "source_rpc", "captured_at", "blockers",
+    };
+    for (size_t i = 0; key && i < sizeof(rebuilt) / sizeof(rebuilt[0]); i++)
+        if (strcmp(key, rebuilt[i]) == 0)
+            return true;
+    return !key || (!include_entries && strcmp(key, "_health") == 0);
+}
+
 /* Build the blocker summary exclusively from the target node's dumpstate RPC
  * response. The native command often runs in a separate client process;
  * reading blocker globals there would describe that empty client and create a
@@ -582,16 +686,11 @@ bool status_build_blocker_summary(const char *raw,
     }
 
     json_set_object(summary_out);
-    bool copy_ok = true;
+    bool copy_ok = !include_entries ||
+                   status_push_compact_blockers(summary_out, entries);
     for (size_t i = 0; i < state->num_children; i++) {
         const char *key = state->keys[i];
-        if (!key || strcmp(key, "dominant") == 0 ||
-            strcmp(key, "execution_locus") == 0 ||
-            strcmp(key, "source_rpc") == 0 ||
-            strcmp(key, "captured_at") == 0 ||
-            (!include_entries &&
-             (strcmp(key, "blockers") == 0 ||
-              strcmp(key, "_health") == 0)))
+        if (status_summary_skips_key(key, include_entries))
             continue;
         if (!status_push_kv_verified(summary_out, key,
                                      &state->children[i])) {
