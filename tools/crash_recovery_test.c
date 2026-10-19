@@ -833,12 +833,16 @@ struct cr_run {
     struct cr_stamp worst_kill;
     struct cr_stamp worst_up;
     const char *skip; /* reason the environment blocked the run, else NULL */
+    const char *error; /* harness error reason: forces a FAIL row, else NULL */
 };
+
+#define CR_RECEIPT_SCAN_ROWS 8
 
 struct cr_receipt_scan {
     unsigned valid;
     unsigned skipped;
-    int64_t last_ms;
+    int64_t ms[CR_RECEIPT_SCAN_ROWS];
+    char verdicts[CR_RECEIPT_SCAN_ROWS][8];
 };
 
 static struct cr_stamp cr_stamp_now(void)
@@ -847,8 +851,7 @@ static struct cr_stamp cr_stamp_now(void)
     struct timespec ts;
     platform_time_monotonic_timespec(&ts);
     s.mono_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-    if (clock_gettime(CLOCK_REALTIME, &ts) == 0)
-        s.wall_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    s.wall_ms = clock_now_wall_ms();
     return s;
 }
 
@@ -860,6 +863,7 @@ static void cr_run_init(struct cr_run *run, int planned)
     run->worst_kill = (struct cr_stamp){0, 0};
     run->worst_up = (struct cr_stamp){0, 0};
     run->skip = NULL;
+    run->error = NULL;
 }
 
 /* One recovered iteration: the kill, and the return to RPC-ready at the
@@ -878,11 +882,17 @@ static void cr_run_note(struct cr_run *run, struct cr_stamp kill_at,
 
 static const char *cr_run_verdict(const struct cr_run *run)
 {
+    if (run->error) return "FAIL";
     if (run->skip) return "SKIP";
     if (run->passed < run->planned || run->passed == 0 ||
         run->worst_ms >= CR_RECEIPT_BUDGET_MS)
         return "FAIL";
     return "PASS";
+}
+
+static const char *cr_run_reason(const struct cr_run *run)
+{
+    return run->error ? run->error : run->skip ? run->skip : "";
 }
 
 static void cr_utc_text(int64_t wall_ms, char *out, size_t cap)
@@ -965,12 +975,17 @@ static bool cr_receipt_format(char *out, size_t cap, const struct cr_run *run,
         snprintf(ms, sizeof(ms), "null");
     else
         snprintf(ms, sizeof(ms), "%" PRId64, run->worst_ms);
+    char sha_json[ZSHA256_HEX_LEN + 4];
+    if (sha_hex[0])
+        snprintf(sha_json, sizeof(sha_json), "\"%s\"", sha_hex);
+    else
+        snprintf(sha_json, sizeof(sha_json), "null");
     int n = snprintf(out, cap,
-        "{\"schema\":\"%s\",\"utc\":\"%s\",\"binary_sha256\":\"%s\","
+        "{\"schema\":\"%s\",\"utc\":\"%s\",\"binary_sha256\":%s,"
         "\"kill_utc\":\"%s\",\"recovered_utc\":\"%s\",\"recover_ms\":%s,"
         "\"verdict\":\"%s\",\"reason\":\"%s\",\"planned\":%d,\"passed\":%d}",
-        CR_RECEIPT_SCHEMA, now, sha_hex, kill_utc, up_utc, ms,
-        cr_run_verdict(run), run->skip ? run->skip : "", run->planned,
+        CR_RECEIPT_SCHEMA, now, sha_json, kill_utc, up_utc, ms,
+        cr_run_verdict(run), cr_run_reason(run), run->planned,
         run->passed);
     return n > 0 && (size_t)n < cap;
 }
@@ -992,6 +1007,7 @@ static bool cr_receipt_append(const char *path, const char *line)
         else if (w < 0 && errno == EINTR) continue;
         else ok = false;
     }
+    if (ok && fsync(fd) != 0) ok = false;
     if (close(fd) != 0) ok = false;
     return ok;
 }
@@ -1017,8 +1033,12 @@ static void cr_receipt_row(const char *row, size_t len, void *ctx)
         return;
     }
     (void)evidence_row_int(row, len, "recover_ms", &ms);
-    scan->valid++;
-    scan->last_ms = ms;
+    unsigned i = scan->valid++;
+    if (i < CR_RECEIPT_SCAN_ROWS) {
+        scan->ms[i] = ms;
+        if (!evidence_row_str(row, len, "verdict", scan->verdicts[i], sizeof(scan->verdicts[i])))
+            scan->verdicts[i][0] = 0;
+    }
 }
 
 static bool cr_receipt_scan(const char *path, struct cr_receipt_scan *scan)
@@ -1026,7 +1046,6 @@ static bool cr_receipt_scan(const char *path, struct cr_receipt_scan *scan)
     unsigned overlong = 0, incomplete = 0;
     scan->valid = 0;
     scan->skipped = 0;
-    scan->last_ms = -1;
     if (!evidence_ledger_scan_tail(path, (size_t)1 << 20, cr_receipt_row, scan,
                                    &overlong, &incomplete))
         return false;
@@ -1034,23 +1053,41 @@ static bool cr_receipt_scan(const char *path, struct cr_receipt_scan *scan)
     return true;
 }
 
-/* Append this run receipt. Warns and carries on when the ledger or the binary
- * hash is unavailable: the receipt records evidence and never changes the exit. */
-static void cr_receipt_emit(const struct cr_config *cfg, struct cr_run *run,
-                            const char *skip_reason)
+/* Append this run receipt. A ledger that cannot be written only warns. An
+ * unreadable binary hash is recorded as null, and the row is still appended. */
+static void cr_receipt_emit(const struct cr_config *cfg, const struct cr_run *run)
 {
     if (!cfg->bootstrap) return;
-    if (skip_reason) run->skip = skip_reason;
-    char path[PATH_MAX], sha[ZSHA256_HEX_LEN], line[CR_RECEIPT_LINE_MAX];
-    if (!cr_receipt_path(path, sizeof(path)) || !cr_receipt_ensure_parent(path) ||
-        !cr_file_sha256_hex(CR_NODE_BIN, sha) ||
-        !cr_receipt_format(line, sizeof(line), run, sha, cr_stamp_now().wall_ms) ||
+    char path[PATH_MAX], sha[ZSHA256_HEX_LEN] = "", line[CR_RECEIPT_LINE_MAX];
+    if (!cr_receipt_path(path, sizeof(path)) || !cr_receipt_ensure_parent(path)) {
+        fprintf(stderr, "crash_recovery_test: receipt not written (ledger unavailable)\n");
+        return;
+    }
+    (void)cr_file_sha256_hex(CR_NODE_BIN, sha);
+    if (!cr_receipt_format(line, sizeof(line), run, sha, cr_stamp_now().wall_ms) ||
         !cr_receipt_append(path, line)) {
-        fprintf(stderr, "crash_recovery_test: receipt not written (ledger or binary hash unavailable)\n");
+        fprintf(stderr, "crash_recovery_test: receipt not written (ledger unavailable)\n");
         return;
     }
     printf("crash_recovery_test: receipt %s verdict=%s recover_ms=%" PRId64 "\n",
            path, cr_run_verdict(run), run->worst_ms);
+}
+
+/* Exit code for a teeth-gated block: 1 under ZCL_CRASH_REQUIRE_TEETH=1, else 0. */
+static int cr_teeth_rc(void)
+{
+    return getenv("ZCL_CRASH_REQUIRE_TEETH") ? 1 : 0;
+}
+
+/* Record why a bootstrap run stopped and return its exit code. Code 0 is the
+ * non-disruptive SKIP; any other code writes a FAIL row with the same reason. */
+static int cr_receipt_exit(const struct cr_config *cfg, struct cr_run *run,
+                           const char *reason, int rc)
+{
+    if (rc == 0) run->skip = reason;
+    else run->error = reason;
+    cr_receipt_emit(cfg, run);
+    return rc;
 }
 
 static const char *cr_receipt_selftest_arg(int argc, char **argv)
@@ -1061,12 +1098,20 @@ static const char *cr_receipt_selftest_arg(int argc, char **argv)
     return argv[1] + sizeof(prefix) - 1;
 }
 
-/* Write two receipts around a torn row into a fresh ledger, read it back, and
- * require exactly the two valid rows: the torn row is skipped, not folded. */
+/* True when row i of the scan carries this verdict and recover_ms (-1 = null). */
+static bool cr_selftest_row(const struct cr_receipt_scan *scan, unsigned i,
+                            const char *verdict, int64_t ms)
+{
+    return i < CR_RECEIPT_SCAN_ROWS && strcmp(scan->verdicts[i], verdict) == 0 &&
+           scan->ms[i] == ms;
+}
+
+/* Write a PASS row, a torn row, a SKIP row and a harness-error FAIL row into a
+ * fresh ledger, read them back, and require each verdict and recover_ms. */
 static int cr_receipt_selftest(const char *path)
 {
     const struct cr_stamp kill_at = {1000, 1700000000000LL};
-    struct cr_stamp up_at = {1400, 1700000000400LL};
+    const struct cr_stamp up_at = {1900, 1700000000900LL};
     struct cr_run run;
     struct cr_receipt_scan scan;
     (void)unlink(path);
@@ -1075,21 +1120,27 @@ static int cr_receipt_selftest(const char *path)
     bool wrote = cr_receipt_write_run(path, &run, kill_at.wall_ms);
     wrote = wrote && cr_receipt_append(path,
         "{\"schema\":\"zcl.crash_recovery_receipt.v1\",\"recover_ms\":");
-    up_at.mono_ms = 1900;
     cr_run_init(&run, 1);
-    cr_run_note(&run, kill_at, up_at);
+    run.skip = "selftest skip";
+    wrote = wrote && cr_receipt_write_run(path, &run, kill_at.wall_ms);
+    cr_run_init(&run, 1);
+    run.error = "selftest harness error";
     wrote = wrote && cr_receipt_write_run(path, &run, kill_at.wall_ms);
     if (!wrote) {
         fprintf(stderr, "crash receipt selftest: FAIL (cannot write %s)\n", path);
         return 1;
     }
-    if (!cr_receipt_scan(path, &scan) || scan.valid != 2 || scan.skipped != 1 ||
-        scan.last_ms != 900) {
-        fprintf(stderr, "crash receipt selftest: FAIL (valid=%u skipped=%u last_ms=%" PRId64 ")\n",
-                scan.valid, scan.skipped, scan.last_ms);
+    if (!cr_receipt_scan(path, &scan) || scan.valid != 3 || scan.skipped != 1 ||
+        !cr_selftest_row(&scan, 0, "PASS", 900) ||
+        !cr_selftest_row(&scan, 1, "SKIP", -1) ||
+        !cr_selftest_row(&scan, 2, "FAIL", -1)) {
+        fprintf(stderr, "crash receipt selftest: FAIL (valid=%u skipped=%u)\n",
+                scan.valid, scan.skipped);
         return 1;
     }
-    printf("crash receipt selftest: PASS (valid=%u skipped=%u)\n", scan.valid, scan.skipped);
+    printf("crash receipt selftest: PASS (valid=%u skipped=%u verdicts=%s,%s,%s recover_ms=%" PRId64 ",null,null)\n",
+           scan.valid, scan.skipped, scan.verdicts[0], scan.verdicts[1],
+           scan.verdicts[2], scan.ms[0]);
     return 0;
 }
 
@@ -1169,7 +1220,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "crash_recovery_test: cannot create bootstrap "
                                 "datadir %s: %s\n",
                         cfg.datadir, strerror(errno));
-                return 2;
+                return cr_receipt_exit(&cfg, &run, "datadir_create_failed", 2);
             }
         }
         printf("crash_recovery_test: bootstrap — seeding %d regtest "
@@ -1179,13 +1230,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "crash_recovery_test: bootstrap node never came "
                             "up — harness error\n");
             if (seed_pid > 0) cr_kill_node(seed_pid);
-            return 2;
+            return cr_receipt_exit(&cfg, &run, "node_never_up", 2);
         }
         if (!cr_generate(&cfg, cfg.seed_blocks)) {
             fprintf(stderr, "crash_recovery_test: bootstrap `generate %d` "
                             "failed — harness error\n", cfg.seed_blocks);
             cr_kill_node(seed_pid);
-            return 2;
+            return cr_receipt_exit(&cfg, &run, "generate_failed", 2);
         }
         /* Verify the seed actually advanced the tip to a REAL, durable height
          * before we trust the kill/restart loop. On a build where the
@@ -1227,13 +1278,11 @@ int main(int argc, char **argv)
                     "(Set ZCL_CRASH_REQUIRE_TEETH=1 to make this a HARD FAIL in "
                     "the dedicated opt-in teeth job.)\n",
                     seeded_h, cfg.seed_blocks);
-                cr_receipt_emit(&cfg, &run, "owner-gated reducer boot-init (MVP.md #7): bootstrap seed below the requested height");
                 if (getenv("ZCL_CRASH_REQUIRE_TEETH")) {
                     fprintf(stderr, "crash_recovery_test: ZCL_CRASH_REQUIRE_TEETH"
                                     "=1 → HARD FAIL on the genesis/short seed.\n");
-                    return 1;
                 }
-                return 0;  /* loud KNOWN-BLOCKED witness, non-disruptive */
+                return cr_receipt_exit(&cfg, &run, "owner-gated reducer boot-init (docs/quality/MVP.md #7): bootstrap seed below the requested height", cr_teeth_rc());  /* KNOWN-BLOCKED witness unless teeth */
             }
             cfg.seeded_height = seeded_h;
             printf("crash_recovery_test: bootstrap seed complete "
@@ -1312,10 +1361,8 @@ int main(int argc, char **argv)
                 "job.)\n",
                 it, before.block_count, cfg.seeded_height);
             cr_kill_node(pid);
-            cr_receipt_emit(&cfg, &run, "owner-gated reducer boot-init (MVP.md #7): restarted node baseline tip is not positive");
-            if (getenv("ZCL_CRASH_REQUIRE_TEETH"))
-                return 1;   /* dedicated opt-in teeth job: vacuous baseline IS a failure */
-            return 0;       /* shared push/PR mvp-spawn job: loud witness, non-disruptive */
+            /* teeth job (ZCL_CRASH_REQUIRE_TEETH=1) FAILs; the shared job stays a SKIP witness */
+            return cr_receipt_exit(&cfg, &run, "owner-gated reducer boot-init (docs/quality/MVP.md #7): restarted node baseline tip is not positive", cr_teeth_rc());
         }
 
         /* Mine before the kill to exercise recovery of an advanced durable
@@ -1398,7 +1445,7 @@ int main(int argc, char **argv)
     printf("  utxo_above_tip:   %d\n", overshoot_fails);
     printf("  harness_errors:   %d\n", harness_errors);
 
-    cr_receipt_emit(&cfg, &run, NULL);
+    cr_receipt_emit(&cfg, &run);
     if (height_fails || utxo_fails || commit_fails || overshoot_fails)
         return 1;
     if (harness_errors > 0 && passes == 0) return 2;

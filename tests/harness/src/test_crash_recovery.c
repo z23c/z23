@@ -308,7 +308,8 @@ static int test_crash_recovery_home_refused(void)
 
 /* One receipt line per run, read back through the shared evidence reader.
  * The selftest owns a temp ledger, appends a malformed row between two good
- * receipts, and must report exactly the two valid rows back. */
+ * receipts, and must report exactly the three valid rows back, with each row verdict
+ * and recover_ms read back. */
 static int test_crash_recovery_receipt_roundtrip(void)
 {
     int failures = 0;
@@ -330,7 +331,7 @@ static int test_crash_recovery_receipt_roundtrip(void)
         ASSERT(!timed_out);
         ASSERT(rc == 0);
         ASSERT(strstr(buf, "crash receipt selftest: PASS") != NULL);
-        ASSERT(strstr(buf, "valid=2 skipped=1") != NULL);
+        ASSERT(strstr(buf, "valid=3 skipped=1 verdicts=PASS,SKIP,FAIL recover_ms=900,null,null") != NULL);
         PASS();
     } _test_next:;
     if (created) {

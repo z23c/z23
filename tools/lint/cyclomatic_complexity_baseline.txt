@@ -3684,7 +3684,7 @@ tools/core_seal.c:path_reject_reason:19
 tools/core_seal.c:read_and_hash:27
 tools/core_seal.c:read_manifest:27
 tools/core_seal.c:verify_sections:20
-tools/crash_recovery_test.c:main:46
+tools/crash_recovery_test.c:main:45
 tools/determinism_scan.c:build_plan:24
 tools/determinism_scan.c:main:27
 tools/determinism_scan.c:run_classify:72
