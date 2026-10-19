@@ -699,7 +699,24 @@ struct osa_refusal {
     enum osa_prep prep;
 };
 
-/* Returns the node_conf to use, or NULL to keep the default; false: skip. */
+/* A regular file owned by someone else and writable only by its owner, so
+ * that ownership is the one check it fails. As root the fixture conf is
+ * chowned instead. */
+static bool osa_foreign_conf(const char *conf, char *alt, size_t cap,
+                             bool *use_alt)
+{
+    struct stat st;
+    if (geteuid() == 0)
+        return chown(conf, 1, (gid_t)-1) == 0;
+    if (lstat("/etc/passwd", &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_uid == geteuid() || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
+        return false;
+    snprintf(alt, cap, "%s", "/etc/passwd");
+    *use_alt = true;
+    return true;
+}
+
+/* Prepares the conf named by p; false when the fixture cannot be built. */
 static bool osa_prep_conf(enum osa_prep p, const char *dir, const char *conf,
                           char *alt, size_t cap, bool *use_alt)
 {
@@ -719,7 +736,7 @@ static bool osa_prep_conf(enum osa_prep p, const char *dir, const char *conf,
         *use_alt = true;
         return mkfifo(alt, 0600) == 0;
     case PREP_FOREIGN:
-        return geteuid() == 0 && chown(conf, 1, (gid_t)-1) == 0;
+        return osa_foreign_conf(conf, alt, cap, use_alt);
     }
     return false;
 }
@@ -739,9 +756,8 @@ static int osa_tip_refused(const struct osa_refusal *r)
     char alt[PATH_MAX];
     bool use_alt;
     if (!osa_prep_conf(r->prep, fx.dir, conf, alt, sizeof(alt), &use_alt)) {
-        printf("ops_slot_activate: SKIP %s (needs root to chown or the file type is unavailable)\n", r->name);
         osa_rm_tree(fx.dir);
-        return 0;
+        return osa_check(false, r->what);
     }
     snprintf(health, sizeof(health),
              "{\"kind\":\"%s\",\"timeout_ms\":300,\"port\":1,\"node_conf\":\"%s\","
