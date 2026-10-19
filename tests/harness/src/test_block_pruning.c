@@ -93,6 +93,15 @@ static bool create_fake_block_file(const char *datadir, int file_num,
     return true;
 }
 
+static bool create_fake_block_dir(const char *datadir, int file_num,
+                                  const char *prefix)
+{
+    char path[512];
+    struct disk_block_pos pos = { .nFile = file_num, .nPos = 0 };
+    get_block_pos_filename(path, sizeof(path), datadir, &pos, prefix);
+    return mkdir(path, 0700) == 0;
+}
+
 static bool fake_file_exists(const char *datadir, int file_num,
                              const char *prefix)
 {
@@ -159,6 +168,50 @@ static void fixture_destroy(struct prune_fixture *f)
  * symbol so the pruning service can call it without linking the full
  * sync module. For run_once() calls in tests, the sync state doesn't
  * matter (it's only checked in the background thread loop). */
+
+/* A refused blk unlink must keep its rev file. Kept out of
+ * test_block_pruning so that function stays under the complexity cap. */
+static int prune_case_blk_unlink_refused(void)
+{
+    int failures = 0;
+    /* ── 2b. A refused blk unlink must not remove its rev file ─── */
+    {
+        install_prune_observer();
+        struct prune_fixture f;
+        bool setup_ok = fixture_init(&f, 3001, "blk_unlink_refused");
+        PRUNE_CHECK("prune: fixture init (blk unlink refused)", setup_ok);
+        if (setup_ok) {
+            /* Setup failure stops this case before any block access. */
+            bool files_ok =
+                create_fake_block_dir(f.datadir, 1, "blk") &&
+                create_fake_block_file(f.datadir, 1, "rev", 2048) &&
+                create_fake_block_file(f.datadir, 2, "blk", 4096) &&
+                create_fake_block_file(f.datadir, 2, "rev", 2048);
+            PRUNE_CHECK("prune: create partial-unlink fixture", files_ok);
+
+            if (files_ok) {
+                for (int i = 0; i < 3001; i++) {
+                    f.blocks[i].nStatus = BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO;
+                    f.blocks[i].nFile = i < 1000 ? 1 : 2;
+                }
+                f.svc.keep_blocks = 1000;
+                int pruned = block_pruning_run_once(&f.svc);
+                PRUNE_CHECK("prune: refused blk unlink prunes no file", pruned == 0);
+                PRUNE_CHECK("prune: refused blk unlink retains rev file",
+                            fake_file_exists(f.datadir, 1, "rev"));
+                PRUNE_CHECK("prune: refused blk unlink retains data and undo flags",
+                            (f.blocks[0].nStatus &
+                             (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) ==
+                            (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO));
+                PRUNE_CHECK("prune: refused blk unlink emits no prune event",
+                            atomic_load(&g_prune_events) == 0);
+            }
+
+            fixture_destroy(&f);
+        }
+    }
+    return failures;
+}
 
 /* ── Tests ─────────────────────────────────────────────────── */
 
@@ -257,6 +310,9 @@ int test_block_pruning(void)
 
         fixture_destroy(&f);
     }
+
+    /* ── 2b. A refused blk unlink must not remove its rev file ─── */
+    failures += prune_case_blk_unlink_refused();
 
     /* ── 3. File 0 never pruned ───────────────────────── */
     {

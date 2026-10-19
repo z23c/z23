@@ -203,6 +203,23 @@ static int64_t file_size_or_zero(const char *path)
 
 /* ── Core pruning logic ────────────────────────────────────── */
 
+/* Removes the blk file, then its rev file only once the blk file is gone.
+ * A refused blk unlink keeps the rev file, so BLOCK_HAVE_UNDO never refers
+ * to an undo file removed by the same pass. The refusal errno is returned
+ * through blk_errno for the caller's warning. Returns true when blk is gone. */
+static bool block_pruning_unlink_pair(const char *blk_path, const char *rev_path,
+                                      bool *rev_ok, int *blk_errno)
+{
+    *rev_ok = false;
+    *blk_errno = 0;
+    if (unlink(blk_path) != 0 && errno != ENOENT) {
+        *blk_errno = errno;
+        return false;
+    }
+    *rev_ok = (unlink(rev_path) == 0 || errno == ENOENT);
+    return true;
+}
+
 /* Shared prune-below-height core for both entry points: run_once's
  * keep_blocks-depth cadence and prune_sealed_range's segment-gated cadence.
  * `prune_below` is the exclusive height boundary — a file is prunable only
@@ -255,12 +272,13 @@ static int block_pruning_run_below(struct block_pruning_service *svc,
          * mutex and would self-deadlock. */
         disk_block_io_lock();
         disk_block_io_close_cache_while_locked();
-        bool blk_ok = (unlink(blk_path) == 0 || errno == ENOENT);
-        bool rev_ok = (unlink(rev_path) == 0 || errno == ENOENT);
+        int blk_errno = 0;
+        bool rev_ok = false;
+        bool blk_ok = block_pruning_unlink_pair(blk_path, rev_path, &rev_ok, &blk_errno);
         disk_block_io_unlock();
 
         if (!blk_ok) {
-            LOG_WARN("prune", "[prune] %s:%d %s(): failed to delete %s: %s", __FILE__, __LINE__, __func__, blk_path, strerror(errno));
+            LOG_WARN("prune", "[prune] %s:%d %s(): failed to delete %s: %s", __FILE__, __LINE__, __func__, blk_path, strerror(blk_errno));
             continue;
         }
 

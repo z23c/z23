@@ -2098,7 +2098,7 @@ engine/services/src/block_index_post_load.c:promote_best_header_after_load:23
 engine/services/src/block_index_sidecar_integrity.c:bii_verify:37
 engine/services/src/block_index_sqlite_cache.c:load_block_index_sqlite:33
 engine/services/src/block_index_sqlite_cache.c:save_block_index_recent:34
-engine/services/src/block_pruning_service.c:block_pruning_run_below:25
+engine/services/src/block_pruning_service.c:block_pruning_run_below:23
 engine/services/src/block_source_policy_persist.c:bsp_persist_decision:17
 engine/services/src/block_source_policy_persist.c:bsp_restore_decision:24
 engine/services/src/block_source_policy_persist.c:persist_source_snapshot:16
