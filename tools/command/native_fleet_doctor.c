@@ -46,6 +46,7 @@
 #define FD_NEXT_IDENTITY "z23 ops mesh identity"
 #define FD_NEXT_ENROL "z23 fleet invite --name=<box>"
 #define FD_NEXT_DELEGATE "z23 zcode network delegate"
+#define FD_NEXT_DELEGATE_MISSING "anchor the master key first (z23 core identity anchor, once the node folds it), then z23 zcode network delegate with seed_file while the node runs"
 #define FD_NEXT_PAIR "z23 ops mesh pair plan --peer=<addr-or-fingerprint-prefix>"
 #define FD_NEXT_ROSTER "z23 ops mesh roster"
 #define FD_NEXT_MAIL "z23-dev dev agent mail"
@@ -384,7 +385,7 @@ static void fd_check_delegation(struct fd_ctx *ctx, struct json_value *checks)
                        "No ZID delegation is loaded (%s).",
                        ctx->dht_reason[0] ? ctx->dht_reason : "DHT is off");
         fd_check(ctx, checks, "delegation", "missing", detail,
-                 FD_NEXT_DELEGATE, NULL);
+                 FD_NEXT_DELEGATE_MISSING, NULL);
         return;
     }
     fd_delegation_warning(ctx, warning, sizeof(warning));

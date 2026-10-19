@@ -66,46 +66,6 @@ static bool zdn_u64(const struct json_value *in, const char *key, uint64_t *out,
   return true;
 }
 
-static bool zdn_read_master_seed(const char *path, uint8_t out[32], char *err,
-                                 size_t err_cap) {
-  struct platform_positioned_file file;
-  struct platform_positioned_file_snapshot before, after;
-  platform_positioned_file_init(&file);
-  if (!platform_positioned_file_open(&file, path)) {
-    snprintf(err, err_cap, "cannot open master seed: %s", strerror(errno));
-    return false;
-  }
-  if (!platform_positioned_file_is_current_user_only(&file) ||
-      !platform_positioned_file_snapshot(&file, &before) ||
-      (before.size != 64 && before.size != 65)) {
-    platform_positioned_file_close(&file);
-    snprintf(err, err_cap, "master seed must be a private regular file");
-    return false;
-  }
-  char hex[66];
-  int64_t n = platform_positioned_file_read(&file, hex, (size_t)before.size, 0);
-  bool stable = platform_positioned_file_snapshot(&file, &after) &&
-      before.size == after.size && before.volume == after.volume &&
-      before.file_low == after.file_low && before.file_high == after.file_high &&
-      before.modified_seconds == after.modified_seconds &&
-      before.modified_nanoseconds == after.modified_nanoseconds &&
-      before.changed_seconds == after.changed_seconds &&
-      before.changed_nanoseconds == after.changed_nanoseconds;
-  platform_positioned_file_close(&file);
-  if (!stable) n = -1;
-  if (n != 64 && !(n == 65 && hex[64] == '\n')) {
-    memory_cleanse(hex, sizeof(hex));
-    snprintf(err, err_cap, "master seed must contain exactly 64 hex chars");
-    return false;
-  }
-  hex[64] = '\0';
-  bool ok = zcl_hex_decode_lower(hex, out, 32);
-  memory_cleanse(hex, sizeof(hex));
-  if (!ok)
-    snprintf(err, err_cap, "master seed is not canonical lowercase hex");
-  return ok;
-}
-
 static bool zdn_rpc_int(const char *method, int64_t arg, bool has_arg,
                         int64_t *out) {
   struct rpc_arg_builder params;
@@ -228,7 +188,7 @@ void zcl_native_handle_zcode_network_delegate(
 
   uint8_t master_seed[32], master_pub[32], master_secret_copy[32];
   char err[192] = {0};
-  if (!zdn_read_master_seed(seed_file, master_seed, err, sizeof(err))) {
+  if (!zcl_native_read_master_seed_file(seed_file, master_seed, err, sizeof(err))) {
     zdn_fail(reply, "MASTER_SEED_UNREADABLE", "normalize", err, seed_file);
     return;
   }

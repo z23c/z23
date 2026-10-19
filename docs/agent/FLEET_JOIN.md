@@ -174,9 +174,20 @@ The operator key is a plain Ed25519 key, the same shape as a ZID master key,
 so it can be anchored on chain with no second key format. This is optional:
 a fleet that never anchors keeps enrolling and listing exactly as before.
 
-1. `fleet invite` prints the `operator_pubkey`. On a node with a wallet, run
-   `z23 core identity anchor --datadir=<node-datadir>` for that pubkey (it spends a fee and is always
-   your decision).
+1. `fleet invite` prints the `operator_pubkey`. To anchor a master key on a
+   node with a wallet, run this sequence. Anchoring spends a fee and is
+   always your decision.
+   1. `z23 core identity keygen --input='{"seed_file":"<absolute private path>"}'`
+      creates the seed file and prints its pubkey. The seed is never printed.
+   2. `z23 core identity anchor --input='{"wallet_scope":"prod","pubkey":"<pubkey>","idempotency_key":"<key>"}'`
+      prints a `plan_id`.
+   3. `z23 core identity anchor --input='{"wallet_scope":"prod","plan_id":"<plan_id>","confirm":true}'`
+      broadcasts it. The fee is 100 zat from the transparent wallet.
+   4. Wait until the tip is at least the anchor height plus 20.
+   5. `z23 core identity resolve --pubkey=<pubkey>` must report the anchor.
+   6. `z23 zcode network delegate --input='{"seed_file":"<absolute private path>"}'`
+      (the node must be running).
+   7. `z23 fleet vitals sample`.
 2. Once the node has folded the anchor, point the fleet leaves at its
    datadir: `--datadir=<dir>` on the CLI (`fleet admit` and `fleet import`
    also take `datadir` in the input). They open

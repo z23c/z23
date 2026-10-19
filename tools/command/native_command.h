@@ -2293,6 +2293,18 @@ void zcl_native_handle_core_identity_revoke(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* Read one master seed file (the zcode network delegate reader): regular,
+ * current-user-only 0400/0600, exactly 64 lowercase hex plus an optional
+ * newline. Fills out[32] or names the refusal in err. */
+bool zcl_native_read_master_seed_file(const char *path, uint8_t out[32],
+                                      char *err, size_t err_cap);
+void zcl_native_handle_core_identity_keygen(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_core_identity_pubkey(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ── core.zdir.* — the on-chain node directory WRITE path
  * (tools/command/native_zdir_command.c). register/deregister build the
  * `ZDIR` OP_RETURN and prefer the live node's zdir_* RPCs, falling back to

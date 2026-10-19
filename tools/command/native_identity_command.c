@@ -27,7 +27,15 @@
 #include "json/json.h"
 #include "models/database.h"
 #include "models/zid_identity.h"
+#include "base/hex.h"
+#include "crypto/ed25519.h"
+#include "platform/file_metadata.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
+#include "support/cleanse.h"
 
+#include <errno.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -322,6 +330,188 @@ void zcl_native_handle_core_identity_list(
     json_push_kv(&reply->data, "identities", &arr);
     json_free(&arr);
     json_push_kv_int(&reply->data, "count", n);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
+/* Read one master seed file into out: a regular, current-user-only 0400 or
+ * 0600 file holding exactly 64 lowercase hex characters, optionally followed by
+ * one newline. Shared by zcode network delegate and core identity pubkey. */
+static bool zcl_seed_snapshot_stable(struct platform_positioned_file *file,
+                                     const struct platform_positioned_file_snapshot *before)
+{
+  struct platform_positioned_file_snapshot after;
+  return platform_positioned_file_snapshot(file, &after) &&
+      before->size == after.size && before->volume == after.volume &&
+      before->file_low == after.file_low && before->file_high == after.file_high &&
+      before->modified_seconds == after.modified_seconds &&
+      before->modified_nanoseconds == after.modified_nanoseconds &&
+      before->changed_seconds == after.changed_seconds &&
+      before->changed_nanoseconds == after.changed_nanoseconds;
+}
+
+bool zcl_native_read_master_seed_file(const char *path, uint8_t out[32], char *err,
+                                 size_t err_cap) {
+  struct platform_positioned_file file;
+  struct platform_positioned_file_snapshot before;
+  platform_positioned_file_init(&file);
+  if (!platform_positioned_file_open(&file, path)) {
+    snprintf(err, err_cap, "cannot open master seed: %s", strerror(errno));
+    return false;
+  }
+  if (!platform_positioned_file_is_current_user_only(&file) ||
+      !platform_positioned_file_snapshot(&file, &before) ||
+      (before.size != 64 && before.size != 65)) {
+    platform_positioned_file_close(&file);
+    snprintf(err, err_cap, "master seed must be a private regular file");
+    return false;
+  }
+  char hex[66];
+  int64_t n = platform_positioned_file_read(&file, hex, (size_t)before.size, 0);
+  bool stable = zcl_seed_snapshot_stable(&file, &before);
+  platform_positioned_file_close(&file);
+  if (!stable) n = -1;
+  if (n != 64 && !(n == 65 && hex[64] == 0x0a)) {
+    memory_cleanse(hex, sizeof(hex));
+    snprintf(err, err_cap, "master seed must contain exactly 64 hex chars");
+    return false;
+  }
+  hex[64] = 0;
+  bool ok = zcl_hex_decode_lower(hex, out, 32);
+  memory_cleanse(hex, sizeof(hex));
+  if (!ok)
+    snprintf(err, err_cap, "master seed is not canonical lowercase hex");
+  return ok;
+}
+
+/* ── core.identity.keygen / core.identity.pubkey ─────────────────────
+ * The master seed file that zcode network delegate reads and that anchor
+ * publishes a pubkey for. keygen mints it exclusively; pubkey reads it back
+ * through the same reader as delegate. The seed is never printed or logged. */
+
+enum zidc_seed_write { ZIDC_SEED_WRITTEN, ZIDC_SEED_EXISTS, ZIDC_SEED_IO,
+                       ZIDC_SEED_PARTIAL };
+
+static void zidc_seed_refuse(struct zcl_command_reply *reply, const char *path,
+                             enum zcl_command_exit exit_code, const char *code,
+                             bool mutated, const char *message)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, exit_code, code,
+                           "execute", false, mutated, message, path);
+}
+
+/* Exclusive create, then one 65-byte write of 64 lowercase hex and a newline.
+ * O_EXCL refuses any existing entry; a symlink is refused by O_NOFOLLOW. */
+static enum zidc_seed_write zidc_seed_write_new(const char *path,
+                                                const uint8_t seed[32])
+{
+    struct platform_private_file file;
+    char text[66];
+    platform_private_file_init(&file);
+    if (!platform_private_file_create(path, &file))
+        return (errno == EEXIST || errno == ELOOP) ? ZIDC_SEED_EXISTS
+                                                   : ZIDC_SEED_IO;
+    zcl_hex_encode(seed, 32, text);
+    text[64] = 0x0a;
+    bool ok = platform_private_file_write_at(&file, text, 65, 0) &&
+              platform_private_file_authority_flush(&file);
+    memory_cleanse(text, sizeof(text));
+    platform_private_file_close(&file);
+    return ok ? ZIDC_SEED_WRITTEN : ZIDC_SEED_PARTIAL;
+}
+
+static void zidc_seed_write_refuse(struct zcl_command_reply *reply,
+                                   const char *path,
+                                   enum zidc_seed_write written)
+{
+    if (written == ZIDC_SEED_EXISTS)
+        zidc_seed_refuse(reply, path, ZCL_COMMAND_EXIT_INVALID,
+                         "SEED_FILE_EXISTS", false,
+                         "seed_file already exists (or is a symlink); it is never overwritten");
+    else if (written == ZIDC_SEED_PARTIAL)
+        zidc_seed_refuse(reply, path, ZCL_COMMAND_EXIT_FAILED,
+                         "SEED_FILE_PARTIAL", true,
+                         "seed_file was created but could not be written or made durable; inspect and delete it before retry");
+    else
+        zidc_seed_refuse(reply, path, ZCL_COMMAND_EXIT_FAILED,
+                         "SEED_FILE_IO", false,
+                         "seed_file could not be created; no seed was written");
+}
+
+static bool zidc_seed_path_given(const char *path)
+{
+    return path && strncmp(path, "/", 1) == 0;
+}
+
+void zcl_native_handle_core_identity_keygen(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *path = "core.identity.keygen";
+    const char *seed_file = zidc_input_str(request->input, "seed_file");
+    if (!zidc_seed_path_given(seed_file)) {
+        zidc_seed_refuse(reply, path, ZCL_COMMAND_EXIT_INVALID,
+                         "MISSING_SEED_FILE", false,
+                         "give --seed_file=<absolute path of a file that does not exist yet>");
+        return;
+    }
+    uint8_t seed[32], pubkey[32], secret[32];
+    if (!rng_host_fill(seed, sizeof(seed))) {
+        memory_cleanse(seed, sizeof(seed));
+        zidc_seed_refuse(reply, seed_file, ZCL_COMMAND_EXIT_FAILED,
+                         "SEED_ENTROPY_UNAVAILABLE", false,
+                         "the host CSPRNG refused; no seed file was written");
+        return;
+    }
+    enum zidc_seed_write written = zidc_seed_write_new(seed_file, seed);
+    if (written != ZIDC_SEED_WRITTEN) {
+        memory_cleanse(seed, sizeof(seed));
+        zidc_seed_write_refuse(reply, seed_file, written);
+        return;
+    }
+    zcl_ed25519_keypair(pubkey, secret, seed);
+    memory_cleanse(secret, sizeof(secret));
+    memory_cleanse(seed, sizeof(seed));
+    char hex[65];
+    zcl_hex_encode(pubkey, sizeof(pubkey), hex);
+    json_push_kv_str(&reply->data, "seed_file", seed_file);
+    json_push_kv_str(&reply->data, "pubkey", hex);
+    reply->error.mutated = true;
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
+void zcl_native_handle_core_identity_pubkey(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *path = "core.identity.pubkey";
+    const char *seed_file = zidc_input_str(request->input, "seed_file");
+    if (!zidc_seed_path_given(seed_file)) {
+        zidc_seed_refuse(reply, path, ZCL_COMMAND_EXIT_INVALID,
+                         "MISSING_SEED_FILE", false,
+                         "give --seed_file=<absolute path of an existing seed file>");
+        return;
+    }
+    uint8_t seed[32], pubkey[32], secret[32];
+    char err[192] = {0};
+    if (!zcl_native_read_master_seed_file(seed_file, seed, err, sizeof(err))) {
+        memory_cleanse(seed, sizeof(seed));
+        zidc_seed_refuse(reply, seed_file, ZCL_COMMAND_EXIT_INVALID,
+                         "SEED_FILE_UNREADABLE", false, err);
+        return;
+    }
+    zcl_ed25519_keypair(pubkey, secret, seed);
+    memory_cleanse(secret, sizeof(secret));
+    memory_cleanse(seed, sizeof(seed));
+    char hex[65];
+    zcl_hex_encode(pubkey, sizeof(pubkey), hex);
+    json_push_kv_str(&reply->data, "seed_file", seed_file);
+    json_push_kv_str(&reply->data, "pubkey", hex);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }

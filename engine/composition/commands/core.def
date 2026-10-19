@@ -1621,6 +1621,36 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_identity_resolve)
 ZCL_COMMAND_READY_COMMAND(
+    "core.identity.keygen", "core.identity", "",
+    "Mint a new master seed file and print its Ed25519 pubkey",
+    "Draws 32 host CSPRNG bytes and writes them as 64 lowercase hex plus a newline to a NEW absolute seed_file (O_CREAT|O_EXCL, mode 0600), then fsyncs. An existing path or symlink refuses with SEED_FILE_EXISTS and is never overwritten. The reply carries seed_file and the Ed25519 pubkey only: the seed is never printed or logged. Feed seed_file to zcode network delegate and the pubkey to identity anchor.", 0,
+    "identity,zid,keygen,seed,master,key,generate,ed25519",
+    "zcl.core_identity_keygen.input.v1", "zcl.core_identity_keygen.v1",
+    "seed_file", "seed_file",
+    "z23 core identity keygen --input='{\"seed_file\":\"/absolute/path/master.hex\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_core_identity_keygen)
+ZCL_COMMAND_READY_READ(
+    "core.identity.pubkey", "core.identity", "",
+    "Print the Ed25519 pubkey of an existing master seed file",
+    "Reads seed_file with the same reader as zcode network delegate (one regular 0400 or 0600 file owned by the current user, holding 64 lowercase hex plus an optional newline) and prints its Ed25519 pubkey. The seed is never printed.", 0,
+    "identity,zid,pubkey,seed,master,key,ed25519",
+    "zcl.core_identity_pubkey.input.v1", "zcl.core_identity_pubkey.v1",
+    "seed_file", "seed_file",
+    "z23 core identity pubkey --seed_file=/absolute/path/master.hex",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_identity_pubkey)
+ZCL_COMMAND_READY_COMMAND(
     "core.identity.anchor", "core.identity", "",
     "Anchor a master key on-chain (spends a fee)",
     "Prepares the exact signed ZID\\0 ANCHOR transaction under explicit "

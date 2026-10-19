@@ -31,6 +31,8 @@
 #include "test/transaction_lab_simnet.h"
 
 #include "command/native_command.h"
+#include "config/command_catalog.h"
+#include "crypto/ed25519.h"
 #include "controllers/rpc_client.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
@@ -41,6 +43,7 @@
 #include "zid/zid_anchor.h"
 
 #include <stdio.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -954,6 +957,140 @@ static int t_verify_anchored(void)
     return failures;
 }
 
+/* ── core.identity.keygen / core.identity.pubkey ───────────────────
+ * The leaves are looked up through the command catalog, so before they
+ * are registered these cases report FAIL at runtime instead of breaking
+ * the build. */
+
+static zcl_command_handler_fn idc_leaf(const char *path)
+{
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(zcl_command_catalog(), path, NULL);
+    return spec ? spec->handler : NULL;
+}
+
+static bool idc_reply_has(const struct zcl_command_reply *reply,
+                          const char *needle)
+{
+    char buf[4096];
+    size_t n = json_write(&reply->data, buf, sizeof(buf));
+    return n > 0 && n < sizeof(buf) && strstr(buf, needle) != NULL;
+}
+
+static bool idc_seed_text_write(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return false;
+    bool ok = fputs(text, f) >= 0;
+    ok = fclose(f) == 0 && ok;
+    return ok && chmod(path, 0600) == 0;
+}
+
+static bool idc_seed_read(const char *path, char out[66], off_t *size)
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        return false;
+    *size = st.st_size;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    size_t n = fread(out, 1, 65, f);
+    fclose(f);
+    out[n] = 0;
+    return n == 65 || n == 64;
+}
+
+static int t_keygen(void)
+{
+    int failures = 0;
+    char dir[256];
+    IDC_CHECK("keygen fixture: datadir",
+              idc_mk_datadir(dir, sizeof(dir), "keygen"));
+    char seed[320], vector_seed[320];
+    snprintf(seed, sizeof(seed), "%s/master.hex", dir);
+    snprintf(vector_seed, sizeof(vector_seed), "%s/vector.hex", dir);
+    unlink(seed);
+    unlink(vector_seed);
+
+    zcl_command_handler_fn keygen = idc_leaf("core.identity.keygen");
+    zcl_command_handler_fn pubkey = idc_leaf("core.identity.pubkey");
+    IDC_CHECK("keygen: leaf is registered", keygen != NULL);
+    IDC_CHECK("pubkey: leaf is registered", pubkey != NULL);
+    if (!keygen || !pubkey)
+        return failures;
+
+    struct json_value input;
+    struct zcl_command_reply reply;
+    idc_input_open(&input, NULL);
+    (void)json_push_kv_str(&input, "seed_file", seed);
+    idc_call(keygen, &input, &reply, "zcl.core_identity_keygen.v1");
+    IDC_CHECK("keygen: exit OK", reply.exit_code == ZCL_COMMAND_EXIT_OK);
+
+    char first[66] = {0}, keygen_pub[65] = {0};
+    off_t size = 0;
+    struct stat st;
+    IDC_CHECK("keygen: seed file is a regular 0600 file",
+              stat(seed, &st) == 0 && S_ISREG(st.st_mode) &&
+              (st.st_mode & 0777) == 0600);
+    IDC_CHECK("keygen: seed file is 65 bytes", idc_seed_read(seed, first, &size) &&
+              size == 65);
+    char seed_hex[65];
+    memcpy(seed_hex, first, 64);
+    seed_hex[64] = 0;
+    snprintf(keygen_pub, sizeof(keygen_pub), "%s", idc_str(&reply, "pubkey"));
+    IDC_CHECK("keygen: reply carries a 64-hex pubkey", strlen(keygen_pub) == 64);
+    IDC_CHECK("keygen: reply never contains the seed hex",
+              !idc_reply_has(&reply, seed_hex));
+
+    struct json_value again;
+    struct zcl_command_reply refused;
+    idc_input_open(&again, NULL);
+    (void)json_push_kv_str(&again, "seed_file", seed);
+    idc_call(keygen, &again, &refused, "zcl.core_identity_keygen.v1");
+    IDC_CHECK("keygen: second run to the same path refuses",
+              refused.exit_code != ZCL_COMMAND_EXIT_OK);
+    char after[66] = {0};
+    off_t after_size = 0;
+    IDC_CHECK("keygen: refusal leaves the seed file untouched",
+              idc_seed_read(seed, after, &after_size) &&
+              after_size == 65 && strcmp(first, after) == 0);
+
+    struct json_value pin;
+    struct zcl_command_reply pin_reply;
+    idc_input_open(&pin, NULL);
+    (void)json_push_kv_str(&pin, "seed_file", seed);
+    idc_call(pubkey, &pin, &pin_reply, "zcl.core_identity_pubkey.v1");
+    IDC_CHECK("pubkey: exit OK", pin_reply.exit_code == ZCL_COMMAND_EXIT_OK);
+    IDC_CHECK("pubkey: equals the keygen pubkey",
+              strcmp(idc_str(&pin_reply, "pubkey"), keygen_pub) == 0);
+    IDC_CHECK("pubkey: reply never contains the seed hex",
+              !idc_reply_has(&pin_reply, seed_hex));
+
+    /* Known vector: seed of 32 0xaa bytes through the same Ed25519 call the
+     * test fixture uses (tools/metaverse_tour_fixture.c). */
+    uint8_t vseed[32], vpk[32], vsk[32];
+    char vhex[65], vector_text[66];
+    memset(vseed, 0xaa, sizeof(vseed));
+    zcl_ed25519_keypair(vpk, vsk, vseed);
+    HexStr(vpk, 32, false, vhex, sizeof(vhex));
+    memset(vector_text, 0x61, 64);
+    vector_text[64] = 0x0a;
+    vector_text[65] = 0;
+    IDC_CHECK("pubkey vector: seed file written",
+              idc_seed_text_write(vector_seed, vector_text));
+    struct json_value vin;
+    struct zcl_command_reply vreply;
+    idc_input_open(&vin, NULL);
+    (void)json_push_kv_str(&vin, "seed_file", vector_seed);
+    idc_call(pubkey, &vin, &vreply, "zcl.core_identity_pubkey.v1");
+    IDC_CHECK("pubkey vector: 0xaa seed gives the fixture pubkey",
+              vreply.exit_code == ZCL_COMMAND_EXIT_OK &&
+              strcmp(idc_str(&vreply, "pubkey"), vhex) == 0);
+    return failures;
+}
+
 int test_identity_command(void)
 {
     printf("\n=== core identity command tests ===\n");
@@ -967,6 +1104,7 @@ int test_identity_command(void)
     failures += t_exact_chain_lifecycle();
     failures += t_write_refusals();
     failures += t_verify_anchored();
+    failures += t_keygen();
 
     node_rpc_client_set_test_hook(NULL);
     return failures;
