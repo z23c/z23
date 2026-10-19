@@ -426,6 +426,74 @@ static bool dep_child_ignored(const char *reldir, const char *name)
             strcmp(name, "hotswap-fast") == 0);
 }
 
+/* Directory listings report failure through errno. A refusal that sets none
+ * (a non-directory, say) has no OS cause to report, so it is EIO. */
+static bool dep_list_dir(bool (*list)(const char *,
+                                      struct platform_directory_list *),
+                         const char *path, struct platform_directory_list *out)
+{
+    errno = 0;
+    if (list(path, out)) return true;
+    if (!errno) errno = EIO;
+    return false;
+}
+
+/* A child directory listed by its parent and gone before it was opened was
+ * removed by a concurrent build, and its depfiles went with it. */
+static bool dep_child_vanished(void)
+{
+    return errno == ENOENT || errno == ENOTDIR;
+}
+
+static int dep_errno_or_eio(void)
+{
+    return errno ? errno : EIO;
+}
+
+static bool collect_dep_paths(const char *root, const char *reldir,
+                              struct dep_paths *paths);
+
+/* Recurse into the child directories; a child that vanished after its
+ * parent was listed was removed by a concurrent build, and its depfiles
+ * went with it. The root's own listing still fails the inventory. */
+static bool collect_dep_subdirs(const char *root, const char *reldir,
+                                const struct platform_directory_list *dirs,
+                                struct dep_paths *paths)
+{
+    for (size_t i = 0; i < dirs->count; i++) {
+        const char *name = dirs->entries[i].name;
+        if (dep_child_ignored(reldir, name)) continue;
+        char child[CI_PATH_MAX];
+        int cn = snprintf(child, sizeof(child), "%s/%s", reldir, name);
+        if (cn <= 0 || (size_t)cn >= sizeof(child)) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        if (!collect_dep_paths(root, child, paths) && !dep_child_vanished())
+            return false;
+    }
+    return true;
+}
+
+static bool collect_dep_files(const char *reldir,
+                              const struct platform_directory_list *files,
+                              struct dep_paths *paths)
+{
+    errno = 0;
+    for (size_t i = 0; i < files->count; i++) {
+        const char *name = files->entries[i].name;
+        if (name[0] == '.' || !has_ext(name, ".d")) continue;
+        char child[CI_PATH_MAX];
+        int cn = snprintf(child, sizeof(child), "%s/%s", reldir, name);
+        if (cn <= 0 || (size_t)cn >= sizeof(child)) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        if (!dep_paths_push(paths, child)) return false;
+    }
+    return true;
+}
+
 static bool collect_dep_paths(const char *root, const char *reldir,
                               struct dep_paths *paths)
 {
@@ -442,38 +510,19 @@ static bool collect_dep_paths(const char *root, const char *reldir,
 
     char full[CI_PATH_MAX];
     int fn = snprintf(full, sizeof(full), "%s/%s", root, reldir);
-    if (fn <= 0 || (size_t)fn >= sizeof(full))
+    if (fn <= 0 || (size_t)fn >= sizeof(full)) {
+        errno = ENAMETOOLONG;
         return false;
+    }
     struct platform_directory_list directories = {0}, files = {0};
-    if (!platform_directory_list_real_sorted(full, &directories) ||
-        !platform_directory_list_regular_sorted(full, &files)) {
-        platform_directory_list_free(&directories);
-        platform_directory_list_free(&files);
-        return false;
-    }
-    bool ok = true;
-    for (size_t i = 0; ok && i < directories.count; i++) {
-        const char *name = directories.entries[i].name;
-        if (dep_child_ignored(reldir, name)) continue;
-        char child[CI_PATH_MAX];
-        int cn = snprintf(child, sizeof(child), "%s/%s", reldir, name);
-        if (cn <= 0 || (size_t)cn >= sizeof(child)) {
-            ok = false;
-            break;
-        }
-        ok = collect_dep_paths(root, child, paths);
-    }
-    for (size_t i = 0; ok && i < files.count; i++) {
-        const char *name = files.entries[i].name;
-        if (name[0] == '.' || !has_ext(name, ".d")) continue;
-        char child[CI_PATH_MAX];
-        int cn = snprintf(child, sizeof(child), "%s/%s", reldir, name);
-        ok = cn > 0 && (size_t)cn < sizeof(child) &&
-             dep_paths_push(paths, child);
-    }
+    bool ok =
+        dep_list_dir(platform_directory_list_real_sorted, full, &directories) &&
+        dep_list_dir(platform_directory_list_regular_sorted, full, &files) &&
+        collect_dep_subdirs(root, reldir, &directories, paths) &&
+        collect_dep_files(reldir, &files, paths);
     platform_directory_list_free(&directories);
     platform_directory_list_free(&files);
-    if (!ok) errno = EIO;
+    if (!ok && !errno) errno = EIO;
     return ok;
 }
 
@@ -1044,7 +1093,7 @@ bool codeindex_depfile_graph(const char *root, size_t *out_count,
     if (!collect_dep_paths(root, "build", &paths)) {
         dep_paths_free(&paths);
         LOG_FAIL("codeindex", "collect depfile inventory failed: %s",
-                 strerror(errno));
+                 strerror(dep_errno_or_eio()));
     }
     bool ok = true;
     size_t count = 0;

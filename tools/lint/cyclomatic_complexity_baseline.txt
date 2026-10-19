@@ -56,7 +56,7 @@ cognition/modules/codeindex/src/codeindex_build_windows.c:collect_directory:20
 cognition/modules/codeindex/src/codeindex_capability.c:cap_scan_symbols:24
 cognition/modules/codeindex/src/codeindex_capability.c:codeindex_capabilities:45
 cognition/modules/codeindex/src/codeindex_deps.c:codeindex_depfile_graph:19
-cognition/modules/codeindex/src/codeindex_deps.c:collect_dep_paths:20
+cognition/modules/codeindex/src/codeindex_deps.c:collect_dep_paths:11
 cognition/modules/codeindex/src/codeindex_deps.c:epoch_current_dir:27
 cognition/modules/codeindex/src/codeindex_deps.c:scan_one_depfile:21
 cognition/modules/codeindex/src/codeindex_emitter.c:codeindex_emitter_sites:17
