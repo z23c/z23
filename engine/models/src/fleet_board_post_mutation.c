@@ -178,7 +178,7 @@ static enum fleet_board_result wiki_write_append(struct node_db *ndb,
     if (r != FLEET_BOARD_OK) return r;
     if (known) return FLEET_BOARD_ERR_STORAGE;
     uint8_t victim[32];
-    r = fleet_board_wiki_room(ndb, post, evicted, victim);
+    r = fleet_board_wiki_room(ndb, post, now, evicted, victim);
     if (r != FLEET_BOARD_OK) return r;
     if (*evicted) {
         if (!fleet_board_wiki_evict_allowed(now)) return FLEET_BOARD_ERR_WIKI_QUOTA;

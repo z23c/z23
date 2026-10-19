@@ -66,11 +66,12 @@ int64_t fleet_board_wiki_window_max(void);
 
 /* The wiki stored leg for `post`, decided under the board write lock: room
  * (FLEET_BOARD_OK, *evict false), the id of the key's own oldest superseded
- * revision to replace (OK, *evict true), or FLEET_BOARD_ERR_WIKI_FULL. Other
- * kinds and legacy-scope posts always get OK. */
+ * revision to replace (OK, *evict true; failing that, its oldest plain
+ * revision whose ttl has elapsed at `now`), or FLEET_BOARD_ERR_WIKI_FULL.
+ * Other kinds and legacy-scope posts always get OK. */
 enum fleet_board_result fleet_board_wiki_room(
-    struct node_db *ndb, const struct fleet_board_post *post, bool *evict,
-    uint8_t victim[32]);
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
+    bool *evict, uint8_t victim[32]);
 
 /* True when `body_bytes` more of wiki rows still fit in half the byte cap. */
 bool fleet_board_wiki_bytes_fit(struct node_db *ndb, int64_t body_bytes);

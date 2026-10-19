@@ -70,8 +70,9 @@ static const char *const k_result_strings[] = {
         "rolling window",
     [FLEET_BOARD_ERR_WIKI_FULL] =
         "this key holds its ceiling of wiki revisions and either none is "
-        "superseded by a newer one, or this revision is older than a stored "
-        "revision of its page, so nothing can be replaced",
+        "superseded by a newer one and none has outlived its ttl, or this "
+        "revision is older than a stored revision of its page, so nothing "
+        "can be replaced",
 };
 static_assert(sizeof k_result_strings / sizeof k_result_strings[0] ==
                   (size_t)FLEET_BOARD_ERR_WIKI_FULL + 1u,

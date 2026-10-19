@@ -60,6 +60,7 @@ struct board_wiki_row {
     uint8_t id[32];
     char slug[FLEET_BOARD_SLUG_MAX + 1];
     int64_t created_at;
+    int64_t expires_at;   /* created_at + ttl, as stored */
 };
 enum { BOARD_WIKI_SCAN_MAX = FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX };
 
@@ -99,6 +100,7 @@ static int board_wiki_rows(struct node_db *ndb,
         memcpy(rows[n].id, row.post.id, 32);
         (void)snprintf(rows[n].slug, sizeof(rows[n].slug), "%s", row.post.slug);
         rows[n].created_at = (int64_t)row.post.created_at;
+        rows[n].expires_at = row.expires_at;
         rows[n].review = kind == FLEET_WIKI_REVIEW_VALID;
         n++;
     }
@@ -131,7 +133,7 @@ static bool board_wiki_plain_superseded(const struct board_wiki_row *rows,
 
 static bool board_wiki_pick_victim(const struct board_wiki_row *rows, int n,
                                    const struct fleet_board_post *post,
-                                   uint8_t victim[32])
+                                   int64_t now, uint8_t victim[32])
 {
     struct json_value review;
     enum fleet_wiki_review_status kind = fleet_wiki_review_parse(
@@ -151,16 +153,28 @@ static bool board_wiki_pick_victim(const struct board_wiki_row *rows, int n,
         if (rows[i].review) continue;
         if (board_wiki_plain_superseded(rows, n, i, post, incoming_review)) { memcpy(victim, rows[i].id, 32); return true; }
     }
+    /* No superseded revision: the key's oldest plain revision whose own
+     * lifetime has elapsed. Rows are ordered oldest first, so the first hit
+     * is the oldest. Review rows and unexpired rows are never taken, and the
+     * incoming post is not stored yet so it cannot be named. */
+    for (int i = 0; i < n; i++) {
+        if (rows[i].review || rows[i].expires_at > now) continue;
+        memcpy(victim, rows[i].id, 32);
+        return true;
+    }
     return false;
 }
 
 /* The wiki stored leg, decided under the board write lock: room, or the id
- * of this key's own oldest superseded revision to replace, or the final
- * refusal. Only this key's rows in this scope are ever read, so an
- * incoming revision can never name another key's row. */
+ * of this key's own oldest superseded revision to replace (failing that,
+ * its oldest plain revision whose ttl has elapsed as of `now`), or the final
+ * refusal. Wiki rows stay resident past their ttl, but under quota pressure
+ * an expired plain revision is the replaceable one; a future pin flag will
+ * exempt pinned pages. Only this key's rows in this scope are ever read,
+ * so an incoming revision can never name another key's row. */
 enum fleet_board_result fleet_board_wiki_room(
-    struct node_db *ndb, const struct fleet_board_post *post, bool *evict,
-    uint8_t victim[32])
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
+    bool *evict, uint8_t victim[32])
 {
     *evict = false;
     if (post->kind != FLEET_BOARD_KIND_WIKI ||
@@ -176,7 +190,7 @@ enum fleet_board_result fleet_board_wiki_room(
         return FLEET_BOARD_OK;
     static struct board_wiki_row rows[BOARD_WIKI_SCAN_MAX];
     int n = board_wiki_rows(ndb, post, rows);
-    if (n < 0 || !board_wiki_pick_victim(rows, n, post, victim))
+    if (n < 0 || !board_wiki_pick_victim(rows, n, post, now, victim))
         return FLEET_BOARD_ERR_WIKI_FULL;
     *evict = true;
     return FLEET_BOARD_OK;

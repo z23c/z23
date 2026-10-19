@@ -69,8 +69,10 @@ enum {
      * wiki writes can never crowd out messages. Wiki revisions are durable
      * history that expiry reclaim never takes back. A key at its stored
      * ceiling replaces its own oldest superseded revision (one with a later
-     * revision of the same slug by the same key in the same scope) and is
-     * refused only when every stored revision is the newest of its slug.
+     * revision of the same slug by the same key in the same scope). Failing
+     * that it replaces its oldest plain revision whose ttl has elapsed (never
+     * a review row); a future pin flag will exempt pinned pages. It is
+     * refused when neither exists.
      * Wiki rows together may use at most half of FLEET_BOARD_STORE_MAX_BYTES. */
     FLEET_BOARD_WIKI_QUOTA_WINDOW_MAX = 20,          /* revisions / key / window */
     FLEET_BOARD_WIKI_QUOTA_STORED_MAX = 200,         /* stored revisions / key */

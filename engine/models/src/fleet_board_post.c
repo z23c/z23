@@ -666,7 +666,7 @@ static enum fleet_board_result board_append_locked(
 {
     bool evict = false;
     uint8_t victim[32];
-    enum fleet_board_result r = fleet_board_wiki_room(ndb, post, &evict, victim);
+    enum fleet_board_result r = fleet_board_wiki_room(ndb, post, now, &evict, victim);
     if (r != FLEET_BOARD_OK)
         return r;
     if (!evict)

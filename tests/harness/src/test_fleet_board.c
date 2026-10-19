@@ -2654,6 +2654,22 @@ static enum fleet_board_result fb_test_put_rev(struct node_db *db,
     return db_fleet_board_post_ingest(db, out, now, NULL);
 }
 
+/* fb_test_put_rev with a day-long ttl, for fixtures whose ingest clock runs
+ * past an hour: the rows must stay unexpired. */
+static enum fleet_board_result fb_test_put_rev_day(struct node_db *db,
+                                                   const char *slug, int n,
+                                                   uint8_t who, int64_t now,
+                                                   struct fleet_board_post *out)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(who, seed, pk);
+    fb_test_wiki_rev(out, slug, n, seed, pk, now);
+    out->ttl = 86400;
+    if (fleet_board_post_sign(out, seed, pk) != FLEET_BOARD_OK)
+        return FLEET_BOARD_ERR_SIGNATURE;
+    return db_fleet_board_post_ingest(db, out, now, NULL);
+}
+
 static int test_fleet_board_wiki_stored_ceiling(void)
 {
     int failures = 0;
@@ -2713,7 +2729,7 @@ static int test_fleet_board_wiki_all_newest_refuses(void)
             char slug[16];
             (void)snprintf(slug, sizeof(slug), "s-%d", i);
             now += 31;
-            ASSERT_EQ(fb_test_put_rev(&db, slug, i, 25, now,
+            ASSERT_EQ(fb_test_put_rev_day(&db, slug, i, 25, now,
                                       i == 0 ? &s0 : &p),
                       FLEET_BOARD_OK);
         }
@@ -2879,6 +2895,110 @@ static int test_fleet_board_wiki_replacement_rules(void)
         ASSERT(fb_chain_ok(&db));
         node_db_close(&db);
         zcl_fleet_role_checker_install_permissive_for_testing();
+        db_fleet_board_test_set_wiki_limits(0, 0);
+        PASS();
+    } _test_next:;
+    db_fleet_board_test_set_wiki_limits(0, 0);
+    return failures;
+}
+
+/* fb_put_wiki with an explicit ttl: `created_at` is an offset inside the
+ * post's live window, so the row is created at now - 3000 + created_at. */
+static enum fleet_board_result fb_put_wiki_ttl(struct node_db *db, uint8_t who,
+                                               const char *slug,
+                                               int64_t created_at,
+                                               uint32_t ttl, int tag,
+                                               int64_t now,
+                                               struct fleet_board_post *out)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(who, seed, pk);
+    char text[32];
+    (void)snprintf(text, sizeof(text), "t%d body", tag);
+    fb_test_compose(out, FLEET_BOARD_KIND_WIKI, "budget", text,
+                    (uint64_t)(now - 3000 + created_at), ttl);
+    fb_test_scope(out, FB_PUB, "general");
+    (void)snprintf(out->slug, sizeof(out->slug), "%s", slug);
+    (void)snprintf(out->title, sizeof(out->title), "%s", slug);
+    if (fleet_board_post_sign(out, seed, pk) != FLEET_BOARD_OK)
+        return FLEET_BOARD_ERR_SIGNATURE;
+    return db_fleet_board_post_ingest(db, out, now, NULL);
+}
+
+static int test_fleet_board_wiki_expired_evict(void)
+{
+    int failures = 0;
+    TEST("fleet board: at the ceiling a key with no superseded revision "
+        "replaces its oldest expired plain revision, keeps unexpired and "
+        "review rows, and still prefers a superseded revision") {
+        struct node_db db;
+        struct fleet_board_post a, b, c, d, in;
+        const int64_t n0 = 3000000;
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        db_fleet_board_test_set_wiki_limits(1000, 3);
+
+        /* a: three short-lived pages; A and B have outlived their ttl. */
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        db_fleet_board_test_reset_wiki_evictions();
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 51, "pa", 2900, 120, 1, n0, &a),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 51, "pb", 2950, 120, 2, n0, &b),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 51, "pc", 3000, 120, 3, n0, &c),
+                  FLEET_BOARD_OK);
+        /* b: nothing has expired yet, so the ceiling still refuses. */
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 51, "pd", 3000, 3600, 4, n0 + 10, &d),
+                  FLEET_BOARD_ERR_WIKI_FULL);
+        ASSERT(!db_fleet_board_have(&db, d.id));
+        ASSERT(db_fleet_board_have(&db, a.id));
+        /* a: A and B expired, C not; the oldest expired row makes room. */
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 51, "pd", 3000, 3600, 4, n0 + 100, &d),
+                  FLEET_BOARD_OK);
+        ASSERT(!db_fleet_board_have(&db, a.id));
+        ASSERT(db_fleet_board_have(&db, b.id));
+        ASSERT(db_fleet_board_have(&db, c.id));
+        ASSERT(db_fleet_board_have(&db, d.id));
+        ASSERT(fb_chain_ok(&db));
+        node_db_close(&db);
+
+        /* d: a superseded revision wins over an older expired page. */
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        db_fleet_board_test_reset_wiki_evictions();
+        struct fleet_board_post s1, s2;
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 52, "old", 2900, 120, 5, n0, &a),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 52, "s", 2950, 120, 6, n0, &s1),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 52, "s", 3000, 120, 7, n0, &s2),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 52, "new", 3000, 3600, 8, n0 + 130,
+                                  &in), FLEET_BOARD_OK);
+        ASSERT(!db_fleet_board_have(&db, s1.id));
+        ASSERT(db_fleet_board_have(&db, a.id));
+        ASSERT(db_fleet_board_have(&db, s2.id));
+        node_db_close(&db);
+
+        /* c: an expired review row is lineage evidence, never a victim. */
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        db_fleet_board_test_reset_wiki_evictions();
+        struct fleet_board_post target, review, other;
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 53, "tgt", 3000, 3600, 9, n0, &target),
+                  FLEET_BOARD_OK);
+        ASSERT(fb_review_compose(&review, 53, target.id, NULL, "approve",
+                                 "ok", (uint64_t)n0));
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &review, n0, NULL),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 53, "oth", 3000, 3600, 10, n0,
+                                  &other), FLEET_BOARD_OK);
+        ASSERT_EQ(fb_put_wiki_ttl(&db, 53, "nxt", 3000, 3600, 11, n0 + 1000,
+                                  &in), FLEET_BOARD_ERR_WIKI_FULL);
+        ASSERT(db_fleet_board_have(&db, review.id));
+        ASSERT(db_fleet_board_have(&db, target.id));
+        ASSERT(db_fleet_board_have(&db, other.id));
+        node_db_close(&db);
         db_fleet_board_test_set_wiki_limits(0, 0);
         PASS();
     } _test_next:;
@@ -7142,6 +7262,7 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_board_wiki_half_store_bound();
     failures += test_fleet_board_wiki_replacement_rules();
     failures += test_fleet_board_wiki_replacement_chain();
+    failures += test_fleet_board_wiki_expired_evict();
     failures += test_fleet_board_wiki_replacement_rolls_back();
     failures += test_fleet_board_wiki_replacement_node_cap();
     failures += test_fleet_board_stored_ceilings_are_separate();
