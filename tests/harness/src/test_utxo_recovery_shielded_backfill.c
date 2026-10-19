@@ -369,6 +369,53 @@ int test_utxo_recovery_shielded_backfill(void)
         node_db_close(&ndb);
     }
 
+    /* ---- (e) a failed value write must not certify coverage in the cursor ---- */
+    {
+        test_make_tmpdir(dir, sizeof(dir), "shielded_backfill", "write_fail");
+        snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
+
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        SBF_CHECK("(e) node.db opens", node_db_open(&ndb, ndb_path));
+
+        struct main_state ms;
+        main_state_init(&ms);
+        SBF_CHECK("(e) shielded block installed",
+                  sbf_install(&ms, 1, 5001) != NULL);
+
+        uint8_t real_sol[64], real_cw[32], real_sr[32];
+        memset(real_sol, 0xAC, sizeof(real_sol));
+        memset(real_cw, 0xCE, sizeof(real_cw));
+        memset(real_sr, 0xF0, sizeof(real_sr));
+        struct uint256 h1;
+        sbf_hash_for(1, &h1);
+        SBF_CHECK("(e) real row pre-inserted",
+                  sbf_insert_real_row(&ndb, &h1, 1, real_sol,
+                                      (int)sizeof(real_sol), real_cw, real_sr));
+        SBF_CHECK("(e) write-failure trigger installs",
+                  sqlite3_exec(ndb.db,
+                      "CREATE TRIGGER fail_shielded_backfill_update "
+                      "BEFORE UPDATE OF sapling_value,sprout_value ON blocks "
+                      "WHEN NEW.height=1 BEGIN "
+                      "SELECT RAISE(ABORT,'shielded value write refused'); END",
+                      NULL, NULL, NULL) == SQLITE_OK);
+
+        int updated = -1;
+        struct zcl_result r = utxo_recovery_backfill_shielded_range(
+            &ndb, NULL, &ms, dir, 1, 1, &updated);
+        SBF_CHECK("(e) rejected value write fails the pass", !r.ok);
+        SBF_CHECK("(e) failed pass leaves out_updated untouched", updated == -1);
+        int64_t cur = -1;
+        SBF_CHECK("(e) failed write leaves coverage cursor unset",
+                  !node_db_state_get_int(&ndb, "shielded_backfill_height",
+                                         &cur));
+        SBF_CHECK("(e) failed write leaves value unchanged",
+                  sbf_read_col_int(&ndb, 1, "sapling_value") == 0);
+
+        main_state_free(&ms);
+        node_db_close(&ndb);
+    }
+
     printf("=== shielded backfill: %d failure(s) ===\n", failures);
     return failures;
 }

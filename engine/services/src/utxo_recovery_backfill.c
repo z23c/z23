@@ -65,6 +65,88 @@ static struct zcl_result backfill_validate_args(
     return ZCL_OK;
 }
 
+/* The cursor is a proof that every covered row is durable.  Once this writer
+ * owns a transaction, any persistence failure must discard the whole current
+ * batch rather than let a later cursor write certify a missing value. */
+static bool backfill_abort_write(struct node_db *ndb, sqlite3_stmt *upd,
+                                 sqlite3_stmt *ins, const char *operation)
+{
+    LOG_WARN("utxo_recovery", "backfill: %s failed: %s", operation,
+             sqlite3_errmsg(ndb->db));
+    if (!node_db_rollback(ndb))
+        LOG_WARN("utxo_recovery", "backfill: rollback after %s failed: %s",
+                 operation, sqlite3_errmsg(ndb->db));
+    sqlite3_finalize(upd);
+    sqlite3_finalize(ins);
+    return false;
+}
+
+static bool backfill_open_write(struct node_db *ndb, sqlite3_stmt **upd_out,
+                                sqlite3_stmt **ins_out)
+{
+    sqlite3_stmt *upd = NULL;
+    sqlite3_stmt *ins = NULL;
+    if (sqlite3_prepare_v2(
+            ndb->db,
+            "UPDATE blocks SET sapling_value=?, sprout_value=? WHERE hash=?",
+            -1, &upd, NULL) != SQLITE_OK) {
+        LOG_WARN("utxo_recovery", "backfill: prepare UPDATE failed: %s",
+                 sqlite3_errmsg(ndb->db));
+        return false;
+    }
+    if (sqlite3_prepare_v2(
+            ndb->db,
+            "INSERT INTO blocks"
+            "(hash,height,prev_hash,version,merkle_root,"
+            "time,bits,nonce,solution,chain_work,status,"
+            "file_num,data_pos,undo_pos,num_tx,"
+            "sapling_root,sprout_root,sapling_value,sprout_value)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)",
+            -1, &ins, NULL) != SQLITE_OK) {
+        sqlite3_finalize(upd);
+        LOG_WARN("utxo_recovery", "backfill: prepare INSERT failed: %s",
+                 sqlite3_errmsg(ndb->db));
+        return false;
+    }
+    if (!node_db_begin(ndb)) {
+        sqlite3_finalize(upd);
+        sqlite3_finalize(ins);
+        LOG_WARN("utxo_recovery", "backfill: begin transaction failed: %s",
+                 sqlite3_errmsg(ndb->db));
+        return false;
+    }
+    *upd_out = upd;
+    *ins_out = ins;
+    return true;
+}
+
+static bool backfill_mark_empty_range(struct node_db *ndb, int tip)
+{
+    if (!node_db_state_set_int(ndb, "shielded_backfill_height", tip)) {
+        LOG_WARN("utxo_recovery", "backfill: persist empty-range cursor failed: %s",
+                 sqlite3_errmsg(ndb->db));
+        return false;
+    }
+    return true;
+}
+
+static bool backfill_finish_write(struct node_db *ndb, sqlite3_stmt *upd,
+                                  sqlite3_stmt *ins, int reached, int start,
+                                  int updated, struct shielded_backfill_ctx *bctx)
+{
+    if (!node_db_state_set_int(ndb, "shielded_backfill_height", reached))
+        return backfill_abort_write(ndb, upd, ins, "persist final cursor");
+    if (!node_db_commit(ndb))
+        return backfill_abort_write(ndb, upd, ins, "commit final value batch");
+    sqlite3_finalize(upd);
+    sqlite3_finalize(ins);
+    bctx->updated = updated;
+    printf("Shielded backfill: covered (%d,%d] — %d blocks carried "
+           "JoinSplit/Sapling values\n", start - 1, reached, updated);
+    fflush(stdout);
+    return true;
+}
+
 static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
 {
     struct shielded_backfill_ctx *bctx = ctx_ptr;
@@ -81,9 +163,8 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
 
     if (tip < start) {
         /* Nothing above the cursor; monotonically advance to the tip. */
-        node_db_state_set_int(ndb, "shielded_backfill_height", tip);
         bctx->updated = 0;
-        return true;
+        return backfill_mark_empty_range(ndb, tip);
     }
 
     /* This backfill only DERIVES the two shielded-value columns; it must never
@@ -93,39 +174,19 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
      * clobbered every other column with empty/NULL, wiping the real solution and
      * chain_work of any suffix block already populated by normal sync. Rows are
      * keyed by hash (the blocks PK); height is NOT unique across forks. */
-    sqlite3_stmt *upd = NULL;
-    if (sqlite3_prepare_v2(
-            ndb->db,
-            "UPDATE blocks SET sapling_value=?, sprout_value=? WHERE hash=?",
-            -1, &upd, NULL) != SQLITE_OK)
-        LOG_FAIL("utxo_recovery", "backfill: prepare UPDATE failed: %s",
-                 sqlite3_errmsg(ndb->db));
-
     /* Fallback only for a hash with no existing row (a shielded block above the
      * blocks-table population). An UPDATE that matched 0 rows must NOT silently
      * drop the computed value, so we INSERT a full row using the REAL fields
      * from the in-memory block_index (solution/chain_work/undo_pos/sapling_root),
      * never empty placeholders. On the active chain the row essentially always
      * exists, so this path is a rarely-taken safety net. */
+    sqlite3_stmt *upd = NULL;
     sqlite3_stmt *ins = NULL;
-    if (sqlite3_prepare_v2(
-            ndb->db,
-            "INSERT INTO blocks"
-            "(hash,height,prev_hash,version,merkle_root,"
-            "time,bits,nonce,solution,chain_work,status,"
-            "file_num,data_pos,undo_pos,num_tx,"
-            "sapling_root,sprout_root,sapling_value,sprout_value)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)",
-            -1, &ins, NULL) != SQLITE_OK) {
-        sqlite3_finalize(upd);
-        LOG_FAIL("utxo_recovery", "backfill: prepare INSERT failed: %s",
-                 sqlite3_errmsg(ndb->db));
-    }
+    if (!backfill_open_write(ndb, &upd, &ins))
+        return false;
 
     int updated = 0, scanned = 0;
     int cursor_committed = start - 1;   /* durable floor already proven */
-    node_db_begin(ndb);
-
     int h = start;
     for (; h <= tip; h++) {
         struct block_index *bi = active_chain_at(chain, h);
@@ -171,10 +232,7 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
 
             bool wrote = false;
             if (AR_STEP_WRITE(upd) != SQLITE_DONE) {
-                static int uerrs = 0;
-                if (++uerrs <= 3)
-                    LOG_INFO("chain", "backfill UPDATE h=%d: %s", bi->nHeight,
-                             sqlite3_errmsg(ndb->db));
+                return backfill_abort_write(ndb, upd, ins, "UPDATE value row");
             } else if (sqlite3_changes(ndb->db) > 0) {
                 wrote = true;
             } else {
@@ -208,10 +266,8 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
                 sqlite3_bind_int64(ins, 17, sapling_val);
                 sqlite3_bind_int64(ins, 18, sprout_val);
                 if (AR_STEP_WRITE(ins) != SQLITE_DONE) {
-                    static int ierrs = 0;
-                    if (++ierrs <= 3)
-                        LOG_INFO("chain", "backfill INSERT h=%d: %s", bi->nHeight,
-                                 sqlite3_errmsg(ndb->db));
+                    return backfill_abort_write(ndb, upd, ins,
+                                                "INSERT value row");
                 } else {
                     wrote = true;
                 }
@@ -223,11 +279,19 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
         if (++scanned >= SHIELDED_BACKFILL_SCAN_BATCH) {
             /* Cursor advance is part of THIS transaction: the covering rows
              * and the cursor commit atomically together (crash-safe). */
+            if (!node_db_state_set_int(ndb, "shielded_backfill_height", h))
+                return backfill_abort_write(ndb, upd, ins,
+                                            "persist batch cursor");
+            if (!node_db_commit(ndb))
+                return backfill_abort_write(ndb, upd, ins,
+                                            "commit value batch");
             cursor_committed = h;
-            node_db_state_set_int(ndb, "shielded_backfill_height",
-                                  cursor_committed);
-            node_db_commit(ndb);
-            node_db_begin(ndb);
+            if (!node_db_begin(ndb)) {
+                sqlite3_finalize(upd);
+                sqlite3_finalize(ins);
+                LOG_FAIL("utxo_recovery", "backfill: begin next batch failed: %s",
+                         sqlite3_errmsg(ndb->db));
+            }
             scanned = 0;
             printf("  backfill: scanned through h=%d (%d shielded rows)...\n",
                    h, updated);
@@ -240,16 +304,7 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
     int reached = h - 1;
     if (reached < cursor_committed)
         reached = cursor_committed;
-    node_db_state_set_int(ndb, "shielded_backfill_height", reached);
-    node_db_commit(ndb);
-    sqlite3_finalize(upd);
-    sqlite3_finalize(ins);
-
-    bctx->updated = updated;
-    printf("Shielded backfill: covered (%d,%d] — %d blocks carried "
-           "JoinSplit/Sapling values\n", start - 1, reached, updated);
-    fflush(stdout);
-    return true;
+    return backfill_finish_write(ndb, upd, ins, reached, start, updated, bctx);
 }
 
 struct zcl_result utxo_recovery_backfill_shielded_range(struct node_db *ndb,
