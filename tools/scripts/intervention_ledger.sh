@@ -112,7 +112,7 @@ HEARTBEAT_SEC="${ZCL_INTERVENE_HEARTBEAT_SEC:-86400}"
 # Watched units. Deliberately NOT auto-discovered: a collector that decides
 # for itself what to watch quietly stops watching the thing you cared about
 # the day its name changes.
-UNITS_RAW="${ZCL_INTERVENE_UNITS:-zclassic23.service}"
+UNITS_RAW="${ZCL_INTERVENE_UNITS:-z23-node.service}"
 
 units_list() { printf '%s' "$UNITS_RAW" | tr ',' ' '; }
 

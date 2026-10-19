@@ -12,7 +12,7 @@
 # never docker.
 #
 # It is fully ISOLATED from the live node:
-#   - a DISTINCT unit name `zclassic23-citest.service` (NEVER touches the live
+#   - a DISTINCT unit name `z23-citest.service` (NEVER touches the live
 #     `z23-node.service`),
 #   - the binaries installed by the REAL `make install` to a throwaway /tmp
 #     prefix (DESTDIR set => the live --user unit install is skipped),
@@ -32,7 +32,7 @@ REPO_ROOT="$(cd "$GATE_DIR/../.." && pwd)"
 gate_skip() { echo "ci-install-linger: SKIP ($*)"; exit 2; }
 gate_die()  { echo "ci-install-linger: FAIL: $*" >&2; exit 1; }
 
-UNIT="zclassic23-citest"
+UNIT="z23-citest"
 USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT_FILE="$USER_UNIT_DIR/$UNIT.service"
 PREFIX=""
@@ -51,7 +51,7 @@ systemctl --user show-environment >/dev/null 2>&1 || gate_skip "no systemd --use
 cleanup() {
     systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
     systemctl --user disable "$UNIT" >/dev/null 2>&1 || true
-    case "$UNIT_FILE" in */systemd/user/zclassic23-citest.service) rm -f "$UNIT_FILE" ;; esac
+    case "$UNIT_FILE" in */systemd/user/z23-citest.service) rm -f "$UNIT_FILE" ;; esac
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     case "${PREFIX:-}"  in /tmp/zcl-linger-prefix.*) rm -rf "$PREFIX"  2>/dev/null || true ;; esac
     case "${DATADIR:-}" in /tmp/zcl-linger-dd.*)     rm -rf "$DATADIR" 2>/dev/null || true ;; esac

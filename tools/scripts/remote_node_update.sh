@@ -221,7 +221,7 @@ main() {
     main_ref="${ZCL_REMOTE_MAIN_REF:-origin/main}"
     build="${ZCL_REMOTE_BUILD:-fast-rebuild}"
     allow_dirty="${ZCL_REMOTE_ALLOW_DIRTY:-0}"
-    unit="${ZCL_REMOTE_UNIT:-zclassic23-test.service}"
+    unit="${ZCL_REMOTE_UNIT:-z23-test.service}"
 
     case "$main_ref" in
         origin/main|refs/remotes/origin/main) ;;
@@ -287,7 +287,7 @@ run_one_host() {
     env_prefix="$env_prefix ZCL_REMOTE_BUILD=$(shell_quote "${ZCL_REMOTE_BUILD:-fast-rebuild}")"
     env_prefix="$env_prefix ZCL_REMOTE_DRY_RUN=1"
     env_prefix="$env_prefix ZCL_REMOTE_ALLOW_DIRTY=$(shell_quote "${ZCL_REMOTE_ALLOW_DIRTY:-0}")"
-    env_prefix="$env_prefix ZCL_REMOTE_UNIT=$(shell_quote "${ZCL_REMOTE_UNIT:-zclassic23-test.service}")"
+    env_prefix="$env_prefix ZCL_REMOTE_UNIT=$(shell_quote "${ZCL_REMOTE_UNIT:-z23-test.service}")"
     env_prefix="$env_prefix ZCL_REMOTE_JSON=$(shell_quote "${ZCL_REMOTE_JSON:-0}")"
 
     if is_self_host "$host"; then
@@ -298,7 +298,7 @@ run_one_host() {
             ZCL_REMOTE_BUILD="${ZCL_REMOTE_BUILD:-fast-rebuild}" \
             ZCL_REMOTE_DRY_RUN=1 \
             ZCL_REMOTE_ALLOW_DIRTY="${ZCL_REMOTE_ALLOW_DIRTY:-0}" \
-            ZCL_REMOTE_UNIT="${ZCL_REMOTE_UNIT:-zclassic23-test.service}" \
+            ZCL_REMOTE_UNIT="${ZCL_REMOTE_UNIT:-z23-test.service}" \
             ZCL_REMOTE_JSON="${ZCL_REMOTE_JSON:-0}" \
             bash -s
         return

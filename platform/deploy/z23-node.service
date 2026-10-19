@@ -54,7 +54,7 @@ NotifyAccess=main
 # optional: a fresh clone without the env file still starts cleanly and
 # discovers peers through the compiled-in seeds, the .onion directory
 # seeds and addrman gossip. There is no DNS fallback: chainparams sets
-# nSeeds = 0 and the node resolves no hostname and trusts no certificate
+# nSeeds = 0 and the node resolves no hostname and accepts no certificate
 # authority. See
 # platform/deploy/z23-node.env.example for the expected variable shape.
 # Explicit empty defaults keep the optional-file path genuinely silent: a
@@ -68,7 +68,7 @@ Environment="ZCL_CHECKPOINT_BUNDLE_SOURCE="
 EnvironmentFile=-%h/.config/zclassic23/env
 
 # Bundle bootstrap (platform/deploy/z23-bundle-bootstrap.sh, docs/ROM_DELIVERY.md
-# "Local bundle bootstrap"): BYTE DELIVERY ONLY, not a trust decision — stages
+# "Local bundle bootstrap"): BYTE DELIVERY ONLY, not an acceptance decision — stages
 # $ZCL_CHECKPOINT_BUNDLE_SOURCE (set in ~/.config/zclassic23/env; see
 # platform/deploy/z23-node.env.example) into <datadir>/bundles/ so the zero-flag
 # cold-boot autodetect below finds it with no operator action at boot. A no-op
@@ -132,7 +132,7 @@ ExecStop=/bin/sh -c 'for i in 1 2 3; do /bin/kill -TERM "$MAINPID" 2>/dev/null |
 # mint whose work SUCCEEDED but whose teardown was force-exited past the
 # durability point records outcome=forced-after-durable there, NOT a failure.
 # systemd's own Result can still read `timeout`/`failed` in that case, so stamp
-# it next to the receipt: operators/tools compare the two and trust the
+# it next to the receipt: operators/tools compare the two and verify against the
 # datadir. The leading `-` keeps a stamp failure from masking the real result.
 ExecStopPost=-/bin/sh -c 'printf "service_result=%s\nexit_code=%s\nexit_status=%s\n" "$SERVICE_RESULT" "$EXIT_CODE" "$EXIT_STATUS" > %h/.zclassic-c23/shutdown-systemd-result.v1'
 

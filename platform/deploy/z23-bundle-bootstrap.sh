@@ -9,9 +9,9 @@
 # new datadir instead of a 15-20h from-genesis fold or the legacy two-step
 # --importblockindex recipe.
 #
-# SOVEREIGNTY: this script is a courier, not a trust boundary. It never
+# SOVEREIGNTY: this script is a courier, not a verification boundary. It never
 # opens, parses, or validates the bundle's consensus content, and staging a
-# bundle here does not make it trusted. The ONE trust boundary is exactly
+# bundle here does not make it verified. The ONE verification boundary is exactly
 # where it already is: the RECEIPT / CHECKPOINT_ROM / CHECKPOINT_CONTENT
 # authority resolved at INSTALL time
 # (engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c), which
@@ -19,7 +19,7 @@
 # Sprout anchor history, nullifier history) against the compiled-in
 # checkpoint (core/chainparams/src/checkpoints.c) before ever lifting
 # admission containment. A bundle staged by this script is exactly as
-# untrusted, until that gate passes, as one fetched cold from a stranger
+# unverified, until that gate passes, as one fetched cold from a stranger
 # over ROM delivery (docs/ROM_DELIVERY.md) — see docs/ROM_DELIVERY.md
 # "Local bundle bootstrap" for the full write-up of why that is fine.
 #
@@ -157,5 +157,5 @@ sync 2>/dev/null || true
 log "PASS: staged $DEST (sha3 $dest_sha3)"
 log "the next zero-flag boot's cold-boot autodetect will find it; the"
 log "RECEIPT/CHECKPOINT_ROM/CHECKPOINT_CONTENT authority at install time"
-log "decides whether it is ever trusted — this script never does"
+log "decides whether it is ever accepted — this script never does"
 exit 0

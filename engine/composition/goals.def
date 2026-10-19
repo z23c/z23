@@ -48,7 +48,7 @@ Z23_GOAL("G13", "Agent productivity",
          "every lead busy on its own lane; review never the bottleneck")
 
 Z23_GOAL("C1", "Single-binary install on clean Ubuntu/Debian",
-         "clean container: make install && systemctl --user start zclassic23 exits 0")
+         "clean container: make install && systemctl --user start z23-node exits 0")
 Z23_GOAL("C2", "Tor onion bootstrap in under 60 s",
          "bootstrap_state=ready within 60 s of start")
 Z23_GOAL("C3", "Cold-start sync to tip in under 10 min",

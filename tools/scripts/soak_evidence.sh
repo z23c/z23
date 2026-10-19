@@ -129,7 +129,7 @@ SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 EVIDENCE_DIR="${ZCL_SOAK_EVIDENCE_DIR:-${HOME:-/root}/.local/state/z23-soak-evidence}"
 EVIDENCE_FILE="$EVIDENCE_DIR/evidence.jsonl"
-SOAK_UNIT="${ZCL_SOAK_UNIT:-zclassic23-soak}"
+SOAK_UNIT="${ZCL_SOAK_UNIT:-z23-soak}"
 
 # Cadence contract: the timer fires hourly (RandomizedDelaySec=120). A
 # sampling hole is judged against 2x cadence + 15 min slack so one missed

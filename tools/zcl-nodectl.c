@@ -27,6 +27,8 @@
 
 extern char **environ;
 
+#define NODE_UNIT "z23-node"
+
 enum { MAX_BUF = 1024 * 1024, SMALL_BUF = 4096 };
 
 struct rpc_auth {
@@ -399,7 +401,7 @@ static int run_cmd(const char *const argv[])
 
 static bool service_is_active(void)
 {
-    const char *argv[] = {"systemctl", "--user", "is-active", "zclassic23", NULL};
+    const char *argv[] = {"systemctl", "--user", "is-active", NODE_UNIT, NULL};
     char out[256];
     int rc = run_cmd_capture(argv, out, sizeof(out));
     trim_line(out);
@@ -408,7 +410,7 @@ static bool service_is_active(void)
 
 static pid_t service_main_pid(void)
 {
-    const char *argv[] = {"systemctl", "--user", "show", "-p", "MainPID", "--value", "zclassic23", NULL};
+    const char *argv[] = {"systemctl", "--user", "show", "-p", "MainPID", "--value", NODE_UNIT, NULL};
     char out[256];
     if (run_cmd_capture(argv, out, sizeof(out)) != 0) return -1;
     trim_line(out);
@@ -418,15 +420,15 @@ static pid_t service_main_pid(void)
 
 static void systemctl_start(void)
 {
-    const char *reset_argv[] = {"systemctl", "--user", "reset-failed", "zclassic23", NULL};
-    const char *start_argv[] = {"systemctl", "--user", "start", "zclassic23", NULL};
+    const char *reset_argv[] = {"systemctl", "--user", "reset-failed", NODE_UNIT, NULL};
+    const char *start_argv[] = {"systemctl", "--user", "start", NODE_UNIT, NULL};
     (void)run_cmd(reset_argv);
     if (run_cmd(start_argv) != 0) die("systemctl start z23-node failed");
 }
 
 static void systemctl_stop(void)
 {
-    const char *stop_argv[] = {"systemctl", "--user", "stop", "zclassic23", NULL};
+    const char *stop_argv[] = {"systemctl", "--user", "stop", NODE_UNIT, NULL};
     (void)run_cmd(stop_argv);
 }
 
@@ -455,7 +457,7 @@ static void force_kill_service(void)
     sleep_ms(1000);
     systemctl_stop();
     {
-        const char *reset_argv[] = {"systemctl", "--user", "reset-failed", "zclassic23", NULL};
+        const char *reset_argv[] = {"systemctl", "--user", "reset-failed", NODE_UNIT, NULL};
         (void)run_cmd(reset_argv);
     }
 }
@@ -472,7 +474,7 @@ static void stop_service_gracefully(struct rpc_target *c23, int timeout_secs)
     systemctl_stop();
     if (wait_for_service_state(false, timeout_secs)) return;
 
-    fprintf(stderr, "zclassic23 did not stop cleanly; forcing SIGKILL\n");
+    fprintf(stderr, "z23-node did not stop cleanly; forcing SIGKILL\n");
     force_kill_service();
 }
 
@@ -558,14 +560,18 @@ static int cmd_status(struct rpc_target *legacy, struct rpc_target *c23)
 static int cmd_stop(struct rpc_target *c23)
 {
     stop_service_gracefully(c23, 30);
-    printf("zclassic23 stopped\n");
+    if (service_is_active()) {
+        fprintf(stderr, "%s is still active after stop\n", NODE_UNIT);
+        return 1;
+    }
+    printf("%s stopped\n", NODE_UNIT);
     return 0;
 }
 
 static int cmd_start(struct rpc_target *c23)
 {
     systemctl_start();
-    if (!rpc_ready(c23, 90)) die("zclassic23 RPC did not become ready");
+    if (!rpc_ready(c23, 90)) die("z23-node RPC did not become ready");
     printf("z23 started and RPC is ready\n");
     return 0;
 }
@@ -574,8 +580,8 @@ static int cmd_restart(struct rpc_target *c23)
 {
     stop_service_gracefully(c23, 30);
     systemctl_start();
-    if (!rpc_ready(c23, 90)) die("zclassic23 RPC did not become ready");
-    printf("zclassic23 restarted and RPC is ready\n");
+    if (!rpc_ready(c23, 90)) die("z23-node RPC did not become ready");
+    printf("z23-node restarted and RPC is ready\n");
     return 0;
 }
 
@@ -591,7 +597,7 @@ static int cmd_verify_follow(struct rpc_target *legacy,
         stop_service_gracefully(c23, 30);
         systemctl_start();
     }
-    if (!rpc_ready(c23, 90)) die("zclassic23 RPC did not become ready");
+    if (!rpc_ready(c23, 90)) die("z23-node RPC did not become ready");
 
     deadline = now_secs() + opts->timeout_secs;
     while (now_secs() < deadline) {
@@ -604,7 +610,7 @@ static int cmd_verify_follow(struct rpc_target *legacy,
         if (status_is_good(&status)) {
             stable++;
             if (stable >= opts->stable_samples) {
-                printf("PASS: zclassic23 reached legacy tip and stayed healthy for %d samples.\n",
+                printf("PASS: z23-node reached legacy tip and stayed healthy for %d samples.\n",
                        stable);
                 return 0;
             }
@@ -614,7 +620,7 @@ static int cmd_verify_follow(struct rpc_target *legacy,
         sleep_ms(opts->poll_secs * 1000);
     }
 
-    fprintf(stderr, "FAIL: zclassic23 did not prove catch-up to legacy tip within %d seconds.\n",
+    fprintf(stderr, "FAIL: z23-node did not prove catch-up to legacy tip within %d seconds.\n",
             opts->timeout_secs);
     return 1;
 }
@@ -719,21 +725,79 @@ static int cmd_launch(int argc, char **argv)
     return saved_errno == ENOENT ? 127 : 126;
 }
 
+/* Units renamed to NODE_UNIT. The old unit shares the datadir and the
+ * 8033/18232 listeners, so an install that enables NODE_UNIT while the old
+ * unit is active or enabled would start two nodes on one datadir. */
+#define LEGACY_NODE_UNIT "zclassic23.service"
+
+static bool legacy_unit_active(void)
+{
+    const char *argv[] = {"systemctl", "--user", "is-active", LEGACY_NODE_UNIT, NULL};
+    char out[256];
+    int rc = run_cmd_capture(argv, out, sizeof(out));
+    trim_line(out);
+    return rc == 0 && (strcmp(out, "active") == 0 ||
+                       strcmp(out, "activating") == 0 ||
+                       strcmp(out, "reloading") == 0);
+}
+
+static bool legacy_unit_enabled(void)
+{
+    const char *argv[] = {"systemctl", "--user", "is-enabled", LEGACY_NODE_UNIT, NULL};
+    char out[256];
+    int rc = run_cmd_capture(argv, out, sizeof(out));
+    trim_line(out);
+    return rc == 0 && (strncmp(out, "enabled", 7) == 0 ||
+                       strcmp(out, "linked") == 0 ||
+                       strcmp(out, "linked-runtime") == 0);
+}
+
+static int cmd_legacy_unit_check(void)
+{
+    bool active = legacy_unit_active();
+    bool enabled = legacy_unit_enabled();
+    if (!active && !enabled) return 0;
+    fprintf(stderr,
+            "REFUSE: %s is %s for this user. Installing %s would run two "
+            "nodes on one datadir and the same ports (8033, 18232).\n"
+            "Nothing was changed. Migrate the host deliberately, then rerun:\n"
+            "  systemctl --user show %s -p ActiveState -p UnitFileState "
+            "-p FragmentPath -p DropInPaths\n"
+            "  systemctl --user stop %s\n"
+            "  systemctl --user disable %s\n"
+            "Full procedure: docs/node/GETTING_STARTED.md#migrating-from-the-pre-rename-zclassic23service-unit\n",
+            LEGACY_NODE_UNIT,
+            active && enabled ? "active and enabled"
+                              : (active ? "active" : "enabled"),
+            NODE_UNIT ".service", LEGACY_NODE_UNIT, LEGACY_NODE_UNIT,
+            LEGACY_NODE_UNIT);
+    return 3;
+}
+
 static void usage(void)
 {
-    puts("Usage: zcl-nodectl <status|stop|start|restart|verify-follow|launch> [options]");
+    puts("Usage: zcl-nodectl <status|stop|start|restart|verify-follow|legacy-unit-check|launch> [options]");
     puts("");
     puts("Options for verify-follow:");
-    puts("  --restart          stop/start zclassic23 before polling");
+    puts("  --restart          stop/start z23-node before polling");
     puts("  --timeout N        total wait budget in seconds (default 900)");
     puts("  --poll N           poll interval in seconds (default 10)");
     puts("  --stable N         required consecutive healthy samples (default 3)");
 }
 
+/* Commands that need neither RPC targets nor option parsing; -1 if not one. */
+static int cmd_standalone(int argc, char **argv)
+{
+    if (argc < 2) return -1;
+    if (strcmp(argv[1], "launch") == 0) return cmd_launch(argc, argv);
+    if (strcmp(argv[1], "legacy-unit-check") == 0) return cmd_legacy_unit_check();
+    return -1;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc >= 2 && strcmp(argv[1], "launch") == 0)
-        return cmd_launch(argc, argv);
+    int standalone = cmd_standalone(argc, argv);
+    if (standalone >= 0) return standalone;
 
     static char legacy_dd[512], legacy_conf[512], legacy_cookie[512];
     static char c23_dd[512], c23_conf[512], c23_cookie[512];
@@ -754,7 +818,7 @@ int main(int argc, char **argv)
         .port = atoi(env_or_default("LEGACY_RPC_PORT", "8232"))
     };
     struct rpc_target c23 = {
-        .name = "zclassic23",
+        .name = "z23-node",
         .datadir = env_or_default("C23_DATADIR", c23_dd),
         .conf_path = env_or_default("C23_CONF", c23_conf),
         .cookie_path = env_or_default("C23_COOKIE", c23_cookie),

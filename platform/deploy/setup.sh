@@ -11,6 +11,27 @@ SERVICE_DIR="$(eval echo ~$TARGET_USER)/.config/systemd/user"
 
 echo "Setting up Z23 for user: $TARGET_USER"
 
+# Refuse to enable z23-node while the pre-rename unit is active or enabled:
+# both would bind the same datadir and ports. The migration is a separate step.
+legacy_state=""
+for verb in is-active is-enabled; do
+    st="$(su - "$TARGET_USER" -c "systemctl --user $verb zclassic23.service" 2>/dev/null || true)"
+    case "$verb:$st" in
+        is-active:active|is-active:activating|is-active:reloading|is-enabled:enabled*|is-enabled:linked*)
+            legacy_state="$legacy_state $st" ;;
+    esac
+done
+if [ -n "$legacy_state" ]; then
+    {
+        echo "REFUSE: zclassic23.service is$legacy_state for $TARGET_USER; enabling z23-node would run two nodes on one datadir and ports 8033/18232."
+        echo "Nothing was changed. Migrate deliberately, then rerun:"
+        echo "  systemctl --user stop zclassic23.service"
+        echo "  systemctl --user disable zclassic23.service"
+        echo "Procedure: docs/node/GETTING_STARTED.md#migrating-from-the-pre-rename-zclassic23service-unit"
+    } >&2
+    exit 3
+fi
+
 # Enable linger (service survives logout) — may already be enabled
 loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 

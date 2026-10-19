@@ -40,7 +40,7 @@
 # Env overrides:
 #   ZCL_RPC_BIN       path to the c23 zcl-rpc client (default build/bin/zcl-rpc)
 #   ZCL_NODE_BIN      path to the native command binary (default build/bin/zclassic23)
-#   ZCL_SOAK_UNIT     service unit/job used for runtime evidence (default zclassic23)
+#   ZCL_SOAK_UNIT     service unit/job used for runtime evidence (default z23-node)
 #   ZD_RPCPORT        zclassicd oracle RPC port for the parity probe (default 8232)
 #   TIP_GAP_OK        max blocks-behind-peer still counted "at tip" (default 10)
 #                     == ZCL_FINALITY_DEPTH; below this the chain is frozen.

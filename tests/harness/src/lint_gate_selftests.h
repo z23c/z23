@@ -490,6 +490,7 @@ int t_legacy_candidate_source_has_no_override_scope(void);
 int t_canonical_deploy_proof_binding_contract(void);
 /* lint_gate_receipt_selftests.c: the receipt wrapper signal contract. */
 int t_receipt_signals(void);
+int t_legacy_unit_guard_contract(void);
 int t_dev_lane_deploy_contract(void);
 int t_agent_fast_ci_contract(void);
 int t_slow_disk_progress_verdicts_contract(void);

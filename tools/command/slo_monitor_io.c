@@ -495,7 +495,7 @@ static void bind_canonical(struct slo_instance *at, const char *home)
     if (env_port && env_port[0])
         snprintf(port_text, sizeof(port_text), "%s", env_port);
     if (!datadir[0] || !port_text[0]) {
-        unit_exec_start("zclassic23.service", show, sizeof(show));
+        unit_exec_start("z23-node.service", show, sizeof(show));
         if (!datadir[0])
             (void)slo_unit_exec_arg(show, "datadir", datadir, sizeof(datadir));
         if (!port_text[0])
@@ -503,7 +503,7 @@ static void bind_canonical(struct slo_instance *at, const char *home)
                                     sizeof(port_text));
     }
     set_instance(at, "canonical", port_or(port_text, IO_CANON_PORT),
-                 datadir[0] ? datadir : fallback, "zclassic23.service");
+                 datadir[0] ? datadir : fallback, "z23-node.service");
 }
 
 static int oracle_port(const char *datadir, const char *show,

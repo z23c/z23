@@ -19,7 +19,7 @@ the two scripts must live side by side wherever the timer invokes them from
 — and never inside a checkout, because a `git worktree remove` or a lane
 teardown can delete the very file the timer is mid-execution on.
 `tools/scripts/install_host_gc.sh` copies both scripts to
-`~/.local/lib/z23/tools/` and writes `zclassic23-host-gc.timer` /
+`~/.local/lib/z23/tools/` and writes `z23-host-gc.timer` /
 `.service` into `~/.config/systemd/user/`, pointed at the installed copy,
 running hourly at a fixed offset with jitter. It only writes under those two
 directories and reloads the user systemd manager; it never touches a

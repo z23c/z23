@@ -18,7 +18,7 @@
 # Env-gated OFF by default (ZCL_GOLDEN_FRESHNESS=1 to run) so a plain `make
 # simnet-nightly` on a dev box with no live node — or a CI runner — stays a
 # clean SKIP, never a false FAIL. The systemd nightly timer
-# (deploy/zclassic23-simnet-nightly.*) is the intended caller once the
+# (deploy/z23-simnet-nightly.*) is the intended caller once the
 # operator wants this to actually page.
 #
 # No new binary: parses the two generated golden-table .c files as text

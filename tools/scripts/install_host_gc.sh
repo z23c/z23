@@ -30,7 +30,7 @@ usage() {
 usage: tools/scripts/install_host_gc.sh [--no-reload]
 
 Installs tools/scripts/host_gc.sh and tools/scripts/worktree_gc.sh into
-~/.local/lib/z23/tools/, and writes zclassic23-host-gc.timer/.service into
+~/.local/lib/z23/tools/, and writes z23-host-gc.timer/.service into
 ~/.config/systemd/user/ (hourly, ExecStart pointing at the installed copy).
 
 --no-reload   skip `systemctl --user daemon-reload` and enabling the timer
@@ -54,7 +54,7 @@ mkdir -p -- "$LIB_DIR" "$UNIT_DIR"
 install -m 0755 -- "$SCRIPT_DIR/host_gc.sh" "$LIB_DIR/host_gc.sh"
 install -m 0755 -- "$SCRIPT_DIR/worktree_gc.sh" "$LIB_DIR/worktree_gc.sh"
 
-cat > "$UNIT_DIR/zclassic23-host-gc.timer" <<'TIMER'
+cat > "$UNIT_DIR/z23-host-gc.timer" <<'TIMER'
 [Unit]
 Description=ZClassic23 Host Garbage Collector Timer
 
@@ -64,13 +64,13 @@ Description=ZClassic23 Host Garbage Collector Timer
 OnCalendar=*-*-* *:47:00
 RandomizedDelaySec=300
 Persistent=true
-Unit=zclassic23-host-gc.service
+Unit=z23-host-gc.service
 
 [Install]
 WantedBy=timers.target
 TIMER
 
-cat > "$UNIT_DIR/zclassic23-host-gc.service" <<SERVICE
+cat > "$UNIT_DIR/z23-host-gc.service" <<SERVICE
 [Unit]
 Description=ZClassic23 Host Garbage Collector
 
@@ -89,7 +89,7 @@ SERVICE
 if [ "$RELOAD" = 1 ]; then
     if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
         "$SYSTEMCTL_BIN" --user daemon-reload
-        "$SYSTEMCTL_BIN" --user enable --now zclassic23-host-gc.timer
+        "$SYSTEMCTL_BIN" --user enable --now z23-host-gc.timer
     else
         printf 'install-host-gc: %s not found — units written, not enabled\n' "$SYSTEMCTL_BIN" >&2
     fi
@@ -97,4 +97,4 @@ fi
 
 printf 'install-host-gc: installed %s and %s\n' "$LIB_DIR/host_gc.sh" "$LIB_DIR/worktree_gc.sh"
 printf 'install-host-gc: wrote %s and %s\n' \
-    "$UNIT_DIR/zclassic23-host-gc.timer" "$UNIT_DIR/zclassic23-host-gc.service"
+    "$UNIT_DIR/z23-host-gc.timer" "$UNIT_DIR/z23-host-gc.service"

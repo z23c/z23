@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # check_quality_lane_freshness.sh — is the background quality lane's OWN
-# checkout ($ROOT — the systemd unit's WorkingDirectory, %h/github/zclassic23)
+# checkout ($ROOT — the systemd unit's WorkingDirectory, %h/github/z23)
 # actually at the tip of `main`, or pinned to whatever commit it happened to
 # be checked out at?
 #

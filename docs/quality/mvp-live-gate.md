@@ -40,7 +40,7 @@ C8 FAIL, shielded-receive surface down => C4 FAIL, node unreachable).
 - `ZCL_DATADIR` / `ZCL_RPCPORT` — explicit live-node RPC target overrides;
   when unset, the script reads them from `ZCL_NODE_UNIT` and falls back to
   `~/.zclassic-c23` / `18232`
-- `ZCL_SOAK_UNIT` — systemd `--user` unit for uptime (default `zclassic23`)
+- `ZCL_SOAK_UNIT` — systemd `--user` unit for uptime (default `z23-node`)
 - `ZD_RPCPORT` — zclassicd oracle RPC port for the parity probe (default `8232`)
 - `ZD_DATADIR` — zclassicd datadir for oracle auth (default `~/.zclassic`)
 - `TIP_GAP_OK` — max blocks-behind-peer still "at tip" (default `10` = `ZCL_FINALITY_DEPTH`)

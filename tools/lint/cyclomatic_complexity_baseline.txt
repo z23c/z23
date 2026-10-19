@@ -3912,7 +3912,7 @@ tools/zcc_epoch_batch.c:batch_read_bindings:25
 tools/zcc_epoch_batch.c:batch_read_job:19
 tools/zcc_epoch_batch.c:zcc_epoch_batch_manifest_decode:25
 tools/zcl-nodectl.c:cmd_launch:30
-tools/zcl-nodectl.c:main:17
+tools/zcl-nodectl.c:main:16
 tools/zcl-rpc.c:main:27
 tools/zcl_portfwd.c:main:41
 tools/zcode_adapter_runner.c:main:73

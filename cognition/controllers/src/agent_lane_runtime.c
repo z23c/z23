@@ -15,7 +15,7 @@
 static const struct agent_operator_lane_topology g_operator_lane_topologies[] = {
     {
         .lane = "canonical",
-        .unit = "zclassic23",
+        .unit = "z23-node",
         .datadir = "~/.zclassic-c23",
         .rpc_port = 18232,
         .p2p_port = 8033,

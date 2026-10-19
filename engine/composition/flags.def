@@ -558,7 +558,7 @@ Z23_FLAG("ZCL_DEPLOY_GUARD_SYSTEMD_ACTIVE", "env_build", "-", "-",
           "undocumented; first use tools/deploy_guard.sh:auto")
 Z23_FLAG("ZCL_DEPLOY_GUARD_SYSTEMD_EXECSTART", "env_build", "-", "-",
           "undocumented; first use tools/deploy_guard.sh:auto")
-Z23_FLAG("ZCL_DEPLOY_GUARD_UNIT", "env_build", "zclassic23", "-",
+Z23_FLAG("ZCL_DEPLOY_GUARD_UNIT", "env_build", "z23-node", "-",
           "undocumented; first use tools/deploy_guard.sh:auto")
 Z23_FLAG("ZCL_DEPLOY_ONE_WAY", "make_var", "0", "-",
           "documented at docs/dev/BUILD.md; first use Makefile deploy: recipe; set by tools/ship.sh's deploy_local() when a candidate changes persistent-schema code AND ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1 was accepted, so automatic local rollback disarms instead of reverting onto a migrated datadir")
@@ -840,7 +840,7 @@ Z23_FLAG("ZCL_DRIFT_PIN_TAG", "env_build", "-", "-",
           "first use tools/scripts/build_drift_probe.sh:auto; documented at docs/node/RELEASE_CANDIDATE_PIN.md:31: append-only. The last line is the active pin unless ZCL_DRIFT_PIN_TAG names")
 Z23_FLAG("ZCL_DRIFT_ROTATE_BYTES", "env_build", "52428800", "-",
           "undocumented; first use tools/scripts/build_drift_probe.sh:auto")
-Z23_FLAG("ZCL_DRIFT_UNIT", "env_build", "zclassic23", "-",
+Z23_FLAG("ZCL_DRIFT_UNIT", "env_build", "z23-node", "-",
           "undocumented; first use tools/scripts/build_drift_probe.sh:auto")
 Z23_FLAG("ZCL_DRIVE_WATCHDOG_SEC", "env_runtime", "-", "-",
           "undocumented; first use engine/reducer/conditions/src/reducer_drive_watchdog.c:auto")
@@ -2318,7 +2318,7 @@ Z23_FLAG("ZCL_SOAK_SECURITY_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:auto")
 Z23_FLAG("ZCL_SOAK_SHOW_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:auto")
-Z23_FLAG("ZCL_SOAK_UNIT", "env_build", "zclassic23", "-",
+Z23_FLAG("ZCL_SOAK_UNIT", "env_build", "z23-node", "-",
           "first use tools/mvp_gate.sh:auto; documented at docs/quality/mvp-live-gate.md:39: live -datadir / -rpcport defaults (default: ZCL_SOAK_UNIT)")
 Z23_FLAG("ZCL_SOURCE_AUTHORITIES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:auto")

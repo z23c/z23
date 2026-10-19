@@ -1790,7 +1790,7 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
                 fprintf(stderr,
                        "error=CONNECT_REFUSED detail=node not running at "
                        "127.0.0.1:%d try=start the node (systemctl --user "
-                       "start zclassic23) or pass -rpcport=<PORT> for the "
+                       "start z23-node) or pass -rpcport=<PORT> for the "
                        "instance you meant\n", cli_port);
             else if (oc == CLI_RPC_TIMEOUT)
                 fprintf(stderr,

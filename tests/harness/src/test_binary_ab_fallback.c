@@ -271,6 +271,118 @@ static bool ab_run_nodectl(const char *slots, const char *threshold,
 }
 #endif /* !defined(_WIN32) */
 
+/* `zcl-nodectl legacy-unit-check` refuses while the pre-rename unit is
+ * active or enabled; `zcl-nodectl stop` addresses z23-node. A stub
+ * systemctl on PATH reports FAKE_ACTIVE / FAKE_ENABLED and logs argv. */
+static bool ab_run_nodectl_unit(const char *dir, const char *active,
+                                const char *enabled, const char *sub,
+                                char *output, size_t output_size,
+                                int *exit_status)
+{
+    int capture[2];
+    if (pipe(capture) != 0)
+        return false;
+    pid_t child = fork();
+    if (child < 0) {
+        close(capture[0]);
+        close(capture[1]);
+        return false;
+    }
+    if (child == 0) {
+        char path[PATH_MAX + 32], log[PATH_MAX + 16];
+        snprintf(path, sizeof(path), "%s:/usr/bin:/bin", dir);
+        snprintf(log, sizeof(log), "%s/calls.log", dir);
+        close(capture[0]);
+        if (dup2(capture[1], STDOUT_FILENO) < 0 ||
+            dup2(capture[1], STDERR_FILENO) < 0)
+            _exit(120);
+        close(capture[1]);
+        if (setenv("PATH", path, 1) != 0 || setenv("HOME", dir, 1) != 0 ||
+            setenv("FAKE_ACTIVE", active, 1) != 0 ||
+            setenv("FAKE_ENABLED", enabled, 1) != 0 ||
+            setenv("FAKE_LOG", log, 1) != 0)
+            _exit(121);
+        execl("build/bin/zcl-nodectl", "zcl-nodectl", sub, (char *)NULL);
+        _exit(124);
+    }
+    close(capture[1]);
+    size_t used = 0;
+    ssize_t n;
+    while (used + 1 < output_size &&
+           (n = read(capture[0], output + used, output_size - 1 - used)) > 0)
+        used += (size_t)n;
+    close(capture[0]);
+    output[used] = '\0';
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status))
+        return false;
+    *exit_status = WEXITSTATUS(status);
+    return true;
+}
+
+static int ab_unit_refusal_cases(const char *dir)
+{
+    int failures = 0;
+    char out[2048];
+    int st = -1;
+    AB_CHECK("legacy unit active refuses with exit 3 and the migration commands",
+             ab_run_nodectl_unit(dir, "active", "disabled",
+                                 "legacy-unit-check", out, sizeof(out), &st) &&
+             st == 3 && strstr(out, "REFUSE: zclassic23.service is active") &&
+             strstr(out, "systemctl --user stop zclassic23.service") &&
+             strstr(out, "systemctl --user disable zclassic23.service"));
+    AB_CHECK("legacy unit enabled but stopped refuses",
+             ab_run_nodectl_unit(dir, "inactive", "enabled",
+                                 "legacy-unit-check", out, sizeof(out), &st) &&
+             st == 3 && strstr(out, "is enabled"));
+    AB_CHECK("legacy unit active and enabled is reported as both",
+             ab_run_nodectl_unit(dir, "active", "enabled",
+                                 "legacy-unit-check", out, sizeof(out), &st) &&
+             st == 3 && strstr(out, "active and enabled"));
+    return failures;
+}
+
+static int ab_nodectl_unit_contract(void)
+{
+    int failures = 0;
+    char tmpl[] = "/tmp/zcl_unit_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (!dir) {
+        printf("ab: mkdtemp failed - cannot run unit contract\n");
+        return 1;
+    }
+    char stub[PATH_MAX], logp[PATH_MAX], out[2048], log[2048];
+    snprintf(stub, sizeof(stub), "%s/systemctl", dir);
+    snprintf(logp, sizeof(logp), "%s/calls.log", dir);
+    static const char script[] =
+        "#!/bin/sh\n"
+        "echo \"$*\" >> \"$FAKE_LOG\"\n"
+        "case \"$2\" in\n"
+        "  is-active) echo \"$FAKE_ACTIVE\"; [ \"$FAKE_ACTIVE\" = active ] ;;\n"
+        "  is-enabled) echo \"$FAKE_ENABLED\"; [ \"$FAKE_ENABLED\" = enabled ] ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n";
+    int st = -1;
+    AB_CHECK("unit stub written", ab_write_file(stub, script, 0700) == 0);
+    failures += ab_unit_refusal_cases(dir);
+    AB_CHECK("legacy unit absent allows the install",
+             ab_run_nodectl_unit(dir, "inactive", "disabled",
+                                 "legacy-unit-check", out, sizeof(out), &st) &&
+             st == 0 && out[0] == '\0');
+    unlink(logp);
+    AB_CHECK("stop addresses z23-node and never the legacy unit",
+             ab_run_nodectl_unit(dir, "inactive", "disabled", "stop",
+                                 out, sizeof(out), &st) && st == 0 &&
+             ab_read_file(logp, log, sizeof(log)) > 0 &&
+             strstr(log, "--user is-active z23-node\n") &&
+             !strstr(log, "zclassic23"));
+    unlink(stub);
+    unlink(logp);
+    rmdir(dir);
+    return failures;
+}
+
+
 static int test_binary_ab_fallback_platform_arm(void)
 {
     printf("\n=== binary_ab_fallback tests ===\n");
@@ -747,5 +859,9 @@ static int test_binary_ab_fallback_platform_arm(void)
 
 int test_binary_ab_fallback(void)
 {
-    return test_binary_ab_fallback_platform_arm();
+    int failures = test_binary_ab_fallback_platform_arm();
+#if !defined(_WIN32)
+    failures += ab_nodectl_unit_contract();
+#endif
+    return failures;
 }

@@ -4548,7 +4548,7 @@ agent-baseline:
 # Classify every git worktree and remove only the provably dead ones.
 # DRY RUN by default; --apply is required before anything is deleted. This is a
 # convenience wrapper — the collector is tools/scripts/worktree_gc.sh, which is
-# also what the zclassic23-worktree-gc systemd unit runs, and there is exactly
+# also what the z23-worktree-gc systemd unit runs, and there is exactly
 # one of it on purpose. Two collectors with different safety flags is how the
 # wrong one gets run.
 #   make worktree-gc                          dry run: classify, report bytes
@@ -6979,7 +6979,7 @@ endif
 #                           that is NOT being written by a running node. The
 #                           recipe REFUSES a source owned by a live pid, so the
 #                           default (the full-history datadir) is rejected while
-#                           zclassic23.service runs on it — point this at a
+#                           z23-node.service runs on it — point this at a
 #                           stopped / non-live synced datadir instead.
 #   ZCL_BOOTSTRAP_WORK      Throwaway FULL copy of the source; minting runs HERE,
 #                           never on the source (a torn live copy is unsafe).
@@ -8673,7 +8673,7 @@ rom-bundle-replicate: $(BIN_DIR)/rom_bundle_sha3
 # consensus-state bundle into <datadir>/bundles/ so a fresh node's zero-flag
 # cold-boot autodetect (boot_autodetect_consensus_bundle,
 # engine/composition/src/boot_auto_install_bundle.c) finds it with no further operator
-# action at boot time (platform/deploy/zclassic23-bundle-bootstrap.sh; see
+# action at boot time (platform/deploy/z23-bundle-bootstrap.sh; see
 # docs/ROM_DELIVERY.md "Local bundle bootstrap"). Idempotent: a no-op if
 # <datadir>/bundles/ already holds a *.sqlite or the datadir already has an
 # installed-bundle marker. Never a trust decision — that stays entirely at
@@ -8685,7 +8685,7 @@ bundle-bootstrap: $(BIN_DIR)/rom_bundle_sha3
 	@if [ -z "$(SOURCE)" ]; then \
 	    echo "usage: make bundle-bootstrap SOURCE=... [DATADIR=...]"; \
 	    exit 2; fi
-	platform/deploy/zclassic23-bundle-bootstrap.sh --source="$(SOURCE)" \
+	platform/deploy/z23-bundle-bootstrap.sh --source="$(SOURCE)" \
 	    --sha3-tool="$(BIN_DIR)/rom_bundle_sha3" \
 	    $(if $(DATADIR),--datadir="$(DATADIR)",)
 
@@ -10015,7 +10015,7 @@ replay-gate-d2: zclassic23
 # ── MVP-C6 live-soak evidence (opt-in; reads the LIVE soak node) ─────
 #
 # soak-evidence-report judges the hourly evidence JSONL accumulated by
-# the zclassic23-soak-evidence timer (deploy/examples/) against the
+# the z23-soak-evidence timer (deploy/examples/) against the
 # 168 h MVP #6 window and prints VERDICT=MET|NOT_MET|INSUFFICIENT from
 # PARSED DATA only. DELIBERATELY excluded from the default `ci:` recipe:
 # the collector reads the LIVE soak node + zclassicd (read-only RPC) and
@@ -10372,7 +10372,7 @@ ci-install: zclassic23 zcl-rpc z23-package-verify z23-package-sign
 # project): the portability floor is enforced statically by `make ci-symbol-floor`
 # (in `make ci`), and the FULL operator claim — a real `make install` +
 # `systemctl --user start` bringing the installed binary up to serve RPC — is
-# exercised here via a fully ISOLATED linger unit `zclassic23-citest` (distinct
+# exercised here via a fully ISOLATED linger unit `z23-citest` (distinct
 # name / /tmp datadir / 3906x non-live ports / dead-sink connect / -nolegacyimport;
 # torn down on exit; NEVER touches the live `zclassic23` unit). SKIPs cleanly
 # (exit 2 -> 0) where there is no systemd --user session. A mvp-verify member;
@@ -11535,7 +11535,7 @@ $(DEV_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_
 # ── install (MVP criterion #1) ──────────────────────────────────────────────
 # Literal install for a fresh operator: copy the two binaries onto PATH and
 # install the systemd --user unit pointed at the installed binary, so a clean
-# Ubuntu/Debian box can do `make install && systemctl --user start zclassic23`.
+# Ubuntu/Debian box can do `make install && systemctl --user start z23-node`.
 #   PREFIX   binary install prefix (default /usr/local; use ~/.local for rootless)
 #   DESTDIR  staging root for packaging — when set, the live --user unit + daemon
 #            reload are skipped (binaries are only staged under DESTDIR).
@@ -11550,6 +11550,7 @@ define INSTALL_C23_PRODUCTS
 set -eu; \
 . tools/scripts/tor_stamp_lib.sh; \
 zcl_tor_require_full "$(Z23_BIN)" "the node this install would place"; \
+if [ -z "$(DESTDIR)" ]; then $(ZCL_NODECTL_BIN) legacy-unit-check || exit $$?; fi; \
 install -d "$(DESTDIR)$(PREFIX)/bin"; \
 install -m 755 $(Z23_BIN) "$(DESTDIR)$(PREFIX)/bin/z23"; \
 ln -sfn z23 "$(DESTDIR)$(PREFIX)/bin/zclassic23"; \
@@ -11568,10 +11569,10 @@ if [ -z "$(DESTDIR)" ]; then \
 	install -d "$(HOME)/.config/systemd/user"; \
 	sed -e 's|%h/zclassic23/build/bin/zcl-nodectl|$(PREFIX)/bin/zcl-nodectl|' \
 	    -e 's|%h/zclassic23/build/bin/z23|$(PREFIX)/bin/z23|' \
-		platform/deploy/zclassic23.service \
-		> "$(HOME)/.config/systemd/user/zclassic23.service"; \
+		platform/deploy/z23-node.service \
+		> "$(HOME)/.config/systemd/user/z23-node.service"; \
 	(systemctl --user daemon-reload 2>/dev/null || true); \
-	echo "installed systemd --user unit; start: systemctl --user start zclassic23"; \
+	echo "installed systemd --user unit; start: systemctl --user start z23-node"; \
 fi; \
 echo "make install: node, RPC, package verifier, signer + certificate worker -> $(DESTDIR)$(PREFIX)/bin"
 endef
@@ -11704,6 +11705,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    *.dev) echo "deploy: REFUSE: $(Z23_BIN) is not a shippable name" >&2; exit 2;; \
 	esac
 	@./tools/deploy_guard.sh canonical-deploy
+	@$(ZCL_NODECTL_BIN) legacy-unit-check
 	@case "$(DEPLOY_VERIFY_STAGE)" in stable|challenger) ;; *) \
 	    echo "deploy: DEPLOY_VERIFY_STAGE must be stable or challenger" >&2; exit 2;; esac
 	@# Snapshot the executable inode owned by the stable MainPID before the
@@ -11711,7 +11713,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@# remains valid after unlink, but the pathname then names the challenger;
 	@# a post-build copy of that pathname is therefore not a rollback image.
 	@set -eu; \
-	mainpid="$$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"; \
+	mainpid="$$(systemctl --user show z23-node -p MainPID --value 2>/dev/null || true)"; \
 	case "$$mainpid" in ''|*[!0-9]*|0) \
 	    echo "deploy: canonical service must be running before prior-binary capture" >&2; exit 1;; esac; \
 	prior="$(BIN_DIR)/.zclassic23.deploy-prior"; \
@@ -11795,7 +11797,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	            rm -f "$$dropin"; rollback_dropin_rc=$$?; \
 	        fi; \
 	        systemctl --user daemon-reload; rollback_reload_rc=$$?; \
-	        timeout $$restart_timeout systemctl --user restart zclassic23; rollback_restart_rc=$$?; \
+	        timeout $$restart_timeout systemctl --user restart z23-node; rollback_restart_rc=$$?; \
 	        rollback_verify_rc=1; \
 	        if [ "$$rollback_install_rc" -eq 0 ] && \
 	           [ "$$rollback_dropin_rc" -eq 0 ] && \
@@ -11817,7 +11819,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    elif [ "$$one_way_armed" -eq 1 ] && [ "$$rollback_complete" -eq 0 ]; then \
 	        rollback_complete=1; \
 	        echo "deploy: REFUSE: forward-only candidate failed qualification; automatic rollback stayed DISARMED because this install accepted a one-way schema change (ZCL_DEPLOY_ONE_WAY=1) and the previous binary cannot read the migrated database. Stopping the node rather than silently reverting it or leaving a failed candidate running." >&2; \
-	        systemctl --user stop zclassic23 2>/dev/null; \
+	        systemctl --user stop z23-node 2>/dev/null; \
 	    fi; \
 	    rm -f "$$candidate" "$$prior_snapshot" "$$dropin_tmp" "$$service_tmp" \
 	          "$$rollback_bin" "$$rollback_dropin" "$$fleet_manifest_tmp"; \
@@ -11850,18 +11852,18 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	        echo "WAL checkpoint failed" >&2; exit 1; }; \
 	fi; \
 	install -d "$(HOME)/.config/systemd/user"; \
-	service_unit="$(HOME)/.config/systemd/user/zclassic23.service"; \
+	service_unit="$(HOME)/.config/systemd/user/z23-node.service"; \
 	if [ ! -f "$$service_unit" ] || \
 	   grep -q '/deploy/zclassic23-launch.sh' "$$service_unit"; then \
 	    service_tmp="$$(mktemp "$$service_unit.tmp.XXXXXX")"; \
-	    sed 's|%h/zclassic23|$(CURDIR)|g' platform/deploy/zclassic23.service > "$$service_tmp"; \
+	    sed 's|%h/zclassic23|$(CURDIR)|g' platform/deploy/z23-node.service > "$$service_tmp"; \
 	    install -m 644 "$$service_tmp" "$$service_unit"; \
 	    rm -f "$$service_tmp"; service_tmp=""; \
 	    echo "deploy: installed/migrated canonical service unit from template"; \
 	else \
 	    echo "deploy: preserving existing canonical service unit"; \
 	fi; \
-	dropin_dir="$(HOME)/.config/systemd/user/zclassic23.service.d"; \
+	dropin_dir="$(HOME)/.config/systemd/user/z23-node.service.d"; \
 	for stale_dropin in zzzzz-z23-ship-release.conf zzzz-z23-release.conf; do \
 	    if [ -e "$$dropin_dir/$$stale_dropin" ]; then \
 	        rm -f "$$dropin_dir/$$stale_dropin"; \
@@ -11869,7 +11871,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    fi; \
 	done; \
 	systemctl --user daemon-reload; \
-	service_exec="$$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null)"; \
+	service_exec="$$(systemctl --user show z23-node -p ExecStart --value 2>/dev/null)"; \
 	service_path="$$(printf '%s\n' "$$service_exec" | \
 	    sed -n 's/^.*path=\([^ ;]*\).*$$/\1/p')"; \
 	service_argv="$$(printf '%s\n' "$$service_exec" | \
@@ -11886,7 +11888,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    case "$$service_path" in /*) SERVICE_BIN="$$service_path" ;; *) \
 	        echo "deploy: direct canonical service binary is not absolute" >&2; exit 1;; esac; \
 	fi; \
-	mainpid="$$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"; \
+	mainpid="$$(systemctl --user show z23-node -p MainPID --value 2>/dev/null || true)"; \
 	case "$$mainpid" in ''|*[!0-9]*|0) \
 	    echo "deploy: canonical service must be running before a rollback-safe mutation" >&2; exit 1;; esac; \
 	running_exe_raw="$$(readlink "/proc/$$mainpid/exe" 2>/dev/null || true)"; \
@@ -11903,11 +11905,11 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    echo "deploy: MainPID changed after prior-binary capture" >&2; exit 1; }; \
 	tools/dev/source-identity.sh verify-record \
 	    "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
-	install -d "$(HOME)/.config/systemd/user/zclassic23.service.d"; \
-	dropin="$(HOME)/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"; \
+	install -d "$(HOME)/.config/systemd/user/z23-node.service.d"; \
+	dropin="$(HOME)/.config/systemd/user/z23-node.service.d/90-build-identity.conf"; \
 	service_bin_dir="$$(dirname "$$SERVICE_BIN")"; \
 	[ -n "$$service_bin_dir" ] && [ -d "$$service_bin_dir" ] && [ -w "$$service_bin_dir" ] || { \
-	    echo "deploy: REFUSE: $$service_bin_dir is not a writable directory — this deploy could neither install the candidate nor restore the rollback image there (a frozen/read-only release dir cannot be deployed over in place). Nothing was mutated. chmod u+w that directory, or point zclassic23.service at a writable canonical path, then re-run." >&2; exit 1; }; \
+	    echo "deploy: REFUSE: $$service_bin_dir is not a writable directory — this deploy could neither install the candidate nor restore the rollback image there (a frozen/read-only release dir cannot be deployed over in place). Nothing was mutated. chmod u+w that directory, or point z23-node.service at a writable canonical path, then re-run." >&2; exit 1; }; \
 	rollback_bin="$$(mktemp "$(BIN_DIR)/.zclassic23.rollback.XXXXXX")"; \
 	install -m 755 "$$prior_snapshot" "$$rollback_bin"; \
 	rollback_artifact_sha256="$$(sha256sum < "$$rollback_bin" | awk '{print $$1}')"; \
@@ -11943,8 +11945,8 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	rm -f "$$dropin_tmp"; dropin_tmp=""; \
 	systemctl --user daemon-reload; \
 	guard_exec="$$(ship_exec_path_from_show_text \
-	    "$$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null || true)")"; \
-	guard_dropins="$$(systemctl --user show zclassic23 -p DropInPaths --value 2>/dev/null || true)"; \
+	    "$$(systemctl --user show z23-node -p ExecStart --value 2>/dev/null || true)")"; \
+	guard_dropins="$$(systemctl --user show z23-node -p DropInPaths --value 2>/dev/null || true)"; \
 	if ! guard_text="$$(ship_exec_guard_check "$$service_path" "$$guard_exec" \
 	        "$$dropin" "$$guard_dropins")"; then \
 	    printf 'deploy: %s\n' "$$guard_text" >&2; \
@@ -11991,7 +11993,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    fi; \
 	    echo "deploy: refreshed PATH shadow $(HOME)/bin/zclassic23 -> $$SERVICE_BIN"; \
 	fi; \
-	timeout $$restart_timeout systemctl --user restart zclassic23; \
+	timeout $$restart_timeout systemctl --user restart z23-node; \
 	set +e; \
 	ZCL_DEPLOY_STAGE="$(DEPLOY_VERIFY_STAGE)" \
 	ZCL_DEPLOY_EXPECT_SOURCE_ID="$(BUILD_SOURCE_ID)" \
@@ -12131,16 +12133,16 @@ background-tests:
 .PHONY: install-remote-status-linger remote-status install-self-update-linger self-update-status
 install-remote-status-linger:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 platform/deploy/examples/zclassic23-self-update.service "$(HOME)/.config/systemd/user/zclassic23-remote-status.service"
-	@install -m 644 platform/deploy/examples/zclassic23-self-update.timer "$(HOME)/.config/systemd/user/zclassic23-remote-status.timer"
+	@install -m 644 platform/deploy/examples/z23-self-update.service "$(HOME)/.config/systemd/user/z23-remote-status.service"
+	@install -m 644 platform/deploy/examples/z23-self-update.timer "$(HOME)/.config/systemd/user/z23-remote-status.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-remote-status.timer
-	@echo "installed read-only remote status timer: zclassic23-remote-status.timer"
+	@systemctl --user enable --now z23-remote-status.timer
+	@echo "installed read-only remote status timer: z23-remote-status.timer"
 	@echo "status: make remote-status"
 
 remote-status:
-	@systemctl --user list-timers zclassic23-remote-status.timer --no-pager 2>/dev/null || true
-	@systemctl --user status zclassic23-remote-status.service zclassic23-remote-status.timer --no-pager -n 20 2>/dev/null || true
+	@systemctl --user list-timers z23-remote-status.timer --no-pager 2>/dev/null || true
+	@systemctl --user status z23-remote-status.service z23-remote-status.timer --no-pager -n 20 2>/dev/null || true
 
 install-self-update-linger:
 	@echo "install-self-update-linger: REFUSING — self-update/build publication is contained; use install-remote-status-linger for read-only observation" >&2
@@ -12152,36 +12154,36 @@ self-update-status: remote-status
 install-remote-test-node-linger:
 	@install -d "$(HOME)/.config/systemd/user" "$(HOME)/.config/zclassic23" "$(HOME)/.zclassic23-test"
 	@if [ ! -f "$(HOME)/.config/zclassic23/remote-test.env" ]; then \
-		install -m 600 platform/deploy/examples/zclassic23-remote-test.env.example "$(HOME)/.config/zclassic23/remote-test.env"; \
+		install -m 600 platform/deploy/examples/z23-remote-test.env.example "$(HOME)/.config/zclassic23/remote-test.env"; \
 		echo "installed editable env: $(HOME)/.config/zclassic23/remote-test.env"; \
 	fi
-	@install -m 644 platform/deploy/examples/zclassic23-remote-test-node.service "$(HOME)/.config/systemd/user/zclassic23-test.service"
+	@install -m 644 platform/deploy/examples/z23-remote-test-node.service "$(HOME)/.config/systemd/user/z23-test.service"
 	@systemctl --user daemon-reload
-	@systemctl --user enable zclassic23-test.service
-	@echo "installed remote test node service: zclassic23-test.service"
+	@systemctl --user enable z23-test.service
+	@echo "installed remote test node service: z23-test.service"
 	@echo "edit $(HOME)/.config/zclassic23/remote-test.env, then start/restart when ready"
 	@echo "status: make remote-test-node-status"
 
 remote-test-node-status:
-	@systemctl --user status zclassic23-test.service --no-pager -n 40 2>/dev/null || true
-	@systemctl --user show zclassic23-test.service -p ActiveState -p SubState -p MainPID -p MemoryHigh -p MemoryMax -p CPUWeight -p IOWeight --no-pager 2>/dev/null || true
+	@systemctl --user status z23-test.service --no-pager -n 40 2>/dev/null || true
+	@systemctl --user show z23-test.service -p ActiveState -p SubState -p MainPID -p MemoryHigh -p MemoryMax -p CPUWeight -p IOWeight --no-pager 2>/dev/null || true
 
 install-quality-linger:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 platform/deploy/zclassic23-fuzz.service "$(HOME)/.config/systemd/user/zclassic23-fuzz.service"
-	@install -m 644 platform/deploy/zclassic23-fuzz.timer "$(HOME)/.config/systemd/user/zclassic23-fuzz.timer"
-	@install -m 644 platform/deploy/zclassic23-coverage.service "$(HOME)/.config/systemd/user/zclassic23-coverage.service"
-	@install -m 644 platform/deploy/zclassic23-coverage.timer "$(HOME)/.config/systemd/user/zclassic23-coverage.timer"
-	@install -m 644 platform/deploy/zclassic23-test-suite.service "$(HOME)/.config/systemd/user/zclassic23-test-suite.service"
-	@install -m 644 platform/deploy/zclassic23-test-suite.timer "$(HOME)/.config/systemd/user/zclassic23-test-suite.timer"
+	@install -m 644 platform/deploy/z23-fuzz.service "$(HOME)/.config/systemd/user/z23-fuzz.service"
+	@install -m 644 platform/deploy/z23-fuzz.timer "$(HOME)/.config/systemd/user/z23-fuzz.timer"
+	@install -m 644 platform/deploy/z23-coverage.service "$(HOME)/.config/systemd/user/z23-coverage.service"
+	@install -m 644 platform/deploy/z23-coverage.timer "$(HOME)/.config/systemd/user/z23-coverage.timer"
+	@install -m 644 platform/deploy/z23-test-suite.service "$(HOME)/.config/systemd/user/z23-test-suite.service"
+	@install -m 644 platform/deploy/z23-test-suite.timer "$(HOME)/.config/systemd/user/z23-test-suite.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-fuzz.timer zclassic23-coverage.timer zclassic23-test-suite.timer
-	@echo "installed background quality lanes: zclassic23-fuzz.timer zclassic23-coverage.timer zclassic23-test-suite.timer"
+	@systemctl --user enable --now z23-fuzz.timer z23-coverage.timer z23-test-suite.timer
+	@echo "installed background quality lanes: z23-fuzz.timer z23-coverage.timer z23-test-suite.timer"
 	@echo "status: make quality-linger-status"
 
 quality-linger-status:
-	@systemctl --user list-timers zclassic23-fuzz.timer zclassic23-coverage.timer zclassic23-test-suite.timer --no-pager 2>/dev/null || true
-	@systemctl --user status zclassic23-fuzz.service zclassic23-coverage.service zclassic23-test-suite.service --no-pager -n 12 2>/dev/null || true
+	@systemctl --user list-timers z23-fuzz.timer z23-coverage.timer z23-test-suite.timer --no-pager 2>/dev/null || true
+	@systemctl --user status z23-fuzz.service z23-coverage.service z23-test-suite.service --no-pager -n 12 2>/dev/null || true
 	@./tools/scripts/background_quality_lane.sh status
 
 # install-slo-probe: the EXTERNAL uptime prober (lane E3) - a read-only
@@ -12240,19 +12242,19 @@ install-hold-judge:
 .PHONY: install-intervention-ledger intervention-ledger-status
 install-intervention-ledger:
 	@install -d "$(HOME)/.config/systemd/user"
-	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/zclassic23-intervention.service.tmp.XXXXXX")"; \
+	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/z23-intervention.service.tmp.XXXXXX")"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-		sed 's|%h/github/zclassic23|$(CURDIR)|g' platform/deploy/zclassic23-intervention.service > "$$tmp"; \
-		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/zclassic23-intervention.service"
-	@install -m 644 platform/deploy/zclassic23-intervention.timer "$(HOME)/.config/systemd/user/zclassic23-intervention.timer"
+		sed 's|%h/github/z23|$(CURDIR)|g' platform/deploy/z23-intervention.service > "$$tmp"; \
+		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/z23-intervention.service"
+	@install -m 644 platform/deploy/z23-intervention.timer "$(HOME)/.config/systemd/user/z23-intervention.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-intervention.timer
-	@echo "installed intervention detector: zclassic23-intervention.timer (every 60s)"
+	@systemctl --user enable --now z23-intervention.timer
+	@echo "installed intervention detector: z23-intervention.timer (every 60s)"
 	@echo "ledger: $(HOME)/.local/state/zclassic23-intervention/intervention-ledger.jsonl"
 
 intervention-ledger-status:
-	@systemctl --user list-timers zclassic23-intervention.timer --no-pager 2>/dev/null || true
-	@systemctl --user status zclassic23-intervention.service zclassic23-intervention.timer --no-pager -n 12 2>/dev/null || true
+	@systemctl --user list-timers z23-intervention.timer --no-pager 2>/dev/null || true
+	@systemctl --user status z23-intervention.service z23-intervention.timer --no-pager -n 12 2>/dev/null || true
 	@./tools/scripts/intervention_ledger.sh summary 2>/dev/null || true
 
 slo-probe-status:
@@ -12278,19 +12280,19 @@ slo-probe-selftest:
 # tools/scripts/tip_agreement_judge.sh (windowed, fails closed).
 install-tip-agreement:
 	@install -d "$(HOME)/.config/systemd/user"
-	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/zclassic23-tip-agreement.service.tmp.XXXXXX")"; \
+	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/z23-tip-agreement.service.tmp.XXXXXX")"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-		sed 's|%h/github/zclassic23|$(CURDIR)|g' platform/deploy/zclassic23-tip-agreement.service > "$$tmp"; \
-		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/zclassic23-tip-agreement.service"
-	@install -m 644 platform/deploy/zclassic23-tip-agreement.timer "$(HOME)/.config/systemd/user/zclassic23-tip-agreement.timer"
+		sed 's|%h/github/z23|$(CURDIR)|g' platform/deploy/z23-tip-agreement.service > "$$tmp"; \
+		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/z23-tip-agreement.service"
+	@install -m 644 platform/deploy/z23-tip-agreement.timer "$(HOME)/.config/systemd/user/z23-tip-agreement.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-tip-agreement.timer
-	@echo "installed off-host tip-hash agreement recorder: zclassic23-tip-agreement.timer (every 10 min)"
+	@systemctl --user enable --now z23-tip-agreement.timer
+	@echo "installed off-host tip-hash agreement recorder: z23-tip-agreement.timer (every 10 min)"
 	@echo "ledger: owner-private state recorded"
 	@echo "verdict: make tip-agreement-status"
 
 tip-agreement-status:
-	@systemctl --user list-timers zclassic23-tip-agreement.timer --no-pager 2>/dev/null || true
+	@systemctl --user list-timers z23-tip-agreement.timer --no-pager 2>/dev/null || true
 	@./tools/scripts/tip_agreement_judge.sh "$(HOME)/.local/state/zclassic23-parity/agreement-ledger.jsonl" || true
 
 # tip-agreement-selftest: hermetic regression guard for the recorder AND the
@@ -12341,19 +12343,19 @@ evidence-selftest:
 # The canonical serving identity (ports 8033/18232, ~/.zclassic-c23) had no
 # failover. install-standby installs the always-warm understudy unit; cutover
 # promotes a healthy candidate to canonical with a hard preflight + auto-
-# rollback. See platform/deploy/zclassic23-standby.service and deploy/zclassic23-cutover.sh.
+# rollback. See platform/deploy/z23-node-standby.service and deploy/z23-cutover.sh.
 .PHONY: install-standby cutover cutover-selftest host-watchdog-selftest migrate-role-names-selftest
 
 install-standby:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 platform/deploy/zclassic23-standby.service "$(HOME)/.config/systemd/user/zclassic23-standby.service"
+	@install -m 644 platform/deploy/z23-node-standby.service "$(HOME)/.config/systemd/user/z23-node-standby.service"
 	@if [ ! -e "$(HOME)/.config/zclassic23/standby.env" ]; then \
 	    install -d "$(HOME)/.config/zclassic23"; \
-	    install -m 644 platform/deploy/zclassic23-standby.env.example "$(HOME)/.config/zclassic23/standby.env"; \
+	    install -m 644 platform/deploy/z23-node-standby.env.example "$(HOME)/.config/zclassic23/standby.env"; \
 	    echo "seeded $(HOME)/.config/zclassic23/standby.env (edit STANDBY_DATADIR/PORT/RPCPORT)"; \
 	fi
-	@echo "installed zclassic23-standby.service. To arm the understudy:"
-	@echo "  systemctl --user daemon-reload && systemctl --user enable --now zclassic23-standby"
+	@echo "installed z23-node-standby.service. To arm the understudy:"
+	@echo "  systemctl --user daemon-reload && systemctl --user enable --now z23-node-standby"
 
 # make cutover CANDIDATE_DATADIR=<path> [YES=1] [TIMEOUT=<secs>]
 #              [STALL_TIMEOUT=<secs>] [CANDIDATE_RPCPORT=<n>]
@@ -12374,14 +12376,14 @@ cutover:
 	 $(if $(CANDIDATE_RPCPORT),CANDIDATE_RPCPORT="$(CANDIDATE_RPCPORT)",) \
 	 $(if $(TIMEOUT),READY_TIMEOUT="$(TIMEOUT)",) \
 	 $(if $(STALL_TIMEOUT),READY_STALL_TIMEOUT="$(STALL_TIMEOUT)",) \
-	 ./platform/deploy/zclassic23-cutover.sh $(if $(filter 1 yes YES true,$(YES)),--yes,)
+	 ./platform/deploy/z23-cutover.sh $(if $(filter 1 yes YES true,$(YES)),--yes,)
 
 # cutover-selftest: hermetic fixture proof of the preflight comparison + the
 # auto-rollback logic — mock units (SYSTEMCTL=echo), injected H* readers, two
 # throwaway fixture datadirs. No live nodes, no real systemd.
 cutover-selftest:
 	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash platform/deploy/zclassic23-cutover-selftest.sh 2>&1); rc=$$?; set -e; \
+	 set +e; out=$$(bash platform/deploy/z23-cutover-selftest.sh 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
 	 pass=1; case "$$out" in *"cutover-selftest: PASS"*) pass=0;; esac; \
 	 if [ "$$rc" != "0" ] || [ "$$pass" != "0" ]; then \
@@ -12394,7 +12396,7 @@ cutover-selftest:
 # a sandbox state file, no root and no node.
 host-watchdog-selftest:
 	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash platform/deploy/zclassic23-host-watchdog.sh --selftest 2>&1); rc=$$?; set -e; \
+	 set +e; out=$$(bash platform/deploy/z23-host-watchdog.sh --selftest 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
 	 pass=1; case "$$out" in *"host-watchdog-selftest: PASS"*) pass=0;; esac; \
 	 if [ "$$rc" != "0" ] || [ "$$pass" != "0" ]; then \
@@ -12428,16 +12430,16 @@ migrate-role-names-selftest:
 .PHONY: install-logrotate logrotate-status logrotate-selftest
 install-logrotate:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 platform/deploy/zclassic23-logrotate.service "$(HOME)/.config/systemd/user/zclassic23-logrotate.service"
-	@install -m 644 platform/deploy/zclassic23-logrotate.timer "$(HOME)/.config/systemd/user/zclassic23-logrotate.timer"
+	@install -m 644 platform/deploy/z23-logrotate.service "$(HOME)/.config/systemd/user/z23-logrotate.service"
+	@install -m 644 platform/deploy/z23-logrotate.timer "$(HOME)/.config/systemd/user/z23-logrotate.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-logrotate.timer
-	@echo "installed log rotation: zclassic23-logrotate.timer (daily ~03:00)"
+	@systemctl --user enable --now z23-logrotate.timer
+	@echo "installed log rotation: z23-logrotate.timer (daily ~03:00)"
 	@echo "status: make logrotate-status"
 
 logrotate-status:
-	@systemctl --user list-timers zclassic23-logrotate.timer --no-pager 2>/dev/null || true
-	@systemctl --user status zclassic23-logrotate.service zclassic23-logrotate.timer --no-pager -n 12 2>/dev/null || true
+	@systemctl --user list-timers z23-logrotate.timer --no-pager 2>/dev/null || true
+	@systemctl --user status z23-logrotate.service z23-logrotate.timer --no-pager -n 12 2>/dev/null || true
 
 # logrotate-selftest: hermetic regression guard — fixture datadir under a
 # temp HOME, no live nodes touched.
@@ -12452,24 +12454,24 @@ logrotate-selftest:
 	 echo "logrotate-selftest: PASS"'
 
 # install-bundle-export: scheduled, verified consensus-state-bundle export +
-# retention + off-disk copy hook (platform/deploy/zclassic23-bundle-export.sh wraps
+# retention + off-disk copy hook (platform/deploy/z23-bundle-export.sh wraps
 # the existing TERMINAL -export-consensus-bundle verb). Only the TIMER is
 # started (enable --now); review the target datadir and ZCL_EXPORT_SECONDARY
-# in platform/deploy/zclassic23-bundle-export.service BEFORE enabling on a given box —
+# in platform/deploy/z23-bundle-export.service BEFORE enabling on a given box —
 # see that file's header comment.
 .PHONY: install-bundle-export bundle-export-status bundle-export-selftest
 install-bundle-export:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 platform/deploy/zclassic23-bundle-export.service "$(HOME)/.config/systemd/user/zclassic23-bundle-export.service"
-	@install -m 644 platform/deploy/zclassic23-bundle-export.timer "$(HOME)/.config/systemd/user/zclassic23-bundle-export.timer"
+	@install -m 644 platform/deploy/z23-bundle-export.service "$(HOME)/.config/systemd/user/z23-bundle-export.service"
+	@install -m 644 platform/deploy/z23-bundle-export.timer "$(HOME)/.config/systemd/user/z23-bundle-export.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-bundle-export.timer
-	@echo "installed bundle export: zclassic23-bundle-export.timer (nightly ~04:00)"
+	@systemctl --user enable --now z23-bundle-export.timer
+	@echo "installed bundle export: z23-bundle-export.timer (nightly ~04:00)"
 	@echo "status: make bundle-export-status"
 
 bundle-export-status:
-	@systemctl --user list-timers zclassic23-bundle-export.timer --no-pager 2>/dev/null || true
-	@systemctl --user status zclassic23-bundle-export.service zclassic23-bundle-export.timer --no-pager -n 12 2>/dev/null || true
+	@systemctl --user list-timers z23-bundle-export.timer --no-pager 2>/dev/null || true
+	@systemctl --user status z23-bundle-export.service z23-bundle-export.timer --no-pager -n 12 2>/dev/null || true
 
 # bundle-export-selftest: hermetic regression guard — REFUSED path against a
 # real fresh datadir (fast, no chain data needed), plus retention and
@@ -12477,10 +12479,10 @@ bundle-export-status:
 # datadir touched.
 bundle-export-selftest:
 	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash platform/deploy/zclassic23-bundle-export.sh --selftest 2>&1); rc=$$?; set -e; \
+	 set +e; out=$$(bash platform/deploy/z23-bundle-export.sh --selftest 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
 	 if [ "$$rc" != "0" ] || ! echo "$$out" | grep -q "^selftest: PASS"; then \
-	     echo "bundle-export-selftest: FAIL zclassic23-bundle-export.sh (rc=$$rc; no selftest: PASS line)"; \
+	     echo "bundle-export-selftest: FAIL z23-bundle-export.sh (rc=$$rc; no selftest: PASS line)"; \
 	     exit 1; \
 	 fi; \
 	 echo "bundle-export-selftest: PASS"'
@@ -12501,20 +12503,20 @@ bundle-export-selftest:
 install-replay-canary:
 	@install -d "$(HOME)/.config/systemd/user"
 	@install -d "$(HOME)/.local/state/zclassic23-canary/scratch"
-	@install -m 644 platform/deploy/zclassic23-replay-canary-nightly.service "$(HOME)/.config/systemd/user/zclassic23-replay-canary-nightly.service"
-	@install -m 644 platform/deploy/zclassic23-replay-canary-nightly.timer "$(HOME)/.config/systemd/user/zclassic23-replay-canary-nightly.timer"
-	@install -m 644 platform/deploy/zclassic23-replay-canary-weekly.service "$(HOME)/.config/systemd/user/zclassic23-replay-canary-weekly.service"
-	@install -m 644 platform/deploy/zclassic23-replay-canary-weekly.timer "$(HOME)/.config/systemd/user/zclassic23-replay-canary-weekly.timer"
-	@install -m 644 "platform/deploy/zclassic23-replay-canary-onfailure@.service" "$(HOME)/.config/systemd/user/zclassic23-replay-canary-onfailure@.service"
+	@install -m 644 platform/deploy/z23-replay-canary-nightly.service "$(HOME)/.config/systemd/user/z23-replay-canary-nightly.service"
+	@install -m 644 platform/deploy/z23-replay-canary-nightly.timer "$(HOME)/.config/systemd/user/z23-replay-canary-nightly.timer"
+	@install -m 644 platform/deploy/z23-replay-canary-weekly.service "$(HOME)/.config/systemd/user/z23-replay-canary-weekly.service"
+	@install -m 644 platform/deploy/z23-replay-canary-weekly.timer "$(HOME)/.config/systemd/user/z23-replay-canary-weekly.timer"
+	@install -m 644 "platform/deploy/z23-replay-canary-onfailure@.service" "$(HOME)/.config/systemd/user/z23-replay-canary-onfailure@.service"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-replay-canary-nightly.timer zclassic23-replay-canary-weekly.timer
-	@echo "installed replay canary timers: zclassic23-replay-canary-nightly.timer zclassic23-replay-canary-weekly.timer"
+	@systemctl --user enable --now z23-replay-canary-nightly.timer z23-replay-canary-weekly.timer
+	@echo "installed replay canary timers: z23-replay-canary-nightly.timer z23-replay-canary-weekly.timer"
 	@echo "(services NOT started now — they fire on the timer's next OnCalendar)"
 	@echo "status: make replay-canary-linger-status"
 
 replay-canary-linger-status:
-	@systemctl --user list-timers zclassic23-replay-canary-nightly.timer zclassic23-replay-canary-weekly.timer --no-pager 2>/dev/null || true
-	@systemctl --user status zclassic23-replay-canary-nightly.service zclassic23-replay-canary-weekly.service --no-pager -n 12 2>/dev/null || true
+	@systemctl --user list-timers z23-replay-canary-nightly.timer z23-replay-canary-weekly.timer --no-pager 2>/dev/null || true
+	@systemctl --user status z23-replay-canary-nightly.service z23-replay-canary-weekly.service --no-pager -n 12 2>/dev/null || true
 
 release:
 	@./tools/release.sh
@@ -15956,7 +15958,7 @@ ci-symbol-floor: zclassic23
 # ("never gates the normal build or make ci/make test", see wire-sweep
 # above) out of `make ci`. The corpus regressions this lane exists to catch
 # are covered instead by `make simnet-nightly` via the
-# zclassic23-simnet-nightly.timer (deploy/), not by the hot loop.
+# z23-simnet-nightly.timer (deploy/), not by the hot loop.
 .PHONY: ci-reproducible
 ci-reproducible:
 	@bash tools/scripts/check_reproducible_build.sh

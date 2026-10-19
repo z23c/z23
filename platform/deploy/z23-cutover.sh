@@ -67,7 +67,7 @@ set -eu
 # ── knobs (all overridable; the test suite injects mocks through these) ─────
 SYSTEMCTL="${SYSTEMCTL:-systemctl --user}"
 CANONICAL_UNIT="${CANONICAL_UNIT:-z23-node}"
-STANDBY_UNIT="${STANDBY_UNIT:-zclassic23-standby}"
+STANDBY_UNIT="${STANDBY_UNIT:-z23-node-standby}"
 CANONICAL_DATADIR="${CANONICAL_DATADIR:-$HOME/.zclassic-c23}"
 CANONICAL_RPCPORT="${CANONICAL_RPCPORT:-18232}"
 CANDIDATE_DATADIR="${CANDIDATE_DATADIR:-}"

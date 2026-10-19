@@ -19,7 +19,7 @@
 #else
 #define ZCL_CLI_DEFAULT_DATADIR ".zclassic-c23"
 #define ZCL_CLI_DEFAULT_RPC_PORT 18232
-#define ZCL_CLI_DEFAULT_UNIT "zclassic23"
+#define ZCL_CLI_DEFAULT_UNIT "z23-node"
 #endif
 
 static inline bool zcl_cli_lane_default_datadir(char *out, size_t out_size,

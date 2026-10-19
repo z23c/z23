@@ -573,6 +573,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     N_(t_deprecated_tools_z_is_absent),          /* git grep, read-only */
     S_(t_canonical_operator_diagnostics_contract),
     S_(t_canonical_deploy_proof_binding_contract),
+    S_(t_legacy_unit_guard_contract),
     S_(t_dev_lane_deploy_contract),
     /* Hermetic: each script proves itself inside its own mktemp sandbox and
      * no tracked path is written, so this needs no worktree clone. */

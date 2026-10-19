@@ -721,7 +721,7 @@ spawn_remote_await() {
             FIXTURE_STATUS_OK="${10:-}" \
             ZCL_SHIP_REMOTE_EXEC="$SANDBOX/fake-ssh" \
             SHIP_LIB_TEXT="$SHIP_LIB_TEXT" \
-            SHIP_OBS_UNIT=zclassic23 SHIP_OBS_SHA="$9" \
+            SHIP_OBS_UNIT=z23-node SHIP_OBS_SHA="$9" \
             SHIP_OBS_SRC="${11:-}" SHIP_OBS_COMMIT="${12:-}" \
             SHIP_SSH_OPTS= SHIP_REMOTE_HOST=fixture-host \
             SHIP_AWAIT_WINDOW="$5" SHIP_AWAIT_SILENCE="$6" \
@@ -1040,7 +1040,7 @@ for marker in PREPARE FINALIZE DISCARD; do
 done
 # The observer program is exactly the library plus one call, and it must run
 # on a plain /bin/sh — the target box's shell is not ours to choose.
-PROG="$(ship_observer_program "$SHIP_LIB_TEXT" zclassic23 abc '' '' 5)"
+PROG="$(ship_observer_program "$SHIP_LIB_TEXT" z23-node abc '' '' 5)"
 printf '%s' "$PROG" > "$SANDBOX/observer.sh"
 if sh -n "$SANDBOX/observer.sh"; then
     pass "observer program parses under POSIX sh"

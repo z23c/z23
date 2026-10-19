@@ -58,7 +58,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 . "$SCRIPT_DIR/lib/evidence_sources.sh"
 SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
-SOAK_UNIT="${ZCL_SOAK_UNIT:-zclassic23-soak}"
+SOAK_UNIT="${ZCL_SOAK_UNIT:-z23-soak}"
 
 fail()
 {

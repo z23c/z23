@@ -13,7 +13,7 @@ Description=Z23 External SLO Prober — client-viewpoint uptime ledger (read-onl
 # boot-time catch-up run samples a started node; deliberately NO Requires=
 # — an unreachable instance is recorded as a reachable:false line (a hole
 # in the ledger is itself the data point), never skipped.
-After=zclassic23.service
+After=z23-node.service
 
 [Service]
 Type=oneshot

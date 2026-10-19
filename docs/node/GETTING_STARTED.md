@@ -595,6 +595,84 @@ default; it no longer needs to, because a full build starts Tor on its own.
 Readiness stays fail-closed: it waits for onion descriptor publication rather
 than silently reporting a clearnet-only node as ready.
 
+#### Migrating from the pre-rename `zclassic23.service` unit
+
+The node unit is `z23-node.service`; earlier installs used `zclassic23.service`.
+Both units use the same datadir (`~/.zclassic-c23`) and ports (8033 P2P, 18232
+RPC), so only one may run. `make install`, `make deploy`, `zcl-nodectl
+legacy-unit-check` and `platform/deploy/setup.sh` refuse to proceed while
+`zclassic23.service` is active or enabled for the user, and change nothing.
+Migrate the host in one deliberate window:
+
+1. Record the old unit's state and drop-ins.
+
+   ```bash
+   systemctl --user show zclassic23.service -p ActiveState -p UnitFileState \
+     -p FragmentPath -p DropInPaths -p MainPID | tee ~/z23-node-migration.before
+   ls ~/.config/systemd/user/zclassic23.service.d/
+   ```
+
+2. Stop and disable the old unit.
+
+   ```bash
+   systemctl --user stop zclassic23.service
+   systemctl --user disable zclassic23.service
+   ```
+
+3. Install the new unit. The install does not start it.
+
+   ```bash
+   make install          # or: sudo bash platform/deploy/setup.sh
+   ```
+
+4. Move the drop-ins. Use `mv -n` per file when `z23-node.service.d/` already
+   exists, so nothing is overwritten.
+
+   ```bash
+   mkdir -p ~/.config/systemd/user/z23-node.service.d
+   mv -n ~/.config/systemd/user/zclassic23.service.d/*.conf \
+         ~/.config/systemd/user/z23-node.service.d/
+   ```
+
+   The environment file `~/.config/zclassic23/env` keeps its path.
+
+5. Enable and start.
+
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user enable --now z23-node
+   ```
+
+6. Verify one node owns the ports and the datadir is unchanged.
+
+   ```bash
+   systemctl --user is-active z23-node
+   systemctl --user show z23-node -p MainPID --value
+   ss -ltnp | grep -E ':(8033|18232)\b'     # one listener per port, pid = MainPID
+   zcl-nodectl status
+   ```
+
+7. Retire the renamed timers. Each `zclassic23-<name>.timer` became
+   `z23-<name>.timer`; the old ones stay enabled until disabled.
+
+   ```bash
+   systemctl --user list-timers 'zclassic23-*' --no-pager
+   systemctl --user disable --now zclassic23-<name>.timer    # per listed timer
+   ```
+
+Undo, while `~/z23-node-migration.before` still describes the old unit:
+
+```bash
+systemctl --user disable --now z23-node
+mv -n ~/.config/systemd/user/z23-node.service.d/*.conf \
+      ~/.config/systemd/user/zclassic23.service.d/
+systemctl --user daemon-reload
+systemctl --user enable --now zclassic23.service
+```
+
+The old unit file stays on disk until you remove it, so the undo needs no
+reinstall.
+
 **On macOS**, install the binary once, then use the provided LaunchAgent:
 
 ```bash

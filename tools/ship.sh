@@ -1642,7 +1642,7 @@ deploy_local() {
     # (candidate installed, no fault proven) apart from a genuine failure; the
     # `deploy` recipe writes build/bin/.deploy-verdict right before every exit
     # (Makefile, target `deploy`) so ship_deploy_local_verdict_rc()
-    # (tools/scripts/ship_progress_lib.sh) can. It is trusted ONLY for exactly
+    # (tools/scripts/ship_progress_lib.sh) can. It is accepted ONLY for exactly
     # this candidate: any other source id, any other verify_rc, or a missing
     # file stays a failure below — fail closed.
     if [ "$rc" -ne 0 ]; then
@@ -1805,7 +1805,7 @@ ship_note_rollout_unverified() {
     SHIP_ROLLOUT_HOST="$note_host"
     SHIP_ROLLOUT_WINDOW="$note_window"
     if [ -z "$note_line" ]; then
-        SHIP_OBS_UNIT=zclassic23
+        SHIP_OBS_UNIT=z23-node
         SHIP_OBS_SHA="$ARTIFACT_SHA"
         SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
         SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
@@ -1927,7 +1927,7 @@ REMOTE_RELEASE_CHECK
     # rerun from continuing to later hosts.
     if [ "$svc_bin" = "$release_root/z23" ]; then
         local current_line current_rc=0
-        SHIP_OBS_UNIT=zclassic23
+        SHIP_OBS_UNIT=z23-node
         SHIP_OBS_SHA="$ARTIFACT_SHA"
         SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
         SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
@@ -1984,8 +1984,8 @@ one_way_schema="${17:-0}"
 # The two subjects this script judges, each wrapped to ship_await's
 # one-argument observer seam. Same observables, same classifier, same words as
 # the local side uses.
-observe_candidate() { ship_observe zclassic23 "$want_sha" "$want_src" "$want_commit" "$1"; }
-observe_restore()   { ship_observe zclassic23 "$prior_sha" "" "" "$1"; }
+observe_candidate() { ship_observe z23-node "$want_sha" "$want_src" "$want_commit" "$1"; }
+observe_restore()   { ship_observe z23-node "$prior_sha" "" "" "$1"; }
 worker_v="$release_root/z23-package-verify"
 worker_v_legacy="$release_root/zclassic23-package-verify"
 worker_d="$release_root/z23-package-verify-dev"
@@ -2260,7 +2260,7 @@ REMOTE_SCRIPT
     # process proven still (WEDGED) or one that will not stay up (CRASHED) may
     # authorise it; a box that is visibly working keeps its candidate.
     local running_sha rollback_rc qual_rc=0
-    SHIP_OBS_UNIT=zclassic23
+    SHIP_OBS_UNIT=z23-node
     SHIP_OBS_SHA="$ARTIFACT_SHA"
     SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
     SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
@@ -2314,7 +2314,7 @@ rollback_window="$4"; rollback_silence="$5"
 crash_samples="$6"; unknown_samples="$7"; rpc_budgets="$8"
 # Wrapped to ship_await's one-argument observer seam. prior_sha is assigned
 # below, before the only call.
-observe_restore() { ship_observe zclassic23 "$prior_sha" "" "" "$1"; }
+observe_restore() { ship_observe z23-node "$prior_sha" "" "" "$1"; }
 dropin="$HOME/.config/systemd/user/z23-node.service.d/zzzzz-z23-ship-release.conf"
 if [ -f "${dropin}.ship.rollback.${run_id}" ] || [ -f "${dropin}.ship.absent.${run_id}" ]; then
     if [ -f "${dropin}.ship.rollback.${run_id}" ]; then

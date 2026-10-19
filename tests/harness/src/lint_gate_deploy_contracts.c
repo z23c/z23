@@ -183,6 +183,48 @@ int t_canonical_deploy_proof_binding_contract(void)
     return failures;
 }
 
+/* The pre-rename unit shares the datadir and ports with z23-node: install,
+ * deploy and setup.sh must refuse before any state change while it is active
+ * or enabled. The behavior is exercised in test_binary_ab_fallback. */
+int t_legacy_unit_guard_contract(void)
+{
+    int failures = 0;
+    char *make_buf = NULL;
+    char *setup_buf = NULL;
+    TEST("install, deploy and setup refuse while the pre-rename unit is live") {
+        char path[PATH_MAX];
+        ASSERT(repo_path(path, sizeof(path), "Makefile") == 0);
+        ASSERT(read_entire_file(path, &make_buf) == 0);
+        const char *deploy = strstr(make_buf, "\ndeploy: vendor-ready");
+        const char *deploy_guard = deploy
+            ? strstr(deploy, "legacy-unit-check") : NULL;
+        const char *deploy_trap = deploy
+            ? strstr(deploy, "trap cleanup_deploy EXIT") : NULL;
+        ASSERT(deploy_guard != NULL && deploy_trap != NULL);
+        ASSERT(deploy_guard < deploy_trap);
+        const char *macro = strstr(make_buf, "define INSTALL_C23_PRODUCTS");
+        const char *install_guard = macro
+            ? strstr(macro, "legacy-unit-check") : NULL;
+        const char *install_unit = macro
+            ? strstr(macro, "platform/deploy/z23-node.service") : NULL;
+        ASSERT(install_guard != NULL && install_unit != NULL);
+        ASSERT(install_guard < install_unit);
+
+        ASSERT(repo_path(path, sizeof(path), "platform/deploy/setup.sh") == 0);
+        ASSERT(read_entire_file(path, &setup_buf) == 0);
+        const char *setup_guard =
+            strstr(setup_buf, "systemctl --user $verb zclassic23.service");
+        const char *setup_install = strstr(setup_buf, "install -m 644 ");
+        ASSERT(setup_guard != NULL && setup_install != NULL);
+        ASSERT(setup_guard < setup_install);
+        ASSERT(strstr(setup_buf, "exit 3") != NULL);
+        PASS();
+    } _test_next:;
+    free(make_buf);
+    free(setup_buf);
+    return failures;
+}
+
 int t_dev_lane_deploy_contract(void)
 {
     int failures = 0;

@@ -17,11 +17,11 @@ platform/deploy/setup.sh
 platform/deploy/test-devbuild-broker.sh
 platform/deploy/test-devbuild.sh
 platform/deploy/z23-build-zram.sh
-platform/deploy/zclassic23-bundle-bootstrap.sh
-platform/deploy/zclassic23-bundle-export.sh
-platform/deploy/zclassic23-cutover-selftest.sh
-platform/deploy/zclassic23-cutover.sh
-platform/deploy/zclassic23-host-watchdog.sh
+platform/deploy/z23-bundle-bootstrap.sh
+platform/deploy/z23-bundle-export.sh
+platform/deploy/z23-cutover-selftest.sh
+platform/deploy/z23-cutover.sh
+platform/deploy/z23-host-watchdog.sh
 platform/packaging/install/install.sh
 platform/packaging/install/install_from_source.sh
 platform/packaging/release/build_release.sh

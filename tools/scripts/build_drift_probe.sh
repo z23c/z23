@@ -57,7 +57,7 @@
 #
 # Env:
 #   ZCL_DRIFT_LEDGER_DIR    ledger dir (default ~/.local/state/zclassic23-drift)
-#   ZCL_DRIFT_UNIT          unit to inspect (default zclassic23)
+#   ZCL_DRIFT_UNIT          unit to inspect (default z23-node)
 #   ZCL_DRIFT_PIN_FILE      candidate pin record (default platform/deploy/release-candidates.jsonl)
 #   ZCL_DRIFT_PIN_TAG       pin a specific rc- tag (default: last line of pin file)
 #   ZCL_DRIFT_ROTATE_BYTES  rotation threshold (default 52428800)
