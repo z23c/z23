@@ -24,6 +24,8 @@ ownership or permission to publish; directory layout grants no authority.
 | Distinguish evidence from acceptance | [Evidence ladder](EVIDENCE_LADDER.md) |
 | Inspect historical observations | [Lessons](LESSONS.md) |
 | Inspect fleet transport boundaries | [Native channel](NATIVE_CHANNEL.md), [Fleet join](FLEET_JOIN.md) |
+| Design and prove a regression fixture | [Representative fixtures](REPRESENTATIVE_FIXTURES.md) |
+| Admit validation jobs on a small disk | [Small-disk qualification](SMALL_DISK_QUALIFICATION.md) |
 | Install the Claude Code plugin | [Z23 plugin for Claude Code](../../.claude/plugin/README.md), opt-in fleet gateway: [fleet plugin](../../.claude/plugin-fleet/README.md) |
 | Inspect experimental unit contracts | [Flash unit](FLASH_UNIT.md), [Executor heuristics](EXECUTOR_HEURISTICS.md) |
 | See where the development system is going | [Development system vision](VISION.md) |
