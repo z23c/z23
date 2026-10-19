@@ -1934,3 +1934,8 @@ ZCL_CAPABILITY_SYMBOL("wcstombs", CAP_HARMLESS, "Text conversion.")
 
 ZCL_CAPABILITY_SYMBOL("fclonefileat", CAP_FS_WRITE, "Clones the pinned Darwin file into an owned destination directory.")
 ZCL_CAPABILITY_SYMBOL("renamex_np", CAP_FS_WRITE, "Darwin atomic pathname rename with no-replace flags.")
+ZCL_CAPABILITY_SYMBOL("mktime", CAP_HARMLESS,
+    "Converts a broken-down time the caller supplied. Reading the clock is "
+    "CAP_CLOCK.")
+ZCL_CAPABILITY_SYMBOL("strptime", CAP_HARMLESS,
+    "Parses a time string the caller supplied into a struct tm.")
