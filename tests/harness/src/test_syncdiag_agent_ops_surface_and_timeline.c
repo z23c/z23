@@ -724,7 +724,7 @@ static bool sd_lanes_fs_and_lane_list(const struct json_value *lanes)
         json_size(lane_arr) >= 3;
     ok = ok && canonical &&
         strcmp(json_get_str(json_get(canonical, "unit")),
-               "zclassic23") == 0;
+               "z23-node") == 0;
     ok = ok && canonical &&
         json_get_int(json_get(canonical, "https_port")) == 8443;
     return ok;
