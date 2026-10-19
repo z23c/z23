@@ -442,6 +442,10 @@ void zcl_native_handle_ops_mesh_device_host_runtime(const struct zcl_command_req
 void zcl_native_handle_ops_mesh_device_psk_new(const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_device_psk_fingerprint(const uint8_t key[32], char out[17]);
+/* ops.mesh.device.host.bench (tools/command/native_device_host_bench.c): in-process
+ * PSK tunnel throughput over a throwaway paired authority; optional atomic receipt_out. */
+void zcl_native_handle_ops_mesh_device_host_bench(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 #if defined(ZCL_TESTING)
 /* Failure injection after the key file exists: bit 0 fails the write, bit 1
  * fails the cleanup unlink. Zero restores normal behavior. */

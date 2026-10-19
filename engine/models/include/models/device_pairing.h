@@ -245,10 +245,10 @@ bool device_pairing_guard_acquire_host_psk_cached(struct device_pairing_store *s
     struct device_pairing_guard_cache *cache, struct device_pairing_guard *guard);
 /* Closes the retained grant and wipes the memo; safe on empty storage. */
 void device_pairing_guard_cache_destroy(struct device_pairing_guard_cache *cache);
+/* Process-wide counts of full grant acquisitions and cheap revalidations. */
+void device_pairing_guard_counts(uint64_t *full, uint64_t *cached);
 #ifdef ZCL_TESTING
 /* One-shot interruption of the actual durable publication sequence. */
 void device_pairing_test_interrupt(unsigned stage);
-/* Process-wide counts of full grant acquisitions and cheap revalidations. */
-void device_pairing_test_guard_counts(uint64_t *full, uint64_t *cached);
 #endif
 #endif

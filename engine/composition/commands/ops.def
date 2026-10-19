@@ -1287,6 +1287,17 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE,
     ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_mesh_device_host_runtime)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.device.host.bench", "ops.mesh.device.host", "",
+    "Measure PSK tunnel throughput in-process",
+    "Runs the real receiver/client PSK bridge pair over in-process sockets with a throwaway paired authority in a private temp profile that is removed afterwards; never opens a real pairing profile. mib 1..512 per direction (default 64), repeats 1..5 (default 3). Returns zcl.tunnel_bench.v1 with median and per-run MiB/s, records, acquisitions per record, build flags, source id and load. Optional absolute receipt_out is written atomically.",
+    ZCL_COMMAND_RESULT_BUDGET, "mesh,device,host,psk,tunnel,benchmark",
+    "zcl.tunnel_bench.input.v1", "zcl.tunnel_bench.v1", "mib,repeats,receipt_out", "",
+    "z23 ops mesh device host bench --mib=64 --repeats=3",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_NONE, ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_device_host_bench)
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.device.host.shell", "ops.mesh.device.host", "",
     "Open an ssh shell through the HOST tunnel in one command",

@@ -373,11 +373,40 @@ static bool devagent_receive_ints(const char *path, const char *key,
     return false;
 }
 
+/* ops.mesh.device.host.bench's bounded integers: mib per direction and repeats.
+ * The service owns the same bounds; the transport admits only the typed range. */
+static bool devagent_tunnel_bench_ints(const char *path, const char *key,
+                                       const struct json_value *value,
+                                       bool *type_ok)
+{
+    static const struct {
+        const char *key;
+        long long lo;
+        long long hi;
+    } bounds[] = {
+        { "mib", 1, 512 },
+        { "repeats", 1, 5 },
+    };
+    if (!path || strcmp(path, "ops.mesh.device.host.bench") != 0)
+        return false;
+    for (size_t i = 0; i < sizeof(bounds) / sizeof(bounds[0]); i++) {
+        if (strcmp(key, bounds[i].key) != 0)
+            continue;
+        *type_ok = value->type == JSON_INT &&
+                   json_get_int(value) >= bounds[i].lo &&
+                   json_get_int(value) <= bounds[i].hi;
+        return true;
+    }
+    return false;
+}
+
 bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
                                             const struct json_value *value,
                                             bool *type_ok)
 {
     if (devagent_worker_ints(path, key, value, type_ok))
+        return true;
+    if (devagent_tunnel_bench_ints(path, key, value, type_ok))
         return true;
     if (devagent_receive_ints(path, key, value, type_ok))
         return true;

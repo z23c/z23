@@ -5,6 +5,12 @@
 #endif
 #include "test/test_core.h"
 #include "services/device_host_bridge.h"
+#include "services/device_host_bench.h"
+#include "config/command_catalog.h"
+#include "kernel/command_registry.h"
+#include "command/native_command.h"
+#include "json/json.h"
+#include "platform/private_file.h"
 #include "platform/clock.h"
 static_assert(_Generic(device_host_bridge_open(NULL, NULL, NULL), struct zcl_result: 1, default: 0),
     "fallible domain API returns canonical zcl_result");
@@ -37,6 +43,7 @@ static_assert(_Generic(device_host_psk_pending_written(NULL, NULL, 0, NULL), str
 #if defined(__linux__) || defined(__APPLE__)
 #include "platform/socket_compat.h"
 #include "platform/pipe_compat.h"
+#include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -1058,9 +1065,9 @@ static int psk_io_receive_single_authority(void)
         const uint8_t payload = 0x62; ASSERT_EQ(send(f.plain[0], &payload, 1, MSG_NOSIGNAL), 1);
         ASSERT(psk_io_client_record_attempt(&f, sizeof(payload), read_before, written_before));
         uint64_t full0 = 0, cached0 = 0, full1 = 0, cached1 = 0;
-        device_pairing_test_guard_counts(&full0, &cached0);
+        device_pairing_guard_counts(&full0, &cached0);
         ASSERT(psk_io_live_result(typed_test_device_host_psk_bridge_step(&f.server)));
-        device_pairing_test_guard_counts(&full1, &cached1);
+        device_pairing_guard_counts(&full1, &cached1);
         ASSERT_EQ(f.server.observation.plaintext_written_bytes, 1);
         ASSERT_EQ((full1 - full0) + (cached1 - cached0), 1);
         uint8_t observed = 0; ASSERT_EQ(psk_io_wait_byte(&f, f.target, &observed), 1); ASSERT_EQ(observed, payload);
@@ -1635,12 +1642,12 @@ static int psk_io_midstream_authority(unsigned mode)
         uint8_t bytes[4096]; for (size_t i = 0; i < sizeof(bytes); ++i) bytes[i] = (uint8_t)(i * 7 + mode);
         /* Freeze the monotonic source so a slow run cannot age the server cache past its window. */
         f.frozen_ns = psk_io_fixture_mono(&f);
-        uint64_t cached0 = 0, cached1 = 0; device_pairing_test_guard_counts(NULL, &cached0);
+        uint64_t cached0 = 0, cached1 = 0; device_pairing_guard_counts(NULL, &cached0);
         for (unsigned i = 0; i < 4; ++i) {
             ASSERT(psk_io_transfer(&f, f.plain[0], f.target, bytes, sizeof(bytes)));
             ASSERT(psk_io_transfer(&f, f.target, f.plain[0], bytes, sizeof(bytes)));
         }
-        device_pairing_test_guard_counts(NULL, &cached1); ASSERT(cached1 > cached0);
+        device_pairing_guard_counts(NULL, &cached1); ASSERT(cached1 > cached0);
         ASSERT_EQ(send(f.plain[0], bytes, sizeof(bytes), MSG_NOSIGNAL), sizeof(bytes));
         ASSERT_EQ(send(f.target, bytes, sizeof(bytes), MSG_NOSIGNAL), sizeof(bytes));
         for (unsigned i = 0; i < 8; ++i) ASSERT(psk_io_live_result(typed_test_device_host_psk_bridge_step(&f.client)));
@@ -1662,98 +1669,125 @@ static int psk_io_midstream_authority(unsigned mode)
     } TEST_END
     psk_io_fixture_close(&f); return failures;
 }
-/* Bounded throughput witness: both bridges run their own poll loop on a thread,
- * as the receiver and client processes do. Default 4 MiB per direction keeps
- * t-fast under its budget; ZCL_DEVICE_HOST_BENCH_MIB (1..256) sizes a
- * measurement run. Prints MiB/s and authority acquisitions per 4 KiB record. */
-enum { PSK_BENCH_PATTERN = 65536 };
-struct psk_bench_pump { int fd; size_t total, moved; const uint8_t *pattern; bool ok; };
-static void *psk_bench_run(void *opaque)
-{
-    struct device_host_psk_bridge *bridge = opaque; enum device_host_bridge_result status;
-    (void)device_host_psk_bridge_run(bridge, &status); return NULL;
-}
-static bool psk_bench_poll(int fd, short events)
-{
-    struct pollfd event = {.fd = fd, .events = events};
-    int ready = poll(&event, 1, 100);
-    return ready >= 0 || errno == EINTR;
-}
-static void *psk_bench_write(void *opaque)
-{
-    struct psk_bench_pump *pump = opaque; int64_t deadline = clock_now_monotonic_ns() + INT64_C(30000000000);
-    while (pump->moved < pump->total && clock_now_monotonic_ns() < deadline) {
-        size_t offset = pump->moved % PSK_BENCH_PATTERN, size = PSK_BENCH_PATTERN - offset;
-        if (size > pump->total - pump->moved) size = pump->total - pump->moved;
-        ssize_t n = send(pump->fd, pump->pattern + offset, size, MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (n > 0) pump->moved += (size_t)n;
-        else if ((n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) ||
-            !psk_bench_poll(pump->fd, POLLOUT)) return NULL;
-    }
-    pump->ok = pump->moved == pump->total && shutdown(pump->fd, SHUT_WR) == 0; return NULL;
-}
-static bool psk_bench_read(int fd, size_t total, const uint8_t *pattern)
-{
-    static uint8_t buffer[PSK_BENCH_PATTERN]; size_t seen = 0;
-    int64_t deadline = clock_now_monotonic_ns() + INT64_C(30000000000);
-    while (clock_now_monotonic_ns() < deadline) {
-        size_t offset = seen % PSK_BENCH_PATTERN;
-        ssize_t n = recv(fd, buffer, PSK_BENCH_PATTERN - offset, MSG_DONTWAIT);
-        if (n == 0) return seen == total;
-        if (n > 0) {
-            if (memcmp(buffer, pattern + offset, (size_t)n)) return false;
-            seen += (size_t)n;
-        } else if ((errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) || !psk_bench_poll(fd, POLLIN)) return false;
-    }
-    return false;
-}
-static bool psk_bench_direction(int source, int destination, size_t total, const uint8_t *pattern, double *mib_per_s)
-{
-    struct psk_bench_pump pump = {.fd = source, .total = total, .pattern = pattern}; pthread_t writer;
-    int64_t start = clock_now_monotonic_ns();
-    if (pthread_create(&writer, NULL, psk_bench_write, &pump)) return false;
-    bool ok = psk_bench_read(destination, total, pattern);
-    int64_t elapsed = clock_now_monotonic_ns() - start;
-    pthread_join(writer, NULL);
-    *mib_per_s = elapsed > 0 ? ((double)total / 1048576.0) / ((double)elapsed / 1e9) : 0.0;
-    return ok && pump.ok;
-}
+/* Bounded throughput witness: the shared in-process bench (services/device_host_bench.c)
+ * that backs `ops mesh device host bench`. Default 4 MiB per direction keeps
+ * t-fast under its budget; ZCL_DEVICE_HOST_BENCH_MIB (1..512) sizes a
+ * measurement run. Prints MiB/s and authority acquisitions per record. */
 static size_t psk_bench_size(void)
 {
     const char *text = getenv("ZCL_DEVICE_HOST_BENCH_MIB");
     unsigned long mib = text && *text ? strtoul(text, NULL, 10) : 4;
-    if (mib < 1 || mib > 256) mib = 4;
-    return (size_t)mib << 20;
+    return mib < 1 || mib > DEVICE_HOST_BENCH_MIB_MAX ? 4 : (size_t)mib;
 }
 static int psk_io_throughput(void)
 {
-    int failures = 0; struct psk_io_fixture f; psk_io_fixture_init(&f);
-    static uint8_t pattern[PSK_BENCH_PATTERN];
-    for (size_t i = 0; i < sizeof(pattern); ++i) pattern[i] = (uint8_t)(i * 131u + (i >> 9));
-    TEST_CASE("host PSK IO throughput: threaded receiver/client bridge pair moves bounded duplex bytes intact") {
-        ASSERT(psk_io_fixture_open(&f, 0, false));
-        int64_t deadline = psk_io_fixture_mono(&f) + INT64_C(60000000000);
-        f.client_spec.session.deadline_ns = f.server_spec.session.deadline_ns = deadline;
-        ASSERT(psk_io_fixture_admit(&f)); ASSERT(psk_io_fixture_ready(&f));
-        size_t total = psk_bench_size(); uint64_t full0 = 0, cached0 = 0, full1 = 0, cached1 = 0;
-        device_pairing_test_guard_counts(&full0, &cached0);
-        pthread_t client, server; double forward = 0, reverse = 0;
-        ASSERT_EQ(pthread_create(&client, NULL, psk_bench_run, &f.client), 0);
-        ASSERT_EQ(pthread_create(&server, NULL, psk_bench_run, &f.server), 0);
-        bool forward_ok = psk_bench_direction(f.plain[0], f.target, total, pattern, &forward);
-        bool reverse_ok = forward_ok && psk_bench_direction(f.target, f.plain[0], total, pattern, &reverse);
-        if (!reverse_ok) atomic_store(&f.cancelled, true);
-        pthread_join(client, NULL); pthread_join(server, NULL);
-        device_pairing_test_guard_counts(&full1, &cached1);
-        ASSERT(forward_ok); ASSERT(reverse_ok);
-        ASSERT_EQ(f.client.observation.result, DEVICE_HOST_BRIDGE_EOF); ASSERT_EQ(f.server.observation.result, DEVICE_HOST_BRIDGE_EOF);
-        double records = (double)(2 * ((total + 4095) / 4096));
+    int failures = 0;
+    TEST_CASE("host PSK IO throughput: shared bench moves bounded duplex bytes intact and removes its temp profile") {
+        struct device_host_bench_result bench;
+        struct zcl_result result = device_host_bench_run(psk_bench_size(), 1, &bench);
+        ASSERT(result.ok); ASSERT(bench.profile_removed); ASSERT(platform_private_path_absent(bench.profile_root));
+        const struct device_host_bench_run *run = &bench.runs[0];
         printf("\n[device_host_psk throughput] MiB/direction=%zu forward=%.1f MiB/s reverse=%.1f MiB/s"
-            " records=%.0f full_acquisitions=%llu (%.3f/record) cached_acquisitions=%llu (%.3f/record)\n", total >> 20, forward, reverse,
-            records, (unsigned long long)(full1 - full0), (double)(full1 - full0) / records,
-            (unsigned long long)(cached1 - cached0), (double)(cached1 - cached0) / records);
+            " records=%llu full_acquisitions=%llu (%.3f/record) cached_acquisitions=%llu (%.3f/record)\n", bench.mib,
+            run->forward_mib_s, run->reverse_mib_s, (unsigned long long)run->records,
+            (unsigned long long)run->full_acquisitions, (double)run->full_acquisitions / (double)run->records,
+            (unsigned long long)run->cached_acquisitions, (double)run->cached_acquisitions / (double)run->records);
     } TEST_END
-    psk_io_fixture_close(&f); return failures;
+    return failures;
+}
+/* `ops mesh device host bench` through registry dispatch: mib=1 repeats=1, typed schema
+ * fields, the atomic receipt file, input bounds, and a temp profile that is gone afterwards.
+ * No throughput value is asserted; wall-clock speed is the benchmark's output, not a gate. */
+static bool bench_dir_empty(const char *directory)
+{
+    DIR *handle = opendir(directory); if (!handle) return false;
+    bool empty = true; struct dirent *entry;
+    while ((entry = readdir(handle)) != NULL) if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) empty = false;
+    closedir(handle); return empty;
+}
+static bool bench_number(const struct json_value *object, const char *key)
+{
+    const struct json_value *value = json_get(object, key);
+    return value && (value->type == JSON_REAL || value->type == JSON_INT);
+}
+static bool bench_runs_ok(const struct json_value *data)
+{
+    const struct json_value *per_record = json_get(data, "acquisitions_per_record");
+    const struct json_value *forward = json_get(data, "forward_runs_mib_s"), *reverse = json_get(data, "reverse_runs_mib_s");
+    return bench_number(data, "forward_mib_s") && bench_number(data, "reverse_mib_s") &&
+        forward && json_size(forward) == 1 && reverse && json_size(reverse) == 1 &&
+        json_get_int(json_get(data, "records")) == 512 && per_record &&
+        bench_number(per_record, "full") && bench_number(per_record, "cached");
+}
+static bool bench_provenance_ok(const struct json_value *data)
+{
+    const struct json_value *flags = json_get(data, "build_flags");
+    const char *source = json_get_str(json_get(data, "source_id_sha256")), *stamp = json_get_str(json_get(data, "timestamp"));
+    return flags && json_get(flags, "optimized") && json_get(flags, "compiler") && bench_number(data, "host_load1") &&
+        source && source[0] && stamp && stamp[0] && json_get(data, "timestamp_unix_ms") &&
+        json_get(data, "profile_removed") && json_get_bool(json_get(data, "profile_removed"));
+}
+static bool bench_schema_ok(const struct json_value *data)
+{
+    const char *schema = json_get_str(json_get(data, "schema"));
+    return schema && !strcmp(schema, "zcl.tunnel_bench.v1") && json_get_int(json_get(data, "mib")) == 1 &&
+        json_get_int(json_get(data, "repeats")) == 1 && bench_runs_ok(data) && bench_provenance_ok(data);
+}
+static int psk_bench_leaf(void)
+{
+    int failures = 0;
+    TEST_CASE("device_host_bench leaf: registry dispatch returns zcl.tunnel_bench.v1, writes the receipt and removes its temp profile") {
+        char scratch[1024], receipt_dir[1024], receipt[1100], *saved = getenv("TMPDIR"), saved_copy[1024] = "";
+        if (saved) snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
+        ASSERT(test_mkdtemp(scratch, sizeof(scratch), "bench-tmp")); ASSERT(test_mkdtemp(receipt_dir, sizeof(receipt_dir), "bench-receipt"));
+        snprintf(receipt, sizeof(receipt), "%s/tunnel.json", receipt_dir);
+        ASSERT_EQ(setenv("TMPDIR", scratch, 1), 0);
+        const struct zcl_command_registry *registry = zcl_command_catalog();
+        const struct zcl_command_spec *spec = zcl_command_registry_find(registry, "ops.mesh.device.host.bench", NULL);
+        ASSERT(spec != NULL); ASSERT(spec->handler == zcl_native_handle_ops_mesh_device_host_bench);
+        struct json_value input; json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_int(&input, "mib", 1)); ASSERT(json_push_kv_int(&input, "repeats", 1));
+        ASSERT(json_push_kv_str(&input, "receipt_out", receipt));
+        char why[192]; ASSERT(zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
+        struct zcl_command_context context = {.registry = registry, .granted_capabilities = ~(uint64_t)0, .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+        static char out[16384]; enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+        size_t n = zcl_command_registry_execute_json(registry, spec, &context, &input, false, spec->path, "normal", 0, 0, NULL, out, sizeof(out), &exit_code);
+        json_free(&input);
+        if (saved) setenv("TMPDIR", saved_copy, 1); else unsetenv("TMPDIR");
+        struct json_value envelope; ASSERT(n > 0); ASSERT(json_read(&envelope, out, n));
+        ASSERT(json_get_bool(json_get(&envelope, "ok")));
+        ASSERT(bench_schema_ok(json_get(&envelope, "data")));
+        /* The private profile lived under TMPDIR; nothing may remain there. */
+        ASSERT(bench_dir_empty(scratch));
+        char text[4096] = ""; FILE *file = fopen(receipt, "r"); ASSERT(file != NULL);
+        size_t length = fread(text, 1, sizeof(text) - 1, file); fclose(file);
+        struct json_value stored; ASSERT(length > 0); ASSERT(json_read(&stored, text, length)); ASSERT(bench_schema_ok(&stored));
+        json_free(&stored); json_free(&envelope);
+        test_rm_rf(scratch); test_rm_rf(receipt_dir);
+    } TEST_END
+    return failures;
+}
+static int psk_bench_leaf_bounds(void)
+{
+    int failures = 0;
+    TEST_CASE("device_host_bench leaf: registry input bounds and the shared median") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "ops.mesh.device.host.bench", NULL);
+        ASSERT(spec != NULL);
+        static const struct { const char *key; int64_t value; bool accepted; } cases[] = {
+            {"mib", 0, false}, {"mib", 1, true}, {"mib", 512, true}, {"mib", 513, false},
+            {"repeats", 0, false}, {"repeats", 5, true}, {"repeats", 6, false}};
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            struct json_value input; json_init(&input); json_set_object(&input);
+            ASSERT(json_push_kv_int(&input, cases[i].key, cases[i].value));
+            char why[192];
+            ASSERT_EQ(zcl_command_registry_input_validate(spec, &input, why, sizeof(why)), cases[i].accepted);
+            json_free(&input);
+        }
+        const double odd[] = {30.0, 10.0, 20.0}, even[] = {40.0, 10.0};
+        ASSERT(device_host_bench_median(odd, 3) == 20.0); ASSERT(device_host_bench_median(even, 2) == 25.0);
+        ASSERT(device_host_bench_median(odd, 0) == 0.0);
+    } TEST_END
+    return failures;
 }
 int test_device_host_bridge(void);
 int test_device_host_bridge(void)
@@ -1771,7 +1805,7 @@ int test_device_host_bridge(void)
         psk_io_deadline_expiry() + psk_io_deadline_handshake() + psk_io_deadline_phase_ceiling() + psk_io_deadline_borrowed() +
         psk_io_poll_interest() + psk_io_poll_stalled_hup() + psk_io_poll_pending_hup() + psk_io_poll_reverse_fin();
     failures += psk_io_typed_outputs() + psk_io_midstream_authority(0) + psk_io_midstream_authority(1) +
-        psk_io_midstream_authority(2) + psk_io_throughput();
+        psk_io_midstream_authority(2) + psk_io_throughput() + psk_bench_leaf() + psk_bench_leaf_bounds();
     return failures + (int)typed_state_failures;
 }
 #else

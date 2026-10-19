@@ -110,6 +110,26 @@ the refusals. Raw carrier EOF without an authenticated FIN is truncation, not
 completion. Rollback is `kill -TERM` of the receiver this rollout started;
 revoke only the new grant, with its inspected root.
 
+Throughput benchmark (read-only, needs no pairing and no network):
+
+```sh
+"$Z23" ops mesh device host bench --mib=64 --repeats=3 [--receipt_out=/abs/path/tunnel.json]
+```
+
+It drives the real receiver and client PSK bridge pair in this process over
+loopback sockets, with a throwaway paired authority in a private temp profile
+that is removed before the leaf returns; it never opens an operator profile.
+`mib` is 1..512 per direction (default 64), `repeats` 1..5 (default 3).
+The result is `zcl.tunnel_bench.v1`: `forward_mib_s` and `reverse_mib_s` (the
+median), the per-run `forward_runs_mib_s` and `reverse_runs_mib_s`, `records`,
+`acquisitions_per_record` (`full`, `cached`), `build_flags`, `source_id_sha256`,
+`host_load1`, `profile_removed` and `timestamp`. Speed is measured on the
+monotonic clock and is an observation of this host and build, never a gate;
+compare `build_flags` and `host_load1` before comparing two results.
+`receipt_out`, when given, writes the same JSON atomically (tmp, fsync, rename)
+into an existing directory so a probe can read it. The t-fast bridge group
+shares this implementation (`ZCL_DEVICE_HOST_BENCH_MIB` sizes its run).
+
 ## Shells and remote commands
 
 Existing OpenSSH peer access (aliases above, existing key and host pins, hybrid

@@ -1572,10 +1572,10 @@ static bool pairing_cache_open(struct pairing_cache_fixture *f, const char *name
 static bool pairing_cache_prime(struct pairing_cache_fixture *f)
 {
     struct device_pairing_guard guard = {0}; uint64_t full0, hit0, full1, hit1;
-    device_pairing_test_guard_counts(&full0, &hit0);
+    device_pairing_guard_counts(&full0, &hit0);
     bool ok = pairing_cache_acquire(f, &guard); device_pairing_guard_release(&guard);
     ok = ok && pairing_cache_acquire(f, &guard); device_pairing_guard_release(&guard);
-    device_pairing_test_guard_counts(&full1, &hit1);
+    device_pairing_guard_counts(&full1, &hit1);
     return ok && full1 == full0 + 1 && hit1 == hit0 + 1;
 }
 /* Copies path's bytes to a fresh file and renames it over path: new inode, same bytes. */
@@ -1594,9 +1594,9 @@ static bool pairing_cache_replace(const char *path)
 static bool pairing_cache_hits(struct pairing_cache_fixture *f)
 {
     struct device_pairing_guard guard = {0}; uint64_t full0, hit0, full1, hit1;
-    device_pairing_test_guard_counts(&full0, &hit0);
+    device_pairing_guard_counts(&full0, &hit0);
     bool ok = pairing_cache_acquire(f, &guard); device_pairing_guard_release(&guard);
-    device_pairing_test_guard_counts(&full1, &hit1);
+    device_pairing_guard_counts(&full1, &hit1);
     return ok && full1 == full0 && hit1 == hit0 + 1;
 }
 static int pairing_cache_case1(void)
@@ -1608,9 +1608,9 @@ static int pairing_cache_case1(void)
         ASSERT(pairing_cache_open(&f, "pair-cache-hit")); ASSERT(pairing_cache_prime(&f));
         ASSERT(pairing_cache_acquire(&f, &guard));
         ASSERT(!db_device_pairing_revoke(&f.store, f.row.peer_key, 160, &publication));
-        device_pairing_test_guard_counts(&full0, &hit0);
+        device_pairing_guard_counts(&full0, &hit0);
         ASSERT(pairing_cache_acquire(&f, &second));
-        device_pairing_test_guard_counts(&full1, &hit1);
+        device_pairing_guard_counts(&full1, &hit1);
         ASSERT_EQ(full1, full0 + 1); ASSERT_EQ(hit1, hit0);
         device_pairing_guard_release(&second);
         ASSERT(!db_device_pairing_revoke(&f.store, f.row.peer_key, 160, &publication));
@@ -1644,9 +1644,9 @@ static int pairing_cache_case3(void)
     TEST_CASE("device_pairing cache: lock file replaced by a new inode is seen by the next check") {
         ASSERT(pairing_cache_open(&f, "pair-cache-lock")); ASSERT(pairing_cache_prime(&f));
         ASSERT(pairing_cache_replace(f.lock));
-        device_pairing_test_guard_counts(&full0, &hit0);
+        device_pairing_guard_counts(&full0, &hit0);
         ASSERT(pairing_cache_acquire(&f, &guard)); device_pairing_guard_release(&guard);
-        device_pairing_test_guard_counts(&full1, &hit1);
+        device_pairing_guard_counts(&full1, &hit1);
         ASSERT_EQ(full1, full0 + 1); ASSERT_EQ(hit1, hit0);
         ASSERT(pairing_cache_hits(&f)); device_pairing_guard_cache_destroy(&f.cache);
     } TEST_END
@@ -1661,10 +1661,10 @@ static int pairing_cache_case4(void)
     TEST_CASE("device_pairing cache: grant replaced with identical bytes revalidates through the full path") {
         ASSERT(pairing_cache_open(&f, "pair-cache-grant")); ASSERT(pairing_cache_prime(&f));
         ASSERT(pairing_cache_replace(f.grant));
-        device_pairing_test_guard_counts(&full0, &hit0);
+        device_pairing_guard_counts(&full0, &hit0);
         ASSERT(pairing_cache_acquire(&f, &guard));
         ASSERT(!memcmp(guard.root, f.root, 32)); device_pairing_guard_release(&guard);
-        device_pairing_test_guard_counts(&full1, &hit1);
+        device_pairing_guard_counts(&full1, &hit1);
         ASSERT_EQ(full1, full0 + 1); ASSERT_EQ(hit1, hit0);
         ASSERT(pairing_cache_hits(&f)); device_pairing_guard_cache_destroy(&f.cache);
     } TEST_END
@@ -1680,9 +1680,9 @@ static int pairing_cache_case5(void)
         ASSERT(pairing_cache_open(&f, "pair-cache-pending")); ASSERT(pairing_cache_prime(&f));
         struct platform_private_file intent; platform_private_file_init(&intent);
         ASSERT(platform_private_file_create(f.pending, &intent)); platform_private_file_close(&intent);
-        device_pairing_test_guard_counts(&full0, &hit0);
+        device_pairing_guard_counts(&full0, &hit0);
         ASSERT(!pairing_cache_acquire(&f, &guard));
-        device_pairing_test_guard_counts(&full1, &hit1);
+        device_pairing_guard_counts(&full1, &hit1);
         ASSERT_EQ(hit1, hit0); ASSERT(!guard.held);
         ASSERT_EQ(remove(f.pending), 0);
         ASSERT(pairing_cache_acquire(&f, &guard)); device_pairing_guard_release(&guard);

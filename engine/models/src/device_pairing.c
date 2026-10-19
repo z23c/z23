@@ -28,22 +28,20 @@ enum { DEVICE_PAIRING_V1_WIRE = 168, DEVICE_PAIRING_V2_WIRE = 176,
        DEVICE_PAIRING_GUEST_WIRE = 288, DEVICE_PAIRING_WIRE = 304 };
 static const uint8_t pairing_magic[8] = {'Z','2','3','D','E','V',2,0};
 
-#ifdef ZCL_TESTING
 #include <stdatomic.h>
+static atomic_ullong guard_full_acquisitions, guard_cached_acquisitions;
+void device_pairing_guard_counts(uint64_t *full, uint64_t *cached)
+{
+    if (full) *full = atomic_load_explicit(&guard_full_acquisitions, memory_order_relaxed);
+    if (cached) *cached = atomic_load_explicit(&guard_cached_acquisitions, memory_order_relaxed);
+}
+#define DEVICE_PAIRING_GUARD_COUNT(counter) atomic_fetch_add_explicit(&(counter), 1, memory_order_relaxed)
+#ifdef ZCL_TESTING
 static _Thread_local unsigned interruption_stage;
-static atomic_ullong test_full_acquisitions, test_cached_acquisitions;
 void device_pairing_test_interrupt(unsigned stage)
 {
     interruption_stage = stage;
 }
-void device_pairing_test_guard_counts(uint64_t *full, uint64_t *cached)
-{
-    if (full) *full = atomic_load_explicit(&test_full_acquisitions, memory_order_relaxed);
-    if (cached) *cached = atomic_load_explicit(&test_cached_acquisitions, memory_order_relaxed);
-}
-#define DEVICE_PAIRING_TEST_COUNT(counter) atomic_fetch_add_explicit(&(counter), 1, memory_order_relaxed)
-#else
-#define DEVICE_PAIRING_TEST_COUNT(counter) ((void)0)
 #endif
 
 static bool publication_checkpoint(unsigned stage)
@@ -847,7 +845,7 @@ static bool guard_acquire_retain(struct device_pairing_store *store,
     if (!guard_arguments_valid(store, peer_key, now, required, guard))
         LOG_FAIL("device_pairing", "invalid guard argument");
     if (!lock_store(store, guard, true)) return false;
-    DEVICE_PAIRING_TEST_COUNT(test_full_acquisitions);
+    DEVICE_PAIRING_GUARD_COUNT(guard_full_acquisitions);
     bool ok = read_exact_retain(store, peer_key, &guard->row, guard->root, retain) &&
         now >= guard->row.paired_at && now < guard->row.expires_at &&
         !guard->row.revoked_at && !guard->row.generation &&
@@ -1154,7 +1152,7 @@ static bool cache_revalidate(struct device_pairing_guard_cache *cache, struct de
         device_pairing_guard_release(guard); return false; // raw-return-ok:cache miss; the full acquisition logs
     }
     guard->row = cache->row; memcpy(guard->root, cache->root, 32);
-    DEVICE_PAIRING_TEST_COUNT(test_cached_acquisitions);
+    DEVICE_PAIRING_GUARD_COUNT(guard_cached_acquisitions);
     return true;
 }
 static void cache_remember(struct device_pairing_guard_cache *cache, struct device_pairing_store *store,
