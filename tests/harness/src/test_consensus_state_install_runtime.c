@@ -39,6 +39,7 @@
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
+#include "util/rpc_paths.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
@@ -912,13 +913,25 @@ static bool csir_sql(const char *sql)
     return ok;
 }
 
+/* The canonical datadir the product derives from `home`, through the same
+ * routine the node control path uses, so the fixture spells no live path. */
+static void csir_default_datadir(const char *home, char *out, size_t cap)
+{
+    char scratch[5][PATH_MAX];
+    zcl_nodectl_build_default_paths(home, scratch[0], sizeof(scratch[0]),
+                                    scratch[1], sizeof(scratch[1]),
+                                    scratch[2], sizeof(scratch[2]), out, cap,
+                                    scratch[3], sizeof(scratch[3]),
+                                    scratch[4], sizeof(scratch[4]));
+}
+
 static int case_fresh_canonical_cutover(void)
 {
     int failures = 0;
     char root[256], home[300], canonical[340];
     test_make_tmpdir(root, sizeof(root), "csir_fresh_canon", "ok");
     snprintf(home, sizeof(home), "%s/home", root);
-    snprintf(canonical, sizeof(canonical), "%s/.zclassic-c23", home);
+    csir_default_datadir(home, canonical, sizeof(canonical));
     const char *old_home = getenv("HOME");
     char saved[PATH_MAX];
     snprintf(saved, sizeof(saved), "%s", old_home ? old_home : "");
@@ -1001,7 +1014,7 @@ static int case_owner_gate_refusal_writes_nothing(void)
         failed[440];
     test_make_tmpdir(root, sizeof(root), "csir_gate_marker", "ok");
     snprintf(home, sizeof(home), "%s/home", root);
-    snprintf(canonical, sizeof(canonical), "%s/.zclassic-c23", home);
+    csir_default_datadir(home, canonical, sizeof(canonical));
     snprintf(bundles, sizeof(bundles), "%s/bundles", canonical);
     snprintf(bundle, sizeof(bundle), "%s/b.sqlite", bundles);
     snprintf(failed, sizeof(failed), "%s.failed", bundle);
@@ -1066,7 +1079,7 @@ static void csir_gate_fx_open(struct csir_gate_fx *fx)
     char node_path[300];
     test_make_tmpdir(fx->root, sizeof(fx->root), "csir_gate_closed", "ok");
     snprintf(fx->home, sizeof(fx->home), "%s/home", fx->root);
-    snprintf(fx->canonical, sizeof(fx->canonical), "%s/.zclassic-c23", fx->home);
+    csir_default_datadir(fx->home, fx->canonical, sizeof(fx->canonical));
     snprintf(fx->other, sizeof(fx->other), "%s/other", fx->root);
     snprintf(node_path, sizeof(node_path), "%s/node.db", fx->root);
     const char *old_home = getenv("HOME");
