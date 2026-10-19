@@ -175,7 +175,7 @@ The items below describe work to prove, not capabilities declared complete.
    content. A signature, receipt or queue acknowledgement alone proves neither
    correctness nor publication.
 
-   Next concrete task: make a publication hold admissible while a landing step is running. `dl_hold` in `tools/command/native_dev_land.c` takes `dl_step_lock` before it writes and replies `STEP_BUSY` when that lock is held; the header of the same file says `step` holds `step.lock` for its whole run and `drive` releases it before a foreground proof, so first show with a test which proof path leaves a hold unwritable.
+   Current main already completes this task: `dl_hold()` writes the hold under `queue.lock` without acquiring `step.lock`; `test_dev_land` registers `dlx_hold_admissible_during_step()` and `dlx_hold_survives_step_rewrite()` to cover admission during a held step lock and survival across a step rewrite that would otherwise erase the hold. The publication-hold cases also assert that publication remains blocked until release. These cases are present in the current source; this note does not claim a new test run.
 
 5. **Keep accepted software usable after its publisher disappears.** Preserve
    source, dependencies, recipes and evidence, then reproduce without the
