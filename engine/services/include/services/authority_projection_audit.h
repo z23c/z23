@@ -85,4 +85,21 @@ void ap_audit_reset_for_test(void);
 struct json_value;
 bool ap_audit_dump_state_json(struct json_value *out, const char *key);
 
+/* Difference diagnostics have three distinct states. diff_keys lists the
+ * differences actually observed; diff_count is the number of keys LISTED, not
+ * the total number of differences.
+ *   - scan error: a prepare or SQL step error (neither SQLITE_ROW nor
+ *     SQLITE_DONE) stopped collection; the list is partial and nothing past
+ *     the error is reported.
+ *   - truncated: collection stopped at diff_limit (AP_DIFF_MAX) while unread
+ *     rows remained, so more differences may exist.
+ *   - neither: both cursors were read to SQLITE_DONE; the list is complete. */
+bool ap_audit_diff_scan_error(void);
+bool ap_audit_diff_truncated(void);
+
+#ifdef ZCL_TESTING
+/* Make the nth projection-cursor step of the next diff scan fail. */
+void ap_audit_test_fail_proj_step(int nth);
+#endif
+
 #endif /* ZCL_SERVICES_AUTHORITY_PROJECTION_AUDIT_H */

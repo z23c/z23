@@ -63,6 +63,8 @@ static _Atomic uint64_t g_ap_last_proj_count     = 0;
 static _Atomic int64_t  g_ap_last_auth_h        = -1;
 static _Atomic int64_t  g_ap_last_proj_h        = -1;
 static _Atomic int      g_ap_diff_count         = 0;
+static _Atomic bool     g_ap_diff_scan_error    = false;
+static _Atomic bool     g_ap_diff_truncated     = false;
 
 /* Unsynced markers are retried at the mirror tick period before the pass is
  * counted as skipped_unsynced: the projection normally trails the authority by
@@ -218,50 +220,115 @@ static void ap_diff_emit(char *buf, size_t cap, size_t *off, char tag,
         *off += (size_t)w;
 }
 
+#ifdef ZCL_TESTING
+/* Fault seam: the Nth (1-based) cursor step on the projection side returns
+ * SQLITE_IOERR instead of stepping. 0 = off. */
+static int g_ap_test_fail_proj_step;
+void ap_audit_test_fail_proj_step(int nth) { g_ap_test_fail_proj_step = nth; }
+#endif
+
+/* Step one cursor. 'proj' marks the projection side (test fault seam only). */
+static int ap_step(sqlite3_stmt *st, bool proj)
+{
+#ifdef ZCL_TESTING
+    static int seen;
+    if (proj && g_ap_test_fail_proj_step > 0 &&
+        ++seen == g_ap_test_fail_proj_step) {
+        seen = 0;
+        g_ap_test_fail_proj_step = 0;
+        return SQLITE_IOERR;
+    }
+#else
+    (void)proj;
+#endif
+    return sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
+}
+
+static bool ap_step_ok(int rc)
+{
+    return rc == SQLITE_ROW || rc == SQLITE_DONE;
+}
+
+/* Collection stopped at the cap with unread rows still pending. */
+static bool ap_diff_cut_short(int n, int ra, int rb)
+{
+    return n >= AP_DIFF_MAX && (ra == SQLITE_ROW || rb == SQLITE_ROW);
+}
+
+/* One merge step over the two cursors: emits at most one difference and
+ * advances whichever cursor(s) were consumed. */
+static void ap_merge_step(char *buf, size_t cap, size_t *off, int *n,
+                          sqlite3_stmt *a, sqlite3_stmt *b, int *ra, int *rb)
+{
+    int c = *ra != SQLITE_ROW ? 1 : *rb != SQLITE_ROW ? -1 : ap_key_cmp(a, b);
+    if (c < 0) {
+        ap_diff_emit(buf, cap, off, 'a', a);
+        (*n)++;
+        *ra = ap_step(a, false);
+        return;
+    }
+    if (c > 0) {
+        ap_diff_emit(buf, cap, off, 'p', b);
+        (*n)++;
+        *rb = ap_step(b, true);
+        return;
+    }
+    if (sqlite3_column_int64(a, 2) != sqlite3_column_int64(b, 2) ||
+        sqlite3_column_int(a, 3) != sqlite3_column_int(b, 3)) {
+        ap_diff_emit(buf, cap, off, 'v', a);
+        (*n)++;
+    }
+    *ra = ap_step(a, false);
+    *rb = ap_step(b, true);
+}
+
+/* Run the merge to the cap or the end. Returns true when both cursors ended
+ * on ROW/DONE (no step error); *truncated reports an unread tail at the cap. */
+static bool ap_merge_scan(sqlite3_stmt *a, sqlite3_stmt *b, char *buf,
+                          size_t cap, int *n_out, bool *truncated)
+{
+    size_t off = 0;
+    int n = 0;
+    int ra = ap_step(a, false);
+    int rb = ap_step(b, true);
+    while (n < AP_DIFF_MAX && ap_step_ok(ra) && ap_step_ok(rb) &&
+           (ra == SQLITE_ROW || rb == SQLITE_ROW))
+        ap_merge_step(buf, cap, &off, &n, a, b, &ra, &rb);
+    bool complete = ap_step_ok(ra) && ap_step_ok(rb);
+    *truncated = complete && ap_diff_cut_short(n, ra, rb);
+    *n_out = n;
+    return complete;
+}
+
 /* Sorted merge of the two PK-ordered scans (coins on the authority side,
  * utxos on the projection side): O(n) with an early exit after AP_DIFF_MAX
  * differences. 'a' = only in the authority, 'p' = only in the projection,
- * 'v' = same outpoint, different value or height. */
+ * 'v' = same outpoint, different value or height. Only SQLITE_ROW continues a
+ * cursor and only SQLITE_DONE ends it: any other step result (or a failed
+ * prepare) flags a scan error and stops, so an unread tail is
+ * never reported as a difference. */
 static void ap_collect_diff(sqlite3 *pdb, sqlite3 *pj)
 {
     char buf[sizeof(g_ap_diff_keys)];
-    size_t off = 0;
     int n = 0;
+    bool complete = false;
+    bool truncated = false;
     buf[0] = '\0';
     sqlite3_stmt *a = NULL, *b = NULL;
     if (sqlite3_prepare_v2(pdb,
             "SELECT txid, vout, value, height FROM coins ORDER BY txid, vout",
             -1, &a, NULL) == SQLITE_OK &&
-        utxo_mirror_prepare_key_scan(pj, &b) == SQLITE_OK) {
-        int ra = sqlite3_step(a);  // raw-sql-ok:progress-kv-kernel-store
-        int rb = sqlite3_step(b);  // raw-sql-ok:progress-kv-kernel-store
-        while (n < AP_DIFF_MAX && (ra == SQLITE_ROW || rb == SQLITE_ROW)) {
-            int c = ra != SQLITE_ROW ? 1 : rb != SQLITE_ROW ? -1
-                                     : ap_key_cmp(a, b);
-            if (c < 0) {
-                ap_diff_emit(buf, sizeof(buf), &off, 'a', a);
-                n++;
-                ra = sqlite3_step(a);  // raw-sql-ok:progress-kv-kernel-store
-            } else if (c > 0) {
-                ap_diff_emit(buf, sizeof(buf), &off, 'p', b);
-                n++;
-                rb = sqlite3_step(b);  // raw-sql-ok:progress-kv-kernel-store
-            } else {
-                if (sqlite3_column_int64(a, 2) != sqlite3_column_int64(b, 2) ||
-                    sqlite3_column_int(a, 3) != sqlite3_column_int(b, 3)) {
-                    ap_diff_emit(buf, sizeof(buf), &off, 'v', a);
-                    n++;
-                }
-                ra = sqlite3_step(a);  // raw-sql-ok:progress-kv-kernel-store
-                rb = sqlite3_step(b);  // raw-sql-ok:progress-kv-kernel-store
-            }
-        }
-    }
+        utxo_mirror_prepare_key_scan(pj, &b) == SQLITE_OK)
+        complete = ap_merge_scan(a, b, buf, sizeof(buf), &n, &truncated);
     sqlite3_finalize(a);
     sqlite3_finalize(b);
+    if (!complete)
+        LOG_WARN("validation_pack", "[ap-audit] diff scan stopped by a step/prepare error after %d differences", n);
     pthread_mutex_lock(&g_ap_detail_lock);
     snprintf(g_ap_diff_keys, sizeof(g_ap_diff_keys), "%s", buf);
     pthread_mutex_unlock(&g_ap_detail_lock);
+    atomic_store(&g_ap_diff_scan_error, !complete);
+    atomic_store(&g_ap_diff_truncated, truncated);
     atomic_store(&g_ap_diff_count, n);
 }
 
@@ -383,8 +450,11 @@ bool ap_audit_run_once(void)
                                  in.auth_root, in.proj_root);
     if (v.violated)
         ap_collect_diff(pdb, ndb->db);
-    else
+    else {
         atomic_store(&g_ap_diff_count, 0);
+        atomic_store(&g_ap_diff_scan_error, false);
+        atomic_store(&g_ap_diff_truncated, false);
+    }
     return true;
 }
 
@@ -442,6 +512,8 @@ void ap_audit_reset_for_test(void)
     g_ap_last_proj_hex[0] = '\0';
     g_ap_diff_keys[0] = '\0';
     atomic_store(&g_ap_diff_count, 0);
+    atomic_store(&g_ap_diff_scan_error, false);
+    atomic_store(&g_ap_diff_truncated, false);
     atomic_store(&g_ap_last_auth_h, -1);
     atomic_store(&g_ap_last_proj_h, -1);
     pthread_mutex_unlock(&g_ap_detail_lock);
@@ -493,10 +565,23 @@ bool ap_audit_dump_state_json(struct json_value *out, const char *key)
                           ms && mh == UTXO_MIRROR_QUARANTINED);
     }
     json_push_kv_int(out, "diff_count", atomic_load(&g_ap_diff_count));
+    json_push_kv_bool(out, "diff_scan_error", atomic_load(&g_ap_diff_scan_error));
+    json_push_kv_bool(out, "diff_truncated", atomic_load(&g_ap_diff_truncated));
+    json_push_kv_int(out, "diff_limit", AP_DIFF_MAX);
         pthread_mutex_lock(&g_ap_detail_lock);
     json_push_kv_str(out, "last_auth_root", g_ap_last_auth_hex);
     json_push_kv_str(out, "diff_keys", g_ap_diff_keys);
     json_push_kv_str(out, "last_proj_root", g_ap_last_proj_hex);
     pthread_mutex_unlock(&g_ap_detail_lock);
     return true;
+}
+
+bool ap_audit_diff_scan_error(void)
+{
+    return atomic_load(&g_ap_diff_scan_error);
+}
+
+bool ap_audit_diff_truncated(void)
+{
+    return atomic_load(&g_ap_diff_truncated);
 }

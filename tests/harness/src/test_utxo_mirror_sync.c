@@ -29,6 +29,9 @@
 #include "services/authority_projection_audit.h"
 #include "services/utxo_mirror_delta.h"
 #include "services/utxo_mirror_sync_service.h"
+#include "kernel/command_registry.h"
+#include "command/native_command.h"
+#include "storage/coins_ram.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 
@@ -466,14 +469,14 @@ static int ums_test_operator_admission(struct utxo_mirror_sync_service *svc,
     UMS_CHECK("operator: remove migration marker",
         progress_meta_delete(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
     UMS_CHECK("operator: absent migration evidence refuses",
-        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_ERROR);
+        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_REFUSED);
     UMS_CHECK("operator: absent evidence preserves old mirror and quarantine",
         ums_old_mirror_intact(svc, ndb, 102, before));
     const uint8_t malformed[2] = {1, 1};
     UMS_CHECK("operator: malformed marker installed",
         progress_meta_set(pdb, COINS_KV_MIGRATION_COMPLETE_KEY, malformed, sizeof(malformed)));
     UMS_CHECK("operator: malformed migration evidence refuses",
-        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_ERROR);
+        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_REFUSED);
     UMS_CHECK("operator: malformed evidence preserves old mirror and quarantine",
         ums_old_mirror_intact(svc, ndb, 102, before));
     UMS_CHECK("operator: genuine migration evidence restored",
@@ -483,12 +486,36 @@ static int ums_test_operator_admission(struct utxo_mirror_sync_service *svc,
         coins_kv_spend(pdb, a, 0) && coins_kv_spend(pdb, b, 0) &&
         coins_kv_count_sqlite(pdb) == 0);
     UMS_CHECK("operator: empty source refuses despite present frontier and marker",
-        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_ERROR);
+        utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_REFUSED);
     UMS_CHECK("operator: empty source preserves old mirror and quarantine",
         ums_old_mirror_intact(svc, ndb, 102, before));
     UMS_CHECK("operator: source restored",
         ums_add_coin(pdb, 0x51, 1000, 100) && ums_add_coin(pdb, 0x52, 2000, 101));
     return failures;
+}
+
+/* The rebuild writes through its own private connection, so staged-read and
+ * rollback faults attach to that handle via the writer hook. */
+struct ums_writer_fault { struct ums_scan_fault *f; bool trace; };
+
+static void ums_writer_hook(sqlite3 *w, void *p)
+{
+    struct ums_writer_fault *c = p;
+    c->f->db = w;
+    if (c->trace)
+        sqlite3_trace_v2(w, SQLITE_TRACE_STMT, ums_trace_staged_step, c->f);
+    else
+        sqlite3_set_authorizer(w, ums_deny_staged_read, c->f);
+}
+
+static int64_t ums_rebuild_with_writer_fault(struct utxo_mirror_sync_service *svc,
+    struct ums_scan_fault *f, bool trace)
+{
+    struct ums_writer_fault c = {.f = f, .trace = trace};
+    utxo_mirror_sync_test_set_writer_hook(ums_writer_hook, &c);
+    int64_t result = utxo_mirror_rebuild_now(svc);
+    utxo_mirror_sync_test_set_writer_hook(NULL, NULL);
+    return result;
 }
 
 static int ums_test_staged_read_errors(struct utxo_mirror_sync_service *svc,
@@ -499,21 +526,14 @@ static int ums_test_staged_read_errors(struct utxo_mirror_sync_service *svc,
     uint64_t before_count = 0;
     utxo_commitment_sha3_compute(ndb->db, before, &before_count);
     UMS_CHECK("operator: baseline mirror has two rows", before_count == 2);
-    struct ums_scan_fault f = {.db = ndb->db};
-    UMS_CHECK("operator: install staged prepare denial",
-        sqlite3_set_authorizer(ndb->db, ums_deny_staged_read, &f) == SQLITE_OK);
-    int64_t result = utxo_mirror_rebuild_now(svc);
-    sqlite3_set_authorizer(ndb->db, NULL, NULL);
+    struct ums_scan_fault f = {.db = NULL};
+    int64_t result = ums_rebuild_with_writer_fault(svc, &f, false);
     UMS_CHECK("operator: real staged prepare error is not a root mismatch",
         f.prepare_denied && result == UTXO_MIRROR_REBUILD_ERROR);
     UMS_CHECK("operator: prepare error rollback preserves old mirror and quarantine",
         ums_old_mirror_intact(svc, ndb, 102, before));
-    f = (struct ums_scan_fault){.db = ndb->db};
-    UMS_CHECK("operator: install staged step interruption",
-        sqlite3_trace_v2(ndb->db, SQLITE_TRACE_STMT, ums_trace_staged_step, &f) == SQLITE_OK);
-    result = utxo_mirror_rebuild_now(svc);
-    sqlite3_trace_v2(ndb->db, 0, NULL, NULL);
-    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    f = (struct ums_scan_fault){.db = NULL};
+    result = ums_rebuild_with_writer_fault(svc, &f, true);
     UMS_CHECK("operator: real staged step error is not a root mismatch",
         f.trace_started && f.interrupted && result == UTXO_MIRROR_REBUILD_ERROR);
     UMS_CHECK("operator: step error rollback preserves old mirror and quarantine",
@@ -521,8 +541,9 @@ static int ums_test_staged_read_errors(struct utxo_mirror_sync_service *svc,
     return failures;
 }
 
-/* A real SQLite authorizer refusal of rollback must not report restoration.
- * Remove the fixture refusal and settle the transaction before later cases. */
+/* A real SQLite authorizer refusal of rollback on the writer must not report
+ * restoration. The writer's checked close then discards the open transaction,
+ * leaving the shared handle in autocommit and the old mirror intact. */
 static int ums_test_rollback_unsettled(struct utxo_mirror_sync_service *svc,
     struct node_db *ndb)
 {
@@ -530,18 +551,15 @@ static int ums_test_rollback_unsettled(struct utxo_mirror_sync_service *svc,
     uint8_t before[32];
     uint64_t count = 0;
     utxo_commitment_sha3_compute(ndb->db, before, &count);
-    struct ums_scan_fault f = {.db = ndb->db, .deny_rollback = true};
-    UMS_CHECK("operator: install rollback refusal",
-        sqlite3_set_authorizer(ndb->db, ums_deny_staged_read, &f) == SQLITE_OK);
-    int64_t result = utxo_mirror_rebuild_now(svc);
-    sqlite3_set_authorizer(ndb->db, NULL, NULL);
+    struct ums_scan_fault f = {.db = NULL, .deny_rollback = true};
+    int64_t result = ums_rebuild_with_writer_fault(svc, &f, false);
     UMS_CHECK("operator: failed rollback is explicitly unsettled",
         f.prepare_denied && f.rollback_denied && result == UTXO_MIRROR_REBUILD_UNSETTLED);
     UMS_CHECK("operator: unsettled rebuild never clears quarantine",
         atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED);
-    if (!sqlite3_get_autocommit(ndb->db))
-        UMS_CHECK("operator: fixture settles its retained transaction", node_db_rollback(ndb));
-    UMS_CHECK("operator: explicit fixture rollback restores old mirror",
+    UMS_CHECK("operator: the shared handle never carried the transaction",
+        sqlite3_get_autocommit(ndb->db) != 0);
+    UMS_CHECK("operator: old mirror intact after unsettled rollback",
         count == 2 && ums_old_mirror_intact(svc, ndb, 102, before));
     return failures;
 }
@@ -622,6 +640,604 @@ static int ums_test_rebuild_now(void)
     node_db_close(&ndb);
     test_cleanup_tmpdir(dir);
     if (!ok) failures++;
+    return failures;
+}
+
+/* ── Containment, overlay refusal, audit truthfulness, repair witness ─────
+ * Each fixture owns its tmpdir, node.db, progress store and db service. */
+struct ums_fx {
+    char dir[256];
+    char ndb_path[600];
+    struct node_db ndb;
+    struct db_service dbsvc;
+    struct app_runtime_context runtime;
+    struct utxo_mirror_sync_service svc;
+    sqlite3 *pdb;
+    bool ok;
+};
+
+static void ums_fx_open(struct ums_fx *fx, const char *name)
+{
+    memset(fx, 0, sizeof(*fx));
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "utxo_mirror_sync", name);
+    snprintf(fx->ndb_path, sizeof(fx->ndb_path), "%s/node.db", fx->dir);
+    bool ok = node_db_open(&fx->ndb, fx->ndb_path) && progress_store_open(fx->dir);
+    fx->pdb = progress_store_db();
+    ok = ok && fx->pdb && coins_kv_ensure_schema(fx->pdb);
+    ok = ok && ums_add_coin(fx->pdb, 0x51, 1000, 100);
+    ok = ok && ums_add_coin(fx->pdb, 0x52, 2000, 101);
+    ok = ok && ums_set_frontier(fx->pdb, 102) &&
+         coins_kv_mark_migration_complete(fx->pdb);
+    db_service_init(&fx->dbsvc);
+    ok = ok && db_service_attach(&fx->dbsvc, &fx->ndb) && db_service_start(&fx->dbsvc);
+    fx->runtime.db_service = &fx->dbsvc;
+    app_runtime_set_current(&fx->runtime);
+    utxo_mirror_sync_init(&fx->svc, &fx->ndb);
+    fx->ok = ok;
+}
+
+static void ums_fx_close(struct ums_fx *fx)
+{
+    g_utxo_mirror_sync = NULL;
+    g_ap_test_ndb = NULL;
+    app_runtime_set_current(NULL);
+    db_service_stop(&fx->dbsvc);
+    progress_store_close();
+    node_db_close(&fx->ndb);
+    test_cleanup_tmpdir(fx->dir);
+}
+
+/* Wallet key so the address's rows reach wallet_utxos / addresses. */
+static bool ums_add_wallet_key(struct node_db *ndb, uint8_t tag)
+{
+    uint8_t script[25], h[20];
+    ums_p2pkh(script, h, tag);
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "INSERT OR REPLACE INTO wallet_keys(pubkey_hash,pubkey,privkey) "
+            "VALUES(?,x'00',x'00')", -1, &s, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(s, 1, h, 20, SQLITE_STATIC);
+    bool ok = sqlite3_step(s) == SQLITE_DONE;
+    sqlite3_finalize(s);
+    return ok;
+}
+
+static int64_t ums_count_table(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *s = NULL;
+    int64_t n = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
+        return -2;
+    if (sqlite3_step(s) == SQLITE_ROW)
+        n = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return n;
+}
+
+/* One text digest of every projection row, cache row, and node_state entry
+ * (the commitment checkpoint and the cursor live there). Byte equality of two
+ * digests is byte-for-byte equality of that state. */
+static bool ums_digest(sqlite3 *db, char *out, size_t cap)
+{
+    static const char *const q[] = {
+        "SELECT ifnull(group_concat(hex(txid)||':'||vout||':'||value||':'||hex(script)"
+        "||':'||script_type||':'||ifnull(hex(address_hash),'')||':'||height||':'"
+        "||is_coinbase,'|'),'') FROM (SELECT * FROM utxos ORDER BY txid,vout)",
+        "SELECT ifnull(group_concat(hex(txid)||':'||vout||':'||value||':'||height,'|'),'')"
+        " FROM (SELECT * FROM wallet_utxos ORDER BY txid,vout)",
+        "SELECT ifnull(group_concat(hex(address_hash)||':'||balance||':'||utxo_count,'|'),'')"
+        " FROM (SELECT * FROM addresses ORDER BY address_hash)",
+        "SELECT ifnull(group_concat(key||'='||hex(value),'|'),'')"
+        " FROM (SELECT * FROM node_state ORDER BY key)",
+    };
+    size_t off = 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < sizeof(q) / sizeof(q[0]); i++) {
+        sqlite3_stmt *s = NULL;
+        if (sqlite3_prepare_v2(db, q[i], -1, &s, NULL) != SQLITE_OK)
+            return false;
+        const char *t = sqlite3_step(s) == SQLITE_ROW
+                            ? (const char *)sqlite3_column_text(s, 0) : NULL;
+        int w = t ? snprintf(out + off, cap - off, "%s#", t) : -1;
+        sqlite3_finalize(s);
+        if (w < 0 || (size_t)w >= cap - off)
+            return false;
+        off += (size_t)w;
+    }
+    return true;
+}
+
+/* A fresh independent connection with a bounded busy timeout can take the
+ * writer reservation: no lock survived the rebuild. */
+static bool ums_fresh_connection_can_write(const char *path)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_busy_timeout(db, 300);
+        ok = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+        if (ok)
+            ok = sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    }
+    sqlite3_close(db);
+    return ok;
+}
+
+/* Common projection state for the failure fixtures: 2 rows built, a wallet
+ * key and caches, an extra authority coin so a successful rebuild WOULD change
+ * the projection, and the mirror quarantined. */
+static bool ums_fx_prepare_dirty(struct ums_fx *fx)
+{
+    bool ok = fx->ok && utxo_mirror_sync_run_once(&fx->svc) == 2;
+    ok = ok && ums_add_wallet_key(&fx->ndb, 0x51) &&
+         db_utxo_rebuild_wallet_and_address_caches(&fx->ndb);
+    ok = ok && ums_add_coin(fx->pdb, 0x53, 3000, 103) &&
+         ums_set_frontier(fx->pdb, 104);
+    atomic_store(&fx->svc.mirror_health, UTXO_MIRROR_QUARANTINED);
+    return ok;
+}
+
+/* One injected failure: typed UNSETTLED, lock released, state byte-identical,
+ * shared handle in autocommit, quarantine kept. */
+static int ums_check_contained(struct ums_fx *fx, const char *tag,
+    enum utxo_mirror_test_fault fault)
+{
+    int failures = 0;
+    char before[4096], after[4096], name[96];
+    UMS_CHECK("contain: digest before", ums_digest(fx->ndb.db, before, sizeof(before)));
+    utxo_mirror_sync_test_set_fault(fault);
+    int64_t r = utxo_mirror_rebuild_now(&fx->svc);
+    utxo_mirror_sync_test_set_fault(UMS_FAULT_NONE);
+    snprintf(name, sizeof(name), "contain/%s: outcome is typed UNSETTLED", tag);
+    UMS_CHECK(name, r == UTXO_MIRROR_REBUILD_UNSETTLED);
+    snprintf(name, sizeof(name), "contain/%s: fresh connection can BEGIN IMMEDIATE", tag);
+    UMS_CHECK(name, ums_fresh_connection_can_write(fx->ndb_path));
+    snprintf(name, sizeof(name), "contain/%s: rows, caches, checkpoint, cursor unchanged", tag);
+    UMS_CHECK(name, ums_digest(fx->ndb.db, after, sizeof(after)) &&
+              strcmp(before, after) == 0);
+    snprintf(name, sizeof(name), "contain/%s: shared ndb is in autocommit", tag);
+    UMS_CHECK(name, sqlite3_get_autocommit(fx->ndb.db) != 0);
+    snprintf(name, sizeof(name), "contain/%s: quarantine kept", tag);
+    UMS_CHECK(name, atomic_load(&fx->svc.mirror_health) == UTXO_MIRROR_QUARANTINED);
+    return failures;
+}
+
+static int ums_test_private_writer_containment(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "contain");
+    UMS_CHECK("contain: fixture prepared", ums_fx_prepare_dirty(&fx));
+    failures += ums_check_contained(&fx, "rollback-fails", UMS_FAULT_ROLLBACK_FAILS);
+    failures += ums_check_contained(&fx, "close-busy", UMS_FAULT_CLOSE_BUSY);
+    /* Control: without a fault the same fixture rebuilds to the 3-row set. */
+    UMS_CHECK("contain: control rebuild succeeds (3 rows)",
+              utxo_mirror_rebuild_now(&fx.svc) == 3);
+    UMS_CHECK("contain: control cleared quarantine",
+              atomic_load(&fx.svc.mirror_health) == UTXO_MIRROR_HEALTHY);
+    UMS_CHECK("contain: control leaves no lock",
+              ums_fresh_connection_can_write(fx.ndb_path));
+    UMS_CHECK("contain: control roots equal", ums_roots_equal(&fx.ndb, fx.pdb));
+    ums_fx_close(&fx);
+    return failures;
+}
+
+/* The proof counts overlay-aware while the copy scans durable SQL; an active
+ * RAM overlay holding a different pending set must refuse before the DELETE. */
+static void ums_activate_overlay_hook(void *p)
+{
+    sqlite3 *pdb = p;
+    (void)coins_ram_init(pdb, 1000000, coins_kv_set_applied_height_in_tx);
+}
+
+struct ums_wire { const char *code; bool mutated; const char *state; const char *reason; };
+static int ums_check_wire(struct utxo_mirror_sync_service *svc, const char *name,
+                          struct ums_wire want);
+
+static int ums_check_overlay_refused(struct ums_fx *fx, const char *tag)
+{
+    int failures = 0;
+    char before[4096], after[4096], reason[96] = "", name[96];
+    UMS_CHECK("overlay: digest before", ums_digest(fx->ndb.db, before, sizeof(before)));
+    int64_t r = utxo_mirror_rebuild_now_reason(&fx->svc, reason, sizeof(reason));
+    snprintf(name, sizeof(name), "overlay/%s: typed OVERLAY_ACTIVE with reason", tag);
+    UMS_CHECK(name, r == UTXO_MIRROR_REBUILD_OVERLAY_ACTIVE &&
+              strcmp(reason, "coins_overlay_active") == 0);
+    snprintf(name, sizeof(name), "overlay/%s: projection and caches preserved", tag);
+    UMS_CHECK(name, ums_digest(fx->ndb.db, after, sizeof(after)) &&
+              strcmp(before, after) == 0);
+    snprintf(name, sizeof(name), "overlay/%s: quarantine preserved", tag);
+    UMS_CHECK(name, atomic_load(&fx->svc.mirror_health) == UTXO_MIRROR_QUARANTINED);
+    snprintf(name, sizeof(name), "overlay/%s: no lock left", tag);
+    UMS_CHECK(name, ums_fresh_connection_can_write(fx->ndb_path) &&
+              sqlite3_get_autocommit(fx->ndb.db) != 0);
+    return failures;
+}
+
+static int ums_test_overlay_refusal(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    setenv("ZCL_FOLD_INRAM", "1", 1);
+    ums_fx_open(&fx, "overlay");
+    UMS_CHECK("overlay: fixture prepared", ums_fx_prepare_dirty(&fx));
+    UMS_CHECK("overlay: flag enabled", coins_ram_enabled());
+
+    /* (1) overlay active before the call, holding a pending coin the durable
+     * set lacks. */
+    UMS_CHECK("overlay: init", coins_ram_init(fx.pdb, 1000000,
+                                  coins_kv_set_applied_height_in_tx));
+    uint8_t txid[32], script[25], h[20];
+    ums_txid(txid, 0x66);
+    ums_p2pkh(script, h, 0x66);
+    UMS_CHECK("overlay: pending coin differs from durable",
+              coins_ram_add(txid, 0, 7777, 104, false, script, sizeof(script)));
+    UMS_CHECK("overlay: active", coins_ram_active());
+    failures += ums_check_overlay_refused(&fx, "active-at-call");
+    coins_ram_shutdown();
+
+    /* (2) overlay becomes active only after rebuild_now's own gate, in the
+     * window before the snapshot opens: the snapshot boundary refuses. */
+    UMS_CHECK("overlay: inactive again", !coins_ram_active());
+    utxo_mirror_sync_test_set_pre_snapshot_hook(ums_activate_overlay_hook, fx.pdb);
+    failures += ums_check_overlay_refused(&fx, "activated-before-snapshot");
+    utxo_mirror_sync_test_set_pre_snapshot_hook(NULL, NULL);
+    coins_ram_shutdown();
+
+    /* (3) the overlay becomes active only AFTER the authority proof passed, at
+     * snapshot establishment: the post-authority check refuses, and the
+     * controller reports it as a no-mutation refusal. */
+    UMS_CHECK("overlay: inactive for the snapshot case", !coins_ram_active());
+    utxo_mirror_sync_test_set_post_authority_hook(ums_activate_overlay_hook, fx.pdb);
+    failures += ums_check_overlay_refused(&fx, "activated-at-snapshot");
+    coins_ram_shutdown();
+    failures += ums_check_wire(&fx.svc, "overlay_at_snapshot",
+        (struct ums_wire){"OVERLAY_ACTIVE", false, "quarantined", "coins_overlay_active"});
+    utxo_mirror_sync_test_set_post_authority_hook(NULL, NULL);
+    coins_ram_shutdown();
+
+    /* Control: with no overlay the same fixture repairs to the 3-row set. */
+    UMS_CHECK("overlay: control rebuild succeeds",
+              utxo_mirror_rebuild_now(&fx.svc) == 3);
+    ums_fx_close(&fx);
+    return failures;
+}
+
+static bool ums_dump_diff(struct json_value *v, bool *incomplete, int *count,
+                          char *keys, size_t cap)
+{
+    json_set_object(v);
+    if (!ap_audit_dump_state_json(v, NULL))
+        return false;
+    const char *k = json_get_str(json_get(v, "diff_keys"));
+    snprintf(keys, cap, "%s", k ? k : "?");
+    *incomplete = json_get_bool(json_get(v, "diff_scan_error"));
+    *count = (int)json_get_int(json_get(v, "diff_count"));
+    return true;
+}
+
+static int ums_test_audit_incomplete(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "audit_incomplete");
+    UMS_CHECK("audit-incomplete: mirror built", fx.ok && utxo_mirror_sync_run_once(&fx.svc) == 2);
+    UMS_CHECK("audit-incomplete: projection-only row", ums_seed_mirror_row(&fx.ndb, 0x77, 50));
+    g_ap_test_ndb = &fx.ndb;
+    g_utxo_mirror_sync = &fx.svc;
+    struct json_value v = {0};
+    bool incomplete = true;
+    int count = -1;
+    char keys[1024];
+
+    ap_audit_reset_for_test();
+    ap_audit_test_fail_proj_step(1);
+    UMS_CHECK("audit-incomplete: pass ran", ap_audit_run_once());
+    json_free(&v);
+    UMS_CHECK("audit-incomplete: dump", ums_dump_diff(&v, &incomplete, &count, keys, sizeof(keys)));
+    UMS_CHECK("audit-incomplete: step error is flagged as a scan error, not truncation",
+              incomplete && !json_get_bool(json_get(&v, "diff_truncated")));
+    UMS_CHECK("audit-incomplete: no fabricated differences",
+              count == 0 && keys[0] == '\0');
+    json_free(&v);
+
+    /* Control: no injection -> complete, exactly the one real difference. */
+    ap_audit_reset_for_test();
+    UMS_CHECK("audit-incomplete: control pass ran", ap_audit_run_once());
+    UMS_CHECK("audit-incomplete: control dump", ums_dump_diff(&v, &incomplete, &count, keys, sizeof(keys)));
+    UMS_CHECK("audit-incomplete: control is complete with the real difference",
+              !incomplete && count == 1 && keys[0] == 'p' &&
+              !json_get_bool(json_get(&v, "diff_truncated")));
+    json_free(&v);
+    ap_audit_reset_for_test();
+    ums_fx_close(&fx);
+    return failures;
+}
+
+/* COMMIT succeeds, then the writer's checked close fails: the committed state
+ * is real, the outcome is conservative (typed UNSETTLED, quarantined, mutated
+ * in the reply), and nothing replays the copy. */
+static int ums_test_close_after_commit(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "close_after_commit");
+    UMS_CHECK("post-commit: fixture prepared", ums_fx_prepare_dirty(&fx));
+    int64_t rebuilds_before = atomic_load(&fx.svc.rebuilds_run);
+    utxo_mirror_sync_test_set_fault(UMS_FAULT_COMMIT_THEN_CLOSE_BUSY);
+    int64_t r = utxo_mirror_rebuild_now(&fx.svc);
+    utxo_mirror_sync_test_set_fault(UMS_FAULT_NONE);
+    UMS_CHECK("post-commit: close failure after COMMIT is typed UNSETTLED",
+              r == UTXO_MIRROR_REBUILD_UNSETTLED);
+    UMS_CHECK("post-commit: quarantined, no success accounted",
+              atomic_load(&fx.svc.mirror_health) == UTXO_MIRROR_QUARANTINED &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before);
+    UMS_CHECK("post-commit: no lock remains", ums_fresh_connection_can_write(fx.ndb_path));
+
+    /* A fresh independent connection reads exactly the committed state. */
+    sqlite3 *fresh = NULL;
+    char got[4096], want[4096];
+    uint8_t root[32], coins[32];
+    uint64_t n = 0;
+    UMS_CHECK("post-commit: fresh reader opens",
+              sqlite3_open_v2(fx.ndb_path, &fresh, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK);
+    UMS_CHECK("post-commit: fresh digest", ums_digest(fresh, got, sizeof(got)));
+    utxo_commitment_sha3_compute(fresh, root, &n);
+    UMS_CHECK("post-commit: committed rows are the authority set",
+              n == 3 && coins_kv_commitment(fx.pdb, coins) == 0 &&
+              memcmp(root, coins, 32) == 0);
+    sqlite3_close(fresh);
+    /* Expected committed state = what a clean rebuild of the same source
+     * produces (rows, caches, checkpoint, cursor). */
+    UMS_CHECK("post-commit: reference rebuild", utxo_mirror_rebuild_now(&fx.svc) == 3);
+    UMS_CHECK("post-commit: committed rows, caches, checkpoint, cursor are the committed state",
+              ums_digest(fx.ndb.db, want, sizeof(want)) && strcmp(got, want) == 0);
+    ums_fx_close(&fx);
+    return failures;
+}
+
+/* diff_count is the number of keys LISTED; past diff_limit the scan reports
+ * truncation (distinct from a scan error). */
+static int ums_audit_diff_state(struct json_value *v, bool *err, bool *trunc,
+                                int *count, int *limit)
+{
+    char keys[1024];
+    if (!ums_dump_diff(v, err, count, keys, sizeof(keys)))
+        return 0;
+    *trunc = json_get_bool(json_get(v, "diff_truncated"));
+    *limit = (int)json_get_int(json_get(v, "diff_limit"));
+    return 1;
+}
+
+static int ums_test_audit_truncated(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "audit_trunc");
+    UMS_CHECK("audit-trunc: mirror built", fx.ok && utxo_mirror_sync_run_once(&fx.svc) == 2);
+    g_ap_test_ndb = &fx.ndb;
+    g_utxo_mirror_sync = &fx.svc;
+    struct json_value v = {0};
+    bool err = true, trunc = true;
+    int count = -1, limit = -1;
+    for (uint8_t t = 0x80; t < 0x83; t++)
+        UMS_CHECK("audit-trunc: stale row (<= limit)", ums_seed_mirror_row(&fx.ndb, t, 50));
+    ap_audit_reset_for_test();
+    UMS_CHECK("audit-trunc: small pass ran", ap_audit_run_once());
+    UMS_CHECK("audit-trunc: small dump", ums_audit_diff_state(&v, &err, &trunc, &count, &limit));
+    UMS_CHECK("audit-trunc: 3 differences is complete, not truncated",
+              count == 3 && !trunc && !err && limit == 8);
+    json_free(&v);
+    for (uint8_t t = 0x83; t < 0x8a; t++)
+        UMS_CHECK("audit-trunc: stale row (> limit)", ums_seed_mirror_row(&fx.ndb, t, 50));
+    ap_audit_reset_for_test();
+    UMS_CHECK("audit-trunc: large pass ran", ap_audit_run_once());
+    UMS_CHECK("audit-trunc: large dump", ums_audit_diff_state(&v, &err, &trunc, &count, &limit));
+    UMS_CHECK("audit-trunc: 10 differences list exactly the limit, truncated, no scan error",
+              count == 8 && trunc && !err && limit == 8);
+    json_free(&v);
+    ap_audit_reset_for_test();
+    ums_fx_close(&fx);
+    return failures;
+}
+
+/* The repair witness: authority = S; projection = S plus two stale coinbase
+ * rows (and their caches); cursor equals the frontier. */
+static int ums_test_stale_residue_repair(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "residue");
+    UMS_CHECK("residue: mirror built", fx.ok && utxo_mirror_sync_run_once(&fx.svc) == 2);
+    UMS_CHECK("residue: stale rows seeded",
+              ums_seed_mirror_row(&fx.ndb, 0x71, 99) && ums_seed_mirror_row(&fx.ndb, 0x72, 99));
+    UMS_CHECK("residue: stale address cached",
+              ums_add_wallet_key(&fx.ndb, 0x71) &&
+              db_utxo_rebuild_wallet_and_address_caches(&fx.ndb));
+    uint8_t script[25], h71[20];
+    ums_p2pkh(script, h71, 0x71);
+    UMS_CHECK("residue: caches show the stale address",
+              ums_addr_cache_balance(&fx.ndb, h71) == 1000 &&
+              ums_count_table(fx.ndb.db, "SELECT COUNT(*) FROM wallet_utxos") == 1);
+
+    /* (a) characterization: the steady-state pass leaves the residue. */
+    UMS_CHECK("residue(a): steady-state pass does no work", utxo_mirror_sync_run_once(&fx.svc) == 0);
+    UMS_CHECK("residue(a): stale rows survive the delta pass",
+              db_utxo_count(&fx.ndb) == 4 && !ums_roots_equal(&fx.ndb, fx.pdb));
+    g_ap_test_ndb = &fx.ndb;
+    g_utxo_mirror_sync = &fx.svc;
+    struct json_value v = {0};
+    bool incomplete = true;
+    int count = -1;
+    char keys[1024];
+    ap_audit_reset_for_test();
+    UMS_CHECK("residue(a): audit pass ran", ap_audit_run_once());
+    UMS_CHECK("residue(a): audit dump", ums_dump_diff(&v, &incomplete, &count, keys, sizeof(keys)));
+    UMS_CHECK("residue(a): audit sees the 2 stale rows, complete (not truncated)",
+              count == 2 && !incomplete &&
+              !json_get_bool(json_get(&v, "diff_truncated")));
+    json_free(&v);
+
+    /* (b) the operator rebuild repairs it. */
+    UMS_CHECK("residue(b): rebuild writes the authority set", utxo_mirror_rebuild_now(&fx.svc) == 2);
+    UMS_CHECK("residue(b): utxos equal coins", db_utxo_count(&fx.ndb) == 2 && ums_roots_equal(&fx.ndb, fx.pdb));
+    UMS_CHECK("residue(b): stale address cache gone",
+              ums_addr_cache_balance(&fx.ndb, h71) == -1 &&
+              ums_count_table(fx.ndb.db, "SELECT COUNT(*) FROM wallet_utxos") == 0);
+    ap_audit_reset_for_test();
+    UMS_CHECK("residue(b): audit pass ran", ap_audit_run_once());
+    UMS_CHECK("residue(b): audit dump", ums_dump_diff(&v, &incomplete, &count, keys, sizeof(keys)));
+    UMS_CHECK("residue(b): audit verdict clean",
+              count == 0 && !incomplete &&
+              json_get_int(json_get(&v, "checks_total")) == 1 &&
+              json_get_int(json_get(&v, "passes_total")) == 1 &&
+              json_get_int(json_get(&v, "divergences_total")) == 0);
+    json_free(&v);
+    ap_audit_reset_for_test();
+    ums_fx_close(&fx);
+    return failures;
+}
+
+/* The controller reply reflects each typed outcome truthfully. */
+
+static int ums_check_wire(struct utxo_mirror_sync_service *svc, const char *name,
+                          struct ums_wire want)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.utxo_mirror_rebuild.v1");
+    g_utxo_mirror_sync = svc;
+    zcl_native_handle_utxo_mirror_rebuild(NULL, &reply);
+    char label[128], evidence[160];
+    snprintf(evidence, sizeof(evidence), "current_state=%s", want.state);
+    if (want.reason)
+        snprintf(evidence + strlen(evidence), sizeof(evidence) - strlen(evidence),
+                 ";reason=%s", want.reason);
+    snprintf(label, sizeof(label), "wire/%s: failed status, code %s", name, want.code);
+    UMS_CHECK(label, reply.status == ZCL_COMMAND_STATUS_FAILED &&
+              strcmp(reply.error.code, want.code) == 0);
+    snprintf(label, sizeof(label), "wire/%s: mutated=%d", name, (int)want.mutated);
+    UMS_CHECK(label, reply.error.mutated == want.mutated);
+    snprintf(label, sizeof(label), "wire/%s: current_state evidence", name);
+    UMS_CHECK(label, strcmp(reply.error.evidence, evidence) == 0);
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
+static int ums_test_controller_wire(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    setenv("ZCL_FOLD_INRAM", "1", 1);
+    ums_fx_open(&fx, "wire");
+    UMS_CHECK("wire: fixture prepared", ums_fx_prepare_dirty(&fx));
+
+    utxo_mirror_sync_test_set_fault(UMS_FAULT_ROLLBACK_FAILS);
+    failures += ums_check_wire(&fx.svc, "unsettled",
+        (struct ums_wire){"ROLLBACK_UNSETTLED", true, "quarantined", NULL});
+    utxo_mirror_sync_test_set_fault(UMS_FAULT_NONE);
+
+    /* A real repair COMMITS, then the writer close fails: the reply must say
+     * mutated, must not be retryable, and must not queue a next action. */
+    utxo_mirror_sync_test_set_fault(UMS_FAULT_COMMIT_THEN_CLOSE_BUSY);
+    struct zcl_command_reply post;
+    zcl_command_reply_init(&post, "zcl.utxo_mirror_rebuild.v1");
+    g_utxo_mirror_sync = &fx.svc;
+    zcl_native_handle_utxo_mirror_rebuild(NULL, &post);
+    utxo_mirror_sync_test_set_fault(UMS_FAULT_NONE);
+    UMS_CHECK("wire/post-commit-close: typed unsettled failure",
+              post.status == ZCL_COMMAND_STATUS_FAILED &&
+              strcmp(post.error.code, "ROLLBACK_UNSETTLED") == 0);
+    UMS_CHECK("wire/post-commit-close: mutated=true, retryable=false, no next action",
+              post.error.mutated && !post.error.retryable && post.next_count == 0);
+    UMS_CHECK("wire/post-commit-close: quarantine set",
+              strcmp(post.error.evidence, "current_state=quarantined") == 0 &&
+              atomic_load(&fx.svc.mirror_health) == UTXO_MIRROR_QUARANTINED);
+    UMS_CHECK("wire/post-commit-close: the repair really committed",
+              ums_roots_equal(&fx.ndb, fx.pdb));
+    zcl_command_reply_free(&post);
+
+    UMS_CHECK("wire: overlay init", coins_ram_init(fx.pdb, 1000000,
+                                        coins_kv_set_applied_height_in_tx));
+    failures += ums_check_wire(&fx.svc, "overlay_active",
+        (struct ums_wire){"OVERLAY_ACTIVE", false, "quarantined",
+                          "coins_overlay_active"});
+    coins_ram_shutdown();
+
+    UMS_CHECK("wire: remove migration marker",
+              progress_meta_delete(fx.pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
+    failures += ums_check_wire(&fx.svc, "refused",
+        (struct ums_wire){"SOURCE_REFUSED", false, "quarantined",
+                          "coins_kv_migration_marker_absent"});
+    UMS_CHECK("wire: marker restored", coins_kv_mark_migration_complete(fx.pdb));
+
+    static uint8_t big[10001];
+    uint8_t btx[32];
+    ums_txid(btx, 0x60);
+    UMS_CHECK("wire: unrepresentable row",
+              coins_kv_add(fx.pdb, btx, 0, 5, 102, false, big, sizeof(big)) &&
+              ums_set_frontier(fx.pdb, 105));
+    failures += ums_check_wire(&fx.svc, "verify_mismatch",
+        (struct ums_wire){"VERIFY_MISMATCH", false, "quarantined", NULL});
+    UMS_CHECK("wire: bad row spent", coins_kv_spend(fx.pdb, btx, 0));
+
+    /* Success: truthful data fields, and a previously incomplete audit scan is
+     * reported as such rather than implied clean. */
+    g_ap_test_ndb = &fx.ndb;
+    g_utxo_mirror_sync = &fx.svc;
+    UMS_CHECK("wire: equal-height projection", utxo_mirror_rebuild_now(&fx.svc) == 3);
+    UMS_CHECK("wire: projection-only row", ums_seed_mirror_row(&fx.ndb, 0x77, 50));
+    ap_audit_reset_for_test();
+    ap_audit_test_fail_proj_step(1);
+    UMS_CHECK("wire: incomplete audit scan ran", ap_audit_run_once());
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.utxo_mirror_rebuild.v1");
+    zcl_native_handle_utxo_mirror_rebuild(NULL, &reply);
+    UMS_CHECK("wire/ok: success status", reply.status == ZCL_COMMAND_STATUS_PASSED);
+    UMS_CHECK("wire/ok: rows_written 3", json_get_int(json_get(&reply.data, "rows_written")) == 3);
+    UMS_CHECK("wire/ok: mutated true",
+              json_get_bool(json_get(&reply.data, "mutated")));
+    const char *st = json_get_str(json_get(&reply.data, "current_state"));
+    UMS_CHECK("wire/ok: current_state healthy", st && strcmp(st, "healthy") == 0);
+    UMS_CHECK("wire/ok: quarantine cleared",
+              !json_get_bool(json_get(&reply.data, "quarantined")));
+    UMS_CHECK("wire/ok: incomplete audit diagnostics are surfaced",
+              json_get_bool(json_get(&reply.data, "audit_diff_scan_error")));
+    zcl_command_reply_free(&reply);
+
+    /* Post-commit projection failure: committed, mutated, no retry advice. */
+    UMS_CHECK("wire: another dirty state", ums_add_coin(fx.pdb, 0x54, 4000, 104) &&
+              ums_set_frontier(fx.pdb, 106));
+    zcl_utxo_mirror_controller_test_fail_projection(true);
+    zcl_command_reply_init(&reply, "zcl.utxo_mirror_rebuild.v1");
+    zcl_native_handle_utxo_mirror_rebuild(NULL, &reply);
+    zcl_utxo_mirror_controller_test_fail_projection(false);
+    UMS_CHECK("wire/commit-reply-failed: typed committed result",
+              reply.status == ZCL_COMMAND_STATUS_FAILED &&
+              strcmp(reply.error.code, "COMMITTED_REPLY_FAILED") == 0 &&
+              reply.error.mutated);
+    UMS_CHECK("wire/commit-reply-failed: does not advise a retry",
+              !reply.error.retryable && reply.next_count == 0 &&
+              strcmp(reply.error.evidence, "current_state=committed") == 0);
+    UMS_CHECK("wire/commit-reply-failed: the repair really committed",
+              ums_roots_equal(&fx.ndb, fx.pdb));
+    zcl_command_reply_free(&reply);
+    ap_audit_reset_for_test();
+    ums_fx_close(&fx);
+    return failures;
+}
+
+static int ums_test_containment_suite(void)
+{
+    int failures = 0;
+    failures += ums_test_private_writer_containment();
+    failures += ums_test_overlay_refusal();
+    failures += ums_test_audit_incomplete();
+    failures += ums_test_audit_truncated();
+    failures += ums_test_close_after_commit();
+    failures += ums_test_stale_residue_repair();
+    failures += ums_test_controller_wire();
     return failures;
 }
 
@@ -1129,6 +1745,7 @@ int test_utxo_mirror_sync(void)
     failures += ums_test_stop_abort_rebuild();
     failures += ums_test_snapshot_race();
     failures += ums_test_rebuild_now();
+    failures += ums_test_containment_suite();
     node_db_close(&ndb);
     test_cleanup_tmpdir(dir);
     return failures;

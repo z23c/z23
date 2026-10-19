@@ -161,6 +161,15 @@ int64_t node_db_recommended_mmap_bytes(void);
  * policy and gives every developer-created explorer reader one tuning path. */
 bool node_db_apply_readonly_tuning(sqlite3 *db);
 void node_db_close(struct node_db *ndb);
+/* Close a statement-free handle and report truthfully: true only when
+ * sqlite3_close returned SQLITE_OK (handle, state and lease then released).
+ * On false the handle stays open; fall back to node_db_close() to force
+ * release, but do not claim the teardown settled. */
+bool node_db_close_checked(struct node_db *ndb);
+#ifdef ZCL_TESTING
+/* Make the next node_db_close_checked report SQLITE_BUSY without closing. */
+void node_db_test_fail_next_checked_close(void);
+#endif
 
 /* Optional quick_check-skip probe (Tier-2 fast restart). When registered,
  * node_db_open() calls it with the db path during the boot ceremony after the

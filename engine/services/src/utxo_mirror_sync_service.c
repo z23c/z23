@@ -25,6 +25,7 @@
 #include "script/standard.h"
 #include "services/chain_state_service.h"
 #include "storage/coins_kv.h"
+#include "storage/coins_ram.h"
 #include "storage/progress_store.h"
 #include "supervisors/domains.h"
 #include "util/log_macros.h"
@@ -295,6 +296,45 @@ mirror_rebuild_fold_row(struct node_db *ndb, sqlite3_stmt *sel,
     return MIRROR_ROW_FOLDED;
 }
 
+#ifdef ZCL_TESTING
+static enum utxo_mirror_test_fault g_mirror_fault;
+void utxo_mirror_sync_test_set_fault(enum utxo_mirror_test_fault fault)
+{
+    g_mirror_fault = fault;
+}
+static void (*g_mirror_post_auth_hook)(void *);
+static void *g_mirror_post_auth_ctx;
+void utxo_mirror_sync_test_set_post_authority_hook(void (*fn)(void *), void *ctx)
+{
+    g_mirror_post_auth_hook = fn;
+    g_mirror_post_auth_ctx = ctx;
+}
+static void (*g_mirror_writer_hook)(sqlite3 *, void *);
+static void *g_mirror_writer_hook_ctx;
+void utxo_mirror_sync_test_set_writer_hook(void (*fn)(sqlite3 *, void *),
+                                           void *ctx)
+{
+    g_mirror_writer_hook = fn;
+    g_mirror_writer_hook_ctx = ctx;
+}
+#define MIRROR_FAULT(x) (g_mirror_fault == (x))
+#else
+#define MIRROR_FAULT(x) false
+#endif
+
+/* Test seam: after the first copied row an armed fault fails the scan so the
+ * abort/teardown path runs deterministically mid-rebuild. */
+static bool mirror_test_scan_fault(int64_t written)
+{
+#ifdef ZCL_TESTING
+    return (g_mirror_fault == UMS_FAULT_ROLLBACK_FAILS ||
+            g_mirror_fault == UMS_FAULT_CLOSE_BUSY) && written >= 1;
+#else
+    (void)written;
+    return false;
+#endif
+}
+
 static void (*mirror_pre_snapshot_hook)(void *);
 static void *mirror_pre_snapshot_ctx;
 
@@ -358,6 +398,10 @@ static bool mirror_rebuild_scan(struct node_db *ndb, sqlite3 *rdb,
             *stopped = true;
             return false;
         }
+        if (mirror_test_scan_fault(*written)) {
+            LOG_WARN("utxo_mirror", "rebuild: injected scan fault");
+            return false;
+        }
         mirror_rebuild_source_fold(src_sha, sel);
         enum mirror_row_fold rf = mirror_rebuild_fold_row(ndb, sel, uc);
         if (rf == MIRROR_ROW_FAILED)
@@ -418,22 +462,37 @@ static bool mirror_staged_commitment(sqlite3 *db, uint8_t root[32], uint64_t *co
 }
 
 /* Open the single read snapshot: BEGIN, then the frontier read as the first
- * statement so WAL pins the snapshot there. */
-static bool mirror_snapshot_begin(sqlite3 *rdb, int32_t *frontier,
-    bool operator_repair, int64_t *source_count)
+ * statement so WAL pins the snapshot there. Returns 0 or a typed
+ * UTXO_MIRROR_REBUILD_* refusal; an operator repair is refused when the RAM
+ * coins overlay is active (checked again here, AFTER the authority proof, as
+ * coins_kv_read_snapshot_open does) because the proof counts overlay-aware
+ * while the copy scans durable SQL. */
+static int mirror_snapshot_begin(sqlite3 *rdb, int32_t *frontier,
+    bool operator_repair, int64_t *source_count, char *reason, size_t cap)
 {
     bool found = false;
     if (sqlite3_exec(rdb, "BEGIN", NULL, NULL, NULL) != SQLITE_OK)
-        return false;
+        return UTXO_MIRROR_REBUILD_ERROR;
     if (!operator_repair)
-        return coins_kv_get_applied_height(rdb, frontier, &found) && found;
-    char reason[96];
-    if (!coins_kv_proven_authority_reason(rdb, frontier, reason, sizeof(reason))) {
+        return coins_kv_get_applied_height(rdb, frontier, &found) && found
+                   ? 0 : UTXO_MIRROR_REBUILD_ERROR;
+    if (!coins_kv_proven_authority_reason(rdb, frontier, reason, cap)) {
         LOG_WARN("utxo_mirror", "operator source authority refused: %s", reason);
-        return false;
+        return UTXO_MIRROR_REBUILD_REFUSED;
     }
-    return mirror_snapshot_count(rdb, source_count) && *source_count > 0;
+#ifdef ZCL_TESTING
+    if (g_mirror_post_auth_hook)
+        g_mirror_post_auth_hook(g_mirror_post_auth_ctx);
+#endif
+    if (coins_ram_active()) {
+        snprintf(reason, cap, "coins_overlay_active");
+        LOG_WARN("utxo_mirror", "operator rebuild refused: RAM coins overlay active");
+        return UTXO_MIRROR_REBUILD_OVERLAY_ACTIVE;
+    }
+    return mirror_snapshot_count(rdb, source_count) && *source_count > 0
+               ? 0 : UTXO_MIRROR_REBUILD_ERROR;
 }
+
 
 /* Verify BEFORE commit: the staged rows must hash to the snapshot's own
  * commitment. On mismatch roll the whole transaction back (the previous
@@ -452,6 +511,7 @@ static int mirror_rebuild_verified(struct node_db *ndb,
     return 0;
 }
 
+
 /* Failed rollback does not prove restoration. Keep quarantine and propagate
  * an explicitly unsettled result instead of blessing either set. */
 static int64_t mirror_rebuild_rollback(struct node_db *ndb, int64_t failure, bool commit_attempted)
@@ -462,7 +522,8 @@ static int64_t mirror_rebuild_rollback(struct node_db *ndb, int64_t failure, boo
      * and update node bookkeeping. After failed COMMIT, autocommit alone
      * cannot distinguish rollback from an uncertain commit outcome. */
     bool auto_rollback = !commit_attempted && sqlite3_get_autocommit(ndb->db) != 0;
-    bool rolled_back = node_db_rollback(ndb);
+    bool rolled_back = !MIRROR_FAULT(UMS_FAULT_ROLLBACK_FAILS) &&
+                       node_db_rollback(ndb);
     if (!rolled_back && !auto_rollback) {
         LOG_WARN("utxo_mirror", "rebuild rollback failed; mirror state unsettled");
         return UTXO_MIRROR_REBUILD_UNSETTLED;
@@ -470,142 +531,249 @@ static int64_t mirror_rebuild_rollback(struct node_db *ndb, int64_t failure, boo
     return failure;
 }
 
-/* Copy every live coins_kv row into the mirror under ONE node.db txn.
- * Returns the number of rows written, or -1 on a (logged) error. The whole
- * write commits atomically. Ordinary failures roll back; UNSETTLED means
- * rollback failed and neither restoration nor a healthy mirror is claimed.
- * `frontier` is the coins_kv applied height this scan is asserted consistent
- * through (the caller sets its own applied_through to the same value on
- * success) — used to height-stamp the XOR checkpoint this rebuild also
- * recomputes from scratch, so utxo_mirror_delta_apply can incrementally
- * maintain it from here on instead of the boot-time O(n) refresh doing it. */
-static int64_t mirror_rebuild_from_coins_kv(struct node_db *ndb,
-                                            int32_t *frontier_out,
-                                            const _Atomic bool *stop, bool operator_repair)
+/* ── The rebuild's two private handles ──────────────────────────────────
+ * Source: its own read-only progress.kv connection (one snapshot). Writer: a
+ * DEDICATED node.db connection, so the shared service handle never carries the
+ * rebuild's transaction, statements or failure state. */
+struct mirror_source {
+    sqlite3 *db;
+    sqlite3_stmt *sel;
+    int32_t frontier;
+    int64_t count;
+};
+
+/* True only when the statement finalized and the connection closed cleanly. */
+static bool mirror_source_close(struct mirror_source *s)
 {
-    int32_t frontier = -1;
-    int64_t source_count = -1;
-    if (mirror_pre_snapshot_hook)
-        mirror_pre_snapshot_hook(mirror_pre_snapshot_ctx);
+    int end = s->sel ? sqlite3_finalize(s->sel) : SQLITE_OK;
+    int cls = s->db ? sqlite3_close(s->db) : SQLITE_OK;
+    s->sel = NULL;
+    s->db = NULL;
+    return end == SQLITE_OK && cls == SQLITE_OK;
+}
 
-    if (!ndb || !ndb->open)
-        LOG_RETURN(-1, "utxo_mirror", "rebuild: node.db unavailable");
-
+/* Open the snapshot reader. Returns 0 or a typed UTXO_MIRROR_REBUILD_* code. */
+static int mirror_source_open(struct mirror_source *s, bool operator_repair,
+                              char *reason, size_t cap)
+{
+    memset(s, 0, sizeof(*s));
+    s->frontier = -1;
+    s->count = -1;
+    if (operator_repair && coins_ram_active()) {
+        snprintf(reason, cap, "coins_overlay_active");
+        LOG_RETURN(UTXO_MIRROR_REBUILD_OVERLAY_ACTIVE, "utxo_mirror",
+                   "rebuild refused: RAM coins overlay active");
+    }
     /* Read coins_kv through our OWN read-only connection to progress.kv — NOT
-     * the shared progress_store_db() handle under progress_store_tx_lock. A
-     * ~1.3M-row scan holding that lock for seconds would STALL the consensus
-     * reducer drive (it holds the same lock for every block-apply txn). WAL
-     * mode lets this independent reader see the last committed snapshot while
-     * the reducer keeps writing. We never WRITE coins_kv — the consensus
-     * commit boundary is untouched. progress_store remains the sole WRITER. */
+     * the shared progress_store_db() handle under progress_store_tx_lock, which
+     * a multi-second scan would hold against the consensus reducer. WAL lets
+     * this reader see the last committed snapshot; we never WRITE coins_kv. */
     char pkv_path[PROGRESS_STORE_PATH_MAX];
     if (!progress_store_path(pkv_path, sizeof(pkv_path)))
-        LOG_RETURN(-1, "utxo_mirror", "rebuild: progress store path unavailable");
-
-    sqlite3 *rdb = NULL;
-    if (sqlite3_open_v2(pkv_path, &rdb, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        if (rdb) sqlite3_close(rdb);
-        LOG_RETURN(-1, "utxo_mirror", "rebuild: open ro progress.kv failed: %s",
-                   pkv_path);
+        LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
+                   "rebuild: progress store path unavailable");
+    if (sqlite3_open_v2(pkv_path, &s->db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        (void)mirror_source_close(s);
+        LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
+                   "rebuild: open ro progress.kv failed: %s", pkv_path);
     }
-    sqlite3_busy_timeout(rdb, 5000);
-
-    /* ONE read snapshot for the frontier AND the scan. The frontier read is
-     * the first statement of the read transaction, so WAL pins the snapshot
-     * there; the coins scan below runs in the same transaction and therefore
-     * reflects exactly coins_applied_height == frontier. Reading the frontier
-     * earlier (under the lock) and scanning later let the reducer commit in
-     * between: rows from height N+k were stamped as height N. */
-    if (!mirror_snapshot_begin(rdb, &frontier, operator_repair, &source_count)) {
-        sqlite3_close(rdb);
-        LOG_RETURN(-1, "utxo_mirror", "rebuild: snapshot frontier unavailable");
-    }
-
-    sqlite3_stmt *sel = NULL;
-    if (sqlite3_prepare_v2(rdb,
+    sqlite3_busy_timeout(s->db, 5000);
+    /* ONE read snapshot for the frontier AND the scan (frontier read first so
+     * WAL pins the snapshot there). */
+    int rc = mirror_snapshot_begin(s->db, &s->frontier, operator_repair,
+                                   &s->count, reason, cap);
+    if (rc == 0 && sqlite3_prepare_v2(s->db,
             "SELECT txid, vout, value, height, is_coinbase, script "
-            "FROM coins ORDER BY txid, vout",
-            -1, &sel, NULL) != SQLITE_OK) {
-        const char *emsg = sqlite3_errmsg(rdb);
-        char msg[256];
-        snprintf(msg, sizeof(msg), "%s", emsg ? emsg : "(no message)");
-        sqlite3_close(rdb);
-        LOG_RETURN(-1, "utxo_mirror", "rebuild: coins SELECT prepare failed: %s",
-                   msg);
+            "FROM coins ORDER BY txid, vout", -1, &s->sel, NULL) != SQLITE_OK) {
+        LOG_WARN("utxo_mirror", "rebuild: coins SELECT prepare failed: %s",
+                 sqlite3_errmsg(s->db));
+        rc = UTXO_MIRROR_REBUILD_ERROR;
     }
+    if (rc != 0)
+        (void)mirror_source_close(s);
+    if (rc != 0)
+        LOG_WARN("utxo_mirror", "rebuild: snapshot unavailable (%d)", rc);
+    return rc;
+}
 
-    /* Plain transaction — NO ibd_turbo_mode here: turbo DROPS the utxos
-     * secondary indexes (idx_utxo_address/value/height) the explorer relies
-     * on, and rebuilding them every pass would be both wrong (a window with no
-     * address index) and expensive. INSERT OR REPLACE over the live indexes is
-     * correct; the one bulk first-run is well within the supervisor deadline. */
-    if (!node_db_begin(ndb)) {
-        sqlite3_finalize(sel);
-        sqlite3_close(rdb);
-        LOG_RETURN(-1, "utxo_mirror", "rebuild: node.db BEGIN failed");
+#define MIRROR_WRITER_BUSY_MS 5000
+
+struct mirror_writer {
+    struct node_db db;
+    sqlite3_stmt *ins;
+};
+
+/* Checked teardown: finalize the statement this writer owns, then close with
+ * the checked helper. If close does not return SQLITE_OK the best-effort
+ * node_db_close releases the connection, but the caller must still report the
+ * outcome unsettled. */
+static bool mirror_writer_close(struct mirror_writer *w)
+{
+    if (!w->db.open)
+        return true;
+    if (w->ins)
+        (void)sqlite3_finalize(w->ins);
+    w->ins = NULL;
+    w->db.stmt_utxo_insert = NULL;
+#ifdef ZCL_TESTING
+    if (MIRROR_FAULT(UMS_FAULT_CLOSE_BUSY) ||
+        MIRROR_FAULT(UMS_FAULT_COMMIT_THEN_CLOSE_BUSY))
+        node_db_test_fail_next_checked_close();
+#endif
+    if (node_db_close_checked(&w->db))
+        return true;
+    LOG_WARN("utxo_mirror", "rebuild writer close not SQLITE_OK; unsettled");
+    node_db_close(&w->db);
+    return false;
+}
+
+/* Open the private writer and BEGIN IMMEDIATE (bounded busy wait). 0 or a
+ * typed failure; a failed teardown after a failed open is UNSETTLED. */
+static int mirror_writer_open(struct mirror_writer *w, const char *path)
+{
+    memset(w, 0, sizeof(*w));
+    if (!node_db_open_existing_runtime(&w->db, path, "utxo_mirror.rebuild"))
+        LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
+                   "rebuild: private node.db writer open failed");
+    sqlite3_busy_timeout(w->db.db, MIRROR_WRITER_BUSY_MS);
+#ifdef ZCL_TESTING
+    if (g_mirror_writer_hook)
+        g_mirror_writer_hook(w->db.db, g_mirror_writer_hook_ctx);
+#endif
+    /* Plain transaction — NO ibd_turbo_mode: turbo DROPS the utxos secondary
+     * indexes the explorer relies on. */
+    if (sqlite3_prepare_v2(w->db.db,
+            "INSERT OR REPLACE INTO utxos"
+            "(txid,vout,value,script,script_type,"
+            "address_hash,height,is_coinbase) VALUES(?,?,?,?,?,?,?,?)",
+            -1, &w->ins, NULL) != SQLITE_OK) {
+        LOG_WARN("utxo_mirror", "rebuild: writer insert prepare failed: %s",
+                 sqlite3_errmsg(w->db.db));
+        return mirror_writer_close(w) ? UTXO_MIRROR_REBUILD_ERROR
+                                      : UTXO_MIRROR_REBUILD_UNSETTLED;
     }
+    w->db.stmt_utxo_insert = w->ins;
+    if (!node_db_begin_immediate(&w->db)) {
+        LOG_WARN("utxo_mirror", "rebuild: writer BEGIN IMMEDIATE failed");
+        return mirror_writer_close(w) ? UTXO_MIRROR_REBUILD_ERROR
+                                      : UTXO_MIRROR_REBUILD_UNSETTLED;
+    }
+    return 0;
+}
 
-    bool ok = node_db_exec(ndb, "DELETE FROM utxos");
-    bool stopped = false;
-    int64_t written = 0;
+/* Roll back, then tear the writer down. Unsettled when either step cannot
+ * prove it completed. */
+static int64_t mirror_writer_abort(struct mirror_writer *w, int64_t failure,
+                                   bool commit_attempted)
+{
+    int64_t r = mirror_rebuild_rollback(&w->db, failure, commit_attempted);
+    if (!mirror_writer_close(w))
+        return UTXO_MIRROR_REBUILD_UNSETTLED;
+    return r;
+}
+
+struct mirror_stage {
     struct utxo_commitment uc;
-    utxo_commitment_init(&uc);
     /* Source-side canonical SHA3 over EVERY well-formed snapshot row, the
-     * exact record stream coins_kv_commitment() emits. Compared below with
-     * the SHA3 of the staged utxos before anything commits. */
+     * exact record stream coins_kv_commitment() emits. Compared with the SHA3
+     * of the staged utxos before anything commits. */
     struct sha3_256_ctx src_sha;
-    sha3_256_init(&src_sha);
+    int64_t written;
+};
 
+/* DELETE + copy under the writer's transaction; closes the source. 0, or the
+ * (already rolled back and torn down) failure. */
+static int64_t mirror_rebuild_stage(struct mirror_writer *w,
+    struct mirror_source *src, const _Atomic bool *stop, struct mirror_stage *st)
+{
+    bool stopped = false;
+    utxo_commitment_init(&st->uc);
+    sha3_256_init(&st->src_sha);
+    st->written = 0;
+    bool ok = node_db_exec(&w->db, "DELETE FROM utxos");
     if (ok)
-        ok = mirror_rebuild_scan(ndb, rdb, sel, stop, &uc, &src_sha, &written,
-                                 &stopped);
+        ok = mirror_rebuild_scan(&w->db, src->db, src->sel, stop, &st->uc,
+                                 &st->src_sha, &st->written, &stopped);
+    bool closed = mirror_source_close(src);
+    if (ok && closed)
+        return 0;
+    LOG_WARN("utxo_mirror", "rebuild: aborted after %lld rows",
+             (long long)st->written);
+    return mirror_writer_abort(w, stopped ? UTXO_MIRROR_REBUILD_STOPPED
+                                          : UTXO_MIRROR_REBUILD_ERROR, false);
+}
 
-    int source_end = sqlite3_finalize(sel);
-    int source_close = sqlite3_close(rdb);
-    ok = ok && source_end == SQLITE_OK && source_close == SQLITE_OK;
-
-    if (!ok) {
-        LOG_WARN("utxo_mirror", "rebuild: aborted after %lld rows", (long long)written);
-        return mirror_rebuild_rollback(ndb, stopped ? UTXO_MIRROR_REBUILD_STOPPED
-                                                  : UTXO_MIRROR_REBUILD_ERROR, false);
-    }
-
-    /* Verify BEFORE commit: the staged rows must hash to the snapshot's own
-     * commitment. A mismatch (skipped/corrupt row, writer bug) rolls the whole
-     * transaction back; failed rollback is explicitly UNSETTLED. */
-    int verdict = mirror_rebuild_verified(ndb, &src_sha, source_count);
+/* Verify, then stamp checkpoint + caches + cursor in the SAME transaction.
+ * 0, or the typed failure to roll back with. */
+static int mirror_rebuild_persist(struct node_db *ndb, struct mirror_stage *st,
+                                  int32_t frontier, int64_t expected_count)
+{
+    int verdict = mirror_rebuild_verified(ndb, &st->src_sha, expected_count);
     if (verdict != 0)
-        return mirror_rebuild_rollback(ndb, verdict, false);
-
-    /* Height-stamp the freshly rebuilt checkpoint in the SAME transaction —
-     * this scan just recomputed it from scratch, so `frontier` (the coins_kv
-     * height the caller asserts this pass reflects) is an exact covering
-     * height, letting utxo_mirror_delta_apply take over incrementally from
-     * here instead of the boot-time refresh redoing this O(n) work. */
-    if (!utxo_commitment_save_checkpoint_at_height(ndb->db, &uc, frontier)) {
+        return verdict;
+    /* Height-stamp the freshly rebuilt checkpoint: `frontier` is an exact
+     * covering height, letting utxo_mirror_delta_apply take over incrementally. */
+    if (!utxo_commitment_save_checkpoint_at_height(ndb->db, &st->uc, frontier)) {
         LOG_WARN("utxo_mirror", "rebuild: commitment checkpoint save failed at frontier=%d", frontier);
-        return mirror_rebuild_rollback(ndb, UTXO_MIRROR_REBUILD_ERROR, false);
+        return UTXO_MIRROR_REBUILD_ERROR;
     }
-
     if (!db_utxo_rebuild_wallet_and_address_caches_in_txn(ndb)) {
         LOG_WARN("utxo_mirror", "rebuild: wallet/address cache refresh failed");
-        return mirror_rebuild_rollback(ndb, UTXO_MIRROR_REBUILD_ERROR, false);
+        return UTXO_MIRROR_REBUILD_ERROR;
     }
-
     int64_t next_cursor = frontier;
     if (!node_db_state_set(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
                            &next_cursor, sizeof(next_cursor))) {
         LOG_WARN("utxo_mirror", "rebuild: cursor persist failed at frontier=%d", frontier);
-        return mirror_rebuild_rollback(ndb, UTXO_MIRROR_REBUILD_ERROR, false);
+        return UTXO_MIRROR_REBUILD_ERROR;
     }
+    return 0;
+}
 
-    if (!node_db_commit(ndb)) {
+/* Copy every live coins_kv row into the mirror under ONE transaction on a
+ * PRIVATE node.db writer. Returns the number of rows written, or a negative
+ * UTXO_MIRROR_REBUILD_* code. Ordinary failures roll back; UNSETTLED means a
+ * rollback or the writer's checked close could not prove completion and
+ * neither restoration nor a healthy mirror is claimed. `shared` is only the
+ * path source; it never carries the rebuild's transaction. */
+static int64_t mirror_rebuild_from_coins_kv(struct node_db *shared,
+                                            int32_t *frontier_out,
+                                            const _Atomic bool *stop,
+                                            bool operator_repair,
+                                            char *reason, size_t reason_cap)
+{
+    if (mirror_pre_snapshot_hook)
+        mirror_pre_snapshot_hook(mirror_pre_snapshot_ctx);
+    if (!shared || !shared->open)
+        LOG_RETURN(-1, "utxo_mirror", "rebuild: node.db unavailable");
+
+    struct mirror_source src;
+    int rc = mirror_source_open(&src, operator_repair, reason, reason_cap);
+    if (rc != 0)
+        return rc;
+    struct mirror_writer w;
+    rc = mirror_writer_open(&w, shared->path);
+    if (rc != 0) {
+        (void)mirror_source_close(&src);
+        return rc;
+    }
+    struct mirror_stage st;
+    int32_t frontier = src.frontier;
+    int64_t expected = src.count;
+    int64_t failure = mirror_rebuild_stage(&w, &src, stop, &st);
+    if (failure != 0)
+        return failure;
+    rc = mirror_rebuild_persist(&w.db, &st, frontier, expected);
+    if (rc != 0)
+        return mirror_writer_abort(&w, rc, false);
+    if (!node_db_commit(&w.db)) {
         LOG_WARN("utxo_mirror", "rebuild: node.db COMMIT failed");
-        return mirror_rebuild_rollback(ndb, UTXO_MIRROR_REBUILD_ERROR, true);
+        return mirror_writer_abort(&w, UTXO_MIRROR_REBUILD_ERROR, true);
     }
-
+    if (!mirror_writer_close(&w))
+        return UTXO_MIRROR_REBUILD_UNSETTLED;
     *frontier_out = frontier;
-    return written;
+    return st.written;
 }
 
 struct mirror_rebuild_ctx {
@@ -618,7 +786,16 @@ struct mirror_rebuild_ctx {
     bool cursor_persisted;
     bool used_delta;         /* diagnostics: delta vs wholesale rebuild */
     bool operator_repair;    /* authority admission required only for explicit repair */
+    char reason[96];         /* refusal token (REFUSED / OVERLAY_ACTIVE) */
 };
+
+/* Typed outcomes that leave the previous mirror and its health untouched (a
+ * failed authority proof keeps its historical quarantine behaviour). */
+static bool mirror_rebuild_left_unchanged(int64_t code)
+{
+    return code == UTXO_MIRROR_REBUILD_STOPPED ||
+           code == UTXO_MIRROR_REBUILD_OVERLAY_ACTIVE;
+}
 
 static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
 {
@@ -664,9 +841,11 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
     atomic_store(&r->svc->mirror_health, UTXO_MIRROR_AUDITING);
     int32_t snap_h = r->frontier;
     r->written = mirror_rebuild_from_coins_kv(ndb, &snap_h,
-                                              &r->svc->stop_requested, r->operator_repair);
-    if (r->written == UTXO_MIRROR_REBUILD_STOPPED) {
-        /* Stopped mid-rebuild (shutdown) and rolled back: the mirror is
+                                              &r->svc->stop_requested, r->operator_repair,
+                                              r->reason, sizeof(r->reason));
+    if (mirror_rebuild_left_unchanged(r->written)) {
+        /* Stopped or refused before any write (shutdown, RAM overlay, failed
+         * authority proof): the mirror is
          * unchanged, so restore HEALTHY — a stop is not corruption and must
          * never quarantine. The service thread exits on the same flag; the
          * next pass (or next boot) retries the rebuild. */
@@ -848,18 +1027,45 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
 
 int64_t utxo_mirror_rebuild_now(struct utxo_mirror_sync_service *svc)
 {
+    return utxo_mirror_rebuild_now_reason(svc, NULL, 0);
+}
+
+/* Refusals that apply before any state is touched. Returns 0 to proceed or the
+ * UTXO_MIRROR_REBUILD_* code to hand back; *frontier is set on proceed. */
+static int64_t rebuild_now_preflight(struct utxo_mirror_sync_service *svc,
+                                     char *reason, size_t reason_cap,
+                                     int32_t *frontier)
+{
     if (!svc || !svc->ndb || !svc->ndb->open)
         LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
                    "rebuild_now: node.db unavailable");
+    if (reason && reason_cap > 0)
+        reason[0] = '\0';
+    if (coins_ram_active()) {
+        if (reason && reason_cap > 0)
+            snprintf(reason, reason_cap, "coins_overlay_active");
+        LOG_RETURN(UTXO_MIRROR_REBUILD_OVERLAY_ACTIVE, "utxo_mirror",
+                   "rebuild_now: refused while the RAM coins overlay is active");
+    }
     if (refold_in_progress())
         LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
                    "rebuild_now: refused while a refold is in progress");
 
-    int32_t frontier = -1;
     int64_t coins_count = -1;
-    if (!read_coins_kv_state(&frontier, &coins_count))
+    *frontier = -1;
+    if (!read_coins_kv_state(frontier, &coins_count))
         LOG_RETURN(UTXO_MIRROR_REBUILD_ERROR, "utxo_mirror",
                    "rebuild_now: no authoritative frontier");
+    return 0;
+}
+
+int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
+                                       char *reason, size_t reason_cap)
+{
+    int32_t frontier = -1;
+    int64_t pre = rebuild_now_preflight(svc, reason, reason_cap, &frontier);
+    if (pre != 0)
+        return pre;
 
     /* cursor 0 forces the wholesale branch; the scan stamps its own snapshot
      * height. Quarantine is cleared only by a verified commit. */
@@ -877,8 +1083,10 @@ int64_t utxo_mirror_rebuild_now(struct utxo_mirror_sync_service *svc)
     atomic_fetch_sub(&svc->updates_active, 1u);
     if (!lane_ok || rebuild.written < 0) {
         atomic_store(&svc->last_error_unix, platform_time_wall_unix());
-        if (rebuild.written == UTXO_MIRROR_REBUILD_STOPPED)
+        if (mirror_rebuild_left_unchanged(rebuild.written))
             atomic_store(&svc->mirror_health, prior);
+        if (reason && reason_cap > 0)
+            snprintf(reason, reason_cap, "%s", rebuild.reason);
         return rebuild.written < 0 ? rebuild.written
                                    : UTXO_MIRROR_REBUILD_ERROR;
     }

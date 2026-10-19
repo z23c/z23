@@ -159,6 +159,11 @@ bool utxo_mirror_sync_audit_snapshot(uint64_t *generation_out);
 #define UTXO_MIRROR_REBUILD_STOPPED          (-2)
 #define UTXO_MIRROR_REBUILD_VERIFY_MISMATCH  (-3)
 #define UTXO_MIRROR_REBUILD_UNSETTLED        (-4)
+/* Refused before any write: the RAM coins overlay is active (its pending set
+ * can differ from the durable rows the copy scans), or the durable source
+ * failed the authority proof (reason token via utxo_mirror_rebuild_now_reason). */
+#define UTXO_MIRROR_REBUILD_OVERLAY_ACTIVE   (-5)
+#define UTXO_MIRROR_REBUILD_REFUSED          (-6)
 
 /* Operator repair: rebuild the whole mirror from ONE coins_kv snapshot, verify
  * the staged rows against that snapshot's SHA3 commitment, and only then
@@ -167,6 +172,34 @@ bool utxo_mirror_sync_audit_snapshot(uint64_t *generation_out);
  * assume the previous mirror was restored. Returns rows written, or a negative
  * UTXO_MIRROR_REBUILD_* code. Never writes coins_kv. */
 int64_t utxo_mirror_rebuild_now(struct utxo_mirror_sync_service *svc);
+
+/* As utxo_mirror_rebuild_now, additionally copying a short machine-readable
+ * refusal token (empty unless REFUSED / OVERLAY_ACTIVE) into reason. */
+int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
+                                       char *reason, size_t reason_cap);
+
+#ifdef ZCL_TESTING
+/* Deterministic fault injection for the private rebuild writer: the scan
+ * fails after its first row; ROLLBACK_FAILS additionally reports the writer
+ * rollback as failed, CLOSE_BUSY reports the writer close as SQLITE_BUSY.
+ * COMMIT_THEN_CLOSE_BUSY lets the copy and COMMIT succeed, then reports the
+ * writer close as SQLITE_BUSY (the post-commit teardown branch).
+ * Consumed by one rebuild. */
+enum utxo_mirror_test_fault { UMS_FAULT_NONE, UMS_FAULT_ROLLBACK_FAILS,
+                              UMS_FAULT_COMMIT_THEN_CLOSE_BUSY,
+                              UMS_FAULT_CLOSE_BUSY };
+void utxo_mirror_sync_test_set_fault(enum utxo_mirror_test_fault fault);
+
+/* Called with the private writer's sqlite handle right after it opens (before
+ * BEGIN IMMEDIATE), so a fixture can attach authorizer/trace/progress faults to
+ * the connection the rebuild really writes through. NULL clears. */
+/* Called after the authority proof passed, before the post-authority overlay
+ * check (the snapshot-establishment boundary). NULL clears. */
+void utxo_mirror_sync_test_set_post_authority_hook(void (*fn)(void *), void *ctx);
+
+void utxo_mirror_sync_test_set_writer_hook(void (*fn)(sqlite3 *writer, void *ctx),
+                                           void *ctx);
+#endif
 
 /* Test seam: called inside a wholesale rebuild after the caller read the
  * frontier and before the rebuild opens its snapshot, so a test can advance

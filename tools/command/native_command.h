@@ -2738,6 +2738,10 @@ void zcl_native_handle_rom_seed_disable(
 void zcl_native_handle_utxo_mirror_rebuild(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+#ifdef ZCL_TESTING
+/* Force the post-commit success projection to fail (reply-build fault). */
+void zcl_utxo_mirror_controller_test_fail_projection(bool fail);
+#endif
 void zcl_native_handle_rom_seed_artifacts(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

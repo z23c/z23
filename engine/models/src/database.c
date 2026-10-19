@@ -924,5 +924,53 @@ void node_db_close(struct node_db *ndb)
     node_db_owner_lease_release(ndb);
 }
 
+#ifdef ZCL_TESTING
+static _Atomic bool g_checked_close_busy_once;
+void node_db_test_fail_next_checked_close(void)
+{
+    atomic_store(&g_checked_close_busy_once, true);
+}
+#endif
+
+/* Checked teardown for a handle that owns no cached statements (a
+ * node_db_open_existing_runtime writer whose caller finalized its own). The
+ * handle, state and lease are released ONLY when sqlite3_close returned
+ * SQLITE_OK; otherwise the handle stays live and the caller must treat the
+ * outcome as unsettled (node_db_close remains the best-effort fallback). */
+bool node_db_close_checked(struct node_db *ndb)
+{
+    if (!ndb)
+        LOG_FAIL("db", "node_db_close_checked: handle is required");
+    if (!ndb->open || !ndb->db) {
+        node_db_state_destroy(ndb);
+        return true;
+    }
+    node_db_note_activity(ndb, "close_checked", SQLITE_OK);
+    struct db_lifetime_scope close_scope;
+    db_lifetime_scope_enter(
+        &close_scope,
+        ndb->lifetime_owner[0] ? ndb->lifetime_owner : "node_db.close",
+        ndb->lifetime_backing_owner ? DB_LIFETIME_BACKING_OWNER
+                                    : DB_LIFETIME_HANDLE_OWNER,
+        ndb->lifetime_generation);
+    zcl_db_txn_trace_unregister(ndb->db);
+    int close_rc;
+#ifdef ZCL_TESTING
+    if (atomic_exchange(&g_checked_close_busy_once, false))
+        close_rc = SQLITE_BUSY;
+    else
+#endif
+        close_rc = sqlite3_close(ndb->db);
+    db_lifetime_scope_leave(&close_scope);
+    if (close_rc != SQLITE_OK)
+        LOG_FAIL("db", "node_db_close_checked: sqlite3_close rc=%d; handle "
+                 "and lease retained", close_rc);
+    ndb->db = NULL;
+    ndb->open = false;
+    node_db_state_destroy(ndb);
+    node_db_owner_lease_release(ndb);
+    return true;
+}
+
 /* node_db_state_*, node_db_schema_version, and node_db_migrate live
  * in database_migrate.c (the KV store + migration runner). */
