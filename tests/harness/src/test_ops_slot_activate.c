@@ -690,10 +690,40 @@ static int osa_tip_case(const char *name, enum osa_tip_mode mode,
     return f;
 }
 
+/* How the node conf is made unsafe before the activate call. */
+enum osa_prep { PREP_NONE, PREP_GROUP_W, PREP_WORLD_W, PREP_SYMLINK, PREP_FIFO, PREP_FOREIGN };
+
 struct osa_refusal {
     const char *name, *cls, *inst, *kind, *node_conf, *extra, *exec_args;
     const char *what;
+    enum osa_prep prep;
 };
+
+/* Returns the node_conf to use, or NULL to keep the default; false: skip. */
+static bool osa_prep_conf(enum osa_prep p, const char *dir, const char *conf,
+                          char *alt, size_t cap, bool *use_alt)
+{
+    *use_alt = false;
+    snprintf(alt, cap, "%s/alt.conf", dir);
+    switch (p) {
+    case PREP_NONE:
+        return true;
+    case PREP_GROUP_W:
+        return chmod(conf, 0620) == 0;
+    case PREP_WORLD_W:
+        return chmod(conf, 0602) == 0;
+    case PREP_SYMLINK:
+        *use_alt = true;
+        return symlink(conf, alt) == 0;
+    case PREP_FIFO:
+        *use_alt = true;
+        return mkfifo(alt, 0600) == 0;
+    case PREP_FOREIGN:
+        return geteuid() == 0 && chown(conf, 1, (gid_t)-1) == 0;
+    }
+    return false;
+}
+
 
 /* Every refusal happens before any restart: no systemctl call is logged. */
 static int osa_tip_refused(const struct osa_refusal *r)
@@ -706,10 +736,17 @@ static int osa_tip_refused(const struct osa_refusal *r)
         return osa_check(false, "fixture");
     osa_tip_json(&fx, health, sizeof(health));
     snprintf(conf, sizeof(conf), "%s/rpc.conf", fx.dir);
+    char alt[PATH_MAX];
+    bool use_alt;
+    if (!osa_prep_conf(r->prep, fx.dir, conf, alt, sizeof(alt), &use_alt)) {
+        printf("ops_slot_activate: SKIP %s (needs root to chown or the file type is unavailable)\n", r->name);
+        osa_rm_tree(fx.dir);
+        return 0;
+    }
     snprintf(health, sizeof(health),
              "{\"kind\":\"%s\",\"timeout_ms\":300,\"port\":1,\"node_conf\":\"%s\","
              "\"reference_host\":\"ref.example\",\"reference_conf\":\"%s\"%s%s}",
-             r->kind, r->node_conf ? r->node_conf : conf, conf,
+             r->kind, r->node_conf ? r->node_conf : (use_alt ? alt : conf), conf,
              r->extra[0] ? "," : "", r->extra);
     snprintf(json, sizeof(json),
              "{\"service_class\":\"%s\",\"slot\":\"new\",\"instances\":%s,"
@@ -743,6 +780,16 @@ static int test_osa_tip_refusals(void)
           "the node class without exec_args is refused" },
         { "nd_inst", "node", "[\"other\"]", "tip_parity", NULL, "", "node run",
           "the node class takes only the instance node" },
+        { "cf_grp", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL, "", "x",
+          "a group-writable conf is refused", PREP_GROUP_W },
+        { "cf_wld", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL, "", "x",
+          "a world-writable conf is refused", PREP_WORLD_W },
+        { "cf_sym", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL, "", "x",
+          "a symlink to a valid conf is refused", PREP_SYMLINK },
+        { "cf_fifo", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL, "", "x",
+          "a FIFO at the conf path is refused without blocking", PREP_FIFO },
+        { "cf_own", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL, "", "x",
+          "a conf owned by another user is refused", PREP_FOREIGN },
     };
     int f = 0;
     for (size_t k = 0; k < sizeof(rows) / sizeof(rows[0]); k++)

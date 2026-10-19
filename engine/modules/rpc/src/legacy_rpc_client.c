@@ -32,6 +32,9 @@
  * This is a bridge/oracle transport, not a consensus path. */
 #define LRC_RESP_MAX        (8u << 20)
 
+/* Largest rpc conf file read. */
+#define LRC_CONF_MAX        (64 * 1024)
+
 /* ── zclassic.conf parser ──────────────────────────────────────── */
 
 static bool legacy_rpc_parse_conf_stream(FILE *f, char *out_user, size_t user_sz,
@@ -84,12 +87,13 @@ bool legacy_rpc_parse_conf_file(const char *path, char *out_user, size_t user_sz
                                         pass_sz, out_port);
 }
 
-/* The explicit ZCL_LEGACY_ORACLE_CONF path carries credentials, so it is
- * opened O_NOFOLLOW, must be a regular file owned by this user and not
- * writable by group or others, and is read from the checked descriptor. */
-static bool legacy_rpc_parse_trusted_conf(const char *path, char *out_user,
-                                          size_t user_sz, char *out_pass,
-                                          size_t pass_sz, int *out_port)
+/* A conf that carries credentials is opened once, O_NOFOLLOW and
+ * O_NONBLOCK (a FIFO cannot block the open), must be a regular file of at
+ * most LRC_CONF_MAX bytes owned by this user and not writable by group or
+ * others, and is parsed from the checked descriptor. */
+bool legacy_rpc_parse_conf_trusted(const char *path, char *out_user,
+                                    size_t user_sz, char *out_pass,
+                                    size_t pass_sz, int *out_port)
 {
 #ifdef _WIN32
     /* No owner or mode bits to check here; read it as the default path is. */
@@ -97,11 +101,13 @@ static bool legacy_rpc_parse_trusted_conf(const char *path, char *out_user,
                                       pass_sz, out_port);
 #else
     struct stat st;
-    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = path ? open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                  : -1;
     FILE *f;
     if (fd < 0) return false;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
-        (st.st_mode & (S_IWGRP | S_IWOTH)) != 0 || !(f = fdopen(fd, "r"))) {
+        (st.st_mode & (S_IWGRP | S_IWOTH)) != 0 || st.st_size > LRC_CONF_MAX ||
+        fcntl(fd, F_SETFL, 0) != 0 || !(f = fdopen(fd, "r"))) {
         close(fd);
         return false;
     }
@@ -124,7 +130,7 @@ bool legacy_rpc_parse_conf(char *out_user, size_t user_sz,
         snprintf(path, sizeof(path), "%s/.zclassic/zclassic.conf", home);
     }
     if (explicit_conf && explicit_conf[0])
-        return legacy_rpc_parse_trusted_conf(path, out_user, user_sz, out_pass,
+        return legacy_rpc_parse_conf_trusted(path, out_user, user_sz, out_pass,
                                              pass_sz, out_port);
     return legacy_rpc_parse_conf_file(path, out_user, user_sz, out_pass,
                                       pass_sz, out_port);
