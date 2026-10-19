@@ -1600,6 +1600,46 @@ can stop with the row still queued; rerun `dev land drive` to continue it.
 A competing integrator receives `STEP_BUSY` during the short
 publication slot and must inspect status before another attempt.
 
+A lane lands with two commands and nothing else. The `dev land` leaves run in the
+development build of a checkout (`make dev-bin`); the product build lists them
+and answers `COMMAND_COMPAT_ONLY`.
+
+```bash
+devbuild --wait z23 dev land submit --worktree=PATH --qualify
+devbuild --wait z23 dev land drive --seq=N
+```
+
+`submit --qualify` runs the pre-submit gates in the lane's worktree, then
+queues the tip they qualified (the worktree's `HEAD`; `--tip` is refused with
+`--qualify`). In order:
+
+1. The tracked tree must be clean (`QUALIFY_DIRTY_TREE`, with the paths).
+2. `git fetch origin`, then a signed rebase onto `origin/main` when the lane
+   is behind it. A conflict aborts the rebase and refuses with
+   `QUALIFY_REBASE_CONFLICT` naming the unmerged paths.
+3. Every commit the lane adds is signed (`QUALIFY_UNSIGNED_TIP`).
+4. `make docs-capability-inventory`, `make dev-bin`, `make install-hooks`,
+   `make lint-ready`; regenerated files are folded into the tip by a signed
+   amend (`QUALIFY_STEP_FAILED` names a failing step).
+5. `VENDOR_CC=gcc make lint` must print `LINT: all checks passed`
+   (`QUALIFY_LINT_FAILED`).
+6. Every affected test group runs in one `make t-fast-exact` invocation, so
+   the harness workers run the groups in parallel. The affected groups are
+   the routes `z23 code tests` reports for each path the lane changes
+   relative to `origin/main`. A group passes on a PASS header and no line of
+   its section that begins with `FAIL at` (a line that merely contains the
+   text, such as the net group's `PARSE FAIL at`, is not a verdict). A
+   failing group refuses with `QUALIFY_GROUP_FAILED`, naming the group and
+   its section log.
+7. A gate that left any other tracked file changed refuses with
+   `QUALIFY_TREE_CHANGED` and the paths; generated files only are folded in.
+
+Logs are kept in the worktree as `build/scratch/qualify-<step>.log`, one per
+step and one per group. Nothing is queued when a gate refuses. Measured on
+one host for four groups, one `t-fast-exact` invocation took 12.5 s and four
+serial `t-fast` calls took 132 s: each serial call pays the checkout lock,
+admission and build check again.
+
 `z23 dev land drive --seq=N` takes one submitted row to a terminal outcome
 without a wrapper script. Each round is one bounded drive session; when a
 proven pair asks for its signed publication intent, the drive seals it with

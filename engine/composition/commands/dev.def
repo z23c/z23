@@ -2060,12 +2060,20 @@ ZCL_COMMAND_BRANCH("dev.land", "dev",
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.submit", "dev.land", "",
     "Queue a signed tip for landing and return at once",
-    "Queues one signed tip from a lane worktree and returns before any "
-    "mutation of origin. Refuses an unsigned or unrelated tip. A repeated "
-    "submission of the same tip answers with the existing row.", 65536,
+    "Queues one signed tip and returns before any mutation of origin; the tip "
+    "defaults to the HEAD of worktree. Refuses an unsigned or unrelated tip. "
+    "A repeated submission of the same tip answers with the existing row. "
+    "With qualify the lane's worktree first fetches, rebases onto origin/main "
+    "when behind, requires signed commits, regenerates derived files, runs "
+    "full lint and every affected test group (one harness run), folds "
+    "regenerated files into the tip, and submits that tip. A failed gate "
+    "refuses with QUALIFY_LINT_FAILED, QUALIFY_GROUP_FAILED (group, log), "
+    "QUALIFY_UNSIGNED_TIP, QUALIFY_TREE_CHANGED (paths), QUALIFY_DIRTY_TREE, "
+    "QUALIFY_FETCH_FAILED, QUALIFY_REBASE_CONFLICT or QUALIFY_STEP_FAILED "
+    "and queues nothing.", 65536,
     "land,submit,queue,lane,tip",
-    "zcl.land_input.v1", "zcl.land.v1", "tip,worktree,note,json", "",
-    "z23 dev land submit --worktree=PATH",
+    "zcl.land_input.v1", "zcl.land.v1", "tip,worktree,note,json,qualify", "",
+    "z23 dev land submit --worktree=PATH --qualify",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,

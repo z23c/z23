@@ -133,6 +133,7 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_land_regen.h"
+#include "command/native_dev_land_qualify.h"
 #include "command/native_dev_land_read.h"
 #include "command/native_dev_land_attestation.h"
 #include "command/native_dev_land_window.h"
@@ -3117,6 +3118,82 @@ static bool dl_submit_tip_resolve(const char *root, const char *tip,
     return true;
 }
 
+/* A qualify refusal as a typed error: QUALIFY_<REFUSAL>, with the step or
+ * group, the retained log and the paths it names in data. */
+static void dl_qualify_refuse(struct zcl_command_reply *reply,
+                              const struct zcl_land_qualify *qr)
+{
+    const char *name = zcl_dev_land_qualify_refusal(qr->code);
+    char code[64] = "QUALIFY_";
+    size_t n = strlen(code);
+    for (size_t i = 0; name[i] && n + 1 < sizeof(code); i++)
+        code[n++] = (char)toupper((unsigned char)name[i]);
+    code[n] = '\0';
+    (void)json_push_kv_str(&reply->data, "refusal", name);
+    (void)json_push_kv_str(&reply->data,
+                           qr->code == ZCL_LAND_QUALIFY_GROUP_FAILED
+                               ? "group" : "step", qr->name);
+    if (qr->log[0])
+        (void)json_push_kv_str(&reply->data, "log", qr->log);
+    if (qr->paths[0])
+        (void)json_push_kv_str(&reply->data, "paths", qr->paths);
+    if (qr->detail[0])
+        (void)json_push_kv_str(&reply->data, "detail", qr->detail);
+    dl_fail(reply, code, "submit", "the lane did not qualify; nothing was queued",
+            qr->detail[0] ? qr->detail : qr->log);
+}
+
+/* submit --qualify: run the pre-submit gates in the lane's worktree and
+ * bind the submission to the tip they qualified. */
+static const char *dl_submit_qualify(const struct zcl_command_request *req,
+                                     struct zcl_command_reply *reply,
+                                     char *buf, size_t cap)
+{
+    const char *bypass = dl_allow_unsigned();
+    bool exempt = bypass && strcmp(bypass, "1") == 0 && dl_stub() != NULL;
+    const char *worktree = dl_str(req, "worktree");
+    struct zcl_land_qualify qr;
+    if (!worktree || dl_str(req, "tip")) {
+        dl_fail(reply, "BAD_INPUT", "submit",
+                "qualify needs --worktree and qualifies its HEAD, not a --tip",
+                "input.worktree missing or input.tip present");
+        return NULL;
+    }
+    if (!zcl_dev_land_qualify(worktree, exempt, &qr)) {
+        dl_qualify_refuse(reply, &qr);
+        return NULL;
+    }
+    (void)snprintf(buf, cap, "%s", qr.tip);
+    return buf;
+}
+
+/* The tip a submission names: --qualify's qualified HEAD, an explicit
+ * --tip, or the HEAD of --worktree. */
+static const char *dl_submit_tip(const struct zcl_command_request *req,
+                                 struct zcl_command_reply *reply, char *buf,
+                                 size_t cap)
+{
+    const struct json_value *flag = json_get(req->input, "qualify");
+    const char *tip = dl_str(req, "tip"), *worktree = dl_str(req, "worktree");
+    if (flag && flag->type == JSON_BOOL && flag->val.b)
+        return dl_submit_qualify(req, reply, buf, cap);
+    if (!tip && worktree) {
+        const char *args[] = { "rev-parse", "HEAD", NULL };
+        if (dl_git(worktree, args, buf, cap, DL_GIT_TIMEOUT_MS) == 0) {
+            dl_trim(buf);
+            tip = buf;
+        }
+    }
+    if (!tip || !dl_tipish_ok(tip)) {
+        dl_fail(reply, "BAD_INPUT", "submit",
+                "tip is a 7-64 character hex commit id, or --worktree names "
+                "the checkout whose HEAD is submitted",
+                "input.tip missing or not a commit id");
+        return NULL;
+    }
+    return tip;
+}
+
 static void dl_submit(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -3125,18 +3202,14 @@ static void dl_submit(const struct zcl_command_request *req,
     struct dl_row *rows = NULL;
     size_t nrows = 0;
     char qpath[4096 + 32];
-    char root[4096], sig[64], full[80], ts[64];
+    char root[4096], sig[64], full[80], ts[64], tip_buf[64];
     const char *tip, *worktree, *note;
     const char *allow_unsigned = dl_allow_unsigned();
     int lock = -1;
 
-    tip = dl_str(req, "tip");
-    if (!tip || !dl_tipish_ok(tip)) {
-        dl_fail(reply, "BAD_INPUT", "submit",
-                "tip is a 7-64 character hex commit id",
-                "input.tip missing or not a commit id");
+    tip = dl_submit_tip(req, reply, tip_buf, sizeof(tip_buf));
+    if (!tip)
         return;
-    }
     if (!dl_dirs_make(&d)) {
         dl_fail(reply, "STATE_DIR_FAILED", "submit",
                 "cannot resolve the owner-private state root",
