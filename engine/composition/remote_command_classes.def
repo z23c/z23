@@ -322,9 +322,11 @@ REMOTE_COMMAND_CLASS("status", REMOTE_CLASS_NEVER, "")
  *   resource; core.mining.benchmark burns CPU on request.
  *
  *   Sovereign identity and directory state — core.identity.anchor / .rotate /
- *   .revoke / .resolve / .list, core.zdir.*, core.anchor.compose / .inspect,
- *   core.epoch.status / .verify. These name and re-key who this node IS. An
- *   identity a remote caller can rotate is not sovereign.
+ *   .revoke / .resolve / .list / .keygen / .pubkey, core.zdir.*,
+ *   core.anchor.compose / .inspect, core.epoch.status / .verify. These name and re-key who this node IS. An
+ *   identity a remote caller can rotate is not sovereign. keygen writes a seed
+ *   file at a caller-named path; pubkey reads one, so a remote caller would
+ *   probe or create key files on this node's filesystem.
  *
  *   Wallet custody — every core.wallet.* leaf, INCLUDING its reads. Balances,
  *   addresses, shielded notes, UTXO lists and backup posture are precisely what
@@ -396,6 +398,8 @@ REMOTE_COMMAND_CLASS("core.identity.anchor", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.identity.rotate", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.identity.revoke", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.identity.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.identity.keygen", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.identity.pubkey", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.zdir.guide", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.zdir.list", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.zdir.register", REMOTE_CLASS_NEVER, "")
