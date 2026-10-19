@@ -18,7 +18,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
 #include <sys/prctl.h>
+#endif
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -685,6 +687,7 @@ static pid_t lt_spawn_sleeper(void)
 static int test_lab_signals(void)
 {
     int failures = 0;
+#if defined(__linux__)
     TEST("lab run: a program cannot signal a process outside the lab, with and without a PID namespace") {
         for (int no_pidns = 0; no_pidns < 2; no_pidns++) {
             struct zcl_command_reply r;
@@ -719,6 +722,7 @@ static int test_lab_signals(void)
         }
         PASS();
     } _test_next:;
+#endif
     return failures;
 }
 

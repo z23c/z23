@@ -34,7 +34,7 @@ enum lab_err lab_source_load(const char *path, struct lab_source *src)
 {
     (void)path;
     memset(src, 0, sizeof(*src));
-    return LAB_E_BAD_FILE;
+    return LAB_E_UNSUPPORTED;
 }
 
 void lab_source_free(struct lab_source *src)
