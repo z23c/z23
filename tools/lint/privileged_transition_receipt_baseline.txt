@@ -207,4 +207,4 @@ ops.mesh.device.host.shell exempt: execs one fixed charset-validated ssh argv th
 ops.mesh.device.psk.new exempt: exclusively creates one owner-private 0600 PSK file under a validated 0700 parent; no grant, package installation or binary activation occurs
 ops.mesh.device.host.receiver exempt: runs a finite owner-selected pair receiver with current directional grants; no package installation, persistence or binary activation occurs
 ops.mesh.device.host.package.run exempt: executes an already-installed fixed bin/tunnel only after separate owner host_os approval and exact installed root/receipt/digest verification; no install or persistent activation transition is performed and the build receipt is not misrepresented as an authority_receipt
-core.identity.keygen exempt: writes one new 32-byte seed file at a caller-named path, never replacing an existing file; it installs no artifact, changes no running binary, and grants no authority
+core.identity.keygen exempt: writes one new seed file (a 32-byte seed in hex) at a caller-named path, never replacing an existing file; it installs no artifact, changes no running binary, and grants no authority

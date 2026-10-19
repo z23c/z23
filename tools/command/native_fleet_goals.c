@@ -105,10 +105,10 @@ struct zcl_goal_result zcl_goal_make(enum zcl_goal_grade grade,
 
 #define gr_unmeasured(next, ...) \
     zcl_goal_make(ZCL_GOAL_UNMEASURED, (next), __VA_ARGS__)
-      
-      static int64_t gr_now(const struct zcl_goals_options *o)
-      {
-          return o && o->now_unix > 0 ? o->now_unix : (int64_t)platform_time_wall_time_t();
+
+static int64_t gr_now(const struct zcl_goals_options *o)
+{
+    return o && o->now_unix > 0 ? o->now_unix : (int64_t)platform_time_wall_time_t();
 }
 
 /* Top-level of the git worktree that holds `dir`; false when git names none. */
