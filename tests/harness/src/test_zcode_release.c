@@ -1273,12 +1273,12 @@ static void zr_hy_part_sign(void)
     zy.v2_hex = zr_hy_dup(zr_str(&c.reply, "doc_hex"));
     const char *pk = zr_str(&c.reply, "pq_pubkey");
     zr_hy_check("with pq_seed_file the leaf emits v2 (doc_version 2, pq "
-                "true, 8090 bytes), seed never in the reply",
+                "true, 8090 bytes, saved as .v2.zid), seed never in the reply",
                 zr_ok(&c.reply) && zy.v2_hex && pk &&
                     zr_int(&c.reply, "doc_version", -1) == 2 &&
                     zr_bool(&c.reply, "pq") == 1 &&
                     zr_int(&c.reply, "doc_bytes", -1) == 8090 &&
-                    zr_bool(&c.reply, "saved") == 0 &&
+                    zr_bool(&c.reply, "saved") == 1 &&
                     !zr_json_contains(&c.reply.data, zy.pq_hex) &&
                     !zr_json_contains(&c.reply.data, zy.f.seed_hex),
                 &zy.failures);
@@ -1408,6 +1408,148 @@ static void zr_hy_part_pins(void)
                 wl == 8090 && !zid_doc_decode(&d, w, wl), &zy.failures);
 }
 
+/* A v2 file in <datadir>/zcode/releases must not break the batch: anchor and
+ * prove fold it by its wire-byte digest next to the v1 doc. */
+static void zr_hy_part_batch(void)
+{
+    char path[400];
+    snprintf(path, sizeof(path), "%s/zcode/releases/demo-1.0.0.v2.zid",
+             zy.f.datadir);
+    struct stat sb;
+    zr_hy_check("the v2 doc was saved next to the v1 doc, not over it",
+                stat(path, &sb) == 0 && (sb.st_mode & 0777) == 0600,
+                &zy.failures);
+    struct zr_cmd c;
+    zr_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", zy.f.datadir);
+    (void)json_push_kv_int(&c.input, "tip", 100);
+    zcl_native_handle_zcode_release_anchor(&c.request, &c.reply);
+    zr_hy_check("batch anchor loads a v1 and a v2 doc together (2 releases)",
+                zr_ok(&c.reply) && zr_int(&c.reply, "releases", -1) == 2,
+                &zy.failures);
+    zr_cmd_free(&c);
+    zr_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", zy.f.datadir);
+    (void)json_push_kv_str(&c.input, "name", "demo");
+    (void)json_push_kv_str(&c.input, "version", "1.0.0");
+    zcl_native_handle_zcode_release_prove(&c.request, &c.reply);
+    zr_hy_check("batch prove works with a v2 doc in the directory",
+                zr_ok(&c.reply), &zy.failures);
+    zr_cmd_free(&c);
+}
+
+static void zr_hy_keygen_refuse(const char *path, const char *text)
+{
+    struct zr_cmd c;
+    struct stat sb;
+    ssize_t n;
+    int fd;
+    char before[ZRS1_PQ_SEED_SIZE * 2 + 8];
+    memcpy(before, text, sizeof(before));
+    zr_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "pq_seed_file", path);
+    zcl_native_handle_zcode_release_keygen_pq(&c.request, &c.reply);
+    char after[ZRS1_PQ_SEED_SIZE * 2 + 8];
+    fd = open(path, O_RDONLY);
+    n = fd >= 0 ? read(fd, after, sizeof(after) - 1) : -1;
+    if (fd >= 0)
+        close(fd);
+    if (n >= 0)
+        after[n] = '\0';
+    zr_hy_check("keygen_pq refuses to overwrite an existing seed file",
+                zr_code_is(&c.reply, "SEED_FILE_EXISTS") &&
+                    n == ZRS1_PQ_SEED_SIZE * 2 + 1 &&
+                    memcmp(before, after, ZRS1_PQ_SEED_SIZE * 2) == 0,
+                &zy.failures);
+    zr_cmd_free(&c);
+
+    zr_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "pq_seed_file", "relative.hex");
+    zcl_native_handle_zcode_release_keygen_pq(&c.request, &c.reply);
+    zr_hy_check("keygen_pq needs an absolute path",
+                zr_code_is(&c.reply, "MISSING_SEED_FILE"), &zy.failures);
+    zr_cmd_free(&c);
+
+    char bad[640];
+    snprintf(bad, sizeof(bad), "%s.bad", path);
+    zr_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "pq_seed_file", bad);
+    (void)json_push_kv_str(&c.input, "master_pubkey", "zz");
+    zcl_native_handle_zcode_release_keygen_pq(&c.request, &c.reply);
+    zr_hy_check("keygen_pq refuses a malformed master_pubkey before writing",
+                zr_code_is(&c.reply, "BAD_MASTER_PUBKEY") &&
+                    stat(bad, &sb) != 0,
+                &zy.failures);
+    zr_cmd_free(&c);
+
+}
+
+/* The minted seed is a real pq_seed_file: it signs a v2 doc whose SLH-DSA
+ * key is the one keygen_pq reported. */
+static void zr_hy_keygen_sign(const char *path, const char *pk_dup)
+{
+    struct zr_cmd c;
+    zr_hy_sign(&zy.f, path, &c);
+    const char *signed_pk = zr_str(&c.reply, "pq_pubkey");
+    zr_hy_check("the minted seed signs a v2 doc under the reported key",
+                zr_ok(&c.reply) && signed_pk && pk_dup &&
+                    strcmp(signed_pk, pk_dup) == 0,
+                &zy.failures);
+    zr_cmd_free(&c);
+}
+
+/* zcode.release.keygen_pq: 0600 seed file, never overwritten, no secret in
+ * the reply, and the seed signs a v2 doc under the reported key. */
+static void zr_hy_part_keygen(void)
+{
+    char cwd[256], path[600], text[ZRS1_PQ_SEED_SIZE * 2 + 8];
+    static const char master[] =
+        "abababababababababababababababababababababababababababababababab";
+    if (!getcwd(cwd, sizeof(cwd)))
+        cwd[0] = '\0';
+    snprintf(path, sizeof(path), "%s/%s/kg_pq.hex", cwd, zy.f.datadir + 2);
+    struct zr_cmd c;
+    zr_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "pq_seed_file", path);
+    (void)json_push_kv_str(&c.input, "master_pubkey", master);
+    zcl_native_handle_zcode_release_keygen_pq(&c.request, &c.reply);
+    const char *pk = zr_str(&c.reply, "pq_pubkey");
+    const char *pin = zr_str(&c.reply, "pin_line");
+    char want_pin[256];
+    snprintf(want_pin, sizeof(want_pin), "zrs1 %s 0 %s", master,
+             pk ? pk : "");
+    struct stat sb;
+    int fd = open(path, O_RDONLY);
+    ssize_t n = fd >= 0 ? read(fd, text, sizeof(text) - 1) : -1;
+    if (fd >= 0)
+        close(fd);
+    if (n >= 0)
+        text[n] = '\0';
+    zr_hy_check("keygen_pq writes a 0600 seed file of 96 hex + newline",
+                zr_ok(&c.reply) && stat(path, &sb) == 0 &&
+                    (sb.st_mode & 0777) == 0600 &&
+                    n == ZRS1_PQ_SEED_SIZE * 2 + 1 &&
+                    text[ZRS1_PQ_SEED_SIZE * 2] == '\n',
+                &zy.failures);
+    /* The SLH-DSA public key carries PK.seed (the last 16 seed bytes), which
+     * is public by definition; the secret SK.seed||SK.prf are the first 32. */
+    char secret_hex[65];
+    memcpy(secret_hex, text, 64);
+    secret_hex[64] = '\0';
+    zr_hy_check("keygen_pq prints only the public key and a ready pin line, "
+                "no secret seed bytes",
+                pk && strlen(pk) == 64 && pin && strcmp(pin, want_pin) == 0 &&
+                    !zr_json_contains(&c.reply.data, secret_hex) &&
+                    !zr_json_contains(&c.reply.data, text),
+                &zy.failures);
+    char *pk_dup = zr_hy_dup(pk);
+    zr_cmd_free(&c);
+
+    zr_hy_keygen_refuse(path, text);
+    zr_hy_keygen_sign(path, pk_dup);
+    free(pk_dup);
+}
+
 static int test_zr_hybrid(void)
 {
     memset(&zy, 0, sizeof(zy));
@@ -1429,6 +1571,8 @@ static int test_zr_hybrid(void)
         zr_hy_part_accept();
         zr_hy_part_refusals();
         zr_hy_part_pins();
+        zr_hy_part_batch();
+        zr_hy_part_keygen();
     } else {
         printf("zcode_release hybrid: signing produced no doc... FAIL\n");
         zy.failures++;

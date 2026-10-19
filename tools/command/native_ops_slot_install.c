@@ -72,7 +72,7 @@ struct osi {
     const char *release, *from, *name, *member, *datadir;
     bool dry_run;
     uint8_t package_root[32];
-    struct zid_doc doc;
+    struct release_pin_doc pd;
     struct zid_release rel;
     struct vcs_package_manifest manifest;
     const struct vcs_package_file *file;
@@ -160,13 +160,14 @@ static bool osi_check_release(const struct zcl_command_request *request,
     const char *code = NULL;
     uint8_t root[32];
     char err[128];
-    if (!release_pin_read_doc(st->release, &st->doc, &code)) {
+    if (!release_pin_read_any(st->release, &st->pd, &code)) {
         slot_refuse(reply, code, "the release doc could not be read as a "
                     "saved .zid (hex text)", st->release);
         return false;
     }
-    if (!zid_release_verify(&st->doc, &st->rel,
-                            (uint64_t)platform_time_wall_unix())) {
+    uint64_t now = (uint64_t)platform_time_wall_unix();
+    if (st->pd.version == ZID_DOC_VERSION &&
+        !zid_release_verify(&st->pd.doc, &st->rel, now)) {
         osi_fail(reply, "RELEASE_INVALID", "execute",
                  "the release doc is expired, tampered, or not a release "
                  "record; `zcode release verify` names which", st->release,
@@ -180,8 +181,8 @@ static bool osi_check_release(const struct zcl_command_request *request,
         return false;
     }
     memcpy(st->package_root, root, sizeof(root));
-    return release_pin_gate(request->input, true, st->doc.master_pubkey,
-                            st->rel.manifest_root, reply, OSI_CMD);
+    return release_pin_doc_gate(request->input, true, &st->pd, now, &st->rel,
+                                reply, OSI_CMD);
 }
 
 /* Step 4a: the manifest for that root, from the local store. */
@@ -439,8 +440,8 @@ static void osi_reply(const struct osi *st, struct zcl_command_reply *reply,
     char sha_hex[65], fp[RELEASE_PIN_FINGERPRINT_HEX + 1], slot[96];
     char pub[65];
     zcl_hex_encode(st->sha, 32, sha_hex);
-    zcl_hex_encode(st->doc.master_pubkey, 32, pub);
-    release_pin_fingerprint(st->doc.master_pubkey, fp);
+    zcl_hex_encode(st->pd.doc.master_pubkey, 32, pub);
+    release_pin_fingerprint(st->pd.doc.master_pubkey, fp);
     snprintf(slot, sizeof(slot), "%s/%s", st->name, OSI_SLOT_FILE);
     json_push_kv_str(&reply->data, "slot", slot);
     json_push_kv_str(&reply->data, "sha256", sha_hex);
@@ -449,6 +450,8 @@ static void osi_reply(const struct osi *st, struct zcl_command_reply *reply,
     json_push_kv_str(&reply->data, "signer_pubkey", pub);
     json_push_kv_str(&reply->data, "release_name", st->rel.name);
     json_push_kv_str(&reply->data, "release_version", st->rel.version);
+    json_push_kv_int(&reply->data, "doc_version", st->pd.version);
+    json_push_kv_bool(&reply->data, "pq_verified", st->pd.pq_verified);
     json_push_kv_bool(&reply->data, "installed", installed);
     json_push_kv_bool(&reply->data, "idempotent", idempotent);
     json_push_kv_bool(&reply->data, "dry_run", st->dry_run);

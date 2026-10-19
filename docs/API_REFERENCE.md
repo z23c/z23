@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 1013 |
+| Registry entries (branches + leaves) | 1014 |
 | Top-level roots | 17 |
 | Branches | 217 |
-| Leaves (dispatchable command paths) | 796 |
-| … `ready` (live handler in this build) | 693 |
+| Leaves (dispatchable command paths) | 797 |
+| … `ready` (live handler in this build) | 694 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 311 |
+| Leaves with `effect=mutate` | 312 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 157 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
-| `engine/composition/commands/zcode.def` | 257 | 60 | 197 |
+| `engine/composition/commands/zcode.def` | 258 | 60 | 198 |
 | `engine/composition/commands/zcode_science.def` | 25 | 7 | 18 |
 | `engine/composition/commands/metaverse.def` | 30 | 7 | 23 |
 | `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1103,7 +1103,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `ops slot install` | ready | mutate / app-write / operator · foreground/moderate | **`release`**, **`from`**, **`name`**, **`package_root`**, `member`, `pin`, `pin_file`, `datadir`, `dry_run` | `zcl.ops_slot_install.v1` | `z23 ops slot install --release=<doc.zid> --from=<checked-out z23> --name=<slot> --package_root=<64hex> --pin_file=<owner-pins>` | Install a signed, pinned release binary as a z23 slot |
+| `ops slot install` | ready | mutate / app-write / operator · foreground/moderate | **`release`**, **`from`**, **`name`**, **`package_root`**, `member`, `pin`, `pin_file`, `require_pq`, `datadir`, `dry_run` | `zcl.ops_slot_install.v1` | `z23 ops slot install --release=<doc.zid> --from=<checked-out z23> --name=<slot> --package_root=<64hex> --pin_file=<owner-pins>` | Install a signed, pinned release binary as a z23 slot |
 | `ops slot activate` | ready | mutate / app-write / operator · foreground/moderate | **`service_class`**, **`slot`**, **`instances`**, **`health`**, `exec_args`, `dry_run` | `zcl.ops_slot_activate.v1` | `z23 ops slot activate --service_class=tunnel-receiver --slot=<name> --instances='["r1","r3"]' --health='{"kind":"listen","port":28022}'` | Move service instances onto an installed slot, one at a time, with rollback |
 | `ops slot status` | ready | read / read / operator · foreground/low | **`service_class`**, **`instances`** | `zcl.ops_slot_status.v1` | `z23 ops slot status --service_class=tunnel-receiver --instances='["r1"]'` | Report the slot each instance runs, its last-good and installed slots |
 
@@ -1691,6 +1691,7 @@ represented by its children's sections.
 | `zcode release sign` | ready | mutate / app-write / operator · fast/low | `name`, `version`, `root`, `seed_file`, `pq_seed_file`, `seq`, `expiry`, `datadir` | `zcl.zcode_release_sign.v1` | `z23 zcode release sign --input='{"name":"demo","version":"0.1","root":"<64hex>","seed_file":"/path/seed.hex"}'` | Sign a release record with a master seed |
 | `zcode release verify` | ready | read / read / public · fast/low | `doc`, `file`, `proof`, `root`, `anchored`, `datadir`, `pin`, `pin_file`, `package_root` | `zcl.zcode_release_verify.v1` | `z23 zcode release verify --input='{"doc":"<hex>"}'` | Verify a signed release record (optionally its batch inclusion) |
 | `zcode release anchor` | ready | mutate / wallet / operator · foreground/moderate | `tip`, `domain`, `datadir` | `zcl.zcode_release_anchor.v1` | `z23 zcode release anchor --input='{}'` | Anchor the release batch's domain root on-chain |
+| `zcode release keygen_pq` | ready | mutate / app-write / operator · fast/low | **`pq_seed_file`**, `master_pubkey` | `zcl.zcode_release_keygen_pq.v1` | `z23 zcode release keygen_pq --input='{"pq_seed_file":"/absolute/path/pq.hex","master_pubkey":"<64hex>"}'` | Mint a PQ release-signing seed file and print its SLH-DSA public key |
 | `zcode release prove` | ready | read / read / operator · fast/low | **`name`**, **`version`**, `domain`, `datadir` | `zcl.zcode_release_prove.v1` | `z23 zcode release prove --input='{"name":"demo","version":"0.1"}'` | Emit the domain-batch inclusion proof for one release |
 
 #### `zcode.domain` — Anchor domains

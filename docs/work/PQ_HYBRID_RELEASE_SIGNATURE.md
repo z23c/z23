@@ -1,6 +1,6 @@
 # ZRS1 hybrid release signature
 
-Status: ACCEPTED (phase 1 and signer phase 2 implemented; pin pairs and k-of-n pending)
+Status: ACCEPTED (phases 1 and 2 and the phase 3 switch implemented for `ops slot install`; k-of-n pending)
 
 This document specifies a hybrid container ("ZRS1") in which a release doc
 carries an Ed25519 signature and an SLH-DSA-SHAKE-128s signature over the same
@@ -12,13 +12,16 @@ verify path (`contexts/wallet/modules/zid/src/zid_hybrid.c`) and the
 module at platform/modules/slhdsa (header
 platform/modules/slhdsa/include/slhdsa/slhdsa.h).
 
-Implemented: migration phase 1 (the verifier accepts v1 and v2) and the signer
+Implemented: migration phase 1 (the verifier accepts v1 and v2), the signer
 half of phase 2 (`zcode.release.sign` emits v2 when given a PQ seed file; v1
-otherwise). Not implemented: the pair-pin file format and `release_pin` gate
-(section 6.1), the k-of-n owner gate (6.2), and any default switch to v2. A v2
-doc reaching `release_pin` today is refused cleanly: `release_pin_read_doc`
-returns false, and `zcode.release.verify` refuses `pin`/`pin_file` on a v2 doc
-with `PQ_PIN_UNSUPPORTED`.
+otherwise), the pair-pin file format and gate in `release_pin` (section 6.1),
+`ops slot install` accepting a v2 doc only under a pair pin, the `require_pq`
+phase 3 switch, v2 docs in the `<datadir>/zcode/releases/` batch (saved as
+`<name>-<version>.v2.zid`) and the `zcode.release.keygen_pq` leaf. Not
+implemented: the k-of-n owner gate (6.2) and any default switch to v2.
+`zcode.release.verify` still refuses `pin`/`pin_file` on a v2 doc with
+`PQ_PIN_UNSUPPORTED` (pair pins there are a later change); `ops slot install`
+is the PQ-secure native install path.
 
 <!-- claim: symbol-present zid_hybrid_release_sign contexts/wallet/modules/zid -->
 <!-- claim: file-present contexts/wallet/modules/zid/include/zid/zid_hybrid.h -->
@@ -179,9 +182,11 @@ leaf emits v2; without it the output is v1 exactly as before. The seed file
 holds 96 hex chars (48 bytes, SK.seed | SK.prf | PK.seed), is opened with the
 same reader as the Ed25519 seed (refused unless mode 0600 or 0400, never
 printed), signing is deterministic (RESOLVED, item 5), and every secret buffer
-is wiped on every path, each right after its last use. A v2 doc is not written
-to the v1 `<datadir>/zcode/releases/` batch directory (batch anchor/prove
-decode v1 docs only); the reply says so in `save_error`. The reply adds
+is wiped on every path, each right after its last use. A v2 doc is saved as
+`<datadir>/zcode/releases/<name>-<version>.v2.zid`, next to (never over) a v1
+doc of the same release; the batch loader reads both versions and digests the
+wire bytes, so `release.anchor` and `release.prove` fold a v2 doc like a v1
+one. The reply adds
 `doc_version`, `pq` and, for v2, `pq_pubkey` and `pq_param`.
 
 `zcode.release.verify` accepts v1 and v2 and reports `doc_version` and
@@ -204,7 +209,7 @@ be verified before it is allowed to supersede anything.
 
 ## 6. Pins and the k-of-n gate plan
 
-### 6.1 Pin model (PROPOSED, not implemented)
+### 6.1 Pin model (IMPLEMENTED in tools/command/release_pin.c)
 
 A pin identifies a signer as a PAIR of keys: the Ed25519 master_pubkey and
 the SLH-DSA pk (with its param). A release is accepted for a pin only if the
@@ -212,14 +217,28 @@ doc's master_pubkey and the container pk both equal the pinned pair and both
 signatures verify. Pinning only the Ed25519 key would let an attacker who
 breaks Ed25519 attach their own SLH-DSA key, defeating the AND property.
 
-Pin file extension: the pin file gains a new versioned entry type for pairs
-(a new version tag, not a reinterpretation of an existing one) carrying
-ed25519 pk hex, param, SLH-DSA pk hex. Old pin lines keep their meaning;
-a pin that is Ed25519-only can accept v1 docs only (and a v2 doc is refused
-for it, since the pair cannot be matched). The release pin gate
-(`release_pin_gate`, signature taking one 32-byte signer and a manifest root,
-with a pin-set maximum of 256) lives in tools/command/release_pin.c and is
-unchanged by this packet; pair semantics there are the next packet.
+Pin file: a new versioned line type for pairs,
+`zrs1 <ed25519_hex64> <param:0> <slhdsa_pk_hex64>` (SLH-DSA-SHAKE-128s pk is
+32 bytes). A bare 64-hex line keeps its meaning (an Ed25519-only pin), `#`
+comments and blank lines are still ignored, and keys plus pairs together
+hold at most 256 entries. A malformed pair line is `PIN_FILE_INVALID` with
+its line number. The inline `pin` input accepts either form.
+
+Acceptance in `ops slot install` (`release_pin_doc_gate`):
+- v2 doc: needs a pair pin matching BOTH master_pubkey and container pk, and
+  both signatures verify (`zid_hybrid_release_verify` with the pinned pk). A
+  differing container key is `PQ_KEY_MISMATCH`. A master key pinned only
+  Ed25519-only is `RELEASE_PQ_UNPINNED` (the AND property is kept); a master
+  key in no pin at all stays `RELEASE_UNPINNED`.
+- v1 doc: accepted by an Ed25519-only pin exactly as before, and by the
+  Ed25519 half of a pair pin (phase 2).
+- Phase 3: `require_pq` (input bool) or a `require-pq` pin-file line refuses
+  every v1 doc with `RELEASE_PQ_REQUIRED`.
+- The reply reports `doc_version` and `pq_verified`.
+
+`zcode.release.keygen_pq` mints the SLH-DSA seed file (48 CSPRNG bytes as 96
+hex, 0600, exclusive create) and prints only the public key and a ready pin
+line. Every earlier refusal code is unchanged.
 
 ### 6.2 k-of-n owner gate (later packet)
 
@@ -241,10 +260,10 @@ Shape only:
 1. DONE: the verifier accepts both v1 (Ed25519 only, unchanged behavior) and
    v2 ZRS1. Ship the verifier everywhere first, because old verifiers refuse
    v2.
-2. PARTLY DONE: the signer emits v2 when given a PQ seed file and v1
-   otherwise. Not done: emitting v2 by default, and the owner generating the
-   SLH-DSA key and publishing the pair pin (needs the pair-pin format).
-3. NOT STARTED: pins require ZRS1 for new releases. A pin may still mark an
+2. DONE for native install: the signer emits v2 when given a PQ seed file and v1
+   otherwise, `zcode.release.keygen_pq` generates the SLH-DSA key and prints
+   the pair pin line. Not done: emitting v2 by default.
+3. SWITCH IMPLEMENTED: `require_pq` / `require-pq` make a pin set require ZRS1. A pin may still mark an
    old release range as v1-acceptable. The owner decides when this starts.
 Existing v1 docs keep verifying; no re-sign is forced. Rollback before phase 3
 is leaving out the PQ seed file.

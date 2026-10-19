@@ -19,6 +19,11 @@
  *   g. dry_run performs every check and writes nothing
  *   i. a tampered or unsigned release doc is refused; j. a symlinked slot
  *      path is SLOT_PATH_UNSAFE and nothing is written through it
+ *   k. ZRS1 v2 hybrid releases and pair pins (docs/work/PQ_HYBRID_RELEASE_
+ *      SIGNATURE.md 6.1): a pair pin plus a v2 doc installs; a different pinned
+ *      SLH-DSA key is PQ_KEY_MISMATCH; an Ed25519-only pin is
+ *      RELEASE_PQ_UNPINNED; a v1 doc passes a pair pin until require_pq
+ *      (RELEASE_PQ_REQUIRED); malformed pair lines name their line number
  *   h. `zcode release verify` without pin is unchanged; with pin/pin_file/
  *      package_root it gains the same typed refusals
  *
@@ -39,6 +44,7 @@
 #include "vcs/package_manifest.h"
 #include "vcs/package_store.h"
 #include "zid/zid.h"
+#include "zid/zid_hybrid.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -280,7 +286,7 @@ static void osi_pkg_free(struct osi_pkg *p)
 
 struct osi_req {
     const char *release, *from, *name, *root, *pin, *pin_file;
-    bool dry_run;
+    bool dry_run, require_pq;
 };
 
 static void osi_run(const struct osi_fx *fx, const struct osi_req *r,
@@ -296,6 +302,8 @@ static void osi_run(const struct osi_fx *fx, const struct osi_req *r,
         json_push_kv_str(&c->input, "pin", r->pin);
     if (r->pin_file)
         json_push_kv_str(&c->input, "pin_file", r->pin_file);
+    if (r->require_pq)
+        json_push_kv_bool(&c->input, "require_pq", true);
     if (r->dry_run)
         json_push_kv_bool(&c->input, "dry_run", true);
     zcl_native_handle_ops_slot_install(&c->request, &c->reply);
@@ -589,6 +597,242 @@ static int test_osi_doc_and_path(const struct osi_fx *fx,
     return failures;
 }
 
+/* ── k. ZRS1 v2 hybrid releases and pair pins ───────────────────────── */
+
+struct osi_hy {
+    char doc_v2[PATH_MAX];       /* a v2 doc signed by the owner's pair */
+    char pins_pair[PATH_MAX];    /* zrs1 pair of that owner + the signer pk */
+    char pins_wrong_pq[PATH_MAX];/* same owner, a different SLH-DSA key */
+    char pins_pair_rq[PATH_MAX]; /* the pair plus a require-pq directive */
+    char pair_line[200];
+    char wrong_line[200];
+};
+
+static void osi_pq_seed(uint8_t fill, uint8_t seed[ZRS1_PQ_SEED_SIZE])
+{
+    for (size_t i = 0; i < ZRS1_PQ_SEED_SIZE; i++)
+        seed[i] = (uint8_t)(fill + i);
+}
+
+static bool osi_hy_init(const struct osi_fx *fx, const struct osi_pkg *p,
+                        struct osi_hy *hy)
+{
+    static struct zid_doc_v2 doc;
+    static uint8_t wire[ZID_DOC_V2_MAX];
+    static char hex[ZID_DOC_V2_MAX * 2 + 1];
+    uint8_t ed_seed[32], pq_seed[ZRS1_PQ_SEED_SIZE], pk[ZRS1_PQ_PK_SIZE];
+    uint8_t other_pk[ZRS1_PQ_PK_SIZE], root[32];
+    char pq_hex[ZRS1_PQ_PK_SIZE * 2 + 1], other_hex[ZRS1_PQ_PK_SIZE * 2 + 1];
+    char text[512];
+    struct zid_release rel;
+    memset(hy, 0, sizeof(*hy));
+    memset(ed_seed, 0x5A, sizeof(ed_seed));
+    osi_pq_seed(0xA0, pq_seed);
+    memset(&rel, 0, sizeof(rel));
+    snprintf(rel.name, sizeof(rel.name), "z23");
+    snprintf(rel.version, sizeof(rel.version), "1.0.a-pq");
+    if (ParseHex(p->root_hex, root, 32) != 32)
+        return false;
+    memcpy(rel.manifest_root, root, 32);
+    bool ok = zid_hybrid_pq_pubkey(pk, pq_seed) &&
+              zid_hybrid_release_sign(&doc, &rel, 1,
+                                      (uint64_t)platform_time_wall_unix() +
+                                          86400u, ed_seed, pq_seed);
+    size_t n = ok ? zid_hybrid_encode(wire, sizeof(wire), &doc) : 0;
+    osi_pq_seed(0xC0, pq_seed);
+    ok = n > 0 && zid_hybrid_pq_pubkey(other_pk, pq_seed);
+    if (!ok)
+        return false;
+    HexStr(wire, n, false, hex, sizeof(hex));
+    HexStr(pk, sizeof(pk), false, pq_hex, sizeof(pq_hex));
+    HexStr(other_pk, sizeof(other_pk), false, other_hex, sizeof(other_hex));
+    snprintf(hy->doc_v2, sizeof(hy->doc_v2), "%s/release_a_v2.zid", fx->dir);
+    snprintf(hy->pins_pair, sizeof(hy->pins_pair), "%s/pins_pair", fx->dir);
+    snprintf(hy->pins_wrong_pq, sizeof(hy->pins_wrong_pq), "%s/pins_wrongpq",
+             fx->dir);
+    snprintf(hy->pins_pair_rq, sizeof(hy->pins_pair_rq), "%s/pins_pair_rq",
+             fx->dir);
+    snprintf(hy->pair_line, sizeof(hy->pair_line), "zrs1 %s 0 %s",
+             fx->pubkey_hex, pq_hex);
+    snprintf(hy->wrong_line, sizeof(hy->wrong_line), "zrs1 %s 0 %s",
+             fx->pubkey_hex, other_hex);
+    snprintf(text, sizeof(text), "# pair\n%s\n", hy->pair_line);
+    ok = osi_write_file(hy->doc_v2, hex, strlen(hex), 0644) &&
+         osi_write_file(hy->pins_pair, text, strlen(text), 0600);
+    snprintf(text, sizeof(text), "%s\n", hy->wrong_line);
+    ok = ok && osi_write_file(hy->pins_wrong_pq, text, strlen(text), 0600);
+    snprintf(text, sizeof(text), "%s\nrequire-pq\n", hy->pair_line);
+    return ok && osi_write_file(hy->pins_pair_rq, text, strlen(text), 0600);
+}
+
+static struct osi_req osi_hy_req(const struct osi_fx *fx,
+                                 const struct osi_pkg *p, const char *doc,
+                                 const char *pins, const char *name)
+{
+    struct osi_req r = osi_good(fx, p, name);
+    r.release = doc;
+    r.pin_file = pins;
+    return r;
+}
+
+static int test_osi_hy_install(const struct osi_fx *fx, const struct osi_pkg *p,
+                               const struct osi_hy *hy)
+{
+    struct osi_cmd c;
+    int failures = 0;
+    struct osi_req r = osi_hy_req(fx, p, hy->doc_v2, hy->pins_pair, "pq-1.0");
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_ok(&c) && oc_bool(&c, "installed") == 1 &&
+                              json_get_int(json_get(&c.reply.data,
+                                                    "doc_version")) == 2 &&
+                              oc_bool(&c, "pq_verified") == 1,
+                          "a pair pin plus a v2 doc installs "
+                          "(doc_version 2, pq_verified)");
+    oc_free(&c);
+    r.pin = hy->pair_line;
+    r.pin_file = NULL;
+    r.dry_run = true;
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_ok(&c) && oc_bool(&c, "dry_run") == 1,
+                          "an inline pair pin works too (dry run)");
+    oc_free(&c);
+    return failures;
+}
+
+static int test_osi_hy_refusals(const struct osi_fx *fx,
+                                const struct osi_pkg *p,
+                                const struct osi_hy *hy)
+{
+    struct osi_cmd c;
+    int failures = 0;
+    int before = osi_count(fx->slots);
+    struct osi_req r = osi_hy_req(fx, p, hy->doc_v2, hy->pins_wrong_pq,
+                                  "pq-wrongpk");
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_code(&c, "PQ_KEY_MISMATCH") &&
+                              osi_count(fx->slots) == before,
+                          "a pinned SLH-DSA key that differs from the doc's "
+                          "is PQ_KEY_MISMATCH, nothing written");
+    oc_free(&c);
+
+    r = osi_hy_req(fx, p, hy->doc_v2, fx->pins_ok, "pq-edonly");
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_code(&c, "RELEASE_PQ_UNPINNED") &&
+                              osi_count(fx->slots) == before,
+                          "a v2 doc under an Ed25519-only pin is "
+                          "RELEASE_PQ_UNPINNED, nothing written");
+    oc_free(&c);
+
+    r = osi_hy_req(fx, p, hy->doc_v2, fx->pins_other, "pq-otherkey");
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_code(&c, "RELEASE_UNPINNED"),
+                          "a v2 doc whose master key is not pinned at all "
+                          "stays RELEASE_UNPINNED");
+    oc_free(&c);
+    return failures;
+}
+
+static int test_osi_hy_v1(const struct osi_fx *fx, const struct osi_pkg *p,
+                          const struct osi_hy *hy)
+{
+    struct osi_cmd c;
+    int failures = 0;
+    struct osi_req r = osi_hy_req(fx, p, p->doc, hy->pins_pair, "v1-pair");
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_ok(&c) &&
+                              json_get_int(json_get(&c.reply.data,
+                                                    "doc_version")) == 1 &&
+                              oc_bool(&c, "pq_verified") == 0,
+                          "a v1 doc under a pair pin is accepted (phase 2), "
+                          "pq_verified false");
+    oc_free(&c);
+    r.name = "v1-pair-rq";
+    r.require_pq = true;
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_code(&c, "RELEASE_PQ_REQUIRED"),
+                          "require_pq refuses a v1 doc (RELEASE_PQ_REQUIRED)");
+    oc_free(&c);
+    r.require_pq = false;
+    r.pin_file = hy->pins_pair_rq;
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_code(&c, "RELEASE_PQ_REQUIRED"),
+                          "a require-pq pin-file line refuses a v1 doc too");
+    oc_free(&c);
+    r.release = hy->doc_v2;
+    r.name = "v2-rq";
+    r.dry_run = true;
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_ok(&c) && oc_bool(&c, "pq_verified") == 1,
+                          "require-pq still accepts a verified v2 doc");
+    oc_free(&c);
+    return failures;
+}
+
+/* Run the install against a pin file holding `body`; true iff it is refused
+ * with PIN_FILE_INVALID naming `line`. */
+static bool osi_bad_pin(const struct osi_fx *fx, const struct osi_pkg *p,
+                        const struct osi_hy *hy, const char *body,
+                        const char *line)
+{
+    char path[PATH_MAX];
+    struct osi_cmd c;
+    snprintf(path, sizeof(path), "%s/pins_bad", fx->dir);
+    bool wrote = osi_write_file(path, body, strlen(body), 0600);
+    struct osi_req r = osi_hy_req(fx, p, hy->doc_v2, path, "pq-badpin");
+    osi_run(fx, &r, &c);
+    bool ok = wrote && oc_code(&c, "PIN_FILE_INVALID") &&
+              strstr(c.reply.error.evidence, line) != NULL;
+    oc_free(&c);
+    return ok;
+}
+
+static int test_osi_hy_pin_lines(const struct osi_fx *fx,
+                                 const struct osi_pkg *p,
+                                 const struct osi_hy *hy)
+{
+    char body[900], pk[65];
+    int failures = 0;
+    memcpy(pk, hy->pair_line + 5 + 64 + 3, 64);
+    pk[64] = '\0';
+    snprintf(body, sizeof(body), "# c\n%s\nzrs1 %s 0 %.62s\n", fx->pubkey_hex,
+             fx->pubkey_hex, pk);
+    failures += osi_check(osi_bad_pin(fx, p, hy, body, "line 3"),
+                          "a short SLH-DSA key in a pair line names line 3");
+    snprintf(body, sizeof(body), "%s\n\nzrs1 %s 1 %s\n", fx->pubkey_hex,
+             fx->pubkey_hex, pk);
+    failures += osi_check(osi_bad_pin(fx, p, hy, body, "line 3"),
+                          "a pair line with param 1 names line 3");
+    snprintf(body, sizeof(body), "zrs1 %s 0\n", fx->pubkey_hex);
+    failures += osi_check(osi_bad_pin(fx, p, hy, body, "line 1"),
+                          "a pair line missing its pk names line 1");
+    snprintf(body, sizeof(body), "# a\n# b\n# c\nzrs1 %s 0 %s extra\n",
+             fx->pubkey_hex, pk);
+    failures += osi_check(osi_bad_pin(fx, p, hy, body, "line 4"),
+                          "a pair line with a trailing token names line 4");
+    snprintf(body, sizeof(body), "zrs1 %.63sg 0 %s\n", fx->pubkey_hex, pk);
+    failures += osi_check(osi_bad_pin(fx, p, hy, body, "line 1"),
+                          "a non-hex Ed25519 half in a pair line names "
+                          "line 1");
+    snprintf(body, sizeof(body), "%s\nzrs2 %s 0 %s\n", fx->pubkey_hex,
+             fx->pubkey_hex, pk);
+    failures += osi_check(osi_bad_pin(fx, p, hy, body, "line 2"),
+                          "an unknown line tag names line 2");
+    return failures;
+}
+
+static int test_osi_hybrid(const struct osi_fx *fx, const struct osi_pkg *p)
+{
+    struct osi_hy hy;
+    int failures = 0;
+    if (!osi_hy_init(fx, p, &hy))
+        return osi_check(false, "hybrid fixture");
+    failures += test_osi_hy_install(fx, p, &hy);
+    failures += test_osi_hy_refusals(fx, p, &hy);
+    failures += test_osi_hy_v1(fx, p, &hy);
+    failures += test_osi_hy_pin_lines(fx, p, &hy);
+    return failures;
+}
+
 int test_ops_slot_install(void)
 {
     struct osi_fx fx;
@@ -609,6 +853,7 @@ int test_ops_slot_install(void)
     failures += test_osi_names_dry(&fx, &a);
     failures += test_osi_verify(&fx, &a, &b);
     failures += test_osi_doc_and_path(&fx, &a);
+    failures += test_osi_hybrid(&fx, &a);
     osi_pkg_free(&a);
     osi_pkg_free(&b);
     unsetenv("ZCL_BINARY_SLOTS_DIR");

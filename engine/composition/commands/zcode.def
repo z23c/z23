@@ -3897,7 +3897,7 @@ ZCL_COMMAND_READY_COMMAND(
     "doc (doc_version 2, pq true): the same prefix is signed by Ed25519 and "
     "by SLH-DSA (deterministic, context z23.zrs1.release.v1), the SLH-DSA "
     "key digest is inside the signed bytes, and the reply adds pq_pubkey; "
-    "a v2 doc is not saved to the v1 releases directory. Without it the "
+    "a v2 doc is saved as <name>-<version>.v2.zid. Without it the "
     "output is the v1 doc exactly as before. Anyone can check the "
     "doc with `zcode release verify --doc=<hex>` — no chain write, no "
     "fee.", 0,
@@ -3992,6 +3992,32 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_release_anchor)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.release.keygen_pq", "zcode.release", "",
+    "Mint a PQ release-signing seed file and print its SLH-DSA public key",
+    "Draws 48 host CSPRNG bytes and writes them as 96 lowercase hex plus a "
+    "newline to a NEW absolute pq_seed_file (O_CREAT|O_EXCL, mode 0600), "
+    "then fsyncs. An existing path or symlink refuses with SEED_FILE_EXISTS "
+    "and is never overwritten. The reply carries pq_seed_file, the derived "
+    "SLH-DSA-SHAKE-128s public key (pq_pubkey, 64 hex) and a ready pin_line "
+    "`zrs1 <ed25519 master pubkey> 0 <pq_pubkey>` for an owner-pins file "
+    "(pass master_pubkey=<64hex> to have it filled in). The seed is never "
+    "printed or logged. Feed pq_seed_file to `zcode release sign` for a v2 "
+    "hybrid doc and put pin_line in the receivers' pin file so `ops slot "
+    "install` accepts only a release signed by both halves.", 0,
+    "zcode,release,keygen,pq,slh-dsa,seed,zrs1,pin,generate",
+    "zcl.zcode_release_keygen_pq.input.v1", "zcl.zcode_release_keygen_pq.v1",
+    "pq_seed_file,master_pubkey", "pq_seed_file",
+    "z23 zcode release keygen_pq --input='{\"pq_seed_file\":\"/absolute/path/pq.hex\",\"master_pubkey\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_release_keygen_pq)
 
 ZCL_COMMAND_READY_READ(
     "zcode.release.prove", "zcode.release", "",

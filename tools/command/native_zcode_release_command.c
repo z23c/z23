@@ -51,6 +51,8 @@
 #include "platform/directory_transaction.h"
 #include "platform/positioned_file.h"
 #endif
+#include "platform/private_file.h"
+#include "platform/rng.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "zanc/zanc.h"
@@ -255,7 +257,8 @@ static bool zr_read_seed(const char *path, uint8_t seed_out[32],
 /* ── doc file I/O ──────────────────────────────────────────────────── */
 
 static bool zr_write_doc_file(const char *datadir, const char *name,
-                              const char *version, const char *doc_hex,
+                              const char *version, const char *suffix,
+                              const char *doc_hex,
                               char *path_out, size_t path_size,
                               char *err, size_t err_size)
 {
@@ -267,7 +270,8 @@ static bool zr_write_doc_file(const char *datadir, const char *name,
     platform_directory_transaction_init(&releases);
     platform_directory_child_init(&staged);
     char leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
-    int leaf_n = snprintf(leaf, sizeof(leaf), "%s-%s.zid", name, version);
+    int leaf_n = snprintf(leaf, sizeof(leaf), "%s-%s%s.zid", name, version,
+                          suffix);
     int path_n = snprintf(path_out, path_size, "%s/zcode/releases/%s",
                           datadir, leaf);
     bool ok = leaf_n > 0 && (size_t)leaf_n < sizeof(leaf) &&
@@ -319,7 +323,8 @@ static bool zr_write_doc_file(const char *datadir, const char *name,
         snprintf(err, err_size, "mkdir %s: %s", dir, strerror(errno));
         return false;
     }
-    n = snprintf(path_out, path_size, "%s/%s-%s.zid", dir, name, version);
+    n = snprintf(path_out, path_size, "%s/%s-%s%s.zid", dir, name, version,
+                  suffix);
     if (n <= 0 || (size_t)n >= path_size)
         goto too_long;
     int fd = open(path_out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
@@ -358,6 +363,53 @@ static int zr_entry_cmp(const void *a, const void *b)
 {
     return memcmp(((const struct zr_batch_entry *)a)->digest,
                   ((const struct zr_batch_entry *)b)->digest, 32);
+}
+
+/* Largest saved doc, as hex chars (a v2 hybrid doc is the longest). */
+#define ZR_BATCH_HEX_MAX (ZID_DOC_V2_MAX * 2u + 2u)
+
+/* Decode one saved doc (hex text, trailing whitespace already trimmed to
+ * length `rn`) of EITHER version into a batch entry. The digest is over the
+ * canonical wire bytes, so a v2 hybrid doc folds exactly like a v1 doc.
+ * Fills `err` naming `label` and returns false on any malformed doc. */
+static bool zr_batch_entry_from_hex(const char *hex, size_t rn,
+                                    const char *label,
+                                    struct zr_batch_entry *e, char *err,
+                                    size_t err_size)
+{
+    if ((rn & 1u) != 0 || !IsHex(hex)) {
+        snprintf(err, err_size, "%s: not even-length hex", label);
+        return false;
+    }
+    uint8_t wire[ZID_DOC_V2_MAX];
+    size_t wire_len = (size_t)ParseHex(hex, wire, sizeof(wire));
+    struct zid_release rel;
+    bool decoded;
+    bool body_ok = false;
+    if (wire_len > 0 && wire[0] == ZID_DOC_VERSION_V2) {
+        struct zid_doc_v2 v2;
+        decoded = zid_hybrid_decode(&v2, wire, wire_len) == ZID_HYBRID_OK;
+        body_ok = decoded && zid_release_decode_body(&rel, v2.body,
+                                                     v2.body_len);
+    } else {
+        struct zid_doc doc;
+        decoded = wire_len > 0 && zid_doc_decode(&doc, wire, wire_len);
+        body_ok = decoded && zid_release_decode_body(&rel, doc.body,
+                                                     doc.body_len);
+    }
+    if (!decoded) {
+        snprintf(err, err_size, "%s: not a well-formed zid doc", label);
+        return false;
+    }
+    if (!body_ok) {
+        snprintf(err, err_size, "%s: doc body is not a ZIDR release record",
+                 label);
+        return false;
+    }
+    zid_record_digest(e->digest, wire, wire_len);
+    snprintf(e->name, sizeof(e->name), "%s", rel.name);
+    snprintf(e->version, sizeof(e->version), "%s", rel.version);
+    return true;
 }
 
 /* Scan <datadir>/zcode/releases for *.zid docs, decode each, and compute
@@ -432,7 +484,7 @@ static size_t zr_batch_load(const char *datadir,
         struct platform_directory_child file;
         struct platform_directory_child_info before, after;
         platform_directory_child_init(&file);
-        char hex[ZID_DOC_MAX * 2 + 2];
+        char hex[ZR_BATCH_HEX_MAX];
         bool read_ok = platform_directory_child_open(&releases, fn, &file) &&
             platform_directory_child_info(&file, &before) &&
             before.size > 0 && before.size < sizeof(hex) &&
@@ -456,25 +508,12 @@ static size_t zr_batch_load(const char *datadir,
                           hex[rn - 1] == ' '))
             rn--;
         hex[rn] = '\0';
-        if ((rn & 1u) != 0 || !IsHex(hex)) {
-            snprintf(err, err_size, "%s: not even-length hex", fn);
+        if (!zr_batch_entry_from_hex(hex, rn, fn, &entries[count], err,
+                                     err_size)) {
             count = (size_t)-1;
             break;
         }
-        uint8_t wire[ZID_DOC_MAX];
-        size_t wire_len = (size_t)ParseHex(hex, wire, sizeof(wire));
-        struct zid_doc doc;
-        struct zid_release rel;
-        if (wire_len == 0 || !zid_doc_decode(&doc, wire, wire_len) ||
-            !zid_release_decode_body(&rel, doc.body, doc.body_len)) {
-            snprintf(err, err_size, "%s: not a well-formed release doc", fn);
-            count = (size_t)-1;
-            break;
-        }
-        struct zr_batch_entry *e = &entries[count++];
-        zid_record_digest(e->digest, wire, wire_len);
-        snprintf(e->name, sizeof(e->name), "%s", rel.name);
-        snprintf(e->version, sizeof(e->version), "%s", rel.version);
+        count++;
     }
     platform_directory_names_free(&names);
     platform_directory_transaction_close(&releases);
@@ -517,7 +556,7 @@ static size_t zr_batch_load(const char *datadir,
             closedir(d);
             return (size_t)-1;
         }
-        char hex[ZID_DOC_MAX * 2 + 2];
+        char hex[ZR_BATCH_HEX_MAX];
         ssize_t rn = read(fd, hex, sizeof(hex) - 1);
         close(fd);
         if (rn <= 0) {
@@ -529,30 +568,11 @@ static size_t zr_batch_load(const char *datadir,
                           hex[rn - 1] == ' '))
             rn--;
         hex[rn] = '\0';
-        if ((rn & 1) != 0 || !IsHex(hex)) {
-            snprintf(err, err_size, "%s: not even-length hex", path);
+        if (!zr_batch_entry_from_hex(hex, (size_t)rn, path, &entries[count],
+                                     err, err_size)) {
             closedir(d);
             return (size_t)-1;
         }
-        uint8_t wire[ZID_DOC_MAX];
-        size_t wire_len = (size_t)ParseHex(hex, wire, sizeof(wire));
-        struct zid_doc doc;
-        if (wire_len == 0 || !zid_doc_decode(&doc, wire, wire_len)) {
-            snprintf(err, err_size, "%s: not a well-formed zid doc", path);
-            closedir(d);
-            return (size_t)-1;
-        }
-        struct zr_batch_entry *e = &entries[count];
-        struct zid_release rel;
-        if (!zid_release_decode_body(&rel, doc.body, doc.body_len)) {
-            snprintf(err, err_size, "%s: doc body is not a ZIDR release "
-                     "record", path);
-            closedir(d);
-            return (size_t)-1;
-        }
-        zid_record_digest(e->digest, wire, wire_len);
-        snprintf(e->name, sizeof(e->name), "%s", rel.name);
-        snprintf(e->version, sizeof(e->version), "%s", rel.version);
         count++;
     }
     closedir(d);
@@ -644,23 +664,18 @@ static void zr_push_pq_facts(struct zcl_command_reply *reply, bool pq,
     json_push_kv_str(&reply->data, "pq_param", "SLH-DSA-SHAKE-128s");
 }
 
-/* Persist a signed doc under <datadir>/zcode/releases/. A v2 hybrid doc is
- * not stored there: batch anchor/prove decode v1 docs only, so a v2 file
- * would poison the batch load. */
+/* Persist a signed doc under <datadir>/zcode/releases/. The batch loader
+ * reads v1 and v2 docs alike (digest over the wire bytes). A v2 hybrid doc
+ * is saved as <name>-<version>.v2.zid so it never overwrites a v1 doc of
+ * the same release, which may already be anchored. */
 static bool zr_persist_doc(const char *datadir, bool pq,
                            const struct zid_release *rel, const char *doc_hex,
                            char *saved_path, size_t saved_cap, char *err,
                            size_t err_cap)
 {
-    if (pq) {
-        snprintf(err, err_cap, "%s",
-                 "a v2 hybrid doc is not stored in the v1 releases batch "
-                 "directory (batch anchor/prove decode v1 docs only); keep "
-                 "doc_hex");
-        return false;
-    }
-    return zr_write_doc_file(datadir, rel->name, rel->version, doc_hex,
-                             saved_path, saved_cap, err, err_cap);
+    return zr_write_doc_file(datadir, rel->name, rel->version,
+                             pq ? ".v2" : "", doc_hex, saved_path, saved_cap,
+                             err, err_cap);
 }
 
 /* Outcome of signing one release: the wire bytes plus the facts the reply
@@ -878,6 +893,117 @@ void zcl_native_handle_zcode_release_sign(
     json_push_kv_str(&reply->data, "next",
                      "distribute doc_hex to verifiers; anyone can check it "
                      "with `z23 zcode release verify --doc=<hex>`");
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
+/* ── zcode.release.keygen_pq ───────────────────────────────────────── */
+
+enum zr_pqseed_write { ZR_PQSEED_WRITTEN, ZR_PQSEED_EXISTS, ZR_PQSEED_IO,
+                       ZR_PQSEED_PARTIAL };
+
+/* Exclusive private create (0600, no symlink follow), then 96 lowercase hex
+ * and a newline: exactly what zcode.release.sign's pq_seed_file reads. */
+static enum zr_pqseed_write zr_pqseed_write_new(const char *path,
+                                                const uint8_t seed[48])
+{
+    struct platform_private_file file;
+    char text[ZRS1_PQ_SEED_SIZE * 2u + 1u];
+    platform_private_file_init(&file);
+    if (!platform_private_file_create(path, &file))
+        return (errno == EEXIST || errno == ELOOP) ? ZR_PQSEED_EXISTS
+                                                   : ZR_PQSEED_IO;
+    HexStr(seed, ZRS1_PQ_SEED_SIZE, false, text, sizeof(text));
+    text[ZRS1_PQ_SEED_SIZE * 2u] = '\n';
+    bool ok = platform_private_file_write_at(&file, text, sizeof(text), 0) &&
+              platform_private_file_authority_flush(&file);
+    memory_cleanse(text, sizeof(text));
+    platform_private_file_close(&file);
+    return ok ? ZR_PQSEED_WRITTEN : ZR_PQSEED_PARTIAL;
+}
+
+static void zr_pqseed_refuse(struct zcl_command_reply *reply, int exit_code,
+                             const char *code, bool mutated, const char *msg,
+                             const char *ctx)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, exit_code, code,
+                           "execute", false, mutated, msg, ctx);
+}
+
+static void zr_pqseed_write_refuse(struct zcl_command_reply *reply,
+                                   const char *path,
+                                   enum zr_pqseed_write w)
+{
+    if (w == ZR_PQSEED_EXISTS)
+        zr_pqseed_refuse(reply, ZCL_COMMAND_EXIT_INVALID, "SEED_FILE_EXISTS",
+                         false, "pq_seed_file already exists (or is a "
+                         "symlink); it is never overwritten", path);
+    else if (w == ZR_PQSEED_PARTIAL)
+        zr_pqseed_refuse(reply, ZCL_COMMAND_EXIT_FAILED, "SEED_FILE_PARTIAL",
+                         true, "pq_seed_file was created but could not be "
+                         "written or made durable; delete it before retry",
+                         path);
+    else
+        zr_pqseed_refuse(reply, ZCL_COMMAND_EXIT_FAILED, "SEED_FILE_IO",
+                         false, "pq_seed_file could not be created; no seed "
+                         "was written", path);
+}
+
+/* The ready pin line for an optional 64-hex master key. */
+static void zr_pq_pin_line(char *out, size_t cap, const char *master_hex,
+                           const char *pq_hex)
+{
+    snprintf(out, cap, "%s %s 0 %s", RELEASE_PIN_PAIR_TAG,
+             master_hex ? master_hex : "<ed25519_master_pubkey_hex64>",
+             pq_hex);
+}
+
+void zcl_native_handle_zcode_release_keygen_pq(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *path = zr_input_str(request->input, "pq_seed_file");
+    const char *master = zr_input_str(request->input, "master_pubkey");
+    if (!path || path[0] != '/') {
+        zr_pqseed_refuse(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_SEED_FILE",
+                         false, "give --pq_seed_file=<absolute path of a file "
+                         "that does not exist yet>", "zcode.release.keygen_pq");
+        return;
+    }
+    if (master && master[0] && (strlen(master) != 64 || !IsHex(master))) {
+        zr_pqseed_refuse(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_MASTER_PUBKEY",
+                         false, "master_pubkey is the owner's Ed25519 public "
+                         "key: exactly 64 hex characters",
+                         "zcode.release.keygen_pq");
+        return;
+    }
+    uint8_t seed[ZRS1_PQ_SEED_SIZE], pk[ZRS1_PQ_PK_SIZE];
+    if (!rng_host_fill(seed, sizeof(seed)) ||
+        !zid_hybrid_pq_pubkey(pk, seed)) {
+        memory_cleanse(seed, sizeof(seed));
+        zr_pqseed_refuse(reply, ZCL_COMMAND_EXIT_FAILED,
+                         "SEED_ENTROPY_UNAVAILABLE", false,
+                         "the host CSPRNG or key derivation failed; no seed "
+                         "file was written", path);
+        return;
+    }
+    enum zr_pqseed_write w = zr_pqseed_write_new(path, seed);
+    memory_cleanse(seed, sizeof(seed));
+    if (w != ZR_PQSEED_WRITTEN) {
+        zr_pqseed_write_refuse(reply, path, w);
+        return;
+    }
+    char pq_hex[ZRS1_PQ_PK_SIZE * 2 + 1], pin[256];
+    HexStr(pk, ZRS1_PQ_PK_SIZE, false, pq_hex, sizeof(pq_hex));
+    zr_pq_pin_line(pin, sizeof(pin), master && master[0] ? master : NULL,
+                   pq_hex);
+    json_push_kv_str(&reply->data, "pq_seed_file", path);
+    json_push_kv_str(&reply->data, "pq_pubkey", pq_hex);
+    json_push_kv_str(&reply->data, "pq_param", "SLH-DSA-SHAKE-128s");
+    json_push_kv_str(&reply->data, "pin_line", pin);
+    reply->error.mutated = true;
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }

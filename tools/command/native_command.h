@@ -1409,6 +1409,9 @@ void zcl_native_zcode_publish_test_before_lease(
 void zcl_native_handle_zcode_release_sign(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_release_keygen_pq(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_release_verify(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
