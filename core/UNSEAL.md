@@ -240,3 +240,7 @@ later lane flips it HARD.
 - 2026-10-15T21:11:14Z — REASON: owner-authorized 2026-10-15: public /wiki site route row; lock node->transport read in zcl23 dial
   old ROOT: 70e00ae0e4a629f895c917fc3c4e9f3b351489d4f94446b449ebcb409b7ddea9
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-19T11:03:57Z — REASON: repin zclassic23/sha3 package root after a byte-identical Keccak/Wrap speedup (lanes state + unrolled rounds); proven by unchanged KATs, a 1000-case differential against the old implementation, and consensus parity
+  old ROOT: 3a3baaab8b5652ad665b1476c79d778f50583daaf6371004f7a5b604e9279ec8
+  by: owner unseal ritual (make core-unseal)

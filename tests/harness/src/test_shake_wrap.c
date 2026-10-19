@@ -207,11 +207,138 @@ static int wrap_empty_and_destroy(void)
     shake_wrap_destroy(&sender); shake_wrap_destroy(&receiver);
     return failures;
 }
+/* Reference: the byte-wise Wrap and the original loop Keccak-f, kept only here
+ * so the optimized library path is compared against an independent copy. */
+static uint64_t ref_rotl(uint64_t x, int n) { return (x << n) | (x >> (64 - n)); }
+static void ref_keccakf(uint64_t st[25])
+{
+    static const uint64_t rc[24] = {
+        0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
+        0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+        0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
+        0x000000008000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003,
+        0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
+        0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008};
+    static const int rot[24] = {1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8,
+        25, 43, 62, 18, 39, 61, 20, 44};
+    static const int pil[24] = {10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13,
+        12, 2, 20, 14, 22, 9, 6, 1};
+    for (int r = 0; r < 24; ++r) {
+        uint64_t bc[5], t;
+        for (int i = 0; i < 5; ++i) bc[i] = st[i] ^ st[i + 5] ^ st[i + 10] ^ st[i + 15] ^ st[i + 20];
+        for (int i = 0; i < 5; ++i) {
+            t = bc[(i + 4) % 5] ^ ref_rotl(bc[(i + 1) % 5], 1);
+            for (int j = 0; j < 25; j += 5) st[j + i] ^= t;
+        }
+        t = st[1];
+        for (int i = 0; i < 24; ++i) {
+            uint64_t next = st[pil[i]]; st[pil[i]] = ref_rotl(t, rot[i]); t = next;
+        }
+        for (int j = 0; j < 25; j += 5) {
+            for (int i = 0; i < 5; ++i) bc[i] = st[j + i];
+            for (int i = 0; i < 5; ++i) st[j + i] ^= ~bc[(i + 1) % 5] & bc[(i + 2) % 5];
+        }
+        st[0] ^= rc[r];
+    }
+}
+static void ref_permute(uint8_t bytes[200])
+{
+    uint64_t lanes[25] = {0};
+    for (size_t i = 0; i < 200; ++i) lanes[i / 8] |= (uint64_t)bytes[i] << (8 * (i % 8));
+    ref_keccakf(lanes);
+    for (size_t i = 0; i < 200; ++i) bytes[i] = (uint8_t)(lanes[i / 8] >> (8 * (i % 8)));
+}
+struct ref_wrap { uint8_t bytes[200]; uint32_t offset; };
+static void ref_duplex(struct ref_wrap *s, const uint8_t *in, size_t len, unsigned domain)
+{
+    memset(s->bytes, 0, 128);
+    if (len) memcpy(s->bytes, in, len);
+    if (len < 128) s->bytes[len] = 1;
+    unsigned leading = domain < 2 ? 1u : 4u;
+    s->bytes[128] ^= (uint8_t)(domain + leading * (len == 128 ? 2u : 1u));
+    s->bytes[135] ^= 0x9fu;
+    ref_permute(s->bytes);
+    s->offset = 0;
+}
+static void ref_extract(struct ref_wrap *s, const uint8_t *in, uint8_t *out, size_t len)
+{
+    for (size_t i = 0; i < len; ++i) out[i] = s->bytes[s->offset + i] ^ in[i];
+    s->offset += (uint32_t)len;
+}
+static void ref_seal(struct ref_wrap *s, const uint8_t *ad, size_t ad_len,
+    const uint8_t *pt, size_t len, uint8_t *out)
+{
+    while (ad_len > 128) { ref_duplex(s, ad, 128, 5); ad += 128; ad_len -= 128; }
+    if (!len) {
+        ref_duplex(s, ad, ad_len, 7);
+    } else {
+        size_t limit = 64;
+        if (ad_len) { ref_duplex(s, ad, ad_len, 5); limit = 128; }
+        size_t block = len < limit ? len : limit;
+        ref_extract(s, pt, out, block);
+        size_t pos = block;
+        while (pos < len) {
+            ref_duplex(s, out + pos - block, block, 4);
+            block = len - pos; if (block > 128) block = 128;
+            ref_extract(s, pt + pos, out + pos, block);
+            pos += block;
+        }
+        ref_duplex(s, out + pos - block, block, 6);
+    }
+    memcpy(out + len, s->bytes, 64);
+    s->offset = 64;
+}
+static uint64_t diff_next(uint64_t *x)
+{
+    uint64_t z = (*x += UINT64_C(0x9e3779b97f4a7c15));
+    z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return z ^ (z >> 31);
+}
+static void diff_fill(uint64_t *rng, uint8_t *p, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) p[i] = (uint8_t)(diff_next(rng) >> 24);
+}
+static int wrap_differential(void)
+{
+    int failures = 0;
+    static uint8_t ad[4096], pt[4096], got[4160], want[4160], back[4096];
+    TEST_CASE("SHAKE256-Wrap: 1000 random geometries match the byte-wise reference, seal and open") {
+        uint64_t rng = UINT64_C(0x5a32334b454343ff);
+        bool all_equal = true;
+        for (unsigned iter = 0; iter < 1000 && all_equal; ++iter) {
+            uint8_t key[SHAKE_WRAP_KEY_SIZE];
+            diff_fill(&rng, key, sizeof(key));
+            struct shake_wrap_state seal_state, open_state;
+            struct ref_wrap ref = {{0}, 0};
+            all_equal = shake_wrap_init(&seal_state, key) && shake_wrap_init(&open_state, key);
+            ref_duplex(&ref, key, sizeof(key), 1);
+            for (unsigned rec = 0; rec < 2 && all_equal; ++rec) {
+                size_t len = (size_t)(diff_next(&rng) % 4097);
+                size_t ad_len = (diff_next(&rng) & 3) == 0 ? (size_t)(diff_next(&rng) % 4097)
+                    : (size_t)(diff_next(&rng) % 200);
+                if (iter < 40) len = (size_t)iter * 129 % 4097;
+                diff_fill(&rng, ad, ad_len); diff_fill(&rng, pt, len);
+                ref_seal(&ref, ad, ad_len, pt, len, want);
+                all_equal = shake_wrap_seal(&seal_state, ad, ad_len, pt, len, got, sizeof(got)) &&
+                    !memcmp(got, want, len + 64) &&
+                    shake_wrap_open(&open_state, ad, ad_len, got, len + 64, back, sizeof(back)) &&
+                    !memcmp(back, pt, len) &&
+                    !memcmp(seal_state.bytes, ref.bytes, 200) && seal_state.offset == ref.offset &&
+                    !memcmp(&seal_state, &open_state, sizeof(seal_state));
+            }
+            if (!all_equal) fprintf(stderr, "Wrap differential mismatch at iteration %u\n", iter);
+        }
+        ASSERT(all_equal);
+    } TEST_END
+    return failures;
+}
 int test_shake_wrap(void);
 int test_shake_wrap(void)
 {
     int failures = wrap_oracle_vectors();
     failures += wrap_authentication_refusals(); failures += wrap_seal_bounds();
     failures += wrap_open_bounds(); failures += wrap_empty_and_destroy();
+    failures += wrap_differential();
     return failures;
 }

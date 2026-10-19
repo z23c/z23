@@ -20,6 +20,71 @@ static void sha3_wipe(void *ptr, size_t len)
     __asm__ __volatile__("" : : "r"(ptr) : "memory");
 }
 
+/* One Keccak-f round, theta/rho/pi/chi/iota fully unrolled over locals, a -> e. */
+static inline void keccak_round(const uint64_t a[restrict 25], uint64_t e[restrict 25], uint64_t rc)
+{
+    uint64_t c0 = a[0] ^ a[5] ^ a[10] ^ a[15] ^ a[20];
+    uint64_t c1 = a[1] ^ a[6] ^ a[11] ^ a[16] ^ a[21];
+    uint64_t c2 = a[2] ^ a[7] ^ a[12] ^ a[17] ^ a[22];
+    uint64_t c3 = a[3] ^ a[8] ^ a[13] ^ a[18] ^ a[23];
+    uint64_t c4 = a[4] ^ a[9] ^ a[14] ^ a[19] ^ a[24];
+    uint64_t d0 = c4 ^ rotl64(c1, 1);
+    uint64_t d1 = c0 ^ rotl64(c2, 1);
+    uint64_t d2 = c1 ^ rotl64(c3, 1);
+    uint64_t d3 = c2 ^ rotl64(c4, 1);
+    uint64_t d4 = c3 ^ rotl64(c0, 1);
+    uint64_t b0 = a[0] ^ d0;
+    uint64_t b10 = rotl64(a[1] ^ d1, 1);
+    uint64_t b7 = rotl64(a[10] ^ d0, 3);
+    uint64_t b11 = rotl64(a[7] ^ d2, 6);
+    uint64_t b17 = rotl64(a[11] ^ d1, 10);
+    uint64_t b18 = rotl64(a[17] ^ d2, 15);
+    uint64_t b3 = rotl64(a[18] ^ d3, 21);
+    uint64_t b5 = rotl64(a[3] ^ d3, 28);
+    uint64_t b16 = rotl64(a[5] ^ d0, 36);
+    uint64_t b8 = rotl64(a[16] ^ d1, 45);
+    uint64_t b21 = rotl64(a[8] ^ d3, 55);
+    uint64_t b24 = rotl64(a[21] ^ d1, 2);
+    uint64_t b4 = rotl64(a[24] ^ d4, 14);
+    uint64_t b15 = rotl64(a[4] ^ d4, 27);
+    uint64_t b23 = rotl64(a[15] ^ d0, 41);
+    uint64_t b19 = rotl64(a[23] ^ d3, 56);
+    uint64_t b13 = rotl64(a[19] ^ d4, 8);
+    uint64_t b12 = rotl64(a[13] ^ d3, 25);
+    uint64_t b2 = rotl64(a[12] ^ d2, 43);
+    uint64_t b20 = rotl64(a[2] ^ d2, 62);
+    uint64_t b14 = rotl64(a[20] ^ d0, 18);
+    uint64_t b22 = rotl64(a[14] ^ d4, 39);
+    uint64_t b9 = rotl64(a[22] ^ d2, 61);
+    uint64_t b6 = rotl64(a[9] ^ d4, 20);
+    uint64_t b1 = rotl64(a[6] ^ d1, 44);
+    e[0] = b0 ^ (~b1 & b2) ^ rc;
+    e[1] = b1 ^ (~b2 & b3);
+    e[2] = b2 ^ (~b3 & b4);
+    e[3] = b3 ^ (~b4 & b0);
+    e[4] = b4 ^ (~b0 & b1);
+    e[5] = b5 ^ (~b6 & b7);
+    e[6] = b6 ^ (~b7 & b8);
+    e[7] = b7 ^ (~b8 & b9);
+    e[8] = b8 ^ (~b9 & b5);
+    e[9] = b9 ^ (~b5 & b6);
+    e[10] = b10 ^ (~b11 & b12);
+    e[11] = b11 ^ (~b12 & b13);
+    e[12] = b12 ^ (~b13 & b14);
+    e[13] = b13 ^ (~b14 & b10);
+    e[14] = b14 ^ (~b10 & b11);
+    e[15] = b15 ^ (~b16 & b17);
+    e[16] = b16 ^ (~b17 & b18);
+    e[17] = b17 ^ (~b18 & b19);
+    e[18] = b18 ^ (~b19 & b15);
+    e[19] = b19 ^ (~b15 & b16);
+    e[20] = b20 ^ (~b21 & b22);
+    e[21] = b21 ^ (~b22 & b23);
+    e[22] = b22 ^ (~b23 & b24);
+    e[23] = b23 ^ (~b24 & b20);
+    e[24] = b24 ^ (~b20 & b21);
+}
+
 void sha3_keccakf_scalar(uint64_t st[25])
 {
     static const uint64_t RNDC[24] = {
@@ -30,78 +95,13 @@ void sha3_keccakf_scalar(uint64_t st[25])
         0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
         0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008
     };
+    uint64_t tmp[25];
 
-    for (int round = 0; round < 24; ++round) {
-        uint64_t bc0, bc1, bc2, bc3, bc4, t;
-
-        bc0 = st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20];
-        bc1 = st[1] ^ st[6] ^ st[11] ^ st[16] ^ st[21];
-        bc2 = st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22];
-        bc3 = st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23];
-        bc4 = st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24];
-        t = bc4 ^ rotl64(bc1, 1); st[0] ^= t; st[5] ^= t; st[10] ^= t; st[15] ^= t; st[20] ^= t;
-        t = bc0 ^ rotl64(bc2, 1); st[1] ^= t; st[6] ^= t; st[11] ^= t; st[16] ^= t; st[21] ^= t;
-        t = bc1 ^ rotl64(bc3, 1); st[2] ^= t; st[7] ^= t; st[12] ^= t; st[17] ^= t; st[22] ^= t;
-        t = bc2 ^ rotl64(bc4, 1); st[3] ^= t; st[8] ^= t; st[13] ^= t; st[18] ^= t; st[23] ^= t;
-        t = bc3 ^ rotl64(bc0, 1); st[4] ^= t; st[9] ^= t; st[14] ^= t; st[19] ^= t; st[24] ^= t;
-
-        t = st[1];
-        bc0 = st[10]; st[10] = rotl64(t, 1); t = bc0;
-        bc0 = st[7]; st[7] = rotl64(t, 3); t = bc0;
-        bc0 = st[11]; st[11] = rotl64(t, 6); t = bc0;
-        bc0 = st[17]; st[17] = rotl64(t, 10); t = bc0;
-        bc0 = st[18]; st[18] = rotl64(t, 15); t = bc0;
-        bc0 = st[3]; st[3] = rotl64(t, 21); t = bc0;
-        bc0 = st[5]; st[5] = rotl64(t, 28); t = bc0;
-        bc0 = st[16]; st[16] = rotl64(t, 36); t = bc0;
-        bc0 = st[8]; st[8] = rotl64(t, 45); t = bc0;
-        bc0 = st[21]; st[21] = rotl64(t, 55); t = bc0;
-        bc0 = st[24]; st[24] = rotl64(t, 2); t = bc0;
-        bc0 = st[4]; st[4] = rotl64(t, 14); t = bc0;
-        bc0 = st[15]; st[15] = rotl64(t, 27); t = bc0;
-        bc0 = st[23]; st[23] = rotl64(t, 41); t = bc0;
-        bc0 = st[19]; st[19] = rotl64(t, 56); t = bc0;
-        bc0 = st[13]; st[13] = rotl64(t, 8); t = bc0;
-        bc0 = st[12]; st[12] = rotl64(t, 25); t = bc0;
-        bc0 = st[2]; st[2] = rotl64(t, 43); t = bc0;
-        bc0 = st[20]; st[20] = rotl64(t, 62); t = bc0;
-        bc0 = st[14]; st[14] = rotl64(t, 18); t = bc0;
-        bc0 = st[22]; st[22] = rotl64(t, 39); t = bc0;
-        bc0 = st[9]; st[9] = rotl64(t, 61); t = bc0;
-        bc0 = st[6]; st[6] = rotl64(t, 20); t = bc0;
-        st[1] = rotl64(t, 44);
-
-        bc0 = st[0]; bc1 = st[1]; bc2 = st[2]; bc3 = st[3]; bc4 = st[4];
-        st[0] = bc0 ^ (~bc1 & bc2) ^ RNDC[round];
-        st[1] = bc1 ^ (~bc2 & bc3);
-        st[2] = bc2 ^ (~bc3 & bc4);
-        st[3] = bc3 ^ (~bc4 & bc0);
-        st[4] = bc4 ^ (~bc0 & bc1);
-        bc0 = st[5]; bc1 = st[6]; bc2 = st[7]; bc3 = st[8]; bc4 = st[9];
-        st[5] = bc0 ^ (~bc1 & bc2);
-        st[6] = bc1 ^ (~bc2 & bc3);
-        st[7] = bc2 ^ (~bc3 & bc4);
-        st[8] = bc3 ^ (~bc4 & bc0);
-        st[9] = bc4 ^ (~bc0 & bc1);
-        bc0 = st[10]; bc1 = st[11]; bc2 = st[12]; bc3 = st[13]; bc4 = st[14];
-        st[10] = bc0 ^ (~bc1 & bc2);
-        st[11] = bc1 ^ (~bc2 & bc3);
-        st[12] = bc2 ^ (~bc3 & bc4);
-        st[13] = bc3 ^ (~bc4 & bc0);
-        st[14] = bc4 ^ (~bc0 & bc1);
-        bc0 = st[15]; bc1 = st[16]; bc2 = st[17]; bc3 = st[18]; bc4 = st[19];
-        st[15] = bc0 ^ (~bc1 & bc2);
-        st[16] = bc1 ^ (~bc2 & bc3);
-        st[17] = bc2 ^ (~bc3 & bc4);
-        st[18] = bc3 ^ (~bc4 & bc0);
-        st[19] = bc4 ^ (~bc0 & bc1);
-        bc0 = st[20]; bc1 = st[21]; bc2 = st[22]; bc3 = st[23]; bc4 = st[24];
-        st[20] = bc0 ^ (~bc1 & bc2);
-        st[21] = bc1 ^ (~bc2 & bc3);
-        st[22] = bc2 ^ (~bc3 & bc4);
-        st[23] = bc3 ^ (~bc4 & bc0);
-        st[24] = bc4 ^ (~bc0 & bc1);
+    for (int round = 0; round < 24; round += 2) {
+        keccak_round(st, tmp, RNDC[round]);
+        keccak_round(tmp, st, RNDC[round + 1]);
     }
+    sha3_wipe(tmp, sizeof(tmp));
 }
 
 /* There is ONE single-stream permutation, and it is the scalar one above.

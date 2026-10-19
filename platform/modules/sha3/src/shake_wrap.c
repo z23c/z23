@@ -4,6 +4,7 @@
 #include "sha3/shake_wrap.h"
 #include "sha3/sha3.h"
 #include "base/cleanse.h"
+#include "base/serialize_le.h"
 #include <string.h>
 
 #define WRAP_RHO 128u
@@ -23,41 +24,50 @@ static bool wrap_spans_valid(const struct wrap_span *spans, size_t count)
     }
     return true;
 }
-static void wrap_permute(struct shake_wrap_state *state)
+/* Working form of the sponge state for one record: 25 little-endian lanes,
+ * loaded once from the stored bytes and written back once at the end, so the
+ * permutation never round-trips through byte-wise conversion. */
+struct wrap_lanes { uint64_t lane[25]; uint32_t offset; };
+static void wrap_load(struct wrap_lanes *w, const struct shake_wrap_state *state)
 {
-    uint64_t lanes[25] = {0};
-    for (size_t i = 0; i < 200; ++i)
-        lanes[i / 8] |= (uint64_t)state->bytes[i] << (8 * (i % 8));
-    sha3_keccakf_scalar(lanes);
-    for (size_t i = 0; i < 200; ++i)
-        state->bytes[i] = (uint8_t)(lanes[i / 8] >> (8 * (i % 8)));
-    memory_cleanse(lanes, sizeof(lanes));
+    for (size_t i = 0; i < 25; ++i) w->lane[i] = zcl_read_u64_le(state->bytes + 8 * i);
+    w->offset = state->offset;
+}
+static void wrap_store(struct shake_wrap_state *state, const struct wrap_lanes *w)
+{
+    for (size_t i = 0; i < 25; ++i) zcl_write_u64_le(state->bytes + 8 * i, w->lane[i]);
+    state->offset = w->offset;
 }
 /* OD overwrites the rho bytes, pads partial blocks, and XORs a 64-bit
  * trailer. E concatenates its leading-one encoding with full-block bit.
  * SHAKE's domain separation is 0x1f in the trailer's final byte. */
-static void wrap_duplex(struct shake_wrap_state *state, const uint8_t *input,
+static void wrap_duplex(struct wrap_lanes *w, const uint8_t *input,
     size_t length, unsigned domain)
 {
-    memset(state->bytes, 0, WRAP_RHO);
-    if (length) memcpy(state->bytes, input, length);
-    if (length < WRAP_RHO) state->bytes[length] = 1;
+    uint8_t block[WRAP_RHO] = {0};
+    if (length) memcpy(block, input, length);
+    if (length < WRAP_RHO) block[length] = 1;
+    for (size_t i = 0; i < WRAP_RHO / 8; ++i) w->lane[i] = zcl_read_u64_le(block + 8 * i);
     unsigned leading = domain < 2 ? 1u : 4u;
-    state->bytes[WRAP_RHO] ^= (uint8_t)(domain + leading * (length == WRAP_RHO ? 2u : 1u));
-    state->bytes[WRAP_RHO + 7] ^= 0x9fu;
-    wrap_permute(state);
-    state->offset = 0;
+    w->lane[WRAP_RHO / 8] ^= (uint64_t)(uint8_t)(domain + leading * (length == WRAP_RHO ? 2u : 1u));
+    w->lane[WRAP_RHO / 8] ^= UINT64_C(0x9f00000000000000);
+    sha3_keccakf_scalar(w->lane);
+    w->offset = 0;
+    memory_cleanse(block, sizeof(block));
 }
-static void wrap_extract(struct shake_wrap_state *state, const uint8_t *input,
+static void wrap_extract(struct wrap_lanes *w, const uint8_t *input,
     uint8_t *output, size_t length)
 {
+    uint8_t rate[WRAP_RHO];
+    for (size_t i = 0; i < WRAP_RHO / 8; ++i) zcl_write_u64_le(rate + 8 * i, w->lane[i]);
     for (size_t i = 0; i < length; ++i)
-        output[i] = state->bytes[state->offset + i] ^ input[i];
-    state->offset += (uint32_t)length;
+        output[i] = rate[w->offset + i] ^ input[i];
+    w->offset += (uint32_t)length;
+    memory_cleanse(rate, sizeof(rate));
 }
 /* Same duplex schedule for seal/open: feedback always contains ciphertext.
  * Keep the first squeezed block distinct: without AD it is rho-tag bytes. */
-static void wrap_record(struct shake_wrap_state *state, const uint8_t *ad,
+static void wrap_record(struct wrap_lanes *state, const uint8_t *ad,
     size_t ad_len, const uint8_t *input, size_t length, uint8_t *output,
     uint8_t tag[SHAKE_WRAP_TAG_SIZE], bool opening)
 {
@@ -87,7 +97,7 @@ static void wrap_record(struct shake_wrap_state *state, const uint8_t *ad,
         const uint8_t *feedback = opening ? input : output;
         wrap_duplex(state, feedback + position - block, block, 6);
     }
-    memcpy(tag, state->bytes, SHAKE_WRAP_TAG_SIZE);
+    for (size_t i = 0; i < SHAKE_WRAP_TAG_SIZE / 8; ++i) zcl_write_u64_le(tag + 8 * i, state->lane[i]);
     state->offset = SHAKE_WRAP_TAG_SIZE;
 }
 static bool wrap_operation_valid(struct shake_wrap_state *state,
@@ -105,10 +115,13 @@ bool shake_wrap_init(struct shake_wrap_state *state, const uint8_t key[SHAKE_WRA
 {
     const struct wrap_span spans[] = {{state, sizeof(*state)}, {key, SHAKE_WRAP_KEY_SIZE}};
     if (!wrap_spans_valid(spans, sizeof(spans) / sizeof(spans[0]))) return false;
+    struct wrap_lanes lanes = {{0}, 0};
     struct shake_wrap_state trial = {0};
-    wrap_duplex(&trial, key, SHAKE_WRAP_KEY_SIZE, 1);
+    wrap_duplex(&lanes, key, SHAKE_WRAP_KEY_SIZE, 1);
+    wrap_store(&trial, &lanes);
     trial.initialized = WRAP_INITIALIZED;
     *state = trial;
+    memory_cleanse(&lanes, sizeof(lanes));
     memory_cleanse(&trial, sizeof(trial));
     return true;
 }
@@ -121,8 +134,12 @@ bool shake_wrap_seal(struct shake_wrap_state *state,
     if (!wrap_operation_valid(state, ad, ad_len, plaintext, plaintext_len,
         ciphertext, capacity, written)) return false;
     struct shake_wrap_state trial = *state;
-    wrap_record(&trial, ad, ad_len, plaintext, plaintext_len, ciphertext,
+    struct wrap_lanes lanes;
+    wrap_load(&lanes, &trial);
+    wrap_record(&lanes, ad, ad_len, plaintext, plaintext_len, ciphertext,
         ciphertext + plaintext_len, false);
+    wrap_store(&trial, &lanes);
+    memory_cleanse(&lanes, sizeof(lanes));
     *state = trial;
     memory_cleanse(&trial, sizeof(trial));
     return true;
@@ -144,7 +161,11 @@ bool shake_wrap_open(struct shake_wrap_state *state,
         plaintext, capacity, length)) return false;
     struct shake_wrap_state trial = *state;
     uint8_t private_plaintext[SHAKE_WRAP_MAX_PLAINTEXT], tag[SHAKE_WRAP_TAG_SIZE];
-    wrap_record(&trial, ad, ad_len, ciphertext, length, private_plaintext, tag, true);
+    struct wrap_lanes lanes;
+    wrap_load(&lanes, &trial);
+    wrap_record(&lanes, ad, ad_len, ciphertext, length, private_plaintext, tag, true);
+    wrap_store(&trial, &lanes);
+    memory_cleanse(&lanes, sizeof(lanes));
     bool authenticated = wrap_tag_equal(tag, ciphertext + length);
     if (authenticated) {
         if (length) memcpy(plaintext, private_plaintext, length);
