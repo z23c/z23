@@ -1507,10 +1507,10 @@ scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
   working directory. `z23_search`, `z23_describe` and `z23_run` work against
   the built-in registry, including `lab.run` and `lab.test` (see
   [LAB.md](../dev/LAB.md)); `z23_code` and every `z23_run` leaf that reads a source
-  tree (`code.*`, `dev.*`, `app.presentation.*`, `fleet.objectives`, and any
-  leaf declaring checkout capabilities) are refused with `NO_CHECKOUT`, and
-  `instructions` say so. Tool calls before `initialize` are refused with
-  `NOT_INITIALIZED`.
+  tree (`code.*`, `dev.*`, `app.presentation.*`, `fleet.objectives`,
+  `fleet.goals`, and any leaf declaring checkout capabilities) are refused
+  with `NO_CHECKOUT`, and `instructions` say so. Tool calls before
+  `initialize` are refused with `NOT_INITIALIZED`.
 - With `--checkout`, an empty or over-long value is refused (`NO_CHECKOUT`), a
   relative path is refused (`CHECKOUT_NOT_ABSOLUTE`), as is an unexpanded
   `${...}` (`CHECKOUT_UNEXPANDED`). At `initialize` it verifies the git toplevel, HEAD,

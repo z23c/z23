@@ -66,6 +66,17 @@ void zcl_objectives_status(const struct zcl_objective_row *row,
 size_t zcl_objectives_render_text(const struct json_value *rows, char *out,
                                   size_t cap);
 
+/* Readers shared with `fleet.goals`. */
+bool zcl_objectives_parse_iso8601(const char *s, int64_t *out);
+bool zcl_objectives_outcomes_path(const struct zcl_objectives_options *options,
+                                  char *buf, size_t cap, const char **out);
+
+/* Calls `row` for every JSON-object line of a ledger file. False, with the
+ * reason, when the file is missing or any line is unreadable. */
+bool zcl_objectives_ledger_walk(const char *path,
+                                void (*row)(const struct json_value *, void *),
+                                void *user, char *reason, size_t reason_cap);
+
 /* The bound leaf: fleet.objectives. */
 void zcl_native_handle_fleet_objectives(
     const struct zcl_command_request *request, struct zcl_command_reply *reply);

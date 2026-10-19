@@ -379,7 +379,7 @@ static bool resolve_target(struct mcp_serve *s, const struct mcp_tool *tool,
 static bool needs_checkout(const struct zcl_command_spec *spec)
 {
     static const char *const trees[] = {"code.", "dev.", "app.presentation.",
-                                        "fleet.objectives"};
+                                        "fleet.objectives", "fleet.goals"};
     const uint64_t checkout_caps =
         ZCL_COMMAND_CAP_CHECKOUT_READ | ZCL_COMMAND_CAP_CHECKOUT_WRITE;
     if ((spec->required_capabilities & checkout_caps) != 0)

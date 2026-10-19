@@ -138,6 +138,35 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives)
 
+ZCL_COMMAND_READY_READ(
+    "fleet.goals", "fleet", "",
+    "The live fleet report card: goals G1-G13, criteria C1-C8, milestones D1-D8",
+    "Prints one row per id in the closed catalog "
+    "(engine/composition/goals.def): the id, title, a grade of pass, "
+    "partial, fail or unmeasured, the A+ bar, one evidence string from a "
+    "local probe, and the command or card that would raise it. Probes run "
+    "in this process: the landing outcomes ledger and a git log of "
+    "origin/main (G9), a warm code lookup (G7), the wiki read path (G4), "
+    "vitals history per admitted host (G8), the lane claims ledger (G13), "
+    "the shell-script allowlist (D8) and the release update leaf (G6). "
+    "Host-set goals (G1, G3, G5, G6, G8, G12) take their hosts from the "
+    "admitted roster and are unmeasured without one. A row whose probe is "
+    "missing is unmeasured with the reason, never a guessed grade, and a "
+    "row passes only when every numeric clause of its bar was measured and "
+    "met. repo, outcomes, bash_allowlist and claims override the paths a "
+    "probe reads. It contacts no peer and writes nothing.",
+    32768,
+    "fleet,goals,scorecard,report,grade,mvp",
+    "zcl.fleet_goals_input.v1", "zcl.fleet_goals.v1",
+    "repo,outcomes,bash_allowlist,claims", "",
+    "z23 fleet goals",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_MAINTENANCE,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_goals)
+
 ZCL_COMMAND_BRANCH("fleet.experiment", "fleet",
                    "Record and query delegation experiments",
                    ZCL_COMMAND_LAYER_OPS)

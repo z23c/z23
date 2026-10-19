@@ -698,3 +698,47 @@ struct zcl_objective_value zcl_objectives_measure(
     obj_set_reason(&v, "no producer wired for id %s", id);
     return v;
 }
+
+/* ── shared with fleet.goals ──────────────────────────────────────────── */
+
+bool zcl_objectives_parse_iso8601(const char *s, int64_t *out)
+{
+    return obj_parse_iso8601(s, out);
+}
+
+bool zcl_objectives_outcomes_path(const struct zcl_objectives_options *options,
+                                  char *buf, size_t cap, const char **out)
+{
+    return obj_resolve_outcomes(options, buf, cap, out);
+}
+
+bool zcl_objectives_ledger_walk(const char *path,
+                                void (*row)(const struct json_value *, void *),
+                                void *user, char *reason, size_t reason_cap)
+{
+    char line[OBJ_LINE_MAX];
+    size_t len;
+    int status;
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        (void)snprintf(reason, reason_cap, "missing ledger %s", path);
+        return false;
+    }
+    while ((status = obj_ledger_line(fp, line, sizeof line, &len)) == 1) {
+        struct json_value value;
+        json_init(&value);
+        bool valid = json_read(&value, line, len) && value.type == JSON_OBJ;
+        if (valid)
+            row(&value, user);
+        json_free(&value);
+        if (!valid)
+            status = -1;
+        if (status < 0)
+            break;
+    }
+    if (fclose(fp) != 0 || status < 0) {
+        (void)snprintf(reason, reason_cap, "incomplete ledger %s", path);
+        return false;
+    }
+    return true;
+}

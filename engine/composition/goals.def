@@ -1,0 +1,82 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * goals - the CLOSED catalog of the report card `fleet goals` prints: the
+ * thirteen fleet goals (docs/work/FLEET_SCORECARD.md), the public-node
+ * acceptance criteria C1-C8 (docs/MVP.md) and the development milestones
+ * D1-D8 (docs/work/DEVELOPMENT_MVP.md). An id not written here is not a
+ * row. Each row is graded by one producer in
+ * tools/command/native_fleet_goals.c; a producer that cannot measure its row
+ * answers `unmeasured` with the reason, never a guessed grade.
+ *
+ *   Z23_GOAL(id_, title_, bar_)
+ *
+ *   id_     the card id, verbatim and stable: G1-G13, C1-C8, D1-D8.
+ *   title_  the goal's name.
+ *   bar_    the A+ bar, the whole threshold the source document states. A row
+ *           grades `pass` only when every numeric clause of its bar was
+ *           measured and met; a producer that measures only some of them
+ *           caps at `partial`.
+ *
+ * Append new rows at the end so a diff reads as an addition.
+ */
+
+Z23_GOAL("G1", "Quantum-secure tunnel",
+         "every directed pair of fleet hosts; at least 150 MiB/s; access renews itself")
+Z23_GOAL("G2", "Post-quantum release signing",
+         "hybrid Ed25519+SLH-DSA; k-of-n hosts; nobody signs by hand")
+Z23_GOAL("G3", "Remote shell",
+         "z23 shell @any on every fleet machine; full commands; per-lead keys and audit")
+Z23_GOAL("G4", "Wiki",
+         "written anywhere, readable everywhere in 10 s; pinned pages never expire")
+Z23_GOAL("G5", "Plugins and binary swarm",
+         "publish once; every host fetches from peers, checks pin and hash, installs atomically")
+Z23_GOAL("G6", "Seamless updates",
+         "a landing upgrades every host automatically and rolls back on failure")
+Z23_GOAL("G7", "MCP harness",
+         "MCP on every agent; warm code lookup under 50 ms; tokens down at least 50 %, measured")
+Z23_GOAL("G8", "Telemetry",
+         "every admitted host in vitals in under 1 s; node-independent; signed history")
+Z23_GOAL("G9", "Landing throughput",
+         "at least 3 trains a day; zero proof failures a pre-submit check could catch")
+Z23_GOAL("G10", "Node health",
+         "every canonical node alive with logs advancing; receivers healthy")
+Z23_GOAL("G11", "Zero spend",
+         "0 ZCL; every fleet feature works without a fee")
+Z23_GOAL("G12", "Mac parity",
+         "Darwin build, confinement and hub pairing equal to Linux")
+Z23_GOAL("G13", "Agent productivity",
+         "every lead busy on its own lane; review never the bottleneck")
+
+Z23_GOAL("C1", "Single-binary install on clean Ubuntu/Debian",
+         "clean container: make install && systemctl --user start zclassic23 exits 0")
+Z23_GOAL("C2", "Tor onion bootstrap in under 60 s",
+         "bootstrap_state=ready within 60 s of start")
+Z23_GOAL("C3", "Cold-start sync to tip in under 10 min",
+         "fresh datadir reports phase=ready within 10 min on a 100 Mbps link")
+Z23_GOAL("C4", "Receive shielded payment end to end",
+         "a test wallet receives 1 ZCL to a z-address and the balance reflects it within 2 blocks")
+Z23_GOAL("C5", "List and sell a file via store",
+         "operator lists a product, buyer pays shielded, buyer receives the file")
+Z23_GOAL("C6", "7-day soak with zero operator intervention",
+         "168 h live node under synthetic load: no manual restarts, RSS plateau")
+Z23_GOAL("C7", "Recover from kill -9 in under 2 min",
+         "kill -9 mid-block, restart, caught up to peer tip within 2 min")
+Z23_GOAL("C8", "Consensus parity with zclassicd",
+         "0 mismatches over the 7-day soak window")
+
+Z23_GOAL("D1", "Every run is accounted",
+         "100 % of finished worker runs record provider requests, input, cached input and output tokens, on every host, unknowns listed")
+Z23_GOAL("D2", "Few requests per change",
+         "median at most 18 provider requests per accepted change, writer plus both reviews")
+Z23_GOAL("D3", "Reviews agree with the truth",
+         "at most 10 % of sound changes rejected and at most 5 % of seeded defects accepted, over at least 59 distinct seeded defects")
+Z23_GOAL("D4", "Changes are accepted first time",
+         "at least 60 % of deliveries accepted by both reviews without a repair round, over 100 consecutive deliveries")
+Z23_GOAL("D5", "Cost per landed change is known and halved",
+         "uncached input plus output tokens per landed change at most half the baseline, first-test pass rate not lower")
+Z23_GOAL("D6", "Fast feedback",
+         "p95 delivery to focused test and mutation verdict within 180 s on a warm lane; a build-rule edit does not rebuild unaffected objects")
+Z23_GOAL("D7", "Landing keeps pace",
+         "zero unnamed failures in 20 consecutive groups; median spacing at most 20 minutes under backlog")
+Z23_GOAL("D8", "Any fleet shape",
+         "host roles, counts and paths come only from configuration; no shell script on the coordination path")

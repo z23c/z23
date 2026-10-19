@@ -1283,6 +1283,7 @@ REMOTE_COMMAND_CLASS("fleet.experiment.export", REMOTE_CLASS_NEVER, "")
  * them from its own checkout, so the remote form buys no capability.
  */
 REMOTE_COMMAND_CLASS("fleet.objectives", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.goals", REMOTE_CLASS_NEVER, "")
 /* ── which key may call which fleet leaf ────────────────────────────────
  * All four are NEVER. `fleet roles list` and `fleet roles check` are
  * authority reads, which this table's own rule excludes from READ_ONLY:

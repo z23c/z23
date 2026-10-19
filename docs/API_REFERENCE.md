@@ -111,7 +111,7 @@ Per source file:
 | `engine/composition/commands/lab.def` | 5 | 1 | 4 |
 | `engine/composition/commands/fleet_board.def` | 12 | 3 | 9 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
-| `engine/composition/commands/fleet.def` | 42 | 9 | 33 |
+| `engine/composition/commands/fleet.def` | 43 | 9 | 34 |
 | `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
 | `engine/composition/commands/fleet_enrol.def` | 7 | 0 | 7 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
@@ -1907,6 +1907,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `fleet usage` | ready | read / read / operator · instant/low | `days`, `provider`, `box` | `zcl.fleet_usage.v1` | `z23 fleet usage --days=7` | What every box spent, per provider, over the last days |
 | `fleet objectives` | ready | read / read / operator · foreground/low | `outcomes`, `attempts_dir`, `repo`, `lintc_dir`, `baseline` | `zcl.fleet_objectives.v1` | `z23-dev fleet objectives` | Every objective z23 optimizes, its current value, target, and status |
+| `fleet goals` | ready | read / read / operator · maintenance/low | `repo`, `outcomes`, `bash_allowlist`, `claims` | `zcl.fleet_goals.v1` | `z23 fleet goals` | The live fleet report card: goals G1-G13, criteria C1-C8, milestones D1-D8 |
 | `fleet invite` | ready | mutate / app-write / **owner** · fast/low | **`name`**, `ttl_hours`, `relay`, `datadir` | `zcl.fleet.invite.v1` | `z23 fleet invite --name=studio --ttl-hours=24` | Mint one signed invite line that adds a computer to this fleet |
 | `fleet join` | ready | mutate / app-write / **owner** · fast/low | **`token`**, `onion` | `zcl.fleet.join.v1` | `z23 fleet join <token> [--onion=<v3>.onion]` | Join this computer to a fleet from one pasted invite |
 | `fleet admit` | ready | mutate / app-write / **owner** · fast/low | **`receipt`**, `bridge`, `datadir`, `require_anchor` | `zcl.fleet.admit.v1` | `z23 fleet admit <receipt>` | Admit one joined computer to this fleet's machine roster |

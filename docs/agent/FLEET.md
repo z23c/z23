@@ -210,6 +210,26 @@ The closed catalog is [`engine/composition/objectives.def`](../../engine/composi
 `functions_over_complexity_cap`, `fresh_node_sync_eta_s` and
 `tokens_per_landed_commit`. It is a report, not a gate.
 
+### Goals
+
+`z23 fleet goals [--format=json]` prints the live report card: one row for each fleet
+goal G1-G13, public-node criterion C1-C8 and development milestone D1-D8, with its
+id, title, grade (`pass`, `partial`, `fail` or `unmeasured`), the A+ bar, one evidence
+string from a local probe and `next`, the command or card that would raise it. The
+closed catalog is [`engine/composition/goals.def`](../engine/composition/goals.def);
+the targets are in [FLEET_SCORECARD.md](work/FLEET_SCORECARD.md),
+[MVP.md](MVP.md) and [DEVELOPMENT_MVP.md](work/DEVELOPMENT_MVP.md).
+
+A row passes only when every numeric clause of its bar was measured and met. A row
+whose probe is missing is `unmeasured` with the reason; the leaf never guesses a grade.
+Probes run in the process: the landing outcomes ledger and `git log origin/main` (G9),
+a warm `code find` over five samples (G7), the wiki read path (G4), vitals history per
+admitted host (G8), the lane claims ledger (G13), the shell-script allowlist (D8) and
+the release update leaf (G6). Host-set goals (G1, G3, G5, G6, G8, G12) take their hosts
+from the admitted roster (`z23 fleet machines`) and are unmeasured without one. The
+first call after a checkout change rebuilds the code index and can take seconds.
+It contacts no peer and writes nothing; it is a report, not a gate.
+
 ### Roles
 
 Which key may call which fleet leaf is decided by each node alone, from a

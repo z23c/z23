@@ -31,4 +31,6 @@ A+ means a live probe passes and keeps passing with nobody babysitting it. Each 
 
 ## Using this scorecard
 
+`z23 fleet goals` prints the live card: each goal's grade, the A+ bar, one evidence string from a local probe and the command that would raise it. A goal without a probe is `unmeasured` with the reason.
+
 Agents tie claims and READY posts to a goal number. The live copy is the fleet wiki page with slug fleet-goals (read it with fleet.wiki.read; MCP: z23_run). Update the owner column when lanes change.

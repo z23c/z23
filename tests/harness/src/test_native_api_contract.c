@@ -1107,7 +1107,7 @@ static int test_uniform_help(void)
  * still yield one zcl.result.v1 document. */
 static const char *const contract_leaves[] = {
     "ops.debug.explain", "ops.debug.producer", "ops.debug.profile",
-    "ops.debug.rom", "fleet.objectives", "fleet.triggers.list",
+    "ops.debug.rom", "fleet.objectives", "fleet.goals", "fleet.triggers.list",
     "dev.train.status", "dev.train.build", "dev.train.check",
     "dev.train.drop", "dev.train.keep", "ops.mesh.device.host.client",
     "ops.mesh.device.host.package.run", "ops.mesh.device.host.receiver",
