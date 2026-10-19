@@ -1331,7 +1331,7 @@ static int test_source_guard_mvp_binds_c3_stopwatch_to_running_binary(void)
         ASSERT(read_script_source(root, "tools/mvp_gate.sh", body,
                                   sizeof(body)));
         ASSERT(strstr(body,
-                      "--expect-artifact-sha256=\"$LIVE_ARTIFACT\"") != NULL);
+                      "--expect_artifact_sha256=\"$LIVE_ARTIFACT\"") != NULL);
         ASSERT(strstr(body, "set_v 3 \"PASS\"") != NULL);
         ASSERT(strstr(body, "node at-tip status is not this claim") != NULL);
         /* A live at-tip reading must never stand in for the stopwatch claim. */
