@@ -16,6 +16,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_memory_guard.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mint_anchor_preflight.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_build_store.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("cognition/modules/session/src/mesh_terminal_hub_client.c", CAP_FS_READ, "Linux uses MSG_NOSIGNAL in the shared I/O helpers; the client does not set the Darwin SO_NOSIGPIPE socket option")
 ZCL_MODULE_CAPABILITY("core/modules/crypto/src/keccak_x4.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("core/modules/crypto/src/sha256.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("core/modules/crypto/src/sha512.c", CAP_NONE, "the Linux arm does not perform the Darwin read-only sysctl feature probe")

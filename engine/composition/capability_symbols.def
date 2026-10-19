@@ -619,6 +619,7 @@ ZCL_CAPABILITY_SYMBOL("GetRand", CAP_RANDOM,
     "The core bounded random-number entry point; callers rely on fresh "
     "entropy even when the result selects a nonce, peer, or queue slot.")
 ZCL_CAPABILITY_SYMBOL("getrandom", CAP_RANDOM, "")
+ZCL_CAPABILITY_SYMBOL("getentropy", CAP_RANDOM, "Reads operating-system entropy into the caller's buffer.")
 ZCL_CAPABILITY_SYMBOL("RAND_bytes", CAP_RANDOM, "")
 ZCL_CAPABILITY_SYMBOL("secp256k1_context_randomize", CAP_RANDOM,
     "Consumes a seed to blind the context against side channels, and "
@@ -1435,7 +1436,9 @@ ZCL_CAPABILITY_SYMBOL("__error", CAP_HARMLESS, "Darwin errno storage accessor.")
 ZCL_CAPABILITY_SYMBOL("__exp10", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__maskrune", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__stderrp", CAP_HARMLESS, "Darwin standard error stream pointer.")
+ZCL_CAPABILITY_SYMBOL("__stdinp", CAP_HARMLESS, "Darwin standard input stream pointer; reading the stream is classified separately.")
 ZCL_CAPABILITY_SYMBOL("__stdoutp", CAP_HARMLESS, "Darwin standard output stream pointer.")
+ZCL_CAPABILITY_SYMBOL("__srget", CAP_FS_READ, "Darwin stdio input refill used by inline getc and getchar.")
 ZCL_CAPABILITY_SYMBOL("__tolower", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__toupper", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("_tlv_bootstrap", CAP_HARMLESS, "Darwin thread-local runtime support.")
