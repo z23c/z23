@@ -179,13 +179,13 @@ a fleet that never anchors keeps enrolling and listing exactly as before.
    always your decision.
    1. `z23 core identity keygen --input='{"seed_file":"<absolute private path>"}'`
       creates the seed file and prints its pubkey. The seed is never printed.
-   2. `z23 core identity anchor --input='{"wallet_scope":"prod","pubkey":"<pubkey>","idempotency_key":"<key>"}'`
+   2. `z23 core identity anchor --datadir=<node-datadir> --input='{"wallet_scope":"prod","pubkey":"<pubkey>","idempotency_key":"<key>"}'`
       prints a `plan_id`.
-   3. `z23 core identity anchor --input='{"wallet_scope":"prod","plan_id":"<plan_id>","confirm":true}'`
+   3. `z23 core identity anchor --datadir=<node-datadir> --input='{"wallet_scope":"prod","plan_id":"<plan_id>","confirm":true}'`
       broadcasts it. The fee is 100 zat from the transparent wallet.
    4. Wait until the tip is at least the anchor height plus 20.
-   5. `z23 core identity resolve --pubkey=<pubkey>` must report the anchor.
-   6. `z23 zcode network delegate --input='{"seed_file":"<absolute private path>"}'`
+   5. `z23 core identity resolve --datadir=<node-datadir> --pubkey=<pubkey>` must report the anchor.
+   6. `z23 zcode network delegate --datadir=<node-datadir> --input='{"seed_file":"<absolute private path>"}'`
       (the node must be running).
    7. `z23 fleet vitals sample`.
 2. Once the node has folded the anchor, point the fleet leaves at its
