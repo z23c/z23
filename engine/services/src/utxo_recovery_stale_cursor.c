@@ -96,8 +96,10 @@ static bool urs_store_repaired_anchor(struct node_db *ndb,
                                       int64_t sync_h,
                                       bool clear_commitment)
 {
-    if (!node_db_begin(ndb))
+    if (!node_db_begin(ndb)) {
+        LOG_WARN("chain", "stale cursor repair: begin transaction failed");
         return false;
+    }
 
     bool ok = (!clear_commitment ||
                node_db_state_delete(ndb, "utxo_commitment")) &&
@@ -188,9 +190,9 @@ bool utxo_recovery_repair_stale_cursor_from_sync_projection(
         if (deleted < 0)
             return false;
         if (!urs_store_repaired_anchor(ndb, sync_hash, sync_h, false))
-            return false;
+            return false; // raw-return-ok:urs_store_repaired_anchor-logs-failure
     } else if (!urs_store_repaired_anchor(ndb, sync_hash, sync_h, true)) {
-        return false;
+        return false; // raw-return-ok:urs_store_repaired_anchor-logs-failure
     }
 
     LOG_WARN("chain", "stale cursor repair: advanced coins_best_block "

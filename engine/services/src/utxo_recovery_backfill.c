@@ -183,7 +183,7 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
     sqlite3_stmt *upd = NULL;
     sqlite3_stmt *ins = NULL;
     if (!backfill_open_write(ndb, &upd, &ins))
-        return false;
+        return false; // raw-return-ok:backfill_open_write-logs-each-failure
 
     int updated = 0, scanned = 0;
     int cursor_committed = start - 1;   /* durable floor already proven */
