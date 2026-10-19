@@ -8,6 +8,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 bash "$ROOT/tools/scripts/vendor_lock_selftest.sh"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-vendor-offline-selftest.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT HUP INT TERM
+# A populated shared vendor archive cache would satisfy the archive these cases
+# delete. Every case below sees an empty private one unless it opts in.
+export VENDOR_ARCHIVE_CACHE="$SANDBOX/vendor-archive-cache"
+mkdir -p "$VENDOR_ARCHIVE_CACHE"
 
 fail()
 {
@@ -235,6 +239,42 @@ done
 probe_bootstrap skip windows-headless-run windows-headless-run-selftest
 probe_bootstrap require z23
 probe_bootstrap require
+
+# A populated archive cache restores in offline mode without a downloader, and
+# the restored archive still passes the stamp check. The first run builds libz
+# from the already-downloaded pinned tarball and saves the bundle; the second
+# run has neither archive, stamp nor tarball, so only the cache can supply it.
+zlib_tarball="$ROOT/vendor/.cache/zlib-1.3.1.tar.gz"
+if [ -f "$zlib_tarball" ]; then
+    rm -rf "$VENDOR_ARCHIVE_CACHE"; mkdir -p "$VENDOR_ARCHIVE_CACHE"
+    cp "$zlib_tarball" "$SANDBOX/vendor/.cache/"
+    (cd "$SANDBOX" && DOWNLOADER_CONTACT_LOG="$contact_log" \
+        PATH="$SANDBOX/bin:$PATH" ZCL_VENDOR_OFFLINE=1 \
+        tools/scripts/build_vendor.sh libz.a >/dev/null 2>&1) ||
+        fail 'offline build from the cached tarball failed'
+    [ -n "$(find "$VENDOR_ARCHIVE_CACHE/zlib" -name bundle.tar 2>/dev/null)" ] ||
+        fail 'a verified build did not populate the archive cache'
+    rm -rf "$SANDBOX/vendor/lib/libz.a" "$SANDBOX/vendor/lib/.provenance" \
+        "$SANDBOX/vendor/.cache/zlib-1.3.1.tar.gz" "$SANDBOX/vendor/include/zlib.h"
+    output="$(cd "$SANDBOX" && DOWNLOADER_CONTACT_LOG="$contact_log" \
+        PATH="$SANDBOX/bin:$PATH" ZCL_VENDOR_OFFLINE=1 \
+        tools/scripts/build_vendor.sh libz.a 2>&1)" ||
+        fail 'populated cache did not restore in offline mode'
+    [[ "$output" == *'restored libz.a (vendor archive cache)'* ]] ||
+        fail 'offline restore was not served from the archive cache'
+    [ -f "$SANDBOX/vendor/lib/libz.a" ] || fail 'restore left no archive'
+    [ ! -s "$contact_log" ] || fail 'offline cache restore invoked a downloader'
+    (cd "$SANDBOX" && ZCL_VENDOR_OFFLINE=1 tools/scripts/build_vendor.sh \
+        --check-provenance libz.a >/dev/null 2>&1) ||
+        fail 'restored archive failed the provenance stamp check'
+    # Tamper: a corrupt bundle must fall back to the (absent) download path.
+    rm -rf "$SANDBOX/vendor/lib/libz.a" "$SANDBOX/vendor/lib/.provenance"
+    for b in "$VENDOR_ARCHIVE_CACHE"/zlib/*/bundle.tar; do printf x >>"$b"; done
+    if (cd "$SANDBOX" && ZCL_VENDOR_OFFLINE=1 \
+        tools/scripts/build_vendor.sh libz.a >/dev/null 2>&1); then
+        fail 'corrupt cache bundle was accepted'
+    fi
+fi
 
 printf '%s\n' \
     'build_vendor_offline_selftest: PASS downloader_contacted=false cache_miss_refused=true launcher_vendor_and_tor_skipped=true source_query_vendor_and_tor_skipped=true mixed_goals_bootstrap=true'
