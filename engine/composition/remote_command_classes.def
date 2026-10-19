@@ -153,8 +153,6 @@ REMOTE_COMMAND_CLASS("ops.debug.meaning", REMOTE_CLASS_READ_ONLY,
     "explains a typed field; deterministic, node-free")
 REMOTE_COMMAND_CLASS("ops.debug.version", REMOTE_CLASS_READ_ONLY,
     "reports this build's identity; deterministic, node-free")
-REMOTE_COMMAND_CLASS("ops.debug.refold.verdict", REMOTE_CLASS_READ_ONLY,
-    "classifies a bounded local sample file; deterministic, node-free")
 REMOTE_COMMAND_CLASS("ops.debug.dash.slo", REMOTE_CLASS_READ_ONLY,
     "SLO dashboard projection")
 REMOTE_COMMAND_CLASS("ops.debug.dash.kpi", REMOTE_CLASS_READ_ONLY,
@@ -703,6 +701,10 @@ REMOTE_COMMAND_CLASS("dev.index.search", REMOTE_CLASS_NEVER, "")
  *   list of names and is read_only; the dump itself is not, because its content
  *   is decided by code this table cannot see.
  *
+ *   Caller-named file readers. ops.debug.refold.verdict parses a file the
+ *   caller names; its replies would let a remote caller probe arbitrary local
+ *   files.
+ *
  *   Work starters. ops.selftest and ops.recovery.rebuild spend the target's
  *   resources on request.
  *
@@ -777,6 +779,7 @@ REMOTE_COMMAND_CLASS("ops.debug.rom_seed.enable", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.debug.rom_seed.disable", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.debug.rom_seed.publish", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.debug.rom_fetch.bundle", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.refold.verdict", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.machines", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.roster", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.identity", REMOTE_CLASS_NEVER, "")

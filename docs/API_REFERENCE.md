@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 1011 |
+| Registry entries (branches + leaves) | 1013 |
 | Top-level roots | 17 |
-| Branches | 216 |
-| Leaves (dispatchable command paths) | 795 |
-| … `ready` (live handler in this build) | 692 |
+| Branches | 217 |
+| Leaves (dispatchable command paths) | 796 |
+| … `ready` (live handler in this build) | 693 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 93 | 18 | 75 |
+| `engine/composition/commands/ops.def` | 95 | 19 | 76 |
 | `engine/composition/commands/dev.def` | 139 | 24 | 115 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -963,6 +963,12 @@ represented by its children's sections.
 | `ops debug rom` (aliases: `ops.rom`) | ready | read / read / operator · fast/low | none | `zcl.rom_compile.v1` | `z23 ops rom` | ROM compilation fold progress |
 | `ops debug backtrace` | ready | read / read / operator · fast/low | none | `zcl.ops_debug_backtrace.v1` | `z23 ops debug backtrace` | Dump every thread's backtrace |
 | `ops debug bundle` | ready | read / read / operator · fast/low | none | `zcl.ops_debug_bundle.v1` | `z23 ops debug bundle` | Write one-shot debug bundle JSON |
+
+#### `ops.debug.refold` — Refold proof
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `ops debug refold verdict` | ready | read / read / operator · fast/low | **`samples`** | `zcl.ops_refold_verdict.v1` | `z23 ops debug refold verdict --samples=<samples.jsonl>` | Refold rate verdict |
 
 #### `ops.debug.dash` — Operator rollup dashboards
 
