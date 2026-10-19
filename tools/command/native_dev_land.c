@@ -1528,7 +1528,7 @@ static bool dl_queue_file_flush(FILE *f)
 
 static bool dl_queue_parent_flush(const char *landdir)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     if (getenv("ZCL_LAND_TEST_DIR_SYNC_FAIL"))
         return false;
 #endif
@@ -2051,7 +2051,7 @@ static bool dl_record_outcome(const struct dl_dirs *d, struct dl_row *r)
     if (present)
         *r = prior;
     else if (
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
         (getenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND") &&
          getenv("ZCL_DEVLOOP_TEST_PROCESS")) ||
 #endif
@@ -2143,7 +2143,7 @@ static bool dl_wt_hooks_ready(const char *wt)
  * set and clear it the same way they do ZCL_LAND_PROOF_STUB. */
 static const char *dl_hooks_stub_dir(void)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_HOOKS_STUB_DIR");
     return s && s[0] ? s : NULL;
 #else
@@ -4388,7 +4388,7 @@ static bool dl_terminal_checkpoint(const struct dl_dirs *d,
                                     struct dl_row *row)
 {
     if (!dl_record_outcome(d, row)) return false;
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     if (getenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME") &&
         getenv("ZCL_DEVLOOP_TEST_PROCESS"))
         _exit(81);
@@ -4789,7 +4789,7 @@ static const char *const DL_REGEN_GATES[] = {
  * the same reasoning as dl_stub() and dl_hooks_stub_dir() above. */
 static bool dl_regen_stub(void)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_REGEN_MAKE_STUB");
     return s && s[0];
 #else
@@ -4805,7 +4805,7 @@ static bool dl_regen_stub(void)
  * dl_regen_stub() already said this is a test process. */
 static bool dl_regen_gate_stub_fails(void)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     return s && s[0];
 #else
@@ -6361,7 +6361,7 @@ static bool dl_wt_hotswap_ensure(const struct dl_dirs *d,
 #if !defined(_WIN32)
 static bool dl_deps_test_force(void)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_DEPS_TEST_FORCE");
     return s && s[0];
 #else
@@ -8899,10 +8899,10 @@ static const char *dl_precheck_word(enum dl_precheck v)
 /* Test-only: make the merge step itself fail the way a crashed or refused
  * git does (a usage error, exit 129), so the uncertain path is exercised
  * through the real spawn rather than a hand-set verdict. Never read
- * outside a test or dev build, the same guard as dl_stub(). */
+ * outside a test build, the same guard as dl_stub(). */
 static bool dl_precheck_tool_fail(void)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_TEST_PRECHECK_TOOL_FAIL");
     return s && s[0];
 #else
@@ -8910,11 +8910,11 @@ static bool dl_precheck_tool_fail(void)
 #endif
 }
 
-/* The beat's budget. A test or dev build may only shorten it, down to
+/* The beat's budget. A test build may only shorten it, down to
  * zero, to reach the deadline path without waiting it out. */
 static int64_t dl_precheck_budget_ms(void)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_TEST_PRECHECK_BUDGET_MS");
     char *end = NULL;
     long long v = s && s[0] ? strtoll(s, &end, 10) : -1;
@@ -10263,7 +10263,7 @@ static void dl_step(const struct zcl_command_request *req,
         dl_unlock(slot);
         return;
     }
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     /* Test-only: a fixed, tiny window between picking a row here and
      * driving it below, so a test can race a concurrent cancel (which
      * takes the row lock, not this step lock) against this exact gap

@@ -14372,6 +14372,248 @@ _test_next:;
 
 #endif /* !defined(_WIN32) */
 
+/* ── test-only hatches stay test-only ───────────────────────────────────
+ * A getenv in dev.land whose name carries STUB, TEST or FAKE skips or fakes
+ * a gate, proof, hook or signature. The dev build lands code too, so each
+ * such read must sit under `#if defined(ZCL_TESTING)` alone: an
+ * `ZCL_DEV_BUILD || ZCL_TESTING` guard would let the dev binary honour it.
+ * The scanner reads the three dev.land sources and checks every such site. */
+
+int repo_path(char *out, size_t outsz, const char *rel);
+
+#define DLX_HATCH_DEPTH 64
+#define DLX_HATCH_LINE 8192
+#define DLX_HATCH_NAME 128
+#define DLX_HATCH_DIR 256
+#define DLX_HATCH_MAX ((size_t)4 * 1024 * 1024)
+
+struct dlx_hatch_scan {
+    int depth;
+    bool testing[DLX_HATCH_DEPTH]; /* this #if is the ZCL_TESTING opener */
+    bool in_else[DLX_HATCH_DEPTH]; /* this #if has passed its #else or #elif */
+    int guarded;                   /* in-scope getenv reads under the guard */
+    int unguarded;                 /* in-scope getenv reads outside it */
+    bool error;                    /* unbalanced, unreadable or unclassifiable */
+    char first[DLX_HATCH_NAME];    /* the first unguarded name */
+};
+
+/* Every STUB, TEST or FAKE name is in scope, plus the unsigned bypass, which
+ * skips the signature check and so is named without one of those words. */
+static bool dlx_hatch_in_scope(const char *name)
+{
+    if (strcmp(name, "ZCL_LAND_ALLOW_UNSIGNED") == 0)
+        return true;
+    return strstr(name, "STUB") != NULL || strstr(name, "TEST") != NULL ||
+           strstr(name, "FAKE") != NULL;
+}
+
+static bool dlx_hatch_word(const char *dir, const char *word)
+{
+    size_t n = strlen(word);
+    return strncmp(dir, word, n) == 0 &&
+           (dir[n] == '\0' || dir[n] == ' ' || dir[n] == '\t' || dir[n] == '/');
+}
+
+/* Exactly the test-build opener, or a conjunction that still requires it. */
+static bool dlx_hatch_opener(const char *dir)
+{
+    static const char and_form[] = "#if defined(ZCL_TESTING) &&";
+    if (strcmp(dir, "#if defined(ZCL_TESTING)") == 0)
+        return true;
+    return strncmp(dir, and_form, sizeof(and_form) - 1) == 0 &&
+           strchr(dir, '|') == NULL;
+}
+
+static bool dlx_hatch_guarded(const struct dlx_hatch_scan *s)
+{
+    for (int i = 0; i < s->depth; i++) {
+        if (s->testing[i] && !s->in_else[i])
+            return true;
+    }
+    return false;
+}
+
+static void dlx_hatch_directive(struct dlx_hatch_scan *s, const char *dir)
+{
+    int top = s->depth - 1;
+    if (strncmp(dir, "#if", 3) == 0) {
+        if (s->depth >= DLX_HATCH_DEPTH) {
+            s->error = true;
+            return;
+        }
+        s->testing[s->depth] = dlx_hatch_opener(dir);
+        s->in_else[s->depth] = false;
+        s->depth++;
+    } else if (dlx_hatch_word(dir, "#else") || dlx_hatch_word(dir, "#elif")) {
+        if (top < 0)
+            s->error = true;
+        else
+            s->in_else[top] = true;
+    } else if (dlx_hatch_word(dir, "#endif")) {
+        if (top < 0)
+            s->error = true;
+        else
+            s->depth--;
+    }
+}
+
+static void dlx_hatch_getenv(struct dlx_hatch_scan *s, const char *line)
+{
+    const char *p = line;
+    while ((p = strstr(p, "getenv(")) != NULL) {
+        char name[DLX_HATCH_NAME];
+        size_t n = 0;
+        p += strlen("getenv(");
+        if (*p != '"') {
+            s->error = true; /* a computed name cannot be classified */
+            return;
+        }
+        for (p++; *p != '"'; p++) {
+            if (*p == '\0' || n + 1 >= sizeof(name)) {
+                s->error = true;
+                return;
+            }
+            name[n++] = *p;
+        }
+        name[n] = '\0';
+        p++;
+        if (!dlx_hatch_in_scope(name))
+            continue;
+        if (dlx_hatch_guarded(s)) {
+            s->guarded++;
+            continue;
+        }
+        if (s->unguarded == 0)
+            (void)snprintf(s->first, sizeof(s->first), "%s", name);
+        s->unguarded++;
+    }
+}
+
+static void dlx_hatch_line(struct dlx_hatch_scan *s, const char *line)
+{
+    const char *p = line;
+    char dir[DLX_HATCH_DIR];
+    size_t n;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != '#') {
+        dlx_hatch_getenv(s, line);
+        return;
+    }
+    n = strlen(p);
+    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t' || p[n - 1] == '\r'))
+        n--;
+    if (n >= sizeof(dir)) {
+        s->error = true;
+        return;
+    }
+    memcpy(dir, p, n);
+    dir[n] = '\0';
+    dlx_hatch_directive(s, dir);
+}
+
+static void dlx_hatch_scan_text(const char *text, struct dlx_hatch_scan *s)
+{
+    char line[DLX_HATCH_LINE];
+    const char *p = text;
+    memset(s, 0, sizeof(*s));
+    while (*p != '\0' && !s->error) {
+        const char *eol = strchr(p, '\n');
+        size_t n = eol ? (size_t)(eol - p) : strlen(p);
+        if (n >= sizeof(line)) {
+            s->error = true;
+            return;
+        }
+        memcpy(line, p, n);
+        line[n] = '\0';
+        dlx_hatch_line(s, line);
+        p = eol ? eol + 1 : p + n;
+    }
+    if (s->depth != 0)
+        s->error = true;
+}
+
+static char *dlx_hatch_read(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    char *buf = NULL;
+    long n;
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) >= 0 &&
+        (size_t)n < DLX_HATCH_MAX && fseek(f, 0, SEEK_SET) == 0) {
+        buf = calloc((size_t)n + 1, 1);
+        if (buf && fread(buf, 1, (size_t)n, f) != (size_t)n) {
+            free(buf);
+            buf = NULL;
+        }
+    }
+    fclose(f);
+    return buf;
+}
+
+static int test_dev_land_test_hatches_testing_only(void)
+{
+    static const char *const files[] = {
+        "tools/command/native_dev_land.c",
+        "tools/command/native_dev_land_regen.c",
+        "tools/command/native_dev_land_window.c",
+    };
+    int failures = 0;
+    TEST("land: every STUB, TEST or FAKE getenv in dev.land sits under #if defined(ZCL_TESTING) alone") {
+        struct dlx_hatch_scan s;
+        int total = 0;
+        /* The scanner's own verdicts first, so a silent scanner cannot pass. */
+        dlx_hatch_scan_text("#if defined(ZCL_TESTING)\n"
+                            "    if (getenv(\"ZCL_LAND_TEST_X\")) return;\n"
+                            "#endif\n", &s);
+        ASSERT(!s.error && s.guarded == 1 && s.unguarded == 0);
+        dlx_hatch_scan_text("#if defined(ZCL_TESTING) && !defined(_WIN32)\n"
+                            "    (void)getenv(\"ZCL_LAND_TEST_X\");\n"
+                            "#else\n    (void)0;\n#endif /* not windows */\n", &s);
+        ASSERT(!s.error && s.guarded == 1 && s.unguarded == 0);
+        dlx_hatch_scan_text("#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)\n"
+                            "    (void)getenv(\"ZCL_LAND_TEST_X\");\n#endif\n", &s);
+        ASSERT(!s.error && s.unguarded == 1);
+        dlx_hatch_scan_text("#if defined(ZCL_TESTING)\n#else\n"
+                            "    (void)getenv(\"ZCL_LAND_TEST_X\");\n#endif\n", &s);
+        ASSERT(!s.error && s.unguarded == 1);
+        dlx_hatch_scan_text("static void f(void) { (void)getenv(\"ZCL_LAND_HOOKS_STUB_DIR\"); }\n", &s);
+        ASSERT(!s.error && s.unguarded == 1);
+        ASSERT(strcmp(s.first, "ZCL_LAND_HOOKS_STUB_DIR") == 0);
+        dlx_hatch_scan_text("(void)getenv(\"HOME\");\n(void)getenv(\"ZCL_LAND_PROOF_STUB\");\n", &s);
+        ASSERT(!s.error && s.unguarded == 1 && s.guarded == 0);
+        ASSERT(strcmp(s.first, "ZCL_LAND_PROOF_STUB") == 0);
+        dlx_hatch_scan_text("(void)getenv(\"ZCL_LAND_ALLOW_UNSIGNED\");\n", &s);
+        ASSERT(!s.error && s.unguarded == 1);
+        dlx_hatch_scan_text("#if defined(ZCL_TESTING)\n    (void)getenv(\"ZCL_LAND_TEST_X\");\n", &s);
+        ASSERT(s.error);
+        dlx_hatch_scan_text("#endif\n", &s);
+        ASSERT(s.error);
+        /* Then the real sources: no in-scope read may sit outside the guard. */
+        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+            char path[1024];
+            char *text;
+            ASSERT(repo_path(path, sizeof(path), files[i]) == 0);
+            text = dlx_hatch_read(path);
+            ASSERT(text != NULL);
+            dlx_hatch_scan_text(text, &s);
+            free(text);
+            if (s.unguarded != 0)
+                (void)fprintf(stderr, "dev.land hatch outside ZCL_TESTING: %s in %s\n",
+                              s.first, files[i]);
+            ASSERT(!s.error);
+            ASSERT(s.unguarded == 0);
+            total += s.guarded;
+        }
+        /* Non-vacuous: the sources really do carry the guarded hatch reads. */
+        ASSERT(total >= 20);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_land(void)
 {
     /* Canonical registered group: private bare origin only, no live queue. */
@@ -14596,6 +14838,7 @@ int test_dev_land(void)
     failures += test_dev_land_final_plan_preparation();
     failures += test_dev_land_rebase_regen_cases();
     failures += test_dev_land_queued_precheck_cases();
+    failures += test_dev_land_test_hatches_testing_only();
     failures += dlx_outcome_escape_cases();
     failures += dlx_optional_string_refusal_cases();
     failures += dlx_string_compatibility_cases();
