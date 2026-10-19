@@ -1195,7 +1195,6 @@ int check_proof_server_pin_selftest(void)
 }
 
 static const char k_ssd_class[] = "tools/scripts/stopwatch_skip_class.sh";
-static const char k_ssd_judge[] = "tools/scripts/stopwatch_evidence_judge.sh";
 static const char k_ssd_def[] =
     "engine/services/include/services/stopwatch_skip_classes.def";
 static const char k_ssd_table_cmd[] =
@@ -1286,9 +1285,6 @@ static int ssd_check(FILE *out)
     rc = ssd_run_selftest(out, k_ssd_class, &fail);
     if (rc)
         return rc;
-    rc = ssd_run_selftest(out, k_ssd_judge, &fail);
-    if (rc)
-        return rc;
 
     int rows_in_file = 0;
     rc = ssd_count_def(&rows_in_file);
@@ -1354,8 +1350,6 @@ static const char k_ssd_class_four[] =
     "echo 'd|'\n"
     "}\n"
     "if [ \"${1:-}\" = \"--selftest\" ]; then echo \"selftest: PASS\"; exit 0; fi\n";
-static const char k_ssd_judge_ok[] =
-    "if [ \"${1:-}\" = \"--selftest\" ]; then echo \"selftest: PASS\"; exit 0; fi\n";
 static const char k_ssd_def_five[] =
     "STOPWATCH_SKIP_CLASS(a, 1)\n"
     "STOPWATCH_SKIP_CLASS(b, 1)\n"
@@ -1383,7 +1377,6 @@ static int ssd_st_class_fail(FILE *out, char *ob, size_t oc)
     if (psp_st_reset(out))
         bad = 1;
     if (csr_write(k_ssd_class, k_ssd_class_fail)
-        || csr_write(k_ssd_judge, k_ssd_judge_ok)
         || csr_write(k_ssd_def, k_ssd_def_five))
         bad = 1;
     int rc = ssd_check(out);
@@ -1455,7 +1448,6 @@ int check_stopwatch_skip_detector_selftest(void)
 
     fclose(out);
     unlink(k_ssd_class);
-    unlink(k_ssd_judge);
     unlink(k_ssd_def);
     (void)rmdir("engine/services/include/services");
     (void)rmdir("engine/services/include");

@@ -8,7 +8,7 @@
 # Three callers source this file:
 #   tools/scripts/c3_stopwatch_run_and_record.sh   (collector — alarms at
 #       collect time, on stderr + syslog, right after the ledger append)
-#   tools/scripts/stopwatch_evidence_judge.sh      (judge — reports the
+#   `z23 ops stopwatch judge`      (judge — reports the
 #       streak on stdout and alarms on stderr)
 #   tools/scripts/netdisrupt_stopwatch_run_and_record.sh (PROOF B collector)
 #

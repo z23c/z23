@@ -15,7 +15,7 @@
  *           typed surface: `z23 ops state --subsystem=stopwatch_evidence`.
  *   - shell tools/scripts/stopwatch_skip_class.sh parses it with sed, and is
  *           sourced by the collector (c3_stopwatch_run_and_record.sh) and by
- *           the judge (stopwatch_evidence_judge.sh).
+ *           the judge (tools/command/native_stopwatch_judge.c).
  * Add a harness skip() site, add its row HERE and both consumers learn it.
  *
  * Rows (each ENTIRELY on one line — the shell parser is line-oriented):

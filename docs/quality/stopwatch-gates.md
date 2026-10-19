@@ -67,10 +67,10 @@ PASS/FAIL/SKIP/SEAM/STALLED-NAMED verdict — that verdict is recorded, not
 paged. The only thing that makes a collect run itself fail is being unable
 to lock or append the ledger line.
 
-## Judge half — `stopwatch_evidence_judge.sh`
+## Judge half — `z23 ops stopwatch judge`
 
 ```bash
-tools/scripts/stopwatch_evidence_judge.sh <history.jsonl> [--max-age-secs N]
+z23 ops stopwatch judge --history=<history.jsonl> [--max_age_secs=N] [--expect_artifact_sha256=HEX]
 ```
 
 Reads only the **last** line (a stopwatch run is a point-in-time proof,
@@ -82,12 +82,12 @@ stopwatch-judge: VERDICT=PASS|FAIL|STALE reason=... artifact=<dir>
 ```
 
 plus one `SKIP_STREAK` report line (see the skip taxonomy above),
-and exits `0`/`1`/`2` respectively. `PASS` requires the last run's verdict
-to be exactly `pass` **and** fresh (age <= `--max-age-secs`, default
+and reports `judge_rc` `0`/`1`/`2` respectively. `PASS` requires the last run's verdict
+to be exactly `pass` **and** fresh (age <= `--max_age_secs`, default
 86400s = 24h). Any other recorded verdict (including `skip`) reads as
 `FAIL`, never a silent pass. `STALE` — the timer-died case — fires when
 the ledger is missing/empty/malformed, or the last sample is older than
-`--max-age-secs`: a green run from last week must not keep reporting PASS
+`--max_age_secs`: a green run from last week must not keep reporting PASS
 forever once the collector stops running.
 
 ## Skip taxonomy and the skip-streak alarm
@@ -101,10 +101,10 @@ verdicts from the judge.
 ### The class table
 
 `engine/services/include/services/stopwatch_skip_classes.def` is the one table.
-Three consumers read it and none keeps a private copy:
+Two readers parse it and none keeps a private copy:
 `engine/services/src/stopwatch_skip_watch.c` (the typed surface),
-`tools/scripts/stopwatch_skip_class.sh` (sourced by the collector and the
-judge). Add a `skip()` site to a harness, add its row there.
+`tools/scripts/stopwatch_skip_class.sh` (sourced by the collector). The
+judge reads the same table through the typed surface. Add a `skip()` site to a harness, add its row there.
 
 | class | threshold | why that threshold | example reasons |
 |-------|-----------|--------------------|-----------------|
@@ -156,7 +156,7 @@ Six mechanisms keep the alarm off the score, listed strongest first:
    merged the streams cannot read it as a verdict, and the recipes'
    FALSE-GREEN guard is unaffected.
 4. The judge's `VERDICT` token and exit code come from the unchanged code
-   path. The 12 pre-existing `--selftest` cases are the regression proof, and
+   path. The `evidence_judge` test group is the regression proof, and
    the new cases assert `(token, rc)` is byte-identical with and without an
    `ALARM`.
 5. It is one-directional by construction: it can only *add* a line. There is

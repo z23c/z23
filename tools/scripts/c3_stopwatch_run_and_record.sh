@@ -6,7 +6,7 @@
 # tools/scripts/cold_start_to_tip_stopwatch.sh exactly once and appends ONE
 # JSON line to the durable ledger at
 # ~/.local/state/zclassic23-c3-stopwatch/history.jsonl. The JUDGE half is
-# tools/scripts/stopwatch_evidence_judge.sh / `make c3-stopwatch-report`
+# `z23 ops stopwatch judge` / `make c3-stopwatch-report`
 # (same collect/judge split as tools/scripts/soak_evidence.sh — collect
 # NEVER gates on the run's outcome, judge does).
 #

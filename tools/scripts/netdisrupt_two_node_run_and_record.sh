@@ -8,7 +8,7 @@
 # live-client PROOF B collector writes:
 #   ~/.local/state/zclassic23-netdisrupt-stopwatch/history.jsonl
 # so the single documented judge (`make netdisrupt-stopwatch-report` /
-# tools/scripts/stopwatch_evidence_judge.sh) reads the last line regardless
+# `z23 ops stopwatch judge`) reads the last line regardless
 # of which PROOF B runner produced it.
 #
 # Ledger line schema is kept identical to

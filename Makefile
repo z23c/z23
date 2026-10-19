@@ -10048,15 +10048,19 @@ replay-gate-d2: zclassic23
 # guard below requires the judge to actually PRINT a verdict line — a
 # crashed/no-op judge fails loud, never exit-0-as-proof.
 .PHONY: soak-evidence-report
-soak-evidence-report:
+soak-evidence-report: $(Z23_DEV_BIN) $(JSONQ_BIN)
 	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash tools/scripts/soak_evidence.sh judge $${ZCL_SOAK_JUDGE_ARGS:-}); rc=$$?; set -e; \
+	 res=$$($(Z23_DEV_BIN) ops soak judge --format=json $${ZCL_SOAK_JUDGE_ARGS:-} 2>/dev/null); \
+	 out=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.text); \
+	 rc=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.judge_rc); \
+	 alarm=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.alarm); \
+	 if [ -n "$$alarm" ]; then echo "$$alarm" >&2; fi; \
 	 echo "$$out"; \
-	 if ! echo "$$out" | grep -q "soak-evidence: VERDICT="; then \
-	     echo "soak-evidence-report: FALSE-GREEN GUARD — judge printed no VERDICT line (rc=$$rc)"; \
+	 if ! echo "$$out" | grep -q "VERDICT="; then \
+	     echo "soak-evidence-report: FALSE-GREEN GUARD — judge printed no VERDICT line"; \
 	     exit 1; \
 	 fi; \
-	 exit "$$rc"'
+	 exit "$${rc:-1}"'
 
 .PHONY: soak-evidence-selftest
 soak-evidence-selftest:
@@ -10075,41 +10079,27 @@ soak-evidence-selftest:
 # the ledgers appended by tools/scripts/c3_stopwatch_run_and_record.sh /
 # tools/scripts/netdisrupt_stopwatch_run_and_record.sh (deploy/examples/
 # zcl-c3-stopwatch.timer / zcl-netdisrupt-stopwatch.timer run those every
-# 6h) via tools/scripts/stopwatch_evidence_judge.sh — a point-in-time
+# 6h) via `z23 ops stopwatch judge` — a point-in-time
 # judge (PASS/FAIL/STALE), not a windowed accrual judge like
 # soak-evidence-report. Same false-green guard discipline: the judge MUST
 # print a VERDICT= line or the recipe fails loud regardless of its own
 # exit code. DELIBERATELY excluded from `make ci` — these read a LEDGER
 # file under $HOME/.local/state, not hermetic fixtures.
 .PHONY: c3-stopwatch-report
-c3-stopwatch-report:
+c3-stopwatch-report: $(Z23_DEV_BIN) $(JSONQ_BIN)
 	@bash -c 'set -uo pipefail; \
 	 hist="$${ZCL_C3_STOPWATCH_HISTORY:-$$HOME/.local/state/zclassic23-c3-stopwatch/history.jsonl}"; \
-	 set +e; out=$$(bash tools/scripts/stopwatch_evidence_judge.sh "$$hist" $${ZCL_STOPWATCH_JUDGE_ARGS:-}); rc=$$?; set -e; \
+	 res=$$($(Z23_DEV_BIN) ops stopwatch judge --format=json --history="$$hist" $${ZCL_STOPWATCH_JUDGE_ARGS:-} 2>/dev/null); \
+	 out=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.text); \
+	 rc=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.judge_rc); \
+	 alarm=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.alarm); \
+	 if [ -n "$$alarm" ]; then echo "$$alarm" >&2; fi; \
 	 echo "$$out"; \
-	 if ! echo "$$out" | grep -q "stopwatch-judge: VERDICT="; then \
-	     echo "c3-stopwatch-report: FALSE-GREEN GUARD — judge printed no VERDICT line (rc=$$rc)"; \
+	 if ! echo "$$out" | grep -q "VERDICT="; then \
+	     echo "c3-stopwatch-report: FALSE-GREEN GUARD — judge printed no VERDICT line"; \
 	     exit 1; \
 	 fi; \
-	 exit "$$rc"'
-
-# stopwatch-judge-selftest: hermetic regression guard for the stopwatch judge's
-# fixture-integrity gates — canned tmp ledgers, no live nodes/ledgers touched.
-# Proves a below-checkpoint tip is refused (THIN_FIXTURE), a fixture lagging a
-# fresh oracle sample is refused (LAGGING_FIXTURE), a missing SLO ledger is
-# tolerated, and legacy/netdisrupt lines without final_network_tip still judge
-# exactly as before. Same false-green discipline as the sibling *-selftest
-# targets (rc==0 AND a "selftest: PASS" line).
-.PHONY: stopwatch-judge-selftest
-stopwatch-judge-selftest:
-	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash tools/scripts/stopwatch_evidence_judge.sh --selftest 2>&1); rc=$$?; set -e; \
-	 echo "$$out"; \
-	 if [ "$$rc" != "0" ] || ! echo "$$out" | grep -q "^selftest: PASS"; then \
-	     echo "stopwatch-judge-selftest: FAIL stopwatch_evidence_judge.sh (rc=$$rc; no selftest: PASS line)"; \
-	     exit 1; \
-	 fi; \
-	 echo "stopwatch-judge-selftest: PASS"'
+	 exit "$${rc:-1}"'
 
 # stopwatch-symmetry-selftest: hermetic mutation test of the artifact-symmetry
 # comparison (tools/scripts/stopwatch_artifact_symmetry_check.sh --selftest).
@@ -10183,16 +10173,20 @@ netdisrupt-stopwatch: zclassic23 zcl-rpc
 	 exit $$rc'
 
 .PHONY: netdisrupt-stopwatch-report
-netdisrupt-stopwatch-report:
+netdisrupt-stopwatch-report: $(Z23_DEV_BIN) $(JSONQ_BIN)
 	@bash -c 'set -uo pipefail; \
 	 hist="$${ZCL_NETDISRUPT_STOPWATCH_HISTORY:-$$HOME/.local/state/zclassic23-netdisrupt-stopwatch/history.jsonl}"; \
-	 set +e; out=$$(bash tools/scripts/stopwatch_evidence_judge.sh "$$hist" $${ZCL_STOPWATCH_JUDGE_ARGS:-}); rc=$$?; set -e; \
+	 res=$$($(Z23_DEV_BIN) ops stopwatch judge --format=json --history="$$hist" $${ZCL_STOPWATCH_JUDGE_ARGS:-} 2>/dev/null); \
+	 out=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.text); \
+	 rc=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.judge_rc); \
+	 alarm=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.alarm); \
+	 if [ -n "$$alarm" ]; then echo "$$alarm" >&2; fi; \
 	 echo "$$out"; \
-	 if ! echo "$$out" | grep -q "stopwatch-judge: VERDICT="; then \
-	     echo "netdisrupt-stopwatch-report: FALSE-GREEN GUARD — judge printed no VERDICT line (rc=$$rc)"; \
+	 if ! echo "$$out" | grep -q "VERDICT="; then \
+	     echo "netdisrupt-stopwatch-report: FALSE-GREEN GUARD — judge printed no VERDICT line"; \
 	     exit 1; \
 	 fi; \
-	 exit "$$rc"'
+	 exit "$${rc:-1}"'
 
 # Always-fresh end-to-end test.
 #

@@ -2321,7 +2321,7 @@ Z23_FLAG("ZCL_SOAK_EVIDENCE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_SOAK_EXE_SHA_CMD", "env_build", "-", "-",
           "Collector test seam for running-image digest; first use tools/scripts/soak_evidence.sh:auto")
 Z23_FLAG("ZCL_SOAK_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:auto")
+          "Flags for the soak judge leaf in soak-evidence-report, e.g. --window_hours=24; first use Makefile:auto")
 Z23_FLAG("ZCL_SOAK_LAG_WARN", "env_build", "-", "-",
           "undocumented; first use tools/scripts/lane_health.sh:auto")
 Z23_FLAG("ZCL_SOAK_NOW", "env_build", "-", "-",
@@ -2397,19 +2397,19 @@ Z23_FLAG("ZCL_STICKY_REQUIRE_ALL", "env_build", "0", "-",
 Z23_FLAG("ZCL_STICKY_VERDICT_DIR", "make_var", "-", "-",
           "undocumented; first use Makefile:auto")
 Z23_FLAG("ZCL_STOPWATCH_CHECKPOINT_HEIGHT", "env_build", "3056758", "-",
-          "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:auto")
+          "undocumented; first use tools/command/native_stopwatch_judge.c:auto")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:auto")
+          "Flags for the stopwatch judge leaf in the c3 and netdisrupt report targets, e.g. --max_age_secs=3600; first use Makefile:auto")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_NOW", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:auto")
+          "undocumented; first use tools/command/native_stopwatch_judge.c:auto")
 Z23_FLAG("ZCL_STOPWATCH_ORACLE_LAG_BUDGET", "env_build", "2000", "-",
-          "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:auto")
+          "undocumented; first use tools/command/native_stopwatch_judge.c:auto")
 Z23_FLAG("ZCL_STOPWATCH_ORACLE_MAX_AGE_SECS", "env_build", "3600", "-",
-          "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:auto")
+          "undocumented; first use tools/command/native_stopwatch_judge.c:auto")
 Z23_FLAG("ZCL_STOPWATCH_SKIP_CLASSES_DEF", "env_build", "-", "-",
           "undocumented; first use tools/scripts/stopwatch_skip_class.sh:auto")
 Z23_FLAG("ZCL_STOPWATCH_SLO_LEDGER", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:auto")
+          "undocumented; first use tools/command/native_stopwatch_judge.c:auto")
 Z23_FLAG("ZCL_STORAGE_CLASS", "env_runtime", "-", "-",
           "undocumented; first use platform/modules/util/src/storage_pacing.c:auto")
 Z23_FLAG("ZCL_STOREPROOF_BACKUP_PASS", "env_build", "-", "-",

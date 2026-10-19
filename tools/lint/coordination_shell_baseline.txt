@@ -306,7 +306,6 @@ tools/scripts/step1_refold_rate_proof.sh
 tools/scripts/sticky_fault_inject.sh
 tools/scripts/sticky_matrix.sh
 tools/scripts/stopwatch_artifact_symmetry_check.sh
-tools/scripts/stopwatch_evidence_judge.sh
 tools/scripts/stopwatch_json_lib.sh
 tools/scripts/stopwatch_skip_class.sh
 tools/scripts/store_sell_operator_proof.sh

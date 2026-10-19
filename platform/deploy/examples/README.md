@@ -86,7 +86,7 @@ operator-specific peers. Copy and adapt before installing:
   collect/judge split as the soak evidence collector: the wrapper always
   exits 0 once the ledger append succeeds, regardless of the run's own
   PASS/FAIL/SKIP/SEAM/STALLED-NAMED verdict; `make c3-stopwatch-report`
-  judges the ledger's last line via `tools/scripts/stopwatch_evidence_judge.sh`.
+  judges the ledger's last line via `z23 ops stopwatch judge`.
   `OnFailure=` fires only on a lock/append failure.
 - `zcl-netdisrupt-run@.service` / `zcl-netdisrupt-stopwatch.timer` —
   PROOF B, the network-disruption recovery collector:

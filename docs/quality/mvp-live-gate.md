@@ -103,7 +103,7 @@ soak-accrual: VERDICT=<v> uptime_s=<n> pct=<n> restarts=<n|null> at_tip=<0|1> re
   includes initial and manual launches.
 
 This is an *instantaneous* accrual signal; the authoritative 168h verdict
-is the JSONL judge in `tools/scripts/soak_evidence.sh`
+is the JSONL judge `z23 ops soak judge`
 (`make soak-evidence-report`). This script does **not** replace it — it
 tells you at a glance whether the current uptime window is even eligible
 to accrue.

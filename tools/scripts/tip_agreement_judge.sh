@@ -21,7 +21,7 @@
 # graded. All of them. Not the last line.
 #
 # That sentence is here because a sibling judge in this repo
-# (stopwatch_evidence_judge.sh) reads `tail -n 1` — correctly, because a
+# (`z23 ops stopwatch judge`) reads `tail -n 1` — correctly, because a
 # stopwatch run is a point-in-time proof — and the shape was then reused
 # where it did not belong, so a single green row was read as a week of
 # endurance. Agreement is an ACCRUAL claim: "our tip hash matched genuinely
@@ -82,7 +82,7 @@
 #   --window-hours 24   The accrual claim this rung supports is "a day of
 #                       repeated agreement". 24h also matches the staleness
 #                       convention already used by
-#                       stopwatch_evidence_judge.sh and soak_evidence.sh, so
+#                       the stopwatch and soak judges (`z23 ops stopwatch judge`, `z23 ops soak judge`), so
 #                       an operator reading three judges reads one clock.
 #   --max-age-secs 1800 The recorder's shipped cadence is 10 minutes
 #                       (platform/deploy/z23-tip-agreement.timer), so 1800s is

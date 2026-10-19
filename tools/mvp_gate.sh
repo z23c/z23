@@ -497,11 +497,9 @@ fi
 C3_HISTORY="${ZCL_C3_STOPWATCH_HISTORY:-$HOME/.local/state/zclassic23-c3-stopwatch/history.jsonl}"
 C3_JUDGE_LINE=""; C3_TOKEN=""
 if [[ -n "$LIVE_ARTIFACT" ]]; then
-    c3_out="$(bash "$MVP_REPO_ROOT/tools/scripts/stopwatch_evidence_judge.sh" "$C3_HISTORY" \
-        --max-age-secs="$CANARY_MAX_AGE_S" --expect-artifact-sha256="$LIVE_ARTIFACT" 2>/dev/null)" || true
-    while IFS= read -r c3_l; do
-        [[ "$c3_l" == "stopwatch-judge: VERDICT="* ]] && C3_JUDGE_LINE="$c3_l"
-    done <<< "$c3_out"
+    c3_json="$("$ZCL_NODE_BIN" ops stopwatch judge --format=json --history="$C3_HISTORY" \
+        --max_age_secs="$CANARY_MAX_AGE_S" --expect_artifact_sha256="$LIVE_ARTIFACT" 2>/dev/null)" || true
+    C3_JUDGE_LINE="$(printf '%s' "$c3_json" | sed -n 's/.*"verdict_line":"\([^"]*\)".*/\1/p')"
     [[ "$C3_JUDGE_LINE" =~ VERDICT=([A-Z_]+) ]] && C3_TOKEN="${BASH_REMATCH[1]}"
 fi
 if [[ -z "$LIVE_ARTIFACT" ]]; then

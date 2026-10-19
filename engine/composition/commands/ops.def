@@ -1154,6 +1154,56 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_ops_host_slo_judge)
 
+ZCL_COMMAND_READY_READ(
+    "ops.host.slo.soak", "ops.host.slo", "ops.soak.judge",
+    "Judge the 168 h soak evidence ledger (MVP C6)",
+    "Reads the hourly soak evidence ledger and answers MET, NOT_MET or "
+    "INSUFFICIENT over the trailing window anchored at the last sample: "
+    "coverage, sampling holes, operator interventions inferred from "
+    "NRestarts, soak and oracle reachability, the share of samples at the "
+    "tip, security posture, one running binary and a fresh last sample. A "
+    "short, thin or stale ledger is INSUFFICIENT, never a pass; verdict and "
+    "judge_rc (0, 1 or 2) carry the result. dir "
+    "overrides the evidence directory (ZCL_SOAK_EVIDENCE_DIR, else "
+    "~/.local/state/zclassic23-soak-evidence); allow_stale judges a "
+    "historical window. It reads the ledger and writes nothing.",
+    8192,
+    "soak,evidence,judge,window,c6,168h,ledger",
+    "zcl.ops_soak_judge.input.v1", "zcl.soak_judge.v1",
+    "dir,window_hours,allow_stale,now", "",
+    "z23 ops soak judge --window_hours=168",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_soak_judge)
+
+ZCL_COMMAND_READY_READ(
+    "ops.host.slo.stopwatch", "ops.host.slo", "ops.stopwatch.judge",
+    "Judge the last row of a stopwatch ledger (MVP C3)",
+    "Reads the last row of a wall-clock stopwatch ledger (history.jsonl) and "
+    "answers PASS, FAIL, STALE, THIN_FIXTURE, LAGGING_FIXTURE, UNBOUND, "
+    "WRONG_ARTIFACT or INCOMPLETE. A row older than max_age_secs (default 24 "
+    "h) is STALE; a pass against a chain below the checkpoint or lagging a "
+    "fresh oracle sample is refused; with expect_artifact_sha256 only a row "
+    "that names that executable and whose artifact proof says pass "
+    "qualifies. It also reports the trailing skip streak. verdict and "
+    "judge_rc (0, 1 or 2) carry the result. It reads the "
+    "ledgers and writes nothing.",
+    8192,
+    "stopwatch,judge,cold,start,c3,ledger,evidence",
+    "zcl.ops_stopwatch_judge.input.v1", "zcl.stopwatch_judge.v1",
+    "history,max_age_secs,expect_artifact_sha256,slo_ledger,now", "history",
+    "z23 ops stopwatch judge --history=$HOME/.local/state/"
+    "zclassic23-c3-stopwatch/history.jsonl",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_stopwatch_judge)
+
 ZCL_COMMAND_BRANCH("ops.mesh.device", "ops.mesh", "Offline owner device identity and grants",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_COMMAND(

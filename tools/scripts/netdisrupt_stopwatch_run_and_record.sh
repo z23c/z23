@@ -8,7 +8,7 @@
 # ~/.local/state/zclassic23-netdisrupt-stopwatch/history.jsonl. Same
 # collect/judge split as c3_stopwatch_run_and_record.sh and
 # tools/scripts/soak_evidence.sh — this wrapper NEVER gates on the run's
-# outcome; tools/scripts/stopwatch_evidence_judge.sh /
+# outcome; `z23 ops stopwatch judge` /
 # `make netdisrupt-stopwatch-report` does.
 #
 # Ledger line: {ts, verdict, exit_code, wall_clock_seconds, budget_seconds,

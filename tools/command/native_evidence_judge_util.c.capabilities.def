@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_evidence_judge_util.c", CAP_FS_READ, "reads one ledger file whole with fopen(path, \"rb\")")

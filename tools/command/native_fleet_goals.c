@@ -299,26 +299,24 @@ static const struct gr_static k_static[] = {
      "run `z23 status` on each node host and post the result as a receipt"},
     {"G11", false, "no spend ledger summary is read by this card",
      "card: report `fleet usage` totals as ZCL spent"},
-    {"C1", false, "no receipt producer: `make mvp` prints the C1 verdict and "
-                  "`make ci-install-linger` records nothing durable",
-     "card: write an install receipt from ci-install-linger, then read it here"},
-    {"C2", false, "no receipt producer: `make mvp-onion-local` prints its "
-                  "bootstrap time and records nothing durable",
-     "card: write a timed onion bootstrap receipt, then read it here"},
-    {"C4", false, "no receipt producer: `make test-shielded-payment` records "
+    {"C1", false, "no receipt producer: `make mvp` and ci-install-linger "
+                  "record nothing durable",
+     "card: write a C1 install receipt"},
+    {"C2", false, "no receipt producer: mvp-onion-local records nothing "
+                  "durable",
+     "card: write a C2 bootstrap receipt"},
+    {"C4", false, "no receipt producer: test-shielded-payment records "
                   "nothing durable",
-     "card: write a shielded payment receipt, then read it here"},
-    {"C5", false, "no receipt producer: `make ci-mvp-gates` records nothing "
-                  "durable and the full store sale has no automated run",
-     "card: write a store sale receipt, then read it here"},
-    {"C7", false, "no receipt producer: `make test-crash-bootstrap` records "
+     "card: write a C4 payment receipt"},
+    {"C5", false, "no receipt producer: ci-mvp-gates records nothing "
+                  "durable",
+     "card: write a C5 store sale receipt"},
+    {"C7", false, "no receipt producer: test-crash-bootstrap records "
                   "nothing durable",
-     "card: write a kill -9 recovery receipt, then read it here"},
-    {"C8", false, "needs 168 h of observation, have 0 h: no producer persists "
-                  "a parity mismatch count; the parity service latches "
-                  "in-process flags and the soak ledger records height gap "
-                  "only",
-     "card: record parity mismatch samples to a ledger, then read it here"},
+     "card: write a C7 recovery receipt"},
+    {"C8", false, "needs 168 h of observation, have 0 h: no producer "
+                  "persists a parity mismatch count",
+     "card: write parity samples to a ledger"},
     {"D1", false, "no reader counts finished runs with complete provider "
                   "counters across hosts",
      "card: report recorded-run share per host from the experiment ledger"},

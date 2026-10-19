@@ -294,7 +294,7 @@ AGENT_IMPACT_RULE("engine/services/src/soak_attestation_service.c|engine/service
  * classifier both stopwatch scripts source, and the collector/judge that
  * emit the alarm. Reporter-only, so it maps to its own group plus the
  * registry test that owns every dumpstate descriptor row. */
-AGENT_IMPACT_RULE("engine/services/src/stopwatch_skip_watch.c|engine/services/include/services/stopwatch_skip_watch.h|engine/services/include/services/stopwatch_skip_classes.def|tests/harness/src/test_stopwatch_skip_watch.c|tools/scripts/stopwatch_skip_class.sh|tools/scripts/stopwatch_evidence_judge.sh|tools/scripts/c3_stopwatch_run_and_record.sh|tools/scripts/netdisrupt_stopwatch_run_and_record.sh", "stopwatch_skip_watch stopwatch_peer_gate syncdiag_rpc rpc make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/stopwatch_skip_watch.c|engine/services/include/services/stopwatch_skip_watch.h|engine/services/include/services/stopwatch_skip_classes.def|tests/harness/src/test_stopwatch_skip_watch.c|tools/scripts/stopwatch_skip_class.sh|tools/command/native_stopwatch_judge.c|tools/scripts/c3_stopwatch_run_and_record.sh|tools/scripts/netdisrupt_stopwatch_run_and_record.sh", "stopwatch_skip_watch stopwatch_peer_gate syncdiag_rpc rpc make_lint_gates")
 /* The C3 stopwatch pre-flight peer gate: the version-handshake probe, the
  * stopwatch script that dispatches on it, and the executed fake-peer test.
  * Self-contained (loopback listeners, no node), so it maps to its own group;

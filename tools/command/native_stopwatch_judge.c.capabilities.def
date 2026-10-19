@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_stopwatch_judge.c", CAP_FS_READ, "reads the tail of a stopwatch ledger, an optional SLO ledger and the run artifact's proof.json with fopen(path, \"rb\"); it writes nothing")

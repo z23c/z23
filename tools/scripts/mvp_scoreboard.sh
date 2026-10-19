@@ -47,6 +47,7 @@ cd "$REPO_ROOT"
 
 TEST_ZCL_BIN="${TEST_ZCL_BIN:-$REPO_ROOT/build/bin/test_zcl}"
 ZCL_RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
+ZCL_NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/z23}"
 ZCL_NODE_UNIT="${ZCL_NODE_UNIT:-z23-node}"
 ZCL_LAUNCHD_PLIST="${ZCL_LAUNCHD_PLIST:-$HOME/Library/LaunchAgents/org.z23.zclassic.plist}"
 TIP_GAP_OK="${TIP_GAP_OK:-10}"
@@ -272,11 +273,13 @@ echo ""
            if [ -n "${ZCL_STOPWATCH_JUDGE_ARGS:-}" ]; then
                read -r -a c3_judge_args <<< "$ZCL_STOPWATCH_JUDGE_ARGS"
            fi
-           c3_judge_out="$(bash "$SELF_DIR/stopwatch_evidence_judge.sh" \
-               "$c3_history" "${c3_judge_args[@]}" 2>&1)"
-           c3_judge_rc=$?
-           c3_judge_verdict="$(printf '%s\n' "$c3_judge_out" | \
-               grep 'stopwatch-judge: VERDICT=' | tail -1)"
+           c3_judge_json="$("$ZCL_NODE_BIN" ops stopwatch judge --format=json \
+               --history="$c3_history" "${c3_judge_args[@]}" 2>/dev/null)"
+           c3_judge_rc="$(printf '%s' "$c3_judge_json" | \
+               sed -n 's/.*"judge_rc":\([0-9]*\).*/\1/p')"
+           c3_judge_rc="${c3_judge_rc:-2}"
+           c3_judge_verdict="$(printf '%s' "$c3_judge_json" | \
+               sed -n 's/.*"verdict_line":"\([^"]*\)".*/\1/p')"
            if [ -z "$c3_judge_verdict" ]; then
                VERDICT[3]="FAIL"
                DETAIL[3]="cold-start evidence plumbing FAILED: judge printed no VERDICT line (rc=$c3_judge_rc)"
@@ -381,9 +384,10 @@ echo ""
 # ═══════════════════════════════════════════════════════════════════
 {
     judge_log="$(mktemp)"
-    bash "$SELF_DIR/soak_evidence.sh" judge ${ZCL_SOAK_JUDGE_ARGS:-} >"$judge_log" 2>&1
-    jrc=$?
-    verdict_line="$(grep "soak-evidence: VERDICT=" "$judge_log" | head -1)"
+    "$ZCL_NODE_BIN" ops soak judge --format=json ${ZCL_SOAK_JUDGE_ARGS:-} >"$judge_log" 2>&1
+    jrc="$(sed -n 's/.*"judge_rc":\([0-9]*\).*/\1/p' "$judge_log")"
+    jrc="${jrc:-2}"
+    verdict_line="$(sed -n 's/.*"verdict_line":"\([^"]*\)".*/\1/p' "$judge_log")"
     v=""; reason=""
     if [ -n "$verdict_line" ]; then
         v="$(printf '%s' "$verdict_line" | grep -oE 'VERDICT=[A-Z_]+' | cut -d= -f2)"
