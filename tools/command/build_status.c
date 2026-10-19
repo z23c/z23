@@ -36,6 +36,7 @@ struct bs_view {
     int owner[BS_LOCKS_MAX];
     size_t count;
     bool scanned;
+    uid_t uid;                       /* whose processes may be scanned */
 };
 
 static void bs_load_locks(struct bs_view *v)
@@ -124,12 +125,11 @@ static void bs_scan_process(struct bs_view *v, const char *name)
         closedir(fds);
 }
 
-/* Only processes of the caller's own user are read: the listing never looks
- * into another account's descriptors. */
-static void bs_scan_owners(struct bs_view *v)
+/* Only processes of user `me` are read: the listing never looks into another
+ * account's descriptors. */
+static void bs_scan_owners(struct bs_view *v, uid_t me)
 {
     DIR *proc = opendir("/proc");
-    uid_t me = geteuid();
     v->scanned = true;
     for (struct dirent *p = proc ? readdir(proc) : NULL; p; p = readdir(proc)) {
         char path[64];
@@ -161,7 +161,7 @@ static size_t bs_holders(struct bs_view *v, const char *path, int *pids,
             continue;
         if (n < max) {
             if (!bs_pid_visible(v->locks[i].pid) && !v->scanned)
-                bs_scan_owners(v);
+                bs_scan_owners(v, v->uid);
             pids[n++] = bs_pid_visible(v->locks[i].pid) ? v->locks[i].pid
                                                        : v->owner[i];
         }
@@ -263,7 +263,7 @@ static size_t bs_push_waiters(struct json_value *out, const char *key,
     return live;
 }
 
-bool ba_status(const char *state_dir, struct json_value *out)
+bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out)
 {
     struct bs_view view;
     char dir[BA_PATH_MAX], heavy[BA_PATH_MAX];
@@ -271,6 +271,7 @@ bool ba_status(const char *state_dir, struct json_value *out)
     bool exclusive = false;
     (void)json_push_kv_str(out, "state_dir", state_dir);
     bs_load_locks(&view);
+    view.uid = uid;
     bs_push_lanes(out, state_dir, &view);
     if (!bs_join(dir, sizeof(dir), state_dir, "z23.fifo") ||
         !bs_join(heavy, sizeof(heavy), state_dir, "heavy.lock"))
@@ -282,6 +283,11 @@ bool ba_status(const char *state_dir, struct json_value *out)
     (void)bs_holders(&view, heavy, pids, 4, &exclusive);
     (void)json_push_kv_bool(out, "exclusive_build", exclusive);
     return true;
+}
+
+bool ba_status(const char *state_dir, struct json_value *out)
+{
+    return ba_status_as(state_dir, geteuid(), out);
 }
 
 #endif /* _WIN32 */

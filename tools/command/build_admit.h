@@ -31,6 +31,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 
 enum { BA_PATH_MAX = 1024, BA_CPU_LIST_MAX = 256, BA_MAX_LANES = 4,
        BA_NAME_MAX = 64 };
@@ -105,5 +108,10 @@ int ba_run(const struct ba_config *cfg, const char *const *argv, int argc);
 /* Running and queued jobs as JSON: lane holders and ticket holders read from
  * /proc/locks, with command line and working directory when visible. */
 bool ba_status(const char *state_dir, struct json_value *out);
+
+#ifndef _WIN32
+/* The same, with owner lookup limited to processes of user `uid`. */
+bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out);
+#endif
 
 #endif /* ZCL_BUILD_ADMIT_H */

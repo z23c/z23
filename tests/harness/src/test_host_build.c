@@ -508,7 +508,7 @@ static int hbt_owner_tests(const char *tmp)
     struct json_value doc;
     char dir[HBT_PATH], lock[HBT_PATH + 32];
 
-    TEST("host build: an orphaned lock is attributed to the live process that holds it") {
+    TEST("host build: an orphaned lock is attributed to the live process of the scanned user only") {
         const struct json_value *row;
         int fd, status = 0;
         pid_t k;
@@ -524,9 +524,18 @@ static int hbt_owner_tests(const char *tmp)
             _exit(flock(fd, LOCK_EX) == 0 ? 0 : 1);
         ASSERT_EQ(waitpid(k, &status, 0), k);
         ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        /* Scanning as another user must not read this process, which holds
+         * the lock: the holder is then reported without a pid. */
         json_init(&doc);
         json_set_object(&doc);
-        ASSERT(ba_status(cfg.state_dir, &doc));
+        ASSERT(ba_status_as(cfg.state_dir, geteuid() + 1, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), 1u);
+        row = json_at(json_get(&doc, "running"), 0);
+        ASSERT(json_get(row, "pid") == NULL);
+        json_free(&doc);
+        json_init(&doc);
+        json_set_object(&doc);
+        ASSERT(ba_status_as(cfg.state_dir, geteuid(), &doc));
         ASSERT_EQ(hbt_array_size(&doc, "running"), 1u);
         row = json_at(json_get(&doc, "running"), 0);
         ASSERT_EQ(json_get_int(json_get(row, "pid")), (int64_t)getpid());

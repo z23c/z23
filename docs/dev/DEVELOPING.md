@@ -107,8 +107,9 @@ the limits. `z23 ops host jobs` lists the running and queued jobs as JSON.
 State follows `XDG_STATE_HOME` and `XDG_CACHE_HOME`, falling back to `$HOME`.
 The queue files use the `devbuild` wrapper's z23 format, so both can serve
 one host during the switch. Settings: `DEVBUILD_Z23_LANES` (1 to 4, default
-4), `DEVBUILD_RESERVE_GIB` or `--reserve-gib` (default 1024), `DEVBUILD_PRIORITY=land`,
-`DEVBUILD_KEEP_SCRATCH=1`. Not yet native: the checkout fingerprint and
+4), `DEVBUILD_RESERVE_GIB` or `--reserve-gib` (default 30 GiB, the floor the
+installed `devbuild` admits with; `DEVBUILD_RESERVE_GIB=0` disables it),
+`DEVBUILD_PRIORITY=land`, `DEVBUILD_KEEP_SCRATCH=1`. Not yet native: the checkout fingerprint and
 repeat-run note, and peak-memory accounting in `devbuild.jobs.jsonl`.
 
 ### Priority order and evidence
