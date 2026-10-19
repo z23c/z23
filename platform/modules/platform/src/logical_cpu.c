@@ -16,6 +16,7 @@
 #include "platform/os_proc.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #if defined(__linux__)
 /* Ahead of the platform split below because platform_available_cpu_count()
@@ -175,10 +176,29 @@ int64_t platform_build_memory_budget_bytes(void)
     return -1;
 }
 
+uint32_t platform_build_job_cap(uint32_t jobs, const char *limit)
+{
+    if (!limit) return jobs;
+    uint32_t cap = 0;
+    for (const char *p = limit; *p; p++) {
+        if (*p < '0' || *p > '9') return 0;
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (cap > (UINT32_MAX - digit) / 10) return 0;
+        cap = cap * 10 + digit;
+    }
+    if (cap == 0) return 0;
+    return cap < jobs ? cap : jobs;
+}
+
 bool platform_build_jobs_arg(char out[16])
 {
     uint32_t jobs = platform_build_job_count(platform_available_cpu_count(),
                                              platform_build_memory_budget_bytes());
+    jobs = platform_build_job_cap(jobs, getenv("ZCL_BUILD_MAX_JOBS"));
+    if (!jobs) {
+        fprintf(stderr, "build jobs: ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal\n");
+        return false;
+    }
     int written = snprintf(out, 16, "-j%u", jobs);
     return written > 0 && written < 16;
 }

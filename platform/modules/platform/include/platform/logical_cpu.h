@@ -69,6 +69,11 @@ uint32_t platform_available_cpu_count(void);
 uint32_t platform_build_job_count(uint32_t available_cpus,
                                   int64_t memory_budget_bytes);
 
+/* Apply an optional positive decimal uint32 cap to a derived job count.
+ * NULL means no cap; empty, zero, malformed and overflowing values return
+ * zero (invalid). Never increases jobs. Pure, with no environment reads. */
+uint32_t platform_build_job_cap(uint32_t jobs, const char *limit);
+
 /* The memory this process tree may actually hold, in bytes, or -1 when the
  * host publishes no limit worth dividing by. Prefers the cgroup v2 ceiling
  * the build actually runs under over the size of the machine, because on a
@@ -77,8 +82,9 @@ uint32_t platform_build_job_count(uint32_t available_cpus,
 int64_t platform_build_memory_budget_bytes(void);
 
 /* Write the `-jN` argument a spawned make should carry into `out` (at most
- * 15 characters plus the terminator). Returns false only when the number
- * would not fit, which no count a real host reports can cause.
+ * 15 characters plus the terminator). ZCL_BUILD_MAX_JOBS optionally lowers
+ * the derived count; it cannot widen a CPU or memory grant. Returns false
+ * for an invalid cap or when the formatted number would not fit.
  *
  * This is platform_build_job_count() over platform_available_cpu_count() and
  * platform_build_memory_budget_bytes(). Callers take the formatted argument

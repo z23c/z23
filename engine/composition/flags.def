@@ -1481,6 +1481,8 @@ Z23_FLAG("ZCL_LINT_GATE_TIMING", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_make_lint_gates.c:auto")
 Z23_FLAG("ZCL_LINT_JOBS", "env_build", "8", "-",
           "undocumented; first use tools/lint/run_lint.sh:auto")
+Z23_FLAG("ZCL_BUILD_MAX_JOBS", "env_build", "-", "-",
+          "Positive decimal uint32 cap for native build parallelism; only lowers the CPU/memory-derived count; invalid values refuse the build.")
 Z23_FLAG("ZCL_LINT_MODE", "env_runtime", "FAIL", "-",
           "first use tools/lint/lintc/gate_ratchet_ports.c:auto; documented at docs/agent/AI_SAFETY_GATES.md:153: invokes it as ZCL_LINT_MODE=FAIL, which fails on any violation and ignores the")
 Z23_FLAG("ZCL_LINT_PATTERNINIT_BIN_DIR", "env_build", "-", "-",

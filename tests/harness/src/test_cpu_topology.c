@@ -32,6 +32,7 @@
 
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #if defined(__linux__)
@@ -107,6 +108,21 @@ static int cpt_build_job_count_checks(void)
     int failures = 0;
     const int64_t mib = INT64_C(1024) * 1024;
 
+    CPT_CHECK("explicit Mac job cap reduces parallelism",
+              platform_build_job_cap(10, "2") == 2);
+    CPT_CHECK("cap cannot widen an existing grant",
+              platform_build_job_cap(2, "32") == 2);
+    CPT_CHECK("absent cap preserves the grant",
+              platform_build_job_cap(8, NULL) == 8);
+    CPT_CHECK("uint32 maximum is a valid non-widening cap",
+              platform_build_job_cap(8, "4294967295") == 8);
+    static const char *const invalid[] = {
+        "", "0", "-2", "+2", " 2", "2 ", "2x", "4294967296",
+        "9999999999999999999999999999999999999"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+        CPT_CHECK("invalid cap refuses", platform_build_job_cap(8, invalid[i]) == 0);
+
     /* No budget named: the CPU count stands alone. */
     CPT_CHECK("no budget: 28 processors buy 28 jobs",
               platform_build_job_count(28, 0) == 28);
@@ -145,9 +161,9 @@ static int cpt_build_job_count_checks(void)
         char expect[16];
         CPT_CHECK("build_jobs_arg formats", platform_build_jobs_arg(arg));
         (void)snprintf(expect, sizeof expect, "-j%u",
-                       platform_build_job_count(
+                       platform_build_job_cap(platform_build_job_count(
                            platform_available_cpu_count(),
-                           platform_build_memory_budget_bytes()));
+                           platform_build_memory_budget_bytes()), getenv("ZCL_BUILD_MAX_JOBS")));
         CPT_CHECK("build_jobs_arg is the derivation, formatted",
                   strcmp(arg, expect) == 0);
         /* And it is a real job count, never "-j0". */
