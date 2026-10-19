@@ -52,6 +52,22 @@ static bool rm_meta_present(sqlite3 *db, const char *key)
     return progress_meta_get(db, key, buf, sizeof(buf), &len, &found) && found;
 }
 
+/* A legacy key whose height does not fit int64_t stays put and is never
+ * migrated as a clamped INT64_MAX marker. */
+static int rm_check_overflow_key(sqlite3 *db, const char *key,
+                                 const uint8_t hash[32], bool seeded)
+{
+    int failures = 0;
+    bool have = true;
+    RM_CHECK("overflow legacy key preserved",
+             seeded && rm_meta_present(db, key));
+    RM_CHECK("overflow legacy key not migrated",
+             repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
+                                INT64_MAX, hash, &have, NULL, 0, NULL) &&
+             !have);
+    return failures;
+}
+
 int test_repair_marker(void);
 int test_repair_marker(void)
 {
@@ -175,6 +191,7 @@ int test_repair_marker(void)
         uint256_get_hex(&u, hex);
 
         char k_ref[192], k_rf[192], k_uo[192], k_scan[192], k_rounds[192];
+        char k_overflow[192];
         snprintf(k_ref, sizeof(k_ref), "coin_backfill.refused.%d.%s", 42, hex);
         snprintf(k_rf, sizeof(k_rf),
                  "reducer_frontier.tipfin_backfill_repair.%d.%s", 50, hex);
@@ -183,6 +200,8 @@ int test_repair_marker(void)
         snprintf(k_scan, sizeof(k_scan), "coin_backfill.scan.%d.%s", 70, hex);
         snprintf(k_rounds, sizeof(k_rounds), "coin_backfill.rounds.%d.%s", 80,
                  hex);
+        snprintf(k_overflow, sizeof(k_overflow),
+                 "coin_backfill.refused.9223372036854775808.%s", hex);
 
         uint8_t one = 1;
         uint8_t scanblob[72];
@@ -205,6 +224,7 @@ int test_repair_marker(void)
             progress_meta_set(db, k_outpoint, &one, 1) &&
             progress_meta_set(db, "coins_applied_height", wit8, 8);
         RM_CHECK("seed legacy keys", seeded);
+        bool overflow_seeded = progress_meta_set(db, k_overflow, &one, 1);
 
         RM_CHECK("migrate runs", repair_marker_migrate_from_progress_meta(db));
 
@@ -216,6 +236,9 @@ int test_repair_marker(void)
                                     42, u.data, &have, out, sizeof(out), &plen) &&
                  have && plen == 8 && memcmp(out, "spent:v2", 8) == 0);
         RM_CHECK("refused old key deleted", !rm_meta_present(db, k_ref));
+
+        failures += rm_check_overflow_key(db, k_overflow, u.data,
+                                          overflow_seeded);
 
         RM_CHECK("reducer_frontier repair migrated",
                  repair_marker_have(db, REPAIR_MARKER_KIND_RF_TIPFIN_BACKFILL,

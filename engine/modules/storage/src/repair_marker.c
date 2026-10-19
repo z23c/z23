@@ -15,6 +15,7 @@
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
+#include "util/parse_num.h"
 #include "util/safe_alloc.h"
 
 #include <sqlite3.h>
@@ -427,12 +428,12 @@ static bool parse_legacy_hh_key(const char *key, char *out_kind, size_t out_cap,
         return false;
 
     char hbuf[24];
+    int64_t hv = 0;
     if (h_len >= sizeof(hbuf))
         return false;
     memcpy(hbuf, h_str, h_len);
     hbuf[h_len] = '\0';
-    long long hv = strtoll(hbuf, NULL, 10);
-    if (hv < 0)
+    if (!zcl_parse_i64(hbuf, &hv))
         return false;
 
     struct uint256 u;
