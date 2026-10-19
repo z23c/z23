@@ -47,7 +47,7 @@ static int ccs_parse(const char *text, int strip, struct ccd_nm *nm)
 
 static int ccs_case_parse(void)
 {
-    struct ccd_nm a = {0}, b = {0}, c = {0}, d = {0};
+    struct ccd_nm a = {0}, b = {0}, c = {0}, d = {0}, empty = {0};
     int ok = ccs_parse("C:/work/epoch/dialer.o:         U connect\nD:\\obj\\x.o:0000000000000000 T main\n", 0, &a) == 0;
     int f = ccs_say(ok && a.n == 2 && ccs_row(&a, 0, "C:/work/epoch/dialer.o", "U", "connect")
                     && ccs_row(&a, 1, "D:\\obj\\x.o", "T", "main"),
@@ -61,10 +61,13 @@ static int ccs_case_parse(void)
     f += ccs_say(ok && c.n == 4 && !strcmp(c.row[0].name, "open") && !strcmp(c.row[1].name, "fopen")
                  && !strcmp(c.row[2].name, "plain") && !strcmp(c.row[3].name, "x$lower")
                  && !strcmp(d.row[0].name, "_open$UNIX2003"), "nm: Darwin decoration is stripped only when asked");
+    f += ccs_say(ccs_parse("", 0, &empty) == 0 && empty.n == 0 && !ccd_nm_failed(&empty),
+                 "nm: empty output adds no rows and no failure");
     ccd_nm_free(&a);
     ccd_nm_free(&b);
     ccd_nm_free(&c);
     ccd_nm_free(&d);
+    ccd_nm_free(&empty);
     return f;
 }
 
@@ -103,7 +106,8 @@ static int ccs_cc(const struct ccs_fx *fx, const char *src, const char *obj)
     return lcp_run(&sp, NULL, &code) == 0 ? code : -1;
 }
 
-/* Compiles the fixture objects: a symbol-free one twice, one with an export, and a corrupt file. */
+/* Compiles empty translation units, one with an export, and a corrupt file.
+ * Mach-O empty units still carry compiler-generated local section labels. */
 static int ccs_nm_objs(const struct ccs_fx *fx, char paths[4][CCD_PATH])
 {
     static const char *const rel[] = { "o/empty.o", "o/fill.o", "o/empty2.o", "o/bad.o" };
@@ -121,15 +125,24 @@ static int ccs_case_nm(const struct ccs_fx *fx)
     int ok = ccs_nm_objs(fx, p);
     char *objs[] = { p[0], p[1], p[2] }, *badv[] = { p[1], p[3] };
     struct ccd_nm one = { 0 }, all = { 0 }, broken = { 0 };
-    ok = ok && ccd_run_nm(objs, 3, 0, 1, 0, &one) == 0 && ccd_run_nm(objs, 3, 0, 0, 0, &all) == 0;
+#if defined(__APPLE__)
+    const int strip = 1;
+#else
+    const int strip = 0;
+#endif
+    ok = ok && ccd_run_nm(objs, 3, 0, 1, strip, &one) == 0 && ccd_run_nm(objs, 3, 0, 0, strip, &all) == 0;
     int same = ok && one.n == all.n, named = 0;
     for (size_t i = 0; ok && i < one.n; i++) {
-        same = same && !strcmp(one.row[i].path, p[1]) && !strcmp(one.row[i].path, all.row[i].path);
-        named = named || (!strcmp(one.row[i].name, "filler_export") && !strcmp(one.row[i].type, "T"));
+        int filled = !strcmp(one.row[i].path, p[1]);
+        int empty = !strcmp(one.row[i].path, p[0]) || !strcmp(one.row[i].path, p[2]);
+        int marker = strip && empty && !strcmp(one.row[i].type, "t") && !strncmp(one.row[i].name, "ltmp", 4);
+        same = same && (filled || marker)
+            && ccs_row(&all, i, one.row[i].path, one.row[i].type, one.row[i].name);
+        named = named || (filled && !strcmp(one.row[i].name, "filler_export") && !strcmp(one.row[i].type, "T"));
     }
-    int fail = ok && ccd_run_nm(badv, 2, 0, 1, 0, &broken) == 0 && ccd_nm_failed(&broken);
+    int fail = ok && ccd_run_nm(badv, 2, 0, 1, strip, &broken) == 0 && ccd_nm_failed(&broken);
     int s = ccs_say(ok && !ccd_nm_failed(&one) && !ccd_nm_failed(&all) && named,
-                    "M: symbol-free objects add no rows and no failure; the export is a T row");
+                    "M: native empty units parse without failure; the export is a T row");
     s += ccs_say(same, "nm: one object per call yields the same rows as one batch");
     s += ccs_say(fail, "nm: a corrupt object makes the scan failed (caller reports UNPROVEN)");
     ccd_nm_free(&one);
