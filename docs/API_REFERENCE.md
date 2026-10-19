@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 1002 |
+| Registry entries (branches + leaves) | 1003 |
 | Top-level roots | 17 |
 | Branches | 215 |
-| Leaves (dispatchable command paths) | 787 |
-| … `ready` (live handler in this build) | 684 |
+| Leaves (dispatchable command paths) | 788 |
+| … `ready` (live handler in this build) | 685 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 86 | 17 | 69 |
+| `engine/composition/commands/ops.def` | 87 | 17 | 70 |
 | `engine/composition/commands/dev.def` | 139 | 24 | 115 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -1080,6 +1080,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `ops mesh device host client` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`directory`**, **`peer_key`**, `expected_root`, `target_port`, `route_id`, `route_address`, `route_port`, `connect_ms`, `handshake_ms`, `session_ms`, `idle_ms`, `confirm` | `zcl.device.host.raw.v1` | `z23 ops mesh device host client --input=<explicit-json>` | Run one raw foreground selected-route HOST client |
 | `ops mesh device host receiver` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`directory`**, **`peer_key`**, `expected_root`, `target_port`, `route_id`, `listen_address`, `listen_port`, `allow_external`, `lifetime_ms`, `handshake_ms`, `session_ms`, `idle_ms`, `max_active`, `max_sessions`, `confirm` | `zcl.device.host.raw.v1` | `z23 ops mesh device host receiver --input=<explicit-json>` | Run a finite foreground receiver for one exact HOST pair/root |
+| `ops mesh device host bench` | ready | read / read / operator · maintenance/moderate | `mib`, `repeats`, `receipt_out` | `zcl.tunnel_bench.v1` | `z23 ops mesh device host bench --mib=64 --repeats=3` | Measure PSK tunnel throughput in-process |
 | `ops mesh device host shell` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`user`**, **`host`**, **`route_input`**, `dry_run` | `zcl.device.host.shell.v1` | `z23 ops mesh device host shell --input=<explicit-json>` | Open an ssh shell through the HOST tunnel in one command |
 
 #### `ops.mesh.device.host.package` — Exact installed HOST tunnel execution
