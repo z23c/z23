@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/command/native_soak_judge.c", CAP_FS_READ|CAP_FS_WRITE, "judges the soak evidence ledger read through the shared ledger reader; the only write is the allocation-failure diagnostic to stderr from base/safe_alloc.h, no file is written")
+ZCL_MODULE_CAPABILITY("tools/command/native_soak_judge.c", CAP_FS_WRITE, "judges the soak evidence ledger through the shared reader in native_evidence_judge_util.c, which owns the file access; the only write is the allocation-failure diagnostic to stderr from base/safe_alloc.h, no file is written")
