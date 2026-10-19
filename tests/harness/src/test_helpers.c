@@ -130,6 +130,8 @@ int test_rm_rf_recursive(const char *path)
     char normalized[768];
     if (!test_cleanup_path(path, normalized)) return test_cleanup_error(path, errno);
     enum platform_file_shape shape = platform_file_shape_read(normalized);
+    /* Nothing at the path is already removed: rm -rf semantics, no refusal. */
+    if (shape == PLATFORM_FILE_SHAPE_MISSING) return 0;
     if (shape == PLATFORM_FILE_SHAPE_SYMLINK) {
 #if defined(_WIN32)
         /* Source-qualified reparse refusal; not exercised on Linux. */

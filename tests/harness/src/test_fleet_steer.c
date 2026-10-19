@@ -69,6 +69,7 @@
 /* ── isolated state root (this group owns its own rig) ─────────────────── */
 
 static char g_fmx_state[1024];
+static char g_fmx_base[512];
 static bool g_fmx_had_root;
 static bool g_fmx_isolated;
 #if defined(_WIN32)
@@ -123,6 +124,7 @@ static void fmx_isolate(const char *tag)
     if (g_fmx_isolated)
         fmx_fixture_fail("previous state root has not been restored");
     test_make_tmpdir(base, sizeof(base), "fleet_steer", tag);
+    snprintf(g_fmx_base, sizeof(g_fmx_base), "%s", base);
     int n = snprintf(g_fmx_state, sizeof(g_fmx_state), "%s/state", base);
     if (n <= 0 || (size_t)n >= sizeof(g_fmx_state) ||
         !platform_private_directory_ensure(g_fmx_state))
@@ -145,6 +147,8 @@ static void fmx_restore(void)
         fmx_fixture_fail("could not restore XDG_STATE_HOME");
 #endif
     g_fmx_isolated = false;
+    /* The isolated base is per case: remove it on every restore path. */
+    (void)test_rm_rf_recursive(g_fmx_base);
 }
 
 /* ── one in-process invocation ─────────────────────────────────────────── */

@@ -41,6 +41,8 @@
 static char g_fsd_state[1024];
 static char g_fsd_saved[1024];
 static bool g_fsd_had;
+static bool g_fsd_active;
+static char g_fsd_base[512];
 static unsigned char g_fsd_file[FSD_MAX + 1];
 static const char *g_fsd_name = "main.c";
 
@@ -50,25 +52,36 @@ struct fsd_call {
     struct zcl_command_reply rp;
 };
 
+static void fsd_restore(void);
+
 static void fsd_isolate(const char *tag)
 {
     char base[512];
-    const char *old = getenv("XDG_STATE_HOME");
+    const char *old;
+    fsd_restore();
+    old = getenv("XDG_STATE_HOME");
     g_fsd_had = old != NULL;
     snprintf(g_fsd_saved, sizeof(g_fsd_saved), "%s", old ? old : "");
     test_make_tmpdir(base, sizeof(base), "fleet_steer_deliver", tag);
+    snprintf(g_fsd_base, sizeof(g_fsd_base), "%s", base);
+    g_fsd_active = true;
     snprintf(g_fsd_state, sizeof(g_fsd_state), "%s/state", base);
     if (!platform_private_directory_ensure(g_fsd_state) ||
         setenv("XDG_STATE_HOME", g_fsd_state, 1) != 0)
         abort();
 }
 
+/* Idempotent: removes the isolated base even when a failing ASSERT skipped
+ * the explicit restore at the end of a case. */
 static void fsd_restore(void)
 {
+    if (!g_fsd_active) return;
+    g_fsd_active = false;
     if (g_fsd_had)
         setenv("XDG_STATE_HOME", g_fsd_saved, 1);
     else
         unsetenv("XDG_STATE_HOME");
+    (void)test_rm_rf_recursive(g_fsd_base);
 }
 
 static void fsd_fill(size_t size, unsigned seed)
@@ -1544,5 +1557,6 @@ int fsd_deliver_checks(void)
     failures += fsd_t_expiry();
     failures += fsd_t_ledger();
     failures += fsd_t_review();
+    fsd_restore();
     return failures;
 }

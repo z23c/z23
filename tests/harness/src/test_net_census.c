@@ -126,6 +126,29 @@ static bool columns_of(const char *dbpath, const char *table, char *out,
     return ok && out[0] != '\0';
 }
 
+/* Each case's datadir is recorded here and removed once when the group
+ * ends, on success and on failure alike: a failing ASSERT jumps past the
+ * case's own tail, so the case cannot remove it. */
+#define CENSUS_MAX_DIRS 16
+static char g_census_dirs[CENSUS_MAX_DIRS][256];
+static int g_census_ndirs;
+
+static void census_tmpdir(char *buf, size_t n, const char *prefix,
+                          const char *tag)
+{
+    if (g_census_ndirs >= CENSUS_MAX_DIRS) abort();
+    test_make_tmpdir(buf, n, prefix, tag);
+    snprintf(g_census_dirs[g_census_ndirs], sizeof(g_census_dirs[0]), "%s", buf);
+    g_census_ndirs++;
+}
+
+static void census_tmpdirs_remove(void)
+{
+    for (int i = 0; i < g_census_ndirs; i++)
+        (void)test_rm_rf_recursive(g_census_dirs[i]);
+    g_census_ndirs = 0;
+}
+
 /* ── 0. schema parity: fixture DDL vs real writer DDL ─────────────────── */
 
 static int test_census_schema_parity(void)
@@ -134,13 +157,13 @@ static int test_census_schema_parity(void)
     TEST("census_read: VERBATIM fixture schema matches the real writer schema") {
         /* Fixture (verbatim CREATE TABLE copies) in one datadir. */
         char fixdir[256];
-        test_make_tmpdir(fixdir, sizeof(fixdir), "net_census_fix", "main");
+        census_tmpdir(fixdir, sizeof(fixdir), "net_census_fix", "main");
         ASSERT(census_read_test_create_schema(fixdir));
 
         /* Real writer schema in a second datadir, created by the production
          * openers themselves (drift-proof: they own the authoritative DDL). */
         char proddir[256];
-        test_make_tmpdir(proddir, sizeof(proddir), "net_census_prod", "main");
+        census_tmpdir(proddir, sizeof(proddir), "net_census_prod", "main");
 
         char elog[300], peers[300];
         snprintf(elog, sizeof(elog), "%s/events.log", proddir);
@@ -197,7 +220,7 @@ static int test_census_empty_degradation(void)
     int failures = 0;
     TEST("census_read: absent census file degrades to DB_ABSENT, never error") {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "net_census_empty", "main");
+        census_tmpdir(dir, sizeof(dir), "net_census_empty", "main");
 
         census_reader *r = NULL;
         enum census_read_status st = census_read_open(dir, &r);
@@ -220,7 +243,7 @@ static int test_census_tables_absent(void)
     int failures = 0;
     TEST("census_read: file present but node_census missing → TABLES_ABSENT") {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "net_census_notable", "main");
+        census_tmpdir(dir, sizeof(dir), "net_census_notable", "main");
 
         /* Create the primary census DB file with an UNRELATED table only, so
          * the file opens but node_census is absent. */
@@ -250,7 +273,7 @@ static int test_census_list_and_filters(void)
     int failures = 0;
     TEST("census_read: list orders by last_seen, filters, and bounds pages") {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "net_census_list", "main");
+        census_tmpdir(dir, sizeof(dir), "net_census_list", "main");
         int64_t now = 1750000000;
         ASSERT(seed_census(dir, now));
 
@@ -329,7 +352,7 @@ static int test_census_node_lookup(void)
     int failures = 0;
     TEST("census_read: node lookup returns row + bounded obs + edges") {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "net_census_node", "main");
+        census_tmpdir(dir, sizeof(dir), "net_census_node", "main");
         int64_t now = 1750000000;
         ASSERT(seed_census(dir, now));
 
@@ -374,7 +397,7 @@ static int test_census_versions_and_graph(void)
     int failures = 0;
     TEST("census_read: version distribution + graph stats are correct") {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "net_census_vg", "main");
+        census_tmpdir(dir, sizeof(dir), "net_census_vg", "main");
         int64_t now = 1750000000;
         ASSERT(seed_census(dir, now));
 
@@ -420,7 +443,7 @@ static int test_census_explorer_page(void)
     int failures = 0;
     TEST("explorer /network renders bounded HTML for fixture and empty store") {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "net_census_explorer", "main");
+        census_tmpdir(dir, sizeof(dir), "net_census_explorer", "main");
         int64_t now = 1750000000;
         ASSERT(seed_census(dir, now));
 
@@ -439,7 +462,7 @@ static int test_census_explorer_page(void)
 
         /* Empty store → the "census empty" degradation card, still HTTP 200. */
         char empty[256];
-        test_make_tmpdir(empty, sizeof(empty), "net_census_explorer_empty",
+        census_tmpdir(empty, sizeof(empty), "net_census_explorer_empty",
                          "main");
         size_t m = explorer_view_network(empty, buf, cap);
         ASSERT(m > 0);
@@ -487,5 +510,6 @@ int test_net_census(void)
     failures += test_census_node_lookup();
     failures += test_census_versions_and_graph();
     failures += test_census_explorer_page();
+    census_tmpdirs_remove();
     return failures;
 }
