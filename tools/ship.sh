@@ -117,8 +117,15 @@ ship_schema_files_changed() {
             'engine/models/src/schema_migration.c' \
             'engine/models/include/models/schema_migration.h' |
             awk '/^\+\+\+ /{f=substr($2,3);next}
-                 /^\+/{l=tolower($0)
-                       if (l ~ /create (unique )?(table|index)|alter table|drop (table|index)|user_version/) print f}'
+                 /^\+/{rest=substr($0,2)
+                       # Skip only lines that are entirely comment (a whole
+                       # /* ... */ line, an unclosed /* opener, a block-comment
+                       # body line, or a // line). Code after a comment, such
+                       # as "/* v68 */ ALTER TABLE", still matches.
+                       if (rest ~ /^[[:space:]]*\/\*([^*]|\*+[^*\/])*(\*+\/)?[[:space:]]*$/) next
+                       if (rest ~ /^[[:space:]]*(\*([^\/]|$)|\/\/)/) next
+                       l=tolower(rest)
+                       if (l ~ /create (unique )?(table|index)|create (temp |temporary )?(view|trigger)|create (or replace )?(view|trigger|materialized view)|create virtual table|alter table|drop (table|index|view|trigger)|user_version/) print f}'
     } | sort -u
 }
 

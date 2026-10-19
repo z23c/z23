@@ -898,6 +898,64 @@ static int dsx_case_ahead(const struct dsx *fx, struct dsx_sh *sh)
         ASSERT_STR_EQ(files, "");
         PASS();
     }
+    TEST("ship: a trigger-only migration is a schema change the gate must catch") {
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
+        dsx_write(path,
+                   "int fixture_schema;\n"
+                   "CREATE TRIGGER fixture_trg AFTER INSERT ON fixture "
+                   "BEGIN SELECT 1; END;\n",
+                   0644);
+        dsx_commit(fx, "unpushed trigger migration");
+        dsx_sh_schema_decision(fx, false, decision, sizeof(decision));
+        ASSERT_STR_EQ(decision, "rc=1 files=" DSX_SCHEMA_FILE);
+        PASS();
+    }
+    TEST("ship: a view migration is a schema change the gate must catch") {
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
+        dsx_write(path,
+                   "int fixture_schema;\n"
+                   "CREATE VIEW fixture_vw AS SELECT a FROM fixture;\n",
+                   0644);
+        dsx_commit(fx, "unpushed view migration");
+        dsx_sh_schema_decision(fx, false, decision, sizeof(decision));
+        ASSERT_STR_EQ(decision, "rc=1 files=" DSX_SCHEMA_FILE);
+        PASS();
+    }
+    TEST("ship: DDL mentioned only inside an added comment is not a schema change") {
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
+        dsx_write(path,
+                   "int fixture_schema;\n"
+                   "/* a note: do not write CREATE TABLE or ALTER TABLE "
+                   "here without bumping the schema */\n",
+                   0644);
+        dsx_commit(fx, "unpushed comment-only mention");
+        dsx_sh_schema_decision(fx, false, decision, sizeof(decision));
+        ASSERT_STR_EQ(decision, "rc=0 files=");
+        PASS();
+    }
+    TEST("ship: DDL after a leading block comment on a code line is still a schema change") {
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
+        dsx_write(path,
+                   "int fixture_schema;\n"
+                   "/* v68 */ ALTER TABLE fixture ADD c;\n",
+                   0644);
+        dsx_commit(fx, "unpushed commented alter");
+        dsx_sh_schema_decision(fx, false, decision, sizeof(decision));
+        ASSERT_STR_EQ(decision, "rc=1 files=" DSX_SCHEMA_FILE);
+        PASS();
+    }
+    TEST("ship: a TEMP trigger is a schema change the gate must catch") {
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
+        dsx_write(path,
+                   "int fixture_schema;\n"
+                   "CREATE TEMP TRIGGER fixture_ttrg AFTER INSERT ON fixture "
+                   "BEGIN SELECT 1; END;\n",
+                   0644);
+        dsx_commit(fx, "unpushed temp trigger migration");
+        dsx_sh_schema_decision(fx, false, decision, sizeof(decision));
+        ASSERT_STR_EQ(decision, "rc=1 files=" DSX_SCHEMA_FILE);
+        PASS();
+    }
     TEST("ship: a schema change is would_refuse, rc 1, as ship.sh decides") {
         (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_FILE, fx->repo);
         dsx_write(path, "int fixture_schema;\nALTER TABLE fixture ADD b;\n", 0644);
