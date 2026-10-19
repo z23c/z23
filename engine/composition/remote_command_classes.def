@@ -153,6 +153,8 @@ REMOTE_COMMAND_CLASS("ops.debug.meaning", REMOTE_CLASS_READ_ONLY,
     "explains a typed field; deterministic, node-free")
 REMOTE_COMMAND_CLASS("ops.debug.version", REMOTE_CLASS_READ_ONLY,
     "reports this build's identity; deterministic, node-free")
+REMOTE_COMMAND_CLASS("ops.debug.refold.verdict", REMOTE_CLASS_READ_ONLY,
+    "classifies a bounded local sample file; deterministic, node-free")
 REMOTE_COMMAND_CLASS("ops.debug.dash.slo", REMOTE_CLASS_READ_ONLY,
     "SLO dashboard projection")
 REMOTE_COMMAND_CLASS("ops.debug.dash.kpi", REMOTE_CLASS_READ_ONLY,

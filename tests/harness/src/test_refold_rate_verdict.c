@@ -4,6 +4,7 @@
 
 #include "command/native_command.h"
 #include "command/refold_rate_verdict.h"
+#include "util/safe_alloc.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -36,7 +37,7 @@ static int expect_verdict(const char *name,
     struct zcl_refold_rate_result result;
     const enum zcl_refold_rate_verdict got =
         zcl_refold_rate_classify(samples, count, &result);
-    const bool passed = got == expected;
+    const bool passed = got == expected && result.verdict == got;
     printf("refold_rate_verdict: %-28s -> %s (samples=%zu intervals=%zu) %s\n",
            name, zcl_refold_rate_verdict_name(got), result.samples,
            result.intervals, passed ? "OK" : "FAIL");
@@ -110,14 +111,14 @@ static int fixture_install_dip(void)
 
 static int fixture_stall(void)
 {
-    struct zcl_refold_rate_sample s[36];
+    struct zcl_refold_rate_sample s[37];
     for (size_t i = 0; i < 21; i++)
         sample(&s[i], 1000 + (int64_t)i * 45,
                (int64_t)i * 45000000000LL, 3056758 + (int64_t)i * 6000);
-    for (size_t i = 21; i < 36; i++)
+    for (size_t i = 21; i < 37; i++)
         sample(&s[i], 1000 + (int64_t)i * 45,
-               (int64_t)i * 45000000000LL, 3056758 + 20 * 6000);
-    return expect_verdict("climb-then-stall", s, 36,
+               (int64_t)i * 45000000000LL, 3056758 + 21 * 6000);
+    return expect_verdict("climb-then-stall", s, 37,
                           ZCL_REFOLD_RATE_DECAYING);
 }
 
@@ -195,18 +196,33 @@ static int run_cli(const char *name, char *out, size_t cap)
     return WEXITSTATUS(status);
 }
 
-static int cli_reports_flat_verdict(void)
+/* Writes `count` records climbing `slope` blocks per 45 s, drives the real
+ * argv path and checks verdict, reply status and process exit code. */
+static int cli_case(const char *name, int count, int slope, int want_rc,
+                    const char *want_status, const char *want_verdict)
 {
-    char data[4096], out[8192];
+    char data[8192], out[8192], status[48], verdict[48];
     size_t used = 0;
-    for (int i = 0; i < 31; i++)
+    for (int i = 0; i < count; i++)
         used += (size_t)snprintf(data + used, sizeof(data) - used,
             "{\"ts\":%d,\"mono_ns\":%lld,\"hstar\":%d}\n", 1000 + i * 45,
-            (long long)i * 45000000000LL, 3056758 + i * 5000);
-    const bool ok = write_file("flat.jsonl", data, used) &&
-                    run_cli("flat.jsonl", out, sizeof(out)) == 0 &&
-                    strstr(out, "\"verdict\":\"FLAT\"") != NULL;
-    return report("cli-samples-flag-verdict", ok);
+            (long long)i * 45000000000LL, 3056758 + i * slope);
+    (void)snprintf(status, sizeof(status), "\"status\":\"%s\"", want_status);
+    (void)snprintf(verdict, sizeof(verdict), "%s%s", want_rc == 0 ? "\"verdict\":\"" : "verdict=", want_verdict);
+    const bool ok = write_file("case.jsonl", data, used) &&
+                    run_cli("case.jsonl", out, sizeof(out)) == want_rc &&
+                    strstr(out, status) != NULL &&
+                    strstr(out, verdict) != NULL;
+    return report(name, ok);
+}
+
+static int cli_reports_verdict_exit_codes(void)
+{
+    return cli_case("cli-flat-exit0-passed", 31, 5000, 0, "passed", "FLAT") +
+           cli_case("cli-decaying-exit1-failed", 31, 2000, 1, "failed",
+                    "DECAYING") +
+           cli_case("cli-no-climb-exit3-blocked", 11, 0, 3, "blocked",
+                    "NO_CLIMB");
 }
 
 static const char k_rising[] =
@@ -242,15 +258,18 @@ static size_t padded_record(char *buf, size_t length)
 static bool reader_accepts(size_t length, bool newline)
 {
     char record[ZCL_REFOLD_RATE_MAX_LINE_BYTES + 8];
-    struct zcl_refold_rate_sample samples[ZCL_REFOLD_RATE_MAX_SAMPLES];
+    struct zcl_refold_rate_sample *samples = zcl_calloc(
+        ZCL_REFOLD_RATE_MAX_SAMPLES, sizeof(*samples), "test_samples");
     char bound_path[RR_TMP_MAX + 32];
     size_t count = 0;
     (void)snprintf(bound_path, sizeof(bound_path), "%s/bound.jsonl", g_dir);
     size_t used = padded_record(record, length);
     if (newline)
         record[used++] = '\n';
-    return write_file("bound.jsonl", record, used) &&
-           zcl_refold_rate_read_jsonl(bound_path, samples, &count);
+    const bool ok = samples && write_file("bound.jsonl", record, used) &&
+                    zcl_refold_rate_read_jsonl(bound_path, samples, &count);
+    free(samples);
+    return ok;
 }
 
 static int line_bound_cases(void)
@@ -283,7 +302,7 @@ int test_refold_rate_verdict(void)
     failures += fixture_stall();
     failures += fixture_wall_clock_step();
     failures += rejects_nonpositive_interval();
-    failures += cli_reports_flat_verdict();
+    failures += cli_reports_verdict_exit_codes();
     failures += cli_refuses_unterminated_nul_tail();
     failures += line_bound_cases();
     test_cleanup_tmpdir(g_dir);

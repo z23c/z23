@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Interface of the refold H* rate classifier and JSONL sample reader. */
 
 #ifndef ZCL_TOOLS_REFOLD_RATE_VERDICT_H
 #define ZCL_TOOLS_REFOLD_RATE_VERDICT_H

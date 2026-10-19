@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Refold H* rate classifier and its bounded JSONL sample reader. */
 
 #include "command/refold_rate_verdict.h"
 
@@ -124,7 +126,8 @@ const char *zcl_refold_rate_verdict_name(enum zcl_refold_rate_verdict verdict)
 
 enum line_status { LINE_OK, LINE_END, LINE_BAD };
 
-/* Reads one physical line (without its newline) into line[]. Rejects an
+/* Reads one physical line (without its newline) into line[]; the byte
+ * scanner allocates nothing. Rejects an
  * embedded NUL and any line longer than ZCL_REFOLD_RATE_MAX_LINE_BYTES. An
  * unterminated final line is a line. */
 static enum line_status read_line(FILE *input,

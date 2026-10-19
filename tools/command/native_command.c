@@ -952,6 +952,58 @@ void zcl_native_handle_ops_statecatalog(
     nc_statecatalog_paged(request, &catalog, subs, total, reply);
 }
 
+static void nc_refold_push_result(
+    struct zcl_command_reply *reply, enum zcl_refold_rate_verdict verdict,
+    const struct zcl_refold_rate_result *result)
+{
+    char overall[48], first[48], last[48];
+    (void)snprintf(overall, sizeof(overall), "%.2f", result->overall_rate);
+    (void)snprintf(first, sizeof(first), "%.2f", result->first_third_rate);
+    (void)snprintf(last, sizeof(last), "%.2f", result->last_third_rate);
+    (void)json_push_kv_str(&reply->data, "verdict",
+                           zcl_refold_rate_verdict_name(verdict));
+    (void)json_push_kv_int(&reply->data, "samples", (int64_t)result->samples);
+    (void)json_push_kv_int(&reply->data, "intervals",
+                           (int64_t)result->intervals);
+    (void)json_push_kv_int(&reply->data, "climb", result->climb);
+    (void)json_push_kv_int(&reply->data, "min_at", (int64_t)result->min_at);
+    (void)json_push_kv_int(&reply->data, "proof_exit_code",
+                           verdict == ZCL_REFOLD_RATE_FLAT ? 0 :
+                           verdict == ZCL_REFOLD_RATE_DECAYING ? 2 : 3);
+    (void)json_push_kv_str(&reply->data, "overall_rate", overall);
+    (void)json_push_kv_str(&reply->data, "first_third_rate", first);
+    (void)json_push_kv_str(&reply->data, "last_third_rate", last);
+}
+
+/* FLAT passes. DECAYING fails the judgement (exit 1). NO_CLIMB blocks it
+ * because the samples cannot be measured (exit 3, as the proof script). A
+ * non-passing reply carries no data object, so its message names the verdict
+ * and rates; proof_exit_code stays in the passing data. */
+static void nc_refold_set_status(struct zcl_command_reply *reply,
+                                 const struct zcl_refold_rate_result *result,
+                                 enum zcl_refold_rate_verdict verdict)
+{
+    if (verdict == ZCL_REFOLD_RATE_FLAT) {
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        reply->exit_code = ZCL_COMMAND_EXIT_OK;
+        return;
+    }
+    const bool decaying = verdict == ZCL_REFOLD_RATE_DECAYING;
+    char message[160];
+    (void)snprintf(message, sizeof(message),
+                   "verdict=%s samples=%zu intervals=%zu climb=%lld overall_rate=%.2f",
+                   zcl_refold_rate_verdict_name(verdict), result->samples,
+                   result->intervals, (long long)result->climb,
+                   result->overall_rate);
+    zcl_command_reply_fail(
+        reply, decaying ? ZCL_COMMAND_STATUS_FAILED : ZCL_COMMAND_STATUS_BLOCKED,
+        decaying ? ZCL_COMMAND_EXIT_FAILED : ZCL_COMMAND_EXIT_BLOCKED,
+        decaying ? "REFOLD_RATE_DECAYING" : "REFOLD_NO_CLIMB", "classify",
+        false, false,
+        message,
+        "ops.debug.refold.verdict");
+}
+
 void zcl_native_handle_ops_refold_verdict(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -967,9 +1019,24 @@ void zcl_native_handle_ops_refold_verdict(
                                "ops.debug.refold.verdict");
         return;
     }
-    struct zcl_refold_rate_sample samples[ZCL_REFOLD_RATE_MAX_SAMPLES];
+    struct zcl_refold_rate_sample *samples = zcl_calloc(
+        ZCL_REFOLD_RATE_MAX_SAMPLES, sizeof(*samples), "refold_rate_samples");
+    if (!samples) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "OUT_OF_MEMORY",
+                               "read", true, false,
+                               "sample buffer allocation failed",
+                               "ops.debug.refold.verdict");
+        return;
+    }
     size_t count = 0;
-    if (!zcl_refold_rate_read_jsonl(path, samples, &count)) {
+    struct zcl_refold_rate_result result = {0};
+    const bool read = zcl_refold_rate_read_jsonl(path, samples, &count);
+    const enum zcl_refold_rate_verdict verdict = read
+        ? zcl_refold_rate_classify(samples, count, &result)
+        : ZCL_REFOLD_RATE_INVALID_INPUT;
+    free(samples);
+    if (!read) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_SAMPLE_FILE",
                                "read", false, false,
@@ -977,9 +1044,6 @@ void zcl_native_handle_ops_refold_verdict(
                                "ops.debug.refold.verdict");
         return;
     }
-    struct zcl_refold_rate_result result;
-    const enum zcl_refold_rate_verdict verdict =
-        zcl_refold_rate_classify(samples, count, &result);
     if (verdict == ZCL_REFOLD_RATE_INVALID_INPUT) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_SAMPLES",
@@ -988,25 +1052,8 @@ void zcl_native_handle_ops_refold_verdict(
                                "ops.debug.refold.verdict");
         return;
     }
-    char overall[48], first[48], last[48];
-    (void)snprintf(overall, sizeof(overall), "%.2f", result.overall_rate);
-    (void)snprintf(first, sizeof(first), "%.2f", result.first_third_rate);
-    (void)snprintf(last, sizeof(last), "%.2f", result.last_third_rate);
-    (void)json_push_kv_str(&reply->data, "verdict",
-                           zcl_refold_rate_verdict_name(verdict));
-    (void)json_push_kv_int(&reply->data, "samples", (int64_t)result.samples);
-    (void)json_push_kv_int(&reply->data, "intervals",
-                           (int64_t)result.intervals);
-    (void)json_push_kv_int(&reply->data, "climb", result.climb);
-    (void)json_push_kv_int(&reply->data, "min_at", (int64_t)result.min_at);
-    (void)json_push_kv_int(&reply->data, "proof_exit_code",
-                           verdict == ZCL_REFOLD_RATE_FLAT ? 0 :
-                           verdict == ZCL_REFOLD_RATE_DECAYING ? 2 : 3);
-    (void)json_push_kv_str(&reply->data, "overall_rate", overall);
-    (void)json_push_kv_str(&reply->data, "first_third_rate", first);
-    (void)json_push_kv_str(&reply->data, "last_third_rate", last);
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
-    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+    nc_refold_push_result(reply, verdict, &result);
+    nc_refold_set_status(reply, &result, verdict);
 }
 
 /* Handler / schema / effect-risk / semantics half of the READY-leaf

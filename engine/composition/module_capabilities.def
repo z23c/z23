@@ -456,6 +456,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_package_resident_command.c", CAP_FS_
 ZCL_MODULE_CAPABILITY("tools/command/native_package_confined_run_command.c", CAP_FS_WRITE, "runs one accepted installed binary confined in the OS sandbox and reaps it")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/package_resident_manifest.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "translates a run manifest into a sandbox profile, spawns the pinned image confined and waits for exit")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_add_command.c", CAP_FS_WRITE, "parses and renders the install-lifecycle JSON only; the checked-allocation failure print is this unit's direct write reach")
+ZCL_MODULE_CAPABILITY("tools/command/refold_rate_verdict.c", CAP_FS_READ, "reads one operator-named JSONL sample file with a fixed byte bound and no write")
 ZCL_MODULE_CAPABILITY("engine/services/src/property_catalog_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/recovery_policy.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/reducer/services/src/reducer_ingest_service.c", CAP_FS_READ|CAP_FS_WRITE, "")
