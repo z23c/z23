@@ -23,7 +23,7 @@ places `ask` inside the writable point workspace; the old initial workspace
 wipe destroys the key bytes. The fixed signer checks both writable regions
 against the key, randomizer, expected `rk`, entropy, and digest before any
 write. Further cases place the signature output over `ask` and the reviewed
-ZIP-243 digest. Rejected storage leaves the unchecked input bytes unchanged.
+ZIP-243 digest. Rejected storage leaves input bytes not yet checked by the device unchanged.
 The caller must treat a false result as no signature, regardless of prior
 output contents.
 

@@ -30,12 +30,12 @@ The assembler now rejects an output-length pointer overlapping the unsigned
 wire, verified signatures, expected digests, or any byte of the declared
 output capacity before writing the length. Further tests cover a length
 inside the unsigned wire, expected digest, and signature record, and require
-the unchecked bytes to remain identical. The collector rejects a signature
+the bytes not yet checked by the device to remain identical. The collector rejects a signature
 array overlapping the expected paths, ownership hashes, or digests before
 zeroing it or requesting approval. The verifier rejects a result overlapping
 the reply frame, expected ownership hash, or digest before clearing it.
 On rejected overlap, the caller must ignore the output and abort the signing
-flow; preservation of unchecked inputs takes precedence over zeroing aliased
+flow; preservation of inputs not yet checked by the device takes precedence over zeroing aliased
 output storage.
 
 The focused Release tests `blue-payment-review` and `blue-payment-sign`

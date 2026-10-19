@@ -33,7 +33,7 @@ typedef struct {
 /* The host uploads the identical complete wire six times. Each pass derives
  * one ZIP-243 section hash from independently parsed bytes and checks its
  * full-wire SHA-256 against pass one. No partial or substituted pass returns
- * a digest. Branch selection and payment approval still need trusted device
+ * a digest. Branch selection and payment approval still need device-enforced
  * policy; this read-only digest grants no signing authority. */
 bool zcl_tx_shielded_replay_begin(zcl_tx_shielded_replay *state,
     uint32_t expected_length, uint32_t branch_id,

@@ -35,7 +35,7 @@ committed components:
   running-binary/toolchain/build-input claims, source fold cursor, chain-corpus
   digest, proof-manifest digest, and artifact digest; these are partial producer
   provenance, not complete reproducible-build proof;
-- verification posture (`sovereign or explicitly assisted), signature set, target
+- verification posture (`sovereign` or explicitly assisted), signature set, target
   lane, acceptance receipt, and rollback generation.
 
 ## Implementation status
