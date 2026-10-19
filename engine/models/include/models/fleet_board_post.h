@@ -285,7 +285,8 @@ int db_fleet_board_wiki_list(struct node_db *ndb,
 /* Up to max pages whose slug sorts after `after` (exclusive; empty starts at
  * the first), in slug order. *last_scanned is the last slug examined, even
  * when its revisions all failed verification and it wrote no row; resume
- * from it. *more is set when a later slug exists. Returns rows written. */
+ * from it. *more is set when a later slug exists. Returns rows written, or
+ * -1 when the store could not be read (never a short list). */
 int db_fleet_board_wiki_list_after(struct node_db *ndb, const char *after,
     struct db_fleet_board_post *out, size_t max,
     char last_scanned[FLEET_BOARD_SLUG_MAX + 1], bool *more);

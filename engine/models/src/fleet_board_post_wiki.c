@@ -357,7 +357,12 @@ int db_fleet_board_wiki_list_after(struct node_db *ndb, const char *after,
     (void)snprintf(last, FLEET_BOARD_SLUG_MAX + 1, "%s", after);
     size_t scanned = 0;
     int written = 0;
-    while (board_wiki_next_slug(ndb, last, slug) > 0) {
+    for (;;) {
+        int next = board_wiki_next_slug(ndb, last, slug);
+        if (next < 0)
+            return -1;
+        if (next == 0)
+            break;
         if (scanned++ == max) {
             *has_more = true;
             break;

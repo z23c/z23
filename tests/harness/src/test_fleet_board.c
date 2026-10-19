@@ -1777,6 +1777,7 @@ static void fb_native_tamper_receipt(struct json_value *output)
  * whole page because it never sees the budget fields. */
 static bool fb_native_legacy_slug_reads;
 static size_t fb_native_wire_max = 8192;
+static bool fb_native_legacy_list_paging;
 
 static bool fb_native_strip_budgets(const struct json_value *params,
                                     struct json_value *stripped)
@@ -1799,6 +1800,19 @@ static bool fb_native_strip_budgets(const struct json_value *params,
     return true;
 }
 
+/* An old node's wiki_list answer: no more, no after_slug. */
+static void fb_native_strip_list_paging(struct json_value *output)
+{
+    struct json_value kept;
+    json_init(&kept);
+    json_set_object(&kept);
+    for (size_t i = 0; i < output->num_children; i++)
+        if (output->keys && strcmp(output->keys[i], "more") && strcmp(output->keys[i], "after_slug"))
+            (void)json_push_kv(&kept, output->keys[i], &output->children[i]);
+    json_free(output);
+    *output = kept;
+}
+
 static bool fb_native_rpc_run(const char *method, const struct json_value *input,
     struct json_value *output)
 {
@@ -1811,6 +1825,8 @@ static bool fb_native_rpc_run(const char *method, const struct json_value *input
     bool ok = rpc_table_execute(fb_native_test_table, method, strip ? &legacy : input, output);
     json_free(&legacy);
     if (ok) fb_native_tamper_receipt(output);
+    if (ok && fb_native_legacy_list_paging && !strcmp(method, "fleet_board") && json_get(output, "more"))
+        fb_native_strip_list_paging(output);
     if (ok && fb_native_receipt_copy_fault)
         zcl_alloc_fault_fail_nth("json_copy_str", fb_native_receipt_copy_nth ? fb_native_receipt_copy_nth : 1);
     return ok;
@@ -5699,6 +5715,12 @@ static int test_fleet_wiki_query_cost(void)
         ASSERT_EQ(progress.status, FLEET_WIKI_QUERY_DONE);
         ASSERT_EQ(progress.verified, 3);
         ASSERT(indexed.steps < old.steps / 2);
+        struct fb_query_vm listed = {0};
+        static struct db_fleet_board_post list_rows[3];
+        ASSERT(sqlite3_trace_v2(e.db.db, SQLITE_TRACE_PROFILE, fb_query_vm_trace, &listed) == SQLITE_OK);
+        ASSERT_EQ(db_fleet_board_wiki_list_after(&e.db, "", list_rows, 3, NULL, NULL), 3);
+        ASSERT(sqlite3_trace_v2(e.db.db, 0, NULL, NULL) == SQLITE_OK);
+        ASSERT(listed.steps < old.steps / 2);
         struct fb_query_compare_rows expected = {.rows = rows};
         ASSERT(db_fleet_board_wiki_query(&e.db, "", fb_query_compare, &expected, &progress));
         ASSERT_EQ(expected.count, 3);
@@ -6907,8 +6929,6 @@ static int test_fleet_board_fleet_quota(void)
     return failures;
 }
 
-/* Run the PUBLIC-scope tests with the real gate installed, then restore the
- * permissive stub. */
 static bool fb_refusal_wiki_post(struct fb_rpc_fixture *e, const char *slug,
                                  const char *text, const char *scope,
                                  struct json_value *result)
@@ -6985,6 +7005,15 @@ static int test_fleet_board_write_refusal_reasons(void)
 }
 
 /* Walk fleet.wiki.list through its own cursor and collect every slug. */
+static char g_fb_list_error[64];
+
+static bool fb_list_last_error_is(const char *code)
+{
+    return !strcmp(g_fb_list_error, code);
+}
+
+void zcl_native_fleet_wiki_list_test_set_calls_max(int max);
+
 static size_t fb_list_walk(struct fb_rpc_env *e, char slugs[][FLEET_BOARD_SLUG_MAX + 1],
                            size_t cap, size_t *calls)
 {
@@ -7008,8 +7037,11 @@ static size_t fb_list_walk(struct fb_rpc_env *e, char slugs[][FLEET_BOARD_SLUG_M
         node_rpc_client_set_test_hook(NULL); fb_native_test_table = NULL;
         json_free(&input);
         json_init(&env);
-        if (!n || rc != ZCL_COMMAND_EXIT_OK || !json_read(&env, wire, strlen(wire)) ||
-            ++*calls > 2000) { json_free(&env); return SIZE_MAX; }
+        g_fb_list_error[0] = '\0';
+        if (n && json_read(&env, wire, strlen(wire)))
+            (void)snprintf(g_fb_list_error, sizeof(g_fb_list_error), "%s",
+                           json_get_str(json_get(json_get(&env, "error"), "code")));
+        if (!n || rc != ZCL_COMMAND_EXIT_OK || ++*calls > 2000) { json_free(&env); return SIZE_MAX; }
         const struct json_value *data = json_get(&env, "data");
         const struct json_value *posts = json_get(data, "posts");
         for (size_t i = 0; i < json_size(posts); i++) {
@@ -7064,22 +7096,39 @@ static int test_fleet_wiki_list_reaches_every_page(void)
         size_t calls;
         fb_native_wire_max = 1u << 20;
         size_t total = fb_list_walk(&e, slugs, 400, &calls);
-        fb_native_wire_max = 8192;
-        ASSERT(total != SIZE_MAX && total >= (size_t)pages);
+        ASSERT_EQ((int64_t)total, pages);
+        for (size_t j = 1; j < total; j++)
+            ASSERT(strcmp(slugs[j - 1], slugs[j]) < 0);
         for (int i = 0; i < pages; i++) {
             char want[16];
             (void)snprintf(want, sizeof(want), "page-%04d", i);
-            bool seen = false;
-            for (size_t j = 0; j < total && !seen; j++) seen = !strcmp(slugs[j], want);
-            ASSERT(seen);
+            ASSERT_STR_EQ(slugs[i], want);
         }
+        ASSERT(calls > 1);
+
+        /* A node that reports no paging is refused by name, never listed short. */
+        fb_native_legacy_list_paging = true;
+        ASSERT(fb_list_walk(&e, slugs, 400, &calls) == SIZE_MAX);
+        ASSERT(fb_list_last_error_is("NODE_VERSION_SKEW"));
+        fb_native_legacy_list_paging = false;
+
+        /* A list needing more node calls than the cap fails by name. */
+        zcl_native_fleet_wiki_list_test_set_calls_max(1);
+        ASSERT(fb_list_walk(&e, slugs, 400, &calls) == SIZE_MAX);
+        ASSERT(fb_list_last_error_is("WIKI_INDEX_TOO_LARGE"));
+        zcl_native_fleet_wiki_list_test_set_calls_max(0);
+        fb_native_wire_max = 8192;
         fb_rpc_env_close(&e);
         PASS();
     } _test_next:;
     fb_native_wire_max = 8192;
+    fb_native_legacy_list_paging = false;
+    zcl_native_fleet_wiki_list_test_set_calls_max(0);
     return failures;
 }
 
+/* Run the PUBLIC-scope tests with the real gate installed, then restore the
+ * permissive stub. */
 static int test_fleet_board_public_no_grant_needed(void)
 {
     int failures = 0;

@@ -801,6 +801,10 @@ static bool fb_wiki_prefix_trial(const struct json_value *meta, char *copy,
         (!partial || (json_push_kv_bool(trial, "truncated", true) &&
                       json_push_kv_int(trial, "next_offset", (int64_t)n)));
     copy[n] = saved;
+    if (!ok) {
+        json_free(trial);
+        json_init(trial);
+    }
     return ok;
 }
 
@@ -983,6 +987,18 @@ void zcl_native_fleet_wiki_write_rpc(const struct zcl_command_request *request,
  * explicit error, never a silently shorter index. */
 enum { FB_WIKI_LIST_CALLS_MAX = 64 };
 
+#ifdef ZCL_TESTING
+static int g_fb_list_calls_max = FB_WIKI_LIST_CALLS_MAX;
+
+void zcl_native_fleet_wiki_list_test_set_calls_max(int max)
+{
+    g_fb_list_calls_max = max > 0 ? max : FB_WIKI_LIST_CALLS_MAX;
+}
+#define FB_LIST_CALLS_MAX g_fb_list_calls_max
+#else
+#define FB_LIST_CALLS_MAX FB_WIKI_LIST_CALLS_MAX
+#endif
+
 /* Append every post of `page` to `all`; false on allocation failure. */
 static bool fb_wiki_list_append(struct json_value *all, const struct json_value *page)
 {
@@ -993,42 +1009,66 @@ static bool fb_wiki_list_append(struct json_value *all, const struct json_value 
     return true;
 }
 
+/* Judge one node page: does it say whether more follows, and from where?
+ * A node that does not has no paging and its list may be cut short. */
+static bool fb_wiki_list_page_more(struct zcl_command_reply *reply,
+                                   const struct json_value *page,
+                                   const char *after, bool *more)
+{
+    const struct json_value *field = json_get(page, "more");
+    const char *last = json_get_str(json_get(page, "after_slug"));
+    *more = field && json_get_bool(field);
+    if (field && (!*more || (last && strcmp(last, after) > 0)))
+        return true;
+    fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+        "NODE_VERSION_SKEW", "execute", false,
+        "the node answered the wiki index without a usable more/after_slug, so it "
+        "predates paged wiki lists and its list may be cut at 256 pages; upgrade the "
+        "node, or walk pages with fleet wiki find", "fleet.wiki.find");
+    return false;
+}
+
+/* One node call for the batch after `after`; false when the reply failed. */
+static bool fb_wiki_list_fetch(struct zcl_command_reply *reply, const char *after,
+                               struct json_value *page)
+{
+    struct json_value out;
+    json_init(&out);
+    json_set_object(&out);
+    bool ok = json_push_kv_str(&out, "op", "wiki_list") &&
+        (!after[0] || json_push_kv_str(&out, "after_slug", after)) &&
+        fb_call(reply, &out, page, 0);
+    json_free(&out);
+    return ok;
+}
+
 /* Fetch the whole index into body.posts, one node call per slug-ordered batch,
  * so every page is reachable through the command's own --cursor. */
 static bool fb_wiki_list_collect(struct zcl_command_reply *reply, struct json_value *body)
 {
-    struct json_value all, after;
+    struct json_value all, after, page;
     json_init(&all); json_set_array(&all);
     json_init(&after); json_set_str(&after, "");
-    bool ok = true;
-    for (int call = 0; ok; call++) {
-        struct json_value out, page;
-        json_init(&out); json_init(&page);
-        json_set_object(&out);
-        ok = json_push_kv_str(&out, "op", "wiki_list") &&
-            (!json_get_str(&after)[0] || json_push_kv_str(&out, "after_slug", json_get_str(&after)));
-        ok = ok && fb_call(reply, &out, &page, 0);
-        json_free(&out);
-        if (!ok) { json_free(&page); break; }
-        const char *last = json_get_str(json_get(&page, "after_slug"));
-        bool more = json_get_bool(json_get(&page, "more")) && last && last[0] &&
-            strcmp(last, json_get_str(&after)) > 0;
-        if (!fb_wiki_list_append(&all, &page)) {
+    bool ok = true, more = true;
+    for (int call = 0; ok && more; call++) {
+        json_init(&page);
+        ok = fb_wiki_list_fetch(reply, json_get_str(&after), &page) &&
+            fb_wiki_list_page_more(reply, &page, json_get_str(&after), &more);
+        if (ok && !fb_wiki_list_append(&all, &page)) {
             fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                 "BOARD_PROJECTION_FAILED", "execute", false,
                 "cannot faithfully collect the wiki index", "fleet.board");
             ok = false;
-        } else if (more && call + 1 >= FB_WIKI_LIST_CALLS_MAX) {
+        } else if (ok && more && call + 1 >= FB_LIST_CALLS_MAX) {
             fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                 "WIKI_INDEX_TOO_LARGE", "execute", false,
                 "the wiki index needs more node calls than one list allows; "
                 "use fleet wiki find --after_slug to walk it", "fleet.wiki.find");
             ok = false;
-        } else if (more) {
-            json_set_str(&after, last);
+        } else if (ok && more) {
+            json_set_str(&after, json_get_str(json_get(&page, "after_slug")));
         }
         json_free(&page);
-        if (!more) break;
     }
     if (ok) {
         json_set_object(body);

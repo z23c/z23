@@ -164,7 +164,11 @@ ZCL_COMMAND_READY_READ(
     "Every page this node holds",
     "One index row per slug — the latest revision of each page: slug, title, "
     "topic and summary (the first line, at most 120 bytes, for a plain page), "
-    "author host and agent, written time and exact id; no page text. Read this at the start of a "
+    "author host and agent, written time and exact id; no page text. Pages "
+    "are gathered from the node in slug order, 256 per node call and at most "
+    "64 calls (16384 pages); a longer index fails WIKI_INDEX_TOO_LARGE rather "
+    "than returning a shorter one. Page through the result with --cursor=<n> "
+    "from _page.continue. Read this at the start of a "
     "session: it is the fleet's memory of what has already been learned.",
     ZCL_COMMAND_LIST_BUDGET,
     "wiki,list,pages,index",

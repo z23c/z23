@@ -972,6 +972,11 @@ static void fb_op_wiki_list(struct node_db *ndb, const struct json_value *in,
     bool more;
     int n = db_fleet_board_wiki_list_after(ndb, after, rows, FLEET_BOARD_LIST_MAX,
                                            last, &more);
+    if (n < 0) {
+        free(rows);
+        fb_error(result, "BOARD_STORAGE", "the wiki index could not be read from the board store");
+        return;
+    }
     if (!fb_render_wiki_index(result, rows, n) ||
         !json_push_kv_bool(result, "more", more) ||
         !json_push_kv_str(result, "after_slug", last)) {
