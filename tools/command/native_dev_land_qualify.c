@@ -21,13 +21,13 @@
 #include "command/native_command.h"
 #include "controllers/agent_impact_rules.h"
 #include "platform/logical_cpu.h"
+#include "platform/private_directory.h"
 #include "util/spawn.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define DLQ_LOG_CAP (32u * 1024u * 1024u)
 #define DLQ_GIT_CAP (1024u * 1024u)
@@ -48,18 +48,19 @@ struct dlq_groups {
 
 const char *zcl_dev_land_qualify_refusal(enum zcl_land_qualify_code code)
 {
-    switch (code) {
-    case ZCL_LAND_QUALIFY_OK: return "ok";
-    case ZCL_LAND_QUALIFY_DIRTY_TREE: return "dirty_tree";
-    case ZCL_LAND_QUALIFY_FETCH_FAILED: return "fetch_failed";
-    case ZCL_LAND_QUALIFY_REBASE_CONFLICT: return "rebase_conflict";
-    case ZCL_LAND_QUALIFY_UNSIGNED_TIP: return "unsigned_tip";
-    case ZCL_LAND_QUALIFY_STEP_FAILED: return "step_failed";
-    case ZCL_LAND_QUALIFY_LINT_FAILED: return "lint_failed";
-    case ZCL_LAND_QUALIFY_GROUP_FAILED: return "group_failed";
-    case ZCL_LAND_QUALIFY_TREE_CHANGED: return "tree_changed";
-    }
-    return "step_failed";
+    static const char *const names[] = {
+        [ZCL_LAND_QUALIFY_OK] = "ok",
+        [ZCL_LAND_QUALIFY_DIRTY_TREE] = "dirty_tree",
+        [ZCL_LAND_QUALIFY_FETCH_FAILED] = "fetch_failed",
+        [ZCL_LAND_QUALIFY_REBASE_CONFLICT] = "rebase_conflict",
+        [ZCL_LAND_QUALIFY_UNSIGNED_TIP] = "unsigned_tip",
+        [ZCL_LAND_QUALIFY_STEP_FAILED] = "step_failed",
+        [ZCL_LAND_QUALIFY_LINT_FAILED] = "lint_failed",
+        [ZCL_LAND_QUALIFY_GROUP_FAILED] = "group_failed",
+        [ZCL_LAND_QUALIFY_TREE_CHANGED] = "tree_changed",
+    };
+    return (unsigned)code < sizeof(names) / sizeof(names[0]) ? names[code]
+                                                              : "step_failed";
 }
 
 static bool dlq_refuse(struct dlq *q, enum zcl_land_qualify_code code,
@@ -101,9 +102,9 @@ static void dlq_write_log(struct dlq *q, const char *name, const char *text)
     char dir[4096 + 16];
     FILE *f;
     (void)snprintf(dir, sizeof(dir), "%s/build", q->wt);
-    (void)mkdir(dir, 0755);
+    (void)platform_private_directory_ensure(dir);
     (void)snprintf(dir, sizeof(dir), "%s/build/scratch", q->wt);
-    (void)mkdir(dir, 0755);
+    (void)platform_private_directory_ensure(dir);
     if (snprintf(q->out->log, sizeof(q->out->log), "%s/qualify-%s.log", dir,
                  name) >= (int)sizeof(q->out->log)) {
         q->out->log[0] = '\0';

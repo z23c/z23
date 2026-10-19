@@ -3473,7 +3473,7 @@ tools/command/native_dev_land.c:dl_materialize_file:43
 tools/command/native_dev_land.c:dl_regen_run:8
 tools/command/native_dev_land.c:dl_status:40
 tools/command/native_dev_land.c:dl_step_start:19
-tools/command/native_dev_land.c:dl_submit:19
+tools/command/native_dev_land.c:dl_submit:18
 tools/command/native_dev_land.c:dl_worktree_ok:17
 tools/command/native_dev_land.c:dl_wt_vendor_tor_pin_matches:17
 tools/command/native_dev_lane.c:dln_clone_file:23

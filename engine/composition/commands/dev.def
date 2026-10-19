@@ -2072,7 +2072,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "QUALIFY_FETCH_FAILED, QUALIFY_REBASE_CONFLICT or QUALIFY_STEP_FAILED "
     "and queues nothing.", 65536,
     "land,submit,queue,lane,tip",
-    "zcl.land_input.v1", "zcl.land.v1", "tip,worktree,note,json,qualify", "",
+    "zcl.land_submit_input.v1", "zcl.land.v1", "tip,worktree,note,json,qualify", "",
     "z23 dev land submit --worktree=PATH --qualify",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2097,7 +2097,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "make dev-bin, then drive again. The proof reads the public fixture "
     "locators exported in the caller's environment.", 65536,
     "land,drive,proof,push,integrator",
-    "zcl.land_input.v1", "zcl.land.v1", "seq", "",
+    "zcl.land_drive_input.v1", "zcl.land.v1", "seq", "",
     "z23 dev land drive --seq=3",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2117,7 +2117,7 @@ ZCL_COMMAND_DEV_READ(
     "from the private landing state at call time; nothing is fetched or "
     "mutated.", 65536,
     "land,status,queue,proof,hold",
-    "zcl.land_input.v1", "zcl.land.v1", "json", "",
+    "zcl.land_status_input.v1", "zcl.land.v1", "json", "",
     "z23 dev land status",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_MODERATE,
@@ -2133,7 +2133,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "answer, and fast-forwards origin/main on a sealed pass. A second step "
     "while one runs answers STEP_BUSY.", 65536,
     "land,step,rebase,lint,push",
-    "zcl.land_input.v1", "zcl.land.v1", "", "",
+    "zcl.land_step_input.v1", "zcl.land.v1", "", "",
     "z23 dev land step",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2152,7 +2152,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "Seals the signed publication intent of one proven row. Optional base and "
     "head pins refuse a changed pair.", 65536,
     "land,attach,intent,proof",
-    "zcl.land_input.v1", "zcl.land.v1", "seq,base,head", "",
+    "zcl.land_attach_input.v1", "zcl.land.v1", "seq,base,head", "",
     "z23 dev land attach --seq=1",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2172,7 +2172,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "publication beat under one lock. wait_ms bounds an explicit wait for "
     "the proof.", 65536,
     "land,attach,publish,intent",
-    "zcl.land_input.v1", "zcl.land.v1", "seq,base,head,wait_ms", "",
+    "zcl.land_attach_publish_input.v1", "zcl.land.v1", "seq,base,head,wait_ms", "",
     "z23 dev land attach_publish --seq=1",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2191,7 +2191,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "Retains a per-sequence publication hold. A held row may prove but never "
     "seals or pushes. Refuses unknown or sealed rows.", 65536,
     "land,hold,publication",
-    "zcl.land_input.v1", "zcl.land.v1", "seq", "",
+    "zcl.land_hold_input.v1", "zcl.land.v1", "seq", "",
     "z23 dev land hold --seq=1",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2210,7 +2210,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "Clears the per-sequence publication hold set by hold. Refuses unknown "
     "or sealed rows.", 65536,
     "land,release,publication",
-    "zcl.land_input.v1", "zcl.land.v1", "seq", "",
+    "zcl.land_release_input.v1", "zcl.land.v1", "seq", "",
     "z23 dev land release --seq=1",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2229,7 +2229,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "Removes one row from the queue by sequence. Refuses a row with an "
     "unresolved push checkpoint.", 65536,
     "land,cancel,queue",
-    "zcl.land_input.v1", "zcl.land.v1", "seq,force,json", "",
+    "zcl.land_cancel_input.v1", "zcl.land.v1", "seq,force,json", "",
     "z23 dev land cancel --seq=1",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2248,7 +2248,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "Replaces a fenced pair with an explicit successor named by seq, base, "
     "head, tip and worktree.", 65536,
     "land,fence,successor",
-    "zcl.land_input.v1", "zcl.land.v1", "seq,base,head,tip,worktree", "",
+    "zcl.land_fence_replace_input.v1", "zcl.land.v1", "seq,base,head,tip,worktree", "",
     "z23 dev land fence_replace --seq=1",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2268,7 +2268,7 @@ ZCL_COMMAND_DEV_READ(
     "unsealed seq410 pair, the time and two fixture booleans; the service "
     "origin stays UNKNOWN. It returns before any mutation.", 16384,
     "land,attest,self,observation",
-    "zcl.land_input.v1", "zcl.land.v1", "", "",
+    "zcl.land_attest_only_input.v1", "zcl.land.v1", "", "",
     "z23 dev land attest_only",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
