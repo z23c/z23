@@ -232,6 +232,32 @@ static bool vh_log_force_ok(sqlite3 *db, int height, int ok)
     return rc == SQLITE_DONE;
 }
 
+static bool vh_log_force_wide_ok(sqlite3 *db, int height, int64_t ok)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+        "UPDATE validate_headers_log SET ok = ? WHERE height = ?",
+        -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_int64(st, 1, ok);
+    sqlite3_bind_int(st, 2, height);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+static bool vh_log_force_text_ok(sqlite3 *db, int height, const char *ok)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+        "UPDATE validate_headers_log SET ok = ? WHERE height = ?",
+        -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, ok, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 2, height);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
 static bool vh_log_force_failure(sqlite3 *db, int height, const char *reason)
 {
     sqlite3_stmt *st = NULL;
@@ -308,6 +334,66 @@ static void bf_teardown(const char *dir, struct main_state *ms,
     synth_chain_bf_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
+}
+
+static int test_body_fetch_malformed_verdict(void)
+{
+    char dir[256]; struct main_state ms; struct synth_chain_bf sc;
+    int failures = 0;
+    BF_CHECK("malformed_verdict: setup",
+             bf_setup("malformed_verdict", 3, dir, sizeof(dir), &ms,
+                      &sc) == 0);
+    header_admit_stage_drain(100);
+    validate_headers_stage_drain(100);
+    sqlite3 *db = progress_store_db();
+    BF_CHECK("malformed_verdict: set non-boolean validate result",
+             vh_log_force_ok(db, 0, 2));
+    BF_CHECK("malformed_verdict: fail closed without advancing",
+             body_fetch_stage_step_once() == JOB_FATAL &&
+             body_fetch_stage_cursor() == 0 &&
+             !log_row_at(db, 0, &(int){0}, NULL, 0));
+    bf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int test_body_fetch_text_verdict(void)
+{
+    char dir[256]; struct main_state ms; struct synth_chain_bf sc;
+    int failures = 0;
+    BF_CHECK("text_verdict: setup",
+             bf_setup("text_verdict", 3, dir, sizeof(dir), &ms, &sc) == 0);
+    header_admit_stage_drain(100);
+    validate_headers_stage_drain(100);
+    sqlite3 *db = progress_store_db();
+    BF_CHECK("text_verdict: set coercible non-integer validate result",
+             vh_log_force_text_ok(db, 0, "1junk"));
+    BF_CHECK("text_verdict: fail closed without advancing",
+             body_fetch_stage_step_once() == JOB_FATAL &&
+             body_fetch_stage_cursor() == 0 &&
+             !log_row_at(db, 0, &(int){0}, NULL, 0));
+    bf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* A value that only differs from 1 beyond 32 bits must not truncate into
+ * a passing verdict through sqlite3_column_int. */
+static int test_body_fetch_wide_verdict(void)
+{
+    char dir[256]; struct main_state ms; struct synth_chain_bf sc;
+    int failures = 0;
+    BF_CHECK("wide_verdict: setup",
+             bf_setup("wide_verdict", 3, dir, sizeof(dir), &ms, &sc) == 0);
+    header_admit_stage_drain(100);
+    validate_headers_stage_drain(100);
+    sqlite3 *db = progress_store_db();
+    BF_CHECK("wide_verdict: set 2^32+1 validate result",
+             vh_log_force_wide_ok(db, 0, 4294967297LL));
+    BF_CHECK("wide_verdict: fail closed without advancing",
+             body_fetch_stage_step_once() == JOB_FATAL &&
+             body_fetch_stage_cursor() == 0 &&
+             !log_row_at(db, 0, &(int){0}, NULL, 0));
+    bf_teardown(dir, &ms, &sc);
+    return failures;
 }
 
 static int test_body_fetch_stage_platform_arm(void);
@@ -446,6 +532,10 @@ static int test_body_fetch_stage_platform_arm(void)
 
         bf_teardown(dir, &ms, &sc);
     }
+
+    failures += test_body_fetch_malformed_verdict();
+    failures += test_body_fetch_text_verdict();
+    failures += test_body_fetch_wide_verdict();
 
     /* ── solution missing: prerequisite blocker, not invalid skip ──── */
     {

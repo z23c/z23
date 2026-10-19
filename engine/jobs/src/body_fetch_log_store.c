@@ -33,6 +33,37 @@ bool body_fetch_log_ensure_schema(sqlite3 *db)
     return true;
 }
 
+static int body_fetch_vh_log_read_row(sqlite3_stmt *st, int height,
+                                      int *out_ok, struct uint256 *out_hash,
+                                      char *out_reason, size_t reason_size)
+{
+    const void *blob = sqlite3_column_blob(st, 1);
+    int blob_n = sqlite3_column_bytes(st, 1);
+    if (!blob || blob_n != 32)
+        LOG_ERR("body_fetch",
+                "[body_fetch] malformed validate hash height=%d bytes=%d",
+                height, blob_n);
+
+    int ok_type = sqlite3_column_type(st, 0);
+    /* sqlite3_column_int truncates to 32 bits (2^32+1 reads as 1), so the
+     * verdict must be read wide.  `ok` is a two-valued durable verdict:
+     * SQLite INTEGER affinity alone admits arbitrary values, and treating
+     * a malformed nonzero value as success would let body_fetch advance
+     * on an unverified result. */
+    int64_t row_ok = sqlite3_column_int64(st, 0);
+    if (ok_type != SQLITE_INTEGER || row_ok < 0 || row_ok > 1)
+        LOG_ERR("body_fetch",
+                "[body_fetch] malformed validate verdict height=%d ok=%lld",
+                height, (long long)row_ok);
+
+    *out_ok = (int)row_ok;
+    memcpy(out_hash->data, blob, 32);
+    const unsigned char *txt = sqlite3_column_text(st, 2);
+    if (txt && out_reason && reason_size)
+        snprintf(out_reason, reason_size, "%s", (const char *)txt);
+    return 1;
+}
+
 /* Returns 1 if the complete authority row was retrieved, 0 if absent, -1 on
  * query error or malformed hash. */
 int body_fetch_vh_log_at(sqlite3 *db, int height, int *out_ok,
@@ -57,20 +88,8 @@ int body_fetch_vh_log_at(sqlite3 *db, int height, int *out_ok,
     int found = 0;
     rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
     if (rc == SQLITE_ROW) {
-        const void *blob = sqlite3_column_blob(st, 1);
-        int blob_n = sqlite3_column_bytes(st, 1);
-        if (!blob || blob_n != 32) {
-            sqlite3_finalize(st);
-            LOG_ERR("body_fetch",
-                    "[body_fetch] malformed validate hash height=%d bytes=%d",
-                    height, blob_n);
-        }
-        *out_ok = sqlite3_column_int(st, 0);
-        memcpy(out_hash->data, blob, 32);
-        const unsigned char *txt = sqlite3_column_text(st, 2);
-        if (txt && out_reason && reason_size)
-            snprintf(out_reason, reason_size, "%s", (const char *)txt);
-        found = 1;
+        found = body_fetch_vh_log_read_row(st, height, out_ok, out_hash,
+                                           out_reason, reason_size);
     } else if (rc != SQLITE_DONE) {
         sqlite3_finalize(st);
         LOG_ERR("body_fetch",
