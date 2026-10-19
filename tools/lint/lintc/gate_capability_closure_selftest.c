@@ -45,28 +45,47 @@ static int ccs_parse(const char *text, int strip, struct ccd_nm *nm)
     return ccd_parse_nm(text, strip, nm);
 }
 
-static int ccs_case_parse(void)
+static int ccs_parse_drive(void)
 {
-    struct ccd_nm a = {0}, b = {0}, c = {0}, d = {0}, empty = {0};
+    struct ccd_nm a = {0};
     int ok = ccs_parse("C:/work/epoch/dialer.o:         U connect\nD:\\obj\\x.o:0000000000000000 T main\n", 0, &a) == 0;
     int f = ccs_say(ok && a.n == 2 && ccs_row(&a, 0, "C:/work/epoch/dialer.o", "U", "connect")
                     && ccs_row(&a, 1, "D:\\obj\\x.o", "T", "main"),
                     "H: Windows drive-letter nm records keep the whole object path");
-    ok = ccs_parse("a.o:0000000000000010 T main\na.o:                 w weak_one\nnm: warning: bad object file\n"
-                   "no colon here\na.o: 1 2 3 4\nC:/x\n\nb.o:  v weak_obj\n", 0, &b) == 0;
-    f += ccs_say(ok && b.n == 3 && ccs_row(&b, 0, "a.o", "T", "main") && ccs_row(&b, 1, "a.o", "w", "weak_one")
-                 && ccs_row(&b, 2, "b.o", "v", "weak_obj"), "nm: bare and address rows parse, other token counts drop");
-    const char *text = "a.o: U _open$UNIX2003\na.o: U _fopen$DARWIN_EXTSN\na.o: U _plain\na.o: U _x$lower\n";
-    ok = ccs_parse(text, 1, &c) == 0 && ccs_parse(text, 0, &d) == 0;
-    f += ccs_say(ok && c.n == 4 && !strcmp(c.row[0].name, "open") && !strcmp(c.row[1].name, "fopen")
-                 && !strcmp(c.row[2].name, "plain") && !strcmp(c.row[3].name, "x$lower")
-                 && !strcmp(d.row[0].name, "_open$UNIX2003"), "nm: Darwin decoration is stripped only when asked");
-    f += ccs_say(ccs_parse("", 0, &empty) == 0 && empty.n == 0 && !ccd_nm_failed(&empty),
-                 "nm: empty output adds no rows and no failure");
     ccd_nm_free(&a);
+    return f;
+}
+
+static int ccs_parse_tokens(void)
+{
+    struct ccd_nm b = {0};
+    int ok = ccs_parse("a.o:0000000000000010 T main\na.o:                 w weak_one\nnm: warning: bad object file\n"
+                       "no colon here\na.o: 1 2 3 4\nC:/x\n\nb.o:  v weak_obj\n", 0, &b) == 0;
+    int f = ccs_say(ok && b.n == 3 && ccs_row(&b, 0, "a.o", "T", "main") && ccs_row(&b, 1, "a.o", "w", "weak_one")
+                    && ccs_row(&b, 2, "b.o", "v", "weak_obj"), "nm: bare and address rows parse, other token counts drop");
     ccd_nm_free(&b);
+    return f;
+}
+
+static int ccs_parse_strip(void)
+{
+    struct ccd_nm c = {0}, d = {0};
+    const char *text = "a.o: U _open$UNIX2003\na.o: U _fopen$DARWIN_EXTSN\na.o: U _plain\na.o: U _x$lower\n";
+    int ok = ccs_parse(text, 1, &c) == 0 && ccs_parse(text, 0, &d) == 0;
+    int f = ccs_say(ok && c.n == 4 && !strcmp(c.row[0].name, "open") && !strcmp(c.row[1].name, "fopen")
+                    && !strcmp(c.row[2].name, "plain") && !strcmp(c.row[3].name, "x$lower")
+                    && !strcmp(d.row[0].name, "_open$UNIX2003"), "nm: Darwin decoration is stripped only when asked");
     ccd_nm_free(&c);
     ccd_nm_free(&d);
+    return f;
+}
+
+static int ccs_case_parse(void)
+{
+    struct ccd_nm empty = {0};
+    int f = ccs_parse_drive() + ccs_parse_tokens() + ccs_parse_strip();
+    f += ccs_say(ccs_parse("", 0, &empty) == 0 && empty.n == 0 && !ccd_nm_failed(&empty),
+                 "nm: empty output adds no rows and no failure");
     ccd_nm_free(&empty);
     return f;
 }
@@ -119,11 +138,24 @@ static int ccs_nm_objs(const struct ccs_fx *fx, char paths[4][CCD_PATH])
         && ccs_cc(fx, "o/fill.c", "o/fill.o") == 0 && ccs_cc(fx, "o/empty.c", "o/empty2.o") == 0;
 }
 
+/* Row i of the per-object scan must match the batch scan; empty-unit marker
+ * rows are tolerated only on Mach-O (strip). Sets *named for the export row. */
+static int ccs_nm_row_same(const struct ccd_nm *one, const struct ccd_nm *all, size_t i, const char *const p[3],
+                           int strip, int *named)
+{
+    int filled = !strcmp(one->row[i].path, p[1]);
+    int empty = !strcmp(one->row[i].path, p[0]) || !strcmp(one->row[i].path, p[2]);
+    int marker = strip && empty && !strcmp(one->row[i].type, "t") && !strncmp(one->row[i].name, "ltmp", 4);
+    *named = *named || (filled && !strcmp(one->row[i].name, "filler_export") && !strcmp(one->row[i].type, "T"));
+    return (filled || marker) && ccs_row(all, i, one->row[i].path, one->row[i].type, one->row[i].name);
+}
+
 static int ccs_case_nm(const struct ccs_fx *fx)
 {
     char p[4][CCD_PATH];
     int ok = ccs_nm_objs(fx, p);
     char *objs[] = { p[0], p[1], p[2] }, *badv[] = { p[1], p[3] };
+    const char *const rows[3] = { p[0], p[1], p[2] };
     struct ccd_nm one = { 0 }, all = { 0 }, broken = { 0 };
 #if defined(__APPLE__)
     const int strip = 1;
@@ -132,14 +164,8 @@ static int ccs_case_nm(const struct ccs_fx *fx)
 #endif
     ok = ok && ccd_run_nm(objs, 3, 0, 1, strip, &one) == 0 && ccd_run_nm(objs, 3, 0, 0, strip, &all) == 0;
     int same = ok && one.n == all.n, named = 0;
-    for (size_t i = 0; ok && i < one.n; i++) {
-        int filled = !strcmp(one.row[i].path, p[1]);
-        int empty = !strcmp(one.row[i].path, p[0]) || !strcmp(one.row[i].path, p[2]);
-        int marker = strip && empty && !strcmp(one.row[i].type, "t") && !strncmp(one.row[i].name, "ltmp", 4);
-        same = same && (filled || marker)
-            && ccs_row(&all, i, one.row[i].path, one.row[i].type, one.row[i].name);
-        named = named || (filled && !strcmp(one.row[i].name, "filler_export") && !strcmp(one.row[i].type, "T"));
-    }
+    for (size_t i = 0; ok && i < one.n; i++)
+        same = ccs_nm_row_same(&one, &all, i, rows, strip, &named) && same;
     int fail = ok && ccd_run_nm(badv, 2, 0, 1, strip, &broken) == 0 && ccd_nm_failed(&broken);
     int s = ccs_say(ok && !ccd_nm_failed(&one) && !ccd_nm_failed(&all) && named,
                     "M: native empty units parse without failure; the export is a T row");
