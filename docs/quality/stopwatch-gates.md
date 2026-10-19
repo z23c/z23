@@ -359,4 +359,4 @@ produce a garbage artifact — run the peer with no timeout and treat any
 run whose peer died as invalid evidence; (2) the harness defaults already
 point at `127.0.0.1:39070`/`39072`, so a dead fixture peer reads as SKIP
 or SEAM, never as "peer missing" — check `boot_status.json` in the peer
-datadir (`phase=serving`) before trusting a non-PASS verdict.
+datadir (`phase=serving`) before relying on a non-PASS verdict.

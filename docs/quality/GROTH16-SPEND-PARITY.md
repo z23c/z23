@@ -143,7 +143,7 @@ is the soundness-relevant failure mode here.
   path (§21, 44224 constraints), the twin blake2s for `nf` (§27, the same 21006
   gadget over the 256-bit nf preimage), and nullifier packing (§28).
   Target: **98777** constraints, **98638** aux, **8** inputs (7 public + ONE).
-  The `98638` aux figure is independently corroborated by the trusted-setup
+  The `98638` aux figure is independently corroborated by the setup
   proving key itself: bellman's private-input query length `pk.l_len` for
   `sapling-spend.params` is exactly 98638 (see the H1 baseline line).
 

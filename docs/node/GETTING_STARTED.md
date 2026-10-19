@@ -361,8 +361,8 @@ project. Consequences of that, both good:
   at `~/.zcash-params` and you are done — check, don't re-download.
 - Otherwise get them however you can (a copy from another machine you control,
   a mirror, whatever your distribution packages) and then **verify the hashes
-  above before starting the node**. The hashes are the trust anchor; where the
-  bytes came from is not. This project pins no download host and trusts no
+  above before starting the node**. The hashes are the pinned anchor; where the
+  bytes came from is not. This project pins no download host and relies on no
   certificate authority, which is exactly why the check is on you:
 
 ```bash
@@ -463,7 +463,7 @@ on what you already have, so read the first line of each before picking:
    ```
 
    `dns_seeds=0` is deliberate and permanent: this project resolves no
-   hostnames and trusts no certificate authority, so there is no DNS seeder
+   hostnames and relies on no certificate authority, so there is no DNS seeder
    to be censored or spoofed. The compiled-in fixed seeds are raw IP
    addresses; the onion seeds are `.onion` directory nodes and are only
    dialled by a real-Tor build, which is the default; on a `ZCL_TOR=stub`
@@ -483,7 +483,7 @@ on what you already have, so read the first line of each before picking:
    Two honest caveats about the compiled-in seeds. They are plain IP
    addresses baked into a release, so they go stale as machines churn — some
    fraction of them will be unreachable by the time you build. And a node
-   whose only reachable seed is one host is trusting that host for its first
+   whose only reachable seed is one host is relying on that host for its first
    view of the chain until gossip widens the peer set. If you already know
    any reachable peer, `-addnode=HOST:8033` short-circuits both problems, and
    `~/.config/zclassic23/onion-seeds` (one `.onion` per line) adds directory
@@ -727,7 +727,7 @@ make dev-service-install ZCL_SERVICE_EXTRA_FLAGS="-allow-clearnet-snapshot-fetch
 ```
 
 This is opt-in and unauthenticated: the node still validates the fetched
-snapshot against consensus before trusting it, but the seed itself is not
+snapshot against consensus before accepting it, but the seed itself is not
 signed by the chain. Omit the flag for a from-genesis P2P-only sync.
 
 Once you have another synced z23 node on your LAN or VPN, point this Mac at

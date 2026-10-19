@@ -26,7 +26,7 @@ The three **synced-node-dependent** criteria — **C3** (cold-start sync to tip)
 **C6** (168h soak), **C8** (consensus parity over the soak window) — CANNOT
 pass until the node holds a clean synced tip on the **sovereign foundation** and
 accrues a clean window. Re-run this reporter against the live node
-(`zcl-rpc getblockchaininfo`, `z23 status`) rather than trusting a
+(`zcl-rpc getblockchaininfo`, `z23 status`) rather than relying on a
 pinned verdict here — no hermetic slice can stand in for "a fresh node
 reached the real ~3.15M-block tip in <10min" or "168h clean wall-clock". The
 reporter probes the live node: when `blocks != headers` (not at tip) the
@@ -53,7 +53,7 @@ human-readable echo of the same regression.
 | C8 | Consensus parity with zclassicd | `test_zcl` slice `parity_slice` (mismatch-detection machinery: consistent set→0, injected outpoint→DETECTED) | 0 byte-mismatches vs a live `zclassicd` oracle over the soak window; needs an EXACT reference (`gettxoutsetinfo` is height-only) + the soak window |
 
 Run `make mvp` or `tools/mvp_gate.sh` for the current PASS/FAIL/BLOCKED verdict
-per criterion — never trust a pinned verdict in this file.
+per criterion — never rely on a pinned verdict in this file.
 
 ## Current scoreboard
 

@@ -125,7 +125,7 @@ frontier.
 
 Net: on the reducer path that actually advances the node's durable tip, a reorg
 cannot exceed the bounded reorg depth AND every Groth16/Ed25519 proof/signature
-below tip is verified — there is no `assumevalid`-style trust window on the
+below tip is verified — there is no `assumevalid`-style skip-verification window on the
 live, state-advancing path. The `assumevalid`-equivalent deferred-height gate is
 real but confined to the legacy `connect_block()` reindex/import/simnet path,
 where it carries the same practical exposure as any `assumevalid`-style node
@@ -146,7 +146,7 @@ height. Anchor membership is checked independently on both paths.
   isolated node recovery check is separate (`make test-crash-bootstrap`).
   Workflow automation uses only
   explicitly managed self-hosted runners. Mainline build/test observations and
-  the trusted-base pull-request security scan are supplementary; exact local
+  the base-branch pull-request security scan are supplementary; exact local
   receipts remain admission authority.
 - **Operator-private HTTP routes:** `/api/wallet`, `/api/messages`, and
   `/api/swaps` are classified operator-private (`api_route_is_operator_private`,
@@ -232,7 +232,7 @@ path.
 
 For a P2P-reconstructed source carrier, the same gate has a Git-free mode.
 `ZCL_SOVEREIGN_SOURCE_ROOT` names the independently accepted ZVCS authority and
-`ZCL_SOVEREIGN_VERIFY_BIN` names a pretrusted bootstrap binary that re-derives
+`ZCL_SOVEREIGN_VERIFY_BIN` names a pre-verified bootstrap binary that re-derives
 that root through the native source-capture implementation. Snapshots exclude
 both `.git` and `.zvcs`; `ZCL_REPRO_REFERENCE_BIN` adds a required byte compare
 against the exact accepted candidate. This proves reconstruction/build

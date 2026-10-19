@@ -22,7 +22,7 @@ not by this code.
 
 ## 2. Where private keys live
 
-Five places. All five are inside the operator's own trust domain; private
+Five places. All five are inside the operator's own control domain; private
 keys can be exported through authenticated loopback JSON-RPC.
 
 | # | Location | Form | Encrypted at rest |
@@ -210,8 +210,8 @@ which rows are which (§8).
 The spending paths also use two independent runtime gates:
 
 - **`wallet_lock_spend_guard()`** — a locked wallet cannot spend even when
-  trust permits (`contexts/wallet/modules/wallet/include/wallet/wallet_lock.h`).
-- **the sync-trust `WALLET_SPEND` capability** — spending is disabled until
+  verification permits (`contexts/wallet/modules/wallet/include/wallet/wallet_lock.h`).
+- **the sync-verified `WALLET_SPEND` capability** — spending is disabled until
   the node's own state is self-verified.
 
 ---

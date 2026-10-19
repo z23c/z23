@@ -374,7 +374,7 @@ the fixture does not provide a separate-uid verifier.
 The queue branch integrated it at signed commit
 `738abc3ef1ec7709d5ddf779901c43f32789b6cd`; the generated capability
 inventory was regenerated on the combined source. Main now runs
-landing-proof test groups cold until a verifier outside the candidate's trust
+landing-proof test groups cold until a verifier outside the candidate's verification
 domain can sign eligible verdicts. This closes admission of same-uid planted
 PASS records, but it is not a measured proof throughput gain. The fixed
 mixed-100 cohort still has zero DEV and zero full acceptances, so the
@@ -844,7 +844,7 @@ refuse inheritance. Fleet mail receipt 791 carries these roots.
 
 The consenting development peers now have bounded command and exact-object
 transfer qualified in both directions. For the newly qualified Peer 1 to
-Peer 2 leg, a pre-trusted public ED25519 known-hosts entry SHA-256
+Peer 2 leg, a pinned public ED25519 known-hosts entry SHA-256
 `275cf3c9d5b848a5ea444e4ce3e5bc82dc60799195f2d8906987066f39a8559b`
 was copied byte-identically into a temporary file; transfer log SHA-256
 `ed87f75fc4232e9f6f25e7c694cd83d9e7b14b7216564dc189419b360d63c106`.
@@ -1232,7 +1232,7 @@ tree, and each tip was an ancestor of fresh `origin/main`. For each receipt,
 changing one signature byte and separately changing one message byte made
 verification fail. All six rows use the same signer for publication and
 remote observation. The report labels signer authority and acceptance
-`UNVERIFIED`; it does not count a second trust domain. The complete output
+`UNVERIFIED`; it does not count a second verification domain. The complete output
 SHA-256 is
 `7a670c0f0fb4e266743dc66b0015e604a6cab5a3431cf5b34aff058a15f972af`.
 The Bash child-inclusive measurement was 0.343 s wall, 0.276 s user CPU and
@@ -1325,7 +1325,7 @@ the alias-only route matrix SHA-256 is
 `1cf0090ad8f089ba283bfa3be1da556b3728199e668f7708bf3f74c35effb60e`.
 Its bounded measured SSH wall times were 124–191 ms for local-to-peer
 commands/transfers and 257–539 ms for the temporary peer-to-peer path.
-Direct peer DNS and persisted host-key trust were unavailable, so a durable
+Direct peer DNS and persisted host-key pins were unavailable, so a durable
 autonomous dispatch route is not qualified by this temporary bootstrap.
 
 The six signed landing rows provide proof SHA-256 digests, but no verified

@@ -1,7 +1,7 @@
 # Z23 Validation Audit Matrix
 
 Exactly what cryptographic validation happens at each stage of block
-processing. Trust nothing — every hash, signature, and proof is verified by one
+processing. Assume nothing — every hash, signature, and proof is verified by one
 of these layers. Operator-facing sync/recovery is in [`SYNC.md`](../node/SYNC.md);
 this doc is the validation/format reference.
 
@@ -9,7 +9,7 @@ this doc is the validation/format reference.
 
 | STAGE | Hash | PoW | Merkle | Scripts | UTXOs | Shielded |
 |-------|------|-----|--------|---------|-------|----------|
-| LevelDB load          | trust   | no  | no  | no    | no        | no    |
+| LevelDB load          | assumed | no  | no  | no    | no        | no    |
 | Block file scan       | compute | no  | no  | no    | no        | no    |
 | `accept_block_header` | verify  | YES | no  | no    | no        | no    |
 | `check_block`         | no      | no  | YES | no    | no        | no    |

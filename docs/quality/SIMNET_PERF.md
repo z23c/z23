@@ -332,7 +332,7 @@ injected regression is completely invisible to every count-based check.
 The 5.48–6.58x calibrated floor at scale 1 is a property of *this specific
 workload against this specific injected fault*, not a law. Two things can
 move it, and either one needs a re-measurement, not a guess, before it is
-trusted again:
+accepted again:
 
 - **The injected fault changes.** `SIMNET_PERF_INJECT_COINS_HASH_COLLAPSE` is
   one specific regression shape (every key collapses to one bucket). A

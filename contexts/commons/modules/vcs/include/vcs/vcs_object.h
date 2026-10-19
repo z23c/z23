@@ -7,7 +7,7 @@
  * The tag byte is a domain separator so a blob and a manifest with identical
  * bytes are never confused. Writes are atomic (tmp file, fsync, rename) and
  * idempotent (a put of already-present content is a no-op). Reads ALWAYS
- * recompute the hash and reject a mismatch — recompute, never trust.
+ * recompute the hash and reject a mismatch — recompute, never assume.
  *
  * This store is beside .git/ in the working copy and is NOT a node.db model;
  * it sits below the ActiveRecord lifecycle by design (same doctrine as the

@@ -36,7 +36,7 @@ entropy.
 Consensus stays untouched throughout — `expensive_checks=false` is the
 existing escape hatch every harness above uses; it never bypasses PoW,
 signature, or shielded-proof checks, only the expensive verification passes
-already skippable on a trusted local mint path.
+already skippable on an accepted local mint path.
 
 ## CI gating
 

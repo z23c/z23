@@ -106,7 +106,7 @@ collision-proof by construction rather than by convention.
 
 Every object read **recomputes** the hash and rejects a mismatch
 (`vcs_object_get()`); ZVCS never accepts a stored hash without re-deriving it.
-The same "recompute, never trust" discipline used elsewhere in this codebase
+The same "recompute, never assume" discipline used elsewhere in this codebase
 (`seal_kv`, the sealed `core/MANIFEST.sha3`).
 
 ## Source identity v2 — current bytes, not Git history

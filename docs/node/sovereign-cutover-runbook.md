@@ -133,7 +133,7 @@ pair together as the portable artifact for every subsequent install call
    (currently expected at
    `$HOME/.zclassic-c23-mint-receipt/consensus-state-bundle-3056758.sqlite`)
    and non-empty. The install call re-validates it fully (root/count/supply,
-   every anchor tree, nullifier digest) — a bad copy is refused, not trusted —
+   every anchor tree, nullifier digest) — a bad copy is refused, not accepted —
    but do not spend a copy-prove run on a file that is not even present.
 2. **The A3 consumer lane is merged to `main`** — `boot_install_consensus_bundle`,
    `consensus_state_snapshot_install_activate`, and the `-install-consensus-bundle`
@@ -291,7 +291,7 @@ of this sequence; the only unavailable window is between step 2 and step 5.
 5. **Expect a ~124k-block forward refold, ~30–60 minutes**, folding
    anchor+1 (3,056,759) through on-disk block bodies to the current header
    tip. Re-derive the actual block count fresh at execution time
-   (`current header tip − 3,056,758`) rather than trusting this figure — the
+   (`current header tip − 3,056,758`) rather than accepting this figure — the
    chain has grown since this was written. Watch progress with
    `z23 status`, `z23 dumpstate reducer_frontier`, and
    `z23 anchorstatus`.

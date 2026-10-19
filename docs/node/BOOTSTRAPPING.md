@@ -30,7 +30,7 @@ Sapling/Sprout, or nullifier roots, so they do not prove the payload contents.
 
 > Without a pack, today's proven recovery is the two-step
 > `--importblockindex $HOME/.zclassic` followed by a normal boot with the legacy
-> datadir available (see `CLAUDE.md`). A trustless fresh P2P genesis-to-tip sync
+> datadir available (see `CLAUDE.md`). A verifying fresh P2P genesis-to-tip sync
 > remains a target, not a proven operational claim.
 
 ## The release
@@ -214,7 +214,7 @@ it, so the manifest scan cannot pick it up):
 | sidecar | contents | effect |
 | --- | --- | --- |
 | `<source>.anchor` | `<height> <blockhash>` (bare 64-hex hash, no `0x`) | required unless `.meta` is present; the pair must name a **compiled** beta6 fast-sync anchor — currently mainnet height `3126937`, hash `00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053`. Serves a v1 manifest. |
-| `<source>.meta` | `<height> <blockhash> <chainstate-commitment>` | an alternative to `.anchor` that self-declares its own chainstate commitment instead of matching a compiled anchor. No z23 tool produces this file today; treat it as the trust shortcut the anchor exists to avoid, not a normal path. Serves a v2 manifest. |
+| `<source>.meta` | `<height> <blockhash> <chainstate-commitment>` | an alternative to `.anchor` that self-declares its own chainstate commitment instead of matching a compiled anchor. No z23 tool produces this file today; treat it as the shortcut the anchor exists to avoid, not a normal path. Serves a v2 manifest. |
 | `<source>.blocktip` | `<height> <blockhash>` | optional, honoured only alongside `.anchor`; when its height is past the anchor, upgrades the manifest to v3 (a growable block bundle riding on the pinned anchor chainstate). |
 
 With neither `.anchor` nor `.meta` present, arming fails outright ("beta6
@@ -317,7 +317,7 @@ first; today the posture gates the *report*, not the *wire*.
 `beta6_bootstrap_source_not_configured` (no source armed),
 `beta6_bootstrap_serving_not_installed` (armed, but neither the in-band seam
 nor the side listener is answering), or `review_required_bootstrap_trust`
-(this node's own security posture — trusted/borrowed state present, or full
+(this node's own security posture — accepted/borrowed state present, or full
 history validation incomplete — has not cleared review); it is empty while
 `serving` is true. The top-level `blockers[]` is a broader readiness list: it
 surfaces the same posture status string (so `review_required_bootstrap_trust`

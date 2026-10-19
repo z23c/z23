@@ -81,7 +81,7 @@ What happens:
    non-competitive chainwork. This does **not** bind the peer's UTXO payload to
    ZClassic consensus; headers commit no UTXO root.
 5. Verify the imported UTXO bytes exactly match the peer manifest's SHA3. This
-   is integrity under assisted trust, not a consensus proof.
+   is integrity under assisted verification, not a consensus proof.
 6. Keep the verified payload in staging. Runtime activation is Phase-0
    contained until one unified installer can atomically bind transparent,
    Sapling, Sprout, nullifier, cursor, log, and provenance state; only then may
@@ -117,7 +117,7 @@ What a consuming node does with them:
   can never teach a consumer a wrong newest height. A node does not mint such
   an offer either — the same predicate decides both sides. The one exception:
   an offer at exactly the compiled checkpoint height is always fresh, however
-  old — the installer already grants that bundle full sovereign trust by
+  old — the installer already grants that bundle full sovereign acceptance by
   height alone, so the 576-block window does not apply to it.
 - **An offer is a claim, never an authority.** The bytes are fetched through
   the unchanged ROM path: every chunk is content-verified against the offer's
@@ -195,7 +195,7 @@ and file-service serving.
 
 ## Method 2 (native): Full P2P Sync (hours)
 
-Trustless sync from genesis over the standard P2P protocol. No snapshot.
+Verifying sync from genesis over the standard P2P protocol. No snapshot.
 
 ```bash
 build/bin/z23 -addnode=<any_peer>
@@ -358,7 +358,7 @@ Rules:
   tip). They refuse if our active tip already meets/exceeds legacy.
 - Legacy data is acceleration only. It must match compiled SHA3 windows,
   runtime windows, local consensus checks, or z23 quorum before it
-  elevates trust.
+  elevates the verification level.
 - Force reimport after a first run:
   `build/bin/z23 -reimport-utxos -datadir="$HOME/.zclassic-c23"`
 
@@ -384,7 +384,7 @@ peer state to sovereignty; background full-history verification must do that.
 
 ## Verification Layers
 
-Sync methods can reach different trust states. Background services must promote
+Sync methods can reach different verification states. Background services must promote
 assisted state only after full-history verification reaches the serving tip and
 complete state commitments match. Current checks include:
 
@@ -453,7 +453,7 @@ Snapshot protocol: z23 peers must speak
 `FAST_SYNC_PROTOCOL_VERSION=2` and `FAST_SYNC_SNAPSHOT_SCHEMA_VERSION=1`.
 Missing v2 fields, zero chainwork, non-final anchors, missing MMR/MMB roots,
 or stale schemas are rejected. Legacy/non-v2 data may still be used locally
-for bootstrap acceleration, but it is not trusted P2P snapshot sync.
+for bootstrap acceleration, but it is not verified P2P snapshot sync.
 
 Quorum model: votes are grouped by source class — local z23, local
 zclassicd, remote z23 peers. Remote votes are keyed by unique peer and

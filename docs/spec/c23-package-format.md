@@ -279,7 +279,7 @@ OPTIONAL input for the deliberately narrower case where the caller names a
 transport root directly and is asking about no package; a caller who IS
 asking about one MUST pass it, and omitting it is not a safe default but a
 strictly weaker act that asserts nothing about any package. Do not treat a
-published attestation pointer as trustworthy because the publish gate
+published attestation pointer as reliable because the publish gate
 exists.
 
 **Admitting is not accepting.** The transport commands deliberately file

@@ -268,7 +268,7 @@ arm64 macOS refuses unsigned binaries, and a file that arrived over the
 network carries a quarantine attribute the signature does not remove. Rebuild
 the bundle on that machine (`make myapp-app`) or clear the attribute with
 `xattr -dr com.apple.quarantine Myapp.app`; the ad-hoc signature is what makes
-the bundle runnable, not what makes it trusted.
+the bundle runnable, not what makes it accepted.
 
 **You edited `contexts/commons/packages/zhello` to make your app and now `make zhello-selftest`
 fails.** Put it back: zhello is the template of record, the reference every

@@ -193,7 +193,7 @@ and the compiled-checkpoint content authority
 (`consensus_state_chain_binding_uses_checkpoint_authority`,
 same file lines 99-121) admits a bundle **only** when its manifest reproduces
 the compiled checkpoint's block hash and Sapling frontier root/height
-byte-for-byte. Trust roots in the shipped binary, not in the seeder. That is the
+byte-for-byte. Verification roots in the shipped binary, not in the seeder. That is the
 sovereignty-correct shape and it is already built.
 
 ---
@@ -295,7 +295,7 @@ produces. The sovereignty-clean options, cheapest first:
 * Serialize the compiled genesis block (already fully specified in
   `core/chainparams`) to `blocks/blk*.dat` once, on the fresh-datadir path in
   `engine/services/src/block_index_loader.c:783-793`, and set `nFile`/`nDataPos`
-  on the index entry. The bytes come from the binary, so no trust is added.
+  on the index entry. The bytes come from the binary, so no standing is added.
 * Or make `body_persist`/`script_validate`/`utxo_apply` treat height 0 as a
   compiled constant and advance without a disk read (genesis has one coinbase,
   zero spendable outputs by consensus).

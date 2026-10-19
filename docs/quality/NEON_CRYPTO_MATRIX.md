@@ -60,7 +60,7 @@ request for the 8-way tier narrows to the 4-way one; the string reporter
 The row order follows the dependency direction: primitives first, the things
 built on them after. "x86 tier" / "arm64 tier" name the tier that runs **after
 the lanes listed in §4 land**; where a cell says "none today", re-derive it
-with the command in the cell rather than trusting the prose.
+with the command in the cell rather than relying on the prose.
 
 | Family (files) | x86-64 tier | x86 gate | arm64 tier | arm64 gate | Bit-identity proof | Bench |
 |---|---|---|---|---|---|---|
@@ -121,7 +121,7 @@ point of this document.
 
 ## 4. Landed arm64 lanes and re-derivation
 
-These paths are code, not promises. Re-derive each instead of trusting this
+These paths are code, not promises. Re-derive each instead of relying on this
 list, and keep measured-slower implementations available for proof without
 making them the automatic default:
 

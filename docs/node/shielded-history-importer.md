@@ -51,14 +51,14 @@ importer uses after a complete bulk insert.
 `nullifier_kv_publish_full_replay_complete_in_tx` mirrors it for the
 nullifier side.
 
-## Trust asymmetry: Sapling is header-bound, Sprout is not
+## Verification asymmetry: Sapling is header-bound, Sprout is not
 
 ZClassic headers commit `hashFinalSaplingRoot` (Heartwood was never activated
 on this chain, so the field was never repurposed) — `struct block_header`
 (`core/modules/primitives/include/primitives/block.h`), mirrored in
 `struct block_index`. An imported **Sapling** frontier's root is therefore
 byte-verifiable against `block_index.hashFinalSaplingRoot` at any height. The
-**Sprout** frontier has no header commitment; its trust bottoms out at the
+**Sprout** frontier has no header commitment; its verification bottoms out at the
 `zclassicd` chainstate's own byte content plus the reader's fail-closed root
 re-hash check. This asymmetry is recorded in the importer's provenance and is
 why this path is `release_assisted`, not `sovereign`.
@@ -154,7 +154,7 @@ Entry point: boot flag `-import-complete-shielded=ZCLASSICD-DATADIR`
 sapling_anchors=... sprout_anchors=... sapling_nf=... sprout_nf=...` (matched
 by `tools/scripts/import-copy-prove.sh`) and exits 0.
 
-## Operational vs sovereign trust split
+## Operational vs sovereign verification split
 
 The distinction lives in two independent `coins_kv` bits:
 
@@ -171,7 +171,7 @@ cursors — it does **not** touch `COINS_KV_SELF_FOLDED_KEY`. After a successful
 import: `coins_kv_is_proven_authority` stays true (serves tip: explorer,
 REST/onion API, P2P relay, wallet viewing, reducer forward-fold), and
 `coins_kv_contains_refold_marker` stays false (honest `release_assisted`
-trust state — borrowed shielded history, Sapling chain-bound, Sprout
+verification state — borrowed shielded history, Sapling chain-bound, Sprout
 `zclassicd`-bound). `bundle_exporter.c`, `consensus_state_snapshot_export_proof.c`,
 `boot_snapshot_offer.c`, and `consensus_state_snapshot_candidate_validate.c`
 all gate export/re-serve/advertise on the sovereign bit, so a
@@ -227,7 +227,7 @@ canonical datadir.
   full-history replay). The importer's tip-anchor bind and the copy-prove
   hash-parity check cover the *import*, but ongoing forward validation does
   not re-check every block's Sapling root by default.
-- **Sprout trust bottoms at the operator's own `zclassicd` chainstate** (no
+- **Sprout verification bottoms at the operator's own `zclassicd` chainstate** (no
   header commitment) — acceptable for a pre-Sapling, effectively-drained
   pool, but the sovereign install is the only path that replaces it with a
   self-derived Sprout history.

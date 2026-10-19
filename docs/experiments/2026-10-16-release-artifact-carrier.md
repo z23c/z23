@@ -39,7 +39,7 @@ The separate ZIDR document signs `(name, version, manifest_root)` beside the
 carrier. Consumers must verify that document under their pinned signer policy,
 match its labels and exact root, verify the carrier, check target compatibility,
 and separately authorize installation. Carrier verification alone establishes
-bytes and shape, not signer trust or safe execution.
+bytes and shape, not signer verification or safe execution.
 
 The public shape classifier remains unchanged and refuses this carrier.
 Completeness, pins and storage classes grant no serving authority. Fleet

@@ -17,7 +17,7 @@ version is:
   gossip from whoever answers. Peers that are not in the compiled list show up
   in the peer set within a couple of minutes.
 - **No DNS seeder is used — ever.** The node resolves no hostnames for peer
-  discovery and trusts no certificate authority. `dns_seeds=0` in the
+  discovery and relies on no certificate authority. `dns_seeds=0` in the
   `[net] bootstrap sources:` line the node prints on first boot is the
   deliberate, permanent value, not a misconfiguration.
 - `.onion` directory seeds are the second bootstrap channel, used only on a

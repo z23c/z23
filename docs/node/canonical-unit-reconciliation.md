@@ -82,7 +82,7 @@ not necessarily what the running process is doing right now. The two can
 disagree indefinitely, silently, for as long as nobody restarts the unit —
 and `systemctl show` gives no hint that this gap exists.
 
-This is the single most valuable step in the whole procedure: never trust a
+This is the single most valuable step in the whole procedure: never assume a
 unit file, a drop-in, or `systemctl show`'s `ExecStart` property to describe
 what a daemon is currently running. Only the running process's own argv can:
 

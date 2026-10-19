@@ -2,7 +2,7 @@
  *
  * purpose: C23 lint gate — check-hardening-ratchet. One extensible,
  * shrink-only ratchet for the memory-safety rules on untrusted input
- * (docs/DEFENSIVE_CODING.md, "Hardening rules for untrusted input").
+ * (docs/DEFENSIVE_CODING.md, "Hardening rules for unverified input").
  * Every finding carries a RULE id; the baseline holds `RULE PATH COUNT`
  * rows; a file may never exceed its baselined count for a rule (a file or
  * rule with no row has baseline 0). Fewer than baseline PASSES with a

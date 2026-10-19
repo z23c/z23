@@ -230,7 +230,7 @@
                "filesystem_snapshot", "bounded_lookup", NULL, NULL, NULL,
                "tests/harness/src/test_chain_segment.c", true),
     DIAG_ENTRY("rom", rom_dump_state_json,
-               "L0-L3 trust machine catalog: compiled SHA3 UTXO checkpoint "
+               "L0-L3 verification machine catalog: compiled SHA3 UTXO checkpoint "
                "(height/block_hash/sha3_hash/utxo_count), what ZClassic "
                "headers commit vs NOT commit per field, per-layer coverage "
                "(L0 ROM height, L1 sealed-segment range, L2 reducer H*/floor, "

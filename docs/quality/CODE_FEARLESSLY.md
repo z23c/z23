@@ -4,7 +4,7 @@ Fear is a fact about the environment, not about the coder.
 
 An engineer who hesitates before a change is usually reading the environment
 correctly: the change is hard to undo, or nothing will catch the mistake, or
-the thing that claims to catch it cannot be trusted. Hesitation is a rational
+the thing that claims to catch it cannot be relied on. Hesitation is a rational
 response to missing rails. It is not a character flaw to be exhorted away.
 
 So the instruction "code fearlessly" is not addressed to the coder. It is
@@ -54,13 +54,13 @@ making something catch it next time.
   should be — a result you can reproduce is a result you can act on alone,
   without asking anyone to vouch for it.
 - **Verifiability over vouching.** Prefer a property anyone can check
-  independently to a claim someone must be trusted for. This is the same
+  independently to a claim someone must be relied on for. This is the same
   principle that makes the network decentralized, applied to the workshop.
 
 ## What quietly destroys it
 
 These are the failure modes that matter, because each one leaves the rail
-*visible* while removing its protection. An engineer who trusts a rail that is
+*visible* while removing its protection. An engineer who relies on a rail that is
 not there is worse off than one who knows there is no rail.
 
 - **A gate that can pass without testing anything.** If a change maps to no

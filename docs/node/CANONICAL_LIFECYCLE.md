@@ -177,7 +177,7 @@ The existing Commons evaluator in
 `engine/services/src/build_fabric_evidence.c` now retains verified failures
 through conflict inspection. Eligible PASS/FAIL disagreements and different
 successful build outputs for the same action/input refuse with
-`proof_observation_conflict` before proof-set materialization or trust promotion.
+`proof_observation_conflict` before proof-set materialization or verification promotion.
 The registered `build_fabric` tests cover signed compile and package observations,
 ineligible/forged failures, repeated successes and failure-only nonadmission.
 This does not complete cross-candidate unit reuse or Git publication convergence.
@@ -318,7 +318,7 @@ FEEDBACK ONLY. Attach's donor scan remains the only reuse authority.
   1. completes any staged publication;
   2. restores the signed issuer log at the head recorded in the worker's row;
   3. rebuilds the receiver from CAS, anchored on every worker's durable head,
-     under the worker table's current trust.
+     under the worker table's current standing.
 
   Worker start is the only place history is replayed. Both the restore and
   the rebuild are bounded by the catalog size and retry when the catalog
@@ -353,7 +353,7 @@ FEEDBACK ONLY. Attach's donor scan remains the only reuse authority.
     identity exists, the author is the worker's own key, and the worker is
     always the local signer.
   - Tickets issued by either never count toward reuse.
-  - The trust-domain rule is unchanged: domain membership outranks the
+  - The verification-domain rule is unchanged: domain membership outranks the
     verifier set.
   - A single-worker node therefore reports ticket MISS with
     `no_eligible_observation` (its own tickets are `signer_in_candidate_domain`)
@@ -415,7 +415,7 @@ Fields: `remote_receipt_root` (self), `publication_root`, target identity/ref,
 Root: domain-separated SHA3-256 of the canonical signed wire, excluding self.
 Created by: any node, including one that did not attempt the push. This is the
 only object that closes a cycle, and it is deliberately produced by re-fetching
-and re-verifying rather than by trusting the pushing node's own report.
+and re-verifying rather than by accepting the pushing node's own report.
 References: a PUBLICATION root.
 
 Recovery does not require the publisher or its result to survive. Another

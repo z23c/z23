@@ -3,7 +3,7 @@
 
 This file is the naming and ownership authority for bootstrap artifacts. A
 schema suffix such as `.v1` versions an on-disk contract; it is not a product
-edition, implementation phase, trust level, or competing architecture. A new
+edition, implementation phase, verification level, or competing architecture. A new
 suffix is allowed only for an incompatible encoding change. There is one
 canonical codec; the implementation may have only one canonical writer and one
 canonical reader for the current schema.
@@ -35,7 +35,7 @@ committed components:
   running-binary/toolchain/build-input claims, source fold cursor, chain-corpus
   digest, proof-manifest digest, and artifact digest; these are partial producer
   provenance, not complete reproducible-build proof;
-- trust posture (`sovereign` or explicitly assisted), signature set, target
+- verification posture (`sovereign or explicitly assisted), signature set, target
   lane, acceptance receipt, and rollback generation.
 
 ## Implementation status
@@ -81,7 +81,7 @@ it does not imply that publication exists today. It:
   `/proc/self/fd` identity, and holds one read transaction for the receipt's
   lifetime;
 - rejects unfinished WAL/SHM/journal sidecars, enables defensive/query-only/
-  untrusted-schema SQLite posture, and bounds SQLite row/query resources;
+  unverified-schema SQLite posture, and bounds SQLite row/query resources;
 - hashes the complete SQLite file before and after semantic validation, rejects
   any byte or descriptor-identity change, and exposes whole-file revalidation
   for long evidence-capture operations;
@@ -169,7 +169,7 @@ legacy format; it never makes the evidence admissible. V2 binds the SHA-256
 source identity instead and requires `producer_commit` to remain empty; optional
 GitHub trace metadata belongs outside receipt authority. A future
 bundle suffix is reserved for an incompatible bundle encoding change, not for
-receipt migration, implementation milestones, or trust profiles.
+receipt migration, implementation milestones, or verification profiles.
 
 Both reducer consumers and export proof are hash-bound. Script and proof stage
 receipts carry the exact selected header hash; a missing, malformed, or foreign
@@ -240,7 +240,7 @@ implemented and proven together:
    checkpoint-fold, incomplete, or legacy-v1 dirty evidence must remain
    explicitly assisted/contained and can never be silently promoted.
 2. One single-use protected candidate must combine the artifact receipt and
-   selected-chain evidence with sovereign trust posture, signed/expiring owner
+   selected-chain evidence with sovereign verification posture, signed/expiring owner
    authority, exact target-store identity, lane, nonce, and rollback digest. It
    must recapture/CAS inside publication; diagnostic evidence is insufficient.
 3. Export and admission must remain descriptor-bound, whole-file-hashed,

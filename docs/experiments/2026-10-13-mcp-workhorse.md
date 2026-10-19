@@ -90,7 +90,7 @@ publishers and signed timestamps under its existing 16 KiB search-payload
 budget. Additional steer and MCP envelopes are outside that payload budget.
 The caller reads the pinned revision through steer_evidence with type=board
 and ref=id. Latest-held selection does not establish globally latest knowledge;
-wiki content remains untrusted and grants no operating authority.
+wiki content remains unverified and grants no operating authority.
 
 All commands ran through devbuild --wait, with 28 jobs for focused tests:
 

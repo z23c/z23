@@ -2,7 +2,7 @@
 
 One 130-byte record on-chain per identity — a master key — with an entire
 signed, content-addressed data plane hanging off it, forever. The chain is
-the smallest possible root of trust: a land registry of keys. Everything
+the smallest possible verification root: a land registry of keys. Everything
 else (service descriptors, names, packages, relay endpoints, messages) is
 signed data moving over gossip and the ZCODE swarm, verified against the
 chain, never touching it again. **Write once, sign forever.**
@@ -21,7 +21,7 @@ directory:
 
 - **~9-10 hardcoded Directory Authorities** vote hourly and majority-sign
   the relay consensus document; **~6 Bandwidth Authorities** decide which
-  relays get traffic. Two small trust roots
+  relays get traffic. Two small verification roots
   ([overview](https://arxiv.org/pdf/2004.09583)).
 - A **single** compromised DirAuth can equivocate and feed a targeted
   client a malicious consensus undetectably
@@ -50,7 +50,7 @@ the signature against the chain-anchored key and enforce a monotonic
 sequence number. Rotating a document costs a signature, not a transaction.
 
 This mirrors Tor's internal design — an offline master identity key with
-medium-term signing keys — with the root of trust moved from the address
+medium-term signing keys — with the verification root moved from the address
 string to the chain.
 
 ### Anti-enumeration: blinded record keys
@@ -195,7 +195,7 @@ worst to quadratic Grover speedup. Consequences:
   chain-state proofs — the Bounded Node endgame: live state + one proof,
   history fully optional; (2) epoch-anchor validity proofs — upgrading
   attestation to math; (3) PQ ownership circuits — STARK-based shielded
-  ownership, which also retires Groth16's trusted setup; (4) verifiable
+  ownership, which also retires Groth16's setup ceremony; (4) verifiable
   builds for the registry. `core/modules/crypto_registry` is the scheme-plugging
   surface; provers are heavy, so these land at epoch/IVC cadences, never
   per-message.
@@ -379,7 +379,7 @@ Weight must come from seniority and measurement, never raw stake: paying
 for relays at scale attracts Sybils — in 2023 the Tor Project had to
 remove relays tied to a crypto scheme
 ([report](https://securityaffairs.com/154535/digital-id/tor-project-removed-relays.html)).
-Trustless bandwidth measurement is unsolved research (FlashFlow, TorCoin);
+Bandwidth measurement that needs no third party is unsolved research (FlashFlow, TorCoin);
 this phase is explicitly gated on A1–A3 proving the substrate.
 
 ## Economics: low cost, high use, no spam
@@ -449,7 +449,7 @@ the named blocker `chain.reorg_refused_below_finality`. Rules:
   drops a record below finality takes its weight back — in
   `core/modules/policy/src/anchor_finality.c` and proven in
   `tests/harness/src/test_anchor_finality.c`.
-- **10 deep is anti-flapping, not trust.** It does not make anything safe.
+- **10 deep is anti-flapping, not security.** It does not make anything safe.
   An attacker with ~10 blocks of private hashpower can rewrite the recent
   window; influence comes only from seniority (hours–days), never recency.
 - **Netsplit detection is directory-safety infrastructure**, wired into
@@ -477,7 +477,7 @@ the named blocker `chain.reorg_refused_below_finality`. Rules:
 - **Directory soundness = ZClassic's PoW security** — a small chain;
   say so. The identity layer is advisory: independent discovery roots
   (hardcoded seeds, addr gossip) always remain.
-- **Bandwidth measurement without trusted measurers is unsolved.**
+- **Bandwidth measurement without measurers that must be taken on faith is unsolved.**
 - **Pruned nodes can't rebuild overlay projections locally** — a future
   ROM-checkpoint commitment of projection digests is a sealed-`core/`
   change, owner-gated, Phase 4+.
@@ -524,7 +524,7 @@ constants only),
 directory influence, and the reorg withdrawal rail),
 `contexts/commons/modules/zanc/include/zanc/zanc.h` (generic 32-byte on-chain anchor),
 `core/modules/chain/src/mmr.c` (MMR hash conventions the domain tree mirrors),
-`core/chainparams/src/checkpoints.c` (baked trust anchor),
+`core/chainparams/src/checkpoints.c` (baked pinned anchor),
 `docs/spec/power-node-contract.md` (ZClassicDNS + onion gateway).
 
 Built (Phase 1): `contexts/wallet/modules/zid/include/zid/zid.h`, `contexts/wallet/modules/zid/src/zid.c`,

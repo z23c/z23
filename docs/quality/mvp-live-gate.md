@@ -83,7 +83,7 @@ C8 FAIL, shielded-receive surface down => C4 FAIL, node unreachable).
 
 ## Soak-accrual check (toward C6)
 
-Read-only from the systemd or launchd process start time, a trustworthy
+Read-only from the systemd or launchd process start time, a verifiable
 restart counter when the service manager exposes one, and the live at-tip
 flag:
 
@@ -98,7 +98,7 @@ soak-accrual: VERDICT=<v> uptime_s=<n> pct=<n> restarts=<n|null> at_tip=<0|1> re
 - `WINDOW_LONG_ENOUGH` — `>= 168h` continuous at tip, 0 restarts makes the
   observation eligible for authoritative judgment by `make soak-evidence-report`.
   Uptime alone does not establish MET.
-- `INSUFFICIENT` — no uptime read, or no trustworthy restart counter. launchd's
+- `INSUFFICIENT` — no uptime read, or no verifiable restart counter. launchd's
   `runs` value is deliberately not treated as a restart count because it also
   includes initial and manual launches.
 
@@ -127,6 +127,6 @@ gate, use `tools/mvp_gate.sh --strict` so only a genuine live regression
 ## Live numbers
 
 Run `tools/mvp_gate.sh` for the current MRS, gap, and soak-accrual state —
-do not trust a pinned snapshot in this file; heights, gaps, and MRS rot
+do not rely on a pinned snapshot in this file; heights, gaps, and MRS rot
 every session. `docs/agent/HANDOFF.md` §0-LATEST carries the current live-node
 narrative; this file only documents the script's contract.

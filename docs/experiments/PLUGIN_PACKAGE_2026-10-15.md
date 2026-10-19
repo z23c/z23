@@ -16,9 +16,9 @@ Each of two generations passes these observations:
 - The package is publicly serveable under its own signed package release.
 - Checkout reconstructs four members into an absent destination; reuse of
   that destination refuses.
-- Publisher-side plugin trust does not authorize the receiver. The first
-  install refuses without the receiver's own trust file.
-- Receiver-local trust permits installation of the exact signed generation,
+- Publisher-side plugin acceptance does not authorize the receiver. The first
+  install refuses without the receiver's own pinned-key file.
+- Receiver-local acceptance permits installation of the exact signed generation,
   whose executable SHA3-512 matches the checked-out bytes.
 - Repeated install reports already present. The first install leaves current
   absent; a second generation leaves the explicitly selected first unchanged.
@@ -67,5 +67,5 @@ After landing attempt 593 published
 passed again with zero failures or skips (2.6 s wall). Raw evidence is retained
 in `build/scratch/gateway-mailbox/plugin-main-focused.log`.
 The integrated design keeps the approved hub ordering, supplies the checkout
-datadir, and explicitly distinguishes the account-local plugin trust/store
+datadir, and explicitly distinguishes the account-local plugin pinned-key store
 from that datadir. No production plugin implementation changed.
