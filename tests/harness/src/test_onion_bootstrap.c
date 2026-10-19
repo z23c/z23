@@ -560,6 +560,9 @@ static int onion_receipt_env_restore_selftest(void)
     int failures = onion_receipt_selftest();
     const char *now = getenv(ONION_RECEIPT_DIR_ENV);
     if (!now || strcmp(now, probe) != 0) failures++;
+    unsetenv(ONION_RECEIPT_DIR_ENV);
+    failures += onion_receipt_selftest();
+    if (getenv(ONION_RECEIPT_DIR_ENV) != NULL) failures++;
     onion_env_restore(ONION_RECEIPT_DIR_ENV, saved, had);
     printf("onion bootstrap receipt env restore: %s\n", failures ? "FAIL" : "OK");
     return failures;
