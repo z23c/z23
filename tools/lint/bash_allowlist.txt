@@ -418,7 +418,6 @@ tools/scripts/netdisrupt_two_node_drill.sh
 tools/scripts/netdisrupt_two_node_run_and_record.sh
 tools/scripts/network_disruption_recovery_stopwatch.sh
 tools/scripts/new_app.sh
-tools/scripts/node_slo_probe.sh
 tools/scripts/onion_pair_watch.sh
 tools/scripts/onion_pair_watch_loop.sh
 tools/scripts/p2p_version_probe.sh
@@ -449,8 +448,6 @@ tools/scripts/sh_str.sh
 tools/scripts/ship_progress_lib.sh
 tools/scripts/simnet_nightly.sh
 tools/scripts/simnet_replay_capsule.sh
-tools/scripts/slo_hold_judge.sh
-tools/scripts/slo_page_if_stalled.sh
 tools/scripts/soak_assert.sh
 tools/scripts/soak_evidence.sh
 tools/scripts/source_identity_lib.sh

@@ -7,7 +7,7 @@
 # `zclassic23-soak-evidence.{service,timer}` + tools/scripts/soak_evidence.sh.
 #
 # INSTALLING THIS UNIT IS TWO STEPS. The external uptime prober only samples
-# instances listed in the INSTANCES table of tools/scripts/node_slo_probe.sh,
+# instances listed in the instance table of `z23 ops host slo probe`,
 # and the soak lane is NOT in it (an instance nobody runs would answer
 # reachable:false on every poll forever and drain the meaning out of the
 # ledger's any_unreachable flag). After installing this unit, add the row

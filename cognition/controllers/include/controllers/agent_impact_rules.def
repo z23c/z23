@@ -300,7 +300,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_stopwatch_peer_gate.c|tools/scripts/p2
 /* External uptime evidence: one bounded C23 reader owns both the node-free
  * typed leaf and dumpstate projection; the old whole-ledger awk reader is
  * deliberately absent. */
-AGENT_IMPACT_RULE("engine/services/src/slo_ledger_summary.c|engine/services/include/services/slo_ledger_summary.h|engine/services/src/evidence_ledger_row.c|engine/services/include/services/evidence_ledger_row.h|tools/command/native_slo_ledger_command.c|tests/harness/src/test_slo_ledger_summary.c|tools/scripts/node_slo_probe.sh", "slo_ledger_summary stopwatch_skip_watch tip_agreement_watch command_registry_catalog command_input_bounds native_api_contract syncdiag_rpc rpc make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/slo_ledger_summary.c|engine/services/include/services/slo_ledger_summary.h|engine/services/src/evidence_ledger_row.c|engine/services/include/services/evidence_ledger_row.h|tools/command/native_slo_ledger_command.c|tests/harness/src/test_slo_ledger_summary.c|engine/services/src/slo_monitor.c|engine/services/src/slo_probe.c|engine/services/src/slo_page.c|engine/services/src/slo_hold.c|engine/services/include/services/slo_monitor.h|tools/command/native_ops_slo_monitor.c|tools/command/slo_monitor_io.c|tools/command/slo_monitor_io.h|tests/harness/src/test_slo_monitor.c", "slo_ledger_summary slo_monitor stopwatch_skip_watch tip_agreement_watch command_registry_catalog command_input_bounds native_api_contract syncdiag_rpc rpc make_lint_gates")
 /* sync_benchmark (zcl.sync_benchmark.v1 phase-timed receipt) — its unit tests
  * live in the existing test_soak_attestation.c file (same datadir-receipt
  * evidence pattern), so both map to the soak_attestation group. */

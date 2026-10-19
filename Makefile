@@ -12184,53 +12184,51 @@ quality-linger-status:
 	@systemctl --user status zclassic23-fuzz.service zclassic23-coverage.service zclassic23-test-suite.service --no-pager -n 12 2>/dev/null || true
 	@./tools/scripts/background_quality_lane.sh status
 
-# install-slo-probe: the EXTERNAL uptime prober (lane E3) — a read-only
-# client-viewpoint scoreboard for "staying synced" that does not trust node
-# self-reports. Probes canonical/soak/dev by RPC every 60s and appends to
-# ~/.local/state/zclassic23-slo/uptime-ledger.jsonl (tools/scripts/
-# node_slo_probe.sh). Never restarts, stops, or writes to any node.
+# install-slo-probe: the EXTERNAL uptime prober (lane E3) - a read-only
+# client-viewpoint scoreboard for "staying synced" that does not rely on node
+# self-reports. Probes canonical/dev and the legacy oracle by RPC every 60s
+# and appends to ~/.local/state/zclassic23-slo/uptime-ledger.jsonl through
+# the installed `z23 ops host slo probe`. Never restarts, stops, or writes to
+# any node.
 .PHONY: install-slo-probe install-slo-pager slo-probe-status
 install-slo-probe:
 	@install -d "$(HOME)/.config/systemd/user"
-	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/zclassic23-slo-probe.service.tmp.XXXXXX")"; \
-		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-		sed 's|%h/github/zclassic23|$(CURDIR)|g' platform/deploy/zclassic23-slo-probe.service > "$$tmp"; \
-		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/zclassic23-slo-probe.service"
-	@install -m 644 platform/deploy/zclassic23-slo-probe.timer "$(HOME)/.config/systemd/user/zclassic23-slo-probe.timer"
+	@install -m 644 platform/deploy/z23-slo-probe.service "$(HOME)/.config/systemd/user/z23-slo-probe.service"
+	@install -m 644 platform/deploy/z23-slo-probe.timer "$(HOME)/.config/systemd/user/z23-slo-probe.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-slo-probe.timer
-	@echo "installed external SLO prober: zclassic23-slo-probe.timer (every 60s)"
+	@systemctl --user enable --now z23-slo-probe.timer
+	@echo "installed external SLO prober: z23-slo-probe.timer (every 60s)"
 	@echo "ledger: $(HOME)/.local/state/zclassic23-slo/uptime-ledger.jsonl"
 	@echo "status: make slo-probe-status"
 
 # install-slo-pager: the pager half of the scoreboard. A SEPARATE 5-min timer
 # (self-watchdog: still fires when the probe itself dies) runs
-# tools/scripts/slo_page_if_stalled.sh; the unit sitting FAILED is the page
+# `z23 ops host slo page`; the unit sitting FAILED is the page
 # surface (plus wall(1) + pages.jsonl on first fire / 6h renotify). Pages on:
 # canonical no-advance >2h, ledger stale >5m, canonical unreachable >10m.
 install-slo-pager:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 platform/deploy/zclassic23-slo-pager.service "$(HOME)/.config/systemd/user/zclassic23-slo-pager.service"
-	@install -m 644 platform/deploy/zclassic23-slo-pager.timer "$(HOME)/.config/systemd/user/zclassic23-slo-pager.timer"
+	@install -m 644 platform/deploy/z23-slo-pager.service "$(HOME)/.config/systemd/user/z23-slo-pager.service"
+	@install -m 644 platform/deploy/z23-slo-pager.timer "$(HOME)/.config/systemd/user/z23-slo-pager.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-slo-pager.timer
-	@echo "installed external SLO pager: zclassic23-slo-pager.timer (every 5 min)"
+	@systemctl --user enable --now z23-slo-pager.timer
+	@echo "installed external SLO pager: z23-slo-pager.timer (every 5 min)"
 	@echo "pages: $(HOME)/.local/state/zclassic23-slo/pages.jsonl"
 	@echo "status: make slo-probe-status"
 
-# install-hold-certifier: the 72h HOLD CERTIFIER — a 15-min timer running
-# tools/scripts/slo_hold_judge.sh --record for the canonical instance. Appends
+# install-hold-judge: the 72h hold judge - a 15-min timer running
+# `z23 ops host slo judge --record=true` for the canonical instance. Appends
 # one JSON verdict line per run to ~/.local/state/zclassic23-slo/
 # hold-ledger.jsonl; the first VERDICT=HOLD_PROVEN line is the 72h win-proof.
-# Always exits 0 (recorder, not a pager — the pager owns the alarm surface).
-.PHONY: install-hold-certifier
-install-hold-certifier:
+# Always exits 0 (recorder, not a pager - the pager owns the alarm surface).
+.PHONY: install-hold-judge
+install-hold-judge:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 platform/deploy/zclassic23-hold-certifier.service "$(HOME)/.config/systemd/user/zclassic23-hold-certifier.service"
-	@install -m 644 platform/deploy/zclassic23-hold-certifier.timer "$(HOME)/.config/systemd/user/zclassic23-hold-certifier.timer"
+	@install -m 644 platform/deploy/z23-hold-judge.service "$(HOME)/.config/systemd/user/z23-hold-judge.service"
+	@install -m 644 platform/deploy/z23-hold-judge.timer "$(HOME)/.config/systemd/user/z23-hold-judge.timer"
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now zclassic23-hold-certifier.timer
-	@echo "installed 72h hold certifier: zclassic23-hold-certifier.timer (every 15 min)"
+	@systemctl --user enable --now z23-hold-judge.timer
+	@echo "installed 72h hold judge: z23-hold-judge.timer (every 15 min)"
 	@echo "verdicts: $(HOME)/.local/state/zclassic23-slo/hold-ledger.jsonl"
 
 # install-intervention-ledger: independent read-only evidence that the node,
@@ -12255,38 +12253,19 @@ intervention-ledger-status:
 	@./tools/scripts/intervention_ledger.sh summary 2>/dev/null || true
 
 slo-probe-status:
-	@systemctl --user list-timers zclassic23-slo-probe.timer zclassic23-slo-pager.timer --no-pager 2>/dev/null || true
-	@systemctl --user status zclassic23-slo-probe.service zclassic23-slo-probe.timer --no-pager -n 12 2>/dev/null || true
-	@systemctl --user status zclassic23-slo-pager.service zclassic23-slo-pager.timer --no-pager -n 12 2>/dev/null || true
+	@systemctl --user list-timers z23-slo-probe.timer z23-slo-pager.timer --no-pager 2>/dev/null || true
+	@systemctl --user status z23-slo-probe.service z23-slo-probe.timer --no-pager -n 12 2>/dev/null || true
+	@systemctl --user status z23-slo-pager.service z23-slo-pager.timer --no-pager -n 12 2>/dev/null || true
 	@tail -n 6 "$(HOME)/.local/state/zclassic23-slo/uptime-ledger.jsonl" 2>/dev/null || echo "no ledger yet"
 	@tail -n 4 "$(HOME)/.local/state/zclassic23-slo/pages.jsonl" 2>/dev/null || echo "no pages (good)"
 	@build/bin/z23 ops slo --window_hours=24 2>/dev/null || true
 
 # slo-probe-selftest: hermetic regression guard for the prober, native bounded
-# summary reader, 72h hold judge, and external pager — fixture RPC commands /
-# fixture ledgers, no live nodes.
+# summary reader, 72h hold judge, and external pager - fixture ledgers and
+# fake observers, no live nodes.
 slo-probe-selftest:
 	@$(MAKE) -s t-fast-exact ONLY=slo_ledger_summary
-	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash tools/scripts/node_slo_probe.sh --selftest 2>&1); rc=$$?; set -e; \
-	 echo "$$out"; \
-	 if [ "$$rc" != "0" ] || ! echo "$$out" | grep -q "^selftest: PASS"; then \
-	     echo "slo-probe-selftest: FAIL node_slo_probe.sh (rc=$$rc; no selftest: PASS line)"; \
-	     exit 1; \
-	 fi; \
-	 set +e; out3=$$(bash tools/scripts/slo_hold_judge.sh --selftest 2>&1); rc3=$$?; set -e; \
-	 echo "$$out3"; \
-	 if [ "$$rc3" != "0" ] || ! echo "$$out3" | grep -q "^selftest: PASS"; then \
-	     echo "slo-probe-selftest: FAIL slo_hold_judge.sh (rc=$$rc3; no selftest: PASS line)"; \
-	     exit 1; \
-	 fi; \
-	 set +e; out4=$$(bash tools/scripts/slo_page_if_stalled.sh --selftest 2>&1); rc4=$$?; set -e; \
-	 echo "$$out4"; \
-	 if [ "$$rc4" != "0" ] || ! echo "$$out4" | grep -q "^selftest: PASS"; then \
-	     echo "slo-probe-selftest: FAIL slo_page_if_stalled.sh (rc=$$rc4; no selftest: PASS line)"; \
-	     exit 1; \
-	 fi; \
-	 echo "slo-probe-selftest: PASS"'
+	@$(MAKE) -s t-fast-exact ONLY=slo_monitor
 
 # ── off-host tip-hash agreement ───────────────────────────────────────
 # The first evidence in this repository that compares a BLOCK HASH against

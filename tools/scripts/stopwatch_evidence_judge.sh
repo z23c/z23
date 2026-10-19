@@ -174,7 +174,7 @@ slo_freshest_oracle() {
 }
 
 # ── --selftest: hermetic gate checks (canned tmp ledgers, no live infra) ──
-# Same idiom as node_slo_probe.sh --selftest / cold_start_to_tip_stopwatch.sh
+# Same idiom as cold_start_to_tip_stopwatch.sh
 # --selftest: build tiny fixtures under a mktemp dir, re-invoke THIS script
 # against each, assert the VERDICT token + exit code, and end with a single
 # "selftest: PASS" / non-zero on any mismatch.

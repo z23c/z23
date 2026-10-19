@@ -961,6 +961,91 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_ops_host_gc)
 
+/* ── ops.host.slo ──────────────────────────────────────────────────────────
+ * The standing node monitors. Each leaf is one timer's whole job and exits
+ * non-zero exactly when that timer's unit should show as failed. They nest
+ * under ops.host because the top-level ops menu is at its
+ * ZCL_COMMAND_BRANCH_BUDGET; `z23 ops slo probe|page|judge` resolve through
+ * the aliases. The ledgers live in ZCL_SLO_LEDGER_DIR (default
+ * ~/.local/state/zclassic23-slo) and keep the row formats their history was
+ * written in. */
+ZCL_COMMAND_BRANCH("ops.host.slo", "ops.host", "Node SLO monitors",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_COMMAND(
+    "ops.host.slo.probe", "ops.host.slo", "ops.slo.probe",
+    "Probe the local nodes from outside and append one ledger row each",
+    "One cycle of the external uptime prober. Dials the canonical and dev "
+    "instances and the legacy zclassicd oracle over RPC the way any outside "
+    "client would, then appends one row per instance to uptime-ledger.jsonl: "
+    "reachability, served and header height, round-trip latency, gaps to the "
+    "oracle and to the highest tip, peers, RSS, datadir bytes, restarts, "
+    "systemd state and the node's own Tor and blocker report. An unreachable "
+    "node is recorded as data with its consecutive-miss streak; the call "
+    "fails only when the ledger cannot be written. Rotates the ledger at "
+    "ZCL_SLO_ROTATE_BYTES. Reads no wallet or key and writes no node "
+    "datadir.", 8192,
+    "slo,probe,uptime,ledger,monitor,timer,reachability,oracle",
+    "zcl.ops_slo_probe.input.v1", "zcl.slo_probe.v1", "", "",
+    "z23 ops host slo probe",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHAIN_READ | ZCL_COMMAND_CAP_PROCESS_EXEC,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_host_slo_probe)
+
+ZCL_COMMAND_READY_COMMAND(
+    "ops.host.slo.page", "ops.host.slo", "ops.slo.page",
+    "Page when the prober ledger shows a stalled or dark node",
+    "Reads the whole retained uptime ledger and tests four conditions: "
+    "stale_ledger (the prober itself stopped), probe_coverage (sampling fell "
+    "below half the expected rate), canonical_unreachable and "
+    "canonical_no_advance (no corroborated climb within ZCL_SLO_PAGE_ADVANCE_SEC). "
+    "Each active condition is appended to pages.jsonl at most once per "
+    "ZCL_SLO_PAGE_RENOTIFY_SEC, broadcast with wall(1) unless "
+    "ZCL_SLO_PAGE_WALL=0, and enriched with the node's typed blocker when "
+    "the node answers. Any active condition exits non-zero so the unit stays "
+    "failed; that failed unit is the page.", 8192,
+    "slo,page,pager,stall,alert,ledger,monitor,timer",
+    "zcl.ops_slo_page.input.v1", "zcl.slo_page.v1", "", "",
+    "z23 ops host slo page",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHAIN_READ | ZCL_COMMAND_CAP_PROCESS_EXEC,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_host_slo_page)
+
+ZCL_COMMAND_READY_COMMAND(
+    "ops.host.slo.judge", "ops.host.slo", "ops.slo.judge",
+    "Judge whether an instance held the SLO bar for the trailing window",
+    "Answers one question over the prober ledger and the pager log: did the "
+    "instance satisfy the hold bar continuously for the trailing window "
+    "(default 72 hours)? Six criteria in a fixed order: reachability, gap to "
+    "the oracle, served-height advance per 15-minute bucket, zero pages, "
+    "sample coverage and freshness. A sparse or stale ledger cannot prove a "
+    "hold. Without record the call exits non-zero unless the hold is proven; "
+    "with record=true it appends the verdict to hold-ledger.jsonl and exits "
+    "zero, so a certifier timer does not sit failed while a hold accrues.",
+    8192,
+    "slo,hold,judge,certify,window,ledger,monitor,timer",
+    "zcl.ops_slo_judge.input.v1", "zcl.slo_hold.v1",
+    "instance,window_hours,gap_budget,record", "",
+    "z23 ops host slo judge --instance=canonical --window_hours=72 "
+    "--gap_budget=3 --record=true",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_host_slo_judge)
+
 ZCL_COMMAND_BRANCH("ops.mesh.device", "ops.mesh", "Offline owner device identity and grants",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_COMMAND(

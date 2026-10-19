@@ -1,5 +1,5 @@
 [Unit]
-Description=Z23 72h Hold Certifier Timer — every 15 min
+Description=Z23 72h Hold Judge Timer — every 15 min
 
 [Timer]
 # OnCalendar (wall-clock), NOT OnBootSec/OnUnitActiveSec (monotonic) — same
@@ -12,7 +12,7 @@ Description=Z23 72h Hold Certifier Timer — every 15 min
 OnCalendar=*-*-* *:00/15:00
 RandomizedDelaySec=20
 Persistent=true
-Unit=zclassic23-hold-certifier.service
+Unit=z23-hold-judge.service
 
 [Install]
 WantedBy=timers.target

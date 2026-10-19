@@ -8,7 +8,7 @@
 # measurements read six different ways across tools/scripts — peer count in
 # lane_health.sh, VmRSS + systemd restart accounting in soak_evidence.sh,
 # directory bytes in worktree_gc.sh (and again in first_build_timing.sh),
-# typed-blocker enrichment in slo_page_if_stalled.sh. Each copy is a chance
+# typed-blocker enrichment in the native pager (`z23 ops host slo page`). Each copy is a chance
 # for two ledgers to disagree about the same host at the same instant, which
 # is exactly the class of bug the architecture doctrine says to fix by
 # DELETING a copy rather than by adding a reconciler. Every caller now reads
@@ -30,8 +30,8 @@
 # scripts that source this.
 
 # Idempotent source guard: several scripts source this both directly and
-# transitively (lane_health.sh -> nothing, but slo_page_if_stalled.sh and
-# node_slo_probe.sh may be chained by an operator wrapper).
+# transitively (lane_health.sh -> nothing, but the native pager (`z23 ops host slo page`) and
+# `z23 ops host slo probe` may be chained by an operator wrapper).
 if [ -n "${ZCL_EVIDENCE_SOURCES_SH_LOADED:-}" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -272,8 +272,8 @@ evidence_sha256_stdin() {
 
 # evidence_node_dumpstate <bin> <subsystem> [datadir] [rpcport]: one typed
 # dumpstate blob, single-line, bounded, NEVER fatal — "" on any
-# absence/timeout/failure. This is the reader slo_page_if_stalled.sh's
-# blocker enrichment already used; the SLO collector now uses the same one
+# absence/timeout/failure. This is the reader behind the native pager's (`z23 ops host slo page`)
+# blocker enrichment; the SLO collector now uses the same one
 # instead of inventing a second way to ask the node what is blocking it.
 #
 # Unlike every other function here the result is a NODE SELF-REPORT, not a
@@ -288,7 +288,7 @@ evidence_node_dumpstate() {
     [ -n "$datadir" ] && args+=("-datadir=$datadir")
     [ -n "$rpcport" ] && args+=("-rpcport=$rpcport")
     # See evidence_systemd_show for why the array is expanded this way —
-    # and here it matters on every call: slo_page_if_stalled.sh asks for a
+    # and here it matters on every call: the native pager (`z23 ops host slo page`) asks for a
     # blocker with no datadir and no rpcport, so `args` is routinely empty.
     local out
     out="$(timeout "$ZCL_EVIDENCE_TIMEOUT_SEC" "$bin" ${args[@]+"${args[@]}"} \

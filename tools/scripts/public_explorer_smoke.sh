@@ -12,7 +12,7 @@
 # WHY IT NOW WRITES A LEDGER
 # --------------------------
 # The uptime ledger's `reachable` column is a LOOPBACK RPC dial from the
-# same host as the node (tools/scripts/node_slo_probe.sh). That measures
+# same host as the node (`z23 ops host slo probe`). That measures
 # "the process is answering", not "a user can reach the service". Every
 # failure mode between the node and a user — the port forward, TLS, the
 # certificate expiring, the machine's route to the internet, DNS — is
@@ -73,7 +73,7 @@ STREAK_DIR="$LEDGER_DIR/streak"
 ROTATE_BYTES="${ZCL_PUBLIC_SMOKE_ROTATE_BYTES:-52428800}"
 BLIND_STREAK="${ZCL_PUBLIC_SMOKE_BLIND_STREAK:-5}"
 
-# ── ledger plumbing (same shapes as node_slo_probe.sh) ─────────────────
+# ── ledger plumbing (same shapes as `z23 ops host slo probe`) ─────────────────
 
 rotate_ledger_if_needed() {
     [ -f "$LEDGER_FILE" ] || return 0

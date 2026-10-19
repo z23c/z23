@@ -1,6 +1,6 @@
 [Unit]
-Description=Z23 72h Hold Certifier — records the hold judge's verdict to hold-ledger.jsonl (read-only)
-# Runs tools/scripts/slo_hold_judge.sh --record: judges the trailing-72h hold
+Description=Z23 72h Hold Judge - records the hold verdict to hold-ledger.jsonl (read-only)
+# Runs `z23 ops host slo judge --record=true`: judges the trailing-72h hold
 # bar for the CANONICAL instance from the external prober's ledger
 # (~/.local/state/zclassic23-slo/uptime-ledger.jsonl + pages.jsonl) and
 # appends one JSON verdict line to hold-ledger.jsonl in the same dir. The
@@ -8,14 +8,14 @@ Description=Z23 72h Hold Certifier — records the hold judge's verdict to hold-
 # VERDICT=HOLD_PROVEN line IS the 72h win-proof, and every NOT_PROVEN line
 # names the first violated criterion. This unit always exits 0 — NOT_PROVEN
 # is the EXPECTED state for the first 72h of any hold, and the failed-unit
-# page surface belongs to zclassic23-slo-pager.service alone. READ-ONLY with
+# page surface belongs to z23-slo-pager.service alone. READ-ONLY with
 # respect to every node: it never restarts, stops, or writes to any of them.
-After=zclassic23-slo-probe.service
+After=z23-slo-probe.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/github/zclassic23/tools/scripts/slo_hold_judge.sh --instance canonical --window-hours 72 --gap-budget 3 --record
-# One awk pass over the retained ledger (~6-7k canonical lines/day) — seconds.
+ExecStart=%h/.local/bin/z23 ops host slo judge --instance=canonical --window_hours=72 --gap_budget=3 --record=true
+# One native pass over the retained ledger (~6-7k canonical lines/day) — seconds.
 TimeoutStartSec=120
 Nice=10
 IOSchedulingClass=idle

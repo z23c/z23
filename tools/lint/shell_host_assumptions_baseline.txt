@@ -84,7 +84,6 @@ stat	tools/scripts/check_reproducible_build.sh	3
 stat	tools/scripts/ci_install_gate.sh	1
 stat	tools/scripts/cold_start_test.sh	4
 stat	tools/scripts/cold_start_to_tip_probe.sh	5
-stat	tools/scripts/node_slo_probe.sh	1
 stat	tools/scripts/produce_anchor_snapshot.sh	1
 stat	tools/scripts/promote_fuzz_artifacts.sh	1
 stat	tools/scripts/public_explorer_smoke.sh	1

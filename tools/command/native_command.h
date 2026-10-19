@@ -2037,6 +2037,19 @@ void zcl_native_handle_ops_host_gc(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.host.slo.probe — one external uptime-probe cycle appended to the SLO
+ * ledger. ops.host.slo.page — evaluate the ledger and page on a stall.
+ * ops.host.slo.judge — trailing-window hold verdict, optionally recorded. */
+void zcl_native_handle_ops_host_slo_probe(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_ops_host_slo_page(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_ops_host_slo_judge(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.debug.meaning — node-free field ontology + question index. Answers
  * "what does this telemetry field mean, is this value bad, and which report
  * answers my question" straight out of the binary's static tables, with no

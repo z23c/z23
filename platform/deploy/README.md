@@ -17,9 +17,12 @@ you are new; this page is about operating a host, not about building.
   `zcl-devd@.service`, `zcl-mind.service`, `zcl-serve.service`.
 - **Scheduled maintenance.** `zclassic23-logrotate`, `-worktree-gc`,
   `-test-tmp-clean`, `-bundle-export`, `-build-drift`, `-coverage`, `-fuzz`,
-  `-simnet-nightly`, `-replay-canary-*`, `-slo-probe`, `-slo-pager`,
-  `-hold-certifier`, `-intervention`, `-tip-agreement`, `-public-smoke`, each
+  `-simnet-nightly`, `-replay-canary-*`, `-intervention`, `-tip-agreement`, `-public-smoke`, each
   with its `.service` and `.timer`.
+- **Node monitors.** `z23-slo-probe`, `z23-slo-pager` and `z23-hold-judge`, each
+  with its `.service` and `.timer`. They run the installed binary
+  (`z23 ops host slo probe|page|judge`) and keep their ledgers in
+  `~/.local/state/zclassic23-slo`.
 - **Landing.** `z23-land-step.service` / `.timer` drive one beat of the native
   landing service. `zclassic23-lander.service` is the older shell lander and is
   a different thing — its own header says so.
@@ -163,7 +166,6 @@ separate work, not a side errand.
 | `~/.local/state/zclassic23-oracle-unit/verify_identity.sh`, `oracle_readiness.sh` | `zclassicd-oracle` | Host state for the parity oracle. Stays out. |
 
 Several tracked units already run tracked scripts under `tools/scripts/` —
-`node_slo_probe.sh`, `soak_evidence.sh`, `worktree_gc.sh`, `slo_hold_judge.sh`,
-`slo_page_if_stalled.sh`, `replay_canary_guard.sh`, `quality_job_guard.sh`,
+`soak_evidence.sh`, `worktree_gc.sh`, `replay_canary_guard.sh`, `quality_job_guard.sh`,
 `c3_stopwatch_run_and_record.sh`. Those are in the tree and reviewed; they are
 shell debt of a different and much smaller kind than the list above.

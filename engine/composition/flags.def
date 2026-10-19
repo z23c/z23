@@ -2236,78 +2236,68 @@ Z23_FLAG("ZCL_SIMNET_NIGHTLY_FUZZ_SWEEP", "env_build", "0", "-",
           "first use tools/scripts/simnet_nightly.sh:auto; documented at docs/RUNBOOK.md:43: :20:00 test-suite timer. Set Environment=ZCL_SIMNET_NIGHTLY_FUZZ_SWEEP=1")
 Z23_FLAG("ZCL_SIMNET_PERF", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_simnet_fuzz.c:auto")
-Z23_FLAG("ZCL_SLO_BLIND_STREAK", "env_build", "10", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_BUCKET_SEC", "env_build", "900", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_CADENCE_SEC", "env_build", "60", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_CANON_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_CANON_RPCPORT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_COVERAGE_PCT", "env_build", "90", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_DU_CMD", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_GAP_BUDGET", "env_build", "3", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_HOST_TIMEOUT_SEC", "env_build", "5", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_INSTANCE", "env_build", "canonical", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_LEDGER_DIR", "env_build", "-", "-",
-          "first use tools/scripts/node_slo_probe.sh:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:1255: {'record':'capability','header':'engine/services/include/services/slo_ledger_summary.h'...")
-Z23_FLAG("ZCL_SLO_MAX_AGE_SEC", "env_build", "300", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_MAX_UNREACH_SEC", "env_build", "600", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_NODE_BIN", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_NOW", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_ORACLE_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_ORACLE_RPCPORT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_ADVANCE_MIN_TRAILING", "env_build", "2", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_ADVANCE_SEC", "env_build", "7200", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_COVERAGE_CADENCE_SEC", "env_build", "60", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_COVERAGE_MIN_RATIO", "env_build", "0.5", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_COVERAGE_WINDOW_SEC", "env_build", "3600", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_LIVE_INSTANCES", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_RENOTIFY_SEC", "env_build", "21600", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGES_FILE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_STALE_SEC", "env_build", "300", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_UNREACH_SEC", "env_build", "600", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_PAGE_WALL", "env_build", "1", "-",
-          "undocumented; first use tools/scripts/slo_page_if_stalled.sh:auto")
-Z23_FLAG("ZCL_SLO_REACH_PCT", "env_build", "99.5", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
-Z23_FLAG("ZCL_SLO_ROTATE_BYTES", "env_build", "52428800", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_RPC_BIN", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_RPC_TIMEOUT_SEC", "env_build", "8", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_RSS_CMD", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_SHOW_CMD", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_STATE_TIMEOUT_SEC", "env_build", "5", "-",
-          "undocumented; first use tools/scripts/node_slo_probe.sh:auto")
-Z23_FLAG("ZCL_SLO_WINDOW_HOURS", "env_build", "72", "-",
-          "undocumented; first use tools/scripts/slo_hold_judge.sh:auto")
+Z23_FLAG("ZCL_SLO_BLIND_STREAK", "env_runtime", "10", "-",
+          "consecutive misses at which the prober reports an instance BLIND rather than merely unreachable; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_BUCKET_SEC", "env_runtime", "900", "-",
+          "width of the served-height advance bucket the hold judge applies; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_CADENCE_SEC", "env_runtime", "60", "-",
+          "expected prober cadence the hold judge uses to size its coverage window; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_CANON_DATADIR", "env_runtime", "-", "-",
+          "explicit canonical datadir for the prober; when absent the unit's ExecStart is read; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_CANON_RPCPORT", "env_runtime", "-", "-",
+          "explicit canonical RPC port for the prober; when absent the unit's ExecStart is read; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_COVERAGE_PCT", "env_runtime", "90", "-",
+          "coverage floor in percent the hold judge requires of the window; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_GAP_BUDGET", "env_runtime", "3", "-",
+          "largest gap to the oracle in blocks the hold judge tolerates on any sample; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_HOST_TIMEOUT_SEC", "env_runtime", "5", "-",
+          "bound on each host-side read (systemctl, disk usage) in a probe cycle; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_INSTANCE", "env_runtime", "canonical", "-",
+          "instance the hold judge evaluates; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_LEDGER_DIR", "env_runtime", "-", "-",
+          "directory holding the SLO ledgers, pages, hold verdicts and state files; first use engine/services/src/slo_monitor.c:auto")
+Z23_FLAG("ZCL_SLO_MAX_AGE_SEC", "env_runtime", "300", "-",
+          "oldest newest-sample age at which the hold judge still accepts the ledger as fresh; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_MAX_UNREACH_SEC", "env_runtime", "600", "-",
+          "longest unreachable run the hold judge tolerates; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_NOW", "env_runtime", "-", "-",
+          "clock override in epoch seconds for the pager and hold judge fixtures; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_ORACLE_DATADIR", "env_runtime", "-", "-",
+          "explicit legacy-node datadir for the prober; when absent the unit's ExecStart is read; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_ORACLE_RPCPORT", "env_runtime", "-", "-",
+          "explicit legacy-node RPC port for the prober; when absent the unit and its config are read; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_ADVANCE_MIN_TRAILING", "env_runtime", "2", "-",
+          "reachable samples required to confirm a climb and to let the no-advance page fire; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_ADVANCE_SEC", "env_runtime", "7200", "-",
+          "longest age since the last confirmed climb before the pager reports canonical_no_advance; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_COVERAGE_CADENCE_SEC", "env_runtime", "60", "-",
+          "expected probe cadence the pager's coverage condition measures against; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_COVERAGE_MIN_RATIO", "env_runtime", "0.5", "-",
+          "lowest observed-to-expected sample ratio before the pager reports probe_coverage; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_COVERAGE_WINDOW_SEC", "env_runtime", "3600", "-",
+          "trailing window the pager's coverage condition measures; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_LIVE_INSTANCES", "env_runtime", "-", "-",
+          "comma-separated instances the pager ages; empty ages every instance in the ledger; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_RENOTIFY_SEC", "env_runtime", "21600", "-",
+          "interval after which a still-active page condition is announced again; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGES_FILE", "env_runtime", "-", "-",
+          "path of the pager log the hold judge reads; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_STALE_SEC", "env_runtime", "300", "-",
+          "oldest newest-sample age before the pager reports stale_ledger; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_UNREACH_SEC", "env_runtime", "600", "-",
+          "window in which a fully unreachable canonical raises canonical_unreachable; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_PAGE_WALL", "env_runtime", "1", "-",
+          "set to 0 to skip the wall(1) broadcast of a page; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_REACH_PCT", "env_runtime", "99.5", "-",
+          "reachable-sample floor in percent the hold judge requires; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_ROTATE_BYTES", "env_runtime", "52428800", "-",
+          "ledger size at which the prober rotates it, keeping two older generations; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_RPC_TIMEOUT_SEC", "env_runtime", "8", "-",
+          "per-call RPC timeout the prober applies to each instance and the oracle; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_STATE_TIMEOUT_SEC", "env_runtime", "5", "-",
+          "per-call timeout of the node self-report dumpstate reads; first use tools/command/slo_monitor_io.c:auto")
+Z23_FLAG("ZCL_SLO_WINDOW_HOURS", "env_runtime", "72", "-",
+          "trailing window in hours the hold judge evaluates; first use tools/command/slo_monitor_io.c:auto")
 Z23_FLAG("ZCL_SOAK_EVIDENCE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:auto")
 Z23_FLAG("ZCL_SOAK_EXE_SHA_CMD", "env_build", "-", "-",

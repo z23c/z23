@@ -122,7 +122,7 @@ job is to precede the number changing. It also sits strictly inside the
 judge's own 24h staleness window, so the two rungs never race to describe the
 same hole: the streak means *"the collector ran and could not prove
 anything"*, `STALE` means *"the collector stopped running"*. Do **not**
-inherit a threshold from another prober — `node_slo_probe.sh` uses 10 because
+inherit a threshold from another prober — the SLO prober (`z23 ops host slo probe`) uses 10 because
 it polls on a minutes cadence; 10 here would be 60 hours of silence.
 
 There is deliberately no env knob to raise a threshold. An override would be

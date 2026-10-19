@@ -7,7 +7,7 @@ Description=Z23 Build Drift Probe Timer — every 5 minutes
 # Persistent=true is honored ONLY for OnCalendar timers, and
 # OnUnitActiveSec schedules relative to the service's last activation in the
 # CURRENT manager runtime, so after a user-manager restart the timer has no
-# anchor and never fires again. See platform/deploy/zclassic23-slo-probe.timer for the
+# anchor and never fires again. See platform/deploy/z23-slo-probe.timer for the
 # full post-mortem. Do not "simplify" this to OnUnitActiveSec.
 #
 # 5 minutes, not 60 seconds: build identity changes only at a deploy, so the

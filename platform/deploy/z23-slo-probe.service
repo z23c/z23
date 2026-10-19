@@ -1,14 +1,14 @@
 [Unit]
 Description=Z23 External SLO Prober — client-viewpoint uptime ledger (read-only)
 # Appends one JSON line per run per DEPLOYED local instance (canonical
-# rpcport 18232, dev rpcport 18252 — the INSTANCES table in the script is
+# rpcport 18232, dev rpcport 18252 — the instance table in the command is
 # the list) to ~/.local/state/zclassic23-slo/uptime-ledger.jsonl via
-# tools/scripts/node_slo_probe.sh. An instance that is not deployed gets no
+# `z23 ops host slo probe`. An instance that is not deployed gets no
 # row at all rather than a permanently unreachable one, so any_unreachable=1
 # in the ledger always means something is actually wrong.
 # This is an EXTERNAL prober — it dials each instance's
 # RPC port the same way any outside client would and records exactly what
-# came back, never trusting node self-reports. READ-ONLY: it never
+# came back, never relying on node self-reports. READ-ONLY: it never
 # restarts, stops, or writes to any node. After= the canonical node so a
 # boot-time catch-up run samples a started node; deliberately NO Requires=
 # — an unreachable instance is recorded as a reachable:false line (a hole
@@ -17,7 +17,7 @@ After=zclassic23.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/github/zclassic23/tools/scripts/node_slo_probe.sh collect
+ExecStart=%h/.local/bin/z23 ops host slo probe
 # Per REACHABLE instance: getblockchaininfo + getpeerinfo (each capped at
 # ZCL_SLO_RPC_TIMEOUT_SEC, default 8s), one `systemctl show` and one
 # `du -sb` (each capped at ZCL_SLO_HOST_TIMEOUT_SEC, default 5s), and two

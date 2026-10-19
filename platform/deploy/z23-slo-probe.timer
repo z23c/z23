@@ -16,12 +16,12 @@ Description=Z23 External SLO Prober Timer — every 60s
 # firing, and Persistent=true (valid here) fires one catch-up run after
 # suspend/downtime so an outage shows up as one bounded gap, not a
 # silent stretch of nothing. The 5-min pager timer
-# (platform/deploy/zclassic23-slo-pager.timer) pages if this ledger ever goes
+# (platform/deploy/z23-slo-pager.timer) pages if this ledger ever goes
 # stale >5m again, whatever the cause.
 OnCalendar=*-*-* *:*:00
 RandomizedDelaySec=5
 Persistent=true
-Unit=zclassic23-slo-probe.service
+Unit=z23-slo-probe.service
 
 [Install]
 WantedBy=timers.target

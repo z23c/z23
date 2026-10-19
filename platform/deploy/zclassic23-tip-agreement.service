@@ -12,7 +12,7 @@ Description=Z23 Off-Host Tip-Hash Agreement Recorder (read-only)
 # remote nodes, written by engine/services/src/network_monitor.c) and asks
 # whether our own hash at that height is the same bytes.
 #
-# READ-ONLY, in the same sense as zclassic23-slo-probe.service: it dials the
+# READ-ONLY, in the same sense as z23-slo-probe.service: it dials the
 # node's operator surfaces the way an outside caller would and records what
 # came back. It never restarts, stops, signals, or writes to any node or
 # datadir. Its only write is its own ledger under ~/.local/state.

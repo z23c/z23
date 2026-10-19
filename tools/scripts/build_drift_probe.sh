@@ -48,7 +48,7 @@
 # does not flap on it. Use `assert` (below) when you want drift to exit non-zero.
 #
 # Bounded ledger: rotates at 50 MiB keeping 2 generations, same rule as
-# node_slo_probe.sh. bash + sed + flock + coreutils only.
+# `z23 ops host slo probe`. bash + sed + flock + coreutils only.
 #
 # Usage:
 #   build_drift_probe.sh [collect]   # probe and append one ledger line

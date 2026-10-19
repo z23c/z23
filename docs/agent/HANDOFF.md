@@ -105,7 +105,7 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
 |---|---|
 | Compact live state, blockers, frontier | `z23 status`; `z23 dumpstate reducer_frontier` |
 | Loopback reachability, local-oracle height gap, peers, RSS, disk, Tor, standing blocker | `~/.local/state/zclassic23-slo/uptime-ledger.jsonl` |
-| 72h hold accrual | `~/.local/state/zclassic23-slo/hold-ledger.jsonl`; judge `tools/scripts/slo_hold_judge.sh`; `make install-hold-certifier` |
+| 72h hold accrual | `~/.local/state/zclassic23-slo/hold-ledger.jsonl`; judge `z23 ops host slo judge`; `make install-hold-judge` |
 | Cure / refold verdict | `~/.local/state/zclassic23-cure/verdict.jsonl` |
 | EXTERNAL availability (not a loopback dial) | `~/.local/state/zclassic23-public-smoke/availability-ledger.jsonl`; collector `tools/scripts/public_explorer_smoke.sh` |
 | Operator interventions, declared and undeclared | `~/.local/state/zclassic23-intervention/intervention-ledger.jsonl`; detector `tools/scripts/intervention_ledger.sh`; front door `tools/scripts/zcl_intervene.sh` |

@@ -49,7 +49,7 @@
  *      inside the judge's own 24h staleness window, so the two rungs never
  *      race — streak means "the collector ran and could not prove anything",
  *      STALE means "the collector stopped running".
- *   Do NOT inherit a threshold from another prober. node_slo_probe.sh uses 10
+ *   Do NOT inherit a threshold from another prober. The SLO prober (z23 ops host slo probe) uses 10
  *   because it polls on a minutes cadence; 10 here would be 60 hours of
  *   silence. Derive from elapsed time, never from a number someone else picked.
  *

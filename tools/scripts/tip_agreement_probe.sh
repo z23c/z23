@@ -30,7 +30,7 @@
 # That table is the only genuinely off-host block-identity data this stack
 # holds, and until this file nothing read it as evidence.
 #
-# This prober is EXTERNAL to the node in the same sense node_slo_probe.sh is:
+# This prober is EXTERNAL to the node in the same sense the SLO prober is:
 # a separate process, dialling the node's own operator surfaces the way any
 # outside caller would (`core storage query` for the peer table, `dumpstate`
 # for the fold, `zcl-rpc getblockhash` for our own hash), writing to a ledger
@@ -228,7 +228,7 @@
 #
 # This script exits non-zero ONLY if it could not append to its own ledger.
 # A node that would not answer is DATA, not a script failure — same doctrine
-# as node_slo_probe.sh and soak_evidence.sh.
+# as the SLO prober and soak_evidence.sh.
 #
 # No python (banned), no jq — bash + sed + awk + flock only.
 
@@ -302,7 +302,7 @@ if [ -n "${ZCL_PARITY_EXCLUDE_HOSTS:-}" ]; then
 fi
 
 # ── instance table ────────────────────────────────────────────────────
-# name|rpcport|datadir. Membership rule is node_slo_probe.sh's: a row
+# name|rpcport|datadir. Membership rule is the SLO prober's: a row
 # exists only while the instance is DEPLOYED on this host, so a permanently
 # unreachable row can never train a reader to ignore could-not-ask. Only
 # zclassic23.service (canonical, 18232) runs here; adding a lane is one
