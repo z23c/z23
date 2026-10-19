@@ -14,10 +14,11 @@
  * depth. This avoids the complexity of sparse-punching individual
  * blocks out of shared files.
  *
- * After deleting a file, the service clears BLOCK_HAVE_DATA (and
- * BLOCK_HAVE_UNDO) from every block_index whose nFile pointed at
- * the pruned file. The block_index entry and all header fields are
- * preserved — only the raw block bytes on disk are gone.
+ * After deleting a file, the service clears BLOCK_HAVE_DATA from every
+ * block_index whose nFile pointed at the pruned file, and BLOCK_HAVE_UNDO
+ * only once the matching rev file is gone; a refused rev unlink keeps the
+ * undo bit so a later pass retries that file. The block_index entry and all
+ * header fields are preserved — only the raw block bytes on disk are gone.
  *
  * Configuration
  * -------------

@@ -19,9 +19,9 @@
  * stored in each file number, then delete files whose max height
  * is below the cutoff.
  *
- * After deleting a file, we walk the chain again and clear
- * BLOCK_HAVE_DATA / BLOCK_HAVE_UNDO on every block_index that
- * referenced the deleted file.
+ * After deleting a file, we walk the chain again and clear BLOCK_HAVE_DATA
+ * on every block_index that referenced it, and BLOCK_HAVE_UNDO only when the
+ * rev file is gone too, so a refused rev unlink is retried on a later pass.
  */
 
 #include "platform/time_compat.h"
