@@ -64,6 +64,8 @@ struct zcl_goals_options {
     const char *bash_allowlist; /* tools/lint/bash_allowlist.txt */
     const char *claims;         /* z23-agent-claims.jsonl */
     const char *mvp_doc;        /* docs/MVP.md */
+    const char *c3_history;     /* cold-start stopwatch history.jsonl (C3) */
+    const char *soak_dir;       /* soak evidence dir holding evidence.jsonl (C6) */
     int64_t now_unix;           /* 0 = wall clock */
     bool hosts_given;           /* true: use hosts[] instead of fleet machines */
     const struct zcl_goals_host *hosts;
@@ -79,6 +81,11 @@ enum zcl_goal_grade zcl_goals_grade_lookup(int64_t median_ms);
 enum zcl_goal_grade zcl_goals_grade_fresh(size_t fresh, size_t hosts);
 enum zcl_goal_grade zcl_goals_grade_claims(int64_t live);
 enum zcl_goal_grade zcl_goals_grade_scripts(int64_t scripts);
+
+/* Grades C3 and C6 from their newest durable receipt
+ * (native_fleet_goals_receipts.c). False when the id has no receipt reader. */
+bool zcl_goals_receipt_measure(const struct zcl_goals_options *options,
+                               const char *id, struct zcl_goal_result *out);
 
 /* Grades one catalog row by id. An unknown id yields unmeasured naming it. */
 struct zcl_goal_result zcl_goals_measure(

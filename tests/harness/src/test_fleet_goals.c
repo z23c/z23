@@ -232,6 +232,145 @@ static int fgl_case_claims(const char *root)
     return failures;
 }
 
+/* ── C rows: newest durable receipt ───────────────────────────────────── */
+
+static bool fgl_soak_hourly(const char *path, int64_t base, int count,
+                            int skip_from, int skip_to)
+{
+    FILE *f = fopen(path, "wb");
+    bool ok = f != NULL;
+    for (int i = 0; ok && i < count; i++) {
+        if (i >= skip_from && i <= skip_to)
+            continue;
+        ok = fprintf(f,
+                 "{\"ts\":%lld,\"soak_height\":3000000,\"zd_height\":3000000,"
+                 "\"gap\":0,\"nrestarts\":1,\"active_enter_ts\":%lld,"
+                 "\"rss_kb\":1500000,\"binary_sha256\":\"%064d\","
+                 "\"security_review_required\":false,"
+                 "\"security_posture_ok\":true,\"window_eligible\":true,"
+                 "\"ok\":true}\n",
+                 (long long)(base + (int64_t)i * 3600),
+                 (long long)(base - 500), 0) > 0;
+    }
+    return f && fclose(f) == 0 && ok;
+}
+
+static int fgl_case_receipt_c3(const char *root)
+{
+    int failures = 0;
+    char hist[600];
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    o.repo = ".";
+    (void)snprintf(hist, sizeof(hist), "%s/c3_history.jsonl", root);
+    o.c3_history = hist;
+    TEST("C3: a fresh stopwatch pass passes with its receipt and age; a "
+         "product failure fails; a skip or a stale receipt is unmeasured") {
+        struct zcl_goal_result r;
+        ASSERT(fgl_write(hist,
+            "{\"ts\":1799996400,\"verdict\":\"pass\",\"artifact_dir\":"
+            "\"/x/run-pass\",\"final_network_tip\":3100000}\n"));
+        r = zcl_goals_measure(&o, "C3");
+        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_has(r.evidence, "receipt run-pass"));
+        ASSERT(fgl_has(r.evidence, "age 1 h of 24 h"));
+        ASSERT(fgl_write(hist,
+            "{\"ts\":1799996400,\"verdict\":\"fail\",\"result_class\":"
+            "\"PRODUCT_FAILURE\",\"artifact_dir\":\"/x/run-fail\"}\n"));
+        r = zcl_goals_measure(&o, "C3");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "receipt run-fail"));
+        ASSERT(fgl_write(hist,
+            "{\"ts\":1799996400,\"verdict\":\"skip\",\"result_class\":"
+            "\"ENVIRONMENT_BLOCKED\",\"artifact_dir\":\"/x/run-skip\"}\n"));
+        r = zcl_goals_measure(&o, "C3");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "not a measurement"));
+        ASSERT(fgl_write(hist,
+            "{\"ts\":1799800000,\"verdict\":\"pass\",\"artifact_dir\":"
+            "\"/x/run-old\",\"final_network_tip\":3100000}\n"));
+        r = zcl_goals_measure(&o, "C3");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "stale"));
+        ASSERT(fgl_has(r.evidence, "window 24 h"));
+        o.c3_history = "/nonexistent/history.jsonl";
+        r = zcl_goals_measure(&o, "C3");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "no receipt"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_receipt_c6(const char *root)
+{
+    int failures = 0;
+    char dir[600], file[700];
+    struct zcl_goals_options o;
+    const int64_t base = FGL_NOW - INT64_C(168) * 3600 - 60;
+    fgl_options(&o);
+    o.repo = ".";
+    (void)snprintf(dir, sizeof(dir), "%s/soak", root);
+    (void)snprintf(file, sizeof(file), "%s/evidence.jsonl", dir);
+    o.soak_dir = dir;
+    TEST("C6: a covered clean week passes; a hole fails; a short window "
+         "stays unmeasured with the hours missing; a stale tail is unmeasured") {
+        struct zcl_goal_result r;
+        ASSERT(mkdir(dir, 0700) == 0 || access(dir, F_OK) == 0);
+        ASSERT(fgl_soak_hourly(file, base, 169, -1, -1));
+        r = zcl_goals_measure(&o, "C6");
+        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_has(r.evidence, "MET over 168.0 h"));
+        ASSERT(fgl_has(r.evidence, "evidence.jsonl"));
+        ASSERT(fgl_soak_hourly(file, base, 169, 50, 53));
+        r = zcl_goals_measure(&o, "C6");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "sampling_hole"));
+        ASSERT(fgl_soak_hourly(file, FGL_NOW - 11 * 3600 - 60, 12, -1, -1));
+        r = zcl_goals_measure(&o, "C6");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "needs 168 h of observation, have 11.0 h"));
+        ASSERT(fgl_soak_hourly(file, base - 3 * 86400, 169, -1, -1));
+        r = zcl_goals_measure(&o, "C6");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "stale"));
+        o.soak_dir = "/nonexistent/soak";
+        r = zcl_goals_measure(&o, "C6");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "needs 168 h of observation, have 0 h"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_receipt_none(void)
+{
+    int failures = 0;
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    TEST("C1 C2 C4 C5 C7 name the missing receipt producer; C8 names the "
+         "observation it lacks; fixtures never read the host ledgers") {
+        static const char *const ids[] = {"C1", "C2", "C4", "C5", "C7"};
+        struct zcl_goal_result r;
+        for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+            r = zcl_goals_measure(&o, ids[i]);
+            ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+            ASSERT(fgl_has(r.evidence, "no receipt producer"));
+        }
+        r = zcl_goals_measure(&o, "C8");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "needs 168 h of observation, have 0 h"));
+        r = zcl_goals_measure(&o, "C3");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "skipped"));
+        r = zcl_goals_measure(&o, "C6");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "skipped"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int fgl_case_hosts(void)
 {
     int failures = 0;
@@ -479,6 +618,9 @@ int test_fleet_goals(void)
     failures += fgl_case_missing(root);
     failures += fgl_case_files(root);
     failures += fgl_case_claims(root);
+    failures += fgl_case_receipt_c3(root);
+    failures += fgl_case_receipt_c6(root);
+    failures += fgl_case_receipt_none();
     failures += fgl_case_hosts();
     failures += fgl_case_render();
     failures += fgl_case_bound();

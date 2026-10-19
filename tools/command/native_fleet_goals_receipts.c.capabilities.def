@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_goals_receipts.c", CAP_FS_READ, "reads the tail of the cold-start stopwatch ledger and tests that the soak evidence ledger and the judge scripts exist with fopen(path, \"rb\"); the judges themselves run through the shared no-shell spawn seam, which the closure gate does not classify as a process reach of this object")
