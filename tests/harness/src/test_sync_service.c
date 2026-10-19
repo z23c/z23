@@ -18,6 +18,7 @@
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include <string.h>
+#include <limits.h>
 #include <time.h>
 
 /* Test-only rearm of block_sync_service.c's three sync_benchmark one-shot
@@ -1066,6 +1067,10 @@ static int test_sync_service_restarts_low_header_batches_from_tip(void)
             160, &low, 3087298, 3087300, false));
         ASSERT(!syncsvc_should_restart_headers_from_tip(
             0, &low, 3087298, 3107754, false));
+        ASSERT(!syncsvc_should_restart_headers_from_tip(
+            160, &low, INT_MAX - 50, INT_MAX, false));
+        ASSERT(syncsvc_should_restart_headers_from_tip(
+            160, &low, INT_MAX - 200, INT_MAX, false));
         PASS();
     } _test_next:;
 
