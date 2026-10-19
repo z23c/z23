@@ -2394,12 +2394,14 @@ enum dl_proof {
  * every rebase, push, row and lock below is the production path. */
 static const char *dl_stub(void)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_PROOF_STUB");
     return s && s[0] ? s : NULL;
 #else
-    /* A leaked test env var must never turn an operator's production
-     * binary's step into an evidence-free "pass" pushed to main. */
+    /* The development binary lands real code: a leaked test env var must
+     * never turn its step into an evidence-free "pass" pushed to main, so
+     * only the test build reads the stub. Neither a production nor a
+     * development binary can be told to skip a proof. */
     return NULL;
 #endif
 }
@@ -2922,12 +2924,12 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
 }
 
 /* Test-only escape hatch for the signature check below: a fixture repo may
- * carry no signing key. Same build-mode guard as dl_stub() and
- * dl_hooks_stub_dir() — a leaked env var must never let a production
- * binary queue an unsigned tip for push. */
+ * carry no signing key. Same build-mode guard as dl_stub(): the test build
+ * only, never the development binary that lands code. A leaked env var must
+ * never let a binary queue an unsigned tip for push. */
 static const char *dl_allow_unsigned(void)
 {
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#if defined(ZCL_TESTING)
     return getenv("ZCL_LAND_ALLOW_UNSIGNED");
 #else
     return NULL;
@@ -10826,6 +10828,25 @@ static void dl_drive_outcome(struct zcl_command_reply *reply, long long seq,
     dl_drive_fail(reply, seq, v);
 }
 
+#if defined(ZCL_TESTING)
+static void (*g_dl_judged_hook)(void);
+
+void zcl_native_dev_land_test_judged_hook(void (*hook)(void))
+{
+    g_dl_judged_hook = hook;
+}
+#endif
+
+/* Between a drive's last judgement and its reply; a test uses it to break
+ * the queue files and prove the reply never reads them again. */
+static void dl_drive_judged(void)
+{
+#if defined(ZCL_TESTING)
+    if (g_dl_judged_hook)
+        g_dl_judged_hook();
+#endif
+}
+
 static void dl_drive_seq(const struct zcl_command_request *req,
                          struct zcl_command_reply *reply)
 {
@@ -10843,6 +10864,7 @@ static void dl_drive_seq(const struct zcl_command_request *req,
         dl_drive_reply_reset(reply);
         dl_drive_round(req, reply, seq, &v);
     }
+    dl_drive_judged();
     dl_drive_outcome(reply, seq, rounds, &v);
 }
 #endif

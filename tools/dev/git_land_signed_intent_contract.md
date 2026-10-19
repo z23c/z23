@@ -104,3 +104,9 @@ Until this contract is green, `9e4407cc8c0582a6272523329d97fca946041dbb`
 on `96e63147ae9047f8eb8e843ca06f251715e3dd0e` remains PROVEN only.
 If main advances, preserve that proof and cut a new immutable successor;
 never alter the frozen candidate or replay an old receipt.
+
+The proof stub (`ZCL_LAND_PROOF_STUB`) and the unsigned bypass
+(`ZCL_LAND_ALLOW_UNSIGNED`) are read only by the test build, never by the
+development binary, which lands real code. The script's stubbed steps
+therefore need the test harness: `make t-fast ONLY=test_dev_land` covers the
+same refusals (`PUBLICATION_INTENT_REQUIRED` and the attach path).

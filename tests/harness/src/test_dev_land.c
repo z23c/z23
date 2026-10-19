@@ -88,6 +88,7 @@ bool zcl_native_dev_land_test_producer_stale(const char *detail);
 int zcl_native_dev_land_test_range_adds_source(const char *wt,
                                                const char *base,
                                                const char *local);
+void zcl_native_dev_land_test_judged_hook(void (*hook)(void));
 int zcl_native_dev_land_test_producer_reproof(const char *root,
                                               const char *local,
                                               const char *base,
@@ -7082,6 +7083,84 @@ static int test_dev_land_qualify_rebase_and_fetch_failures(void)
     }
 _test_next:;
     dlx_qualify_restore();
+    return failures;
+}
+
+/* ── drive --seq: the landed reply stands alone; stubs are test-build only ── */
+
+static int g_dlx_judged_hook_runs;
+
+/* Corrupt the ledger the judge read, after the judge and before the reply. */
+static void dlx_break_outcomes(void)
+{
+    char land[1200], path[1400];
+    FILE *f;
+    g_dlx_judged_hook_runs++;
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", land);
+    f = fopen(path, "ab");
+    if (f) {
+        (void)fputs("not a ledger row\n", f);
+        (void)fclose(f);
+    }
+}
+
+static int test_dev_land_drive_seq_landed_reply_stands_alone(void)
+{
+    int failures = 0;
+    TEST("land: a landed drive reply does not read the ledger a second time") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64];
+        dlx_isolate("drive_seq_landed_alone");
+        ASSERT(dlx_attach_proven_pair(&rig, "drive_seq_landed_alone", base));
+        g_dlx_judged_hook_runs = 0;
+        zcl_native_dev_land_test_judged_hook(dlx_break_outcomes);
+        ASSERT(dlx_drive_seq(&c, 1));
+        zcl_native_dev_land_test_judged_hook(NULL);
+        ASSERT_EQ(g_dlx_judged_hook_runs, 1);
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "");
+        ASSERT_STR_EQ(dlx_str(&c, "outcome"), "landed");
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    zcl_native_dev_land_test_judged_hook(NULL);
+    dlx_restore();
+    return failures;
+}
+
+/* The text of one function's guard: the first preprocessor condition after
+ * its signature line. */
+static bool dlx_guard_is_test_only(const char *source, const char *signature)
+{
+    const char *at = strstr(source, signature);
+    const char *guard = at ? strstr(at, "#if") : NULL;
+    static const char want[] = "#if defined(ZCL_TESTING)\n";
+    return guard && strncmp(guard, want, sizeof(want) - 1) == 0;
+}
+
+static int test_dev_land_stubs_are_test_build_only(void)
+{
+    int failures = 0;
+    TEST("land: the proof stub and unsigned bypass compile only in the test build") {
+        static char source[1u << 20];
+        FILE *f = fopen("tools/command/native_dev_land.c", "rb");
+        size_t n;
+        ASSERT(f != NULL);
+        n = fread(source, 1, sizeof(source) - 1, f);
+        (void)fclose(f);
+        ASSERT(n > 0 && n < sizeof(source) - 1);
+        source[n] = '\0';
+        ASSERT(dlx_guard_is_test_only(source,
+                                      "static const char *dl_stub(void)"));
+        ASSERT(dlx_guard_is_test_only(
+            source, "static const char *dl_allow_unsigned(void)"));
+        PASS();
+    }
+_test_next:;
     return failures;
 }
 
@@ -14411,6 +14490,8 @@ int test_dev_land(void)
     failures += test_dev_land_qualify_selection_refusals();
     failures += test_dev_land_qualify_origin_moves();
     failures += test_dev_land_qualify_rebase_and_fetch_failures();
+    failures += test_dev_land_drive_seq_landed_reply_stands_alone();
+    failures += test_dev_land_stubs_are_test_build_only();
 
     failures += dlx_case_stub_detail();
 

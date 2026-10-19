@@ -438,7 +438,12 @@ static bool dlq_select_path(struct dlq_groups *g, const char *path)
 
 /* The union of the routes for every path the lane changes. A selection that
  * lost groups, or read a truncated path list, is refused rather than run
- * short. */
+ * short.
+ *
+ * zcl_spawn_capture() does not report overflow: it returns the child's exit
+ * status (0 here) and silently keeps only the first cap-1 bytes. A capture
+ * whose length reaches cap-1 is therefore treated as truncated, which also
+ * refuses a list of exactly cap-1 bytes; refusing is the safe side. */
 static bool dlq_select(struct dlq *q, struct dlq_groups *g)
 {
     const char *args[] = { "diff", "--name-only", "origin/main...HEAD", NULL };
