@@ -1005,7 +1005,7 @@ ZCL_COMMAND_READY_COMMAND(
     "below half the expected rate), canonical_unreachable and "
     "canonical_no_advance (no corroborated climb within ZCL_SLO_PAGE_ADVANCE_SEC). "
     "Each active condition is appended to pages.jsonl at most once per "
-    "ZCL_SLO_PAGE_RENOTIFY_SEC, broadcast with wall(1) unless "
+    "ZCL_SLO_PAGE_RENOTIFY_SEC, announce with wall(1) unless "
     "ZCL_SLO_PAGE_WALL=0, and enriched with the node's typed blocker when "
     "the node answers. Any active condition exits non-zero so the unit stays "
     "failed; that failed unit is the page.", 8192,
