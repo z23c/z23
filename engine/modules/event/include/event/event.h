@@ -190,7 +190,7 @@ enum event_type {
     EV_RPC_TIMEOUT,              /* payload: "method=NAME elapsed_ms=N ip=A.B.C.D" */
 
     /* ── Block pruning ────────────────────────────────── */
-    EV_BLOCK_PRUNING_DONE,       /* payload: "file=N max_height=N freed=N blocks=N" */
+    EV_BLOCK_PRUNING_DONE,       /* payload: "file=N max_height=N freed=N blocks=N blk=0/1 rev=0/1" */
 
     /* ── Net backpressure watchdog ─────────────── */
     EV_BACKPRESSURE_ACTIVE,      /* payload: "tip_stalled drained=N" — once on entry */

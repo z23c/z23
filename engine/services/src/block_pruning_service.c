@@ -203,20 +203,132 @@ static int64_t file_size_or_zero(const char *path)
 
 /* ── Core pruning logic ────────────────────────────────────── */
 
+/* Outcome of removing one blk/rev pair. */
+struct prune_unlink {
+    bool blk_ok;       /* blk file is gone: removed now or already absent */
+    bool blk_removed;  /* this call removed the blk file */
+    bool rev_ok;       /* rev file is gone; false keeps BLOCK_HAVE_UNDO */
+    bool rev_removed;  /* this call removed the rev file */
+    int  blk_errno;
+    int  rev_errno;
+};
+
 /* Removes the blk file, then its rev file only once the blk file is gone.
- * A refused blk unlink keeps the rev file, so BLOCK_HAVE_UNDO never refers
- * to an undo file removed by the same pass. The refusal errno is returned
- * through blk_errno for the caller's warning. Returns true when blk is gone. */
-static bool block_pruning_unlink_pair(const char *blk_path, const char *rev_path,
-                                      bool *rev_ok, int *blk_errno)
+ * A refused blk unlink keeps the rev file. A refused rev unlink leaves
+ * rev_ok false so the caller keeps BLOCK_HAVE_UNDO and a later pass retries
+ * the undo-only file. */
+static void block_pruning_unlink_pair(const char *blk_path,
+                                      const char *rev_path,
+                                      struct prune_unlink *u)
 {
-    *rev_ok = false;
-    *blk_errno = 0;
-    if (unlink(blk_path) != 0 && errno != ENOENT) {
-        *blk_errno = errno;
+    *u = (struct prune_unlink){0};
+    u->blk_removed = unlink(blk_path) == 0;
+    u->blk_ok = u->blk_removed || errno == ENOENT;
+    if (!u->blk_ok) {
+        u->blk_errno = errno;
+        return;
+    }
+    u->rev_removed = unlink(rev_path) == 0;
+    u->rev_ok = u->rev_removed || errno == ENOENT;
+    if (!u->rev_ok)
+        u->rev_errno = errno;
+}
+
+/* Phase 1: record the highest height per file for blocks that still own a
+ * blk or rev file, so an undo-only file stays schedulable. Returns the lowest
+ * height that still has block data. */
+static int block_pruning_scan_chain(struct block_pruning_service *svc,
+                                    int chain_height,
+                                    struct file_height_map *fmap)
+{
+    int lowest_have = chain_height;
+    for (int h = 0; h <= chain_height; h++) {
+        struct block_index *bi = active_chain_at(&svc->ms->chain_active, h);
+        if (!bi) continue;
+        if (!(bi->nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO))) continue;
+
+        int fn = bi->nFile;
+        if (fn == 255) continue;  /* never prune sync file */
+        if (fn == 0)   continue;  /* never prune file 0 (genesis) */
+
+        file_height_map_record(fmap, fn, h);
+        if ((bi->nStatus & BLOCK_HAVE_DATA) && h < lowest_have)
+            lowest_have = h;
+    }
+    return lowest_have;
+}
+
+/* Phase 3: clear BLOCK_HAVE_DATA on blocks of file `fn`, and BLOCK_HAVE_UNDO
+ * only when its rev file is gone. Returns the number of blocks whose data bit
+ * was cleared. */
+static int block_pruning_clear_flags(struct block_pruning_service *svc,
+                                     int chain_height, int fn, bool rev_ok)
+{
+    unsigned int clear = BLOCK_HAVE_DATA;
+    if (rev_ok)
+        clear |= BLOCK_HAVE_UNDO;
+    int blocks_cleared = 0;
+    for (int h = 0; h <= chain_height; h++) {
+        struct block_index *bi = active_chain_at(&svc->ms->chain_active, h);
+        if (!bi) continue;
+        if (bi->nFile != fn) continue;
+        if (bi->nStatus & BLOCK_HAVE_DATA)
+            blocks_cleared++;
+        bi->nStatus &= ~clear;
+    }
+    return blocks_cleared;
+}
+
+/* Phase 2 for one file. Returns true when this call removed a blk or rev
+ * file. Counters, bytes and the done event cover only files this call
+ * removed, so a retry that removes nothing reports no progress. */
+static bool block_pruning_prune_file(struct block_pruning_service *svc,
+                                     int chain_height, int fn, int max_height)
+{
+    char blk_path[512], rev_path[512];
+    struct disk_block_pos pos = { .nFile = fn, .nPos = 0 };
+    get_block_pos_filename(blk_path, sizeof(blk_path), svc->datadir, &pos, "blk");
+    get_block_pos_filename(rev_path, sizeof(rev_path), svc->datadir, &pos, "rev");
+
+    int64_t blk_sz = file_size_or_zero(blk_path);
+    int64_t rev_sz = file_size_or_zero(rev_path);
+
+    /* Invalidate the file cache and delete under lock to prevent
+     * concurrent readers from hitting a deleted file → SIGSEGV.
+     * Uses the `_while_locked` variant because the public
+     * `disk_block_io_close_cache` re-enters the same NORMAL
+     * mutex and would self-deadlock. */
+    struct prune_unlink u;
+    disk_block_io_lock();
+    disk_block_io_close_cache_while_locked();
+    block_pruning_unlink_pair(blk_path, rev_path, &u);
+    disk_block_io_unlock();
+
+    if (!u.blk_ok) {
+        LOG_WARN("prune", "[prune] %s:%d %s(): failed to delete %s: %s", __FILE__, __LINE__, __func__, blk_path, strerror(u.blk_errno));
         return false;
     }
-    *rev_ok = (unlink(rev_path) == 0 || errno == ENOENT);
+    if (!u.rev_ok)
+        LOG_WARN("prune", "[prune] %s:%d %s(): failed to delete %s: %s", __FILE__, __LINE__, __func__, rev_path, strerror(u.rev_errno));
+
+    int blocks_cleared = block_pruning_clear_flags(svc, chain_height, fn, u.rev_ok);
+    atomic_fetch_add(&svc->blocks_pruned, blocks_cleared);
+
+    int removed_files = (u.blk_removed ? 1 : 0) + (u.rev_removed ? 1 : 0);
+    if (removed_files == 0)
+        return false;
+
+    int64_t freed = (u.blk_removed ? blk_sz : 0) + (u.rev_removed ? rev_sz : 0);
+    atomic_fetch_add(&svc->files_pruned, removed_files);
+    atomic_fetch_add(&svc->bytes_reclaimed, freed);
+
+    event_emitf(EV_BLOCK_PRUNING_DONE, 0,
+                "file=%d max_height=%d freed=%lld blocks=%d blk=%d rev=%d",
+                fn, max_height, (long long)freed, blocks_cleared,
+                u.blk_removed, u.rev_removed);
+    printf("[prune] deleted file=%05d (blk=%d rev=%d, max_h=%d, freed=%lld bytes, %d blocks)\n",
+           fn, u.blk_removed, u.rev_removed, max_height, (long long)freed,
+           blocks_cleared);
     return true;
 }
 
@@ -230,87 +342,24 @@ static int block_pruning_run_below(struct block_pruning_service *svc,
     if (prune_below <= 0)
         return 0;  /* nothing old enough yet */
 
-    /* Phase 1: Build map of file_num → max block height. */
     struct file_height_map fmap;
     if (!file_height_map_init(&fmap, 64))
         return 0;
 
-    int lowest_have = chain_height;
-    for (int h = 0; h <= chain_height; h++) {
-        struct block_index *bi = active_chain_at(&svc->ms->chain_active, h);
-        if (!bi) continue;
-        if (!(bi->nStatus & BLOCK_HAVE_DATA)) continue;
-
-        int fn = bi->nFile;
-        if (fn == 255) continue;  /* never prune sync file */
-        if (fn == 0)   continue;  /* never prune file 0 (genesis) */
-
-        file_height_map_record(&fmap, fn, h);
-        if (h < lowest_have) lowest_have = h;
-    }
-    atomic_store(&svc->lowest_have_data, lowest_have);
+    atomic_store(&svc->lowest_have_data,
+                 block_pruning_scan_chain(svc, chain_height, &fmap));
 
     /* Phase 2: Delete files where max_height < prune_below. */
     int files_pruned_this_pass = 0;
     for (int fn = 1; fn < fmap.capacity; fn++) {
         if (fmap.max_height[fn] < 0)   continue;  /* no blocks in this file */
         if (fmap.max_height[fn] >= prune_below) continue;  /* too recent */
-
-        /* Delete blk file */
-        char blk_path[512], rev_path[512];
-        struct disk_block_pos pos = { .nFile = fn, .nPos = 0 };
-        get_block_pos_filename(blk_path, sizeof(blk_path), svc->datadir, &pos, "blk");
-        get_block_pos_filename(rev_path, sizeof(rev_path), svc->datadir, &pos, "rev");
-
-        int64_t blk_sz = file_size_or_zero(blk_path);
-        int64_t rev_sz = file_size_or_zero(rev_path);
-
-        /* Invalidate the file cache and delete under lock to prevent
-         * concurrent readers from hitting a deleted file → SIGSEGV.
-         * Uses the `_while_locked` variant because the public
-         * `disk_block_io_close_cache` re-enters the same NORMAL
-         * mutex and would self-deadlock. */
-        disk_block_io_lock();
-        disk_block_io_close_cache_while_locked();
-        int blk_errno = 0;
-        bool rev_ok = false;
-        bool blk_ok = block_pruning_unlink_pair(blk_path, rev_path, &rev_ok, &blk_errno);
-        disk_block_io_unlock();
-
-        if (!blk_ok) {
-            LOG_WARN("prune", "[prune] %s:%d %s(): failed to delete %s: %s", __FILE__, __LINE__, __func__, blk_path, strerror(blk_errno));
-            continue;
-        }
-
-        int64_t freed = blk_sz + (rev_ok ? rev_sz : 0);
-        files_pruned_this_pass++;
-        atomic_fetch_add(&svc->files_pruned, rev_ok ? 2 : 1);
-        atomic_fetch_add(&svc->bytes_reclaimed, freed);
-
-        /* Phase 3: Clear BLOCK_HAVE_DATA/UNDO flags on affected blocks. */
-        int blocks_cleared = 0;
-        for (int h = 0; h <= chain_height; h++) {
-            struct block_index *bi = active_chain_at(&svc->ms->chain_active, h);
-            if (!bi) continue;
-            if (bi->nFile != fn) continue;
-            if (bi->nStatus & BLOCK_HAVE_DATA) {
-                bi->nStatus &= ~(unsigned int)BLOCK_HAVE_DATA;
-                blocks_cleared++;
-            }
-            if (bi->nStatus & BLOCK_HAVE_UNDO)
-                bi->nStatus &= ~(unsigned int)BLOCK_HAVE_UNDO;
-        }
-        atomic_fetch_add(&svc->blocks_pruned, blocks_cleared);
-
-        event_emitf(EV_BLOCK_PRUNING_DONE, 0,
-                    "file=%d max_height=%d freed=%lld blocks=%d",
-                    fn, fmap.max_height[fn], (long long)freed, blocks_cleared);
-        printf("[prune] deleted blk%05d.dat (max_h=%d, freed=%lld bytes, %d blocks)\n",
-               fn, fmap.max_height[fn], (long long)freed, blocks_cleared);
+        if (block_pruning_prune_file(svc, chain_height, fn, fmap.max_height[fn]))
+            files_pruned_this_pass++;
     }
 
     /* Update lowest_have_data after pruning */
-    lowest_have = chain_height;
+    int lowest_have = chain_height;
     for (int h = 0; h <= chain_height; h++) {
         struct block_index *bi = active_chain_at(&svc->ms->chain_active, h);
         if (!bi) continue;

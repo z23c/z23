@@ -102,6 +102,15 @@ static bool create_fake_block_dir(const char *datadir, int file_num,
     return mkdir(path, 0700) == 0;
 }
 
+static bool remove_fake_block_dir(const char *datadir, int file_num,
+                                  const char *prefix)
+{
+    char path[512];
+    struct disk_block_pos pos = { .nFile = file_num, .nPos = 0 };
+    get_block_pos_filename(path, sizeof(path), datadir, &pos, prefix);
+    return rmdir(path) == 0;
+}
+
 static bool fake_file_exists(const char *datadir, int file_num,
                              const char *prefix)
 {
@@ -213,6 +222,105 @@ static int prune_case_blk_unlink_refused(void)
     return failures;
 }
 
+/* Undo-only retry fixture: file 1 has its blk file and a rev path the
+ * filesystem refuses to unlink; file 2 is recent and intact. */
+static bool prune_retry_setup(struct prune_fixture *f)
+{
+    for (int i = 0; i < 3001; i++) {
+        f->blocks[i].nStatus = BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO;
+        f->blocks[i].nFile = i < 1000 ? 1 : 2;
+    }
+    bool files_ok =
+        create_fake_block_file(f->datadir, 1, "blk", 4096) &&
+        create_fake_block_dir(f->datadir, 1, "rev") &&
+        create_fake_block_file(f->datadir, 2, "blk", 4096) &&
+        create_fake_block_file(f->datadir, 2, "rev", 2048);
+    f->svc.keep_blocks = 1000;
+    return files_ok;
+}
+
+/* First pass removes blk only; a second pass with the refusal persisting
+ * reports no progress and keeps the undo bit. */
+static int prune_retry_blk_only(struct prune_fixture *f)
+{
+    int failures = 0;
+    struct block_pruning_status st;
+    int first = block_pruning_run_once(&f->svc);
+    PRUNE_CHECK("prune: blk removal progresses despite refused undo", first == 1);
+    PRUNE_CHECK("prune: blk removed while undo is retained",
+                !fake_file_exists(f->datadir, 1, "blk") &&
+                fake_file_exists(f->datadir, 1, "rev"));
+    PRUNE_CHECK("prune: data clears but undo bit remains",
+                !(f->blocks[0].nStatus & BLOCK_HAVE_DATA) &&
+                (f->blocks[0].nStatus & BLOCK_HAVE_UNDO));
+    block_pruning_get_status(&f->svc, &st);
+    PRUNE_CHECK("prune: blk-only progress has exact counters",
+                st.files_pruned == 1 && st.bytes_reclaimed == 4096 &&
+                st.blocks_pruned == 1000 &&
+                atomic_load(&g_prune_events) == 1);
+
+    int second = block_pruning_run_once(&f->svc);
+    block_pruning_get_status(&f->svc, &st);
+    PRUNE_CHECK("prune: persistent undo failure counts no progress",
+                second == 0 && st.files_pruned == 1 &&
+                st.bytes_reclaimed == 4096 && st.blocks_pruned == 1000 &&
+                atomic_load(&g_prune_events) == 1);
+    return failures;
+}
+
+/* Once the refusal clears, one pass removes the undo file; the next pass
+ * changes nothing. */
+static int prune_retry_undo_only(struct prune_fixture *f)
+{
+    int failures = 0;
+    struct block_pruning_status st;
+    int third = block_pruning_run_once(&f->svc);
+    PRUNE_CHECK("prune: retry removes undo-only file",
+                third == 1 && !fake_file_exists(f->datadir, 1, "rev") &&
+                !(f->blocks[0].nStatus & BLOCK_HAVE_UNDO));
+    block_pruning_get_status(&f->svc, &st);
+    PRUNE_CHECK("prune: undo retry has exact counters",
+                st.files_pruned == 2 && st.bytes_reclaimed == 6144 &&
+                st.blocks_pruned == 1000 &&
+                atomic_load(&g_prune_events) == 2);
+
+    int fourth = block_pruning_run_once(&f->svc);
+    block_pruning_get_status(&f->svc, &st);
+    PRUNE_CHECK("prune: completed undo retry is idempotent",
+                fourth == 0 && st.files_pruned == 2 &&
+                st.bytes_reclaimed == 6144 && st.blocks_pruned == 1000 &&
+                atomic_load(&g_prune_events) == 2);
+    return failures;
+}
+
+/* A rev unlink refused after the blk file is gone leaves an undo-only file
+ * that stays eligible: the undo bit is kept, no progress is counted, and a
+ * later pass removes the file once the refusal clears. */
+static int prune_case_rev_unlink_retry(void)
+{
+    int failures = 0;
+    install_prune_observer();
+    struct prune_fixture f;
+    bool setup_ok = fixture_init(&f, 3001, "rev_unlink_retry");
+    PRUNE_CHECK("prune: fixture init (rev unlink retry)", setup_ok);
+    if (!setup_ok)
+        return failures;
+
+    bool files_ok = prune_retry_setup(&f);
+    PRUNE_CHECK("prune: create undo-retry fixture", files_ok);
+    if (files_ok) {
+        failures += prune_retry_blk_only(&f);
+        bool retry_ready = remove_fake_block_dir(f.datadir, 1, "rev") &&
+                           create_fake_block_file(f.datadir, 1, "rev", 2048);
+        PRUNE_CHECK("prune: replace synthetic undo failure", retry_ready);
+        if (retry_ready)
+            failures += prune_retry_undo_only(&f);
+    }
+
+    fixture_destroy(&f);
+    return failures;
+}
+
 /* ── Tests ─────────────────────────────────────────────────── */
 
 int test_block_pruning(void)
@@ -313,6 +421,8 @@ int test_block_pruning(void)
 
     /* ── 2b. A refused blk unlink must not remove its rev file ─── */
     failures += prune_case_blk_unlink_refused();
+    /* ── 2c. A refused rev unlink stays eligible for retry ─── */
+    failures += prune_case_rev_unlink_retry();
 
     /* ── 3. File 0 never pruned ───────────────────────── */
     {
