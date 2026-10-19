@@ -1420,7 +1420,7 @@ add/remove a gate.
 - `check-result-discard`
 - `check-c23-only`
 - `check-no-python`
-- `check-no-trust-state-ordering`
+- `check-sync-state-no-ordinal`
 - `check-no-warning-suppression`
 - `check-fuzz-artifact-ledger`
 - `check-live-datadir-isolation`

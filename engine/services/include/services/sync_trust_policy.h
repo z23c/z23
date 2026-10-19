@@ -34,7 +34,7 @@
 #include <stdint.h>
 
 /* These states are ORTHOGONAL provenance facts, NOT a trust ordinal — never
- * compare them with </<=/>/>= (the check-no-trust-state-ordering lint gate
+ * compare them with </<=/>/>= (the check-sync-state-no-ordinal lint gate
  * forbids exactly that). Two provenance bits diverge independently:
  *   S = self_derived                      (serve / spend / mine / seed authority)
  *   X = proven_authority && refold_marker (export authority)

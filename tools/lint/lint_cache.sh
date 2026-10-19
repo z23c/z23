@@ -133,7 +133,7 @@ check-telemetry-ontology check-privileged-transition-receipt
 check-c23-only
 check-no-python
 check-shell-host-assumptions
-check-no-trust-state-ordering check-no-gnu-va-args check-no-warning-suppression
+check-sync-state-no-ordinal check-no-gnu-va-args check-no-warning-suppression
 check-result-discard
 check-published-platforms
 check-platform-header-guards check-flag-registry

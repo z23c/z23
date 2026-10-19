@@ -346,7 +346,6 @@ tools/scripts/check_no_dev_history_in_contracts.sh
 tools/scripts/check_no_live_lab_history.sh
 tools/scripts/check_no_new_repair_rung.sh
 tools/scripts/check_no_secret_printf.sh
-tools/scripts/check_no_trust_state_ordering.sh
 tools/scripts/check_no_uncited_victory.sh
 tools/scripts/check_one_result_type.sh
 tools/scripts/check_one_write_path.sh
@@ -363,6 +362,7 @@ tools/scripts/check_shape_includes_header.sh
 tools/scripts/check_stable_publish_containment.sh
 tools/scripts/check_stage_advances_or_blocks.sh
 tools/scripts/check_supervisor_registration.sh
+tools/scripts/check_sync_state_no_ordinal.sh
 tools/scripts/check_systemd_memory_budget.sh
 tools/scripts/check_test_registration.sh
 tools/scripts/ci_install_gate.sh

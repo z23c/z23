@@ -679,7 +679,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_privileged_transition_receipt_gate),
     S_(t_blocker_escape_registered_gate),
     /* Read-only real scan plus a private Git-backed fixture repository. */
-    N_(t_no_trust_state_ordering_gate),
+    N_(t_sync_state_no_ordinal_gate),
     S_(t_lint_gates_fail_loud_on_empty_scan),
     /* Hermetic: builds its fixture trees under TMPDIR and reads Makefile /
      * run_lint.sh, never writing into the worktree. */
@@ -1168,7 +1168,7 @@ static int t_partition_shards_all_carry_work(void)
     for (size_t i = 0; i < LINT_GATE_ENTRY_COUNT; i++) {
         if (g_lint_gate_entries[i].lane == LINT_LANE_HEAVY) heavy_lane_entries++;
         int owner = lint_owner_of(i);
-        if (g_lint_gate_entries[i].fn == t_no_trust_state_ordering_gate)
+        if (g_lint_gate_entries[i].fn == t_sync_state_no_ordinal_gate)
             trust_order_owner = owner;
         if (g_lint_gate_entries[i].fn == t_no_stray_root_files)
             stray_root_owner = owner;

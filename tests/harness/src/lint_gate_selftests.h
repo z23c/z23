@@ -111,7 +111,7 @@
 /* Gate — no ordinal comparison of enum sync_trust_state. The script owns a
  * private Git fixture repo for its trip/recover selftest. */
 #define TRUST_ORDER_SCRIPT_REL \
-    "tools/scripts/check_no_trust_state_ordering.sh"
+    "tools/scripts/check_sync_state_no_ordinal.sh"
 #define GIT_HOOKS_PRE_PUSH_REL "tools/dev/z23_git_hook.c"
 /* Fixture path prefixes, not whole paths: these two checks run in the
  * REALROOT lane inside the worker pool and are resolved via repo_path_pid()
@@ -469,7 +469,7 @@ int t_hotswap_static_state_covers_swappable(void);
 int t_hotswap_service_island_gate(void);
 int t_privileged_transition_receipt_gate(void);
 int t_dumper_never_blocks_gate(void);
-int t_no_trust_state_ordering_gate(void);
+int t_sync_state_no_ordinal_gate(void);
 int t_blocker_escape_registered_gate(void);
 int t_lint_gates_fail_loud_on_empty_scan(void);
 int t_lint_gate_wiring_gate(void);

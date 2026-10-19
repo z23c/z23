@@ -59,12 +59,12 @@ mapfile -t universe < <(
     git grep --untracked -lE 'SYNC_TRUST_|enum[[:space:]]+sync_trust_state' -- \
         "${scan_pathspecs[@]}" 2>/dev/null || true
 )
-gate_require_scanned "${#universe[@]}" 1 check_no_trust_state_ordering \
+gate_require_scanned "${#universe[@]}" 1 check_sync_state_no_ordinal \
     "no source under the architecture authorities mentions SYNC_TRUST_ — was services/sync_trust_policy.* renamed/moved?"
 
 if [ "${#hits[@]}" -gt 0 ]; then
     echo ""
-    echo "check_no_trust_state_ordering: FAIL — ordinal comparison of enum sync_trust_state"
+    echo "check_sync_state_no_ordinal: FAIL — ordinal comparison of enum sync_trust_state"
     echo ""
     for v in "${hits[@]}"; do
         echo "  $v"
@@ -79,7 +79,7 @@ if [ "${#hits[@]}" -gt 0 ]; then
     exit 1
 fi
 
-echo "check_no_trust_state_ordering: clean — no ordinal sync_trust_state comparison (${#universe[@]} files scanned)"
+echo "check_sync_state_no_ordinal: clean — no ordinal sync_trust_state comparison (${#universe[@]} files scanned)"
 exit 0
 }
 
@@ -95,7 +95,7 @@ if [[ "${1:-}" == "--selftest" ]]; then
         local want="$1" label="$2" actual=0 output
         output=$(cd "$st_tmp" && scan_sources 2>&1) || actual=$?
         if [[ "$actual" != "$want" ]]; then
-            printf 'check_no_trust_state_ordering --selftest: FAIL %s: rc=%s want=%s\n%s\n' \
+            printf 'check_sync_state_no_ordinal --selftest: FAIL %s: rc=%s want=%s\n%s\n' \
                 "$label" "$actual" "$want" "$output" >&2
             exit 1
         fi
@@ -113,11 +113,11 @@ if [[ "${1:-}" == "--selftest" ]]; then
     st_expect 0 'count sentinel recovers'
     rm "$st_source"
     st_expect 2 'empty scan fails closed'
-    echo 'check_no_trust_state_ordering --selftest: PASS'
+    echo 'check_sync_state_no_ordinal --selftest: PASS'
     exit 0
 fi
 if (( $# != 0 )); then
-    echo 'check_no_trust_state_ordering: FATAL — expected no arguments or --selftest' >&2
+    echo 'check_sync_state_no_ordinal: FATAL — expected no arguments or --selftest' >&2
     exit 2
 fi
 scan_sources

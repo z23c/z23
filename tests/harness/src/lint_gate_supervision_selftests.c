@@ -569,17 +569,17 @@ int t_dumper_never_blocks_gate(void)
     return failures;
 }
 
-/* Gate check-no-trust-state-ordering: the sync_trust_state enumerators are
+/* Gate check-sync-state-no-ordinal: the sync_trust_state enumerators are
  * ORTHOGONAL provenance facts, so any </<=/>/>= comparison against a
  * SYNC_TRUST_* value is forbidden (it invites the `state >= X` mis-grant bug).
  * The script exercises tracked/untracked violations and recovery in its own
  * private Git repository, leaving the live source tree read-only. */
-int t_no_trust_state_ordering_gate(void)
+int t_sync_state_no_ordinal_gate(void)
 {
     int failures = 0;
     int baseline_rc = run_gate_script(TRUST_ORDER_SCRIPT_REL, NULL);
     int selftest_rc = run_gate_script_selftest(TRUST_ORDER_SCRIPT_REL);
-    TEST("[lint-gate] no-trust-state-ordering: real tree clean, private Git fixture matrix") {
+    TEST("[lint-gate] sync-state-no-ordinal: real tree clean, private Git fixture matrix") {
         ASSERT(baseline_rc == 0);
         ASSERT(selftest_rc == 0);
         PASS();

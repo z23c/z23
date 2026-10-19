@@ -327,7 +327,7 @@ gate_command() {
         check-privileged-transition-receipt) echo './tools/lint/check_privileged_transition_receipt.sh' ;;
         check-c23-only)                     echo './build/bin/z23-lint check-c23-only --selftest && ./build/bin/z23-lint check-c23-only' ;;
         check-no-python)                    echo './build/bin/z23-lint check-no-python --selftest && ./build/bin/z23-lint check-no-python' ;;
-        check-no-trust-state-ordering)     echo './tools/scripts/check_no_trust_state_ordering.sh' ;;
+        check-sync-state-no-ordinal)     echo './tools/scripts/check_sync_state_no_ordinal.sh' ;;
         check-no-gnu-va-args)              echo './build/bin/z23-lint check-no-gnu-va-args' ;;
         check-no-snapshot-struct-memcmp)   echo './build/bin/z23-lint check-no-snapshot-struct-memcmp --self-test && ./build/bin/z23-lint check-no-snapshot-struct-memcmp' ;;
         check-no-warning-suppression)      echo './build/bin/z23-lint check-no-warning-suppression .' ;;

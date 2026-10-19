@@ -125,7 +125,6 @@ lint_gate	check-no-snapshot-struct-memcmp	767	338
 lint_gate	check-no-stale-pinned-facts	103	338
 lint_gate	check-no-stray-root-files	29	375
 lint_gate	check-no-stray-untracked-source	995	375
-lint_gate	check-no-trust-state-ordering	780	338
 lint_gate	check-no-unattended-publish	386	338
 lint_gate	check-no-uncited-victory	20	338
 lint_gate	check-no-utxo-projection	109	338
@@ -188,6 +187,7 @@ lint_gate	check-stopwatch-skip-detector	5557	338
 lint_gate	check-supervisor-domain	643	338
 lint_gate	check-supervisor-progress-declared	248	338
 lint_gate	check-supervisor-registration	1149	375
+lint_gate	check-sync-state-no-ordinal	780	338
 lint_gate	check-sysinit-ordering	12	338
 lint_gate	check-systemd-memory-budget	40	338
 lint_gate	check-telemetry-ontology	500	338
