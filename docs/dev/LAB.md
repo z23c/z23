@@ -172,6 +172,18 @@ stderr even when an earlier test receipt is cached. Run roots are unchanged;
 
 <!-- claim: symbol-present test.stderr.v1 tools/command/native_lab_test_command.c # test-only receipt version -->
 
+Receipt replay and compiled-artifact reuse are separate. Changing stdin,
+arguments or cases requires a new execution receipt and currently invokes the
+compiler again. The lab's compile-and-link command always includes `-lm`
+without an explicit library directory; zcc cannot account for that library's
+inputs and treats the build as unkeyable. Its working directory and `TMPDIR`
+also depend on the execution root. A `cache.hit` receipt therefore does not
+demonstrate compiler-cache reuse. One `lab test` request compiles once for all
+its cases.
+
+<!-- claim: symbol-present lab_cc_argv tools/command/lab_build.c # lab compile-and-link arguments -->
+<!-- claim: symbol-present hash_named_libs tools/zcc.c # unresolved named libraries prevent cache reuse -->
+
 ## The one-file agent loop
 
 1. Write `solve.c`.
@@ -251,8 +263,9 @@ The plugin's stdout `ABC\n` is the first case's `expect_stdout`, and the
 
 2026-10-18 on r1 (AMD Ryzen 9 7950X3D, GCC 14.2.0, Linux 6.8.0-139, load
 average about 13 from other workers). Smallest of three consecutive runs of
-`build/bin/z23-dev lab run`; `fresh` recompiles with a warm compile cache,
-`cold` starts from an empty state directory. Times are the receipt's own
+`build/bin/z23-dev lab run`; `fresh` bypasses receipt replay, and `cold` starts
+from an empty lab state directory. These timings do not establish compiled-artifact
+cache hits. Times are the receipt's own
 `elapsed_us`; the last column is the `time` of the CLI process for a cached
 reply, which is node start-up.
 
