@@ -17,7 +17,7 @@
  * in test_groth16_selfverify.c.
  *
  * ACCEPTANCE BAR PER CHECK CATEGORY (also documented in
- * docs/work/GROTH16-SPEND-PARITY.md):
+ * docs/quality/GROTH16-SPEND-PARITY.md):
  *
  *   (1) Self-test end-to-end.        prove(native C23) -> sapling_check_spend
  *                                     MUST accept. This is today's real

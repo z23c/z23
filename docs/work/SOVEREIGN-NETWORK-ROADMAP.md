@@ -100,7 +100,7 @@ honest, repeatable states.
 ### Immediate cure — LANDED
 
 Shipped as the checkpoint-content consensus-bundle install path — see
-`docs/work/sovereign-cutover-runbook.md` for the mechanism and acceptance
+`docs/node/sovereign-cutover-runbook.md` for the mechanism and acceptance
 gate.
 
 ### Permanent architecture

@@ -328,5 +328,5 @@ height, and only then mirror the identical rule (and update
 `test_consensus_parity`) here. z23 follows the network; it does not lead
 a fork.
 
-See also: [`docs/SECURITY_AND_INTEGRITY.md`](./SECURITY_AND_INTEGRITY.md),
+See also: [`docs/node/SECURITY_AND_INTEGRITY.md`](./node/SECURITY_AND_INTEGRITY.md),
 [`docs/DEFENSIVE_CODING.md`](./DEFENSIVE_CODING.md) (Gate E13).

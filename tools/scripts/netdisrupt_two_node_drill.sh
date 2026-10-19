@@ -14,7 +14,7 @@
 # how long the follower takes to auto-resume and re-catch the miner's tip
 # WITHOUT a restart.
 #
-# The plan's proof pillar (docs/work/stopwatch-gates.md, PROOF B / MVP C3's
+# The plan's proof pillar (docs/quality/stopwatch-gates.md, PROOF B / MVP C3's
 # sibling): "yank the network mid-sync, confirm the node auto-resumes and
 # climbs." The headline metric is the RESUME LATENCY — time from the
 # network coming back until the follower's first resumed block — recorded

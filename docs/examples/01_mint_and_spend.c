@@ -28,7 +28,7 @@
  * before a coinbase output can be spent. This example mines past that
  * maturity window explicitly with `simnet_mint_to_height` so a learner can
  * see the concept, even though the wallet-level helpers (see
- * docs/SIMULATOR_TXNS.md) can skip straight to a mature spend under the hood.
+ * docs/quality/SIMULATOR_TXNS.md) can skip straight to a mature spend under the hood.
  *
  * Determinism: everything randomness-dependent (the wallet's P2PKH keypair)
  * is drawn from a `seed_tape` installed BEFORE `simnet_wallet_create`, so

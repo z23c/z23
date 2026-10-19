@@ -1219,7 +1219,7 @@ void zcl_native_handle_zcode_patronage_refund_commit(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 /* Simulation anchor/policy verification report for the ZC23 Living Commons
- * status surfaces (docs/METAVERSE_MVP.md MM4/LC3). `complete` is reported
+ * status surfaces (docs/commons/METAVERSE_MVP.md MM4/LC3). `complete` is reported
  * only when the caller pins the immutable policy root, expected epoch/award,
  * active-chain height/MTP and both declared simulation anchors AND every
  * indexed creation attribution re-verifies under them; otherwise a NAMED

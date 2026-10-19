@@ -20,7 +20,7 @@ The project is pre-v1 (see [`docs/MVP.md`](MVP.md)). It is fully usable for
 building, developing against, and running a real ZClassic node; don't rely on
 it as your only mainnet node yet.
 
-Windows developers should start with [`WINDOWS.md`](WINDOWS.md). It separates
+Windows developers should start with [`WINDOWS.md`](node/WINDOWS.md). It separates
 the native MSYS2 UCRT64 portability lane from the currently supported WSL2
 full-node build and service lane. WSL2 means Windows Subsystem for Linux 2.
 
@@ -200,7 +200,7 @@ P2P (peer-to-peer) services connect nodes to one another.
 | Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart | Not yet measured |
 
 Windows setup and the boundary between native MSYS2 and WSL2 are documented in
-[`WINDOWS.md`](WINDOWS.md). Never share `build/` or `vendor/lib/` between
+[`WINDOWS.md`](node/WINDOWS.md). Never share `build/` or `vendor/lib/` between
 native Windows and WSL.
 
 For standalone Windows platform fixtures, run
@@ -287,8 +287,8 @@ build/bin/z23 zcode guide
 It answers with the current start command and the plain step order; every step
 after it returns the next safe command. The full journey, including publishing,
 fetching on a second node, and independent reproduction, is
-[`C23_COMMONS_QUICKSTART.md`](C23_COMMONS_QUICKSTART.md); the developer-loop
-detail is [`work/ZCODE_DEVELOPMENT_WALKTHROUGH.md`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md).
+[`C23_COMMONS_QUICKSTART.md`](commons/C23_COMMONS_QUICKSTART.md); the developer-loop
+detail is [`ZCODE_DEVELOPMENT_WALKTHROUGH.md`](commons/ZCODE_DEVELOPMENT_WALKTHROUGH.md).
 
 ---
 
@@ -397,7 +397,7 @@ on what you already have, so read the first line of each before picking:
   matter how old), and fetches and installs it with no flag from you, through
   the same chunk-by-chunk
   verification and the same checkpoint-bound install an operator-supplied bundle
-  goes through (see [`SYNC.md`](SYNC.md), "State offers over the peer link").
+  goes through (see [`SYNC.md`](node/SYNC.md), "State offers over the peer link").
   If nobody offers anything acceptable within two minutes of your first peer,
   the node stops waiting and says so — naming the newest height it did see, in
   `bootstrap.stale_offers_only` — and proceeds with path 2. A node with **no**
@@ -483,14 +483,14 @@ on what you already have, so read the first line of each before picking:
    reaches tip far faster than genesis P2P sync — but it requires an
    existing local `zclassicd` datadir as the header/body source. Leave
    `zclassicd` running while this happens. Full detail:
-   [`docs/SYNC.md`](SYNC.md) "Method 3".
+   [`docs/node/SYNC.md`](node/SYNC.md) "Method 3".
 
 A published/prebuilt starter-pack snapshot loader also exists
 (`-load-snapshot-at-own-height`) as a faster-but-partial extra option; it
 seeds transparent state quickly but the node's shielded-history gate
 intentionally stops at the first unproven spend, and body-derived
 projections (explorer token/tx/address history below the seed height) stay
-empty until real bodies are folded. See [`docs/BOOTSTRAPPING.md`](BOOTSTRAPPING.md)
+empty until real bodies are folded. See [`docs/node/BOOTSTRAPPING.md`](node/BOOTSTRAPPING.md)
 and [`docs/BLOCK_EXPLORER_HOSTING.md`](BLOCK_EXPLORER_HOSTING.md) §E before
 choosing it for anything that needs full history (e.g. a public explorer).
 
@@ -530,7 +530,7 @@ build/bin/z23 zcode commons status --input='{"workspace":"/tmp/zcl23-tour-common
 
 For the exact installed-node author, consumer, and independent-reproducer
 package journey, continue with
-[`C23_COMMONS_QUICKSTART.md`](C23_COMMONS_QUICKSTART.md).
+[`C23_COMMONS_QUICKSTART.md`](commons/C23_COMMONS_QUICKSTART.md).
 
 Want a real committed space instead of an empty listing? `metaverse space
 plan` then `metaverse space commit` returns the 64-hex root for
@@ -539,8 +539,8 @@ plan` then `metaverse space commit` returns the 64-hex root for
 The ZCODE package site is served alongside the explorer at `/zcode` (onion or
 HTTPS). ZC23 patronage is **simulation-only** — there is no live token, and
 every live-money path fails closed with a typed error. The full picture and
-the acceptance bar: [`docs/METAVERSE.md`](METAVERSE.md) and
-[`docs/METAVERSE_MVP.md`](METAVERSE_MVP.md).
+the acceptance bar: [`docs/commons/METAVERSE.md`](commons/METAVERSE.md) and
+[`docs/commons/METAVERSE_MVP.md`](commons/METAVERSE_MVP.md).
 
 ### Running as a durable service
 
@@ -851,6 +851,6 @@ To report a bug or propose a feature, use the forms in
 [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE/); they ask for
 `z23 status` output and the consensus question up front.
 
-Next: [`HOW_THE_NODE_WORKS.md`](HOW_THE_NODE_WORKS.md) for the mental model,
+Next: [`HOW_THE_NODE_WORKS.md`](node/HOW_THE_NODE_WORKS.md) for the mental model,
 and [`AGENT_TRAPS.md`](agent/AGENT_TRAPS.md) for the list of things that look broken
 but are intentional or already done.

@@ -15,7 +15,7 @@ the wires. Where this document and a header disagree, the header is right;
 fix this document. Wire formats change only by an explicit new schema
 version; old evidence is never relabeled.
 
-The journey these formats serve is [`../C23_COMMONS_QUICKSTART.md`](../C23_COMMONS_QUICKSTART.md).
+The journey these formats serve is [`C23_COMMONS_QUICKSTART.md`](../commons/C23_COMMONS_QUICKSTART.md).
 
 ## 1. Identity: semantic vs artifact
 

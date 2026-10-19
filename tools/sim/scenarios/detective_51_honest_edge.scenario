@@ -2,7 +2,7 @@
 # half) of a 20-node cluster is honest, the rest byzantine. This is the
 # tightest ratio the DSL supports where "the honest majority converges" is
 # still the operative claim (below 500 there is no honest majority at all).
-# Node 0 is always honest (docs/CHAOS_HARNESS.md), so the real chain always
+# Node 0 is always honest (docs/quality/CHAOS_HARNESS.md), so the real chain always
 # has at least one legitimate origin to build from.
 #
 # Mints are driven across a wide sample of node indices (0..17) so close to

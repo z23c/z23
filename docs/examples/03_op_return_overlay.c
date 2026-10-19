@@ -94,7 +94,7 @@ static bool read_op_return_payload(const struct script *s,
     return true;
 }
 
-/* Print one result row in the same shape docs/SIMULATOR_TXNS.md's cost
+/* Print one result row in the same shape docs/quality/SIMULATOR_TXNS.md's cost
  * table uses, so learners can cross-reference measured fee/size. */
 static void print_result(const char *label, const struct simnet_tx_result *r)
 {
@@ -107,7 +107,7 @@ static void print_result(const char *label, const struct simnet_tx_result *r)
 int main(void)
 {
     /* Fixed seed => byte-identical wallet keys, addresses, txids, fees, and
-     * sizes on every run (docs/SIMULATOR.md "the simulator is deterministic"). */
+     * sizes on every run (docs/quality/SIMULATOR.md "the simulator is deterministic"). */
     seed_tape_t *tape = seed_tape_open(0x03524554414B4954ULL, 1700000000);
     assert(tape != NULL);
     seed_tape_install(tape);

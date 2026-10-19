@@ -2,8 +2,8 @@
 
 - **Status:** Accepted and landed. `check-core-seal` is HARD.
 - **Deciders:** Project maintainer.
-- **Related:** `docs/FRAMEWORK.md` (the eight-shape architecture this split
-  sits inside), [`docs/ZVCS.md`](../ZVCS.md) (the in-binary VCS whose own
+- **Related:** `docs/commons/FRAMEWORK.md` (the eight-shape architecture this split
+  sits inside), [`docs/commons/ZVCS.md`](../commons/ZVCS.md) (the in-binary VCS whose own
   seal guard mirrors this one), `core/UNSEAL.md` (the append-only owner
   unseal ritual log).
 
@@ -11,7 +11,7 @@
 
 ## Context
 
-`docs/FRAMEWORK.md`'s Prime Directive draws a hard line: Equihash parameters,
+`docs/commons/FRAMEWORK.md`'s Prime Directive draws a hard line: Equihash parameters,
 activation heights, block/transaction validity, and coin accounting are
 **consensus-parity territory** — a change here must never ship to z23
 ahead of the reference chain, even framed as opt-in or miner-signaled (see
@@ -25,7 +25,7 @@ it would publish an explorer template fix.
 
 The project increasingly relies on autonomous and semi-autonomous agent
 cycles (the dev loop described in `docs/dev/HOTSWAP.md`, ZVCS's auto-anchor
-in `docs/ZVCS.md`) to move fast on everything *outside* consensus. "Code
+in `docs/commons/ZVCS.md`) to move fast on everything *outside* consensus. "Code
 fearlessly, not recklessly" requires that fast path to be **structurally**
 incapable of touching consensus rules without an explicit, logged, owner-run
 step — not merely discouraged from it by a doc or a code-review convention
@@ -71,7 +71,7 @@ sorted `(path, filehash)` stream. `make core-seal` (re)writes it;
 lint` gate `check-core-seal` verifies it. **`check-core-seal` is HARD**: any
 drift in `core/` from the recorded manifest fails the build. It reads the
 file list from `git ls-files -z core/` — the same publish-bridge git
-described in `docs/ZVCS.md`, invoked only from the Makefile, never from
+described in `docs/commons/ZVCS.md`, invoked only from the Makefile, never from
 inside `tools/core_seal.c` itself.
 
 A second gate, `check-core-include-boundary`
@@ -131,7 +131,7 @@ checks `plan.sealed_core` **before any hot-swap or reload publish step**:
 
 The dev fast loop structurally refuses to auto-publish the sealed consensus
 core. ZVCS's own independent seal guard (`contexts/commons/modules/vcs/src/vcs_seal.c`, described
-in `docs/ZVCS.md`) is a second, defense-in-depth check at the
+in `docs/commons/ZVCS.md`) is a second, defense-in-depth check at the
 source-snapshot layer; it runs *after* the dev-loop's own publish step
 (advisory only at that integration point) — the dev-loop refusal above is
 the one that is load-bearing for blocking the running binary.
@@ -238,7 +238,7 @@ sealed core).
 consensus-affecting RPC/native command calls behind a runtime permission model instead
 of sealing the source tree. Rejected: this ADR is about the *source-editing*
 surface (an agent's dev-loop cycle), not the *runtime* RPC surface — those
-are different threat models (see `docs/SECURITY_AND_INTEGRITY.md` for the
+are different threat models (see `docs/node/SECURITY_AND_INTEGRITY.md` for the
 runtime-facing controls). A runtime check does nothing to stop an
 autonomous agent from committing and hot-swapping a changed validity
 predicate; only a build/publish-time gate does.

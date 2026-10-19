@@ -412,7 +412,7 @@ What Noise does NOT protect against (must not be oversold):
 
 Grounded in code:
 - Consensus validity is defined by the eight reducer stages reading `progress.kv`
-  (`docs/HOW_THE_NODE_WORKS.md`), driven by `reducer_frontier.c` — they consume
+  (`docs/node/HOW_THE_NODE_WORKS.md`), driven by `reducer_frontier.c` — they consume
   already-deserialized, already-stored block/tx data, never live socket bytes.
 - `g_msg_dispatch` (`msgprocessor.c`) keys purely on the 12-byte command string
   parsed from `struct msg_header` and hands handlers a `struct byte_stream *`

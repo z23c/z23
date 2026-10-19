@@ -82,7 +82,7 @@ classes per class): `tests/harness/src/test_simnet_byzantine.c`.
 `simnet_byzantine.h` defines seven more classes (BIP30 duplicate txid,
 missing spend, immature coinbase spend, overflow output, oversize vtx, bad
 diffbits, bad timestamp) not exercised in this example — see the header's
-`enum simnet_byzantine_class` and `docs/SIMULATOR.md` for the full matrix.
+`enum simnet_byzantine_class` and `docs/quality/SIMULATOR.md` for the full matrix.
 
 ## Production counterpart
 

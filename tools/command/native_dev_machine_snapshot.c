@@ -14,7 +14,7 @@
  * and runs the guest until the device has delivered enough new bytes, or
  * refuses with FRESH_NO_HARVEST.
  * The guest resumes at the guest time of the snapshot; the machine has no
- * host clock. docs/RISCV_MACHINE.md, "Snapshots". */
+ * host clock. docs/commons/RISCV_MACHINE.md, "Snapshots". */
 
 #include "command/native_command.h"
 

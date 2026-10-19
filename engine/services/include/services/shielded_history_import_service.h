@@ -23,7 +23,7 @@
  *
  * This is an owner-gated, copy-prove-gated path (never auto-run on a live
  * datadir) — see engine/entry/main.c -import-complete-shielded and §6 of
- * docs/work/shielded-history-importer.md.
+ * docs/node/shielded-history-importer.md.
  */
 #ifndef ZCL_SERVICES_SHIELDED_HISTORY_IMPORT_SERVICE_H
 #define ZCL_SERVICES_SHIELDED_HISTORY_IMPORT_SERVICE_H
@@ -39,7 +39,7 @@ struct sqlite3;
  * best block, per-pool counts, tip-anchor-bind result, self_folded=false) on
  * a successful commit — see shi_write_provenance in
  * shielded_history_import_service.c §4.4/§5 of
- * docs/work/shielded-history-importer.md. Exposed here so other
+ * docs/node/shielded-history-importer.md. Exposed here so other
  * SELECT-only readers (sovereignty_dump_state_json) can read it back via
  * progress_meta_get without duplicating the literal. */
 #define SHIELDED_IMPORT_PROVENANCE_KEY "shielded_import.provenance"

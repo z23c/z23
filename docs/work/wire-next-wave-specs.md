@@ -7,8 +7,8 @@ Grounded in the merged step A/B code (`engine/modules/sim/src/simnet_wire.c`,
 `engine/modules/sim/src/simnet_wallet.c`, `engine/modules/sim/include/sim/simnet_mempool.h`,
 `core/modules/net/src/net_fault.c`, `core/modules/net/include/net/net.h`
 (`struct net_manager`), and `tests/harness/src/test_simnet_txkit.c`. See also
-[`io-harness-design.md`](./io-harness-design.md), `docs/SIMULATOR.md`,
-`docs/SIMULATOR_TXNS.md`.
+[`io-harness-design.md`](../quality/io-harness-design.md), `docs/quality/SIMULATOR.md`,
+`docs/quality/SIMULATOR_TXNS.md`.
 
 ## 0. Ground-truth architecture facts that change the plan
 
@@ -230,7 +230,7 @@ detail).
     a config, similar to `sw_run_mixed` in `test_simnet_wire.c:199-243` but
     seed-driven rather than fixed), run under `ASan`/`UBSan` (already how
     `FUZZ_TARGETS` are built per `Makefile:1582` and the CI tier note in
-    `docs/work/io-harness-design.md:80-82`), and on any monitor failure call
+    `docs/quality/io-harness-design.md:80-82`), and on any monitor failure call
     `simnet_wire_save_capsule(wire, path)` (already implemented,
     `simnet_wire.c:847-857`, and also auto-invoked internally by
     `simnet_wire_mark_monitor_failed()`, `simnet_wire.c:859-875`, into
@@ -240,7 +240,7 @@ detail).
   - `Makefile` — new `wire-sweep` target (thousands of seeds, excluded from
     `make ci`/`make test`, analogous to how `fuzz`/`fuzz-ci` are separated
     from `test` at `Makefile:1599`/`1647`). Add the grep security-gate the
-    design doc calls for (`docs/work/io-harness-design.md:65-68`): CI-time
+    design doc calls for (`docs/quality/io-harness-design.md:65-68`): CI-time
     `grep` over `engine/modules/sim/src/simnet_wire*.c` + `tools/sim/*wire*` asserting
     no `recv(`/`send(`/`socket(`/`connect(`/`bind(`/`getaddrinfo(` — **this
     gate now EXISTS and is wired**: `make check-wire-harness-security-gate`
@@ -284,7 +284,7 @@ detail).
   fees, and enqueues an OP_RETURN carrier tx; `simnet_mempool_add`/
   `simnet_mempool_mint` (`engine/modules/sim/include/sim/simnet_mempool.h:48-59`)
   already mines it through real `connect_block()`. This whole chain is
-  proven today via `simnet` (not `simnet_wire`) — see `docs/SIMULATOR.md`'s
+  proven today via `simnet` (not `simnet_wire`) — see `docs/quality/SIMULATOR.md`'s
   "ZNAM REGISTER | A" row and `make t ONLY=simnet`.
 - **Missing for the wire-integrated version**: the ONLY new work is bridging
   a mined block (containing a ZNAM OP_RETURN tx) onto the P2P wire so an
@@ -319,7 +319,7 @@ detail).
 - **Already present**: `slp_build_genesis`/`_mint`/`_send`
   (`contexts/market/modules/zslp/include/zslp/slp.h:73-89`) + the same
   `simnet_wallet_op_return()` + `simnet_mempool_add/mint` path. Proven via
-  `simnet` today (`docs/SIMULATOR.md`: "ZSLP GENESIS/SEND/MINT | A").
+  `simnet` today (`docs/quality/SIMULATOR.md`: "ZSLP GENESIS/SEND/MINT | A").
 - **Missing**: identical gap to (a) — wire-level relay-with-adversaries
   integration. No new tx-building infra needed; same `simnet_wire_app.c`
   lane covers both (a) and (b) — do not split into two lanes, they share
@@ -336,8 +336,8 @@ detail).
   fund) → `simnet_mempool_add`/`simnet_mempool_mint` (redeem and refund,
   including a real timelock-finality gate via
   `simnet_mint_to_height`) — see the "P2SH HTLC fund" / "HTLC redeem path" /
-  "HTLC refund path" rows in `docs/SIMULATOR_TXNS.md`'s transaction catalog,
-  with real measured sizes/fees. **`docs/SIMULATOR.md`'s own action-coverage
+  "HTLC refund path" rows in `docs/quality/SIMULATOR_TXNS.md`'s transaction catalog,
+  with real measured sizes/fees. **`docs/quality/SIMULATOR.md`'s own action-coverage
   table is stale here** — it still lists "HTLC redeem scriptSig build" and
   "HTLC refund scriptSig build" as Class B ("simnet lacks a
   mempool/timelock/script execution flow for settlement"), which was true
@@ -351,7 +351,7 @@ detail).
   the correct party's redeem/refund succeeds). (ii) the ATOMIC SWAP
   controller layer (`engine/controllers/src/swap_controller.c`,
   `swap_initiate`/`swap_participate`/`swap_list`) remains Class C per
-  `docs/SIMULATOR.md` — it builds local state but doesn't drive on-chain
+  `docs/quality/SIMULATOR.md` — it builds local state but doesn't drive on-chain
   settlement through simnet; that is a controller-integration gap distinct
   from the HTLC script/settlement gap, and cross-chain (BTC/LTC/DOGE) legs
   are out of scope for this repo's simulator entirely (no counterparty
@@ -365,7 +365,7 @@ detail).
 
 ### (d) Sapling shielded send in-sim
 
-- **Confirmed NOT feasible today**, and this matches `docs/SIMULATOR.md`'s
+- **Confirmed NOT feasible today**, and this matches `docs/quality/SIMULATOR.md`'s
   own Phase-2 roadmap (no doc drift here, unlike HTLC). Evidence:
   `engine/modules/sim/src/simnet.c:35-36` picks the harness's mint height explicitly
   "low enough that Sapling is inactive (so the all-zeros
@@ -375,13 +375,13 @@ detail).
   note/tree/anchor/nullifier state anywhere in `engine/modules/sim/`. A grep for
   "sapling" across `engine/modules/sim/` returns only these sapling-is-OFF markers —
   zero note-commitment-tree or memo-field code.
-  `docs/work/sim-phase2-plan.md` exists and is the right place to check for
+  `docs/quality/sim-phase2-plan.md` exists and is the right place to check for
   a design before starting; it was not read in depth here (out of scope for
   this pass) but should be the first read for whoever staffs this.
 - **What's missing, concretely, to make (d) possible**: (1) a
   post-Sapling-activation synthetic checkpoint (the `simnet` harness already
   has the mechanism — a synthetic covering checkpoint per
-  `docs/SIMULATOR.md`'s Model section — the gap is only that today's chosen
+  `docs/quality/SIMULATOR.md`'s Model section — the gap is only that today's chosen
   height is deliberately pre-activation); (2) Sapling note commitment tree +
   anchor tracking in the coins view (real `coins_view_cache` may already
   carry Sapling tree state for the real node — check
@@ -390,18 +390,18 @@ detail).
   shielded-spend/output builder analogous to `simnet_wallet_send()` but
   producing Sapling Spend/Output descriptions with real Groth16 proofs (or,
   for a lower-effort first cut, with `expensive_checks=false` proof
-  skipping — same trick `docs/SIMULATOR.md`'s Model section already uses for
+  skipping — same trick `docs/quality/SIMULATOR.md`'s Model section already uses for
   PoW/script, confirm whether Sapling proof verification is similarly
   gateable before assuming full proving is required); (4) memo-field
   plumbing if the goal includes the ZMSG Sapling-memo channel
-  (`docs/SIMULATOR.md`: "ZMSG Sapling memo channel | B" — messaging
+  (`docs/quality/SIMULATOR.md`: "ZMSG Sapling memo channel | B" — messaging
   controller hardcodes P2P today per project CLAUDE.md's ZCL Messaging
   section).
 - **This is a real, separately-sized feature, not a wire-integration
   add-on** — it needs coins-view/Sapling-tree research before any code, and
   should NOT be folded into the same wave as (a)/(b)/(c) or into Steps
   D/E/F. Recommend a dedicated research spike (read
-  `docs/work/sim-phase2-plan.md` + `core/modules/coins/include/coins/coins_view.h` +
+  `docs/quality/sim-phase2-plan.md` + `core/modules/coins/include/coins/coins_view.h` +
   wherever the real node keeps its Sapling tree) before writing an
   implementation-ready spec for it.
 - **Model tier: Opus for a future implementation lane; this wave's action
@@ -416,8 +416,8 @@ detail).
 | **L2 — Step E** | REPLAY peer kind, adversarial reorder, live bandwidth caps | `engine/modules/sim/src/simnet_wire_peer.c` (new adversary logic), `engine/modules/sim/src/simnet_wire.c` (bandwidth cap wiring — touches same file as L1; **sequence L1 then L2, don't run concurrently on simnet_wire.c**, or split by function region and merge carefully), `engine/modules/sim/include/sim/simnet_wire.h` (setter API), `tests/harness/src/test_simnet_wire.c` (new tests, additive) | step A/B; independent of D2 | **Sonnet** (bandwidth-only slice could be **Haiku** if split out) |
 | **L3 — Step F** | nightly wire_sweep + capsule save + security grep gate | `tools/sim/wire_sweep.c` (new), `Makefile` (new targets), possibly `engine/modules/sim/src/seed_tape.c` (only if replay-from-file is missing — verify first) | step A/B; benefits from C for byzantine-mix seeds but doesn't require it | **Sonnet** (runner + Makefile); **Sonnet verify pass** specifically for the security grep gate |
 | **L4 — App flows (a)+(b)+(c)-wire-slice** | ZNAM/ZSLP/HTLC relay-with-adversaries through simnet_wire | `engine/modules/sim/src/simnet_wire_app.c` (new), `engine/modules/sim/include/sim/simnet_wire_app.h` (new), `tests/harness/src/test_simnet_wire_app.c` (new) | step C landing (needs a real, non-byzantine-stub `block_submit`/mempool-relay path) OR write its own submit hook if C is delayed | **Sonnet** |
-| **L5 — Doc fix** | correct `docs/SIMULATOR.md`'s stale HTLC Class-B rows to reflect `test_simnet_txkit.c` reality | `docs/SIMULATOR.md` only | none | **Haiku** |
-| **L6 — Sapling research spike** | design doc for shielded-send-in-sim (NOT code) | new doc under `docs/work/` (or extend `sim-phase2-plan.md`) | read `docs/work/sim-phase2-plan.md` + coins_view Sapling state first | **Opus** (research/design only) |
+| **L5 — Doc fix** | correct `docs/quality/SIMULATOR.md`'s stale HTLC Class-B rows to reflect `test_simnet_txkit.c` reality | `docs/quality/SIMULATOR.md` only | none | **Haiku** |
+| **L6 — Sapling research spike** | design doc for shielded-send-in-sim (NOT code) | new doc under `docs/work/` (or extend `sim-phase2-plan.md`) | read `docs/quality/sim-phase2-plan.md` + coins_view Sapling state first | **Opus** (research/design only) |
 
 **Sequencing note**: L1 and L2 both touch `engine/modules/sim/src/simnet_wire.c` and
 `simnet_wire.h`. Land L1 first (it also introduces the scenario-timeline
@@ -435,14 +435,14 @@ diff before accepting. Do not blindly trust the implementer's self-report.
 
 ## 6. Contradictions / stale-doc findings hit during this pass
 
-1. **`docs/SIMULATOR.md`'s action-coverage table is stale for HTLC.** It
+1. **`docs/quality/SIMULATOR.md`'s action-coverage table is stale for HTLC.** It
    marks HTLC redeem/refund scriptSig build as Class B ("simnet lacks a
    mempool/timelock/script execution flow for settlement"), but
-   `tests/harness/src/test_simnet_txkit.c` and `docs/SIMULATOR_TXNS.md`'s own
+   `tests/harness/src/test_simnet_txkit.c` and `docs/quality/SIMULATOR_TXNS.md`'s own
    transaction catalog show real, working, measured HTLC fund/redeem/refund
    through `simnet_mempool_add`/`simnet_mempool_mint` with real timelock
-   finality. `docs/SIMULATOR_TXNS.md` (the newer doc) is correct;
-   `docs/SIMULATOR.md`'s matrix predates it and was not updated. Recommend
+   finality. `docs/quality/SIMULATOR_TXNS.md` (the newer doc) is correct;
+   `docs/quality/SIMULATOR.md`'s matrix predates it and was not updated. Recommend
    fixing (L5) so the next reader doesn't re-derive HTLC settlement as "not
    yet possible."
 2. **The task brief's assumption that OP_RETURN tx building is missing from

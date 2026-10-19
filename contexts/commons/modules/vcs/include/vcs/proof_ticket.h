@@ -2,7 +2,7 @@
  * purpose: Component proof input keys, interface contract roots, signed
  *          proof tickets and signed per-issuer log checkpoints (codecs).
  *
- * This is the TICKET object of docs/work/CANONICAL_LIFECYCLE.md (PROOF_SET
+ * This is the TICKET object of docs/node/CANONICAL_LIFECYCLE.md (PROOF_SET
  * section). Four identities, never substituted for one another:
  *
  *   source identity   source_closure root: which source bytes were compiled

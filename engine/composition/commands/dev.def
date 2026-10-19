@@ -2429,7 +2429,7 @@ ZCL_COMMAND_DEV_READ(
 
 /* ── dev.beta6 ─────────────────────────────────────────────────────────────
  * Preflight for the optional beta6 bootstrap-snapshot server
- * (engine/services/src/beta6_bootstrap_serve.c, docs/BOOTSTRAPPING.md). */
+ * (engine/services/src/beta6_bootstrap_serve.c, docs/node/BOOTSTRAPPING.md). */
 ZCL_COMMAND_BRANCH("dev.beta6", "dev",
                    "Preflight a beta6 bootstrap serve tree",
                    ZCL_COMMAND_LAYER_DEV)
@@ -2486,10 +2486,10 @@ ZCL_COMMAND_DEV_COMMAND(
     "proves licensing. public_unlock accepts only the PUBLIC literal fixture; "
     "no arbitrary credential, private identity, transcript or SSH readiness. "
     "protected_unlock requires current invocation authority and either native "
-    "OS-RNG INITIAL creation or an existing locked credential. Persisted "
-    "autostart configuration is separate. ports allows one/two test-only "
+    "OS-RNG INITIAL creation or an existing locked credential. "
+    "Autostart configuration is separate. ports allows one/two test-only "
     "regular input/expect pairs, 65536 total bytes: exact replies and consumption "
-    "within the work budget, no host transport or secrets. docs/RISCV_MACHINE.md.", 8192,
+    "within the work budget, no host transport or secrets. docs/commons/RISCV_MACHINE.md.", 8192,
     "machine,riscv,rv64,boot,kernel,emulator,freebsd,console,transcript,deterministic",
     "zcl.dev_machine_boot_input.v1", "zcl.dev_machine_boot.v1",
     "kernel,accepted_kernel,public_kernel,protected_kernel,builtin_kernel,disk,ram_mib,bootargs,max_instr,until,type_after,transcript,"
@@ -2525,7 +2525,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "protection. The trailer is an unkeyed SHA-256: it detects corruption, not "
     "tampering. The guest resumes at the guest time of the snapshot; the "
     "machine has no host clock. "
-    "docs/RISCV_MACHINE.md, Snapshots.", 8192,
+    "docs/commons/RISCV_MACHINE.md, Snapshots.", 8192,
     "machine,riscv,rv64,snapshot,save,restore,freebsd,deterministic",
     "zcl.dev_machine_snapshot_input.v1", "zcl.dev_machine_snapshot.v1",
     "kernel,disk,ram_mib,bootargs,max_instr,until,type_after,transcript,"
@@ -2565,7 +2565,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "long-running process that uses randomness. Restoring a snapshot you did "
     "not make runs a guest someone else prepared. The receipt carries restored, mode, the "
     "snapshot digest and the instructions executed since restore. The disk is "
-    "only read; guest writes stay in memory. docs/RISCV_MACHINE.md, "
+    "only read; guest writes stay in memory. docs/commons/RISCV_MACHINE.md, "
     "Snapshots.", 8192,
     "machine,riscv,rv64,snapshot,resume,restore,freebsd,deterministic",
     "zcl.dev_machine_resume_input.v1", "zcl.dev_machine_resume.v1",
@@ -2599,7 +2599,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "DATA_DISK_DIRECTORY_REFUSED, DATA_DISK_NOT_REGULAR, DATA_DISK_OPEN_FAILED, "
     "DATA_DISK_CREATE_FAILED, DATA_DISK_GROW_FAILED, DATA_DISK_ATTACH_FAILED, "
     "DATA_DISK_NOT_AVAILABLE (boot with public_unlock). "
-    "docs/RISCV_MACHINE.md.", 2048,
+    "docs/commons/RISCV_MACHINE.md.", 2048,
     "machine,riscv,guest,disk,storage,persistent",
     "zcl.dev_machine_data_input.v1", "zcl.dev_machine_data.v1",
     "action,name,size_mib,home", "",
@@ -2627,7 +2627,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "for eof_quiet_ms. Idle guest time follows the host clock; the entropy "
     "device and ELF boot seed come from the host OS CSPRNG. max_instr is an "
     "optional work cap. The envelope follows the console bytes on stdout; "
-    "receipt names a new file that also receives it. docs/RISCV_MACHINE.md.", 4096,
+    "receipt names a new file that also receives it. docs/commons/RISCV_MACHINE.md.", 4096,
     "machine,riscv,rv64,shell,console,terminal,interactive,freebsd",
     "zcl.dev_machine_shell_input.v1", "zcl.dev_machine_shell.v1",
     "kernel,disk,ram_mib,bootargs,max_instr,escape,stdio,eof_quiet_ms,receipt", "",

@@ -35,7 +35,7 @@ static int eqp_path_filter_bad(const char *p_build, const char *p_skill)
     return eqp_keep_path(p_build) | eqp_keep_path("vendor/y.c")
         | eqp_keep_path(".claude/worktrees/z.h")
         | !eqp_keep_path(p_skill)
-        | eqp_keep_path("docs/EQUIHASH_PARAMS.md")
+        | eqp_keep_path("docs/node/EQUIHASH_PARAMS.md")
         | eqp_keep_path("tools/equihash_params_fact.c")
         | eqp_keep_path("foo.py") | !eqp_keep_path("foo.def");
 }

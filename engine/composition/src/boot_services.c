@@ -525,7 +525,7 @@ static void boot_register_core_liveness_and_reducer(
      * own constant, never a peer's word — and the anchor row carries no UTXOs,
      * anchors or nullifiers, so nothing borrowed is admitted. Stamps every
      * upstream cursor to 1, never the coins frontier; inert on a node with real
-     * state. Seam analysis: docs/work/fresh-start-seam.md. */
+     * state. Seam analysis: docs/node/fresh-start-seam.md. */
     if (!armed_from_anchor && params) {
         struct block_index *gtip = active_chain_tip(&svc->state->chain_active);
         if (gtip && gtip->phashBlock && gtip->nHeight == 0 &&

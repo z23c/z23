@@ -28,7 +28,7 @@
  * suite inflates the clean growth ratio past the budget and compresses the
  * armed/clean growth discrimination below the idle-regime margin, so no
  * growth assertion survives contact with a parallel run. The suite prints
- * the budget line informationally; docs/SIMNET_PERF.md carries the
+ * the budget line informationally; docs/quality/SIMNET_PERF.md carries the
  * calibration, both directions, and the 2026-08-28 incident that moved the
  * absolute assertions out of suite.
  *

@@ -6,7 +6,7 @@
  * health. The field names, units, tiers, health rules and meanings all live
  * in platform/modules/util/include/util/telemetry/zcode_fields.def and are written there
  * exactly once; util/telemetry_render.c turns the filled snapshot into the
- * document. See docs/TELEMETRY_CONTRACT.md for the four-layer split.
+ * document. See docs/node/TELEMETRY_CONTRACT.md for the four-layer split.
  *
  * NEVER BLOCKS, and that is a contract not an aspiration. This runs on the
  * native/RPC thread. The package store's own lock is held across CAS file

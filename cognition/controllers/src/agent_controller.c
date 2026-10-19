@@ -177,7 +177,7 @@ static const struct agent_path_outcome agent_out_consensus = {
     "docs/CONSENSUS_PARITY_DOCTRINE.md", true, false, true,
     AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_reducer = {
-    "reducer_stage", "reducer_liveness", "docs/HOW_THE_NODE_WORKS.md", true,
+    "reducer_stage", "reducer_liveness", "docs/node/HOW_THE_NODE_WORKS.md", true,
     false, false, AGENT_PATH_GROUPS_STAGE };
 static const struct agent_path_outcome agent_out_service = {
     "service_layer", "operator_liveness", "docs/CODEBASE_MAP.md", true,

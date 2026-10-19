@@ -2,7 +2,7 @@
 
 Exactly what cryptographic validation happens at each stage of block
 processing. Trust nothing — every hash, signature, and proof is verified by one
-of these layers. Operator-facing sync/recovery is in [`SYNC.md`](../SYNC.md);
+of these layers. Operator-facing sync/recovery is in [`SYNC.md`](../node/SYNC.md);
 this doc is the validation/format reference.
 
 ## Validation Stages
@@ -69,7 +69,7 @@ sync, cleared when `bg_validation` completes full chain verification).
 ZClassic selects Equihash (N,K) BY HEIGHT. Mainnet is 192,7 from the Bubbles
 activation height (400-byte solution) and 200,9 below it (1344-byte solution);
 regtest is 48,5. The generated table is
-[`docs/EQUIHASH_PARAMS.md`](../EQUIHASH_PARAMS.md), printed by linking the same
+[`docs/node/EQUIHASH_PARAMS.md`](../node/EQUIHASH_PARAMS.md), printed by linking the same
 consensus tables the node validates with.
 - Personalization: `"ZcashPoW"` + LE32(N) + LE32(K)
 - Input: serialized header (version through nNonce, excluding solution)
@@ -77,7 +77,7 @@ consensus tables the node validates with.
 ## Sync & Self-Healing Source Map
 
 Sync methods and self-healing recovery are documented operator-side in
-[`SYNC.md`](../SYNC.md). The implementing files, for validation review:
+[`SYNC.md`](../node/SYNC.md). The implementing files, for validation review:
 
 | Mechanism | Files |
 |-----------|-------|

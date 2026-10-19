@@ -248,7 +248,7 @@ void zcl_native_handle_yardsale_guide(
             &reply->data, "continue_rule",
             "Follow the plan reply's commit_input. Discover exact keys with "
             "z23 discover schema <leaf>.") &&
-        json_push_kv_str(&reply->data, "docs", "docs/SELL.md");
+        json_push_kv_str(&reply->data, "docs", "docs/node/SELL.md");
     struct json_value layers;
     json_init(&layers);
     json_set_array(&layers);

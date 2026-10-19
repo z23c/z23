@@ -69,7 +69,7 @@
  * Ground truth this file was built from: docs/examples/04_zslp_token.c,
  * docs/examples/05_znam_names.c, docs/examples/06_htlc_swap.c,
  * tests/harness/src/test_simnet.c (sections 6-7), tests/harness/src/test_simnet_txkit.c,
- * docs/SIMULATOR_TXNS.md.
+ * docs/quality/SIMULATOR_TXNS.md.
  */
 
 #include "core/amount.h"

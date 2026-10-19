@@ -499,13 +499,13 @@ git rev-parse HEAD origin/main
 
 Read [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md), then consult:
 
-- [`HOW_THE_NODE_WORKS.md`](HOW_THE_NODE_WORKS.md) for the state-machine mental
+- [`HOW_THE_NODE_WORKS.md`](node/HOW_THE_NODE_WORKS.md) for the state-machine mental
   model;
 - [`CODEBASE_MAP.md`](CODEBASE_MAP.md) for source ownership and extension
   recipes;
 - [`AGENT_TRAPS.md`](agent/AGENT_TRAPS.md) before re-solving an intentional or
   completed behavior;
-- [`SECURITY_AND_INTEGRITY.md`](SECURITY_AND_INTEGRITY.md) and
+- [`SECURITY_AND_INTEGRITY.md`](node/SECURITY_AND_INTEGRITY.md) and
   [`CONSENSUS_PARITY_DOCTRINE.md`](CONSENSUS_PARITY_DOCTRINE.md) near security,
   custody, or consensus boundaries;
 - [`HANDOFF.md`](HANDOFF.md) only when operating the maintainer's hosted node.

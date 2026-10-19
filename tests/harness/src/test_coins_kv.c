@@ -3,7 +3,7 @@
  * on the progress.kv handle and therefore honors the caller's enclosing
  * transaction (rollback leaves the set unchanged). That is the entire point of
  * the move — coins commit or roll back together with the stage cursor, closing
- * the tip-wedge tear class (docs/work/tip-durability-collapse.md). */
+ * the tip-wedge tear class (docs/node/tip-durability-collapse.md). */
 
 #include "test/test_core.h"
 

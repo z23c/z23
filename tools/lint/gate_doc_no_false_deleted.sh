@@ -118,7 +118,7 @@ done
 BIN=build/bin/z23
 # A Windows host names the same release target build/bin/z23.exe.
 if [ ! -f "$BIN" ] && [ -f build/bin/z23.exe ]; then BIN=build/bin/z23.exe; fi
-SIZE_DOCS="docs/FRAMEWORK.md docs/adr/0001-personal-sovereignty-stack.md CLAUDE.md"
+SIZE_DOCS="docs/commons/FRAMEWORK.md docs/adr/0001-personal-sovereignty-stack.md CLAUDE.md"
 SIZE_BAND_MB=6   # tolerance: a cited MB number may not differ from real by > this
 
 if [ -f "$BIN" ]; then

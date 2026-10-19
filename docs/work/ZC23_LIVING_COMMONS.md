@@ -5,8 +5,8 @@
 > [`ZC23_FAMILY_COMMONS.md`](./ZC23_FAMILY_COMMONS.md). V2 never
 > reinterprets the v1 authorities frozen in this document.
 
-> User-facing entry point: [`../METAVERSE.md`](../METAVERSE.md); acceptance
-> bar: [`../METAVERSE_MVP.md`](../METAVERSE_MVP.md). This is a scoped protocol
+> User-facing entry point: [`METAVERSE.md`](../commons/METAVERSE.md); acceptance
+> bar: [`METAVERSE_MVP.md`](../commons/METAVERSE_MVP.md). This is a scoped protocol
 > and policy specification, not a current-work queue. Current ordering lives
 > only in [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
 
@@ -475,7 +475,7 @@ objects. The result is labelled exactly `distinct_signer_simulation=true`,
 `approved_fixture_policy=true`, and `actual_off_host_credit=false`.
 
 The portable second-machine procedure is
-[`ZC23_REPRODUCTION_RUNBOOK.md`](./ZC23_REPRODUCTION_RUNBOOK.md). A confined
+[`ZC23_REPRODUCTION_RUNBOOK.md`](../commons/ZC23_REPRODUCTION_RUNBOOK.md). A confined
 byte-identical rebuild is necessary but insufficient: the reproduced report
 must also be bound into the existing signed work-receipt/proof-set path and
 admitted under the approved-reproducer policy. No command, fixture, process

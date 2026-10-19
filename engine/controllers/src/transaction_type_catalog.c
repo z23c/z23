@@ -316,7 +316,7 @@ bool zcl_transaction_types_index_json(struct json_value *out)
     /* Reproducible isolated fixtures are public; owner-funded history is not
      * a repository artifact, even when its txid is publicly visible on-chain. */
     (void)json_push_kv_str(out, "checked_in_proof_source",
-        "docs/work/transaction-lab-events.jsonl");
+        "docs/quality/transaction-lab-events.jsonl");
     (void)json_push_kv_str(out, "live_proof_source",
         "private_local_notebook");
     (void)json_push_kv_str(out, "funded_experiment_history_policy",

@@ -147,7 +147,7 @@ plan steps make each duplicate zero-callers — never out of order.**
 Trusted bootstrap's information floor is *headers + UTXO snapshot*. We measure
 at the floor today; remaining work is recipe-safety, not throughput. The proven
 two-step cold-sync recipe, its measured timings, and the port table are in
-`docs/SYNC.md` — the canonical source. The recipe's `--importblockindex`-FIRST
+`docs/node/SYNC.md` — the canonical source. The recipe's `--importblockindex`-FIRST
 order is load-bearing: skipping it leaves a 3.1M header hole (headers=960) and
 pins forever, so the footgun must be removed or auto-composed in code, not
 documented around.

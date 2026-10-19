@@ -86,7 +86,7 @@ static const struct agent_impact_case {
     { "core/modules/chain", "general", "normal",
       "docs/CODEBASE_MAP.md", 0 },
     { "engine/jobs/x.c", "reducer_stage", "reducer_liveness",
-      "docs/HOW_THE_NODE_WORKS.md", F_CODE },
+      "docs/node/HOW_THE_NODE_WORKS.md", F_CODE },
     { "engine/services/x.c", "service_layer", "operator_liveness",
       "docs/CODEBASE_MAP.md", F_CODE },
     { "tests/harness/include/test/x.h", "test_harness", "normal",

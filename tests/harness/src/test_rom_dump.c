@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Unit tests for the "rom" dumpstate subsystem (diagnostics_registry_rom.c)
- * — the L0-L3 trust-machine catalog docs/ROM.md documents. Drives
+ * — the L0-L3 trust-machine catalog docs/node/ROM.md documents. Drives
  * rom_dump_state_json() directly (no full node boot needed: the function
  * degrades cleanly when diag_main_state() has never been wired, exactly as
  * a `dumpstate rom` call from a test/tooling context would see it).

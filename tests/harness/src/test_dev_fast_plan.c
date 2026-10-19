@@ -31,12 +31,12 @@ struct fp_case {
 
 static const struct fp_case fp_cases[] = {
     {"c_file_with_rule", "engine/composition/src/args.c", false},
-    {"doc_file", "docs/ARENA.md", false},
+    {"doc_file", "docs/commons/ARENA.md", false},
     {"makefile", "Makefile", false},
     {"code_without_rule", "contexts/commons/modules/vcs/src/zcode_work_output.c", false},
     {"deleted_source", "tests/harness/src/no_such_dev_fast_plan_fixture.c", false},
     {"mixed",
-     "engine/composition/src/args.c,Makefile,docs/ARENA.md,"
+     "engine/composition/src/args.c,Makefile,docs/commons/ARENA.md,"
      "contexts/commons/modules/vcs/src/zcode_work_output.c,"
      "tests/harness/src/no_such_dev_fast_plan_fixture.c",
      false},

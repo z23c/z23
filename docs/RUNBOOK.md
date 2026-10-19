@@ -16,7 +16,7 @@ changes require the operator's authority.
 Run `make test-crash-bootstrap` (C7 kill-9) and `make soak-ci` (C6 soak proxy)
 to exercise a real but fully isolated node. For the isolation contract, build
 caveat, output/verdict reading, and the operational forms (`make soak-7day` =
-MVP #6), see [`CHAOS_HARNESS.md`](./CHAOS_HARNESS.md).
+MVP #6), see [`CHAOS_HARNESS.md`](./quality/CHAOS_HARNESS.md).
 
 ### Nightly simulator sweep
 
@@ -479,9 +479,9 @@ a spent shielded note.
 
 **Symptoms:** `H*` holds flat below the header tip on a node seeded from a
 transparent-only artifact — the fold-from-checkpoint path
-(`-refold-from-anchor` / `-load-verify-boot`, [`docs/SYNC.md`](SYNC.md) "Fold
+(`-refold-from-anchor` / `-load-verify-boot`, [`docs/node/SYNC.md`](node/SYNC.md) "Fold
 from checkpoint") or a legacy `starterpack-<height>` release
-([`docs/BOOTSTRAPPING.md`](BOOTSTRAPPING.md)). Both mark shielded history
+([`docs/node/BOOTSTRAPPING.md`](node/BOOTSTRAPPING.md)). Both mark shielded history
 below their seed height as empty rather than forging it, so a spend that
 references an older root has nothing to verify against.
 
@@ -513,7 +513,7 @@ byte-verified against the header-committed `hashFinalSaplingRoot`, but
 Sprout has no header commitment and bottoms out at the operator's own
 `zclassicd` chainstate bytes. Full data model, trust-asymmetry detail, and
 `zclassicd`-source key layout:
-[`docs/work/shielded-history-importer.md`](work/shielded-history-importer.md).
+[`docs/node/shielded-history-importer.md`](node/shielded-history-importer.md).
 
 **Copy-prove first — never live surgery.** Prove the cure on a throwaway
 copy and gate on H\* climbing past the wedge height (both blockers absent,
@@ -539,7 +539,7 @@ would reject valid forward spends. When this happens the
 cure is **not applicable to that datadir**; do not force it. The reliable path
 is then a **fresh full-history rebuild** (two-step `--importblockindex` +
 genesis body-fold, which builds complete anchor+nullifier state with no gap)
-and a service cutover to the fresh datadir — see [`docs/SYNC.md`](SYNC.md)
+and a service cutover to the fresh datadir — see [`docs/node/SYNC.md`](node/SYNC.md)
 Method 3.
 
 **Prevention:** this wedge is the expected next step after a transparent-only

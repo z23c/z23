@@ -2,7 +2,7 @@
  *
  * test_importblockindex_cli_dispatch — proves the literal
  * `zclassic23 --importblockindex <src-datadir> [<target-node.db>]` CLI
- * invocation (step 1 of the two-step cold-sync recipe, docs/SYNC.md Method 3)
+ * invocation (step 1 of the two-step cold-sync recipe, docs/node/SYNC.md Method 3)
  * is ROUTED by engine/entry/main.c's argv dispatch chain to the real importer,
  * not swallowed by an earlier branch (`is_cli_mode()`, the `argc == 1` status
  * shortcut, or an unrelated `if`).

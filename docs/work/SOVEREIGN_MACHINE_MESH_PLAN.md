@@ -219,7 +219,7 @@ reimplemented:
   resume state, quota enforcement, and path confinement. See
   [`contexts/commons/modules/vcs/include/vcs/package_store.h`](../../contexts/commons/modules/vcs/include/vcs/package_store.h),
   [`contexts/commons/modules/vcs/include/vcs/package_swarm_node.h`](../../contexts/commons/modules/vcs/include/vcs/package_swarm_node.h),
-  and [`docs/P2P_SOURCE_HOSTING.md`](../P2P_SOURCE_HOSTING.md).
+  and [`docs/commons/P2P_SOURCE_HOSTING.md`](../commons/P2P_SOURCE_HOSTING.md).
 - Signed transfer receipts, storage acknowledgements, source-reproduction
   acknowledgements, local verifier policy, and the package lifecycle already
   separate transport, evidence, acceptance, build, install, and rollback. See

@@ -7,7 +7,7 @@
  * decides no health. Every field name in the domain is spelled once, as a
  * TL_LEAF row in platform/modules/util/include/util/telemetry/sync_fields.def; the struct
  * member, the JSON key, the ontology path and the leaf id are all expansions
- * of that one token. See docs/TELEMETRY_CONTRACT.md for the four layers.
+ * of that one token. See docs/node/TELEMETRY_CONTRACT.md for the four layers.
  *
  * THE COLLECTOR NEVER BLOCKS. It runs on whatever native/RPC thread asked for
  * the reply, while the reducer fold may own progress_store_tx_lock around a

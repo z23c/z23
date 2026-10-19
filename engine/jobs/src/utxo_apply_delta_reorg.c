@@ -548,7 +548,7 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
      * rows, and rewind the cursor to fork_plus1 (the first height step_apply
      * re-applies on the winner). Wrapping the inverse-delta loop in the SAME txn
      * as the cursor rewind is the fix that keeps coins_kv from drifting from the
-     * cursor on a crash mid-unwind (docs/work/tip-durability-collapse.md):
+     * cursor on a crash mid-unwind (docs/node/tip-durability-collapse.md):
      * coins_kv mutation + delete + cursor commit or roll back as one unit.
      * coins_kv is the sole live UTXO store. The in-memory s->cursor is reloaded
      * from this DB row at the top of the next stage_run_once (cursor_read). */

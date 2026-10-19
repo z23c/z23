@@ -15,7 +15,7 @@
 
 A native Windows box can now run as a public ZClassic peer through the
 documented service lane (`make windows-service-install` /
-`windows-service-status` in `docs/WINDOWS.md`). That is public peering, not
+`windows-service-status` in `docs/node/WINDOWS.md`). That is public peering, not
 private fleet membership ([`0009-private-fleet-on-a-public-network.md`](0009-private-fleet-on-a-public-network.md)).
 
 Three security gaps showed up the moment the Windows node came online:

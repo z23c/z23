@@ -1077,7 +1077,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "build/bin/z23 discover help")
                != NULL);
         ASSERT(strstr(buf, "dumpstate reducer_frontier") != NULL);
-        ASSERT(strstr(buf, "docs/BOOTSTRAPPING.md") != NULL);
+        ASSERT(strstr(buf, "docs/node/BOOTSTRAPPING.md") != NULL);
         ASSERT(strstr(buf, "core sync diagnose") != NULL);
         ASSERT(strstr(buf, "docs/HANDOFF.md") != NULL);
         free(buf);

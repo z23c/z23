@@ -190,7 +190,7 @@ an immediate named failure before either downloader is invoked. P2P source
 carriers include the five default-build archives under `vendor/.cache/`, so a
 Git-free consumer can prove it did not fall back to GitHub while retaining the
 same pin checks and source-build recipes. See
-[`P2P_SOURCE_HOSTING.md`](./P2P_SOURCE_HOSTING.md#git-free-consumer-build) for
+[`P2P_SOURCE_HOSTING.md`](./commons/P2P_SOURCE_HOSTING.md#git-free-consumer-build) for
 the complete trust inputs and commands.
 
 Release reproduction is intentionally stricter than the ordinary first-build
@@ -622,7 +622,7 @@ Notes:
 <!-- claim: file-present vendor/x11/SHA256SUMS # vendored X11 header pin -->
 <!-- claim: symbol-present vendor/x11/include Makefile # the include wiring -->
 - **raylib is vendored source, not an archive `make vendor` builds.** The Sky
-  Combat game (`apps/skycombat`, see [GAME.md](GAME.md)) renders with raylib,
+  Combat game (`apps/skycombat`, see [GAME.md](commons/GAME.md)) renders with raylib,
   and raylib is committed as trimmed C source under `vendor/raylib/`: 20
   upstream files — the five renderer modules the game calls, their headers,
   the RGFW desktop backend and the eight single-file dependencies those
@@ -946,4 +946,4 @@ release publication stays contained until exact-candidate evidence, two
 independently provisioned byte-identical builds, complete manifests/SBOM/
 provenance, and the required offline signatures are all enforced. For a local
 binary, use the ordinary build targets above. See
-`docs/SECURITY_AND_INTEGRITY.md` for the integrity model.
+`docs/node/SECURITY_AND_INTEGRITY.md` for the integrity model.

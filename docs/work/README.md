@@ -43,7 +43,9 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 
 Developer references (hot-swap, test-result cache, fast path, lab) live in
 [`../dev/`](../dev/README.md); agent and fleet documents live in
-[`../agent/`](../agent/README.md).
+[`../agent/`](../agent/README.md); node, commons and quality references live in
+[`../node/`](../node/README.md), [`../commons/`](../commons/README.md) and
+[`../quality/`](../quality/README.md).
 
 | File | Authority | Purpose |
 |---|---|---|
@@ -52,28 +54,19 @@ Developer references (hot-swap, test-result cache, fast path, lab) live in
 | [`self-verified-tip-plan.md`](./self-verified-tip-plan.md) | DESIGN | the `G-SOV` sovereignty-gate design + open hardening items; `G-SOV` is the active gate in `sovereignty_controller.c` |
 | [`SOVEREIGN-NETWORK-ROADMAP.md`](./SOVEREIGN-NETWORK-ROADMAP.md) | FOUNDATION | durable Phase 0–6 hierarchy and promotion gates, subordinate to `FORWARD_PLAN.md` |
 | [`SOVEREIGN_MACHINE_MESH_PLAN.md`](./SOVEREIGN_MACHINE_MESH_PLAN.md) | DESIGN | owner-paired Linux/macOS/Windows machine discovery, private transfer, typed control, secure remote-service tunnels, and hot-swap acceptance |
-| [`sovereign-cutover-runbook.md`](./sovereign-cutover-runbook.md) | LIVE | owner-gated live cutover + revert procedure for the bundle install path |
 | [`ZCODE_DEVELOPMENT_NETWORK.md`](./ZCODE_DEVELOPMENT_NETWORK.md) | DESIGN | agentic C23 development-network contract: canonical task/evidence objects, real ZBuild worker, requester-led P2P work, typed create/use/improve, and durability lanes |
 | [`ZCODE_DEVELOPMENT_PRODUCT.md`](./ZCODE_DEVELOPMENT_PRODUCT.md) | DESIGN | v0.1 C23 product contract: measured expert-workflow baseline, project/work front door, bounded context/adapters/repair/review, self-hosting benchmark, and fresh-checkout acceptance |
-| [`ZCODE_DEVELOPMENT_WALKTHROUGH.md`](./ZCODE_DEVELOPMENT_WALKTHROUGH.md) | LIVE | five-minute small-C23-project path: inspect, start, bounded manual/Codex handoff, repair/evidence, explicit human acceptance, and the permanent hermetic acceptance target |
 | [`SEMANTIC_MANIFEST.md`](./SEMANTIC_MANIFEST.md) | DESIGN | canonical per-TU semantic manifest v1 (byte format, exact and hint roots, facts extension revision 2) and its one producer, the optional libclang sensor (a second parse at 1.2-1.6x `clang -fsyntax-only`); the planner consumer is not on main yet |
 | [`ZCODE_SCIENTIFIC_METAVERSE.md`](./ZCODE_SCIENTIFIC_METAVERSE.md) | DESIGN | owner-directed scientific-object and evidence-network design; includes no-live-funds gates |
 | [`ZC23_LIVING_COMMONS.md`](./ZC23_LIVING_COMMONS.md) | DESIGN | people+AI shared-commons design and LC0-LC5 dependency order |
-| [`ZC23_REPRODUCTION_RUNBOOK.md`](./ZC23_REPRODUCTION_RUNBOOK.md) | LIVE | O5 three-party portable-reproduction protocol, exact same-host acceptance gate, genuine second-machine verifier command, and explicit no-credit/no-live-authority boundaries |
-| [`NEON_CRYPTO_MATRIX.md`](./NEON_CRYPTO_MATRIX.md) | LIVE | per-crypto-family x86-64/arm64 tier matrix: gating, the test group proving bit-identity, the bench that times each tier, and honest no-clean-NEON-equivalent markers |
 | [`ZCODE_PLAN.md`](./ZCODE_PLAN.md) | FOUNDATION | original 15-slice ZCODE package-hosting order; slices 1–13 remain live foundations, while payout slices 14–15 are deferred behind the development network; `contexts/commons/modules/vcs/include/vcs/package_reward.h` cites its "ZCL fuel economics" section by name |
 | [`MARKET_ONION_DELIVERY.md`](./MARKET_ONION_DELIVERY.md) | DESIGN | B5 onion-routed chunk delivery: offer v2 endpoint_type=onion wire, `/market/chunk` onion route, session-binding replacement, stub fail-closed policy, and the honest non-goals (timing, gossip metadata) |
-| [`shielded-history-importer.md`](./shielded-history-importer.md) | LIVE | reference for the shipped `-import-complete-shielded` operational cure; operational-vs-sovereign trust-mode split |
-| [`CONSENSUS-STATE-BUNDLE.md`](./CONSENSUS-STATE-BUNDLE.md) | LIVE | naming/ownership authority for `zcl.consensus_state_bundle.v1` |
-| [`fresh-start-seam.md`](./fresh-start-seam.md) | DESIGN | why a genuinely bare boot (empty datadir, isolated `$HOME`, no flags) reaches no state source and folds zero blocks: the two independent seams, every state source and the exact predicate that refuses it, and why the install gate is NOT circular at HEAD |
 | [`never-stuck-plan.md`](./never-stuck-plan.md) | DESIGN | the wedge class this doc diagnosed is CURED; retained as the design record for the never-stuck hardening map + the per-height UTXO-ladder gap |
 | [`fail-safe-architecture.md`](./fail-safe-architecture.md) | DESIGN | the progress law + universal repair ladder; absorbs `sticky-node-plan.md`'s invariants and `never-stuck-plan.md` §1b |
 | [`sticky-node-plan.md`](./sticky-node-plan.md) | DESIGN/RETAINED | the stickiness invariants + gap analysis; §4 (the AAR/MTTUR metric) is cited by `tools/scripts/sticky_matrix.sh`/`sticky_fault_inject.sh` and the Makefile `sticky-matrix`/`sticky-matrix-v1` targets — keep §4 numbered as-is |
 | [`ladder-carve-audit.md`](./ladder-carve-audit.md) | DESIGN | current per-file consumer graph for the borrowed-state ladder deletion; headline verdict: zero LOC deletable today |
 | [`reducer-shielded-consensus-plan.md`](./reducer-shielded-consensus-plan.md) | DESIGN | anchor-membership + turnstile enforcement design (not implementation-ready — see its own §8 gaps) |
-| [`concurrency-hazards-consensus-gated.md`](./concurrency-hazards-consensus-gated.md) | DESIGN | unfixed cross-thread hazards on the consensus/chain-advance path, boot-validation-blocked |
 | [`refold-fold-rate-bottlenecks.md`](./refold-fold-rate-bottlenecks.md) | DESIGN | from-genesis refold fold-rate bottlenecks + fix order |
-| [`tip-durability-collapse.md`](./tip-durability-collapse.md) | DESIGN | rationale of record for `coins_kv` as sole live UTXO author |
 | [`wt-rom-fetch-engine.md`](./wt-rom-fetch-engine.md) | DESIGN | ROM-bundle fetch engine (client side of ROM delivery): trust model + open items |
 | [`os-substrate-plan.md`](./os-substrate-plan.md) | DESIGN | OS-substrate three-rung plan (shell-out removal, `os_proc` shim, sandbox facade) |
 | [`os/A1-authority-receipt-idiom.md`](./os/A1-authority-receipt-idiom.md) | DESIGN | the Law-7 privileged-transition authority-receipt idiom, cited by `tools/lint/check_privileged_transition_receipt.sh` |
@@ -92,13 +85,6 @@ Developer references (hot-swap, test-result cache, fast path, lab) live in
 | [`session-substrate-probes.md`](./session-substrate-probes.md) | DESIGN | measured rootless-sandboxing capability probes for the multi-user-server program |
 | [`LLM-C23-APP-PLATFORM-CHECKLIST.md`](./LLM-C23-APP-PLATFORM-CHECKLIST.md) | DESIGN | future LLM/App platform execution checklist (Phases 3–5); not the current execution queue, cannot displace the sovereign cure |
 | [`agent-spend-policy-design.md`](./agent-spend-policy-design.md) | LIVE/RETAINED | scoped agent authority over digital assets — shipped as `agent_sessions` (migration v36) + `cognition/services/include/services/agent_spend_policy.h`; 16 `.c`/`.h`/test files cite its "Minting + presentation" and "Enforcement" sections by name, so keep those headings as-is |
-| [`stopwatch-gates.md`](./stopwatch-gates.md) | LIVE | the C3 / net-disruption wall-clock stopwatch gates |
-| [`coldstart-remote-peer-proof.md`](./coldstart-remote-peer-proof.md) | LIVE | the C3 stopwatch run against a REMOTE peer (`make mvp-coldstart-to-tip-remote`) and what it names |
-| [`mvp-ci-map.md`](./mvp-ci-map.md) | LIVE | each MVP criterion → its mechanical CI check |
-| [`mvp-live-gate.md`](./mvp-live-gate.md) | LIVE | `tools/mvp_gate.sh`, the live-node MVP probe companion to the CI map |
-| [`sim-phase2-plan.md`](./sim-phase2-plan.md) | LIVE | the in-memory simulation network reference |
-| [`io-harness-design.md`](./io-harness-design.md) | LIVE | the `simnet_wire` adversarial network-IO harness design |
-| [`GROTH16-SPEND-PARITY.md`](./GROTH16-SPEND-PARITY.md) | LIVE | native Sapling spend-circuit differential parity scoreboard |
 | [`parity-audit-round2-findings.md`](./parity-audit-round2-findings.md) | RETAINED | superseded audit, retained — findings L1/L2/L3 cited by the consensus-parity lock-in tests |
 
 This table covers **every** tracked file in this directory. Reconcile it after
@@ -164,7 +150,7 @@ commit — retiring a doc is not finished until its callers are gone too.
   [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
 - **Maintainer-host live state only:** [`../HANDOFF.md`](../HANDOFF.md); never
   use it to choose ordinary development work.
-- **Architecture reference:** [`../FRAMEWORK.md`](../FRAMEWORK.md); its scoped
+- **Architecture reference:** [`FRAMEWORK.md`](../commons/FRAMEWORK.md); its scoped
   debt inventory is not a priority queue.
 - **Worker protocol:** [`agent-protocol.md`](../agent/agent-protocol.md).
 
@@ -179,15 +165,9 @@ completion remain defined by `AGENTS.md` and `docs/DEVELOPING.md`.
 | File | Authority | Purpose |
 |---|---|---|
 | [`ZC23_FAMILY_COMMONS.md`](./ZC23_FAMILY_COMMONS.md) | DESIGN | additive pre-genesis protocol foundation: family commons + evidence economics objects and commands |
-| [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | systemd drop-in reconciliation runbook: lexical apply order, detecting an `ExecStart=` collision, reading `/proc/<pid>/cmdline` for ground truth vs. `systemctl show`, and the hazard of another actor rewriting drop-ins mid-reconciliation |
-| [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](./LIVE_TRANSACTION_DEMONSTRATIONS.md) | LIVE | runbook: which cataloged transaction shapes are demonstrated live, and how |
 | [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | DESIGN | owner-approved `app shop` one-command sovereign storefront specification; not an execution queue |
-| [`TRANSACTION_LAB.md`](./TRANSACTION_LAB.md) | LIVE | transaction laboratory notebook; keeps its two questions separate |
-| [`TRANSACTION_MICRO_LAB.md`](./TRANSACTION_MICRO_LAB.md) | LIVE | owner-gated 100-transaction demonstration runbook; never ordinary development work |
 | [`ZC23_DISTRIBUTION_RULES.md`](./ZC23_DISTRIBUTION_RULES.md) | RETAINED | owner-decided phase-C2 policy record; simulation-only and not an execution queue |
 | [`WIRE_COMPILE_CACHE.md`](./WIRE_COMPILE_CACHE.md) | DESIGN | Commons WIRE lane working note: transfer framing, POINTER/PROVIDER discovery records, and the cross-node compile cache; subordinate to `../spec/c23-package-format.md`, which wins on any disagreement |
-| [`transaction-lab-events.jsonl`](./transaction-lab-events.jsonl) | EVIDENCE | event ledger backing TRANSACTION_LAB |
-| [`transaction-micro-lab-events.jsonl`](./transaction-micro-lab-events.jsonl) | EVIDENCE | event ledger backing TRANSACTION_MICRO_LAB |
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-b663f019ed20d6ece26aa94b5dfe92f41bd4c0be.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-b663f019ed20d6ece26aa94b5dfe92f41bd4c0be.jsonl) | EVIDENCE | frozen nine-record publishable retrieval receipt; exact evaluator-batch replay, six-task equal-weight macro denominator, 28 eligible relevance judgments, and explicit unavailable ceilings |
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-476e66661523.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-476e66661523.jsonl) | EVIDENCE | frozen 12-record publishable retrieval receipt for the distinct ten-task v2 cohort; exact evaluator-batch and per-task ranking-root replay, nine-task equal-weight macro denominator, 43 eligible relevance judgments, and explicit unavailable ceilings |
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-705d16ccab6b.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-705d16ccab6b.jsonl) | EVIDENCE | frozen 12-record publishable receipt for the same ten-task cohort with a current-driver directory-taxonomy scope proxy over exact-parent source: literal 7,209 bp and BM25 4,888 bp wrong-group selections at five; semantic scope, reuse success, and unique LOC avoided remain unobserved |

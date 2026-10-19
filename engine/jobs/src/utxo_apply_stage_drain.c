@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * utxo_apply_stage_drain — the outer batched-drain driver for the utxo_apply
- * Job, split out of utxo_apply_stage.c (per docs/FRAMEWORK.md §5's file-size
+ * Job, split out of utxo_apply_stage.c (per docs/commons/FRAMEWORK.md §5's file-size
  * ceiling) alongside its existing dump/observe/lookup/accessors siblings.
  * Owns the one outer BEGIN IMMEDIATE .. COMMIT window a drain call opens
  * around up to max_steps single-height utxo_apply_stage_step_once() calls

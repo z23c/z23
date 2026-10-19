@@ -4,7 +4,7 @@
 # longest VALID chain even while a byzantine minority is actively feeding
 # forged blocks into the same fully-connected network. `simnet_nodes 100
 # honest=800` marks ~20% of the 99 non-zero-indexed nodes byzantine (node 0
-# is always honest, per docs/CHAOS_HARNESS.md); a byzantine node's
+# is always honest, per docs/quality/CHAOS_HARNESS.md); a byzantine node's
 # `simnet_mint` forges an INVALID block (bad merkle root / bad coinbase
 # amount / negative or overflowing output) instead of mining honestly. Every
 # forged block still flows through `simnet_relay`/`simnet_deliver` exactly

@@ -18,7 +18,7 @@
 #
 # Determinism is supplied by REPRO_CFLAGS in the Makefile (behavior-identical
 # -ffile-prefix-map + -gno-record-gcc-switches). See
-# docs/SECURITY_AND_INTEGRITY.md "Reproducible build gate".
+# docs/node/SECURITY_AND_INTEGRITY.md "Reproducible build gate".
 #
 # Cost: two full whole-program LTO builds (~2x a normal `make zclassic23`).
 # This is intentionally NOT on the default lint/ci path — run it on demand.

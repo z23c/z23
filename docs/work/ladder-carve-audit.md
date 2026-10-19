@@ -1,7 +1,7 @@
 # Ladder-carve deletion audit — the borrowed-state reconcile/recovery ladders
 
 Scope: the ~8.3k LOC of recovery/reconcile/mirror machinery that the doctrine
-(`docs/ARCHITECTURE_NORTH_STAR.md`, `docs/work/never-stuck-plan.md` §4) marks
+(`docs/commons/ARCHITECTURE_NORTH_STAR.md`, `docs/work/never-stuck-plan.md` §4) marks
 for deletion once the node holds tip on self-derived state. This audit produces
 the per-file consumer graph and the staged deletion plan so a future carve does
 not repeat the prior failure (a delete that built green but broke content-assert

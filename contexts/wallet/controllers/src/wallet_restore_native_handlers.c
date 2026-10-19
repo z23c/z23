@@ -11,7 +11,7 @@
  * very wallet they are trying to put back. So both handlers call the
  * service directly, in-process, and `core.wallet.restore` REFUSES if a
  * node is holding the target datadir (the pidfile flock is the
- * single-writer lock — see docs/WALLET_PERSISTENCE_RECOVERY.md).
+ * single-writer lock — see docs/node/WALLET_PERSISTENCE_RECOVERY.md).
  *
  * Both carry ZCL_COMMAND_CONFIRM_PLAN_COMMIT, and the plan half is not
  * cosmetic:

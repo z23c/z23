@@ -44,7 +44,7 @@
  * R1CS synthesis; no ~/.zcash-params), so it gates unconditionally. It
  * proves parity only over the sections currently ported; the scoreboard
  * (ported prefix vs the 98777-constraint target) is documented in
- * docs/work/GROTH16-SPEND-PARITY.md.
+ * docs/quality/GROTH16-SPEND-PARITY.md.
  */
 
 #include "test/test_core.h"

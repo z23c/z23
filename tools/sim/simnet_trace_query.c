@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * simnet_trace_query — linear-scan filter over a simnet full-state trace
- * (engine/modules/sim/include/sim/simnet_trace.h; docs/CHAOS_HARNESS.md "Recording a
+ * (engine/modules/sim/include/sim/simnet_trace.h; docs/quality/CHAOS_HARNESS.md "Recording a
  * full-state trace").
  *
  * A trace is one NDJSON object per (node, event) snapshot, written by

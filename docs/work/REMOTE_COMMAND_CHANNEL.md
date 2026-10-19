@@ -377,6 +377,6 @@ an allowlist grown one hurried leaf at a time next to the code that needed it.
 ## See also
 
 - [`AGENTS.md`](../../AGENTS.md) — authority boundaries this design sits under.
-- [`docs/SECURITY_AND_INTEGRITY.md`](../SECURITY_AND_INTEGRITY.md)
+- [`docs/node/SECURITY_AND_INTEGRITY.md`](../node/SECURITY_AND_INTEGRITY.md)
 - [`docs/dev/HOTSWAP.md`](../dev/HOTSWAP.md)
 - [`docs/work/DIRECT_TRANSPORT.md`](./DIRECT_TRANSPORT.md)

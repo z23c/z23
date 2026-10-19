@@ -9,8 +9,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-LAB_BASELINE="docs/work/transaction-lab-events.jsonl"
-MICRO_BASELINE="docs/work/transaction-micro-lab-events.jsonl"
+LAB_BASELINE="docs/quality/transaction-lab-events.jsonl"
+MICRO_BASELINE="docs/quality/transaction-micro-lab-events.jsonl"
 LAB_NAME="transaction-lab-events.jsonl"
 MICRO_NAME="transaction-micro-lab-events.jsonl"
 MICRO_HEADER='{"schema":"zcl.transaction_micro_lab_campaign.v1","campaign_id":"mainnet-micro-100-v1","created_at":"2026-08-05T00:00:00Z","target_count":100,"recipient_zat_each":1000,"fee_ceiling_zat_each":10000,"setup_envelope_zat":900000,"campaign_envelope_zat":2000000,"lifetime_lab_cap_zat":5000000,"reserve_floor_zat":25000000}'
@@ -99,7 +99,7 @@ selftest() {
         [ ! -d "$fixture" ] || rm -r -- "$fixture"
     }
     trap cleanup_no_live_lab_history_selftest RETURN
-    mkdir -p "$fixture/docs/work" "$fixture/private"
+    mkdir -p "$fixture/docs/quality" "$fixture/private"
     printf '%s\n' \
         '{"schema":"zcl.transaction_lab_event.v1","proof":"simnet_confirmed"}' \
         > "$fixture/$LAB_BASELINE"

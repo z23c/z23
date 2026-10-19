@@ -605,7 +605,7 @@ int test_chaos_harness(void)
 
     /* ── simnet mode: drives a REAL simnet_cluster (real
      * connect_block/disconnect_block/fork-choice), not sim_peer counters.
-     * See tools/sim/chaos.c "simnet mode" block + docs/CHAOS_HARNESS.md. */
+     * See tools/sim/chaos.c "simnet mode" block + docs/quality/CHAOS_HARNESS.md. */
 
     rc = run_temp_scenario(
         "seed 0xC0A1E5C1\n"

@@ -326,7 +326,7 @@ Two design habits are worth stealing if you are adding a gate of your own:
   allows it, it is the one to reach for.
 
 Related: [`DEFENSIVE_CODING.md`](../DEFENSIVE_CODING.md) (the full gate list and
-the coding rules they enforce), [`FRAMEWORK.md`](../FRAMEWORK.md) (Law 7 and the
+the coding rules they enforce), [`FRAMEWORK.md`](../commons/FRAMEWORK.md) (Law 7 and the
 detect/remedy/witness contract), [`TENACITY.md`](../TENACITY.md) (the copy-prove
 recovery doctrine), and [`dev/fast-path.md`](../dev/fast-path.md) (the
 diagnosis algorithm the copy-prove harness sits inside).

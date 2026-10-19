@@ -2,7 +2,7 @@
  *
  * coins_kv — the reducer's canonical UTXO set as a `coins` table IN progress.kv.
  *
- * WHY (docs/work/tip-durability-collapse.md): the live coins set once lived in
+ * WHY (docs/node/tip-durability-collapse.md): the live coins set once lived in
  * a SEPARATE WAL database, folded from an out-of-txn event_log, while the stage
  * cursor + inverse-delta + utxo_apply_log row commit in progress.kv. Two WAL
  * databases have NO atomic cross-commit (WAL has no master journal) — a crash

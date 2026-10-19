@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Native handlers for the `ops.telemetry.sync` branch — the three leaves over
- * the typed sync domain snapshot (docs/TELEMETRY_CONTRACT.md, "the four
+ * the typed sync domain snapshot (docs/node/TELEMETRY_CONTRACT.md, "the four
  * layers"). This file is the CONTROL layer and nothing else:
  *
  *   summary   pick a view, fill one snapshot, render it, and name the rung the

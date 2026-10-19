@@ -34,15 +34,15 @@ vendor, a package registry, or a hosted service.
 
 For how the node, the commons, the emulated machine and the tunnels fit
 together, and which parts are on main, a candidate, an experiment or still a
-target, see [the whole picture](docs/WHOLE_PICTURE.md).
+target, see [the whole picture](docs/commons/WHOLE_PICTURE.md).
 
 ## At a glance
 
 | You want to | Start with | Read next |
 | --- | --- | --- |
 | Run your own ZClassic node | [Public start here](#public-start-here), then [Run a node](#run-a-node) | [Getting Started](docs/GETTING_STARTED.md) |
-| Reach the chain tip sooner | [What reaching the tip actually costs](#what-reaching-the-tip-actually-costs) | [Sync](docs/SYNC.md) |
-| Share and reuse C23 source | [The C23 Commons](#the-c23-commons) | [Commons Quickstart](docs/C23_COMMONS_QUICKSTART.md) |
+| Reach the chain tip sooner | [What reaching the tip actually costs](#what-reaching-the-tip-actually-costs) | [Sync](docs/node/SYNC.md) |
+| Share and reuse C23 source | [The C23 Commons](#the-c23-commons) | [Commons Quickstart](docs/commons/C23_COMMONS_QUICKSTART.md) |
 | Change Z23 itself | [Working on Z23 itself](#working-on-z23-itself) | [Developing](docs/DEVELOPING.md) |
 | Contribute, or attach a coding agent | [Contribute](#contribute-with-or-without-a-coding-agent) | [CONTRIBUTING.md](.github/CONTRIBUTING.md) |
 | Operate a fleet of machines | [Fleet guide](docs/agent/FLEET.md) | [AGENTS.md](AGENTS.md) |
@@ -132,7 +132,7 @@ build/bin/z23
 Naming a peer you already know shortens any of these — `-addnode=HOST:8033`,
 plus `-fileservice=HOST` to pull the header seed and state bundle from that
 host's file service. Every path, with its measured evidence, is in
-[Sync](docs/SYNC.md).
+[Sync](docs/node/SYNC.md).
 
 | Path | You need | Time to tip | Standing |
 | --- | --- | --- | --- |
@@ -224,7 +224,7 @@ Maintainers and fleet members continue with [AGENTS.md](AGENTS.md).
 
 ## Go deeper
 
-- **Run it:** [Getting Started](docs/GETTING_STARTED.md) · [Sync](docs/SYNC.md) · [MVP acceptance](docs/MVP.md) · [Windows](docs/WINDOWS.md)
-- **Understand it:** [How the Node Works](docs/HOW_THE_NODE_WORKS.md) · [Framework](docs/FRAMEWORK.md) · [API Reference](docs/API_REFERENCE.md)
-- **Build with it:** [Developing](docs/DEVELOPING.md) · [Codebase Map](docs/CODEBASE_MAP.md) · [Commons Quickstart](docs/C23_COMMONS_QUICKSTART.md) · [Forward Plan](docs/work/FORWARD_PLAN.md)
+- **Run it:** [Getting Started](docs/GETTING_STARTED.md) · [Sync](docs/node/SYNC.md) · [MVP acceptance](docs/MVP.md) · [Windows](docs/node/WINDOWS.md)
+- **Understand it:** [How the Node Works](docs/node/HOW_THE_NODE_WORKS.md) · [Framework](docs/commons/FRAMEWORK.md) · [API Reference](docs/API_REFERENCE.md)
+- **Build with it:** [Developing](docs/DEVELOPING.md) · [Codebase Map](docs/CODEBASE_MAP.md) · [Commons Quickstart](docs/commons/C23_COMMONS_QUICKSTART.md) · [Forward Plan](docs/work/FORWARD_PLAN.md)
 - **License:** [Apache-2.0](LICENSE), with upstream notices preserved in [NOTICE](NOTICE)

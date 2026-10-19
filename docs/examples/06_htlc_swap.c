@@ -30,7 +30,7 @@
  * RAM-only single-node chain harness. It builds blocks and folds them
  * through the REAL `connect_block()` consensus path (script checks +
  * locktime finality are real; PoW/expensive checks are skipped by a
- * synthetic covering checkpoint — see docs/SIMULATOR.md). Everything here
+ * synthetic covering checkpoint — see docs/quality/SIMULATOR.md). Everything here
  * is the same code path a live node runs; wallet keys and the virtual clock
  * come from a `seed_tape` so THOSE are byte-for-byte repeatable.
  *
@@ -49,7 +49,7 @@
  * Ground-truth reference for this exact flow:
  *   tests/harness/src/test_simnet_txkit.c  (txk_htlc_scripts / txk_build_htlc_spend)
  *   tests/harness/src/test_htlc.c          (unit coverage of each htlc_* builder)
- *   docs/SIMULATOR_TXNS.md            ("test a timelocked contract")
+ *   docs/quality/SIMULATOR_TXNS.md            ("test a timelocked contract")
  *
  * Build: this file is meant to be compiled by the examples harness, which
  * links it against the library sources it calls into (sim, script, core,
@@ -346,11 +346,11 @@ int main(void)
  *   engine/controllers/src/swap_controller.c build the HTLC params + P2SH
  *   script + local swap-state record from `swap_initiate` / `swap_participate`
  *   RPCs and the native swap commands.
- * - What's NOT wired yet (see docs/SIMULATOR.md swap rows, Class B/C): the
+ * - What's NOT wired yet (see docs/quality/SIMULATOR.md swap rows, Class B/C): the
  *   controller builds the contract and records local state, but there is no
  *   node-broadcast redeem/refund/settlement path today — an operator would
  *   currently have to fund/redeem/refund the P2SH address by hand (e.g. via
  *   `zclassic-cli` raw-transaction calls) the way this example does directly
  *   against simnet. Closing that gap is the remaining work named in
- *   docs/HOW_THE_NODE_WORKS.md's ZSWP coverage note.
+ *   docs/node/HOW_THE_NODE_WORKS.md's ZSWP coverage note.
  */

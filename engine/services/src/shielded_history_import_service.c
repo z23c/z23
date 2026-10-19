@@ -11,7 +11,7 @@
  * boot/import entry point (like the --importblockindex / node_db_import boot
  * modes), not a runtime saga step. Its public signature is deliberately
  * `bool + struct shielded_import_report` per the design spec
- * (docs/work/shielded-history-importer.md §4.4): the failure reason
+ * (docs/node/shielded-history-importer.md §4.4): the failure reason
  * travels with the failure via node.log [shielded_import] (every refusal path
  * LOG_FAIL/LOG_RETURNs the exact anomaly) AND via the per-pool report the
  * caller inspects; there is no zcl_result-returning runtime surface to thread. */

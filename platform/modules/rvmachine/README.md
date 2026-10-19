@@ -169,7 +169,7 @@ itself the twin (`RVMACHINE_TWIN_BUILD`) does not compile.
 Proofs: `tests/harness/src/test_rvmachine.c` runs the supervisor guests of
 `tests/fixtures/rvmachine` through the machine. The command leaf
 `dev app machine boot` (`tools/command/native_dev_machine_boot.c`) is the machine
-with files around it; `docs/RISCV_MACHINE.md` shows how to boot a kernel.
+with files around it; `docs/commons/RISCV_MACHINE.md` shows how to boot a kernel.
 
 Written from the RISC-V privileged, SBI, PLIC, VIRTIO and devicetree
 specifications. Depends on base, fdt, rvemu, rvplat and rvvirtio.

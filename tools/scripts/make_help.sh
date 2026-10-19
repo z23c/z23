@@ -132,7 +132,7 @@ list them all with:
 Deeper reading:
   AGENTS.md                          model-neutral mission and authority rules
   CLAUDE.md                          thin Claude compatibility adapter
-  docs/HOW_THE_NODE_WORKS.md         the node as a state machine, in one page
+  docs/node/HOW_THE_NODE_WORKS.md         the node as a state machine, in one page
   docs/DEFENSIVE_CODING.md           the coding laws and every lint gate
   .claude/skills/z23-dev/     the developer operating manual
 EOF

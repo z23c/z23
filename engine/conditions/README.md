@@ -32,7 +32,7 @@ include the last remedy result and the witness facts that decide whether the
 halt is still active. Agents should not have to reconstruct that from
 `node.log`.
 
-See [`docs/FRAMEWORK.md`](../../docs/FRAMEWORK.md) §"The canonical form is
+See [`docs/commons/FRAMEWORK.md`](../../docs/commons/FRAMEWORK.md) §"The canonical form is
 struct-registration, not a block-DSL" (lines 198-226) and the exemplar
 [`block_failed_mask_at_tip.c`](./src/block_failed_mask_at_tip.c).
 

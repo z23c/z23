@@ -124,7 +124,7 @@ struct chaos_ctx {
     int simnet_honest_permille;  /* 1000 = all honest (the default) */
     uint64_t simnet_byz_rng;     /* byzantine role/class sub-stream state */
 
-    /* Optional full-state trace (sim/simnet_trace.h, docs/CHAOS_HARNESS.md
+    /* Optional full-state trace (sim/simnet_trace.h, docs/quality/CHAOS_HARNESS.md
      * "Recording a full-state trace"). NULL/unset means no trace is ever
      * written — every existing scenario and `make chaos` runs exactly as it
      * did before this field existed. Opt-in via `trace_dir PATH` (this
@@ -1049,7 +1049,7 @@ static int handle_auto_reindex_clear_if_covered(struct chaos_ctx *ctx,
  * and a process never given `--trace-dir=` runs exactly as it did before
  * this existed (trace_dir_set stays false, so every trace_* helper below is
  * a no-op). See sim/simnet_trace.h for the file format and the
- * "why not a live diagnostics dumper" rationale, and docs/CHAOS_HARNESS.md
+ * "why not a live diagnostics dumper" rationale, and docs/quality/CHAOS_HARNESS.md
  * "Recording a full-state trace" for the operator-facing walkthrough.
  */
 

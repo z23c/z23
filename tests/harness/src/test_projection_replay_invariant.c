@@ -2,7 +2,7 @@
  *
  * PRIME DIRECTIVE proof: "everything is a pure fold of the log."
  *
- * docs/FRAMEWORK.md: the append-only event_log is the single source of
+ * docs/commons/FRAMEWORK.md: the append-only event_log is the single source of
  * truth and every projection is a *pure fold* over it. Invariant:
  *
  *     replaying the SAME event log into a FRESH projection yields a state

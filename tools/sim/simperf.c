@@ -27,7 +27,7 @@
  * and whose easiest maintenance is to raise it. The gated metric here is
  * dimensionless — per-tx cost at 4x work divided by per-tx cost at 1x work —
  * so the same threshold holds on a fast box, a slow box, and a loaded box.
- * See sim/simnet_perf.h and docs/SIMNET_PERF.md.
+ * See sim/simnet_perf.h and docs/quality/SIMNET_PERF.md.
  *
  * PROVEN TO HAVE TEETH
  * --------------------
@@ -44,7 +44,7 @@
  *                     [--expect='METRIC OP VALUE']... [--quiet]
  *
  * `--expect` takes exactly the chaos scenario DSL's assertion text
- * (docs/CHAOS_HARNESS.md `expect METRIC OP VALUE`, operators == != >= <= > <)
+ * (docs/quality/CHAOS_HARNESS.md `expect METRIC OP VALUE`, operators == != >= <= > <)
  * and may be repeated. With no --expect the calibrated default budget plus the
  * derived anti-vacuity assertions are applied.
  */

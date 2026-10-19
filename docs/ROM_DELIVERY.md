@@ -3,7 +3,7 @@
 z23 is a P2P file delivery system, and the files it delivers fastest
 and most generously are its own bootstrap ("ROM") artifacts: the consensus-
 state bundle (`zcl.consensus_state_bundle.v1`, see
-[`docs/work/CONSENSUS-STATE-BUNDLE.md`](./work/CONSENSUS-STATE-BUNDLE.md)) and
+[`docs/node/CONSENSUS-STATE-BUNDLE.md`](./node/CONSENSUS-STATE-BUNDLE.md)) and
 header-chain seed data. A fresh node should be able to pull these from any
 peer — free, unmetered, no payment — instead of folding block-by-block from
 genesis. This page covers the trust model, the policy knobs that keep
@@ -23,7 +23,7 @@ every artifact is verified by content after download, never by transport:
 2. **Checkpoint re-derivation.** The installer re-derives the compiled
    checkpoint SHA3 from the bundle's contents and Pedersen-roots the Sapling
    frontier against the PoW header chain it has independently validated. See
-   [`docs/work/CONSENSUS-STATE-BUNDLE.md`](./work/CONSENSUS-STATE-BUNDLE.md)
+   [`docs/node/CONSENSUS-STATE-BUNDLE.md`](./node/CONSENSUS-STATE-BUNDLE.md)
    for the full component list a bundle must independently prove.
 3. **PoW header roots remain the anchor.** `hashFinalSaplingRoot` and the
    rest of the header commitment are validated against the header chain the
@@ -238,7 +238,7 @@ unwanted and idle, and a malformed horizon value is ignored rather than obeyed.
 
 > Not to be confused with the legacy, transparent-only starter pack
 > (`block_index.bin` + `utxo-seed-<height>.snapshot`,
-> [`docs/BOOTSTRAPPING.md`](./BOOTSTRAPPING.md)) — a different artifact on a
+> [`docs/node/BOOTSTRAPPING.md`](./node/BOOTSTRAPPING.md)) — a different artifact on a
 > different autodetect loader (`boot_autodetect_bundle_snapshot`, not
 > `boot_autodetect_consensus_bundle`). This section is about the
 > **complete-state** `zcl.consensus_state_bundle.v1` artifact this whole page
@@ -321,7 +321,7 @@ behaves exactly as it does today.
 **Where a bundle source comes from today:** the canonical producer is the
 receipt-owning `-mint-anchor` full-validation fold, whose successful
 finalization immediately invokes the contained exporter
-(`docs/work/CONSENSUS-STATE-BUNDLE.md`); an operator running a second node
+(`docs/node/CONSENSUS-STATE-BUNDLE.md`); an operator running a second node
 can also point `SOURCE` at a copy pulled from a first node they already
 operate (optionally via `tools/scripts/rom-bundle-replicate.sh` for a
 verified second-disk copy first). This is packaging/fleet plumbing, not a new

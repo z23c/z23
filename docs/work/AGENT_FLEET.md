@@ -443,7 +443,7 @@ summary declares sample count, interval, workload and cold/warm state.
 
 ## Durable execution and budgets
 
-The authority remains [the canonical lifecycle](CANONICAL_LIFECYCLE.md):
+The authority remains [the canonical lifecycle](../node/CANONICAL_LIFECYCLE.md):
 
 ```text
 NEED → JOB → CANDIDATE → PROOF_SET → PUBLICATION → REMOTE_RECEIPT

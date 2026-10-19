@@ -9,7 +9,7 @@
 # `simnet_wire_save_capsule()` (a plain `seed_tape_save()` file — the same
 # format `docs/examples/09_seed_replay.c` and `engine/modules/sim/src/postmortem.c` use).
 # The whole point of the seed-tape design ("every bug becomes a 64-bit
-# seed", `docs/work/sim-phase2-plan.md`) is that the scenario is a *pure
+# seed", `docs/quality/sim-phase2-plan.md`) is that the scenario is a *pure
 # function of the scalar seed* — `wire_sweep_run_one(seed)` rebuilds the
 # exact same peer archetype, sub-case, and event stream every time, with
 # no dependency on the saved tape file's contents. So replaying a capsule

@@ -3,7 +3,7 @@
  * Unit test for the sovereignty guard (controllers/sovereignty_controller.h):
  * the operational-vs-sovereign trust split enforced at the mint/mining entry
  * (mining_controller.c) and the wallet-spend entry (wallet_shielded_send.c
- * rpc_z_sendmany), per docs/work/shielded-history-importer.md §5.
+ * rpc_z_sendmany), per docs/node/shielded-history-importer.md §5.
  *
  * Three scenarios, same shape as test_coins_kv_sovereign_gate.c:
  *   - bare (no migration stamp): G-SOV part 3's first disjunct

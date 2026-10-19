@@ -27,7 +27,7 @@
  * learned the hard way here:
  *   1. Cloning. The ledger file is the ONE authority. Latching a copy of its
  *      state into node memory would create a second ledger that can drift —
- *      the recurring defect docs/ARCHITECTURE_NORTH_STAR.md names, whose fix
+ *      the recurring defect docs/commons/ARCHITECTURE_NORTH_STAR.md names, whose fix
  *      is always deleting a copy, never adding a reconciler. So every call
  *      re-reads the file; nothing is cached, nothing is latched.
  *   2. Standing. The evidence is about remote peers, recorded out of process.

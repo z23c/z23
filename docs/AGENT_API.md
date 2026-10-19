@@ -1108,7 +1108,7 @@ versioned as `zcl.bootstrap_status.v1` and separates two surfaces:
   (`1 << 24`) and answers `getbsman/bsman`, `getbschk/bschk`,
   `getbspman/bspman`, and `getbspchk/bspchk`; z23 implements this service and
   advertises the bit whenever `-beta6-bootstrap-source` is armed (see
-  [`docs/BOOTSTRAPPING.md`](./BOOTSTRAPPING.md) "Serving beta6 clients"). The
+  [`docs/node/BOOTSTRAPPING.md`](./node/BOOTSTRAPPING.md) "Serving beta6 clients"). The
   object's own `advertised` and `serving` fields can disagree: `advertised`
   and the wire-level bit follow only whether the service is armed, while
   `serving` additionally ANDs in this node's own security posture, so a node
@@ -1335,7 +1335,7 @@ explicitly with `build/bin/z23-dev dev proof wait`.
 Windows installs the same receipt-only native hook, but its native proof
 producer is not implemented yet. Missing evidence therefore refuses promptly;
 the hook does not substitute a synchronous build. Run the fixed
-`make windows-acceptance` catalog described in [`WINDOWS.md`](WINDOWS.md) as an
+`make windows-acceptance` catalog described in [`WINDOWS.md`](node/WINDOWS.md) as an
 explicit parity gate, not as exact-receipt admission. `make pre-push-ci` remains
 a manually invoked legacy parity oracle on other hosts. Full-suite, fuzz, and
 coverage evidence belongs to the background quality lanes: install them with

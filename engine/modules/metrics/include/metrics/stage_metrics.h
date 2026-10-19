@@ -4,7 +4,7 @@
  *
  * The eight reducer stages (header_admit -> validate_headers -> body_fetch
  * -> body_persist -> script_validate -> proof_validate -> utxo_apply ->
- * tip_finalize; see docs/HOW_THE_NODE_WORKS.md) already expose a live
+ * tip_finalize; see docs/node/HOW_THE_NODE_WORKS.md) already expose a live
  * cursor + step_us_ewma pair via the per-stage headers under
  * engine/jobs/include/jobs (e.g. header_admit_stage.h) and their diagnostics
  * dumpers (`dumpstate <stage>`). This module renders
@@ -39,7 +39,7 @@ extern "C" {
 #endif
 
 /* Fixed reducer-stage pipeline order — never grows without a matching
- * change to the pipeline itself (docs/HOW_THE_NODE_WORKS.md). */
+ * change to the pipeline itself (docs/node/HOW_THE_NODE_WORKS.md). */
 #define METRICS_STAGE_COUNT 8
 
 /* Canonical stage name for index [0, METRICS_STAGE_COUNT). NULL for an

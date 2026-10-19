@@ -1,7 +1,7 @@
 # Byzantine-role scenario: 66% honest cluster, composed with a real
 # partition/heal — proves the two fault classes compose. honest=660 permille
 # marks a minority of the 12 nodes byzantine (node 0 always honest, per
-# docs/CHAOS_HARNESS.md). Phase 1 mints across every node index in the fully
+# docs/quality/CHAOS_HARNESS.md). Phase 1 mints across every node index in the fully
 # connected network: whichever indices are byzantine forge invalid blocks
 # that every peer must reject on delivery; whichever are honest extend the
 # one real chain. Phase 2 severs node 6 from node 0 and keeps node 0 (always

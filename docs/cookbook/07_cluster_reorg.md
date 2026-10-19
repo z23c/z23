@@ -87,5 +87,5 @@ The equivalent live-node machinery:
 - `z23 ops timeline` — inspect recent reorg events a live node has
   actually processed.
 
-See also: `docs/SIMULATOR.md` (simulator model), `tests/harness/src/test_simnet_cluster.c`
+See also: `docs/quality/SIMULATOR.md` (simulator model), `tests/harness/src/test_simnet_cluster.c`
 (the ground-truth test this example's API usage is derived from).

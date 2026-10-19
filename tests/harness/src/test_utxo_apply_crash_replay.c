@@ -6,7 +6,7 @@
  * stage_run_once BEGIN IMMEDIATE txn against progress.kv: the coins_kv
  * mutation, the inverse delta, the utxo_apply_log row, the
  * coins_applied_height frontier, and the stage cursor
- * (docs/work/tip-durability-collapse.md). Splitting that transaction is
+ * (docs/node/tip-durability-collapse.md). Splitting that transaction is
  * the exact tear class behind the live tip-wedge; until this test, no
  * suite SIGKILLed the real stage mid-commit, so a future edit that splits
  * the txn would ship green. test_kill9_recovery covers the legacy

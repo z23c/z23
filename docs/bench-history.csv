@@ -2,7 +2,7 @@
 # Columns: date, commit, bench, value, unit, notes.
 # Numeric value rows are regression-gated by build/bin/z23 -bench-regress.
 # Empty value rows are pending/skipped measurements and are ignored by the gate.
-# Bench names follow docs/USER_BENCHMARKS.md primaries #1..#5.
+# Bench names follow docs/quality/USER_BENCHMARKS.md primaries #1..#5.
 # Append-only: do not rewrite old rows; add a correction row instead.
 date,commit,bench,value,unit,notes
 2026-05-25T09:47:53Z,bf206e5de,#1 cold-start to operational,"",s,pending P0/full-chain run; set ZCL_BENCH_RUN_COLD=1 to run cold import against ~/.zclassic

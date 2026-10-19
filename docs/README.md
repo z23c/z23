@@ -46,30 +46,30 @@ exact packages without a central registry.
 - [`../README.md`](../README.md) — what the product is and what users can do.
 - [`GETTING_STARTED.md`](GETTING_STARTED.md) — build and run it on a fresh
   machine, and what peer discovery does with no flags.
-- [`MACOS_GUI_QUICKSTART.md`](MACOS_GUI_QUICKSTART.md) — a fresh Mac with only
+- [`MACOS_GUI_QUICKSTART.md`](node/MACOS_GUI_QUICKSTART.md) — a fresh Mac with only
   Apple's command-line tools to a native GUI application: scaffold it from
   `contexts/commons/packages/zhello`, see your change on screen, ship a reproducible `.app`.
-- [`WINDOWS.md`](WINDOWS.md) — MSYS2 UCRT64 native C23 development, the
+- [`WINDOWS.md`](node/WINDOWS.md) — MSYS2 UCRT64 native C23 development, the
   remaining Win32 port boundary, and the current WSL2 full-node/service lane.
 - [`PARAMS.md`](PARAMS.md) — why a node validates shielded proofs out of the
   box but cannot create a shielded payment until you supply the proving
   parameters yourself, and how to check the bytes you were given.
-- [`JOIN.md`](JOIN.md) — the two independent senses of "joining": the
+- [`JOIN.md`](node/JOIN.md) — the two independent senses of "joining": the
   blockchain P2P network (automatic, no command, no DNS seeder) and the C23
   software commons (`z23 join`, the swarm and DHT tiers, reading the verdict).
-- [`C23_COMMONS_QUICKSTART.md`](C23_COMMONS_QUICKSTART.md) — installed-node
+- [`C23_COMMONS_QUICKSTART.md`](commons/C23_COMMONS_QUICKSTART.md) — installed-node
   author, consumer, and reproducer journey for exact third-party C23 packages.
 - [`MVP.md`](MVP.md) — public-node V1 acceptance contract; `make mvp` reports
   the live criterion state and `make mvp-verify` runs the local aggregate.
-- [`SELL.md`](SELL.md) — pay ZCL and sell a 1/1 collectible: yardsale,
+- [`SELL.md`](node/SELL.md) — pay ZCL and sell a 1/1 collectible: yardsale,
   package-swarm, and onion shop; start with `z23 yardsale guide`.
 - [`NATIVE_COMMAND_INTERFACE.md`](NATIVE_COMMAND_INTERFACE.md) — discoverable,
   typed operator interface.
-- [`BOOTSTRAPPING.md`](BOOTSTRAPPING.md) and [`SYNC.md`](SYNC.md) — how a node
+- [`BOOTSTRAPPING.md`](node/BOOTSTRAPPING.md) and [`SYNC.md`](node/SYNC.md) — how a node
   reaches the chain.
 - [`OVERLAY.md`](OVERLAY.md) — FlyClient, SHA3 swarm, file-service overlay,
   and onion marketplace; consensus hashes stay SHA-256d.
-- [`CUSTODY_MODEL.md`](CUSTODY_MODEL.md) — wallet ownership and spend
+- [`CUSTODY_MODEL.md`](node/CUSTODY_MODEL.md) — wallet ownership and spend
   authority.
 
 ## C23 Commons acceptance
@@ -83,9 +83,9 @@ does not authorize execution or deployment.
 - [`spec/c23-package-format.md`](spec/c23-package-format.md) — normative
   package format: root-only identity, versions as DAG edges, package anatomy
   discipline, and proven (not hoped) build determinism.
-- [`C23_COMMONS_QUICKSTART.md`](C23_COMMONS_QUICKSTART.md) — concise public
+- [`C23_COMMONS_QUICKSTART.md`](commons/C23_COMMONS_QUICKSTART.md) — concise public
   workflow and its current portability/reproduction limits.
-- [`ZVCS.md`](ZVCS.md) — in-binary source identity and versioning.
+- [`ZVCS.md`](commons/ZVCS.md) — in-binary source identity and versioning.
 - `make zcode-development-acceptance` — package developer lifecycle.
 - `make zcode-async-proof-acceptance` — interchangeable full-node async work,
   lease recovery, stale-result refusal, and exact-action reuse.
@@ -104,6 +104,9 @@ from a hash, signature, test, or reproduction receipt.
   fleet guide, board, ledger, triggers, wiki, work cards, safety gates.
 - [`dev/README.md`](dev/README.md) — developer references: build and test
   loop, hot-swap, lab, plugins, services, flags, host maintenance.
+- [`node/README.md`](node/README.md) — node references: boot, sync, custody, recovery, security.
+- [`commons/README.md`](commons/README.md) — commons, metaverse, ZCODE, framework and architecture references.
+- [`quality/README.md`](quality/README.md) — simulators, chaos, benchmarks, acceptance gates and transaction labs.
 - [`work/AGENT_FLEET.md`](work/AGENT_FLEET.md) — consolidated fleet operating
   contract: storage admission, task ownership, native and guest execution,
   transport choices, timestamped JSON observations, and measured agent cost.
@@ -132,7 +135,7 @@ from a hash, signature, test, or reproduction receipt.
   latency.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
-- [`CHAOS_HARNESS.md`](CHAOS_HARNESS.md) — the two chaos/kill harnesses (the
+- [`CHAOS_HARNESS.md`](quality/CHAOS_HARNESS.md) — the two chaos/kill harnesses (the
   deterministic sim engine and the full-binary SIGKILL recovery test), and
   where in-process dev-proof worker-death acceptance lives.
 - [`API_REFERENCE.md`](API_REFERENCE.md) — generated command catalog; edit its
@@ -145,29 +148,29 @@ from a hash, signature, test, or reproduction receipt.
   never hand-edit it.
 - [`BUILD.md`](BUILD.md) — vendored dependencies, profiles, and reproducibility.
 - [`AI_SAFETY_GATES.md`](agent/AI_SAFETY_GATES.md) — claim and evidence discipline.
-- [`SECURITY_AND_INTEGRITY.md`](SECURITY_AND_INTEGRITY.md) — project security
+- [`SECURITY_AND_INTEGRITY.md`](node/SECURITY_AND_INTEGRITY.md) — project security
   boundary and review checklist.
 - [`CONSENSUS_PARITY_DOCTRINE.md`](CONSENSUS_PARITY_DOCTRINE.md) — inviolable
   compatibility boundary.
 
 ## Understand the system
 
-- [`HOW_THE_NODE_WORKS.md`](HOW_THE_NODE_WORKS.md) — reducer kernel, stages,
+- [`HOW_THE_NODE_WORKS.md`](node/HOW_THE_NODE_WORKS.md) — reducer kernel, stages,
   projections, and health.
-- [`CHAIN_AUTHORITY.md`](CHAIN_AUTHORITY.md) — current chain-mutation paths,
+- [`CHAIN_AUTHORITY.md`](node/CHAIN_AUTHORITY.md) — current chain-mutation paths,
   proof limits, and the target typed ownership boundary.
-- [`ARCHITECTURE_DIAGRAMS.md`](ARCHITECTURE_DIAGRAMS.md) — current subsystem
+- [`ARCHITECTURE_DIAGRAMS.md`](commons/ARCHITECTURE_DIAGRAMS.md) — current subsystem
   and boot topology.
-- [`WHOLE_PICTURE.md`](WHOLE_PICTURE.md) — one picture of the node, the commons,
+- [`WHOLE_PICTURE.md`](commons/WHOLE_PICTURE.md) — one picture of the node, the commons,
   the emulated machine and the tunnels, each part labelled on main, candidate,
   experiment or target.
-- [`ROM.md`](ROM.md) — compiled checkpoint and verification layers.
-- [`RISCV_MACHINE.md`](RISCV_MACHINE.md) — the built-in RISC-V machine and
+- [`ROM.md`](node/ROM.md) — compiled checkpoint and verification layers.
+- [`RISCV_MACHINE.md`](commons/RISCV_MACHINE.md) — the built-in RISC-V machine and
   how to boot a kernel in it.
 - [`BOOT_INVARIANTS.md`](BOOT_INVARIANTS.md) — boot-stage guarantees.
-- [`EXTENSION_POINTS.md`](EXTENSION_POINTS.md) — actively changing extension
+- [`EXTENSION_POINTS.md`](commons/EXTENSION_POINTS.md) — actively changing extension
   surfaces with claim-bound facts.
-- [`LEGACY_LIFECYCLE.md`](LEGACY_LIFECYCLE.md) — active versus retired legacy
+- [`LEGACY_LIFECYCLE.md`](node/LEGACY_LIFECYCLE.md) — active versus retired legacy
   paths.
 
 ## Operate and recover a node
@@ -186,7 +189,7 @@ from a hash, signature, test, or reproduction receipt.
   operation.
 - [`PROMOTION_RECEIPTS.md`](PROMOTION_RECEIPTS.md) — promotion evidence ledger
   and owner setup.
-- [`RELEASE_CANDIDATE_PIN.md`](RELEASE_CANDIDATE_PIN.md) — exact candidate
+- [`RELEASE_CANDIDATE_PIN.md`](node/RELEASE_CANDIDATE_PIN.md) — exact candidate
   identity.
 
 ## Current maintainer state
@@ -198,15 +201,15 @@ current development mission; neither file redefines the durable product.
 
 ## Measurement
 
-- [`BENCHMARKS_LOG.md`](BENCHMARKS_LOG.md) — append-only measured benchmark
+- [`BENCHMARKS_LOG.md`](quality/BENCHMARKS_LOG.md) — append-only measured benchmark
   ledger.
 - [`BUILD_BENCH.md`](dev/BUILD_BENCH.md) — `make build-bench` scenario harness;
   how build-speed claims get a measured artifact.
-- [`USER_BENCHMARKS.md`](USER_BENCHMARKS.md) — user-facing measurement
+- [`USER_BENCHMARKS.md`](quality/USER_BENCHMARKS.md) — user-facing measurement
   questions.
-- [`SIMNET_PERF.md`](SIMNET_PERF.md) — deterministic simulation performance
+- [`SIMNET_PERF.md`](quality/SIMNET_PERF.md) — deterministic simulation performance
   gate.
-- [`TELEMETRY_CONTRACT.md`](TELEMETRY_CONTRACT.md) — stable telemetry shape and
+- [`TELEMETRY_CONTRACT.md`](node/TELEMETRY_CONTRACT.md) — stable telemetry shape and
   unknown-value rules.
 
 Keep remembered performance numbers out of onboarding prose; cite or rerun the
@@ -217,15 +220,15 @@ appropriate ledgered benchmark.
 These are useful but do not define the primary product or current critical
 path:
 
-- [`GAME.md`](GAME.md) — Sky Combat (`apps/skycombat`), the split-screen flight
+- [`GAME.md`](commons/GAME.md) — Sky Combat (`apps/skycombat`), the split-screen flight
   game that ships from this repo behind the opt-in `make game`; not the node,
   and not on any node critical path.
-- [`METAVERSE.md`](METAVERSE.md) and [`METAVERSE_MVP.md`](METAVERSE_MVP.md) —
+- [`METAVERSE.md`](commons/METAVERSE.md) and [`METAVERSE_MVP.md`](commons/METAVERSE_MVP.md) —
   engine/application/creation layer; token economics remain simulation-only.
 - [`FILE_MARKET_PROTOCOL.md`](FILE_MARKET_PROTOCOL.md) — marketplace protocol;
   the operator acceptance journey it once planned now lives as
   `make commons-multihost-acceptance` (see the top-level README).
-- [`FRAMEWORK.md`](FRAMEWORK.md) and [`AGENT_ARCHITECTURE.md`](agent/AGENT_ARCHITECTURE.md)
+- [`FRAMEWORK.md`](commons/FRAMEWORK.md) and [`AGENT_ARCHITECTURE.md`](agent/AGENT_ARCHITECTURE.md)
   — architectural reference, off the public-node critical path unless the
   current plan explicitly pulls in a bounded item.
 - [`adr/`](adr/) — historical design decisions; useful context, not live state.

@@ -7,7 +7,7 @@ contributor (human or AI agent) to accidentally skip validation, swallow
 errors, or leak memory. Read this before writing new code.
 
 Modules prefixed `legacy_` are a compatibility layer with an external
-`zclassicd` — see [`LEGACY_LIFECYCLE.md`](./LEGACY_LIFECYCLE.md) for which
+`zclassicd` — see [`LEGACY_LIFECYCLE.md`](./node/LEGACY_LIFECYCLE.md) for which
 paths are still load-bearing.
 
 ---
@@ -69,7 +69,7 @@ table plus the per-stage `*_log` tables (`header_admit_log`, `body_fetch_log`,
 A3 flip; a pre-flip datadir is migrated in place on open, and `progress.kv` now
 holds only the rebuildable `address_index`/`txindex` projections. This store
 sits **below** the AR/domain-model layer by design (see
-`storage/progress_store.h`, `storage/consensus_db.h`, `docs/FRAMEWORK.md`): a
+`storage/progress_store.h`, `storage/consensus_db.h`, `docs/commons/FRAMEWORK.md`): a
 `stage_cursor` row is not a model, has no domain identity, no save hooks.
 Cursor commits are tiny, hot-path, and want their own WAL out of the way of
 larger `node.db` transactions; the saga atomicity contract (a stage advance and
@@ -866,7 +866,7 @@ assert green).
 - **Gate: `check-no-writer-below-sealed-frontier`** (FAIL) —
   `tools/lint/check_no_writer_below_sealed_frontier.sh`. The North Star's
   single-writer-per-frontier invariant
-  (`docs/ARCHITECTURE_NORTH_STAR.md` invariant 1) made mechanical for the
+  (`docs/commons/ARCHITECTURE_NORTH_STAR.md` invariant 1) made mechanical for the
   sealed ROM segment store (`engine/modules/storage/chain_segment`), which is
   written-once-then-immutable (chmod 0444, never rewritten/appended). Only the
   designated sealer/RPC/healer surface — `engine/modules/storage/src/chain_segment.c`, its

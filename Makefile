@@ -1048,7 +1048,7 @@ COMMAND_SRCS = $(call zcl_filter_ephemeral_sources,\
 COMMAND_SRCS += contexts/commons/packages/zutf8/src/zutf8.c
 COMMAND_SRCS += contexts/commons/packages/zbase64/src/zbase64.c
 
-# Built-in guest kernel (docs/RISCV_MACHINE.md). Z23_GUEST_KERNEL names the
+# Built-in guest kernel (docs/commons/RISCV_MACHINE.md). Z23_GUEST_KERNEL names the
 # published kernel; the build checks its length and sha256, packs it
 # deterministically with tools/gen_guest_kernel.c and links it read-only.
 # Unset, the generated source holds an empty definition: the binary carries no
@@ -1170,7 +1170,7 @@ DEV_SOURCE_RECEIPT_CPPFLAGS = -DZCL_BUILD_SOURCE_MUTATION=\"$(BUILD_MUTATION)\"
 # The shipped node binary is stripped (`strip -s`), so its .text/.rodata/.data
 # are already byte-identical across two builders in different absolute
 # directories; the ONLY divergences the two-builder gate (`make repro-verify`,
-# docs/SECURITY_AND_INTEGRITY.md) found were the absolute build directory baked
+# docs/node/SECURITY_AND_INTEGRITY.md) found were the absolute build directory baked
 # into DWARF:
 #   * DW_AT_comp_dir = the compile-time CWD (an absolute path) — differs per
 #     builder, perturbing the split .debug sidecar and therefore the
@@ -2812,7 +2812,7 @@ new-app-selftest:
 # Z23RAYLIB_ prefix, not RAYLIB_: tools/arena_view.c already claims RAYLIB_CFLAGS
 # and RAYLIB_LIBS further down for the raylib it finds through pkg-config. That
 # viewer still wants a system raylib; pointing it at this vendored copy is a
-# separate change and a separate owner (docs/GAME.md notes it).
+# separate change and a separate owner (docs/commons/GAME.md notes it).
 SKYCOMBAT_DIR := apps/skycombat
 Z23RAYLIB_DIR := vendor/raylib
 SKYCOMBAT_OBJ_DIR := $(BUILD_DIR)/skycombat
@@ -8829,7 +8829,7 @@ chaos-clean:
 	rm -rf build/chaos-output/ chaos-output/
 
 # ── simnet_trace_query: linear-scan filter over a simnet state trace ─────
-# (engine/modules/sim/include/sim/simnet_trace.h; docs/CHAOS_HARNESS.md "Recording a
+# (engine/modules/sim/include/sim/simnet_trace.h; docs/quality/CHAOS_HARNESS.md "Recording a
 # full-state trace"). Standalone build: only platform/modules/json (the trace's own
 # format) plus the safe_alloc/log_level it transitively needs — no DB, no
 # node libs, no Tor, no simulator/consensus code, same discipline as
@@ -8878,7 +8878,7 @@ wire-sweep-clean:
 # ratio, so the same threshold holds on a fast, slow, or loaded box. It is a
 # CI-cheap PROXY for complexity regressions ONLY: no disk, no network, no real
 # PoW, so it neither is nor replaces the wall-clock coldstart-to-tip stopwatch.
-# Full contract: docs/SIMNET_PERF.md. Same standalone BUILD_NODE_TOOL shape as
+# Full contract: docs/quality/SIMNET_PERF.md. Same standalone BUILD_NODE_TOOL shape as
 # wire_sweep above.
 $(eval $(call BUILD_NODE_TOOL,simperf,tools/sim/simperf.c))
 
@@ -8915,7 +8915,7 @@ sim-perf-clean:
 # binary. `wire_sweep_run_one(seed)` (tools/sim/wire_sweep.c) is a pure
 # function of the scalar seed, so a single seed fully determines the
 # archetype/sub-case/event stream ("bugs become 64-bit seeds",
-# docs/work/sim-phase2-plan.md); replaying a capsule only needs the seed
+# docs/quality/sim-phase2-plan.md); replaying a capsule only needs the seed
 # it was saved under, which is already encoded in the capsule's filename
 # (see tools/scripts/simnet_replay_capsule.sh).
 SIMNET_REPRO_ARTIFACT_DIR ?= build/simnet-repro-output
@@ -8946,7 +8946,7 @@ simnet-replay: wire_sweep
 # "only by developer discipline" (`make ci` does not run `make chaos` today —
 # see the ci-gate decision recorded beside the `ci:` target below). Both
 # targets are fixed/seeded and MUST terminate; wire_sweep_run_one(seed) is a
-# pure function of the scalar seed (docs/work/sim-phase2-plan.md), so every
+# pure function of the scalar seed (docs/quality/sim-phase2-plan.md), so every
 # run here is exactly reproducible via `make simnet-repro SEED=0x<hex>`.
 #
 # simnet-nightly: the bounded default the nightly timer runs every night —
@@ -9726,7 +9726,7 @@ test-market-onion-acceptance: zclassic23 zcl-rpc
 test-market-moderation-acceptance: zclassic23 zcl-rpc
 	@bash tools/dev/market_moderation_acceptance.sh
 
-# ── metaverse-tour / metaverse-verify (docs/METAVERSE_MVP.md, MM1 + MM7) ──
+# ── metaverse-tour / metaverse-verify (docs/commons/METAVERSE_MVP.md, MM1 + MM7) ──
 #
 # metaverse-tour is criterion MM1: ONE hermetic script driving an isolated
 # regtest node (own /tmp datadir + 39xxx ports, same discipline as
@@ -10140,7 +10140,7 @@ stopwatch-symmetry-prove:
 # holds --cut-secs of silence, restores it (SIGCONT), mines a fresh gap, and
 # times how long the follower takes to auto-resume and re-catch the miner's
 # tip WITHOUT a restart — the plan's proof pillar
-# (docs/work/stopwatch-gates.md, PROOF B). It records the RESUME LATENCY as
+# (docs/quality/stopwatch-gates.md, PROOF B). It records the RESUME LATENCY as
 # the headline metric.
 #
 # It ALWAYS appends one line to the shared PROOF B ledger
@@ -15001,7 +15001,7 @@ check-generated-artifact-contradictions: $(LINTC_TOOL)
 	@./build/bin/z23-lint check-generated-artifact-contradictions
 
 
-# docs/EQUIHASH_PARAMS.md is GENERATED by tools/equihash_params_fact.c, which
+# docs/node/EQUIHASH_PARAMS.md is GENERATED by tools/equihash_params_fact.c, which
 # LINKS the real chainparams and upgrade tables and prints what consensus
 # would answer at each activation height. Prose across this repository said
 # "ZClassic is Equihash 200,9" as a flat present-tense fact; mainnet has been
@@ -15071,15 +15071,15 @@ $(LINTC_TOOL): $(LINTC_OBJS) $(LINTC_NODE_OBJS)
 .PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)
 docs-equihash-params: $(EQUIHASH_FACT_TOOL)
-	@$(EQUIHASH_FACT_TOOL) docs/EQUIHASH_PARAMS.md
-	@echo "docs-equihash-params: wrote docs/EQUIHASH_PARAMS.md from the consensus tables"
+	@$(EQUIHASH_FACT_TOOL) docs/node/EQUIHASH_PARAMS.md
+	@echo "docs-equihash-params: wrote docs/node/EQUIHASH_PARAMS.md from the consensus tables"
 
 equihash-facts: docs-equihash-params
 
 equihash-facts-check: check-equihash-params
 
 # Gate — the height-selected Equihash fact cannot drift, in either direction.
-# Half of it regenerates docs/EQUIHASH_PARAMS.md from the consensus tables and
+# Half of it regenerates docs/node/EQUIHASH_PARAMS.md from the consensus tables and
 # diffs; the other half scans prose for a flat "Equihash 200,9" claim about
 # what the chain IS, which is what was wrong across nine files.
 check-equihash-params: $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL)
@@ -15152,7 +15152,7 @@ new-controller:
 #   make scenario NAME=foo -> tools/sim/scenarios/foo.scenario (chaos DSL
 #   skeleton: mode simnet + a small honest cluster + a mint/relay/deliver
 #   round + the standard simnet_converged/simnet_tip_monotonic expects; see
-#   docs/CHAOS_HARNESS.md. Picked up automatically by `make chaos` — no
+#   docs/quality/CHAOS_HARNESS.md. Picked up automatically by `make chaos` — no
 #   registry edit needed.
 .PHONY: scenario
 scenario:
@@ -15545,7 +15545,7 @@ ZCL_DEFAULT_JOBS = $(if $(filter -j%,$(MAKEFLAGS)),,-j$(ZCL_HOST_JOBS))
 # driver is CPU-starved, not gate-bound — raising this is what made lint fast.
 #
 # RAISING THIS DOES NOT HELP, MEASURED 2026-09-19 and recorded in
-# docs/BENCHMARKS_LOG.md. `make lint` under the build scheduler's 28-processor
+# docs/quality/BENCHMARKS_LOG.md. `make lint` under the build scheduler's 28-processor
 # grant, same tree, lint cache warm, three alternating runs each, wall taken
 # from run_lint.sh's own timing line so scheduler queue time is excluded:
 # 21 workers (this derivation) 196.7 / 190.9 / 197.1 s, 28 workers (the full
@@ -15991,7 +15991,7 @@ ci-reproducible:
 # both builders produce a byte-identical build/bin/zclassic23. The gate compares
 # the shipped (stripped) artifacts AS SHIPPED — it strips nothing itself and, on
 # any residual divergence, reports the exact differing ELF sections + byte
-# offsets rather than papering over them. See docs/SECURITY_AND_INTEGRITY.md
+# offsets rather than papering over them. See docs/node/SECURITY_AND_INTEGRITY.md
 # "Reproducible build gate". DELIBERATELY opt-in (NOT in `make ci` / `make lint`)
 # — it runs TWO full whole-program LTO links (~2x a normal `make zclassic23`).
 .PHONY: repro-verify
@@ -16117,7 +16117,7 @@ check-restart-follow:
 # (Super-Reliability / Detective Node program, lane B5). Converts an
 # unpacked postmortem crash capsule (engine/modules/sim/include/sim/postmortem.h)
 # into a .scenario SKELETON for the chaos DSL (tools/sim/chaos.c,
-# docs/CHAOS_HARNESS.md "From Capsule To Scenario"). Automates ONLY the
+# docs/quality/CHAOS_HARNESS.md "From Capsule To Scenario"). Automates ONLY the
 # seed + best-effort boot-phase steps; translating the recorded events
 # into chaos commands and adding the assertion that would have caught the
 # bug stays manual — see the TODO block the tool emits. Standalone build:

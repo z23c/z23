@@ -62,14 +62,14 @@ You need a C23 toolchain, `git`, and enough disk for a build.
 **macOS.** Xcode command line tools (`xcode-select --install`).
 
 **Windows.** The Windows path is the **native MSYS2 UCRT64 build** — install
-MSYS2, open the UCRT64 shell, and follow `docs/WINDOWS.md`. Enrolment is
+MSYS2, open the UCRT64 shell, and follow `docs/node/WINDOWS.md`. Enrolment is
 native Windows code: it reads the computer's own facts through the Win32
 calls and writes its key under the Windows state root, with no Linux layer
 underneath.
 
 The mesh terminal worker has a Windows arm (ConPTY, with the shell's process
 tree held in a kill-on-close Job Object), described in
-`docs/WINDOWS.md`. The terminal lane is refused on Windows by default,
+`docs/node/WINDOWS.md`. The terminal lane is refused on Windows by default,
 because the shell has no confined identity there: a Windows machine enrols,
 appears in `fleet machines` and holds a name like any other, and answers
 terminal opens with `CONFINEMENT_UNAVAILABLE`. The owner can start the node

@@ -22,7 +22,7 @@
 #   scenario   -> tools/sim/scenarios/<name>.scenario
 #                 (chaos DSL skeleton: mode simnet + a small honest cluster +
 #                  a mint/relay/deliver round + the standard convergence
-#                  expects; see docs/CHAOS_HARNESS.md and `make chaos`)
+#                  expects; see docs/quality/CHAOS_HARNESS.md and `make chaos`)
 #
 # Usage (normally via the Makefile targets, but callable directly):
 #   tools/new_shape.sh <shape> <NAME>
@@ -472,7 +472,7 @@ emit_scenario() {
 #
 # TODO: describe what this scenario demonstrates — which invariant, which
 # honest/byzantine mix, which fault (partition/heal, reorg, ...), and what
-# convergence property is being proven. See docs/CHAOS_HARNESS.md and the
+# convergence property is being proven. See docs/quality/CHAOS_HARNESS.md and the
 # checked-in examples (simnet_partition_heal.scenario,
 # simnet_competing_reorg.scenario, detective_100_80.scenario) for the
 # real-cluster (mode simnet) verb set:

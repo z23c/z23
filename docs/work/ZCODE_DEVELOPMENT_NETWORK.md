@@ -1,7 +1,7 @@
 # ZCODE agentic development network
 
-> User-facing entry point: [`../METAVERSE.md`](../METAVERSE.md); acceptance
-> bar: [`../METAVERSE_MVP.md`](../METAVERSE_MVP.md). This is a scoped protocol
+> User-facing entry point: [`METAVERSE.md`](../commons/METAVERSE.md); acceptance
+> bar: [`METAVERSE_MVP.md`](../commons/METAVERSE_MVP.md). This is a scoped protocol
 > specification, not a current-work queue. Current ordering lives only in
 > [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
 

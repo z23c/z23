@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 /* Pipeline order used throughout this condition (index 0..7), matching the
- * fixed reducer stage line in docs/HOW_THE_NODE_WORKS.md and the abbreviated
+ * fixed reducer stage line in docs/node/HOW_THE_NODE_WORKS.md and the abbreviated
  * report in engine/composition/src/boot_mint_anchor.c:mint_stage_ewma_collect. */
 #define STAGE_BUDGET_NUM_STAGES 8
 

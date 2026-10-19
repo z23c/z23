@@ -151,7 +151,7 @@ is [`experiments/FLEET_TERMINAL_CONTRACT.md`](../experiments/FLEET_TERMINAL_CONT
 fleet ledger; unmeasurable facts are stored absent, never as zero. The metric
 catalog, ledger kinds and refusals are in [`FLEET_LEDGER.md`](FLEET_LEDGER.md);
 the telemetry shape and unknown-value rules are in
-[`TELEMETRY_CONTRACT.md`](../TELEMETRY_CONTRACT.md).
+[`TELEMETRY_CONTRACT.md`](../node/TELEMETRY_CONTRACT.md).
 
 Read another machine's load, memory and disk over the host tunnel (200 to 220 ms in three runs on 2026-10-18):
 

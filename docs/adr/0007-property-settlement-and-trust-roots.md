@@ -6,7 +6,7 @@
   consensus core the proof-of-work class depends on),
   [`ADR-0005`](./0005-offchain-signed-contract-channels.md) (off-chain signed
   state — explicitly *not* a settlement mechanism under this ADR),
-  [`SECURITY_AND_INTEGRITY.md`](../SECURITY_AND_INTEGRITY.md),
+  [`SECURITY_AND_INTEGRITY.md`](../node/SECURITY_AND_INTEGRITY.md),
   [`MVP.md`](../MVP.md) (the distribution gaps this ADR's Limits section
   points at).
 - **Numbering note:** requested as `0003`; `0003` was already taken by the

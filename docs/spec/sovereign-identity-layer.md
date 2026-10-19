@@ -289,7 +289,7 @@ controls its own signature scheme, so it takes the Schnorr family:
   comes from at the codec layer — not from threshold schemes.
 - **GG20's one real niche:** threshold custody of on-chain *transparent*
   ZCL, because the chain itself speaks secp256k1 ECDSA. That is the
-  custody lane (`docs/CUSTODY_MODEL.md`), not the identity layer — and
+  custody lane (`docs/node/CUSTODY_MODEL.md`), not the identity layer — and
   even there the modern successor is CGGMP21, not GG20.
 
 Honest scoping: threshold signatures do not speed up anchoring — the MMR

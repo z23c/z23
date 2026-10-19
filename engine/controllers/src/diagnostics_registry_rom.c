@@ -2,7 +2,7 @@
  *
  * ROM / trust-machine catalog dump — the "rom" g_dumpers[] subsystem.
  *
- * The L0-L3 trust machine (docs/ROM.md) had no single introspection
+ * The L0-L3 trust machine (docs/node/ROM.md) had no single introspection
  * surface: an operator or agent could not ask one question and see what
  * the compiled checkpoint commits, what each layer covers, and where every
  * cheaply-readable projection's cursor currently sits. This dumper answers

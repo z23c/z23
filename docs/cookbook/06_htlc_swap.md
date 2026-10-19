@@ -70,7 +70,7 @@ of each step, never the secret's exact bytes.
 Ground-truth reference for this exact flow: `tests/harness/src/test_simnet_txkit.c`
 (`txk_htlc_scripts` / `txk_build_htlc_spend`), `tests/harness/src/test_htlc.c`
 (unit coverage of each `htlc_*` builder), and
-`docs/SIMULATOR_TXNS.md` ("test a timelocked contract").
+`docs/quality/SIMULATOR_TXNS.md` ("test a timelocked contract").
 
 ## Production counterpart
 
@@ -91,5 +91,5 @@ redeem/refund/settlement RPC path — an operator funds/redeems/refunds the
 resulting P2SH address by hand (e.g. raw-transaction RPC methods called
 directly, `z23 <method> '[params]'`), the same way this example builds the
 redeem/refund transactions directly.
-See `docs/SIMULATOR.md`'s HTLC/swap rows (Class B/C) for the current
+See `docs/quality/SIMULATOR.md`'s HTLC/swap rows (Class B/C) for the current
 coverage boundary.

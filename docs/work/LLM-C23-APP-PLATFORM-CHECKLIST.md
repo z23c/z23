@@ -19,7 +19,7 @@ artifacts admitted from the private SHA3 CAS and launched out of process.
 
 The source-distribution implementation checklist and optional non-consensus
 ratio/burn-credit design live in
-[`../P2P_SOURCE_HOSTING.md`](../P2P_SOURCE_HOSTING.md).
+[`P2P_SOURCE_HOSTING.md`](../commons/P2P_SOURCE_HOSTING.md).
 
 This document turns the long-term product direction into checkable work:
 
@@ -262,7 +262,7 @@ Use this loop while the later platform items remain incomplete.
 |---|---|
 | What is live and protected? | `z23 status` + `docs/HANDOFF.md` |
 | What should execute next? | `docs/work/FORWARD_PLAN.md` |
-| Why is the code shaped this way? | `docs/FRAMEWORK.md` |
+| Why is the code shaped this way? | `docs/commons/FRAMEWORK.md` |
 | How is a feature slice built? | `docs/agent/AGENT_ARCHITECTURE.md` |
 | What commands exist now? | `discover search/describe` |
 | Where is a symbol and who uses it? | `code sym/refs/room` |

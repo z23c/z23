@@ -1,10 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * simnet_trace — opt-in, append-only NDJSON state trace for a `mode simnet`
- * chaos cluster (docs/CHAOS_HARNESS.md "Recording a full-state trace").
+ * chaos cluster (docs/quality/CHAOS_HARNESS.md "Recording a full-state trace").
  *
  * Why this exists: a chaos scenario today only reports a small, fixed set of
- * hand-picked counters (docs/CHAOS_HARNESS.md's `expect METRIC` list). When a
+ * hand-picked counters (docs/quality/CHAOS_HARNESS.md's `expect METRIC` list). When a
  * scenario fails or behaves surprisingly there is no way to ask "what did
  * node 3's chain/coins state actually look like right before it diverged" —
  * only whatever counter someone thought to track ahead of time. This module

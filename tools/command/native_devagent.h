@@ -220,7 +220,7 @@ bool zcl_devagent_worker_muse_executor(const struct wkr_job *job,
  * wall clock and kills the whole job. The child image's own entry picks
  * the executor (the production binary passes the Muse executor, as the
  * leaf does); the drive's exec pointer is not carried across the
- * process boundary. See docs/WINDOWS.md for what Windows does and does
+ * process boundary. See docs/node/WINDOWS.md for what Windows does and does
  * not enforce relative to POSIX. */
 
 #define WKR_ACTIVE_PROCESS_CAP 64u

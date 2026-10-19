@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # metaverse_tour.sh — the hermetic five-step "metaverse tour" proof
-# (docs/METAVERSE_MVP.md criterion MM1). Drives ONE isolated regtest node
+# (docs/commons/METAVERSE_MVP.md criterion MM1). Drives ONE isolated regtest node
 # (unique /tmp datadir, 39xxx non-live ports, dead-sink -connect, armed by
 # tools/scripts/isolated_node_env.sh) through:
 #

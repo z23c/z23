@@ -597,7 +597,7 @@ static void bench_sha3_512_x4(unsigned char *msg)
  * THE consensus PoW inner loop. This row pins the pre-Bubbles (200,9)
  * parameters, where one block header costs 512 independent BLAKE2b
  * finalizations; the parameters consensus uses are height-selected
- * (docs/EQUIHASH_PARAMS.md), and this benchmark deliberately measures the
+ * (docs/node/EQUIHASH_PARAMS.md), and this benchmark deliberately measures the
  * larger, older shape rather than tracking the active epoch. Until now this
  * had NO tier selector, so no test in the tree could force
  * scalar-vs-AVX2-vs-AVX-512 on one input, and the 8-way path at these

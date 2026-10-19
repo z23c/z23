@@ -191,7 +191,7 @@ static bool bk_pin_documented_case(void)
     char row[160], bytes[32];
     char *doc = NULL, *release = NULL;
     const char *line;
-    bool ok = bk_read("docs/RISCV_MACHINE.md", &doc) &&
+    bool ok = bk_read("docs/commons/RISCV_MACHINE.md", &doc) &&
               bk_read("tests/harness/src/test_rvmachine_freebsd_release.c", &release);
     snprintf(bytes, sizeof bytes, "UINT64_C(%llu)", (unsigned long long)ZCL_BUILTIN_KERNEL_BYTES);
     snprintf(row, sizeof row, "| KERNEL: release GENERIC kernel | %llu | `%s` |",

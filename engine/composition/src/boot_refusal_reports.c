@@ -15,7 +15,7 @@
 #include <string.h>
 
 #define WALLET_PHASE "wallet_load"
-#define WALLET_RECOVERY_DOC "docs/WALLET_PERSISTENCE_RECOVERY.md"
+#define WALLET_RECOVERY_DOC "docs/node/WALLET_PERSISTENCE_RECOVERY.md"
 
 /* Write the parent directory of `path` into `out`. "/a/b" -> "/a";
  * "/a" -> "/"; "a" -> ".". */

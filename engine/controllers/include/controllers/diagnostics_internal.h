@@ -151,7 +151,7 @@ bool sapling_checkpoint_dump_state_json(struct json_value *out,
 /* diagnostics_registry_rom.c — the "rom" g_dumpers[] entry: L0-L3 trust
  * machine catalog (compiled checkpoint, header commitment enumeration,
  * per-layer coverage, MMB/utxo_root_ladder projection cursors). See
- * docs/ROM.md. */
+ * docs/node/ROM.md. */
 bool rom_dump_state_json(struct json_value *out, const char *key);
 
 /* nodelog_controller.c */

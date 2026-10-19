@@ -73,7 +73,7 @@ make -C examples && ./examples/bin/11_collectible_market
       refund accepted+mined at height 617 — the seller reclaimed deed #3; provenance = 3 row(s), ending back at the seller (nobody redeemed it)
 
 [6/6] production counterpart — same primitives, real node:
-      start with z23 yardsale guide (docs/SELL.md)
+      start with z23 yardsale guide (docs/node/SELL.md)
 
 === SUCCESS: three one-of-one collectibles minted and hash-bound, a permanent on-chain storefront claimed, one sold by direct payment, one sold through a redeemed HTLC escrow, and one reclaimed after its escrow timed out unclaimed — every step proved through real connect_block() + real projection folds ===
 ```
@@ -126,7 +126,7 @@ P2PKH transfer.
 Ground-truth references this file was built from: `docs/examples/04_zslp_token.c`,
 `docs/examples/05_znam_names.c`, `docs/examples/06_htlc_swap.c`,
 `tests/harness/src/test_simnet.c` (sections 6-7), `tests/harness/src/test_simnet_txkit.c`,
-`docs/SIMULATOR_TXNS.md`.
+`docs/quality/SIMULATOR_TXNS.md`.
 
 ## Production counterpart
 

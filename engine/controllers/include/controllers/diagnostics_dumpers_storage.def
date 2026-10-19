@@ -236,7 +236,7 @@
                "(L0 ROM height, L1 sealed-segment range, L2 reducer H*/floor, "
                "L3 active+external tip), and cheaply-readable projection "
                "cursors (MMB leaves/mountains, utxo_root_ladder rung/dense "
-               "height). See docs/ROM.md",
+               "height). See docs/node/ROM.md",
                "storage", "controller",
                "engine/controllers/src/diagnostics_registry_rom.c",
                "in_process_snapshot", "cheap", NULL, NULL, NULL,

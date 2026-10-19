@@ -159,7 +159,7 @@ The items below describe work to prove, not capabilities declared complete.
    2 and 4. Guest daemon activation, keys, login and production operation retain
    their separate authority requirements; this roadmap grants none of them.
 
-   Next concrete task: choose and freeze one guest byte route, either the console transport or an attached network device (`rvvirtio_net_init` and `rvvirtio_net_receive` exist in `platform/modules/rvvirtio`; [`RISCV_MACHINE.md`](../RISCV_MACHINE.md) says the machine attaches no network device), and qualify that chosen path with an actual stock-kernel acceptance run. The registered group `rvmachine_freebsd_ports` prints UNOBSERVED when its image is unavailable (`tests/harness/src/test_rvmachine_freebsd_ports.c`), so the run needs a supplied kernel.
+   Next concrete task: choose and freeze one guest byte route, either the console transport or an attached network device (`rvvirtio_net_init` and `rvvirtio_net_receive` exist in `platform/modules/rvvirtio`; [`RISCV_MACHINE.md`](../commons/RISCV_MACHINE.md) says the machine attaches no network device), and qualify that chosen path with an actual stock-kernel acceptance run. The registered group `rvmachine_freebsd_ports` prints UNOBSERVED when its image is unavailable (`tests/harness/src/test_rvmachine_freebsd_ports.c`), so the run needs a supplied kernel.
 
 3. **Complete one useful application journey.** Choose a real user problem,
    reuse existing C23 first, build the missing behavior and show its actual
@@ -204,14 +204,14 @@ and the fleet A+ scorecard rather than section order.
 
 ### 1. Finish the foundation for fast, coordinated work
 
-Read [`CANONICAL_LIFECYCLE.md`](./CANONICAL_LIFECYCLE.md) before changing
+Read [`CANONICAL_LIFECYCLE.md`](../node/CANONICAL_LIFECYCLE.md) before changing
 landing, proof, board, train or lane behavior. Its lifecycle remains:
 
 ```text
 NEED → JOB → CANDIDATE → PROOF_SET → PUBLICATION → REMOTE_RECEIPT
 ```
 
-<!-- claim: file-present docs/work/CANONICAL_LIFECYCLE.md -->
+<!-- claim: file-present docs/node/CANONICAL_LIFECYCLE.md -->
 
 1. Freeze evidence interfaces, then develop runner, lifecycle and federation
    changes in parallel with one primary writer per component. Connect candidate

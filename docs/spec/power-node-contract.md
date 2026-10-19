@@ -178,7 +178,7 @@ Concrete files: `engine/modules/kernel/src/command_registry.c`,
 shared explanation surface for networking, sync, validation, chain, boot,
 database, model lifecycle, recovery, native commands, wallet backup, disk, mempool, and
 integrity behavior. The event/projection model is canonical in
-`docs/FRAMEWORK.md`.
+`docs/commons/FRAMEWORK.md`.
 
 Invariants:
 

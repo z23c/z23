@@ -111,7 +111,7 @@
 #                     canonical datadir, so the install call's canonical-lane
 #                     gate is not exercised here; the live cutover run sets
 #                     that env var itself (see
-#                     docs/work/sovereign-cutover-runbook.md).
+#                     docs/node/sovereign-cutover-runbook.md).
 #   --                everything after is passed verbatim to build/bin/zclassic23
 #
 # Refold-specific rule:

@@ -151,7 +151,7 @@ static bool rpc_getmininginfo(const struct json_value *params, bool help,
 /* Shared admission check for both on-demand mint entry points (`generate`
  * and `generatetoaddress`). Two conditions, in this order:
  *
- *   1. Sovereign guard (docs/work/shielded-history-importer.md §5.3):
+ *   1. Sovereign guard (docs/node/shielded-history-importer.md §5.3):
  *      refuse to mint on a borrowed-and-not-self-folded (release_assisted)
  *      shielded history. This gates the MINT action only — tip-following
  *      (rpc_submitblock accepting a block relayed/mined by someone else, the

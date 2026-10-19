@@ -37,7 +37,7 @@ are shares of the epoch budget, not absolute amounts):
 | Class | Evidence | Weight |
 |---|---|---|
 | **Creation** | New policy-valid C23 package published to the commons (exact retrievable source, tests) | **100** |
-| **Reproduction** | Independent three-party reproduction of someone else's package (O5, [`ZC23_REPRODUCTION_RUNBOOK.md`](./ZC23_REPRODUCTION_RUNBOOK.md)) | **40** |
+| **Reproduction** | Independent three-party reproduction of someone else's package (O5, [`ZC23_REPRODUCTION_RUNBOOK.md`](../commons/ZC23_REPRODUCTION_RUNBOOK.md)) | **40** |
 | **Repair** | Review, repair, or port merged into a commons package | **20** |
 | **Preservation** | Availability proof for a hosted commons package, per epoch per package | **5** |
 

@@ -10,7 +10,7 @@
  * WHAT THIS DOMAIN DESCRIBES, and the rule that follows from it: this is the
  * surface that says what OTHER AI agents may do to this node and what they
  * have done — so it is read by the very things it describes. No leaf here
- * carries a credential. A session id is a BEARER grant (docs/CUSTODY_MODEL.md
+ * carries a credential. A session id is a BEARER grant (docs/node/CUSTODY_MODEL.md
  * §5-6): presenting it IS the act that makes a spend run under its caps.
  * Nothing below is a session id, a nonce, a cookie, an address or a public
  * key — only counts, ages, caps and outcomes. Keep it that way; a per-identity
@@ -22,7 +22,7 @@
  * worst, oldest, soonest — and per-row listing stays on `vault session list`,
  * the surface that already owns the redaction rule.
  *
- * WHAT A GRANT ACTUALLY BOUNDS (docs/CUSTODY_MODEL.md §5, checked against
+ * WHAT A GRANT ACTUALLY BOUNDS (docs/node/CUSTODY_MODEL.md §5, checked against
  * cognition/models/include/models/agent_session.h): amount per transaction, amount
  * per rolling window, destination allowlist, and lifetime. It does NOT bound
  * an agent that declines to present it (§7) — that is an operating-system

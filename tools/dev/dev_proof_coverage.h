@@ -3,7 +3,7 @@
  *          manifest that binds executed test groups to eligible signed
  *          observations.
  *
- * The canonical lifecycle (docs/work/CANONICAL_LIFECYCLE.md, PROOF_SET)
+ * The canonical lifecycle (docs/node/CANONICAL_LIFECYCLE.md, PROOF_SET)
  * separates reusable input keys from immutable observation roots: coverage
  * binds the mandatory input keys derived for a candidate and the receiver's
  * eligibility basis. An explicit observation run emits one signed verdict-leaf

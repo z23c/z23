@@ -299,4 +299,4 @@ printf 'State-root chain:          %s\n' "$STATE_ROOT_CHAIN"
 if [ -n "$SVG_LINE" ]; then printf '\n%s\n' "$SVG_LINE"; fi
 printf '\n'
 printf 'Any node that builds these exact sources reproduces these exact\n'
-printf 'roots. See docs/ARENA.md.\n'
+printf 'roots. See docs/commons/ARENA.md.\n'

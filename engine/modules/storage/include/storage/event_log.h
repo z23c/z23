@@ -4,7 +4,7 @@
  *
  * The event log is the durable source for reducer/projection replay.
  * This file ships only the primitive; boot/runtime code wires concrete
- * producers and projections. See `docs/FRAMEWORK.md` for the current
+ * producers and projections. See `docs/commons/FRAMEWORK.md` for the current
  * reducer authority model.
  *
  * Wire format (per event)

@@ -18,4 +18,4 @@ Do not use it for:
 - direct HTML/JSON rendering
 - route dispatch
 
-Primary architecture reference: [docs/ARCHITECTURE_DIAGRAMS.md](../../docs/ARCHITECTURE_DIAGRAMS.md)
+Primary architecture reference: [docs/commons/ARCHITECTURE_DIAGRAMS.md](../../docs/commons/ARCHITECTURE_DIAGRAMS.md)

@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * The `ops.telemetry.metaverse` controller. It is deliberately thin, and the
- * thinness is the contract (docs/TELEMETRY_CONTRACT.md): pick a snapshot, pick
+ * thinness is the contract (docs/node/TELEMETRY_CONTRACT.md): pick a snapshot, pick
  * the view the caller asked for, call telemetry_render(). It names no field,
  * builds no JSON, decides no health, and holds no state — every one of those
  * belongs to the field table, the provider, or the render layer.

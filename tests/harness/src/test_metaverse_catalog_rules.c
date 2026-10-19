@@ -387,7 +387,7 @@ int t_adapter_registry(void)
 
 /* ── 3a: the MVP scope partition is a pinned decision ───────────────────── */
 
-/* docs/METAVERSE_MVP.md MM3: the catalog is complete or honestly scoped.
+/* docs/commons/METAVERSE_MVP.md MM3: the catalog is complete or honestly scoped.
  * The four datadir-provable kinds are in MVP scope, the four runtime/node.db
  * kinds out; asserted against the live registry (MV_MVP_SCOPE in
  * contexts/commons/modules/metaverse/src/adapter_registry.c). */

@@ -23,7 +23,7 @@ run, inspect, and harden an operator-owned node.
 
 The safety boundary, scanner context, local gates, command authorization, release
 integrity checks, and reviewer checklist are documented in
-[`docs/SECURITY_AND_INTEGRITY.md`](../docs/SECURITY_AND_INTEGRITY.md).
+[`docs/node/SECURITY_AND_INTEGRITY.md`](../docs/node/SECURITY_AND_INTEGRITY.md).
 
 ## Automated review of pull requests
 
@@ -51,4 +51,4 @@ There is no bug-bounty program.
 A third-party security and cryptographic audit was received and triaged
 in June 2026. The point-by-point disposition record — what was fixed,
 what was refuted (with citations), and what is deferred and tracked — is
-folded into ["Concrete safeguards"](../docs/SECURITY_AND_INTEGRITY.md#concrete-safeguards).
+folded into ["Concrete safeguards"](../docs/node/SECURITY_AND_INTEGRITY.md#concrete-safeguards).

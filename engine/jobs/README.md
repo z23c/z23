@@ -19,5 +19,5 @@ Do not add macro-only job scaffold. If a helper is shared by stages, keep it
 purpose-named (`stage_helpers.c`, `utxo_apply_delta.c`) and out of the hot path
 unless it removes real duplicated stage mechanics.
 
-See [`docs/FRAMEWORK.md`](../../docs/FRAMEWORK.md) for the contract and its
+See [`docs/commons/FRAMEWORK.md`](../../docs/commons/FRAMEWORK.md) for the contract and its
 §9 debt board for active cleanup work.

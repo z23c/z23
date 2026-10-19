@@ -253,7 +253,7 @@ bool sapling_rebuild_account_skip(const char *reason_tag, int h,
  * the replay-from-activation they fall back to is structurally impossible,
  * because the block bodies below the cure anchor are simply not on disk.
  * Reading the canonical ledger is the only resume that can succeed there —
- * per docs/ARCHITECTURE_NORTH_STAR.md, heal by reading the canonical copy,
+ * per docs/commons/ARCHITECTURE_NORTH_STAR.md, heal by reading the canonical copy,
  * never by replaying a clone.
  *
  * Lock order (docs: LOCK-ORDER LAW): anchor_kv lives in the coins/consensus

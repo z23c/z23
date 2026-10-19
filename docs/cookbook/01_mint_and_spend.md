@@ -69,6 +69,6 @@ The example's steps map onto real node code as:
 
 ## See also
 
-- `docs/SIMULATOR.md` — the simulator model overview.
-- `docs/SIMULATOR_TXNS.md` — the transaction toolkit (wallets, fees, mempool, HTLCs) built on top of the primitives used here.
+- `docs/quality/SIMULATOR.md` — the simulator model overview.
+- `docs/quality/SIMULATOR_TXNS.md` — the transaction toolkit (wallets, fees, mempool, HTLCs) built on top of the primitives used here.
 - `tests/harness/src/test_simnet.c` (sections 1-2) — the ground-truth test this example is adapted from.

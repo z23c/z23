@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * The `network` telemetry domain's PROVIDER (docs/TELEMETRY_CONTRACT.md).
+ * The `network` telemetry domain's PROVIDER (docs/node/TELEMETRY_CONTRACT.md).
  *
  * It fills a typed `struct network_snapshot` and does nothing else: it writes
  * no JSON, decides no health, and names no field in prose. The field names,

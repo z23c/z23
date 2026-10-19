@@ -101,7 +101,7 @@ run` from a fresh checkout is the whole recipe.
   with expected console output and a "Production counterpart" section
   mapping every simulator call back to the real node code path (or naming
   the gap, where one exists).
-- [`docs/SIMULATOR.md`](../SIMULATOR.md) / [`docs/SIMULATOR_TXNS.md`](../SIMULATOR_TXNS.md) —
+- [`docs/quality/SIMULATOR.md`](../quality/SIMULATOR.md) / [`docs/quality/SIMULATOR_TXNS.md`](../quality/SIMULATOR_TXNS.md) —
   the simulator's own design docs and transaction-shape coverage table.
 - `tests/harness/src/test_simnet*.c` — the ground-truth test suite these
   examples are built from; when in doubt about an API's contract, that's

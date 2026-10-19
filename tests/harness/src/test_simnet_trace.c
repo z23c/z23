@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Regression test for the simnet full-state trace (engine/modules/sim/include/sim/
- * simnet_trace.h, docs/CHAOS_HARNESS.md "Recording a full-state trace").
+ * simnet_trace.h, docs/quality/CHAOS_HARNESS.md "Recording a full-state trace").
  *
  * Runs a real `mode simnet` chaos scenario (mint, deliver, partition, heal —
  * driving the actual simnet_cluster, not sim_peer counters) with `trace_dir`

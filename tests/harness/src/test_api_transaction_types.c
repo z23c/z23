@@ -679,7 +679,7 @@ static bool tx_type_index_policy_ok(const struct json_value *root)
                "explicit_non_chain_command_count")) == 36 &&
            strcmp(json_get_str(json_get(root,
                        "checked_in_proof_source")),
-                  "docs/work/transaction-lab-events.jsonl") == 0 &&
+                  "docs/quality/transaction-lab-events.jsonl") == 0 &&
            strcmp(json_get_str(json_get(root, "live_proof_source")),
                   "private_local_notebook") == 0 &&
            strcmp(json_get_str(json_get(root,

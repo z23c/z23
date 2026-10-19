@@ -3,7 +3,7 @@
  *          identity, deterministic packing and verified in-memory unpacking.
  *
  * The built-in kernel is the published FreeBSD 15.1-RELEASE riscv64 GENERIC
- * kernel (docs/RISCV_MACHINE.md, "KERNEL: release GENERIC kernel"), stored
+ * kernel (docs/commons/RISCV_MACHINE.md, "KERNEL: release GENERIC kernel"), stored
  * gzip-compressed. It is present only in a build made with Z23_GUEST_KERNEL.
  * A buffer is returned only when the inflated bytes have exactly the pinned
  * length and SHA-256; the compressed bytes are treated as untrusted input. */

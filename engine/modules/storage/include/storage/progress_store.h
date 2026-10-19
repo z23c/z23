@@ -21,7 +21,7 @@
  *   - Cursor commits are tiny and on the hot path; a dedicated WAL keeps
  *     them out of the way of the much larger node.db txns.
  *   - `consensus.db` is a distinct transaction domain for reducer state (see
- *     docs/CHAIN_AUTHORITY.md). One file and one process mutex serialize
+ *     docs/node/CHAIN_AUTHORITY.md). One file and one process mutex serialize
  *     transactions; they do not by themselves prove one code-level writer.
  *   - Future stages may want to use blob columns, FTS, or LMDB without
  *     dragging node.db's schema along.

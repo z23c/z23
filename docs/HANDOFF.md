@@ -198,9 +198,9 @@ real chain history first — see
 - Transaction laboratory: re-derive isolated vs live bars from
   `make transaction-lab-status`. Isolated proofs are not broadcast
   approval. Notebook and safety boundary:
-  [`work/TRANSACTION_LAB.md`](work/TRANSACTION_LAB.md). Live classification
+  [`TRANSACTION_LAB.md`](quality/TRANSACTION_LAB.md). Live classification
   and owner-review sequence:
-  [`work/LIVE_TRANSACTION_DEMONSTRATIONS.md`](work/LIVE_TRANSACTION_DEMONSTRATIONS.md).
+  [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](quality/LIVE_TRANSACTION_DEMONSTRATIONS.md).
 
 ## MVP status
 
@@ -216,7 +216,7 @@ Soak accrual is `make soak-evidence-report`, not process uptime.
 - [`MVP.md`](MVP.md) — the v1 acceptance bar.
 - [`TENACITY.md`](TENACITY.md) — copy-first recovery doctrine.
 - [`work/self-verified-tip-plan.md`](work/self-verified-tip-plan.md) — sovereign-cure design.
-- [`work/sovereign-cutover-runbook.md`](work/sovereign-cutover-runbook.md) — owner-gated cutover + revert.
+- [`sovereign-cutover-runbook.md`](node/sovereign-cutover-runbook.md) — owner-gated cutover + revert.
 - History of this page is `git log --follow -- docs/HANDOFF.md`.
 
 A map, not the territory: trust the node you query this minute over this

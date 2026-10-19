@@ -2,7 +2,7 @@
  *
  * objectives — the CLOSED catalog of named objective functions z23
  * optimizes. Before this file, what the project was steering toward lived
- * in prose (docs/ARCHITECTURE_NORTH_STAR.md, the owner's standing
+ * in prose (docs/commons/ARCHITECTURE_NORTH_STAR.md, the owner's standing
  * directives) and in an agent's head, never in the binary. An id not
  * written here is not an objective: `fleet objectives` prints only the
  * rows below, and a producer that cannot answer prints `unmeasured` with

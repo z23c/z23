@@ -3206,7 +3206,7 @@ static bool boot_step_refold_from_anchor(struct app_context *ctx,
 /* Clamp a tip_finalize cursor left ahead of the applied coins tip. */
 static void boot_step_clamp_reducer_cursor(void)
 {
-    /* SINGLE SOURCE OF TRUTH (docs/work/tip-durability-collapse.md):
+    /* SINGLE SOURCE OF TRUTH (docs/node/tip-durability-collapse.md):
      * floor on the GENUINE coins frontier. Wave 2: that frontier is
      * DERIVED — coins_applied_height-1 straight from progress.kv's own
      * co-committed state (no hash->block_map->height roundtrip through

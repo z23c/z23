@@ -5,12 +5,12 @@
 Copyright 2026 Rhett Creighton. Licensed under the Apache License, Version 2.0.
 
 Fast reference for a fresh agent. Plain and technical. For the *why* (laws,
-shapes, doctrine) read `docs/FRAMEWORK.md`; for the concrete feature-slice
+shapes, doctrine) read `docs/commons/FRAMEWORK.md`; for the concrete feature-slice
 contract (REST resources, ActiveRecord, validations, relationships, database
 schema, services, native commands) read `docs/agent/AGENT_ARCHITECTURE.md`; for *current
 live state* read `docs/HANDOFF.md`; for *coding rules* read
 `docs/DEFENSIVE_CODING.md`. For the one-page mental model read
-`docs/HOW_THE_NODE_WORKS.md`.
+`docs/node/HOW_THE_NODE_WORKS.md`.
 
 **Never hand-write a file count into this page.** They drift 5-15% a week and a
 wrong count reads as authority. Derive one when you need it:
@@ -177,8 +177,8 @@ platform (the ONLY clock/RNG source: `time_compat.h`,
 utils. Boot stage enum: `platform/modules/util/include/util/boot_phase.h`.
 
 `contexts/commons/modules/vcs/` owns ZVCS plus the `content.v2` package-manifest and source swarm.
-Read [`ZVCS.md`](ZVCS.md) for internal source/version identity and
-[`P2P_SOURCE_HOSTING.md`](P2P_SOURCE_HOSTING.md) for the source-hosting trust
+Read [`ZVCS.md`](commons/ZVCS.md) for internal source/version identity and
+[`P2P_SOURCE_HOSTING.md`](commons/P2P_SOURCE_HOSTING.md) for the source-hosting trust
 boundary and the remaining CAS work. Three files with three different reaches;
 check which one a claim is about before believing it:
 
@@ -477,7 +477,7 @@ Use `docs/agent/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
 4. E5 gate (`check-typed-blocker`) enforces advance-or-block.
 
 Stage order and per-stage contract: see
-[`docs/HOW_THE_NODE_WORKS.md`](HOW_THE_NODE_WORKS.md) §2. The reducer is the
+[`docs/node/HOW_THE_NODE_WORKS.md`](node/HOW_THE_NODE_WORKS.md) §2. The reducer is the
 **only** chain writer.
 
 ### Change a reducer stage
@@ -954,7 +954,7 @@ then exactly one of `ALL TESTS PASSED`, `ALL TESTS PASSED (CACHED)`, or
 | `make agent-loop` | Manual one-shot AI/operator verification loop. Runs `fast-ci`; `ZCL_AGENT_LOOP_BIN=1` may also build `build/bin/z23-dev`. Runtime deployment remains contained. |
 | `make fast-ci` | Cache-aware edit loop: `lint-fast`, exact source-wide compile/test proofs, and native live probe. Changed-path/test mappings are hints only. Use `ZCL_FAST_TESTS=...`, `ZCL_FAST_LIVE=0`, `ZCL_FAST_CACHE=0`, `ZCL_FAST_CACHE_RESET=1` as needed. |
 | `make test` | Runs `test_parallel` (isolated per-process runner). **Use this**, not test_zcl. Green = regression floor, NOT a liveness proof. |
-| `make t ONLY=simnet` | Runs the deterministic simulator harness and the current action coverage matrix documented in `docs/SIMULATOR.md`. |
+| `make t ONLY=simnet` | Runs the deterministic simulator harness and the current action coverage matrix documented in `docs/quality/SIMULATOR.md`. |
 | `make hotswap-sim` | Focused deterministic simulated-network proof for the dev hot-swap transaction. Use after loader/router/provider changes. |
 | `make sim-fast` | Broader deterministic network proof: chaos-harness slice, checked-in scenarios, and a bounded reproducible seed sweep. |
 | `make hotswap` | Phase-0 contained: refuses and directs the caller to `make hotswap-so` plus build/test verification. Whole-generation runtime publication stays contained; the live runtime path is the swappable-leaf module loop below. |

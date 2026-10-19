@@ -1,7 +1,7 @@
 # The Self-Verified Tip Plan — sovereignty hardening (open items)
 
 > **Live sovereignty (`G-SOV`) is proven via the checkpoint-content
-> consensus-bundle install path** (`docs/work/sovereign-cutover-runbook.md`,
+> consensus-bundle install path** (`docs/node/sovereign-cutover-runbook.md`,
 > `engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c`), which
 > proves the same G-SOV predicate (coins reproduce the compiled SHA3
 > checkpoint + Sapling frontier roots to the validated header) a different
@@ -23,7 +23,7 @@
 > readings of the same T.
 
 This is the canonical statement of the **sovereign cure** design that
-[`FRAMEWORK.md`](../FRAMEWORK.md) §0 names. It is the same design referenced
+[`FRAMEWORK.md`](../commons/FRAMEWORK.md) §0 names. It is the same design referenced
 by [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) #1 (sovereign cure) and
 [`never-stuck-plan.md`](./never-stuck-plan.md).
 

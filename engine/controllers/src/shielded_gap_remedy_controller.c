@@ -49,7 +49,7 @@
     "Run the copy-prove step FIRST against a throwaway -COPY- datadir; gate on " \
     "H* CLIMB + tip-block-hash parity vs zclassicd; ONLY THEN cut over to " \
     "canonical. Never apply in place on a live node."
-#define SGR_REMEDY_DOC "docs/work/shielded-history-importer.md"
+#define SGR_REMEDY_DOC "docs/node/shielded-history-importer.md"
 
 enum shielded_gap_kind shielded_gap_remedy_classify(void)
 {

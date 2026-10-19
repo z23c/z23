@@ -3,7 +3,7 @@
 // dumpers it reads (CLAUDE.md "Adding state introspection"): bool, where false
 // means "could not populate at all". struct zcl_result is the wrong carrier
 // here specifically — it formats a message, and the telemetry contract
-// (docs/TELEMETRY_CONTRACT.md) requires every failure reason to be a STATIC
+// (docs/node/TELEMETRY_CONTRACT.md) requires every failure reason to be a STATIC
 // greppable token with program lifetime, because the reason is borrowed by the
 // rendered document rather than copied into it. That is what the `const char
 // **why` out-parameter carries. There is no fallible service surface here.

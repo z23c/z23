@@ -1289,7 +1289,7 @@ int check_framework_filename_suffix_selftest(void)
 }
 
 /* check-equihash-params: regenerate-and-diff plus tracked-file scan. */
-static const char k_eqp_doc[] = "docs/EQUIHASH_PARAMS.md";
+static const char k_eqp_doc[] = "docs/node/EQUIHASH_PARAMS.md";
 static const char k_eqp_tool[] = "build/bin/equihash-params-fact";
 static const char k_eqp_lit[] = "Equihash[ -]?\\(?200[,/ ]?9\\)?";
 static const char k_eqp_claim[] =
@@ -1429,7 +1429,7 @@ static int eqp_msg(void)
         "height; 200,9 describes only the blocks below it.\n"
         "\n"
         "  Say which blocks you mean — \"before Bubbles\", \"at launch\", \"pre-Bubbles\",\n"
-        "  or name the height — or point at docs/EQUIHASH_PARAMS.md, which is\n"
+        "  or name the height — or point at docs/node/EQUIHASH_PARAMS.md, which is\n"
         "  generated from the consensus tables and cannot drift.\n",
         stderr) < 0 ? die("z23-lint: write failed\n", "") : 0;
 }
@@ -1458,7 +1458,7 @@ int check_equihash_params_run(int argc, char **argv)
     if (rc || code != 0) { unlink(fresh); return rc ? rc : 1; }
     struct stat st;
     if (stat(k_eqp_doc, &st) != 0 || !S_ISREG(st.st_mode)) {
-        fputs("check_equihash_params: FAIL — docs/EQUIHASH_PARAMS.md is missing;"
+        fputs("check_equihash_params: FAIL — docs/node/EQUIHASH_PARAMS.md is missing;"
               " run: make equihash-facts\n", stderr);
         status = 1;
     } else if (sh_single_quote(k_eqp_doc, qdoc, sizeof qdoc)
@@ -1468,7 +1468,7 @@ int check_equihash_params_run(int argc, char **argv)
     } else if ((rc = capture_cmd(cmd, dump, sizeof dump, &code)) != 0) {
         unlink(fresh); return rc;
     } else if (code == 1) {
-        fputs("check_equihash_params: FAIL — docs/EQUIHASH_PARAMS.md no "
+        fputs("check_equihash_params: FAIL — docs/node/EQUIHASH_PARAMS.md no "
               "longer matches the consensus tables:\n", stderr);
         if (eqp_head40(dump)) { unlink(fresh); return 2; }
         fputs("  regenerate it: make equihash-facts\n", stderr);
@@ -1487,7 +1487,7 @@ int check_equihash_params_run(int argc, char **argv)
     drop3(&lit, &claim, &qual);
     if (rc) return rc;
     if (status == 0
-        && fputs("check_equihash_params: OK — docs/EQUIHASH_PARAMS.md matches "
+        && fputs("check_equihash_params: OK — docs/node/EQUIHASH_PARAMS.md matches "
                  "consensus, no flat 200,9 claim\n", stdout) < 0)
         return die("z23-lint: write failed\n", "");
     return status;

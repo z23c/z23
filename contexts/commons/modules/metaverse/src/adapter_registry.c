@@ -37,7 +37,7 @@
 
 #define MV_ADAPTER_ZNAM_NAME     MV_WIRED(metaverse_adapter_znam)
 #define MV_ADAPTER_ZSLP_ASSET    MV_WIRED(metaverse_adapter_zslp)
-/* ── MV_MVP_SCOPE decision (docs/METAVERSE_MVP.md, criterion MM3) ──────────
+/* ── MV_MVP_SCOPE decision (docs/commons/METAVERSE_MVP.md, criterion MM3) ──────────
  * The metaverse MVP catalog surface covers the four kinds a datadir alone
  * can prove: content, zcode_package, znam_name, zslp_asset. The four kinds
  * below are explicitly OUT of MVP scope — not unimplemented: their

@@ -1010,7 +1010,7 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
     {
         struct json_value sec;
         const char *plan = "docs/work/FORWARD_PLAN.md";
-        const char *lifecycle = "docs/work/CANONICAL_LIFECYCLE.md";
+        const char *lifecycle = "docs/node/CANONICAL_LIFECYCLE.md";
         char path[ZCL_FLEET_PATH_MAX], title[256] = "";
         struct platform_file_metadata meta;
         bool lifecycle_present;
@@ -1443,7 +1443,7 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
         if (json_size(&rows) == 0)
             fs_next_row(&rows,
                         "pick the first open lifecycle lane in "
-                        "docs/work/CANONICAL_LIFECYCLE.md section 7",
+                        "docs/node/CANONICAL_LIFECYCLE.md section 7",
                         "main is quiet: nothing is stale, unanswered, dirty, "
                         "or ahead",
                         "z23 dev agent start");

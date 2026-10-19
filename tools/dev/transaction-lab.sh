@@ -6,7 +6,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CATALOG="${ZCL_TRANSACTION_LAB_CATALOG:-$REPO/tools/dev/transaction_lab_catalog.def}"
 ACTION="${1:-status}"
-LEDGER_TEMPLATE="$REPO/docs/work/transaction-lab-events.jsonl"
+LEDGER_TEMPLATE="$REPO/docs/quality/transaction-lab-events.jsonl"
 PRIVATE_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23-transaction-lab"
 PRIVATE_LEDGER="$PRIVATE_STATE_ROOT/transaction-lab-events.jsonl"
 if [ -n "${ZCL_TRANSACTION_LAB_LEDGER:-}" ]; then

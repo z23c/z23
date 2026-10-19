@@ -45,7 +45,7 @@ tip height = 102
 
 Exact txids/fees/sizes are byte-identical run to run (fixed seed tape), and
 match the measured `OP_RETURN data carrier` row (103 bytes, fee 1030 zats)
-in `docs/SIMULATOR_TXNS.md`'s cost table.
+in `docs/quality/SIMULATOR_TXNS.md`'s cost table.
 
 ## Key APIs used
 

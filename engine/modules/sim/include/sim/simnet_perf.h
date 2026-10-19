@@ -77,7 +77,7 @@ extern "C" {
 
 /* Default workload (the calibrated one above). 192 measured blocks x 8 spends
  * keeps every point's UTXO working set in the same memory-hierarchy regime —
- * see docs/SIMNET_PERF.md "Why the ladder cannot be arbitrarily wide".
+ * see docs/quality/SIMNET_PERF.md "Why the ladder cannot be arbitrarily wide".
  *
  * It does NOT make the smallest point self-averaging: ~1.7k txs is an ~8 ms
  * CPU window, short enough that co-resident work inflates a single sample by
@@ -133,7 +133,7 @@ extern "C" {
 
 /* The in-suite self-test (tests/harness/src/test_simnet_perf.c) runs THIS default
  * workload, not a quarter-size ladder. A mixed 32-worker suite inflates the
- * growth ratio well past its solo value (see docs/SIMNET_PERF.md), so the
+ * growth ratio well past its solo value (see docs/quality/SIMNET_PERF.md), so the
  * in-suite group asserts no growth budget at any size: the budgets live in
  * `make sim-perf` / `make sim-perf-teeth` on a quiet host, and the suite
  * keeps the per-scale same-window armed-vs-clean discrimination. */
@@ -188,7 +188,7 @@ struct simnet_perf_result {
     uint64_t coins_at_end;           /* at the largest scale */
 };
 
-/* Fill `cfg` with the calibrated defaults (see docs/SIMNET_PERF.md):
+/* Fill `cfg` with the calibrated defaults (see docs/quality/SIMNET_PERF.md):
  * blocks=192, txs_per_block=8, scales {1,2,4}, reps=3, funding_multiple=2,
  * inject=NONE.
  * Every point additionally runs one DISCARDED warm-up sample, and reports the
@@ -216,7 +216,7 @@ bool simnet_perf_metric(const struct simnet_perf_result *r, const char *name,
 
 /* Evaluate one assertion in the same shape (and with the same operator set)
  * as the chaos scenario DSL's `expect METRIC OP VALUE` — see
- * docs/CHAOS_HARNESS.md. Operators: == != >= <= > <
+ * docs/quality/CHAOS_HARNESS.md. Operators: == != >= <= > <
  *
  * Returns 0 on pass, -1 on fail, -2 on an unknown operator, -3 on an unknown
  * metric. `*out_actual` receives the metric's value whenever it resolved. */

@@ -11,7 +11,7 @@
  * leaves the coins set atomically consistent with the cursor. The earlier
  * separate-WAL event-log-fed UTXO projection lacked that atomic
  * cross-commit (the entire tip-wedge tear class —
- * docs/work/tip-durability-collapse.md) and was deleted in Program H1.
+ * docs/node/tip-durability-collapse.md) and was deleted in Program H1.
  *
  * The view holds NO database handle of its own: every vtable thunk fetches
  * the process-global progress.kv handle lazily via progress_store_db() (a

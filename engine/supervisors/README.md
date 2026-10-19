@@ -19,5 +19,5 @@ tip watchdog before the escalator, the escalator before self-heal) and is
 pinned by ordering asserts in `tests/harness/src/test_make_lint_gates.c`, so it
 moves under a seam design, never as a code-motion sweep.
 
-See [`docs/FRAMEWORK.md`](../../docs/FRAMEWORK.md) for the destination shape
+See [`docs/commons/FRAMEWORK.md`](../../docs/commons/FRAMEWORK.md) for the destination shape
 and its §9 debt board for remaining supervisor cleanup.

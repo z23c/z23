@@ -52,7 +52,7 @@ PERSONA("core/modules/net",
     "broken. The same rule holds anywhere in this module that reports why "
     "something did not arrive: reachability and speed are different "
     "properties, and an honest node on a slow disk is reachable.",
-    "docs/P2P_SOURCE_HOSTING.md")
+    "docs/commons/P2P_SOURCE_HOSTING.md")
 
 PERSONA("core/modules/validation",
     "The block-connection ordering layer is sealed, and an ordering bug here "

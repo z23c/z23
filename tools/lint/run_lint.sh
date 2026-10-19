@@ -105,7 +105,7 @@ SERIAL_EPILOGUE=" check-codeindex-coverage check-cookbook "
 # the longest gate of the whole run started last and the run's wall was its
 # start offset PLUS its own duration. Longest-first is the classic fix for
 # that list-scheduling tail. The landing-proof long pole comes first, then
-# the other gates measured at 30 s or more cold (docs/BENCHMARKS_LOG.md,
+# the other gates measured at 30 s or more cold (docs/quality/BENCHMARKS_LOG.md,
 # 2026-09-25); read the lint timing table (ZCL_LINT_VERBOSE=1) before editing.
 LONG_POLE_FIRST="check-windows-cross-syntax check-standalone-tools-link
     check-clang-portability check-vcs-no-sha1

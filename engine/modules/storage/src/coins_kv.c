@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * coins_kv — implementation. See storage/coins_kv.h for the contract and the
- * durability rationale (docs/work/tip-durability-collapse.md).
+ * durability rationale (docs/node/tip-durability-collapse.md).
  *
  * Raw sqlite3_step calls carry // raw-sql-ok:progress-kv-kernel-store, the
  * sanctioned hatch for the kernel store (same convention as progress_store.c).

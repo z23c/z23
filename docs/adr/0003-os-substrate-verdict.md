@@ -80,7 +80,7 @@ not an OS-grade preemptive scheduler.
 
 ### Evidence (b): the OS organs that matter are already here, shaped for this node's liveness philosophy
 
-The node's failure model (`docs/FRAMEWORK.md` §0) is "advance a durable
+The node's failure model (`docs/commons/FRAMEWORK.md` §0) is "advance a durable
 cursor or name a typed blocker — never a silent halt," which is a different
 contract than a general-purpose OS scheduler's "run whatever is runnable,
 fairly." The organs that contract actually needs are built:
@@ -98,7 +98,7 @@ fairly." The organs that contract actually needs are built:
   process state.
 - **Durable stage cursors** — `core/modules/sync/include/sync/stage.h`: one SQLite
   table (`stage_cursor`) keyed by stage name; chain progress is a cursor on
-  disk, never RAM-only authoritative state (`docs/FRAMEWORK.md` §0's Prime
+  disk, never RAM-only authoritative state (`docs/commons/FRAMEWORK.md` §0's Prime
   Directive).
 - **Injectable clock** — `platform/modules/platform/include/platform/clock.h`: the one
   swappable time source production and the deterministic simulator both
@@ -174,7 +174,7 @@ Detail, file inventories, and the ordered checklist are in
 - **A FreeBSD port.** Not undertaken now; the Rung 1 shim keeps the door
   open without paying the cost today.
 - **A unikernel.** A horizon that disciplines the platform/ports/adapters seam
-  (`docs/FRAMEWORK.md`), not a work item.
+  (`docs/commons/FRAMEWORK.md`), not a work item.
 
 ## Consequences
 

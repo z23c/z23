@@ -111,7 +111,7 @@ no wallet or broadcast authority:
 For payments and selling, `z23 yardsale guide` is the one-call map for paying
 ZCL at the min-relay fee (the minimum fee required for relay) and selling a 1/1
 collectible through yardsale, the package swarm, or an onion
-shop. It grants no authority. See [`SELL.md`](./SELL.md).
+shop. It grants no authority. See [`SELL.md`](./node/SELL.md).
 
 Public read-only clients may use the REST mirror:
 
@@ -634,14 +634,14 @@ The collection names this split in machine-readable fields:
 `live_proof_source` is `private_local_notebook`, and
 `funded_experiment_history_policy` is `private_local_only_never_git`.
 The reproducible isolated-event baseline is
-[`work/transaction-lab-events.jsonl`](./work/transaction-lab-events.jsonl); live
+[`work/transaction-lab-events.jsonl`](./quality/transaction-lab-events.jsonl); live
 receipts default to private local state and are never committed. The
 procedure and safety cap are in
-[`work/TRANSACTION_LAB.md`](./work/TRANSACTION_LAB.md). Only a `live_confirmed`
+[`TRANSACTION_LAB.md`](./quality/TRANSACTION_LAB.md). Only a `live_confirmed`
 mainnet event with a public txid increments live counts, recipient value, or
 fees. Simnet confirmation never increments live money statistics.
 The exact 39-row mainnet posture and the owner-reviewed Sapling campaign are in
-[Live transaction demonstrations](./work/LIVE_TRANSACTION_DEMONSTRATIONS.md).
+[Live transaction demonstrations](./quality/LIVE_TRANSACTION_DEMONSTRATIONS.md).
 
 The checked-in baseline records **39/39 isolated cases passing**, with **38
 simulated-chain confirmations** plus **1 process-only consensus-verified**

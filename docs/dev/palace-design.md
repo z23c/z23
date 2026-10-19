@@ -50,12 +50,12 @@ Each follows the shape-gate ladder (`ZCL_LINT_MODE` WARN → RATCHET
   `adapters`/`ports`/`tools` group.
 
 Each gate is planted-and-asserted in `test_make_lint_gates` per
-`docs/FRAMEWORK.md` §5's gate-testing convention.
+`docs/commons/FRAMEWORK.md` §5's gate-testing convention.
 
 ## No physical reorg
 
 The palace is a legibility + invariant layer, not a file-move. The 8-shape
-location structure is already enforced (`docs/FRAMEWORK.md` §9); a tree-wide
+location structure is already enforced (`docs/commons/FRAMEWORK.md` §9); a tree-wide
 move would churn includes/depfiles and touch the consensus boot path for
 near-zero additional legibility gain once purpose data and `code room` exist.
 If a boot-monolith split ever happens, it happens on the architecture axis

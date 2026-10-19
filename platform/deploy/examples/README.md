@@ -6,7 +6,7 @@ operator-specific peers. Copy and adapt before installing:
 
 - `zclassicd-peer.service` — operator-specific example for a legacy C++
   `zclassicd` dev peer used as a drift/consensus oracle. The live/default
-  unit name documented in CLAUDE.md and docs/SYNC.md is `zclassicd.service`;
+  unit name documented in CLAUDE.md and docs/node/SYNC.md is `zclassicd.service`;
   copy and rename this example if your host uses that name.
 - `zclassic23-soak.service` / `.timer` — the OLDER 10-minute three-guarantees
   soak probe driving `tools/scripts/soak_assert.sh` against the MAIN node

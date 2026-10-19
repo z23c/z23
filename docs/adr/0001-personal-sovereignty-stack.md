@@ -1,6 +1,6 @@
 # ADR-0001: Adopt the AI-Integrated Personal Sovereignty Stack vision
 
-- **Status:** Superseded by `docs/FRAMEWORK.md`.
+- **Status:** Superseded by `docs/commons/FRAMEWORK.md`.
 - **Deciders:** Project maintainer.
 - **Supersedes:** the audit-first master plan and the 3-epoch revamp framing, both kept in the maintainer's private planning notes, which are not in the repository.
 
@@ -46,4 +46,4 @@ Concretely:
 ## References
 
 - The maintainer's private master plan, architecture notes and the recorded feedback that prompted this decision are not part of the repository.
-- `docs/FRAMEWORK.md` — canonical architecture doc. (The L1–L7 layer-cake framing this ADR introduced was superseded 2026-05-23 by the eight-shape framework; see FRAMEWORK.md and its §9 debt-board decision log.)
+- `docs/commons/FRAMEWORK.md` — canonical architecture doc. (The L1–L7 layer-cake framing this ADR introduced was superseded 2026-05-23 by the eight-shape framework; see FRAMEWORK.md and its §9 debt-board decision log.)

@@ -110,7 +110,7 @@ Z23_FLAG("ZCL_AGENT_DEV_UNIT", "env_build", "zcl23-dev.service", "-",
 Z23_FLAG("ZCL_AGENT_FAST_PLAN_CMD", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-doctor.sh:auto")
 Z23_FLAG("ZCL_AGENT_ID", "env_runtime", "-", "-",
-          "first use tools/dev/devloop_cycle.c:auto; documented at docs/ZVCS.md:257: [64 agent_id] from ZCL_AGENT_ID")
+          "first use tools/dev/devloop_cycle.c:auto; documented at docs/commons/ZVCS.md:257: [64 agent_id] from ZCL_AGENT_ID")
 Z23_FLAG("ZCL_AGENT_INDEX_CHECK_FILE", "env_build", "-", "-",
           "undocumented; first use tools/dev/generate-compdb.sh:auto")
 Z23_FLAG("ZCL_AGENT_INDEX_CLANGD_CHECK", "env_build", "0", "-",
@@ -132,7 +132,7 @@ Z23_FLAG("ZCL_AGENT_LOOP_DEPLOY", "make_var", "-", "-",
 Z23_FLAG("ZCL_AGENT_RELEASE_BIN", "env_build", "build/bin/zclassic23", "-",
           "undocumented; first use tools/dev/agent-doctor.sh:auto")
 Z23_FLAG("ZCL_AGENT_SESSION", "env_runtime", "-", "-",
-          "first use tools/command/native_command.c:auto; documented at docs/CUSTODY_MODEL.md:223: as ZCL_AGENT_SESSION=<32 hex chars>")
+          "first use tools/command/native_command.c:auto; documented at docs/node/CUSTODY_MODEL.md:223: as ZCL_AGENT_SESSION=<32 hex chars>")
 Z23_FLAG("ZCL_AGENT_SHA3", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-gold-benchmark.sh:auto")
 Z23_FLAG("ZCL_AGENT_SRC_BIN", "env_build", "build/bin/zclassic23-dev", "-",
@@ -215,9 +215,9 @@ Z23_FLAG("ZCL_BENCH_SAMPLES", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_BENCH_SOURCE_DATADIR", "env_runtime", "-", "-",
           "first use engine/entry/main_cli_modes.c:auto; documented at docs/bench-history.csv:9: 2026-05-25T09:47:53Z,bf206e5de,#2 warm-start to operational,'',s,pending: set ZCL_BENCH...")
 Z23_FLAG("ZCL_BETA6_BOOTSTRAP_LISTEN", "env_runtime", "-", "-",
-          "<ip>:<port> the zclassicd v2.1.2-beta6 bootstrap snapshot server answers on; environment fallback for -beta6-bootstrap-listen, unset = not served; first use engine/composition/src/boot_beta6_bootstrap.c:auto; documented at docs/BOOTSTRAPPING.md: Serving beta6 clients")
+          "<ip>:<port> the zclassicd v2.1.2-beta6 bootstrap snapshot server answers on; environment fallback for -beta6-bootstrap-listen, unset = not served; first use engine/composition/src/boot_beta6_bootstrap.c:auto; documented at docs/node/BOOTSTRAPPING.md: Serving beta6 clients")
 Z23_FLAG("ZCL_BETA6_BOOTSTRAP_SOURCE", "env_runtime", "-", "-",
-          "absolute directory holding the beta6 snapshot (blocks/, blocks/index/, chainstate/) this node serves; environment fallback for -beta6-bootstrap-source, unset = the beta6 bootstrap service stays dormant; first use engine/composition/src/boot_beta6_bootstrap.c:auto; documented at docs/BOOTSTRAPPING.md: Serving beta6 clients")
+          "absolute directory holding the beta6 snapshot (blocks/, blocks/index/, chainstate/) this node serves; environment fallback for -beta6-bootstrap-source, unset = the beta6 bootstrap service stays dormant; first use engine/composition/src/boot_beta6_bootstrap.c:auto; documented at docs/node/BOOTSTRAPPING.md: Serving beta6 clients")
 Z23_FLAG("ZCL_BIN", "env_build", "-", "-",
           "first use tools/scripts/c3_stopwatch_run_and_record.sh:auto; documented at docs/MVP.md:25: | 3 | **Cold-start sync to tip in <10 min** | Fresh datadir → z23 core sync status repo...")
 Z23_FLAG("ZCL_BINARY_FALLBACK_THRESHOLD", "env_runtime", "-", "-",
@@ -257,7 +257,7 @@ Z23_FLAG("ZCL_BLOCKER_RATE_LIMIT_MS", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_BLOCKER_REMEDY_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_blocker_remedy.c:auto")
 Z23_FLAG("ZCL_BLOCK_SCAN_WORKERS", "env_runtime", "-", "-",
-          "first use engine/composition/src/boot_block_file_scan.c:auto; documented at docs/BENCHMARKS_LOG.md:28: | 2026-05-24 | 6e0f6a82c | #1 cold import identity | serial 48.9s / default-workers 57....")
+          "first use engine/composition/src/boot_block_file_scan.c:auto; documented at docs/quality/BENCHMARKS_LOG.md:28: | 2026-05-24 | 6e0f6a82c | #1 cold import identity | serial 48.9s / default-workers 57....")
 Z23_FLAG("ZCL_BODY_HISTORY_BACKFILL_MODE", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/body_backfill_service.c:auto")
 Z23_FLAG("ZCL_BOOTSTRAP_CC", "env_build", "cc", "-",
@@ -440,7 +440,7 @@ Z23_FLAG("ZCL_CORPUS_STORE_ROOT", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_CRASH_DATADIR", "env_runtime", "-", "-",
           "first use tools/crash_recovery_test.c:auto; documented at docs/TENACITY.md:205: ZCL_CRASH_DATADIR unset). All valuable as a regression floor; none sample the")
 Z23_FLAG("ZCL_CRASH_REQUIRE_TEETH", "env_runtime", "-", "-",
-          "first use tools/crash_recovery_test.c:auto; documented at docs/CHAOS_HARNESS.md:64: > with ZCL_CRASH_REQUIRE_TEETH=1).")
+          "first use tools/crash_recovery_test.c:auto; documented at docs/quality/CHAOS_HARNESS.md:64: > with ZCL_CRASH_REQUIRE_TEETH=1).")
 Z23_FLAG("ZCL_CROSS_TRIPLE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tor_archives_ready.sh:auto")
 Z23_FLAG("ZCL_CRYPTO_PERF_BASELINE", "env_build", "-", "-",
@@ -458,7 +458,7 @@ Z23_FLAG("ZCL_CS_BUNDLE_PATH", "env_build", "-", "-",
 Z23_FLAG("ZCL_CS_EXPECTED_TIP", "env_build", "-", "-",
           "first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto; documented at tools/scripts/cold_start_to_tip_stopwatch.sh: tip the peer start_height must approach")
 Z23_FLAG("ZCL_CS_FILE_PEER", "env_build", "-", "-",
-          "first use tools/scripts/c3_stopwatch_run_and_record.sh:auto; documented at docs/work/stopwatch-gates.md:278: | run | ZCL_PEER | ZCL_CS_FILE_PEER | verdict | wall | final H/* | network tip |")
+          "first use tools/scripts/c3_stopwatch_run_and_record.sh:auto; documented at docs/quality/stopwatch-gates.md:278: | run | ZCL_PEER | ZCL_CS_FILE_PEER | verdict | wall | final H/* | network tip |")
 Z23_FLAG("ZCL_CS_FRONTIER_BUSY_TIMEOUT_SECS", "env_build", "120", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
 Z23_FLAG("ZCL_CS_FS_HANDSHAKE_PROBE", "env_build", "-", "-",
@@ -526,7 +526,7 @@ Z23_FLAG("ZCL_CYCLOMATIC_ROOT", "env_build", "-", "-",
           "which directory the complexity gate scans; a test rail so the selftest "
           "can measure a planted fixture instead of the whole checkout")
 Z23_FLAG("ZCL_DATADIR", "env_runtime", "-", "-",
-          "first use engine/entry/main_cli_modes.c:auto; documented at docs/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
+          "first use engine/entry/main_cli_modes.c:auto; documented at docs/quality/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
 Z23_FLAG("ZCL_DB_BACKUP_BEFORE_MIGRATE", "env_runtime", "-", "-",
           "set by -db-backup-before-migrate (engine/composition/src/args.c:746); "
           "first use engine/models/src/database_backup.c:auto; when set, copies "
@@ -837,7 +837,7 @@ Z23_FLAG("ZCL_DRIFT_PID", "env_build", "-", "-",
 Z23_FLAG("ZCL_DRIFT_PIN_FILE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/build_drift_probe.sh:auto")
 Z23_FLAG("ZCL_DRIFT_PIN_TAG", "env_build", "-", "-",
-          "first use tools/scripts/build_drift_probe.sh:auto; documented at docs/RELEASE_CANDIDATE_PIN.md:31: append-only. The last line is the active pin unless ZCL_DRIFT_PIN_TAG names")
+          "first use tools/scripts/build_drift_probe.sh:auto; documented at docs/node/RELEASE_CANDIDATE_PIN.md:31: append-only. The last line is the active pin unless ZCL_DRIFT_PIN_TAG names")
 Z23_FLAG("ZCL_DRIFT_ROTATE_BYTES", "env_build", "52428800", "-",
           "undocumented; first use tools/scripts/build_drift_probe.sh:auto")
 Z23_FLAG("ZCL_DRIFT_UNIT", "env_build", "zclassic23", "-",
@@ -1644,7 +1644,7 @@ Z23_FLAG("ZCL_ND_NODE_BIN", "env_build", "-", "-",
 Z23_FLAG("ZCL_ND_RUN_ID", "env_build", "-", "-",
           "undocumented; first use tools/scripts/network_disruption_recovery_stopwatch.sh:auto")
 Z23_FLAG("ZCL_ND_UPSTREAM_PID", "env_build", "-", "-",
-          "first use tools/scripts/netdisrupt_stopwatch_run_and_record.sh:auto; documented at docs/work/stopwatch-gates.md:38: process (--upstream-pid-file= or a bare ZCL_ND_UPSTREAM_PID). It never")
+          "first use tools/scripts/netdisrupt_stopwatch_run_and_record.sh:auto; documented at docs/quality/stopwatch-gates.md:38: process (--upstream-pid-file= or a bare ZCL_ND_UPSTREAM_PID). It never")
 Z23_FLAG("ZCL_ND_UPSTREAM_PID_FILE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/netdisrupt_stopwatch_run_and_record.sh:auto")
 Z23_FLAG("ZCL_NETCRAWL_INTERVAL_SECS", "env_runtime", "-", "-",
@@ -1682,7 +1682,7 @@ Z23_FLAG("ZCL_NO_BUNDLE_FETCH", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_NODE_BIN", "env_build", "build/bin/zclassic23", "-",
           "undocumented; first use tools/dev/arena_acceptance.sh:auto")
 Z23_FLAG("ZCL_NODE_UNIT", "env_build", "zclassic23", "-",
-          "first use tools/mvp_gate.sh:auto; documented at docs/work/mvp-live-gate.md:38: ZCL_NODE_UNIT — systemd --user unit whose ExecStart supplies the")
+          "first use tools/mvp_gate.sh:auto; documented at docs/quality/mvp-live-gate.md:38: ZCL_NODE_UNIT — systemd --user unit whose ExecStart supplies the")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:auto")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_FILE_FLOOR", "env_build", "400", "-",
@@ -1731,7 +1731,7 @@ Z23_FLAG("ZCL_PACKAGE_SIGN_BIN", "env_build", "-", "-",
 Z23_FLAG("ZCL_PARAMS_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/store_sell_operator_proof.sh:auto")
 Z23_FLAG("ZCL_PARAMS_TESTS", "env_test", "-", "-",
-          "first use tests/harness/src/test_crypto_perf_selftest.c:auto; documented at docs/SIMULATOR.md:133: | Sapling shielded send (t→z, z→z) | A | Params-gated (ZCL_PARAMS_TESTS=1 or --only=sim...")
+          "first use tests/harness/src/test_crypto_perf_selftest.c:auto; documented at docs/quality/SIMULATOR.md:133: | Sapling shielded send (t→z, z→z) | A | Params-gated (ZCL_PARAMS_TESTS=1 or --only=sim...")
 Z23_FLAG("ZCL_PARITY_CANON_DATADIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tip_agreement_probe.sh:auto")
 Z23_FLAG("ZCL_PARITY_CANON_RPCPORT", "env_build", "-", "-",
@@ -1785,7 +1785,7 @@ Z23_FLAG("ZCL_PAS_WORK_DATADIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_PEER", "env_build", "127.0.0.1:39070", "-",
           "first use tools/scripts/c3_stopwatch_run_and_record.sh:auto; documented at docs/MVP.md:25: | 3 | **Cold-start sync to tip in <10 min** | Fresh datadir → z23 core sync status repo...")
 Z23_FLAG("ZCL_PEER_BAN_HOURS", "env_test", "-", "-",
-          "first use tests/harness/src/test_peer_scoring.c:auto; documented at docs/work/coldstart-remote-peer-proof.md:150: ordinary path) replaces ZCL_PEER_BAN_HOURS for that one case. With any")
+          "first use tests/harness/src/test_peer_scoring.c:auto; documented at docs/node/coldstart-remote-peer-proof.md:150: ordinary path) replaces ZCL_PEER_BAN_HOURS for that one case. With any")
 Z23_FLAG("ZCL_PEER_BAN_THRESHOLD", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_peer_scoring.c:auto")
 Z23_FLAG("ZCL_PEER_FLOOR_SELFTEST", "env_runtime", "-", "-",
@@ -1937,7 +1937,7 @@ Z23_FLAG("ZCL_RECEIPT_RECORDED_BY", "env_build", "-", "-",
 Z23_FLAG("ZCL_RECEIPT_SIGNERS", "env_build", "-", "-",
           "undocumented; first use tools/scripts/promotion_receipt.sh:auto")
 Z23_FLAG("ZCL_RECOVERY_PHRASE", "env_runtime", "-", "-",
-          "first use contexts/wallet/controllers/src/wallet_recovery_native_handlers.c:auto; documented at docs/CUSTODY_MODEL.md:106: ZCL_RECOVERY_PHRASE. Rebuilding installs spending keys, so a rescan over")
+          "first use contexts/wallet/controllers/src/wallet_recovery_native_handlers.c:auto; documented at docs/node/CUSTODY_MODEL.md:106: ZCL_RECOVERY_PHRASE. Rebuilding installs spending keys, so a rescan over")
 Z23_FLAG("ZCL_REFLEX_BENCH_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-reactor-bench.sh:auto")
 Z23_FLAG("ZCL_REFLEX_BENCH_RUNS", "env_build", "31", "-",
@@ -2055,7 +2055,7 @@ Z23_FLAG("ZCL_REPRO_KEEP", "env_build", "0", "-",
 Z23_FLAG("ZCL_REPRO_LIVE_PLIST", "env_build", "-", "-",
           "undocumented; first use tools/repro_on_copy.sh:auto")
 Z23_FLAG("ZCL_REPRO_REFERENCE_BIN", "env_build", "-", "-",
-          "first use tools/scripts/repro-verify.sh:auto; documented at docs/P2P_SOURCE_HOSTING.md:302: ZCL_REPRO_REFERENCE_BIN=/trusted/accepted/zclassic23 make repro-verify")
+          "first use tools/scripts/repro-verify.sh:auto; documented at docs/commons/P2P_SOURCE_HOSTING.md:302: ZCL_REPRO_REFERENCE_BIN=/trusted/accepted/zclassic23 make repro-verify")
 Z23_FLAG("ZCL_REQUIRE_BACKUP_VERIFIED", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/recovery_policy.c:auto")
 Z23_FLAG("ZCL_REQUIRE_MINGW", "env_build", "0", "-",
@@ -2089,7 +2089,7 @@ Z23_FLAG("ZCL_ROUNDTRIP_RPCPORT", "env_build", "-", "-",
 Z23_FLAG("ZCL_ROUNDTRIP_TIMEOUT", "env_build", "300", "-",
           "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:auto")
 Z23_FLAG("ZCL_RPC_BIN", "env_build", "build/bin/zcl-rpc", "-",
-          "first use platform/deploy/zclassic23-cutover.sh:auto; documented at docs/work/mvp-live-gate.md:37: ZCL_RPC_BIN — c23 client (default build/bin/zcl-rpc)")
+          "first use platform/deploy/zclassic23-cutover.sh:auto; documented at docs/quality/mvp-live-gate.md:37: ZCL_RPC_BIN — c23 client (default build/bin/zcl-rpc)")
 Z23_FLAG("ZCL_RPCCONNECT", "env_build", "-", "-",
           "first use tools/mvp_gate.sh:auto; documented at docs/BUILD.md:817: ZCL_RPCCONNECT: it derives the loopback RPC endpoint from the canonical")
 Z23_FLAG("ZCL_RPC_CONNECT_MS", "env_runtime", "2000", "-",
@@ -2099,7 +2099,7 @@ Z23_FLAG("ZCL_RPC_COOKIE_ROTATE_SEC", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_RPC_DEADLINE_MS", "env_runtime", "10000", "-",
           "first use engine/controllers/src/rpc_client.c:auto; bounds the overall connect/send/receive allowance of one env-defaulted loopback node RPC call after cookie loading and request formatting (1..600000 ms; a non-numeric or out-of-range value falls back to the default); explicit-deadline callers do not read it.")
 Z23_FLAG("ZCL_RPCPORT", "env_runtime", "18232", "-",
-          "first use engine/entry/main_cli_modes.c:auto; documented at docs/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
+          "first use engine/entry/main_cli_modes.c:auto; documented at docs/quality/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
 Z23_FLAG("ZCL_RPC_MAX_TIME_SECS", "env_runtime", "30", "-",
           "first use tools/zcl-rpc.c:auto; bounds curl's --max-time for a single zcl-rpc call (POSIX transport); refused with a named stderr error if set to a non-numeric or non-positive value.")
 Z23_FLAG("ZCL_RPC_QUEUE_WAIT_MS", "env_runtime", "-", "-",
@@ -2155,7 +2155,7 @@ Z23_FLAG("ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR", "env_build", "engine/service
 Z23_FLAG("ZCL_SERVICES_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_supervisor_registration.c:auto")
 Z23_FLAG("ZCL_SESSION_ID", "env_runtime", "-", "-",
-          "first use tools/dev/devloop_cycle.c:auto; documented at docs/ZVCS.md:258: [64 session_id] from ZCL_SESSION_ID")
+          "first use tools/dev/devloop_cycle.c:auto; documented at docs/commons/ZVCS.md:258: [64 session_id] from ZCL_SESSION_ID")
 Z23_FLAG("ZCL_SHELL_HOST_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_shell_host_assumptions.c:auto")
 Z23_FLAG("ZCL_SHELL_HOST_BOOTSTRAP", "env_build", "0", "-",
@@ -2227,9 +2227,9 @@ Z23_FLAG("ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_SIMNET_CONTRACT_SEED", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_simnet_contract.c:auto")
 Z23_FLAG("ZCL_SIMNET_FUZZ_SEED", "env_test", "-", "-",
-          "first use tests/harness/src/test_simnet_fuzz.c:auto; documented at docs/SIMULATOR.md:202: ZCL_SIMNET_FUZZ_SEED=0x51c0ffee5eed0001 make t ONLY=simnet_fuzz")
+          "first use tests/harness/src/test_simnet_fuzz.c:auto; documented at docs/quality/SIMULATOR.md:202: ZCL_SIMNET_FUZZ_SEED=0x51c0ffee5eed0001 make t ONLY=simnet_fuzz")
 Z23_FLAG("ZCL_SIMNET_FUZZ_SEEDS", "env_test", "-", "-",
-          "first use tests/harness/src/test_simnet_fuzz.c:auto; documented at docs/SIMULATOR.md:201: ZCL_SIMNET_FUZZ_SEEDS=2000 make t ONLY=simnet_fuzz")
+          "first use tests/harness/src/test_simnet_fuzz.c:auto; documented at docs/quality/SIMULATOR.md:201: ZCL_SIMNET_FUZZ_SEEDS=2000 make t ONLY=simnet_fuzz")
 Z23_FLAG("ZCL_SIMNET_MEMPOOL_SEED", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_simnet_mempool_adv.c:auto")
 Z23_FLAG("ZCL_SIMNET_NIGHTLY_FUZZ_SWEEP", "env_build", "0", "-",
@@ -2327,7 +2327,7 @@ Z23_FLAG("ZCL_SOAK_SECURITY_CMD", "env_build", "-", "-",
 Z23_FLAG("ZCL_SOAK_SHOW_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:auto")
 Z23_FLAG("ZCL_SOAK_UNIT", "env_build", "zclassic23", "-",
-          "first use tools/mvp_gate.sh:auto; documented at docs/work/mvp-live-gate.md:39: live -datadir / -rpcport defaults (default: ZCL_SOAK_UNIT)")
+          "first use tools/mvp_gate.sh:auto; documented at docs/quality/mvp-live-gate.md:39: live -datadir / -rpcport defaults (default: ZCL_SOAK_UNIT)")
 Z23_FLAG("ZCL_SOURCE_AUTHORITIES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:auto")
 Z23_FLAG("ZCL_SOURCE_AUTHORITY_BASELINE", "env_build", "-", "-",
@@ -2357,9 +2357,9 @@ Z23_FLAG("ZCL_SOURCE_IDENTITY_SESSION", "env_build", "-", "-",
 Z23_FLAG("ZCL_SOURCE_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-resident-bench.sh:auto")
 Z23_FLAG("ZCL_SOVEREIGN_SOURCE_ROOT", "env_build", "-", "-",
-          "first use tools/dev/source-identity.sh:auto; documented at docs/P2P_SOURCE_HOSTING.md:297: export ZCL_SOVEREIGN_SOURCE_ROOT=<accepted-64-hex-ZVCS-root>")
+          "first use tools/dev/source-identity.sh:auto; documented at docs/commons/P2P_SOURCE_HOSTING.md:297: export ZCL_SOVEREIGN_SOURCE_ROOT=<accepted-64-hex-ZVCS-root>")
 Z23_FLAG("ZCL_SOVEREIGN_VERIFY_BIN", "env_build", "-", "-",
-          "first use tools/dev/sovereign-source-identity.sh:auto; documented at docs/P2P_SOURCE_HOSTING.md:298: export ZCL_SOVEREIGN_VERIFY_BIN=/trusted/bootstrap/zclassic23")
+          "first use tools/dev/sovereign-source-identity.sh:auto; documented at docs/commons/P2P_SOURCE_HOSTING.md:298: export ZCL_SOVEREIGN_VERIFY_BIN=/trusted/bootstrap/zclassic23")
 Z23_FLAG("ZCL_SPECIALISTS_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_specialists.c:auto")
 Z23_FLAG("ZCL_SPECIALISTS_FLOOR", "env_build", "10", "-",
@@ -2467,7 +2467,7 @@ Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_ROOT", "env_build", ".", "-",
 Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_SELFTEST", "env_build", "0", "-",
           "undocumented; first use tools/lint/lintc/gate_systemd_memory_budget.c:auto")
 Z23_FLAG("ZCL_TASK_REF", "env_runtime", "-", "-",
-          "first use tools/dev/devloop_cycle.c:auto; documented at docs/ZVCS.md:259: [128 task_ref] from ZCL_TASK_REF")
+          "first use tools/dev/devloop_cycle.c:auto; documented at docs/commons/ZVCS.md:259: [128 task_ref] from ZCL_TASK_REF")
 Z23_FLAG("ZCL_TELEMETRY_DOMAINS_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
 Z23_FLAG("ZCL_TELEMETRY_FIELDS_DIR", "env_build", "-", "-",
@@ -2511,7 +2511,7 @@ Z23_FLAG("ZCL_TEST_FREEBSD_RELEASE_DISK", "env_test", "-", "-",
 Z23_FLAG("ZCL_TEST_LOG", "env_build", "/invalid", "-",
           "undocumented; first use tools/dev/deploy-dev-lane-selftest.sh:auto")
 Z23_FLAG("ZCL_TEST_ONLY", "env_test", "-", "-",
-          "first use tests/harness/src/test.c:auto; documented at docs/CHAOS_HARNESS.md:518: ZCL_TEST_ONLY=chaos_harness build/bin/test_zcl")
+          "first use tests/harness/src/test.c:auto; documented at docs/quality/CHAOS_HARNESS.md:518: ZCL_TEST_ONLY=chaos_harness build/bin/test_zcl")
 Z23_FLAG("ZCL_TEST_PERF_ASSERTS", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_coins_ram.c:auto")
 Z23_FLAG("ZCL_TEST_PERF_BUDGET_SEC", "env_test", "-", "-",
@@ -2633,9 +2633,9 @@ Z23_FLAG("ZCL_WALLCLOCK_GATE_SCAN_GLOB", "env_build", "-", "-",
 Z23_FLAG("ZCL_WALLET_KDF_ITERS", "env_runtime", "-", "-",
           "undocumented; first use contexts/wallet/modules/wallet/src/wallet_keystore.c:auto")
 Z23_FLAG("ZCL_WALLET_NO_PHRASE_BACKUP", "env_runtime", "-", "-",
-          "first use engine/composition/src/boot_wallet_phrase.c:auto; documented at docs/CUSTODY_MODEL.md:80: | a file or pipe | -wallet-no-phrase-backup / ZCL_WALLET_NO_PHRASE_BACKUP | SKIP | wall...")
+          "first use engine/composition/src/boot_wallet_phrase.c:auto; documented at docs/node/CUSTODY_MODEL.md:80: | a file or pipe | -wallet-no-phrase-backup / ZCL_WALLET_NO_PHRASE_BACKUP | SKIP | wall...")
 Z23_FLAG("ZCL_WALLET_PASSPHRASE", "env_runtime", "-", "-",
-          "first use contexts/wallet/modules/wallet/src/wallet_keystore.c:auto; documented at docs/CUSTODY_MODEL.md:46: layers use **independent passphrases**: ZCL_WALLET_PASSPHRASE wraps the rows,")
+          "first use contexts/wallet/modules/wallet/src/wallet_keystore.c:auto; documented at docs/node/CUSTODY_MODEL.md:46: layers use **independent passphrases**: ZCL_WALLET_PASSPHRASE wraps the rows,")
 Z23_FLAG("ZCL_WALLET_RAW_PREPARE_SCAN_DIRS_FOR_TEST", "env_build", "contexts/wallet", "-",
           "which directories the wallet raw-prepare log gate scans; a test rail so "
           "the selftest can point it at a planted fixture")

@@ -202,7 +202,7 @@ static int ph_ready_report(const struct ph_ready *a)
             return die("z23-lint: write failed\n", "");
     return ph_puts(ph_out,
         "\nThe block-connection authority must advance-the-tip OR name-a-typed-blocker\n"
-        "every tick (FRAMEWORK.md Prime Directive). Going ACTIVATION_READY is only\n"
+        "every tick (docs/commons/FRAMEWORK.md Prime Directive). Going ACTIVATION_READY is only\n"
         "honest when local_tip == most-work valid-header tip. On the behind path,\n"
         "register a typed blocker (blocker_set / activation_set_behind_blocker) that\n"
         "names WHY, the height, and the escape action, then transition to READY.\n")

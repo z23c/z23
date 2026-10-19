@@ -5,7 +5,7 @@
  * node observed; a receipt binds BOTH session endpoints to the same fact,
  * so a node can present portable evidence of its verified-byte ratio.
  *
- * TRUST MODEL (docs/P2P_SOURCE_HOSTING.md "Ratio"): receipts are advisory
+ * TRUST MODEL (docs/commons/P2P_SOURCE_HOSTING.md "Ratio"): receipts are advisory
  * reputation, never consensus facts, and every node may ignore them. A
  * signature establishes only that one key attests this exact byte count
  * for this exact package root in this day window. It proves nothing about

@@ -59,7 +59,7 @@
 #include <string.h>
 
 /* Print one result row in the same shape the test suite's cost table uses
- * (docs/SIMULATOR_TXNS.md), so learners can cross-reference. */
+ * (docs/quality/SIMULATOR_TXNS.md), so learners can cross-reference. */
 static void print_result(const char *label, const struct simnet_tx_result *r)
 {
     char hex[65];
@@ -168,7 +168,7 @@ static bool build_htlc_redeem(struct transaction *tx,
 int main(void)
 {
     /* Fixed seed => byte-identical wallet keys, addresses, txids, fees, and
-     * sizes on every run (docs/SIMULATOR.md "the simulator is deterministic"). */
+     * sizes on every run (docs/quality/SIMULATOR.md "the simulator is deterministic"). */
     seed_tape_t *tape = seed_tape_open(0x02017054584B4954ULL, 1700000000);
     assert(tape != NULL);
     seed_tape_install(tape);
@@ -291,5 +291,5 @@ int main(void)
  *       swap state in engine/controllers/src/swap_controller.c
  *       (`swap_initiate`, `swap_participate`; on-chain broadcast/settlement
  *       of the redeem/refund path is still in flight — see
- *       docs/SIMULATOR.md's ZSWP action-coverage rows).
+ *       docs/quality/SIMULATOR.md's ZSWP action-coverage rows).
  */

@@ -140,7 +140,7 @@ list, so the next person comparing `ls ~/.config/systemd/user/` against
 
 Drop-in directories (`<unit>.service.d/`) are host-local by construction and
 are not counted above. When one has accumulated, reconcile it with the
-procedure in [`../../docs/work/canonical-unit-reconciliation.md`](../../docs/work/canonical-unit-reconciliation.md)
+procedure in [`../../docs/node/canonical-unit-reconciliation.md`](../../docs/node/canonical-unit-reconciliation.md)
 rather than reading the directory by eye.
 
 ## Out-of-tree shell still in the path

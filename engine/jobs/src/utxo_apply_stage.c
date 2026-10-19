@@ -144,7 +144,7 @@ _Atomic int64_t  g_ua_select_idle_reason = UA_SELECT_IDLE_NONE;
  * (coins_kv) on the stage's own db handle, INSIDE stage_run_once's BEGIN
  * IMMEDIATE — the coin mutation commits or rolls back as ONE atomic unit
  * with the cursor + inverse-delta + log row, closing the tip-wedge tear
- * class (docs/work/tip-durability-collapse.md). coins_kv is the SOLE live
+ * class (docs/node/tip-durability-collapse.md). coins_kv is the SOLE live
  * UTXO author and read source (the projection is seed-only). Adds run BEFORE
  * spends and the ORDER IS LOAD-BEARING: an intra-block create-then-spend coin
  * is in both arrays and coins_kv_spend no-ops on an absent row, so spends-first

@@ -11,7 +11,7 @@
  *   (scripthash, txid, vout) -> {height, value, script_type,
  *                                spent_by_txid?, spent_height?}
  *
- * Projection discipline (docs/HOW_THE_NODE_WORKS.md): it is derived from the
+ * Projection discipline (docs/node/HOW_THE_NODE_WORKS.md): it is derived from the
  * L0-L2 machine (verified persisted block bodies below the tip_finalize
  * frontier), rebuildable from scratch (drop-and-rederive), carries its own
  * cursor + running SHA3 digest, and is NEVER authoritative for consensus. It is

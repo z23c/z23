@@ -1105,7 +1105,7 @@ static void args_warn_unknown_flag(const char *arg)
         return;
     /* Loud unknown-flag WARNING: this loop must never accept ANY
      * unrecognized "-flag" silently (a documented footgun — see
-     * docs/SYNC.md and CLAUDE.md "Skipping step 1 is a footgun"). A
+     * docs/node/SYNC.md and CLAUDE.md "Skipping step 1 is a footgun"). A
      * typo'd or removed flag (e.g. the old -cold-import/-fastimport) must not
      * silently no-op; it must say so, every boot, at WARN. This is
      * advisory only — it does not FATAL, since some recognized

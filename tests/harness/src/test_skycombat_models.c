@@ -24,7 +24,7 @@
  * and names it, which is the point of stubbing exactly this list.
  *
  * Deterministic models use no live clock, RNG, devices or DB. The document
- * oracle reads only docs/GAME.md as a bounded public source fixture. */
+ * oracle reads only docs/commons/GAME.md as a bounded public source fixture. */
 
 #include "test/test_core.h"
 
@@ -353,7 +353,7 @@ _test_next:;
 static int skycombat_document_tests(void)
 {
     int failures = 0;
-    FILE *f = fopen("docs/GAME.md", "r");
+    FILE *f = fopen("docs/commons/GAME.md", "r");
     ASSERT(f != NULL);
     char prose[16384] = {0}, line[512];
     size_t used = 0;

@@ -1,7 +1,7 @@
 # ZCODE — decentralized C23 source-package hosting (foundation)
 
-> User-facing entry point: [`../METAVERSE.md`](../METAVERSE.md); acceptance
-> bar: [`../METAVERSE_MVP.md`](../METAVERSE_MVP.md). This is a retained
+> User-facing entry point: [`METAVERSE.md`](../commons/METAVERSE.md); acceptance
+> bar: [`METAVERSE_MVP.md`](../commons/METAVERSE_MVP.md). This is a retained
 > foundation record, not a current-work queue. Current ordering lives only in
 > [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
 
@@ -18,7 +18,7 @@
 > [`ZC23_LIVING_COMMONS.md`](./ZC23_LIVING_COMMONS.md).
 
 Foundation record for the ZCODE program. The authority on existing foundations is
-[`../P2P_SOURCE_HOSTING.md`](../P2P_SOURCE_HOSTING.md); this file carries the
+[`P2P_SOURCE_HOSTING.md`](../commons/P2P_SOURCE_HOSTING.md); this file carries the
 owner's original 15-slice build order, naming, and boundaries on top of it.
 That order is retained as history, not as the current queue. Consensus
 parity is untouched: ZCODE is an application protocol over Z23.
@@ -114,7 +114,7 @@ record pays a ZCL transaction fee. Two deliverables:
    The settle plan must preview the exact ZCL fee before commit
    (`zcode reward plan` shows `estimated_fee_zcl`, recipient count, byte
    size); the owner confirms an irreversible spend, matching the burn-preview
-   discipline in `docs/P2P_SOURCE_HOSTING.md`. Fee model: transparent ZCL tx
+   discipline in `docs/commons/P2P_SOURCE_HOSTING.md`. Fee model: transparent ZCL tx
    with 1 OP_RETURN (ZSLP lokad payload) + N token outputs + change; size and
    fee grow ~linearly in N, so the per-recipient fee falls as the batch grows.
    Settlement stays reorg-aware and idempotent: a settled window records its

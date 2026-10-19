@@ -335,7 +335,7 @@ static int test_yardsale_guide(void)
         ASSERT(strstr(json_get_str(json_get(&reply.data, "confirm_rule")),
                       "confirm:true") != NULL);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "docs")),
-                      "docs/SELL.md") == 0);
+                      "docs/node/SELL.md") == 0);
         const struct json_value *layers = json_get(&reply.data, "layers");
         ASSERT(layers != NULL && layers->type == JSON_ARR);
         ASSERT(layers->num_children == 6);

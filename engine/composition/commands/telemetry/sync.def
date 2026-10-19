@@ -7,7 +7,7 @@
  * leaves they project the ALREADY-RENDERED document into one row per rung.
  * They name no telemetry field and decide no health; see
  * tools/command/native_telemetry_sync_command.c and
- * docs/TELEMETRY_CONTRACT.md.
+ * docs/node/TELEMETRY_CONTRACT.md.
  *
  * FRESHNESS, stated once here because all three share it: the provider reads
  * lock-free publications of THIS PROCESS's reducer stages plus one durable

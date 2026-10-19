@@ -13,7 +13,7 @@
  *       SERVED to peers (core/modules/net/src/fast_sync.c streams `FROM utxos`).
  *   (B) progress.kv `coins` (coins_kv) — the tear-PROOF reducer authority. The
  *       reducer writes coins_kv atomically with the stage cursor in ONE
- *       BEGIN IMMEDIATE (docs/work/tip-durability-collapse.md), so every block's
+ *       BEGIN IMMEDIATE (docs/node/tip-durability-collapse.md), so every block's
  *       effect lands or rolls back as one unit.
  *
  * A SIGKILL between the legacy mirror's lazy batch flush and its tip-anchor

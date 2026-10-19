@@ -52,7 +52,7 @@ properties of that machine are the cost.
   loop.
 
 The object vocabulary for the replacement is already frozen in
-[`../work/CANONICAL_LIFECYCLE.md`](../work/CANONICAL_LIFECYCLE.md):
+[`CANONICAL_LIFECYCLE.md`](../node/CANONICAL_LIFECYCLE.md):
 `NEED -> JOB -> CANDIDATE -> PROOF_SET -> PUBLICATION -> REMOTE_RECEIPT`. That
 document defines the objects and the publication predicate. It does not define
 how the objects reach another node, who proves what, or when two changes may
@@ -312,7 +312,7 @@ that calls it is woken by a row rather than by a timer.
   is keyed by a commit pair. Per-group closure keys remove the pair key and the
   train with it. [`../agent/TRAIN_PROTOCOL.md`](../agent/TRAIN_PROTOCOL.md) is
   reduced to a note pointing at the lifecycle, as
-  [`../work/CANONICAL_LIFECYCLE.md`](../work/CANONICAL_LIFECYCLE.md) already
+  [`CANONICAL_LIFECYCLE.md`](../node/CANONICAL_LIFECYCLE.md) already
   requires.
 - **Train stacks as durable state.** `dev train build|check` and its stack
   worktrees, replaced by CANDIDATE bundles.
@@ -369,7 +369,7 @@ once at the end.
 
 This ZRC does not redefine the object vocabulary or the publication predicate;
 both are fixed in
-[`../work/CANONICAL_LIFECYCLE.md`](../work/CANONICAL_LIFECYCLE.md). It does not
+[`CANONICAL_LIFECYCLE.md`](../node/CANONICAL_LIFECYCLE.md). It does not
 add NEED, JOB, CLAIM or REMOTE_RECEIPT, which that document already owns. It
 does not change what a gate checks, only how many times and where a gate's
 verdict is checked. It does not propose a scheduler that assigns work to a
