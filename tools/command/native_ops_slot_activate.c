@@ -111,21 +111,6 @@ struct osa {
     size_t n;
 };
 
-static void osa_invalid(struct zcl_command_reply *reply, const char *code,
-                        const char *message, const char *evidence)
-{
-    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                           ZCL_COMMAND_EXIT_INVALID, code, "normalize", false,
-                           false, message, evidence);
-}
-
-static const char *osa_str(const struct json_value *in, const char *key)
-{
-    const struct json_value *v = json_get(in, key);
-    const char *s = v ? json_get_str(v) : NULL;
-    return (s && s[0]) ? s : NULL;
-}
-
 static bool osa_copy(char *dst, size_t cap, const char *src)
 {
     int n = snprintf(dst, cap, "%s", src);
@@ -143,19 +128,19 @@ static bool osa_add_instance(struct osa *a, const struct json_value *item,
     if (item->type == JSON_STR)
         name = json_get_str(item);
     else if (item->type == JSON_OBJ) {
-        name = osa_str(item, "name");
+        name = slot_json_str(item, "name");
         port = json_get(item, "port");
     }
     if (!slot_name_ok(name) ||
         !slot_unit_name(a->service_class, name, in->unit, sizeof(in->unit))) {
-        osa_invalid(reply, "BAD_INSTANCE",
+        slot_refuse(reply, "BAD_INSTANCE",
                     "an instance is a name of 1-64 characters of a-z 0-9 . _ "
                     "- (or {name, port})", name ? name : "");
         return false;
     }
     for (size_t i = 0; i < a->n; i++)
         if (strcmp(a->inst[i].name, name) == 0) {
-            osa_invalid(reply, "BAD_INSTANCE", "duplicate instance", name);
+            slot_refuse(reply, "BAD_INSTANCE", "duplicate instance", name);
             return false;
         }
     osa_copy(in->name, sizeof(in->name), name);
@@ -170,7 +155,7 @@ static bool osa_parse_instances(const struct json_value *in, struct osa *a,
     const struct json_value *arr = json_get(in, "instances");
     size_t count = arr && arr->type == JSON_ARR ? json_size(arr) : 0;
     if (count == 0 || count > OSA_MAX_INSTANCES) {
-        osa_invalid(reply, "MISSING_INPUT",
+        slot_refuse(reply, "MISSING_INPUT",
                     "instances must be a non-empty array of at most 8 "
                     "instance names", OSA_CMD);
         return false;
@@ -191,7 +176,7 @@ static bool osa_parse_probe(const struct json_value *argv, struct osa *a,
         ok = s && osa_copy(a->probe[i], OSA_ARG_MAX, s);
     }
     if (!ok || a->probe[0][0] != '/') {
-        osa_invalid(reply, "BAD_HEALTH",
+        slot_refuse(reply, "BAD_HEALTH",
                     "a probe is health.argv: an array of up to 12 strings "
                     "whose first is an absolute program path (no shell)",
                     OSA_CMD);
@@ -210,7 +195,7 @@ static bool osa_parse_listen(const struct json_value *h, const char *kind,
     for (size_t i = 0; i < a->n; i++) {
         int port = a->inst[i].port ? a->inst[i].port : a->default_port;
         if (strcmp(kind, "listen") != 0 || port < 1 || port > 65535) {
-            osa_invalid(reply, "BAD_HEALTH",
+            slot_refuse(reply, "BAD_HEALTH",
                         "a listen check needs a port 1..65535 per instance "
                         "(instance {name, port} or health.port)",
                         a->inst[i].name);
@@ -225,13 +210,13 @@ static bool osa_parse_health(const struct json_value *in, struct osa *a,
                              struct zcl_command_reply *reply)
 {
     const struct json_value *h = json_get(in, "health");
-    const char *kind = h ? osa_str(h, "kind") : NULL;
+    const char *kind = h ? slot_json_str(h, "kind") : NULL;
     const struct json_value *t = h ? json_get(h, "timeout_ms") : NULL;
     a->timeout_ms = OSA_TIMEOUT_DEFAULT_MS;
     if (t && t->type == JSON_INT)
         a->timeout_ms = json_get_int(t);
     if (!kind || a->timeout_ms < 0 || a->timeout_ms > OSA_TIMEOUT_MAX_MS) {
-        osa_invalid(reply, "BAD_HEALTH",
+        slot_refuse(reply, "BAD_HEALTH",
                     "health needs kind=listen|probe and a timeout_ms of "
                     "0..300000", OSA_CMD);
         return false;
@@ -246,14 +231,14 @@ static bool osa_parse_health(const struct json_value *in, struct osa *a,
 static bool osa_parse_exec_args(const struct json_value *in, struct osa *a,
                                 struct zcl_command_reply *reply)
 {
-    const char *s = osa_str(in, "exec_args");
+    const char *s = slot_json_str(in, "exec_args");
     if (s && !osa_copy(a->exec_args, sizeof(a->exec_args), s)) {
-        osa_invalid(reply, "BAD_EXEC_ARGS", "exec_args is too long", OSA_CMD);
+        slot_refuse(reply, "BAD_EXEC_ARGS", "exec_args is too long", OSA_CMD);
         return false;
     }
     for (const char *c = a->exec_args; *c; c++)
         if ((unsigned char)*c < 0x20 || *c == 0x7f) {
-            osa_invalid(reply, "BAD_EXEC_ARGS",
+            slot_refuse(reply, "BAD_EXEC_ARGS",
                         "exec_args must be one line of printable text",
                         OSA_CMD);
             return false;
@@ -271,7 +256,7 @@ static bool osa_resolve_dirs(struct osa *a, struct zcl_command_reply *reply)
 {
     enum slot_path_status ps = slot_paths_resolve(&a->sp, a->slot);
     if (ps != SLOT_PATH_OK) {
-        osa_invalid(reply,
+        slot_refuse(reply,
                     ps == SLOT_PATH_NO_ROOT ? "NO_SLOTS_DIR"
                                             : "SLOT_PATH_TOO_LONG",
                     "cannot resolve the slots directory", OSA_CMD);
@@ -279,7 +264,7 @@ static bool osa_resolve_dirs(struct osa *a, struct zcl_command_reply *reply)
     }
     if (!slot_unit_dir(a->unit_dir, sizeof(a->unit_dir)) ||
         !slot_state_dir(a->state_dir, sizeof(a->state_dir))) {
-        osa_invalid(reply, "NO_UNIT_DIR",
+        slot_refuse(reply, "NO_UNIT_DIR",
                     "cannot locate the systemd user unit or state directory: "
                     "set ZCL_SLOT_UNIT_DIR / ZCL_SLOT_STATE_DIR to absolute "
                     "paths or ensure HOME is set", OSA_CMD);
@@ -309,7 +294,7 @@ static bool osa_inst_paths(struct osa *a, struct zcl_command_reply *reply)
 {
     for (size_t i = 0; i < a->n; i++) {
         if (!osa_set_paths(&a->inst[i], a->unit_dir, a->state_dir)) {
-            osa_invalid(reply, "SLOT_PATH_TOO_LONG", "a path is too long",
+            slot_refuse(reply, "SLOT_PATH_TOO_LONG", "a path is too long",
                         a->inst[i].name);
             return false;
         }
@@ -323,7 +308,7 @@ static bool osa_slot_installed(struct osa *a,
     struct stat sb;
     if (stat(a->sp.final_path, &sb) != 0 || !S_ISREG(sb.st_mode) ||
         (sb.st_mode & 0100) == 0) {
-        osa_invalid(reply, "SLOT_NOT_INSTALLED",
+        slot_refuse(reply, "SLOT_NOT_INSTALLED",
                     "the slot is not an installed executable "
                     "<slots>/<slot>/z23; run ops.slot.install first", a->slot);
         return false;
@@ -332,29 +317,29 @@ static bool osa_slot_installed(struct osa *a,
     case SLOT_VERIFY_OK:
         if (slot_record_hex(a->sp.name_dir, a->want_hex))
             return true;
-        osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
+        slot_refuse(reply, "SLOT_DIGEST_MISMATCH",
                     "the slot digest record cannot be read; nothing was "
                     "moved, reinstall the slot", a->slot);
         return false;
     case SLOT_VERIFY_WRITABLE:
-        osa_invalid(reply, "SLOT_DIR_WRITABLE",
+        slot_refuse(reply, "SLOT_DIR_WRITABLE",
                     "the slot directory or the slots root is writable by "
                     "group or others; nothing was moved, chmod go-w it",
                     a->slot);
         return false;
     case SLOT_VERIFY_MISMATCH:
-        osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
+        slot_refuse(reply, "SLOT_DIGEST_MISMATCH",
                     "the slot binary no longer matches the digest recorded "
                     "at install; nothing was moved, reinstall the slot",
                     a->slot);
         break;
     case SLOT_VERIFY_NO_RECORD:
-        osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
+        slot_refuse(reply, "SLOT_DIGEST_MISMATCH",
                     "the slot has no digest record from ops.slot.install; "
                     "nothing was moved, reinstall the slot", a->slot);
         break;
     default:
-        osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
+        slot_refuse(reply, "SLOT_DIGEST_MISMATCH",
                     "the slot is a symlink, not a plain directory and file, "
                     "or not owned by this user; nothing was moved", a->slot);
         break;
@@ -367,24 +352,24 @@ static bool osa_parse(const struct zcl_command_request *request,
 {
     const struct json_value *in = request->input;
     const struct json_value *dry = json_get(in, "dry_run");
-    a->service_class = osa_str(in, "service_class");
-    a->slot = osa_str(in, "slot");
+    a->service_class = slot_json_str(in, "service_class");
+    a->slot = slot_json_str(in, "slot");
     a->dry_run = dry && dry->type == JSON_BOOL && json_get_bool(dry);
     if (!a->service_class || !a->slot) {
-        osa_invalid(reply, "MISSING_INPUT",
+        slot_refuse(reply, "MISSING_INPUT",
                     "ops slot activate needs service_class, slot, instances "
                     "and health", OSA_CMD);
         return false;
     }
     if (!slot_class_ok(a->service_class)) {
-        osa_invalid(reply, "BAD_SERVICE_CLASS",
+        slot_refuse(reply, "BAD_SERVICE_CLASS",
                     "service_class must be tunnel-receiver or gateway; the "
                     "canonical node is never activated here",
                     a->service_class);
         return false;
     }
     if (!slot_name_ok(a->slot)) {
-        osa_invalid(reply, "BAD_SLOT_NAME",
+        slot_refuse(reply, "BAD_SLOT_NAME",
                     "a slot name is 1-64 characters of a-z 0-9 . _ -, not "
                     "starting with - or .", a->slot);
         return false;
@@ -795,7 +780,7 @@ static void osa_execute(const struct zcl_command_request *request,
 {
     struct osa *a = zcl_calloc(1, sizeof(*a), "slot_activate");
     if (!a) {
-        osa_invalid(reply, "OUT_OF_MEMORY", "cannot allocate", OSA_CMD);
+        slot_refuse(reply, "OUT_OF_MEMORY", "cannot allocate", OSA_CMD);
         return;
     }
     if (osa_parse(request, a, reply)) {

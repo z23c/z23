@@ -28,6 +28,7 @@
 #include "base/safe_alloc.h"
 #include "crypto/sha256.h"
 #include "json/json.h"
+#include "util/write_all.h"
 #include "kernel/command_registry.h"
 #include "platform/os_binary_slots.h"
 #include "platform/time_compat.h"
@@ -92,51 +93,36 @@ static void osi_fail(struct zcl_command_reply *reply, const char *code,
                            mutated, message, evidence);
 }
 
-static void osi_invalid(struct zcl_command_reply *reply, const char *code,
-                        const char *message, const char *evidence)
-{
-    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                           ZCL_COMMAND_EXIT_INVALID, code, "normalize", false,
-                           false, message, evidence);
-}
-
-static const char *osi_str(const struct json_value *in, const char *key)
-{
-    const struct json_value *v = json_get(in, key);
-    const char *s = v ? json_get_str(v) : NULL;
-    return (s && s[0]) ? s : NULL;
-}
-
 static bool osi_parse_inputs(const struct zcl_command_request *request,
                              struct osi *st, struct zcl_command_reply *reply)
 {
     const struct json_value *in = request->input;
     const struct json_value *dry = json_get(in, "dry_run");
-    st->release = osi_str(in, "release");
-    st->from = osi_str(in, "from");
-    st->name = osi_str(in, "name");
-    st->member = osi_str(in, "member");
-    st->datadir = osi_str(in, "datadir");
+    st->release = slot_json_str(in, "release");
+    st->from = slot_json_str(in, "from");
+    st->name = slot_json_str(in, "name");
+    st->member = slot_json_str(in, "member");
+    st->datadir = slot_json_str(in, "datadir");
     st->dry_run = dry && dry->type == JSON_BOOL && json_get_bool(dry);
     if (!st->member)
         st->member = OSI_SLOT_FILE;
     if (!st->datadir)
         st->datadir = zcl_native_command_datadir();
     if (!st->release || !st->from || !st->name) {
-        osi_invalid(reply, "MISSING_INPUT",
+        slot_refuse(reply, "MISSING_INPUT",
                     "ops slot install needs release=<the .zid doc>, "
                     "from=<the checked-out binary> and name=<slot name>",
                     OSI_CMD);
         return false;
     }
     if (!slot_name_ok(st->name)) {
-        osi_invalid(reply, "BAD_SLOT_NAME",
+        slot_refuse(reply, "BAD_SLOT_NAME",
                     "a slot name is 1-64 characters of a-z 0-9 . _ -, "
                     "not starting with - or .", st->name);
         return false;
     }
     if (!st->datadir) {
-        osi_invalid(reply, "MISSING_DATADIR",
+        slot_refuse(reply, "MISSING_DATADIR",
                     "no datadir given: the package manifest is read from the "
                     "local package store", OSI_CMD);
         return false;
@@ -149,7 +135,7 @@ static bool osi_resolve_paths(struct osi *st, struct zcl_command_reply *reply)
     struct slot_paths sp;
     enum slot_path_status ps = slot_paths_resolve(&sp, st->name);
     if (ps != SLOT_PATH_OK) {
-        osi_invalid(reply,
+        slot_refuse(reply,
                     ps == SLOT_PATH_NO_ROOT ? "NO_SLOTS_DIR"
                                             : "SLOT_PATH_TOO_LONG",
                     ps == SLOT_PATH_NO_ROOT
@@ -175,7 +161,7 @@ static bool osi_check_release(const struct zcl_command_request *request,
     uint8_t root[32];
     char err[128];
     if (!release_pin_read_doc(st->release, &st->doc, &code)) {
-        osi_invalid(reply, code, "the release doc could not be read as a "
+        slot_refuse(reply, code, "the release doc could not be read as a "
                     "saved .zid (hex text)", st->release);
         return false;
     }
@@ -188,9 +174,9 @@ static bool osi_check_release(const struct zcl_command_request *request,
         return false;
     }
     if (!zcl_native_require_hex64("package_root",
-                                  osi_str(request->input, "package_root"),
+                                  slot_json_str(request->input, "package_root"),
                                   root, err, sizeof(err))) {
-        osi_invalid(reply, "BAD_ROOT", err, OSI_CMD);
+        slot_refuse(reply, "BAD_ROOT", err, OSI_CMD);
         return false;
     }
     memcpy(st->package_root, root, sizeof(root));
@@ -234,20 +220,6 @@ static bool osi_load_manifest(struct osi *st, struct zcl_command_reply *reply)
     return st->file != NULL;
 }
 
-static bool osi_write_all(int fd, const uint8_t *buf, size_t len)
-{
-    while (len > 0) {
-        ssize_t w = write(fd, buf, len);
-        if (w < 0 && errno == EINTR)
-            continue;
-        if (w <= 0)
-            return false;
-        buf += w;
-        len -= (size_t)w;
-    }
-    return true;
-}
-
 /* Read one chunk-sized block, retrying short reads. */
 static ssize_t osi_read_block(int fd, uint8_t *buf, size_t want)
 {
@@ -287,7 +259,7 @@ static enum osi_pass osi_pass_chunks(const struct osi *st, int fd, int dst,
             return OSI_PASS_SIZE;
         if (!vcs_package_verify_chunk(st->file, i, buf, want))
             return OSI_PASS_CHUNK;
-        if (dst >= 0 && !osi_write_all(dst, buf, want))
+        if (dst >= 0 && !zcl_write_all(dst, buf, want))
             return OSI_PASS_IO;
         sha256_write(ctx, buf, want);
     }

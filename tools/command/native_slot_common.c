@@ -80,7 +80,7 @@ bool slot_unit_name(const char *service_class, const char *instance,
     prefix = strcmp(service_class, "gateway") == 0 ? "z23-gateway@"
                                                    : "z23-tunnel-receiver@";
     n = snprintf(out, cap, "%s%s.service", prefix, instance);
-    return n > 0 && (size_t)n < cap;
+    return n >= 0 && (size_t)n < cap;
 }
 
 static bool dir_from_env(const char *env, const char *home_rel,
@@ -174,6 +174,28 @@ bool slot_name_from_binary(const char *binary, char *out, size_t cap)
     return true;
 }
 
+void zcl_native_refuse(struct zcl_command_reply *reply, const char *code,
+                       const char *phase, const char *message,
+                       const char *evidence)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INVALID, code, phase, false,
+                           false, message, evidence);
+}
+
+void slot_refuse(struct zcl_command_reply *reply, const char *code,
+                 const char *message, const char *evidence)
+{
+    zcl_native_refuse(reply, code, "normalize", message, evidence);
+}
+
+const char *slot_json_str(const struct json_value *in, const char *key)
+{
+    const struct json_value *v = json_get(in, key);
+    const char *s = v ? json_get_str(v) : NULL;
+    return (s && s[0]) ? s : NULL;
+}
+
 #ifndef _WIN32
 /* ---- slot digest record -------------------------------------------------- */
 
@@ -181,7 +203,7 @@ static bool slot_child_path(const char *dir, const char *leaf, char *out,
                             size_t cap)
 {
     int n = snprintf(out, cap, "%s/%s", dir, leaf);
-    return n > 0 && (size_t)n < cap;
+    return n >= 0 && (size_t)n < cap;
 }
 
 /* The slot directory must be a real directory we own, and neither it nor the

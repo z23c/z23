@@ -39,14 +39,6 @@ static void oss_execute(const struct zcl_command_request *request,
 #define OSS_CMD "ops.slot.status"
 #define OSS_TEXT_MAX 4096u
 
-static void oss_invalid(struct zcl_command_reply *reply, const char *code,
-                        const char *message, const char *evidence)
-{
-    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                           ZCL_COMMAND_EXIT_INVALID, code, "normalize", false,
-                           false, message, evidence);
-}
-
 /* sha256 and size of a regular file; false when unreadable. */
 static bool oss_hash(const char *path, char hex[65], int64_t *size)
 {
@@ -156,7 +148,7 @@ static bool oss_instances(const struct json_value *in, const char *cls,
     struct json_value rows;
     if (count == 0 || count > 64 || !slot_unit_dir(unit_dir, sizeof(unit_dir)) ||
         !slot_state_dir(state_dir, sizeof(state_dir))) {
-        oss_invalid(reply, "MISSING_INPUT",
+        slot_refuse(reply, "MISSING_INPUT",
                     "instances must be a non-empty array of instance names "
                     "and the unit/state directories must be resolvable",
                     OSS_CMD);
@@ -170,7 +162,7 @@ static bool oss_instances(const struct json_value *in, const char *cls,
         char unit[160];
         if (!name || !slot_unit_name(cls, name, unit, sizeof(unit))) {
             json_free(&rows);
-            oss_invalid(reply, "BAD_INSTANCE",
+            slot_refuse(reply, "BAD_INSTANCE",
                         "an instance is a name of 1-64 characters of a-z 0-9 "
                         ". _ -", name ? name : "");
             return false;
@@ -189,13 +181,13 @@ static void oss_execute(const struct zcl_command_request *request,
     const char *c = cls ? json_get_str(cls) : NULL;
     char slots[SLOT_PATH_MAX];
     if (!c || !slot_class_ok(c)) {
-        oss_invalid(reply, "BAD_SERVICE_CLASS",
+        slot_refuse(reply, "BAD_SERVICE_CLASS",
                     "service_class must be tunnel-receiver or gateway",
                     c ? c : OSS_CMD);
         return;
     }
     if (!slot_root(slots, sizeof(slots))) {
-        oss_invalid(reply, "NO_SLOTS_DIR",
+        slot_refuse(reply, "NO_SLOTS_DIR",
                     "cannot locate the slots directory: set "
                     "ZCL_BINARY_SLOTS_DIR to an absolute path or ensure HOME "
                     "is set", OSS_CMD);

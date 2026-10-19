@@ -20,6 +20,7 @@
  */
 
 #include "command/native_command.h"
+#include "command/native_slot_common.h"
 
 #include "appsync/app_event_sync.h"
 #include "base/bytes.h"
@@ -36,15 +37,6 @@
 #include <string.h>
 
 #define APP_SYNC_LEAF_EVIDENCE "dev.app.sync"
-
-static void app_sync_refuse(struct zcl_command_reply *reply, const char *code,
-                            const char *phase, const char *message,
-                            const char *evidence)
-{
-    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                           ZCL_COMMAND_EXIT_INVALID, code, phase, false, false,
-                           message, evidence);
-}
 
 /* The checkout this command was launched from. Same rule the other dev
  * leaves use: the dispatcher's own context first, the environment second,
@@ -193,7 +185,7 @@ void zcl_native_handle_dev_app_sync(const struct zcl_command_request *request,
     const char *topic = json_get_str(json_get(request->input, "topic"));
     const char *peer = json_get_str(json_get(request->input, "peer"));
     if (!app_id || !app_id[0] || !topic || !topic[0]) {
-        app_sync_refuse(reply, "MISSING_ARGS", "normalize",
+        zcl_native_refuse(reply, "MISSING_ARGS", "normalize",
                         "app_id and topic are both required",
                         APP_SYNC_LEAF_EVIDENCE);
         return;
@@ -204,7 +196,7 @@ void zcl_native_handle_dev_app_sync(const struct zcl_command_request *request,
     bool unknown_topic;
     if (!app_sync_scope(app_sync_source_root(request), app_id, topic, &scope,
                         &why, &unknown_topic)) {
-        app_sync_refuse(reply, "UNKNOWN_TOPIC", "resolve", why, topic);
+        zcl_native_refuse(reply, "UNKNOWN_TOPIC", "resolve", why, topic);
         if (unknown_topic) {
             (void)snprintf(reply->error.evidence, sizeof(reply->error.evidence),
                            "app_id=%s topic=%s", app_id, topic);
@@ -228,14 +220,14 @@ void zcl_native_handle_dev_app_sync(const struct zcl_command_request *request,
     const char *refusal = "";
     if (!app_sync_read_local(&scope, peer, path, sizeof(path), &frontier,
                              &report, &read, &refusal)) {
-        app_sync_refuse(reply, refusal, "datadir",
+        zcl_native_refuse(reply, refusal, "datadir",
                         "this node's database under the datadir could not be "
                         "opened at an absolute path",
                         APP_SYNC_LEAF_EVIDENCE);
         return;
     }
     if (!read) {
-        app_sync_refuse(reply, "TOPIC_UNREADABLE", "read",
+        zcl_native_refuse(reply, "TOPIC_UNREADABLE", "read",
                         "this node's rows for that topic would not be read",
                         topic);
         return;

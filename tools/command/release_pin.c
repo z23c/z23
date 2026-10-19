@@ -7,6 +7,7 @@
 #include "command/release_pin.h"
 
 #include "command/native_command.h"
+#include "command/native_slot_common.h"
 
 #include "base/hex.h"
 #include "crypto/sha256.h"
@@ -37,21 +38,12 @@ bool release_pin_contains(const struct release_pin_set *set,
     return false;
 }
 
-static void rp_fail(struct zcl_command_reply *reply, const char *code,
-                    const char *phase, const char *message,
-                    const char *evidence)
-{
-    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                           ZCL_COMMAND_EXIT_INVALID, code, phase, false,
-                           false, message, evidence);
-}
-
 static bool rp_add(struct release_pin_set *set, const char *hex,
                    struct zcl_command_reply *reply, const char *command)
 {
     uint8_t key[32];
     if (!zcl_hex_decode(hex, key, sizeof(key))) {
-        rp_fail(reply, "BAD_PIN", "normalize",
+        zcl_native_refuse(reply, "BAD_PIN", "normalize",
                 "a pin is an owner's Ed25519 public key: exactly 64 hex "
                 "characters", command);
         return false;
@@ -59,7 +51,7 @@ static bool rp_add(struct release_pin_set *set, const char *hex,
     if (release_pin_contains(set, key))
         return true;
     if (set->count >= RELEASE_PIN_MAX) {
-        rp_fail(reply, "TOO_MANY_PINS", "normalize",
+        zcl_native_refuse(reply, "TOO_MANY_PINS", "normalize",
                 "the pin set holds at most 256 distinct owner keys", command);
         return false;
     }
@@ -89,7 +81,7 @@ static bool rp_pin_line(struct release_pin_set *set, char *line, size_t lineno,
     if (!zcl_hex_decode(key, probe, sizeof(probe))) {
         char where[64];
         snprintf(where, sizeof(where), "line %zu", lineno);
-        rp_fail(reply, "PIN_FILE_INVALID", "normalize",
+        zcl_native_refuse(reply, "PIN_FILE_INVALID", "normalize",
                 "every non-comment line of a pin file must be one 64-hex "
                 "owner public key", where);
         return false;
@@ -102,7 +94,7 @@ static bool rp_load_file(struct release_pin_set *set, const char *path,
 {
     FILE *fp = fopen(path, "rb");
     if (!fp) {
-        rp_fail(reply, "PIN_FILE_UNREADABLE", "normalize",
+        zcl_native_refuse(reply, "PIN_FILE_UNREADABLE", "normalize",
                 "cannot open the owner-pins file; it must be a local file "
                 "listing one 64-hex owner public key per line", path);
         return false;
@@ -115,7 +107,7 @@ static bool rp_load_file(struct release_pin_set *set, const char *path,
         lineno++;
         if (total > RELEASE_PIN_FILE_MAX_BYTES ||
             (!strchr(line, '\n') && !feof(fp))) {
-            rp_fail(reply, "PIN_FILE_INVALID", "normalize",
+            zcl_native_refuse(reply, "PIN_FILE_INVALID", "normalize",
                     "pin file lines must be short and the file at most "
                     "64 KiB", path);
             ok = false;
@@ -125,7 +117,7 @@ static bool rp_load_file(struct release_pin_set *set, const char *path,
     }
     fclose(fp);
     if (ok && set->count == before) {
-        rp_fail(reply, "PIN_FILE_EMPTY", "normalize",
+        zcl_native_refuse(reply, "PIN_FILE_EMPTY", "normalize",
                 "the owner-pins file lists no keys, so nothing could ever "
                 "be trusted from it; add the owner's 64-hex public key",
                 path);
@@ -144,7 +136,7 @@ bool release_pin_collect(const struct json_value *in,
     const char *pin_s = pin ? json_get_str(pin) : NULL;
     const char *file_s = file ? json_get_str(file) : NULL;
     if ((pin && !pin_s) || (file && !file_s)) {
-        rp_fail(reply, "BAD_PIN", "normalize",
+        zcl_native_refuse(reply, "BAD_PIN", "normalize",
                 "pin and pin_file must be strings", command);
         return false;
     }
@@ -190,7 +182,7 @@ static bool rp_root_check(const struct json_value *in,
     char err[128];
     if (!zcl_native_require_hex64("package_root", hex, want, err,
                                   sizeof(err))) {
-        rp_fail(reply, "BAD_ROOT", "normalize", err, command);
+        zcl_native_refuse(reply, "BAD_ROOT", "normalize", err, command);
         return false;
     }
     if (memcmp(want, manifest_root, 32) == 0)
@@ -215,7 +207,7 @@ bool release_pin_gate(const struct json_value *in, bool require_pin,
     if (!release_pin_collect(in, &set, reply, command))
         return false;
     if (require_pin && !set.given) {
-        rp_fail(reply, "PIN_REQUIRED", "normalize",
+        zcl_native_refuse(reply, "PIN_REQUIRED", "normalize",
                 "installing needs an owner pin: pass pin=<64-hex owner "
                 "public key> or pin_file=<local owner-pins file>; there is "
                 "no unpinned install", command);

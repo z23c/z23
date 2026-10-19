@@ -11,6 +11,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "json/json.h"
+#include "kernel/command_registry.h"
+
 #define SLOT_FILE "z23"
 #define SLOT_NAME_MAX 64u
 #define SLOT_PATH_MAX 1536u
@@ -21,6 +24,19 @@ struct slot_paths {
     char final_path[SLOT_PATH_MAX];
     char tmp_path[SLOT_PATH_MAX];
 };
+
+/* The one INVALID-exit refusal every slot leaf, the release pin parser and the
+ * app-sync leaf share: code, phase, message, evidence. */
+void zcl_native_refuse(struct zcl_command_reply *reply, const char *code,
+                       const char *phase, const char *message,
+                       const char *evidence);
+
+/* The same refusal in the "normalize" phase. */
+void slot_refuse(struct zcl_command_reply *reply, const char *code,
+                 const char *message, const char *evidence);
+
+/* A non-empty string member of a JSON object, or NULL. */
+const char *slot_json_str(const struct json_value *in, const char *key);
 
 enum slot_path_status { SLOT_PATH_OK, SLOT_PATH_NO_ROOT, SLOT_PATH_TOO_LONG };
 
