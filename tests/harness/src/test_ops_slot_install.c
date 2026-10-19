@@ -29,6 +29,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_slot_common.h"
 
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
@@ -351,8 +352,10 @@ static int test_osi_install(const struct osi_fx *fx, const struct osi_pkg *p)
                       "the slot is byte-identical and mode 0755");
     free(got);
     snprintf(tmp, sizeof(tmp), "%s/fleet-1.0", fx->slots);
-    failures += osi_check(osi_count(fx->slots) == 1 && osi_count(tmp) == 1,
-                          "no temp file is left behind");
+    failures += osi_check(osi_count(fx->slots) == 1 && osi_count(tmp) == 2 &&
+                          slot_verify_installed(tmp) == SLOT_VERIFY_OK,
+                          "only the binary and its digest record exist, "
+                          "and they agree");
     oc_free(&c);
     return failures;
 }

@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define SLOT_FILE "z23"
 #define SLOT_NAME_MAX 64u
@@ -64,5 +65,26 @@ bool slot_dropin_exec(const char *text, char *bin, size_t bin_cap, char *args,
 
 /* "<slots>/<name>/z23" -> "<name>". */
 bool slot_name_from_binary(const char *binary, char *out, size_t cap);
+
+/* ---- slot digest record (written by install, re-checked by activate) ----- */
+
+#define SLOT_DIGEST_FILE "z23.sha256"
+
+enum slot_verify {
+    SLOT_VERIFY_OK,
+    SLOT_VERIFY_UNSAFE,    /* symlink, not a plain dir/file, or not our own */
+    SLOT_VERIFY_NO_RECORD, /* no readable digest record from install */
+    SLOT_VERIFY_MISMATCH   /* the binary no longer matches the record */
+};
+
+/* SHA-256 of <name_dir>/z23, opened O_NOFOLLOW; false unless it is a regular
+ * file owned by the effective user. */
+bool slot_binary_digest(const char *name_dir, uint8_t sha[32]);
+
+/* Record sha as 64 hex in <name_dir>/z23.sha256 (temp file + rename). */
+bool slot_record_write(const char *name_dir, const uint8_t sha[32]);
+
+/* Recompute the slot binary digest and compare it with the install record. */
+enum slot_verify slot_verify_installed(const char *name_dir);
 
 #endif

@@ -25,6 +25,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_slot_common.h"
 
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -148,6 +149,12 @@ static bool osa_fx_init(struct osa_fx *fx, const char *name)
         snprintf(path, sizeof(path), "%s/%s/z23", fx->slots, slot);
         if (!osa_put(path, slot, 0755))
             return false;
+        {
+            uint8_t sha[32];
+            snprintf(path, sizeof(path), "%s/%s", fx->slots, slot);
+            if (!slot_binary_digest(path, sha) || !slot_record_write(path, sha))
+                return false;
+        }
     }
     if (!osa_put(fx->fake, OSA_FAKE_SYSTEMCTL, 0755) ||
         !osa_put(fx->probe, OSA_PROBE, 0755))
@@ -448,6 +455,46 @@ static int test_osa_listen(void)
     return f;
 }
 
+static int test_osa_digest_reverify(void)
+{
+    struct osa_fx fx;
+    struct osa_cmd c;
+    char json[1024], health[512], p1[PATH_MAX], b1[2048], a1[2048];
+    char bin[PATH_MAX], keep[PATH_MAX], lnk[PATH_MAX];
+    int f = 0;
+    if (!osa_fx_init(&fx, "dig") || !osa_seed_old(&fx, "r1"))
+        return osa_check(false, "fixture");
+    osa_unit_path(&fx, "r1", p1, sizeof(p1));
+    TEST_DISCARD(osa_get(p1, b1, sizeof(b1)));
+    snprintf(bin, sizeof(bin), "%s/new/z23", fx.slots);
+    snprintf(keep, sizeof(keep), "%s/new/z23.keep", fx.slots);
+    snprintf(lnk, sizeof(lnk), "%s/old/z23", fx.slots);
+    osa_probe_json(&fx, health, sizeof(health));
+    /* one byte of the installed binary changes after install */
+    f += osa_check(osa_put(bin, "nex", 0755), "slot byte overwritten");
+    osa_json(&fx, "tunnel-receiver", "new", "[\"r1\"]", health, false, json,
+             sizeof(json));
+    oc_run(&c, json, false);
+    f += osa_check(!oc_ok(&c) && oc_code(&c, "SLOT_DIGEST_MISMATCH"),
+                   "a slot whose bytes changed since install is refused");
+    f += osa_check(osa_get(p1, a1, sizeof(a1)) > 0 && strcmp(a1, b1) == 0 &&
+                       !osa_exists(fx.calls) && !osa_exists(fx.state),
+                   "current drop-in untouched, nothing restarted, no "
+                   "last-good written");
+    oc_free(&c);
+    /* a symlink in place of the binary is refused as well */
+    TEST_DISCARD(rename(bin, keep));
+    f += osa_check(symlink(lnk, bin) == 0, "symlink slot fixture");
+    oc_run(&c, json, false);
+    f += osa_check(!oc_ok(&c) && oc_code(&c, "SLOT_DIGEST_MISMATCH") &&
+                       !osa_exists(fx.calls) &&
+                       osa_get(p1, a1, sizeof(a1)) > 0 && strcmp(a1, b1) == 0,
+                   "a symlinked slot binary is refused, current untouched");
+    oc_free(&c);
+    osa_rm_tree(fx.dir);
+    return f;
+}
+
 int test_ops_slot_activate(void)
 {
     int failures = 0;
@@ -458,6 +505,7 @@ int test_ops_slot_activate(void)
     failures += test_osa_refusals();
     failures += test_osa_dry_run();
     failures += test_osa_listen();
+    failures += test_osa_digest_reverify();
     printf("=== OPS_SLOT_ACTIVATE: %d failure(s) ===\n", failures);
     return failures;
 }

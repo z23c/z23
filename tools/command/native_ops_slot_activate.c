@@ -325,7 +325,27 @@ static bool osa_slot_installed(const struct osa *a,
                     "<slots>/<slot>/z23; run ops.slot.install first", a->slot);
         return false;
     }
-    return true;
+    switch (slot_verify_installed(a->sp.name_dir)) {
+    case SLOT_VERIFY_OK:
+        return true;
+    case SLOT_VERIFY_MISMATCH:
+        osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
+                    "the slot binary no longer matches the digest recorded "
+                    "at install; nothing was moved, reinstall the slot",
+                    a->slot);
+        break;
+    case SLOT_VERIFY_NO_RECORD:
+        osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
+                    "the slot has no digest record from ops.slot.install; "
+                    "nothing was moved, reinstall the slot", a->slot);
+        break;
+    default:
+        osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
+                    "the slot is a symlink, not a plain directory and file, "
+                    "or not owned by this user; nothing was moved", a->slot);
+        break;
+    }
+    return false;
 }
 
 static bool osa_parse(const struct zcl_command_request *request,

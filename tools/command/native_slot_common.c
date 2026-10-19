@@ -4,10 +4,13 @@
  */
 #include "command/native_slot_common.h"
 
+#include "crypto/sha256.h"
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -170,3 +173,106 @@ bool slot_name_from_binary(const char *binary, char *out, size_t cap)
     out[end - start] = '\0';
     return true;
 }
+
+#ifndef _WIN32
+/* ---- slot digest record -------------------------------------------------- */
+
+static bool slot_child_path(const char *dir, const char *leaf, char *out,
+                            size_t cap)
+{
+    int n = snprintf(out, cap, "%s/%s", dir, leaf);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* The slot directory itself must be a real directory we own. */
+static bool slot_dir_safe(const char *name_dir)
+{
+    struct stat sb;
+    return lstat(name_dir, &sb) == 0 && S_ISDIR(sb.st_mode) &&
+           sb.st_uid == geteuid();
+}
+
+bool slot_binary_digest(const char *name_dir, uint8_t sha[32])
+{
+    char path[SLOT_PATH_MAX];
+    struct stat sb;
+    struct sha256_ctx ctx;
+    uint8_t buf[65536];
+    bool ok = true;
+    if (!slot_child_path(name_dir, SLOT_FILE, path, sizeof(path)))
+        return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return false;
+    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) ||
+        sb.st_uid != geteuid()) {
+        close(fd);
+        return false;
+    }
+    sha256_init(&ctx);
+    for (;;) {
+        ssize_t got = read(fd, buf, sizeof(buf));
+        if (got < 0) {
+            ok = false;
+            break;
+        }
+        if (got == 0)
+            break;
+        sha256_write(&ctx, buf, (size_t)got);
+    }
+    close(fd);
+    if (ok)
+        sha256_finalize(&ctx, sha);
+    return ok;
+}
+
+bool slot_record_write(const char *name_dir, const uint8_t sha[32])
+{
+    char final_path[SLOT_PATH_MAX], tmp_path[SLOT_PATH_MAX + 16];
+    char hex[66];
+    if (!slot_child_path(name_dir, SLOT_DIGEST_FILE, final_path,
+                         sizeof(final_path)) ||
+        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", final_path,
+                 (long)getpid()) >= (int)sizeof(tmp_path))
+        return false;
+    for (size_t i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", sha[i]);
+    hex[64] = '\n';
+    hex[65] = '\0';
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                                O_NOFOLLOW, 0644);
+    if (fd < 0)
+        return false;
+    bool ok = write(fd, hex, 65) == 65 && fsync(fd) == 0;
+    if (close(fd) != 0)
+        ok = false;
+    if (!ok || rename(tmp_path, final_path) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+    return true;
+}
+
+enum slot_verify slot_verify_installed(const char *name_dir)
+{
+    char rec_path[SLOT_PATH_MAX], rec[80];
+    uint8_t sha[32];
+    char hex[65];
+    struct stat sb;
+    if (!slot_dir_safe(name_dir))
+        return SLOT_VERIFY_UNSAFE;
+    if (!slot_child_path(name_dir, SLOT_DIGEST_FILE, rec_path,
+                         sizeof(rec_path)) ||
+        lstat(rec_path, &sb) != 0 || !S_ISREG(sb.st_mode) ||
+        sb.st_uid != geteuid())
+        return SLOT_VERIFY_NO_RECORD;
+    if (slot_read_file(rec_path, rec, sizeof(rec)) < 64)
+        return SLOT_VERIFY_NO_RECORD;
+    if (!slot_binary_digest(name_dir, sha))
+        return SLOT_VERIFY_UNSAFE;
+    for (size_t i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", sha[i]);
+    return memcmp(rec, hex, 64) == 0 ? SLOT_VERIFY_OK : SLOT_VERIFY_MISMATCH;
+}
+
+#endif /* _WIN32 */

@@ -519,6 +519,10 @@ static bool osi_install(struct osi *st, struct zcl_command_reply *reply,
     idempotent = state == OSI_SLOT_SAME;
     if (!st->dry_run && !idempotent && !osi_commit(st, reply, &idempotent))
         return false;
+    if (!st->dry_run && !slot_record_write(st->name_dir, st->sha)) {
+        osi_install_fail(reply, "digest record");
+        return false;
+    }
     osi_reply(st, reply, !st->dry_run && !idempotent, idempotent,
               platform_time_monotonic_ms() - t0);
     return true;
