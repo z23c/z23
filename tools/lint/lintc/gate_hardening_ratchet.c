@@ -15,6 +15,10 @@
  * Scope: git-tracked *.c and *.h, minus vendor/, tests/ and tools/lint/.
  * Escape: `// hardening-ok: <reason>` on the same line (reason required).
  *
+ * Shrink-only: the baseline is also compared with its merge-base (origin/main)
+ * version; a raised count or new row fails (as check_determinism_ratchet.sh).
+ * A line of 8192+ bytes is a hard FAIL (file:line), never a silent skip.
+ *
  * Modes: (default) check | --write-baseline | --selftest (main.c).
  *
  * Gates: check-hardening-ratchet
@@ -244,8 +248,12 @@ static int hr_scan_line(struct hr_set *s, struct cstrip *st, const char *path,
                         const char *line, size_t n, int lineno)
 {
     char scrubbed[CSTRIP_LINE_MAX];
-    if (!cstrip_line(st, line, n, scrubbed, sizeof scrubbed))
-        return 0;
+    if (!cstrip_line(st, line, n, scrubbed, sizeof scrubbed)) {
+        fprintf(stderr, "z23-lint: check-hardening-ratchet: %s:%d: line too "
+                "long (%zu bytes, max %d); an unscanned line is not a clean "
+                "line\n", path, lineno, n, CSTRIP_LINE_MAX - 1);
+        return 2;
+    }
     if (hr_has_hatch(line))
         return 0;
     for (int r = 0; r < HR_RULES; r++) {
@@ -266,8 +274,10 @@ static int hr_scan_text(struct hr_set *s, const char *path, const char *text)
         const char *nl = strchr(p, '\n');
         size_t n = nl ? (size_t)(nl - p) : strlen(p);
         lineno++;
-        if (n < CSTRIP_LINE_MAX) {
-            char buf[CSTRIP_LINE_MAX];
+        char buf[CSTRIP_LINE_MAX];
+        if (n >= CSTRIP_LINE_MAX) {
+            rc = hr_scan_line(s, &st, path, "", n, lineno);
+        } else {
             memcpy(buf, p, n);
             buf[n] = '\0';
             rc = hr_scan_line(s, &st, path, buf, n, lineno);
@@ -455,6 +465,80 @@ static int hr_judge(struct hr_set *live, struct hr_set *base, FILE *out)
     return 0;
 }
 
+/* ── shrink-only against the integration point ─────────────────────────── */
+
+/* The baseline itself may only shrink. A (rule, file) count that rose, or a
+ * row that did not exist at the anchor, fails. Mirrors
+ * tools/lint/check_determinism_ratchet.sh: no flag, no commit-message
+ * escape and no reason column admits growth; the in-place
+ * `// hardening-ok: <reason>` on the offending line is the only exemption,
+ * and it lives in the source, not the baseline. Returns 1 on growth. */
+static int hr_shrink_judge(struct hr_set *cur, struct hr_set *old, FILE *out)
+{
+    int grew = 0;
+    for (int i = 0; i < cur->n; i++) {
+        const struct hr_row *c = &cur->v[i];
+        const struct hr_row *o = hr_find(old, c->rule, c->path);
+        int was = o ? o->count : 0;
+        if (c->count <= was)
+            continue;
+        if (!grew)
+            fputs("[check_hardening_ratchet] FAIL — the baseline GREW "
+                  "(shrink-only):\n", out);
+        fprintf(out, "  %s %s: %d -> %d%s\n", k_rules[c->rule].name,
+                c->path, was, c->count, o ? "" : " (new row)");
+        grew++;
+    }
+    if (grew)
+        fputs("  A baseline number may only go down. Fix the code, or mark "
+              "the line\n  // hardening-ok: <reason>. There is no flag that "
+              "admits a higher count.\n", out);
+    return grew ? 1 : 0;
+}
+
+/* Load the baseline as of the merge-base with origin/main (HEAD when there
+ * is no origin/main). Returns 0 and sets *have when an ancestor version
+ * exists; a baseline with no ancestor is the first commit of the record. */
+static int hr_anchor_load(struct hr_set *old, const char *bpath, int *have)
+{
+    char anchor[128] = "HEAD", mb[128];
+    char cmd[HR_PATH + 192];
+    int code = 0;
+    *have = 0;
+    if (capture_cmd("git rev-parse --verify -q origin/main >/dev/null 2>&1",
+                    mb, sizeof mb, &code))
+        return 2;
+    if (code == 0) {
+        if (capture_cmd("git merge-base HEAD origin/main 2>/dev/null", mb,
+                        sizeof mb, &code))
+            return 2;
+        if (code == 0 && mb[0] && strlen(mb) < sizeof anchor)
+            memcpy(anchor, mb, strlen(mb) + 1);
+    }
+    snprintf(cmd, sizeof cmd, "git show '%s:%s' 2>/dev/null", anchor, bpath);
+    FILE *p = popen(cmd, "r");
+    if (!p)
+        return die("z23-lint: check-hardening-ratchet: popen failed (%s)\n",
+                   cmd);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t nread;
+    int rc = 0, rows = 0;
+    while (rc == 0 && (nread = getline(&line, &cap, p)) >= 0) {
+        size_t n = (size_t)nread;
+        if (n && line[n - 1] == '\n')
+            line[--n] = '\0';
+        rows++;
+        rc = hr_base_line(old, line);
+    }
+    free(line); // raw-alloc-ok:lint-runtime
+    int st = pclose(p);
+    if (rc)
+        return rc;
+    *have = st == 0 && rows > 0;
+    return 0;
+}
+
 /* ── entry points ──────────────────────────────────────────────────────── */
 
 int check_hardening_ratchet_run(int argc, char **argv)
@@ -480,7 +564,23 @@ int check_hardening_ratchet_run(int argc, char **argv)
         return rc;
     }
     rc = hr_base_load(&base, bpath);
-    return rc ? rc : hr_judge(&live, &base, stdout);
+    if (rc)
+        return rc;
+    static struct hr_set old;
+    int have = 0;
+    rc = hr_anchor_load(&old, bpath, &have);
+    if (rc)
+        return rc;
+    int grew = 0;
+    if (have)
+        grew = hr_shrink_judge(&base, &old, stdout);
+    else
+        puts("note: no ancestor baseline at the merge-base; treating this "
+             "as the first commit of the record. Later commits may only "
+             "shrink it.");
+    if (grew)
+        return 1;
+    return hr_judge(&live, &base, stdout);
 }
 
 /* ── selftest ──────────────────────────────────────────────────────────── */
@@ -591,6 +691,66 @@ static void hr_st_reader(void)
                "local-reader old/m.h");
 }
 
+/* Finding: a line the scrubber cannot take must FAIL, never be skipped. */
+static void hr_st_longline(void)
+{
+    static char text[CSTRIP_LINE_MAX + 128];
+    memset(text, 'x', sizeof text);
+    memcpy(text, "/* ", 3);
+    memcpy(text + CSTRIP_LINE_MAX + 3, " */ strcpy(a,b);\n", 18);
+    text[CSTRIP_LINE_MAX + 3 + 17] = '\0';
+    static struct hr_set live;
+    live.n = 0;
+    int rc = hr_scan_text(&live, "new/long.c", text);
+    printf("hardening-ratchet selftest %s: line of 8192+ bytes is a hard "
+           "FAIL\n", rc == 2 ? "ok" : "FAIL");
+    hr_st_fails += rc != 2;
+}
+
+static void hr_st_shrink_case(const char *tag, const char *cur_rows,
+                              const char *old_rows, int want_rc,
+                              const char *want_out)
+{
+    static struct hr_set cur, old;
+    static char outbuf[4096];
+    cur.n = old.n = 0;
+    int rc = 0;
+    for (int pass = 0; pass < 2 && rc == 0; pass++) {
+        char *copy = strdup(pass ? old_rows : cur_rows); // raw-alloc-ok:lint-runtime
+        for (char *l = copy ? strtok(copy, "\n") : NULL; l && rc == 0;
+             l = strtok(NULL, "\n"))
+            rc = hr_base_line(pass ? &old : &cur, l);
+        free(copy);
+    }
+    FILE *o = fmemopen(outbuf, sizeof outbuf - 1, "w");
+    if (!o || rc) {
+        printf("hardening-ratchet selftest FAIL: %s (setup)\n", tag);
+        hr_st_fails++;
+        if (o)
+            fclose(o);
+        return;
+    }
+    rc = hr_shrink_judge(&cur, &old, o);
+    fclose(o);
+    int ok = rc == want_rc && (!want_out || strstr(outbuf, want_out));
+    printf("hardening-ratchet selftest %s: %s\n", ok ? "ok" : "FAIL", tag);
+    hr_st_fails += !ok;
+}
+
+static void hr_st_shrink(void)
+{
+    hr_st_shrink_case("baseline row appended fails",
+                      "banned-str a.c 1\nbanned-str b.c 2\n",
+                      "banned-str a.c 1\n", 1,
+                      "banned-str b.c: 0 -> 2 (new row)");
+    hr_st_shrink_case("baseline count raised fails (regenerated upward)",
+                      "banned-str a.c 4\n", "banned-str a.c 3\n", 1,
+                      "banned-str a.c: 3 -> 4");
+    hr_st_shrink_case("baseline unchanged or lowered passes",
+                      "banned-str a.c 2\n", "banned-str a.c 3\n"
+                      "local-reader c.h 1\n", 0, NULL);
+}
+
 int check_hardening_ratchet_selftest(void)
 {
     hr_st_fails = 0;
@@ -598,6 +758,8 @@ int check_hardening_ratchet_selftest(void)
     hr_st_escape();
     hr_st_baseline();
     hr_st_reader();
+    hr_st_longline();
+    hr_st_shrink();
     if (hr_st_fails) {
         printf("check_hardening_ratchet selftest: FAIL — %d case(s)\n",
                hr_st_fails);
