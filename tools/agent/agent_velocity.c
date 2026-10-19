@@ -450,7 +450,7 @@ static const char AV_REGISTRY_RE[] =
     "engine/composition/commands/.*\\.def|"
     "engine/controllers/include/controllers/diagnostics_dumpers.*\\.def|"
     "tools/lint/.*baseline.*\\.txt|core/MANIFEST\\.sha3|docs/DEFENSIVE_CODING\\.md|"
-    "docs/CODEBASE_MAP\\.md|CLAUDE\\.md|\\.gitattributes|\\.gitignore)$";
+    "docs/dev/CODEBASE_MAP\\.md|CLAUDE\\.md|\\.gitattributes|\\.gitignore)$";
 
 static bool av_is_registry(const char *path)
 {

@@ -181,7 +181,7 @@ static void dlq_porcelain_paths(const char *text, char *paths, size_t cap)
 static bool dlq_generated_path(const char *path, size_t len)
 {
     static const char *const generated[] = {
-        "docs/CAPABILITY_INVENTORY.jsonl", "docs/CODEBASE_MAP.md",
+        "docs/CAPABILITY_INVENTORY.jsonl", "docs/dev/CODEBASE_MAP.md",
         "docs/API_REFERENCE.md"
     };
     for (size_t i = 0; i < sizeof(generated) / sizeof(generated[0]); i++) {

@@ -6720,7 +6720,7 @@ static const char dlx_qualify_makefile[] =
     "lint:\n"
     "\t@if [ \"$(QFX)\" = lint ]; then echo \"FAIL gate-x\"; exit 1; fi\n"
     "\t@if [ \"$(QFX)\" = fold ]; then echo regenerated >> "
-    "docs/CODEBASE_MAP.md; fi\n"
+    "docs/dev/CODEBASE_MAP.md; fi\n"
     "\t@if [ \"$(QFX)\" = tree ]; then echo changed >> tracked.txt; fi\n"
     "\t@echo \"== LINT: all checks passed ==\"\n"
     "t-fast-exact:\n"
@@ -6754,7 +6754,7 @@ static bool dlx_qualify_rig(struct dlx_rig *rig, const char *tag,
     (void)snprintf(path, sizeof(path), "%s/Makefile", rig->clone);
     if (!dlx_write(path, dlx_qualify_makefile) ||
         ((files & DLX_Q_MAP) &&
-         !dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", "map\n")) ||
+         !dlx_write_dep(rig->clone, "docs/dev/CODEBASE_MAP.md", "map\n")) ||
         !dlx_write_dep(rig->clone, "tracked.txt", "tracked\n") ||
         ((files & DLX_Q_LEAF_SMOKE) &&
          !dlx_write_dep(rig->clone, "tests/harness/src/test_leaf_smoke.c",
