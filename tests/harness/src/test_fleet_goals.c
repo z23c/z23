@@ -736,6 +736,65 @@ static int fgl_case_checkout(const char *root)
     return failures;
 }
 
+#define FGL_WIKI_OWN "aa11"
+#define FGL_WIKI_FOREIGN "bb22"
+
+static bool fgl_wiki_data(struct json_value *v, const char *text)
+{
+    json_init(v);
+    return json_read(v, text, strlen(text));
+}
+
+static int fgl_case_wiki(void)
+{
+    int failures = 0;
+    struct json_value fresh, own_only, stale, edge;
+    struct zcl_goal_result r;
+    TEST("wiki: a fresh row from another host passes; own-only rows, a stale "
+         "foreign row or an unknown own host stay partial, unmeasured or fail "
+         "as the bar says") {
+        ASSERT(fgl_wiki_data(&fresh,
+            "{\"posts\":[{\"host\":\"" FGL_WIKI_FOREIGN "\",\"created_at\":1799996400},"
+            "{\"host\":\"" FGL_WIKI_OWN "\",\"created_at\":1799999990}]}"));
+        r = zcl_goals_wiki_grade(true, "", &fresh, FGL_WIKI_OWN, FGL_NOW, 120);
+        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_has(r.evidence, "answered in 120 ms"));
+        ASSERT(fgl_has(r.evidence, "1 row(s) from other hosts, newest 3600 s old"));
+        ASSERT(fgl_has(r.evidence, "pinned expiry not probed"));
+        ASSERT(fgl_wiki_data(&edge,
+            "{\"posts\":[{\"host\":\"" FGL_WIKI_FOREIGN "\",\"created_at\":1799913600}]}"));
+        r = zcl_goals_wiki_grade(true, "", &edge, FGL_WIKI_OWN, FGL_NOW, 120);
+        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_wiki_data(&own_only,
+            "{\"posts\":[{\"host\":\"" FGL_WIKI_OWN "\",\"created_at\":1799999940}]}"));
+        r = zcl_goals_wiki_grade(true, "", &own_only, FGL_WIKI_OWN, FGL_NOW, 120);
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "0 row(s) from other hosts"));
+        ASSERT(fgl_has(r.evidence, "no row from another host"));
+        ASSERT(fgl_wiki_data(&stale,
+            "{\"posts\":[{\"host\":\"" FGL_WIKI_FOREIGN "\",\"created_at\":1799913599}]}"));
+        r = zcl_goals_wiki_grade(true, "", &stale, FGL_WIKI_OWN, FGL_NOW, 120);
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "newer than the 86400 s freshness bound"));
+        r = zcl_goals_wiki_grade(true, "", &fresh, FGL_WIKI_OWN, FGL_NOW, 10001);
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "bar 10000 ms"));
+        r = zcl_goals_wiki_grade(false, "fleet board offline", &fresh,
+                                 FGL_WIKI_OWN, FGL_NOW, 0);
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "wiki list did not answer on this node: fleet board offline"));
+        r = zcl_goals_wiki_grade(true, "", &fresh, "", FGL_NOW, 120);
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "own host id is unreadable"));
+        json_free(&fresh);
+        json_free(&edge);
+        json_free(&own_only);
+        json_free(&stale);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_goals(void);
 int test_fleet_goals(void)
 {
@@ -757,6 +816,7 @@ int test_fleet_goals(void)
     failures += fgl_case_hosts();
     failures += fgl_case_render();
     failures += fgl_case_bound();
+    failures += fgl_case_wiki();
     failures += fgl_case_handler(root);
     failures += fgl_case_checkout(root);
     (void)test_rm_rf_recursive(root);

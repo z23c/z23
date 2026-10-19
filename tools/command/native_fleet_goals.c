@@ -400,12 +400,101 @@ static struct zcl_goal_result gr_g6(const struct zcl_goals_options *o)
 
 /* ── G4: wiki read path ───────────────────────────────────────────────── */
 
+/* Newest created_at over the index rows whose host is not this node. */
+static void gr_wiki_foreign(const struct json_value *posts, const char *own,
+                            size_t *count, int64_t *newest)
+{
+    *count = 0;
+    *newest = 0;
+    for (size_t i = 0; posts && posts->type == JSON_ARR && i < posts->num_children;
+         i++) {
+        const struct json_value *row = &posts->children[i];
+        const char *host = json_get_str(json_get(row, "host"));
+        int64_t ts = json_get_int(json_get(row, "created_at"));
+        if (!host || !host[0] || strcmp(host, own) == 0)
+            continue;
+        if (*count == 0 || ts > *newest)
+            *newest = ts;
+        (*count)++;
+    }
+}
+
+struct zcl_goal_result zcl_goals_wiki_grade(bool answered, const char *why,
+                                            const struct json_value *data,
+                                            const char *own_host,
+                                            int64_t now, int64_t latency_ms)
+{
+    const char *next = "card: write a probe page and read it back from "
+                       "every admitted host";
+    const char *tail = "; pinned expiry not probed";
+    size_t foreign = 0;
+    int64_t newest = 0, age = 0;
+    char newest_txt[32] = "none";
+    if (!answered)
+        return gr_unmeasured(next, "wiki list did not answer on this node: %s",
+                             why);
+    if (!own_host || !own_host[0])
+        return gr_unmeasured(next, "this node own host id is unreadable, so "
+                             "rows from other hosts cannot be told apart");
+    gr_wiki_foreign(json_get(data, "posts"), own_host, &foreign, &newest);
+    if (foreign > 0) {
+        age = now - newest;
+        (void)snprintf(newest_txt, sizeof(newest_txt), "%lld s old",
+                       (long long)age);
+    }
+    if (latency_ms > ZCL_GOALS_WIKI_MS_MAX)
+        return zcl_goal_make(ZCL_GOAL_FAIL, next,
+                             "fleet.wiki.list answered in %lld ms on this "
+                             "node (bar %d ms); %zu row(s) from other hosts, "
+                             "newest %s; the list is over the bar%s",
+                             (long long)latency_ms, ZCL_GOALS_WIKI_MS_MAX,
+                             foreign, newest_txt, tail);
+    if (foreign > 0 && age >= 0 && age <= ZCL_GOALS_WIKI_FRESH_S)
+        return zcl_goal_make(ZCL_GOAL_PASS, next,
+                             "fleet.wiki.list answered in %lld ms on this "
+                             "node (bar %d ms); %zu row(s) from other hosts, "
+                             "newest %s; a row from another host is newer "
+                             "than the %d s freshness bound%s",
+                             (long long)latency_ms, ZCL_GOALS_WIKI_MS_MAX,
+                             foreign, newest_txt, ZCL_GOALS_WIKI_FRESH_S, tail);
+    if (foreign == 0)
+        return zcl_goal_make(ZCL_GOAL_PARTIAL, next,
+                             "fleet.wiki.list answered in %lld ms on this "
+                             "node (bar %d ms); 0 row(s) from other hosts; "
+                             "no row from another host yet%s",
+                             (long long)latency_ms, ZCL_GOALS_WIKI_MS_MAX, tail);
+    return zcl_goal_make(ZCL_GOAL_PARTIAL, next,
+                         "fleet.wiki.list answered in %lld ms on this node "
+                         "(bar %d ms); %zu row(s) from other hosts, newest %s; "
+                         "no row from another host is newer than the %d s "
+                         "freshness bound%s",
+                         (long long)latency_ms, ZCL_GOALS_WIKI_MS_MAX, foreign,
+                         newest_txt, ZCL_GOALS_WIKI_FRESH_S, tail);
+}
+
+/* This node board host id in hex, from the local board status; empty when
+ * the status call did not answer. */
+static void gr_own_host(char *out, size_t cap)
+{
+    struct json_value input;
+    struct zcl_command_reply reply;
+    out[0] = '\0';
+    json_init(&input);
+    json_set_object(&input);
+    if (gr_call("fleet.board.status", &input, &reply))
+        (void)snprintf(out, cap, "%s",
+                       json_get_str(json_get(&reply.data, "host")));
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+}
+
 static struct zcl_goal_result gr_g4(const struct zcl_goals_options *o)
 {
     struct json_value input;
     struct zcl_command_reply reply;
-    char why[256];
+    char why[256] = "", own[65] = "";
     int64_t t0, ms;
+    bool answered;
     struct zcl_goal_result r;
     const char *next = "card: write a probe page and read it back from "
                        "every admitted host";
@@ -414,17 +503,13 @@ static struct zcl_goal_result gr_g4(const struct zcl_goals_options *o)
     json_init(&input);
     json_set_object(&input);
     t0 = platform_time_monotonic_ms();
-    if (!gr_call("fleet.wiki.list", &input, &reply)) {
+    answered = gr_call("fleet.wiki.list", &input, &reply);
+    ms = platform_time_monotonic_ms() - t0;
+    if (!answered)
         gr_reason(&reply, why, sizeof(why));
-        r = gr_unmeasured(next, "wiki list did not answer on this node: %s",
-                          why);
-    } else {
-        ms = platform_time_monotonic_ms() - t0;
-        r = zcl_goal_make(ZCL_GOAL_PARTIAL, next,
-                          "fleet.wiki.list answered in %lld ms on this node; "
-                          "cross-host read and pinned expiry are not probed",
-                          (long long)ms);
-    }
+    else
+        gr_own_host(own, sizeof(own));
+    r = zcl_goals_wiki_grade(answered, why, &reply.data, own, gr_now(o), ms);
     zcl_command_reply_free(&reply);
     json_free(&input);
     return r;

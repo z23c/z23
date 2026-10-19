@@ -19,6 +19,8 @@
 #define ZCL_GOALS_TEXT_MAX 16384u
 #define ZCL_GOALS_TRAIN_MIN 3
 #define ZCL_GOALS_LOOKUP_MS_MAX 50
+#define ZCL_GOALS_WIKI_MS_MAX 10000
+#define ZCL_GOALS_WIKI_FRESH_S 86400
 
 enum zcl_goal_grade {
     ZCL_GOAL_PASS,
@@ -82,6 +84,14 @@ enum zcl_goal_grade zcl_goals_grade_lookup(int64_t median_ms);
 enum zcl_goal_grade zcl_goals_grade_fresh(size_t fresh, size_t hosts);
 enum zcl_goal_grade zcl_goals_grade_claims(int64_t live);
 enum zcl_goal_grade zcl_goals_grade_scripts(int64_t scripts);
+
+/* Grades G4 from one fleet.wiki.list answer: data holds its posts array of
+ * index rows (host, created_at), own_host is this node board host id in hex.
+ * Latency is the list call in ms. Exposed so a fixture can pin each rule. */
+struct zcl_goal_result zcl_goals_wiki_grade(bool answered, const char *why,
+                                            const struct json_value *data,
+                                            const char *own_host,
+                                            int64_t now, int64_t latency_ms);
 
 /* Build one graded row: `fmt` formats the evidence, `next` is copied whole. */
 struct zcl_goal_result zcl_goal_make(enum zcl_goal_grade grade, const char *next,
