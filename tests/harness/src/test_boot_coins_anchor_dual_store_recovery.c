@@ -142,6 +142,100 @@ static bool bdsr_anchor_absent(struct node_db *ndb)
     return !found || len == 0;
 }
 
+static bool bdsr_state_present(struct node_db *ndb, const char *key)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool found = false;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT 1 FROM node_state WHERE key=?", -1, &stmt, NULL) ==
+        SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+        found = sqlite3_step(stmt) == SQLITE_ROW;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+static bool bdsr_save_connected_block(struct node_db *ndb, int height,
+                                      const uint8_t hash[32],
+                                      const uint8_t prev_hash[32])
+{
+    struct db_block block;
+    memset(&block, 0, sizeof(block));
+    memcpy(block.hash, hash, sizeof(block.hash));
+    memcpy(block.prev_hash, prev_hash, sizeof(block.prev_hash));
+    block.height = height;
+    block.version = 4;
+    block.merkle_root[0] = 0xAB;
+    block.time = 1700000000u;
+    block.bits = 0x1d00ffffu;
+    block.status = 3;
+    uint8_t solution[8] = {0xE9, 1, 2, 3, 4, 5, 6, 7};
+    block.solution = solution;
+    block.solution_len = sizeof(solution);
+    return db_block_save(ndb, &block);
+}
+
+/* A legacy stale-cursor repair publishes its hash and height as one anchor
+ * fact.  Reject the second write to verify the transaction preserves the
+ * old fact and the no-rewind commitment. */
+static int bdsr_stale_cursor_anchor_atomic(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_coins_anchor_dual_store",
+                     "stale_anchor_atomic");
+    char node_path[512];
+    snprintf(node_path, sizeof(node_path), "%s/node.db", dir);
+
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    TEST("bdsr RED/GREEN: failed stale-anchor height write rolls back hash") {
+        uint8_t old_hash[32];
+        uint8_t old_prev[32] = {1};
+        uint8_t sync_hash[32];
+        bdsr_block_hash(old_hash, 100);
+        ASSERT(node_db_open(&ndb, node_path));
+        ASSERT(bdsr_seed_node_db(&ndb, 105, sync_hash));
+        ASSERT(bdsr_save_connected_block(&ndb, 100, old_hash, old_prev));
+        ASSERT(node_db_state_set(&ndb, "coins_best_block", old_hash,
+                                 sizeof(old_hash)));
+        ASSERT(node_db_state_set_int(&ndb, "cec.coins_best_block_height",
+                                     100));
+        ASSERT(node_db_state_set(&ndb, "sync_projection_tip_hash", sync_hash,
+                                 sizeof(sync_hash)));
+        ASSERT(node_db_state_set_int(&ndb, "sync_projection_tip_height",
+                                     105));
+        ASSERT(node_db_exec(&ndb,
+            "INSERT INTO node_state(key,value) VALUES('utxo_commitment',"
+            "X'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')"));
+        ASSERT(node_db_exec(&ndb,
+            "CREATE TRIGGER bdsr_refuse_anchor_height BEFORE INSERT ON "
+            "node_state WHEN NEW.key='cec.coins_best_block_height' "
+            "BEGIN SELECT RAISE(ABORT,'injected height write failure'); END"));
+
+        ASSERT(!utxo_recovery_repair_stale_cursor_from_sync_projection(&ndb));
+        uint8_t got_hash[32] = {0};
+        size_t got_len = 0;
+        int64_t got_height = -1;
+        ASSERT(node_db_state_get(&ndb, "coins_best_block", got_hash,
+                                 sizeof(got_hash), &got_len));
+        ASSERT(got_len == sizeof(got_hash));
+        ASSERT(memcmp(got_hash, old_hash, sizeof(old_hash)) == 0);
+        ASSERT(node_db_state_get_int(&ndb, "cec.coins_best_block_height",
+                                     &got_height));
+        ASSERT(got_height == 100);
+        ASSERT(bdsr_state_present(&ndb, "utxo_commitment"));
+        PASS();
+    } _test_next:;
+    if (ndb.open) {
+        node_db_exec(&ndb, "DROP TRIGGER IF EXISTS bdsr_refuse_anchor_height");
+        node_db_close(&ndb);
+    }
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* CASE 1 — canonical: torn-legacy shape + proven-healthy coins_kv.
  *
  * With coins_applied_height present in progress.kv the open passes directly
@@ -288,6 +382,7 @@ int test_boot_coins_anchor_dual_store_recovery(void)
 {
     printf("\n=== boot_coins_anchor_dual_store_recovery (L1 torn-anchor) ===\n");
     int failures = 0;
+    failures += bdsr_stale_cursor_anchor_atomic();
     failures += bdsr_green();
     failures += bdsr_red_no_coins_kv();
     failures += bdsr_red_migration_incomplete();

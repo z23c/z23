@@ -88,6 +88,32 @@ static bool urs_utxo_height_summary(struct node_db *ndb,
     return ok;
 }
 
+/* The legacy anchor hash and its height are one fact to the integrity gate.
+ * Keep their durable publication (and the no-rewind commitment clear) in one
+ * transaction: a second-write failure must leave the prior anchor intact. */
+static bool urs_store_repaired_anchor(struct node_db *ndb,
+                                      const uint8_t sync_hash[32],
+                                      int64_t sync_h,
+                                      bool clear_commitment)
+{
+    if (!node_db_begin(ndb))
+        return false;
+
+    bool ok = (!clear_commitment ||
+               node_db_state_delete(ndb, "utxo_commitment")) &&
+              node_db_state_set(ndb, "coins_best_block",
+                                sync_hash, 32) &&
+              node_db_state_set_int(ndb, "cec.coins_best_block_height",
+                                    sync_h) &&
+              node_db_commit(ndb);
+    if (ok)
+        return true;
+
+    node_db_rollback(ndb);
+    LOG_WARN("chain", "stale cursor repair: anchor transaction failed");
+    return false;
+}
+
 bool utxo_recovery_repair_stale_cursor_from_sync_projection(
     struct node_db *ndb)
 {
@@ -161,22 +187,9 @@ bool utxo_recovery_repair_stale_cursor_from_sync_projection(
             ndb->db, sync_h, UTXO_BOOT_REWIND_MAX_ROWS);
         if (deleted < 0)
             return false;
-    } else {
-        (void)node_db_exec(ndb,
-            "DELETE FROM node_state WHERE key='utxo_commitment'");
-    }
-
-    if (!node_db_state_set(ndb, "coins_best_block",
-                           sync_hash, sizeof(sync_hash)))
-        return false;
-    /* The height metadata must land too: coins_best_block (hash) and its
-     * height are read together by the coins-integrity gate, so a hash
-     * written without its height is exactly the inconsistency that gate
-     * trips on. Don't claim a successful repair if this write fails. */
-    if (!node_db_state_set_int(ndb, "cec.coins_best_block_height", sync_h)) {
-        LOG_WARN("chain", "stale cursor repair: coins_best_block advanced "
-                 "to h=%lld but height-metadata write failed; reporting "
-                 "repair incomplete", (long long)sync_h);
+        if (!urs_store_repaired_anchor(ndb, sync_hash, sync_h, false))
+            return false;
+    } else if (!urs_store_repaired_anchor(ndb, sync_hash, sync_h, true)) {
         return false;
     }
 
