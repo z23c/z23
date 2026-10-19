@@ -14387,12 +14387,12 @@ check-no-new-coordination-shell: $(LINTC_TOOL)
 	@echo "══ LINT: no new coordination shell ══"
 	@./tools/lint/check_no_new_coordination_shell.sh --selftest && ./tools/lint/check_no_new_coordination_shell.sh
 
-# Gate — no NEW bash script. Every tracked file whose first line is a bash
-# shebang, or whose name ends in .bash, must be listed in
-# tools/lint/bash_allowlist.txt. The list is hand-edited and can only shrink;
-# new tools are written in C23 (preferred) or POSIX sh run by FreeBSD sh.
+# Gate — no NEW shell script. Every tracked shell file (*.sh, *.bash, or a sh,
+# bash, dash or ksh shebang; vendor/ and contexts/commons/corpus/ excluded) must
+# be listed in tools/lint/bash_allowlist.txt. The list is hand-edited and can
+# only shrink; a new tool is a C23 nested z23 command, never a shell script.
 check-no-new-bash: $(LINTC_TOOL)
-	@echo "══ LINT: no new bash ══"
+	@echo "══ LINT: no new shell ══"
 	@./build/bin/z23-lint check-no-new-bash --selftest
 	@./build/bin/z23-lint check-no-new-bash
 

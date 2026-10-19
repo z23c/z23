@@ -1,16 +1,18 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * purpose: gate family — no new bash script (check-no-new-bash). Z23 tools are
- * C23 (preferred) or thin POSIX sh run by FreeBSD sh. A tracked file is a bash
- * file when its first line is a shebang that names bash (`#!/bin/bash`,
- * `#!/usr/bin/env bash`, with or without flags) or its name ends in `.bash`.
+ * purpose: gate family — no new shell script (check-no-new-bash). Z23 tools are
+ * C23, and a new tool is a nested `z23` command, not a script. A tracked file
+ * is a shell file when its name ends in `.sh` or `.bash`, or its first line is
+ * a shebang that names sh, bash, dash or ksh (`#!/bin/sh`, `#!/usr/bin/env
+ * bash`, with or without flags). vendor/ and contexts/commons/corpus/ are not
+ * scanned.
  *
- * Every bash file must be listed in tools/lint/bash_allowlist.txt (one
- * repo-relative path per line, LC_ALL=C sorted, '#' comments allowed). A bash
+ * Every shell file must be listed in tools/lint/bash_allowlist.txt (one
+ * repo-relative path per line, LC_ALL=C sorted, '#' comments allowed). A shell
  * file that is not listed FAILS as NEW. A listed path that is no longer
- * tracked, no longer exists or no longer uses bash FAILS as STALE: delete the
- * line. An unsorted list FAILS. The list is hand-edited and can only shrink;
- * this gate never writes it.
+ * tracked, no longer exists or no longer is a shell file FAILS as STALE: delete
+ * the line. An unsorted list FAILS. The list is hand-edited and can only
+ * shrink; this gate never writes it.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -30,8 +32,15 @@ static int nb_is_name(const char *tok, const char *want_name)
     return strcmp(slash ? slash + 1 : tok, want_name) == 0;
 }
 
-/* A word that names bash once surrounding quotes are dropped. */
-static int nb_word_is_bash(const char *w)
+/* The interpreter names that make a file a shell file. */
+static int nb_name_is_shell(const char *tok)
+{
+    return nb_is_name(tok, "bash") || nb_is_name(tok, "sh")
+        || nb_is_name(tok, "dash") || nb_is_name(tok, "ksh");
+}
+
+/* A word that names a shell once surrounding quotes are dropped. */
+static int nb_word_is_shell(const char *w)
 {
     char buf[256];
     while (*w == '"' || *w == '\'')
@@ -43,7 +52,7 @@ static int nb_word_is_bash(const char *w)
         return 0;
     memcpy(buf, w, n);
     buf[n] = '\0';
-    return nb_is_name(buf, "bash");
+    return nb_name_is_shell(buf);
 }
 
 /* An env option whose value is the next word. */
@@ -55,7 +64,7 @@ static int nb_env_takes_arg(const char *opt)
 
 /* After env: skip options (and the value of -u/-C), NAME=value words and
  * the word after a bare -S; -SSTRING names its command directly. */
-static int nb_env_command_is_bash(char *save)
+static int nb_env_command_is_shell(char *save)
 {
     char *tok;
     while ((tok = strtok_r(NULL, " \t\r\n", &save)) != NULL) {
@@ -64,17 +73,17 @@ static int nb_env_command_is_bash(char *save)
             continue;
         }
         if (strncmp(tok, "-S", 2) == 0 && tok[2] != '\0')
-            return nb_word_is_bash(tok + 2);
+            return nb_word_is_shell(tok + 2);
         if (tok[0] == '-' || strchr(tok, '='))
             continue;
-        return nb_word_is_bash(tok);
+        return nb_word_is_shell(tok);
     }
     return 0;
 }
 
 /* `line` is the first line. The interpreter is the first word, or the
  * command word after env. */
-static int nb_shebang_is_bash(char *line)
+static int nb_shebang_is_shell(char *line)
 {
     if (line[0] != '#' || line[1] != '!')
         return 0;
@@ -82,9 +91,9 @@ static int nb_shebang_is_bash(char *line)
     char *tok = strtok_r(line + 2, " \t\r\n", &save);
     if (!tok)
         return 0;
-    if (nb_is_name(tok, "bash"))
+    if (nb_name_is_shell(tok))
         return 1;
-    return nb_is_name(tok, "env") && nb_env_command_is_bash(save);
+    return nb_is_name(tok, "env") && nb_env_command_is_shell(save);
 }
 
 static int nb_has_suffix(const char *path, const char *suffix)
@@ -93,28 +102,37 @@ static int nb_has_suffix(const char *path, const char *suffix)
     return n > k && strcmp(path + n - k, suffix) == 0;
 }
 
-/* 1 when `path` is a regular file that is a bash file, else 0. */
-static int nb_is_bash(const char *path)
+/* 1 when `path` is under a tree the gate does not scan, else 0. */
+static int nb_excluded(const char *path)
+{
+    return strncmp(path, "vendor/", 7) == 0
+        || strncmp(path, "contexts/commons/corpus/", 24) == 0;
+}
+
+/* 1 when `path` is a regular file that is a shell file, else 0. */
+static int nb_is_shell(const char *path)
 {
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
         return 0;
-    if (nb_has_suffix(path, ".bash"))
+    if (nb_has_suffix(path, ".sh") || nb_has_suffix(path, ".bash"))
         return 1;
     FILE *f = fopen(path, "r");
     if (!f)
         return 0;
     char line[512];
-    int bash = 0;
+    int shell = 0;
     if (fgets(line, sizeof line, f))
-        bash = nb_shebang_is_bash(line);
+        shell = nb_shebang_is_shell(line);
     fclose(f);
-    return bash;
+    return shell;
 }
 
 static int nb_on_path(const char *path, void *ctx)
 {
-    return nb_is_bash(path) ? bln_add(ctx, path) : 0;
+    if (nb_excluded(path))
+        return 0;
+    return nb_is_shell(path) ? bln_add(ctx, path) : 0;
 }
 
 /* Appends without dropping repeats, so a duplicated line stays visible. */
@@ -195,11 +213,12 @@ static int nb_compare(FILE *err, const struct bln_set *list,
 {
     int bad = nb_list_sorted(err, list);
     bad |= nb_only_in(err, found, list,
-                      "check-no-new-bash: NEW bash file(s) not on the list.\n"
-                      "Write it in C23 (preferred) or POSIX sh run by FreeBSD sh:\n") > 0;
+                      "check-no-new-bash: NEW shell file(s) not on the list.\n"
+                      "Do not add a shell script. Write it in C23 and add a "
+                      "nested `z23` command instead:\n") > 0;
     bad |= nb_only_in(err, list, found,
                       "check-no-new-bash: STALE list entries: the file is "
-                      "gone or no longer uses bash.\n"
+                      "gone or no longer is a shell file.\n"
                       "Delete these lines from tools/lint/bash_allowlist.txt:\n") > 0;
     return bad;
 }
@@ -222,7 +241,7 @@ int check_no_new_bash_run(int argc, char **argv)
         fputs("check-no-new-bash: FAIL\n", stderr);
         return 1;
     }
-    printf("check-no-new-bash: clean — %d bash file(s), all on the shrinking "
+    printf("check-no-new-bash: clean — %d shell file(s), all on the shrinking "
            "list\n", found.count);
     return 0;
 }
@@ -236,29 +255,33 @@ static int nb_fixture(const char *dir, const char *name, const char *text,
     if (ovf(snprintf(path, sizeof path, "%s/%s", dir, name), sizeof path)
         || csr_write(path, text))
         return 1;
-    if (nb_is_bash(path) == expect)
+    if (nb_is_shell(path) == expect)
         return 0;
     fprintf(stderr, "check-no-new-bash selftest: %s expected %s\n", name,
-            expect ? "bash" : "not bash");
+            expect ? "shell" : "not shell");
     return 1;
 }
 
 static int nb_detect_selftest(const char *dir)
 {
-    return nb_fixture(dir, "a.sh", "#!/bin/bash\necho\n", 1)
-         | nb_fixture(dir, "b.sh", "#!/usr/bin/env bash\n", 1)
-         | nb_fixture(dir, "c.sh", "#!/bin/bash -eu\n", 1)
-         | nb_fixture(dir, "d.sh", "#!/usr/bin/env -S bash -e\n", 1)
-         | nb_fixture(dir, "k.sh", "#!/usr/bin/env -u HOME bash\n", 1)
-         | nb_fixture(dir, "l.sh", "#!/usr/bin/env -C /srv bash\n", 1)
-         | nb_fixture(dir, "m.sh", "#!/usr/bin/env -Sbash -e\n", 1)
-         | nb_fixture(dir, "n.sh", "#!/usr/bin/env -S\"bash -e\"\n", 1)
-         | nb_fixture(dir, "o.sh", "#!/usr/bin/env -u bash sh\n", 0)
+    return nb_fixture(dir, "a", "#!/bin/bash\necho\n", 1)
+         | nb_fixture(dir, "b", "#!/usr/bin/env bash\n", 1)
+         | nb_fixture(dir, "c", "#!/bin/bash -eu\n", 1)
+         | nb_fixture(dir, "d", "#!/usr/bin/env -S bash -e\n", 1)
+         | nb_fixture(dir, "k", "#!/usr/bin/env -u HOME bash\n", 1)
+         | nb_fixture(dir, "l", "#!/usr/bin/env -C /srv bash\n", 1)
+         | nb_fixture(dir, "m", "#!/usr/bin/env -Sbash -e\n", 1)
+         | nb_fixture(dir, "n", "#!/usr/bin/env -S\"bash -e\"\n", 1)
+         | nb_fixture(dir, "o", "#!/usr/bin/env -u bash sh\n", 1)
          | nb_fixture(dir, "e.bash", "echo\n", 1)
-         | nb_fixture(dir, "f.sh", "#!/bin/sh\necho\n", 0)
-         | nb_fixture(dir, "g.sh", "#!/usr/bin/env sh\n", 0)
-         | nb_fixture(dir, "h.sh", "echo bash\n", 0)
-         | nb_fixture(dir, "i.sh", "# #!/bin/bash\n", 0)
+         | nb_fixture(dir, "f", "#!/bin/sh\necho\n", 1)
+         | nb_fixture(dir, "g", "#!/usr/bin/env sh\n", 1)
+         | nb_fixture(dir, "q", "#!/bin/dash\n", 1)
+         | nb_fixture(dir, "r", "#!/usr/bin/env ksh\n", 1)
+         | nb_fixture(dir, "p.sh", "echo\n", 1)
+         | nb_fixture(dir, "h.txt", "echo bash\n", 0)
+         | nb_fixture(dir, "i", "# #!/bin/bash\n", 0)
+         | nb_fixture(dir, "t", "#!/bin/zsh\n", 0)
          | nb_fixture(dir, "j.c", "#!/bin/bashful\n", 0);
 }
 
@@ -289,10 +312,27 @@ static int nb_compare_selftest(void)
     if (rc)
         return 1;
     return nb_expect("exact list must pass", &list, &same, 0)
-         | nb_expect("new bash file must fail", &list, &added, 1)
+         | nb_expect("new shell file must fail", &list, &added, 1)
          | nb_expect("stale entry must fail", &list, &gone, 1)
          | nb_expect("unsorted list must fail", &reversed, &same, 1)
          | nb_expect("duplicate entry must fail", &dup, &same, 1);
+}
+
+static int nb_exclude_expect(const char *path, int want)
+{
+    if (nb_excluded(path) == want)
+        return 0;
+    fprintf(stderr, "check-no-new-bash selftest: %s excluded != %d\n", path,
+            want);
+    return 1;
+}
+
+static int nb_exclude_selftest(void)
+{
+    return nb_exclude_expect("vendor/x.sh", 1)
+         | nb_exclude_expect("contexts/commons/corpus/y.sh", 1)
+         | nb_exclude_expect("tools/x.sh", 0)
+         | nb_exclude_expect("vendor.sh", 0);
 }
 
 int check_no_new_bash_selftest(void)
@@ -303,7 +343,8 @@ int check_no_new_bash_selftest(void)
         return die("z23-lint: selftest path overflow\n", "");
     if (csr_mkdirs(env_or("TMPDIR", "test-tmp")) || !mkdtemp(dir))
         return die("z23-lint: mkdtemp failed\n", "");
-    int bad = nb_detect_selftest(dir) | nb_compare_selftest();
+    int bad = nb_detect_selftest(dir) | nb_compare_selftest()
+            | nb_exclude_selftest();
     rap_rm_rf(dir);
     return st_ok(bad, "check_no_new_bash selftest: OK\n");
 }
