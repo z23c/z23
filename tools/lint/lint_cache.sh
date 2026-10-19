@@ -95,7 +95,7 @@ check-arm-symbol-single
 check-coins-lookup-nullcheck check-silent-errors-services
 check-silent-errors-controllers check-silent-errors-jobs
 check-silent-errors-conditions check-silent-errors-bool
-check-log-macro-return-type check-no-runtime-abort check-wallet-raw-prepare-log
+check-log-macro-return-type check-no-runtime-abort check-hardening-ratchet check-wallet-raw-prepare-log
 check-before-save-hooks check-pthread-create check-model-validation
 check-model-ar-lifecycle check-model-sql-literals check-persona-resolves
 check-specialists

@@ -315,8 +315,28 @@ assert green).
 | `check-pthread-create` | HARD | Thread spawns go through the sanctioned registry, not raw `pthread_create`, across `core/ engine/ contexts/ cognition/ platform/ tools/` (production C roots). Override `// raw-pthread-ok:<reason>`; sites the wider scan uncovered are pinned in `tools/lint/pthread_create_baseline.txt`. |
 | `check-posix-ere-only` | HARD | GNU regex-extension escapes in `tools/*.c` source text (`regcomp(REG_EXTENDED)` is POSIX ERE only; macOS libc rejects GNU `\b`). Override `// posix-ere-ok:<reason>`. |
 | `check-no-runtime-abort` | RATCHET | New runtime `assert(` / `abort(` in network-reachable modules. `_Static_assert` is NOT counted. Override `// abort-ok:<reason>`. |
+| `check-hardening-ratchet` | RATCHET | Per-file, per-rule shrink-only count of `banned-str` (`strcpy`/`strcat`/`sprintf`/`vsprintf`/`gets`) and `local-reader` (new `*_reader`/`*_cursor`/`*_rd` struct definitions) across tracked C. Override `// hardening-ok: <reason>`. |
 
 ### Detailed gates
+
+- **Gate: `check-hardening-ratchet`** (RATCHET, shrink-only baseline
+  `tools/lint/hardening_ratchet_baseline.txt`) — the single extensible
+  ratchet for the memory-safety rules on untrusted input below. Every finding
+  carries a RULE id; the baseline holds `RULE PATH COUNT` rows, sorted; a
+  tracked `*.c`/`*.h` file (not `vendor/`, `tests/`, `tools/lint/`) may never
+  exceed its baselined count for a rule, and a file or rule with no row has
+  baseline 0. Fewer findings than the row PASSES and prints
+  `can tighten: RULE PATH old->new`, so cleanup lanes never coordinate on the
+  baseline. `core/` is counted like everything else. Rules today:
+  `banned-str` (calls to `strcpy`, `strcat`, `sprintf`, `vsprintf`, `gets`;
+  comments and string literals ignored) and `local-reader` (a struct
+  *definition* named `*_reader`, `*_cursor` or `*_rd`; uses do not count).
+  Override on the same line: `// hardening-ok: <reason>` (reason required).
+  A later rule is one scanner function and one rule-table row in the gate
+  source. `--write-baseline` regenerates the file; `--selftest` is mandatory.
+  <!-- claim: file-present tools/lint/lintc/gate_hardening_ratchet.c # the gate source -->
+  <!-- claim: file-present tools/lint/hardening_ratchet_baseline.txt # the shrink-only baseline -->
+  <!-- claim: gate-passes check-hardening-ratchet # the tree stays within its baseline -->
 
 - **Gate: `check-no-runtime-abort`** (RATCHET, shrink-only baseline
   `tools/lint/no_runtime_abort_baseline.txt`) — **`assert()` is live in this
@@ -1326,6 +1346,7 @@ add/remove a gate.
 - `check-observability-pairing`
 - `check-no-hardlink-seeding`
 - `check-toolgen`
+- `check-hardening-ratchet`
 - `check-hex-codec-single`
 - `check-one-result-type`
 - `check-no-secret-printf`
@@ -1687,6 +1708,36 @@ flag profile shared with `tools/release.sh`.
 
 ---
 
+## Hardening rules for untrusted input
+
+The owner adopted these eleven rules for every byte that arrives from outside
+the process. `check-hardening-ratchet` is the program they grow into: one
+rule at a time becomes a scanner in that gate, with its baseline rows.
+
+1. Untrusted bytes go through the one bounded reader, `stream_read_*` in
+   `core/math/include/core/serialize.h`; no new local reader structs or buf+pos arithmetic in
+   decoders.
+2. Every input-derived length or size uses `<stdckdint.h>` `ckd_add` /
+   `ckd_mul` and fails closed.
+3. Copy only with the destination's size in hand.
+4. No `strcpy`, `strcat`, `sprintf` or `gets` in new code; `snprintf` with a
+   truncation check.
+5. `counted_by` on every flexible array member.
+6. No input-sized VLAs; `-Wvla` on.
+7. One owner per allocation; never keep a pointer into a realloc-able buffer.
+8. C23 in new code: `nullptr`, `[[nodiscard]]` on result-returning functions,
+   `static_assert` for layout.
+9. Every network-facing decoder gets a fuzz target and a sanitizer test group.
+10. Hardening flags `-D_FORTIFY_SOURCE=3`, `-ftrivial-auto-var-init=zero`,
+    `-fstrict-flex-arrays=3`, and `-fsanitize=bounds` in the ASan lane.
+11. Parsers small, loops bounded by explicit lengths, no pointer games, so
+    `qedc` can later prove them.
+
+Enforced today: rule 4 (`banned-str`) and the new-struct part of rule 1
+(`local-reader`), both by `check-hardening-ratchet`; rule 6 is already
+enforced by the compiler warning `-Wvla`. The rest are the program the gate
+grows into and are not yet mechanically checked.
+
 ## 8. Lint-override discipline — every escape hatch is named
 
 Several lint gates accept an inline override marker when the rule cannot
@@ -1711,6 +1762,7 @@ mechanically hold:
 | `// projection-cache-ok:<tag>` | line in a `*_projection.c` with a legitimate cache write outside the strict fold | `check-projections-pure` |
 | `// ram-state-ok:<tag>` | line with derived active-chain cache state that must stay non-authoritative | `check-no-authoritative-ram-state` |
 | `// abort-ok:<reason>` | line with an `assert(`/`abort(` in network-reachable code where continuing would be worse than crashing (a leaked plaintext, a forged key, a silently mis-verified signature) | `check-no-runtime-abort` |
+| `// hardening-ok: <reason>` | line with a banned string call or a hand-rolled reader struct that is provably bounded (reason required) | `check-hardening-ratchet` |
 
 **Syntax (machine-enforced).** Every `<tag>` marker requires a non-empty
 single-token tag matching `[A-Za-z][A-Za-z0-9_-]+` immediately after the colon.

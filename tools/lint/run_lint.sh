@@ -188,6 +188,7 @@ gate_command() {
         check-silent-errors-bool)          echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_silent_bool_errors.sh' ;;
         check-log-macro-return-type)       echo './tools/lint/check_log_macro_return_type.sh --selftest && ./tools/lint/check_log_macro_return_type.sh' ;;
         check-no-runtime-abort)            echo './tools/lint/check_no_runtime_abort.sh' ;;
+        check-hardening-ratchet)           echo './build/bin/z23-lint check-hardening-ratchet --selftest && ./build/bin/z23-lint check-hardening-ratchet' ;;
         check-wallet-raw-prepare-log)      echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_wallet_raw_prepare_log.sh' ;;
         check-before-save-hooks)           echo './build/bin/z23-lint check-before-save-hooks' ;;
         check-pthread-create)              echo './build/bin/z23-lint check-pthread-create' ;;

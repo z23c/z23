@@ -285,6 +285,8 @@ static const struct lint_gate k_gates[] = {
       check_no_snapshot_struct_memcmp_selftest },
     { "check-remote-command-classes", check_remote_command_classes_run,
       check_remote_command_classes_selftest },
+    { "check-hardening-ratchet", check_hardening_ratchet_run,
+      check_hardening_ratchet_selftest },
     { "check-no-runtime-abort", check_no_runtime_abort_run,
       check_no_runtime_abort_selftest },
     { "check-model-sql-literals", check_model_sql_literals_run,

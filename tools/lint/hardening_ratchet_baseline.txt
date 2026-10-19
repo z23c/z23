@@ -1,0 +1,85 @@
+# check-hardening-ratchet baseline: `RULE PATH COUNT` rows, sorted.
+# COUNTS MAY ONLY SHRINK. A file or rule with no row has baseline 0.
+# Fewer findings than a row passes and prints a tighten note;
+# lower the number (or delete the row) when you clean a file up.
+# Adding a row or raising a number is not a fix; mark a justified
+# line in place with `// hardening-ok: <reason>` instead.
+# Rules: banned-str (strcpy strcat sprintf vsprintf gets),
+#        local-reader (struct *_reader, *_cursor, *_rd definitions).
+# core/ rows are counted and frozen like the rest of core/.
+# Regenerate: z23-lint check-hardening-ratchet --write-baseline
+banned-str apps/skycombat/src/models/input_model.c 4
+banned-str apps/zcl-ledger/device-blue-review/src/blue_review_app.c 5
+banned-str apps/zcl-ledger/device-blue-shielded-review/src/blue_shielded_review_app.c 3
+banned-str apps/zcl-ledger/device-blue-wallet/src/blue_payment_screen.c 1
+banned-str apps/zcl-ledger/device-blue-wallet/src/wallet_payment_device.c 1
+banned-str apps/zcl-ledger/src/blue_payment_screen.c 1
+banned-str apps/zcl-ledger/src/blue_shielded_review_app.c 3
+banned-str apps/zcl-ledger/tests/test_blue_app_catalog.c 1
+banned-str apps/zcl-ledger/tests/test_blue_payment_screen.c 3
+banned-str apps/zcl-ledger/tests/test_blue_review_screen.c 4
+banned-str apps/zcl-ledger/tests/test_blue_review_simulator.c 2
+banned-str apps/zcl-ledger/tests/test_blue_wallet_device_ui.c 1
+banned-str apps/zcl-ledger/tests/test_blue_wallet_integrated_loop.c 2
+banned-str apps/zcl-ledger/tests/test_blue_wallet_startup.c 1
+banned-str contexts/commons/modules/plugin/src/plugin_pack.c 2
+banned-str contexts/commons/modules/vcs/src/package_recipe.c 1
+banned-str contexts/commons/packages/zlru/tests/test_zlru.c 2
+banned-str contexts/commons/packages/ztemplate/tests/test_ztemplate.c 1
+banned-str contexts/commons/packages/ztoml/tests/test_ztoml.c 1
+banned-str contexts/commons/packages/zxml/src/zxml.c 1
+banned-str core/chainparams/src/chainparams.c 20
+banned-str core/math/src/uint256.c 1
+banned-str core/modules/net/src/fast_sync.c 3
+banned-str core/modules/net/src/msg_headers.c 1
+banned-str core/modules/script/src/htlc.c 1
+banned-str tools/agent/agent_velocity.c 8
+banned-str tools/agent/check_claims.c 2
+banned-str tools/arena_product_journey_c23.c 2
+banned-str tools/bench_fresh_sync.c 1
+banned-str tools/command/native_dev_land_qualify.c 2
+banned-str tools/command/native_dev_train_keep.c 1
+banned-str tools/command/native_devagent_ticketkey.c 3
+banned-str tools/corpus_census.c 1
+banned-str tools/corpus_census_args.c 1
+banned-str tools/dev/dev_proof.c 1
+banned-str tools/dev/wiki_runtime.c 1
+banned-str tools/package_factory.c 1
+banned-str tools/verify/fixed_result_image.c 1
+banned-str tools/verify/fixed_result_launcher_probe.c 1
+banned-str tools/verify/fixed_result_profile.c 1
+banned-str tools/verify/probe_util.c 3
+local-reader cognition/modules/codeindex/src/codeindex_merkle.c 1
+local-reader cognition/modules/codeindex/src/codeindex_merkle_decode.c 1
+local-reader cognition/modules/session/src/fleet_board_proto.c 2
+local-reader contexts/commons/modules/vcs/src/build_action_v2_decode.c 1
+local-reader contexts/commons/modules/vcs/src/package_store.c 1
+local-reader contexts/commons/modules/zssh/src/zssh_internal.h 1
+local-reader contexts/explorer/modules/presentation/src/model.c 1
+local-reader contexts/wallet/services/src/yardsale_wallet_service.c 1
+local-reader core/modules/net/include/net/https_frontdoor.h 2
+local-reader core/modules/sapling/src/groth16_prover.c 1
+local-reader engine/composition/src/boot_fleet_board_fleet.c 1
+local-reader engine/jobs/src/utxo_apply_delta_undo.c 1
+local-reader engine/models/include/models/op_return_index.h 1
+local-reader engine/modules/appsync/include/appsync/app_event_sync.h 1
+local-reader engine/modules/appsync/src/app_event_sync_wire.c 1
+local-reader engine/modules/overlay/include/overlay/overlay_codec.h 1
+local-reader engine/modules/storage/src/census_read.c 1
+local-reader engine/modules/storage/src/checkpoint_rung.c 1
+local-reader engine/modules/storage/src/ldb_reader_internal.h 1
+local-reader engine/modules/storage/src/sqlite_pinned_reader.c 1
+local-reader engine/services/src/block_index_flat_header.c 1
+local-reader engine/services/src/build_fabric_attach.c 2
+local-reader platform/modules/codec/include/codec/cursor.h 1
+local-reader platform/modules/rvmachine/src/rvmachine_snapshot_priv.h 1
+local-reader tools/command/native_dev_fleet_start.c 1
+local-reader tools/command/native_dev_index_identity.h 1
+local-reader tools/command/native_dev_land.c 1
+local-reader tools/command/native_dev_machine_boot_owner.c 1
+local-reader tools/command/native_fleet_triggers_eval.c 1
+local-reader tools/dev/verify_attest.c 1
+local-reader tools/fleet_gateway.c 1
+local-reader tools/verify/fixed_result_contract.c 1
+local-reader tools/zcc_epoch_batch.c 1
+local-reader tools/zcode_app_server_benchmark.c 1

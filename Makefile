@@ -6610,6 +6610,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_remote_command_classes.c \
     tools/lint/lintc/gate_remote_command_classes_parse.c \
     tools/lint/lintc/gate_remote_command_classes_selftest.c \
+    tools/lint/lintc/gate_hardening_ratchet.c \
     tools/lint/lintc/gate_no_runtime_abort.c \
     tools/lint/lintc/gate_no_runtime_abort_report.c \
     tools/lint/lintc/gate_no_runtime_abort_selftest.c \
@@ -13828,6 +13829,11 @@ check-test-registration: $(LINTC_TOOL)
 # compile-time and is NOT counted. An abort that is correct (softening it would
 # leak plaintext or forge a key) is annotated in place with
 # `// abort-ok:<reason>` instead of being buried in the baseline.
+check-hardening-ratchet: $(LINTC_TOOL)
+	@echo "══ LINT: memory-safety hardening ratchet (banned-str, local-reader) ══"
+	@./build/bin/z23-lint check-hardening-ratchet --selftest
+	@./build/bin/z23-lint check-hardening-ratchet
+
 check-no-runtime-abort: $(LINTC_TOOL)
 	@echo "══ LINT: no runtime abort primitive ══"
 	@./tools/lint/check_no_runtime_abort.sh
@@ -15616,6 +15622,7 @@ LINT_GATES := \
     check-silent-errors-bool \
     check-log-macro-return-type \
     check-no-runtime-abort \
+    check-hardening-ratchet \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
     check-zcc-epoch-object \
