@@ -59,14 +59,6 @@ static int hr_idc(int c)
     return c == '_' || isalnum(c);
 }
 
-static size_t hr_skip_ws(const char *s, size_t i, size_t n)
-{
-    for (; i < n; i++)
-        if (s[i] != ' ' && s[i] != '\t')
-            break;
-    return i;
-}
-
 /* ── rule banned-str ───────────────────────────────────────────────────── */
 
 static int hr_banned_word(const char *w, size_t len)
@@ -91,7 +83,7 @@ static int hr_scan_banned(const char *s, size_t n)
         size_t b = i;
         while (i < n && hr_idc((unsigned char)s[i]))
             i++;
-        size_t j = hr_skip_ws(s, i, n);
+        size_t j = lc_skip_ws(s, i, n);
         if (j < n && s[j] == '(' && hr_banned_word(s + b, i - b))
             hits++;
     }
@@ -115,17 +107,17 @@ static int hr_reader_name(const char *w, size_t len)
  * definition: the brace is on the next line). */
 static int hr_struct_def_at(const char *s, size_t n, size_t kw, size_t end)
 {
-    size_t i = hr_skip_ws(s, end, n), b = i;
+    size_t i = lc_skip_ws(s, end, n), b = i;
     while (i < n && hr_idc((unsigned char)s[i]))
         i++;
     if (i == b || !hr_reader_name(s + b, i - b))
         return 0;
-    i = hr_skip_ws(s, i, n);
+    i = lc_skip_ws(s, i, n);
     if (i < n)
         return s[i] == '{';
-    size_t p = hr_skip_ws(s, 0, n);
+    size_t p = lc_skip_ws(s, 0, n);
     return p == kw || (p + 8 <= kw && memcmp(s + p, "typedef ", 8) == 0
-                       && hr_skip_ws(s, p + 7, n) == kw);
+                       && lc_skip_ws(s, p + 7, n) == kw);
 }
 
 /* Column-0 `} NAME;` closing a typedef'd struct. */
@@ -133,12 +125,12 @@ static int hr_typedef_close(const char *s, size_t n)
 {
     if (n == 0 || s[0] != '}')
         return 0;
-    size_t i = hr_skip_ws(s, 1, n), b = i;
+    size_t i = lc_skip_ws(s, 1, n), b = i;
     while (i < n && hr_idc((unsigned char)s[i]))
         i++;
     if (i == b || !hr_reader_name(s + b, i - b))
         return 0;
-    i = hr_skip_ws(s, i, n);
+    i = lc_skip_ws(s, i, n);
     return i < n && s[i] == ';';
 }
 

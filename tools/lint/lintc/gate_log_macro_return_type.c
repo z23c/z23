@@ -105,13 +105,6 @@ static int lmr_alpha_(char c)
 
 static int lmr_upper(char c) { return c >= 'A' && c <= 'Z'; }
 
-static size_t lmr_skip_ws(const char *s, size_t i, size_t n)
-{
-    while (i < n && lmr_ws(s[i]))
-        i++;
-    return i;
-}
-
 static const char *lmr_find(const char *h, size_t hn, const char *nd)
 {
     size_t nn = strlen(nd);
@@ -201,10 +194,10 @@ static enum lmr_dir lmr_classify(const char *s, size_t n)
         { "ifdef", LMR_DIR_IF }, { "ifndef", LMR_DIR_IF }, { "if", LMR_DIR_IF },
         { "elif", LMR_DIR_ELSE }, { "else", LMR_DIR_ELSE }, { "endif", LMR_DIR_ENDIF },
     };
-    size_t i = lmr_skip_ws(s, 0, n);
+    size_t i = lc_skip_ws(s, 0, n);
     if (i >= n || s[i] != '#')
         return LMR_DIR_NONE;
-    i = lmr_skip_ws(s, i + 1, n);
+    i = lc_skip_ws(s, i + 1, n);
     size_t e = i;
     while (e < n && lmr_word(s[e]))
         e++;
@@ -217,14 +210,14 @@ static enum lmr_dir lmr_classify(const char *s, size_t n)
 
 static int lmr_is_pp_line(const char *s, size_t n)
 {
-    size_t i = lmr_skip_ws(s, 0, n);
+    size_t i = lc_skip_ws(s, 0, n);
     return i < n && s[i] == '#';
 }
 
 /* Index of the '(' after an all-caps macro name at the start of the line, or 0. */
 static size_t lmr_macro_open(const char *s, size_t n)
 {
-    size_t i = lmr_skip_ws(s, 0, n);
+    size_t i = lc_skip_ws(s, 0, n);
     if (i >= n || !lmr_upper(s[i]))
         return 0;
     size_t e = i + 1;
@@ -232,7 +225,7 @@ static size_t lmr_macro_open(const char *s, size_t n)
         e++;
     if (e == i + 1)
         return 0;
-    size_t q = lmr_skip_ws(s, e, n);
+    size_t q = lc_skip_ws(s, e, n);
     return q < n && s[q] == '(' ? q : 0;
 }
 
@@ -325,7 +318,7 @@ static int lmr_split_name(const struct lmr_buf *s, size_t *at, size_t *end)
         size_t e = b;
         while (e < s->n && lmr_word(s->p[e]))
             e++;
-        size_t q = lmr_skip_ws(s->p, e, s->n);
+        size_t q = lc_skip_ws(s->p, e, s->n);
         if (q + 1 < s->n && s->p[q] == '(' && (!have_bad || last_bad < q)) {
             *at = b;
             *end = e;
@@ -467,7 +460,7 @@ static const char *lmr_find_log(const char *s, size_t n, int *is_err)
             size_t l = strlen(k[j]);
             if (i + l > n || memcmp(s + i, k[j], l) != 0)
                 continue;
-            size_t q = lmr_skip_ws(s, i + l, n);
+            size_t q = lc_skip_ws(s, i + l, n);
             if (q < n && s[q] == '(') {
                 *is_err = j == 0;
                 return s + i;
@@ -482,7 +475,7 @@ static int lmr_has_log_fail(const char *s, size_t n)
     for (size_t i = 0; i + 8 <= n; i++) {
         if ((i > 0 && lmr_word(s[i - 1])) || memcmp(s + i, "LOG_FAIL", 8) != 0)
             continue;
-        size_t q = lmr_skip_ws(s, i + 8, n);
+        size_t q = lc_skip_ws(s, i + 8, n);
         if (q < n && s[q] == '(')
             return 1;
     }

@@ -58,6 +58,7 @@ void drop3(regex_t *a, regex_t *b, regex_t *c);
 int each_zpath_st(const char *cmd, int allow_exit1,
                   int (*fn)(const char *, void *), void *ctx);
 int each_zpath(const char *cmd, int (*fn)(const char *, void *), void *ctx);
+size_t lc_skip_ws(const char *s, size_t i, size_t n);
 int lc_each_line(const char *path,
                  int (*cb)(void *ctx, const char *line, size_t len),
                  void *ctx, int missing_ok);

@@ -86,6 +86,16 @@ int each_zpath(const char *cmd, int (*fn)(const char *, void *), void *ctx)
     return each_zpath_st(cmd, 0, fn, ctx);
 }
 
+/* First index at or after `i` (below `n`) that is not ASCII whitespace.
+ * The one whitespace skipper the line scanners share. */
+size_t lc_skip_ws(const char *s, size_t i, size_t n)
+{
+    while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' ||
+                     s[i] == '\r' || s[i] == '\f' || s[i] == '\v'))
+        i++;
+    return i;
+}
+
 /* Checked line reader. Calls cb(ctx, line, len) for every line of path
  * (len includes any trailing newline). cb returns 0 to continue, 1 to stop
  * early successfully, anything else is a callback error. Returns 0 when
