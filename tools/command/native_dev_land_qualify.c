@@ -5,12 +5,17 @@
  *
  * Verdict rules:
  *   - lint passes only on a zero exit that prints "LINT: all checks passed";
- *   - a test group passes only on a zero exit that prints "ALL TESTS PASSED"
- *     and no line that begins with "FAIL at". A line that merely contains
- *     "FAIL at" (the net group prints "PARSE FAIL at" on purpose) is not a
- *     verdict;
+ *   - a test group passes only on a PASS header in the harness output and
+ *     no line of its section that begins with "FAIL at". A line that merely
+ *     contains "FAIL at" (the net group prints "PARSE FAIL at" on purpose)
+ *     is not a verdict; a group with no header has no verdict and fails;
  *   - the affected groups are the routes `code tests` reports for each path
- *     the lane changes relative to origin/main, run one group at a time.
+ *     the lane changes relative to origin/main, run in one harness
+ *     invocation (t-fast-exact over the whole set) so its workers run them
+ *     in parallel; each group still gets its own section log. A selection
+ *     that lost groups (a path routing to more than the accumulator holds,
+ *     an overlong token, or a truncated path list) is refused, never run
+ *     short.
  * Every command's merged output is kept under build/scratch/qualify-*.log in
  * the worktree, and a refusal names the log of the command that failed.
  */
@@ -53,6 +58,8 @@ const char *zcl_dev_land_qualify_refusal(enum zcl_land_qualify_code code)
         [ZCL_LAND_QUALIFY_DIRTY_TREE] = "dirty_tree",
         [ZCL_LAND_QUALIFY_FETCH_FAILED] = "fetch_failed",
         [ZCL_LAND_QUALIFY_REBASE_CONFLICT] = "rebase_conflict",
+        [ZCL_LAND_QUALIFY_REBASE_FAILED] = "rebase_failed",
+        [ZCL_LAND_QUALIFY_GROUP_SELECTION] = "group_selection",
         [ZCL_LAND_QUALIFY_UNSIGNED_TIP] = "unsigned_tip",
         [ZCL_LAND_QUALIFY_STEP_FAILED] = "step_failed",
         [ZCL_LAND_QUALIFY_LINT_FAILED] = "lint_failed",
@@ -238,7 +245,9 @@ static bool dlq_fetch(struct dlq *q)
 }
 
 /* Rebase onto origin/main when the lane is behind it. A conflict aborts the
- * rebase and names the unmerged paths; resolving them is the author's. */
+ * rebase and names the unmerged paths; resolving them is the author's. A
+ * rebase that fails without unmerged paths (a missing signing key, a hook)
+ * is a different refusal, so the author is not sent to look for conflicts. */
 static bool dlq_rebase(struct dlq *q)
 {
     const char *ancestor[] = { "merge-base", "--is-ancestor", "origin/main",
@@ -248,7 +257,7 @@ static bool dlq_rebase(struct dlq *q)
     const char *plain_args[] = { "rebase", "-q", "origin/main", NULL };
     const char *unmerged[] = { "diff", "--name-only", "--diff-filter=U", NULL };
     const char *abort_args[] = { "rebase", "--abort", NULL };
-    char names[1024], paths[1024];
+    char names[1024];
     if (dlq_git(q, ancestor, NULL, 0) == 0)
         return true;
     if (dlq_git(q, q->exempt ? plain_args : signed_args, NULL, 0) == 0)
@@ -257,9 +266,10 @@ static bool dlq_rebase(struct dlq *q)
     (void)dlq_git(q, abort_args, NULL, 0);
     for (char *p = names; *p; p++)
         *p = *p == '\n' ? ' ' : *p;
-    (void)snprintf(paths, sizeof(paths), "%s", names);
-    return dlq_refuse(q, ZCL_LAND_QUALIFY_REBASE_CONFLICT, "origin/main",
-                      paths);
+    return names[0] ? dlq_refuse(q, ZCL_LAND_QUALIFY_REBASE_CONFLICT,
+                                 "origin/main", names)
+                    : dlq_refuse(q, ZCL_LAND_QUALIFY_REBASE_FAILED,
+                                 "origin/main", NULL);
 }
 
 /* Every commit the lane adds must carry a good signature. */
@@ -378,27 +388,85 @@ static int dlq_group_cmp(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
-/* The union of the routes for every path the lane changes. */
+#if defined(ZCL_TESTING)
+static void (*g_dlq_route)(const char *path, struct agent_impact_acc *acc);
+static size_t g_dlq_capture_cap;
+
+void zcl_dev_land_qualify_test_limits(
+    void (*route)(const char *path, struct agent_impact_acc *acc),
+    size_t capture_cap)
+{
+    g_dlq_route = route;
+    g_dlq_capture_cap = capture_cap;
+}
+#endif
+
+static void dlq_route(const char *path, struct agent_impact_acc *acc)
+{
+    bool risk = false;
+#if defined(ZCL_TESTING)
+    if (g_dlq_route) {
+        g_dlq_route(path, acc);
+        return;
+    }
+#endif
+    (void)zcl_native_code_route_for_path(path, acc, &risk);
+}
+
+static size_t dlq_capture_cap(void)
+{
+#if defined(ZCL_TESTING)
+    if (g_dlq_capture_cap)
+        return g_dlq_capture_cap;
+#endif
+    return DLQ_GIT_CAP;
+}
+
+/* Add one path's routed groups. False when the router dropped any. */
+static bool dlq_select_path(struct dlq_groups *g, const char *path)
+{
+    struct agent_impact_acc acc = {0};
+    dlq_route(path, &acc);
+    if (acc.groups_lost)
+        return false;
+    for (size_t i = 0; i < acc.groups_len; i++) {
+        if (!dlq_group_add(g, acc.groups[i]))
+            return false;
+    }
+    return true;
+}
+
+/* The union of the routes for every path the lane changes. A selection that
+ * lost groups, or read a truncated path list, is refused rather than run
+ * short. */
 static bool dlq_select(struct dlq *q, struct dlq_groups *g)
 {
     const char *args[] = { "diff", "--name-only", "origin/main...HEAD", NULL };
-    char *paths = (char *)zcl_malloc(DLQ_GIT_CAP, "dev.land.qualify.paths");
-    bool ok = paths && dlq_git(q, args, paths, DLQ_GIT_CAP) == 0;
-    for (char *line = ok ? paths : NULL; line && *line;) {
+    size_t cap = dlq_capture_cap();
+    char *paths = (char *)zcl_malloc(cap, "dev.land.qualify.paths");
+    bool ok = true;
+    if (!paths || dlq_git(q, args, paths, cap) != 0) {
+        free(paths);
+        return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, "group_selection",
+                          NULL);
+    }
+    if (strlen(paths) + 1 >= cap) {
+        free(paths);
+        return dlq_refuse(q, ZCL_LAND_QUALIFY_GROUP_SELECTION,
+                          "path_list_truncated", NULL);
+    }
+    for (char *line = paths; ok && *line;) {
         char *end = strchr(line, '\n');
-        struct agent_impact_acc acc = {0};
-        bool risk = false;
         if (end)
             *end = '\0';
-        (void)zcl_native_code_route_for_path(line, &acc, &risk);
-        for (size_t i = 0; ok && i < acc.groups_len; i++)
-            ok = dlq_group_add(g, acc.groups[i]);
-        line = end ? end + 1 : NULL;
+        if (!dlq_select_path(g, line))
+            ok = dlq_refuse(q, ZCL_LAND_QUALIFY_GROUP_SELECTION, "groups_lost",
+                            line);
+        line = end ? end + 1 : line + strlen(line);
     }
     free(paths);
     qsort(g->name, g->count, sizeof(g->name[0]), dlq_group_cmp);
-    return ok || dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, "group_selection",
-                            NULL);
+    return ok;
 }
 
 static bool dlq_group_name_ok(const char *name)
@@ -574,6 +642,18 @@ static bool dlq_run_groups(struct dlq *q, const struct dlq_groups *g)
     return ok;
 }
 
+/* Name the selected groups in the result, even when none are routed. */
+static void dlq_record_groups(struct dlq *q, const struct dlq_groups *g)
+{
+    size_t used = 0;
+    q->out->group_count = g->count;
+    q->out->groups[0] = '\0';
+    for (size_t i = 0; i < g->count; i++)
+        used += (size_t)snprintf(q->out->groups + used,
+                                 sizeof(q->out->groups) - used, "%s%s",
+                                 i ? " " : "", g->name[i]);
+}
+
 static bool dlq_groups_run(struct dlq *q)
 {
     struct dlq_groups *g =
@@ -588,6 +668,8 @@ static bool dlq_groups_run(struct dlq *q)
             ok = dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, "group_name",
                             g->name[i]);
     }
+    if (ok)
+        dlq_record_groups(q, g);
     if (ok && g->count > 0)
         ok = dlq_run_groups(q, g);
     free(g);

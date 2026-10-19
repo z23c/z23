@@ -22,6 +22,8 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_land_regen.h"
+#include "command/native_dev_land_qualify.h"
+#include "controllers/agent_impact_rules.h"
 #include "command/native_dev_land_attestation.h"
 #include "platform/logical_cpu.h"
 #include "platform/state_root.h"
@@ -6722,6 +6724,7 @@ static const char dlx_qualify_makefile[] =
     "\t@echo \"== LINT: all checks passed ==\"\n"
     "t-fast-exact:\n"
     "\t@for g in `echo \"$(ONLY)\" | tr , ' '`; do \\\n"
+    "\t  [ \"$$g\" = \"$(QCRASH)\" ] && continue; \\\n"
     "\t  v=PASS; [ \"$$g\" = \"$(QFAIL)\" ] && v=FAIL; \\\n"
     "\t  echo \"==================== test_$$g ($$v, 1s) "
     "====================\"; \\\n"
@@ -6732,8 +6735,14 @@ static const char dlx_qualify_makefile[] =
     "\t@[ -n \"$(QFAIL)\" ] && { echo \"SOME TESTS FAILED\"; exit 2; }; "
     "echo \"ALL TESTS PASSED - fixture\"\n";
 
+/* Fixture test files the lane changes: each routes to its own group. */
+#define DLX_Q_LEAF_SMOKE 1U
+#define DLX_Q_LAND_WINDOW 2U
+#define DLX_Q_MAP 4U
+
 static bool dlx_qualify_rig(struct dlx_rig *rig, const char *tag,
-                            const char *mode, const char *fail_group)
+                            const char *mode, const char *fail_group,
+                            unsigned files)
 {
     char path[1300], head[64];
     if (!dlx_rig_make(rig, tag))
@@ -6743,10 +6752,15 @@ static bool dlx_qualify_rig(struct dlx_rig *rig, const char *tag,
         return false;
     (void)snprintf(path, sizeof(path), "%s/Makefile", rig->clone);
     if (!dlx_write(path, dlx_qualify_makefile) ||
-        !dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", "map\n") ||
+        ((files & DLX_Q_MAP) &&
+         !dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", "map\n")) ||
         !dlx_write_dep(rig->clone, "tracked.txt", "tracked\n") ||
-        !dlx_write_dep(rig->clone, "tests/harness/src/test_leaf_smoke.c",
-                       "int leaf;\n") ||
+        ((files & DLX_Q_LEAF_SMOKE) &&
+         !dlx_write_dep(rig->clone, "tests/harness/src/test_leaf_smoke.c",
+                        "int leaf;\n")) ||
+        ((files & DLX_Q_LAND_WINDOW) &&
+         !dlx_write_dep(rig->clone, "tests/harness/src/test_dev_land_window.c",
+                        "int window;\n")) ||
         !dlx_commit_tree(rig->clone, "qualify fixture", head))
         return false;
     setenv("GIT_AUTHOR_NAME", "land", 1);
@@ -6755,6 +6769,7 @@ static bool dlx_qualify_rig(struct dlx_rig *rig, const char *tag,
     setenv("GIT_COMMITTER_EMAIL", "land@z23.invalid", 1);
     setenv("QFX", mode, 1);
     setenv("QFAIL", fail_group, 1);
+    setenv("QCRASH", "", 1);
     setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
     setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
     return true;
@@ -6762,8 +6777,10 @@ static bool dlx_qualify_rig(struct dlx_rig *rig, const char *tag,
 
 static void dlx_qualify_restore(void)
 {
+    zcl_dev_land_qualify_test_limits(NULL, 0);
     unsetenv("QFX");
     unsetenv("QFAIL");
+    unsetenv("QCRASH");
     unsetenv("GIT_AUTHOR_NAME");
     unsetenv("GIT_AUTHOR_EMAIL");
     unsetenv("GIT_COMMITTER_NAME");
@@ -6794,7 +6811,8 @@ static int test_dev_land_qualify_passes(void)
         char head[64];
         const char *rev[] = { "rev-parse", "HEAD", NULL };
         dlx_isolate("qualify_passes");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_passes", "fold", ""));
+        ASSERT(dlx_qualify_rig(&rig, "qualify_passes", "fold", "",
+                               DLX_Q_LEAF_SMOKE | DLX_Q_MAP));
         ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "queued");
         ASSERT(dlx_git_out(rig.clone, rev, head, sizeof(head)) == 0);
@@ -6815,12 +6833,12 @@ static int test_dev_land_qualify_verdict_rule(void)
         struct dlx_rig rig;
         struct dlx_call c;
         dlx_isolate("qualify_parse");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_parse", "parse", ""));
+        ASSERT(dlx_qualify_rig(&rig, "qualify_parse", "parse", "", DLX_Q_LEAF_SMOKE));
         ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
         dlx_end(&c);
         setenv("QFX", "linestart", 1);
         dlx_isolate("qualify_linestart");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_linestart", "linestart", ""));
+        ASSERT(dlx_qualify_rig(&rig, "qualify_linestart", "linestart", "", DLX_Q_LEAF_SMOKE));
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_FAILED"));
         dlx_end(&c);
@@ -6838,14 +6856,14 @@ static int test_dev_land_qualify_refusals(void)
         struct dlx_rig rig;
         struct dlx_call c;
         dlx_isolate("qualify_lint");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_lint", "lint", ""));
+        ASSERT(dlx_qualify_rig(&rig, "qualify_lint", "lint", "", DLX_Q_LEAF_SMOKE));
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_LINT_FAILED"));
         ASSERT_STR_EQ(dlx_str(&c, "refusal"), "lint_failed");
         ASSERT(dlx_file_exists(dlx_str(&c, "log")));
         dlx_end(&c);
         dlx_isolate("qualify_group");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_group", "", "leaf_smoke"));
+        ASSERT(dlx_qualify_rig(&rig, "qualify_group", "", "leaf_smoke", DLX_Q_LEAF_SMOKE));
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_FAILED"));
         ASSERT_STR_EQ(dlx_str(&c, "group"), "leaf_smoke");
@@ -6853,13 +6871,13 @@ static int test_dev_land_qualify_refusals(void)
         ASSERT(dlx_file_exists(dlx_str(&c, "log")));
         dlx_end(&c);
         dlx_isolate("qualify_tree");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_tree", "tree", ""));
+        ASSERT(dlx_qualify_rig(&rig, "qualify_tree", "tree", "", DLX_Q_LEAF_SMOKE));
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_TREE_CHANGED"));
         ASSERT(strstr(dlx_str(&c, "paths"), "tracked.txt") != NULL);
         dlx_end(&c);
         dlx_isolate("qualify_unsigned");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_unsigned", "", ""));
+        ASSERT(dlx_qualify_rig(&rig, "qualify_unsigned", "", "", DLX_Q_LEAF_SMOKE));
         unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_UNSIGNED_TIP"));
@@ -6878,11 +6896,187 @@ static int test_dev_land_qualify_dirty_tree(void)
         struct dlx_rig rig;
         struct dlx_call c;
         dlx_isolate("qualify_dirty");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_dirty", "", ""));
+        ASSERT(dlx_qualify_rig(&rig, "qualify_dirty", "", "", DLX_Q_LEAF_SMOKE));
         ASSERT(dlx_write_dep(rig.clone, "tracked.txt", "edited\n"));
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_DIRTY_TREE"));
         ASSERT(strstr(dlx_str(&c, "paths"), "tracked.txt") != NULL);
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_qualify_restore();
+    return failures;
+}
+
+/* A second clone of the origin that lands `file` on main, so the lane's
+ * clone is behind (or in conflict with) origin/main. */
+static bool dlx_origin_advances(const struct dlx_rig *rig, const char *file,
+                                const char *body)
+{
+    char other[700], moved[64];
+    const char *clone[] = { "clone", "--quiet", rig->bare, other, NULL };
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    (void)snprintf(other, sizeof(other), "%s_other", rig->clone);
+    return dlx_git(NULL, clone) == 0 &&
+           dlx_commit(other, file, body, moved) &&
+           dlx_git(other, push) == 0;
+}
+
+static bool dlx_clone_clean(const struct dlx_rig *rig)
+{
+    const char *status[] = { "status", "--porcelain", "--untracked-files=no",
+                             NULL };
+    char out[256], dir[1300];
+    (void)snprintf(dir, sizeof(dir), "%s/.git/rebase-merge", rig->clone);
+    return dlx_git_out(rig->clone, status, out, sizeof(out)) == 0 && !out[0] &&
+           !dlx_file_exists(dir);
+}
+
+static int test_dev_land_qualify_group_verdicts(void)
+{
+    int failures = 0;
+    TEST("land: qualify attributes a group that fails or reports nothing") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("qualify_two");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_two", "", "leaf_smoke",
+                               DLX_Q_LEAF_SMOKE | DLX_Q_LAND_WINDOW));
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_FAILED"));
+        ASSERT_STR_EQ(dlx_str(&c, "group"), "leaf_smoke");
+        ASSERT_STR_EQ(dlx_str(&c, "paths"), "leaf_smoke");
+        dlx_end(&c);
+        dlx_isolate("qualify_crash");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_crash", "", "", DLX_Q_LEAF_SMOKE));
+        setenv("QCRASH", "leaf_smoke", 1);
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_FAILED"));
+        ASSERT_STR_EQ(dlx_str(&c, "group"), "leaf_smoke");
+        ASSERT(strstr(dlx_str(&c, "detail"), "no verdict") != NULL);
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_qualify_restore();
+    return failures;
+}
+
+static int test_dev_land_qualify_groups_reported(void)
+{
+    int failures = 0;
+    TEST("land: a qualified submission lists its groups, [] when none") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        const struct json_value *groups;
+        dlx_isolate("qualify_groups");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_groups", "", "",
+                               DLX_Q_LEAF_SMOKE | DLX_Q_LAND_WINDOW));
+        ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
+        groups = dlx_arr(&c, "groups");
+        ASSERT(groups != NULL && groups->num_children >= 2);
+        dlx_end(&c);
+        dlx_isolate("qualify_no_groups");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_no_groups", "", "", 0));
+        ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
+        groups = dlx_arr(&c, "groups");
+        ASSERT(groups != NULL && groups->num_children == 0);
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_qualify_restore();
+    return failures;
+}
+
+static void dlx_route_lost(const char *path, struct agent_impact_acc *acc)
+{
+    (void)path;
+    memset(acc, 0, sizeof(*acc));
+    acc->groups_lost = true;
+}
+
+static int test_dev_land_qualify_selection_refusals(void)
+{
+    int failures = 0;
+    TEST("land: qualify refuses a selection that lost groups or paths") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("qualify_lost");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_lost", "", "", DLX_Q_LEAF_SMOKE));
+        zcl_dev_land_qualify_test_limits(dlx_route_lost, 0);
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_SELECTION"));
+        ASSERT_STR_EQ(dlx_str(&c, "step"), "groups_lost");
+        ASSERT(dlx_str(&c, "paths")[0] != '\0');
+        dlx_end(&c);
+        zcl_dev_land_qualify_test_limits(NULL, 16);
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_SELECTION"));
+        ASSERT_STR_EQ(dlx_str(&c, "step"), "path_list_truncated");
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_qualify_restore();
+    return failures;
+}
+
+static int test_dev_land_qualify_origin_moves(void)
+{
+    int failures = 0;
+    TEST("land: qualify rebases a lane behind origin and refuses a conflict") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        const char *contains[] = { "merge-base", "--is-ancestor", "origin/main",
+                                   "HEAD", NULL };
+        dlx_isolate("qualify_behind");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_behind", "", "", DLX_Q_LEAF_SMOKE));
+        ASSERT(dlx_origin_advances(&rig, "elsewhere.txt", "far away\n"));
+        ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
+        ASSERT(dlx_git(rig.clone, contains) == 0);
+        dlx_end(&c);
+        dlx_isolate("qualify_conflict");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_conflict", "", "", DLX_Q_LEAF_SMOKE));
+        ASSERT(dlx_origin_advances(&rig, "change.txt", "theirs\n"));
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_REBASE_CONFLICT"));
+        ASSERT(strstr(dlx_str(&c, "paths"), "change.txt") != NULL);
+        ASSERT(dlx_clone_clean(&rig));
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_qualify_restore();
+    return failures;
+}
+
+static int test_dev_land_qualify_rebase_and_fetch_failures(void)
+{
+    int failures = 0;
+    TEST("land: qualify types a rebase that is no conflict and a fetch failure") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char hook[1300];
+        const char *unset[] = { "remote", "set-url", "origin", "/nonexistent",
+                                NULL };
+        dlx_isolate("qualify_rebase_failed");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_rebase_failed", "", "",
+                               DLX_Q_LEAF_SMOKE));
+        ASSERT(dlx_origin_advances(&rig, "elsewhere.txt", "far away\n"));
+        (void)snprintf(hook, sizeof(hook), "%s/.git/hooks/pre-rebase", rig.clone);
+        ASSERT(dlx_write_dep(rig.clone, ".git/hooks/pre-rebase",
+                             "#!/bin/sh\nexit 1\n"));
+        ASSERT(chmod(hook, 0755) == 0);
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_REBASE_FAILED"));
+        ASSERT(dlx_clone_clean(&rig));
+        dlx_end(&c);
+        dlx_isolate("qualify_fetch");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_fetch", "", "", DLX_Q_LEAF_SMOKE));
+        ASSERT(dlx_git(rig.clone, unset) == 0);
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_FETCH_FAILED"));
         dlx_end(&c);
         PASS();
     }
@@ -14212,6 +14406,11 @@ int test_dev_land(void)
     failures += test_dev_land_qualify_verdict_rule();
     failures += test_dev_land_qualify_refusals();
     failures += test_dev_land_qualify_dirty_tree();
+    failures += test_dev_land_qualify_group_verdicts();
+    failures += test_dev_land_qualify_groups_reported();
+    failures += test_dev_land_qualify_selection_refusals();
+    failures += test_dev_land_qualify_origin_moves();
+    failures += test_dev_land_qualify_rebase_and_fetch_failures();
 
     failures += dlx_case_stub_detail();
 

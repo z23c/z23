@@ -1616,7 +1616,9 @@ queues the tip they qualified (the worktree's `HEAD`; `--tip` is refused with
 1. The tracked tree must be clean (`QUALIFY_DIRTY_TREE`, with the paths).
 2. `git fetch origin`, then a signed rebase onto `origin/main` when the lane
    is behind it. A conflict aborts the rebase and refuses with
-   `QUALIFY_REBASE_CONFLICT` naming the unmerged paths.
+   `QUALIFY_REBASE_CONFLICT` naming the unmerged paths; a rebase that fails
+   without a conflict (for example a missing signing key) refuses with
+   `QUALIFY_REBASE_FAILED`.
 3. Every commit the lane adds is signed (`QUALIFY_UNSIGNED_TIP`).
 4. `make docs-capability-inventory`, `make dev-bin`, `make install-hooks`,
    `make lint-ready`; regenerated files are folded into the tip by a signed
@@ -1629,11 +1631,15 @@ queues the tip they qualified (the worktree's `HEAD`; `--tip` is refused with
    relative to `origin/main`. A group passes on a PASS header and no line of
    its section that begins with `FAIL at` (a line that merely contains the
    text, such as the net group's `PARSE FAIL at`, is not a verdict). A
+   selection that lost groups (a path routing to more groups than the router
+   holds, or a truncated path list) refuses with `QUALIFY_GROUP_SELECTION`
+   instead of running short. A group with no verdict in the output fails. A
    failing group refuses with `QUALIFY_GROUP_FAILED`, naming the group and
    its section log.
 7. A gate that left any other tracked file changed refuses with
    `QUALIFY_TREE_CHANGED` and the paths; generated files only are folded in.
 
+The reply lists the groups it ran as `groups` (`[]` when none were routed).
 Logs are kept in the worktree as `build/scratch/qualify-<step>.log`, one per
 step and one per group. Nothing is queued when a gate refuses. Measured on
 one host for four groups, one `t-fast-exact` invocation took 12.5 s and four

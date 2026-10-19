@@ -3147,23 +3147,23 @@ static void dl_qualify_refuse(struct zcl_command_reply *reply,
  * bind the submission to the tip they qualified. */
 static const char *dl_submit_qualify(const struct zcl_command_request *req,
                                      struct zcl_command_reply *reply,
-                                     char *buf, size_t cap)
+                                     char *buf, size_t cap,
+                                     struct zcl_land_qualify *qr)
 {
     const char *bypass = dl_allow_unsigned();
     bool exempt = bypass && strcmp(bypass, "1") == 0 && dl_stub() != NULL;
     const char *worktree = dl_str(req, "worktree");
-    struct zcl_land_qualify qr;
     if (!worktree || dl_str(req, "tip")) {
         dl_fail(reply, "BAD_INPUT", "submit",
                 "qualify needs --worktree and qualifies its HEAD, not a --tip",
                 "input.worktree missing or input.tip present");
         return NULL;
     }
-    if (!zcl_dev_land_qualify(worktree, exempt, &qr)) {
-        dl_qualify_refuse(reply, &qr);
+    if (!zcl_dev_land_qualify(worktree, exempt, qr)) {
+        dl_qualify_refuse(reply, qr);
         return NULL;
     }
-    (void)snprintf(buf, cap, "%s", qr.tip);
+    (void)snprintf(buf, cap, "%s", qr->tip);
     return buf;
 }
 
@@ -3171,12 +3171,12 @@ static const char *dl_submit_qualify(const struct zcl_command_request *req,
  * --tip, or the HEAD of --worktree. */
 static const char *dl_submit_tip(const struct zcl_command_request *req,
                                  struct zcl_command_reply *reply, char *buf,
-                                 size_t cap)
+                                 size_t cap, struct zcl_land_qualify *qr)
 {
     const struct json_value *flag = json_get(req->input, "qualify");
     const char *tip = dl_str(req, "tip"), *worktree = dl_str(req, "worktree");
     if (flag && flag->type == JSON_BOOL && flag->val.b)
-        return dl_submit_qualify(req, reply, buf, cap);
+        return dl_submit_qualify(req, reply, buf, cap, qr);
     if (!tip && worktree) {
         const char *args[] = { "rev-parse", "HEAD", NULL };
         if (dl_git(worktree, args, buf, cap, DL_GIT_TIMEOUT_MS) == 0) {
@@ -3194,6 +3194,30 @@ static const char *dl_submit_tip(const struct zcl_command_request *req,
     return tip;
 }
 
+/* A qualified submission says which test groups it ran, [] when none. */
+static void dl_submit_report_groups(struct zcl_command_reply *reply,
+                                    const struct zcl_land_qualify *qr)
+{
+    struct json_value list;
+    if (!qr->tip[0] || reply->status != ZCL_COMMAND_STATUS_PASSED)
+        return;
+    json_init(&list);
+    json_set_array(&list);
+    for (const char *p = qr->groups; *p;) {
+        size_t n = strcspn(p, " ");
+        struct json_value item;
+        char name[128];
+        (void)snprintf(name, sizeof(name), "%.*s", (int)n, p);
+        json_init(&item);
+        json_set_str(&item, name);
+        (void)json_push_back(&list, &item);
+        json_free(&item);
+        p += n + (p[n] == ' ' ? 1 : 0);
+    }
+    (void)json_push_kv(&reply->data, "groups", &list);
+    json_free(&list);
+}
+
 static void dl_submit(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -3206,8 +3230,9 @@ static void dl_submit(const struct zcl_command_request *req,
     const char *tip, *worktree, *note;
     const char *allow_unsigned = dl_allow_unsigned();
     int lock = -1;
+    struct zcl_land_qualify qr = {0};
 
-    tip = dl_submit_tip(req, reply, tip_buf, sizeof(tip_buf));
+    tip = dl_submit_tip(req, reply, tip_buf, sizeof(tip_buf), &qr);
     if (!tip)
         return;
     if (!dl_dirs_make(&d)) {
@@ -3315,6 +3340,7 @@ static void dl_submit(const struct zcl_command_request *req,
      * be needed to recover a vanished submitter. Terminal outcomes remain
      * separate: a later submission may need a new current-base proof. */
     dl_submit_loaded(&d, &r, rows, nrows, lock, qpath, full, root, reply);
+    dl_submit_report_groups(reply, &qr);
 }
 
 static bool dl_cancel_push_settled(const struct dl_dirs *d, const char *qpath,
@@ -10653,6 +10679,7 @@ enum dl_drive_kind {
 struct dl_drive_verdict {
     enum dl_drive_kind kind;
     char detail[4352];
+    struct dl_row row; /* the row the verdict was read from */
 };
 
 static void dl_attach(const struct zcl_command_request *req,
@@ -10688,6 +10715,7 @@ static void dl_drive_judge_row(const struct dl_row *row, const char *wt,
                                struct dl_drive_verdict *v)
 {
     char failed[4096];
+    v->row = *row;
     if (strcmp(row->state, "landed") == 0) {
         v->kind = DL_DRIVE_LANDED;
     } else if (strcmp(row->state, "queued") == 0 ||
@@ -10781,13 +10809,13 @@ static void dl_drive_outcome(struct zcl_command_reply *reply, long long seq,
 {
     static const char *const names[] = { "stopped", "stopped", "landed",
                                          "proof_failed", "refused" };
-    struct dl_row row;
-    char wt[4096];
     dl_drive_reply_reset(reply);
     (void)json_push_kv_str(&reply->data, "outcome", names[v->kind]);
     (void)json_push_kv_int(&reply->data, "rounds", rounds);
-    if (v->kind == DL_DRIVE_LANDED && dl_drive_row(seq, &row, wt)) {
-        dl_step_reply(reply, &row, "landed");
+    if (v->kind == DL_DRIVE_LANDED) {
+        /* The verdict carries the row it was judged from: a landed reply
+         * never depends on a second read of the queue. */
+        dl_step_reply(reply, &v->row, "landed");
         return;
     }
     (void)json_push_kv_int(&reply->data, "seq", seq);

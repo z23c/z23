@@ -11,17 +11,20 @@
 #define ZCL_NATIVE_DEV_LAND_QUALIFY_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 enum zcl_land_qualify_code {
     ZCL_LAND_QUALIFY_OK = 0,
     ZCL_LAND_QUALIFY_DIRTY_TREE,
     ZCL_LAND_QUALIFY_FETCH_FAILED,
     ZCL_LAND_QUALIFY_REBASE_CONFLICT,
+    ZCL_LAND_QUALIFY_REBASE_FAILED,
     ZCL_LAND_QUALIFY_UNSIGNED_TIP,
     ZCL_LAND_QUALIFY_STEP_FAILED,
     ZCL_LAND_QUALIFY_LINT_FAILED,
     ZCL_LAND_QUALIFY_GROUP_FAILED,
-    ZCL_LAND_QUALIFY_TREE_CHANGED
+    ZCL_LAND_QUALIFY_TREE_CHANGED,
+    ZCL_LAND_QUALIFY_GROUP_SELECTION
 };
 
 struct zcl_land_qualify {
@@ -31,6 +34,8 @@ struct zcl_land_qualify {
     char paths[1024];  /* space-separated paths a refusal names */
     char detail[256];  /* first failing line, when the log has one */
     char tip[41];      /* qualified tip, set on ZCL_LAND_QUALIFY_OK */
+    char groups[17000]; /* space-separated affected groups, sorted */
+    size_t group_count;
 };
 
 /* Run the gates in worktree `wt` and report the first refusal, or OK with the
@@ -45,5 +50,14 @@ bool zcl_dev_land_qualify(const char *wt, bool signing_exempt,
 /* The registry spelling of a refusal: lint_failed, group_failed,
  * unsigned_tip, tree_changed and the rest. */
 const char *zcl_dev_land_qualify_refusal(enum zcl_land_qualify_code code);
+
+#if defined(ZCL_TESTING)
+struct agent_impact_acc;
+/* Replace the path-to-groups router and the path-list capture cap so a test
+ * can drive the lost-group refusals; NULL and 0 restore the defaults. */
+void zcl_dev_land_qualify_test_limits(
+    void (*route)(const char *path, struct agent_impact_acc *acc),
+    size_t capture_cap);
+#endif
 
 #endif

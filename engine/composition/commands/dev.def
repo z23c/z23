@@ -2069,7 +2069,8 @@ ZCL_COMMAND_DEV_COMMAND(
     "regenerated files into the tip, and submits that tip. A failed gate "
     "refuses with QUALIFY_LINT_FAILED, QUALIFY_GROUP_FAILED (group, log), "
     "QUALIFY_UNSIGNED_TIP, QUALIFY_TREE_CHANGED (paths), QUALIFY_DIRTY_TREE, "
-    "QUALIFY_FETCH_FAILED, QUALIFY_REBASE_CONFLICT or QUALIFY_STEP_FAILED "
+    "QUALIFY_FETCH_FAILED, QUALIFY_REBASE_CONFLICT, QUALIFY_REBASE_FAILED, "
+    "QUALIFY_GROUP_SELECTION or QUALIFY_STEP_FAILED "
     "and queues nothing.", 65536,
     "land,submit,queue,lane,tip",
     "zcl.land_submit_input.v1", "zcl.land.v1", "tip,worktree,note,json,qualify", "",
