@@ -2,9 +2,9 @@
 
 # Four-host shell and transfer observation — 2026-10-15
 
-rhett3.dev and rhett4.dev were retired on 2026-10-18; this record is historical evidence.
+Two hosts in this record were retired on 2026-10-18; this record is historical evidence.
 
-All twelve directed pairs among z23-r1, z23-r2, z23-r3 and z23-r4
+All twelve directed pairs among hosts A, B, C and D
 completed both a direct SSH exchange and an SSH-forwarded exchange.
 Each source initiated its own three peer connections; the coordinator did not
 stand in for a missing peer route. Existing account keys and host pins were used.
@@ -22,12 +22,12 @@ Both layers negotiated the same hybrid KEX. Public-key authentication and
 strict existing host-key checks succeeded. Authentication was not upgraded
 to post-quantum signatures by choosing a hybrid key exchange.
 
-| Source / destination | r1 | r2 | r3 | r4 |
+| Source / destination | A | B | C | D |
 | --- | --- | --- | --- | --- |
-| r1 | — | PASS | PASS | PASS |
-| r2 | PASS | — | PASS | PASS |
-| r3 | PASS | PASS | — | PASS |
-| r4 | PASS | PASS | PASS | — |
+| A | — | PASS | PASS | PASS |
+| B | PASS | — | PASS | PASS |
+| C | PASS | PASS | — | PASS |
+| D | PASS | PASS | PASS | — |
 
 ## Retained evidence
 
@@ -38,12 +38,12 @@ SHA256SUMS binds those files; its own SHA256 is listed here.
 
 | Host | Directory under .local/state/z23 | SHA256 of SHA256SUMS |
 | --- | --- | --- |
-| r1 | fleet-route-demo.1nrid4 | ec56fd157c7238790f839cb02512c8fdae951854cb890295eb80876037ae3d8d |
-| r2 | fleet-route-demo.ouGrDh | 75420c765eadb794830fded5944447340255da773e2fef0c3d583657c3198e70 |
-| r3 | fleet-route-demo.nqygug | ca3f0bbcf66d98e9cf45fc73d7fd506380dfc4e63b6663494e54b502e2d67d3b |
-| r4 | fleet-route-demo.gzukqD | 556e4ff558a1e583276260b659e48607f115b4f5c2eea26e5e11eac9a5a7f98a |
+| A | fleet-route-demo.1nrid4 | ec56fd157c7238790f839cb02512c8fdae951854cb890295eb80876037ae3d8d |
+| B | fleet-route-demo.ouGrDh | 75420c765eadb794830fded5944447340255da773e2fef0c3d583657c3198e70 |
+| C | fleet-route-demo.nqygug | ca3f0bbcf66d98e9cf45fc73d7fd506380dfc4e63b6663494e54b502e2d67d3b |
+| D | fleet-route-demo.gzukqD | 556e4ff558a1e583276260b659e48607f115b4f5c2eea26e5e11eac9a5a7f98a |
 
-r1/r2/r3 reported OpenSSH 9.6p1 Ubuntu-3ubuntu13.20; r4 reported
+Hosts A, B and C reported OpenSSH 9.6p1 Ubuntu-3ubuntu13.20; host D reported
 OpenSSH 9.6p1 Ubuntu-3ubuntu13.19. These are observed installed versions.
 
 ## Scope
@@ -60,27 +60,27 @@ Builds still require devbuild admission and source changes still require
 component ownership. Route availability grants neither consensus nor custody
 authority.
 
-## Mac peer extension
+## Host E peer extension
 
-A subsequent run on the same date added z23-mac in both directions with
+A subsequent run on the same date added host E in both directions with
 each Linux host: eight directed pairs, each exercised directly and through
 the forwarding carrier. All sixteen additional exchanges matched payload
 SHA256 and exit 23. Both SSH layers negotiated
-sntrup761x25519-sha512@openssh.com. The Mac reported OpenSSH 10.0p2.
+sntrup761x25519-sha512@openssh.com. Host E reported OpenSSH 10.0p2.
 Together the two runs cover every directed pair among five physical hosts;
-they do not establish agent session presence or native HOST support on Mac.
+they do not establish agent session presence or native HOST support on host E.
 
 The same evidence layout is retained under .local/state/z23 in each host's
 home:
 
 | Host | Directory | SHA256 of SHA256SUMS |
 | --- | --- | --- |
-| Mac | fleet-mac-route-demo.zdk1ml | 69856ba76b1b390f77b9b9543f1f1316cfe79ad6aaecc700e691992a46e6aef9 |
-| r1 | fleet-mac-route-demo.3GsK0L | 0a8914f8c8f06a36f8e22bf3ac43ccf523b2e82c2ac435e85a363104c8fcce27 |
-| r2 | fleet-mac-route-demo.yRdDAs | 29aca55dfdd22175df9cad2bb574becd32e0bb870bdab7642829572dc74fb2e8 |
-| r3 | fleet-mac-route-demo.JN4dkJ | dd5f2ec3b73b26a73909ef22db0947cdfea15df74d8ef4a7bade4ff379c63960 |
-| r4 | fleet-mac-route-demo.iPIoD1 | d4a3632d523c8f6220caaa36fb4e422f873d1c41726b967c2f0c408bd9f6dea6 |
+| E | fleet-mac-route-demo.zdk1ml | 69856ba76b1b390f77b9b9543f1f1316cfe79ad6aaecc700e691992a46e6aef9 |
+| A | fleet-mac-route-demo.3GsK0L | 0a8914f8c8f06a36f8e22bf3ac43ccf523b2e82c2ac435e85a363104c8fcce27 |
+| B | fleet-mac-route-demo.yRdDAs | 29aca55dfdd22175df9cad2bb574becd32e0bb870bdab7642829572dc74fb2e8 |
+| C | fleet-mac-route-demo.JN4dkJ | dd5f2ec3b73b26a73909ef22db0947cdfea15df74d8ef4a7bade4ff379c63960 |
+| D | fleet-mac-route-demo.iPIoD1 | d4a3632d523c8f6220caaa36fb4e422f873d1c41726b967c2f0c408bd9f6dea6 |
 
-The existing z23-mac alias supplies its account, gateway port and host pin;
+The existing alias for host E supplies its account, gateway port and host pin;
 do not replace these with the Linux account or a guessed external port.
 The forwarding destination remains the peer's loopback SSH listener.

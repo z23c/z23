@@ -170,11 +170,7 @@ A engine/composition/commands/core.def 5
 A engine/composition/commands/ops.def 1
 A engine/controllers/src/blockchain_controller_admin.c 1
 A platform/deploy/zclassic23.env.example 1
-A platform/deploy/zclassic23-standby.env.example 1
-A tests/harness/src/test_tip_agreement_watch.c 1
 A tools/lint/check_live_datadir_isolation.sh 1
-A tools/scripts/byte_exact_utxo_check.sh 2
-A tools/scripts/produce_anchor_snapshot.sh 2
 A vendor/include/sqlite3.h 7
 B cognition/controllers/src/agent_controller.c 2
 B contexts/commons/corpus/evidence-000002.json 6
@@ -333,14 +329,10 @@ B contexts/commons/corpus/report-000042.json 73
 B contexts/commons/services/include/services/zcode_pointer.h 1
 B platform/deploy/install-host-watchdog.sh 1
 B platform/deploy/zclassic23-host-watchdog.sh 1
-B platform/deploy/zclassic23-standby.env.example 1
-B tests/harness/src/test_tip_agreement_watch.c 1
 B tests/harness/src/test_vcs_accept.c 15
 B tests/harness/src/test_vcs_release.c 11
 B tests/harness/src/test_zcode_contributor.c 15
 B tests/harness/src/test_zcode_publish.c 32
 B tests/harness/src/test_zcode_recipe.c 5
 B tests/harness/src/test_zcode_store.c 3
-B tools/scripts/byte_exact_utxo_check.sh 2
-B tools/scripts/produce_anchor_snapshot.sh 2
 B tools/scripts/zcl_intervene.sh 1

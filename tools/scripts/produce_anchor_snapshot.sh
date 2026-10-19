@@ -92,7 +92,7 @@
 #
 # ENV (all optional):
 #   ZCL_PAS_BINARY          path to the zclassic23 binary
-#                           (default: /home/rhett/github/zclassic23/build/bin/zclassic23)
+#                           (default: <repo root>/build/bin/z23)
 #   ZCL_PAS_SOURCE_DATADIR  read-only source datadir to copy from
 #                           (default: $HOME/.zclassic-c23-serve1.archived)
 #   ZCL_PAS_WORK_DATADIR    the isolated copy the mint runs against
@@ -129,7 +129,8 @@
 
 set -u
 
-BINARY="${ZCL_PAS_BINARY:-/home/rhett/github/zclassic23/build/bin/zclassic23}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BINARY="${ZCL_PAS_BINARY:-$ROOT/build/bin/z23}"
 SRC_DATADIR="${ZCL_PAS_SOURCE_DATADIR:-$HOME/.zclassic-c23-serve1.archived}"
 WORK_DATADIR="${ZCL_PAS_WORK_DATADIR:-$HOME/.zclassic-c23-anchor-producer}"
 VERIFY_DATADIR="${ZCL_PAS_VERIFY_DATADIR:-${WORK_DATADIR}-verify}"

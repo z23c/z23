@@ -384,7 +384,7 @@ int test_tip_agreement_watch(void)
         bool ok = true;
         static const char live_row[] =
             "{\"ts\":1785387019,\"instance\":\"canonical\",\"rpcport\":18232,"
-            "\"datadir\":\"/home/rhett/.zclassic-c23\",\"window_secs\":900,"
+            "\"datadir\":\"/home/node/.zclassic-c23\",\"window_secs\":900,"
             "\"min_distinct_peers\":2,\"our_height\":3198925,\"height\":null,"
             "\"our_tip_hash\":\"\",\"modal_remote_hash\":\"\","
             "\"modal_remote_peers\":null,\"modal_remote_groups\":null,"

@@ -20,11 +20,12 @@ DD="${ZCL_PRODUCER_DD:?set ZCL_PRODUCER_DD}"
 RPCP="${ZCL_PRODUCER_RPCPORT:?set ZCL_PRODUCER_RPCPORT}"
 ZD="${ZD_DATADIR:-$HOME/.zclassic}"
 ZDRPC="${ZD_RPC:-8232}"
-BIN="${NODE_BIN:-/home/rhett/github/zclassic23/build/producer-bin/zclassic23}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BIN="${NODE_BIN:-$ROOT/build/bin/z23}"
 # zd-side RPC MUST go through zcl-rpc (zclassicd auth — rpcuser/rpcpassword
 # from zclassic.conf; the c23 node binary expects a .cookie and is REFUSED).
 # Mirrors replay_canary.sh's zd verb (ISO_RPC_BIN = build/bin/zcl-rpc).
-ZDRPC_BIN="${ZD_RPC_BIN:-/home/rhett/github/zclassic23/build/bin/zcl-rpc}"
+ZDRPC_BIN="${ZD_RPC_BIN:-$ROOT/build/bin/zcl-rpc}"
 
 json_field() {
     local v
