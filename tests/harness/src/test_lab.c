@@ -411,6 +411,8 @@ static int test_lab_test_cases(void)
             ASSERT_EQ(lt_int(&r.data, "failed", NULL), 1);
             ASSERT(cases && cases->num_children == 4);
             ASSERT(lt_flag(&cases->children[0], "pass", NULL));
+            ASSERT(lt_streq(lt_at(&cases->children[0], "stderr_status", NULL),
+                           "not_retained"));
             ASSERT(!lt_flag(&cases->children[2], "pass", NULL));
             ASSERT(lt_has(&cases->children[2], "diff", NULL,
                           "line 1: expected \"6\\n\" got \"5\\n\""));
@@ -443,6 +445,119 @@ static int test_lab_test_inline_and_cache(void)
             ASSERT(lt_failed_with(&a, "LAB_UNCONFINED"));
         }
         zcl_command_reply_free(&a);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool lt_stderr_input(struct json_value *input, size_t count, bool large)
+{
+    struct json_value cases;
+    json_init(&cases);
+    json_set_array(&cases);
+    json_set_object(input);
+    bool ok = json_push_kv_str(input, "file", LT_FIX "stderr_cases.c") &&
+              json_push_kv_bool(input, "sanitize", false);
+    for (size_t i = 0; ok && i < count; i++) {
+        struct json_value row, args;
+        char name[24];
+        snprintf(name, sizeof(name), "case-%zu", i);
+        json_init(&row);
+        json_init(&args);
+        json_set_object(&row);
+        json_set_array(&args);
+        struct json_value arg;
+        json_init(&arg);
+        json_set_str(&arg, large ? "l" : i == 0 ? "a" : "b");
+        ok = json_push_back(&args, &arg) &&
+             json_push_kv_str(&row, "name", name) &&
+             json_push_kv(&row, "args", &args) && json_push_back(&cases, &row);
+        json_free(&arg);
+        json_free(&args);
+        json_free(&row);
+    }
+    ok = ok && json_push_kv(input, "cases", &cases);
+    json_free(&cases);
+    return ok;
+}
+
+static bool lt_test_envelope(const struct json_value *input,
+                              struct json_value *envelope)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(reg, "lab.test", NULL);
+    if (!spec)
+        return false;
+    struct zcl_command_context ctx = {
+        .registry = reg, .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+    };
+    char output[65537];
+    enum zcl_command_exit code;
+    size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, input,
+        false, spec->path, "normal", 0, 0, NULL, output, sizeof(output), &code);
+    if (n == 0 || n > 65536 || !json_read(envelope, output, n))
+        return false;
+    return lab_confinement_available()
+        ? code == ZCL_COMMAND_EXIT_OK && lt_flag(envelope, "ok", NULL)
+        : lt_streq(lt_at(envelope, "error", "code"), "LAB_UNCONFINED");
+}
+
+static int test_lab_test_stderr(void)
+{
+    int failures = 0;
+    TEST("lab test: case stderr fits the registry envelope and replays without work") {
+        const size_t counts[] = { 2, 1, 256 };
+        for (size_t scenario = 0; scenario < 3; scenario++) {
+            struct json_value input, first, replay;
+            json_init(&input);
+            json_init(&first);
+            json_init(&replay);
+            ASSERT(lt_stderr_input(&input, counts[scenario], scenario != 0));
+            size_t runs_before = lab_run_count();
+            ASSERT(lt_test_envelope(&input, &first));
+            if (lab_confinement_available()) {
+                const struct json_value *data = json_get(&first, "data");
+                const struct json_value *rows = json_get(data, "cases");
+                ASSERT(rows && rows->num_children == counts[scenario]);
+                ASSERT_EQ(lt_int(data, "failed", NULL), counts[scenario]);
+                ASSERT_EQ(lab_run_count(), runs_before + counts[scenario]);
+                if (scenario == 0) {
+                    ASSERT(lt_streq(lt_at(&rows->children[0], "stderr", NULL),
+                                   "invalid record a at byte 17\n"));
+                    ASSERT(lt_streq(lt_at(&rows->children[1], "stderr", NULL),
+                                   "invalid record b at byte 17\n"));
+                    ASSERT(lt_streq(lt_at(&rows->children[0], "stderr_status", NULL),
+                                   "complete"));
+                } else {
+                    ASSERT(lt_has(&rows->children[0], "stderr", NULL, "\"\n\xef\xbf\xbd"));
+                    ASSERT(lt_streq(lt_at(&rows->children[0], "stderr_status", NULL),
+                                   "truncated"));
+                    if (scenario == 2)
+                        ASSERT(lt_streq(lt_at(&rows->children[255], "stderr_status", NULL),
+                                       "omitted"));
+                }
+                size_t compiles = lab_compile_count(), runs = lab_run_count();
+                ASSERT(lt_test_envelope(&input, &replay));
+                ASSERT(lt_flag(json_get(&replay, "data"), "cache", "hit"));
+                ASSERT_EQ(lab_compile_count(), compiles);
+                ASSERT_EQ(lab_run_count(), runs);
+                const struct json_value *again = lt_at(&replay, "data", "cases");
+                ASSERT(again && again->num_children == rows->num_children);
+                for (size_t i = 0; i < rows->num_children; i++) {
+                    ASSERT(lt_streq(lt_at(&again->children[i], "stderr", NULL),
+                        json_get_str(json_get(&rows->children[i], "stderr"))));
+                    ASSERT(lt_streq(lt_at(&again->children[i], "stderr_status", NULL),
+                        json_get_str(json_get(&rows->children[i], "stderr_status"))));
+                }
+            } else {
+                ASSERT_EQ(lab_run_count(), runs_before);
+            }
+            json_free(&replay);
+            json_free(&first);
+            json_free(&input);
+        }
         PASS();
     } _test_next:;
     return failures;
@@ -663,6 +778,7 @@ int test_lab(void)
     failures += test_lab_cache();
     failures += test_lab_test_cases();
     failures += test_lab_test_inline_and_cache();
+    failures += test_lab_test_stderr();
     failures += test_lab_refusals();
     failures += test_lab_unconfined_seam();
     failures += test_lab_workload();

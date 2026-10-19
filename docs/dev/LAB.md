@@ -85,8 +85,14 @@ wrong):
 
 A case passes when the program exits with `expect_exit` (default 0), is not
 signalled or timed out, and, if `expect_stdout` is given, stdout equals it
-exactly. `diff` is the first differing line, at most 512 bytes; all diffs of one
-receipt share 16 KiB, and `diffs_omitted` counts those cut.
+exactly. `diff` is the first differing line, at most 512 escaped JSON bytes.
+Failed cases also retain `stderr`, at most 512 escaped JSON bytes per case.
+`stderr_status` is `complete`, `truncated`, or `omitted`; passing cases use
+`not_retained`. Capture truncation also produces `truncated`. Diffs, stderr,
+and the added field framing share the existing 16 KiB diagnostic allowance;
+`diffs_omitted` counts diffs shortened by that allowance or their per-case cap.
+
+<!-- claim: symbol-present lab_diagnostic_budget tools/command/native_lab_test_command.c # shared escaped diagnostic allowance -->
 
 ## Limits
 
@@ -159,6 +165,12 @@ for `test` the canonical cases. The same root with the same compiler identity
 with `cache.hit:true`, without compiling or running. The cache keys the inputs,
 not the program's behavior: a program that reads the clock or a random source is
 replayed, not re-run. Pass `fresh:true` to compile and run again.
+
+Test roots use the `test.stderr.v1` kind so requests obtain receipts with case
+stderr even when an earlier test receipt is cached. Run roots are unchanged;
+`lab show` returns historical receipts with their original fields.
+
+<!-- claim: symbol-present test.stderr.v1 tools/command/native_lab_test_command.c # test-only receipt version -->
 
 ## The one-file agent loop
 

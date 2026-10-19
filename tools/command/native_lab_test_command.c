@@ -19,6 +19,7 @@ enum {
     LAB_NAME_MAX = 64,
     LAB_DIFF_CASE = 512,
     LAB_DIFF_TOTAL = 16 * 1024,
+    LAB_STDERR_CASE = 512,
     LAB_LINE_SHOW = 150,
 };
 
@@ -180,7 +181,7 @@ static void lab_hash_case(struct lab_hasher *h, const struct lab_case *c)
 static bool lab_root_test(struct lab_ctx *ctx, const struct lab_cases *cs,
                           bool sanitize, uint32_t timeout_ms, uint32_t mem_mb)
 {
-    struct lab_hasher *h = lab_hasher_new("test");
+    struct lab_hasher *h = lab_hasher_new("test.stderr.v1");
     if (!h)
         return false;
     lab_hasher_field(h, "source", ctx->src.bytes, ctx->src.len);
@@ -270,27 +271,52 @@ struct lab_tally {
     char first[LAB_FIRST_MAX + 1];
 };
 
+/* Reserve added row framing inside the existing diagnostic allowance. Text
+ * is charged after UTF-8 repair and JSON escaping, excluding string quotes. */
+static void lab_diagnostic_budget(struct lab_tally *t, size_t cases)
+{
+    t->diff_left = LAB_DIFF_TOTAL - cases *
+        (sizeof(",\"stderr\":\"\",\"stderr_status\":\"not_retained\"") - 1);
+}
+
+static bool lab_case_text(struct json_value *row, const char *key,
+                           const char *text, size_t len, size_t cap,
+                           struct lab_tally *t, bool *cut)
+{
+    size_t allowance = cap < t->diff_left ? cap : t->diff_left;
+    if (!lab_json_text(row, key, text, len, allowance, cut))
+        return false;
+    size_t used = json_write(json_get(row, key), NULL, 0) - 2;
+    t->diff_left -= used;
+    return true;
+}
+
 static bool lab_case_row(struct json_value *rows, const struct lab_case *c,
                          const struct lab_proc *p, bool pass, const char *diff,
                          struct lab_tally *t)
 {
     struct json_value row;
     bool cut = false;
-    size_t dl = strlen(diff) < LAB_DIFF_CASE ? strlen(diff) : LAB_DIFF_CASE;
-    bool omit = dl > t->diff_left;
+    bool err_cut = p->err_cut;
     json_init(&row);
     json_set_object(&row);
-    t->diffs_omitted += omit;
     bool ok = json_push_kv_str(&row, "name", c->name) &&
               json_push_kv_bool(&row, "pass", pass) &&
               json_push_kv_int(&row, "exit_code",
                                p->launch == LAB_LAUNCHED ? p->exit_code : -1) &&
               json_push_kv_int(&row, "signal", p->term_signal) &&
               json_push_kv_int(&row, "wall_us", p->wall_us) &&
-              lab_json_text(&row, "diff", diff, omit ? 0 : dl, LAB_DIFF_CASE,
-                            &cut) &&
-              json_push_back(rows, &row);
-    t->diff_left -= omit ? 0 : dl;
+              lab_case_text(&row, "diff", diff, strlen(diff), LAB_DIFF_CASE,
+                            t, &cut) &&
+              lab_case_text(&row, "stderr", pass ? "" : p->err,
+                            pass ? 0 : p->err_len, LAB_STDERR_CASE, t, &err_cut);
+    t->diffs_omitted += cut;
+    const struct json_value *err = json_get(&row, "stderr");
+    const char *status = pass ? "not_retained"
+        : err_cut && err && !json_get_str(err)[0] && p->err_len ? "omitted"
+        : err_cut ? "truncated" : "complete";
+    ok = ok && json_push_kv_str(&row, "stderr_status", status) &&
+         json_push_back(rows, &row);
     json_free(&row);
     return ok;
 }
@@ -364,6 +390,7 @@ enum lab_check lab_cases_check(const struct zcl_command_request *rq,
     json_init(&rows);
     json_set_array(&rows);
     if (comp && lab_cases_load(rq, &cs)) {
+        lab_diagnostic_budget(&t, cs.n);
         comp->ok = true;
         snprintf(comp->binary, sizeof(comp->binary), "%s", binary);
         res = lab_run_cases(ctx, &cs, comp, timeout_ms, mem_mb, &rows, &t)
@@ -392,6 +419,7 @@ static void lab_test_execute(struct lab_ctx *ctx, const struct lab_cases *cs,
     struct json_value rows;
     json_init(&rows);
     json_set_array(&rows);
+    lab_diagnostic_budget(&t, cs->n);
     if (!comp) {
         lab_fail(reply, "LAB_ALLOC", "run", "the lab could not allocate");
         return;
