@@ -517,9 +517,17 @@ if [ "$LIGHT" = "1" ]; then
 else
     NEED_KB=$(du -sk "$SRC" 2>/dev/null | awk '{print $1}')
 fi
-AVAIL_KB=$(df -Pk "$SRC" 2>/dev/null | awk 'NR==2{print $4}')
+# The copy lands below HOME, which can be a different filesystem from SRC.
+# Walk to an existing destination ancestor before mkdir creates the new copy.
+DEST_FS_PATH="$(dirname "$DEST")"
+while [ ! -e "$DEST_FS_PATH" ]; do
+    DEST_FS_PARENT="$(dirname "$DEST_FS_PATH")"
+    [ "$DEST_FS_PARENT" != "$DEST_FS_PATH" ] || break
+    DEST_FS_PATH="$DEST_FS_PARENT"
+done
+AVAIL_KB=$(df -Pk "$DEST_FS_PATH" 2>/dev/null | awk 'NR==2{print $4}')
 case "$AVAIL_KB" in
-    ''|*[!0-9]*) echo "[repro] WARN: could not read free space for $SRC; skipping disk precheck" ;;
+    ''|*[!0-9]*) echo "[repro] WARN: could not read free space for destination $DEST_FS_PATH; skipping disk precheck" ;;
     *) if [ "$((NEED_KB + NEED_KB/10))" -gt "$AVAIL_KB" ]; then
            echo "repro_on_copy: not enough disk: need ~$((NEED_KB/1024))M (+10%), avail $((AVAIL_KB/1024))M" >&2
            exit 1

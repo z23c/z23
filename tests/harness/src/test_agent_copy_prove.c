@@ -26,6 +26,7 @@
 #include "platform/directory_compat.h"
 #include "util/spawn.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -87,6 +88,81 @@ static bool acp_read_file(const char *path, char *out, size_t out_len)
     out[used] = '\0';
     bool ok = !ferror(f);
     fclose(f);
+    return ok;
+}
+
+static bool acp_home_has_copy(const char *home)
+{
+    DIR *dir = opendir(home);
+    if (!dir)
+        return false;
+    bool found = false;
+    struct dirent *entry = NULL;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, ".zclassic-c23-COPY-",
+                    strlen(".zclassic-c23-COPY-")) == 0) {
+            found = true;
+            break;
+        }
+    }
+    closedir(dir);
+    return found;
+}
+
+static bool acp_repro_dest_space_case(const char *label,
+                                      int src_avail_kb, int dest_avail_kb,
+                                      bool expect_success, bool expect_copy)
+{
+    char work[512], home[560], src[600], fakebin[600];
+    char df[700], cp[700], marker[700], stdout_path[700], stderr_path[700];
+    test_make_tmpdir(work, sizeof(work), "acp_dest_space", label);
+    snprintf(home, sizeof(home), "%s/home", work);
+    snprintf(src, sizeof(src), "%s/src", work);
+    snprintf(fakebin, sizeof(fakebin), "%s/bin", work);
+    platform_directory_create(home, 0700);
+    platform_directory_create(src, 0700);
+    platform_directory_create(fakebin, 0700);
+
+    char progress[700];
+    snprintf(progress, sizeof(progress), "%s/progress.kv", src);
+    bool ok = acp_write_file(progress, "fixture\n");
+    snprintf(df, sizeof(df), "%s/df", fakebin);
+    const char *df_body =
+        "#!/bin/sh\n"
+        "last=''\n"
+        "for arg in \"$@\"; do last=\"$arg\"; done\n"
+        "if [ \"$last\" = \"$ACP_DF_SRC\" ]; then\n"
+        "  avail=$ACP_DF_SRC_AVAIL\n"
+        "else\n"
+        "  avail=$ACP_DF_DEST_AVAIL\n"
+        "fi\n"
+        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+        "printf 'fake 100000 0 %s 0%% /fake\\n' \"$avail\"\n";
+    ok = ok && acp_write_file(df, df_body) && chmod(df, 0755) == 0;
+    snprintf(cp, sizeof(cp), "%s/cp", fakebin);
+    const char *cp_body =
+        "#!/bin/sh\n"
+        "printf copied > \"$ACP_DF_COPY_MARKER\"\n"
+        "exec /bin/cp \"$@\"\n";
+    ok = ok && acp_write_file(cp, cp_body) && chmod(cp, 0755) == 0;
+    snprintf(marker, sizeof(marker), "%s/copied", work);
+    snprintf(stdout_path, sizeof(stdout_path), "%s/stdout", work);
+    snprintf(stderr_path, sizeof(stderr_path), "%s/stderr", work);
+
+    char cmd[4000];
+    snprintf(cmd, sizeof(cmd),
+        "env PATH=%s:/usr/bin:/bin HOME=%s ACP_DF_SRC=%s "
+        "ACP_DF_SRC_AVAIL=%d ACP_DF_DEST_AVAIL=%d "
+        "ACP_DF_COPY_MARKER=%s tools/repro_on_copy.sh %s --src=%s "
+        "--no-run >%s 2>%s",
+        fakebin, home, src, src_avail_kb, dest_avail_kb, marker, label,
+        src, stdout_path, stderr_path);
+    int rc = ok ? system(cmd) : -1;
+    bool copied = access(marker, F_OK) == 0;
+    bool created = acp_home_has_copy(home);
+    ok = ok && ((rc == 0) == expect_success) && copied == expect_copy &&
+         created == expect_copy;
+    test_rm_rf_recursive(work);
     return ok;
 }
 
@@ -353,6 +429,22 @@ static int test_acp_script_no_run_json(void)
     ACP_CHECK("macOS canonical RPC bind port is refused", system(cmd) != 0);
 
     test_rm_rf_recursive(work);
+    return failures;
+}
+
+static int test_acp_destination_space_admission(void)
+{
+    int failures = 0;
+    printf("[test_agent_copy_prove] destination filesystem admission\n");
+    ACP_CHECK("destination shortage refuses before copy",
+              acp_repro_dest_space_case("dest-low", 999999, 0,
+                                        false, false));
+    ACP_CHECK("source shortage does not reject a roomy destination",
+              acp_repro_dest_space_case("src-low", 0, 999999,
+                                        true, true));
+    ACP_CHECK("same-filesystem admission remains unchanged",
+              acp_repro_dest_space_case("same-fs", 999999, 999999,
+                                        true, true));
     return failures;
 }
 
@@ -981,6 +1073,7 @@ int test_agent_copy_prove(void)
     printf("[test_agent_copy_prove] starting\n");
     failures += test_acp_agentbuild_identity_parser();
     failures += test_acp_script_no_run_json();
+    failures += test_acp_destination_space_admission();
     failures += test_acp_launchd_like_live();
     failures += test_acp_rpc_refusals();
     failures += test_acp_rpc_launch_and_poll();
