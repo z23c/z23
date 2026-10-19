@@ -18,6 +18,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #define TIP_RPC_TIMEOUT_MS 2000u
 #define TIP_BODY \
@@ -84,18 +88,44 @@ static bool tip_host_ok(const char *h)
     return true;
 }
 
+/* The conf carries a password: it must be a regular file this user owns that
+ * no one else can write. */
+static bool tip_conf_safe(const char *path)
+{
+    struct stat st;
+#if !defined(_WIN32)
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+           st.st_uid == geteuid() && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+#else
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+#endif
+}
+
+/* A port is an integer 1..65535 in the health object, else the conf's. */
+static bool tip_port(const struct json_value *port, int conf_port, int *out)
+{
+    int64_t v = conf_port;
+    if (port) {
+        if (port->type != JSON_INT)
+            return false;
+        v = json_get_int(port);
+    }
+    if (v < 1 || v > 65535)
+        return false;
+    *out = (int)v;
+    return true;
+}
+
 static bool tip_load(struct slot_tip_endpoint *e, const char *host,
                      const char *conf, const struct json_value *port)
 {
     int conf_port = 0;
-    if (!tip_host_ok(host) || !conf || conf[0] != '/' ||
+    if (!tip_host_ok(host) || !conf || conf[0] != '/' || !tip_conf_safe(conf) ||
         !legacy_rpc_parse_conf_file(conf, e->user, sizeof(e->user), e->pass,
                                     sizeof(e->pass), &conf_port))
         return false;
     snprintf(e->host, sizeof(e->host), "%s", host);
-    e->port = port && port->type == JSON_INT ? (int)json_get_int(port)
-                                             : conf_port;
-    return e->port >= 1 && e->port <= 65535;
+    return tip_port(port, conf_port, &e->port);
 }
 
 bool slot_tip_spec_parse(const struct json_value *health,

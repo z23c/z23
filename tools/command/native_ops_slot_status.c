@@ -182,7 +182,7 @@ static void oss_execute(const struct zcl_command_request *request,
     char slots[SLOT_PATH_MAX];
     if (!c || !slot_class_ok(c)) {
         slot_refuse(reply, "BAD_SERVICE_CLASS",
-                    "service_class must be tunnel-receiver or gateway",
+                    "service_class must be tunnel-receiver, gateway or node",
                     c ? c : OSS_CMD);
         return;
     }

@@ -9,6 +9,7 @@
 
 #include "rpc/legacy_rpc_client.h"
 
+#include "base/cleanse.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "platform/socket_compat.h"
@@ -70,6 +71,7 @@ static bool legacy_rpc_parse_conf_stream(FILE *f, char *out_user, size_t user_sz
         }
     }
     fclose(f);
+    memory_cleanse(line, sizeof(line));
     return got_user && got_pass;
 }
 
@@ -147,6 +149,8 @@ bool legacy_rpc_fill_missing_creds(char *user, size_t user_sz,
         if (port && !port_is_explicit)
             *port = conf_port;
     }
+    memory_cleanse(u, sizeof(u));
+    memory_cleanse(p, sizeof(p));
 
     return user && user[0] != '\0' && pass && pass[0] != '\0';
 }
@@ -182,9 +186,12 @@ bool legacy_rpc_authenticated_call_with_timeout(const char *body_json,
         return false;
     }
 
-    return legacy_rpc_call_with_timeout("127.0.0.1", port, user, pass,
-                                        body_json, timeout_ms, out_resp,
-                                        err, err_sz);
+    bool ok = legacy_rpc_call_with_timeout("127.0.0.1", port, user, pass,
+                                           body_json, timeout_ms, out_resp,
+                                           err, err_sz);
+    memory_cleanse(user, sizeof(user));
+    memory_cleanse(pass, sizeof(pass));
+    return ok;
 }
 
 bool legacy_rpc_call(const char *host, int port,
@@ -196,6 +203,13 @@ bool legacy_rpc_call(const char *host, int port,
     return legacy_rpc_call_with_timeout(host, port, user, pass, body_json,
                                         LRC_TIMEOUT_SECS * 1000u, out_resp,
                                         err, err_sz);
+}
+
+/* The request carries the Basic credential: wipe it before release. */
+static void lrc_free_req(char *req, size_t cap)
+{
+    memory_cleanse(req, cap);
+    free(req);
 }
 
 bool legacy_rpc_call_with_timeout(const char *host, int port,
@@ -249,11 +263,13 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
     char b64[384];
     EncodeBase64((const unsigned char *)userpass, strlen(userpass),
                  b64, sizeof(b64));
+    memory_cleanse(userpass, sizeof(userpass));
 
     size_t body_len = strlen(body_json);
     size_t req_cap  = 768 + body_len;
     char *req = zcl_malloc(req_cap, "lrc_req");
     if (!req) {
+        memory_cleanse(b64, sizeof(b64));
         platform_socket_close(sock);
         snprintf(err, err_sz, "oom req");
         return false;
@@ -268,8 +284,9 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
         "\r\n"
         "%s",
         host, port, b64, body_len, body_json);
+    memory_cleanse(b64, sizeof(b64));
     if (reqlen < 0 || (size_t)reqlen >= req_cap) {
-        free(req); platform_socket_close(sock);
+        lrc_free_req(req, req_cap); platform_socket_close(sock);
         snprintf(err, err_sz, "request buffer overflow");
         return false;
     }
@@ -278,9 +295,9 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
         snprintf(err, err_sz, "send: %s",
                  platform_socket_error_string(platform_socket_last_error(),
                                               detail, sizeof(detail)));
-        free(req); platform_socket_close(sock); return false;
+        lrc_free_req(req, req_cap); platform_socket_close(sock); return false;
     }
-    free(req);
+    lrc_free_req(req, req_cap);
 
     size_t cap = 64 << 10;
     size_t total = 0;

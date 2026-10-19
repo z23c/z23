@@ -67,7 +67,8 @@ enum slot_path_status slot_paths_resolve(struct slot_paths *out,
 bool slot_class_ok(const char *service_class)
 {
     return service_class && (strcmp(service_class, "tunnel-receiver") == 0 ||
-                             strcmp(service_class, "gateway") == 0);
+                             strcmp(service_class, "gateway") == 0 ||
+                             strcmp(service_class, "node") == 0);
 }
 
 bool slot_unit_name(const char *service_class, const char *instance,
@@ -77,6 +78,9 @@ bool slot_unit_name(const char *service_class, const char *instance,
     int n;
     if (!slot_class_ok(service_class) || !slot_name_ok(instance))
         return false;
+    if (strcmp(service_class, "node") == 0) /* one canonical unit */
+        return strcmp(instance, "node") == 0 &&
+               snprintf(out, cap, "z23-node.service") < (int)cap;
     prefix = strcmp(service_class, "gateway") == 0 ? "z23-gateway@"
                                                    : "z23-tunnel-receiver@";
     n = snprintf(out, cap, "%s%s.service", prefix, instance);

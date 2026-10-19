@@ -6,21 +6,22 @@
  *          drop-in (<unit>.d/z23-slot.conf, temp + rename) that points
  *          ExecStart's binary at <slots>/<slot>/z23, daemon-reload, restart
  *          that one instance, require MainPID's /proc exe to be the slot,
- *          then run the health check (a listen port, a "health needs kind=listen|probe|tip_parity and a "
-                    "timeout_ms of 0..300000"|probe|tip_parity and a "
-                    "timeout_ms of 0..300000" argv with
- *          no shell, or tip_parity: the node and a reference zclassicd report
- *          the same getbestblockhash). The first failure restores every
- *          instance moved so far plus the failing one (same checks) and returns
+ *          then run the health check: listen (a loopback port accepts a
+ *          connection), probe (an argv run without a shell exits 0) or
+ *          tip_parity (the node and a reference zclassicd report the same
+ *          getbestblockhash). The first failure restores every instance moved
+ *          so far plus the failing one (same checks) and returns
  *          SLOT_ACTIVATE_ROLLED_BACK naming the instance and the phase.
  *          A running exe whose bytes differ from the install record is
  *          SLOT_RUNNING_DIGEST_MISMATCH (phase running_digest), rolled back.
  *
- *          Only the allow-listed classes tunnel-receiver and gateway can be
- *          activated; the canonical node unit and ~/.local/bin are never
- *          touched. systemctl is injectable (ZCL_SLOT_SYSTEMCTL_BIN) and so
- *          are the unit directory, state directory and /proc root, which is
- *          how the tests run a fake systemd.
+ *          Only the allow-listed classes tunnel-receiver, gateway and node
+ *          can be activated. The node class is the canonical z23-node unit:
+ *          it is refused unless health.kind is tip_parity and exec_args are
+ *          given; ~/.local/bin is never touched. systemctl is injectable
+ *          (ZCL_SLOT_SYSTEMCTL_BIN) and so are the unit directory, state
+ *          directory and /proc root, which is how the tests run a fake
+ *          systemd.
  */
 
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
@@ -368,6 +369,26 @@ static bool osa_slot_installed(struct osa *a,
     return false;
 }
 
+/* The canonical node is rolled only with a tip parity proof and explicit
+ * exec args (a drop-in replaces ExecStart, so none would start it bare). */
+static bool osa_node_rules(const struct osa *a, struct zcl_command_reply *reply)
+{
+    if (strcmp(a->service_class, "node") != 0)
+        return true;
+    if (a->kind != OSA_HEALTH_TIP) {
+        slot_refuse(reply, "BAD_HEALTH",
+                    "the node service is rolled only with health.kind="
+                    "tip_parity", OSA_CMD);
+        return false;
+    }
+    if (!a->exec_args[0]) {
+        slot_refuse(reply, "BAD_EXEC_ARGS",
+                    "the node service needs explicit exec_args", OSA_CMD);
+        return false;
+    }
+    return true;
+}
+
 static bool osa_parse(const struct zcl_command_request *request,
                       struct osa *a, struct zcl_command_reply *reply)
 {
@@ -384,8 +405,7 @@ static bool osa_parse(const struct zcl_command_request *request,
     }
     if (!slot_class_ok(a->service_class)) {
         slot_refuse(reply, "BAD_SERVICE_CLASS",
-                    "service_class must be tunnel-receiver or gateway; the "
-                    "canonical node is never activated here",
+                    "service_class must be tunnel-receiver, gateway or node",
                     a->service_class);
         return false;
     }
@@ -397,8 +417,9 @@ static bool osa_parse(const struct zcl_command_request *request,
     }
     return osa_parse_instances(in, a, reply) &&
            osa_parse_health(in, a, reply) &&
-           osa_parse_exec_args(in, a, reply) && osa_resolve_dirs(a, reply) &&
-           osa_inst_paths(a, reply) && osa_slot_installed(a, reply);
+           osa_parse_exec_args(in, a, reply) && osa_node_rules(a, reply) &&
+           osa_resolve_dirs(a, reply) && osa_inst_paths(a, reply) &&
+           osa_slot_installed(a, reply);
 }
 
 /* ---- processes ---------------------------------------------------------- */

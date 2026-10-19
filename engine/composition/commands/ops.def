@@ -1406,9 +1406,14 @@ ZCL_COMMAND_READY_COMMAND(
     "failure restores every instance moved so far plus the failing one with "
     "the same checks and returns SLOT_ACTIVATE_ROLLED_BACK naming the "
     "instance and phase (a failed rollback is SLOT_ROLLBACK_FAILED). "
-    "service_class is an allow-list: tunnel-receiver or gateway "
-    "(BAD_SERVICE_CLASS otherwise); the canonical node unit and "
-    "~/.local/bin are never touched. `dry_run` checks and writes nothing. "
+    "service_class is an allow-list: tunnel-receiver, gateway or node "
+    "(BAD_SERVICE_CLASS otherwise). node is the canonical z23-node.service "
+    "(instance name node): it is refused (BAD_HEALTH) unless health.kind is "
+    "tip_parity and exec_args are given (BAD_EXEC_ARGS), since the drop-in "
+    "replaces ExecStart. A tip_parity port must be a JSON integer 1..65535 "
+    "and the conf files must be owned by the caller and not group or world "
+    "writable. ~/.local/bin is never touched. "
+    "`dry_run` checks and writes nothing. "
     "systemctl is ZCL_SLOT_SYSTEMCTL_BIN.",
     65536, "slot,activate,rollout,rolling,rollback,systemd,fleet",
     "zcl.ops_slot_activate.input.v1", "zcl.ops_slot_activate.v1",
@@ -1426,7 +1431,7 @@ ZCL_COMMAND_READY_COMMAND(
     "ops.slot.status", "ops.slot", "",
     "Report the slot each instance runs, its last-good and installed slots",
     "Read-only. For each instance of an allow-listed service_class "
-    "(tunnel-receiver, gateway) reports the slot its z23-slot.conf drop-in "
+    "(tunnel-receiver, gateway, node) reports the slot its z23-slot.conf drop-in "
     "points at (empty when it runs the unit's own binary) and the last-good "
     "slot recorded by ops.slot.activate, plus every installed slot with its "
     "sha256 and size. Starts no process and writes nothing.",

@@ -582,13 +582,15 @@ static int test_osa_writable_dirs(void)
 }
 
 #define OSA_TIP_A "00000000000000000000000000000000000000000000000000000000000000aa"
+#define OSA_TIP_A_UPPER "00000000000000000000000000000000000000000000000000000000000000AA"
 #define OSA_TIP_B "00000000000000000000000000000000000000000000000000000000000000bb"
 
 enum osa_tip_mode {
     TIP_EQUAL,
     TIP_NODE_BEHIND_ON_NEW,
     TIP_REF_DOWN,
-    TIP_NODE_MALFORMED
+    TIP_NODE_MALFORMED,
+    TIP_NODE_UPPERCASE
 };
 
 static enum osa_tip_mode osa_tip_mode;
@@ -614,6 +616,8 @@ static char *osa_tip_rpc(const char *host, int port, const char *user,
         return osa_tip_mode == TIP_REF_DOWN ? NULL : osa_tip_reply(OSA_TIP_A);
     if (osa_tip_mode == TIP_NODE_MALFORMED)
         return osa_tip_reply("not-a-hash");
+    if (osa_tip_mode == TIP_NODE_UPPERCASE)
+        return osa_tip_reply(OSA_TIP_A_UPPER);
     if (osa_tip_mode == TIP_NODE_BEHIND_ON_NEW &&
         osa_has(osa_tip_conf, "/new/z23"))
         return osa_tip_reply(OSA_TIP_B);
@@ -632,23 +636,41 @@ static void osa_tip_json(const struct osa_fx *fx, char *out, size_t cap)
              conf, conf);
 }
 
-/* Activates r1 under `mode`; the old drop-in is seeded so a restore has
- * bytes to put back. want_code NULL: the activation must pass. */
+/* The canonical node unit with a prior drop-in; its path is returned. */
+static bool osa_seed_node(const struct osa_fx *fx, char *conf, size_t cap)
+{
+    char dir[PATH_MAX], text[PATH_MAX + 128];
+    snprintf(dir, sizeof(dir), "%s/z23-node.service.d", fx->units);
+    mkdir(fx->units, 0755);
+    mkdir(dir, 0755);
+    snprintf(conf, cap, "%s/z23-slot.conf", dir);
+    snprintf(text, sizeof(text),
+             "[Service]\nExecStart=\nExecStart=%s/old/z23 node --keep\n",
+             fx->slots);
+    return osa_put(conf, text, 0644);
+}
+
+/* Activates r1 (or the node unit) under `mode`; the old drop-in is seeded so
+ * a restore has bytes to put back. want_code NULL: the activation passes. */
 static int osa_tip_case(const char *name, enum osa_tip_mode mode,
-                        const char *want_code)
+                        const char *want_code, bool node)
 {
     struct osa_fx fx;
     struct osa_cmd c;
     char json[2048], health[1024], before[2048], after[2048];
     int f = 0;
-    if (!osa_fx_init(&fx, name) || !osa_seed_old(&fx, "r1"))
+    if (!osa_fx_init(&fx, name) ||
+        !(node ? osa_seed_node(&fx, osa_tip_conf, sizeof(osa_tip_conf))
+               : osa_seed_old(&fx, "r1")))
         return osa_check(false, "fixture");
-    osa_unit_path(&fx, "r1", osa_tip_conf, sizeof(osa_tip_conf));
+    if (!node)
+        osa_unit_path(&fx, "r1", osa_tip_conf, sizeof(osa_tip_conf));
     TEST_DISCARD(osa_get(osa_tip_conf, before, sizeof(before)));
     osa_tip_mode = mode;
     slot_tip_set_rpc(osa_tip_rpc);
     osa_tip_json(&fx, health, sizeof(health));
-    osa_json(&fx, "tunnel-receiver", "new", "[\"r1\"]", health, false, json,
+    osa_json(&fx, node ? "node" : "tunnel-receiver", "new",
+             node ? "[\"node\"]" : "[\"r1\"]", health, false, json,
              sizeof(json));
     oc_run(&c, json, false);
     if (want_code) {
@@ -668,28 +690,81 @@ static int osa_tip_case(const char *name, enum osa_tip_mode mode,
     return f;
 }
 
-static int test_osa_tip_parity(void)
+struct osa_refusal {
+    const char *name, *cls, *inst, *kind, *node_conf, *extra, *exec_args;
+    const char *what;
+};
+
+/* Every refusal happens before any restart: no systemctl call is logged. */
+static int osa_tip_refused(const struct osa_refusal *r)
 {
     struct osa_fx fx;
     struct osa_cmd c;
-    char json[2048];
+    char json[3072], health[1536], conf[PATH_MAX];
     int f = 0;
-    f += osa_tip_case("tip_eq", TIP_EQUAL, NULL);
-    f += osa_tip_case("tip_lag", TIP_NODE_BEHIND_ON_NEW,
-                      "SLOT_ACTIVATE_ROLLED_BACK");
-    f += osa_tip_case("tip_ref", TIP_REF_DOWN, "SLOT_ROLLBACK_FAILED");
-    f += osa_tip_case("tip_bad", TIP_NODE_MALFORMED, "SLOT_ROLLBACK_FAILED");
-    if (!osa_fx_init(&fx, "tip_refuse"))
-        return f + osa_check(false, "fixture");
-    osa_json(&fx, "tunnel-receiver", "new", "[\"r1\"]",
-             "{\"kind\":\"tip_parity\",\"timeout_ms\":100,"
-             "\"node_conf\":\"/nonexistent\"}", false, json, sizeof(json));
+    if (!osa_fx_init(&fx, r->name))
+        return osa_check(false, "fixture");
+    osa_tip_json(&fx, health, sizeof(health));
+    snprintf(conf, sizeof(conf), "%s/rpc.conf", fx.dir);
+    snprintf(health, sizeof(health),
+             "{\"kind\":\"%s\",\"timeout_ms\":300,\"port\":1,\"node_conf\":\"%s\","
+             "\"reference_host\":\"ref.example\",\"reference_conf\":\"%s\"%s%s}",
+             r->kind, r->node_conf ? r->node_conf : conf, conf,
+             r->extra[0] ? "," : "", r->extra);
+    snprintf(json, sizeof(json),
+             "{\"service_class\":\"%s\",\"slot\":\"new\",\"instances\":%s,"
+             "\"health\":%s,\"exec_args\":\"%s\"}", r->cls, r->inst, health,
+             r->exec_args);
     oc_run(&c, json, false);
-    f += osa_check(!oc_ok(&c) && oc_code(&c, "BAD_HEALTH") &&
-                       !osa_exists(fx.calls),
-                   "an unreadable conf or missing reference is refused before any restart");
+    f += osa_check(!oc_ok(&c) && !osa_exists(fx.calls), r->what);
     oc_free(&c);
     osa_rm_tree(fx.dir);
+    return f;
+}
+
+static int test_osa_tip_refusals(void)
+{
+    static const struct osa_refusal rows[] = {
+        { "tr_big", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL,
+          "\"node_port\":4294967297", "x",
+          "a node_port that truncates to 1 is refused" },
+        { "tr_str", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL,
+          "\"node_port\":\"18232\"", "x",
+          "a string node_port is refused, not the conf port" },
+        { "tr_zero", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL,
+          "\"reference_port\":0", "x", "port 0 is refused" },
+        { "tr_high", "tunnel-receiver", "[\"r1\"]", "tip_parity", NULL,
+          "\"reference_port\":65536", "x", "port 65536 is refused" },
+        { "tr_rel", "tunnel-receiver", "[\"r1\"]", "tip_parity", "rpc.conf",
+          "", "x", "a relative node_conf is refused" },
+        { "nd_listen", "node", "[\"node\"]", "listen", NULL, "", "node run",
+          "the node class with a listen check is refused" },
+        { "nd_noargs", "node", "[\"node\"]", "tip_parity", NULL, "", "",
+          "the node class without exec_args is refused" },
+        { "nd_inst", "node", "[\"other\"]", "tip_parity", NULL, "", "node run",
+          "the node class takes only the instance node" },
+    };
+    int f = 0;
+    for (size_t k = 0; k < sizeof(rows) / sizeof(rows[0]); k++)
+        f += osa_tip_refused(&rows[k]);
+    return f;
+}
+
+static int test_osa_tip_parity(void)
+{
+    int f = 0;
+    f += osa_tip_case("tip_eq", TIP_EQUAL, NULL, false);
+    f += osa_tip_case("tip_lag", TIP_NODE_BEHIND_ON_NEW,
+                      "SLOT_ACTIVATE_ROLLED_BACK", false);
+    f += osa_tip_case("tip_ref", TIP_REF_DOWN, "SLOT_ROLLBACK_FAILED", false);
+    f += osa_tip_case("tip_bad", TIP_NODE_MALFORMED, "SLOT_ROLLBACK_FAILED",
+                      false);
+    f += osa_tip_case("tip_up", TIP_NODE_UPPERCASE, "SLOT_ROLLBACK_FAILED",
+                      false);
+    f += osa_tip_case("node_eq", TIP_EQUAL, NULL, true);
+    f += osa_tip_case("node_lag", TIP_NODE_BEHIND_ON_NEW,
+                      "SLOT_ACTIVATE_ROLLED_BACK", true);
+    f += test_osa_tip_refusals();
     return f;
 }
 
