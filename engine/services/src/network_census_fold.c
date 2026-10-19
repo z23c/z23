@@ -21,6 +21,54 @@
 
 /* ── pure census fold ────────────────────────────────────────────────── */
 
+/* Reachable chain_checked rows with an advertised height at `height`. */
+static int ncrawl_checked_at(const struct ncrawl_probe_result *r, int n,
+                             int64_t height)
+{
+    int c = 0;
+    for (int j = 0; j < n; j++)
+        if (r[j].reachable && r[j].chain_checked && r[j].best_height == height)
+            c++;
+    return c;
+}
+
+/* Modal advertised height over reachable chain_checked rows (-1 if none);
+ * counts those rows into out->chain_checked_count. */
+static int64_t ncrawl_checked_modal(const struct ncrawl_probe_result *r, int n,
+                                    struct network_census_view *out)
+{
+    int best_count = 0;
+    int64_t best_h = -1;
+    for (int i = 0; i < n; i++) {
+        if (!r[i].reachable || !r[i].chain_checked || r[i].best_height < 0)
+            continue;
+        out->chain_checked_count++;
+        int c = ncrawl_checked_at(r, n, r[i].best_height);
+        if (c > best_count || (c == best_count && r[i].best_height > best_h)) {
+            best_count = c;
+            best_h = r[i].best_height;
+        }
+    }
+    return best_h;
+}
+
+/* Fill the chain-checked eclipse fields of out. */
+static void ncrawl_fold_eclipse(const struct ncrawl_probe_result *r, int n,
+                                int64_t own_modal_height,
+                                struct network_census_view *out)
+{
+    int64_t best_h = ncrawl_checked_modal(r, n, out);
+    out->network_modal_height = best_h;
+    out->census_insufficient = out->chain_checked_count < NCRAWL_ECLIPSE_MIN;
+    if (own_modal_height < 0 || best_h < 0 || out->census_insufficient)
+        return;
+    int at_own = ncrawl_checked_at(r, n, own_modal_height);
+    out->network_count_at_own_modal = at_own;
+    out->eclipse_suspected =
+        own_modal_height != best_h &&
+        (int64_t)at_own * 3 < (int64_t)out->chain_checked_count;
+}
+
 void network_census_compute(const struct ncrawl_probe_result *r, int n,
                             int64_t own_modal_height, int64_t now_unix,
                             struct network_census_view *out)
@@ -35,6 +83,7 @@ void network_census_compute(const struct ncrawl_probe_result *r, int n,
     out->min_height = -1;
     out->own_modal_height = own_modal_height;
     out->network_modal_height = -1;
+    out->census_insufficient = true;
     if (!r || n <= 0)
         return;
     if (n > NCRAWL_MAX_CENSUS)
@@ -116,7 +165,6 @@ void network_census_compute(const struct ncrawl_probe_result *r, int n,
     }
     out->modal_height = best_h;
     out->modal_height_count = best_count;
-    out->network_modal_height = best_h;
 
     /* sort version histogram descending by count (bounded selection sort) */
     for (int i = 0; i < out->num_versions; i++)
@@ -127,18 +175,10 @@ void network_census_compute(const struct ncrawl_probe_result *r, int n,
                 out->versions[j] = t;
             }
 
-    /* whole-network eclipse signal: our connected peers cluster on a height
-     * that is a small minority (<1/3) of the wider crawled network. */
-    if (own_modal_height >= 0 && best_h >= 0) {
-        int at_own = 0;
-        for (int i = 0; i < n; i++)
-            if (r[i].reachable && r[i].best_height == own_modal_height)
-                at_own++;
-        out->network_count_at_own_modal = at_own;
-        out->eclipse_suspected =
-            out->reachable_count >= NCRAWL_ECLIPSE_MIN &&
-            own_modal_height != best_h &&
-            (int64_t)at_own * 3 < (int64_t)out->reachable_count;
-    }
+    /* whole-network eclipse signal, judged over chain_checked rows only: a peer
+     * that shares our message magic but not our chain says nothing about
+     * whether our peers are the minority of OUR network. The anchor is the
+     * compiled checkpoint, never our own tip, so an eclipse onto a fake chain
+     * stays visible among checkpoint-consistent peers. */
+    ncrawl_fold_eclipse(r, n, own_modal_height, out);
 }
-

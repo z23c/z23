@@ -7,6 +7,11 @@
  * disconnects immediately. It NEVER relays, syncs, or requests blocks; it
  * advertises no services and relay=false.
  *
+ * After the handshake it sends ONE getheaders whose locator is the last
+ * compiled checkpoint hash and sets chain_checked only when the first reply
+ * header builds on that checkpoint, within the handshake deadline. A shared
+ * message magic and a completed handshake do not show the peer is on our chain.
+ *
  * ONION targets are dialed too, through the embedded Tor
  * (tor_integration_fetch_onion_blocking — dynhost, no SOCKS; the same call
  * connman uses for onion seed fetches). Because dynhost speaks HTTP and not a
@@ -33,6 +38,7 @@
 #include "services/network_crawler.h"
 
 #include "chain/chainparams.h"
+#include "chain/checkpoints.h"
 #include "core/hash.h"
 #include "core/serialize.h"
 #include "core/uint256.h"
@@ -45,6 +51,7 @@
 #include "net/protocol.h"
 #include "net/tor_integration.h"
 #include "net/version.h"
+#include "primitives/block.h"
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -57,6 +64,7 @@
 
 #define NCRAWL_MAX_MSG_PAYLOAD  (1u << 20) /* 1 MiB cap on any handshake frame */
 #define NCRAWL_MAX_HANDSHAKE_MSGS 4        /* frames read while awaiting version */
+#define NCRAWL_MAX_CHAIN_MSGS     8        /* frames read while awaiting headers */
 #define NCRAWL_USER_AGENT "/zclassic23-observatory:1/"
 
 /* Tor v3 hostname: 56 base32 chars + ".onion". */
@@ -428,6 +436,120 @@ static bool ncrawl_probe_onion(const struct net_address *addr, int timeout_ms,
     return true;
 }
 
+/* ── chain identity check ────────────────────────────────────────────── */
+
+/* True when a `headers` payload's first header builds directly on `anchor`:
+ * compact-size count >= 1, then the first header's 4-byte version followed by
+ * its 32-byte prev hash. Only the connection is judged; the peer's proof of
+ * work is not verified, so this separates chains, it does not authenticate one. */
+static bool ncrawl_headers_connect(const uint8_t *p, size_t len,
+                                   const struct uint256 *anchor)
+{
+    if (len < 1)
+        return false; // raw-return-ok:malformed peer reply is classified unchecked, not logged
+    size_t off;
+    uint64_t count;
+    if (p[0] < 253) {
+        count = p[0];
+        off = 1;
+    } else if (p[0] == 253 && len >= 3) {
+        count = (uint64_t)p[1] | ((uint64_t)p[2] << 8);
+        off = 3;
+    } else {
+        return false; // raw-return-ok:malformed peer reply is classified unchecked, not logged
+    }
+    if (count == 0 || len < off + 4 + sizeof(anchor->data))
+        return false; // raw-return-ok:an empty reply means the peer lacks the anchor
+    return memcmp(p + off + 4, anchor->data, sizeof(anchor->data)) == 0;
+}
+
+/* Send one getheaders whose locator is the single hash `anchor`. */
+static bool ncrawl_send_getheaders(platform_socket_t sock,
+                                   const struct chain_params *params,
+                                   const struct uint256 *anchor)
+{
+    struct block_locator loc;
+    block_locator_init(&loc);
+    loc.vhave = zcl_malloc(sizeof(*loc.vhave), "ncrawl_locator");
+    if (!loc.vhave)
+        return false; // raw-return-ok:allocation failure leaves the peer unchecked
+    loc.vhave[0] = *anchor;
+    loc.num_hashes = 1;
+    struct uint256 stop;
+    memset(&stop, 0, sizeof(stop));
+    struct byte_stream s;
+    stream_init(&s, 128);
+    bool sent = getheaders_serialize(&s, &loc, &stop) &&
+                ncrawl_send_framed(sock, params, "getheaders", &s);
+    stream_free(&s);
+    block_locator_free(&loc);
+    return sent;
+}
+
+/* Read one frame: command into cmd (COMMAND_SIZE + 1 bytes) and a malloc'd
+ * payload (NULL when empty). False on IO failure, wrong magic or oversize. */
+static bool ncrawl_read_frame(platform_socket_t sock,
+                              const struct chain_params *params, char *cmd,
+                              uint8_t **payload, unsigned int *plen)
+{
+    uint8_t hdr[MSG_HEADER_SIZE];
+    *payload = NULL;
+    if (!ncrawl_recv_all(sock, hdr, MSG_HEADER_SIZE) ||
+        memcmp(hdr, params->pchMessageStart, MESSAGE_START_SIZE) != 0)
+        return false; // raw-return-ok:per-peer IO failure is expected, not logged
+    memcpy(cmd, hdr + MESSAGE_START_SIZE, COMMAND_SIZE);
+    cmd[COMMAND_SIZE] = '\0';
+    *plen = (unsigned int)hdr[MESSAGE_START_SIZE + COMMAND_SIZE] |
+            ((unsigned int)hdr[MESSAGE_START_SIZE + COMMAND_SIZE + 1] << 8) |
+            ((unsigned int)hdr[MESSAGE_START_SIZE + COMMAND_SIZE + 2] << 16) |
+            ((unsigned int)hdr[MESSAGE_START_SIZE + COMMAND_SIZE + 3] << 24);
+    if (*plen > NCRAWL_MAX_MSG_PAYLOAD)
+        return false; // raw-return-ok:oversized frame leaves the peer unchecked
+    if (!*plen)
+        return true;
+    *payload = zcl_malloc(*plen, "ncrawl_payload");
+    if (*payload && ncrawl_recv_all(sock, *payload, *plen))
+        return true;
+    free(*payload);
+    *payload = NULL;
+    return false; // raw-return-ok:per-peer IO failure is expected, not logged
+}
+
+/* Ask the peer for headers after the last compiled checkpoint and report
+ * whether its first reply header connects to it. Bounded: at most
+ * NCRAWL_MAX_CHAIN_MSGS frames, each read capped by the time left until
+ * deadline_us (monotonic). Any failure leaves the peer unchecked. */
+static bool ncrawl_check_chain(platform_socket_t sock,
+                               const struct chain_params *params,
+                               int64_t deadline_us)
+{
+    const struct checkpoint_data *cp = &params->checkpointData;
+    if (!cp->entries || cp->nEntries <= 0)
+        return false; // raw-return-ok:no compiled checkpoint means no anchor, peer stays unchecked
+    const struct uint256 *anchor = &cp->entries[cp->nEntries - 1].hash;
+    if (!ncrawl_send_getheaders(sock, params, anchor))
+        return false; // raw-return-ok:send failure leaves the peer unchecked
+
+    for (int i = 0; i < NCRAWL_MAX_CHAIN_MSGS; i++) {
+        int64_t left_ms = (deadline_us - platform_time_monotonic_us()) / 1000;
+        if (left_ms <= 0)
+            return false; // raw-return-ok:probe deadline reached, peer stays unchecked
+        (void)platform_socket_set_receive_timeout(sock, (int)left_ms);
+        char cmd[COMMAND_SIZE + 1];
+        uint8_t *payload;
+        unsigned int plen;
+        if (!ncrawl_read_frame(sock, params, cmd, &payload, &plen))
+            return false; // raw-return-ok:per-peer IO failure is expected, not logged
+        bool is_headers = strcmp(cmd, "headers") == 0;
+        bool connects = is_headers && payload &&
+                        ncrawl_headers_connect(payload, plen, anchor);
+        free(payload);
+        if (is_headers)
+            return connects;
+    }
+    return false; // raw-return-ok:no headers reply within the frame cap
+}
+
 bool network_crawler_default_probe(const struct net_address *addr,
                                    int connect_timeout_ms,
                                    int handshake_timeout_ms,
@@ -485,6 +607,9 @@ bool network_crawler_default_probe(const struct net_address *addr,
         (void)ncrawl_send_framed(sock, params, "verack", NULL); /* best-effort */
         out->reachable = true;
         out->latency_us = platform_time_monotonic_us() - t0;
+        out->chain_checked = ncrawl_check_chain(
+            sock, params,
+            platform_time_monotonic_us() + (int64_t)handshake_timeout_ms * 1000);
     } else {
         snprintf(out->reason, sizeof(out->reason), "version handshake failed");
     }

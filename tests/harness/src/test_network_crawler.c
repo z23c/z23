@@ -28,6 +28,7 @@
 #include "conditions/net_eclipse_suspected.h"
 #include "json/json.h"
 #include "chain/chainparams.h"
+#include "chain/checkpoints.h"
 #include "core/hash.h"
 #include "core/serialize.h"
 #include "core/uint256.h"
@@ -84,6 +85,7 @@ static bool synth_probe(const struct net_address *addr, int ct, int ht,
     unsigned char fl = addr->svc.addr.ip[14];
     out->is_onion = (fl & 0x02) != 0;
     out->reachable = (fl & 0x01) != 0;
+    out->chain_checked = out->reachable;
     out->version = 170011;
     out->services = 1;
     out->best_height = out->reachable ? (int64_t)(3000000 + hc) : -1;
@@ -173,6 +175,7 @@ static struct ncrawl_probe_result mk_res(const char *addr, bool reachable,
     snprintf(r.addr, sizeof(r.addr), "%s", addr);
     r.reachable = reachable;
     r.is_onion = onion;
+    r.chain_checked = reachable; /* a checkpoint-verified peer; tests clear it */
     r.version = 170011;
     r.best_height = reachable ? height : -1;
     if (subver)
@@ -251,6 +254,202 @@ static bool nc_slow_peer_start(struct nc_slow_peer *p)
         return false;
     p->port = ntohs(sa.sin_port);
     return pthread_create(&p->thread, NULL, nc_slow_peer_main, p) == 0;
+}
+
+/* ── loopback peer that answers the chain-identity getheaders ──────────── */
+
+struct nc_chain_peer {
+    platform_socket_t listener;
+    uint16_t port;
+    pthread_t thread;
+    bool connects;   /* first header's prev hash is the checkpoint */
+};
+
+static void nc_send_frame(platform_socket_t c, const char *cmd,
+                          const uint8_t *payload, size_t len)
+{
+    uint8_t frame[MSG_HEADER_SIZE + 512] = {0};
+    if (len > 512)
+        return;
+    memcpy(frame, chain_params_get()->pchMessageStart, MESSAGE_START_SIZE);
+    memcpy(frame + MESSAGE_START_SIZE, cmd, strlen(cmd));
+    for (int i = 0; i < 4; i++)
+        frame[MESSAGE_START_SIZE + COMMAND_SIZE + i] = (uint8_t)(len >> (8 * i));
+    struct uint256 h;
+    hash256(payload, len, h.data);
+    memcpy(frame + MESSAGE_START_SIZE + COMMAND_SIZE + 4, h.data, 4);
+    if (len)
+        memcpy(frame + MSG_HEADER_SIZE, payload, len);
+    (void)platform_socket_send_all(c, frame, MSG_HEADER_SIZE + len);
+}
+
+static void *nc_chain_peer_main(void *arg)
+{
+    struct nc_chain_peer *p = arg;
+    struct sockaddr_in from;
+    size_t fl = sizeof(from);
+    platform_socket_t c =
+        platform_socket_accept(p->listener, (struct sockaddr *)&from, &fl);
+    if (c == PLATFORM_SOCKET_INVALID)
+        return NULL;
+    uint8_t sink[1024];
+    (void)platform_socket_receive(c, sink, sizeof(sink)); /* version */
+
+    struct version_message ver;
+    version_message_init(&ver);
+    ver.protocol_version = PROTOCOL_VERSION;
+    ver.timestamp = platform_time_wall_unix();
+    snprintf(ver.sub_version, sizeof(ver.sub_version), "/chain:1/");
+    ver.start_height = 3289750;
+    struct byte_stream s;
+    stream_init(&s, 256);
+    if (version_message_serialize(&ver, &s)) {
+        nc_send_frame(c, "version", s.data, s.size);
+        nc_send_frame(c, "verack", NULL, 0);
+    }
+    stream_free(&s);
+
+    /* Wait for the getheaders (it may trail the verack in one segment). */
+    size_t have = 0;
+    bool got = false;
+    while (!got && have < sizeof(sink)) {
+        int n = platform_socket_receive(c, sink + have, sizeof(sink) - have);
+        if (n <= 0)
+            break;
+        have += (size_t)n;
+        for (size_t i = 0; i + 10 <= have; i++)
+            if (memcmp(sink + i, "getheaders", 10) == 0)
+                got = true;
+    }
+    if (got) {
+        const struct checkpoint_data *cp = &chain_params_get()->checkpointData;
+        uint8_t hdrs[1 + 140 + 2] = {0};
+        hdrs[0] = 1;                       /* one header */
+        if (p->connects)
+            memcpy(hdrs + 1 + 4, cp->entries[cp->nEntries - 1].hash.data, 32);
+        else
+            memset(hdrs + 1 + 4, 0xA5, 32); /* builds on some other chain */
+        nc_send_frame(c, "headers", hdrs, sizeof(hdrs));
+    }
+    platform_sleep_ms(100);
+    (void)platform_socket_close(c);
+    return NULL;
+}
+
+static bool nc_chain_peer_start(struct nc_chain_peer *p, bool connects)
+{
+    p->connects = connects;
+    p->listener = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (p->listener == PLATFORM_SOCKET_INVALID)
+        return false;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    size_t sl = sizeof(sa);
+    if (platform_socket_bind(p->listener, (struct sockaddr *)&sa,
+                             sizeof(sa)) != 0 ||
+        platform_socket_listen(p->listener, 1) != 0 ||
+        platform_socket_local_address(p->listener, (struct sockaddr *)&sa,
+                                      &sl) != 0)
+        return false;
+    p->port = ntohs(sa.sin_port);
+    return pthread_create(&p->thread, NULL, nc_chain_peer_main, p) == 0;
+}
+
+
+static int nc_case_chain_fold(void)
+{
+    int failures = 0;
+    printf("  eclipse ignores reachable peers that never proved our chain... ");
+    /* The canonical-node defect: 5 peers share our magic at another
+     * height but fail the checkpoint check; the 2 that pass agree with us. */
+    struct ncrawl_probe_result r[7];
+    for (int i = 0; i < 5; i++) {
+        r[i] = mk_res("u", true, false, 3522818, "/A/");
+        r[i].chain_checked = false;
+    }
+    for (int i = 5; i < 7; i++)
+        r[i] = mk_res("c", true, false, 3289740, "/A/");
+    struct network_census_view v;
+    network_census_compute(r, 7, 3289740, 1, &v);
+    NC_CHECK(v.reachable_count == 7);        /* display counts unchanged */
+    NC_CHECK(v.modal_height == 3522818);
+    NC_CHECK(v.chain_checked_count == 2);
+    NC_CHECK(v.network_modal_height == 3289740);
+    NC_CHECK(v.eclipse_suspected == false);
+    NC_CHECK(v.census_insufficient == true);
+
+    /* Five checked peers elsewhere and one at our height still fire. */
+    struct ncrawl_probe_result e[6];
+    for (int i = 0; i < 5; i++)
+        e[i] = mk_res("e", true, false, 3522818, "/A/");
+    e[5] = mk_res("o", true, false, 3289740, "/A/");
+    network_census_compute(e, 6, 3289740, 1, &v);
+    NC_CHECK(v.chain_checked_count == 6);
+    NC_CHECK(v.census_insufficient == false);
+    NC_CHECK(v.network_count_at_own_modal == 1);
+    NC_CHECK(v.eclipse_suspected == true);
+
+    /* Empty census is reported as unjudged, not healthy. */
+    network_census_compute(NULL, 0, 3289740, 1, &v);
+    NC_CHECK(v.census_insufficient == true);
+    NC_CHECK(v.eclipse_suspected == false);
+    printf("done\n");
+
+    return failures;
+}
+
+static int nc_case_probe_chain(void)
+{
+    int failures = 0;
+    printf("  default probe checks the first header against the checkpoint... ");
+    const struct checkpoint_data *cp = &chain_params_get()->checkpointData;
+    NC_CHECK(cp->entries != NULL && cp->nEntries > 0);
+    for (int pass = 0; pass < 2 && cp->nEntries > 0; pass++) {
+        struct nc_chain_peer peer;
+        NC_CHECK(nc_chain_peer_start(&peer, pass == 0));
+        struct net_address lo;
+        net_address_init(&lo);
+        unsigned char ip4[4] = { 127, 0, 0, 1 };
+        net_addr_set_ipv4(&lo.svc.addr, ip4);
+        lo.svc.port = peer.port;
+        struct ncrawl_probe_result r;
+        memset(&r, 0, sizeof(r));
+        NC_CHECK(network_crawler_default_probe(&lo, 2000, 2000, &r) == true);
+        NC_CHECK(r.reachable == true);
+        NC_CHECK(r.best_height == 3289750);
+        NC_CHECK(r.chain_checked == (pass == 0));
+        pthread_join(peer.thread, NULL);
+        (void)platform_socket_close(peer.listener);
+    }
+    printf("done\n");
+
+    return failures;
+}
+
+static int nc_case_probe_silent(void)
+{
+    int failures = 0;
+    printf("  default probe leaves a silent peer unchecked within the deadline... ");
+    struct nc_slow_peer peer;
+    NC_CHECK(nc_slow_peer_start(&peer));
+    struct net_address lo;
+    net_address_init(&lo);
+    unsigned char ip4[4] = { 127, 0, 0, 1 };
+    net_addr_set_ipv4(&lo.svc.addr, ip4);
+    lo.svc.port = peer.port;
+    struct ncrawl_probe_result r;
+    memset(&r, 0, sizeof(r));
+    int64_t t0 = platform_time_monotonic_us();
+    NC_CHECK(network_crawler_default_probe(&lo, 1000, 1000, &r) == true);
+    NC_CHECK(r.reachable == true);
+    NC_CHECK(r.chain_checked == false);
+    NC_CHECK(platform_time_monotonic_us() - t0 < 3 * 1000 * 1000);
+    pthread_join(peer.thread, NULL);
+    (void)platform_socket_close(peer.listener);
+    printf("done\n");
+    return failures;
 }
 
 int test_network_crawler(void)
@@ -473,6 +672,7 @@ int test_network_crawler(void)
         v.ready = true;
         v.eclipse_suspected = true;
         v.reachable_count = 9;
+        v.chain_checked_count = 9;
         v.own_modal_height = 100;
         v.network_modal_height = 200;
         v.network_count_at_own_modal = 2;
@@ -828,6 +1028,10 @@ int test_network_crawler(void)
         (void)platform_socket_close(peer.listener);
         printf("done\n");
     }
+
+    failures += nc_case_chain_fold();
+    failures += nc_case_probe_chain();
+    failures += nc_case_probe_silent();
 
     network_crawler_test_reset();
 

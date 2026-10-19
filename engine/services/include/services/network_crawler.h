@@ -72,7 +72,7 @@ enum {
     NCRAWL_TOPN_VERSIONS  = 8,    /* reported top-N subver buckets */
     NCRAWL_ADDR_MAX       = 96,   /* addr string cap */
     NCRAWL_SUBVER_MAX     = 128,  /* trimmed subver cap */
-    NCRAWL_ECLIPSE_MIN    = 4,    /* reachable nodes before eclipse can fire */
+    NCRAWL_ECLIPSE_MIN    = 4,    /* chain-checked nodes before eclipse can fire */
     NCRAWL_REASON_MAX     = 48,   /* short not-probed / failed-dial reason */
     /* Onion budget — bounded SEPARATELY from clearnet because a circuit build
      * costs seconds, not milliseconds. */
@@ -106,6 +106,11 @@ struct ncrawl_probe_result {
     char     addr[NCRAWL_ADDR_MAX];
     bool     is_onion;
     bool     reachable;
+    /* True only when the peer answered a getheaders anchored at the last
+     * compiled checkpoint with a first header whose prev hash IS that
+     * checkpoint: the peer holds our chain. A shared message magic and a
+     * completed version handshake prove neither. Onion rows stay false. */
+    bool     chain_checked;
     uint8_t  outcome;         /* enum ncrawl_probe_outcome */
     char     reason[NCRAWL_REASON_MAX];
     int32_t  version;
@@ -127,6 +132,7 @@ struct network_census_view {
     int64_t computed_at;
     int32_t probed;              /* census rows in the sample */
     int32_t reachable_count;     /* rows with reachable=true */
+    int32_t chain_checked_count; /* reachable rows with chain_checked=true */
     int32_t onion_count;         /* reachable onion nodes */
     int32_t clearnet_count;      /* reachable clearnet nodes */
 
@@ -152,9 +158,14 @@ struct network_census_view {
     struct ncrawl_version_bucket versions[NCRAWL_MAX_VERSIONS];
 
     /* whole-network eclipse signal */
+    /* The eclipse signal below is computed over chain_checked rows ONLY.
+     * With fewer than NCRAWL_ECLIPSE_MIN of them the signal cannot be judged:
+     * eclipse_suspected stays false and census_insufficient is set so the
+     * operator sees an unjudged census, never a healthy one. */
+    bool    census_insufficient;
     bool    eclipse_suspected;
     int64_t own_modal_height;        /* our connected-peer modal (network_monitor) */
-    int64_t network_modal_height;    /* == modal_height */
+    int64_t network_modal_height;    /* modal over chain_checked rows, -1 if none */
     int32_t network_count_at_own_modal;
 };
 

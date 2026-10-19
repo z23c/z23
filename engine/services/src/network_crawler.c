@@ -621,6 +621,9 @@ bool network_crawler_dump_state_json(struct json_value *out, const char *key)
     json_free(&versions);
 
     json_push_kv_bool(out, "eclipse_suspected", v.eclipse_suspected);
+    json_push_kv_int(out, "chain_checked_count", v.chain_checked_count);
+    json_push_kv_str(out, "census_quality",
+                     v.census_insufficient ? "insufficient_checked_peers" : "ok");
     struct json_value ev;
     json_init(&ev);
     json_set_object(&ev);
@@ -629,21 +632,23 @@ bool network_crawler_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(&ev, "network_count_at_own_modal",
                      v.network_count_at_own_modal);
     json_push_kv_int(&ev, "reachable_count", v.reachable_count);
+    json_push_kv_int(&ev, "chain_checked_count", v.chain_checked_count);
     (void)json_push_kv(out, "eclipse_evidence", &ev);
     json_free(&ev);
 
-    char reason[192];
+    char reason[256];
     if (v.eclipse_suspected)
         snprintf(reason, sizeof(reason),
                  "eclipse: our peers modal=%lld is a %d/%d minority vs network "
                  "modal=%lld",
                  (long long)v.own_modal_height, v.network_count_at_own_modal,
-                 v.reachable_count, (long long)v.network_modal_height);
+                 v.chain_checked_count, (long long)v.network_modal_height);
     else
         snprintf(reason, sizeof(reason),
-                 "reachable=%d modal_height=%lld spread=%lld",
-                 v.reachable_count, (long long)v.modal_height,
-                 (long long)v.height_spread);
+                 "reachable=%d chain_checked=%d%s modal_height=%lld spread=%lld",
+                 v.reachable_count, v.chain_checked_count,
+                 v.census_insufficient ? " (insufficient_checked_peers: eclipse not judged)" : "",
+                 (long long)v.modal_height, (long long)v.height_spread);
     diag_push_health(out, !v.eclipse_suspected, reason);
     return true;
 }

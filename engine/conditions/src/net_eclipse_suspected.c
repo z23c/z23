@@ -66,7 +66,7 @@ static bool detect_net_eclipse_suspected(void)
     if (fire) {
         atomic_store(&g_own_modal_at_detect, v.own_modal_height);
         atomic_store(&g_net_modal_at_detect, v.network_modal_height);
-        atomic_store(&g_reachable_at_detect, v.reachable_count);
+        atomic_store(&g_reachable_at_detect, v.chain_checked_count);
         atomic_store(&g_at_own_at_detect, v.network_count_at_own_modal);
     }
     return fire;
@@ -76,7 +76,7 @@ static enum condition_remedy_result remedy_net_eclipse_suspected(void)
 {
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "our peers modal=%lld is %d/%d of the reachable network "
+             "our peers modal=%lld is %d/%d of the chain-checked network "
              "(network modal=%lld) for >=%d census rounds",
              (long long)atomic_load(&g_own_modal_at_detect),
              atomic_load(&g_at_own_at_detect),
