@@ -354,7 +354,8 @@ static bool pp_runtime_receive(struct pp_fixture *f, unsigned version,
 static bool pp_runtime_healthy(struct plugin_run *run, const char *generation,
                                bool fallback)
 {
-    struct timespec start, now;
+    struct timespec start;
+    struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return false;
     for (;;) {
         if (plugin_run_poll(run) != PLUGIN_RUN_OK) return false;
