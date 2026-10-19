@@ -5034,7 +5034,10 @@ static int dl_regen_make(const struct dl_dirs *d, struct dl_row *row,
      * host's build grant, where the old literal spent 8. `jobs` must outlive
      * argv. */
     char jobs[16];
-    if (!platform_build_jobs_arg(jobs)) return -1;
+    if (!platform_build_jobs_arg(jobs)) {
+        fprintf(stderr, "[dev.land] build jobs: ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal\n");
+        return -1;
+    }
     const char *argv[] = { "make", jobs, "-C", d->wt, target, NULL };
     char *buf;
     int rc;
@@ -5707,8 +5710,10 @@ static int dl_lint_new_source(const struct dl_dirs *d, struct dl_row *row)
     char jobs[16];
     if (dl_range_adds_source(d->wt, row->base, row->local) == 0)
         return 0;
-    if (!platform_build_jobs_arg(jobs))
+    if (!platform_build_jobs_arg(jobs)) {
+        fprintf(stderr, "[dev.land] build jobs: ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal\n");
         return -1;
+    }
     const char *argv[] = { "make", jobs, "-C", d->wt, "lint-preflight",
                            NULL };
     return dl_lint_run(row, argv);
@@ -10444,8 +10449,11 @@ int zcl_native_dev_land_test_watch_worker(const char *wt, const char *base,
     char jobs[16], bin[4096], root_arg[4200], local_arg[128], base_arg[128];
     char *buf;
     int rc;
-    if (!platform_build_jobs_arg(jobs) ||
-        snprintf(bin, sizeof(bin), "%s/build/bin/z23-dev", root) >=
+    if (!platform_build_jobs_arg(jobs)) {
+        (void)snprintf(why, why_cap, "%s", "build_jobs_invalid_ZCL_BUILD_MAX_JOBS");
+        return -1;
+    }
+    if (snprintf(bin, sizeof(bin), "%s/build/bin/z23-dev", root) >=
             (int)sizeof(bin) ||
         snprintf(root_arg, sizeof(root_arg), "--root=%s", root) >=
             (int)sizeof(root_arg) ||

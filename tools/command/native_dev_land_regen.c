@@ -230,7 +230,7 @@ static int dlrg_make_goals(const char *wt, const char *jobs_arg,
     if (!jobs_arg) {
         if (!platform_build_jobs_arg(jobs)) {
             (void)snprintf(why, why_cap,
-                           "landing build job count unavailable");
+                           "landing build job count unavailable (ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal)");
             return -1;
         }
         jobs_arg = jobs;

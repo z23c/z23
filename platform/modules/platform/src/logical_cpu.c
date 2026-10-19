@@ -195,10 +195,8 @@ bool platform_build_jobs_arg(char out[16])
     uint32_t jobs = platform_build_job_count(platform_available_cpu_count(),
                                              platform_build_memory_budget_bytes());
     jobs = platform_build_job_cap(jobs, getenv("ZCL_BUILD_MAX_JOBS"));
-    if (!jobs) {
-        fprintf(stderr, "build jobs: ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal\n");
+    if (!jobs)
         return false;
-    }
     int written = snprintf(out, 16, "-j%u", jobs);
     return written > 0 && written < 16;
 }

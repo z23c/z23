@@ -594,7 +594,7 @@ static bool dtk_gates(const struct dtk_paths *p, char *why, size_t cap)
      * must outlive `steps` below. */
     char dev_bin_jobs[16];
     if (!platform_build_jobs_arg(dev_bin_jobs)) {
-        (void)snprintf(why, cap, "could not size the dev-bin build");
+        (void)snprintf(why, cap, "could not size the dev-bin build (ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal)");
         return false;
     }
     const char *const dev_bin[] = {"make", "-s", dev_bin_jobs,

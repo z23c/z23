@@ -84,7 +84,9 @@ int64_t platform_build_memory_budget_bytes(void);
 /* Write the `-jN` argument a spawned make should carry into `out` (at most
  * 15 characters plus the terminator). ZCL_BUILD_MAX_JOBS optionally lowers
  * the derived count; it cannot widen a CPU or memory grant. Returns false
- * for an invalid cap or when the formatted number would not fit.
+ * for an invalid cap or when the formatted number would not fit. This module
+ * holds no output reach, so it prints nothing: the caller reports the refusal
+ * and should name ZCL_BUILD_MAX_JOBS.
  *
  * This is platform_build_job_count() over platform_available_cpu_count() and
  * platform_build_memory_budget_bytes(). Callers take the formatted argument
