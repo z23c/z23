@@ -518,6 +518,20 @@ static int64_t ums_rebuild_with_writer_fault(struct utxo_mirror_sync_service *sv
     return result;
 }
 
+/* Same-row-count tamper: a temp trigger on the private writer rewrites each
+ * staged value after insert. Only the SHA3 root compare can catch this; the
+ * row-count check sees an identical count. */
+static void ums_tamper_hook(sqlite3 *w, void *p)
+{
+    (void)p;
+    char *err = NULL;
+    (void)sqlite3_exec(w,
+        "CREATE TEMP TRIGGER ums_tamper AFTER INSERT ON main.utxos BEGIN "
+        "UPDATE utxos SET value = value + 1 "
+        "WHERE txid = NEW.txid AND vout = NEW.vout; END;", NULL, NULL, &err);
+    sqlite3_free(err);
+}
+
 static int ums_test_staged_read_errors(struct utxo_mirror_sync_service *svc,
     struct node_db *ndb)
 {
@@ -633,6 +647,29 @@ static int ums_test_rebuild_now(void)
     UMS_CHECK("rebuild_now: roots match", ums_roots_equal(&ndb, pdb));
 
     failures += ums_test_audit_diff(&svc, &ndb, pdb);
+
+    /* Tampered staged value, identical row count: the root compare alone
+     * must reject it, roll back, and quarantine. Runs last so the audit
+     * fixtures above keep their row set. */
+    int64_t tcur_before = -1;
+    (void)node_db_state_get_int(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &tcur_before);
+    UMS_CHECK("tamper: good coin added",
+              ums_add_coin(pdb, 0x54, 4000, 190) && ums_set_frontier(pdb, 191));
+    int64_t db_before = db_utxo_count(&ndb);
+    utxo_mirror_sync_test_set_writer_hook(ums_tamper_hook, NULL);
+    r = utxo_mirror_rebuild_now(&svc);
+    utxo_mirror_sync_test_set_writer_hook(NULL, NULL);
+    cur = -1;
+    (void)node_db_state_get_int(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &cur);
+    UMS_CHECK("tamper: same-count tamper returns VERIFY_MISMATCH",
+              r == UTXO_MIRROR_REBUILD_VERIFY_MISMATCH);
+    UMS_CHECK("tamper: old mirror and cursor untouched",
+              db_utxo_count(&ndb) == db_before && cur == tcur_before);
+    UMS_CHECK("tamper: failed rebuild stays quarantined",
+              atomic_load(&svc.mirror_health) == UTXO_MIRROR_QUARANTINED);
+    r = utxo_mirror_rebuild_now(&svc);
+    UMS_CHECK("tamper: clean rebuild converges", r > 0);
+    UMS_CHECK("tamper: roots match after recovery", ums_roots_equal(&ndb, pdb));
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);

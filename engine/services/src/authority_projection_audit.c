@@ -568,7 +568,7 @@ bool ap_audit_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_bool(out, "diff_scan_error", atomic_load(&g_ap_diff_scan_error));
     json_push_kv_bool(out, "diff_truncated", atomic_load(&g_ap_diff_truncated));
     json_push_kv_int(out, "diff_limit", AP_DIFF_MAX);
-        pthread_mutex_lock(&g_ap_detail_lock);
+    pthread_mutex_lock(&g_ap_detail_lock);
     json_push_kv_str(out, "last_auth_root", g_ap_last_auth_hex);
     json_push_kv_str(out, "diff_keys", g_ap_diff_keys);
     json_push_kv_str(out, "last_proj_root", g_ap_last_proj_hex);
