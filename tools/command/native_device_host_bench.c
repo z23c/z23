@@ -81,19 +81,27 @@ static double bench_load1(void)
 #endif
     return -1.0;
 }
+static bool bench_ratio(struct json_value *data, const char *key, uint64_t full, uint64_t cached, uint64_t records)
+{
+    struct json_value ratio;
+    json_init(&ratio); json_set_object(&ratio);
+    bool ok = json_push_kv_real(&ratio, "full", records ? (double)full / (double)records : 0.0) &&
+        json_push_kv_real(&ratio, "cached", records ? (double)cached / (double)records : 0.0) &&
+        json_push_kv(data, key, &ratio);
+    json_free(&ratio);
+    return ok;
+}
+/* acquisitions_per_record divides by the 4 KiB-equivalent count; acquisitions_per_sealed_record by the
+ * DATA records actually sealed, which is what the guard cost really amortises over. */
 static bool bench_per_record(struct json_value *data, const struct device_host_bench_result *bench)
 {
-    uint64_t full = 0, cached = 0, records = 0;
+    uint64_t full = 0, cached = 0, records = 0, sealed = 0;
     for (unsigned i = 0; i < bench->repeats; ++i) {
-        full += bench->runs[i].full_acquisitions; cached += bench->runs[i].cached_acquisitions; records += bench->runs[i].records;
+        full += bench->runs[i].full_acquisitions; cached += bench->runs[i].cached_acquisitions;
+        records += bench->runs[i].records; sealed += bench->runs[i].sealed_records;
     }
-    struct json_value per_record;
-    json_init(&per_record); json_set_object(&per_record);
-    bool ok = json_push_kv_real(&per_record, "full", records ? (double)full / (double)records : 0.0) &&
-        json_push_kv_real(&per_record, "cached", records ? (double)cached / (double)records : 0.0) &&
-        json_push_kv(data, "acquisitions_per_record", &per_record);
-    json_free(&per_record);
-    return ok;
+    return bench_ratio(data, "acquisitions_per_record", full, cached, records) &&
+        bench_ratio(data, "acquisitions_per_sealed_record", full, cached, sealed);
 }
 static bool bench_provenance(struct json_value *data, const struct device_host_bench_result *bench)
 {
@@ -120,6 +128,7 @@ static bool bench_build(struct json_value *data, const struct device_host_bench_
         bench_push_reals(data, "forward_runs_mib_s", forward, bench->repeats) &&
         bench_push_reals(data, "reverse_runs_mib_s", reverse, bench->repeats) &&
         json_push_kv_int(data, "records", (int64_t)bench->runs[0].records) &&
+        json_push_kv_int(data, "sealed_records", (int64_t)bench->runs[0].sealed_records) &&
         bench_per_record(data, bench) && bench_provenance(data, bench);
 }
 

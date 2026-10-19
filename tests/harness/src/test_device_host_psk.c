@@ -4,6 +4,7 @@
 #include "platform/clock.h"
 #include "base/hex.h"
 #include "base/cleanse.h"
+#include "base/serialize_le.h"
 #include <stdio.h>
 #include <string.h>
 static_assert(_Generic(device_host_psk_start(NULL, NULL, NULL), struct zcl_result: 1, default: 0),
@@ -674,6 +675,155 @@ static int psk_typed_custody(void)
     device_pairing_guard_release(&guard); device_host_psk_destroy(&c); device_host_psk_destroy(&s);
     psk_fixture_close(&f); return failures;
 }
+/* Large-record profile. Sessions here use the live entropy path, so both hello nonces carry the
+ * capability tag; a session started with a public test vector nonce advertises nothing and is the
+ * legacy 4 KiB peer. */
+static bool psk_live_start(struct psk_fixture *f, struct device_host_psk_session *client,
+    struct device_host_psk_session *server, unsigned legacy)
+{
+    device_host_psk_init(client); device_host_psk_init(server);
+    struct device_host_psk_spec c = psk_fixture_spec(f, 0, true), s = psk_fixture_spec(f, 1, false);
+    uint8_t nonce[32];
+    for (size_t i = 0; i < 32; ++i) nonce[i] = (uint8_t)(0xc0 + i);
+    if (legacy & 1u) device_host_psk_test_nonce(nonce, false);
+    if (typed_test_device_host_psk_start(client, &c) != DEVICE_HOST_PSK_PROGRESS) return false;
+    if (legacy & 2u) device_host_psk_test_nonce(nonce, false);
+    return typed_test_device_host_psk_start(server, &s) == DEVICE_HOST_PSK_PROGRESS;
+}
+static bool psk_live_handshake(struct psk_fixture *f, struct device_host_psk_session *client,
+    struct device_host_psk_session *server, unsigned legacy)
+{
+    if (!psk_live_start(f, client, server, legacy)) return false;
+    return psk_flight(client, server, 0, NULL, 1) && psk_flight(server, client, 0, NULL, 7) &&
+        psk_flight(client, server, 0, NULL, 1) && server->phase == DEVICE_HOST_PSK_NEED_TARGET &&
+        psk_target_ready(server) && psk_flight(server, client, 0, NULL, 3) &&
+        client->phase == DEVICE_HOST_PSK_ESTABLISHED && server->phase == DEVICE_HOST_PSK_ESTABLISHED;
+}
+static bool psk_take_big(struct device_host_psk_session *sender, uint8_t wire[DEVICE_HOST_PSK_WIRE_MAX], size_t *length)
+{
+    struct device_pairing_guard guard = {0}; const uint8_t *bytes = NULL;
+    enum device_host_psk_result result = typed_test_device_host_psk_pending_acquire(sender, &guard, &bytes, length);
+    if (result != DEVICE_HOST_PSK_PROGRESS) { device_pairing_guard_release(&guard); return false; }
+    memcpy(wire, bytes, *length);
+    result = typed_test_device_host_psk_pending_written(sender, &guard, *length);
+    device_pairing_guard_release(&guard);
+    return result == DEVICE_HOST_PSK_PROGRESS;
+}
+static void psk_fill(uint8_t *bytes, size_t size)
+{
+    for (size_t i = 0; i < size; ++i) bytes[i] = (uint8_t)(i * 131u + (i >> 8) + 7u);
+}
+static int psk_large_case_1(void)
+{
+    int failures = 0; struct psk_fixture f = {0}; struct device_host_psk_session c = {0}, s = {0};
+    static uint8_t plaintext[DEVICE_HOST_PSK_RECORD_MAX + 1], wire[DEVICE_HOST_PSK_WIRE_MAX];
+    psk_fill(plaintext, sizeof(plaintext));
+    TEST_CASE("host PSK: a record at the large maximum round-trips both ways under one verify-then-release") {
+        ASSERT(psk_fixture_open(&f)); ASSERT(psk_live_handshake(&f, &c, &s, 0));
+        ASSERT(c.large_records && s.large_records);
+        ASSERT_EQ(device_host_psk_record_limit(&c), DEVICE_HOST_PSK_RECORD_MAX);
+        for (unsigned direction = 0; direction < 2; ++direction) {
+            struct device_host_psk_session *from = direction ? &s : &c, *to = direction ? &c : &s;
+            size_t length = 0;
+            ASSERT_EQ(typed_test_device_host_psk_queue_data(from, plaintext, DEVICE_HOST_PSK_RECORD_MAX), DEVICE_HOST_PSK_PROGRESS);
+            ASSERT(psk_take_big(from, wire, &length));
+            ASSERT_EQ(length, DEVICE_HOST_PSK_WIRE_MAX);
+            ASSERT_EQ(psk_feed(to, wire, length, 1000), DEVICE_HOST_PSK_PROGRESS);
+            ASSERT(psk_release_plaintext(to, plaintext, DEVICE_HOST_PSK_RECORD_MAX));
+        }
+        /* A short record after a long one still chains correctly. */
+        size_t length = 0;
+        ASSERT_EQ(typed_test_device_host_psk_queue_data(&c, plaintext, 4097), DEVICE_HOST_PSK_PROGRESS);
+        ASSERT(psk_take_big(&c, wire, &length)); ASSERT_EQ(length, 24u + 4097u + 128u);
+        ASSERT_EQ(psk_feed(&s, wire, length, 4096), DEVICE_HOST_PSK_PROGRESS);
+        ASSERT(psk_release_plaintext(&s, plaintext, 4097));
+    } TEST_END
+    device_host_psk_destroy(&c); device_host_psk_destroy(&s); psk_fixture_close(&f);
+    return failures;
+}
+static int psk_large_case_2(void)
+{
+    int failures = 0; struct psk_fixture f = {0}; struct device_host_psk_session c = {0}, s = {0};
+    static uint8_t plaintext[DEVICE_HOST_PSK_RECORD_MAX + 1], wire[DEVICE_HOST_PSK_WIRE_MAX];
+    psk_fill(plaintext, sizeof(plaintext));
+    TEST_CASE("host PSK: the sender refuses one byte over the large maximum") {
+        ASSERT(psk_fixture_open(&f)); ASSERT(psk_live_handshake(&f, &c, &s, 0));
+        ASSERT_EQ(typed_test_device_host_psk_queue_data(&c, plaintext, DEVICE_HOST_PSK_RECORD_MAX + 1), DEVICE_HOST_PSK_REFUSED);
+        ASSERT(psk_failed_erased(&c));
+    } TEST_END
+    device_host_psk_destroy(&c); device_host_psk_destroy(&s); psk_fixture_close(&f);
+    return failures;
+}
+static int psk_large_case_3(void)
+{
+    int failures = 0; struct psk_fixture f = {0}; struct device_host_psk_session c = {0}, s = {0};
+    static uint8_t plaintext[DEVICE_HOST_PSK_RECORD_MAX + 1], wire[DEVICE_HOST_PSK_WIRE_MAX];
+    psk_fill(plaintext, sizeof(plaintext));
+    TEST_CASE("host PSK: the receiver refuses a header one byte over the large maximum and releases nothing") {
+        ASSERT(psk_fixture_open(&f)); ASSERT(psk_live_handshake(&f, &c, &s, 0));
+        size_t length = 0;
+        ASSERT_EQ(typed_test_device_host_psk_queue_data(&c, plaintext, DEVICE_HOST_PSK_RECORD_MAX), DEVICE_HOST_PSK_PROGRESS);
+        ASSERT(psk_take_big(&c, wire, &length));
+        zcl_write_u32_be(wire + 12, (uint32_t)(DEVICE_HOST_PSK_RECORD_MAX + 1 + 5 * 64));
+        ASSERT_EQ(psk_feed(&s, wire, DEVICE_HOST_PSK_HEADER, DEVICE_HOST_PSK_HEADER), DEVICE_HOST_PSK_REFUSED);
+        ASSERT(psk_failed_erased(&s));
+    } TEST_END
+    device_host_psk_destroy(&c); device_host_psk_destroy(&s); psk_fixture_close(&f);
+    return failures;
+}
+static int psk_large_case_4(void)
+{
+    int failures = 0; struct psk_fixture f = {0}; struct device_host_psk_session c = {0}, s = {0};
+    static uint8_t plaintext[DEVICE_HOST_PSK_RECORD_MAX + 1], wire[DEVICE_HOST_PSK_WIRE_MAX];
+    psk_fill(plaintext, sizeof(plaintext));
+    TEST_CASE("host PSK: a forged tag in the last chunk of a large record refuses the whole record") {
+        ASSERT(psk_fixture_open(&f)); ASSERT(psk_live_handshake(&f, &c, &s, 0));
+        size_t length = 0;
+        ASSERT_EQ(typed_test_device_host_psk_queue_data(&c, plaintext, DEVICE_HOST_PSK_RECORD_MAX), DEVICE_HOST_PSK_PROGRESS);
+        ASSERT(psk_take_big(&c, wire, &length)); wire[length - 1] ^= 1;
+        ASSERT_EQ(psk_feed(&s, wire, length, 5000), DEVICE_HOST_PSK_REFUSED);
+        ASSERT(psk_failed_erased(&s));
+    } TEST_END
+    device_host_psk_destroy(&c); device_host_psk_destroy(&s); psk_fixture_close(&f);
+    return failures;
+}
+static int psk_large_case_5(void)
+{
+    int failures = 0; struct psk_fixture f = {0}; struct device_host_psk_session c = {0}, s = {0};
+    static uint8_t plaintext[DEVICE_HOST_PSK_RECORD_MAX + 1], wire[DEVICE_HOST_PSK_WIRE_MAX];
+    psk_fill(plaintext, sizeof(plaintext));
+    TEST_CASE("host PSK: a legacy-max peer interoperates at 4096 and the new side refuses over it") {
+        for (unsigned legacy = 1; legacy <= 2; ++legacy) {
+            ASSERT(psk_fixture_open(&f)); ASSERT(psk_live_handshake(&f, &c, &s, legacy));
+            ASSERT(!c.large_records && !s.large_records);
+            ASSERT_EQ(device_host_psk_record_limit(&c), DEVICE_HOST_PSK_CHUNK);
+            ASSERT_EQ(device_host_psk_record_limit(&s), DEVICE_HOST_PSK_CHUNK);
+            size_t length = 0;
+            ASSERT_EQ(typed_test_device_host_psk_queue_data(&c, plaintext, DEVICE_HOST_PSK_CHUNK), DEVICE_HOST_PSK_PROGRESS);
+            ASSERT(psk_take_big(&c, wire, &length)); ASSERT_EQ(length, DEVICE_HOST_PSK_WIRE);
+            ASSERT_EQ(psk_feed(&s, wire, length, 777), DEVICE_HOST_PSK_PROGRESS);
+            ASSERT(psk_release_plaintext(&s, plaintext, DEVICE_HOST_PSK_CHUNK));
+            ASSERT_EQ(typed_test_device_host_psk_queue_data(&s, plaintext, DEVICE_HOST_PSK_CHUNK + 1), DEVICE_HOST_PSK_REFUSED);
+            ASSERT(psk_failed_erased(&s));
+            device_host_psk_destroy(&c); device_host_psk_destroy(&s); psk_fixture_close(&f);
+        }
+        /* Receive side: a two-chunk frame (4097 bytes) is not accepted without the capability. */
+        ASSERT(psk_fixture_open(&f)); ASSERT(psk_live_handshake(&f, &c, &s, 0));
+        size_t length = 0; uint8_t header[DEVICE_HOST_PSK_HEADER];
+        ASSERT_EQ(typed_test_device_host_psk_queue_data(&c, plaintext, 4097), DEVICE_HOST_PSK_PROGRESS);
+        ASSERT(psk_take_big(&c, wire, &length)); memcpy(header, wire, sizeof(header));
+        device_host_psk_destroy(&c); device_host_psk_destroy(&s); psk_fixture_close(&f);
+        ASSERT(psk_fixture_open(&f)); ASSERT(psk_live_handshake(&f, &c, &s, 1));
+        ASSERT_EQ(psk_feed(&s, header, sizeof(header), sizeof(header)), DEVICE_HOST_PSK_REFUSED);
+        ASSERT(psk_failed_erased(&s));
+    } TEST_END
+    device_host_psk_destroy(&c); device_host_psk_destroy(&s); psk_fixture_close(&f);
+    return failures;
+}
+static int psk_large_records(void)
+{
+    return psk_large_case_1() + psk_large_case_2() + psk_large_case_3() + psk_large_case_4() + psk_large_case_5();
+}
 int test_device_host_psk(void);
 int test_device_host_psk(void)
 {
@@ -685,6 +835,6 @@ int test_device_host_psk(void)
     failures += psk_wrong_states(); failures += psk_failure_reason();
     failures += psk_late_confirmations(); failures += psk_accepted_replay();
     failures += psk_partial_record_suffixes(); failures += psk_entropy_and_cancel();
-    failures += psk_typed_custody();
+    failures += psk_typed_custody(); failures += psk_large_records();
     return failures + (int)typed_state_failures;
 }

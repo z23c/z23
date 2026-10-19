@@ -90,12 +90,13 @@ struct device_host_psk_bridge_observation {
     bool io_taken, target_connect_started, target_connected;
     uint64_t plaintext_read_bytes, plaintext_written_bytes;
     uint64_t carrier_read_bytes, carrier_written_bytes;
+    uint64_t data_records_sealed, data_records_opened; /* verified DATA records; FIN excluded */
 };
 struct device_host_psk_bridge {
     struct device_host_psk_bridge_spec spec;
     struct device_host_psk_session session;
     struct device_host_psk_bridge_observation observation;
-    uint8_t unread[DEVICE_HOST_PSK_WIRE], local[4096];
+    uint8_t unread[DEVICE_HOST_PSK_WIRE_MAX], local[DEVICE_HOST_PSK_RECORD_MAX];
     size_t unread_used, unread_sent, local_used;
     int64_t hard_deadline_ns; /* Immutable initial session ceiling. */
     int target_fd;

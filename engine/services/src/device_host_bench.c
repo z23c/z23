@@ -225,7 +225,8 @@ static bool bench_once(struct bench_fixture *f, size_t total, const uint8_t *pat
     if (!reverse_ok) atomic_store(&f->cancelled, true);
     pthread_join(client, NULL); pthread_join(server, NULL);
     device_pairing_guard_counts(&full1, &cached1);
-    run->records = 2 * ((total + 4095) / 4096);
+    run->records = 2 * ((total + 4095) / 4096); /* 4 KiB-equivalent units, comparable across record sizes */
+    run->sealed_records = f->client.observation.data_records_sealed + f->server.observation.data_records_sealed;
     run->full_acquisitions = full1 - full0; run->cached_acquisitions = cached1 - cached0;
     return reverse_ok && f->client.observation.result == DEVICE_HOST_BRIDGE_EOF &&
         f->server.observation.result == DEVICE_HOST_BRIDGE_EOF;

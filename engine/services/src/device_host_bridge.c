@@ -725,9 +725,10 @@ static enum device_host_bridge_result psk_io_consume_unread(struct device_host_p
     for (unsigned pass = 0; pass < 2; ++pass) {
         size_t remaining = bridge->unread_used - bridge->unread_sent;
         if (!remaining || !psk_io_receive_enabled(bridge)) break;
-        size_t consumed = 0;
+        size_t consumed = 0, held_before = bridge->session.plaintext_used;
         enum device_host_psk_result received = host_call_device_host_psk_receive_bytes(&bridge->session,
             bridge->unread + bridge->unread_sent, remaining, &consumed);
+        if (!held_before && bridge->session.plaintext_used) bridge->observation.data_records_opened++;
         enum device_host_bridge_result result = psk_io_map(received);
         if (result != DEVICE_HOST_BRIDGE_READY) return result;
         bridge->unread_sent += consumed;
@@ -786,6 +787,7 @@ static enum device_host_bridge_result psk_io_queue_local(struct device_host_psk_
     else return DEVICE_HOST_BRIDGE_READY;
     enum device_host_bridge_result result = psk_io_map(queued);
     if (result == DEVICE_HOST_BRIDGE_READY && queued != DEVICE_HOST_PSK_WAIT) {
+        if (bridge->local_used) bridge->observation.data_records_sealed++;
         memory_cleanse(bridge->local, bridge->local_used); bridge->local_used = 0; *progress = true;
     }
     return result;
@@ -798,7 +800,7 @@ static enum device_host_bridge_result psk_io_read_local(struct device_host_psk_b
     if (!psk_io_read_ready(psk_io_input(bridge))) return psk_io_queue_local(bridge, progress, guard);
     enum device_host_bridge_result result = psk_io_authorize(bridge, guard);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
-    ssize_t count = read(psk_io_input(bridge), bridge->local, sizeof(bridge->local)); int error = errno;
+    ssize_t count = read(psk_io_input(bridge), bridge->local, device_host_psk_record_limit(&bridge->session)); int error = errno;
     if (count > 0) { bridge->local_used = (size_t)count; bridge->observation.plaintext_read_bytes += (uint64_t)count; *progress = true; }
     else if (!count) { bridge->local_eof = true; *progress = true; }
     else if (!transient_error(error)) {

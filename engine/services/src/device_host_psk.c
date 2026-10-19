@@ -23,18 +23,6 @@ void device_host_psk_test_nonce(const uint8_t nonce[32], bool refuse)
     test_nonce_set = true; test_nonce_refuse = refuse;
 }
 #endif
-static bool psk_nonce(uint8_t nonce[32])
-{
-#ifdef ZCL_TESTING
-    if (test_nonce_set) {
-        bool ok = !test_nonce_refuse;
-        if (ok) memcpy(nonce, test_nonce, 32);
-        memory_cleanse(test_nonce, sizeof(test_nonce)); test_nonce_set = false; test_nonce_refuse = false;
-        return ok;
-    }
-#endif
-    return rng_host_fill(nonce, 32);
-}
 static void psk_header(uint8_t header[24], unsigned type, size_t body, uint64_t sequence)
 {
     memcpy(header, "Z23PSK01", 8); zcl_write_u16_le(header + 8, zcl_bswap16((uint16_t)(1)));
@@ -53,6 +41,40 @@ static bool psk_overlap(const void *left, size_t left_size, const void *right, s
     uintptr_t a = (uintptr_t)left, b = (uintptr_t)right;
     if (!a || !b || left_size > UINTPTR_MAX - a || right_size > UINTPTR_MAX - b) return true;
     return a < b + right_size && b < a + left_size;
+}
+/* Chunks in a frame body of plaintext + 64 per chunk (a FIN body of 64 is one empty chunk). */
+static size_t psk_chunk_count(size_t body)
+{
+    return (body + DEVICE_HOST_PSK_CHUNK + 63) / (DEVICE_HOST_PSK_CHUNK + 64);
+}
+/* Capability advertisement without a wire change: bytes 16..31 of a hello nonce are a public
+ * hash of bytes 0..15, so a peer that does not know the capability (random nonce) matches with
+ * probability 2^-128. Both nonces are in the transcript, so stripping or forging the tag makes
+ * the confirmations fail; it cannot silently downgrade or upgrade a session. */
+static void psk_caps_tag(const uint8_t nonce[16], uint8_t tag[16])
+{
+    uint8_t input[48] = "Z23PSK1/LARGE-RECORDS", digest[32];
+    memcpy(input + 32, nonce, 16); sha3_256(input, sizeof(input), digest);
+    memcpy(tag, digest, 16); memory_cleanse(digest, sizeof(digest));
+}
+static bool psk_nonce_advertises(const uint8_t nonce[32])
+{
+    uint8_t tag[16]; psk_caps_tag(nonce, tag);
+    return psk_equal(tag, nonce + 16, 16);
+}
+static bool psk_nonce(uint8_t nonce[32], bool *advertised)
+{
+    *advertised = false;
+#ifdef ZCL_TESTING
+    if (test_nonce_set) { /* public vectors are used verbatim and advertise nothing */
+        bool ok = !test_nonce_refuse;
+        if (ok) memcpy(nonce, test_nonce, 32);
+        memory_cleanse(test_nonce, sizeof(test_nonce)); test_nonce_set = false; test_nonce_refuse = false;
+        return ok;
+    }
+#endif
+    if (!rng_host_fill(nonce, 32)) return false;
+    psk_caps_tag(nonce, nonce + 16); *advertised = true; return true;
 }
 static bool psk_buffer_valid(const struct device_host_psk_session *session, const void *bytes, size_t length)
 {
@@ -213,7 +235,7 @@ static enum device_host_psk_result device_host_psk_start_state(struct device_hos
     bool ok = device_pairing_psk_snapshot_acquire(spec->store, spec->peer, spec->approved_root,
         psk_wall(), spec->direction, spec->port, &guard, &session->snapshot);
     device_pairing_guard_release(&guard);
-    if (!ok || !psk_nonce(session->nonce)) return psk_refuse(session, "current private credential or qualified entropy unavailable");
+    if (!ok || !psk_nonce(session->nonce, &session->advertised_large)) return psk_refuse(session, "current private credential or qualified entropy unavailable");
     current = psk_release_boundary(session, &session->snapshot.row);
     if (current != DEVICE_HOST_PSK_PROGRESS) return current;
     session->client_role = spec->direction == DEVICE_PAIRING_HOST_OUTBOUND;
@@ -232,6 +254,7 @@ static bool psk_hello_matches(const struct device_host_psk_session *session, con
 static bool psk_server_hello(struct device_host_psk_session *session)
 {
     if (!psk_hello_matches(session, session->incoming)) return false;
+    session->large_records = session->advertised_large && psk_nonce_advertises(session->incoming + 132);
     memcpy(session->transcript, session->incoming, 198);
     uint8_t *wire = session->transcript + 198;
     psk_header(wire, PSK_S_HELLO, 128, 0); memcpy(wire + 24, session->nonce, 32);
@@ -248,6 +271,7 @@ static bool psk_check_confirmation(struct device_host_psk_session *session,
 }
 static bool psk_client_confirm(struct device_host_psk_session *session)
 {
+    session->large_records = session->advertised_large && psk_nonce_advertises(session->incoming + 24);
     memcpy(session->transcript + 198, session->incoming, 152); psk_transcript_zero(session);
     if (!psk_check_confirmation(session, "Z23PSK1/SCONF", "Z23PSK1/SERVER", 0, session->incoming + 88)) return false;
     uint8_t *wire = session->transcript + 350;
@@ -287,10 +311,18 @@ static void psk_finish_if_drained(struct device_host_psk_session *session)
 }
 static bool psk_receive_record(struct device_host_psk_session *session)
 {
-    size_t body = session->incoming_expected - 24, plain = body - SHAKE_WRAP_TAG_SIZE;
+    size_t body = session->incoming_expected - 24, chunks = psk_chunk_count(body);
+    size_t plain = body - chunks * SHAKE_WRAP_TAG_SIZE;
     uint8_t ad[96]; size_t ad_length = psk_record_ad(session, session->incoming, session->receive_total, ad);
-    bool ok = shake_wrap_open(&session->receive, ad, ad_length, session->incoming + 24, body,
-        session->plaintext, sizeof(session->plaintext)); memory_cleanse(ad, sizeof(ad));
+    bool ok = true; size_t in = 24, out = 0;
+    /* Every chunk tag is checked; nothing is released until the whole frame has verified. */
+    for (size_t i = 0; i < chunks && ok; ++i) {
+        size_t take = body - (in - 24) < DEVICE_HOST_PSK_CHUNK + SHAKE_WRAP_TAG_SIZE ? body - (in - 24) : DEVICE_HOST_PSK_CHUNK + SHAKE_WRAP_TAG_SIZE;
+        ok = shake_wrap_open(&session->receive, ad, ad_length, session->incoming + in, take,
+            session->plaintext + out, sizeof(session->plaintext) - out);
+        in += take; out += take - SHAKE_WRAP_TAG_SIZE;
+    }
+    memory_cleanse(ad, sizeof(ad));
     if (!ok) return false;
     session->receive_sequence++;
     if (session->incoming[10] == PSK_FIN) session->receive_fin = true;
@@ -321,11 +353,21 @@ static bool psk_handshake_header(const struct device_host_psk_session *session, 
     default: return false;
     }
 }
+/* DATA body = plaintext + 64 per chunk. Legacy sessions: one chunk, 65..4160. Large sessions:
+ * full 4160-byte chunks then one final chunk of 65..4160, total plaintext <= RECORD_MAX. */
+static bool psk_data_body_valid(const struct device_host_psk_session *session, size_t body)
+{
+    if (body < 65) return false;
+    size_t limit = session->large_records ? DEVICE_HOST_PSK_RECORD_MAX : DEVICE_HOST_PSK_CHUNK;
+    size_t chunks = psk_chunk_count(body);
+    size_t last = body - (chunks - 1) * (DEVICE_HOST_PSK_CHUNK + 64);
+    return last >= 65 && body - chunks * 64 <= limit;
+}
 static bool psk_established_header(const struct device_host_psk_session *session, unsigned type, size_t body)
 {
     if (session->receive_fin || session->receive_sequence >= DEVICE_HOST_PSK_FRAME_LIMIT) return false;
     if (type == PSK_FIN) return body == 64;
-    return type == PSK_DATA && body >= 65 && body <= 4160 &&
+    return type == PSK_DATA && psk_data_body_valid(session, body) &&
         session->receive_sequence < DEVICE_HOST_PSK_FRAME_LIMIT - 1;
 }
 static bool psk_header_valid(struct device_host_psk_session *session)
@@ -382,7 +424,7 @@ static enum device_host_psk_result psk_queue_checks(struct device_host_psk_sessi
     if (current != DEVICE_HOST_PSK_PROGRESS) return current;
     if (session->phase != DEVICE_HOST_PSK_ESTABLISHED || session->send_fin) return psk_refuse(session, "send direction is not established/open");
     if (session->pending_used) return DEVICE_HOST_PSK_WAIT;
-    if (!psk_buffer_valid(session, plaintext, length) || length > 4096) return psk_refuse(session, "invalid plaintext geometry");
+    if (!psk_buffer_valid(session, plaintext, length) || length > device_host_psk_record_limit(session)) return psk_refuse(session, "invalid plaintext geometry");
     if (session->send_sequence >= DEVICE_HOST_PSK_FRAME_LIMIT) return psk_refuse(session, "direction frame limit exhausted");
     if (type == PSK_DATA && (!length || session->send_sequence >= DEVICE_HOST_PSK_FRAME_LIMIT - 1))
         return psk_refuse(session, "DATA requires nonempty bytes and a non-FIN-reserved sequence");
@@ -406,13 +448,19 @@ static enum device_host_psk_result psk_queue_record(struct device_host_psk_sessi
     if (current != DEVICE_HOST_PSK_PROGRESS) {
         device_pairing_guard_release(&own); return current;
     }
-    psk_header(session->pending, type, length + 64, session->send_sequence);
+    size_t chunks = length ? (length + DEVICE_HOST_PSK_CHUNK - 1) / DEVICE_HOST_PSK_CHUNK : 1;
+    psk_header(session->pending, type, length + chunks * SHAKE_WRAP_TAG_SIZE, session->send_sequence);
     uint8_t ad[96]; size_t ad_length = psk_record_ad(session, session->pending, session->send_total, ad);
-    bool ok = shake_wrap_seal(&session->send, ad, ad_length, plaintext, length, session->pending + 24, sizeof(session->pending) - 24);
+    bool ok = true; size_t in = 0, out = 24;
+    for (size_t i = 0; i < chunks && ok; ++i) {
+        size_t take = length - in < DEVICE_HOST_PSK_CHUNK ? length - in : DEVICE_HOST_PSK_CHUNK;
+        ok = shake_wrap_seal(&session->send, ad, ad_length, plaintext + in, take, session->pending + out, sizeof(session->pending) - out);
+        in += take; out += take + SHAKE_WRAP_TAG_SIZE;
+    }
     memory_cleanse(ad, sizeof(ad)); device_pairing_guard_release(&own);
     if (!ok) return psk_refuse(session, "record sealing failed");
     session->send_sequence++; session->send_total += length; session->send_fin = type == PSK_FIN;
-    session->pending_used = 24 + length + 64; session->pending_sent = 0;
+    session->pending_used = 24 + length + chunks * SHAKE_WRAP_TAG_SIZE; session->pending_sent = 0;
     return DEVICE_HOST_PSK_PROGRESS;
 }
 static enum device_host_psk_result device_host_psk_queue_data_state(struct device_host_psk_session *session,
@@ -718,4 +766,8 @@ struct zcl_result device_host_psk_plaintext_acquire_held(struct device_host_psk_
     *status = DEVICE_HOST_PSK_REFUSED;
     enum device_host_psk_result value = device_host_psk_plaintext_acquire_held_state(session, guard, bytes, length);
     return host_domain_result(value, status, 0, __func__);
+}
+size_t device_host_psk_record_limit(const struct device_host_psk_session *session)
+{
+    return session && session->large_records ? DEVICE_HOST_PSK_RECORD_MAX : DEVICE_HOST_PSK_CHUNK;
 }

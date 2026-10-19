@@ -10,7 +10,23 @@
 #include <stdint.h>
 
 #define DEVICE_HOST_PSK_HEADER 24u
-#define DEVICE_HOST_PSK_WIRE 4184u
+#define DEVICE_HOST_PSK_WIRE 4184u /* legacy maximum frame: 24 header + 4096 plaintext + 64 tag */
+/* Large-record profile, used ONLY when both peers advertised it in their hello nonces. A
+ * record is one frame of up to DEVICE_HOST_PSK_RECORD_MAX plaintext bytes sealed as
+ * consecutive independent SHAKE-wrap chunks of at most DEVICE_HOST_PSK_CHUNK plaintext
+ * bytes, each with its own 64-byte tag, so every tag is still checked and the primitive
+ * is unchanged. Wire body = plaintext + 64 per chunk; for plaintext <= 4096 that is the
+ * legacy single-chunk frame byte for byte. The whole frame is verified before any byte
+ * is released, and every release or send still needs its own fresh authority guard, so
+ * revocation takes effect within one record: the most that can leave after a revocation
+ * is one record, DEVICE_HOST_PSK_RECORD_MAX (16384) plaintext bytes released on receive or
+ * DEVICE_HOST_PSK_WIRE_MAX (16664) wire bytes sent (legacy sessions: 4096 and 4184).
+ * Negotiation: each side tags its hello nonce (see device_host_psk.c); the profile is on
+ * only when both advertised, so a peer that does not know it sees ordinary 4 KiB records. */
+#define DEVICE_HOST_PSK_CHUNK 4096u
+#define DEVICE_HOST_PSK_RECORD_MAX 16384u
+#define DEVICE_HOST_PSK_WIRE_MAX (DEVICE_HOST_PSK_HEADER + DEVICE_HOST_PSK_RECORD_MAX + \
+    (DEVICE_HOST_PSK_RECORD_MAX / DEVICE_HOST_PSK_CHUNK) * 64u)
 #define DEVICE_HOST_PSK_TRANSCRIPT 526u
 #define DEVICE_HOST_PSK_FRAME_LIMIT UINT64_C(1048576)
 enum device_host_psk_phase {
@@ -41,13 +57,14 @@ struct device_host_psk_session {
     struct shake_wrap_state send, receive;
     uint8_t transcript[DEVICE_HOST_PSK_TRANSCRIPT], t0[64], t1[64], prk[32];
     uint8_t client[32], server[32], nonce[32];
-    uint8_t pending[DEVICE_HOST_PSK_WIRE], incoming[DEVICE_HOST_PSK_WIRE], plaintext[4096];
+    uint8_t pending[DEVICE_HOST_PSK_WIRE_MAX], incoming[DEVICE_HOST_PSK_WIRE_MAX], plaintext[DEVICE_HOST_PSK_RECORD_MAX];
     size_t pending_used, pending_sent, incoming_used, incoming_expected, plaintext_used, plaintext_sent;
     uint64_t send_sequence, receive_sequence, send_total, receive_total;
     enum device_host_psk_phase phase;
     enum device_host_psk_result terminal;
     struct device_pairing_guard *borrowed_guard;
     bool client_role, send_fin, receive_fin, borrowing_plaintext;
+    bool advertised_large, large_records; /* large_records: both hello nonces carried the capability tag */
 };
 /* Fixed reviewed application profile, not an independently proved protocol.
  * Owner-private backend2 snapshot is acquired internally; no raw-secret entry.
@@ -70,6 +87,10 @@ struct zcl_result device_host_psk_receive_bytes(struct device_host_psk_session *
 struct zcl_result device_host_psk_queue_data(struct device_host_psk_session *session,
     const uint8_t *plaintext, size_t length, enum device_host_psk_result *status);
 struct zcl_result device_host_psk_queue_fin(struct device_host_psk_session *session, enum device_host_psk_result *status);
+/* Largest plaintext one record may carry in this session: DEVICE_HOST_PSK_CHUNK (the legacy
+ * maximum) unless both peers advertised the large-record capability, then DEVICE_HOST_PSK_RECORD_MAX.
+ * The same value bounds what the receiver accepts, so a record one byte over it is refused. */
+size_t device_host_psk_record_limit(const struct device_host_psk_session *session);
 /* Internal IO rail: zero-initialized unheld guard, output metadata independent. Success
  * returns current suffix while retaining exact current root/binding/port guard.
  * Caller performs only an immediate nonblocking write, then calls *_written /

@@ -13,6 +13,7 @@ enum { DEVICE_HOST_BENCH_MIB_MAX = 512, DEVICE_HOST_BENCH_REPEATS_MAX = 5 };
 struct device_host_bench_run {
     double forward_mib_s, reverse_mib_s;
     uint64_t records, full_acquisitions, cached_acquisitions;
+    uint64_t sealed_records; /* DATA records actually sealed (both directions); records is the 4 KiB-equivalent count */
 };
 struct device_host_bench_result {
     size_t mib;
