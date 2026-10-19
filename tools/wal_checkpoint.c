@@ -13,7 +13,7 @@
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <db_path> [reset|mark_done]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <db_path> [reset|mark_done|wipe_utxos]\n", argv[0]);
         return 1;
     }
     sqlite3 *db;
