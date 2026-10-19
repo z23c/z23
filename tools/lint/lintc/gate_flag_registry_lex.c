@@ -3,7 +3,7 @@
  * Gates: check-flag-registry
  * Third file of the check-flag-registry family: decides whether a read
  * the scanner's regexes recognized is a REAL read. gate_flag_registry.c
- * finds getenv/env_or/env_int_or and ${...} matches as text; this file
+ * finds getenv/env_or/env_int_or/zcl_env_positive_int and ${...} matches as text; this file
  * lexes just enough C (comments, literals, #if 0) and shell/Makefile
  * (comment-opening '#') to tell code from a mention, which is what a
  * "first use <path>:auto" pointer is proved against.

@@ -303,10 +303,11 @@ static int fr_find(const struct fr_row *rows, int n, const char *name)
     return -1;
 }
 
-/* ── read-site scanning: getenv("ZCL_..."), and the lint runtime's env_or /
- * env_int_or wrappers around it, in C; ${ZCL_...}/$ZCL_... in shell and
- * Makefile text. A wrapper read is a read: scanning only getenv() would call
- * a flag that only the lint gates consume dead and demand its row be deleted.
+/* ── read-site scanning: getenv("ZCL_..."), the lint runtime's env_or /
+ * env_int_or wrappers and zcl_env_positive_int (util/parse_num.h) in C;
+ * ${ZCL_...}/$ZCL_... in shell and Makefile text. A wrapper read is a read:
+ * scanning only getenv() would call a flag that only the lint gates consume
+ * dead and demand its row be deleted.
  * The C regex captures the name in group 2 (group 1 is the reader's name),
  * the shell regex in group 1; an enum/status identifier such as ZCL_OK never
  * follows a '$' or one of those call prefixes, so neither pattern ever
@@ -320,7 +321,8 @@ static int fr_ensure_re(void)
     if (g_fr_re_ok)
         return 0;
     int cr = pair_comp(&g_fr_c_re, REG_EXTENDED,
-                        "(getenv|env_or|env_int_or)\\(\"(ZCL_[A-Z0-9_]+)\"",
+                        "(getenv|env_or|env_int_or|zcl_env_positive_int)"
+                        "\\(\"(ZCL_[A-Z0-9_]+)\"",
                         "", "", "",
                         &g_fr_sh_re, REG_EXTENDED,
                         "\\$\\{?(ZCL_[A-Z0-9_]+)", "", "", "");
@@ -819,18 +821,20 @@ static int fr_st_core_cases(FILE *out, char *ob, size_t obcap)
                       "sites, 0 unregistered, 0 expired, 0 first-use "
                       "pointers verified") == NULL;
 
-    /* A read through the lint runtime's env_or / env_int_or wrappers is a
-     * read. Without this the gate calls a flag only a C gate consumes dead
-     * and demands its row be deleted — the shape that first caught it. */
+    /* A read through the lint runtime's env_or / env_int_or wrappers, or the
+     * product's zcl_env_positive_int, is a read. Without this the gate calls
+     * a flag read only through a wrapper dead and demands its row be deleted. */
     bad |= fr_st_case(
             "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n"
-            "Z23_FLAG(\"ZCL_KNOWN_Y\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
+            "Z23_FLAG(\"ZCL_KNOWN_Y\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n"
+            "Z23_FLAG(\"ZCL_KNOWN_Z\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
             "./w.c",
             "int f(void){ return *env_or(\"ZCL_KNOWN_X\", \"d\")\n"
-            "                  + env_int_or(\"ZCL_KNOWN_Y\", 1); }\n",
+            "                  + env_int_or(\"ZCL_KNOWN_Y\", 1)\n"
+            "                  + zcl_env_positive_int(\"ZCL_KNOWN_Z\", 1); }\n",
             "2026-01-01", "printf '%s\\0' w.c", out, ob, obcap, &rc);
     bad |= rc != 0
-        || strstr(ob, "check_flag_registry: OK — 2 flags registered, 2 read "
+        || strstr(ob, "check_flag_registry: OK — 3 flags registered, 3 read "
                       "sites, 0 unregistered, 0 expired, 0 first-use "
                       "pointers verified") == NULL;
 
