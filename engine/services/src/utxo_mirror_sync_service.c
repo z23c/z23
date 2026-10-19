@@ -545,11 +545,14 @@ struct mirror_source {
 /* True only when the statement finalized and the connection closed cleanly. */
 static bool mirror_source_close(struct mirror_source *s)
 {
-    int end = s->sel ? sqlite3_finalize(s->sel) : SQLITE_OK;
-    int cls = s->db ? sqlite3_close(s->db) : SQLITE_OK;
+    bool clean = true;
+    if (s->sel && sqlite3_finalize(s->sel) != SQLITE_OK)
+        clean = false;
+    if (s->db && sqlite3_close(s->db) != SQLITE_OK)
+        clean = false;
     s->sel = NULL;
     s->db = NULL;
-    return end == SQLITE_OK && cls == SQLITE_OK;
+    return clean;
 }
 
 /* Open the snapshot reader. Returns 0 or a typed UTXO_MIRROR_REBUILD_* code. */

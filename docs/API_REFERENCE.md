@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 998 |
+| Registry entries (branches + leaves) | 999 |
 | Top-level roots | 17 |
 | Branches | 214 |
-| Leaves (dispatchable command paths) | 784 |
-| … `ready` (live handler in this build) | 681 |
+| Leaves (dispatchable command paths) | 785 |
+| … `ready` (live handler in this build) | 682 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 306 |
+| Leaves with `effect=mutate` | 307 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 156 |
 
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 82 | 16 | 66 |
+| `engine/composition/commands/ops.def` | 83 | 16 | 67 |
 | `engine/composition/commands/dev.def` | 139 | 24 | 115 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -1032,6 +1032,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `ops recovery status` | ready | read / read / operator · fast/low | none | `zcl.recovery_status.v1` | `z23 ops recovery status` | Refold and recovery progress |
 | `ops recovery rebuild` | planned | destructive / core-recovery / **owner**, job, plan-commit · background/high | `depth` | `zcl.recovery_rebuild.v1` | `z23 ops recovery rebuild --depth=100` | Rebuild recent chain state — *recovery rebuild plan/commit handshake is a Wave 2.2 deliverable* |
+| `ops recovery utxo_mirror` | ready | mutate / app-write / operator · maintenance/high | none | `zcl.utxo_mirror_rebuild.v1` | `z23 ops recovery utxo_mirror` | Rebuild the utxo projection from the authority |
 
 #### `ops.host` — Host maintenance
 
