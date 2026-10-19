@@ -385,9 +385,10 @@ static int cas_test_machine_boot_skips_service(void)
     return 0;
 #else
     int failures = 0;
-    TEST("guest boot skips systemctl; status still resolves the user unit") {
+    TEST("local lab and guest boot skip systemctl; status resolves the unit") {
         const char *boot_params[] = {"app", "machine", "boot", "--input=x"};
         const char *land_params[] = {"land", "status"};
+        const char *lab_params[] = {"run", "missing.c"};
         char home[PATH_MAX];
         char bin[PATH_MAX];
         char log[PATH_MAX];
@@ -402,11 +403,19 @@ static int cas_test_machine_boot_skips_service(void)
         char *status_argv[] = {
             (char *)CAS_DEV_BIN, (char *)"status", NULL,
         };
+        char *lab_argv[] = {
+            (char *)CAS_DEV_BIN, (char *)"lab", (char *)"run", NULL,
+        };
         int rc;
         ASSERT(zcl_cli_skips_service_lookup("dev", boot_params, 4));
         ASSERT(!zcl_cli_skips_service_lookup("dev", land_params, 2));
         ASSERT(!zcl_cli_skips_service_lookup("status", boot_params, 4));
         ASSERT(!zcl_cli_skips_service_lookup(NULL, boot_params, 4));
+        ASSERT(zcl_cli_skips_service_lookup("lab", lab_params, 2));
+        ASSERT(zcl_cli_skips_service_lookup("lab.run", NULL, 0));
+        ASSERT(zcl_cli_skips_service_lookup("lab.test", NULL, 0));
+        ASSERT(zcl_cli_skips_service_lookup("lab.show", NULL, 0));
+        ASSERT(!zcl_cli_skips_service_lookup("lab.promote", NULL, 0));
         ASSERT(zcl_cli_service_lookup_blocked("status", boot_params, 4)
                == (getenv("ZCL_CLI_TEST_NO_SERVICE_LOOKUP") != NULL));
         test_fmt_tmpdir(home, sizeof(home), "zcl_cas_boot_svc", "home");
@@ -425,6 +434,11 @@ static int cas_test_machine_boot_skips_service(void)
         rc = cas_run(boot_argv, home, out, sizeof(out));
         ASSERT_EQ(rc, 0);
         ASSERT(cas_contains(out, "\"retired\":279"));
+        ASSERT(!cas_file_exists(log));
+        memset(out, 0, sizeof(out));
+        rc = cas_run(lab_argv, home, out, sizeof(out));
+        ASSERT(rc != 0);
+        ASSERT(cas_contains(out, "lab.run"));
         ASSERT(!cas_file_exists(log));
         memset(status_out, 0, sizeof(status_out));
         (void)cas_run(status_argv, home, status_out, sizeof(status_out));

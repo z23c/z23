@@ -72,13 +72,22 @@ static inline bool zcl_cli_lane_settle_datadir(char *datadir, size_t cap,
     return true;
 }
 
-/* Guest boot does not read the user unit's ExecStart. The CLI uses this to
- * skip the systemctl spawn. Every other invocation still resolves the unit. */
+/* Local lab feedback and guest boot do not need service defaults. */
 static inline bool zcl_cli_skips_service_lookup(const char *method,
                                                 const char *const *params,
                                                 int nparams)
 {
-    if (method == NULL || params == NULL || nparams < 3)
+    if (method == NULL)
+        return false;
+    if (strcmp(method, "lab.run") == 0 ||
+        strcmp(method, "lab.test") == 0 ||
+        strcmp(method, "lab.show") == 0)
+        return true;
+    if (strcmp(method, "lab") == 0 && params != NULL && nparams > 0)
+        return strcmp(params[0], "run") == 0 ||
+               strcmp(params[0], "test") == 0 ||
+               strcmp(params[0], "show") == 0;
+    if (params == NULL || nparams < 3)
         return false;
     if (strcmp(method, "dev") != 0)
         return false;
@@ -89,7 +98,7 @@ static inline bool zcl_cli_skips_service_lookup(const char *method,
     return strcmp(params[2], "boot") == 0;
 }
 
-/* Guest boot skips the user unit. The test switch skips every lookup.
+/* Local feedback skips the user unit. The test switch skips every lookup.
  * The bound argv belongs to the caller; this keeps no process state. */
 static inline bool zcl_cli_service_lookup_blocked(const char *method,
                                                   const char *const *params,
