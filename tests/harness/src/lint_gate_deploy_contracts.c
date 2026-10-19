@@ -234,7 +234,7 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(repo_path(agent_doctor_path, sizeof(agent_doctor_path),
                          "tools/dev/agent-doctor.sh") == 0);
         ASSERT(repo_path(handoff_path, sizeof(handoff_path),
-                         "docs/HANDOFF.md") == 0);
+                         "docs/agent/HANDOFF.md") == 0);
         ASSERT(repo_path(makefile_path, sizeof(makefile_path),
                          "Makefile") == 0);
         ASSERT(repo_path(live_unit_path, sizeof(live_unit_path),
@@ -919,14 +919,14 @@ int t_agent_fast_ci_contract(void)
                       "\"consensus_parity domain_consensus_tx_structural chain\"")
                != NULL);
         ASSERT(strstr(rules, "core/modules/net/src/connman.c") != NULL);
-        ASSERT(strstr(rules, "docs/AGENT_API.md") != NULL);
+        ASSERT(strstr(rules, "docs/agent/AGENT_API.md") != NULL);
         ASSERT(strstr(rules, "deploy/*.service") != NULL);
         ASSERT(strstr(rules, "core/modules/net/include/net/msg_internal.h") != NULL);
         ASSERT(strstr(rules, "core/modules/net/include/net/port_policy.h") != NULL);
         ASSERT(strstr(rules, "README.md") != NULL);
         ASSERT(strstr(rules, ".github/CONTRIBUTING.md") != NULL);
-        ASSERT(strstr(rules, "docs/BUILD.md") != NULL);
-        ASSERT(strstr(rules, "docs/GETTING_STARTED.md") != NULL);
+        ASSERT(strstr(rules, "docs/dev/BUILD.md") != NULL);
+        ASSERT(strstr(rules, "docs/node/GETTING_STARTED.md") != NULL);
         ASSERT(strstr(rules, "engine/controllers/include/controllers/network_controller.h")
                != NULL);
         ASSERT(strstr(rules, "engine/jobs/src/tip_finalize_stage*.c") != NULL);
@@ -1049,7 +1049,7 @@ int t_agent_fast_ci_contract(void)
 
         ASSERT(repo_path(path, sizeof(path), "README.md") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
-        ASSERT(strstr(buf, "docs/GETTING_STARTED.md") != NULL);
+        ASSERT(strstr(buf, "docs/node/GETTING_STARTED.md") != NULL);
         ASSERT(strstr(buf, "Public start here") != NULL);
         ASSERT(strstr(buf, "make dev-bin") != NULL);
         /* Same contract, phrased as the README phrases it: how a
@@ -1062,7 +1062,7 @@ int t_agent_fast_ci_contract(void)
         free(buf);
         buf = NULL;
 
-        ASSERT(repo_path(path, sizeof(path), "docs/GETTING_STARTED.md") == 0);
+        ASSERT(repo_path(path, sizeof(path), "docs/node/GETTING_STARTED.md") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
         ASSERT(strstr(buf, "generic, fresh-machine setup guide")
                != NULL);
@@ -1079,7 +1079,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "dumpstate reducer_frontier") != NULL);
         ASSERT(strstr(buf, "docs/node/BOOTSTRAPPING.md") != NULL);
         ASSERT(strstr(buf, "core sync diagnose") != NULL);
-        ASSERT(strstr(buf, "docs/HANDOFF.md") != NULL);
+        ASSERT(strstr(buf, "docs/agent/HANDOFF.md") != NULL);
         free(buf);
         buf = NULL;
 

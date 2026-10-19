@@ -123,6 +123,6 @@ way out. The unit file carries the install, register and retire commands.
 
 ## Related
 
-- [`DEVELOPING.md`](../DEVELOPING.md) — the developer procedure this fits inside.
+- [`DEVELOPING.md`](DEVELOPING.md) — the developer procedure this fits inside.
 - [`API_REFERENCE.md`](../API_REFERENCE.md) — the generated leaf reference.
 - [`AGENT_TRAPS.md`](../agent/AGENT_TRAPS.md) — traps an agent should not relearn.

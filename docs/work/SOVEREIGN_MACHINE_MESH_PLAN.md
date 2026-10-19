@@ -233,7 +233,7 @@ reimplemented:
   The Windows native dependency lane currently uses the stub. Each runtime must
   report its linked capability rather than infer it from the operating system.
   The measured platform boundary is recorded in
-  [`docs/GETTING_STARTED.md`](../GETTING_STARTED.md). Windows support is not a
+  [`docs/node/GETTING_STARTED.md`](../node/GETTING_STARTED.md). Windows support is not a
   completed or measured production baseline yet.
 
 Important gaps remain. The Noise transport is not yet the universal default, static

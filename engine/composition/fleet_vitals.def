@@ -127,7 +127,7 @@ FLEET_VITAL("story.predict_error", "ratio", "gauge", 86400,
             "how wrong the estimate was, which is whether it may be trusted")
 
 /* ── link: the low-latency datagram channel between two paired peers ──
- * gamelink DATAGRAM transport (engine/modules/gamelink, docs/GAMELINK.md).
+ * gamelink DATAGRAM transport (engine/modules/gamelink, docs/node/GAMELINK.md).
  * Rows are append-only: new rows add subject indices without moving any
  * existing one, so this is not a wire change. */
 FLEET_VITAL("link.rtt_us", "us", "gauge", 60,

@@ -133,7 +133,7 @@
     "platform/modules/util/include/util/_dev_history_lint_fixture_tmp.h"
 #define NO_DEV_HISTORY_ALLOWLIST_FIXTURE_DST \
     "platform/modules/util/include/util/_dev_history_lint_fixture_test.h"
-/* Gate — no uncited victory claim in docs/HANDOFF.md. The scanned doc is
+/* Gate — no uncited victory claim in docs/agent/HANDOFF.md. The scanned doc is
  * overridden via ZCL_LINT_MODE (run_gate_script's 2nd arg), pointing at a
  * planted fixture .md. */
 #define NO_UNCITED_VICTORY_SCRIPT_REL \

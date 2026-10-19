@@ -31,3 +31,11 @@ How the node boots, syncs, stores state, holds keys and recovers: operator and m
 | [RELEASE_CANDIDATE_PIN.md](./RELEASE_CANDIDATE_PIN.md) | the record naming the build under proof |
 | [SECURITY_AND_INTEGRITY.md](./SECURITY_AND_INTEGRITY.md) | security boundaries and build-verification results |
 | [SELL.md](./SELL.md) | pay ZCL and sell a 1/1 collectible |
+
+## Also in this directory
+
+- [`APP_EVENT_SYNC.md`](./APP_EVENT_SYNC.md): App event sync — one dapp's signed events between two nodes
+- [`FILE_MARKET_PROTOCOL.md`](./FILE_MARKET_PROTOCOL.md): ZCL file-market protocol
+- [`GAMELINK.md`](./GAMELINK.md): gamelink — the low-latency datagram link between two fleet peers
+- [`GETTING_STARTED.md`](./GETTING_STARTED.md): Getting Started With Z23
+- [`OVERLAY.md`](./OVERLAY.md): Overlay sync and onion marketplace

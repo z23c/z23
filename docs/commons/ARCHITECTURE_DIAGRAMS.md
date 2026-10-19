@@ -7,7 +7,7 @@ transactions (transfers of value). A **wallet** holds keys and tracks payments;
 **HTTP** (Hypertext Transfer Protocol) carries the web requests shown below.
 You need the source checkout to follow the symbols and a Mermaid-compatible
 viewer to render the diagrams. For a first node build, read
-[GETTING_STARTED.md](../GETTING_STARTED.md).
+[GETTING_STARTED.md](../node/GETTING_STARTED.md).
 
 1. Render a diagram in your Mermaid-compatible viewer.
 2. Follow its arrows through the named functions, stages, and events.

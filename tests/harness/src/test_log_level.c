@@ -303,7 +303,7 @@ static int test_log_level_origin_checks(void)
     }
 
     /* ── `grep -a -m1 'origin='` on a 200-INFO-line fixture log plus one ERROR
-     * line finds the ERROR line (docs/DEVELOPING.md). ── */
+     * line finds the ERROR line (docs/dev/DEVELOPING.md). ── */
     {
         char path[PATH_MAX];
         int fd = test_mkstemp(path, sizeof(path), "log_level_origin_fixture");

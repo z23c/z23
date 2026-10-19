@@ -4,9 +4,9 @@
 [`SOVEREIGN-NETWORK-ROADMAP.md`](./SOVEREIGN-NETWORK-ROADMAP.md), not a new
 priority queue.
 
-[`../HANDOFF.md`](../HANDOFF.md) owns current live facts,
+[`../agent/HANDOFF.md`](../agent/HANDOFF.md) owns current live facts,
 [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) owns immediate execution order, and
-[`../MVP.md`](../MVP.md) owns the v1 acceptance bar. The sovereign
+[`../quality/MVP.md`](../quality/MVP.md) owns the v1 acceptance bar. The sovereign
 complete-state cure remains priority #1. The native command registry is the
 sole agent interface. Nothing in this checklist authorizes runtime
 publication, canonical deployment, or mutation of the protected mint
@@ -176,7 +176,7 @@ worth naming exactly rather than leaving the whole clause unticked:
   answerer's arrival order, so a node that joins mid-history and advances
   its frontier can keep a hole), and alternate-relay recovery.
 
-See [`docs/APP_EVENT_SYNC.md`](../APP_EVENT_SYNC.md).
+See [`docs/node/APP_EVENT_SYNC.md`](../node/APP_EVENT_SYNC.md).
 
 - [ ] **Shared substrate:** immutable `AppEvent` persistence keyed by event
   ID (app/topic/receive-cursor and app/author/sequence/event-ID indexes);
@@ -260,7 +260,7 @@ Use this loop while the later platform items remain incomplete.
 
 | Question | First source |
 |---|---|
-| What is live and protected? | `z23 status` + `docs/HANDOFF.md` |
+| What is live and protected? | `z23 status` + `docs/agent/HANDOFF.md` |
 | What should execute next? | `docs/work/FORWARD_PLAN.md` |
 | Why is the code shaped this way? | `docs/commons/FRAMEWORK.md` |
 | How is a feature slice built? | `docs/agent/AGENT_ARCHITECTURE.md` |
@@ -271,7 +271,7 @@ Use this loop while the later platform items remain incomplete.
 | What does an App declare? | `dev app describe` + `apps/<id>/app.def` |
 | What apparent bug may be intentional? | `docs/agent/AGENT_TRAPS.md` |
 
-Detailed contracts: `../NATIVE_COMMAND_INTERFACE.md`,
+Detailed contracts: `../dev/NATIVE_COMMAND_INTERFACE.md`,
 `../agent/AGENT_ARCHITECTURE.md`, `../../engine/modules/framework/include/zclassic23/app.h`. Daily
 operating loop: `.claude/skills/z23-dev/SKILL.md`.
 

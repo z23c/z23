@@ -157,7 +157,7 @@ a transient `systemd-run --user` unit so a shell timeout
 cannot kill it.
 
 Rebasing a train that took `--ours` for
-`docs/CODEBASE_MAP.md` drops the other side's DOC-COUNTS
+`docs/dev/CODEBASE_MAP.md` drops the other side's DOC-COUNTS
 increment. `check-doc-counts` then fails with
 `test_groups MISMATCH — code=N doc-says=N-1`. Fix the
 `test_groups:` line in the DOC-COUNTS block, never the code.

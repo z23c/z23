@@ -8,11 +8,11 @@
 
 This is a **reference table**, not a spec. For the grammar, envelope shapes,
 budgets, and migration status, read
-[`docs/NATIVE_COMMAND_INTERFACE.md`](./NATIVE_COMMAND_INTERFACE.md) first —
+[`docs/dev/NATIVE_COMMAND_INTERFACE.md`](./dev/NATIVE_COMMAND_INTERFACE.md) first —
 that document is the frozen contract; this one enumerates every leaf the
 contract currently declares. For additional native aliases and operator
 contracts (`agentops`, `agentdiagnose`, `servicecatalog`, and the ZNAM/ZMSG/
-Market/ZSWP methods), see [`docs/AGENT_API.md`](./AGENT_API.md).
+Market/ZSWP methods), see [`docs/agent/AGENT_API.md`](./agent/AGENT_API.md).
 
 The command tree supports the shared mission: people and AI create verifiable
 public work through the same API, while no caller, balance, package index, or UI
@@ -132,7 +132,7 @@ Per source file:
 |---|---|
 | **Command** | the leaf's dotted path written as CLI words (`core chain block get`), plus any declared aliases |
 | **Avail** | `ready` (dispatches now) · `compat` (metadata only; NULL handler, names a `→` fallback) · `planned` (fail-closed BLOCKED, exit 3, no handler) · 🔧 = dev-gated |
-| **Policy** | `effect / risk / authority`, then a non-`sync` mode and any confirmation ritual, then `· latency/cost` — the `zcl_command_*` enums, see `docs/NATIVE_COMMAND_INTERFACE.md` §13 |
+| **Policy** | `effect / risk / authority`, then a non-`sync` mode and any confirmation ritual, then `· latency/cost` — the `zcl_command_*` enums, see `docs/dev/NATIVE_COMMAND_INTERFACE.md` §13 |
 | **Input keys** | the leaf's allowed input keys; **bold** = `positional_keys`, the key(s) the handler requires |
 | **Output schema** | the leaf's `output_schema` id |
 | **Example** | the invocation the `.def` entry declares as its canonical example |
@@ -204,7 +204,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `core status` | ready | read / read / public · fast/low | none | `zcl.core_status.v2` | `z23 core status` | Consensus node status: height, sync, health |
-| `core status brief` | ready | read / read / public, prose · fast/low | none | `zcl.core_status_brief.v1` | `z23 core status brief` | Flat lean status: hstar, gap, blocker, conditions, peers, rss (full field list: docs/NATIVE_COMMAND_INTERFACE.md CLI UX contract) |
+| `core status brief` | ready | read / read / public, prose · fast/low | none | `zcl.core_status_brief.v1` | `z23 core status brief` | Flat lean status: hstar, gap, blocker, conditions, peers, rss (full field list: docs/dev/NATIVE_COMMAND_INTERFACE.md CLI UX contract) |
 
 #### `core.wallet.security` — Encryption-at-rest and runtime key custody
 
@@ -2142,7 +2142,7 @@ promise the same document shape.
 
 ## Envelope shapes (quick reference)
 
-Full spec: `docs/NATIVE_COMMAND_INTERFACE.md` §8–§9. Summary only:
+Full spec: `docs/dev/NATIVE_COMMAND_INTERFACE.md` §8–§9. Summary only:
 
 | Schema | When | Key fields |
 |---|---|---|

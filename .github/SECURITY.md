@@ -8,7 +8,7 @@ Z23 is **pre-v1 and in active stabilization** — it is not
 production-ready, and there are no supported release lines yet. Only the
 current `main` branch receives fixes. Do not rely on this build as a
 mainnet node until the v1 acceptance criteria in
-[`docs/MVP.md`](../docs/MVP.md) are met.
+[`docs/quality/MVP.md`](../docs/quality/MVP.md) are met.
 
 Known soft spots are stated plainly in the README status section and in
 the audit disposition below (for example: off-chain ZMSG P2P messages

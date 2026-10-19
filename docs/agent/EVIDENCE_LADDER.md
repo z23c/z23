@@ -3,7 +3,7 @@
 # Evidence ladder
 
 The development and publication procedure lives in
-[DEVELOPING.md](../DEVELOPING.md). This page explains what observations can
+[DEVELOPING.md](../dev/DEVELOPING.md). This page explains what observations can
 support, without defining another promotion ledger or requiring activation.
 
 ## Use the cheapest meaningful refutation first

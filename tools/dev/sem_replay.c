@@ -3,7 +3,7 @@
  * z23-sem-replay: measure, on real commits, what the semantic facts plan
  * saves in compiles and test groups, and check it against the objects make
  * actually rebuilt. See docs/work/SEMANTIC_MANIFEST.md, "Replay on real
- * history", and docs/DEVELOPING.md.
+ * history", and docs/dev/DEVELOPING.md.
  *
  * This is a reporting tool only. Nothing in `make ff`, `t-fast`,
  * `t-fast-exact`, the land path or the proof path reads its output, spawns

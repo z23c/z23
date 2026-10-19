@@ -11,7 +11,7 @@ is never committed.
 ## Set up a new machine
 
 1. Build the runner with `make z23-fx` and the `z23` binary as in
-   [`docs/BUILD.md`](../BUILD.md). Put
+   [`docs/dev/BUILD.md`](../dev/BUILD.md). Put
    `build/bin/z23-fx` and `build/bin/z23` on `PATH`.
 2. Create the private fleet file from the placeholder example:
 

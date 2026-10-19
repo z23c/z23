@@ -52,7 +52,7 @@ content_id() {
 # The canonical gate owns measurement. Repair only its numeric mismatch rows;
 # every other failure remains a refusal, including a mismatch mixed with prose.
 repair_counts() (
-    local doc=docs/CODEBASE_MAP.md tmp rc key old new before message
+    local doc=docs/dev/CODEBASE_MAP.md tmp rc key old new before message
     tmp="$(mktemp -d docs/.stack-counts.XXXXXX)"
     trap 'rm -rf "$tmp"' EXIT
     rc=0
@@ -184,19 +184,19 @@ printf 'counts\n' >> order
 echo 'code-measured: test_groups=2'
 if [ -f fail-counts ]; then
     printf '\nFAIL: doc-count drift detected.\n'
-    printf '    test_groups MISMATCH — code=2 doc-says=1 (update the DOC-COUNTS block in docs/CODEBASE_MAP.md)\n'
+    printf '    test_groups MISMATCH — code=2 doc-says=1 (update the DOC-COUNTS block in docs/dev/CODEBASE_MAP.md)\n'
     printf '    stale prose cannot be repaired as a count\n\n'
     exit 1
 fi
-declared=$(sed -n 's/^test_groups: //p' docs/CODEBASE_MAP.md)
+declared=$(sed -n 's/^test_groups: //p' docs/dev/CODEBASE_MAP.md)
 if [ "$declared" != 2 ]; then
     printf '\nFAIL: doc-count drift detected.\n'
-    printf '    test_groups MISMATCH — code=2 doc-says=%s (update the DOC-COUNTS block in docs/CODEBASE_MAP.md)\n\n' "$declared"
+    printf '    test_groups MISMATCH — code=2 doc-says=%s (update the DOC-COUNTS block in docs/dev/CODEBASE_MAP.md)\n\n' "$declared"
     exit 1
 fi
 echo 'check_doc_counts: clean'
 FIXTURE
-    printf '<!-- DOC-COUNTS-BEGIN -->\ntest_groups: 2\n<!-- DOC-COUNTS-END -->\n' > "$tmp/docs/CODEBASE_MAP.md"
+    printf '<!-- DOC-COUNTS-BEGIN -->\ntest_groups: 2\n<!-- DOC-COUNTS-END -->\n' > "$tmp/docs/dev/CODEBASE_MAP.md"
     local key value
     for key in user.name user.email user.signingkey gpg.format gpg.ssh.program gpg.ssh.allowedSignersFile; do
         value="$(git config --get "$key" || true)"
@@ -230,9 +230,9 @@ FIXTURE
     : > "$tmp/.git/info/exclude"
     echo 'B1 PASS: dirty inputs refuse without effects'
     # B2/B3: assertions bind the real operator documentation, not fake Make.
-    grep -Fq 'devbuild --wait bash tools/scripts/stack_tip_refresh.sh`' "$ROOT/docs/DEVELOPING.md" || { echo 'B2 RED: nonexistent documented entry'; return 1; }
+    grep -Fq 'devbuild --wait bash tools/scripts/stack_tip_refresh.sh`' "$ROOT/docs/dev/DEVELOPING.md" || { echo 'B2 RED: nonexistent documented entry'; return 1; }
     echo 'B2 PASS: existing script entry documented'
-    grep -Fq 'Helper builds may regenerate tracked view headers before checking' "$ROOT/docs/DEVELOPING.md" || { echo 'B3 RED: source-preserving promise'; return 1; }
+    grep -Fq 'Helper builds may regenerate tracked view headers before checking' "$ROOT/docs/dev/DEVELOPING.md" || { echo 'B3 RED: source-preserving promise'; return 1; }
     echo 'B3 PASS: prerequisite-write limitation documented'
     # Stale registry refuses before touching inventory; check never rewrites.
     if "${cli[@]}" --check >"$out" 2>&1; then return 1; fi
@@ -282,20 +282,20 @@ FIXTURE
     rm "$tmp/fail-registry"
     # Count drift begins at a clean committed tip; only the document is committed.
     local before after staged
-    staged="$(git -C "$tmp" ls-files --stage -- ':!docs/CODEBASE_MAP.md')"
-    sed 's/test_groups: 2/test_groups: 1/' "$tmp/docs/CODEBASE_MAP.md" > "$tmp/count-doc"
-    mv "$tmp/count-doc" "$tmp/docs/CODEBASE_MAP.md"
-    git -C "$tmp" -c commit.gpgSign=false commit --only -qm 'Fixture count drift' -- docs/CODEBASE_MAP.md
+    staged="$(git -C "$tmp" ls-files --stage -- ':!docs/dev/CODEBASE_MAP.md')"
+    sed 's/test_groups: 2/test_groups: 1/' "$tmp/docs/dev/CODEBASE_MAP.md" > "$tmp/count-doc"
+    mv "$tmp/count-doc" "$tmp/docs/dev/CODEBASE_MAP.md"
+    git -C "$tmp" -c commit.gpgSign=false commit --only -qm 'Fixture count drift' -- docs/dev/CODEBASE_MAP.md
     before="$(git -C "$tmp" rev-parse HEAD)"
     : > "$tmp/order"
     "${cli[@]}" >"$out" 2>&1
     after="$(git -C "$tmp" rev-parse HEAD)"
     [ "$before" != "$after" ]
     [ "$(git -C "$tmp" show -s --format=%G? HEAD)" = G ]
-    [ "$(git -C "$tmp" diff-tree --no-commit-id --name-only -r HEAD)" = docs/CODEBASE_MAP.md ]
+    [ "$(git -C "$tmp" diff-tree --no-commit-id --name-only -r HEAD)" = docs/dev/CODEBASE_MAP.md ]
     value="$(git -C "$tmp" log -1 --format=%B)"
     grep -q 'test_groups.*1.*2' <<< "$value"
-    [ "$(git -C "$tmp" ls-files --stage -- ':!docs/CODEBASE_MAP.md')" = "$staged" ]
+    [ "$(git -C "$tmp" ls-files --stage -- ':!docs/dev/CODEBASE_MAP.md')" = "$staged" ]
     [ "$(cat "$tmp/order")" = $'registry\ncounts\ncounts\ninventory\ncounts' ]
     echo 'COUNTS PASS: signed document-only correction 1 -> 2 before inventory'
     git -C "$tmp" add .
@@ -303,19 +303,19 @@ FIXTURE
     after="$(git -C "$tmp" rev-parse HEAD)"
     "${cli[@]}" >"$out" 2>&1
     [ "$(git -C "$tmp" rev-parse HEAD)" = "$after" ]
-    grep -qx 'test_groups: 2' "$tmp/docs/CODEBASE_MAP.md"
+    grep -qx 'test_groups: 2' "$tmp/docs/dev/CODEBASE_MAP.md"
     echo 'COUNTS PASS: no drift leaves HEAD unchanged'
     # Match the reported old value so an ignored prose row could be repaired.
-    sed 's/test_groups: 2/test_groups: 1/' "$tmp/docs/CODEBASE_MAP.md" > "$tmp/count-doc"
-    mv "$tmp/count-doc" "$tmp/docs/CODEBASE_MAP.md"
-    git -C "$tmp" -c user.name=Fixture -c user.email=fixture@invalid -c commit.gpgSign=false commit --only -qm 'Fixture mixed drift' -- docs/CODEBASE_MAP.md
+    sed 's/test_groups: 2/test_groups: 1/' "$tmp/docs/dev/CODEBASE_MAP.md" > "$tmp/count-doc"
+    mv "$tmp/count-doc" "$tmp/docs/dev/CODEBASE_MAP.md"
+    git -C "$tmp" -c user.name=Fixture -c user.email=fixture@invalid -c commit.gpgSign=false commit --only -qm 'Fixture mixed drift' -- docs/dev/CODEBASE_MAP.md
     after="$(git -C "$tmp" rev-parse HEAD)"
     touch "$tmp/fail-counts"
     : > "$tmp/order"
     if "${cli[@]}" >"$out" 2>&1; then return 1; fi
     [ "$(cat "$tmp/order")" = $'registry\ncounts' ]
     [ "$(git -C "$tmp" rev-parse HEAD)" = "$after" ]
-    grep -qx 'test_groups: 1' "$tmp/docs/CODEBASE_MAP.md"
+    grep -qx 'test_groups: 1' "$tmp/docs/dev/CODEBASE_MAP.md"
     grep -Fq 'stale prose cannot be repaired as a count' "$out"
     grep -Fq 'stack-tip-refresh: doc-count failure is not exclusively numeric count drift' "$out"
     echo 'COUNTS PASS: mixed numeric/prose failure refuses without correction or inventory'
@@ -395,7 +395,7 @@ report_changes() {
 }
 trap report_changes EXIT
 bash tools/scripts/zcode_registry_rederive.sh
-ORIGINAL_CHANGED+=(docs/CODEBASE_MAP.md)
+ORIGINAL_CHANGED+=(docs/dev/CODEBASE_MAP.md)
 repair_counts
 make --no-print-directory docs-capability-inventory
 make --no-print-directory check-doc-counts

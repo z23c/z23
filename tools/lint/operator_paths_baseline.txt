@@ -165,7 +165,7 @@ A contexts/commons/corpus/report-000040.json 66
 A contexts/commons/corpus/report-000041.json 73
 A contexts/commons/corpus/report-000042.json 73
 A docs/API_REFERENCE.md 6
-A docs/NATIVE_COMMAND_INTERFACE.md 2
+A docs/dev/NATIVE_COMMAND_INTERFACE.md 2
 A engine/composition/commands/core.def 5
 A engine/composition/commands/ops.def 1
 A engine/controllers/src/blockchain_controller_admin.c 1

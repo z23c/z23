@@ -63,4 +63,4 @@ claude mcp add z23-local -- z23 mcp serve --checkout=/abs/path/to/checkout
 ### Codex
 
 The Codex `[mcp_servers.z23-local]` table and the full tool contract are in
-[`docs/AGENT_API.md`](../../docs/AGENT_API.md#local-mcp-adapter).
+[`docs/agent/AGENT_API.md`](../../docs/agent/AGENT_API.md#local-mcp-adapter).

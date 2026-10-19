@@ -1396,7 +1396,7 @@ static int test_ic_every_selection_has_a_reason(void)
         const char *files[] = {
             "core/modules/net/src/tor_integration.c",
             "engine/controllers/include/controllers/ic_rows.def",
-            "docs/HANDOFF.md",
+            "docs/agent/HANDOFF.md",
         };
         struct zcl_devloop_plan plan;
         ASSERT(zcl_devloop_plan_files(files, 3, &plan));
@@ -1425,7 +1425,7 @@ static int test_ic_every_selection_has_a_reason(void)
          * group, and in the three-file plan above a .c file names the same
          * group first, so that entry honestly reads "semantic" — a graph DID
          * reach it. Alone, nothing but the .def rule can explain it. */
-        const char *doc_only[] = { "docs/HANDOFF.md" };
+        const char *doc_only[] = { "docs/agent/HANDOFF.md" };
         struct zcl_devloop_plan dplan;
         ASSERT(zcl_devloop_plan_files(doc_only, 1, &dplan));
         ASSERT(zcl_devloop_plan_add_closure(IC_FIX_DEF, doc_only, 1, &dplan));
@@ -1433,7 +1433,7 @@ static int test_ic_every_selection_has_a_reason(void)
         bool saw_opaque = false;
         for (size_t i = 0; i < dplan.selections_len; i++) {
             if (dplan.selections[i].dim == ZCL_DEVLOOP_DIM_OPAQUE &&
-                strcmp(dplan.selections[i].via, "docs/HANDOFF.md") == 0)
+                strcmp(dplan.selections[i].via, "docs/agent/HANDOFF.md") == 0)
                 saw_opaque = true;
         }
         ASSERT(saw_opaque);
@@ -1461,7 +1461,7 @@ static int test_ic_every_selection_has_a_reason(void)
                                                   dbody, sizeof(dbody));
         ASSERT(dn > 0 && dn < sizeof(dbody));
         ASSERT(strstr(dbody, "\"dimension\":\"opaque\"") != NULL);
-        ASSERT(strstr(dbody, "\"via\":\"docs/HANDOFF.md\"") != NULL);
+        ASSERT(strstr(dbody, "\"via\":\"docs/agent/HANDOFF.md\"") != NULL);
 
         /* The explanation is only worth writing if it can be DELIVERED. The
          * command registry hard-fails (RESPONSE_BUDGET_EXCEEDED, empty
@@ -1506,7 +1506,7 @@ static const char *const ic_superset_paths[] = {
     "core/modules/net/src/zmsg.c",
     "engine/controllers/include/controllers/diagnostics_dumpers.def",
     "tools/lint/check_core_seal.sh",
-    "docs/HANDOFF.md",
+    "docs/agent/HANDOFF.md",
     "platform/modules/sha3/src/sha3.c",
     "engine/models/src/store.c",
     "cognition/modules/codeindex/src/codeindex_impact.c",

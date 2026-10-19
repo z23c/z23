@@ -93,7 +93,7 @@ groups, which the submit step did not do.
 | E1 | The maintainer submit step runs every group `code tests` routes from the changed paths before submitting. | late failures per landed row |
 | E5 | The duplicated root-count pin is removed. | duplicate pins |
 | E4 | Command search ranking is under revision with a 25-intent regression test and 10 held-out intents. | hit@1, hit@5 |
-| orientation | `code guide` takes `paths`/`topic` and returns a brief of about 0.9 KB for `tools/command/native_command.c`, against 8 KB of contract documents (120 KB with `docs/DEVELOPING.md`). | E6 |
+| orientation | `code guide` takes `paths`/`topic` and returns a brief of about 0.9 KB for `tools/command/native_command.c`, against 8 KB of contract documents (120 KB with `docs/dev/DEVELOPING.md`). | E6 |
 
 ## Next experiment
 

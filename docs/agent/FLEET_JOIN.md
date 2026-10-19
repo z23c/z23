@@ -329,7 +329,7 @@ a static SHAKE256-Wrap PSK. There is no inner OpenSSH key exchange here, so
 nothing post-quantum or ephemeral is negotiated, and the tunnel has no
 forward secrecy: anyone who later obtains the PSK and a recording of the
 session can read it (see
-[the forward-secrecy design](../TUNNEL_PQ_FORWARD_SECRECY.md)). This is not the
+[the forward-secrecy design](../spec/TUNNEL_PQ_FORWARD_SECRECY.md)). This is not the
 earlier hybrid SSH trial (`sntrup761x25519-sha512` inside OpenSSH); that
 measurement belongs to the SSH path and says nothing about the hub. The
 receiver is unchanged: it connects to a loopback

@@ -18,7 +18,7 @@
 # still exits non-zero and non-3, and systemd still marks that failed.
 [Unit]
 Description=Advance one z23 train's unattended state machine
-Documentation=file:%h/github/zclassic23/docs/DEVELOPING.md
+Documentation=file:%h/github/zclassic23/docs/dev/DEVELOPING.md
 
 [Service]
 Type=oneshot

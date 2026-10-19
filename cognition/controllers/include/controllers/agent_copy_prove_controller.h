@@ -4,7 +4,7 @@
  * tools/repro_on_copy.sh (the existing copy-prove H*-CLIMB harness) in
  * the background against a throwaway datadir COPY and returns
  * immediately. Never reimplements the harness; never touches a live
- * datadir. See docs/CODEBASE_MAP.md "copy-prove" and tools/repro_on_copy.sh.
+ * datadir. See docs/dev/CODEBASE_MAP.md "copy-prove" and tools/repro_on_copy.sh.
  *
  * Poll a run via the diagnostics registry primitive:
  *   z23 dumpstate agent_copy_prove <slug>

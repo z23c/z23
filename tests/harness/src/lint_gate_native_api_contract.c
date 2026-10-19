@@ -6,7 +6,7 @@
  * them stay accurate.
  *
  * One long check that asserts on the TEXT of the registry sources, the
- * controllers behind them, and docs/AGENT_API.md, so a leaf that is renamed,
+ * controllers behind them, and docs/agent/AGENT_API.md, so a leaf that is renamed,
  * dropped, or left undocumented fails here. */
 
 #define _POSIX_C_SOURCE 200809L
@@ -175,7 +175,7 @@ int t_native_agent_api_contract(void)
         ASSERT(repo_path(api_status_path, sizeof(api_status_path),
                          "engine/controllers/src/api_controller_status.c") == 0);
         ASSERT(repo_path(agent_doc_path, sizeof(agent_doc_path),
-                         "docs/AGENT_API.md") == 0);
+                         "docs/agent/AGENT_API.md") == 0);
         ASSERT(read_entire_file(main_path, &main_buf) == 0);
         /* The node entry point spans main.c, main_cli_modes.c,
          * cli_compare_runtime.c and args.c;

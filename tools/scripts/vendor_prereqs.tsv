@@ -5,7 +5,7 @@
 # every `need <tool>` call in tools/scripts/build_vendor.sh has a row here, so
 # a new vendor prerequisite cannot be added without appearing in the doctor.
 # That assertion is why this file, not prose, is authoritative: three separate
-# prose lists (docs/BUILD.md, .github/CONTRIBUTING.md, README.md) disagreed
+# prose lists (docs/dev/BUILD.md, .github/CONTRIBUTING.md, README.md) disagreed
 # with each other and with the script, and none of them listed perl, nm or tar.
 #
 # Columns (tab-separated):

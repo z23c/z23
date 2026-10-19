@@ -106,5 +106,10 @@ run` from a fresh checkout is the whole recipe.
 - `tests/harness/src/test_simnet*.c` — the ground-truth test suite these
   examples are built from; when in doubt about an API's contract, that's
   the authoritative source.
-- [`docs/CODEBASE_MAP.md`](../CODEBASE_MAP.md) — where things live in
+- [`docs/dev/CODEBASE_MAP.md`](../dev/CODEBASE_MAP.md) — where things live in
   the wider node codebase.
+
+## Also in this directory
+
+- [`_shim.c`](./_shim.c): defines g_shutdown_requested, the one process-global symbol every example needs
+- [`printvar.mk`](./printvar.mk): Tiny helper: `include`s the root Makefile and exposes a `print-VAR` target

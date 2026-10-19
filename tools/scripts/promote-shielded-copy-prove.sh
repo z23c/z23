@@ -22,7 +22,7 @@
 # MANUAL-ONLY: not wired to any Makefile target, `make test`/`make
 # test-parallel`, or CI. This is an operator-run copy-prove harness for the
 # sovereign shielded-state cure (see CLAUDE.md "Tenacity & recovery" +
-# docs/HANDOFF.md §0-LATEST for current live state; cure design/spine:
+# docs/agent/HANDOFF.md §0-LATEST for current live state; cure design/spine:
 # docs/work/self-verified-tip-plan.md). Run it by hand:
 #   tools/scripts/promote-shielded-copy-prove.sh --dry-run \
 #     --producer=$HOME/.zclassic-c23-mint3-COPY-<ts>
@@ -70,7 +70,7 @@
 #     the repo yet as of this commit — lane/fast-cure-promote and
 #     lane/fast-cure-crosscheck are building it concurrently with this
 #     script in sibling worktrees.
-# The argv loop silently ignores unknown flags (see docs/HANDOFF.md /
+# The argv loop silently ignores unknown flags (see docs/agent/HANDOFF.md /
 # CLAUDE.md), so running this script for real against a build that predates
 # the flag will NOT crash — it will boot normally, and phase 1 below FAILS
 # closed because the required banner never appears (never a false PASS from

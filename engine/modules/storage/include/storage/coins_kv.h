@@ -531,7 +531,7 @@ bool coins_kv_backfill_applied_height_if_absent(
  * unspendable, so the coin delta is empty — hence coins_applied_height = 1 is
  * EXACTLY the value the forward fold co-commits the instant it applies genesis
  * (cursor_in 0 -> next_cursor 1). See engine/controllers/src/sovereignty_controller.c
- * and docs/MVP.md C7. Called ONLY from utxo_apply_stage_init (this frontier's
+ * and docs/quality/MVP.md C7. Called ONLY from utxo_apply_stage_init (this frontier's
  * single writer — check-frontier-single-writer); the paired genesis anchor that
  * unblocks the follower's proof_validate is seeded separately at boot
  * (engine/composition/src/boot_services.c).

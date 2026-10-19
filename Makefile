@@ -2069,7 +2069,7 @@ endif
 # Vendored static archives the final link needs.  Only libsecp256k1.a is
 # committed to git; `make vendor` builds the rest from source (pinned URL +
 # SHA256), so `git clone && make zclassic23` links in one shot.  See
-# docs/BUILD.md and tools/scripts/build_vendor.sh.
+# docs/dev/BUILD.md and tools/scripts/build_vendor.sh.
 .PHONY: vendor vendor-force vendor-provenance vendor-ready tor-full tor-ready tor-check tor-provenance-ready check-vendor-provenance
 # Build every missing OR provenance-stale vendor/lib/*.a from its pinned,
 # SHA256-verified source. `make vendor-force` rebuilds all of them.
@@ -4885,7 +4885,7 @@ action-root-reuse-study: $(ACTION_ROOT_STUDY_BIN) \
 # make recompiled, which object bytes changed, the plain plan and the facts
 # plan (docs/work/SEMANTIC_MANIFEST.md, "Replay on real history"; docs
 # on this Makefile wiring and the reporting-tool boundary in
-# docs/DEVELOPING.md). Its sources carry the only main() and stay out of
+# docs/dev/DEVELOPING.md). Its sources carry the only main() and stay out of
 # every node, dev and test link via DEV_STANDALONE_SRCS. The run itself
 # drives git, make, the sensor (make clang-manifest) and a z23-dev planner
 # in a dedicated worktree. It is POSIX-only (fork, wait4, objcopy), so the
@@ -5329,7 +5329,7 @@ zcode-dht-asan:
 # every race in one run, then exits the failing child with exitcode=66 so a
 # group WITH reports surfaces red — findings are the point of this target.
 # Suppressions come from tools/tsan.supp (documented-benign entries only —
-# never seed it to hide an untriaged report; see docs/BUILD.md
+# never seed it to hide an untriaged report; see docs/dev/BUILD.md
 # "ThreadSanitizer profiles" for the current known-good triage state). Same
 # finite 1 GiB stack as t-asan.
 # setarch -R (disable ASLR) is REQUIRED: TSan reserves fixed shadow address
@@ -5351,7 +5351,7 @@ t-tsan: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure
 # several times slower than the plain fast harness and push times must stay
 # stable. Green as of the first TSan sweep's one finding (R1, atomic
 # publication of thread_liveness_child.id) getting fixed in code — see
-# docs/BUILD.md "ThreadSanitizer profiles" for the known-good writeup. Run it
+# docs/dev/BUILD.md "ThreadSanitizer profiles" for the known-good writeup. Run it
 # locally before touching threaded code. Override the set with
 # TSAN_CI_GROUPS="...". Gate posture: halt_on_error=1 turns the first race
 # report into a red group (mirrors asan-ci's UBSan posture) — a red tsan-ci
@@ -5884,7 +5884,7 @@ $(DEV_ASAN_LINK_RSP): $(DEV_ASAN_OBJS)
 # non-LTO, no hot-path split (sanitizer fidelity over optimizer coverage).
 # Never a release/deploy artifact. Boot it on a scratch datadir; race
 # reports go to stderr — triage before suppressing anything (see
-# docs/BUILD.md "ThreadSanitizer profiles").
+# docs/dev/BUILD.md "ThreadSanitizer profiles").
 dev-tsan z23-dev-tsan zclassic23-dev-tsan: $(DEV_TSAN_BIN) $(DEV_TSAN_BIN_ALIAS)
 
 # Temporary migration alias: build/bin/zclassic23-dev-tsan -> z23-dev-tsan.
@@ -6304,7 +6304,7 @@ hotswap-try:
 #     the banner, the SUITE VERDICT line and the headline.
 #
 # It is an EDIT LOOP, not a gate: `make t-fast ONLY=<group>` (or `make t`) is
-# still what proves the linked binary. See docs/DEVELOPING.md "Module mode".
+# still what proves the linked binary. See docs/dev/DEVELOPING.md "Module mode".
 HOTSWAP_TEST_SO_DIR = $(BUILD_DIR)/hotswap/test-fast/$(TEST_FAST_COMPILE_EPOCH)
 
 .PHONY: hotswap-test-so
@@ -10234,7 +10234,7 @@ test-store-operator-proof: zclassic23 zcl-rpc
 
 # ── MVP acceptance gates: hermetic vs fixture-bound ───────────
 #
-# The MVP acceptance tests (docs/MVP.md #2..#7) all self-skip unless
+# The MVP acceptance tests (docs/quality/MVP.md #2..#7) all self-skip unless
 # ZCL_STRESS_TESTS=1. We split them by what a clean CI container can
 # actually provide, so `make ci` only blocks on tests that truly run:
 #
@@ -10721,7 +10721,7 @@ mvp-netdisrupt-recovery-stopwatch: zclassic23
 #                               SKIPs cleanly when egress is unavailable)
 #
 # DOC-HONESTY (revised 2026-06-17): under the local-only-CI / never-docker MVP
-# rule (docs/MVP.md), a criterion is ✅ when its FULL operator claim RUN-PASSES
+# rule (docs/quality/MVP.md), a criterion is ✅ when its FULL operator claim RUN-PASSES
 # (not SKIPs, not a slice) via the relevant member here — `make mvp-verify` IS
 # the local operator proof. A member that SKIPs for a missing local dependency
 # (params / Tor egress / fixture) keeps its criterion ◐ until it run-passes.
@@ -10769,7 +10769,7 @@ mvp-verify: zclassic23 zcl-rpc test_zcl
 # ── mvp: the HONEST MVP 8/8 scoreboard ────────────────────────
 #
 # AGENTS.md P1 priority — CI-enforce the MVP criteria. `make mvp` is the
-# single per-criterion reporter: for each of the 8 docs/MVP.md acceptance
+# single per-criterion reporter: for each of the 8 docs/quality/MVP.md acceptance
 # criteria it runs the ONE mechanically-runnable check that proves it (a
 # hermetic test_zcl slice, the symbol-floor gate, the soak-evidence judge,
 # or a live-node probe) and prints a verdict line PASS / FAIL / BLOCKED(reason).
@@ -14507,7 +14507,7 @@ check-route-command-parity: $(LINTC_TOOL)
 
 # Antipoison ratchets (2026-06-18) — keep the docs honest + the node standing
 # alone + reorgs safe. Each PASSES on the current tree and only fails on a
-# regression. See docs/HANDOFF.md for why these exist.
+# regression. See docs/agent/HANDOFF.md for why these exist.
 check-doc-no-false-deleted:
 	@echo "══ LINT: doc no-false-deleted ══"
 	@./tools/lint/gate_doc_no_false_deleted.sh .
@@ -14606,7 +14606,7 @@ check-doc-inline-paths: $(LINTC_TOOL)
 
 # Doc counts vs code: numeric claims (test_groups / port_interfaces /
 # persistence_adapters) declared in the <!-- DOC-COUNTS --> block of
-# docs/CODEBASE_MAP.md must agree with the code, and known-stale compound
+# docs/dev/CODEBASE_MAP.md must agree with the code, and known-stale compound
 # phrases ("15 ports", "1500+ tests", ...) must not return to the prose.
 check-doc-counts:
 	@echo "══ LINT: doc counts vs code ══"
@@ -14617,7 +14617,7 @@ check-doc-counts:
 # rewriting the declared values from the code-measured ones) but nothing
 # could reach it through `make`. dev.land's rebase auto-resolve
 # (tools/command/native_dev_land.c) names one make target per regenerated
-# artifact, and docs/CODEBASE_MAP.md had none.
+# artifact, and docs/dev/CODEBASE_MAP.md had none.
 .PHONY: fix-doc-counts
 fix-doc-counts:
 	@./tools/scripts/check_doc_counts.sh --fix
@@ -14813,7 +14813,7 @@ check-no-real-clock-test-deadline: $(LINTC_TOOL)
 # Anti-stale forbid gate: no hand-pinned rot-prone facts in the docs. Two
 # classes — a "<N> MB … binary" size claim (HARD; the size has a live source,
 # tools/scripts/binary_size.sh — de-pin to size-agnostic prose) and a live-state
-# HEIGHT PIN outside docs/HANDOFF.md (RATCHET; shrink-only baseline at
+# HEIGHT PIN outside docs/agent/HANDOFF.md (RATCHET; shrink-only baseline at
 # tools/lint/stale_pinned_facts_baseline.txt). Per-line escape hatch: a trailing
 # `<!-- stale-ok: <reason> -->` marker. Owner directive 2026-07-17: numeric
 # facts with a live source are DERIVED or GATED, never hand-pinned.
@@ -14823,14 +14823,14 @@ check-no-stale-pinned-facts:
 
 # No UNCITED victory claim in the one live-state page (HARD). This repo shipped
 # 9+ "cured / at tip / fully synced" claims in six weeks, every one later false
-# (~103 "wedge FIXED" -> re-wedge cycles). A paragraph in docs/HANDOFF.md that
+# (~103 "wedge FIXED" -> re-wedge cycles). A paragraph in docs/agent/HANDOFF.md that
 # carries a victory phrase ("at tip", "cured", "wedge closed", "soak window
 # open", ...) must also carry a machine-checkable citation token (VERDICT=PASS,
 # gap_vs_oracle, uptime-ledger, a ts= stamp, slo-summary:, WALL_CLOCK_SECONDS)
 # or the explicit historical override <!-- victory-ok: <reason> -->. See
 # tools/scripts/check_no_uncited_victory.sh (has --selftest).
 check-no-uncited-victory: $(LINTC_TOOL)
-	@echo "══ LINT: no uncited victory claim (docs/HANDOFF.md) ══"
+	@echo "══ LINT: no uncited victory claim (docs/agent/HANDOFF.md) ══"
 	@./tools/scripts/check_no_uncited_victory.sh
 
 # Bound doc claims. An author binds ONE prose assertion to ONE machine-checkable

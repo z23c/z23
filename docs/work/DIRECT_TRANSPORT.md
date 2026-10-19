@@ -52,7 +52,7 @@ New `core/modules/net/udp_transport.{h,c}`:
 this component: the fixed header, ChaCha20-Poly1305 per packet under an
 HKDF-SHA3-256 subkey of the paired session, sequence-as-nonce with a
 refusal instead of a wrap, a bounded replay window, byte caps, and
-`z23 fleet link probe` ([`GAMELINK.md`](../GAMELINK.md)). It sits under
+`z23 fleet link probe` ([`GAMELINK.md`](../node/GAMELINK.md)). It sits under
 engine/ rather than the `core/modules/net/udp_transport.*` named above
 because core/ is sealed; moving it changes no caller. NOT done: the
 ORDERED_RELIABLE profile, the amplification-refusing handshake and

@@ -9,8 +9,8 @@ This is a curated map, not an inventory. The documentation hierarchy is:
 1. [`../README.md`](../README.md) — public product explanation.
 2. [`../AGENTS.md`](../AGENTS.md) — model-neutral entry point for maintainers and fleet agents. Public volunteers start at [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).
 3. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) — current ordered work.
-4. [`DEVELOPING.md`](DEVELOPING.md) — detailed developer procedure.
-5. [`HANDOFF.md`](HANDOFF.md) — current state of the maintainer's hosted node
+4. [`DEVELOPING.md`](dev/DEVELOPING.md) — detailed developer procedure.
+5. [`HANDOFF.md`](agent/HANDOFF.md) — current state of the maintainer's hosted node
    only.
 6. This page — map to specialist documentation.
 7. [`../CLAUDE.md`](../CLAUDE.md) and vendor-specific skills — thin
@@ -44,7 +44,7 @@ publish, discover, fetch, verify, build, independently reproduce, and serve
 exact packages without a central registry.
 
 - [`../README.md`](../README.md) — what the product is and what users can do.
-- [`GETTING_STARTED.md`](GETTING_STARTED.md) — build and run it on a fresh
+- [`GETTING_STARTED.md`](node/GETTING_STARTED.md) — build and run it on a fresh
   machine, and what peer discovery does with no flags.
 - [`MACOS_GUI_QUICKSTART.md`](node/MACOS_GUI_QUICKSTART.md) — a fresh Mac with only
   Apple's command-line tools to a native GUI application: scaffold it from
@@ -59,15 +59,15 @@ exact packages without a central registry.
   software commons (`z23 join`, the swarm and DHT tiers, reading the verdict).
 - [`C23_COMMONS_QUICKSTART.md`](commons/C23_COMMONS_QUICKSTART.md) — installed-node
   author, consumer, and reproducer journey for exact third-party C23 packages.
-- [`MVP.md`](MVP.md) — public-node V1 acceptance contract; `make mvp` reports
+- [`MVP.md`](quality/MVP.md) — public-node V1 acceptance contract; `make mvp` reports
   the live criterion state and `make mvp-verify` runs the local aggregate.
 - [`SELL.md`](node/SELL.md) — pay ZCL and sell a 1/1 collectible: yardsale,
   package-swarm, and onion shop; start with `z23 yardsale guide`.
-- [`NATIVE_COMMAND_INTERFACE.md`](NATIVE_COMMAND_INTERFACE.md) — discoverable,
+- [`NATIVE_COMMAND_INTERFACE.md`](dev/NATIVE_COMMAND_INTERFACE.md) — discoverable,
   typed operator interface.
 - [`BOOTSTRAPPING.md`](node/BOOTSTRAPPING.md) and [`SYNC.md`](node/SYNC.md) — how a node
   reaches the chain.
-- [`OVERLAY.md`](OVERLAY.md) — FlyClient, SHA3 swarm, file-service overlay,
+- [`OVERLAY.md`](node/OVERLAY.md) — FlyClient, SHA3 swarm, file-service overlay,
   and onion marketplace; consensus hashes stay SHA-256d.
 - [`CUSTODY_MODEL.md`](node/CUSTODY_MODEL.md) — wallet ownership and spend
   authority.
@@ -113,9 +113,9 @@ from a hash, signature, test, or reproduction receipt.
   It distinguishes available interfaces from unqualified integration.
 - [`../AGENTS.md`](../AGENTS.md) — durable priorities, authority boundaries,
   initial commands, and continuation behavior.
-- [`DEVELOPING.md`](DEVELOPING.md) — navigation, reflex feedback, focused tests,
+- [`DEVELOPING.md`](dev/DEVELOPING.md) — navigation, reflex feedback, focused tests,
   integration, push, and asynchronous deep proof.
-- [`CODEBASE_MAP.md`](CODEBASE_MAP.md) — source ownership and extension recipes.
+- [`CODEBASE_MAP.md`](dev/CODEBASE_MAP.md) — source ownership and extension recipes.
 - [`DATA_INDEX.md`](dev/DATA_INDEX.md) — local data-source ingest/search (`z23-dev dev
   index`): the board, experiment ledger, landing outcomes, and logs, into
   one sqlite+FTS5 file.
@@ -146,7 +146,7 @@ from a hash, signature, test, or reproduction receipt.
   declared invariants. Scanner ambiguities are named `UNPROVEN` records rather
   than silently assigned. Regenerate it with `make docs-capability-inventory`;
   never hand-edit it.
-- [`BUILD.md`](BUILD.md) — vendored dependencies, profiles, and reproducibility.
+- [`BUILD.md`](dev/BUILD.md) — vendored dependencies, profiles, and reproducibility.
 - [`AI_SAFETY_GATES.md`](agent/AI_SAFETY_GATES.md) — claim and evidence discipline.
 - [`SECURITY_AND_INTEGRITY.md`](node/SECURITY_AND_INTEGRITY.md) — project security
   boundary and review checklist.
@@ -187,14 +187,14 @@ from a hash, signature, test, or reproduction receipt.
   copy.
 - [`BLOCK_EXPLORER_HOSTING.md`](BLOCK_EXPLORER_HOSTING.md) — public explorer
   operation.
-- [`PROMOTION_RECEIPTS.md`](PROMOTION_RECEIPTS.md) — promotion evidence ledger
+- [`PROMOTION_RECEIPTS.md`](dev/PROMOTION_RECEIPTS.md) — promotion evidence ledger
   and owner setup.
 - [`RELEASE_CANDIDATE_PIN.md`](node/RELEASE_CANDIDATE_PIN.md) — exact candidate
   identity.
 
 ## Current maintainer state
 
-[`HANDOFF.md`](HANDOFF.md) is the only document allowed to describe the current
+[`HANDOFF.md`](agent/HANDOFF.md) is the only document allowed to describe the current
 hosted node. It is relevant only on the maintainer host and must be checked
 against typed node status. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) is the
 current development mission; neither file redefines the durable product.
@@ -225,7 +225,7 @@ path:
   and not on any node critical path.
 - [`METAVERSE.md`](commons/METAVERSE.md) and [`METAVERSE_MVP.md`](commons/METAVERSE_MVP.md) —
   engine/application/creation layer; token economics remain simulation-only.
-- [`FILE_MARKET_PROTOCOL.md`](FILE_MARKET_PROTOCOL.md) — marketplace protocol;
+- [`FILE_MARKET_PROTOCOL.md`](node/FILE_MARKET_PROTOCOL.md) — marketplace protocol;
   the operator acceptance journey it once planned now lives as
   `make commons-multihost-acceptance` (see the top-level README).
 - [`FRAMEWORK.md`](commons/FRAMEWORK.md) and [`AGENT_ARCHITECTURE.md`](agent/AGENT_ARCHITECTURE.md)

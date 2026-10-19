@@ -137,7 +137,7 @@ static char g_resident_datadir[512];
  * whole test binary. If the harness re-implemented these hooks, a test would
  * pass through a validation path production never runs — the exact divergence
  * this facility exists to avoid. A release build (neither macro) still links
- * none of it. See docs/DEVELOPING.md "Module mode". */
+ * none of it. See docs/dev/DEVELOPING.md "Module mode". */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
 /* The probe executes on the activating RPC worker. Keep its rendered command

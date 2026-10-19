@@ -175,8 +175,8 @@ anything to another fleet you would not publish.
   honest red is a valid result.
 - Ask the navigator before writing: `z23 code have <thing>`.
 
-Docs: [DEVELOPING.md](../DEVELOPING.md) (order of work),
-[COOKBOOK.md](../COOKBOOK.md) (exact incantations),
+Docs: [DEVELOPING.md](../dev/DEVELOPING.md) (order of work),
+[COOKBOOK.md](../dev/COOKBOOK.md) (exact incantations),
 [agent index](README.md). The installed systemd unit and datadir may still
 carry an older product name; that is the installed name, not another product.
 

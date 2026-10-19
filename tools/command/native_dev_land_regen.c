@@ -11,7 +11,7 @@
  * regenerates the fleet routing table across two scripts
  * (`docs-executor-routing`), one regenerates the capability census
  * (`docs-capability-inventory`), and one repairs the doc-counts block of
- * docs/CODEBASE_MAP.md (`fix-doc-counts`, the existing repair half of
+ * docs/dev/CODEBASE_MAP.md (`fix-doc-counts`, the existing repair half of
  * `check-doc-counts` — see Makefile). Each writes to exactly one tracked
  * path. The table below is CLOSED and mirrors DL_REGEN_ARTIFACTS in
  * native_dev_land.c, which exists for the same reason: nothing here is
@@ -75,7 +75,7 @@ struct dlrg_artifact {
 static const struct dlrg_artifact DLRG_ARTIFACTS[] = {
     { "docs-capability-inventory", "docs/CAPABILITY_INVENTORY.jsonl" },
     { "docs-executor-routing", "docs/agent/EXECUTOR_HEURISTICS.md" },
-    { "fix-doc-counts", "docs/CODEBASE_MAP.md" },
+    { "fix-doc-counts", "docs/dev/CODEBASE_MAP.md" },
 };
 #define DLRG_N (sizeof(DLRG_ARTIFACTS) / sizeof(DLRG_ARTIFACTS[0]))
 
@@ -534,7 +534,7 @@ static bool dlrg_has_makefile(const char *wt)
  *
  * WHY -j1. The targets are NOT provably independent under -jN.
  * fix-doc-counts (tools/scripts/check_doc_counts.sh --fix) rewrites
- * docs/CODEBASE_MAP.md and then scans every tracked *.md, which includes
+ * docs/dev/CODEBASE_MAP.md and then scans every tracked *.md, which includes
  * docs/agent/EXECUTOR_HEURISTICS.md — the file docs-executor-routing
  * rewrites (z23-lint check-fleet-facts --write-doc). Run in parallel, that
  * scan could read the routing page mid-rewrite. Table order (inventory,

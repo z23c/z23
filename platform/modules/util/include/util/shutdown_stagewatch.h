@@ -51,7 +51,7 @@
 #define SHUTDOWN_STAGEWATCH_MAX_STAGES 32
 #define SHUTDOWN_STAGE_NAME_MAX        48
 
-/* Exit-reason breadcrumb (E2 boot-loop-failsafe, docs/HANDOFF.md 2026-07):
+/* Exit-reason breadcrumb (E2 boot-loop-failsafe, docs/agent/HANDOFF.md 2026-07):
  * a durable one-row marker, sibling to shutdown-receipt.v1, that records WHY
  * this process is about to leave — an operator/systemd-driven shutdown, or a
  * SELF-respawn requested by chain_tip_watchdog / supervisor_backstop after

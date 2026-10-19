@@ -1,7 +1,7 @@
 # Never-stuck foundation — retained design record
 
 > **STATUS: the wedge this doc diagnoses is CURED** — the serve node is AT
-> NETWORK TIP on self-verified state (`docs/HANDOFF.md` §0-LATEST), via the
+> NETWORK TIP on self-verified state (`docs/agent/HANDOFF.md` §0-LATEST), via the
 > checkpoint-content consensus-bundle install path, NOT via this doc's
 > literal "self-mint a from-genesis SHA3 anchor → `-refold-from-anchor`
 > cutover → DELETE the borrowed loader" sequence (that sequence is still

@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Golden contract tests for the native command registry catalog
- * (docs/NATIVE_COMMAND_INTERFACE.md §20). Proves the composition-root catalog
+ * (docs/dev/NATIVE_COMMAND_INTERFACE.md §20). Proves the composition-root catalog
  * is well-formed, shallow, budgeted, fail-closed for planned leaves, and that
  * every READY leaf has a live binding — without contacting a node.
  */
@@ -508,7 +508,7 @@ static int test_code_guide_leaf(void)
         ASSERT(strstr(json_get_str(json_get(&reply.data, "never")),
                       "test_zcl") != NULL);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "docs")),
-                      "docs/DEVELOPING.md") == 0);
+                      "docs/dev/DEVELOPING.md") == 0);
         zcl_command_reply_free(&reply);
         json_free(&input);
         PASS();
@@ -5613,7 +5613,7 @@ int command_registry_ready_read_latency_contract(void)
     int failures = 0;
     const struct zcl_command_registry *reg = zcl_command_catalog();
     TEST("every READY discover.*/code.* leaf's WARM dispatch meets its latency bucket") {
-        /* budget_ms is a WARM-latency contract (docs/NATIVE_COMMAND_INTERFACE.md
+        /* budget_ms is a WARM-latency contract (docs/dev/NATIVE_COMMAND_INTERFACE.md
          * §8 "warm latency class"). code.* leaves lazily build the in-binary
          * code index on their first call (a ~1s one-time O(codebase) scan);
          * that cold build is not the steady-state read this bucket budgets. So

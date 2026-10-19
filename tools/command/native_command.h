@@ -2106,7 +2106,7 @@ void zcl_native_handle_ops_rom(
  * peer_best, sync_state, primary_blocker, blocker_age_s, active_conditions,
  * peer_count, rss_mb. `buf`/`cap` must be at least 256 bytes; the line is
  * always NUL-terminated and never exceeds 200 visible bytes before the
- * terminator. Exposed for test_operator_ux. See docs/NATIVE_COMMAND_INTERFACE.md
+ * terminator. Exposed for test_operator_ux. See docs/dev/NATIVE_COMMAND_INTERFACE.md
  * "CLI UX contract" for the frozen field list. */
 struct json_value;
 void zcl_native_status_brief_render(const struct json_value *data, char *buf,
@@ -2132,7 +2132,7 @@ const char *zcl_native_status_brief_next_command(const struct json_value *data);
  * short, human-readable reason (naming the bad field and, space permitting,
  * up to 12 of the object's own known top-level keys); `out` is left
  * untouched. This is the ONE implementation `status field=` and
- * `dumpstate ... field=` both call — see docs/NATIVE_COMMAND_INTERFACE.md
+ * `dumpstate ... field=` both call — see docs/dev/NATIVE_COMMAND_INTERFACE.md
  * "CLI UX contract". */
 bool zcl_native_render_field_selection(const struct json_value *obj,
                                        const char *fields_csv,
@@ -2153,7 +2153,7 @@ bool zcl_native_require_hex64(const char *field, const char *value,
                               uint8_t out[32], char *err, size_t err_size);
 
 /* Build the CLI UX contract's unrecognized-command diagnostic (see
- * docs/NATIVE_COMMAND_INTERFACE.md "CLI UX contract"): one typed
+ * docs/dev/NATIVE_COMMAND_INTERFACE.md "CLI UX contract"): one typed
  * `error=UNKNOWN_COMMAND detail=... try=...` line, plus (when the existing
  * command-search index returns any hit — reused, never a new fuzzy matcher)
  * a `did you mean: ...` line naming up to 3 candidate paths. Writes into

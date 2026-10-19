@@ -103,7 +103,7 @@ Every ZRC body has these sections, in this order:
    onion addresses, no datadir paths, no key material, and no per-machine
    capacity or load numbers. A ZRC describes a design that should read the
    same regardless of which machines run it; operational specifics for one
-   node belong in [`../HANDOFF.md`](../HANDOFF.md) or the board, never here.
+   node belong in [`../agent/HANDOFF.md`](../agent/HANDOFF.md) or the board, never here.
    This directory is written to be safe to publish.
 5. **The project's docs gates apply.** `make lint` runs the same documentation
    gates over `docs/zrc/` as over every other document — link targets must

@@ -4,7 +4,7 @@
 
 New to a z23 fleet? Read [START_HERE.md](START_HERE.md) first. Then [AGENTS.md](../../AGENTS.md), then select work under its fleet priorities, using
 [FORWARD_PLAN.md](../work/FORWARD_PLAN.md) for scoped context. The development procedure is
-[DEVELOPING.md](../DEVELOPING.md). These adapters do not reorder that work.
+[DEVELOPING.md](../dev/DEVELOPING.md). These adapters do not reorder that work.
 
 Before editing, inspect dirty work and `git worktree list --porcelain`, and
 fetch the exact `origin/main` identity. On a managed host, also read its host
@@ -58,3 +58,9 @@ proof that a command is available in an older binary.
 - Never stash shared work, force-push, bypass hooks, or weaken a refusal.
 - Use existing task, candidate, action, receipt, and signature authorities.
   A coordination message is not an independent proof or a new authority.
+
+## Also in this directory
+
+- [`AGENT_API.md`](./AGENT_API.md): AGENT_API.md — native API for AI coding operators
+- [`COMMUTING_TICKETS.md`](./COMMUTING_TICKETS.md): Commuting tickets
+- [`HANDOFF.md`](./HANDOFF.md): HANDOFF — current state

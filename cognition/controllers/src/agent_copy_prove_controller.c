@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * agentcopyprove — native agent contract wrapping tools/repro_on_copy.sh
- * (the existing copy-prove H*-CLIMB harness, docs/CODEBASE_MAP.md /
+ * (the existing copy-prove H*-CLIMB harness, docs/dev/CODEBASE_MAP.md /
  * CLAUDE.md "Copy-prove before live"). This controller NEVER reimplements
  * the harness — it validates+quotes agent-supplied parameters, launches
  * the script detached, and lets a caller poll progress through the

@@ -9,7 +9,7 @@ This runbook is the **reference procedure** for installing that cure (a
 fresh node, a future regression, or a second lane) — re-verify every fact
 below against the live node and current source before running any command
 in it; heights, commits, and producer state rot fast in this repo. Current
-live state: `docs/HANDOFF.md`.
+live state: `docs/agent/HANDOFF.md`.
 
 The cure flows through a **complete consensus-state bundle** (coins +
 Sprout/Sapling anchors + nullifiers, `history_complete=true`,
@@ -30,7 +30,7 @@ it in place of this bundle-install cure.
   `engine/composition/include/config/boot.h:420-430`). The export is proof-bound to the
   exact running binary (`running_binary_digest == SHA3(/proc/self/exe)`) and
   refuses while the in-RAM fold overlay is live. Current producer status:
-  `docs/HANDOFF.md`.
+  `docs/agent/HANDOFF.md`.
 - **Consumer side** (this doc, currently contained in production):
   `-install-consensus-bundle=PATH`
   (`engine/composition/src/boot_install_consensus_bundle.c`, wired in `engine/composition/src/boot.c`
@@ -191,7 +191,7 @@ Notes:
 - `--expect-climb-past=3176325` is the **current live wedge height**, not the
   bundle's own anchor height (3,056,758). The point of this gate is to prove
   the forward fold actually clears the exact height the borrowed-seed path
-  got stuck on — re-derive this number fresh from `docs/HANDOFF.md` /
+  got stuck on — re-derive this number fresh from `docs/agent/HANDOFF.md` /
   `z23 dumpstate reducer_frontier` before running; it rots.
 - `--full` is required (the forward fold reads on-disk block bodies); the
   harness refuses `--install-consensus-bundle` on a `--light` copy.
@@ -228,7 +228,7 @@ Notes:
 4. **Mirror same-height hash-agree:** cross-check the copy's block hash at
    3,176,325 (or the live wedge height) and again at the copy's final climbed
    tip against `zclassicd` (RPC 8232) or the soak/dev mirror nodes
-   (`:18242`/`:18252`, confirmed near-tip and NOT wedged per `docs/HANDOFF.md`).
+   (`:18242`/`:18252`, confirmed near-tip and NOT wedged per `docs/agent/HANDOFF.md`).
    A hash mismatch at either height is a hard stop — do not proceed to the
    live cutover.
 5. No `download_queue_starved` escalation to `EV_OPERATOR_NEEDED` during the
@@ -304,7 +304,7 @@ of this sequence; the only unavailable window is between step 2 and step 5.
    during the climb. Do not declare the cutover done on "booted without
    FATAL" — that is exactly the false-green trap `-load-verify-boot` has
    historically hit (it no-ops once `coins_kv_is_proven_authority()` is true).
-7. Update `docs/HANDOFF.md` with the new live H\* and confirm the wedge
+7. Update `docs/agent/HANDOFF.md` with the new live H\* and confirm the wedge
    condition (`utxo_apply.anchor_backfill_gap`) has cleared in
    `z23 dumpstate condition_engine` / `z23 ops debug dash selfheal`.
 

@@ -253,7 +253,7 @@ Cocoa — but the parse that reaches them checks.
 runners set a large *finite* stack (1 GiB) rather than `ulimit -s unlimited`,
 because ASan with an unlimited stack intermittently aborts at startup
 (google/sanitizers#856). Run tests through `make t-fast ONLY=<group>` and
-`make test-parallel`, which set it for you; see [`BUILD.md`](../BUILD.md).
+`make test-parallel`, which set it for you; see [`BUILD.md`](../dev/BUILD.md).
 
 **Your new file trips the file-size limit.** The hard limit is 1500 lines for
 every production `.c` (800 lines is the advisory target, and 801..1500 is an

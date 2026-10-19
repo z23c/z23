@@ -61,7 +61,7 @@ z23 discover schema app.shop.init
 - **Onion shop / store** is the private storefront: persistent onion identity,
   product rows, Sapling pay, hash-verified download over the SHA3 file-service
   overlay (`-tor -onion-persist`). Session keys are HKDF-SHA3-256; chunk ids
-  are SHA3-256. Block hashes, txids, and transaction Merkle roots stay SHA-256d. See [`OVERLAY.md`](../OVERLAY.md).
+  are SHA3-256. Block hashes, txids, and transaction Merkle roots stay SHA-256d. See [`OVERLAY.md`](OVERLAY.md).
 
 The simnet collectible example (`docs/examples/11_collectible_market.c`) proves the
 same primitives on an isolated chain. Use it to see the shape; use the commands

@@ -12,7 +12,7 @@ Description=Z23 Consensus-State Bundle Export — scheduled backup primitive
 Type=oneshot
 WorkingDirectory=%h/github/zclassic23
 # Target datadir: default points at mint3, the independent from-genesis cure
-# source (docs/HANDOFF.md "THE RELIABLE PATH") — a validated, durable,
+# source (docs/agent/HANDOFF.md "THE RELIABLE PATH") — a validated, durable,
 # non-live-copy chain, which is exactly the precondition
 # -export-consensus-bundle needs. Review/replace this path before enabling
 # on a given box; NEVER point it at a datadir a live systemd unit holds the

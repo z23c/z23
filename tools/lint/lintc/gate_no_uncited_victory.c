@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: gate — check-no-uncited-victory (replaces
  * tools/scripts/check_no_uncited_victory.sh). Guards the one live-state
- * page, docs/HANDOFF.md (ZCL_LINT_MODE override), against uncited
+ * page, docs/agent/HANDOFF.md (ZCL_LINT_MODE override), against uncited
  * "cured / at tip / fully synced" claims in prose — this repo shipped 9+
  * such claims in six weeks, every one later false (~103 wedge-FIXED-then-
  * re-wedge cycles). Per-paragraph: any victory phrase with no citation
@@ -216,7 +216,7 @@ static const char *nuv_doc(void)
     const char *mode = getenv("ZCL_LINT_MODE");
     struct stat st;
     if (mode && mode[0] && stat(mode, &st) == 0 && S_ISREG(st.st_mode)) return mode;
-    return "docs/HANDOFF.md";
+    return "docs/agent/HANDOFF.md";
 }
 int check_no_uncited_victory_run(int argc, char **argv)
 {

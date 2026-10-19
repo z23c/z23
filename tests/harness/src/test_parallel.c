@@ -1919,7 +1919,7 @@ static void write_test_verdict_file(const struct group_result *results,
  * module that would be refused in production is refused here, and this harness
  * then refuses to run at all rather than silently testing resident code.
  *
- * Divergence containment (see docs/DEVELOPING.md "Module mode"):
+ * Divergence containment (see docs/dev/DEVELOPING.md "Module mode"):
  *   - the .so must live under the compile epoch this binary was built in
  *     (ZCL_TEST_COMPILE_EPOCH — a digest of the exact compiler, CFLAGS and
  *     LDFLAGS). Different flags => different epoch => refused, so the module's

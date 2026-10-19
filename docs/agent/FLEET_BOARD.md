@@ -442,7 +442,7 @@ A wiki page body may be a JSON object of schema `zcl.fleet_wiki_entry.v1`:
   "lessons": [
     { "rule": "Run the full lint before pushing.",
       "why": "lint-fast skips the whole-tree gates.",
-      "evidence": "docs/DEVELOPING.md" }
+      "evidence": "docs/dev/DEVELOPING.md" }
   ],
   "applies_to": ["git", "landing"],
   "updated": "2026-10-12T09:00:00Z"

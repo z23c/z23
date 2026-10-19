@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Before writing code: this project is pre-v1 and the bar for v1 is the
-        eight acceptance criteria in `docs/MVP.md`. A proposal that is off that
+        eight acceptance criteria in `docs/quality/MVP.md`. A proposal that is off that
         path may be a good idea and still wait — saying so early is meant to
         save your time, not to discourage you.
 

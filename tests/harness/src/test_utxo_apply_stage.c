@@ -2824,7 +2824,7 @@ int test_utxo_apply_stage(void)
      * cursor (not a stale cached verdict) and the reducer must RESUME folding
      * the SAME held block at the SAME height — no skip, no duplicate write,
      * no re-wedge on the following heights. This is the live H*=wedge shape
-     * (docs/HANDOFF.md: utxo_apply.anchor_backfill_gap + the nullifier
+     * (docs/agent/HANDOFF.md: utxo_apply.anchor_backfill_gap + the nullifier
      * history dependency raised together) taken all the way through cursor
      * flip -> blocker clear -> forward fold. */
     {

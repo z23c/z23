@@ -10,7 +10,7 @@
 #   engine/services/src/utxo_parity_service.c             PARITY_RPC_DEFAULT_HOST
 #   engine/services/src/utxo_reference_source_zclassicd.c same
 # All three read the sibling zclassicd on THIS box — same disk, same clock,
-# same operator, same binary lineage. docs/HANDOFF.md states the consequence
+# same operator, same binary lineage. docs/agent/HANDOFF.md states the consequence
 # plainly: gap_vs_oracle "is one network view from one box, and it compares
 # numbers, not blocks". This recorder is the first thing in the repository
 # that compares a BLOCK HASH against genuinely REMOTE peers, on a cadence,
@@ -18,7 +18,7 @@
 #
 # It is the FIRST RUNG only: per-height tip-hash agreement. It says nothing
 # about the UTXO set root (no external reference for a zclassic23 SHA3
-# exists — docs/MVP.md), nothing about shielded frontiers, and nothing about
+# exists — docs/quality/MVP.md), nothing about shielded frontiers, and nothing about
 # any state the header does not commit.
 #
 # WHERE THE REMOTE FACTS COME FROM

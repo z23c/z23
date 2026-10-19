@@ -1055,7 +1055,7 @@ static int fmx_t_send_refusal_guidance(bool mixed)
         ASSERT(json_push_back(&items, &item));
         json_free(&item);
         if (mixed) {
-            fmx_item(&item, "field-agent", "inspect docs/DEVELOPING.md",
+            fmx_item(&item, "field-agent", "inspect docs/dev/DEVELOPING.md",
                      "safe-check", "safe-check-key");
             ASSERT(json_push_back(&items, &item));
             json_free(&item);

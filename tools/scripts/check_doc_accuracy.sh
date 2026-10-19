@@ -22,7 +22,7 @@
 # Prong C (repo-wide, added after a measured escape): checking one filename
 # only protects one filename. On 2026-07-25 the Makefile carried 98 gates and
 # DEFENSIVE_CODING.md correctly said 98, so prongs A/B were green — while
-# docs/BUILD.md said "40 defensive-coding gates" and docs/TENACITY.md said
+# docs/dev/BUILD.md said "40 defensive-coding gates" and docs/TENACITY.md said
 # "36 lint gates". Both had been wrong for months with lint green, because
 # neither file was named in this script. Prong C therefore does NOT name
 # files: it derives the count from the Makefile (source A) and then scans

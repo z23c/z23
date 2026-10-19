@@ -2,7 +2,7 @@
 #
 # ci_install_gate.sh — the hermetic MVP C1 ("single-binary install") gate.
 #
-# MVP criterion #1 (docs/MVP.md) is "single-binary install on clean
+# MVP criterion #1 (docs/quality/MVP.md) is "single-binary install on clean
 # Ubuntu/Debian": a fresh operator runs `make install && systemctl --user
 # start zclassic23` and the node comes up. That literal claim needs a real
 # systemd user session + the live datadir/ports, which CI must NEVER touch.

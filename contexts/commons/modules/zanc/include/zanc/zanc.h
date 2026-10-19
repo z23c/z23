@@ -8,7 +8,7 @@
  * history timestamps the digest; verification recomputes the digest and finds
  * the anchoring tx. Anchoring is permissionless — anyone may anchor any
  * digest; the anchor proves existence-at-height, not authorship (see
- * docs/SOFTWARE_ANCHORING.md).
+ * docs/commons/SOFTWARE_ANCHORING.md).
  *
  * Lokad ID: "ZANC" (0x5a414e43). Encoded in the tx's first OP_RETURN output.
  *

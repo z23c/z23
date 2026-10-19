@@ -7,7 +7,7 @@
   [`ADR-0004`](./0004-capability-service-fabric-and-app-checkpoints.md)
   (capability service fabric — the sandboxed program tier), the consensus
   parity doctrine ([`CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DOCTRINE.md)),
-  and the software-anchoring overlay ([`SOFTWARE_ANCHORING.md`](../SOFTWARE_ANCHORING.md)).
+  and the software-anchoring overlay ([`SOFTWARE_ANCHORING.md`](../commons/SOFTWARE_ANCHORING.md)).
 - **Enabled by:** the overlay SDK (`engine/modules/overlay/`), the generalized
   authority-receipt idiom (`platform/modules/util/authority_receipt.*`), and the
   sandbox/hotload program tier (`engine/modules/hotswap/`, `os_sandbox`).

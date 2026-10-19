@@ -19,7 +19,7 @@ evidence would be exactly as trustworthy as one local mutable ref.
 
 `platform/deploy/promotion-receipts.jsonl` — one JSON object per line, append-only,
 following the same shape conventions as `platform/deploy/release-candidates.jsonl` (see
-[`RELEASE_CANDIDATE_PIN.md`](./node/RELEASE_CANDIDATE_PIN.md)). Four properties, each
+[`RELEASE_CANDIDATE_PIN.md`](../node/RELEASE_CANDIDATE_PIN.md)). Four properties, each
 load-bearing:
 
 1. **Hash-chained.** Every record carries `prev_hash`, the SHA-256 of the
@@ -150,7 +150,7 @@ without a JSON canonicaliser. The signed payload is the record with its own
 | `sig_b64` | the sshsig, base64 body only (the PEM wrapper is rebuilt at verify time) |
 
 The three identity fields are the same triple
-[`RELEASE_CANDIDATE_PIN.md`](./node/RELEASE_CANDIDATE_PIN.md) explains: none of
+[`RELEASE_CANDIDATE_PIN.md`](../node/RELEASE_CANDIDATE_PIN.md) explains: none of
 `commit`, `source_id_sha256`, `artifact_sha256` is sufficient alone.
 
 `host`, `recorded_by` and `signer` are restricted to a charset with no `"`,

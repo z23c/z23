@@ -3,9 +3,9 @@
 # AGENT_API.md — native API for AI coding operators
 
 The agent interface is the **native command registry** (`z23 <command>`);
-[`docs/NATIVE_COMMAND_INTERFACE.md`](./NATIVE_COMMAND_INTERFACE.md) is the primary
+[`docs/dev/NATIVE_COMMAND_INTERFACE.md`](../dev/NATIVE_COMMAND_INTERFACE.md) is the primary
 reference. Shell wrappers are compatibility shims only. New feature work follows
-[`docs/agent/AGENT_ARCHITECTURE.md`](./agent/AGENT_ARCHITECTURE.md): REST resource first,
+[`docs/agent/AGENT_ARCHITECTURE.md`](./AGENT_ARCHITECTURE.md): REST resource first,
 database schema, ActiveRecord model, validations, relationships, service
 workflow, REST route contract, then the native surface.
 
@@ -14,7 +14,7 @@ Commands are written as typed registry leaves (`z23 ops state`,
 commands have no leaf yet and are served only by the flat names in
 `g_cli_static_agent_routes`; they are marked in the table below and work as
 shown. Do not add new flat commands; add a registry leaf
-(see [`docs/CODEBASE_MAP.md`](./CODEBASE_MAP.md) §2 "Add a native command").
+(see [`docs/dev/CODEBASE_MAP.md`](../dev/CODEBASE_MAP.md) §2 "Add a native command").
 Everything below the "First calls" table is response-schema transcription that
 the running node returns anyway — prefer `z23 discover schema <leaf>` or
 just calling the command.
@@ -746,7 +746,7 @@ The same response embeds `operator_proofs`
 (`zcl.mvp_operator_proofs.v1`): one row per MVP criterion with
 `proof_command`, `ci_gate`, `proof_scope`, `primary_blocker`,
 `local_dependency_required`, and `ci_regression_protected`. This is the
-machine-readable version of the `docs/MVP.md` proof table: agents use it to
+machine-readable version of the `docs/quality/MVP.md` proof table: agents use it to
 choose the next MRS-moving command without scraping docs. It does not change
 the score; `mvp_readiness_score` still counts only accepted full operator
 proofs.
@@ -1108,7 +1108,7 @@ versioned as `zcl.bootstrap_status.v1` and separates two surfaces:
   (`1 << 24`) and answers `getbsman/bsman`, `getbschk/bschk`,
   `getbspman/bspman`, and `getbspchk/bspchk`; z23 implements this service and
   advertises the bit whenever `-beta6-bootstrap-source` is armed (see
-  [`docs/node/BOOTSTRAPPING.md`](./node/BOOTSTRAPPING.md) "Serving beta6 clients"). The
+  [`docs/node/BOOTSTRAPPING.md`](../node/BOOTSTRAPPING.md) "Serving beta6 clients"). The
   object's own `advertised` and `serving` fields can disagree: `advertised`
   and the wire-level bit follow only whether the service is armed, while
   `serving` additionally ANDs in this node's own security posture, so a node
@@ -1335,7 +1335,7 @@ explicitly with `build/bin/z23-dev dev proof wait`.
 Windows installs the same receipt-only native hook, but its native proof
 producer is not implemented yet. Missing evidence therefore refuses promptly;
 the hook does not substitute a synchronous build. Run the fixed
-`make windows-acceptance` catalog described in [`WINDOWS.md`](node/WINDOWS.md) as an
+`make windows-acceptance` catalog described in [`WINDOWS.md`](../node/WINDOWS.md) as an
 explicit parity gate, not as exact-receipt admission. `make pre-push-ci` remains
 a manually invoked legacy parity oracle on other hosts. Full-suite, fuzz, and
 coverage evidence belongs to the background quality lanes: install them with
@@ -1500,13 +1500,13 @@ speaks newline-delimited JSON-RPC on stdin/stdout, handles one request at a
 time and logs to stderr only. Four tools keep the MCP tool listing near 2 KB:
 `z23_search`, `z23_describe`, `z23_run` and `z23_code`.
 `z23_search` takes an optional `scope`, `commands` (default) or `wiki`; the wiki
-scope is described in [WIKI.md](agent/WIKI.md#from-an-agent-harness).
+scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
 
 - `--checkout` is optional. Without it the server starts with no source root:
   it unsets `ZCL_DEV_SOURCE_ROOT`, moves to `/`, and never uses the caller's
   working directory. `z23_search`, `z23_describe` and `z23_run` work against
   the built-in registry, including `lab.run` and `lab.test` (see
-  [LAB.md](dev/LAB.md)); `z23_code` and every `z23_run` leaf that reads a source
+  [LAB.md](../dev/LAB.md)); `z23_code` and every `z23_run` leaf that reads a source
   tree (`code.*`, `dev.*`, `app.presentation.*`, `fleet.objectives`, and any
   leaf declaring checkout capabilities) are refused with `NO_CHECKOUT`, and
   `instructions` say so. Tool calls before `initialize` are refused with
@@ -1548,7 +1548,7 @@ args = ["mcp", "serve", "--checkout=/abs/path/to/checkout"]
 ```
 
 Claude Code gets the same server from the public plugin (see
-[`.claude/plugin/README.md`](../.claude/plugin/README.md)), or manually with
+[`.claude/plugin/README.md`](../../.claude/plugin/README.md)), or manually with
 `claude mcp add z23-local -- z23 mcp serve --checkout=/abs/path/to/checkout`.
 
 ## Rule

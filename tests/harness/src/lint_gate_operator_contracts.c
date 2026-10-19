@@ -96,12 +96,12 @@ int t_native_operator_docs_contract(void)
         ASSERT(strstr(readme, "ops logs") != NULL);
         ASSERT(strstr(readme, "native command registry") != NULL);
 
-        ASSERT(repo_path(path, sizeof(path), "docs/GETTING_STARTED.md") == 0);
+        ASSERT(repo_path(path, sizeof(path), "docs/node/GETTING_STARTED.md") == 0);
         ASSERT(read_entire_file(path, &getting_started) == 0);
         ASSERT(strstr(getting_started, "native command registry") != NULL);
         ASSERT(strstr(getting_started, "discover help") != NULL);
 
-        ASSERT(repo_path(path, sizeof(path), "docs/BUILD.md") == 0);
+        ASSERT(repo_path(path, sizeof(path), "docs/dev/BUILD.md") == 0);
         ASSERT(read_entire_file(path, &build_doc) == 0);
         ASSERT(strstr(build_doc, "z23 ops selftest") != NULL);
         ASSERT(strstr(build_doc, "z23 dumpstate hotswap") != NULL);
@@ -262,7 +262,7 @@ int t_remote_node_update_contract(void)
         free(agent);
         agent = NULL;
 
-        ASSERT(repo_path(path, sizeof(path), "docs/AGENT_API.md") == 0);
+        ASSERT(repo_path(path, sizeof(path), "docs/agent/AGENT_API.md") == 0);
         ASSERT(read_entire_file(path, &doc) == 0);
         ASSERT(strstr(doc, "## Remote Node Planning") != NULL);
         ASSERT(strstr(doc, "zcl.remote_node_update.v1") != NULL);
@@ -328,7 +328,7 @@ int t_remote_node_update_contract(void)
                == 0);
         ASSERT(read_entire_file(path, &service) == 0);
         ASSERT(strstr(service,
-                      "Documentation=file:%h/github/zclassic23/docs/AGENT_API.md")
+                      "Documentation=file:%h/github/zclassic23/docs/agent/AGENT_API.md")
                != NULL);
         ASSERT(strstr(service, "remote_node_update.sh self") != NULL);
         ASSERT(strstr(service, "ZCL_REMOTE_BUILD=none") != NULL);

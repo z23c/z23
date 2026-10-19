@@ -25,3 +25,7 @@ Simulators, chaos harnesses, benchmarks, acceptance gates and transaction labora
 | [transaction-lab-events.jsonl](./transaction-lab-events.jsonl) | event ledger backing TRANSACTION_LAB |
 | [transaction-micro-lab-events.jsonl](./transaction-micro-lab-events.jsonl) | event ledger backing TRANSACTION_MICRO_LAB |
 | [CODE_FEARLESSLY.md](./CODE_FEARLESSLY.md) | why safe change depends on the environment |
+
+## Also in this directory
+
+- [`MVP.md`](./MVP.md): z23 — MVP target

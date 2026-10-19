@@ -206,12 +206,12 @@ and `z23 dumpstate reducer_frontier`.
 ## 5. Where to start
 
 1. Read **`docs/work/FORWARD_PLAN.md`** (the current plan), then
-   **`docs/MVP.md`** (the v1 acceptance bar). `docs/commons/FRAMEWORK.md` is the
+   **`docs/quality/MVP.md`** (the v1 acceptance bar). `docs/commons/FRAMEWORK.md` is the
    canonical architecture; this page is its plain-language summary.
    **`docs/agent/AGENT_TRAPS.md`** lists things that look broken but are not
    (don't re-chase them);
-   **`docs/CODEBASE_MAP.md`** is where-things-live + how-to-do-each-thing.
-   `docs/HANDOFF.md` records one maintainer's hosted-node state — read it only
+   **`docs/dev/CODEBASE_MAP.md`** is where-things-live + how-to-do-each-thing.
+   `docs/agent/HANDOFF.md` records one maintainer's hosted-node state — read it only
    if you are operating that specific node; it says nothing about a node you
    run yourself.
 2. Check the node with `z23 status` and `z23 milestone`. Use the calls in

@@ -1,13 +1,13 @@
 > **Read this file first for current live-node state.** This page can be
 > stale and the node cannot. Older revisions are evidence, not standing
-> fact — recover them with `git log --follow -- docs/HANDOFF.md`.
+> fact — recover them with `git log --follow -- docs/agent/HANDOFF.md`.
 
 # HANDOFF — current state
 
 This page is maintainer-only. It records how to re-check the project's
 hosted node; it does not define product direction or development priority.
-Read [`../AGENTS.md`](../AGENTS.md) for the durable contract and
-[`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) for the current ordered
+Read [`../AGENTS.md`](../../AGENTS.md) for the durable contract and
+[`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md) for the current ordered
 mission, then re-derive every live claim through the node.
 
 Typed status commands are ground truth. This page is a pointer to evidence
@@ -29,8 +29,8 @@ Do not copy those outputs here. A later session must run the same commands
 again. `z23 status` and `z23 dumpstate reducer_frontier` answer live height,
 blockers, and frontier posture; the uptime-ledger tail answers reachability
 and sample history. Recovery and cure design live in
-[`TENACITY.md`](TENACITY.md) and
-[`work/self-verified-tip-plan.md`](work/self-verified-tip-plan.md), not in a
+[`TENACITY.md`](../TENACITY.md) and
+[`work/self-verified-tip-plan.md`](../work/self-verified-tip-plan.md), not in a
 copied snapshot.
 
 Check whether the running binary matches this checkout before diagnosing
@@ -76,7 +76,7 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
   the lint-gate hygiene groups pass — check with `make hooks-status`, and arm
   by running `make install-hooks` **in that lane**, which writes only that
   worktree's own config scope and leaves every other checkout armed. See
-  `docs/DEVELOPING.md` section 0.
+  `docs/dev/DEVELOPING.md` section 0.
 - Before submitting: every commit in `origin/main..HEAD` shows `G` under
   `%G?`; `git diff --name-only origin/main...HEAD` equals the lane's owned
   file list; the cyclomatic baseline gains no pin; `git merge-tree
@@ -95,7 +95,7 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
   owner decisions recorded in the host handoff notes.
 - Host follow-ups (ship, arming the beta6 serve tree, the fresh-datadir
   anchor test) live in the host handoff notes above. Product ordering lives
-  only in [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md). The hot-fork
+  only in [`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md). The hot-fork
   single-link publish (`4e228f02c0`) and the dev depfile fix (`e4fcaa01cc`)
   have landed.
 
@@ -114,7 +114,7 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
 | Soak evidence | `make soak-evidence-report` |
 | Lane health | `make lane-health`; `z23 agentlanes` |
 | Transaction-lab bars | `make transaction-lab-status` |
-| MVP / MRS | [`MVP.md`](MVP.md); `z23 milestone` |
+| MVP / MRS | [`MVP.md`](../quality/MVP.md); `z23 milestone` |
 
 `reachable` in the uptime ledger is a **loopback** RPC dial from the same
 host as the node. It answers "the process is answering", never "a user can
@@ -175,7 +175,7 @@ Copy-prove every recovery path on a datadir COPY before live; never live
 surgery. Gate on **H\* CLIMB**, never "booted without FATAL." Never weaken a
 safety/operator gate. Replay any consensus-predicate tightening against
 real chain history first — see
-[`CONSENSUS_PARITY_DOCTRINE.md`](CONSENSUS_PARITY_DOCTRINE.md).
+[`CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DOCTRINE.md).
 
 ## Operator invariants
 
@@ -198,26 +198,26 @@ real chain history first — see
 - Transaction laboratory: re-derive isolated vs live bars from
   `make transaction-lab-status`. Isolated proofs are not broadcast
   approval. Notebook and safety boundary:
-  [`TRANSACTION_LAB.md`](quality/TRANSACTION_LAB.md). Live classification
+  [`TRANSACTION_LAB.md`](../quality/TRANSACTION_LAB.md). Live classification
   and owner-review sequence:
-  [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](quality/LIVE_TRANSACTION_DEMONSTRATIONS.md).
+  [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](../quality/LIVE_TRANSACTION_DEMONSTRATIONS.md).
 
 ## MVP status
 
-MRS and per-criterion evidence live in [`MVP.md`](MVP.md) and
+MRS and per-criterion evidence live in [`MVP.md`](../quality/MVP.md) and
 `z23 milestone` (REST `GET /api/v1/milestone`). Only a run-passing
 `make mvp-verify` member moves a ◐ to a ✅ — never hand-bump the count.
 Soak accrual is `make soak-evidence-report`, not process uptime.
 
 ## Pointers
 
-- [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) — scoped acceptance and implementation context (work order: `AGENTS.md`).
-- [`AGENT_TRAPS.md`](agent/AGENT_TRAPS.md) — read before "fixing" anything.
-- [`MVP.md`](MVP.md) — the v1 acceptance bar.
-- [`TENACITY.md`](TENACITY.md) — copy-first recovery doctrine.
-- [`work/self-verified-tip-plan.md`](work/self-verified-tip-plan.md) — sovereign-cure design.
-- [`sovereign-cutover-runbook.md`](node/sovereign-cutover-runbook.md) — owner-gated cutover + revert.
-- History of this page is `git log --follow -- docs/HANDOFF.md`.
+- [`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md) — scoped acceptance and implementation context (work order: `AGENTS.md`).
+- [`AGENT_TRAPS.md`](AGENT_TRAPS.md) — read before "fixing" anything.
+- [`MVP.md`](../quality/MVP.md) — the v1 acceptance bar.
+- [`TENACITY.md`](../TENACITY.md) — copy-first recovery doctrine.
+- [`work/self-verified-tip-plan.md`](../work/self-verified-tip-plan.md) — sovereign-cure design.
+- [`sovereign-cutover-runbook.md`](../node/sovereign-cutover-runbook.md) — owner-gated cutover + revert.
+- History of this page is `git log --follow -- docs/agent/HANDOFF.md`.
 
 A map, not the territory: trust the node you query this minute over this
 file.

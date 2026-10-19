@@ -167,7 +167,7 @@ LIB_MODULE("plugin")
  * argument — so its rank buys it no authority it could later leak. */
 LIB_MODULE("fleetledger")
 /* The unreliable-sequenced UDP datagram channel between two paired fleet
- * peers (docs/GAMELINK.md). It reaches down to platform/modules/platform
+ * peers (docs/node/GAMELINK.md). It reaches down to platform/modules/platform
  * for the socket and the injected clock, core/modules/crypto for the AEAD
  * and the subkey derivation, and engine/modules/fleetledger for the vitals
  * rows it writes — so directly above fleetledger is its lowest legal rank.

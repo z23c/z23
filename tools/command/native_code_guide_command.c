@@ -42,7 +42,7 @@ static bool cg_render_static(struct zcl_command_reply *reply)
         json_push_kv_str(
             &reply->data, "never",
             "test_zcl; omit -datadir; stash; rebase; reset; force-push") &&
-        json_push_kv_str(&reply->data, "docs", "docs/DEVELOPING.md");
+        json_push_kv_str(&reply->data, "docs", "docs/dev/DEVELOPING.md");
 }
 
 void zcl_native_handle_code_guide(

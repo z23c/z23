@@ -20,7 +20,7 @@ A snapshot is a saved state payload. The UTXO set contains unspent
 transaction outputs. Overlay proofs, swarm piece identifiers, and the
 file-service handshake's key derivation function (KDF) use SHA3-256;
 consensus block hashes stay SHA-256d (double SHA-256). See the operator map in
-[`OVERLAY.md`](../OVERLAY.md).
+[`OVERLAY.md`](OVERLAY.md).
 
 ## Canonical Authority Model
 
@@ -61,7 +61,7 @@ The machinery below is built and code-tested, but Method 1 as coded still
 cannot publish: `SNAPSYNC_VERIFYING → SNAPSYNC_COMPLETE` is a false transition
 under Phase-0 containment (`core/modules/sync/src/sync_state.c:238-241`).
 Whether a fresh z23-to-z23 sync-to-tip has been proven end-to-end on a live
-network is acceptance criterion C3, tracked in [`MVP.md`](../MVP.md) with the run
+network is acceptance criterion C3, tracked in [`MVP.md`](../quality/MVP.md) with the run
 dates and artifact paths for each attempt — read the status there, not here.
 Today's proven cold-start is Method 3 below.
 
@@ -208,7 +208,7 @@ signature, and proof end to end.
 
 Use when no snapshot source is available, or as the path toward local
 sovereignty. The current end-to-end genesis-to-tip timing/validation claim still
-requires exact-candidate proof; see `docs/HANDOFF.md`.
+requires exact-candidate proof; see `docs/agent/HANDOFF.md`.
 
 ### Per-stage throughput measurement (`sync_throughput`)
 
@@ -284,7 +284,7 @@ The robust path for a known-good datadir is to copy one onto the target lane.
 The deployed path is `-load-snapshot-at-own-height=<PATH>`: it loads a
 digest-verified borrowed UTXO snapshot above coins-best and folds forward.
 Verify current sync state with `z23 status` /
-`z23 dumpstate reducer_frontier`; `docs/HANDOFF.md` holds current
+`z23 dumpstate reducer_frontier`; `docs/agent/HANDOFF.md` holds current
 state, never this doc. The snapshot's `anchor_block_hash` must byte-equal
 this node's PoW header at the seed height. A wrong-chain anchor fails closed. If
 headers have not reached the seed height, the loader

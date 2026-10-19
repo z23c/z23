@@ -843,8 +843,8 @@ if [ "$external" -eq 0 ]; then
         AGENTS.md
         CLAUDE.md
         docs/README.md
-        docs/DEVELOPING.md
-        docs/HANDOFF.md
+        docs/dev/DEVELOPING.md
+        docs/agent/HANDOFF.md
         docs/work/FORWARD_PLAN.md
         .claude/skills/z23-dev/SKILL.md
     )

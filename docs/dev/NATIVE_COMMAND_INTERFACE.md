@@ -5,12 +5,12 @@ Audience: LLM coding agents, application developers, node operators, and UI
 adapters
 
 This document is the grammar/tree/envelope contract. For every leaf the
-registry currently declares, see [`docs/API_REFERENCE.md`](./API_REFERENCE.md)
+registry currently declares, see [`docs/API_REFERENCE.md`](../API_REFERENCE.md)
 (generated from `engine/composition/commands/` by `tools/gen_api_reference.c`; regenerate
 with `make docs-api-reference`). For the practical field-by-field
 reference of the implemented agent surface (`agentops`, `agentdiagnose`,
 `healthcheck`, `agentlanes`, the service/operation catalog, and more), see
-[`docs/AGENT_API.md`](./AGENT_API.md).
+[`docs/agent/AGENT_API.md`](../agent/AGENT_API.md).
 
 ## 1. North star
 
@@ -401,7 +401,7 @@ examples, and transport mappings until a leaf is described.
 Before calling anything you can read its exact contract - inputs, output schema,
 risk, cost and time budget:
 
-![z23 discover describe - the typed contract for one command](assets/z23-term-contract.svg)
+![z23 discover describe - the typed contract for one command](../assets/z23-term-contract.svg)
 
 Schema: `zcl.command_spec.v1`
 
@@ -652,7 +652,7 @@ dispatch gates **default-deny the money surface**: the leaves the policy
 understands are capped (per-tx, rolling window, recipient allowlist) and
 everything else touching the wallet capability — key export, wallet backup, key
 import, and the grant surface itself — is refused outright. Full contract:
-[`docs/work/agent-spend-policy-design.md`](./work/agent-spend-policy-design.md).
+[`docs/work/agent-spend-policy-design.md`](../work/agent-spend-policy-design.md).
 
 **This is a bound, not a sandbox.** The grant lives in the agent's own
 environment, so the same agent can run with it unset and be the unbounded local
@@ -938,7 +938,7 @@ described in older revisions of this section. Typed effect/authority/
 availability/schema/execution-mode metadata, the common result envelope, the
 stable exit-code policy, and ranked search are all live. Do not re-propose any
 of that; verify current per-leaf `ready`/`planned`/`compat` status with
-`z23 discover describe <path>` or [`docs/API_REFERENCE.md`](./API_REFERENCE.md)
+`z23 discover describe <path>` or [`docs/API_REFERENCE.md`](../API_REFERENCE.md)
 rather than trusting a hand-maintained gap list here, which goes stale the
 moment a leaf ships.
 

@@ -3,7 +3,7 @@
 The first piece of "gaming-level networking between fleet agents": one
 unreliable-sequenced, authenticated-encrypted UDP channel between two peers
 that have already paired over Noise and can already reach each other. It is
-the DATAGRAM profile of [`DIRECT_TRANSPORT.md`](./work/DIRECT_TRANSPORT.md)
+the DATAGRAM profile of [`DIRECT_TRANSPORT.md`](../work/DIRECT_TRANSPORT.md)
 "Component 1", and it lives in `engine/modules/gamelink/`.
 
 It retransmits nothing and reorders nothing. A game snapshot that arrives late

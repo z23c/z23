@@ -70,7 +70,7 @@ authenticate a swarm piece. Evidence establishes only its exact stated claim.
 ## Fast overlay sync
 
 Three native paths, in order of cost. Canonical chain state is still
-locally validated; see [`SYNC.md`](node/SYNC.md).
+locally validated; see [`SYNC.md`](SYNC.md).
 
 1. **Block-piece swarm (default among caught-up z23 peers).** A node that
    already has bodies within 1024 headers of tip advertises SHA3-addressed
@@ -115,7 +115,7 @@ P2P. Handshake:
 Paid marketplace delivery binds its signed request to these session public
 keys. ROM fetch uses the same handshake with an all-zero UTXO root and
 then verifies content SHA3; it never installs consensus state. See
-[`ROM_DELIVERY.md`](ROM_DELIVERY.md).
+[`ROM_DELIVERY.md`](../ROM_DELIVERY.md).
 
 ## Onion marketplace
 
@@ -137,7 +137,7 @@ build/bin/z23 discover schema app.shop.init
   product rows, Sapling pay, hash-verified download over the file-service
   overlay.
 
-Details and custody rules: [`SELL.md`](node/SELL.md). A production / canonical
+Details and custody rules: [`SELL.md`](SELL.md). A production / canonical
 datadir is not mutated by these guides. Use an isolated `--datadir=` for
 experiments.
 

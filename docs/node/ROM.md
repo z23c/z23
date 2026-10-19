@@ -5,7 +5,7 @@ map of what each layer guarantees, what it does NOT guarantee, and how to
 read its live state in one call: `z23 dumpstate rom`.
 
 Cross-references: `docs/CONSENSUS_PARITY_DOCTRINE.md` (why headers are the
-only PoW-bound commitment), `docs/HANDOFF.md` (current live state — this
+only PoW-bound commitment), `docs/agent/HANDOFF.md` (current live state — this
 page carries none), `docs/node/HOW_THE_NODE_WORKS.md` (the reducer/projection
 mental model L2 and L3 sit inside).
 
@@ -76,4 +76,4 @@ carries no authority of its own over consensus.
 
 For the live H\* / sync-gap numbers this doc deliberately omits, use
 `z23 status` or `z23 dumpstate reducer_frontier`; current
-canonical state lives in `docs/HANDOFF.md`.
+canonical state lives in `docs/agent/HANDOFF.md`.

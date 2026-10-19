@@ -4,7 +4,7 @@ Where the current round's work lives and how to extend each. Every factual
 sentence here is bound to a `claim:` annotation that `make lint`
 (`check-doc-claims`) evaluates, so a section that goes stale fails the build
 instead of misleading the next agent. Counts come from the machine-checked
-`DOC-COUNTS` block in [`CODEBASE_MAP.md`](../CODEBASE_MAP.md); none are typed here.
+`DOC-COUNTS` block in [`CODEBASE_MAP.md`](../dev/CODEBASE_MAP.md); none are typed here.
 
 ## 1. Crypto ownership — the vault
 

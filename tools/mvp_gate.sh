@@ -6,7 +6,7 @@
 # Companion to tools/scripts/mvp_scoreboard.sh (which runs the HERMETIC
 # slices behind `make mvp`). This script does the OTHER half: it probes
 # the RUNNING live node read-only and reports, per measurable MVP-C
-# criterion (docs/MVP.md), what the live node ACTUALLY demonstrates right
+# criterion (docs/quality/MVP.md), what the live node ACTUALLY demonstrates right
 # now — height/at-tip, onion bootstrap, shielded-receive capability,
 # store reachability, parity-vs-zclassicd, and crash-recovery surface —
 # plus an MRS score (n/8) and a soak-accrual check (continuous-uptime +
@@ -24,7 +24,7 @@
 #     real funds, Tor egress) is reported BLOCKED(reason) — never silently
 #     green. BLOCKED does NOT count toward MRS.
 #   * The MRS bottom line counts ONLY criteria PASS at the FULL operator
-#     claim level. This deliberately matches the docs/MVP.md MRS rule and
+#     claim level. This deliberately matches the docs/quality/MVP.md MRS rule and
 #     mvp_scoreboard.sh so the two reporters cannot disagree on the score.
 #
 # Exit code: 0 always (a status reporter — BLOCKED is the honest expected
@@ -643,7 +643,7 @@ if [[ "$JSON_OUT" == 1 ]]; then
     printf '}\n'
 else
     echo "════════════════════════════════════════════════════════════════════"
-    echo " Z23 MVP live-node gate  (READ-ONLY probe; docs/MVP.md)"
+    echo " Z23 MVP live-node gate  (READ-ONLY probe; docs/quality/MVP.md)"
     echo "════════════════════════════════════════════════════════════════════"
     if [[ "$NODE_UP" == 1 ]]; then
         echo " live node: UP  datadir=$LIVE_DATADIR  rpcport=$LIVE_RPCPORT  height=$HEIGHT  conservative_reference_tip=$REFTIP  conservative_reference_gap=${GAP:-?}  at_tip=$AT_TIP  chain=$CHAIN"

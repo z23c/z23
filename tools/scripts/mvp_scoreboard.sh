@@ -4,7 +4,7 @@
 #
 # AGENTS.md P1 priority: CI-enforce the MVP criteria. This is the reporter
 # behind `make mvp`. For each of the 8 operator acceptance criteria in
-# docs/MVP.md it runs the ONE mechanically-runnable check that proves it
+# docs/quality/MVP.md it runs the ONE mechanically-runnable check that proves it
 # (a hermetic test_zcl slice, a gate, or a live-node probe) and prints a
 # single per-criterion verdict line:
 #
@@ -161,7 +161,7 @@ probe_live_node() {
 }
 
 echo "═══════════════════════════════════════════════════════════════════════"
-echo "  make mvp — HONEST MVP 8/8 scoreboard (docs/MVP.md acceptance criteria)"
+echo "  make mvp — HONEST MVP 8/8 scoreboard (docs/quality/MVP.md acceptance criteria)"
 echo "  PASS only when the criterion's check actually RAN and PASSED."
 echo "  Synced-node / egress / params-dependent claims report BLOCKED(reason)"
 echo "  — never silently skipped-as-pass, never green. Reporter exits 0."

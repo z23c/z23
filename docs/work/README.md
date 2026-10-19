@@ -9,13 +9,13 @@ rationale, and specialist procedures. It is not itself a priority queue:
    [`FLEET_SCORECARD.md`](./FLEET_SCORECARD.md) owns the thirteen A+ completion
    bars. [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) supplies scoped acceptance and
    implementation context.
-2. [`../MVP.md`](../MVP.md) owns the v1 acceptance contract.
-3. [`../HANDOFF.md`](../HANDOFF.md) owns maintainer-host live facts only.
+2. [`../quality/MVP.md`](../quality/MVP.md) owns the v1 acceptance contract.
+3. [`../agent/HANDOFF.md`](../agent/HANDOFF.md) owns maintainer-host live facts only.
 
 Choose authorized work under the current tiers in `AGENTS.md`, closest to its
 A+ bar within the tier; independent work may proceed in parallel. This index
 does not promote an older plan back into the queue. Hosted-node facts
-belong only in `../HANDOFF.md`; source priorities do not.
+belong only in `../agent/HANDOFF.md`; source priorities do not.
 
 Worktrees are dynamic; never infer current workers from a hard-coded path
 list. Inspect them with `git worktree list --porcelain`. No checkout path is a
@@ -148,7 +148,7 @@ commit — retiring a doc is not finished until its callers are gone too.
   scoped context and procedures under that order.
 - **Session entrypoint:** [`../../AGENTS.md`](../../AGENTS.md), then
   [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
-- **Maintainer-host live state only:** [`../HANDOFF.md`](../HANDOFF.md); never
+- **Maintainer-host live state only:** [`../agent/HANDOFF.md`](../agent/HANDOFF.md); never
   use it to choose ordinary development work.
 - **Architecture reference:** [`FRAMEWORK.md`](../commons/FRAMEWORK.md); its scoped
   debt inventory is not a priority queue.
@@ -158,7 +158,7 @@ commit — retiring a doc is not finished until its callers are gone too.
 
 Parallel-worker mechanics are adapted in
 [`agent-protocol.md`](../agent/agent-protocol.md); project authority, integration, and
-completion remain defined by `AGENTS.md` and `docs/DEVELOPING.md`.
+completion remain defined by `AGENTS.md` and `docs/dev/DEVELOPING.md`.
 
 ## Late-indexed records
 
@@ -172,3 +172,12 @@ completion remain defined by `AGENTS.md` and `docs/DEVELOPING.md`.
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-476e66661523.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-476e66661523.jsonl) | EVIDENCE | frozen 12-record publishable retrieval receipt for the distinct ten-task v2 cohort; exact evaluator-batch and per-task ranking-root replay, nine-task equal-weight macro denominator, 43 eligible relevance judgments, and explicit unavailable ceilings |
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-705d16ccab6b.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-705d16ccab6b.jsonl) | EVIDENCE | frozen 12-record publishable receipt for the same ten-task cohort with a current-driver directory-taxonomy scope proxy over exact-parent source: literal 7,209 bp and BM25 4,888 bp wrong-group selections at five; semantic scope, reuse success, and unique LOC avoided remain unobserved |
 | [`retrieval-gold-evidence/retrieval-gold-benchmark-25fe3e353288.jsonl`](./retrieval-gold-evidence/retrieval-gold-benchmark-25fe3e353288.jsonl) | EVIDENCE | frozen 12-record publishable third-arm receipt with two sealed evaluator metric replays: the rare-identifier and observed-reverse-reference permutation records Recall@5 1,243 bp versus BM25 936 bp, equal Recall@20 at 3,502 bp, projected five-result context 733,211 versus 853,082 bytes, and directory-taxonomy proxy 4,666 versus 4,888 bp; vectors are not used, while scanner completeness, semantic scope, reuse success, and unique LOC avoided remain unobserved |
+
+## Also in this directory
+
+- [`AGENT_FLEET.md`](./AGENT_FLEET.md): Fleet operation and measured development
+- [`BOOTSTRAP_PLAN.md`](./BOOTSTRAP_PLAN.md): Bootstrap plan — not yet a public install path
+- [`C23_TASK_CATALOG.md`](./C23_TASK_CATALOG.md): C23 task type catalog
+- [`MVP_GAME_MAP.md`](./MVP_GAME_MAP.md): MVP work map: implementation contract
+- [`RETRIEVAL_GOLD_CORPUS.jsonl`](./RETRIEVAL_GOLD_CORPUS.jsonl): historical agent tasks used as the retrieval gold corpus; benchmark runs are in [`retrieval-gold-evidence`](./retrieval-gold-evidence/)
+- [`cards.jsonl`](./cards.jsonl): current seed work cards, one JSON card per line

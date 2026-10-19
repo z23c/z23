@@ -19,8 +19,8 @@
 # (b) dated benchmark log: the script was deleted after the measurement.
 docs/quality/BENCHMARKS_LOG.md -> tools/bench_cold_import_equivalence.sh
 
-# (b) docs/BUILD.md is owned by another lane.
-docs/BUILD.md -> vendor/sqlite3.c
+# (b) docs/dev/BUILD.md is owned by another lane.
+docs/dev/BUILD.md -> vendor/sqlite3.c
 
 # (a) design memos — files the plan would create.
 docs/work/ladder-carve-audit.md -> tools/scripts/check_no_rowcount_install.sh

@@ -2,7 +2,7 @@
  *
  * diagnostics_mvp.c — the "mvp" dumpstate subsystem (schema zcl.mvp_status.v1).
  *
- * Turns docs/MVP.md's eight operator acceptance criteria (v1 = MRS 8/8) from a
+ * Turns docs/quality/MVP.md's eight operator acceptance criteria (v1 = MRS 8/8) from a
  * human reading docs against the node into a typed, evidence-derived query:
  * `z23 ops state --subsystem=mvp`.
  *
@@ -141,7 +141,7 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
 
     json_set_object(out);
     json_push_kv_str(out, "schema", "zcl.mvp_status.v1");
-    json_push_kv_str(out, "doc", "docs/MVP.md");
+    json_push_kv_str(out, "doc", "docs/quality/MVP.md");
     json_push_kv_bool(out, "reporter_only", true);
 
     struct json_value arr = {0};

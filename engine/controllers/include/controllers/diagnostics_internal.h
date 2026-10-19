@@ -326,7 +326,7 @@ bool addrman_diag_dump_state_json(struct json_value *out, const char *key);
 
 /* ── MVP v1 scoreboard (diagnostics_mvp.c) ──────────────────────────
  *
- * The "mvp" g_dumpers[] entry (schema zcl.mvp_status.v1): docs/MVP.md's eight
+ * The "mvp" g_dumpers[] entry (schema zcl.mvp_status.v1): docs/quality/MVP.md's eight
  * operator acceptance criteria as a typed, evidence-derived query surfaced via
  * `ops state --subsystem=mvp`. REPORTER ONLY — it derives met=true|false|
  * unknown strictly from durable/runtime evidence the node already produces

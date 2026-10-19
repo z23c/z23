@@ -47,7 +47,7 @@
 # height because the clone's header chain was stale relative to zclassicd's
 # current chainstate tip. Before phase 1 (the -import-complete-shielded call)
 # import mode runs the proven read-only two-step recipe's step 1
-# (docs/HANDOFF.md "legacy TWO-step recipe"):
+# (docs/agent/HANDOFF.md "legacy TWO-step recipe"):
 #   "$NODE_BIN" --importblockindex "$ZD_DATADIR" "$COPY_DIR/node.db"
 # against the COPY's node.db — refreshing the copy's SQLite `blocks` header
 # chain (and blocks.sapling_root) from zclassicd's live LevelDB block index,

@@ -4,7 +4,7 @@
 
 This document is the compatibility entry point for parallel workers. Authority
 lives in [`../../AGENTS.md`](../../AGENTS.md); the normal loop lives in
-[`../DEVELOPING.md`](../DEVELOPING.md); dispatch and return adapters live in
+[`../dev/DEVELOPING.md`](../dev/DEVELOPING.md); dispatch and return adapters live in
 [`../agent/LANE_LAUNCH.md`](LANE_LAUNCH.md) and
 [`../agent/LANE_REPORT.md`](LANE_REPORT.md).
 

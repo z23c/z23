@@ -166,7 +166,7 @@ provide an accepted persistent failsafe profile or automatic guest-key unlock.
 
 This page assumes a full node that already starts and syncs. If you have not
 run one on this machine yet, do
-[`GETTING_STARTED.md`](../GETTING_STARTED.md) first — in particular the proving
+[`GETTING_STARTED.md`](../node/GETTING_STARTED.md) first — in particular the proving
 parameters, without which a mainnet node parks during boot and never reaches
 the network. `z23 join` below is about the package commons only; joining the
 blockchain network itself takes no command at all

@@ -25,7 +25,7 @@
  *     (coins/utxo_commitment.h). self_derived=false — today this is written
  *     ONLY at snapshot-import (seed_integrity_stamp_utxo_sha3), never
  *     re-derived by ongoing forward fold, so it is a borrowed provenance
- *     marker, not yet a self-verified rung (see docs/HANDOFF.md and
+ *     marker, not yet a self-verified rung (see docs/agent/HANDOFF.md and
  *     docs/work/self-verified-tip-plan.md).
  *
  * NEAREST-BASE SELECTION IS SELF-VERIFIED-FIRST, not height-first: a borrowed

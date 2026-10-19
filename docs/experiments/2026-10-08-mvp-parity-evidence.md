@@ -4,7 +4,7 @@
 
 Intention: prevent a zero mismatch counter from qualifying public-node C8
 without the exact replay and continuous parity evidence required by
-`docs/MVP.md`. The previous classifier reported C8 `met` with an active
+`docs/quality/MVP.md`. The previous classifier reported C8 `met` with an active
 oracle, zero mismatches, and no canary evidence.
 
 The classifier now requires a present genesis PASS, freshness within seven

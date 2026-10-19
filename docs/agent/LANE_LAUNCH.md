@@ -4,7 +4,7 @@
 
 This page adds dispatch and handoff mechanics. Authority remains in
 [AGENTS.md](../../AGENTS.md); exact build, integration, and publication
-procedure remains in [DEVELOPING.md](../DEVELOPING.md).
+procedure remains in [DEVELOPING.md](../dev/DEVELOPING.md).
 
 ## Dispatch
 

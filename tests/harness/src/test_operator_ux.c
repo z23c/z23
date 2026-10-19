@@ -3,7 +3,7 @@
  * test_operator_ux — the operator-UX native commands (wf/operator-ux):
  *   explain (pure topic composers), profile (in-process thread sampler),
  *   ops.producer.status (node-free producer datadir reader), and the CLI UX
- *   contract (docs/NATIVE_COMMAND_INTERFACE.md): the ONE-LINE status brief,
+ *   contract (docs/dev/NATIVE_COMMAND_INTERFACE.md): the ONE-LINE status brief,
  *   the next-command hint, the field selector, and the unknown-command
  *   diagnostic. Each is exercised without a running node using fabricated
  *   fixtures / a synthetic datadir.

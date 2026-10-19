@@ -89,7 +89,7 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_READ(
     "core.status.brief", "core", "",
     "Flat lean status: hstar, gap, blocker, conditions, peers, rss "
-    "(full field list: docs/NATIVE_COMMAND_INTERFACE.md CLI UX contract)",
+    "(full field list: docs/dev/NATIVE_COMMAND_INTERFACE.md CLI UX contract)",
     "Same live status fields as core.status flattened to bare scalars "
     "for scripting, read from the running node at call time; one "
     "snapshot per call, not a stream.", 0,

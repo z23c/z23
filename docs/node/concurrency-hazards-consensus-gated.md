@@ -5,7 +5,7 @@ documented here with precise fixes. Each fix changes locking on the **live
 chain path** and MUST be boot-validated for both correctness AND absence of
 deadlock under live reorg before applying — copy-prove first, per the
 standing method. Verify the live H\* via `z23 status` /
-`z23 dumpstate reducer_frontier`; `docs/HANDOFF.md` holds current
+`z23 dumpstate reducer_frontier`; `docs/agent/HANDOFF.md` holds current
 state. NONE of these is the already-fixed `phashBlock` UAF.
 
 ## 1 — bg_validation_service.c lock-free `chain_active` read (HIGHEST value — a real UAF)

@@ -2,7 +2,7 @@
 
 # Native landing and historical train observations
 
-The current procedure lives in [DEVELOPING.md](../DEVELOPING.md). This page
+The current procedure lives in [DEVELOPING.md](../dev/DEVELOPING.md). This page
 records the boundaries of that route and preserves historical train
 measurements; it does not define a second queue, timer, or publication policy.
 

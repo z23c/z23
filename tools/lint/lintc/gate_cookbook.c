@@ -4,7 +4,7 @@
  * replacement for the bash body of tools/lint/check_cookbook.sh. Every
  * cookbook recipe still works (RUN rows are executed and must print their
  * token, ASK rows must still be described by the command registry, READ rows
- * cite a tracked file that still holds the symbol) and docs/COOKBOOK.md still
+ * cite a tracked file that still holds the symbol) and docs/dev/COOKBOOK.md still
  * matches the registry byte for byte; --fix regenerates it. The tool set is
  * closed (z23-dev), arguments are split without a shell and any character
  * outside [A-Za-z0-9_./= -] is refused before anything runs.
@@ -428,7 +428,7 @@ int check_cookbook_run(int argc, char **argv)
     struct ck_cfg cfg = {
         .root = root,
         .def = env_or("ZCL_COOKBOOK_DEF", "engine/composition/cookbook.def"),
-        .doc = env_or("ZCL_COOKBOOK_DOC", "docs/COOKBOOK.md"),
+        .doc = env_or("ZCL_COOKBOOK_DOC", "docs/dev/COOKBOOK.md"),
         .bin_dir = env_or("ZCL_LINT_BIN_DIR", "build/bin"),
         .floor = env_or("ZCL_COOKBOOK_ROW_FLOOR", "10"),
         .timeout = env_or("ZCL_COOKBOOK_TIMEOUT", "120"),

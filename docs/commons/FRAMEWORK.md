@@ -1,7 +1,7 @@
 # The z23 Framework
 
 Place a resource, follow its contracts, and preview or scaffold a slice (§4).
-First, follow [`docs/DEVELOPING.md`](../DEVELOPING.md) to prepare a checkout.
+First, follow [`docs/dev/DEVELOPING.md`](../dev/DEVELOPING.md) to prepare a checkout.
 Scaffolding needs `build/bin/z23-dev`, built with `make dev-bin`.
 
 > **One binary. One chain. One way to do each thing — and the compiler
@@ -81,7 +81,7 @@ the cursor advance, or the two-store ordering hazard we are killing comes back.
 State this precisely or the model misleads.
 
 A second honesty, and this one is a standing architectural fact rather than a
-live status (live status lives only in `docs/HANDOFF.md` §0-LATEST — never
+live status (live status lives only in `docs/agent/HANDOFF.md` §0-LATEST — never
 here): above genesis, ZClassic headers commit none of the UTXO, Sapling/Sprout
 frontier, or nullifier contents. A state artifact whose `anchor_block_hash`
 matches a validated in-binary PoW header (`core/chainparams/src/checkpoints.c`)
@@ -92,13 +92,13 @@ fold is genuinely pure *above* a complete, self-derived anchor; the
 `-refold-from-anchor` sovereign cure folds from the verified checkpoint
 forward and then deletes any borrowed seed. Whether this node is currently
 running on self-derived vs. borrowed state is a live fact: see
-`docs/HANDOFF.md` §0-LATEST.
+`docs/agent/HANDOFF.md` §0-LATEST.
 
 The four promises this buys the operator:
 
 | Promise | Meaning |
 |---------|---------|
-| Fast | Cold-sync in seconds through FlyClient and a SHA3 snapshot is a design target; that stack is built but inert today. The legacy `--importblockindex` boot path still works. Current sync/cure status belongs in `docs/HANDOFF.md` §0-LATEST. |
+| Fast | Cold-sync in seconds through FlyClient and a SHA3 snapshot is a design target; that stack is built but inert today. The legacy `--importblockindex` boot path still works. Current sync/cure status belongs in `docs/agent/HANDOFF.md` §0-LATEST. |
 | Lean | One static binary, bounded RAM, no runtime it does not ship itself. |
 | Unbreakable | No silent halt: a named blocker or growing `log_head` gap exposes a stall; exhaustion pages a human. |
 | Honest | Forward progress on the live tip is the acceptance bar; green tests do not establish node health. |
@@ -227,12 +227,12 @@ implementations; Event is a concept rather than a required folder.
 |---|-------|--------|----------------|--------|----------|
 | 1 | **Controller** | `engine/controllers/` | `static int h_x(req,res)` + route table | partial; E1 is empty, but import/sync controllers still carry legacy orchestration and raw-SQL debt is ratcheted | `chain_projection.c` |
 | 2 | **Service** | `engine/services/` | functions returning `struct zcl_result` | partial; file-level E2 and typed-blocker baselines are empty, but legacy bool compatibility APIs remain | `replay_verify_service.c` |
-| 3 | **Model** | `engine/models/` | `DEFINE_MODEL_CALLBACKS` + `validates_*` + AR save | **real, enforced** (E3+E4+model-validation HARD; file count in `docs/CODEBASE_MAP.md` §1's app-shapes table) | `block.c` |
+| 3 | **Model** | `engine/models/` | `DEFINE_MODEL_CALLBACKS` + `validates_*` + AR save | **real, enforced** (E3+E4+model-validation HARD; file count in `docs/dev/CODEBASE_MAP.md` §1's app-shapes table) | `block.c` |
 | 4 | **Job** | `engine/jobs/` + `engine/reducer/jobs/` | cursor-stamped stage: advance-or-blocker | **real** — eight stage files live in `engine/jobs/`; reducer frontier ownership lives in `engine/reducer/`; E5 HARD (advance-or-block) | `*_stage.c` |
 | 5 | **Supervisor** | `engine/supervisors/` | declared liveness tree, restart policy | partial — `net`/`chain`/`staged_sync` declared; `boot_services.c` still owns lifecycle wiring | `engine/supervisors/src/staged_sync_supervisor.c` |
-| 6 | **Condition** | `engine/conditions/` | `{detect, remedy, witness}` struct + `register()` | **real, the model citizen** (`condition_registrations` count is machine-checked in `docs/CODEBASE_MAP.md`'s DOC-COUNTS block) | `block_failed_mask_at_tip.c` |
+| 6 | **Condition** | `engine/conditions/` | `{detect, remedy, witness}` struct + `register()` | **real, the model citizen** (`condition_registrations` count is machine-checked in `docs/dev/CODEBASE_MAP.md`'s DOC-COUNTS block) | `block_failed_mask_at_tip.c` |
 | 7 | **Event** | concept, not a physical shape | typed append-only emit + subscribers | owned by `engine/modules/event/` + `engine/modules/storage/src/event_log.c` + `engine/modules/storage/src/*_projection.c` | `engine/modules/storage/src/event_log.c` |
-| 8 | **Storage Adapter** | `platform/adapters/` + `platform/ports/` | port interface + swappable impl | **real — outbound-only by design** (§6); port/adapter counts are machine-checked in `docs/CODEBASE_MAP.md`'s DOC-COUNTS block; `check_raw_sqlite.sh` CLEAN | `platform/adapters/outbound/persistence/` |
+| 8 | **Storage Adapter** | `platform/adapters/` + `platform/ports/` | port interface + swappable impl | **real — outbound-only by design** (§6); port/adapter counts are machine-checked in `docs/dev/CODEBASE_MAP.md`'s DOC-COUNTS block; `check_raw_sqlite.sh` CLEAN | `platform/adapters/outbound/persistence/` |
 
 ### The canonical form is struct-registration, not a block-DSL
 
@@ -344,7 +344,7 @@ with no further wiring:
 The plan's `wiring` array names the existing files a real resource
 eventually needs edited — the App manifest, the feature migration, the
 agent impact rules, and the `DOC-COUNTS` block in
-[`docs/CODEBASE_MAP.md`](../CODEBASE_MAP.md), whose test-group total the new
+[`docs/dev/CODEBASE_MAP.md`](../dev/CODEBASE_MAP.md), whose test-group total the new
 catalog row raises by one (`make check-doc-counts` prints both numbers).
 The scaffold never edits them: which registry a resource joins is a reviewed
 decision, not boilerplate.
@@ -445,7 +445,7 @@ next routing, all without the domain moving.
 
 The pure consensus contexts are `core/consensus/`, `core/params/`,
 `core/math/` and `core/chainparams/`; the byte seal covers `core/`.
-The adapter tree is **outbound-only by design**: `docs/CODEBASE_MAP.md`'s
+The adapter tree is **outbound-only by design**: `docs/dev/CODEBASE_MAP.md`'s
 machine-checked `port_interfaces` / `persistence_adapters` counts carry writes
 out through swappable ports (Law 2); reads are owned by the Models (Law 5),
 so no inbound "repository" port fronts them — the same kind of by-design absence

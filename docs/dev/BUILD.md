@@ -5,7 +5,7 @@
 This is the focused build reference — vendored-library sources/versions, the
 fast dev-compile targets, and the sanitizer profiles. For the full setup
 path (build → run in production → run in development), start at
-[`docs/GETTING_STARTED.md`](GETTING_STARTED.md) instead; this page is what it
+[`docs/node/GETTING_STARTED.md`](../node/GETTING_STARTED.md) instead; this page is what it
 links to for build detail.
 
 `z23` is one whole-program C23 binary. The build is a single `cc` over
@@ -190,7 +190,7 @@ an immediate named failure before either downloader is invoked. P2P source
 carriers include the five default-build archives under `vendor/.cache/`, so a
 Git-free consumer can prove it did not fall back to GitHub while retaining the
 same pin checks and source-build recipes. See
-[`P2P_SOURCE_HOSTING.md`](./commons/P2P_SOURCE_HOSTING.md#git-free-consumer-build) for
+[`P2P_SOURCE_HOSTING.md`](../commons/P2P_SOURCE_HOSTING.md#git-free-consumer-build) for
 the complete trust inputs and commands.
 
 Release reproduction is intentionally stricter than the ordinary first-build
@@ -253,7 +253,7 @@ wrapper. `make agent-loop` is the manual one-shot form
 writes `zcl.dev_loop_bench.v1` latency samples. Full field-level semantics —
 every mode, the content-addressed generation/activation transaction, deploy
 guards, and the `agent-*` status contracts — live in
-[`docs/AGENT_API.md`](./AGENT_API.md) "Build loop"; this page stays the
+[`docs/agent/AGENT_API.md`](../agent/AGENT_API.md) "Build loop"; this page stays the
 practical command list.
 
 Foreground candidate preflight uses `build/bin/z23 ops selftest`. It
@@ -278,7 +278,7 @@ override in the running `zcl23-dev` node, gated on `-hotswap-activate` +
 `engine/composition/hotswap_swappable.def` are eligible. Inspect provenance with
 `z23 dumpstate hotswap` (`zcl.hotswap_generation.v2`,
 `artifact_inode_pinned=true` per accepted generation) — full contract in
-`docs/AGENT_API.md`.
+`docs/agent/AGENT_API.md`.
 
 `make fast-rebuild` (alias for `make dev-bin`) links without LTO, keeps
 symbols, defaults to `ZCL_DEV_OPT=-Og` with consensus/crypto/script/validation
@@ -622,7 +622,7 @@ Notes:
 <!-- claim: file-present vendor/x11/SHA256SUMS # vendored X11 header pin -->
 <!-- claim: symbol-present vendor/x11/include Makefile # the include wiring -->
 - **raylib is vendored source, not an archive `make vendor` builds.** The Sky
-  Combat game (`apps/skycombat`, see [GAME.md](commons/GAME.md)) renders with raylib,
+  Combat game (`apps/skycombat`, see [GAME.md](../commons/GAME.md)) renders with raylib,
   and raylib is committed as trimmed C source under `vendor/raylib/`: 20
   upstream files — the five renderer modules the game calls, their headers,
   the RGFW desktop backend and the eight single-file dependencies those
@@ -902,7 +902,7 @@ That number changes whenever a gate lands, and every copy of it in prose has
 gone stale within weeks. The authoritative list is the `LINT_GATES` variable in
 the `Makefile`; the same list is mirrored, and machine-checked against the
 Makefile by the `check-doc-accuracy` gate, in the `<!-- LINT-GATES-BEGIN -->`
-block of [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md). To see what runs on your
+block of [`DEFENSIVE_CODING.md`](../DEFENSIVE_CODING.md). To see what runs on your
 tree, run `make lint` and read what it names, or print the list itself:
 
 ```bash

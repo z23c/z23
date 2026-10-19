@@ -6,7 +6,7 @@
 # was never true, e.g. "15 ports + 10 sqlite impls"). This gate has two prongs:
 #
 #   (A) CANONICAL BLOCK (HARD): a machine-readable declaration in
-#       docs/CODEBASE_MAP.md delimited by
+#       docs/dev/CODEBASE_MAP.md delimited by
 #         <!-- DOC-COUNTS-BEGIN --> ... <!-- DOC-COUNTS-END -->
 #       containing `key: value` lines for test_groups / port_interfaces /
 #       persistence_adapters / condition_registrations. This gate measures the
@@ -32,7 +32,7 @@
 #       The scan set is `git ls-files '*.md'` — TRACKED files only. It used to
 #       be `CLAUDE.md` + `find docs -name '*.md'`, which silently excluded the
 #       root README.md; README.md then claimed "631 parallel groups" (real
-#       count 739, correctly declared in docs/CODEBASE_MAP.md all along) and
+#       count 739, correctly declared in docs/dev/CODEBASE_MAP.md all along) and
 #       this gate — the gate whose entire job is catching that — passed every
 #       run. A `find` set also lets untracked scratch .md files into the scan.
 #
@@ -120,9 +120,9 @@ code_app_shapes=${#ZCL_APP_SHAPES[@]}
 echo "code-measured: test_groups=$code_test_groups port_interfaces=$code_ports persistence_adapters=$code_adapters condition_registrations=$code_conditions command_bundles=$code_command_bundles command_roots=$code_command_roots dumpstate_subsystems=$code_dumpstate app_shape_folders=$code_app_shapes"
 
 # --------------------------------------------------------------------------
-# (A) Canonical block in docs/CODEBASE_MAP.md must agree with the code.
+# (A) Canonical block in docs/dev/CODEBASE_MAP.md must agree with the code.
 # --------------------------------------------------------------------------
-DOC=docs/CODEBASE_MAP.md
+DOC=docs/dev/CODEBASE_MAP.md
 [ -f "$DOC" ] || { echo "FAIL: $DOC not found" >&2; exit 1; }
 
 # --fix: the code is authoritative, so a mismatch is ALWAYS resolved by
@@ -349,7 +349,7 @@ if [ "$fail" != "0" ]; then
     echo ""
     echo "Fix: the CODE is authoritative."
     echo "  - For a MISMATCH: update the <!-- DOC-COUNTS --> block in $DOC"
-    echo "    AND any prose (FRAMEWORK.md, CLAUDE.md, docs/BUILD.md, docs/HANDOFF.md) to match."
+    echo "    AND any prose (FRAMEWORK.md, CLAUDE.md, docs/dev/BUILD.md, docs/agent/HANDOFF.md) to match."
     echo "  - For a stale phrase: delete or correct the prose (the number is wrong)."
     exit 1
 fi

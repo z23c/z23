@@ -126,7 +126,7 @@
  * with ok=false and a MAIL_REFUSED_* code naming the rule — a typed error
  * row, never a crash. Refusal words: key, onion address, IP, absolute path.
  * Repo-relative paths are allowed: a slash only makes a path ABSOLUTE when
- * it STARTS a token, so "docs/DEVELOPING.md" passes and "/etc/passwd" does
+ * it STARTS a token, so "docs/dev/DEVELOPING.md" passes and "/etc/passwd" does
  * not. (A relative path whose own text contains a secret-shaped marker such
  * as "/tmp/" is still refused by the marker list that runs before that
  * test — a marker match, not a statement about leading slashes.)
@@ -402,7 +402,7 @@ static bool dvm_delim(char c)
 /* Does a token START at p, i.e. is p the first byte of the body or does a
  * delimiter sit just before it? This is what separates "/etc/passwd" (a
  * token that begins with a slash, so an absolute path) from the slash
- * INSIDE "docs/DEVELOPING.md" (a relative path, which is allowed and
+ * INSIDE "docs/dev/DEVELOPING.md" (a relative path, which is allowed and
  * always was meant to be). */
 static bool dvm_token_start(const char *s, const char *p)
 {

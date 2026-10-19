@@ -236,7 +236,7 @@ cmd_verify() {
 
     # ZERO RECORDS IS A CLEAN STATE, NOT A FAILURE. The ledger ships with no
     # records at all: the chain's genesis is minted by the owner under a key
-    # the owner chose (see "Owner setup" in docs/PROMOTION_RECEIPTS.md), and
+    # the owner chose (see "Owner setup" in docs/dev/PROMOTION_RECEIPTS.md), and
     # until then the only truthful thing to say is that nothing has been
     # recorded. An empty chain has nothing to contradict, so it verifies.
     #
@@ -254,7 +254,7 @@ cmd_verify() {
         echo "  ledger          $ledger"
         echo "promotion_receipt: NO PROMOTION RECORDED — the ledger holds no records at all."
         echo "  The chain has not been started: its genesis record is minted once, by the"
-        echo "  owner, under a signing key the owner chooses (docs/PROMOTION_RECEIPTS.md,"
+        echo "  owner, under a signing key the owner chooses (docs/dev/PROMOTION_RECEIPTS.md,"
         echo "  \"Owner setup\"). Nothing has been promoted to a proof server through this"
         echo "  path, so no build on any proof server can be tied to a reviewed commit."
         echo "  That is this repository's honest state, not a defect and not a failure."
@@ -433,7 +433,7 @@ emit_record() {
       printf '%s %s\\n' <principal> "\$(cut -d' ' -f1-2 ~/.ssh/zcl-promotion-receipt.pub)" >> $SIGNERS
       ZCL_RECEIPT_KEY=~/.ssh/zcl-promotion-receipt $SELF init
       git add $SIGNERS $LEDGER && git commit
-  See docs/PROMOTION_RECEIPTS.md, "Owner setup".
+  See docs/dev/PROMOTION_RECEIPTS.md, "Owner setup".
 EOF
         return 1
     fi
@@ -932,7 +932,7 @@ usage:
 
 Writing (init/append) requires ZCL_RECEIPT_KEY to name a signing key whose only
 purpose is signing promotion evidence. There is no default: see "Owner setup" in
-docs/PROMOTION_RECEIPTS.md. Verifying needs no private key.
+docs/dev/PROMOTION_RECEIPTS.md. Verifying needs no private key.
 EOF
         exit 2
         ;;

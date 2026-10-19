@@ -54,7 +54,7 @@ bytes it wrote, so they are always in sync with the artifact you download.
 
 ## Quickstart
 
-Build the node from `main` (see [`docs/BUILD.md`](../BUILD.md)), then (replace
+Build the node from `main` (see [`docs/dev/BUILD.md`](../dev/BUILD.md)), then (replace
 `<height>` and the tag with the latest release you downloaded):
 
 ```bash

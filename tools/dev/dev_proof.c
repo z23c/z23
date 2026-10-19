@@ -5715,7 +5715,7 @@ static const struct dp_docs_fresh_artifact DP_DOCS_FRESH[] = {
     { "docs/agent/EXECUTOR_HEURISTICS.md",
       "tools/lint/check_fleet_observations.sh",
       "make docs-executor-routing", NULL },
-    { "docs/CODEBASE_MAP.md",
+    { "docs/dev/CODEBASE_MAP.md",
       "tools/scripts/check_doc_counts.sh",
       "make fix-doc-counts", NULL },
 };

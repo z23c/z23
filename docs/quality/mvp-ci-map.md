@@ -4,7 +4,7 @@ AGENTS.md P1 priority: **CI-enforce the MVP criteria.** This document is the
 mapping behind `make mvp` (the reporter, `tools/scripts/mvp_scoreboard.sh`).
 
 `make mvp` prints an HONEST 8/8 scoreboard. For each of the 8 operator
-acceptance criteria in [`docs/MVP.md`](../MVP.md) it runs the ONE
+acceptance criteria in [`docs/quality/MVP.md`](MVP.md) it runs the ONE
 mechanically-runnable check that proves it and prints a per-criterion verdict
 line: **PASS / FAIL / BLOCKED(reason)**.
 
@@ -82,6 +82,6 @@ MRS unchanged at 4/8, FAIL=1 — never green.)
   `build/c3-probe/latest.txt` points at the newest evidence directory.
 - `Makefile` target `mvp` — `make mvp`; also invoked as a visible non-fatal
   report at the end of `make ci`.
-- `docs/MVP.md` — the 8 criteria (source of truth for the claims).
+- `docs/quality/MVP.md` — the 8 criteria (source of truth for the claims).
 - `Makefile` target `ci-mvp-gates` — the build-FATAL hermetic slice gates
   (the regression floor; the scoreboard's PASS/FAIL echoes these).

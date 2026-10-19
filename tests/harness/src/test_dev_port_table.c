@@ -8,7 +8,7 @@
  *   touch two         CONFLICT  (the base rewrote the same line)
  *   already on base   ON_BASE   (the base already carries the change)
  *   tweak nine        APPLIES   (plain apply rejects it, the 3-way fallback places it)
- *   docs only         EMPTY     (only docs/CODEBASE_MAP.md)
+ *   docs only         EMPTY     (only docs/dev/CODEBASE_MAP.md)
  *
  * The handler is called directly with GIT_DIR/GIT_INDEX_FILE poisoned in the
  * process environment: the leaf must ignore them, must leave refs, the real
@@ -110,6 +110,9 @@ static bool ptt_rig_topic(const char *dir)
 {
     char path[PATH_MAX];
     (void)snprintf(path, sizeof(path), "%s/docs", dir);
+    if (mkdir(path, 0700) != 0)
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/docs/dev", dir);
     if (mkdir(path, 0700) != 0 || !PTT_G(dir, "checkout", "-q", "-b", "topic"))
         return false;
     return ptt_write(dir, "d.txt", "d\n") &&
@@ -121,7 +124,7 @@ static bool ptt_rig_topic(const char *dir)
            ptt_commit(dir, "already on base") &&
            ptt_write(dir, "e.txt", E_TOPIC) &&
            ptt_commit(dir, "tweak nine") &&
-           ptt_write(dir, "docs/CODEBASE_MAP.md", "map\n") &&
+           ptt_write(dir, "docs/dev/CODEBASE_MAP.md", "map\n") &&
            ptt_commit(dir, "docs only");
 }
 

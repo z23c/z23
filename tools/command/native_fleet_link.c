@@ -21,7 +21,7 @@
  *
  * `echo` and `probe` take the shared key as an operator-supplied hex string
  * because the pairing plumbing that would hand this leaf a live Noise
- * session's material does not exist yet (docs/GAMELINK.md, "What is
+ * session's material does not exist yet (docs/node/GAMELINK.md, "What is
  * missing"). That is stated rather than hidden: the key is visible in this
  * machine's process list while the command runs, the traffic it protects is
  * timestamps and nothing else, and it is not any other key this node holds.

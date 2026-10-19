@@ -9,7 +9,7 @@ does the verifying.
 This card ships alone, next to the three binaries, in a release directory
 with no checkout nearby -- so it does not link to other files; nothing at
 those paths exists next to it. The full command-tree contract is the file
-docs/NATIVE_COMMAND_INTERFACE.md in the Z23 source repository, if you have
+docs/dev/NATIVE_COMMAND_INTERFACE.md in the Z23 source repository, if you have
 that checked out. If you do not, you do not need it: `z23 discover help`
 and `z23 discover schema <path>` below are the running node describing its
 own interface live, which is the more reliable copy anyway.

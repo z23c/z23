@@ -2373,7 +2373,7 @@ ROLLBACK_SCRIPT
     # It needs ZCL_RECEIPT_KEY in the environment (a key whose only job is
     # signing promotion evidence — never a login/push key) and refuses loudly
     # without one rather than reaching for a default. See "Owner setup" in
-    # docs/PROMOTION_RECEIPTS.md; the chain must also have been started with
+    # docs/dev/PROMOTION_RECEIPTS.md; the chain must also have been started with
     # `promotion_receipt.sh init` before the first append can land.
         if tools/scripts/promotion_receipt.sh append "$HEAD_SHA" "$CAND_SOURCE_ID" "$ARTIFACT_SHA" "$host"; then
             say "commit platform/deploy/promotion-receipts.jsonl — until committed the receipt is local only"

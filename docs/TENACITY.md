@@ -9,7 +9,7 @@ history. Current sequencing is in [`docs/work/FORWARD_PLAN.md`](work/FORWARD_PLA
 Companion docs: `docs/CONSENSUS_PARITY_DOCTRINE.md` (the parity bar),
 `docs/dev/fast-path.md` (diagnose on a COPY, never live).
 
-Live bootstrap/cure status: [`docs/HANDOFF.md`](HANDOFF.md); design:
+Live bootstrap/cure status: [`docs/agent/HANDOFF.md`](agent/HANDOFF.md); design:
 `docs/work/self-verified-tip-plan.md`. Verify live state from
 `z23 status` / `z23 dumpstate reducer_frontier`, never from this
 doctrine document. The six principles below are timeless, independent of that

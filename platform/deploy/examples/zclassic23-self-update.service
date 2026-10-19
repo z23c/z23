@@ -1,6 +1,6 @@
 [Unit]
 Description=Z23 read-only remote source/service status lane
-Documentation=file:%h/github/zclassic23/docs/AGENT_API.md
+Documentation=file:%h/github/zclassic23/docs/agent/AGENT_API.md
 Wants=network-online.target
 After=network-online.target
 

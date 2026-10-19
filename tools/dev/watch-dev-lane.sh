@@ -1042,7 +1042,7 @@ self_test()
     printf '/build/\n/.cache/\n' > "$ROOT/.gitignore"
     printf 'int a;\n' > "$ROOT/app/a.c"
     printf 'int consensus_value;\n' > "$ROOT/core/consensus/value.c"
-    printf '# handoff\n' > "$ROOT/docs/HANDOFF.md"
+    printf '# handoff\n' > "$ROOT/docs/agent/HANDOFF.md"
     printf '%s\n' \
         'HOTSWAP_ELIGIBLE("app/a.c") HOTSWAP_PROBE("probe_a")' \
         > "$ROOT/engine/composition/hotswap_eligible.def"
@@ -1161,7 +1161,7 @@ self_test()
     : > "$ROOT/.fail-parity"
     write_manifest "$new" || { rm -rf "$sandbox"; return 1; }
     expected="$new"
-    printf 'docs/HANDOFF.md\n' > "$changed"
+    printf 'docs/agent/HANDOFF.md\n' > "$changed"
     : > "$command_log"
     run_cycle "$changed" "$expected" >/dev/null 2>&1
     rc=$?

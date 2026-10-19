@@ -61,7 +61,7 @@ structured entry, searchable by lesson text:
   "lessons": [
     { "rule": "Run the full lint before pushing.",
       "why": "lint-fast skips the whole-tree gates.",
-      "evidence": "docs/DEVELOPING.md" }
+      "evidence": "docs/dev/DEVELOPING.md" }
   ],
   "applies_to": ["git", "landing"],
   "updated": "2026-10-12T09:00:00Z"

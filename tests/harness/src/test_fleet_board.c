@@ -3027,7 +3027,7 @@ static const char FB_ENTRY_OK[] =
     "\"summary\":\"The push gate runs the full lint.\","
     "\"lessons\":[{\"rule\":\"Run the full lint before pushing.\","
     "\"why\":\"lint-fast skips whole-tree gates.\","
-    "\"evidence\":\"docs/DEVELOPING.md\"}],"
+    "\"evidence\":\"docs/dev/DEVELOPING.md\"}],"
     "\"applies_to\":[\"Git\",\"landing\"],"
     "\"updated\":\"2026-10-12T09:00:00Z\"}";
 

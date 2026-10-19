@@ -842,7 +842,7 @@ int t_no_dev_history_in_contracts(void)
     return failures;
 }
 
-/* check-no-uncited-victory - docs/HANDOFF.md may not carry a victory phrase
+/* check-no-uncited-victory - docs/agent/HANDOFF.md may not carry a victory phrase
  * ("at tip", "cured", "wedge closed", ...) without a machine-checkable
  * citation token in the same paragraph. Proof:
  * (1) the clean tree passes;

@@ -9,7 +9,7 @@
 # HARD RULE: every active entry below must be CONFIRMED benign and carry a
 # justification comment (why the race cannot corrupt state). Never add an
 # entry to hide an untriaged report — triage first, fix forward, suppress
-# only what is provably benign. Current triage state: docs/BUILD.md
+# only what is provably benign. Current triage state: docs/dev/BUILD.md
 # "ThreadSanitizer profiles" (known-good-as-of note).
 #
 # No active suppressions — the first sweep's one finding was fixed in code

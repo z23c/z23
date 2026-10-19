@@ -7,8 +7,8 @@ Public volunteers use `.github/CONTRIBUTING.md` and the `z23-work` skill, not
 this one.
 
 Read [`AGENTS.md`](../../../AGENTS.md) first. The developer manual
-[`docs/DEVELOPING.md`](../../../docs/DEVELOPING.md) is large; read only the
-section for your step, with `grep -n '^## ' docs/DEVELOPING.md` to find it:
+[`docs/dev/DEVELOPING.md`](../../../docs/dev/DEVELOPING.md) is large; read only the
+section for your step, with `grep -n '^## ' docs/dev/DEVELOPING.md` to find it:
 
 | Step | Section |
 | --- | --- |

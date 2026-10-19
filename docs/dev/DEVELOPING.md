@@ -12,9 +12,9 @@ C23 is the C language standard used by this project. A receipt records a
 bound observation; it grants only the authority its receiving policy allows.
 An action identifies work with exact inputs; a candidate identifies the
 proposed source. The durable mission and authority
-contract are in [`../AGENTS.md`](../AGENTS.md); current priorities are in
-[`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md). Current state of the
-maintainer's hosted node belongs only in [`HANDOFF.md`](HANDOFF.md).
+contract are in [`../AGENTS.md`](../../AGENTS.md); current priorities are in
+[`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md). Current state of the
+maintainer's hosted node belongs only in [`HANDOFF.md`](../agent/HANDOFF.md).
 
 Z23 is first a public ZClassic full node and second an optional
 decentralized C23 software commons. Consensus, custody, synchronization, peer
@@ -31,7 +31,7 @@ worktree, preserve native claims, and run heavy commands through
 `devbuild --wait`. Admission reserves come from the installed storage
 contract, not an old benchmark or a copied constant in a runbook.
 
-[`work/AGENT_FLEET.md`](work/AGENT_FLEET.md#consolidated-operating-model)
+[`work/AGENT_FLEET.md`](../work/AGENT_FLEET.md#consolidated-operating-model)
 owns the fleet operating model and capability limits. This document owns the
 development sequence. The native command catalog owns implemented schemas;
 the shared wiki explains approved procedures and links evidence. Neither wiki
@@ -66,7 +66,7 @@ exist only on maintainer hosts. Read the operations, storage and worker policy,
 then inspect the assigned lane. Their reserves
 supersede historical floors. Managed development runs remotely through `devon`
 routes; the laptop coordinates and reviews, without builds or worker copies.
-New to a fleet: [`agent/START_HERE.md`](agent/START_HERE.md).
+New to a fleet: [`agent/START_HERE.md`](../agent/START_HERE.md).
 
 Reuse a sanctioned worktree and preserve owned dirty work. Route heavy builds,
 proofs, benchmarks and matrices through `devbuild --wait`, preserving job
@@ -88,7 +88,7 @@ command catalog through `discover help <path>`, search with
 `discover search <query>`, inspect inputs with `discover schema <leaf>`. A
 command in a plan is a target until the selected binary lists it.
 
-[`HANDOFF.md`](HANDOFF.md) is read only for an explicit maintainer-host
+[`HANDOFF.md`](../agent/HANDOFF.md) is read only for an explicit maintainer-host
 assignment; verify it against the running node with `build/bin/z23 status` and
 `build/bin/z23 dumpstate reducer_frontier`. Do not copy live height, soak or
 deployment status into durable entry documents.
@@ -107,7 +107,7 @@ rulings by number.
    and authority contention. Builds, telemetry, package traffic and AI
    workers may not delay chain advancement, block processing, transaction
    relay, synchronization, peer health or wallet custody.
-2. **The fleet A+ scorecard** ([FLEET_SCORECARD.md](work/FLEET_SCORECARD.md))
+2. **The fleet A+ scorecard** ([FLEET_SCORECARD.md](../work/FLEET_SCORECARD.md))
    orders all other work. Fleet tooling is first-class product.
    - Tier 1, the unblockers: G9 landing throughput, G13 agent
      productivity and review, G7 MCP harness, G4 wiki.
@@ -116,8 +116,8 @@ rulings by number.
    - Tier 3: G2 post-quantum release signing, G8 telemetry, G12 Mac parity.
    Within a tier, the work closest to its A+ bar goes first; independent work
    may proceed in parallel. Public-node V1 acceptance under
-   [MVP.md](MVP.md) C1-C8 and the product priorities in
-   [FORWARD_PLAN.md](work/FORWARD_PLAN.md) remain acceptance context.
+   [MVP.md](../quality/MVP.md) C1-C8 and the product priorities in
+   [FORWARD_PLAN.md](../work/FORWARD_PLAN.md) remain acceptance context.
 3. **Zero spend.** No fleet feature may require ZCL, an anchored ZID or a fee.
    Work that needs a spend (such as the 1 ZCL payment rerun) waits for an
    explicit owner authorization.
@@ -157,7 +157,7 @@ qualification and production acceptance.
 - Fleet agents coordinate through native tasks, candidates, actions and
   receipts, never GitHub Issues or pull requests; committed `origin/main` is
   the integration blackboard. Public volunteers submit work cards as `card:`
-  pull requests (see [CONTRIBUTING.md](../.github/CONTRIBUTING.md)), and issues
+  pull requests (see [CONTRIBUTING.md](../../.github/CONTRIBUTING.md)), and issues
   are for user-visible defects only.
 - Claim disjoint scopes through native tools. Keep one primary writer per
   component and respect live leases; silence alone does not establish an
@@ -181,9 +181,9 @@ execution, production or custody authority. Recurring transport, access
 control and job execution belong in C23 node services; shell stays
 bootstrap/build/test glue. Protected native execution, hardware virtualization
 and emulated guests keep their qualification boundaries under
-[AGENT_FLEET.md](work/AGENT_FLEET.md). Lanes and trains:
-[agent/TRAIN_PROTOCOL.md](agent/TRAIN_PROTOCOL.md) and
-[agent/LANE_QUICKSTART.md](agent/LANE_QUICKSTART.md).
+[AGENT_FLEET.md](../work/AGENT_FLEET.md). Lanes and trains:
+[agent/TRAIN_PROTOCOL.md](../agent/TRAIN_PROTOCOL.md) and
+[agent/LANE_QUICKSTART.md](../agent/LANE_QUICKSTART.md).
 
 ### Platform baseline and completion
 
@@ -191,7 +191,7 @@ Linux and arm64 macOS have native build paths; macOS needs no Linux VM. An
 arm64 Mac16,10 (macOS 26.0.1, Apple Clang 17) built the node and passed the
 dependency audit and isolated platform tests on 2026-08-26; that is not
 current-candidate chain-sync acceptance. Intel macOS is unverified. Details:
-[NATIVE_MACOS_RUNBOOK.md](dev/NATIVE_MACOS_RUNBOOK.md#historical-platform-baseline).
+[NATIVE_MACOS_RUNBOOK.md](NATIVE_MACOS_RUNBOOK.md#historical-platform-baseline).
 Linux tests do not qualify macOS.
 
 A coherent slice needs green focused acceptance, current generated files,
@@ -207,7 +207,7 @@ active work.
 Source baseline: the one-time history baseline of 2026-10-12 grants no future
 rewrite authority (see [Managed source baseline](#managed-source-baseline)).
 Start from current main and recover old work as bounded reviewed patches.
-Recovery is copy-first under [TENACITY.md](TENACITY.md); deployment and custody
+Recovery is copy-first under [TENACITY.md](../TENACITY.md); deployment and custody
 remain owner-gated, and explicit scoped owner authorization persists.
 
 ## The normal loop
@@ -339,7 +339,7 @@ over the host configuration, lower a reserve to admit a job, or bypass
 admission for a single-user session. Reuse sanctioned lanes and preserve
 unique source, evidence and live leases when retiring generated output.
 
-[The deployment guide](../platform/deploy/README.md) describes versioned
+[The deployment guide](../../platform/deploy/README.md) describes versioned
 reference implementations and their tests. Their presence does not establish
 which implementation or profile a host currently runs. Inspect the installed
 program and its plan before diagnosing admission. Development on the
@@ -497,18 +497,18 @@ git fetch origin main
 git rev-parse HEAD origin/main
 ```
 
-Read [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md), then consult:
+Read [`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md), then consult:
 
-- [`HOW_THE_NODE_WORKS.md`](node/HOW_THE_NODE_WORKS.md) for the state-machine mental
+- [`HOW_THE_NODE_WORKS.md`](../node/HOW_THE_NODE_WORKS.md) for the state-machine mental
   model;
 - [`CODEBASE_MAP.md`](CODEBASE_MAP.md) for source ownership and extension
   recipes;
-- [`AGENT_TRAPS.md`](agent/AGENT_TRAPS.md) before re-solving an intentional or
+- [`AGENT_TRAPS.md`](../agent/AGENT_TRAPS.md) before re-solving an intentional or
   completed behavior;
-- [`SECURITY_AND_INTEGRITY.md`](node/SECURITY_AND_INTEGRITY.md) and
-  [`CONSENSUS_PARITY_DOCTRINE.md`](CONSENSUS_PARITY_DOCTRINE.md) near security,
+- [`SECURITY_AND_INTEGRITY.md`](../node/SECURITY_AND_INTEGRITY.md) and
+  [`CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DOCTRINE.md) near security,
   custody, or consensus boundaries;
-- [`HANDOFF.md`](HANDOFF.md) only when operating the maintainer's hosted node.
+- [`HANDOFF.md`](../agent/HANDOFF.md) only when operating the maintainer's hosted node.
 
 Do not infer a permanent coordinator or special agent role from a local
 worktree layout. Maintain one primary writer per component, preserve unrelated
@@ -516,7 +516,7 @@ dirty work, and use committed identities on `origin/main` as the shared
 integration blackboard.
 
 For fleet optimization, follow the
-[fleet speed north star](work/AGENT_FLEET.md#consolidated-operating-model).
+[fleet speed north star](../work/AGENT_FLEET.md#consolidated-operating-model).
 Record the exact action inputs and receiving policy before spending CPU.
 Check qualified peer work and in-flight duplicates first; compare the measured
 cost of discovery, missing-byte transfer, verification, and binding with local
@@ -610,7 +610,7 @@ cannot verify against this checkout's own source Merkle falls back to the full
 `index: rebuilt` build.
 
 Before creating a reusable helper or importing a library, search the generated
-capability census in [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl).
+capability census in [`CAPABILITY_INVENTORY.jsonl`](../CAPABILITY_INVENTORY.jsonl).
 It includes package public headers that the interactive code index does not,
 and records exposed symbols, verified direct-use file counts, registered-test
 reachability, ranked normalized duplicate bodies, and untested declared header
@@ -688,11 +688,11 @@ make core-unseal REASON="<owner-reviewed reason>"
 make core-seal
 ```
 
-Read [`../core/UNSEAL.md`](../core/UNSEAL.md) first. A bounded validity change
+Read [`../../core/UNSEAL.md`](../../core/UNSEAL.md) first. A bounded validity change
 requires full-history parity evidence against the real chain, not only a
 comparison with reference source text.
 
-Mandatory C rules are detailed in [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md):
+Mandatory C rules are detailed in [`DEFENSIVE_CODING.md`](../DEFENSIVE_CODING.md):
 application writes use the ActiveRecord save lifecycle; allocations are
 checked; error returns log context; native command failures set an explanatory
 body; and custody-bearing models retain save hooks.
@@ -704,11 +704,11 @@ Version suffixes name wire/format compatibility ladders only
 families carry no version
 suffix (`zcode_commons`, never a numbered sibling) — extract shared helpers
 instead of spawning a numbered copy. See the naming law in
-[`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md#naming--role-based-not-birth-order).
+[`DEFENSIVE_CODING.md`](../DEFENSIVE_CODING.md#naming--role-based-not-birth-order).
 
 Recovery changes are copy-proven on isolated datadirs before any owner-gated
 production action. A successful boot is not liveness evidence; recovery
-acceptance observes H* climb and parity. See [`TENACITY.md`](TENACITY.md).
+acceptance observes H* climb and parity. See [`TENACITY.md`](../TENACITY.md).
 
 ## 4. Receive fast local feedback
 
@@ -747,8 +747,8 @@ only an exact deterministic compiler diagnostic may be coalesced.
 Do not expand HOT_FORK, hot-swap, or reflex machinery merely to improve
 coverage or benchmark numbers. It changes only when a current public-node or
 C23 Commons acceptance requires it. Architecture and measured evidence live in
-[`dev/REFLEX_REACTOR.md`](dev/REFLEX_REACTOR.md) and
-[`dev/C23_DEV_LOOP_PERFORMANCE.md`](dev/C23_DEV_LOOP_PERFORMANCE.md).
+[`dev/REFLEX_REACTOR.md`](REFLEX_REACTOR.md) and
+[`dev/C23_DEV_LOOP_PERFORMANCE.md`](C23_DEV_LOOP_PERFORMANCE.md).
 
 ## 5. Build and focused proof
 
@@ -1121,7 +1121,7 @@ before the tree has measured scores would block everyone. Run it on the file
 you are changing.
 
 What mutation testing does NOT catch is in
-[`tools/dev/mutation_harness.h`](../tools/dev/mutation_harness.h); read it
+[`tools/dev/mutation_harness.h`](../../tools/dev/mutation_harness.h); read it
 before treating any score as a quality claim.
 
 ### Measuring what the semantic facts plan saves — z23-sem-replay
@@ -1170,7 +1170,7 @@ stand-in sensor and planner programs. It checks that a facts reply that
 leaves out the changed TU exits 3 and names the TU in `MISSES.tsv`, and that
 a correct narrowing produces the exact hand-computed counts. The method and
 its limits are in
-[the replay method](./work/SEMANTIC_MANIFEST.md#replay-on-real-history).
+[the replay method](../work/SEMANTIC_MANIFEST.md#replay-on-real-history).
 
 ### Proving a permissionless cold join
 
@@ -1194,7 +1194,7 @@ are the reason the target prints propositions instead of a checkmark: the
 narrow, true form of each claim is asserted, and where the flattering form does
 not hold the transcript says so instead of asserting it away. The propositions,
 and which are narrower than the story, are enumerated at the top of
-[the cold-join fixture](../tests/harness/src/test_cold_join_sovereign.c).
+[the cold-join fixture](../../tests/harness/src/test_cold_join_sovereign.c).
 
 For an exact push checkpoint, commit first. The notification hook makes a
 best-effort detached request to the checkout's development service and returns;
@@ -1268,7 +1268,7 @@ records are unsigned and writable by the uid the candidate runs as; reuse
 comes back only when a separate-uid verifier qualifies. `phases.txt` records
 `test_reuse_admit=test-reuse: unqualified(no_verifier_account)` and an
 `advisory` `test_preflight` probe count that admits nothing
-([`dev/test-result-cache.md`](dev/test-result-cache.md)).
+([`dev/test-result-cache.md`](test-result-cache.md)).
 Automatic proof-worker per-group collection is deferred until every mandatory
 input closure qualifies. The default exact cold whole-cycle proof and its signed
 pair receipt remain the admission gate. Explicit runner diagnostics use
@@ -1499,7 +1499,7 @@ and `docs/CAPABILITY_INVENTORY.jsonl` out of their commits. The integrator runs
 assembled stack tip.
 It rederives the registry and dependent pins, then runs the canonical
 documented-count gate. If its only failures are numeric count mismatches,
-it updates only those values in `docs/CODEBASE_MAP.md` and makes a signed
+it updates only those values in `docs/dev/CODEBASE_MAP.md` and makes a signed
 document-only commit naming each count and its old and measured values.
 Other count failures stop with the gate output; a failed correction or
 signature stops before inventory. It then regenerates the capability
@@ -1763,7 +1763,7 @@ without ever re-running the tests those captures gate.
 Canonical deployment remains owner-gated. Development generation activation is
 an explicit plan/commit transaction with source, resident-CAS, process, probe,
 and rollback verification. A source identity or environment variable alone
-grants no activation authority. See [`RUNBOOK.md`](RUNBOOK.md) and the current
+grants no activation authority. See [`RUNBOOK.md`](../RUNBOOK.md) and the current
 command schema before any authorized deployment work.
 
 ## 7. Continue while deep proof runs
@@ -1802,7 +1802,7 @@ CONTINUATION QUEUE
 ESCALATE ONLY IF
 ```
 
-The capsule says what changes now; [`../AGENTS.md`](../AGENTS.md) supplies the
+The capsule says what changes now; [`../AGENTS.md`](../../AGENTS.md) supplies the
 durable repository contract. Do not paste a vendor-specific fleet doctrine or
 another full copy of the project rules into each prompt.
 
@@ -1813,7 +1813,7 @@ mission. Otherwise continue through the ordered queue.
 
 ### Briefing a Haiku implementer
 
-The shared agent `z23-unit-haiku` in [`../.claude/agents/`](../.claude/agents/z23-unit-haiku.md)
+The shared agent `z23-unit-haiku` in [`../.claude/agents/`](../../.claude/agents/z23-unit-haiku.md)
 takes well-specified work: a C23 patch with a named focused test, a small port
 from shell to C23, a test written from a spec, a doc or measurement update, a
 mechanical rename, or a gate fix. Give it no open design questions; use a
@@ -1870,7 +1870,7 @@ git show origin/main:tools/dev/test_group_catalog.def > catalog.def
   commit on `origin/main`, a registered sweep group, a dev.land outcome row
   or an `INDEPENDENT REVIEW by <agent>` note, and XP is never hand-set. The
   rules, the milestone multiplier table and the `tokens_extra.tsv` format
-  are stated once in [`docs/work/MVP_GAME_MAP.md`](./work/MVP_GAME_MAP.md)
+  are stated once in [`docs/work/MVP_GAME_MAP.md`](../work/MVP_GAME_MAP.md)
   under "XP rules v1".
 - `progress` prints the milestone bars. With `--session` it adds a cost line
   and the KPI line.

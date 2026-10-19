@@ -3,7 +3,7 @@
 > Operator-only acceptance reference. Do not start these time-running or
 > live-process procedures as ordinary development work. Current development
 > ordering lives only in [`FORWARD_PLAN.md`](../work/FORWARD_PLAN.md); current state
-> of the maintainer host lives only in [`../HANDOFF.md`](../HANDOFF.md).
+> of the maintainer host lives only in [`../agent/HANDOFF.md`](../agent/HANDOFF.md).
 
 Two opt-in, periodic wall-clock proofs, each split the same way as
 `tools/scripts/soak_evidence.sh`: a **collect** half that runs a real
@@ -15,7 +15,7 @@ both need a live binary/peer/fixture, not hermetic fixtures.
 
 | gate | proves | harness script | collect wrapper | ledger |
 |------|--------|-----------------|------------------|--------|
-| C3 | a genuinely-wiped fresh node reaches network tip within budget (`docs/MVP.md` criterion 3) | `tools/scripts/cold_start_to_tip_stopwatch.sh` | `tools/scripts/c3_stopwatch_run_and_record.sh` | `~/.local/state/zclassic23-c3-stopwatch/history.jsonl` |
+| C3 | a genuinely-wiped fresh node reaches network tip within budget (`docs/quality/MVP.md` criterion 3) | `tools/scripts/cold_start_to_tip_stopwatch.sh` | `tools/scripts/c3_stopwatch_run_and_record.sh` | `~/.local/state/zclassic23-c3-stopwatch/history.jsonl` |
 | PROOF B | an already-at-tip node recovers from an upstream network outage within budget | `tools/scripts/network_disruption_recovery_stopwatch.sh` | `tools/scripts/netdisrupt_stopwatch_run_and_record.sh` | `~/.local/state/zclassic23-netdisrupt-stopwatch/history.jsonl` |
 
 Both harnesses gate on the same real claim `cold_start_to_tip_stopwatch.sh`

@@ -21,3 +21,7 @@ The package commons, source hosting, metaverse, ZCODE arena, architecture diagra
 | [ARCHITECTURE_DIAGRAMS.md](./ARCHITECTURE_DIAGRAMS.md) | startup, peers, validation and transactions |
 | [ARCHITECTURE_NORTH_STAR.md](./ARCHITECTURE_NORTH_STAR.md) | proven headers, derived state and duplicate writable facts |
 | [RISCV_MACHINE.md](./RISCV_MACHINE.md) | the built-in RISC-V machine |
+
+## Also in this directory
+
+- [`SOFTWARE_ANCHORING.md`](./SOFTWARE_ANCHORING.md): Software Anchoring (ZANC)

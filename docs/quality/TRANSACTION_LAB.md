@@ -17,7 +17,7 @@ projections named in `tools/dev/transaction_lab_catalog.def`.
 For the complete machine-readable inventory—including receive-only, contained,
 planned, ZID/ZDIR/ZANC, and ZCODE shapes—start with
 `z23 app transaction-types list`; field meanings and the AI workflow are
-documented in the [transaction API guide](../TRANSACTION_API.md).
+documented in the [transaction API guide](../spec/TRANSACTION_API.md).
 The checked mainnet classification, prerequisites, and owner-reviewed
 shield/private/unshield sequence are in the
 [live transaction demonstration runbook](./LIVE_TRANSACTION_DEMONSTRATIONS.md).
@@ -34,7 +34,7 @@ shield/private/unshield sequence are in the
 - The notebook never stores addresses, endpoints, datadir paths, grant tokens,
   private keys, recovery words, memos, or swap secrets. A mainnet txid is public
   and may be recorded after broadcast.
-- `docs/HANDOFF.md` is the current operational authority. Do not start while
+- `docs/agent/HANDOFF.md` is the current operational authority. Do not start while
   it says to stop the mainnet transaction lab; when it clears the
   infrastructure stop, the live identity-bound custody checks and the exact
   per-transaction owner approval are still required.

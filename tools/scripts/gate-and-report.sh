@@ -7,7 +7,7 @@
 # Manual release-boundary tool — intentionally no in-repo caller. The
 # PASS-TOKEN and complete suite accounting, never a substring match, are the
 # acceptance bar this wraps. Normal worker handoff uses focused acceptance;
-# see docs/DEVELOPING.md.
+# see docs/dev/DEVELOPING.md.
 set -u
 LINTLOG="${1:?lintlog}"; TESTLOG="${2:?testlog}"
 cd "$(git rev-parse --show-toplevel)" || exit 3

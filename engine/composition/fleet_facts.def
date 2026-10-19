@@ -309,7 +309,7 @@ FLEET_FACT("full-lint", "refuses_when", "generation-flavour-mismatch", "lane_sta
 FLEET_FACT("executor-routing", "lives_at", "engine/composition/fleet_facts.def", "doctrine", "DOCTRINE",
            "this table is the source; docs/agent/EXECUTOR_HEURISTICS.md renders it and never restates it")
 FLEET_FACT("train-protocol", "lives_at", "docs/agent/TRAIN_PROTOCOL.md", "doctrine", "DOCTRINE",
-           "historical train state and board records; current ownership and receipt-gated landing procedure live in docs/DEVELOPING.md")
+           "historical train state and board records; current ownership and receipt-gated landing procedure live in docs/dev/DEVELOPING.md")
 
 #ifdef ZCL_FLEET_RELATION_LOCAL_
 #undef FLEET_RELATION

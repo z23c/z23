@@ -297,7 +297,7 @@ static void api_push_mvp_operator_proofs(
 
     json_push_kv_str(&proofs, "schema", "zcl.mvp_operator_proofs.v1");
     json_push_kv_str(&proofs, "api_version", ZCL_REST_API_VERSION);
-    json_push_kv_str(&proofs, "source", "docs/MVP.md");
+    json_push_kv_str(&proofs, "source", "docs/quality/MVP.md");
     json_push_kv_str(&proofs, "native_command", "z23 milestone");
     json_push_kv_str(&proofs, "alias_command", "z23 mvpstatus");
     json_push_kv_int(&proofs, "accepted_count", strict_pass);

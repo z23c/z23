@@ -1730,7 +1730,7 @@ static void b64_encode(const char *in, size_t len, char *out)
  * listening but rejected our cookie" are distinct outcomes. Each gets its own
  * message AND its own process exit code (see the dispatch below
  * cli_rpc_call's caller), reusing the taxonomy the native command registry
- * documents in docs/NATIVE_COMMAND_INTERFACE.md (0/1/2/3/4/5/6). */
+ * documents in docs/dev/NATIVE_COMMAND_INTERFACE.md (0/1/2/3/4/5/6). */
 enum cli_rpc_outcome {
     CLI_RPC_OK = 0,
     CLI_RPC_CONNECT_REFUSED,  /* nothing listening at 127.0.0.1:PORT */
@@ -2635,7 +2635,7 @@ int cli_main(int argc, char **argv)
     if (!resp) {
         /* cli_rpc_call_internal_ex already printed the specific
          * error=<TAXONOMY> line; just map it to the matching documented
-         * exit code (docs/NATIVE_COMMAND_INTERFACE.md's stable table) so
+         * exit code (docs/dev/NATIVE_COMMAND_INTERFACE.md's stable table) so
          * a monitor can branch without scraping stderr text. */
         switch (rpc_outcome) {
         case CLI_RPC_CONNECT_REFUSED:
@@ -3513,7 +3513,7 @@ int import_complete_shielded_mode(int argc, char **argv)
  * the import instead of silently falling through to a normal boot (the
  * historical footgun: the verb only worked as argv[1], every other position
  * was ignored by the old argv[1]-only strcmp and the node quietly booted
- * normally — see docs/HANDOFF.md two-step cold-sync recipe /
+ * normally — see docs/agent/HANDOFF.md two-step cold-sync recipe /
  * test_importblockindex_cli_dispatch.c). A missing or non-existent source
  * datadir REFUSES loudly here (named error, non-zero exit) rather than
  * proceeding as a normal boot or failing deep inside the importer with a

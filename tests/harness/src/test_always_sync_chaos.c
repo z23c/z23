@@ -16,7 +16,7 @@
  *   - a BOUNDED gap, inside BLOCK_INDEX_LOADER_SEED_MAX_GAP — repaired by
  *     engine/services/src/block_index_loader_rebuild.c; an unconditional gate.
  *   - a gap beyond BLOCK_INDEX_LOADER_SEED_MAX_GAP — the open Pillar-0 limit
- *     (docs/HANDOFF.md). Until recovery lands, the row requires an explicit
+ *     (docs/agent/HANDOFF.md). Until recovery lands, the row requires an explicit
  *     contained refusal with no operator page; it flips to the recovery
  *     assertion when the injector reports `ok=true`.
  *

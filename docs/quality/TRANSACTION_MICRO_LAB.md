@@ -37,7 +37,7 @@ execution gate               [--------------------]   EXTERNAL CHECK REQUIRED
 
 No transaction in this campaign has been broadcast according to its ledger.
 This page intentionally carries no live lane or balance claim: re-read
-`docs/HANDOFF.md`, current typed status, and `make custody-status` before every
+`docs/agent/HANDOFF.md`, current typed status, and `make custody-status` before every
 session. A remembered 0.30000000 ZCL observation is not spend authority.
 
 ## What “smallest possible fee” means

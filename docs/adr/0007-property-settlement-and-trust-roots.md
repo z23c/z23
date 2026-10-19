@@ -7,7 +7,7 @@
   [`ADR-0005`](./0005-offchain-signed-contract-channels.md) (off-chain signed
   state — explicitly *not* a settlement mechanism under this ADR),
   [`SECURITY_AND_INTEGRITY.md`](../node/SECURITY_AND_INTEGRITY.md),
-  [`MVP.md`](../MVP.md) (the distribution gaps this ADR's Limits section
+  [`MVP.md`](../quality/MVP.md) (the distribution gaps this ADR's Limits section
   points at).
 - **Numbering note:** requested as `0003`; `0003` was already taken by the
   OS-substrate verdict, so this landed as `0007`.
@@ -228,7 +228,7 @@ being misquoted.
   thing.
 
 - **Software nobody can obtain has no censorship resistance at all.**
-  [`MVP.md`](../MVP.md) and this repository's own sovereignty findings record
+  [`MVP.md`](../quality/MVP.md) and this repository's own sovereignty findings record
   that there is no release, that the default build cannot send shielded, and
   that the proving parameters are not shipped. Distribution is the weakest
   link in this stack and it is the first thing a serious adversary attacks —

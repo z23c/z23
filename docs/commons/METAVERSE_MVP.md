@@ -38,12 +38,12 @@ live-money path fails closed with a typed, owner-gated error.
 | MM5 | **Metaverse web UX in the explorer** | `/metaverse` landing, `/metaverse/property`, `/metaverse/space`, `/metaverse/commons` pages render from live projections (pattern: `contexts/explorer/views/src/zcode_view*.c` + `contexts/commons/controllers/src/zcode_site_controller.c`); render gate `test_metaverse_site` registered and green (18/18 checks; isolated-node HTTPS smoke returns 200 on all four routes) | ✅ |
 | MM6 | **CLI UX is discoverable and documented** | every `metaverse.*` / `zcode.*` leaf has a complete declared schema and description in `engine/composition/commands/*.def`; `docs/API_REFERENCE.md` regenerates clean (`make docs-api-reference`) and the lint gate `check-api-reference-generated` stays green | ◐ |
 | MM7 | **Metaverse test suite runs as one aggregate** | `make metaverse-verify` exists and is green: the MM4 unit groups, the registered zcode/metaverse/space groups' key members, the multi-daemon proofs `make test-zcode-dht-acceptance` + `make test-science-acceptance`, and `make metaverse-tour`; new fuzzers `fuzz_zcode_dht` and `fuzz_zcode_science` in `FUZZ_TARGETS`. The target and fuzzers exist; the full aggregate has not run green yet | ◐ |
-| MM8 | **Docs tell the truth to a newcomer** | root `README.md` and `docs/GETTING_STARTED.md` describe the metaverse tour; `docs/commons/METAVERSE.md` is the canonical user-facing page; `docs/README.md` maps all of it; load-bearing claims carry inline `claim`-annotation bindings so `check-doc-claims` fails on rot | ✅ |
+| MM8 | **Docs tell the truth to a newcomer** | root `README.md` and `docs/node/GETTING_STARTED.md` describe the metaverse tour; `docs/commons/METAVERSE.md` is the canonical user-facing page; `docs/README.md` maps all of it; load-bearing claims carry inline `claim`-annotation bindings so `check-doc-claims` fails on rot | ✅ |
 
 **Legend:** ☐ unmet / not gated · ◐ a gate covers a **slice** (real regression
 protection, not the full claim) · ✅ the full claim run-passes via its
 verification target on this machine. Same update rule as
-[`docs/MVP.md`](../MVP.md): a criterion earns ✅ only when its full claim
+[`docs/quality/MVP.md`](../quality/MVP.md): a criterion earns ✅ only when its full claim
 actually runs and passes; a SKIP for a missing local dependency stays ◐.
 
 <!-- claim: symbol-present zcode_publish tools/dev/test_group_catalog.def # MM2 publish group -->
@@ -63,7 +63,7 @@ table does not choose the next repository task.
 
 ## Relationship to the v1 node MVP
 
-The v1 bar remains [`docs/MVP.md`](../MVP.md) (MRS 8/8) and its critical path
+The v1 bar remains [`docs/quality/MVP.md`](../quality/MVP.md) (MRS 8/8) and its critical path
 remains [`docs/work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md). The owner
 opened this metaverse lane in parallel; nothing here
 deprioritizes C3/C5/C6/C8, touches consensus (the core seal stays frozen),

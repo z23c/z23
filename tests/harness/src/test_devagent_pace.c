@@ -169,7 +169,7 @@ int test_devagent_pace(void)
     static const char *const log_nothing =
         "cwd=/work/z23-lane-x\n"
         READ "Read AGENTS.md\n"
-        READ "Read docs/DEVELOPING.md\n"
+        READ "Read docs/dev/DEVELOPING.md\n"
         SEARCH "Grep zcl_native_handle\n"
         SHELL "git status --short\n"
         SHELL "make -s lint-fast\n"

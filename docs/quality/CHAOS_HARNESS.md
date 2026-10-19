@@ -20,7 +20,7 @@ guards, preserves evidence, admits no completion`). Those tests fork real
 workers, synchronize on a blocking fake-git FIFO seam, and identify the
 guard owner by its published lease pid — no full node and no scenario file.
 The contract they enforce is written out in
-[`DEVELOPING.md`](../DEVELOPING.md) §6.
+[`DEVELOPING.md`](../dev/DEVELOPING.md) §6.
 
 ---
 

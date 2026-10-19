@@ -32,8 +32,8 @@ composition over new abstractions. The product is described in
 - `gcc` 14+ (or `clang` with working `-std=c23`), GNU `make`, a C++ compiler.
 - `cmake`, `autoconf`, `curl` or `wget`, `unzip`, `sha256sum` for the one-time
   build of pinned third-party sources (details in
-  [`docs/BUILD.md`](../docs/BUILD.md)). macOS and Windows:
-  [`docs/GETTING_STARTED.md`](../docs/GETTING_STARTED.md).
+  [`docs/dev/BUILD.md`](../docs/dev/BUILD.md)). macOS and Windows:
+  [`docs/node/GETTING_STARTED.md`](../docs/node/GETTING_STARTED.md).
 
 ## Build and smoke test
 

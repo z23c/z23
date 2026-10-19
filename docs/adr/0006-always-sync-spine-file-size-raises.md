@@ -12,7 +12,7 @@
 - **Deciders:** Project maintainer.
 - **Related:** [`self-verified-tip-plan.md`](../work/self-verified-tip-plan.md),
   [`fail-safe-architecture.md`](../work/fail-safe-architecture.md),
-  [`HANDOFF.md`](../HANDOFF.md), the approved always-sync spine plan
+  [`HANDOFF.md`](../agent/HANDOFF.md), the approved always-sync spine plan
   (`remember-this-software-must-snappy-fog`).
 
 ---

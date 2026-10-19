@@ -21,7 +21,7 @@ already named in the tree:
   fast-start state source and folds from genesis; the
   `bootstrap.no_state_source` condition exists precisely to make that LOUD
   rather than let the node sit silently at height 0
-  (`engine/conditions/src/no_state_source.c:28`). `docs/GETTING_STARTED.md:307`
+  (`engine/conditions/src/no_state_source.c:28`). `docs/node/GETTING_STARTED.md:307`
   said it plainly, before phase 1a of this ZRC landed: "the node does not
   discover a file-service host on its own."
 - **Discovery already rides the peer link across restarts — the gap is
@@ -45,7 +45,7 @@ already named in the tree:
   content digest, or freshness signal — so even a cached endpoint is dialled
   blind; the seed either turns out to have a fresh bundle or it does not,
   discovered only by trying.
-  `docs/GETTING_STARTED.md:307` stated the operator-visible symptom
+  `docs/node/GETTING_STARTED.md:307` stated the operator-visible symptom
   plainly: "the node does not discover a file-service host on its own"
   (true, before phase 1a landed, for the specific case this gap describes —
   first boot, nothing cached, no live peers consulted; a first-boot node now

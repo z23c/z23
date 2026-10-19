@@ -7,7 +7,7 @@
  * Both leaves are READ-ONLY and node-free: they read a broker directory that
  * an operator names, and they CREATE NOTHING. A missing directory is an
  * explicit not-present verdict, never an implicit mkdir — see the read-leaf
- * contract in docs/NATIVE_COMMAND_INTERFACE.md.
+ * contract in docs/dev/NATIVE_COMMAND_INTERFACE.md.
  *
  * `metaverse.property` — the READ half of the property catalog.
  *

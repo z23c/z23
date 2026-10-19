@@ -26,7 +26,7 @@
  *       "Pillar-0" boot wedge. Reproduces it at a caller-chosen gap size so
  *       one call can model both the in-bounds repair (already landed,
  *       BLOCK_INDEX_LOADER_SEED_MAX_GAP) and the live-node wedge scale
- *       (currently refused by design — see docs/HANDOFF.md).
+ *       (currently refused by design — see docs/agent/HANDOFF.md).
  *   (b) chaos_fault_kill_restart_mid_fold — an abrupt close+reopen of
  *       progress.kv mid-fold (simulates kill -9 before the last stage
  *       committed); asserts H* recomputes identically after the "restart".

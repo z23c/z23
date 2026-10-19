@@ -7,7 +7,7 @@
 # the native dev-lane activation engine live in DEV_ONLY_SRCS (Makefile) or
 # are self-guarded by `#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)`
 # and are compiled ONLY into the DEV/TEST binaries; the release binary must
-# link none of them. See docs/NATIVE_COMMAND_INTERFACE.md §20 ("Release
+# link none of them. See docs/dev/NATIVE_COMMAND_INTERFACE.md §20 ("Release
 # builds contain no dev mutation or loader command path").
 #
 # Two layers, so the gate is authoritative from source AND from the artifact:

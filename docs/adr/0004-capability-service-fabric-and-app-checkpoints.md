@@ -13,7 +13,7 @@
   central scheduler, keeping Linux first, and treating FreeBSD as a later
   native host.
 - **Related:** [`ADR-0002`](./0002-sealed-consensus-core.md),
-  [`HANDOFF.md`](../HANDOFF.md),
+  [`HANDOFF.md`](../agent/HANDOFF.md),
   [`self-verified-tip-plan.md`](../work/self-verified-tip-plan.md), and
   [`LLM-C23-APP-PLATFORM-CHECKLIST.md`](../work/LLM-C23-APP-PLATFORM-CHECKLIST.md).
 

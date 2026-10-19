@@ -34,7 +34,7 @@ tx load** with zero operator restarts, starting only after a complete
 self-verified cure passes copy proof (complete shielded anchors/nullifiers,
 not just transparent state) — check current sync state with
 `z23 status` / `z23 dumpstate reducer_frontier`;
-`docs/HANDOFF.md` holds current state. Once the cure passes, start a fresh
+`docs/agent/HANDOFF.md` holds current state. Once the cure passes, start a fresh
 exact-same-height-parity window with complete security posture and zero
 intervention. Run that with `make soak-7day` against the pinned candidate.
 

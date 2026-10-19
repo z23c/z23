@@ -25,14 +25,14 @@
 #       — a live-state trigger ("H*=", "wedged at", "held at", "currently
 #       …at/wedged/held", "live tip", "stuck at", "pinned at") next to a
 #       height-shaped number. Live state belongs on the ONE live-state page,
-#       docs/HANDOFF.md; every other doc must point there, not pin a height
+#       docs/agent/HANDOFF.md; every other doc must point there, not pin a height
 #       that rots the moment the node moves. New pins FAIL; the pre-existing
 #       corpus is grandfathered in tools/lint/stale_pinned_facts_baseline.txt
 #       (shrink-only — the concurrent doc-hygiene lane drains it).
 #
 # ── Precision / allowlisting ────────────────────────────────────────────────
 # Scope is deliberately narrow to keep false positives near zero:
-#   * docs/HANDOFF.md is EXEMPT — it is the one sanctioned live-state page.
+#   * docs/agent/HANDOFF.md is EXEMPT — it is the one sanctioned live-state page.
 #   * docs/work/archive/** is EXEMPT — frozen historical narratives; pinning a
 #     past height is their whole point (git history is the archaeology).
 # Per-line escape hatch: a trailing `<!-- stale-ok: <reason> -->` marker
@@ -193,7 +193,7 @@ if (( total > 0 )); then
         echo "               (NOT baseline-exemptible — this is the owner's named case.)" >&2
     fi
     if (( hgt_violations > 0 )); then
-        echo "  height-pin:  live state lives in docs/HANDOFF.md — point there, don't pin a height." >&2
+        echo "  height-pin:  live state lives in docs/agent/HANDOFF.md — point there, don't pin a height." >&2
         echo "               Verify the live H* (z23 dumpstate reducer_frontier) before writing." >&2
         echo "               A legitimately-constant/dated line may add a trailing" >&2
         echo "               <!-- stale-ok: <reason> --> marker." >&2

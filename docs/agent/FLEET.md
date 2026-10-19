@@ -65,7 +65,7 @@ Current status:
 - macOS is blocked pending native HOST qualification: Darwin strict
   descendant cleanup is not qualified.
 - Forward-secrecy design (proposal, not implemented):
-  [`TUNNEL_PQ_FORWARD_SECRECY.md`](../TUNNEL_PQ_FORWARD_SECRECY.md).
+  [`TUNNEL_PQ_FORWARD_SECRECY.md`](../spec/TUNNEL_PQ_FORWARD_SECRECY.md).
 
 Install and run each host from an owner-selected immutable release directory
 after an explicit owner GO naming the host, source, image hash, peer, target

@@ -148,7 +148,7 @@ free-tier P2P recovery source for the same bundle.
 ## Operator commands
 
 All three live under `ops.debug.rom_seed.*` (native command registry — see
-[`docs/NATIVE_COMMAND_INTERFACE.md`](./NATIVE_COMMAND_INTERFACE.md)). They
+[`docs/dev/NATIVE_COMMAND_INTERFACE.md`](./dev/NATIVE_COMMAND_INTERFACE.md)). They
 nest under `ops.debug` rather than a new top-level `ops.*` branch because
 the top-level `ops` menu is already at its listing-budget ceiling
 (`ZCL_COMMAND_BRANCH_BUDGET`) — see the precedent comment above

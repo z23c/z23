@@ -14,7 +14,7 @@
 > borrowed-seed loader is not deleted. This file is retained as the **design
 > reference** for the `G-SOV` predicate (the live sovereignty gate,
 > `engine/controllers/src/sovereignty_controller.c`) and for the still-open
-> hardening items below. Read `docs/HANDOFF.md` for current live status, not
+> hardening items below. Read `docs/agent/HANDOFF.md` for current live status, not
 > this file.
 
 > **One metric: T = time-to-self-verified-tip.** Wall-clock from a cold or
@@ -192,7 +192,7 @@ A boot is *self-verified-sovereign* iff **all three** hold:
 3. `coins_kv_is_proven_authority() == false`, **or** (`== true` **and**
    `coins_kv_contains_refold_marker()` — a single kernel-store key
    (`COINS_KV_SELF_FOLDED_KEY`, `progress.kv` pre-flip / `consensus.db`
-   after the item-2/3 kernel-store flip, `docs/HANDOFF.md` §0-LATEST)
+   after the item-2/3 kernel-store flip, `docs/agent/HANDOFF.md` §0-LATEST)
    proving a from-anchor reset ran). This separates self-derived from
    borrowed-and-stamped.
 

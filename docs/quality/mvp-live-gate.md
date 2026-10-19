@@ -1,7 +1,7 @@
 # MVP live-node gate — `tools/mvp_gate.sh`
 
 A **read-only** probe of the *running* node that scores the 8 MVP
-acceptance criteria (`docs/MVP.md`) against what the live node actually
+acceptance criteria (`docs/quality/MVP.md`) against what the live node actually
 demonstrates right now, plus a **soak-accrual** check (continuous-uptime
 + at-tip duration toward the 168h C6 window).
 
@@ -14,7 +14,7 @@ deliberately split:
 | `mvp_scoreboard.sh` (`make mvp`) | the mechanical/hermetic slices ran + passed | none (CI-safe) |
 | `mvp_gate.sh` (this) | what the *live running node* demonstrates now | a running node |
 
-Both compute MRS the same way (`docs/MVP.md` rule): **MRS = count of
+Both compute MRS the same way (`docs/quality/MVP.md` rule): **MRS = count of
 criteria PASS at the FULL operator-claim level.** A hermetic slice that
 passes, or a live surface that answers but whose full claim needs the
 sovereign foundation, is `BLOCKED(reason)` and does **not** count. Live
@@ -128,5 +128,5 @@ gate, use `tools/mvp_gate.sh --strict` so only a genuine live regression
 
 Run `tools/mvp_gate.sh` for the current MRS, gap, and soak-accrual state —
 do not trust a pinned snapshot in this file; heights, gaps, and MRS rot
-every session. `docs/HANDOFF.md` §0-LATEST carries the current live-node
+every session. `docs/agent/HANDOFF.md` §0-LATEST carries the current live-node
 narrative; this file only documents the script's contract.

@@ -3,7 +3,7 @@
 # Lane quickstart
 
 The operating contract is [AGENTS.md](../../AGENTS.md); the exact build,
-review, and native publication procedure is [DEVELOPING.md](../DEVELOPING.md).
+review, and native publication procedure is [DEVELOPING.md](../dev/DEVELOPING.md).
 Dispatch: [LANE_LAUNCH.md](LANE_LAUNCH.md). Report:
 [LANE_REPORT.md](LANE_REPORT.md).
 

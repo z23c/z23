@@ -1,4 +1,4 @@
-# allowed-signers for zcl.promotion_receipt.v1 — see docs/PROMOTION_RECEIPTS.md
+# allowed-signers for zcl.promotion_receipt.v1 — see docs/dev/PROMOTION_RECEIPTS.md
 #
 # THIS FILE IS INTENTIONALLY EMPTY OF KEYS. The evidence-signing identity is the
 # owner's decision, and publishing "this specific key is the evidence authority"
@@ -13,7 +13,7 @@
 # invalidate the evidence chain. Generate a key whose only job is signing
 # evidence.
 #
-# One-time owner setup (full version in docs/PROMOTION_RECEIPTS.md,
+# One-time owner setup (full version in docs/dev/PROMOTION_RECEIPTS.md,
 # "Owner setup"):
 #
 #   ssh-keygen -t ed25519 -C 'zclassic23 promotion receipts' \

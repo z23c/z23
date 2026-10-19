@@ -562,10 +562,12 @@ static const char hlt_receipt_e[] =
     "\"cache_creation_input_tokens\":0,\"output_tokens\":1357,"
     "\"reasoning_tokens\":548,\"total_tokens\":78900}\n";
 
+/* Frozen episode evidence: these path lists keep their historical spelling;
+ * the expected roots below hash these exact bytes. */
 static const char hlt_paths_a[] =
     ".claude/skills/z23-dev/SKILL.md\n.grok/skills/c23/SKILL.md\nMakefile\n"
     "cognition/modules/science/include/science/science_claim.h\n"
-    "docs/agent/AGENT_TRAPS.md\ndocs/DEFENSIVE_CODING.md\ndocs/DEVELOPING.md\n"
+    "docs/AGENT_TRAPS.md\ndocs/DEFENSIVE_CODING.md\ndocs/DEVELOPING.md\n"
     "docs/work/FORWARD_PLAN.md\nengine/composition/lib_module_order.def\n"
     "engine/modules/engine/include/engine/engine.h\n"
     "engine/modules/engine/include/engine/engine_err.h\n"
@@ -586,7 +588,7 @@ static const char hlt_paths_a[] =
 static const char hlt_paths_b[] =
     ".claude/skills/z23-dev/SKILL.md\n.grok/skills/c23/SKILL.md\nMakefile\n"
     "cognition/modules/science/include/science/science_claim.h\n"
-    "docs/agent/AGENT_TRAPS.md\ndocs/CODEBASE_MAP.md\ndocs/DEFENSIVE_CODING.md\n"
+    "docs/AGENT_TRAPS.md\ndocs/CODEBASE_MAP.md\ndocs/DEFENSIVE_CODING.md\n"
     "docs/DEVELOPING.md\ndocs/work/FORWARD_PLAN.md\n"
     "engine/composition/lib_module_order.def\n"
     "engine/composition/module_capabilities.def\n"

@@ -54,7 +54,7 @@
 # tools/scripts/promotion_receipt.sh (also called from tools/ship.sh's promotion
 # path) and verifiable offline by a third party. That ledger ships with zero
 # records: its genesis is minted once by the owner under a signing key the owner
-# chooses (docs/PROMOTION_RECEIPTS.md, "Owner setup"). The tag below stays as a
+# chooses (docs/dev/PROMOTION_RECEIPTS.md, "Owner setup"). The tag below stays as a
 # convenience index — it makes a promotion visible in `git log --decorate` —
 # and it proves nothing on its own.
 #

@@ -35,7 +35,7 @@ make lint-fast                                # fast lint subset
 ```
 
 Never run `test_zcl` directly. Run full `make lint` once, at the candidate tip before landing.
-On a maintainer host, prefix heavy commands with `devbuild --wait` ([Maintainer hosts](docs/DEVELOPING.md#maintainer-hosts)).
+On a maintainer host, prefix heavy commands with `devbuild --wait` ([Maintainer hosts](docs/dev/DEVELOPING.md#maintainer-hosts)).
 
 Before editing, `build/bin/z23 code guide <paths>` (MCP: `z23_code sub=guide`) returns one brief: nearest `AGENTS.md` rules, test groups, wiki lessons, first commands.
 Navigate with the binary before searching: `code map`, `code owner <path>`, `code impact <path>`, `discover help <path>`.
@@ -77,11 +77,11 @@ Escalate only for consensus or custody risk, destructive production action, irre
 - Commits are authored by the repository owner; an AI-written commit ends with a `Co-Authored-By:` trailer naming the model.
 - Fleet work coordinates through native tasks and receipts, never GitHub issues or pull requests; volunteers use `card:` pull requests.
 - After placement changes run `make check-architecture-tree`.
-- Landing is receipt-gated: [section 6](docs/DEVELOPING.md#6-integrate-and-push-a-coherent-slice). A push is a checkpoint; fetch, integrate and continue.
+- Landing is receipt-gated: [section 6](docs/dev/DEVELOPING.md#6-integrate-and-push-a-coherent-slice). A push is a checkpoint; fetch, integrate and continue.
 
 ## Where detail lives
 
-- Procedure: [DEVELOPING.md](docs/DEVELOPING.md); open one section, never the whole file: [1. Orient](docs/DEVELOPING.md#1-orient), [3. Edit within ownership](docs/DEVELOPING.md#3-edit-within-ownership-boundaries), [4. Fast feedback](docs/DEVELOPING.md#4-receive-fast-local-feedback), [5. Build and proof](docs/DEVELOPING.md#5-build-and-focused-proof).
-- Maintainer hosts, fleet priorities, scorecard tiers, lanes and trains, source baseline: [Maintainer hosts](docs/DEVELOPING.md#maintainer-hosts), [AGENT_FLEET.md](docs/work/AGENT_FLEET.md), [START_HERE.md](docs/agent/START_HERE.md).
-- Ownership map: [CODEBASE_MAP.md](docs/CODEBASE_MAP.md). Current work order: [FORWARD_PLAN.md](docs/work/FORWARD_PLAN.md). Docs index: [docs/README.md](docs/README.md).
+- Procedure: [DEVELOPING.md](docs/dev/DEVELOPING.md); open one section, never the whole file: [1. Orient](docs/dev/DEVELOPING.md#1-orient), [3. Edit within ownership](docs/dev/DEVELOPING.md#3-edit-within-ownership-boundaries), [4. Fast feedback](docs/dev/DEVELOPING.md#4-receive-fast-local-feedback), [5. Build and proof](docs/dev/DEVELOPING.md#5-build-and-focused-proof).
+- Maintainer hosts, fleet priorities, scorecard tiers, lanes and trains, source baseline: [Maintainer hosts](docs/dev/DEVELOPING.md#maintainer-hosts), [AGENT_FLEET.md](docs/work/AGENT_FLEET.md), [START_HERE.md](docs/agent/START_HERE.md).
+- Ownership map: [CODEBASE_MAP.md](docs/dev/CODEBASE_MAP.md). Current work order: [FORWARD_PLAN.md](docs/work/FORWARD_PLAN.md). Docs index: [docs/README.md](docs/README.md).
 - Nested `AGENTS.md` files in `engine/`, `cognition/`, `platform/`, `apps/`, `tools/`, `tests/`, `docs/` and `vendor/` add area rules.

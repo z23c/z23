@@ -26,7 +26,7 @@ vendor, a package registry, or a hosted service.
 > through the built-in store, seven days of running with no operator
 > intervention, recovery from `kill -9`, and consensus parity with `zclassicd`,
 > the original C++ ZClassic client. They are not all met yet.
-> [`docs/MVP.md`](docs/MVP.md) records each one with its evidence, failed runs
+> [`docs/quality/MVP.md`](docs/quality/MVP.md) records each one with its evidence, failed runs
 > included. For the current count, ask a running node rather than this page:
 > `build/bin/z23 milestone`.
 
@@ -40,10 +40,10 @@ target, see [the whole picture](docs/commons/WHOLE_PICTURE.md).
 
 | You want to | Start with | Read next |
 | --- | --- | --- |
-| Run your own ZClassic node | [Public start here](#public-start-here), then [Run a node](#run-a-node) | [Getting Started](docs/GETTING_STARTED.md) |
+| Run your own ZClassic node | [Public start here](#public-start-here), then [Run a node](#run-a-node) | [Getting Started](docs/node/GETTING_STARTED.md) |
 | Reach the chain tip sooner | [What reaching the tip actually costs](#what-reaching-the-tip-actually-costs) | [Sync](docs/node/SYNC.md) |
 | Share and reuse C23 source | [The C23 Commons](#the-c23-commons) | [Commons Quickstart](docs/commons/C23_COMMONS_QUICKSTART.md) |
-| Change Z23 itself | [Working on Z23 itself](#working-on-z23-itself) | [Developing](docs/DEVELOPING.md) |
+| Change Z23 itself | [Working on Z23 itself](#working-on-z23-itself) | [Developing](docs/dev/DEVELOPING.md) |
 | Contribute, or attach a coding agent | [Contribute](#contribute-with-or-without-a-coding-agent) | [CONTRIBUTING.md](.github/CONTRIBUTING.md) |
 | Operate a fleet of machines | [Fleet guide](docs/agent/FLEET.md) | [AGENTS.md](AGENTS.md) |
 
@@ -67,7 +67,7 @@ sync and validate — the verifying keys are compiled in — only to *send*
 shielded. The first build fetches pinned third-party sources, verifies each
 against a pinned SHA-256, and compiles them locally; after that, builds are
 offline. Prerequisites in full, macOS, Windows, and the container-free
-`make portable` build are in [Getting Started](docs/GETTING_STARTED.md).
+`make portable` build are in [Getting Started](docs/node/GETTING_STARTED.md).
 
 ## Run a node
 
@@ -147,7 +147,7 @@ same blocks, and consensus divergence is a defect rather than a feature. A
 read-only parity service diffs the UTXO set and tip against a local `zclassicd`
 oracle whenever one resolves, and a from-genesis replay canary re-validates full
 history through the current reducer — both are criterion 8, with their standing
-verdicts, in [`docs/MVP.md`](docs/MVP.md).
+verdicts, in [`docs/quality/MVP.md`](docs/quality/MVP.md).
 
 ## The C23 Commons
 
@@ -224,7 +224,7 @@ Maintainers and fleet members continue with [AGENTS.md](AGENTS.md).
 
 ## Go deeper
 
-- **Run it:** [Getting Started](docs/GETTING_STARTED.md) · [Sync](docs/node/SYNC.md) · [MVP acceptance](docs/MVP.md) · [Windows](docs/node/WINDOWS.md)
+- **Run it:** [Getting Started](docs/node/GETTING_STARTED.md) · [Sync](docs/node/SYNC.md) · [MVP acceptance](docs/quality/MVP.md) · [Windows](docs/node/WINDOWS.md)
 - **Understand it:** [How the Node Works](docs/node/HOW_THE_NODE_WORKS.md) · [Framework](docs/commons/FRAMEWORK.md) · [API Reference](docs/API_REFERENCE.md)
-- **Build with it:** [Developing](docs/DEVELOPING.md) · [Codebase Map](docs/CODEBASE_MAP.md) · [Commons Quickstart](docs/commons/C23_COMMONS_QUICKSTART.md) · [Forward Plan](docs/work/FORWARD_PLAN.md)
+- **Build with it:** [Developing](docs/dev/DEVELOPING.md) · [Codebase Map](docs/dev/CODEBASE_MAP.md) · [Commons Quickstart](docs/commons/C23_COMMONS_QUICKSTART.md) · [Forward Plan](docs/work/FORWARD_PLAN.md)
 - **License:** [Apache-2.0](LICENSE), with upstream notices preserved in [NOTICE](NOTICE)

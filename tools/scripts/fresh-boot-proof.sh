@@ -24,9 +24,9 @@
 #
 # Manual operator tool — intentionally no in-repo caller (no doc/Makefile
 # wiring): run by hand when re-proving the flagless cold-boot bar. Owning
-# runbook: docs/MVP.md criterion 3 ("Cold-start sync to tip") is the product
+# runbook: docs/quality/MVP.md criterion 3 ("Cold-start sync to tip") is the product
 # claim this harness verifies live against a real fresh datadir; see also
-# docs/HANDOFF.md for the current live sync state before running it.
+# docs/agent/HANDOFF.md for the current live sync state before running it.
 set -u
 
 # ── configuration (env-overridable) ────────────────────────────────────────

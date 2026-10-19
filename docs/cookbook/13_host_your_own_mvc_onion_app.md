@@ -117,7 +117,7 @@ marketplace. The rules that keep it one:
   mirror of the read-only pages.
 
 To smoke two onion nodes trading, build the vendored Tor
-(`git submodule update --init vendor/tor`, then per `docs/BUILD.md`),
+(`git submodule update --init vendor/tor`, then per `docs/dev/BUILD.md`),
 boot two isolated datadirs with `-tor` (see
 `tools/scripts/isolated_node_env.sh` for the port-discipline pattern),
 and walk the seller → gossip → buyer-accept loop by hand.

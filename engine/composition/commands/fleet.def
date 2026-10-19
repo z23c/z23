@@ -410,7 +410,7 @@ ZCL_COMMAND_READY_READ(
  * it opens a real UDP session, pings it, and prints round-trip microseconds,
  * jitter and loss. It is a measurement tool, not a node service — the node
  * never calls it, it touches no datadir, and it shares no code and no socket
- * with block relay. See docs/GAMELINK.md. */
+ * with block relay. See docs/node/GAMELINK.md. */
 
 ZCL_COMMAND_BRANCH("fleet.link", "fleet", "Measure the datagram link to a peer",
                    ZCL_COMMAND_LAYER_OPS)

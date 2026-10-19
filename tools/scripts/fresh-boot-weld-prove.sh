@@ -13,7 +13,7 @@
 # cleanly (never-stuck) rather than wedging or crash-looping.
 #
 # Gate is H* CLIMB (dumpstate reducer_frontier's "hstar" field), never "the
-# node stayed up" or "no FATAL in the log" — see docs/HANDOFF.md and
+# node stayed up" or "no FATAL in the log" — see docs/agent/HANDOFF.md and
 # tools/scripts/fresh-boot-proof.sh for the same doctrine applied to the
 # flagless from-genesis path this script's positive leg is the install-first
 # sibling of.

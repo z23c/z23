@@ -5,8 +5,8 @@
 This file supplies scoped product and implementation context for development.
 Durable product direction and
 agent authority live in [`../../AGENTS.md`](../../AGENTS.md); public-node
-acceptance lives in [`../MVP.md`](../MVP.md). Maintainer-host live state belongs
-only in [`../HANDOFF.md`](../HANDOFF.md), consulted for an explicit host
+acceptance lives in [`../quality/MVP.md`](../quality/MVP.md). Maintainer-host live state belongs
+only in [`../agent/HANDOFF.md`](../agent/HANDOFF.md), consulted for an explicit host
 assignment. Do not copy live heights, process state, or benchmark anecdotes here.
 
 `AGENTS.md` owns work order; `FLEET_SCORECARD.md` owns the thirteen current
@@ -121,7 +121,7 @@ These five outcomes retain product acceptance context. Select work under
 The items below describe work to prove, not capabilities declared complete.
 
 1. **Trust the public node and wallet first.** Close the literal
-   [C1–C8 criteria](../MVP.md) with evidence bound to the exact candidate.
+   [C1–C8 criteria](../quality/MVP.md) with evidence bound to the exact candidate.
    Literal payment qualification requires a previously uncredited recipient
    to receive **1 ZCL within two blocks**, with real proof verification and no
    double credit. Preserve the full from-genesis parity and uninterrupted
@@ -130,7 +130,7 @@ The items below describe work to prove, not capabilities declared complete.
    maps to section 5.
 
    Criterion 4's literal 1 ZCL rerun remains deferred until explicit owner spend
-   authorization. Its [`MVP.md`](../MVP.md) evidence is a 0.02 ZCL note decrypted
+   authorization. Its [`MVP.md`](../quality/MVP.md) evidence is a 0.02 ZCL note decrypted
    after mempool entry; that does not close the literal criterion. Criteria 6
    and 8 retain their recorded acceptance gaps. Follow the fleet work order
    when selecting authorized work on these gaps.

@@ -1220,7 +1220,7 @@ static bool dlx_regen_files(struct dlx_rig *rig, const char *body,
                             const char *extra)
 {
     return dlx_write_dep(rig->clone, "docs/CAPABILITY_INVENTORY.jsonl", body) &&
-           dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", map_body) &&
+           dlx_write_dep(rig->clone, "docs/dev/CODEBASE_MAP.md", map_body) &&
            (!third || dlx_write_dep(rig->clone, third, body)) &&
            (!extra || dlx_write_dep(rig->clone, extra, body));
 }
@@ -1283,7 +1283,7 @@ static bool dlx_rerere_autoupdate_prime(struct dlx_rig *rig)
     const char *merge[] = { "merge", "--no-ff", "keep-tip", NULL };
     const char *ours[] = { "checkout", "--ours", "--",
                            "docs/CAPABILITY_INVENTORY.jsonl",
-                           "docs/CODEBASE_MAP.md", NULL };
+                           "docs/dev/CODEBASE_MAP.md", NULL };
     const char *rerere[] = { "rerere", NULL };
     const char *merge_abort[] = { "merge", "--abort", NULL };
     const char *checkout_tip[] = { "checkout", "--quiet", "keep-tip", NULL };
@@ -1394,7 +1394,7 @@ static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
                        "orig\n") ||
         !dlx_write_dep(rig->clone, "docs/agent/EXECUTOR_HEURISTICS.md",
                        "orig\n") ||
-        !dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", "orig\n"))
+        !dlx_write_dep(rig->clone, "docs/dev/CODEBASE_MAP.md", "orig\n"))
         return false;
     if (!dlx_commit_all(rig->clone, "seed", seed))
         return false;
@@ -13192,7 +13192,7 @@ static int dlx_case_generated_conflict(void)
         const char *inventory[] = { "show",
                                     "HEAD:docs/CAPABILITY_INVENTORY.jsonl",
                                     NULL };
-        const char *map[] = { "show", "HEAD:docs/CODEBASE_MAP.md", NULL };
+        const char *map[] = { "show", "HEAD:docs/dev/CODEBASE_MAP.md", NULL };
         const char *mine[] = { "show", "HEAD:mine.txt", NULL };
         dlx_isolate("regenauto");
         ASSERT(dlx_rig_make(&rig, "regenauto_rig"));
@@ -13214,7 +13214,7 @@ static int dlx_case_generated_conflict(void)
         ASSERT(strstr(dlx_str(&c, "detail"),
                       "rebase: regenerated "
                       "docs/CAPABILITY_INVENTORY.jsonl,"
-                      "docs/CODEBASE_MAP.md") != NULL);
+                      "docs/dev/CODEBASE_MAP.md") != NULL);
         dlx_end(&c);
         dlx_land_wt(landwt, sizeof(landwt));
         ASSERT(dlx_git_out(landwt, log_subject, subject, sizeof(subject)) ==
@@ -13264,19 +13264,19 @@ static int dlx_case_conflict_regens_clean_merged_artifact(void)
         const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
                                NULL };
         const char *reset[] = { "reset", "--quiet", "--hard", base, NULL };
-        const char *map[] = { "show", "HEAD:docs/CODEBASE_MAP.md", NULL };
+        const char *map[] = { "show", "HEAD:docs/dev/CODEBASE_MAP.md", NULL };
         dlx_isolate("regenclean");
         ASSERT(dlx_rig_make_docregen(
             &rig, "regenclean_rig",
             "@printf 'regen\\n' > docs/CAPABILITY_INVENTORY.jsonl", "@:",
-            "@printf 'fixed\\n' > docs/CODEBASE_MAP.md"));
+            "@printf 'fixed\\n' > docs/dev/CODEBASE_MAP.md"));
         (void)snprintf(mkpath, sizeof(mkpath), "%s/Makefile", rig.clone);
         ASSERT(dlx_slurp(mkpath, mk, sizeof(mk) - 1, &len));
         mk[len] = '\0';
         ASSERT((size_t)snprintf(mk2, sizeof(mk2),
             "%sdocs-api-reference:\n\t@:\n"
             "check-generated-artifact-contradictions:\n\t@:\n"
-            "check-doc-counts:\n\t@grep -q fixed docs/CODEBASE_MAP.md || "
+            "check-doc-counts:\n\t@grep -q fixed docs/dev/CODEBASE_MAP.md || "
             "{ echo 'FAIL: doc-count drift detected'; exit 1; }\n",
             mk) < sizeof(mk2));
         ASSERT(dlx_write_dep(rig.clone, "Makefile", mk2));
@@ -13286,13 +13286,13 @@ static int dlx_case_conflict_regens_clean_merged_artifact(void)
         ASSERT(dlx_git(rig.clone, push) == 0);
         ASSERT(dlx_write_dep(rig.clone, "docs/CAPABILITY_INVENTORY.jsonl",
                              "mine\n"));
-        ASSERT(dlx_write_dep(rig.clone, "docs/CODEBASE_MAP.md", "bump\n"));
+        ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", "bump\n"));
         ASSERT(dlx_commit_tree(rig.clone, "the submitted work", tip));
         ASSERT(dlx_git(rig.clone, branch) == 0);
         ASSERT(dlx_git(rig.clone, reset) == 0);
         ASSERT(dlx_write_dep(rig.clone, "docs/CAPABILITY_INVENTORY.jsonl",
                              "theirs\n"));
-        ASSERT(dlx_write_dep(rig.clone, "docs/CODEBASE_MAP.md", "bump\n"));
+        ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", "bump\n"));
         ASSERT(dlx_commit_tree(rig.clone, "someone else's train", out));
         ASSERT(dlx_git(rig.clone, push) == 0);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
@@ -13427,7 +13427,7 @@ static int dlx_case_mixed_conflict(void)
         ASSERT(strstr(dlx_str(&c, "detail"), "change.txt") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"),
                       "docs/CAPABILITY_INVENTORY.jsonl") != NULL);
-        ASSERT(strstr(dlx_str(&c, "detail"), "docs/CODEBASE_MAP.md") !=
+        ASSERT(strstr(dlx_str(&c, "detail"), "docs/dev/CODEBASE_MAP.md") !=
               NULL);
         /* No regeneration note anywhere: nothing was auto-resolved. */
         ASSERT(strstr(dlx_str(&c, "detail"), "rebase: regenerated") ==
@@ -14334,8 +14334,8 @@ static int test_dev_land_rebase_regen_cases(void)
             const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
             const char *keep[] = { "branch", "keep-tip", NULL };
             const char *reset[] = { "reset", "--hard", base, NULL };
-            const char *show[] = { "show", "keep-tip:docs/CODEBASE_MAP.md", NULL };
-            const char *head[] = { "show", "HEAD:docs/CODEBASE_MAP.md", NULL };
+            const char *show[] = { "show", "keep-tip:docs/dev/CODEBASE_MAP.md", NULL };
+            const char *head[] = { "show", "HEAD:docs/dev/CODEBASE_MAP.md", NULL };
             dlx_isolate("countsprose");
             ASSERT(dlx_rig_make(&rig, "countsprose_rig"));
             memset(pad, 'x', sizeof(pad) - 1); pad[sizeof(pad) - 2] = '\n'; pad[sizeof(pad) - 1] = '\0';
@@ -14349,14 +14349,14 @@ static int test_dev_land_rebase_regen_cases(void)
                 strstr(b, "1253")[3] = '4';
                 strstr(p, "1253")[3] = '5';
             }
-            ASSERT(dlx_write_dep(rig.clone, "docs/CODEBASE_MAP.md", a)); ASSERT(dlx_commit_tree(rig.clone, "base", base));
+            ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", a)); ASSERT(dlx_commit_tree(rig.clone, "base", base));
             ASSERT(dlx_git(rig.clone, push) == 0);
-            ASSERT(dlx_write_dep(rig.clone, "docs/CODEBASE_MAP.md", p));
+            ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", p));
             if (mode == 1) ASSERT(dlx_write_dep(rig.clone, "clean.txt", "clean\n"));
             ASSERT(dlx_commit_tree(rig.clone, "proposal", tip));
             ASSERT(dlx_git(rig.clone, keep) == 0);
             ASSERT(dlx_git(rig.clone, reset) == 0);
-            ASSERT(dlx_write_dep(rig.clone, "docs/CODEBASE_MAP.md", b)); ASSERT(dlx_commit_tree(rig.clone, "upstream", upstream));
+            ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", b)); ASSERT(dlx_commit_tree(rig.clone, "upstream", upstream));
             ASSERT(dlx_git(rig.clone, push) == 0);
             setenv("ZCL_LAND_PROOF_STUB", "running", 1);
             setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -14368,7 +14368,7 @@ static int test_dev_land_rebase_regen_cases(void)
             ASSERT_STR_EQ(dlx_str(&c, "state"), mode >= 4 ? "started" : "conflict");
             if (mode >= 4)
                 ASSERT(strstr(dlx_str(&c, "detail"),
-                              "rebase: regenerated docs/CODEBASE_MAP.md") != NULL);
+                              "rebase: regenerated docs/dev/CODEBASE_MAP.md") != NULL);
             dlx_end(&c);
             ASSERT(dlx_git_out(rig.clone, show, out, sizeof(out)) == 0);
             p[strlen(p) - 1] = '\0';

@@ -4,7 +4,7 @@
 # agent_test_runner.sh — backing script for the `agenttest` native contract
 # (cognition/controllers/src/agent_test_controller.c / native `dev test run`),
 # cloned from the tools/repro_on_copy.sh + agentcopyprove pattern (see that
-# script + docs/CODEBASE_MAP.md "copy-prove").
+# script + docs/dev/CODEBASE_MAP.md "copy-prove").
 #
 # Runs ONE bounded, already-allowlisted test surface in the background and
 # writes a JSON status file the caller polls via `z23 dumpstate

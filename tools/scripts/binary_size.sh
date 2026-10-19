@@ -10,7 +10,7 @@
 # runs THIS and quotes the live value, and a reviewer re-runs it to confirm.
 #
 # DESIGN DECISION (step 2 of the anti-stale lane): the binary size is NOT baked
-# into the machine-checked DOC-COUNTS block in docs/CODEBASE_MAP.md. That block
+# into the machine-checked DOC-COUNTS block in docs/dev/CODEBASE_MAP.md. That block
 # is build-free by contract (check_doc_counts.sh is "filesystem + grep only, no
 # build"), whereas a binary size only exists after a whole-program LTO link and
 # depends on the flag profile (release vs test, portable vs ZCL_NATIVE, Tor stub

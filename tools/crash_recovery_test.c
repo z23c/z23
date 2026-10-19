@@ -923,7 +923,7 @@ int main(int argc, char **argv)
                     "are not durable across restart, so the kill/restart "
                     "overshoot teeth cannot be exercised. This is NOT a vacuous "
                     "green and NOT a regression in this harness — refusing to "
-                    "run a toothless loop. See MVP.md #7. "
+                    "run a toothless loop. See docs/quality/MVP.md #7. "
                     "(Set ZCL_CRASH_REQUIRE_TEETH=1 to make this a HARD FAIL in "
                     "the dedicated opt-in teeth job.)\n",
                     seeded_h, cfg.seed_blocks);

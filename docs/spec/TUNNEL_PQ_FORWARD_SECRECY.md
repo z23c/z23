@@ -18,7 +18,7 @@ This objective does not cover a compromised endpoint while it handles plaintext.
 The current host tunnel uses a static 32-byte PSK with SHAKE256-Wrap records.
 Its key schedule extracts from that PSK and the handshake transcript
 (the session key schedule in
-[`device_host_psk.c`](../engine/services/src/device_host_psk.c)).
+[`device_host_psk.c`](../../engine/services/src/device_host_psk.c)).
 Fresh nonces distinguish sessions; they do not supply an ephemeral secret
 unknown to an observer who later obtains the PSK. This outer profile has
 **no forward secrecy**. Erasing one session's derived keys does not change
@@ -35,7 +35,7 @@ does not fix unpinned SSH host keys or grant remote shell authority.
 
 The preferred migration is explicit pairing and target admission through the
 existing native mesh transport, then reuse of
-[`mesh_tunnel`](../engine/composition/include/config/mesh_tunnel.h).
+[`mesh_tunnel`](../../engine/composition/include/config/mesh_tunnel.h).
 Its header describes bounded streams and a receiver-owned loopback target
 allow table. That interface alone does not establish the negotiated transport
 suite. Reuse requires separately verifying the session's Noise suite, peer
@@ -43,7 +43,7 @@ identity binding and runtime admission; none is inferred from the header.
 
 Require the exact suite
 `Noise_XXhfs_25519+MLKEM768_ChaChaPoly_SHA256`, already represented in
-[`noise_handshake.h`](../core/modules/noise/include/noise/noise_handshake.h).
+[`noise_handshake.h`](../../core/modules/noise/include/noise/noise_handshake.h).
 It combines ephemeral X25519 with ephemeral ML-KEM-768 in the existing
 handshake state machine. The current suite name and token layout are a
 repository protocol; FIPS 203 standardizes ML-KEM, not this complete tunnel.
@@ -71,7 +71,7 @@ forward secrecy, not resistance to every active quantum attacker.
 ## Standalone alternative
 
 First inspect and reuse the existing
-[`device_channel`](../engine/services/src/device_channel.c) boundary. It already
+[`device_channel`](../../engine/services/src/device_channel.c) boundary. It already
 uses XXhfs with pinned local and peer X25519 identities, a purpose/profile-bound
 prologue and a guest-stream interface. That source mechanism is not evidence
 that the current static-PSK host tunnel uses it.
@@ -165,9 +165,9 @@ sealed authority requires the repository's separate unseal/reseal procedure.
 ## Vectors, experiments and acceptance
 
 Reuse the pinned NIST ACVP vectors in
-[`mlkem768_vectors.h`](../platform/modules/mlkem/tests/mlkem768_vectors.h)
+[`mlkem768_vectors.h`](../../platform/modules/mlkem/tests/mlkem768_vectors.h)
 and the deterministic transcript checks in
-[`test_noise_xxhfs.c`](../tests/harness/src/test_noise_xxhfs.c).
+[`test_noise_xxhfs.c`](../../tests/harness/src/test_noise_xxhfs.c).
 The former records its upstream commit and source JSON hashes. Retain those
 identities; never regenerate expected outputs with the implementation being
 tested and call that independent evidence.

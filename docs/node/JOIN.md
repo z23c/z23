@@ -9,7 +9,7 @@ also want it to take part in the C23 software commons.
 There is no join command for the chain, no registration, no invitation, and
 nobody who can approve or refuse you. A node that starts is on the network.
 Peer discovery is automatic and is described in
-[`GETTING_STARTED.md`](../GETTING_STARTED.md#syncing-to-the-chain-tip); the short
+[`GETTING_STARTED.md`](GETTING_STARTED.md#syncing-to-the-chain-tip); the short
 version is:
 
 - The binary carries a small set of compiled-in seed addresses. It puts them
@@ -40,7 +40,7 @@ choosing when you type nothing:
   where the bundle is fetched before any peer is even dialled, needs a
   `-fileservice=HOST` you supply. Without it, a node with at least one peer
   still asks that peer for a signed state offer and installs one that is
-  accepted with no flag from you (see [`GETTING_STARTED.md`](../GETTING_STARTED.md#syncing-to-the-chain-tip));
+  accepted with no flag from you (see [`GETTING_STARTED.md`](GETTING_STARTED.md#syncing-to-the-chain-tip));
   a node with no peers at all logs the named blocker
   `bootstrap.no_state_source` and syncs from genesis, which is correct and
   slow.
@@ -226,5 +226,5 @@ source until that changes.
   using packages once you have joined.
 - [`P2P_SOURCE_HOSTING.md`](../commons/P2P_SOURCE_HOSTING.md) — what package hosting
   actually serves.
-- [`GETTING_STARTED.md`](../GETTING_STARTED.md) — installing and running a node in
+- [`GETTING_STARTED.md`](GETTING_STARTED.md) — installing and running a node in
   the first place.

@@ -60,7 +60,7 @@ puts keys, addresses, grants, endpoints, paths, memos, or secrets in chat.
 
 Do not create a plan, reserve funds, or broadcast while any item is false:
 
-1. `docs/HANDOFF.md` no longer says to stop the mainnet transaction lab, and
+1. `docs/agent/HANDOFF.md` no longer says to stop the mainnet transaction lab, and
    every acceptance fact listed there is closed with current evidence.
 2. The installed dev binary identifies the source being reviewed; the node's
    typed `status` and `dumpstate reducer_frontier` reads are current.

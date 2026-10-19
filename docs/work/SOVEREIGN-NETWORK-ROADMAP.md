@@ -2,7 +2,7 @@
 
 This scoped foundation record preserves the Phase 0–6 product hierarchy and
 promotion gates. It does not choose current work. [`FORWARD_PLAN.md`](./FORWARD_PLAN.md)
-is the sole execution queue; [`../HANDOFF.md`](../HANDOFF.md) is consulted only
+is the sole execution queue; [`../agent/HANDOFF.md`](../agent/HANDOFF.md) is consulted only
 for an explicit maintainer-host operation.
 
 The preserved hierarchy is:
@@ -45,7 +45,7 @@ higher one.
 
 ## Current baseline
 
-Live state: `docs/HANDOFF.md`.
+Live state: `docs/agent/HANDOFF.md`.
 
 ## Phase 0 — containment and truthful control planes
 

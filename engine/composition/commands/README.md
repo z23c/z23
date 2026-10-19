@@ -1,7 +1,7 @@
 # Command registry definitions
 
 This directory is the authored source for the native LLM command ontology in
-[`docs/NATIVE_COMMAND_INTERFACE.md`](../../../docs/NATIVE_COMMAND_INTERFACE.md).
+[`docs/dev/NATIVE_COMMAND_INTERFACE.md`](../../../docs/dev/NATIVE_COMMAND_INTERFACE.md).
 
 Checkpoint status (2026-07-11):
 

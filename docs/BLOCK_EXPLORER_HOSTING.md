@@ -254,7 +254,7 @@ the node skipped. Symptom: `/explorer/tokens` returns `200` but lists nothing;
   full history, so run it as a **full-history node**. Either let it P2P-sync
   bodies from genesis, or on a box that already has a `zclassicd` archive use the
   two-step legacy import (`build/bin/z23 --importblockindex $HOME/.zclassic`
-  then a normal boot — see `docs/HANDOFF.md`), which gives the fold every body so
+  then a normal boot — see `docs/agent/HANDOFF.md`), which gives the fold every body so
   it rebuilds `zslp_tokens` and the address/tx indexes. Do **not** point an
   explorer-serving node at the `-load-snapshot-at-own-height` loader if you need
   the token/history pages populated.

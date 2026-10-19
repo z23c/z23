@@ -194,7 +194,7 @@ static int cks_build(struct cks_fx *fx)
     snprintf(fx->root, sizeof fx->root, "%s/root", fx->base);
     snprintf(fx->out, sizeof fx->out, "%s/out.txt", fx->base);
     char docs[CK_PATH + 32];
-    snprintf(docs, sizeof docs, "%s/docs", fx->root);
+    snprintf(docs, sizeof docs, "%s/docs/dev", fx->root);
     if (cks_put(fx, "build/bin/z23-dev", k_cks_dev, 0700) || cks_put(fx, "Makefile", "all:\n\ttrue\n", 0600)
         || csr_mkdirs(docs) != 0)
         return -1;
@@ -204,7 +204,7 @@ static int cks_build(struct cks_fx *fx)
 static struct ck_cfg cks_cfg(const struct cks_fx *fx, int fix, const char *floor, int grace)
 {
     return (struct ck_cfg){ .root = fx->root, .def = "engine/composition/cookbook.def",
-                            .doc = "docs/COOKBOOK.md", .bin_dir = "build/bin", .floor = floor,
+                            .doc = "docs/dev/COOKBOOK.md", .bin_dir = "build/bin", .floor = floor,
                             .timeout = "20", .fix = fix, .grace_ms = grace };
 }
 
@@ -261,14 +261,14 @@ static int cks_cases(const struct cks_fx *fx)
 {
     char path[CK_PATH * 2], doc[CKS_BUF], drifted[CKS_BUF + 8];
     const struct cks_case fix = { "--fix writes the document", k_cks_def, 1, "1", 0,
-                                  "fixed: docs/COOKBOOK.md regenerated", NULL };
+                                  "fixed: docs/dev/COOKBOOK.md regenerated", NULL };
     const struct cks_case clean = { "a matching document is clean", k_cks_def, 0, "1", 0,
                                     "check_cookbook: clean — 1 run, 1 ask, 1 read recipe(s)", NULL };
     const struct cks_case drift = { "a drifted document fails", k_cks_def, 0, "1", 1,
                                     "has drifted from", "check_cookbook: FAILED" };
     const struct cks_case again = { "--fix repairs a drifted document", k_cks_def, 1, "1", 0, "fixed:", NULL };
     const struct cks_case none = { "a missing document fails", k_cks_def, 0, "1", 1, "does not exist; run", NULL };
-    snprintf(path, sizeof path, "%s/docs/COOKBOOK.md", fx->root);
+    snprintf(path, sizeof path, "%s/docs/dev/COOKBOOK.md", fx->root);
     if (cks_case(fx, &fix) || cks_case(fx, &clean))
         return 1;
     if (cks_slurp(path, doc, sizeof doc) != 0 || !strstr(doc, "### How?\n\n    z23 code have retrieval\n\n")

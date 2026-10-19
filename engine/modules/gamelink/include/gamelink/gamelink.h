@@ -32,7 +32,7 @@
  * The clock is injected. Nothing here reads a wall clock, so a test can
  * assert an exact RTT instead of a tolerance.
  *
- * See docs/GAMELINK.md.
+ * See docs/node/GAMELINK.md.
  */
 
 #ifndef ZCL_GAMELINK_H
@@ -82,7 +82,7 @@
  * exposes no dedicated exporter — noise_hs_split() zeroizes the chaining key
  * it would have to come from — so the caller passes the material it DOES
  * hold: the two directional record-layer keys and the transcript hash. The
- * security consequences are written down in docs/GAMELINK.md; they are not
+ * security consequences are written down in docs/node/GAMELINK.md; they are not
  * hidden behind this struct. */
 #define GAMELINK_MATERIAL_BYTES 96u
 

@@ -2,7 +2,7 @@
 
 This is a historical design proposal for per-group proof reuse, not a current
 admission contract or implementation claim. The active route is
-[DEVELOPING.md](../DEVELOPING.md). Only implemented receiving-node policy can
+[DEVELOPING.md](../dev/DEVELOPING.md). Only implemented receiving-node policy can
 admit exact reusable evidence; this proposal grants no skip or publication
 authority and does not create another receipt ledger.
 

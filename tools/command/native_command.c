@@ -3091,7 +3091,7 @@ static int nc_run_discover(const struct zcl_command_spec *spec,
 }
 
 /* ── CLI UX contract: ONE-LINE status brief ──────────────────────────
- * See docs/NATIVE_COMMAND_INTERFACE.md "CLI UX contract". Exactly one line
+ * See docs/dev/NATIVE_COMMAND_INTERFACE.md "CLI UX contract". Exactly one line
  * (<=200 bytes), stable `key=value` pairs separated by single spaces, no
  * JSON braces. Reads only the flat fields core.status.brief already computed
  * (zcl_native_status_brief_body) — the render and the field selector below
@@ -3321,7 +3321,7 @@ const char *zcl_native_status_brief_next_command(const struct json_value *d)
 }
 
 /* ── CLI UX contract: field selector ─────────────────────────────────
- * See docs/NATIVE_COMMAND_INTERFACE.md "CLI UX contract". `status field=` and
+ * See docs/dev/NATIVE_COMMAND_INTERFACE.md "CLI UX contract". `status field=` and
  * `dumpstate <subsystem> field=` both call this one function — neither
  * hand-rolls its own key lookup. */
 enum { NC_FIELD_MAX = 24, NC_FIELD_NAME_MAX = 65 };
@@ -3539,7 +3539,7 @@ bool zcl_native_require_hex64(const char *field, const char *value,
 }
 
 /* ── CLI UX contract: unrecognized-command diagnostic ────────────────
- * See docs/NATIVE_COMMAND_INTERFACE.md "CLI UX contract". Pure text
+ * See docs/dev/NATIVE_COMMAND_INTERFACE.md "CLI UX contract". Pure text
  * builder — engine/entry/main.c's raw-RPC fallback calls this once it has confirmed
  * (via the RPC layer's method-not-found response) that `method` is not a
  * real command, then fprintf's the result to stderr. */
@@ -4802,7 +4802,7 @@ static bool nc_main_execute(struct nc_main_state *st,
  * lines, nothing else. Selects out of reply.data, the SAME object the
  * JSON envelope and the prose renderer below both read; no second data
  * path. Unknown field name -> the frozen `error=... detail=... try=...`
- * one-line error contract (docs/NATIVE_COMMAND_INTERFACE.md).
+ * one-line error contract (docs/dev/NATIVE_COMMAND_INTERFACE.md).
  * Returns true when this call is fully handled (*rc holds the process
  * exit code); false means fall through to the ordinary rendering below. */
 static bool nc_main_apply_field_selection(const struct zcl_command_spec *spec,

@@ -32,7 +32,7 @@ size_t zcode_view_develop(uint8_t *resp, size_t max)
         "Check your environment and build the native C23 node:</p>"
         "<pre><code>make doctor-env\nmake setup\nmake -j4 z23\n"
         "build/bin/z23 code guide</code></pre>"
-        "<p>The platform prerequisites live in <code>docs/GETTING_STARTED.md</code>. "
+        "<p>The platform prerequisites live in <code>docs/node/GETTING_STARTED.md</code>. "
         "Agree who owns the files, make one useful change, run its named "
         "tests, and submit the exact result with its evidence. "
         "Consensus, wallet custody, and public-node reliability come first.</p>"

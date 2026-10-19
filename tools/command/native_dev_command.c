@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Native handlers for the registry-owned `dev` tree
- * (docs/NATIVE_COMMAND_INTERFACE.md §7). These bind the registry catalog's dev
+ * (docs/dev/NATIVE_COMMAND_INTERFACE.md §7). These bind the registry catalog's dev
  * subtree to the checkout-local read-only producers: App manifest describe /
  * plan / simulate, source-change classification, the Core/App boundary law,
  * the latest native cycle verdict, and dev.vcs.revert. Source-only append-only

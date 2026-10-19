@@ -5,7 +5,7 @@
 > cursor-flip primitive. It is the *operational* (`release_assisted`) cure —
 > a separate `sovereign` cure (from-genesis self-mint + bundle install) is
 > the mechanism that actually passed the wedge live; see
-> `docs/HANDOFF.md` §0-LATEST for current trust-mode status and
+> `docs/agent/HANDOFF.md` §0-LATEST for current trust-mode status and
 > `sovereign-cutover-runbook.md` for that path. File:line references below
 > rot — re-verify against HEAD before relying on them.
 

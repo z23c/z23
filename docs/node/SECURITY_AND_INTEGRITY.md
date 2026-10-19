@@ -17,7 +17,7 @@ address; recovery checks use isolated state.
 
 - Z23 is pre-v1 and in active stabilization. It is not production-ready
   and has no supported release line yet.
-- The v1 bar is [`MVP.md`](../MVP.md). The project does not claim v1 until all
+- The v1 bar is [`MVP.md`](../quality/MVP.md). The project does not claim v1 until all
   eight operator acceptance criteria pass at the documented bar.
 - Known gaps are documented instead of hidden. Examples include the current
   live forward-progress blocker, off-chain ZMSG plaintext transport, and
@@ -202,7 +202,7 @@ height. Anchor membership is checked independently on both paths.
 - **Dependency provenance:** the shipped binary is not libc-only — it
   statically links vendored, source-built, SHA256-pinned third-party static
   libraries (OpenSSL, libevent, LevelDB, and secp256k1; see
-  `tools/scripts/build_vendor.sh` and [`BUILD.md`](../BUILD.md)'s dependency
+  `tools/scripts/build_vendor.sh` and [`BUILD.md`](../dev/BUILD.md)'s dependency
   table). The precise claim is **no unvendored, unpinned, or dynamically
   fetched-at-runtime dependencies** — every third-party source tarball is
   fetched from a pinned URL and verified against a pinned SHA256 before it is
@@ -390,7 +390,7 @@ Evidence files worth reading first:
 
 - [`../README.md`](../../README.md) - public status and feature scope.
 - [`../../.github/SECURITY.md`](../../.github/SECURITY.md) - vulnerability reporting.
-- [`MVP.md`](../MVP.md) - v1 acceptance criteria and readiness score.
+- [`MVP.md`](../quality/MVP.md) - v1 acceptance criteria and readiness score.
 - [`RUNBOOK.md`](../RUNBOOK.md) - operational safety rails.
 - [Isolated node harness](../../tools/scripts/isolated_node_env.sh) - process
   and datadir guardrails.

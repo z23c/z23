@@ -169,7 +169,7 @@ static const char k_evidence_plan[] =
 "    L05 A vanished sweep | state=LANDED | loop=five | evidence="
     "ONLY=ghost_group | box=node1\n"
 "    L06 A doc path | state=LANDED | loop=six | evidence="
-    "docs/DEVELOPING.md | box=node1\n"
+    "docs/dev/DEVELOPING.md | box=node1\n"
 "    L07 Two commits | state=LANDED | loop=seven | evidence="
     "0123456789abcdef0123456789abcdef01234567,fedcba9876543210 | box=node1\n"
 "    L08 One commit still in flight | state=LANDED | loop=eight | evidence="
@@ -750,7 +750,7 @@ static int test_mvp_ledger_evidence(void)
                   (int)MVL_EVIDENCE_RANGE);
         ASSERT_EQ((int)mvl_evidence_kind_of("ONLY=wallet_backup"),
                   (int)MVL_EVIDENCE_SWEEP);
-        ASSERT_EQ((int)mvl_evidence_kind_of("docs/DEVELOPING.md"),
+        ASSERT_EQ((int)mvl_evidence_kind_of("docs/dev/DEVELOPING.md"),
                   (int)MVL_EVIDENCE_OTHER);
         ASSERT_EQ((int)mvl_evidence_kind_of("wf_29284f91-171,wf_bdb64e24-7aa"),
                   (int)MVL_EVIDENCE_OTHER);

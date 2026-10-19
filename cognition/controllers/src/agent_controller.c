@@ -158,16 +158,16 @@ static const struct agent_path_outcome agent_out_fast_ci = {
     "fast_ci_and_gates", "normal", "docs/dev/fast-path.md", true, false,
     false, AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_native_agent = {
-    "native_agent_api", "operator_api", "docs/AGENT_API.md", true, true,
+    "native_agent_api", "operator_api", "docs/agent/AGENT_API.md", true, true,
     false, AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_native_status = {
-    "native_status_api", "operator_api", "docs/AGENT_API.md", true, true,
+    "native_status_api", "operator_api", "docs/agent/AGENT_API.md", true, true,
     false, AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_native_cli = {
-    "native_cli_api", "operator_api", "docs/AGENT_API.md", true, true,
+    "native_cli_api", "operator_api", "docs/agent/AGENT_API.md", true, true,
     false, AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_rest = {
-    "rest_agent_api", "operator_api", "docs/CODEBASE_MAP.md", true, true,
+    "rest_agent_api", "operator_api", "docs/dev/CODEBASE_MAP.md", true, true,
     false, AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_node_health = {
     "node_health", "operator_health", "docs/RUNBOOK.md", true, false,
@@ -180,19 +180,19 @@ static const struct agent_path_outcome agent_out_reducer = {
     "reducer_stage", "reducer_liveness", "docs/node/HOW_THE_NODE_WORKS.md", true,
     false, false, AGENT_PATH_GROUPS_STAGE };
 static const struct agent_path_outcome agent_out_service = {
-    "service_layer", "operator_liveness", "docs/CODEBASE_MAP.md", true,
+    "service_layer", "operator_liveness", "docs/dev/CODEBASE_MAP.md", true,
     false, false, AGENT_PATH_GROUPS_LINT };
 static const struct agent_path_outcome agent_out_harness = {
     "test_harness", "normal", "docs/dev/fast-path.md", true, false, false,
     AGENT_PATH_GROUPS_LINT };
 static const struct agent_path_outcome agent_out_code = {
-    "code", "normal", "docs/CODEBASE_MAP.md", true, false, false,
+    "code", "normal", "docs/dev/CODEBASE_MAP.md", true, false, false,
     AGENT_PATH_GROUPS_LINT };
 static const struct agent_path_outcome agent_out_general = {
-    "general", "normal", "docs/CODEBASE_MAP.md", false, false, false,
+    "general", "normal", "docs/dev/CODEBASE_MAP.md", false, false, false,
     AGENT_PATH_GROUPS_NONE };
 static const struct agent_path_outcome agent_out_invalid = {
-    "general", "invalid", "docs/AGENT_API.md", false, false, false,
+    "general", "invalid", "docs/agent/AGENT_API.md", false, false, false,
     AGENT_PATH_GROUPS_NONE };
 
 /* Evaluated top to bottom; the first matching rule decides. Overlaps:
@@ -343,12 +343,12 @@ bool rpc_agent_map(const struct json_value *params, bool help,
     agent_push_subsystem(&subsystems, "native_agent_api",
                          "first-call binary JSON contracts",
                          "cognition/controllers/src/agent_controller.c, cognition/controllers/src/agent_contracts_controller.c, cognition/controllers/src/agent_anchor_status_controller.c, cognition/controllers/src/agent_background_quality.c, cognition/controllers/src/agent_lane_runtime.c, cognition/controllers/src/agent_lanes_controller.c, cognition/controllers/src/agent_liveness_controller.c, cognition/controllers/src/agent_runtime_controller.c, cognition/controllers/include/controllers/agent_contracts.def, engine/entry/main.c",
-                         "docs/AGENT_API.md",
+                         "docs/agent/AGENT_API.md",
                          "syncdiag_rpc, command_registry_catalog, make_lint_gates");
     agent_push_subsystem(&subsystems, "rest_agent_api",
                          "public HTTP status/discovery mirror",
                          "engine/controllers/src/api_controller_status.c",
-                         "docs/CODEBASE_MAP.md",
+                         "docs/dev/CODEBASE_MAP.md",
                          "api");
     agent_push_subsystem(&subsystems, "health_and_blockers",
                          "serving/healthy/blocker semantics",

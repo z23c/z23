@@ -4620,7 +4620,7 @@ static void dl_beat(const struct dl_row *row, const char *beat, int64_t started)
 /* ── rebase conflicts on the artifacts every train regenerates ──────────
  *
  * docs/CAPABILITY_INVENTORY.jsonl, docs/API_REFERENCE.md and the
- * <!-- DOC-COUNTS --> block of docs/CODEBASE_MAP.md are GENERATED from the
+ * <!-- DOC-COUNTS --> block of docs/dev/CODEBASE_MAP.md are GENERATED from the
  * code, and a train that lands regenerates them. Two tips landing in the
  * same window therefore collide on those files by construction, and a
  * textual merge of two generated files settles nothing: neither side is
@@ -4650,7 +4650,7 @@ static const struct dl_regen_artifact DL_REGEN_ARTIFACTS[] = {
      * block from the code-measured values. Recovery normalizes that block
      * to upstream before merging the three stages' authored prose; an
      * authored conflict refuses recovery before regeneration or gates. */
-    { "docs/CODEBASE_MAP.md", "fix-doc-counts", "codebase map" },
+    { "docs/dev/CODEBASE_MAP.md", "fix-doc-counts", "codebase map" },
 };
 
 /* Regenerating is only half of it: an artifact rewritten from THIS tree
@@ -4780,7 +4780,7 @@ static inline bool dl_counts_span(char *text, char **begin, char **end)
  * truncated. */
 #define DL_COUNTS_MAX_BYTES ((size_t)8 << 20)
 
-/* Read one index stage of docs/CODEBASE_MAP.md into an exact-size heap
+/* Read one index stage of docs/dev/CODEBASE_MAP.md into an exact-size heap
  * buffer (NUL-terminated). The size comes first so the capture cap is the
  * real length rather than a guess. */
 #if !defined(_WIN32)
@@ -4790,7 +4790,7 @@ static bool dl_counts_stage(const struct dl_dirs *d, int stage, char **text,
     char spec[64], size_text[32], *endp = NULL;
     struct zcl_spawn_binary_observation capture;
     unsigned long long size;
-    (void)snprintf(spec, sizeof(spec), ":%d:docs/CODEBASE_MAP.md", stage);
+    (void)snprintf(spec, sizeof(spec), ":%d:docs/dev/CODEBASE_MAP.md", stage);
     const char *cat[] = { "git", "-C", d->wt, "cat-file", "-s", spec, NULL };
     if (!zcl_spawn_capture_binary(cat, size_text, sizeof(size_text) - 1,
                                   DL_GIT_TIMEOUT_MS, &capture).ok) return false;
@@ -4840,7 +4840,7 @@ static bool dl_counts_combine(const struct dl_dirs *d, const char *scratch,
                                  &capture).ok) {
         merged[capture.output_len] = '\0';
         (void)snprintf(path, sizeof(path), "%s/merged", scratch);
-        (void)snprintf(file[1], sizeof(file[1]), "%s/docs/CODEBASE_MAP.md",
+        (void)snprintf(file[1], sizeof(file[1]), "%s/docs/dev/CODEBASE_MAP.md",
                        d->wt);
         ok = dl_append_text(path, merged) && rename(path, file[1]) == 0;
     }
@@ -4887,7 +4887,7 @@ static bool dl_regen_resolve(const struct dl_dirs *d, const char *paths)
             line[--n] = '\0';
         if (!line[0])
             continue;
-        bool resolved = strcmp(line, "docs/CODEBASE_MAP.md") == 0
+        bool resolved = strcmp(line, "docs/dev/CODEBASE_MAP.md") == 0
             ? dl_counts_merge(d) : dl_git(d->wt, ours, NULL, 0, DL_GIT_TIMEOUT_MS) == 0;
         if (!resolved ||
             dl_git(d->wt, add, NULL, 0, DL_GIT_TIMEOUT_MS) != 0)

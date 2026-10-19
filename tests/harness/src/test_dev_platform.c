@@ -355,7 +355,7 @@ static int test_change_classification(void)
         ASSERT(plan.action == ZCL_DEVLOOP_RELOAD);
         ASSERT(plan.consensus_risk);
 
-        const char *docs[] = { "docs/BUILD.md" };
+        const char *docs[] = { "docs/dev/BUILD.md" };
         ASSERT(zcl_devloop_plan_files(docs, 1, &plan));
         ASSERT(plan.action == ZCL_DEVLOOP_CHECK);
         ASSERT(plan.docs_only);
@@ -1849,7 +1849,7 @@ static int test_watch_relevance(void)
             "core/consensus/src/check_block.c",
             "tools/dev/devloop_watch.c",
             "tests/harness/fixtures/raw_sqlite_step_fixture.c",
-            "docs/HANDOFF.md",
+            "docs/agent/HANDOFF.md",
             "Makefile",
             "cognition/controllers/include/controllers/agent_impact_rules.def",
         };

@@ -92,7 +92,7 @@ static void prc_anchor_verdict(struct prc_run *g, long keys, long records)
     } else if (keys == 0) {
         prc_say("  ok: %s lists no key yet and %s holds no records — consistent, unrecorded", c->signers,
                 c->ledger);
-        prc_say("      (the evidence-signing identity is an owner decision: docs/PROMOTION_RECEIPTS.md, "
+        prc_say("      (the evidence-signing identity is an owner decision: docs/dev/PROMOTION_RECEIPTS.md, "
                 "\"Owner setup\")");
     } else {
         prc_say("  ok: %s names %ld signing identity/identities for %ld record(s)", c->signers, keys, records);

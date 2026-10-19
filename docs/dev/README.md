@@ -2,7 +2,7 @@
 
 # Developer references
 
-Build and test loop, hot-swap, test-result cache, lab, plugins, services, flags and host maintenance for people changing Z23. Procedure lives in [DEVELOPING.md](../DEVELOPING.md).
+Build and test loop, hot-swap, test-result cache, lab, plugins, services, flags and host maintenance for people changing Z23. Procedure lives in [DEVELOPING.md](DEVELOPING.md).
 
 ## Build and test loop
 
@@ -39,3 +39,11 @@ Build and test loop, hot-swap, test-result cache, lab, plugins, services, flags 
 ## Contributors
 
 [CONTRIBUTORS.md](./CONTRIBUTORS.md) recognizes contributors and states the licensing terms.
+
+## Also in this directory
+
+- [`BUILD.md`](./BUILD.md): Building z23
+- [`CODEBASE_MAP.md`](./CODEBASE_MAP.md): CODEBASE_MAP.md — where things live + how to do each thing
+- [`COOKBOOK.md`](./COOKBOOK.md): Z23 cookbook
+- [`NATIVE_COMMAND_INTERFACE.md`](./NATIVE_COMMAND_INTERFACE.md): Z23 Native Command Interface
+- [`PROMOTION_RECEIPTS.md`](./PROMOTION_RECEIPTS.md): Promotion receipts — evidence that outlives the machine that made it

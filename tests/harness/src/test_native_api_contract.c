@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Native-command API contract tests (docs/NATIVE_COMMAND_INTERFACE.md,
+ * Native-command API contract tests (docs/dev/NATIVE_COMMAND_INTERFACE.md,
  * docs/API_REFERENCE.md). Sweeps, for the WHOLE catalog and without a live
  * node, invariants beyond test_command_registry_catalog.c:
  *

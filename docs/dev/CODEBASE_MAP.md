@@ -8,7 +8,7 @@ Fast reference for a fresh agent. Plain and technical. For the *why* (laws,
 shapes, doctrine) read `docs/commons/FRAMEWORK.md`; for the concrete feature-slice
 contract (REST resources, ActiveRecord, validations, relationships, database
 schema, services, native commands) read `docs/agent/AGENT_ARCHITECTURE.md`; for *current
-live state* read `docs/HANDOFF.md`; for *coding rules* read
+live state* read `docs/agent/HANDOFF.md`; for *coding rules* read
 `docs/DEFENSIVE_CODING.md`. For the one-page mental model read
 `docs/node/HOW_THE_NODE_WORKS.md`.
 
@@ -147,8 +147,8 @@ make core-unseal REASON="why this consensus change is parity-safe"   # mints .co
 make core-seal                                                        # re-freeze MANIFEST.sha3
 ```
 
-Read [`core/UNSEAL.md`](../core/UNSEAL.md) and
-[`docs/adr/0002-sealed-consensus-core.md`](adr/0002-sealed-consensus-core.md)
+Read [`core/UNSEAL.md`](../../core/UNSEAL.md) and
+[`docs/adr/0002-sealed-consensus-core.md`](../adr/0002-sealed-consensus-core.md)
 before touching anything under `core/`. Include paths were preserved across the
 move, so `#include "domain/consensus/…"` inside `core/` is correct and is *not*
 a stale path (`-Icore/consensus/include`); a `domain/consensus/…` path in a
@@ -177,8 +177,8 @@ platform (the ONLY clock/RNG source: `time_compat.h`,
 utils. Boot stage enum: `platform/modules/util/include/util/boot_phase.h`.
 
 `contexts/commons/modules/vcs/` owns ZVCS plus the `content.v2` package-manifest and source swarm.
-Read [`ZVCS.md`](commons/ZVCS.md) for internal source/version identity and
-[`P2P_SOURCE_HOSTING.md`](commons/P2P_SOURCE_HOSTING.md) for the source-hosting trust
+Read [`ZVCS.md`](../commons/ZVCS.md) for internal source/version identity and
+[`P2P_SOURCE_HOSTING.md`](../commons/P2P_SOURCE_HOSTING.md) for the source-hosting trust
 boundary and the remaining CAS work. Three files with three different reaches;
 check which one a claim is about before believing it:
 
@@ -261,7 +261,7 @@ namespaced public header `include/<pkg>/<pkg>.h`, primary TU `src/<pkg>.c`,
 Arena shelf and the `jsonq` helpers are); they are built, published,
 fetched, and reproduced through the Commons machinery itself
 (`tools/package_factory.c`, the swarm tests). The format discipline is
-normative in [`spec/c23-package-format.md`](spec/c23-package-format.md) and
+normative in [`spec/c23-package-format.md`](../spec/c23-package-format.md) and
 enforced by `make check-package-anatomy`.
 <!-- claim: gate-passes check-package-anatomy # contexts/commons/packages/ format discipline -->
 <!-- claim: file-present tools/package_factory.c # packages are built through the commons machinery -->
@@ -477,7 +477,7 @@ Use `docs/agent/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
 4. E5 gate (`check-typed-blocker`) enforces advance-or-block.
 
 Stage order and per-stage contract: see
-[`docs/node/HOW_THE_NODE_WORKS.md`](node/HOW_THE_NODE_WORKS.md) §2. The reducer is the
+[`docs/node/HOW_THE_NODE_WORKS.md`](../node/HOW_THE_NODE_WORKS.md) §2. The reducer is the
 **only** chain writer.
 
 ### Change a reducer stage
@@ -514,12 +514,12 @@ RATCHET gates compare against a baseline file (e.g.
 ## 3. The agent surface
 
 > The native typed command registry is the sole agent interface — see
-> [`docs/NATIVE_COMMAND_INTERFACE.md`](NATIVE_COMMAND_INTERFACE.md). Command
+> [`docs/dev/NATIVE_COMMAND_INTERFACE.md`](NATIVE_COMMAND_INTERFACE.md). Command
 > contracts carry native paths plus input/output schemas for discovery.
 > Alongside it a set of ~40 **flat compatibility shims** (`statecatalog`,
 > `dumpstate`, `agentdiagnose`, `proofbundle`, …) still work but are not in
 > `discover help` and not in any `engine/composition/commands/*.def`. They are documented
-> in [`docs/AGENT_API.md`](AGENT_API.md). Do not add new ones.
+> in [`docs/agent/AGENT_API.md`](../agent/AGENT_API.md). Do not add new ones.
 
 100+ typed commands. Discover them natively with `z23 discover help` /
 `z23 discover search <q>`. Source of truth is the `engine/composition/commands/*.def`
@@ -597,7 +597,7 @@ sapling`); the `--input='{"query":"…"}'` form its schema advertises returns
   visible for diagnosis.
 - `z23 agentmap` — AI-coder map for the native
   operator surface: where code lives, which docs apply, and which tests cover
-  each subsystem. The full contract guide is `docs/AGENT_API.md`.
+  each subsystem. The full contract guide is `docs/agent/AGENT_API.md`.
   First-call method/schema/tool metadata is centralized in
   `cognition/controllers/include/controllers/agent_contracts.def`; registry-backed
   `agentmap` command rows and telemetry drilldowns are grouped in
@@ -826,7 +826,7 @@ sync fields must match a direct agent-status packet; `test_api` and
 `test_syncdiag_rpc` enforce that. If any required agent field is missing, the
 endpoint must say `agent_cached_summary_with_fallbacks` and name the fallback
 source rather than silently mixing authorities. `operator_proofs` is static
-MVP-proof metadata, not a live-health authority; update it with `docs/MVP.md`
+MVP-proof metadata, not a live-health authority; update it with `docs/quality/MVP.md`
 when the accepted proof command or blocker for a criterion changes.
 The bounded agent fast path may use a cached chain-advance decision only when
 its projection fields are internally consistent with the served/tip frontier;

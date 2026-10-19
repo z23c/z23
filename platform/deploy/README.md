@@ -7,7 +7,7 @@ how much of it can I get from a clone". Everything here is tracked, reviewed
 and reproducible on someone else's machine. Nothing here is generated from a
 host's live state.
 
-Read [`../../docs/DEVELOPING.md`](../../docs/DEVELOPING.md) section 0 first if
+Read [`../../docs/dev/DEVELOPING.md`](../../docs/dev/DEVELOPING.md) section 0 first if
 you are new; this page is about operating a host, not about building.
 
 ## What is here

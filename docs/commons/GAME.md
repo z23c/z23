@@ -199,7 +199,7 @@ the input's ability to distinguish those policies is asserted.
 The game is Apache-2.0 (`LICENSE` at the repo root) and every imported file
 carries the repo header. raylib is vendored under `vendor/raylib/` under its
 own zlib licence, origin commit and digests pinned — see the dependency
-section of [BUILD.md](../BUILD.md). No submodule, no package manager, no system
+section of [BUILD.md](../dev/BUILD.md). No submodule, no package manager, no system
 raylib. Source files that could never compile upstream (headers that exist
 nowhere, SDL2/GLUT/GLEW demos, the GDB-proof pipeline) were not imported; the
 import commit for `apps/skycombat` names each one.

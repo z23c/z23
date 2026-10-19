@@ -152,7 +152,7 @@
                "canonical", "dev",
                "tests/harness/src/test_slo_ledger_summary.c", false),
     DIAG_ENTRY("mvp", mvp_dump_state_json,
-               "MVP v1 scoreboard (schema zcl.mvp_status.v1): docs/MVP.md's "
+               "MVP v1 scoreboard (schema zcl.mvp_status.v1): docs/quality/MVP.md's "
                "eight operator acceptance criteria as {id,title,met,evidence,"
                "since,blocker} + met_count/total/ready_for_v1. REPORTER ONLY "
                "— derives met=true|false|unknown from live evidence "

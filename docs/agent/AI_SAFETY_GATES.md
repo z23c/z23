@@ -75,7 +75,7 @@ genuinely made progress. None survived contact with the node the next morning.
 The claim outlived the state it described, and the next session started from
 the claim.
 
-**What it does.** It scans exactly one file: `docs/HANDOFF.md`, the single page
+**What it does.** It scans exactly one file: `docs/agent/HANDOFF.md`, the single page
 in the tree permitted to carry live node state. It splits that file into
 blank-line-delimited paragraphs. Any paragraph containing a **victory phrase**
 — matched case-insensitively and word-bounded, so "secured" never trips "cured"
@@ -98,7 +98,7 @@ can't fake with fluency: the claim and its evidence must be adjacent in the
 same paragraph. To pass, you have to go get a ledger line — which means the
 proof job has to have actually run.
 
-**The hollow-gate rule.** If `docs/HANDOFF.md` is missing, or is shorter than
+**The hollow-gate rule.** If `docs/agent/HANDOFF.md` is missing, or is shorter than
 ten lines, the gate **fails** rather than reporting clean. A gate that quietly
 passes on an empty scan set is worse than no gate, because it produces a green
 check for nothing. The script also ships a hermetic `--selftest` that proves
@@ -173,7 +173,7 @@ is a claim with an expiry date and no expiry mechanism. Correcting it buys you
 one release cycle; **removing** it fixes it permanently.
 
 **What it does.** It scans `CLAUDE.md`, `README.md`, and every tracked
-`docs/**/*.md`, minus the two sanctioned exceptions — `docs/HANDOFF.md` (the
+`docs/**/*.md`, minus the two sanctioned exceptions — `docs/agent/HANDOFF.md` (the
 one live-state page, which is *supposed* to carry current numbers, and is
 policed instead by `check-no-uncited-victory`) and `docs/work/archive/**`
 (frozen historical narratives, where pinning a past value is the whole point).
@@ -199,7 +199,7 @@ benchmark log row, an immutable positioning statement in an ADR.
 **A gap that was closed, and the rule it left behind.** The sibling gate
 `tools/scripts/check_doc_counts.sh`, which machine-checks code-derived counts
 (test groups, ports, adapters, condition registrations) against a canonical
-`DOC-COUNTS` block in [`CODEBASE_MAP.md`](../CODEBASE_MAP.md), once scanned
+`DOC-COUNTS` block in [`CODEBASE_MAP.md`](../dev/CODEBASE_MAP.md), once scanned
 `CLAUDE.md` and `docs/**` but **not** `README.md`. The single most-read file in
 the repository was the one file exempt from that gate — which is why several
 counts in it rotted undetected. Its scan set is now every tracked `*.md` via

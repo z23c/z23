@@ -14,10 +14,10 @@
  * has its command actually run and the expected token must appear in the
  * output. An ASK row must still name a command the binary offers and reports
  * as ready. A READ row must name a tracked file that still contains the
- * symbol it points at. docs/COOKBOOK.md is GENERATED from this file, so the
+ * symbol it points at. docs/dev/COOKBOOK.md is GENERATED from this file, so the
  * prose cannot drift from the rows either.
  *
- * THIS IS NOT docs/DEVELOPING.md. That is the ORDER you do things in —
+ * THIS IS NOT docs/dev/DEVELOPING.md. That is the ORDER you do things in —
  * orient, inspect, edit, prove, integrate. This is the lookup table: one
  * question, one answer, no narrative. Read DEVELOPING once; come back here
  * every time you forget the exact incantation.
@@ -54,7 +54,7 @@
  *     and the code cannot.
  *
  * ADDING A ROW: put it under the right SECTION, then run
- * tools/lint/check_cookbook.sh --fix to regenerate docs/COOKBOOK.md. Never
+ * tools/lint/check_cookbook.sh --fix to regenerate docs/dev/COOKBOOK.md. Never
  * edit that file by hand.
  */
 

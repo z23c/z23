@@ -15,7 +15,7 @@
  * recorder dials the loopback address: the reference-oracle service and
  * engine/services/src/utxo_parity_service.c (PARITY_RPC_DEFAULT_HOST) both read
  * the co-located legacy reference node on THIS box — same disk, same clock,
- * same operator, same binary lineage. docs/HANDOFF.md says so plainly and that
+ * same operator, same binary lineage. docs/agent/HANDOFF.md says so plainly and that
  * paragraph stands. This is the first rung that compares a BLOCK HASH against
  * genuinely remote machines.
  *
