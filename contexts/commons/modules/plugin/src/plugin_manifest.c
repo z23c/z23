@@ -38,7 +38,8 @@ static const struct {
     [PLUGIN_ERR_ARGUMENT] = { "PLUGIN_ARGUMENT",
         "pass the documented arguments: z23 discover describe plugin" },
     [PLUGIN_ERR_NO_KEYS] = { "PLUGIN_NO_KEYS",
-        "write one Ed25519 public key hex per line to ~/.z23/plugins/publisher_keys" },
+        "add the publisher key: z23 plugin publisher <64-character-public-key>; "
+        "then retry the requested operation" },
     [PLUGIN_ERR_KEYS_MALFORMED] = { "PLUGIN_KEYS_MALFORMED",
         "fix ~/.z23/plugins/publisher_keys so every line is a 64 character public key hex" },
     [PLUGIN_ERR_MANIFEST_MISSING] = { "PLUGIN_MANIFEST_MISSING",

@@ -431,11 +431,26 @@ static int pct_case_keys_chain(void)
     struct pct_env e;
     bool ready = pct_env_bare(&e);
     TEST_CASE("keygen, publisher, pack, install, switch and call run end to end with no hand edits") {
-        char pub[65];
+        char pub[65], input[4 * PATH_MAX];
         struct zcl_command_next next;
         struct zcl_command_reply r;
         ASSERT(ready);
         ASSERT(pct_keygen(&e, pub, &next));
+        snprintf(input, sizeof(input),
+                 "{\"exe\":\"%s\",\"name\":\"upper\",\"version\":\"1.2.3\","
+                 "\"key\":\"%s/publisher.key\",\"dir\":\"%s\",\"interface\":2}",
+                 PCT_FIXTURE, e.base, e.dist);
+        ASSERT(pct_call(zcl_native_handle_plugin_pack, input, &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&r);
+        snprintf(input, sizeof(input), "{\"manifest\":\"%s/upper.plugin.json\"}", e.dist);
+        ASSERT(pct_call(zcl_native_handle_plugin_install, input, &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_NO_KEYS");
+        ASSERT(!r.error.mutated);
+        ASSERT(strstr(r.error.next_action, "z23 plugin publisher ") != NULL);
+        ASSERT(strstr(r.error.next_action, "retry the requested operation") != NULL);
+        zcl_command_reply_free(&r);
         ASSERT(pct_keys_call(pub, &r));
         ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
         zcl_command_reply_free(&r);
