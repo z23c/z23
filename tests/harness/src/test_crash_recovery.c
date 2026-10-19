@@ -306,6 +306,46 @@ static int test_crash_recovery_home_refused(void)
     return failures;
 }
 
+/* One receipt line per run, read back through the shared evidence reader.
+ * The selftest owns a temp ledger, appends a malformed row between two good
+ * receipts, and must report exactly the two valid rows back. */
+static int test_crash_recovery_receipt_roundtrip(void)
+{
+    int failures = 0;
+    char buf[4096] = {0};
+    char root[512] = {0};
+    char ledger[600] = {0};
+    char flag[640] = {0};
+    bool created = false;
+    bool timed_out = false;
+    TEST("crash_recovery: receipt round-trips and a malformed row is skipped") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "crash_receipt") != NULL);
+        created = true;
+        int n = snprintf(ledger, sizeof(ledger), "%s/receipts.jsonl", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(ledger));
+        n = snprintf(flag, sizeof(flag), "--receipt-selftest=%s", ledger);
+        ASSERT(n > 0 && (size_t)n < sizeof(flag));
+        const char *const argv[] = {CRASH_RECOVERY_BIN, flag, NULL};
+        int rc = cr_run_merged(buf, sizeof(buf), &timed_out, argv);
+        ASSERT(!timed_out);
+        ASSERT(rc == 0);
+        ASSERT(strstr(buf, "crash receipt selftest: PASS") != NULL);
+        ASSERT(strstr(buf, "valid=2 skipped=1") != NULL);
+        PASS();
+    } _test_next:;
+    if (created) {
+        if (unlink(ledger) != 0 && errno != ENOENT) {
+            fprintf(stderr, "crash_recovery: cannot remove receipt %s: %s\n", ledger, strerror(errno));
+            failures++;
+        }
+        if (rmdir(root) != 0) {
+            fprintf(stderr, "crash_recovery: cannot remove fixture %s: %s\n", root, strerror(errno));
+            failures++;
+        }
+    }
+    return failures;
+}
+
 int test_crash_recovery(void)
 {
     int failures = 0;
@@ -322,5 +362,6 @@ int test_crash_recovery(void)
     failures += test_crash_recovery_help_still_works();
     failures += test_crash_recovery_defaults_refused();
     failures += test_crash_recovery_home_refused();
+    failures += test_crash_recovery_receipt_roundtrip();
     return failures;
 }
