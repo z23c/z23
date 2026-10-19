@@ -14827,7 +14827,7 @@ check-no-uncited-victory: $(LINTC_TOOL)
 # Generalizes the two hardcoded rows in check-doc-no-false-deleted. Covers
 # tracked *.md; out-of-repo plans need the explicit
 # `tools/lint/check_doc_claims.sh --scan <dir>` invocation.
-check-doc-claims:
+check-doc-claims: $(LINTC_TOOL) $(BIN_DIR)/z23_bounded_run
 	@echo "══ LINT: bound doc claims (doc freshness) ══"
 	@./tools/lint/check_doc_claims.sh
 
