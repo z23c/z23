@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 996 |
+| Registry entries (branches + leaves) | 998 |
 | Top-level roots | 17 |
 | Branches | 214 |
-| Leaves (dispatchable command paths) | 782 |
-| … `ready` (live handler in this build) | 679 |
+| Leaves (dispatchable command paths) | 784 |
+| … `ready` (live handler in this build) | 681 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 305 |
+| Leaves with `effect=mutate` | 306 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 156 |
 
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 80 | 16 | 64 |
+| `engine/composition/commands/ops.def` | 82 | 16 | 66 |
 | `engine/composition/commands/dev.def` | 139 | 24 | 115 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -1038,6 +1038,8 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `ops host gc` | ready | destructive / dev-mutation / operator · maintenance/moderate | `apply`, `floor_hours`, `roots`, `age_days` | `zcl.host_gc.v1` | `z23 ops host gc --apply=false` | Classify and reclaim dead dev-proof worktree generations |
+| `ops host build` | ready | mutate / dev-mutation / operator, stream · background/high | none | `zcl.ops_host_build.blocker.v1` | `z23 ops host build -- make lint-fast` | Run a heavy command through the host build queue |
+| `ops host jobs` | ready | read / read / operator · fast/low | none | `zcl.host_jobs.v1` | `z23 ops host jobs` | List running and queued host build jobs |
 
 #### `ops.host.slo` — Node SLO monitors
 
