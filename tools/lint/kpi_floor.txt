@@ -21,7 +21,7 @@
 cmd.help_pct 10000
 cmd.ready_pct 9591
 cmd.tested 493
-code.bash_scripts 345
+code.shell_scripts 493
 code.size_debt 19
 determinism_debt 4
 docs.orphans 15

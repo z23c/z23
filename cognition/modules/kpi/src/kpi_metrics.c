@@ -73,7 +73,7 @@ static const struct kpi_metric_def k_metrics[] = {
       "engine/composition/commands/catalog.def", "docs/API_REFERENCE.md" },
     { "cmd.tested", KPI_DIRECTION_HIGHER_IS_BETTER,
       "engine/composition/commands/catalog.def", "z23 code tests <path>" },
-    { "code.bash_scripts", KPI_DIRECTION_LOWER_IS_BETTER,
+    { "code.shell_scripts", KPI_DIRECTION_LOWER_IS_BETTER,
       "tools/lint/bash_allowlist.txt", "cat tools/lint/bash_allowlist.txt" },
     { "code.size_debt", KPI_DIRECTION_LOWER_IS_BETTER,
       "tools/lint/file_size_policy_baseline.txt",

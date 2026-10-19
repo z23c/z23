@@ -277,7 +277,6 @@ tools/lint/check_sysinit_ordering.sh
 tools/lint/check_telemetry_ontology.sh
 tools/lint/check_thread_supervision.sh
 tools/lint/check_tor_provenance.sh
-tools/lint/check_verification_coverage.sh
 tools/lint/check_wallet_raw_prepare_log.sh
 tools/lint/check_windows_acceptance.sh
 tools/lint/check_windows_acceptance_guard.sh

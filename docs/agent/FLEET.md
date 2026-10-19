@@ -216,9 +216,9 @@ The closed catalog is [`engine/composition/objectives.def`](../../engine/composi
 goal G1-G13, public-node criterion C1-C8 and development milestone D1-D8, with its
 id, title, grade (`pass`, `partial`, `fail` or `unmeasured`), the A+ bar, one evidence
 string from a local probe and `next`, the command or card that would raise it. The
-closed catalog is [`engine/composition/goals.def`](../engine/composition/goals.def);
-the targets are in [FLEET_SCORECARD.md](work/FLEET_SCORECARD.md),
-[MVP.md](MVP.md) and [DEVELOPMENT_MVP.md](work/DEVELOPMENT_MVP.md).
+closed catalog is [`engine/composition/goals.def`](../../engine/composition/goals.def);
+the targets are in [FLEET_SCORECARD.md](../work/FLEET_SCORECARD.md),
+[MVP.md](../quality/MVP.md) and [DEVELOPMENT_MVP.md](DEVELOPMENT_MVP.md).
 
 A row passes only when every numeric clause of its bar was measured and met. A row
 whose probe is missing is `unmeasured` with the reason; the leaf never guesses a grade.

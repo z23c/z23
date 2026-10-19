@@ -1942,7 +1942,7 @@ rows behind it, in three groups:
   `cmd.help_pct` (leaves with a summary and an example) and `cmd.tested`
   (ready leaves named inside a string literal under `tests/harness/src`).
   `*_pct` values are hundredths of a percent.
-- `code` — `code.bash_scripts`, `code.size_debt`, `determinism_debt`,
+- `code` — `code.shell_scripts`, `code.size_debt`, `determinism_debt`,
   `lint_gates`, `test_groups`, `capabilities`, `duplicate_candidates`,
   `untested_invariants`, `territories`, `files_owned`.
 - `docs` — `docs.orphans`.

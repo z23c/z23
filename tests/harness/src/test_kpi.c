@@ -658,7 +658,7 @@ static int case_tree_metrics(void)
 
     struct kpi_frame f;
     kpi_collect_files(dir, KPI_GROUP_ALL, &f);
-    const struct kpi_entry *bash = kpi_frame_find(&f, "code.bash_scripts");
+    const struct kpi_entry *bash = kpi_frame_find(&f, "code.shell_scripts");
     const struct kpi_entry *size = kpi_frame_find(&f, "code.size_debt");
     const struct kpi_entry *orph = kpi_frame_find(&f, "docs.orphans");
     KPI_CHECK("bash scripts and size debt count their rows",
@@ -681,7 +681,7 @@ static int case_tree_metrics(void)
               kpi_frame_find(&f, "docs.orphans")->state == KPI_STATE_PRESENT &&
                   kpi_frame_find(&f, "cmd.leaves")->state ==
                       KPI_STATE_UNAVAILABLE &&
-                  kpi_frame_find(&f, "code.bash_scripts")->state ==
+                  kpi_frame_find(&f, "code.shell_scripts")->state ==
                       KPI_STATE_UNAVAILABLE);
 
     uint8_t buf[KPI_PAYLOAD_MAX];
