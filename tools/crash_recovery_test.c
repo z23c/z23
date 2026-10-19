@@ -808,14 +808,14 @@ static int cr_rpc_selftest(void)
 
 /* ---- C7 durable receipt: one JSONL row per --bootstrap-regtest run ----
  * Same flat-row shape the evidence ledgers already use: appended under an
- * advisory lock to HOME/.local/state/zclassic23-crash-recovery/receipts.jsonl
+ * advisory lock to HOME/.local/state/z23/crash-recovery/receipts.jsonl
  * (ZCL_CRASH_RECEIPT_DIR overrides the directory) and read back through the
  * shared evidence_ledger_row reader. Only the bootstrap run writes, so the
  * default and test-crash paths never touch the dev state directory. */
 
 #define CR_RECEIPT_SCHEMA "zcl.crash_recovery_receipt.v1"
 #define CR_RECEIPT_DIR_ENV "ZCL_CRASH_RECEIPT_DIR"
-#define CR_RECEIPT_HOME_REL ".local/state/zclassic23-crash-recovery"
+#define CR_RECEIPT_HOME_REL ".local/state/z23/crash-recovery"
 #define CR_RECEIPT_FILE "receipts.jsonl"
 #define CR_RECEIPT_BUDGET_MS 120000
 #define CR_RECEIPT_LINE_MAX 1024
