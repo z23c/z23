@@ -29,6 +29,10 @@
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <sys/file.h>
+#include "services/evidence_ledger_row.h"
+#include "zsha256/zsha256.h"
 
 /* Bind port 0 on loopback and return the assigned port. Same idiom as
  * test_acme_cert_reload.c. Returns 0 when no port could be observed; the
@@ -305,6 +309,209 @@ int test_onion_bootstrap_diagnostics(void)
     return failures;
 }
 
+/* ── C2 durable receipt ────────────────────────────────────────────────
+ * One flat JSONL row per opted-in run (ZCL_ONION_RECEIPT=1), flock-appended to
+ * $ZCL_ONION_RECEIPT_DIR/receipts.jsonl, or to
+ * $HOME/.local/state/z23/onion-bootstrap/receipts.jsonl when the env is
+ * unset. Path resolution and the row reader are the shared
+ * evidence_ledger_row helpers, so a torn or foreign line is dropped there and
+ * never folded in as a receipt. */
+#define ONION_RECEIPT_SCHEMA "zcl.onion_bootstrap_receipt.v1"
+#define ONION_RECEIPT_ENV "ZCL_ONION_RECEIPT"
+#define ONION_RECEIPT_DIR_ENV "ZCL_ONION_RECEIPT_DIR"
+#define ONION_RECEIPT_HOME_REL ".local/state/z23/onion-bootstrap"
+#define ONION_RECEIPT_FILE "receipts.jsonl"
+#define ONION_RECEIPT_SLO_MS 60000
+#define ONION_RECEIPT_PATH_MAX 1024
+#define ONION_RECEIPT_LINE_MAX 640
+#define ONION_RECEIPT_SHA_MAX 65
+
+enum onion_verdict { ONION_PASS, ONION_FAIL, ONION_SKIP };
+
+static const char *onion_verdict_text(enum onion_verdict v)
+{
+    switch (v) {
+    case ONION_PASS: return "PASS";
+    case ONION_SKIP: return "SKIP";
+    default:         return "FAIL";
+    }
+}
+
+/* The only place a verdict is decided: a ready onion with a well-formed address
+ * passes iff it was ready strictly under the 60s SLO. */
+static enum onion_verdict onion_verdict_for(bool addr_ok, int64_t ms,
+                                            const char **reason)
+{
+    if (!addr_ok) { *reason = "bad_onion_address"; return ONION_FAIL; }
+    if (ms < ONION_RECEIPT_SLO_MS) { *reason = "under_60s"; return ONION_PASS; }
+    *reason = "over_60s";
+    return ONION_FAIL;
+}
+
+/* SHA-256 of the running test binary, streamed. "unavailable" when the binary
+ * cannot be read (no /proc/self/exe on this host). */
+static bool onion_receipt_self_sha(char out[ONION_RECEIPT_SHA_MAX])
+{
+    snprintf(out, ONION_RECEIPT_SHA_MAX, "unavailable");
+    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    zsha256_ctx ctx;
+    zsha256_init(&ctx);
+    uint8_t buf[65536];
+    bool ok = true;
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0) { ok = false; break; }
+        if (n == 0) break;
+        zsha256_update(&ctx, buf, (size_t)n);
+    }
+    close(fd);
+    if (!ok) return false;
+    uint8_t digest[ZSHA256_DIGEST_LEN];
+    zsha256_final(&ctx, digest);
+    for (size_t i = 0; i < ZSHA256_DIGEST_LEN; i++)
+        snprintf(out + 2 * i, 3, "%02x", digest[i]);
+    return true;
+}
+
+static void onion_receipt_utc(char out[32])
+{
+    struct tm tm;
+    time_t now = platform_time_wall_time_t();
+    if (!platform_time_utc_tm(now, &tm) ||
+        strftime(out, 32, "%Y-%m-%dT%H:%M:%SZ", &tm) == 0)
+        snprintf(out, 32, "unknown");
+}
+
+static bool onion_receipt_path(char *out, size_t cap)
+{
+    return evidence_ledger_resolve_path(ONION_RECEIPT_DIR_ENV,
+                                        ONION_RECEIPT_HOME_REL,
+                                        ONION_RECEIPT_FILE, out, cap);
+}
+
+/* Create every parent directory of `path` (the file component is excluded
+ * because it is never followed by a separator). */
+static bool onion_receipt_mkdirs(const char *path)
+{
+    char buf[ONION_RECEIPT_PATH_MAX];
+    size_t n = strlen(path);
+    if (n == 0 || n >= sizeof(buf)) return false;
+    memcpy(buf, path, n + 1);
+    for (size_t i = 1; i < n; i++) {
+        if (buf[i] != '/') continue;
+        buf[i] = '\0';
+        if (mkdir(buf, 0700) != 0 && errno != EEXIST) return false;
+        buf[i] = '/';
+    }
+    return true;
+}
+
+static bool onion_receipt_append(const char *path, const char *line, size_t len)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    bool ok = flock(fd, LOCK_EX) == 0;
+    if (ok) ok = write(fd, line, len) == (ssize_t)len;
+    (void)flock(fd, LOCK_UN);
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+
+/* Ungated writer: one JSON row, newline-terminated. `ms` < 0 writes null. */
+static bool onion_receipt_write(enum onion_verdict verdict, const char *reason,
+                                int64_t ms)
+{
+    char path[ONION_RECEIPT_PATH_MAX], utc[32], sha[ONION_RECEIPT_SHA_MAX];
+    char ms_text[24], line[ONION_RECEIPT_LINE_MAX];
+    if (!onion_receipt_path(path, sizeof(path))) return false;
+    if (!onion_receipt_mkdirs(path)) return false;
+    onion_receipt_utc(utc);
+    (void)onion_receipt_self_sha(sha);
+    if (ms < 0) snprintf(ms_text, sizeof(ms_text), "null");
+    else snprintf(ms_text, sizeof(ms_text), "%lld", (long long)ms);
+    int n = snprintf(line, sizeof(line),
+        "{\"schema\":\"%s\",\"utc\":\"%s\",\"binary_sha256\":\"%s\","
+        "\"bootstrap_ms\":%s,\"verdict\":\"%s\",\"reason\":\"%s\"}\n",
+        ONION_RECEIPT_SCHEMA, utc, sha, ms_text,
+        onion_verdict_text(verdict), reason);
+    if (n < 0 || (size_t)n >= sizeof(line)) return false;
+    return onion_receipt_append(path, line, (size_t)n);
+}
+
+/* Gated record: a no-op unless ZCL_ONION_RECEIPT=1. Returns false only when an
+ * opted-in receipt could not be written. */
+static bool onion_receipt_record(enum onion_verdict verdict, const char *reason,
+                                 int64_t ms)
+{
+    const char *on = getenv(ONION_RECEIPT_ENV);
+    if (!on || strcmp(on, "1") != 0) return true;
+    return onion_receipt_write(verdict, reason, ms);
+}
+
+struct onion_scan { unsigned rows, pass, fail; int64_t last_ms; };
+
+static void onion_receipt_scan_row(const char *row, size_t len, void *ctx)
+{
+    struct onion_scan *s = ctx;
+    char schema[64], verdict[8];
+    int64_t ms = -1;
+    if (!evidence_row_flat_object_valid(row, len)) return;
+    if (!evidence_row_str(row, len, "schema", schema, sizeof(schema)) ||
+        strcmp(schema, ONION_RECEIPT_SCHEMA) != 0) return;
+    if (!evidence_row_str(row, len, "verdict", verdict, sizeof(verdict)))
+        return;
+    s->rows++;
+    if (strcmp(verdict, "PASS") == 0) s->pass++;
+    else if (strcmp(verdict, "FAIL") == 0) s->fail++;
+    if (evidence_row_int(row, len, "bootstrap_ms", &ms)) s->last_ms = ms;
+}
+
+/* The 60 s boundary: under it passes, at it or without a bootstrap fails. */
+static int onion_verdict_selftest(void)
+{
+    int failures = 0;
+    const char *reason = "";
+    if (onion_verdict_for(true, 59999, &reason) != ONION_PASS) failures++;
+    if (onion_verdict_for(true, 60000, &reason) != ONION_FAIL) failures++;
+    if (onion_verdict_for(false, 1000, &reason) != ONION_FAIL) failures++;
+    return failures;
+}
+
+/* Hermetic: writes two receipts into a temp ledger, appends a malformed line
+ * and a torn (no newline) tail, then reads the ledger back through the shared
+ * reader. The malformed row must be skipped and the torn tail dropped. */
+static int onion_receipt_selftest(void)
+{
+    int failures = 0;
+    char dir[256], path[ONION_RECEIPT_PATH_MAX];
+    test_make_tmpdir(dir, sizeof(dir), "p11", "receipt_ledger");
+    setenv(ONION_RECEIPT_DIR_ENV, dir, 1);
+    if (!onion_receipt_path(path, sizeof(path))) failures++;
+    if (!onion_receipt_write(ONION_PASS, "under_60s", 12345)) failures++;
+    const char junk[] = "{\"schema\":\"zcl.onion_bootstrap_receipt.v1\",\"verdict\":\n";
+    if (!onion_receipt_append(path, junk, sizeof(junk) - 1)) failures++;
+    if (!onion_receipt_write(ONION_FAIL, "over_60s", 75000)) failures++;
+    const char torn[] = "{\"schema\":\"zcl.onion_bootstrap_receipt.v1\"";
+    if (!onion_receipt_append(path, torn, sizeof(torn) - 1)) failures++;
+
+    struct onion_scan s = {0};
+    unsigned overlong = 0, incomplete = 0;
+    if (!evidence_ledger_scan_tail(path, (size_t)1 << 20, onion_receipt_scan_row,
+                                   &s, &overlong, &incomplete))
+        failures++;
+    if (s.rows != 2 || s.pass != 1 || s.fail != 1 || s.last_ms != 75000 ||
+        overlong != 0 || incomplete != 1)
+        failures++;
+
+    failures += onion_verdict_selftest();
+
+    unsetenv(ONION_RECEIPT_DIR_ENV);
+    p11_remove_tree(dir);
+    printf("onion bootstrap receipt ledger: %s\n", failures ? "FAIL" : "OK");
+    return failures;
+}
+
 /* v3 hidden service names are 56 base32 chars + ".onion" = 62 total.
  * RFC 4648 base32 alphabet, lowercase-only in .onion addresses:
  *   a-z | 2-7 */
@@ -345,10 +552,12 @@ int test_onion_bootstrap(void)
     failures += p11_remove_tree_link_case(false);
     failures += p11_remove_tree_link_case(true);
 #endif
+    failures += onion_receipt_selftest();
     printf("onion_bootstrap MVP #2 bootstrap_state=ready in <60s... ");
 
     if (!getenv("ZCL_STRESS_TESTS")) {
         printf("SKIP (set ZCL_STRESS_TESTS=1 to run — ~30s + Tor network)\n");
+        failures += !onion_receipt_record(ONION_SKIP, "stress_gate_unset", -1);
         return failures;
     }
 
@@ -368,8 +577,10 @@ int test_onion_bootstrap(void)
      * lanes and tor then fails to bind. A probe-to-bind race is rare and self-evident. */
     const uint16_t p2p_port = onion_free_port();
 
+    int64_t mono0 = platform_time_monotonic_us();
     if (!tor_integration_start(datadir, p2p_port)) {
         printf("FAIL (tor_integration_start returned false)\n");
+        failures += !onion_receipt_record(ONION_FAIL, "tor_start_refused", -1);
         p11_remove_tree(datadir);
         return 1;
     }
@@ -414,6 +625,7 @@ int test_onion_bootstrap(void)
     }
 
     if (!ready) {
+        failures += !onion_receipt_record(ONION_FAIL, "not_ready_in_90s", -1);
         p11_notice_report(notice_path, notice_fresh);
         printf("UNOBSERVED (tor bootstrap did not complete inside the %ds "
                "observation window; addr=%s; loadavg %s)\n",
@@ -443,6 +655,13 @@ int test_onion_bootstrap(void)
         printf("OK (%ds, %s)\n", elapsed, addr);
     }
 
+    {
+        const char *reason = "";
+        int64_t ms = (int64_t)((platform_time_monotonic_us() - mono0) / 1000);
+        enum onion_verdict verdict = onion_verdict_for(
+            addr && is_valid_onion_v3(addr), ms, &reason);
+        failures += !onion_receipt_record(verdict, reason, ms);
+    }
     tor_integration_stop();
     p11_remove_tree(datadir);
     return failures;
