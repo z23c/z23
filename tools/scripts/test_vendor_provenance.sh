@@ -179,6 +179,55 @@ if grep -q 'command -v cmake' "$vendor_builder"; then
     die "LevelDB vendor route still depends on optional host CMake presence"
 fi
 
+# Cross-tree vendor archive cache. A restore must hand back the archive, its
+# stamp and the headers the build installed; a corrupt, foreign or escaping
+# bundle, a different key, and the hermetic/forced modes must all miss.
+cache_src="$tmp/cache-vendor-src"
+cache_dst="$tmp/cache-vendor-dst"
+export VENDOR_ARCHIVE_CACHE="$tmp/cache-store"
+mkdir -p "$cache_src/lib" "$cache_src/include/zz" "$cache_dst/lib"
+cache_mark="$tmp/cache-mark"
+: >"$cache_mark"
+sleep 0.05
+printf 'archive-bytes' >"$cache_src/lib/libzz.a"
+printf 'header-bytes' >"$cache_src/include/zz/zz.h"
+cache_desc="schema=test
+archive=libzz.a"
+vp_write_stamp "$cache_src/lib" libzz.a "$cache_desc"
+vp_cache_save "$cache_src" zz key1 "$cache_mark" \
+    lib/libzz.a lib/.provenance/libzz.a.stamp
+vp_cache_restore "$cache_dst" zz key2 &&
+    die "vendor cache restored an entry saved under a different key"
+vp_cache_restore "$cache_dst" zz key1 || die "vendor cache did not restore"
+cmp -s "$cache_src/lib/libzz.a" "$cache_dst/lib/libzz.a" ||
+    die "restored archive bytes differ"
+cmp -s "$cache_src/include/zz/zz.h" "$cache_dst/include/zz/zz.h" ||
+    die "restored header differs"
+vp_verify_stamp "$cache_dst/lib" libzz.a "$cache_desc" ||
+    die "restored stamp does not verify"
+vp_verify_stamp "$cache_dst/lib" libzz.a "$cache_desc-changed" &&
+    die "restored stamp verified against a different descriptor"
+# Corrupt the stored bundle: the digest check must refuse it.
+rm -rf "$cache_dst/lib" "$cache_dst/include"; mkdir -p "$cache_dst/lib"
+printf 'x' >>"$VENDOR_ARCHIVE_CACHE/zz/key1/bundle.tar"
+vp_cache_restore "$cache_dst" zz key1 &&
+    die "vendor cache restored a corrupt bundle"
+[[ ! -e "$cache_dst/lib/libzz.a" ]] || die "corrupt bundle was extracted"
+# A bundle whose members escape lib/ and include/ is refused even with a
+# matching digest.
+mkdir -p "$VENDOR_ARCHIVE_CACHE/zz/key3"
+printf 'evil' >"$tmp/evil"
+tar -C "$tmp" -cf "$VENDOR_ARCHIVE_CACHE/zz/key3/bundle.tar" evil
+vp_sha256_file "$VENDOR_ARCHIVE_CACHE/zz/key3/bundle.tar" \
+    >"$VENDOR_ARCHIVE_CACHE/zz/key3/bundle.sha256"
+vp_cache_restore "$cache_dst" zz key3 &&
+    die "vendor cache extracted a member outside lib/ and include/"
+vp_cache_enabled || die "vendor cache disabled by default"
+ZCL_USE_CCACHE=0 vp_cache_enabled && die "vendor cache ignored ZCL_USE_CCACHE=0"
+VENDOR_FORCE=1 vp_cache_enabled && die "vendor cache ignored VENDOR_FORCE=1"
+VENDOR_NO_CACHE=1 vp_cache_enabled && die "vendor cache ignored VENDOR_NO_CACHE=1"
+unset VENDOR_ARCHIVE_CACHE
+
 presentation_src="$repo_root/contexts/explorer/modules/presentation/src/presentation.c"
 presentation_include="$repo_root/contexts/explorer/modules/presentation/include"
 presentation_base_include="$repo_root/platform/modules/base/include"

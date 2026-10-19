@@ -167,6 +167,15 @@ keep it honest:
 certainty, and the hermetic goals (`ci-reproducible`, `repro-verify`) already
 force the cache off, so no reproducibility claim is ever served from it.
 
+zcc does not see the vendored archives (OpenSSL, libevent, SQLite, LevelDB,
+zlib), which `tools/scripts/build_vendor.sh` builds with configure/make. On a
+fresh worktree that was 48 s of a 93 s fully cached `make dev-bin`, serial,
+before the first compile. The script now keeps a bundle per archive group under
+`$ZCC_DIR/vendor/` (`VENDOR_ARCHIVE_CACHE` overrides), keyed by the group's
+provenance descriptor, and restores it into another tree (about 3 s). Every
+restored archive is still verified against its stamp, and `VENDOR_FORCE=1`,
+`VENDOR_NO_CACHE=1` and `ZCL_USE_CCACHE=0` (the hermetic goals) bypass it.
+
 ## One command: `make vendor`
 
 The static third-party archives in `vendor/lib/` are **built from source** by

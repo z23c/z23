@@ -141,3 +141,94 @@ vp_verify_locked_manifest() {
     got_size="$(wc -c <"$archive_path" | tr -d ' ')"
     [[ "$got_sha" == "$want_sha" && "$got_size" == "$want_size" ]]
 }
+
+# ---------------------------------------------------------------------------
+# Vendor archive cache. A fresh worktree rebuilt OpenSSL, libevent, SQLite and
+# LevelDB from source before its first compile could start: MEASURED 48 s of a
+# 93 s fully zcc-cached build (52 %), serial, because zcc caches compiler
+# invocations and these archives are built by configure/make recipes it never
+# sees. The archives are byte-reproducible, and every one carries a stamp that
+# binds the exact descriptor and the archive SHA-256, so a bundle saved from a
+# verified build can be handed to any other tree. Restoring never replaces the
+# stamp check: the caller re-verifies every restored archive against the
+# descriptor it computes itself, and a mismatch is a rebuild.
+#
+#   <cache>/<group>/<key>/bundle.tar + bundle.sha256
+#
+# key = SHA-256 of the group's descriptors, so any pin, recipe, flag,
+# dependency or toolchain change selects a different entry.
+vp_cache_root() {
+    if [[ -n "${VENDOR_ARCHIVE_CACHE:-}" ]]; then
+        printf '%s' "$VENDOR_ARCHIVE_CACHE"
+    elif [[ -n "${ZCC_DIR:-}" ]]; then
+        printf '%s/vendor' "$ZCC_DIR"
+    elif [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+        printf '%s/zcc/vendor' "$XDG_CACHE_HOME"
+    elif [[ -n "${HOME:-}" ]]; then
+        printf '%s/.cache/zcc/vendor' "$HOME"
+    else
+        return 1
+    fi
+}
+
+# Off for forced rebuilds and for the hermetic goals, which export
+# ZCL_USE_CCACHE=0 precisely so that no reproducibility claim is served from a
+# cache.
+vp_cache_enabled() {
+    [[ "${ZCL_USE_CCACHE:-1}" != "0" && "${VENDOR_NO_CACHE:-0}" != "1" &&
+       "${VENDOR_FORCE:-0}" != "1" ]]
+}
+
+# vp_cache_save VENDOR_DIR GROUP KEY MARKER FILE...   (FILE relative to VENDOR_DIR)
+# Headers installed by the build are every file under include/ newer than MARKER.
+vp_cache_save() {
+    local vendor="$1" group="$2" key="$3" marker="$4"
+    shift 4
+    local root dir tmp list f old
+    root="$(vp_cache_root)" || return 0
+    dir="$root/$group/$key"
+    [[ -d "$dir" ]] && return 0
+    mkdir -p "$root/$group" || return 0
+    tmp="$(mktemp -d "$root/$group/.tmp.XXXXXX")" || return 0
+    list="$tmp/list"
+    for f in "$@"; do
+        [[ -f "$vendor/$f" ]] || { rm -rf "$tmp"; return 0; }
+        printf '%s\n' "$f" >>"$list"
+    done
+    (cd "$vendor" && find include -type f -newer "$marker" 2>/dev/null) \
+        >>"$list" || true
+    if tar -C "$vendor" -cf "$tmp/bundle.tar" -T "$list" &&
+       printf '%s\n' "$(vp_sha256_file "$tmp/bundle.tar")" \
+           >"$tmp/bundle.sha256" &&
+       rm -f "$list" && mv "$tmp" "$dir" 2>/dev/null; then
+        :
+    else
+        rm -rf "$tmp"
+        return 0
+    fi
+    # Keep the newest three keys per group; a changed pin or toolchain would
+    # otherwise grow the store forever.
+    # shellcheck disable=SC2012
+    for old in $(ls -t "$root/$group" 2>/dev/null | tail -n +4); do
+        rm -rf "${root:?}/$group/${old:?}"
+    done
+    return 0
+}
+
+# vp_cache_restore VENDOR_DIR GROUP KEY: extract a digest-checked bundle.
+vp_cache_restore() {
+    local vendor="$1" group="$2" key="$3" root dir
+    root="$(vp_cache_root)" || return 1
+    dir="$root/$group/$key"
+    [[ -f "$dir/bundle.tar" && -f "$dir/bundle.sha256" ]] || return 1
+    [[ "$(vp_sha256_file "$dir/bundle.tar")" == "$(cat "$dir/bundle.sha256")" ]] ||
+        return 1
+    # Only relative member names under lib/ or include/, never "..".
+    if tar -tf "$dir/bundle.tar" | grep -Ev '^(lib|include)/' >/dev/null ||
+       tar -tf "$dir/bundle.tar" | grep -E '(^|/)\.\.(/|$)' >/dev/null; then
+        return 1
+    fi
+    tar -C "$vendor" -xf "$dir/bundle.tar" || return 1
+    touch "$dir" 2>/dev/null || true
+    return 0
+}

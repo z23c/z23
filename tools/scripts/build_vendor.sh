@@ -632,6 +632,56 @@ stamp_archives() {
     done
 }
 
+# Cross-tree archive cache (see vp_cache_* in vendor_provenance_lib.sh). The
+# key is the group's own provenance descriptors; a restored bundle is accepted
+# only if archive_current() then verifies every archive against those same
+# descriptors, so the cache can skip work but never relax the stamp check.
+vendor_cache_key() {
+    local a descriptors=""
+    for a in "$@"; do
+        descriptors+="$(archive_descriptor "$a")" || return 1
+        descriptors+=$'\n'
+    done
+    vp_sha256_text "$descriptors"
+}
+
+vendor_cache_usable() {
+    [[ -z "$VENDOR_TARGET" ]] && vp_cache_enabled
+}
+
+# vendor_cache_try GROUP ARCHIVE...: 0 when the archives were restored AND verify.
+vendor_cache_try() {
+    local group="$1" key a
+    shift
+    vendor_cache_usable || return 1
+    key="$(vendor_cache_key "$@")" || return 1
+    vp_cache_restore "$VENDOR" "$group" "$key" || return 1
+    for a in "$@"; do
+        archive_current "$a" || { invalidate_stamps "$@"; return 1; }
+    done
+    ok "restored $* (vendor archive cache)"
+}
+
+vendor_cache_mark() {
+    local mark="$WORK/.cache-mark.$$"
+    : >"$mark"
+    sleep 0.01
+    printf '%s' "$mark"
+}
+
+# vendor_cache_put GROUP MARK ARCHIVE...: after stamp_archives.
+vendor_cache_put() {
+    local group="$1" mark="$2" key a
+    shift 2
+    vendor_cache_usable || return 0
+    key="$(vendor_cache_key "$@")" || return 0
+    local -a files=()
+    for a in "$@"; do
+        files+=("${LIB#"$VENDOR"/}/$a" "${LIB#"$VENDOR"/}/.provenance/$a.stamp")
+    done
+    vp_cache_save "$VENDOR" "$group" "$key" "$mark" "${files[@]}"
+}
+
 install_archive() {
     local source="$1" archive="$2" tmp
     tmp="$LIB/.${archive}.tmp.$$"
@@ -701,8 +751,10 @@ build_sqlite() {       # FETCHED: SQLite amalgamation
         ok "restored SQLite amalgamation source (archive provenance current)"
         return
     fi
+    vendor_cache_try sqlite libsqlite3.a && return
     say "build   libsqlite3.a  (SQLite ${SQLITE_AMALG#sqlite-amalgamation-})"
     invalidate_stamps libsqlite3.a
+    local cmark; cmark="$(vendor_cache_mark)"
     # Build flags mirror a typical Bitcoin/Zcash sqlite vendor build.
     local FLAGS="-DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE \
         -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_OMIT_DEPRECATED \
@@ -716,13 +768,16 @@ build_sqlite() {       # FETCHED: SQLite amalgamation
     # Keep the amalgamation source in vendor/ (gitignored) so the rest of the
     # build (tools/sqlq.c etc.) and the header stay in sync.
     stamp_archives libsqlite3.a
+    vendor_cache_put sqlite "$cmark" libsqlite3.a
     ok "built   libsqlite3.a"
 }
 
 build_zlib() {         # FETCHED: zlib
     have libz.a && { say "skip    libz.a (provenance current)"; return; }
+    vendor_cache_try zlib libz.a && return
     say "build   libz.a  (zlib ${ZLIB_VER})"
     invalidate_stamps libz.a
+    local cmark; cmark="$(vendor_cache_mark)"
     local tb; tb="$(fetch "$ZLIB_URL" "$ZLIB_SHA" "zlib-${ZLIB_VER}.tar.gz")"
     local d="$WORK/zlib-${ZLIB_VER}"
     rm -rf "$d"; tar -C "$WORK" -xzf "$tb"
@@ -736,14 +791,17 @@ build_zlib() {         # FETCHED: zlib
     install_archive "$d/libz.a" libz.a
     cp -f "$d/zlib.h" "$d/zconf.h" "$INC/"
     stamp_archives libz.a
+    vendor_cache_put zlib "$cmark" libz.a
     ok "built   libz.a"
 }
 
 build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
     need perl
     { have libcrypto.a && have libssl.a; } && { say "skip    libcrypto.a/libssl.a (provenance current)"; return; }
+    vendor_cache_try openssl libcrypto.a libssl.a && return
     say "build   libcrypto.a + libssl.a  (OpenSSL ${OPENSSL_VER}) — this is the slow one"
     invalidate_stamps libcrypto.a libssl.a
+    local cmark; cmark="$(vendor_cache_mark)"
     local tb; tb="$(fetch "$OPENSSL_URL" "$OPENSSL_SHA" "openssl-${OPENSSL_VER}.tar.gz")"
     local d="$WORK/openssl-${OPENSSL_VER}"
     rm -rf "$d"; tar -C "$WORK" -xzf "$tb"
@@ -789,6 +847,7 @@ build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
     rm -rf "$INC/openssl"; mkdir -p "$INC/openssl"
     cp -f "$d/include/openssl/"*.h "$INC/openssl/" 2>/dev/null || true
     stamp_archives libcrypto.a libssl.a
+    vendor_cache_put openssl "$cmark" libcrypto.a libssl.a
     ok "built   libcrypto.a + libssl.a"
 }
 
@@ -806,10 +865,13 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
     { have libevent.a && have libevent_openssl.a && have libevent_pthreads.a &&
       [[ -f "$INC/event2/event.h" && -f "$INC/event2/event-config.h" ]]; } \
         && { say "skip    libevent*.a (provenance current)"; return; }
+    vendor_cache_try libevent libevent.a libevent_openssl.a libevent_pthreads.a &&
+        [[ -f "$INC/event2/event.h" && -f "$INC/event2/event-config.h" ]] && return
     say "build   libevent.a + libevent_openssl.a + libevent_pthreads.a  (libevent ${LIBEVENT_VER})"
     need nm; need patch
     [[ -f "$LIBEVENT_PATCH" ]] || die "missing libevent patch: $LIBEVENT_PATCH"
     invalidate_stamps libevent.a libevent_openssl.a libevent_pthreads.a
+    local cmark; cmark="$(vendor_cache_mark)"
     # Drop any previously staged event2/ BEFORE the build, not after. The build
     # puts -I$INC on the compile line (LIBEVENT_CPPFLAGS), so leaving a stale
     # copy of libevent's own headers there is a shadowing hazard with no
@@ -895,6 +957,7 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
         "$INC/event2/util.h" ||
         die "staged event2/util.h does not declare evutil_secure_rng_add_bytes (the pinned secure-rng ABI patch did not reach the header)"
     stamp_archives libevent.a libevent_openssl.a libevent_pthreads.a
+    vendor_cache_put libevent "$cmark" libevent.a libevent_openssl.a libevent_pthreads.a
     ok "built   libevent*.a"
 }
 
@@ -1024,8 +1087,10 @@ EOF
 
 build_leveldb() {      # FETCHED: LevelDB -> libleveldb.a
     have libleveldb.a && { say "skip    libleveldb.a (provenance current)"; return; }
+    vendor_cache_try leveldb libleveldb.a && return
     say "build   libleveldb.a  (LevelDB ${LEVELDB_VER})"
     invalidate_stamps libleveldb.a
+    local cmark; cmark="$(vendor_cache_mark)"
     local tb; tb="$(fetch "$LEVELDB_URL" "$LEVELDB_SHA" "leveldb-${LEVELDB_VER}.tar.gz")"
     local d="$WORK/leveldb-${LEVELDB_VER}"
     rm -rf "$d"; tar -C "$WORK" -xzf "$tb"
@@ -1037,6 +1102,7 @@ build_leveldb() {      # FETCHED: LevelDB -> libleveldb.a
     # Tracked vendor/include/leveldb/*.h (1.18) expose the same stable C API
     # (leveldb/c.h) the repo uses; we intentionally do NOT overwrite them.
     stamp_archives libleveldb.a
+    vendor_cache_put leveldb "$cmark" libleveldb.a
     ok "built   libleveldb.a"
 }
 
