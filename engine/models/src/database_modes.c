@@ -56,6 +56,21 @@ int64_t node_db_utxo_count(struct node_db *ndb)
     return count;
 }
 
+bool node_db_utxo_count_checked(struct node_db *ndb, int64_t *out)
+{
+    if (!ndb || !ndb->open || !ndb->db || !out)
+        return false;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "SELECT count(*) FROM utxos",
+                           -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW; // raw-sql-ok:read-only-introspection
+    if (ok)
+        *out = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
 /* ── Performance Modes ─────────────────────────────────────────── */
 
 /* Secondary indexes dropped during IBD for throughput, rebuilt after. */

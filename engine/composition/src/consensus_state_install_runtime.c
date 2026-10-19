@@ -222,19 +222,11 @@ static bool icb_store_chain_state_empty(sqlite3 *db)
     return empty;
 }
 /* The legacy node.db utxo mirror is empty only when it was read and counted 0.
- * node_db_utxo_count conflates an error with 0, so count here. */
+ * node_db_utxo_count conflates an error with 0, so use the checked count. */
 static bool icb_mirror_empty(struct node_db *ndb)
 {
-    if (!ndb || !ndb->open || !ndb->db)
-        return false;
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(ndb->db, "SELECT count(*) FROM utxos", -1, &st,
-                           NULL) != SQLITE_OK)
-        return false;
-    bool empty = sqlite3_step(st) == SQLITE_ROW && // raw-sql-ok:read-only-introspection
-                 sqlite3_column_int64(st, 0) == 0;
-    sqlite3_finalize(st);
-    return empty;
+    int64_t count = 0;
+    return node_db_utxo_count_checked(ndb, &count) && count == 0;
 }
 /* The canonical-lane owner gate protects a daily-driver's existing chain state.
  * Returns NULL when the cutover is admitted: the owner authorized it, the lane

@@ -276,6 +276,11 @@ bool node_db_wipe_utxos(struct node_db *ndb);
 /* Count UTXOs in the database. */
 int64_t node_db_utxo_count(struct node_db *ndb);
 
+/* Count UTXOs, distinguishing an unreadable mirror from an empty one. Returns
+ * false on NULL, a closed handle, or a prepare or step error; *out is then
+ * left untouched. */
+bool node_db_utxo_count_checked(struct node_db *ndb, int64_t *out);
+
 /* ── Performance Modes ─────────────────────────────────────────── */
 
 /* IBD turbo: synchronous=OFF, large cache, drop secondary indexes.
