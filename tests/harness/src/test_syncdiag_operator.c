@@ -306,7 +306,7 @@ static int test_mvp_receipts_pass_met(void)
         {"C7", "met", NULL, "within the 2min budget", "2026-10-18T10:00:00Z"},
     };
     bool ok = mvp_rcpt_run(RCPT_ONION("PASS", "42000"),
-                           RCPT_CRASH("PASS", "120000", ""), want, 2);
+                           RCPT_CRASH("PASS", "119999", ""), want, 2);
     printf("mvp receipts: PASS rows within budget are MET with source and utc... %s\n",
            ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
@@ -333,7 +333,7 @@ static int test_mvp_receipts_fail_unmet(void)
     ok = mvp_rcpt_run(RCPT_ONION("FAIL", "null"), NULL, onion_fail, 1) && ok;
     ok = mvp_rcpt_run(RCPT_ONION("PASS", "60000"), NULL, onion_pass_edge, 1) && ok;
     ok = mvp_rcpt_run(NULL, RCPT_CRASH("FAIL", "30000", ""), crash_fail, 1) && ok;
-    ok = mvp_rcpt_run(NULL, RCPT_CRASH("PASS", "120001", ""), crash_slow, 1) && ok;
+    ok = mvp_rcpt_run(NULL, RCPT_CRASH("PASS", "120000", ""), crash_slow, 1) && ok;
     printf("mvp receipts: FAIL and over-budget rows are UNMET with named blockers... %s\n",
            ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
@@ -381,6 +381,71 @@ static int test_mvp_receipts_torn_tail_uses_previous(void)
         "{\"schema\":\"zcl.crash_recovery_receipt.v1\",\"verdict\":\"FAIL\"",
         crash, 1) && ok;
     printf("mvp receipts: a torn last line leaves the previous valid row in force... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int test_mvp_receipts_onion_just_under_budget(void)
+{
+    static const struct mvp_rcpt_expect want[] = {
+        {"C2", "met", NULL, "within the 60s budget", NULL},
+    };
+    bool ok = mvp_rcpt_run(RCPT_ONION("PASS", "59999"), NULL, want, 1);
+    printf("mvp receipts: a PASS at 59999 ms is MET, strictly under 60 s... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+#define MVP_RCPT_LONG_SEGS 6
+#define MVP_RCPT_LONG_SEG_LEN 100
+
+static int test_mvp_receipts_long_dir_path(void)
+{
+    char base[512];
+    char dir[PATH_MAX];
+    char file[PATH_MAX + 32];
+    size_t lens[MVP_RCPT_LONG_SEGS];
+    char seg[MVP_RCPT_LONG_SEG_LEN + 2];
+    memset(seg, 'd', sizeof(seg));
+    seg[0] = '/';
+    seg[sizeof(seg) - 1] = '\0';
+    bool ok = test_mkdtemp(base, sizeof(base), "mvp_long") != NULL;
+    snprintf(dir, sizeof(dir), "%s", base);
+    for (size_t i = 0; ok && i < MVP_RCPT_LONG_SEGS; i++) {
+        size_t used = strlen(dir);
+        if (used + sizeof(seg) >= sizeof(dir)) {
+            ok = false;
+            break;
+        }
+        memcpy(dir + used, seg, sizeof(seg));
+        lens[i] = strlen(dir);
+        ok = mkdir(dir, 0700) == 0;
+    }
+    ok = ok && strlen(dir) > 512;
+    snprintf(file, sizeof(file), "%s/receipts.jsonl", dir);
+    ok = ok && mvp_rcpt_write(file, RCPT_ONION("PASS", "42000"));
+    setenv("ZCL_ONION_RECEIPT_DIR", dir, 1);
+    setenv("ZCL_CRASH_RECEIPT_DIR", base, 1);
+
+    struct json_value out = {0};
+    ok = ok && mvp_dump_state_json(&out, NULL);
+    const struct json_value *c = mvp_find_criterion(
+        json_get(&out, "criteria"), "C2");
+    const char *state = json_get_str(json_get(c, "met_state"));
+    const char *src = mvp_rcpt_ev(c, "evidence_source");
+    ok = ok && state && strcmp(state, "met") == 0 &&
+         strcmp(src, file) == 0 && strlen(file) > 512;
+    json_free(&out);
+
+    unlink(file);
+    for (size_t i = MVP_RCPT_LONG_SEGS; i > 0; i--) {
+        dir[lens[i - 1]] = '\0';
+        rmdir(dir);
+    }
+    unsetenv("ZCL_ONION_RECEIPT_DIR");
+    unsetenv("ZCL_CRASH_RECEIPT_DIR");
+    test_cleanup_tmpdir(base);
+    printf("mvp receipts: a receipt dir path longer than 512 bytes still reads MET... %s\n",
            ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
 }
@@ -1303,5 +1368,7 @@ int syncdiag_cases_operator(void)
     failures += test_mvp_receipts_fail_unmet();
     failures += test_mvp_receipts_skip_unmeasured_unknown();
     failures += test_mvp_receipts_torn_tail_uses_previous();
+    failures += test_mvp_receipts_onion_just_under_budget();
+    failures += test_mvp_receipts_long_dir_path();
     return failures;
 }

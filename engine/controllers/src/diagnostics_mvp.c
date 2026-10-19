@@ -273,11 +273,8 @@ static void mvp_c7_apply(struct mvp_evidence *ev,
     ev->c7_recovery_drill_present =
         r->ms >= 0 && r->verdict != MVP_RECEIPT_SKIP;
     if (r->ms >= 0) {
-        /* Round up to whole seconds so 120001 ms is over the 120 s budget. */
-        int64_t whole = r->ms / 1000;
-        if (r->ms % 1000 != 0)
-            whole++;
-        ev->c7_recovery_secs = whole;
+        /* Whole seconds, floored: floor(ms / 1000) < 120 exactly when ms < 120000. */
+        ev->c7_recovery_secs = r->ms / 1000;
     }
     if (r->verdict == MVP_RECEIPT_SKIP) {
         snprintf(ev->c7_reason, sizeof(ev->c7_reason),
@@ -329,7 +326,7 @@ static struct mvp_verdict mvp_c2_verdict(const struct mvp_evidence *ev)
 }
 
 /* C7 verdict: FAIL is UNMET (recovery.failed). An unmeasured or SKIP receipt
- * stays UNKNOWN with its reason. A measured PASS is MET within 120 s. */
+ * stays UNKNOWN with its reason. A measured PASS is MET strictly under 120 s. */
 static struct mvp_verdict mvp_c7_verdict(const struct mvp_evidence *ev)
 {
     struct mvp_verdict v = {MVP_UNKNOWN, NULL,
@@ -341,7 +338,7 @@ static struct mvp_verdict mvp_c7_verdict(const struct mvp_evidence *ev)
     } else if (!ev->c7_recovery_drill_present) {
         return v;
     } else if (ev->c7_recovery_secs >= 0 &&
-               ev->c7_recovery_secs <= MVP_RECOVERY_SECS_MAX) {
+               ev->c7_recovery_secs < MVP_RECOVERY_SECS_MAX) {
         v.met = MVP_MET;
         v.reason = "kill-9 recovery drill within the 2min budget";
     } else {

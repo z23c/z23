@@ -16,6 +16,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <limits.h>
 
 #include "util/supervisor.h" /* enum supervisor_stall_reason (debug bundle) */
 
@@ -148,8 +149,8 @@ void diag_push_explorer_index_state_json(struct json_value *out,
 bool sapling_checkpoint_dump_state_json(struct json_value *out,
                                         const char *key);
 
-/* diagnostics_registry_rom.c — the "rom" g_dumpers[] entry: L0-L3 trust
- * machine catalog (compiled checkpoint, header commitment enumeration,
+/* diagnostics_registry_rom.c — the "rom" g_dumpers[] entry: L0-L3 verification-level
+ * catalog (compiled checkpoint, header commitment enumeration,
  * per-layer coverage, MMB/utxo_root_ladder projection cursors). See
  * docs/node/ROM.md. */
 bool rom_dump_state_json(struct json_value *out, const char *key);
@@ -337,10 +338,10 @@ bool addrman_diag_dump_state_json(struct json_value *out, const char *key);
 
 #define MVP_CRITERIA_TOTAL 8
 #define MVP_SOAK_WINDOW_HOURS_REQUIRED 168 /* the 7-day (168h) clean window */
-#define MVP_RECOVERY_SECS_MAX 120          /* kill-9 recovery budget (2 min) */
+#define MVP_RECOVERY_SECS_MAX 120          /* kill-9 budget (2 min): MET strictly below */
 #define MVP_SLO_SUCCESS_MIN 0.999          /* SLO floor when a probe is present */
 #define MVP_ONION_BOOTSTRAP_MS_MAX 60000   /* onion bootstrap budget (60 s) */
-#define MVP_RECEIPT_PATH_MAX 512            /* receipt ledger path buffer */
+#define MVP_RECEIPT_PATH_MAX PATH_MAX       /* receipt ledger path buffer */
 #define MVP_RECEIPT_UTC_MAX 40
 #define MVP_RECEIPT_REASON_MAX 192
 
