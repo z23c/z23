@@ -4,8 +4,9 @@
 #include "base/bytes.h"
 #include "base/checked.h"
 #include "base/cleanse.h"
-#include "base/compare.h"
-#include "base/path_leaf.h"
+
+#include "util/compare.h"
+#include "util/path_leaf.h"
 
 #include <stdint.h>
 #include <stdlib.h>

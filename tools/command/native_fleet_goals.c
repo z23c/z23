@@ -12,10 +12,10 @@
 
 #include "native_fleet_objectives.h"
 
-#include "base/compare.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "util/compare.h"
 #include "util/spawn.h"
 
 #include <stdarg.h>

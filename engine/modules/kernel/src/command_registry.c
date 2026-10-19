@@ -4,10 +4,10 @@
 
 #include "command_registry_internal.h"
 
-#include "base/compare.h"
 #include "crypto/sha256.h"
 #include "platform/time_compat.h"
 #include "services/agent_spend_policy.h"  // lib-layer-ok:agent-spend-policy-gate
+#include "util/compare.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 

@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: shared qsort comparators for foundation and tool code. */
-#ifndef ZCL_BASE_COMPARE_H
-#define ZCL_BASE_COMPARE_H
+#ifndef ZCL_UTIL_COMPARE_H
+#define ZCL_UTIL_COMPARE_H
 
 #include <stdint.h>
 
@@ -13,4 +13,4 @@ static inline int zcl_cmp_i64(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
-#endif /* ZCL_BASE_COMPARE_H */
+#endif /* ZCL_UTIL_COMPARE_H */

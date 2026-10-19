@@ -22,10 +22,10 @@
 #include "codeindex_merkle_internal.h"
 
 #include "base/hex.h"
-#include "base/path_leaf.h"
 #include "base/serialize_le.h"
 
 #include "util/log_macros.h"
+#include "util/path_leaf.h"
 #include "util/safe_alloc.h"
 #include "platform/positioned_file.h"
 
