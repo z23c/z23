@@ -203,8 +203,11 @@ static uint8_t *sct_revision2(const uint8_t *m, size_t n)
 {
     static const char cur[] = VCS_SEMANTIC_FACTS_V4_NAME;
     const size_t len = sizeof(cur) - 1;
-    uint8_t *out = zcl_malloc(n + 1, "sct.rev2");
+    uint8_t *out;
     size_t hits = 0;
+    if (n > SIZE_MAX - 1)
+        return NULL;
+    out = zcl_malloc(n + 1, "sct.rev2");
     if (out == NULL)
         return NULL;
     memcpy(out, m, n);
