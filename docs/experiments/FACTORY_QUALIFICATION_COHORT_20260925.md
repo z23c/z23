@@ -41,6 +41,7 @@ The original source root in F1 remains its historical run identity.
 Run the two bounded tracked controls with:
 
 ```sh
+# tools/dev/fixtures/factory_qualification/toolchain_drift.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/toolchain_drift.sh
 tools/dev/fixtures/factory_qualification/toolchain_drift.sh /usr/bin/gcc test-tmp
 tools/dev/fixtures/receiver/receive-revoke-replay.sh build/bin/z23-dev test-tmp
 ```
@@ -85,7 +86,7 @@ is inferred from object hit counts.
 F11 fixes six published Git tips in
 `tools/dev/fixtures/factory_qualification/land_remote_tips_20260925.txt`.
 The independent verifier
-`tools/dev/fixtures/factory_qualification/verify_land_receipts.sh` checks
+`tools/dev/fixtures/factory_qualification/verify_land_receipts.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/verify_land_receipts.sh`) <!-- doc-path-ok: removed script --> checks
 both signed messages from each local landing outcome, exact Git tree and
 fresh-main ancestry, then requires a changed signature byte and a changed
 message byte to fail verification. All six rows passed those checks; full
@@ -106,7 +107,7 @@ results test the qualification fixture, not production publication admission.
 ## Addendum: proof-byte availability after publication
 
 F12 uses the same six tips and their exact published local commit/base pairs.
-The bounded `tools/dev/fixtures/factory_qualification/probe_land_proofs.sh`
+The bounded `tools/dev/fixtures/factory_qualification/probe_land_proofs.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/probe_land_proofs.sh`) <!-- doc-path-ok: removed script -->
 queries the native proof status and compares a passed receipt's bytes with
 the signed landing row's proof SHA-256. Current local-path availability is
 **0/6**; all six status results are `missing`. Output SHA-256 is
@@ -127,7 +128,7 @@ matrix SHA-256 is
 F14 challenges a retained 760-byte signed proof receipt, SHA-256
 `a368dd8529a3569415d57f87572006773b15028f8d435bb772eecab6712358ec`,
 against the current `origin/main` base. The executable
-`tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh` independently
+`tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh`) <!-- doc-path-ok: removed script --> independently
 verifies its Ed25519 signature, then asks the native proof-status leaf for the
 old exact pair, a current-base relabel, a corrupt signature and a truncated
 receipt. The old pair passes; the other three return `missing`. The current
@@ -177,7 +178,7 @@ application change.
 
 F16 is an isolated Linux resource-exhaustion counterexample for the existing
 `dev.agent.mail` outbox. The executable fixture
-`tools/dev/fixtures/factory_qualification/mail_fsize_partial.sh` has SHA-256
+`tools/dev/fixtures/factory_qualification/mail_fsize_partial.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/mail_fsize_partial.sh`) <!-- doc-path-ok: removed script --> has SHA-256
 `04588eed7c59dfe4fcfba92d0aac290c29ba49a9ea11aaa4484f27b87468b2a4`.
 It used development binary SHA-256
 `da515771d618ef4158cf5203a1a957f69a915f1367f1c1f1a3b3577619efcdfe`
@@ -187,6 +188,7 @@ on the same combined tree, with GCC 16.1.1 and AMD Ryzen 7 PRO 8840U on
 2026-09-25. Reproduce in an isolated scratch parent with:
 
 ```sh
+# tools/dev/fixtures/factory_qualification/mail_fsize_partial.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/mail_fsize_partial.sh
 tools/dev/fixtures/factory_qualification/mail_fsize_partial.sh \
     build/bin/z23-dev test-tmp build/bin/jsonq
 ```

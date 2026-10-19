@@ -1128,7 +1128,7 @@ or refuse reuse and rebuild; the owning lane retains the repair and gate.
 
 ## Frozen compile-valid flag-drift control
 
-The bounded `tools/dev/fixtures/factory_qualification/toolchain_drift.sh`
+The bounded `tools/dev/fixtures/factory_qualification/toolchain_drift.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/toolchain_drift.sh`) <!-- doc-path-ok: removed script -->
 control uses one C23 source and four strict builds. It changes only the
 compiler argument `-DZCL_FIXTURE_VALUE=1` to `=2` at `-O0` and `-O2`.
 All four compile and execute; both baseline outputs are `1`, and both
@@ -1137,6 +1137,7 @@ in an exact action's execution closure even when the source bytes do not
 change. It does not claim that the current receiver admitted a stale object.
 
 ```sh
+# tools/dev/fixtures/factory_qualification/toolchain_drift.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/toolchain_drift.sh
 tools/dev/fixtures/factory_qualification/toolchain_drift.sh \
     /usr/bin/gcc "$Z23_QUAL_SCRATCH"
 ```
@@ -1218,7 +1219,7 @@ remote-receipt message formats in `tools/command/native_dev_land.c`
 (source SHA-256
 `33f3265d5c997c7491376ff11a6613650566fd14939df27fa81a51f9a3541dcc`).
 The bounded script is
-`tools/dev/fixtures/factory_qualification/verify_land_receipts.sh`
+`tools/dev/fixtures/factory_qualification/verify_land_receipts.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/verify_land_receipts.sh`) <!-- doc-path-ok: removed script -->
 (SHA-256 `146824e05ac85e1545ce9fe0f84df960a52921831ecbb9bae84f97eba3434c4b`);
 its six-tip manifest SHA-256 is
 `2cda19d523146d7f7987c2057fff6d36fb86298f0a75f2ef10595cd4eb1f76cd`.
@@ -1244,6 +1245,7 @@ on AMD Ryzen 7 PRO 8840U at 2026-09-25T18:43:51Z.
 
 ```sh
 make -j1 jsonq
+# tools/dev/fixtures/factory_qualification/verify_land_receipts.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/verify_land_receipts.sh
 tools/dev/fixtures/factory_qualification/verify_land_receipts.sh \
     "$Z23_LAND_OUTCOMES" \
     tools/dev/fixtures/factory_qualification/land_remote_tips_20260925.txt \
@@ -1281,7 +1283,7 @@ publication admission consumed these altered rows.
 The six signature-qualified landing rows each name a local worktree, exact
 local commit/base pair and SHA-256 digest of the signed proof receipt used at
 publication. The read-only
-`tools/dev/fixtures/factory_qualification/probe_land_proofs.sh` script
+`tools/dev/fixtures/factory_qualification/probe_land_proofs.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/probe_land_proofs.sh`) <!-- doc-path-ok: removed script --> script
 (SHA-256 `b9aec802a47b6ebf36325de1e6c43ce047b5a7ef969aa3d50055412f8d6687b4`)
 queries the native `dev proof status` leaf for each exact pair and compares
 receipt bytes with the row's digest if a passed local receipt is available.
@@ -1294,6 +1296,7 @@ The six queries, JSON parsing and shell startup took 0.704 s wall,
 `91ada1863c54dc089b2627bd2360f273e73e2baf5a3862e50c1dab06538c1b35`.
 
 ```sh
+# tools/dev/fixtures/factory_qualification/probe_land_proofs.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/probe_land_proofs.sh
 tools/dev/fixtures/factory_qualification/probe_land_proofs.sh \
     "$Z23_LAND_OUTCOMES" \
     tools/dev/fixtures/factory_qualification/land_remote_tips_20260925.txt \
@@ -1346,7 +1349,7 @@ domain and the first 664 receipt bytes. This authenticates the receipt's
 signer and bytes, not the truth of its proof claim or current authority.
 
 The executable
-`tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh`
+`tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh`) <!-- doc-path-ok: removed script -->
 (SHA-256 `3bba7226b3500f0829538092ec5f7f7d8e9fb6217782e4eb66cff3a37da86eca`)
 copies the same receipt into four isolated proof stores. The native `dev proof
 status` leaf returns `passed` for the old exact pair, then `missing` after
@@ -1363,6 +1366,7 @@ at 2026-09-25T18:59:26Z; time-output SHA-256 is
 `ed416210e61e3228dc7fa0e1741dd6bfd0391b03a16f53adfdc993663fc75a2b`.
 
 ```sh
+# tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh
 tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh \
     "$Z23_ROOT_DEV_BIN" \
     "$Z23_PROOF_RECEIPTS/f43384551597177d6b49c0b83d54f1682ca314df-e390e57d51a7aaf042c1b916fe1c54093c2e30b0.receipt" \
@@ -1372,7 +1376,7 @@ tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh \
 
 The exact signed receipt was then streamed to each consenting development
 peer over authenticated SSH by
-`tools/dev/fixtures/factory_qualification/proof_receipt_peer_verify.sh`
+`tools/dev/fixtures/factory_qualification/proof_receipt_peer_verify.sh` (removed 2026-10-19; last present at d15f5f62e, recover with `git show d15f5f62e:tools/dev/fixtures/factory_qualification/proof_receipt_peer_verify.sh`) <!-- doc-path-ok: removed script -->
 (SHA-256 `0a07f99213dc0665a2646e939e8aa0fa34871d810910d5f716a9a4f4fcfdefc3`).
 Each checked its 760-byte length and SHA-256, reconstructed the Ed25519
 public key from the receipt, and verified the domain-separated signature with
@@ -1392,6 +1396,7 @@ local hits, peer hits, duplicate executions avoided, and bytes avoided were
 all zero observed. Local status never waited on SSH.
 
 ```sh
+# tools/dev/fixtures/factory_qualification/proof_receipt_peer_verify.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/proof_receipt_peer_verify.sh
 tools/dev/fixtures/factory_qualification/proof_receipt_peer_verify.sh \
     "$Z23_PROOF_RECEIPTS/f43384551597177d6b49c0b83d54f1682ca314df-e390e57d51a7aaf042c1b916fe1c54093c2e30b0.receipt" \
     "<consenting-peer-alias>"

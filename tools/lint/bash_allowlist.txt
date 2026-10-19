@@ -93,12 +93,6 @@ tools/dev/factory-mixed-stages.sh
 tools/dev/factory-node-health-qualification.sh
 tools/dev/factory-same-store-lineage.sh
 tools/dev/factory-throughput-qualification.sh
-tools/dev/fixtures/factory_qualification/mail_fsize_partial.sh
-tools/dev/fixtures/factory_qualification/probe_land_proofs.sh
-tools/dev/fixtures/factory_qualification/proof_receipt_peer_verify.sh
-tools/dev/fixtures/factory_qualification/proof_receipt_stale.sh
-tools/dev/fixtures/factory_qualification/toolchain_drift.sh
-tools/dev/fixtures/factory_qualification/verify_land_receipts.sh
 tools/dev/fixtures/proof/generation_hook_refresh.sh
 tools/dev/fixtures/proof/stale_candidate_zcc.sh
 tools/dev/fixtures/proof/stale_epoch_dep.sh
