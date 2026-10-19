@@ -12,6 +12,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "platform/private_directory.h"
+#include "platform/time_compat.h"
 #include "sha3/sha3.h"
 
 #include <dirent.h>
@@ -20,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -494,3 +496,59 @@ enum plugin_status plugin_keys_load(const char *path, char **bytes, size_t *len)
     }
 }
 
+
+/* Per-plugin mutation lock. flock locks belong to the open file description,
+ * so a crashed holder never leaves a stale lock behind. */
+enum { PLUGIN_LOCK_WAIT_MS = 5000, PLUGIN_LOCK_STEP_MS = 20 };
+
+enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *lock)
+{
+    lock->fd = -1;
+#if defined(_WIN32)
+    /* Windows keeps its current behavior: no cross-process mutation lock yet;
+     * the exclusive temp-file creates and atomic replaces remain the only
+     * exclusion there. */
+    (void)plugdir;
+    return PLUGIN_OK;
+#else
+
+    char path[PLUGIN_PATH_MAX];
+    if (!plugin_join(path, sizeof(path), plugdir, ".lock", NULL, NULL))
+        return PLUGIN_ERR_ARGUMENT;
+    int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return errno == ELOOP ? PLUGIN_ERR_KEYS_INSECURE : PLUGIN_ERR_IO;
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return PLUGIN_ERR_IO;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_uid != geteuid()) {
+        close(fd);
+        return PLUGIN_ERR_KEYS_INSECURE;
+    }
+    for (int waited = 0;; waited += PLUGIN_LOCK_STEP_MS) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            lock->fd = fd;
+            return PLUGIN_OK;
+        }
+        if (errno != EWOULDBLOCK && errno != EINTR) {
+            close(fd);
+            return PLUGIN_ERR_IO;
+        }
+        if (waited >= PLUGIN_LOCK_WAIT_MS) {
+            close(fd);
+            return PLUGIN_ERR_BUSY;
+        }
+        platform_sleep_ms(PLUGIN_LOCK_STEP_MS);
+    }
+
+#endif
+}
+
+void plugin_lock_release(struct plugin_lock *lock)
+{
+    if (lock->fd >= 0)
+        close(lock->fd); /* closing drops the flock */
+    lock->fd = -1;
+}

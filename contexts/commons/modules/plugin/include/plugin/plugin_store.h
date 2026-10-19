@@ -45,7 +45,8 @@ enum plugin_status {
     PLUGIN_ERR_KEY_INSECURE,
     PLUGIN_ERR_KEY_MALFORMED,
     PLUGIN_ERR_KEY_EXISTS,
-    PLUGIN_ERR_INTERFACE /* the command does not run this interface version */
+    PLUGIN_ERR_INTERFACE, /* the command does not run this interface version */
+    PLUGIN_ERR_BUSY /* another process holds the plugin mutation lock */
 };
 
 /* Stable refusal code, for example "PLUGIN_KEY_UNKNOWN". */

@@ -15,11 +15,15 @@
 #include "plugin/plugin_store.h"
 #include "sha3/sha3.h"
 
+#include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define PST_HEX (PLUGIN_HEX_SHA3_512 + 1)
@@ -1426,6 +1430,203 @@ static int pst_case_pack_next_escaping(void)
     return failures;
 }
 
+struct pst_trio {
+    char a[PST_HEX], b[PST_HEX], c[PST_HEX];
+};
+
+/* Run fn in a forked child; its plugin_status comes back as the exit code. */
+static pid_t pst_spawn(enum plugin_status (*fn)(struct pst_fx *, const struct pst_trio *),
+                       struct pst_fx *fx, const struct pst_trio *t)
+{
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit((int)fn(fx, t));
+    return pid;
+}
+
+static int pst_reap(pid_t pid)
+{
+    int wst = 0;
+    if (pid < 0 || waitpid(pid, &wst, 0) != pid || !WIFEXITED(wst))
+        return -1;
+    return WEXITSTATUS(wst);
+}
+
+static bool pst_three_generations(struct pst_fx *fx, struct pst_trio *t)
+{
+    struct pst_opts o = {0};
+    if (!pst_fx_open(fx, true) || pst_install(fx, "hello", "version a", &o) != PLUGIN_OK)
+        return false;
+    memcpy(t->a, fx->generation, PST_HEX);
+    if (pst_install(fx, "hello", "version b", &o) != PLUGIN_OK)
+        return false;
+    memcpy(t->b, fx->generation, PST_HEX);
+    if (pst_install(fx, "hello", "version c", &o) != PLUGIN_OK)
+        return false;
+    memcpy(t->c, fx->generation, PST_HEX);
+    return true;
+}
+
+static enum plugin_status pst_flip_worker(struct pst_fx *fx, const struct pst_trio *t)
+{
+    for (int i = 0; i < 20; i++) {
+        enum plugin_status st = plugin_store_switch(fx->root, "hello", t->b);
+        if (st == PLUGIN_OK)
+            st = plugin_store_switch(fx->root, "hello", t->c);
+        if (st != PLUGIN_OK)
+            return st;
+    }
+    return PLUGIN_OK;
+}
+
+/* Every entry of the plugin directory must be a known name: no stray temp link. */
+static bool pst_plugdir_clean(const struct pst_fx *fx)
+{
+    char dir[PATH_MAX];
+    if (!pst_plug_path(fx, NULL, dir, sizeof(dir)))
+        return false;
+    DIR *d = opendir(dir);
+    if (!d)
+        return false;
+    bool clean = true;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0 &&
+            strcmp(e->d_name, "generations") != 0 && strcmp(e->d_name, "current") != 0 &&
+            strcmp(e->d_name, "last-good") != 0 && strcmp(e->d_name, ".lock") != 0)
+            clean = false;
+    }
+    closedir(d);
+    return clean;
+}
+
+static int pst_case_concurrent_switch(void)
+{
+    int failures = 0;
+    TEST_CASE("eight concurrent switchers leave current and last-good distinct and verified") {
+        enum { KIDS = 8 };
+        struct pst_fx fx;
+        struct pst_trio t;
+        pid_t pids[KIDS];
+        char cur[PST_HEX], lg[PST_HEX], exe[PATH_MAX];
+        struct plugin_manifest m;
+        ASSERT(pst_three_generations(&fx, &t));
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", t.a), PLUGIN_OK);
+        for (int i = 0; i < KIDS; i++)
+            pids[i] = pst_spawn(pst_flip_worker, &fx, &t);
+        for (int i = 0; i < KIDS; i++)
+            ASSERT_EQ(pst_reap(pids[i]), (int)PLUGIN_OK);
+        pst_link(&fx, "hello", "current", cur);
+        pst_link(&fx, "hello", "last-good", lg);
+        ASSERT_EQ(plugin_store_current(fx.root, "hello", &m, exe, sizeof(exe)), PLUGIN_OK);
+        ASSERT_STR_EQ(m.generation, cur);
+        ASSERT(strcmp(cur, lg) != 0);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", lg), PLUGIN_OK); /* verifies lg */
+        ASSERT(pst_plugdir_clean(&fx));
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static enum plugin_status pst_busy_switch(struct pst_fx *fx, const struct pst_trio *t)
+{
+    return plugin_store_switch(fx->root, "hello", t->c);
+}
+
+static enum plugin_status pst_busy_rollback(struct pst_fx *fx, const struct pst_trio *t)
+{
+    char restored[PST_HEX];
+    (void)t;
+    return plugin_store_rollback(fx->root, "hello", restored);
+}
+
+static enum plugin_status pst_busy_install(struct pst_fx *fx, const struct pst_trio *t)
+{
+    struct pst_opts o = {0};
+    (void)t;
+    return pst_install(fx, "hello", "version d", &o);
+}
+
+static int pst_case_lock_exclusion(void)
+{
+    int failures = 0;
+    TEST_CASE("a held plugin lock refuses install, switch and rollback with PLUGIN_BUSY") {
+        struct pst_fx fx;
+        struct pst_trio t;
+        char lockpath[PATH_MAX], cur[PST_HEX], lg[PST_HEX];
+        ASSERT(pst_three_generations(&fx, &t));
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", t.a), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", t.b), PLUGIN_OK);
+        ASSERT(pst_plug_path(&fx, ".lock", lockpath, sizeof(lockpath)));
+        int fd = open(lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0);
+        ASSERT_EQ(flock(fd, LOCK_EX | LOCK_NB), 0);
+        pid_t sw = pst_spawn(pst_busy_switch, &fx, &t);
+        pid_t rb = pst_spawn(pst_busy_rollback, &fx, &t);
+        pid_t in = pst_spawn(pst_busy_install, &fx, &t);
+        ASSERT_EQ(pst_reap(sw), (int)PLUGIN_ERR_BUSY);
+        ASSERT_EQ(pst_reap(rb), (int)PLUGIN_ERR_BUSY);
+        ASSERT_EQ(pst_reap(in), (int)PLUGIN_ERR_BUSY);
+        ASSERT_STR_EQ(plugin_status_code(PLUGIN_ERR_BUSY), "PLUGIN_BUSY");
+        pst_link(&fx, "hello", "current", cur);
+        pst_link(&fx, "hello", "last-good", lg);
+        ASSERT_STR_EQ(cur, t.b);
+        ASSERT_STR_EQ(lg, t.a);
+        /* The refused installer staged nothing. */
+        ASSERT(pst_plugdir_clean(&fx));
+        ASSERT_EQ(flock(fd, LOCK_UN), 0);
+        close(fd);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", t.c), PLUGIN_OK);
+        pst_link(&fx, "hello", "current", cur);
+        pst_link(&fx, "hello", "last-good", lg);
+        ASSERT_STR_EQ(cur, t.c);
+        ASSERT_STR_EQ(lg, t.b);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_crashed_install(void)
+{
+    int failures = 0;
+    TEST_CASE("a crash between staging and rename leaves no partial generation and the retry installs") {
+        struct pst_fx fx;
+        struct pst_opts o = {0};
+        struct plugin_info *infos = NULL;
+        struct plugin_manifest m;
+        char a[PST_HEX], cur[PST_HEX], staging[PATH_MAX], leftover[PATH_MAX], tag[32];
+        int present = -1;
+        ASSERT(pst_fx_open(&fx, true));
+        ASSERT_EQ(pst_install(&fx, "hello", "version a", &o), PLUGIN_OK);
+        memcpy(a, fx.generation, PST_HEX);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", a), PLUGIN_OK);
+        ASSERT(pst_publish(&fx, "hello", "version b", &o));
+        /* What a crashed installer leaves: its staging directory, filled but
+         * never renamed into generations/ (same pid as a reused one). */
+        snprintf(tag, sizeof(tag), "staging.%ld", (long)getpid());
+        ASSERT(pst_plug_path(&fx, tag, staging, sizeof(staging)));
+        ASSERT_EQ(mkdir(staging, 0700), 0);
+        ASSERT(pst_path(leftover, sizeof(leftover), staging, "hello"));
+        ASSERT(pst_write(leftover, "partial", 7));
+        ASSERT(pst_list_one(&fx, &infos));
+        ASSERT_EQ(infos[0].generation_count, 1u);
+        ASSERT_STR_EQ(infos[0].generations[0], a);
+        plugin_store_list_free(infos, 1);
+        ASSERT_EQ(plugin_store_install(fx.root, fx.manifest, &m, &present), PLUGIN_OK);
+        ASSERT_EQ(present, 0);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, a);
+        ASSERT(access(staging, F_OK) != 0);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", m.generation), PLUGIN_OK);
+        ASSERT(pst_list_one(&fx, &infos));
+        ASSERT_EQ(infos[0].generation_count, 2u);
+        plugin_store_list_free(infos, 1);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
 static int pst_case_registered(void)
 {
     int failures = 0;
@@ -1491,6 +1692,9 @@ int test_plugin_store(void)
     failures += pst_case_pack_field_mutation();
     failures += pst_case_pack_commands();
     failures += pst_case_pack_next_escaping();
+    failures += pst_case_concurrent_switch();
+    failures += pst_case_lock_exclusion();
+    failures += pst_case_crashed_install();
     failures += pst_case_registered();
     return failures;
 }

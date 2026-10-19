@@ -68,6 +68,15 @@ enum plugin_status plugin_check_dir(const char *path);
 bool plugin_fsync_dir(const char *path);
 
 bool plugin_mkdirs(const char *path);
+
+/* Per-plugin mutation lock (plugdir/.lock) held across the whole
+ * read-verify-modify of install, switch and rollback. Waits a bounded time and
+ * then refuses PLUGIN_ERR_BUSY. Readers never take it. */
+struct plugin_lock {
+    int fd;
+};
+enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *lock);
+void plugin_lock_release(struct plugin_lock *lock);
 /* Create one new owner-private directory; false if it exists. */
 bool plugin_mkdir_new(const char *path);
 bool plugin_join(char *out, size_t cap, const char *a, const char *b,

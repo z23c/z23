@@ -434,6 +434,28 @@ static enum plugin_status ps_publish(const char *plugdir, const char *name,
     return st;
 }
 
+/* Install under the plugin lock. Presence is judged here, after the lock is
+ * held, so two installers never stage the same generation twice. */
+static enum plugin_status ps_install_locked(const char *root, const char *plugdir,
+                                            const char *stem, const struct ps_paths *src,
+                                            const char *keys_file,
+                                            struct plugin_manifest *out,
+                                            int *already_present)
+{
+    struct plugin_lock lock;
+    enum plugin_status st = plugin_lock_acquire(plugdir, &lock);
+    if (st != PLUGIN_OK)
+        return st;
+    if (plugin_verify_generation(root, stem, out->generation) == PLUGIN_OK) {
+        if (already_present)
+            *already_present = 1;
+    } else {
+        st = ps_publish(plugdir, stem, src, keys_file, out);
+    }
+    plugin_lock_release(&lock);
+    return st;
+}
+
 enum plugin_status plugin_store_install(const char *root,
                                         const char *manifest_path,
                                         struct plugin_manifest *out,
@@ -463,12 +485,7 @@ enum plugin_status plugin_store_install(const char *root,
     st = plugin_check_dir(plugdir);
     if (st != PLUGIN_OK)
         return st;
-    if (plugin_verify_generation(root, stem, out->generation) == PLUGIN_OK) {
-        if (already_present)
-            *already_present = 1;
-        return PLUGIN_OK;
-    }
-    return ps_publish(plugdir, stem, &src, keys_file, out);
+    return ps_install_locked(root, plugdir, stem, &src, keys_file, out, already_present);
 }
 
 static enum plugin_status ps_plugin_dir(const char *root, const char *name,
@@ -507,16 +524,25 @@ enum plugin_status plugin_store_switch(const char *root, const char *name,
 {
     char plugdir[PLUGIN_PATH_MAX], previous[PLUGIN_HEX_SHA3_512 + 1];
     enum plugin_status st = ps_plugin_dir(root, name, plugdir, sizeof(plugdir));
-    if (st == PLUGIN_OK)
-        st = plugin_verify_generation(root, name, generation);
     if (st != PLUGIN_OK)
         return st;
-    if (plugin_link_generation(plugdir, "current", previous)) {
-        if (strcmp(previous, generation) == 0)
+    struct plugin_lock lock;
+    st = plugin_lock_acquire(plugdir, &lock);
+    if (st != PLUGIN_OK)
+        return st;
+    st = plugin_verify_generation(root, name, generation);
+    /* current is read only now, under the lock, so last-good is the true previous. */
+    if (st == PLUGIN_OK && plugin_link_generation(plugdir, "current", previous)) {
+        if (strcmp(previous, generation) == 0) {
+            plugin_lock_release(&lock);
             return PLUGIN_OK;
+        }
         st = ps_point(plugdir, "last-good", previous);
     }
-    return st == PLUGIN_OK ? ps_point(plugdir, "current", generation) : st;
+    if (st == PLUGIN_OK)
+        st = ps_point(plugdir, "current", generation);
+    plugin_lock_release(&lock);
+    return st;
 }
 
 enum plugin_status plugin_store_current(const char *root, const char *name,
@@ -543,10 +569,20 @@ enum plugin_status plugin_store_rollback(const char *root, const char *name,
     enum plugin_status st = ps_plugin_dir(root, name, plugdir, sizeof(plugdir));
     if (st != PLUGIN_OK)
         return st;
-    if (!restored || !plugin_link_generation(plugdir, "last-good", restored))
+    if (!restored)
         return PLUGIN_ERR_NO_LAST_GOOD;
-    st = plugin_verify_generation(root, name, restored);
-    return st == PLUGIN_OK ? ps_point(plugdir, "current", restored) : st;
+    struct plugin_lock lock;
+    st = plugin_lock_acquire(plugdir, &lock);
+    if (st != PLUGIN_OK)
+        return st;
+    if (!plugin_link_generation(plugdir, "last-good", restored))
+        st = PLUGIN_ERR_NO_LAST_GOOD;
+    else
+        st = plugin_verify_generation(root, name, restored);
+    if (st == PLUGIN_OK)
+        st = ps_point(plugdir, "current", restored);
+    plugin_lock_release(&lock);
+    return st;
 }
 
 static int ps_cmp_info(const void *a, const void *b)

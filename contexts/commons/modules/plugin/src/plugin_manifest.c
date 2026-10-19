@@ -86,7 +86,9 @@ static const struct {
     [PLUGIN_ERR_KEY_EXISTS] = { "PLUGIN_KEY_EXISTS",
         "keygen never overwrites; choose a new key file path" },
     [PLUGIN_ERR_INTERFACE] = { "PLUGIN_INTERFACE",
-        "use plugin run for interface 1 and plugin call for interface 2" }
+        "use plugin run for interface 1 and plugin call for interface 2" },
+    [PLUGIN_ERR_BUSY] = { "PLUGIN_BUSY",
+        "another plugin install, switch or rollback is running for this plugin; wait for it to finish and retry" }
 };
 
 const char *plugin_status_code(enum plugin_status status)
