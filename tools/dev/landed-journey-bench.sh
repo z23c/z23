@@ -414,7 +414,7 @@ wait_remote_tip()
 # Prove, seal, publish. The drive proves the pair and stops at the push
 # phase: publication requires a signed intent that only the explicit
 # attach seals — dl_drive never attaches, sealing is a deliberate
-# operator action (tools/dev/git_land_signed_intent_contract.md). The
+# operator action. The
 # retryable PUBLICATION_INTENT_REQUIRED block is the expected midpoint
 # (run 17 proved the pair, then sat blocked until this step existed).
 land_publish()
