@@ -10,6 +10,7 @@
 #include "vcs/package_checkout.h"
 #include "vcs/package_public_shape.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,11 +128,14 @@ static bool pp_store_file_chunks(struct pp_fixture *f, const char *leaf,
     return true;
 }
 
+static const char *const pp_versions[] = {"1.0.0", "2.0.0", "3.0.0"};
+static const char *const pp_releases[] = {"one/plugin", "two/plugin", "three/plugin"};
+
 static bool pp_publish(struct pp_fixture *f, unsigned version)
 {
     struct plugin_pack_request request = {
         .exe_path = f->executable, .name = "demo",
-        .version = version == 1 ? "1.0.0" : "2.0.0",
+        .version = pp_versions[version - 1],
         .key_path = f->signing, .out_dir = f->source,
         .capabilities = f->capabilities
     };
@@ -162,7 +166,7 @@ static bool pp_publish(struct pp_fixture *f, unsigned version)
     free(wire);
     vcs_package_manifest_free(&manifest);
     return ok && sw_publish_release(f->publisher.store, f->root,
-                                     (uint8_t)(90 + version), version == 1 ? "one/plugin" : "two/plugin");
+                                     (uint8_t)(90 + version), pp_releases[version - 1]);
 }
 
 static bool pp_exchange(struct pp_fixture *f, uint64_t now)
@@ -414,6 +418,281 @@ static int pp_runtime_journey(void)
 }
 #endif
 
+
+/* ── refusal cases: wrong pin, corrupt transit, altered stored generation ── */
+
+static bool pp_read_link(const struct pp_fixture *f, const char *leaf,
+                         char target[160])
+{
+    char dir[1500], path[1500];
+    if (!pp_path(dir, sizeof(dir), f->plugins, "demo") ||
+        !pp_path(path, sizeof(path), dir, leaf))
+        return false;
+    ssize_t n = readlink(path, target, 159);
+    if (n < 0)
+        return false;
+    target[n] = '\0';
+    return true;
+}
+
+static int pp_generation_entries(const struct pp_fixture *f)
+{
+    char dir[1500];
+    if (!pp_path(dir, sizeof(dir), f->plugins, "demo/generations"))
+        return -1;
+    DIR *d = opendir(dir);
+    if (!d)
+        return -1;
+    int count = 0;
+    for (struct dirent *e = readdir(d); e; e = readdir(d))
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0)
+            count++;
+    (void)closedir(d);
+    return count;
+}
+
+static bool pp_generation_absent(const struct pp_fixture *f, const char *generation)
+{
+    char path[1700], leaf[200];
+    struct stat st;
+    return snprintf(leaf, sizeof(leaf), "demo/generations/%s", generation) > 0 &&
+        pp_path(path, sizeof(path), f->plugins, leaf) &&
+        lstat(path, &st) != 0 && errno == ENOENT;
+}
+
+/* Receive version 1 then 2 over the swarm and install both under the pinned
+ * publisher key: current names the second generation, last-good the first. */
+static bool pp_stage_two(struct pp_fixture *f, char first[129], char second[129])
+{
+    for (unsigned version = 1; version <= 2; version++) {
+        if (!pp_publish(f, version) || !pp_fetch(f) ||
+            !pp_keys(f->plugins, f->packed.public_key) ||
+            !pp_path(f->checkout, sizeof(f->checkout), f->base,
+                     version == 1 ? "stage-one" : "stage-two"))
+            return false;
+        struct vcs_package_checkout_metrics metrics;
+        struct plugin_manifest installed;
+        int present = -1;
+        if (vcs_package_checkout(f->receiver.store, f->root, f->checkout,
+                                 &metrics) != VCS_PACKAGE_CHECKOUT_OK ||
+            !pp_path(f->manifest, sizeof(f->manifest), f->checkout,
+                     "demo.plugin.json") ||
+            plugin_store_install(f->plugins, f->manifest, &installed, &present) !=
+                PLUGIN_OK ||
+            plugin_store_switch(f->plugins, "demo", installed.generation) != PLUGIN_OK)
+            return false;
+        memcpy(version == 1 ? first : second, installed.generation, 129);
+    }
+    return true;
+}
+
+static int pp_refusal_wrong_pin(void)
+{
+    int failures = 0;
+    struct pp_fixture f = {0};
+    bool ready = pp_open(&f);
+    TEST("plugin package: valid signature by an unpinned key refuses and keeps state") {
+        char first[129], second[129], cur[160], lg[160], cur2[160], lg2[160];
+        char other_key[1400], other_out[1400], other_pub[65];
+        ASSERT(ready);
+        ASSERT(pp_stage_two(&f, first, second));
+        ASSERT(pp_read_link(&f, "current", cur) && pp_read_link(&f, "last-good", lg));
+        ASSERT(strcmp(cur + 12, second) == 0 && strcmp(lg + 12, first) == 0);
+        int before = pp_generation_entries(&f);
+        ASSERT_EQ(before, 2);
+        /* The signer is a second, genuine key; the receiver still pins only the first. */
+        ASSERT(pp_path(other_key, sizeof(other_key), f.base, "other-signing"));
+        ASSERT(pp_path(other_out, sizeof(other_out), f.base, "other-packed"));
+        ASSERT_EQ(plugin_keygen(other_key, other_pub), PLUGIN_OK);
+        ASSERT(strcmp(other_pub, f.packed.public_key) != 0);
+        struct plugin_pack_request request = {
+            .exe_path = f.executable, .name = "demo", .version = "9.0.0",
+            .key_path = other_key, .out_dir = other_out
+        };
+        struct plugin_pack_result other;
+        ASSERT_EQ(plugin_pack(&request, &other), PLUGIN_OK);
+        struct plugin_manifest installed;
+        int present = -1;
+        ASSERT_EQ(plugin_store_install(f.plugins, other.manifest_path, &installed,
+                                       &present), PLUGIN_ERR_KEY_UNKNOWN);
+        ASSERT_EQ(pp_generation_entries(&f), before);
+        ASSERT(pp_generation_absent(&f, other.generation));
+        ASSERT(pp_read_link(&f, "current", cur2) && pp_read_link(&f, "last-good", lg2));
+        ASSERT(strcmp(cur, cur2) == 0 && strcmp(lg, lg2) == 0);
+        PASS();
+    } _test_next:;
+    pp_close(&f);
+    return failures;
+}
+
+/* Flip one byte of the CAS object holding the bytes whose chunk hash is given;
+ * the original is kept so the caller can put it back. */
+static bool pp_cas_object(const struct sw_node *node, const uint8_t *bytes,
+                          size_t length, char path[1500])
+{
+    uint8_t digest[32];
+    char hex[65];
+    if (!vcs_package_chunk_hash(bytes, length, digest))
+        return false;
+    for (size_t i = 0; i < 32; i++)
+        snprintf(hex + 2 * i, 3, "%02x", digest[i]);
+    int n = snprintf(path, 1500, "%s/cas/sha3/%.2s/%s", node->zcode_dir, hex, hex);
+    return n > 0 && n < 1500;
+}
+
+static bool pp_cas_swap(const char *path, uint8_t *saved, size_t length, bool corrupt)
+{
+    uint8_t bytes[64];
+    if (length > sizeof(bytes))
+        return false;
+    if (!corrupt) {
+        /* The store may have discarded the bad object; recreate it from the saved bytes. */
+        (void)chmod(path, 0644);
+        return pp_write(path, (const char *)saved, length);
+    }
+    FILE *file = fopen(path, "rb");
+    if (!file)
+        return false;
+    bool ok = fread(saved, 1, length, file) == length;
+    ok = fclose(file) == 0 && ok;
+    memcpy(bytes, saved, length);
+    bytes[0] ^= 0x01;
+    (void)chmod(path, 0644);
+    return ok && pp_write(path, (const char *)bytes, length);
+}
+
+/* A second download of the same root after the first stalled. Peers are
+ * already registered; this only reissues the fetch and drives ticks. */
+static bool pp_fetch_again(struct pp_fixture *f, uint64_t first_tick)
+{
+    const uint64_t provider = 11;
+    (void)vcs_swarm_engine_cancel(f->receiver.engine, f->root, first_tick);
+    if (vcs_swarm_engine_fetch_from_bounded(f->receiver.engine, f->root,
+            SW_DAY, first_tick, &provider, 1, 4u * PP_CAP) != VCS_SWARM_FETCH_OK)
+        return false;
+    for (uint64_t now = first_tick + 1; now < first_tick + 33; now++) {
+        vcs_swarm_engine_tick(f->receiver.engine, SW_DAY, now);
+        if (!pp_exchange(f, now))
+            return false;
+        struct vcs_swarm_download_status status;
+        if (vcs_swarm_engine_download_status(f->receiver.engine, f->root, &status) &&
+            status.state == VCS_SWARM_DL_COMPLETE)
+            return true;
+    }
+    return false;
+}
+
+static int pp_refusal_transit(void)
+{
+    static const char image[] = "inert plugin image, transit variant\n";
+    int failures = 0;
+    struct pp_fixture f = {0};
+    bool ready = pp_open(&f);
+    TEST("plugin package: corrupt exe chunk is refused in transit and recovery installs") {
+        char first[129], second[129], cur[160], lg[160], cur2[160], lg2[160];
+        char publisher_cas[1500], receiver_cas[1500];
+        uint8_t saved[64];
+        ASSERT(ready);
+        ASSERT(pp_stage_two(&f, first, second));
+        ASSERT(pp_read_link(&f, "current", cur) && pp_read_link(&f, "last-good", lg));
+        int before = pp_generation_entries(&f);
+        ASSERT_EQ(before, 2);
+        /* Version 3 carries an image no earlier version did, so its executable
+         * chunk must cross the wire; flip one byte of it at the publisher. */
+        ASSERT(pp_write(f.executable, image, sizeof(image) - 1));
+        ASSERT(pp_publish(&f, 3));
+        ASSERT(pp_cas_object(&f.publisher, (const uint8_t *)image, sizeof(image) - 1,
+                             publisher_cas));
+        ASSERT(pp_cas_object(&f.receiver, (const uint8_t *)image, sizeof(image) - 1,
+                             receiver_cas));
+        ASSERT(pp_cas_swap(publisher_cas, saved, sizeof(image) - 1, true));
+        ASSERT(!pp_fetch_again(&f, 100));
+        struct vcs_swarm_download_status status;
+        ASSERT(!vcs_swarm_engine_download_status(f.receiver.engine, f.root, &status) ||
+               status.state != VCS_SWARM_DL_COMPLETE);
+        ASSERT(access(receiver_cas, F_OK) != 0 && errno == ENOENT);
+        ASSERT(pp_path(f.checkout, sizeof(f.checkout), f.base, "transit-bad"));
+        struct vcs_package_checkout_metrics metrics;
+        ASSERT_EQ(vcs_package_checkout(f.receiver.store, f.root, f.checkout, &metrics),
+                  VCS_PACKAGE_CHECKOUT_INCOMPLETE);
+        ASSERT(access(f.checkout, F_OK) != 0 && errno == ENOENT);
+        ASSERT_EQ(pp_generation_entries(&f), before);
+        ASSERT(pp_read_link(&f, "current", cur2) && pp_read_link(&f, "last-good", lg2));
+        ASSERT(strcmp(cur, cur2) == 0 && strcmp(lg, lg2) == 0);
+        /* The correct bytes arrive: nothing from the refusal blocks recovery. */
+        /* The publisher quarantined the bad object and reports the package
+         * incomplete; supplying the correct chunk through its store completes it. */
+        ASSERT_EQ(vcs_package_store_put_chunk(f.publisher.store, f.root, "demo", 0,
+                      (const uint8_t *)image, sizeof(image) - 1), VCS_PACKAGE_STORE_OK);
+        ASSERT(pp_fetch_again(&f, 200));
+        ASSERT(pp_path(f.checkout, sizeof(f.checkout), f.base, "transit-good"));
+        ASSERT_EQ(vcs_package_checkout(f.receiver.store, f.root, f.checkout, &metrics),
+                  VCS_PACKAGE_CHECKOUT_OK);
+        /* Receiver-side rot between fetch and checkout is refused the same way. */
+        char rotten[1400];
+        ASSERT(pp_cas_swap(receiver_cas, saved, sizeof(image) - 1, true));
+        ASSERT(pp_path(rotten, sizeof(rotten), f.base, "transit-rotten"));
+        ASSERT_EQ(vcs_package_checkout(f.receiver.store, f.root, rotten, &metrics),
+                  VCS_PACKAGE_CHECKOUT_CHUNK);
+        ASSERT(access(rotten, F_OK) != 0 && errno == ENOENT);
+        /* Checkout quarantined the rotten object, so the package is incomplete
+         * until the correct chunk is admitted again. */
+        ASSERT_EQ(vcs_package_checkout(f.receiver.store, f.root, rotten, &metrics),
+                  VCS_PACKAGE_CHECKOUT_INCOMPLETE);
+        ASSERT(access(rotten, F_OK) != 0 && errno == ENOENT);
+        ASSERT_EQ(vcs_package_store_put_chunk(f.receiver.store, f.root, "demo", 0,
+                      (const uint8_t *)image, sizeof(image) - 1), VCS_PACKAGE_STORE_OK);
+        ASSERT_EQ(vcs_package_checkout(f.receiver.store, f.root, rotten, &metrics),
+                  VCS_PACKAGE_CHECKOUT_OK);
+        ASSERT(pp_path(f.manifest, sizeof(f.manifest), rotten, "demo.plugin.json"));
+        struct plugin_manifest installed;
+        int present = -1;
+        ASSERT_EQ(plugin_store_install(f.plugins, f.manifest, &installed, &present),
+                  PLUGIN_OK);
+        ASSERT_EQ(present, 0);
+        ASSERT_EQ(pp_generation_entries(&f), before + 1);
+        ASSERT(pp_read_link(&f, "current", cur2) && pp_read_link(&f, "last-good", lg2));
+        ASSERT(strcmp(cur, cur2) == 0 && strcmp(lg, lg2) == 0);
+        PASS();
+    } _test_next:;
+    pp_close(&f);
+    return failures;
+}
+
+static int pp_refusal_switch(void)
+{
+    int failures = 0;
+    struct pp_fixture f = {0};
+    bool ready = pp_open(&f);
+    TEST("plugin package: switch to an altered stored generation refuses and keeps state") {
+        char first[129], second[129], cur[160], lg[160], cur2[160], lg2[160];
+        char stored[1700], leaf[200];
+        ASSERT(ready);
+        ASSERT(pp_stage_two(&f, first, second));
+        /* Install a third generation without selecting it, then alter its stored image. */
+        ASSERT(pp_write(f.executable, "third plugin image\n", 19));
+        ASSERT(pp_publish(&f, 3));
+        struct plugin_manifest installed;
+        int present = -1;
+        ASSERT_EQ(plugin_store_install(f.plugins, f.packed.manifest_path, &installed,
+                                       &present), PLUGIN_OK);
+        ASSERT(pp_read_link(&f, "current", cur) && pp_read_link(&f, "last-good", lg));
+        ASSERT(strcmp(cur + 12, second) == 0 && strcmp(lg + 12, first) == 0);
+        ASSERT(snprintf(leaf, sizeof(leaf), "demo/generations/%s/demo",
+                        installed.generation) > 0);
+        ASSERT(pp_path(stored, sizeof(stored), f.plugins, leaf));
+        ASSERT_EQ(chmod(stored, 0644), 0);
+        ASSERT(pp_write(stored, "tampered after install", 22));
+        ASSERT_EQ(plugin_store_switch(f.plugins, "demo", installed.generation),
+                  PLUGIN_ERR_EXE_HASH);
+        ASSERT(pp_read_link(&f, "current", cur2) && pp_read_link(&f, "last-good", lg2));
+        ASSERT(strcmp(cur, cur2) == 0 && strcmp(lg, lg2) == 0);
+        PASS();
+    } _test_next:;
+    pp_close(&f);
+    return failures;
+}
+
 int test_plugin_package(void)
 {
     struct pp_fixture fixture = {0};
@@ -427,6 +706,9 @@ int test_plugin_package(void)
     if (!failures)
         failures += pp_round(&fixture, 2, first);
     pp_close(&fixture);
+    failures += pp_refusal_wrong_pin();
+    failures += pp_refusal_transit();
+    failures += pp_refusal_switch();
 #if defined(__linux__)
     failures += pp_runtime_journey();
 #endif
