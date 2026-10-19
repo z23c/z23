@@ -360,14 +360,18 @@ static int cgs_case_l(void)
 {
     static const char *const stub = "platform/modules/platform/src/os_sandbox_stub.c";
     static const char *const pkg = "platform/modules/platform/src/os_sandbox_package_linux.c";
+    static const char *const terminal = "platform/modules/platform/src/os_sandbox_terminal_worker.c";
     int linux_ok = !ccd_coverage_applicable(CCD_LINUX, stub)
+                   && ccd_coverage_applicable(CCD_LINUX, terminal)
                    && ccd_coverage_applicable(CCD_LINUX, "tests/harness/src/test_thread_qos.c")
                    && ccd_coverage_applicable(CCD_LINUX, "tools/dev/wallet_gui_load.c")
                    && ccd_coverage_applicable(CCD_LINUX, "tools/rebuild_recent.c");
     int darwin_ok = !ccd_coverage_applicable(CCD_DARWIN, k_arm) && !ccd_coverage_applicable(CCD_DARWIN, pkg)
+                    && !ccd_coverage_applicable(CCD_DARWIN, terminal)
                     && !ccd_coverage_applicable(CCD_DARWIN, "platform/modules/util/src/self_backtrace.c")
                     && !ccd_coverage_applicable(CCD_DARWIN, "tools/dev/wallet_gui_load.c");
     int windows_ok = !ccd_coverage_applicable(CCD_WINDOWS, k_arm) && !ccd_coverage_applicable(CCD_WINDOWS, pkg)
+                     && !ccd_coverage_applicable(CCD_WINDOWS, terminal)
                      && !ccd_coverage_applicable(CCD_WINDOWS, "contexts/commons/modules/vcs/src/vcs_devloop.c")
                      && !ccd_coverage_applicable(CCD_WINDOWS, "tools/package_verify.c");
     return ccs_say(linux_ok && darwin_ok && windows_ok,

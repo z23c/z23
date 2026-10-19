@@ -105,11 +105,13 @@ static const struct { char os; const char *path; } k_ccd_skip[] = {
     { 'D', "platform/modules/platform/src/os_sandbox_linux.c" },
     { 'D', "platform/modules/platform/src/os_sandbox_landlock_linux.c" },
     { 'D', "platform/modules/platform/src/os_sandbox_package_linux.c" },
+    { 'D', "platform/modules/platform/src/os_sandbox_terminal_worker.c" },
     { 'D', "platform/modules/util/src/self_backtrace.c" },
     { 'D', "tools/dev/wallet_gui_load.c" },
     { 'W', "platform/modules/platform/src/os_sandbox_linux.c" },
     { 'W', "platform/modules/platform/src/os_sandbox_landlock_linux.c" },
     { 'W', "platform/modules/platform/src/os_sandbox_package_linux.c" },
+    { 'W', "platform/modules/platform/src/os_sandbox_terminal_worker.c" },
     { 'W', "contexts/commons/modules/vcs/src/vcs_devloop.c" },
     { 'W', "tools/package_verify.c" },
 };
