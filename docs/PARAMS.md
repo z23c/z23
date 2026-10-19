@@ -150,7 +150,7 @@ uses, not something specific to this project. If this machine already runs
 `zcashd` or `zclassicd`, they are likely already at `~/.zcash-params`; check
 before fetching anything.
 
-Otherwise, get the four files from wherever you already trust — a copy from
+Otherwise, get the four files from wherever you already accept — a copy from
 another machine you control, your distribution's package, or any other
 source — and run `verify` (or `install`, which verifies for you) before
 starting the node with shielded sending in mind. There is deliberately no

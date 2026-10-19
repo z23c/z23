@@ -507,11 +507,11 @@ This borrows the **complete** historical Sprout+Sapling anchor and nullifier
 set from the co-located `zclassicd` chainstate and, in one transaction,
 atomically flips both `anchor_kv`/`nullifier_kv` activation cursors to 0 and
 clears both blockers — `H*` then resumes climbing without a from-genesis
-fold. It never touches mining/spend eligibility. The resulting trust posture
+fold. It never touches mining/spend eligibility. The resulting verification posture
 is `release_assisted`, not `sovereign`: Sapling's imported frontier is
 byte-verified against the header-committed `hashFinalSaplingRoot`, but
 Sprout has no header commitment and bottoms out at the operator's own
-`zclassicd` chainstate bytes. Full data model, trust-asymmetry detail, and
+`zclassicd` chainstate bytes. Full data model, verification-asymmetry detail, and
 `zclassicd`-source key layout:
 [`docs/node/shielded-history-importer.md`](node/shielded-history-importer.md).
 

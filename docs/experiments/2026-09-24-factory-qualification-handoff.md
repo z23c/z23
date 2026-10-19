@@ -105,7 +105,7 @@ qualified receiver-policy recipe in addition to a complete-game candidate.
 An isolated local regtest node stayed responsive at height 0 during factory
 load (100 baseline, 539 during, one after successful block-count RPC), but
 its log emitted `catchup: final commit missing tip hash` before workload and
-again later. Remote peer node state was already blocked by bootstrap trust.
+again later. Remote peer node state was already blocked by bootstrap verification.
 Chain synchronization safety under load remains unqualified; the public-node
 owner received native mail sequence 407.
 

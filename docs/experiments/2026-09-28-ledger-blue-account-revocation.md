@@ -71,4 +71,4 @@ The image has not been installed on a physical Blue. SDK stubs and Cortex-M0
 emulation cannot prove BOLOS PIN-state timing, touchscreen behavior, or
 physical startup and exit. The physical Wallet install block remains after
 0.3.4 froze on opening. This change does not enable Sapling signing or
-establish a trusted chain tip.
+establish a verified chain tip.

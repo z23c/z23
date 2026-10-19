@@ -25,7 +25,7 @@ only shrink, never grow, and growing it costs an ADR."
 The anchor replay-canary FAILed twice on the bg-validation walk extent.
 First (`budget_exceeded`, 5400 s): a fresh walk always started at genesis,
 and the Equihash-serial per-block walk needs ~19 h for 3.2M blocks. The first
-fix (4c8f4a208) started the walk at the durable trusted base — but the rerun
+fix (4c8f4a208) started the walk at the durable verified base — but the rerun
 FAILed in 306 s: `tip_finalize_anchor` keeps RAISING
 `REDUCER_TRUSTED_BASE_HEIGHT_KEY` toward tip as anchors finalize, so by
 bg-validation start it sat at ~tip and the walk verified zero blocks.
@@ -44,7 +44,7 @@ sites already sit exactly at their recorded size baselines:
 - **`engine/composition/src/consensus_state_snapshot_install_activate.c` 1158 → 1169
   (+11)** — the bundle install declares the floor in the same activation
   transaction that stamps the provenance markers, right after clearing the
-  stale trusted-base declaration.
+  stale verified-base declaration.
 
 Both additions are ~70% rationale comment, matching the surrounding house
 style for consensus-adjacent boot/recovery code. Compressing them to fit

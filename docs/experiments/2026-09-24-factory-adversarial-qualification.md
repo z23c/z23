@@ -249,7 +249,7 @@ there is no real-app preview or local application acceptance in this report.
 The operator selected SkyCombat as the real application and authorized the
 existing development SSH hosts. Peer A and Peer B each executed a bounded
 read command on the other with host
-keys pinned to this operator's existing trusted keys. A fixture object sent
+keys pinned to this operator's existing pinned keys. A fixture object sent
 from Peer A to Peer B retained SHA-256
 `917d9fda1ca2d18fbc3567b61b797aac677a5d01375e65ff1ea9719bc194f048`;
 an object sent in the reverse direction retained SHA-256

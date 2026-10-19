@@ -33,11 +33,11 @@ A blob's root is checkable by anyone holding the bytes and nobody else's
 cooperation. A ZNAM registration is an ordering question that only chain state
 answers. A hosted-service row is this node asserting something about itself.
 Those are three different security properties wearing one word ("owned"), and
-a catalog that renders them identically teaches a reader to trust the weakest
+a catalog that renders them identically teaches a reader to rely on the weakest
 one as much as the strongest.
 
 The distinction the project actually cares about is not "centralised versus
-decentralised". It is **how a trust root fails**, which is a narrower and more
+decentralised". It is **how a verification root fails**, which is a narrower and more
 checkable question.
 
 A directory authenticated by a fixed set of signing keys fails **silently**.
@@ -210,7 +210,7 @@ being misquoted.
   bytes.
 
 - **Reachability is a separate and harder problem.** A censor does not need to
-  attack a trust root when it can drop packets. This node has no pluggable
+  attack a verification root when it can drop packets. This node has no pluggable
   transports, no bridges, and easily fingerprinted traffic. Nothing in this
   ADR improves that, and a perfect answer to "what is authentic" is worth
   little to someone who cannot complete a connection.
@@ -286,7 +286,7 @@ Framed as work, not as promises. None of it is scheduled by this ADR.
 - Three classes is a coarse partition, and `PROOF_OF_WORK` in particular spans
   a one-confirmation record and a deeply buried one. The class name is not a
   strength score, and until depth is exposed per record a reader can
-  over-trust a shallow record on class name alone.
+  over-rely on a shallow record on class name alone.
 - The declaration is currently stronger than the observation: six kinds have
   no reader, so their class cannot be checked against real catalog output.
 - A per-record field is one more thing an adapter can fill in wrongly. The

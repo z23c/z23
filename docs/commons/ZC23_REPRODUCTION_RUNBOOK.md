@@ -7,7 +7,7 @@ deployment, service changes, or live-datadir access.
 ## Secure build release qualification
 
 The build fabric has a separate, inert qualification boundary for release
-candidates. It reuses the existing action, receipt, worker-trust and CAS
+candidates. It reuses the existing action, receipt, worker-verification and CAS
 models. The supervisor requires three distinct signed receipts for one exact
 action and artifact: the admitted candidate, a clean shadow, and an independent
 reproduction. Both later receipts must match the candidate's canonical
@@ -16,7 +16,7 @@ physical observation. It also requires one already-admitted exact
 binds the canonical `build_release_regressions.v1` requested-intent manifest;
 its signed work receipt is the physical observation, and its existing proof
 set must satisfy the task's proof policy. Qualification inspects that proof set
-without writing trust state or admitting evidence.
+without writing verification state or admitting evidence.
 
 A signed `build_release_confirmation.v2` binds the regression action and proof
 set, three distinct content-verified physical-machine evidence roots, and an

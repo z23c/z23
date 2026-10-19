@@ -95,7 +95,7 @@ its routed groups, whoever produced them.
 `author_pubkey`, `signature`. The chain field is `expected_base`: a PUBLICATION
 extends another when its `expected_base` equals that one's `head_commit`, so
 the publication ledger is `main`'s own history and any node verifies the chain
-by fetching `main` rather than by trusting a gossiped sequence.
+by fetching `main` rather than by taking a gossiped sequence on faith.
 
 **How they move.** All three ride the frozen `zpkgswm` carrier the fleet board
 already rides — no new P2P command, no new listener, no new port. Each gets a
@@ -146,7 +146,7 @@ is legal and merely wasteful; it is never an error, and no lease, claim or
 queue position grants the right to prove.
 
 A **proof of a candidate is the routed groups whose closure digests lack a
-trusted verdict row** — nothing more. When every routed group already has one,
+verified verdict row** — nothing more. When every routed group already has one,
 the candidate needs no build at all.
 
 Four changes in `tools/dev/dev_proof.c` and its neighbours make that skip real.
@@ -155,7 +155,7 @@ the compile dimension has run `make build-only` and the bundle step has run
 `make dev-proof-bundle`. The proof's test dimension then runs every selected
 group cold (`--no-cache`), because the only verdict store it could read is the
 unsigned, same-uid `.zvcs/objects` store a candidate's own tests can write;
-see "Trust" below. So:
+see "Verification" below. So:
 
 1. **Move the keyer out of the test binary.** The closure walk and the depfile
    graph it depends on (`codeindex_forward_closure`,
@@ -179,7 +179,7 @@ see "Trust" below. So:
    is visible to this prover and no row the candidate wrote ever counts.
 4. **Probe before the build, not inside the test dimension.** A probe pass runs
    as soon as the routed group set is known and before the compile branch. When
-   every routed group has a trusted verdict at its key, the compile and test
+   every routed group has a verified verdict at its key, the compile and test
    dimensions are marked reused the way whole-cycle reuse is marked today, and
    neither `make build-only` nor `make dev-proof-bundle` runs.
 
@@ -235,7 +235,7 @@ red row against one gate's inputs. Five red lint gates then block the five
 candidates whose closures reach them and nothing else, instead of refusing
 every push until someone fixes them.
 
-### 6. Trust
+### 6. Verification
 
 Gossip is open; admission is not. The board accepts any correctly self-signed
 post from any host key, and the replicated table keeps that property — a row
@@ -248,7 +248,7 @@ matches the candidate's. A group is covered when **K** such rows agree. `K` is
 one for keys the owner controls; a higher `K` for keys the owner does not,
 declared by policy rather than by code.
 
-The signer must sit outside the candidate's trust domain. A candidate's build
+The signer must sit outside the candidate's verification domain. A candidate's build
 and tests run as the proof's uid, so anything that uid can write, including an
 unsigned per-group PASS record or a key the proof itself holds, can be planted
 by the code being judged. Until a separate-uid verifier is qualified, landing
@@ -261,7 +261,7 @@ same-user cache does not.
 
 The allowlist becomes signed rows on the same seam instead of a file each box
 edits by hand. The verification mechanism is already right — a pubkey is
-trusted only when it is this box's own key or listed in the allowlist,
+accepted only when it is this box's own key or listed in the allowlist,
 `zcl_dev_proof_signer_verify` — only the distribution is manual, and a fifth
 descriptor fixes that.
 
@@ -328,7 +328,7 @@ that calls it is woken by a row rather than by a timer.
 - **The host-local slot lock as a landing gate.** It survives as scheduling
   scratch for one host's own worktree and never decides who may land.
 - **The whole-tree generation build** for any candidate whose routed groups
-  already carry trusted verdicts.
+  already carry verified verdicts.
 
 ### 10. Migration order
 

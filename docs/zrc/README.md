@@ -131,7 +131,7 @@ means.
   private row, room name, or post id that would reveal a private room exists.
 - [`0010-composable-proofs.md`](0010-composable-proofs.md) —
   a signed Merkle tree of per-group verdict leaves, so a receiver admits a
-  tip when trusted producers' union covers the required closure; covered
+  tip when accepted producers' union covers the required closure; covered
   work is never re-proven.
 - [`0011-fast-sync-over-the-peer-link.md`](0011-fast-sync-over-the-peer-link.md) —
   signed state offers and a resumable chunked bundle transfer over the

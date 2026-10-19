@@ -68,8 +68,8 @@ cells tells you which one is right. You never fix it by editing the cell.
 6. **Verify against the chain, not against text or mirrors.** Ground truth is
    the canonical chain's own bytes; reference source text and sibling copies are
    lossy proxies. Text said 102,000 bytes was the tx maximum; the chain holds a
-   125,811-byte tx at h=478544, and trusting the text FATALs genesis replay
-   (see I4). Trusting a lagging mirror can manufacture a false coin-tear —
+   125,811-byte tx at h=478544, and accepting the text FATALs genesis replay
+   (see I4). Accepting a lagging mirror can manufacture a false coin-tear —
    both classes cure by checking the derivation, not the copy.
 
 ---
@@ -144,7 +144,7 @@ plan steps make each duplicate zero-callers — never out of order.**
 
 ## The sync-speed floor
 
-Trusted bootstrap's information floor is *headers + UTXO snapshot*. We measure
+Assisted bootstrap's information floor is *headers + UTXO snapshot*. We measure
 at the floor today; remaining work is recipe-safety, not throughput. The proven
 two-step cold-sync recipe, its measured timings, and the port table are in
 `docs/node/SYNC.md` — the canonical source. The recipe's `--importblockindex`-FIRST

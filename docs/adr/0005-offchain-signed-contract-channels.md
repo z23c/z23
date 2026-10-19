@@ -41,9 +41,9 @@ resort, not as the execution surface.
 
 The naive alternative — put contract logic on-chain as new script — is
 rejected by ADR-0002 and the parity doctrine outright. The other naive
-alternative — a trusted contract server — is rejected because it reintroduces
-exactly the DNS/CA/registry trust this stack exists to remove. The model
-below keeps the only roots of trust the rest of the system keeps: PoW and the
+alternative — a contract server run by a third party — is rejected because it reintroduces
+exactly the DNS/CA/registry reliance this stack exists to remove. The model
+below keeps the only verification roots the rest of the system keeps: PoW and the
 compiled, content-addressed binary.
 
 ## Decision
@@ -59,7 +59,7 @@ clock, RNG, network, or filesystem authority except what the capability fabric
 grants (ADR-0004). It is a hotloadable module (`engine/modules/hotswap/`) whose bytes are
 **content-addressed and ZANC-anchored on-chain**, so both counterparties prove
 they are running byte-identical logic by comparing one SHA3 digest against the
-chain — no "did you run the real code?" trust.
+chain — no "did you run the real code?" question.
 
 Determinism is the load-bearing property: identical inputs must produce
 identical output bytes on every node, or the two parties cannot co-sign a
@@ -100,10 +100,10 @@ branch). PoW finality plus the timeout resolves the dispute deterministically.
 No new opcode is required — the dispute is expressed entirely in standard
 HTLC/CLTV/multisig script that the sealed core already validates.
 
-**Summary of the trust reduction:** a contract's correctness reduces to (a)
+**Summary of the reliance reduction:** a contract's correctness reduces to (a)
 both parties ran the same ZANC-anchored deterministic program, (b) every state
 was co-signed and authority-receipt-bound, and (c) the chain enforces the last
-signed state under PoW. No trusted third party, no consensus change, minimal
+signed state under PoW. No third party is needed, no consensus change, minimal
 on-chain footprint (open + close, or open + dispute).
 
 ## Reference service: Discreet Log Contracts (DLC)

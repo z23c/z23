@@ -64,4 +64,4 @@ The image has not been installed on a physical Blue. SDK stubs cannot prove
 BOLOS lock timing, physical touchscreen behavior, or app startup and exit.
 PIN validation is checked at defined boundaries rather than atomically
 across BOLOS calls. This change does not enable Sapling signing or establish
-a trusted chain tip.
+a verified chain tip.

@@ -6,7 +6,7 @@ OP_RETURN output, no new opcodes, no consensus change (same pattern as ZNAM/
 ZSLP). The chain's proof-of-work history timestamps the digest; anyone can
 recompute the digest and find the block that committed it.
 
-## Trust model — what it proves
+## Verification model — what it proves
 
 An anchor is a transaction whose first output is an `OP_RETURN` carrying a
 digest. Once that transaction is buried under work, the fact "this exact
@@ -36,7 +36,7 @@ history; the table is only an index over it. Delete it and it rebuilds.
 - **Not integrity of the content behind the digest.** It commits the 32-byte
   digest, not the bytes. You must recompute the digest from the real file; the
   chain only tells you *when that digest first appeared*.
-- **Not first-publication ordering across forks below finality.** Trust the
+- **Not first-publication ordering across forks below finality.** Rely on the
   anchor only once it has meaningful confirmations.
 
 ## Payload layout

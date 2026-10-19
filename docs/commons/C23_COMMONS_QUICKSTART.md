@@ -9,7 +9,7 @@ z23 zcode guide
 z23 zcode package guide
 ```
 
-The rule throughout is **verify, don't trust**. A name and semantic version
+The rule throughout is **verify, don't assume**. A name and semantic version
 are labels. The `package_root` is exact identity. An author signature says
 only who made one release statement; a provider record says only where bytes
 are claimed to be available; a build receipt says only what one exact build
@@ -370,7 +370,7 @@ later peer still fetches the exact C23 Apache-2.0 bytes after the original
 publisher disappears. The swarm net hop proves that for both the Arena
 shelf and an ordinary catalog (`zhex`, `zstr`, `zbuf`, `zsha256`, `zring`,
 `zmap`, `zvec`, `zutf8`, `zjson`). Verify the `package_root`;
-do not trust the announcer.
+do not take the announcer's word for it.
 
 1. Discover the signed POINTER for the exact root, then fetch its returned
    `transport_root`. Fetch is resumable and inert: it does not build, link, or

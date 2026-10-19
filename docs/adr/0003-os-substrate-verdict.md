@@ -188,7 +188,7 @@ Detail, file inventories, and the ordered checklist are in
   convention a reviewer has to remember.
 - Rung 0's shell-out removal is valuable independent of sandboxing — it
   also removes ~12 sites where `system()`'s return code is already known to
-  be untrustworthy tree-wide, because `alerts_init()`
+  be unreliable tree-wide, because `alerts_init()`
   (`engine/modules/event/src/alerts.c:287-291`) installs a process-wide `SIGCHLD`
   handler with `SA_NOCLDWAIT` so `system()`'s internal `waitpid()` reliably
   fails `ECHILD` (documented in-place at

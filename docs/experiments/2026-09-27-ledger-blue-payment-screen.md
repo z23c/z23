@@ -48,5 +48,5 @@ review controller, transport, touch handling, and linked Blue image.
 The PNG canvas uses SDK font data but cannot prove physical Blue pixels,
 contrast, touchscreen hit boxes, or USB responsiveness. The preview is not
 linked into the Blue app and cannot authorize a transaction. The controller
-still needs trusted previous outputs, an independently checked fee and
+still needs verified previous outputs, an independently checked fee and
 change path, and final device approval before payment signing is safe.

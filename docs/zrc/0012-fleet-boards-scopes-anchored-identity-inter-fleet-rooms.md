@@ -347,7 +347,7 @@ dotted `<owner>.<condition>` form (e.g. `bootstrap.no_state_source` in
 |---|---|---|
 | Signed, gossiped board | Yes — `fleet_board.def`, `fleet_board_post.c`, `boot_fleet_board.c`, `fleet_board_proto.c`, all landed. | Unchanged as the transport and chain-linking mechanism; extended with a `scope` field. |
 | Row identity | Node's local DHT online key, no on-chain binding. | Board key stays as the per-row signer, but is now certified by a roster row rooted in a ZID anchor, so a reader can verify a key belongs to a named fleet, not just that some key signed it. |
-| Fleet identity anchor | One system, step 1 implemented: the general ZID anchor overlay (`contexts/wallet/modules/zid/src/zid_anchor.c`) and `fleetenrol` (`tools/dev/fleet_enrol*.c`, on `main`). `fleetenrol`'s operator root is the same 32-byte Ed25519 key shape; `fleet invite`/`admit`/`import`/`machines` report whether it is an active ZID anchor, and `--require_anchor=yes` makes `admit`/`import` fail closed. Step 2: the board reads it: the root's `active`/`rotated`/`revoked` state decides whether its roster is trusted. | Roster rows signed by that anchored root (or a certified delegate) gate `scope: fleet` relay. |
+| Fleet identity anchor | One system, step 1 implemented: the general ZID anchor overlay (`contexts/wallet/modules/zid/src/zid_anchor.c`) and `fleetenrol` (`tools/dev/fleet_enrol*.c`, on `main`). `fleetenrol`'s operator root is the same 32-byte Ed25519 key shape; `fleet invite`/`admit`/`import`/`machines` report whether it is an active ZID anchor, and `--require_anchor=yes` makes `admit`/`import` fail closed. Step 2: the board reads it: the root's `active`/`rotated`/`revoked` state decides whether its roster is accepted. | Roster rows signed by that anchored root (or a certified delegate) gate `scope: fleet` relay. |
 | Membership | Step 2 implemented, opt-in (`-fleetrostergate` on the manager): a signing key is a member when a root-sealed machine line, carried as a `fleet-roster` fleet note, names it; with a roster in force, the paired board stream and P2P POST ingress take `scope: fleet` from members only. No revocation record or delegate yet. | Roster rows, signed by the fleet root or a certified delegate, gate `scope: fleet` relay. |
 | Fleet-row privacy | None — every gossiped row is legible to every peer that relays it. | Epoch-key encryption, rotated on every membership change, relay gated to roster members over onion. |
 | Direct messages | Plaintext on the wire, in-memory ring buffer, unreplicated per-node SQLite mirror, on-chain memo as the only durable/private option. | Sealed per-message with forward secrecy, durable signed at-rest store mirroring the board's own model, delivered over the existing flood/INV path or a ZRC-0002 stream, onion-only; on-chain memo stays as the fallback. |
@@ -400,7 +400,7 @@ record before the next lane starts.
    the root's chain state from the `zid_identities` projection: an anchored
    root is bound by the chain (`active` passes, `rotated` and `revoked`
    refuse), a never-anchored root is tolerated, an unreadable projection
-   refuses. Three states: unarmed (no root trusted, or no sealed row yet:
+   refuses. Three states: unarmed (no root pinned, or no sealed row yet:
    fleet carriage is exactly what it was), armed (the paired board stream
    serves, pulls from and accepts fleet posts from roster members only, and
    so does ordinary P2P POST ingress), unverifiable (no fleet-scope relay at
@@ -409,7 +409,7 @@ record before the next lane starts.
    `-fleetrostergate`, and `-fleetrostergate=0` on any box switches
    enforcement off there (logged); arming is logged once at INFO with the
    member count and a lapse to unarmed once at WARN. A roster row is stored
-   only if its seal verifies under the trusted root, on every ingest path
+   only if its seal verifies under the pinned root, on every ingest path
    (mesh stream, P2P POST, local post): one Ed25519 verify for roster rows
    only, none on the cached path for ordinary posts. A failed read of the
    roster notes is unverifiable, never unarmed. A rebuild is single-flight and

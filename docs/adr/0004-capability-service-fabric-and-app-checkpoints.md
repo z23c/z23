@@ -43,7 +43,7 @@ referenced state content. The image and logical roots identify the physical
 SQLite image and canonical logical state separately. The
 operator should be able to load an activation, cheaply fork its state for a
 test, checkpoint it, restore it, or roll it back without minting new authority,
-making consensus state part of the cartridge, or trusting a raw process-memory
+making consensus state part of the cartridge, or accepting a raw process-memory
 image.
 
 This model is especially important for LLM development. An agent should work
@@ -236,7 +236,7 @@ Checkpoint/restore has four tiers:
    page size, CPU feature floor, schema, activation/state generation, and grant
    revision. Any mismatch discards it and rebuilds from portable state.
 4. **Demand paging:** `userfaultfd` or a platform equivalent is deferred until
-   measurements prove it necessary. It is unavailable to an untrusted App and
+   measurements prove it necessary. It is unavailable to an unverified App and
    is not required for correctness.
 
 Raw core dumps, copied heaps, stack/register images, kernel objects, live
@@ -247,7 +247,7 @@ W^X, and would weaken the sandbox's non-dumpable policy.
 Full-database rescans are a correctness fallback, not the fast path. `appd`
 maintains a complete parent chunk manifest, but broker-level write knowledge is
 not sufficient: B-tree splits, freelists, schema changes, and auto-vacuum can
-dirty physical pages indirectly. A trusted SQLite VFS/WAL-frame observer tracks
+dirty physical pages indirectly. A pinned SQLite VFS/WAL-frame observer tracks
 page ranges under a persistent snapshot epoch. Any gap, restart, WAL reset,
 unknown VFS operation, or epoch discontinuity invalidates incremental reuse and
 forces a full image rescan. With continuous evidence, a child checkpoint reuses
@@ -396,7 +396,7 @@ host owns that App's isolated database and atomic switch transaction.
 - Core remains a small immutable authority while Apps gain OS-enforced fault
   and privilege isolation.
 - App state can be forked, tested, restored, and rolled back without copying or
-  trusting process-memory internals; a probed reflink may also avoid a full
+  relying on process-memory internals; a probed reflink may also avoid a full
   database byte copy.
 - Portable correctness and same-host speed are separate: a corrupt or stale
   warm cache costs performance, never state.

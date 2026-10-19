@@ -28,8 +28,8 @@ legacy paths). Fix the seams; keep the core.
 ## The one bug, every time
 
 Not "too many acquisition paths" (a sovereign node MUST keep genesis-fold as
-its trust root). Not "one log would fix it" (that erases the two distinct
-trust mechanisms below). The actual disease:
+its verification root). Not "one log would fix it" (that erases the two distinct
+verification mechanisms below). The actual disease:
 
 > **A single fact ("header proven to H", "state applied to H") has two or
 > three independently-writable copies. One writer updates copy A; a reader
@@ -43,7 +43,7 @@ and the node folded from genesis. Same fact, two copies, drift.
 
 ## Two provenance domains — keep them SEPARATE and VISIBLE
 
-State is trusted by two different mechanisms. PoW establishes the header
+State is verified by two different mechanisms. PoW establishes the header
 spine: hash-linked headers with verified PoW. Derived state is the
 UTXO (unspent transaction output), anchor (commitment-tree root), and nullifier
 (spend-detection identifier) sets earned by replaying block bodies.

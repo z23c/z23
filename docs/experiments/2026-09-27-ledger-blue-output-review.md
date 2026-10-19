@@ -36,7 +36,7 @@ ARM GCC 16.2.0 compiled the new controller as ISO C23 with `-Os -Wall
 of `.text`, zero `.data`, and zero `.bss`. The largest reported local frame
 is 40 bytes. Its state type measures 376 bytes on ARM. This excludes the
 BLAKE2b and SHA-256 contexts, UI, USB transport, linker stack reservation,
-and any future trusted previous-output verification.
+and any future previous-output verification.
 
 ## Limit
 

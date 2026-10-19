@@ -105,7 +105,7 @@ different object kind — that is what makes the object store's addressing
 collision-proof by construction rather than by convention.
 
 Every object read **recomputes** the hash and rejects a mismatch
-(`vcs_object_get()`); ZVCS never trusts a stored hash without re-deriving it.
+(`vcs_object_get()`); ZVCS never accepts a stored hash without re-deriving it.
 The same "recompute, never trust" discipline used elsewhere in this codebase
 (`seal_kv`, the sealed `core/MANIFEST.sha3`).
 

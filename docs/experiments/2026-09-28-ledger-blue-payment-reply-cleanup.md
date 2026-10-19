@@ -68,5 +68,5 @@ baselined findings and no new findings.
 
 The image is not installed. Host tests and the SDK link do not prove that the
 Blue's BOLOS USB loop, touchscreen, or exit behavior works on the physical
-device. This cleanup does not enable Sapling signing or establish a trusted
+device. This cleanup does not enable Sapling signing or establish a verified
 chain tip.

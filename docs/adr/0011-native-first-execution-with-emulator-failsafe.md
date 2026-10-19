@@ -27,7 +27,7 @@ other:
 1. **Speed.** Users run binaries at native speed. Emulation and binary
    translation always cost something, and hardware virtualization needs a
    host grant.
-2. **Trust without a trusted builder.** A binary from a peer is accepted
+2. **Verification without a privileged builder.** A binary from a peer is accepted
    only when its bytes are proven, not because of who sent it.
 3. **It always runs.** Some hosts lack the sandbox features native
    confinement needs, such as an old kernel or a platform backend that does
@@ -164,7 +164,7 @@ time rules:
 
 - Native speed is the default, and a host without sandbox support still runs
   applications through the failsafe tier.
-- Trust in fetched binaries comes from reproducible builds and agreement
+- Verification of fetched binaries comes from reproducible builds and agreement
   between nodes, not from a signing authority.
 - The project now maintains an emulator. Its scope stays bounded: the user
   mode failsafe first, and kernel boots only for exact mode.

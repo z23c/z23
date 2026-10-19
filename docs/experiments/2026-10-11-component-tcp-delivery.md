@@ -71,7 +71,7 @@ manifest metadata length and one transferred metadata object. No verified
 component chunk bytes are permitted. The selected component remains
 non-complete with no verified component chunk bytes, assembly, sealed copy or execution, followed
 by actual download cancellation. Terminal download state is not required.
-Same-host loopback peers retain the production trust exemption; peer-score
+Same-host loopback peers retain the production verification exemption; peer-score
 accumulation and banning are not qualified by this fixture. It does
 not claim specifically image-byte corruption: another component member may be
 the first rejected chunk. A deadline or setup failure is not this negative's
@@ -142,7 +142,7 @@ No gate was bypassed and no shared capability projection was regenerated.
 
 Prior public TCP attempts and their external receipts remain retained: release
 fetch failed before policy controls when scheduler polling did not service quiet
-timer progress; repeated complete-root fetches and trusted localhost scoring
+timer progress; repeated complete-root fetches and localhost scoring
 assumptions then failed distinct controls. Corruption accounting initially
 misclassified verified manifest metadata as component content, and source review
 corrected nested manifest cleanup. Each correction required its own reviewed

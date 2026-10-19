@@ -50,7 +50,7 @@ fixture releases. Signed attestation mode uses `--store` and `--key`, without
 Attestation subprocess exit 0 means successful observation persistence and can
 also accompany a failing package test.
 
-The boundary case independently captures trusted fixture files into native
+The boundary case independently captures accepted fixture files into native
 ZVCS CAS, materializes their verified bytes read-only, and recaptures the tree
 to check its exact identity. It uses the canonical recipe file outside that
 tree and candidate quick mode with fresh cold/warm emit and work paths, a shared
@@ -221,7 +221,7 @@ unknown.
 The version-4 production refactor separates platform arguments, compiler
 options and declared recipe inputs while preserving their ordering, accepted
 counts, formatting refusals, heap ownership and vector capacities. Regression
-helpers separate recipe construction, trusted fixture population, sidecar
+helpers separate recipe construction, accepted fixture population, sidecar
 contents/object verification, shard enumeration and cache-count checks. Every
 existing behavioral, root, byte, argv, isolation and reuse assertion remains.
 The generated header is described by its directory and basename.

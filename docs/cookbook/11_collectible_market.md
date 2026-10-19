@@ -5,7 +5,7 @@
 This is the flagship example: the executable design doc for z23's
 commerce stack. It mints one-of-one digital collectibles, claims a
 permanent on-chain storefront identity, and sells them two different
-ways — a plain direct payment and a trustless HTLC escrow — entirely
+ways — a plain direct payment and a chain-enforced HTLC escrow — entirely
 inside the deterministic `simnet` harness, through the real
 `connect_block()` consensus path. It is built directly on top of examples
 04 (ZSLP), 05 (ZNAM), and 06 (HTLC) and composes all three: an HTLC
@@ -29,7 +29,7 @@ The story, real blocks throughout:
    seller, and the SAME block also carries the ZSLP SEND handing deed #1
    to the buyer. Provenance (GENESIS -> SEND) reads straight off the
    chain.
-4. **Sale path B (trustless escrow)** — deed #2's holder output is a P2SH
+4. **Sale path B (chain-enforced escrow)** — deed #2's holder output is a P2SH
    HTLC instead of a plain P2PKH, but it still carries an SLP SEND
    OP_RETURN. A collector reveals the secret to redeem it (and
    `htlc_extract_secret` recovers that secret from the settled scriptSig

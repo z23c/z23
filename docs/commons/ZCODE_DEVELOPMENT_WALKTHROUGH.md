@@ -105,7 +105,7 @@ z23-dev zcode work review -datadir=/tmp/z23-work \
   --input='{"workspace":".","work":"latest","adapter":"manual","verdict":"approve","findings":"No blocking findings."}'
 ```
 
-The command binds the already-trusted non-review proof set, uses a distinct
+The command binds the already-verified non-review proof set, uses a distinct
 reviewer identity, and creates the existing `review.v1` plus signed REVIEW work
 receipt. Status then shows the verdict; conflicting-review execution remains a
 named v0.1 blocker rather than silently replacing the first review.

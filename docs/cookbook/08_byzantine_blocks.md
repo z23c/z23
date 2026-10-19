@@ -2,7 +2,7 @@
 
 ## What this demonstrates
 
-A node accepts bytes from untrusted peers, so every block or header a peer
+A node accepts bytes from unverified peers, so every block or header a peer
 sends must pass through the same validator an honest block passes through —
 there is no separate "attack detector." This example drives four distinct
 malformed inputs (bad merkle root, over-subsidy coinbase, negative output

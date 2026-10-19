@@ -62,5 +62,5 @@ for byte. This tests build repeatability on one host and compiler toolchain.
 The image has not been installed on a physical Blue. The SDK stubs do not
 prove BOLOS PIN-state timing, touchscreen behavior, or app startup and exit.
 The physical install block remains in place after Wallet 0.3.4 froze on
-opening. This change does not enable Sapling signing or establish a trusted
+opening. This change does not enable Sapling signing or establish a verified
 chain tip.

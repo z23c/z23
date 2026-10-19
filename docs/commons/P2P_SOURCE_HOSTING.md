@@ -5,7 +5,7 @@ consensus. The source system is an application protocol: the blockchain may
 anchor publisher identity, release roots, payments, or optional burn receipts,
 but block and transaction validity remain exactly compatible with `zclassicd`.
 
-## Trust model
+## Verification model
 
 The source tree is the authority; transport is not. A release is identified by
 the `content.v2` package root from `contexts/commons/modules/vcs/package_manifest.*`: canonical
@@ -80,7 +80,7 @@ have_remote flags, never secret keys.
 <!-- claim: symbol-present boot_zcode_swarm_receipt_frame engine/composition/src/boot_zcode_swarm_receipt.c # boot glue consumes ZSID/ZSR1 -->
 
 
-Do not put source packages through the legacy file-market trust path. Its offer
+Do not put source packages through the legacy file-market acceptance path. Its offer
 root and possession/payment checks predate `content.v2`, and the fast file
 service's public-root-derived stream key is not peer authentication. Useful
 quota, worker, backpressure, and PoW mechanics may be generalized later, but a
@@ -205,7 +205,7 @@ authority and is reported separately as `acceptance_recipe_root`.
 
 Carrier construction and checkout both resolve that chain from immutable
 objects. Checkout first stages it in an isolated CAS, derives the expected
-Ed25519 signer from the candidate (never from a key trusted merely because a
+Ed25519 signer from the candidate (never from a key accepted merely because a
 receipt embeds it), verifies every receipt and both proof sets, requires the
 `PROVEN` lane, checks task recipe membership against the reconstructed source,
 and only then imports authority into the destination workspace. The caller
@@ -276,9 +276,9 @@ for and for no other reason.
 
 ### Git-free consumer build
 
-A reconstructed carrier is built under two explicit trust inputs: the
+A reconstructed carrier is built under two explicit verification inputs: the
 human-accepted ZVCS `source_root`, and a bootstrap `z23` binary whose
-SHA3-256 came through an already trusted channel. The bootstrap does not grant
+SHA3-256 came through an already verified channel. The bootstrap does not grant
 acceptance; it only re-derives the complete source root before build admission
 and artifact publication. Carrier checkout additionally takes the immutable
 `accepted_work_root` and derives its acceptance signer from the carried,
@@ -358,7 +358,7 @@ announce bound (`VCS_SWARM_MAX_LOCAL_ANNOUNCES`). There is no central tracker
 and no Python path.
 
 1. A peer gossips a bounded announcement containing the package root and
-   internally feasible manifest/count/size hints. Hints remain untrusted: they
+   internally feasible manifest/count/size hints. Hints remain unverified: they
    never reserve storage, earn ratio credit, or establish package identity.
    Unique *new* roots consume the NEW_USER hourly quota; keep-alive of a root
    the peer already heard is inventory, not flood, and does not consume that
@@ -482,7 +482,7 @@ weaker "file these bytes, I am not asking about one package" case, in which
 the command files whatever package the wire itself names and asserts
 nothing about yours.
 
-**Where the trust actually sits.** The publish-side gate refuses to
+**Where the verification actually sits.** The publish-side gate refuses to
 advertise a pointer this node cannot stand behind — bytes it does not hold,
 bytes that are not a canonical `ZCLATT` wire, a signature that does not
 verify, or a wire attesting a different package than the pointer claims.
@@ -499,7 +499,7 @@ an attestation whose own `package_root` differs is refused
 `package-root-binding` and never filed. `admit` gives the same check to a
 caller who names the package they are asking about, and skips it only for
 the caller who is asking about none. Do not treat a published attestation
-pointer as trustworthy because the publish gate exists.
+pointer as reliable because the publish gate exists.
 
 **Pulling is not accepting.** `pull` files attestations signed by keys this
 node has never approved, carrying failure result classes, for packages it

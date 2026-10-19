@@ -53,5 +53,5 @@ source or image changed.
 The snapshot prevents callback changes from altering the expectations used
 by this signing call. The caller must still derive the expected digest from the
 reviewed unsigned transaction and verified previous outputs. Host software
-and callbacks remain in the trust boundary. The Wallet image remains
+and callbacks remain in the verification boundary. The Wallet image remains
 uninstalled and physical signing is unverified.

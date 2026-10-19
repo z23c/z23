@@ -207,7 +207,7 @@ running nodes accept that history only because validated blocks are never
 re-checked — a from-genesis replay of zclassicd's own text false-rejects its own
 chain: it FATALs at block 478,544 on tx `e3eeb123…` (125,811 bytes,
 `bad-txns-oversize`), breaking every full-validation path (reindex, background
-validation, trustless genesis sync). The 413-tx list is derived from a
+validation, verifying genesis sync). The 413-tx list is derived from a
 complete frame-walk + per-height hash scan of the canonical chain (heights
 0..3,143,532), `getblockhash`-compared and per-tx-drilled against live
 zclassicd; H_LAST = 1,968,856.

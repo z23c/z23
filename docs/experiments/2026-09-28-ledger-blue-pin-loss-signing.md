@@ -59,4 +59,4 @@ The candidate has not been installed on a physical Blue. SDK stubs cannot
 prove that PIN state changes during these BOLOS calls on device or that a
 physical app opens and exits correctly. The check cannot make the PIN state
 atomic across BOLOS calls. This work does not enable Sapling signing or
-establish a trusted chain tip.
+establish a verified chain tip.

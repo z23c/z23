@@ -68,4 +68,4 @@ files and 80 sections. The Markdown link check scanned 518 documents and
 The image has not been installed on a physical Blue. SDK stubs do not prove
 the timing of PIN state changes in BOLOS or physical app startup and EXIT.
 The PIN checks cannot make BOLOS operations atomic. This change does not
-enable Sapling signing or establish a trusted chain tip.
+enable Sapling signing or establish a verified chain tip.

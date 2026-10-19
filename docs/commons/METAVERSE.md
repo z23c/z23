@@ -41,7 +41,7 @@ proven, gate by gate):
 - **ZCODE package commons** — decentralized C23 source-package hosting:
   signed release envelopes, a 10 GiB content-addressed store, publication and
   search, contributor identity, declarative build recipes, and third-party
-  bit-identical reproduction as the headline trust test
+  bit-identical reproduction as the headline verification test
   (`build/bin/z23-package-verify --reproduce-against`).
   Spec: [`docs/work/ZCODE_PLAN.md`](../work/ZCODE_PLAN.md). Site: `/zcode` on
   your node's explorer/onion. Commands: `zcode package *`.

@@ -60,7 +60,7 @@ changed or was installed during this experiment.
 The supplied previous-output scriptCode and amount are not authenticated by
 this wrapper. The branch ID is not selected from ZCL chain state here. The
 digest alone proves neither prevout ownership nor approval; no signing path
-uses it. A payment app must verify trusted prevout bytes and chain context,
+uses it. A payment app must verify prevout bytes and chain context,
 derive change and account information on device, display all outputs and fee,
 and bind the resulting exact digest to explicit approval before releasing a
 signature. The next ARM experiment must measure a smaller state arrangement

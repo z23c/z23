@@ -20,7 +20,7 @@ fixed external `0/0` and internal `1/0` keys.
 The totals and final signing pages now label the exact device-key matches
 MATCHES YOUR KEY and the remainder OWNER NOT VERIFIED. The latter amount
 equals all outputs minus the exact matches. The device derives the matching
-hashes; the host does not provide a trusted ownership claim. An assertion
+hashes; the host does not provide a verified ownership claim. An assertion
 for OWNER NOT VERIFIED failed on the old device UI. After the edit, the UI
 test passed and its simulator preview matched the device BAGL elements byte
 for byte in decoded RGB. The totals pixel SHA-256 is

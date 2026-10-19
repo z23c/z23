@@ -19,7 +19,7 @@ The reviewer now retains the branch accepted at BEGIN, displays it beside
 the full digest, and clears it with the rest of the review on abort or USB
 reset. An alternate known branch, `0x930B540D`, produces a distinct digest
 and its own branch label. The branch policy checks that the ID is known; it
-does not verify the active branch at a trusted height. No signing command is
+does not verify the active branch at a verified height. No signing command is
 available in this app.
 
 The screen simulator rendered 123 PNG pages for the two fixture wires and

@@ -77,7 +77,7 @@ binary dynamically links only libc and the ELF loader. These are host
 and C23 screen-model tests; the new app image has not been installed or
 tested over physical Blue USB. The command has no signing or broadcasting
 path. It does not establish shielded recipients, amounts, fee, proofs,
-memo contents, account ownership, or a trusted chain tip.
+memo contents, account ownership, or a verified chain tip.
 
 ## Shielded key compatibility and image substitution
 
@@ -145,7 +145,7 @@ image. The gate requires all named frames, but excludes BOLOS and SDK
 internals. Two clean builds produced identical `.text` bytes, SHA-256
 `42fc4fe0c7e9ac3864ed4977b0ac601b742c95868798fa80807034b83fd0eec2`.
 The app is not installed or physically tested. No shielded signing, key
-derivation, trusted branch selection, fee, recipient, proof, or memo
+derivation, verified branch selection, fee, recipient, proof, or memo
 verification is present.
 
 ## Shielded review display semantics
@@ -190,9 +190,9 @@ Cortex-M3 with ISO C23 and strict warnings; its object has 924 bytes
 its public handler. Its compile-time state bound is 672 bytes; linked stack
 and memory costs are not yet measured. The controller has no direct OpenSSL
 dependency. It is not linked into a BOLOS image or installed on the Blue.
-The branch is only checked against a known-ID list, not a trusted chain tip;
+The branch is only checked against a known-ID list, not a verified chain tip;
 shielded recipients, amounts, fee, proofs, and memos cannot yet be reviewed
-from trusted device inputs. This protocol grants no signing authority.
+from verified device inputs. This protocol grants no signing authority.
 
 ## Six-pass bounded-memory shielded ZIP-243 replay
 
@@ -217,7 +217,7 @@ Release each passed the full 43/43 Ledger suite on an AMD Ryzen 7 PRO
 8840U. The C23 complexity ratchet passed 61,071 functions at cap 15.
 The controller has no OpenSSL dependency. It is
 not yet in the Blue app's APDU or touchscreen path, and its host-supplied
-branch ID is not bound to a trusted chain tip. It grants no signing
+branch ID is not bound to a verified chain tip. It grants no signing
 authority.
 
 ## Bounded-state Sapling transaction scanner
@@ -244,7 +244,7 @@ compiled the parser for Cortex-M3 with `-std=c23 -O2 -Wall -Wextra -Werror
 `.data` or `.bss`. Its largest reported function frame is 40 bytes. The
 parser does not yet authenticate repeated passes or feed a Blue signing
 command. A future bounded-memory digest must replay identical wire bytes,
-then bind trusted branch selection and reviewed transaction facts before
+then bind verified branch selection and reviewed transaction facts before
 any signature may be released.
 
 ## Synthetic Sapling wire through review and signature tests
@@ -277,7 +277,7 @@ maximum remained 1,500. The harness has 32,152 bytes `.text`, 1,360 bytes
 Debug ASan/UBSan and GCC 16.1.1 Release passed 42/42 Ledger tests on an
 AMD Ryzen 7 PRO 8840U; the C23 complexity ratchet passed 61,016 functions
 at cap 15. Device-side shielded recipient, amount, fee, proof, and memo
-review, trusted branch selection, protected keys, approval binding, and
+review, verified branch selection, protected keys, approval binding, and
 physical signing remain unimplemented or unverified.
 
 ## Complete isolated SpendAuth signature fixture
@@ -754,7 +754,7 @@ The focused test and complete Ledger suite passed 34/34 under Clang 22.1.6
 Debug ASan/UBSan and 34/34 under GCC 16.1.1 Release on an AMD Ryzen 7 PRO
 8840U. The C23 complexity ratchet passed 60,918 functions at cap 15.
 The previous wires are synthetic, the device is simulated, and no transaction
-was saved or broadcast. Physical BOLOS execution, trusted chain provenance,
+was saved or broadcast. Physical BOLOS execution, verified chain provenance,
 installed-image authentication, and Sapling signing remain unverified.
 
 ## Sapling device memory gate

@@ -86,7 +86,7 @@ failed, skipped, and unobserved (`tools/dev/dev_proof.c:3432-3467`).
 `groups_gated` is declined work; it does not cover a leaf.
 
 **Admission by union.** A receiver admits `tip` against `base` when the
-union of leaves from trusted producers covers every required leaf key.
+union of leaves from accepted producers covers every required leaf key.
 Covered subtrees are never re-proven; uncovered keys are the only work.
 The pair-keyed receipt file becomes a cache of that union, not the
 authority.
@@ -97,7 +97,7 @@ capsule capture (`tools/dev/dev_proof_receipt.h:33-38`,
 `zcl_dev_proof_build_identity_v1_capture` at
 `tools/dev/dev_proof.c:2180-2189`). Two classes are named at least:
 `linux-gnu-c23` and `darwin-arm64-c23`. A Mac leaf and a Linux leaf
-**compose** for a host-neutral group: either class's trusted `pass` covers
+**compose** for a host-neutral group: either class's verified `pass` covers
 that group id. They do not compose for a host-specific group (Landlock /
 seccomp, Darwin CodeDirectory, kqueue versus inotify). No host-predicate
 table file exists under tools/dev/; the mechanism is the catalog's
@@ -132,7 +132,7 @@ a different pair is `receipt_commit_or_base_mismatch`
   Batch rule: one producer may sign the Merkle root of its own leaves; a
   leaf is covered only with an inclusion proof to that root. Distinct
   producers never share a batch. Batch verification is a speed-up, not a
-  second trust rule, and does not change `signers.allow`.
+  second verification rule, and does not change `signers.allow`.
 - **Allowlist.** A leaf counts only when `zcl_dev_proof_signer_verify`
   accepts the key: this box, or a 64-hex line in `signers.allow`
   (`tools/dev/dev_proof_signer.c:26-27`, `:368-406`). Existing refusals:

@@ -106,7 +106,7 @@ already named in the tree:
   header-anchored, consensus-binding proof. The existing bundle installer
   compensates by re-deriving the bundle's content directly from the
   compiled checkpoint and the header chain's own PoW-protected Sapling root
-  rather than trusting any offered root
+  rather than accepting any offered root
   (`engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c:15-41`).
   Any fast-sync design has to be honest about this line: today, a peer can
   vouch for *which bytes* it holds, but the chain's own headers do not
@@ -181,7 +181,7 @@ end to end (Problem, above) in two ways:
 | `signature` | Signed by the offering node's peer identity key over the above fields. |
 
 An offer is a claim, not an authority — nothing about being offered a
-bundle causes it to be trusted; sections 2 and 5 cover what a consumer does
+bundle causes it to be accepted; sections 2 and 5 cover what a consumer does
 with it, and every fetch phase 1a triggers still goes through the unchanged
 existing verified-fetch path (1b) and the unchanged existing install path
 (section 2c).
@@ -210,7 +210,7 @@ name (parallel to the tunnel's `tcp:<host>:<port>` naming). Concretely:
   catchup-cadence batching described in the Problem section, since bundle
   transfer is a distinct traffic class (bulk state transfer, not block
   relay).
-- **Serving is on by default.** Any full node holding a bundle it trusts
+- **Serving is on by default.** Any full node holding a bundle it accepts
   (installed or self-produced) serves it to peers by default over this
   stream (and keeps serving it over the existing raw-TCP file-service path
   for peers still using that), subject to a documented bandwidth budget
@@ -259,17 +259,17 @@ only proves the bundle is internally self-consistent (its own claimed
 state matches its own claimed root); neither one proves the *chain's*
 headers commit to that state, because they do not (`chain/mmb.h:53-56`).
 So through the end of phase 2, an independently derived checkpoint/state
-authority remains required to trust bundle content at all — exactly the
+authority remains required to accept bundle content at all — exactly the
 re-derivation against `get_sha3_utxo_checkpoint()` and the PoW-protected
 `hashFinalSaplingRoot` that the existing install path already performs
 (`consensus_state_snapshot_install_checkpoint_authority.c:15-41,131-137`).
-What phase 2 adds is narrower than "trust the state": it tightens what the
+What phase 2 adds is narrower than "accept the state": it tightens what the
 bundle format itself commits to (so a bundle cannot silently mismatch its
 own claimed state root) and proves the offered header is on the heaviest
 chain without a full header download — it does **not** remove the need for
 checkpoint re-derivation, and this ZRC must not be read as claiming it
 does. Binding an arbitrary height's state to that height's PoW-protected
-header — trusting a bundle between checkpoints with the same strength as
+header — accepting a bundle between checkpoints with the same strength as
 today's checkpoint-bound install, without independent re-derivation — needs
 the consensus change named as phase 3.
 
@@ -299,7 +299,7 @@ already-checkpoint-anchored history. This threshold:
   height. Exception: an offer at exactly the compiled checkpoint height
   (`get_sha3_utxo_checkpoint()->height`) is always fresh, however far it
   trails the tip — the installer already grants that one bundle full
-  sovereign trust by height alone, and the export verb only ever produces a
+  sovereign acceptance by height alone, and the export verb only ever produces a
   bundle bound to it, so its age carries no information the installer does
   not already discard.
 - A consumer that, after asking its connected peers, finds only stale
@@ -341,7 +341,7 @@ newest offer's height, plus forward validation of at most 576 blocks
 
 - **No authority.** Any node may produce a bundle (subject to the existing
   exporter qualification gate) and any node may serve one it holds.
-  Consumers trust proofs (section 2), never a peer's identity or position.
+  Consumers verify proofs (section 2), never a peer's identity or position.
 - **DoS caps**, all per connected peer:
   - maximum offers accepted per peer per session,
   - maximum chunk requests per second,
@@ -380,11 +380,11 @@ Following the existing naming pattern in `engine/conditions/include/conditions/`
 | Discovery | `zfileaddr` already advertises a port over the peer handshake and it is cached (`file_services` table), but only read back before `connman` is up, from a *previous* run's cache, with no height/digest/freshness field | Same advertisement, extended with signed height/digest/`chunk_root`/receipt fields, consumed live off a just-connected peer too — not only the pre-network cache |
 | Transfer | RMF (`rom_fetch_download_verified_parallel`) already does per-chunk-verified, journaled, resumable, multi-seeder-failover transfer — but only over a raw `getaddrinfo()` TCP dial, unreachable for an onion-only peer | Identical RMF format and verification, moved onto the ZRC-0002 peer-link stream so an already-connected onion peer becomes reachable too; the raw-TCP path keeps working unchanged |
 | Chunk-level integrity | Already per-chunk (RMF's `chunk_root` fold, verified before each `pwrite`) plus whole-file SHA3 — this was already true before this ZRC | Unchanged — this ZRC does not touch RMF's verification, only where the bytes travel and how the fetch is scheduled |
-| Work verification | Full header chain download, or trust the compiled checkpoint wholesale | FlyClient-style MMR/MMB sampling proof against an operator-visible checkpoint (proves *work*, not state — phase 2) |
+| Work verification | Full header chain download, or accept the compiled checkpoint wholesale | FlyClient-style MMR/MMB sampling proof against an operator-visible checkpoint (proves *work*, not state — phase 2) |
 | Bundle self-consistency | Bundle content checked only against the compiled checkpoint at install | Bundle header additionally commits its own state root, so a bundle cannot silently disagree with itself (phase 2) — still not a chain-header commitment |
 | State-to-header binding | None at arbitrary heights; checkpoint height only, via re-derivation against the compiled checkpoint | Unchanged through phase 2 — checkpoint-height re-derivation remains mandatory; header commitment of the state root at arbitrary heights arrives only in phase 3 (consensus change) |
 | Freshness | No contract; a stale or absent bundle looks the same as "healthy but nothing new" (`bundle_exporter.c:167-172`) | 576-block offer ceiling (exempt at exactly the compiled checkpoint height, which never goes stale), loud typed refusal naming the newest height seen, fold-forward never silent-to-genesis |
-| Serving | Nothing serves via the peer link at all | On by default for any node holding a trusted bundle, with a bandwidth budget and opt-out |
+| Serving | Nothing serves via the peer link at all | On by default for any node holding a verified bundle, with a bandwidth budget and opt-out |
 | Post-upgrade producer recovery | None — ticks forever reporting a healthy-looking zero/zero | Automatic retry named as the bundlefresh lane's acceptance line (phase 1) |
 
 ## Rollout
@@ -426,7 +426,7 @@ proof that the offered `header_hash` sits on the heaviest chain, without
 downloading the intervening header chain in full. It does **not** make the
 chain's block headers commit to that state root — that binding is
 consensus-level and is phase 3's job — so checkpoint re-derivation
-(section 2c) remains mandatory input to trust throughout phase 2, not an
+(section 2c) remains mandatory input to verification throughout phase 2, not an
 optional belt-and-suspenders check.
 Acceptance: (a) a sampling proof rejects a lighter alternate-chain offer,
 demonstrated by a test; (b) a bundle whose state-root field disagrees with

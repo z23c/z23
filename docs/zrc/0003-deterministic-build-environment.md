@@ -68,7 +68,7 @@ source of truth for every place a build's identity is checked.
   cover vendored dependencies (`vendor/lib`) as its own follow-on.
 - **Capsule on the wire.** Once receipts carry a portable identity, a live
   node can offer its toolchain capsule to a peer so the peer can decide
-  whether to trust a build result without re-running it itself. This is a
+  whether to accept a build result without re-running it itself. This is a
   separate proposal built on the capsule identity defined here.
 - **Sandboxed build-and-run leaf per platform.** The owner's directive that
   every node "run a VM for C23 code" resolves, at the smallest correct scope,
@@ -76,7 +76,7 @@ source of truth for every place a build's identity is checked.
   confinement (Landlock and seccomp), macOS confinement (Seatbelt), and
   Windows confinement (a Job Object) in place of refusing the platform
   outright. A full general-purpose virtual machine is a larger and slower
-  answer than the guarantee actually needed — that untrusted C23 source can
+  answer than the guarantee actually needed — that unverified C23 source can
   be built and run without touching anything outside its declared inputs and
   outputs — so this proposal treats the confined build-and-run leaf as the
   target, not a VM. This leaf is its own follow-on proposal, built on the
@@ -102,7 +102,7 @@ source of truth for every place a build's identity is checked.
 
 ## Out of scope
 
-Putting the capsule on the wire for live peer-to-peer trust decisions, the
+Putting the capsule on the wire for live peer-to-peer verification decisions, the
 per-platform sandboxed build-and-run leaf's implementation, extending the
 two-directory byte-identity gate to `vendor/lib`, and any general-purpose
 virtual machine. Each is its own follow-on ZRC or lane.

@@ -33,7 +33,7 @@ already proved out on the exact same peer link.
 ### Prior art to extend
 
 This proposal is a third protocol multiplexed the same way two protocols
-already are, and it reuses the pairing model both already trust:
+already are, and it reuses the pairing model both already rely on:
 
 - **The shared carrier.** Every protocol below rides one already-frozen P2P
   message, `"zpkgswm"` — its dispatch row lives in
@@ -130,7 +130,7 @@ the same receive budget. Initial proposed limits are 16 streams per peer,
 16 KiB per DATA payload, 64 KiB outstanding per direction per stream, and
 256 KiB aggregate reserved receive capacity per peer. A node also has a
 finite aggregate stream-memory budget across peers; exhaustion refuses new
-OPENs or withholds additional credit. It never allocates from an untrusted
+OPENs or withholds additional credit. It never allocates from an unverified
 advertised length before enforcing these limits.
 
 When send credit or outbound queue capacity is exhausted, stop reading the

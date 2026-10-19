@@ -6,20 +6,20 @@ state bundle (`zcl.consensus_state_bundle.v1`, see
 [`docs/node/CONSENSUS-STATE-BUNDLE.md`](./node/CONSENSUS-STATE-BUNDLE.md)) and
 header-chain seed data. A fresh node should be able to pull these from any
 peer — free, unmetered, no payment — instead of folding block-by-block from
-genesis. This page covers the trust model, the policy knobs that keep
+genesis. This page covers the verification model, the policy knobs that keep
 generosity from becoming a bandwidth liability, the operator commands, and
 the fetch recipe.
 
-## Trust model — delivery is untrusted, content is verified
+## Verification model — delivery is unverified, content is verified
 
 Nothing about who serves an artifact, how fast, or how many peers vouch for
-it makes that artifact more trustworthy. A malicious or careless seeder can
+it makes that artifact more verifiable. A malicious or careless seeder can
 waste a fetcher's bandwidth; it cannot poison the fetcher's state, because
 every artifact is verified by content after download, never by transport:
 
 1. **Whole-file digest.** The downloaded bundle is hashed (SHA3-256) and
    compared against the digest the fetcher already committed to before
-   requesting chunks — a mismatch discards the whole file, no partial trust.
+   requesting chunks — a mismatch discards the whole file, no partial acceptance.
 2. **Checkpoint re-derivation.** The installer re-derives the compiled
    checkpoint SHA3 from the bundle's contents and Pedersen-roots the Sapling
    frontier against the PoW header chain it has independently validated. See
@@ -112,7 +112,7 @@ metadata shape.
 The two-builder-verified consensus-state bundle (`docs/work/CONSENSUS-STATE-
 BUNDLE.md`) is exported once and, today, tends to live on a single machine's
 disk. Two pieces close that single point of failure without weakening
-rom_seed's untrusted-delivery model: a **receipt-gated admission gate**
+rom_seed's unverified-delivery model: a **receipt-gated admission gate**
 (`config/rom_bundle_admission.h`) and a **replication helper**
 (`tools/scripts/rom-bundle-replicate.sh`).
 
@@ -190,7 +190,7 @@ by content, and installs — no operator setup required beyond a normal boot:
    manifest before accepting it.
 3. On whole-file digest match, the installer re-derives the checkpoint SHA3
    and Pedersen-roots the Sapling frontier against the independently
-   validated PoW header chain (see Trust model above). Only a bundle that
+   validated PoW header chain (see Verification model above). Only a bundle that
    passes this re-derivation is installed.
 4. The node then folds forward from the installed checkpoint via normal
    block-body sync to reach the live tip.
@@ -209,7 +209,7 @@ journal `<name>.part.journal`. A chunk's journal bit is only set after the
 chunk's own digest has been checked and the data is on disk
 (`core/modules/net/include/net/rom_journal.h`), so a restarted node re-fetches
 exactly the chunks the journal has not marked — a power cut halfway through a
-20 GB bundle costs seconds, not hours. Nothing is trusted more because it
+20 GB bundle costs seconds, not hours. Nothing is accepted more because it
 survived: the journal header pins the manifest identity, a resume re-hashes a
 random sample of what it kept, and the whole-file digest still has to pass
 before the atomic rename.
@@ -249,10 +249,10 @@ artifact. Today's P2P fetch client (`core/modules/net/src/rom_fetch.c`,
 `ops.debug.rom_fetch.bundle`) is operator-driven by design: it commits to a
 `(chunk_root, whole_sha3, size)` triple **before** requesting a single byte,
 either from explicit operator input or a manifest parsed out of a peer's
-`/directory.json` — see the trust-model note in
+`/directory.json` — see the verification-model note in
 [`docs/work/wt-rom-fetch-engine.md`](./work/wt-rom-fetch-engine.md) ("do not
 create a third activation door"). Automatic discovery of *which* manifest to
-trust with zero prior operator input is explicitly still on that lane's "Next
+accept with zero prior operator input is explicitly still on that lane's "Next
 (not done yet)" list. Until it lands, a genuinely first-boot node — no peers
 proven yet, no digest an operator has committed to — has nothing in
 `<datadir>/bundles/` for the zero-flag cold-boot autodetect
@@ -268,23 +268,23 @@ no flags and no manual command at boot. It is not, and does not need to be, a
 peer-fetch client — the bytes can come from anywhere (a bundle you exported
 yourself, one copied off another node you operate, a future signed release
 artifact once stable publication is unsealed — see `tools/release.sh`) because
-this script establishes **zero** trust in them:
+this script treats them as **unverified** input:
 
 - it never opens, parses, or interprets the bundle as SQLite or as consensus
   content;
 - its own SHA3-256 re-hash after copying (`build/bin/rom_bundle_sha3`, falling
   back to `openssl dgst -sha3-256` on a checkout that hasn't built that tool
   yet) is a **copy-integrity** check only — "did the bytes I just wrote match
-  the bytes I just read" — not a content trust decision, exactly analogous to
+  the bytes I just read" — not a content verification decision, exactly analogous to
   the copy-verify step in `tools/scripts/rom-bundle-replicate.sh`;
-- the one and only trust boundary stays exactly where it already is: the
+- the one and only verification boundary stays exactly where it already is: the
   RECEIPT / CHECKPOINT_ROM / CHECKPOINT_CONTENT authority resolved at INSTALL
   time
   (`engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c`),
   which independently re-derives the bundle's coins/anchor/nullifier content
   digests against the compiled-in checkpoint
   (`core/chainparams/src/checkpoints.c`) before ever lifting admission
-  containment. A bundle this script stages is exactly as untrusted, until that
+  containment. A bundle this script stages is exactly as unverified, until that
   gate passes, as one fetched cold from a stranger over ROM delivery above.
 
 It is also fail-safe and idempotent, so it is safe to run unconditionally on

@@ -42,5 +42,5 @@ accept 0.2.2. The Blue has no ZCL app installed after this experiment.
 
 The next experiment must isolate the first failing APDU and verify that the
 owner can leave each displayed screen. A read-only transaction review remains
-separate from payment approval, prevout trust, fee verification, change
+separate from payment approval, prevout provenance, fee verification, change
 recognition, and signing.

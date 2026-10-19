@@ -41,6 +41,6 @@ correction changes only the build gate and documentation, not device code.
 With the 512-byte unallocated headroom rule, the current Wallet image can
 add at most 2,284 bytes of `.bss`. The isolated 684-byte replay state and
 800-byte two-context state each fit that amount. A complete integrated image
-must still include payment UI, USB protocol, trusted prevout evidence, and
+must still include payment UI, USB protocol, verified prevout evidence, and
 key handling, then pass linked SRAM and stack checks. Linker arithmetic does
 not prove BOLOS runtime behavior or touchscreen responsiveness.

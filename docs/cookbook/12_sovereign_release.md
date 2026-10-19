@@ -1,7 +1,7 @@
 # 12_sovereign_release — your first chain-verified release in 5 minutes
 
 What it demonstrates: the sovereign identity layer end to end, with nothing
-to install and nothing to trust but the chain you already synced. You will
+to install and nothing to rely on but the chain you already synced. You will
 verify a signed release, sign your own, and anchor an epoch — the
 ~40-byte transaction that commits the *entire overlay state* of the
 network. Depth lives in `docs/spec/sovereign-identity-layer.md`; this page
@@ -35,7 +35,7 @@ Invalid docs are hard errors with named codes — `DOC_EXPIRED`,
 failure mode is always explicit.
 
 That answers *"was this signed by the key it names?"* and nothing more.
-*"Should I trust that key?"* is a second, separate question, and Step 4
+*"Should I accept that key?"* is a second, separate question, and Step 4
 answers it from the chain with `--anchored`.
 
 ## Step 1 — make your publisher key (one command, keep it secret)
@@ -123,7 +123,7 @@ facts stay separate, and the output says both:
 Neither one rescues the other. A tampered doc under an anchored key is
 still `BAD_SIGNATURE`. A perfect signature under a key nobody anchored is
 `KEY_NOT_ANCHORED` — the verifier is told, in as many words, that they
-would be trusting the key on the publisher's say-so. A key you later
+would be accepting the key on the publisher's say-so. A key you later
 retired is `KEY_REVOKED`; a key you rotated still verifies and reports its
 `successor`.
 

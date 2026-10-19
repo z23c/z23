@@ -762,7 +762,7 @@ No, with one exception that needs machinery that does not exist yet.
 - The rule keeps callers on four entries whose contract is ADDITIVE:
   2357.0 s in total, 1.8% of reference. For real-03, real-12 and real-14
   the only contract growth is in the component's own test file
-  (`test_codeindex_*`, `test_vcs_*`). Added test lines cannot be trusted:
+  (`test_codeindex_*`, `test_vcs_*`). Added test lines cannot be relied on:
   an added `#define` or an inserted `|| 1` weakens an old assertion without
   removing a line. The sound rule is the existing compositional rule, with
   the contract root taken over the header plus the **base** test bytes. It

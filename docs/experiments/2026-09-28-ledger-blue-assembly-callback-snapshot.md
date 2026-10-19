@@ -25,7 +25,7 @@ rejected before a write.
 The snapshot header is 3,120 bytes with this compiler; its flexible wire
 array accepts at most 2,097,152 bytes. Maximum allocation is therefore
 2,100,272 bytes. The Wallet device image and its SRAM use are unchanged.
-The verifier callback remains a trusted implementation of secp256k1 ECDSA;
+The verifier callback remains an accepted implementation of secp256k1 ECDSA;
 the snapshot protects against changes in its caller-owned inputs, not a
 verifier that lies about signature validity.
 
