@@ -24,7 +24,7 @@ output, signature output, and signature-length output before writing any
 caller buffer. The private signer workspace is still wiped first. Further
 tests reject public-key overlap with the digest, signature overlap with the
 account hashes, and signature-length overlap with the digest. Rejected calls
-leave accepted inputs unchanged and do not invoke ECDSA. Normal disjoint
+leave unchecked inputs unchanged and do not invoke ECDSA. Normal disjoint
 signing still passes.
 
 The final C23 Release suite passed 60/60 in 46.26 seconds. The final

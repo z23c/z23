@@ -503,7 +503,7 @@ verification. It does not link OpenSSL. The archive's original source
 provenance remains unresolved in its vendor manifest; its fixed digest
 establishes byte identity, not a source audit. The Blue app has no OpenSSL
 dependency. The host verifier, signature collector, and assembler reject
-result buffers overlapping trusted inputs or the assembled transaction. The
+result buffers overlapping unchecked inputs or the assembled transaction. The
 [host signing storage experiment](../../docs/experiments/2026-09-28-ledger-blue-host-signing-storage.md)
 records a formerly accepted output-length alias and input-preserving
 rejection checks. These host checks do not establish physical signing safety.

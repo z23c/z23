@@ -20,7 +20,7 @@ Three tests failed against the preceding signed source, before the guards:
    transaction and returned success. Its final length write then landed in
    the first bytes of the returned transaction, after the wire comparison.
 2. The signature collector erased its result array before checking that the
-   same storage held the expected ZIP-243 digest. The test found the accepted
+   same storage held the expected ZIP-243 digest. The test found the expected
    digest changed on rejection.
 3. The host verifier erased its result before checking that the expected
    ZIP-243 digest shared the same storage. The test found the digest changed
@@ -30,12 +30,12 @@ The assembler now rejects an output-length pointer overlapping the unsigned
 wire, verified signatures, expected digests, or any byte of the declared
 output capacity before writing the length. Further tests cover a length
 inside the unsigned wire, expected digest, and signature record, and require
-the accepted bytes to remain identical. The collector rejects a signature
+the unchecked bytes to remain identical. The collector rejects a signature
 array overlapping the expected paths, ownership hashes, or digests before
 zeroing it or requesting approval. The verifier rejects a result overlapping
 the reply frame, expected ownership hash, or digest before clearing it.
 On rejected overlap, the caller must ignore the output and abort the signing
-flow; preservation of accepted inputs takes precedence over zeroing aliased
+flow; preservation of unchecked inputs takes precedence over zeroing aliased
 output storage.
 
 The focused Release tests `blue-payment-review` and `blue-payment-sign`

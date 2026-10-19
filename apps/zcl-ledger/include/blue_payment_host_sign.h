@@ -22,7 +22,7 @@ typedef bool (*blue_payment_host_approval)(void *context);
  * every output slot, including signatures already obtained. Invalid arguments
  * also request an abort when an exchange callback is available. The output
  * array must not overlap the expected paths, hashes, or digests; rejected
- * overlap leaves trusted input bytes untouched and makes no signing request.
+ * overlap leaves unchecked input bytes untouched and makes no signing request.
  * Callers must
  * ignore output slots after any failure. No broadcast occurs. */
 bool blue_payment_host_sign(size_t count, const uint8_t *paths,
