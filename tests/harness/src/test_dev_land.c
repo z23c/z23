@@ -6729,6 +6729,7 @@ static bool dlx_fake_make(const char *path, const char *count,
     (void)snprintf(
         script, sizeof(script),
         "#!/bin/sh\n"
+        "echo \"make:${ZCL_LAND_PROOF_STUB-unset}:${ZCL_LAND_MAKE-unset}\" >> '%s.env'\n"
         "[ \"$2\" = -C ] && [ \"$4\" = dev-bin ] || exit 64\n"
         "mkdir -p \"$3/build/bin\" || exit 65\n"
         "cat > \"$3/build/bin/z23-dev\" <<'PRODUCER'\n"
@@ -6737,10 +6738,11 @@ static bool dlx_fake_make(const char *path, const char *count,
         "--root=*) R=${a#--root=};; --local_commit=*) L=${a#--local_commit=};;\n"
         "--remote_base=*) B=${a#--remote_base=};; esac; done\n"
         "echo run >> '%s'\n"
+        "echo \"proof:${ZCL_LAND_PROOF_STUB-unset}:${ZCL_LAND_ALLOW_UNSIGNED-unset}\" >> '%s.env'\n"
         "%s"
         "PRODUCER\n"
         "chmod 700 \"$3/build/bin/z23-dev\"\n",
-        count, action);
+        count, count, count, action);
     return dlx_write(path, script) && chmod(path, 0700) == 0;
 }
 
@@ -6822,6 +6824,17 @@ static int test_dev_land_prove_drive1(void)
         }
         dlx_end(&c);
         ASSERT_EQ((int64_t)dlx_runs(p.count), 2);
+        /* The lander's own control variables never reach its children. */
+        {
+            char seen[2048], env_path[1500];
+            size_t seen_len = 0;
+            (void)snprintf(env_path, sizeof(env_path), "%s.env", p.count);
+            ASSERT(dlx_slurp(env_path, seen, sizeof(seen) - 1, &seen_len));
+            seen[seen_len] = '\0';
+            ASSERT(strstr(seen, "make:unset:unset") != NULL);
+            ASSERT(strstr(seen, "proof:unset:unset") != NULL);
+            ASSERT(strstr(seen, "pass") == NULL && strstr(seen, "fake-make") == NULL);
+        }
         ASSERT(dlx_origin_main(&p.rig, main_tip));
         ASSERT_STR_EQ(main_tip, p.second);
         PASS();
@@ -6972,6 +6985,44 @@ static int test_dev_land_prove_drive5(void)
         dlx_end(&c);
         ASSERT(dlx_origin_main(&p.rig, main_tip));
         ASSERT_STR_EQ(main_tip, before);
+        PASS();
+    }
+#endif
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_prove_drive6(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: a plain drive refuses while another drive holds the lander lock") {
+        struct dlx_prove_rig p;
+        struct dlx_call c;
+        char land[1200], lock[1400], before[64], main_tip[64];
+        dlx_isolate("plain_drive_busy");
+        ASSERT(dlx_prove_rig(&p, "plain_drive_busy_rig", DLX_PRODUCER_OK));
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(lock, sizeof(lock), "%s/drive.lock", land);
+        int fd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0);
+        ASSERT(dlx_origin_main(&p.rig, before));
+        dlx_begin(&c, "drive");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_BUSY");
+        dlx_end(&c);
+        dlx_begin(&c, "drive");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_BUSY");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&p.rig, main_tip));
+        ASSERT_STR_EQ(main_tip, before);
+        ASSERT(flock(fd, LOCK_UN) == 0 && close(fd) == 0);
+        dlx_begin(&c, "drive");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
         PASS();
     }
 #endif
@@ -15002,6 +15053,7 @@ int test_dev_land(void)
     failures += test_dev_land_prove_drive3();
     failures += test_dev_land_prove_drive4();
     failures += test_dev_land_prove_drive5();
+    failures += test_dev_land_prove_drive6();
     failures += test_dev_land_qualify_passes();
     failures += test_dev_land_qualify_verdict_rule();
     failures += test_dev_land_qualify_refusals();

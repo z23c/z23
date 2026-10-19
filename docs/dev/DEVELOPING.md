@@ -1616,10 +1616,10 @@ not truncate the handoff. Any worker with access to that checkout can run
 the foreground step through `devbuild --wait`; the next landing step consumes
 its signed receipt. Landing does not start a resident proof watcher by
 default. An operator who explicitly wants the prior watcher path can set
-`ZCL_LAND_START_PROOF_WATCHER=1` for that landing step.
 `ZCL_LAND_START_PROOF_WATCHER=1` for that landing step. To skip the hand
 copy entirely, run `dev land drive` with `prove` (see "Driving proofs without
 a human" below).
+
 `dev land` refuses a malformed or legacy queue record by record number on
 status, submit and step. It preserves the queue bytes until an operator
 repairs that record; a later valid row cannot make an earlier one disappear
@@ -1733,7 +1733,7 @@ tried with `seq`, `base`, `head`, `proof_ms` (producer build plus proof),
 `proof` (`ran`, or `receipt_present` when a receipt already existed) and
 `outcome`.
 
-- One drive at a time: a second one refuses `DRIVE_BUSY` (retryable) while
+- One drive at a time, proving or not: a second one refuses `DRIVE_BUSY` (retryable) while
   `drive.lock` in the land directory is held. The lock dies with its process.
 - The first row that does not land stops the drive. A proof that left no
   receipt refuses `PROOF_RECEIPT_MISSING`; a producer that cannot be built
@@ -1743,6 +1743,9 @@ tried with `seq`, `base`, `head`, `proof_ms` (producer build plus proof),
 - Resumable: a killed drive leaves the row in flight. The next drive resumes
   it, and a pair whose receipt is already on disk is published without any
   rebuild.
+- The build and proof children run under `env -u` for every `ZCL_LAND_*`
+  variable (stubs, the unsigned bypass) and the dev-loop test switch; PATH,
+  HOME, the scheduler variables and `ZCC_*` pass through.
 - `seq` and `prove`/`max_rows` are exclusive (`BAD_INPUT`). Plain `drive` and
   `drive --seq` are unchanged.
 

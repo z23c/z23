@@ -10450,6 +10450,66 @@ static void dl_producer_log_write(const char *log_path, const char *stage,
     (void)fclose(f);
 }
 
+/* The children below build and prove the candidate; they must not inherit
+ * what steers this process. The lander's own control variables (the
+ * ZCL_LAND_ family, which holds test stubs and the unsigned bypass, and the
+ * dev-loop test switch) are removed by running the child under `env -u`;
+ * PATH, HOME, the build scheduler's job variables and ZCC_* pass through. */
+#if !defined(_WIN32)
+extern char **environ;
+#define DL_SCRUB_MAX 48
+struct dl_scrub {
+    char name[DL_SCRUB_MAX][64];
+    const char *argv[DL_SCRUB_MAX * 2 + 16];
+};
+
+static bool dl_scrub_name(const char *entry)
+{
+    return strncmp(entry, "ZCL_LAND_", 9) == 0 ||
+           strncmp(entry, "ZCL_DEVLOOP_TEST_PROCESS=", 25) == 0;
+}
+
+static bool dl_scrubbed_argv(struct dl_scrub *s, const char *const *argv)
+{
+    size_t n = 0, a = 0, k;
+    s->argv[a++] = "env";
+    for (char **e = environ; e && *e; e++) {
+        const char *eq;
+        size_t len;
+        if (!dl_scrub_name(*e))
+            continue;
+        eq = strchr(*e, '=');
+        len = eq ? (size_t)(eq - *e) : strlen(*e);
+        if (n >= DL_SCRUB_MAX || len == 0 || len >= sizeof(s->name[0]))
+            return false;
+        memcpy(s->name[n], *e, len);
+        s->name[n][len] = '\0';
+        s->argv[a++] = "-u";
+        s->argv[a++] = s->name[n++];
+    }
+    for (k = 0; argv[k]; k++) {
+        if (a + 2 > sizeof(s->argv) / sizeof(s->argv[0]))
+            return false;
+        s->argv[a++] = argv[k];
+    }
+    s->argv[a] = NULL;
+    return true;
+}
+#endif
+
+static int dl_spawn_scrubbed(const char *const *argv, char *buf, size_t cap,
+                             int timeout_ms)
+{
+#if !defined(_WIN32)
+    struct dl_scrub scrub;
+    if (!dl_scrubbed_argv(&scrub, argv))
+        return -1;
+    return zcl_spawn_capture(scrub.argv, buf, cap, timeout_ms);
+#else
+    return zcl_spawn_capture(argv, buf, cap, timeout_ms);
+#endif
+}
+
 static int dl_producer_reproof_log(const char *root, const char *local,
                                    const char *base, const char *make_program,
                                    const char *log_path, char *why,
@@ -10479,7 +10539,7 @@ static int dl_producer_reproof_log(const char *root, const char *local,
         return -1;
     }
     const char *build[] = { make_program, jobs, "-C", root, "dev-bin", NULL };
-    rc = zcl_spawn_capture(build, buf, DL_LOG_CAP,
+    rc = dl_spawn_scrubbed(build, buf, DL_LOG_CAP,
                            DL_PRODUCER_BUILD_TIMEOUT_MS);
     dl_producer_log_write(log_path, "producer build", buf);
     if (rc != 0 || access(bin, X_OK) != 0) {
@@ -10491,7 +10551,7 @@ static int dl_producer_reproof_log(const char *root, const char *local,
     }
     const char *prove[] = { bin, "dev", "proof", "step", root_arg, local_arg,
                             base_arg, NULL };
-    rc = zcl_spawn_capture(prove, buf, DL_LOG_CAP,
+    rc = dl_spawn_scrubbed(prove, buf, DL_LOG_CAP,
                            DL_PRODUCER_PROOF_TIMEOUT_MS);
     dl_producer_log_write(log_path, "proof step", buf);
     free(buf);
@@ -11108,11 +11168,8 @@ static void dl_drive_rows(const struct zcl_command_request *req,
 {
     struct json_value report;
     struct dl_drive_verdict v = { .kind = DL_DRIVE_LANDED };
-    int fd, done = 0;
+    int done = 0;
     long long last_seq = 0;
-    fd = dl_drive_lock(reply);
-    if (fd < 0)
-        return;
     json_init(&report);
     json_set_array(&report);
     g_dl_prove_mode = prove;
@@ -11151,7 +11208,6 @@ static void dl_drive_rows(const struct zcl_command_request *req,
             break;
     }
     g_dl_prove_mode = false;
-    dl_unlock(fd);
     dl_drive_judged();
     if (v.kind == DL_DRIVE_LANDED) {
         dl_drive_reply_reset(reply);
@@ -11172,8 +11228,8 @@ static void dl_drive_rows(const struct zcl_command_request *req,
 /* A drive that names a row (`--seq`) runs to that row's outcome; with
  * `prove` or `max_rows` it drives that many rows in a row, proofs included;
  * otherwise it is a single bounded session over the queue head. */
-static void dl_drive(const struct zcl_command_request *req,
-                     struct zcl_command_reply *reply)
+static void dl_drive_dispatch(const struct zcl_command_request *req,
+                              struct zcl_command_reply *reply)
 {
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
     if (json_get(req->input, "seq")) {
@@ -11200,6 +11256,22 @@ static void dl_drive(const struct zcl_command_request *req,
     }
 #endif
     dl_drive_session(req, reply);
+}
+
+/* Every drive, proving or not, holds drive.lock for its whole run: two
+ * drives would race each other's rows and proofs. */
+static void dl_drive(const struct zcl_command_request *req,
+                     struct zcl_command_reply *reply)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    int fd = dl_drive_lock(reply);
+    if (fd < 0)
+        return;
+    dl_drive_dispatch(req, reply);
+    dl_unlock(fd);
+#else
+    dl_drive_dispatch(req, reply);
+#endif
 }
 
 /* Dedicated self observation: no control helper is reachable from this path. */
