@@ -101,6 +101,8 @@ bool slo_io_chain_parse(const char *raw, struct slo_chain_answer *out)
     return ok;
 }
 
+/* The peer list is only believed when it is empty or every element carries
+ * an address; any other shape is an unexpected answer and yields null. */
 struct slo_opt slo_io_peer_count(const char *raw)
 {
     struct json_value root;
@@ -109,11 +111,11 @@ struct slo_opt slo_io_peer_count(const char *raw)
     if (raw && json_read(&root, raw, strlen(raw))) {
         const struct json_value *list = json_get(&root, "result");
         list = list ? list : &root;
-        if (list->type == JSON_ARR) {
-            n.has = true;
-            for (size_t i = 0; i < json_size(list); i++)
-                n.v += json_get(json_at(list, i), "addr") != NULL;
-        }
+        size_t seen = 0;
+        for (size_t i = 0; list->type == JSON_ARR && i < json_size(list); i++)
+            seen += json_get(json_at(list, i), "addr") != NULL;
+        n.has = list->type == JSON_ARR && seen == json_size(list);
+        n.v = n.has ? (int64_t)seen : 0;
     }
     json_free(&root);
     return n;

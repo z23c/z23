@@ -12196,6 +12196,7 @@ install-slo-probe:
 	@install -m 644 platform/deploy/z23-slo-probe.service "$(HOME)/.config/systemd/user/z23-slo-probe.service"
 	@install -m 644 platform/deploy/z23-slo-probe.timer "$(HOME)/.config/systemd/user/z23-slo-probe.timer"
 	@systemctl --user daemon-reload
+	@systemctl --user disable --now zclassic23-slo-probe.timer 2>/dev/null || true
 	@systemctl --user enable --now z23-slo-probe.timer
 	@echo "installed external SLO prober: z23-slo-probe.timer (every 60s)"
 	@echo "ledger: $(HOME)/.local/state/zclassic23-slo/uptime-ledger.jsonl"
@@ -12211,6 +12212,7 @@ install-slo-pager:
 	@install -m 644 platform/deploy/z23-slo-pager.service "$(HOME)/.config/systemd/user/z23-slo-pager.service"
 	@install -m 644 platform/deploy/z23-slo-pager.timer "$(HOME)/.config/systemd/user/z23-slo-pager.timer"
 	@systemctl --user daemon-reload
+	@systemctl --user disable --now zclassic23-slo-pager.timer 2>/dev/null || true
 	@systemctl --user enable --now z23-slo-pager.timer
 	@echo "installed external SLO pager: z23-slo-pager.timer (every 5 min)"
 	@echo "pages: $(HOME)/.local/state/zclassic23-slo/pages.jsonl"
@@ -12227,6 +12229,7 @@ install-hold-judge:
 	@install -m 644 platform/deploy/z23-hold-judge.service "$(HOME)/.config/systemd/user/z23-hold-judge.service"
 	@install -m 644 platform/deploy/z23-hold-judge.timer "$(HOME)/.config/systemd/user/z23-hold-judge.timer"
 	@systemctl --user daemon-reload
+	@systemctl --user disable --now zclassic23-hold-certifier.timer 2>/dev/null || true
 	@systemctl --user enable --now z23-hold-judge.timer
 	@echo "installed 72h hold judge: z23-hold-judge.timer (every 15 min)"
 	@echo "verdicts: $(HOME)/.local/state/zclassic23-slo/hold-ledger.jsonl"

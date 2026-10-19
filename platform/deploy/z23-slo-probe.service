@@ -25,7 +25,7 @@ ExecStart=%h/.local/bin/z23 ops host slo probe
 # default 5s) = 36s worst case. Two instances plus the oracle RPC = 80s
 # worst case. Measured cost on a healthy box is ~0.25s for the whole
 # cycle; the 150s budget exists so a WEDGED host cannot produce
-# overlapping runs of a 60s collector.
+# overlapping runs of a 60s probe.
 TimeoutStartSec=150
 Nice=10
 IOSchedulingClass=idle

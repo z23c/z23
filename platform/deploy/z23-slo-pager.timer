@@ -14,7 +14,7 @@ Description=Z23 SLO Pager Timer — every 5 min (separate from the probe: self-w
 # depend on the thing it watches.
 #
 # 5m is fine-grained enough for the >2h no-advance / >10m unreachable
-# windows it evaluates while keeping wall(1) noise and journal churn low.
+# windows it reads while keeping wall(1) noise and journal churn low.
 # RandomizedDelaySec jitters it off the exact boundary; Persistent=true
 # fires a catch-up evaluation after suspend/reboot so a page condition that
 # began during downtime is surfaced promptly rather than after a full idle

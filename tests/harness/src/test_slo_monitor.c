@@ -842,8 +842,11 @@ static bool scalar_parsers(void)
     struct slo_opt two = slo_io_peer_count("[{\"addr\":\"a\"},{\"addr\":\"b\"}]");
     struct slo_opt zero = slo_io_peer_count("[]");
     struct slo_opt bad = slo_io_peer_count("{\"error\":1}");
+    struct slo_opt noaddr = slo_io_peer_count("[{\"id\":1}]");
+    struct slo_opt mixed = slo_io_peer_count("[{\"addr\":\"a\"},{\"id\":2}]");
     int64_t v = 0;
-    return two.has && two.v == 2 && zero.has && zero.v == 0 && !bad.has &&
+    return two.has && two.v == 2 && zero.has && zero.v == 0 &&
+           !bad.has && !noaddr.has && !mixed.has &&
            slo_io_epoch_parse("@1700000000", &v) && v == 1700000000 &&
            !slo_io_epoch_parse("n/a", &v) && !slo_io_epoch_parse("", &v) &&
            slo_io_rss_parse("Name:\tz23\nVmRSS:\t  2048 kB\n", &v) &&

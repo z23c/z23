@@ -142,8 +142,11 @@ static void say(struct slo_hold_report *r, const char *fmt, ...)
 
 static void say(struct slo_hold_report *r, const char *fmt, ...)
 {
-    if (r->nlines >= SLO_HOLD_LINES)
+    if (r->nlines >= SLO_HOLD_LINES) {
+        snprintf(r->lines[SLO_HOLD_LINES - 1], SLO_HOLD_LINE_LEN,
+                 "slo-hold: report truncated at %u lines", SLO_HOLD_LINES);
         return;
+    }
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(r->lines[r->nlines++], SLO_HOLD_LINE_LEN, fmt, ap);

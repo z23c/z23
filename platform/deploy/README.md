@@ -22,7 +22,11 @@ you are new; this page is about operating a host, not about building.
 - **Node monitors.** `z23-slo-probe`, `z23-slo-pager` and `z23-hold-judge`, each
   with its `.service` and `.timer`. They run the installed binary
   (`z23 ops host slo probe|page|judge`) and keep their ledgers in
-  `~/.local/state/zclassic23-slo`.
+  `~/.local/state/zclassic23-slo`. Each leaf is single-mode: no subcommand.
+  The install targets stop and disable the retired `zclassic23-slo-probe`,
+  `zclassic23-slo-pager` and `zclassic23-hold-certifier` timers (absent units
+  are tolerated); two probers on one ledger would double every row and halve
+  the BLIND threshold.
 - **Landing.** `z23-land-step.service` / `.timer` drive one beat of the native
   landing service. `zclassic23-lander.service` is the older shell lander and is
   a different thing — its own header says so.
