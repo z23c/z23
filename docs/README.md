@@ -36,6 +36,35 @@ reader one obvious next action. The durable statement of this is
 [`../AGENTS.md`](../AGENTS.md#north-star). How Z23 itself is developed toward
 it, by people and agents, is [`agent/VISION.md`](agent/VISION.md).
 
+### The shape of it
+
+Z23 is one program you build from source that verifies everything it runs:
+the money, the software, the peers and the agents. A hash names bytes, a
+signature names a key, a receipt binds an observation, and acceptance is
+always a decision made on your own machine. Each fact has one writer; every
+other copy is a view of it.
+
+The parts nest, each smaller and more sealed than the one around it:
+
+| Layer | What it gives you |
+|---|---|
+| Core | ZClassic consensus, custody and network: money you verify yourself. Sealed, flat or shrinking. |
+| Commons | Software named by its exact source, rebuilt and reproduced on another node, accepted by version, usable after its publisher is gone. |
+| Runtime | Software that runs confined: one-file C23 programs and plugins, authority passed as descriptors, and a FreeBSD-derived guest as the same fallback everywhere. |
+| Mesh | Your machines and your peers: peer to peer, onion routing, pinned keys, no fee, no signup, no central server. |
+| Agents | Replaceable workers outside the authority boundary. They propose; Z23 verifies; you accept. |
+
+Z23 is developed with Z23. A card, a one-file lab run against its cases, a
+receipt, an independent review, a landing, a release and a deployment are the
+commons pipeline applied to Z23's own source. A step that needs a private
+script or a manual action is a gap in the product, and closing it is product
+work.
+
+Less is more. One program, one service per host, one ledger per fact, one
+command registry for the command line and MCP, one tree of documents. New
+capability arrives as small, deletable plugins while the core stays small;
+removing code while every test still passes is progress.
+
 ## Public product
 
 Z23 is first a public ZClassic blockchain full node. It also offers an

@@ -42,7 +42,7 @@ in exact experiment receipts.
 
 | Part | What it is | Status | Evidence | What it does not show |
 | --- | --- | --- | --- | --- |
-| Full node | A ZClassic full node in the one C23 program. Version 1 is defined by eight pass/fail criteria. | On main | [`MVP.md`](../quality/MVP.md) | `MVP.md` marks criteria 6 (seven-day soak) and 8 (consensus parity) as partial, and says a checkmark "records a historically demonstrated run" and "is not current-candidate qualification". It says to ask a running node for the live state: `build/bin/z23 milestone`. Criterion 4 is worded as receiving 1 ZCL with the balance reflected within 2 blocks, while the evidence its row records is a 0.02 ZCL note decrypted after the transaction entered the mempool. |
+| Full node | A ZClassic full node in the one C23 program. Version 1 is defined by eight pass/fail criteria. | On main | [`MVP.md`](../quality/MVP.md) | `MVP.md` marks criteria 6 (seven-day soak) and 8 (consensus parity) as partial, and says a checkmark "records a historically demonstrated run" and "is not current-candidate qualification". It says to ask a running node for the live state: `build/bin/z23 milestone`. Criterion 4 asks for a minimal shielded payment with the balance reflected within 2 blocks, while the evidence its row records is a 0.02 ZCL note decrypted after the transaction entered the mempool. |
 | C23 Commons | Source identified by the exact `package_root` of its bytes, fetched as inert bytes on another node and rebuilt byte-identically. | On main | [`C23_COMMONS_QUICKSTART.md`](C23_COMMONS_QUICKSTART.md) | The quickstart is the installed-node path for an ordinary C23 static-library package. A [recorded journey across three physical hosts](../experiments/COMMONS_MULTIHOST_2026-09-29.md) lists run 3 as "PASS 12/12" beside runs that failed; that journey is opt-in and is not part of `make ci`. |
 | Emulated RISC-V machine | A small RISC-V computer in `z23-dev`: one RV64 IMAFDC hart, a serial console, a virtio block device and a device tree. | On main | [`RISCV_MACHINE.md`](RISCV_MACHINE.md) | "One hart; no network device is attached." The registered tests run only small guests committed under `tests/fixtures/rvmachine`. |
 | FreeBSD guest | An unmodified FreeBSD 15.1 riscv64 kernel booted in that machine. | Experiment | [`RISCV_MACHINE.md`](RISCV_MACHINE.md), [experiment record](../experiments/2026-10-11-guest-pq-ssh-loopback.md) | `RISCV_MACHINE.md` calls these boots "an operator recipe: they are run by hand through the command and are not part of the registered tests". No kernel or disk image is kept in the repository. |
@@ -65,8 +65,8 @@ in exact experiment receipts.
   engine has no production session owner or accepted guest integration.
   Module tests do not establish a deployed quantum-resistant route.
 - `MVP.md` records criteria 6 and 8 as partial, and the evidence recorded for
-  criterion 4 is a smaller amount, seen at mempool entry, than its wording asks
-  for.
+  criterion 4 was seen at mempool entry, not with the balance reflected within
+  2 blocks as its wording asks.
 - The figure of warm compile and focused proof, p95 within 10 seconds on a
   frozen small-change corpus, is a target; this page cites no measurement that
   meets it.
@@ -85,8 +85,8 @@ exposes, in no order:
 - Post-quantum key exchange has been observed only on loopback, in one run, with
   classical identities.
 - Criteria 6 and 8 are recorded as partial in `MVP.md`.
-- The evidence recorded for criterion 4 does not show its literal wording: 1
-  ZCL received, with the balance reflected within 2 blocks.
+- The evidence recorded for criterion 4 does not show its wording: a minimal
+  shielded payment received, with the balance reflected within 2 blocks.
 - The warm compile and focused proof target (p95 within 10 seconds on a frozen
   small-change corpus) is not shown as met.
 

@@ -21,7 +21,7 @@ Standing brief: read AGENTS.md and applicable host instructions first; they and 
 - Evidence: a new test must fail without the fix and pass with it; say how you showed it. A compile error is not a failing test.
 - Retry only with new evidence or a changed fix; never repeat an unchanged failing command.
 - STOP AND REPORT, without committing, when the prompt's premise is false (the code is not dead, a caller exists, parity is impossible) or the contract would need an owner decision. A clear stop report is a good result.
-- Commit: use Rhett Creighton attribution and `git -C $W commit -S`, with the requested subject and a 1–3 line user-facing body. Record local and UTC ISO-8601 timestamps. Never include AI/tool attribution or trailers.
+- Commit: use Rhett Creighton attribution and `git -C $W commit -S`, with the requested subject and a 1–3 line user-facing body. Record local and UTC ISO-8601 timestamps. End the message with `Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>`; the author stays Rhett Creighton.
 - Do exactly the task. Report anything else that is wrong in one line instead of fixing it. After about 60 tool calls without a red→green result, stop and report.
 
 End your turn with this block and nothing after it:

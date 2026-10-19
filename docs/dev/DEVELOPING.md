@@ -119,7 +119,7 @@ rulings by number.
    [MVP.md](../quality/MVP.md) C1-C8 and the product priorities in
    [FORWARD_PLAN.md](../work/FORWARD_PLAN.md) remain acceptance context.
 3. **Zero spend.** No fleet feature may require ZCL, an anchored ZID or a fee.
-   Work that needs a spend (such as the 1 ZCL payment rerun) waits for an
+   Work that needs a spend (such as the minimal-payment rerun for criterion 4) waits for an
    explicit owner authorization.
 
 Every unit, including core, crypto, consensus and custody, needs one reviewer

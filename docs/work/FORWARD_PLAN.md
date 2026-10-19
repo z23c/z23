@@ -26,39 +26,32 @@ do not replace the fleet A+ bars or reorder current work.
 
 <!-- claim: file-present docs/agent/DEVELOPMENT_MVP.md -->
 
-## Current mission: fast C23 development with fleet Insight + Control
+## Current mission
 
-Make Z23 the durable P2P platform through which interchangeable agents
-understand real problems, reuse C23, produce verified improvements, operate
-permitted systems, and measure the consequences:
+Make Z23 the program described in the [North Star](../README.md#north-star):
+it verifies the money, the software, the peers and the agents, and it is
+developed, released and deployed with its own commands. Work is chosen in
+this order:
 
-> Observe → understand → propose → build → independently reproduce → publish
-> → operate → measure.
+1. **Money (P0).** Canonical nodes run the latest landed build, agree with
+   `zclassicd` on tip and block hash, and carry no unexplained blocker.
+   Consensus parity and custody come before everything else.
+2. **Self-hosting.** Landing, release, deployment, build admission and
+   cleanup are `z23` commands; no private script is on the path from a card
+   to a running node.
+3. **Subtraction.** Retire legacy names, dead scripts, stub commands and
+   duplicate plans. The core, the command count, the documents and the shell
+   scripts trend down while every test passes.
+4. **A stranger's first hour.** From a fresh clone to a verified node and a
+   first lab result in minutes; then one useful application built as a
+   one-file plugin and reproduced on a second node.
+5. **Your own fleet.** Joining, updating, shell access, the wiki and
+   telemetry work for any owner's machines, not only the maintainers'.
 
-Deliver native APIs and CLI with a keyboard-controlled live fleet terminal
-for Linux, arm64 macOS and Windows; qualify each runtime independently.
-The terminal contract is in
-[AGENT_FLEET.md](AGENT_FLEET.md#keyboard-controlled-fleet-terminal). A browser
-console follows. Aggregate fleet membership has no fixed ceiling, while every node's
-connections, work, storage and responses remain bounded. Native documents and
-signed task objects are the first live business sources. Transcripts, Slack,
-email, tickets, CRM, analytics and feedback receive bounded import support;
-direct connectors subsequently reuse the same adapter contract.
-
-Canonical lifecycle convergence is one scoped implementation objective below.
-The earlier blanket fleet freeze and temporary P0.5 queue are superseded by
-the owner-adopted fleet priorities in `AGENTS.md`. Existing design records
-supply implementation detail under that order. Requirements below are acceptance
-targets, not claims of completed
-implementation or measured performance.
-
-The [measured fleet development contract](AGENT_FLEET.md) specifies passive
-Codex accounting, qualified cost routing and durable executor recovery for this
-mission. Its delivery sequence does not reorder the fleet priorities; automatic
-dispatch and publication retain their explicit qualification gates.
-
-Work after P0 is ordered by the owner-adopted [fleet A+
-scorecard](FLEET_SCORECARD.md): thirteen goals, each with a probe-based A+ bar.
+The [fleet A+ scorecard](FLEET_SCORECARD.md) and `z23 fleet goals` measure
+the fleet features in item 5 and the self-hosting in item 2; they do not
+reorder P0. Requirements below are acceptance targets, not claims of
+completed implementation or measured performance.
 
 ## Invariants and authority
 
@@ -123,15 +116,15 @@ The items below describe work to prove, not capabilities declared complete.
 1. **Trust the public node and wallet first.** Close the literal
    [C1–C8 criteria](../quality/MVP.md) with evidence bound to the exact candidate.
    Literal payment qualification requires a previously uncredited recipient
-   to receive **1 ZCL within two blocks**, with real proof verification and no
+   to receive **a minimal shielded payment within two blocks** (never a whole ZCL), with real proof verification and no
    double credit. Preserve the full from-genesis parity and uninterrupted
    seven-day soak requirements; a smaller decrypted note or a unit test cannot
    replace them. Missing prerequisites remain explicit; synchronization work
    maps to section 5.
 
-   Criterion 4's literal 1 ZCL rerun remains deferred until explicit owner spend
-   authorization. Its [`MVP.md`](../quality/MVP.md) evidence is a 0.02 ZCL note decrypted
-   after mempool entry; that does not close the literal criterion. Criteria 6
+   Criterion 4 is rerun later with the minimal amount, when the owner schedules the
+   spend. Its [`MVP.md`](../quality/MVP.md) evidence is a 0.02 ZCL note decrypted
+   after mempool entry; that shows decryption, not the balance within two blocks. Criteria 6
    and 8 retain their recorded acceptance gaps. Follow the fleet work order
    when selecting authorized work on these gaps.
 
