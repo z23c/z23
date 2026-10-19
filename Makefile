@@ -377,7 +377,7 @@ VENDOR_REPAIR_REQUESTED := $(filter $(VENDOR_REPAIR_GOALS),$(MAKECMDGOALS))
 ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest \
 	build/bin/z23-headless-run.exe
 # Build queries and game-only goals need no node vendor configure.
-ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
+ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
 ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
 ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
