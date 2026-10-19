@@ -840,6 +840,7 @@ int test_always_sync_chaos(void);
 int test_waitforheight_provable(void);
 int test_refold_progress_floor(void);
 int test_refold_cadence(void);
+int test_refold_rate_verdict(void);
 int test_validate_headers_tuning(void);
 int test_catchup_cadence(void);
 int test_refold_premature_clear(void);

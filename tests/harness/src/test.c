@@ -1943,6 +1943,7 @@ int main(int argc, char **argv)
     failures += test_waitforheight_provable();
     failures += test_refold_progress_floor();
     failures += test_refold_cadence();
+    failures += test_refold_rate_verdict();
     failures += test_catchup_cadence();
     { extern int test_stage_dump_trylock(void);
       failures += test_stage_dump_trylock(); }

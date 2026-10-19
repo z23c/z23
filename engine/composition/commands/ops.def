@@ -161,6 +161,23 @@ ZCL_COMMAND_READY_READ(
  * the primary invocation surface, so the canonical path barely shows. */
 ZCL_COMMAND_BRANCH("ops.debug", "ops", "Diagnostics",
                    ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_BRANCH("ops.debug.refold", "ops.debug", "Refold proof",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.debug.refold.verdict", "ops.debug.refold", "", "Refold rate verdict",
+    "Classify a bounded JSONL sample file with the shared C23 H* rate classifier. "
+    "Each record requires nonnegative `mono_ns` and `hstar` integers; optional "
+    "`ts` is wall-clock display metadata and never affects rates. Monotonic "
+    "intervals must be strictly positive; malformed or nonpositive intervals "
+    "are refused, never clamped.",
+    0, "refold,verdict,rate,hstar", "zcl.ops_refold_verdict.input.v1",
+    "zcl.ops_refold_verdict.v1", "samples", "samples",
+    "z23 ops debug refold verdict --samples=<samples.jsonl>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_refold_verdict)
 ZCL_COMMAND_READY_READ(
     "ops.debug.explain", "ops.debug", "explain,ops.explain",
     "Explain a subsystem in plain prose",

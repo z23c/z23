@@ -19,6 +19,7 @@
 #define _GNU_SOURCE
 #include "command/native_command.h"
 #include "command/native_command_priv.h"
+#include "command/refold_rate_verdict.h"
 #include "base/hex.h"
 
 #include "config/command_catalog.h"
@@ -949,6 +950,63 @@ void zcl_native_handle_ops_statecatalog(
         return;
     }
     nc_statecatalog_paged(request, &catalog, subs, total, reply);
+}
+
+void zcl_native_handle_ops_refold_verdict(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *path = json_get_str(json_get(request->input, "samples"));
+    if (!path || !path[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_INPUT_FILE",
+                               "validate", false, false,
+                               "provide a JSONL sample path with --samples",
+                               "ops.debug.refold.verdict");
+        return;
+    }
+    struct zcl_refold_rate_sample samples[ZCL_REFOLD_RATE_MAX_SAMPLES];
+    size_t count = 0;
+    if (!zcl_refold_rate_read_jsonl(path, samples, &count)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "INVALID_SAMPLE_FILE",
+                               "read", false, false,
+                               "sample file is unreadable, malformed, or exceeds its bounds",
+                               "ops.debug.refold.verdict");
+        return;
+    }
+    struct zcl_refold_rate_result result;
+    const enum zcl_refold_rate_verdict verdict =
+        zcl_refold_rate_classify(samples, count, &result);
+    if (verdict == ZCL_REFOLD_RATE_INVALID_INPUT) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "INVALID_SAMPLES",
+                               "classify", false, false,
+                               "hstar must be nonnegative and monotonic timestamps strictly increasing; invalid intervals are refused, never clamped",
+                               "ops.debug.refold.verdict");
+        return;
+    }
+    char overall[48], first[48], last[48];
+    (void)snprintf(overall, sizeof(overall), "%.2f", result.overall_rate);
+    (void)snprintf(first, sizeof(first), "%.2f", result.first_third_rate);
+    (void)snprintf(last, sizeof(last), "%.2f", result.last_third_rate);
+    (void)json_push_kv_str(&reply->data, "verdict",
+                           zcl_refold_rate_verdict_name(verdict));
+    (void)json_push_kv_int(&reply->data, "samples", (int64_t)result.samples);
+    (void)json_push_kv_int(&reply->data, "intervals",
+                           (int64_t)result.intervals);
+    (void)json_push_kv_int(&reply->data, "climb", result.climb);
+    (void)json_push_kv_int(&reply->data, "min_at", (int64_t)result.min_at);
+    (void)json_push_kv_int(&reply->data, "proof_exit_code",
+                           verdict == ZCL_REFOLD_RATE_FLAT ? 0 :
+                           verdict == ZCL_REFOLD_RATE_DECAYING ? 2 : 3);
+    (void)json_push_kv_str(&reply->data, "overall_rate", overall);
+    (void)json_push_kv_str(&reply->data, "first_third_rate", first);
+    (void)json_push_kv_str(&reply->data, "last_third_rate", last);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
 
 /* Handler / schema / effect-risk / semantics half of the READY-leaf

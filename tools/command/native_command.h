@@ -1846,6 +1846,11 @@ void zcl_native_handle_ops_statecatalog(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* Node-free, bounded classifier for saved refold H* samples. */
+void zcl_native_handle_ops_refold_verdict(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.slo — node-free, bounded fold of the external uptime probe ledger. */
 void zcl_native_handle_ops_slo(
     const struct zcl_command_request *request,
