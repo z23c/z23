@@ -916,7 +916,12 @@ ZCL_COMMAND_READY_COMMAND(
     "One report per sweep class over the dev-proof worktree pools (the disk "
     "pool and its tmpfs twin by default, or --roots): registered, and the "
     "partition of it into reapable / too_young / in_use / locked / "
-    "need_review, plus bytes_reclaimable and bytes_reclaimed. Counts are "
+    "need_review, plus bytes_reclaimable and bytes_reclaimed. Only a clean "
+    "worktree is removed. A clean detached worktree whose HEAD no origin or "
+    "archive ref holds is removed after age_days (default 7; 0 keeps it) and "
+    "only once refs/archive/wt/<name> holds that HEAD (unique_archived, "
+    "kept_on_failure). A dirty worktree is never removed; it is listed in "
+    "needs_review with idle_days and dirty_count. Counts are "
     "measured at call time from git's own worktree listing and a single "
     "/proc pass, never cached. Dry run unless apply=true, and even then git's "
     "own worktree removal goes first; a directory git unregistered but left "
@@ -924,7 +929,7 @@ ZCL_COMMAND_READY_COMMAND(
     "named in refusals[] rather than silently skipped.", 65536,
     "host,gc,garbage,worktree,generation,disk,reclaim,janitor",
     "zcl.host_gc.input.v1", "zcl.host_gc.v1",
-    "apply,floor_hours,roots", "",
+    "apply,floor_hours,roots,age_days", "",
     "z23 ops host gc --apply=false",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_DESTRUCTIVE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,

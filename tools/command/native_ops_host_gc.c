@@ -29,7 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { OHG_MAX_FLOOR_HOURS = 24 * 365 };
+enum { OHG_MAX_FLOOR_HOURS = 24 * 365, OHG_MAX_AGE_DAYS = 3650 };
 
 static void ohg_fail(struct zcl_command_reply *reply, const char *code,
                      const char *phase, const char *message,
@@ -114,6 +114,8 @@ static void ohg_push_class(struct json_value *arr,
     (void)json_push_kv_int(&row, "in_use", cls->in_use);
     (void)json_push_kv_int(&row, "locked", cls->locked);
     (void)json_push_kv_int(&row, "need_review", cls->need_review);
+    (void)json_push_kv_int(&row, "unique_archived", cls->unique_archived);
+    (void)json_push_kv_int(&row, "kept_on_failure", cls->kept_on_failure);
     (void)json_push_kv_int(&row, "bytes_reclaimable",
                            (int64_t)cls->bytes_reclaimable);
     (void)json_push_kv_int(&row, "bytes_reclaimed",
@@ -130,6 +132,19 @@ static void ohg_push_refusal(struct json_value *arr,
     json_set_object(&row);
     (void)json_push_kv_str(&row, "path", ref->path);
     (void)json_push_kv_str(&row, "reason", ref->reason);
+    (void)json_push_back(arr, &row);
+    json_free(&row);
+}
+
+static void ohg_push_review(struct json_value *arr,
+                            const struct host_gc_review *rev)
+{
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_str(&row, "path", rev->path);
+    (void)json_push_kv_int(&row, "idle_days", rev->idle_days);
+    (void)json_push_kv_int(&row, "dirty_count", rev->dirty_count);
     (void)json_push_back(arr, &row);
     json_free(&row);
 }
@@ -160,11 +175,15 @@ static void ohg_project(struct zcl_command_reply *reply,
                         const struct host_gc_request *req,
                         const struct host_gc_report *report)
 {
-    struct json_value classes, refusals;
+    struct json_value classes, refusals, reviews;
     json_init(&classes);
     json_set_array(&classes);
     for (size_t i = 0; i < report->nclasses; i++)
         ohg_push_class(&classes, &report->classes[i]);
+    json_init(&reviews);
+    json_set_array(&reviews);
+    for (size_t i = 0; i < report->nreviews; i++)
+        ohg_push_review(&reviews, &report->reviews[i]);
     json_init(&refusals);
     json_set_array(&refusals);
     for (size_t i = 0; i < report->nrefusals; i++)
@@ -172,12 +191,15 @@ static void ohg_project(struct zcl_command_reply *reply,
 
     (void)json_push_kv_bool(&reply->data, "apply", req->apply);
     (void)json_push_kv_int(&reply->data, "floor_hours", req->floor_hours);
+    (void)json_push_kv_int(&reply->data, "age_days", req->age_days);
     (void)json_push_kv(&reply->data, "classes", &classes);
     ohg_push_totals(&reply->data, report);
     (void)json_push_kv(&reply->data, "refusals", &refusals);
+    (void)json_push_kv(&reply->data, "needs_review", &reviews);
     (void)json_push_kv_bool(&reply->data, "truncated", report->truncated);
     json_free(&classes);
     json_free(&refusals);
+    json_free(&reviews);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
 }
 
@@ -188,7 +210,7 @@ void zcl_native_handle_ops_host_gc(const struct zcl_command_request *request,
     const struct json_value *roots = json_get(input, "roots");
     struct host_gc_request req;
     struct host_gc_report report;
-    int64_t floor_hours;
+    int64_t floor_hours, age_days;
 
     if (!reply)
         return;
@@ -208,6 +230,13 @@ void zcl_native_handle_ops_host_gc(const struct zcl_command_request *request,
         return;
     }
     req.floor_hours = (int)floor_hours;
+    age_days = json_get_int_or(input, "age_days", HOST_GC_DEFAULT_AGE_DAYS);
+    if (age_days < 0 || age_days > OHG_MAX_AGE_DAYS) {
+        ohg_fail(reply, "host_gc.age_out_of_range", "validate",
+                 "age_days must be between 0 (keep) and 3650", "age_days");
+        return;
+    }
+    req.age_days = (int)age_days;
     if (roots && !ohg_take_roots(roots, &req)) {
         ohg_fail(reply, "host_gc.roots_invalid", "validate",
                  "roots must be 1..8 entries, each an absolute pool "

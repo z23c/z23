@@ -213,8 +213,9 @@ static bool devagent_scoped_bool(const char *path, const char *key,
     return false;
 }
 
-/* ops.host.gc's two non-boolean inputs. `floor_hours` is the age floor in
- * hours (0 disables it, a year is the ceiling) and would otherwise fall to
+/* ops.host.gc's three non-boolean inputs. `floor_hours` is the age floor in
+ * hours (0 disables it, a year is the ceiling) and `age_days` the idle days
+ * before a unique HEAD is pinned and removed (0 keeps it); both would otherwise fall to
  * the shared string branch, making `--floor_hours=12` unpassable from a
  * shell; `roots` is the bounded array of pool directories that replaces the
  * default pair, and an array key with no rule is refused outright. */
@@ -227,6 +228,11 @@ static bool devagent_host_gc_input(const char *path, const char *key,
     if (strcmp(key, "floor_hours") == 0) {
         *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
                    json_get_int(value) <= 8760;
+        return true;
+    }
+    if (strcmp(key, "age_days") == 0) {
+        *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
+                   json_get_int(value) <= 3650;
         return true;
     }
     if (strcmp(key, "roots") == 0) {

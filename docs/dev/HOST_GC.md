@@ -84,6 +84,39 @@ identity seeds its build from. The native engine (`z23 ops host gc`)
 applies the same rule and counts a kept donor as `in_use`. Every other
 generation is classified as before.
 
+### What the native sweep removes
+
+`z23 ops host gc` removes only clean worktrees and pins unique commits first;
+dirty worktrees are listed, never removed.
+
+A worktree is clean when `git status --porcelain --untracked-files=all` is
+empty, so untracked files and untracked nested repositories count as dirty.
+A clean detached worktree whose HEAD is held by a `refs/remotes/origin/*` or
+`refs/archive/*` ref is removed once it is older than `floor_hours`. A clean
+detached worktree whose HEAD is held by no such ref is removed only when
+`age_days` (default 7, `0` keeps it) is set and its gitdir `index` (or `HEAD`)
+is that old, and only after `refs/archive/wt/<name>` was created and read back;
+if that fails it stays and counts as `kept_on_failure`. `<name>` is the path
+below `$HOME` with every character outside `[A-Za-z0-9_-]` replaced by `_` and
+leading `_` removed; a name already bound to another commit gets a `-<n>`
+suffix. Ignored files are build output by repository policy and go with the
+worktree.
+
+A dirty worktree is reported under `needs_review` as `{path, idle_days,
+dirty_count}`. A worktree is also kept when it is locked, in use by a live
+process, a warm donor, or named by a systemd user unit file
+(`~/.config/systemd/user/*.service|.timer|.path`; `%h`, `~`, `$HOME` and
+`${HOME}` are expanded before matching; drop-ins are not read). If the unit
+files cannot be read whole, nothing is removed.
+
+```
+z23 ops host gc --apply=false
+z23 ops host gc --input="{\"roots\":[\"$HOME/.z23/lanes\"],\"age_days\":14,\"apply\":false}"
+z23 ops host gc --age_days=0 --apply=false          # unique commits are kept
+```
+
+Recover a pinned worktree with `git worktree add <dir> refs/archive/wt/<name>`.
+
 ### Where the logic lives
 
 `host_gc.sh` is the authoritative whole-host sweep: it is what the hourly

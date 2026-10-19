@@ -34,7 +34,15 @@
  *   in_use       the directory, or something under it, is a live process's
  *                cwd or an open file descriptor's target
  *   too_young    its mtime is younger than the age floor
- *   need_review  git says it carries a branch or uncommitted content
+ *   need_review  git says it carries a branch or uncommitted content; a dirty
+ *                worktree (untracked files and nested repositories included)
+ *                is listed in report->reviews and never removed
+ *
+ * A clean detached worktree whose HEAD no refs/remotes/origin or refs/archive
+ * ref holds is removed only with age_days > 0 and an index idle that long, and
+ * only after refs/archive/wt/<name> was created and read back. A systemd user
+ * unit file naming a worktree (absolute, %h, ~ or $HOME) keeps it as in_use;
+ * unit files that cannot be read whole keep every worktree.
  * The lock and in-use tests run BEFORE the age floor deliberately: all four
  * are keeps, and an operator reading "in use" learns more than "too young".
  *
@@ -58,7 +66,9 @@ enum {
     HOST_GC_MAX_POOLS = 8,
     HOST_GC_MAX_REFUSALS = 32,
     HOST_GC_MAX_CANDIDATES = 512,
-    HOST_GC_DEFAULT_FLOOR_HOURS = 6
+    HOST_GC_DEFAULT_FLOOR_HOURS = 6,
+    HOST_GC_DEFAULT_AGE_DAYS = 7,
+    HOST_GC_MAX_REVIEWS = 64
 };
 
 /* One pool the caller asked to sweep. `name` is the class label carried in
@@ -82,6 +92,8 @@ struct host_gc_class {
     int in_use;
     int locked;
     int need_review;
+    int unique_archived;    /* HEAD pinned under refs/archive/wt, then removed */
+    int kept_on_failure;    /* the pin failed: worktree stands */
     uint64_t bytes_reclaimable;
     uint64_t bytes_reclaimed;
 };
@@ -91,9 +103,18 @@ struct host_gc_refusal {
     char reason[HOST_GC_REASON_CAP];
 };
 
+/* A dirty worktree the sweep left alone, for a person to decide. */
+struct host_gc_review {
+    char path[HOST_GC_PATH_CAP];
+    int idle_days;                    /* -1 unknown */
+    int dirty_count;                  /* lines of git status */
+};
+
 struct host_gc_request {
     bool apply;                       /* false = classify only, remove nothing */
     int floor_hours;                  /* keep anything younger than this */
+    int age_days;                     /* idle days before a unique HEAD is pinned and removed; 0 = keep */
+    char unit_dir[HOST_GC_PATH_CAP];  /* systemd user units; "" = $HOME default */
     struct host_gc_pool pools[HOST_GC_MAX_POOLS];
     size_t npools;
     char home[HOST_GC_PATH_CAP];      /* protection root; "" = $HOME */
@@ -106,6 +127,8 @@ struct host_gc_report {
     size_t nclasses;
     struct host_gc_refusal refusals[HOST_GC_MAX_REFUSALS];
     size_t nrefusals;
+    struct host_gc_review reviews[HOST_GC_MAX_REVIEWS];
+    size_t nreviews;
     bool truncated;                   /* more candidates than the cap */
 };
 

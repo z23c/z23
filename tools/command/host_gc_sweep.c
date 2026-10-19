@@ -24,6 +24,7 @@
 #include "util/spawn.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,7 +36,11 @@ enum {
     HG_GIT_TIMEOUT_MS = 120000,
     HG_LIST_CAP = 262144,
     HG_STATUS_CAP = 4096,
-    HG_REPO_PROBE_MAX = 32
+    HG_REPO_PROBE_MAX = 32,
+    HG_DIRTY_CAP = 65536,
+    HG_UNITS_CAP = 4 * 1024 * 1024,
+    HG_REF_NAME_MAX = 200,
+    HG_PIN_TRIES = 100
 };
 
 /* One removal candidate: a registered worktree of the pool's repository.
@@ -47,6 +52,7 @@ struct hg_cand {
     bool locked;
     bool occupied;
     bool donor;       /* kept: newest complete generation of its identity */
+    int dirty;        /* lines of `git status`; -1 unknown */
 };
 
 struct hg_scan {
@@ -184,15 +190,11 @@ static bool hg_pool_repo(const char *pool, char *buf, size_t cap, char *repo,
     return found;
 }
 
-/* git prints `locked` in the porcelain listing; the on-disk marker is read
- * as well so a git too old to print it still cannot lose a lock. Either
- * source saying "locked" keeps the worktree. */
-static bool hg_locked_on_disk(const char *wt)
+/* The administrative directory a linked worktree's .git file names. */
+static bool hg_gitdir(const char *wt, char *out, size_t cap)
 {
     char dotgit[HOST_GC_PATH_CAP];
     char line[HOST_GC_PATH_CAP];
-    char marker[HOST_GC_PATH_CAP];
-    struct stat st;
     FILE *f;
     if (!zcl_path_join(dotgit, sizeof(dotgit), wt, ".git"))
         return false;
@@ -205,9 +207,20 @@ static bool hg_locked_on_disk(const char *wt)
     hg_strip(line);
     if (strncmp(line, "gitdir: ", 8) != 0)
         return false;
-    if (!zcl_path_join(marker, sizeof(marker), line + 8, "locked"))
-        return false;
-    return stat(marker, &st) == 0;
+    return hg_copy(out, cap, line + 8);
+}
+
+/* git prints `locked` in the porcelain listing; the on-disk marker is read
+ * as well so a git too old to print it still cannot lose a lock. Either
+ * source saying "locked" keeps the worktree. */
+static bool hg_locked_on_disk(const char *wt)
+{
+    char gitdir[HOST_GC_PATH_CAP];
+    char marker[HOST_GC_PATH_CAP];
+    struct stat st;
+    return hg_gitdir(wt, gitdir, sizeof(gitdir)) &&
+           zcl_path_join(marker, sizeof(marker), gitdir, "locked") &&
+           stat(marker, &st) == 0;
 }
 
 static void hg_push_cand(struct hg_scan *scan, size_t cls, const char *path,
@@ -226,6 +239,7 @@ static void hg_push_cand(struct hg_scan *scan, size_t cls, const char *path,
     c->locked = locked || hg_locked_on_disk(path);
     c->occupied = false;
     c->donor = false;
+    c->dirty = 0;
     scan->n++;
 }
 
@@ -511,13 +525,243 @@ static void hg_mark_donors(struct hg_scan *scan, size_t nclasses)
 
 /* ------------------------------------------------------- classification */
 
-static bool hg_worktree_clean(const char *wt)
+/* Lines `git status` reports: tracked changes and every untracked file,
+ * which includes an untracked nested repository. 0 is clean; -1 is unknown
+ * and is never clean. */
+static int hg_dirty_count(const char *wt)
 {
-    static const char *const args[] = { "status", "--porcelain", NULL };
-    char out[HG_STATUS_CAP];
-    if (hg_git(wt, args, out, sizeof(out)) != 0)
+    static const char *const args[] = { "--no-optional-locks", "status",
+                                        "--porcelain",
+                                        "--untracked-files=all", NULL };
+    char *out = zcl_malloc(HG_DIRTY_CAP, "host_gc status");
+    int n = 0;
+    if (!out)
+        return -1;
+    if (hg_git(wt, args, out, HG_DIRTY_CAP) != 0)
+        n = -1;
+    else
+        for (const char *p = out; *p; p++)
+            n += *p == '\n';
+    if (n == 0 && out[0] != '\0')
+        n = 1;
+    free(out);
+    return n;
+}
+
+/* Seconds since the gitdir index (HEAD when there is none) changed. */
+static int64_t hg_idle_secs(const char *wt, int64_t now)
+{
+    static const char *const files[] = { "index", "HEAD" };
+    char gitdir[HOST_GC_PATH_CAP], file[HOST_GC_PATH_CAP];
+    struct stat st;
+    if (!hg_gitdir(wt, gitdir, sizeof(gitdir)))
+        return -1;
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+        if (zcl_path_join(file, sizeof(file), gitdir, files[i]) &&
+            stat(file, &st) == 0)
+            return now > (int64_t)st.st_mtime ? now - (int64_t)st.st_mtime : 0;
+    return -1;
+}
+
+/* ------------------------------------------------------ unique HEADs */
+
+/* A clean detached worktree whose HEAD no other ref holds is the only thing
+ * the sweep removes that git could not give back. Its HEAD is pinned under
+ * refs/archive/wt/<name> first, and the worktree is removed only when the
+ * ref reads back. A clean committed tree is wholly held by that ref. */
+
+static bool hg_head_sha(const char *wt, char *sha, size_t cap)
+{
+    static const char *const args[] = { "rev-parse", "--verify", "HEAD",
+                                        NULL };
+    if (hg_git(wt, args, sha, cap) != 0)
         return false;
-    return out[0] == '\0';
+    hg_strip(sha);
+    return sha[0] != '\0';
+}
+
+/* True unless HEAD is contained in a refs/remotes/origin or refs/archive
+ * ref. An unanswerable question reads as unique, the direction that keeps. */
+static bool hg_head_unique(const char *wt)
+{
+    char sha[HG_STATUS_CAP], out[HG_STATUS_CAP];
+    const char *args[] = { "for-each-ref", "--count=1", "--format=%(refname)",
+                           "--contains", sha, "refs/remotes/origin",
+                           "refs/archive", NULL };
+    if (!hg_head_sha(wt, sha, sizeof(sha)))
+        return true;
+    return hg_git(wt, args, out, sizeof(out)) != 0 || out[0] == '\0';
+}
+
+static bool hg_name_char(char c)
+{
+    return (unsigned)((c | 0x20) - 'a') < 26u ||
+           (unsigned)(c - '0') < 10u || c == '_' || c == '-';
+}
+
+static const char *hg_home(const struct host_gc_request *req)
+{
+    const char *home = getenv("HOME");
+    return req->home[0] ? req->home : (home ? home : "");
+}
+
+/* The path below $HOME with every character outside [A-Za-z0-9_-] mapped to
+ * '_' and leading '_' stripped (update-ref refuses a leading '.'). */
+static bool hg_ref_name(const char *home, const char *path, char *out,
+                        size_t cap)
+{
+    const char *p = path;
+    size_t n = 0, skip;
+    if (home[0] && strcmp(home, path) != 0 && hg_under(home, path))
+        p = path + strlen(home);
+    for (; *p; p++) {
+        if (n + 1 >= cap)
+            return false;
+        out[n++] = hg_name_char(*p) ? *p : '_';
+    }
+    out[n] = '\0';
+    skip = strspn(out, "_");
+    memmove(out, out + skip, n - skip + 1);
+    return out[0] != '\0' && out[0] != '-' && strlen(out) <= HG_REF_NAME_MAX;
+}
+
+static bool hg_ref_holds(const char *repo, const char *ref, const char *sha,
+                         int *rc)
+{
+    const char *args[] = { "rev-parse", "--verify", "-q", ref, NULL };
+    char cur[HG_STATUS_CAP];
+    *rc = hg_git(repo, args, cur, sizeof(cur));
+    hg_strip(cur);
+    return *rc == 0 && strcmp(cur, sha) == 0;
+}
+
+/* Create refs/archive/wt/<name> at sha and read it back. A name bound to a
+ * different commit is never overwritten: the next free <name>-<n> is used. */
+static bool hg_pin_name(const char *repo, const char *name, const char *sha)
+{
+    char ref[HOST_GC_PATH_CAP + 32], out[HG_STATUS_CAP];
+    const char *upd[] = { "update-ref", ref, sha, "", NULL };
+    int rc;
+    for (int n = 0; n < HG_PIN_TRIES; n++) {
+        (void)snprintf(ref, sizeof(ref), n ? "refs/archive/wt/%s-%d"
+                                           : "refs/archive/wt/%s", name, n);
+        if (hg_ref_holds(repo, ref, sha, &rc))
+            return true;
+        if (rc == 0)
+            continue;
+        return rc == 1 && hg_git(repo, upd, out, sizeof(out)) == 0 &&
+               hg_ref_holds(repo, ref, sha, &rc);
+    }
+    return false;
+}
+
+static bool hg_pin_head(const struct host_gc_request *req, const char *repo,
+                        const char *wt)
+{
+    char sha[HG_STATUS_CAP], name[HOST_GC_PATH_CAP];
+    return hg_ref_name(hg_home(req), wt, name, sizeof(name)) &&
+           hg_head_sha(wt, sha, sizeof(sha)) && hg_pin_name(repo, name, sha);
+}
+
+/* -------------------------------------------------------- systemd units */
+
+static bool hg_unit_file(const char *name)
+{
+    static const char *const suffix[] = { ".service", ".timer", ".path" };
+    size_t len = strlen(name);
+    for (size_t i = 0; i < sizeof(suffix) / sizeof(suffix[0]); i++) {
+        size_t s = strlen(suffix[i]);
+        if (len > s && strcmp(name + len - s, suffix[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* False when the file cannot be read whole. */
+static bool hg_append_unit(const char *path, char *text, size_t *used)
+{
+    FILE *f = fopen(path, "r");
+    bool whole;
+    if (!f)
+        return errno == ENOENT;
+    *used += fread(text + *used, 1, HG_UNITS_CAP - 2 - *used, f);
+    text[(*used)++] = '\n';
+    whole = fgetc(f) == EOF && !ferror(f);
+    (void)fclose(f);
+    return whole;
+}
+
+/* The user unit files, or false when they cannot be read whole. An absent
+ * directory is an empty answer. */
+static bool hg_units_text(const struct host_gc_request *req, char **text)
+{
+    char dir[HOST_GC_PATH_CAP], file[HOST_GC_PATH_CAP];
+    struct dirent *e;
+    size_t used = 0;
+    bool ok = true;
+    DIR *d;
+    *text = zcl_calloc(1, HG_UNITS_CAP, "host_gc unit text");
+    if (req->unit_dir[0] ? !hg_copy(dir, sizeof(dir), req->unit_dir)
+                         : !zcl_path_join(dir, sizeof(dir), hg_home(req),
+                                          ".config/systemd/user"))
+        ok = false;
+    d = ok && *text ? opendir(dir) : NULL;
+    if (ok && *text && !d)
+        ok = errno == ENOENT;
+    while (d && ok && (e = readdir(d)) != NULL)
+        if (hg_unit_file(e->d_name) &&
+            zcl_path_join(file, sizeof(file), dir, e->d_name))
+            ok = hg_append_unit(file, *text, &used);
+    if (d)
+        (void)closedir(d);
+    return ok && *text;
+}
+
+static bool hg_path_char(char c)
+{
+    return hg_name_char(c) || c == '.' || c == '/';
+}
+
+static bool hg_names_exact(const char *text, const char *path)
+{
+    size_t len = strlen(path);
+    for (const char *p = strstr(text, path); p; p = strstr(p + 1, path))
+        if ((p == text || p[-1] == '-' || !hg_path_char(p[-1])) &&
+            !hg_path_char(p[len]))
+            return true;
+    return false;
+}
+
+/* True when `text` names `path` as a whole path, absolute or relative to the
+ * home directory the way systemd spells it (%h, ~, $HOME). */
+static bool hg_text_names(const char *text, const char *path,
+                          const char *home)
+{
+    static const char *const forms[] = { "%h", "~", "$HOME", "${HOME}" };
+    char alt[HOST_GC_PATH_CAP + 8];
+    if (hg_names_exact(text, path))
+        return true;
+    if (!home[0] || !strcmp(home, path) || !hg_under(home, path))
+        return false;
+    for (size_t i = 0; i < sizeof(forms) / sizeof(forms[0]); i++)
+        if (snprintf(alt, sizeof(alt), "%s%s", forms[i],
+                     path + strlen(home)) < (int)sizeof(alt) &&
+            hg_names_exact(text, alt))
+            return true;
+    return false;
+}
+
+/* A worktree a user unit file names is in use. When the unit files cannot
+ * be read whole, every candidate is: nothing is removed. */
+static void hg_mark_units(const struct host_gc_request *req,
+                          struct hg_scan *scan)
+{
+    char *text = NULL;
+    bool ok = hg_units_text(req, &text);
+    for (size_t i = 0; i < scan->n; i++)
+        if (!ok || hg_text_names(text, scan->cands[i].path, hg_home(req)))
+            scan->cands[i].occupied = true;
+    free(text);
 }
 
 enum hg_verdict {
@@ -526,15 +770,33 @@ enum hg_verdict {
     HG_KEEP_DONOR,
     HG_KEEP_TOO_YOUNG,
     HG_KEEP_NEEDS_REVIEW,
+    HG_ARCHIVE_UNIQUE,
     HG_REAPABLE
 };
+
+/* A clean detached worktree is reapable when its HEAD lives elsewhere, and
+ * when it does not, only with age_days on and idle that long (its HEAD is
+ * then pinned first). Anything dirty is kept and recorded for a human. */
+static enum hg_verdict hg_classify_content(const struct host_gc_request *req,
+                                           struct hg_cand *c, int64_t now)
+{
+    c->dirty = hg_dirty_count(c->path);
+    if (c->dirty != 0 || !c->detached)
+        return HG_KEEP_NEEDS_REVIEW;
+    if (!hg_head_unique(c->path))
+        return HG_REAPABLE;
+    if (req->age_days > 0 &&
+        hg_idle_secs(c->path, now) >= (int64_t)req->age_days * 86400)
+        return HG_ARCHIVE_UNIQUE;
+    return HG_KEEP_NEEDS_REVIEW;
+}
 
 /* The keep rules, in the order host_gc_sweep.h documents, plus the warm
  * donor keep (see hg_mark_donors). Lock and occupancy come first because
  * both outrank the age floor as an explanation; every verdict below
  * REAPABLE is a keep, and a donor is counted as in_use. */
 static enum hg_verdict hg_classify(const struct host_gc_request *req,
-                                   const struct hg_cand *c, int64_t now)
+                                   struct hg_cand *c, int64_t now)
 {
     int64_t floor_s =
         (int64_t)(req->floor_hours > 0 ? req->floor_hours : 0) * 3600;
@@ -546,11 +808,7 @@ static enum hg_verdict hg_classify(const struct host_gc_request *req,
         return HG_KEEP_DONOR;
     if (hg_age_secs(c->path, now) < floor_s)
         return HG_KEEP_TOO_YOUNG;
-    if (!c->detached)
-        return HG_KEEP_NEEDS_REVIEW;
-    if (!hg_worktree_clean(c->path))
-        return HG_KEEP_NEEDS_REVIEW;
-    return HG_REAPABLE;
+    return hg_classify_content(req, c, now);
 }
 
 static void hg_count(struct host_gc_class *cls, enum hg_verdict v)
@@ -561,6 +819,7 @@ static void hg_count(struct host_gc_class *cls, enum hg_verdict v)
     case HG_KEEP_DONOR: cls->in_use++; break;
     case HG_KEEP_TOO_YOUNG: cls->too_young++; break;
     case HG_KEEP_NEEDS_REVIEW: cls->need_review++; break;
+    case HG_ARCHIVE_UNIQUE: cls->unique_archived++; cls->reapable++; break;
     case HG_REAPABLE: cls->reapable++; break;
     }
 }
@@ -647,13 +906,20 @@ static bool hg_finish_removal(const struct host_gc_request *req,
 
 static void hg_act(const struct host_gc_request *req,
                    struct host_gc_report *report, struct host_gc_class *cls,
-                   const struct hg_cand *c)
+                   const struct hg_cand *c, enum hg_verdict v)
 {
     uint64_t bytes = hg_dir_bytes(c->path);
     bool gone;
     cls->bytes_reclaimable += bytes;
     if (!req->apply)
         return;
+    if (v == HG_ARCHIVE_UNIQUE && !hg_pin_head(req, cls->repo, c->path)) {
+        cls->unique_archived--;
+        cls->kept_on_failure++;
+        cls->reapable--;
+        cls->need_review++;
+        return;
+    }
     gone = hg_reap(cls->repo, c->path) && !hg_exists(c->path);
     if (!gone)
         gone = hg_finish_removal(req, report, cls, c->path);
@@ -666,6 +932,24 @@ static void hg_act(const struct host_gc_request *req,
      * never happened. */
     cls->reapable--;
     cls->need_review++;
+}
+
+/* A dirty worktree is never touched; it is listed so a person decides. */
+static void hg_note_review(struct host_gc_report *report,
+                           const struct hg_cand *c, int64_t now)
+{
+    struct host_gc_review *r;
+    int64_t idle = hg_idle_secs(c->path, now);
+    if (report->nreviews >= HOST_GC_MAX_REVIEWS) {
+        report->truncated = true;
+        return;
+    }
+    r = &report->reviews[report->nreviews];
+    if (!hg_copy(r->path, sizeof(r->path), c->path))
+        return;
+    r->idle_days = idle < 0 ? -1 : (int)(idle / 86400);
+    r->dirty_count = c->dirty > 0 ? c->dirty : 0;
+    report->nreviews++;
 }
 
 /* ------------------------------------------------------------- per pool */
@@ -715,8 +999,10 @@ static void hg_settle(const struct host_gc_request *req,
         }
         v = hg_classify(req, c, now);
         hg_count(cls, v);
-        if (v == HG_REAPABLE)
-            hg_act(req, report, cls, c);
+        if (v == HG_KEEP_NEEDS_REVIEW && c->dirty != 0)
+            hg_note_review(report, c, now);
+        if (v >= HG_ARCHIVE_UNIQUE)
+            hg_act(req, report, cls, c, v);
     }
 }
 
@@ -760,6 +1046,7 @@ bool host_gc_run(const struct host_gc_request *req,
     }
     hg_mark_occupied(req, &scan);
     hg_mark_donors(&scan, report->nclasses);
+    hg_mark_units(req, &scan);
     hg_settle(req, report, &scan, now);
     report->truncated = scan.truncated;
     free(scan.cands);
@@ -780,6 +1067,7 @@ bool host_gc_defaults(struct host_gc_request *req)
         return false;
     memset(req, 0, sizeof(*req));
     req->floor_hours = HOST_GC_DEFAULT_FLOOR_HOURS;
+    req->age_days = HOST_GC_DEFAULT_AGE_DAYS;
     if (!home || home[0] != '/' ||
         !hg_copy(req->home, sizeof(req->home), home))
         return false;

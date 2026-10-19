@@ -92,6 +92,9 @@ static bool hgt_make_repo(const char *repo)
         "-c", "user.name=z23-test", "-c", "user.email=z23@example.invalid",
         "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty",
         "-m", "fixture", NULL };
+    static const char *const origin[] = { "update-ref",
+                                          "refs/remotes/origin/main", "HEAD",
+                                          NULL };
     char seed[HGT_PATH];
     char ignore[HGT_PATH];
     if (mkdir(repo, 0700) != 0 || !hgt_git(repo, init))
@@ -101,7 +104,8 @@ static bool hgt_make_repo(const char *repo)
     if (!hgt_write(seed, "fixture\n") ||
         !hgt_write(ignore, "out/\nvendor/\nbuild/\n"))
         return false;
-    return hgt_git(repo, add) && hgt_git(repo, commit);
+    return hgt_git(repo, add) && hgt_git(repo, commit) &&
+           hgt_git(repo, origin);
 }
 
 static bool hgt_add_gen(const char *repo, const char *pool, const char *name,
@@ -317,6 +321,277 @@ static int hgt_handler_tests(const char *pool, const char *inuse,
         PASS();
     }
 
+_test_next:;
+    return failures;
+}
+
+/* ---------------------------------------------- clean-only removal rules
+ *
+ * One repository whose only commit is origin/main and six registered
+ * generations, all back-dated:
+ *
+ *   reach   clean, HEAD is origin/main            -> removed
+ *   uniq    clean, HEAD in no other ref           -> pinned under wt, removed
+ *   dmod    tracked file modified                 -> kept, listed
+ *   duntr   untracked file                        -> kept, listed
+ *   dnest   untracked nested repository           -> kept, listed
+ *   unit    clean and reachable, named by %h unit -> kept in_use
+ */
+
+enum { HGT_OLD_HOURS = 300 };
+
+static bool hgt_out(const char *dir, const char *const *args, char *out,
+                    size_t cap)
+{
+    const char *argv[24];
+    size_t n = 0;
+    argv[n++] = "git";
+    argv[n++] = "-C";
+    argv[n++] = dir;
+    for (size_t i = 0; args[i] && n + 1 < sizeof(argv) / sizeof(argv[0]); i++)
+        argv[n++] = args[i];
+    argv[n] = NULL;
+    out[0] = '\0';
+    return zcl_spawn_capture(argv, out, cap, 60000) == 0;
+}
+
+static void hgt_chomp(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r'))
+        s[--n] = '\0';
+}
+
+static int hgt_count_refs(const char *repo, const char *prefix)
+{
+    const char *args[] = { "for-each-ref", "--format=%(refname)", prefix,
+                           NULL };
+    char out[HGT_OUT];
+    int n = 0;
+    if (!hgt_out(repo, args, out, sizeof(out)))
+        return -1;
+    for (const char *p = out; *p; p++)
+        n += *p == '\n';
+    return n;
+}
+
+struct hgt_arch {
+    char root[HGT_PATH], repo[HGT_PATH], pool[HGT_PATH], units[HGT_PATH];
+    char reach[HGT_PATH], uniq[HGT_PATH], dmod[HGT_PATH], duntr[HGT_PATH];
+    char dnest[HGT_PATH], unit[HGT_PATH], fail[HGT_PATH];
+};
+
+/* Back-date a worktree directory and the index and HEAD of its gitdir. */
+static bool hgt_age(const struct hgt_arch *a, const char *name,
+                    const char *wt)
+{
+    static const char *const files[] = { "index", "HEAD" };
+    char path[HGT_PATH + 64];
+    if (!hgt_backdate(wt, HGT_OLD_HOURS))
+        return false;
+    for (size_t i = 0; i < 2; i++) {
+        (void)snprintf(path, sizeof(path), "%s/.git/worktrees/%s/%s", a->repo,
+                       name, files[i]);
+        if (!hgt_backdate(path, HGT_OLD_HOURS))
+            return false;
+    }
+    return true;
+}
+
+/* A clean generation whose HEAD is one commit no other ref holds. */
+static bool hgt_unique_gen(const struct hgt_arch *a, const char *name,
+                           char *path, size_t cap)
+{
+    const char *commit[] = {
+        "-c", "user.name=z23-test", "-c", "user.email=z23@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty",
+        "-m", name, NULL };
+    return hgt_add_gen(a->repo, a->pool, name, path, cap) &&
+           hgt_git(path, commit) && hgt_age(a, name, path);
+}
+
+static bool hgt_arch_dirty(const struct hgt_arch *a)
+{
+    char file[HGT_PATH + 32], inner[HGT_PATH + 32];
+    static const char *const init[] = { "init", "-q", NULL };
+    (void)snprintf(file, sizeof(file), "%s/seed.txt", a->dmod);
+    if (!hgt_write(file, "changed\n"))
+        return false;
+    (void)snprintf(file, sizeof(file), "%s/new.txt", a->duntr);
+    if (!hgt_write(file, "untracked\n"))
+        return false;
+    (void)snprintf(inner, sizeof(inner), "%s/inner", a->dnest);
+    return mkdir(inner, 0700) == 0 && hgt_git(inner, init);
+}
+
+static bool hgt_arch_gens(struct hgt_arch *a)
+{
+    return hgt_add_gen(a->repo, a->pool, "reach", a->reach, HGT_PATH) &&
+           hgt_add_gen(a->repo, a->pool, "dmod", a->dmod, HGT_PATH) &&
+           hgt_add_gen(a->repo, a->pool, "duntr", a->duntr, HGT_PATH) &&
+           hgt_add_gen(a->repo, a->pool, "dnest", a->dnest, HGT_PATH) &&
+           hgt_add_gen(a->repo, a->pool, "unit", a->unit, HGT_PATH) &&
+           hgt_unique_gen(a, "uniq", a->uniq, HGT_PATH);
+}
+
+static bool hgt_arch_build(struct hgt_arch *a, const char *tmp)
+{
+    char unit[HGT_PATH + 32];
+    (void)snprintf(a->root, sizeof(a->root), "%s/archive", tmp);
+    (void)snprintf(a->repo, sizeof(a->repo), "%s/repo", a->root);
+    (void)snprintf(a->pool, sizeof(a->pool), "%s/pool", a->root);
+    (void)snprintf(a->units, sizeof(a->units), "%s/units", a->root);
+    (void)snprintf(unit, sizeof(unit), "%s/job.service", a->units);
+    if (mkdir(a->root, 0700) != 0 || mkdir(a->pool, 0700) != 0 ||
+        mkdir(a->units, 0700) != 0 || !hgt_make_repo(a->repo) ||
+        !hgt_write(unit, "WorkingDirectory=%h/pool/unit\n"))
+        return false;
+    return hgt_arch_gens(a) && hgt_arch_dirty(a) &&
+           hgt_age(a, "reach", a->reach) &&
+           hgt_age(a, "dmod", a->dmod) && hgt_age(a, "duntr", a->duntr) &&
+           hgt_age(a, "dnest", a->dnest) && hgt_age(a, "unit", a->unit);
+}
+
+static void hgt_arch_request(const struct hgt_arch *a,
+                             struct host_gc_request *req, bool apply)
+{
+    hgt_seed_request(req, a->pool);
+    (void)snprintf(req->home, sizeof(req->home), "%s", a->root);
+    (void)snprintf(req->unit_dir, sizeof(req->unit_dir), "%s", a->units);
+    req->age_days = HOST_GC_DEFAULT_AGE_DAYS;
+    req->apply = apply;
+}
+
+static bool hgt_arch_dirty_kept(const struct hgt_arch *a)
+{
+    return hgt_exists(a->dmod) && hgt_exists(a->duntr) &&
+           hgt_exists(a->dnest) && hgt_exists(a->unit);
+}
+
+static bool hgt_listed(const struct host_gc_report *r, const char *path,
+                       int min_count)
+{
+    for (size_t i = 0; i < r->nreviews; i++)
+        if (!strcmp(r->reviews[i].path, path))
+            return r->reviews[i].dirty_count >= min_count;
+    return false;
+}
+
+static int hgt_arch_dry(const struct hgt_arch *a)
+{
+    struct host_gc_request req;
+    struct host_gc_report report;
+    const struct host_gc_class *cls;
+    int failures = 0;
+
+    TEST("host gc clean-only: a dry run lists dirty work and removes nothing") {
+        hgt_arch_request(a, &req, false);
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL);
+        ASSERT_EQ(cls->registered, 6);
+        ASSERT_EQ(cls->reapable, 2);
+        ASSERT_EQ(cls->unique_archived, 1);
+        ASSERT_EQ(cls->need_review, 3);
+        ASSERT_EQ(cls->in_use, 1);
+        ASSERT_EQ(report.nreviews, (size_t)3);
+        ASSERT(hgt_listed(&report, a->dmod, 1));
+        ASSERT(hgt_listed(&report, a->duntr, 1));
+        ASSERT(hgt_listed(&report, a->dnest, 1));
+        ASSERT(hgt_exists(a->reach) && hgt_exists(a->uniq));
+        ASSERT_EQ(hgt_count_refs(a->repo, "refs/archive"), 0);
+        PASS();
+    }
+
+    TEST("host gc clean-only: age_days 0 keeps a unique HEAD") {
+        hgt_arch_request(a, &req, false);
+        req.age_days = 0;
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL);
+        ASSERT_EQ(cls->reapable, 1);
+        ASSERT_EQ(cls->unique_archived, 0);
+        ASSERT_EQ(cls->need_review, 4);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hgt_arch_apply(const struct hgt_arch *a)
+{
+    struct host_gc_request req;
+    struct host_gc_report report;
+    const struct host_gc_class *cls;
+    char want[HGT_OUT], got[HGT_OUT];
+    const char *head[] = { "rev-parse", "HEAD", NULL };
+    const char *list[] = { "for-each-ref", "--format=%(objectname)",
+                           "refs/archive/wt", NULL };
+    int failures = 0;
+
+    TEST("host gc clean-only: apply removes clean trees, pins the unique HEAD, keeps dirty ones") {
+        ASSERT(hgt_out(a->uniq, head, want, sizeof(want)));
+        hgt_chomp(want);
+        hgt_arch_request(a, &req, true);
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL);
+        ASSERT_EQ(cls->unique_archived, 1);
+        ASSERT_EQ(cls->kept_on_failure, 0);
+        ASSERT(!hgt_exists(a->reach) && !hgt_exists(a->uniq));
+        ASSERT(hgt_arch_dirty_kept(a));
+        ASSERT_EQ(hgt_count_refs(a->repo, "refs/archive/wt"), 1);
+        ASSERT(hgt_out(a->repo, list, got, sizeof(got)));
+        hgt_chomp(got);
+        ASSERT_STR_EQ(got, want);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* The pin cannot be written: the unique worktree must stand. */
+static int hgt_arch_pin_failure(struct hgt_arch *a)
+{
+    struct host_gc_request req;
+    struct host_gc_report report;
+    const struct host_gc_class *cls;
+    char dir[HGT_PATH + 32];
+    int failures = 0;
+
+    TEST("host gc clean-only: a failed pin keeps the unique worktree") {
+        (void)snprintf(dir, sizeof(dir), "%s/.git/refs/archive/wt", a->repo);
+        ASSERT(hgt_unique_gen(a, "fail", a->fail, HGT_PATH));
+        ASSERT(chmod(dir, 0500) == 0);
+        hgt_arch_request(a, &req, true);
+        ASSERT(host_gc_run(&req, &report));
+        (void)chmod(dir, 0700);
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL);
+        ASSERT_EQ(cls->kept_on_failure, 1);
+        ASSERT_EQ(cls->unique_archived, 0);
+        ASSERT(hgt_exists(a->fail));
+        ASSERT_EQ(hgt_count_refs(a->repo, "refs/archive/wt"), 1);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hgt_archive_tests(const char *tmp)
+{
+    struct hgt_arch a;
+    int failures = 0;
+
+    TEST("host gc clean-only: the fixture repository and its generations build") {
+        memset(&a, 0, sizeof(a));
+        ASSERT(hgt_arch_build(&a, tmp));
+        PASS();
+    }
+
+    failures += hgt_arch_dry(&a);
+    failures += hgt_arch_apply(&a);
+    failures += hgt_arch_pin_failure(&a);
 _test_next:;
     return failures;
 }
@@ -604,6 +879,8 @@ int test_host_gc(void)
         ASSERT(hgt_exists(blk));
         PASS();
     }
+
+    failures += hgt_archive_tests(tmp);
 
 _test_next:;
     /* Restore both read-only fixture directories so the recursive cleanup can run. */

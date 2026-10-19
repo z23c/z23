@@ -1021,7 +1021,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `ops host gc` | ready | destructive / dev-mutation / operator · maintenance/moderate | `apply`, `floor_hours`, `roots` | `zcl.host_gc.v1` | `z23 ops host gc --apply=false` | Classify and reclaim dead dev-proof worktree generations |
+| `ops host gc` | ready | destructive / dev-mutation / operator · maintenance/moderate | `apply`, `floor_hours`, `roots`, `age_days` | `zcl.host_gc.v1` | `z23 ops host gc --apply=false` | Classify and reclaim dead dev-proof worktree generations |
 
 #### `ops.mesh.device` — Offline owner device identity and grants
 
