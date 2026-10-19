@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 979 |
+| Registry entries (branches + leaves) | 980 |
 | Top-level roots | 17 |
 | Branches | 212 |
-| Leaves (dispatchable command paths) | 767 |
-| … `ready` (live handler in this build) | 674 |
+| Leaves (dispatchable command paths) | 768 |
+| … `ready` (live handler in this build) | 675 |
 | … `compat` (metadata only, names a fallback) | 63 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 62 |
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 75 | 15 | 60 |
+| `engine/composition/commands/ops.def` | 76 | 15 | 61 |
 | `engine/composition/commands/dev.def` | 128 | 23 | 105 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -941,6 +941,7 @@ represented by its children's sections.
 | `ops debug explain` (aliases: `explain`, `ops.explain`) | ready | read / read / operator · fast/low | **`topic`** | `zcl.ops_explain.v1` | `z23 explain sync` | Explain a subsystem in plain prose |
 | `ops debug meaning` (aliases: `meaning`, `ops.meaning`) | ready | read / read / operator · fast/low | `subsystem`, `name`, `question` | `zcl.ops_meaning.v1` | `z23 meaning --name=pre_handshake_disconnects` | What a telemetry field means, and which report answers a question |
 | `ops debug profile` (aliases: `profile`, `ops.profile`) | ready | read / read / operator · foreground/moderate | **`seconds`**, `top_n` | `zcl.ops_profile.v1` | `z23 profile 3` | Sample thread CPU + stage rates |
+| `ops debug version` (aliases: `version`, `ops.version`) | ready | read / read / public · fast/low | none | `zcl.version.v1` | `z23 version` | Report version, source id and Tor build |
 | `ops debug producer` (aliases: `ops.producer.status`) | ready | read / read / operator · fast/low | **`datadir`** | `zcl.ops_producer_status.v1` | `z23 ops producer status -datadir=/home/you/.zclassic-c23-mint` | Read a producer datadir's fold progress + receipt |
 | `ops debug rom` (aliases: `ops.rom`) | ready | read / read / operator · fast/low | none | `zcl.rom_compile.v1` | `z23 ops rom` | ROM compilation fold progress |
 | `ops debug backtrace` | ready | read / read / operator · fast/low | none | `zcl.ops_debug_backtrace.v1` | `z23 ops debug backtrace` | Dump every thread's backtrace |
@@ -2030,6 +2031,8 @@ Every alias resolves through the same grammar as its canonical path
 | `ops.meaning` | `ops.debug.meaning` |
 | `profile` | `ops.debug.profile` |
 | `ops.profile` | `ops.debug.profile` |
+| `version` | `ops.debug.version` |
+| `ops.version` | `ops.debug.version` |
 | `ops.producer.status` | `ops.debug.producer` |
 | `ops.rom` | `ops.debug.rom` |
 | `ops.slo` | `ops.debug.dash.slo` |

@@ -19,6 +19,7 @@
 #include "controllers/chain_native_handlers.h"
 #include "controllers/rpc_client.h"
 #include "controllers/wallet_native_handlers.h"
+#include "util/clientversion.h"
 #include "util/safe_alloc.h"
 #include "util/boot_status.h"
 #include "util/boot_phase.h"
@@ -3656,6 +3657,49 @@ static int test_fleet_wiki_positionals_and_alias(void)
     return failures;
 }
 
+static int test_version_alias_resolves_to_ops_debug(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("version resolves to ops.debug.version and reports the build identity") {
+        ASSERT(zcl_native_command_is_root("version"));
+        const char *words[] = { "version" };
+        size_t consumed = 0;
+        bool alias = false;
+        char invoked[ZCL_COMMAND_MAX_PATH];
+        const struct zcl_command_spec *s = zcl_command_registry_resolve_words(
+            reg, words, 1, &consumed, &alias, invoked, sizeof(invoked));
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(s->path, "ops.debug.version");
+        ASSERT(alias);
+        ASSERT_EQ(consumed, (size_t)1);
+
+        struct zcl_command_request request;
+        memset(&request, 0, sizeof(request));
+        request.spec = s;
+        struct zcl_command_reply reply;
+        memset(&reply, 0, sizeof(reply));
+        json_init(&reply.data);
+        json_set_object(&reply.data);
+        zcl_native_handle_ops_debug_version(&request, &reply);
+        const struct json_value *version = json_get(&reply.data, "version");
+        const struct json_value *source = json_get(&reply.data, "source_id");
+        const struct json_value *tor = json_get(&reply.data, "tor");
+        ASSERT(version && source && tor);
+        char expect[32];
+        (void)snprintf(expect, sizeof(expect), "%d.%d.%d",
+                       CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR,
+                       CLIENT_VERSION_REVISION);
+        ASSERT_STR_EQ(json_get_str(version), expect);
+        ASSERT_STR_EQ(json_get_str(source), zcl_build_source_id_sha256());
+        ASSERT(strcmp(json_get_str(tor), "full") == 0 ||
+               strcmp(json_get_str(tor), "stub") == 0);
+        json_free(&reply.data);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_card_alias_resolves_to_work(void)
 {
     int failures = 0;
@@ -6611,6 +6655,7 @@ int test_command_registry_catalog(void)
     failures += test_typo_stays_branch();
     failures += test_fleet_wiki_positionals_and_alias();
     failures += test_card_alias_resolves_to_work();
+    failures += test_version_alias_resolves_to_ops_debug();
     failures += test_ops_selftest_registry();
     failures += test_ops_dash_dashboards_ported();
     failures += test_ops_state_requires_subsystem();

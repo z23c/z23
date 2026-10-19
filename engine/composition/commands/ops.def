@@ -217,6 +217,27 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_profile)
 
+/* `z23 version` is the bare alias. It sits under ops.debug (not a new ops
+ * child or root) so the ops menu budget and the twelve-root cap are untouched;
+ * the recognizer in tools/command/native_command.c owns the bare word. */
+ZCL_COMMAND_READY_READ(
+    "ops.debug.version", "ops.debug", "version,ops.version",
+    "Report version, source id and Tor build",
+    "This binary's identity read at call time with no node: the major.minor."
+    "revision version, the authoritative source_id_sha256, and "
+    "tor, which is \"full\" when this build links the real Tor and \"stub\" "
+    "otherwise. No git commit is reported, since the executable does not "
+    "embed one. Reports only; it grants nothing.", 0,
+    "version,build,identity,source,tor,release",
+    "zcl.command.empty_input.v1", "zcl.version.v1", "", "",
+    "z23 version",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_debug_version)
+
 ZCL_COMMAND_READY_READ(
     "ops.debug.producer", "ops.debug", "ops.producer.status",
     "Read a producer datadir's fold progress + receipt",

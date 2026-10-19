@@ -107,6 +107,10 @@ bool zcl_native_command_is_root(const char *word)
          * field ontology is most needed by an operator who does not yet know
          * which report — let alone which prefix — to reach for. */
         "explain", "profile", "meaning",
+        /* `z23 version` is a bare alias of ops.debug.version (engine/composition/
+         * commands/ops.def): the build's version, source id and Tor link, one
+         * word, no node. A child alias, not a root, so the twelve-root cap holds. */
+        "version",
         /* Onboarding roots: `z23 join` is the first command a stranger runs
          * after installing, and `z23 update` the one they reach for later.
          * Both are bare aliases of zcode.node.* (engine/composition/commands/zcode.def)

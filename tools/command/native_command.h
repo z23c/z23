@@ -2078,6 +2078,11 @@ void zcl_native_handle_ops_profile(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.debug.version — `z23 version`: the build's version, source id and Tor link. Node-free and read-only. */
+void zcl_native_handle_ops_debug_version(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.producer.status --datadir= — read a mint/anchor producer's kernel
  * store (consensus.db, or the legacy progress.kv on a pre-flip datadir;
  * stage cursors + session/receipt lifecycle) and mint-progress.log tail
