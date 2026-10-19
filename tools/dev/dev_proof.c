@@ -12364,6 +12364,25 @@ bool zcl_dev_proof_retry(const char *repo_root,
     return proof_retry_platform(repo_root, local_commit, remote_base, out);
 }
 
+bool zcl_dev_proof_failure_path(const char *repo_root, const char *local_commit,
+                                const char *remote_base, char *out,
+                                size_t out_len)
+{
+#if defined(_WIN32)
+    (void)repo_root; (void)local_commit; (void)remote_base; (void)out;
+    (void)out_len;
+    return false;
+#else
+    struct proof_paths paths;
+    if (!out || !out_len ||
+        !proof_paths_fill(repo_root, local_commit, remote_base, &paths) ||
+        access(paths.failure, R_OK) != 0 ||
+        snprintf(out, out_len, "%s", paths.failure) >= (int)out_len)
+        return false;
+    return true;
+#endif
+}
+
 int zcl_dev_proof_queue_run_next(const char *repo_root,
                                  char *why, size_t why_len)
 {

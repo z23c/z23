@@ -2080,13 +2080,17 @@ ZCL_COMMAND_DEV_COMMAND(
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.drive", "dev.land", "",
     "Drive a queued row through proof and publication",
-    "A bounded foreground integrator session: serializes rebase, lint, exact "
-    "proof request, proof execution, signed intent attachment and "
-    "receipt-gated push, and releases the step lock while the proof runs. "
-    "Rerun it to continue a row that stopped queued.", 65536,
+    "A bounded foreground integrator session: rebase, lint, exact proof "
+    "request, proof execution and receipt-gated push, with the step lock "
+    "released while the proof runs. With seq it repeats up to 6 rounds, "
+    "attaching the signed intent a proven pair asks for, and answers "
+    "outcome landed, proof_failed (failed_path), refused (reason) or "
+    "stopped (rounds). A stale producer refuses with the rebuild command: "
+    "make dev-bin, then drive again. The proof reads the public fixture "
+    "locators exported in the caller's environment.", 65536,
     "land,drive,proof,push,integrator",
     "zcl.land_input.v1", "zcl.land.v1", "seq", "",
-    "z23 dev land drive",
+    "z23 dev land drive --seq=3",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,

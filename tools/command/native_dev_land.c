@@ -10516,8 +10516,8 @@ static void dl_drive_reply_reset(struct zcl_command_reply *reply)
  * than the exclusive preparation slot. A PASS is followed immediately by a
  * step that checks the remote base before publication. A lost CAS leaves the
  * same aged row queued for this or any later driver. */
-static void dl_drive(const struct zcl_command_request *req,
-                     struct zcl_command_reply *reply)
+static void dl_drive_session(const struct zcl_command_request *req,
+                              struct zcl_command_reply *reply)
 {
 #if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
     (void)req;
@@ -10555,6 +10555,209 @@ static void dl_drive(const struct zcl_command_request *req,
             "four proof cycles ended with a newer main tip; the aged row remains queued",
             "run dev land drive again from a current authorized checkout");
 #endif
+}
+
+/* ── drive --seq: one row to a terminal outcome ───────────────────────────
+ * A seq-targeted drive repeats bounded sessions, sealing the signed intent
+ * a proven pair asks for between them, until the named row reaches a
+ * terminal state or the round budget ends. The reply says which: `landed`,
+ * `proof_failed` (the pair's .failed record), `refused` (a typed reason) or
+ * `stopped` (rounds spent, row still live). The proof child inherits the
+ * caller's environment, so the public fixture locators the exact proof
+ * reads (ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL, ZCL_TEST_FREEBSD_PORT_FIXTURE_KERNEL,
+ * ZCL_TEST_GELI_FIXTURE_PACKET) are whatever the operator exported. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#define DL_DRIVE_ROUNDS 6
+
+enum dl_drive_kind {
+    DL_DRIVE_CONTINUE,
+    DL_DRIVE_ATTACH,
+    DL_DRIVE_LANDED,
+    DL_DRIVE_PROOF_FAILED,
+    DL_DRIVE_REFUSED
+};
+
+struct dl_drive_verdict {
+    enum dl_drive_kind kind;
+    char detail[4352];
+};
+
+static void dl_attach(const struct zcl_command_request *req,
+                      struct zcl_command_reply *reply, bool publish);
+
+/* The row `seq` names: live in queue.jsonl, or settled in outcomes.jsonl. */
+static bool dl_drive_row(long long seq, struct dl_row *out, char wt[4096])
+{
+    struct dl_dirs d;
+    struct dl_row *rows = NULL;
+    size_t count = 0;
+    char path[4096 + 32];
+    bool found = false;
+    if (!dl_dirs_make(&d) ||
+        snprintf(path, sizeof(path), "%s/queue.jsonl", d.land) >=
+            (int)sizeof(path) ||
+        !dl_load_rows(path, &rows, &count, NULL, 0))
+        return false;
+    for (size_t i = 0; i < count && !found; i++) {
+        if (rows[i].seq != seq)
+            continue;
+        *out = rows[i];
+        found = true;
+    }
+    free(rows);
+    if (!found && !dl_chain_outcome(&d, seq, out, &found))
+        return false;
+    (void)snprintf(wt, 4096, "%s", d.wt);
+    return found;
+}
+
+static void dl_drive_judge_row(const struct dl_row *row, const char *wt,
+                               struct dl_drive_verdict *v)
+{
+    char failed[4096];
+    if (strcmp(row->state, "landed") == 0) {
+        v->kind = DL_DRIVE_LANDED;
+    } else if (strcmp(row->state, "queued") == 0 ||
+               strcmp(row->state, "inflight") == 0) {
+        v->kind = DL_DRIVE_CONTINUE;
+    } else if (strcmp(row->state, "failed") == 0 && dl_sha_ok(row->local) &&
+               dl_sha_ok(row->base) &&
+               zcl_dev_proof_failure_path(wt, row->local, row->base, failed,
+                                          sizeof(failed))) {
+        v->kind = DL_DRIVE_PROOF_FAILED;
+        (void)snprintf(v->detail, sizeof(v->detail), "%s", failed);
+    } else {
+        v->kind = DL_DRIVE_REFUSED;
+        (void)snprintf(v->detail, sizeof(v->detail), "row_%s: %s", row->state,
+                       row->detail[0] ? row->detail : "no detail recorded");
+    }
+}
+
+/* A session that ended in a typed refusal. A stale or unbuildable producer
+ * carries the operator command that clears it. */
+static void dl_drive_judge_reply(const struct zcl_command_reply *reply,
+                                 struct dl_drive_verdict *v)
+{
+    const char *code = reply->error.code;
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED) {
+        v->kind = DL_DRIVE_CONTINUE;
+    } else if (strcmp(code, "PUBLICATION_INTENT_REQUIRED") == 0) {
+        v->kind = DL_DRIVE_ATTACH;
+    } else {
+        v->kind = DL_DRIVE_REFUSED;
+        (void)snprintf(v->detail, sizeof(v->detail), "%s: %s%s", code,
+                       reply->error.evidence,
+                       strncmp(code, "PROOF_PRODUCER_", 15) == 0
+                           ? " (rebuild with make dev-bin, then drive again)"
+                           : "");
+    }
+}
+
+/* One round: a session, then the intent it may ask for, then the row. */
+static void dl_drive_round(const struct zcl_command_request *req,
+                           struct zcl_command_reply *reply, long long seq,
+                           struct dl_drive_verdict *v)
+{
+    struct dl_row row;
+    char wt[4096];
+    dl_drive_session(req, reply);
+    dl_drive_judge_reply(reply, v);
+    if (v->kind == DL_DRIVE_ATTACH) {
+        dl_drive_reply_reset(reply);
+        dl_attach(req, reply, false);
+        dl_drive_judge_reply(reply, v);
+        if (v->kind == DL_DRIVE_ATTACH)
+            v->kind = DL_DRIVE_REFUSED;
+    }
+    if (v->kind != DL_DRIVE_CONTINUE)
+        return;
+    if (!dl_drive_row(seq, &row, wt)) {
+        v->kind = DL_DRIVE_REFUSED;
+        (void)snprintf(v->detail, sizeof(v->detail), "unknown_seq_%lld", seq);
+        return;
+    }
+    dl_drive_judge_row(&row, wt, v);
+}
+
+static void dl_drive_fail(struct zcl_command_reply *reply, long long seq,
+                          const struct dl_drive_verdict *v)
+{
+    char cmd[96];
+    const char *code = "DRIVE_STOPPED", *evidence = cmd;
+    const char *msg = "the round budget ended with the row still live";
+    (void)snprintf(cmd, sizeof(cmd), "z23 dev land drive --seq=%lld", seq);
+    if (v->kind == DL_DRIVE_PROOF_FAILED) {
+        code = "DRIVE_PROOF_FAILED";
+        msg = "the exact proof of this pair failed";
+        evidence = v->detail;
+    } else if (v->kind == DL_DRIVE_REFUSED) {
+        code = "DRIVE_REFUSED";
+        msg = "the drive cannot continue this row";
+        evidence = v->detail;
+    }
+    dl_fail(reply, code, "drive", msg, evidence);
+    reply->error.retryable = v->kind == DL_DRIVE_CONTINUE;
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "%s%s", strstr(v->detail, "PROOF_PRODUCER_")
+                               ? "make dev-bin && " : "",
+                   v->kind == DL_DRIVE_CONTINUE ? cmd : "z23 dev land status");
+}
+
+static void dl_drive_outcome(struct zcl_command_reply *reply, long long seq,
+                             int rounds, const struct dl_drive_verdict *v)
+{
+    static const char *const names[] = { "stopped", "stopped", "landed",
+                                         "proof_failed", "refused" };
+    struct dl_row row;
+    char wt[4096];
+    dl_drive_reply_reset(reply);
+    (void)json_push_kv_str(&reply->data, "outcome", names[v->kind]);
+    (void)json_push_kv_int(&reply->data, "rounds", rounds);
+    if (v->kind == DL_DRIVE_LANDED && dl_drive_row(seq, &row, wt)) {
+        dl_step_reply(reply, &row, "landed");
+        return;
+    }
+    (void)json_push_kv_int(&reply->data, "seq", seq);
+    if (v->kind == DL_DRIVE_PROOF_FAILED)
+        (void)json_push_kv_str(&reply->data, "failed_path", v->detail);
+    if (v->kind == DL_DRIVE_REFUSED)
+        (void)json_push_kv_str(&reply->data, "reason", v->detail);
+    dl_drive_fail(reply, seq, v);
+}
+
+static void dl_drive_seq(const struct zcl_command_request *req,
+                         struct zcl_command_reply *reply)
+{
+    struct dl_drive_verdict v = { .kind = DL_DRIVE_CONTINUE };
+    long long seq = 0;
+    int rounds = 0;
+    if (!dl_seq_in(req, &seq)) {
+        dl_fail(reply, "BAD_INPUT", "drive",
+                "drive --seq names one row by a positive sequence",
+                "input.seq");
+        return;
+    }
+    while (rounds < DL_DRIVE_ROUNDS && v.kind == DL_DRIVE_CONTINUE) {
+        rounds++;
+        dl_drive_reply_reset(reply);
+        dl_drive_round(req, reply, seq, &v);
+    }
+    dl_drive_outcome(reply, seq, rounds, &v);
+}
+#endif
+
+/* A drive that names a row (`--seq`) runs to that row's outcome; without one
+ * it is a single bounded session over the queue head. */
+static void dl_drive(const struct zcl_command_request *req,
+                     struct zcl_command_reply *reply)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    if (json_get(req->input, "seq")) {
+        dl_drive_seq(req, reply);
+        return;
+    }
+#endif
+    dl_drive_session(req, reply);
 }
 
 /* Dedicated self observation: no control helper is reachable from this path. */

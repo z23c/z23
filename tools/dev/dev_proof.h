@@ -288,6 +288,12 @@ bool zcl_dev_proof_retry(const char *repo_root,
                          const char *local_commit,
                          const char *remote_base,
                          struct zcl_dev_proof_status *out);
+/* The settled `.failed` record of this exact pair: true with its path when
+ * one exists and is readable. Evidence only; it grants no receipt. */
+bool zcl_dev_proof_failure_path(const char *repo_root,
+                                const char *local_commit,
+                                const char *remote_base, char *out,
+                                size_t out_len);
 /* Scheduling exclusion shared by foreground and resident edit/commit workers.
  * Returns 1 with an owned descriptor, 0 busy, -1 refusal. Across fork the
  * parent closes its copy without unlocking; the child releases after work. */

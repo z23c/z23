@@ -1600,6 +1600,28 @@ can stop with the row still queued; rerun `dev land drive` to continue it.
 A competing integrator receives `STEP_BUSY` during the short
 publication slot and must inspect status before another attempt.
 
+`z23 dev land drive --seq=N` takes one submitted row to a terminal outcome
+without a wrapper script. Each round is one bounded drive session; when a
+proven pair asks for its signed publication intent, the drive seals it with
+the same checks as `z23 dev land attach --seq=N` and continues. At most six
+rounds run. The reply carries `outcome`, one of:
+
+- `landed`: the row published; `tip_pushed` names the commit.
+- `proof_failed`: the exact proof settled as failed; `failed_path` names the
+  pair's `.failed` record. Error code `DRIVE_PROOF_FAILED`.
+- `refused`: a typed `reason` (the row's own refusal, `unknown_seq_N`, or a
+  step refusal such as `STEP_BUSY`). Error code `DRIVE_REFUSED`. A producer
+  that cannot be rebuilt in the landing worktree adds the operator command:
+  `make dev-bin && z23 dev land drive --seq=N`.
+- `stopped`: six rounds ended with the row still live. Error code
+  `DRIVE_STOPPED`, retryable; `rounds` says how many ran.
+
+The proof child inherits the caller's environment, so the public fixture
+locators that the exact proof reads (`ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL`,
+`ZCL_TEST_FREEBSD_PORT_FIXTURE_KERNEL`, `ZCL_TEST_GELI_FIXTURE_PACKET`) are
+whatever the operator exported. A drive without `--seq` stays a single
+bounded session over the queue head.
+
 Use ordinary scheduler admission unless the job actually needs more than
 24 GiB. Do not wrap a polling driver in an exclusive reservation or add a
 nested CPU/memory scope that strands capacity. Preserve an already-running

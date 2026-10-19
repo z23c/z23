@@ -6553,6 +6553,158 @@ _test_next:;
     return failures;
 }
 
+/* ── drive --seq: a typed outcome for one row ──────────────────────────── */
+
+/* The 40-hex value of a quoted member of the settled outcome row. */
+static bool dlx_row_member(const char *member, char out[41])
+{
+    char land[1200], path[1400], ledger[16384], key[48];
+    size_t len = 0;
+    const char *at;
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", land);
+    (void)snprintf(key, sizeof(key), "\"%s\":\"", member);
+    if (!dlx_slurp(path, ledger, sizeof(ledger) - 1, &len))
+        return false;
+    ledger[len] = '\0';
+    at = strstr(ledger, key);
+    if (!at)
+        return false;
+    at += strlen(key);
+    if (strspn(at, "0123456789abcdef") < 40)
+        return false;
+    memcpy(out, at, 40);
+    out[40] = '\0';
+    return true;
+}
+
+static bool dlx_drive_seq(struct dlx_call *c, int seq)
+{
+    dlx_begin(c, "drive");
+    (void)json_push_kv_int(&c->input, "seq", seq);
+    return dlx_run(c);
+}
+
+static int test_dev_land_drive_seq_lands(void)
+{
+    int failures = 0;
+    TEST("land: drive --seq seals the intent it asks for and lands the row") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], main_tip[64];
+        dlx_isolate("drive_seq_lands");
+        ASSERT(dlx_attach_proven_pair(&rig, "drive_seq_lands", base));
+        ASSERT(dlx_drive_seq(&c, 1) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "outcome"), "landed");
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT_EQ(dlx_int(&c, "rounds"), 2);
+        ASSERT(dlx_origin_main(&rig, main_tip));
+        ASSERT_STR_EQ(main_tip, dlx_str(&c, "tip_pushed"));
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_drive_seq_refusals(void)
+{
+    int failures = 0;
+    TEST("land: drive --seq names a refused row and an unknown sequence") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("drive_seq_refused");
+        ASSERT(dlx_rig_make(&rig, "drive_seq_refused_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        ASSERT(dlx_drive_seq(&c, 1));
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_REFUSED");
+        ASSERT_STR_EQ(dlx_str(&c, "outcome"), "refused");
+        ASSERT(strstr(dlx_str(&c, "reason"), "row_failed") != NULL);
+        dlx_end(&c);
+        ASSERT(dlx_drive_seq(&c, 99));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_REFUSED");
+        ASSERT_STR_EQ(dlx_str(&c, "reason"), "unknown_seq_99");
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_drive_seq_proof_failed(void)
+{
+    int failures = 0;
+    TEST("land: drive --seq on a failed row names the pair's .failed record") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char local[41], base[41], land[1200], dir[1500], marker[1700];
+        FILE *f;
+        dlx_isolate("drive_seq_proof_failed");
+        ASSERT(dlx_rig_make(&rig, "drive_seq_proof_failed_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        ASSERT(dlx_drive_seq(&c, 1));
+        dlx_end(&c);
+        ASSERT(dlx_row_member("local", local) && dlx_row_member("base", base));
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(dir, sizeof(dir), "%s/wt/.cache/zcl-dev-proof", land);
+        ASSERT(dlx_mkdir_p(dir));
+        (void)snprintf(marker, sizeof(marker), "%s/%s-%s.failed", dir, local,
+                       base);
+        f = fopen(marker, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("child_proof_failed\n", f) >= 0);
+        ASSERT(fclose(f) == 0);
+        ASSERT(dlx_drive_seq(&c, 1));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_PROOF_FAILED");
+        ASSERT_STR_EQ(dlx_str(&c, "outcome"), "proof_failed");
+        ASSERT(strstr(dlx_str(&c, "failed_path"), ".failed") != NULL);
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_drive_seq_stops(void)
+{
+    int failures = 0;
+    TEST("land: drive --seq stops after its round budget with the row live") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("drive_seq_stops");
+        ASSERT(dlx_rig_make(&rig, "drive_seq_stops_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        ASSERT(dlx_drive_seq(&c, 1));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_STOPPED");
+        ASSERT_STR_EQ(dlx_str(&c, "outcome"), "stopped");
+        ASSERT_EQ(dlx_int(&c, "rounds"), 6);
+        ASSERT(c.reply.error.retryable);
+        ASSERT_STR_EQ(c.reply.error.next_action,
+                      "z23 dev land drive --seq=1");
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_pending_proof_move(void)
 {
     int failures = 0;
@@ -13866,6 +14018,10 @@ int test_dev_land(void)
     failures += test_dev_land_competing_publish("drive", "step", false);
 
     failures += test_dev_land_bounded_drive();
+    failures += test_dev_land_drive_seq_lands();
+    failures += test_dev_land_drive_seq_refusals();
+    failures += test_dev_land_drive_seq_proof_failed();
+    failures += test_dev_land_drive_seq_stops();
 
     failures += dlx_case_stub_detail();
 
