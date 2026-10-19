@@ -1067,6 +1067,81 @@ static int test_acp_dumper_utf8(void)
     return failures;
 }
 
+/* A failed path resolver must refuse before the proof can start the node.
+ * The alias points at a synthetic datadir directory; no live node
+ * path or database is used. */
+static int test_acp_refold_proof_realpath_failure(void)
+{
+    int failures = 0;
+    printf("[test_agent_copy_prove] refold proof realpath failure refusal\n");
+
+    char work[512], fakebin[600], fake_root[700], protected_dir[760];
+    char home[700], datadir[760], realpath_stub[760], node_stub[760];
+    char call_log[760], node_marker[760], proof_work[760];
+    char command[8192], output[4096], calls[512];
+    test_make_tmpdir(work, sizeof(work), "acp_refold", "realpath");
+    snprintf(fakebin, sizeof(fakebin), "%s/bin", work);
+    snprintf(fake_root, sizeof(fake_root), "%s/fake", work);
+    snprintf(protected_dir, sizeof(protected_dir), "%s/protected-datadir",
+             fake_root);
+    snprintf(home, sizeof(home), "%s/home", work);
+    snprintf(datadir, sizeof(datadir), "%s/datadir-alias", work);
+    snprintf(realpath_stub, sizeof(realpath_stub), "%s/realpath", fakebin);
+    snprintf(node_stub, sizeof(node_stub), "%s/node", fakebin);
+    snprintf(call_log, sizeof(call_log), "%s/realpath.calls", work);
+    snprintf(node_marker, sizeof(node_marker), "%s/node.started", work);
+    snprintf(proof_work, sizeof(proof_work), "%s/proof", work);
+
+    bool setup = platform_directory_create(fakebin, 0700) == 0 &&
+        platform_directory_create(fake_root, 0700) == 0 &&
+        platform_directory_create(protected_dir, 0700) == 0 &&
+        platform_directory_create(home, 0700) == 0 &&
+        symlink(protected_dir, datadir) == 0;
+    ACP_CHECK("isolated protected-looking datadir alias created", setup);
+    if (setup) {
+        ACP_CHECK("write failing realpath stub",
+                  acp_write_file(realpath_stub,
+                    "#!/bin/sh\nprintf 'called\\n' >> \"$ZCL_REALPATH_CALLS\"\nexit 1\n"));
+        ACP_CHECK("write harmless node-launch marker stub",
+                  acp_write_file(node_stub,
+                    "#!/bin/sh\nprintf 'started\\n' > \"$ZCL_REFOLD_NODE_MARKER\"\nexit 0\n"));
+        ACP_CHECK("make resolver and node stubs executable",
+                  chmod(realpath_stub, 0755) == 0 &&
+                  chmod(node_stub, 0755) == 0);
+
+        int command_len = snprintf(command, sizeof(command),
+            "env PATH='%s:/usr/bin:/bin' HOME='%s' ZCL_REAL_HOME='%s' "
+            "ZCL_REALPATH_CALLS='%s' ZCL_REFOLD_NODE_MARKER='%s' "
+            "bash tools/scripts/step1_refold_rate_proof.sh --bin '%s' "
+            "--datadir '%s' --workdir '%s' --budget-secs 1 "
+            "--sample-secs 1 --ready-grace-secs 1 2>&1",
+            fakebin, home, home, call_log, node_marker, node_stub,
+            datadir, proof_work);
+        ACP_CHECK("bounded preflight command assembled",
+                  command_len > 0 && (size_t)command_len < sizeof(command));
+        FILE *pipe = command_len > 0 &&
+            (size_t)command_len < sizeof(command) ? popen(command, "r") : NULL;
+        ACP_CHECK("launch isolated refold preflight", pipe != NULL);
+        if (pipe) {
+            size_t used = fread(output, 1, sizeof(output) - 1, pipe);
+            output[used] = '\0';
+            int rc = pclose(pipe);
+            ACP_CHECK("resolver failure exits nonzero", rc != 0);
+            ACP_CHECK("canonicalization refusal is named",
+                      strstr(output, "cannot canonicalize datadir") != NULL);
+            ACP_CHECK("refusal happens before proof workdir creation",
+                      access(proof_work, F_OK) != 0);
+            ACP_CHECK("node was not launched",
+                      access(node_marker, F_OK) != 0);
+        }
+        ACP_CHECK("failing resolver stub was exercised",
+                  acp_read_file(call_log, calls, sizeof(calls)) &&
+                  strstr(calls, "called") != NULL);
+    }
+    test_rm_rf_recursive(work);
+    return failures;
+}
+
 int test_agent_copy_prove(void)
 {
     int failures = 0;
@@ -1081,6 +1156,7 @@ int test_agent_copy_prove(void)
     failures += test_acp_dumper_safety_invariant();
     failures += test_acp_dumper_complete_file();
     failures += test_acp_dumper_utf8();
+    failures += test_acp_refold_proof_realpath_failure();
     printf("[test_agent_copy_prove] %d failure(s)\n", failures);
     return failures;
 }

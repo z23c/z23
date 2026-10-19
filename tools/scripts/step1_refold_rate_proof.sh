@@ -237,17 +237,22 @@ fi
 [ -x "$BIN" ]     || die "binary not executable: $BIN"
 [ -d "$DATADIR" ] || die "datadir not a directory: $DATADIR"
 
-canon() { realpath -m -- "$1" 2>/dev/null || printf '%s' "$1"; }
-dd_canon="$(canon "$DATADIR")"
+canon() { realpath -m -- "$1" 2>/dev/null; }
+dd_canon="$(canon "$DATADIR")" || \
+    die "cannot canonicalize datadir: $DATADIR"
 dd_base="$(basename "$dd_canon")"
 case "$dd_base" in
     .zclassic|.zclassic-c23)
         die "refusing: datadir final component '$dd_base' is a LIVE/ORACLE datadir name — pass a COPY" ;;
 esac
-for forb in "$(canon "$REAL_HOME/.zclassic-c23")" "$(canon "$REAL_HOME/.zclassic")"; do
-    [ "$dd_canon" = "$forb" ] && \
-        die "refusing: datadir resolves to a LIVE/ORACLE path ($dd_canon)"
-done
+live_canon="$(canon "$REAL_HOME/.zclassic-c23")" || \
+    die "cannot canonicalize live datadir path: $REAL_HOME/.zclassic-c23"
+oracle_canon="$(canon "$REAL_HOME/.zclassic")" || \
+    die "cannot canonicalize oracle datadir path: $REAL_HOME/.zclassic"
+[ "$dd_canon" != "$live_canon" ] || \
+    die "refusing: datadir resolves to a LIVE/ORACLE path ($dd_canon)"
+[ "$dd_canon" != "$oracle_canon" ] || \
+    die "refusing: datadir resolves to a LIVE/ORACLE path ($dd_canon)"
 
 [ "$BUDGET_SECS" -gt 0 ] 2>/dev/null || die "--budget-secs must be a positive integer"
 [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null || die "--sample-secs must be a positive integer"
