@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define FGL_NOW INT64_C(1800000000)
@@ -166,6 +167,135 @@ static int fgl_case_missing(const char *root)
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
         ASSERT(fgl_has(r.evidence, "missing ledger"));
         ASSERT(fgl_has(r.evidence, "missing.jsonl"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void fgl_iso(int64_t t, char *out, size_t cap)
+{
+    time_t tt = (time_t)t;
+    struct tm tm;
+    (void)gmtime_r(&tt, &tm);
+    (void)strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tm);
+}
+
+/* Appends one ledger row; `dimension` may be empty. */
+static void fgl_row(char *buf, size_t cap, int i, const char *state,
+                    int64_t ts, const char *dimension)
+{
+    char iso[32];
+    size_t used = strlen(buf);
+    fgl_iso(ts, iso, sizeof(iso));
+    (void)snprintf(buf + used, cap - used,
+                   "{\"tip\":\"t\",\"note\":\"n%d\",\"state\":\"%s\","
+                   "\"dimension\":\"%s\",\"ts\":\"%s\"}\n",
+                   i, state, dimension, iso);
+}
+
+/* Twenty groups ten minutes apart ending at FGL_NOW - 60; group `bad`
+ * (-1 for none) is a failure carrying `dimension`. */
+static void fgl_groups(char *buf, size_t cap, int count, int bad,
+                       const char *dimension)
+{
+    buf[0] = '\0';
+    for (int i = 0; i < count; i++)
+        fgl_row(buf, cap, i, i == bad ? "failed" : "landed",
+                FGL_NOW - 60 - (int64_t)(count - 1 - i) * 600,
+                i == bad ? dimension : "");
+}
+
+static int fgl_case_stale(const char *root)
+{
+    int failures = 0;
+    char path[600];
+    struct zcl_goals_options o;
+    struct zcl_goal_result r;
+    fgl_options(&o);
+    (void)snprintf(path, sizeof(path), "%s/stale.jsonl", root);
+    o.outcomes = path;
+    TEST("G9: a ledger older than origin/main is unmeasured, never a failure") {
+        ASSERT(fgl_write(path,
+            FGL_ROW("a", "landed", "2027-01-15T05:13:20Z")));
+        o.origin_tip_unix = FGL_NOW;
+        r = zcl_goals_measure(&o, "G9");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "ledger stale since 2027-01-15T05:13:20Z"));
+        ASSERT(fgl_has(r.evidence, "read on the lander host"));
+        ASSERT(fgl_write(path, ""));
+        r = zcl_goals_measure(&o, "G9");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "ledger stale since never"));
+        ASSERT(fgl_write(path,
+            FGL_ROW("a", "landed", "2027-01-15T07:43:20Z")));
+        o.origin_tip_unix = FGL_NOW - 600;
+        r = zcl_goals_measure(&o, "G9");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "1 landed train(s)"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_d7_unmeasured(const char *root)
+{
+    int failures = 0;
+    char path[600], text[16384];
+    struct zcl_goals_options o;
+    struct zcl_goal_result r;
+    fgl_options(&o);
+    (void)snprintf(path, sizeof(path), "%s/d7short.jsonl", root);
+    o.outcomes = path;
+    TEST("D7: fewer than 20 groups, or a stale ledger, is unmeasured") {
+        fgl_groups(text, sizeof(text), 19, -1, "");
+        ASSERT(fgl_write(path, text));
+        o.origin_tip_unix = FGL_NOW - 60;
+        r = zcl_goals_measure(&o, "D7");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "19 landing group(s)"));
+        fgl_groups(text, sizeof(text), 20, -1, "");
+        ASSERT(fgl_write(path, text));
+        o.origin_tip_unix = FGL_NOW + 7200;
+        r = zcl_goals_measure(&o, "D7");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "ledger stale since"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_d7_grade(const char *root)
+{
+    int failures = 0;
+    char path[600], text[16384];
+    struct zcl_goals_options o;
+    struct zcl_goal_result r;
+    fgl_options(&o);
+    (void)snprintf(path, sizeof(path), "%s/d7grade.jsonl", root);
+    o.outcomes = path;
+    TEST("D7: 20 groups grade on unnamed failures and landed spacing") {
+        o.origin_tip_unix = FGL_NOW - 60;
+        fgl_groups(text, sizeof(text), 20, -1, "");
+        ASSERT(fgl_write(path, text));
+        r = zcl_goals_measure(&o, "D7");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "0 of the last 20 groups failed without"));
+        ASSERT(fgl_has(r.evidence, "median spacing of landed groups 600 s"));
+        fgl_groups(text, sizeof(text), 20, 7, "");
+        ASSERT(fgl_write(path, text));
+        r = zcl_goals_measure(&o, "D7");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "1 of the last 20 groups failed without"));
+        fgl_groups(text, sizeof(text), 20, 7, "lint");
+        ASSERT(fgl_write(path, text));
+        r = zcl_goals_measure(&o, "D7");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "0 of the last 20 groups failed without"));
+        fgl_groups(text, sizeof(text), 25, 2, "");
+        ASSERT(fgl_write(path, text));
+        r = zcl_goals_measure(&o, "D7");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "0 of the last 20 groups failed without"));
         PASS();
     } _test_next:;
     return failures;
@@ -616,6 +746,9 @@ int test_fleet_goals(void)
     failures += fgl_case_graders();
     failures += fgl_case_trains(root);
     failures += fgl_case_missing(root);
+    failures += fgl_case_stale(root);
+    failures += fgl_case_d7_unmeasured(root);
+    failures += fgl_case_d7_grade(root);
     failures += fgl_case_files(root);
     failures += fgl_case_claims(root);
     failures += fgl_case_receipt_c3(root);

@@ -19,6 +19,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define GOALS_DAY_S 86400
@@ -331,9 +332,6 @@ static const struct gr_static k_static[] = {
      "card: wire the experiment ledger into fleet objectives"},
     {"D6", false, "delivery-to-verdict time is not recorded",
      "card: stamp delivery and verdict times in the test lane"},
-    {"D7", false, "unnamed failures and group spacing are not derived from "
-                  "the landing ledger",
-     "land through `dev land` so groups are recorded"},
 };
 
 static const struct gr_static *gr_find_static(const char *id)
@@ -586,7 +584,56 @@ static struct zcl_goal_result gr_g8(const struct zcl_goals_options *o)
                    fresh, roster.count, silent, (long long)oldest);
 }
 
-/* ── G9: landed trains in the last 24 h ───────────────────────────────── */
+/* ── landing ledger: G9 trains and D7 groups ──────────────────────────── */
+
+#define GOALS_LEDGER_SLACK_S 3600
+#define GOALS_GROUPS 20
+#define GOALS_SPACING_MAX_S 1200
+
+/* Newest timestamped row of the local ledger, whatever its state. */
+struct gr_ledger {
+    int64_t newest;
+    char newest_ts[64];
+};
+
+static void gr_ledger_note(struct gr_ledger *l, const struct json_value *row)
+{
+    const char *s = json_get_str(json_get(row, "ts"));
+    int64_t ts;
+    if (!zcl_objectives_parse_iso8601(s, &ts) || ts <= l->newest)
+        return;
+    l->newest = ts;
+    (void)snprintf(l->newest_ts, sizeof(l->newest_ts), "%s", s);
+}
+
+/* Commit time of origin/main, which every host holds; 0 when git cannot say. */
+static int64_t gr_origin_tip_time(const struct zcl_goals_options *o,
+                                  const char *repo)
+{
+    char out[64];
+    const char *argv[] = {"git", "-C", repo, "log", "-1", "--format=%ct",
+                          "origin/main", NULL};
+    if (o && o->origin_tip_unix > 0)
+        return o->origin_tip_unix;
+    if (zcl_spawn_capture(argv, out, sizeof(out), 5000) != 0)
+        return 0;
+    return strtoll(out, NULL, 10);
+}
+
+/* The outcomes ledger is written only on the host that lands. A copy whose
+ * newest row predates origin/main by more than the slack is missing evidence
+ * about the landings since, not a measurement of them. */
+static bool gr_ledger_stale(const struct zcl_goals_options *o,
+                            const char *repo,
+                            const struct gr_ledger *l, char *why, size_t cap)
+{
+    int64_t tip = gr_origin_tip_time(o, repo);
+    if (tip <= 0 || tip <= l->newest + GOALS_LEDGER_SLACK_S)
+        return false;
+    (void)snprintf(why, cap, "ledger stale since %s, read on the lander host",
+                   l->newest_ts[0] ? l->newest_ts : "never");
+    return true;
+}
 
 struct gr_trains {
     int64_t since;
@@ -596,6 +643,7 @@ struct gr_trains {
     size_t count;
     char (*keys)[128];
     size_t cap;
+    struct gr_ledger led;
 };
 
 static bool gr_train_seen(const struct gr_trains *t, const char *key)
@@ -620,6 +668,7 @@ static void gr_train_row(const struct json_value *row, void *user)
     const char *note = json_get_str(json_get(row, "note"));
     const char *key = note[0] ? note : json_get_str(json_get(row, "worktree"));
     int64_t ts;
+    gr_ledger_note(&t->led, row);
     if (strcmp(state, "landed") != 0 && strcmp(state, "failed") != 0)
         return;
     if (!zcl_objectives_parse_iso8601(json_get_str(json_get(row, "ts")),
@@ -634,6 +683,7 @@ static void gr_train_row(const struct json_value *row, void *user)
     else if (strcmp(state, "failed") == 0)
         t->failed++;
 }
+
 /* Commits that reached origin/main in the window; -1 when git cannot say. */
 static int64_t gr_origin_commits(const char *repo, int64_t since)
 {
@@ -676,6 +726,8 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
         return gr_unmeasured(next, "%lld landed or failed row(s) in %s have "
                              "no readable timestamp", (long long)t.unreadable,
                              use);
+    if (gr_ledger_stale(o, repo, &t.led, reason, sizeof(reason)))
+        return gr_unmeasured(next, "%s (%s)", reason, use);
     commits = gr_origin_commits(repo, t.since);
     if (commits < 0)
         (void)snprintf(seen, sizeof(seen), "origin/main unreadable");
@@ -687,6 +739,126 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
         "%zu landed train(s) and %lld failed attempt(s) in the outcomes "
         "ledger over 24 h, bar %d trains and 0 failures; %s in the same window",
         t.count, (long long)t.failed, ZCL_GOALS_TRAIN_MIN, seen);
+}
+
+/* ── D7: the most recent landing groups ───────────────────────────────── */
+
+/* A group is one landed train (consecutive landed rows sharing a note) or
+ * one failed attempt. A failure is named when its row carries a dimension. */
+struct gr_group {
+    int64_t ts;
+    char key[128];
+    bool landed;
+    bool named;
+};
+
+struct gr_groups {
+    struct gr_group ring[GOALS_GROUPS];
+    size_t total;
+    int64_t unreadable;
+    struct gr_ledger led;
+};
+
+static void gr_group_row(const struct json_value *row, void *user)
+{
+    struct gr_groups *g = user;
+    const char *state = json_get_str(json_get(row, "state"));
+    const char *note = json_get_str(json_get(row, "note"));
+    const char *key = note[0] ? note : json_get_str(json_get(row, "worktree"));
+    bool landed = strcmp(state, "landed") == 0;
+    struct gr_group *last = g->total ? &g->ring[(g->total - 1) % GOALS_GROUPS]
+                                     : NULL;
+    struct gr_group *cur;
+    int64_t ts;
+    gr_ledger_note(&g->led, row);
+    if (!landed && strcmp(state, "failed") != 0)
+        return;
+    if (!zcl_objectives_parse_iso8601(json_get_str(json_get(row, "ts")),
+                                      &ts)) {
+        g->unreadable++;
+        return;
+    }
+    if (landed && last && last->landed && strcmp(last->key, key) == 0) {
+        last->ts = ts > last->ts ? ts : last->ts;
+        return;
+    }
+    cur = &g->ring[g->total++ % GOALS_GROUPS];
+    cur->ts = ts;
+    cur->landed = landed;
+    cur->named = json_get_str(json_get(row, "dimension"))[0] != '\0';
+    (void)snprintf(cur->key, sizeof(cur->key), "%s", key);
+}
+
+static int gr_cmp_i64(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* Median gap between consecutive landed groups, oldest first; -1 when fewer
+ * than two landed. Also counts the failures without a named cause. */
+static int64_t gr_group_spacing(const struct gr_groups *g, int64_t *unnamed)
+{
+    int64_t gaps[GOALS_GROUPS], prev = 0;
+    size_t n = 0, first = g->total > GOALS_GROUPS ? g->total - GOALS_GROUPS : 0;
+    bool have_prev = false;
+    *unnamed = 0;
+    for (size_t i = first; i < g->total; i++) {
+        const struct gr_group *c = &g->ring[i % GOALS_GROUPS];
+        if (!c->landed) {
+            *unnamed += c->named ? 0 : 1;
+            continue;
+        }
+        if (have_prev)
+            gaps[n++] = c->ts > prev ? c->ts - prev : 0;
+        prev = c->ts;
+        have_prev = true;
+    }
+    if (n == 0)
+        return -1;
+    qsort(gaps, n, sizeof(gaps[0]), gr_cmp_i64);
+    return n % 2 ? gaps[n / 2] : (gaps[n / 2 - 1] + gaps[n / 2]) / 2;
+}
+
+static struct zcl_goal_result gr_d7(const struct zcl_goals_options *o)
+{
+    struct zcl_objectives_options oo;
+    struct gr_groups g;
+    char path[512], reason[256] = "", repo[512];
+    const char *use = NULL;
+    int64_t unnamed, median;
+    const char *next = "land through `dev land` so groups are recorded; "
+                       "the under-backlog clause needs a queue-depth record";
+    if (!gr_repo(o, repo, sizeof(repo)))
+        return gr_unmeasured(next, "%s", GR_NO_CHECKOUT);
+    memset(&oo, 0, sizeof(oo));
+    memset(&g, 0, sizeof(g));
+    oo.outcomes = o ? o->outcomes : NULL;
+    if (!zcl_objectives_outcomes_path(&oo, path, sizeof(path), &use))
+        return gr_unmeasured(next, "state root unavailable");
+    if (!zcl_objectives_ledger_walk(use, gr_group_row, &g, reason,
+                                    sizeof(reason)))
+        return gr_unmeasured(next, "%s", reason);
+    if (g.unreadable > 0)
+        return gr_unmeasured(next, "%lld landed or failed row(s) in %s have "
+                             "no readable timestamp", (long long)g.unreadable,
+                             use);
+    if (gr_ledger_stale(o, repo, &g.led, reason, sizeof(reason)))
+        return gr_unmeasured(next, "%s (%s)", reason, use);
+    if (g.total < GOALS_GROUPS)
+        return gr_unmeasured(next, "%zu landing group(s) recorded in %s, the "
+                             "bar reads %d consecutive groups", g.total, use,
+                             GOALS_GROUPS);
+    median = gr_group_spacing(&g, &unnamed);
+    if (median < 0)
+        return gr_unmeasured(next, "fewer than two landed groups in the last "
+                             "%d groups of %s", GOALS_GROUPS, use);
+    return gr_make(unnamed > 0 ? ZCL_GOAL_FAIL : ZCL_GOAL_PARTIAL, next,
+                   "%lld of the last %d groups failed without a named cause "
+                   "(bar 0); median spacing of landed groups %lld s (bar %d "
+                   "s under backlog); the backlog clause is not measured",
+                   (long long)unnamed, GOALS_GROUPS, (long long)median,
+                   GOALS_SPACING_MAX_S);
 }
 
 /* ── G13: active lane claims ──────────────────────────────────────────── */
@@ -814,7 +986,8 @@ static const struct {
     gr_fn fn;
 } k_producers[] = {
     {"G4", gr_g4},   {"G6", gr_g6},   {"G7", gr_g7},   {"G8", gr_g8},
-    {"G9", gr_g9},   {"G12", gr_g12}, {"G13", gr_g13}, {"D8", gr_d8},
+    {"G9", gr_g9},   {"G12", gr_g12}, {"G13", gr_g13}, {"D7", gr_d7},
+    {"D8", gr_d8},
 };
 
 struct zcl_goal_result zcl_goals_measure(

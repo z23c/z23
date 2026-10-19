@@ -71,6 +71,7 @@ struct zcl_goals_options {
     const struct zcl_goals_host *hosts;
     size_t host_count;
     bool skip_probes;           /* tests: skip the in-process code and wiki probes */
+    int64_t origin_tip_unix;    /* commit time of origin/main; 0 = ask git */
 };
 
 const char *zcl_goal_grade_name(enum zcl_goal_grade grade);
