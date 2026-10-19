@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 999 |
+| Registry entries (branches + leaves) | 1002 |
 | Top-level roots | 17 |
-| Branches | 214 |
-| Leaves (dispatchable command paths) | 785 |
-| … `ready` (live handler in this build) | 682 |
+| Branches | 215 |
+| Leaves (dispatchable command paths) | 787 |
+| … `ready` (live handler in this build) | 684 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 307 |
+| Leaves with `effect=mutate` | 308 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 156 |
 
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 83 | 16 | 67 |
+| `engine/composition/commands/ops.def` | 86 | 17 | 69 |
 | `engine/composition/commands/dev.def` | 139 | 24 | 115 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -1041,6 +1041,13 @@ represented by its children's sections.
 | `ops host gc` | ready | destructive / dev-mutation / operator · maintenance/moderate | `apply`, `floor_hours`, `roots`, `age_days` | `zcl.host_gc.v1` | `z23 ops host gc --apply=false` | Classify and reclaim dead dev-proof worktree generations |
 | `ops host build` | ready | mutate / dev-mutation / operator, stream · background/high | none | `zcl.ops_host_build.blocker.v1` | `z23 ops host build -- make lint-fast` | Run a heavy command through the host build queue |
 | `ops host jobs` | ready | read / read / operator · fast/low | none | `zcl.host_jobs.v1` | `z23 ops host jobs` | List running and queued host build jobs |
+
+#### `ops.host.legacy` — Legacy zclassicd nodes
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `ops host legacy status` (aliases: `ops.legacy.status`) | ready | read / read / operator · fast/low | `instances`, `z23_datadir`, `z23_rpcport`, `z23_height`, `rpc`, `now_unix`, `identity_only`, `binary`, `sha256`, `node_conf` | `zcl.legacy_status.v1` | `z23 ops host legacy status --identity_only=true --binary=<zclassicd> --sha256=<pin>` | Legacy zclassicd oracle and bootstrap node status |
+| `ops host legacy seed` (aliases: `ops.legacy.seed`) | ready | mutate / dev-mutation / operator, plan-commit · maintenance/high | **`source`**, **`target`**, `step`, `plan_id`, `confirm`, `max_gap`, `source_height`, `z23_height`, `margin_mib`, `workers` | `zcl.legacy_seed.v1` | `z23 ops host legacy seed --input='{"source":"<datadir>","target":"<newdatadir>"}'` | Seed a new legacy datadir from a synced one |
 
 #### `ops.host.slo` — Node SLO monitors
 
@@ -2075,6 +2082,8 @@ Every alias resolves through the same grammar as its canonical path
 | `ops.machine.status` | `ops.mesh.identity` |
 | `machine.status` | `ops.mesh.identity` |
 | `fleet.roster` | `ops.mesh.roster` |
+| `ops.legacy.status` | `ops.host.legacy.status` |
+| `ops.legacy.seed` | `ops.host.legacy.seed` |
 | `ops.slo.probe` | `ops.host.slo.probe` |
 | `ops.slo.page` | `ops.host.slo.page` |
 | `ops.slo.judge` | `ops.host.slo.judge` |
