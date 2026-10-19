@@ -272,10 +272,25 @@ build/bin/z23
 | Verb | What it does |
 |---|---|
 | `z23 wiki [topic]` | Walks the docs tree one topic at a time. |
-| `z23 lab run <file.c>` | Compiles one C file and runs it confined; `tests/fixtures/lab/hello.c` is a checked-in example. `z23 lab test` runs a file against a list of cases. |
+| `z23 lab run <file.c>` | Returns a confined C23 run or a stored receipt. `z23 lab test` checks a file against a list of cases. |
 | `z23 card [--level=haiku]` | Lists the owner's public work cards; `z23 card show <id>` shows one. |
 
 The same verbs are found by `z23 discover search "first steps"`.
+
+Run the checked-in example:
+
+```bash
+build/bin/z23 lab run tests/fixtures/lab/hello.c
+```
+
+Read `data.cache.hit` first. When it is `true`, the reply replays a stored
+receipt: `run.ran` and the compile/run timings describe the earlier execution.
+Add `--fresh=true` to execute again. Changing the C23 source bytes changes the
+receipt root. A compile error reports its line and column in
+`data.compile.diagnostics`, with `data.run.ran` set to `false`.
+
+<!-- claim: symbol-present lab_cache_serve tools/command/native_lab_command.c # stored receipt replay -->
+<!-- claim: symbol-present fresh engine/composition/commands/lab.def # explicit fresh execution input -->
 
 ### Your one obvious next action
 
