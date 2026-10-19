@@ -383,7 +383,7 @@ static bool orchestration_env(const char *entry)
     static const char *const names[] = {
         "BUILD_SOURCE_RECORD=", "BUILD_COMPILER_ID=", "BUILD_SYSTEM_ID=",
         "BUILD_EPOCH_KEEP=", "MAKEFLAGS=", "MFLAGS=", "MAKELEVEL=",
-        "ZCL_CHECKOUT_LOCK_HELD=", "ZCL_HOST_JOBS=",
+        "ZCL_CHECKOUT_LOCK_HELD=", "ZCL_HOST_JOBS=", "PWD=",
         /* Per-session and per-job bookkeeping. Each of these differs between
          * two otherwise identical compiles (measured: 17,780 compiles in an
          * hour, 21 hits, because every agent session carried its own ids), and
@@ -961,7 +961,53 @@ static bool env_same_name(const char *a, const char *b)
     return end && strncmp(a, b, (size_t)(end - a) + 1u) == 0;
 }
 
-static bool hash_environment(struct sha3_256_ctx *h)
+/* Environment entries that name only WHERE this process runs or WHERE the
+ * compiler puts scratch files, never WHAT it emits. Measured: devbuild gives
+ * every job a fresh TMPDIR (same tree, two jobs, two MISSes) and PWD differs
+ * per worktree (two worktrees at one commit shared 0 of 4122 keys; pinning
+ * PWD alone made them equal).
+ *  - PWD: the working directory is already keyed, through getcwd() with the
+ *    argv prefix maps applied (recorded_cwd). The raw PWD value is the same
+ *    fact spelled again, and it defeated that normalization. PWD is also
+ *    stripped from the compiler's environment (orchestration_env), because
+ *    GCC records $PWD in preference to getcwd() when both name the same
+ *    directory: the child must see only the directory the key models.
+ *  - TMPDIR, TMP, TEMP: select only the directory of the compiler's own
+ *    temporary files (cc1 output, as input, LTO ltrans). Those files are
+ *    deleted and their names reach a non-save-temps object nowhere. They stay
+ *    in the child environment: a sandbox may have no writable /tmp.
+ * keep_tmp restores TMPDIR, TMP and TEMP to the key for an invocation where a
+ * temp name can reach the artifact: -save-temps, -dumpdir, -dumpbase, LTO,
+ * or a response file whose flags this scan cannot see. -frandom-seed is NOT a
+ * trigger: it pins the only seed a temp name could otherwise reach, and every
+ * TU in this tree passes it (Makefile ZCL_TU_RANDOM_SEED). HOME and every other
+ * entry remain hashed. */
+static bool key_env_ignored(const char *entry, bool keep_tmp)
+{
+    if (child_env_excluded(entry)) return true;
+    if (keep_tmp) return false;
+    static const char *const names[] = { "TMPDIR=", "TMP=", "TEMP=" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (strncmp(entry, names[i], strlen(names[i])) == 0)
+            return true;
+    return false;
+}
+
+/* Can a compiler temp-file name reach this invocation's artifact? */
+static bool tmpdir_may_reach_object(const struct plan *pl)
+{
+    if (pl->rsp_n > 0 || lto_in_effect(pl)) return true;
+    for (int i = 1; i < pl->argc; i++) {
+        const char *a = pl->argv[i];
+        if (strncmp(a, "-save-temps", 11) == 0 ||
+            strncmp(a, "-dumpdir", 8) == 0 ||
+            strncmp(a, "-dumpbase", 9) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool hash_environment(struct sha3_256_ctx *h, bool keep_tmp)
 {
     size_t n = 0;
     for (char **ep = environ; ep && *ep; ep++)
@@ -980,7 +1026,7 @@ static bool hash_environment(struct sha3_256_ctx *h)
             ok = false;
             break;
         }
-        if (child_env_excluded(e))
+        if (key_env_ignored(e, keep_tmp))
             continue;
         hstr(h, e);
     }
@@ -1259,7 +1305,7 @@ static bool apple_tool_selection_key(char *const query[],
     hstr(&h, label); hstr(&h, driver); hstr(&h, digest);
     hstr(&h, developer);
     for (size_t i = 0; query[i]; i++) hstr(&h, query[i]);
-    if (!hash_environment(&h) ||
+    if (!hash_environment(&h, true) ||
         !apple_hash_search_dirs(&h, getenv("PATH"), "clang")) return false;
     sha3_256_finalize(&h, root);
     return true;
@@ -1560,7 +1606,7 @@ static bool hash_toolchain(struct sha3_256_ctx *h, const struct plan *pl,
     /* Compiler drivers can read CPATH, SDKROOT, LANG, and custom selectors.
      * Environment entry order is irrelevant unless a name is duplicated;
      * reject duplicates rather than guessing which value the compiler sees. */
-    return hash_environment(h);
+    return hash_environment(h, tmpdir_may_reach_object(pl));
 }
 
 /* Archives named by -l are real inputs; fold in the ones we can resolve. */

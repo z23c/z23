@@ -147,6 +147,14 @@ keep it honest:
   of every file the compile read and re-checks all of them. `check-zcc-cache`
   builds a fixture seven ways on every `make lint` and fails if a header edit is
   ever served from cache.
+- **Where a compile runs is keyed once, normalized.** The working directory
+  enters the key as `getcwd()` with the argv `-ffile-prefix-map` applied, the
+  directory the compiler will record. The raw `PWD` value is neither keyed nor
+  passed to the compiler, and `TMPDIR`, `TMP` and `TEMP` are not keyed, because
+  they only place the compiler's own scratch files. Hashing them gave every
+  devbuild job and every worktree a private key space. They are keyed again
+  for `-save-temps`, `-dumpdir`, `-dumpbase`, LTO and
+  response-file invocations; `HOME` and all other entries stay hashed.
 - **A compile it cannot key says so.** Silently declining to cache is a
   performance bug nobody can see: one unconsumed `-MT` value made every node
   object skip the cache while the counters looked healthy. Those invocations

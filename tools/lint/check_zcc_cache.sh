@@ -945,6 +945,62 @@ fi
 unkey="$("$ZCC" --zcc-stats | awk '/unkeyable/ {print $2}')"
 [ "${unkey:-0}" = 0 ] || fail "$unkey compile(s) could not be keyed at all"
 
+# 10. THE FIFTH REGRESSION: PWD and TMPDIR were hashed as raw environment
+#     values. devbuild gives every job a fresh TMPDIR and every worktree has
+#     its own PWD, so the same tree missed from one job to the next (fleet hit
+#     rate 5.6%). The working directory is already keyed through the
+#     prefix-map-normalized getcwd, and TMPDIR cannot reach an ordinary object.
+envkey_src='int zcl_envkey_probe(void) { return 7; }'
+mkdir -p "$WORK/envdir.a" "$WORK/envdir.b" "$WORK/envtmp.a" "$WORK/envtmp.b"
+printf '%s\n' "$envkey_src" > "$WORK/envdir.a/env.c"
+printf '%s\n' "$envkey_src" > "$WORK/envdir.b/env.c"
+env_build()
+{
+    # env_build DIR TMP OUT [flags...]: PWD follows the directory, as in a shell.
+    local dir="$1" tmp="$2" out="$3"
+    shift 3
+    (cd "$dir" && PWD="$dir" TMPDIR="$tmp" TMP="$tmp" TEMP="$tmp" \
+        "$ZCC" cc -std=c23 -O1 -g -c env.c -o "$out" "$@") 2>/dev/null
+}
+# (a) prefix map on each directory, different directory and TMPDIR: HIT.
+env_build "$WORK/envdir.a" "$WORK/envtmp.a" "$WORK/env.a.o" \
+    -ffile-prefix-map="$WORK/envdir.a=/zcl" || fail "env key (a): compile failed"
+[ "$(last_disposition)" = MISS ] || fail "env key (a): first compile was not a MISS"
+env_build "$WORK/envdir.b" "$WORK/envtmp.b" "$WORK/env.b.o" \
+    -ffile-prefix-map="$WORK/envdir.b=/zcl" || fail "env key (a): second compile failed"
+[ "$(last_disposition)" = HIT ] ||
+    fail "env key (a): a different PWD/TMPDIR with a mapped cwd missed"
+cmp -s "$WORK/env.a.o" "$WORK/env.b.o" ||
+    fail "env key (a): the hit is not byte-identical to the fresh compile"
+# (b) no prefix map: comp_dir differs, so it must still MISS.
+printf '%s\n' 'int zcl_envkey_nomap(void) { return 8; }' > "$WORK/envdir.a/nomap.c"
+cp "$WORK/envdir.a/nomap.c" "$WORK/envdir.b/nomap.c"
+for d in a b; do
+    (cd "$WORK/envdir.$d" && PWD="$WORK/envdir.$d" TMPDIR="$WORK/envtmp.a" \
+        "$ZCC" cc -std=c23 -O1 -g -c nomap.c -o "$WORK/nomap.$d.o") 2>/dev/null ||
+        fail "env key (b): compile $d failed"
+done
+[ "$(last_disposition)" = MISS ] ||
+    fail "env key (b): two unmapped cwds shared a key though comp_dir differs"
+# (c) -save-temps keeps TMPDIR in the key (or bypasses): a new TMPDIR must not HIT.
+printf '%s\n' 'int zcl_envkey_st(void) { return 9; }' > "$WORK/envdir.a/st.c"
+for t in a b; do
+    (cd "$WORK/envdir.a" && TMPDIR="$WORK/envtmp.$t" \
+        "$ZCC" cc -std=c23 -O1 -save-temps=cwd -c st.c -o "$WORK/st.$t.o") 2>/dev/null ||
+        fail "env key (c): compile $t failed"
+done
+[ "$(last_disposition)" != HIT ] ||
+    fail "env key (c): -save-temps ignored a different TMPDIR"
+# (d) a pinned -frandom-seed (every TU in this tree) must not re-key on TMPDIR.
+printf '%s\n' 'int zcl_envkey_seed(void) { return 10; }' > "$WORK/envdir.a/seed.c"
+for t in a b; do
+    (cd "$WORK/envdir.a" && TMPDIR="$WORK/envtmp.$t" \
+        "$ZCC" cc -std=c23 -O1 -frandom-seed=seed.c -c seed.c -o "$WORK/seed.$t.o") 2>/dev/null ||
+        fail "env key (d): compile $t failed"
+done
+[ "$(last_disposition)" = HIT ] || fail "env key (d): -frandom-seed re-keyed on TMPDIR"
+cmp -s "$WORK/seed.a.o" "$WORK/seed.b.o" || fail "env key (d): bytes differ"
+
 # Same-content requests share one compile; independent keys and audit requests
 # retain their own compiler execution. Barriers follow real compilation so a
 # header edit while a follower waits cannot change the owner's fixture bytes.
