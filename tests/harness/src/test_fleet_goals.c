@@ -68,8 +68,6 @@ static int fgl_case_catalog(void)
             o.outcomes = "/nonexistent/outcomes.jsonl";
             r = zcl_goals_measure(&o, rows[i].id);
             ASSERT(r.evidence[0] && r.next[0]);
-            ASSERT(strcmp(zcl_goal_grade_name(r.grade), "unmeasured") != 0 ||
-                   r.evidence[0]);
         }
         PASS();
     } _test_next:;
@@ -90,7 +88,7 @@ static int fgl_case_graders(void)
         ASSERT(zcl_goals_grade_fresh(3, 3) == ZCL_GOAL_PARTIAL);
         ASSERT(zcl_goals_grade_claims(0) == ZCL_GOAL_FAIL);
         ASSERT(zcl_goals_grade_claims(1) == ZCL_GOAL_PARTIAL);
-        ASSERT(zcl_goals_grade_scripts(0) == ZCL_GOAL_PASS);
+        ASSERT(zcl_goals_grade_scripts(0) == ZCL_GOAL_PARTIAL);
         ASSERT(zcl_goals_grade_scripts(1) == ZCL_GOAL_PARTIAL);
         ASSERT_STR_EQ(zcl_goal_grade_name(ZCL_GOAL_UNMEASURED), "unmeasured");
         PASS();
@@ -139,6 +137,12 @@ static int fgl_case_trains(const char *root)
         r = zcl_goals_measure(&o, "G9");
         ASSERT(r.grade == ZCL_GOAL_FAIL);
         ASSERT(fgl_has(r.evidence, "0 landed train(s)"));
+        ASSERT(fgl_write(fail,
+            "{\"note\":\"a\",\"state\":\"landed\"}\n"));
+        o.outcomes = fail;
+        r = zcl_goals_measure(&o, "G9");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "no readable timestamp"));
         PASS();
     } _test_next:;
     return failures;
@@ -172,22 +176,22 @@ static int fgl_case_files(const char *root)
     (void)snprintf(none, sizeof(none), "%s/none.txt", root);
     (void)snprintf(some, sizeof(some), "%s/some.txt", root);
     (void)snprintf(absent, sizeof(absent), "%s/absent.txt", root);
-    TEST("D8: an empty allowlist passes, entries are counted, a missing file "
+    TEST("D8: an empty allowlist still caps at partial, entries are counted, a missing file "
          "is unmeasured") {
         struct zcl_goal_result r;
         ASSERT(fgl_write(none, "# header\n\n# only comments\n"));
         ASSERT(fgl_write(some, "# header\ntools/a.sh\n\ntools/b.sh\n"));
         o.bash_allowlist = none;
         r = zcl_goals_measure(&o, "D8");
-        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
         o.bash_allowlist = some;
         r = zcl_goals_measure(&o, "D8");
         ASSERT(r.grade == ZCL_GOAL_PARTIAL);
-        ASSERT(fgl_has(r.evidence, "2 bash script(s)"));
+        ASSERT(fgl_has(r.evidence, "2 shell script(s)"));
         o.bash_allowlist = absent;
         r = zcl_goals_measure(&o, "D8");
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
-        ASSERT(fgl_has(r.evidence, "no bash allowlist"));
+        ASSERT(fgl_has(r.evidence, "no shell script allowlist"));
         PASS();
     } _test_next:;
     return failures;
@@ -215,6 +219,10 @@ static int fgl_case_claims(const char *root)
         o.claims = empty;
         r = zcl_goals_measure(&o, "G13");
         ASSERT(r.grade == ZCL_GOAL_FAIL);
+        o.claims = "/nonexistent/claims.jsonl";
+        r = zcl_goals_measure(&o, "G13");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "/nonexistent/claims.jsonl"));
         PASS();
     } _test_next:;
     return failures;
@@ -246,6 +254,17 @@ static int fgl_case_hosts(void)
         ASSERT(fgl_has(r.evidence, "2 admitted host(s)"));
         r = zcl_goals_measure(&o, "G12");
         ASSERT(fgl_has(r.evidence, "1 of 2 admitted host(s) report Darwin"));
+        {
+            static struct zcl_goals_host many[33];
+            for (size_t i = 0; i < 33; i++)
+                (void)snprintf(many[i].name, sizeof(many[i].name), "h%zu", i);
+            o.hosts = many;
+            o.host_count = 33;
+            r = zcl_goals_measure(&o, "G8");
+            ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+            ASSERT(fgl_has(r.evidence, "more than 32"));
+            o.hosts = hosts;
+        }
         o.host_count = 1;
         r = zcl_goals_measure(&o, "G12");
         ASSERT(fgl_has(r.evidence, "none reports Darwin"));
@@ -300,6 +319,61 @@ static int fgl_case_bound(void)
     return failures;
 }
 
+static int fgl_case_handler(const char *root)
+{
+    int failures = 0;
+    char outcomes[600], allow[600], claims[600];
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/h_out.jsonl", root);
+    (void)snprintf(allow, sizeof(allow), "%s/h_allow.txt", root);
+    (void)snprintf(claims, sizeof(claims), "%s/h_claims.jsonl", root);
+    TEST("handler: 29 graded rows, summary equals the row counts, schema set") {
+        struct json_value input;
+        struct zcl_command_request request;
+        struct zcl_command_reply reply;
+        const struct json_value *rows, *summary;
+        int64_t counts[4], total = 0;
+        ASSERT(fgl_write(outcomes, ""));
+        ASSERT(fgl_write(allow, "tools/a.sh\n"));
+        ASSERT(fgl_write(claims, ""));
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "outcomes", outcomes);
+        (void)json_push_kv_str(&input, "bash_allowlist", allow);
+        (void)json_push_kv_str(&input, "claims", claims);
+        memset(&request, 0, sizeof(request));
+        request.input = &input;
+        request.spec =
+            zcl_command_registry_find(zcl_command_catalog(), "fleet.goals", NULL);
+        zcl_command_reply_init(&reply, ZCL_GOALS_SCHEMA);
+        zcl_native_handle_fleet_goals(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "schema")),
+                      ZCL_GOALS_SCHEMA);
+        rows = json_get(&reply.data, "goals");
+        summary = json_get(&reply.data, "summary");
+        ASSERT(rows && rows->type == JSON_ARR && rows->num_children == 29);
+        for (size_t i = 0; i < rows->num_children; i++) {
+            const char *grade =
+                json_get_str(json_get(&rows->children[i], "grade"));
+            ASSERT(grade && (!strcmp(grade, "pass") || !strcmp(grade, "partial") ||
+                             !strcmp(grade, "fail") ||
+                             !strcmp(grade, "unmeasured")));
+            ASSERT(json_get_str(json_get(&rows->children[i], "evidence"))[0]);
+        }
+        zcl_goals_tally(rows, counts);
+        for (int g = 0; g < 4; g++) {
+            ASSERT(json_get_int(json_get(summary,
+                       zcl_goal_grade_name((enum zcl_goal_grade)g))) == counts[g]);
+            total += counts[g];
+        }
+        ASSERT(total == 29);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_goals(void);
 int test_fleet_goals(void)
 {
@@ -315,6 +389,7 @@ int test_fleet_goals(void)
     failures += fgl_case_hosts();
     failures += fgl_case_render();
     failures += fgl_case_bound();
+    failures += fgl_case_handler(root);
     (void)test_rm_rf_recursive(root);
     if (failures == 0)
         printf("test_fleet_goals: all passed\n");

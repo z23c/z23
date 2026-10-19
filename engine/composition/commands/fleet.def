@@ -153,8 +153,11 @@ ZCL_COMMAND_READY_READ(
     "admitted roster and are unmeasured without one. A row whose probe is "
     "missing is unmeasured with the reason, never a guessed grade, and a "
     "row passes only when every numeric clause of its bar was measured and "
-    "met. repo, outcomes, bash_allowlist and claims override the paths a "
-    "probe reads. It contacts no peer and writes nothing.",
+    "met. repo overrides the git worktree G9 and G13 read; outcomes, "
+    "bash_allowlist and claims override the files G9, D8 and G13 read. "
+    "The G7 lookup uses the working directory's code index and may refresh "
+    "it, writing under .codeindex; the leaf writes nothing else. "
+    "It contacts no peer.",
     32768,
     "fleet,goals,scorecard,report,grade,mvp",
     "zcl.fleet_goals_input.v1", "zcl.fleet_goals.v1",

@@ -20,7 +20,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #define GOALS_DAY_S 86400
 #define GOALS_LOOKUP_SAMPLES 5
@@ -78,9 +77,13 @@ enum zcl_goal_grade zcl_goals_grade_claims(int64_t live)
     return live <= 0 ? ZCL_GOAL_FAIL : ZCL_GOAL_PARTIAL;
 }
 
+/* The bar also requires host roles and paths to come only from
+ * configuration, which no probe measures, so an empty allowlist caps at
+ * partial too. */
 enum zcl_goal_grade zcl_goals_grade_scripts(int64_t scripts)
 {
-    return scripts == 0 ? ZCL_GOAL_PASS : ZCL_GOAL_PARTIAL;
+    (void)scripts;
+    return ZCL_GOAL_PARTIAL;
 }
 
 /* ── result helpers ───────────────────────────────────────────────────── */
@@ -149,6 +152,7 @@ static void gr_reason(const struct zcl_command_reply *reply, char *out,
 
 struct gr_roster {
     bool ok;
+    bool truncated;
     char reason[200];
     struct zcl_goals_host hosts[ZCL_GOALS_HOSTS_MAX];
     size_t count;
@@ -169,39 +173,72 @@ static void gr_roster_row(const struct json_value *machine,
     r->count++;
 }
 
-static void gr_roster_load(const struct zcl_goals_options *o,
-                           struct gr_roster *r)
+/* Reads one page of the roster. Returns the next offset, or -1 when the
+ * roster is finished or a page failed (r->reason then names why). */
+static int64_t gr_roster_page(struct gr_roster *r, int64_t offset)
 {
     struct json_value input;
     struct zcl_command_reply reply;
     const struct json_value *rows;
+    int64_t next = -1;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_int(&input, "offset", offset);
+    if (!gr_call("fleet.machines", &input, &reply)) {
+        char code[100];
+        gr_reason(&reply, code, sizeof(code));
+        (void)snprintf(r->reason, sizeof(r->reason),
+                       "no admitted roster: fleet machines failed (%s)", code);
+    } else {
+        rows = json_get(&reply.data, "machines");
+        for (size_t i = 0; rows && i < rows->num_children; i++) {
+            if (r->count == ZCL_GOALS_HOSTS_MAX) {
+                r->truncated = true;
+                break;
+            }
+            gr_roster_row(&rows->children[i], r);
+        }
+        next = json_get_int(json_get(&reply.data, "next_offset"));
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return next;
+}
+
+static void gr_roster_load(const struct zcl_goals_options *o,
+                           struct gr_roster *r)
+{
     memset(r, 0, sizeof(*r));
     if (o && o->hosts_given) {
-        for (size_t i = 0; i < o->host_count && i < ZCL_GOALS_HOSTS_MAX; i++)
-            r->hosts[r->count++] = o->hosts[i];
+        for (size_t i = 0; i < o->host_count; i++) {
+            if (r->count == ZCL_GOALS_HOSTS_MAX)
+                r->truncated = true;
+            else
+                r->hosts[r->count++] = o->hosts[i];
+        }
     } else {
-        json_init(&input);
-        json_set_object(&input);
-        if (!gr_call("fleet.machines", &input, &reply))
-            gr_reason(&reply, r->reason, sizeof(r->reason));
-        else if ((rows = json_get(&reply.data, "machines")) != NULL)
-            for (size_t i = 0; i < rows->num_children &&
-                               r->count < ZCL_GOALS_HOSTS_MAX; i++)
-                gr_roster_row(&rows->children[i], r);
-        zcl_command_reply_free(&reply);
-        json_free(&input);
+        int64_t next = 0;
+        for (int page = 0; next >= 0 && page < GOALS_PAGES_MAX; page++)
+            next = gr_roster_page(r, next);
+        if (next >= 0 && !r->reason[0])
+            r->truncated = true;
     }
-    if (r->count == 0 && !r->reason[0])
+    if (r->truncated)
         (void)snprintf(r->reason, sizeof(r->reason),
-                       "no admitted machines in the roster");
-    r->ok = r->count > 0;
+                       "roster has more than %u admitted machines; the card "
+                       "will not grade a host list it cannot hold",
+                       ZCL_GOALS_HOSTS_MAX);
+    else if (r->count == 0 && !r->reason[0])
+        (void)snprintf(r->reason, sizeof(r->reason),
+                       "no admitted roster: no machines are enrolled");
+    r->ok = r->count > 0 && !r->truncated;
 }
 
 static struct zcl_goal_result gr_no_roster(const struct gr_roster *r)
 {
     return gr_unmeasured("admit machines with `z23 fleet invite` and "
                          "`z23 fleet admit`, then rerun",
-                         "no admitted roster: %s", r->reason);
+                         "%s", r->reason);
 }
 
 /* ── rows whose probe is not in the tree yet ──────────────────────────── */
@@ -464,6 +501,11 @@ static bool gr_host_age(const struct gr_roster *r, size_t host, int64_t now,
             return false;
         if (!more)
             break;
+        if (page == GOALS_PAGES_MAX - 1) {
+            (void)snprintf(why, cap, "history longer than %d pages",
+                           GOALS_PAGES_MAX);
+            return false;
+        }
     }
     if (!a->found) {
         (void)snprintf(why, cap, "no vitals row recorded");
@@ -516,6 +558,7 @@ struct gr_trains {
     int64_t since;
     int64_t until;
     int64_t failed;
+    int64_t unreadable;
     size_t count;
     char (*keys)[128];
     size_t cap;
@@ -543,8 +586,13 @@ static void gr_train_row(const struct json_value *row, void *user)
     const char *note = json_get_str(json_get(row, "note"));
     const char *key = note[0] ? note : json_get_str(json_get(row, "worktree"));
     int64_t ts;
-    if (!zcl_objectives_parse_iso8601(json_get_str(json_get(row, "ts")), &ts))
+    if (strcmp(state, "landed") != 0 && strcmp(state, "failed") != 0)
         return;
+    if (!zcl_objectives_parse_iso8601(json_get_str(json_get(row, "ts")),
+                                      &ts)) {
+        t->unreadable++;
+        return;
+    }
     if (ts < t->since || ts > t->until)
         return;
     if (strcmp(state, "landed") == 0)
@@ -589,6 +637,10 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
     if (!zcl_objectives_ledger_walk(use, gr_train_row, &t, reason,
                                     sizeof(reason)))
         return gr_unmeasured(next, "%s", reason);
+    if (t.unreadable > 0)
+        return gr_unmeasured(next, "%lld landed or failed row(s) in %s have "
+                             "no readable timestamp", (long long)t.unreadable,
+                             use);
     commits = gr_origin_commits(gr_repo(o), t.since);
     if (commits < 0)
         (void)snprintf(seen, sizeof(seen), "origin/main unreadable");
@@ -666,8 +718,9 @@ static struct zcl_goal_result gr_g13(const struct zcl_goals_options *o)
     if (!gr_claims_path(o, path, sizeof(path)))
         return gr_unmeasured(next, "no git common dir to hold the claims "
                              "ledger under %s", gr_repo(o));
-    if (!gr_claims_scan(path, gr_now(o), &live, &unreadable) && access(path, F_OK) == 0)
-        return gr_unmeasured(next, "claims ledger %s is not readable", path);
+    if (!gr_claims_scan(path, gr_now(o), &live, &unreadable))
+        return gr_unmeasured(next, "claims ledger %s is missing or "
+                             "unreadable", path);
     return gr_make(zcl_goals_grade_claims(live), next,
                    "%lld live lane claim(s) in the claims ledger (%lld "
                    "unreadable line(s)); review latency is not measured",
@@ -704,9 +757,10 @@ static struct zcl_goal_result gr_d8(const struct zcl_goals_options *o)
                        gr_repo(o));
     n = gr_count_entries(path);
     if (n < 0)
-        return gr_unmeasured(next, "no bash allowlist at %s", path);
+        return gr_unmeasured(next, "no shell script allowlist at %s", path);
     return gr_make(zcl_goals_grade_scripts(n), next,
-                   "%lld bash script(s) on the check-no-new-bash allowlist",
+                   "%lld shell script(s) on the check-no-new-bash allowlist; the "
+                   "host-configuration clause is not measured",
                    (long long)n);
 }
 

@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/command/native_fleet_goals.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_goals.c", CAP_FS_READ, "reads the landing outcomes ledger, the lane claims ledger and the shell script allowlist with fopen(path, \"r\"); git runs through the shared no-shell spawn seam, which the closure gate does not classify as a process reach of this object")

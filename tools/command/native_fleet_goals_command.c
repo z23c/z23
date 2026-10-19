@@ -23,17 +23,17 @@ static const char *goals_input_str(const struct zcl_command_request *request,
     return text && text[0] ? text : NULL;
 }
 
-static void goals_row_json(const struct zcl_goal_row *row,
+static bool goals_row_json(const struct zcl_goal_row *row,
                            const struct zcl_goal_result *res,
                            struct json_value *out)
 {
     json_set_object(out);
-    (void)json_push_kv_str(out, "id", row->id);
-    (void)json_push_kv_str(out, "title", row->title);
-    (void)json_push_kv_str(out, "grade", zcl_goal_grade_name(res->grade));
-    (void)json_push_kv_str(out, "bar", row->bar);
-    (void)json_push_kv_str(out, "evidence", res->evidence);
-    (void)json_push_kv_str(out, "next", res->next);
+    return json_push_kv_str(out, "id", row->id) &&
+           json_push_kv_str(out, "title", row->title) &&
+           json_push_kv_str(out, "grade", zcl_goal_grade_name(res->grade)) &&
+           json_push_kv_str(out, "bar", row->bar) &&
+           json_push_kv_str(out, "evidence", res->evidence) &&
+           json_push_kv_str(out, "next", res->next);
 }
 
 void zcl_goals_tally(const struct json_value *rows, int64_t counts[4])
@@ -50,25 +50,53 @@ void zcl_goals_tally(const struct json_value *rows, int64_t counts[4])
     }
 }
 
-static void goals_summary_json(const struct json_value *rows,
+static bool goals_summary_json(const struct json_value *rows,
                                struct json_value *out)
 {
     int64_t counts[4];
+    bool ok = true;
     zcl_goals_tally(rows, counts);
     json_set_object(out);
     for (int g = 0; g < 4; g++)
-        (void)json_push_kv_int(out, zcl_goal_grade_name((enum zcl_goal_grade)g),
-                               counts[g]);
+        ok = json_push_kv_int(out, zcl_goal_grade_name((enum zcl_goal_grade)g),
+                              counts[g]) && ok;
+    return ok;
+}
+
+static bool goals_rows(const struct zcl_goals_options *options,
+                       struct json_value *rows)
+{
+    const struct zcl_goal_row *catalog;
+    size_t n = zcl_goals_catalog(&catalog);
+    json_set_array(rows);
+    for (size_t i = 0; i < n; i++) {
+        struct zcl_goal_result res = zcl_goals_measure(options, catalog[i].id);
+        struct json_value row;
+        bool ok;
+        json_init(&row);
+        ok = goals_row_json(&catalog[i], &res, &row) &&
+             json_push_back(rows, &row);
+        json_free(&row);
+        if (!ok)
+            return false;
+    }
+    return true;
+}
+
+static void goals_fail(struct zcl_command_reply *reply, const char *what)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INTERNAL, "GOALS_REPLY_FAILED",
+                           "render", false, false, what, "");
 }
 
 void zcl_native_handle_fleet_goals(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
     struct zcl_goals_options options;
-    const struct zcl_goal_row *catalog;
     struct json_value rows, summary;
     static char text[ZCL_GOALS_TEXT_MAX];
-    size_t n;
+    bool ok;
 
     if (!reply)
         return;
@@ -79,27 +107,20 @@ void zcl_native_handle_fleet_goals(const struct zcl_command_request *request,
     options.bash_allowlist = goals_input_str(request, "bash_allowlist");
     options.claims = goals_input_str(request, "claims");
 
-    n = zcl_goals_catalog(&catalog);
     json_init(&rows);
-    json_set_array(&rows);
-    for (size_t i = 0; i < n; i++) {
-        struct zcl_goal_result res = zcl_goals_measure(&options, catalog[i].id);
-        struct json_value row;
-        json_init(&row);
-        goals_row_json(&catalog[i], &res, &row);
-        (void)json_push_back(&rows, &row);
-        json_free(&row);
-    }
     json_init(&summary);
-    goals_summary_json(&rows, &summary);
+    ok = goals_rows(&options, &rows) && goals_summary_json(&rows, &summary);
     (void)zcl_goals_render_text(&rows, text, sizeof(text));
-
-    (void)json_push_kv_str(&reply->data, "schema", ZCL_GOALS_SCHEMA);
-    (void)json_push_kv(&reply->data, "goals", &rows);
-    (void)json_push_kv(&reply->data, "summary", &summary);
-    (void)json_push_kv_str(&reply->data, "text", text);
+    ok = ok && json_push_kv_str(&reply->data, "schema", ZCL_GOALS_SCHEMA) &&
+         json_push_kv(&reply->data, "goals", &rows) &&
+         json_push_kv(&reply->data, "summary", &summary) &&
+         json_push_kv_str(&reply->data, "text", text);
     json_free(&summary);
     json_free(&rows);
+    if (!ok) {
+        goals_fail(reply, "the report card could not be assembled");
+        return;
+    }
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
@@ -123,8 +144,10 @@ size_t zcl_goals_render_text(const struct json_value *rows, char *out,
                          json_get_str(json_get(row, "evidence")),
                          json_get_str(json_get(row, "next")));
         if (w < 0 || (size_t)w >= cap - at) {
-            at = cap - 1;
-            break;
+            static const char mark[] = "[truncated]\n";
+            at = cap > sizeof(mark) ? cap - sizeof(mark) : 0;
+            (void)snprintf(out + at, cap - at, "%s", mark);
+            return cap - 1;
         }
         at += (size_t)w;
     }

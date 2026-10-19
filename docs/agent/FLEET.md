@@ -228,7 +228,8 @@ admitted host (G8), the lane claims ledger (G13), the shell-script allowlist (D8
 the release update leaf (G6). Host-set goals (G1, G3, G5, G6, G8, G12) take their hosts
 from the admitted roster (`z23 fleet machines`) and are unmeasured without one. The
 first call after a checkout change rebuilds the code index and can take seconds.
-It contacts no peer and writes nothing; it is a report, not a gate.
+The G7 lookup uses the working directory's code index and can refresh it, writing under
+`.codeindex`; the leaf writes nothing else and contacts no peer. It is a report, not a gate.
 
 ### Roles
 
