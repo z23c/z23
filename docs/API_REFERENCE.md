@@ -74,28 +74,28 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 1007 |
+| Registry entries (branches + leaves) | 1011 |
 | Top-level roots | 17 |
 | Branches | 216 |
-| Leaves (dispatchable command paths) | 791 |
-| … `ready` (live handler in this build) | 688 |
+| Leaves (dispatchable command paths) | 795 |
+| … `ready` (live handler in this build) | 692 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 310 |
+| Leaves with `effect=mutate` | 311 |
 | Leaves with `effect=destructive` | 6 |
-| Leaves requiring **owner** authority | 156 |
+| Leaves requiring **owner** authority | 157 |
 
 Per source file:
 
 | `.def` file | Entries | Branches | Leaves |
 |---|---|---|---|
 | `engine/composition/commands/root.def` | 12 | 5 | 7 |
-| `engine/composition/commands/core.def` | 124 | 29 | 95 |
+| `engine/composition/commands/core.def` | 126 | 29 | 97 |
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 91 | 18 | 73 |
+| `engine/composition/commands/ops.def` | 93 | 18 | 75 |
 | `engine/composition/commands/dev.def` | 139 | 24 | 115 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -430,6 +430,8 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `core identity resolve` | ready | read / read / public · fast/low | **`pubkey`**, `name`, `datadir` | `zcl.core_identity_resolve.v1` | `z23 core identity resolve --pubkey=<64hex>` | Resolve one master key by pubkey or ZNAM name |
+| `core identity keygen` | ready | mutate / app-write / **owner** · fast/low | **`seed_file`** | `zcl.core_identity_keygen.v1` | `z23 core identity keygen --input='{"seed_file":"/absolute/path/master.hex"}'` | Mint a new master seed file and print its Ed25519 pubkey |
+| `core identity pubkey` | ready | read / read / public · fast/low | **`seed_file`** | `zcl.core_identity_pubkey.v1` | `z23 core identity pubkey --seed_file=/absolute/path/master.hex` | Print the Ed25519 pubkey of an existing master seed file |
 | `core identity anchor` | ready | mutate / wallet / **owner**, plan-commit · foreground/moderate | **`wallet_scope`**, `pubkey`, `idempotency_key`, `plan_id`, `confirm`, `datadir` | `zcl.core_identity_anchor.v2` | `z23 core identity anchor --input='{"wallet_scope":"dev","pubkey":"<64hex>","idempotency_key":"zid-anchor-1"}'` | Anchor a master key on-chain (spends a fee) |
 | `core identity rotate` | ready | mutate / wallet / **owner**, plan-commit · foreground/moderate | **`wallet_scope`**, `pubkey`, `new_pubkey`, `idempotency_key`, `plan_id`, `confirm`, `datadir` | `zcl.core_identity_anchor.v2` | `z23 core identity rotate --input='{"wallet_scope":"dev","pubkey":"<64hex>","new_pubkey":"<64hex>","idempotency_key":"zid-rotate-1"}'` | Rotate an anchored master key to a successor (spends a fee) |
 | `core identity revoke` | ready | mutate / wallet / **owner**, plan-commit · foreground/moderate | **`wallet_scope`**, `pubkey`, `idempotency_key`, `plan_id`, `confirm`, `datadir` | `zcl.core_identity_anchor.v2` | `z23 core identity revoke --input='{"wallet_scope":"dev","pubkey":"<64hex>","idempotency_key":"zid-revoke-1"}'` | Retire an anchored master key with no successor (spends a fee) |
@@ -1056,6 +1058,8 @@ represented by its children's sections.
 | `ops host slo probe` (aliases: `ops.slo.probe`) | ready | mutate / app-write / operator · maintenance/low | none | `zcl.slo_probe.v1` | `z23 ops host slo probe` | Probe the local nodes from outside and append one ledger row each |
 | `ops host slo page` (aliases: `ops.slo.page`) | ready | mutate / app-write / operator · foreground/low | none | `zcl.slo_page.v1` | `z23 ops host slo page` | Page when the prober ledger shows a stalled or dark node |
 | `ops host slo judge` (aliases: `ops.slo.judge`) | ready | mutate / app-write / operator · fast/low | `instance`, `window_hours`, `gap_budget`, `record` | `zcl.slo_hold.v1` | `z23 ops host slo judge --instance=canonical --window_hours=72 --gap_budget=3 --record=true` | Judge whether an instance held the SLO bar for the trailing window |
+| `ops host slo soak` (aliases: `ops.soak.judge`) | ready | read / read / operator · fast/low | `dir`, `window_hours`, `allow_stale`, `now` | `zcl.soak_judge.v1` | `z23 ops soak judge --window_hours=168` | Judge the 168 h soak evidence ledger (MVP C6) |
+| `ops host slo stopwatch` (aliases: `ops.stopwatch.judge`) | ready | read / read / operator · fast/low | **`history`**, `max_age_secs`, `expect_artifact_sha256`, `slo_ledger`, `now` | `zcl.stopwatch_judge.v1` | `z23 ops stopwatch judge --history=$HOME/.local/state/zclassic23-c3-stopwatch/history.jsonl` | Judge the last row of a stopwatch ledger (MVP C3) |
 
 #### `ops.mesh.device` — Offline owner device identity and grants
 
@@ -2096,6 +2100,8 @@ Every alias resolves through the same grammar as its canonical path
 | `ops.slo.probe` | `ops.host.slo.probe` |
 | `ops.slo.page` | `ops.host.slo.page` |
 | `ops.slo.judge` | `ops.host.slo.judge` |
+| `ops.soak.judge` | `ops.host.slo.soak` |
+| `ops.stopwatch.judge` | `ops.host.slo.stopwatch` |
 | `dev.change.cycle` | `dev.change.apply` |
 | `dev.loop.watch` | `dev.loop.ensure` |
 | `dev.loop.heartbeat` | `dev.loop.status` |
