@@ -95,11 +95,11 @@ void zcl_native_handle_ops_soak_judge(const struct zcl_command_request *request,
     static struct zcl_judge_result res;
     struct zcl_soak_judge_opts opts;
     char path[JUDGE_PATH_MAX], dir_path[JUDGE_PATH_MAX], err[JUDGE_ERR_MAX];
-    const struct json_value *stale = judge_in(request, "allow_stale");
-    const char *dir = judge_str(request, "dir");
     if (!reply)
         return;
     zcl_command_reply_init(reply, ZCL_SOAK_JUDGE_SCHEMA);
+    const struct json_value *stale = judge_in(request, "allow_stale");
+    const char *dir = judge_str(request, "dir");
     if (!zcl_soak_judge_defaults(&opts, path, sizeof(path), err, sizeof(err))) {
         judge_invalid(reply, "a ZCL_SOAK variable is malformed", err);
         return;
@@ -141,12 +141,12 @@ void zcl_native_handle_ops_stopwatch_judge(
     static struct zcl_judge_result res;
     struct zcl_stopwatch_judge_opts opts;
     char slo[JUDGE_PATH_MAX], err[JUDGE_ERR_MAX];
-    const char *history = judge_str(request, "history");
-    const char *sha = judge_str(request, "expect_artifact_sha256");
-    const char *slo_in = judge_str(request, "slo_ledger");
     if (!reply)
         return;
     zcl_command_reply_init(reply, ZCL_STOPWATCH_JUDGE_SCHEMA);
+    const char *history = judge_str(request, "history");
+    const char *sha = judge_str(request, "expect_artifact_sha256");
+    const char *slo_in = judge_str(request, "slo_ledger");
     if (!zcl_stopwatch_judge_defaults(&opts, slo, sizeof(slo), err, sizeof(err))) {
         judge_invalid(reply, "a ZCL_STOPWATCH variable is malformed", err);
         return;
