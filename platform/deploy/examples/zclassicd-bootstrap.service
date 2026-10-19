@@ -1,0 +1,44 @@
+# Example: legacy zclassicd serving BOOTSTRAP peers (-bootstrapserve=auto)
+# from its own datadir (systemd USER unit). Same env file and identity gate
+# as zclassicd-oracle.service. Distinct ports so both run side by side:
+# P2P 8035, RPC 8233 (the oracle holds 8034 and 8232).
+#
+# Seed the datadir from the synced oracle instead of -reindex (a corrupt
+# datadir can SIGSEGV on reindex): see "Seed a legacy node from the parity
+# oracle" in docs/node/LEGACY_LIFECYCLE.md. Start this unit only after the
+# seed finished, so <bootstrap datadir> exists and holds seed-receipt.json.
+#
+# A seeded datadir has no peers.dat and the seed copies no conf, so this unit
+# passes -addnode=127.0.0.1:8033 (the local z23 node P2P port): without a peer
+# source the node sits at the seed height with 0 connections. `ops host
+# legacy status` reports connections and flags no_peers.
+
+[Unit]
+Description=ZClassic legacy zclassicd bootstrap server (pinned)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.zclassic-bootstrap/seed-receipt.json
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/z23/zclassicd.env
+ExecStartPre=%h/.local/bin/z23 ops host legacy status --identity_only=true --binary=${ZCLASSICD_BIN} --sha256=${ZCLASSICD_SHA256}
+ExecStart=${ZCLASSICD_BIN} -datadir=%h/.zclassic-bootstrap -port=8035 -rpcport=8233 -rpcbind=127.0.0.1 -bootstrapserve=auto -txindex=1 -addnode=127.0.0.1:8033 -printtoconsole -showmetrics=0
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+KillSignal=SIGINT
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.zclassic-bootstrap
+UMask=0077
+OOMScoreAdjust=-300
+MemoryHigh=6G
+
+[Install]
+WantedBy=default.target

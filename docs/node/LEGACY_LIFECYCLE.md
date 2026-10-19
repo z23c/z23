@@ -92,6 +92,13 @@ monitoring; do not remove it.
 | `legacy_chain_oracle.c` + `.h` | Treats `zclassicd` as an external chain oracle (hash-at-height, getblockcount) for quorum / drift checks. | `fast_sync`, `boot_services`, `tip_stall_oracle_rebuild`, `snapshot_verify`, `repair_controller_rebuild` |
 | `legacy_header_client.c` + `.h` | Header-fetch client used to pull headers over RPC. | `engine/services/src/header_probe.c` |
 
+### Seed and status (operator tooling)
+
+| File | Role |
+|------|------|
+| `tools/command/legacy_seed.c`, `legacy_seed_walk.c`, `legacy_seed_copy.c` | Two-phase seed of a new legacy datadir from the oracle. Behind `ops host legacy seed`. |
+| `tools/command/legacy_status.c` | Binary identity, port conflicts, catch-up rate and mirror-credential comparison. Behind `ops host legacy status`. |
+
 ### Tests
 
 | File | Covers |
@@ -99,6 +106,7 @@ monitoring; do not remove it.
 | `tests/harness/src/test_block_log_legacy.c` | `block_log_legacy` |
 | `tests/harness/src/test_boot_legacy_blocks.c` | `boot_legacy_blocks` |
 | `tests/harness/src/test_chainstate_legacy_reader.c` | `chainstate_legacy_reader` |
+| `tests/harness/src/test_legacy_seed.c` | `legacy_seed`, `legacy_status` |
 
 Boot-heuristic predicates from `boot_legacy_import.c` are additionally
 exercised by `test_boot_phase.c` and
@@ -107,6 +115,94 @@ observer by `test_rpc.c`, `test_zclassicd_oracle.c`, `test_lag_slo.c`,
 `test_parity_slo.c`, and `test_block_source_policy.c`.
 
 ---
+
+## Seed a legacy node from the parity oracle
+
+Use this when a second legacy `zclassicd` datadir (the bootstrap server, or a
+replacement for a corrupt one) is needed. Never `-reindex` a datadir that
+crashed on reindex: copy the synced oracle's `blocks/` and `chainstate/`
+(`txindex` lives in `blocks/index`) into a NEW datadir. Everything below is
+native; `<oracle datadir>`, `<bootstrap datadir>` and the instance values are
+placeholders.
+
+| Leaf | Reads or writes |
+|------|-----------------|
+| `ops host legacy status` (alias `ops legacy status`) | read only |
+| `ops host legacy seed` (alias `ops legacy seed`) | writes only `<target>.tmp`, then renames it to `<target>` |
+
+Oracle and node must share the credential source. The node's legacy mirror
+reads `rpcuser`/`rpcpassword` from `$HOME/.zclassic/zclassic.conf`; an oracle
+in its own datadir has different ones and the mirror stays silently
+unreachable (`consensus.parity_slo_breach`, `oracle_unreachable`). Point the
+node at the oracle's conf with `ZCL_LEGACY_ORACLE_CONF=<oracle datadir>/zclassic.conf`
+(unset keeps the default). `status` compares the file the node reads (`node_conf` if you pass what the running
+node uses, else this process's `ZCL_LEGACY_ORACLE_CONF`, else the default) with each
+instance's own `<datadir>/zclassic.conf`, and reports `status` reports `mirror_creds` per instance
+(`match`, `mismatch`, `unknown`) and `mirror_creds_mismatch: true` when the
+mirror would not authenticate; credentials are compared by SHA3 digest and
+never printed.
+
+1. Check identities, ports and progress (pass the previous height and unix
+   time as `prev_height`/`prev_unix` to get `blocks_per_min` and
+   `eta_seconds`):
+
+   ```
+   z23 ops host legacy status --input='{"instances":[
+     {"name":"oracle","datadir":"<oracle datadir>","port":8034,"rpcport":8232,
+      "binary":"<zclassicd>","sha256":"<pin>"},
+     {"name":"bootstrap","datadir":"<bootstrap datadir>","port":8035,"rpcport":8233}],
+     "z23_datadir":"<z23 datadir>","z23_rpcport":18232}'
+   ```
+
+2. Plan (runs every refusal; returns `plan_id`). Pass `source_height` and
+   `z23_height` (from step 1) so a source more than `max_gap` (default 2)
+   blocks behind is refused:
+
+   ```
+   z23 ops host legacy seed --input='{"source":"<oracle datadir>","target":"<bootstrap datadir>","source_height":<h>,"z23_height":<tip>}'
+   ```
+
+3. Stage while the oracle keeps running (resumable; copies the immutable
+   `blk*.dat`/`rev*.dat` pairs below the highest-numbered pair into
+   `<bootstrap datadir>.tmp`; rerun after an interruption and files whose size
+   and mtime match are skipped):
+
+   ```
+   z23 ops host legacy seed --input='{"source":"<oracle datadir>","target":"<bootstrap datadir>","step":"stage","confirm":true,"plan_id":"<id>"}'
+   ```
+
+4. Stop the oracle (`systemctl --user stop zclassicd-oracle`), wait for it to
+   exit, then finish. The leaf holds the datadir lock, copies the tail pair,
+   `blocks/index` and `chainstate`, re-copies any staged file that changed,
+   fsyncs, hashes the manifest, writes `seed-receipt.json` and renames
+   atomically. `downtime_ms` is the copy window with the oracle down:
+
+   ```
+   z23 ops host legacy seed --input='{"source":"<oracle datadir>","target":"<bootstrap datadir>","step":"finish","confirm":true,"plan_id":"<id>"}'
+   ```
+
+5. Restart the oracle (`systemctl --user start zclassicd-oracle`), then start
+   `zclassicd-bootstrap` (ports 8035/8233).
+
+   A seeded datadir has no `peers.dat` (the seed copies only `blocks/` and
+   `chainstate/`), so it needs a peer source or it sits at the seed height with
+   0 connections: pass `-addnode=127.0.0.1:8033` (the local z23 node's P2P
+   address; the bootstrap unit does) or a dnsseed. `status` reports
+   `connections` per instance and `no_peers: true` when it has none while
+   behind the z23 tip or not advancing. The `finish` reply repeats this as
+   `peer_source`.
+
+Refusals (stable codes `legacy_seed.<name>`): `target_exists`, `source_running`
+(pid file or a flock/fcntl lock on `.lock`), `source_missing`,
+`source_symlink`, `target_symlink`, `owner_mismatch`, `symlink_in_tree`,
+`special_file`, `gap_exceeded`, `insufficient_space` (source size plus
+`margin_mib`, default 1024), `tmp_mismatch` (a `.tmp` from another source),
+`plan_mismatch` (the plan id binds source, target, `max_gap`, both heights, `workers`, `margin_mib` and the source directory identity: repeat the same inputs at every step), `source_lock_missing` (finish needs `<datadir>/.lock` to prove the source stopped), `copy_failed`. A failed copy leaves no target, only a
+`<target>.tmp` that a rerun resumes or you may delete. `wallet*`, `key*`,
+`*.key`, `*.pem` and `*.wallet` files are never copied, and the datadir root
+is never read. The receipt holds source, target, file count, bytes, the
+SHA3-256 over the sorted `(path, size, sha3)` manifest, both heights and the
+creation time.
 
 ## Self-heal note (not `legacy_`-named, but adjacent)
 

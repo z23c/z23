@@ -1,0 +1,49 @@
+# Example: pinned legacy zclassicd as the consensus-parity ORACLE (systemd
+# USER unit). Install as ~/.config/systemd/user/zclassicd-oracle.service and
+# put the two pins in ~/.config/z23/zclassicd.env:
+#
+#   ZCLASSICD_BIN=/home/<user>/bin/zclassicd
+#   ZCLASSICD_SHA256=<64 hex digits of the pinned v2.1.2-beta6 binary>
+#
+# ExecStartPre checks the binary against that pin through the native leaf,
+# with no RPC and no node needed; any mismatch, missing file or empty pin
+# exits non-zero and the unit does not start (fail closed).
+#
+# Ports: P2P 8034 and RPC 8232 on loopback, -connect to the local z23 node
+# on 8033. The z23 node's legacy mirror must read THIS datadir's rpcuser and
+# rpcpassword: export ZCL_LEGACY_ORACLE_CONF=<oracle datadir>/zclassic.conf
+# for the node, or consensus.parity_slo_breach fires (oracle_unreachable).
+#
+# The datadir <oracle datadir> (default %h/.zclassic-oracle) holds txindex=1
+# state (blocks/index). Never run two zclassicd on one datadir: the
+# datadir lock refuses the second, and `ops host legacy seed` refuses a
+# source whose lock is held.
+
+[Unit]
+Description=ZClassic legacy zclassicd parity oracle (pinned)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/z23/zclassicd.env
+ExecStartPre=%h/.local/bin/z23 ops host legacy status --identity_only=true --binary=${ZCLASSICD_BIN} --sha256=${ZCLASSICD_SHA256}
+ExecStart=${ZCLASSICD_BIN} -datadir=%h/.zclassic-oracle -port=8034 -rpcport=8232 -rpcbind=127.0.0.1 -bind=127.0.0.1 -txindex=1 -connect=127.0.0.1:8033 -printtoconsole -showmetrics=0
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+KillSignal=SIGINT
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.zclassic-oracle
+UMask=0077
+OOMScoreAdjust=-500
+MemoryHigh=6G
+
+[Install]
+WantedBy=default.target

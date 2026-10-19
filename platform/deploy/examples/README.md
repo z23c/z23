@@ -4,6 +4,24 @@ Reference units from the original operator's machine. Unlike the portable
 units in `deploy/` (which use `%h`), these hardcode operator paths or name
 operator-specific peers. Copy and adapt before installing:
 
+- `zclassicd-oracle.service` / `zclassicd-bootstrap.service` + `zclassicd.env.example` — the
+  pinned legacy `zclassicd` pair, brought up with native leaves only.
+
+  | Unit | Datadir | P2P | RPC | Role |
+  |------|---------|-----|-----|------|
+  | `zclassicd-oracle` | `~/.zclassic-oracle` | 8034 | 8232 | parity oracle, txindex=1, `-connect` to the z23 node on 8033 |
+  | `zclassicd-bootstrap` | `~/.zclassic-bootstrap` | 8035 | 8233 | `-bootstrapserve=auto` |
+
+  Both gate `ExecStartPre` on `z23 ops host legacy status --identity_only=true
+  --binary=${ZCLASSICD_BIN} --sha256=${ZCLASSICD_SHA256}`. Seed the bootstrap
+  datadir from the synced oracle (never `-reindex` a corrupt one):
+  `z23 ops host legacy seed --input='{"source":"<oracle datadir>","target":"<bootstrap datadir>"}'`
+  (plan), then `"step":"stage"` (oracle running), stop the oracle, `"step":"finish"`
+  (each with `"confirm":true,"plan_id":"<id>"`), restart the oracle, start the
+  bootstrap unit. `z23 ops host legacy status --input='{"instances":[...]}'`
+  shows identity, running, heights, gap, catch-up rate, ETA, port conflicts and
+  `mirror_creds_mismatch`. Set `ZCL_LEGACY_ORACLE_CONF` for the node so its
+  legacy mirror reads the oracle datadir's credentials.
 - `zclassicd-peer.service` — operator-specific example for a legacy C++
   `zclassicd` dev peer used as a drift/consensus oracle. The live/default
   unit name documented in CLAUDE.md and docs/node/SYNC.md is `zclassicd.service`;
