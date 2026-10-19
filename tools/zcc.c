@@ -485,6 +485,7 @@ struct plan {
     int blob_n;
     char **libdir;    /* -L directories */
     int libdir_n;
+    bool named_lib;
     /* Inputs named INSIDE an @response-file, plus the response file itself.
      * They are file inputs like any other; they simply are not spelled on
      * the command line. Owned strings, because nothing in argv points at
@@ -625,8 +626,10 @@ static bool plan_parse_input(struct plan *pl, const char *a, int i)
         pl->bypass = "explicit language or hidden include not modeled";
         return false;
     }
-    if (a[0] == '-')
+    if (a[0] == '-') {
+        pl->named_lib |= strncmp(a, "-l", 2) == 0 && a[2] != '\0';
         return true;
+    }
     if (has_suffix(a, ".c")) {
         pl->src[pl->src_n++] = i;
         return true;
@@ -712,6 +715,12 @@ static void plan_build(struct plan *pl, int argc, char **argv)
     }
     if (pl->src_n == 0 && pl->blob_n == 0 && pl->rsp_n == 0) {
         pl->bypass = "no file inputs to key on";
+        return;
+    }
+    /* hash_named_libs can resolve named libraries only under explicit -L
+     * directories. Parse all arguments first: a later -L still counts. */
+    if (pl->named_lib && pl->libdir_n == 0) {
+        pl->bypass = "named library has no explicit search directory";
         return;
     }
 

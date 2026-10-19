@@ -176,7 +176,9 @@ Receipt replay and compiled-artifact reuse are separate. Changing stdin,
 arguments or cases requires a new execution receipt and currently invokes the
 compiler again. The lab's compile-and-link command always includes `-lm`
 without an explicit library directory; zcc cannot account for that library's
-inputs and treats the build as unkeyable. Its working directory and `TMPDIR`
+inputs and bypasses caching before compiler probes or preprocessing. These
+invocations count as `bypass`, rather than `unkeyable`, in zcc statistics.
+Its working directory and `TMPDIR`
 also depend on the execution root. A `cache.hit` receipt therefore does not
 demonstrate compiler-cache reuse. One `lab test` request compiles once for all
 its cases.

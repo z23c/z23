@@ -697,6 +697,67 @@ HDR
 [ "$("$WORK/search")" = 2 ] ||
     fail "new earlier header did not change executed behavior"
 
+# A named library without explicit search directories cannot enter this
+# cache. Reject that shape before compiler queries or preprocessing, while
+# preserving the original compiler's output and exit status.
+cat > "$WORK/named.c" <<'SRC'
+#include <math.h>
+#include <stdio.h>
+int main(void)
+{
+    volatile double value = 81.0;
+    printf("%.0f\n", sqrt(value));
+    return 7;
+}
+SRC
+"$ZCC" cc -std=c23 -O1 "$WORK/named.c" -lm -o "$WORK/named" \
+    2>"$WORK/named.err" || fail "named-library bypass compile failed"
+[ "$(last_disposition)" = BYPASS ] || fail "named library without -L was not bypassed"
+named_status=0
+"$WORK/named" >"$WORK/named.out" || named_status=$?
+[ "$named_status" = 7 ] || fail "named-library program exit status changed"
+[ "$(cat "$WORK/named.out")" = 9 ] || fail "named-library program output changed"
+cat > "$WORK/named-error.c" <<'SRC'
+#error ZCC_NAMED_LIBRARY_DIAGNOSTIC
+SRC
+named_direct_status=0
+cc -std=c23 "$WORK/named-error.c" -lm -o "$WORK/named-error" \
+    >"$WORK/named-direct.out" 2>"$WORK/named-direct.err" || named_direct_status=$?
+named_cached_status=0
+"$ZCC" cc -std=c23 "$WORK/named-error.c" -lm -o "$WORK/named-error" \
+    >"$WORK/named-cached.out" 2>"$WORK/named-cached.err" || named_cached_status=$?
+[ "$named_direct_status" != 0 ] || fail "named-library error fixture unexpectedly compiled"
+[ "$named_cached_status" = "$named_direct_status" ] || fail "named-library compiler status changed"
+cmp -s "$WORK/named-direct.out" "$WORK/named-cached.out" || fail "named-library compiler stdout changed"
+cmp -s "$WORK/named-direct.err" "$WORK/named-cached.err" || fail "named-library compiler diagnostics changed"
+[ "$(last_disposition)" = BYPASS ] || fail "named-library error was not bypassed"
+
+# A -L appearing after -l, separated or joined, still permits archive reuse.
+cat > "$WORK/named-lib.c" <<'SRC'
+int named_value(void) { return 23; }
+SRC
+cat > "$WORK/named-main.c" <<'SRC'
+#include <stdio.h>
+int named_value(void);
+int main(void) { printf("%d\n", named_value()); return 0; }
+SRC
+cc -std=c23 -c "$WORK/named-lib.c" -o "$WORK/named-lib.o" || fail "named archive fixture compile failed"
+ar rcs "$WORK/libzccnamed.a" "$WORK/named-lib.o" || fail "named archive fixture creation failed"
+for named_style in separated joined; do
+    if [ "$named_style" = separated ]; then
+        named_search=(-L "$WORK")
+    else
+        named_search=("-L$WORK")
+    fi
+    for named_expected in MISS HIT; do
+        "$ZCC" cc -std=c23 -O1 "$WORK/named-main.c" -lzccnamed \
+            "${named_search[@]}" -o "$WORK/named-archive" 2>"$WORK/named-archive.err" ||
+            fail "later $named_style -L compile failed"
+        [ "$(last_disposition)" = "$named_expected" ] || fail "later $named_style -L did not retain $named_expected"
+        [ "$("$WORK/named-archive")" = 23 ] || fail "later $named_style -L produced wrong behavior"
+    done
+done
+
 # -x can make a non-.c file a C source. It must bypass both levels: the
 # ordinary content key treats that suffix as a raw blob and would miss its
 # include closure as well.
