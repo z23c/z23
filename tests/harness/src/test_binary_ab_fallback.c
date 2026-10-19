@@ -274,6 +274,23 @@ static bool ab_run_nodectl(const char *slots, const char *threshold,
 /* `zcl-nodectl legacy-unit-check` refuses while the pre-rename unit is
  * active or enabled; `zcl-nodectl stop` addresses z23-node. A stub
  * systemctl on PATH reports FAKE_ACTIVE / FAKE_ENABLED and logs argv. */
+/* Child environment for the stub-systemctl runs: the stub first on PATH, a
+ * throwaway HOME, a one-second stop budget and an unused RPC port, so a
+ * stop that stays active ends quickly and can never reach a real node. */
+static bool ab_unit_child_env(const char *dir, const char *active,
+                              const char *enabled)
+{
+    char path[PATH_MAX + 32], log[PATH_MAX + 16];
+    snprintf(path, sizeof(path), "%s:/usr/bin:/bin", dir);
+    snprintf(log, sizeof(log), "%s/calls.log", dir);
+    return setenv("PATH", path, 1) == 0 && setenv("HOME", dir, 1) == 0 &&
+           setenv("FAKE_ACTIVE", active, 1) == 0 &&
+           setenv("FAKE_ENABLED", enabled, 1) == 0 &&
+           setenv("FAKE_LOG", log, 1) == 0 &&
+           setenv("ZCL_NODECTL_STOP_TIMEOUT", "1", 1) == 0 &&
+           setenv("C23_RPC_PORT", "1", 1) == 0;
+}
+
 static bool ab_run_nodectl_unit(const char *dir, const char *active,
                                 const char *enabled, const char *sub,
                                 char *output, size_t output_size,
@@ -289,18 +306,12 @@ static bool ab_run_nodectl_unit(const char *dir, const char *active,
         return false;
     }
     if (child == 0) {
-        char path[PATH_MAX + 32], log[PATH_MAX + 16];
-        snprintf(path, sizeof(path), "%s:/usr/bin:/bin", dir);
-        snprintf(log, sizeof(log), "%s/calls.log", dir);
         close(capture[0]);
         if (dup2(capture[1], STDOUT_FILENO) < 0 ||
             dup2(capture[1], STDERR_FILENO) < 0)
             _exit(120);
         close(capture[1]);
-        if (setenv("PATH", path, 1) != 0 || setenv("HOME", dir, 1) != 0 ||
-            setenv("FAKE_ACTIVE", active, 1) != 0 ||
-            setenv("FAKE_ENABLED", enabled, 1) != 0 ||
-            setenv("FAKE_LOG", log, 1) != 0)
+        if (!ab_unit_child_env(dir, active, enabled))
             _exit(121);
         execl("build/bin/zcl-nodectl", "zcl-nodectl", sub, (char *)NULL);
         _exit(124);
@@ -342,6 +353,28 @@ static int ab_unit_refusal_cases(const char *dir)
     return failures;
 }
 
+/* A query that cannot run, or answers with an unknown word, is not "clear". */
+static int ab_unit_failclosed_cases(const char *dir)
+{
+    int failures = 0;
+    char out[2048];
+    int st = -1;
+    AB_CHECK("legacy check refuses when systemctl cannot reach the user bus",
+             ab_run_nodectl_unit(dir, "__FAIL__", "disabled",
+                                 "legacy-unit-check", out, sizeof(out), &st) &&
+             st == 4 && strstr(out, "could not determine") &&
+             strstr(out, "systemctl --user is-active zclassic23.service"));
+    AB_CHECK("legacy check refuses an unrecognised state word",
+             ab_run_nodectl_unit(dir, "__WEIRD__", "disabled",
+                                 "legacy-unit-check", out, sizeof(out), &st) &&
+             st == 4 && strstr(out, "could not determine"));
+    AB_CHECK("stop exits 1 while z23-node stays active",
+             ab_run_nodectl_unit(dir, "active", "disabled", "stop",
+                                 out, sizeof(out), &st) &&
+             st == 1 && strstr(out, "z23-node is still active after stop"));
+    return failures;
+}
+
 static int ab_nodectl_unit_contract(void)
 {
     int failures = 0;
@@ -357,6 +390,8 @@ static int ab_nodectl_unit_contract(void)
     static const char script[] =
         "#!/bin/sh\n"
         "echo \"$*\" >> \"$FAKE_LOG\"\n"
+        "[ \"$FAKE_ACTIVE\" = __FAIL__ ] && { echo 'Failed to connect to bus: No medium found' >&2; exit 1; }\n"
+        "[ \"$FAKE_ACTIVE\" = __WEIRD__ ] && { echo 'unexpected'; exit 0; }\n"
         "case \"$2\" in\n"
         "  is-active) echo \"$FAKE_ACTIVE\"; [ \"$FAKE_ACTIVE\" = active ] ;;\n"
         "  is-enabled) echo \"$FAKE_ENABLED\"; [ \"$FAKE_ENABLED\" = enabled ] ;;\n"
@@ -369,6 +404,7 @@ static int ab_nodectl_unit_contract(void)
              ab_run_nodectl_unit(dir, "inactive", "disabled",
                                  "legacy-unit-check", out, sizeof(out), &st) &&
              st == 0 && out[0] == '\0');
+    failures += ab_unit_failclosed_cases(dir);
     unlink(logp);
     AB_CHECK("stop addresses z23-node and never the legacy unit",
              ab_run_nodectl_unit(dir, "inactive", "disabled", "stop",

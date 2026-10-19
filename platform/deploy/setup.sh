@@ -14,11 +14,19 @@ echo "Setting up Z23 for user: $TARGET_USER"
 # Refuse to enable z23-node while the pre-rename unit is active or enabled:
 # both would bind the same datadir and ports. The migration is a separate step.
 legacy_state=""
+legacy_unknown=""
+legacy_uid="$(id -u "$TARGET_USER")"
 for verb in is-active is-enabled; do
-    st="$(su - "$TARGET_USER" -c "systemctl --user $verb zclassic23.service" 2>/dev/null || true)"
+    st="$(su - "$TARGET_USER" -c "XDG_RUNTIME_DIR=/run/user/$legacy_uid systemctl --user $verb zclassic23.service" 2>&1 || true)"
+    st="$(printf '%s\n' "$st" | head -n 1)"
+    case "$st" in
+        *"Failed to get unit file state"*"No such file"*) st=not-found ;;
+    esac
     case "$verb:$st" in
-        is-active:active|is-active:activating|is-active:reloading|is-enabled:enabled*|is-enabled:linked*)
+        is-active:active|is-active:activating|is-active:reloading|is-active:deactivating|is-enabled:enabled|is-enabled:enabled-runtime|is-enabled:linked|is-enabled:linked-runtime)
             legacy_state="$legacy_state $st" ;;
+        is-active:inactive|is-active:failed|is-active:unknown|is-active:not-found|is-enabled:disabled|is-enabled:static|is-enabled:indirect|is-enabled:masked|is-enabled:masked-runtime|is-enabled:generated|is-enabled:transient|is-enabled:alias|is-enabled:not-found) ;;
+        *) legacy_unknown="$legacy_unknown $verb" ;;
     esac
 done
 if [ -n "$legacy_state" ]; then
@@ -30,6 +38,16 @@ if [ -n "$legacy_state" ]; then
         echo "Procedure: docs/node/GETTING_STARTED.md#migrating-from-the-pre-rename-zclassic23service-unit"
     } >&2
     exit 3
+fi
+if [ -n "$legacy_unknown" ]; then
+    {
+        echo "REFUSE: could not determine whether zclassic23.service is active or enabled for $TARGET_USER (checks that did not run:$legacy_unknown)."
+        echo "Nothing was changed. As $TARGET_USER, in a session with a user bus (over ssh: export XDG_RUNTIME_DIR=/run/user/\$(id -u)), run:"
+        echo "  systemctl --user is-active zclassic23.service"
+        echo "  systemctl --user is-enabled zclassic23.service"
+        echo "then rerun this script."
+    } >&2
+    exit 4
 fi
 
 # Enable linger (service survives logout) — may already be enabled

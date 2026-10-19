@@ -1683,6 +1683,10 @@ Z23_FLAG("ZCL_NO_BUNDLE_FETCH", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_bundle_fetch.c:auto")
 Z23_FLAG("ZCL_NODE_BIN", "env_build", "build/bin/zclassic23", "-",
           "undocumented; first use tools/dev/arena_acceptance.sh:auto")
+Z23_FLAG("ZCL_NODECTL_BIN", "env_build", "build/bin/zcl-nodectl", "-",
+          "first use platform/deploy/z23-cutover.sh:auto; zcl-nodectl used for the legacy-unit-check preflight")
+Z23_FLAG("ZCL_NODECTL_STOP_TIMEOUT", "env_build", "30", "-",
+          "first use tools/zcl-nodectl.c:auto; seconds zcl-nodectl stop waits for the unit to go inactive")
 Z23_FLAG("ZCL_NODE_UNIT", "env_build", "z23-node", "-",
           "first use tools/mvp_gate.sh:auto; documented at docs/quality/mvp-live-gate.md:38: ZCL_NODE_UNIT — systemd --user unit whose ExecStart supplies the")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_BASELINE", "env_build", "-", "-",

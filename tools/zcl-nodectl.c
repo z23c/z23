@@ -557,9 +557,16 @@ static int cmd_status(struct rpc_target *legacy, struct rpc_target *c23)
     return 0;
 }
 
+static int stop_timeout_secs(void)
+{
+    const char *env = getenv("ZCL_NODECTL_STOP_TIMEOUT");
+    int secs = env ? atoi(env) : 0;
+    return secs > 0 ? secs : 30;
+}
+
 static int cmd_stop(struct rpc_target *c23)
 {
-    stop_service_gracefully(c23, 30);
+    stop_service_gracefully(c23, stop_timeout_secs());
     if (service_is_active()) {
         fprintf(stderr, "%s is still active after stop\n", NODE_UNIT);
         return 1;
@@ -730,33 +737,49 @@ static int cmd_launch(int argc, char **argv)
  * unit is active or enabled would start two nodes on one datadir. */
 #define LEGACY_NODE_UNIT "zclassic23.service"
 
-static bool legacy_unit_active(void)
+enum legacy_state { LEGACY_CLEAR, LEGACY_LIVE, LEGACY_UNKNOWN };
+
+static const char *const ACTIVE_LIVE[] = {
+    "active", "activating", "reloading", "deactivating", NULL};
+static const char *const ACTIVE_CLEAR[] = {
+    "inactive", "failed", "unknown", "not-found", NULL};
+static const char *const ENABLED_LIVE[] = {
+    "enabled", "enabled-runtime", "linked", "linked-runtime", NULL};
+static const char *const ENABLED_CLEAR[] = {
+    "disabled", "static", "indirect", "masked", "masked-runtime",
+    "generated", "transient", "alias", "not-found", NULL};
+
+static bool word_in(const char *word, const char *const *set)
 {
-    const char *argv[] = {"systemctl", "--user", "is-active", LEGACY_NODE_UNIT, NULL};
+    for (; *set; set++)
+        if (strcmp(word, *set) == 0) return true;
+    return false;
+}
+
+/* Classify one systemctl query about the pre-rename unit. The first output
+ * line must be a state word systemctl documents. Anything else (no systemctl,
+ * no user bus, a permission error) is LEGACY_UNKNOWN and never counts as
+ * clear. */
+static enum legacy_state query_legacy_unit(const char *verb,
+                                           const char *const *live,
+                                           const char *const *clear)
+{
+    const char *argv[] = {"systemctl", "--user", verb, LEGACY_NODE_UNIT, NULL};
     char out[256];
     int rc = run_cmd_capture(argv, out, sizeof(out));
     trim_line(out);
-    return rc == 0 && (strcmp(out, "active") == 0 ||
-                       strcmp(out, "activating") == 0 ||
-                       strcmp(out, "reloading") == 0);
+    if (rc < 0 || rc == 126 || rc == 127 || strstr(out, "Failed to connect"))
+        return LEGACY_UNKNOWN;
+    if (strstr(out, "Failed to get unit file state") && strstr(out, "No such file"))
+        copy_cstr(out, sizeof(out), "not-found");
+    char *eol = strpbrk(out, "\r\n");
+    if (eol) *eol = '\0';
+    if (word_in(out, live)) return LEGACY_LIVE;
+    return word_in(out, clear) ? LEGACY_CLEAR : LEGACY_UNKNOWN;
 }
 
-static bool legacy_unit_enabled(void)
+static int legacy_unit_refuse_live(bool active, bool enabled)
 {
-    const char *argv[] = {"systemctl", "--user", "is-enabled", LEGACY_NODE_UNIT, NULL};
-    char out[256];
-    int rc = run_cmd_capture(argv, out, sizeof(out));
-    trim_line(out);
-    return rc == 0 && (strncmp(out, "enabled", 7) == 0 ||
-                       strcmp(out, "linked") == 0 ||
-                       strcmp(out, "linked-runtime") == 0);
-}
-
-static int cmd_legacy_unit_check(void)
-{
-    bool active = legacy_unit_active();
-    bool enabled = legacy_unit_enabled();
-    if (!active && !enabled) return 0;
     fprintf(stderr,
             "REFUSE: %s is %s for this user. Installing %s would run two "
             "nodes on one datadir and the same ports (8033, 18232).\n"
@@ -772,6 +795,37 @@ static int cmd_legacy_unit_check(void)
             NODE_UNIT ".service", LEGACY_NODE_UNIT, LEGACY_NODE_UNIT,
             LEGACY_NODE_UNIT);
     return 3;
+}
+
+static int legacy_unit_refuse_unknown(void)
+{
+    fprintf(stderr,
+            "REFUSE: could not determine whether %s is active or enabled "
+            "(systemctl --user is unavailable or answered with an "
+            "unrecognised state), so the install cannot rule out a second "
+            "node on the same datadir and ports.\n"
+            "Nothing was changed. Run as the node's own user in a session "
+            "with a user bus (over ssh: export XDG_RUNTIME_DIR=/run/user/$(id -u)) "
+            "and check:\n"
+            "  systemctl --user is-active %s\n"
+            "  systemctl --user is-enabled %s\n"
+            "then rerun.\n",
+            LEGACY_NODE_UNIT, LEGACY_NODE_UNIT, LEGACY_NODE_UNIT);
+    return 4;
+}
+
+static int cmd_legacy_unit_check(void)
+{
+    enum legacy_state active =
+        query_legacy_unit("is-active", ACTIVE_LIVE, ACTIVE_CLEAR);
+    enum legacy_state enabled =
+        query_legacy_unit("is-enabled", ENABLED_LIVE, ENABLED_CLEAR);
+    if (active == LEGACY_LIVE || enabled == LEGACY_LIVE)
+        return legacy_unit_refuse_live(active == LEGACY_LIVE,
+                                       enabled == LEGACY_LIVE);
+    if (active == LEGACY_UNKNOWN || enabled == LEGACY_UNKNOWN)
+        return legacy_unit_refuse_unknown();
+    return 0;
 }
 
 static void usage(void)

@@ -76,6 +76,47 @@ printf 'pid=9 cpu=7 blkio=7 io=7\n'
 EOF
 chmod +x "$MOCK_PROGRESS_MOVING" "$MOCK_PROGRESS_FROZEN"
 
+# ── mock systemctl: stateful, so `stop` is only believed if is-active agrees ─
+# State per unit lives in $MOCK_COUNTER_DIR/units. Default is active. `stop`
+# makes it inactive unless MOCK_STOP_NOOP is set or the unit is stuck;
+# MOCK_STICKY_ON_START makes a started unit ignore later stops;
+# MOCK_STATE_<UNIT> pins what is-active reports (e.g. MOCK_STATE_Z23_NODE).
+MOCK_SYSTEMCTL="$SANDBOX/mock_systemctl.sh"
+cat > "$MOCK_SYSTEMCTL" <<'MOCKEOF'
+#!/bin/sh
+d="$MOCK_COUNTER_DIR/units"; mkdir -p "$d"
+f="$d/$2"
+st="$(cat "$f" 2>/dev/null || echo active)"
+case "$1" in
+    is-active)
+        var="MOCK_STATE_$(printf '%s' "$2" | tr 'a-z-' 'A-Z_')"
+        eval "ov=\${$var:-}"
+        [ -n "$ov" ] && st="$ov"
+        [ "$st" = active-sticky ] && st=active
+        echo "$st"
+        [ "$st" = active ] ;;
+    stop)
+        [ -n "${MOCK_STOP_NOOP:-}" ] && exit 0
+        [ "$st" = active-sticky ] && exit 0
+        echo inactive > "$f" ;;
+    start)
+        if [ -n "${MOCK_STICKY_ON_START:-}" ]; then echo active-sticky > "$f"
+        else echo active > "$f"; fi ;;
+esac
+exit 0
+MOCKEOF
+MOCK_NODECTL="$SANDBOX/mock_nodectl.sh"
+cat > "$MOCK_NODECTL" <<'MOCKEOF'
+#!/bin/sh
+if [ "${MOCK_LEGACY:-}" = live ]; then
+    echo "REFUSE: zclassic23.service is active for this user." >&2
+    exit 3
+fi
+exit 0
+MOCKEOF
+chmod +x "$MOCK_SYSTEMCTL" "$MOCK_NODECTL"
+export MOCK_SYSTEMCTL MOCK_NODECTL
+
 # Fresh fixture datadirs: canonical/ (marker CANON), candidate/ (marker CAND).
 setup_fixtures() {
     local root="$1"
@@ -91,7 +132,8 @@ marker_of() { cat "$1/marker" 2>/dev/null || echo MISSING; }
 # mock wired in; per-case MOCK_H_* + knobs come from the caller's environment.
 run_cutover() {
     local root="$1"; shift
-    SYSTEMCTL="${SYSTEMCTL_MOCK:-echo}" \
+    SYSTEMCTL="${SYSTEMCTL_MOCK:-$MOCK_SYSTEMCTL}" \
+    ZCL_NODECTL_BIN="$MOCK_NODECTL" \
     CANONICAL_DATADIR="$root/canonical" \
     CANONICAL_RPCPORT=19998 \
     CANDIDATE_RPCPORT=19999 \
@@ -219,8 +261,7 @@ if [ "$1" = start ] && [ "$2" = z23-node ]; then
     echo "mock systemctl: refusing to start $2" >&2
     exit 1
 fi
-echo "mock systemctl: $*"
-exit 0
+exec "$MOCK_SYSTEMCTL" "$@"
 EOF
     chmod +x "$mc"
     local out rc
@@ -349,7 +390,64 @@ c14() {
     [ "$rc" = 0 ] && ok "case14 --help documents the catching-up exit code and the stall knob"
 }
 
-c1; c2; c3; c4; c5; c6; c7; c8; c9; c10; c11; c12; c13; c14
+# ── case 15: a live pre-rename unit refuses the cutover, before any mutation ─
+c15() {
+    local r="$SANDBOX/c15"; setup_fixtures "$r"
+    local out rc
+    out="$(MOCK_LEGACY=live MOCK_H_CANONICAL_PRE=100 MOCK_H_CANDIDATE_PRE=105 \
+           MOCK_H_CANDIDATE_POSTSTOP=-1 \
+           run_cutover "$r" --yes 2>&1)"; rc=$?
+    [ "$rc" = 2 ] || fail "c15: expected exit 2 (legacy unit live), got $rc"
+    str_contains "$out" "REFUSED: the legacy-unit check did not pass" || fail "c15: no legacy refusal message"
+    [ "$(marker_of "$r/canonical")" = CANON ] || fail "c15: canonical datadir touched beside a live legacy unit"
+    [ "$(marker_of "$r/candidate")" = CAND ] || fail "c15: candidate datadir touched"
+    ls -d "$r"/canonical.pre-cutover-* >/dev/null 2>&1 && fail "c15: a swap happened"
+    [ "$rc" = 2 ] && ok "case15 refuses while the legacy unit is live, touches nothing"
+}
+
+# ── case 16: canonical RPC answers but z23-node is inactive ─────────────────
+c16() {
+    local r="$SANDBOX/c16"; setup_fixtures "$r"
+    local out rc
+    out="$(MOCK_STATE_Z23_NODE=inactive MOCK_H_CANONICAL_PRE=100 \
+           MOCK_H_CANDIDATE_PRE=105 MOCK_H_CANDIDATE_POSTSTOP=-1 \
+           run_cutover "$r" --yes 2>&1)"; rc=$?
+    [ "$rc" = 2 ] || fail "c16: expected exit 2 (RPC answers, unit inactive), got $rc"
+    str_contains "$out" "is not active" || fail "c16: no inactive-unit refusal message"
+    [ "$(marker_of "$r/canonical")" = CANON ] || fail "c16: canonical datadir touched"
+    ls -d "$r"/canonical.pre-cutover-* >/dev/null 2>&1 && fail "c16: a swap happened"
+    [ "$rc" = 2 ] && ok "case16 refuses when the RPC answering is not served by the canonical unit"
+}
+
+# ── case 17: a stop that leaves the unit active fails the cutover ───────────
+c17() {
+    local r="$SANDBOX/c17"; setup_fixtures "$r"
+    local out rc
+    out="$(MOCK_STOP_NOOP=1 MOCK_H_CANONICAL_PRE=100 MOCK_H_CANDIDATE_PRE=105 \
+           MOCK_H_CANDIDATE_POSTSTOP=-1 \
+           run_cutover "$r" --yes 2>&1)"; rc=$?
+    [ "$rc" = 2 ] || fail "c17: expected exit 2 (unit would not stop), got $rc"
+    str_contains "$out" "not provably stopped" || fail "c17: no stop-failure message"
+    [ "$(marker_of "$r/canonical")" = CANON ] || fail "c17: canonical datadir moved under a live unit"
+    [ "$(marker_of "$r/candidate")" = CAND ] || fail "c17: candidate datadir moved"
+    [ "$rc" = 2 ] && ok "case17 refuses to swap when stop leaves the unit active"
+}
+
+# ── case 18: rollback whose stop fails moves no datadir ─────────────────────
+c18() {
+    local r="$SANDBOX/c18"; setup_fixtures "$r"
+    local out rc
+    out="$(MOCK_STICKY_ON_START=1 MOCK_H_CANONICAL_PRE=100 MOCK_H_CANDIDATE_PRE=105 \
+           MOCK_H_CANDIDATE_POSTSTOP=-1 \
+           PROGRESS_MOCK="$MOCK_PROGRESS_FROZEN" STALL_MOCK=2 \
+           run_cutover "$r" --yes --timeout=1 2>&1)"; rc=$?
+    [ "$rc" = 1 ] || fail "c18: expected exit 1 (rollback incomplete), got $rc"
+    str_contains "$out" "ROLLBACK-INCOMPLETE" || fail "c18: no ROLLBACK-INCOMPLETE verdict"
+    [ "$(marker_of "$r/canonical")" = CAND ] || fail "c18: promoted datadir was moved under a live unit"
+    [ "$rc" = 1 ] && ok "case18 leaves data in place when the rollback's own stop fails"
+}
+
+c1; c2; c3; c4; c5; c6; c7; c8; c9; c10; c11; c12; c13; c14; c15; c16; c17; c18
 
 if [ "$fails" -eq 0 ]; then
     echo "cutover-selftest: PASS"

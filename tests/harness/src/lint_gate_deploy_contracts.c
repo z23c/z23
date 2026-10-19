@@ -218,6 +218,15 @@ int t_legacy_unit_guard_contract(void)
         ASSERT(setup_guard != NULL && setup_install != NULL);
         ASSERT(setup_guard < setup_install);
         ASSERT(strstr(setup_buf, "exit 3") != NULL);
+        ASSERT(strstr(setup_buf, "exit 4") != NULL);
+        char *cut_buf = NULL;
+        ASSERT(repo_path(path, sizeof(path), "platform/deploy/z23-cutover.sh") == 0);
+        ASSERT(read_entire_file(path, &cut_buf) == 0);
+        const char *cut_guard = strstr(cut_buf, "legacy-unit-check");
+        const char *cut_gate = strstr(cut_buf, "canonical cutover is an owner action");
+        ASSERT(cut_guard != NULL && cut_gate != NULL && cut_guard < cut_gate);
+        ASSERT(strstr(cut_buf, "not provably stopped") != NULL);
+        free(cut_buf);
         PASS();
     } _test_next:;
     free(make_buf);

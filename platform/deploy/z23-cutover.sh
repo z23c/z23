@@ -89,6 +89,7 @@ ASSUME_YES=0
 # Seams the fixture selftest overrides. The real readers just talk to zcl-rpc.
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 RPC_BIN="${ZCL_RPC_BIN:-$SCRIPT_DIR/build/bin/zcl-rpc}"
+NODECTL_BIN="${ZCL_NODECTL_BIN:-$SCRIPT_DIR/build/bin/zcl-nodectl}"
 HSTAR_READER="${CUTOVER_HSTAR_READER:-_hstar_read_rpc}"
 PROGRESS_READER="${CUTOVER_PROGRESS_READER:-_progress_read_proc}"
 
@@ -162,7 +163,21 @@ _progress_read_proc() {
 progress_token() { "$PROGRESS_READER"; }
 
 # ── unit control (SYSTEMCTL=echo in tests makes these visible no-ops) ────────
-unit_stop()  { log "stopping $1"; $SYSTEMCTL stop "$1" >/dev/null 2>&1 || $SYSTEMCTL stop "$1" || true; }
+# unit_state <unit> -> systemctl's is-active word, or empty when it cannot say.
+unit_state() { $SYSTEMCTL is-active "$1" 2>/dev/null || true; }
+# unit_stop fails unless the unit is provably down afterwards. A stop that is
+# a no-op (wrong unit name, no user bus) must never be mistaken for success:
+# the datadir is renamed next, and a live writer would be moved under.
+unit_stop() {
+    log "stopping $1"
+    $SYSTEMCTL stop "$1" >/dev/null 2>&1 || $SYSTEMCTL stop "$1" || true
+    case "$(unit_state "$1" | head -1)" in
+        inactive|failed|unknown) return 0 ;;
+    esac
+    log "ERROR: $1 is not provably stopped after 'stop' (is-active did not report inactive, failed or unknown)"
+    return 1
+}
+
 unit_start() { log "starting $1"; $SYSTEMCTL start "$1"; }
 
 # ── argument parsing ────────────────────────────────────────────────────────
@@ -232,6 +247,23 @@ else
     log "WARNING: canonical is unreachable on rpc $CANONICAL_RPCPORT (H*=$CANON_H) — treating this as a FAILOVER. The promoted node must reach candidate H*=$CAND_H."
 fi
 
+# The pre-rename unit shares the canonical datadir and ports. While it is
+# active or enabled, stopping CANONICAL_UNIT does nothing to the live node,
+# so the datadir swap below would move it from under a running writer.
+if ! "$NODECTL_BIN" legacy-unit-check; then
+    log "REFUSED: the legacy-unit check did not pass (see above). Migrate the host first (docs/node/GETTING_STARTED.md, \"Migrating from the pre-rename zclassic23.service unit\")."
+    exit 2
+fi
+# A canonical node answering RPC must be the unit this script controls.
+if [ "$CANON_H" -ge 0 ] 2>/dev/null; then
+    case "$(unit_state "$CANONICAL_UNIT" | head -1)" in
+        active|activating|reloading) ;;
+        *)
+            log "REFUSED: canonical RPC answers on $CANONICAL_RPCPORT but $CANONICAL_UNIT is not active, so the node serving it is not under this unit. Stopping $CANONICAL_UNIT would not release $CANONICAL_DATADIR."
+            exit 2 ;;
+    esac
+fi
+
 if [ "$ASSUME_YES" != "1" ]; then
     log "REFUSED: canonical cutover is an owner action. Re-run with --yes to promote (heights above)."
     exit 2
@@ -249,7 +281,11 @@ PROMOTED_DONE=0
 rollback() {
     _reason="$1"
     log "AUTO-ROLLBACK: $_reason"
-    unit_stop "$CANONICAL_UNIT"
+    if ! unit_stop "$CANONICAL_UNIT"; then
+        log "FATAL: $CANONICAL_UNIT would not stop; no datadir was moved. Data stays at $CANONICAL_DATADIR (promoted=$PROMOTED_DONE); stop the node by hand, then repair."
+        printf 'CUTOVER: ROLLBACK-INCOMPLETE  canonical_H*=%s candidate_H*=%s bar=%s\n' "$CANON_H" "$CAND_H" "$BAR"
+        exit 1
+    fi
     if [ "$PROMOTED_DONE" = "1" ]; then
         # undo promote: the candidate's data is currently at CANONICAL_DATADIR
         if [ -e "$CANDIDATE_DATADIR" ]; then
@@ -280,8 +316,10 @@ rollback() {
 }
 
 log "EXECUTE: stopping both units before the datadir swap"
-unit_stop "$STANDBY_UNIT"
-unit_stop "$CANONICAL_UNIT"
+if ! unit_stop "$STANDBY_UNIT" || ! unit_stop "$CANONICAL_UNIT"; then
+    log "REFUSED (pre-swap): a unit would not stop; no datadir was touched. Resolve it, then retry."
+    exit 2
+fi
 
 # The candidate datadir must be RELEASED (its node fully stopped) before we can
 # safely rename it — moving a datadir with a live writer corrupts it. Poll its
