@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 980 |
+| Registry entries (branches + leaves) | 985 |
 | Top-level roots | 17 |
-| Branches | 212 |
-| Leaves (dispatchable command paths) | 768 |
-| … `ready` (live handler in this build) | 675 |
+| Branches | 213 |
+| Leaves (dispatchable command paths) | 772 |
+| … `ready` (live handler in this build) | 679 |
 | … `compat` (metadata only, names a fallback) | 63 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 62 |
-| Leaves with `effect=mutate` | 294 |
+| Leaves with `effect=mutate` | 297 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 156 |
 
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 76 | 15 | 61 |
+| `engine/composition/commands/ops.def` | 80 | 16 | 64 |
 | `engine/composition/commands/dev.def` | 128 | 23 | 105 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -1023,6 +1023,14 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `ops host gc` | ready | destructive / dev-mutation / operator · maintenance/moderate | `apply`, `floor_hours`, `roots`, `age_days` | `zcl.host_gc.v1` | `z23 ops host gc --apply=false` | Classify and reclaim dead dev-proof worktree generations |
+
+#### `ops.host.slo` — Node SLO monitors
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `ops host slo probe` (aliases: `ops.slo.probe`) | ready | mutate / app-write / operator · maintenance/low | none | `zcl.slo_probe.v1` | `z23 ops host slo probe` | Probe the local nodes from outside and append one ledger row each |
+| `ops host slo page` (aliases: `ops.slo.page`) | ready | mutate / app-write / operator · foreground/low | none | `zcl.slo_page.v1` | `z23 ops host slo page` | Page when the prober ledger shows a stalled or dark node |
+| `ops host slo judge` (aliases: `ops.slo.judge`) | ready | mutate / app-write / operator · fast/low | `instance`, `window_hours`, `gap_budget`, `record` | `zcl.slo_hold.v1` | `z23 ops host slo judge --instance=canonical --window_hours=72 --gap_budget=3 --record=true` | Judge whether an instance held the SLO bar for the trailing window |
 
 #### `ops.mesh.device` — Offline owner device identity and grants
 
@@ -2049,6 +2057,9 @@ Every alias resolves through the same grammar as its canonical path
 | `ops.machine.status` | `ops.mesh.identity` |
 | `machine.status` | `ops.mesh.identity` |
 | `fleet.roster` | `ops.mesh.roster` |
+| `ops.slo.probe` | `ops.host.slo.probe` |
+| `ops.slo.page` | `ops.host.slo.page` |
+| `ops.slo.judge` | `ops.host.slo.judge` |
 | `dev.change.cycle` | `dev.change.apply` |
 | `dev.loop.watch` | `dev.loop.ensure` |
 | `dev.loop.heartbeat` | `dev.loop.status` |
