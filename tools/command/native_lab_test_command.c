@@ -291,13 +291,26 @@ static bool lab_case_text(struct json_value *row, const char *key,
     return true;
 }
 
+static bool lab_case_stderr(struct json_value *row, const struct lab_proc *p,
+                            bool pass, struct lab_tally *t)
+{
+    bool cut = p->err_cut;
+    if (!lab_case_text(row, "stderr", pass ? "" : p->err,
+                       pass ? 0 : p->err_len, LAB_STDERR_CASE, t, &cut))
+        return false;
+    const struct json_value *err = json_get(row, "stderr");
+    const char *status = pass ? "not_retained"
+        : cut && err && !json_get_str(err)[0] && p->err_len ? "omitted"
+        : cut ? "truncated" : "complete";
+    return json_push_kv_str(row, "stderr_status", status);
+}
+
 static bool lab_case_row(struct json_value *rows, const struct lab_case *c,
                          const struct lab_proc *p, bool pass, const char *diff,
                          struct lab_tally *t)
 {
     struct json_value row;
     bool cut = false;
-    bool err_cut = p->err_cut;
     json_init(&row);
     json_set_object(&row);
     bool ok = json_push_kv_str(&row, "name", c->name) &&
@@ -308,15 +321,9 @@ static bool lab_case_row(struct json_value *rows, const struct lab_case *c,
               json_push_kv_int(&row, "wall_us", p->wall_us) &&
               lab_case_text(&row, "diff", diff, strlen(diff), LAB_DIFF_CASE,
                             t, &cut) &&
-              lab_case_text(&row, "stderr", pass ? "" : p->err,
-                            pass ? 0 : p->err_len, LAB_STDERR_CASE, t, &err_cut);
+              lab_case_stderr(&row, p, pass, t);
     t->diffs_omitted += cut;
-    const struct json_value *err = json_get(&row, "stderr");
-    const char *status = pass ? "not_retained"
-        : err_cut && err && !json_get_str(err)[0] && p->err_len ? "omitted"
-        : err_cut ? "truncated" : "complete";
-    ok = ok && json_push_kv_str(&row, "stderr_status", status) &&
-         json_push_back(rows, &row);
+    ok = ok && json_push_back(rows, &row);
     json_free(&row);
     return ok;
 }
