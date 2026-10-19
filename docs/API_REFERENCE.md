@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 1003 |
+| Registry entries (branches + leaves) | 1007 |
 | Top-level roots | 17 |
-| Branches | 215 |
-| Leaves (dispatchable command paths) | 788 |
-| … `ready` (live handler in this build) | 685 |
+| Branches | 216 |
+| Leaves (dispatchable command paths) | 791 |
+| … `ready` (live handler in this build) | 688 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 308 |
+| Leaves with `effect=mutate` | 310 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 156 |
 
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 87 | 17 | 70 |
+| `engine/composition/commands/ops.def` | 91 | 18 | 73 |
 | `engine/composition/commands/dev.def` | 139 | 24 | 115 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -1089,6 +1089,14 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `ops mesh device host package run` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`datadir`**, **`package_root`**, **`receipt_id`**, **`artifact_sha3`**, `accept_execution`, `runtime_policy`, `role`, `runtime_input`, `launch_ms`, `execution_ms`, `cleanup_ms` | `zcl.device.host.raw.v1` | `z23 ops mesh device host package run --input=<explicit-json>` | Run exact owner-accepted installed bin/tunnel in foreground |
 
+#### `ops.slot` — Binary slots
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `ops slot install` | ready | mutate / app-write / operator · foreground/moderate | **`release`**, **`from`**, **`name`**, **`package_root`**, `member`, `pin`, `pin_file`, `datadir`, `dry_run` | `zcl.ops_slot_install.v1` | `z23 ops slot install --release=<doc.zid> --from=<checked-out z23> --name=<slot> --package_root=<64hex> --pin_file=<owner-pins>` | Install a signed, pinned release binary as a z23 slot |
+| `ops slot activate` | ready | mutate / app-write / operator · foreground/moderate | **`service_class`**, **`slot`**, **`instances`**, **`health`**, `exec_args`, `dry_run` | `zcl.ops_slot_activate.v1` | `z23 ops slot activate --service_class=tunnel-receiver --slot=<name> --instances='["r1","r3"]' --health='{"kind":"listen","port":28022}'` | Move service instances onto an installed slot, one at a time, with rollback |
+| `ops slot status` | ready | read / read / operator · foreground/low | **`service_class`**, **`instances`** | `zcl.ops_slot_status.v1` | `z23 ops slot status --service_class=tunnel-receiver --instances='["r1"]'` | Report the slot each instance runs, its last-good and installed slots |
+
 #### `ops.telemetry` — Canonical typed telemetry tree
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
@@ -1671,7 +1679,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `zcode release sign` | ready | mutate / app-write / operator · fast/low | `name`, `version`, `root`, `seed_file`, `seq`, `expiry`, `datadir` | `zcl.zcode_release_sign.v1` | `z23 zcode release sign --input='{"name":"demo","version":"0.1","root":"<64hex>","seed_file":"/path/seed.hex"}'` | Sign a release record with a master seed |
-| `zcode release verify` | ready | read / read / public · fast/low | `doc`, `file`, `proof`, `root`, `anchored`, `datadir` | `zcl.zcode_release_verify.v1` | `z23 zcode release verify --input='{"doc":"<hex>"}'` | Verify a signed release record (optionally its batch inclusion) |
+| `zcode release verify` | ready | read / read / public · fast/low | `doc`, `file`, `proof`, `root`, `anchored`, `datadir`, `pin`, `pin_file`, `package_root` | `zcl.zcode_release_verify.v1` | `z23 zcode release verify --input='{"doc":"<hex>"}'` | Verify a signed release record (optionally its batch inclusion) |
 | `zcode release anchor` | ready | mutate / wallet / operator · foreground/moderate | `tip`, `domain`, `datadir` | `zcl.zcode_release_anchor.v1` | `z23 zcode release anchor --input='{}'` | Anchor the release batch's domain root on-chain |
 | `zcode release prove` | ready | read / read / operator · fast/low | **`name`**, **`version`**, `domain`, `datadir` | `zcl.zcode_release_prove.v1` | `z23 zcode release prove --input='{"name":"demo","version":"0.1"}'` | Emit the domain-batch inclusion proof for one release |
 
