@@ -66,10 +66,13 @@ static bool connect_window(void *ctx, uint16_t *cols, uint16_t *rows)
     return true;
 }
 
+static const int connect_signals[] = { SIGWINCH, SIGTERM, SIGHUP, SIGINT, SIGPIPE };
+
 struct connect_edge {
     struct termios saved;
     bool raw;
-    struct sigaction winch, term, hup, intr, pipe;
+    struct sigaction saved_signals[sizeof connect_signals / sizeof connect_signals[0]];
+    size_t signals_installed;
     int events[2];
 };
 
@@ -88,18 +91,27 @@ static void connect_raw(struct connect_edge *e)
     e->raw = tcsetattr(STDIN_FILENO, TCSAFLUSH, &t) == 0;
 }
 
+static void connect_edge_close(struct connect_edge *e);
+
 static bool connect_edge_open(struct connect_edge *e)
 {
     struct sigaction act = { .sa_handler = connect_on_winch };
     sigemptyset(&act.sa_mask);
+    e->signals_installed = 0;
+    e->raw = false;
     if (hub_pipe_cloexec_nonblock(e->events) != 0)
         return false;
     g_event_write = e->events[1];
-    sigaction(SIGWINCH, &act, &e->winch);
-    sigaction(SIGTERM, &act, &e->term);
-    sigaction(SIGHUP, &act, &e->hup);
-    sigaction(SIGINT, &act, &e->intr);
-    signal(SIGPIPE, SIG_IGN);
+    for (size_t i = 0; i < sizeof connect_signals / sizeof connect_signals[0]; ++i) {
+        act.sa_handler = connect_signals[i] == SIGPIPE ? SIG_IGN : connect_on_winch;
+        if (sigaction(connect_signals[i], &act, &e->saved_signals[i]) != 0) {
+            int saved = errno;
+            connect_edge_close(e);
+            errno = saved;
+            return false;
+        }
+        ++e->signals_installed;
+    }
     connect_raw(e);
     return true;
 }
@@ -108,10 +120,10 @@ static void connect_edge_close(struct connect_edge *e)
 {
     if (e->raw)
         (void)tcsetattr(STDIN_FILENO, TCSAFLUSH, &e->saved);
-    sigaction(SIGWINCH, &e->winch, NULL);
-    sigaction(SIGTERM, &e->term, NULL);
-    sigaction(SIGHUP, &e->hup, NULL);
-    sigaction(SIGINT, &e->intr, NULL);
+    while (e->signals_installed) {
+        size_t i = --e->signals_installed;
+        (void)sigaction(connect_signals[i], &e->saved_signals[i], NULL);
+    }
     g_event_write = -1;
     close(e->events[0]);
     close(e->events[1]);
