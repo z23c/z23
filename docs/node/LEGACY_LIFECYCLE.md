@@ -162,8 +162,8 @@ never printed.
    z23 ops host legacy seed --input='{"source":"<oracle datadir>","target":"<bootstrap datadir>","source_height":<h>,"z23_height":<tip>}'
    ```
 
-3. Stage while the oracle keeps running (resumable; copies the immutable
-   `blk*.dat`/`rev*.dat` pairs below the highest-numbered pair into
+3. Stage while the oracle keeps running (resumable; copies every file of
+   `blocks/` and `chainstate/`, LevelDB trees included, into
    `<bootstrap datadir>.tmp`; rerun after an interruption and files whose size
    and mtime match are skipped):
 
@@ -172,10 +172,14 @@ never printed.
    ```
 
 4. Stop the oracle (`systemctl --user stop zclassicd-oracle`), wait for it to
-   exit, then finish. The leaf holds the datadir lock, copies the tail pair,
-   `blocks/index` and `chainstate`, re-copies any staged file that changed,
-   fsyncs, hashes the manifest, writes `seed-receipt.json` and renames
-   atomically. `downtime_ms` is the copy window with the oracle down:
+   exit, then finish. The leaf holds the datadir lock and copies only what
+   changed since stage: files that are new or whose size or mtime differ, plus
+   LevelDB `MANIFEST-*`, `CURRENT`, `LOG` and the newest table and log of each
+   LevelDB directory, which are always recopied. Target files the source no
+   longer has (compacted `.ldb` files) are deleted, confined to the target
+   tree. It then fsyncs, hashes the manifest, writes `seed-receipt.json`
+   (`phase_b_ms`, `phase_b_files`, `phase_b_bytes`) and renames atomically.
+   `downtime_ms` is the copy window with the oracle down:
 
    ```
    z23 ops host legacy seed --input='{"source":"<oracle datadir>","target":"<bootstrap datadir>","step":"finish","confirm":true,"plan_id":"<id>"}'

@@ -2,17 +2,19 @@
  *
  * Seed a NEW legacy zclassicd datadir from a synced one (the consensus-parity
  * oracle) without ever overwriting a datadir and without copying a wallet or
- * key file. Two phases keep the oracle's downtime to the tail:
+ * key file. Two phases keep the oracle's downtime to what changed:
  *
- *   stage   (source may be RUNNING) copy the immutable blocks/blk*.dat and
- *           rev*.dat files, every pair below the highest-numbered one, into
- *           <target>.tmp. Resumable: a file whose size and mtime already
- *           match is skipped.
- *   finish  (source STOPPED, lock free) hold the datadir lock, copy the tail
- *           pair, blocks/index and chainstate, re-copy anything staged that
- *           changed, fsync, release the lock, hash a (path, size, sha3)
- *           manifest, write the receipt and rename <target>.tmp to <target>
- *           with RENAME_NOREPLACE.
+ *   stage   (source may be RUNNING) copy every file of blocks/ and chainstate/
+ *           (blk/rev, the LevelDB trees, everything) into <target>.tmp.
+ *           Resumable: a file whose size and mtime already match is skipped.
+ *   finish  (source STOPPED, lock free) hold the datadir lock, recopy only
+ *           files that are new or whose size or mtime changed since stage,
+ *           plus LevelDB's MANIFEST-*, CURRENT, LOG and the newest table and
+ *           log of each LevelDB directory (always), delete target files the
+ *           source no longer has (confined to the target tree), fsync, release
+ *           the lock, hash a (path, size, sha3) manifest, write the receipt
+ *           (phase_b_ms, phase_b_files, phase_b_bytes) and rename <target>.tmp
+ *           to <target> with RENAME_NOREPLACE.
  *
  * Every refusal is a stable code (lseed_refusal_name). The engine reads the
  * file system only through the seams in struct lseed_hooks so tests inject
@@ -114,6 +116,8 @@ struct lseed_result {
     uint64_t excluded_files;
     uint64_t stage_ms;
     uint64_t phase_b_ms; /* oracle downtime: lock held to copy fsynced */
+    uint64_t phase_b_files; /* files copied while the source was stopped */
+    uint64_t phase_b_bytes; /* bytes copied while the source was stopped */
     uint64_t hash_ms;
     char manifest_sha3[65];
     char receipt_path[LSEED_PATH_MAX];

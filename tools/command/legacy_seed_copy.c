@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * The legacy seed copier: reflink first, then copy_file_range, then
- * read/write; a bounded worker pool; data fsynced before the mtime is set so
- * a crashed partial file can never satisfy the resume check. */
+ * read/write; a bounded worker pool; one fsync per file after the mtime is
+ * set, so the data and the resume stamp reach disk together. */
 
 #ifndef _WIN32
 
@@ -33,6 +33,8 @@ struct pool {
     int dstroot;
     struct lseed_tree *tree;
     lseed_want_fn want;
+    bool recopy_forced;
+    atomic_int no_clone; /* latched by the first refused FICLONE of this phase */
     atomic_size_t next;
     atomic_int failed;
     atomic_uint_fast64_t copied, resumed, cloned, bytes, done;
@@ -79,12 +81,20 @@ static bool lseed_cfr_copy(int in, int out, uint64_t size)
 }
 
 /* Returns 0 copied, 1 cloned, <0 failure. */
-static int lseed_copy_data(int in, int out, uint64_t size, int mode)
+/* A filesystem that refuses FICLONE once refuses it for every file, so the
+ * refusal is latched in no_clone and later files skip the ioctl. */
+static int lseed_copy_data(int in, int out, uint64_t size, int mode,
+                           atomic_int *no_clone)
 {
     if (size == 0)
         return 0;
-    if (mode == 0 && ioctl(out, FICLONE, in) == 0)
-        return 1;
+    if (mode == 0 && !atomic_load(no_clone)) {
+        if (ioctl(out, FICLONE, in) == 0)
+            return 1;
+        if (errno == EOPNOTSUPP || errno == EXDEV || errno == EINVAL ||
+            errno == ENOTTY)
+            atomic_store(no_clone, 1);
+    }
     if (mode == 1)
         return lseed_rw_copy(in, out, size) ? 0 : -1;
     return lseed_cfr_copy(in, out, size) ? 0 : -1;
@@ -102,7 +112,7 @@ static bool lseed_finish_file(int out, const struct lseed_ent *e)
 {
     struct timespec ts[2] = { { e->mtime_s, e->mtime_ns },
                               { e->mtime_s, e->mtime_ns } };
-    return fsync(out) == 0 && futimens(out, ts) == 0 && fsync(out) == 0;
+    return futimens(out, ts) == 0 && fsync(out) == 0;
 }
 
 static int lseed_copy_one(struct pool *p, const struct lseed_ent *e)
@@ -120,7 +130,7 @@ static int lseed_copy_one(struct pool *p, const struct lseed_ent *e)
                                           e->mode & 0600);
     int how = -1;
     if (out >= 0)
-        how = lseed_copy_data(in, out, e->size, h->copy_mode);
+        how = lseed_copy_data(in, out, e->size, h->copy_mode, &p->no_clone);
     bool ok = how >= 0 && lseed_finish_file(out, e);
     if (in >= 0)
         close(in);
@@ -149,7 +159,7 @@ static void *lseed_copy_worker(void *arg)
         const struct lseed_ent *e = &p->tree->e[i];
         if (!p->want(e))
             continue;
-        if (lseed_matches(p->dstroot, e)) {
+        if (!(p->recopy_forced && e->force) && lseed_matches(p->dstroot, e)) {
             atomic_fetch_add(&p->resumed, 1);
             continue;
         }
@@ -220,7 +230,8 @@ static void lseed_run_pool(void *(*fn)(void *), void *arg, atomic_int *failed,
 
 enum lseed_refusal lseed_copy_tree(int srcroot, int dstroot,
                                    struct lseed_tree *tree, lseed_want_fn want,
-                                   int workers, struct lseed_counts *counts,
+                                   bool recopy_forced, int workers,
+                                   struct lseed_counts *counts,
                                    char *why, size_t why_cap)
 {
     struct pool *p = lseed_shared_alloc(sizeof(*p));
@@ -234,6 +245,7 @@ enum lseed_refusal lseed_copy_tree(int srcroot, int dstroot,
     p->dstroot = dstroot;
     p->tree = tree;
     p->want = want;
+    p->recopy_forced = recopy_forced;
     lseed_run_pool(lseed_copy_worker, p, &p->failed, workers);
     counts->copied += p->copied;
     counts->resumed += p->resumed;
@@ -272,6 +284,22 @@ static bool lseed_in_tree(const struct lseed_tree *t, const char *rel)
     return t->n > 0 && bsearch(rel, t->e, t->n, sizeof(*t->e), lseed_key_cmp);
 }
 
+/* Unlink one target entry through its O_NOFOLLOW parent directory, so a
+ * component swapped for a symlink after the walk is refused, never followed. */
+static bool lseed_unlink_beneath(int dstroot, const char *rel, bool dir)
+{
+    char parent[LSEED_PATH_MAX];
+    const char *slash = strrchr(rel, '/');
+    if (!slash || (size_t)(slash - rel) >= sizeof(parent))
+        return false;
+    (void)snprintf(parent, sizeof(parent), "%.*s", (int)(slash - rel), rel);
+    int pfd = lseed_open_beneath(dstroot, parent, O_RDONLY | O_DIRECTORY, 0);
+    bool ok = pfd >= 0 && unlinkat(pfd, slash + 1, dir ? AT_REMOVEDIR : 0) == 0;
+    if (pfd >= 0)
+        close(pfd);
+    return ok;
+}
+
 bool lseed_prune_extra(int dstroot, const struct lseed_tree *tree)
 {
     /* Walk the target the same way the source was walked; an entry the
@@ -286,8 +314,7 @@ bool lseed_prune_extra(int dstroot, const struct lseed_tree *tree)
     for (size_t i = have.n; i-- > 0;) {
         if (lseed_in_tree(tree, have.e[i].rel))
             continue;
-        ok = unlinkat(dstroot, have.e[i].rel,
-                      have.e[i].dir ? AT_REMOVEDIR : 0) == 0 && ok;
+        ok = lseed_unlink_beneath(dstroot, have.e[i].rel, have.e[i].dir) && ok;
     }
     lseed_tree_free(&have);
     return ok;

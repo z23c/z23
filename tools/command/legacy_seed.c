@@ -410,7 +410,7 @@ enum lseed_refusal lseed_stage(const struct lseed_request *req,
             rc = lseed_refuse(why, why_cap, LSEED_COPY_FAILED, "cannot open stage dirs");
         goto out;
     }
-    rc = lseed_copy_tree(src, dst, &tree, lseed_want_stage, req->workers,
+    rc = lseed_copy_tree(src, dst, &tree, lseed_want_all, false, req->workers,
                          &counts, why, why_cap);
     if (rc == LSEED_OK && !lseed_sync_dirs(dst, &tree))
         rc = lseed_refuse(why, why_cap, LSEED_COPY_FAILED, "directory fsync failed");
@@ -459,6 +459,8 @@ static bool lseed_write_receipt(const struct lseed_request *req, int dst,
     (void)json_push_kv_int(&doc, "source_height", req->source_height);
     (void)json_push_kv_int(&doc, "created_unix", platform_time_wall_unix());
     (void)json_push_kv_int(&doc, "phase_b_ms", (int64_t)res->phase_b_ms);
+    (void)json_push_kv_int(&doc, "phase_b_files", (int64_t)res->phase_b_files);
+    (void)json_push_kv_int(&doc, "phase_b_bytes", (int64_t)res->phase_b_bytes);
     size_t len = json_write(&doc, buf, sizeof(buf) - 1);
     json_free(&doc);
     int fd = len > 0 && len < sizeof(buf) - 1
@@ -502,8 +504,8 @@ static enum lseed_refusal lseed_copy_stopped(const struct lseed_request *req, in
     enum lseed_refusal rc = lseed_walk(src, tree, why, cap);
     if (rc != LSEED_OK)
         return rc;
-    rc = lseed_copy_tree(src, dst, tree, lseed_want_all, req->workers, counts,
-                         why, cap);
+    rc = lseed_copy_tree(src, dst, tree, lseed_want_all, true, req->workers,
+                         counts, why, cap);
     if (rc == LSEED_OK &&
         (!lseed_prune_extra(dst, tree) || !lseed_sync_dirs(dst, tree)))
         rc = lseed_refuse(why, cap, LSEED_COPY_FAILED, "prune or fsync failed");
@@ -547,6 +549,8 @@ enum lseed_refusal lseed_finish(const struct lseed_request *req,
         res->bytes = tree.bytes;
         res->copied_files = counts.copied;
         res->resumed_files = counts.resumed;
+        res->phase_b_files = counts.copied;
+        res->phase_b_bytes = counts.bytes;
         res->cloned_files = counts.cloned;
         res->excluded_files = tree.excluded;
         if (!lseed_hash_tree(dst, &tree, req->workers) ||

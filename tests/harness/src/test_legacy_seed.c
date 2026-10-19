@@ -276,15 +276,19 @@ static int test_seed_two_phase(const char *root)
         pid_t holder = lst_hold_lock(src, 0);
         ASSERT(holder > 0);
         ASSERT_EQ(lseed_stage(&req, &res, why, sizeof(why)), LSEED_OK);
-        ASSERT_EQ(res.copied_files, (uint64_t)2);
+        ASSERT_EQ(res.copied_files, (uint64_t)LST_NFILES); /* phase A stages every file */
         ASSERT(lst_exists(root, "twophase.tmp", "blocks/blk00000.dat"));
-        ASSERT(!lst_exists(root, "twophase.tmp", "blocks/blk00001.dat"));
+        ASSERT(lst_exists(root, "twophase.tmp", "blocks/blk00001.dat"));
+        ASSERT(lst_exists(root, "twophase.tmp", "blocks/index/000005.ldb"));
         ASSERT_EQ(lseed_finish(&req, &res, why, sizeof(why)), LSEED_SOURCE_RUNNING);
         lst_release(holder);
         ASSERT(lst_put(src, "blocks/blk00000.dat", 300000, 77));
         ASSERT(lst_stamp(src, "blocks/blk00000.dat", 1800000000));
         ASSERT_EQ(lseed_finish(&req, &res, why, sizeof(why)), LSEED_OK);
-        ASSERT_EQ(res.resumed_files, (uint64_t)1); /* rev00000 kept, blk recopied */
+        /* blk00000 changed; the four LevelDB files that are metadata or the
+         * newest table are always recopied; the other four stay resumed. */
+        ASSERT_EQ(res.phase_b_files, (uint64_t)5);
+        ASSERT_EQ(res.resumed_files, (uint64_t)4);
         ASSERT(lst_tree_identical(root, "twophase"));
         PASS();
     }
@@ -411,6 +415,134 @@ static int test_seed_symlink_in_tree(const char *root)
                   LSEED_SYMLINK_IN_TREE);
         ASSERT_EQ(unlink(link), 0);
         ASSERT_EQ(lseed_preflight(&req, false, &plan, why, sizeof(why)), LSEED_OK);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* A fake LevelDB dir next to the blk/rev fixture, in its own source tree. */
+static const struct { const char *rel; size_t size; } k_pb_files[] = {
+    { "blocks/index/MANIFEST-000004", 300 }, { "blocks/index/LOG", 120 },
+    { "blocks/index/000003.ldb", 3000 },     { "blocks/index/000004.ldb", 4000 },
+    { "blocks/index/000009.ldb", 9000 },     { "blocks/index/000010.log", 700 },
+};
+
+static bool lst_build_pb(const char *pbroot)
+{
+    if (mkdir(pbroot, 0700) != 0 || !lst_build(pbroot))
+        return false;
+    char dir[LST_PATH];
+    (void)snprintf(dir, sizeof(dir), "%s/src", pbroot);
+    for (size_t i = 0; i < sizeof(k_pb_files) / sizeof(k_pb_files[0]); i++)
+        if (!lst_put(dir, k_pb_files[i].rel, k_pb_files[i].size, 50 + (unsigned)i) ||
+            !lst_stamp(dir, k_pb_files[i].rel, 1700000100 + (long)i))
+            return false;
+    return true;
+}
+
+/* Every non-secret file of src and target: same paths, same bytes. */
+static bool lst_trees_equal(const char *root, const char *name)
+{
+    char sp[LST_PATH], tp[LST_PATH], why[256], a[LST_PATH], b[LST_PATH];
+    struct lseed_tree st, tt;
+    (void)snprintf(sp, sizeof(sp), "%s/src", root);
+    (void)snprintf(tp, sizeof(tp), "%s/%s", root, name);
+    int sfd = open(sp, O_RDONLY | O_DIRECTORY), tfd = open(tp, O_RDONLY | O_DIRECTORY);
+    bool ok = sfd >= 0 && tfd >= 0 &&
+              lseed_walk(sfd, &st, why, sizeof(why)) == LSEED_OK;
+    if (ok && lseed_walk(tfd, &tt, why, sizeof(why)) != LSEED_OK) {
+        lseed_tree_free(&st);
+        ok = false;
+    } else if (ok) {
+        ok = st.n == tt.n;
+        for (size_t i = 0; ok && i < st.n; i++) {
+            (void)snprintf(a, sizeof(a), "%s/%s", sp, st.e[i].rel);
+            (void)snprintf(b, sizeof(b), "%s/%s", tp, tt.e[i].rel);
+            ok = strcmp(st.e[i].rel, tt.e[i].rel) == 0 && st.e[i].dir == tt.e[i].dir &&
+                 st.e[i].size == tt.e[i].size && (st.e[i].dir || lst_same(a, b));
+        }
+        lseed_tree_free(&st);
+        lseed_tree_free(&tt);
+    }
+    if (sfd >= 0) close(sfd);
+    if (tfd >= 0) close(tfd);
+    return ok;
+}
+
+static int test_seed_phase_b(const char *root)
+{
+    int failures = 0;
+    TEST("legacy seed: phase B recopies only changed, new and LevelDB metadata files and prunes removed ones") {
+        struct lseed_request req;
+        struct lseed_result res;
+        char why[256], pb[LST_PATH], src[LST_PATH], path[LST_PATH], text[2048];
+        lst_reset_hooks();
+        (void)snprintf(pb, sizeof(pb), "%s/pb", root);
+        ASSERT(lst_build_pb(pb));
+        lst_req(&req, pb, "out");
+        (void)snprintf(src, sizeof(src), "%s/src", pb);
+        ASSERT_EQ(lseed_stage(&req, &res, why, sizeof(why)), LSEED_OK);
+        ASSERT_EQ(res.copied_files, (uint64_t)(LST_NFILES + 6));
+        ASSERT(lst_exists(pb, "out.tmp", "blocks/index/000009.ldb"));
+        ASSERT(lst_exists(pb, "out.tmp", "blocks/index/000003.ldb"));
+        ASSERT(lst_exists(pb, "out.tmp", "blocks/blk00001.dat"));
+        /* The source keeps running: one table rewritten at the same size, one
+         * compacted away, one new, CURRENT rewritten. */
+        ASSERT(lst_put(src, "blocks/index/000004.ldb", 4000, 200));
+        ASSERT(lst_stamp(src, "blocks/index/000004.ldb", 1700000500));
+        (void)snprintf(path, sizeof(path), "%s/blocks/index/000003.ldb", src);
+        ASSERT_EQ(unlink(path), 0);
+        ASSERT(lst_put(src, "blocks/index/000011.ldb", 11000, 201));
+        ASSERT(lst_stamp(src, "blocks/index/000011.ldb", 1700000501));
+        ASSERT(lst_put(src, "blocks/index/CURRENT", 16, 202));
+        ASSERT(lst_stamp(src, "blocks/index/CURRENT", 1700000502));
+        ASSERT_EQ(lseed_finish(&req, &res, why, sizeof(why)), LSEED_OK);
+        /* 000004.ldb (changed) + 000011.ldb (new, now newest table) + index
+         * CURRENT, MANIFEST, LOG, 000010.log (newest log) + chainstate CURRENT
+         * and 000007.ldb (newest table). 000009.ldb is no longer newest. */
+        ASSERT_EQ(res.phase_b_files, (uint64_t)8);
+        ASSERT_EQ(res.phase_b_bytes,
+                  (uint64_t)(4000 + 11000 + 16 + 300 + 120 + 700 + 16 + 40000));
+        ASSERT(!lst_exists(pb, "out", "blocks/index/000003.ldb"));
+        ASSERT(lst_trees_equal(pb, "out"));
+        ASSERT(lst_no_secrets(pb, "out"));
+        (void)snprintf(path, sizeof(path), "%s/out/seed-receipt.json", pb);
+        FILE *f = fopen(path, "r");
+        ASSERT(f != NULL);
+        size_t n = fread(text, 1, sizeof(text) - 1, f);
+        fclose(f);
+        text[n] = '\0';
+        ASSERT(strstr(text, "\"phase_b_files\":8") != NULL ||
+               strstr(text, "\"phase_b_files\": 8") != NULL);
+        ASSERT(strstr(text, "\"phase_b_bytes\"") != NULL);
+        PASS();
+    }
+    TEST("legacy seed: a symlink in the source or a planted target symlink never lets prune reach outside") {
+        struct lseed_request req;
+        struct lseed_result res;
+        char why[256], pb[LST_PATH], src[LST_PATH], link[LST_PATH], out[LST_PATH],
+            victim[LST_PATH];
+        lst_reset_hooks();
+        (void)snprintf(pb, sizeof(pb), "%s/pb", root);
+        (void)snprintf(src, sizeof(src), "%s/src", pb);
+        (void)snprintf(out, sizeof(out), "%s/outside", pb);
+        ASSERT_EQ(mkdir(out, 0700), 0);
+        ASSERT(lst_put(out, "victim", 10, 1));
+        (void)snprintf(victim, sizeof(victim), "%s/victim", out);
+        lst_req(&req, pb, "esc");
+        ASSERT_EQ(lseed_stage(&req, &res, why, sizeof(why)), LSEED_OK);
+        /* Source side: a symlink out of the tree is refused. */
+        (void)snprintf(link, sizeof(link), "%s/blocks/index/000012.ldb", src);
+        ASSERT_EQ(symlink(victim, link), 0);
+        ASSERT_EQ(lseed_finish(&req, &res, why, sizeof(why)), LSEED_SYMLINK_IN_TREE);
+        ASSERT_EQ(unlink(link), 0);
+        /* Target side: a symlinked directory planted in the staged tree. */
+        (void)snprintf(link, sizeof(link), "%s/esc.tmp/blocks/planted", pb);
+        ASSERT_EQ(symlink(out, link), 0);
+        ASSERT(lseed_finish(&req, &res, why, sizeof(why)) != LSEED_OK);
+        ASSERT(!lst_exists(pb, "esc", "."));
+        ASSERT_EQ(access(victim, F_OK), 0);
         PASS();
     }
 _test_next:;
@@ -831,7 +963,7 @@ static int test_seed_swapped_dir(void)
         ASSERT_EQ(rename(p, q), 0);
         (void)snprintf(q, sizeof(q), "%s/decoy", root);
         ASSERT_EQ(symlink(q, p), 0);
-        ASSERT_EQ(lseed_copy_tree(src, dst, &tree, lseed_want_all, 1, &counts,
+        ASSERT_EQ(lseed_copy_tree(src, dst, &tree, lseed_want_all, false, 1, &counts,
                                   why, sizeof(why)), LSEED_COPY_FAILED);
         (void)snprintf(p, sizeof(p), "%s/dst/blocks/index/000005.ldb", root);
         ASSERT(access(p, F_OK) != 0); /* nothing came through the symlink */
@@ -959,6 +1091,7 @@ int test_legacy_seed(void)
     }
     failures += test_seed_happy(root);
     failures += test_seed_two_phase(root);
+    failures += test_seed_phase_b(root);
     failures += test_seed_lock_kinds(root);
     failures += test_seed_refusals(root);
     failures += test_seed_symlink_in_tree(root);

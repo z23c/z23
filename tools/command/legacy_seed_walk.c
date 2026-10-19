@@ -223,6 +223,69 @@ static void lseed_mark_tail(struct lseed_tree *t)
     }
 }
 
+/* LevelDB table or log number from "NNNNNN.ldb|log|sst" (kind 1 table, 2 log),
+ * else -1. */
+static int64_t lseed_ldb_number(const char *name, int *kind)
+{
+    char *end;
+    long n = strtol(name, &end, 10);
+    if (end == name || n < 0)
+        return -1;
+    *kind = (strcmp(end, ".ldb") == 0 || strcmp(end, ".sst") == 0) ? 1
+            : strcmp(end, ".log") == 0                             ? 2
+                                                                   : 0;
+    return *kind ? n : -1;
+}
+
+/* Files LevelDB rewrites in place or appends to: always recopied while the
+ * source is stopped, whatever their size and mtime say. */
+static bool lseed_is_ldb_meta(const char *name)
+{
+    return strcmp(name, "CURRENT") == 0 || strcmp(name, "LOG") == 0 ||
+           strcmp(name, "LOG.old") == 0 || strncmp(name, "MANIFEST-", 9) == 0;
+}
+
+struct lseed_newest {
+    size_t idx[3]; /* newest table / newest log, by kind */
+    int64_t num[3];
+    char dir[LSEED_PATH_MAX];
+};
+
+static void lseed_newest_flush(struct lseed_tree *t, struct lseed_newest *nw)
+{
+    for (int k = 1; k <= 2; k++)
+        if (nw->num[k] >= 0)
+            t->e[nw->idx[k]].force = true;
+    nw->num[1] = nw->num[2] = -1;
+}
+
+/* Entries are sorted by path, so the files of one directory are adjacent;
+ * a nested directory splitting them only marks one extra file. */
+static void lseed_mark_force(struct lseed_tree *t)
+{
+    struct lseed_newest nw = { .num = { -1, -1, -1 }, .dir = "" };
+    for (size_t i = 0; i < t->n; i++) {
+        const char *base = strrchr(t->e[i].rel, '/');
+        int kind = 0;
+        if (t->e[i].dir || !base)
+            continue;
+        base++;
+        t->e[i].force = lseed_is_ldb_meta(base);
+        if (strncmp(t->e[i].rel, nw.dir, (size_t)(base - t->e[i].rel)) != 0 ||
+            nw.dir[base - t->e[i].rel] != '\0') {
+            lseed_newest_flush(t, &nw);
+            (void)snprintf(nw.dir, sizeof(nw.dir), "%.*s",
+                           (int)(base - t->e[i].rel), t->e[i].rel);
+        }
+        int64_t n = lseed_ldb_number(base, &kind);
+        if (n >= nw.num[kind] && n >= 0) {
+            nw.num[kind] = n;
+            nw.idx[kind] = i;
+        }
+    }
+    lseed_newest_flush(t, &nw);
+}
+
 enum lseed_refusal lseed_walk(int rootfd, struct lseed_tree *tree, char *why,
                               size_t why_cap)
 {
@@ -254,12 +317,8 @@ enum lseed_refusal lseed_walk(int rootfd, struct lseed_tree *tree, char *why,
     }
     qsort(tree->e, tree->n, sizeof(*tree->e), lseed_cmp_ent);
     lseed_mark_tail(tree);
+    lseed_mark_force(tree);
     return LSEED_OK;
-}
-
-bool lseed_want_stage(const struct lseed_ent *ent)
-{
-    return !ent->dir && !ent->tail;
 }
 
 bool lseed_want_all(const struct lseed_ent *ent)

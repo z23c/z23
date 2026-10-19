@@ -15,7 +15,8 @@ struct lseed_ent {
     long mtime_ns;
     mode_t mode;
     bool dir;
-    bool tail; /* blk/rev of the highest-numbered pair: copied while stopped */
+    bool tail;  /* blk/rev of the highest-numbered pair, or a non-pair file */
+    bool force; /* LevelDB metadata or newest table/log: always recopied in phase B */
     char sha3[65];
 };
 
@@ -48,14 +49,15 @@ void lseed_tree_free(struct lseed_tree *tree);
 int lseed_open_beneath(int rootfd, const char *rel, int flags, mode_t mode);
 
 typedef bool (*lseed_want_fn)(const struct lseed_ent *ent);
-bool lseed_want_stage(const struct lseed_ent *ent);
-bool lseed_want_all(const struct lseed_ent *ent);
+bool lseed_want_all(const struct lseed_ent *ent); /* every file, both phases */
 
 /* Create every directory entry under dstroot, then copy the wanted files with
- * `workers` threads. Files already matching size and mtime are skipped. */
+ * `workers` processes. Files already matching size and mtime are skipped,
+ * except forced ones when recopy_forced is set (phase B). */
 enum lseed_refusal lseed_copy_tree(int srcroot, int dstroot,
                                    struct lseed_tree *tree, lseed_want_fn want,
-                                   int workers, struct lseed_counts *counts,
+                                   bool recopy_forced, int workers,
+                                   struct lseed_counts *counts,
                                    char *why, size_t why_cap);
 
 /* fsync every directory of the tree and the root. */
