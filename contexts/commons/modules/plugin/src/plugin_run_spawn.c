@@ -246,6 +246,29 @@ static bool prs_accept(const struct plugin_run *run, struct resident_launch_acce
     return true;
 }
 
+/* Resolve and fully check the generation `current` names, as a start would,
+ * without disturbing a running child: the executable is hashed here too, so a
+ * cached verification cannot hide altered bytes. On refusal the resolved fields
+ * are put back exactly as they were and only info.detail records the reason. */
+enum plugin_run_status prs_check_target(struct plugin_run *run)
+{
+    const struct plugin_run saved = *run;
+    struct resident_launch_accepted accepted;
+    enum plugin_run_status st = prs_resolve(run);
+    if (st == PLUGIN_RUN_OK && !prs_accept(run, &accepted)) {
+        prs_detail(run, "image not accepted", "bytes differ from the signed SHA3-512");
+        st = PLUGIN_RUN_ERR_SPAWN;
+    }
+    if (st != PLUGIN_RUN_OK) {
+        memcpy(run->exe, saved.exe, sizeof(run->exe));
+        memcpy(run->data_dir, saved.data_dir, sizeof(run->data_dir));
+        memcpy(run->exe_sha3, saved.exe_sha3, sizeof(run->exe_sha3));
+        memcpy(run->info.generation, saved.info.generation, sizeof(run->info.generation));
+        run->capabilities = saved.capabilities;
+    }
+    return st;
+}
+
 /* Everything the parent opens for one start, released together. */
 struct prs_start {
     int log_read, log_write, data_fd, grant_image, grant_data;

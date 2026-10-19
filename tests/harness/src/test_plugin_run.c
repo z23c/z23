@@ -710,6 +710,57 @@ static int prt_case_reload(void)
     return failures;
 }
 
+static int prt_case_reload_refused(void)
+{
+    int failures = 0;
+    struct prt_env e;
+    struct plugin_run *run = NULL;
+    bool ready = prt_env_open(&e);
+    TEST_CASE("a reload onto a tampered generation leaves the running child alone") {
+        char g1[PRT_HEX], g2[PRT_HEX], g3[PRT_HEX], exe[PATH_MAX];
+        struct plugin_run_info info;
+        static volatile sig_atomic_t stop, reload;
+        uint64_t old_pid;
+        ASSERT(ready);
+        ASSERT(prt_install(&e, "keep", "normal", "k1", PRT_FS, g1));
+        run = prt_open(&e, "keep");
+        ASSERT(run != NULL);
+        ASSERT(prt_wait(&run, 1, 0, prt_healthy, NULL, 5000));
+        plugin_run_info_get(run, &info);
+        old_pid = info.pid;
+        ASSERT(old_pid != 0);
+        /* a new generation whose executable bytes no longer match its signed hash */
+        ASSERT(prt_install(&e, "keep", "normal", "k2", PRT_FS, g2));
+        snprintf(exe, sizeof(exe), "%s/keep/generations/%s/keep", e.root, g2);
+        ASSERT_EQ(chmod(exe, 0755), 0);
+        ASSERT(prt_write(exe, "evil", 4));
+        ASSERT_EQ(plugin_run_reload(run), PLUGIN_RUN_ERR_STORE);
+        plugin_run_info_get(run, &info);
+        ASSERT_EQ(info.pid, old_pid);
+        ASSERT_EQ(info.state, PLUGIN_RUN_STATE_RUNNING);
+        ASSERT_STR_EQ(info.generation, g1);
+        ASSERT(strstr(info.detail, "plugin store refused") != NULL);
+        ASSERT_EQ(kill((pid_t)old_pid, 0), 0);
+        /* the loop keeps supervising the old child through a refused reload */
+        reload = 1;
+        ASSERT_EQ(plugin_run_loop(run, &stop, &reload, 200), PLUGIN_RUN_OK);
+        plugin_run_info_get(run, &info);
+        ASSERT_EQ(info.pid, old_pid);
+        ASSERT_EQ(info.state, PLUGIN_RUN_STATE_RUNNING);
+        /* a valid generation afterwards still takes over: the refusal wedged nothing */
+        ASSERT(prt_install(&e, "keep", "normal", "k3", PRT_FS, g3));
+        ASSERT_EQ(plugin_run_reload(run), PLUGIN_RUN_OK);
+        ASSERT(prt_wait(&run, 1, 0, prt_new_pid, &old_pid, 5000));
+        ASSERT(prt_wait(&run, 1, 0, prt_healthy, NULL, 5000));
+        plugin_run_info_get(run, &info);
+        ASSERT_STR_EQ(info.generation, g3);
+        ASSERT(info.pid != old_pid);
+    } TEST_END
+    plugin_run_close(run);
+    prt_env_close(&e);
+    return failures;
+}
+
 static int prt_case_crash_loop(void)
 {
     int failures = 0;
@@ -1364,6 +1415,7 @@ int test_plugin_run(void)
     failures += prt_case_cached_unsafe_dir("a remembered generation is refused once the generations directory is group-writable", "udd", true);
     failures += prt_case_hung_ping();
     failures += prt_case_reload();
+    failures += prt_case_reload_refused();
     failures += prt_case_crash_loop();
     failures += prt_case_crash_no_fallback();
     failures += prt_case_refusals();

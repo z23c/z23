@@ -60,6 +60,9 @@ uint64_t prs_now_ns(void);
 #if defined(__linux__)
 /* Read the current generation, verify it and its capabilities. */
 enum plugin_run_status prs_resolve(struct plugin_run *run);
+/* Resolve and verify the target as a start would, leaving a running child and
+ * the resolved fields untouched when it is refused. */
+enum plugin_run_status prs_check_target(struct plugin_run *run);
 /* Start the confined child for the resolved generation. */
 enum plugin_run_status prs_child_start(struct plugin_run *run);
 /* Stop frame, then SIGKILL; releases the launch and the log pipe. */
@@ -74,6 +77,12 @@ void prs_log_drain(struct plugin_run *run, bool final);
 /* Confined plugin processes are Linux-only; plugin_run_open refuses before any
  * of these run. */
 static inline enum plugin_run_status prs_resolve(struct plugin_run *run)
+{
+    (void)run;
+    return PLUGIN_RUN_ERR_PLATFORM;
+}
+
+static inline enum plugin_run_status prs_check_target(struct plugin_run *run)
 {
     (void)run;
     return PLUGIN_RUN_ERR_PLATFORM;

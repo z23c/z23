@@ -152,11 +152,10 @@ static void prr_crashed(struct plugin_run *run, uint64_t now)
         prr_fallback(run, now);
 }
 
-static enum plugin_run_status prr_start(struct plugin_run *run, uint64_t now)
+/* Start the child for the generation prs_resolve or prs_check_target left resolved. */
+static enum plugin_run_status prr_launch(struct plugin_run *run, uint64_t now)
 {
-    enum plugin_run_status st = prs_resolve(run);
-    if (st == PLUGIN_RUN_OK)
-        st = prs_child_start(run);
+    enum plugin_run_status st = prs_child_start(run);
     if (st == PLUGIN_RUN_ERR_SPAWN && run->started_once) {
         prr_crashed(run, now);
         return PLUGIN_RUN_OK;
@@ -176,6 +175,15 @@ static enum plugin_run_status prr_start(struct plugin_run *run, uint64_t now)
     run->misses = 0;
     run->run_pings = 0;
     return PLUGIN_RUN_OK;
+}
+
+static enum plugin_run_status prr_start(struct plugin_run *run, uint64_t now)
+{
+    enum plugin_run_status st = prs_resolve(run);
+    if (st == PLUGIN_RUN_OK)
+        return prr_launch(run, now);
+    run->info.state = PLUGIN_RUN_STATE_FAILED;
+    return st;
 }
 
 static void prr_kill(struct plugin_run *run, uint64_t now, const char *why)
@@ -260,12 +268,22 @@ enum plugin_run_status plugin_run_reload(struct plugin_run *run)
 {
     if (!run)
         return PLUGIN_RUN_ERR_ARGUMENT;
-    if (run->info.state == PLUGIN_RUN_STATE_RUNNING)
-        prs_child_stop(run);
+    /* A running child is only replaced by a target that already verified: a
+     * refused reload leaves it, its pid and its state as they were. */
+    if (run->info.state != PLUGIN_RUN_STATE_RUNNING) {
+        run->info.pid = 0;
+        run->info.fell_back = false;
+        prr_reset_backoff(run);
+        return prr_start(run, prs_now_ns());
+    }
+    enum plugin_run_status st = prs_check_target(run);
+    if (st != PLUGIN_RUN_OK)
+        return st;
+    prs_child_stop(run);
     run->info.pid = 0;
     run->info.fell_back = false;
     prr_reset_backoff(run);
-    return prr_start(run, prs_now_ns());
+    return prr_launch(run, prs_now_ns());
 }
 
 void plugin_run_info_get(const struct plugin_run *run, struct plugin_run_info *out)
@@ -286,6 +304,9 @@ enum plugin_run_status plugin_run_loop(struct plugin_run *run,
         if (reload && *reload) {
             *reload = 0;
             st = plugin_run_reload(run);
+            /* a refused reload keeps the old child supervised; only a lost child ends the loop */
+            if (st != PLUGIN_RUN_OK && run->info.state == PLUGIN_RUN_STATE_RUNNING)
+                st = PLUGIN_RUN_OK;
         }
         if (st == PLUGIN_RUN_OK)
             st = plugin_run_poll(run);
