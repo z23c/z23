@@ -53,6 +53,26 @@ A fresh checkout starts from the new main; do not merge an old checkout's
 unrelated history back into it. Recover a needed change as a bounded, reviewed
 patch against the current baseline.
 
+### Historical retrieval evidence in a fresh clone
+
+The retrieval lint gate checks pinned commits from before the source baseline.
+If it reports `benchmark lineage is unavailable` or `driver commit is unavailable`,
+fetch those exact evidence objects without fetching their old submodules:
+
+```sh
+git fetch --no-recurse-submodules origin fff77e30c30157113c7dced2f0179c92980f6481
+git fetch --no-recurse-submodules origin 25fe3e353288d2f52e7f5fc07b7b722b27e71f1a
+devbuild --wait make -j4 check-retrieval-historical-evidence
+```
+
+Use the scheduler prefix on maintainer hosts; elsewhere run the `make` command
+directly. These fetches supply evidence without changing the checked-out source.
+Do not merge the historical commits. If either object is unavailable, retain the
+failure for the reviewer; the check still requires the exact evidence.
+
+<!-- claim: symbol-present lineage_commit tools/dev/retrieval-gold-corpus-check.sh # pinned historical corpus lineage -->
+<!-- claim: symbol-present driver tools/dev/retrieval-gold-identifier-graph-receipt-check.sh # pinned historical benchmark driver -->
+
 
 ## Maintainer hosts
 
