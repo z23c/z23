@@ -144,10 +144,10 @@ static int ss_test_weights(void)
 {
     int failures = 0;
     struct zcl_shadow_weights w = {0};
-    TEST("shadow select: cost weights are sorted and cover the 213 lint gates") {
+    TEST("shadow select: cost weights are sorted and cover the 212 lint gates") {
         ASSERT(ss_load_weights(&w));
         ASSERT_EQ(zcl_shadow_weights_count(&w, ZCL_SHADOW_OBLIGATION_LINT_GATE),
-                  (size_t)213);
+                  (size_t)212);
         uint32_t ms = 0;
         ASSERT(zcl_shadow_weight_ms(&w, ZCL_SHADOW_OBLIGATION_TEST_GROUP,
                                     "test_codec_cursor", &ms));
@@ -491,7 +491,7 @@ static bool ss_row_consistent(const struct zcl_shadow_result *r)
 {
     return r->bytes_verified && r->groups_reference > 0 &&
            ss_row_classes_consistent(r) &&
-           r->lint_reference == 213 && r->lint_selected == r->lint_reference &&
+           r->lint_reference == 212 && r->lint_selected == r->lint_reference &&
            r->eligible_groups == 0 &&
            r->eligible_cost_ms == r->reference_cost_ms &&
            r->carried_groups + r->predicted_groups >= r->groups_reference &&

@@ -1,7 +1,7 @@
 # Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 # Shadow selector cost weights: mean fresh service ms per lint gate and test group.
 # Source: costs.tsv (125749 rows from 485 landing-proof attempt logs), sha256 3b8b7a8b175830c915d17aa6d8c39283d1ef5bcd37ea258a4b3d150fc512d126.
-# Rows: reuse=fresh only; lint gates limited to the 213 LINT_GATES of 7a9f354f3f.
+# Rows: reuse=fresh only; lint gates limited to the 212 LINT_GATES (the 213 of 7a9f354f3f less check-verification-coverage).
 # kind	name	mean_ms	samples
 lint_gate	check-accel-oracle-pinned	7713	338
 lint_gate	check-api-reference-generated	320	333
