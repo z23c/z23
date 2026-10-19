@@ -250,4 +250,9 @@ void boot_fleet_board_fleet_test_restart_cursors(void);
 int64_t boot_fleet_board_fleet_test_last_after(void);
 #endif
 
+/* The refusal phrase for `r` and, where one exists, the limit hit and the
+ * command that clears it. Writes into buf and returns it. */
+const char *boot_fleet_board_write_message(enum fleet_board_result r, char *buf,
+                                           size_t cap);
+
 #endif /* ZCL_CONFIG_BOOT_FLEET_BOARD_H */

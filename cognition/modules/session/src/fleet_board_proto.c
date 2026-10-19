@@ -44,7 +44,9 @@ static const char *const k_result_strings[] = {
     [FLEET_BOARD_ERR_SLUG]      = "slug is not [a-z0-9-] within 64 bytes",
     [FLEET_BOARD_ERR_TITLE]     = "title too long or unprintable",
     [FLEET_BOARD_ERR_RECEIPT]   = "receipt too long or unprintable",
-    [FLEET_BOARD_ERR_TEXT]      = "text is empty or over the kind's limit",
+    [FLEET_BOARD_ERR_TEXT]      =
+        "text is empty, over the kind's byte limit, or holds a control "
+        "character other than tab and newline (a carriage return is one)",
     [FLEET_BOARD_ERR_TTL]       = "ttl is zero or over the ceiling",
     [FLEET_BOARD_ERR_FUTURE]    = "created_at is in the future",
     [FLEET_BOARD_ERR_EXPIRED]   = "post has expired",

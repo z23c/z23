@@ -332,6 +332,43 @@ static bool board_wiki_query_arguments(struct node_db *ndb, const char *after,
     return true;
 }
 
+static bool board_wiki_list_args_ok(struct node_db *ndb, const char *after,
+    const struct db_fleet_board_post *out, size_t max)
+{
+    return ndb && ndb->open && after && out && max > 0 &&
+        (!after[0] || fleet_board_slug_valid(after));
+}
+
+int db_fleet_board_wiki_list_after(struct node_db *ndb, const char *after,
+    struct db_fleet_board_post *out, size_t max,
+    char last_scanned[FLEET_BOARD_SLUG_MAX + 1], bool *more)
+{
+    char last_sink[FLEET_BOARD_SLUG_MAX + 1];
+    bool more_sink;
+    char *last = last_scanned ? last_scanned : last_sink;
+    bool *has_more = more ? more : &more_sink;
+    last[0] = '\0';
+    *has_more = false;
+    if (!board_wiki_list_args_ok(ndb, after, out, max))
+        return 0;
+    if (max > FLEET_BOARD_LIST_MAX)
+        max = FLEET_BOARD_LIST_MAX;
+    char slug[FLEET_BOARD_SLUG_MAX + 1];
+    (void)snprintf(last, FLEET_BOARD_SLUG_MAX + 1, "%s", after);
+    size_t scanned = 0;
+    int written = 0;
+    while (board_wiki_next_slug(ndb, last, slug) > 0) {
+        if (scanned++ == max) {
+            *has_more = true;
+            break;
+        }
+        (void)snprintf(last, FLEET_BOARD_SLUG_MAX + 1, "%s", slug);
+        if (db_fleet_board_wiki_read(ndb, slug, &out[written]))
+            written++;
+    }
+    return written;
+}
+
 bool db_fleet_board_wiki_query(struct node_db *ndb, const char *after,
     fleet_wiki_visit_fn visit, void *context,
     struct fleet_wiki_query_progress *progress)

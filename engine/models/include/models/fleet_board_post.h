@@ -277,9 +277,18 @@ bool db_fleet_board_wiki_query(struct node_db *, const char *after_slug,
     fleet_wiki_visit_fn, void *, struct fleet_wiki_query_progress *);
 
 
-/* One row per slug: the latest revision of every page. */
+/* One row per slug: the latest revision of the first max pages. Pages past
+ * max are reached with db_fleet_board_wiki_list_after. */
 int db_fleet_board_wiki_list(struct node_db *ndb,
                              struct db_fleet_board_post *out, size_t max);
+
+/* Up to max pages whose slug sorts after `after` (exclusive; empty starts at
+ * the first), in slug order. *last_scanned is the last slug examined, even
+ * when its revisions all failed verification and it wrote no row; resume
+ * from it. *more is set when a later slug exists. Returns rows written. */
+int db_fleet_board_wiki_list_after(struct node_db *ndb, const char *after,
+    struct db_fleet_board_post *out, size_t max,
+    char last_scanned[FLEET_BOARD_SLUG_MAX + 1], bool *more);
 
 /* Every revision of one slug, newest first. */
 int db_fleet_board_wiki_history(struct node_db *ndb, const char *slug,

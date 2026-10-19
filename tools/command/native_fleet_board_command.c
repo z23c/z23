@@ -736,6 +736,23 @@ static void fb_wiki_read_next(struct zcl_command_reply *reply)
             "cannot faithfully build the continuation hint", "fleet.board");
 }
 
+/* Bytes the continuation hint adds to a truncated reply, measured at the
+ * largest allowed offset. Replacing {} with a field in nonempty data adds a
+ * comma: subtract one byte, not two. Escaping is measured by json_write. */
+static bool fb_wiki_continue_bytes(size_t *out)
+{
+    static const char id[] =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    struct json_value cont, extra;
+    json_init(&extra); json_set_object(&extra);
+    bool ok = fb_wiki_read_hint(id, 16384, &cont) &&
+        json_push_kv(&extra, "continue", &cont);
+    if (ok) *out = json_write(&extra, NULL, 0) - 1;
+    json_free(&cont);
+    json_free(&extra);
+    return ok;
+}
+
 /* Measure the actual continuation representation at the largest allowed
  * byte offset. Full replies need none of this reservation. */
 static bool fb_wiki_read_allowance(const struct zcl_command_request *request,
@@ -747,20 +764,109 @@ static bool fb_wiki_read_allowance(const struct zcl_command_request *request,
         return true;
     if (!request->success_data_budget)
         return false;
-    static const char id[] =
-        "0000000000000000000000000000000000000000000000000000000000000000";
-    struct json_value cont, extra;
-    json_init(&extra); json_set_object(&extra);
-    bool ok = fb_wiki_read_hint(id, 16384, &cont) &&
-        json_push_kv(&extra, "continue", &cont);
-    /* Replacing the enclosing {} by a field in nonempty data adds a comma:
-     * subtract one byte, not two. Escaping is measured by json_write. */
-    if (ok) ok = json_push_kv_int(out, "data_budget",
-                     (int64_t)request->success_data_budget) &&
-        json_push_kv_int(out, "continuation_bytes", (int64_t)json_write(&extra, NULL, 0) - 1);
-    json_free(&cont);
-    json_free(&extra);
+    size_t extra;
+    return fb_wiki_continue_bytes(&extra) &&
+        json_push_kv_int(out, "data_budget", (int64_t)request->success_data_budget) &&
+        json_push_kv_int(out, "continuation_bytes", (int64_t)extra);
+}
+
+static bool fb_wiki_body_key(const char *key)
+{
+    return !strcmp(key, "text") || !strcmp(key, "entry") ||
+        !strcmp(key, "truncated") || !strcmp(key, "next_offset") ||
+        !strcmp(key, "continue");
+}
+
+/* Metadata of the reply without any body field; false on allocation failure. */
+static bool fb_wiki_metadata(const struct json_value *data, struct json_value *meta)
+{
+    json_init(meta);
+    json_set_object(meta);
+    for (size_t i = 0; i < data->num_children; i++)
+        if (data->keys[i] && !fb_wiki_body_key(data->keys[i]) &&
+            !json_push_kv(meta, data->keys[i], &data->children[i]))
+            return false;
+    return true;
+}
+
+/* One trial reply: metadata plus the first n bytes of text, marked partial. */
+static bool fb_wiki_prefix_trial(const struct json_value *meta, char *copy,
+                                 size_t n, bool partial, struct json_value *trial)
+{
+    char saved = copy[n];
+    copy[n] = 0;
+    json_init(trial);
+    bool ok = json_copy_checked(trial, meta) &&
+        json_push_kv_str(trial, "text", copy) &&
+        (!partial || (json_push_kv_bool(trial, "truncated", true) &&
+                      json_push_kv_int(trial, "next_offset", (int64_t)n)));
+    copy[n] = saved;
     return ok;
+}
+
+/* Largest UTF-8-aligned prefix whose reply, with the continuation hint still
+ * to be added, fits room. Zero when not even one whole character fits. */
+static bool fb_wiki_prefix_search(const struct json_value *meta, char *copy,
+                                  size_t len, size_t room, size_t *best)
+{
+    size_t low = 1, high = len - 1;
+    *best = 0;
+    while (low <= high) {
+        size_t mid = low + (high - low) / 2, n = mid;
+        while (n > 0 && ((uint8_t)copy[n] & 0xC0) == 0x80) n--;
+        struct json_value trial;
+        bool ok = n > 0 && fb_wiki_prefix_trial(meta, copy, n, true, &trial);
+        bool fits = ok && json_write(&trial, NULL, 0) <= room;
+        if (ok) json_free(&trial);
+        else if (n > 0) return false;
+        if (fits) { *best = n; low = mid + 1; }
+        else high = mid - 1;
+    }
+    return true;
+}
+
+/* A node that predates bounded slug reads answers with the whole page. Fit it
+ * to the data budget here: drop the parsed entry, keep the longest whole-
+ * character prefix of the raw text (the whole text when it fits), and let
+ * fb_wiki_read_next add the exact chunk route for the rest. */
+static void fb_wiki_read_clamp(const struct zcl_command_request *request,
+                               struct zcl_command_reply *reply)
+{
+    size_t room = request->success_data_budget;
+    if (!request->success_data_budget_provided ||
+        json_write(&reply->data, NULL, 0) <= room)
+        return;
+    const char *text = json_get_str(json_get(&reply->data, "text"));
+    size_t extra, best = 0, len = text ? strlen(text) : 0;
+    struct json_value meta, trial;
+    json_init(&meta);
+    json_init(&trial);
+    char *copy = len > 1 ? zcl_malloc(len + 1, "fleet_board.wiki_clamp") : NULL;
+    bool ok = copy && fb_wiki_continue_bytes(&extra) && extra < room &&
+        fb_wiki_metadata(&reply->data, &meta);
+    if (ok) {
+        memcpy(copy, text, len + 1);
+        /* Without the parsed entry the raw body may fit whole. */
+        ok = fb_wiki_prefix_trial(&meta, copy, len, false, &trial);
+        if (ok && json_write(&trial, NULL, 0) > room) {
+            json_free(&trial);
+            json_init(&trial);
+            ok = fb_wiki_prefix_search(&meta, copy, len, room - extra, &best) &&
+                best > 0 && fb_wiki_prefix_trial(&meta, copy, best, true, &trial);
+        }
+    }
+    if (ok) {
+        json_free(&reply->data);
+        reply->data = trial;
+    } else {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "READ_BUDGET", "execute", false,
+            "page metadata and a whole body character do not fit the response budget",
+            "fleet.wiki.read");
+        json_free(&trial);
+    }
+    json_free(&meta);
+    free(copy);
 }
 
 static bool fb_wiki_chunk_request(const struct zcl_command_request *request,
@@ -783,6 +889,27 @@ static bool fb_wiki_chunk_request(const struct zcl_command_request *request,
     return true;
 }
 
+/* The node request for a read by slug; false when the reply already failed. */
+static bool fb_wiki_slug_request(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply,
+                                 const char *slug, struct json_value *out)
+{
+    if (json_get(request->input, "offset") || json_get(request->input, "bytes")) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "MISSING_ID", "normalize", false,
+            "byte chunks require an exact revision id", "id");
+        return false;
+    }
+    bool prepared = json_push_kv_str(out, "slug", slug) &&
+        json_push_kv_int(out, "response_budget", (int64_t)fb_wiki_response_cap(request)) &&
+        fb_wiki_read_allowance(request, out);
+    if (!prepared)
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "BOARD_PROJECTION_FAILED", "prepare", false,
+            "cannot faithfully build the wiki read request", "fleet.board");
+    return prepared;
+}
+
 void zcl_native_handle_fleet_wiki_read(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -798,28 +925,14 @@ void zcl_native_handle_fleet_wiki_read(
     struct json_value out;
     json_init(&out);
     json_set_object(&out);
-    bool prepared = json_push_kv_str(&out, "op", "wiki_read");
-    if (chunk) {
-        if (!fb_wiki_chunk_request(request, reply, &out)) {
-            json_free(&out);
-            return;
-        }
-    } else {
-        if (json_get(request->input, "offset") || json_get(request->input, "bytes")) {
-            fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "MISSING_ID", "normalize", false,
-                "byte chunks require an exact revision id", "id");
-            json_free(&out);
-            return;
-        }
-        prepared = prepared && json_push_kv_str(&out, "slug", slug) &&
-            json_push_kv_int(&out, "response_budget", (int64_t)fb_wiki_response_cap(request)) &&
-            fb_wiki_read_allowance(request, &out);
-    }
-    if (!prepared) {
-        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-            "BOARD_PROJECTION_FAILED", "prepare", false,
-            "cannot faithfully build the wiki read request", "fleet.board");
+    bool ready = json_push_kv_str(&out, "op", "wiki_read") &&
+        (chunk ? fb_wiki_chunk_request(request, reply, &out)
+               : fb_wiki_slug_request(request, reply, slug, &out));
+    if (!ready) {
+        if (reply->status == ZCL_COMMAND_STATUS_PASSED)
+            fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "BOARD_PROJECTION_FAILED", "prepare", false,
+                "cannot faithfully build the wiki read request", "fleet.board");
         json_free(&out);
         return;
     }
@@ -831,8 +944,11 @@ void zcl_native_handle_fleet_wiki_read(
     if (!ok)
         return;
     fb_project_object(reply, &body);
-    if (!chunk && reply->status == ZCL_COMMAND_STATUS_PASSED)
-        fb_wiki_read_next(reply);
+    if (!chunk && reply->status == ZCL_COMMAND_STATUS_PASSED) {
+        fb_wiki_read_clamp(request, reply);
+        if (reply->status == ZCL_COMMAND_STATUS_PASSED)
+            fb_wiki_read_next(reply);
+    }
     json_free(&body);
 }
 
@@ -862,22 +978,77 @@ void zcl_native_fleet_wiki_write_rpc(const struct zcl_command_request *request,
 }
 
 /* ── fleet wiki list ────────────────────────────────────────────────── */
+/* Index pages the node serves per call. The node stores at most 10000 posts,
+ * so this bound is never reached by a well-formed board; reaching it is an
+ * explicit error, never a silently shorter index. */
+enum { FB_WIKI_LIST_CALLS_MAX = 64 };
+
+/* Append every post of `page` to `all`; false on allocation failure. */
+static bool fb_wiki_list_append(struct json_value *all, const struct json_value *page)
+{
+    const struct json_value *posts = json_get(page, "posts");
+    for (size_t i = 0; posts && posts->type == JSON_ARR && i < json_size(posts); i++)
+        if (!json_push_back(all, json_at(posts, i)))
+            return false;
+    return true;
+}
+
+/* Fetch the whole index into body.posts, one node call per slug-ordered batch,
+ * so every page is reachable through the command's own --cursor. */
+static bool fb_wiki_list_collect(struct zcl_command_reply *reply, struct json_value *body)
+{
+    struct json_value all, after;
+    json_init(&all); json_set_array(&all);
+    json_init(&after); json_set_str(&after, "");
+    bool ok = true;
+    for (int call = 0; ok; call++) {
+        struct json_value out, page;
+        json_init(&out); json_init(&page);
+        json_set_object(&out);
+        ok = json_push_kv_str(&out, "op", "wiki_list") &&
+            (!json_get_str(&after)[0] || json_push_kv_str(&out, "after_slug", json_get_str(&after)));
+        ok = ok && fb_call(reply, &out, &page, 0);
+        json_free(&out);
+        if (!ok) { json_free(&page); break; }
+        const char *last = json_get_str(json_get(&page, "after_slug"));
+        bool more = json_get_bool(json_get(&page, "more")) && last && last[0] &&
+            strcmp(last, json_get_str(&after)) > 0;
+        if (!fb_wiki_list_append(&all, &page)) {
+            fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "BOARD_PROJECTION_FAILED", "execute", false,
+                "cannot faithfully collect the wiki index", "fleet.board");
+            ok = false;
+        } else if (more && call + 1 >= FB_WIKI_LIST_CALLS_MAX) {
+            fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "WIKI_INDEX_TOO_LARGE", "execute", false,
+                "the wiki index needs more node calls than one list allows; "
+                "use fleet wiki find --after_slug to walk it", "fleet.wiki.find");
+            ok = false;
+        } else if (more) {
+            json_set_str(&after, last);
+        }
+        json_free(&page);
+        if (!more) break;
+    }
+    if (ok) {
+        json_set_object(body);
+        ok = json_push_kv(body, "posts", &all);
+    }
+    json_free(&all);
+    json_free(&after);
+    return ok;
+}
+
 void zcl_native_handle_fleet_wiki_list(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    (void)request;
-    struct json_value out;
-    json_init(&out);
-    json_set_object(&out);
-    (void)json_push_kv_str(&out, "op", "wiki_list");
-
     struct json_value body;
     json_init(&body);
-    bool ok = fb_call(reply, &out, &body, 0);
-    json_free(&out);
-    if (!ok)
+    if (!fb_wiki_list_collect(reply, &body)) {
+        json_free(&body);
         return;
+    }
     zcl_native_fleet_board_project_list(request, &body, reply);
     json_free(&body);
     (void)zcl_command_reply_add_next(reply, "fleet.wiki.read", "{}",

@@ -139,19 +139,6 @@ static const enum qb_column k_board_chain_cols[] = {
 ZCL_MODEL_READ_ROW_FN(board_read_chain_ref, struct fleet_board_chain_ref,
                       FLEET_BOARD_CHAIN_FIELDS)
 
-struct fleet_board_slug_ref {
-    char slug[FLEET_BOARD_SLUG_MAX + 1];
-};
-#define FB_QB_SLUG_COLUMN(kind, col, member, extra) \
-    ZCL_MF_CAT(QB_C_fleet_board_posts_, col),
-static const enum qb_column k_board_slug_cols[] = {
-    ZCL_MODEL_EXPAND(FB_QB_SLUG_COLUMN, FLEET_BOARD_SLUG_FIELDS)
-};
-#define BOARD_SLUG_NCOLS \
-    (sizeof(k_board_slug_cols) / sizeof(k_board_slug_cols[0]))
-ZCL_MODEL_READ_ROW_FN(board_read_slug_ref, struct fleet_board_slug_ref,
-                      FLEET_BOARD_SLUG_FIELDS)
-
 struct fleet_board_room_ref {
     char room[FLEET_BOARD_ROOM_MAX + 1];
 };
@@ -1241,41 +1228,7 @@ int db_fleet_board_wiki_history(struct node_db *ndb, const char *slug,
 int db_fleet_board_wiki_list(struct node_db *ndb,
                              struct db_fleet_board_post *out, size_t max)
 {
-    if (!ndb || !ndb->open || !out || max == 0)
-        return 0;
-    if (max > FLEET_BOARD_LIST_MAX)
-        max = FLEET_BOARD_LIST_MAX;
-
-    /* Two bounded steps rather than one GROUP BY: collect the distinct slugs
-     * in order, then resolve each one through the same latest-revision rule
-     * `wiki read` uses. One rule, one place. */
-    char slugs[FLEET_BOARD_LIST_MAX][FLEET_BOARD_SLUG_MAX + 1];
-    size_t n_slugs = 0;
-    struct qb q;
-    qb_select(&q, QB_T_fleet_board_posts);
-    qb_select_columns(&q, k_board_slug_cols, BOARD_SLUG_NCOLS);
-    qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ,
-                 FLEET_BOARD_KIND_WIKI);
-    qb_order_by(&q, QB_C_fleet_board_posts_slug, QB_ASC);
-    sqlite3_stmt *s = NULL;
-    if (!QB_PREPARE(ndb, &q, s))
-        return 0;
-    while (AR_STEP_ROW(s) && n_slugs < max) {
-        struct fleet_board_slug_ref row;
-        board_read_slug_ref(&row, s);
-        if (n_slugs && strcmp(slugs[n_slugs - 1], row.slug) == 0)
-            continue;               /* ordered, so a repeat is adjacent */
-        (void)snprintf(slugs[n_slugs], sizeof(slugs[n_slugs]), "%s", row.slug);
-        n_slugs++;
-    }
-    sqlite3_finalize(s);
-
-    int written = 0;
-    for (size_t i = 0; i < n_slugs; i++) {
-        if (db_fleet_board_wiki_read(ndb, slugs[i], &out[written]))
-            written++;
-    }
-    return written;
+    return db_fleet_board_wiki_list_after(ndb, "", out, max, NULL, NULL);
 }
 
 int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,

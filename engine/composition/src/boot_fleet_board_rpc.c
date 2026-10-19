@@ -52,6 +52,13 @@ static void fb_refuse(struct json_value *result, enum fleet_board_result r)
              fleet_board_result_string(r));
 }
 
+static void fb_refuse_write(struct json_value *result, enum fleet_board_result r)
+{
+    char message[640];
+    fb_error(result, r == FLEET_BOARD_ERR_BUSY ? "BOARD_BUSY" : "BOARD_REFUSED",
+             boot_fleet_board_write_message(r, message, sizeof(message)));
+}
+
 static const char *fb_str(const struct json_value *in, const char *key,
                           const char *fallback)
 {
@@ -340,7 +347,7 @@ static void fb_op_post(const struct json_value *in, struct json_value *result,
         return;
     enum fleet_board_result r = boot_fleet_board_publish(&post, now);
     if (r != FLEET_BOARD_OK) {
-        fb_refuse(result, r);
+        fb_refuse_write(result, r);
         return;
     }
     char hex[65];
@@ -446,7 +453,10 @@ static void fb_op_wiki_write(const struct json_value *in,
         static const char *const codes[] = {"OK", "REPLAY", "WIKI_INPUT", "WIKI_CONFLICT",
             "WIKI_CORRUPT", "WIKI_REQUEST_COLLISION", "WIKI_CLOCK", "WIKI_BUSY",
             "WIKI_STORAGE", "WIKI_REFUSED"};
-        fb_error(result, codes[status], "receiver-local atomic wiki mutation was refused; reconcile retained request before retry");
+        char message[640];
+        bool refused = status == FLEET_WIKI_WRITE_REFUSED && refusal != FLEET_BOARD_OK;
+        fb_error(result, codes[status], refused ? boot_fleet_board_write_message(refusal, message, sizeof(message))
+            : "receiver-local atomic wiki mutation was refused; reconcile retained request before retry");
         return;
     }
     if (!fb_wiki_write_receipt(result, &out, status == FLEET_WIKI_WRITE_REPLAY))
@@ -847,7 +857,16 @@ static void fb_wiki_read_body(const struct db_fleet_board_post *row,
         *result = trial;
     } else {
         json_free(&trial);
-        if (ok) ok = fb_wiki_read_prefix(row, limits->partial, result);
+        /* The parsed entry is the first thing to give way: the raw body, whole,
+         * still reads back in one reply. */
+        ok = ok && fb_wiki_read_trial(result, row->post.text, NULL, false, 0, &trial);
+        if (ok && json_write(&trial, NULL, 0) <= limits->full) {
+            json_free(result);
+            *result = trial;
+        } else {
+            json_free(&trial);
+            if (ok) ok = fb_wiki_read_prefix(row, limits->partial, result);
+        }
     }
     json_free(&entry);
     if (!ok)
@@ -934,8 +953,14 @@ static bool fb_render_wiki_index(struct json_value *result,
     return ok;
 }
 
-static void fb_op_wiki_list(struct node_db *ndb, struct json_value *result)
+static void fb_op_wiki_list(struct node_db *ndb, const struct json_value *in,
+                            struct json_value *result)
 {
+    const char *after = fb_str(in, "after_slug", "");
+    if (after[0] && !fleet_board_slug_valid(after)) {
+        fb_error(result, "BAD_AFTER", "after_slug must be a page slug");
+        return;
+    }
     struct db_fleet_board_post *rows = zcl_calloc(
         FLEET_BOARD_LIST_MAX, sizeof(*rows), "fleet_board.rpc.wiki_list");
     if (!rows) {
@@ -943,8 +968,13 @@ static void fb_op_wiki_list(struct node_db *ndb, struct json_value *result)
                  "the bounded wiki result snapshot could not be allocated");
         return;
     }
-    int n = db_fleet_board_wiki_list(ndb, rows, FLEET_BOARD_LIST_MAX);
-    if (!fb_render_wiki_index(result, rows, n)) {
+    char last[FLEET_BOARD_SLUG_MAX + 1];
+    bool more;
+    int n = db_fleet_board_wiki_list_after(ndb, after, rows, FLEET_BOARD_LIST_MAX,
+                                           last, &more);
+    if (!fb_render_wiki_index(result, rows, n) ||
+        !json_push_kv_bool(result, "more", more) ||
+        !json_push_kv_str(result, "after_slug", last)) {
         json_free(result);
         json_init(result);
         fb_error(result, "READ_PROJECTION_FAILED",
@@ -1371,7 +1401,7 @@ static bool fb_dispatch_wiki(struct node_db *ndb, const char *op,
     if (strcmp(op, "wiki_read") == 0)
         fb_op_wiki_read(ndb, in, result);
     else if (strcmp(op, "wiki_list") == 0)
-        fb_op_wiki_list(ndb, result);
+        fb_op_wiki_list(ndb, in, result);
     else if (strcmp(op, "wiki_find") == 0)
         fb_op_wiki_find(ndb, in, result);
     else if (strcmp(op, "wiki_history") == 0)
