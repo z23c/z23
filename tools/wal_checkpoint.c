@@ -1,3 +1,11 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * wal_checkpoint: standalone SQLite maintenance tool. It opens the database at
+ * the given path, prints UTXO, block and max-height counts, runs a TRUNCATE WAL
+ * checkpoint (falling back to PASSIVE) and optionally resets, marks or wipes
+ * the leveldb UTXO migration state. Built by the Makefile tools/wal_checkpoint
+ * target and run by the deploy sequence before SIGTERM. */
+
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,3 +1,11 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Shared declarations for the legacy blk-file import scanner: the worker
+ * argument and context structs for the file scan, Sapling filter and decrypt
+ * passes, the block position record, the block visitor type and the block-file
+ * walker. Implemented in legacy_import_scan.c and driven by
+ * legacy_import_service.c. */
+
 #ifndef ZCL_LEGACY_IMPORT_SCAN_H
 #define ZCL_LEGACY_IMPORT_SCAN_H
 

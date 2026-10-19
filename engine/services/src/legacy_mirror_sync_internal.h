@@ -1,3 +1,10 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Private header for the legacy mirror-sync services: the default tuning
+ * constants, the shared runtime state struct and the internal helpers used by
+ * the legacy_mirror_sync_*.c files and mirror_divergence_locator.c. The
+ * test_lag_slo.c harness includes it directly. */
+
 #ifndef ZCL_LEGACY_MIRROR_SYNC_INTERNAL_H
 #define ZCL_LEGACY_MIRROR_SYNC_INTERNAL_H
 
