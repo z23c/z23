@@ -113,10 +113,41 @@ static int64_t gr_now(const struct zcl_goals_options *o)
     return o && o->now_unix > 0 ? o->now_unix : (int64_t)platform_time_wall_time_t();
 }
 
-static const char *gr_repo(const struct zcl_goals_options *o)
+/* Top-level of the git worktree that holds `dir`; false when git names none. */
+static bool gr_toplevel(const char *dir, char *out, size_t cap)
 {
-    return o && o->repo ? o->repo : ".";
+    char buf[1024];
+    const char *argv[] = {"git", "-C", dir, "rev-parse", "--show-toplevel",
+                          NULL};
+    size_t n;
+    if (zcl_spawn_capture(argv, buf, sizeof(buf), 5000) != 0)
+        return false;
+    n = strcspn(buf, "\r\n");
+    if (n == 0 || n >= cap)
+        return false;
+    memcpy(out, buf, n);
+    out[n] = '\0';
+    return true;
 }
+
+/* The git worktree a producer reads: the explicit repo input, else the top
+ * level of the current directory, else the checkout that holds the running
+ * binary's source. False when none resolves; nothing is guessed. */
+static bool gr_repo(const struct zcl_goals_options *o, char *out, size_t cap)
+{
+    out[0] = '\0';
+    if (o && o->repo && o->repo[0])
+        return snprintf(out, cap, "%s", o->repo) < (int)cap;
+    if (gr_toplevel(".", out, cap))
+        return true;
+    return o && o->source_root && o->source_root[0] &&
+           gr_toplevel(o->source_root, out, cap);
+}
+
+/* Reason a git-backed row gives when no checkout resolves. */
+#define GR_NO_CHECKOUT                                                       \
+    "no git checkout: the current directory is not inside one, no repo "     \
+    "input was given, and no source checkout is recorded or configured"
 
 /* ── in-process leaf calls ────────────────────────────────────────────── */
 
@@ -600,7 +631,6 @@ static void gr_train_row(const struct json_value *row, void *user)
     else if (strcmp(state, "failed") == 0)
         t->failed++;
 }
-
 /* Commits that reached origin/main in the window; -1 when git cannot say. */
 static int64_t gr_origin_commits(const char *repo, int64_t since)
 {
@@ -621,12 +651,14 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
     struct zcl_objectives_options oo;
     static char keys[GOALS_TRAINS_MAX][128];
     struct gr_trains t = {.keys = keys, .cap = GOALS_TRAINS_MAX};
-    char path[512], reason[256] = "";
+    char path[512], reason[256] = "", repo[512];
     const char *use = NULL;
     int64_t now = gr_now(o), commits;
     char seen[48];
     const char *next = "land through `dev land` so every train is recorded "
                        "in the outcomes ledger";
+    if (!gr_repo(o, repo, sizeof(repo)))
+        return gr_unmeasured(next, "%s", GR_NO_CHECKOUT);
     memset(&oo, 0, sizeof(oo));
     oo.outcomes = o ? o->outcomes : NULL;
     if (!zcl_objectives_outcomes_path(&oo, path, sizeof(path), &use))
@@ -641,7 +673,7 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
         return gr_unmeasured(next, "%lld landed or failed row(s) in %s have "
                              "no readable timestamp", (long long)t.unreadable,
                              use);
-    commits = gr_origin_commits(gr_repo(o), t.since);
+    commits = gr_origin_commits(repo, t.since);
     if (commits < 0)
         (void)snprintf(seen, sizeof(seen), "origin/main unreadable");
     else
@@ -656,17 +688,19 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
 
 /* ── G13: active lane claims ──────────────────────────────────────────── */
 
-static bool gr_claims_path(const struct zcl_goals_options *o, char *out,
-                           size_t cap)
+/* The claims ledger: the explicit claims input, else the git common dir of
+ * the resolved repo. False when neither gives a path. */
+static bool gr_claims_path(const struct zcl_goals_options *o, const char *repo,
+                           char *out, size_t cap)
 {
     char common[512];
-    const char *argv[] = {"git", "-C", gr_repo(o), "rev-parse",
+    const char *argv[] = {"git", "-C", repo, "rev-parse",
                           "--path-format=absolute", "--git-common-dir", NULL};
     char buf[1024];
     size_t n;
     if (o && o->claims)
         return snprintf(out, cap, "%s", o->claims) < (int)cap;
-    if (zcl_spawn_capture(argv, buf, sizeof(buf), 5000) != 0)
+    if (!repo[0] || zcl_spawn_capture(argv, buf, sizeof(buf), 5000) != 0)
         return false;
     n = strcspn(buf, "\r\n");
     if (n == 0 || n >= sizeof(common))
@@ -713,11 +747,13 @@ static bool gr_claims_scan(const char *path, int64_t now, int64_t *live,
 static struct zcl_goal_result gr_g13(const struct zcl_goals_options *o)
 {
     int64_t live = 0, unreadable = 0;
-    char path[1024];
+    char path[1024], repo[512];
     const char *next = "card: report review queue age per reviewer";
-    if (!gr_claims_path(o, path, sizeof(path)))
+    if (!gr_repo(o, repo, sizeof(repo)) && !(o && o->claims))
+        return gr_unmeasured(next, "%s", GR_NO_CHECKOUT);
+    if (!gr_claims_path(o, repo, path, sizeof(path)))
         return gr_unmeasured(next, "no git common dir to hold the claims "
-                             "ledger under %s", gr_repo(o));
+                             "ledger under %s", repo);
     if (!gr_claims_scan(path, gr_now(o), &live, &unreadable))
         return gr_unmeasured(next, "claims ledger %s is missing or "
                              "unreadable", path);
@@ -746,15 +782,17 @@ static int64_t gr_count_entries(const char *path)
 
 static struct zcl_goal_result gr_d8(const struct zcl_goals_options *o)
 {
-    char path[1024];
+    char path[1024], repo[512] = "";
     int64_t n;
     const char *next = "convert allowlisted scripts to nested z23 leaves; "
                        "the allowlist may only shrink";
     if (o && o->bash_allowlist)
         (void)snprintf(path, sizeof(path), "%s", o->bash_allowlist);
+    else if (!gr_repo(o, repo, sizeof(repo)))
+        return gr_unmeasured(next, "%s", GR_NO_CHECKOUT);
     else
         (void)snprintf(path, sizeof(path), "%s/tools/lint/bash_allowlist.txt",
-                       gr_repo(o));
+                       repo);
     n = gr_count_entries(path);
     if (n < 0)
         return gr_unmeasured(next, "no shell script allowlist at %s", path);

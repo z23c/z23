@@ -56,7 +56,10 @@ struct zcl_goals_host {
 /* Inputs every producer reads; NULL or zero selects this machine's own
  * default so tests can drive the whole leaf against a fixture tree. */
 struct zcl_goals_options {
-    const char *repo;           /* git worktree: lane claims, origin/main log */
+    const char *repo;           /* git worktree: lane claims, origin/main log;
+                                * NULL resolves the top level of the cwd */
+    const char *source_root;    /* checkout the running binary was built from;
+                                * NULL when none is recorded or configured */
     const char *outcomes;       /* landing outcomes.jsonl */
     const char *bash_allowlist; /* tools/lint/bash_allowlist.txt */
     const char *claims;         /* z23-agent-claims.jsonl */

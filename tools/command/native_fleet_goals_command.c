@@ -13,6 +13,7 @@
 #include "json/json.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *goals_input_str(const struct zcl_command_request *request,
@@ -21,6 +22,18 @@ static const char *goals_input_str(const struct zcl_command_request *request,
     const struct json_value *in = request ? request->input : NULL;
     const char *text = in ? json_get_str(json_get(in, key)) : NULL;
     return text && text[0] ? text : NULL;
+}
+
+/* The checkout the running binary records, else the configured dev source
+ * root; NULL when neither is set, so the producers resolve nothing. */
+static const char *goals_source_root(const struct zcl_command_request *request)
+{
+    const char *recorded =
+        request && request->context ? request->context->source_root : NULL;
+    const char *configured = getenv("ZCL_DEV_SOURCE_ROOT");
+    if (recorded && recorded[0])
+        return recorded;
+    return configured && configured[0] ? configured : NULL;
 }
 
 static bool goals_row_json(const struct zcl_goal_row *row,
@@ -103,6 +116,7 @@ void zcl_native_handle_fleet_goals(const struct zcl_command_request *request,
     zcl_command_reply_init(reply, ZCL_GOALS_SCHEMA);
     memset(&options, 0, sizeof(options));
     options.repo = goals_input_str(request, "repo");
+    options.source_root = goals_source_root(request);
     options.outcomes = goals_input_str(request, "outcomes");
     options.bash_allowlist = goals_input_str(request, "bash_allowlist");
     options.claims = goals_input_str(request, "claims");

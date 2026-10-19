@@ -19,6 +19,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define FGL_NOW INT64_C(1800000000)
 
@@ -106,6 +108,7 @@ static int fgl_case_trains(const char *root)
     char pass[600], fail[600], mixed[600];
     struct zcl_goals_options o;
     fgl_options(&o);
+    o.repo = root;
     (void)snprintf(pass, sizeof(pass), "%s/pass.jsonl", root);
     (void)snprintf(mixed, sizeof(mixed), "%s/mixed.jsonl", root);
     (void)snprintf(fail, sizeof(fail), "%s/fail.jsonl", root);
@@ -154,6 +157,7 @@ static int fgl_case_missing(const char *root)
     char missing[600];
     struct zcl_goals_options o;
     fgl_options(&o);
+    o.repo = root;
     (void)snprintf(missing, sizeof(missing), "%s/missing.jsonl", root);
     TEST("G9: a missing ledger is unmeasured and names the file") {
         struct zcl_goal_result r;
@@ -374,6 +378,95 @@ static int fgl_case_handler(const char *root)
     return failures;
 }
 
+static bool fgl_mkdir(const char *path)
+{
+    return mkdir(path, 0700) == 0;
+}
+
+/* A .git skeleton git accepts as a repository, one live claim in its common
+ * dir and a one-entry allowlist at the top level. */
+static bool fgl_make_checkout(const char *top)
+{
+    char path[1024];
+    (void)snprintf(path, sizeof(path), "%s/.git", top);
+    if (!fgl_mkdir(top) || !fgl_mkdir(path))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/.git/objects", top);
+    if (!fgl_mkdir(path))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/.git/refs", top);
+    if (!fgl_mkdir(path))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/.git/HEAD", top);
+    if (!fgl_write(path, "ref: refs/heads/main\n"))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/.git/z23-agent-claims.jsonl", top);
+    if (!fgl_write(path, "{\"lane\":\"a\",\"expires_unix\":1900000000}\n"))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/tools", top);
+    if (!fgl_mkdir(path))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/tools/lint", top);
+    if (!fgl_mkdir(path))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/tools/lint/bash_allowlist.txt", top);
+    return fgl_write(path, "# header\ntools/a.sh\n");
+}
+
+/* Measures D8 and G13 with the process cwd set to `dir`, then restores it. */
+static bool fgl_measure_in(const char *dir,
+                           const struct zcl_goals_options *o,
+                           struct zcl_goal_result out[2])
+{
+    char saved[1024];
+    bool entered = getcwd(saved, sizeof(saved)) != NULL && chdir(dir) == 0;
+    if (!entered)
+        return false;
+    out[0] = zcl_goals_measure(o, "D8");
+    out[1] = zcl_goals_measure(o, "G13");
+    return chdir(saved) == 0;
+}
+
+static int fgl_case_checkout(const char *root)
+{
+    int failures = 0;
+    char repo[1024], sub_parent[1024], sub[1024], outside[1024];
+    struct zcl_goals_options o;
+    struct zcl_goal_result inside[2], outer[2], pinned[2];
+    bool made, in_ok, out_ok, pin_ok;
+    fgl_options(&o);
+    (void)snprintf(repo, sizeof(repo), "%s/checkout", root);
+    (void)snprintf(sub_parent, sizeof(sub_parent), "%s/checkout/sub", root);
+    (void)snprintf(sub, sizeof(sub), "%s/checkout/sub/dir", root);
+    (void)snprintf(outside, sizeof(outside), "%s/outside", root);
+    TEST("checkout: from a subdirectory the top level is read; outside any "
+         "repo the git rows are unmeasured and name the missing checkout") {
+        made = fgl_make_checkout(repo) && fgl_mkdir(sub_parent) &&
+               fgl_mkdir(sub) && fgl_mkdir(outside);
+        ASSERT(made);
+        in_ok = fgl_measure_in(sub, &o, inside);
+        (void)setenv("GIT_CEILING_DIRECTORIES", root, 1);
+        out_ok = fgl_measure_in(outside, &o, outer);
+        o.repo = repo;
+        pin_ok = fgl_measure_in(outside, &o, pinned);
+        o.repo = NULL;
+        (void)unsetenv("GIT_CEILING_DIRECTORIES");
+        ASSERT(in_ok && out_ok && pin_ok);
+        ASSERT(inside[0].grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(inside[0].evidence, "1 shell script(s)"));
+        ASSERT(inside[1].grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(inside[1].evidence, "1 live lane claim(s)"));
+        ASSERT(outer[0].grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(outer[0].evidence, "no git checkout"));
+        ASSERT(outer[1].grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(outer[1].evidence, "no git checkout"));
+        ASSERT(pinned[0].grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(pinned[0].evidence, "1 shell script(s)"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_goals(void);
 int test_fleet_goals(void)
 {
@@ -390,6 +483,7 @@ int test_fleet_goals(void)
     failures += fgl_case_render();
     failures += fgl_case_bound();
     failures += fgl_case_handler(root);
+    failures += fgl_case_checkout(root);
     (void)test_rm_rf_recursive(root);
     if (failures == 0)
         printf("test_fleet_goals: all passed\n");
