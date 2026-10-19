@@ -18,7 +18,6 @@
 #include "util/parse_num.h"
 #include "platform/time_compat.h"
 
-#include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -56,13 +55,7 @@ static int64_t nps_now(void)
 
 static int nps_partition_secs(void)
 {
-    const char *e = getenv("ZCL_NET_PARTITION_SECS");
-    if (e && e[0]) {
-        int64_t parsed = 0;
-        if (zcl_parse_i64(e, &parsed) && parsed >= 1 && parsed <= INT_MAX)
-            return (int)parsed;
-    }
-    return NET_PARTITION_SECS;
+    return zcl_env_positive_int("ZCL_NET_PARTITION_SECS", NET_PARTITION_SECS);
 }
 
 static void nps_reset_tracking(void)

@@ -4,6 +4,7 @@
 #define ZCL_UTIL_PARSE_NUM_H
 
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -31,6 +32,17 @@ static inline bool zcl_parse_i64(const char *s, int64_t *out)
     if (errno != 0 || end == s || (end && *end != '\0')) return false;
     *out = (int64_t)v;
     return true;
+}
+
+
+/* The positive int an environment variable names, or dflt when it is unset,
+ * empty, not a whole number, below 1 or above INT_MAX. */
+static inline int zcl_env_positive_int(const char *name, int dflt)
+{
+    int64_t v = 0;
+    if (zcl_parse_i64(getenv(name), &v) && v >= 1 && v <= INT_MAX)
+        return (int)v;
+    return dflt;
 }
 
 #endif
