@@ -870,6 +870,20 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
 
 /* ── One sync pass ─────────────────────────────────────────── */
 
+/* One completion line per rebuild entry point: heights, row count and elapsed
+ * milliseconds only. blocks_scanned is the height span the pass advanced. */
+static void mirror_log_pass_done(const char *op, int32_t start, int32_t end,
+                                 int64_t items, int64_t t0_ms, bool ok)
+{
+    int32_t span = end > start ? end - start : 0;
+    LOG_INFO("utxo_mirror",
+             "[utxo_mirror] op=%s start_height=%d end_height=%d "
+             "blocks_scanned=%d items=%lld elapsed_ms=%lld result=%s",
+             op, start, end, span, (long long)(items < 0 ? 0 : items),
+             (long long)(platform_time_monotonic_ms() - t0_ms),
+             ok ? "ok" : "failed");
+}
+
 int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
 {
     if (!svc || !svc->ndb || !svc->ndb->open)
@@ -994,6 +1008,7 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
         .cursor_persisted = false,
         .used_delta = false,
     };
+    int64_t t0_ms = platform_time_monotonic_ms();
     /* Bracket the complete node.db write lane. The generation changes at both
      * edges so an auditor spanning even a fast rebuild detects the overlap;
      * updates_active covers a sample taken while the transaction is open. */
@@ -1006,6 +1021,9 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
     atomic_fetch_sub(&svc->updates_active, 1u);
     if (!lane_ok || rebuild.written < 0) {
         atomic_store(&svc->last_error_unix, platform_time_wall_unix());
+        mirror_log_pass_done("run_once", rebuild.cursor,
+                             rebuild.applied_through, rebuild.written, t0_ms,
+                             false);
         return -1;  // raw-return-ok:logged-in-mirror_rebuild_from_coins_kv
     }
 
@@ -1023,6 +1041,8 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
              "[utxo_mirror] %s mirror: %lld rows, synced to height %d",
              rebuild.used_delta ? "delta-applied" : "rebuilt",
              (long long)rebuild.written, rebuild.applied_through);
+    mirror_log_pass_done("run_once", rebuild.cursor, rebuild.applied_through,
+                         rebuild.written, t0_ms, true);
     return rebuild.written;
 }
 
@@ -1070,6 +1090,7 @@ int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
     if (pre != 0)
         return pre;
 
+    int64_t t0_ms = platform_time_monotonic_ms();
     /* cursor 0 forces the wholesale branch; the scan stamps its own snapshot
      * height. Quarantine is cleared only by a verified commit. */
     struct mirror_rebuild_ctx rebuild = {
@@ -1086,6 +1107,9 @@ int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
     atomic_fetch_sub(&svc->updates_active, 1u);
     if (!lane_ok || rebuild.written < 0) {
         atomic_store(&svc->last_error_unix, platform_time_wall_unix());
+        mirror_log_pass_done("operator_rebuild", rebuild.cursor,
+                             rebuild.applied_through, rebuild.written, t0_ms,
+                             false);
         if (mirror_rebuild_left_unchanged(rebuild.written))
             atomic_store(&svc->mirror_health, prior);
         if (reason && reason_cap > 0)
@@ -1100,6 +1124,8 @@ int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
     LOG_INFO("utxo_mirror",
              "[utxo_mirror] operator rebuild: %lld rows, synced to height %d",
              (long long)rebuild.written, rebuild.applied_through);
+    mirror_log_pass_done("operator_rebuild", rebuild.cursor,
+                         rebuild.applied_through, rebuild.written, t0_ms, true);
     return rebuild.written;
 }
 

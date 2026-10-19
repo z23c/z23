@@ -57,6 +57,7 @@ static bool wallet_rescan_block_mapping_open(
 #include "storage/progress_store.h"
 
 #include <limits.h>
+#include "platform/time_compat.h"
 #include <sqlite3.h>
 
 static bool uint256_is_zero_local(const struct uint256 *v)
@@ -221,6 +222,21 @@ static bool rescan_seed_before_oldest_note(
     return ok;
 }
 
+/* One completion line per Sapling witness rescan that reached its scan:
+ * heights, counts and milliseconds only. Refusals before the scan log nothing. */
+static void witness_rescan_log_done(int start_height, int end_height,
+                                    int blocks_scanned, int items,
+                                    int64_t t0_ms, bool ok)
+{
+    LOG_INFO("rescanwitnesses",
+             "rescanwitnesses: op=witness_rescan start_height=%d "
+             "end_height=%d blocks_scanned=%d items=%d elapsed_ms=%lld "
+             "result=%s",
+             start_height, end_height, blocks_scanned, items,
+             (long long)(platform_time_monotonic_ms() - t0_ms),
+             ok ? "ok" : "failed");
+}
+
 bool rpc_rescanwitnesses(const struct json_value *params, bool help,
 	                                  struct json_value *result)
 {
@@ -326,6 +342,7 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
     struct wallet_rescan_block_mapping block_mapping;
     wallet_rescan_block_mapping_init(&block_mapping);
 
+    int64_t t0_ms = platform_time_monotonic_ms();
     int64_t t_start = (int64_t)platform_time_wall_time_t();
     int blocks_scanned = 0;
     size_t total_commitments = 0;
@@ -519,6 +536,8 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         free(witness_active);
         free(notes);
         atomic_store(&g_sapling_rescan_active, false);
+        witness_rescan_log_done(sapling_start, safe_tip, blocks_scanned, 0,
+                                t0_ms, false);
 
         json_set_object(result);
         json_push_kv_str(result, "status", "diverged");
@@ -615,6 +634,8 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
            n_notes, saved);
     fflush(stdout);
 
+    witness_rescan_log_done(sapling_start, safe_tip, blocks_scanned, saved,
+                            t0_ms, true);
     json_set_object(result);
     json_push_kv_str(result, "seed_source", seed_source);
     json_push_kv_int(result, "seed_height", seed_height);

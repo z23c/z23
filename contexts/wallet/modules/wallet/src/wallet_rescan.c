@@ -17,6 +17,7 @@
 #include "wallet/wallet.h"
 #include "util/log_macros.h"
 #include "core/utiltime.h"
+#include "platform/time_compat.h"
 #include "storage/disk_block_io.h"
 #include "validation/chainstate.h"
 #include <inttypes.h>
@@ -140,6 +141,20 @@ static void wallet_rescan_rebase_depths(struct wallet *w, int stop_height)
         (void)wallet_advance_confirmations(w, stop_height);
 }
 
+/* One completion line per rescan: heights, counts and milliseconds only. */
+static void wallet_rescan_log_done(const struct wallet_rescan_report *r,
+                                   int start_height, int stop_height,
+                                   int64_t t0_ms)
+{
+    LOG_INFO("wallet",
+             "[wallet_rescan] op=wallet_rescan start_height=%d end_height=%d "
+             "blocks_scanned=%lld items=%lld elapsed_ms=%lld result=%s",
+             start_height, stop_height, (long long)r->blocks_scanned,
+             (long long)(r->outputs_found + r->shielded_notes_found),
+             (long long)(platform_time_monotonic_ms() - t0_ms),
+             r->coverage_ok ? "ok" : "failed");
+}
+
 int wallet_rescan_report(struct wallet *w, const struct active_chain *chain,
                          int start_height, int stop_height,
                          const char *datadir,
@@ -149,6 +164,7 @@ int wallet_rescan_report(struct wallet *w, const struct active_chain *chain,
     struct wallet_rescan_report *r = out ? out : &local;
     memset(r, 0, sizeof(*r));
     r->coverage_ok = true;
+    int64_t t0_ms = platform_time_monotonic_ms();
 
     if (!w || !chain) {
         r->coverage_ok = false;
@@ -235,6 +251,8 @@ int wallet_rescan_report(struct wallet *w, const struct active_chain *chain,
                   r->blocker, start_height, stop_height, r->blocks_scanned,
                   r->blocks_indexed, r->blocks_missing_data + r->blocks_read_failed,
                   r->outputs_found, r->shielded_notes_found);
+
+    wallet_rescan_log_done(r, start_height, stop_height, t0_ms);
 
     return total_found;
 }
