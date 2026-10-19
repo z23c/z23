@@ -1090,6 +1090,17 @@ static int cr_receipt_exit(const struct cr_config *cfg, struct cr_run *run,
     return rc;
 }
 
+static bool cr_binaries_ready(void);
+
+/* Missing node binaries end the run before it starts; a bootstrap run still
+ * records that as a FAIL row so the ledger never keeps a stale verdict. */
+static int cr_binaries_exit(const struct cr_config *cfg, struct cr_run *run)
+{
+    if (cr_binaries_ready())
+        return 0;
+    return cfg->bootstrap ? cr_receipt_exit(cfg, run, "binaries_missing", 2) : 2;
+}
+
 static const char *cr_receipt_selftest_arg(int argc, char **argv)
 {
     static const char prefix[] = "--receipt-selftest=";
@@ -1194,7 +1205,7 @@ int main(int argc, char **argv)
     cr_defaults(&cfg);
     int parse_rc = parse_args(argc, argv, &cfg);
     if (parse_rc == 1) return 0;  /* --help */
-    if (parse_rc != 0) return 2;
+    if (parse_rc != 0) return 2;  /* usage error: no run started, no receipt */
 
     printf("crash_recovery_test:\n");
     printf("  datadir:      %s\n", cfg.datadir);
@@ -1204,9 +1215,10 @@ int main(int argc, char **argv)
     printf("  rpc port:     %d\n", cfg.rpc_port);
     printf("  seed:         %" PRIu64 "\n", cfg.seed);
 
-    if (!cr_binaries_ready()) return 2;
     struct cr_run run;
     cr_run_init(&run, cfg.iterations);
+    int brc = cr_binaries_exit(&cfg, &run);
+    if (brc != 0) return brc;
 
     if (cfg.bootstrap) {
         /* The make target (via isolated_node_env.sh) has already minted
