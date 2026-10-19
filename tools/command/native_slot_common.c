@@ -184,31 +184,52 @@ static bool slot_child_path(const char *dir, const char *leaf, char *out,
     return n > 0 && (size_t)n < cap;
 }
 
-/* The slot directory itself must be a real directory we own. */
-static bool slot_dir_safe(const char *name_dir)
+/* The slot directory must be a real directory we own, and neither it nor the
+ * slots root above it may be writable by group or others: whoever can write
+ * there can swap the binary the digest record vouches for. */
+enum slot_dir_state { SLOT_DIR_OK, SLOT_DIR_BAD, SLOT_DIR_WRITABLE };
+
+static enum slot_dir_state slot_dir_state(const char *name_dir)
 {
     struct stat sb;
-    return lstat(name_dir, &sb) == 0 && S_ISDIR(sb.st_mode) &&
-           sb.st_uid == geteuid();
+    char root[SLOT_PATH_MAX];
+    const char *slash = strrchr(name_dir, '/');
+    if (lstat(name_dir, &sb) != 0 || !S_ISDIR(sb.st_mode) ||
+        sb.st_uid != geteuid())
+        return SLOT_DIR_BAD;
+    if ((sb.st_mode & 022) != 0)
+        return SLOT_DIR_WRITABLE;
+    if (!slash || slash == name_dir ||
+        (size_t)(slash - name_dir) >= sizeof(root))
+        return SLOT_DIR_BAD;
+    memcpy(root, name_dir, (size_t)(slash - name_dir));
+    root[slash - name_dir] = '\0';
+    if (stat(root, &sb) != 0 || !S_ISDIR(sb.st_mode))
+        return SLOT_DIR_BAD;
+    return (sb.st_mode & 022) != 0 ? SLOT_DIR_WRITABLE : SLOT_DIR_OK;
 }
 
 bool slot_binary_digest(const char *name_dir, uint8_t sha[32])
 {
     char path[SLOT_PATH_MAX];
     struct stat sb;
-    struct sha256_ctx ctx;
-    uint8_t buf[65536];
-    bool ok = true;
+    bool ok;
     if (!slot_child_path(name_dir, SLOT_FILE, path, sizeof(path)))
         return false;
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
         return false;
-    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) ||
-        sb.st_uid != geteuid()) {
-        close(fd);
-        return false;
-    }
+    ok = fstat(fd, &sb) == 0 && S_ISREG(sb.st_mode) &&
+         sb.st_uid == geteuid() && slot_fd_digest(fd, sha);
+    close(fd);
+    return ok;
+}
+
+bool slot_fd_digest(int fd, uint8_t sha[32])
+{
+    struct sha256_ctx ctx;
+    uint8_t buf[65536];
+    bool ok = true;
     sha256_init(&ctx);
     for (;;) {
         ssize_t got = read(fd, buf, sizeof(buf));
@@ -220,7 +241,6 @@ bool slot_binary_digest(const char *name_dir, uint8_t sha[32])
             break;
         sha256_write(&ctx, buf, (size_t)got);
     }
-    close(fd);
     if (ok)
         sha256_finalize(&ctx, sha);
     return ok;
@@ -253,20 +273,49 @@ bool slot_record_write(const char *name_dir, const uint8_t sha[32])
     return true;
 }
 
-enum slot_verify slot_verify_installed(const char *name_dir)
+bool slot_record_hex(const char *name_dir, char hex[65])
 {
     char rec_path[SLOT_PATH_MAX], rec[80];
-    uint8_t sha[32];
-    char hex[65];
     struct stat sb;
-    if (!slot_dir_safe(name_dir))
-        return SLOT_VERIFY_UNSAFE;
     if (!slot_child_path(name_dir, SLOT_DIGEST_FILE, rec_path,
                          sizeof(rec_path)) ||
         lstat(rec_path, &sb) != 0 || !S_ISREG(sb.st_mode) ||
         sb.st_uid != geteuid())
-        return SLOT_VERIFY_NO_RECORD;
+        return false;
     if (slot_read_file(rec_path, rec, sizeof(rec)) < 64)
+        return false;
+    memcpy(hex, rec, 64);
+    hex[64] = '\0';
+    return true;
+}
+
+bool slot_exe_matches_hex(const char *exe_path, const char hex[65])
+{
+    uint8_t sha[32];
+    char got[65];
+    int fd = open(exe_path, O_RDONLY | O_CLOEXEC);
+    bool ok;
+    if (fd < 0)
+        return false;
+    ok = slot_fd_digest(fd, sha);
+    close(fd);
+    if (!ok)
+        return false;
+    for (size_t i = 0; i < 32; i++)
+        snprintf(got + i * 2, 3, "%02x", sha[i]);
+    return memcmp(got, hex, 64) == 0;
+}
+
+enum slot_verify slot_verify_installed(const char *name_dir)
+{
+    uint8_t sha[32];
+    char hex[65], rec[65];
+    enum slot_dir_state ds = slot_dir_state(name_dir);
+    if (ds == SLOT_DIR_WRITABLE)
+        return SLOT_VERIFY_WRITABLE;
+    if (ds != SLOT_DIR_OK)
+        return SLOT_VERIFY_UNSAFE;
+    if (!slot_record_hex(name_dir, rec))
         return SLOT_VERIFY_NO_RECORD;
     if (!slot_binary_digest(name_dir, sha))
         return SLOT_VERIFY_UNSAFE;

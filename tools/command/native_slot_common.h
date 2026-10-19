@@ -74,12 +74,24 @@ enum slot_verify {
     SLOT_VERIFY_OK,
     SLOT_VERIFY_UNSAFE,    /* symlink, not a plain dir/file, or not our own */
     SLOT_VERIFY_NO_RECORD, /* no readable digest record from install */
-    SLOT_VERIFY_MISMATCH   /* the binary no longer matches the record */
+    SLOT_VERIFY_MISMATCH,  /* the binary no longer matches the record */
+    SLOT_VERIFY_WRITABLE   /* slot dir or slots root is group/world-writable */
 };
 
 /* SHA-256 of <name_dir>/z23, opened O_NOFOLLOW; false unless it is a regular
  * file owned by the effective user. */
 bool slot_binary_digest(const char *name_dir, uint8_t sha[32]);
+
+/* SHA-256 of everything readable from fd (does not close it). */
+bool slot_fd_digest(int fd, uint8_t sha[32]);
+
+/* The 64 hex of <name_dir>/z23.sha256, NUL-terminated; false unless it is a
+ * regular file we own holding at least 64 bytes. */
+bool slot_record_hex(const char *name_dir, char hex[65]);
+
+/* Open exe_path (a /proc/<pid>/exe link) O_RDONLY, hash those bytes and
+ * compare with the 64 hex. False on any open, read or hash failure. */
+bool slot_exe_matches_hex(const char *exe_path, const char hex[65]);
 
 /* Record sha as 64 hex in <name_dir>/z23.sha256 (temp file + rename). */
 bool slot_record_write(const char *name_dir, const uint8_t sha[32]);

@@ -325,6 +325,27 @@ static void osi_print_reply(const struct osi_cmd *c)
            signer ? signer : "?", oc_bool(c, "installed"));
 }
 
+/* A group-writable slot dir or a world-writable slots root fails verify. */
+static int test_osi_writable(const struct osi_fx *fx, const char *tmp)
+{
+    struct stat rs, ds;
+    int failures = 0;
+    bool have = stat(fx->slots, &rs) == 0 && stat(tmp, &ds) == 0;
+    failures += osi_check(have && chmod(tmp, 0775) == 0 &&
+                              slot_verify_installed(tmp) ==
+                                  SLOT_VERIFY_WRITABLE,
+                          "a group-writable slot dir fails verify");
+    TEST_DISCARD(chmod(tmp, ds.st_mode & 07777));
+    failures += osi_check(have && chmod(fx->slots, 0777) == 0 &&
+                              slot_verify_installed(tmp) ==
+                                  SLOT_VERIFY_WRITABLE,
+                          "a world-writable slots root fails verify");
+    TEST_DISCARD(chmod(fx->slots, rs.st_mode & 07777));
+    failures += osi_check(slot_verify_installed(tmp) == SLOT_VERIFY_OK,
+                          "verify passes again once the modes are tight");
+    return failures;
+}
+
 /* a. pinned + matching */
 static int test_osi_install(const struct osi_fx *fx, const struct osi_pkg *p)
 {
@@ -356,6 +377,7 @@ static int test_osi_install(const struct osi_fx *fx, const struct osi_pkg *p)
                           slot_verify_installed(tmp) == SLOT_VERIFY_OK,
                           "only the binary and its digest record exist, "
                           "and they agree");
+    failures += test_osi_writable(fx, tmp);
     oc_free(&c);
     return failures;
 }

@@ -10,6 +10,8 @@
  *          no shell). The first failure restores every instance moved so
  *          far plus the failing one (same checks) and returns
  *          SLOT_ACTIVATE_ROLLED_BACK naming the instance and the phase.
+ *          A running exe whose bytes differ from the install record is
+ *          SLOT_RUNNING_DIGEST_MISMATCH (phase running_digest), rolled back.
  *
  *          Only the allow-listed classes tunnel-receiver and gateway can be
  *          activated; the canonical node unit and ~/.local/bin are never
@@ -95,6 +97,7 @@ struct osa {
     char exec_args[OSA_TEXT_MAX];
     bool dry_run;
     struct slot_paths sp;
+    char want_hex[65]; /* the install record digest the running exe must match */
     char unit_dir[SLOT_PATH_MAX];
     char state_dir[SLOT_PATH_MAX];
     char systemctl[SLOT_PATH_MAX];
@@ -314,7 +317,7 @@ static bool osa_inst_paths(struct osa *a, struct zcl_command_reply *reply)
     return true;
 }
 
-static bool osa_slot_installed(const struct osa *a,
+static bool osa_slot_installed(struct osa *a,
                                struct zcl_command_reply *reply)
 {
     struct stat sb;
@@ -327,7 +330,18 @@ static bool osa_slot_installed(const struct osa *a,
     }
     switch (slot_verify_installed(a->sp.name_dir)) {
     case SLOT_VERIFY_OK:
-        return true;
+        if (slot_record_hex(a->sp.name_dir, a->want_hex))
+            return true;
+        osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
+                    "the slot digest record cannot be read; nothing was "
+                    "moved, reinstall the slot", a->slot);
+        return false;
+    case SLOT_VERIFY_WRITABLE:
+        osa_invalid(reply, "SLOT_DIR_WRITABLE",
+                    "the slot directory or the slots root is writable by "
+                    "group or others; nothing was moved, chmod go-w it",
+                    a->slot);
+        return false;
     case SLOT_VERIFY_MISMATCH:
         osa_invalid(reply, "SLOT_DIGEST_MISMATCH",
                     "the slot binary no longer matches the digest recorded "
@@ -556,6 +570,18 @@ static bool osa_exe_is(const struct osa *a, long pid, const char *expected)
     return realpath(expected, real) && strcmp(target, real) == 0;
 }
 
+/* The bytes of the RUNNING process, not of the path it was started from: open
+ * /proc/<pid>/exe and hash that fd against the install record. */
+static bool osa_running_digest_ok(const struct osa *a, long pid,
+                                  const char *want_hex)
+{
+    char link[SLOT_PATH_MAX];
+    if (snprintf(link, sizeof(link), "%s/%ld/exe", a->proc_root, pid) >=
+        (int)sizeof(link))
+        return false;
+    return slot_exe_matches_hex(link, want_hex);
+}
+
 static long osa_main_pid(const struct osa *a, const struct osa_inst *in)
 {
     int64_t deadline = platform_time_monotonic_ms() + a->timeout_ms;
@@ -638,7 +664,7 @@ static bool osa_healthy(const struct osa *a, const struct osa_inst *in)
  * `expected` (NULL: no expectation, a restored unit's own binary), then the
  * health check. Returns the failing phase, or NULL. */
 static const char *osa_apply(const struct osa *a, const struct osa_inst *in,
-                             const char *expected)
+                             const char *expected, const char *want_hex)
 {
     long pid;
     if (osa_systemctl(a, "daemon-reload", NULL, NULL, 0) != 0)
@@ -650,6 +676,8 @@ static const char *osa_apply(const struct osa *a, const struct osa_inst *in,
         return "main_pid";
     if (expected && !osa_exe_is(a, pid, expected))
         return "exe";
+    if (want_hex && !osa_running_digest_ok(a, pid, want_hex))
+        return "running_digest";
     return osa_healthy(a, in) ? NULL : "health";
 }
 
@@ -669,7 +697,7 @@ static const char *osa_forward(struct osa *a, struct osa_inst *in)
     if (!osa_dropin_text(a->sp.final_path, args, text, sizeof(text)) ||
         !osa_write_atomic(in->dropin_dir, in->dropin, text))
         return "dropin";
-    return osa_apply(a, in, a->sp.final_path);
+    return osa_apply(a, in, a->sp.final_path, a->want_hex);
 }
 
 /* Put the instance back exactly as it was: prior drop-in bytes, or none. */
@@ -681,7 +709,7 @@ static const char *osa_restore(struct osa *a, struct osa_inst *in)
     } else if (unlink(in->dropin) != 0 && errno != ENOENT) {
         return "dropin";
     }
-    return osa_apply(a, in, in->prior_bin[0] ? in->prior_bin : NULL);
+    return osa_apply(a, in, in->prior_bin[0] ? in->prior_bin : NULL, NULL);
 }
 
 static void osa_push_results(const struct osa *a, struct json_value *out)
@@ -742,8 +770,11 @@ static void osa_rollback(struct osa *a, size_t failed,
                     : "a rollback step also failed: manual attention");
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_FAILED,
-                           all_ok ? "SLOT_ACTIVATE_ROLLED_BACK"
-                                  : "SLOT_ROLLBACK_FAILED",
+                           !all_ok ? "SLOT_ROLLBACK_FAILED"
+                           : strcmp(a->inst[failed].failed_phase,
+                                    "running_digest") == 0
+                               ? "SLOT_RUNNING_DIGEST_MISMATCH"
+                               : "SLOT_ACTIVATE_ROLLED_BACK",
                            a->inst[failed].failed_phase, false, true, msg, ev);
 }
 

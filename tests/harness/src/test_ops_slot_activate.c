@@ -113,6 +113,7 @@ static const char *const OSA_FAKE_SYSTEMCTL =
     "  conf=\"$FAKE_UNITS/$2.d/z23-slot.conf\"\n"
     "  bin=/fake/original/z23\n"
     "  if [ -f \"$conf\" ]; then bin=$(sed -n 's/^ExecStart=\\([^ ]*\\).*/\\1/p' \"$conf\" | tail -n 1); fi\n"
+    "  if [ -f \"$FAKE_DIR/swap-once\" ]; then rm -f \"$FAKE_DIR/swap-once\"; printf evil > \"$FAKE_SWAP_FILE\"; fi\n"
     "  mkdir -p \"$FAKE_PROC/4242\"\n"
     "  ln -sfn \"${FAKE_EXE_OVERRIDE:-$bin}\" \"$FAKE_PROC/4242/exe\" ;;\n"
     "show) echo 4242 ;;\n"
@@ -495,6 +496,88 @@ static int test_osa_digest_reverify(void)
     return f;
 }
 
+/* The bytes of the slot change after the verify at parse time but before the
+ * post-restart check: the fake service swaps the file it execs. The running
+ * digest must differ from the install record, the instance must be rolled
+ * back and the previous slot must be the one running again. */
+static int test_osa_running_digest(void)
+{
+    struct osa_fx fx;
+    struct osa_cmd c;
+    char json[1024], health[512], p1[PATH_MAX], b1[2048], a1[2048];
+    char bin[PATH_MAX], swap[PATH_MAX], exe[PATH_MAX], tgt[PATH_MAX];
+    ssize_t n;
+    int f = 0;
+    if (!osa_fx_init(&fx, "run") || !osa_seed_old(&fx, "r1"))
+        return osa_check(false, "fixture");
+    osa_unit_path(&fx, "r1", p1, sizeof(p1));
+    TEST_DISCARD(osa_get(p1, b1, sizeof(b1)));
+    snprintf(bin, sizeof(bin), "%s/new/z23", fx.slots);
+    snprintf(swap, sizeof(swap), "%s/swap-once", fx.dir);
+    snprintf(exe, sizeof(exe), "%s/4242/exe", fx.proc);
+    TEST_DISCARD(osa_put(swap, "x", 0644));
+    setenv("FAKE_SWAP_FILE", bin, 1);
+    osa_probe_json(&fx, health, sizeof(health));
+    osa_json(&fx, "tunnel-receiver", "new", "[\"r1\"]", health, false, json,
+             sizeof(json));
+    oc_run(&c, json, false);
+    f += osa_check(!oc_ok(&c) && oc_code(&c, "SLOT_RUNNING_DIGEST_MISMATCH") &&
+                       strcmp(c.reply.error.phase, "running_digest") == 0,
+                   "bytes swapped after install, before the post-restart "
+                   "check: refused with the running-digest code");
+    f += osa_check(osa_get(p1, a1, sizeof(a1)) > 0 && strcmp(a1, b1) == 0 &&
+                       strcmp(oc_row(&c, "instances", 0, "outcome"),
+                              "rolled_back") == 0,
+                   "the prior drop-in is restored byte for byte");
+    n = readlink(exe, tgt, sizeof(tgt) - 1);
+    if (n > 0)
+        tgt[n] = 0;
+    else
+        tgt[0] = 0;
+    f += osa_check(n > 0 && strstr(tgt, "/old/z23") != NULL &&
+                       osa_has(fx.calls, "restart z23-tunnel-receiver"),
+                   "the service was restarted and the previous slot runs "
+                   "again");
+    oc_free(&c);
+    unsetenv("FAKE_SWAP_FILE");
+    osa_rm_tree(fx.dir);
+    return f;
+}
+
+/* A group-writable slot dir, or a world-writable slots root, is refused. */
+static int test_osa_writable_dirs(void)
+{
+    struct osa_fx fx;
+    struct osa_cmd c;
+    char json[1024], health[512], dir[PATH_MAX];
+    int f = 0;
+    if (!osa_fx_init(&fx, "wr"))
+        return osa_check(false, "fixture");
+    snprintf(dir, sizeof(dir), "%s/new", fx.slots);
+    osa_probe_json(&fx, health, sizeof(health));
+    osa_json(&fx, "tunnel-receiver", "new", "[\"r1\"]", health, false, json,
+             sizeof(json));
+    f += osa_check(chmod(dir, 0775) == 0, "slot dir made group-writable");
+    oc_run(&c, json, false);
+    f += osa_check(!oc_ok(&c) && oc_code(&c, "SLOT_DIR_WRITABLE") &&
+                       !osa_exists(fx.calls),
+                   "a group-writable slot dir is refused, nothing run");
+    oc_free(&c);
+    TEST_DISCARD(chmod(dir, 0755));
+    f += osa_check(chmod(fx.slots, 0777) == 0, "slots root made world-writable");
+    oc_run(&c, json, false);
+    f += osa_check(!oc_ok(&c) && oc_code(&c, "SLOT_DIR_WRITABLE") &&
+                       !osa_exists(fx.calls),
+                   "a world-writable slots root is refused, nothing run");
+    oc_free(&c);
+    TEST_DISCARD(chmod(fx.slots, 0755));
+    oc_run(&c, json, false);
+    f += osa_check(oc_ok(&c), "the same slot activates once the modes are tight");
+    oc_free(&c);
+    osa_rm_tree(fx.dir);
+    return f;
+}
+
 int test_ops_slot_activate(void)
 {
     int failures = 0;
@@ -506,6 +589,8 @@ int test_ops_slot_activate(void)
     failures += test_osa_dry_run();
     failures += test_osa_listen();
     failures += test_osa_digest_reverify();
+    failures += test_osa_running_digest();
+    failures += test_osa_writable_dirs();
     printf("=== OPS_SLOT_ACTIVATE: %d failure(s) ===\n", failures);
     return failures;
 }
