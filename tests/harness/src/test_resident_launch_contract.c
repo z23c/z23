@@ -2078,6 +2078,65 @@ static char *rlc_private_base(char *buf, size_t n)
     return buf;
 }
 
+/* Connect the real package lifecycle update and rollback paths for the
+ * shipped ztasks package. The serving-generation rollback below is a separate
+ * adapter contract; this case exercises package_lifecycle_rollback after an
+ * updated generation is made unavailable. */
+static int rlc_ztasks_lifecycle_rollback(const char *base,
+    const char *zcode, const uint8_t original_root[32])
+{
+    int failures = 0;
+    uint8_t active_root[32];
+    size_t generations = 0;
+    bool present = false;
+    struct zcl_result active = package_lifecycle_active(
+        base, RLC_APP, active_root, &generations, &present);
+    RLC_CHECK("package lifecycle case starts with exact installed ztasks",
+              active.ok && present && generations == 1 &&
+                  memcmp(active_root, original_root, 32) == 0);
+
+    struct rlc_binding updated;
+    bool updated_ok = rlc_install_ztasks_variant(
+        base, zcode, "0.3.0", 3, "No tasks yet (0.3.0).",
+        RLC_PREVIEW_OK, &updated);
+    active = package_lifecycle_active(
+        base, RLC_APP, active_root, &generations, &present);
+    RLC_CHECK("real lifecycle update activates a distinct ztasks root",
+              updated_ok && active.ok && present && generations == 2 &&
+                  memcmp(active_root, updated.root, 32) == 0 &&
+                  memcmp(updated.root, original_root, 32) != 0);
+    if (!updated_ok)
+        return failures;
+
+    char updated_install[4500], original_install[4500], original_hex[65];
+    struct stat removed_st, kept_st;
+    zcl_hex_encode(original_root, 32, original_hex);
+    int n = snprintf(updated_install, sizeof(updated_install),
+                     "%s/zcode/installed/%s", base, updated.root_hex);
+    int m = snprintf(original_install, sizeof(original_install),
+                     "%s/zcode/installed/%s", base, original_hex);
+    bool forced_failure = n > 0 && (size_t)n < sizeof(updated_install) &&
+        m > 0 && (size_t)m < sizeof(original_install) &&
+        test_rm_rf_recursive(updated_install) == 0 &&
+        stat(updated_install, &removed_st) != 0 && errno == ENOENT &&
+        stat(original_install, &kept_st) == 0;
+    RLC_CHECK("forced updated-generation failure removes only its isolated install",
+              forced_failure);
+
+    struct package_lifecycle_rollback_report rollback;
+    struct zcl_result rolled = package_lifecycle_rollback(
+        base, RLC_APP, INT64_C(1700000002), &rollback);
+    active = package_lifecycle_active(
+        base, RLC_APP, active_root, &generations, &present);
+    RLC_CHECK("package lifecycle rollback restores the exact prior ztasks root",
+              forced_failure && rolled.ok && active.ok && present &&
+                  generations == 3 &&
+                  memcmp(rollback.from_root, updated.root, 32) == 0 &&
+                  memcmp(rollback.to_root, original_root, 32) == 0 &&
+                  memcmp(active_root, original_root, 32) == 0);
+    return failures;
+}
+
 int test_resident_launch_contract(void)
 {
     int failures = 0;
@@ -2145,6 +2204,9 @@ int test_resident_launch_contract(void)
         zcl_hex_encode(ztasks_receipt, 32, ztasks_receipt_hex);
         zcl_hex_encode(parker_root, 32, parker_root_hex);
         zcl_hex_encode(parker_receipt, 32, parker_receipt_hex);
+
+        failures += rlc_ztasks_lifecycle_rollback(base, zcode,
+                                                   ztasks_root);
 
         struct package_resident_artifact artifact;
         struct zcl_result ar = package_resident_artifact_read(
