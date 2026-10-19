@@ -8,6 +8,9 @@
  * which cannot be created (overlong or unwritable TMPDIR) removes nothing.
  * Every fixture lives under a private directory this selftest creates.
  */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -225,9 +228,13 @@ static int ars_mkdeep(char *path, size_t target)
 /* An overlong TMPDIR truncates the scratch name to a directory that exists. */
 static int ars_truncation(const char *priv, const char *root, const char *home)
 {
-    char tmp[PATH_MAX + 64], victim[PATH_MAX + 128];
+    char tmp[PATH_MAX + 64], victim[PATH_MAX + 128], physical[PATH_MAX];
     static const char name[] = "/zcl-apiref.XXXXXX";
-    snprintf(tmp, sizeof tmp, "%s/long", priv);
+    /* Darwin's /var alias adds /private during pathname resolution. Count
+     * the physical prefix so the planted victim stays below PATH_MAX. */
+    if (!realpath(priv, physical))
+        return die("z23-lint: cannot resolve the scratch directory\n", "");
+    snprintf(tmp, sizeof tmp, "%s/long", physical);
     if (mkdir(tmp, 0700) != 0 || ars_mkdeep(tmp, PATH_MAX - (sizeof name - 1)) != 0)
         return die("z23-lint: cannot stage an overlong TMPDIR\n", "");
     snprintf(victim, sizeof victim, "%s%.*s", tmp, (int)sizeof name - 2, name);
