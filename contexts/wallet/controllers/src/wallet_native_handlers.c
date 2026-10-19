@@ -554,8 +554,10 @@ static bool wnh_shielded_fee_zat(struct zcl_command_reply *reply,
                                  CAmount *fee_out)
 {
     struct json_value info;
-    if (!wnh_call_rpc(reply, "getwalletinfo", NULL, &info))
+    if (!wnh_call_rpc(reply, "getwalletinfo", NULL, &info)) {
+        LOG_WARN(WNH_TAG, "shielded fee read: getwalletinfo failed");
         return false;
+    }
     char fee_text[32];
     bool ok = wnh_amount_exact(json_get(&info, "paytxfee"), fee_out, fee_text);
     json_free(&info);
@@ -571,8 +573,10 @@ static bool wnh_shielded_quote(struct zcl_command_reply *reply,
                                CAmount amount_zats, CAmount *fee_out,
                                CAmount *total_out)
 {
-    if (!wnh_shielded_fee_zat(reply, fee_out))
+    if (!wnh_shielded_fee_zat(reply, fee_out)) {
+        LOG_WARN(WNH_TAG, "shielded quote: wallet fee unavailable");
         return false;
+    }
     *total_out = amount_zats + *fee_out;
     if (!MoneyRange(*total_out)) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_AMOUNT",
