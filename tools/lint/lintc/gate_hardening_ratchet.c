@@ -28,6 +28,7 @@
 #endif
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <sys/stat.h>
 #include "lintc.h"
@@ -55,14 +56,14 @@ static const char k_baseline_default[] =
 
 static int hr_idc(int c)
 {
-    return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
-        || (c >= 'A' && c <= 'Z');
+    return c == '_' || isalnum(c);
 }
 
 static size_t hr_skip_ws(const char *s, size_t i, size_t n)
 {
-    while (i < n && (s[i] == ' ' || s[i] == '\t'))
-        i++;
+    for (; i < n; i++)
+        if (s[i] != ' ' && s[i] != '\t')
+            break;
     return i;
 }
 
@@ -338,11 +339,11 @@ static int hr_on_index(const char *path, int stage, void *vctx)
 
 /* ── baseline ──────────────────────────────────────────────────────────── */
 
-static int hr_base_line(struct hr_set *b, char *line)
+static int hr_base_line(struct hr_set *b, const char *line)
 {
     char rule[64], path[HR_PATH];
     int count;
-    char *p = line;
+    const char *p = line;
     while (*p == ' ' || *p == '\t')
         p++;
     if (*p == '\0' || *p == '#')
@@ -364,22 +365,16 @@ static int hr_base_line(struct hr_set *b, char *line)
     return 0;
 }
 
+static int hr_base_cb(void *ctx, const char *line, size_t len)
+{
+    (void)len;
+    return hr_base_line(ctx, line);
+}
+
 static int hr_base_load(struct hr_set *b, const char *path)
 {
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0; /* a missing baseline is an empty one */
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t nread;
-    int rc = 0;
-    while (rc == 0 && (nread = getline(&line, &cap, f)) >= 0) {
-        size_t n = (size_t)nread;
-        if (n && line[n - 1] == '\n')
-            line[--n] = '\0';
-        rc = hr_base_line(b, line);
-    }
-    return fin(f, line, path, rc);
+    int rc = lc_each_line(path, hr_base_cb, b, 1);
+    return rc == 1 ? 0 : rc; /* a missing baseline is an empty one */
 }
 
 static int hr_row_cmp(const void *a, const void *b)
@@ -638,16 +633,24 @@ static void hr_st_banned(void)
 
 static void hr_st_escape(void)
 {
-    hr_st_case("hardening-ok with reason exempts", "new/e.c",
-               "strcpy(d, s); // hardening-ok: fixed 4-byte literal\n", "",
-               0, "PASS");
-    hr_st_case("hardening-ok block form with reason exempts", "new/e2.c",
-               "strcpy(d, s); /* hardening-ok: sized above */\n", "", 0,
-               "PASS");
-    hr_st_case("hardening-ok with empty reason does not", "new/f.c",
-               "strcpy(d, s); // hardening-ok:\n", "", 1, "FAIL");
-    hr_st_case("hardening-ok with blank block reason does not", "new/f2.c",
-               "strcpy(d, s); /* hardening-ok: */\n", "", 1, "FAIL");
+    static const struct {
+        const char *tag, *path, *text;
+        int want_rc;
+        const char *want_out;
+    } k_cases[] = {
+        { "hardening-ok with reason exempts", "new/e.c",
+          "strcpy(d, s); // hardening-ok: fixed 4-byte literal\n", 0,
+          "PASS" },
+        { "hardening-ok block form with reason exempts", "new/e2.c",
+          "strcpy(d, s); /* hardening-ok: sized above */\n", 0, "PASS" },
+        { "hardening-ok with empty reason does not", "new/f.c",
+          "strcpy(d, s); // hardening-ok:\n", 1, "FAIL" },
+        { "hardening-ok with blank block reason does not", "new/f2.c",
+          "strcpy(d, s); /* hardening-ok: */\n", 1, "FAIL" },
+    };
+    for (size_t i = 0; i < sizeof k_cases / sizeof k_cases[0]; i++)
+        hr_st_case(k_cases[i].tag, k_cases[i].path, k_cases[i].text, "",
+                   k_cases[i].want_rc, k_cases[i].want_out);
 }
 
 static void hr_st_baseline(void)
