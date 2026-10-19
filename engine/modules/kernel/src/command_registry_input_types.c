@@ -420,7 +420,7 @@ static bool cr_match_leaf_ints(const char *path, const char *key,
         return true;
     if (cr_match_vanity_ints(path, key, value, type_ok))
         return true;
-    if (strcmp(path, "dev.land") == 0 && strcmp(key, "wait_ms") == 0) {
+    if (strcmp(path, "dev.land.attach_publish") == 0 && strcmp(key, "wait_ms") == 0) {
         *type_ok = cr_int_range(value, 1, 900000);
         return true;
     }

@@ -1549,8 +1549,8 @@ Before committing:
 9. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 A resident loop lands the same way through the native async queue
-(`z23-dev dev land submit|status|step|drive|cancel`,
-`tools/command/native_dev_land.c`):
+(`z23 dev land submit|status|step|drive|cancel`, nested leaves under the `dev land` branch;
+`tools/command/native_dev_land.c`; `z23 dev land --help` lists every verb):
 one driver steps that queue at a time, since `step` holds a per-queue lock for
 its whole run and a second driver that finds it held gets `STEP_BUSY`
 (retryable) and steps again shortly rather than racing the first driver's

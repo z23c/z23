@@ -2048,31 +2048,45 @@ ZCL_COMMAND_DEV_COMMAND(
 
 /* ── dev.land ──────────────────────────────────────────────────────────────
  * The landing service: an agent submits a tip and returns in milliseconds,
- * a driver steps the queue, and the agent learns the outcome by
- * pulling. step drives
- * one beat under a host-wide, non-blocking slot lock — rebase onto
- * origin/main, lint, ASK for the exact proof, return — and a later step
- * reads the proof's own answer and fast-forwards origin/main. */
+ * a driver steps the queue, and the agent learns the outcome by pulling.
+ * Each verb is its own leaf under this branch and shares one handler
+ * (tools/command/native_dev_land.c), which reads the verb from the leaf the
+ * registry resolved; the older `action` input still selects a verb for
+ * in-process callers. */
+ZCL_COMMAND_BRANCH("dev.land", "dev",
+                   "Queue a tip, prove it and publish it to origin/main",
+                   ZCL_COMMAND_LAYER_DEV)
+
 ZCL_COMMAND_DEV_COMMAND(
-    "dev.land", "dev", "",
-    "Queue a tip; attach signed Git intent, prove and push without waiting",
-    "attest_only reports bounded self-image/source, exact unsealed seq410 pair, "
-    "time and two fixture booleans; service origin stays UNKNOWN. It returns "
-    "before all mutations. submit queues a signed related tip; status reads "
-    "the queue and exact proof handoff. step serializes rebase, lint, proof "
-    "request and receipt-gated push in the private worktree. drive bounds that "
-    "sequence and releases its lock during proof. attach seals an exact proven "
-    "pair; attach_publish seals and performs its current-base publication beat "
-    "under one lock. Optional base/head pins refuse changed pairs; wait_ms "
-    "bounds explicit attach_publish proof waiting. hold/release retain a per-sequence "
-    "publication hold; held rows may prove but never seal or push. Both refuse "
-    "unknown or sealed rows. status exposes the hold. cancel refuses unresolved "
-    "push checkpoints. fence_replace binds an explicit paired successor. "
-    "Outcomes retain provenance and normal native mail receipts. No shell.", 65536,
-    "land,submit,attach,attach_publish,step,drive,status,hold,release,cancel,queue,proof,push,rebase,async",
-    "zcl.land_input.v1", "zcl.land.v1",
-    "action,tip,worktree,note,seq,base,head,wait_ms,json", "action",
-    "z23-dev dev land drive",
+    "dev.land.submit", "dev.land", "",
+    "Queue a signed tip for landing and return at once",
+    "Queues one signed tip from a lane worktree and returns before any "
+    "mutation of origin. Refuses an unsigned or unrelated tip. A repeated "
+    "submission of the same tip answers with the existing row.", 65536,
+    "land,submit,queue,lane,tip",
+    "zcl.land_input.v1", "zcl.land.v1", "tip,worktree,note,json", "",
+    "z23 dev land submit --worktree=PATH",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land submit")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.drive", "dev.land", "",
+    "Drive a queued row through proof and publication",
+    "A bounded foreground integrator session: serializes rebase, lint, exact "
+    "proof request, proof execution, signed intent attachment and "
+    "receipt-gated push, and releases the step lock while the proof runs. "
+    "Rerun it to continue a row that stopped queued.", 65536,
+    "land,drive,proof,push,integrator",
+    "zcl.land_input.v1", "zcl.land.v1", "seq", "",
+    "z23 dev land drive",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
@@ -2082,13 +2096,180 @@ ZCL_COMMAND_DEV_COMMAND(
     ZCL_COMMAND_TRAIT_DEV_ONLY,
     zcl_native_handle_dev_land,
     "the landing queue is a development-lane coordination surface",
-    "z23-dev dev land")
+    "z23 dev land drive")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.land.status", "dev.land", "",
+    "Read the landing queue and the exact proof handoff",
+    "Reads the queue rows, the in-flight proof pair and the publication hold "
+    "from the private landing state at call time; nothing is fetched or "
+    "mutated.", 65536,
+    "land,status,queue,proof,hold",
+    "zcl.land_input.v1", "zcl.land.v1", "json", "",
+    "z23 dev land status",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY, zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land status")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.step", "dev.land", "",
+    "Advance the queue by one serialized beat",
+    "Rebases onto origin/main, lints, asks for the exact proof or reads its "
+    "answer, and fast-forwards origin/main on a sealed pass. A second step "
+    "while one runs answers STEP_BUSY.", 65536,
+    "land,step,rebase,lint,push",
+    "zcl.land_input.v1", "zcl.land.v1", "", "",
+    "z23 dev land step",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land step")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.attach", "dev.land", "",
+    "Seal the signed Git intent for an exact proven pair",
+    "Seals the signed publication intent of one proven row. Optional base and "
+    "head pins refuse a changed pair.", 65536,
+    "land,attach,intent,proof",
+    "zcl.land_input.v1", "zcl.land.v1", "seq,base,head", "",
+    "z23 dev land attach --seq=1",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land attach")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.attach_publish", "dev.land", "",
+    "Seal the intent and run its publication beat under one lock",
+    "Seals the intent of an exact pair and performs its current-base "
+    "publication beat under one lock. wait_ms bounds an explicit wait for "
+    "the proof.", 65536,
+    "land,attach,publish,intent",
+    "zcl.land_input.v1", "zcl.land.v1", "seq,base,head,wait_ms", "",
+    "z23 dev land attach_publish --seq=1",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land attach_publish")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.hold", "dev.land", "",
+    "Hold one row from sealing or pushing",
+    "Retains a per-sequence publication hold. A held row may prove but never "
+    "seals or pushes. Refuses unknown or sealed rows.", 65536,
+    "land,hold,publication",
+    "zcl.land_input.v1", "zcl.land.v1", "seq", "",
+    "z23 dev land hold --seq=1",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land hold")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.release", "dev.land", "",
+    "Remove the publication hold from one row",
+    "Clears the per-sequence publication hold set by hold. Refuses unknown "
+    "or sealed rows.", 65536,
+    "land,release,publication",
+    "zcl.land_input.v1", "zcl.land.v1", "seq", "",
+    "z23 dev land release --seq=1",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land release")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.cancel", "dev.land", "",
+    "Cancel one queued row by sequence number",
+    "Removes one row from the queue by sequence. Refuses a row with an "
+    "unresolved push checkpoint.", 65536,
+    "land,cancel,queue",
+    "zcl.land_input.v1", "zcl.land.v1", "seq,force,json", "",
+    "z23 dev land cancel --seq=1",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land cancel")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.fence_replace", "dev.land", "",
+    "Bind an explicit paired successor to a fenced row",
+    "Replaces a fenced pair with an explicit successor named by seq, base, "
+    "head, tip and worktree.", 65536,
+    "land,fence,successor",
+    "zcl.land_input.v1", "zcl.land.v1", "seq,base,head,tip,worktree", "",
+    "z23 dev land fence_replace --seq=1",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land fence_replace")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.land.attest_only", "dev.land", "",
+    "Report the bounded self observation of this binary",
+    "Reports the bounded self image and source observation, the exact "
+    "unsealed seq410 pair, the time and two fixture booleans; the service "
+    "origin stays UNKNOWN. It returns before any mutation.", 16384,
+    "land,attest,self,observation",
+    "zcl.land_input.v1", "zcl.land.v1", "", "",
+    "z23 dev land attest_only",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DEV_ONLY, zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23 dev land attest_only")
 
 /* ── dev.land.window ───────────────────────────────────────────────────────
  * The two-lander LAND-WINDOW mail protocol
  * (tools/command/native_dev_land_window.c). */
 ZCL_COMMAND_DEV_COMMAND(
-    "dev.land.window", "dev.proof", "",
+    "dev.land.window", "dev.land", "",
     "Read or announce the two-lander LAND-WINDOW proving windows",
     "open reads the agent mail dir and lists windows another host announced "
     "as 'LAND-WINDOW <host>, candidate <sha10> on base <sha10>, proving now, "
@@ -2104,7 +2285,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "land,window,mail,lander,proof,coordination",
     "zcl.land_window_input.v1", "zcl.land_window.v1",
     "action,host,seq,candidate,base,expected_done,now,grace_s", "action",
-    "z23-dev dev land window --action=open --host=hosta",
+    "z23 dev land window --action=open --host=hosta",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
@@ -2113,7 +2294,7 @@ ZCL_COMMAND_DEV_COMMAND(
     ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_dev_land_window,
     "landing windows are a development-lane coordination surface",
-    "z23-dev dev land window")
+    "z23 dev land window")
 
 /* ── dev.lane ──────────────────────────────────────────────────────────────
  * An agent worktree with the proof's vendored dependencies primed onto

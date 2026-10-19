@@ -915,8 +915,8 @@ static const struct search_rank_case SEARCH_RANK_TUNING[] = {
     {"retry a proof", "dev.proof.retry"},
     {"list work cards", "work.list"},
     {"show a work card", "work.show"},
-    {"land a change", "dev.land"},
-    {"landing queue status", "dev.land"},
+    {"land a change", "dev.land.submit"},
+    {"landing queue status", "dev.land.status"},
     {"read a wiki page", "fleet.wiki.read"},
 };
 

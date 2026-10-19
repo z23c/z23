@@ -195,16 +195,22 @@ struct dlx_call {
     struct zcl_command_reply reply;
 };
 
+/* A known verb resolves its registry leaf (dev.land.<verb>) and is validated
+ * against that leaf's keys; an unknown or absent verb carries no leaf, and
+ * the `action` input reaches the handler as an in-process caller sends it. */
 static void dlx_begin(struct dlx_call *c, const char *action)
 {
+    char path[64];
     json_init(&c->input);
     json_set_object(&c->input);
     memset(&c->request, 0, sizeof(c->request));
     c->request.input = &c->input;
-    c->request.spec =
-        zcl_command_registry_find(zcl_command_catalog(), DLX_PATH, NULL);
+    if (action && snprintf(path, sizeof(path), "%s.%s", DLX_PATH, action) <
+                      (int)sizeof(path))
+        c->request.spec =
+            zcl_command_registry_find(zcl_command_catalog(), path, NULL);
     zcl_command_reply_init(&c->reply, "zcl.land.v1");
-    if (action)
+    if (action && !c->request.spec)
         (void)json_push_kv_str(&c->input, "action", action);
 }
 
@@ -260,7 +266,7 @@ static bool dlx_refusal_serializes(const struct dlx_call *call)
     const char *error_code = json_get_str(json_get(error, "code"));
     const char *action = json_get_str(json_get(error, "next_action"));
     ok = ok && error_code && strcmp(error_code, call->reply.error.code) == 0 &&
-        action && strcmp(action, "z23-dev dev land step") == 0 &&
+        action && strcmp(action, "z23 dev land step") == 0 &&
         json_get_bool(json_get(error, "retryable")) == call->reply.error.retryable &&
         json_get_bool(json_get(error, "mutated")) == call->reply.error.mutated;
     json_free(&doc);
@@ -3163,7 +3169,7 @@ static bool dlx_steer_stalled(const struct dlx_call *c,
     if (!dlx_alls(v, 8))
         return false;
     v[0] = dlx_eq_str(dlx_jstr(steer, "first_missing_transition"), "claim");
-    v[1] = dlx_eq_str(dlx_jstr(steer, "wake_command"), "z23-dev dev land step");
+    v[1] = dlx_eq_str(dlx_jstr(steer, "wake_command"), "z23 dev land step");
     v[2] = dlx_has(dlx_jstr(steer, "remote_state"), "cached:");
     v[3] = queued && queued->num_children == 1;
     v[4] = json_get(&c->reply.data, "in_flight") == NULL;
@@ -3181,7 +3187,7 @@ static bool dlx_screen_names_incident(void)
     }
     ok = dlx_has(dlx_str(&c, "screen"), "incident: drain_absent") &&
          dlx_has(dlx_str(&c, "screen"),
-                 "steer.wake_command: z23-dev dev land step");
+                 "steer.wake_command: z23 dev land step");
     dlx_end(&c);
     return ok;
 }
@@ -3777,23 +3783,23 @@ static int test_dev_land_blocked_names_attach_target(void)
         ASSERT_STR_EQ(dlx_str(&c, "base"), base);
         ASSERT(strlen(dlx_str(&c, "head_commit")) == 40);
         ASSERT_STR_EQ(dlx_str(&c, "next_command"),
-                      "z23-dev dev land attach --seq=1");
+                      "z23 dev land attach --seq=1");
         ASSERT_STR_EQ(c.reply.error.next_action,
-                      "z23-dev dev land attach --seq=1");
+                      "z23 dev land attach --seq=1");
         ASSERT(strstr(dlx_err_evidence(&c), "seq=1 ") != NULL);
         ASSERT(strstr(dlx_err_evidence(&c), base) != NULL);
         ASSERT(dlx_blocked_wire(&c, action, evidence, reason,
                                 sizeof(action)));
-        ASSERT_STR_EQ(action, "z23-dev dev land attach --seq=1");
+        ASSERT_STR_EQ(action, "z23 dev land attach --seq=1");
         ASSERT(strstr(evidence, "seq=1 ") != NULL);
         ASSERT(strstr(evidence, rig.tip) != NULL);
-        ASSERT(strstr(reason, "z23-dev dev land attach --seq=1") != NULL);
+        ASSERT(strstr(reason, "z23 dev land attach --seq=1") != NULL);
         dlx_end(&c);
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT_STR_EQ(dlx_err_code(&c), "PUBLICATION_INTENT_REQUIRED");
         ASSERT_STR_EQ(c.reply.error.next_action,
-                      "z23-dev dev land attach --seq=1");
+                      "z23 dev land attach --seq=1");
         dlx_end(&c);
         ASSERT(dlx_origin_main(&rig, remote));
         ASSERT_STR_EQ(remote, base);
@@ -11234,22 +11240,34 @@ static int dlx_string_compatibility_cases(void)
     failures += dlx_row_member_boundary_case(4096, false);
     return failures;
 }
+static const struct zcl_command_spec *dlx_leaf(const char *verb)
+{
+    char path[64];
+    (void)snprintf(path, sizeof(path), "%s.%s", DLX_PATH, verb);
+    return zcl_command_registry_find(zcl_command_catalog(), path, NULL);
+}
+
 static int dlx_case_registration(void)
 {
     int failures = 0;
-    TEST("land: the leaf is registered with its verb and row keys") {
-        const struct zcl_command_spec *spec =
+    TEST("land: every verb is a nested leaf with its row keys") {
+        static const char *const verbs[] = {
+            "submit", "drive", "status", "step", "attach", "attach_publish",
+            "hold", "release", "cancel", "fence_replace", "attest_only" };
+        const struct zcl_command_spec *branch =
             zcl_command_registry_find(zcl_command_catalog(), DLX_PATH, NULL);
-        ASSERT(spec != NULL);
-        ASSERT(spec->input_keys && strstr(spec->input_keys, "action") != NULL);
-        ASSERT(spec->input_keys && strstr(spec->input_keys, "tip") != NULL);
-        ASSERT(spec->input_keys &&
-               strstr(spec->input_keys, "worktree") != NULL);
-        ASSERT(spec->input_keys && strstr(spec->input_keys, "note") != NULL);
-        ASSERT(spec->input_keys && strstr(spec->input_keys, "seq") != NULL);
-        ASSERT(spec->input_keys && strstr(spec->input_keys, "json") != NULL);
-        ASSERT(spec->positional_keys &&
-               strstr(spec->positional_keys, "action") != NULL);
+        ASSERT(branch != NULL && branch->mode == ZCL_COMMAND_MODE_BRANCH);
+        for (size_t i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
+            const struct zcl_command_spec *leaf = dlx_leaf(verbs[i]);
+            ASSERT(leaf != NULL);
+            ASSERT_STR_EQ(leaf->parent, DLX_PATH);
+        }
+        ASSERT(strstr(dlx_leaf("submit")->input_keys, "tip") != NULL);
+        ASSERT(strstr(dlx_leaf("submit")->input_keys, "worktree") != NULL);
+        ASSERT(strstr(dlx_leaf("submit")->input_keys, "note") != NULL);
+        ASSERT(strstr(dlx_leaf("drive")->input_keys, "seq") != NULL);
+        ASSERT(strstr(dlx_leaf("cancel")->input_keys, "seq") != NULL);
+        ASSERT(strstr(dlx_leaf("status")->input_keys, "json") != NULL);
         PASS();
     }
 _test_next:;

@@ -80,7 +80,7 @@
  * z23-land-step timer is not armed or the row is older than the drain
  * idle bound (ZCL_LAND_DRAIN_IDLE_SEC, default 900s — a healthy timer
  * claims within one 20s period, so 900s is a dead drain, not a gap
- * between beats). The wake command is then `z23-dev dev land step`:
+ * between beats). The wake command is then `z23 dev land step`:
  * another authorized integrator adopts by calling that same step. A
  * held lock is not an incident; a second step returns STEP_BUSY and
  * does not push. status does not create step.lock and does not hold it.
@@ -91,7 +91,7 @@
  * attach_publish makes the same explicit signed intent, then runs the
  * existing current-base publication beat before releasing step.lock.
  * A beat blocked on PUBLICATION_INTENT_REQUIRED names seq, tip and base in
- * error.evidence and `z23-dev dev land attach --seq=N` in next_action.
+ * error.evidence and `z23 dev land attach --seq=N` in next_action.
  *
  * step ALSO carries persist:"failed" (plus persist_reason) alongside the
  * `state` it names when the row's own commit to queue.jsonl/outcomes.jsonl
@@ -3374,9 +3374,9 @@ static void dl_cancel(const struct zcl_command_request *req,
 #define PATH_MAX 4096
 #endif
 
-static const char DL_WAKE_STEP[] = "z23-dev dev land step";
+static const char DL_WAKE_STEP[] = "z23 dev land step";
 static const char DL_WAKE_BUSY[] =
-    "none (step.lock held; z23-dev dev land step returns STEP_BUSY and does not push)";
+    "none (step.lock held; z23 dev land step returns STEP_BUSY and does not push)";
 
 enum dl_beat {
     DL_BEAT_FREE = 0,
@@ -6748,7 +6748,7 @@ static bool dl_observe_remote_main(const struct dl_dirs *d,
                            "cannot freshly observe origin main; retry this step",
                            "origin refs/heads/main fetch or commit resolution failed");
     (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
-                   "%s", "z23-dev dev land step");
+                   "%s", "z23 dev land step");
     return false;
 }
 
@@ -7007,7 +7007,7 @@ static void dl_step_deferred(struct zcl_command_reply *reply,
                            "after its window closes",
                            evidence);
     (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
-                   "%s", "z23-dev dev land step");
+                   "%s", "z23 dev land step");
 }
 
 /* True when the step deferred (reply written). Fail-open: no window, a
@@ -8115,7 +8115,7 @@ static void dl_push_outcome_unknown(const struct dl_dirs *d,
                            observed_main ? observed_main : "remote observation unavailable");
     (void)snprintf(reply->error.next_action,
                    sizeof(reply->error.next_action), "%s",
-                   "z23-dev dev land step");
+                   "z23 dev land step");
 }
 
 /* dl_push_proven_pair is a compare-and-swap of refs/heads/main from base to
@@ -8295,7 +8295,7 @@ static void dl_push_checkpoint_failed(const struct dl_dirs *d, struct dl_row *ro
                            d->land);
     (void)snprintf(reply->error.next_action,
                    sizeof(reply->error.next_action), "%s",
-                   "z23-dev dev land step");
+                   "z23 dev land step");
 }
 
 static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
@@ -8394,7 +8394,7 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
                                "remote main does not confirm this candidate; retry observation",
                                observed_main);
         (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
-                       "%s", "z23-dev dev land step");
+                       "%s", "z23 dev land step");
         return;
     }
 }
@@ -10845,14 +10845,14 @@ static void dl_push_intent_blocked(const struct dl_row *row, bool required,
                    row->seq, row->tip, row->base, row->local);
     if (required) {
         (void)snprintf(command, sizeof(command),
-                       "z23-dev dev land attach --seq=%lld", row->seq);
+                       "z23 dev land attach --seq=%lld", row->seq);
         (void)snprintf(reason, sizeof(reason),
                        "sign the proven pair, then step: %s", command);
     } else {
-        (void)snprintf(command, sizeof(command), "z23-dev dev land status");
+        (void)snprintf(command, sizeof(command), "z23 dev land status");
         (void)snprintf(reason, sizeof(reason),
                        "stored intent for seq=%lld no longer verifies; if it "
-                       "persists: z23-dev dev land cancel --seq=%lld",
+                       "persists: z23 dev land cancel --seq=%lld",
                        row->seq, row->seq);
     }
     (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
@@ -10945,11 +10945,11 @@ static bool dl_attach_resolve(const struct dl_dirs *d,
     if (found == 0)
         (void)snprintf(reply->error.next_action,
                        sizeof(reply->error.next_action), "%s",
-                       "z23-dev dev land status");
+                       "z23 dev land status");
     else
         (void)snprintf(reply->error.next_action,
                        sizeof(reply->error.next_action),
-                       "z23-dev dev land attach --seq=<one of %s>", named);
+                       "z23 dev land attach --seq=<one of %s>", named);
     return false;
 }
 
@@ -10991,7 +10991,7 @@ static bool dl_attach_pick(const struct dl_row *rows, size_t count,
         (void)json_push_kv_str(&reply->data, "phase", hit->phase);
     }
     (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
-                   "%s", "z23-dev dev land status");
+                   "%s", "z23 dev land status");
     return false;
 }
 
@@ -11588,6 +11588,21 @@ static bool dl_hold_action(const char *action,
     return false;
 }
 
+/* The verb is the registry leaf that was resolved (dev.land.<verb>); the
+ * `action` input selects one for in-process callers that hold no leaf. */
+static const char *dl_action(const struct zcl_command_request *request)
+{
+    static const char prefix[] = "dev.land.";
+    const char *explicit_action = dl_str(request, "action");
+    const char *path = request->spec ? request->spec->path : NULL;
+    if (explicit_action)
+        return explicit_action;
+    if (path && strncmp(path, prefix, sizeof(prefix) - 1) == 0 &&
+        !strchr(path + sizeof(prefix) - 1, '.'))
+        return path + sizeof(prefix) - 1;
+    return NULL;
+}
+
 void zcl_native_handle_dev_land(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
@@ -11596,15 +11611,15 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
         return;
     if (!request || !request->input) {
         dl_fail(reply, "BAD_INPUT", "route",
-                "dev land needs an action: submit|attach|attach_publish|status|step|drive|hold|release|cancel|fence_replace",
+                "dev land needs a verb: submit|attach|attach_publish|status|step|drive|hold|release|cancel|fence_replace",
                 "request.input was missing");
         return;
     }
-    action = dl_str(request, "action");
+    action = dl_action(request);
     if (!action) {
         dl_fail(reply, "BAD_INPUT", "route",
-                "dev land needs an action: submit|attach|attach_publish|status|step|drive|hold|release|cancel|fence_replace",
-                "input.action missing or empty");
+                "dev land needs a verb: submit|attach|attach_publish|status|step|drive|hold|release|cancel|fence_replace",
+                "leaf and input.action both missing");
         return;
     }
     if (strcmp(action, "attest_only") == 0) {
