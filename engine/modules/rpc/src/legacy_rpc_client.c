@@ -91,7 +91,7 @@ bool legacy_rpc_parse_conf_file(const char *path, char *out_user, size_t user_sz
  * O_NONBLOCK (a FIFO cannot block the open), must be a regular file of at
  * most LRC_CONF_MAX bytes owned by this user and not writable by group or
  * others, and is parsed from the checked descriptor. */
-bool legacy_rpc_parse_conf_trusted(const char *path, char *out_user,
+bool legacy_rpc_parse_conf_checked(const char *path, char *out_user,
                                     size_t user_sz, char *out_pass,
                                     size_t pass_sz, int *out_port)
 {
@@ -130,7 +130,7 @@ bool legacy_rpc_parse_conf(char *out_user, size_t user_sz,
         snprintf(path, sizeof(path), "%s/.zclassic/zclassic.conf", home);
     }
     if (explicit_conf && explicit_conf[0])
-        return legacy_rpc_parse_conf_trusted(path, out_user, user_sz, out_pass,
+        return legacy_rpc_parse_conf_checked(path, out_user, user_sz, out_pass,
                                              pass_sz, out_port);
     return legacy_rpc_parse_conf_file(path, out_user, user_sz, out_pass,
                                       pass_sz, out_port);

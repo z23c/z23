@@ -28,7 +28,7 @@
 /* Same parse over a conf opened once without following symlinks: a regular
  * file of at most 64 KiB owned by this user and not group or world writable.
  * A FIFO or other special file is refused without blocking. */
-bool legacy_rpc_parse_conf_trusted(const char *path, char *out_user,
+bool legacy_rpc_parse_conf_checked(const char *path, char *out_user,
                                    size_t user_sz, char *out_pass,
                                    size_t pass_sz, int *out_port);
 

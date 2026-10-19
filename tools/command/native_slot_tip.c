@@ -104,7 +104,7 @@ static bool tip_load(struct slot_tip_endpoint *e, const char *host,
 {
     int conf_port = 0;
     if (!tip_host_ok(host) || !conf || conf[0] != '/' ||
-        !legacy_rpc_parse_conf_trusted(conf, e->user, sizeof(e->user), e->pass,
+        !legacy_rpc_parse_conf_checked(conf, e->user, sizeof(e->user), e->pass,
                                         sizeof(e->pass), &conf_port))
         return false;
     snprintf(e->host, sizeof(e->host), "%s", host);
