@@ -605,6 +605,14 @@ bool boot_maybe_auto_install_consensus_bundle(struct node_db *ndb,
                           "post-install step failed (%s) — retrying on the next "
                           "boot (not marked .failed: the state is on disk)",
                           auto_bundle, rr.reason);
+            } else if (rr.owner_gate_refused) {
+                /* The canonical-lane owner gate protects existing chain state;
+                 * it judges the datadir, not the bundle. Leave no .failed
+                 * marker so a boot with ZCL_DEPLOY_ALLOW_CANONICAL=1 finds the
+                 * bundle again. */
+                LOG_WARN(ICB_SUBSYS,
+                         "autodetected bundle %s not installed (NOT marked "
+                         ".failed): %s", auto_bundle, rr.reason);
             } else if (rr.retriable_headers_not_ready) {
                 /* RETRIABLE WAIT (fresh boot / mid-header-sync): the validated
                  * header chain has not yet reached the checkpoint height. The

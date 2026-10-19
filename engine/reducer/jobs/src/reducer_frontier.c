@@ -564,6 +564,90 @@ static bool tip_finalize_served_floor(sqlite3 *db, int32_t *served_floor)
     return rc_ok;
 }
 
+/* True iff the reducer's anchor-bearing log table exists. A consensus store
+ * whose stage schema has not been created yet has no frontier to compute; the
+ * caller reports that once per interval instead of failing every table read. */
+static bool reducer_frontier_schema_present(sqlite3 *db)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND "
+            "name='tip_finalize_log'", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    bool present = sqlite3_step(st) == SQLITE_ROW; // raw-sql-ok:read-only-introspection
+    sqlite3_finalize(st);
+    return present;
+}
+
+#define FRONTIER_LOG_THROTTLE_SECS 300
+#define FRONTIER_STAGE_THROTTLE_MAX 16
+_Static_assert(sizeof(k_logs) / sizeof(k_logs[0]) <= FRONTIER_STAGE_THROTTLE_MAX,
+               "one cursor-below-hstar throttle slot per stage");
+static struct log_throttle g_schema_throttle = LOG_THROTTLE_INIT;
+static struct log_throttle g_cursor_throttle[FRONTIER_STAGE_THROTTLE_MAX];
+
+#ifdef ZCL_TESTING
+static _Atomic uint64_t g_test_schema_warn_emitted;
+static _Atomic uint64_t g_test_cursor_warn_emitted;
+uint64_t reducer_frontier_schema_warn_emitted_for_test(void)
+{
+    return atomic_load(&g_test_schema_warn_emitted);
+}
+uint64_t reducer_frontier_cursor_warn_emitted_for_test(void)
+{
+    return atomic_load(&g_test_cursor_warn_emitted);
+}
+void reducer_frontier_log_throttles_reset_for_test(void)
+{
+    log_throttle_reset(&g_schema_throttle);
+    for (int i = 0; i < FRONTIER_STAGE_THROTTLE_MAX; i++)
+        log_throttle_reset(&g_cursor_throttle[i]);
+    atomic_store(&g_test_schema_warn_emitted, 0);
+    atomic_store(&g_test_cursor_warn_emitted, 0);
+}
+#endif
+
+/* A cursor sitting below the anchor persists for as long as the stage has not
+ * advanced; report each stage once per interval with its repeat count. */
+static void frontier_warn_cursor_below(int stage, const char *cursor_name,
+                                       int64_t raw_cursor, int32_t anchor)
+{
+    uint64_t reps = 0;
+    if (!log_throttle_should_emit(&g_cursor_throttle[stage],
+                                  ((uint64_t)(uint32_t)anchor << 32) |
+                                      (uint32_t)raw_cursor,
+                                  platform_time_wall_unix(),
+                                  FRONTIER_LOG_THROTTLE_SECS, &reps))
+        return;
+    LOG_WARN("reducer", "cursor below hstar: %s cursor=%lld anchor=%d "
+             "repeated=%llu", cursor_name, (long long)raw_cursor, anchor,
+             (unsigned long long)reps);
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_test_cursor_warn_emitted, 1);
+#endif
+}
+
+/* Fail-closed schema gate: a store without the reducer stage schema has no
+ * frontier. Reports once per interval and returns false. */
+static bool frontier_schema_gate(sqlite3 *db)
+{
+    if (reducer_frontier_schema_present(db))
+        return true;
+    uint64_t reps = 0;
+    if (log_throttle_should_emit(&g_schema_throttle, 1,
+                                 platform_time_wall_unix(),
+                                 FRONTIER_LOG_THROTTLE_SECS, &reps)) {
+        LOG_WARN("reducer",
+                 "frontier unavailable: the consensus store has no reducer "
+                 "stage schema yet (no state source has landed) repeated=%llu",
+                 (unsigned long long)reps);
+#ifdef ZCL_TESTING
+        atomic_fetch_add(&g_test_schema_warn_emitted, 1);
+#endif
+    }
+    return false;
+}
+
 bool reducer_frontier_compute_hstar(sqlite3 *progress_db,
                                     int32_t *hstar,
                                     int32_t *served_floor)
@@ -572,6 +656,9 @@ bool reducer_frontier_compute_hstar(sqlite3 *progress_db,
         LOG_FAIL("reducer", "compute_hstar: NULL progress_db");
     if (!hstar || !served_floor)
         LOG_FAIL("reducer", "compute_hstar: NULL out param(s)");
+
+    if (!frontier_schema_gate(progress_db))
+        return false;
 
     /* Witness every full O(delta) fold. The tip_finalize H* watermark advances
      * by one row per finalize WITHOUT calling this (see tf_advance_provable_tip),
@@ -625,8 +712,8 @@ bool reducer_frontier_compute_hstar(sqlite3 *progress_db,
          * upstream frame by convention. SUPPRESSED during a refold: a
          * below-anchor cursor is then EXPECTED (re-walking the prefix). */
         if (scan_cursor < (int64_t)anchor + 1 && !refold_in_progress())
-            LOG_WARN("reducer", "cursor below hstar: %s cursor=%lld anchor=%d",
-                     k_logs[i].cursor_name, (long long)raw_cursor, anchor);
+            frontier_warn_cursor_below(i, k_logs[i].cursor_name, raw_cursor,
+                                       anchor);
 
         int32_t h_contig = anchor;
         if (!log_contiguous_prefix(progress_db, k_logs[i].log_table, anchor,

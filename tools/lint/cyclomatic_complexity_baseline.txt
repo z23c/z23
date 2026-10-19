@@ -121,7 +121,6 @@ cognition/modules/codeindex/src/codeindex_scan_file.c:ci_scan_file:26
 cognition/modules/codeindex/src/codeindex_search.c:ci_store_search_text:17
 cognition/modules/codeindex/src/codeindex_search.c:codeindex_search_story:28
 cognition/modules/codeindex/src/codeindex_semantic_candidate.c:zcl_code_semantic_candidate_v1_validate:24
-cognition/modules/codeindex/src/codeindex_source_universe.c:ci_source_universe_reconcile:14
 cognition/modules/codeindex/src/codeindex_store.c:ci_copy_image_fd:31
 cognition/modules/codeindex/src/codeindex_store.c:ci_store_open:34
 cognition/modules/codeindex/src/codeindex_store.c:ci_store_write_image_fd:19
@@ -487,7 +486,6 @@ contexts/commons/modules/vcs/src/zcode_c23_corpus_shard.c:vcs_zcode_c23_corpus_s
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:bundle_parse_parts:17
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:bundle_validate_authority:18
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:vcs_zcode_candidate_bundle_export:27
-contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:vcs_zcode_candidate_bundle_import:14
 contexts/commons/modules/vcs/src/zcode_candidate_tree.c:vcs_zcode_candidate_tree_import:37
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_decode:16
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_from_selection:18
@@ -824,7 +822,6 @@ contexts/commons/services/src/package_lifecycle.c:package_lifecycle_plan:22
 contexts/commons/services/src/package_lifecycle_install.c:package_lifecycle_installed_programs:21
 contexts/commons/services/src/package_lifecycle_install.c:pkgl_activate:16
 contexts/commons/services/src/package_lifecycle_install.c:pkgl_build_and_install:34
-contexts/commons/services/src/package_lifecycle_install.c:pkgl_verify_installed_receipt:6
 contexts/commons/services/src/package_lifecycle_reproduce.c:pkgl_reproduce_run:26
 contexts/commons/services/src/package_lifecycle_reproduce.c:pkgl_run_reproduce_worker:18
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_materialize_package:28
@@ -1374,6 +1371,7 @@ engine/composition/src/boot.c:boot_step_init_crypto_and_state:17
 engine/composition/src/boot.c:sandbox_build_fs_rules:18
 engine/composition/src/boot_anchor_snapshot_reachability.c:anchor_snapshot_verified_reachable_ex:19
 engine/composition/src/boot_auto_install_bundle.c:boot_autodetect_consensus_bundle#2:22
+engine/composition/src/boot_auto_install_bundle.c:boot_maybe_auto_install_consensus_bundle#2:16
 engine/composition/src/boot_auto_install_bundle.c:boot_select_state_source#2:19
 engine/composition/src/boot_background_workers.c:hodl_history_worker_thread:17
 engine/composition/src/boot_background_workers.c:projection_backfill_service_thread:56
@@ -1503,7 +1501,7 @@ engine/composition/src/bundle_exporter.c:bx_try_export_once:20
 engine/composition/src/consensus_state_bundle_validate.c:validate_nullifiers:20
 engine/composition/src/consensus_state_bundle_validate.c:validate_rom_keystone_binding:16
 engine/composition/src/consensus_state_bundle_validate_schema.c:consensus_state_bundle_validate_canonical_schema:26
-engine/composition/src/consensus_state_install_runtime.c:consensus_state_install_from_bundle#2:81
+engine/composition/src/consensus_state_install_runtime.c:consensus_state_install_from_bundle#2:80
 engine/composition/src/consensus_state_install_runtime.c:icb_datadir_open_classify:17
 engine/composition/src/consensus_state_install_runtime.c:icb_read_source_receipt:24
 engine/composition/src/consensus_state_install_verify_receipt.c:consensus_state_install_verify_receipt_lookup:20
@@ -1781,7 +1779,6 @@ engine/jobs/src/tip_finalize_stage_observe.c:tip_finalize_observe_dump_state_jso
 engine/jobs/src/tip_finalize_visible_body.c:tip_finalize_reconcile_visible_cursor_body:21
 engine/jobs/src/utxo_apply_anchors.c:utxo_apply_anchor_bind_mismatch:20
 engine/jobs/src/utxo_apply_delta.c:utxo_apply_compute_block_delta:61
-engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_emit_inverse_delta:10
 engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_reorg_unwind_if_needed:39
 engine/jobs/src/utxo_apply_delta_repair.c:prove_exact_future_coin_suffix:19
 engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:42
@@ -1820,7 +1817,6 @@ engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_complete:16
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_insert:16
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_validate:23
 engine/models/src/mmb_leaf_store.c:mmb_leaf_store_rebuild:16
-engine/models/src/peer.c:db_peer_save_with_attempts:15
 engine/models/src/query_builder.c:qb_prepare_db:17
 engine/models/src/query_builder.c:qb_where_lead:16
 engine/models/src/schema_migration.c:schema_migration_rollback_last:16
@@ -1828,7 +1824,6 @@ engine/models/src/schema_migration.c:schema_migration_run_pending:17
 engine/models/src/shared_validators.c:zcl_validate_zcl_address:20
 engine/models/src/zid_domain.c:zid_domain_replace_leaves:19
 engine/modules/chainlog/src/chainlog.c:scan:16
-engine/modules/chainlog/src/chainlog.c:zcl_chainlog_open:1
 engine/modules/chainlog/src/chainlog.c:zcl_chainlog_read:17
 engine/modules/determinism/src/classify.c:zcl_det_classify:21
 engine/modules/determinism/src/receipt.c:zcl_det_receipt_check:16
@@ -1861,7 +1856,6 @@ engine/modules/event/src/event.c:event_dump_json_filtered:23
 engine/modules/fleetledger/src/fleet_ledger.c:index_row:17
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_append:27
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_experiment_stats:42
-engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_open:1
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_query:30
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_decode:20
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_validate:36
@@ -1949,7 +1943,6 @@ engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/block_index_projection.c:block_index_projection_catch_up:18
 engine/modules/storage/src/block_index_projection.c:block_index_projection_commitment:16
 engine/modules/storage/src/block_index_projection_binding.c:block_index_projection_iterate_dirty_if_bound:17
-engine/modules/storage/src/block_index_projection_status.c:catch_up_apply_status:14
 engine/modules/storage/src/block_parse_cache.c:block_parse_cache_acquire:22
 engine/modules/storage/src/block_prefetch.c:bp_frame_size:16
 engine/modules/storage/src/blocks_index_legacy_reader.c:bilr_load_height_map:22
@@ -2046,7 +2039,7 @@ engine/reducer/conditions/src/reducer_frontier_reconcile_light.c:progressing_red
 engine/reducer/conditions/src/reducer_frontier_reconcile_light.c:remedy_reducer_frontier_reconcile_light:26
 engine/reducer/jobs/src/reducer_frontier.c:log_contiguous_prefix:25
 engine/reducer/jobs/src/reducer_frontier.c:log_ok_at:21
-engine/reducer/jobs/src/reducer_frontier.c:reducer_frontier_compute_hstar:21
+engine/reducer/jobs/src/reducer_frontier.c:reducer_frontier_compute_hstar:22
 engine/reducer/jobs/src/reducer_frontier.c:reducer_trusted_anchor:16
 engine/reducer/jobs/src/reducer_frontier_dump.c:first_hstar_blocker:17
 engine/reducer/jobs/src/reducer_frontier_dump.c:reducer_frontier_dump_state_json:67
@@ -2322,7 +2315,6 @@ platform/modules/encoding/src/utilstrencodings.c:ParseFixedPoint:45
 platform/modules/install/src/front_door_dns_txt.c:fd_dns_txt_parse:22
 platform/modules/json/src/json.c:json_escape_str:18
 platform/modules/json/src/json.c:json_write:33
-platform/modules/json/src/json.c:parse_string:12
 platform/modules/json/src/json.c:parse_value_r:22
 platform/modules/platform/src/current_identity.c:platform_current_identity_native:17
 platform/modules/platform/src/directory_compat.c:platform_directory_canonical_real:22
@@ -2356,9 +2348,8 @@ platform/modules/platform/src/private_file.c:platform_private_file_link_no_clobb
 platform/modules/platform/src/private_file.c:platform_private_path_resolve:49
 platform/modules/platform/src/process_lifecycle.c:append_arg:20
 platform/modules/platform/src/process_lifecycle.c:environment_block:16
-platform/modules/platform/src/process_lifecycle.c:platform_process_capture_stdout:1
-platform/modules/platform/src/process_lifecycle.c:process_capture_stdout_stdio:53
 platform/modules/platform/src/process_lifecycle.c:platform_process_start_hidden#2:34
+platform/modules/platform/src/process_lifecycle.c:process_capture_stdout_stdio:53
 platform/modules/platform/src/process_lifecycle.c:process_start_hidden_with_stdout:44
 platform/modules/platform/src/ram_scratch.c:platform_ram_scratch_reserve:18
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read:38
@@ -2753,7 +2744,6 @@ tests/harness/src/test_file_tree_ops.c:test_update_only:20
 tests/harness/src/test_fingerprint.c:test_fingerprint:53
 tests/harness/src/test_fleet_board.c:fb_rpc_verify_item:17
 tests/harness/src/test_fleet_board.c:test_fleet_board_rpc_verification:31
-tests/harness/src/test_fleet_facts.c:test_fleet_facts_table:11
 tests/harness/src/test_fleet_ledger.c:test_fleet_ledger:40
 tests/harness/src/test_fold_inram_crash_proof.c:fip_proof1_ab_equivalence:25
 tests/harness/src/test_fold_inram_crash_proof.c:fip_proof2_crash_resume:30
@@ -3470,7 +3460,6 @@ tools/command/native_dev_hotswap.c:rpc_dev_hotswap_native:19
 tools/command/native_dev_hotswap.c:service_resident_observation_append:24
 tools/command/native_dev_land.c:dl_dependency_repair_one:36
 tools/command/native_dev_land.c:dl_materialize_file:43
-tools/command/native_dev_land.c:dl_regen_run:8
 tools/command/native_dev_land.c:dl_status:40
 tools/command/native_dev_land.c:dl_step_start:19
 tools/command/native_dev_land.c:dl_submit:18
@@ -3512,7 +3501,6 @@ tools/command/native_devagent_ticketkey.c:dvt_parse_tree:22
 tools/command/native_devagent_ticketkey.c:dvt_scan_includes:32
 tools/command/native_devagent_triage.c:zcl_native_handle_dev_agent_triage:31
 tools/command/native_epoch_command.c:zcl_native_handle_core_epoch_anchor:16
-tools/command/native_fleet_board_command.c:fb_call:1
 tools/command/native_fleet_command.c:zcl_fleet_host_snapshot:18
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_predict:22
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_result:39
@@ -3830,7 +3818,6 @@ tools/gen_utxo_root_ladder.c:main:35
 tools/gen_utxo_root_ladder.c:parse_cli:22
 tools/install/z23_bootstrap.c:bootstrap_main#2:39
 tools/install/z23_bootstrap.c:dns_attestation:16
-tools/jsonq.c:main:7
 tools/jsonq.c:parse_path:21
 tools/jsonq.c:walk:25
 tools/land/land_main.c:cmd_gate_run:22
@@ -3897,11 +3884,9 @@ tools/wallet_check.c:main:22
 tools/wallet_dump.c:dump_text:29
 tools/z23_gpu_miner.c:hash_meets_target:16
 tools/z23_gpu_miner.c:main:35
-tools/zcc.c:deps_scan:4
 tools/zcc.c:epoch_authority_current:16
 tools/zcc.c:epoch_authority_open:23
 tools/zcc.c:epoch_compile_publish:22
-tools/zcc.c:manifest_verify:6
 tools/zcc.c:plan_build:41
 tools/zcc.c:preprocess:26
 tools/zcc.c:scan_entries:27

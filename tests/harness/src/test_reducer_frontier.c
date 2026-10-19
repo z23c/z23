@@ -2378,6 +2378,43 @@ static int case_derived_stage_cursor_equivalence(void)
     return failures;
 }
 
+/* A consensus store with no reducer stage schema yet (no state source landed)
+ * reports one WARN per interval and fails closed; the per-stage "cursor below
+ * hstar" diagnostic is likewise emitted once per stage per interval, not once
+ * per call. */
+static int case_unseeded_store_warnings_are_throttled(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    reducer_frontier_log_throttles_reset_for_test();
+
+    int32_t hstar = -1, served = -1;
+    bool any_ok = false;
+    for (int i = 0; i < 50; i++)
+        any_ok = any_ok || reducer_frontier_compute_hstar(db, &hstar, &served);
+    RF_CHECK("unseeded: compute fails closed on a schema-less store", !any_ok);
+    RF_CHECK("unseeded: 50 calls emit exactly one schema warning",
+             reducer_frontier_schema_warn_emitted_for_test() == 1);
+
+    RF_CHECK("unseeded: schema", build_schema(db));
+    RF_CHECK("unseeded: empty cursors", set_all_cursors(db, 0));
+    bool all_ok = true;
+    for (int i = 0; i < 50; i++)
+        all_ok = all_ok &&
+                 reducer_frontier_compute_hstar(db, &hstar, &served);
+    uint64_t first = reducer_frontier_cursor_warn_emitted_for_test();
+    RF_CHECK("unseeded: seeded schema computes", all_ok && hstar == 0);
+    RF_CHECK("unseeded: each stage warns once across 50 calls",
+             first > 0 && first <= 16);
+    for (int i = 0; i < 50; i++)
+        (void)reducer_frontier_compute_hstar(db, &hstar, &served);
+    RF_CHECK("unseeded: 50 more calls emit no further cursor warnings",
+             reducer_frontier_cursor_warn_emitted_for_test() == first);
+    sqlite3_close(db);
+    return failures;
+}
+
 int test_reducer_frontier(void)
 {
     int failures = 0;
@@ -2386,6 +2423,7 @@ int test_reducer_frontier(void)
     failures += case_derived_stage_cursor_equivalence();
     failures += case_partial_authority_does_not_enable_compiled_floor();
     failures += case_consistent();
+    failures += case_unseeded_store_warnings_are_throttled();
     failures += case_proof_and_utxo_fork_split();
     failures += case_validation_evidence_contained();
     failures += case_torn();

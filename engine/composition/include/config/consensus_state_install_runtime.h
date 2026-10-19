@@ -55,6 +55,10 @@ struct consensus_state_install_runtime_result {
      * future boot) installs it once the checkpoint header arrives on-chain. A
      * genuine byte-mismatch / bad-content refusal leaves this false (→ .fail). */
     bool     retriable_headers_not_ready;
+    /* The canonical-lane owner gate refused because the datadir holds chain
+     * state and the owner did not authorize the cutover. A verdict on the
+     * datadir, not the bundle: the boot seam must not .fail the bundle. */
+    bool     owner_gate_refused;
     int32_t  height;          /* installed bundle height (−1 until known) */
     int32_t  hstar;           /* durable H* after install (−1 until known) */
     /* Must retain activate's complete operator-facing success detail,

@@ -301,6 +301,12 @@ bool reducer_frontier_stage_cursor_derived(
  * across freshly-opened in-memory fixtures call this between fixtures so a
  * prior fixture's cached frontier cannot survive into the next. */
 void reducer_frontier_stage_cursor_derived_reset_memo_for_testing(void);
+/* Emission counters and throttle reset for the de-stormed frontier warnings:
+ * schema-absent (once per interval) and cursor-below-hstar (once per stage per
+ * interval). */
+uint64_t reducer_frontier_schema_warn_emitted_for_test(void);
+uint64_t reducer_frontier_cursor_warn_emitted_for_test(void);
+void reducer_frontier_log_throttles_reset_for_test(void);
 #endif
 
 /* Hash recorded by ONE stage log at `height` (e.g. validate_headers_log.hash).

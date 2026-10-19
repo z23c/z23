@@ -153,6 +153,60 @@ static bool icb_canonical_authorized(const char *authorization)
 {
     return authorization && strcmp(authorization, "1") == 0;
 }
+/* True iff `table` exists in `db` and holds at least one row matching `where`
+ * (NULL matches every row). A missing table is "no rows". Any SQLite error is
+ * reported as "has rows" so the caller fails closed. `table` and `where` are
+ * fixed literals from this file, never caller input. */
+static bool icb_table_has_rows(sqlite3 *db, const char *table,
+                               const char *where)
+{
+    char sql[160];
+    int n = snprintf(sql, sizeof(sql),
+                     "SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                     "name='%s'", table);
+    if (n <= 0 || (size_t)n >= sizeof(sql))
+        return true;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return true;
+    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    sqlite3_finalize(st);
+    if (rc == SQLITE_DONE)
+        return false;
+    if (rc != SQLITE_ROW)
+        return true;
+    n = snprintf(sql, sizeof(sql), "SELECT 1 FROM %s %s%s LIMIT 1", table,
+                 where ? "WHERE " : "", where ? where : "");
+    if (n <= 0 || (size_t)n >= sizeof(sql) ||
+        sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return true;
+    rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    sqlite3_finalize(st);
+    return rc != SQLITE_DONE;
+}
+/* A datadir with no prior chain state: the consensus store carries no coin and
+ * no tip_finalize / utxo_apply row above genesis, and the legacy utxo mirror is
+ * empty. Nothing exists for a bundle cutover to overwrite. An unavailable
+ * store is never "empty". */
+static bool icb_chain_state_empty(struct node_db *ndb, sqlite3 *progress_db)
+{
+    if (!progress_db)
+        return false;
+    if (icb_table_has_rows(progress_db, "coins", NULL) ||
+        icb_table_has_rows(progress_db, "tip_finalize_log", "height > 0") ||
+        icb_table_has_rows(progress_db, "utxo_apply_log", "height > 0"))
+        return false;
+    return !ndb || node_db_utxo_count(ndb) == 0;
+}
+/* The canonical-lane owner gate protects a daily-driver's existing chain state.
+ * It admits the install when the owner authorized it, when the lane is a copy,
+ * or when the canonical datadir has no prior chain state. */
+static bool icb_cutover_admitted(bool canonical, const char *authorization,
+                                 struct node_db *ndb, sqlite3 *progress_db)
+{
+    return !canonical || icb_canonical_authorized(authorization) ||
+           icb_chain_state_empty(ndb, progress_db);
+}
 /* Read the producer source receipt from the pinned, already-validated bundle
  * handle. The CAS re-checks the receipt's self-consistency and its binding to
  * the manifest source digest, so a misread fails closed there. */
@@ -279,10 +333,12 @@ struct zcl_result consensus_state_install_from_bundle(
                      classified.message);
         goto done;
     }
-    if (canonical_datadir &&
-        !icb_canonical_authorized(getenv("ZCL_DEPLOY_ALLOW_CANONICAL"))) {
+    if (!icb_cutover_admitted(canonical_datadir,
+                              getenv("ZCL_DEPLOY_ALLOW_CANONICAL"), ndb,
+                              progress_store_db())) {
+        out->owner_gate_refused = true;
         rc = ZCL_ERR(-1,
-                     "datadir %s is the canonical lane; set "
+                     "datadir %s is the canonical lane and holds chain state; set "
                      "ZCL_DEPLOY_ALLOW_CANONICAL=1 to cut over the daily-driver, "
                      "or run the install on a dev/copy datadir first", datadir);
         goto done;
@@ -702,7 +758,8 @@ bool boot_install_consensus_bundle_gate_allows_for_test(
     (void)close(dir_fd);
     if (out_canonical)
         *out_canonical = canonical;
-    return !canonical || icb_canonical_authorized(authorization);
+    return icb_cutover_admitted(canonical, authorization, NULL,
+                                progress_store_db());
 }
 bool boot_install_consensus_bundle_invalidate_derived_for_test(
     struct node_db *ndb, sqlite3 *progress_db, int32_t bundle_height)

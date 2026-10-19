@@ -28,6 +28,7 @@
 #include "coins/coins_view.h"
 #include "conditions/checkpoint_bundle_install_ready.h"
 #include "conditions/checkpoint_header_solution_repair.h"
+#include "config/boot.h"
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h"
 #include "core/uint256.h"
@@ -40,6 +41,8 @@
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
+#include <limits.h>
+#include <sqlite3.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -884,6 +887,146 @@ static int case_retry_condition(void)
     return failures;
 }
 
+/* Fresh-datadir cutover: the canonical-lane owner gate protects existing chain
+ * state. A canonical datadir whose consensus store holds no coins and no
+ * tip_finalize/utxo_apply rows above genesis has nothing to protect, so the
+ * first-node path (docs/node/GETTING_STARTED.md) admits the bundle without
+ * ZCL_DEPLOY_ALLOW_CANONICAL. Any prior row keeps the gate closed. */
+static bool csir_sql(const char *sql)
+{
+    char *err = NULL;
+    bool ok = sqlite3_exec(progress_store_db(), sql, NULL, NULL, &err) ==
+              SQLITE_OK;
+    if (err)
+        sqlite3_free(err);
+    return ok;
+}
+
+static int case_fresh_canonical_cutover(void)
+{
+    int failures = 0;
+    char root[256], home[300], canonical[340];
+    test_make_tmpdir(root, sizeof(root), "csir_fresh_canon", "ok");
+    snprintf(home, sizeof(home), "%s/home", root);
+    snprintf(canonical, sizeof(canonical), "%s/.zclassic-c23", home);
+    const char *old_home = getenv("HOME");
+    char saved[PATH_MAX];
+    snprintf(saved, sizeof(saved), "%s", old_home ? old_home : "");
+    bool setup = mkdir(home, 0700) == 0 && mkdir(canonical, 0700) == 0 &&
+                 setenv("HOME", home, 1) == 0;
+    CSIR_CHECK("fresh canonical: fixture initializes", setup);
+
+    bool is_canonical = false;
+    CSIR_CHECK("fresh canonical: progress store opens",
+               setup && progress_store_open(canonical));
+    CSIR_CHECK("fresh canonical: empty store admits without owner gate",
+               boot_install_consensus_bundle_gate_allows_for_test(
+                   canonical, NULL, &is_canonical) && is_canonical);
+    CSIR_CHECK("fresh canonical: schema without rows still admits",
+               csir_sql("CREATE TABLE IF NOT EXISTS tip_finalize_log("
+                        "height INTEGER PRIMARY KEY, status TEXT NOT NULL,"
+                        "ok INTEGER NOT NULL, work_delta_high INTEGER NOT NULL,"
+                        "work_delta_low INTEGER NOT NULL,"
+                        "utxo_size_after INTEGER NOT NULL,"
+                        "reorg_depth INTEGER NOT NULL,"
+                        "finalized_at INTEGER NOT NULL)") &&
+               boot_install_consensus_bundle_gate_allows_for_test(
+                   canonical, NULL, &is_canonical));
+    CSIR_CHECK("fresh canonical: genesis-only row still admits",
+               csir_sql("INSERT INTO tip_finalize_log VALUES"
+                        "(0,'ok',1,0,0,0,0,0)") &&
+               boot_install_consensus_bundle_gate_allows_for_test(
+                   canonical, NULL, &is_canonical));
+    CSIR_CHECK("fresh canonical: a finalized height above genesis refuses",
+               csir_sql("INSERT INTO tip_finalize_log VALUES"
+                        "(7,'ok',1,0,0,0,0,0)") &&
+               !boot_install_consensus_bundle_gate_allows_for_test(
+                   canonical, NULL, &is_canonical) && is_canonical);
+    CSIR_CHECK("fresh canonical: owner gate still admits existing state",
+               boot_install_consensus_bundle_gate_allows_for_test(
+                   canonical, "1", &is_canonical));
+    CSIR_CHECK("fresh canonical: removing the row reopens the fresh path",
+               csir_sql("DELETE FROM tip_finalize_log WHERE height=7") &&
+               boot_install_consensus_bundle_gate_allows_for_test(
+                   canonical, NULL, &is_canonical));
+    CSIR_CHECK("fresh canonical: any coin refuses",
+               csir_sql("CREATE TABLE IF NOT EXISTS coins(txid BLOB NOT NULL,"
+                        "vout INTEGER NOT NULL, value INTEGER NOT NULL,"
+                        "height INTEGER NOT NULL, is_coinbase INTEGER NOT NULL,"
+                        "script BLOB NOT NULL, PRIMARY KEY(txid,vout))"
+                        " WITHOUT ROWID") &&
+               csir_sql("INSERT INTO coins VALUES(X'01',0,1,1,0,X'00')") &&
+               !boot_install_consensus_bundle_gate_allows_for_test(
+                   canonical, NULL, &is_canonical));
+    progress_store_close();
+    CSIR_CHECK("fresh canonical: closed store fails closed",
+               !boot_install_consensus_bundle_gate_allows_for_test(
+                   canonical, NULL, &is_canonical));
+
+    if (old_home)
+        (void)setenv("HOME", saved, 1);
+    else
+        (void)unsetenv("HOME");
+    test_rm_rf_recursive(root);
+    return failures;
+}
+
+/* A refusal by the canonical-lane owner gate says nothing about the bundle, so
+ * it must leave no <name>.failed marker: a later boot with the owner
+ * authorization has to find the bundle again. A genuinely unreadable bundle on
+ * a fresh canonical datadir still degrades to a normal boot. */
+static int case_owner_gate_refusal_writes_nothing(void)
+{
+    int failures = 0;
+    char root[256], home[300], canonical[340], bundles[380], bundle[420],
+        failed[440];
+    test_make_tmpdir(root, sizeof(root), "csir_gate_marker", "ok");
+    snprintf(home, sizeof(home), "%s/home", root);
+    snprintf(canonical, sizeof(canonical), "%s/.zclassic-c23", home);
+    snprintf(bundles, sizeof(bundles), "%s/bundles", canonical);
+    snprintf(bundle, sizeof(bundle), "%s/b.sqlite", bundles);
+    snprintf(failed, sizeof(failed), "%s.failed", bundle);
+    const char *old_home = getenv("HOME");
+    char saved[PATH_MAX];
+    snprintf(saved, sizeof(saved), "%s", old_home ? old_home : "");
+    bool setup = mkdir(home, 0700) == 0 && mkdir(canonical, 0700) == 0 &&
+                 mkdir(bundles, 0700) == 0 && csir_touch(bundles, "b.sqlite") &&
+                 setenv("HOME", home, 1) == 0 && progress_store_open(canonical);
+    CSIR_CHECK("gate marker: fixture initializes", setup);
+    CSIR_CHECK("gate marker: seed one coin",
+               setup &&
+               csir_sql("CREATE TABLE IF NOT EXISTS coins(txid BLOB NOT NULL,"
+                        "vout INTEGER NOT NULL, value INTEGER NOT NULL,"
+                        "height INTEGER NOT NULL, is_coinbase INTEGER NOT NULL,"
+                        "script BLOB NOT NULL, PRIMARY KEY(txid,vout))"
+                        " WITHOUT ROWID") &&
+               csir_sql("INSERT INTO coins VALUES(X'01',0,1,1,0,X'00')"));
+    struct consensus_state_install_runtime_result rr;
+    struct zcl_result r =
+        consensus_state_install_from_bundle(NULL, NULL, bundle, canonical, &rr);
+    CSIR_CHECK("gate marker: existing state refuses", !r.ok &&
+               rr.owner_gate_refused && !rr.state_installed);
+    CSIR_CHECK("gate marker: boot seam installs nothing",
+               !boot_maybe_auto_install_consensus_bundle(NULL, NULL, canonical,
+                                                        false));
+    CSIR_CHECK("gate marker: refusal leaves no .failed marker",
+               access(failed, F_OK) != 0);
+    CSIR_CHECK("gate marker: bundle is still autodetected",
+               boot_autodetect_consensus_bundle(canonical) != NULL);
+    CSIR_CHECK("gate marker: clearing the state lets admission judge the bundle",
+               csir_sql("DELETE FROM coins") &&
+               !boot_maybe_auto_install_consensus_bundle(NULL, NULL, canonical,
+                                                        false) &&
+               access(failed, F_OK) == 0);
+    progress_store_close();
+    if (old_home)
+        (void)setenv("HOME", saved, 1);
+    else
+        (void)unsetenv("HOME");
+    test_rm_rf_recursive(root);
+    return failures;
+}
+
 int test_consensus_state_install_runtime(void)
 {
     printf("\n=== consensus_state_install_runtime ===\n");
@@ -898,6 +1041,8 @@ int test_consensus_state_install_runtime(void)
     failures += case_checkpoint_header_frontier_restore();
     failures += case_retry_condition();
     failures += case_solution_repair_detect_window();
+    failures += case_fresh_canonical_cutover();
+    failures += case_owner_gate_refusal_writes_nothing();
     printf("=== consensus_state_install_runtime: %d failure(s) ===\n", failures);
     return failures;
 }
