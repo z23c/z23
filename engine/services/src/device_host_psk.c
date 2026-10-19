@@ -375,7 +375,7 @@ static enum device_host_psk_result device_host_psk_receive_bytes_state(struct de
     if (session->phase == DEVICE_HOST_PSK_NEED_TARGET) return DEVICE_HOST_PSK_TARGET_REQUIRED;
     return DEVICE_HOST_PSK_PROGRESS;
 }
-static enum device_host_psk_result psk_queue_record(struct device_host_psk_session *session,
+static enum device_host_psk_result psk_queue_checks(struct device_host_psk_session *session,
     const uint8_t *plaintext, size_t length, unsigned type)
 {
     enum device_host_psk_result current = psk_current(session);
@@ -387,16 +387,29 @@ static enum device_host_psk_result psk_queue_record(struct device_host_psk_sessi
     if (type == PSK_DATA && (!length || session->send_sequence >= DEVICE_HOST_PSK_FRAME_LIMIT - 1))
         return psk_refuse(session, "DATA requires nonempty bytes and a non-FIN-reserved sequence");
     if (UINT64_MAX - session->send_total < length) return psk_refuse(session, "direction byte total overflow");
-    struct device_pairing_guard guard = {0}; bool authorized = psk_authorize(session, &guard);
-    if (!authorized) return psk_refuse(session, "current send authority unavailable");
-    current = psk_release_boundary(session, &guard.row);
+    return DEVICE_HOST_PSK_PROGRESS;
+}
+/* held == NULL: acquire and release this record's authority here. held != NULL: the caller
+ * already took one authority for this record under the shared lock and carries it through
+ * seal and send; it must be the exact current root/binding/port and stays caller-owned. */
+static enum device_host_psk_result psk_queue_record(struct device_host_psk_session *session,
+    const uint8_t *plaintext, size_t length, unsigned type, const struct device_pairing_guard *held)
+{
+    enum device_host_psk_result current = psk_queue_checks(session, plaintext, length, type);
+    if (current != DEVICE_HOST_PSK_PROGRESS) return current;
+    struct device_pairing_guard own = {0};
+    if (held) {
+        if (!psk_buffer_valid(session, held, sizeof(*held)) || !psk_model_guard_matches(session, held))
+            return psk_refuse(session, "carried send authority is not the exact current authority");
+    } else if (!psk_authorize(session, &own)) return psk_refuse(session, "current send authority unavailable");
+    current = psk_release_boundary(session, held ? &held->row : &own.row);
     if (current != DEVICE_HOST_PSK_PROGRESS) {
-        device_pairing_guard_release(&guard); return current;
+        device_pairing_guard_release(&own); return current;
     }
     psk_header(session->pending, type, length + 64, session->send_sequence);
     uint8_t ad[96]; size_t ad_length = psk_record_ad(session, session->pending, session->send_total, ad);
     bool ok = shake_wrap_seal(&session->send, ad, ad_length, plaintext, length, session->pending + 24, sizeof(session->pending) - 24);
-    memory_cleanse(ad, sizeof(ad)); device_pairing_guard_release(&guard);
+    memory_cleanse(ad, sizeof(ad)); device_pairing_guard_release(&own);
     if (!ok) return psk_refuse(session, "record sealing failed");
     session->send_sequence++; session->send_total += length; session->send_fin = type == PSK_FIN;
     session->pending_used = 24 + length + 64; session->pending_sent = 0;
@@ -405,11 +418,17 @@ static enum device_host_psk_result psk_queue_record(struct device_host_psk_sessi
 static enum device_host_psk_result device_host_psk_queue_data_state(struct device_host_psk_session *session,
     const uint8_t *plaintext, size_t length)
 {
-    return psk_queue_record(session, plaintext, length, PSK_DATA);
+    return psk_queue_record(session, plaintext, length, PSK_DATA, NULL);
+}
+static enum device_host_psk_result device_host_psk_queue_data_held_state(struct device_host_psk_session *session,
+    const struct device_pairing_guard *guard, const uint8_t *plaintext, size_t length)
+{
+    if (!guard || !guard->held) return psk_refuse(session, "carried send authority is not held");
+    return psk_queue_record(session, plaintext, length, PSK_DATA, guard);
 }
 static enum device_host_psk_result device_host_psk_queue_fin_state(struct device_host_psk_session *session)
 {
-    return psk_queue_record(session, NULL, 0, PSK_FIN);
+    return psk_queue_record(session, NULL, 0, PSK_FIN, NULL);
 }
 static bool psk_span_geometry(const struct device_host_psk_session *session,
     const struct device_pairing_guard *guard, const uint8_t **bytes, const size_t *length)
@@ -419,17 +438,23 @@ static bool psk_span_geometry(const struct device_host_psk_session *session,
         !psk_overlap(guard, sizeof(*guard), bytes, sizeof(*bytes)) &&
         !psk_overlap(guard, sizeof(*guard), length, sizeof(*length)) && !psk_overlap(bytes, sizeof(*bytes), length, sizeof(*length));
 }
+/* carried: the guard is already held for this record (taken by the caller under the shared
+ * lock) and is borrowed as-is after exact-authority and interval checks; otherwise the
+ * guard is an unheld output and the authority is acquired here. */
 static enum device_host_psk_result psk_span_acquire(struct device_host_psk_session *session,
-    struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length, bool plaintext)
+    struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length, bool plaintext, bool carried)
 {
     enum device_host_psk_result current = psk_current(session);
     if (current != DEVICE_HOST_PSK_PROGRESS) return current;
     if (!psk_span_geometry(session, guard, bytes, length)) return psk_refuse(session, "invalid independent guarded span storage");
-    if (guard->held) return psk_refuse(session, "guarded span requires an initialized unheld guard");
+    if (carried != guard->held) return psk_refuse(session, carried ? "carried guarded span requires a held guard" :
+        "guarded span requires an initialized unheld guard");
     *bytes = NULL; *length = 0;
     size_t used = plaintext ? session->plaintext_used : session->pending_used;
     if (!used) return DEVICE_HOST_PSK_WAIT;
-    if (!psk_authorize(session, guard)) return psk_refuse(session, "current release authority unavailable");
+    if (carried) {
+        if (!psk_model_guard_matches(session, guard)) return psk_refuse(session, "carried release authority is not the exact current authority");
+    } else if (!psk_authorize(session, guard)) return psk_refuse(session, "current release authority unavailable");
     current = psk_release_boundary(session, &guard->row);
     if (current != DEVICE_HOST_PSK_PROGRESS) {
         device_pairing_guard_release(guard); return current;
@@ -442,12 +467,22 @@ static enum device_host_psk_result psk_span_acquire(struct device_host_psk_sessi
 static enum device_host_psk_result device_host_psk_pending_acquire_state(struct device_host_psk_session *session,
     struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length)
 {
-    return psk_span_acquire(session, guard, bytes, length, false);
+    return psk_span_acquire(session, guard, bytes, length, false, false);
 }
 static enum device_host_psk_result device_host_psk_plaintext_acquire_state(struct device_host_psk_session *session,
     struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length)
 {
-    return psk_span_acquire(session, guard, bytes, length, true);
+    return psk_span_acquire(session, guard, bytes, length, true, false);
+}
+static enum device_host_psk_result device_host_psk_pending_acquire_held_state(struct device_host_psk_session *session,
+    struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length)
+{
+    return psk_span_acquire(session, guard, bytes, length, false, true);
+}
+static enum device_host_psk_result device_host_psk_plaintext_acquire_held_state(struct device_host_psk_session *session,
+    struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length)
+{
+    return psk_span_acquire(session, guard, bytes, length, true, true);
 }
 static void psk_sent_handshake(struct device_host_psk_session *session)
 {
@@ -649,5 +684,38 @@ struct zcl_result device_host_psk_transport_eof(struct device_host_psk_session *
         return ZCL_ERR(-1000, "device_host_psk_transport_eof: status output must be independent");
     *status = DEVICE_HOST_PSK_REFUSED;
     enum device_host_psk_result value = device_host_psk_transport_eof_state(session);
+    return host_domain_result(value, status, 0, __func__);
+}
+
+struct zcl_result device_host_psk_queue_data_held(struct device_host_psk_session *session,
+    const struct device_pairing_guard *guard, const uint8_t *plaintext, size_t length, enum device_host_psk_result *status)
+{
+    const struct host_status_range ranges[] = {{session, sizeof(*session)}, {guard, sizeof(*guard)}, {plaintext, length}, {session ? session->borrowed_guard : NULL, sizeof(struct device_pairing_guard)}};
+    if (!host_status_storage(status, sizeof(*status), ranges, sizeof(ranges) / sizeof(ranges[0])))
+        return ZCL_ERR(-1000, "device_host_psk_queue_data_held: status output must be independent");
+    *status = DEVICE_HOST_PSK_REFUSED;
+    enum device_host_psk_result value = device_host_psk_queue_data_held_state(session, guard, plaintext, length);
+    return host_domain_result(value, status, 0, __func__);
+}
+
+struct zcl_result device_host_psk_pending_acquire_held(struct device_host_psk_session *session,
+    struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length, enum device_host_psk_result *status)
+{
+    const struct host_status_range ranges[] = {{session, sizeof(*session)}, {guard, sizeof(*guard)}, {bytes, sizeof(*bytes)}, {length, sizeof(*length)}, {session ? session->borrowed_guard : NULL, sizeof(struct device_pairing_guard)}};
+    if (!host_status_storage(status, sizeof(*status), ranges, sizeof(ranges) / sizeof(ranges[0])))
+        return ZCL_ERR(-1000, "device_host_psk_pending_acquire_held: status output must be independent");
+    *status = DEVICE_HOST_PSK_REFUSED;
+    enum device_host_psk_result value = device_host_psk_pending_acquire_held_state(session, guard, bytes, length);
+    return host_domain_result(value, status, 0, __func__);
+}
+
+struct zcl_result device_host_psk_plaintext_acquire_held(struct device_host_psk_session *session,
+    struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length, enum device_host_psk_result *status)
+{
+    const struct host_status_range ranges[] = {{session, sizeof(*session)}, {guard, sizeof(*guard)}, {bytes, sizeof(*bytes)}, {length, sizeof(*length)}, {session ? session->borrowed_guard : NULL, sizeof(struct device_pairing_guard)}};
+    if (!host_status_storage(status, sizeof(*status), ranges, sizeof(ranges) / sizeof(ranges[0])))
+        return ZCL_ERR(-1000, "device_host_psk_plaintext_acquire_held: status output must be independent");
+    *status = DEVICE_HOST_PSK_REFUSED;
+    enum device_host_psk_result value = device_host_psk_plaintext_acquire_held_state(session, guard, bytes, length);
     return host_domain_result(value, status, 0, __func__);
 }

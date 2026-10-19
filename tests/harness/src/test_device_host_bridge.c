@@ -1018,6 +1018,35 @@ static ssize_t psk_io_wait_byte(struct psk_io_fixture *f, int fd, uint8_t *byte)
     }
     return -1;
 }
+/* Continuous stream: several records are delivered under the carried per-record authority,
+ * then the receiving side's pairing is revoked between two records. The very next record
+ * must be refused before any byte reaches the target and the session must end refused. */
+static int psk_io_revoke_between_stream_records(void)
+{
+    int failures = 0; struct psk_io_fixture f; psk_io_fixture_init(&f);
+    TEST_CASE("host PSK IO: revoke between two records of a continuous stream; next record is never delivered and the session ends refused") {
+        ASSERT(psk_io_fixture_open(&f, 0, false)); ASSERT(psk_io_fixture_admit(&f)); ASSERT(psk_io_fixture_ready(&f));
+        for (unsigned i = 0; i < 4; ++i) {
+            uint8_t record[64]; memset(record, 0x30 + (int)i, sizeof(record));
+            ASSERT(psk_io_transfer(&f, f.plain[0], f.target, record, sizeof(record)));
+        }
+        ASSERT_EQ(f.server.observation.plaintext_written_bytes, 4 * 64);
+        enum device_pairing_publication publication;
+        ASSERT(db_device_pairing_revoke_expected(f.server_spec.session.store, f.server_spec.session.peer, 150,
+            f.server_spec.session.approved_root, &publication)); ASSERT_EQ(publication, DEVICE_PAIRING_DURABLE);
+        const uint8_t late[] = {0x4c, 0x61, 0x74, 0x65};
+        uint64_t read_before = f.client.observation.plaintext_read_bytes;
+        uint64_t written_before = f.client.observation.carrier_written_bytes;
+        ASSERT_EQ(send(f.plain[0], late, sizeof(late), MSG_NOSIGNAL), sizeof(late));
+        ASSERT(psk_io_client_record_attempt(&f, sizeof(late), read_before, written_before));
+        ASSERT(f.server.active);
+        ASSERT_EQ(typed_test_device_host_psk_bridge_step(&f.server), DEVICE_HOST_BRIDGE_REFUSED);
+        ASSERT(!f.server.active);
+        ASSERT_EQ(f.server.observation.plaintext_written_bytes, 4 * 64);
+        uint8_t seen = 0; ASSERT_EQ(psk_io_wait_byte(&f, f.target, &seen), 0);
+    } TEST_END
+    psk_io_fixture_close(&f); return failures;
+}
 static int psk_io_actual_guard_boundary(void)
 {
     int failures = 0; struct psk_io_fixture f; psk_io_fixture_init(&f);
@@ -1712,7 +1741,7 @@ int test_device_host_bridge(void)
         bridge_invalid_transport() + bridge_halfclose() + bridge_partial_release() +
         bridge_broken_pipe() + bridge_closed_transport() + bridge_idle_revoke() + bridge_fullbytes() +
         bridge_write_boundary(true) + bridge_write_boundary(false) + psk_io_admission_and_bytes() +
-        psk_io_wrong_key_and_truncation() + psk_io_buffered_revoke() + psk_io_idle_revoke_then_record() + psk_io_actual_guard_boundary() +
+        psk_io_wrong_key_and_truncation() + psk_io_buffered_revoke() + psk_io_idle_revoke_then_record() + psk_io_revoke_between_stream_records() + psk_io_actual_guard_boundary() +
         psk_io_fin_and_extra() + psk_io_refused_target() + psk_io_closed_stderr() +
         psk_io_preflight_refusals() + psk_io_explicit_backup() + psk_io_partial_ciphertext() +
         psk_io_deadline_expiry() + psk_io_deadline_handshake() + psk_io_deadline_phase_ceiling() + psk_io_deadline_borrowed() +

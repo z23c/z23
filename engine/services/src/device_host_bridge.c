@@ -99,6 +99,39 @@ static enum device_host_psk_result host_call_device_host_psk_plaintext_acquire(s
     return status;
 }
 
+static enum device_host_psk_result host_call_device_host_psk_queue_data_held(struct device_host_psk_session *session,
+    const struct device_pairing_guard *guard,
+    const uint8_t *plaintext,
+    size_t length)
+{
+    enum device_host_psk_result status = DEVICE_HOST_PSK_REFUSED;
+    struct zcl_result result = device_host_psk_queue_data_held(session, guard, plaintext, length, &status);
+    if (!result.ok) LOG_ERROR("device_host", "%s (code=%d)", result.message, result.code);
+    return status;
+}
+
+static enum device_host_psk_result host_call_device_host_psk_pending_acquire_held(struct device_host_psk_session *session,
+    struct device_pairing_guard *guard,
+    const uint8_t **bytes,
+    size_t *length)
+{
+    enum device_host_psk_result status = DEVICE_HOST_PSK_REFUSED;
+    struct zcl_result result = device_host_psk_pending_acquire_held(session, guard, bytes, length, &status);
+    if (!result.ok) LOG_ERROR("device_host", "%s (code=%d)", result.message, result.code);
+    return status;
+}
+
+static enum device_host_psk_result host_call_device_host_psk_plaintext_acquire_held(struct device_host_psk_session *session,
+    struct device_pairing_guard *guard,
+    const uint8_t **bytes,
+    size_t *length)
+{
+    enum device_host_psk_result status = DEVICE_HOST_PSK_REFUSED;
+    struct zcl_result result = device_host_psk_plaintext_acquire_held(session, guard, bytes, length, &status);
+    if (!result.ok) LOG_ERROR("device_host", "%s (code=%d)", result.message, result.code);
+    return status;
+}
+
 static enum device_host_psk_result host_call_device_host_psk_plaintext_released(struct device_host_psk_session *session,
     struct device_pairing_guard *guard,
     size_t count)
@@ -446,11 +479,28 @@ static enum device_host_bridge_result psk_io_action_limit(const struct device_ho
     if (result == DEVICE_HOST_BRIDGE_READY && !current_interval(&guard->row)) return DEVICE_HOST_BRIDGE_REFUSED;
     return result;
 }
+/* Authority is acquired ONCE per record per direction and that single held guard is carried
+ * through the record's whole path: read + decrypt + release of plaintext inbound, read + seal +
+ * queue/send outbound. A step takes one guard at its start (this is also the idle-revoke
+ * probe); the first action that forwards or releases a record uses it instead of re-acquiring,
+ * and every such action RELEASES the guard when its record is done. A guard that is still
+ * held therefore always began after the previous record's release.
+ * Invariant (exact): no record's plaintext is forwarded or released unless an authority check
+ * that started after the previous record's release succeeded under the shared lock with the
+ * grant-state and intent-absent revalidation (or a full acquisition). A revoke or root change
+ * that completes before a record's check is never followed by that record being forwarded;
+ * one that arrives later waits on the exclusive lock until the record's action is done.
+ * A guard is never carried across steps, records or waits, and no lock fd is retained. */
 static enum device_host_bridge_result psk_io_authorize(struct device_host_psk_bridge *bridge,
     struct device_pairing_guard *guard)
 {
     enum device_host_bridge_result result = psk_io_limit(bridge);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
+    if (guard->held) {
+        result = psk_io_action_limit(bridge, guard);
+        if (result != DEVICE_HOST_BRIDGE_READY) device_pairing_guard_release(guard);
+        return result;
+    }
     int64_t ms = clock_now_wall_ms();
     if (ms <= 0) return DEVICE_HOST_BRIDGE_REFUSED;
     if (!device_pairing_guard_acquire_host_psk_cached(bridge->spec.session.store, bridge->spec.session.peer,
@@ -608,38 +658,43 @@ static ssize_t psk_io_write(int fd, bool socket, const uint8_t *bytes, size_t le
 {
     return socket ? send(fd, bytes, length, MSG_DONTWAIT | MSG_NOSIGNAL) : pipe_write(fd, bytes, length);
 }
-struct psk_io_span { struct device_pairing_guard guard; const uint8_t *bytes; size_t length; bool plaintext; };
+struct psk_io_span { struct device_pairing_guard *guard; const uint8_t *bytes; size_t length; bool plaintext; };
 static enum device_host_bridge_result psk_io_complete_span(struct device_host_psk_bridge *bridge,
     struct psk_io_span *span, size_t count)
 {
-    if (bridge->session.borrowed_guard != &span->guard) {
-        device_pairing_guard_release(&span->guard); return DEVICE_HOST_BRIDGE_REFUSED;
+    if (bridge->session.borrowed_guard != span->guard) {
+        device_pairing_guard_release(span->guard); return DEVICE_HOST_BRIDGE_REFUSED;
     }
-    enum device_host_psk_result completed = span->plaintext ? host_call_device_host_psk_plaintext_released(&bridge->session, &span->guard, count) :
-        host_call_device_host_psk_pending_written(&bridge->session, &span->guard, count);
-    device_pairing_guard_release(&span->guard); return psk_io_map(completed);
+    enum device_host_psk_result completed = span->plaintext ? host_call_device_host_psk_plaintext_released(&bridge->session, span->guard, count) :
+        host_call_device_host_psk_pending_written(&bridge->session, span->guard, count);
+    device_pairing_guard_release(span->guard); return psk_io_map(completed);
 }
+/* span->guard is the step's guard: held means this record's single authority is carried in,
+ * unheld means the span acquires its own. Either way completion releases it. */
 static enum device_host_bridge_result psk_io_acquire_span(struct device_host_psk_bridge *bridge, struct psk_io_span *span)
 {
+    bool carried = span->guard->held;
     enum device_host_psk_result acquired = span->plaintext ?
-        host_call_device_host_psk_plaintext_acquire(&bridge->session, &span->guard, &span->bytes, &span->length) :
-        host_call_device_host_psk_pending_acquire(&bridge->session, &span->guard, &span->bytes, &span->length);
+        (carried ? host_call_device_host_psk_plaintext_acquire_held(&bridge->session, span->guard, &span->bytes, &span->length) :
+            host_call_device_host_psk_plaintext_acquire(&bridge->session, span->guard, &span->bytes, &span->length)) :
+        (carried ? host_call_device_host_psk_pending_acquire_held(&bridge->session, span->guard, &span->bytes, &span->length) :
+            host_call_device_host_psk_pending_acquire(&bridge->session, span->guard, &span->bytes, &span->length));
     enum device_host_bridge_result result = psk_io_map(acquired);
-    if (result != DEVICE_HOST_BRIDGE_READY) { device_pairing_guard_release(&span->guard); return result; }
-    if (!span->guard.held || !span->length) {
+    if (result != DEVICE_HOST_BRIDGE_READY) { device_pairing_guard_release(span->guard); return result; }
+    if (!span->guard->held || !span->length) {
         (void)psk_io_complete_span(bridge, span, 0); return DEVICE_HOST_BRIDGE_REFUSED;
     }
     return DEVICE_HOST_BRIDGE_READY;
 }
 static enum device_host_bridge_result psk_io_write_span(struct device_host_psk_bridge *bridge,
-    bool plaintext, bool *progress)
+    bool plaintext, bool *progress, struct device_pairing_guard *guard)
 {
     size_t used = plaintext ? bridge->session.plaintext_used : bridge->session.pending_used;
     if (!used) return DEVICE_HOST_BRIDGE_READY;
-    struct psk_io_span span = {.plaintext = plaintext};
+    struct psk_io_span span = {.guard = guard, .plaintext = plaintext};
     enum device_host_bridge_result result = psk_io_acquire_span(bridge, &span);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
-    result = psk_io_action_limit(bridge, &span.guard);
+    result = psk_io_action_limit(bridge, span.guard);
     ssize_t written = -1; int error = 0;
     if (result == DEVICE_HOST_BRIDGE_READY) {
         int fd = plaintext ? psk_io_output(bridge) : bridge->spec.carrier_output_fd;
@@ -694,14 +749,15 @@ static bool psk_io_read_ready(int fd)
     int ready = poll(&event, 1, 0);
     return ready != 0;
 }
-static enum device_host_bridge_result psk_io_read_carrier(struct device_host_psk_bridge *bridge, bool *progress)
+static enum device_host_bridge_result psk_io_read_carrier(struct device_host_psk_bridge *bridge, bool *progress,
+    struct device_pairing_guard *guard)
 {
     if (bridge->carrier_eof || bridge->unread_used || !psk_io_receive_enabled(bridge)) return DEVICE_HOST_BRIDGE_READY;
     if (!psk_io_read_ready(bridge->spec.carrier_input_fd)) return DEVICE_HOST_BRIDGE_READY;
-    struct device_pairing_guard guard = {0}; enum device_host_bridge_result result = psk_io_authorize(bridge, &guard);
+    enum device_host_bridge_result result = psk_io_authorize(bridge, guard);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
     ssize_t count = read(bridge->spec.carrier_input_fd, bridge->unread, sizeof(bridge->unread)); int error = errno;
-    device_pairing_guard_release(&guard);
+    device_pairing_guard_release(guard);
     if (count > 0) {
         bridge->unread_used = (size_t)count; bridge->observation.carrier_read_bytes += (uint64_t)count; *progress = true;
         return psk_io_consume_unread(bridge, progress);
@@ -710,12 +766,16 @@ static enum device_host_bridge_result psk_io_read_carrier(struct device_host_psk
     else if (!transient_error(error)) { bridge->observation.error_number = error; return DEVICE_HOST_BRIDGE_IO_ERROR; }
     return DEVICE_HOST_BRIDGE_READY;
 }
-static enum device_host_bridge_result psk_io_queue_local(struct device_host_psk_bridge *bridge, bool *progress)
+/* A held guard is this record's authority: seal under it and leave it held for the send. */
+static enum device_host_bridge_result psk_io_queue_local(struct device_host_psk_bridge *bridge, bool *progress,
+    struct device_pairing_guard *guard)
 {
     if (bridge->session.phase != DEVICE_HOST_PSK_ESTABLISHED || bridge->session.pending_used || bridge->session.send_fin)
         return DEVICE_HOST_BRIDGE_READY;
     enum device_host_psk_result queued;
-    if (bridge->local_used) queued = host_call_device_host_psk_queue_data(&bridge->session, bridge->local, bridge->local_used);
+    if (bridge->local_used) queued = guard->held ?
+        host_call_device_host_psk_queue_data_held(&bridge->session, guard, bridge->local, bridge->local_used) :
+        host_call_device_host_psk_queue_data(&bridge->session, bridge->local, bridge->local_used);
     else if (bridge->local_eof) queued = host_call_device_host_psk_queue_fin(&bridge->session);
     else return DEVICE_HOST_BRIDGE_READY;
     enum device_host_bridge_result result = psk_io_map(queued);
@@ -724,27 +784,34 @@ static enum device_host_bridge_result psk_io_queue_local(struct device_host_psk_
     }
     return result;
 }
-static enum device_host_bridge_result psk_io_read_local(struct device_host_psk_bridge *bridge, bool *progress)
+static enum device_host_bridge_result psk_io_read_local(struct device_host_psk_bridge *bridge, bool *progress,
+    struct device_pairing_guard *guard)
 {
     if (bridge->session.phase != DEVICE_HOST_PSK_ESTABLISHED || bridge->local_eof || bridge->local_used ||
         bridge->session.pending_used || bridge->session.send_fin) return DEVICE_HOST_BRIDGE_READY;
-    if (!psk_io_read_ready(psk_io_input(bridge))) return psk_io_queue_local(bridge, progress);
-    struct device_pairing_guard guard = {0}; enum device_host_bridge_result result = psk_io_authorize(bridge, &guard);
+    if (!psk_io_read_ready(psk_io_input(bridge))) return psk_io_queue_local(bridge, progress, guard);
+    enum device_host_bridge_result result = psk_io_authorize(bridge, guard);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
     ssize_t count = read(psk_io_input(bridge), bridge->local, sizeof(bridge->local)); int error = errno;
-    device_pairing_guard_release(&guard);
     if (count > 0) { bridge->local_used = (size_t)count; bridge->observation.plaintext_read_bytes += (uint64_t)count; *progress = true; }
     else if (!count) { bridge->local_eof = true; *progress = true; }
-    else if (!transient_error(error)) { bridge->observation.error_number = error; return DEVICE_HOST_BRIDGE_IO_ERROR; }
-    return psk_io_queue_local(bridge, progress);
+    else if (!transient_error(error)) {
+        bridge->observation.error_number = error; device_pairing_guard_release(guard); return DEVICE_HOST_BRIDGE_IO_ERROR;
+    }
+    /* Read, seal and first send of this record all run under the one guard taken above. */
+    result = psk_io_queue_local(bridge, progress, guard);
+    if (result == DEVICE_HOST_BRIDGE_READY && guard->held) result = psk_io_write_span(bridge, false, progress, guard);
+    device_pairing_guard_release(guard);
+    return result;
 }
-static enum device_host_bridge_result psk_io_half_close(struct device_host_psk_bridge *bridge, bool carrier, bool *progress)
+static enum device_host_bridge_result psk_io_half_close(struct device_host_psk_bridge *bridge, bool carrier, bool *progress,
+    struct device_pairing_guard *guard)
 {
     bool *closed = carrier ? &bridge->carrier_half_closed : &bridge->output_half_closed;
     bool finished = carrier ? bridge->session.send_fin && !bridge->session.pending_used :
         bridge->session.receive_fin && !bridge->session.plaintext_used;
     if (*closed || !finished) return DEVICE_HOST_BRIDGE_READY;
-    struct device_pairing_guard guard = {0}; enum device_host_bridge_result result = psk_io_authorize(bridge, &guard);
+    enum device_host_bridge_result result = psk_io_authorize(bridge, guard);
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
     int fd = carrier ? bridge->spec.carrier_output_fd : psk_io_output(bridge);
     bool socket = carrier ? bridge->carrier_output_socket : bridge->output_socket;
@@ -754,7 +821,7 @@ static enum device_host_bridge_result psk_io_half_close(struct device_host_psk_b
         observed = close(fd);
         if (carrier) bridge->spec.carrier_output_fd = -1; else bridge->spec.output_fd = -1;
     }
-    int error = errno; device_pairing_guard_release(&guard);
+    int error = errno; device_pairing_guard_release(guard);
     if (observed < 0) { bridge->observation.error_number = error; return DEVICE_HOST_BRIDGE_IO_ERROR; }
     *closed = true; *progress = true; return DEVICE_HOST_BRIDGE_READY;
 }
@@ -763,19 +830,20 @@ static enum device_host_bridge_result psk_io_eof(struct device_host_psk_bridge *
     if (!bridge->carrier_eof || bridge->unread_used || bridge->session.plaintext_used) return DEVICE_HOST_BRIDGE_READY;
     return psk_io_map(host_call_device_host_psk_transport_eof(&bridge->session));
 }
-static enum device_host_bridge_result psk_io_work(struct device_host_psk_bridge *bridge, bool *progress)
+static enum device_host_bridge_result psk_io_work(struct device_host_psk_bridge *bridge, bool *progress,
+    struct device_pairing_guard *guard)
 {
     enum device_host_bridge_result result = psk_io_target_step(bridge, progress);
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_write_span(bridge, false, progress);
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_write_span(bridge, true, progress);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_write_span(bridge, false, progress, guard);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_write_span(bridge, true, progress, guard);
     if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_consume_unread(bridge, progress);
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_read_carrier(bridge, progress);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_read_carrier(bridge, progress, guard);
     if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_target_step(bridge, progress);
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_queue_local(bridge, progress);
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_read_local(bridge, progress);
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_write_span(bridge, false, progress);
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_half_close(bridge, false, progress);
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_half_close(bridge, true, progress);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_queue_local(bridge, progress, guard);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_read_local(bridge, progress, guard);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_write_span(bridge, false, progress, guard);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_half_close(bridge, false, progress, guard);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_half_close(bridge, true, progress, guard);
     if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_eof(bridge);
     return result;
 }
@@ -784,12 +852,13 @@ static enum device_host_bridge_result device_host_psk_bridge_step_state(struct d
     if (!bridge) return DEVICE_HOST_BRIDGE_REFUSED;
     if (!bridge->active) return bridge->started ? bridge->observation.result : DEVICE_HOST_BRIDGE_REFUSED;
     struct device_pairing_guard guard = {0}; enum device_host_bridge_result result = psk_io_authorize(bridge, &guard);
-    device_pairing_guard_release(&guard);
+    /* The step's one guard stays held for the first record action; released below. */
     bool progress = false;
     if (result == DEVICE_HOST_BRIDGE_READY && bridge->poll_error) {
         bridge->observation.error_number = EIO; result = DEVICE_HOST_BRIDGE_IO_ERROR;
     }
-    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_work(bridge, &progress);
+    if (result == DEVICE_HOST_BRIDGE_READY) result = psk_io_work(bridge, &progress, &guard);
+    device_pairing_guard_release(&guard);
     if (result != DEVICE_HOST_BRIDGE_READY) { device_host_psk_bridge_close(bridge, result); return result; }
     if (bridge->session.phase == DEVICE_HOST_PSK_FINISHED && !bridge->unread_used &&
         bridge->output_half_closed && bridge->carrier_half_closed) {

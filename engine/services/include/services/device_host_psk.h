@@ -83,6 +83,18 @@ struct zcl_result device_host_psk_plaintext_acquire(struct device_host_psk_sessi
     struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length, enum device_host_psk_result *status);
 struct zcl_result device_host_psk_plaintext_released(struct device_host_psk_session *session,
     struct device_pairing_guard *guard, size_t count, enum device_host_psk_result *status);
+/* Carried-authority rail: the caller already holds ONE guard (exact current root,
+ * binding and port) that was acquired for this record under the shared authority
+ * lock. queue_data_held seals under it; the *_acquire_held calls borrow it for the
+ * immediate write, and the usual *_written / *_released release it. The caller must
+ * not reuse a guard across records: each record needs a check that started after
+ * the previous record's release. Same BUSY/refusal rules as the acquiring forms. */
+struct zcl_result device_host_psk_queue_data_held(struct device_host_psk_session *session,
+    const struct device_pairing_guard *guard, const uint8_t *plaintext, size_t length, enum device_host_psk_result *status);
+struct zcl_result device_host_psk_pending_acquire_held(struct device_host_psk_session *session,
+    struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length, enum device_host_psk_result *status);
+struct zcl_result device_host_psk_plaintext_acquire_held(struct device_host_psk_session *session,
+    struct device_pairing_guard *guard, const uint8_t **bytes, size_t *length, enum device_host_psk_result *status);
 /* Server NEED_TARGET only after valid mutual confirmation. Trusted integration
  * calls this only after actual fixed-loopback target admission under THIS fresh
  * retained guard; hook verifies local authority and queues S_READY, never dials
