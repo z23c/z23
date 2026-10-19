@@ -8,6 +8,7 @@
 
 #include "command/lab.h"
 #include "command/native_command.h"
+#include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "util/file_tree_ops.h"
@@ -145,7 +146,9 @@ static int test_lab_compile_error(void)
     int failures = 0;
     TEST("lab run: a compile error is parsed to line, column and severity") {
         struct zcl_command_reply r;
-        ASSERT(lt_run("compile_error.c", "\"compile_only\":true", &r));
+        const char *extra = "\"compile_only\":true,\"stdin\":\"hello\\n\","
+                            "\"args\":[\"two words\",\"quoted\\\"arg\"]";
+        ASSERT(lt_run("compile_error.c", extra, &r));
         ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
         ASSERT(!lt_flag(&r.data, "compile", "ok"));
         ASSERT(!lt_flag(&r.data, "run", "ran"));
@@ -156,7 +159,47 @@ static int test_lab_compile_error(void)
         ASSERT(lt_streq(json_get(&diag->children[0], "severity"), "error"));
         ASSERT(lt_has(&diag->children[0], "message", NULL, "undefined_symbol"));
         ASSERT(lt_has(&r.data, "compile", "raw_tail", "compile_error.c:4:12"));
+        ASSERT_EQ(r.next_count, 0);
+        ASSERT(lt_has(&r.data, "next_action", NULL, "Fix the source"));
         zcl_command_reply_free(&r);
+        ASSERT(lt_run("compile_error.c", extra, &r));
+        ASSERT(lt_flag(&r.data, "cache", "hit"));
+        ASSERT_EQ(r.next_count, 0);
+        ASSERT(lt_has(&r.data, "next_action", NULL, "repeat your lab run command"));
+        zcl_command_reply_free(&r);
+        char large[700];
+        ASSERT(snprintf(large, sizeof(large),
+                        "\"compile_only\":true,\"stdin\":\"%0600d\"", 0) > 0);
+        ASSERT(lt_run("compile_error.c", large, &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(!lt_flag(&r.data, "compile", "ok"));
+        ASSERT_EQ(r.next_count, 0);
+        ASSERT(lt_has(&r.data, "next_action", NULL, "Fix the source"));
+        zcl_command_reply_free(&r);
+        const struct zcl_command_registry *reg = zcl_command_catalog();
+        const struct zcl_command_spec *spec =
+            zcl_command_registry_find(reg, "lab.run", NULL);
+        ASSERT(spec);
+        struct zcl_command_context ctx = {
+            .registry = reg, .granted_capabilities = ~(uint64_t)0,
+            .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+        };
+        struct json_value input, envelope;
+        json_init(&input);
+        json_init(&envelope);
+        const char *request = "{\"file\":\"" LT_FIX "compile_error.c\",\"compile_only\":true}";
+        ASSERT(json_read(&input, request, strlen(request)));
+        char output[8192];
+        enum zcl_command_exit code;
+        size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, &input,
+            false, spec->path, "normal", 0, 0, NULL, output, sizeof(output), &code);
+        ASSERT(n > 0 && n < sizeof(output));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_read(&envelope, output, n));
+        ASSERT(lt_flag(&envelope, "ok", NULL));
+        ASSERT(lt_has(&envelope, "data", "next_action", "Fix the source"));
+        json_free(&envelope);
+        json_free(&input);
         PASS();
     } _test_next:;
     return failures;

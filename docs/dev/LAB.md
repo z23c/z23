@@ -56,6 +56,14 @@ A compile error (`tests/fixtures/lab/compile_error.c`) returns
   reported only once for each function it appears in"}]
 ```
 
+The outer `ok` describes receipt production, not whether your program compiled
+or passed. After a compile failure, `data.next_action` tells you to fix the
+reported diagnostics, then repeat your command. This also applies to a cached
+failure. It is guidance for an edit, not an automatic retry command. The guidance
+is added to the reply after receipt retrieval; it does not change the stored receipt.
+
+<!-- claim: symbol-present next_action tools/command/native_lab_command.c # compile-failure edit guidance -->
+
 An undefined-behavior finding (`ub.c`) is counted and quoted:
 
 ```

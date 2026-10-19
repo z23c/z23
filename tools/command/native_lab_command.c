@@ -352,6 +352,13 @@ void zcl_native_handle_lab_run(const struct zcl_command_request *request,
         return;
     lab_run_dispatch(&ctx, &req, reply);
     lab_ctx_close(&ctx);
+    const struct json_value *compile = json_get(&reply->data, "compile");
+    const struct json_value *compiled = compile ? json_get(compile, "ok") : NULL;
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED && compiled &&
+        compiled->type == JSON_BOOL && !json_get_bool(compiled) &&
+        !json_push_kv_str(&reply->data, "next_action",
+                         "Fix the source at data.compile.diagnostics, then repeat your lab run command"))
+        lab_fail(reply, "LAB_ALLOC", "serialize", "the guidance could not be built");
 }
 
 /* ── lab.show ───────────────────────────────────────────────────────── */

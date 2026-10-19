@@ -23,7 +23,9 @@ ZCL_COMMAND_READY_COMMAND(
     "receipt (cache.hit true) without compiling or running, so a program that "
     "reads the clock or a random source is replayed, not re-measured: pass "
     "fresh to bypass. Where Landlock or seccomp cannot be applied it refuses "
-    "with LAB_UNCONFINED and never runs the program; compile_only still works.",
+    "with LAB_UNCONFINED and never runs the program; compile_only still works. "
+    "Compile failures include data.next_action guidance to fix the diagnostics "
+    "and repeat the original command; they never suggest an automatic retry.",
     65536U,
     "lab,c23,compile,run,sandbox,sanitizer,ubsan,asan,test,exit,stdout,start,first,steps,begin,newcomer,onboarding",
     "zcl.lab_run_input.v1", "zcl.lab_run.v1",
