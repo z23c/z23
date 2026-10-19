@@ -4007,6 +4007,7 @@ static int64_t blocker_page_retry_budget(void)
 static void blocker_page_rows(struct json_value *rows, int total)
 {
     char reason[256]; memset(reason, 'r', 255); reason[255] = 0;
+    if (g_blocker_page_case == 22) { memset(reason, 0x61, 79); memcpy(reason + 79, "\xc3\xa9", 2); memset(reason + 81, 0x62, 20); reason[101] = 0; }
     for (int i = 0; i < total; i++) {
         struct json_value row = {0}; char id[32];
         snprintf(id, sizeof(id), "blocker-%d", i);
@@ -4037,6 +4038,70 @@ static void blocker_page_rows(struct json_value *rows, int total)
     }
 }
 
+/* Case 20: seven rows over every class and several ages, in registry order
+ * that is not causal order. Counts are derived from the rows. */
+static const struct { const char *id, *class_name; int64_t age; } g_mixed_rows[] = {
+    {"t-old", "transient", 900}, {"dep-young", "dependency", 10},
+    {"perm-young", "permanent", 20}, {"res", "resource", 5},
+    {"dep-old", "dependency", 800},
+    {"utxo_apply.anchor_backfill_gap", "permanent", 1},
+    {"perm-old", "permanent", 700},
+};
+static const char *const g_mixed_order[] = {
+    "res", "utxo_apply.anchor_backfill_gap", "perm-old", "perm-young",
+    "dep-old", "dep-young", "t-old",
+};
+
+static void blocker_mixed_rows(struct json_value *rows, struct json_value *counts)
+{
+    static const char *const keys[] = {"permanent_count", "transient_count",
+                                       "dependency_count", "resource_count"};
+    static const char *const names[] = {"permanent", "transient", "dependency", "resource"};
+    int64_t n[4] = {0, 0, 0, 0};
+    for (size_t i = 0; i < sizeof(g_mixed_rows) / sizeof(g_mixed_rows[0]); i++) {
+        struct json_value row = {0};
+        json_set_object(&row);
+        json_push_kv_str(&row, "id", g_mixed_rows[i].id);
+        json_push_kv_str(&row, "owner", "sync");
+        json_push_kv_str(&row, "class", g_mixed_rows[i].class_name);
+        json_push_kv_str(&row, "escape_action", "inspect");
+        json_push_kv_str(&row, "reason", "short");
+        json_push_kv_int(&row, "retry_count", 0);
+        json_push_kv_int(&row, "retry_budget", 5);
+        json_push_kv_int(&row, "fire_count", 1);
+        json_push_kv_int(&row, "age_us", g_mixed_rows[i].age);
+        json_push_kv_int(&row, "deadline_remaining_us", 0);
+        json_push_back(rows, &row); json_free(&row);
+        for (size_t c = 0; c < 4; c++)
+            if (!strcmp(names[c], g_mixed_rows[i].class_name)) n[c]++;
+    }
+    for (size_t c = 0; c < 4; c++) json_push_kv_int(counts, keys[c], n[c]);
+}
+
+static int blocker_page_total(void)
+{
+    switch (g_blocker_page_case) {
+    case 4: return 0;
+    case 19: case 20: return 7;
+    case 21: return 20;
+    default: return 8;
+    }
+}
+/* Counts and rows of the fixture registry for the current case. */
+static void blocker_page_fill(struct json_value *blockers, struct json_value *rows, int total)
+{
+    json_push_kv_int(blockers, "active_count", total);
+    if (g_blocker_page_case == 20) {
+        blocker_mixed_rows(rows, blockers);
+    } else {
+        json_push_kv_int(blockers, "permanent_count", g_blocker_page_case == 12 ? 0 : total);
+        json_push_kv_int(blockers, "transient_count", 0);
+        json_push_kv_int(blockers, "dependency_count", g_blocker_page_case == 12 ? total : 0);
+        json_push_kv_int(blockers, "resource_count", 0);
+        blocker_page_rows(rows, total);
+    }
+}
+
 static char *blocker_page_rpc(const char *method, const char *params)
 {
     (void)params;
@@ -4058,14 +4123,9 @@ static char *blocker_page_rpc(const char *method, const char *params)
     json_push_kv_bool(&root, "healthy", false);
     json_push_kv_bool(&blockers, "known", true);
     json_push_kv_int(&blockers, "generation", 9);
-    int total = g_blocker_page_case == 4 ? 0 : g_blocker_page_case == 19 ? 7 : 8;
-    json_push_kv_int(&blockers, "active_count", total);
-    json_push_kv_int(&blockers, "permanent_count", g_blocker_page_case == 12 ? 0 : total);
-    json_push_kv_int(&blockers, "transient_count", 0);
-    json_push_kv_int(&blockers, "dependency_count", g_blocker_page_case == 12 ? total : 0);
-    json_push_kv_int(&blockers, "resource_count", 0);
+    int total = blocker_page_total();
+    blocker_page_fill(&blockers, &rows, total);
     json_push_kv_int(&blockers, "escape_dispatched_total", 0);
-    blocker_page_rows(&rows, total);
     json_push_kv(&blockers, "blockers", &rows);
     if (legacy) {
         json_free(&root); json_set_object(&root);
@@ -4258,6 +4318,81 @@ static int test_blocker_default_view(void)
     }
 _test_next:;
     json_free(&input); json_free(&envelope);
+    node_rpc_client_set_test_hook(NULL); g_blocker_page_case = 0;
+    return failures;
+}
+/* Parses the reply for the dumpstate-backed default view at `budget`. */
+static bool blocker_default_reply(int fixture, size_t budget, struct json_value *envelope)
+{
+    char out[8193];
+    struct json_value input = {0};
+    enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+    g_blocker_page_case = fixture;
+    json_set_object(&input);
+    size_t n = blocker_page_execute(&input, "normal", budget, NULL, out, &code);
+    json_free(&input);
+    json_free(envelope);
+    return n > 0 && code == ZCL_COMMAND_EXIT_OK && strlen(out) <= budget &&
+           json_read(envelope, out, strlen(out));
+}
+static int test_blocker_default_contract(void)
+{
+    int failures = 0;
+    struct json_value envelope = {0};
+    node_rpc_client_set_test_hook(blocker_page_rpc);
+    TEST("blocker default list follows causal priority and starts with the dominant") {
+        ASSERT(blocker_default_reply(20, 4096, &envelope));
+        const struct json_value *data = json_get(&envelope, "data");
+        ASSERT(data && data->num_children > 0 && !strcmp(data->keys[0], "blockers"));
+        const struct json_value *list = json_get(data, "blockers");
+        ASSERT(list && list->num_children == sizeof(g_mixed_order) / sizeof(g_mixed_order[0]));
+        for (size_t i = 0; i < list->num_children; i++)
+            ASSERT(!strcmp(json_get_str(json_get(&list->children[i], "id")), g_mixed_order[i]));
+        ASSERT(!strcmp(json_get_str(json_get(&list->children[0], "id")),
+                       json_get_str(json_get(json_get(data, "dominant"), "id"))));
+        json_free(&envelope); PASS();
+    }
+    TEST("blocker list over the byte cap omits whole rows and counts them") {
+        ASSERT(blocker_default_reply(21, 4096, &envelope));
+        const struct json_value *data = json_get(&envelope, "data");
+        ASSERT(data && !strcmp(data->keys[0], "blockers"));
+        const struct json_value *list = json_get(data, "blockers");
+        ASSERT(list && list->type == JSON_ARR);
+        size_t shown = list->num_children;
+        ASSERT(shown > 0 && shown < 20);
+        ASSERT_EQ(json_get_int(json_get(data, "blockers_omitted")), (int64_t)(20 - shown));
+        ASSERT(json_write(list, NULL, 0) <= 2304);
+        for (size_t i = 0; i < shown; i++) {
+            const struct json_value *row = &list->children[i];
+            ASSERT_EQ((long long)row->num_children, 5);
+            ASSERT(json_get_str(json_get(row, "id")) && json_get_str(json_get(row, "owner")) &&
+                   json_get_str(json_get(row, "class")) && json_get(row, "age_us"));
+            ASSERT_EQ((long long)strlen(json_get_str(json_get(row, "reason"))), 83);
+        }
+        json_free(&envelope); PASS();
+    }
+    TEST("blocker reason cut backs up over a UTF-8 character straddling byte 80") {
+        ASSERT(blocker_default_reply(22, 4096, &envelope));
+        const struct json_value *list = json_get(json_get(&envelope, "data"), "blockers");
+        ASSERT(list && list->num_children > 0);
+        const char *reason = json_get_str(json_get(&list->children[0], "reason"));
+        ASSERT(reason != NULL);
+        ASSERT_EQ((long long)strlen(reason), 82);
+        for (size_t i = 0; i < 79; i++) ASSERT(reason[i] == 0x61);
+        ASSERT(strcmp(reason + 79, "...") == 0);
+        json_free(&envelope); PASS();
+    }
+    TEST("blocker list needs a 3100-byte response budget and is skipped as oversize below it") {
+        ASSERT(blocker_default_reply(21, 3100, &envelope));
+        ASSERT(json_get(json_get(&envelope, "data"), "blockers") != NULL);
+        ASSERT(blocker_default_reply(21, 1100, &envelope));
+        const struct json_value *data = json_get(&envelope, "data");
+        ASSERT(json_get(data, "blockers") == NULL);
+        ASSERT(!strcmp(json_get_str(json_get(json_get(data, "_page"), "skipped_oversize")), "blockers"));
+        json_free(&envelope); PASS();
+    }
+_test_next:;
+    json_free(&envelope);
     node_rpc_client_set_test_hook(NULL); g_blocker_page_case = 0;
     return failures;
 }
@@ -6704,6 +6839,7 @@ int test_command_registry_catalog(void)
     failures += test_blocker_basic_pages();
     failures += test_blocker_paging_controls();
     failures += test_blocker_default_view();
+    failures += test_blocker_default_contract();
     failures += test_every_describe_document_parses();
     failures += test_blocker_basic_refusals();
     failures += test_work_envelope_ceiling();

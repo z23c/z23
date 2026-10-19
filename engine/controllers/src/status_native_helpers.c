@@ -607,6 +607,16 @@ static bool status_summary_skips_key(const char *key, bool include_entries)
     return !key || (!include_entries && strcmp(key, "_health") == 0);
 }
 
+/* The reason the dumpstate blockers value cannot be summarized, or NULL. */
+static const char *status_entries_defect(const struct json_value *entries)
+{
+    if (!entries || entries->type != JSON_ARR)
+        return "blocker dumpstate missing object state/blockers array";
+    if (json_size(entries) > BLOCKER_CAP)
+        return "blocker dumpstate lists more blockers than the registry cap";
+    return NULL;
+}
+
 /* Build the blocker summary exclusively from the target node's dumpstate RPC
  * response. The native command often runs in a separate client process;
  * reading blocker globals there would describe that empty client and create a
@@ -670,10 +680,11 @@ bool status_build_blocker_summary(const char *raw,
         return false;
     }
     const struct json_value *entries = json_get(state, "blockers");
-    if (!entries || entries->type != JSON_ARR) {
+    const char *defect = status_entries_defect(entries);
+    if (defect) {
         json_set_object(error_out);
         json_push_kv_str(error_out, "message",
-                         "blocker dumpstate missing object state/blockers array");
+                         defect);
         json_free(&response);
         return false;
     }
