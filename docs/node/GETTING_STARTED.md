@@ -77,12 +77,18 @@ find are not sufficient for either.
 4. Build the public node with four parallel jobs (`-j4`).
 
 ```bash
-git clone https://github.com/z23c/z23.git
+git clone --recurse-submodules https://github.com/z23c/z23.git
 cd z23
 make doctor
 make setup
 make -j4 z23
 ```
+
+The recursive clone initializes the pinned Tor source under `vendor/tor`.
+If you already cloned without that option, run
+`git submodule update --init vendor/tor` before setup.
+
+<!-- claim: file-present .gitmodules # pinned Tor source submodule -->
 
 The public node serves this same clone-and-build sequence as a script at
 `/install.sh`, so `curl -fsSL https://<site>/install.sh | sh` builds from
