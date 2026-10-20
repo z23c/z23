@@ -706,6 +706,7 @@ cj_sign_digest() {
 cj_publish_package() {
     local node="$1" dir="$2" seq="$3"
     local pub="${4:-$CJ_PUBLISHER}" key="${5:-$DHT_WORK/publisher.key}"
+    local day_input="${6:+,\"day\":$6}"
     local prepare digest body manifest recipe signature seal plan commit
     prepare="$("cj_$node" zcode package dev prepare \
         --input="{\"dir\":\"$dir\",\"publisher_pubkey\":\"$pub\",\"publisher_sequence\":$seq}")"
@@ -727,7 +728,7 @@ cj_publish_package() {
     [ "$(cj_field data.valid "$plan" False)" = True ] ||
         cj_die "publish plan refused $dir: $plan"
     commit="$("cj_$node" zcode package publish commit \
-        --input="{\"release_hex\":\"$CJ_PKG_RELEASE_HEX\",\"manifest_hex\":\"$manifest\",\"recipe_hex\":\"$recipe\",\"dir\":\"$dir\"}")"
+        --input="{\"release_hex\":\"$CJ_PKG_RELEASE_HEX\",\"manifest_hex\":\"$manifest\",\"recipe_hex\":\"$recipe\",\"dir\":\"$dir\"$day_input}")"
     cj_require_ok "publish commit $dir" "$commit"
     CJ_PKG_TRANSPORT="$(cj_field data.transport_root "$commit")"
     [ "${#CJ_PKG_TRANSPORT}" -eq 64 ] ||
@@ -2011,8 +2012,10 @@ cj_journey_use_app() {
     CJ_APP_PKG_PUBLISHER="$("$CJ_SIGNER" --generate "$DHT_WORK/app-package-publisher.key")"
     [ -n "$CJ_APP_PKG_PUBLISHER" ] ||
         cj_die "could not create the application package publisher identity"
+    # Isolated policy-clock fixture: v2 is published one week after v1.
+    CJ_APP_FIXTURE_DAY=$(( $(date +%s) / 86400 ))
     cj_publish_package a "$src_a" 1 "$CJ_APP_PKG_PUBLISHER" \
-        "$DHT_WORK/app-package-publisher.key"
+        "$DHT_WORK/app-package-publisher.key" "$CJ_APP_FIXTURE_DAY"
     CJ_APP_PKG_ROOT="$CJ_PKG_ROOT"
     CJ_APP_PKG_TRANSPORT="$CJ_PKG_TRANSPORT"
     cj_note "apps/wordcount published as an ordinary package on node A: ${CJ_APP_PKG_ROOT:0:16}…"
@@ -2021,6 +2024,8 @@ cj_journey_use_app() {
     # rebuild (distinct second receipt), then announce.
     cj_use_package a "$CJ_APP_PKG_ROOT"
     bin_a="$(cj_program_path "$CJ_USE_COMMIT" wordcount)"
+    [ "$(cj_field data.active_root "$CJ_USE_COMMIT")" = "$CJ_APP_PKG_ROOT" ] ||
+        cj_die "requester did not activate v1"
     [ -n "$bin_a" ] && cj_on a test -x "$bin_a" ||
         cj_die "node A admitted apps/wordcount but installed no executable program"
     cj_reproduce_package a "$CJ_APP_PKG_ROOT"
@@ -2038,6 +2043,8 @@ cj_journey_use_app() {
         *) cj_die "node B installed the program somewhere other than its own package tree: $bin_b" ;;
     esac
     CJ_APP_BIN_B="$bin_b"
+    [ "$(cj_field data.active_root "$CJ_USE_COMMIT")" = "$CJ_APP_PKG_ROOT" ] ||
+        cj_die "worker did not activate v1"
 
     sample="$DHT_WORK/sample.txt"
     printf '%s\n' \
@@ -2068,6 +2075,78 @@ cj_journey_use_app() {
     cj_note "wordcount sample.txt -> $CJ_APP_OUTPUT"
     cj_note "identical $CJ_APP_BINARY_BYTES-byte program on both nodes, installed by zcode use as bin/wordcount"
     cj_note "the longest_line number is the behavior this journey created"
+}
+
+# Both hosts independently install a changed same-name/same-key release,
+# then the native lifecycle restores the exact previous active generation.
+cj_journey_update_rollback() {
+    local source="$(cj_node_dir a)/wordcount-v2" out bin active node dd sample rollback
+    local commit_a commit_b commit
+    local root_v1="$CJ_APP_PKG_ROOT" root_v2 transport_v2
+    cp -R "$(cj_node_dir a)/checkout-a" "$source"
+    sed 's/"semver": "0.1.0"/"semver": "0.2.0"/' \
+        "$source/zcode-package.json" >"$source/zcode-package.json.next"
+    mv "$source/zcode-package.json.next" "$source/zcode-package.json"
+    sed 's/printf("lines /printf("v2 lines /' \
+        "$source/app/main.c" >"$source/app/main.c.next"
+    mv "$source/app/main.c.next" "$source/app/main.c"
+    grep -Fq '"semver": "0.2.0"' "$source/zcode-package.json" ||
+        cj_die "v2 manifest edit did not apply"
+    grep -Fq 'printf("v2 lines ' "$source/app/main.c" ||
+        cj_die "v2 visible-output edit did not apply"
+    cj_publish_package a "$source" 2 "$CJ_APP_PKG_PUBLISHER" \
+        "$DHT_WORK/app-package-publisher.key" "$((CJ_APP_FIXTURE_DAY + 7))"
+    root_v2="$CJ_PKG_ROOT"; transport_v2="$CJ_PKG_TRANSPORT"
+    [ "$root_v2" != "$root_v1" ] || cj_die "v2 did not change package identity"
+    cj_use_package a "$root_v2"
+    [ "$(cj_field data.active_root "$CJ_USE_COMMIT")" = "$root_v2" ] ||
+        cj_die "requester did not activate v2"
+    commit_a="$CJ_USE_COMMIT"
+    cj_reproduce_package a "$root_v2"
+    cj_announce_package a "$root_v2" "$transport_v2" 2
+    cj_fetch_package b "$root_v2" "$transport_v2"
+    # The second host verifies/reproduces its fetched bytes independently.
+    cj_use_package b "$root_v2"
+    commit_b="$CJ_USE_COMMIT"
+    [ "$(cj_field data.active_root "$commit_b")" = "$root_v2" ] ||
+        cj_die "worker did not activate v2"
+    cj_reproduce_package b "$root_v2"
+    [ "$(cj_on a readlink "$DHT_DD_A/zcode/active/apps/wordcount")" = "$DHT_DD_A/zcode/installed/$root_v2" ] &&
+        [ "$(cj_on b readlink "$DHT_DD_B/zcode/active/apps/wordcount")" = "$DHT_DD_B/zcode/installed/$root_v2" ] ||
+        cj_die "both hosts must select v2 before either rollback"
+    for node in a b; do
+        case "$node" in
+            a) dd="$DHT_DD_A"; sample="$DHT_WORK/sample.txt"; commit="$commit_a" ;;
+            b) dd="$DHT_DD_B"; sample="$(cj_node_dir b)/sample-b.txt"; commit="$commit_b" ;;
+        esac
+        [ "$(cj_field data.active_root "$commit")" = "$root_v2" ] ||
+            cj_die "node $node did not activate v2"
+        bin="$(cj_program_path "$commit" wordcount)"
+        cj_pause_remote_for_local_build "$node"
+        out="$(cj_scheduled_on "$node" "$bin" "$sample")"
+        cj_resume_remote_after_local_build
+        [ "$out" = "v2 $CJ_APP_OUTPUT" ] || cj_die "node $node v2 output mismatch: $out"
+        printf 'node=%s root=%s output=%s\n' "$node" "$root_v2" "$out" \
+            >>"$DHT_WORK/update-rollback.txt"
+        rollback="$("cj_$node" zcode package rollback \
+            --input="{\"name\":\"apps/wordcount\",\"datadir\":\"$dd\"}")"
+        cj_require_ok "node $node rollback" "$rollback"
+        [ "$(cj_field data.from_root "$rollback")" = "$root_v2" ] &&
+            [ "$(cj_field data.to_root "$rollback")" = "$root_v1" ] ||
+            cj_die "node $node rollback restored a different active root"
+        # Observe the actual active pointer independently, then execute
+        # through that selected generation; no use/reproduce after rollback.
+        active="$dd/zcode/active/apps/wordcount"
+        [ "$(cj_on "$node" readlink "$active")" = "$dd/zcode/installed/$root_v1" ] ||
+            cj_die "node $node active pointer did not restore v1"
+        cj_pause_remote_for_local_build "$node"
+        out="$(cj_scheduled_on "$node" "$active/bin/wordcount" "$sample")"
+        cj_resume_remote_after_local_build
+        [ "$out" = "$CJ_APP_OUTPUT" ] || cj_die "node $node restored output mismatch: $out"
+        printf 'node=%s restored_root=%s output=%s\n' "$node" "$root_v1" "$out" \
+            >>"$DHT_WORK/update-rollback.txt"
+    done
+    CJ_APP_UPDATE_ROOT="$root_v2"
 }
 
 # ── 10/12  the object-set carrier: the compile cache itself travels ───────
@@ -3338,6 +3417,8 @@ cj_write_facts() {
             "$CJ_TEXTSTAT_BYTES" "$CJ_APP_BYTES"
         printf 'reused_package_match  = byte-identical on both nodes (%s bytes)\n' "$CJ_LIB_BYTES"
         printf 'accepted_package_root = %s\n' "$CJ_APP_PKG_ROOT"
+        printf 'update_package_root   = %s\n' "$CJ_APP_UPDATE_ROOT"
+        cat "$DHT_WORK/update-rollback.txt"
         printf 'application_match     = byte-identical program on both nodes (%s bytes)\n' "$CJ_APP_BINARY_BYTES"
         printf 'program_installed_by  = zcode use — recipe program app/main.c -> bin/wordcount, receipt-bound; this proof ran no compiler\n'
         printf 'tamper_refused        = 4 of 4, each by name\n'
@@ -3451,6 +3532,7 @@ cj_journey_remote_reproduction
 CJ_SECS_REPRO=$(( $(date +%s) - CJ_T_REPRO ))
 cj_journey_tamper_refusals
 cj_journey_use_app
+cj_journey_update_rollback
 CJ_SECS_RUNNING=$(( $(date +%s) - CJ_T0 ))
 # The tenth step moves the work, not the source: the compile cache itself
 # leaves node B as one ordinary package, and node C — which never compiled
