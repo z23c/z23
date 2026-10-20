@@ -135,7 +135,6 @@ void plugin_dist_test_set_image_max(uint64_t bytes) { g_image_max = bytes; }
 #endif
 
 #if !defined(_WIN32)
-static const char k_hex[] = "0123456789abcdef";
 
 static bool pd_join(char *out, size_t cap, const char *a, const char *b)
 {
