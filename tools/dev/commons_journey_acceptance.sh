@@ -2077,6 +2077,25 @@ cj_journey_use_app() {
     cj_note "the longest_line number is the behavior this journey created"
 }
 
+# This fixture has an explicit top-level version and an independently pinned
+# dependency. Change only the former; preserve all dependency identity bytes.
+cj_update_app_manifest_v2() {
+    local manifest="$1" before after
+    before="$(grep '^  "dependencies": ' "$manifest")"
+    [ "$before" = "  \"dependencies\": [{\"root\": \"$CJ_TEXTSTAT_ROOT\", \"name\": \"z23/textstat\", \"semver\": \"0.1.0\"}]," ] ||
+        cj_die "v2 fixture dependency root/name/version differs before edit"
+    grep -qx '  "semver": "0.1.0",' "$manifest" ||
+        cj_die "v2 fixture has no top-level application version 0.1.0"
+    sed 's/^  "semver": "0.1.0",$/  "semver": "0.2.0",/' \
+        "$manifest" >"$manifest.next"
+    mv "$manifest.next" "$manifest"
+    after="$(grep '^  "dependencies": ' "$manifest")"
+    [ "$after" = "$before" ] ||
+        cj_die "v2 edit changed dependency root/name/version"
+    grep -qx '  "semver": "0.2.0",' "$manifest" ||
+        cj_die "v2 top-level application version edit did not apply"
+}
+
 # Both hosts independently install a changed same-name/same-key release,
 # then the native lifecycle restores the exact previous active generation.
 cj_journey_update_rollback() {
@@ -2084,9 +2103,7 @@ cj_journey_update_rollback() {
     local commit_a commit_b commit
     local root_v1="$CJ_APP_PKG_ROOT" root_v2 transport_v2
     cp -R "$(cj_node_dir a)/checkout-a" "$source"
-    sed 's/"semver": "0.1.0"/"semver": "0.2.0"/' \
-        "$source/zcode-package.json" >"$source/zcode-package.json.next"
-    mv "$source/zcode-package.json.next" "$source/zcode-package.json"
+    cj_update_app_manifest_v2 "$source/zcode-package.json"
     sed 's/printf("lines /printf("v2 lines /' \
         "$source/app/main.c" >"$source/app/main.c.next"
     mv "$source/app/main.c.next" "$source/app/main.c"

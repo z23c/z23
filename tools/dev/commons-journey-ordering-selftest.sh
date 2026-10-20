@@ -665,6 +665,33 @@ grep -qF 'if [ "$CJ_MULTIHOST" = 1 ]; then DHT_REMOTE_DEVBUILD=1; fi' "$JOURNEY"
     fail "three-host nodes bypass receiving-host scheduler admission"
 grep -qF 'remote scheduler mapped-image qualification requires Linux' <<<"$setup" ||
     fail "real non-Linux topology lacks an early named refusal"
+# Execute the production manifest writer and transformation, not a copy of
+# the substitution. The inline dependency deliberately shares version 0.1.0.
+for function_name in cj_write_package_json cj_update_app_manifest_v2; do
+    awk -v name="$function_name" '$0 == name "() {" {f=1} f {print}
+        f && /^}/ && (name != "cj_write_package_json" || previous == "JSON") {exit}
+        {previous=$0}' \
+        "$JOURNEY" >>"$SCHEDULING/manifest-functions.sh"
+done
+if (
+    . "$SCHEDULING/manifest-functions.sh" || exit 1
+    cj_die() { printf '%s\n' "$*" >&2; exit 1; }
+    CJ_TEXTSTAT_ROOT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    mkdir "$SCHEDULING/manifest" || exit 1
+    cj_write_package_json "$SCHEDULING/manifest" "$CJ_TEXTSTAT_ROOT" apps/wordcount
+    manifest="$SCHEDULING/manifest/zcode-package.json"
+    before="$(grep '^  "dependencies": ' "$manifest")"
+    cj_update_app_manifest_v2 "$manifest" || exit 1
+    grep -qx '  "semver": "0.2.0",' "$manifest" || exit 1
+    [ "$(grep '^  "dependencies": ' "$manifest")" = "$before" ] || exit 1
+    grep -Fq '"name": "z23/textstat", "semver": "0.1.0"' "$manifest" || exit 1
+    # A dependency version must never stand in for a missing app version.
+    if (cj_update_app_manifest_v2 "$manifest") >/dev/null 2>&1; then exit 1; fi
+) ; then
+    pass "actual v2 manifest edit preserves dependency root/name/version"
+else
+    fail "actual v2 manifest edit changed the dependency or missed app version"
+fi
 rm -rf "$SCHEDULING"
 
 [ "$FAIL" -eq 0 ] || exit 1
