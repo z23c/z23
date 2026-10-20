@@ -5,6 +5,8 @@
 #include "test/test_verdict_json.h"
 #include "platform/os_proc.h"
 #include "platform/file_metadata.h"
+#include "platform/path_compat.h"
+#include "platform/state_root.h"
 #include "test_group_catalog.h"
 #include "test_group_weights.h"
 #include "util/clientversion.h"
@@ -2111,9 +2113,143 @@ static int test_cleanup_path_namespaces(void)
     return failures;
 }
 
-int test_test_group_selector(void)
+/* The existing recursive-runner tests enter this small real group body to
+ * inspect its inherited environment without recursively running the suite. */
+static bool g_tgs_state_probe;
+void zcl_test_group_selector_state_probe(bool enabled)
+{
+    g_tgs_state_probe = enabled;
+}
+
+static bool tgs_native_state_matches(const char *state)
+{
+    char native[PATH_MAX], want[PATH_MAX];
+    int n = snprintf(want, sizeof(want), "%s/z23/dev", state);
+    if (n < 0 || (size_t)n >= sizeof(want) ||
+        !platform_state_root(native, sizeof(native))) return false;
+    for (char *p = native; *p; ++p) if (*p == '\\') *p = '/';
+    for (char *p = want; *p; ++p) if (*p == '\\') *p = '/';
+    return strcmp(native, want) == 0;
+}
+
+static int tgs_state_probe(void)
+{
+    const char *state = getenv("XDG_STATE_HOME");
+    const char *home = getenv("HOME");
+    const char *expected = getenv("ZCL_TEST_RUNNER_EXPECT_HOME");
+    char path[PATH_MAX];
+    if (!state || !expected || strcmp(home ? home : "", expected) != 0)
+        return 1;
+    if (!tgs_native_state_matches(state)) return 1;
+    int n = snprintf(path, sizeof(path), "%s/runner-probe", state);
+    if (n < 0 || (size_t)n >= sizeof(path)) return 1;
+    FILE *f = fopen(path, "wx");
+    if (!f) return 1;
+    bool ok = fputs("private state\n", f) >= 0;
+    if (fclose(f) != 0) ok = false;
+    printf("runner-state-probe: %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int test_runner_private_state(void)
 {
     int failures = 0;
+    TEST("runner: private attempt state preserves HOME and retained evidence") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], command[8 * PATH_MAX];
+        char home[PATH_MAX], caller_state[PATH_MAX];
+        char first[PATH_MAX] = {0};
+        test_make_tmpdir(root, sizeof(root), "tgs_state", "runner");
+        int n = snprintf(home, sizeof(home), "%s/caller-home", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(home));
+        ASSERT(mkdir(home, 0700) == 0);
+        n = snprintf(caller_state, sizeof(caller_state), "%s/caller-state", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(caller_state));
+        ASSERT(mkdir(caller_state, 0700) == 0);
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        ASSERT(strpbrk(root, "'\n\r") == NULL);
+        ASSERT(strpbrk(exe, "'\n\r") == NULL);
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            char home_env[PATH_MAX + 16];
+            n = snprintf(home_env, sizeof(home_env),
+                         attempt == 2 ? "%s" : "HOME='%s'",
+                         attempt == 2 ? "" : home);
+            ASSERT(n >= 0 && (size_t)n < sizeof(home_env));
+            n = snprintf(command, sizeof(command),
+                "cd '%s' && env %s %s %s='%s' ZCL_STATE_ROOT='%s' "
+                "ZCL_TEST_RUNNER_EXPECT_HOME='%s' "
+                "'%s' --jobs=2 --verbose --no-cache --state-isolation-probe "
+                "--exact=test_test_group_selector,test_hex_codec 2>&1",
+                root, attempt == 2 ? "-u XDG_STATE_HOME -u HOME" :
+                attempt == 1 ? "-u XDG_STATE_HOME" : "",
+                home_env,
+                attempt == 0 ? "XDG_STATE_HOME" : "ZCL_TEST_CALLER_STATE",
+                caller_state, caller_state,
+                attempt == 2 ? "" : home, exe);
+            ASSERT(n > 0 && (size_t)n < sizeof(command));
+            ASSERT(capture_command(command, out, sizeof(out)) == 0);
+            ASSERT(strstr(out, "runner-state-probe: PASS") != NULL);
+            const char *p = strstr(out,
+                "attempt group=test_test_group_selector retained_state=");
+            ASSERT(p != NULL);
+            p = strstr(p, "retained_state=") + strlen("retained_state=");
+            const char *end = strchr(p, '\n');
+            ASSERT(end && (size_t)(end - p) < sizeof(first));
+            char current[PATH_MAX] = {0};
+            memcpy(current, p, (size_t)(end - p));
+            ASSERT(platform_path_is_absolute(current));
+            ASSERT(strstr(current, "runner-state-") != NULL);
+            if (attempt == 0) snprintf(first, sizeof(first), "%s", current);
+            else ASSERT(strcmp(first, current) != 0);
+            const char *next = strstr(out,
+                "attempt group=test_hex_codec retained_state=");
+            ASSERT(next != NULL);
+            next = strstr(next, "retained_state=") + strlen("retained_state=");
+            ASSERT(strncmp(current, next, strlen(current)) != 0);
+        }
+        char probe[PATH_MAX];
+        n = snprintf(probe, sizeof(probe), "%s/runner-probe", first);
+        ASSERT(n > 0 && (size_t)n < sizeof(probe));
+        FILE *retained = fopen(probe, "r");
+        ASSERT(retained != NULL);
+        ASSERT(fclose(retained) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_runner_state_setup_refuses(void)
+{
+    int failures = 0;
+    TEST("runner: unusable state parent refuses before the group runs") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], path[PATH_MAX];
+        char command[3 * PATH_MAX];
+        test_make_tmpdir(root, sizeof(root), "tgs_state_bad", "runner");
+        int n = snprintf(path, sizeof(path), "%s/test-tmp", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(path));
+        FILE *f = fopen(path, "wx");
+        ASSERT(f != NULL);
+        ASSERT(fclose(f) == 0);
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --jobs=1 --verbose --no-cache "
+            "--exact=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) != 0);
+        ASSERT(strstr(out, "private state setup failed") != NULL);
+        ASSERT(strstr(out, "private state retained=") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+int test_test_group_selector(void)
+{
+    if (g_tgs_state_probe) return tgs_state_probe();
+    int failures = 0;
+    failures += test_runner_private_state();
+    failures += test_runner_state_setup_refuses();
     failures += test_exact_default_parallel_jobs();
     failures += test_exact_verifier_prerequisites();
     failures += test_compile_scope_proof();

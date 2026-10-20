@@ -36,10 +36,13 @@
  * not just dead but WRONG — it failed the moment it was finally executed. */
 
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 
 #include "platform/time_compat.h"
 #include "platform/directory_compat.h"
 #include "platform/logical_cpu.h"
+#include "platform/private_directory.h"
+#include "platform/rng.h"
 #include "command/native_dev_hotswap.h"
 #include "config/command_catalog.h"
 #include "hotswap/hotswap.h"
@@ -799,7 +802,10 @@ static bool activate_proof_contract(size_t idx)
     return true;
 }
 
-static void child_run(size_t idx, const char *out_path,
+static bool g_state_isolation_probe;
+extern void zcl_test_group_selector_state_probe(bool enabled);
+
+static void child_run(size_t idx, const char *out_path, const char *state_path,
                       bool activate_proof_contracts)
 {
     /* Redirect stdout + stderr to our tempfile. */
@@ -815,6 +821,23 @@ static void child_run(size_t idx, const char *out_path,
     }
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
+
+    if (!state_path || !state_path[0] ||
+        setenv("XDG_STATE_HOME", state_path, 1) != 0) {
+        fprintf(stderr, "test_parallel: private state activation failed: %s\n",
+                strerror(errno));
+        _exit(2);
+    }
+#if defined(_WIN32)
+    if (setenv("ZCL_STATE_ROOT", state_path, 1) != 0) {
+        fprintf(stderr, "test_parallel: native state activation failed: %s\n",
+                strerror(errno));
+        _exit(2);
+    }
+#endif
+    printf("test_parallel: private state retained=%s\n", state_path);
+    zcl_test_group_selector_state_probe(g_state_isolation_probe &&
+        strcmp(g_groups[idx].name, "test_test_group_selector") == 0);
 
     if (activate_proof_contracts && !activate_proof_contract(idx))
         _exit(2);
@@ -849,15 +872,80 @@ static void child_run(size_t idx, const char *out_path,
     _exit(failures ? 1 : 0);
 }
 
+#if defined(_WIN32)
+/* Return true only when an internal worker dispatch was requested. */
+static bool child_dispatch(int argc, char **argv)
+{
+    long idx = -1;
+    const char *out = NULL, *state = NULL;
+    bool proof = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strncmp(argv[i], "--child-run=", 12) == 0)
+            idx = strtol(argv[i] + 12, NULL, 10);
+        else if (strncmp(argv[i], "--child-out=", 12) == 0)
+            out = argv[i] + 12;
+        else if (strncmp(argv[i], "--child-state=", 14) == 0)
+            state = argv[i] + 14;
+        else if (strcmp(argv[i], "--child-proof") == 0)
+            proof = true;
+        else if (strcmp(argv[i], "--state-isolation-probe") == 0)
+            g_state_isolation_probe = true;
+    }
+    if (idx < 0) return false;
+    if (!out || !state || (unsigned long)idx >= (unsigned long)g_num_groups) {
+        fprintf(stderr, "test_parallel: bad --child-run dispatch\n");
+        return true;
+    }
+    child_run((size_t)idx, out, state, proof);
+    return true;
+}
+#endif
+
 /* Spawn one group's worker. POSIX forks and the child runs child_run in
  * place. Windows has no fork(), so the parent re-execs this same binary with
  * --child-run=<idx> --child-out=<path>; the early dispatch in main() hands
  * those arguments straight to child_run, which does its own stdout/stderr
  * redirection exactly as the forked child does. Returns 0 and fills `out`,
  * or -1 (already logged). */
+/* Attempt roots are retained fixtures, like failed logs in test-tmp. The
+ * parent creates them before dispatch; retries never reuse a prior root. */
+static bool child_state_create(char *out, size_t cap)
+{
+    char parent[PATH_MAX];
+    if (platform_directory_create("test-tmp", 0755) != 0 && errno != EEXIST)
+        return false;
+#if defined(_WIN32)
+    if (!_fullpath(parent, "test-tmp", sizeof(parent))) return false;
+#else
+    if (!realpath("test-tmp", parent)) return false;
+#endif
+    for (unsigned attempt = 0; attempt < 64; ++attempt) {
+        uint8_t nonce[9];
+        char hex[19];
+        if (!rng_fill(nonce, 8)) { errno = EIO; return false; }
+        nonce[8] = (uint8_t)attempt;
+        zcl_hex_encode(nonce, sizeof(nonce), hex);
+        int n = snprintf(out, cap, "%s/runner-state-%s", parent, hex);
+        if (n < 0 || (size_t)n >= cap) { errno = ENAMETOOLONG; return false; }
+        if (platform_private_directory_create(out)) return true;
+        if (errno != EEXIST) return false;
+    }
+    errno = EEXIST;
+    return false;
+}
+
 static int child_spawn(size_t idx, const char *out_path,
                        bool activate_proof_contracts, zcl_child_t *out)
 {
+    char state_path[PATH_MAX];
+    if (!child_state_create(state_path, sizeof(state_path))) {
+        fprintf(stderr, "test_parallel: private state setup failed group=%s: %s\n",
+                g_groups[idx].name, strerror(errno));
+        return -1;
+    }
+    printf("test_parallel: attempt group=%s retained_state=%s\n",
+           g_groups[idx].name, state_path);
+    fflush(stdout);
 #if defined(_WIN32)
     char exe[PATH_MAX];
     DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof(exe));
@@ -866,11 +954,13 @@ static int child_spawn(size_t idx, const char *out_path,
                 (unsigned long)GetLastError());
         return -1;
     }
-    char cmd[PATH_MAX + 320];
+    char cmd[3 * PATH_MAX + 320];
     int len = snprintf(cmd, sizeof(cmd),
-                       "\"%s\" --child-run=%zu --child-out=%s%s",
-                       exe, idx, out_path,
-                       activate_proof_contracts ? " --child-proof" : "");
+                       "\"%s\" --child-run=%zu \"--child-out=%s\" "
+                       "\"--child-state=%s\"%s%s",
+                       exe, idx, out_path, state_path,
+                       activate_proof_contracts ? " --child-proof" : "",
+                       g_state_isolation_probe ? " --state-isolation-probe" : "");
     if (len < 0 || (size_t)len >= sizeof(cmd)) {
         fprintf(stderr, "test_parallel: child command line too long\n");
         return -1;
@@ -899,7 +989,7 @@ static int child_spawn(size_t idx, const char *out_path,
         return -1;
     }
     if (pid == 0) {
-        child_run(idx, out_path, activate_proof_contracts);
+        child_run(idx, out_path, state_path, activate_proof_contracts);
         _exit(2); /* unreachable */
     }
     *out = pid;
@@ -2345,28 +2435,7 @@ int main(int argc, char **argv)
      * group. Dispatch before any suite setup: child_run does its own
      * stdout/stderr redirection (same body the forked POSIX child runs), so
      * nothing may print before it. */
-    {
-        long child_idx = -1;
-        const char *child_out = NULL;
-        bool child_proof = false;
-        for (int i = 1; i < argc; i++) {
-            if (strncmp(argv[i], "--child-run=", 12) == 0)
-                child_idx = strtol(argv[i] + 12, NULL, 10);
-            else if (strncmp(argv[i], "--child-out=", 12) == 0)
-                child_out = argv[i] + 12;
-            else if (strcmp(argv[i], "--child-proof") == 0)
-                child_proof = true;
-        }
-        if (child_idx >= 0) {
-            if (!child_out || (unsigned long)child_idx >=
-                              (unsigned long)g_num_groups) {
-                fprintf(stderr, "test_parallel: bad --child-run dispatch\n");
-                return 2;
-            }
-            child_run((size_t)child_idx, child_out, child_proof);
-            return 2; /* unreachable: child_run _exit()s */
-        }
-    }
+    if (child_dispatch(argc, argv)) return 2;
 
     /* Fork-role dispatch: tests with a cross-process leg (SQLite owner lease,
      * kill -9 recovery, ...) re-exec this binary through
@@ -2457,6 +2526,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--verbose") == 0 ||
                    strcmp(argv[i], "-v") == 0) {
             verbose = true;
+        } else if (strcmp(argv[i], "--state-isolation-probe") == 0) {
+            g_state_isolation_probe = true;
         } else if (strcmp(argv[i], "--list") == 0) {
             list_only = true;
         } else if (strcmp(argv[i], "--list-build-needs") == 0) {

@@ -2502,6 +2502,8 @@ Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_parallel.c:auto")
 Z23_FLAG("ZCL_TEST_FORK_ROLE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_boot_phase.c:auto")
+Z23_FLAG("ZCL_TEST_RUNNER_EXPECT_HOME", "env_test", "-", "-",
+          "Expected optional HOME in the explicit runner state-isolation probe; first use tests/harness/src/test_test_group_selector.c:auto")
 Z23_FLAG("ZCL_TEST_GELI_FIXTURE_PACKET", "env_test", "-", "-",
           "Exact public guest image locator; compiled kernel hash refuses substitutions; first use tests/harness/src/test_rvmachine_geli_volume.c:auto")
 Z23_FLAG("ZCL_TEST_FREEBSD_PORT_FIXTURE_KERNEL", "env_test", "-", "-",
