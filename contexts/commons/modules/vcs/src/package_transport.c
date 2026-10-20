@@ -428,7 +428,13 @@ enum vcs_package_transport_result vcs_package_transport_import(
                    "carrier recipe hashes to a different recipe root than "
                    "the release names");
     }
-    put = vcs_package_store_put_release(store, &expected.release, &accept);
+    /* Reimport validates the carrier binding above but is not a new release
+     * admission. Exact durable history may precede the current cursor. */
+    if (vcs_package_store_release_history_matches(store, &expected.release)) {
+        put = VCS_PACKAGE_STORE_OK;
+    } else {
+        put = vcs_package_store_put_release(store, &expected.release, &accept);
+    }
     if (put != VCS_PACKAGE_STORE_OK) {
         vcs_package_transport_free(&expected);
         LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_STORE, "vcs.package.transport",

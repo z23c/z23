@@ -1269,6 +1269,51 @@ static enum vcs_package_store_result store_release_persist(
     return VCS_PACKAGE_STORE_OK;
 }
 
+static bool store_release_history_matches_locked(
+    const struct vcs_package_store *store,
+    const struct vcs_package_release *release)
+{
+    uint8_t id[32];
+    if (vcs_package_release_id(release, id) != VCS_PACKAGE_RELEASE_OK)
+        return false;
+    char hex[65], path[STORE_PATH_MAX];
+    zcl_hex_encode(id, 32, hex);
+    int n = snprintf(path, sizeof(path), "%s/releases/%s", store->root, hex);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    uint8_t *wire = NULL, *requested = NULL;
+    size_t length = 0, requested_length = 0;
+    /* The positioned reader opens a regular file without following the
+     * final symlink/reparse point and bounds bytes by the release codec. */
+    if (store_release_read(path, &wire, &length) != STORE_RELEASE_READ_OK)
+        return false;
+    struct store_release_row row = {0};
+    enum vcs_package_release_error refused = VCS_PACKAGE_RELEASE_OK;
+    const char *damage = store_release_damage(wire, length, hex, &row, &refused);
+    bool matches = !damage && refused == VCS_PACKAGE_RELEASE_OK &&
+        vcs_package_release_verify(&row.release) == VCS_PACKAGE_RELEASE_OK &&
+        vcs_package_release_serialize(release, &requested, &requested_length) ==
+            VCS_PACKAGE_RELEASE_OK;
+    if (matches)
+        matches = length == requested_length &&
+                  memcmp(wire, requested, length) == 0;
+    free(requested);
+    free(wire);
+    return matches;
+}
+
+bool vcs_package_store_release_history_matches(
+    struct vcs_package_store *store, const struct vcs_package_release *release)
+{
+    if (!store || !release) return false;
+    pthread_mutex_lock(&store->lock);
+    bool process_locked = store_process_lock(store);
+    bool matches = process_locked && store_generation_check(store) &&
+        store_release_history_matches_locked(store, release);
+    if (process_locked) store_process_unlock(store);
+    pthread_mutex_unlock(&store->lock);
+    return matches;
+}
+
 enum vcs_package_store_result vcs_package_store_put_release(
     struct vcs_package_store *store,
     const struct vcs_package_release *release,

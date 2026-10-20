@@ -400,6 +400,15 @@ size_t vcs_package_store_list_summaries(
     struct vcs_package_store *store, bool complete_only,
     struct vcs_package_store_summary *out, size_t max);
 
+/* Read-only observation of exact canonical bytes in durable accepted history.
+ * Uses current generation and store/process locks, bounded no-follow read,
+ * digest/name and signature validation. False includes missing/damaged history
+ * and read/allocation failure; callers must then use ordinary admission.
+ * Does not admit a release, change its cursor, or infer missing history.
+ * The releases directory is the existing replay authority described above. */
+bool vcs_package_store_release_history_matches(
+    struct vcs_package_store *store, const struct vcs_package_release *release);
+
 /* Admit a signed release envelope through the acceptance layer. OK and
  * DUPLICATE persist the envelope under releases/<release-id-hex>; any
  * other acceptance result stores nothing and returns ERR_ACCEPT with

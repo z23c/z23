@@ -3586,6 +3586,87 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
                    VCS_PACKAGE_STORE_OK);
         }
 
+        /* All graph releases share a publisher; v1 is historical now. New
+         * admission remains stale, while transport reimport is idempotent. */
+        enum vcs_package_accept_result historical_accept;
+        ASSERT(vcs_package_store_put_release(b.store, &prepared.release,
+                   &historical_accept) == VCS_PACKAGE_STORE_ERR_ACCEPT);
+        ASSERT(historical_accept == VCS_PACKAGE_ACCEPT_STALE);
+        struct vcs_package_transport_import historical_import;
+        ASSERT(vcs_package_transport_import(b.store, transport.transport_root,
+                   &historical_import) == VCS_PACKAGE_TRANSPORT_OK);
+        const struct vcs_package_release *latest_release =
+            &prepared.release;
+        for (size_t i = 0; i < ZWN_PACKAGE_SCENARIO_COUNT - 1u; i++)
+            if (graph_prepared[i].release.publisher_sequence > latest_release->publisher_sequence)
+                latest_release = &graph_prepared[i].release;
+        ASSERT(latest_release->publisher_sequence > prepared.release.publisher_sequence);
+        ASSERT(vcs_package_store_put_release(b.store, latest_release,
+                   &historical_accept) == VCS_PACKAGE_STORE_OK);
+        ASSERT(historical_accept == VCS_PACKAGE_ACCEPT_DUPLICATE);
+        /* An independent handle replays durable history before reimport. */
+        struct vcs_package_store *reopened_history =
+            vcs_package_store_open(b.datadir, 64u * 1024u * 1024u);
+        ASSERT(reopened_history != NULL);
+        ASSERT(vcs_package_transport_import(reopened_history,
+                   transport.transport_root, &historical_import) == VCS_PACKAGE_TRANSPORT_OK);
+        ASSERT(vcs_package_store_put_release(reopened_history, latest_release,
+                   &historical_accept) == VCS_PACKAGE_STORE_OK);
+        ASSERT(historical_accept == VCS_PACKAGE_ACCEPT_DUPLICATE);
+        vcs_package_store_close(reopened_history);
+        /* Duplicate admission through the independent handle advances the
+         * durable generation; refresh before testing the original handle. */
+        ASSERT(vcs_package_store_refresh(b.store));
+        struct vcs_package_release altered_history = prepared.release;
+        altered_history.signature[0] ^= 1u;
+        ASSERT(!vcs_package_store_release_history_matches(b.store, &altered_history));
+        struct vcs_package_prepared unseen_prepared;
+        struct vcs_package_transport unseen_transport;
+        vcs_package_transport_init(&unseen_transport);
+        const struct zwn_package_scenario *unseen_scenario = &zwn_package_scenarios[1];
+        ASSERT(zwn_prepare_package_transport(unseen_scenario, unseen_scenario->source_dir,
+                   prepared.release.publisher_sequence, unseen_scenario->expected_package_root_hex,
+                   &unseen_prepared, &unseen_transport));
+        ASSERT(!vcs_package_store_release_history_matches(b.store, &unseen_prepared.release));
+        ASSERT(vcs_package_store_put_release(b.store, &unseen_prepared.release,
+                   &historical_accept) == VCS_PACKAGE_STORE_ERR_ACCEPT);
+        ASSERT(historical_accept == VCS_PACKAGE_ACCEPT_STALE);
+        /* Store the complete carrier without admitting its unseen stale
+         * release; transport_store itself attempts the same import. */
+        ASSERT(vcs_package_transport_store(b.store, &unseen_transport,
+                   unseen_scenario->source_dir) == VCS_PACKAGE_TRANSPORT_ERR_STORE);
+        struct vcs_package_store_status unseen_status;
+        ASSERT(vcs_package_store_package_status(b.store,
+                   unseen_transport.transport_root, &unseen_status));
+        ASSERT(unseen_status.complete);
+        ASSERT(vcs_package_transport_import(b.store, unseen_transport.transport_root,
+                   &historical_import) == VCS_PACKAGE_TRANSPORT_ERR_STORE);
+        ASSERT(!vcs_package_store_release_history_matches(b.store, &unseen_prepared.release));
+        vcs_package_transport_free(&unseen_transport);
+        vcs_package_prepared_free(&unseen_prepared);
+        char historical_hex[65], historical_path[1400], historical_saved[1440];
+        zcl_hex_encode(transport.release_id, 32, historical_hex);
+        ASSERT(snprintf(historical_path, sizeof(historical_path), "%s/releases/%s",
+                   vcs_package_store_root_dir(b.store), historical_hex) > 0);
+        ASSERT(snprintf(historical_saved, sizeof(historical_saved), "%s.saved",
+                   historical_path) > 0);
+        ASSERT(rename(historical_path, historical_saved) == 0);
+        ASSERT(vcs_package_transport_import(b.store, transport.transport_root,
+                   &historical_import) == VCS_PACKAGE_TRANSPORT_ERR_STORE);
+        FILE *historical_bad = fopen(historical_path, "wb");
+        ASSERT(historical_bad != NULL);
+        ASSERT(fputc(0, historical_bad) != EOF);
+        ASSERT(fclose(historical_bad) == 0);
+        ASSERT(vcs_package_transport_import(b.store, transport.transport_root,
+                   &historical_import) == VCS_PACKAGE_TRANSPORT_ERR_STORE);
+        ASSERT(unlink(historical_path) == 0);
+        ASSERT(rename(historical_saved, historical_path) == 0);
+        ASSERT(vcs_package_transport_import(b.store, transport.transport_root,
+                   &historical_import) == VCS_PACKAGE_TRANSPORT_OK);
+        ASSERT(vcs_package_store_put_release(b.store, latest_release,
+                   &historical_accept) == VCS_PACKAGE_STORE_OK);
+        ASSERT(historical_accept == VCS_PACKAGE_ACCEPT_DUPLICATE);
+
         /* Publisher A is genuinely removed before C begins. B is now an
          * ordinary onward provider of the entire exact package graph. */
         zwn_fixture_release_link(&fixture, &a_b);
