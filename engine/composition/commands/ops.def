@@ -1273,6 +1273,31 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_NONE,
     ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_mesh_device_psk_new)
+ZCL_COMMAND_BRANCH("ops.mesh.device.pair", "ops.mesh.device", "Fleet hash-PSK pairing epochs and weekly renewal", ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.device.pair.status", "ops.mesh.device.pair", "",
+    "List every hash-PSK pairing epoch with its expiry",
+    "Reads each <peer>-e<N>/client.json under state_dir and the grant its profile holds: state (active, expired, revoked), expires_at and expires_in_s against the local clock, revoked_at, credential id, key_epoch and the psk_fingerprint only (the first 16 hex of a domain-separated SHA3-256, never key bytes). renew_due is true when the soonest active expiry is within renew_before_s (default 259200 = 72 h) or no epoch is active. Unreadable epochs are omitted, never guessed. Mutates nothing and reaches no network.",
+    ZCL_COMMAND_LIST_BUDGET, "mesh,device,pairing,expiry,renewal,fleet",
+    "zcl.device.pair.status.input.v1", "zcl.device.pair.status.v1", "state_dir,peer,renew_before_s", "",
+    "z23 ops mesh device pair status --peer=r2",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT, ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_device_pair_status)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.device.pair.renew", "ops.mesh.device.pair", "",
+    "Plan or confirm the next hash-PSK pairing epoch for a peer",
+    "Without confirm: reads the current epoch N (expiry, credential, psk_fingerprint, the evidence slot digest and hub unit it is bound to), reports renew_due against renew_before_s (default 259200 = 72 h), and returns the exact steps and a plan_id over the pairing, evidence, unit and running binary; mutates nothing. With confirm:true and that plan_id it re-derives the plan (any drift refuses RENEW_PLAN_MISMATCH), then composes the existing init, psk new, plan, commit and revoke leaves to create epoch N+1 on the client profile under state_dir and the hub profile under hub_state_dir (a directory reachable from this host), writes the hub route and unit environment, requires a loopback smoke round trip of the target banner through N+1, and only then writes the client route and revokes N on both sides. Any failure revokes N+1, restores the environment, burns the epoch and leaves N in force with a typed RENEW_* code. The PSK is imported from one owner-private source file by both commits and removed; no PSK byte is read, printed or logged. Writes a renewal receipt through the authority receipt idiom. A hub on another host is not reached: this leaf has no ssh or systemctl.",
+    ZCL_COMMAND_RESULT_BUDGET, "mesh,device,pairing,renewal,epoch,fleet",
+    "zcl.device.pair.renew.input.v1", "zcl.device.pair.renew.v1",
+    "state_dir,peer,hub_state_dir,hub_config_dir,hub_unit_file,evidence_dir,slot_bin,renew_before_s,grant_days,force,plan_id,confirm", "",
+    "z23 ops mesh device pair renew --peer=r2 --hub-state-dir=<hub-state>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_mesh_device_pair_renew)
 ZCL_COMMAND_BRANCH("ops.mesh.device.host", "ops.mesh.device", "Foreground owner-approved hash-PSK host transport",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_COMMAND(

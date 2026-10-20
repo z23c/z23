@@ -448,6 +448,16 @@ void zcl_native_handle_ops_mesh_device_host_runtime(const struct zcl_command_req
 void zcl_native_handle_ops_mesh_device_psk_new(const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_device_psk_fingerprint(const uint8_t key[32], char out[17]);
+/* ops.mesh.device.pair.status / .renew (tools/command/native_pair_state.c,
+ * native_pair_renew.c, native_pair_renew_run.c, native_pair_smoke.c): fleet
+ * hash-PSK pairing epochs. status lists every epoch's expiry and PSK
+ * fingerprint; renew plans, or with confirm and plan_id creates epoch N+1 by
+ * composing the init, psk new, plan, commit and revoke leaves, smokes it and
+ * only then retires N. No PSK byte is read, printed or logged. */
+void zcl_native_handle_ops_mesh_device_pair_status(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_ops_mesh_device_pair_renew(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* ops.mesh.device.host.bench (tools/command/native_device_host_bench.c): in-process
  * PSK tunnel throughput over a throwaway paired authority; optional atomic receipt_out. */
 void zcl_native_handle_ops_mesh_device_host_bench(const struct zcl_command_request *request,
