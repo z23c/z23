@@ -1108,6 +1108,64 @@ static int t_store_manifest_index_binding(void)
     return failures;
 }
 
+static int store_history_refusals(struct vcs_package_store *s,
+                                  const struct vcs_package_release *first,
+                                  const struct vcs_package_release *latest,
+                                  const struct vcs_package_release *unseen)
+{
+    int failures = 0;
+    enum vcs_package_accept_result ar;
+    struct vcs_package_release altered = *first;
+    altered.signature[0] ^= 1u;
+    ZS_CHECK("history: altered signature refused",
+             !vcs_package_store_release_history_matches(s, &altered));
+    ZS_CHECK("history: unseen release refused",
+             !vcs_package_store_release_history_matches(s, unseen));
+    ZS_CHECK("history: latest remains duplicate",
+             vcs_package_store_put_release(s, latest, &ar) == VCS_PACKAGE_STORE_OK &&
+             ar == VCS_PACKAGE_ACCEPT_DUPLICATE);
+    ZS_CHECK("history: historical admission remains stale",
+             vcs_package_store_put_release(s, first, &ar) == VCS_PACKAGE_STORE_ERR_ACCEPT &&
+             ar == VCS_PACKAGE_ACCEPT_STALE);
+    return failures;
+}
+
+static int t_store_history_observation(void)
+{
+    int failures = 0;
+    char dd[1024];
+    struct vcs_package_store *s = zs_open(dd, sizeof(dd), "history-observation", 1000000u);
+    ZS_CHECK("history: store opens", s != NULL);
+    if (!s) return failures;
+    struct vcs_package_release first, latest, unseen;
+    bool ready = zs_release(&first, 0x31, 1u, "acme/history") &&
+                 zs_release(&latest, 0x31, 2u, "acme/history") &&
+                 zs_release(&unseen, 0x31, 3u, "acme/history");
+    ZS_CHECK("history: signed fixtures", ready);
+    if (!ready) {
+        vcs_package_store_close(s);
+        return failures;
+    }
+    enum vcs_package_accept_result ar;
+    ZS_CHECK("history: first admitted",
+             vcs_package_store_put_release(s, &first, &ar) == VCS_PACKAGE_STORE_OK &&
+             ar == VCS_PACKAGE_ACCEPT_OK);
+    ZS_CHECK("history: latest admitted",
+             vcs_package_store_put_release(s, &latest, &ar) == VCS_PACKAGE_STORE_OK &&
+             ar == VCS_PACKAGE_ACCEPT_OK);
+    ZS_CHECK("history: exact historical bytes match",
+             vcs_package_store_release_history_matches(s, &first));
+    vcs_package_store_close(s);
+    s = vcs_package_store_open(dd, 1000000u);
+    ZS_CHECK("history: reopen", s != NULL);
+    if (!s) return failures;
+    ZS_CHECK("history: durable exact bytes match",
+             vcs_package_store_release_history_matches(s, &first));
+    failures += store_history_refusals(s, &first, &latest, &unseen);
+    vcs_package_store_close(s);
+    return failures;
+}
+
 int test_zcode_store(void)
 {
     printf("\n=== zcode_store: local content-addressed package store ===\n");
@@ -1132,6 +1190,7 @@ int test_zcode_store(void)
     failures += t_store_pins();
     failures += t_store_possession_scheduler();
     failures += t_store_releases();
+    failures += t_store_history_observation();
     failures += t_store_release_quarantine();
     failures += t_store_blob();
     failures += t_store_work_output();
