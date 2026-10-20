@@ -1,0 +1,5 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* purpose: Declare filesystem authority used by snapshot import recovery. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_snapshot_import_recovery.c",
+    CAP_FS_READ|CAP_FS_WRITE,
+    "verifies the committed mirror and resident authority, resumes the boot-only import epilogue, and retires its pending record")

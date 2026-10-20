@@ -120,7 +120,8 @@ static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
      * derivation body after atomically copying the verified snapshot into
      * node.db.utxos. */
     if (!reindex_epilogue_seed_coins(pdb, node_db_path, tip_h, reset_required, expected_generation))
-        return false;
+        LOG_RETURN(false, "reindex_epi", "coin authority seed phase failed source=%s tip=%d path=%s",
+                   source, tip_h, node_db_path);
 
     /* ── (2) Recompute the SHA3 commitment over the replayed `utxos` mirror and
      * stamp it (utxo_sha3) + the coins_best_block cache. The caller already

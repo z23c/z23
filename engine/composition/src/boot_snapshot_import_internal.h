@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Share the snapshot import pending-record and recovery contracts. */
 #ifndef Z23_BOOT_SNAPSHOT_IMPORT_INTERNAL_H
 #define Z23_BOOT_SNAPSHOT_IMPORT_INTERNAL_H
 #include "base/result.h"
