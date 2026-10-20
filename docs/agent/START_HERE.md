@@ -28,17 +28,19 @@ it carries a build-and-coordination layer, so a group of machines and AI
 agents can write, test and share software together. A set of machines one
 owner runs is a **fleet**.
 
-Four things need an explicit grant from the owner. Source access, builds and
-tests never imply them:
+Four boundaries stay explicit. Source access, builds and tests never cross
+them:
 
 1. Custody and keys: spending funds, exporting keys, weakening custody.
-2. Consensus and the sealed core: predicate changes, or edits under `core/`.
-3. Canonical datadirs: mutating a live datadir or its databases.
-4. Production deploy or restart: deploying, restarting or promoting anything.
+2. Consensus and the sealed core: predicate changes, or edits under `core/`
+   outside the unseal ritual in [`core/UNSEAL.md`](../../core/UNSEAL.md).
+3. Canonical datadirs: deleting, reindexing or hand-editing a live datadir.
+4. Unreviewed production code: deploying or promoting a build that is not
+   reviewed and landed. Restarts and reviewed upgrades are routine.
 
-Use private fixtures and isolated datadirs for tests. When in doubt, stop and
-ask. The full contract is [AGENTS.md](../../AGENTS.md), section "Authority and
-safety boundaries".
+Use private fixtures and isolated datadirs for tests. Stop and ask only at
+one of these boundaries; otherwise decide, record it and continue. The full
+contract is [AGENTS.md](../../AGENTS.md), section "Authority and safety".
 
 ## 2. Join a fleet (intra-fleet)
 
@@ -63,8 +65,8 @@ not verified. Details, refusals and the optional ssh bridge:
 ### Get an MCP gateway grant
 
 A hosted AI client (a Claude custom connector, for example) reaches the fleet
-through the fleet gateway at `<base>/steer`. The owner deploys it and mints
-grants. You never deploy it and never mint your own. The owner connects the
+through the fleet gateway at `<base>/steer`, deployed from a reviewed, landed
+build. The owner mints grants; never mint your own. The owner connects the
 connector and approves a sign-in page that names the scopes. Tools and the
 scope each needs:
 

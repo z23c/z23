@@ -6,7 +6,7 @@ Portable base and outside-world seams: `platform/modules/` (`base`, `json`, `uti
 
 Rules:
 - Outside systems are reached only through `platform/ports/` and `platform/adapters/`.
-- `deploy/` and `packaging/release/` describe production deployment and release; running or changing their effect on a live host is owner-gated.
+- `deploy/` and `packaging/release/` describe production deployment and release. Deploy only reviewed, landed builds, one host at a time; never delete or reindex a canonical datadir.
 - `LOG_FAIL`, `LOG_ERR` and `LOG_NULL` return; never discard their value.
 - After moving files run `make check-architecture-tree`.
 

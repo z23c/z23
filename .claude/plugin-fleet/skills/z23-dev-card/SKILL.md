@@ -33,8 +33,8 @@ Call each with the Agent tool as `z23-fleet:<agent>` and pass the card, the
    delta); a second failure stops the card.
 
 Hand back: `git -C LANE bundle create BUNDLE BASE..COMMIT`, the commit id, the
-quoted acceptance result line and the review verdict. Never push, land or
-post a result without the maintainer's word. Landing is in `z23-dev-fleet`.
+quoted acceptance result line and the review verdict. Never push; land an
+accepted card through `z23-dev-fleet`.
 
 ## Stop rules
 
