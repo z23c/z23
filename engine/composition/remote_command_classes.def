@@ -1157,7 +1157,7 @@ REMOTE_COMMAND_CLASS("yardsale.buy", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zses.invite.create", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zses.invite.accept", REMOTE_CLASS_NEVER, "")
 
-/* PLUGIN — 12 never_remote leaves.
+/* PLUGIN — 15 never_remote leaves.
  *
  * The plugin store decides which executables this machine will later run.
  * Changing it is an owner decision made at the machine; a peer on the mesh
@@ -1178,6 +1178,7 @@ REMOTE_COMMAND_CLASS("plugin.attest", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.attest_verify", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.publish", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.fetch", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("plugin.fetch_remote", REMOTE_CLASS_NEVER, "")
 
 /* STORY — 4 never_remote leaves.
  *

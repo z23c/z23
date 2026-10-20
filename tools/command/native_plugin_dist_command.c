@@ -14,6 +14,10 @@
 #include "native_plugin_common.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
+#include "controllers/rpc_client.h"
+#include "controllers/rpc_params.h"
+#include "platform/time_compat.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "plugin/plugin_dist.h"
@@ -237,4 +241,162 @@ void zcl_native_handle_plugin_fetch(const struct zcl_command_request *request,
     (void)snprintf(input, sizeof(input), "{\"name\":\"%s\",\"generation\":\"%s\"}", out.name,
                    out.generation);
     (void)zcl_command_reply_add_next(reply, "plugin.switch", input, "make this generation current");
+}
+
+/* ---- plugin.fetch_remote: the running node fetches and installs ------------ */
+
+#define PDC_REMOTE_POLL_MS 250
+
+/* Comma-separated peer handles ("11,12") into a JSON array; false if malformed. */
+static bool pdc_peers_json(const char *list, struct json_value *out)
+{
+    json_set_array(out);
+    while (list && *list) {
+        char *end = NULL;
+        unsigned long long id = strtoull(list, &end, 10);
+        if (end == list || id == 0 || id > INT64_MAX || (*end != ',' && *end != '\0'))
+            return false;
+        struct json_value v;
+        json_init(&v);
+        json_set_int(&v, (int64_t)id);
+        bool pushed = json_push_back(out, &v);
+        json_free(&v);
+        if (!pushed)
+            return false;
+        list = *end == ',' ? end + 1 : end;
+    }
+    return true;
+}
+
+static char *pdc_remote_params(const struct zcl_command_request *request, bool *bad)
+{
+    struct json_value arg, one, peers;
+    uint64_t max_bytes = 0, timeout = 0;
+    const char *list = zcl_native_plugin_str(request, "peers");
+    json_init(&arg);
+    json_init(&one);
+    json_init(&peers);
+    json_set_array(&arg);
+    json_set_object(&one);
+    *bad = !pdc_u64(request, "max-bytes", &max_bytes) || !pdc_u64(request, "timeout", &timeout) ||
+           (list && !pdc_peers_json(list, &peers));
+    const char *job = zcl_native_plugin_str(request, "job");
+    if (job) {
+        json_push_kv_int(&one, "job", (int64_t)strtoll(job, NULL, 10));
+    } else {
+        json_push_kv_str(&one, "root", zcl_native_plugin_str(request, "root"));
+        json_push_kv_str(&one, "name", zcl_native_plugin_str(request, "name"));
+        json_push_kv_bool(&one, "allow_downgrade", pdc_flag(request, "allow-downgrade"));
+        if (list)
+            json_push_kv(&one, "peers", &peers);
+        if (max_bytes)
+            json_push_kv_int(&one, "max_bytes", (int64_t)max_bytes);
+        if (timeout)
+            json_push_kv_int(&one, "timeout_s", (int64_t)timeout);
+    }
+    json_push_back(&arg, &one);
+    size_t needed = json_write(&arg, NULL, 0);
+    char *wire = needed ? zcl_malloc(needed + 1, "plugin.fetch_remote.params") : NULL;
+    if (wire && json_write(&arg, wire, needed + 1) != needed) {
+        free(wire);
+        wire = NULL;
+    }
+    json_free(&arg);
+    json_free(&one);
+    json_free(&peers);
+    return wire;
+}
+
+/* One resident call. On a refusal the reply is filled and NULL returned. */
+static bool pdc_remote_call(struct zcl_command_reply *reply, const char *method, const char *params,
+                            struct json_value *body)
+{
+    char *raw = node_rpc_call(method, params);
+    bool parsed = raw && json_read(body, raw, strlen(raw)) && body->type == JSON_OBJ;
+    free(raw);
+    if (!parsed) {
+        json_free(body);
+        json_init(body);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
+                               "PLUGIN_FETCH_NO_NODE", "fetch_remote", true, false,
+                               "no running node answered on this datadir's RPC",
+                               "start the node with -packagehost=1, or use the two-phase plugin fetch");
+        return false;
+    }
+    if (!json_get_bool_or(body, "ok", false)) {
+        const char *code = json_get_str(json_get(body, "code"));
+        const char *msg = json_get_str(json_get(body, "message"));
+        const char *next = json_get_str(json_get(body, "next_action"));
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                               code ? code : "PLUGIN_FETCH_REFUSED", "fetch_remote", false, false,
+                               msg ? msg : "the node refused the request", "");
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s", next ? next : "");
+        reply->error.human_action_required = true;
+        return false;
+    }
+    return true;
+}
+
+static void pdc_remote_finish(struct zcl_command_reply *reply, struct json_value *body)
+{
+    const char *state = json_get_str(json_get(body, "state"));
+    if (state && strcmp(state, "failed") == 0) {
+        const char *code = json_get_str(json_get(body, "code"));
+        const char *detail = json_get_str(json_get(body, "detail"));
+        const char *next = json_get_str(json_get(body, "next_action"));
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                               code ? code : "PLUGIN_FETCH_FAILED", "fetch_remote", false, false,
+                               detail ? detail : "the fetch job failed", detail ? detail : "");
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s", next ? next : "");
+        reply->error.human_action_required = true;
+        return;
+    }
+    json_free(&reply->data);
+    json_init(&reply->data);
+    json_copy(&reply->data, body);
+    if (state && strcmp(state, "installed") == 0) {
+        reply->error.mutated = !json_get_bool_or(body, "already_present", false);
+        char input[256];
+        (void)snprintf(input, sizeof(input), "{\"name\":\"%s\",\"generation\":\"%s\"}",
+                       json_get_str(json_get(body, "name")), json_get_str(json_get(body, "generation")));
+        (void)zcl_command_reply_add_next(reply, "plugin.switch", input, "make this generation current");
+    }
+}
+
+void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *request,
+                                           struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    bool bad = false, polling = zcl_native_plugin_str(request, "job") != NULL;
+    uint64_t wait_s = 0;
+    char *params = pdc_remote_params(request, &bad);
+    if (bad || !params || !pdc_u64(request, "wait", &wait_s) ||
+        (!polling && (!zcl_native_plugin_str(request, "root") || !zcl_native_plugin_str(request, "name")))) {
+        free(params);
+        pdc_refuse(reply, PLUGIN_DIST_ERR_ARGUMENT, "fetch_remote",
+                   "root and name (or job), and positive integers for peers, max-bytes, timeout, wait are required",
+                   false, false);
+        return;
+    }
+    zcl_native_bridge_ensure_rpc();
+    struct json_value body;
+    json_init(&body);
+    bool ok = pdc_remote_call(reply, polling ? "plugin_fetch_poll" : "plugin_fetch_begin", params, &body);
+    free(params);
+    int64_t job = ok ? json_get_int(json_get(&body, "job")) : 0;
+    for (uint64_t waited_ms = 0; ok && waited_ms < wait_s * 1000u; waited_ms += PDC_REMOTE_POLL_MS) {
+        const char *state = json_get_str(json_get(&body, "state"));
+        if (state && strcmp(state, "fetching") != 0 && strcmp(state, "installing") != 0)
+            break;
+        platform_sleep_ms(PDC_REMOTE_POLL_MS);
+        char poll[64];
+        (void)snprintf(poll, sizeof(poll), "[{\"job\":%lld}]", (long long)job);
+        json_free(&body);
+        json_init(&body);
+        ok = pdc_remote_call(reply, "plugin_fetch_poll", poll, &body);
+    }
+    if (ok)
+        pdc_remote_finish(reply, &body);
+    json_free(&body);
 }

@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Nonblocking, capability-owned public lookup lifecycle. */
 
+#include "config/boot_plugin_fetch.h"
 #include "config/boot_zcode_dht.h"
 #include "config/boot_zcode_dht_publish_gate.h"
 #include "config/boot_zcode_dht_record_kind.h"
@@ -726,4 +727,5 @@ void boot_zcode_dht_register_rpc(struct rpc_table *table) {
   boot_zcode_dht_record_register_rpc(table);
   boot_zcode_dht_replication_register_rpc(table);
   boot_zcode_package_register_rpc(table);
+  boot_plugin_fetch_register_rpc(table);
 }

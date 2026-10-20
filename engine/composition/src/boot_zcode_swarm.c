@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * The only lib/net-to-swarm adapter; see config/boot_zcode_swarm.h. */
 #include "config/state_offer_service.h"
+#include "config/boot_plugin_fetch.h"
 #include "config/boot_zcode_swarm.h"
 #include "config/boot_zcode_swarm_membership.h"
 #include "config/boot_zcode_swarm_receipt.h"
@@ -1137,6 +1138,8 @@ static void boot_zcode_swarm_timer_tick(struct liveness_contract *self)
     }
     size_t active = vcs_swarm_engine_active_downloads(engine);
     zcl_mutex_unlock(&s_lock);
+    /* Finished plugin fetch jobs verify and install here, outside every swarm lock. */
+    boot_plugin_fetch_tick();
     if (sent > 0) {
         s_frames_sent += sent;
         supervisor_progress(s_timer_child, (int64_t)s_frames_sent);

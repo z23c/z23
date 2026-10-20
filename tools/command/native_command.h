@@ -333,6 +333,8 @@ bool zcl_native_plugin_root(char *out, size_t cap);
 void zcl_native_handle_plugin_publish(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *request,
+                                           struct zcl_command_reply *reply);
 void zcl_native_handle_plugin_fetch(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
