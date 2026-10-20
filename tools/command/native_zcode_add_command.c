@@ -419,6 +419,58 @@ static void za_push_commit_data_dir(
 
 /* ── zcode package add commit ───────────────────────────────────────── */
 
+static void za_push_installed_programs(struct zcl_command_reply *reply,
+                                        const char *datadir, const uint8_t root[32])
+{
+    /* What a PERSON can now run. The receipt that travels with the active
+     * install names every output; the ones under bin/ are the executables
+     * the recipe declared as programs. `programs` is ALWAYS present — an
+     * empty array is the honest answer for a library-only package, and is
+     * not the same as never having looked, which is why an unreadable
+     * receipt is reported as `programs_rule` instead of a silent zero. */
+    struct package_lifecycle_programs programs;
+    struct zcl_result pr = package_lifecycle_installed_programs(
+        datadir, root, &programs);
+    struct json_value program_rows;
+    json_init(&program_rows);
+    json_set_array(&program_rows);
+    char first_program[PACKAGE_LIFECYCLE_INSTALL_DIR_MAX +
+                       VCS_PACKAGE_BUILD_PATH_MAX + 2u];
+    first_program[0] = '\0';
+    size_t rendered = 0;
+    for (size_t i = 0; pr.ok && i < programs.count; i++) {
+        char absolute[PACKAGE_LIFECYCLE_INSTALL_DIR_MAX +
+                      VCS_PACKAGE_BUILD_PATH_MAX + 2u];
+        int n = snprintf(absolute, sizeof(absolute), "%s/%s",
+                         programs.install_dir, programs.output[i]);
+        if (n <= 0 || (size_t)n >= sizeof(absolute))
+            continue;
+        struct json_value row;
+        json_init(&row);
+        json_set_object(&row);
+        (void)json_push_kv_str(&row, "output", programs.output[i]);
+        (void)json_push_kv_str(&row, "path", absolute);
+        (void)json_push_back(&program_rows, &row);
+        json_free(&row);
+        if (!first_program[0])
+            (void)snprintf(first_program, sizeof(first_program), "%s",
+                           absolute);
+        rendered++;
+    }
+    (void)json_push_kv(&reply->data, "programs", &program_rows);
+    json_free(&program_rows);
+    (void)json_push_kv_int(&reply->data, "program_count", (int64_t)rendered);
+    if (!pr.ok)
+        (void)json_push_kv_str(&reply->data, "programs_rule", pr.message);
+    if (first_program[0]) {
+        char next_action[sizeof(first_program) + 8u];
+        (void)snprintf(next_action, sizeof(next_action), "run %s",
+                       first_program);
+        (void)json_push_kv_str(&reply->data, "next_action", next_action);
+    }
+
+}
+
 void zcl_native_handle_zcode_package_add_commit(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -499,52 +551,7 @@ void zcl_native_handle_zcode_package_add_commit(
     if (!windowed)
         return;
 
-    /* What a PERSON can now run. The receipt that travels with the active
-     * install names every output; the ones under bin/ are the executables
-     * the recipe declared as programs. `programs` is ALWAYS present — an
-     * empty array is the honest answer for a library-only package, and is
-     * not the same as never having looked, which is why an unreadable
-     * receipt is reported as `programs_rule` instead of a silent zero. */
-    struct package_lifecycle_programs programs;
-    struct zcl_result pr = package_lifecycle_installed_programs(
-        datadir, report.active_root, &programs);
-    struct json_value program_rows;
-    json_init(&program_rows);
-    json_set_array(&program_rows);
-    char first_program[PACKAGE_LIFECYCLE_INSTALL_DIR_MAX +
-                       VCS_PACKAGE_BUILD_PATH_MAX + 2u];
-    first_program[0] = '\0';
-    size_t rendered = 0;
-    for (size_t i = 0; pr.ok && i < programs.count; i++) {
-        char absolute[PACKAGE_LIFECYCLE_INSTALL_DIR_MAX +
-                      VCS_PACKAGE_BUILD_PATH_MAX + 2u];
-        int n = snprintf(absolute, sizeof(absolute), "%s/%s",
-                         programs.install_dir, programs.output[i]);
-        if (n <= 0 || (size_t)n >= sizeof(absolute))
-            continue;
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "output", programs.output[i]);
-        (void)json_push_kv_str(&row, "path", absolute);
-        (void)json_push_back(&program_rows, &row);
-        json_free(&row);
-        if (!first_program[0])
-            (void)snprintf(first_program, sizeof(first_program), "%s",
-                           absolute);
-        rendered++;
-    }
-    (void)json_push_kv(&reply->data, "programs", &program_rows);
-    json_free(&program_rows);
-    (void)json_push_kv_int(&reply->data, "program_count", (int64_t)rendered);
-    if (!pr.ok)
-        (void)json_push_kv_str(&reply->data, "programs_rule", pr.message);
-    if (first_program[0]) {
-        char next_action[sizeof(first_program) + 8u];
-        (void)snprintf(next_action, sizeof(next_action), "run %s",
-                       first_program);
-        (void)json_push_kv_str(&reply->data, "next_action", next_action);
-    }
+    za_push_installed_programs(reply, datadir, report.active_root);
 
     (void)json_push_kv_str(
         &reply->data, "note",
@@ -587,6 +594,7 @@ void zcl_native_handle_zcode_package_rollback(
                             report.selected_by_default);
     za_push_hex(&reply->data, "from_root", report.from_root);
     za_push_hex(&reply->data, "to_root", report.to_root);
+    za_push_installed_programs(reply, datadir, report.to_root);
     (void)json_push_kv_int(&reply->data, "generation_count",
                            (int64_t)report.generation_count);
     /* Going back changes the CODE, never the user's data: the same

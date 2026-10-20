@@ -3150,6 +3150,64 @@ static int za_state_after_update(const char *base, const char *zcode,
     return failures;
 }
 
+static bool za_rollback_reply(const char *base, const char *name, int64_t now,
+                               struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "datadir", base) &&
+              json_push_kv_str(&input, "name", name) &&
+              json_push_kv_int(&input, "now_unix", now);
+    if (ok) {
+        struct zcl_command_request request = {.input = &input};
+        zcl_native_handle_zcode_package_rollback(&request, reply);
+    }
+    json_free(&input);
+    return ok;
+}
+
+static int za_state_rollback_feedback(const char *base, int64_t t0,
+                                        const struct za_state_app *a)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_package_rollback.v1");
+    bool called = za_rollback_reply(base, "alice/statecli", t0 + 32, &reply);
+    char alpha_hex[65];
+    za_hex(a->alpha_root, 32, alpha_hex);
+    ZA_CHECK("the program rolls back to its previous exact root",
+        called && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        strcmp(json_get_str(json_get(&reply.data, "to_root")), alpha_hex) == 0);
+    const struct json_value *programs = json_get(&reply.data, "programs");
+    const struct json_value *first = programs ? json_at(programs, 0) : NULL;
+    const char *path = first ? json_get_str(json_get(first, "path")) : NULL;
+    const char *next = json_get_str(json_get(&reply.data, "next_action"));
+    ZA_CHECK("rollback reports the restored program instead of the newer path",
+        programs && programs->num_children == 1 && path &&
+        !strcmp(path, a->alpha_path) && strcmp(path, a->beta_path) &&
+        next && !strncmp(next, "run ", 4) && !strcmp(next + 4, path) &&
+        json_get_int(json_get(&reply.data, "program_count")) == 1);
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
+static int za_state_rollback_refused(const char *base, int64_t now)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_package_rollback.v1");
+    bool called = za_rollback_reply(base, "alice/statecli", now, &reply);
+    ZA_CHECK("failed native rollback returns no program or run action",
+        called && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        !strcmp(reply.error.code, "ROLLBACK_TARGET_INVALID") &&
+        json_get(&reply.data, "programs") == NULL &&
+        json_get(&reply.data, "program_count") == NULL &&
+        json_get(&reply.data, "next_action") == NULL);
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
 static int za_state_after_rollback(const char *base, int64_t t0,
                                    const struct za_state_app *a)
 {
@@ -3174,13 +3232,10 @@ static int za_state_after_rollback(const char *base, int64_t t0,
     ZA_CHECK("rollback refusal names the repair in the bounded report",
              strcmp(blocked_report.rule, "rollback-target-invalid") == 0 &&
                  strstr(blocked_report.detail, "reinstall the exact root") != NULL);
+    failures += za_state_rollback_refused(base, t0 + 32);
     bool restored = moved && rename(hidden, a->alpha_path) == 0;
     ZA_CHECK("the previous program fixture is restored", restored);
-    struct package_lifecycle_rollback_report rb;
-    struct zcl_result rbr =
-        package_lifecycle_rollback(base, "alice/statecli", t0 + 32, &rb);
-    ZA_CHECK("the program rolls back to its previous exact root",
-             rbr.ok && memcmp(rb.to_root, a->alpha_root, 32) == 0);
+    failures += za_state_rollback_feedback(base, t0, a);
 
     /* THE WHOLE POINT: the running version is alpha again, and what BETA
      * wrote is still there. Going back changed the code and left the user's
@@ -3370,6 +3425,42 @@ static int za_installed_parent_link_refusal(const char *base,
 }
 #endif
 
+static int za_library_rollback_programs(const char *base, const char *zcode,
+    const struct za_file *files, const uint8_t first_root[32], int64_t now)
+{
+    int failures = 0;
+    uint8_t root[32];
+    /* A new release label alone keeps the same content root and overwrites
+     * that root's release fixture. Give v2 distinct source bytes so v1's
+     * retained install and the application's locked dependency stay intact. */
+    struct za_file revised[4];
+    memcpy(revised, files, sizeof(revised));
+    revised[2].content = ZA_RING_C "\n/* second library generation */\n";
+    bool published = za_publish(zcode, "alice/ringlib", "2.0.0", 100,
+        revised, 4, "src/ring.h", "src/ring.c", "test/test_ring.c", "src", root);
+    ZA_CHECK("library rollback fixture has two distinct content roots",
+        published && memcmp(root, first_root, 32) != 0);
+    struct zcl_command_reply installed, rollback;
+    zcl_command_reply_init(&installed, "zcl.zcode_add_commit.v1");
+    zcl_command_reply_init(&rollback, "zcl.zcode_package_rollback.v1");
+    bool used = published && za_use_commit(base, "alice/ringlib", now, &installed);
+    bool called = used && installed.status == ZCL_COMMAND_STATUS_PASSED &&
+        za_rollback_reply(base, "alice/ringlib", now + 2, &rollback);
+    char hex[65];
+    za_hex(first_root, 32, hex);
+    const struct json_value *programs = json_get(&rollback.data, "programs");
+    ZA_CHECK("library rollback reports an empty program list at the restored root",
+        called && rollback.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(json_get_str(json_get(&rollback.data, "to_root")), hex) &&
+        programs && programs->type == JSON_ARR && programs->num_children == 0 &&
+        json_get_int(json_get(&rollback.data, "program_count")) == 0 &&
+        json_get(&rollback.data, "next_action") == NULL &&
+        json_get(&rollback.data, "programs_rule") == NULL);
+    zcl_command_reply_free(&rollback);
+    zcl_command_reply_free(&installed);
+    return failures;
+}
+
 static int t_programs(void)
 {
     int failures = 0;
@@ -3499,6 +3590,10 @@ static int t_programs(void)
     if (prc != 0)
         printf("  zcode_add: program run rc=%d out=%s\n", prc, ran);
 
+    /* The publisher-gone fixture removes source-store layout deliberately;
+     * finish any fixture that publishes a new release before that boundary. */
+    failures += za_library_rollback_programs(base, zcode, lib_files, lib_root,
+                                             t0 + 100);
     failures += za_publisher_gone(base, zcode, first_path, installed_exec,
                                   t0);
     failures += za_program_missing_refusal(base, cli_root, installed_bin,
