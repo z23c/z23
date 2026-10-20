@@ -20,17 +20,15 @@
 #                                   reseeded coins_kv; replay is deterministic)
 #         4. SERVING + NO TEAR:    node answers RPC at tip AND node.log shows
 #                                  NO "coins_applied=.*> utxo_apply_frontier"
-#       The epilogue stamps coins_kv from the replayed mirror, so a torn
-#       (no-op) epilogue would change txouts/commitment and fail teeth 2/3.
+#       These four parity checks do not independently prove that replay or
+#       its epilogue completed; preserved pre-existing state can pass them.
 #
 #   (c) test-reindex-killmid (KILL_MID=1): spawn with -reindex-chainstate,
-#       kill -9 after a randomized 200-2000ms delay DURING the replay, then
+#       kill -9 after a randomized 200-2000ms delay from startup, then
 #       reboot normally (the crash-only path re-requests reindex). Assert
 #       eventual SERVING at tip == N with the same four teeth, within <=3
-#       reboot cycles. Proves the epilogue is crash-only safe: it runs only
-#       after errors==0 and clears the sentinel only after the H* self-check,
-#       so a crash mid-replay re-replays from scratch — never a half-derived
-#       serve.
+#       reboot cycles. Checks restart parity after a forced interruption;
+#       the elapsed-time kill does not identify an exact replay boundary.
 #
 # Required env (set by the Makefile target before sourcing isolated_node_env.sh):
 #   ISO_KIND=reindex, ISO_PORT_BASE=390xx, SEED_BLOCKS=N, KILL_MID=0|1.
@@ -41,12 +39,28 @@ SEED_BLOCKS="${SEED_BLOCKS:-50}"
 KILL_MID="${KILL_MID:-0}"
 RPC_READY_TIMEOUT="${RPC_READY_TIMEOUT:-90}"
 MAX_REBOOTS="${MAX_REBOOTS:-3}"
+REINDEX_KILL_DELAY_MS="${REINDEX_KILL_DELAY_MS:-}"
 
 # shellcheck source=tools/scripts/isolated_node_env.sh
 . tools/scripts/isolated_node_env.sh
 iso_init
 
-fail() { echo "reindex-smoke: FAIL: $*" >&2; exit 1; }
+reindex_log_tail() {
+    echo "reindex-smoke: node log tail pid=${ISO_NODE_PID:-} pgid=${ISO_PGID:-}" >&2
+    [ ! -f "$ISO_DD/node.log" ] || tail -n 80 "$ISO_DD/node.log" >&2
+}
+
+fail() { echo "reindex-smoke: FAIL: $*" >&2; reindex_log_tail; exit 1; }
+
+if [ -n "$REINDEX_KILL_DELAY_MS" ]; then
+    case "$REINDEX_KILL_DELAY_MS" in
+        *[!0-9]*) fail "REINDEX_KILL_DELAY_MS must be 200..2000" ;;
+    esac
+    [ "${#REINDEX_KILL_DELAY_MS}" -le 4 ] || fail "REINDEX_KILL_DELAY_MS must be 200..2000"
+    REINDEX_KILL_DELAY_MS=$((10#$REINDEX_KILL_DELAY_MS))
+    [ "$REINDEX_KILL_DELAY_MS" -ge 200 ] && [ "$REINDEX_KILL_DELAY_MS" -le 2000 ] \
+        || fail "REINDEX_KILL_DELAY_MS must be 200..2000"
+fi
 
 # Gracefully stop the current node (SIGTERM the group, poll for WAL drain),
 # WITHOUT firing the full cleanup trap (which would also rm the datadir).
@@ -59,6 +73,9 @@ iso_stop_node() {
         sleep 0.2
     done
     kill -KILL "-$ISO_PGID" 2>/dev/null || true
+    local stop_status=0
+    if wait "$ISO_NODE_PID"; then stop_status=0; else stop_status=$?; fi
+    echo "reindex-smoke: waited pid=$ISO_NODE_PID pgid=$ISO_PGID status=$stop_status"
     ISO_NODE_PID=""
     ISO_PGID=""
 }
@@ -120,21 +137,27 @@ fi
 [ -n "$base_commit" ] || fail "baseline commitment empty"
 echo "reindex-smoke: baseline height=$base_height txouts=$base_txouts commit=${base_commit:0:16}..."
 
-# ── 2. Restart with -reindex-chainstate (clean, or kill -9 mid-replay). ──
+# ── 2. Restart with -reindex-chainstate (clean, or kill after startup). ──
 boot=0
 serving=0
 while [ "$boot" -lt "$MAX_REBOOTS" ]; do
     boot=$((boot + 1))
     if [ "$KILL_MID" = "1" ] && [ "$boot" -eq 1 ]; then
-        echo "reindex-smoke: boot $boot — spawn with -reindex-chainstate then kill -9 mid-replay"
+        echo "reindex-smoke: boot $boot — spawn with -reindex-chainstate then kill -9 after startup"
         iso_stop_node
         iso_spawn_node "-reindex-chainstate"
-        # Randomized 200-2000ms kill point DURING replay.
-        delay_ms=$(( (RANDOM % 1801) + 200 ))
+        # Elapsed startup delay, not an observed replay boundary.
+        delay_ms="${REINDEX_KILL_DELAY_MS:-$(( (RANDOM % 1801) + 200 ))}"
         sleep "$(awk "BEGIN{print $delay_ms/1000}")"
         if [ -n "${ISO_PGID:-}" ]; then
-            kill -KILL "-$ISO_PGID" 2>/dev/null || true
+            kill -KILL "-$ISO_PGID" 2>/dev/null || fail "could not kill owned reindex process group $ISO_PGID"
+            kill_status=0
+            if wait "$ISO_NODE_PID"; then kill_status=0; else kill_status=$?; fi
+            echo "reindex-smoke: waited killed pid=$ISO_NODE_PID pgid=$ISO_PGID status=$kill_status"
+            [ "$kill_status" -eq 137 ] || fail "reindex child $ISO_NODE_PID did not exit from SIGKILL (status=$kill_status)"
             ISO_NODE_PID=""; ISO_PGID=""
+        else
+            fail "missing owned reindex process group before SIGKILL"
         fi
         echo "reindex-smoke: killed -9 after ${delay_ms}ms; rebooting normally"
         iso_spawn_node
@@ -155,8 +178,10 @@ while [ "$boot" -lt "$MAX_REBOOTS" ]; do
             break
         fi
         echo "reindex-smoke: boot $boot serving at h=$h (want $base_height) — rebooting"
+        reindex_log_tail
     else
         echo "reindex-smoke: boot $boot RPC not ready — rebooting"
+        reindex_log_tail
     fi
 done
 
