@@ -959,6 +959,25 @@ static size_t search_rank_of(const struct zcl_command_registry *reg,
     return rank;
 }
 
+static int test_lab_feedback_search(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const char *queries[] = {"feedback", "reflex"};
+    const char *paths[] = {"lab.run", "lab.test"};
+    TEST("feedback and reflex find ready lab leaves") {
+        for (size_t p = 0; p < sizeof(paths) / sizeof(paths[0]); p++) {
+            const struct zcl_command_spec *spec = find_spec(reg, paths[p]);
+            ASSERT(spec != NULL);
+            ASSERT_EQ(spec->availability, ZCL_COMMAND_READY);
+            for (size_t q = 0; q < sizeof(queries) / sizeof(queries[0]); q++)
+                ASSERT(search_rank_of(reg, queries[q], paths[p]) > 0);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static void search_rank_tally(const struct zcl_command_registry *reg,
                               const struct search_rank_case *cases, size_t n,
                               size_t *hit1, size_t *hit5)
@@ -6794,6 +6813,7 @@ int test_command_registry_catalog(void)
     failures += test_search_latency();
     failures += test_receive_address_search();
     failures += test_common_intent_search();
+    failures += test_lab_feedback_search();
     failures += test_ready_leaves_bound();
     failures += test_bridge_bindings_reverse();
     failures += test_bootstatus_projects_recovery_and_blocker();

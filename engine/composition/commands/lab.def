@@ -25,9 +25,10 @@ ZCL_COMMAND_READY_COMMAND(
     "fresh to bypass. Where Landlock or seccomp cannot be applied it refuses "
     "with LAB_UNCONFINED and never runs the program; compile_only still works. "
     "Compile failures include data.next_action guidance to fix the diagnostics "
-    "and repeat the original command; they never suggest an automatic retry.",
+    "and repeat the original command; they never suggest an automatic retry. "
+    "This isolated feedback grants no acceptance or publication authority.",
     65536U,
-    "lab,c23,compile,run,sandbox,sanitizer,ubsan,asan,test,exit,stdout,start,first,steps,begin,newcomer,onboarding",
+    "lab,c23,compile,run,sandbox,sanitizer,ubsan,asan,test,exit,stdout,start,first,steps,begin,newcomer,onboarding,feedback,reflex",
     "zcl.lab_run_input.v1", "zcl.lab_run.v1",
     "file,stdin,args,sanitize,timeout_ms,mem_mb,fresh,compile_only,idempotency_key", "file",
     "z23 lab run hello.c --stdin=hi",
@@ -55,9 +56,10 @@ ZCL_COMMAND_READY_COMMAND(
     "and, if given, stdout equals expect_stdout exactly. The receipt "
     "zcl.lab_test.v1 is content addressed and cached like lab.run's; fresh "
     "bypasses the cache. Refuses with LAB_UNCONFINED where Landlock or "
-    "seccomp cannot be applied.",
+    "seccomp cannot be applied. This isolated feedback grants no acceptance "
+    "or publication authority.",
     65536U,
-    "lab,c23,test,cases,expect,diff,sandbox,sanitizer,start,first,steps,begin,newcomer,onboarding",
+    "lab,c23,test,cases,expect,diff,sandbox,sanitizer,start,first,steps,begin,newcomer,onboarding,feedback,reflex",
     "zcl.lab_test_input.v1", "zcl.lab_test.v1",
     "file,cases,sanitize,timeout_ms,mem_mb,fresh,idempotency_key", "file",
     "z23 lab test solve.c --cases=cases.json",
