@@ -47,6 +47,17 @@
 #include "util/blocker.h"
 #include "util/boot_progress.h"
 #include "validation/main_state.h"
+#if !defined(_WIN32)
+#include "crypto/sha3.h"
+#include "services/utxo_recovery_service.h"
+#include "storage/coins_view_sqlite.h"
+#include "../../../engine/composition/src/boot_steps_internal.h"
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include <errno.h>
 #include <sqlite3.h>
@@ -470,11 +481,284 @@ static int sb_shared_bootstrap_tests(const char *dir)
     return failures;
 }
 
+#if !defined(_WIN32)
+struct sb_crash_cut {
+    uint8_t source_digest[32];
+    uint8_t root[32];
+    uint64_t count;
+    int pipe_fd;
+    sqlite3 *db;
+};
+
+static bool sb_file_digest(const char *path, uint8_t out[32])
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return false;
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    uint8_t bytes[4096];
+    ssize_t n;
+    while ((n = read(fd, bytes, sizeof(bytes))) != 0) {
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            close(fd);
+            return false;
+        }
+        sha3_256_write(&ctx, bytes, (size_t)n);
+    }
+    if (close(fd) != 0)
+        return false;
+    sha3_256_finalize(&ctx, out);
+    return true;
+}
+
+static int sb_detach_trace(unsigned event, void *opaque, void *statement, void *unused)
+{
+    (void)unused;
+    struct sb_crash_cut *cut = opaque;
+    const char *sql = sqlite3_sql(statement);
+    if (event != SQLITE_TRACE_STMT || !sql ||
+        strcmp(sql, "DETACH DATABASE snapsrc") != 0 || !sqlite3_get_autocommit(cut->db))
+        return 0;
+    /* No SQL in this callback: COMMIT has returned, cache/epilogue have not run. */
+    if (write(cut->pipe_fd, cut, sizeof(*cut)) != (ssize_t)sizeof(*cut))
+        _exit(5);
+    for (;;)
+        pause();
+}
+
+static void sb_crash_import_child(const char *dir, int pipe_fd)
+{
+    if (signal(SIGALRM, SIG_DFL) == SIG_ERR)
+        _exit(2);
+    alarm(90);
+    char snapshot[600], node_path[600];
+    snprintf(snapshot, sizeof(snapshot), "%s/consensus_snapshot.db", dir);
+    snprintf(node_path, sizeof(node_path), "%s/node.db", dir);
+    uint8_t hash[32];
+    sb_tip_hash(hash);
+    struct node_db ndb = {0};
+    struct sb_crash_cut cut = {.pipe_fd = pipe_fd};
+    sqlite3 *source = NULL;
+    if (!sb_build_fixture(snapshot, hash) || !sb_file_digest(snapshot, cut.source_digest) ||
+        sqlite3_open_v2(snapshot, &source, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+        _exit(3);
+    utxo_commitment_sha3_compute(source, cut.root, &cut.count);
+    sqlite3_close(source);
+    if (cut.count != SB_UTXO_COUNT || !node_db_open(&ndb, node_path) ||
+        !progress_store_open(dir) || !coins_kv_ensure_schema(progress_store_db()))
+        _exit(4);
+    cut.db = ndb.db;
+    if (sqlite3_trace_v2(ndb.db, SQLITE_TRACE_STMT, sb_detach_trace, &cut) != SQLITE_OK)
+        _exit(6);
+    int64_t count = 0, height = 0;
+    (void)boot_import_snapshot_db(&ndb, snapshot, &count, &height, hash);
+    _exit(7); /* Reaching here means the requested crash cut was never observed. */
+}
+
+static bool sb_wait_and_kill(pid_t child, int fd, struct sb_crash_cut *cut)
+{
+    struct pollfd pending = {.fd = fd, .events = POLLIN};
+    bool ready = poll(&pending, 1, 60000) == 1 && (pending.revents & POLLIN) != 0;
+    bool received = ready && read(fd, cut, sizeof(*cut)) == (ssize_t)sizeof(*cut);
+    /* Reap before opening either SQLite store, including every timeout/error path. */
+    int killed = kill(child, SIGKILL);
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    return received && killed == 0 && waited == child &&
+        WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+}
+
+static bool sb_cache_absent(sqlite3 *db)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "SELECT count(*) FROM node_state WHERE key='coins_best_block'", -1, &stmt, NULL) == SQLITE_OK;
+    ok = ok && sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int64(stmt, 0) == 0;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static int sb_crash_cut_facts(struct node_db *ndb, const char *dir,
+                              const struct sb_crash_cut *cut)
+{
+    int failures = 0;
+    uint8_t root[32], digest[32];
+    uint64_t count = 0;
+    int64_t mirror_count = -1;
+    utxo_commitment_sha3_compute(ndb->db, root, &count);
+    SB_CHECK("SIGKILL cut: exact durable mirror commitment and 1200 rows",
+        node_db_utxo_count_checked(ndb, &mirror_count) && mirror_count == SB_UTXO_COUNT &&
+        count == cut->count && memcmp(root, cut->root, 32) == 0);
+    SB_CHECK("SIGKILL cut: best-block cache has not been written", sb_cache_absent(ndb->db));
+    int32_t applied = -1;
+    bool found = true;
+    SB_CHECK("SIGKILL cut: kernel empty, unproven, applied frontier absent",
+        coins_kv_count_sqlite(progress_store_db()) == 0 &&
+        !coins_kv_is_proven_authority(progress_store_db(), NULL) &&
+        coins_kv_get_applied_height(progress_store_db(), &applied, &found) && !found);
+    char snapshot[600];
+    snprintf(snapshot, sizeof(snapshot), "%s/consensus_snapshot.db", dir);
+    SB_CHECK("SIGKILL cut: source snapshot bytes unchanged",
+        sb_file_digest(snapshot, digest) && memcmp(digest, cut->source_digest, 32) == 0);
+    return failures;
+}
+
+static int sb_terminal_authority(const uint8_t expected_root[32])
+{
+    int failures = 0;
+    uint8_t root[32];
+    int32_t applied = -1;
+    SB_CHECK("restart full kernel authority agrees with committed mirror",
+        coins_kv_count_sqlite(progress_store_db()) == SB_UTXO_COUNT &&
+        coins_kv_commitment(progress_store_db(), root) == 0 &&
+        memcmp(root, expected_root, 32) == 0 &&
+        coins_kv_is_proven_authority(progress_store_db(), &applied) && applied == SB_SNAP_HEIGHT + 1);
+    return failures;
+}
+
+static int sb_terminal_caches(struct node_db *ndb, const uint8_t expected_root[32])
+{
+    int failures = 0;
+    uint8_t stamp[32], best[32], expected_best[32];
+    uint64_t count = 0;
+    int32_t height = -1;
+    size_t n = 0;
+    sb_tip_hash(expected_best);
+    SB_CHECK("restart cache and commitment stamp agree",
+        node_db_state_get(ndb, "coins_best_block", best, sizeof(best), &n) && n == 32 &&
+        memcmp(best, expected_best, 32) == 0 &&
+        utxo_commitment_sha3_load(ndb->db, stamp, &height, &count) &&
+        height == SB_SNAP_HEIGHT && count == SB_UTXO_COUNT && memcmp(stamp, expected_root, 32) == 0);
+    return failures;
+}
+
+static int sb_terminal_frontier(void)
+{
+    int failures = 0;
+    static const char *const upstream[] = {
+        "header_admit", "validate_headers", "body_fetch", "body_persist",
+        "script_validate", "proof_validate", "utxo_apply"
+    };
+    for (size_t i = 0; i < sizeof(upstream) / sizeof(upstream[0]); i++)
+        SB_CHECK(upstream[i], sb_cursor(progress_store_db(), upstream[i]) == SB_SNAP_HEIGHT + 1);
+    int32_t hstar = -1, frontier = -1;
+    progress_store_tx_lock();
+    bool coherent = reducer_frontier_compute_hstar(progress_store_db(), &hstar, &frontier);
+    progress_store_tx_unlock();
+    SB_CHECK("restart durable frontier and H* agree with imported base",
+        sb_cursor(progress_store_db(), "tip_finalize") == SB_SNAP_HEIGHT &&
+        sb_trusted_base(progress_store_db()) == SB_SNAP_HEIGHT && coherent && hstar == SB_SNAP_HEIGHT);
+    return failures;
+}
+
+static int sb_restart_terminal(struct node_db *ndb, const char *dir,
+                               const uint8_t expected_root[32])
+{
+    int failures = 0;
+    struct main_state ms = {0};
+    main_state_init(&ms);
+    seed_integrity_gate_set_node_db_for_testing(ndb);
+    SB_CHECK("restart finalization stage initializes", tip_finalize_stage_init(&ms));
+    enum boot_snapshot_first_outcome outcome;
+    SB_CHECK("restart snapshot preparation succeeds",
+        boot_prepare_snapshot_first(ndb, dir, &outcome).ok);
+    struct boot_derived_coins_best derived;
+    bool authority = boot_derive_coins_best(&derived);
+    if (!authority)
+        (void)utxo_recovery_repair_stale_cursor_from_sync_projection(ndb);
+    struct coins_view_sqlite view = {0};
+    bool usable = coins_view_sqlite_open(&view, ndb->db);
+    if (!usable && !authority &&
+        utxo_recovery_heal_torn_legacy_coins_anchor(ndb, progress_store_db(), dir))
+        usable = coins_view_sqlite_open(&view, ndb->db);
+    SB_CHECK("restart normal restore/repair produces usable coins view", usable);
+    if (usable)
+        coins_view_sqlite_close(&view);
+    failures += sb_terminal_authority(expected_root);
+    failures += sb_terminal_caches(ndb, expected_root);
+    failures += sb_terminal_frontier();
+    tip_finalize_stage_shutdown();
+    main_state_free(&ms);
+    seed_integrity_gate_reset_for_testing();
+    return failures;
+}
+
+static int sb_crash_uninterrupted_control(const char *root, const uint8_t expected_root[32])
+{
+    int failures = 0;
+    char dir[512], snapshot[600], node_path[600];
+    snprintf(dir, sizeof(dir), "%s/control", root);
+    snprintf(snapshot, sizeof(snapshot), "%s/consensus_snapshot.db", dir);
+    snprintf(node_path, sizeof(node_path), "%s/node.db", dir);
+    uint8_t hash[32];
+    sb_tip_hash(hash);
+    struct node_db ndb = {0};
+    bool opened = sb_mkdir(dir) == 0 && sb_build_fixture(snapshot, hash) &&
+        node_db_open(&ndb, node_path) && progress_store_open(dir);
+    SB_CHECK("uninterrupted control opens same genuine snapshot fixture", opened);
+    if (opened)
+        failures += sb_restart_terminal(&ndb, dir, expected_root);
+    progress_store_close();
+    if (ndb.open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+static int sb_mirror_commit_sigkill_test(void)
+{
+    int failures = 0;
+    SB_CHECK("SIGKILL fixture begins before any progress store opens", progress_store_db() == NULL);
+    if (failures)
+        return failures;
+    char dir[256], node_path[600];
+    test_fmt_tmpdir(dir, sizeof(dir), "snapshot_boot_seed", "mirror-commit-sigkill");
+    int channel[2];
+    if (sb_mkdir("./test-tmp") != 0 || sb_mkdir(dir) != 0 || pipe(channel) != 0)
+        return 1;
+    pid_t child = fork();
+    if (child == 0) {
+        close(channel[0]);
+        sb_crash_import_child(dir, channel[1]);
+    }
+    close(channel[1]);
+    struct sb_crash_cut cut = {0};
+    bool killed = child > 0 && sb_wait_and_kill(child, channel[0], &cut);
+    close(channel[0]);
+    SB_CHECK("worker really SIGKILLed after mirror COMMIT before cache/epilogue", killed);
+    /* All module initialization follows fork/reap; the worker inherits no fixture locks. */
+    blocker_module_init();
+    blocker_reset_for_testing();
+    seed_integrity_gate_reset_for_testing();
+    snprintf(node_path, sizeof(node_path), "%s/node.db", dir);
+    struct node_db ndb = {0};
+    bool opened = killed && node_db_open(&ndb, node_path) && progress_store_open(dir);
+    SB_CHECK("crashed stores reopen only after child is reaped", opened);
+    if (opened) {
+        failures += sb_crash_cut_facts(&ndb, dir, &cut);
+        failures += sb_restart_terminal(&ndb, dir, cut.root);
+    }
+    progress_store_close();
+    if (ndb.open)
+        node_db_close(&ndb);
+    if (killed)
+        failures += sb_crash_uninterrupted_control(dir, cut.root);
+    return sb_finish_fixture(dir, failures);
+}
+#else
+static int sb_mirror_commit_sigkill_test(void) { return 0; }
+#endif
+
 int test_snapshot_boot_seed(void)
 {
+    int failures = sb_mirror_commit_sigkill_test();
     test_reset_shared_globals();
     printf("\n=== snapshot_boot_seed tests ===\n");
-    int failures = 0;
 
     blocker_module_init();
     blocker_reset_for_testing();
