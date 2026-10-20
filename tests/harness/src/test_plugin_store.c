@@ -13,6 +13,8 @@
 #include "platform/atomic_link.h"
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_store.h"
+#include "platform/time_compat.h"
+#include "../../../contexts/commons/modules/plugin/src/plugin_internal.h"
 #include "sha3/sha3.h"
 
 #include <dirent.h>
@@ -1538,7 +1540,8 @@ static bool pst_plugdir_clean(const struct pst_fx *fx)
     while ((e = readdir(d)) != NULL) {
         if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0 &&
             strcmp(e->d_name, "generations") != 0 && strcmp(e->d_name, "current") != 0 &&
-            strcmp(e->d_name, "last-good") != 0 && strcmp(e->d_name, ".lock") != 0)
+            strcmp(e->d_name, "last-good") != 0 && strcmp(e->d_name, ".lock") != 0 &&
+            strcmp(e->d_name, ".lock.q") != 0)
             clean = false;
     }
     closedir(d);
@@ -1626,6 +1629,110 @@ static int pst_case_lock_exclusion(void)
         pst_link(&fx, "hello", "last-good", lg);
         ASSERT_STR_EQ(cur, t.c);
         ASSERT_STR_EQ(lg, t.b);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+/* Child: hold the plugin lock for 2 ms and re-acquire it at once, for ms. */
+static enum plugin_status pst_loop_worker(const char *plugdir, int64_t ms)
+{
+    int64_t end = platform_time_monotonic_ms() + ms;
+    while (platform_time_monotonic_ms() < end) {
+        struct plugin_lock lk;
+        enum plugin_status st = plugin_lock_acquire(plugdir, &lk);
+        if (st != PLUGIN_OK)
+            return st;
+        platform_sleep_ms(2);
+        plugin_lock_release(&lk);
+    }
+    return PLUGIN_OK;
+}
+
+static int pst_case_lock_fairness(void)
+{
+    int failures = 0;
+    TEST_CASE("a waiter acquires the plugin lock while holders re-acquire in a tight loop") {
+        enum { LOOPERS = 1, WAITS = 20 };
+        struct pst_fx fx;
+        char plugdir[PATH_MAX];
+        pid_t pids[LOOPERS];
+        ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
+        ASSERT(pst_plug_path(&fx, NULL, plugdir, sizeof(plugdir)));
+        fflush(NULL);
+        for (int i = 0; i < LOOPERS; i++) {
+            pids[i] = fork();
+            if (pids[i] == 0)
+                _exit((int)pst_loop_worker(plugdir, 3000));
+        }
+        for (int i = 0; i < WAITS; i++) {
+            struct plugin_lock lk;
+            int64_t t0 = platform_time_monotonic_ms();
+            ASSERT_EQ(plugin_lock_acquire(plugdir, &lk), PLUGIN_OK);
+            /* A holder cycles every ~2 ms; a fair waiter gets in within a few cycles. */
+            ASSERT(platform_time_monotonic_ms() - t0 < 500); /* real-clock: a flock waiter against a real child process; no fake-clock seam exists */
+            plugin_lock_release(&lk);
+            platform_sleep_ms(1);
+        }
+        for (int i = 0; i < LOOPERS; i++)
+            ASSERT_EQ(pst_reap(pids[i]), (int)PLUGIN_OK);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_lock_budget(void)
+{
+    int failures = 0;
+    TEST_CASE("a lock held past the budget returns PLUGIN_BUSY with a next action and withdraws the waiter") {
+        struct pst_fx fx;
+        char plugdir[PATH_MAX], lockpath[PATH_MAX], gatepath[PATH_MAX];
+        struct plugin_lock lk;
+        ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
+        ASSERT(pst_plug_path(&fx, NULL, plugdir, sizeof(plugdir)));
+        ASSERT(pst_plug_path(&fx, ".lock", lockpath, sizeof(lockpath)));
+        ASSERT(pst_plug_path(&fx, ".lock.q", gatepath, sizeof(gatepath)));
+        int held = open(lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(held >= 0);
+        ASSERT_EQ(flock(held, LOCK_EX | LOCK_NB), 0);
+        int64_t t0 = platform_time_monotonic_ms();
+        ASSERT_EQ(plugin_lock_acquire(plugdir, &lk), PLUGIN_ERR_BUSY);
+        ASSERT(platform_time_monotonic_ms() - t0 >= PLUGIN_LOCK_WAIT_MS); /* real-clock: the product deadline is a kernel flock wait on a monotonic clock; no fake-clock seam exists */
+        ASSERT_EQ(lk.fd, -1);
+        const char *next = plugin_status_next_action(PLUGIN_ERR_BUSY);
+        ASSERT(next != NULL && strstr(next, "wait") != NULL && strstr(next, "retry") != NULL);
+        /* The timed-out waiter withdrew its gate announcement. */
+        int gate = open(gatepath, O_RDWR | O_CLOEXEC);
+        ASSERT(gate >= 0);
+        ASSERT_EQ(flock(gate, LOCK_EX | LOCK_NB), 0);
+        close(gate);
+        ASSERT_EQ(flock(held, LOCK_UN), 0);
+        close(held);
+        ASSERT_EQ(plugin_lock_acquire(plugdir, &lk), PLUGIN_OK);
+        plugin_lock_release(&lk);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_lock_gate_leftover(void)
+{
+    int failures = 0;
+    TEST_CASE("a leftover unlocked .lock.q is harmless and a switch still succeeds") {
+        struct pst_fx fx;
+        struct pst_trio t;
+        char gatepath[PATH_MAX], cur[PST_HEX];
+        ASSERT(pst_three_generations(&fx, &t));
+        ASSERT(pst_plug_path(&fx, ".lock.q", gatepath, sizeof(gatepath)));
+        int gate = open(gatepath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(gate >= 0);
+        ASSERT(write(gate, "stale", 5) == 5);
+        close(gate);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", t.a), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", t.b), PLUGIN_OK);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, t.b);
+        ASSERT(pst_plugdir_clean(&fx));
         pst_fx_close(&fx);
     } TEST_END
     return failures;
@@ -1741,6 +1848,9 @@ int test_plugin_store(void)
 #if !defined(_WIN32)
     failures += pst_case_concurrent_switch();
     failures += pst_case_lock_exclusion();
+    failures += pst_case_lock_fairness();
+    failures += pst_case_lock_budget();
+    failures += pst_case_lock_gate_leftover();
 #endif
     failures += pst_case_crashed_install();
     failures += pst_case_registered();

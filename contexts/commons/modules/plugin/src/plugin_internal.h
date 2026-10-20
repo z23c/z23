@@ -69,9 +69,13 @@ bool plugin_fsync_dir(const char *path);
 
 bool plugin_mkdirs(const char *path);
 
-/* Per-plugin mutation lock (plugdir/.lock) held across the whole
- * read-verify-modify of install, switch and rollback. Waits a bounded time and
- * then refuses PLUGIN_ERR_BUSY. Readers never take it. */
+/* Per-plugin mutation lock (plugdir/.lock, plus the waiter gate
+ * plugdir/.lock.q that keeps a returning holder from starving a waiter) held
+ * across the whole read-verify-modify of install, switch and rollback. Waits
+ * until a monotonic deadline PLUGIN_LOCK_WAIT_MS after the call, then refuses
+ * PLUGIN_ERR_BUSY. Readers never take it. A leftover unlocked .lock.q is
+ * harmless. */
+enum { PLUGIN_LOCK_WAIT_MS = 5000 };
 struct plugin_lock {
     int fd;
 };

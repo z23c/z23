@@ -498,22 +498,41 @@ enum plugin_status plugin_keys_load(const char *path, char **bytes, size_t *len)
 
 
 /* Per-plugin mutation lock. flock locks belong to the open file description,
- * so a crashed holder never leaves a stale lock behind. */
-enum { PLUGIN_LOCK_WAIT_MS = 5000, PLUGIN_LOCK_STEP_MS = 20 };
+ * so a crashed holder never leaves a stale lock behind.
+ *
+ * A bare poll of a non-blocking flock is unfair: a holder that releases and
+ * re-takes ".lock" back to back wins every race against a poller, so under
+ * load a waiter can starve for the whole budget. ".lock.q" is a waiter gate
+ * that removes that race without any wake-up order from the kernel:
+ *
+ *   - An acquirer first tests the gate with a momentary exclusive flock. If a
+ *     waiter holds the gate shared, the test fails and the newcomer yields
+ *     (polls the gate, holding nothing) instead of racing for ".lock".
+ *   - A newcomer that passes the gate tries ".lock" once. If it is held, the
+ *     newcomer becomes a waiter: it holds the gate shared (announces itself)
+ *     and polls ".lock" until the deadline.
+ *
+ * So once a waiter has announced itself, a holder that comes back around is
+ * gated and cannot take ".lock" until every announced waiter has been served.
+ * At most one acquirer that had already passed the gate before the
+ * announcement can still win ".lock" once; the next release finds the waiter
+ * alone with the lock. The waiter therefore wins within about two holds plus
+ * one 1 ms step, not by luck. Waiters hold the gate shared, so they never
+ * block each other, and only waiters that arrived within one hold of each
+ * other race among themselves. Both locks are flocks, so a crashed process
+ * releases them and a leftover (unlocked) ".lock.q" file is harmless.
+ *
+ * The budget is a monotonic-clock deadline equal to the old wall budget, not
+ * a step count: a slow sleep or a loaded machine cannot stretch or shrink it.
+ * A lock held past the deadline still answers PLUGIN_ERR_BUSY. */
+enum { PLUGIN_LOCK_STEP_MS = 1 };
 
-enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *lock)
+#if !defined(_WIN32)
+/* Open one lock file and require a regular file owned by this user. */
+static enum plugin_status plugin_lock_open(const char *plugdir, const char *name, int *fd_out)
 {
-    lock->fd = -1;
-#if defined(_WIN32)
-    /* Windows keeps its current behavior: no cross-process mutation lock yet;
-     * the exclusive temp-file creates and atomic replaces remain the only
-     * exclusion there. */
-    (void)plugdir;
-    return PLUGIN_OK;
-#else
-
     char path[PLUGIN_PATH_MAX];
-    if (!plugin_join(path, sizeof(path), plugdir, ".lock", NULL, NULL))
+    if (!plugin_join(path, sizeof(path), plugdir, name, NULL, NULL))
         return PLUGIN_ERR_ARGUMENT;
     int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0)
@@ -527,21 +546,108 @@ enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *
         close(fd);
         return PLUGIN_ERR_KEYS_INSECURE;
     }
-    for (int waited = 0;; waited += PLUGIN_LOCK_STEP_MS) {
-        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
-            lock->fd = fd;
-            return PLUGIN_OK;
+    *fd_out = fd;
+    return PLUGIN_OK;
+}
+
+
+/* One non-blocking flock attempt: 0 taken, 1 held elsewhere, -1 error. */
+static int plugin_flock_try(int fd, int op)
+{
+    if (flock(fd, op | LOCK_NB) == 0)
+        return 0;
+    return (errno == EWOULDBLOCK || errno == EINTR) ? 1 : -1;
+}
+
+/* Poll until the deadline; true when the lock is taken. *st is set to BUSY
+ * on timeout or IO on error. */
+static bool plugin_flock_poll(int fd, int op, int64_t deadline, enum plugin_status *st)
+{
+    for (;;) {
+        int r = plugin_flock_try(fd, op);
+        if (r == 0)
+            return true;
+        if (r < 0) {
+            *st = PLUGIN_ERR_IO;
+            return false;
         }
-        if (errno != EWOULDBLOCK && errno != EINTR) {
-            close(fd);
-            return PLUGIN_ERR_IO;
-        }
-        if (waited >= PLUGIN_LOCK_WAIT_MS) {
-            close(fd);
-            return PLUGIN_ERR_BUSY;
+        if (platform_time_monotonic_ms() >= deadline) {
+            *st = PLUGIN_ERR_BUSY;
+            return false;
         }
         platform_sleep_ms(PLUGIN_LOCK_STEP_MS);
     }
+}
+
+/* Pass the waiter gate: true when no waiter is announced. A newcomer yields
+ * (holding nothing) while one is. */
+static bool plugin_gate_pass(int qfd, int64_t deadline, enum plugin_status *st)
+{
+    for (;;) {
+        int r = plugin_flock_try(qfd, LOCK_EX);
+        if (r == 0) {
+            flock(qfd, LOCK_UN);
+            return true;
+        }
+        if (r < 0) {
+            *st = PLUGIN_ERR_IO;
+            return false;
+        }
+        if (platform_time_monotonic_ms() >= deadline) {
+            *st = PLUGIN_ERR_BUSY;
+            return false;
+        }
+        platform_sleep_ms(PLUGIN_LOCK_STEP_MS);
+    }
+}
+
+/* Take ".lock" with qfd and fd open; see the comment above. */
+static enum plugin_status plugin_lock_take(int qfd, int fd, int64_t deadline)
+{
+    enum plugin_status st = PLUGIN_OK;
+    if (!plugin_gate_pass(qfd, deadline, &st))
+        return st;
+    int r = plugin_flock_try(fd, LOCK_EX);
+    if (r == 0)
+        return PLUGIN_OK;
+    if (r < 0)
+        return PLUGIN_ERR_IO;
+    /* Held: announce as a waiter, then poll. Closing qfd later withdraws it. */
+    if (!plugin_flock_poll(qfd, LOCK_SH, deadline, &st))
+        return st;
+    if (!plugin_flock_poll(fd, LOCK_EX, deadline, &st))
+        return st;
+    return PLUGIN_OK;
+}
+#endif
+
+enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *lock)
+{
+    lock->fd = -1;
+#if defined(_WIN32)
+    /* Windows keeps its current behavior: no cross-process mutation lock yet;
+     * the exclusive temp-file creates and atomic replaces remain the only
+     * exclusion there. */
+    (void)plugdir;
+    return PLUGIN_OK;
+#else
+
+    int qfd = -1, fd = -1;
+    int64_t deadline = platform_time_monotonic_ms() + PLUGIN_LOCK_WAIT_MS;
+    enum plugin_status st = plugin_lock_open(plugdir, ".lock.q", &qfd);
+    if (st != PLUGIN_OK)
+        return st;
+    st = plugin_lock_open(plugdir, ".lock", &fd);
+    if (st == PLUGIN_OK)
+        st = plugin_lock_take(qfd, fd, deadline);
+    close(qfd); /* withdraws the waiter announcement */
+    if (st != PLUGIN_OK) {
+        if (fd >= 0)
+            close(fd);
+        return st;
+    }
+    lock->fd = fd;
+    return PLUGIN_OK;
 
 #endif
 }
