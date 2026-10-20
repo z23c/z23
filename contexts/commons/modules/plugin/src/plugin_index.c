@@ -419,6 +419,13 @@ static bool pi_same_claim(const struct plugin_index_entry *a,
            a->capabilities == b->capabilities && strcmp(a->root, b->root) == 0;
 }
 
+static bool pi_stream_same(const struct plugin_index_entry *a,
+                           const struct plugin_index_entry *b)
+{
+    return strcmp(a->publisher, b->publisher) == 0 &&
+           strcmp(a->name, b->name) == 0;
+}
+
 /* The refusal an entry meets against one earlier entry of its stream. */
 static enum plugin_index_status pi_conflict(const struct plugin_index_entry *seen,
                                             const struct plugin_index_entry *e)
@@ -451,6 +458,28 @@ static bool pi_write_new(const char *dir, const char *bytes, size_t len,
     return ok;
 }
 
+/* Checks e against the loaded set: sets *present when e is already there and
+ * returns the first rollback or equivocation against its own stream. */
+static enum plugin_index_status pi_admit(const struct pi_set *set,
+                                         const struct plugin_index_entry *e,
+                                         bool *present)
+{
+    *present = false;
+    for (size_t i = 0; i < set->count; i++) {
+        const struct plugin_index_entry *s = &set->items[i];
+        if (strcmp(s->digest, e->digest) == 0) {
+            *present = true;
+            continue;
+        }
+        if (!pi_stream_same(s, e))
+            continue;
+        enum plugin_index_status st = pi_conflict(s, e);
+        if (st != PLUGIN_INDEX_OK)
+            return st;
+    }
+    return PLUGIN_INDEX_OK;
+}
+
 enum plugin_index_status plugin_index_add(const char *dir, const char *bytes,
                                           size_t len,
                                           struct plugin_index_entry *out,
@@ -458,6 +487,7 @@ enum plugin_index_status plugin_index_add(const char *dir, const char *bytes,
 {
     struct plugin_index_entry e;
     struct pi_set set;
+    bool present = false;
     if (!dir || !*dir || !bytes)
         return PLUGIN_INDEX_ARGUMENT;
     enum plugin_index_status st = plugin_index_parse(bytes, len, &e);
@@ -468,15 +498,7 @@ enum plugin_index_status plugin_index_add(const char *dir, const char *bytes,
     st = pi_load(dir, &set, NULL);
     if (st != PLUGIN_INDEX_OK)
         return st;
-    bool present = false;
-    for (size_t i = 0; i < set.count && st == PLUGIN_INDEX_OK; i++) {
-        const struct plugin_index_entry *s = &set.items[i];
-        if (strcmp(s->digest, e.digest) == 0)
-            present = true;
-        else if (strcmp(s->publisher, e.publisher) == 0 &&
-                 strcmp(s->name, e.name) == 0)
-            st = pi_conflict(s, &e);
-    }
+    st = pi_admit(&set, &e, &present);
     free(set.items);
     if (st != PLUGIN_INDEX_OK)
         return st;
@@ -526,13 +548,6 @@ static bool pi_fold_stream(struct plugin_index_report *rep,
         best = e;
     }
     return pi_row_push(rep, best);
-}
-
-static bool pi_stream_same(const struct plugin_index_entry *a,
-                           const struct plugin_index_entry *b)
-{
-    return strcmp(a->publisher, b->publisher) == 0 &&
-           strcmp(a->name, b->name) == 0;
 }
 
 static int pi_row_order(const void *pa, const void *pb)

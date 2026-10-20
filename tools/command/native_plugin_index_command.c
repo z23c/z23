@@ -5,24 +5,16 @@
  *          marks each publisher pinned or unpinned and changes nothing. Neither
  *          contacts the daemon, and neither fetches or installs a plugin. */
 
-#include "command/native_command.h"
+#include "native_plugin_common.h"
 
 #include "json/json.h"
 #include "plugin/plugin_index.h"
 #include "plugin/plugin_pack.h"
+#include "platform/time_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-
-static const char *pix_str(const struct zcl_command_request *request,
-                           const char *key)
-{
-    const struct json_value *v = request->input ? json_get(request->input, key)
-                                                : NULL;
-    return v && v->type == JSON_STR ? json_get_str(v) : NULL;
-}
 
 static void pix_refuse(struct zcl_command_reply *reply, const char *code,
                        const char *next_action, const char *what,
@@ -56,31 +48,13 @@ static const char *pix_next_action(enum plugin_index_status st)
     }
 }
 
-static void pix_push_caps(struct json_value *obj, unsigned mask)
-{
-    struct json_value caps;
-    json_init(&caps);
-    json_set_array(&caps);
-    for (unsigned i = 0; plugin_capability_name(i); i++) {
-        struct json_value s;
-        json_init(&s);
-        if (mask & (1u << i)) {
-            json_set_str(&s, plugin_capability_name(i));
-            (void)json_push_back(&caps, &s);
-        }
-        json_free(&s);
-    }
-    (void)json_push_kv(obj, "capabilities", &caps);
-    json_free(&caps);
-}
-
 static void pix_push_entry(struct json_value *obj,
                            const struct plugin_index_entry *e)
 {
     (void)json_push_kv_str(obj, "name", e->name);
     (void)json_push_kv_str(obj, "version", e->version);
     (void)json_push_kv_int(obj, "interface_version", e->interface_version);
-    pix_push_caps(obj, e->capabilities);
+    plg_push_capabilities(obj, e->capabilities);
     (void)json_push_kv_str(obj, "root", e->root);
     (void)json_push_kv_str(obj, "publisher", e->publisher);
     (void)json_push_kv_int(obj, "timestamp", e->timestamp);
@@ -96,11 +70,11 @@ void zcl_native_handle_plugin_index_add(const struct zcl_command_request *reques
     bool present = false;
     if (!request || !reply)
         return;
-    pub.root = pix_str(request, "root");
-    pub.manifest_path = pix_str(request, "manifest");
-    pub.key_path = pix_str(request, "key");
-    pub.dir = pix_str(request, "index");
-    pub.timestamp = (int64_t)time(NULL);
+    pub.root = plg_str(request, "root");
+    pub.manifest_path = plg_str(request, "manifest");
+    pub.key_path = plg_str(request, "key");
+    pub.dir = plg_str(request, "index");
+    pub.timestamp = platform_time_wall_unix();
     enum plugin_index_status st = plugin_index_publish(&pub, &entry, &present, &cause);
     if (st == PLUGIN_INDEX_SOURCE) {
         pix_refuse(reply, plugin_status_code(cause), plugin_status_next_action(cause),
@@ -117,36 +91,6 @@ void zcl_native_handle_plugin_index_add(const struct zcl_command_request *reques
     pix_push_entry(&reply->data, &entry);
     (void)json_push_kv_bool(&reply->data, "already_present", present);
     reply->error.mutated = !present;
-}
-
-static bool pix_caps(const struct zcl_command_request *request, unsigned *mask)
-{
-    const struct json_value *v = request->input ? json_get(request->input, "cap") : NULL;
-    *mask = 0;
-    if (!v || json_is_null(v))
-        return true;
-    if (v->type == JSON_STR) {
-        const char *csv = json_get_str(v);
-        while (*csv) {
-            size_t len = strcspn(csv, ",");
-            if (!len || !plugin_capability_add(csv, len, mask))
-                return false;
-            csv += len;
-            if (*csv == ',' && csv[1] == '\0')
-                return false;
-            csv += (*csv == ',');
-        }
-        return true;
-    }
-    if (v->type != JSON_ARR)
-        return false;
-    for (size_t i = 0; i < json_size(v); i++) {
-        const struct json_value *item = json_at(v, i);
-        const char *s = item && item->type == JSON_STR ? json_get_str(item) : NULL;
-        if (!s || !*s || !plugin_capability_add(s, strlen(s), mask))
-            return false;
-    }
-    return true;
 }
 
 static void pix_push_report(struct json_value *data,
@@ -193,16 +137,16 @@ void zcl_native_handle_plugin_search(const struct zcl_command_request *request,
     struct plugin_index_report rep;
     if (!request || !reply)
         return;
-    query.name = pix_str(request, "name");
-    if (!pix_caps(request, &query.capabilities)) {
+    query.name = plg_str(request, "name");
+    if (!plg_capabilities(request, &query.capabilities)) {
         pix_refuse(reply, "PLUGIN_INDEX_ARGUMENT",
                    "cap must name distinct capabilities from the plugin vocabulary",
                    "search", NULL);
         return;
     }
-    const char *dir = pix_str(request, "index");
+    const char *dir = plg_str(request, "index");
     enum plugin_index_status st = plugin_index_search(
-        dir, pix_str(request, "publishers"), &query, &rep);
+        dir, plg_str(request, "publishers"), &query, &rep);
     if (st != PLUGIN_INDEX_OK) {
         pix_refuse(reply, plugin_index_status_code(st), pix_next_action(st),
                    "search", dir);

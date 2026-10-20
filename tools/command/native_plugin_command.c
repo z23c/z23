@@ -9,6 +9,7 @@
 #include "command/lab.h"
 #include "command/lab_priv.h"
 #include "command/native_command.h"
+#include "native_plugin_common.h"
 
 #include "json/json.h"
 #include "plugin/plugin_pack.h"
@@ -37,7 +38,7 @@ static void plg_refuse(struct zcl_command_reply *reply, enum plugin_status st,
     reply->error.human_action_required = true;
 }
 
-static const char *plg_str(const struct zcl_command_request *request,
+const char *plg_str(const struct zcl_command_request *request,
                            const char *key)
 {
     const struct json_value *v = request->input ? json_get(request->input, key)
@@ -67,7 +68,7 @@ static bool plg_begin(const struct zcl_command_request *request,
     return true;
 }
 
-static void plg_push_capabilities(struct json_value *obj, unsigned mask)
+void plg_push_capabilities(struct json_value *obj, unsigned mask)
 {
     struct json_value caps;
     json_init(&caps);
@@ -99,7 +100,7 @@ static bool plg_cap_csv(const char *csv, unsigned *mask)
     return true;
 }
 
-static bool plg_capabilities(const struct zcl_command_request *request, unsigned *mask)
+bool plg_capabilities(const struct zcl_command_request *request, unsigned *mask)
 {
     const struct json_value *v = request->input ? json_get(request->input, "cap") : NULL;
     *mask = 0;
