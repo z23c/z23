@@ -3278,6 +3278,7 @@ endif
 ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
 RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_run_child$(ZCL_HOST_EXEEXT)
 RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_call_upper$(ZCL_HOST_EXEEXT)
+RESIDENT_CONTRACT_FIXTURE_BINS += $(PLUGIN_BUILTIN_BINS)
 endif
 
 $(BUILD_DIR)/fixtures/rlc_child_v1$(ZCL_HOST_EXEEXT): $(RESIDENT_CONTRACT_FIXTURE_SRC)
@@ -3322,6 +3323,35 @@ $(BUILD_DIR)/fixtures/plugin_call_upper$(ZCL_HOST_EXEEXT): $(PLUGIN_CALL_FIXTURE
 	@mkdir -p $(dir $@)
 	$(CC) -std=gnu2x -O2 -Wall -Wextra $(RESIDENT_CONFINED_STATIC) \
 	  -o $@ $(PLUGIN_CALL_FIXTURE_SRC)
+
+# Built-in one-shot plugins (interface 2) from the commons packages: zhexenc
+# (zhex encode) and zcrc32 (CRC-32). Each is one static image built from its
+# plugin source plus the package source it wraps. Linux only, like the fixture.
+PLUGIN_BUILTIN_DIR = $(BUILD_DIR)/plugins/builtin
+PLUGIN_BUILTIN_VERSION ?= 1.0.0
+PLUGIN_BUILTIN_BINS = $(PLUGIN_BUILTIN_DIR)/zhexenc$(ZCL_HOST_EXEEXT) \
+	$(PLUGIN_BUILTIN_DIR)/zcrc32$(ZCL_HOST_EXEEXT)
+PLUGIN_BUILTIN_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(RESIDENT_CONFINED_STATIC) -I contexts/commons/packages/zhex/include \
+	-I contexts/commons/packages/zcrc/include
+$(PLUGIN_BUILTIN_DIR)/zhexenc$(ZCL_HOST_EXEEXT): contexts/commons/apps/zhexenc/zhexenc.c contexts/commons/packages/zhex/src/zhex.c
+	@mkdir -p $(dir $@)
+	$(CC) $(PLUGIN_BUILTIN_CFLAGS) -o $@ contexts/commons/apps/zhexenc/zhexenc.c contexts/commons/packages/zhex/src/zhex.c
+$(PLUGIN_BUILTIN_DIR)/zcrc32$(ZCL_HOST_EXEEXT): contexts/commons/apps/zcrc32/zcrc32.c contexts/commons/packages/zcrc/src/zcrc.c
+	@mkdir -p $(dir $@)
+	$(CC) $(PLUGIN_BUILTIN_CFLAGS) -o $@ contexts/commons/apps/zcrc32/zcrc32.c contexts/commons/packages/zcrc/src/zcrc.c
+
+# Sign the built-in plugins with the publisher key file named by PLUGIN_KEY
+# (never committed). Writes one manifest and signature per plugin to dist/.
+PLUGIN_KEY ?=
+.PHONY: plugin-builtin-pack
+plugin-builtin-pack: $(PLUGIN_BUILTIN_BINS) | $(Z23_BIN)
+	@test -n "$(PLUGIN_KEY)" || { echo "plugin-builtin-pack: PLUGIN_KEY=<publisher key file> is required" >&2; exit 1; }
+	@for p in zhexenc zcrc32; do \
+	  $(Z23_BIN) plugin pack $(PLUGIN_BUILTIN_DIR)/$$p$(ZCL_HOST_EXEEXT) --name=$$p \
+	    --version=$(PLUGIN_BUILTIN_VERSION) --key=$(PLUGIN_KEY) --interface=2 \
+	    --dir=$(PLUGIN_BUILTIN_DIR)/dist || exit 1; \
+	done
 
 TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard tests/harness/src/*.c))
