@@ -51,6 +51,58 @@ static struct mining_context *mining_ctx(void)
     return &g_mining_ctx;
 }
 
+struct mining_template_parent {
+    struct block_index *index;
+    int height;
+    int64_t minimum_time;
+};
+
+/* The tip can advance after core assembles a template. Refresh against the
+ * parent named by that template, never against a newly sampled active tip. */
+static struct block_template *mining_create_template(const struct script *script,
+    const struct chain_params *cp, struct mining_template_parent *bound,
+    const char **reason)
+{
+    struct mining_context *ctx = mining_ctx();
+    *reason = "Mining state unavailable";
+    if (!ctx->main_state || !ctx->mempool || !ctx->coins_tip || !cp) {
+        LOG_WARN("mining", "template refused: %s", *reason);
+        return NULL;
+    }
+    struct block_template *tmpl = create_new_block(script, ctx->main_state,
+        ctx->coins_tip, ctx->mempool, cp);
+    *reason = "Could not create block template";
+    if (!tmpl) {
+        LOG_WARN("mining", "template refused: %s", *reason);
+        return NULL;
+    }
+    zcl_mutex_lock(&ctx->main_state->cs_main);
+    struct block_index *parent = block_map_find(&ctx->main_state->map_block_index,
+        &tmpl->block.header.hashPrevBlock);
+    bool ok = false;
+    *reason = "Block template parent unavailable";
+    if (parent && parent->phashBlock &&
+        uint256_eq(parent->phashBlock, &tmpl->block.header.hashPrevBlock)) {
+        int64_t median = block_index_get_median_time_past(parent);
+        *reason = "Block template parent median time plus one exceeds uint32 range";
+        if (median < UINT32_MAX) {
+            int64_t minimum = median + 1;
+            if ((int64_t)tmpl->block.header.nTime < minimum)
+                tmpl->block.header.nTime = (uint32_t)minimum;
+            tmpl->block.header.nBits = GetNextWorkRequired(parent,
+                &tmpl->block.header, &cp->consensus);
+            *bound = (struct mining_template_parent){parent, parent->nHeight + 1, minimum};
+            ok = true;
+        }
+    }
+    zcl_mutex_unlock(&ctx->main_state->cs_main);
+    if (ok) return tmpl;
+    LOG_WARN("mining", "template refused: %s", *reason);
+    block_template_free(tmpl);
+    free(tmpl);
+    return NULL;
+}
+
 /* Announce a just-accepted local tip block to connected peers. Locally-minted
  * (`generate`) and externally-submitted (`submitblock`) blocks are accepted
  * through reducer_ingest_block directly, never through the P2P block-receive
@@ -239,25 +291,26 @@ static bool mining_generate_to_script(const struct script *coinbase_script,
                                       int64_t num_blocks,
                                       struct json_value *result)
 {
-    struct mining_context *ctx = mining_ctx();
     const struct chain_params *cp = chain_params_get();
 
     json_set_array(result);
 
     for (int64_t i = 0; i < num_blocks; i++) {
-        struct block_template *tmpl = create_new_block(
-            coinbase_script, ctx->main_state, ctx->coins_tip, ctx->mempool, cp);
-        if (!tmpl) break;
-
-        struct block_index *tip = active_chain_tip(&ctx->main_state->chain_active);
+        struct mining_template_parent parent;
+        const char *reason;
+        struct block_template *tmpl = mining_create_template(coinbase_script, cp, &parent, &reason);
+        if (!tmpl) {
+            json_set_str(result, reason);
+            return false;
+        }
         unsigned int extra_nonce = 0;
-        increment_extra_nonce(&tmpl->block, tip, &extra_nonce);
+        increment_extra_nonce(&tmpl->block, parent.index, &extra_nonce);
 
         /* Solve the Equihash PoW so the block passes the reducer's
          * stateless check_block(check_pow=true) gate. Without this the
          * block carries an empty solution and is rejected at intake, so
          * the tip never advances. Fast for regtest/testnet (small N,K). */
-        int new_height = (tip ? tip->nHeight : 0) + 1;
+        int new_height = parent.height;
         mining_stamp_sapling_final_root(&tmpl->block, new_height, cp);
         if (!mine_block_pow(&tmpl->block, new_height, cp, 0)) {
             block_template_free(tmpl);
@@ -476,7 +529,6 @@ static bool rpc_submitblock(const struct json_value *params, bool help,
 static bool rpc_getblocktemplate(const struct json_value *params, bool help,
                                   struct json_value *result)
 {
-    struct mining_context *ctx = mining_ctx();
     (void)params;
     RPC_HELP(help, result,
         "getblocktemplate ( \"jsonrequestobject\" )\n"
@@ -498,19 +550,14 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
     }
 
     const struct chain_params *cp = chain_params_get();
-    struct block_index *tip = active_chain_tip(&ctx->main_state->chain_active);
-    if (!tip) {
-        json_set_str(result, "No tip available");
-        return false;
-    }
-
     struct script coinbase_script;
     coinbase_script.size = 0;
 
-    struct block_template *tmpl = create_new_block(
-        &coinbase_script, ctx->main_state, ctx->coins_tip, ctx->mempool, cp);
+    struct mining_template_parent parent;
+    const char *reason;
+    struct block_template *tmpl = mining_create_template(&coinbase_script, cp, &parent, &reason);
     if (!tmpl) {
-        json_set_str(result, "Could not create block template");
+        json_set_str(result, reason);
         return false;
     }
 
@@ -574,10 +621,10 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
     snprintf(bits_str, sizeof(bits_str), "%08x", tmpl->block.header.nBits);
     json_push_kv_str(result, "bits", bits_str);
 
-    json_push_kv_int(result, "height", tip->nHeight + 1);
+    json_push_kv_int(result, "height", parent.height);
     json_push_kv_int(result, "curtime", (int64_t)tmpl->block.header.nTime);
     json_push_kv_int(result, "mintime",
-                     block_index_get_median_time_past(tip) + 1);
+                     parent.minimum_time);
     json_push_kv_int(result, "sizelimit", MAX_BLOCK_SIZE);
     json_push_kv_int(result, "sigoplimit", 20000);
 
