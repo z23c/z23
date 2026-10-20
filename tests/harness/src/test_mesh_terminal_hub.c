@@ -767,6 +767,9 @@ static int limit_cases(void)
         int64_t took = now_us() - t0;
         failures = check(failures, got && ex.reason == cases[i].reason && !(ex.flags & 3) && fin &&
                          (int)r.reason == cases[i].reason, cases[i].label);
+        printf("  deadline timing diagnostic: case=%s elapsed_us=%lld "
+               "required_us=(900000,4000000) handshake=%d exit_received=%d reaped=%d\n",
+               cases[i].label, (long long)took, hs, got, fin);
         failures = check(failures, took > 900000 && took < 4000000, "and it fires at the deadline, not before or long after");
     }
     return failures;
