@@ -305,11 +305,7 @@ void plugin_manifest_digest(const char *manifest, size_t len,
                                uint8_t digest[PLUGIN_DIGEST_BYTES])
 {
     static const unsigned char domain[] = PM_SIG_DOMAIN;
-    struct sha3_512_ctx ctx;
-    sha3_512_init(&ctx);
-    sha3_512_write(&ctx, domain, sizeof(domain)); /* includes the NUL */
-    sha3_512_write(&ctx, (const unsigned char *)manifest, len);
-    sha3_512_finalize(&ctx, digest);
+    plugin_domain_digest(domain, sizeof(domain), manifest, len, digest);
 }
 
 enum plugin_status plugin_verify_manifest_keys(const char *manifest, size_t manifest_len,

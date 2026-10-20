@@ -13,6 +13,7 @@
 #include "base/cleanse.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
+#include "sha3/sha3.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -50,6 +51,18 @@ static bool pp_manifest_build(const struct plugin_pack_request *r,
     if (n > 0 && (size_t)n < cap)
         n += snprintf(out + n, cap - (size_t)n, "]}\n");
     return n > 0 && (size_t)n < cap;
+}
+
+/* See plugin_internal.h. */
+void plugin_domain_digest(const unsigned char *domain, size_t domain_len,
+                          const void *data, size_t len,
+                          uint8_t out[PLUGIN_DIGEST_BYTES])
+{
+    struct sha3_512_ctx ctx;
+    sha3_512_init(&ctx);
+    sha3_512_write(&ctx, domain, domain_len);
+    sha3_512_write(&ctx, (const unsigned char *)data, len);
+    sha3_512_finalize(&ctx, out);
 }
 
 /* Writes data to path through an exclusive sibling file and a rename, so a

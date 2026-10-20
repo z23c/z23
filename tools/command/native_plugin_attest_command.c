@@ -7,6 +7,7 @@
  *          and both are owner-only and never remote. */
 
 #include "base/safe_alloc.h"
+#include "command/lab_priv.h"
 #include "command/native_command.h"
 
 #include "json/json.h"
@@ -16,16 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static const char *pat_str(const struct zcl_command_request *request, const char *key)
-{
-    if (!request->input)
-        return NULL;
-    const struct json_value *v = json_get(request->input, key);
-    if (!v || v->type != JSON_STR)
-        return NULL;
-    return json_get_str(v);
-}
 
 static void pat_refuse(struct zcl_command_reply *reply, const char *code,
                        const char *next_action, const char *what, const char *evidence)
@@ -57,13 +48,13 @@ void zcl_native_handle_plugin_attest(const struct zcl_command_request *request,
     if (!request || !reply)
         return;
     struct plugin_attest_request in = {
-        .image_path = pat_str(request, "image"),
-        .key_path = pat_str(request, "key"),
-        .name = pat_str(request, "name"),
-        .version = pat_str(request, "version"),
-        .source_root = pat_str(request, "source-root"),
-        .toolchain = pat_str(request, "toolchain"),
-        .dir = pat_str(request, "dir"),
+        .image_path = lab_in_str(request, "image"),
+        .key_path = lab_in_str(request, "key"),
+        .name = lab_in_str(request, "name"),
+        .version = lab_in_str(request, "version"),
+        .source_root = lab_in_str(request, "source-root"),
+        .toolchain = lab_in_str(request, "toolchain"),
+        .dir = lab_in_str(request, "dir"),
     };
     struct plugin_attest_result out;
     enum plugin_attest_status st = plugin_attest_make(&in, &out);
@@ -151,10 +142,10 @@ void zcl_native_handle_plugin_attest_verify(const struct zcl_command_request *re
     memset(rep, 0, sizeof(*rep));
     enum plugin_attest_status st =
         pat_threshold(request, &k)
-            ? plugin_attest_verify_dir(pat_str(request, "manifest"),
-                                       pat_str(request, "attestations"),
-                                       pat_str(request, "builders"), k,
-                                       pat_str(request, "source-root"), rep)
+            ? plugin_attest_verify_dir(lab_in_str(request, "manifest"),
+                                       lab_in_str(request, "attestations"),
+                                       lab_in_str(request, "builders"), k,
+                                       lab_in_str(request, "source-root"), rep)
             : PLUGIN_ATTEST_THRESHOLD_INVALID;
     pat_evidence(rep, evidence, sizeof(evidence));
     if (st != PLUGIN_ATTEST_OK)

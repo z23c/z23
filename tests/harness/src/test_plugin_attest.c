@@ -421,6 +421,29 @@ static int pat_case_status_text(void)
     return failures;
 }
 
+static int pat_case_manifest_digest_pin(void)
+{
+    int failures = 0;
+    struct pat_fx fx;
+    struct plugin_pack_result res;
+    char exe[PATH_MAX], key[PATH_MAX], dist[PATH_MAX], pub[65];
+    TEST_CASE("the signed-manifest digest of a fixed manifest is pinned to its hex value") {
+        ASSERT(test_mkdtemp(fx.base, sizeof(fx.base), "plugin_attest"));
+        ASSERT(pat_path(exe, sizeof(exe), fx.base, "exe") && pat_write(exe, "the same bytes", 14));
+        ASSERT(pat_path(key, sizeof(key), fx.base, "k.key") && plugin_keygen(key, pub) == PLUGIN_OK);
+        ASSERT(pat_path(dist, sizeof(dist), fx.base, "dist"));
+        struct plugin_pack_request rq = { .exe_path = exe, .name = "hello", .version = "1.0.0",
+                                          .key_path = key, .out_dir = dist };
+        ASSERT_EQ(plugin_pack(&rq, &res), PLUGIN_OK);
+        /* SHA3-512 of "z23.plugin.manifest.v1", NUL, the manifest bytes: computed
+         * outside this tree with openssl before the digest helper was shared. */
+        ASSERT_STR_EQ(res.generation,
+            "464af05cdc16ecec1ccb60f942b11dc67ce19276dc9a216b2edab917af0966495eb3eda9a2d9a6f8d8a9a514ae10d217713d8de0ee5215ea8f0d56db2ca3bd01");
+        (void)test_rm_rf_recursive(fx.base);
+    } TEST_END
+    return failures;
+}
+
 static int pat_case_pins(void)
 {
     int failures = 0;
@@ -599,6 +622,7 @@ int test_plugin_attest(void)
     failures += pat_case_malformed_file();
     failures += pat_case_readdir_error();
     failures += pat_case_status_text();
+    failures += pat_case_manifest_digest_pin();
     failures += pat_case_pins();
     failures += pat_case_parser();
     failures += pat_case_deterministic();

@@ -73,6 +73,13 @@ bool plugin_mkdirs(const char *path);
  * reader never sees a partial file. Used by plugin_pack and plugin_attest. */
 bool plugin_write_atomic(const char *path, const char *data, size_t len);
 
+/* SHA3-512 of domain (domain_len bytes, include the NUL when the tag is a C
+ * string), then data. The one domain-separated digest the manifest signature
+ * and the builder attestation share. Never truncates. */
+void plugin_domain_digest(const unsigned char *domain, size_t domain_len,
+                          const void *data, size_t len,
+                          uint8_t out[PLUGIN_DIGEST_BYTES]);
+
 /* Per-plugin mutation lock (plugdir/.lock, plus the waiter gate
  * plugdir/.lock.q that keeps a returning holder from starving a waiter) held
  * across the whole read-verify-modify of install, switch and rollback. Waits

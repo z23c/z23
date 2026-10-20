@@ -10,7 +10,6 @@
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "plugin/plugin_attest.h"
-#include "sha3/sha3.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -239,11 +238,7 @@ enum plugin_attest_status plugin_attest_parse(const char *bytes, size_t len,
 static void pa_digest(const char *prefix, size_t len, uint8_t digest[PLUGIN_DIGEST_BYTES])
 {
     static const unsigned char domain[] = PA_SCHEMA; /* sizeof includes the NUL */
-    unsigned char msg[sizeof(domain) + PLUGIN_ATTEST_RECORD_MAX];
-    if (len > PLUGIN_ATTEST_RECORD_MAX) len = PLUGIN_ATTEST_RECORD_MAX;
-    memcpy(msg, domain, sizeof(domain));
-    memcpy(msg + sizeof(domain), prefix, len);
-    zcl_sha3_512(msg, sizeof(domain) + len, digest);
+    plugin_domain_digest(domain, sizeof(domain), prefix, len, digest);
 }
 
 enum plugin_attest_status plugin_attest_check_signature(
