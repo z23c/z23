@@ -7158,6 +7158,15 @@ static bool dlx_qualify_refused(const struct dlx_call *c, const char *code)
            strcmp(dlx_err_code(c), code) == 0 && !dlx_queue_has_one();
 }
 
+static bool dlx_qualify_make_field(FILE *f, const char *text, int delimiter)
+{
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        if (fgetc(f) != *p)
+            return false;
+    }
+    return fgetc(f) == delimiter;
+}
+
 /* The real Make recipes record normalized job flags after argv processing. */
 static bool dlx_qualify_make_trace(const struct dlx_rig *rig,
                                   const char *jobs, const char *prepare,
@@ -7166,7 +7175,7 @@ static bool dlx_qualify_make_trace(const struct dlx_rig *rig,
     static const char *const goals[] = { "docs-capability-inventory", "dev-bin",
         "install-hooks", "lint-ready", "check-cyclomatic-complexity",
         "lint", "t-fast-exact" };
-    char path[1400], line[256], expected[256];
+    char path[1400];
     if (snprintf(path, sizeof(path), "%s/qualify-jobs.txt", rig->clone) >=
         (int)sizeof(path))
         return false;
@@ -7174,10 +7183,10 @@ static bool dlx_qualify_make_trace(const struct dlx_rig *rig,
     if (!f) return false;
     bool ok = true;
     for (size_t i = 0; ok && i < sizeof(goals) / sizeof(goals[0]); i++) {
-        int n = snprintf(expected, sizeof(expected), "%s|%s|%s\n", goals[i],
-                          i == 1 ? prepare : jobs, i == 6 ? "test_leaf_smoke" : inherited_only);
-        ok = n > 0 && n < (int)sizeof(expected) &&
-             fgets(line, sizeof(line), f) && strcmp(line, expected) == 0;
+        ok = dlx_qualify_make_field(f, goals[i], '|') &&
+             dlx_qualify_make_field(f, i == 1 ? prepare : jobs, '|') &&
+             dlx_qualify_make_field(f,
+                 i == 6 ? "test_leaf_smoke" : inherited_only, '\n');
     }
     ok = ok && fgetc(f) == EOF && !ferror(f);
     if (fclose(f) != 0) ok = false;
@@ -7243,6 +7252,34 @@ _test_next:;
     return failures;
 }
 
+static int dlx_qualify_make_long_only(void)
+{
+    static const char selection[] =
+        "test_binary_ab_fallback,test_boot_shutdown_marker,test_code_inventory,"
+        "test_command_handler_snapshot,test_command_registry_catalog,"
+        "test_dev_land,test_dev_platform,test_hotswap_loader,test_hotswap_module,"
+        "test_hotswap_module_v2,test_hotswap_simnet,test_make_lint_gates,"
+        "test_native_api_contract,test_self_backtrace,test_test_group_selector,"
+        "test_dev_land_window";
+    int failures = 0;
+    const char *old_only = getenv("ONLY");
+    bool present = old_only != NULL, ready = false;
+    char *saved = old_only ? strdup(old_only) : NULL;
+    TEST("land: Make cap trace retains a long inherited exact selection") {
+        ASSERT(!present || saved);
+        ASSERT(strlen(selection) > 335);
+        ASSERT(setenv("ONLY", selection, 1) == 0);
+        ready = true;
+        PASS();
+    }
+_test_next:;
+    if (ready)
+        failures += dlx_qualify_make_cap_case("4", true,
+                                             "qualify_make_cap_long_only");
+    dlx_qualify_env_restore("ONLY", saved, present);
+    return failures;
+}
+
 static int test_dev_land_qualify_make_caps(void)
 {
     return dlx_qualify_make_cap_case(NULL, true, "qualify_make_cap_unset") +
@@ -7251,7 +7288,8 @@ static int test_dev_land_qualify_make_caps(void)
            dlx_qualify_make_cap_case("", false, "qualify_make_cap_empty") +
            dlx_qualify_make_cap_case("0", false, "qualify_make_cap_zero") +
            dlx_qualify_make_cap_case("4x", false, "qualify_make_cap_malformed") +
-           dlx_qualify_make_cap_case("4294967296", false, "qualify_make_cap_overflow");
+           dlx_qualify_make_cap_case("4294967296", false, "qualify_make_cap_overflow") +
+           dlx_qualify_make_long_only();
 }
 
 /* These are real registry aliases, including a group with a test_ basename. */
