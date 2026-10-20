@@ -63,13 +63,16 @@ Source inspection, editing, builds and isolated tests do not permit:
 
 - consensus predicate changes or edits to the sealed `core/` (explicit unseal/reseal ritual only);
 - spending funds, exporting keys or weakening custody;
-- canonical-datadir mutation or live database surgery;
-- production deployment, restart or promotion;
+- deleting, reindexing or hand-editing a canonical datadir (live database surgery);
+- deploying, restarting into or promoting a build that is not reviewed and landed;
+- secrets, keys or grants in logs, argv, commits or messages;
 - fetched-source execution outside the bounded build/test lifecycle;
 - publication, signing or acceptance on another operator's behalf.
 
+Restarting a node and upgrading it to a reviewed, landed build are routine; `make deploy` keeps its explicit `ZCL_DEPLOY_ALLOW_CANONICAL=1` switch for the canonical lane. Routine development, landing and reviewed deploys need no approval round.
+
 **Verify, don't trust.** A hash identifies bytes, a signature identifies a signing key, a receipt binds an observation; none alone proves safety or correctness. Downloaded C is inert until built and tested under local policy. P0 is always consensus, custody and public-node health; builds, telemetry and agent work never delay them.
-Escalate only for consensus or custody risk, destructive production action, irreconcilable authority ambiguity, a missing human product decision, or an assertion that would need weakening. Read [SECURITY_AND_INTEGRITY.md](docs/node/SECURITY_AND_INTEGRITY.md) and [CONSENSUS_PARITY_DOCTRINE.md](docs/CONSENSUS_PARITY_DOCTRINE.md) before consensus or custody work.
+Escalate only for consensus or custody risk, a destructive production action (datadir delete or reindex), a spend, or an assertion that would need weakening; decide everything else, record the decision and continue. Read [SECURITY_AND_INTEGRITY.md](docs/node/SECURITY_AND_INTEGRITY.md) and [CONSENSUS_PARITY_DOCTRINE.md](docs/CONSENSUS_PARITY_DOCTRINE.md) before consensus or custody work.
 
 ## Review and landing
 
