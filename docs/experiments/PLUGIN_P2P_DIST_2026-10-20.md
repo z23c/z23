@@ -90,14 +90,14 @@ HOME=$H_RCV $Z plugin fetch ... again                                           
 HOME=$H_RCV $Z plugin switch upper $GEN ; HOME=$H_RCV $Z plugin call upper --stdin=abc
 ```
 
-Observed on R1 (one run, this commit):
+Observed on R1 (first run; the second run repeated every outcome):
 
 | Step | Result | Time |
 | --- | --- | --- |
 | pack | passed | 29 ms |
 | publish (852301 bytes, 4 files) | passed, root and `manifest_sha3` returned | 127 ms |
 | receiver fetch before any bytes | `PLUGIN_DIST_NOT_FETCHED`, download recorded | 26 ms |
-| both nodes up to receiver store `complete:true` (4 of 4 chunks) | swarm transfer over loopback | about 4.1 s (poll granularity 1 s) |
+| both nodes up to receiver store `complete:true` (4 of 4 chunks) | swarm transfer over loopback | 4.1 s and 3.1 s in two runs (poll granularity 1 s) |
 | unpinned `fetch` of the delivered root | `PLUGIN_DIST_PUBLISHER_UNPINNED`, nothing stored | 48 ms |
 | pinned `fetch` | passed, `already_present:false`, `switched:false` | 96 ms |
 | `plugin status` | `current` empty, one generation | under 1 ms |
