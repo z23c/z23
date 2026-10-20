@@ -69,6 +69,10 @@ bool plugin_fsync_dir(const char *path);
 
 bool plugin_mkdirs(const char *path);
 
+/* Write data to path through an exclusive sibling file and a rename, so a
+ * reader never sees a partial file. Used by plugin_pack and plugin_attest. */
+bool plugin_write_atomic(const char *path, const char *data, size_t len);
+
 /* Per-plugin mutation lock (plugdir/.lock, plus the waiter gate
  * plugdir/.lock.q that keeps a returning holder from starving a waiter) held
  * across the whole read-verify-modify of install, switch and rollback. Waits

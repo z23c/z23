@@ -54,7 +54,7 @@ static bool pp_manifest_build(const struct plugin_pack_request *r,
 
 /* Writes data to path through an exclusive sibling file and a rename, so a
  * reader never sees a partial file and a leftover sibling is not reused. */
-static bool pp_write_atomic(const char *path, const char *data, size_t len)
+bool plugin_write_atomic(const char *path, const char *data, size_t len)
 {
 #if defined(_WIN32)
     return platform_directory_transaction_write_atomic(path, data, len);
@@ -171,8 +171,8 @@ static enum plugin_status pp_publish(const struct plugin_pack_request *r,
     plugin_manifest_digest(manifest, strlen(manifest), digest);
     zcl_hex_encode(digest, sizeof(digest), out->generation);
     st = pp_sign_doc(seed, manifest, strlen(manifest), sig, sizeof(sig), out->public_key);
-    if (st == PLUGIN_OK && !(pp_write_atomic(out->manifest_path, manifest, strlen(manifest)) &&
-                             pp_write_atomic(sig_path, sig, strlen(sig))))
+    if (st == PLUGIN_OK && !(plugin_write_atomic(out->manifest_path, manifest, strlen(manifest)) &&
+                             plugin_write_atomic(sig_path, sig, strlen(sig))))
         st = PLUGIN_ERR_IO;
     return st;
 }

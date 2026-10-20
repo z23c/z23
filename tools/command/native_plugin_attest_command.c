@@ -19,8 +19,12 @@
 
 static const char *pat_str(const struct zcl_command_request *request, const char *key)
 {
-    const struct json_value *v = request->input ? json_get(request->input, key) : NULL;
-    return v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    if (!request->input)
+        return NULL;
+    const struct json_value *v = json_get(request->input, key);
+    if (!v || v->type != JSON_STR)
+        return NULL;
+    return json_get_str(v);
 }
 
 static void pat_refuse(struct zcl_command_reply *reply, const char *code,

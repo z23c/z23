@@ -175,6 +175,7 @@ static int pat_case_accept(void)
         ASSERT_EQ(rep.toolchains, 2u);
         ASSERT_STR_EQ(rep.source_root, PAT_ROOT_A);
         ASSERT_EQ(pat_verify(&fx, dir, 1, PAT_ROOT_A, &rep), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(plugin_attest_verify_dir(fx.manifest, dir, fx.pins, 2, NULL, &rep), PLUGIN_ATTEST_OK);
         pat_close(&fx);
     } TEST_END
     return failures;
@@ -403,6 +404,23 @@ static int pat_case_readdir_error(void)
     return failures;
 }
 
+static int pat_case_status_text(void)
+{
+    int failures = 0;
+    TEST_CASE("every refusal has a distinct code and a next action") {
+        for (int s = PLUGIN_ATTEST_ARGUMENT; s <= PLUGIN_ATTEST_BELOW_THRESHOLD; s++) {
+            const char *code = plugin_attest_status_code((enum plugin_attest_status)s);
+            const char *next = plugin_attest_status_next_action((enum plugin_attest_status)s);
+            ASSERT(strncmp(code, "PLUGIN_ATTEST_", 14) == 0 && next[0] != '\0');
+            for (int u = PLUGIN_ATTEST_ARGUMENT; u < s; u++)
+                ASSERT(strcmp(code, plugin_attest_status_code((enum plugin_attest_status)u)) != 0);
+        }
+        ASSERT_STR_EQ(plugin_attest_status_next_action(PLUGIN_ATTEST_OK), "");
+        ASSERT_STR_EQ(plugin_attest_status_code((enum plugin_attest_status)999), "PLUGIN_ATTEST_UNKNOWN");
+    } TEST_END
+    return failures;
+}
+
 static int pat_case_pins(void)
 {
     int failures = 0;
@@ -580,6 +598,7 @@ int test_plugin_attest(void)
     failures += pat_case_bad_signature();
     failures += pat_case_malformed_file();
     failures += pat_case_readdir_error();
+    failures += pat_case_status_text();
     failures += pat_case_pins();
     failures += pat_case_parser();
     failures += pat_case_deterministic();

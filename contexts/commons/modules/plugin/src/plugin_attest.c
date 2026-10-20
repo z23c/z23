@@ -19,17 +19,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(_WIN32)
-#include "platform/directory_transaction.h"
-#endif
-
-#ifndef O_CLOEXEC
-#define O_CLOEXEC 0
-#endif
-#ifndef O_NOFOLLOW
-#define O_NOFOLLOW 0
-#endif
-
 #define PA_SCHEMA "z23.plugin.attest.v1"
 
 enum pa_kind { PA_NAME, PA_VERSION, PA_KEY, PA_SIG, PA_IMAGE, PA_TOOLCHAIN };
@@ -249,12 +238,12 @@ enum plugin_attest_status plugin_attest_parse(const char *bytes, size_t len,
 
 static void pa_digest(const char *prefix, size_t len, uint8_t digest[PLUGIN_DIGEST_BYTES])
 {
-    static const unsigned char domain[] = PA_SCHEMA;
-    struct sha3_512_ctx ctx;
-    sha3_512_init(&ctx);
-    sha3_512_write(&ctx, domain, sizeof(domain)); /* includes the NUL */
-    sha3_512_write(&ctx, (const unsigned char *)prefix, len);
-    sha3_512_finalize(&ctx, digest);
+    static const unsigned char domain[] = PA_SCHEMA; /* sizeof includes the NUL */
+    unsigned char msg[sizeof(domain) + PLUGIN_ATTEST_RECORD_MAX];
+    if (len > PLUGIN_ATTEST_RECORD_MAX) len = PLUGIN_ATTEST_RECORD_MAX;
+    memcpy(msg, domain, sizeof(domain));
+    memcpy(msg + sizeof(domain), prefix, len);
+    zcl_sha3_512(msg, sizeof(domain) + len, digest);
 }
 
 enum plugin_attest_status plugin_attest_check_signature(
@@ -303,31 +292,6 @@ static void pa_fill(struct plugin_attest_record *rec,
     zcl_hex_encode(sig, sizeof(sig), rec->signature);
 }
 
-/* Exclusive sibling file, then a rename: a reader never sees a partial record. */
-static bool pa_write_atomic(const char *path, const char *data, size_t len)
-{
-#if defined(_WIN32)
-    return platform_directory_transaction_write_atomic(path, data, len);
-#else
-    char tmp[PLUGIN_PATH_MAX];
-    if (!plugin_join(tmp, sizeof(tmp), path, NULL, NULL, NULL) ||
-        strlen(tmp) + 5 >= sizeof(tmp))
-        return false;
-    strcat(tmp, ".tmp");
-    (void)unlink(tmp);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
-    if (fd < 0)
-        return false;
-    bool ok = write(fd, data, len) == (ssize_t)len && fchmod(fd, 0644) == 0 &&
-              fsync(fd) == 0;
-    ok = close(fd) == 0 && ok;
-    ok = ok && rename(tmp, path) == 0;
-    if (!ok)
-        (void)unlink(tmp);
-    return ok;
-#endif
-}
-
 static enum plugin_attest_status pa_store(const struct plugin_attest_request *r,
                                           struct plugin_attest_result *out)
 {
@@ -339,7 +303,7 @@ static enum plugin_attest_status pa_store(const struct plugin_attest_request *r,
         !plugin_join(out->path, sizeof(out->path), r->dir ? r->dir : ".", leaf,
                      NULL, NULL))
         return PLUGIN_ATTEST_ARGUMENT;
-    return pa_write_atomic(out->path, bytes, n) ? PLUGIN_ATTEST_OK : PLUGIN_ATTEST_IO;
+    return plugin_write_atomic(out->path, bytes, n) ? PLUGIN_ATTEST_OK : PLUGIN_ATTEST_IO;
 }
 
 enum plugin_attest_status plugin_attest_make(
