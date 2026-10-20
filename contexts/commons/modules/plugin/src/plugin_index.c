@@ -32,21 +32,21 @@
 
 const char *plugin_index_status_code(enum plugin_index_status status)
 {
-    switch (status) {
-    case PLUGIN_INDEX_OK: return "PLUGIN_INDEX_OK";
-    case PLUGIN_INDEX_ARGUMENT: return "PLUGIN_INDEX_ARGUMENT";
-    case PLUGIN_INDEX_MALFORMED: return "PLUGIN_INDEX_MALFORMED";
-    case PLUGIN_INDEX_BAD_SIGNATURE: return "PLUGIN_INDEX_BAD_SIGNATURE";
-    case PLUGIN_INDEX_ROLLBACK: return "PLUGIN_INDEX_ROLLBACK";
-    case PLUGIN_INDEX_EQUIVOCATION: return "PLUGIN_INDEX_EQUIVOCATION";
-    case PLUGIN_INDEX_SOURCE: return "PLUGIN_INDEX_SOURCE";
-    case PLUGIN_INDEX_PINS: return "PLUGIN_INDEX_PINS";
-    case PLUGIN_INDEX_TOO_MANY: return "PLUGIN_INDEX_TOO_MANY";
-    case PLUGIN_INDEX_IO: return "PLUGIN_INDEX_IO";
-    }
-    return "PLUGIN_INDEX_UNKNOWN";
+    static const char *const names[] = {
+        [PLUGIN_INDEX_OK] = "PLUGIN_INDEX_OK",
+        [PLUGIN_INDEX_ARGUMENT] = "PLUGIN_INDEX_ARGUMENT",
+        [PLUGIN_INDEX_MALFORMED] = "PLUGIN_INDEX_MALFORMED",
+        [PLUGIN_INDEX_BAD_SIGNATURE] = "PLUGIN_INDEX_BAD_SIGNATURE",
+        [PLUGIN_INDEX_ROLLBACK] = "PLUGIN_INDEX_ROLLBACK",
+        [PLUGIN_INDEX_EQUIVOCATION] = "PLUGIN_INDEX_EQUIVOCATION",
+        [PLUGIN_INDEX_SOURCE] = "PLUGIN_INDEX_SOURCE",
+        [PLUGIN_INDEX_PINS] = "PLUGIN_INDEX_PINS",
+        [PLUGIN_INDEX_TOO_MANY] = "PLUGIN_INDEX_TOO_MANY",
+        [PLUGIN_INDEX_IO] = "PLUGIN_INDEX_IO"
+    };
+    size_t n = sizeof(names) / sizeof(names[0]);
+    return (size_t)status < n && names[status] ? names[status] : "PLUGIN_INDEX_UNKNOWN";
 }
-
 static bool pi_digit(char c)
 {
     return c >= '0' && c <= '9';
@@ -124,28 +124,24 @@ static bool pi_body(const struct plugin_index_entry *e, char *out, size_t cap,
     return true;
 }
 
+/* SHA3-512 of the domain tag, its NUL and the body, hashed in one pass. */
 static void pi_signing_digest(const char *body, size_t len,
                               uint8_t digest[PLUGIN_DIGEST_BYTES])
 {
-    static const unsigned char domain[] = PI_SCHEMA; /* includes the NUL */
-    struct sha3_512_ctx ctx;
-    sha3_512_init(&ctx);
-    sha3_512_write(&ctx, domain, sizeof(domain));
-    sha3_512_write(&ctx, (const unsigned char *)body, len);
-    sha3_512_finalize(&ctx, digest);
+    unsigned char msg[sizeof(PI_SCHEMA) + PLUGIN_INDEX_ENTRY_MAX];
+    if (len > PLUGIN_INDEX_ENTRY_MAX)
+        len = PLUGIN_INDEX_ENTRY_MAX; /* bodies are bounded by the caller */
+    memcpy(msg, PI_SCHEMA, sizeof(PI_SCHEMA));
+    memcpy(msg + sizeof(PI_SCHEMA), body, len);
+    zcl_sha3_512(msg, sizeof(PI_SCHEMA) + len, digest);
 }
-
 static void pi_entry_digest(const char *bytes, size_t len,
                             char hex[PLUGIN_HEX_SHA3_512 + 1])
 {
     uint8_t d[PLUGIN_DIGEST_BYTES];
-    struct sha3_512_ctx ctx;
-    sha3_512_init(&ctx);
-    sha3_512_write(&ctx, (const unsigned char *)bytes, len);
-    sha3_512_finalize(&ctx, d);
+    zcl_sha3_512((const unsigned char *)bytes, len, d);
     zcl_hex_encode(d, sizeof(d), hex);
 }
-
 static bool pi_fields_valid(const struct plugin_index_entry *e)
 {
     unsigned all = 0;
@@ -154,7 +150,9 @@ static bool pi_fields_valid(const struct plugin_index_entry *e)
     return plugin_name_valid(e->name) && plugin_version_valid(e->version) &&
            (e->interface_version == 1 || e->interface_version == 2) &&
            (e->capabilities & ~all) == 0 &&
+           strlen(e->root) == PLUGIN_INDEX_HEX_KEY &&
            plugin_hex_valid(e->root, PLUGIN_INDEX_HEX_KEY) &&
+           strlen(e->publisher) == PLUGIN_INDEX_HEX_KEY &&
            plugin_hex_valid(e->publisher, PLUGIN_INDEX_HEX_KEY) &&
            e->timestamp >= 0;
 }
@@ -185,12 +183,18 @@ enum plugin_index_status plugin_index_encode(struct plugin_index_entry *entry,
     return PLUGIN_INDEX_OK;
 }
 
-static const char *pi_str(const struct json_value *obj, const char *key)
+/* Copies the string field key of obj into dst; false when absent, not a
+ * string or too long. */
+static bool pi_field(const struct json_value *obj, const char *key,
+                     char *dst, size_t cap)
 {
     const struct json_value *v = json_get(obj, key);
-    return v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    const char *s = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    if (!s || strlen(s) >= cap)
+        return false;
+    memcpy(dst, s, strlen(s) + 1);
+    return true;
 }
-
 static bool pi_int(const struct json_value *obj, const char *key, int64_t *out)
 {
     const struct json_value *v = json_get(obj, key);
@@ -214,28 +218,20 @@ static bool pi_caps(const struct json_value *arr, unsigned *mask)
     return true;
 }
 
-static bool pi_copy(char *dst, size_t cap, const char *src)
-{
-    if (!src || strlen(src) >= cap)
-        return false;
-    memcpy(dst, src, strlen(src) + 1);
-    return true;
-}
-
 /* Reads the fields; the canonical re-encoding check happens in the caller. */
 static bool pi_fields_read(const struct json_value *root,
-                           struct plugin_index_entry *e, const char **sig)
+                           struct plugin_index_entry *e, char sig[129])
 {
+    char schema[sizeof(PI_SCHEMA) + 1];
     if (root->type != JSON_OBJ)
         return false;
-    const char *schema = pi_str(root, "schema");
-    *sig = pi_str(root, "signature");
-    return schema && strcmp(schema, PI_SCHEMA) == 0 && *sig &&
-           pi_copy(e->name, sizeof(e->name), pi_str(root, "name")) &&
-           pi_copy(e->version, sizeof(e->version), pi_str(root, "version")) &&
-           pi_copy(e->root, sizeof(e->root), pi_str(root, "root")) &&
-           pi_copy(e->publisher, sizeof(e->publisher),
-                   pi_str(root, "publisher")) &&
+    return pi_field(root, "schema", schema, sizeof(schema)) &&
+           strcmp(schema, PI_SCHEMA) == 0 &&
+           pi_field(root, "signature", sig, 129) &&
+           pi_field(root, "name", e->name, sizeof(e->name)) &&
+           pi_field(root, "version", e->version, sizeof(e->version)) &&
+           pi_field(root, "root", e->root, sizeof(e->root)) &&
+           pi_field(root, "publisher", e->publisher, sizeof(e->publisher)) &&
            pi_int(root, "interface_version", &e->interface_version) &&
            pi_int(root, "timestamp", &e->timestamp) &&
            pi_caps(json_get(root, "capabilities"), &e->capabilities);
@@ -261,7 +257,7 @@ enum plugin_index_status plugin_index_parse(const char *bytes, size_t len,
 {
     struct plugin_index_entry e;
     struct json_value root;
-    const char *sig_hex = NULL;
+    char sig_hex[129];
     char body[PLUGIN_INDEX_ENTRY_MAX];
     size_t body_len = 0;
     uint8_t pk[32], sig[64], digest[PLUGIN_DIGEST_BYTES];
@@ -272,8 +268,9 @@ enum plugin_index_status plugin_index_parse(const char *bytes, size_t len,
         return PLUGIN_INDEX_MALFORMED;
     memset(&e, 0, sizeof(e));
     json_init(&root);
-    bool ok = json_read(&root, bytes, len) && pi_fields_read(&root, &e, &sig_hex) &&
-              pi_fields_valid(&e) && plugin_hex_valid(sig_hex, 128) &&
+    bool ok = json_read(&root, bytes, len) && pi_fields_read(&root, &e, sig_hex) &&
+              pi_fields_valid(&e) && strlen(sig_hex) == 128 &&
+              plugin_hex_valid(sig_hex, 128) &&
               pi_canonical(&e, sig_hex, bytes, len, body, sizeof(body), &body_len) &&
               zcl_hex_decode_lower(e.publisher, pk, 32) &&
               zcl_hex_decode_lower(sig_hex, sig, 64);

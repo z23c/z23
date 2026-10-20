@@ -260,6 +260,12 @@ static int pix_case_malformed(void)
         memcpy(bad, good, len + 1);
         *strstr(bad, "aaaa") = 'A';
         ASSERT_EQ(plugin_index_parse(bad, len, &e), PLUGIN_INDEX_MALFORMED);
+        /* A root two characters too long is malformed, not merely badly signed. */
+        {
+            char *at = strstr(good, ROOT_A) + 64;
+            snprintf(bad, sizeof(bad), "%.*saa%s", (int)(at - good), good, at);
+            ASSERT_EQ(plugin_index_parse(bad, len + 2, &e), PLUGIN_INDEX_MALFORMED);
+        }
         /* No single-byte change of a valid entry may still be accepted. */
         for (size_t i = 0; i < len; i++) {
             memcpy(bad, good, len + 1);
