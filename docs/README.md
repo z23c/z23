@@ -116,6 +116,7 @@ does not authorize execution or deployment.
 - [`C23_COMMONS_QUICKSTART.md`](commons/C23_COMMONS_QUICKSTART.md) — concise public
   workflow and its current portability/reproduction limits.
 - [`ZVCS.md`](commons/ZVCS.md) — in-binary source identity and versioning.
+- [`PLUGIN_APPS.md`](commons/PLUGIN_APPS.md) — plan for turning every z23 app and feature into a plugin.
 - `make zcode-development-acceptance` — package developer lifecycle.
 - `make zcode-async-proof-acceptance` — interchangeable full-node async work,
   lease recovery, stale-result refusal, and exact-action reuse.

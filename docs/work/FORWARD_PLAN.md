@@ -48,6 +48,8 @@ this order:
 5. **Your own fleet.** Joining, updating, shell access, the wiki and
    telemetry work for any owner's machines, not only the maintainers'.
 
+The app-to-plugin plan for item 4 is [`PLUGIN_APPS.md`](../commons/PLUGIN_APPS.md).
+
 The [fleet A+ scorecard](FLEET_SCORECARD.md) and `z23 fleet goals` measure
 the fleet features in item 5 and the self-hosting in item 2; they do not
 reorder P0. Requirements below are acceptance targets, not claims of
