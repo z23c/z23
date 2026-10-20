@@ -31,7 +31,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define RT_SIGNERS 4
+#define RT_SIGNERS 14
+#define RT_SHARED_ED 12 /* signer 0's Ed25519 key, signer 1's SLH-DSA key */
+#define RT_SHARED_PQ 13 /* a fresh Ed25519 key, signer 0's SLH-DSA key */
 
 struct rt_signer {
     uint8_t ed_seed[32];
@@ -97,9 +99,18 @@ static bool rt_init(struct rt_fx *fx)
     mkdir("./test-tmp", 0755);
     memset(fx->root, 0xAB, sizeof(fx->root));
     bool ok = mkdir(fx->dir, 0755) == 0;
-    for (int i = 0; ok && i < RT_SIGNERS; i++)
-        ok = rt_signer_init(&fx->s[i], (uint8_t)(0x41 + i * 0x10),
-                            (uint8_t)(0xA0 + i * 0x20));
+    for (int i = 0; ok && i < RT_SIGNERS; i++) {
+        uint8_t ed = (uint8_t)(i < 4 ? 0x41 + i * 0x10 : 0x90 + i);
+        uint8_t pq = (uint8_t)(i < 4 ? 0xA0 + i * 0x20 : 0x10 + i * 3);
+        if (i == RT_SHARED_ED) {
+            ed = 0x41;
+            pq = 0xC0;
+        } else if (i == RT_SHARED_PQ) {
+            ed = 0xEE;
+            pq = 0xA0;
+        }
+        ok = rt_signer_init(&fx->s[i], ed, pq);
+    }
     return ok;
 }
 
@@ -332,6 +343,77 @@ static int rt_refusals(struct rt_fx *fx)
     return failures;
 }
 
+/* Flip the last byte of signer i's v2 doc (inside the SLH-DSA signature, so
+ * the Ed25519 half still verifies) and write it to <dir>/<file>. */
+static bool rt_doc_bad_pq(const struct rt_fx *fx, int i, const char *file)
+{
+    char path[PATH_MAX];
+    if (!rt_doc(fx, i, "z23", "1.0", fx->root, file))
+        return false;
+    snprintf(path, sizeof(path), "%s/%s", fx->dir, file);
+    FILE *fp = fopen(path, "rb+");
+    if (!fp)
+        return false;
+    char hex[ZID_DOC_V2_MAX * 2 + 2];
+    size_t n = fread(hex, 1, sizeof(hex) - 1, fp);
+    bool ok = n >= 2;
+    if (ok) {
+        hex[n - 1] = hex[n - 1] == '0' ? '1' : '0';
+        ok = fseek(fp, 0, SEEK_SET) == 0 && fwrite(hex, 1, n, fp) == n;
+    }
+    return fclose(fp) == 0 && ok;
+}
+
+/* Negative rows added after review: a bad SLH-DSA half, a signer that shares
+ * only one key with another, huge K, and a set past the 8-doc cap. */
+static int rt_more_negative(struct rt_fx *fx)
+{
+    int failures = 0;
+    char files[8][32], seven[512] = "", all[600];
+    failures += rt_check(
+        rt_doc_bad_pq(fx, 1, "b_badpq.zid") &&
+            rt_doc(fx, RT_SHARED_ED, "z23", "1.0", fx->root, "s_ed.zid") &&
+            rt_doc(fx, RT_SHARED_PQ, "z23", "1.0", fx->root, "s_pq.zid"),
+        "bad-PQ and shared-key docs");
+    failures += rt_expect(fx, "Ed25519 valid but SLH-DSA bad refuses the set "
+                          "(BAD_PQ_SIGNATURE)", "a.zid", "p_ab_k2",
+                          "b_badpq.zid", "BAD_PQ_SIGNATURE");
+    failures += rt_expect(fx, "a shared Ed25519 key with a different SLH-DSA "
+                          "key is one signer: THRESHOLD_DUPLICATE_SIGNER",
+                          "a.zid", "p_ab_k2", "s_ed.zid",
+                          "THRESHOLD_DUPLICATE_SIGNER");
+    failures += rt_expect(fx, "a shared SLH-DSA key with a different Ed25519 "
+                          "key is one signer: THRESHOLD_DUPLICATE_SIGNER",
+                          "a.zid", "p_ab_k2", "s_pq.zid",
+                          "THRESHOLD_DUPLICATE_SIGNER");
+    const int ab[] = { 0, 1, -1 };
+    failures += rt_check(rt_pins(fx, "p_k99999", ab, "threshold 99999\n"),
+                         "threshold 99999 pin file");
+    failures += rt_expect(fx, "threshold 99999 is refused (PIN_FILE_INVALID)",
+                          "a.zid", "p_k99999", "b.zid", "PIN_FILE_INVALID");
+    bool ok = true;
+    for (int i = 0; ok && i < 8; i++) {
+        snprintf(files[i], sizeof(files[i]), "m%d.zid", i);
+        ok = rt_doc(fx, i == 0 ? 1 : 3 + i, "z23", "1.0", fx->root, files[i]);
+        if (i == 0)
+            continue;
+        if (i < 7) {
+            strcat(seven, ",");
+            strcat(seven, files[i]);
+        }
+    }
+    failures += rt_check(ok, "nine distinct signers");
+    char seven_all[640];
+    snprintf(seven_all, sizeof(seven_all), "%s%s", files[0], seven);
+    snprintf(all, sizeof(all), "%s%s,%s", files[0], seven, files[7]);
+    failures += rt_expect(fx, "a primary plus 7 cosigners (8 docs) is not "
+                          "over the cap", "a.zid", "p_ab_k2", seven_all, "");
+    failures += rt_expect(fx, "a primary plus 8 cosigners (9 docs) is "
+                          "TOO_MANY_DOCS", "a.zid", "p_ab_k2",
+                          all, "TOO_MANY_DOCS");
+    return failures;
+}
+
 /* `zcode release verify` runs the same gate: K=2 with two sibling docs
  * accepts and reports the counts; with one doc it is refused. */
 static int rt_verify(const struct rt_fx *fx)
@@ -372,6 +454,69 @@ static int rt_verify(const struct rt_fx *fx)
     return failures;
 }
 
+/* A non-string cosigs is BAD_COSIGS in zcode release verify even with no
+ * pin file and no threshold. */
+static int rt_bad_cosigs(const struct rt_fx *fx)
+{
+    struct json_value in;
+    struct zcl_command_request req;
+    struct zcl_command_reply reply;
+    char a[PATH_MAX];
+    snprintf(a, sizeof(a), "%s/a.zid", fx->dir);
+    json_init(&in);
+    json_set_object(&in);
+    json_push_kv_str(&in, "file", a);
+    json_push_kv_int(&in, "cosigs", 7);
+    memset(&req, 0, sizeof(req));
+    req.input = &in;
+    zcl_command_reply_init(&reply, "zcl.release_threshold_cosigs.v1");
+    zcl_native_handle_zcode_release_verify(&req, &reply);
+    int failures = rt_check(reply.status != ZCL_COMMAND_STATUS_PASSED &&
+                                strcmp(reply.error.code, "BAD_COSIGS") == 0,
+                            "zcode release verify: a non-string cosigs is "
+                            "BAD_COSIGS with no threshold set");
+    zcl_command_reply_free(&reply);
+    json_free(&in);
+    return failures;
+}
+
+/* Readers refuse anything but a regular file: a symlink (not followed) and a
+ * FIFO (never blocks) are DOC_UNREADABLE / PIN_FILE_UNREADABLE. */
+static int rt_io(const struct rt_fx *fx)
+{
+    int failures = 0;
+    char a[PATH_MAX], link_doc[PATH_MAX], fifo[PATH_MAX], link_pins[PATH_MAX];
+    char pins[PATH_MAX];
+    struct release_pin_doc d;
+    const char *code = NULL;
+    snprintf(a, sizeof(a), "%s/a.zid", fx->dir);
+    snprintf(pins, sizeof(pins), "%s/p_ab_k2", fx->dir);
+    snprintf(link_doc, sizeof(link_doc), "%s/link.zid", fx->dir);
+    snprintf(link_pins, sizeof(link_pins), "%s/link_pins", fx->dir);
+    snprintf(fifo, sizeof(fifo), "%s/fifo.zid", fx->dir);
+    failures += rt_check(symlink(a, link_doc) == 0 &&
+                             symlink(pins, link_pins) == 0 &&
+                             mkfifo(fifo, 0600) == 0,
+                         "symlink and FIFO fixtures");
+    failures += rt_check(!release_pin_read_any(link_doc, &d, &code) &&
+                             strcmp(code, "DOC_UNREADABLE") == 0,
+                         "a symlinked release doc is DOC_UNREADABLE");
+    failures += rt_check(!release_pin_read_any(fifo, &d, &code) &&
+                             strcmp(code, "DOC_UNREADABLE") == 0,
+                         "a FIFO release doc is DOC_UNREADABLE, no hang");
+    failures += rt_expect(fx, "a symlinked cosigner doc is DOC_UNREADABLE",
+                          "a.zid", "p_ab_k2", "link.zid", "DOC_UNREADABLE");
+    failures += rt_expect(fx, "a FIFO cosigner doc is DOC_UNREADABLE",
+                          "a.zid", "p_ab_k2", "fifo.zid", "DOC_UNREADABLE");
+    failures += rt_expect(fx, "a symlinked pin file is PIN_FILE_UNREADABLE",
+                          "a.zid", "link_pins", "b.zid",
+                          "PIN_FILE_UNREADABLE");
+    failures += rt_expect(fx, "a FIFO pin file is PIN_FILE_UNREADABLE",
+                          "a.zid", "fifo.zid", "b.zid",
+                          "PIN_FILE_UNREADABLE");
+    return failures;
+}
+
 int release_threshold_suite(void)
 {
     struct rt_fx fx;
@@ -383,7 +528,10 @@ int release_threshold_suite(void)
     }
     failures += rt_accept(&fx);
     failures += rt_refusals(&fx);
+    failures += rt_more_negative(&fx);
+    failures += rt_io(&fx);
     failures += rt_verify(&fx);
+    failures += rt_bad_cosigs(&fx);
     char rm[PATH_MAX + 16];
     snprintf(rm, sizeof(rm), "rm -rf '%s'", fx.dir);
     TEST_DISCARD(system(rm));

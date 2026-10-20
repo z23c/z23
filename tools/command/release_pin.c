@@ -15,8 +15,11 @@
 #include "kernel/command_registry.h"
 #include "zid/zid.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 void release_pin_fingerprint(const uint8_t pubkey[32],
                              char out[RELEASE_PIN_FINGERPRINT_HEX + 1])
@@ -215,10 +218,31 @@ static bool rp_pin_line(struct release_pin_set *set, char *line, size_t lineno,
     return rp_add(set, key, reply, path);
 }
 
+/* Open `path` for reading only if it is a regular file: no symlink is
+ * followed (O_NOFOLLOW), a FIFO or device cannot block the open
+ * (O_NONBLOCK) and is then refused by the fstat. NULL on any refusal.
+ * Windows has no symlink or FIFO open flags; it falls back to fopen. */
+static FILE *rp_fopen_regular(const char *path)
+{
+#ifdef _WIN32
+    return fopen(path, "rb");
+#else
+    struct stat sb;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return NULL;
+    FILE *fp = (fstat(fd, &sb) == 0 && S_ISREG(sb.st_mode))
+                   ? fdopen(fd, "rb") : NULL;
+    if (!fp)
+        close(fd);
+    return fp;
+#endif
+}
+
 static bool rp_load_file(struct release_pin_set *set, const char *path,
                          struct zcl_command_reply *reply)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = rp_fopen_regular(path);
     if (!fp) {
         zcl_native_refuse(reply, "PIN_FILE_UNREADABLE", "normalize",
                 "cannot open the owner-pins file; it must be a local file "
@@ -465,7 +489,7 @@ bool release_pin_doc_gate(const struct json_value *in, bool require_pin,
  * Returns the length, or 0 when unreadable, empty or oversize. */
 static size_t rp_slurp(const char *path, size_t max_chars, char *hex)
 {
-    FILE *fp = path ? fopen(path, "rb") : NULL;
+    FILE *fp = path ? rp_fopen_regular(path) : NULL;
     if (!fp)
         return 0;
     size_t n = fread(hex, 1, max_chars, fp);
@@ -537,12 +561,20 @@ bool release_pin_read_any(const char *path, struct release_pin_doc *d,
 
 /* ── k-of-n owner gate ─────────────────────────────────────────────── */
 
-bool release_pin_threshold_active(const struct json_value *in)
+/* The `cosigs` input: *cos is its string, or NULL when absent. False when
+ * present but not a string (json_get_str would read that as ""). */
+static bool rp_cosigs(const struct json_value *in, const char **cos)
 {
     const struct json_value *cs = json_get(in, "cosigs");
-    const char *cos = cs ? json_get_str(cs) : NULL;
-    if (cos && cos[0])
-        return true;
+    *cos = cs && cs->type == JSON_STR ? json_get_str(cs) : NULL;
+    return !cs || cs->type == JSON_STR;
+}
+
+bool release_pin_threshold_active(const struct json_value *in)
+{
+    const char *cos;
+    if (!rp_cosigs(in, &cos) || (cos && cos[0]))
+        return true; /* a non-string cosigs is refused BAD_COSIGS by the gate */
     struct zcl_command_reply scratch;
     struct release_pin_set set;
     zcl_command_reply_init(&scratch, "zcl.release_pin.probe.v1");
@@ -714,9 +746,8 @@ bool release_pin_multi_gate(const struct json_value *in, bool require_pin,
 {
     if (out)
         memset(out, 0, sizeof(*out));
-    const struct json_value *cs = json_get(in, "cosigs");
-    const char *cos = cs ? json_get_str(cs) : NULL;
-    if (cs && !cos) {
+    const char *cos;
+    if (!rp_cosigs(in, &cos)) {
         zcl_native_refuse(reply, "BAD_COSIGS", "normalize",
                 "cosigs must be a string", command);
         return false;
