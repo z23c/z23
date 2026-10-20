@@ -1,4 +1,4 @@
-# THE STICKY NODE — Revised Plan of Record
+# THE STICKY NODE — stickiness invariants and gap analysis (design record)
 
 **Prime invariant: STICKINESS.** Once installed/run, the node ALWAYS keeps working with
 zero maintenance — no recovery recipes, no two-step `--importblockindex`, no owner-gated

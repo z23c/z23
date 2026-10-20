@@ -248,15 +248,14 @@ single-seed slice of the same sweep loop `make wire-sweep` runs.
 seed from each capsule's filename and calls `wire_sweep` the same way;
 it does not need to parse the `.tape` file's contents because
 `wire_sweep_run_one(seed)` is a pure function of the scalar seed (the
-"bugs become 64-bit seeds" property, `docs/quality/sim-phase2-plan.md`) —
+"bugs become 64-bit seeds" property, `docs/quality/SIM_DETERMINISM.md`) —
 the same seed always rebuilds the identical adversary archetype,
 sub-case, and event stream. Both targets exit non-zero if the replayed
 seed still reports a monitor failure.
 
 ## Phase 2
 
-The phase-2 roadmap is `docs/quality/sim-phase2-plan.md` on the follow-up branch.
-The expected simulator extensions are:
+The expected simulator extensions (their order is set by `docs/work/FORWARD_PLAN.md`) are:
 
 - Sapling post-activation state for shielded memo and Sapling transaction tests.
 - Mempool and timelock support for HTLC redeem/refund settlement.

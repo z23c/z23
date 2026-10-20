@@ -8986,7 +8986,7 @@ sim-perf-clean:
 # binary. `wire_sweep_run_one(seed)` (tools/sim/wire_sweep.c) is a pure
 # function of the scalar seed, so a single seed fully determines the
 # archetype/sub-case/event stream ("bugs become 64-bit seeds",
-# docs/quality/sim-phase2-plan.md); replaying a capsule only needs the seed
+# docs/quality/SIM_DETERMINISM.md); replaying a capsule only needs the seed
 # it was saved under, which is already encoded in the capsule's filename
 # (see tools/scripts/simnet_replay_capsule.sh).
 SIMNET_REPRO_ARTIFACT_DIR ?= build/simnet-repro-output
@@ -9017,7 +9017,7 @@ simnet-replay: wire_sweep
 # "only by developer discipline" (`make ci` does not run `make chaos` today —
 # see the ci-gate decision recorded beside the `ci:` target below). Both
 # targets are fixed/seeded and MUST terminate; wire_sweep_run_one(seed) is a
-# pure function of the scalar seed (docs/quality/sim-phase2-plan.md), so every
+# pure function of the scalar seed (docs/quality/SIM_DETERMINISM.md), so every
 # run here is exactly reproducible via `make simnet-repro SEED=0x<hex>`.
 #
 # simnet-nightly: the bounded default the nightly timer runs every night —

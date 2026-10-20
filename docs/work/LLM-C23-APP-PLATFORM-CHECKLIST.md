@@ -97,7 +97,7 @@ calling an App or package stable.
 - [ ] Keep dynamic loading on canonical/soak/release lanes at zero.
 - [ ] Name the event stores precisely instead of calling all of them "the
   event log": `progress.kv` (consensus/reducer authority),
-  `engine/modules/storage/event_log` (durable engine/application/projection replay),
+  `engine/modules/storage/src/event_log.c` (durable engine/application/projection replay),
   `engine/modules/event` (volatile bounded observability), development receipts and
   the proposed telemetry ledger (non-consensus evidence).
 - [ ] Permit consensus state to flow into diagnostics; never let telemetry

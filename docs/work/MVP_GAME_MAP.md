@@ -206,7 +206,7 @@ sets, and is printed with every leaderboard so it can be audited:
   `lifecycle` or `candidate` — the machinery correctness depends on.
 - **×1** otherwise.
 
-Against the plan of record that is:
+Against that plan it is:
 
 | id | multiplier | title |
 | --- | --- | --- |

@@ -276,5 +276,5 @@ listed for continuity with the rest of this plan's dependency graph):
 ### Deferred (restated from the ADR, for the lane owner who only reads this file)
 
 epoll/kqueue reactor, custom allocator, thread priorities/QoS, a FreeBSD
-port, a unikernel — none scheduled; reasons are in `docs/adr/0003`'s
+port, a unikernel — none scheduled; reasons are in `docs/adr/0003-os-substrate-verdict.md`'s
 "Explicitly deferred" section.

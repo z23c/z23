@@ -605,7 +605,7 @@ assert green).
   sealed headers ship `static inline` consensus arithmetic
   (`consensus_last_founders_reward_height()`,
   `consensus_subsidy_slow_start_shift()`, the compact-size sizing in
-  `core/serialize.h`), and a controller including one compiles a PRIVATE COPY
+  `core/math/include/core/serialize.h`), and a controller including one compiles a PRIVATE COPY
   into its .so — so a module built before a seal re-cut still mounted and still
   ran its stale copy. `engine/modules/hotswap/include/hotswap/core_seal_root.h` mirrors
   `core/MANIFEST.sha3`'s ROOT, the module emitter stamps it into every artifact
@@ -887,7 +887,7 @@ assert green).
   `tools/lint/check_no_writer_below_sealed_frontier.sh`. The North Star's
   single-writer-per-frontier invariant
   (`docs/commons/ARCHITECTURE_NORTH_STAR.md` invariant 1) made mechanical for the
-  sealed ROM segment store (`engine/modules/storage/chain_segment`), which is
+  sealed ROM segment store (`engine/modules/storage/src/chain_segment.c`), which is
   written-once-then-immutable (chmod 0444, never rewritten/appended). Only the
   designated sealer/RPC/healer surface — `engine/modules/storage/src/chain_segment.c`, its
   header, `engine/services/src/segment_sealer_service.c`,
@@ -910,7 +910,7 @@ assert green).
   `platform/`, `tools/` (the real production C roots — the root list was
   dead since a tree rename and had scanned only `tools/`) outside
   `platform/modules/platform/`. Route process/host memory, uptime, and exe-path reads
-  through `platform/os_proc.h` (os-substrate Rung 1,
+  through `platform/modules/platform/include/platform/os_proc.h` (os-substrate Rung 1,
   `docs/work/os-substrate-plan.md` §2). Baseline
   `tools/lint/proc_self_shim_baseline.txt` (shrink-only); the one permanent
   exemption is `engine/modules/sim/src/postmortem.c`'s async-signal-safe crash-handler

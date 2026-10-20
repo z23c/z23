@@ -375,7 +375,7 @@ detail).
   note/tree/anchor/nullifier state anywhere in `engine/modules/sim/`. A grep for
   "sapling" across `engine/modules/sim/` returns only these sapling-is-OFF markers —
   zero note-commitment-tree or memo-field code.
-  `docs/quality/sim-phase2-plan.md` exists and is the right place to check for
+  `docs/quality/SIM_DETERMINISM.md` exists and is the right place to check for
   a design before starting; it was not read in depth here (out of scope for
   this pass) but should be the first read for whoever staffs this.
 - **What's missing, concretely, to make (d) possible**: (1) a
@@ -401,7 +401,7 @@ detail).
   add-on** — it needs coins-view/Sapling-tree research before any code, and
   should NOT be folded into the same wave as (a)/(b)/(c) or into Steps
   D/E/F. Recommend a dedicated research spike (read
-  `docs/quality/sim-phase2-plan.md` + `core/modules/coins/include/coins/coins_view.h` +
+  `docs/quality/SIM_DETERMINISM.md` + `core/modules/coins/include/coins/coins_view.h` +
   wherever the real node keeps its Sapling tree) before writing an
   implementation-ready spec for it.
 - **Model tier: Opus for a future implementation lane; this wave's action
@@ -417,7 +417,7 @@ detail).
 | **L3 — Step F** | nightly wire_sweep + capsule save + security grep gate | `tools/sim/wire_sweep.c` (new), `Makefile` (new targets), possibly `engine/modules/sim/src/seed_tape.c` (only if replay-from-file is missing — verify first) | step A/B; benefits from C for byzantine-mix seeds but doesn't require it | **Sonnet** (runner + Makefile); **Sonnet verify pass** specifically for the security grep gate |
 | **L4 — App flows (a)+(b)+(c)-wire-slice** | ZNAM/ZSLP/HTLC relay-with-adversaries through simnet_wire | `engine/modules/sim/src/simnet_wire_app.c` (new), `engine/modules/sim/include/sim/simnet_wire_app.h` (new), `tests/harness/src/test_simnet_wire_app.c` (new) | step C landing (needs a real, non-byzantine-stub `block_submit`/mempool-relay path) OR write its own submit hook if C is delayed | **Sonnet** |
 | **L5 — Doc fix** | correct `docs/quality/SIMULATOR.md`'s stale HTLC Class-B rows to reflect `test_simnet_txkit.c` reality | `docs/quality/SIMULATOR.md` only | none | **Haiku** |
-| **L6 — Sapling research spike** | design doc for shielded-send-in-sim (NOT code) | new doc under `docs/work/` (or extend `sim-phase2-plan.md`) | read `docs/quality/sim-phase2-plan.md` + coins_view Sapling state first | **Opus** (research/design only) |
+| **L6 — Sapling research spike** | design doc for shielded-send-in-sim (NOT code) | new doc under `docs/work/` (or extend `SIM_DETERMINISM.md`) | read `docs/quality/SIM_DETERMINISM.md` + coins_view Sapling state first | **Opus** (research/design only) |
 
 **Sequencing note**: L1 and L2 both touch `engine/modules/sim/src/simnet_wire.c` and
 `simnet_wire.h`. Land L1 first (it also introduces the scenario-timeline

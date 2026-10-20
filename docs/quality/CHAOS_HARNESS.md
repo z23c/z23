@@ -268,7 +268,7 @@ assertions over broad smoke checks.
 
 Every command above is bookkeeping-only: `sim_peer` counts blocks and bytes
 but never calls into consensus. `mode simnet` switches a scenario into a
-different engine that drives an actual `engine/modules/sim/simnet_cluster` — real
+different engine that drives an actual `engine/modules/sim/src/simnet_cluster.c` — real
 `connect_block`/`disconnect_block`, real nChainWork fork-choice, real
 Sapling-ready coins views. Use it when a scenario needs to prove something
 about *consensus behavior* (a reorg really disconnects and reconnects, a

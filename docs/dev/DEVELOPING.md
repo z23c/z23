@@ -1972,7 +1972,7 @@ Put the worktree, the contract and the gates after it.
 
 ## Measuring the MVP experiment
 
-MVP means minimum viable product. The 144-loop plan of record is also an
+MVP means minimum viable product. The 144-loop plan is also an
 experiment: what does it cost, in wall
 time and tokens, to take z23 from that plan to MVP? `build/bin/z23-mvp-ledger`
 (sources `tools/dev/mvp_ledger*.c`, test group `mvp_ledger`) answers it from

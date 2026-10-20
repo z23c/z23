@@ -10,7 +10,7 @@ Simulators, chaos harnesses, benchmarks, acceptance gates and transaction labora
 | [SIMULATOR.md](./SIMULATOR.md) | deterministic simulator surface and action coverage |
 | [SIMULATOR_TXNS.md](./SIMULATOR_TXNS.md) | transparent-transaction toolkit for simnet tests |
 | [SIMNET_PERF.md](./SIMNET_PERF.md) | deterministic simulation performance |
-| [sim-phase2-plan.md](./sim-phase2-plan.md) | in-memory simulation network reference |
+| [SIM_DETERMINISM.md](./SIM_DETERMINISM.md) | in-memory simulation network reference |
 | [io-harness-design.md](./io-harness-design.md) | simnet_wire adversarial network-IO harness |
 | [USER_BENCHMARKS.md](./USER_BENCHMARKS.md) | user-facing measurement specification |
 | [BENCHMARKS_LOG.md](./BENCHMARKS_LOG.md) | append-only measured benchmark ledger |

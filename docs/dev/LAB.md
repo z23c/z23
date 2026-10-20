@@ -126,7 +126,7 @@ failed".
   `/etc/ld.so.cache`, `/proc/self`, `/dev/null`, `/dev/urandom`, `/dev/zero`.
   The workdir is not executable. Reading `/etc/passwd` or the home directory is
   denied.
-- Syscalls (seccomp): the session deny-set from `platform/os_sandbox.h` (socket
+- Syscalls (seccomp): the session deny-set from `platform/modules/platform/include/platform/os_sandbox.h` (socket
   family, ptrace, mount and namespace calls, bpf, modules, keyrings,
   `open_by_handle_at`) kills the process with `SIGSYS`; `fork` and `vfork` are
   denied, `clone` only with `CLONE_THREAD`, so threads work and child

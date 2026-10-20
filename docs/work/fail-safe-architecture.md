@@ -1,6 +1,6 @@
 # FAIL-SAFE ARCHITECTURE — the progress law + universal repair ladder
 
-**Plan of record for making "stuck-needs-a-human" structurally impossible.**
+**Design record for making "stuck-needs-a-human" structurally impossible.**
 Supersedes per-class whack-a-mole; absorbs
 [`sticky-node-plan.md`](./sticky-node-plan.md) and `never-stuck-plan.md` §1b.
 

@@ -17,7 +17,7 @@
 ## Context
 
 Z23's positioning is one self-contained C23 binary that is its own
-node, wallet, explorer, and operator surface (`docs/adr/0001`). Two questions
+node, wallet, explorer, and operator surface (`docs/adr/0001-personal-sovereignty-stack.md`). Two questions
 recur whenever the node's sync rate or its runtime safety comes up: (1) is
 the observed fold-rate ceiling actually a *scheduling* problem — one thread,
 one queue, priorities — that only a real OS or a hand-rolled scheduler would
@@ -181,7 +181,7 @@ Detail, file inventories, and the ordered checklist are in
 **Positive:**
 
 - The node stays one process, one binary, no privilege-separated helper —
-  consistent with `docs/adr/0001`'s one-binary positioning.
+  consistent with `docs/adr/0001-personal-sovereignty-stack.md`'s one-binary positioning.
 - The sandbox design (Rung 2) reuses the same pattern ADR-0002 already
   proved works for this codebase: a structural, build/boot-time boundary
   (there, a source-tree seal; here, a syscall deny-list) rather than a
