@@ -1003,29 +1003,111 @@ static int test_umbrella_groups(void)
     return failures;
 }
 
+static bool tgs_selection_output(const char *out, bool exact)
+{
+    bool umbrella = strstr(out, "SELECTED test_zcode_swarm_net\n") != NULL;
+    return umbrella == exact && strstr(out, "executed=0 cache_probes=0") &&
+        !strstr(out, "attempt group=") && !strstr(out, "PROBE ") &&
+        !strstr(out, "cache PLAN") &&
+        (exact ? strstr(out, "SELECTION-ONLY groups=1 ") != NULL :
+                 strstr(out, "SELECTED test_zcode_swarm_net_shard_01\n") != NULL);
+}
+
 static int test_umbrella_runner_fold(void)
 {
     int failures = 0;
     TEST("test group selector: the runner folds an umbrella into its shards "
          "for --only and keeps it whole for --exact") {
-        /* A cache probe stops before any fork, so nothing here runs a
-         * sub-suite; the fold decision is printed before it. */
+        /* Inspect the dispatch selection without opening the verdict cache
+         * or running any selected sub-suite. */
         static char out[256 * 1024];
         char exe[PATH_MAX];
         char command[PATH_MAX + 160];
         ASSERT(os_proc_exe_path(exe, sizeof(exe)));
         int n = snprintf(command, sizeof(command),
-                         "\"%s\" --jobs=1 --only=zcode_swarm_net --cache "
-                         "--cache-probe-only 2>&1", exe);
+                         "\"%s\" --jobs=1 --only=zcode_swarm_net --no-cache "
+                         "--selection-only 2>&1", exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(strstr(out, "test_zcode_swarm_net runs as its") != NULL);
+        ASSERT(tgs_selection_output(out, false));
         n = snprintf(command, sizeof(command),
-                     "\"%s\" --jobs=1 --exact=test_zcode_swarm_net --cache "
-                     "--cache-probe-only 2>&1", exe);
+                     "\"%s\" --jobs=1 --exact=test_zcode_swarm_net --no-cache "
+                     "--selection-only 2>&1", exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(strstr(out, "runs as its") == NULL);
+        ASSERT(tgs_selection_output(out, true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_selection_only_no_acquisition(void)
+{
+    int failures = 0;
+    TEST("runner: selection-only leaves cache and child state absent") {
+        char root[PATH_MAX], exe[PATH_MAX], command[8 * PATH_MAX], out[16384];
+        char cache[PATH_MAX + 32], attempts[PATH_MAX + 32];
+        test_make_tmpdir(root, sizeof(root), "tgs_selection", "no-acquisition");
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "cd '%s' && env ZCL_TEST_CACHE=1 ZCL_TEST_CACHE_DUMP=test_hex_codec "
+            "ZCL_TESTCACHE_STORE_ROOT='%s/cache-sentinel' '%s' --verbose --cache "
+            "--selection-only --exact=test_hex_codec 2>&1", root, root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        int rc = capture_command(command, out, sizeof(out));
+        n = snprintf(cache, sizeof(cache), "%s/cache-sentinel", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(cache));
+        n = snprintf(attempts, sizeof(attempts), "%s/test-tmp", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(attempts));
+        bool untouched = access(cache, F_OK) != 0 && access(attempts, F_OK) != 0;
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        ASSERT_EQ(rc, 0);
+        ASSERT(untouched);
+        ASSERT(strstr(out, "SELECTED test_hex_codec\n") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_selection_only_conflicts(void)
+{
+    int failures = 0;
+    TEST("runner: selection-only refuses competing modes and module activation") {
+        char exe[PATH_MAX], command[3 * PATH_MAX], out[8192];
+        const char *modes[] = {"--list", "--list-build-needs", "--source-id",
+                              "--cache-probe-only", "--state-isolation-probe"};
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+            int n = snprintf(command, sizeof(command),
+                "\"%s\" --selection-only --exact=test_hex_codec %s 2>&1", exe, modes[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(command));
+            ASSERT_EQ(capture_command(command, out, sizeof(out)), 2);
+            ASSERT(strstr(out, "selection-only refuses conflicting") != NULL);
+        }
+        int n = snprintf(command, sizeof(command),
+            "env ZCL_HOTSWAP_TEST_MODULE=/missing-selection-sentinel "
+            "\"%s\" --selection-only --exact=test_hex_codec 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 2);
+        ASSERT(strstr(out, "selection-only refuses module activation") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_selection_only_invalid(void)
+{
+    int failures = 0;
+    TEST("runner: selection-only rejects an unknown exact group") {
+        char exe[PATH_MAX], command[PATH_MAX + 160], out[8192];
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "\"%s\" --no-cache --selection-only --exact=no_such_selection_group 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 2);
+        ASSERT(strstr(out, "SELECTION-ONLY") == NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -2386,6 +2468,9 @@ int test_test_group_selector(void)
     failures += test_declared_family_expansion();
     failures += test_umbrella_groups();
     failures += test_umbrella_runner_fold();
+    failures += test_selection_only_invalid();
+    failures += test_selection_only_no_acquisition();
+    failures += test_selection_only_conflicts();
     failures += test_native_catalog_resolution();
     failures += test_process_sensitive_groups_are_catalog_exclusive();
     failures += test_runner_exact_selection();

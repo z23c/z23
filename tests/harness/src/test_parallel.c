@@ -635,6 +635,16 @@ static bool group_cache_hit_marked(struct group_result *results, size_t i,
 }
 static bool selected_all_external(const struct group_result *results);
 enum cache_mode { CACHE_OFF, CACHE_ON, CACHE_COLD_AUDIT };
+
+static enum cache_mode runner_cache_mode(bool cold, bool no_cache, bool cache)
+{
+    const char *env = getenv("ZCL_TEST_CACHE");
+    bool env_on = env && env[0] && strcmp(env, "0") != 0;
+    if (cold) return CACHE_COLD_AUDIT;
+    if (no_cache) return CACHE_OFF;
+    if (cache || env_on) return CACHE_ON;
+    return CACHE_OFF;
+}
 static void print_external_probe_only(const struct group_result *results);
 static void external_cache_prepare(const struct group_result *, size_t, enum cache_mode *);
 static void print_probe_only(const struct group_result *results,
@@ -1331,6 +1341,17 @@ static bool group_still_selected(const char *full_id, void *ctx)
         if (strcmp(g_groups[i].name, full_id) == 0)
             return !results[i].skipped;
     return false;
+}
+
+static void print_selected_groups(const struct group_result *results)
+{
+    size_t selected = 0;
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped) continue;
+        printf("SELECTED %s\n", g_groups[i].name);
+        selected++;
+    }
+    printf("SELECTION-ONLY groups=%zu executed=0 cache_probes=0\n", selected);
 }
 
 /* An umbrella (tools/dev/test_group_umbrellas.def) runs whole when named with
@@ -2503,8 +2524,36 @@ static int emit_group_observations(const struct group_result *results,
     return refused;
 }
 
+static bool selection_inspection_arg(const char *arg)
+{
+    return strcmp(arg, "--selection-only") == 0 || strcmp(arg, "--verbose") == 0 ||
+        strcmp(arg, "--cache") == 0 || strcmp(arg, "--no-cache") == 0 ||
+        strncmp(arg, "--jobs=", 7) == 0 || strncmp(arg, "--only=", 7) == 0 ||
+        strncmp(arg, "--exact=", 8) == 0;
+}
+
+static bool selection_inspection_valid(int argc, char **argv)
+{
+    bool requested = false;
+    for (int i = 1; i < argc; i++)
+        requested |= strcmp(argv[i], "--selection-only") == 0;
+    if (!requested) return true;
+    if (getenv("ZCL_HOTSWAP_TEST_MODULE")) {
+        fprintf(stderr, "selection-only refuses module activation\n");
+        return false;
+    }
+    for (int i = 1; i < argc; i++) {
+        if (!selection_inspection_arg(argv[i])) {
+            fprintf(stderr, "selection-only refuses conflicting inspection or execution modes\n");
+            return false;
+        }
+    }
+    return true;
+}
+
 int main(int argc, char **argv)
 {
+    if (!selection_inspection_valid(argc, argv)) return 2;
     /* Narrow sealed-image process fixture dispatch, before runner init. */
     extern void supervised_fixture_exit_if_requested(int argc, char **argv);
     supervised_fixture_exit_if_requested(argc, argv);
@@ -2588,6 +2637,7 @@ int main(int argc, char **argv)
     int timeout_secs = 300;
     bool verbose = false;
     bool list_only = false;
+    bool selection_only = false;
     bool list_build_needs = false;
     const char *only = NULL; /* --only=SUBSTR or --exact=FULL_ID[,FULL...] */
     bool only_exact = false;
@@ -2627,6 +2677,8 @@ int main(int argc, char **argv)
             /* Internal fixture flags are validated together after parsing. */
         } else if (strcmp(argv[i], "--list") == 0) {
             list_only = true;
+        } else if (strcmp(argv[i], "--selection-only") == 0) {
+            selection_only = true;
         } else if (strcmp(argv[i], "--list-build-needs") == 0) {
             list_build_needs = true;
         } else if (strncmp(argv[i], "--only=", 7) == 0) {
@@ -2675,7 +2727,7 @@ int main(int argc, char **argv)
         } else {
             fprintf(stderr,
                     "Usage: %s [--jobs=N] [--timeout=SECS] [--verbose] "
-                    "[--list|--list-build-needs|--source-id|--source-record] "
+                    "[--list|--list-build-needs|--selection-only|--source-id|--source-record] "
                     "[--only=SUBSTR|--exact=FULL_ID[,FULL...]] "
                     "[--cache|--no-cache] "
                     "[--cache-snapshot --changed-source=PATH] "
@@ -2712,7 +2764,7 @@ int main(int argc, char **argv)
      * input closure, its content key, and its cacheability, then exits — the
      * operator/proof lens onto what the cache would key on. */
     const char *dump_group = getenv("ZCL_TEST_CACHE_DUMP");
-    if (dump_group && dump_group[0]) {
+    if (!selection_only && dump_group && dump_group[0]) {
         struct testcache *tc = testcache_open(NULL);
         if (!tc) {
             fprintf(stderr, "test_parallel: cache open failed for dump\n");
@@ -2726,15 +2778,8 @@ int main(int argc, char **argv)
     /* Resolve the cache mode. Precedence: --cold-audit > --no-cache >
      * (--cache | ZCL_TEST_CACHE!=0) > OFF. OFF reproduces the historical
      * behavior byte-for-byte (none of the cache code below runs). */
-    enum cache_mode cache_mode;
-    {
-        const char *env = getenv("ZCL_TEST_CACHE");
-        bool env_on = env && env[0] && strcmp(env, "0") != 0;
-        if (cli_cold_audit)      cache_mode = CACHE_COLD_AUDIT;
-        else if (cli_no_cache)   cache_mode = CACHE_OFF;
-        else if (cli_cache || env_on) cache_mode = CACHE_ON;
-        else                     cache_mode = CACHE_OFF;
-    }
+    enum cache_mode cache_mode = runner_cache_mode(cli_cold_audit,
+                                                    cli_no_cache, cli_cache);
     /* A probe-only run reports what the cache WOULD reuse; with the cache
      * off or auditing there is nothing reusable to report. (Placed before
      * any allocation, so refusal here frees nothing.) */
@@ -2744,7 +2789,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (!list_only) {
+    if (!list_only && !selection_only) {
         if (!hotswap_module_mode_begin())
             return 2;
         /* A verdict produced against a hot-swapped module must never be
@@ -2767,8 +2812,6 @@ int main(int argc, char **argv)
     }
 
     if (!exact_selection_valid(only_exact, only)) return 2;
-
-    ensure_tmp_dir();
 
     setbuf(stdout, NULL);
     printf("test_parallel: %zu groups, %d workers, %ds per-group timeout\n",
@@ -2797,6 +2840,12 @@ int main(int argc, char **argv)
         return 2;
     }
     pre_skipped += fold_umbrellas_into_shards(results, only_exact);
+    if (selection_only) {
+        print_selected_groups(results);
+        free(results);
+        return 0;
+    }
+    ensure_tmp_dir();
 
     /* Params-heavy opt-in gate: exclude the Groth16-proving groups from a
      * default full run. They still run when ZCL_PARAMS_TESTS is set, or when
