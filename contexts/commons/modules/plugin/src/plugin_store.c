@@ -406,6 +406,10 @@ static enum plugin_status ps_replace(const char *gens, const char *staging,
 #endif
 }
 
+/* Called only with the per-plugin flock held (ps_install_locked). The staging
+ * name carries only the pid, which the RPC thread and the swarm timer share;
+ * the lock is what keeps two same-process installs of one plugin from sharing
+ * a staging directory (POSIX; Windows has no mutation lock yet). */
 static enum plugin_status ps_publish(const char *plugdir, const char *name,
                                      const struct ps_paths *src,
                                      const char *keys_file,

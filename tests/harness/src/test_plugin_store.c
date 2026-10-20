@@ -20,6 +20,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1737,6 +1738,47 @@ static int pst_case_lock_gate_leftover(void)
     } TEST_END
     return failures;
 }
+
+/* Two installs of one plugin from two threads of one process share a pid, so
+ * a pid-named staging directory would collide. The per-plugin flock (taken on
+ * a separate open file description per call) serializes them: exactly one
+ * stages, the other sees the generation present and stages nothing. */
+struct pst_thread_job {
+    const struct pst_fx *fx;
+    enum plugin_status st;
+    int present;
+};
+
+static void *pst_install_thread(void *arg)
+{
+    struct pst_thread_job *j = arg;
+    struct plugin_manifest m;
+    j->st = plugin_store_install(j->fx->root, j->fx->manifest, &m, &j->present);
+    return NULL;
+}
+
+static int pst_case_threaded_install(void)
+{
+    int failures = 0;
+    TEST_CASE("two threads installing one plugin never collide on staging") {
+        struct pst_fx fx;
+        struct pst_opts o = {0};
+        struct pst_thread_job job[2] = {{&fx, PLUGIN_ERR_IO, -1}, {&fx, PLUGIN_ERR_IO, -1}};
+        pthread_t th[2];
+        ASSERT(pst_fx_open(&fx, true));
+        ASSERT(pst_publish(&fx, "hello", "version t", &o));
+        for (int i = 0; i < 2; i++)
+            ASSERT_EQ(pthread_create(&th[i], NULL, pst_install_thread, &job[i]), 0);
+        for (int i = 0; i < 2; i++)
+            ASSERT_EQ(pthread_join(th[i], NULL), 0);
+        ASSERT_EQ(job[0].st, PLUGIN_OK);
+        ASSERT_EQ(job[1].st, PLUGIN_OK);
+        ASSERT_EQ(job[0].present + job[1].present, 1);
+        ASSERT(pst_plugdir_clean(&fx));
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
 #endif
 
 static int pst_case_crashed_install(void)
@@ -1851,6 +1893,7 @@ int test_plugin_store(void)
     failures += pst_case_lock_fairness();
     failures += pst_case_lock_budget();
     failures += pst_case_lock_gate_leftover();
+    failures += pst_case_threaded_install();
 #endif
     failures += pst_case_crashed_install();
     failures += pst_case_registered();
