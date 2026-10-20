@@ -66,6 +66,20 @@ struct consensus_state_install_runtime_result {
     char     reason[CONSENSUS_STATE_ACTIVATE_REASON_MAX];
 };
 
+struct consensus_state_install_recovery_result {
+    bool recovered;
+    bool advanced;
+    int32_t height;
+};
+
+/* Before snapshot import or derived-state loading, finish the post-commit
+ * tail of an interrupted install. Never activates a bundle or changes coins,
+ * trust provenance, generation, or reducer cursors. Missing generation
+ * evidence or contradictory identity refuses before any repair. */
+struct zcl_result consensus_state_install_recover_committed(
+    struct node_db *ndb, const char *datadir,
+    struct consensus_state_install_recovery_result *out);
+
 /* True iff this node's validated header chain genuinely OWNS the compiled SHA3
  * UTXO checkpoint block: the header frontier (ms->pindex_best_header) is at or
  * above the checkpoint height AND the header-chain ancestor at the checkpoint
@@ -88,11 +102,12 @@ bool consensus_state_install_restore_checkpoint_header_frontier(
  * -install-consensus-bundle verb (containment classify → admit+validate →
  * producer source receipt → publication CAS with the compiled SHA3 +
  * CHECKPOINT_ROM authority → reload durable ADMIT → atomic activate →
- * derived-state invalidation → durable marker → utxos mirror reset) but RETURNS
+ * derived-state invalidation → utxos mirror reset → durable marker) but RETURNS
  * a result instead of _exit()ing. `out` is always populated (reason set on
  * every refusal); pass NULL only if the detail is unwanted. Returns ok iff the
- * state landed AND post-install invalidation verified; best-effort marker/mirror
- * failures still return ok. */
+ * state landed AND post-install reconciliation and marker persistence succeeded.
+ * A post-commit failure retains state_installed and is recoverable at boot
+ * without another activation. */
 struct zcl_result consensus_state_install_from_bundle(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct consensus_state_install_runtime_result *out);

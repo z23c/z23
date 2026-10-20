@@ -200,6 +200,15 @@ static bool cse_exec(sqlite3 *db, const char *sql)
     return ok;
 }
 
+static bool cse_install_prefix(sqlite3 *db, sqlite3 *bundle,
+                                const struct consensus_state_bundle_manifest *manifest)
+{
+    return cse_exec(db, "BEGIN IMMEDIATE") &&
+        coins_kv_bump_authority_generation_in_tx(db) &&
+        consensus_state_proof_prefix_install_in_tx(db, bundle, manifest) &&
+        cse_exec(db, "COMMIT");
+}
+
 static bool cse_insert_hash_row(sqlite3 *db, const char *sql, int height,
                                 const uint8_t hash[32])
 {
@@ -1888,10 +1897,7 @@ static int test_consensus_state_snapshot_export_platform_arm(void)
                                         &base_validation);
     progress_store_tx_lock();
     if (prefix_installed)
-        prefix_installed = cse_exec(db, "BEGIN IMMEDIATE") &&
-            consensus_state_proof_prefix_install_in_tx(
-                db, base_bundle, &base_manifest) &&
-            cse_exec(db, "COMMIT");
+        prefix_installed = cse_install_prefix(db, base_bundle, &base_manifest);
     if (!prefix_installed)
         (void)cse_exec(db, "ROLLBACK");
     progress_store_tx_unlock();

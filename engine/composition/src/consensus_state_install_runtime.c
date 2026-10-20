@@ -18,6 +18,16 @@
  * routes through consensus_state_snapshot_install_activate; no new state writer. */
 #include "config/consensus_state_install_runtime.h"
 #if defined(_WIN32)
+struct zcl_result consensus_state_install_recover_committed(
+    struct node_db *ndb, const char *datadir,
+    struct consensus_state_install_recovery_result *out)
+{
+    (void)ndb;
+    (void)datadir;
+    (void)out;
+    return ZCL_ERR(-1, "consensus-state install recovery is not qualified on Windows");
+}
+
 struct zcl_result consensus_state_install_from_bundle(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct consensus_state_install_runtime_result *out)
@@ -38,6 +48,7 @@ struct zcl_result consensus_state_install_from_bundle(
 #include "config/consensus_state_snapshot_install.h"
 #include "consensus_state_snapshot_install_internal.h" /* candidate_lease_begin/end */
 #include "consensus_state_install_derived_state_internal.h" /* post-install reconciliation */
+#include "consensus_state_proof_prefix.h"
 #include "chain/chain.h"                              /* block_index, active_chain_at */
 #include "chain/checkpoints.h"                        /* get_sha3_utxo_checkpoint */
 #include "controllers/sync_controller.h"              /* sapling_tree_persist_pair */
@@ -247,6 +258,132 @@ static const char *icb_cutover_refusal(bool canonical, const char *authorization
     if (!icb_mirror_empty(ndb))
         return "the legacy utxo mirror is not provably empty";
     return NULL;
+}
+
+static struct zcl_result icb_recovery_refuse(const char *reason)
+{
+    LOG_WARN(ICB_SUBSYS, "committed install recovery refused: %s", reason);
+    return ZCL_ERR(-1, "committed install recovery refused: %s; preserve this "
+                   "datadir and diagnose a copy before retrying; do not "
+                   "reinstall or reset the installed state", reason);
+}
+
+/* The prefix belongs to this coins generation, not merely to this directory.
+ * Frontiers may have advanced since an unsuccessful marker write; in that
+ * case only restore the marker and let the current-frontier owners reconcile
+ * their derived stores. Never republish a base-height cache over newer state. */
+static bool icb_recovery_provenance(sqlite3 *db,
+                                    const struct consensus_state_proof_prefix *p)
+{
+    uint64_t generation = 0;
+    if (!p->authority_generation_present ||
+        !coins_kv_get_authority_generation(db, &generation) ||
+        generation != p->authority_generation)
+        return false;
+    if (coins_kv_contains_refold_marker(db))
+        return true;
+    int32_t seam_height = -1;
+    uint8_t root[32], anchors[32], nullifiers[32];
+    bool found = false;
+    return consensus_state_install_read_assisted_seam(
+        db, &seam_height, root, anchors, nullifiers, &found) &&
+        found && seam_height == p->height;
+}
+
+static bool icb_recovery_at_base(const struct consensus_state_proof_prefix *p,
+                                 int durable, int32_t hstar, int32_t served,
+                                 const uint8_t tip_hash[32])
+{
+    return durable == p->height && hstar == p->height && served == p->height &&
+           memcmp(tip_hash, p->block_hash, 32) == 0;
+}
+
+static bool icb_recovery_frontier(sqlite3 *db,
+                                 const struct consensus_state_proof_prefix *p,
+                                 bool *advanced)
+{
+    int32_t applied = -1, hstar = -1, served = -1;
+    int durable = -1;
+    uint8_t tip_hash[32], base_hash[32];
+    if (!icb_recovery_provenance(db, p) ||
+        !coins_kv_is_proven_authority(db, &applied) ||
+        applied <= p->height ||
+        !reducer_frontier_compute_hstar(db, &hstar, &served) ||
+        hstar < p->height || served < p->height ||
+        !tip_finalize_stage_resolve_durable_tip(db, &durable, tip_hash) ||
+        durable < p->height || durable >= applied ||
+        !tip_finalize_stage_block_hash_at(db, p->height, base_hash) ||
+        memcmp(base_hash, p->block_hash, sizeof(base_hash)) != 0)
+        return false;
+    *advanced = applied > p->height + 1;
+    return *advanced || icb_recovery_at_base(p, durable, hstar, served, tip_hash);
+}
+
+static bool icb_finish_derived_install(struct node_db *ndb, sqlite3 *db,
+                                     int32_t height, const char *datadir,
+                                     const uint8_t artifact_digest[32])
+{
+    return icb_invalidate_derived_state(ndb, db, height) &&
+           icb_reset_utxo_mirror(ndb) &&
+           boot_consensus_bundle_marker_write(datadir, height, artifact_digest);
+}
+
+struct zcl_result consensus_state_install_recover_committed(
+    struct node_db *ndb, const char *datadir,
+    struct consensus_state_install_recovery_result *out)
+{
+    struct consensus_state_install_recovery_result result = {.height = -1};
+    if (out)
+        *out = result;
+    sqlite3 *db = progress_store_db();
+    int dir_fd = -1;
+    bool canonical = false;
+    struct zcl_result opened =
+        icb_datadir_open_classify(datadir, &dir_fd, &canonical);
+    if (!opened.ok)
+        return opened;
+    bool bound = db && progress_store_directory_matches_fd(db, dir_fd);
+    (void)close(dir_fd);
+    if (!bound)
+        return icb_recovery_refuse("consensus store/datadir identity mismatch");
+    struct consensus_state_proof_prefix prefix;
+    progress_store_tx_lock();
+    bool loaded = consensus_state_proof_prefix_load(db, &prefix);
+    progress_store_tx_unlock();
+    if (!loaded)
+        return icb_recovery_refuse("installed prefix is unreadable or malformed");
+    if (!prefix.present)
+        return ZCL_OK;
+    result.height = prefix.height;
+    if (boot_consensus_bundle_marker_exists(datadir)) {
+        if (!boot_consensus_bundle_marker_matches(
+                datadir, prefix.height, prefix.artifact_digest))
+            return icb_recovery_refuse("installed marker contradicts committed prefix");
+        if (out)
+            *out = result;
+        return ZCL_OK; /* Compatible with matching pre-generation markers. */
+    }
+    if (!prefix.authority_generation_present)
+        return icb_recovery_refuse("legacy prefix lacks an install generation binding");
+    progress_store_tx_lock();
+    bool coherent = icb_recovery_frontier(db, &prefix, &result.advanced);
+    progress_store_tx_unlock();
+    if (!coherent)
+        return icb_recovery_refuse("install generation, provenance or frontier mismatch");
+    bool repaired = result.advanced
+        ? boot_consensus_bundle_marker_write(datadir, prefix.height,
+                                             prefix.artifact_digest)
+        : icb_finish_derived_install(ndb, db, prefix.height, datadir,
+                                     prefix.artifact_digest);
+    if (!repaired)
+        return icb_recovery_refuse("post-install derived reconciliation or marker write failed");
+    result.recovered = true;
+    if (out)
+        *out = result;
+    LOG_INFO(ICB_SUBSYS, "recovered committed install h=%d advanced=%d; "
+             "consensus generation and state preserved", prefix.height,
+             result.advanced);
+    return ZCL_OK;
 }
 /* Read the producer source receipt from the pinned, already-validated bundle
  * handle. The CAS re-checks the receipt's self-consistency and its binding to
@@ -813,34 +950,15 @@ struct zcl_result consensus_state_install_from_bundle(
      * matches the bundle height. A mismatch means the install did not land where
      * the ADMIT record says — refuse loudly rather than continue onto an
      * inconsistent kernel. */
-    if (!icb_invalidate_derived_state(ndb, progress_store_db(), manifest.height)) {
+    if (!icb_finish_derived_install(ndb, progress_store_db(), manifest.height,
+                                   datadir, manifest.artifact_digest)) {
         rc = ZCL_ERR(-1,
-                     "post-install derived-state invalidation failed (installed "
-                     "coin tip != bundle height, or sapling_tree pair could not be "
-                     "cleared) — see ERROR log above");
+                     "post-install reconciliation or marker write failed; "
+                     "installed state is preserved and boot will retry "
+                     "reconciliation without reactivation — see ERROR log above");
         goto done;
     }
-    /* (7) Durable marker: record that a sovereign bundle is now installed here so
-     * a future boot never auto-loads a leftover borrowed starter-pack seed back
-     * over the installed state. Best-effort — the install is already durable; a
-     * marker write failure is loud but not fatal. */
-    if (!boot_consensus_bundle_marker_write(datadir, manifest.height,
-                                            manifest.artifact_digest))
-        LOG_ERROR(ICB_SUBSYS,
-                  "consensus-bundle-installed marker could not be written in %s — "
-                  "install is durable, but a future boot may re-autodetect a "
-                  "leftover borrowed seed; remove any utxo-seed-*.snapshot from "
-                  "the datadir root manually", datadir);
-    else
-        out->marker_written = true;
-    /* (8) Post-install: reset the node.db `utxos` mirror — see
-     * icb_reset_utxo_mirror. Best-effort by design (see its doc comment). */
-    if (!icb_reset_utxo_mirror(ndb))
-        LOG_WARN(ICB_SUBSYS,
-                 "post-install utxos mirror reset incomplete — the mirror may "
-                 "retain stale rows until utxo_mirror_sync_service's own drift "
-                 "detector next fires; the installed consensus state itself is "
-                 "unaffected (node.db utxos carries no consensus weight)");
+    out->marker_written = true;
     snprintf(out->reason, sizeof(out->reason), "%s", ares.reason);
     rc = ZCL_OK;
 done:

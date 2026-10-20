@@ -144,3 +144,39 @@ bool boot_consensus_bundle_marker_height(const char *datadir, int32_t *height)
     fclose(fp);
     return found;
 }
+
+static bool marker_timestamp_complete(const char *body, size_t size, size_t at)
+{
+    size_t start = at;
+    while (at < size && body[at] >= '0' && body[at] <= '9')
+        ++at;
+    return at > start && at + 1 == size && body[at] == '\n';
+}
+
+bool boot_consensus_bundle_marker_matches(const char *datadir, int32_t height,
+                                         const uint8_t artifact_digest[32])
+{
+    char path[1200], body[257], expected[224], hex[65];
+    if (!artifact_digest || height < 0 ||
+        !marker_path(path, sizeof(path), datadir))
+        return false;
+    FILE *fp = fopen(path, "r"); // platform-ok: bounded installed-marker read
+    if (!fp)
+        return false;
+    size_t size = fread(body, 1, sizeof(body), fp);
+    bool readable = !ferror(fp) && size < sizeof(body);
+    fclose(fp);
+    if (!readable)
+        return false;
+    body[size] = '\0';
+    for (size_t i = 0; i < 32; ++i)
+        snprintf(hex + i * 2, 3, "%02x", artifact_digest[i]);
+    int n = snprintf(expected, sizeof(expected),
+                     "zclassic23-consensus-bundle-installed v1\n"
+                     "height=%d\nartifact_digest=%s\ninstalled_unix=",
+                     height, hex);
+    if (n <= 0 || (size_t)n >= sizeof(expected) || size <= (size_t)n ||
+        memcmp(body, expected, (size_t)n) != 0)
+        return false;
+    return marker_timestamp_complete(body, size, (size_t)n);
+}

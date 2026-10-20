@@ -7,6 +7,7 @@
 #include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
+#include "storage/coins_kv.h"
 #include "util/log_macros.h"
 
 #include <limits.h>
@@ -35,7 +36,9 @@ static const char k_prefix_schema_sql[] =
     "proof_manifest_digest BLOB NOT NULL "
         "CHECK(length(proof_manifest_digest)=32),"
     "source_digest BLOB NOT NULL CHECK(length(source_digest)=32),"
-    "artifact_digest BLOB NOT NULL CHECK(length(artifact_digest)=32));"
+    "artifact_digest BLOB NOT NULL CHECK(length(artifact_digest)=32),"
+    "authority_generation BLOB CHECK(authority_generation IS NULL OR "
+        "(typeof(authority_generation)='blob' AND length(authority_generation)=8)));"
     "CREATE TABLE IF NOT EXISTS consensus_state_proof_prefix_component("
     "ordinal INTEGER PRIMARY KEY CHECK(ordinal>=0 AND ordinal<8),"
     "component TEXT NOT NULL UNIQUE,cursor INTEGER NOT NULL CHECK(cursor>=0),"
@@ -147,6 +150,24 @@ static bool read_components(
     return ok;
 }
 
+static bool generation_column_present(sqlite3 *db, bool *present)
+{
+    *present = false;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "PRAGMA table_info(consensus_state_proof_prefix_base)",
+            -1, &st, NULL) != SQLITE_OK)
+        return prefix_fail("prefix generation: schema introspection failed");
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
+        if (text_equal(st, 1, "authority_generation"))
+            *present = true;
+    }
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ||
+           prefix_fail("prefix generation: schema introspection read failed");
+}
+
 static bool ensure_schema(sqlite3 *db)
 {
     char *err = NULL;
@@ -157,6 +178,26 @@ static bool ensure_schema(sqlite3 *db)
                  err ? err : sqlite3_errmsg(db));
     if (err)
         sqlite3_free(err);
+    if (!ok)
+        return false; /* raw-return-ok:schema error logged above */
+    bool generation_present = false;
+    if (!generation_column_present(db, &generation_present))
+        return false; /* raw-return-ok:introspection logged failure */
+    /* Migrate only while replacing evidence inside the install transaction.
+     * Legacy reads never manufacture a current-generation association. */
+    if (!generation_present) {
+        err = NULL;
+        ok = sqlite3_exec(db,
+            "ALTER TABLE consensus_state_proof_prefix_base ADD COLUMN "
+            "authority_generation BLOB CHECK(authority_generation IS NULL OR "
+            "(typeof(authority_generation)='blob' AND length(authority_generation)=8))",
+            NULL, NULL, &err) == SQLITE_OK;
+        if (!ok)
+            LOG_WARN(PREFIX_SUBSYS, "prefix generation migration failed: %s",
+                     err ? err : sqlite3_errmsg(db));
+        if (err)
+            sqlite3_free(err);
+    }
     return ok;
 }
 
@@ -176,21 +217,34 @@ static bool clear_rows(sqlite3 *db)
     return ok;
 }
 
+static bool prefix_manifest_complete(const struct consensus_state_bundle_manifest *m)
+{
+    return m->height >= 0 && m->height < INT32_MAX && m->history_complete &&
+        m->activation_boundary == 0 &&
+        m->source_fold_cursor == (int64_t)m->height + 1 &&
+        (m->validation_profile == CONSENSUS_STATE_VALIDATION_FULL ||
+         m->validation_profile == CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) &&
+        zcl_bytes_any_set(m->proof_manifest_digest, 32) &&
+        zcl_bytes_any_set(m->source_digest, 32) &&
+        zcl_bytes_any_set(m->artifact_digest, 32);
+}
+
+static bool prefix_install_generation(sqlite3 *db, uint8_t bytes[8])
+{
+    uint64_t generation = 0;
+    if (!coins_kv_get_authority_generation(db, &generation) || generation == 0)
+        return prefix_fail("prefix install: current coins generation unavailable");
+    zcl_write_u64_le(bytes, generation);
+    return true;
+}
+
 bool consensus_state_proof_prefix_install_in_tx(
     sqlite3 *progress_db, sqlite3 *bundle_db,
     const struct consensus_state_bundle_manifest *manifest)
 {
     if (!progress_db || !bundle_db || !manifest)
         return prefix_fail("prefix install: NULL argument");
-    if (manifest->height < 0 || manifest->height == INT32_MAX ||
-        !manifest->history_complete || manifest->activation_boundary != 0 ||
-        manifest->source_fold_cursor != (int64_t)manifest->height + 1 ||
-        (manifest->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
-         manifest->validation_profile !=
-             CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
-        !zcl_bytes_any_set(manifest->proof_manifest_digest, 32) ||
-        !zcl_bytes_any_set(manifest->source_digest, 32) ||
-        !zcl_bytes_any_set(manifest->artifact_digest, 32))
+    if (!prefix_manifest_complete(manifest))
         return prefix_fail("prefix install: manifest is not a complete proof base");
 
     struct consensus_state_bundle_proof_summary
@@ -203,14 +257,17 @@ bool consensus_state_proof_prefix_install_in_tx(
         components, CONSENSUS_STATE_BUNDLE_PROOF_COUNT, proof_digest);
     if (memcmp(proof_digest, manifest->proof_manifest_digest, 32) != 0)
         return prefix_fail("prefix install: proof manifest digest mismatch");
+    uint8_t generation_bytes[8];
+    if (!prefix_install_generation(progress_db, generation_bytes))
+        return false; /* raw-return-ok:generation refusal logged */
     if (!ensure_schema(progress_db) || !clear_rows(progress_db))
         return false; /* raw-return-ok:helper logged store failure */
 
     static const char base_sql[] =
         "INSERT INTO consensus_state_proof_prefix_base("
         "singleton,height,block_hash,validation_profile,"
-        "proof_manifest_digest,source_digest,artifact_digest) "
-        "VALUES(1,?,?,?,?,?,?)";
+        "proof_manifest_digest,source_digest,artifact_digest,authority_generation) "
+        "VALUES(1,?,?,?,?,?,?,?)";
     sqlite3_stmt *base = NULL;
     bool ok = sqlite3_prepare_v2(progress_db, base_sql, -1, &base, NULL) ==
                   SQLITE_OK &&
@@ -225,6 +282,9 @@ bool consensus_state_proof_prefix_install_in_tx(
                                 SQLITE_STATIC) == SQLITE_OK &&
               sqlite3_bind_blob(base, 6, manifest->artifact_digest, 32,
                                 SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(base, 7, generation_bytes,
+                                sizeof(generation_bytes), SQLITE_STATIC) ==
+                  SQLITE_OK &&
               sqlite3_step(base) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
     if (base)
         sqlite3_finalize(base);
@@ -271,6 +331,32 @@ bool consensus_state_proof_prefix_install_in_tx(
     return true;
 }
 
+static bool prefix_load_generation(sqlite3_stmt *st,
+                                    struct consensus_state_proof_prefix *out)
+{
+    if (sqlite3_column_type(st, 6) == SQLITE_NULL)
+        return true;
+    const uint8_t *bytes = sqlite3_column_type(st, 6) == SQLITE_BLOB
+                              ? sqlite3_column_blob(st, 6) : NULL;
+    if (!bytes || sqlite3_column_bytes(st, 6) != 8)
+        return false;
+    out->authority_generation = zcl_read_u64_le(bytes);
+    out->authority_generation_present = out->authority_generation != 0;
+    return out->authority_generation_present;
+}
+
+static bool prefix_load_digests(sqlite3_stmt *st,
+                                struct consensus_state_proof_prefix *out)
+{
+    return copy_blob32(st, 1, out->block_hash) &&
+        copy_blob32(st, 3, out->proof_manifest_digest) &&
+        copy_blob32(st, 4, out->source_digest) &&
+        copy_blob32(st, 5, out->artifact_digest) &&
+        zcl_bytes_any_set(out->proof_manifest_digest, 32) &&
+        zcl_bytes_any_set(out->source_digest, 32) &&
+        zcl_bytes_any_set(out->artifact_digest, 32);
+}
+
 bool consensus_state_proof_prefix_load(
     sqlite3 *progress_db, struct consensus_state_proof_prefix *out)
 {
@@ -278,9 +364,15 @@ bool consensus_state_proof_prefix_load(
         return prefix_fail("prefix load: NULL argument");
     memset(out, 0, sizeof(*out));
     sqlite3_stmt *st = NULL;
-    static const char sql[] =
+    bool generation_present = false;
+    if (!generation_column_present(progress_db, &generation_present))
+        return false; /* raw-return-ok:introspection logged failure */
+    const char *sql = generation_present ?
         "SELECT height,block_hash,validation_profile,proof_manifest_digest,"
-        "source_digest,artifact_digest "
+        "source_digest,artifact_digest,authority_generation "
+        "FROM consensus_state_proof_prefix_base WHERE singleton=1" :
+        "SELECT height,block_hash,validation_profile,proof_manifest_digest,"
+        "source_digest,artifact_digest,NULL "
         "FROM consensus_state_proof_prefix_base WHERE singleton=1";
     if (sqlite3_prepare_v2(progress_db, sql, -1, &st, NULL) != SQLITE_OK) {
         /* A pre-feature or full-replay datadir legitimately has no table;
@@ -303,13 +395,9 @@ bool consensus_state_proof_prefix_load(
     ok = ok && height >= 0 && height < INT32_MAX &&
          (profile == CONSENSUS_STATE_VALIDATION_FULL ||
           profile == CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) &&
-         copy_blob32(st, 1, out->block_hash) &&
-         copy_blob32(st, 3, out->proof_manifest_digest) &&
-         copy_blob32(st, 4, out->source_digest) &&
-         copy_blob32(st, 5, out->artifact_digest) &&
-         zcl_bytes_any_set(out->proof_manifest_digest, 32) &&
-         zcl_bytes_any_set(out->source_digest, 32) &&
-         zcl_bytes_any_set(out->artifact_digest, 32);
+         prefix_load_digests(st, out);
+    if (ok)
+        ok = prefix_load_generation(st, out);
     if (ok)
         ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
     sqlite3_finalize(st);

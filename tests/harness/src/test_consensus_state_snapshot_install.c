@@ -11,6 +11,8 @@
 #include "chain/checkpoints.h"
 #include "chain/utxo_snapshot_loader.h"
 #include "config/boot.h"
+#include "config/boot_consensus_bundle_marker.h"
+#include "config/consensus_state_install_runtime.h"
 #include "config/boot_snapshot_install.h"
 #include "config/consensus_state_bundle_validate.h"
 #include "config/consensus_state_install_verify_receipt.h"
@@ -50,7 +52,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #if !defined(_WIN32)
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include "../../../engine/composition/src/consensus_state_snapshot_install_internal.h"
+#include "../../../engine/composition/src/consensus_state_proof_prefix.h"
 
 #define CSI_CHECK(label, expr) do {                                      \
     printf("consensus_state_install: %s... ", (label));                  \
@@ -1397,14 +1403,11 @@ static bool hs_ins(sqlite3 *db, const char *sql, int32_t h,
 
 /* Fold one fully-consistent ok=1 height across every contiguity + C3 log, all
  * bound to the same per-height hash. */
-static bool hs_put_forward_height(sqlite3 *db, int32_t h)
+static bool hs_put_forward_stage_evidence(sqlite3 *db, int32_t h)
 {
     uint8_t hh[32];
     hs_synth_hash(hh, h);
     return hs_ins(db,
-            "INSERT INTO header_admit_log(height,hash,admitted_at) "
-            "VALUES(?1,?2,0)", h, hh) &&
-        hs_ins(db,
             "INSERT INTO validate_headers_log(height,hash,ok,validated_at) "
             "VALUES(?1,?2,1,0)", h, hh) &&
         hs_ins(db,
@@ -1430,6 +1433,15 @@ static bool hs_put_forward_height(sqlite3 *db, int32_t h)
             "INSERT INTO tip_finalize_log(height,status,ok,work_delta_high,"
             "work_delta_low,utxo_size_after,reorg_depth,finalized_at,tip_hash) "
             "VALUES(?1,'ok',1,0,0,0,0,0,?2)", h, hh);
+}
+
+static bool hs_put_forward_height(sqlite3 *db, int32_t h)
+{
+    uint8_t hh[32];
+    hs_synth_hash(hh, h);
+    return hs_ins(db,
+        "INSERT INTO header_admit_log(height,hash,admitted_at) "
+        "VALUES(?1,?2,0)", h, hh) && hs_put_forward_stage_evidence(db, h);
 }
 
 /* Set one reducer stage cursor (upsert). */
@@ -1490,6 +1502,353 @@ static bool hs_seed_current_frontier(sqlite3 *db, int32_t h,
     }
     progress_store_tx_unlock();
     return ok;
+}
+
+/* Run after the first committed-install repair, while its real kernel and
+ * derived stores are still open. Every refusal is checked after fixture setup
+ * so its own UPDATE cannot masquerade as a recovery write. */
+static int marker_identity_tests(sqlite3 *db, struct node_db *ndb,
+    const char *datadir, const struct csi_fixture *bundle)
+{
+    int failures = 0;
+    struct consensus_state_install_recovery_result recovery;
+    uint8_t wrong_artifact[32];
+    memcpy(wrong_artifact, bundle->artifact, sizeof(wrong_artifact));
+    wrong_artifact[0] ^= 1;
+    CSI_CHECK("marker recovery: contradictory marker fixture",
+              boot_consensus_bundle_marker_write(
+                  datadir, bundle->height, wrong_artifact));
+    sqlite3_int64 kernel_before = sqlite3_total_changes64(db);
+    sqlite3_int64 derived_before = sqlite3_total_changes64(ndb->db);
+    CSI_CHECK("marker recovery: contradictory identity refuses without writes",
+              !consensus_state_install_recover_committed(
+                  ndb, datadir, &recovery).ok &&
+              sqlite3_total_changes64(db) == kernel_before &&
+              sqlite3_total_changes64(ndb->db) == derived_before &&
+              boot_consensus_bundle_marker_matches(
+                  datadir, bundle->height, wrong_artifact) &&
+              active_is(db, bundle));
+    CSI_CHECK("marker recovery: matching marker fixture restored",
+              boot_consensus_bundle_marker_write(
+                  datadir, bundle->height, bundle->artifact));
+    return failures;
+}
+
+static int marker_legacy_tests(sqlite3 *db, struct node_db *ndb,
+    const char *datadir)
+{
+    int failures = 0;
+    struct consensus_state_install_recovery_result recovery;
+    char marker[512];
+    snprintf(marker, sizeof(marker), "%s/%s", datadir,
+             BOOT_CONSENSUS_BUNDLE_MARKER_NAME);
+    CSI_CHECK("marker recovery: legacy NULL binding fixture",
+              exec_ok(db, "BEGIN IMMEDIATE") &&
+              exec_ok(db, "UPDATE consensus_state_proof_prefix_base "
+                          "SET authority_generation=NULL"));
+    sqlite3_int64 kernel_before = sqlite3_total_changes64(db);
+    sqlite3_int64 derived_before = sqlite3_total_changes64(ndb->db);
+    CSI_CHECK("marker recovery: matching legacy marker remains accepted",
+              consensus_state_install_recover_committed(
+                  ndb, datadir, &recovery).ok && !recovery.recovered &&
+              sqlite3_total_changes64(db) == kernel_before &&
+              sqlite3_total_changes64(ndb->db) == derived_before);
+    CSI_CHECK("marker recovery: legacy without marker refuses without writes",
+              unlink(marker) == 0 &&
+              !consensus_state_install_recover_committed(
+                  ndb, datadir, &recovery).ok &&
+              !boot_consensus_bundle_marker_exists(datadir) &&
+              sqlite3_total_changes64(db) == kernel_before &&
+              sqlite3_total_changes64(ndb->db) == derived_before);
+    CSI_CHECK("marker recovery: legacy fixture rolls back", exec_ok(db, "ROLLBACK"));
+
+    return failures;
+}
+
+static int marker_malformed_tests(sqlite3 *db, struct node_db *ndb,
+    const char *datadir)
+{
+    int failures = 0;
+    struct consensus_state_install_recovery_result recovery;
+    /* Deliberately corrupt a constrained field to cover loader refusal, not
+     * merely SQLite rejecting a bad fixture UPDATE before recovery runs. */
+    static const char *const malformed[] = {"X'01'", "'bad'", "zeroblob(8)"};
+    for (size_t i = 0; i < sizeof(malformed) / sizeof(malformed[0]); i++) {
+        char sql[160];
+        snprintf(sql, sizeof(sql), "UPDATE consensus_state_proof_prefix_base "
+                 "SET authority_generation=%s", malformed[i]);
+        bool seeded = exec_ok(db, "PRAGMA ignore_check_constraints=ON") &&
+                      exec_ok(db, "BEGIN IMMEDIATE") && exec_ok(db, sql);
+        CSI_CHECK("marker recovery: malformed binding fixture", seeded);
+        sqlite3_int64 kernel_before = sqlite3_total_changes64(db);
+        sqlite3_int64 derived_before = sqlite3_total_changes64(ndb->db);
+        CSI_CHECK("marker recovery: malformed binding refuses without writes",
+                  seeded && !consensus_state_install_recover_committed(
+                      ndb, datadir, &recovery).ok &&
+                  !boot_consensus_bundle_marker_exists(datadir) &&
+                  sqlite3_total_changes64(db) == kernel_before &&
+                  sqlite3_total_changes64(ndb->db) == derived_before);
+        CSI_CHECK("marker recovery: malformed fixture rolls back",
+                  exec_ok(db, "ROLLBACK") &&
+                  exec_ok(db, "PRAGMA ignore_check_constraints=OFF"));
+    }
+
+    return failures;
+}
+
+static int marker_advanced_setup(sqlite3 *db, struct node_db *ndb,
+    const struct csi_fixture *bundle, uint8_t tree_before[4096], size_t *out_len)
+{
+    int failures = 0;
+    /* A forward fold already owns newer derived state. Replaying B-height
+     * invalidation would regress the Sapling pair and delete this mirror row. */
+    size_t tree_len = 0;
+    int32_t advanced_height = bundle->height + 1;
+    uint8_t advanced_hash[32];
+    hs_synth_hash(advanced_hash, advanced_height);
+    uint8_t retained_header_hash[32] = {0};
+    char retained_header_sql[128];
+    snprintf(retained_header_sql, sizeof(retained_header_sql),
+             "SELECT hash FROM header_admit_log WHERE height=%d", advanced_height);
+    CSI_CHECK("marker recovery: retained header matches forward fixture exactly",
+              candidate_query_blob32(db, retained_header_sql, retained_header_hash) &&
+              memcmp(retained_header_hash, advanced_hash, 32) == 0);
+    CSI_CHECK("marker recovery: newer frontier and derived fixtures",
+              memcmp(retained_header_hash, advanced_hash, 32) == 0 &&
+              hs_put_forward_stage_evidence(db, advanced_height) &&
+              hs_seed_current_frontier(db, advanced_height, advanced_hash) &&
+              node_db_state_get(ndb, "sapling_tree", tree_before,
+                                4096, &tree_len) && tree_len > 0 &&
+              node_db_state_set_int(ndb, "sapling_tree_rebuild_height",
+                                    advanced_height) &&
+              node_db_exec(ndb,
+                  "INSERT INTO utxos(txid,vout,height,value,script) "
+                  "VALUES(X'01020304000000000000000000000000"
+                  "00000000000000000000000000000000',0,1,7,X'51')") &&
+              node_db_utxo_count(ndb) == 1);
+    *out_len = tree_len;
+    return failures;
+}
+
+static bool marker_tree_preserved(struct node_db *ndb, int32_t expected_height,
+    const uint8_t *before, size_t before_len)
+{
+    uint8_t after[4096];
+    size_t after_len = 0;
+    int64_t height = -1;
+    return node_db_state_get_int(ndb, "sapling_tree_rebuild_height", &height) &&
+        height == expected_height &&
+        node_db_state_get(ndb, "sapling_tree", after, sizeof(after), &after_len) &&
+        after_len == before_len && memcmp(before, after, before_len) == 0;
+}
+
+static bool marker_tip_preserved(sqlite3 *db, int32_t expected_height)
+{
+    int height = -1;
+    uint8_t hash[32], expected[32];
+    hs_synth_hash(expected, expected_height);
+    return tip_finalize_stage_resolve_durable_tip(db, &height, hash) &&
+        height == expected_height && memcmp(hash, expected, 32) == 0;
+}
+
+static int marker_advanced_recovery(sqlite3 *db, struct node_db *ndb,
+    const char *datadir, const struct csi_fixture *bundle,
+    const uint8_t *tree_before, size_t tree_len)
+{
+    int failures = 0;
+    struct consensus_state_install_recovery_result recovery;
+    sqlite3_int64 kernel_before = sqlite3_total_changes64(db);
+    sqlite3_int64 derived_before = sqlite3_total_changes64(ndb->db);
+    CSI_CHECK("marker recovery: advanced recovery only writes marker",
+              consensus_state_install_recover_committed(
+                  ndb, datadir, &recovery).ok &&
+              recovery.recovered && recovery.advanced &&
+              recovery.height == bundle->height &&
+              boot_consensus_bundle_marker_matches(
+                  datadir, bundle->height, bundle->artifact) &&
+              sqlite3_total_changes64(db) == kernel_before &&
+              sqlite3_total_changes64(ndb->db) == derived_before &&
+              node_db_utxo_count(ndb) == 1 &&
+              marker_tree_preserved(ndb, bundle->height + 1, tree_before, tree_len) &&
+              marker_tip_preserved(db, bundle->height + 1) &&
+              active_is(db, bundle));
+    return failures;
+}
+
+static int marker_partial_frontier_tests(sqlite3 *db, struct node_db *ndb,
+    const char *datadir, const struct csi_fixture *bundle)
+{
+    int failures = 0;
+    struct consensus_state_install_recovery_result recovery;
+    char marker[512];
+    snprintf(marker, sizeof(marker), "%s/%s", datadir,
+             BOOT_CONSENSUS_BUNDLE_MARKER_NAME);
+    int32_t advanced_height = bundle->height + 1;
+    int64_t tree_height = -1;
+    CSI_CHECK("marker recovery: partially applied frontier fixture",
+              unlink(marker) == 0 && exec_ok(db, "BEGIN IMMEDIATE") &&
+              coins_kv_set_applied_height_in_tx(db, advanced_height + 2));
+    sqlite3_int64 kernel_before = sqlite3_total_changes64(db);
+    sqlite3_int64 derived_before = sqlite3_total_changes64(ndb->db);
+    CSI_CHECK("marker recovery: applied ahead of served preserves newer state",
+              consensus_state_install_recover_committed(
+                  ndb, datadir, &recovery).ok &&
+              recovery.recovered && recovery.advanced &&
+              sqlite3_total_changes64(db) == kernel_before &&
+              sqlite3_total_changes64(ndb->db) == derived_before &&
+              node_db_utxo_count(ndb) == 1 &&
+              node_db_state_get_int(ndb, "sapling_tree_rebuild_height", &tree_height) &&
+              tree_height == advanced_height && marker_tip_preserved(db, advanced_height));
+    CSI_CHECK("marker recovery: partial frontier rolls back", exec_ok(db, "ROLLBACK"));
+    return failures;
+}
+
+static int installed_marker_edge_tests(sqlite3 *db, struct node_db *ndb,
+    const char *datadir, const struct csi_fixture *bundle)
+{
+    uint8_t tree_before[4096];
+    size_t tree_len = 0;
+    int failures = marker_identity_tests(db, ndb, datadir, bundle);
+    failures += marker_legacy_tests(db, ndb, datadir);
+    failures += marker_malformed_tests(db, ndb, datadir);
+    failures += marker_advanced_setup(db, ndb, bundle, tree_before, &tree_len);
+    failures += marker_advanced_recovery(db, ndb, datadir, bundle, tree_before, tree_len);
+    failures += marker_partial_frontier_tests(db, ndb, datadir, bundle);
+    return failures;
+}
+
+static int marker_generation_refusal_tests(sqlite3 *pdb, struct node_db *ndb,
+    const char *active_dir, uint64_t recovered_generation_before,
+    struct consensus_state_proof_prefix *recovered_prefix)
+{
+    int failures = 0;
+    CSI_CHECK("marker recovery: prefix binds the committed generation",
+              consensus_state_proof_prefix_load(pdb, recovered_prefix) &&
+              recovered_prefix->present &&
+              recovered_prefix->authority_generation_present &&
+              recovered_prefix->authority_generation ==
+                  recovered_generation_before);
+    struct consensus_state_install_recovery_result recovery;
+    CSI_CHECK("marker recovery: missing generation refuses before repair",
+              exec_ok(pdb, "BEGIN IMMEDIATE") &&
+              exec_ok(pdb, "UPDATE consensus_state_proof_prefix_base "
+                           "SET authority_generation=NULL") &&
+              !consensus_state_install_recover_committed(
+                  ndb, active_dir, &recovery).ok &&
+              !boot_consensus_bundle_marker_exists(active_dir));
+    CSI_CHECK("marker recovery: restore fixture generation",
+              exec_ok(pdb, "ROLLBACK"));
+    CSI_CHECK("marker recovery: stale generation refuses before repair",
+              exec_ok(pdb, "BEGIN IMMEDIATE") &&
+              coins_kv_bump_authority_generation_in_tx(pdb) &&
+              !consensus_state_install_recover_committed(
+                  ndb, active_dir, &recovery).ok &&
+              !boot_consensus_bundle_marker_exists(active_dir));
+    CSI_CHECK("marker recovery: restore fixture after stale generation",
+              exec_ok(pdb, "ROLLBACK"));
+    return failures;
+}
+
+static int marker_repair_tests(struct node_db *ndb,
+    const char *active_dir, const struct csi_fixture *b,
+    const struct consensus_state_proof_prefix *recovered_prefix)
+{
+    int failures = 0;
+    struct consensus_state_install_recovery_result recovery;
+    CSI_CHECK("marker recovery: early boot reconciles committed state",
+              consensus_state_install_recover_committed(
+                  ndb, active_dir, &recovery).ok &&
+              recovery.recovered && !recovery.advanced &&
+              recovery.height == b->height);
+    int32_t recovered_marker_height = -1;
+    CSI_CHECK("marker recovery: boot restores marker from committed install",
+              boot_consensus_bundle_marker_height(
+                  active_dir, &recovered_marker_height) &&
+              recovered_marker_height == b->height);
+    CSI_CHECK("marker recovery: marker binds exact installed artifact",
+              boot_consensus_bundle_marker_matches(
+                  active_dir, b->height, recovered_prefix->artifact_digest));
+    CSI_CHECK("marker recovery: above-anchor reset is refused after reopen",
+              boot_refold_anchor_reset_blocked_by_marker(
+                  active_dir, b->height - 1));
+    return failures;
+}
+
+static int marker_preserved_state_tests(sqlite3 *pdb, struct node_db *ndb,
+    const char *active_dir, const struct csi_fixture *b,
+    const struct consensus_state_proof_prefix *recovered_prefix,
+    uint64_t recovered_generation_before, const uint8_t recovered_root_before[32],
+    sqlite3_int64 kernel_changes)
+{
+    int failures = 0;
+    struct consensus_state_install_recovery_result recovery;
+    uint64_t recovered_generation_after = 0;
+    uint8_t recovered_root_after[32] = {0};
+    CSI_CHECK("marker recovery: repair preserves generation and exact state",
+              pdb &&
+              coins_kv_get_authority_generation(
+                  pdb, &recovered_generation_after) &&
+              recovered_generation_after == recovered_generation_before &&
+              coins_kv_commitment(pdb, recovered_root_after) == 0 &&
+              memcmp(recovered_root_before, recovered_root_after, 32) == 0 &&
+              active_is(pdb, b) &&
+              sqlite3_total_changes64(pdb) == kernel_changes);
+    int recovered_tip = -1;
+    uint8_t recovered_hash[32];
+    CSI_CHECK("marker recovery: durable height and hash stay unchanged",
+              tip_finalize_stage_resolve_durable_tip(
+                  pdb, &recovered_tip, recovered_hash) &&
+              recovered_tip == b->height &&
+              memcmp(recovered_hash, recovered_prefix->block_hash, 32) == 0);
+    CSI_CHECK("marker recovery: repeated recovery is a no-op",
+              consensus_state_install_recover_committed(
+                  ndb, active_dir, &recovery).ok &&
+              !recovery.recovered &&
+              sqlite3_total_changes64(pdb) == kernel_changes);
+    return failures;
+}
+
+static int installed_marker_reopen_tests(const char *active_dir,
+                                          const struct csi_fixture *b)
+{
+    int failures = 0;
+    sqlite3 *pdb = progress_store_db();
+    /* Crash cut: ACTIVATE committed, but the runtime's later filesystem
+     * marker write never ran. There is deliberately no bundles/ input in
+     * this datadir: recovery must recognize resident state, not reinstall. */
+    uint64_t recovered_generation_before = 0;
+    uint8_t recovered_root_before[32] = {0};
+    CSI_CHECK("marker recovery: committed generation exists without marker",
+              !boot_consensus_bundle_marker_exists(active_dir) &&
+              coins_kv_get_authority_generation(
+                  pdb, &recovered_generation_before) &&
+              coins_kv_commitment(pdb, recovered_root_before) == 0);
+    progress_store_close();
+    CSI_CHECK("marker recovery: committed store reopens",
+              progress_store_open(active_dir));
+    pdb = progress_store_db();
+    struct node_db recovered_ndb = {0};
+    char recovered_node_path[512];
+    snprintf(recovered_node_path, sizeof(recovered_node_path),
+             "%s/node.db", active_dir);
+    bool recovered_node_open =
+        node_db_open(&recovered_ndb, recovered_node_path);
+    CSI_CHECK("marker recovery: isolated node store opens",
+              recovered_node_open);
+    struct consensus_state_proof_prefix recovered_prefix;
+    failures += marker_generation_refusal_tests(pdb, &recovered_ndb, active_dir,
+        recovered_generation_before, &recovered_prefix);
+    sqlite3_int64 kernel_changes = sqlite3_total_changes64(pdb);
+    failures += marker_repair_tests(&recovered_ndb, active_dir, b, &recovered_prefix);
+    failures += marker_preserved_state_tests(pdb, &recovered_ndb, active_dir, b,
+        &recovered_prefix, recovered_generation_before, recovered_root_before, kernel_changes);
+    if (pdb && recovered_node_open)
+        failures += installed_marker_edge_tests(
+            pdb, &recovered_ndb, active_dir, b);
+    if (recovered_node_open)
+        node_db_close(&recovered_ndb);
+
+    return failures;
 }
 
 static bool hs_meta_present(sqlite3 *db, const char *key)
@@ -2348,6 +2707,151 @@ static void csi_make_tmpdir(char *buf, size_t n)
     }
 #endif
     test_make_tmpdir(buf, n, "consensus_state_install", "main");
+}
+
+/* This runs first at the exported group entry, before platform_arm opens any
+ * SQLite fixture. child_run's chain/ECC/event initialization starts no workers.
+ * Only the child opens the activation stores; the parent opens them after reap. */
+struct marker_committed_tuple {
+    uint64_t generation, coins;
+    int height;
+    uint8_t root[32], tip_hash[32], artifact[32];
+};
+
+static void marker_sigkill_child(const char *root, int read_fd, int write_fd)
+{
+    /* Parent timeout is 60s; this fuse also bounds an orphaned victim. */
+    if (signal(SIGALRM, SIG_DFL) == SIG_ERR)
+        _exit(4);
+    (void)alarm(90);
+    (void)close(read_fd);
+    struct marker_committed_tuple expected = {0};
+    struct rung_act_ctx c;
+    bool built = false;
+    int setup_failures = rung_act_setup(&c, root, &built);
+    struct consensus_state_activate_result activated;
+    bool committed = setup_failures == 0 && built &&
+        rung_act_try(&c, &c.rung, &activated) && activated.activated &&
+        active_is(c.pdb, &c.kb) &&
+        !boot_consensus_bundle_marker_exists(c.rdir) &&
+        coins_kv_get_authority_generation(c.pdb, &expected.generation) &&
+        coins_kv_commitment(c.pdb, expected.root) == 0 &&
+        tip_finalize_stage_resolve_durable_tip(
+            c.pdb, &expected.height, expected.tip_hash);
+    if (!committed)
+        _exit(2);
+    expected.coins = coins_kv_count(c.pdb);
+    memcpy(expected.artifact, c.kb.artifact, sizeof(expected.artifact));
+    /* One atomic commit handshake; keep SQLite open for the genuine crash. */
+    if (write(write_fd, &expected, sizeof(expected)) != (ssize_t)sizeof(expected))
+        _exit(3);
+    for (;;)
+        pause();
+}
+
+static bool marker_sigkill_await(pid_t child, int read_fd,
+                                 struct marker_committed_tuple *expected)
+{
+    if (child <= 0)
+        return false;
+    struct pollfd pfd = {.fd = read_fd, .events = POLLIN};
+    int polled = poll(&pfd, 1, 60000);
+    ssize_t got = -1;
+    if (polled > 0 && (pfd.revents & POLLIN)) {
+        do { got = read(read_fd, expected, sizeof(*expected)); }
+        while (got < 0 && errno == EINTR);
+    }
+    /* Always terminate and reap, including timeout and short-read paths. */
+    (void)kill(child, SIGKILL);
+    int status = 0;
+    pid_t reaped;
+    do { reaped = waitpid(child, &status, 0); }
+    while (reaped < 0 && errno == EINTR);
+    return got == (ssize_t)sizeof(*expected) && reaped == child &&
+        WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+}
+
+static bool marker_sigkill_tuple_matches(sqlite3 *db,
+                                         const struct marker_committed_tuple *expected)
+{
+    struct consensus_state_proof_prefix prefix;
+    uint64_t generation = 0;
+    uint8_t root[32], hash[32];
+    int height = -1;
+    return consensus_state_proof_prefix_load(db, &prefix) &&
+        prefix.authority_generation_present &&
+        prefix.authority_generation == expected->generation &&
+        coins_kv_get_authority_generation(db, &generation) &&
+        generation == expected->generation &&
+        coins_kv_count(db) == expected->coins &&
+        coins_kv_commitment(db, root) == 0 &&
+        memcmp(root, expected->root, sizeof(root)) == 0 &&
+        tip_finalize_stage_resolve_durable_tip(db, &height, hash) &&
+        height == expected->height && memcmp(hash, expected->tip_hash, sizeof(hash)) == 0;
+}
+
+static int marker_sigkill_reopen(const char *datadir, const char *node_path,
+                                 const struct marker_committed_tuple *expected)
+{
+    int failures = 0;
+    bool opened = progress_store_open(datadir);
+    struct node_db ndb = {0};
+    bool node_opened = opened && node_db_open(&ndb, node_path);
+    CSI_CHECK("marker kill9: stores reopen only after killed writer reaped",
+              opened && node_opened && !boot_consensus_bundle_marker_exists(datadir));
+    reducer_frontier_test_set_compiled_anchor(0);
+    if (node_opened) {
+        sqlite3 *db = progress_store_db();
+        sqlite3_int64 changes = sqlite3_total_changes64(db);
+        struct consensus_state_install_recovery_result recovery;
+        CSI_CHECK("marker kill9: recovery preserves exact committed tuple",
+                  consensus_state_install_recover_committed(
+                      &ndb, datadir, &recovery).ok && recovery.recovered &&
+                  !recovery.advanced && recovery.height == expected->height &&
+                  marker_sigkill_tuple_matches(db, expected) &&
+                  boot_consensus_bundle_marker_matches(
+                      datadir, expected->height, expected->artifact) &&
+                  sqlite3_total_changes64(db) == changes);
+        node_db_close(&ndb);
+    }
+    progress_store_close();
+    reducer_frontier_test_set_compiled_anchor(-1);
+    return failures;
+}
+
+static int committed_install_sigkill_test(void)
+{
+    int failures = 0;
+    CSI_CHECK("marker kill9: clean entry has no open progress store",
+              progress_store_db() == NULL);
+    if (failures)
+        return failures;
+    char root[256], datadir[320], node_path[512];
+    test_make_tmpdir(root, sizeof(root), "install_marker_kill9", "committed");
+    snprintf(datadir, sizeof(datadir), "%s/ckpt-rung-act", root);
+    snprintf(node_path, sizeof(node_path), "%s/node.db", datadir);
+    struct marker_committed_tuple expected = {0};
+    int handshake[2];
+    if (pipe(handshake) != 0) {
+        CSI_CHECK("marker kill9: handshake pipe opens", false);
+        printf("marker kill9: retained fixture=%s\n", root);
+        return failures;
+    }
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0)
+        marker_sigkill_child(root, handshake[0], handshake[1]);
+    (void)close(handshake[1]);
+    bool killed = marker_sigkill_await(child, handshake[0], &expected);
+    (void)close(handshake[0]);
+    CSI_CHECK("marker kill9: actual activation committed before SIGKILL", killed);
+    if (killed)
+        failures += marker_sigkill_reopen(datadir, node_path, &expected);
+    if (!failures)
+        test_rm_rf_recursive(root);
+    else
+        printf("marker kill9: retained fixture=%s\n", root);
+    return failures;
 }
 
 /* zcl.sync_benchmark.v1: after a successful install, ARTIFACT_VERIFY and
@@ -4103,6 +4607,8 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
         if (ares_auth.prior_generation_path[0])
             unlink(ares_auth.prior_generation_path);
 
+        failures += installed_marker_reopen_tests(active_dir, &b);
+
         reducer_frontier_test_set_compiled_anchor(-1);
         if (active_dir_fd >= 0)
             (void)close(active_dir_fd);
@@ -4660,5 +5166,10 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
 
 int test_consensus_state_snapshot_install(void)
 {
+#if !defined(_WIN32)
+    int crash_failures = committed_install_sigkill_test();
+    return crash_failures + test_consensus_state_snapshot_install_platform_arm();
+#else
     return test_consensus_state_snapshot_install_platform_arm();
+#endif
 }

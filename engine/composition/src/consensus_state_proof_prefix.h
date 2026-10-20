@@ -20,6 +20,10 @@
 
 struct consensus_state_proof_prefix {
     bool present;
+    /* Legacy inherited evidence has no generation binding. Only a binding
+     * matching current coins authority can identify a resident install. */
+    bool authority_generation_present;
+    uint64_t authority_generation;
     int32_t height;
     uint8_t block_hash[32];
     uint8_t validation_profile;
@@ -33,7 +37,8 @@ struct consensus_state_proof_prefix {
 /* Replace inherited prefix evidence from an already-admitted bundle.  The
  * caller holds progress_store_tx_lock() and an open BEGIN IMMEDIATE; this
  * function starts no transaction, so evidence and activated state commit or
- * roll back together. */
+ * roll back together. The caller has already advanced coins authority generation;
+ * zero/missing generation cannot identify an installed generation. */
 bool consensus_state_proof_prefix_install_in_tx(
     sqlite3 *progress_db, sqlite3 *bundle_db,
     const struct consensus_state_bundle_manifest *manifest);

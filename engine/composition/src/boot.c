@@ -1594,18 +1594,8 @@ static bool boot_step_open_progress_store(struct app_context *ctx)
  * chain-tip restoration runs. */
 static void boot_step_import_snapshot_first(struct app_context *ctx)
 {
-    /* Snapshot-first: if a downloaded consensus_snapshot.db
-     * is present in the datadir, import its UTXOs into node.db *before*
-     * any chain-tip restoration runs. This makes coins_best_block
-     * resolve to the snapshot height when the coins view first reads
-     * it, so utxo_recovery_restore_chain_tip / chain_restore_finalize
-     * observe the snapshot anchor as ground truth instead of racing
-     * past it with the older block_index.bin tip and leaving utxos=0.
-     *
-     * Idempotent: the helper refuses to import if main.utxos already
-     * holds the snapshot's contents (handled by checking the source
-     * file's integrity + size; a re-run with utxos>1000 is a no-op via
-     * the export guard in consensus_snapshot_export_service_run_bound). */
+    /* Import before coins-view restoration; the count guard below skips
+     * a populated store rather than letting an older index set its tip. */
     if (g_node_db.open) {
         char snap_path[PATH_MAX];
         int sp_n = snprintf(snap_path, sizeof(snap_path),
@@ -1991,8 +1981,18 @@ static bool boot_seq_open_coins_state(struct app_context *ctx)
 {
     if (!boot_step_open_progress_store(ctx))
         return false;
-    /* Timing only: the stretch to the block_index_load marker (~1.3–13s warm)
-     * had no markers — attribute its heaviest steps via boot_submark(). */
+#if !defined(_WIN32)
+    /* A failed store open retains the existing bounded retry/park path in
+     * boot_step_bind_coins_read_view; it is not an interrupted install. */
+    if (progress_store_db()) {
+        struct zcl_result recovered = consensus_state_install_recover_committed(
+            &g_node_db, ctx->datadir, NULL);
+        if (!recovered.ok) {
+            LOG_ERROR("boot", "%s", recovered.message);
+            return false;
+        }
+    }
+#endif
     int64_t t_sub = boot_clock_ms();
     boot_step_import_snapshot_first(ctx);
     t_sub = boot_submark("coins.snapshot_first", t_sub);

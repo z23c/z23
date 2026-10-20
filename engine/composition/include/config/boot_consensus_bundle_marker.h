@@ -36,4 +36,9 @@ bool boot_consensus_bundle_marker_exists(const char *datadir);
  * on boot_consensus_bundle_marker_exists). */
 bool boot_consensus_bundle_marker_height(const char *datadir, int32_t *height);
 
+/* Exact installed identity check. Read-only; malformed or contradictory
+ * contents are never overwritten by recovery. */
+bool boot_consensus_bundle_marker_matches(const char *datadir, int32_t height,
+                                         const uint8_t artifact_digest[32]);
+
 #endif /* ZCL_BOOT_CONSENSUS_BUNDLE_MARKER_H */
