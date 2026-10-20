@@ -444,8 +444,14 @@ static enum plugin_dist_status pd_pub_source(struct pd_pub *p,
         return PLUGIN_DIST_ERR_SOURCE;
     }
     const char *spdx = rq->spdx ? rq->spdx : "MIT";
-    if (!plugin_read_file(rq->license_file, PD_LICENSE_MAX, 0, &p->license, &p->license_len) ||
-        !vcs_package_release_license_text_matches(spdx, (const uint8_t *)p->license,
+    if (!plugin_read_file(rq->license_file, PD_LICENSE_MAX, PLUGIN_OPEN_NOFOLLOW, &p->license,
+                          &p->license_len)) {
+        pd_detail(out->detail, sizeof(out->detail),
+                  errno == ELOOP ? "the license file is a symlink; pass the regular file itself%s"
+                                 : "the license file is unreadable%s", "");
+        return PLUGIN_DIST_ERR_LICENSE;
+    }
+    if (!vcs_package_release_license_text_matches(spdx, (const uint8_t *)p->license,
                                                   p->license_len)) {
         pd_detail(out->detail, sizeof(out->detail),
                   "the license file is unreadable or is not the %s text", spdx);

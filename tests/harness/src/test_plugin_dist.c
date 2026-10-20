@@ -493,17 +493,26 @@ static int pd_refuse_publish(void)
     return failures;
 }
 
-/* ---- 8. over-cap image ----------------------------- */
-static int pd_refuse_big(void)
+/* ---- 8. over-cap image and symlinked license ----------------------------- */
+static int pd_refuse_big_and_link(void)
 {
     int failures = 0;
     struct pd_fixture f = {0};
-    TEST("plugin dist: an image over the cap is refused before checkout") {
+    TEST("plugin dist: an image over the cap is refused before checkout; a symlinked license is refused") {
         struct plugin_pack_result packed;
         struct plugin_dist_published pub;
         struct plugin_dist_received got;
+        char link[1400], original[1200];
         ASSERT(pd_open(&f));
         ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        /* A symlink in place of the license file is named, not a generic refusal. */
+        ASSERT(pd_path(link, sizeof(link), f.base, "LICENSE.link"));
+        ASSERT_EQ(symlink(f.license, link), 0);
+        snprintf(original, sizeof(original), "%s", f.license);
+        snprintf(f.license, sizeof(f.license), "%s", link);
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_ERR_LICENSE);
+        ASSERT(strstr(pub.detail, "symlink") != NULL);
+        snprintf(f.license, sizeof(f.license), "%s", original);
         ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
         ASSERT(pd_transfer(&f, pub.root, 0, true));
         ASSERT(pd_keys(f.plugins, packed.public_key));
@@ -533,6 +542,6 @@ int test_plugin_dist(void)
     failures += pd_refuse_truncated();
     failures += pd_refuse_downgrade();
     failures += pd_refuse_publish();
-    failures += pd_refuse_big();
+    failures += pd_refuse_big_and_link();
     return failures;
 }
