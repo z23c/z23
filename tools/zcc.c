@@ -3691,8 +3691,13 @@ static int epoch_compiler_start(int argc, char **argv)
     if (stat(argv[0], &self) != 0 || !S_ISREG(self.st_mode) ||
         stat(argv[12], &wrapper) != 0 || !S_ISREG(wrapper.st_mode))
         return 12;
-    return self.st_dev == wrapper.st_dev && self.st_ino == wrapper.st_ino
-               ? 13 : 12;
+    if (self.st_dev == wrapper.st_dev && self.st_ino == wrapper.st_ino)
+        return 13;
+    char self_digest[HEXLEN + 1u], wrapper_digest[HEXLEN + 1u];
+    return self.st_size == wrapper.st_size &&
+           file_hex(argv[0], self_digest) &&
+           file_hex(argv[12], wrapper_digest) &&
+           strcmp(self_digest, wrapper_digest) == 0 ? 13 : 12;
 }
 
 static char **epoch_compiler_argv(int argc, char **argv, const char *output,

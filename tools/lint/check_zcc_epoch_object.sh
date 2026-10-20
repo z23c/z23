@@ -456,6 +456,126 @@ compile dep "$MAKE_STYLE" "$ZCC" "$COUNTING_COMPILER" \
 [ "$(launch_count compile)" = "$MAKE_COLD_COMPILE" ] ||
     fail 'Make-style warm hit launched an object compiler'
 
+# A separate BUILD_DIR publishes a byte-identical zcc at a different inode.
+# It must unwrap exactly like the same-file wrapper above, without issuing
+# a driver query to zcc itself or adding another cache coordinator.
+ZCC_COPY="$WORK/zcc-copy"
+cp "$ZCC" "$ZCC_COPY"
+[ ! "$ZCC" -ef "$ZCC_COPY" ] || fail 'copied zcc shares the original inode'
+cmp "$ZCC" "$ZCC_COPY" || fail 'copied zcc bytes differ'
+MAKE_COPY="$OBJECT_ROOT/make-copy.o"
+LOG_BEFORE="$(cache_outcome_count)"
+LAUNCHES_BEFORE="$(wc -l < "$COMPILER_LAUNCHES")"
+COMPILER_LAUNCHES="$COMPILER_LAUNCHES" \
+compile dep "$MAKE_COPY" "$ZCC_COPY" "$COUNTING_COMPILER" \
+    -std=c23 -O2 -Wall -Wextra -Werror -DMAKE_COPY_EPOCH=1 \
+    "-frandom-seed=$SOURCE" 2>"$WORK/make-copy-cold.err"
+[ "$(cache_outcome_count)" = "$((LOG_BEFORE + 1))" ] &&
+[ "$(tail -1 "$ZCC_LOG" | awk '{print $1}')" = MISS ] ||
+    fail 'copied-wrapper cold compile used more than one zcc coordinator'
+[ "$(wc -l < "$COMPILER_LAUNCHES")" -gt "$LAUNCHES_BEFORE" ] ||
+    fail 'copied-wrapper cold compile launched no compiler child'
+! grep -F 'zcc: cannot execute -print-prog-name=' "$WORK/make-copy-cold.err" ||
+    fail 'copied-wrapper cold compile queried zcc as the compiler driver'
+COPY_COLD_PREPROCESS="$(launch_count preprocess)"
+COPY_COLD_COMPILE="$(launch_count compile)"
+rm -f -- "$MAKE_COPY" "${MAKE_COPY%.o}.d"
+COMPILER_LAUNCHES="$COMPILER_LAUNCHES" \
+compile dep "$MAKE_COPY" "$ZCC_COPY" "$COUNTING_COMPILER" \
+    -std=c23 -O2 -Wall -Wextra -Werror -DMAKE_COPY_EPOCH=1 \
+    "-frandom-seed=$SOURCE" 2>"$WORK/make-copy-warm.err"
+[ "$(cache_outcome_count)" = "$((LOG_BEFORE + 2))" ] &&
+[ "$(tail -1 "$ZCC_LOG" | awk '{print $1}')" = HIT ] ||
+    fail 'copied-wrapper warm compile used more than one zcc coordinator'
+[ "$(launch_count preprocess)" = "$((COPY_COLD_PREPROCESS + 1))" ] &&
+[ "$(launch_count compile)" = "$COPY_COLD_COMPILE" ] ||
+    fail 'copied-wrapper warm hit failed fresh preprocess or compiled an object'
+! grep -F 'zcc: cannot execute -print-prog-name=' "$WORK/make-copy-warm.err" ||
+    fail 'copied-wrapper warm compile queried zcc as the compiler driver'
+
+# Equal size alone must not unwrap a different, working compiler forwarder.
+cat > "$WORK/different-wrapper.c" <<'DIFFERENT_WRAPPER'
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+    const char *log = getenv("COMPILER_LAUNCHES");
+    if (argc < 2 || !log) return 2;
+    FILE *f = fopen(log, "a");
+    if (!f) return 2;
+    int wrote = fputs("different-wrapper\n", f);
+    int closed = fclose(f);
+    if (wrote < 0 || closed != 0) return 2;
+    execvp(argv[1], argv + 1);
+    perror("different-wrapper: compiler");
+    return 2;
+}
+DIFFERENT_WRAPPER
+DIFFERENT_WRAPPER="$WORK/different-wrapper"
+"$POSIX_CC" -std=c23 -O1 -Wall -Wextra -Werror \
+    "$WORK/different-wrapper.c" -o "$DIFFERENT_WRAPPER"
+ZCC_SIZE="$(wc -c < "$ZCC")"
+[ "$(wc -c < "$DIFFERENT_WRAPPER")" -lt "$ZCC_SIZE" ] ||
+    fail 'different-wrapper fixture cannot be padded to zcc size'
+dd if=/dev/zero of="$DIFFERENT_WRAPPER" bs=1 count=1 \
+    seek="$((ZCC_SIZE - 1))" conv=notrunc 2>/dev/null
+[ "$(wc -c < "$DIFFERENT_WRAPPER")" = "$ZCC_SIZE" ] ||
+    fail 'different-wrapper size differs from zcc'
+! cmp -s "$ZCC" "$DIFFERENT_WRAPPER" || fail 'different-wrapper bytes equal zcc'
+COMPILER_LAUNCHES="$COMPILER_LAUNCHES" \
+    "$DIFFERENT_WRAPPER" "$POSIX_CC" --version >"$WORK/different-wrapper-version"
+DIFFERENT_BEFORE="$(grep -c '^different-wrapper$' "$COMPILER_LAUNCHES")"
+MAKE_DIFFERENT="$OBJECT_ROOT/make-different.o"
+COMPILER_LAUNCHES="$COMPILER_LAUNCHES" \
+compile dep "$MAKE_DIFFERENT" "$DIFFERENT_WRAPPER" "$COUNTING_COMPILER" \
+    -std=c23 -O2 -Wall -Wextra -Werror -DMAKE_COPY_EPOCH=1 \
+    "-frandom-seed=$SOURCE" 2>"$WORK/make-different.err"
+[ "$(grep -c '^different-wrapper$' "$COMPILER_LAUNCHES")" -gt "$DIFFERENT_BEFORE" ] ||
+    fail 'same-size different executable was incorrectly unwrapped'
+cmp -s "$MAKE_COPY" "$MAKE_DIFFERENT" ||
+    fail 'same-size different executable changed forwarded compile output'
+
+if [ "${ZCC_EPOCH_TIMING:-0}" = 1 ]; then
+    # Opt-in whole-invocation timing: includes fresh preprocessing and cache
+    # validation, not an isolated digest cost or a throughput comparison.
+    TIMING_REFERENCE="$WORK/timing-reference.o"
+    cp "$MAKE_COPY" "$TIMING_REFERENCE"
+    for TIMING_KIND in same-inode identical-copy; do
+        TIMING_WRAPPER="$ZCC"
+        [ "$TIMING_KIND" != identical-copy ] || TIMING_WRAPPER="$ZCC_COPY"
+        TIMING_OUT="$OBJECT_ROOT/timing-$TIMING_KIND.o"
+        COMPILER_LAUNCHES="$COMPILER_LAUNCHES" \
+        compile dep "$TIMING_OUT" "$TIMING_WRAPPER" "$COUNTING_COMPILER" \
+            -std=c23 -O2 -Wall -Wextra -Werror -DMAKE_COPY_EPOCH=1 \
+            "-frandom-seed=$SOURCE" 2>"$WORK/timing-warmup.err"
+        TIMING_HITS_BEFORE="$(awk '$1 == "HIT" {n++} END {print n+0}' "$ZCC_LOG")"
+        TIMING_PREPROCESS_BEFORE="$(launch_count preprocess)"
+        TIMING_COMPILE_BEFORE="$(launch_count compile)"
+        TIMEFORMAT="epoch-wrapper-timing $TIMING_KIND n=5 real_s=%R user_s=%U sys_s=%S"
+        { time {
+            for TIMING_SAMPLE in 1 2 3 4 5; do
+                rm -f -- "$TIMING_OUT" "${TIMING_OUT%.o}.d"
+                COMPILER_LAUNCHES="$COMPILER_LAUNCHES" \
+                compile dep "$TIMING_OUT" "$TIMING_WRAPPER" "$COUNTING_COMPILER" \
+                    -std=c23 -O2 -Wall -Wextra -Werror -DMAKE_COPY_EPOCH=1 \
+                    "-frandom-seed=$SOURCE" 2>"$WORK/timing-sample.err"
+                cmp -s "$TIMING_REFERENCE" "$TIMING_OUT" ||
+                    fail 'timed invocation changed object bytes'
+            done
+        }; } 2>"$WORK/timing-$TIMING_KIND.txt"
+        cat "$WORK/timing-$TIMING_KIND.txt"
+        [ "$(awk '$1 == "HIT" {n++} END {print n+0}' "$ZCC_LOG")" = "$((TIMING_HITS_BEFORE + 5))" ] ||
+            fail 'timing batch did not produce five warm hits'
+        [ "$(launch_count preprocess)" = "$((TIMING_PREPROCESS_BEFORE + 5))" ] ||
+            fail 'timing batch did not freshly preprocess every invocation'
+        [ "$(launch_count compile)" = "$TIMING_COMPILE_BEFORE" ] ||
+            fail 'timing batch launched an object compiler'
+    done
+    printf '%s\n' 'epoch-wrapper-timing scope=whole-invocation-plus-output-check; includes preprocessing, not isolated hashing'
+fi
+
 # The legacy shell oracle and the native path must publish identical object
 # bytes for the same compiler inputs.
 LEGACY="$OBJECT_ROOT/legacy.o"
