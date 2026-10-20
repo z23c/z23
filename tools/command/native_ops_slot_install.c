@@ -73,6 +73,7 @@ struct osi {
     bool dry_run;
     uint8_t package_root[32];
     struct release_pin_doc pd;
+    struct release_pin_threshold th;
     struct zid_release rel;
     struct vcs_package_manifest manifest;
     const struct vcs_package_file *file;
@@ -181,8 +182,8 @@ static bool osi_check_release(const struct zcl_command_request *request,
         return false;
     }
     memcpy(st->package_root, root, sizeof(root));
-    return release_pin_doc_gate(request->input, true, &st->pd, now, &st->rel,
-                                reply, OSI_CMD);
+    return release_pin_multi_gate(request->input, true, &st->pd, now, &st->rel,
+                                  &st->th, reply, OSI_CMD);
 }
 
 /* Step 4a: the manifest for that root, from the local store. */
@@ -452,6 +453,11 @@ static void osi_reply(const struct osi *st, struct zcl_command_reply *reply,
     json_push_kv_str(&reply->data, "release_version", st->rel.version);
     json_push_kv_int(&reply->data, "doc_version", st->pd.version);
     json_push_kv_bool(&reply->data, "pq_verified", st->pd.pq_verified);
+    if (st->th.threshold > 0) {
+        json_push_kv_int(&reply->data, "threshold", (int64_t)st->th.threshold);
+        json_push_kv_int(&reply->data, "signers_matched",
+                         (int64_t)st->th.matched);
+    }
     json_push_kv_bool(&reply->data, "installed", installed);
     json_push_kv_bool(&reply->data, "idempotent", idempotent);
     json_push_kv_bool(&reply->data, "dry_run", st->dry_run);

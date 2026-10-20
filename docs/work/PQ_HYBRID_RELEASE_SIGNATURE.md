@@ -18,9 +18,11 @@ otherwise), the pair-pin file format and gate in `release_pin` (section 6.1),
 `ops slot install` accepting a v2 doc only under a pair pin, the `require_pq`
 phase 3 switch, v2 docs in the `<datadir>/zcode/releases/` batch (saved as
 `<name>-<version>.v2.zid`) and the `zcode.release.keygen_pq` leaf. Not
-implemented: the k-of-n owner gate (6.2) and any default switch to v2.
+implemented: any default switch to v2. Implemented since: the k-of-n owner
+gate (6.2), `threshold K` in a pin file plus `cosigs`, in `ops slot install`
+and `zcode.release.verify`.
 `zcode.release.verify` still refuses `pin`/`pin_file` on a v2 doc with
-`PQ_PIN_UNSUPPORTED` (pair pins there are a later change); `ops slot install`
+`PQ_PIN_UNSUPPORTED` unless the pin file has a `threshold` line or `cosigs` is given (pair pins there are a later change); `ops slot install`
 is the PQ-secure native install path.
 
 <!-- claim: symbol-present zid_hybrid_release_sign contexts/wallet/modules/zid -->
@@ -240,19 +242,59 @@ Acceptance in `ops slot install` (`release_pin_doc_gate`):
 hex, 0600, exclusive create) and prints only the public key and a ready pin
 line. Every earlier refusal code is unchanged.
 
-### 6.2 k-of-n owner gate (later packet)
+### 6.2 k-of-n owner gate
 
-Shape only:
-- n owner hybrid keys (pairs), threshold k.
-- Each signer produces a complete, independent ZRS1 doc over the same
-  release body; the gate receives a set of docs, not a merged signature.
-- Verification counts DISTINCT pinned pairs that fully verify. Two docs from
-  the same pair count once; a pair not in the pinned set counts zero.
-- The result reports the matched count and the threshold; the single
-  `signer[32]` argument of the current gate cannot express this, so the
-  gate API changes in that packet.
-- All docs in a set must agree on name, version and manifest_root; any
-  disagreement refuses.
+IMPLEMENTED. A pin file with a `threshold K` line makes a receiver accept a
+release only when at least K DISTINCT pinned pairs each hold a valid hybrid
+(v2) doc over the same (name, version, manifest_root). With no `threshold`
+line nothing changes: the single-doc path is the same code as before.
+
+Design choice: sibling docs, not a multi-signer container. Each signer
+produces an ordinary, complete, independent ZIDR v2 doc over the same
+release body, unchanged on the wire (no new version byte, no container
+change, signers never need to meet or share a secret, and any one signer's
+doc still verifies on its own under the old verifier). The primary doc is the
+usual `release=` / `file=` input; the others are named by the comma-separated
+input `cosigs=<a.zid>,<b.zid>,...` (at most 7, so 8 docs in all). The gate
+receives a set of docs, not a merged signature.
+
+One gate, no forks: `release_pin_multi_gate` in `tools/command/release_pin.c`
+is called by both `ops slot install` and `zcode release verify`, and verifies
+each doc through the same `zid_hybrid_release_verify` path as the single-doc
+gate (shared helper `rp_verify_v2`). It reports `threshold` and
+`signers_matched` in the reply, only when a threshold applied.
+
+Rules, each with a typed refusal:
+- `threshold K` with K < 1: `THRESHOLD_BELOW_ONE`. A non-numeric K or a second
+  `threshold` line: `PIN_FILE_INVALID`.
+- K greater than the number of distinct pinned pairs (`zrs1` lines; the same
+  pair pinned twice counts once; Ed25519-only pins count zero):
+  `THRESHOLD_EXCEEDS_PINS`, refused when the pin file loads.
+- One doc when K >= 2: `THRESHOLD_SINGLE_DOC`.
+- Two docs from one signer, whether the same pair or a shared Ed25519 or
+  SLH-DSA key: `THRESHOLD_DUPLICATE_SIGNER`. A signer counts once, so
+  repeating a doc never raises the count.
+- Docs that verify but disagree on name, version or manifest_root:
+  `THRESHOLD_DISAGREE`.
+- Fewer than K pinned pairs verify (a doc by an unpinned pair counts zero):
+  `THRESHOLD_NOT_MET`.
+- A doc that is pinned but fails verification (`PQ_KEY_MISMATCH`,
+  `BAD_SIGNATURE`, `BAD_PQ_SIGNATURE`, `DOC_EXPIRED`...) refuses the whole
+  set with its own code; a bad doc is never silently dropped.
+- A v1 doc in a threshold set: `RELEASE_PQ_REQUIRED`. A threshold implies
+  `require-pq`: only hybrid pairs count.
+- `cosigs` without a `threshold` line: `THRESHOLD_MISSING`; extra docs are
+  never ignored.
+- `package_root`, when given, is checked against the agreed root afterwards
+  (`RELEASE_ROOT_MISMATCH`), as for a single doc.
+
+Operator adoption: generate a second owner hybrid key pair and keep it
+offline with a different custodian; pin both pairs in the owner-pins file and
+add `threshold 2`; distribute that pin file to receivers. A release is then
+signed twice (`zcode release sign` once per key, same name, version and
+root) and installed with `cosigs=` naming the second doc. Until a receiver
+adopts the new pin file it keeps accepting a single signer.
+
 
 
 ## 7. Migration from Ed25519-only
@@ -290,8 +332,8 @@ fix everything, do your best"). Resolutions:
    every path.
 7. One seq and one expiry for the whole doc.
 
-Still open: the pair-pin file format and `release_pin` gate change, the k-of-n
-gate API, and when migration phase 3 starts.
+Still open: when migration phase 3 starts. (Pair pins and the k-of-n gate, 6.2,
+are implemented.)
 
 ## 9. Test vectors
 

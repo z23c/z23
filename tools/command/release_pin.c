@@ -138,6 +138,47 @@ static char *rp_trim(char *s)
     return s;
 }
 
+/* `threshold K`: K is plain decimal digits. Returns the typed refusal code
+ * through `reply`; false when the line is refused. */
+static bool rp_threshold_line(struct release_pin_set *set, const char *rest,
+                              size_t lineno, struct zcl_command_reply *reply,
+                              const char *path)
+{
+    char where[64];
+    snprintf(where, sizeof(where), "line %zu", lineno);
+    while (*rest == ' ' || *rest == '\t')
+        rest++;
+    size_t n = strlen(rest), k = 0;
+    bool digits = n > 0 && n <= 4;
+    for (size_t i = 0; digits && i < n; i++) {
+        digits = rest[i] >= '0' && rest[i] <= '9';
+        k = k * 10u + (size_t)(rest[i] - '0');
+    }
+    if (!digits || set->threshold_seen) {
+        zcl_native_refuse(reply, "PIN_FILE_INVALID", "normalize",
+                "a pin file holds at most one `threshold <K>` line, K "
+                "written as decimal digits", where);
+        return false;
+    }
+    set->threshold_seen = true;
+    if (k < 1) {
+        zcl_native_refuse(reply, "THRESHOLD_BELOW_ONE", "normalize",
+                "a release threshold must be at least 1; remove the "
+                "`threshold` line to keep single-signer behaviour", path);
+        return false;
+    }
+    set->threshold = k;
+    set->require_pq = true; /* a threshold counts hybrid pairs only */
+    return true;
+}
+
+static bool rp_is_directive(const char *key, const char *word)
+{
+    size_t n = strlen(word);
+    return strncmp(key, word, n) == 0 &&
+           (key[n] == '\0' || key[n] == ' ' || key[n] == '\t');
+}
+
 static bool rp_pin_line(struct release_pin_set *set, char *line, size_t lineno,
                         struct zcl_command_reply *reply, const char *path)
 {
@@ -148,6 +189,9 @@ static bool rp_pin_line(struct release_pin_set *set, char *line, size_t lineno,
         set->require_pq = true;
         return true;
     }
+    if (rp_is_directive(key, RELEASE_PIN_THRESHOLD_LINE))
+        return rp_threshold_line(set, key + strlen(RELEASE_PIN_THRESHOLD_LINE),
+                                 lineno, reply, path);
     char where[64];
     snprintf(where, sizeof(where), "line %zu", lineno);
     if (rp_is_pair_text(key)) {
@@ -246,6 +290,13 @@ bool release_pin_collect(const struct json_value *in,
         set->given = true;
         if (!rp_load_file(set, file_s, reply))
             return false;
+    }
+    if (set->threshold > set->pair_count) {
+        zcl_native_refuse(reply, "THRESHOLD_EXCEEDS_PINS", "normalize",
+                "the pin file asks for more distinct signers than it pins "
+                "hybrid pairs (`zrs1` lines; a pair pinned twice counts "
+                "once)", command);
+        return false;
     }
     return true;
 }
@@ -357,6 +408,30 @@ rp_pair_for(const struct release_pin_set *set, const struct zid_doc_v2 *v2)
     return found;
 }
 
+/* Verify one v2 doc against its governing pair pin (NULL: authenticate the
+ * pair the doc names, unpinned). Fills `rel` and sets d->pq_verified. */
+static bool rp_verify_v2(struct release_pin_doc *d,
+                         const struct release_pin_pair *pair,
+                         uint64_t now_unix, struct zid_release *rel,
+                         struct zcl_command_reply *reply, const char *command)
+{
+    enum zid_hybrid_status st = zid_hybrid_release_verify(
+        &d->v2, pair ? pair->pq : NULL, rel, now_unix);
+    if (st != ZID_HYBRID_OK) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED,
+                               zid_hybrid_status_code(st), "execute", false,
+                               false,
+                               "the v2 hybrid release doc did not verify "
+                               "against your pinned pair; both the Ed25519 "
+                               "and the SLH-DSA signature must hold",
+                               command);
+        return false;
+    }
+    d->pq_verified = true;
+    return true;
+}
+
 bool release_pin_doc_gate(const struct json_value *in, bool require_pin,
                           struct release_pin_doc *d, uint64_t now_unix,
                           struct zid_release *rel,
@@ -381,20 +456,8 @@ bool release_pin_doc_gate(const struct json_value *in, bool require_pin,
             "post-quantum half is held to a key you chose",
             d->v2.master_pubkey);
     }
-    enum zid_hybrid_status st = zid_hybrid_release_verify(
-        &d->v2, pair ? pair->pq : NULL, rel, now_unix);
-    if (st != ZID_HYBRID_OK) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED,
-                               zid_hybrid_status_code(st), "execute", false,
-                               false,
-                               "the v2 hybrid release doc did not verify "
-                               "against your pinned pair; both the Ed25519 "
-                               "and the SLH-DSA signature must hold",
-                               command);
+    if (!rp_verify_v2(d, pair, now_unix, rel, reply, command))
         return false;
-    }
-    d->pq_verified = true;
     return rp_root_check(in, rel->manifest_root, reply, command);
 }
 
@@ -470,4 +533,202 @@ bool release_pin_read_any(const char *path, struct release_pin_doc *d,
     d->doc.body_len = d->v2.body_len;
     memcpy(d->doc.body, d->v2.body, d->v2.body_len);
     return true;
+}
+
+/* ── k-of-n owner gate ─────────────────────────────────────────────── */
+
+bool release_pin_threshold_active(const struct json_value *in)
+{
+    const struct json_value *cs = json_get(in, "cosigs");
+    const char *cos = cs ? json_get_str(cs) : NULL;
+    if (cos && cos[0])
+        return true;
+    struct zcl_command_reply scratch;
+    struct release_pin_set set;
+    zcl_command_reply_init(&scratch, "zcl.release_pin.probe.v1");
+    bool ok = release_pin_collect(in, &set, &scratch, "release_pin");
+    zcl_command_reply_free(&scratch);
+    return ok && set.threshold > 0;
+}
+
+static bool rp_same_release(const struct zid_release *a,
+                            const struct zid_release *b)
+{
+    return strcmp(a->name, b->name) == 0 &&
+           strcmp(a->version, b->version) == 0 &&
+           memcmp(a->manifest_root, b->manifest_root, 32) == 0;
+}
+
+/* Running state of one threshold check. Docs are read one at a time and only
+ * their signer identity is kept, so the set needs no heap. */
+struct rp_tally {
+    const struct release_pin_set *set;
+    uint64_t now_unix;
+    struct zcl_command_reply *reply;
+    const char *command;
+    uint8_t seen_ed[RELEASE_PIN_MAX_DOCS][32];
+    uint8_t seen_pq[RELEASE_PIN_MAX_DOCS][ZRS1_PQ_PK_SIZE];
+    size_t seen;
+    size_t matched;
+    struct zid_release first; /* the release every counted doc agrees on */
+};
+
+/* One doc into the tally. A v1 doc, a second doc by one signer (the same
+ * pair, or a shared Ed25519 or SLH-DSA key) and a pinned doc that does not
+ * verify each refuse the whole set; a doc by an unpinned pair counts zero;
+ * verified docs must all agree on name, version and root. */
+static bool rp_tally_doc(struct rp_tally *t, struct release_pin_doc *d)
+{
+    struct zid_release r;
+    if (d->version != ZID_DOC_VERSION_V2)
+        return rp_refuse_signer(
+            t->reply, "RELEASE_PQ_REQUIRED",
+            " with a v1 (Ed25519-only) doc, but a threshold counts "
+            "post-quantum hybrid (v2) pairs only", d->doc.master_pubkey);
+    for (size_t i = 0; i < t->seen; i++)
+        if (memcmp(t->seen_ed[i], d->v2.master_pubkey, 32) == 0 ||
+            memcmp(t->seen_pq[i], d->v2.pq_pk, ZRS1_PQ_PK_SIZE) == 0)
+            return rp_refuse_signer(
+                t->reply, "THRESHOLD_DUPLICATE_SIGNER",
+                " on more than one doc of this set; one signer counts "
+                "once, so a threshold needs docs from different pairs",
+                d->v2.master_pubkey);
+    memcpy(t->seen_ed[t->seen], d->v2.master_pubkey, 32);
+    memcpy(t->seen_pq[t->seen], d->v2.pq_pk, ZRS1_PQ_PK_SIZE);
+    t->seen++;
+    const struct release_pin_pair *pair = rp_pair_for(t->set, &d->v2);
+    if (!pair)
+        return true;
+    memset(&r, 0, sizeof(r));
+    if (!rp_verify_v2(d, pair, t->now_unix, &r, t->reply, t->command))
+        return false;
+    if (t->matched == 0)
+        t->first = r;
+    else if (!rp_same_release(&t->first, &r)) {
+        zcl_native_refuse(t->reply, "THRESHOLD_DISAGREE", "execute",
+                "the signers did not sign the same release: name, "
+                "version and package root must be identical in every "
+                "doc", t->command);
+        return false;
+    }
+    t->matched++;
+    return true;
+}
+
+/* Read each comma-separated saved .zid path of `cos` through the same reader
+ * as the primary doc and tally it. */
+static bool rp_tally_cosigs(struct rp_tally *t, const char *cos)
+{
+    struct release_pin_doc cur;
+    while (cos && cos[0]) {
+        const char *comma = strchr(cos, ',');
+        size_t len = comma ? (size_t)(comma - cos) : strlen(cos);
+        char path[1024];
+        const char *code = NULL;
+        if (len == 0 || len >= sizeof(path)) {
+            zcl_native_refuse(t->reply, "BAD_COSIGS", "normalize",
+                    "cosigs is a comma-separated list of saved .zid file "
+                    "paths, none empty", t->command);
+            return false;
+        }
+        if (t->seen >= RELEASE_PIN_MAX_DOCS) {
+            zcl_native_refuse(t->reply, "TOO_MANY_DOCS", "normalize",
+                    "a threshold set holds at most 8 docs", t->command);
+            return false;
+        }
+        memcpy(path, cos, len);
+        path[len] = '\0';
+        if (!release_pin_read_any(path, &cur, &code)) {
+            zcl_native_refuse(t->reply, code, "normalize",
+                    "a cosigner release doc could not be read as a saved "
+                    ".zid (hex text)", path);
+            return false;
+        }
+        if (!rp_tally_doc(t, &cur))
+            return false;
+        cos = comma ? comma + 1 : cos + len;
+    }
+    return true;
+}
+
+/* Refusals that need no doc: no pin, cosigners without a threshold, and
+ * one doc when K >= 2. */
+static bool rp_threshold_preflight(const struct release_pin_set *set,
+                                   const char *cos, bool require_pin,
+                                   struct zcl_command_reply *reply,
+                                   const char *command)
+{
+    if (!rp_need_pin(set, require_pin, reply, command))
+        return false;
+    if (set->threshold == 0) {
+        zcl_native_refuse(reply, "THRESHOLD_MISSING", "normalize",
+                "cosigner docs were given but the pin file has no "
+                "`threshold <K>` line; extra docs are never ignored",
+                command);
+        return false;
+    }
+    if ((!cos || !cos[0]) && set->threshold >= 2) {
+        zcl_native_refuse(reply, "THRESHOLD_SINGLE_DOC", "execute",
+                "your pins require K distinct signers but only one doc "
+                "was given; pass the other signers' docs in cosigs",
+                command);
+        return false;
+    }
+    return true;
+}
+
+/* Tally the primary and cosigner docs and compare with K. */
+static bool rp_threshold_run(const struct json_value *in,
+                             const struct release_pin_set *set,
+                             const char *cos, struct release_pin_doc *d,
+                             uint64_t now_unix, struct zid_release *rel,
+                             struct release_pin_threshold *out,
+                             struct zcl_command_reply *reply,
+                             const char *command)
+{
+    struct rp_tally t = { .set = set, .now_unix = now_unix, .reply = reply,
+                          .command = command };
+    d->pq_verified = false;
+    if (!rp_tally_doc(&t, d) || !rp_tally_cosigs(&t, cos))
+        return false;
+    if (t.matched < set->threshold) {
+        zcl_native_refuse(reply, "THRESHOLD_NOT_MET", "execute",
+                "fewer distinct pinned pairs signed this release than your "
+                "pins require", command);
+        return false;
+    }
+    *rel = t.first;
+    if (out) {
+        out->threshold = set->threshold;
+        out->matched = t.matched;
+    }
+    return rp_root_check(in, rel->manifest_root, reply, command);
+}
+
+bool release_pin_multi_gate(const struct json_value *in, bool require_pin,
+                            struct release_pin_doc *d, uint64_t now_unix,
+                            struct zid_release *rel,
+                            struct release_pin_threshold *out,
+                            struct zcl_command_reply *reply,
+                            const char *command)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+    const struct json_value *cs = json_get(in, "cosigs");
+    const char *cos = cs ? json_get_str(cs) : NULL;
+    if (cs && !cos) {
+        zcl_native_refuse(reply, "BAD_COSIGS", "normalize",
+                "cosigs must be a string", command);
+        return false;
+    }
+    struct release_pin_set set;
+    if (!release_pin_collect(in, &set, reply, command))
+        return false;
+    if (set.threshold == 0 && !(cos && cos[0]))
+        return release_pin_doc_gate(in, require_pin, d, now_unix, rel, reply,
+                                    command);
+    if (!rp_threshold_preflight(&set, cos, require_pin, reply, command))
+        return false;
+    return rp_threshold_run(in, &set, cos, d, now_unix, rel, out, reply,
+                            command);
 }

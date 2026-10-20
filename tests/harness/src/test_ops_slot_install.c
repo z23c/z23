@@ -285,7 +285,7 @@ static void osi_pkg_free(struct osi_pkg *p)
 }
 
 struct osi_req {
-    const char *release, *from, *name, *root, *pin, *pin_file;
+    const char *release, *from, *name, *root, *pin, *pin_file, *cosigs;
     bool dry_run, require_pq;
 };
 
@@ -302,6 +302,8 @@ static void osi_run(const struct osi_fx *fx, const struct osi_req *r,
         json_push_kv_str(&c->input, "pin", r->pin);
     if (r->pin_file)
         json_push_kv_str(&c->input, "pin_file", r->pin_file);
+    if (r->cosigs)
+        json_push_kv_str(&c->input, "cosigs", r->cosigs);
     if (r->require_pq)
         json_push_kv_bool(&c->input, "require_pq", true);
     if (r->dry_run)
@@ -820,6 +822,79 @@ static int test_osi_hy_pin_lines(const struct osi_fx *fx,
     return failures;
 }
 
+/* l. k-of-n (docs/work/PQ_HYBRID_RELEASE_SIGNATURE.md 6.2): `threshold 2`
+ * installs only with two distinct pinned pairs' docs over the same release. */
+static bool osi_cosign(const struct osi_fx *fx, const struct osi_pkg *p,
+                       const struct osi_hy *hy, char pins[PATH_MAX],
+                       char doc_b[PATH_MAX])
+{
+    static struct zid_doc_v2 doc;
+    static uint8_t wire[ZID_DOC_V2_MAX];
+    static char hex[ZID_DOC_V2_MAX * 2 + 1];
+    uint8_t ed_seed[32], pq_seed[ZRS1_PQ_SEED_SIZE], pk[ZRS1_PQ_PK_SIZE];
+    uint8_t ed_pk[32];
+    char ed_hex[65], pq_hex[ZRS1_PQ_PK_SIZE * 2 + 1], text[1024];
+    struct zid_release rel;
+    memset(ed_seed, 0x6B, sizeof(ed_seed));
+    osi_pq_seed(0xC0, pq_seed);
+    memset(&rel, 0, sizeof(rel));
+    snprintf(rel.name, sizeof(rel.name), "z23");
+    snprintf(rel.version, sizeof(rel.version), "1.0.a-pq");
+    if (ParseHex(p->root_hex, rel.manifest_root, 32) != 32 ||
+        !zid_hybrid_pq_pubkey(pk, pq_seed) ||
+        !zid_hybrid_release_sign(&doc, &rel, 1,
+                                 (uint64_t)platform_time_wall_unix() + 86400u,
+                                 ed_seed, pq_seed))
+        return false;
+    size_t n = zid_hybrid_encode(wire, sizeof(wire), &doc);
+    memcpy(ed_pk, doc.master_pubkey, 32);
+    HexStr(ed_pk, 32, false, ed_hex, sizeof(ed_hex));
+    HexStr(pk, sizeof(pk), false, pq_hex, sizeof(pq_hex));
+    HexStr(wire, n, false, hex, sizeof(hex));
+    snprintf(doc_b, PATH_MAX, "%s/release_b_v2.zid", fx->dir);
+    snprintf(pins, PATH_MAX, "%s/pins_k2", fx->dir);
+    snprintf(text, sizeof(text), "%s\nzrs1 %s 0 %s\nthreshold 2\n",
+             hy->pair_line, ed_hex, pq_hex);
+    return n > 0 && osi_write_file(doc_b, hex, strlen(hex), 0644) &&
+           osi_write_file(pins, text, strlen(text), 0600);
+}
+
+static int test_osi_threshold(const struct osi_fx *fx, const struct osi_pkg *p,
+                              const struct osi_hy *hy)
+{
+    struct osi_cmd c;
+    int failures = 0;
+    char pins[PATH_MAX], doc_b[PATH_MAX];
+    if (!osi_cosign(fx, p, hy, pins, doc_b))
+        return osi_check(false, "threshold fixture");
+    int before = osi_count(fx->slots);
+    struct osi_req r = osi_hy_req(fx, p, hy->doc_v2, pins, "k2-one");
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_code(&c, "THRESHOLD_SINGLE_DOC") &&
+                              osi_count(fx->slots) == before,
+                          "threshold 2 with one doc is refused, nothing "
+                          "written");
+    oc_free(&c);
+    r.name = "k2-two";
+    r.cosigs = doc_b;
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_ok(&c) && oc_bool(&c, "installed") == 1 &&
+                              json_get_int(json_get(&c.reply.data,
+                                                    "signers_matched")) == 2 &&
+                              json_get_int(json_get(&c.reply.data,
+                                                    "threshold")) == 2,
+                          "threshold 2 with two distinct pinned pairs "
+                          "installs (threshold 2, signers_matched 2)");
+    oc_free(&c);
+    r.name = "k2-dup";
+    r.cosigs = hy->doc_v2;
+    osi_run(fx, &r, &c);
+    failures += osi_check(oc_code(&c, "THRESHOLD_DUPLICATE_SIGNER"),
+                          "the same pair twice does not reach threshold 2");
+    oc_free(&c);
+    return failures;
+}
+
 static int test_osi_hybrid(const struct osi_fx *fx, const struct osi_pkg *p)
 {
     struct osi_hy hy;
@@ -830,6 +905,7 @@ static int test_osi_hybrid(const struct osi_fx *fx, const struct osi_pkg *p)
     failures += test_osi_hy_refusals(fx, p, &hy);
     failures += test_osi_hy_v1(fx, p, &hy);
     failures += test_osi_hy_pin_lines(fx, p, &hy);
+    failures += test_osi_threshold(fx, p, &hy);
     return failures;
 }
 
@@ -854,6 +930,7 @@ int test_ops_slot_install(void)
     failures += test_osi_verify(&fx, &a, &b);
     failures += test_osi_doc_and_path(&fx, &a);
     failures += test_osi_hybrid(&fx, &a);
+    failures += release_threshold_suite();
     osi_pkg_free(&a);
     osi_pkg_free(&b);
     unsetenv("ZCL_BINARY_SLOTS_DIR");

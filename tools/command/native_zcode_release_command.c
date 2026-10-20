@@ -1229,6 +1229,47 @@ static bool zr_v2_pin_refused(const struct json_value *in,
     return true;
 }
 
+/* The k-of-n gate for `zcode release verify`: wrap the decoded primary doc
+ * and hand it, with `cosigs`, to the shared release_pin gate. */
+static bool zr_threshold_gate(const struct json_value *in, bool is_v2,
+                              const struct zid_doc *doc,
+                              const struct zid_doc_v2 *v2,
+                              struct zid_release *rel, int64_t now,
+                              struct zcl_command_reply *reply)
+{
+    struct release_pin_doc pd;
+    struct release_pin_threshold th;
+    memset(&pd, 0, sizeof(pd));
+    pd.version = is_v2 ? ZID_DOC_VERSION_V2 : ZID_DOC_VERSION;
+    pd.doc = *doc;
+    if (is_v2)
+        pd.v2 = *v2;
+    if (!release_pin_multi_gate(in, false, &pd, (uint64_t)now, rel, &th, reply,
+                                "zcode.release.verify"))
+        return false;
+    if (th.threshold > 0) {
+        json_push_kv_int(&reply->data, "threshold", (int64_t)th.threshold);
+        json_push_kv_int(&reply->data, "signers_matched",
+                         (int64_t)th.matched);
+    }
+    return true;
+}
+
+/* Receiver pins: the k-of-n gate when the input asks for one, else the
+ * single-signer gate (a v2 doc cannot meet key pins, see above). */
+static bool zr_pin_gate(const struct json_value *in, bool is_v2,
+                        const struct zid_doc *doc, const struct zid_doc_v2 *v2,
+                        struct zid_release *rel, int64_t now,
+                        struct zcl_command_reply *reply)
+{
+    if (release_pin_threshold_active(in))
+        return zr_threshold_gate(in, is_v2, doc, v2, rel, now, reply);
+    if (is_v2 && zr_v2_pin_refused(in, reply))
+        return false;
+    return release_pin_gate(in, false, doc->master_pubkey, rel->manifest_root,
+                            reply, "zcode.release.verify");
+}
+
 /* ── zcode.release.verify ──────────────────────────────────────────── */
 
 void zcl_native_handle_zcode_release_verify(
@@ -1322,10 +1363,7 @@ void zcl_native_handle_zcode_release_verify(
      * A v2 doc cannot be matched against today's Ed25519-only pins (pair
      * pins are a later packet), so key pins are refused for it rather
      * than half-applied; package_root alone still runs. */
-    if (is_v2 && zr_v2_pin_refused(in, reply))
-        return;
-    if (!release_pin_gate(in, false, doc.master_pubkey, rel.manifest_root,
-                          reply, "zcode.release.verify"))
+    if (!zr_pin_gate(in, is_v2, &doc, &v2, &rel, now, reply))
         return;
 
     /* Chain-rooted key trust (optional `--anchored`). The signature above

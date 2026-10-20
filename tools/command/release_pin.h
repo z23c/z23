@@ -42,6 +42,9 @@ struct zcl_command_reply;
 #define RELEASE_PIN_FINGERPRINT_HEX 16u
 #define RELEASE_PIN_PAIR_TAG "zrs1"
 #define RELEASE_PIN_REQUIRE_PQ_LINE "require-pq"
+#define RELEASE_PIN_THRESHOLD_LINE "threshold"
+/* Most docs one threshold set may hold: the primary plus 7 cosigners. */
+#define RELEASE_PIN_MAX_DOCS 8u
 
 struct release_pin_pair {
     uint8_t ed[32];
@@ -56,6 +59,8 @@ struct release_pin_set {
     size_t pair_count;
     bool given;      /* pin or pin_file was supplied (even if it listed nothing) */
     bool require_pq; /* refuse v1 docs (phase 3) */
+    size_t threshold;     /* `threshold K` directive; 0 = none (single signer) */
+    bool threshold_seen;  /* a threshold line was read (K=0 is refused at once) */
 };
 
 /* A saved release doc of either version. `doc` is the v1-shaped view (for
@@ -107,6 +112,31 @@ bool release_pin_doc_gate(const struct json_value *in, bool require_pin,
                           struct release_pin_doc *d, uint64_t now_unix,
                           struct zid_release *rel,
                           struct zcl_command_reply *reply, const char *command);
+
+/* k-of-n owner gate (docs/work/PQ_HYBRID_RELEASE_SIGNATURE.md 6.2).
+ * `threshold K` in the pin file means K DISTINCT pinned pairs must each
+ * sign the same (name, version, root), one independent v2 doc per signer.
+ * The primary doc is `d`; the others are saved .zid files named by the
+ * comma-separated input `cosigs`. Without a threshold line and without
+ * `cosigs` this is exactly release_pin_doc_gate. Refusal codes beyond the
+ * doc gate's: THRESHOLD_BELOW_ONE, THRESHOLD_EXCEEDS_PINS (pin-file load),
+ * THRESHOLD_SINGLE_DOC, THRESHOLD_DUPLICATE_SIGNER, THRESHOLD_DISAGREE,
+ * THRESHOLD_NOT_MET, THRESHOLD_MISSING (cosigs given, no threshold),
+ * TOO_MANY_DOCS, and RELEASE_PQ_REQUIRED for a v1 doc. */
+struct release_pin_threshold {
+    size_t threshold; /* 0 when no threshold line applied */
+    size_t matched;   /* distinct pinned pairs whose doc fully verified */
+};
+
+/* True iff the input names cosigners or its pin file has a threshold line. */
+bool release_pin_threshold_active(const struct json_value *in);
+
+bool release_pin_multi_gate(const struct json_value *in, bool require_pin,
+                            struct release_pin_doc *d, uint64_t now_unix,
+                            struct zid_release *rel,
+                            struct release_pin_threshold *out,
+                            struct zcl_command_reply *reply,
+                            const char *command);
 
 /* Read a saved .zid v1 release doc (hex text, at most ZID_DOC_MAX*2 chars
  * plus whitespace) and decode it. A v2 file is refused. On failure returns
