@@ -11,6 +11,7 @@
 #include "base/safe_alloc.h"
 #include "platform/atomic_link.h"
 
+#include <stdatomic.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -271,6 +272,20 @@ static enum plugin_status ps_source_paths(const char *manifest_path,
                ? PLUGIN_OK : PLUGIN_ERR_ARGUMENT;
 }
 
+/* Distinct per call within the process: pid alone is shared by every thread. */
+static unsigned long ps_unique(void)
+{
+    static atomic_ulong counter;
+    return atomic_fetch_add(&counter, 1ul) + 1ul;
+}
+
+#ifdef ZCL_TESTING
+unsigned long plugin_store_test_unique(void)
+{
+    return ps_unique();
+}
+#endif
+
 /* Copy the verified set into a staging directory and verify the copy. */
 static enum plugin_status ps_stage(const struct ps_paths *src, const char *name,
                                    const char *staging, const char *keys_file,
@@ -344,8 +359,8 @@ static bool ps_windows_replacement_aside(struct ps_windows_replacement *state)
 {
     if (!state->had)
         return true;
-    int n = snprintf(state->aside, sizeof(state->aside), "%s.old.%lu", state->target,
-                     (unsigned long)getpid());
+    int n = snprintf(state->aside, sizeof(state->aside), "%s.old.%lu.%lu", state->target,
+                     (unsigned long)getpid(), ps_unique());
     return n > 0 && (size_t)n < sizeof(state->aside) &&
            platform_directory_transaction_move_directory(
                &state->to, state->target, &state->prior, &state->to, state->aside) ==
@@ -388,8 +403,8 @@ static enum plugin_status ps_replace(const char *gens, const char *staging,
     struct stat st;
     bool had = lstat(final_dir, &st) == 0;
     if (had) {
-        int n = snprintf(aside, sizeof(aside), "%s.old.%ld", final_dir,
-                         (long)getpid());
+        int n = snprintf(aside, sizeof(aside), "%s.old.%ld.%lu", final_dir,
+                         (long)getpid(), ps_unique());
         if (n <= 0 || (size_t)n >= sizeof(aside) || !plugin_remove_tree(aside) ||
             rename(final_dir, aside) != 0)
             return PLUGIN_ERR_IO;
@@ -406,22 +421,45 @@ static enum plugin_status ps_replace(const char *gens, const char *staging,
 #endif
 }
 
-/* Called only with the per-plugin flock held (ps_install_locked). The staging
- * name carries only the pid, which the RPC thread and the swarm timer share;
- * the lock is what keeps two same-process installs of one plugin from sharing
- * a staging directory (POSIX; Windows has no mutation lock yet). */
+/* A crashed installer leaves its staging directory behind, and the unique name
+ * means no later install reuses it. The plugin lock is held, so every
+ * staging.* entry is dead: sweep them. Windows has no lock, so it keeps them. */
+static void ps_sweep_staging(const char *plugdir)
+{
+#if !defined(_WIN32)
+    DIR *d = opendir(plugdir);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        char path[PLUGIN_PATH_MAX];
+        if (strncmp(e->d_name, "staging.", 8) == 0 &&
+            plugin_join(path, sizeof(path), plugdir, e->d_name, NULL, NULL))
+            (void)plugin_remove_tree(path);
+    }
+    closedir(d);
+#else
+    (void)plugdir;
+#endif
+}
+
+/* Called only with the per-plugin flock held (ps_install_locked), which already
+ * serializes installs of one plugin on POSIX. The staging name is pid plus a
+ * process-wide counter so it is unique per call regardless (threads share a
+ * pid); that uniqueness is tested directly through plugin_store_test_unique. */
 static enum plugin_status ps_publish(const char *plugdir, const char *name,
                                      const struct ps_paths *src,
                                      const char *keys_file,
                                      struct plugin_manifest *m)
 {
     char gens[PLUGIN_PATH_MAX], staging[PLUGIN_PATH_MAX], final_dir[PLUGIN_PATH_MAX];
-    char tag[32];
-    snprintf(tag, sizeof(tag), "staging.%ld", (long)getpid());
+    char tag[48];
+    snprintf(tag, sizeof(tag), "staging.%ld.%lu", (long)getpid(), ps_unique());
     if (!plugin_join(gens, sizeof(gens), plugdir, "generations", NULL, NULL) ||
         !plugin_join(staging, sizeof(staging), plugdir, tag, NULL, NULL) ||
         !plugin_join(final_dir, sizeof(final_dir), gens, m->generation, NULL, NULL))
         return PLUGIN_ERR_ARGUMENT;
+    ps_sweep_staging(plugdir);
     if (!plugin_mkdirs(gens))
         return PLUGIN_ERR_IO;
     enum plugin_status st = plugin_check_dir(gens);

@@ -1739,11 +1739,12 @@ static int pst_case_lock_gate_leftover(void)
     return failures;
 }
 
-/* Two installs of one plugin from two threads of one process share a pid, so
- * a pid-named staging directory would collide. The per-plugin flock (taken on
- * a separate open file description per call) serializes them: exactly one
- * stages, the other sees the generation present and stages nothing. */
+/* Two threads installing one plugin start together (barrier). The per-plugin
+ * flock serializes them: exactly one stages, the other sees the generation
+ * present and stages nothing, and both end consistent. This does NOT prove
+ * staging-name uniqueness (the lock hides it); pst_case_unique_names does. */
 struct pst_thread_job {
+    pthread_barrier_t *go;
     const struct pst_fx *fx;
     enum plugin_status st;
     int present;
@@ -1753,6 +1754,7 @@ static void *pst_install_thread(void *arg)
 {
     struct pst_thread_job *j = arg;
     struct plugin_manifest m;
+    pthread_barrier_wait(j->go);
     j->st = plugin_store_install(j->fx->root, j->fx->manifest, &m, &j->present);
     return NULL;
 }
@@ -1760,22 +1762,75 @@ static void *pst_install_thread(void *arg)
 static int pst_case_threaded_install(void)
 {
     int failures = 0;
-    TEST_CASE("two threads installing one plugin never collide on staging") {
+    TEST_CASE("concurrent installs of one plugin serialize and both end consistent") {
         struct pst_fx fx;
         struct pst_opts o = {0};
-        struct pst_thread_job job[2] = {{&fx, PLUGIN_ERR_IO, -1}, {&fx, PLUGIN_ERR_IO, -1}};
+        pthread_barrier_t bar;
+        struct pst_thread_job job[2] = {{&bar, &fx, PLUGIN_ERR_IO, -1}, {&bar, &fx, PLUGIN_ERR_IO, -1}};
         pthread_t th[2];
         ASSERT(pst_fx_open(&fx, true));
         ASSERT(pst_publish(&fx, "hello", "version t", &o));
+        ASSERT_EQ(pthread_barrier_init(&bar, NULL, 2), 0);
         for (int i = 0; i < 2; i++)
             ASSERT_EQ(pthread_create(&th[i], NULL, pst_install_thread, &job[i]), 0);
         for (int i = 0; i < 2; i++)
             ASSERT_EQ(pthread_join(th[i], NULL), 0);
+        pthread_barrier_destroy(&bar);
         ASSERT_EQ(job[0].st, PLUGIN_OK);
         ASSERT_EQ(job[1].st, PLUGIN_OK);
         ASSERT_EQ(job[0].present + job[1].present, 1);
         ASSERT(pst_plugdir_clean(&fx));
         pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+/* The staging and aside names must be unique per call across threads that
+ * share a pid, independent of the flock. Several threads draw names after a
+ * common start barrier; every name must be distinct. */
+enum { PST_UQ_THREADS = 8, PST_UQ_DRAWS = 2000 };
+struct pst_uq_job {
+    pthread_barrier_t *go;
+    unsigned long *out;
+};
+
+static void *pst_uq_thread(void *arg)
+{
+    struct pst_uq_job *j = arg;
+    pthread_barrier_wait(j->go);
+    for (int i = 0; i < PST_UQ_DRAWS; i++)
+        j->out[i] = plugin_store_test_unique();
+    return NULL;
+}
+
+static int pst_uq_cmp(const void *a, const void *b)
+{
+    unsigned long x = *(const unsigned long *)a, y = *(const unsigned long *)b;
+    return x < y ? -1 : x > y;
+}
+
+static int pst_case_unique_names(void)
+{
+    int failures = 0;
+    TEST_CASE("staging and aside names are distinct across concurrent threads") {
+        static unsigned long all[PST_UQ_THREADS * PST_UQ_DRAWS];
+        struct pst_uq_job job[PST_UQ_THREADS];
+        pthread_barrier_t bar;
+        pthread_t th[PST_UQ_THREADS];
+        size_t dup = 0;
+        ASSERT_EQ(pthread_barrier_init(&bar, NULL, PST_UQ_THREADS), 0);
+        for (int i = 0; i < PST_UQ_THREADS; i++) {
+            job[i].go = &bar;
+            job[i].out = all + (size_t)i * PST_UQ_DRAWS;
+            ASSERT_EQ(pthread_create(&th[i], NULL, pst_uq_thread, &job[i]), 0);
+        }
+        for (int i = 0; i < PST_UQ_THREADS; i++)
+            ASSERT_EQ(pthread_join(th[i], NULL), 0);
+        pthread_barrier_destroy(&bar);
+        qsort(all, PST_UQ_THREADS * PST_UQ_DRAWS, sizeof(all[0]), pst_uq_cmp);
+        for (size_t i = 1; i < PST_UQ_THREADS * PST_UQ_DRAWS; i++)
+            dup += all[i] == all[i - 1];
+        ASSERT_EQ(dup, 0u);
     } TEST_END
     return failures;
 }
@@ -1797,8 +1852,8 @@ static int pst_case_crashed_install(void)
         ASSERT_EQ(plugin_store_switch(fx.root, "hello", a), PLUGIN_OK);
         ASSERT(pst_publish(&fx, "hello", "version b", &o));
         /* What a crashed installer leaves: its staging directory, filled but
-         * never renamed into generations/ (same pid as a reused one). */
-        snprintf(tag, sizeof(tag), "staging.%ld", (long)getpid());
+         * never renamed into generations/ (a unique name no retry reuses). */
+        snprintf(tag, sizeof(tag), "staging.%ld.0", (long)getpid());
         ASSERT(pst_plug_path(&fx, tag, staging, sizeof(staging)));
         ASSERT_EQ(mkdir(staging, 0700), 0);
         ASSERT(pst_path(leftover, sizeof(leftover), staging, "hello"));
@@ -1894,6 +1949,7 @@ int test_plugin_store(void)
     failures += pst_case_lock_budget();
     failures += pst_case_lock_gate_leftover();
     failures += pst_case_threaded_install();
+    failures += pst_case_unique_names();
 #endif
     failures += pst_case_crashed_install();
     failures += pst_case_registered();

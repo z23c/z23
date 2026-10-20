@@ -171,6 +171,8 @@ void plugin_store_list_free(struct plugin_info *infos, size_t count);
 /* Test seam: after `after` successful entries, a directory read whose path
  * ends in suffix fails with EIO. NULL clears it. */
 void plugin_store_test_fail_readdir(const char *suffix, unsigned after);
+/* Test seam: the generator behind staging and aside names. */
+unsigned long plugin_store_test_unique(void);
 #endif
 
 #endif
