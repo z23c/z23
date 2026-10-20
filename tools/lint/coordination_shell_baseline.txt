@@ -154,7 +154,6 @@ tools/scripts/agent_msg_roundtrip.sh
 tools/scripts/anchor-snapshot-copy-prove.sh
 tools/scripts/background_quality_lane.sh
 tools/scripts/binary_size.sh
-tools/scripts/boot_owner_beacon_regression.sh
 tools/scripts/build_bench.sh
 tools/scripts/build_c23_portable_release.sh
 tools/scripts/build_drift_probe.sh
@@ -267,7 +266,6 @@ tools/scripts/p2p_version_probe.sh
 tools/scripts/port_probe.sh
 tools/scripts/pr_security_scan.sh
 tools/scripts/produce_anchor_snapshot.sh
-tools/scripts/promote-shielded-copy-prove.sh
 tools/scripts/promote_fuzz_artifacts.sh
 tools/scripts/promotion_receipt.sh
 tools/scripts/proof_server_pin.sh
