@@ -292,47 +292,77 @@ static char *pdc_remote_params(const struct zcl_command_request *request, bool *
     return wire;
 }
 
-/* One resident call. On a refusal the reply is filled and NULL returned. */
-static bool pdc_remote_call(struct zcl_command_reply *reply, const char *method, const char *params,
-                            struct json_value *body)
+/* json_get_str never returns NULL (a missing or non-string value reads as ""),
+ * so "x ? x : fallback" never reaches its fallback. This does. */
+static const char *pdc_str_or(const struct json_value *body, const char *key, const char *fallback)
+{
+    const char *value = json_get_str(json_get(body, key));
+    return value[0] ? value : fallback;
+}
+
+enum pdc_call {
+    PDC_CALL_OK,        /* the node answered ok:true */
+    PDC_CALL_REFUSED,   /* the node answered ok:false with its own envelope: final */
+    PDC_CALL_TRANSPORT, /* no node answer: refused connect, deadline, bare JSON-RPC error */
+};
+
+/* A node answer carries a boolean "ok". Anything else (no reply, unparseable
+ * text, the client's bare {"code":-32603,"message":..} error value, or a
+ * {"error":..} wrapper) is the transport failing, not the node deciding. */
+static bool pdc_body_is_node_answer(const struct json_value *body)
+{
+    const struct json_value *ok = json_get(body, "ok");
+    return body->type == JSON_OBJ && ok && ok->type == JSON_BOOL;
+}
+
+/* The transport's own explanation, or a stock one. */
+static const char *pdc_transport_text(const struct json_value *body)
+{
+    const struct json_value *err = json_get(body, "error");
+    const struct json_value *src = err && err->type == JSON_OBJ ? err : body;
+    return pdc_str_or(src, "message", "no running node answered on this datadir's RPC");
+}
+
+/* One resident call. On a refusal or transport failure the reply is filled. */
+static enum pdc_call pdc_remote_call(struct zcl_command_reply *reply, const char *method, const char *params,
+                                     struct json_value *body)
 {
     char *raw = node_rpc_call(method, params);
-    bool parsed = raw && json_read(body, raw, strlen(raw)) && body->type == JSON_OBJ;
+    bool parsed = raw && json_read(body, raw, strlen(raw));
     free(raw);
     if (!parsed) {
         json_free(body);
         json_init(body);
+    }
+    if (!pdc_body_is_node_answer(body)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
                                "PLUGIN_FETCH_NO_NODE", "fetch_remote", true, false,
-                               "no running node answered on this datadir's RPC",
+                               pdc_transport_text(body),
                                "start the node with -packagehost=1, or use the two-phase plugin fetch");
-        return false;
+        return PDC_CALL_TRANSPORT;
     }
     if (!json_get_bool_or(body, "ok", false)) {
-        const char *code = json_get_str(json_get(body, "code"));
-        const char *msg = json_get_str(json_get(body, "message"));
-        const char *next = json_get_str(json_get(body, "next_action"));
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                               code ? code : "PLUGIN_FETCH_REFUSED", "fetch_remote", false, false,
-                               msg ? msg : "the node refused the request", "");
-        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s", next ? next : "");
+                               pdc_str_or(body, "code", "PLUGIN_FETCH_REFUSED"), "fetch_remote", false, false,
+                               pdc_str_or(body, "message", "the node refused the request"), "");
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s",
+                       json_get_str(json_get(body, "next_action")));
         reply->error.human_action_required = true;
-        return false;
+        return PDC_CALL_REFUSED;
     }
-    return true;
+    return PDC_CALL_OK;
 }
 
 static void pdc_remote_finish(struct zcl_command_reply *reply, struct json_value *body)
 {
     const char *state = json_get_str(json_get(body, "state"));
     if (state && strcmp(state, "failed") == 0) {
-        const char *code = json_get_str(json_get(body, "code"));
-        const char *detail = json_get_str(json_get(body, "detail"));
-        const char *next = json_get_str(json_get(body, "next_action"));
+        const char *detail = pdc_str_or(body, "detail", "the fetch job failed");
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                               code ? code : "PLUGIN_FETCH_FAILED", "fetch_remote", false, false,
-                               detail ? detail : "the fetch job failed", detail ? detail : "");
-        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s", next ? next : "");
+                               pdc_str_or(body, "code", "PLUGIN_FETCH_FAILED"), "fetch_remote", false, false,
+                               detail, detail);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s",
+                       json_get_str(json_get(body, "next_action")));
         reply->error.human_action_required = true;
         return;
     }
@@ -348,23 +378,73 @@ static void pdc_remote_finish(struct zcl_command_reply *reply, struct json_value
     }
 }
 
-/* Polls the job until it leaves fetching/installing or wait_s runs out. */
+/* Consecutive poll transport failures tolerated before the wait gives up. Each
+ * failure is followed by the poll sleep, so this is also a floor on how long a
+ * node that is busy (or just booted) gets to answer again. */
+#define PDC_REMOTE_POLL_RETRIES 8
+
+static bool pdc_remote_job_running(const struct json_value *body)
+{
+    const char *state = json_get_str(json_get(body, "state"));
+    return strcmp(state, "fetching") == 0 || strcmp(state, "installing") == 0;
+}
+
+/* The poll kept failing: say so, naming the job, which is still running. */
+static void pdc_remote_poll_lost(struct zcl_command_reply *reply, int64_t job, const char *why)
+{
+    char message[320];
+    (void)snprintf(message, sizeof(message),
+                   "lost contact with the node while waiting on fetch job %lld, which may still be running: %s",
+                   (long long)job, why);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
+                           "PLUGIN_FETCH_POLL_FAILED", "fetch_remote", true, false, message, "");
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "poll again: z23 plugin fetch_remote --job=%lld", (long long)job);
+    reply->error.human_action_required = true;
+}
+
+/* Polls the job until it leaves fetching/installing or wait_s of wall time runs
+ * out. A poll that gets no node answer is retried (bounded); only a final
+ * failure is reported, and never while a good answer is the latest one. */
 static bool pdc_remote_wait(struct zcl_command_reply *reply, struct json_value *body, uint64_t wait_s)
 {
     int64_t job = json_get_int(json_get(body, "job"));
-    for (uint64_t waited_ms = 0; waited_ms < wait_s * 1000u; waited_ms += PDC_REMOTE_POLL_MS) {
-        const char *state = json_get_str(json_get(body, "state"));
-        if (state && strcmp(state, "fetching") != 0 && strcmp(state, "installing") != 0)
-            break;
+    const int64_t deadline = platform_time_monotonic_ms() + (int64_t)(wait_s * 1000u);
+    const enum zcl_command_status status = reply->status;
+    const enum zcl_command_exit exit_code = reply->exit_code;
+    const struct zcl_command_error clean = reply->error;
+    int failures = 0;
+    bool last_ok = true;
+    while ((last_ok ? pdc_remote_job_running(body) : true) && platform_time_monotonic_ms() < deadline) {
         platform_sleep_ms(PDC_REMOTE_POLL_MS);
         char poll[64];
         (void)snprintf(poll, sizeof(poll), "[{\"job\":%lld}]", (long long)job);
-        json_free(body);
-        json_init(body);
-        if (!pdc_remote_call(reply, "plugin_fetch_poll", poll, body))
+        struct json_value next;
+        json_init(&next);
+        enum pdc_call rc = pdc_remote_call(reply, "plugin_fetch_poll", poll, &next);
+        if (rc == PDC_CALL_REFUSED) {
+            json_free(&next);
             return false;
+        }
+        last_ok = rc == PDC_CALL_OK;
+        if (last_ok) {
+            json_free(body);
+            *body = next;
+            failures = 0;
+            reply->status = status;
+            reply->exit_code = exit_code;
+            reply->error = clean;
+        } else {
+            const char *why = pdc_transport_text(&next);
+            char kept[256];
+            (void)snprintf(kept, sizeof(kept), "%s", why);
+            json_free(&next);
+            pdc_remote_poll_lost(reply, job, kept);
+            if (++failures > PDC_REMOTE_POLL_RETRIES)
+                return false;
+        }
     }
-    return true;
+    return last_ok || (pdc_remote_poll_lost(reply, job, "the wait ran out before the node answered again"), false);
 }
 
 static bool pdc_remote_args_ok(const struct zcl_command_request *request, bool polling, bool bad,
@@ -392,7 +472,7 @@ void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *req
     zcl_native_bridge_ensure_rpc();
     struct json_value body;
     json_init(&body);
-    bool ok = pdc_remote_call(reply, polling ? "plugin_fetch_poll" : "plugin_fetch_begin", params, &body);
+    bool ok = pdc_remote_call(reply, polling ? "plugin_fetch_poll" : "plugin_fetch_begin", params, &body) == PDC_CALL_OK;
     free(params);
     ok = ok && pdc_remote_wait(reply, &body, wait_s);
     if (ok)

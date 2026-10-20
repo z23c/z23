@@ -7,6 +7,9 @@
  * inputs; the image is inert and never executed. */
 #include "test/plugin_dist_fixture.h"
 #include "plugin/plugin_fetch_job.h"
+#include "command/native_command.h"
+#include "controllers/rpc_client.h"
+#include "json/json.h"
 
 #include <stdio.h>
 #include <sys/stat.h>
@@ -345,6 +348,126 @@ static int pj_bounds(void)
     return failures;
 }
 
+/* ---- the CLI half: plugin fetch_remote against a scripted node ------------- */
+
+static const char *const pjr_script_begin = "{\"ok\":true,\"job\":7,\"state\":\"fetching\"}";
+static const char *const pjr_done =
+    "{\"ok\":true,\"job\":7,\"state\":\"installed\",\"name\":\"demo\",\"generation\":\"g1\"}";
+static const char *const pjr_running = "{\"ok\":true,\"job\":7,\"state\":\"fetching\"}";
+/* What node_rpc_call hands back when a poll misses its deadline or the node is busy. */
+static const char *const pjr_lost = "{\"code\":-32603,\"message\":\"RPC deadline expired reading the reply\"}";
+static const char *const pjr_lost_bare = "{\"error\":{\"code\":-32603}}";
+
+static const char *const *g_pjr_polls;
+static size_t g_pjr_npolls, g_pjr_next, g_pjr_calls;
+
+static char *pjr_hook(const char *method, const char *params)
+{
+    (void)params;
+    g_pjr_calls++;
+    if (strcmp(method, "plugin_fetch_begin") == 0)
+        return strdup(pjr_script_begin);
+    const char *answer = g_pjr_next < g_pjr_npolls ? g_pjr_polls[g_pjr_next++] : g_pjr_polls[g_pjr_npolls - 1];
+    return strdup(answer);
+}
+
+static void pjr_run(const char *const *polls, size_t n, const char *wait, struct zcl_command_reply *r)
+{
+    char in_text[160];
+    struct json_value in;
+    g_pjr_polls = polls;
+    g_pjr_npolls = n;
+    g_pjr_next = g_pjr_calls = 0;
+    (void)snprintf(in_text, sizeof(in_text),
+                   "{\"root\":\"%064d\",\"name\":\"demo\",\"wait\":\"%s\"}", 1, wait);
+    json_init(&in);
+    (void)json_read(&in, in_text, strlen(in_text));
+    struct zcl_command_request request = { .input = &in, .view = "normal" };
+    zcl_command_reply_init(r, "zcl.plugin_test.v1");
+    node_rpc_client_set_test_hook(pjr_hook);
+    zcl_native_handle_plugin_fetch_remote(&request, r);
+    node_rpc_client_set_test_hook(NULL);
+    json_free(&in);
+}
+
+/* The cross-host defect: polls that missed the RPC deadline ended the wait with
+ * an empty code and message while the job went on to install. */
+static int pjr_case_0(void)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    TEST_CASE("fetch_remote keeps waiting across failed polls and reports installed") {
+        const char *const polls[] = { pjr_lost, pjr_lost_bare, pjr_running, pjr_lost, pjr_done };
+        pjr_run(polls, 5, "30", &r);
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(r.error.code, "");
+        ASSERT_STR_EQ(r.error.message, "");
+        ASSERT_STR_EQ(json_get_str(json_get(&r.data, "state")), "installed");
+        zcl_command_reply_free(&r);
+    } TEST_END
+    return failures;
+}
+
+static int pjr_case_1(void)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    TEST_CASE("fetch_remote with a node that never answers a poll fails with a code and a message") {
+        const char *const polls[] = { pjr_lost };
+        pjr_run(polls, 1, "60", &r);
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_FETCH_POLL_FAILED");
+        ASSERT(r.error.message[0] != '\0');
+        ASSERT(strstr(r.error.message, "job 7") != NULL);
+        ASSERT(strstr(r.error.next_action, "--job=7") != NULL);
+        ASSERT(r.error.retryable);
+        ASSERT(g_pjr_calls <= 12); /* bounded retries, not the whole wait */
+        zcl_command_reply_free(&r);
+    } TEST_END
+    return failures;
+}
+
+static int pjr_case_2(void)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    TEST_CASE("fetch_remote reports a job still running as ok when the wait runs out") {
+        const char *const polls[] = { pjr_running };
+        pjr_run(polls, 1, "1", &r);
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&r.data, "state")), "fetching");
+        zcl_command_reply_free(&r);
+    } TEST_END
+    return failures;
+}
+
+static int pjr_case_3(void)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    TEST_CASE("fetch_remote refusals and failed jobs never carry an empty code or message") {
+        const char *const refused[] = { "{\"ok\":false,\"code\":\"\",\"message\":\"\"}" };
+        pjr_run(refused, 1, "5", &r);
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(r.error.code[0] != '\0');
+        ASSERT(r.error.message[0] != '\0');
+        zcl_command_reply_free(&r);
+        const char *const failed[] = { "{\"ok\":true,\"job\":7,\"state\":\"failed\",\"code\":\"\",\"detail\":\"\"}" };
+        pjr_run(failed, 1, "5", &r);
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(r.error.code[0] != '\0');
+        ASSERT(r.error.message[0] != '\0');
+        zcl_command_reply_free(&r);
+        const char *const stated[] = { "{\"ok\":true,\"job\":7,\"state\":\"failed\",\"code\":\"PLUGIN_FETCH_TIMEOUT\",\"detail\":\"too slow\"}" };
+        pjr_run(stated, 1, "5", &r);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_FETCH_TIMEOUT");
+        ASSERT_STR_EQ(r.error.message, "too slow");
+        zcl_command_reply_free(&r);
+    } TEST_END
+    return failures;
+}
+
 int test_plugin_fetch_job(void)
 {
     int failures = 0;
@@ -355,5 +478,9 @@ int test_plugin_fetch_job(void)
     failures += pj_refusal_3();
     failures += pj_begin_refusals();
     failures += pj_bounds();
+    failures += pjr_case_0();
+    failures += pjr_case_1();
+    failures += pjr_case_2();
+    failures += pjr_case_3();
     return failures;
 }
