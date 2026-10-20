@@ -1734,6 +1734,7 @@ ZCL_TEST_GROUP(plugin_attest)
 
 ZCL_TEST_GROUP(plugin_package)
 ZCL_TEST_GROUP(plugin_index)
+ZCL_TEST_GROUP(plugin_dist)
 ZCL_TEST_GROUP(mcp_serve)
 ZCL_TEST_GROUP(zcode_release_artifact)
 ZCL_TEST_GROUP(work_card)

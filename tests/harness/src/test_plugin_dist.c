@@ -1,0 +1,491 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Verify peer-to-peer plugin distribution: publish a generation as a package
+ * root, move it between two isolated datadirs through the real swarm engines,
+ * and refuse by name every delivery that is not the exact signed generation
+ * the receiver pinned. Peer handles are fixture inputs; the image is inert and
+ * never executed. */
+#include "test/test_core.h"
+#include "test/test_zcode_swarm_priv.h"
+#include "test/public_shape_fixture.h"
+#include "plugin/plugin_dist.h"
+#include "plugin/plugin_pack.h"
+#include "plugin/plugin_store.h"
+#include "vcs/package_public_shape.h"
+
+#include <dirent.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define PD_CAP (4u * VCS_PACKAGE_CHUNK_BYTES)
+
+struct pd_fixture {
+    struct sw_node publisher, receiver;
+    char base[1024], signing[1200], release_key[1200], license[1200];
+    char plugins[1200], scratch[1200], pub_plugins[1200];
+    char public_key[65];
+    bool ready;
+};
+
+static bool pd_path(char *out, size_t cap, const char *base, const char *leaf)
+{
+    int n = snprintf(out, cap, "%s/%s", base, leaf);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool pd_write(const char *path, const char *bytes, size_t len, mode_t mode)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = fwrite(bytes, 1, len, f) == len;
+    return fclose(f) == 0 && ok && chmod(path, mode) == 0;
+}
+
+static bool pd_keys(const char *dir, const char *key)
+{
+    char path[1400], line[66];
+    int n = snprintf(line, sizeof(line), "%s\n", key);
+    return n == 65 && pd_path(path, sizeof(path), dir, "publisher_keys") &&
+           pd_write(path, line, (size_t)n, 0600);
+}
+
+static bool pd_open(struct pd_fixture *f)
+{
+    char seed[32];
+    memset(seed, 0x61, sizeof(seed));
+    f->ready = test_mkdtemp(f->base, sizeof(f->base), "plugin_dist") &&
+        pd_path(f->signing, sizeof(f->signing), f->base, "publisher-signing") &&
+        pd_path(f->release_key, sizeof(f->release_key), f->base, "release.key") &&
+        pd_path(f->license, sizeof(f->license), f->base, "LICENSE") &&
+        pd_path(f->plugins, sizeof(f->plugins), f->base, "receiver-plugins") &&
+        pd_path(f->pub_plugins, sizeof(f->pub_plugins), f->base, "publisher-plugins") &&
+        pd_path(f->scratch, sizeof(f->scratch), f->base, "scratch") &&
+        mkdir(f->plugins, 0700) == 0 && mkdir(f->pub_plugins, 0700) == 0 &&
+        mkdir(f->scratch, 0700) == 0 &&
+        pd_write(f->release_key, seed, sizeof(seed), 0600) &&
+        pd_write(f->license, TEST_LICENSE_TEXT_MIT, strlen(TEST_LICENSE_TEXT_MIT), 0644) &&
+        plugin_keygen(f->signing, f->public_key) == PLUGIN_OK &&
+        sw_node_open(&f->publisher, "plugin-dist-publisher", sw_score_contributor) &&
+        sw_node_open(&f->receiver, "plugin-dist-receiver", sw_score_contributor);
+    return f->ready;
+}
+
+static void pd_close(struct pd_fixture *f)
+{
+    sw_node_close(&f->receiver);
+    sw_node_close(&f->publisher);
+    if (f->receiver.datadir[0])
+        (void)test_rm_rf_recursive(f->receiver.datadir);
+    if (f->publisher.datadir[0])
+        (void)test_rm_rf_recursive(f->publisher.datadir);
+    if (f->base[0])
+        (void)test_rm_rf_recursive(f->base);
+}
+
+/* Pack plugin "demo" at a version into <base>/<leaf>; the image differs per version. */
+static bool pd_pack(struct pd_fixture *f, const char *leaf, const char *version,
+                    struct plugin_pack_result *packed)
+{
+    char dir[1400], exe[1400], image[96];
+    int n = snprintf(image, sizeof(image), "inert plugin image %s\n", version);
+    if (!pd_path(dir, sizeof(dir), f->base, leaf) ||
+        !pd_path(exe, sizeof(exe), f->base, "image") || n <= 0)
+        return false;
+    struct plugin_pack_request rq = {
+        .exe_path = exe, .name = "demo", .version = version,
+        .key_path = f->signing, .out_dir = dir, .capabilities = 0
+    };
+    return pd_write(exe, image, (size_t)n, 0644) && plugin_pack(&rq, packed) == PLUGIN_OK;
+}
+
+static enum plugin_dist_status pd_publish(struct pd_fixture *f, const char *leaf,
+                                          uint64_t sequence,
+                                          struct plugin_dist_published *out)
+{
+    char dir[1400];
+    if (!pd_path(dir, sizeof(dir), f->base, leaf))
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    struct plugin_dist_publish_request rq = {
+        .name = "demo", .src_dir = dir, .license_file = f->license, .spdx = "MIT",
+        .release_key = f->release_key, .sequence = sequence
+    };
+    return plugin_dist_publish(f->publisher.store, &rq, out);
+}
+
+/* Drive the real engines until the receiver has `limit` replies (0 = until
+ * complete). Returns true when the stop condition was reached. */
+static bool pd_transfer(struct pd_fixture *f, const uint8_t root[32],
+                        unsigned limit, bool first)
+{
+    uint8_t pk[33], rk[33];
+    sw_key(81, pk);
+    sw_key(82, rk);
+    if (first) {
+        if (!vcs_swarm_engine_peer_add(f->receiver.engine, 11, pk) ||
+            !vcs_swarm_engine_peer_add(f->publisher.engine, 13, rk))
+            return false;
+        const uint64_t provider = 11;
+        if (vcs_swarm_engine_fetch_from_bounded(f->receiver.engine, root, SW_DAY, 1,
+                &provider, 1, 4u * PD_CAP) != VCS_SWARM_FETCH_OK)
+            return false;
+    }
+    unsigned replies = 0;
+    for (uint64_t now = first ? 2 : 40; now < (first ? 34 : 80); now++) {
+        vcs_swarm_engine_tick(f->receiver.engine, SW_DAY, now);
+        uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+        uint64_t target = 0;
+        size_t length = 0;
+        unsigned frames = 0;
+        while (vcs_swarm_engine_next_outbound(f->receiver.engine, 11, &target, frame, &length)) {
+            if (++frames > 64)
+                return false;
+            struct vcs_swarm_frame_result served = vcs_swarm_engine_handle_frame(
+                f->publisher.engine, 13, frame, length, SW_DAY, now);
+            if (served.reply && served.reply_len) {
+                struct vcs_swarm_frame_result got = vcs_swarm_engine_handle_frame(
+                    f->receiver.engine, 11, served.reply, served.reply_len, SW_DAY, now);
+                free(got.reply);
+                replies++;
+            }
+            free(served.reply);
+            if (limit && replies >= limit)
+                return true;
+        }
+        struct vcs_swarm_download_status st;
+        if (vcs_swarm_engine_download_status(f->receiver.engine, root, &st) &&
+            st.state == VCS_SWARM_DL_COMPLETE)
+            return limit == 0;
+    }
+    return false;
+}
+
+static bool pd_selection(const struct pd_fixture *f, const char *generation)
+{
+    char path[1400], target[160];
+    if (!pd_path(path, sizeof(path), f->plugins, "demo/current"))
+        return false;
+    errno = 0;
+    ssize_t n = readlink(path, target, sizeof(target));
+    if (!generation)
+        return n < 0 && errno == ENOENT;
+    return n == 12 + PLUGIN_HEX_SHA3_512 && memcmp(target + 12, generation, 128) == 0;
+}
+
+static bool pd_generation_stored(const struct pd_fixture *f, const char *generation)
+{
+    char path[1400], rel[256];
+    snprintf(rel, sizeof(rel), "demo/generations/%s", generation);
+    struct stat st;
+    return pd_path(path, sizeof(path), f->plugins, rel) && stat(path, &st) == 0;
+}
+
+static enum plugin_dist_status pd_receive(struct pd_fixture *f, const uint8_t root[32],
+                                          const uint8_t *delivered, bool allow,
+                                          struct plugin_dist_received *out)
+{
+    struct plugin_dist_receive_request rq = {
+        .store = f->receiver.store, .delivered_root = delivered, .name = "demo",
+        .plugins_dir = f->plugins, .scratch_dir = f->scratch, .allow_downgrade = allow
+    };
+    memcpy(rq.requested_root, root, 32);
+    return plugin_dist_receive(&rq, out);
+}
+
+static bool pd_scratch_empty(const struct pd_fixture *f)
+{
+    DIR *d = opendir(f->scratch);
+    if (!d)
+        return false;
+    struct dirent *e;
+    bool empty = true;
+    while ((e = readdir(d)))
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
+            empty = false;
+    closedir(d);
+    return empty;
+}
+
+/* ---- 1. the whole journey, never switching ---------------------------- */
+static int pd_journey(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: publish, swarm transfer, pinned install as a new generation") {
+        struct plugin_pack_result packed;
+        struct plugin_dist_published pub;
+        struct plugin_dist_received got;
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT(strcmp(pub.generation, packed.generation) == 0);
+        ASSERT_EQ(pub.files, 4u);
+        struct vcs_package_public_verdict verdict;
+        vcs_package_public_shape_classify(f.publisher.store, pub.root, &verdict);
+        ASSERT(verdict.shape == VCS_PACKAGE_PUBLIC_RELEASE);
+        /* Not yet transferred: named, not an install. */
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_ERR_NOT_FETCHED);
+        ASSERT(pd_transfer(&f, pub.root, 0, true));
+        ASSERT(pd_keys(f.plugins, packed.public_key));
+        ASSERT_EQ(pd_receive(&f, pub.root, pub.root, false, &got), PLUGIN_DIST_OK);
+        ASSERT(strcmp(got.generation, packed.generation) == 0);
+        ASSERT(!got.already_present);
+        ASSERT(pd_generation_stored(&f, got.generation));
+        ASSERT(pd_selection(&f, NULL)); /* never switches */
+        ASSERT(pd_scratch_empty(&f));
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_OK);
+        ASSERT(got.already_present);
+        ASSERT(pd_selection(&f, NULL));
+        PASS();
+    } _test_next:;
+    pd_close(&f);
+    return failures;
+}
+
+/* ---- 1b. publish by name from an installed generation ----------------- */
+static int pd_installed_publish(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: publish an installed current generation by name") {
+        struct plugin_pack_result packed;
+        struct plugin_dist_published pub;
+        struct plugin_manifest m;
+        int present = 0;
+        char manifest[1400];
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        ASSERT(pd_keys(f.pub_plugins, packed.public_key));
+        ASSERT_EQ(plugin_store_install(f.pub_plugins, packed.manifest_path, &m, &present), PLUGIN_OK);
+        struct plugin_dist_publish_request rq = {
+            .plugins_dir = f.pub_plugins, .name = "demo", .license_file = f.license,
+            .spdx = "MIT", .release_key = f.release_key, .sequence = 1
+        };
+        /* No current generation yet: refused, not guessed. */
+        ASSERT_EQ(plugin_dist_publish(f.publisher.store, &rq, &pub), PLUGIN_DIST_ERR_SOURCE);
+        ASSERT_EQ(plugin_store_switch(f.pub_plugins, "demo", m.generation), PLUGIN_OK);
+        ASSERT_EQ(plugin_dist_publish(f.publisher.store, &rq, &pub), PLUGIN_DIST_OK);
+        ASSERT(strcmp(pub.generation, m.generation) == 0);
+        (void)manifest;
+        PASS();
+    } _test_next:;
+    pd_close(&f);
+    return failures;
+}
+
+/* ---- 2. root identity -------------------------------------------------- */
+static int pd_refuse_root(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: a delivered root that is not the requested root is refused") {
+        struct plugin_pack_result packed;
+        struct plugin_dist_published pub;
+        struct plugin_dist_received got;
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT(pd_transfer(&f, pub.root, 0, true));
+        ASSERT(pd_keys(f.plugins, packed.public_key));
+        uint8_t other[32];
+        memcpy(other, pub.root, 32);
+        other[7] ^= 0x40;
+        ASSERT_EQ(pd_receive(&f, pub.root, other, false, &got), PLUGIN_DIST_ERR_ROOT_MISMATCH);
+        ASSERT(!pd_generation_stored(&f, packed.generation));
+        /* A root the store does not hold under that name is not fetched. */
+        ASSERT_EQ(pd_receive(&f, other, NULL, false, &got), PLUGIN_DIST_ERR_NOT_FETCHED);
+        PASS();
+    } _test_next:;
+    pd_close(&f);
+    return failures;
+}
+
+/* ---- 3. publisher pin --------------------------------------------------- */
+static int pd_refuse_unpinned(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: an unpinned publisher is refused and nothing is stored") {
+        struct plugin_pack_result packed;
+        struct plugin_dist_published pub;
+        struct plugin_dist_received got;
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT(pd_transfer(&f, pub.root, 0, true));
+        /* No publisher_keys at all. */
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_ERR_PUBLISHER_UNPINNED);
+        /* Some other key pinned: still not this publisher. */
+        ASSERT(pd_keys(f.plugins,
+            "0000000000000000000000000000000000000000000000000000000000000001"));
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_ERR_PUBLISHER_UNPINNED);
+        ASSERT(!pd_generation_stored(&f, packed.generation));
+        ASSERT(pd_selection(&f, NULL));
+        ASSERT(pd_scratch_empty(&f));
+        PASS();
+    } _test_next:;
+    pd_close(&f);
+    return failures;
+}
+
+/* ---- 4. image hash ------------------------------------------------------ */
+static int pd_refuse_image(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: an image that does not match the signed sha3_512 is refused") {
+        struct plugin_pack_result packed;
+        struct plugin_dist_published pub;
+        struct plugin_dist_received got;
+        char exe[1400];
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        ASSERT(pd_path(exe, sizeof(exe), f.base, "packed1/demo"));
+        chmod(exe, 0644);
+        ASSERT(pd_write(exe, "tampered image\n", 15, 0644));
+        /* An honest publish refuses to offer it. */
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_ERR_SOURCE);
+        /* A dishonest publisher offers it anyway; the receiver must not care. */
+        plugin_dist_test_skip_source_check(true);
+        enum plugin_dist_status ps = pd_publish(&f, "packed1", 1, &pub);
+        plugin_dist_test_skip_source_check(false);
+        ASSERT_EQ(ps, PLUGIN_DIST_OK);
+        ASSERT(pd_transfer(&f, pub.root, 0, true));
+        ASSERT(pd_keys(f.plugins, packed.public_key));
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_ERR_IMAGE_HASH);
+        ASSERT(!pd_generation_stored(&f, packed.generation));
+        ASSERT(pd_scratch_empty(&f));
+        PASS();
+    } _test_next:;
+    pd_close(&f);
+    return failures;
+}
+
+/* ---- 5. truncated transfer ---------------------------------------------- */
+static int pd_refuse_truncated(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: a partial transfer is refused, then resumes to completion") {
+        struct plugin_pack_result packed;
+        struct plugin_dist_published pub;
+        struct plugin_dist_received got;
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT(pd_keys(f.plugins, packed.public_key));
+        ASSERT(pd_transfer(&f, pub.root, 2, true)); /* manifest + one chunk */
+        struct vcs_package_store_status st;
+        ASSERT(vcs_package_store_package_status(f.receiver.store, pub.root, &st));
+        ASSERT(st.tracked && !st.complete);
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_ERR_TRUNCATED);
+        ASSERT(!pd_generation_stored(&f, packed.generation));
+        ASSERT(pd_scratch_empty(&f));
+        ASSERT(pd_transfer(&f, pub.root, 0, false));
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_OK);
+        ASSERT(pd_generation_stored(&f, packed.generation));
+        PASS();
+    } _test_next:;
+    pd_close(&f);
+    return failures;
+}
+
+/* ---- 6. downgrade -------------------------------------------------------- */
+static int pd_refuse_downgrade(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: a lower version than current needs the owner flag; current stays") {
+        struct plugin_pack_result v1, v2;
+        struct plugin_dist_published pub;
+        struct plugin_dist_received got;
+        struct plugin_manifest m;
+        int present = 0;
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &v1));
+        ASSERT(pd_pack(&f, "packed2", "2.0.0", &v2));
+        ASSERT(strcmp(v1.public_key, v2.public_key) == 0);
+        ASSERT(pd_keys(f.plugins, v1.public_key));
+        ASSERT_EQ(plugin_store_install(f.plugins, v2.manifest_path, &m, &present), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(f.plugins, "demo", v2.generation), PLUGIN_OK);
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT(pd_transfer(&f, pub.root, 0, true));
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_ERR_DOWNGRADE);
+        ASSERT(!pd_generation_stored(&f, v1.generation));
+        ASSERT(pd_selection(&f, v2.generation));
+        ASSERT(strcmp(got.current_version, "2.0.0") == 0);
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, true, &got), PLUGIN_DIST_OK);
+        ASSERT(got.downgrade_allowed);
+        ASSERT(pd_generation_stored(&f, v1.generation));
+        ASSERT(pd_selection(&f, v2.generation)); /* still the newer one */
+        PASS();
+    } _test_next:;
+    pd_close(&f);
+    return failures;
+}
+
+static int pd_versions(void)
+{
+    int failures = 0;
+    TEST("plugin dist: dotted versions compare numerically; tails do not compare") {
+        bool ok = false;
+        ASSERT_EQ(plugin_dist_version_compare("1.10.0", "1.9.9", &ok), 1);
+        ASSERT(ok);
+        ASSERT_EQ(plugin_dist_version_compare("1.0", "1.0.0", &ok), 0);
+        ASSERT_EQ(plugin_dist_version_compare("0.9.9", "1.0.0", &ok), -1);
+        (void)plugin_dist_version_compare("1.0.0-rc1", "1.0.0", &ok);
+        ASSERT(!ok);
+        (void)plugin_dist_version_compare("1..0", "1.0.0", &ok);
+        ASSERT(!ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ---- 7. publish refusals -------------------------------------------------- */
+static int pd_refuse_publish(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: publish refuses a placeholder license, a missing key and a reused sequence") {
+        struct plugin_pack_result v1, v2;
+        struct plugin_dist_published pub;
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &v1));
+        ASSERT(pd_pack(&f, "packed2", "2.0.0", &v2));
+        ASSERT(pd_write(f.license, "MIT\n", 4, 0644));
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_ERR_LICENSE);
+        ASSERT(pd_write(f.license, TEST_LICENSE_TEXT_MIT, strlen(TEST_LICENSE_TEXT_MIT), 0644));
+        char dir[1400];
+        ASSERT(pd_path(dir, sizeof(dir), f.base, "packed1"));
+        struct plugin_dist_publish_request rq = {
+            .name = "demo", .src_dir = dir, .license_file = f.license, .spdx = "MIT",
+            .release_key = NULL, .sequence = 1
+        };
+        ASSERT_EQ(plugin_dist_publish(f.publisher.store, &rq, &pub), PLUGIN_DIST_ERR_RELEASE);
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT_EQ(pd_publish(&f, "packed2", 1, &pub), PLUGIN_DIST_ERR_RELEASE);
+        ASSERT_EQ(pd_publish(&f, "packed2", 2, &pub), PLUGIN_DIST_OK);
+        PASS();
+    } _test_next:;
+    pd_close(&f);
+    return failures;
+}
+
+int test_plugin_dist(void)
+{
+    int failures = 0;
+    failures += pd_versions();
+    failures += pd_journey();
+    failures += pd_installed_publish();
+    failures += pd_refuse_root();
+    failures += pd_refuse_unpinned();
+    failures += pd_refuse_image();
+    failures += pd_refuse_truncated();
+    failures += pd_refuse_downgrade();
+    failures += pd_refuse_publish();
+    return failures;
+}

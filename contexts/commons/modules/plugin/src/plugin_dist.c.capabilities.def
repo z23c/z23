@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for publishing and receiving signed plugin generations through the package store. */
+ZCL_MODULE_CAPABILITY("contexts/commons/modules/plugin/src/plugin_dist.c", CAP_FS_READ|CAP_FS_WRITE, "")
