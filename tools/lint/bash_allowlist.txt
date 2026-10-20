@@ -90,7 +90,6 @@ tools/dev/factory-mixed-fixture.sh
 tools/dev/factory-mixed-loc.sh
 tools/dev/factory-mixed-peer-check.sh
 tools/dev/factory-mixed-stages.sh
-tools/dev/factory-node-health-qualification.sh
 tools/dev/factory-same-store-lineage.sh
 tools/dev/factory-throughput-qualification.sh
 tools/dev/fixtures/proof/generation_hook_refresh.sh
@@ -101,7 +100,6 @@ tools/dev/fixtures/skycombat/remote_run.sh
 tools/dev/fleet-identity.sh
 tools/dev/generate-compdb.sh
 tools/dev/hotswap-candidates.sh
-tools/dev/hotswap-core-section-reach.sh
 tools/dev/hotswap-module-fast.sh
 tools/dev/hotswap-package.sh
 tools/dev/hotswap-resident-bench.sh
@@ -122,7 +120,6 @@ tools/dev/native-dev-loop-wait-selftest.sh
 tools/dev/native_agent_ui_alpha_acceptance.sh
 tools/dev/node_lifecycle.sh
 tools/dev/noise_transport_interop.sh
-tools/dev/package-worker-boundary-acceptance.sh
 tools/dev/process-start-token.sh
 tools/dev/public_node_coin_generation_matrix_hook.sh
 tools/dev/publish-build-alias.sh
@@ -151,7 +148,6 @@ tools/dev/retrieval-prefix-sweep.sh
 tools/dev/retrieval-profile-sweep.sh
 tools/dev/science_acceptance.sh
 tools/dev/secure-release-regressions-selftest.sh
-tools/dev/shadow-service-image-acceptance.sh
 tools/dev/skycombat-factory-qualification.sh
 tools/dev/skycombat-libm-control.sh
 tools/dev/skycombat-platform-link-control.sh
@@ -171,7 +167,6 @@ tools/dev/transaction-micro-lab-wallets.sh
 tools/dev/transaction-micro-lab.sh
 tools/dev/watch-dev-lane.sh
 tools/dev/watcher-session-stop-selftest.sh
-tools/dev/watcher-stop-identity-selftest.sh
 tools/dev/zcc_bootstrap.sh
 tools/dev/zcode-adapter-usage-selftest.sh
 tools/dev/zcode_adapter_benchmark.sh

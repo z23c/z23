@@ -66,7 +66,6 @@ stat	tools/dev/custody-bind.sh	2
 stat	tools/dev/deploy-dev-lane.sh	4
 stat	tools/dev/dev-wallet-credential.sh	2
 stat	tools/dev/generate-compdb.sh	5
-stat	tools/dev/hotswap-core-section-reach.sh	1
 stat	tools/dev/hotswap-module-fast.sh	2
 stat	tools/dev/hotswap-package.sh	2
 stat	tools/dev/recover-dev-lane.sh	8
