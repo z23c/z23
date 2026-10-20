@@ -6,6 +6,8 @@
 #include "test/test_core.h"
 
 #include "config/boot_mesh_pairing.h"
+#include "config/boot_internal.h"
+#include "chain/chainparams.h"
 #include "config/boot_mesh_status.h"
 #include "config/boot_mesh_machines.h"
 #include "base/cleanse.h"
@@ -1059,9 +1061,36 @@ _test_next:
     return failures;
 }
 
+static int test_mesh_pairing_wiring_lifecycle(void)
+{
+    struct net_manager net = {0};
+    struct msg_processor processor = {0};
+    struct boot_svc_ctx svc = {0};
+    struct boot_mesh_pairing_plan plan;
+    const struct chain_params *params = chain_params_get();
+    if (!params)
+        return 1;
+    processor.net_mgr = &net;
+    processor.params = params;
+    svc.msg_processor = &processor;
+    boot_mesh_pairing_shutdown();
+    bool unavailable = boot_mesh_pairing_plan(NULL, &plan) == MESH_PAIR_PLAN_UNAVAILABLE;
+    boot_mesh_pairing_wire(&svc);
+    bool disabled = boot_mesh_pairing_plan(NULL, &plan) == MESH_PAIR_PLAN_NOISE_DISABLED;
+    /* Retire the borrowed stack composition on every path before returning. */
+    boot_mesh_pairing_shutdown();
+    bool retired = boot_mesh_pairing_plan(NULL, &plan) == MESH_PAIR_PLAN_UNAVAILABLE;
+    if (!unavailable || !disabled || !retired) {
+        fprintf(stderr, "mesh_pairing: wiring lifecycle failed unavailable=%d disabled=%d retired=%d\n",
+            unavailable, disabled, retired);
+        return 1;
+    }
+    return 0;
+}
+
 int test_mesh_pairing(void)
 {
-    int failures = 0;
+    int failures = test_mesh_pairing_wiring_lifecycle();
     char dir[256], path[320];
     test_make_tmpdir(dir, sizeof(dir), "mesh_pairing", "authority");
     snprintf(path, sizeof(path), "%s/node.db", dir);

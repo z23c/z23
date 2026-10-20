@@ -16,6 +16,8 @@
 #include "util/boot_phase.h"
 #include "util/boot_status.h"
 #include "util/thread_registry.h"
+#include "storage/event_log_singleton.h"
+#include "storage/progress_store.h"
 #include <sqlite3.h>
 #include "util/sd_notify.h"
 #include <stddef.h>
@@ -401,6 +403,22 @@ static int bp_node_db_gate_refuses(void)
     return failures;
 }
 static int bp_test_thread_io_evidence(void);  /* end of file */
+static int test_boot_event_log_lifecycle(void)
+{
+    if (progress_store_db() || event_log_singleton())
+        return 1;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_phase", "event-log");
+    bool rejects_missing = !boot_ensure_event_log(NULL) && !boot_ensure_event_log("");
+    bool opened = boot_ensure_event_log(dir);
+    event_log_t *first = event_log_singleton();
+    bool reused = opened && first && boot_ensure_event_log(dir) && event_log_singleton() == first;
+    boot_stop_projection_storage();
+    bool retired = event_log_singleton() == NULL && progress_store_db() == NULL;
+    test_rm_rf(dir);
+    return !(rejects_missing && reused && retired);
+}
+
 int test_boot_phase(void)
 {
 #if defined(_WIN32)
@@ -426,6 +444,8 @@ int test_boot_phase(void)
 #endif
     printf("\n=== boot_phase tests ===\n");
     int failures = 0;
+    BP_CHECK("event log publishes once, reuses its handle and retires cleanly",
+        test_boot_event_log_lifecycle() == 0);
 
     boot_stage_reset_for_testing();
 

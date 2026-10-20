@@ -41,6 +41,9 @@
 #include "chain/chainparams.h"
 #include "config/runtime.h"
 #include "controllers/store_controller.h"
+#include "controllers/store_buyer_controller.h"
+#include "json/json.h"
+#include "rpc/server.h"
 #include "controllers/wallet_shielded_controller.h"
 #include "controllers/zslp_controller.h"
 #include "crypto/sha3.h"
@@ -785,6 +788,59 @@ static bool tsb_low_tip_prunes_nothing(void)
     return ok && st == STORE_ORDER_PENDING;
 }
 
+static bool tsb_rpc_catalog_unwired(const struct rpc_command *command)
+{
+    struct json_value params = {0}, result = {0};
+    bool called = command->actor(&params, false, &result);
+    const struct json_value *ok = json_get(&result, "ok");
+    const char *code = json_get_str(json_get(&result, "code"));
+    const char *detail = json_get_str(json_get(&result, "detail"));
+    bool refused = called && ok && !json_get_bool(ok) && code && detail &&
+        strcmp(code, "NODE_DB_UNAVAILABLE") == 0 &&
+        strcmp(detail, "no data directory wired") == 0;
+    json_free(&result);
+    return refused;
+}
+
+static bool tsb_rpc_catalog_contains(const struct rpc_command *command, int64_t product_id)
+{
+    struct json_value params = {0}, result = {0};
+    bool called = command->actor(&params, false, &result);
+    const struct json_value *products = json_get(&result, "products");
+    bool found = false;
+    for (size_t i = 0; i < json_size(products); i++) {
+        const struct json_value *row = json_at(products, i);
+        if (json_get_int(json_get(row, "product_id")) == product_id)
+            found = true;
+    }
+    bool listed = called && json_get_bool(json_get(&result, "ok")) && found;
+    json_free(&result);
+    return listed;
+}
+
+static int tsb_rpc_datadir_copy(const char *datadir, int64_t product_id)
+{
+    struct rpc_table table;
+    rpc_table_init(&table);
+    register_store_buyer_rpc_commands(&table);
+    const struct rpc_command *command = rpc_table_find(&table, "storebuy_catalog");
+    rpc_store_buyer_set_state(NULL);
+    if (!command || !command->actor)
+        return 1;
+    bool before = tsb_rpc_catalog_unwired(command);
+    char mutable_path[1024];
+    snprintf(mutable_path, sizeof(mutable_path), "%s", datadir);
+    rpc_store_buyer_set_state(mutable_path);
+    memset(mutable_path, 0, sizeof(mutable_path));
+    bool copied = tsb_rpc_catalog_contains(command, product_id);
+    rpc_store_buyer_set_state(NULL);
+    bool after = tsb_rpc_catalog_unwired(command);
+    if (!before || !copied || !after)
+        fprintf(stderr, "store_buyer: RPC datadir copy failed before=%d copied=%d after=%d\n",
+            before, copied, after);
+    return !(before && copied && after);
+}
+
 int test_store_buyer(void)
 {
     int failures = 0;
@@ -870,6 +926,8 @@ int test_store_buyer(void)
             failures++;
         }
     }
+
+    failures += tsb_rpc_datadir_copy(datadir, product_id);
 
     /* ── 3. Happy path: order, pay, collect, verify ──────────────────── */
     printf("store_buyer: order -> confirmed payment -> verified file... ");

@@ -61,6 +61,7 @@
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "util/supervisor.h"
+#include "util/thread_registry.h"
 #include "vcs/zendp_swarm.h"
 #include "zid/zendp.h"
 #include "zid/zid.h"
@@ -555,11 +556,61 @@ static int zr_case_dumper(void)
     return failures;
 }
 
+static bool zr_worker_running(bool *running)
+{
+    struct json_value state = {0};
+    bool dumped = boot_endpoint_records_dump_state_json(&state, NULL);
+    const struct json_value *worker = json_get(&state, "worker_running");
+    bool ok = dumped && worker && worker->type == JSON_BOOL;
+    if (ok)
+        *running = json_get_bool(worker);
+    json_free(&state);
+    return ok;
+}
+
+static int zr_case_supervisor_admission_refusal(void)
+{
+    int failures = 0;
+    bool running = false;
+    if (!zr_worker_running(&running) || running)
+        return 1;
+    int headroom = supervisor_child_headroom();
+    static struct liveness_contract pool[SUPERVISOR_CAP];
+    supervisor_child_id ids[SUPERVISOR_CAP];
+    int registered = 0;
+    for (int i = 0; i < headroom; i++) {
+        char name[SUPERVISOR_NAME_MAX];
+        snprintf(name, sizeof(name), "zendp.capacity.%d", i);
+        liveness_contract_init(&pool[i], name);
+        supervisor_child_id id = supervisor_register(&pool[i]);
+        if (id == SUPERVISOR_INVALID_ID)
+            break;
+        ids[registered++] = id;
+    }
+    bool full = registered == headroom && supervisor_child_headroom() == 0;
+    ZR_CHECK("inert contracts consume every supervisor slot", full);
+    int live_before = thread_registry_live_count();
+    /* Never call the start path unless admission is certain to fail. */
+    if (full) {
+        boot_endpoint_records_start_revalidation();
+        ZR_CHECK("admission refusal leaves revalidation stopped",
+            zr_worker_running(&running) && !running);
+        ZR_CHECK("admission refusal starts no thread",
+            thread_registry_live_count() == live_before);
+    }
+    for (int i = 0; i < registered; i++)
+        supervisor_unregister(ids[i]);
+    ZR_CHECK("only fixture contracts are retired and prior headroom restored",
+        supervisor_child_headroom() == headroom);
+    return failures;
+}
+
 int test_zendp_revocation(void)
 {
     printf("\n=== zendp revocation: a revoked key stops being advertised "
            "without a restart ===\n");
     int failures = 0;
+    failures += zr_case_supervisor_admission_refusal();
     failures += zr_case_revoked_key_stops_being_advertised();
     failures += zr_case_non_answer_changes_nothing();
     failures += zr_case_lock_released();

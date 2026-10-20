@@ -746,9 +746,32 @@ static int test_blog_publication_slice(void)
     return failures;
 }
 
+static int test_blog_rpc_registration(void)
+{
+    struct rpc_table table;
+    rpc_table_init(&table);
+    bool absent = rpc_table_find(&table, "blog_anchor") == NULL;
+    register_blog_post_rpc_commands(&table);
+    const struct rpc_command *command = rpc_table_find(&table, "blog_anchor");
+    if (!absent || !command || !command->actor || !command->ok_safe_mode ||
+        strcmp(command->category, "blog") != 0)
+        return 1;
+    struct json_value params = {0}, result = {0};
+    bool help = command->actor(&params, true, &result);
+    const char *text = json_get_str(&result);
+    bool describes_plan = help && text && strstr(text, "blog_anchor plan") &&
+        strstr(text, "blog_anchor commit");
+    bool refused = !command->actor(&params, false, &result);
+    text = json_get_str(&result);
+    bool explains_refusal = refused && text &&
+        strcmp(text, "blog_anchor requires wallet_scope=dev|prod") == 0;
+    json_free(&result);
+    return !(describes_plan && explains_refusal);
+}
+
 int test_blog(void)
 {
-    int failures = 0;
+    int failures = test_blog_rpc_registration();
 
     printf("blog: safe_path rejects .. traversal... ");
     {

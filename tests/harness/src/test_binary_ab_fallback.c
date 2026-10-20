@@ -419,7 +419,7 @@ static int ab_nodectl_unit_contract(void)
 }
 
 
-static int test_binary_ab_fallback_platform_arm(void)
+static int test_binary_ab_fallback_posix_arm(void)
 {
     printf("\n=== binary_ab_fallback tests ===\n");
     int failures = 0;
@@ -867,7 +867,7 @@ static int test_binary_ab_fallback_platform_arm(void)
  * directory-handle-relative O_NOFOLLOW open and no descriptor-bound exec,
  * and a partial emulation was deliberately rejected. This lane asserts the
  * refusal contract itself; the launch matrix above is the POSIX lane. */
-static int test_binary_ab_fallback_platform_arm(void)
+static int test_binary_ab_fallback_windows_arm(void)
 {
     printf("\n=== binary_ab_fallback tests (Windows refusal lane) ===\n");
     int failures = 0;
@@ -895,9 +895,11 @@ static int test_binary_ab_fallback_platform_arm(void)
 
 int test_binary_ab_fallback(void)
 {
-    int failures = test_binary_ab_fallback_platform_arm();
 #if !defined(_WIN32)
+    int failures = test_binary_ab_fallback_posix_arm();
     failures += ab_nodectl_unit_contract();
+#else
+    int failures = test_binary_ab_fallback_windows_arm();
 #endif
     return failures;
 }
