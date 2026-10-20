@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the plugin publish and fetch handlers. */
+ZCL_MODULE_CAPABILITY("tools/command/native_plugin_dist_command.c", CAP_FS_READ|CAP_FS_WRITE, "opens the datadir package store and records a resumable download; the module does the verification")

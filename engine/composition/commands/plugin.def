@@ -281,3 +281,51 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_plugin_search)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.publish", "plugin", "",
+    "Put an installed or packed plugin generation in the package store as a root",
+    "Takes a plugin generation (manifest, detached signature and image, from "
+    "the installed store or a packed dir), refuses one whose image does not "
+    "match its manifest, and files it with a LICENSE as a four-file content.v2 "
+    "package root, signed as a release by a package key, in this datadir's "
+    "package store. Replies with the root and the signed-manifest SHA3-512 (the "
+    "generation id). A hosting node on the datadir then serves the root; "
+    "nothing is sent by this command and nothing is installed.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,publish,p2p,package,swarm,root,release,distribution",
+    "zcl.plugin_publish.input.v1", "zcl.plugin_publish.v1",
+    "name,generation,dir,license-file,spdx,release-key,sequence,datadir", "name",
+    "z23 plugin publish upper --license-file=./LICENSE --release-key=./package.key --sequence=1",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_plugin_publish)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.fetch", "plugin", "",
+    "Install a plugin generation the package swarm delivered, as a new generation",
+    "Checks a package root out of this datadir's package store (delivered by the "
+    "hosting node's swarm) and refuses, by name, a root that is not the "
+    "requested one, a partial transfer, a package that is not exactly a plugin "
+    "generation, a signing key not already in publisher_keys, an image that "
+    "differs from the signed sha3_512, and a version lower than the installed "
+    "current generation (unless allow-downgrade, an owner flag). Then installs "
+    "it through the ordinary install path as a NEW generation. It never "
+    "switches, never changes current and never runs the plugin. A root not yet "
+    "in the datadir records a resumable download for the hosting node.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,fetch,p2p,package,swarm,root,verify,distribution,downgrade",
+    "zcl.plugin_fetch.input.v1", "zcl.plugin_fetch.v1",
+    "root,name,datadir,allow-downgrade", "root,name",
+    "z23 plugin fetch --root=<64hex> --name=upper",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_plugin_fetch)
