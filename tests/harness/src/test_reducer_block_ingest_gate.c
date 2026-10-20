@@ -349,15 +349,8 @@ int test_reducer_block_ingest_gate(void)
         ms.pindex_best_header = genesis;
     }
 
-    /* Seed the pipeline to treat genesis as the processed anchor:
-     * tip_finalize_stage_seed_anchor stamps the anchor row and advances every
-     * upstream cursor to height 1 (the snapshot-apply cold-start seed,
-     * engine/services/src/snapshot_apply.c). */
-    RBI_CHECK("tip_finalize anchor seed at genesis",
-              tip_finalize_stage_seed_anchor(0, genesis_hash.data, false));
-
-    /* Init the eight reducer stages on production defaults. Init after the
-     * anchor seed so each stage loads cursor=1. */
+    /* Bind the fresh genesis authority before adding durable anchor history,
+     * matching test_boot_matrix's production-default stage setup. */
     bool stages_ok =
         header_admit_stage_init(&ms) &&
         validate_headers_stage_init(&ms) &&
@@ -375,6 +368,11 @@ int test_reducer_block_ingest_gate(void)
     if (stages_ok)
         RBI_CHECK("seed genesis utxo_apply_log row",
                   rbi_seed_genesis_utxo_apply_row(progress_store_db()));
+
+    /* Seed the processed genesis anchor after stage initialization: this
+     * advances upstream cursors to 1 while preserving the fresh H0 authority. */
+    RBI_CHECK("tip_finalize anchor seed at genesis",
+              tip_finalize_stage_seed_anchor(0, genesis_hash.data, false));
 
     /* Build the activation controller (its mutex serializes the front door;
      * its params drive check_block). datadir is stored by pointer, so it must
