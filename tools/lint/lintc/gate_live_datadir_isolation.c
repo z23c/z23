@@ -201,7 +201,11 @@ static int ldi_doc_line(struct ldi_scan *s, const char *path, const char *line)
             char needle[LDI_PATH + 16];
             int n = snprintf(needle, sizeof needle, "%s %s", names[j], leaf);
             if (ovf(n, sizeof needle)) return 2;
-            if (strstr(line, needle) && ldi_add(&s->c, path, 1)) return 2;
+            /* The leaf name must end at a word boundary: `plugin publisher` is not an
+             * invocation of the datadir-taking leaf `plugin publish`. */
+            const char *hit = strstr(line, needle);
+            while (hit && (isalnum((unsigned char)hit[n]) || hit[n] == '_')) hit = strstr(hit + 1, needle);
+            if (hit && ldi_add(&s->c, path, 1)) return 2;
         }
     }
     return 0;
