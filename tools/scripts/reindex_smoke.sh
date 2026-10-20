@@ -47,6 +47,9 @@ iso_init
 
 reindex_log_tail() {
     echo "reindex-smoke: node log tail pid=${ISO_NODE_PID:-} pgid=${ISO_PGID:-}" >&2
+    if [ -f "$ISO_DD/node.log" ]; then
+        grep -aE 'reindex|authority epilogue|REFUSING' "$ISO_DD/node.log" | tail -n 40 >&2 || true
+    fi
     [ ! -f "$ISO_DD/node.log" ] || tail -n 80 "$ISO_DD/node.log" >&2
 }
 
@@ -186,6 +189,16 @@ while [ "$boot" -lt "$MAX_REBOOTS" ]; do
 done
 
 [ "$serving" = "1" ] || fail "node did not serve at tip $base_height within $MAX_REBOOTS reboots"
+
+# A clean reindex must actually replay and finish its authority epilogue.
+# Unchanged pre-existing coins also satisfy the parity checks below.
+if [ "$KILL_MID" = "0" ]; then
+    grep -aqE '^reindex-chainstate: complete in .+ \(0 errors\)$' "$ISO_DD/node.log" \
+        || fail "clean reindex did not complete replay with zero errors"
+    grep -aqF "UTXO authority epilogue derived: source=reindex tip=$base_height " "$ISO_DD/node.log" \
+        || fail "clean reindex did not complete its authority epilogue at height $base_height"
+    echo "reindex-smoke: completed replay and authority epilogue PASS"
+fi
 
 # ── 3. The FOUR teeth (each prints PASS; require all four). ──────────
 post_height="$(rpc_int getblockcount)"

@@ -1640,6 +1640,16 @@ static void boot_step_open_block_tree(struct app_context *ctx)
     }
 }
 
+/* Block bodies use the network directory; authority stores use ctx->datadir. */
+static bool boot_reindex_inputs_available(void)
+{
+    char body_datadir[2048] = {0};
+    GetDataDir(true, body_datadir, sizeof(body_datadir));
+    return body_datadir[0] &&
+        boot_index_reindex_replay_executable(&g_state, &g_block_tree,
+                                             g_block_tree_open, body_datadir);
+}
+
 /* Consume a prior boot's crash-only reindex request and, when one is in
  * flight, clear the coins state before the integrity gate reads it. */
 static void boot_coins_consume_reindex_request(struct app_context *ctx)
@@ -1680,8 +1690,7 @@ static void boot_coins_consume_reindex_request(struct app_context *ctx)
      * refuse — leaving nothing to fold forward from. Skip the early clear
      * there; the mirror is preserved and the reducer reconciles forward. */
     if (ctx->reindex_chainstate) {
-        if (!boot_index_reindex_replay_executable(&g_state, &g_block_tree,
-                g_block_tree_open, ctx->datadir))
+        if (!boot_reindex_inputs_available())
             fprintf(stderr,
                 "[boot] -reindex-chainstate: genesis-side block data "
                 "unreadable (cold-import window) — NOT clearing coins state "
@@ -1743,8 +1752,7 @@ static bool boot_coins_open_view_or_gate(struct app_context *ctx)
              * exhausted, park alive-degraded (paged once), never power-cycle. */
             if (boot_crashonly_storage_gate(ctx->datadir,
                     "coins_view_integrity",
-                    boot_index_reindex_replay_executable(&g_state,
-                        &g_block_tree, g_block_tree_open, ctx->datadir))
+                    boot_reindex_inputs_available())
                     == BOOT_GATE_PARK_DEGRADED)
                 return boot_park_until_shutdown("coins_view_integrity");
             return false;
@@ -1870,8 +1878,7 @@ static bool boot_step_bind_coins_read_view(struct app_context *ctx)
          * The reindex sentinel is harmless if progress.kv later opens — it is
          * consumed up front and the reindex_chainstate execution rebuilds. */
         if (boot_crashonly_storage_gate(ctx->datadir, "progress_kv_open",
-                boot_index_reindex_replay_executable(&g_state, &g_block_tree,
-                    g_block_tree_open, ctx->datadir))
+                boot_reindex_inputs_available())
                 == BOOT_GATE_PARK_DEGRADED)
             return boot_park_until_shutdown("progress_kv_open");
         return false;
@@ -2113,8 +2120,7 @@ static bool boot_handle_corrupt_block_index(struct app_context *ctx,
          * alive-degraded (paged once) instead of looping. */
         if (boot_crashonly_storage_gate(ctx->datadir,
                 "block_index_integrity",
-                boot_index_reindex_replay_executable(&g_state,
-                    &g_block_tree, g_block_tree_open, ctx->datadir))
+                boot_reindex_inputs_available())
                 == BOOT_GATE_PARK_DEGRADED)
             return boot_park_until_shutdown("block_index_integrity");
         return false;
@@ -2383,6 +2389,12 @@ static void boot_step_run_reindex_chainstate(struct app_context *ctx,
                                              struct block_index *scan_reindex_best,
                                              struct block_index *scan_best_header)
 {
+    char body_datadir[2048] = {0};
+    GetDataDir(true, body_datadir, sizeof(body_datadir));
+    if (!body_datadir[0]) {
+        fprintf(stderr, "Warning: reindex block-body directory unavailable\n");
+        return;
+    }
     if (scan_reindex_best) {
         if (boot_promote_tip_via_csr(scan_reindex_best,
                                      "scan_reindex_best", false)) {
@@ -2394,7 +2406,7 @@ static void boot_step_run_reindex_chainstate(struct app_context *ctx,
                g_state.map_block_index.size);
     }
     if (!reindex_chainstate(&g_state, &g_coins_sqlite, &g_coins_tip,
-                             &g_node_db, ctx->datadir)) {
+                             &g_node_db, ctx->datadir, body_datadir)) {
         /* Replay-from-blocks/ failed. Warn-and-continue: the post-restore
          * integrity gate + boot_crashonly_handle_unrecoverable own the
          * BOUNDED reindex budget (a genuinely-corrupt datadir climbs to
@@ -3107,8 +3119,7 @@ static bool boot_step_refold_from_anchor(struct app_context *ctx,
              * alive-degraded rather than _exit()ing into a crash-loop. */
             if (boot_crashonly_storage_gate(ctx->datadir,
                     "refold_sapling_rebuild",
-                    boot_index_reindex_replay_executable(&g_state,
-                        &g_block_tree, g_block_tree_open, ctx->datadir))
+                    boot_reindex_inputs_available())
                     == BOOT_GATE_PARK_DEGRADED)
                 return boot_park_until_shutdown("refold_sapling_rebuild");
             return false;

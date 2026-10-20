@@ -311,10 +311,115 @@ static int bil_union_boot_case(void)
     return failures;
 }
 
+static int bil_genesis_cache_roundtrip(const char *dir, struct main_state *src,
+                                     const struct uint256 *hash,
+                                     const struct uint256 *child_hash,
+                                     uint32_t bits)
+{
+    int failures = 0;
+    struct block_index_flat_identity identity = {0};
+    bool saved = save_block_index_flat_identity(dir, src, &identity).ok;
+    struct main_state again = {0};
+    block_map_init(&again.map_block_index);
+    active_chain_init(&again.chain_active);
+    bool reloaded = saved && load_block_index_flat(dir, &again).ok;
+    struct block_index *g = block_map_find(&again.map_block_index, hash);
+    struct block_index *child = block_map_find(&again.map_block_index, child_hash);
+    BIL_CHECK("bil: corrected cache roundtrip preserves bits and parent",
+        reloaded && g && child && child->pprev == g && g->nBits == bits);
+    active_chain_free(&again.chain_active);
+    block_map_free(&again.map_block_index);
+    return failures;
+}
+
+/* Reproduce a legacy cache that gave bodyless regtest genesis mainnet bits. */
+static int bil_genesis_cache_case(int variant)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "bil_genesis")) {
+        BIL_CHECK("bil: genesis cache directory", false);
+        return failures;
+    }
+    const struct chain_params *cp = chain_params_get();
+    struct main_state src = {0}, dst = {0};
+    block_map_init(&src.map_block_index);
+    block_map_init(&dst.map_block_index);
+    active_chain_init(&src.chain_active);
+    active_chain_init(&dst.chain_active);
+    struct uint256 hash = cp->consensus.hashGenesisBlock;
+    if (variant == 1) memset(hash.data, 0xff, 32);
+    struct block_index *g = chainstate_insert_block_index(
+        (struct chainstate *)&src, &hash);
+    struct uint256 ch = make_test_hash(1);
+    struct block_index *child = chainstate_insert_block_index(
+        (struct chainstate *)&src, &ch);
+    bool ok = g && child;
+    if (ok) {
+        g->nHeight = variant == 2 ? 1 : 0;
+        g->nBits = 0x1f07ffff;
+        g->nTx = 1;
+        child->nHeight = 1;
+        child->nBits = 0x1f07ffff;
+        child->nTx = 1;
+        if (variant == 3) g->pprev = child;
+        else child->pprev = g;
+        struct block_index_flat_identity identity = {0};
+        ok = save_block_index_flat_identity(dir, &src, &identity).ok;
+    }
+    BIL_CHECK("bil: legacy genesis cache saved", ok);
+    if (ok) {
+        BIL_CHECK("bil: legacy genesis cache loaded", load_block_index_flat(dir, &dst).ok);
+        struct block_index *loaded = block_map_find(&dst.map_block_index, &hash);
+        if (variant == 0) {
+            struct arith_uint256 limit;
+            uint256_to_arith(&limit, &cp->consensus.powLimit);
+            struct block_index *linked = block_map_find(&dst.map_block_index, &ch);
+            BIL_CHECK("bil: canonical genesis uses selected bits",
+                loaded && loaded->nBits == arith_uint256_get_compact(&limit, false));
+            BIL_CHECK("bil: H1 retains hash-only canonical parent",
+                loaded && linked && linked->pprev == loaded);
+            failures += bil_genesis_cache_roundtrip(dir, &dst, &hash, &ch,
+                arith_uint256_get_compact(&limit, false));
+        } else {
+            BIL_CHECK("bil: foreign, high or parented genesis remains rejected", !loaded);
+        }
+    }
+    active_chain_free(&src.chain_active);
+    active_chain_free(&dst.chain_active);
+    block_map_free(&src.map_block_index);
+    block_map_free(&dst.map_block_index);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int bil_genesis_cases(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_REGTEST);
+    for (int variant = 0; variant < 4; variant++)
+        failures += bil_genesis_cache_case(variant);
+    struct main_state ms = {0};
+    block_map_init(&ms.map_block_index);
+    active_chain_init(&ms.chain_active);
+    const struct chain_params *cp = chain_params_get();
+    bool ok = load_block_index(&ms, cp, NULL, false).ok;
+    struct block_index *g = block_map_find(&ms.map_block_index,
+                                          &cp->consensus.hashGenesisBlock);
+    struct arith_uint256 limit;
+    uint256_to_arith(&limit, &cp->consensus.powLimit);
+    BIL_CHECK("bil: fresh genesis uses selected network bits",
+        ok && g && g->nBits == arith_uint256_get_compact(&limit, false));
+    active_chain_free(&ms.chain_active);
+    block_map_free(&ms.map_block_index);
+    chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
 int test_block_index_loader(void)
 {
     printf("\n=== block index loader tests ===\n");
-    int failures = 0;
+    int failures = bil_genesis_cases();
 
     /* ── 1. Flat file round-trip ─────────────────────────── */
 

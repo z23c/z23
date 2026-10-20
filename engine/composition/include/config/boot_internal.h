@@ -66,7 +66,8 @@ bool reindex_chainstate(struct main_state *ms,
                           struct coins_view_sqlite *cvs,
                           struct coins_view_cache *cvtip,
                           struct node_db *ndb,
-                          const char *datadir);
+                          const char *datadir,
+                          const char *body_datadir);
 
 /* Clear the persisted coins state (utxos + coins_best_block + commitments) so
  * the UTXO set can be rebuilt from block data. Used by reindex_chainstate and
@@ -74,14 +75,15 @@ bool reindex_chainstate(struct main_state *ms,
  * FATAL boot before -reindex-chainstate can run). Idempotent. */
 bool boot_index_clear_coins_state(struct node_db *ndb);
 
-/* True iff a from-genesis -reindex-chainstate replay can actually read block
- * bodies from blocks/ (the reindex reads every block from h=0 and cannot skip a
- * missing one). Prefers the loaded active chain (h=0/1 probe); at the early
+/* True iff a from-genesis replay has its initial inputs in the body datadir.
+ * The loaded active chain accepts only the compiled canonical genesis at h=0,
+ * then requires a real body at h=1 when present. At the early
  * boot-storage gates — which run before the in-memory index is loaded — it
  * resolves genesis from the block tree DB (btdb, open iff btdb_open) and
  * attempts the real body read, since a cold-import datadir can persist
  * BLOCK_HAVE_DATA with no body. Returns false when genesis readability cannot be
- * proven — the caller must then NOT wipe the coins state / arm a reindex. */
+ * proven in that unloaded branch — the caller must then NOT wipe the coins
+ * state / arm a reindex. */
 bool boot_index_reindex_replay_executable(struct main_state *ms,
                                           struct block_tree_db *btdb,
                                           bool btdb_open,

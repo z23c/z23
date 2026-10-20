@@ -1391,10 +1391,10 @@ engine/composition/src/boot_error.c:boot_error_report:20
 engine/composition/src/boot_export_consensus_bundle.c:boot_export_consensus_bundle:21
 engine/composition/src/boot_frontend_services.c:boot_https_explorer_start:27
 engine/composition/src/boot_header_seed_import.c:boot_header_seed_import_maybe:32
-engine/composition/src/boot_index.c:boot_index_shielded_tx:25
+engine/composition/src/boot_index.c:boot_index_shielded_tx:20
 engine/composition/src/boot_index.c:boot_index_verify_coins_tip_consistency:52
 engine/composition/src/boot_index.c:propagate_nchaintx:29
-engine/composition/src/boot_index.c:reindex_chainstate:31
+engine/composition/src/boot_index.c:reindex_chainstate:30
 engine/composition/src/boot_legacy_blocks.c:boot_legacy_default_blocks_dir:16
 engine/composition/src/boot_legacy_blocks.c:boot_legacy_import_block_files:18
 engine/composition/src/boot_loop_guard.c:boot_loop_guard_check:16

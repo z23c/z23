@@ -55,11 +55,42 @@
 #include <malloc.h>
 #endif
 #include <sqlite3.h>
+static bool boot_index_shielded_replay_step(sqlite3 *db,
+                                           const struct block *blk,
+                                           int height, int target_height)
+{
+    bool ok = true;
+    struct delta_summary summary;
+    memset(&summary, 0, sizeof(summary));
+    summary.ok = true;
+    summary.status = "ok";
+    /* Canonical genesis has an empty state delta and no stored body.
+     * Its caller proves the compiled identity before clearing any state. */
+    if (blk)
+        ok = utxo_apply_check_and_insert_anchors_full_replay(
+            db, blk, height, &summary);
+    if (blk && ok && summary.ok)
+        ok = utxo_apply_check_and_insert_nullifiers(db, blk, height,
+                                                    &summary);
+    if (ok && summary.ok)
+        ok = shielded_history_full_replay_advance_in_tx(
+            db, height, target_height);
+    if (ok && !summary.ok) {
+        LOG_WARN("reindex-chainstate",
+                 "shielded derivation refused h=%d status=%s kind=%s",
+                 height, summary.status ? summary.status : "unknown",
+                 summary.failure_kind ? summary.failure_kind : "unknown");
+        ok = false;
+    }
+    return ok;
+}
+
 static bool boot_index_shielded_tx(sqlite3 *db, const struct block *blk,
                                    int height, int target_height, bool reset)
 {
-    if (!db || target_height < 0 || (reset == (blk != NULL)) ||
-        (!reset && (height < 0 || height > target_height)))
+    if (!db || target_height < 0 || (reset && blk != NULL) ||
+        (!reset && (height < 0 || height > target_height ||
+                    (!blk && height != 0))))
         LOG_FAIL("reindex-chainstate",
                  "shielded tx invalid args reset=%d blk=%p h=%d target=%d",
                  reset ? 1 : 0, (const void *)blk, height, target_height);
@@ -74,26 +105,7 @@ static bool boot_index_shielded_tx(sqlite3 *db, const struct block *blk,
         progress_store_tx_unlock();
         return false;
     }
-    bool ok = true;
-    struct delta_summary summary;
-    memset(&summary, 0, sizeof(summary));
-    summary.ok = true;
-    summary.status = "ok";
-    ok = utxo_apply_check_and_insert_anchors_full_replay(
-        db, blk, height, &summary);
-    if (ok && summary.ok)
-        ok = utxo_apply_check_and_insert_nullifiers(db, blk, height,
-                                                    &summary);
-    if (ok && summary.ok)
-        ok = shielded_history_full_replay_advance_in_tx(
-            db, height, target_height);
-    if (ok && !summary.ok) {
-        LOG_WARN("reindex-chainstate",
-                 "shielded derivation refused h=%d status=%s kind=%s",
-                 height, summary.status ? summary.status : "unknown",
-                 summary.failure_kind ? summary.failure_kind : "unknown");
-        ok = false;
-    }
+    bool ok = boot_index_shielded_replay_step(db, blk, height, target_height);
     const char *finish = ok ? "COMMIT" : "ROLLBACK";
     if (sqlite3_exec(db, finish, NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("reindex-chainstate", "shielded %s failed: %s", finish,
@@ -236,6 +248,39 @@ static bool boot_index_flush_reindex_coins(struct coins_view_sqlite *cvs,
     return true;
 }
 
+static bool boot_index_reindex_input_available(struct block_index *pi,
+                                               int height,
+                                               const char *datadir)
+{
+    if (!pi || pi->nHeight != height)
+        return false;
+    if (height == 0) {
+        const struct chain_params *cp = chain_params_get();
+        return cp && pi->phashBlock &&
+            uint256_eq(pi->phashBlock, &cp->consensus.hashGenesisBlock);
+    }
+    struct block blk;
+    if (!read_block_from_disk_index(&blk, pi, datadir))
+        return false;
+    block_free(&blk);
+    return true;
+}
+
+/* Report the first unavailable input without mutating the recovery request. */
+static int boot_index_reindex_missing_input(struct main_state *ms,
+                                            const char *datadir)
+{
+    int tip = active_chain_height(&ms->chain_active);
+    if (tip < 0)
+        return 0;
+    for (int h = 0; h <= (tip < 1 ? tip : 1); h++) {
+        struct block_index *pi = active_chain_at(&ms->chain_active, h);
+        if (!boot_index_reindex_input_available(pi, h, datadir))
+            return h;
+    }
+    return -1;
+}
+
 bool boot_index_reindex_replay_executable(struct main_state *ms,
                                           struct block_tree_db *btdb,
                                           bool btdb_open,
@@ -247,17 +292,8 @@ bool boot_index_reindex_replay_executable(struct main_state *ms,
     /* Preferred source: the loaded active chain (the late block-index gate and
      * the post-restore integrity path). Probe h=0/1 exactly like
      * reindex_chainstate's inline verb check. */
-    if (ms && active_chain_tip(&ms->chain_active)) {
-        int tip = active_chain_height(&ms->chain_active);
-        for (int h = 0; h <= (tip < 1 ? tip : 1); h++) {
-            struct block_index *pi = active_chain_at(&ms->chain_active, h);
-            struct block pblk;
-            if (!pi || !read_block_from_disk_index(&pblk, pi, datadir))
-                return false;
-            block_free(&pblk);
-        }
-        return true;
-    }
+    if (ms && active_chain_tip(&ms->chain_active))
+        return boot_index_reindex_missing_input(ms, datadir) < 0;
 
     /* The early coins-view / progress.kv gates run BEFORE the in-memory index
      * is loaded, so resolve genesis from the durable block tree DB and attempt
@@ -352,11 +388,17 @@ bool reindex_chainstate(struct main_state *ms,
                           struct coins_view_sqlite *cvs,
                           struct coins_view_cache *cvtip,
                           struct node_db *ndb,
-                          const char *datadir)
+                          const char *datadir,
+                          const char *body_datadir)
 {
     int tip_height = active_chain_height(&ms->chain_active);
     if (tip_height < 0) {
         fprintf(stderr, "reindex-chainstate: no active chain\n");
+        return false;
+    }
+    const struct chain_params *cparams = chain_params_get();
+    if (!cparams) {
+        LOG_WARN("reindex-chainstate", "network parameters unavailable");
         return false;
     }
 
@@ -367,31 +409,27 @@ bool reindex_chainstate(struct main_state *ms,
 
     platform_allocator_prepare_bulk();
 
-    /* The replay reads every block from h=0 and cannot skip. Verify the
-     * verb is executable BEFORE wiping the derived set: a cold-import
+    /* Native bootstrap stores no genesis body: only the compiled genesis
+     * identity can stand for its empty state delta. Require a real block 1
+     * when present BEFORE wiping the derived set: a cold-import
      * datadir has no block data below its import window, so a
      * wipe-then-discover order destroys a healthy mirror for nothing
      * (the wipe succeeds, then the very first genesis-side read fails). */
-    for (int h = 0; h <= (tip_height < 1 ? tip_height : 1); h++) {
-        struct block_index *probe = active_chain_at(&ms->chain_active, h);
-        struct block pblk;
-        if (!probe || !read_block_from_disk_index(&pblk, probe, datadir)) {
-            fprintf(stderr,
-                    "reindex-chainstate: block at height %d is unreadable — "
-                    "replay-from-blocks/ is not executable on this datadir "
-                    "(cold-import window has no genesis-side block data); "
-                    "REFUSING before wiping the UTXO set. The right verb "
-                    "here is a cold-import re-seed.\n", h);
-            event_emitf(EV_BOOT_ACTIVATE, 0,
-                        "reindex_refused_unexecutable probe_h=%d tip=%d",
-                        h, tip_height);
-            /* The verb can NEVER execute on this datadir — a pending
-             * auto-reindex sentinel would replay this consume→refuse
-             * cycle on every boot (task #29 follow-up). Clear it. */
-            boot_auto_reindex_clear(datadir);
-            return false;
-        }
-        block_free(&pblk);
+    int missing = boot_index_reindex_missing_input(ms, body_datadir);
+    if (missing >= 0) {
+        fprintf(stderr,
+                "reindex-chainstate: input at height %d is unavailable or "
+                "noncanonical — replay-from-blocks/ is not executable on "
+                "this datadir; REFUSING before wiping the UTXO set. Restore "
+                "the missing block data or use a cold-import re-seed.\n",
+                missing);
+        event_emitf(EV_BOOT_ACTIVATE, 0,
+                    "reindex_refused_unexecutable probe_h=%d tip=%d",
+                    missing, tip_height);
+        /* An unexecutable pending request would repeat this consume/refuse
+         * cycle on every boot. Preserve the coins and retire the request. */
+        boot_auto_reindex_clear(datadir);
+        return false;
     }
 
     if (!boot_index_flush_reindex_coins(cvs, cvtip))
@@ -417,6 +455,15 @@ bool reindex_chainstate(struct main_state *ms,
         return false;
     }
 
+    /* Advance the bounded replay over canonical genesis without inventing a
+     * block or applying its unspendable coinbase. Completeness stays pending
+     * until the final epilogue; no anchors or nullifiers are inserted here. */
+    if (!boot_index_shielded_tx(shielded_db, NULL, 0, tip_height, false)) {
+        LOG_WARN("reindex-chainstate", "cannot establish genesis replay base");
+        return false;
+    }
+    coins_view_cache_set_best_block(cvtip, &cparams->consensus.hashGenesisBlock);
+
     set_flush_policy(3600, 1000000, 500);
     if (ndb->open) {
         if (!boot_index_enter_turbo_mode(ndb))
@@ -433,12 +480,11 @@ bool reindex_chainstate(struct main_state *ms,
         node_db_state_set(ndb, "sapling_tree_rescan_height", NULL, 0);
     }
 
-    const struct chain_params *cparams = chain_params_get();
     int64_t t_start = (int64_t)platform_time_wall_time_t();
     int errors = 0;
     boot_status_set_progress("reindex_chainstate", 0, tip_height);
 
-    for (int h = 0; h <= tip_height; h++) {
+    for (int h = 1; h <= tip_height; h++) {
         struct block_index *pindex = active_chain_at(
             &ms->chain_active, h);
         if (!pindex) {
@@ -448,7 +494,7 @@ bool reindex_chainstate(struct main_state *ms,
         }
 
         struct block blk;
-        if (!read_block_from_disk_index(&blk, pindex, datadir)) {
+        if (!read_block_from_disk_index(&blk, pindex, body_datadir)) {
             fprintf(stderr, "reindex-chainstate: failed to read block at "
                     "height %d — stopping to prevent UTXO corruption\n", h);
             errors++;

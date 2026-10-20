@@ -35,13 +35,32 @@
 #include "test/test_core.h"
 
 #include "config/boot_internal.h"
+#include "bloom/merkle.h"
+#include "chain/chainparams.h"
+#include "chain/pow.h"
+#include "chain/subsidy.h"
+#include "coins/utxo_commitment.h"
+#include "core/arith_uint256.h"
+#include "domain/consensus/coinbase.h"
+#include "jobs/reducer_frontier.h"
+#include "jobs/tip_finalize_stage.h"
+#include "mining/miner.h"
 #include "models/database.h"
+#include "services/seed_integrity_gate.h"
+#include "storage/anchor_kv.h"
+#include "storage/coins_kv.h"
+#include "storage/disk_block_io.h"
+#include "storage/nullifier_kv.h"
+#include "storage/progress_store.h"
+#include "util/safe_alloc.h"
+#include "util/util.h"
 #include "storage/boot_auto_refold.h"
 #include "storage/txdb.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #define NW_CHECK(name, expr) do {                                    \
     printf("  recovery_no_worse: %s... ", (name));                   \
@@ -62,11 +81,235 @@ static int nw_count(struct node_db *ndb, const char *sql)
     return n;
 }
 
+/* Real regtest coinbase and PoW, matching boot_matrix's public builder path. */
+static bool nw_build_one(struct block *blk, const struct chain_params *cp)
+{
+    block_init(blk);
+    blk->vtx = zcl_calloc(1, sizeof(struct transaction), "nw_replay_coinbase");
+    if (!blk->vtx) return false;
+    blk->num_vtx = 1;
+    transaction_init(&blk->vtx[0]);
+    if (!transaction_alloc(&blk->vtx[0], 1, 1)) return false;
+    struct script script;
+    script_init(&script);
+    script.data[0] = 0x76; script.data[1] = 0xa9; script.data[2] = 0x14;
+    memset(script.data + 3, 0x42, 20);
+    script.data[23] = 0x88; script.data[24] = 0xac; script.size = 25;
+    struct domain_consensus_coinbase_inputs inputs = {
+        .n_height = 1, .subsidy = get_block_subsidy(1, &cp->consensus),
+        .miner_script = &script, .params = &cp->consensus,
+    };
+    struct zcl_result result = domain_consensus_coinbase_build(&inputs, &blk->vtx[0]);
+    if (!result.ok) return false;
+    blk->header.hashMerkleRoot = compute_merkle_root(&blk->vtx[0].hash, 1);
+    blk->header.hashPrevBlock = cp->consensus.hashGenesisBlock;
+    uint256_set_null(&blk->header.hashFinalSaplingRoot);
+    blk->header.nTime = 1700000001u;
+    struct arith_uint256 limit;
+    uint256_to_arith(&limit, &cp->consensus.powLimit);
+    blk->header.nBits = arith_uint256_get_compact(&limit, false);
+    return mine_block_pow(blk, 1, cp, 0);
+}
+
+struct nw_replay {
+    char root[256], dir[512], file[640];
+    struct main_state ms;
+    struct node_db ndb;
+    struct coins_view_sqlite view;
+    struct coins_view_cache cache;
+    struct block one;
+    struct block_index *genesis;
+    struct uint256 hash;
+    struct disk_block_pos pos;
+    bool view_open;
+};
+
+static bool nw_replay_open(struct nw_replay *f)
+{
+    main_state_init(&f->ms);
+    block_init(&f->one);
+    test_make_tmpdir(f->root, sizeof(f->root), "recovery_no_worse", "canonical-replay");
+    chain_params_select(CHAIN_REGTEST);
+    SetDataDir(f->root);
+    GetDataDir(true, f->dir, sizeof(f->dir));
+    if (mkdir(f->dir, 0700) != 0 && errno != EEXIST) return false;
+    char path[640];
+    snprintf(path, sizeof(path), "%s/blocks", f->dir);
+    if (mkdir(path, 0700) != 0 && errno != EEXIST) return false;
+    snprintf(path, sizeof(path), "%s/node.db", f->root);
+    if (!node_db_open(&f->ndb, path) || !progress_store_open(f->root)) return false;
+    f->view_open = coins_view_sqlite_open(&f->view, f->ndb.db);
+    if (!f->view_open) return false;
+    coins_view_cache_init(&f->cache, &f->view.view);
+    return true;
+}
+
+static bool nw_replay_chain(struct nw_replay *f, int target)
+{
+    const struct chain_params *cp = chain_params_get();
+    if (!nw_build_one(&f->one, cp)) return false;
+    block_get_hash(&f->one, &f->hash);
+    f->genesis = chainstate_insert_block_index((struct chainstate *)&f->ms, &cp->consensus.hashGenesisBlock);
+    struct block_index *one = chainstate_insert_block_index((struct chainstate *)&f->ms, &f->hash);
+    if (!f->genesis || !one) return false;
+    f->genesis->nHeight = 0;
+    f->genesis->nStatus = BLOCK_VALID_SCRIPTS; /* Canonical index; no genesis body. */
+    f->genesis->nBits = f->one.header.nBits;
+    f->genesis->nTx = 1; f->genesis->nChainTx = 1;
+    f->genesis->nChainWork = GetBlockProof(f->genesis);
+    one->pprev = f->genesis; one->nHeight = 1; one->nStatus = BLOCK_VALID_SCRIPTS;
+    one->nVersion = f->one.header.nVersion; one->nTime = f->one.header.nTime;
+    one->nBits = f->one.header.nBits; one->nTx = 1; one->nChainTx = 2;
+    disk_block_pos_init(&f->pos);
+    if (!write_block_to_disk(&f->one, &f->pos, f->dir, cp->pchMessageStart) ||
+        !block_index_set_have_data_verified(one, &f->pos, f->dir)) return false;
+    snprintf(f->file, sizeof(f->file), "%s/blocks/blk%05d.dat", f->dir, f->pos.nFile);
+    struct block_index *tip = target ? one : f->genesis;
+    active_chain_move_window_tip(&f->ms.chain_active, tip);
+    f->ms.pindex_best_header = tip;
+    coins_view_cache_set_best_block(&f->cache, &cp->consensus.hashGenesisBlock);
+    return node_db_exec(&f->ndb,
+        "INSERT INTO utxos(txid,vout,value,script,script_type,address_hash,height,is_coinbase) "
+        "VALUES(zeroblob(32),0,5000,x'51',0,NULL,777,0)") &&
+        node_db_state_set(&f->ndb, "coins_best_block", cp->consensus.hashGenesisBlock.data, 32);
+}
+
+static void nw_replay_close(struct nw_replay *f)
+{
+    seed_integrity_gate_reset_for_testing();
+    tip_finalize_stage_shutdown();
+    if (f->view_open) {
+        coins_view_cache_free(&f->cache);
+        coins_view_sqlite_close(&f->view);
+    }
+    progress_store_close();
+    if (f->ndb.open) node_db_close(&f->ndb);
+    block_free(&f->one);
+    main_state_free(&f->ms);
+    SetDataDir(""); ClearDataDirCache();
+    chain_params_select(CHAIN_MAIN);
+    test_cleanup_tmpdir(f->root);
+}
+
+static bool nw_flip_body(struct nw_replay *f)
+{
+    FILE *file = fopen(f->file, "r+b");
+    if (!file) return false;
+    bool ok = fseek(file, (long)f->pos.nPos, SEEK_SET) == 0;
+    int byte = ok ? fgetc(file) : EOF;
+    ok = byte != EOF && fseek(file, (long)f->pos.nPos, SEEK_SET) == 0;
+    if (ok) ok = fputc(byte ^ 1, file) != EOF;
+    return fclose(file) == 0 && ok;
+}
+
+static bool nw_replay_refuses_unchanged(struct nw_replay *f)
+{
+    disk_block_io_close_cache();
+    uint8_t before[32], after[32], cache[32], cache_after[32];
+    uint64_t before_count = 0, after_count = 0, generation = 0, after_generation = 0;
+    size_t len = 0;
+    utxo_commitment_sha3_compute(f->ndb.db, before, &before_count);
+    bool captured = node_db_state_get(&f->ndb, "coins_best_block", cache, sizeof(cache), &len) && len == 32 &&
+        coins_kv_get_authority_generation(progress_store_db(), &generation);
+    bool executable = boot_index_reindex_replay_executable(&f->ms, NULL, false, f->dir);
+    bool replayed = reindex_chainstate(&f->ms, &f->view, &f->cache, &f->ndb, f->root, f->dir);
+    utxo_commitment_sha3_compute(f->ndb.db, after, &after_count);
+    return captured && !executable && !replayed && before_count == after_count &&
+        memcmp(before, after, 32) == 0 &&
+        node_db_state_get(&f->ndb, "coins_best_block", cache_after, sizeof(cache_after), &len) && len == 32 &&
+        memcmp(cache, cache_after, 32) == 0 &&
+        coins_kv_get_authority_generation(progress_store_db(), &after_generation) && generation == after_generation;
+}
+
+static bool nw_replay_complete(sqlite3 *db)
+{
+    int64_t cursor;
+    bool found;
+    for (int pool = 0; pool < 2; pool++)
+        if (!anchor_kv_activation_cursor(db, pool, &cursor, &found) || !found || cursor != 0) return false;
+    if (!nullifier_kv_activation_cursor(db, &cursor, &found) || !found || cursor != 0) return false;
+    uint8_t bytes[32]; size_t len;
+    return progress_meta_get_blob_exact(db, SHIELDED_REPLAY_NEXT_KEY, bytes, sizeof(bytes), &len, &found) && !found;
+}
+
+static bool nw_replay_caches_match(struct nw_replay *f, int target,
+    const uint8_t root[32], uint64_t count)
+{
+    uint8_t stamp[32], best[32];
+    uint64_t stamp_count = 0;
+    int32_t height = -1;
+    size_t len = 0;
+    const uint8_t *expected = target ? f->hash.data : chain_params_get()->consensus.hashGenesisBlock.data;
+    return node_db_state_get(&f->ndb, "coins_best_block", best, sizeof(best), &len) && len == 32 && memcmp(best, expected, 32) == 0 &&
+        utxo_commitment_sha3_load(f->ndb.db, stamp, &height, &stamp_count) && height == target && stamp_count == count && memcmp(root, stamp, 32) == 0;
+}
+
+static int nw_replay_terminal(struct nw_replay *f, int target, uint64_t prior_generation)
+{
+    int failures = 0;
+    sqlite3 *db = progress_store_db();
+    uint64_t count = 0, generation = 0;
+    uint8_t root[32], kernel[32];
+    int32_t applied = -1, hstar = -1, served = -1;
+    utxo_commitment_sha3_compute(f->ndb.db, root, &count);
+    NW_CHECK("canonical replay: stale coin removed and kernel commitment matches",
+        nw_count(&f->ndb, "SELECT count(*) FROM utxos WHERE height=777") == 0 &&
+        coins_kv_count_sqlite(db) == (int64_t)count && coins_kv_commitment(db, kernel) == 0 && memcmp(root, kernel, 32) == 0);
+    NW_CHECK("canonical replay: real H1 coinbase or empty genesis delta",
+        target ? coins_kv_exists(db, f->one.vtx[0].hash.data, 0) : count == 0);
+    NW_CHECK("canonical replay: next height and single generation transition",
+        coins_kv_get_applied_height(db, &applied, NULL) && applied == target + 1 &&
+        coins_kv_get_authority_generation(db, &generation) && generation == prior_generation + 1);
+    NW_CHECK("canonical replay: exact tip cache and commitment stamp",
+        nw_replay_caches_match(f, target, root, count));
+    NW_CHECK("canonical replay: served tip and H* agree",
+        active_chain_height(&f->ms.chain_active) == target && reducer_frontier_compute_hstar(db, &hstar, &served) && hstar == target && served == target);
+    NW_CHECK("canonical replay: complete shielded history and retired session", nw_replay_complete(db));
+    return failures;
+}
+
+static int nw_canonical_replay_case(int target)
+{
+    int failures = 0;
+    struct nw_replay f = {0};
+    bool ready = nw_replay_open(&f) && nw_replay_chain(&f, target);
+    NW_CHECK("canonical replay: valid mined H1 with bodyless canonical genesis fixture", ready);
+    if (!ready) { nw_replay_close(&f); return failures; }
+    if (target) {
+        struct uint256 foreign = *f.genesis->phashBlock;
+        foreign.data[0] ^= 1;
+        const struct uint256 *original = f.genesis->phashBlock;
+        f.genesis->phashBlock = &foreign;
+        NW_CHECK("canonical replay: foreign H0 refuses without mutation", nw_replay_refuses_unchanged(&f));
+        f.genesis->phashBlock = original;
+        char retained[704]; snprintf(retained, sizeof(retained), "%s.retained", f.file);
+        disk_block_io_close_cache();
+        NW_CHECK("canonical replay: remove H1 fixture", rename(f.file, retained) == 0);
+        NW_CHECK("canonical replay: missing H1 refuses without mutation", nw_replay_refuses_unchanged(&f));
+        NW_CHECK("canonical replay: restore H1 fixture", rename(retained, f.file) == 0);
+        disk_block_io_close_cache();
+        NW_CHECK("canonical replay: corrupt H1 fixture", nw_flip_body(&f));
+        NW_CHECK("canonical replay: corrupt H1 refuses without mutation", nw_replay_refuses_unchanged(&f));
+        NW_CHECK("canonical replay: repair H1 fixture", nw_flip_body(&f));
+        disk_block_io_close_cache();
+    }
+    uint64_t generation = UINT64_MAX;
+    NW_CHECK("canonical replay: prior generation readable", coins_kv_get_authority_generation(progress_store_db(), &generation));
+    seed_integrity_gate_set_node_db_for_testing(&f.ndb);
+    NW_CHECK("canonical replay: loaded chain is executable", boot_index_reindex_replay_executable(&f.ms, NULL, false, f.dir));
+    NW_CHECK("canonical replay: actual reindex_chainstate succeeds", reindex_chainstate(&f.ms, &f.view, &f.cache, &f.ndb, f.root, f.dir));
+    failures += nw_replay_terminal(&f, target, generation);
+    nw_replay_close(&f);
+    return failures;
+}
+
 int test_recovery_no_worse(void);
 int test_recovery_no_worse(void)
 {
     printf("\n=== recovery_no_worse: RECOVERY NEVER MAKES IT WORSE ===\n");
     int failures = 0;
+    failures += nw_canonical_replay_case(1);
+    failures += nw_canonical_replay_case(0);
 
     /* ════════════════════════════════════════════════════════════════
      * SECTION B — reindex-chainstate / coins-state clear: compose the

@@ -403,6 +403,26 @@ static void bil_flat_rollback(struct block_map *bm,
     }
 }
 
+static uint32_t bil_selected_genesis_bits(const struct chain_params *cp)
+{
+    struct arith_uint256 limit;
+    uint256_to_arith(&limit, &cp->consensus.powLimit);
+    return arith_uint256_get_compact(&limit, false);
+}
+
+/* Legacy fresh loaders persisted mainnet bits on every network. Correct only
+ * the compiled genesis identity; the ordinary PoW admission still runs. */
+static uint32_t bil_flat_effective_bits(const struct block_index_flat *row,
+                                      const struct chain_params *cp)
+{
+    static const uint8_t zero[32] = {0};
+    if (cp && row->height == 0 &&
+        memcmp(row->hash, cp->consensus.hashGenesisBlock.data, 32) == 0 &&
+        memcmp(row->prev_hash, zero, 32) == 0)
+        return bil_selected_genesis_bits(cp);
+    return row->n_bits;
+}
+
 static struct zcl_result bil_flat_insert_rows(
     struct main_state *ms, const struct block_index_flat *entries,
     uint32_t count, struct block_index *arena)
@@ -433,7 +453,8 @@ static struct zcl_result bil_flat_insert_rows(
          * per-row (not inserted → header sync + body_fetch re-supply it) rather
          * than admitted below PoW strength. Skipped when cp is NULL (see above)
          * so it can never drop every row on a missing params table. */
-        if (cp && block_row_verify(entries[i].hash, entries[i].n_bits, NULL,
+        uint32_t effective_bits = bil_flat_effective_bits(&entries[i], cp);
+        if (cp && block_row_verify(entries[i].hash, effective_bits, NULL,
                                    cp, false) != BLOCK_ROW_VERIFY_OK) {
             flat_quarantine_row(entries[i].height, entries[i].hash,
                                 &flat_bad_count);
@@ -454,6 +475,7 @@ static struct zcl_result bil_flat_insert_rows(
         if (admit == BIL_FLAT_ADMIT_DUPLICATE)
             continue;
         bil_flat_fill_pindex(pindex, &entries[i]);
+        pindex->nBits = effective_bits;
 
         /* Reconcile the persisted FAILED verdict against the ROM checkpoint
          * before the forward pass runs (so a stripped/demoted entry does not
@@ -702,7 +724,7 @@ struct zcl_result load_block_index(struct main_state *ms,
             genesis->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
             genesis->nTx = 1;
             genesis->nChainTx = 1;
-            genesis->nBits = 0x1f07ffff;
+            genesis->nBits = bil_selected_genesis_bits(params);
             genesis->nChainWork = GetBlockProof(genesis);
             struct chain_state_rollback_authorization rollback_auth = {
                 .source = CSR_ROLLBACK_SOURCE_RESTORE,
