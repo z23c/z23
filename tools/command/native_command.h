@@ -328,6 +328,8 @@ void zcl_native_handle_plugin_keygen(
 void zcl_native_handle_plugin_publisher(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* Shared by the plugin leaves: the HOME-based store root. */
+bool zcl_native_plugin_root(char *out, size_t cap);
 void zcl_native_handle_plugin_publish(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

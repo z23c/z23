@@ -11,6 +11,7 @@
  *          action. The daemon is not contacted. */
 
 #include "command/native_command.h"
+#include "native_plugin_common.h"
 
 #include "base/hex.h"
 #include "json/json.h"
@@ -21,6 +22,7 @@
 #include "vcs/package_swarm_node.h"
 #include "vcs/package_service.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,12 +43,6 @@ static void pdc_refuse(struct zcl_command_reply *reply, enum plugin_dist_status 
     (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s",
                    plugin_dist_status_next_action(st));
     reply->error.human_action_required = true;
-}
-
-static const char *pdc_str(const struct zcl_command_request *request, const char *key)
-{
-    const struct json_value *v = request->input ? json_get(request->input, key) : NULL;
-    return v && v->type == JSON_STR ? json_get_str(v) : NULL;
 }
 
 static bool pdc_flag(const struct zcl_command_request *request, const char *key)
@@ -80,21 +76,6 @@ static bool pdc_u64(const struct zcl_command_request *request, const char *key,
     return s && *s && end && *end == '\0' && n > 0;
 }
 
-static bool pdc_is_dir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-static bool pdc_plugins_dir(char *out, size_t cap)
-{
-    const char *home = getenv("HOME");
-    if (!home || home[0] != '/')
-        return false;
-    int n = snprintf(out, cap, "%s/.z23/plugins", home);
-    return n > 0 && (size_t)n < cap;
-}
-
 static struct vcs_package_store *pdc_open_store(struct zcl_command_reply *reply,
                                                 const char *what, const char *datadir)
 {
@@ -114,9 +95,9 @@ void zcl_native_handle_plugin_publish(const struct zcl_command_request *request,
         return;
     char plugins[PATH_MAX];
     uint64_t sequence = 0;
-    const char *name = pdc_str(request, "name");
+    const char *name = plg_str(request, "name");
     if (!pdc_u64(request, "sequence", &sequence) ||
-        (!pdc_plugins_dir(plugins, sizeof(plugins)) && !pdc_str(request, "dir"))) {
+        (!zcl_native_plugin_root(plugins, sizeof(plugins)) && !plg_str(request, "dir"))) {
         pdc_refuse(reply, PLUGIN_DIST_ERR_ARGUMENT, "publish",
                    "sequence must be a positive integer and HOME must be absolute",
                    false, false);
@@ -126,16 +107,16 @@ void zcl_native_handle_plugin_publish(const struct zcl_command_request *request,
         pdc_refuse(reply, PLUGIN_DIST_ERR_ARGUMENT, "publish", "name is required", false, false);
         return;
     }
-    const char *datadir = pdc_str(request, "datadir");
+    const char *datadir = plg_str(request, "datadir");
     if (!datadir)
         datadir = zcl_native_command_datadir();
     struct vcs_package_store *store = pdc_open_store(reply, "publish", datadir);
     if (!store)
         return;
     struct plugin_dist_publish_request rq = {
-        .plugins_dir = plugins, .name = name, .generation = pdc_str(request, "generation"),
-        .src_dir = pdc_str(request, "dir"), .license_file = pdc_str(request, "license-file"),
-        .spdx = pdc_str(request, "spdx"), .release_key = pdc_str(request, "release-key"),
+        .plugins_dir = plugins, .name = name, .generation = plg_str(request, "generation"),
+        .src_dir = plg_str(request, "dir"), .license_file = plg_str(request, "license-file"),
+        .spdx = plg_str(request, "spdx"), .release_key = plg_str(request, "release-key"),
         .sequence = sequence
     };
     struct plugin_dist_published out;
@@ -188,17 +169,17 @@ void zcl_native_handle_plugin_fetch(const struct zcl_command_request *request,
         return;
     char plugins[PATH_MAX], scratch[PATH_MAX], err[160];
     uint8_t root[32];
-    const char *name = pdc_str(request, "name");
-    if (!zcl_native_require_hex64("root", pdc_str(request, "root"), root, err, sizeof(err))) {
+    const char *name = plg_str(request, "name");
+    if (!zcl_native_require_hex64("root", plg_str(request, "root"), root, err, sizeof(err))) {
         pdc_refuse(reply, PLUGIN_DIST_ERR_ARGUMENT, "fetch", err, false, false);
         return;
     }
-    if (!name || !pdc_plugins_dir(plugins, sizeof(plugins))) {
+    if (!name || !zcl_native_plugin_root(plugins, sizeof(plugins))) {
         pdc_refuse(reply, PLUGIN_DIST_ERR_ARGUMENT, "fetch",
                    "name is required and HOME must be absolute", false, false);
         return;
     }
-    const char *datadir = pdc_str(request, "datadir");
+    const char *datadir = plg_str(request, "datadir");
     if (!datadir)
         datadir = zcl_native_command_datadir();
     struct vcs_package_store *store = pdc_open_store(reply, "fetch", datadir);
@@ -217,7 +198,7 @@ void zcl_native_handle_plugin_fetch(const struct zcl_command_request *request,
         return;
     }
     if (snprintf(scratch, sizeof(scratch), "%s/zcode/plugin-dist", datadir) >= (int)sizeof(scratch) ||
-        (mkdir(scratch, 0700) != 0 && !pdc_is_dir(scratch))) {
+        (mkdir(scratch, 0700) != 0 && errno != EEXIST)) {
         vcs_package_store_close(store);
         pdc_refuse(reply, PLUGIN_DIST_ERR_IO, "fetch", "cannot create the checkout scratch directory",
                    false, false);

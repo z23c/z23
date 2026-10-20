@@ -39,14 +39,14 @@ static void plg_refuse(struct zcl_command_reply *reply, enum plugin_status st,
 }
 
 const char *plg_str(const struct zcl_command_request *request,
-                           const char *key)
+                    const char *key)
 {
     const struct json_value *v = request->input ? json_get(request->input, key)
                                                 : NULL;
     return v && v->type == JSON_STR ? json_get_str(v) : NULL;
 }
 
-static bool plg_root(char *out, size_t cap)
+bool zcl_native_plugin_root(char *out, size_t cap)
 {
     const char *home = getenv("HOME");
     if (!home || home[0] != '/')
@@ -61,7 +61,7 @@ static bool plg_begin(const struct zcl_command_request *request,
 {
     if (!request || !reply)
         return false;
-    if (!plg_root(root, cap)) {
+    if (!zcl_native_plugin_root(root, cap)) {
         plg_refuse(reply, PLUGIN_ERR_ARGUMENT, what, "HOME is not absolute");
         return false;
     }

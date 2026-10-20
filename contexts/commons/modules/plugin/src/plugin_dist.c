@@ -119,36 +119,6 @@ int plugin_dist_version_compare(const char *a, const char *b, bool *comparable)
     return 0;
 }
 
-#if defined(_WIN32)
-
-enum plugin_dist_status plugin_dist_publish(
-    struct vcs_package_store *store,
-    const struct plugin_dist_publish_request *request,
-    struct plugin_dist_published *out)
-{
-    (void)store;
-    (void)request;
-    if (out)
-        snprintf(out->detail, sizeof(out->detail), "needs POSIX file semantics");
-    return PLUGIN_DIST_ERR_ARGUMENT;
-}
-
-enum plugin_dist_status plugin_dist_receive(
-    const struct plugin_dist_receive_request *request,
-    struct plugin_dist_received *out)
-{
-    (void)request;
-    if (out)
-        snprintf(out->detail, sizeof(out->detail), "needs POSIX file semantics");
-    return PLUGIN_DIST_ERR_ARGUMENT;
-}
-
-#ifdef ZCL_TESTING
-void plugin_dist_test_skip_source_check(bool skip) { (void)skip; }
-#endif
-
-#else /* POSIX */
-
 #ifdef ZCL_TESTING
 static bool g_skip_source_check;
 void plugin_dist_test_skip_source_check(bool skip) { g_skip_source_check = skip; }
@@ -157,10 +127,14 @@ void plugin_dist_test_skip_source_check(bool skip) { g_skip_source_check = skip;
 #define PD_SKIP_SOURCE_CHECK false
 #endif
 
+#if !defined(_WIN32)
+
 static const char k_hex[] = "0123456789abcdef";
 
 static bool pd_join(char *out, size_t cap, const char *a, const char *b)
 {
+    if (!a || !b || !a[0] || !b[0])
+        return false;
     int n = snprintf(out, cap, "%s/%s", a, b);
     return n > 0 && (size_t)n < cap;
 }
@@ -514,7 +488,7 @@ static void pd_pub_fill(const struct pd_pub *p, struct plugin_dist_published *ou
     pd_hex(out->generation, md, PLUGIN_DIGEST_BYTES);
 }
 
-enum plugin_dist_status plugin_dist_publish(
+static enum plugin_dist_status pd_publish(
     struct vcs_package_store *store,
     const struct plugin_dist_publish_request *rq,
     struct plugin_dist_published *out)
@@ -809,7 +783,7 @@ static enum plugin_dist_status pd_checkout_install(
     return ds;
 }
 
-enum plugin_dist_status plugin_dist_receive(
+static enum plugin_dist_status pd_receive(
     const struct plugin_dist_receive_request *rq,
     struct plugin_dist_received *out)
 {
@@ -826,4 +800,38 @@ enum plugin_dist_status plugin_dist_receive(
     return ds != PLUGIN_DIST_OK ? ds : pd_checkout_install(rq, out);
 }
 
-#endif /* POSIX */
+#endif /* !_WIN32 */
+
+enum plugin_dist_status plugin_dist_publish(
+    struct vcs_package_store *store,
+    const struct plugin_dist_publish_request *request,
+    struct plugin_dist_published *out)
+{
+#if defined(_WIN32)
+    (void)store;
+    (void)request;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        snprintf(out->detail, sizeof(out->detail), "needs POSIX file semantics");
+    }
+    return PLUGIN_DIST_ERR_ARGUMENT;
+#else
+    return pd_publish(store, request, out);
+#endif
+}
+
+enum plugin_dist_status plugin_dist_receive(
+    const struct plugin_dist_receive_request *request,
+    struct plugin_dist_received *out)
+{
+#if defined(_WIN32)
+    (void)request;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        snprintf(out->detail, sizeof(out->detail), "needs POSIX file semantics");
+    }
+    return PLUGIN_DIST_ERR_ARGUMENT;
+#else
+    return pd_receive(request, out);
+#endif
+}
