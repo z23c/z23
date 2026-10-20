@@ -12346,11 +12346,14 @@ static int test_ic_rule_group_capacity(void)
             if (list) agent_impact_add_group_list(&acc, " ,\tgroup_0,group_31 ");
             else agent_impact_add_group(&acc, "group_0");
             ASSERT(!acc.groups_lost);
-            if (list) agent_impact_add_group_list(&acc, "group_32");
-            else agent_impact_add_group(&acc, "group_32");
+            char overflow[32], last[32];
+            snprintf(overflow, sizeof(overflow), "group_%zu", (size_t)ZCL_AGENT_IMPACT_MAX_GROUPS);
+            snprintf(last, sizeof(last), "group_%zu", (size_t)ZCL_AGENT_IMPACT_MAX_GROUPS - 1);
+            if (list) agent_impact_add_group_list(&acc, overflow);
+            else agent_impact_add_group(&acc, overflow);
             ASSERT(acc.groups_lost);
             ASSERT(acc.groups_len == ZCL_AGENT_IMPACT_MAX_GROUPS);
-            ASSERT(strcmp(acc.groups[31], "group_31") == 0);
+            ASSERT(strcmp(acc.groups[ZCL_AGENT_IMPACT_MAX_GROUPS - 1], last) == 0);
             agent_impact_add_group(&acc, "group_0");
             ASSERT(acc.groups_lost);
         }

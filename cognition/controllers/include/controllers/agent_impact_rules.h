@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define ZCL_AGENT_IMPACT_MAX_GROUPS 32
+#define ZCL_AGENT_IMPACT_MAX_GROUPS 64
 #define ZCL_AGENT_IMPACT_GROUP_MAX 64
 
 struct agent_impact_acc {

@@ -1519,6 +1519,28 @@ static int test_code_impact_rootless_index_rebuilds(void)
     return failures;
 }
 
+static int test_boot_services_rule_capacity(void)
+{
+    int failures = 0;
+    TEST("code impact: boot services retains every mapped proof group") {
+        struct agent_impact_acc acc = {0};
+        ASSERT(agent_impact_apply_shared_rules("engine/composition/src/boot_services.c", &acc));
+        ASSERT(!acc.groups_lost);
+        ASSERT(acc.groups_len > 32);
+        bool rom_fetch = false, installed_state = false;
+        for (size_t i = 0; i < acc.groups_len; i++) {
+            if (strcmp(acc.groups[i], "rom_fetch") == 0)
+                rom_fetch = true;
+            if (strcmp(acc.groups[i], "consensus_state_install_runtime") == 0)
+                installed_state = true;
+        }
+        ASSERT(rom_fetch);
+        ASSERT(installed_state);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_impact(void)
 {
     int failures = 0;
@@ -1538,6 +1560,7 @@ int test_code_impact(void)
     failures += test_code_context_map();
     failures += test_code_context_map_complete_pages();
     failures += test_code_context_map_shape_overflow();
+    failures += test_boot_services_rule_capacity();
     failures += test_code_context_map_warm_follows_generation();
     failures += test_code_guide();
     failures += test_code_impact_conditional_include_edge();
