@@ -386,15 +386,23 @@ int t_boot_genesis_init_preserves_restored_authority_contract(void)
         ASSERT(repo_path(path, sizeof(path), "engine/composition/src/boot.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
         char *restore = strstr(buf, "utxo_recovery_restore_chain_tip");
-        char *guard = strstr(buf, "boot_restored_authority_tip = true");
+        /* The fast-restart helper has its own earlier guard. Bind this
+         * contract to the successful non-genesis restore result. */
+        char *restored = restore ?
+            strstr(restore, "if (cr.restored && cr.restored_height > 0)") : NULL;
+        char *guard = restored ?
+            strstr(restored, "boot_restored_authority_tip = true") : NULL;
         char *skip = strstr(buf, "skipped genesis_init");
         char *genesis = strstr(buf, "\"genesis_init\"");
         char *skip_activate = strstr(buf, "skip_initial_activate");
         ASSERT(restore != NULL);
+        ASSERT(restored != NULL);
         ASSERT(guard != NULL);
         ASSERT(skip != NULL);
         ASSERT(genesis != NULL);
         ASSERT(skip_activate != NULL);
+        ASSERT(restore < restored);
+        ASSERT(restored < guard);
         ASSERT(restore < guard);
         ASSERT(guard < genesis);
         ASSERT(skip < genesis);
