@@ -12,6 +12,7 @@
  * already-public functions, so this TU needs no private header.
  */
 #include "config/boot.h"
+#include "config/boot_consensus_bundle_marker.h"
 
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
@@ -101,6 +102,59 @@ void boot_refold_body_rebind_set_datadir(const char *datadir)
         g_refold_rebind_datadir_set = false;
     }
 }
+
+/* Marker guard for EVERY from-anchor reset route. A datadir whose install
+ * marker records a height ABOVE the compiled anchor (a baked-rung install such as
+ * h=3200000) holds sovereign state at that height and, by construction, no block
+ * bodies in (anchor, marker height]. boot_refold_from_anchor_reset FULL-resets
+ * coins_kv back to the anchor, so on such a datadir it must NEVER run: not by
+ * the explicit flag, the torn-import auto-arm, the cold-start arm or a
+ * sticky-escalator respawn, and not whatever active_chain_height() reports (an
+ * empty or low fold span would otherwise read as "trivially contiguous"). The
+ * decision keys on the MARKER only. A marker at or below the anchor (the
+ * keystone install) and a datadir with no marker are unchanged. A marker that
+ * exists but cannot be read fails closed. `datadir` NULL uses the datadir boot
+ * registered via boot_refold_body_rebind_set_datadir; when none is known (unit
+ * harnesses) the guard stands down. Logs the reason when it blocks. */
+bool boot_refold_anchor_reset_blocked_by_marker(const char *datadir,
+                                                int32_t anchor_height)
+{
+    const char *dd = (datadir && datadir[0]) ? datadir
+                     : (g_refold_rebind_datadir_set ? g_refold_rebind_datadir
+                                                    : NULL);
+    if (!dd || !boot_consensus_bundle_marker_exists(dd))
+        return false;
+    int32_t marker_h = -1;
+    if (boot_consensus_bundle_marker_height(dd, &marker_h) &&
+        marker_h <= anchor_height)
+        return false;
+    LOG_WARN("boot",
+             "[boot] from-anchor reset REFUSED: install marker height=%d is "
+             "above the compiled anchor h=%d (or unreadable) - the datadir "
+             "holds installed state with no bodies in (anchor, marker]; a "
+             "reset to the anchor would destroy it and could not be re-folded",
+             (int)marker_h, (int)anchor_height);
+    return true;
+}
+
+/* boot.c's explicit/consumed from-anchor cutover: the guard above plus the
+ * operator-visible refusal (stderr + validation event). True = refuse. */
+bool boot_refold_from_anchor_refused_by_marker(const char *datadir,
+                                               int32_t anchor_height)
+{
+    if (!boot_refold_anchor_reset_blocked_by_marker(datadir, anchor_height))
+        return false;
+    fprintf(stderr,
+            "WARNING: refold-from-anchor: refused - the install marker is above "
+            "the compiled anchor h=%d; the datadir was installed from a newer "
+            "baked bundle and cannot be reset to the anchor.\n",
+            (int)anchor_height);
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                "refold_from_anchor install_marker_above_anchor anchor=%d",
+                (int)anchor_height);
+    return true;
+}
+
 
 /* True iff at least one non-empty blk*.dat exists under datadir/blocks (a cheap
  * stat probe over the first few files — the scan itself walks the rest). */
@@ -277,6 +331,11 @@ bool boot_refold_from_anchor_arm_if_torn(struct main_state *ms,
     if (!block_index_loader_torn_import_detect(ms, progress_db, checkpoint,
                                                &hole_h, &ceiling))
         return false;  /* no durable tear → caller runs the normal seed path */
+
+    /* An installed-above-anchor datadir (baked-rung install) is never reset to
+     * the anchor, whatever the active height reads. */
+    if (boot_refold_anchor_reset_blocked_by_marker(NULL, checkpoint))
+        return false;
 
     /* SAFETY (load-bearing): the AUTO-ARM must NEVER route a torn datadir into
      * the node.db `utxos` reseed + the hard-assert FATAL. boot_refold_from_anchor_reset

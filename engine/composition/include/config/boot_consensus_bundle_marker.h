@@ -31,4 +31,9 @@ bool boot_consensus_bundle_marker_write(const char *datadir, int32_t height,
  * parses contents (a present-but-unreadable marker still counts as installed). */
 bool boot_consensus_bundle_marker_exists(const char *datadir);
 
+/* Height recorded in the install marker. False when the marker is absent or
+ * unreadable/garbled (callers that gate destructive work must then fail closed
+ * on boot_consensus_bundle_marker_exists). */
+bool boot_consensus_bundle_marker_height(const char *datadir, int32_t *height);
+
 #endif /* ZCL_BOOT_CONSENSUS_BUNDLE_MARKER_H */

@@ -82,3 +82,16 @@ bool consensus_state_install_restore_checkpoint_header_frontier(
     }
     return consensus_state_checkpoint_header_ready(ms);
 }
+
+bool consensus_state_header_chain_owns(struct main_state *ms, int32_t height,
+                                       const uint8_t block_hash[32])
+{
+    if (!ms || !block_hash || height < 0)
+        return false;
+    struct block_index *header = ms->pindex_best_header;
+    if (!header || header->nHeight < height)
+        return false;
+    struct block_index *at = block_index_get_ancestor(header, (int)height);
+    return at && at->phashBlock &&
+           memcmp(at->phashBlock->data, block_hash, 32) == 0;
+}

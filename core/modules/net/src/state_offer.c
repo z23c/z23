@@ -66,6 +66,15 @@ bool state_offer_height_is_fresh(int32_t bundle_height, int32_t tip_height)
      * design for the one bundle the installer already re-derives trust for. */
     if (bundle_height == get_sha3_utxo_checkpoint()->height)
         return true;
+    /* Likewise every BAKED ladder rung height (keystone or rung, via
+     * get_baked_rom_state_checkpoint_at_height): the installer re-derives and
+     * binds a bundle at exactly such a height to its full compiled commitment,
+     * so a fresh node can be offered the newest baked rung regardless of age.
+     * An UNBAKED height gets no exemption and stays inside the window. This
+     * widens only which offers are relayed/fetched; trust still binds at
+     * install, and no block/tx/header/difficulty predicate reads it. */
+    if (get_baked_rom_state_checkpoint_at_height(bundle_height) != NULL)
+        return true;
     /* Both positive with bundle_height <= tip_height, so this subtraction can
      * neither overflow nor go negative. */
     return tip_height - bundle_height <= STATE_OFFER_FRESHNESS_BLOCKS;

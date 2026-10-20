@@ -203,13 +203,21 @@ static int chsr_peer_count(void)
     return cm ? (int)connman_get_node_count(cm) : 0;
 }
 
-static bool chsr_checkpoint_hash(const struct sha3_utxo_checkpoint *cp,
-                                 struct uint256 *out)
+struct chsr_target { int32_t height; };
+/* The (height, hash) the staged bundle's install binds on: the baked commitment
+ * (keystone or ladder rung) named by the staged bundle, else the compiled SHA3
+ * checkpoint. Only decides which header solution to fetch; trust binds at
+ * install against the full baked commitment. */
+static bool chsr_wait_target(const char *datadir, int32_t *height,
+                             struct uint256 *hash)
 {
-    if (!cp)
-        return false; // raw-return-ok:no-compiled-checkpoint-is-normal-not-an-error
-    memcpy(out->data, cp->block_hash, 32);
-    return true;
+    char *bundle = datadir ? boot_autodetect_consensus_bundle(datadir) : NULL;
+    uint8_t h32[32];
+    bool ok = boot_staged_bundle_wait_target(bundle, height, h32);
+    free(bundle);
+    if (ok)
+        memcpy(hash->data, h32, 32);
+    return ok;
 }
 
 static bool detect_checkpoint_header_solution_repair(void)
@@ -219,9 +227,9 @@ static bool detect_checkpoint_header_solution_repair(void)
     if (!ms || !datadir || !datadir[0])
         return false; // raw-return-ok:runtime-not-wired-detect-poll
 
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    struct chsr_target tgt = {0};
     struct uint256 cp_hash;
-    if (!chsr_checkpoint_hash(cp, &cp_hash))
+    if (!chsr_wait_target(chsr_datadir(), &tgt.height, &cp_hash))
         return false; // raw-return-ok:no-compiled-checkpoint
 
     /* Tip position does NOT gate the fetch. A fresh instant-on node is BELOW the
@@ -236,7 +244,8 @@ static bool detect_checkpoint_header_solution_repair(void)
 
     /* The header chain must own the checkpoint block so the fetched solution can
      * be validated + a pass record minted against a resolvable index entry. */
-    if (!consensus_state_checkpoint_header_ready(ms))
+    if (!consensus_state_checkpoint_header_ready(ms) ||
+        !consensus_state_header_chain_owns(ms, tgt.height, cp_hash.data))
         return false; // raw-return-ok:header-chain-not-yet-at-checkpoint
 
     /* Only fetch if there is actually a bundle waiting to install. */
@@ -246,7 +255,7 @@ static bool detect_checkpoint_header_solution_repair(void)
     free(bundle);
 
     /* Nothing to do once the solution is durably available. */
-    if (checkpoint_header_solution_available(cp->height, &cp_hash))
+    if (checkpoint_header_solution_available(tgt.height, &cp_hash))
         return false; // raw-return-ok:solution-already-durable
     return true;
 }
@@ -254,9 +263,9 @@ static bool detect_checkpoint_header_solution_repair(void)
 static enum condition_remedy_result remedy_checkpoint_header_solution_repair(void)
 {
     struct main_state *ms = chsr_main_state();
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    struct chsr_target tgt = {0};
     struct uint256 cp_hash;
-    if (!ms || !chsr_checkpoint_hash(cp, &cp_hash))
+    if (!ms || !chsr_wait_target(chsr_datadir(), &tgt.height, &cp_hash))
         return COND_REMEDY_SKIP; // raw-return-ok:runtime-not-wired-this-tick
 
     /* (1) Did the net-thread fetch capture the checkpoint header? Verify +
@@ -264,14 +273,14 @@ static enum condition_remedy_result remedy_checkpoint_header_solution_repair(voi
     struct block_header hdr;
     int32_t captured_h = -1;
     if (checkpoint_header_fetch_take(&hdr, &captured_h)) {
-        if (captured_h == cp->height &&
-            checkpoint_header_solution_verify_and_persist(ms, cp->height,
+        if (captured_h == tgt.height &&
+            checkpoint_header_solution_verify_and_persist(ms, tgt.height,
                                                           &cp_hash, &hdr)) {
             checkpoint_header_fetch_disarm();
             blocker_clear(CHSR_NO_PEER_BLOCKER_ID);
             event_emitf(EV_RECOVERY_ACTION, 0,
                         "action=checkpoint_header_solution_persisted height=%d",
-                        cp->height);
+                        tgt.height);
             return COND_REMEDY_OK;
         }
         LOG_WARN(CHSR_SUBSYS,
@@ -283,7 +292,7 @@ static enum condition_remedy_result remedy_checkpoint_header_solution_repair(voi
 
     /* (2) Not yet captured — (re-)arm the bounded getheaders span. The net
      * thread sends it to a capable peer; the capture arrives on a later tick. */
-    checkpoint_header_fetch_arm(cp->height, &cp_hash);
+    checkpoint_header_fetch_arm(tgt.height, &cp_hash);
 
     int peers = chsr_peer_count();
     if (peers <= 0) {
@@ -292,7 +301,7 @@ static enum condition_remedy_result remedy_checkpoint_header_solution_repair(voi
         snprintf(reason, sizeof(reason),
                  "checkpoint header solution h=%d needed to install the staged "
                  "bundle, but no connected peer can serve the getheaders span",
-                 cp->height);
+                 tgt.height);
         if (blocker_init(&r, CHSR_NO_PEER_BLOCKER_ID, "checkpoint_fetch",
                          BLOCKER_TRANSIENT, reason))
             (void)blocker_set(&r);
@@ -300,13 +309,13 @@ static enum condition_remedy_result remedy_checkpoint_header_solution_repair(voi
                  "[condition:%s] armed checkpoint-header fetch h=%d but no peer "
                  "(peers=0) — named blocker %s, deferring (cooldown re-arms "
                  "forever, no operator page)",
-                 CHSR_NAME, cp->height, CHSR_NO_PEER_BLOCKER_ID);
+                 CHSR_NAME, tgt.height, CHSR_NO_PEER_BLOCKER_ID);
     } else {
         blocker_clear(CHSR_NO_PEER_BLOCKER_ID);
         LOG_INFO(CHSR_SUBSYS,
                  "[condition:%s] armed checkpoint-header fetch h=%d (peers=%d) — "
                  "awaiting the peer's one-header span reply",
-                 CHSR_NAME, cp->height, peers);
+                 CHSR_NAME, tgt.height, peers);
     }
     return COND_REMEDY_SKIP;
 }
@@ -325,16 +334,16 @@ static bool urgent_checkpoint_header_solution_repair(void)
 static bool witness_checkpoint_header_solution_repair(int64_t target_at_detect)
 {
     (void)target_at_detect;
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    struct chsr_target tgt = {0};
     struct uint256 cp_hash;
-    if (!chsr_checkpoint_hash(cp, &cp_hash))
+    if (!chsr_wait_target(chsr_datadir(), &tgt.height, &cp_hash))
         return false; // raw-return-ok:no-compiled-checkpoint-witness-cannot-clear
     // honest-witness-ok: NOT poison-absence and NOT an FSM flag. This clears iff
     // a FRESH durable SELECT shows the checkpoint solution landed — a
     // validate_headers_log PASS row OR a hash-bound header_solution_repair row
     // (checkpoint_header_solution_available reads both). That is the exact
     // observable forward fact the remedy produces and the install then binds on.
-    return checkpoint_header_solution_available(cp->height, &cp_hash);
+    return checkpoint_header_solution_available(tgt.height, &cp_hash);
 }
 
 static struct condition c_checkpoint_header_solution_repair = {

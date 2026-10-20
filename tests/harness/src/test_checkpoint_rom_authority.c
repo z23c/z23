@@ -80,6 +80,125 @@ static void manifest_from_rom(struct consensus_state_bundle_manifest *m,
     m->nullifier_count = rom->nullifier_count;
 }
 
+/* Baked ladder rung activation. A bundle at a baked rung height (above the
+ * keystone) activates via CHECKPOINT_ROM only when EVERY field of THAT rung is
+ * reproduced; the keystone height keeps resolving (non-regression) with the rung
+ * table installed; an UNBAKED height, a rung with an unbaked placeholder, and a
+ * rung-height bundle carrying the keystone's content all stay "none". */
+static int rung_activation_tests(const struct rom_state_checkpoint *keystone,
+                                 const struct consensus_state_activate_request *req)
+{
+    int failures = 0;
+#define RCHECK(desc, cond)                                                   \
+    do {                                                                     \
+        printf("checkpoint_rom_authority: rung: %s... ", (desc));            \
+        if (cond) printf("OK\n");                                            \
+        else { printf("FAIL\n"); failures++; }                              \
+    } while (0)
+#define RNAME(m)                                                             \
+    consensus_state_activate_resolve_content_authority_name_for_test(        \
+        (m), req)
+
+    struct rom_state_rung rung;
+    memset(&rung, 0, sizeof(rung));
+    synth_rom(&rung.cp, CROM_H + 500);
+    /* Distinct content from the keystone so cross-binding is observable. */
+    memset(rung.cp.block_hash, 0xc3, 32);
+    memset(rung.cp.utxo_root, 0x12, 32);
+    memset(rung.cp.anchor_digest, 0x23, 32);
+    memset(rung.cp.sprout_frontier_root, 0x34, 32);
+    memset(rung.cp.sapling_frontier_root, 0x45, 32);
+    memset(rung.cp.nullifier_digest, 0x56, 32);
+    rung.cp.utxo_count += 99;
+    rung.cp.anchor_count += 99;
+    rung.cp.nullifier_count += 99;
+    rung.chainwork[31] = 9;
+
+    checkpoints_set_rom_state_override_for_test(keystone);
+    checkpoints_set_rom_state_rungs_override_for_test(&rung, 1);
+
+    /* (a) full match at the rung height activates via CHECKPOINT_ROM, no header. */
+    {
+        struct consensus_state_bundle_manifest m;
+        manifest_from_rom(&m, &rung.cp);
+        const char *nm = RNAME(&m);
+        RCHECK("full rung match -> checkpoint_rom",
+               nm && strcmp(nm, "checkpoint_rom") == 0);
+    }
+
+    /* (b) every single tampered field refuses (none). */
+#define RFLIP(desc, mutate)                                                  \
+    do {                                                                     \
+        struct consensus_state_bundle_manifest m;                            \
+        manifest_from_rom(&m, &rung.cp);                                     \
+        mutate;                                                              \
+        const char *nm = RNAME(&m);                                          \
+        RCHECK("tampered " desc " -> none", nm && strcmp(nm, "none") == 0);  \
+    } while (0)
+    RFLIP("block_hash", m.block_hash[0] ^= 0xff);
+    RFLIP("utxo_root", m.utxo_root[0] ^= 0xff);
+    RFLIP("utxo_count", m.utxo_count += 1);
+    RFLIP("total_supply", m.total_supply += 1);
+    RFLIP("anchor_digest", m.anchor_digest[0] ^= 0xff);
+    RFLIP("anchor_count", m.anchor_count += 1);
+    RFLIP("sprout_frontier_root", m.sprout_frontier_root[0] ^= 0xff);
+    RFLIP("sprout_frontier_height", m.sprout_frontier_height += 1);
+    RFLIP("sapling_frontier_root", m.sapling_frontier_root[0] ^= 0xff);
+    RFLIP("sapling_frontier_height", m.sapling_frontier_height += 1);
+    RFLIP("nullifier_digest", m.nullifier_digest[0] ^= 0xff);
+    RFLIP("nullifier_count", m.nullifier_count += 1);
+#undef RFLIP
+
+    /* (c) the keystone height still activates with the rung table installed. */
+    {
+        struct consensus_state_bundle_manifest m;
+        manifest_from_rom(&m, keystone);
+        const char *nm = RNAME(&m);
+        RCHECK("keystone-height bundle still -> checkpoint_rom",
+               nm && strcmp(nm, "checkpoint_rom") == 0);
+    }
+
+    /* (d) UNBAKED height: rung content at a height no commitment is baked for. */
+    {
+        struct consensus_state_bundle_manifest m;
+        manifest_from_rom(&m, &rung.cp);
+        m.height = CROM_H + 700;
+        const char *nm = RNAME(&m);
+        RCHECK("unbaked height -> none", nm && strcmp(nm, "none") == 0);
+    }
+    /* Rung-height bundle carrying the KEYSTONE's content is not the rung. */
+    {
+        struct consensus_state_bundle_manifest m;
+        manifest_from_rom(&m, keystone);
+        m.height = rung.cp.height;
+        const char *nm = RNAME(&m);
+        RCHECK("rung height with keystone content -> none",
+               nm && strcmp(nm, "none") == 0);
+    }
+    /* Rung whose shielded fold is unbaked (placeholder): never a trust root. */
+    {
+        struct rom_state_rung ph = rung;
+        memset(ph.cp.nullifier_digest, 0, 32);
+        checkpoints_set_rom_state_rungs_override_for_test(&ph, 1);
+        struct consensus_state_bundle_manifest m;
+        manifest_from_rom(&m, &ph.cp);
+        const char *nm = RNAME(&m);
+        RCHECK("placeholder rung -> none", nm && strcmp(nm, "none") == 0);
+    }
+    /* Rung withdrawn: the same exact bundle is no longer activatable. */
+    {
+        checkpoints_reset_rom_state_rungs_override_for_test();
+        struct consensus_state_bundle_manifest m;
+        manifest_from_rom(&m, &rung.cp);
+        const char *nm = RNAME(&m);
+        RCHECK("no baked rung -> none", nm && strcmp(nm, "none") == 0);
+    }
+    checkpoints_reset_rom_state_rungs_override_for_test();
+#undef RNAME
+#undef RCHECK
+    return failures;
+}
+
 int test_checkpoint_rom_authority(void)
 {
     printf("\n=== checkpoint_rom_authority ===\n");
@@ -288,6 +407,10 @@ int test_checkpoint_rom_authority(void)
                       &m, &areq), "none") == 0);
     }
 
+
+    /* (f) baked ladder rungs: activation at a rung height (see above). */
+    checkpoints_reset_sha3_override_for_test();
+    failures += rung_activation_tests(&rom, &req);
     checkpoints_reset_rom_state_override_for_test();
     checkpoints_reset_sha3_override_for_test();
 

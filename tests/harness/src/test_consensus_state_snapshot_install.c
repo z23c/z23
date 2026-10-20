@@ -2081,6 +2081,251 @@ static int rom_rung_binding_tests(const char *dir)
     return failures;
 }
 
+struct rung_act_ctx {
+    struct csi_fixture kb;
+    sqlite3 *pdb;
+    char rdir[320];
+    int rdir_fd;
+    struct consensus_state_activate_request areq;
+    struct consensus_state_publication_decision_record rdec;
+    struct rom_state_rung rung;
+    sqlite3_int64 base_changes;
+    int base_backups;
+};
+
+/* Wedged live store: one borrowed coin, empty anchors, positive cursor. */
+static int rung_act_seed_store(struct rung_act_ctx *c)
+{
+    int failures = 0;
+    uint8_t borrowed_txid[32];
+    memset(borrowed_txid, 0x5b, sizeof(borrowed_txid));
+    const uint8_t borrowed_script[] = {0x51};
+    sqlite3 *pdb = c->pdb;
+    CSI_CHECK("rung-activate: store schemas",
+              pdb && coins_kv_ensure_schema(pdb) &&
+              progress_meta_table_ensure(pdb) && anchor_kv_ensure_schema(pdb) &&
+              nullifier_kv_ensure_schema(pdb));
+    CSI_CHECK("rung-activate: histories initialise",
+              anchor_kv_initialize_history(pdb, c->kb.height) &&
+              nullifier_kv_initialize_history(pdb, c->kb.height));
+    CSI_CHECK("rung-activate: borrowed coin + frontier seed",
+              coins_kv_add(pdb, borrowed_txid, 0, 4242, c->kb.height, false,
+                           borrowed_script, sizeof(borrowed_script)) &&
+              hs_seed_current_frontier(pdb, c->kb.height, c->kb.block_hash));
+    return failures;
+}
+
+/* The ADMIT decision + exact receipt binding activate requires. */
+static int rung_act_build_request(struct rung_act_ctx *c)
+{
+    int failures = 0;
+    struct consensus_state_activate_request *areq = &c->areq;
+    memset(areq, 0, sizeof(*areq));
+    areq->bundle_path = c->kb.path;
+    areq->expected_height = c->kb.height;
+    memcpy(areq->expected_block_hash, c->kb.block_hash, 32);
+    areq->datadir_fd = c->rdir_fd;
+    areq->datadir_display = c->rdir;
+
+    struct consensus_state_artifact_evidence *rev = NULL;
+    struct zcl_result revr =
+        consensus_state_artifact_evidence_open(c->kb.path, -1, &rev);
+    struct consensus_state_publication_cas_inputs rin;
+    memset(&rin, 0, sizeof(rin));
+    bool rin_ok = revr.ok && rev &&
+        consensus_state_artifact_evidence_manifest_copy(rev, &rin.manifest) &&
+        consensus_state_artifact_evidence_digest(rev,
+                                                 rin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            rev, rin.artifact_receipt_digest);
+    rin.chain_evidence_present = true;
+    rin.chain_bound_to_artifact = true;
+    memset(rin.chain_evidence_digest, 0xa6, 32);
+    rin.source_receipt_present = true;
+    rin.source_receipt = c->kb.receipt;
+    rin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
+    rin.frontier_known = true;
+    memcpy(rin.frontier_hash, c->kb.block_hash, 32);
+    rin.frontier_height = c->kb.height;
+    consensus_state_publication_cas_decide(&rin, &c->rdec);
+    CSI_CHECK("rung-activate: bundle CAS-decides ADMIT",
+              rin_ok && c->rdec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    memcpy(areq->expected_artifact_receipt_digest,
+           c->rdec.artifact_receipt_digest, 32);
+    areq->publication_decision = &c->rdec;
+    if (rev)
+        consensus_state_artifact_evidence_free(rev);
+    return failures;
+}
+
+static int rung_act_setup(struct rung_act_ctx *c, const char *dir, bool *built)
+{
+    int failures = 0;
+    memset(c, 0, sizeof(*c));
+    *built = false;
+    c->rdir_fd = -1;
+    if (!fixture_init(&c->kb, dir, "rungact", 0x48, 140, true)) {
+        CSI_CHECK("rung-activate: fixture builds", false);
+        return failures;
+    }
+    *built = true; /* fixture exists: teardown must free it */
+    c->kb.anchors[0].height = c->kb.height;
+    c->kb.anchors[1].height = c->kb.height;
+    snprintf(c->rdir, sizeof(c->rdir), "%s/ckpt-rung-act", dir);
+    CSI_CHECK("rung-activate: datadir", mkdir(c->rdir, 0700) == 0);
+    CSI_CHECK("rung-activate: live progress store opens",
+              progress_store_open(c->rdir));
+    c->pdb = progress_store_db();
+    c->rdir_fd = open(c->rdir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    reducer_frontier_test_set_compiled_anchor(0);
+    failures += rung_act_seed_store(c);
+    CSI_CHECK("rung-activate: bundle writes", write_bundle(&c->kb, CSI_VALID));
+    failures += rung_act_build_request(c);
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        false);
+
+    /* A keystone at a LOWER height (so the keystone cannot authorise this
+     * bundle) and the rung at the bundle height. */
+    struct rom_state_checkpoint keystone;
+    rom_keystone_from_fixture(&c->kb, &keystone);
+    keystone.height = c->kb.height - 50;
+    rom_keystone_from_fixture(&c->kb, &c->rung.cp);
+    c->rung.chainwork[31] = 5;
+    checkpoints_set_rom_state_override_for_test(&keystone);
+    c->base_changes = sqlite3_total_changes64(c->pdb);
+    c->base_backups = prior_generation_count(c->rdir);
+    *built = true;
+    return failures;
+}
+
+static void rung_act_teardown(struct rung_act_ctx *c)
+{
+    checkpoints_reset_rom_state_rungs_override_for_test();
+    checkpoints_reset_rom_state_override_for_test();
+    reducer_frontier_test_set_compiled_anchor(-1);
+    if (c->rdir_fd >= 0)
+        (void)close(c->rdir_fd);
+    progress_store_close();
+    test_cleanup_tmpdir(c->rdir);
+    fixture_free(&c->kb);
+}
+
+/* Install `rung` as the only baked rung and try to activate. */
+static bool rung_act_try(struct rung_act_ctx *c, const struct rom_state_rung *r,
+                         struct consensus_state_activate_result *ares)
+{
+    checkpoints_set_rom_state_rungs_override_for_test(r, 1);
+    return consensus_state_snapshot_install_activate(c->pdb, &c->areq, ares);
+}
+
+/* Not activated, the expected status, and NOTHING written. */
+static bool rung_act_untouched(struct rung_act_ctx *c,
+                               const struct consensus_state_activate_result *a,
+                               enum consensus_state_install_status want)
+{
+    return !a->activated && a->status == want &&
+           sqlite3_total_changes64(c->pdb) == c->base_changes &&
+           prior_generation_count(c->rdir) == c->base_backups &&
+           coins_kv_count(c->pdb) == 1;
+}
+
+static int rung_act_expect_refused(struct rung_act_ctx *c, const char *label,
+                                   const struct rom_state_rung *bad)
+{
+    int failures = 0;
+    struct consensus_state_activate_result ares;
+    bool ok = rung_act_try(c, bad, &ares);
+    printf("consensus_state_install: rung-activate: tampered %s is REFUSED at "
+           "admission... ", label);
+    if (!ok && rung_act_untouched(c, &ares, CONSENSUS_INSTALL_REFUSED))
+        printf("OK\n");
+    else {
+        printf("FAIL\n");
+        failures++;
+    }
+    return failures;
+}
+
+static int rung_act_tamper_tests(struct rung_act_ctx *c)
+{
+    int failures = 0;
+#define RACT_TAMPER(label, stmt)                                             \
+    do {                                                                     \
+        struct rom_state_rung bad = c->rung;                                 \
+        stmt;                                                                \
+        failures += rung_act_expect_refused(c, label, &bad);                 \
+    } while (0)
+    RACT_TAMPER("block_hash", bad.cp.block_hash[0] ^= 0xff);
+    RACT_TAMPER("utxo_root", bad.cp.utxo_root[0] ^= 0xff);
+    RACT_TAMPER("utxo_count", bad.cp.utxo_count += 1);
+    RACT_TAMPER("total_supply", bad.cp.total_supply += 1);
+    RACT_TAMPER("anchor_digest", bad.cp.anchor_digest[0] ^= 0xff);
+    RACT_TAMPER("anchor_count", bad.cp.anchor_count += 1);
+    RACT_TAMPER("sprout_frontier_root", bad.cp.sprout_frontier_root[0] ^= 0xff);
+    RACT_TAMPER("sapling_frontier_root",
+                bad.cp.sapling_frontier_root[0] ^= 0xff);
+    RACT_TAMPER("sapling_frontier_height", bad.cp.sapling_frontier_height ^= 1);
+    RACT_TAMPER("nullifier_digest", bad.cp.nullifier_digest[0] ^= 0xff);
+    RACT_TAMPER("nullifier_count", bad.cp.nullifier_count += 1);
+#undef RACT_TAMPER
+    return failures;
+}
+
+static int rung_act_commit_tests(struct rung_act_ctx *c)
+{
+    int failures = 0;
+    struct consensus_state_activate_result ares;
+    /* (d) UNBAKED height: no rung baked at the bundle height -> contained. */
+    struct rom_state_rung other = c->rung;
+    other.cp.height = c->kb.height + 1;
+    bool ok = rung_act_try(c, &other, &ares);
+    CSI_CHECK("rung-activate: unbaked height stays CONTAINED, nothing written",
+              !ok && rung_act_untouched(c, &ares,
+                                        CONSENSUS_INSTALL_VERIFIED_CONTAINED));
+
+    /* (a) the exact baked rung: the install commits; tip + state equal it. */
+    ok = rung_act_try(c, &c->rung, &ares);
+    CSI_CHECK("rung-activate: full rung match activates", ok && ares.activated &&
+              ares.status == CONSENSUS_INSTALL_ACTIVATED);
+    CSI_CHECK("rung-activate: tip equals the rung (height, hstar, cursor)",
+              ares.height == c->rung.cp.height &&
+              ares.hstar == c->rung.cp.height &&
+              ares.coins_applied_height == c->rung.cp.height + 1);
+    CSI_CHECK("rung-activate: state counts equal the rung",
+              ares.utxo_count == c->rung.cp.utxo_count &&
+              ares.anchor_count == c->rung.cp.anchor_count &&
+              ares.nullifier_count == c->rung.cp.nullifier_count);
+    CSI_CHECK("rung-activate: authority=checkpoint_rom is named",
+              strstr(ares.reason, "authority=checkpoint_rom") != NULL);
+    CSI_CHECK("rung-activate: installed state matches the bundle",
+              active_is(c->pdb, &c->kb));
+    if (ares.prior_generation_path[0])
+        (void)unlink(ares.prior_generation_path);
+    return failures;
+}
+
+/* Full atomic ACTIVATE from a baked ladder RUNG. The same wedged-store install as
+ * the keystone CHECKPOINT_ROM block in the platform arm, but the bundle sits at a
+ * LADDER rung height ABOVE the keystone: with the rung baked and the bundle
+ * reproducing it field for field the install commits and names
+ * authority=checkpoint_rom with tip/state equal to the rung; with any one rung
+ * field tampered (admission refuses) or the rung unbaked at that height
+ * (containment holds) NOTHING is written. The keystone is installed at a lower
+ * height throughout, so only the rung can authorise. */
+static int rom_rung_activate_tests(const char *dir)
+{
+    int failures = 0;
+    struct rung_act_ctx c;
+    bool built = false;
+    failures += rung_act_setup(&c, dir, &built);
+    if (built) {
+        failures += rung_act_tamper_tests(&c);
+        failures += rung_act_commit_tests(&c);
+        rung_act_teardown(&c);
+    }
+    return failures;
+}
+
 /* Every generation activation in this file backs the prior consensus.db
  * kernel up via a real VACUUM (see the "A4" comment above) — a full-file
  * copy plus fsync of both the source and the backup. On a journaled disk
@@ -4395,6 +4640,7 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
     failures += install_verify_receipt_tests(dir);
     failures += rom_keystone_binding_tests(dir);
     failures += rom_rung_binding_tests(dir);
+    failures += rom_rung_activate_tests(dir);
 
     fixture_free(&a); fixture_free(&b); fixture_free(&inc);
     if (db)

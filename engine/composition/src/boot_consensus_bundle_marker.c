@@ -15,6 +15,7 @@
 #include "util/log_macros.h"
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -120,4 +121,26 @@ bool boot_consensus_bundle_marker_exists(const char *datadir)
     struct platform_file_metadata metadata;
     return platform_file_metadata_read(path, &metadata) ==
            PLATFORM_FILE_METADATA_OK;
+}
+
+bool boot_consensus_bundle_marker_height(const char *datadir, int32_t *height)
+{
+    char path[1200];
+    if (!height || !marker_path(path, sizeof(path), datadir))
+        return false;
+    FILE *fp = fopen(path, "r"); // platform-ok: bounded read of our own small marker
+    if (!fp)
+        return false;
+    char line[256];
+    bool found = false;
+    int lines = 0;
+    while (!found && lines++ < 8 && fgets(line, sizeof(line), fp)) {
+        long long h = 0;
+        if (sscanf(line, "height=%lld", &h) == 1 && h >= 0 && h <= INT32_MAX) {
+            *height = (int32_t)h;
+            found = true;
+        }
+    }
+    fclose(fp);
+    return found;
 }

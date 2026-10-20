@@ -127,6 +127,21 @@ bool boot_maybe_auto_install_consensus_bundle(struct node_db *ndb,
  * wins (stable, deterministic). Pure discovery — installs nothing. */
 char *boot_autodetect_consensus_bundle(const char *datadir);
 
+/* The (height, block_hash) a STAGED bundle's install waits on. For a bundle whose
+ * canonical name carries a height with a BAKED commitment (the keystone or a
+ * ladder rung, get_baked_rom_state_checkpoint_at_height), that commitment's
+ * height + block hash; otherwise the compiled SHA3 checkpoint (the keystone),
+ * exactly the pre-ladder behavior. This only decides what to WAIT on (header
+ * ownership, checkpoint-header solution); trust still binds at install against
+ * the full baked commitment. Returns false when neither exists. */
+bool boot_staged_bundle_wait_target(const char *bundle_path, int32_t *height,
+                                    uint8_t block_hash[32]);
+
+/* True iff this node's validated header chain has reached `height` and the block
+ * there carries `block_hash`. Read-only. */
+bool consensus_state_header_chain_owns(struct main_state *ms, int32_t height,
+                                       const uint8_t block_hash[32]);
+
 /* Post-install fold-span gate — the call-site wiring around
  * boot_refold_body_span_contiguous() (impl in engine/composition/src/boot_refold_staged.c,
  * contract in config/boot.h), reused here (impl in engine/composition/src/

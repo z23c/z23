@@ -558,6 +558,9 @@ int block_index_loader_arm_cold_start_from_index(struct main_state *ms,
     if (!anchor_bi || anchor_bi->nHeight != cp->height)
         return 0;
 
+    /* Never reset an installed-above-anchor (baked-rung) datadir to the anchor. */
+    if (boot_refold_anchor_reset_blocked_by_marker(NULL, cp->height))
+        return 0; // raw-return-ok:rung-install-marker-above-anchor-decline
     /* (3) VERIFIED ANCHOR SNAPSHOT REACHABLE. Fail-closed: no
      *     verified artifact → decline; the genesis fold runs unchanged. This is
      *     a legitimate decline (no error), so a bare return is correct here. */

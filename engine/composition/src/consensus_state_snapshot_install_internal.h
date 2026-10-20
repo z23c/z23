@@ -8,6 +8,7 @@
 
 #include <sqlite3.h>
 #include <stddef.h>
+struct rom_state_checkpoint; /* chain/checkpoints.h */
 
 struct consensus_state_candidate_output {
     struct consensus_export_output_binding binding;
@@ -92,6 +93,14 @@ enum consensus_state_activate_authority {
      * that qualifies for any sovereign authority never resolves to ASSISTED. */
     CONSENSUS_STATE_ACTIVATE_AUTHORITY_ASSISTED,
 };
+
+/* The fully-baked compiled commitment (keystone or baked ladder rung) for a
+ * bundle at EXACTLY `height`, or NULL when none is baked there or it is an
+ * unbaked placeholder. The one lookup both the activate authority and the
+ * install runtime's chain-binding authority share, so they can never disagree
+ * about which heights carry a compiled trust root. */
+const struct rom_state_checkpoint *
+consensus_state_baked_trust_root_for_height(int32_t height);
 
 const char *consensus_state_activate_authority_name(
     enum consensus_state_activate_authority authority);

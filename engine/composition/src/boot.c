@@ -3115,8 +3115,8 @@ static bool boot_step_refold_from_anchor(struct app_context *ctx,
      * self-repair is suspended until utxo_apply reaches the resume target
      * (the active tip we are about to fold up to). */
     const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    int32_t resume_target =
-        (int32_t)active_chain_height(&g_state.chain_active);
+    int32_t resume_target = (int32_t)active_chain_height(&g_state.chain_active);
+    if (cp && boot_refold_from_anchor_refused_by_marker(ctx->datadir, cp->height)) return false;
     if (cp) {
         int32_t first_missing = -1;
         if (!boot_refold_body_span_contiguous(

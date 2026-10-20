@@ -342,6 +342,45 @@ checkpoint map. A datadir installed from the h=3056758 bundle is unaffected: the
 keystone binding is byte-for-byte what it was, and a bundle at any height that
 is neither the keystone nor a baked rung is untouched.
 
+### Activation from a baked rung (fresh-node sync)
+
+A fresh node can ACTIVATE from a bundle at the newest baked rung (h=3200000),
+replaying about 90k blocks instead of about 233k. The keystone is still baked
+and a node with a 3056758 bundle, or a datadir installed from one, boots and
+validates unchanged. "The keystone height" is generalised to "the baked
+commitment for this bundle height" (`get_baked_rom_state_checkpoint_at_height`,
+no hard-coded height):
+
+- CHECKPOINT_ROM activate authority (`activate_rom_checkpoint_content_evaluate`)
+  resolves the commitment baked at the manifest height (keystone or rung) and
+  requires block_hash and every digest, count, supply and frontier field to
+  match it. An unbaked height or an unbaked (placeholder) commitment grants
+  nothing. Admission (`validate_rom_keystone_binding`) refuses any tampered
+  field first.
+- The install runtime feeds the chain-binding authority from the rung at the
+  bundle height (so it is sovereign, not ASSISTED) and defers retriably until
+  the validated header chain owns the rung block.
+- The install-readiness conditions (`checkpoint_bundle_install_ready`,
+  `checkpoint_header_solution_repair`) wait on the STAGED bundle's baked
+  height (`boot_staged_bundle_wait_target`): header ownership and the rung
+  header's Equihash solution, fetched over P2P like the keystone's.
+- The state-offer freshness exemption (core/modules/net/src/state_offer.c) now
+  covers every baked height, so the newest rung is relayed and fetched at any
+  age; an unbaked height stays inside the 576-block window.
+- Fresh-node choice: discovery ranks candidates by advertised height, so the
+  newest rung is tried first and the keystone bundle is the fallback;
+  autodetect also takes the highest staged height and skips `.failed` ones.
+
+Unchanged by design: the SHA3 UTXO checkpoint, header seed import (keystone
+ownership is an ancestor of the rung), `-refold-from-anchor` and `-mint-anchor`
+(keyed to the keystone anchor; a rung-installed node has no bodies in
+(3056758, 3200000], so the body-gap gate refuses cleanly before any reset).
+
+To SERVE a rung bundle an operator exports one at the rung height with the
+existing exporter into the node's `bundles/` directory as
+`consensus-state-bundle-3200000.sqlite` and lets it register; trust is
+re-derived by the installer against the compiled commitment, not by the seeder.
+
 ### Receipt: rung h=3200000 (baked 2026-10-19, owner-approved)
 
 Two independent from-genesis full-validation folds (builders r1 and r2, one

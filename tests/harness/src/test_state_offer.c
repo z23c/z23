@@ -197,6 +197,41 @@ static int offer_freshness_refusal(void)
     return failures;
 }
 
+static int offer_rung_exemption(void)
+{
+    int failures = 0;
+    TEST_CASE("an offer at a BAKED ladder rung height is fresh at any age; an "
+              "unbaked height stays inside the window") {
+        struct sha3_utxo_checkpoint sha3;
+        memset(&sha3, 0, sizeof(sha3));
+        sha3.height = 500000;
+        checkpoints_set_sha3_override_for_test(&sha3);
+        struct rom_state_checkpoint keystone;
+        memset(&keystone, 0, sizeof(keystone));
+        keystone.height = 500000;
+        checkpoints_set_rom_state_override_for_test(&keystone);
+        struct rom_state_rung rung;
+        memset(&rung, 0, sizeof(rung));
+        rung.cp.height = 600000;
+        checkpoints_set_rom_state_rungs_override_for_test(&rung, 1);
+
+        int32_t tip = 700000; /* both are far outside the 576-block window */
+        ASSERT(state_offer_height_is_fresh(500000, tip));  /* keystone */
+        ASSERT(state_offer_height_is_fresh(600000, tip));  /* baked rung */
+        ASSERT(!state_offer_height_is_fresh(600001, tip)); /* off the rung */
+        ASSERT(!state_offer_height_is_fresh(599999, tip));
+        ASSERT(!state_offer_height_is_fresh(0, tip));
+        ASSERT(!state_offer_height_is_fresh(600000, 599999)); /* above tip */
+
+        checkpoints_reset_rom_state_rungs_override_for_test();
+        /* Rung withdrawn: the same height is stale again. */
+        ASSERT(!state_offer_height_is_fresh(600000, tip));
+        checkpoints_reset_rom_state_override_for_test();
+        checkpoints_reset_sha3_override_for_test();
+    } TEST_END
+    return failures;
+}
+
 static int offer_checkpoint_exemption(void)
 {
     int failures = 0;
@@ -650,6 +685,7 @@ int test_state_offer(void)
     failures += offer_roundtrip();
     failures += offer_freshness_refusal();
     failures += offer_checkpoint_exemption();
+    failures += offer_rung_exemption();
     failures += offer_field_refusals();
     failures += offer_signature();
     failures += batch_cap_and_bounds();

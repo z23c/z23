@@ -25,6 +25,7 @@
 #include "test/test_core.h"
 
 #include "config/boot.h"
+#include "config/boot_consensus_bundle_marker.h"
 #include "services/block_index_loader.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
@@ -380,6 +381,77 @@ static void raa_t3_child(const char *dir, const struct sha3_utxo_checkpoint *cp)
     _exit(fails == 0 ? RAA_CHILD_PASS : 1);
 }
 
+/* T4 children: a MATCHING snapshot is reachable and the torn signature is real,
+ * so without the marker guard the auto-arm RESETS (T2). The datadir carries an
+ * install marker ABOVE the anchor (a baked-rung install), so the auto-arm must
+ * decline: no reset, no arming, coins_kv byte-identical, and the child survives.
+ * raa_t4_body runs it with the active tip at `tip_h`; the second child forces the
+ * active height to the anchor itself, where the body-span gate alone would read a
+ * trivially-contiguous span and let the reset through. */
+static void raa_t4_body(const char *dir, const struct sha3_utxo_checkpoint *cp,
+                        int tip_h)
+{
+    struct node_db ndb;
+    struct main_state ms;
+    raa_child_common_setup(dir, cp, &ndb, &ms);
+    if (tip_h != RAA_FRONTIER) {
+        main_state_free(&ms);
+        main_state_init(&ms);
+        raa_install_tip(&ms, tip_h);
+    }
+    int fails = 0;
+
+    uint8_t digest[32];
+    memset(digest, 0x7e, sizeof(digest));
+    if (!boot_consensus_bundle_marker_write(dir, cp->height + 200, digest))
+        fails++;
+    boot_refold_body_rebind_set_datadir(dir);
+
+    int32_t hole_h = -1, ceiling = -1;
+    if (!block_index_loader_torn_import_detect(&ms, progress_store_db(),
+                                               cp->height, &hole_h, &ceiling))
+        fails++;                       /* the tear must be real, or this is vacuous */
+    if ((int32_t)active_chain_height(&ms.chain_active) != tip_h)
+        fails++;
+
+    int64_t count_before = coins_kv_count(progress_store_db());
+    uint8_t root_before[32] = {0};
+    if (coins_kv_commitment(progress_store_db(), root_before) != 0)
+        fails++;
+
+    bool armed = boot_refold_from_anchor_arm_if_torn(
+        &ms, &ndb, progress_store_db());
+    if (armed)
+        fails++;                       /* must DECLINE */
+    if (refold_from_anchor_active())
+        fails++;                       /* must NOT arm */
+    uint8_t root_after[32] = {0};
+    if (coins_kv_count(progress_store_db()) != count_before ||
+        coins_kv_commitment(progress_store_db(), root_after) != 0 ||
+        memcmp(root_before, root_after, 32) != 0)
+        fails++;                       /* coins_kv NOT reset */
+    if (!boot_refold_anchor_reset_blocked_by_marker(dir, cp->height))
+        fails++;
+
+    boot_refold_body_rebind_set_datadir(NULL);
+    main_state_free(&ms);
+    node_db_close(&ndb);
+    progress_store_close();
+    checkpoints_set_sha3_override_for_test(NULL);
+    _exit(fails == 0 ? RAA_CHILD_PASS : 1);
+}
+
+static void raa_t4_child(const char *dir, const struct sha3_utxo_checkpoint *cp)
+{
+    raa_t4_body(dir, cp, RAA_FRONTIER);
+}
+
+static void raa_t4_low_child(const char *dir,
+                             const struct sha3_utxo_checkpoint *cp)
+{
+    raa_t4_body(dir, cp, RAA_CP_HEIGHT);
+}
+
 /* Fork + run a child body; return its exit code (-1 on fork/wait error). */
 static int raa_run_child(void (*body)(const char *, const struct sha3_utxo_checkpoint *),
                          const char *dir, const struct sha3_utxo_checkpoint *cp)
@@ -514,6 +586,31 @@ static int test_refold_auto_arm_platform_arm(void)
 
         unsetenv("ZCL_MINT_ANCHOR_OUT");
         test_cleanup_tmpdir(dir);
+    }
+
+    /* ── T4: install marker ABOVE the anchor (baked-rung install) ─────────
+     * The snapshot IS reachable (as in T2), so only the marker guard stands
+     * between the torn signature and a coins_kv reset to the anchor. Run once
+     * with the active tip above the anchor and once with the active height
+     * forced to the anchor, where the body-span gate alone is trivially met.
+     * Red = the guard removed: the auto-arm resets (as T2 shows) and the child
+     * exits 1. */
+    if (snap_ok) {
+        for (int variant = 0; variant < 2; variant++) {
+            char dir[256];
+            test_make_tmpdir(dir, sizeof(dir), "refold_auto_arm_marker", "main");
+            setenv("ZCL_MINT_ANCHOR_OUT", snap_path, 1);
+            int code = raa_run_child(variant ? raa_t4_low_child : raa_t4_child,
+                                     dir, &cp_match);
+            RAA_CHECK(variant
+                          ? "T4b: rung marker + active height at the anchor: "
+                            "NO reset, child survives"
+                          : "T4a: rung marker above the anchor: NO reset, "
+                            "child survives",
+                      code == RAA_CHILD_PASS);
+            unsetenv("ZCL_MINT_ANCHOR_OUT");
+            test_cleanup_tmpdir(dir);
+        }
     }
 
     unlink(snap_path);

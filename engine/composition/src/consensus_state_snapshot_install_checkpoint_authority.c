@@ -196,15 +196,30 @@ static bool activate_rom_checkpoint_is_placeholder(
  * ROM, a height off the checkpoint, an unbaked placeholder, or any single
  * component mismatch. block_hash is bound separately (the activate request's
  * expected_block_hash and the admission keystone binding both pin it). */
+const struct rom_state_checkpoint *
+consensus_state_baked_trust_root_for_height(int32_t height)
+{
+    /* The keystone, or any baked ladder rung, at EXACTLY this height. */
+    const struct rom_state_checkpoint *rom =
+        get_baked_rom_state_checkpoint_at_height(height);
+    if (!rom || activate_rom_checkpoint_is_placeholder(rom))
+        return NULL; /* none baked here, or an unbaked dev placeholder */
+    return rom;
+}
+
 static bool activate_rom_checkpoint_content_evaluate(
     const struct consensus_state_bundle_manifest *manifest)
 {
-    const struct rom_state_checkpoint *rom = get_rom_state_checkpoint();
-    if (!rom || manifest->height != rom->height)
-        return false; /* not the checkpoint-height candidate: nothing to bind */
-    if (activate_rom_checkpoint_is_placeholder(rom))
-        return false; /* an unbaked dev keystone is never a trust root */
+    /* The commitment baked for THIS bundle height (keystone or ladder rung).
+     * A height with no baked commitment, or an unbaked placeholder, grants no
+     * ROM authority. block_hash is compared here too, so every field of the
+     * baked commitment is bound on the activate path. */
+    const struct rom_state_checkpoint *rom =
+        consensus_state_baked_trust_root_for_height(manifest->height);
+    if (!rom)
+        return false;
     return manifest->utxo_count == rom->utxo_count &&
+           memcmp(manifest->block_hash, rom->block_hash, 32) == 0 &&
            manifest->total_supply == rom->total_supply &&
            manifest->anchor_count == rom->anchor_count &&
            manifest->sprout_frontier_height == rom->sprout_frontier_height &&

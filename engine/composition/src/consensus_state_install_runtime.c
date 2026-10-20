@@ -331,6 +331,30 @@ static bool install_bundle_header_ready(struct main_state *ms, int32_t height,
     return at && at->phashBlock &&
            memcmp(at->phashBlock->data, block_hash, 32) == 0;
 }
+/* Baked-rung checkpoint authority. For a bundle sitting at EXACTLY a baked
+ * ladder rung height strictly above the keystone, substitute that rung's
+ * compiled commitment (height, block_hash, Sapling frontier height + root) as
+ * the chain-binding trust root, in place of the keystone authority. The keystone
+ * branch in the caller is untouched: this is a no-op for a keystone-height or
+ * any other bundle, and for an unbaked placeholder rung. The chain-binding
+ * predicate still demands the manifest's own block_hash and Sapling frontier
+ * reproduce these byte-for-byte, so a tampered bundle gets no substitution. */
+static void install_fill_rung_checkpoint_authority(
+    struct consensus_state_checkpoint_authority *auth,
+    const struct rom_state_checkpoint *keystone, int32_t bundle_height)
+{
+    if (!keystone || bundle_height <= keystone->height)
+        return;
+    const struct rom_state_checkpoint *rung =
+        consensus_state_baked_trust_root_for_height(bundle_height);
+    if (!rung)
+        return;
+    auth->available = true;
+    auth->height = rung->height;
+    memcpy(auth->block_hash, rung->block_hash, 32);
+    auth->sapling_frontier_height = (int32_t)rung->sapling_frontier_height;
+    memcpy(auth->sapling_frontier_root, rung->sapling_frontier_root, 32);
+}
 /* Assisted (above-checkpoint FRESHEST-bundle) admission is owner-approved and
  * default ON. The env kill switch ZCL_INSTALL_ASSISTED=0 forces it OFF, in which
  * case an above-checkpoint bundle gets no assisted opt-in and refuses at the
@@ -341,6 +365,95 @@ static bool install_assisted_opt_in(void)
 {
     const char *kill = getenv("ZCL_INSTALL_ASSISTED");
     return !(kill && strcmp(kill, "0") == 0);
+}
+/* (2b) Deferral gate — distinguish a RETRIABLE WAIT from a genuine refusal.
+ * The bundle has already passed strict admission (byte integrity + manifest
+ * self-bind) above, so a flipped-byte / corrupt bundle never reaches here.
+ * When this is the compiled-checkpoint bundle (manifest sits at exactly the
+ * compiled checkpoint height) BUT this node's validated header chain has not
+ * yet reached the checkpoint block, the below-checkpoint chain-binding
+ * predicates cannot bind yet — NOT because the bundle is bad, but because the
+ * node has not caught up. Refuse WITHOUT the state_installed flag and mark it
+ * retriable so the boot seam does not permanently .fail a good bundle; the
+ * install retries (this session's condition OR a future boot) once the
+ * checkpoint header is genuinely on-chain. A non-checkpoint bundle, or one
+ * whose header IS present, falls through to the unchanged full gate. */
+/* Record a retriable header wait: refuse WITHOUT the state_installed flag and
+ * mark it retriable, naming the height the validated header chain must reach. */
+static void install_note_header_wait(
+    struct main_state *ms, const char *what, int32_t want_height,
+    struct consensus_state_install_runtime_result *out, struct zcl_result *rc)
+{
+    out->retriable_headers_not_ready = true;
+    int hdr_h = (ms->pindex_best_header)
+                    ? ms->pindex_best_header->nHeight : -1;
+    *rc = ZCL_ERR(-2,
+                  "%s bundle deferred: validated header chain has not yet "
+                  "reached height %d (header frontier h=%d) — retriable wait, "
+                  "not a bundle rejection", what, (int)want_height, hdr_h);
+}
+
+/* Compiled-keystone bundle: wait for the keystone checkpoint header. */
+static bool install_defer_keystone(
+    struct main_state *ms, const struct consensus_state_bundle_manifest *mf,
+    struct consensus_state_install_runtime_result *out, struct zcl_result *rc)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    const struct rom_state_checkpoint *rom = get_rom_state_checkpoint();
+    bool checkpoint_bundle = cp && rom && cp->height == rom->height &&
+                             mf->height == (int32_t)cp->height;
+    if (!checkpoint_bundle || !ms)
+        return false;
+    (void)consensus_state_install_restore_checkpoint_header_frontier(ms);
+    if (consensus_state_checkpoint_header_ready(ms))
+        return false;
+    install_note_header_wait(ms, "checkpoint", cp->height, out, rc);
+    return true;
+}
+
+/* Baked ladder rung above the keystone: same retriable deferral at the RUNG
+ * height/hash, independent of the assisted opt-in (a rung is sovereign, not
+ * assisted). Until this node's validated header chain owns the rung block the
+ * checkpoint-authority bind cannot run; that is a wait, never a permanent .fail. */
+static bool install_defer_rung(
+    struct main_state *ms, const struct consensus_state_bundle_manifest *mf,
+    struct consensus_state_install_runtime_result *out, struct zcl_result *rc)
+{
+    const struct rom_state_checkpoint *rom = get_rom_state_checkpoint();
+    if (!rom || !ms || mf->height <= rom->height)
+        return false;
+    const struct rom_state_checkpoint *rung =
+        consensus_state_baked_trust_root_for_height(mf->height);
+    if (!rung || install_bundle_header_ready(ms, rung->height,
+                                             rung->block_hash))
+        return false;
+    install_note_header_wait(ms, "baked-rung", rung->height, out, rc);
+    return true;
+}
+
+/* Assisted above-checkpoint FRESHEST bundle: same retriable deferral, generalized
+ * from the checkpoint height to the BUNDLE height, only when the assisted opt-in
+ * is on (the sovereign lane is untouched). */
+static bool install_defer_assisted(
+    struct main_state *ms, const struct consensus_state_bundle_manifest *mf,
+    struct consensus_state_install_runtime_result *out, struct zcl_result *rc)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    bool above_checkpoint_bundle = cp && mf->height > (int32_t)cp->height;
+    if (!above_checkpoint_bundle || !install_assisted_opt_in() || !ms ||
+        install_bundle_header_ready(ms, mf->height, mf->block_hash))
+        return false;
+    install_note_header_wait(ms, "assisted", mf->height, out, rc);
+    return true;
+}
+
+static bool install_defer_until_headers_ready(
+    struct main_state *ms, const struct consensus_state_bundle_manifest *mf,
+    struct consensus_state_install_runtime_result *out, struct zcl_result *rc)
+{
+    return install_defer_keystone(ms, mf, out, rc) ||
+           install_defer_rung(ms, mf, out, rc) ||
+           install_defer_assisted(ms, mf, out, rc);
 }
 /* ── The NON-TERMINAL install core ─────────────────────────────────────────── */
 struct zcl_result consensus_state_install_from_bundle(
@@ -401,62 +514,8 @@ struct zcl_result consensus_state_install_from_bundle(
         rc = ZCL_ERR(-1, "artifact evidence became stale after admission");
         goto done;
     }
-    /* (2b) Deferral gate — distinguish a RETRIABLE WAIT from a genuine refusal.
-     * The bundle has already passed strict admission (byte integrity + manifest
-     * self-bind) above, so a flipped-byte / corrupt bundle never reaches here.
-     * When this is the compiled-checkpoint bundle (manifest sits at exactly the
-     * compiled checkpoint height) BUT this node's validated header chain has not
-     * yet reached the checkpoint block, the below-checkpoint chain-binding
-     * predicates cannot bind yet — NOT because the bundle is bad, but because the
-     * node has not caught up. Refuse WITHOUT the state_installed flag and mark it
-     * retriable so the boot seam does not permanently .fail a good bundle; the
-     * install retries (this session's condition OR a future boot) once the
-     * checkpoint header is genuinely on-chain. A non-checkpoint bundle, or one
-     * whose header IS present, falls through to the unchanged full gate. */
-    {
-        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        const struct rom_state_checkpoint *rom = get_rom_state_checkpoint();
-        bool checkpoint_bundle =
-            cp && rom && cp->height == rom->height &&
-            manifest.height == (int32_t)cp->height;
-        bool above_checkpoint_bundle =
-            cp && manifest.height > (int32_t)cp->height;
-        if (checkpoint_bundle && ms) {
-            (void)consensus_state_install_restore_checkpoint_header_frontier(
-                ms);
-        }
-        if (checkpoint_bundle && ms &&
-            !consensus_state_checkpoint_header_ready(ms)) {
-            out->retriable_headers_not_ready = true;
-            int hdr_h = (ms->pindex_best_header)
-                            ? ms->pindex_best_header->nHeight : -1;
-            rc = ZCL_ERR(-2,
-                         "checkpoint bundle deferred: validated header chain has "
-                         "not yet reached checkpoint height %d (header frontier "
-                         "h=%d) — retriable wait, not a bundle rejection",
-                         (int)cp->height, hdr_h);
-            goto done;
-        }
-        /* Assisted above-checkpoint FRESHEST bundle: same retriable deferral,
-         * generalized from the checkpoint height to the BUNDLE height. Until this
-         * node's validated header chain reaches the bundle height with the
-         * bundle's own block hash present, the assisted chain-binding cannot bind
-         * — NOT because the bundle is bad, but because headers have not caught up.
-         * Only when the assisted opt-in is on (the sovereign lane is untouched). */
-        if (above_checkpoint_bundle && install_assisted_opt_in() && ms &&
-            !install_bundle_header_ready(ms, manifest.height,
-                                         manifest.block_hash)) {
-            out->retriable_headers_not_ready = true;
-            int hdr_h = (ms->pindex_best_header)
-                            ? ms->pindex_best_header->nHeight : -1;
-            rc = ZCL_ERR(-2,
-                         "assisted bundle deferred: validated header chain has "
-                         "not yet reached bundle height %d (header frontier h=%d) "
-                         "— retriable wait, not a bundle rejection",
-                         manifest.height, hdr_h);
-            goto done;
-        }
-    }
+    if (install_defer_until_headers_ready(ms, &manifest, out, &rc))
+        goto done;
     /* (3) Read the producer source receipt from the pinned bundle handle. */
     struct consensus_state_source_receipt receipt;
     {
@@ -515,6 +574,8 @@ struct zcl_result consensus_state_install_from_bundle(
         memcpy(chain_req.checkpoint_authority.sapling_frontier_root,
                rom_cp->sapling_frontier_root, 32);
     }
+    install_fill_rung_checkpoint_authority(&chain_req.checkpoint_authority,
+                                           rom_cp, manifest.height);
     /* (3c-assisted) Opt in to the FRESHEST above-checkpoint borrowed-state tier.
      * The chain-binding assisted relaxation only fires when this is on AND the
      * bundle sits strictly above the compiled checkpoint; it needs the compiled

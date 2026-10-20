@@ -79,37 +79,42 @@ static bool detect_checkpoint_bundle_install_ready(void)
      * staged-bundle predicate below (autodetect != NULL, which returns NULL once
      * the sovereign marker exists) is the real scope — a healthy sovereign node
      * short-circuits there and never arms. */
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    if (!cp)
-        return false; // raw-return-ok:no-compiled-checkpoint
-
-    /* The header chain must genuinely own the compiled checkpoint block before
-     * the install can bind — the exact precondition the boot-time deferral waits
-     * on. */
-    if (!consensus_state_checkpoint_header_ready(ms))
-        return false; // raw-return-ok:detect-poll-headers-not-yet-at-checkpoint-is-normal
-
-    /* The checkpoint header's Equihash solution must be durably available so the
-     * install can actually bind. On a headers-first substrate the solution is
-     * absent until checkpoint_header_solution_repair peer-fetches + persists it;
-     * arming the install-on-next-boot before then would only burn the bounded
-     * install budget (BOOT_INSTALL_BUNDLE_MAX) on a solutionless retriable
-     * defer. Wait for the sibling repair to land it first. */
-    {
-        struct uint256 cp_hash;
-        memcpy(cp_hash.data, cp->block_hash, 32);
-        if (!checkpoint_header_solution_available(cp->height, &cp_hash))
-            return false; // raw-return-ok:checkpoint-header-solution-not-yet-backfilled
-    }
-
     /* A staged, installable bundle must still be present. autodetect returns
      * NULL once the sovereign marker exists (installed), when no installable
      * bundle is present under bundles/, or when every candidate carries a
-     * .failed sibling. Side-effect free (pure discovery). */
+     * .failed sibling. Side-effect free (pure discovery). The staged bundle's
+     * baked height (keystone or ladder rung) decides which header + solution the
+     * install waits on; a bundle at no baked height waits on the compiled
+     * checkpoint exactly as before. */
     char *bundle = boot_autodetect_consensus_bundle(datadir);
     if (!bundle)
         return false;
+    int32_t target_h = 0;
+    uint8_t target_hash[32];
+    bool have_target = boot_staged_bundle_wait_target(bundle, &target_h,
+                                                      target_hash);
     free(bundle);
+    if (!have_target)
+        return false; // raw-return-ok:no-compiled-checkpoint
+
+    /* The header chain must genuinely own the baked block before the install can
+     * bind — the exact precondition the boot-time deferral waits on. */
+    if (!consensus_state_checkpoint_header_ready(ms) ||
+        !consensus_state_header_chain_owns(ms, target_h, target_hash))
+        return false; // raw-return-ok:detect-poll-headers-not-yet-at-checkpoint-is-normal
+
+    /* The header's Equihash solution must be durably available so the install
+     * can actually bind. On a headers-first substrate the solution is absent
+     * until checkpoint_header_solution_repair peer-fetches + persists it; arming
+     * the install-on-next-boot before then would only burn the bounded install
+     * budget (BOOT_INSTALL_BUNDLE_MAX) on a solutionless retriable defer. Wait
+     * for the sibling repair to land it first. */
+    {
+        struct uint256 cp_hash;
+        memcpy(cp_hash.data, target_hash, 32);
+        if (!checkpoint_header_solution_available(target_h, &cp_hash))
+            return false; // raw-return-ok:checkpoint-header-solution-not-yet-backfilled
+    }
     return true;
 }
 
@@ -124,21 +129,27 @@ static enum condition_remedy_result remedy_checkpoint_bundle_install_ready(void)
         return COND_REMEDY_SKIP; // raw-return-ok:runtime-not-wired-this-tick
 
     /* Re-confirm at remedy time: never respawn to install a bundle whose
-     * checkpoint header is not (still) genuinely on-chain. */
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    if (!cp || !consensus_state_checkpoint_header_ready(ms))
-        return COND_REMEDY_SKIP; // raw-return-ok:precondition-regressed-this-tick
-    {
-        struct uint256 cp_hash;
-        memcpy(cp_hash.data, cp->block_hash, 32);
-        if (!checkpoint_header_solution_available(cp->height, &cp_hash))
-            return COND_REMEDY_SKIP; // raw-return-ok:solution-not-yet-backfilled-do-not-burn-budget
-    }
-
+     * baked header (keystone or ladder rung of the staged bundle) is not (still)
+     * genuinely on-chain with its solution durable. */
     char *bundle = boot_autodetect_consensus_bundle(datadir);
     if (!bundle)
         return COND_REMEDY_SKIP; // raw-return-ok:installed/failed-between-detect-and-remedy
-
+    int32_t target_h = 0;
+    uint8_t target_hash[32];
+    if (!boot_staged_bundle_wait_target(bundle, &target_h, target_hash) ||
+        !consensus_state_checkpoint_header_ready(ms) ||
+        !consensus_state_header_chain_owns(ms, target_h, target_hash)) {
+        free(bundle);
+        return COND_REMEDY_SKIP; // raw-return-ok:precondition-regressed-this-tick
+    }
+    {
+        struct uint256 cp_hash;
+        memcpy(cp_hash.data, target_hash, 32);
+        if (!checkpoint_header_solution_available(target_h, &cp_hash)) {
+            free(bundle);
+            return COND_REMEDY_SKIP; // raw-return-ok:solution-not-yet-backfilled-do-not-burn-budget
+        }
+    }
     /* Arm the durable, bounded install-on-next-boot request. Idempotent while
      * pending (the attempt count only bumps at CONSUME/boot), so repeated ticks
      * never inflate the budget; a spent budget returns TERMINAL. */
@@ -164,10 +175,10 @@ static enum condition_remedy_result remedy_checkpoint_bundle_install_ready(void)
              "checkpoint-bundle install-on-next-boot of %s (attempt %d); "
              "requesting a supervised respawn so the atomic ROM/PoW-gated "
              "installer runs at the next single-threaded boot",
-             CBIR_NAME, cp->height, bundle, armed);
+             CBIR_NAME, (int)target_h, bundle, armed);
     event_emitf(EV_RECOVERY_ACTION, 0,
                 "action=checkpoint_bundle_install_armed height=%d attempt=%d",
-                cp->height, armed);
+                (int)target_h, armed);
     free(bundle);
 
 #ifdef ZCL_TESTING

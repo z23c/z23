@@ -1171,6 +1171,19 @@ bool boot_refold_body_span_contiguous(struct main_state *ms,
  * rebind (the pre-existing "name the gap" behavior). Copies the path. */
 void boot_refold_body_rebind_set_datadir(const char *datadir);
 
+/* True (and logs the reason) when a from-anchor reset must NOT run because the
+ * datadir's install marker records a height above `anchor_height` (a baked-rung
+ * install), or the marker is unreadable. Keys on the marker alone, never on
+ * active_chain_height(). `datadir` NULL = the boot-registered datadir (above).
+ * Every route into boot_refold_from_anchor_reset consults it. */
+bool boot_refold_anchor_reset_blocked_by_marker(const char *datadir,
+                                                int32_t anchor_height);
+
+/* boot_refold_anchor_reset_blocked_by_marker plus the refusal warning + event,
+ * for the explicit/consumed from-anchor cutover. True = refuse the cutover. */
+bool boot_refold_from_anchor_refused_by_marker(const char *datadir,
+                                               int32_t anchor_height);
+
 #ifdef ZCL_TESTING
 /* Number of times the fold-span rebind scan was ATTEMPTED this process
  * (once-per-process cap). Lets a test assert the rebind fired on a gap. */

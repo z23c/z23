@@ -756,8 +756,93 @@ static int case_parallel_manifest_probe(void)
     return failures;
 }
 
-/* ── (e2) Newest-by-height pick + legacy size fallback (GAP-4) ──────────── */
+/* ── (e3) Fresh-node bundle choice: newest baked rung over the keystone ───── */
+/* Guard, not a fix: the picker and ranker already order by advertised height.
+ * This pins the owner's fresh-node policy for the h=3200000 rung: when both the
+ * keystone bundle and the newer rung bundle are offered, the rung is chosen and
+ * named by its height; when only the keystone bundle is offered it is chosen. */
+static int case_pick_rung_over_keystone(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: the newer baked rung bundle beats the keystone "
+         "bundle; the keystone is the fallback when no rung is offered") {
+        uint64_t size = (uint64_t)ROM_SEED_CHUNK_SIZE + 4096;
+        char both[1024];
+        snprintf(both, sizeof(both),
+                 "{\"artifacts\":["
+                 "{\"kind\":\"consensus_bundle\",\"digest\":\"%064d\","
+                 "\"whole_sha3\":\"%064d\",\"size\":%llu,\"chunk_size\":%u,"
+                 "\"chunks\":2,\"height\":3056758},"
+                 "{\"kind\":\"consensus_bundle\",\"digest\":\"%064d\","
+                 "\"whole_sha3\":\"%064d\",\"size\":%llu,\"chunk_size\":%u,"
+                 "\"chunks\":2,\"height\":3200000}]}",
+                 1, 2, (unsigned long long)size, (unsigned)ROM_SEED_CHUNK_SIZE,
+                 3, 4, (unsigned long long)size, (unsigned)ROM_SEED_CHUNK_SIZE);
+        struct rom_fetch_manifest m;
+        memset(&m, 0, sizeof(m));
+        ASSERT(boot_bundle_pick_manifest(both, &m));
+        ASSERT(m.height == 3200000);
+        ASSERT(strcmp(m.filename, "consensus-state-bundle-3200000.sqlite") == 0);
 
+        char only_keystone[512];
+        snprintf(only_keystone, sizeof(only_keystone),
+                 "{\"artifacts\":["
+                 "{\"kind\":\"consensus_bundle\",\"digest\":\"%064d\","
+                 "\"whole_sha3\":\"%064d\",\"size\":%llu,\"chunk_size\":%u,"
+                 "\"chunks\":2,\"height\":3056758}]}",
+                 1, 2, (unsigned long long)size, (unsigned)ROM_SEED_CHUNK_SIZE);
+        memset(&m, 0, sizeof(m));
+        ASSERT(boot_bundle_pick_manifest(only_keystone, &m));
+        ASSERT(m.height == 3056758);
+
+        /* Across seeds: a rung offered by one seed outranks a keystone offered
+         * by two. */
+        int64_t hs[] = { 3056758, 3200000 };
+        int cs[] = { 2, 1 };
+        bool fs[] = { true, false };
+        ASSERT(boot_bundle_quorum_pick_for_test(hs, cs, fs, 2) == 1);
+
+        /* The install readiness chain waits on the STAGED bundle's baked height:
+         * a rung-named bundle waits on the rung's header + solution; any other
+         * name (or none) waits on the compiled SHA3 checkpoint, as before. */
+        struct sha3_utxo_checkpoint sha3;
+        memset(&sha3, 0, sizeof(sha3));
+        sha3.height = 500;
+        memset(sha3.block_hash, 0xa1, 32);
+        checkpoints_set_sha3_override_for_test(&sha3);
+        struct rom_state_checkpoint ks;
+        memset(&ks, 0, sizeof(ks));
+        ks.height = 500;
+        memset(ks.block_hash, 0xa1, 32);
+        checkpoints_set_rom_state_override_for_test(&ks);
+        struct rom_state_rung rg;
+        memset(&rg, 0, sizeof(rg));
+        rg.cp.height = 700;
+        memset(rg.cp.block_hash, 0xd1, 32);
+        checkpoints_set_rom_state_rungs_override_for_test(&rg, 1);
+        int32_t wh = 0;
+        uint8_t wb[32];
+        ASSERT(boot_staged_bundle_wait_target(
+            "/d/bundles/consensus-state-bundle-700.sqlite", &wh, wb));
+        ASSERT(wh == 700 && wb[0] == 0xd1 && wb[31] == 0xd1);
+        ASSERT(boot_staged_bundle_wait_target(
+            "/d/bundles/consensus-state-bundle-500.sqlite", &wh, wb));
+        ASSERT(wh == 500 && wb[0] == 0xa1);
+        ASSERT(boot_staged_bundle_wait_target(
+            "/d/bundles/consensus-state-bundle-600.sqlite", &wh, wb));
+        ASSERT(wh == 500 && wb[0] == 0xa1); /* unbaked name -> compiled ckpt */
+        ASSERT(boot_staged_bundle_wait_target(NULL, &wh, wb));
+        ASSERT(wh == 500);
+        checkpoints_reset_rom_state_rungs_override_for_test();
+        checkpoints_reset_rom_state_override_for_test();
+        checkpoints_reset_sha3_override_for_test();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
+/* ── (e2) Newest-by-height pick + legacy size fallback (GAP-4) ──────────── */
 static int case_pick_newest(void)
 {
     int failures = 0;
@@ -1456,6 +1541,7 @@ int test_boot_bundle_fetch(void)
     failures += case_e2e();
     failures += case_baked_facts();
     failures += case_pick_newest();
+    failures += case_pick_rung_over_keystone();
     failures += case_quorum();
     failures += case_parallel_probe();
     failures += case_parallel_manifest_probe();
