@@ -1,3 +1,0 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Source-owned capability declaration for writing signed builder attestations. */
-ZCL_MODULE_CAPABILITY("contexts/commons/modules/plugin/src/plugin_attest.c", CAP_FS_READ|CAP_FS_WRITE, "")

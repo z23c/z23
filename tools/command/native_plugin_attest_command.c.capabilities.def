@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the plugin command handlers. */
+ZCL_MODULE_CAPABILITY("tools/command/native_plugin_attest_command.c", CAP_FS_WRITE, "zcl_malloc reports an allocation failure on stderr; the handlers write no file themselves")
