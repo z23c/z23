@@ -1245,6 +1245,16 @@ build/bin/z23-dev dev proof status
 build/bin/z23-dev dev proof wait
 ```
 
+The compatibility status `running` includes unclaimed requests. Its
+`execution_state` is `queued` for a matching unclaimed request, `executing`
+when the proof reader establishes a live worker, and `unknown` otherwise.
+Queued replies include `request_age_s`; they do not establish worker activity.
+The existing `eta_ms` is a timeout budget, not a predicted completion time.
+An executing worker's budget decreases with elapsed time; an unclaimed request
+reports the configured ceiling without predicting when it will be admitted.
+
+<!-- claim: symbol-present proof_execution_state tools/command/native_dev_proof_command.c -->
+
 For a fresh worktree or a one-off agent session, use the foreground step —
 the same bounded worker and signed
 receipt lifecycle, run synchronously for one exact pair:

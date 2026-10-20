@@ -112,6 +112,16 @@ static void proof_emit_producer_recovery(struct zcl_command_reply *reply,
         "make dev-bin in that root first if the candidate producer is missing.");
 }
 
+static const char *proof_execution_state(const struct zcl_dev_proof_status *status)
+{
+    if (strcmp(status->detail, "resident_proof_request_queued") == 0)
+        return "queued";
+    if (strcmp(status->detail, "background_verification_running") == 0 &&
+        status->worker_id > 1 && status->started_unix > 0)
+        return "executing";
+    return "unknown";
+}
+
 static void proof_emit_status(struct zcl_command_reply *reply,
                               const struct zcl_dev_proof_status *status,
                               bool add_wait_next)
@@ -142,8 +152,15 @@ static void proof_emit_status(struct zcl_command_reply *reply,
     if (status->started_unix > 0)
         (void)json_push_kv_int(&reply->data, "started_unix",
                                status->started_unix);
-    if (status->state == ZCL_DEV_PROOF_STATE_RUNNING)
+    if (status->state == ZCL_DEV_PROOF_STATE_RUNNING) {
+        (void)json_push_kv_str(&reply->data, "execution_state",
+                               proof_execution_state(status));
+        if (strcmp(status->detail, "resident_proof_request_queued") == 0)
+            (void)json_push_kv_int(&reply->data, "request_age_s",
+                                   status->request_age_s);
+        /* Remaining timeout budget, not a predicted completion time. */
         (void)json_push_kv_int(&reply->data, "eta_ms", status->eta_ms);
+    }
     (void)json_push_kv_bool(&reply->data, "receipt_reused",
                             status->receipt_reused);
     if (add_wait_next) proof_emit_next(reply, status);

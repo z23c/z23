@@ -2611,6 +2611,103 @@ static bool ic_bytes_equal(const char *path, const void *expected, size_t size)
     return fclose(file) == 0 && ok;
 }
 
+static bool ic_reap_proof_child(int hold, pid_t child, const char *path)
+{
+    (void)close(hold);
+    int result = 0;
+    pid_t reaped;
+    do { reaped = waitpid(child, &result, 0); } while (reaped < 0 && errno == EINTR);
+    bool removed = unlink(path) == 0;
+    return reaped == child && WIFEXITED(result) &&
+           WEXITSTATUS(result) == 0 && removed;
+}
+
+static bool ic_live_proof_status_reply(const char *root, const char *local,
+                                       const char *base,
+                                       struct zcl_command_reply *reply)
+{
+    char state[4096], relative[256], path[4096], body[160];
+    if ((size_t)snprintf(state, sizeof(state), "%s/.cache/zcl-dev-proof", root) >= sizeof(state) ||
+        (size_t)snprintf(relative, sizeof(relative), "leases/%s-%s.lease", local, base) >= sizeof(relative) ||
+        (size_t)snprintf(path, sizeof(path), "%s/%s", state, relative) >= sizeof(path))
+        return false;
+    int hold[2];
+    if (pipe(hold) != 0) return false;
+    pid_t child = fork();
+    if (child == 0) {
+        char byte;
+        (void)close(hold[1]);
+        while (read(hold[0], &byte, 1) < 0 && errno == EINTR) {}
+        (void)close(hold[0]);
+        _exit(0);
+    }
+    (void)close(hold[0]);
+    if (child < 0) { (void)close(hold[1]); return false; }
+    struct zcl_dev_proof_status status = {0};
+    bool ok = (size_t)snprintf(body, sizeof(body), "fixture %ld %lld\n",
+        (long)child, (long long)time(NULL)) < sizeof(body) &&
+        ic_proof_private_write(state, relative, body) &&
+        zcl_dev_proof_status_read(root, local, base, &status) &&
+        status.worker_id == child &&
+        strcmp(status.detail, "background_verification_running") == 0;
+    if (ok) zcl_dev_proof_status_conclude(reply, &status);
+    bool cleaned = ic_reap_proof_child(hold[1], child, path);
+    return ok && cleaned;
+}
+
+static int test_ic_proof_status_execution_projection(void)
+{
+    int failures = 0;
+    TEST("proof status: unclaimed age and reader-qualified execution remain distinct") {
+        const char *local = "1111111111111111111111111111111111111111";
+        const char *base = "2222222222222222222222222222222222222222";
+        char root[4096], relative[256], path[4096], body[320];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "status-execution");
+        ASSERT((size_t)snprintf(relative, sizeof(relative),
+            ".cache/zcl-dev-proof/requests/%s-%s.request", local, base) < sizeof(relative));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/%s", root, relative) < sizeof(path));
+        ASSERT((size_t)snprintf(body, sizeof(body),
+            "zcl.dev_proof_request.v1\n%s\n%s\n1\n1\n", local, base) < sizeof(body));
+        ASSERT(ic_proof_private_write(root, relative, body));
+        struct timespec aged[2] = {{.tv_sec = time(NULL) - 7200}, {.tv_sec = time(NULL) - 7200}};
+        ASSERT(utimensat(AT_FDCWD, path, aged, 0) == 0);
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_status_conclude(&reply, &status);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "running");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "execution_state")), "queued");
+        ASSERT(json_get_int(json_get(&reply.data, "request_age_s")) >= 7199);
+        ASSERT(json_get_int(json_get(&reply.data, "eta_ms")) == status.eta_ms);
+        ASSERT(json_get(&reply.data, "worker_id") == NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "local_commit")), local);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "remote_base")), base);
+        ASSERT(reply.next_count == 1 && strcmp(reply.next[0].command, "dev.proof.wait") == 0);
+        ASSERT(ic_bytes_equal(path, body, strlen(body)));
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        ASSERT(ic_live_proof_status_reply(root, local, base, &reply));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "execution_state")), "executing");
+        ASSERT(json_get_int(json_get(&reply.data, "worker_id")) > 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "local_commit")), local);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "remote_base")), base);
+        ASSERT(json_get(&reply.data, "request_age_s") == NULL);
+        ASSERT(ic_bytes_equal(path, body, strlen(body)));
+        zcl_command_reply_free(&reply);
+        status.detail[0] = 0;
+        status.worker_id = getpid();
+        status.started_unix = time(NULL);
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_status_conclude(&reply, &status);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "execution_state")), "unknown");
+        zcl_command_reply_free(&reply);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_proof_environment_no_verdict(void)
 {
     int failures = 0;
@@ -12619,6 +12716,7 @@ int test_impact_composition(void)
     failures += test_ic_landing_proof_holds_lock_through_worker();
     failures += test_ic_proof_environment_no_verdict();
     failures += test_ic_proof_retry();
+    failures += test_ic_proof_status_execution_projection();
     failures += test_ic_proof_ensure_passed_writes_no_request();
     failures += test_ic_proof_leftover_request_never_hides_passed();
     failures += test_ic_proof_next_preserves_root();
