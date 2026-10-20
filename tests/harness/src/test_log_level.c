@@ -107,6 +107,7 @@ static void emit_test_error_with_embedded_origin_text(void)
     LOG_ERROR("test_log_level", "existing origin=user-supplied-value in the message body");
 }
 
+static int test_log_origin_basename_inputs(void);
 static int test_log_level_origin_checks(void);
 
 int test_log_level(void)
@@ -224,11 +225,28 @@ int test_log_level(void)
                   captured && strstr(buf, "Z INFO [test_log_level]") != NULL);
     }
 
+    failures += test_log_origin_basename_inputs();
     failures += test_log_level_origin_checks();
 
     /* Restore the entry level for later groups in the same binary. */
     zcl_log_level_set(prev);
 
+    return failures;
+}
+
+static int test_log_origin_basename_inputs(void)
+{
+    int failures = 0;
+    LVL_CHECK("zcl_log_origin_basename handles POSIX paths",
+              strcmp(zcl_log_origin_basename("a/b/c.c"), "c.c") == 0);
+    LVL_CHECK("zcl_log_origin_basename handles Windows paths",
+              strcmp(zcl_log_origin_basename("a\\b\\c.c"), "c.c") == 0);
+    LVL_CHECK("zcl_log_origin_basename handles mixed slash-backslash paths",
+              strcmp(zcl_log_origin_basename("a/b\\c.c"), "c.c") == 0);
+    LVL_CHECK("zcl_log_origin_basename handles mixed backslash-slash paths",
+              strcmp(zcl_log_origin_basename("a\\b/c.c"), "c.c") == 0);
+    LVL_CHECK("zcl_log_origin_basename handles bare filenames",
+              strcmp(zcl_log_origin_basename("c.c"), "c.c") == 0);
     return failures;
 }
 
