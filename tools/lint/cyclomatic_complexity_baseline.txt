@@ -130,7 +130,6 @@ cognition/modules/codeindex/src/codeindex_vector_hint.c:segment_shape:17
 cognition/modules/codeindex/src/codeindex_vector_hint.c:zcl_code_concept_card_v1_validate_ontology:21
 cognition/modules/codeindex/src/codeindex_vector_hint.c:zcl_code_embedding_segment_v1_parse:36
 cognition/modules/codeindex/src/codeindex_vector_hint.c:zcl_code_embedding_segment_v1_validate_cards:34
-cognition/modules/codeindex/src/codeindex_vector_hint.c:zcl_code_vector_hint_error_string:19
 cognition/modules/fingerprint/src/fp_emit.c:fp_emit_harness:24
 cognition/modules/fingerprint/src/fp_emit.c:fp_emit_probe:16
 cognition/modules/fingerprint/src/fp_index.c:fp_clean:25
@@ -256,10 +255,8 @@ cognition/services/src/zcode_goal_context_service.c:zgoal_literal_candidates:16
 cognition/services/src/zcode_goal_context_service.c:zgoal_select_indexed:24
 cognition/services/src/zcode_retrieval_profile_comparison_service.c:zcode_retrieval_profile_comparison_observe:27
 cognition/services/src/zcode_retrieval_profile_evolution_service.c:zcode_retrieval_profile_evolution_propose:48
-cognition/services/src/zcode_retrieval_profile_pair_measure_service.c:zcode_retrieval_profile_pair_measure_error_string:16
 cognition/services/src/zcode_retrieval_science_adapter_service.c:rsa_action:16
 cognition/services/src/zcode_retrieval_science_adapter_service.c:rsa_boundary_roots:29
-cognition/services/src/zcode_retrieval_science_adapter_service.c:zcode_retrieval_science_adapter_error_string:17
 cognition/services/src/zcode_retrieval_science_adapter_service.c:zcode_retrieval_science_reproduction_compose:24
 cognition/services/src/zcode_retrieval_science_adapter_service.c:zcode_retrieval_science_result_compose:27
 cognition/services/src/zcode_science_carrier.c:science_identify_wire:39
@@ -499,7 +496,6 @@ contexts/commons/modules/vcs/src/zcode_continuity_policy.c:vcs_zcode_continuity_
 contexts/commons/modules/vcs/src/zcode_continuity_policy.c:vcs_zcode_creation_event_key:21
 contexts/commons/modules/vcs/src/zcode_contributor_binding.c:binding_fields:20
 contexts/commons/modules/vcs/src/zcode_contributor_binding.c:binding_fields_v2:29
-contexts/commons/modules/vcs/src/zcode_contributor_binding.c:vcs_zcode_binding_error_string:26
 contexts/commons/modules/vcs/src/zcode_contributor_binding.c:vcs_zcode_contributor_binding_seal_v2:37
 contexts/commons/modules/vcs/src/zcode_contributor_binding.c:vcs_zcode_contributor_binding_validate_successor:18
 contexts/commons/modules/vcs/src/zcode_contributor_binding.c:vcs_zcode_contributor_binding_validate_successor_v2:21
@@ -554,7 +550,6 @@ contexts/commons/modules/vcs/src/zcode_discovery_rank.c:rank_normalize:38
 contexts/commons/modules/vcs/src/zcode_discovery_rank.c:vcs_zcode_discovery_rank_compute:30
 contexts/commons/modules/vcs/src/zcode_discovery_rank.c:vcs_zcode_discovery_rank_error_string:18
 contexts/commons/modules/vcs/src/zcode_discovery_rank.c:vcs_zcode_discovery_rank_result_validate:25
-contexts/commons/modules/vcs/src/zcode_epoch_creation.c:vcs_zcode_epoch_creation_error_string:22
 contexts/commons/modules/vcs/src/zcode_epoch_creation.c:vcs_zcode_epoch_creation_parse:39
 contexts/commons/modules/vcs/src/zcode_epoch_creation.c:vcs_zcode_epoch_creation_serialize:33
 contexts/commons/modules/vcs/src/zcode_epoch_creation.c:vcs_zcode_epoch_creation_validate:26
@@ -640,7 +635,6 @@ contexts/commons/modules/vcs/src/zcode_score_receipt.c:vcs_zcode_score_receipt_p
 contexts/commons/modules/vcs/src/zcode_score_receipt.c:vcs_zcode_score_receipt_verify_cas:37
 contexts/commons/modules/vcs/src/zcode_seed.c:seed_body:31
 contexts/commons/modules/vcs/src/zcode_seed.c:seed_fields:19
-contexts/commons/modules/vcs/src/zcode_seed.c:vcs_c23_seed_error_string:19
 contexts/commons/modules/vcs/src/zcode_seed.c:vcs_c23_seed_parse:37
 contexts/commons/modules/vcs/src/zcode_shadow_election.c:shadow_snapshot_valid:18
 contexts/commons/modules/vcs/src/zcode_shadow_election.c:vcs_c23_shadow_election_build:27
@@ -650,7 +644,6 @@ contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_approved_reprod
 contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_policy_candidate_parse:29
 contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_policy_candidate_serialize:27
 contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_policy_candidate_validate:22
-contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_shadow_error_string:21
 contexts/commons/modules/vcs/src/zcode_shadow_protocol.c:protocol_report_root:17
 contexts/commons/modules/vcs/src/zcode_shadow_protocol.c:vcs_zcode_shadow_protocol_verify_cas:46
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:shadow_package_facts:16
@@ -962,14 +955,12 @@ contexts/market/models/src/zslp_validity.c:zslp_validity_token_summary:20
 contexts/market/modules/zslp/src/slp.c:slp_classify_tx_output:18
 contexts/market/modules/zslp/src/slp.c:slp_parse:34
 contexts/market/modules/zswap/src/zswap_assembly.c:zswap_assemble:33
-contexts/market/modules/zswap/src/zswap_assembly.c:zswap_assembly_error_string:16
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_accept_decode:24
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_buyer_verify_partial:24
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_error_string:24
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_seller_build_partial:18
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_seller_verify_assembly:61
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_partial_decode:20
-contexts/market/modules/zswap/src/zswap_quote.c:zswap_quote_error_string:18
 contexts/market/modules/zswap/src/zswap_yardsale.c:zswap_yardsale_ingest_wire:16
 contexts/market/services/src/file_market_content_service.c:file_market_content_load_chunk:18
 contexts/market/services/src/file_market_content_service.c:file_market_content_manifest_build:18
