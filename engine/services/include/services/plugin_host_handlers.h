@@ -17,9 +17,15 @@
  *                          header is never empty, so empty means not found)
  *   log.write              empty
  *
- * Threading: one struct plugin_host_node serves one plugin's control socket
- * from one thread. The block model reads share the node_db statement cache, so
- * the caller must serve them from the thread that owns ndb. */
+ * Threading (enforced at construction, not just documented): the node is bound
+ * to the thread that calls plugin_host_node_init, with a DEDICATED READ-ONLY
+ * node_db connection that thread owns. No cached statement of the node's
+ * main connection is touched, and every handler refuses when called from any
+ * other thread. Header reads use per-call prepared statements on that
+ * connection; canonical heights come from the lock-free active chain index and
+ * must agree with the authority tip, so a stored fork block is never served.
+ * log.write drops C0/DEL/C1 controls and malformed UTF-8; it keeps valid
+ * UTF-8 text. */
 #ifndef ZCL_SERVICES_PLUGIN_HOST_HANDLERS_H
 #define ZCL_SERVICES_PLUGIN_HOST_HANDLERS_H
 
@@ -28,9 +34,11 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <pthread.h>
 #include <stdint.h>
 
 struct node_db;
+struct active_chain;
 
 #define PLUGIN_HOST_NAME_MAX 48u      /* plugin name bytes kept in a log prefix */
 #define PLUGIN_HOST_LOG_TEXT_MAX 256u /* log text bytes accepted per line */
@@ -57,7 +65,9 @@ typedef void (*plugin_host_log_sink_fn)(void *context, unsigned level,
                                         const char *line);
 
 struct plugin_host_node {
-    struct node_db *ndb;
+    struct node_db *ndb;               /* read-only, owned by the serving thread */
+    const struct active_chain *chain;  /* canonical height -> hash index */
+    pthread_t owner;                   /* the thread that called init */
     char plugin[PLUGIN_HOST_NAME_MAX + 1]; /* sanitized by plugin_host_node_init */
     plugin_host_authority_fn authority;
     void *authority_context;
@@ -70,10 +80,18 @@ struct plugin_host_node {
     uint64_t log_dropped;    /* lines refused by the rate limit */
 };
 
-/* Prepare a node for one plugin. The name has control bytes stripped and is
- * cut at PLUGIN_HOST_NAME_MAX; an empty result or a null ndb is refused. */
-struct zcl_result plugin_host_node_init(struct plugin_host_node *node, struct node_db *ndb,
-                           const char *plugin_name);
+/* Prepare a node for one plugin on the CALLING thread, which becomes the only
+ * thread allowed to run its handlers (each handler refuses on any other).
+ * ro_ndb must be an open, strictly read-only connection that this thread owns
+ * (for example from zcl_native_node_db_open_readonly); a writable or closed
+ * connection is refused (sqlite3_db_readonly). chain is the node's active
+ * chain index (&ms->chain_active), read lock-free. The plugin name has control
+ * bytes stripped and is cut at PLUGIN_HOST_NAME_MAX; an empty result is
+ * refused. */
+struct zcl_result plugin_host_node_init(struct plugin_host_node *node,
+                                        struct node_db *ro_ndb,
+                                        const struct active_chain *chain,
+                                        const char *plugin_name);
 
 /* Fill out with the node-backed handlers (context = node) and leave every
  * other method NULL. Refuses a null argument without writing. */

@@ -11,8 +11,13 @@
 #include "models/block.h"
 #include "models/database.h"
 #include "platform/clock.h"
+#include "chain/chain.h"
 #include "primitives/block.h"
+#include "validation/chainstate.h"
+#include "zutf8/zutf8.h"
 
+#include <pthread.h>
+#include <sqlite3.h>
 #include <string.h>
 
 /* The served authority pair when the node has no injected source. */
@@ -35,13 +40,35 @@ static int read_authority(const struct plugin_host_node *n, int64_t *height,
     return 0;
 }
 
+
+/* The hash of the block at `height` on the chain that ends at the authority
+ * tip: the lock-free active chain index, accepted only while its tip slot
+ * agrees with the authority pair. 0 on success. */
+static int canonical_hash_at(const struct plugin_host_node *n, int height,
+                             int64_t tip_height, const uint8_t tip_hash[32],
+                             uint8_t out[32])
+{
+    const struct block_index *tip = active_chain_at(n->chain, (int)tip_height);
+    const struct block_index *bi = active_chain_at(n->chain, height);
+    if (tip == nullptr || bi == nullptr || tip->phashBlock == nullptr ||
+        bi->phashBlock == nullptr || bi->nHeight != height ||
+        memcmp(tip->phashBlock->data, tip_hash, 32) != 0)
+        return -1; // raw-return-ok:the index does not agree with the authority; not found
+    memcpy(out, bi->phashBlock->data, 32);
+    return 0;
+}
+
+static bool on_owner_thread(const struct plugin_host_node *n)
+{
+    return pthread_equal(n->owner, pthread_self()) != 0;
+}
 /* chain.tip: empty payload -> height u32, hash 32, time u32. */
 static int host_chain_tip(void *context, const uint8_t *payload, size_t payload_len,
                           uint8_t *out, size_t out_cap, size_t *out_len)
 {
     struct plugin_host_node *n = context;
     (void)payload;
-    if (n == nullptr || out == nullptr || out_len == nullptr || payload_len != 0 ||
+    if (n == nullptr || !on_owner_thread(n) || out == nullptr || out_len == nullptr || payload_len != 0 ||
         out_cap < PLUGIN_HOST_TIP_REPLY_BYTES)
         return 1;
     int64_t height = -1;
@@ -58,13 +85,28 @@ static int host_chain_tip(void *context, const uint8_t *payload, size_t payload_
     return 0;
 }
 
+/* Serialize hdr into out; false when it does not fit or cannot be encoded. */
+static bool write_header_reply(const struct block_header *hdr, uint8_t *out, size_t out_cap,
+                               size_t *out_len)
+{
+    struct byte_stream s;
+    stream_init(&s, 256);
+    bool ok = block_header_serialize(hdr, &s) && !s.error && s.size <= out_cap;
+    if (ok) {
+        memcpy(out, s.data, s.size);
+        *out_len = s.size;
+    }
+    stream_free(&s);
+    return ok;
+}
+
 /* chain.header_by_height: height u32 -> header bytes, or an empty reply. */
 static int host_header_by_height(void *context, const uint8_t *payload,
                                  size_t payload_len, uint8_t *out, size_t out_cap,
                                  size_t *out_len)
 {
     struct plugin_host_node *n = context;
-    if (n == nullptr || payload == nullptr || out == nullptr || out_len == nullptr ||
+    if (n == nullptr || !on_owner_thread(n) || payload == nullptr || out == nullptr || out_len == nullptr ||
         payload_len != 4)
         return 1;
     *out_len = 0;
@@ -75,21 +117,13 @@ static int host_header_by_height(void *context, const uint8_t *payload,
         return 2;
     if (want > INT32_MAX || (int64_t)want > tip)
         return 0; /* not found: past the served tip */
-    struct db_block row;
-    if (!db_block_find_by_height(n->ndb, (int)want, &row))
-        return 0;
+    uint8_t want_hash[32];
+    if (canonical_hash_at(n, (int)want, tip, tip_hash, want_hash) != 0)
+        return 0; /* not on the chain ending at the authority tip */
     struct block_header hdr;
-    if (!db_block_load_header_by_hash_height(n->ndb, (int)want, row.hash, &hdr))
+    if (!db_block_load_header_by_hash_height(n->ndb, (int)want, want_hash, &hdr))
         return 0;
-    struct byte_stream s;
-    stream_init(&s, 256);
-    bool ok = block_header_serialize(&hdr, &s) && !s.error && s.size <= out_cap;
-    if (ok) {
-        memcpy(out, s.data, s.size);
-        *out_len = s.size;
-    }
-    stream_free(&s);
-    return ok ? 0 : 3;
+    return write_header_reply(&hdr, out, out_cap, out_len) ? 0 : 3;
 }
 
 /* Copy src into dst (cap bytes, NUL added) without control bytes. Returns the
@@ -97,9 +131,23 @@ static int host_header_by_height(void *context, const uint8_t *payload,
 static size_t strip_controls(char *dst, size_t cap, const uint8_t *src, size_t n)
 {
     size_t w = 0;
-    for (size_t i = 0; i < n && w + 1 < cap; i++)
-        if (src[i] >= 0x20 && src[i] != 0x7f)
-            dst[w++] = (char)src[i];
+    size_t i = 0;
+    while (i < n && w + 1 < cap) {
+        uint32_t cp = 0;
+        size_t used = 0;
+        if (zutf8_decode_n((const char *)src + i, n - i, &cp, &used) != ZUTF8_OK) {
+            i++; /* malformed or truncated byte: dropped */
+            continue;
+        }
+        bool control = cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
+        if (!control && w + used < cap) {
+            memcpy(dst + w, src + i, used);
+            w += used;
+        } else if (!control) {
+            break; /* the next scalar does not fit whole */
+        }
+        i += used;
+    }
     dst[w] = '\0';
     return w;
 }
@@ -137,7 +185,7 @@ static int host_log_write(void *context, const uint8_t *payload, size_t payload_
     struct plugin_host_node *n = context;
     (void)out;
     (void)out_cap;
-    if (n == nullptr || payload == nullptr || out_len == nullptr)
+    if (n == nullptr || !on_owner_thread(n) || payload == nullptr || out_len == nullptr)
         return 1;
     *out_len = 0;
     if (payload_len < 2 || payload_len - 1 > PLUGIN_HOST_LOG_TEXT_MAX ||
@@ -164,17 +212,24 @@ static int host_log_write(void *context, const uint8_t *payload, size_t payload_
     return 0;
 }
 
-struct zcl_result plugin_host_node_init(struct plugin_host_node *node, struct node_db *ndb,
-                           const char *plugin_name)
+struct zcl_result plugin_host_node_init(struct plugin_host_node *node, struct node_db *ro_ndb,
+                                        const struct active_chain *chain,
+                                        const char *plugin_name)
 {
-    if (node == nullptr || ndb == nullptr || plugin_name == nullptr)
-        return ZCL_ERR(-1, "plugin host node: bad argument or empty plugin name");
+    if (node == nullptr || ro_ndb == nullptr || chain == nullptr || plugin_name == nullptr)
+        return ZCL_ERR(-1, "plugin host node: null argument");
+    if (!ro_ndb->open || ro_ndb->db == nullptr ||
+        sqlite3_db_readonly(ro_ndb->db, "main") != 1)
+        return ZCL_ERR(-1, "plugin host node: ndb must be an open read-only connection "
+                           "owned by the serving thread");
     memset(node, 0, sizeof *node);
-    node->ndb = ndb;
+    node->ndb = ro_ndb;
+    node->chain = chain;
+    node->owner = pthread_self();
     size_t len = strnlen(plugin_name, PLUGIN_HOST_NAME_MAX * 4);
     if (strip_controls(node->plugin, sizeof node->plugin, (const uint8_t *)plugin_name, len) == 0) {
         memset(node, 0, sizeof *node);
-        return ZCL_ERR(-1, "plugin host node: bad argument or empty plugin name");
+        return ZCL_ERR(-1, "plugin host node: empty plugin name");
     }
     return ZCL_OK;
 }
