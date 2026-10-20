@@ -18,9 +18,9 @@ Neither leaf switches `current`, and neither runs the plugin. Both are
 ## Leaves
 
 ```sh
-z23 plugin publish NAME [GEN] [--dir=PACKED_DIR] --license-file=F [--spdx=MIT] \
+z23 plugin publish NAME --datadir=DD [GEN] [--dir=PACKED_DIR] --license-file=F [--spdx=MIT] \
     --release-key=K --sequence=N
-z23 plugin fetch --root=R --name=NAME [--allow-downgrade]
+z23 plugin fetch --datadir=DD --root=R --name=NAME [--allow-downgrade]
 ```
 
 - `publish` takes the installed `current` generation (or `GEN`) or a packed
@@ -86,7 +86,7 @@ kill both nodes
 HOME=$H_STRANGER $Z -datadir=$DD_RCV -regtest plugin fetch --root=$ROOT --name=upper   # unpinned: refused
 HOME=$H_RCV $Z -datadir=$DD_RCV -regtest plugin fetch --root=$ROOT --name=upper        # installs
 HOME=$H_RCV $Z plugin status upper
-HOME=$H_RCV $Z plugin fetch ... again                                                 # already_present
+HOME=$H_RCV $Z plugin fetch --datadir=$DD_RCV ... again                                                # already_present
 HOME=$H_RCV $Z plugin switch upper $GEN ; HOME=$H_RCV $Z plugin call upper --stdin=abc
 ```
 

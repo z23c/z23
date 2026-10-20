@@ -15,6 +15,7 @@
 #include "base/hex.h"
 #include "command/native_command.h"
 #include "json/json.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "plugin/plugin_fetch_job.h"
 #include "rpc/server.h"
@@ -29,11 +30,6 @@
 
 static struct plugin_fetch_table *g_table;
 
-static const struct json_value *fetch_input(const struct json_value *params)
-{
-    const struct json_value *first = params && json_size(params) ? json_at(params, 0) : NULL;
-    return first && first->type == JSON_OBJ ? first : NULL;
-}
 
 static void fetch_error(struct json_value *result, const char *code, const char *message,
                         const char *next_action)
@@ -55,7 +51,7 @@ static bool fetch_ctx(struct plugin_fetch_ctx *ctx, char plugins[PATH_MAX], char
     if (!store || !engine || !root || !zcl_native_plugin_root(plugins, PATH_MAX))
         return false;
     if (snprintf(scratch, PATH_MAX, "%s/plugin-dist", root) >= PATH_MAX ||
-        (mkdir(scratch, 0700) != 0 && errno != EEXIST))
+        !platform_private_directory_ensure(scratch))
         return false;
     *ctx = (struct plugin_fetch_ctx){
         .engine = engine, .store = store, .plugins_dir = plugins, .scratch_dir = scratch
@@ -76,6 +72,23 @@ static bool fetch_int(const struct json_value *in, const char *key, uint64_t *ou
     return true;
 }
 
+/* Optional array of positive peer handles into rq; false when malformed. */
+static bool fetch_peers(const struct json_value *list, struct plugin_fetch_request *rq,
+                        uint64_t peers[PLUGIN_FETCH_PEERS_MAX])
+{
+    if (list && (list->type != JSON_ARR || json_size(list) > PLUGIN_FETCH_PEERS_MAX))
+        return false;
+    for (size_t i = 0; list && i < json_size(list); i++) {
+        const struct json_value *p = json_at(list, i);
+        int64_t id = p && p->type == JSON_INT ? json_get_int(p) : -1;
+        if (id <= 0)
+            return false;
+        peers[rq->peer_count++] = (uint64_t)id;
+    }
+    rq->peers = rq->peer_count ? peers : NULL;
+    return true;
+}
+
 /* Reads the request fields; false (result filled) on any malformed one. */
 static bool fetch_parse(const struct json_value *in, struct plugin_fetch_request *rq,
                         uint64_t peers[PLUGIN_FETCH_PEERS_MAX], struct json_value *result)
@@ -90,18 +103,7 @@ static bool fetch_parse(const struct json_value *in, struct plugin_fetch_request
     rq->timeout_s = timeout > UINT32_MAX ? UINT32_MAX : (uint32_t)timeout;
     const struct json_value *allow = json_get(in, "allow_downgrade");
     rq->allow_downgrade = allow && allow->type == JSON_BOOL && json_get_bool(allow);
-    const struct json_value *list = json_get(in, "peers");
-    if (list && (list->type != JSON_ARR || json_size(list) > PLUGIN_FETCH_PEERS_MAX))
-        bad = true;
-    for (size_t i = 0; list && !bad && i < json_size(list); i++) {
-        const struct json_value *p = json_at(list, i);
-        int64_t id = p && p->type == JSON_INT ? json_get_int(p) : -1;
-        if (id <= 0)
-            bad = true;
-        else
-            peers[rq->peer_count++] = (uint64_t)id;
-    }
-    rq->peers = rq->peer_count ? peers : NULL;
+    bad = bad || !fetch_peers(json_get(in, "peers"), rq, peers);
     if (bad || !hex || strlen(hex) != 64u || !zcl_hex_decode_lower(hex, rq->root, 32) || !rq->name) {
         fetch_error(result, "PLUGIN_FETCH_ARGUMENT",
                     "root (64 lowercase hex), name, and optional peers (positive ints), max_bytes, "
@@ -118,7 +120,9 @@ static bool fetch_begin(const struct json_value *params, bool help, struct json_
         json_set_str(result, "plugin_fetch_begin {root,name,peers?,max_bytes?,timeout_s?,allow_downgrade?}");
         return true;
     }
-    const struct json_value *in = fetch_input(params);
+    const struct json_value *in = params && json_size(params) ? json_at(params, 0) : NULL;
+    if (in && in->type != JSON_OBJ)
+        in = NULL;
     struct plugin_fetch_request rq;
     uint64_t peers[PLUGIN_FETCH_PEERS_MAX];
     char plugins[PATH_MAX], scratch[PATH_MAX];
@@ -188,7 +192,9 @@ static bool fetch_poll(const struct json_value *params, bool help, struct json_v
         json_set_str(result, "plugin_fetch_poll {job}");
         return true;
     }
-    const struct json_value *in = fetch_input(params);
+    const struct json_value *in = params && json_size(params) ? json_at(params, 0) : NULL;
+    if (in && in->type != JSON_OBJ)
+        in = NULL;
     const struct json_value *id = in ? json_get(in, "job") : NULL;
     int64_t job = id && id->type == JSON_INT ? json_get_int(id) : 0;
     char plugins[PATH_MAX], scratch[PATH_MAX];

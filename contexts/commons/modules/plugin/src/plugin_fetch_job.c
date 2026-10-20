@@ -32,29 +32,30 @@ struct plugin_fetch_table {
     struct pfj_job jobs[PLUGIN_FETCH_TABLE_MAX];
 };
 
+static const char *const k_state_names[] = {
+    [PLUGIN_FETCH_FETCHING] = "fetching", [PLUGIN_FETCH_INSTALLING] = "installing",
+    [PLUGIN_FETCH_INSTALLED] = "installed", [PLUGIN_FETCH_FAILED] = "failed"
+};
+
 const char *plugin_fetch_state_string(enum plugin_fetch_state state)
 {
-    switch (state) {
-    case PLUGIN_FETCH_FETCHING: return "fetching";
-    case PLUGIN_FETCH_INSTALLING: return "installing";
-    case PLUGIN_FETCH_INSTALLED: return "installed";
-    case PLUGIN_FETCH_FAILED: return "failed";
-    }
-    return "unknown";
+    return (unsigned)state < sizeof(k_state_names) / sizeof(k_state_names[0]) ? k_state_names[state]
+                                                                              : "unknown";
 }
+
+static const char *const k_begin_codes[] = {
+    [PLUGIN_FETCH_BEGIN_OK] = "OK", [PLUGIN_FETCH_BEGIN_ARGUMENT] = "PLUGIN_FETCH_ARGUMENT",
+    [PLUGIN_FETCH_BEGIN_BUSY] = "PLUGIN_FETCH_BUSY",
+    [PLUGIN_FETCH_BEGIN_NO_SWARM] = "PLUGIN_FETCH_NO_SWARM",
+    [PLUGIN_FETCH_BEGIN_NO_PEERS] = "PLUGIN_FETCH_NO_PEERS",
+    [PLUGIN_FETCH_BEGIN_UNKNOWN_PEER] = "PLUGIN_FETCH_UNKNOWN_PEER",
+    [PLUGIN_FETCH_BEGIN_SWARM_REFUSED] = "PLUGIN_FETCH_SWARM_REFUSED"
+};
 
 const char *plugin_fetch_begin_code(enum plugin_fetch_begin_status status)
 {
-    switch (status) {
-    case PLUGIN_FETCH_BEGIN_OK: return "OK";
-    case PLUGIN_FETCH_BEGIN_ARGUMENT: return "PLUGIN_FETCH_ARGUMENT";
-    case PLUGIN_FETCH_BEGIN_BUSY: return "PLUGIN_FETCH_BUSY";
-    case PLUGIN_FETCH_BEGIN_NO_SWARM: return "PLUGIN_FETCH_NO_SWARM";
-    case PLUGIN_FETCH_BEGIN_NO_PEERS: return "PLUGIN_FETCH_NO_PEERS";
-    case PLUGIN_FETCH_BEGIN_UNKNOWN_PEER: return "PLUGIN_FETCH_UNKNOWN_PEER";
-    case PLUGIN_FETCH_BEGIN_SWARM_REFUSED: return "PLUGIN_FETCH_SWARM_REFUSED";
-    }
-    return "PLUGIN_FETCH_UNKNOWN";
+    return (unsigned)status < sizeof(k_begin_codes) / sizeof(k_begin_codes[0]) ? k_begin_codes[status]
+                                                                               : "PLUGIN_FETCH_UNKNOWN";
 }
 
 struct plugin_fetch_table *plugin_fetch_table_new(void)

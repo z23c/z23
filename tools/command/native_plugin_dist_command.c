@@ -17,8 +17,10 @@
 #include "base/safe_alloc.h"
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "json/json.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "plugin/plugin_dist.h"
 #include "plugin/plugin_store.h"
@@ -202,7 +204,7 @@ void zcl_native_handle_plugin_fetch(const struct zcl_command_request *request,
         return;
     }
     if (snprintf(scratch, sizeof(scratch), "%s/zcode/plugin-dist", datadir) >= (int)sizeof(scratch) ||
-        (mkdir(scratch, 0700) != 0 && errno != EEXIST)) {
+        !platform_private_directory_ensure(scratch)) {
         vcs_package_store_close(store);
         pdc_refuse(reply, PLUGIN_DIST_ERR_IO, "fetch", "cannot create the checkout scratch directory",
                    false, false);
@@ -346,6 +348,32 @@ static void pdc_remote_finish(struct zcl_command_reply *reply, struct json_value
     }
 }
 
+/* Polls the job until it leaves fetching/installing or wait_s runs out. */
+static bool pdc_remote_wait(struct zcl_command_reply *reply, struct json_value *body, uint64_t wait_s)
+{
+    int64_t job = json_get_int(json_get(body, "job"));
+    for (uint64_t waited_ms = 0; waited_ms < wait_s * 1000u; waited_ms += PDC_REMOTE_POLL_MS) {
+        const char *state = json_get_str(json_get(body, "state"));
+        if (state && strcmp(state, "fetching") != 0 && strcmp(state, "installing") != 0)
+            break;
+        platform_sleep_ms(PDC_REMOTE_POLL_MS);
+        char poll[64];
+        (void)snprintf(poll, sizeof(poll), "[{\"job\":%lld}]", (long long)job);
+        json_free(body);
+        json_init(body);
+        if (!pdc_remote_call(reply, "plugin_fetch_poll", poll, body))
+            return false;
+    }
+    return true;
+}
+
+static bool pdc_remote_args_ok(const struct zcl_command_request *request, bool polling, bool bad,
+                               const char *params, uint64_t *wait_s)
+{
+    return !bad && params && pdc_u64(request, "wait", wait_s) &&
+           (polling || (zcl_native_plugin_str(request, "root") && zcl_native_plugin_str(request, "name")));
+}
+
 void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *request,
                                            struct zcl_command_reply *reply)
 {
@@ -354,8 +382,7 @@ void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *req
     bool bad = false, polling = json_get(request->input, "job") != NULL;
     uint64_t wait_s = 0;
     char *params = pdc_remote_params(request, &bad);
-    if (bad || !params || !pdc_u64(request, "wait", &wait_s) ||
-        (!polling && (!zcl_native_plugin_str(request, "root") || !zcl_native_plugin_str(request, "name")))) {
+    if (!pdc_remote_args_ok(request, polling, bad, params, &wait_s)) {
         free(params);
         pdc_refuse(reply, PLUGIN_DIST_ERR_ARGUMENT, "fetch_remote",
                    "root and name (or job), and positive integers for peer_id, max-bytes, timeout, wait are required",
@@ -367,18 +394,7 @@ void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *req
     json_init(&body);
     bool ok = pdc_remote_call(reply, polling ? "plugin_fetch_poll" : "plugin_fetch_begin", params, &body);
     free(params);
-    int64_t job = ok ? json_get_int(json_get(&body, "job")) : 0;
-    for (uint64_t waited_ms = 0; ok && waited_ms < wait_s * 1000u; waited_ms += PDC_REMOTE_POLL_MS) {
-        const char *state = json_get_str(json_get(&body, "state"));
-        if (state && strcmp(state, "fetching") != 0 && strcmp(state, "installing") != 0)
-            break;
-        platform_sleep_ms(PDC_REMOTE_POLL_MS);
-        char poll[64];
-        (void)snprintf(poll, sizeof(poll), "[{\"job\":%lld}]", (long long)job);
-        json_free(&body);
-        json_init(&body);
-        ok = pdc_remote_call(reply, "plugin_fetch_poll", poll, &body);
-    }
+    ok = ok && pdc_remote_wait(reply, &body, wait_s);
     if (ok)
         pdc_remote_finish(reply, &body);
     json_free(&body);

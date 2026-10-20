@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the resident plugin fetch RPCs. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_plugin_fetch_rpc.c", CAP_FS_WRITE, "creates the private checkout scratch directory under the node's package store; verification and install are plugin_dist_receive")

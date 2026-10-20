@@ -385,8 +385,8 @@ anything, and both are never accepted from a mesh peer. See
 [PLUGIN_P2P_DIST_2026-10-20.md](../experiments/PLUGIN_P2P_DIST_2026-10-20.md).
 
 ```sh
-z23 plugin publish upper --license-file=./LICENSE --spdx=MIT --release-key=./package.key --sequence=1
-z23 plugin fetch --root=<64hex> --name=upper [--allow-downgrade]
+z23 plugin publish upper --datadir=/tmp/fixture-dd --license-file=./LICENSE --spdx=MIT --release-key=./package.key --sequence=1
+z23 plugin fetch --datadir=/tmp/fixture-dd --root=<64hex> --name=upper [--allow-downgrade]
 ```
 
 `fetch` refuses, each with its own code: `PLUGIN_DIST_NOT_FETCHED` (root not in

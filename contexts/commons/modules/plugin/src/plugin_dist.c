@@ -255,7 +255,7 @@ static enum plugin_dist_status pd_source(
     if (rq->src_dir) {
         if (strlen(rq->src_dir) >= PLUGIN_PATH_MAX)
             return PLUGIN_DIST_ERR_ARGUMENT;
-        strcpy(dir, rq->src_dir);
+        snprintf(dir, PLUGIN_PATH_MAX, "%s", rq->src_dir);
         return PLUGIN_DIST_OK;
     }
     if (!rq->plugins_dir)
@@ -288,7 +288,7 @@ static enum plugin_dist_status pd_source(
         !pd_join(b, sizeof(b), a, "generations") ||
         !pd_join(a, sizeof(a), b, gen))
         return PLUGIN_DIST_ERR_ARGUMENT;
-    strcpy(dir, a);
+    snprintf(dir, PLUGIN_PATH_MAX, "%s", a);
     return PLUGIN_DIST_OK;
 }
 
