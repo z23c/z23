@@ -15263,6 +15263,265 @@ _test_next:;
     return failures;
 }
 
+#if !defined(_WIN32)
+struct dlx_scope_case {
+    struct dlx_rig rig;
+    char queue[16384], origin[64], wt[1400];
+    size_t queue_len;
+};
+
+static bool dlx_scope_state_matches(void)
+{
+    const char *xdg = getenv("XDG_STATE_HOME");
+    if (!g_dlx_state[0]) return false;
+    if (xdg && xdg[0]) return strcmp(xdg, g_dlx_state) == 0;
+    const char *home = getenv("HOME");
+    char base[4096];
+    if (!home || !home[0]) return false;
+    int n = snprintf(base, sizeof(base), "%s/.local/state", home);
+    return n > 0 && (size_t)n < sizeof(base) && strcmp(base, g_dlx_state) == 0;
+}
+
+static bool dlx_scope_fence_prepare(struct dlx_rig *rig, const char *tag,
+                                    char base[64], char wt[1400], char tip[64])
+{
+    return dlx_scope_state_matches() && dlx_fence_prepare(rig, tag, base, wt, tip);
+}
+
+static int dlx_scope_isolation_guard(void)
+{
+    int failures = 0;
+    char saved[1024] = "", other[512], path[1400], base[64], wt[1400], tip[64];
+    struct dlx_rig rig = {0};
+    struct stat info;
+    TEST("land: scope preparation refuses absent or mismatched isolated state") {
+        dlx_isolate("drive_seq_scope_guard");
+        (void)snprintf(saved, sizeof(saved), "%s", g_dlx_state);
+        test_make_tmpdir(other, sizeof(other), "dev_land", "scope_guard_other");
+        ASSERT(setenv("XDG_STATE_HOME", other, 1) == 0);
+        ASSERT(!dlx_scope_fence_prepare(&rig, "scope_guard_mismatch", base, wt, tip));
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/land/queue.jsonl", other);
+        ASSERT(lstat(path, &info) != 0 && errno == ENOENT);
+        ASSERT(setenv("XDG_STATE_HOME", saved, 1) == 0);
+        g_dlx_state[0] = '\0';
+        ASSERT(!dlx_scope_fence_prepare(&rig, "scope_guard_absent", base, wt, tip));
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/land/queue.jsonl", saved);
+        ASSERT(lstat(path, &info) != 0 && errno == ENOENT);
+        PASS();
+    }
+_test_next:;
+    if (saved[0]) (void)snprintf(g_dlx_state, sizeof(g_dlx_state), "%s", saved);
+    dlx_restore();
+    return failures;
+}
+
+static bool dlx_scope_submit(const struct dlx_rig *rig, const char *tip)
+{
+    if (!dlx_scope_state_matches()) return false;
+    struct dlx_call c;
+    dlx_submit(&c, rig, tip);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_scope_number(const char *old, const char *replacement,
+                              const char *old_priority, const char *priority)
+{
+    return dlx_queue_field_once(old, old, replacement) &&
+           dlx_queue_field_once(replacement, old_priority, priority);
+}
+
+static bool dlx_scope_terminal(struct dlx_scope_case *t, const char *state,
+                                const char *base, const char *later)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "cancel");
+    (void)json_push_kv_int(&c.input, "seq", 685);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    if (!ok || strcmp(state, "cancelled") == 0) return ok;
+    char land[1200], path[1400], row[4096], wire[4200];
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", land);
+    if (!dlx_chain_row(row, sizeof(row), 685, t->rig.clone, later, base,
+                        state, 0, NULL, NULL)) return false;
+    int n = snprintf(wire, sizeof(wire), "%s\n", row);
+    return n > 0 && (size_t)n < sizeof(wire) && dlx_write(path, wire);
+}
+
+static bool dlx_scope_prepare(struct dlx_scope_case *t, const char *tag,
+                               const char *terminal)
+{
+    char base[64], later[64];
+    dlx_isolate(tag);
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    if (!dlx_rig_make(&t->rig, tag) || !dlx_origin_main(&t->rig, base) ||
+        !dlx_scope_submit(&t->rig, t->rig.tip) ||
+        !dlx_commit(t->rig.clone, "later.txt", "later\n", later) ||
+        !dlx_scope_submit(&t->rig, later) ||
+        !dlx_scope_number("\"seq\":1,", "\"seq\":674,",
+                           "\"priority_seq\":1,", "\"priority_seq\":674,") ||
+        !dlx_scope_number("\"seq\":2,", "\"seq\":685,",
+                           "\"priority_seq\":2,", "\"priority_seq\":685,") ||
+        (terminal && !dlx_scope_terminal(t, terminal, base, later)))
+        return false;
+    dlx_land_wt(t->wt, sizeof(t->wt));
+    return dlx_queue_bytes(t->queue, sizeof(t->queue), &t->queue_len) &&
+           dlx_origin_main(&t->rig, t->origin);
+}
+
+
+static bool dlx_scope_unchanged(const struct dlx_scope_case *t)
+{
+    char queue[16384], origin[64];
+    size_t len = 0;
+    struct stat info;
+    return dlx_queue_bytes(queue, sizeof(queue), &len) && len == t->queue_len &&
+           memcmp(queue, t->queue, len) == 0 &&
+           dlx_origin_main(&t->rig, origin) && strcmp(origin, t->origin) == 0 &&
+           lstat(t->wt, &info) != 0 && errno == ENOENT;
+}
+
+static int dlx_scope_refusal_case(int seq, const char *terminal,
+                                  const char *reason)
+{
+    int failures = 0;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    TEST("land: named drive leaves another eligible row and its origin untouched") {
+        ASSERT(dlx_scope_prepare(&t, "drive_seq_scope", terminal));
+        opened = true;
+        ASSERT(dlx_drive_seq(&c, seq));
+        ASSERT(dlx_scope_unchanged(&t));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_REFUSED");
+        ASSERT(!c.reply.error.mutated);
+        ASSERT(strstr(dlx_str(&c, "reason"), reason) != NULL);
+        ASSERT_EQ(dlx_int(&c, "seq"), seq);
+        PASS();
+    }
+_test_next:;
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_scope_landed_target(void)
+{
+    int failures = 0;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    TEST("land: an already landed named target does not drive the live head") {
+        ASSERT(dlx_scope_prepare(&t, "drive_seq_landed_scope", "landed"));
+        opened = true;
+        ASSERT(dlx_drive_seq(&c, 685) && dlx_ok(&c));
+        ASSERT(dlx_scope_unchanged(&t));
+        ASSERT_STR_EQ(dlx_str(&c, "outcome"), "landed");
+        ASSERT_EQ(dlx_int(&c, "seq"), 685);
+        PASS();
+    }
+_test_next:;
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
+static bool dlx_scope_later_unchanged(const struct dlx_scope_case *t)
+{
+    char queue[16384];
+    size_t len = 0;
+    if (!dlx_queue_bytes(queue, sizeof(queue), &len)) return false;
+    const char *before = strstr(t->queue, "{\"seq\":685,");
+    const char *after = strstr(queue, "{\"seq\":685,");
+    if (!before || !after) return false;
+    const char *a = strchr(before, '\n'), *b = strchr(after, '\n');
+    return a && b && a - before == b - after &&
+           memcmp(before, after, (size_t)(a - before)) == 0;
+}
+
+static int dlx_scope_requested_head(void)
+{
+    int failures = 0;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    TEST("land: named queue head still starts its own bounded proof") {
+        ASSERT(dlx_scope_prepare(&t, "drive_seq_head_scope", NULL));
+        opened = true;
+        ASSERT(dlx_drive_seq(&c, 674));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DRIVE_STOPPED");
+        ASSERT_EQ(dlx_int(&c, "seq"), 674);
+        ASSERT_EQ(dlx_int(&c, "rounds"), 6);
+        ASSERT(dlx_scope_later_unchanged(&t));
+        dlx_end(&c); opened = false;
+        dlx_begin(&c, "status"); opened = true;
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *active = json_get(&c.reply.data, "in_flight");
+        ASSERT(active && json_get_int(json_get(active, "seq")) == 674);
+        const struct json_value *queued = dlx_arr(&c, "queued");
+        ASSERT(queued && queued->num_children == 1);
+        ASSERT_EQ(json_get_int(json_get(&queued->children[0], "seq")), 685);
+        PASS();
+    }
+_test_next:;
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_scope_shared_fence(void)
+{
+    int failures = 0;
+    struct dlx_fence_case t = {0};
+    char path[1400], before[32768], after[32768], old_head[64], head[64];
+    size_t before_len = 0, after_len = 0;
+    bool opened = false;
+    TEST("land: named drive refuses a publication fence spanning another row") {
+        dlx_isolate("drive_seq_fence_scope");
+        ASSERT(dlx_scope_fence_prepare(&t.rig, "drive_seq_fence_scope", t.base, t.wt, t.successor));
+        dlx_fence_call(&t.c, &t.rig, t.base, t.rig.tip, t.successor); opened = true;
+        ASSERT(dlx_run(&t.c) && dlx_ok(&t.c));
+        dlx_end(&t.c); opened = false;
+        ASSERT(dlx_queue_bytes(t.before, sizeof(t.before), &t.before_len));
+        dlx_landdir(t.land, sizeof(t.land));
+        (void)snprintf(path, sizeof(path), "%s/fence.jsonl", t.land);
+        ASSERT(dlx_slurp(path, before, sizeof(before), &before_len));
+        ASSERT(dlx_origin_main(&t.rig, t.remote));
+        const char *rev[] = { "rev-parse", "HEAD", NULL };
+        ASSERT(dlx_git_out(t.wt, rev, old_head, sizeof(old_head)) == 0);
+        opened = true;
+        ASSERT(dlx_drive_seq(&t.c, 1));
+        ASSERT_STR_EQ(dlx_err_code(&t.c), "DRIVE_REFUSED");
+        ASSERT(strstr(dlx_str(&t.c, "reason"), "requested_seq=1 blocking_seq=2") != NULL);
+        ASSERT(!t.c.reply.error.mutated);
+        ASSERT(dlx_fence_same_queue(&t));
+        ASSERT(dlx_slurp(path, after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len && memcmp(before, after, before_len) == 0);
+        ASSERT(dlx_origin_main(&t.rig, head));
+        ASSERT_STR_EQ(head, t.remote);
+        ASSERT(dlx_git_out(t.wt, rev, head, sizeof(head)) == 0);
+        ASSERT_STR_EQ(head, old_head);
+        PASS();
+    }
+_test_next:;
+    if (opened) dlx_end(&t.c);
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_drive_seq_scope(void)
+{
+    return dlx_scope_refusal_case(685, NULL, "requested_seq=685 blocking_seq=674") +
+           dlx_scope_refusal_case(999, "cancelled", "unknown_seq_999") +
+           dlx_scope_refusal_case(685, "cancelled", "row_cancelled") +
+           dlx_scope_landed_target() + dlx_scope_requested_head() +
+           dlx_scope_shared_fence() + dlx_scope_isolation_guard();
+}
+#endif
+
 int test_dev_land(void)
 {
     /* Canonical registered group: private bare origin only, no live queue. */
@@ -15370,6 +15629,7 @@ int test_dev_land(void)
 
     failures += test_dev_land_bounded_drive();
     failures += test_dev_land_drive_seq_lands();
+    failures += test_dev_land_drive_seq_scope();
     failures += test_dev_land_drive_seq_refusals();
     failures += test_dev_land_drive_seq_proof_failed();
     failures += test_dev_land_drive_seq_stops();

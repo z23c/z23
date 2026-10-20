@@ -10490,17 +10490,91 @@ static void dl_fence_drive(const struct dl_dirs *d, struct dl_fence *f,
     dl_fence_send(d, &next_dirs, f, reply);
 }
 
-static bool dl_fence_step(const struct dl_dirs *d, struct zcl_command_reply *reply)
+static bool dl_drive_scope_blocked(struct zcl_command_reply *reply,
+                                    long long requested, long long blocking)
+{
+    char evidence[128];
+    (void)snprintf(evidence, sizeof(evidence),
+                   "requested_seq=%lld blocking_seq=%lld", requested, blocking);
+    dl_fail(reply, "DRIVE_ROW_BLOCKED", "drive",
+            "the named row cannot be driven by this queue step",
+            evidence);
+    return false;
+}
+
+static bool dl_step_scope_pick(const struct zcl_command_request *req,
+                                struct zcl_command_reply *reply,
+                                bool have, const struct dl_row *pick)
+{
+    if (!json_get(req->input, "seq"))
+        return true;
+    long long seq = 0;
+    if (!dl_seq_in(req, &seq))
+        return dl_drive_scope_blocked(reply, 0, 0);
+    return have && pick->seq == seq ? true :
+           dl_drive_scope_blocked(reply, seq, have ? pick->seq : 0);
+}
+
+[[maybe_unused]] static bool dl_step_scope(const struct zcl_command_request *req,
+                                            struct zcl_command_reply *reply,
+                                            const char *qpath)
+{
+    if (!json_get(req->input, "seq"))
+        return true;
+    struct dl_row *rows = NULL, pick = {0};
+    size_t count = 0;
+    bool inflight = false;
+    char why[128] = {0};
+    if (!dl_load_rows(qpath, &rows, &count, why, sizeof(why))) {
+        dl_fail(reply, "QUEUE_READ_FAILED", "drive", "cannot read the queue file",
+                dl_reason_or_path(why, qpath));
+        return false;
+    }
+    bool have = dl_step_pick_row(rows, count, &pick, &inflight);
+    free(rows);
+    return dl_step_scope_pick(req, reply, have, &pick);
+}
+
+static bool dl_fence_step(const struct dl_dirs *d, struct zcl_command_reply *reply,
+                           long long requested)
 {
     struct dl_fence *f = zcl_malloc(sizeof(*f), "dev.land.fence.step");
     if (!f) { dl_fence_blocked(reply, "FENCE_READ_FAILED", NULL); return true; }
     int rc = dl_fence_read(d, f);
     bool handled = rc < 0 || (rc == 1 && f->stage < 2);
     if (rc < 0) dl_fence_blocked(reply, "FENCE_READ_FAILED", NULL);
+    else if (rc == 1 && f->stage < 2 && requested > 0 &&
+             (f->anchor.seq != requested || f->next.seq != requested))
+        (void)dl_drive_scope_blocked(reply, requested,
+            f->anchor.seq != requested ? f->anchor.seq : f->next.seq);
     else if (rc == 1 && f->stage < 2) dl_fence_drive(d, f, reply);
     free(f);
     return handled;
 }
+#endif
+
+#if !defined(_WIN32)
+static bool dl_step_enter(const struct zcl_command_request *req,
+                           struct zcl_command_reply *reply,
+                           const struct dl_dirs *d, const char *qpath)
+{
+    if (!dl_step_scope(req, reply, qpath) ||
+        dl_fence_step(d, reply, json_get_int(json_get(req->input, "seq"))))
+        return false;
+    if (!json_get(req->input, "seq"))
+        dl_pool_sweep_and_log(d);
+    return true;
+}
+
+static void dl_step_queue_precheck(const struct zcl_command_request *req,
+                                    const struct dl_dirs *d,
+                                    const char *main,
+                                    struct zcl_command_reply *reply)
+{
+    if (!json_get(req->input, "seq"))
+        dl_precheck_queued(d, main, reply);
+}
+
 #endif
 
 static void dl_step(const struct zcl_command_request *req,
@@ -10550,14 +10624,10 @@ static void dl_step(const struct zcl_command_request *req,
         dl_step_busy(reply, d.land);
         return;
     }
-    if (dl_fence_step(&d, reply)) {
+    if (!dl_step_enter(req, reply, &d, qpath)) {
         dl_unlock(slot);
         return;
     }
-    /* A finished attempt's generation is swept here, once the lock proves
-     * this step actually runs -- never before the busy check, which the
-     * lock-contention test proves touches nothing. */
-    dl_pool_sweep_and_log(&d);
     char queue_why[128] = {0};
     if (!dl_load_rows(qpath, &rows, &nrows, queue_why,
                       sizeof(queue_why))) {
@@ -10570,6 +10640,10 @@ static void dl_step(const struct zcl_command_request *req,
     memset(&pick, 0, sizeof(pick));
     have_row = dl_step_pick_row(rows, nrows, &pick, &have_inflight);
     free(rows);
+    if (!dl_step_scope_pick(req, reply, have_row, &pick)) {
+        dl_unlock(slot);
+        return;
+    }
     if (!have_row) {
         dl_step_reply(reply, NULL, "empty");
         dl_window_settle(&d, NULL, reply);
@@ -10616,7 +10690,7 @@ static void dl_step(const struct zcl_command_request *req,
     /* Still under step.lock, after the driven row's own work: rows queued
      * behind a row in flight learn now whether this main left them
      * mergeable, not when they reach the head of the queue. */
-    dl_precheck_queued(&d, observed_main, reply);
+    dl_step_queue_precheck(req, &d, observed_main, reply);
     dl_unlock(slot);
 #endif
 }
@@ -10624,7 +10698,8 @@ static void dl_step(const struct zcl_command_request *req,
 /* Read the durable pair after a step has released step.lock. No process
  * owns this intent: another authorized integrator can read the same row. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-static bool dl_drive_pair(char local[80], char base[80], char root[4096])
+static bool dl_drive_pair(long long seq, char local[80], char base[80],
+                           char root[4096])
 {
     struct dl_dirs d;
     struct dl_row *rows = NULL;
@@ -10637,6 +10712,8 @@ static bool dl_drive_pair(char local[80], char base[80], char root[4096])
         !dl_load_rows(path, &rows, &count, NULL, 0))
         return false;
     for (size_t i = 0; i < count; i++) {
+        if (seq > 0 && rows[i].seq != seq)
+            continue;
         if (strcmp(rows[i].state, "inflight") != 0 ||
             strcmp(rows[i].phase, "prove") != 0)
             continue;
@@ -10998,7 +11075,7 @@ static int dl_prove_pair(struct zcl_command_reply *reply)
     struct dl_dirs d;
     int64_t started;
     int rc;
-    if (!dl_drive_pair(local, base, root) || !dl_dirs_make(&d)) {
+    if (!dl_drive_pair(0, local, base, root) || !dl_dirs_make(&d)) {
         dl_fail(reply, "PROOF_INTENT_UNAVAILABLE", "drive",
                 "the exact in-flight proof pair is unavailable",
                 "retry dev land drive after inspecting dev land status");
@@ -11054,8 +11131,9 @@ static int dl_prove_pair(struct zcl_command_reply *reply)
 
 /* Return 1 after this pair settles, 0 when a worker owns it, -1 on refusal. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-static int dl_drive_proof(struct zcl_command_reply *reply)
+static int dl_drive_proof(long long seq, struct zcl_command_reply *reply)
 {
+    (void)seq;
     if (g_dl_prove_mode)
         return dl_prove_pair(reply);
 #ifdef ZCL_DEV_BUILD
@@ -11064,7 +11142,7 @@ static int dl_drive_proof(struct zcl_command_reply *reply)
     int result;
     if (dl_stub())
         return 1;
-    if (!dl_drive_pair(local, base, root)) {
+    if (!dl_drive_pair(seq, local, base, root)) {
         dl_fail(reply, "PROOF_INTENT_UNAVAILABLE", "drive",
                 "the exact in-flight proof pair is unavailable",
                 "retry dev land drive after inspecting dev land status");
@@ -11156,7 +11234,7 @@ static void dl_drive_session(const struct zcl_command_request *req,
                        strcmp(state, "proving") != 0))
             return;
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-        if (dl_drive_proof(reply) <= 0)
+        if (dl_drive_proof(json_get_int(json_get(req->input, "seq")), reply) <= 0)
             return;
 #endif
         dl_drive_reply_reset(reply);
@@ -11279,6 +11357,14 @@ static void dl_drive_round(const struct zcl_command_request *req,
 {
     struct dl_row row;
     char wt[4096];
+    if (!dl_drive_row(seq, &row, wt)) {
+        v->kind = DL_DRIVE_REFUSED;
+        (void)snprintf(v->detail, sizeof(v->detail), "unknown_seq_%lld", seq);
+        return;
+    }
+    dl_drive_judge_row(&row, wt, v);
+    if (v->kind != DL_DRIVE_CONTINUE)
+        return;
     dl_drive_session(req, reply);
     dl_drive_judge_reply(reply, v);
     if (v->kind == DL_DRIVE_ATTACH) {
