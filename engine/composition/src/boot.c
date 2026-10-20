@@ -45,6 +45,7 @@
 #include "supervisors/staged_sync_supervisor.h"
 #include "storage/progress_store.h"
 #include "storage/anchor_kv.h"  /* seed the verified Sapling anchor frontier at boot */
+#include "storage/nullifier_kv.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/refold_progress.h"  /* refold_progress_mark_started_from_anchor (B2) */
 #include "jobs/stage_repair.h"
@@ -1175,6 +1176,8 @@ bool boot_park_until_shutdown(const char *gate_name)
  * app_init; nothing here is written before the step that used to
  * initialise it. */
 struct boot_seq {
+    bool replay_pending;
+    struct shielded_replay_session replay_session;
     int64_t t_boot_start;              /* whole-boot clock; the "total" mark */
     int64_t t_finalize_build;          /* finalize-and-build span start */
     const struct chain_params *params; /* resolved once in the prologue */
@@ -1771,7 +1774,7 @@ static bool boot_coins_open_view_or_gate(struct app_context *ctx)
 }
 
 /* The coins-view open gate. */
-static bool boot_step_open_coins_view(struct app_context *ctx)
+static bool boot_step_open_coins_view(struct app_context *ctx, bool replay_pending)
 {
     /* Open coins view on the SHARED sqlite3 handle.
      * Both node_db and coins_view_sqlite use the same connection.
@@ -1780,6 +1783,11 @@ static bool boot_step_open_coins_view(struct app_context *ctx)
      * its own BEGIN/COMMIT. One connection = no WAL lock contention. */
     if (!g_node_db.open)
         return true;
+    if (replay_pending) {
+        if (coins_view_sqlite_open(&g_coins_sqlite, g_node_db.db)) return true;
+        LOG_ERROR("boot", "unfinished replay coins view cannot open safely; preserving state");
+        return false;
+    }
     boot_coins_consume_reindex_request(ctx);
     return boot_coins_open_view_or_gate(ctx);
 }
@@ -1924,7 +1932,7 @@ static void boot_step_wire_repository(struct app_context *ctx)
 
 /* Progress store, snapshots, block tree, coins view and the
  * chain_state_repository. */
-static bool boot_seq_open_coins_state(struct app_context *ctx)
+static bool boot_seq_open_coins_state(struct app_context *ctx, struct boot_seq *s)
 {
     if (!boot_step_open_progress_store(ctx))
         return false;
@@ -1935,14 +1943,20 @@ static bool boot_seq_open_coins_state(struct app_context *ctx)
         LOG_ERROR("boot", "%s", prepared.message);
         return false;
     }
+    if (!shielded_history_read_full_replay(progress_store_db(),
+            &s->replay_session, &s->replay_pending)) {
+        LOG_ERROR("boot", "invalid unfinished shielded replay session; preserving state");
+        return false;
+    }
+    if (s->replay_pending) ctx->reindex_chainstate = true;
     t_sub = boot_submark("coins.snapshot_first", t_sub);
-    if (!boot_step_create_legacy_snapshot(ctx))
+    if (!s->replay_pending && !boot_step_create_legacy_snapshot(ctx))
         return false;
     boot_step_open_block_tree(ctx);
-    if (!boot_step_open_coins_view(ctx))
+    if (!boot_step_open_coins_view(ctx, s->replay_pending))
         return false;
     t_sub = boot_submark("coins.view_open_gate", t_sub);
-    boot_step_check_coins_best_cache(ctx);
+    if (!s->replay_pending) boot_step_check_coins_best_cache(ctx);
     if (!boot_step_bind_coins_read_view(ctx))
         return false;
     boot_step_wire_repository(ctx);
@@ -2129,7 +2143,7 @@ static bool boot_handle_corrupt_block_index(struct app_context *ctx,
 }
 
 /* Verify the block-index sidecar SHA3 after all loads. */
-static bool boot_step_gate_block_index_integrity(struct app_context *ctx)
+static bool boot_step_gate_block_index_integrity(struct app_context *ctx, bool replay_pending)
 {
     /* Block index integrity — verify sidecar SHA3 after all loads.
      *
@@ -2163,6 +2177,9 @@ static bool boot_step_gate_block_index_integrity(struct app_context *ctx)
                 "WARNING: block index integrity: %s "
                 "(continuing in degraded reconcile mode)\n",
                 err[0] ? err : bii_verdict_name(v));
+    } else if (replay_pending) {
+        LOG_ERROR("boot", "unfinished replay block index integrity refused: %s", err);
+        return false;
     } else if (!boot_handle_corrupt_block_index(ctx, v, err)) {
         return false;
     }
@@ -2178,7 +2195,7 @@ static bool boot_seq_load_block_index(struct app_context *ctx, struct boot_seq *
     boot_step_load_block_index_ladder(ctx, s->params, s);
     boot_topmark("block_index_load", t_phase);
     boot_step_repair_block_index(ctx, s);
-    if (!boot_step_gate_block_index_integrity(ctx))
+    if (!boot_step_gate_block_index_integrity(ctx, s->replay_pending))
         return false;
     /* BLOCK_INDEX_LOADED boundary: the block index is loaded, repaired, and
      * the sidecar integrity gate accepted the map. The tip is not yet
@@ -2809,7 +2826,8 @@ static bool boot_seq_reconcile_chain_state(struct app_context *ctx,
                                            struct boot_seq *s)
 {
     int64_t t_phase = boot_clock_ms();
-    boot_step_import_legacy_utxos(ctx, s->params, s->rebuilt_from_log);
+    if (!s->replay_pending)
+        boot_step_import_legacy_utxos(ctx, s->params, s->rebuilt_from_log);
     boot_topmark("utxo_import", t_phase);
     /* Timing only (no behavior change): mark the start of the
      * block-index reconcile span — single-pass block-index scan,
@@ -2824,13 +2842,32 @@ static bool boot_seq_reconcile_chain_state(struct app_context *ctx,
     boot_step_scan_block_index(&scan);
     t_reconcile_sub = boot_submark("blkidx.scan", t_reconcile_sub);
     bool fast_restart = false;
-    boot_step_try_fast_restart(ctx, s, scan.best_header, s->rebuilt_from_log,
-                               &fast_restart);
-    boot_step_gate_reindex_coverage(ctx, scan.reindex_best,
-                                    scan.max_have_data_h,
-                                    scan.have_data_count);
+    if (!s->replay_pending)
+        boot_step_try_fast_restart(ctx, s, scan.best_header, s->rebuilt_from_log,
+                                   &fast_restart);
+    if (s->replay_pending) {
+        if (!scan.reindex_best && scan.best_header && scan.best_header->nHeight == 0)
+            scan.reindex_best = block_map_find(&g_state.map_block_index,
+                &s->params->consensus.hashGenesisBlock);
+        char body_datadir[2048] = {0};
+        GetDataDir(true, body_datadir, sizeof(body_datadir));
+        if (!boot_index_pending_replay_unchanged(&s->replay_session) ||
+            !boot_index_pending_replay_preflight(scan.reindex_best,
+                &s->replay_session, body_datadir))
+            return false;
+    } else {
+        boot_step_gate_reindex_coverage(ctx, scan.reindex_best,
+                                        scan.max_have_data_h,
+                                        scan.have_data_count);
+    }
     boot_step_resolve_chain_tip(ctx, s, s->params, s->index_repaired,
                                 fast_restart, &scan);
+    struct shielded_replay_session remaining;
+    bool pending = false;
+    if (!shielded_history_read_full_replay(progress_store_db(), &remaining, &pending) || pending) {
+        LOG_ERROR("boot", "shielded replay remains unfinished after tip resolution; refusing services");
+        return false;
+    }
     boot_step_ensure_genesis(s, s->params);
     t_reconcile_sub = boot_submark("blkidx.restore_tip", t_reconcile_sub);
     if (!boot_seed_oneshot_headers_preflight(ctx, &g_state)) return false; /* D3: seed one-shot headers-prereq fast-fail, boot_seed_gate.c */
@@ -3585,7 +3622,7 @@ bool app_init(struct app_context *ctx)
     if (!boot_seq_prologue(ctx, &seq)) return false;
     if (!boot_seq_open_node_db(ctx)) return false;
     if (!boot_seq_load_wallet(ctx, &seq)) return false;
-    if (!boot_seq_open_coins_state(ctx)) return false;
+    if (!boot_seq_open_coins_state(ctx, &seq)) return false;
     if (!boot_seq_load_block_index(ctx, &seq)) return false;
     if (!boot_seq_reconcile_chain_state(ctx, &seq)) return false;
     if (!boot_seq_load_sapling_tree(ctx)) return false;

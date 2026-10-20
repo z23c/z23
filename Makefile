@@ -9652,7 +9652,8 @@ test-crash-bootstrap: crash_recovery_test zclassic23 zcl-rpc jsonq process-group
 # Item-3 reindex epilogue acceptance (a): seed an isolated /tmp regtest node,
 # clean-restart with -reindex-chainstate, and assert the FOUR teeth (tip parity,
 # gettxoutsetinfo.txouts parity, getutxocommitment parity, SERVING + no coin
-# tear in node.log). A torn/no-op epilogue changes txouts/commitment and fails.
+# tear in node.log), preceded by actual zero-error replay and authority
+# epilogue completion. Preserved old state alone can satisfy the parity checks.
 # Opt-in (NOT in hermetic `make ci`): it SPAWNS a real regtest node. All
 # isolation is delegated to tools/scripts/isolated_node_env.sh.
 .PHONY: test-reindex-smoke
@@ -9661,14 +9662,14 @@ test-reindex-smoke: zclassic23 zcl-rpc
 	    SEED_BLOCKS=50 KILL_MID=0 \
 	    bash tools/scripts/reindex_smoke.sh
 
-# Item-3 reindex epilogue acceptance (c): kill -9 mid-reindex then reboot
-# converges. Spawn with -reindex-chainstate, SIGKILL after a randomized
-# 200-2000ms during replay, reboot normally (crash-only re-replay), and assert
-# eventual SERVING at tip with the same four teeth within <=3 reboot cycles.
-# Proves the epilogue is crash-only safe (runs only after errors==0, clears the
-# sentinel only after the H* self-check). Opt-in (NOT in hermetic `make ci`).
+# Reindex startup interruption: timer mode alone proves restart parity, not
+# an unfinished replay. REINDEX_WITNESS=1 freezes an interior durable replay
+# cursor before SIGKILL and requires replay/epilogue completion after restart.
+# Both modes retain four parity checks and the <=3 reboot bound. Optional
+# REINDEX_SEED_BLOCKS=3..5000 controls the isolated fixture size (default 50).
+# Opt-in (NOT in hermetic `make ci`).
 .PHONY: test-reindex-killmid
-test-reindex-killmid: zclassic23 zcl-rpc
+test-reindex-killmid: zclassic23 zcl-rpc sqlq
 	@ISO_KIND=reindex ISO_PORT_BASE=$${ISO_PORT_BASE:-39054} \
 	    SEED_BLOCKS=50 KILL_MID=1 \
 	    bash tools/scripts/reindex_smoke.sh

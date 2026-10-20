@@ -123,6 +123,61 @@ static bool nk_replay_advance(sqlite3 *db, int64_t height, int64_t target)
     return ok;
 }
 
+static int nk_replay_status_lifecycle(sqlite3 *db)
+{
+    int failures = 0;
+    struct shielded_replay_session session;
+    bool pending = true;
+    NK_CHECK("absent replay session is read-only absent",
+        shielded_history_read_full_replay(db, &session, &pending) && !pending);
+    NK_CHECK("create bounded replay status fixture", shielded_history_begin_full_replay(db, 10));
+    NK_CHECK("initial replay session is pending",
+        shielded_history_read_full_replay(db, &session, &pending) && pending &&
+        session.target == 10 && session.next == 0 && session.sprout_started == 0 && session.sapling_started == 0);
+    NK_CHECK("interior replay session is pending",
+        progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "5", 1) &&
+        shielded_history_read_full_replay(db, &session, &pending) && pending && session.next == 5);
+    NK_CHECK("restore initial replay cursor", progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "0", 1));
+    return failures;
+}
+
+static int nk_replay_status_cases(sqlite3 *db)
+{
+    int failures = nk_replay_status_lifecycle(db);
+    struct shielded_replay_session session;
+    bool pending = false;
+    const char *keys[] = {SHIELDED_REPLAY_TARGET_KEY, SHIELDED_REPLAY_NEXT_KEY,
+        SHIELDED_REPLAY_SPROUT_STARTED_KEY, SHIELDED_REPLAY_SAPLING_STARTED_KEY};
+    for (unsigned i = 0; i < 4; i++) {
+        const char *valid = i == 0 ? "10" : "0";
+        NK_CHECK("remove one replay field", progress_meta_delete(db, keys[i]));
+        NK_CHECK("partial replay session refuses", !shielded_history_read_full_replay(db, &session, &pending));
+        const char *bad[] = {"", "00", "-1", "1x", "9223372036854775808"};
+        for (unsigned j = 0; j < sizeof(bad) / sizeof(bad[0]); j++) {
+            NK_CHECK("write malformed replay field", progress_meta_set(db, keys[i], bad[j], strlen(bad[j])));
+            NK_CHECK("malformed replay session refuses", !shielded_history_read_full_replay(db, &session, &pending));
+        }
+        NK_CHECK("restore canonical replay field", progress_meta_set(db, keys[i], valid, strlen(valid)));
+    }
+    NK_CHECK("replay endpoint remains pending",
+        progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "11", 2) &&
+        shielded_history_read_full_replay(db, &session, &pending) && pending && session.next == 11);
+    NK_CHECK("next beyond endpoint refuses", progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "12", 2) &&
+        !shielded_history_read_full_replay(db, &session, &pending));
+    NK_CHECK("restore next", progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "0", 1));
+    NK_CHECK("target outside int range refuses", progress_meta_set(db, SHIELDED_REPLAY_TARGET_KEY, "2147483647", 10) &&
+        !shielded_history_read_full_replay(db, &session, &pending));
+    NK_CHECK("restore target", progress_meta_set(db, SHIELDED_REPLAY_TARGET_KEY, "10", 2));
+    NK_CHECK("started flag outside boolean range refuses",
+        progress_meta_set(db, SHIELDED_REPLAY_SPROUT_STARTED_KEY, "2", 1) &&
+        !shielded_history_read_full_replay(db, &session, &pending));
+    NK_CHECK("cancel replay fixture", sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
+        shielded_history_cancel_full_replay_in_tx(db) && sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+    NK_CHECK("retired replay session reads absent again",
+        shielded_history_read_full_replay(db, &session, &pending) && !pending);
+    return failures;
+}
+
 int test_nullifier_kv(void);
 int test_nullifier_kv(void)
 {
@@ -455,6 +510,7 @@ int test_nullifier_kv(void)
                  nk_reset_empty_below_tx(db, 0) && nk_marker_is(db, "0"));
     }
 
+    failures += nk_replay_status_cases(db);
     progress_store_close();
     test_cleanup_tmpdir(dir);
     return failures;

@@ -89,6 +89,14 @@ bool boot_index_reindex_replay_executable(struct main_state *ms,
                                           bool btdb_open,
                                           const char *datadir);
 
+struct shielded_replay_session;
+/* Boot-only, before coin writers start: prove every indexed body and the
+ * exact target ancestry before an unfinished replay may replace state. */
+bool boot_index_pending_replay_preflight(struct block_index *tip,
+    const struct shielded_replay_session *session, const char *body_datadir);
+bool boot_index_pending_replay_unchanged(
+    const struct shielded_replay_session *session);
+
 /* Fail-closed reset used only by the immutable anchor producer lane. */
 bool boot_mint_anchor_genesis_reset(struct node_db *ndb);
 

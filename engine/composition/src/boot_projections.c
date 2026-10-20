@@ -18,6 +18,7 @@
 #include "config/boot_fast_restart.h"
 #include "platform/file_metadata.h"
 #include "storage/coins_kv.h"
+#include "storage/nullifier_kv.h"
 #include "storage/event_log.h"
 #include "storage/event_log_singleton.h"
 #include "storage/progress_store.h"
@@ -33,6 +34,22 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+/* Event-log publication is needed during replay, but recognizing old coins as
+ * self-derived must wait until the pending replay has finished its epilogue. */
+static void boot_rebuild_coins_without_pending_replay(void)
+{
+    sqlite3 *db = progress_store_db();
+    if (!db) return;
+    struct shielded_replay_session session;
+    bool pending = false;
+    if (!shielded_history_read_full_replay(db, &session, &pending)) {
+        fprintf(stderr, // obs-ok:phase4-storage
+                "[phase4] invalid replay session; preserving unstamped coins authority\n");
+        return;
+    }
+    if (!pending) (void)coins_kv_boot_rebuild_if_needed(db);
+}
 
 static event_log_t               *g_phase4_event_log = NULL;
 static mempool_projection_t      *g_phase4_mempool_projection = NULL;
@@ -61,7 +78,7 @@ bool boot_ensure_event_log(const char *datadir)
          * call is the one that reaches a later-opened progress.kv. Leaving it
          * under the return made "retried on the later fan-out call" a comment
          * the code never executed. */
-        (void)coins_kv_boot_rebuild_if_needed(progress_store_db());
+        boot_rebuild_coins_without_pending_replay();
         return true;
     }
     if (!datadir || !datadir[0])
@@ -89,7 +106,7 @@ bool boot_ensure_event_log(const char *datadir)
      * (retried on the later fan-out call) and on an empty coins_kv, which
      * re-derives from block bodies via the normal fold (pre-1.0: legacy
      * datadirs may re-derive). */
-    (void)coins_kv_boot_rebuild_if_needed(progress_store_db());
+    boot_rebuild_coins_without_pending_replay();
     return true;
 }
 

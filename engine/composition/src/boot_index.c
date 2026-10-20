@@ -12,6 +12,7 @@
  * in engine/composition/src/boot_block_file_scan.c. Block index flat-file save/load
  * and SQLite cache functions live in engine/services/src/block_index_loader.c. */
 #include "platform/time_compat.h"
+#include <limits.h>
 #include "platform/allocator_compat.h"
 #include "config/boot_internal.h"
 #include "config/boot_memory_guard.h"
@@ -266,6 +267,62 @@ static bool boot_index_reindex_input_available(struct block_index *pi,
     return true;
 }
 
+static bool boot_index_pending_body(struct block_index *pi, int height,
+                                    const char *datadir)
+{
+    if (!pi || !pi->phashBlock || pi->nHeight != height || !pi->pprev ||
+        pi->pprev->nHeight != height - 1 || !pi->pprev->phashBlock)
+        return false;
+    struct block blk;
+    if (!read_block_from_disk_index(&blk, pi, datadir)) return false;
+    bool linked = uint256_eq(&blk.header.hashPrevBlock, pi->pprev->phashBlock);
+    block_free(&blk);
+    return linked;
+}
+
+bool boot_index_pending_replay_preflight(struct block_index *tip,
+    const struct shielded_replay_session *session, const char *body_datadir)
+{
+    if (!tip || !session || !body_datadir || !body_datadir[0] ||
+        session->target < 0 || session->target >= INT_MAX ||
+        tip->nHeight != session->target) {
+        LOG_WARN("reindex-chainstate", "pending replay target differs from selected chain");
+        return false;
+    }
+    struct block_index *pi = tip;
+    for (int h = tip->nHeight; h >= 0; h--) {
+        bool available = h == 0 ? boot_index_reindex_input_available(pi, h, body_datadir)
+                                : boot_index_pending_body(pi, h, body_datadir);
+        if (!available) {
+            LOG_WARN("reindex-chainstate", "pending replay input unavailable height=%d", h);
+            return false;
+        }
+        if (h == 0) {
+            if (pi->pprev) {
+                LOG_WARN("reindex-chainstate", "pending canonical genesis has a parent");
+                return false;
+            }
+        } else pi = pi->pprev;
+    }
+    return true;
+}
+
+bool boot_index_pending_replay_unchanged(const struct shielded_replay_session *session)
+{
+    if (!session) {
+        LOG_WARN("reindex-chainstate", "missing expected pending replay session");
+        return false;
+    }
+    struct shielded_replay_session now;
+    bool pending = false;
+    bool ok = shielded_history_read_full_replay(progress_store_db(), &now, &pending) &&
+        pending && now.target == session->target && now.next == session->next &&
+        now.sprout_started == session->sprout_started &&
+        now.sapling_started == session->sapling_started;
+    if (!ok) LOG_WARN("reindex-chainstate", "pending replay session changed before mutation");
+    return ok;
+}
+
 /* Report the first unavailable input without mutating the recovery request. */
 static int boot_index_reindex_missing_input(struct main_state *ms,
                                             const char *datadir)
@@ -384,6 +441,47 @@ bool boot_backfill_zslp(struct node_db *ndb)
     return true;
 }
 
+static bool boot_index_admit_replay(struct main_state *ms, int tip_height,
+    const char *datadir, const char *body_datadir,
+    struct shielded_replay_session *session, bool *pending)
+{
+    if (!shielded_history_read_full_replay(progress_store_db(), session, pending)) {
+        LOG_WARN("reindex-chainstate", "invalid durable replay session; preserving state");
+        return false;
+    }
+    if (*pending) {
+        struct block_index *tip = active_chain_at(&ms->chain_active, tip_height);
+        if (!boot_index_pending_replay_preflight(tip, session, body_datadir)) return false;
+        for (int h = tip_height; h >= 0; h--) {
+            if (active_chain_at(&ms->chain_active, h) != tip) {
+                LOG_WARN("reindex-chainstate", "pending replay active-chain gap height=%d", h);
+                return false;
+            }
+            tip = tip->pprev;
+        }
+        return true;
+    }
+    /* Preserve the ordinary early probe: bodyless canonical genesis is empty,
+     * but an unexecutable explicit/sentinel request must not wipe the seed. */
+    int missing = boot_index_reindex_missing_input(ms, body_datadir);
+    if (missing < 0) return true;
+    fprintf(stderr,
+        "reindex-chainstate: input at height %d is unavailable or noncanonical — "
+        "replay-from-blocks/ is not executable on this datadir; REFUSING before "
+        "wiping the UTXO set. Restore the missing block data or use a cold-import re-seed.\n", missing);
+    event_emitf(EV_BOOT_ACTIVATE, 0, "reindex_refused_unexecutable probe_h=%d tip=%d", missing, tip_height);
+    boot_auto_reindex_clear(datadir);
+    return false;
+}
+
+static bool boot_index_flush_admitted_replay(struct coins_view_sqlite *cvs,
+    struct coins_view_cache *cvtip, const struct shielded_replay_session *session,
+    bool pending)
+{
+    if (pending && !boot_index_pending_replay_unchanged(session)) return false;
+    return boot_index_flush_reindex_coins(cvs, cvtip);
+}
+
 bool reindex_chainstate(struct main_state *ms,
                           struct coins_view_sqlite *cvs,
                           struct coins_view_cache *cvtip,
@@ -402,6 +500,11 @@ bool reindex_chainstate(struct main_state *ms,
         return false;
     }
 
+    struct shielded_replay_session session;
+    bool pending = false;
+    if (!boot_index_admit_replay(ms, tip_height, datadir, body_datadir, &session, &pending))
+        return false;
+
     printf("reindex-chainstate: rebuilding UTXO set (%d blocks)...\n",
            tip_height + 1);
     event_emitf(EV_SYNC_STATE_CHANGE, 0, "reindex start blocks=%d",
@@ -409,30 +512,7 @@ bool reindex_chainstate(struct main_state *ms,
 
     platform_allocator_prepare_bulk();
 
-    /* Native bootstrap stores no genesis body: only the compiled genesis
-     * identity can stand for its empty state delta. Require a real block 1
-     * when present BEFORE wiping the derived set: a cold-import
-     * datadir has no block data below its import window, so a
-     * wipe-then-discover order destroys a healthy mirror for nothing
-     * (the wipe succeeds, then the very first genesis-side read fails). */
-    int missing = boot_index_reindex_missing_input(ms, body_datadir);
-    if (missing >= 0) {
-        fprintf(stderr,
-                "reindex-chainstate: input at height %d is unavailable or "
-                "noncanonical — replay-from-blocks/ is not executable on "
-                "this datadir; REFUSING before wiping the UTXO set. Restore "
-                "the missing block data or use a cold-import re-seed.\n",
-                missing);
-        event_emitf(EV_BOOT_ACTIVATE, 0,
-                    "reindex_refused_unexecutable probe_h=%d tip=%d",
-                    missing, tip_height);
-        /* An unexecutable pending request would repeat this consume/refuse
-         * cycle on every boot. Preserve the coins and retire the request. */
-        boot_auto_reindex_clear(datadir);
-        return false;
-    }
-
-    if (!boot_index_flush_reindex_coins(cvs, cvtip))
+    if (!boot_index_flush_admitted_replay(cvs, cvtip, &session, pending))
         return false;
     coins_view_cache_free(cvtip);
 

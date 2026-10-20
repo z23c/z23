@@ -73,6 +73,16 @@ struct sqlite3;
 #define SHIELDED_REPLAY_SAPLING_STARTED_KEY \
     "shielded_history.full_replay.sapling_started"
 
+struct shielded_replay_session {
+    int64_t target, next, sprout_started, sapling_started;
+};
+
+/* Read-only, under the progress-store recursive lock. All four keys absent
+ * means no session. Partial, malformed or out-of-range sessions are errors;
+ * next == target+1 remains pending until the successful epilogue retires it. */
+bool shielded_history_read_full_replay(struct sqlite3 *db,
+    struct shielded_replay_session *session, bool *pending);
+
 /* CREATE TABLE IF NOT EXISTS nullifiers(...) + height index. Idempotent. */
 bool nullifier_kv_ensure_schema(struct sqlite3 *db);
 

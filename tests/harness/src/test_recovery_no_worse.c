@@ -82,7 +82,8 @@ static int nw_count(struct node_db *ndb, const char *sql)
 }
 
 /* Real regtest coinbase and PoW, matching boot_matrix's public builder path. */
-static bool nw_build_one(struct block *blk, const struct chain_params *cp)
+static bool nw_build_block(struct block *blk, const struct chain_params *cp,
+                            int height, const struct uint256 *prev)
 {
     block_init(blk);
     blk->vtx = zcl_calloc(1, sizeof(struct transaction), "nw_replay_coinbase");
@@ -96,19 +97,19 @@ static bool nw_build_one(struct block *blk, const struct chain_params *cp)
     memset(script.data + 3, 0x42, 20);
     script.data[23] = 0x88; script.data[24] = 0xac; script.size = 25;
     struct domain_consensus_coinbase_inputs inputs = {
-        .n_height = 1, .subsidy = get_block_subsidy(1, &cp->consensus),
+        .n_height = height, .subsidy = get_block_subsidy(height, &cp->consensus),
         .miner_script = &script, .params = &cp->consensus,
     };
     struct zcl_result result = domain_consensus_coinbase_build(&inputs, &blk->vtx[0]);
     if (!result.ok) return false;
     blk->header.hashMerkleRoot = compute_merkle_root(&blk->vtx[0].hash, 1);
-    blk->header.hashPrevBlock = cp->consensus.hashGenesisBlock;
+    blk->header.hashPrevBlock = *prev;
     uint256_set_null(&blk->header.hashFinalSaplingRoot);
-    blk->header.nTime = 1700000001u;
+    blk->header.nTime = 1700000000u + (uint32_t)height;
     struct arith_uint256 limit;
     uint256_to_arith(&limit, &cp->consensus.powLimit);
     blk->header.nBits = arith_uint256_get_compact(&limit, false);
-    return mine_block_pow(blk, 1, cp, 0);
+    return mine_block_pow(blk, height, cp, 0);
 }
 
 struct nw_replay {
@@ -147,7 +148,7 @@ static bool nw_replay_open(struct nw_replay *f)
 static bool nw_replay_chain(struct nw_replay *f, int target)
 {
     const struct chain_params *cp = chain_params_get();
-    if (!nw_build_one(&f->one, cp)) return false;
+    if (!nw_build_block(&f->one, cp, 1, &cp->consensus.hashGenesisBlock)) return false;
     block_get_hash(&f->one, &f->hash);
     f->genesis = chainstate_insert_block_index((struct chainstate *)&f->ms, &cp->consensus.hashGenesisBlock);
     struct block_index *one = chainstate_insert_block_index((struct chainstate *)&f->ms, &f->hash);
@@ -202,9 +203,11 @@ static bool nw_flip_body(struct nw_replay *f)
     return fclose(file) == 0 && ok;
 }
 
-static bool nw_replay_refuses_unchanged(struct nw_replay *f)
+static bool nw_replay_refuses_state(struct nw_replay *f, bool require_probe_refusal)
 {
     disk_block_io_close_cache();
+    int kernel_writes = sqlite3_total_changes(progress_store_db());
+    int mirror_writes = sqlite3_total_changes(f->ndb.db);
     uint8_t before[32], after[32], cache[32], cache_after[32];
     uint64_t before_count = 0, after_count = 0, generation = 0, after_generation = 0;
     size_t len = 0;
@@ -214,11 +217,18 @@ static bool nw_replay_refuses_unchanged(struct nw_replay *f)
     bool executable = boot_index_reindex_replay_executable(&f->ms, NULL, false, f->dir);
     bool replayed = reindex_chainstate(&f->ms, &f->view, &f->cache, &f->ndb, f->root, f->dir);
     utxo_commitment_sha3_compute(f->ndb.db, after, &after_count);
-    return captured && !executable && !replayed && before_count == after_count &&
+    return captured && (!require_probe_refusal || !executable) && !replayed && before_count == after_count &&
+        kernel_writes == sqlite3_total_changes(progress_store_db()) &&
+        mirror_writes == sqlite3_total_changes(f->ndb.db) &&
         memcmp(before, after, 32) == 0 &&
         node_db_state_get(&f->ndb, "coins_best_block", cache_after, sizeof(cache_after), &len) && len == 32 &&
         memcmp(cache, cache_after, 32) == 0 &&
         coins_kv_get_authority_generation(progress_store_db(), &after_generation) && generation == after_generation;
+}
+
+static bool nw_replay_refuses_unchanged(struct nw_replay *f)
+{
+    return nw_replay_refuses_state(f, true);
 }
 
 static bool nw_replay_complete(sqlite3 *db)
@@ -303,6 +313,139 @@ static int nw_canonical_replay_case(int target)
     return failures;
 }
 
+/* Admit real H2/H3 indexes and bodies, then hide only the middle body. */
+static bool nw_pending_missing_middle(struct nw_replay *f)
+{
+    const struct chain_params *cp = chain_params_get();
+    struct block_index *prev = active_chain_at(&f->ms.chain_active, 1);
+    struct block_index *middle = NULL;
+    struct disk_block_pos middle_pos;
+    for (int h = 2; h <= 3; h++) {
+        struct block blk;
+        if (!nw_build_block(&blk, cp, h, prev->phashBlock)) return false;
+        struct uint256 hash;
+        block_get_hash(&blk, &hash);
+        struct block_index *pi = chainstate_insert_block_index((struct chainstate *)&f->ms, &hash);
+        struct disk_block_pos pos;
+        disk_block_pos_init(&pos);
+        bool ok = pi && write_block_to_disk(&blk, &pos, f->dir, cp->pchMessageStart);
+        if (ok) {
+            pi->nHeight = h; pi->pprev = prev; pi->nBits = blk.header.nBits;
+            pi->nTx = 1; pi->nChainTx = h + 1; pi->nStatus = BLOCK_VALID_SCRIPTS;
+            ok = block_index_set_have_data_verified(pi, &pos, f->dir);
+        }
+        block_free(&blk);
+        if (!ok) return false;
+        if (h == 2) { middle = pi; middle_pos = pos; }
+        prev = pi;
+    }
+    active_chain_move_window_tip(&f->ms.chain_active, prev);
+    if (!shielded_history_begin_full_replay(progress_store_db(), 3)) return false;
+    disk_block_io_close_cache();
+    middle->nDataPos = UINT32_MAX; /* only the indexed H2 body becomes unreadable */
+    bool refused = nw_replay_refuses_state(f, false);
+    middle->nDataPos = middle_pos.nPos;
+    return refused;
+}
+
+static int nw_pending_replay_case(void)
+{
+    int failures = 0;
+    struct nw_replay f = {0};
+    bool ready = nw_replay_open(&f) && nw_replay_chain(&f, 1);
+    NW_CHECK("pending replay fixture ready", ready);
+    if (!ready) { nw_replay_close(&f); return failures; }
+    sqlite3 *db = progress_store_db();
+    struct block_index *one = block_map_find(&f.ms.map_block_index, &f.hash);
+    NW_CHECK("pending replay bound-body fixture", shielded_history_begin_full_replay(db, 1));
+    const struct uint256 *own_hash = one->phashBlock;
+    one->phashBlock = NULL;
+    NW_CHECK("pending replay unbound body refuses without writes", nw_replay_refuses_state(&f, false));
+    one->phashBlock = own_hash;
+    struct block_index foreign = *f.genesis;
+    struct uint256 foreign_hash = *foreign.phashBlock;
+    foreign_hash.data[0] ^= 1;
+    foreign.phashBlock = &foreign_hash;
+    one->pprev = &foreign;
+    NW_CHECK("pending replay body parent mismatch refuses without writes", nw_replay_refuses_state(&f, false));
+    one->pprev = f.genesis;
+    NW_CHECK("pending replay lower target refuses without state loss",
+        shielded_history_begin_full_replay(db, 0) && nw_replay_refuses_state(&f, false));
+    NW_CHECK("pending replay higher target refuses without state loss",
+        shielded_history_begin_full_replay(db, 2) && nw_replay_refuses_state(&f, false));
+    NW_CHECK("pending replay malformed session refuses without state loss",
+        progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "00", 2) && nw_replay_refuses_state(&f, false));
+    NW_CHECK("pending replay missing middle body refuses without state loss", nw_pending_missing_middle(&f));
+    active_chain_move_window_tip(&f.ms.chain_active, one);
+    NW_CHECK("pending endpoint session is restored",
+        shielded_history_begin_full_replay(db, 1) && progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "2", 1));
+    uint64_t generation = UINT64_MAX;
+    NW_CHECK("pending endpoint prior generation readable", coins_kv_get_authority_generation(db, &generation));
+    seed_integrity_gate_set_node_db_for_testing(&f.ndb);
+    NW_CHECK("pending endpoint restarts replay from genesis",
+        reindex_chainstate(&f.ms, &f.view, &f.cache, &f.ndb, f.root, f.dir));
+    failures += nw_replay_terminal(&f, 1, generation);
+    nw_replay_close(&f);
+    return failures;
+}
+
+static bool nw_event_log_preserves_authority(sqlite3 *db, const char *dir)
+{
+    int writes = sqlite3_total_changes(db);
+    bool opened = boot_ensure_event_log(dir) && boot_ensure_event_log(dir);
+    uint8_t byte;
+    size_t len = 0;
+    bool found = true;
+    bool absent = progress_meta_get(db, COINS_KV_MIGRATION_COMPLETE_KEY, &byte, 1, &len, &found) && !found;
+    absent = absent && progress_meta_get(db, COINS_KV_SELF_FOLDED_KEY, &byte, 1, &len, &found) && !found;
+    return opened && absent && writes == sqlite3_total_changes(db);
+}
+
+static bool nw_migration_stamps_present(sqlite3 *db)
+{
+    const char *keys[] = {COINS_KV_MIGRATION_COMPLETE_KEY, COINS_KV_SELF_FOLDED_KEY};
+    for (unsigned i = 0; i < 2; i++) {
+        uint8_t value = 0;
+        size_t len = 0;
+        bool found = false;
+        if (!progress_meta_get(db, keys[i], &value, 1, &len, &found) ||
+            !found || len != 1 || value != 1) return false;
+    }
+    return true;
+}
+
+static int nw_pending_migration_case(void)
+{
+    int failures = 0;
+    struct nw_replay f = {0};
+    bool ready = nw_replay_open(&f);
+    NW_CHECK("pending migration fixture open", ready);
+    if (!ready) { nw_replay_close(&f); return failures; }
+    sqlite3 *db = progress_store_db();
+    uint8_t txid[32] = {0x42};
+    NW_CHECK("pending migration unstamped resident coins fixture",
+        coins_kv_ensure_schema(db) && coins_kv_add(db, txid, 0, 5000, 1, false, NULL, 0) &&
+        progress_meta_delete(db, COINS_KV_MIGRATION_COMPLETE_KEY) &&
+        progress_meta_delete(db, COINS_KV_SELF_FOLDED_KEY) &&
+        shielded_history_begin_full_replay(db, 3));
+    NW_CHECK("pending first/already-open event log cannot stamp authority",
+        nw_event_log_preserves_authority(db, f.root));
+    boot_stop_projection_storage();
+    NW_CHECK("make replay session invalid", progress_meta_delete(db, SHIELDED_REPLAY_NEXT_KEY));
+    NW_CHECK("invalid first/already-open event log cannot stamp authority",
+        nw_event_log_preserves_authority(db, f.root));
+    boot_stop_projection_storage();
+    NW_CHECK("retire replay migration fixture",
+        sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
+        shielded_history_cancel_full_replay_in_tx(db) &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+    NW_CHECK("absent replay still permits ordinary authority migration",
+        boot_ensure_event_log(f.root) && nw_migration_stamps_present(db));
+    boot_stop_projection_storage();
+    nw_replay_close(&f);
+    return failures;
+}
+
 int test_recovery_no_worse(void);
 int test_recovery_no_worse(void)
 {
@@ -310,6 +453,8 @@ int test_recovery_no_worse(void)
     int failures = 0;
     failures += nw_canonical_replay_case(1);
     failures += nw_canonical_replay_case(0);
+    failures += nw_pending_replay_case();
+    failures += nw_pending_migration_case();
 
     /* ════════════════════════════════════════════════════════════════
      * SECTION B — reindex-chainstate / coins-state clear: compose the

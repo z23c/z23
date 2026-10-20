@@ -16,6 +16,7 @@
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <limits.h>
 
 #define NF_ACTIVATION_KEY "nullifier_kv.activation_cursor"
 static bool marker_set_i64_in_tx(sqlite3 *db, const char *key, int64_t value)
@@ -77,6 +78,42 @@ static bool marker_read_i64(sqlite3 *db, const char *key,
     }
     *value_out = value;
     *found_out = true;
+    return true;
+}
+
+bool shielded_history_read_full_replay(sqlite3 *db,
+    struct shielded_replay_session *session, bool *pending)
+{
+    if (!db || !session || !pending) {
+        LOG_WARN("nullifier_kv", "[shielded_history] invalid session read arguments");
+        return false;
+    }
+    *session = (struct shielded_replay_session){0};
+    *pending = false;
+    const char *keys[] = {SHIELDED_REPLAY_TARGET_KEY, SHIELDED_REPLAY_NEXT_KEY,
+        SHIELDED_REPLAY_SPROUT_STARTED_KEY, SHIELDED_REPLAY_SAPLING_STARTED_KEY};
+    int64_t values[4] = {0};
+    unsigned found_count = 0;
+    bool ok = true;
+    progress_store_tx_lock();
+    for (unsigned i = 0; i < 4; i++) {
+        bool found = false;
+        if (!marker_read_i64(db, keys[i], &values[i], &found)) {
+            ok = false;
+            break;
+        }
+        found_count += found ? 1 : 0;
+    }
+    progress_store_tx_unlock();
+    if (!ok) return false;
+    if (found_count == 0) return true;
+    if (found_count != 4 || values[0] >= INT_MAX ||
+        values[1] > values[0] + 1 || values[2] > 1 || values[3] > 1) {
+        LOG_WARN("nullifier_kv", "[shielded_history] incomplete or out-of-range replay session");
+        return false;
+    }
+    *session = (struct shielded_replay_session){values[0], values[1], values[2], values[3]};
+    *pending = true;
     return true;
 }
 
