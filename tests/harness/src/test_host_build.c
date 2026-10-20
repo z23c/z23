@@ -431,7 +431,7 @@ _test_next:;
     return failures;
 }
 
-/* Tickets of 300 waiters, past any fixed listing bound: `live` of them keep
+/* Tickets past fixed listing bounds: `live` of them keep
  * their flock (the last `live` names), the rest are dead files. */
 static size_t hbt_make_tickets(const char *fifo, size_t total, size_t live,
                                int *fds)
@@ -456,7 +456,7 @@ static size_t hbt_make_tickets(const char *fifo, size_t total, size_t live,
 
 static int hbt_long_queue_tests(const char *tmp)
 {
-    enum { TICKETS = 300 };
+    enum { TICKETS = 600 };
     int failures = 0;
     int fds[TICKETS];
     struct ba_config cfg;
@@ -464,21 +464,34 @@ static int hbt_long_queue_tests(const char *tmp)
     char dir[HBT_PATH], fifo[HBT_PATH + 16], marker[HBT_PATH + 16];
     size_t held;
 
-    TEST("host build: the status lists every waiter of a queue longer than 256") {
+    TEST("host build: status includes all 600 live waiters") {
         (void)snprintf(dir, sizeof(dir), "%s/long", tmp);
         ASSERT(mkdir(dir, 0700) == 0);
         ASSERT(hbt_config(&cfg, dir, 1));
         (void)snprintf(fifo, sizeof(fifo), "%s/state/z23.fifo", dir);
         (void)mkdir(cfg.state_dir, 0700);
         held = hbt_make_tickets(fifo, TICKETS, TICKETS, fds);
-        ASSERT_EQ(held, (size_t)TICKETS);
         json_init(&doc);
         json_set_object(&doc);
-        ASSERT(ba_status(cfg.state_dir, &doc));
-        ASSERT_EQ(hbt_array_size(&doc, "queued"), (size_t)TICKETS);
+        bool observed = ba_status(cfg.state_dir, &doc);
+        size_t queued = hbt_array_size(&doc, "queued");
         json_free(&doc);
+        bool refused[2];
+        for (unsigned attempt = 0; attempt < 2; attempt++) {
+            json_init(&doc);
+            json_set_object(&doc);
+            zcl_alloc_fault_fail_nth("build status locks", attempt + 1);
+            refused[attempt] = !ba_status(cfg.state_dir, &doc);
+            zcl_alloc_fault_clear();
+            json_free(&doc);
+        }
         for (size_t i = 0; i < held; i++)
             close(fds[i]);
+        ASSERT_EQ(held, (size_t)TICKETS);
+        ASSERT(observed);
+        ASSERT_EQ(queued, (size_t)TICKETS);
+        ASSERT(refused[0]);
+        ASSERT(refused[1]);
         PASS();
     }
 

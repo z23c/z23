@@ -17,13 +17,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-enum { BS_LOCKS_MAX = 512, BS_TEXT_MAX = 240 };
+enum { BS_TEXT_MAX = 240 };
 
 struct bs_record {
     int pid, cpu, ram, io, priority, width;
@@ -280,7 +281,7 @@ bool ba_status_broker(const char *root, uid_t uid, ba_scope_probe probe,
 }
 
 struct bs_lock {
-    int pid;
+    int pid, owner;
     unsigned dev_major, dev_minor;
     unsigned long inode;
     bool write;
@@ -290,32 +291,48 @@ struct bs_lock {
  * the live process that still holds its open file description (0: none
  * found). The owners are looked up once per status call. */
 struct bs_view {
-    struct bs_lock locks[BS_LOCKS_MAX];
-    int owner[BS_LOCKS_MAX];
-    size_t count;
+    struct bs_lock *locks;
+    size_t count, capacity;
     bool scanned;
     uid_t uid;                       /* whose processes may be scanned */
 };
 
-static void bs_load_locks(struct bs_view *v)
+static bool bs_lock_append(struct bs_view *v, struct bs_lock lock)
+{
+    if (v->count == v->capacity) {
+        size_t capacity = v->capacity ? v->capacity * 2 : 64;
+        if (capacity < v->capacity || capacity > SIZE_MAX / sizeof(*v->locks))
+            return false;
+        void *grown = zcl_realloc(v->locks, capacity * sizeof(*v->locks),
+                                  "build status locks");
+        if (!grown) return false;
+        v->locks = grown;
+        v->capacity = capacity;
+    }
+    v->locks[v->count++] = lock;
+    return true;
+}
+
+static bool bs_load_locks(struct bs_view *v)
 {
     char line[256];
     FILE *f = fopen("/proc/locks", "r");
-    memset(v->owner, 0, sizeof(v->owner));
-    v->count = 0;
-    v->scanned = false;
-    while (f && v->count < BS_LOCKS_MAX && fgets(line, sizeof(line), f)) {
+    if (!f) return false;
+    bool ok = true;
+    while (fgets(line, sizeof(line), f)) {
         char kind[16], mode[16];
-        struct bs_lock l;
+        struct bs_lock l = {0};
+        if (!strchr(line, '\n') && !feof(f)) { ok = false; break; }
         if (sscanf(line, "%*d: %15s %*s %15s %d %x:%x:%lu", kind, mode,
                    &l.pid, &l.dev_major, &l.dev_minor, &l.inode) == 6 &&
             strcmp(kind, "FLOCK") == 0) {
             l.write = strcmp(mode, "WRITE") == 0;
-            v->locks[v->count++] = l;
+            if (!bs_lock_append(v, l)) { ok = false; break; }
         }
     }
-    if (f)
-        fclose(f);
+    if (ferror(f)) ok = false;
+    if (fclose(f) != 0) ok = false;
+    return ok;
 }
 
 static bool bs_join(char *out, size_t cap, const char *dir, const char *name)
@@ -342,14 +359,14 @@ static void bs_claim(struct bs_view *v, unsigned maj, unsigned min,
         if (v->locks[i].inode != inode || v->locks[i].dev_major != maj ||
             v->locks[i].dev_minor != min)
             continue;
-        if (v->owner[i] == pid)
+        if (v->locks[i].owner == pid)
             return;
-        if (v->owner[i] == 0 && slot == v->count &&
+        if (v->locks[i].owner == 0 && slot == v->count &&
             !bs_pid_visible(v->locks[i].pid))
             slot = i;
     }
     if (slot < v->count)
-        v->owner[slot] = pid;
+        v->locks[slot].owner = pid;
 }
 
 /* The kernel reports a flock under the pid that first took it, and the
@@ -421,7 +438,7 @@ static size_t bs_holders(struct bs_view *v, const char *path, int *pids,
             if (!bs_pid_visible(v->locks[i].pid) && !v->scanned)
                 bs_scan_owners(v, v->uid);
             pids[n++] = bs_pid_visible(v->locks[i].pid) ? v->locks[i].pid
-                                                       : v->owner[i];
+                                                       : v->locks[i].owner;
         }
         *write = *write || v->locks[i].write;
     }
@@ -526,15 +543,15 @@ static size_t bs_push_waiters(struct json_value *out, const char *key,
 #endif /* __linux__ */
 
 #ifndef _WIN32
-bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out)
-{
 #ifdef __linux__
-    struct bs_view view;
+static bool bs_status_as(const char *state_dir, uid_t uid, struct json_value *out,
+                          struct bs_view *snapshot)
+{
+    struct bs_view view = *snapshot;
     char dir[BA_PATH_MAX], heavy[BA_PATH_MAX];
     int pids[4];
     bool exclusive = false;
     (void)json_push_kv_str(out, "state_dir", state_dir);
-    bs_load_locks(&view);
     view.uid = uid;
     bs_push_lanes(out, state_dir, &view);
     if (!bs_join(dir, sizeof(dir), state_dir, "z23.fifo") ||
@@ -552,8 +569,17 @@ bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out)
         broker = dir;
     }
     return ba_status_broker(broker, uid, NULL, NULL, out);
+}
+#endif
+
+bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out)
+{
+#ifdef __linux__
+    struct bs_view view = {0};
+    bool ok = bs_load_locks(&view) && bs_status_as(state_dir, uid, out, &view);
+    free(view.locks);
+    return ok;
 #else
-    /* No procfs observation means unavailable, never an empty queue. */
     (void)state_dir;
     (void)uid;
     (void)out;
