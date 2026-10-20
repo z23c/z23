@@ -14,7 +14,10 @@
 #include "test/test_core.h"
 
 #include "command/build_admit.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
+#include "kernel/command_registry.h"
+#include "config/command_catalog.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -626,6 +629,215 @@ _test_next:;
     return failures;
 }
 
+#ifdef __linux__
+static int hbt_scope_probe(const char *scope, uid_t uid, void *context)
+{
+    (void)scope;
+    (void)uid;
+    return *(const int *)context;
+}
+
+static bool hbt_broker_record(const char *root, const char *part,
+                              unsigned long long tick, const char *version)
+{
+    char path[HBT_PATH + 128];
+    (void)snprintf(path, sizeof(path), "%s/%s/%d-%llu-100", root, part,
+                   (int)getpid(), tick);
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fprintf(f, "%d %llu devbuild-%d-%llu-100.scope z23 release "
+        "16 20 4 200 100 %s 2\n", (int)getpid(), tick, (int)getpid(),
+        tick, version) > 0;
+    return fclose(f) == 0 && ok;
+}
+
+static void hbt_broker_doc(struct json_value *doc)
+{
+    struct json_value rows = {0};
+    json_set_object(doc);
+    json_set_array(&rows);
+    (void)json_push_kv(doc, "running", &rows);
+    (void)json_push_kv(doc, "queued", &rows);
+    json_free(&rows);
+}
+
+static bool hbt_broker_malformed(const char *root, unsigned long long tick,
+                                 unsigned kind)
+{
+    char path[HBT_PATH + 128], text[1024];
+    (void)snprintf(path, sizeof(path), "%s/running/%d-%llu-100", root,
+                   (int)getpid(), tick);
+    int n = snprintf(text, sizeof(text),
+        "%d %llu devbuild-%d-%llu-100.scope z23 release 16 20 4 200 100 broker-v5 2",
+        (int)getpid(), tick, (int)getpid(), tick);
+    if (n <= 0 || (size_t)n + 16 >= sizeof(text)) return false;
+    size_t size = (size_t)n;
+    if (kind == 0) {
+        memcpy(text + size, "\0trailing", 9);
+        size += 9;
+    } else if (kind == 1) {
+        memset(text + size, 'x', sizeof(text) - size);
+        size = sizeof(text);
+    } else if (kind == 2) {
+        text[0] = 'x';
+    } else {
+        memcpy(text + size, " extra", 6);
+        size += 6;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(text, 1, size, f) == size;
+    return fclose(f) == 0 && ok;
+}
+
+static unsigned long long hbt_start_tick(void)
+{
+    char text[4096];
+    if (!hbt_slurp("/proc/self/stat", text, sizeof(text))) return 0;
+    char *at = strrchr(text, ')');
+    if (!at) return 0;
+    at += 2;
+    for (int field = 3; field < 22; field++) {
+        at = strchr(at, ' ');
+        if (!at) return 0;
+        at++;
+    }
+    return strtoull(at, NULL, 10);
+}
+
+static int hbt_broker_tests(const char *tmp)
+{
+    int failures = 0;
+    TEST("host build: broker records preserve live, stale and unknown scope states") {
+        char root[HBT_PATH], path[HBT_PATH + 32];
+        struct json_value doc = {0};
+        unsigned long long tick = hbt_start_tick();
+        int scope = 0;
+        ASSERT(tick > 0);
+        (void)snprintf(root, sizeof(root), "%s/broker", tmp);
+        ASSERT(mkdir(root, 0700) == 0);
+        (void)snprintf(path, sizeof(path), "%s/running", root);
+        ASSERT(mkdir(path, 0700) == 0);
+        (void)snprintf(path, sizeof(path), "%s/queue-v5", root);
+        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(hbt_broker_record(root, "running", tick, "broker-v5"));
+        ASSERT(hbt_broker_record(root, "queue-v5", tick, "broker-v5"));
+        hbt_broker_doc(&doc);
+        zcl_alloc_fault_fail_next("build_status_broker_view");
+        bool allocation_refused =
+            !ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc);
+        zcl_alloc_fault_clear();
+        ASSERT(allocation_refused);
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)0);
+        ASSERT_EQ(hbt_array_size(&doc, "queued"), (size_t)0);
+        ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)1);
+        ASSERT_EQ(hbt_array_size(&doc, "queued"), (size_t)0);
+        const struct json_value *row = json_at(json_get(&doc, "running"), 0);
+        ASSERT(strcmp(json_get_str(json_get(row, "source")), "broker-v5") == 0);
+        ASSERT(json_get(row, "cmd") == NULL && json_get(row, "cwd") == NULL);
+        json_free(&doc);
+        ASSERT(hbt_broker_record(root, "running", tick + 1, "broker-v5"));
+        ASSERT(hbt_broker_record(root, "queue-v5", tick + 1, "broker-v5"));
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)1);
+        ASSERT_EQ(hbt_array_size(&doc, "queued"), (size_t)0);
+        json_free(&doc);
+        scope = 1;
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)2);
+        json_free(&doc);
+        scope = -1;
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)2);
+        ASSERT(strcmp(json_get_str(json_get(&doc, "broker_coverage")), "unknown") == 0);
+        json_free(&doc);
+        ASSERT(hbt_broker_record(root, "running", tick + 1, "broker-v6"));
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)1);
+        ASSERT(json_get_int(json_get(&doc, "broker_unknown_records")) > 0);
+        json_free(&doc);
+        for (unsigned kind = 0; kind < 4; kind++) {
+            ASSERT(hbt_broker_malformed(root, tick + 1, kind));
+            hbt_broker_doc(&doc);
+            ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+            ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)1);
+            ASSERT(strcmp(json_get_str(json_get(&doc, "broker_coverage")), "unknown") == 0);
+            json_free(&doc);
+        }
+        ASSERT(hbt_broker_record(root, "running", tick + 1, "broker-v5"));
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(root, geteuid(), NULL, NULL, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)2);
+        ASSERT(strcmp(json_get_str(json_get(&doc, "broker_coverage")), "unknown") == 0);
+        json_free(&doc);
+        (void)snprintf(path, sizeof(path), "%s/running/invalid", root);
+        ASSERT(symlink("/dev/null", path) == 0);
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT(json_get_int(json_get(&doc, "broker_unknown_records")) >= 2);
+        json_free(&doc);
+        (void)snprintf(path, sizeof(path), "%s/absent", root);
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(path, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT(strcmp(json_get_str(json_get(&doc, "broker_coverage")), "unknown") == 0);
+        json_free(&doc);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hbt_broker_display_tests(const char *tmp)
+{
+    int failures = 0;
+    TEST("host build: broker display limit retains exact omitted count and bounded JSON") {
+        char root[HBT_PATH], path[HBT_PATH + 32];
+        struct json_value doc = {0};
+        int scope = 1;
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), "ops.host.jobs", NULL);
+        ASSERT(spec != NULL);
+        ASSERT_EQ(spec->budget_bytes, (size_t)65536);
+        (void)snprintf(root, sizeof(root), "%s/broker-display", tmp);
+        ASSERT(mkdir(root, 0700) == 0);
+        (void)snprintf(path, sizeof(path), "%s/running", root);
+        ASSERT(mkdir(path, 0700) == 0);
+        (void)snprintf(path, sizeof(path), "%s/queue-v5", root);
+        ASSERT(mkdir(path, 0700) == 0);
+        for (unsigned i = 0; i < BA_BROKER_DISPLAY_MAX; i++)
+            ASSERT(hbt_broker_record(root, "running", 1000 + i, "broker-v5"));
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)BA_BROKER_DISPLAY_MAX);
+        ASSERT_EQ(json_get_int(json_get(&doc, "broker_omitted")), 0);
+        ASSERT(strcmp(json_get_str(json_get(&doc, "broker_coverage")), "observed") == 0);
+        ASSERT(json_write(&doc, NULL, 0) + 8192 < (size_t)spec->budget_bytes);
+        json_free(&doc);
+        ASSERT(hbt_broker_record(root, "running", 2000, "broker-v5"));
+        /* Duplicate every running ID in the queue, including the omitted ID. */
+        for (unsigned i = 0; i < BA_BROKER_DISPLAY_MAX; i++)
+            ASSERT(hbt_broker_record(root, "queue-v5", 1000 + i, "broker-v5"));
+        ASSERT(hbt_broker_record(root, "queue-v5", 2000, "broker-v5"));
+        hbt_broker_doc(&doc);
+        ASSERT(ba_status_broker(root, geteuid(), hbt_scope_probe, &scope, &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), (size_t)BA_BROKER_DISPLAY_MAX);
+        ASSERT_EQ(hbt_array_size(&doc, "queued"), (size_t)0);
+        ASSERT_EQ(json_get_int(json_get(&doc, "broker_omitted")), 1);
+        ASSERT(strcmp(json_get_str(json_get(&doc, "broker_coverage")), "partial") == 0);
+        ASSERT(json_write(&doc, NULL, 0) + 8192 < (size_t)spec->budget_bytes);
+        json_free(&doc);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+#endif
+
 int test_host_build(void)
 {
     int failures = 0;
@@ -648,6 +860,10 @@ int test_host_build(void)
     failures += hbt_owner_tests(tmp);
 #endif
     failures += hbt_reserve_env_tests();
+#ifdef __linux__
+    failures += hbt_broker_tests(tmp);
+    failures += hbt_broker_display_tests(tmp);
+#endif
     (void)test_rm_rf_recursive(tmp);
     if (failures == 0)
         printf("test_host_build: all passed\n");

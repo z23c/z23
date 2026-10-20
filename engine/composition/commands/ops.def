@@ -982,7 +982,11 @@ ZCL_COMMAND_READY_READ(
     "Build lanes held, queued tickets in FIFO order and landing markers, "
     "read from /proc/locks at call time, with each holder's command line and "
     "working directory when visible. Covers jobs started by this command and "
-    "by the installed devbuild wrapper. Takes no lock.", 0,
+    "by the installed devbuild wrapper. Broker-v5 reservations are also "
+    "observed without command lines or working directories; unknown liveness "
+    "and incomplete coverage are labeled. The unlocked observation may race "
+    "with admission transitions. Displays at most 32 broker rows with an "
+    "omitted count. Takes no lock.", 65536,
     "host,build,queue,jobs,status",
     "zcl.command.empty_input.v1", "zcl.host_jobs.v1", "", "",
     "z23 ops host jobs",

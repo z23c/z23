@@ -2,16 +2,20 @@
  *
  * purpose: report the running and queued build jobs of command/build_admit.h
  *          as JSON. Holders come from /proc/locks, which lists every flock
- *          with its owner and inode, so jobs started by the installed
- *          devbuild wrapper appear alongside native ones. The read takes no
- *          lock and changes nothing.
+ *          with its owner and inode. The installed broker's bounded records
+ *          are observed separately, with PID/start-tick and scope liveness.
+ *          The read takes no lock and changes nothing.
  */
 
 #include "command/build_admit.h"
+#include "base/safe_alloc.h"
 
 #ifndef _WIN32
 
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +24,260 @@
 #include <unistd.h>
 
 enum { BS_LOCKS_MAX = 512, BS_TEXT_MAX = 240 };
+
+struct bs_record {
+    int pid, cpu, ram, io, priority, width;
+    unsigned long long tick, queued;
+    char scope[128], project[16], class_name[16];
+};
+
+static bool bs_one_of(const char *value, const char *csv)
+{
+    char pattern[64];
+    (void)snprintf(pattern, sizeof(pattern), ",%s,", value);
+    return strstr(csv, pattern) != NULL;
+}
+
+static bool bs_numeric_fields(const char *text)
+{
+    unsigned field = 0;
+    const char *at = text;
+    while (*at) {
+        at += strspn(at, " \t\r\n");
+        if (!*at) break;
+        size_t n = strcspn(at, " \t\r\n");
+        bool numeric = field == 0 || field == 1 ||
+                       (field >= 5 && field <= 9) || field == 11;
+        size_t limit = field == 1 || field == 9 ? 19 : 8;
+        if (numeric && (n > limit || strspn(at, "0123456789") < n))
+            return false;
+        at += n;
+        field++;
+    }
+    return field == 12;
+}
+
+static bool bs_between(int value, int low, int high)
+{
+    return value >= low && value <= high;
+}
+
+static bool bs_record_bounds(const struct bs_record *r)
+{
+    /* Observation format bound, not admission policy: scalar int tokens are
+     * at most eight decimal digits (bs_numeric_fields), safely below INT_MAX.
+     * The observer does not enforce current CPU/memory/I/O reservation caps. */
+    return r->pid > 0 && r->tick > 0 && r->queued > 0 && r->queued <= LLONG_MAX &&
+        bs_between(r->cpu, 1, 99999999) && bs_between(r->ram, 1, 99999999) &&
+        bs_between(r->io, 1, 99999999) && bs_between(r->priority, 0, 99999999) &&
+        bs_between(r->width, 1, 99999999);
+}
+
+static bool bs_record_parse(const char *text, const char *name,
+                             struct bs_record *r)
+{
+    char version[32], tail, expected[128], scope[160];
+    if (!bs_numeric_fields(text) || sscanf(text,
+        "%d %llu %127s %15s %15s %d %d %d %d %llu %31s %d %c",
+        &r->pid, &r->tick, r->scope, r->project, r->class_name,
+        &r->cpu, &r->ram, &r->io, &r->priority, &r->queued,
+        version, &r->width, &tail) != 12)
+        return false;
+    (void)snprintf(expected, sizeof(expected), "%d-%llu-%llu",
+                   r->pid, r->tick, r->queued);
+    (void)snprintf(scope, sizeof(scope), "devbuild-%s.scope", expected);
+    return strcmp(name, expected) == 0 && strcmp(r->scope, scope) == 0 &&
+        strcmp(version, "broker-v5") == 0 && bs_record_bounds(r) &&
+        bs_one_of(r->project, ",z23,qedc,exclusive,") &&
+        bs_one_of(r->class_name, ",legacy,hotload,release,normal,compact,background,exclusive,");
+}
+
+static int bs_wrapper_live(const struct bs_record *r, uid_t uid)
+{
+    char path[64], text[4096];
+    struct stat st;
+    (void)snprintf(path, sizeof(path), "/proc/%d/stat", r->pid);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return errno == ENOENT ? 0 : -1;
+    bool read_ok = fstat(fileno(f), &st) == 0 && st.st_uid == uid &&
+                   fgets(text, sizeof(text), f) != NULL;
+    fclose(f);
+    if (!read_ok)
+        return -1;
+    char *at = strrchr(text, ')');
+    if (!at)
+        return -1;
+    at += 2;
+    for (int field = 3; field < 22; field++) {
+        at = strchr(at, ' ');
+        if (!at) return -1;
+        at++;
+    }
+    char *end;
+    unsigned long long tick = strtoull(at, &end, 10);
+    return end != at && tick == r->tick;
+}
+
+static int bs_scope_local(const char *scope, uid_t uid, void *context)
+{
+    char path[512], line[128];
+    (void)context;
+    (void)snprintf(path, sizeof(path),
+        "/sys/fs/cgroup/user.slice/user-%lu.slice/user@%lu.service/development.slice/%s/cgroup.events",
+        (unsigned long)uid, (unsigned long)uid, scope);
+    FILE *f = fopen(path, "r");
+    int result = -1, populated;
+    while (f && fgets(line, sizeof(line), f))
+        if (sscanf(line, "populated %d", &populated) == 1)
+            result = populated == 1 ? 1 : -1;
+    if (f) fclose(f);
+    return result;
+}
+
+static bool bs_read_record(int dir, const char *name, uid_t uid, struct bs_record *r)
+{
+    char text[512];
+    int fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return false;
+    struct stat st;
+    ssize_t n = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == uid
+        ? read(fd, text, sizeof(text) - 1) : -1;
+    close(fd);
+    if (n <= 0 || n >= (ssize_t)sizeof(text) - 1 || memchr(text, 0, (size_t)n))
+        return false;
+    text[n] = 0;
+    return bs_record_parse(text, name, r);
+}
+
+struct bs_broker_view {
+    char ids[4096][64];
+    size_t count, displayed, omitted, unknown;
+};
+
+static bool bs_seen(const struct bs_broker_view *view, const char *name)
+{
+    for (size_t i = 0; i < view->count; i++)
+        if (strcmp(view->ids[i], name) == 0)
+            return true;
+    return false;
+}
+
+static bool bs_broker_row(struct json_value *rows, const char *name,
+                           const struct bs_record *r, const char *live)
+{
+    struct json_value row = {0};
+    json_set_object(&row);
+    bool ok = json_push_kv_str(&row, "source", "broker-v5") &&
+        json_push_kv_str(&row, "id", name) && json_push_kv_int(&row, "pid", r->pid) &&
+        json_push_kv_str(&row, "project", r->project) &&
+        json_push_kv_str(&row, "class", r->class_name) &&
+        json_push_kv_str(&row, "liveness", live) &&
+        json_push_kv_int(&row, "cpu_tokens", r->cpu) &&
+        json_push_kv_int(&row, "ram_gib", r->ram) &&
+        json_push_kv_int(&row, "io_tokens", r->io) &&
+        json_push_kv_int(&row, "priority", r->priority) &&
+        json_push_kv_int(&row, "qualification_width", r->width) &&
+        json_push_kv_int(&row, "queued_ns", (int64_t)r->queued) &&
+        json_push_back(rows, &row);
+    json_free(&row);
+    return ok;
+}
+
+static bool bs_broker_entry(int fd, const char *name, bool is_running,
+    uid_t uid, ba_scope_probe probe, void *context, struct json_value *rows,
+    struct bs_broker_view *view)
+{
+    struct bs_record r;
+    if (!bs_read_record(fd, name, uid, &r)) {
+        view->unknown++;
+        return true;
+    }
+    if (!is_running && bs_seen(view, name)) return true;
+    int live = bs_wrapper_live(&r, uid);
+    if (is_running && live != 1) live = probe(r.scope, uid, context);
+    if (live == 0) return true;
+    if (live < 0) view->unknown++;
+    if (is_running) {
+        (void)snprintf(view->ids[view->count], sizeof(view->ids[0]), "%s", name);
+        view->count++;
+    }
+    if (view->displayed == BA_BROKER_DISPLAY_MAX) {
+        view->omitted++;
+        return true;
+    }
+    view->displayed++;
+    return bs_broker_row(rows, name, &r, live == 1 ? "live" : "unknown");
+}
+
+static bool bs_broker_scan(const char *root, const char *part, uid_t uid,
+    ba_scope_probe probe, void *context, struct json_value *rows,
+    struct bs_broker_view *view)
+{
+    char path[BA_PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", root, part) >= (int)sizeof(path))
+        return false;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    DIR *dir = fd < 0 ? NULL : fdopendir(fd);
+    if (!dir) {
+        if (fd >= 0) close(fd);
+        view->unknown++;
+        return true;
+    }
+    size_t count = 0;
+    bool ok = true;
+    for (;;) {
+        errno = 0;
+        struct dirent *e = readdir(dir);
+        if (!e) {
+            if (errno) view->unknown++;
+            break;
+        }
+        if (e->d_name[0] == '.') continue;
+        if (++count > 4096) { ok = false; break; }
+        if (!bs_broker_entry(dirfd(dir), e->d_name, strcmp(part, "running") == 0,
+                             uid, probe, context, rows, view)) {
+            ok = false; break;
+        }
+    }
+    closedir(dir);
+    return ok;
+}
+
+static bool bs_broker_coverage(struct json_value *out, const struct bs_broker_view *v, bool ok)
+{
+    const char *coverage = !ok || v->unknown ? "unknown" : v->omitted ? "partial" : "observed";
+    return json_push_kv_str(out, "observation", "unlocked; transitions may race") &&
+        json_push_kv_str(out, "broker_coverage", coverage) &&
+        json_push_kv_int(out, "broker_displayed", (int64_t)v->displayed) &&
+        json_push_kv_int(out, "broker_omitted", (int64_t)v->omitted) &&
+        json_push_kv_bool(out, "broker_scan_complete", ok) &&
+        json_push_kv_int(out, "broker_unknown_records", (int64_t)v->unknown) && ok;
+}
+
+bool ba_status_broker(const char *root, uid_t uid, ba_scope_probe probe,
+                      void *context, struct json_value *out)
+{
+    struct json_value *running = NULL, *queued = NULL;
+    if (!out || out->type != JSON_OBJ) return false;
+    for (size_t i = 0; i < out->num_children; i++) {
+        if (strcmp(out->keys[i], "running") == 0) running = &out->children[i];
+        if (strcmp(out->keys[i], "queued") == 0) queued = &out->children[i];
+    }
+    if (!root || root[0] != '/' || !running || !queued) return false;
+    if (running->type != JSON_ARR || queued->type != JSON_ARR) return false;
+    struct bs_broker_view *view =
+        zcl_calloc(1, sizeof(*view), "build_status_broker_view");
+    if (!view) return false;
+    if (!probe) probe = bs_scope_local;
+    bool ok = bs_broker_scan(root, "running", uid, probe, context,
+                             running, view);
+    ok = bs_broker_scan(root, "queue-v5", uid, probe, context,
+                        queued, view) && ok;
+    bool result = bs_broker_coverage(out, view, ok);
+    free(view);
+    return result;
+}
 
 struct bs_lock {
     int pid;
@@ -215,6 +473,7 @@ static void bs_push_lanes(struct json_value *out, const char *state_dir,
             struct json_value row;
             json_init(&row);
             json_set_object(&row);
+            (void)json_push_kv_str(&row, "source", "legacy-locks");
             (void)json_push_kv_int(&row, "lane", i + 1);
             bs_push_process(&row, pids[k]);
             (void)json_push_back(&rows, &row);
@@ -248,6 +507,7 @@ static size_t bs_push_waiters(struct json_value *out, const char *key,
             continue;
         json_init(&row);
         json_set_object(&row);
+        (void)json_push_kv_str(&row, "source", "legacy-locks");
         (void)json_push_kv_int(&row, "position", (int64_t)++live);
         (void)json_push_kv_str(&row, "ticket", names[i]);
         (void)json_push_kv_int(&row, "enqueued",
@@ -282,7 +542,12 @@ bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out)
     (void)bs_push_waiters(out, "landing", dir, &view);
     (void)bs_holders(&view, heavy, pids, 4, &exclusive);
     (void)json_push_kv_bool(out, "exclusive_build", exclusive);
-    return true;
+    const char *broker = getenv("DEVBUILD_BROKER_STATE");
+    if (!broker || !broker[0]) {
+        if (!bs_join(dir, sizeof(dir), state_dir, "broker-v1")) return false;
+        broker = dir;
+    }
+    return ba_status_broker(broker, uid, NULL, NULL, out);
 }
 
 bool ba_status(const char *state_dir, struct json_value *out)

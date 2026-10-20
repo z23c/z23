@@ -295,10 +295,11 @@ void zcl_native_handle_ops_host_jobs(const struct zcl_command_request *request,
     if (!ohb_locations(&cfg) || !ba_status(cfg.state_dir, &reply->data)) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-            "host_jobs.state_unresolved", "anchor",
+            "host_jobs.observation_failed", "observe",
             false, false,
-            "HOME is unset or not absolute, or the state path is too long",
-            "HOME");
+            "host build observation could not be completed: check state "
+            "path resolution, allocation, or bounded record-scan failures",
+            "ops.host.jobs");
         return;
     }
     reply->status = ZCL_COMMAND_STATUS_PASSED;

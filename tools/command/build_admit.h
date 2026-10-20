@@ -37,6 +37,7 @@
 
 enum { BA_PATH_MAX = 1024, BA_CPU_LIST_MAX = 256, BA_MAX_LANES = 4,
        BA_NAME_MAX = 64 };
+enum { BA_BROKER_DISPLAY_MAX = 32 };
 
 /* Free-space reserve in GiB when DEVBUILD_RESERVE_GIB is unset. It is the
  * floor the installed devbuild wrapper admits with, so both admit alike. */
@@ -105,13 +106,21 @@ void ba_slot_release(struct ba_slot *slot);
  * status above when the job was not admitted. */
 int ba_run(const struct ba_config *cfg, const char *const *argv, int argc);
 
-/* Running and queued jobs as JSON: lane holders and ticket holders read from
- * /proc/locks, with command line and working directory when visible. */
+/* Running and queued jobs as JSON: legacy lock holders plus installed broker
+ * records. Broker rows disclose reservations and liveness, never cmd/cwd.
+ * Coverage is observational; unreadable or uncertain records are labeled. */
 bool ba_status(const char *state_dir, struct json_value *out);
 
 #ifndef _WIN32
 /* The same, with owner lookup limited to processes of user `uid`. */
 bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out);
+/* Read-only broker observation. Probe returns 1 active, 0 inactive, -1
+ * unknown. NULL uses the local cgroup probe, which proves only active state;
+ * absent, empty or unreadable cgroups remain unknown. No scope command runs.
+ * out must contain running/queued arrays, to which broker rows are appended. */
+typedef int (*ba_scope_probe)(const char *scope, uid_t uid, void *context);
+bool ba_status_broker(const char *root, uid_t uid, ba_scope_probe probe,
+                      void *context, struct json_value *out);
 #endif
 
 #endif /* ZCL_BUILD_ADMIT_H */
