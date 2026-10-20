@@ -127,6 +127,24 @@ static int pht_case_table(void)
     return failures;
 }
 
+static int pht_case_status_text(void)
+{
+    int failures = 0;
+    TEST_CASE("every status has a distinct code and a non-empty next action") {
+        for (int a = 0; a <= PLUGIN_HOSTCALL_ERR_BUFFER; a++) {
+            const char *code = plugin_hostcall_status_code((enum plugin_hostcall_status)a);
+            const char *act = plugin_hostcall_status_next_action((enum plugin_hostcall_status)a);
+            ASSERT(code != NULL && strncmp(code, "PLUGIN_HOSTCALL_", 16) == 0);
+            ASSERT(act != NULL && act[0] != '\0');
+            ASSERT(strcmp(code, "PLUGIN_HOSTCALL_UNKNOWN") != 0);
+            for (int b = a + 1; b <= PLUGIN_HOSTCALL_ERR_BUFFER; b++)
+                ASSERT(strcmp(code, plugin_hostcall_status_code((enum plugin_hostcall_status)b)) != 0);
+        }
+        ASSERT(plugin_hostcall_status_next_action((enum plugin_hostcall_status)999)[0] != '\0');
+    } TEST_END
+    return failures;
+}
+
 static int pht_case_roundtrip(void)
 {
     int failures = 0;
@@ -155,7 +173,7 @@ static int pht_case_roundtrip(void)
     return failures;
 }
 
-static int pht_case_roundtrip_1(void)
+static int pht_case_limits(void)
 {
     int failures = 0;
     TEST_CASE("max payload frame round-trips and one more byte is refused") {
@@ -220,7 +238,7 @@ static int pht_case_decode_refusals(void)
     return failures;
 }
 
-static int pht_case_decode_refusals_1(void)
+static int pht_case_encode_refusals(void)
 {
     int failures = 0;
     TEST_CASE("encode refuses bad input") {
@@ -296,7 +314,7 @@ static int pht_case_dispatch_refusals(void)
     return failures;
 }
 
-static int pht_case_dispatch_refusals_1(void)
+static int pht_case_dispatch_shape(void)
 {
     int failures = 0;
     TEST_CASE("dispatch refuses a bad call shape") {
@@ -435,7 +453,7 @@ static int pht_case_mutation(void)
     return failures;
 }
 
-static int pht_case_mutation_1(void)
+static int pht_case_random_bytes(void)
 {
     int failures = 0;
     TEST_CASE("mutation loop: random bytes never crash the decoder") {
@@ -457,18 +475,45 @@ static int pht_case_mutation_1(void)
     return failures;
 }
 
+static int pht_case_wire(void)
+{
+    int failures = 0;
+    TEST_CASE("a request encoded on the wire is dispatched and answered with its id") {
+        struct plugin_hostcall_handlers h;
+        struct pht_fake f;
+        pht_handlers(&h, &f);
+        uint8_t wire[32], reply[64];
+        size_t w = 0, rl = 0, used = 0;
+        static const uint8_t key[2] = { 1, 'k' };
+        struct plugin_hostcall_frame req = { PLUGIN_HOSTCALL_KIND_REQUEST, 42, PLUGIN_HOSTCALL_M_STATE_GET, key, 2 };
+        struct plugin_hostcall_frame in, out;
+        ASSERT_EQ(plugin_hostcall_encode(&req, wire, sizeof wire, &w), PLUGIN_HOSTCALL_OK);
+        ASSERT_EQ(plugin_hostcall_decode(wire, w, &in, &used), PLUGIN_HOSTCALL_OK);
+        ASSERT_EQ(plugin_hostcall_dispatch(&in, PLUGIN_HOSTCALL_CAP_STATE, &h, reply, sizeof reply, &rl), PLUGIN_HOSTCALL_OK);
+        ASSERT_EQ(plugin_hostcall_decode(reply, rl, &out, &used), PLUGIN_HOSTCALL_OK);
+        ASSERT_EQ(out.id, 42u);
+        ASSERT_EQ(out.kind, PLUGIN_HOSTCALL_KIND_REPLY);
+        ASSERT_EQ(f.calls[PLUGIN_HOSTCALL_M_STATE_GET], 1u);
+        ASSERT_EQ(plugin_hostcall_dispatch(&in, 0, &h, reply, sizeof reply, &rl), PLUGIN_HOSTCALL_DENIED);
+        ASSERT_EQ(f.calls[PLUGIN_HOSTCALL_M_STATE_GET], 1u);
+    } TEST_END
+    return failures;
+}
+
 int test_plugin_hostcall(void)
 {
     int failures = 0;
     printf("\n=== Plugin host-call tests ===\n");
     failures += pht_case_table();
+    failures += pht_case_wire();
+    failures += pht_case_status_text();
     failures += pht_case_roundtrip();
-    failures += pht_case_roundtrip_1();
+    failures += pht_case_limits();
     failures += pht_case_decode_refusals();
-    failures += pht_case_decode_refusals_1();
+    failures += pht_case_encode_refusals();
     failures += pht_case_dispatch_refusals();
-    failures += pht_case_dispatch_refusals_1();
+    failures += pht_case_dispatch_shape();
     failures += pht_case_mutation();
-    failures += pht_case_mutation_1();
+    failures += pht_case_random_bytes();
     return failures;
 }

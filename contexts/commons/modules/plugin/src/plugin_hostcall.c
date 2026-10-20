@@ -5,6 +5,7 @@
 
 #include "plugin/plugin_hostcall.h"
 
+#include "base/serialize_le.h"
 #include "plugin/plugin_store.h"
 
 #include <string.h>
@@ -110,21 +111,8 @@ const struct plugin_hostcall_method_info *plugin_hostcall_method_at(size_t index
 {
     return index < PLUGIN_HOSTCALL_METHOD_COUNT ? &k_methods[index] : nullptr;
 }
+[[nodiscard]] enum plugin_hostcall_status plugin_hostcall_encode(
 
-static void put_be32(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
-}
-
-static uint32_t get_be32(const uint8_t *p)
-{
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-}
-
-enum plugin_hostcall_status plugin_hostcall_encode(
     const struct plugin_hostcall_frame *frame, uint8_t *out, size_t out_cap,
     size_t *written)
 {
@@ -141,19 +129,20 @@ enum plugin_hostcall_status plugin_hostcall_encode(
     size_t total = PLUGIN_HOSTCALL_HEADER_BYTES + frame->payload_len;
     if (out_cap < total)
         return PLUGIN_HOSTCALL_ERR_BUFFER;
-    put_be32(out, (uint32_t)(PLUGIN_HOSTCALL_BODY_FIXED + frame->payload_len));
+    zcl_write_u32_be(out, (uint32_t)(PLUGIN_HOSTCALL_BODY_FIXED + frame->payload_len));
     out[4] = PLUGIN_HOSTCALL_VERSION;
     out[5] = frame->kind;
-    put_be32(out + 6, frame->id);
-    out[10] = (uint8_t)(frame->code >> 8);
-    out[11] = (uint8_t)frame->code;
+    zcl_write_u32_be(out + 6, frame->id);
+    uint8_t code_be[4];
+    zcl_write_u32_be(code_be, frame->code);
+    memcpy(out + 10, code_be + 2, 2);
     if (frame->payload_len > 0)
         memmove(out + PLUGIN_HOSTCALL_HEADER_BYTES, frame->payload, frame->payload_len);
     *written = total;
     return PLUGIN_HOSTCALL_OK;
 }
 
-enum plugin_hostcall_status plugin_hostcall_decode(
+[[nodiscard]] enum plugin_hostcall_status plugin_hostcall_decode(
     const uint8_t *buf, size_t len, struct plugin_hostcall_frame *frame,
     size_t *consumed)
 {
@@ -163,7 +152,7 @@ enum plugin_hostcall_status plugin_hostcall_decode(
         return PLUGIN_HOSTCALL_ERR_ARGUMENT;
     if (len < 4)
         return PLUGIN_HOSTCALL_ERR_TRUNCATED;
-    uint32_t body = get_be32(buf);
+    uint32_t body = zcl_read_u32_be(buf);
     /* Judge the declared length before waiting for the bytes it promises, so
      * a hostile prefix is refused at once instead of stalling the reader. */
     if (body < PLUGIN_HOSTCALL_BODY_FIXED)
@@ -180,8 +169,8 @@ enum plugin_hostcall_status plugin_hostcall_decode(
     if (len < total)
         return PLUGIN_HOSTCALL_ERR_TRUNCATED;
     frame->kind = buf[5];
-    frame->id = get_be32(buf + 6);
-    frame->code = (uint16_t)(((unsigned)buf[10] << 8) | buf[11]);
+    frame->id = zcl_read_u32_be(buf + 6);
+    frame->code = (uint16_t)(zcl_read_u32_be(buf + 8) & 0xFFFFu); /* id tail, then code */
     frame->payload_len = total - PLUGIN_HOSTCALL_HEADER_BYTES;
     frame->payload = buf + PLUGIN_HOSTCALL_HEADER_BYTES;
     *consumed = total;
@@ -214,7 +203,7 @@ static enum plugin_hostcall_status gate(const struct plugin_hostcall_method_info
     return PLUGIN_HOSTCALL_OK;
 }
 
-enum plugin_hostcall_status plugin_hostcall_dispatch(
+[[nodiscard]] enum plugin_hostcall_status plugin_hostcall_dispatch(
     const struct plugin_hostcall_frame *request, uint32_t granted,
     const struct plugin_hostcall_handlers *handlers, uint8_t *reply,
     size_t reply_cap, size_t *reply_len)

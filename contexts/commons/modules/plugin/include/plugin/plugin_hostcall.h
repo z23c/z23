@@ -16,7 +16,7 @@
  *   ... payload  0 to PLUGIN_HOSTCALL_MAX_PAYLOAD bytes
  *
  * Payload layouts (the codec bounds sizes only; handlers parse the bytes):
- *   chain.tip              empty            -> height u32, block hash 32
+ *   chain.tip              empty            -> 40 bytes: height u32, hash 32, time u32
  *   chain.header_by_height height u32       -> header bytes
  *   state.get              klen u8, key     -> value bytes
  *   state.put              klen u8, key, value bytes -> empty
@@ -135,7 +135,7 @@ struct plugin_hostcall_frame {
 /* Encode one frame into out. Writes the frame size to *written. Refuses a
  * bad kind, an oversized payload, a null payload with a nonzero length, or a
  * buffer too small, and leaves *written 0 on refusal. */
-enum plugin_hostcall_status plugin_hostcall_encode(
+[[nodiscard]] enum plugin_hostcall_status plugin_hostcall_encode(
     const struct plugin_hostcall_frame *frame, uint8_t *out, size_t out_cap,
     size_t *written);
 
@@ -144,7 +144,7 @@ enum plugin_hostcall_status plugin_hostcall_encode(
  * on OK and 0 otherwise. ERR_TRUNCATED means more bytes may complete the
  * frame; every other refusal is final. Structure only: method, payload bounds
  * and capability are checked by plugin_hostcall_dispatch. */
-enum plugin_hostcall_status plugin_hostcall_decode(
+[[nodiscard]] enum plugin_hostcall_status plugin_hostcall_decode(
     const uint8_t *buf, size_t len, struct plugin_hostcall_frame *frame,
     size_t *consumed);
 
@@ -166,7 +166,7 @@ struct plugin_hostcall_handlers {
  * frame (the status in its code, an empty payload unless OK) when reply_cap
  * can hold one, and returns the status that reply carries. A null or
  * non-request frame writes no reply. */
-enum plugin_hostcall_status plugin_hostcall_dispatch(
+[[nodiscard]] enum plugin_hostcall_status plugin_hostcall_dispatch(
     const struct plugin_hostcall_frame *request, uint32_t granted,
     const struct plugin_hostcall_handlers *handlers, uint8_t *reply,
     size_t reply_cap, size_t *reply_len);
