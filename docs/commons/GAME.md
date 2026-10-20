@@ -54,6 +54,32 @@ difference; native math-library results can still differ between platforms.
 QA frame limits can be combined with the pinned HUD option in either argument
 order. All options are validated before window setup.
 
+## Signed plugin package
+
+`make plugin-skycombat` packs the game as a signed z23 plugin. It depends on
+`make game` and the full `z23` binary, then runs:
+
+```sh
+z23 plugin pack build/bin/z23-skycombat --name=skycombat --version=<git describe> \
+  --interface=1 --cap=ui.panel --key=$PLUGIN_KEY --dir=build/plugins/skycombat
+```
+
+`PLUGIN_KEY` names a 0600, 32-byte key file made with `z23 plugin keygen <file>`.
+The target refuses by name when it is unset and never writes a key into the
+tree. The output is `build/plugins/skycombat/skycombat`, `skycombat.plugin.json`
+and `skycombat.plugin.sig`.
+
+**Not runnable yet.** `z23 plugin run skycombat` is blocked until the plugin
+sandbox grants `ui.panel` and the game can reach a GPU from inside it; today
+the sandbox refuses `ui.panel`, so the signed package can be installed and
+verified but not run. Running the game still uses `./build/bin/z23-skycombat`.
+
+**Static linking.** `plugin run` needs a static ELF (`docs/dev/PLUGINS.md`).
+`plugin pack` does not check that, so packing succeeds for a dynamic binary,
+and such a package would be refused at run time. This host cannot link the game
+statically: it has no static libGL, libXrandr, libXi or libXcursor, and no
+Xrandr, XInput2 or Xcursor headers, so `make game` stops at the platform probe.
+
 ## Pinned data-only HUD
 
 `--hud-part=<64-hex-SHA-256>:<file>` selects a HUDX expression part. The game

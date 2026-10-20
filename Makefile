@@ -3004,6 +3004,24 @@ game-check: $(SKYCOMBAT_SUPPORT_OBJS) $(SKYCOMBAT_OBJS) $(Z23RAYLIB_OBJS)
 	@test $(words $(Z23RAYLIB_SRCS)) -eq 5 || { echo "game_check_scan_floor: expected 5 raylib sources, found $(words $(Z23RAYLIB_SRCS))" >&2; exit 2; }
 	@echo "game-check: compiled $(words $(SKYCOMBAT_SRCS)) game and $(words $(Z23RAYLIB_SRCS)) raylib translation units, no link"
 
+# Sky Combat as a signed plugin package (docs/commons/GAME.md). The packed
+# image is the game binary itself, copied and hashed by `z23 plugin pack`.
+# PLUGIN_KEY is a 0600 key file from `z23 plugin keygen`; it is never committed.
+# Version comes from git and is lazily expanded, so only this target runs git.
+PLUGIN_SKYCOMBAT_DIR := $(BUILD_DIR)/plugins/skycombat
+PLUGIN_SKYCOMBAT_VERSION = $(shell git -C $(CURDIR) describe --tags --always --dirty 2>/dev/null || echo 0.0.0-nogit)
+
+.PHONY: plugin-skycombat plugin-skycombat-key
+plugin-skycombat-key:
+	@test -n "$(PLUGIN_KEY)" || { echo "plugin_key_unset: pass PLUGIN_KEY=<key file> made by: $(BIN_DIR)/z23 plugin keygen <key file>; keys are never committed" >&2; exit 2; }
+
+plugin-skycombat: plugin-skycombat-key game $(Z23_BIN)
+	@mkdir -p $(PLUGIN_SKYCOMBAT_DIR)
+	$(Z23_BIN) plugin pack $(BIN_DIR)/z23-skycombat --name=skycombat \
+	  --version=$(PLUGIN_SKYCOMBAT_VERSION) --interface=1 --cap=ui.panel \
+	  --key=$(PLUGIN_KEY) --dir=$(PLUGIN_SKYCOMBAT_DIR)
+	@echo "plugin-skycombat: packed $(PLUGIN_SKYCOMBAT_DIR)/skycombat (not run: plugin run needs ui.panel and GPU access)"
+
 # Source-bound QA entrypoint fixture: no window-system headers or GPU needed.
 SKYCOMBAT_QA_BIN := $(BIN_DIR)/skycombat-qa-entrypoint
 $(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) Makefile \
