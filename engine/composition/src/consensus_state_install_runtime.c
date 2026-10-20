@@ -662,10 +662,15 @@ struct zcl_result consensus_state_install_from_bundle(
         bool content_refusal = (cb <= -5 && cb >= -10);
         if (cb == -3 || (!content_refusal && no_pass_record))
             out->retriable_headers_not_ready = true;
-        rc = ZCL_ERR(chain_built.code,
-                     "selected-chain binding failed (the bundle's height/hash is "
-                     "not on this node's validated header chain, or the node is "
-                     "not the open singleton): %s", chain_built.message);
+        /* The wrapped refusal rides a 256-byte zcl_result message, so keep this
+         * prefix short and log the full diagnosis (and the hint) unbounded. */
+        LOG_WARN(ICB_SUBSYS,
+                 "selected-chain binding failed (code=%d): %s - the bundle's "
+                 "height/hash is not on this node's validated header chain, the "
+                 "durable frontier moved or is not durable, or the node is not "
+                 "the open singleton", chain_built.code, chain_built.message);
+        rc = ZCL_ERR(chain_built.code, "chain binding refused: %s",
+                     chain_built.message);
         goto done;
     }
     /* Auditable, not silent: state whether the below-checkpoint predicates were

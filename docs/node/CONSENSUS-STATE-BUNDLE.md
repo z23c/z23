@@ -381,6 +381,24 @@ existing exporter into the node's `bundles/` directory as
 `consensus-state-bundle-3200000.sqlite` and lets it register; trust is
 re-derived by the installer against the compiled commitment, not by the seeder.
 
+Operator notes from the first real fresh-datadir run:
+
+- `-listen=0` is not a flag; to keep a test node off the public interface use
+  `-bind=127.0.0.1`.
+- The staged bundle must be read-only (`chmod 444`); a writable bundle is
+  refused as unsafe to install from.
+- A datadir that holds a legacy chainstate auto-migrates it unless
+  `-nolegacyutxoimport` is given (and `-nolegacyimport` skips the block import);
+  pass them for a clean install-only run.
+- After install the first forward step replaces the trusted-base anchor row.
+  The boot-time tip_finalize clamp no longer rewinds that completed
+  transition (`stage_repair.c`), so H* advances with applied.
+- The install runtime does not publish a header-only legacy tip as a fresh
+  served authority (`tip_finalize_stage_warm_authority_caches`): with no coin
+  frontier the genesis authority is published instead, so the chain-binding
+  frontier stays durable. A chain-binding refusal now carries its full
+  diagnostic (the 256-byte result message no longer loses it to prefixes).
+
 ### Receipt: rung h=3200000 (baked 2026-10-19, owner-approved)
 
 Two independent from-genesis full-validation folds (builders r1 and r2, one

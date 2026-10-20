@@ -162,10 +162,87 @@ void tip_finalize_stage_publish_resolved_or_fresh_tip(
     (void)publish_resolved_or_fresh_tip(db, existing_tip, reason);
 }
 
+/* Genesis finality is a compiled constant: a node whose folded state is
+ * genesis serves H*=0 under a runtime authority. The chain-frontier gate wants
+ * the served block at BLOCK_VALID_SCRIPTS, but a legacy block-index import
+ * carries genesis at BLOCK_VALID_TRANSACTIONS (zclassicd never script-validates
+ * it) while an empty-map boot inserts genesis at VALID_SCRIPTS
+ * (block_index_loader.c). Raise the in-memory level to the same value so the
+ * clean-genesis binding is not refused on that cosmetic difference. */
+static void warm_raise_genesis_validity(struct block_index *genesis)
+{
+    if (genesis && genesis->nHeight == 0 &&
+        (genesis->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_SCRIPTS)
+        block_index_status_set_valid_level(genesis, BLOCK_VALID_SCRIPTS);
+}
+
+/* The boot-order warm must not publish a FRESH runtime authority at a
+ * header-only tip. A positive-height in-memory tip with no durable history is
+ * header-only evidence (e.g. a legacy block-index import loaded the header
+ * chain to its tip while coins_kv is empty): publishing it as the served
+ * authority pins the runtime pair at a height nothing has folded, so the
+ * install's chain binding then sees a frontier that is not durable ("selected
+ * frontier changed or is not durable") and every retry refuses. Fall back to
+ * the genesis authority (what has actually been folded). */
+static const struct block_index *warm_fresh_candidate(
+    sqlite3 *db, const struct block_index *existing_tip, const char *reason)
+{
+    if (!existing_tip || existing_tip->nHeight <= 0)
+        return existing_tip;
+    int32_t applied = -1;
+    bool coins_found = false;
+    if (!coins_kv_get_applied_height(db, &applied, &coins_found) ||
+        coins_found)
+        return existing_tip;
+    /* Header-only positive tip: the node's folded state IS genesis. */
+    const struct block_index *genesis = block_index_get_ancestor(
+        (struct block_index *)existing_tip, 0);
+    if (genesis)
+        LOG_INFO("tip_finalize",
+                 "[tip_finalize] warm: in-memory tip h=%d is header-"
+                 "only (no coin frontier, no durable history) - "
+                 "publishing the genesis authority instead reason=%s",
+                 existing_tip->nHeight, reason ? reason : "");
+    return genesis;
+}
+
+/* Warm the provable-tip cache from the durable store. Caller holds the
+ * progress-store transaction lock. */
+static void warm_provable_tip_cache_unlocked(
+    sqlite3 *db, bool genesis_authority_published, const char *reason)
+{
+    if (reducer_frontier_provable_tip_is_published())
+        return;
+    int32_t hs = 0, sf = 0;
+    if (reducer_frontier_compute_hstar(db, &hs, &sf)) {
+        reducer_frontier_provable_tip_set(hs);
+        LOG_INFO("tip_finalize",
+                 "[tip_finalize] provable-tip cache warmed h=%d reason=%s",
+                 reducer_frontier_provable_tip_cached(),
+                 reason ? reason : "");
+    } else if (genesis_authority_published) {
+        /* A fresh datadir reaches this boot-order seam before reducer stage
+         * tables exist, so compute_hstar cannot derive a durable frontier.
+         * The runtime authority pair above nevertheless owns the compiled
+         * genesis block. Publish exactly H*=0 so the chain-binding service
+         * can apply its already-fail-closed clean-genesis admission; never
+         * synthesize a positive frontier here. */
+        reducer_frontier_provable_tip_set(0);
+        LOG_INFO("tip_finalize",
+                 "[tip_finalize] provable-tip cache warmed from clean "
+                 "genesis runtime authority h=0 reason=%s",
+                 reason ? reason : "");
+    } else {
+        LOG_WARN("tip_finalize",
+                 "[tip_finalize] verb warm: compute_hstar failed "
+                 "(cache holds prior H*)");
+    }
+}
+
 void tip_finalize_stage_warm_authority_caches(
     sqlite3 *db, const struct block_index *existing_tip, const char *reason)
 {
-    /* A published provable tip means a live boot already warmed/advanced —
+    /* A published provable tip means a live boot already warmed/advanced -
      * republishing the (possibly older) durable pair over the newer runtime
      * authority would be a regression, not a warm. The terminal verb this
      * exists for always calls pre-services with nothing published. Mirrors
@@ -173,36 +250,16 @@ void tip_finalize_stage_warm_authority_caches(
      * public primitives. */
     if (!db || reducer_frontier_provable_tip_is_published())
         return;
+    const struct block_index *fresh_candidate =
+        warm_fresh_candidate(db, existing_tip, reason);
     bool authority_published =
-        publish_resolved_or_fresh_tip(db, existing_tip, reason);
+        publish_resolved_or_fresh_tip(db, fresh_candidate, reason);
+    bool genesis_published = authority_published && fresh_candidate &&
+                             fresh_candidate->nHeight == 0;
+    if (genesis_published)
+        warm_raise_genesis_validity((struct block_index *)fresh_candidate);
     progress_store_tx_lock();
-    if (!reducer_frontier_provable_tip_is_published()) {
-        int32_t hs = 0, sf = 0;
-        if (reducer_frontier_compute_hstar(db, &hs, &sf)) {
-            reducer_frontier_provable_tip_set(hs);
-            LOG_INFO("tip_finalize",
-                     "[tip_finalize] provable-tip cache warmed h=%d reason=%s",
-                     reducer_frontier_provable_tip_cached(),
-                     reason ? reason : "");
-        } else if (authority_published && existing_tip &&
-                   existing_tip->nHeight == 0) {
-            /* A fresh datadir reaches this boot-order seam before reducer stage
-             * tables exist, so compute_hstar cannot derive a durable frontier.
-             * The runtime authority pair above nevertheless owns the compiled
-             * genesis block. Publish exactly H*=0 so the chain-binding service
-             * can apply its already-fail-closed clean-genesis admission; never
-             * synthesize a positive frontier here. */
-            reducer_frontier_provable_tip_set(0);
-            LOG_INFO("tip_finalize",
-                     "[tip_finalize] provable-tip cache warmed from clean "
-                     "genesis runtime authority h=0 reason=%s",
-                     reason ? reason : "");
-        } else {
-            LOG_WARN("tip_finalize",
-                     "[tip_finalize] verb warm: compute_hstar failed "
-                     "(cache holds prior H*)");
-        }
-    }
+    warm_provable_tip_cache_unlocked(db, genesis_published, reason);
     progress_store_tx_unlock();
 }
 

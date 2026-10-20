@@ -254,6 +254,54 @@ static void teardown_case(const char *dir)
     test_cleanup_tmpdir(dir);
 }
 
+static int case_boot_clamp_trusted_base(void)
+{
+    int failures = 0;
+    /* The RESTART sibling of the case above. On boot, boot.c clamps the
+     * tip_finalize cursor to the applied coins frontier
+     * (stage_reconcile_clamp_tip_finalize_to_floor, coins_best = applied-1).
+     * A bundle install at a scaled rung height 18 whose first transition 18->19
+     * already finalized has cursor 19 and coins_best 18; the clamp used to
+     * rewind it to 18, where the anchor row is gone and the stage refuses on
+     * evidence=invalid forever (H* pinned at the install height while utxo_apply
+     * folds ahead - the fresh rung-install stall). It must be preserved, and a
+     * cursor that is NOT a completed trusted-base transition must still clamp. */
+    {
+        char dir[256];
+        sqlite3 *db = NULL;
+        bool ok = setup_case("trusted_base_boot_clamp", dir, sizeof(dir), &db);
+        ok = ok && seed_cursors(db, 19, 19) &&
+             exec_sql(db,
+                "ALTER TABLE tip_finalize_log ADD COLUMN tip_hash BLOB;") &&
+             exec_sql(db,
+                "INSERT OR REPLACE INTO tip_finalize_log"
+                "(height,status,ok,tip_hash) VALUES"
+                "(18,'finalized',1,"
+                "X'0100000000000000000000000000000000000000000000000000000000000000');"
+                "INSERT OR REPLACE INTO progress_meta(key,value) VALUES"
+                "('reducer_trusted_base_height',X'1200000000000000');"
+                "INSERT OR REPLACE INTO progress_meta(key,value) VALUES"
+                "('reducer_trusted_base_hash',zeroblob(32));");
+        struct stage_reconcile_result rr;
+        memset(&rr, 0, sizeof(rr));
+        bool rv = stage_reconcile_clamp_tip_finalize_to_floor(db, 18, &rr);
+        ok = ok && rv && !rr.clamped && cursor_for(db, "tip_finalize") == 19;
+        STR_CHECK("boot clamp never rewinds a completed trusted-base "
+                  "transition (rung install restart)", ok);
+
+        /* Control: no trusted-base declaration -> the clamp still applies. */
+        bool ok2 = exec_sql(db,
+            "DELETE FROM progress_meta WHERE key LIKE 'reducer_trusted_base%';");
+        memset(&rr, 0, sizeof(rr));
+        rv = stage_reconcile_clamp_tip_finalize_to_floor(db, 18, &rr);
+        ok2 = ok2 && rv && rr.clamped && cursor_for(db, "tip_finalize") == 18;
+        STR_CHECK("boot clamp still rewinds a cursor that is not a trusted-base "
+                  "transition", ok2);
+        teardown_case(dir);
+    }
+    return failures;
+}
+
 int test_stage_repair(void)
 {
     printf("\n=== stage_repair poison-rewind safety guard tests ===\n");
@@ -733,6 +781,8 @@ int test_stage_repair(void)
         STR_CHECK("trusted-base completed transition is never rewound", ok);
         teardown_case(dir);
     }
+
+    failures += case_boot_clamp_trusted_base();
 
     /* === tip_finalize rewind-churn refusal (defence-in-depth
      * under the coins-frontier clamp) ===

@@ -18,6 +18,7 @@
 #include "services/chain_state_service.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
+#include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "validation/main_state.h"
 
@@ -464,6 +465,32 @@ static void capture_binding_predicates(
         index_descends_from(bundle, sapling_source);
 }
 
+/* Name the failing sub-gates of an inconsistent frontier sample. The refusal
+ * message carries only the aggregate consistent flag; this one line says which
+ * of the gates behind it was false so a refusal is diagnosable from the log. */
+static void log_frontier_gates(const char *which,
+                               const struct chain_frontier_snapshot *s)
+{
+    if (chain_frontier_snapshot_consistent(s) ||
+        chain_frontier_snapshot_clean_genesis(s))
+        return;
+    LOG_WARN("chain_binding",
+             "frontier %s inconsistent: ctx=%d hstar=%d served_h=%d "
+             "indexed_h=%d header_h=%d bind=%d%d%d pair=%d durable=%d "
+             "match=%d anc=%d%d%d work=%d%d valid=%d%d fail_free=%d src=%d "
+             "status=%x/%x/%x",
+             which, s->context_known, s->hstar_published, s->served.height,
+             s->indexed.height, s->header.height, s->served.binding_known,
+             s->indexed.binding_known, s->header.binding_known,
+             s->authority_pair_known, s->durable_authority_known,
+             s->authority_matches_served, s->ancestry_known,
+             s->served_ancestor_indexed, s->indexed_ancestor_header,
+             s->work_known, s->work_monotone, s->validity_known,
+             s->validity_sufficient, s->failure_free, (int)s->authority_source,
+             (unsigned)s->served.status, (unsigned)s->indexed.status,
+             (unsigned)s->header.status);
+}
+
 /* Gap A — the "no partial fold state" half of fresh_genesis_bootstrap. A clean
  * pre-fold node must have (1) no durable finalized tip at all (nothing has been
  * folded/finalized), and (2) coins not applied above genesis (applied is the
@@ -609,6 +636,8 @@ struct zcl_result consensus_state_chain_evidence_build(
         chain_frontier_snapshot_consistent(&frontier_before);
     observation.after_frontier_consistent =
         chain_frontier_snapshot_consistent(&frontier_after);
+    log_frontier_gates("before", &frontier_before);
+    log_frontier_gates("after", &frontier_after);
     observation.durable_served_height = frontier_after.served.height;
     observation.frontier_unchanged = capture_equal(&view_before, &view_after) &&
         chain_frontier_snapshot_equal(&frontier_before, &frontier_after) &&
@@ -641,7 +670,7 @@ struct zcl_result consensus_state_chain_evidence_build(
          * runtime classifies retriable-vs-.fail from it (a -3 frontier-durability
          * refusal is a solution-independent node-side deferral that must never
          * .fail a byte-good bundle). The specific reason stays in the message. */
-        return ZCL_ERR(decision.code, "chain evidence refused: %s",
+        return ZCL_ERR(decision.code, "%s",
                        decision.message);
     }
     progress_store_tx_unlock();

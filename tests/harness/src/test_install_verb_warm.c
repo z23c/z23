@@ -407,6 +407,54 @@ static int case_warm_clean_genesis(void)
     return failures;
 }
 
+/* A legacy block-index import leaves a header-only tip at a positive height
+ * (here 1, scaled) while coins_kv and every stage log are empty. The warm must
+ * not publish THAT as the served authority: it pinned the runtime pair at a
+ * height nothing folded, so the install's chain binding then refused "selected
+ * frontier changed or is not durable" on every retry. The node's folded state is
+ * genesis, so genesis is what must be published. */
+static int case_warm_header_only_tip(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    reducer_frontier_provable_tip_reset();
+    tip_finalize_observe_reset_last_height();
+    IVW_CHECK("header-only: schema", ivw_build_schema(db));
+
+    struct uint256 gh, th;
+    ivw_synth_hash(gh.data, 0, 0x42);
+    ivw_synth_hash(th.data, 1, 0x43);
+    struct block_index genesis, tip;
+    block_index_init(&genesis);
+    block_index_init(&tip);
+    genesis.nHeight = 0;
+    genesis.phashBlock = &gh;
+    genesis.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA; /* legacy import */
+    tip.nHeight = 1;
+    tip.phashBlock = &th;
+    tip.pprev = &genesis;
+
+    tip_finalize_stage_warm_authority_caches(db, &tip, "test_warm_header_only");
+
+    int64_t authority_h = -1;
+    uint8_t authority_hash[32];
+    memset(authority_hash, 0, sizeof(authority_hash));
+    IVW_CHECK("header-only: runtime authority is genesis, not the header tip",
+              tip_finalize_stage_authority_snapshot(&authority_h,
+                                                    authority_hash) &&
+              authority_h == 0 &&
+              memcmp(authority_hash, gh.data, 32) == 0);
+    IVW_CHECK("header-only: legacy genesis raised to VALID_SCRIPTS for the binding",
+              (genesis.nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_SCRIPTS);
+    IVW_CHECK("header-only: H*=0 published, no positive H* manufactured",
+              reducer_frontier_provable_tip_is_published() &&
+              reducer_frontier_provable_tip_cached() == 0);
+
+    sqlite3_close(db);
+    return failures;
+}
+
 /* (4) An already-published provable tip is never clobbered by the warm. */
 static int case_warm_never_clobbers_published(void)
 {
@@ -595,6 +643,7 @@ int test_install_verb_warm(void)
     failures += case_warm_publishes_durable();
     failures += case_warm_empty_datadir();
     failures += case_warm_clean_genesis();
+    failures += case_warm_header_only_tip();
     failures += case_warm_never_clobbers_published();
     failures += case_post_install_invalidation();
     return failures;

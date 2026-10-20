@@ -5,6 +5,7 @@
 
 #include "chain/chain.h"
 #include "json/json.h"
+#include "jobs/stage_repair.h"
 #include "jobs/tip_finalize_stage.h"
 #include "jobs/reducer_frontier.h"
 #include "platform/private_directory.h"
@@ -624,6 +625,115 @@ static int64_t tf_count_rows(sqlite3 *db, const char *table)
         n = sqlite3_column_int64(st, 0);
     sqlite3_finalize(st);
     return n;
+}
+
+/* Scaled rung-install fold. A bundle/snapshot install at base height B leaves
+ * the first transition B->B+1 finalized (the anchor row at B replaced by its
+ * finalized successor row) with a durable trusted-base declaration at B. Every
+ * restart then runs the boot clamp with coins_best = B (the applied frontier);
+ * the clamp used to rewind the tip_finalize cursor back to B, where step_finalize
+ * no longer has an anchor row, so H* pinned at B while utxo_apply folded ahead
+ * (the fresh rung-install stall). This drives the REAL stage through a restart
+ * after the install and then a fold of N blocks past it, restarting at every
+ * block, and asserts H* (the deepest finalized row) advances with applied. */
+static void fold_put_trusted_base(sqlite3 *db, int base,
+                                  const struct uint256 *hash)
+{
+    uint8_t h8[8] = {0};
+    h8[0] = (uint8_t)base;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO progress_meta(key,value) VALUES(?,?)",
+            -1, &st, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(st, 1, "reducer_trusted_base_height", -1, SQLITE_STATIC);
+    sqlite3_bind_blob(st, 2, h8, 8, SQLITE_STATIC);
+    sqlite3_step(st);
+    sqlite3_reset(st);
+    sqlite3_bind_text(st, 1, "reducer_trusted_base_hash", -1, SQLITE_STATIC);
+    sqlite3_bind_blob(st, 2, hash->data, 32, SQLITE_STATIC);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* One restart after the install: stop the stage, boot-clamp to the applied
+ * frontier (coins_best = highest applied block), re-init, drain, and check
+ * that the clamp did not rewind the cursor and H* tracks applied. */
+static int fold_restart_and_check(struct main_state *ms,
+                                  struct synth_chain_tf *sc, int k,
+                                  int applied, int32_t cursor_before)
+{
+    int failures = 0;
+    tip_finalize_stage_shutdown();
+    struct stage_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    bool clamp_ok = stage_reconcile_clamp_tip_finalize_to_floor(
+        progress_store_db(), applied - 1, &rr);
+    bool init_ok = tip_finalize_stage_init(ms);
+    tip_finalize_stage_set_utxo_counter(fake_utxo_count, sc);
+    tip_finalize_stage_drain(100);
+    int32_t hs = compute_hstar_now(progress_store_db());
+    char nm[96];
+    snprintf(nm, sizeof(nm),
+             "rung_fold: restart %d: H* tracks applied (hs=%d applied-1=%d)",
+             k, (int)hs, applied - 1);
+    TF_CHECK(nm, clamp_ok && init_ok && hs == applied - 1);
+    snprintf(nm, sizeof(nm), "rung_fold: restart %d: cursor never rewound", k);
+    TF_CHECK(nm, !rr.clamped &&
+                 (int32_t)tip_finalize_stage_cursor() >= cursor_before);
+    return failures;
+}
+
+/* Fold one more block past the rung: it arrives with its upstream evidence. */
+static bool fold_admit_block(struct main_state *ms, struct synth_chain_tf *sc,
+                             int nb)
+{
+    return block_map_insert(&ms->map_block_index, sc->blocks[nb].phashBlock,
+                            &sc->blocks[nb]) &&
+           active_chain_move_window_tip(&ms->chain_active, &sc->blocks[nb]) &&
+           seed_utxo_apply(progress_store_db(), nb, -1) &&
+           seed_upstream_logs_tf(progress_store_db(), sc, nb);
+}
+
+static int case_rung_install_fold_advances_hstar(void)
+{
+    enum { BASE = 3, FOLD = 5, CHAIN = BASE + FOLD + 1 };
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_tf sc;
+    test_fmt_tmpdir(dir, sizeof(dir), "tip_finalize", "rung_fold");
+    mkdir_p_tf("./test-tmp");
+    mkdir_p_tf(dir);
+    bool ok = progress_store_open(dir);
+    memset(&sc, 0, sizeof(sc));
+    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+    ok = ok && synth_chain_tf_build(&sc, CHAIN + 1);
+    /* The install: chain known through BASE+1, folded through BASE, anchor at
+     * BASE, then the first transition BASE->BASE+1 finalized. */
+    for (int i = 0; ok && i <= BASE + 1; i++)
+        ok = block_map_insert(&ms.map_block_index, sc.blocks[i].phashBlock,
+                              &sc.blocks[i]);
+    ok = ok && active_chain_move_window_tip(&ms.chain_active,
+                                            &sc.blocks[BASE + 1]);
+    ok = ok && seed_utxo_apply(progress_store_db(), BASE + 1, -1);
+    ok = ok && seed_upstream_logs_tf(progress_store_db(), &sc, BASE + 1);
+    ok = ok && tip_finalize_stage_init(&ms);
+    tip_finalize_stage_set_utxo_counter(fake_utxo_count, &sc);
+    ok = ok && tip_finalize_stage_drain(100) >= BASE;
+    fold_put_trusted_base(progress_store_db(), BASE, &sc.hashes[BASE]);
+    TF_CHECK("rung_fold: install image built (H* at base)",
+             ok && compute_hstar_now(progress_store_db()) == BASE);
+
+    int32_t cursor_before = (int32_t)tip_finalize_stage_cursor();
+    for (int k = 0; k <= FOLD; k++) {
+        int applied = BASE + 1 + k;
+        failures += fold_restart_and_check(&ms, &sc, k, applied, cursor_before);
+        if (k < FOLD)
+            TF_CHECK("rung_fold: next block admitted",
+                     fold_admit_block(&ms, &sc, applied + 1));
+    }
+    tf_teardown(dir, &ms, &sc);
+    return failures;
 }
 
 int test_tip_finalize_stage(void);
@@ -2288,6 +2398,8 @@ int test_tip_finalize_stage(void)
         utxo_apply_sum_through_reset();
         if (sdb) sqlite3_close(sdb);
     }
+
+    failures += case_rung_install_fold_advances_hstar();
 
     printf("tip_finalize_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");

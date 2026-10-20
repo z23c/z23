@@ -12,6 +12,7 @@
 
 #include "jobs/stage_repair.h"
 #include "jobs/stage_repair_internal.h"
+#include "stage_repair_reducer_frontier_internal.h" /* trusted-base transition */
 
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
@@ -49,6 +50,35 @@ static bool tip_finalize_served_floor_unlocked(sqlite3 *db, int *out)
         return false;
     }
     sqlite3_finalize(st);
+    return true;
+}
+
+/* Rewind ONLY the tip_finalize cursor to `floor` in one transaction. No log
+ * deletions, no upstream cursor changes - the upstream evidence stays intact,
+ * and the surviving tip_finalize_log rows keep the public-tip floor at
+ * served_floor. The caller holds the progress-store transaction lock. */
+static bool clamp_tip_finalize_cursor_txn_unlocked(sqlite3 *db, int floor)
+{
+    char *err = NULL;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
+        LOG_WARN("stage_repair",
+                 "[stage_repair] tip_finalize clamp BEGIN failed: %s",
+                 err ? err : "(no message)");
+        if (err) sqlite3_free(err);
+        return false;
+    }
+    if (!stage_repair_force_stage_cursor(db, "tip_finalize", floor)) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return false;
+    }
+    if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
+        LOG_WARN("stage_repair",
+                 "[stage_repair] tip_finalize clamp COMMIT failed: %s",
+                 err ? err : "(no message)");
+        if (err) sqlite3_free(err);
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return false;
+    }
     return true;
 }
 
@@ -110,35 +140,32 @@ bool stage_reconcile_clamp_tip_finalize_to_floor(
         return true;   /* no-op, clamped=false */
     }
 
-    char *err = NULL;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN("stage_repair",
-                 "[stage_repair] tip_finalize clamp BEGIN failed: %s",
-                 err ? err : "(no message)");
-        if (err) sqlite3_free(err);
-        progress_store_tx_unlock();
-        return false;
+    /* A COMPLETED first transition above a durable trusted base (a bundle or
+     * snapshot install: the anchor row at the base was replaced by its
+     * finalized successor row) must not be rewound to the base. Rewinding
+     * re-runs step_finalize at a height whose anchor row no longer exists, and
+     * the retry then needs per-block script/proof/utxo evidence the install
+     * never produced (evidence=invalid), so H* pins at the base while
+     * utxo_apply folds ahead. Same shape and same rule as the L1 reconcile
+     * (stage_reducer_frontier reconcile_tip_finalize_cursor); this is the
+     * boot-time sibling that lacked it. The base is any trusted-base height
+     * (keystone or baked rung), never a hard-coded one. */
+    if (cur == floor + 1) {
+        struct stage_reducer_frontier_reconcile_result shape;
+        memset(&shape, 0, sizeof(shape));
+        shape.coins_applied_found = true;
+        shape.coins_applied_height = cur;
+        if (stage_repair_preserve_trusted_base_transition(db, floor, cur,
+                                                          &shape)) {
+            progress_store_tx_unlock();
+            return true;   /* preserved, clamped=false */
+        }
     }
 
-    /* Reconcile ONLY the tip_finalize cursor. No log deletions, no upstream
-     * cursor changes — the upstream evidence stays intact, and the surviving
-     * tip_finalize_log rows keep the public-tip floor at served_floor. */
-    if (!stage_repair_force_stage_cursor(db, "tip_finalize", floor)) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        return false;
-    }
-
-    if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN("stage_repair",
-                 "[stage_repair] tip_finalize clamp COMMIT failed: %s",
-                 err ? err : "(no message)");
-        if (err) sqlite3_free(err);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        return false;
-    }
+    bool committed = clamp_tip_finalize_cursor_txn_unlocked(db, floor);
     progress_store_tx_unlock();
+    if (!committed)
+        return false;
 
     if (out)
         out->clamped = true;
