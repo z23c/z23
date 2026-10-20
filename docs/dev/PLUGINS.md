@@ -398,6 +398,12 @@ installed current one, or one that cannot be compared; only the owner flag
 `--allow-downgrade` permits it). `publish` refuses `PLUGIN_DIST_SOURCE`,
 `PLUGIN_DIST_LICENSE`, `PLUGIN_DIST_RELEASE` and `PLUGIN_DIST_STORE`.
 
+`PLUGIN_DIST_TOO_LARGE` refuses an image over 48 MiB. On a running node use
+`z23 plugin fetch_remote --root=<64hex> --name=upper --wait=60`: the node fetches
+from its swarm peers (or `--peer_id=N`) and installs through the same checks as a
+new generation, with at most two jobs, a byte cap (`--max-bytes`) and a deadline
+(`--timeout`); it never stops the node and never switches.
+
 ## Showing installed plugins in mesh status
 
 Off by default. With `-meshstatusplugins`, the signed capsule that `z23 ops

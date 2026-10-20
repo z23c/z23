@@ -335,7 +335,7 @@ ZCL_COMMAND_READY_COMMAND(
     "Have the running node fetch a plugin root from its peers and install it as a new generation",
     "Asks the node already running on this datadir (over its local RPC, no stop "
     "needed) to start a bounded swarm fetch of one package root from its "
-    "connected peers, or from the named peer handles, and returns a job id. "
+    "connected peers, or from the one named peer_id handle, and returns a job id. "
     "When the root is complete the node runs the same verification and install "
     "as plugin fetch and refuses, by name, every case plugin fetch refuses; the "
     "refusal code and next action come back in the job status (job=<id> asks "
@@ -347,12 +347,12 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_RESULT_BUDGET,
     "plugin,fetch,remote,p2p,package,swarm,root,verify,install,running,node,job",
     "zcl.plugin_fetch_remote.input.v1", "zcl.plugin_fetch_job.v1",
-    "root,name,peers,max-bytes,timeout,wait,job,allow-downgrade", "",
+    "root,name,peer_id,max-bytes,timeout,wait,job,allow-downgrade", "",
     "z23 plugin fetch_remote --root=<64hex> --name=upper --wait=60",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
-    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_plugin_fetch_remote)

@@ -247,48 +247,30 @@ void zcl_native_handle_plugin_fetch(const struct zcl_command_request *request,
 
 #define PDC_REMOTE_POLL_MS 250
 
-/* Comma-separated peer handles ("11,12") into a JSON array; false if malformed. */
-static bool pdc_peers_json(const char *list, struct json_value *out)
-{
-    json_set_array(out);
-    while (list && *list) {
-        char *end = NULL;
-        unsigned long long id = strtoull(list, &end, 10);
-        if (end == list || id == 0 || id > INT64_MAX || (*end != ',' && *end != '\0'))
-            return false;
-        struct json_value v;
-        json_init(&v);
-        json_set_int(&v, (int64_t)id);
-        bool pushed = json_push_back(out, &v);
-        json_free(&v);
-        if (!pushed)
-            return false;
-        list = *end == ',' ? end + 1 : end;
-    }
-    return true;
-}
-
 static char *pdc_remote_params(const struct zcl_command_request *request, bool *bad)
 {
-    struct json_value arg, one, peers;
-    uint64_t max_bytes = 0, timeout = 0;
-    const char *list = zcl_native_plugin_str(request, "peers");
+    struct json_value arg, one, peers, peer_value;
+    uint64_t max_bytes = 0, timeout = 0, peer = 0, job = 0;
     json_init(&arg);
     json_init(&one);
     json_init(&peers);
+    json_init(&peer_value);
     json_set_array(&arg);
     json_set_object(&one);
+    json_set_array(&peers);
     *bad = !pdc_u64(request, "max-bytes", &max_bytes) || !pdc_u64(request, "timeout", &timeout) ||
-           (list && !pdc_peers_json(list, &peers));
-    const char *job = zcl_native_plugin_str(request, "job");
+           !pdc_u64(request, "peer_id", &peer) || !pdc_u64(request, "job", &job);
     if (job) {
-        json_push_kv_int(&one, "job", (int64_t)strtoll(job, NULL, 10));
+        json_push_kv_int(&one, "job", (int64_t)job);
     } else {
         json_push_kv_str(&one, "root", zcl_native_plugin_str(request, "root"));
         json_push_kv_str(&one, "name", zcl_native_plugin_str(request, "name"));
         json_push_kv_bool(&one, "allow_downgrade", pdc_flag(request, "allow-downgrade"));
-        if (list)
+        if (peer) {
+            json_set_int(&peer_value, (int64_t)peer);
+            json_push_back(&peers, &peer_value);
             json_push_kv(&one, "peers", &peers);
+        }
         if (max_bytes)
             json_push_kv_int(&one, "max_bytes", (int64_t)max_bytes);
         if (timeout)
@@ -304,6 +286,7 @@ static char *pdc_remote_params(const struct zcl_command_request *request, bool *
     json_free(&arg);
     json_free(&one);
     json_free(&peers);
+    json_free(&peer_value);
     return wire;
 }
 
@@ -368,14 +351,14 @@ void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *req
 {
     if (!request || !reply)
         return;
-    bool bad = false, polling = zcl_native_plugin_str(request, "job") != NULL;
+    bool bad = false, polling = json_get(request->input, "job") != NULL;
     uint64_t wait_s = 0;
     char *params = pdc_remote_params(request, &bad);
     if (bad || !params || !pdc_u64(request, "wait", &wait_s) ||
         (!polling && (!zcl_native_plugin_str(request, "root") || !zcl_native_plugin_str(request, "name")))) {
         free(params);
         pdc_refuse(reply, PLUGIN_DIST_ERR_ARGUMENT, "fetch_remote",
-                   "root and name (or job), and positive integers for peers, max-bytes, timeout, wait are required",
+                   "root and name (or job), and positive integers for peer_id, max-bytes, timeout, wait are required",
                    false, false);
         return;
     }

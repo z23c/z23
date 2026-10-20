@@ -212,6 +212,11 @@ static const struct cr_int_bound *cr_find_int_bound(const char *key)
         { "expires_unix", 0, INT64_MAX },
         { "amount_zatoshi", 1, 2100000000000000LL },
         { "sequence", 1, INT64_MAX },
+        /* plugin.fetch_remote: byte cap, job deadline and CLI wait in seconds, job id. */
+        { "max-bytes", 1, 268435456 },
+        { "timeout", 1, 3600 },
+        { "wait", 1, 3600 },
+        { "job", 1, INT64_MAX },
         { "not_before", 1, INT64_MAX },
         { "expiry", 1, INT64_MAX },
         { "observation_unix", 1, INT64_MAX },
