@@ -2107,6 +2107,13 @@ void zcl_native_handle_ops_host_legacy_seed(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.release.sign - sign a landed-main fleet release with the ZRS1 hybrid
+ * key and write <release_dir>/z23-<commit12>.v2.zid
+ * (tools/command/native_ops_release_sign.c). */
+void zcl_native_handle_ops_release_sign(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.slot.install - install a checked-out release binary as a slot only
  * when its signed release doc names a pinned owner key and the bytes match
  * the package manifest exactly (tools/command/native_ops_slot_install.c). */

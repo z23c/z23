@@ -20,10 +20,10 @@ phase 3 switch, v2 docs in the `<datadir>/zcode/releases/` batch (saved as
 `<name>-<version>.v2.zid`) and the `zcode.release.keygen_pq` leaf. Not
 implemented: any default switch to v2. Implemented since: the k-of-n owner
 gate (6.2), `threshold K` in a pin file plus `cosigs`, in `ops slot install`
-and `zcode.release.verify`.
-`zcode.release.verify` still refuses `pin`/`pin_file` on a v2 doc with
-`PQ_PIN_UNSUPPORTED` unless the pin file has a `threshold` line or `cosigs` is given (pair pins there are a later change); `ops slot install`
 is the PQ-secure native install path.
+`zcode.release.verify` takes the same pin gate as `ops slot install`: a v2 doc
+needs a pair pin (an Ed25519-only pin gives RELEASE_PQ_UNPINNED). The fleet
+signer is `ops release sign` (section 10).
 
 <!-- claim: symbol-present zid_hybrid_release_sign contexts/wallet/modules/zid -->
 <!-- claim: file-present contexts/wallet/modules/zid/include/zid/zid_hybrid.h -->
@@ -197,9 +197,7 @@ NOT_A_RELEASE_BODY, DOC_EXPIRED, BAD_SIGNATURE and DOC_DECODE_FAILED. New
 codes, each distinct and never folded into `valid:false` or into one another:
 BAD_PQ_SIGNATURE (SLH-DSA fails), PQ_KEY_MISMATCH (container pk differs from
 the signed digest or the pin), PQ_CONTAINER_MALFORMED (length, magic or param
-error), and PQ_PIN_UNSUPPORTED (a key `pin`/`pin_file` given with a v2 doc:
-Ed25519-only pins cannot match a pair, so the doc is refused rather than
-half-accepted). BAD_SIGNATURE keeps meaning the Ed25519 half.
+error). BAD_SIGNATURE keeps meaning the Ed25519 half.
 
 Version-1 verifier behavior: a deployed verifier calls `zid_doc_decode`,
 which logs "unsupported version 2" and returns false for buf[0] != 1. The
@@ -386,6 +384,47 @@ Implemented in `tests/harness/src/test_zid.c` (group `test_zid`, function
     doc given to the v2 decoder (NOT_V2_DOC);
   - expired v2 doc (DOC_EXPIRED);
   - a PQ seed file with mode 0644 (and 0640, 0660, 0604, 0700, 0666) refused;
-  - a v2 doc refused by `release_pin_read_doc` and by `pin`/`pin_file` on
-    `zcode.release.verify` (PQ_PIN_UNSUPPORTED).
+  - a v2 doc refused by `release_pin_read_doc`, and by an Ed25519-only
+    `pin`/`pin_file` on `zcode.release.verify` (RELEASE_PQ_UNPINNED).
 - Regression: every existing v1 vector still verifies unchanged.
+
+## 10. The fleet signer: `ops release sign`
+
+A dedicated release key signs landed main only. `ops release sign` takes
+`release_dir`, `commit` (40 lowercase hex), `seed_file` (Ed25519 master seed)
+and `pq_seed_file` (SLH-DSA seed), plus optional `seq` (default: now),
+`expiry` (default: now + 365 days), `repo` (default: the working directory,
+whose fetched `refs/remotes/origin/main` is the landed tip) and `datadir`.
+Every refusal comes before any write:
+
+- `RELEASE_NOT_LANDED`: `merge-base <commit> origin/main` is not the commit
+  (also an unknown commit); `RELEASE_ORIGIN_UNKNOWN`: no fetched origin/main.
+  The leaf never fetches; the conveyor already fetches before it signs.
+- `RELEASE_MANIFEST_MISMATCH`: `MANIFEST.sha256` (`sha256sum` lines) does not
+  re-derive: a listed file is missing, not a plain file, or its sha256 differs.
+- `RELEASE_DOC_EXISTS`: `<release_dir>/z23-<commit12>.v2.zid` is present.
+
+**Manifest root (decision).** The signed `manifest_root` is the vcs package
+root (`vcs_package_manifest_root`, domain `zcl.package_manifest.v1`) of the
+package whose files are those `MANIFEST.sha256` lists plus `MANIFEST.sha256`
+itself: flat paths, mode 0755 if any exec bit is set else 0644, ordered 1 MiB
+SHA3-256 chunk hashes. It is exactly the `package_root` that `ops slot install`
+recomputes from the package store and that `zcode release verify
+--package_root` and the pin gate compare. A plain SHA-256 of MANIFEST.sha256
+could never pass `ops slot install` (it loads a vcs manifest for the root), so
+it is not used. The receiver still needs that manifest and the `z23` chunks in
+its package store, which `zcode package` distribution provides; this leaf does
+not publish them.
+
+**Version (deviation).** The doc `version` field is capped at 32 characters, so
+it carries the first 32 hex characters of the commit (128 bits); the doc name is
+`z23`, the file name and the receipt carry the first 12.
+
+The doc is written 0600 through an exclusive staging file and a no-clobber
+publish, read back, and verified through the pair-pin gate (with `package_root`
+and `require_pq`) before the leaf reports ok; a doc that fails read-back is
+removed. A receipt `release-sign-<commit12>.receipt` (authority_receipt header,
+schema `z23.release_sign.v1`: artifact = package root, anchor = SHA3-256 of the
+commit, detail = SHA3-256 of the doc bytes) is sealed under the datadir. Seeds
+come from files only and never reach argv, the reply, a log or the receipt; the
+reply carries the public keys and the ready `zrs1` pin line.

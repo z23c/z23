@@ -1211,6 +1211,7 @@ static struct {
     char *v1_hex;
     char *v2_hex;
     char pq_pub[65];
+    char master_pub[65];
     int failures;
 } zy;
 
@@ -1274,6 +1275,9 @@ static void zr_hy_part_sign(void)
 
     zr_hy_sign(&zy.f, zy.pq_file, &c);
     zy.v2_hex = zr_hy_dup(zr_str(&c.reply, "doc_hex"));
+    const char *mpk = zr_str(&c.reply, "master_pubkey");
+    if (mpk)
+        snprintf(zy.master_pub, sizeof(zy.master_pub), "%s", mpk);
     const char *pk = zr_str(&c.reply, "pq_pubkey");
     zr_hy_check("with pq_seed_file the leaf emits v2 (doc_version 2, pq "
                 "true, 8090 bytes, saved as .v2.zid), seed never in the reply",
@@ -1375,18 +1379,18 @@ static void zr_hy_part_refusals(void)
                   "PQ_CONTAINER_MALFORMED");
 }
 
-/* The pin gate is untouched: a key pin cannot match a pair, so a v2 doc is
- * refused with a named code, never half-accepted. */
+/* An Ed25519-only key pin cannot match a pair, so a v2 doc is refused with a
+ * named code (RELEASE_PQ_UNPINNED), never half-accepted. */
 static void zr_hy_part_pins(void)
 {
     struct zr_cmd c;
     zr_cmd_init(&c);
     (void)json_push_kv_str(&c.input, "doc", zy.v2_hex);
-    (void)json_push_kv_str(&c.input, "pin", zy.f.seed_hex);
+    (void)json_push_kv_str(&c.input, "pin", zy.master_pub);
     zcl_native_handle_zcode_release_verify(&c.request, &c.reply);
-    zr_hy_check("a key pin on a v2 doc is refused (PQ_PIN_UNSUPPORTED)",
+    zr_hy_check("a key pin on a v2 doc is refused (RELEASE_PQ_UNPINNED)",
                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                    zr_code_is(&c.reply, "PQ_PIN_UNSUPPORTED"),
+                    zr_code_is(&c.reply, "RELEASE_PQ_UNPINNED"),
                 &zy.failures);
     zr_cmd_free(&c);
 

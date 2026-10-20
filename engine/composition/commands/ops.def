@@ -1343,6 +1343,45 @@ ZCL_COMMAND_READY_COMMAND(
 /* ops.slot: install a fetched release as a binary slot, only when the owner
  * who signed it is one the receiver pinned. This is the receiver half of the
  * fleet binary swarm; it needs no chain, no wallet and zero ZCL. */
+ZCL_COMMAND_BRANCH("ops.release", "ops", "Fleet release signing",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.release.sign", "ops.release", "",
+    "Sign a landed-main fleet release with the ZRS1 hybrid release key",
+    "Signs the release in release_dir as a ZRS1 v2 hybrid doc (Ed25519 + "
+    "SLH-DSA-SHAKE-128s) named z23, version = the first 32 hex of `commit` "
+    "(the version field is capped at 32 characters), and writes "
+    "<release_dir>/z23-<commit12>.v2.zid (0600, never overwriting: "
+    "RELEASE_DOC_EXISTS). Refuses first, writing nothing: `commit` must be "
+    "40 lowercase hex and an ancestor of the fetched refs/remotes/origin/main "
+    "of `repo` (default the working directory; RELEASE_NOT_LANDED, "
+    "RELEASE_ORIGIN_UNKNOWN), and MANIFEST.sha256 in release_dir must "
+    "re-derive: every listed file a plain file whose sha256 matches "
+    "(RELEASE_MANIFEST_MISMATCH). The signed manifest_root is the vcs "
+    "package root (zcl.package_manifest.v1) over the listed files plus "
+    "MANIFEST.sha256 itself, exec bit -> mode 0755 else 0644, 1 MiB SHA3-256 "
+    "chunks: the package_root `ops slot install` and `zcode release verify "
+    "--package_root` compare. Seeds come only from seed_file and "
+    "pq_seed_file (0600/0400 hex files) and are never in argv, the reply, a "
+    "log or the receipt. The saved doc is read back and verified through the "
+    "pair-pin gate with require_pq before ok. A receipt "
+    "release-sign-<commit12>.receipt (authority_receipt, schema "
+    "z23.release_sign.v1) is sealed under datadir. seq defaults to now "
+    "(monotonic), expiry to now+365d. Reply: doc_path, package_root, "
+    "public keys and the ready pin line.",
+    65536, "release,sign,fleet,zrs1,hybrid,landed,manifest,pin",
+    "zcl.ops_release_sign.input.v1", "zcl.ops_release_sign.v1",
+    "release_dir,commit,seed_file,pq_seed_file,seq,expiry,repo,datadir",
+    "release_dir,commit,seed_file,pq_seed_file",
+    "z23 ops release sign --release_dir=<dir with MANIFEST.sha256> --commit=<40hex> --seed_file=<0600 ed25519 seed> --pq_seed_file=<0600 slh-dsa seed>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_release_sign)
+
 ZCL_COMMAND_BRANCH("ops.slot", "ops", "Binary slots",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_COMMAND(

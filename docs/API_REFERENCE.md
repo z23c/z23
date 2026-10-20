@@ -82,7 +82,7 @@ z23 discover schema <path> --side=input|output
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 23 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 312 |
+| Leaves with `effect=mutate` | 313 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 158 |
 
@@ -1076,6 +1076,12 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `ops mesh device host package run` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`datadir`**, **`package_root`**, **`receipt_id`**, **`artifact_sha3`**, `accept_execution`, `runtime_policy`, `role`, `runtime_input`, `launch_ms`, `execution_ms`, `cleanup_ms` | `zcl.device.host.raw.v1` | `z23 ops mesh device host package run --input=<explicit-json>` | Run exact owner-accepted installed bin/tunnel in foreground |
+
+#### `ops.release` — Fleet release signing
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `ops release sign` | ready | mutate / app-write / operator · foreground/moderate | **`release_dir`**, **`commit`**, **`seed_file`**, **`pq_seed_file`**, `seq`, `expiry`, `repo`, `datadir` | `zcl.ops_release_sign.v1` | `z23 ops release sign --release_dir=<dir with MANIFEST.sha256> --commit=<40hex> --seed_file=<0600 ed25519 seed> --pq_seed_file=<0600 slh-dsa seed>` | Sign a landed-main fleet release with the ZRS1 hybrid release key |
 
 #### `ops.slot` — Binary slots
 

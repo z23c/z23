@@ -37,6 +37,7 @@
  * buffer is memory_cleanse'd after use and is NEVER logged or echoed. */
 
 #include "command/native_command.h"
+#include "command/native_zcode_release_sign.h"
 #include "command/release_pin.h"
 
 #include "base/log_macros.h"
@@ -678,16 +679,6 @@ static bool zr_persist_doc(const char *datadir, bool pq,
                              err, err_cap);
 }
 
-/* Outcome of signing one release: the wire bytes plus the facts the reply
- * reports. `pq` is true for a v2 (hybrid) doc. */
-struct zr_signed {
-    uint8_t wire[ZID_DOC_V2_MAX];
-    size_t wire_len;
-    uint8_t master_pubkey[32];
-    uint8_t pq_pk[ZRS1_PQ_PK_SIZE];
-    bool pq;
-};
-
 static void zr_sign_fail(struct zcl_command_reply *reply, int exit_code,
                          const char *code, const char *phase,
                          const char *message, const char *ctx)
@@ -699,10 +690,11 @@ static void zr_sign_fail(struct zcl_command_reply *reply, int exit_code,
 /* Sign rel into `out`: v1 when pq_seed_file is empty (exactly as before),
  * v2 hybrid when it names a PQ seed file. Both seed buffers are wiped on
  * every path before this returns. Fails the reply and returns false. */
-static bool zr_sign_release(struct zcl_command_reply *reply,
-                            const struct zid_release *rel, uint64_t seq,
-                            uint64_t expiry, const char *seed_file,
-                            const char *pq_seed_file, struct zr_signed *out)
+bool zcl_zcode_release_sign_doc(struct zcl_command_reply *reply,
+                                const struct zid_release *rel, uint64_t seq,
+                                uint64_t expiry, const char *seed_file,
+                                const char *pq_seed_file,
+                                struct zcode_release_signed *out)
 {
     uint8_t seed[32];
     uint8_t pq_seed[ZRS1_PQ_SEED_SIZE];
@@ -847,9 +839,10 @@ void zcl_native_handle_zcode_release_sign(
     }
 
     const char *pq_seed_file = zr_input_str(in, "pq_seed_file");
-    struct zr_signed sg;
-    if (!zr_sign_release(reply, &rel, (uint64_t)seq, (uint64_t)expiry,
-                         seed_file, pq_seed_file, &sg))
+    struct zcode_release_signed sg;
+    if (!zcl_zcode_release_sign_doc(reply, &rel, (uint64_t)seq,
+                                    (uint64_t)expiry, seed_file, pq_seed_file,
+                                    &sg))
         return;
     uint8_t *wire = sg.wire;
     size_t wire_len = sg.wire_len;
@@ -1213,63 +1206,6 @@ static void zr_fail_invalid(struct zcl_command_reply *reply, bool is_v2,
                            false, msg, "zcode.release.verify");
 }
 
-/* Key pins hold Ed25519-only owner keys and cannot match a pair (pair pins
- * are a later packet): refuse them for a v2 doc instead of half-applying. */
-static bool zr_v2_pin_refused(const struct json_value *in,
-                              struct zcl_command_reply *reply)
-{
-    if (!json_get(in, "pin") && !json_get(in, "pin_file"))
-        return false;
-    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                           ZCL_COMMAND_EXIT_INVALID, "PQ_PIN_UNSUPPORTED",
-                           "normalize", false, false,
-                           "pin/pin_file hold Ed25519-only owner keys and "
-                           "cannot pin a v2 hybrid doc; pair pins are not "
-                           "implemented yet", "zcode.release.verify");
-    return true;
-}
-
-/* The k-of-n gate for `zcode release verify`: wrap the decoded primary doc
- * and hand it, with `cosigs`, to the shared release_pin gate. */
-static bool zr_threshold_gate(const struct json_value *in, bool is_v2,
-                              const struct zid_doc *doc,
-                              const struct zid_doc_v2 *v2,
-                              struct zid_release *rel, int64_t now,
-                              struct zcl_command_reply *reply)
-{
-    struct release_pin_doc pd;
-    struct release_pin_threshold th;
-    memset(&pd, 0, sizeof(pd));
-    pd.version = is_v2 ? ZID_DOC_VERSION_V2 : ZID_DOC_VERSION;
-    pd.doc = *doc;
-    if (is_v2)
-        pd.v2 = *v2;
-    if (!release_pin_multi_gate(in, false, &pd, (uint64_t)now, rel, &th, reply,
-                                "zcode.release.verify"))
-        return false;
-    if (th.threshold > 0) {
-        json_push_kv_int(&reply->data, "threshold", (int64_t)th.threshold);
-        json_push_kv_int(&reply->data, "signers_matched",
-                         (int64_t)th.matched);
-    }
-    return true;
-}
-
-/* Receiver pins: the k-of-n gate when the input asks for one, else the
- * single-signer gate (a v2 doc cannot meet key pins, see above). */
-static bool zr_pin_gate(const struct json_value *in, bool is_v2,
-                        const struct zid_doc *doc, const struct zid_doc_v2 *v2,
-                        struct zid_release *rel, int64_t now,
-                        struct zcl_command_reply *reply)
-{
-    if (release_pin_threshold_active(in))
-        return zr_threshold_gate(in, is_v2, doc, v2, rel, now, reply);
-    if (is_v2 && zr_v2_pin_refused(in, reply))
-        return false;
-    return release_pin_gate(in, false, doc->master_pubkey, rel->manifest_root,
-                            reply, "zcode.release.verify");
-}
-
 /* ── zcode.release.verify ──────────────────────────────────────────── */
 
 void zcl_native_handle_zcode_release_verify(
@@ -1360,11 +1296,24 @@ void zcl_native_handle_zcode_release_verify(
     /* Receiver pins (optional `pin` / `pin_file` / `package_root`). Only
      * runs after the signature verdict above; without any of the three
      * keys the gate is a no-op, so unpinned callers see no change.
-     * A v2 doc cannot be matched against today's Ed25519-only pins (pair
-     * pins are a later packet), so key pins are refused for it rather
-     * than half-applied; package_root alone still runs. */
-    if (!zr_pin_gate(in, is_v2, &doc, &v2, &rel, now, reply))
+     * A v2 doc is held to a PAIR pin (`zrs1 <ed25519> 0 <slh-dsa pk>`)
+     * by release_pin_doc_gate; an Ed25519-only pin is RELEASE_PQ_UNPINNED. */
+    struct release_pin_doc pd;
+    memset(&pd, 0, sizeof(pd));
+    pd.doc = doc;
+    pd.v2 = v2;
+    pd.version = is_v2 ? ZID_DOC_VERSION_V2 : ZID_DOC_VERSION;
+    struct release_pin_threshold th;
+    if (!release_pin_multi_gate(in, false, &pd, (uint64_t)now, &rel, &th,
+                                reply, "zcode.release.verify"))
         return;
+    if (th.threshold > 0) {
+        json_push_kv_int(&reply->data, "threshold", (int64_t)th.threshold);
+        json_push_kv_int(&reply->data, "signers_matched",
+                         (int64_t)th.matched);
+    }
+    if (is_v2)
+        json_push_kv_bool(&reply->data, "pq_verified", pd.pq_verified);
 
     /* Chain-rooted key trust (optional `--anchored`). The signature above
      * proves the doc was signed by the key it names — it says NOTHING

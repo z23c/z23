@@ -312,6 +312,7 @@ int test_net(void);
 int test_host_gc(void);
 int test_host_build(void);
 int test_legacy_seed(void);
+int test_ops_release_sign(void);
 int test_ops_slot_install(void);
 int release_threshold_suite(void);
 int test_ops_slot_activate(void);

@@ -1323,6 +1323,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_zcode_package_transport_command.c", 
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_project_command.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_release_command.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/command/release_pin.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_ops_release_sign.c", CAP_FS_READ|CAP_FS_WRITE, "git ancestry check runs through util/spawn")
 ZCL_MODULE_CAPABILITY("tools/command/native_ops_slot_install.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_slot_common.c", CAP_FS_READ|CAP_FS_WRITE, "slot digest record")
 ZCL_MODULE_CAPABILITY("tools/command/native_ops_slot_activate.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK|CAP_NETWORK, "")
