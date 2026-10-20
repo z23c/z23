@@ -316,6 +316,22 @@ static int fc_case_helper(void)
 
 /* ── T5b: fresh-datadir seed above the compiled checkpoint ─────────── */
 
+static int fc_check_cold_seed_cap(sqlite3 *db, int height, const uint8_t hash[32])
+{
+    int failures = 0;
+    int64_t published_before = tip_finalize_stage_last_height();
+    FC_CHECK("cold cap: existing log stops before a rowless successor",
+        fc_cursor(db, "tip_finalize") == (uint64_t)height &&
+        fc_tip_row(db, height + 1, NULL, 0) == -1);
+    FC_CHECK("cold cap: untrusted seed above the hole succeeds without a live stage",
+        tip_finalize_stage_seed_anchor(height + 3, hash, false));
+    FC_CHECK("cold cap: durable cursor stops at the first hole",
+        fc_cursor(db, "tip_finalize") == (uint64_t)height + 1u);
+    FC_CHECK("cold cap: requested height above the cap is not published",
+        tip_finalize_stage_last_height() == published_before);
+    return failures;
+}
+
 static int fc_case_fresh_seed(void)
 {
     int failures = 0;
@@ -428,6 +444,7 @@ static int fc_case_fresh_seed(void)
              hs_ok && hstar == H);
 
     tip_finalize_stage_shutdown();
+    failures += fc_check_cold_seed_cap(db, H, hash.data);
     main_state_free(&ms);
     progress_store_close();
     test_cleanup_tmpdir(dir);

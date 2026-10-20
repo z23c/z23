@@ -755,6 +755,61 @@ static int sb_terminal_frontier(void)
     return failures;
 }
 
+/* app_init prepares snapshots before services initialize tip_finalize. */
+static int sb_prepare_before_stage_init(struct node_db *ndb, const char *dir,
+    const uint8_t expected_root[32])
+{
+    int failures = 0;
+    tip_finalize_stage_shutdown();
+    seed_integrity_gate_set_node_db_for_testing(ndb);
+    enum boot_snapshot_first_outcome outcome;
+    struct zcl_result prepared = boot_prepare_snapshot_first(ndb, dir, &outcome);
+    SB_CHECK("cold-stage snapshot preparation completes before finalizer init",
+        prepared.ok && outcome == BOOT_SNAPSHOT_FIRST_IMPORTED);
+    SB_CHECK("cold-stage completion retires pending record",
+        !boot_snapshot_import_pending_or_error(ndb));
+    uint64_t generation = UINT64_MAX;
+    SB_CHECK("cold-stage completion advances authority exactly once",
+        coins_kv_get_authority_generation(progress_store_db(), &generation) && generation == 1);
+    failures += sb_terminal_authority(expected_root);
+    failures += sb_terminal_caches(ndb, expected_root);
+    failures += sb_terminal_frontier();
+
+    uint8_t expected_hash[32];
+    sb_tip_hash(expected_hash);
+    SB_CHECK("cold-stage outer transaction begins with cursor already stamped",
+        sb_sql(progress_store_db(), "BEGIN IMMEDIATE"));
+    SB_CHECK("cold-stage prestamped seed succeeds inside outer transaction",
+        tip_finalize_stage_seed_anchor(SB_SNAP_HEIGHT, expected_hash, true));
+    SB_CHECK("cold-stage prestamped seed preserves outer transaction ownership",
+        sqlite3_get_autocommit(progress_store_db()) == 0);
+    SB_CHECK("cold-stage outer transaction rolls back", sb_sql(progress_store_db(), "ROLLBACK"));
+    failures += sb_terminal_frontier();
+
+    sqlite3_int64 node_writes = sqlite3_total_changes64(ndb->db);
+    sqlite3_int64 kernel_writes = sqlite3_total_changes64(progress_store_db());
+    SB_CHECK("cold-stage repeated preparation succeeds",
+        boot_prepare_snapshot_first(ndb, dir, &outcome).ok);
+    SB_CHECK("cold-stage repeated preparation writes neither store",
+        sqlite3_total_changes64(ndb->db) == node_writes &&
+        sqlite3_total_changes64(progress_store_db()) == kernel_writes);
+    SB_CHECK("cold-stage repeated preparation keeps generation one",
+        coins_kv_get_authority_generation(progress_store_db(), &generation) && generation == 1);
+
+    struct main_state ms = {0};
+    main_state_init(&ms);
+    SB_CHECK("finalizer initializes after cold-stage preparation", tip_finalize_stage_init(&ms));
+    failures += sb_terminal_authority(expected_root);
+    failures += sb_terminal_caches(ndb, expected_root);
+    failures += sb_terminal_frontier();
+    SB_CHECK("later finalizer init preserves authority generation",
+        coins_kv_get_authority_generation(progress_store_db(), &generation) && generation == 1);
+    tip_finalize_stage_shutdown();
+    main_state_free(&ms);
+    seed_integrity_gate_reset_for_testing();
+    return failures;
+}
+
 static int sb_restart_terminal(struct node_db *ndb, const char *dir,
                                const uint8_t expected_root[32])
 {
@@ -787,7 +842,8 @@ static int sb_restart_terminal(struct node_db *ndb, const char *dir,
     return failures;
 }
 
-static int sb_crash_uninterrupted_control(const char *root, const uint8_t expected_root[32])
+static int sb_crash_uninterrupted_control(const char *root, const uint8_t expected_root[32],
+    bool cold_stage)
 {
     int failures = 0;
     char dir[512], snapshot[600], node_path[600];
@@ -800,8 +856,11 @@ static int sb_crash_uninterrupted_control(const char *root, const uint8_t expect
     bool opened = sb_mkdir(dir) == 0 && sb_build_fixture(snapshot, hash) &&
         node_db_open(&ndb, node_path) && progress_store_open(dir);
     SB_CHECK("uninterrupted control opens same genuine snapshot fixture", opened);
-    if (opened)
+    if (opened) {
+        if (cold_stage)
+            failures += sb_prepare_before_stage_init(&ndb, dir, expected_root);
         failures += sb_restart_terminal(&ndb, dir, expected_root);
+    }
     progress_store_close();
     if (ndb.open)
         node_db_close(&ndb);
@@ -911,6 +970,8 @@ static int sb_crashed_store_recover(struct node_db *ndb, const char *dir,
     uint64_t generation_before = UINT64_MAX, generation_after = UINT64_MAX;
     SB_CHECK("pre-recovery generation readable",
         coins_kv_get_authority_generation(progress_store_db(), &generation_before));
+    if (cut->mode == 0)
+        failures += sb_prepare_before_stage_init(ndb, dir, cut->root);
     failures += sb_restart_terminal(ndb, dir, cut->root);
     SB_CHECK("recovery resets authority exactly once",
         coins_kv_get_authority_generation(progress_store_db(), &generation_after) &&
@@ -970,7 +1031,7 @@ static int sb_import_sigkill_case(int mode)
     if (ndb.open)
         node_db_close(&ndb);
     if (killed)
-        failures += sb_crash_uninterrupted_control(dir, cut.root);
+        failures += sb_crash_uninterrupted_control(dir, cut.root, mode == 0);
     return sb_finish_fixture(dir, failures);
 }
 

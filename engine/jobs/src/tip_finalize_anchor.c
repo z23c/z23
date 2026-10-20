@@ -242,6 +242,29 @@ void tip_finalize_stage_set_authoritative_tip(int height,
     tip_finalize_publish_last_advance(height, hash);
 }
 
+/* The caller holds the progress lock after validating the anchor and cap.
+ * Boot persists the served cursor before service initialization supplies a
+ * live stage. Publish only a committed pair covered by that cursor; a capped
+ * no-stage stamp must not publish the higher requested height. */
+static bool tip_finalize_seed_cursor_publish(sqlite3 *db, uint64_t cursor,
+    uint64_t stamp, int height, const uint8_t hash[32])
+{
+    stage_t *stage = tip_finalize_stage_handle();
+    if (cursor >= stamp)
+        return true;
+    bool cursor_stamped = stage ? stage_set_cursor(stage, db, stamp) :
+        stage_set_named_cursor_if_behind(db, STAGE_NAME, stamp);
+    if (!cursor_stamped) {
+        LOG_WARN("tip_finalize",
+                 "[tip_finalize] anchor seed: cursor stamp to %llu failed",
+                 (unsigned long long)stamp);
+        return false;
+    }
+    if (sqlite3_get_autocommit(db) != 0 && (stage || stamp == (uint64_t)height))
+        tip_finalize_publish_last_advance(height, hash);
+    return true;
+}
+
 bool tip_finalize_stage_seed_anchor(int height, const uint8_t hash[32],
                                     bool trusted_seed)
 {
@@ -422,24 +445,12 @@ bool tip_finalize_stage_seed_anchor(int height, const uint8_t hash[32],
      * first, then cursor-1, so a capped re-anchor that lands BELOW height is
      * still tolerated (the reducer re-finalizes forward from the frontier —
      * slower, never wrong). */
-    stage_t *stage = tip_finalize_stage_handle();
     /* Monotonic guard (mirrors the authority path's cursor>=target check):
      * a re-anchor at or below the current served cursor must NEVER rewind it,
      * and we must not republish a lower tip. The forward reducer owns
      * advancement from the existing frontier. The upstream H+1 cursors were
      * stamped earlier (separate from this served-tip cursor) and are
      * untouched here. */
-    if (stage && cursor >= stamp) {
-        progress_store_tx_unlock();
-        return true;
-    }
-    if (stage && !stage_set_cursor(stage, db, stamp)) {
-        LOG_WARN("tip_finalize",
-                 "[tip_finalize] anchor seed: cursor stamp to %llu failed",
-                 (unsigned long long)stamp);
-        progress_store_tx_unlock();
-        return false;
-    }
 
     /* Publish immediately only when this function owns a committed context.
      * Snapshot activation intentionally calls us inside a larger cutover
@@ -447,8 +458,7 @@ bool tip_finalize_stage_seed_anchor(int height, const uint8_t hash[32],
      * runtime authority pair that a later failure rolls back on disk. The
      * terminal installer exits after commit and normal boot reconstructs the
      * runtime projection from this durable row. */
-    if (sqlite3_get_autocommit(db) != 0)
-        tip_finalize_publish_last_advance(height, hash);
+    bool stamped = tip_finalize_seed_cursor_publish(db, cursor, stamp, height, hash);
     progress_store_tx_unlock();
-    return true;
+    return stamped;
 }
