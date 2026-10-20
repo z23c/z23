@@ -1487,7 +1487,6 @@ engine/composition/src/bundle_exporter.c:bundle_exporter_start#2:21
 engine/composition/src/bundle_exporter.c:bx_recover_session:18
 engine/composition/src/bundle_exporter.c:bx_try_export_once:20
 engine/composition/src/consensus_state_bundle_validate.c:validate_nullifiers:20
-engine/composition/src/consensus_state_bundle_validate.c:validate_rom_keystone_binding:15
 engine/composition/src/consensus_state_bundle_validate_schema.c:consensus_state_bundle_validate_canonical_schema:26
 engine/composition/src/consensus_state_install_runtime.c:consensus_state_install_from_bundle#2:66
 engine/composition/src/consensus_state_install_runtime.c:icb_datadir_open_classify:17
@@ -1740,7 +1739,6 @@ engine/jobs/src/script_validate_verify.c:sv_parallel:17
 engine/jobs/src/seal_rewind_executor.c:seal_rewind_to_nearest:23
 engine/jobs/src/stage_anchor.c:stage_anchor_cap_target_at_log_frontier:29
 engine/jobs/src/stage_rederive_range.c:stage_rederive_range:30
-engine/jobs/src/stage_repair.c:stage_reconcile_clamp_tip_finalize_to_floor:13
 engine/jobs/src/stage_repair_body_fetch.c:stage_repair_body_fetch_missing_have_data_candidate:16
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:54
 engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:34
@@ -3557,7 +3555,6 @@ tools/command/native_vault_intent_command.c:vni_rpc:18
 tools/command/native_vault_session_command.c:zcl_native_handle_vault_session_create:22
 tools/command/native_yardsale_command.c:ys_forward:17
 tools/command/native_yardsale_command.c:zcl_native_handle_yardsale_guide:31
-tools/command/native_zcode_add_command.c:zcl_native_handle_zcode_package_add_commit:21
 tools/command/native_zcode_attest_transport_command.c:zcl_native_handle_zcode_package_attest_admit:20
 tools/command/native_zcode_attest_transport_command.c:zcl_native_handle_zcode_package_attest_pull:32
 tools/command/native_zcode_badge_command.c:zcl_native_handle_zcode_badge_issue:28

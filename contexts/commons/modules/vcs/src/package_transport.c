@@ -339,6 +339,17 @@ static enum vcs_package_transport_result transport_open_complete_carrier(
     return VCS_PACKAGE_TRANSPORT_OK;
 }
 
+static enum vcs_package_store_result transport_admit_or_reuse_release(
+    struct vcs_package_store *store, const struct vcs_package_release *release,
+    enum vcs_package_accept_result *accept)
+{
+    /* Reimport is not a new release admission. Exact durable history may
+     * precede the current cursor; unknown history uses ordinary admission. */
+    if (vcs_package_store_release_history_matches(store, release))
+        return VCS_PACKAGE_STORE_OK;
+    return vcs_package_store_put_release(store, release, accept);
+}
+
 enum vcs_package_transport_result vcs_package_transport_import(
     struct vcs_package_store *store, const uint8_t transport_root[32],
     struct vcs_package_transport_import *receipt)
@@ -428,13 +439,7 @@ enum vcs_package_transport_result vcs_package_transport_import(
                    "carrier recipe hashes to a different recipe root than "
                    "the release names");
     }
-    /* Reimport validates the carrier binding above but is not a new release
-     * admission. Exact durable history may precede the current cursor. */
-    if (vcs_package_store_release_history_matches(store, &expected.release)) {
-        put = VCS_PACKAGE_STORE_OK;
-    } else {
-        put = vcs_package_store_put_release(store, &expected.release, &accept);
-    }
+    put = transport_admit_or_reuse_release(store, &expected.release, &accept);
     if (put != VCS_PACKAGE_STORE_OK) {
         vcs_package_transport_free(&expected);
         LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_STORE, "vcs.package.transport",
