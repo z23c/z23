@@ -6,6 +6,7 @@
 
 #include "plugin_internal.h"
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "core/uint256.h"
 #include "keys/key.h"
@@ -134,7 +135,6 @@ void plugin_dist_test_set_image_max(uint64_t bytes) { g_image_max = bytes; }
 #endif
 
 #if !defined(_WIN32)
-
 static const char k_hex[] = "0123456789abcdef";
 
 static bool pd_join(char *out, size_t cap, const char *a, const char *b)
@@ -150,14 +150,6 @@ static void pd_detail(char *out, size_t cap, const char *fmt, const char *a)
     (void)snprintf(out, cap, fmt, a ? a : "");
 }
 
-static void pd_hex(char *out, const uint8_t *bytes, size_t n)
-{
-    for (size_t i = 0; i < n; i++) {
-        out[2 * i] = k_hex[bytes[i] >> 4];
-        out[2 * i + 1] = k_hex[bytes[i] & 15];
-    }
-    out[2 * n] = '\0';
-}
 
 /* ---- publish ----------------------------------------------------------- */
 
@@ -488,7 +480,7 @@ static bool pd_pub_store(struct pd_pub *p, struct vcs_package_store *store,
 
 static void pd_pub_fill(const struct pd_pub *p, struct plugin_dist_published *out)
 {
-    pd_hex(out->root_hex, out->root, 32);
+    zcl_hex_encode(out->root, 32, out->root_hex);
     snprintf(out->name, sizeof(out->name), "%s", p->m.name);
     snprintf(out->version, sizeof(out->version), "%s", p->m.version);
     snprintf(out->exe_sha3, sizeof(out->exe_sha3), "%s", p->m.exe_sha3);
@@ -497,7 +489,7 @@ static void pd_pub_fill(const struct pd_pub *p, struct plugin_dist_published *ou
      * exact manifest bytes without trusting any key list. */
     uint8_t md[PLUGIN_DIGEST_BYTES];
     plugin_manifest_digest(p->manifest_bytes, p->manifest_len, md);
-    pd_hex(out->generation, md, PLUGIN_DIGEST_BYTES);
+    zcl_hex_encode(md, PLUGIN_DIGEST_BYTES, out->generation);
 }
 
 static enum plugin_dist_status pd_publish(
