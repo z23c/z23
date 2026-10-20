@@ -116,45 +116,63 @@ static enum plugin_dist_status pd_publish(struct pd_fixture *f, const char *leaf
     return plugin_dist_publish(f->publisher.store, &rq, out);
 }
 
+/* One receiver tick: deliver each queued WANT to the publisher engine and its
+ * DATA back. Returns false on a runaway queue; *replies counts DATA frames and
+ * a nonzero limit stops the tick early with *stopped set. */
+static bool pd_pump_tick(struct pd_fixture *f, uint64_t now, unsigned limit,
+                         unsigned *replies, bool *stopped)
+{
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    uint64_t target = 0;
+    size_t length = 0;
+    unsigned frames = 0;
+    vcs_swarm_engine_tick(f->receiver.engine, SW_DAY, now);
+    while (vcs_swarm_engine_next_outbound(f->receiver.engine, 11, &target, frame, &length)) {
+        if (++frames > 64)
+            return false;
+        struct vcs_swarm_frame_result served = vcs_swarm_engine_handle_frame(
+            f->publisher.engine, 13, frame, length, SW_DAY, now);
+        if (served.reply && served.reply_len) {
+            struct vcs_swarm_frame_result got = vcs_swarm_engine_handle_frame(
+                f->receiver.engine, 11, served.reply, served.reply_len, SW_DAY, now);
+            free(got.reply);
+            (*replies)++;
+        }
+        free(served.reply);
+        if (limit && *replies >= limit) {
+            *stopped = true;
+            return true;
+        }
+    }
+    return true;
+}
+
+static bool pd_transfer_start(struct pd_fixture *f, const uint8_t root[32])
+{
+    uint8_t pk[33], rk[33];
+    sw_key(81, pk);
+    sw_key(82, rk);
+    const uint64_t provider = 11;
+    return vcs_swarm_engine_peer_add(f->receiver.engine, 11, pk) &&
+           vcs_swarm_engine_peer_add(f->publisher.engine, 13, rk) &&
+           vcs_swarm_engine_fetch_from_bounded(f->receiver.engine, root, SW_DAY, 1,
+               &provider, 1, 4u * PD_CAP) == VCS_SWARM_FETCH_OK;
+}
+
 /* Drive the real engines until the receiver has `limit` replies (0 = until
  * complete). Returns true when the stop condition was reached. */
 static bool pd_transfer(struct pd_fixture *f, const uint8_t root[32],
                         unsigned limit, bool first)
 {
-    uint8_t pk[33], rk[33];
-    sw_key(81, pk);
-    sw_key(82, rk);
-    if (first) {
-        if (!vcs_swarm_engine_peer_add(f->receiver.engine, 11, pk) ||
-            !vcs_swarm_engine_peer_add(f->publisher.engine, 13, rk))
-            return false;
-        const uint64_t provider = 11;
-        if (vcs_swarm_engine_fetch_from_bounded(f->receiver.engine, root, SW_DAY, 1,
-                &provider, 1, 4u * PD_CAP) != VCS_SWARM_FETCH_OK)
-            return false;
-    }
+    if (first && !pd_transfer_start(f, root))
+        return false;
     unsigned replies = 0;
+    bool stopped = false;
     for (uint64_t now = first ? 2 : 40; now < (first ? 34 : 80); now++) {
-        vcs_swarm_engine_tick(f->receiver.engine, SW_DAY, now);
-        uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
-        uint64_t target = 0;
-        size_t length = 0;
-        unsigned frames = 0;
-        while (vcs_swarm_engine_next_outbound(f->receiver.engine, 11, &target, frame, &length)) {
-            if (++frames > 64)
-                return false;
-            struct vcs_swarm_frame_result served = vcs_swarm_engine_handle_frame(
-                f->publisher.engine, 13, frame, length, SW_DAY, now);
-            if (served.reply && served.reply_len) {
-                struct vcs_swarm_frame_result got = vcs_swarm_engine_handle_frame(
-                    f->receiver.engine, 11, served.reply, served.reply_len, SW_DAY, now);
-                free(got.reply);
-                replies++;
-            }
-            free(served.reply);
-            if (limit && replies >= limit)
-                return true;
-        }
+        if (!pd_pump_tick(f, now, limit, &replies, &stopped))
+            return false;
+        if (stopped)
+            return true;
         struct vcs_swarm_download_status st;
         if (vcs_swarm_engine_download_status(f->receiver.engine, root, &st) &&
             st.state == VCS_SWARM_DL_COMPLETE)
