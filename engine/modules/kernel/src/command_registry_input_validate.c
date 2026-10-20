@@ -23,7 +23,8 @@
 static bool cr_input_failure(const struct zcl_command_spec *spec,
     const char *key, const struct json_value *value, char *why, size_t why_size)
 {
-    if (!strcmp(spec->path, "fleet.steer.wiki-write") && !strcmp(key, "text")) {
+    if ((!strcmp(spec->path, "fleet.steer.wiki-write") ||
+         !strcmp(spec->path, "fleet.wiki.write")) && !strcmp(key, "text")) {
         if (why && why_size) snprintf(why, why_size,
             "inline wiki text must be a nonempty UTF-8 string of at most %u bytes",
             (unsigned)FLEET_BOARD_WIKI_TEXT_MAX);

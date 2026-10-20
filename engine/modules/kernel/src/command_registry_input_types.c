@@ -350,7 +350,8 @@ static bool cr_match_fleet_steer(const char *path, const char *key,
         return true;
     }
     size_t j;
-    if (!strcmp(path, "fleet.steer.wiki-write") && !strcmp(key, "text")) {
+    if ((!strcmp(path, "fleet.steer.wiki-write") ||
+         !strcmp(path, "fleet.wiki.write")) && !strcmp(key, "text")) {
         *type_ok = cr_nonempty_str(value, FLEET_BOARD_WIKI_TEXT_MAX);
         return true;
     }

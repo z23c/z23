@@ -20,6 +20,7 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "session/fleet_board_proto.h"
 
 #include "fleetledger/fleet_ledger.h"
 #include "vcs/package_manifest.h"
@@ -333,6 +334,66 @@ static int t_key_edges(void)
 }
 
 /* ── 2. The read frame follows the per-key bounds ────────────────────── */
+
+static bool cib_wiki_escaped_frame(const struct zcl_command_spec *spec)
+{
+    size_t cap = zcl_command_registry_input_budget_bytes(spec);
+    char *text = cib_fill(FLEET_BOARD_WIKI_TEXT_MAX);
+    char *wire = malloc(cap);
+    struct json_value input, decoded;
+    json_init(&input);
+    json_init(&decoded);
+    json_set_object(&input);
+    bool ok = text && wire;
+    if (ok) {
+        memset(text, 1, FLEET_BOARD_WIKI_TEXT_MAX);
+        ok = json_push_kv_str(&input, "text", text) &&
+             json_push_kv_str(&input, "slug", "bounded-page") &&
+             json_push_kv_str(&input, "title", "Bounded page");
+    }
+    size_t n = ok ? json_write(&input, wire, cap) : 0;
+    ok = n >= 6u * FLEET_BOARD_WIKI_TEXT_MAX && n < cap &&
+         json_read(&decoded, wire, n) &&
+         zcl_command_registry_input_validate(spec, &decoded, NULL, 0);
+    json_free(&decoded);
+    json_free(&input);
+    free(wire);
+    free(text);
+    return ok;
+}
+
+static int t_wiki_text_bounds(void)
+{
+    int failures = 0;
+    const char *paths[] = {"fleet.wiki.write", "fleet.steer.wiki-write"};
+    const size_t accepted[] = {4097, 7765, FLEET_BOARD_WIKI_TEXT_MAX};
+    char why[256];
+    for (size_t p = 0; p < sizeof(paths) / sizeof(paths[0]); p++) {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), paths[p], NULL);
+        CIB_CHECK("wiki write leaf resolves", spec != NULL);
+        if (!spec) continue;
+        for (size_t i = 0; i < sizeof(accepted) / sizeof(accepted[0]); i++)
+            CIB_CHECK("wiki text within signed body limit is accepted",
+                cib_accepts(paths[p], "text", accepted[i], why, sizeof(why)));
+        CIB_CHECK("wiki text above signed body limit is refused",
+            !cib_accepts(paths[p], "text", FLEET_BOARD_WIKI_TEXT_MAX + 1u,
+                         why, sizeof(why)));
+        CIB_CHECK("wiki text refusal reports the signed body limit",
+            strstr(why, "16384") != NULL);
+        CIB_CHECK("empty wiki text is refused",
+            !cib_accepts(paths[p], "text", 0, why, sizeof(why)));
+        CIB_CHECK("integer wiki text is refused",
+            !cib_accepts_int(paths[p], "text", 1));
+        CIB_CHECK("maximum escaped wiki body fits and validates in input frame",
+            cib_wiki_escaped_frame(spec));
+    }
+    CIB_CHECK("unrelated text accepts the default bound",
+        cib_accepts("code.have", "text", 4096, why, sizeof(why)));
+    CIB_CHECK("unrelated text retains the default bound",
+        !cib_accepts("code.have", "text", 4097, why, sizeof(why)));
+    return failures;
+}
 
 static int t_frame_budget(void)
 {
@@ -1349,6 +1410,7 @@ int test_command_input_bounds(void)
     failures += t_machine_protected_object_types();
     failures += t_machine_protected_wrong_types();
     failures += t_frame_budget();
+    failures += t_wiki_text_bounds();
     failures += t_no_collateral_loosening();
     failures += t_vault_effects_array();
     failures += t_liquidity_numeric_input();
